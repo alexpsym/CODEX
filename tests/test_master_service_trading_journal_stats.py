@@ -442,6 +442,7 @@ def test_market_return_percentage_uses_account_balance_return() -> None:
             "symbol": "EURUSD",
             "net_profit": -100.0,
             "result_pct": -80.0,
+            "r_multiple": -0.8,
             "currency": "AUD",
         }
     ]
@@ -453,6 +454,7 @@ def test_market_return_percentage_uses_account_balance_return() -> None:
     assert fx["market_return_pct"] == pytest.approx(-10.0)
     assert fx["gross_gain_return_pct"] == pytest.approx(0.0)
     assert fx["gross_loss_return_pct"] == pytest.approx(80.0)
+    assert fx["gross_ir_loss"] == pytest.approx(0.8)
     assert fx["return_method"] == "cashflow_adjusted_account_balance"
 
 
@@ -508,10 +510,20 @@ def test_risk_of_ruin_is_deterministic_and_clamped() -> None:
     ]
     risk = _compute_journal_stats(rows, balances=[])["groups"]["risk_of_ruin_by_account"]
     assert risk["OANDA DEMO"]["risk_of_ruin"] == pytest.approx((0.75 / 1.25) ** 10)
+    assert 0 < risk["OANDA DEMO"]["risk_of_ruin"] < 1
+    assert risk["OANDA DEMO"]["edge"] > 0
+    assert risk["OANDA DEMO"]["trade_count"] == 4
+    assert risk["OANDA DEMO"]["win_rate"] == pytest.approx(0.5)
+    assert risk["OANDA DEMO"]["payoff_ratio"] == pytest.approx(1.5)
+    assert risk["OANDA DEMO"]["risk_per_trade_fraction"] == pytest.approx(0.1)
+    assert risk["OANDA DEMO"]["capital_units"] == pytest.approx(10.0)
     assert risk["OANDA DEMO"]["risk_source"] == "median_loss_over_balance"
     assert risk["BYBIT"]["risk_of_ruin"] == 1.0
+    assert risk["BYBIT"]["edge"] <= 0
     assert risk["BINANCE"]["risk_of_ruin"] is None
     assert risk["BINANCE"]["reason"] == "requires_wins_and_losses"
+    for key in ("win_rate", "payoff_ratio", "risk_per_trade_fraction", "edge", "capital_units", "risk_source", "trade_count"):
+        assert key in risk["BINANCE"]
 
 
 def test_invalid_fx_target_distance_is_ignored_but_large_crypto_target_is_kept() -> None:
@@ -519,15 +531,17 @@ def test_invalid_fx_target_distance_is_ignored_but_large_crypto_target_is_kept()
         {
             "row_type": "trade", "asset_class": "fx", "account": "OANDA DEMO",
             "symbol": "USDJPY", "entry_price": 153.0, "take_profit": 1.0,
-            "result_pct": 1.0, "net_profit": 1.0,
+            "stop_loss": 152.0, "result_pct": 1.0, "net_profit": 1.0,
         },
         {
             "row_type": "trade", "asset_class": "crypto", "account": "BYBIT",
             "symbol": "BTCUSDT", "entry_price": 100.0, "take_profit": 174.65,
-            "result_pct": 1.0, "net_profit": 1.0,
+            "stop_loss": 95.0, "result_pct": 1.0, "net_profit": 1.0,
         },
     ]
     by_market = _compute_journal_stats(rows, balances=[])["groups"]["by_market"]
     assert by_market["fx"]["max_target_pct"] is None
     assert by_market["crypto"]["max_target_pct"] == pytest.approx(74.65)
     assert by_market["overall"]["max_target_pct"] == pytest.approx(74.65)
+    assert by_market["overall"]["metric_sources"]["max_target_pct"]["symbol"] == "BTCUSDT"
+    assert by_market["overall"]["metric_sources"]["min_stop_pct"]["symbol"] == "USDJPY"

@@ -134,15 +134,24 @@ REPORT_METRIC_LABELS = [
     "Test",
     "Win rate",
     "Net P/L",
-    "Gross gain",
-    "Gross loss",
+    "Gross percent gain",
+    "Gross percent loss",
+    "Gross IR gain",
+    "Gross IR loss",
     "Best Win Streak",
     "Worst Losing Streak",
-    "Avg result %",
-    "Avg R",
+    "Percentage expectancy",
+    "R expectancy",
     "Avg stop %",
     "Avg target %",
+    "Min stop %",
+    "Source",
+    "Max stop %",
+    "Source",
+    "Min target %",
+    "Source",
     "Max target %",
+    "Source",
     "Avg duration (DD:HH:MM:SS)",
     "Move to Break Even (DD:HH:MM:SS)",
     "Move to Profit (DD:HH:MM:SS)",
@@ -161,13 +170,13 @@ REPORT_METRIC_LABELS = [
     "Winners",
     "Avg stop %",
     "Avg target %",
-    "Avg result %",
-    "Avg R",
+    "Percentage expectancy",
+    "R expectancy",
     "Losers",
     "Avg stop %",
     "Avg target %",
-    "Avg result %",
-    "Avg R",
+    "Percentage expectancy",
+    "R expectancy",
     "Drawdown",
     "Max drawdown",
     "Avg drawdown",
@@ -384,6 +393,43 @@ def _instrument_averages_header_map(ws) -> Dict[str, int]:
     return headers
 
 
+def _apply_symbols_filter_header_layout(ws) -> None:
+    header_row = _instrument_averages_header_row(ws)
+    if header_row != INSTRUMENT_AVERAGES_FILTER_HEADER_ROW:
+        return
+    ws.row_dimensions[header_row].height = max(ws.row_dimensions[header_row].height or 0, 36)
+    minimum_widths = {
+        "Most Traded Pattern": 18,
+        "Most Traded EMA": 16,
+        "Most traded timeframe": 18,
+        "Most Profitable Timeframe": 20,
+        "Least Profitable Timeframe": 20,
+        "Shortest duration (DD:HH:MM:SS)": 18,
+        "Avg duration (DD:HH:MM:SS)": 18,
+        "Longest duration (DD:HH:MM:SS)": 18,
+        "Move to break even": 16,
+        "Move to profit": 14,
+    }
+    headers = _instrument_averages_header_map(ws)
+    for col in range(1, ws.max_column + 1):
+        cell = ws.cell(header_row, col)
+        if cell.value in (None, ""):
+            continue
+        alignment = copy(cell.alignment)
+        alignment.wrap_text = True
+        alignment.vertical = "center"
+        alignment.horizontal = "left"
+        cell.alignment = alignment
+    for header, minimum in minimum_widths.items():
+        col = headers.get(header)
+        if not col:
+            continue
+        letter = get_column_letter(col)
+        current = ws.column_dimensions[letter].width or 8
+        if current < minimum:
+            ws.column_dimensions[letter].width = minimum
+
+
 def _write_instrument_averages_headers(ws, *, preserve_freeze: bool = False) -> None:
     previous_freeze = ws.freeze_panes
     order_start = INSTRUMENT_AVERAGES_HEADERS.index("Market") + 1
@@ -409,6 +455,7 @@ def _write_instrument_averages_headers(ws, *, preserve_freeze: bool = False) -> 
         f"A{INSTRUMENT_AVERAGES_FILTER_HEADER_ROW}:"
         f"{get_column_letter(len(INSTRUMENT_AVERAGES_HEADERS))}{max(INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, ws.max_row)}"
     )
+    _apply_symbols_filter_header_layout(ws)
 
 
 def _ensure_symbols_schema(ws, diagnostics: Dict[str, Any] | None = None) -> bool:
@@ -572,14 +619,38 @@ def _linear_profit_percentage_totals(rows: List[Dict[str, Any]]) -> Dict[str, fl
         for value in (_as_float(row.get("result_pct")) for row in rows)
         if value is not None and math.isfinite(value)
     ]
+    r_values = [
+        value
+        for value in (_as_float(row.get("r_multiple")) for row in rows)
+        if value is not None and math.isfinite(value)
+    ]
     return {
         "net_result_pct": sum(values) if values else None,
         "gross_gain_result_pct": sum(value for value in values if value > 0) if values else None,
         "gross_loss_result_pct": abs(sum(value for value in values if value < 0)) if values else None,
+        "gross_ir_gain": sum(value for value in r_values if value > 0) if r_values else None,
+        "gross_ir_loss": abs(sum(value for value in r_values if value < 0)) if r_values else None,
         "avg_result_pct": (sum(values) / len(values)) if values else None,
         "min_result_pct": min(values) if values else None,
         "max_result_pct": max(values) if values else None,
     }
+
+
+def _merge_metric_buckets(*buckets: Dict[str, Any] | None) -> Dict[str, Any]:
+    merged: Dict[str, Any] = {}
+    metric_sources: Dict[str, Any] = {}
+    for bucket in buckets:
+        if not isinstance(bucket, dict):
+            continue
+        for key, value in bucket.items():
+            if key == "metric_sources":
+                if isinstance(value, dict):
+                    metric_sources.update(value)
+            else:
+                merged[key] = value
+    if metric_sources:
+        merged["metric_sources"] = metric_sources
+    return merged
 
 
 def adaptive_percent_number_format(value: Any, *, max_decimals: int = 12) -> str:
@@ -1219,7 +1290,23 @@ def _fmt_detail_src(src: Any) -> str:
         return "-"
     sym = str(src.get("symbol") or src.get("instrument") or "").strip() or "-"
     d = _as_date(src.get("close_time") or src.get("date") or src.get("open_time"))
-    return f"{sym} - {d.isoformat() if d else '-'}"
+    return f"{sym} · {d.isoformat() if d else '-'}"
+
+
+def _trade_metric_ref(row: Dict[str, Any], metric_key: str | None = None, metric_value: Any = None) -> Dict[str, Any]:
+    return {
+        "id": row.get("id"),
+        "symbol": row.get("symbol") or row.get("symbol_raw") or row.get("instrument"),
+        "asset_class": row.get("asset_class"),
+        "side": row.get("side"),
+        "open_time": row.get("open_time"),
+        "close_time": row.get("close_time"),
+        "date": row.get("close_time") or row.get("open_time"),
+        "account": row.get("account_label") or row.get("account"),
+        "source": row.get("source"),
+        "metric_key": metric_key,
+        "metric_value": metric_value,
+    }
 
 
 def _fmt_detail_datetime(value: Any) -> str:
@@ -2349,6 +2436,7 @@ def _apply_instrument_averages_requested_style(ws, *, preserve_layout: bool = Fa
             for header in ("Move to break even", "Move to profit"):
                 if headers.get(header):
                     ws.cell(row, headers[header]).number_format = ZERO_HIDE_FORMAT
+        _apply_symbols_filter_header_layout(ws)
         return
     for row in range(data_start_row, ws.max_row + 1):
         if ws.cell(row, symbol_col).value in (None, ""):
@@ -2398,6 +2486,7 @@ def _apply_instrument_averages_requested_style(ws, *, preserve_layout: bool = Fa
                     cf.add(replacement, copy(rule))
     if not preserve_layout:
         _write_instrument_averages_headers(ws)
+    _apply_symbols_filter_header_layout(ws)
 
 
 def _apply_instrument_averages_profit_loss_formatting(ws) -> None:
@@ -2544,7 +2633,46 @@ def _subtract_range_rectangle(cell_range: str, cut_range: str) -> List[str]:
     ]
 
 def _sanitize_dashboard_semantic_conditional_formatting(ws) -> None:
-    protected_ranges = ("B3:D4", "B10:D11", "C10:D11", "C21:D28")
+    protected_ranges: List[str] = ["B3:D4", "B10:D11", "C10:D11", "C21:D28"]
+    protected_labels = {
+        "wins",
+        "losses",
+        "gross percent gain",
+        "gross ir gain",
+        "gross percent loss",
+        "gross ir loss",
+        "max win %",
+        "avg win %",
+        "min win %",
+        "max r win",
+        "avg r win",
+        "min r win",
+        "max loss %",
+        "avg loss %",
+        "min loss %",
+        "max r loss",
+        "avg r loss",
+        "min r loss",
+    }
+    for row in range(1, ws.max_row + 1):
+        label = str(ws.cell(row, 1).value or "").strip().casefold()
+        if label in protected_labels:
+            protected_ranges.append(f"B{row}:D{row}")
+    winners_start = next(
+        (row for row in range(1, ws.max_row + 1) if str(ws.cell(row, 1).value or "").strip().casefold() == "winners"),
+        None,
+    )
+    if winners_start:
+        next_section = next(
+            (
+                row
+                for row in range(winners_start + 1, ws.max_row + 1)
+                if str(ws.cell(row, 1).value or "").strip().casefold() in {"side", "patterns", "timeframe", "commission"}
+            ),
+            ws.max_row + 1,
+        )
+        if next_section > winners_start:
+            protected_ranges.append(f"B{winners_start}:D{next_section - 1}")
     sanitized = OrderedDict()
 
     def add_rules(key, rules) -> None:
@@ -2582,6 +2710,10 @@ def _apply_dashboard_requested_semantic_fills(ws) -> None:
         _apply_full_cell_semantic_fill(ws[coordinate], "loss")
 
     semantic_by_label = {
+        "gross percent gain": "profit",
+        "gross ir gain": "profit",
+        "gross percent loss": "loss",
+        "gross ir loss": "loss",
         "max win %": "profit",
         "avg win %": "profit",
         "min win %": "profit",
@@ -2596,18 +2728,14 @@ def _apply_dashboard_requested_semantic_fills(ws) -> None:
         "min r loss": "loss",
         "max r win": "profit",
     }
-    semantic_rows: List[int] = []
     for row in range(1, ws.max_row + 1):
         label = str(ws.cell(row, 1).value or "").strip().lower()
         if label == "source":
             _apply_dashboard_source_label_style(ws.cell(row, 1))
         semantic = semantic_by_label.get(label)
         if semantic:
-            semantic_rows.append(row)
             for col in (2, 3, 4):
                 _apply_full_cell_semantic_fill(ws.cell(row, col), semantic)
-    for row in semantic_rows:
-        _profit_loss_rules(ws, f"B{row}:D{row}")
 
     for section in ("Side", "Patterns", "Timeframe"):
         bounds = _stats1_section_bounds(ws, section)
@@ -2677,6 +2805,18 @@ def _repair_stats1_formatting(
     if not market_cols:
         return
     repaired = 0
+    for row in range(1, ws.max_row + 1):
+        cell = ws.cell(row, 1)
+        if cell.value in (None, ""):
+            continue
+        font = copy(cell.font)
+        font.bold = True
+        font.color = "FF000000"
+        cell.font = font
+        alignment = copy(cell.alignment)
+        alignment.horizontal = "left"
+        cell.alignment = alignment
+        repaired += 1
     neutral_overall_ranges: List[str] = []
     categorical_sections = {"side", "patterns", "timeframe", "commission", "drawdown"}
     for section_name in ("Timeframe", "Patterns", "Side"):
@@ -2739,7 +2879,7 @@ def _repair_stats1_formatting(
                 repaired += 1
     for row in range(1, ws.max_row + 1):
         label = str(ws.cell(row, 1).value or "").strip().casefold()
-        if label in {"net p/l", "net p/l %", "net p/l percentage", "gross gain", "gross loss"}:
+        if label in {"net p/l", "net p/l %", "net p/l percentage", "gross percent gain", "gross percent loss", "gross gain", "gross loss"}:
             cell = ws.cell(row, market_cols["overall"])
             font = copy(cell.font)
             font.bold = False
@@ -2868,8 +3008,8 @@ def _move_duration_seconds(row: Dict[str, Any], prefix: str) -> float | None:
     return seconds if seconds >= 0 else None
 
 
-def _trade_move_duration_metrics(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str, float | None]]:
-    values: Dict[str, Dict[str, List[float]]] = {
+def _trade_move_duration_metrics(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    values: Dict[str, Dict[str, List[Tuple[float, Dict[str, Any]]]]] = {
         market: {"move_to_break_even_duration_seconds": [], "move_to_profit_duration_seconds": []}
         for market in ("overall", "fx", "crypto")
     }
@@ -2888,11 +3028,27 @@ def _trade_move_duration_metrics(rows: List[Dict[str, Any]]) -> Dict[str, Dict[s
             if seconds is None:
                 continue
             for market_name in markets:
-                values[market_name][key].append(seconds)
-    return {
-        market: {key: (sum(samples) / len(samples) if samples else None) for key, samples in metrics.items()}
-        for market, metrics in values.items()
-    }
+                values[market_name][key].append((seconds, row))
+    output: Dict[str, Dict[str, Any]] = {}
+    for market, metrics in values.items():
+        bucket: Dict[str, Any] = {"metric_sources": {}}
+        for key, samples in metrics.items():
+            values_only = [value for value, _row in samples]
+            bucket[key] = (sum(values_only) / len(values_only)) if values_only else None
+            if not samples:
+                continue
+            prefix = key.removesuffix("_duration_seconds")
+            min_value, min_row = min(samples, key=lambda item: (item[0], str(item[1].get("symbol") or "")))
+            max_value, max_row = max(samples, key=lambda item: (item[0], str(item[1].get("symbol") or "")))
+            bucket[f"min_{key}"] = min_value
+            bucket[f"avg_{key}"] = bucket[key]
+            bucket[f"max_{key}"] = max_value
+            bucket["metric_sources"][f"min_{key}"] = _trade_metric_ref(min_row, f"min_{prefix}", min_value)
+            bucket["metric_sources"][f"max_{key}"] = _trade_metric_ref(max_row, f"max_{prefix}", max_value)
+        if not bucket["metric_sources"]:
+            bucket.pop("metric_sources", None)
+        output[market] = bucket
+    return output
 
 
 def _mode_nonblank(values: List[Any]) -> Any:
@@ -3023,7 +3179,12 @@ def _instrument_analysis_by_symbol(rows: List[Dict[str, Any]]) -> Dict[str, Dict
 def _result_percentage_totals_by_market(
     rows: List[Dict[str, Any]], balances: List[Dict[str, Any]]
 ) -> Dict[str, Dict[str, Any]]:
-    """Calculate STATS1 returns from account equity while retaining trade-% detail metrics."""
+    """Return linear trade-result percentages plus account-return diagnostics by market.
+
+    ``net_result_pct`` is the sum of non-test Trade Log Profit % values and is
+    the displayed Net P/L Percentage. ``market_return_pct`` is a capital-based
+    account return diagnostic and must not be relabeled as Net P/L Percentage.
+    """
     grouped: Dict[str, List[Dict[str, Any]]] = {
         market: [] for market in ("overall", "fx", "crypto")
     }
@@ -3287,6 +3448,22 @@ def _risk_of_ruin_by_account(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str, 
             grouped[account].append(row)
     result: Dict[str, Dict[str, Any]] = {}
     for account, account_rows in grouped.items():
+        def _risk_payload(reason: str | None, risk_of_ruin: float | None = None, **extra: Any) -> Dict[str, Any]:
+            payload = {
+                "risk_of_ruin": risk_of_ruin,
+                "reason": reason,
+                "model": "fixed_fractional_balsara",
+                "trade_count": len(account_rows),
+                "win_rate": None,
+                "payoff_ratio": None,
+                "risk_per_trade_fraction": None,
+                "edge": None,
+                "capital_units": None,
+                "risk_source": None,
+            }
+            payload.update(extra)
+            return payload
+
         wins: List[float] = []
         losses: List[float] = []
         balance_risks: List[float] = []
@@ -3318,21 +3495,11 @@ def _risk_of_ruin_by_account(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str, 
             if risk_pct is not None and math.isfinite(risk_pct) and risk_pct > 0:
                 fallback_risks.append(risk_pct / 100.0)
         if not wins or not losses:
-            result[account] = {
-                "risk_of_ruin": None,
-                "reason": "requires_wins_and_losses",
-                "model": "fixed_fractional_balsara",
-                "trade_count": len(account_rows),
-            }
+            result[account] = _risk_payload("requires_wins_and_losses")
             continue
         risk_samples = balance_risks or fallback_risks
         if not risk_samples:
-            result[account] = {
-                "risk_of_ruin": None,
-                "reason": "missing_risk_per_trade",
-                "model": "fixed_fractional_balsara",
-                "trade_count": len(account_rows),
-            }
+            result[account] = _risk_payload("missing_risk_per_trade")
             continue
         sorted_risks = sorted(risk_samples)
         midpoint = len(sorted_risks) // 2
@@ -3347,15 +3514,13 @@ def _risk_of_ruin_by_account(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str, 
         avg_loss = sum(losses) / len(losses)
         payoff_ratio = avg_win / avg_loss if avg_loss > 0 else None
         if payoff_ratio is None or risk_fraction <= 0 or not math.isfinite(risk_fraction):
-            result[account] = {
-                "risk_of_ruin": None,
-                "reason": "invalid_model_inputs",
-                "model": "fixed_fractional_balsara",
-                "trade_count": len(account_rows),
-            }
+            result[account] = _risk_payload("invalid_model_inputs")
             continue
         edge = (win_rate * payoff_ratio) - loss_rate
         capital_units = 1.0 / risk_fraction
+        # A non-positive edge is mathematically certain ruin in this model.
+        # Positive-edge accounts use the Balsara-style curve directly instead
+        # of being coerced to 100%.
         if edge <= 0:
             risk_of_ruin = 1.0
         elif edge >= 1:
@@ -3363,20 +3528,50 @@ def _risk_of_ruin_by_account(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str, 
         else:
             risk_of_ruin = ((1.0 - edge) / (1.0 + edge)) ** capital_units
         risk_of_ruin = max(0.0, min(1.0, risk_of_ruin))
-        result[account] = {
-            "risk_of_ruin": risk_of_ruin,
-            "reason": None,
-            "model": "fixed_fractional_balsara",
-            "trade_count": len(account_rows),
-            "win_rate": win_rate,
-            "loss_rate": loss_rate,
-            "payoff_ratio": payoff_ratio,
-            "risk_per_trade_fraction": risk_fraction,
-            "risk_source": "median_loss_over_balance" if balance_risks else "median_stop_loss_distance",
-            "edge": edge,
-            "capital_units": capital_units,
-        }
+        result[account] = _risk_payload(
+            None,
+            risk_of_ruin,
+            win_rate=win_rate,
+            loss_rate=loss_rate,
+            payoff_ratio=payoff_ratio,
+            risk_per_trade_fraction=risk_fraction,
+            risk_source="median_loss_over_balance" if balance_risks else "median_stop_loss_distance",
+            edge=edge,
+            capital_units=capital_units,
+        )
     return result
+
+
+def _empty_risk_of_ruin_payload(reason: str, trade_count: int | None = None) -> Dict[str, Any]:
+    return {
+        "risk_of_ruin": None,
+        "reason": reason,
+        "model": "fixed_fractional_balsara",
+        "trade_count": trade_count,
+        "win_rate": None,
+        "payoff_ratio": None,
+        "risk_per_trade_fraction": None,
+        "edge": None,
+        "capital_units": None,
+        "risk_source": None,
+    }
+
+
+def _risk_of_ruin_comment_text(payload: Dict[str, Any]) -> str:
+    wanted = {
+        key: payload.get(key)
+        for key in (
+            "win_rate",
+            "payoff_ratio",
+            "risk_per_trade_fraction",
+            "edge",
+            "capital_units",
+            "risk_source",
+            "trade_count",
+            "reason",
+        )
+    }
+    return f"Fixed-fractional/Balsara-style risk of ruin. Model inputs: {wanted}"
 
 
 def _dashboard_extended_metrics(
@@ -3402,19 +3597,47 @@ def _dashboard_extended_metrics(
             return 0
         return 1 if value > 0 else -1
 
-    def _distance_values(items: List[Dict[str, Any]], key: str) -> List[float]:
-        values: List[float] = []
+    def _distance_samples(items: List[Dict[str, Any]], key: str) -> List[Tuple[float, Dict[str, Any]]]:
+        samples: List[Tuple[float, Dict[str, Any]]] = []
         fallback_key = "stop_loss_distance_pct" if key == "stop_loss" else "target_distance_pct"
         for item in items:
             fraction = _validated_distance_fraction(item, key)
             if fraction is not None:
-                values.append(fraction * 100.0)
+                samples.append((fraction * 100.0, item))
                 continue
             fallback = _as_float(item.get(fallback_key))
             if fallback is not None and math.isfinite(fallback):
                 if _trade_row_market(item) != "fx" or abs(fallback) <= 50.0:
-                    values.append(abs(fallback))
-        return values
+                    samples.append((abs(fallback), item))
+        return samples
+
+    def _distance_values(items: List[Dict[str, Any]], key: str) -> List[float]:
+        return [value for value, _item in _distance_samples(items, key)]
+
+    def _distance_extreme_ref(items: List[Dict[str, Any]], key: str, mode: str, source_key: str) -> Dict[str, Any] | None:
+        samples = _distance_samples(items, key)
+        if not samples:
+            return None
+        picked_value, picked_row = (min if mode == "min" else max)(
+            samples,
+            key=lambda item: (item[0], str(item[1].get("symbol") or "")),
+        )
+        return _trade_metric_ref(picked_row, source_key, picked_value)
+
+    def _metric_extreme_ref(items: List[Dict[str, Any]], key: str, mode: str, source_key: str) -> Dict[str, Any] | None:
+        samples = [
+            (value, item)
+            for item in items
+            for value in [_as_float(item.get(key))]
+            if value is not None and math.isfinite(value)
+        ]
+        if not samples:
+            return None
+        picked_value, picked_row = (min if mode == "min" else max)(
+            samples,
+            key=lambda item: (item[0], str(item[1].get("symbol") or "")),
+        )
+        return _trade_metric_ref(picked_row, source_key, picked_value)
 
     def _summary(values: List[float], prefix: str) -> Dict[str, Any]:
         return {
@@ -3555,9 +3778,29 @@ def _dashboard_extended_metrics(
             **{f"timeframe_{label.lower()}_losses": timeframe_losses[label] for label in timeframe_aliases.values()},
             **_summary(commissions, "commission"),
             "net_r_multiple": sum(r_values) if r_values else None,
+            "gross_ir_gain": sum(value for value in r_values if value > 0) if r_values else None,
+            "gross_ir_loss": abs(sum(value for value in r_values if value < 0)) if r_values else None,
             "total_commission": sum(commissions) if commissions else None,
             "min_commission_source": _fmt_detail_src(min_commission_source) if min_commission_source else "",
             "max_commission_source": _fmt_detail_src(max_commission_source) if max_commission_source else "",
+            "metric_sources": {
+                "min_stop_pct": _distance_extreme_ref(items, "stop_loss", "min", "min_stop_pct"),
+                "max_stop_pct": _distance_extreme_ref(items, "stop_loss", "max", "max_stop_pct"),
+                "min_target_pct": _distance_extreme_ref(items, "take_profit", "min", "min_target_pct"),
+                "max_target_pct": _distance_extreme_ref(items, "take_profit", "max", "max_target_pct"),
+                "min_stop_pct_winners": _distance_extreme_ref(winners, "stop_loss", "min", "min_stop_pct_winners"),
+                "max_stop_pct_winners": _distance_extreme_ref(winners, "stop_loss", "max", "max_stop_pct_winners"),
+                "min_target_pct_winners": _distance_extreme_ref(winners, "take_profit", "min", "min_target_pct_winners"),
+                "max_target_pct_winners": _distance_extreme_ref(winners, "take_profit", "max", "max_target_pct_winners"),
+                "min_stop_pct_losers": _distance_extreme_ref(losers, "stop_loss", "min", "min_stop_pct_losers"),
+                "max_stop_pct_losers": _distance_extreme_ref(losers, "stop_loss", "max", "max_stop_pct_losers"),
+                "min_target_pct_losers": _distance_extreme_ref(losers, "take_profit", "min", "min_target_pct_losers"),
+                "max_target_pct_losers": _distance_extreme_ref(losers, "take_profit", "max", "max_target_pct_losers"),
+                "min_result_pct": _metric_extreme_ref(items, "result_pct", "min", "min_result_pct"),
+                "max_result_pct": _metric_extreme_ref(items, "result_pct", "max", "max_result_pct"),
+                "min_r_multiple": _metric_extreme_ref(items, "r_multiple", "min", "min_r_multiple"),
+                "max_r_multiple": _metric_extreme_ref(items, "r_multiple", "max", "max_r_multiple"),
+            },
             "min_drawdown_pct": stats_bucket.get("min_drawdown_pct"),
             "avg_drawdown_pct": stats_bucket.get("avg_drawdown_pct"),
             "max_drawdown_pct": stats_bucket.get("max_drawdown_pct"),
@@ -3591,12 +3834,12 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
     percentage_totals = _result_percentage_totals_by_market(rows, snapshot.get("balances") or stats.get("balances") or [])
     extended_metrics = _dashboard_extended_metrics(metric_rows, by_market)
     buckets = {
-        market: {
-            **dict(bucket or {}),
-            **percentage_totals[market],
-            **{key: value for key, value in extended_metrics[market].items() if value is not None},
-            **{key: value for key, value in move_duration_metrics[market].items() if value is not None},
-        }
+        market: _merge_metric_buckets(
+            dict(bucket or {}),
+            percentage_totals[market],
+            {key: value for key, value in extended_metrics[market].items() if value is not None},
+            {key: value for key, value in move_duration_metrics[market].items() if value is not None},
+        )
         for market, bucket in {
             "overall": by_market.get("overall") or totals,
             "fx": by_market.get("fx") or {},
@@ -3620,17 +3863,26 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
         ("Break-even", "break_even", "count", None),
         ("Test", "test_trades", "count", None),
         ("Win rate", "win_rate_pct", "pct", None),
-        ("Net P/L Percentage", "market_return_pct", "pct", "auto"),
+        ("Net P/L Percentage", "net_result_pct", "pct", "auto"),
         ("Net P/L R multiples", "net_r_multiple", "r", "auto"),
-        ("Gross gain", "gross_gain_return_pct", "pct", "profit"),
-        ("Gross loss", "gross_loss_return_pct", "pct", "loss"),
+        ("Gross percent gain", "gross_gain_result_pct", "pct", "profit"),
+        ("Gross percent loss", "gross_loss_result_pct", "pct", "loss"),
+        ("Gross IR gain", "gross_ir_gain", "r", "profit"),
+        ("Gross IR loss", "gross_ir_loss", "r", "loss"),
+        ("Percentage expectancy", "avg_result_pct", "pct", "auto"),
+        ("R expectancy", "avg_r_multiple", "r", "auto"),
         ("Best Win Streak", "winning_streak", "count", "profit"),
         ("Worst Losing Streak", "losing_streak", "count", "loss"),
-        ("Avg result %", "avg_result_pct", "pct", "auto"),
-        ("Avg R", "avg_r_multiple", "r", "auto"),
         ("Avg stop %", "avg_stop_pct", "pct", None),
         ("Avg target %", "avg_target_pct", "pct", None),
+        ("Min stop %", "min_stop_pct", "pct", None),
+        ("Source", "source:min_stop_pct", "source", None),
+        ("Max stop %", "max_stop_pct", "pct", None),
+        ("Source", "source:max_stop_pct", "source", None),
+        ("Min target %", "min_target_pct", "pct", None),
+        ("Source", "source:min_target_pct", "source", None),
         ("Max target %", "max_target_pct", "pct", None),
+        ("Source", "source:max_target_pct", "source", None),
     ]
 
     row = 2
@@ -3642,16 +3894,16 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
             cell = dash.cell(row, col)
             if kind == "pct":
                 number = _as_float(value)
-                if number is None and market == "overall" and key == "market_return_pct":
-                    reason = str(bucket.get("return_unavailable_reason") or "insufficient percentage data").replace("_", " ")
-                    cell.value = f"Unavailable: {reason}"
-                    cell.fill = PatternFill("solid", fgColor=LIGHT_GREY_FILL_RGB)
-                else:
-                    cell.value = "" if number is None else number / 100.0
-                    cell.number_format = adaptive_percent_number_format(cell.value)
+                cell.value = "" if number is None else number / 100.0
+                cell.number_format = adaptive_percent_number_format(cell.value)
             elif kind == "r":
                 cell.value = "" if value is None else value
                 cell.number_format = '0.000"R"'
+            elif kind == "source":
+                source_key = str(key or "").split(":", 1)[1] if ":" in str(key or "") else str(key or "")
+                source = (bucket.get("metric_sources") or {}).get(source_key)
+                cell.value = _fmt_detail_src(source) if source else ""
+                cell.number_format = "General"
             elif kind == "count":
                 cell.value = "" if value is None else value
                 cell.number_format = "0"
@@ -3690,19 +3942,27 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
             ("Avg duration", "avg_duration_seconds", "duration", None),
             ("Max duration", "max_duration_seconds", "duration", None),
             ("Min Move to Break Even", "min_move_to_break_even_duration_seconds", "duration", None),
+            ("Source", "source:min_move_to_break_even_duration_seconds", "source", None),
             ("Average Move to Break Even", "avg_move_to_break_even_duration_seconds", "duration", None),
             ("Max Move to Break Even", "max_move_to_break_even_duration_seconds", "duration", None),
+            ("Source", "source:max_move_to_break_even_duration_seconds", "source", None),
             ("Min Move to Profit", "min_move_to_profit_duration_seconds", "duration", None),
+            ("Source", "source:min_move_to_profit_duration_seconds", "source", None),
             ("Average Move to Profit", "avg_move_to_profit_duration_seconds", "duration", None),
             ("Max Move to Profit", "max_move_to_profit_duration_seconds", "duration", None),
+            ("Source", "source:max_move_to_profit_duration_seconds", "source", None),
         ], False),
         ("Winners", [
             ("Min stop %", "min_stop_pct_winners", "pct", None),
+            ("Source", "source:min_stop_pct_winners", "source", None),
             ("Avg stop %", "avg_stop_pct_winners", "pct", None),
             ("Max stop %", "max_stop_pct_winners", "pct", None),
+            ("Source", "source:max_stop_pct_winners", "source", None),
             ("Min target %", "min_target_pct_winners", "pct", None),
+            ("Source", "source:min_target_pct_winners", "source", None),
             ("Avg target %", "avg_target_pct_winners", "pct", None),
             ("Max target %", "max_target_pct_winners", "pct", None),
+            ("Source", "source:max_target_pct_winners", "source", None),
             ("Min win %", "min_result_pct_winners", "pct", "profit"),
             ("Avg win %", "avg_result_pct_winners", "pct", "profit"),
             ("Max win %", "max_result_pct_winners", "pct", "profit"),
@@ -3713,11 +3973,15 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
         ], True),
         ("Losers", [
             ("Min stop %", "min_stop_pct_losers", "pct", None),
+            ("Source", "source:min_stop_pct_losers", "source", None),
             ("Avg stop %", "avg_stop_pct_losers", "pct", None),
             ("Max stop %", "max_stop_pct_losers", "pct", None),
+            ("Source", "source:max_stop_pct_losers", "source", None),
             ("Min target %", "min_target_pct_losers", "pct", None),
+            ("Source", "source:min_target_pct_losers", "source", None),
             ("Avg target %", "avg_target_pct_losers", "pct", None),
             ("Max target %", "max_target_pct_losers", "pct", None),
+            ("Source", "source:max_target_pct_losers", "source", None),
             ("Max loss %", "min_result_pct_losers", "pct", "loss"),
             ("Avg loss %", "avg_result_pct_losers", "pct", "loss"),
             ("Min loss %", "max_result_pct_losers", "pct", "loss"),
@@ -3805,6 +4069,11 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
                 elif kind == "r":
                     cell.value = "" if value is None else value
                     cell.number_format = '0.000"R"'
+                elif kind == "source":
+                    source_key = str(key or "").split(":", 1)[1] if ":" in str(key or "") else str(key or "")
+                    source = (buckets[market].get("metric_sources") or {}).get(source_key)
+                    cell.value = _fmt_detail_src(source) if source else ""
+                    cell.number_format = "General"
                 elif kind == "duration":
                     cell.value = _format_duration_display(value) if value is not None else ""
                     cell.number_format = "General"
@@ -3827,7 +4096,11 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
 
     _style_header_row(dash, 1)
     _table_border(dash, 1, 1, row - 1, 4)
-    _profit_loss_rules(dash, f"B13:D14")
+    labels_by_name = {str(dash.cell(rr, 1).value or "").strip(): rr for rr in range(1, row)}
+    for label in ("Percentage expectancy", "R expectancy"):
+        metric_row = labels_by_name.get(label)
+        if metric_row:
+            _profit_loss_rules(dash, f"B{metric_row}:D{metric_row}")
 
     detail = _stats2_sheet(wb, required=True)
     balances = _canonicalize_and_dedupe_balances(snapshot.get("balances") or stats.get("balances") or [])
@@ -3844,14 +4117,10 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
         detail.cell(target_row, 2, _as_float(rec.get("balance")))
         detail.cell(target_row, 2).number_format = "#,##0.0000000000" if _is_crypto_currency(currency) else "#,##0.00"
         detail.cell(target_row, 3, currency)
-        risk_payload = risk_of_ruin.get(account_label) or {}
+        risk_payload = risk_of_ruin.get(account_label) or _empty_risk_of_ruin_payload("no_usable_trade_history")
         detail.cell(target_row, 4, risk_payload.get("risk_of_ruin"))
         detail.cell(target_row, 4).number_format = "0.00%"
-        detail.cell(target_row, 4).comment = Comment(
-            "Fixed-fractional/Balsara-style risk of ruin. "
-            f"Inputs: {risk_payload if risk_payload else {'reason': 'no usable trade history'}}",
-            "Codex",
-        )
+        detail.cell(target_row, 4).comment = Comment(_risk_of_ruin_comment_text(risk_payload), "Codex")
         detail.cell(target_row, 5, rec.get("as_of") or "")
 
     _apply_dashboard_requested_semantic_fills(dash)
@@ -4077,7 +4346,7 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
 
     if STATS2_SHEET in wb.sheetnames:
         _repair_stats2_account_balance_formatting(wb[STATS2_SHEET])
-    _apply_workbook_right_alignment(wb)
+    _apply_workbook_left_alignment(wb)
     output_path.parent.mkdir(parents=True, exist_ok=True); wb.save(output_path)
     return {'ok':True,'path':str(output_path)}
 
@@ -4178,15 +4447,24 @@ _REPORT_SPECS = [
     ("Test", "test_trades", "count", None),
     ("Win rate", "win_rate_pct", "pct", None),
     ("Net P/L", "net_result_pct", "pct", "auto"),
-    ("Gross gain", "gross_gain_result_pct", "pct", "profit"),
-    ("Gross loss", "gross_loss_result_pct", "pct", "loss"),
+    ("Gross percent gain", "gross_gain_result_pct", "pct", "profit"),
+    ("Gross percent loss", "gross_loss_result_pct", "pct", "loss"),
+    ("Gross IR gain", "gross_ir_gain", "r", "profit"),
+    ("Gross IR loss", "gross_ir_loss", "r", "loss"),
     ("Best Win Streak", "winning_streak", "count", "profit"),
     ("Worst Losing Streak", "losing_streak", "count", "loss"),
-    ("Avg result %", "avg_result_pct", "pct", "auto"),
-    ("Avg R", "avg_r_multiple", "r", "auto"),
+    ("Percentage expectancy", "avg_result_pct", "pct", "auto"),
+    ("R expectancy", "avg_r_multiple", "r", "auto"),
     ("Avg stop %", "avg_stop_pct", "pct", None),
     ("Avg target %", "avg_target_pct", "pct", None),
+    ("Min stop %", "min_stop_pct", "pct", None),
+    ("Source", "source:min_stop_pct", "source", None),
+    ("Max stop %", "max_stop_pct", "pct", None),
+    ("Source", "source:max_stop_pct", "source", None),
+    ("Min target %", "min_target_pct", "pct", None),
+    ("Source", "source:min_target_pct", "source", None),
     ("Max target %", "max_target_pct", "pct", None),
+    ("Source", "source:max_target_pct", "source", None),
     ("Avg duration (DD:HH:MM:SS)", "avg_duration_seconds", "duration", None),
     ("Move to Break Even (DD:HH:MM:SS)", "move_to_break_even_duration_seconds", "duration", None),
     ("Move to Profit (DD:HH:MM:SS)", "move_to_profit_duration_seconds", "duration", None),
@@ -4205,13 +4483,13 @@ _REPORT_SPECS = [
     ("Winners", None, "section", None),
     ("Avg stop %", "avg_stop_pct_winners", "pct", None),
     ("Avg target %", "avg_target_pct_winners", "pct", None),
-    ("Avg result %", "avg_result_pct_winners", "pct", "profit"),
-    ("Avg R", "avg_r_multiple_winners", "r", "profit"),
+    ("Percentage expectancy", "avg_result_pct_winners", "pct", "profit"),
+    ("R expectancy", "avg_r_multiple_winners", "r", "profit"),
     ("Losers", None, "section", None),
     ("Avg stop %", "avg_stop_pct_losers", "pct", None),
     ("Avg target %", "avg_target_pct_losers", "pct", None),
-    ("Avg result %", "avg_result_pct_losers", "pct", "loss"),
-    ("Avg R", "avg_r_multiple_losers", "r", "loss"),
+    ("Percentage expectancy", "avg_result_pct_losers", "pct", "loss"),
+    ("R expectancy", "avg_r_multiple_losers", "r", "loss"),
     ("Drawdown", None, "section", None),
     ("Max drawdown", "max_drawdown_pct", "pct", "loss"),
     ("Avg drawdown", "avg_drawdown_pct", "pct", "loss"),
@@ -4231,17 +4509,25 @@ _REPORT_SPECS = [
     ("Min Move to Profit", "min_move_to_profit_duration_seconds", "duration", None),
     ("Max Move to Profit", "max_move_to_profit_duration_seconds", "duration", None),
     ("Winners min stop %", "min_stop_pct_winners", "pct", None),
+    ("Source", "source:min_stop_pct_winners", "source", None),
     ("Winners max stop %", "max_stop_pct_winners", "pct", None),
+    ("Source", "source:max_stop_pct_winners", "source", None),
     ("Winners min target %", "min_target_pct_winners", "pct", None),
+    ("Source", "source:min_target_pct_winners", "source", None),
     ("Winners max target %", "max_target_pct_winners", "pct", None),
+    ("Source", "source:max_target_pct_winners", "source", None),
     ("Winners min result %", "min_result_pct_winners", "pct", "profit"),
     ("Winners max result %", "max_result_pct_winners", "pct", "profit"),
     ("Winners min R", "min_r_multiple_winners", "r", "profit"),
     ("Winners max R", "max_r_multiple_winners", "r", "profit"),
     ("Losers min stop %", "min_stop_pct_losers", "pct", None),
+    ("Source", "source:min_stop_pct_losers", "source", None),
     ("Losers max stop %", "max_stop_pct_losers", "pct", None),
+    ("Source", "source:max_stop_pct_losers", "source", None),
     ("Losers min target %", "min_target_pct_losers", "pct", None),
+    ("Source", "source:min_target_pct_losers", "source", None),
     ("Losers max target %", "max_target_pct_losers", "pct", None),
+    ("Source", "source:max_target_pct_losers", "source", None),
     ("Losers min result %", "min_result_pct_losers", "pct", "loss"),
     ("Losers max result %", "max_result_pct_losers", "pct", "loss"),
     ("Losers min R", "min_r_multiple_losers", "r", "loss"),
@@ -4479,6 +4765,22 @@ def _report_label_rows(ws, label: str) -> List[int]:
 
 def _repair_report_layout(ws, diagnostics: Dict[str, Any] | None = None) -> None:
     diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+    label_replacements = {
+        "avg result %": "Percentage expectancy",
+        "average result percent": "Percentage expectancy",
+        "average result %": "Percentage expectancy",
+        "avg r": "R expectancy",
+        "average r": "R expectancy",
+        "gross gain": "Gross percent gain",
+        "gross loss": "Gross percent loss",
+    }
+    for row in range(1, ws.max_row + 1):
+        current = str(ws.cell(row, 1).value or "").strip()
+        replacement = label_replacements.get(current.casefold())
+        if replacement and current != replacement:
+            ws.cell(row, 1).value = replacement
+            diagnostics.setdefault("renamed_report_metric_labels", []).append(f"{ws.title}: {replacement}")
+
     expectancy_rows = _report_label_rows(ws, "Expectancy %")
     for row in reversed(expectancy_rows):
         ws.delete_rows(row, 1)
@@ -4564,6 +4866,9 @@ def _update_report_sheet_preserving_layout(
     missing = [spec[0] for spec in _REPORT_SPECS if spec[0] not in found_labels]
     if missing:
         diagnostics.setdefault("missing_report_metric_labels", {})[ws.title] = missing
+        _write_report_sheet(ws, headers, buckets)
+        diagnostics.setdefault("rewrote_report_sheets_for_requested_metrics", []).append(ws.title)
+        return
     for row, (_label, key, kind, _semantic) in spec_rows:
         for col, bucket in zip(header_cols, buckets):
             cell = ws.cell(row, col)
@@ -4628,11 +4933,14 @@ def _report_bucket_for_period(
     bucket = _report_bucket_from_stats(_period_report_lookup(snapshot, year=year, month=month))
     rows = _report_rows_for_period(snapshot, year=year, month=month)
     if rows:
-        bucket.update(_linear_profit_percentage_totals(rows))
         extended = _dashboard_extended_metrics(rows, {"overall": bucket})["overall"]
-        bucket.update({key: value for key, value in extended.items() if value is not None})
         move_durations = _trade_move_duration_metrics(rows)["overall"]
-        bucket.update({key: value for key, value in move_durations.items() if value is not None})
+        bucket = _merge_metric_buckets(
+            bucket,
+            _linear_profit_percentage_totals(rows),
+            {key: value for key, value in extended.items() if value is not None},
+            {key: value for key, value in move_durations.items() if value is not None},
+        )
         commission_by_currency: Dict[str, List[float]] = defaultdict(list)
         for row in rows:
             commission = _as_float(row.get("commission"))
@@ -4786,23 +5094,23 @@ def _set_cell_horizontal_alignment(cell, horizontal: str) -> None:
     cell.alignment = alignment
 
 
-def _apply_workbook_right_alignment(wb) -> None:
-    right_alignment_id_by_source: Dict[int, int] = {}
+def _apply_workbook_left_alignment(wb) -> None:
+    left_alignment_id_by_source: Dict[int, int] = {}
 
-    def right_alignment_id(source_id: int) -> int:
-        if source_id in right_alignment_id_by_source:
-            return right_alignment_id_by_source[source_id]
+    def left_alignment_id(source_id: int) -> int:
+        if source_id in left_alignment_id_by_source:
+            return left_alignment_id_by_source[source_id]
         source = wb._alignments[source_id]
-        if source.horizontal == "right":
-            right_alignment_id_by_source[source_id] = source_id
+        if source.horizontal == "left":
+            left_alignment_id_by_source[source_id] = source_id
             return source_id
         target = copy(source)
-        target.horizontal = "right"
+        target.horizontal = "left"
         target_id = wb._alignments.add(target)
-        right_alignment_id_by_source[source_id] = target_id
+        left_alignment_id_by_source[source_id] = target_id
         return target_id
 
-    default_right_alignment = Alignment(horizontal="right")
+    default_left_alignment = Alignment(horizontal="left")
     for ws in wb.worksheets:
         non_anchor_cells = {
             (row, col)
@@ -4815,12 +5123,14 @@ def _apply_workbook_right_alignment(wb) -> None:
         for (row, col), cell in list(ws._cells.items()):
             if (row, col) in non_anchor_cells:
                 continue
+            if cell.value in (None, ""):
+                continue
             source_style = cell._style
             if source_style is None:
-                cell.alignment = default_right_alignment
+                cell.alignment = default_left_alignment
                 continue
             source_alignment_id = source_style.alignmentId
-            target_alignment_id = right_alignment_id(source_alignment_id)
+            target_alignment_id = left_alignment_id(source_alignment_id)
             if target_alignment_id == source_alignment_id:
                 continue
             style_key = tuple(source_style)
@@ -5107,6 +5417,17 @@ def _restore_dashboard_row_snapshot(ws, row: int, snapshot: Dict[str, Any]) -> N
         cell.comment = copy(state["comment"])
         cell.hyperlink = copy(state["hyperlink"])
 
+def _move_dashboard_row_preserving_layout(ws, source_row: int, target_row: int) -> None:
+    if source_row == target_row:
+        return
+    snapshot = _dashboard_row_snapshot(ws, source_row)
+    insert_at = target_row if source_row > target_row else target_row + 1
+    style_row = source_row + 1 if insert_at <= source_row else source_row
+    _insert_dashboard_rows_preserving_layout(ws, insert_at, 1, style_row)
+    _restore_dashboard_row_snapshot(ws, insert_at, snapshot)
+    delete_at = source_row + 1 if insert_at <= source_row else source_row
+    _delete_dashboard_rows_preserving_layout(ws, delete_at, 1)
+
 def _repair_dashboard_extreme_metric_order(ws, diagnostics: Dict[str, Any] | None = None) -> bool:
     diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
     positions = {}
@@ -5249,6 +5570,149 @@ def _ensure_dashboard_move_duration_rows(ws, diagnostics: Dict[str, Any] | None 
     return changed
 
 
+def _ensure_dashboard_requested_metric_rows(ws, diagnostics: Dict[str, Any] | None = None) -> bool:
+    diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+    market_cols = _stats1_market_columns(ws)
+    if not market_cols or market_cols["overall"] <= 1:
+        return False
+    label_col = market_cols["overall"] - 1
+    changed = False
+
+    def label_at(row: int) -> str:
+        return str(ws.cell(row, label_col).value or "").strip()
+
+    def find_row(label: str, *, before: int | None = None) -> int | None:
+        wanted = label.casefold()
+        last_row = min(ws.max_row, before - 1) if before else ws.max_row
+        return next(
+            (row for row in range(1, last_row + 1) if label_at(row).casefold() == wanted),
+            None,
+        )
+
+    core_boundary = min(
+        [
+            row for row in range(1, ws.max_row + 1)
+            if label_at(row).casefold() in {"min duration", "min duration (dd:hh:mm:ss)", "winners"}
+        ] or [ws.max_row + 1]
+    )
+
+    def find_core_row(label: str) -> int | None:
+        return find_row(label, before=core_boundary)
+
+    replacements = {
+        "avg result %": "Percentage expectancy",
+        "average result percent": "Percentage expectancy",
+        "average result %": "Percentage expectancy",
+        "avg r": "R expectancy",
+        "average r": "R expectancy",
+    }
+    for row in range(1, ws.max_row + 1):
+        replacement = replacements.get(label_at(row).casefold())
+        if replacement and label_at(row) != replacement:
+            ws.cell(row, label_col).value = replacement
+            diagnostics.setdefault("renamed_dashboard_metric_labels", []).append(replacement)
+            changed = True
+
+    gross_replacements = {
+        "gross gain": "Gross percent gain",
+        "gross loss": "Gross percent loss",
+    }
+    for row in range(1, min(ws.max_row, 40) + 1):
+        replacement = gross_replacements.get(label_at(row).casefold())
+        if replacement:
+            ws.cell(row, label_col).value = replacement
+            diagnostics.setdefault("renamed_dashboard_metric_labels", []).append(replacement)
+            changed = True
+
+    def insert_after(anchor_label: str, wanted_label: str) -> int | None:
+        nonlocal changed
+        existing = find_row(wanted_label)
+        if existing:
+            return existing
+        anchor = find_row(anchor_label)
+        if not anchor:
+            return None
+        insert_at = anchor + 1
+        _insert_dashboard_rows_preserving_layout(ws, insert_at, 1, anchor)
+        ws.cell(insert_at, label_col).value = wanted_label
+        diagnostics.setdefault("inserted_dashboard_metric_rows", []).append(wanted_label)
+        changed = True
+        return insert_at
+
+    gross_ir_gain_row = insert_after("Gross percent loss", "Gross IR gain")
+    if gross_ir_gain_row and not find_row("Gross IR loss"):
+        _insert_dashboard_rows_preserving_layout(ws, gross_ir_gain_row + 1, 1, gross_ir_gain_row)
+        ws.cell(gross_ir_gain_row + 1, label_col).value = "Gross IR loss"
+        diagnostics.setdefault("inserted_dashboard_metric_rows", []).append("Gross IR loss")
+        changed = True
+
+    canonical_core_order = [
+        "Net P/L Percentage",
+        "Net P/L R multiples",
+        "Gross percent gain",
+        "Gross percent loss",
+        "Gross IR gain",
+        "Gross IR loss",
+        "Percentage expectancy",
+        "R expectancy",
+        "Best Win Streak",
+        "Worst Losing Streak",
+    ]
+    target_row = find_row(canonical_core_order[0])
+    if target_row:
+        for metric_label in canonical_core_order:
+            current_row = find_row(metric_label)
+            if not current_row:
+                continue
+            if current_row != target_row:
+                _move_dashboard_row_preserving_layout(ws, current_row, target_row)
+                diagnostics.setdefault("reordered_dashboard_core_metric_rows", []).append(metric_label)
+                changed = True
+            target_row += 1
+
+    cursor_anchor = "Avg target %"
+    for metric_label in ("Min stop %", "Max stop %", "Min target %", "Max target %"):
+        metric_row = find_core_row(metric_label)
+        if not metric_row:
+            anchor = find_core_row(cursor_anchor)
+            if not anchor:
+                continue
+            metric_row = anchor + 1
+            _insert_dashboard_rows_preserving_layout(ws, metric_row, 1, anchor)
+            ws.cell(metric_row, label_col).value = metric_label
+            diagnostics.setdefault("inserted_dashboard_metric_rows", []).append(metric_label)
+            changed = True
+        cursor_anchor = metric_label
+
+    source_metric_labels = {
+        "Min stop %",
+        "Max stop %",
+        "Min target %",
+        "Max target %",
+        "Min Move to Break Even",
+        "Max Move to Break Even",
+        "Min Move to Profit",
+        "Max Move to Profit",
+    }
+    row = 1
+    while row <= ws.max_row:
+        metric_label = label_at(row)
+        if metric_label in source_metric_labels:
+            next_row = row + 1
+            if next_row <= ws.max_row and label_at(next_row).casefold() == "source":
+                row += 2
+                continue
+            _insert_dashboard_rows_preserving_layout(ws, next_row, 1, row)
+            ws.cell(next_row, label_col).value = "Source"
+            diagnostics.setdefault("inserted_dashboard_source_rows", []).append(metric_label)
+            changed = True
+            row += 2
+            continue
+        row += 1
+
+    return changed
+
+
 def _ensure_dashboard_expectancy_row(ws, diagnostics: Dict[str, Any] | None = None) -> bool:
     diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
     market_cols = _stats1_market_columns(ws)
@@ -5304,10 +5768,10 @@ def _ensure_dashboard_extended_layout(ws, diagnostics: Dict[str, Any] | None = N
             ("Avg target %", {"avg target %"}),
             ("Max target %", {"max target %"}),
             ("Min result %", {"min result %", "min win %"}),
-            ("Avg result %", {"avg result %", "avg win %"}),
+            ("Percentage expectancy", {"percentage expectancy", "avg result %", "avg win %"}),
             ("Max result %", {"max result %", "max win %"}),
             ("Min R", {"min r", "min r win"}),
-            ("Avg R", {"avg r", "avg r win"}),
+            ("R expectancy", {"r expectancy", "avg r", "avg r win"}),
             ("Max R", {"max r", "max r win"}),
         ],
         "Losers": [
@@ -5318,10 +5782,10 @@ def _ensure_dashboard_extended_layout(ws, diagnostics: Dict[str, Any] | None = N
             ("Avg target %", {"avg target %"}),
             ("Max target %", {"max target %"}),
             ("Min result %", {"min result %", "max loss %"}),
-            ("Avg result %", {"avg result %", "avg loss %"}),
+            ("Percentage expectancy", {"percentage expectancy", "avg result %", "avg loss %"}),
             ("Max result %", {"max result %", "min loss %"}),
             ("Min R", {"min r", "max r loss"}),
-            ("Avg R", {"avg r", "avg r loss"}),
+            ("R expectancy", {"r expectancy", "avg r", "avg r loss"}),
             ("Max R", {"max r", "min r loss"}),
         ],
     }
@@ -5763,19 +6227,11 @@ def _write_stats2_risk_of_ruin(
         account = _canonical_account_label(ws.cell(row, account_col).value)
         if not account:
             continue
-        payload = risk_by_account.get(account) or {
-            "risk_of_ruin": None,
-            "reason": "no_usable_trade_history",
-            "model": "fixed_fractional_balsara",
-        }
+        payload = risk_by_account.get(account) or _empty_risk_of_ruin_payload("no_usable_trade_history")
         cell = ws.cell(row, risk_col)
         cell.value = payload.get("risk_of_ruin")
         cell.number_format = "0.00%"
-        cell.comment = Comment(
-            "Fixed-fractional/Balsara-style risk of ruin. "
-            f"Model inputs: {payload}",
-            "Codex",
-        )
+        cell.comment = Comment(_risk_of_ruin_comment_text(payload), "Codex")
         if payload.get("risk_of_ruin") is None:
             unavailable.append({"account": account, "reason": payload.get("reason")})
         else:
@@ -5995,6 +6451,7 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
         _repair_dashboard_core_layout(dash, diagnostics)
         _ensure_dashboard_expectancy_row(dash, diagnostics)
         _ensure_dashboard_move_duration_rows(dash, diagnostics)
+        _ensure_dashboard_requested_metric_rows(dash, diagnostics)
         _ensure_dashboard_extended_layout(dash, diagnostics)
 
         stats = snapshot.get("stats") or {}
@@ -6096,7 +6553,12 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
             *,
             allow_grey: bool = False,
         ) -> bool:
-            if value is None or (_is_light_grey_no_metric_cell(target_ws.cell(row, col)) and not allow_grey):
+            existing_cell = target_ws.cell(row, col)
+            existing_text = str(existing_cell.value or "").strip().casefold()
+            grey_locked = _is_light_grey_no_metric_cell(existing_cell) and not allow_grey
+            if grey_locked and existing_text.startswith("unavailable:"):
+                grey_locked = False
+            if value is None or grey_locked:
                 return False
             if _write_value_preserving_cell(target_ws, row, col, value):
                 diagnostics["updated_cells"] += 1
@@ -6189,16 +6651,21 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
                 (["Break-even"], "break_even", "count", None),
                 (["Test"], "test_trades", "count", None),
                 (["Win rate"], "win_rate_pct", "pct", None),
-                (["Net P/L Percentage", "Net P/L %", "Net P/L"], "market_return_pct", "pct", "profit_loss"),
+                (["Net P/L Percentage", "Net P/L %", "Net P/L"], "net_result_pct", "pct", "profit_loss"),
                 (["Net P/L R multiples", "Net P/L R multiple", "Net R Multiple"], "net_r_multiple", "r", "profit_loss"),
-                (["Gross gain"], "gross_gain_return_pct", "pct", "profit_loss"),
-                (["Gross loss"], "gross_loss_return_pct", "pct", "loss"),
+                (["Gross percent gain", "Gross gain"], "gross_gain_result_pct", "pct", "profit_loss"),
+                (["Gross percent loss", "Gross loss"], "gross_loss_result_pct", "pct", "loss"),
+                (["Gross IR gain"], "gross_ir_gain", "r", "profit"),
+                (["Gross IR loss"], "gross_ir_loss", "r", "loss"),
                 (["Best Win Streak", "Winning Streak"], "winning_streak", "count", None),
                 (["Worst Losing Streak", "Losing Streak"], "losing_streak", "count", None),
-                (["Avg result %"], "avg_result_pct", "pct", "profit_loss"),
-                (["Avg R"], "avg_r_multiple", "r", "profit_loss"),
+                (["Percentage expectancy", "Avg result %", "Average result percent"], "avg_result_pct", "pct", "profit_loss"),
+                (["R expectancy", "Avg R", "Average R"], "avg_r_multiple", "r", "profit_loss"),
                 (["Avg stop %"], "avg_stop_pct", "pct", None),
                 (["Avg target %"], "avg_target_pct", "pct", None),
+                (["Min stop %"], "min_stop_pct", "pct", None),
+                (["Max stop %"], "max_stop_pct", "pct", None),
+                (["Min target %"], "min_target_pct", "pct", None),
                 (["Max target %"], "max_target_pct", "pct", None),
                 (["Min duration", "Min duration (DD:HH:MM:SS)"], "min_duration_seconds", "duration", None),
                 (["Avg duration", "Avg duration (DD:HH:MM:SS)"], "avg_duration_seconds", "duration", None),
@@ -6225,12 +6692,12 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
             ]
             percentage_totals = _result_percentage_totals_by_market(rows, snapshot.get("balances") or stats.get("balances") or [])
             buckets = {
-                market: {
-                    **dict(bucket or {}),
-                    **percentage_totals[market],
-                    **{key: value for key, value in extended_metrics[market].items() if value is not None},
-                    **{key: value for key, value in move_duration_metrics[market].items() if value is not None},
-                }
+                market: _merge_metric_buckets(
+                    dict(bucket or {}),
+                    percentage_totals[market],
+                    {key: value for key, value in extended_metrics[market].items() if value is not None},
+                    {key: value for key, value in move_duration_metrics[market].items() if value is not None},
+                )
                 for market, bucket in {
                     "overall": by_market.get("overall") or totals,
                     "fx": by_market.get("fx") or {},
@@ -6248,17 +6715,6 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
                     for market, col in market_cols.items():
                         value = _format_metric_value((buckets.get(market) or {}).get(key), metric_type)
                         if value is None:
-                            if key == "market_return_pct":
-                                cell = dash.cell(row_num, col)
-                                reason = str((buckets.get(market) or {}).get("return_unavailable_reason") or "insufficient percentage data")
-                                cell.value = f"Unavailable: {reason.replace('_', ' ')}"
-                                cell.number_format = "General"
-                                cell.fill = PatternFill("solid", fgColor=LIGHT_GREY_FILL_RGB)
-                                _clear_generated_semantic_fill(cell)
-                                diagnostics.setdefault("return_unavailable", []).append({
-                                    "market": market,
-                                    "reason": reason,
-                                })
                             diagnostics.setdefault("missing_dashboard_metric_values", []).append(f"{market} {labels[0]}")
                             continue
                         _write_dashboard_metric_cell(
@@ -6268,8 +6724,57 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
                             value,
                             metric_type,
                             semantic,
-                            allow_grey=key in {"market_return_pct", "gross_gain_return_pct", "gross_loss_return_pct"},
+                            allow_grey=False,
                         )
+
+            def write_market_source_row(row_num: int, source_key: str) -> None:
+                source_row = row_num + 1
+                if source_row > dash.max_row or str(dash.cell(source_row, 1).value or "").strip().casefold() != "source":
+                    return
+                market_cols = _main_dashboard_market_columns()
+                for market, col in market_cols.items():
+                    source = ((buckets.get(market) or {}).get("metric_sources") or {}).get(source_key)
+                    text = _fmt_detail_src(source) if source else ""
+                    if _write_value_preserving_cell(dash, source_row, col, text):
+                        dash.cell(source_row, col).number_format = "General"
+                        diagnostics["updated_cells"] += 1
+
+            first_winners_row = next(
+                (row for row in range(1, dash.max_row + 1)
+                 if str(dash.cell(row, 1).value or "").strip().casefold() == "winners"),
+                dash.max_row + 1,
+            )
+            for label, source_key in (
+                ("Min stop %", "min_stop_pct"),
+                ("Max stop %", "max_stop_pct"),
+                ("Min target %", "min_target_pct"),
+                ("Max target %", "max_target_pct"),
+            ):
+                for row_num in label_rows.get(label.lower(), []):
+                    if row_num < first_winners_row:
+                        write_market_source_row(row_num, source_key)
+                        break
+            for label, source_key in (
+                ("Min Move to Break Even", "min_move_to_break_even_duration_seconds"),
+                ("Max Move to Break Even", "max_move_to_break_even_duration_seconds"),
+                ("Min Move to Profit", "min_move_to_profit_duration_seconds"),
+                ("Max Move to Profit", "max_move_to_profit_duration_seconds"),
+            ):
+                for row_num in label_rows.get(label.lower(), []):
+                    write_market_source_row(row_num, source_key)
+            for section, suffix in (("Winners", "winners"), ("Losers", "losers")):
+                section_meta = anchors.get(section)
+                if not section_meta:
+                    continue
+                for label, source_key in (
+                    ("Min stop %", f"min_stop_pct_{suffix}"),
+                    ("Max stop %", f"max_stop_pct_{suffix}"),
+                    ("Min target %", f"min_target_pct_{suffix}"),
+                    ("Max target %", f"max_target_pct_{suffix}"),
+                ):
+                    pos = _find_label_in_section(dash, label, section_meta)
+                    if pos:
+                        write_market_source_row(pos[0], source_key)
             for labels, detail_key in (
                 (["Best Win Streak", "Winning Streak"], "longest_winning_streak"),
                 (["Worst Losing Streak", "Losing Streak"], "longest_losing_streak"),
@@ -6324,8 +6829,10 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
             write_metric(section, "Test", bucket.get("test_trades"), "count")
             write_metric(section, "Win rate", bucket.get("win_rate_pct"), "pct")
             write_metric(section, "Net P/L", bucket.get("net_profit_total"))
-            write_metric(section, "Avg result %", bucket.get("avg_result_pct"), "pct")
-            write_metric(section, "Avg R", bucket.get("avg_r_multiple"), "r")
+            for label in ("Percentage expectancy", "Avg result %"):
+                write_metric(section, label, bucket.get("avg_result_pct"), "pct")
+            for label in ("R expectancy", "Avg R"):
+                write_metric(section, label, bucket.get("avg_r_multiple"), "r")
             write_metric(section, "Gross gain", bucket.get("gross_gain"))
             write_metric(section, "Gross loss", bucket.get("gross_loss"))
             write_metric(section, "Max loss %", bucket.get("min_result_pct"), "pct")
@@ -6357,12 +6864,12 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
                 for market in ("overall", "fx", "crypto")
             }
 
-        write_market_metric("Winners", ["Avg result %", "Avg win %"], _risk_market_values("avg_result_pct_winners"), "pct", "profit_loss")
-        write_market_metric("Winners", ["Avg R", "Avg R win"], _risk_market_values("avg_r_multiple_winners"), "r", "profit_loss")
+        write_market_metric("Winners", ["Percentage expectancy", "Avg result %", "Avg win %"], _risk_market_values("avg_result_pct_winners"), "pct", "profit_loss")
+        write_market_metric("Winners", ["R expectancy", "Avg R", "Avg R win"], _risk_market_values("avg_r_multiple_winners"), "r", "profit_loss")
         write_market_metric("Winners", "Avg stop %", _risk_market_values("avg_stop_pct_winners"), "pct")
         write_market_metric("Winners", "Avg target %", _risk_market_values("avg_target_pct_winners"), "pct")
-        write_market_metric("Losers", ["Avg result %", "Avg loss %"], _risk_market_values("avg_result_pct_losers"), "pct", "loss")
-        write_market_metric("Losers", ["Avg R", "Avg R loss"], _risk_market_values("avg_r_multiple_losers"), "r", "loss")
+        write_market_metric("Losers", ["Percentage expectancy", "Avg result %", "Avg loss %"], _risk_market_values("avg_result_pct_losers"), "pct", "loss")
+        write_market_metric("Losers", ["R expectancy", "Avg R", "Avg R loss"], _risk_market_values("avg_r_multiple_losers"), "r", "loss")
         write_market_metric("Losers", "Avg stop %", _risk_market_values("avg_stop_pct_losers"), "pct")
         write_market_metric("Losers", "Avg target %", _risk_market_values("avg_target_pct_losers"), "pct")
         for section, suffix, semantic in (("Winners", "winners", "profit"), ("Losers", "losers", "loss")):
@@ -6889,7 +7396,7 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
         candidate = path.with_suffix(".update-candidate.tmp.xlsx")
         if STATS2_SHEET in wb.sheetnames:
             _repair_stats2_account_balance_formatting(wb[STATS2_SHEET], diagnostics)
-        _apply_workbook_right_alignment(wb)
+        _apply_workbook_left_alignment(wb)
         wb.save(candidate)
         return {"ok": True, "path": str(path), "candidate_path": str(candidate), "diagnostics": diagnostics}
     finally:

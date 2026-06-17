@@ -22927,6 +22927,25 @@ def _compute_journal_stats(
         # at read_master_journal_source() using cell number formats.
         return val
 
+    def _distance_extreme_ref(
+        rows_subset: List[Dict[str, object]], field: str, mode: str, source_key: str
+    ) -> Optional[Dict[str, object]]:
+        fallback_key = "stop_loss_distance_pct" if field == "stop_loss" else "target_distance_pct"
+        choices = []
+        for r in rows_subset:
+            pct = _pct_distance(r, field)
+            if pct is None:
+                pct = _distance_cell_pct_points(r.get(fallback_key))
+            if pct is not None:
+                choices.append((pct, str(r.get("symbol") or ""), r))
+        if not choices:
+            return None
+        picked = (min if mode == "min" else max)(
+            choices,
+            key=lambda t: (t[0], t[1]) if mode == "min" else (t[0], -len(t[1])),
+        )
+        return _trade_metric_ref(picked[2], source_key, picked[0])
+
     def _stop_pct_values(rows_subset: List[Dict[str, object]]) -> List[float]:
         out: List[float] = []
         for r in rows_subset:
@@ -23437,6 +23456,8 @@ def _compute_journal_stats(
             "gross_gain_result_pct": sum(value for value in result_pct_vals if value > 0) if result_pct_vals else None,
             "gross_loss_result_pct": abs(sum(value for value in result_pct_vals if value < 0)) if result_pct_vals else None,
             "avg_r_multiple": _avg(r_mult_vals),
+            "gross_ir_gain": sum(value for value in r_mult_vals if value > 0) if r_mult_vals else None,
+            "gross_ir_loss": abs(sum(value for value in r_mult_vals if value < 0)) if r_mult_vals else None,
             "min_result_pct": _safe_min(result_pct_vals),
             "max_result_pct": _safe_max(result_pct_vals),
             "min_r_multiple": _safe_min(r_mult_vals),
@@ -23640,6 +23661,8 @@ def _compute_journal_stats(
             "min_result_pct": _safe_min(result_vals),
             "max_result_pct": _safe_max(result_vals),
             "avg_r_multiple": _avg(r_vals),
+            "gross_ir_gain": sum(value for value in r_vals if value > 0) if r_vals else None,
+            "gross_ir_loss": abs(sum(value for value in r_vals if value < 0)) if r_vals else None,
             "min_r_multiple": _safe_min(r_vals),
             "max_r_multiple": _safe_max(r_vals),
             "expectancy_pct": expectancy_local,
@@ -23709,6 +23732,18 @@ def _compute_journal_stats(
                 "max_result_pct": _metric_extreme_ref(rows_subset, "result_pct", "max"),
                 "min_r_multiple": _metric_extreme_ref(rows_subset, "r_multiple", "min"),
                 "max_r_multiple": _metric_extreme_ref(rows_subset, "r_multiple", "max"),
+                "min_stop_pct": _distance_extreme_ref(rows_subset, "stop_loss", "min", "min_stop_pct"),
+                "max_stop_pct": _distance_extreme_ref(rows_subset, "stop_loss", "max", "max_stop_pct"),
+                "min_target_pct": _distance_extreme_ref(rows_subset, "take_profit", "min", "min_target_pct"),
+                "max_target_pct": _distance_extreme_ref(rows_subset, "take_profit", "max", "max_target_pct"),
+                "min_stop_pct_winners": _distance_extreme_ref(winner_subset, "stop_loss", "min", "min_stop_pct_winners"),
+                "max_stop_pct_winners": _distance_extreme_ref(winner_subset, "stop_loss", "max", "max_stop_pct_winners"),
+                "min_target_pct_winners": _distance_extreme_ref(winner_subset, "take_profit", "min", "min_target_pct_winners"),
+                "max_target_pct_winners": _distance_extreme_ref(winner_subset, "take_profit", "max", "max_target_pct_winners"),
+                "min_stop_pct_losers": _distance_extreme_ref(loser_subset, "stop_loss", "min", "min_stop_pct_losers"),
+                "max_stop_pct_losers": _distance_extreme_ref(loser_subset, "stop_loss", "max", "max_stop_pct_losers"),
+                "min_target_pct_losers": _distance_extreme_ref(loser_subset, "take_profit", "min", "min_target_pct_losers"),
+                "max_target_pct_losers": _distance_extreme_ref(loser_subset, "take_profit", "max", "max_target_pct_losers"),
                 "shortest_duration_seconds": _duration_extreme_ref(rows_subset, "min"),
                 "longest_duration_seconds": _duration_extreme_ref(rows_subset, "max"),
                 "max_gain": _pnl_extreme_ref(rows_subset, "max_gain"),

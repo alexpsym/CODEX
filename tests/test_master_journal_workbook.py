@@ -1,4 +1,5 @@
 from pathlib import Path
+from collections import defaultdict
 from copy import copy
 from datetime import datetime
 import zipfile
@@ -190,12 +191,15 @@ def test_dashboard_parity_and_equity(tmp_path: Path):
         for c in range(1,15)
     ]
     assert 'Account Balances' in vals and 'Main Stats' not in vals and 'Label' not in vals
-    for label in ['Overall','Winners','Losers','Drawdown','FX','Crypto','Win rate','Avg R','Max R loss','Max R win','Min duration','Max Move to Profit','Side','Patterns','Timeframe','Commission']:
+    for label in ['Overall','Winners','Losers','Drawdown','FX','Crypto','Win rate','R expectancy','Gross IR gain','Max R loss','Max R win','Min duration','Max Move to Profit','Side','Patterns','Timeframe','Commission']:
         assert label in vals
     assert 'Instrument leaders' not in vals
     assert any(isinstance(wb[STATS1_SHEET].cell(r,c).value, float) for r in range(1,220) for c in range(1,13))
     assert wb[STATS1_SHEET]["A8"].value == "Net P/L Percentage"
     assert wb[STATS1_SHEET]["A9"].value == "Net P/L R multiples"
+    assert wb[STATS1_SHEET]["A14"].value == "Percentage expectancy"
+    assert wb[STATS1_SHEET]["A15"].value == "R expectancy"
+    assert wb[STATS1_SHEET]["B8"].value == pytest.approx(0.012)
     assert all(wb[STATS1_SHEET][coord].number_format == '0.00%' for coord in ('C8','D8','C10','D10'))
     assert all(wb[STATS1_SHEET][coord].number_format == '0.000"R"' for coord in ('C9','D9'))
     assert any(
@@ -226,6 +230,9 @@ def test_dashboard_overall_return_average_labels_and_move_durations(tmp_path: Pa
     assert labels["Min Move to Profit"] < labels[DASHBOARD_MOVE_TO_PROFIT_LABEL] < labels["Max Move to Profit"]
     assert dash.cell(labels[DASHBOARD_MOVE_TO_BREAK_EVEN_LABEL], 2).value == "01 hours, 00 minutes, 00 seconds"
     assert dash.cell(labels[DASHBOARD_MOVE_TO_PROFIT_LABEL], 2).value == "02 hours, 00 minutes, 00 seconds"
+    for label in ("Min Move to Break Even", "Max Move to Break Even", "Min Move to Profit", "Max Move to Profit"):
+        assert dash.cell(labels[label] + 1, 1).value == "Source"
+        assert "EURUSD · 2026-05-01" in str(dash.cell(labels[label] + 1, 2).value)
 
 
 def test_mixed_currency_overall_return_uses_account_balances():
@@ -248,8 +255,42 @@ def test_mixed_currency_overall_return_uses_account_balances():
     assert totals["fx"]["market_return_pct"] == pytest.approx(10.0)
     assert totals["crypto"]["market_return_pct"] == pytest.approx(10.0)
     assert totals["overall"]["market_return_pct"] is None
+    assert totals["fx"]["net_result_pct"] == pytest.approx(99.0)
+    assert totals["crypto"]["net_result_pct"] == pytest.approx(88.0)
+    assert totals["overall"]["net_result_pct"] == pytest.approx(187.0)
     assert totals["overall"]["return_unavailable_reason"] == "mixed_currencies"
     assert totals["overall"]["return_method"] == "cashflow_adjusted_account_balance"
+
+
+def test_stats1_net_pl_percentage_uses_linear_trade_profit_percent(tmp_path: Path):
+    snapshot = {
+        "items": [
+            {
+                "id": "fx-loss",
+                "row_type": "trade",
+                "account": "OANDA DEMO",
+                "asset_class": "fx",
+                "symbol": "EURUSD",
+                "open_time": "2026-01-01",
+                "close_time": "2026-01-01",
+                "net_profit": -100.0,
+                "result_pct": -80.0,
+                "r_multiple": -0.8,
+                "analysis_balance_after_trade": 900.0,
+                "currency": "AUD",
+            }
+        ],
+        "balances": [{"account_label": "OANDA DEMO", "balance": 900.0, "currency": "AUD"}],
+        "stats": {"totals": {}, "groups": {"by_market": {"overall": {}, "fx": {}, "crypto": {}}, "risk_expectancy": {}, "duration": {}, "leaders": {}}, "by_instrument": []},
+    }
+    out = tmp_path / "linear-net-pl.xlsx"
+    build_master_journal_workbook(snapshot, out)
+    stats1 = load_workbook(out, data_only=True)[STATS1_SHEET]
+    labels = {str(stats1.cell(row, 1).value or ""): row for row in range(1, stats1.max_row + 1)}
+    row = labels["Net P/L Percentage"]
+    assert stats1.cell(row, 2).value == pytest.approx(-0.8)
+    assert stats1.cell(row, 3).value == pytest.approx(-0.8)
+    assert "Unavailable" not in str(stats1.cell(row, 2).value)
 
 
 def test_move_to_duration_repair_uses_open_and_move_times():
@@ -311,7 +352,11 @@ def test_instrument_averages_new_columns_order_formats_and_alignment(tmp_path: P
     assert ws.cell(row, by_header["Early close"]).value == 1
     assert ws.cell(row, by_header["Move to break even"]).font.color.rgb == "FF000000"
     assert ws.cell(row, by_header["Move to profit"]).font.color.rgb == "FF000000"
-    assert all(ws.cell(row, col).alignment.horizontal == "right" for col in range(2, ws.max_column + 1))
+    assert all(
+        ws.cell(row, col).alignment.horizontal == "left"
+        for col in range(2, ws.max_column + 1)
+        if ws.cell(row, col).value is not None
+    )
     order_range = (
         f"{get_column_letter(by_header['Market'])}1:"
         f"{get_column_letter(by_header['Limit'])}1"
@@ -352,7 +397,7 @@ def test_trade_number_schema_reports_and_source_roundtrip(tmp_path: Path):
     assert yearly.cell(1, yearly.max_column).value >= 2026
     assert [yearly.cell(row, 1).value for row in range(2, 2 + len(REPORT_METRIC_LABELS))] == REPORT_METRIC_LABELS
     assert yearly["B7"].number_format == "0.00%"
-    avg_r_row = REPORT_METRIC_LABELS.index("Avg R") + 2
+    avg_r_row = REPORT_METRIC_LABELS.index("R expectancy") + 2
     assert yearly.cell(avg_r_row, 2).number_format == '0.000"R"'
     duration_row = REPORT_METRIC_LABELS.index("Shortest (DD:HH:MM:SS)") + 2
     assert yearly.cell(duration_row, 2).number_format == "General"
@@ -448,7 +493,7 @@ def test_trade_log_three_row_umbrella_headers_and_filter(tmp_path: Path):
             assert ws.cell(1, col).value == header
             assert ws.cell(2, col).value is None
             assert ws.cell(3, col).value is None
-            assert ws.cell(1, col).alignment.horizontal == "right"
+            assert ws.cell(1, col).alignment.horizontal == "left"
             assert ws.cell(1, col).alignment.vertical == "center"
     expected = ["Time", "Duration", "Trigger Price", "Distance From Entry %", "Distance From Exit %"]
     assert [ws.cell(2, col).value for col in be_cols] == expected
@@ -506,7 +551,14 @@ def test_dashboard_build_includes_canonical_move_duration_rows(tmp_path: Path):
     assert DASHBOARD_MOVE_TO_PROFIT_LABEL in labels
     break_even_row = labels[DASHBOARD_MOVE_TO_BREAK_EVEN_LABEL]
     profit_row = labels[DASHBOARD_MOVE_TO_PROFIT_LABEL]
-    assert profit_row == break_even_row + 3
+    assert labels["Min Move to Break Even"] + 2 == break_even_row
+    assert labels["Max Move to Break Even"] == break_even_row + 1
+    assert dash.cell(labels["Min Move to Break Even"] + 1, 1).value == "Source"
+    assert dash.cell(labels["Max Move to Break Even"] + 1, 1).value == "Source"
+    assert labels["Min Move to Profit"] + 2 == profit_row
+    assert labels["Max Move to Profit"] == profit_row + 1
+    assert dash.cell(labels["Min Move to Profit"] + 1, 1).value == "Source"
+    assert dash.cell(labels["Max Move to Profit"] + 1, 1).value == "Source"
     for value_col in (2, 3, 4):
         assert dash.cell(break_even_row, value_col).number_format == "General"
         assert dash.cell(profit_row, value_col).number_format == "General"
@@ -670,7 +722,7 @@ def test_dashboard_manual_move_rows_survive_and_populate_by_label(tmp_path: Path
     assert str(dash["A2"].fill.fgColor.rgb).endswith("ABCDEF")
     assert dash["A2"].font.bold is True
     assert dash["A2"].border.bottom.style == "thick"
-    assert dash["A2"].alignment.horizontal == "right"
+    assert dash["A2"].alignment.horizontal == "left"
     assert dash.row_dimensions[2].height == 31
     wb.close()
 
@@ -999,12 +1051,12 @@ def test_dashboard_layout_style_columns(tmp_path: Path):
     assert dash['I2'].value != 'Instrument leaders'
     expected_duration_labels = [
         "Min duration", "Avg duration", "Max duration",
-        "Min Move to Break Even", "Average Move to Break Even", "Max Move to Break Even",
-        "Min Move to Profit", "Average Move to Profit", "Max Move to Profit",
+        "Min Move to Break Even", "Source", "Average Move to Break Even", "Max Move to Break Even", "Source",
+        "Min Move to Profit", "Source", "Average Move to Profit", "Max Move to Profit", "Source",
     ]
     labels = {str(dash.cell(row, 1).value or "").strip(): row for row in range(1, dash.max_row + 1)}
-    duration_rows = [labels[label] for label in expected_duration_labels]
-    assert duration_rows == list(range(duration_rows[0], duration_rows[0] + len(expected_duration_labels)))
+    duration_start = labels["Min duration"]
+    duration_rows = range(duration_start, duration_start + len(expected_duration_labels))
     assert [dash.cell(row, 1).value for row in duration_rows] == expected_duration_labels
 
 def test_read_master_journal_source_parses_core_fields(tmp_path: Path):
@@ -1173,6 +1225,17 @@ def test_instrument_averages_op_and_duration_not_blank_after_data_only_update(tm
     ]
     assert any(isinstance(v[0], (int, float)) or isinstance(v[1], (int, float)) for v in vals)
     assert any(all(isinstance(x, (int, float)) for x in v[2:]) for v in vals)
+    for row in range(INSTRUMENT_AVERAGES_DATA_START_ROW, inst2.max_row + 1):
+        if inst2.cell(row, h2["Symbol"]).value in (None, ""):
+            continue
+        for col in (s_col, a_col, l_col):
+            assert inst2.cell(row, col).number_format == DURATION_NUMBER_FORMAT
+            assert inst2.cell(row, col).number_format != "General"
+    for col in (s_col, a_col, l_col):
+        header_cell = inst2.cell(INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, col)
+        assert header_cell.alignment.wrap_text is True
+        assert header_cell.alignment.vertical == "center"
+    assert inst2.auto_filter.ref
     out.close()
 
 
@@ -2078,26 +2141,48 @@ def test_dashboard_market_risk_cells_and_grey_no_metric_cells(tmp_path: Path):
     Path(result["candidate_path"]).replace(out)
     updated = load_workbook(out)
     d = updated[STATS1_SHEET]
-    assert d["C34"].value == pytest.approx(0.015)
-    assert d["D34"].value == pytest.approx(0.055)
-    assert d["C34"].number_format == "0.00%"
-    assert d["D34"].number_format == "0.00%"
-    assert d["C35"].value == pytest.approx(0.015)
-    assert d["D35"].value in (None, "")
-    assert d["C35"].number_format == "0.00%"
-    assert d["D35"].number_format != "0.00%"
-    assert d["C37"].value == pytest.approx(1.5)
-    assert d["D37"].value == pytest.approx(2.5)
-    assert d["C37"].number_format == '0.000"R"'
-    assert d["D37"].number_format == '0.000"R"'
-    assert d["C39"].value == pytest.approx(-0.035)
-    assert d["D42"].number_format == '0.000"R"'
-    assert d["C44"].value == pytest.approx(0.10)
-    assert d["D44"].value == pytest.approx(0.12)
-    assert d["C45"].value == pytest.approx(0.05)
-    assert d["D45"].value == pytest.approx(0.06)
-    assert d["C44"].number_format == "0.00%"
-    assert d["D45"].number_format == "0.00%"
+    section_rows = {
+        str(d.cell(row, 1).value or ""): row
+        for row in range(1, d.max_row + 1)
+        if str(d.cell(row, 1).value or "") in {"Winners", "Losers", "Drawdown"}
+    }
+    def row_in_section(section: str, label: str) -> int:
+        start = section_rows[section] + 1
+        end = min(
+            [row for name, row in section_rows.items() if row > section_rows[section]] or [d.max_row + 1]
+        )
+        return next(
+            row for row in range(start, end)
+            if str(d.cell(row, 1).value or "").strip() == label
+        )
+
+    winners_pct = row_in_section("Winners", "Percentage expectancy")
+    winners_stop = row_in_section("Winners", "Avg stop %")
+    winners_r = row_in_section("Winners", "R expectancy")
+    losers_pct = row_in_section("Losers", "Percentage expectancy")
+    losers_r = row_in_section("Losers", "R expectancy")
+    max_drawdown = row_in_section("Drawdown", "Max drawdown")
+    avg_drawdown = row_in_section("Drawdown", "Avg drawdown")
+    assert d.cell(winners_pct, 3).value == pytest.approx(0.015)
+    assert d.cell(winners_pct, 4).value == pytest.approx(0.055)
+    assert d.cell(winners_pct, 3).number_format == "0.00%"
+    assert d.cell(winners_pct, 4).number_format == "0.00%"
+    assert d.cell(winners_stop, 3).value == pytest.approx(0.015)
+    assert d.cell(winners_stop, 4).value in (None, "")
+    assert d.cell(winners_stop, 3).number_format == "0.00%"
+    assert d.cell(winners_stop, 4).number_format != "0.00%"
+    assert d.cell(winners_r, 3).value == pytest.approx(1.5)
+    assert d.cell(winners_r, 4).value == pytest.approx(2.5)
+    assert d.cell(winners_r, 3).number_format == '0.000"R"'
+    assert d.cell(winners_r, 4).number_format == '0.000"R"'
+    assert d.cell(losers_pct, 3).value == pytest.approx(-0.035)
+    assert d.cell(losers_r, 4).number_format == '0.000"R"'
+    assert d.cell(max_drawdown, 3).value == pytest.approx(0.10)
+    assert d.cell(max_drawdown, 4).value == pytest.approx(0.12)
+    assert d.cell(avg_drawdown, 3).value == pytest.approx(0.05)
+    assert d.cell(avg_drawdown, 4).value == pytest.approx(0.06)
+    assert d.cell(max_drawdown, 3).number_format == "0.00%"
+    assert d.cell(avg_drawdown, 4).number_format == "0.00%"
     updated.close()
 
 
@@ -2695,10 +2780,10 @@ def test_generated_dashboard_layout_percentages_semantic_fills_and_labels(tmp_pa
 
     labels = _dashboard_core_labels(dash)
     assert "Max gain" not in labels
-    assert labels[-9:] == [
+    assert labels[-13:] == [
         "Min duration", "Avg duration", "Max duration",
-        "Min Move to Break Even", "Average Move to Break Even", "Max Move to Break Even",
-        "Min Move to Profit", "Average Move to Profit", "Max Move to Profit",
+        "Min Move to Break Even", "Source", "Average Move to Break Even", "Max Move to Break Even", "Source",
+        "Min Move to Profit", "Source", "Average Move to Profit", "Max Move to Profit", "Source",
     ]
     assert all(detail.cell(row, col).value in (None, "") for row in range(1, 12) for col in range(6, 15))
     assert "BYBIT DEMO" in _dashboard_account_balances(detail)
@@ -2718,12 +2803,21 @@ def test_generated_dashboard_layout_percentages_semantic_fills_and_labels(tmp_pa
     for coordinate in ("B9", "C9", "D9"):
         assert dash[coordinate].number_format == '0.000"R"'
 
-    green = ("B3", "C3", "D3", "B10", "C10", "D10", "B36", "C36")
-    red = ("B4", "C4", "D4", "B11", "C11", "D11", "B50", "D50")
-    assert all(_cell_fill_rgb(dash[coordinate]) == "C6EFCE" for coordinate in green)
-    assert all(_cell_font_rgb(dash[coordinate]) == "006100" for coordinate in green)
-    assert all(_cell_fill_rgb(dash[coordinate]) == "FFC7CE" for coordinate in red)
-    assert all(_cell_font_rgb(dash[coordinate]) == "9C0006" for coordinate in red)
+    rows_by_label = {str(dash.cell(row, 1).value or "").strip(): row for row in range(1, dash.max_row + 1)}
+    green = [
+        (rows_by_label[label], col)
+        for label in ("Wins", "Gross percent gain", "Gross IR gain")
+        for col in (2, 3, 4)
+    ]
+    red = [
+        (rows_by_label[label], col)
+        for label in ("Losses", "Gross percent loss", "Gross IR loss")
+        for col in (2, 3, 4)
+    ]
+    assert all(_cell_fill_rgb(dash.cell(row, col)) == "C6EFCE" for row, col in green)
+    assert all(_cell_font_rgb(dash.cell(row, col)) == "006100" for row, col in green)
+    assert all(_cell_fill_rgb(dash.cell(row, col)) == "FFC7CE" for row, col in red)
+    assert all(_cell_font_rgb(dash.cell(row, col)) == "9C0006" for row, col in red)
     assert not _cf_fill_intersects(dash, "B11:D11", "FFC7CE")
 
     wb.close()
@@ -2741,6 +2835,14 @@ def test_update_repairs_dashboard_order_source_style_max_gain_and_stale_cf(tmp_p
     wb = load_workbook(path)
     dash = wb[STATS1_SHEET]
     detail = wb[STATS2_SHEET]
+
+    # Recreate legacy core rows where expectancy sat below streak rows and the
+    # displayed Net P/L Percentage was a grey mixed-currency diagnostic.
+    _swap_dashboard_test_rows(dash, 14, 16)
+    _swap_dashboard_test_rows(dash, 15, 17)
+    dash["B8"] = "Unavailable: mixed currencies"
+    dash["B8"].fill = PatternFill("solid", fgColor="FFEAF2F8")
+    dash["B8"].number_format = "General"
 
     # Recreate an obsolete generated Max gain pair below the current Dashboard.
     dash["A83"] = "Max gain"
@@ -2776,12 +2878,23 @@ def test_update_repairs_dashboard_order_source_style_max_gain_and_stale_cf(tmp_p
     assert "Max gain" not in labels
     assert all(detail.cell(row, col).value in (None, "") for row in range(1, 12) for col in range(6, 15))
     assert "BYBIT DEMO" in _dashboard_account_balances(detail)
-    assert all(dash[coordinate].number_format == "0.00%" for coordinate in ("C8", "D8", "C9", "D9", "C10", "D10"))
-    assert all(_cell_fill_rgb(dash[coordinate]) == "C6EFCE" for coordinate in ("B11", "C11", "D11"))
-    assert all(_cell_font_rgb(dash[coordinate]) == "006100" for coordinate in ("B11", "C11", "D11"))
-    assert not _cf_fill_intersects(dash, "B11:D11", "FFC7CE")
-    assert _cf_fill_intersects(dash, "B49:B54", "FFC7CE")
-    for target in ("B57:B62", "B64:B73", "B75:B90"):
+    assert dash["A14"].value == "Percentage expectancy"
+    assert dash["A15"].value == "R expectancy"
+    assert dash["B8"].value == pytest.approx(0.012)
+    assert dash["B8"].number_format == "0.00%"
+    rows_by_label = {str(dash.cell(row, 1).value or "").strip(): row for row in range(1, dash.max_row + 1)}
+    for label in ("Net P/L Percentage", "Gross percent gain", "Gross percent loss", "Percentage expectancy"):
+        assert all(dash.cell(rows_by_label[label], col).number_format == "0.00%" for col in (3, 4))
+    for label in ("Net P/L R multiples", "Gross IR gain", "Gross IR loss", "R expectancy"):
+        assert all(dash.cell(rows_by_label[label], col).number_format == '0.000"R"' for col in (3, 4))
+    for label in ("Gross percent gain", "Gross IR gain"):
+        assert all(_cell_fill_rgb(dash.cell(rows_by_label[label], col)) == "C6EFCE" for col in (2, 3, 4))
+        assert all(_cell_font_rgb(dash.cell(rows_by_label[label], col)) == "006100" for col in (2, 3, 4))
+    for label in ("Gross percent loss", "Gross IR loss"):
+        assert all(_cell_fill_rgb(dash.cell(rows_by_label[label], col)) == "FFC7CE" for col in (2, 3, 4))
+        assert all(_cell_font_rgb(dash.cell(rows_by_label[label], col)) == "9C0006" for col in (2, 3, 4))
+        assert not _cf_fill_intersects(dash, f"B{rows_by_label[label]}:D{rows_by_label[label]}", "FFC7CE")
+    for target in ("B49:B54", "B57:B62", "B64:B73", "B75:B90"):
         assert not _cf_fill_intersects(dash, target, "FFC7CE")
     assert _cf_fill_intersects(dash, "E20", "FFF2CC")
     wb.close()
@@ -2982,15 +3095,38 @@ def test_stats_symbols_and_reports_required_repairs(tmp_path: Path):
     out = tmp_path / "required-repairs.xlsx"
     build_master_journal_workbook(snapshot, out)
     wb = load_workbook(out)
+    for sheet_name, coordinate in (
+        (STATS1_SHEET, "B8"),
+        (STATS2_SHEET, "A1"),
+        (SYMBOLS_SHEET, "A2"),
+        ("Trade Log", "A1"),
+        ("P&L Calendar", "A1"),
+        (REPORT_YEARLY_SHEET, "B1"),
+    ):
+        assert wb[sheet_name][coordinate].alignment.horizontal == "left"
 
     stats1 = wb[STATS1_SHEET]
     labels = {str(stats1.cell(row, 1).value or ""): row for row in range(1, stats1.max_row + 1)}
+    label_rows = defaultdict(list)
+    for row in range(1, stats1.max_row + 1):
+        label_rows[str(stats1.cell(row, 1).value or "")].append(row)
     assert "Expectancy %" not in labels
-    assert labels["Avg result %"] < labels["Winners"]
-    for label in ("Net P/L Percentage", "Gross gain", "Gross loss"):
+    assert "Avg result %" not in labels
+    assert "Avg R" not in labels
+    assert stats1["A14"].value == "Percentage expectancy"
+    assert stats1["A15"].value == "R expectancy"
+    assert labels["Percentage expectancy"] < labels["Winners"]
+    assert stats1.cell(labels["Net P/L Percentage"], 2).value == pytest.approx(0.007)
+    for label in ("Net P/L Percentage", "Gross percent gain", "Gross percent loss", "Gross IR gain", "Gross IR loss"):
         cell = stats1.cell(labels[label], 2)
-        assert cell.alignment.horizontal == "right"
+        assert cell.alignment.horizontal == "left"
         assert cell.font.bold is False
+    for row in range(1, stats1.max_row + 1):
+        label_cell = stats1.cell(row, 1)
+        if label_cell.value in (None, ""):
+            continue
+        assert label_cell.font.bold is True
+        assert _cell_font_rgb(label_cell) == "000000"
     for section in ("Side", "Patterns", "Timeframe"):
         section_row = labels[section]
         winner_row = next(
@@ -3008,7 +3144,11 @@ def test_stats_symbols_and_reports_required_repairs(tmp_path: Path):
         if stats1.cell(row, 1).value == "Losers" and row < labels["Side"]
     )
     loser_row = losers_section + 1
-    assert all(stats1.cell(loser_row, col).alignment.horizontal == "right" for col in (2, 3, 4))
+    assert all(stats1.cell(loser_row, col).alignment.horizontal == "left" for col in (2, 3, 4))
+    for label in ("Min stop %", "Max stop %", "Min target %", "Max target %"):
+        row = label_rows[label][0]
+        assert stats1.cell(row + 1, 1).value == "Source"
+        assert "·" in str(stats1.cell(row + 1, 2).value)
     for label, expected_fx, expected_crypto in (
         ("Min Commission", 1.25, 0.75),
         ("Avg Commission", 1.625, 0.75),
@@ -3060,10 +3200,10 @@ def test_stats_symbols_and_reports_required_repairs(tmp_path: Path):
     ].width
     assert symbols.column_dimensions[
         get_column_letter(headers["Most Profitable Timeframe"])
-    ].width == timeframe_width
+    ].width >= timeframe_width
     assert symbols.column_dimensions[
         get_column_letter(headers["Least Profitable Timeframe"])
-    ].width == timeframe_width
+    ].width >= timeframe_width
     assert symbols.cell(3, headers["Most Traded Pattern"]).value == "Range"
     assert symbols.cell(3, headers["Most Traded EMA"]).value == "20"
     assert symbols.cell(3, headers["Most Profitable Timeframe"]).value == "1H"
@@ -3099,11 +3239,22 @@ def test_stats_symbols_and_reports_required_repairs(tmp_path: Path):
         report_rows = {
             str(report.cell(row, 1).value or ""): row for row in range(1, report.max_row + 1)
         }
+        report_label_rows = defaultdict(list)
+        for row in range(1, report.max_row + 1):
+            report_label_rows[str(report.cell(row, 1).value or "")].append(row)
+        assert "Avg result %" not in report_rows
+        assert "Avg R" not in report_rows
+        for label in ("Percentage expectancy", "R expectancy", "Gross percent gain", "Gross percent loss", "Gross IR gain", "Gross IR loss"):
+            assert label in report_rows
         assert report_rows["Min drawdown"] == report_rows["Avg drawdown"] + 1
         period_col = next(
             col for col in range(2, report.max_column + 1)
             if report.cell(1, col).value == period_header
         )
+        for label in ("Min stop %", "Max stop %", "Min target %", "Max target %"):
+            row = report_label_rows[label][0]
+            assert report.cell(row + 1, 1).value == "Source"
+            assert "·" in str(report.cell(row + 1, period_col).value)
         total_commission = report.cell(report_rows["Total Commission"], period_col)
         assert "AUD 3.25" in str(total_commission.value)
         assert "USDT 0.75" in str(total_commission.value)
@@ -3129,7 +3280,11 @@ def test_report_profit_rows_are_linear_percentages(tmp_path: Path):
         if yearly.cell(1, col).value == 2026
     )
     assert yearly.cell(rows["Net P/L"], year_col).value == pytest.approx(0.012)
-    assert yearly.cell(rows["Gross gain"], year_col).value == pytest.approx(0.023)
-    assert yearly.cell(rows["Gross loss"], year_col).value == pytest.approx(0.011)
-    for label in ("Net P/L", "Gross gain", "Gross loss"):
+    assert yearly.cell(rows["Gross percent gain"], year_col).value == pytest.approx(0.023)
+    assert yearly.cell(rows["Gross percent loss"], year_col).value == pytest.approx(0.011)
+    assert yearly.cell(rows["Gross IR gain"], year_col).value == pytest.approx(1.2)
+    assert yearly.cell(rows["Gross IR loss"], year_col).value == pytest.approx(0.8)
+    for label in ("Net P/L", "Gross percent gain", "Gross percent loss"):
         assert yearly.cell(rows[label], year_col).number_format == "0.00%"
+    for label in ("Gross IR gain", "Gross IR loss"):
+        assert yearly.cell(rows[label], year_col).number_format == '0.000"R"'
