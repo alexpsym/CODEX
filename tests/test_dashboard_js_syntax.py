@@ -43,6 +43,8 @@ def test_dashboard_js_no_removed_widget_endpoints_and_keeps_needed_calls() -> No
     assert "const isActiveMainView = isDashboardMainView(script) && String(script.name) === activeMainScriptName;" in js
     assert "if (isActiveMainView) {" in js
     assert "dotState = 'running';" in js
+    assert "} else if (isDashboardMainView(script) && !isMonitor) {" in js
+    assert "workspaceTitle = 'Workspace not selected';" in js
     assert "workspaceTitle = activeMainLoadState === 'loading'" in js
     assert "'Open in workspace: loading'" in js
     assert "'Open in workspace: load failed'" in js

@@ -343,7 +343,8 @@
         : activeMainLoadState === 'error'
           ? 'Open in workspace: load failed'
           : 'Open in workspace';
-    } else if (isDashboardMainView(script)) {
+    } else if (isDashboardMainView(script) && !isMonitor) {
+      dotState = 'stopped';
       workspaceTitle = 'Workspace not selected';
     }
     dotTitle = workspaceTitle ? `${workspaceTitle}; ${processTitle}` : processTitle;

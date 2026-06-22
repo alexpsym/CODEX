@@ -74,7 +74,7 @@ from shared.symbol_resolution import (
 from shared.atomic_json import write_json_file
 from render.dropbox_sync import download_bytes, list_excel_files, upload_bytes
 from render import dropbox_state_store
-from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, read_master_journal_source, update_master_journal_workbook_data_only, refresh_master_journal_derived_sheets, stable_row_id, SHEET_ORDER, REPORT_YEARLY_SHEET, expected_report_sheet_names, _get_all_trades_sheet, _get_trade_log_sheet, _trade_log_header_map, _trade_log_data_start_row, _find_instrument_leaders_table, LEADER_LABEL_TO_KEY, _repair_or_flag_zero_trade_qty, _canonicalize_and_dedupe_balances, _trade_execution_fingerprint, _trade_row_source_rank, _dedupe_trade_rows_by_execution, _instrument_averages_header_map, INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, INSTRUMENT_AVERAGES_DATA_START_ROW, _result_percentage_totals_by_market, _risk_of_ruin_by_account, _stats1_sheet, _stats2_sheet, _symbols_sheet, STATS1_SHEET, STATS2_SHEET, SYMBOLS_SHEET
+from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, read_master_journal_source, update_master_journal_workbook_data_only, refresh_master_journal_derived_sheets, stable_row_id, SHEET_ORDER, REPORT_YEARLY_SHEET, expected_report_sheet_names, _get_all_trades_sheet, _get_trade_log_sheet, _trade_log_header_map, _trade_log_data_start_row, _find_instrument_leaders_table, LEADER_LABEL_TO_KEY, _repair_or_flag_zero_trade_qty, _canonicalize_and_dedupe_balances, _trade_execution_fingerprint, _trade_row_source_rank, _dedupe_trade_rows_by_execution, _instrument_averages_header_map, INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, INSTRUMENT_AVERAGES_DATA_START_ROW, _result_percentage_totals_by_market, _risk_of_ruin_by_account, _stats1_sheet, _stats2_sheet, _symbols_sheet, STATS1_SHEET, STATS2_SHEET, SYMBOLS_SHEET, _parse_duration_text, _duration_ddhhmmss_cell_to_seconds
 from bybit_monitor import bybit_altcoin_monitor as bybit_monitor
 from oanda_monitor import oanda_forex_monitor as oanda_monitor
 from bybit_demo_tpsl_cache import (
@@ -27700,7 +27700,7 @@ def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, e
                     None,
                 )
                 if not symbol_idx or not trades_idx:
-                    raise RuntimeError("Trading Journal validation failed: Instrument Averages Symbol/Trades headers missing.")
+                    raise RuntimeError("Trading Journal validation failed: SYMBOLS Symbol/Trades headers missing.")
                 has_instrument_data = False
                 for rr in range(INSTRUMENT_AVERAGES_DATA_START_ROW, inst.max_row + 1):
                     symbol = str(inst.cell(rr, symbol_idx).value or "").strip()
@@ -27709,7 +27709,7 @@ def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, e
                         has_instrument_data = True
                         break
                 if not has_instrument_data:
-                    raise RuntimeError("Trading Journal validation failed: Instrument Averages is blank despite instrument stats.")
+                    raise RuntimeError("Trading Journal validation failed: SYMBOLS is blank despite instrument stats.")
                 def _inst_col(*aliases: str) -> int | None:
                     for a in aliases:
                         if a in instrument_header_map:
@@ -27727,17 +27727,33 @@ def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, e
                         for rec in by_instrument if isinstance(rec, dict)
                     )
                     any_duration_cells = False
+                    def _symbols_duration_seconds(value: object, number_format: object = None) -> float | None:
+                        if value in (None, ""):
+                            return None
+                        parsed = _parse_duration_text(value)
+                        if parsed is not None:
+                            return float(parsed)
+                        if isinstance(value, (int, float)):
+                            ddhhmmss = _duration_ddhhmmss_cell_to_seconds(value)
+                            if ddhhmmss is not None:
+                                return float(ddhhmmss)
+                        return None
                     for rr in range(INSTRUMENT_AVERAGES_DATA_START_ROW, inst.max_row + 1):
                         vals = [inst.cell(rr, c).value for c in inst_dur_cols]
-                        nums = [v for v in vals if isinstance(v, (int, float))]
-                        if nums:
+                        parsed = [
+                            _symbols_duration_seconds(inst.cell(rr, c).value, inst.cell(rr, c).number_format)
+                            for c in inst_dur_cols
+                        ]
+                        nonblank = [v for v in vals if v not in (None, "")]
+                        parsed_present = [v for v in parsed if v is not None]
+                        if parsed_present:
                             any_duration_cells = True
-                        if nums and len(nums) != len(vals):
-                            raise RuntimeError("Trading Journal validation failed: Instrument durations must be numeric DDHHMMSS.")
-                        if len(nums) == 3 and not (nums[0] <= nums[1] <= nums[2]):
-                            raise RuntimeError("Trading Journal validation failed: Instrument duration order must satisfy Shortest <= Avg <= Longest.")
+                        if nonblank and len(parsed_present) != len(nonblank):
+                            raise RuntimeError("Trading Journal validation failed: SYMBOLS durations must be duration text or numeric DDHHMMSS.")
+                        if len(parsed_present) == 3 and not (parsed_present[0] <= parsed_present[1] <= parsed_present[2]):
+                            raise RuntimeError("Trading Journal validation failed: SYMBOLS duration order must satisfy Shortest <= Avg <= Longest.")
                     if has_any_duration_stat and not any_duration_cells:
-                        raise RuntimeError("Trading Journal validation failed: Instrument Averages duration columns are blank despite duration stats.")
+                        raise RuntimeError("Trading Journal validation failed: SYMBOLS duration columns are blank despite duration stats.")
                 net_col = instrument_header_map.get("net p/l %")
                 avg_col = instrument_header_map.get("avg p/l %")
                 if net_col and avg_col:
@@ -27752,7 +27768,7 @@ def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, e
                                 has_op = True
                                 break
                         if not has_op:
-                            raise RuntimeError("Trading Journal validation failed: Instrument Averages Net/Avg P/L % columns are blank despite result_pct stats.")
+                            raise RuntimeError("Trading Journal validation failed: SYMBOLS Net/Avg P/L % columns are blank despite result_pct stats.")
             non_test_with_results = []
             from tools.master_journal_workbook import _as_date as _journal_as_date
             for r in visible_trade_rows:

@@ -1,4 +1,22 @@
 /Local Trading Tools.exe
+.pytest_cache/
+.pytest_tmp*/
+.pytest_tmp*
+.pytest_*.log
+__pycache__/
+*.pyc
+PATCH_DESKTOP_PUSH-latest.log
+INSTALL-latest.log
+.env
+.env.*
+*.env
+!.env.example
+!*example.env
+render/data/
+bybit_monitor/runtime_status.json
+bybit_monitor/state.json
+oanda_monitor/runtime_status.json
+state_backup.json
 journal/*.xls
 journal/*.xlsx
 !journal/Trading Journal.xlsx

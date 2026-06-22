@@ -1,0 +1,236 @@
+//@version=6
+indicator("Custom Indicator", overlay=false, max_lines_count=500)
+
+// -----------------------------------------------------------------------------
+// SYMBOL FILTERS
+// -----------------------------------------------------------------------------
+isForex = syminfo.type == "forex"
+
+// Only show Bybit funding/expiry for NON-forex charts.
+allowBybitTimingLines = not isForex
+
+// -----------------------------------------------------------------------------
+// INPUTS
+// -----------------------------------------------------------------------------
+emaGroup = "EMA"
+showEma9 = input.bool(true, "Show 9 EMA", group=emaGroup)
+showEma20 = input.bool(true, "Show 20 EMA", group=emaGroup)
+showEma9Offset = input.bool(false, "Enable 9 EMA offset line", group=emaGroup)
+ema9OffsetDistance = input.float(0.0, "9 EMA offset distance (%)", minval=0.0, group=emaGroup)
+ema9OffsetSide = input.string("Below", "9 EMA offset side", options=["Above", "Below"], group=emaGroup)
+showEma20Offset = input.bool(false, "Enable 20 EMA offset line", group=emaGroup)
+ema20OffsetDistance = input.float(0.0, "20 EMA offset distance (%)", minval=0.0, group=emaGroup)
+ema20OffsetSide = input.string("Below", "20 EMA offset side", options=["Above", "Below"], group=emaGroup)
+
+vwapGroup = "VWAP"
+showVwap = input.bool(true, "Show VWAP", group=vwapGroup)
+showVwapOffset = input.bool(false, "Enable VWAP offset line", group=vwapGroup)
+vwapOffsetDistance = input.float(0.0, "VWAP offset distance (%)", minval=0.0, group=vwapGroup)
+vwapOffsetSide = input.string("Below", "VWAP offset side", options=["Above", "Below"], group=vwapGroup)
+
+atrGroup = "ATR"
+showAtr = input.bool(true, "Show ATR", group=atrGroup)
+
+volumeGroup = "Volume"
+showVolume = input.bool(true, "Show Volume", group=volumeGroup)
+
+timingGroup = "Funding/Expiry Timing"
+showFunding = input.bool(true, "Show Future Funding Lines (Non-Forex Only)", group=timingGroup)
+showExpiry = input.bool(true, "Show Next Option Expiry Line (Non-Forex Only)", group=timingGroup)
+numFunding = input.int(3, "Number of Future Funding Intervals", minval=1, maxval=100, group=timingGroup)
+fundingColor = input.color(color.blue, "Funding Line Color", group=timingGroup)
+expiryColor = input.color(color.black, "Expiry Line Color", group=timingGroup)
+
+sessionGroup = "Trading Session Open/Close Lines"
+showSydneySession = input.bool(true, "Sydney", group=sessionGroup, inline="sessionCustom1")
+showTokyoSession = input.bool(true, "Tokyo", group=sessionGroup, inline="sessionCustom1")
+showLondonSession = input.bool(true, "London", group=sessionGroup, inline="sessionCustom2")
+showNewYorkSession = input.bool(true, "New York", group=sessionGroup, inline="sessionCustom2")
+
+showAnySession = showSydneySession or showTokyoSession or showLondonSession or showNewYorkSession
+showSessionLines = showAnySession and timeframe.isintraday and timeframe.in_seconds(timeframe.period) <= 60 * 60
+
+// -----------------------------------------------------------------------------
+// EMA / VWAP / ATR / VOLUME
+// -----------------------------------------------------------------------------
+applyPercentOffset(baseLine, distancePercent, offsetSide) =>
+    offsetFactor = distancePercent / 100.0
+    baseLine * (offsetSide == "Above" ? 1.0 + offsetFactor : 1.0 - offsetFactor)
+
+ema9 = ta.ema(close, 9)
+ema20 = ta.ema(close, 20)
+ema9Offset = applyPercentOffset(ema9, ema9OffsetDistance, ema9OffsetSide)
+ema20Offset = applyPercentOffset(ema20, ema20OffsetDistance, ema20OffsetSide)
+
+vwapAnchorTimeframe = timeframe.isintraday ? "D" : timeframe.isdaily ? "W" : timeframe.isweekly ? "M" : "12M"
+vwapAnchor = timeframe.change(vwapAnchorTimeframe)
+vwapValue = ta.vwap(hlc3, vwapAnchor)
+vwapOffset = applyPercentOffset(vwapValue, vwapOffsetDistance, vwapOffsetSide)
+
+atrValue = ta.atr(14)
+volumeColor = color.new(color.blue, 20)
+ema9Color = color.rgb(57, 255, 20)
+ema20Color = color.blue
+showVwapOnChart = showVwap and not isForex
+showVwapOffsetOnChart = showVwapOffset and not isForex
+showVolumeInPane = showVolume and not isForex
+
+plot(showEma9 ? ema9 : na, "9 EMA", color=ema9Color, linewidth=2, format=format.price, force_overlay=true)
+plot(showEma20 ? ema20 : na, "20 EMA", color=ema20Color, linewidth=2, format=format.price, force_overlay=true)
+plot(showVwapOnChart ? vwapValue : na, "VWAP", color=color.new(color.purple, 0), linewidth=2, format=format.price, force_overlay=true)
+
+// plot() cannot draw dashed series lines, so offset lines use recent dashed line segments.
+offsetSegmentLimit = 60
+var line[] ema9OffsetLines = array.new_line()
+var line[] ema20OffsetLines = array.new_line()
+var line[] vwapOffsetLines = array.new_line()
+
+drawDashedOffset(array<line> offsetLines, bool enabled, float value, color lineColor) =>
+    if barstate.isnew
+        if enabled and not na(value) and not na(value[1])
+            offsetLine = line.new(x1=bar_index - 1, y1=value[1], x2=bar_index, y2=value,
+                                  xloc=xloc.bar_index, extend=extend.none,
+                                  color=lineColor, style=line.style_dashed, width=1,
+                                  force_overlay=true)
+            array.push(offsetLines, offsetLine)
+            if array.size(offsetLines) > offsetSegmentLimit
+                line.delete(array.shift(offsetLines))
+        else
+            if array.size(offsetLines) > 0
+                for i = 0 to array.size(offsetLines) - 1
+                    line.delete(array.get(offsetLines, i))
+                array.clear(offsetLines)
+
+drawDashedOffset(ema9OffsetLines, showEma9Offset, ema9Offset, color.new(ema9Color, 30))
+drawDashedOffset(ema20OffsetLines, showEma20Offset, ema20Offset, color.new(ema20Color, 30))
+drawDashedOffset(vwapOffsetLines, showVwapOffsetOnChart, vwapOffset, color.new(color.purple, 30))
+
+// Pine scripts can own only one lower pane, so Volume and ATR share this pane.
+// Keeping Volume as columns and ATR as a line avoids breaking the price overlays.
+plot(showVolumeInPane ? volume : na, "Volume", color=volumeColor, style=plot.style_columns, format=format.volume)
+plot(showAtr ? atrValue : na, "ATR (14)", color=color.new(color.teal, 0), linewidth=2, format=format.price)
+
+// -----------------------------------------------------------------------------
+// BYBIT FUNDING SCHEDULE (UTC)
+// -----------------------------------------------------------------------------
+fundingHours = array.from(0, 8, 16)
+utcZone = "GMT"
+
+// Current UTC timestamp
+now = timenow
+
+// UTC date components
+Y = year(now, utcZone)
+M = month(now, utcZone)
+D = dayofmonth(now, utcZone)
+
+// Helper to generate timestamp for a given day offset and hour
+getTs(dayOffset, hr) =>
+    timestamp(utcZone, Y, M, D + dayOffset, hr, 0)
+
+// Build list of future funding timestamps
+times = array.new_int()
+for hourValue in fundingHours
+    ts = getTs(0, hourValue)
+    if ts > now
+        array.push(times, ts)
+// Include next day's funding times
+for hourValue in fundingHours
+    array.push(times, getTs(1, hourValue))
+array.sort(times)
+
+topPrice100 = ta.highest(high, 100)
+lowPrice100 = ta.lowest(low, 100)
+
+// Draw funding lines on <= 30 min intraday charts (NON-FOREX ONLY)
+var line[] fundingLines = array.new_line()
+
+if barstate.islast
+    if array.size(fundingLines) > 0
+        for i = 0 to array.size(fundingLines) - 1
+            line.delete(array.get(fundingLines, i))
+        array.clear(fundingLines)
+
+if barstate.islast and allowBybitTimingLines and showFunding and timeframe.isintraday and timeframe.multiplier <= 30
+    for i = 0 to numFunding - 1
+        if i < array.size(times)
+            fTs = array.get(times, i)
+            fundingLine = line.new(x1=fTs, y1=lowPrice100, x2=fTs, y2=topPrice100,
+                                   xloc=xloc.bar_time, extend=extend.both,
+                                   color=fundingColor, style=line.style_dashed,
+                                   force_overlay=true)
+            array.push(fundingLines, fundingLine)
+
+// Compute next option expiry at 08:00 UTC (Brisbane 18:00)
+expTs = timestamp(utcZone, Y, M, D, 8, 0)
+if expTs <= now
+    expTs := timestamp(utcZone, Y, M, D + 1, 8, 0)
+
+// Draw single expiry line on <= 4 h intraday charts (NON-FOREX ONLY)
+var line expiryLine = na
+
+if barstate.islast
+    if not na(expiryLine)
+        line.delete(expiryLine)
+        expiryLine := na
+
+if barstate.islast and allowBybitTimingLines and showExpiry and timeframe.isintraday and timeframe.multiplier <= 240
+    expiryLine := line.new(x1=expTs, y1=lowPrice100, x2=expTs, y2=topPrice100,
+                           xloc=xloc.bar_time, extend=extend.both,
+                           color=expiryColor, style=line.style_dashed, width=2,
+                           force_overlay=true)
+
+// -----------------------------------------------------------------------------
+// TRADING SESSION OPEN/CLOSE LINES
+// -----------------------------------------------------------------------------
+var line[] sessionLines = array.new_line()
+sessionMaxLines = 192
+
+sydneyColor = color.rgb(0, 137, 123)
+tokyoColor = color.rgb(245, 124, 0)
+londonColor = color.rgb(63, 81, 181)
+newYorkColor = color.rgb(213, 0, 0)
+
+sessionEventTimestamp(simple string sessionTimezone, simple int eventHour, simple int eventMinute) =>
+    timestamp(sessionTimezone, year(time, sessionTimezone), month(time, sessionTimezone), dayofmonth(time, sessionTimezone), eventHour, eventMinute)
+
+isSessionEvent(simple string sessionTimezone, simple int eventHour, simple int eventMinute) =>
+    eventTs = sessionEventTimestamp(sessionTimezone, eventHour, eventMinute)
+    time <= eventTs and eventTs < time_close
+
+drawSessionLine(simple string sessionTimezone, simple int eventHour, simple int eventMinute, color sessionColor, simple bool isOpen) =>
+    eventTs = sessionEventTimestamp(sessionTimezone, eventHour, eventMinute)
+    lineColor = isOpen ? sessionColor : color.new(sessionColor, 65)
+    lineStyle = isOpen ? line.style_solid : line.style_dotted
+    sessionLine = line.new(x1=eventTs, y1=low, x2=eventTs, y2=high,
+                           xloc=xloc.bar_time, extend=extend.both,
+                           color=lineColor, style=lineStyle, width=1,
+                           force_overlay=true)
+    array.push(sessionLines, sessionLine)
+    if array.size(sessionLines) > sessionMaxLines
+        line.delete(array.shift(sessionLines))
+
+if showSessionLines and barstate.isnew
+    if showSydneySession
+        if isSessionEvent("Australia/Sydney", 8, 0)
+            drawSessionLine("Australia/Sydney", 8, 0, sydneyColor, true)
+        if isSessionEvent("Australia/Sydney", 17, 0)
+            drawSessionLine("Australia/Sydney", 17, 0, sydneyColor, false)
+
+    if showTokyoSession
+        if isSessionEvent("Asia/Tokyo", 9, 0)
+            drawSessionLine("Asia/Tokyo", 9, 0, tokyoColor, true)
+        if isSessionEvent("Asia/Tokyo", 18, 0)
+            drawSessionLine("Asia/Tokyo", 18, 0, tokyoColor, false)
+
+    if showLondonSession
+        if isSessionEvent("Europe/London", 8, 0)
+            drawSessionLine("Europe/London", 8, 0, londonColor, true)
+        if isSessionEvent("Europe/London", 17, 0)
+            drawSessionLine("Europe/London", 17, 0, londonColor, false)
+
+    if showNewYorkSession
+        if isSessionEvent("America/New_York", 8, 0)
+            drawSessionLine("America/New_York", 8, 0, newYorkColor, true)
+        if isSessionEvent("America/New_York", 17, 0)
+            drawSessionLine("America/New_York", 17, 0, newYorkColor, false)

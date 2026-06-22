@@ -79,6 +79,10 @@ def test_open_orders_js_uses_version_polling_and_force_query_refresh() -> None:
     assert "/api/open-orders/version" in js
     assert "/api/open-orders?force=1" in js
     assert "/api/calculator/webhook-attempts?limit=20" in js
+    assert "Unknown source error" not in js
+    assert "const formattedErrors=formatSourceErrors(errors);" in js
+    assert "retCode=${retCode}" in js
+    assert "retMsg=${retMsg}" in js
 
 
 def test_open_orders_version_endpoint_returns_cache_version() -> None:
