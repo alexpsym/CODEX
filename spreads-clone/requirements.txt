@@ -1,0 +1,4 @@
+Flask
+openpyxl
+requests
+MetaTrader5; platform_system == "Windows"

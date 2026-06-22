@@ -1198,6 +1198,18 @@ def test_instrument_averages_op_and_duration_not_blank_after_data_only_update(tm
     build_master_journal_workbook(snap, p)
     wb = load_workbook(p)
     inst = wb[SYMBOLS_SHEET]
+    legacy_headers = _instrument_averages_header_map(inst)
+    for row in range(INSTRUMENT_AVERAGES_DATA_START_ROW, inst.max_row + 1):
+        if inst.cell(row, legacy_headers["Symbol"]).value in (None, ""):
+            continue
+        for header, value in (
+            ("Shortest duration (DD:HH:MM:SS)", 41),
+            ("Avg duration (DD:HH:MM:SS)", 303),
+            ("Longest duration (DD:HH:MM:SS)", 3661),
+        ):
+            cell = inst.cell(row, legacy_headers[header])
+            cell.value = value
+            cell.number_format = r"00\:00\:00\:00"
     headers = [str(c.value or "") for c in inst[INSTRUMENT_AVERAGES_FILTER_HEADER_ROW]]
     # mimic live alias header style
     inst.cell(INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, headers.index("Shortest duration (DD:HH:MM:SS)") + 1).value = "Shortest (DD:HH:MM:SS)"
@@ -2379,6 +2391,40 @@ def test_stats1_manual_a_column_merges_survive_data_only_update(tmp_path: Path):
         out.close()
 
 
+def test_merged_stats1_metric_source_pairs_do_not_get_forced_source_labels(tmp_path: Path):
+    path = tmp_path / "merged-source-pairs.xlsx"
+    snap = sample_snapshot()
+    build_master_journal_workbook(snap, path)
+    wb = load_workbook(path)
+    stats1 = wb[STATS1_SHEET]
+    rows = defaultdict(list)
+    for row in range(1, stats1.max_row + 1):
+        rows[str(stats1.cell(row, 1).value or "")].append(row)
+    source_metric_row = rows["Min stop %"][0]
+    assert stats1.cell(source_metric_row + 1, 1).value == "Source"
+    stats1.merge_cells(start_row=source_metric_row, start_column=1, end_row=source_metric_row + 1, end_column=1)
+    stats1.cell(source_metric_row, 1).value = "Min stop %"
+    stats1.cell(source_metric_row + 1, 2).value = "EURUSD source detail"
+    stats1.merge_cells("A52:A53")
+    stats1["A52"] = "Manual merged note"
+    wb.save(path)
+    wb.close()
+
+    result = update_master_journal_workbook_data_only(path, snap)
+    assert result["ok"] is True
+    Path(result["candidate_path"]).replace(path)
+    out = load_workbook(path)
+    try:
+        ws = out[STATS1_SHEET]
+        assert f"A{source_metric_row}:A{source_metric_row + 1}" in {str(rng) for rng in ws.merged_cells.ranges}
+        assert ws.cell(source_metric_row + 1, 1).value is None
+        assert ws.cell(source_metric_row + 1, 2).value not in (None, "")
+        assert "A52:A53" in {str(rng) for rng in ws.merged_cells.ranges}
+        assert ws["A52"].value == "Manual merged note"
+    finally:
+        out.close()
+
+
 def test_drawdown_detail_rows_are_split_for_stats1_and_reports(tmp_path: Path):
     snap = sample_snapshot()
     detail = {"start_time": "2026-05-01T01:00:00Z", "end_time": "2026-05-02T02:00:00Z"}
@@ -2453,6 +2499,7 @@ def test_stats2_net_pl_percentage_update_preserves_borders(tmp_path: Path):
     headers = {str(stats2.cell(2, col).value or ""): col for col in range(1, stats2.max_column + 1)}
     net_col = headers["Net P/L Percentage"]
     account_col = headers["Account"]
+    stats2.cell(2, headers["As Of"]).value = "Risk Of Ruin"
     row = next(r for r in range(3, stats2.max_row + 1) if stats2.cell(r, account_col).value == "OANDA DEMO")
     custom_border = Border(left=Side(style="thick", color="FF123456"), right=Side(style="double", color="FF654321"))
     stats2.cell(row, net_col).border = custom_border
@@ -2465,6 +2512,10 @@ def test_stats2_net_pl_percentage_update_preserves_borders(tmp_path: Path):
     out = load_workbook(path)
     try:
         ws = out[STATS2_SHEET]
+        final_headers = [str(ws.cell(2, col).value or "") for col in range(1, ws.max_column + 1)]
+        assert sum(header.casefold() == "risk of ruin" for header in final_headers) == 1
+        assert final_headers[headers["As Of"] - 1] == "As Of"
+        assert final_headers[net_col - 1] == "Net P/L Percentage"
         cell = ws.cell(row, net_col)
         assert cell.value == pytest.approx(0.023)
         assert cell.number_format == "0.00%"
@@ -2494,12 +2545,12 @@ def test_report_period_rows_populate_core_counts_duration_and_drawdown(tmp_path:
             ws = wb[sheet_name]
             rows = {str(ws.cell(row, 1).value or ""): row for row in range(1, ws.max_row + 1)}
             col = next(c for c in range(2, ws.max_column + 1) if ws.cell(1, c).value == header)
-            assert ws.cell(rows["Trades"], col).value == 2
-            assert ws.cell(rows["Wins"], col).value == 1
+            assert ws.cell(rows["Trades"], col).value == 3
+            assert ws.cell(rows["Wins"], col).value == 2
             assert ws.cell(rows["Losses"], col).value == 1
             assert ws.cell(rows["Break-even"], col).value == 0
             assert ws.cell(rows["Test"], col).value == 1
-            assert ws.cell(rows["Win rate"], col).value == pytest.approx(0.5)
+            assert ws.cell(rows["Win rate"], col).value == pytest.approx(2 / 3)
             assert _parse_duration_text(ws.cell(rows["Shortest (DD:HH:MM:SS)"], col).value) is not None
             assert ws.cell(rows["Max drawdown"], col).value not in (None, "")
             assert ws.cell(rows["Max drawdown"] + 1, 1).value == "Start"
@@ -2942,7 +2993,9 @@ def test_generated_dashboard_layout_percentages_semantic_fills_and_labels(tmp_pa
         "Min Move to Break Even", "Source", "Average Move to Break Even", "Max Move to Break Even", "Source",
         "Min Move to Profit", "Source", "Average Move to Profit", "Max Move to Profit", "Source",
     ]
-    assert all(detail.cell(row, col).value in (None, "") for row in range(1, 12) for col in range(6, 15))
+    assert detail["F2"].value == "Net P/L Percentage"
+    assert any(detail.cell(row, 6).value not in (None, "") for row in range(3, 12))
+    assert all(detail.cell(row, col).value in (None, "") for row in range(1, 12) for col in range(7, 15))
     assert "BYBIT DEMO" in _dashboard_account_balances(detail)
 
     assert 0 < dash["C8"].value < 1
@@ -3033,7 +3086,9 @@ def test_update_repairs_dashboard_order_source_style_max_gain_and_stale_cf(tmp_p
     detail = wb[STATS2_SHEET]
     labels = _dashboard_core_labels(dash)
     assert "Max gain" not in labels
-    assert all(detail.cell(row, col).value in (None, "") for row in range(1, 12) for col in range(6, 15))
+    assert detail["F2"].value == "Net P/L Percentage"
+    assert any(detail.cell(row, 6).value not in (None, "") for row in range(3, 12))
+    assert all(detail.cell(row, col).value in (None, "") for row in range(1, 12) for col in range(7, 15))
     assert "BYBIT DEMO" in _dashboard_account_balances(detail)
     assert dash["A14"].value == "Percentage expectancy"
     assert dash["A15"].value == "R expectancy"

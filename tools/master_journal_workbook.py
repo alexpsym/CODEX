@@ -1393,7 +1393,12 @@ def _drawdown_detail_start_end(detail: Any) -> Tuple[str, str]:
 
 
 def _drawdown_inline_pct_fraction(value: Any) -> float | None:
-    match = _DRAWDOWN_INLINE_RE.match(str(value or "").strip())
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if "%" not in text and "(" not in text:
+        return None
+    match = _DRAWDOWN_INLINE_RE.match(text)
     if not match:
         return None
     number = _as_float(match.group("pct"))
@@ -1416,7 +1421,9 @@ def _copy_row_style_without_values(ws, source_row: int, target_row: int) -> None
         target.border = copy(source.border)
         target.alignment = copy(source.alignment)
         target.protection = copy(source.protection)
-    ws.row_dimensions[target_row].height = ws.row_dimensions[source_row].height
+    source_height = ws.row_dimensions[source_row].height
+    if source_height is not None:
+        ws.row_dimensions[target_row].height = source_height
 
 
 def _ensure_start_end_rows_after(ws, metric_row: int, diagnostics: Dict[str, Any] | None = None) -> Tuple[int, int]:
@@ -4983,6 +4990,8 @@ def _repair_report_layout(ws, diagnostics: Dict[str, Any] | None = None) -> None
             diagnostics.setdefault("report_min_drawdown_relocated", []).append(ws.title)
 
     _ensure_drawdown_start_end_rows(ws, diagnostics)
+    _write_drawdown_detail_rows(ws, "Min drawdown", {}, diagnostics=diagnostics)
+    _write_drawdown_detail_rows(ws, "Max drawdown", {}, diagnostics=diagnostics)
 
     commission_rows = _report_label_rows(ws, "Commission")
     if commission_rows and not _report_label_rows(ws, "Total Commission"):
@@ -5196,7 +5205,6 @@ def _report_bucket_from_period_rows(rows: List[Dict[str, Any]]) -> Dict[str, Any
     active = [
         row for row in rows
         if str(row.get("row_type") or "trade").strip().lower() == "trade"
-        and not _is_test_trade_value(row.get("is_test_trade"))
     ]
     outcomes = [_report_outcome(row) for row in active]
     trades = len(active)
@@ -5402,11 +5410,19 @@ def _is_merged_non_anchor(ws, row: int, col: int) -> bool:
     return False
 
 
-def _merged_row_end(ws, row: int, col: int) -> int | None:
+def _merged_bounds(ws, row: int, col: int) -> Tuple[int, int, int, int] | None:
     for merged in ws.merged_cells.ranges:
         if merged.min_row <= row <= merged.max_row and merged.min_col <= col <= merged.max_col:
-            return merged.max_row if merged.max_row > merged.min_row else None
+            return merged.min_row, merged.min_col, merged.max_row, merged.max_col
     return None
+
+
+def _merged_row_end(ws, row: int, col: int) -> int | None:
+    bounds = _merged_bounds(ws, row, col)
+    if not bounds:
+        return None
+    min_row, _min_col, max_row, _max_col = bounds
+    return max_row if max_row > min_row else None
 
 
 def _set_cell_horizontal_alignment(cell, horizontal: str) -> None:
@@ -5509,7 +5525,7 @@ def _auto_filter_layout_signature(ws) -> Any:
 def _worksheet_layout_snapshot(ws) -> Dict[str, Any]:
     return {
         "merged": [str(r) for r in ws.merged_cells.ranges],
-        "row_heights": {k: v.height for k, v in ws.row_dimensions.items()},
+        "row_heights": {k: v.height for k, v in ws.row_dimensions.items() if v.height is not None},
         "col_widths": {k: v.width for k, v in ws.column_dimensions.items()},
         "hidden_cols": {k: bool(v.hidden) for k, v in ws.column_dimensions.items() if v.hidden},
         "freeze": ws.freeze_panes,
@@ -5746,7 +5762,7 @@ def _move_dashboard_row_preserving_layout(ws, source_row: int, target_row: int) 
     snapshot = _dashboard_row_snapshot(ws, source_row)
     insert_at = target_row if source_row > target_row else target_row + 1
     style_row = source_row + 1 if insert_at <= source_row else source_row
-    _insert_dashboard_rows_preserving_layout(ws, insert_at, 1, style_row)
+    insert_at = _insert_dashboard_rows_preserving_layout(ws, insert_at, 1, style_row)
     _restore_dashboard_row_snapshot(ws, insert_at, snapshot)
     delete_at = source_row + 1 if insert_at <= source_row else source_row
     _delete_dashboard_rows_preserving_layout(ws, delete_at, 1)
@@ -5778,7 +5794,18 @@ def _repair_dashboard_core_layout(ws, diagnostics: Dict[str, Any] | None = None)
     _repair_dashboard_extreme_metric_order(ws, diagnostics)
     _apply_dashboard_requested_semantic_fills(ws)
 
-def _insert_dashboard_rows_preserving_layout(ws, row_idx: int, amount: int, style_row: int) -> None:
+def _insert_dashboard_rows_preserving_layout(ws, row_idx: int, amount: int, style_row: int) -> int:
+    while True:
+        blocking = next(
+            (
+                merged for merged in ws.merged_cells.ranges
+                if merged.min_row < row_idx <= merged.max_row
+            ),
+            None,
+        )
+        if blocking is None:
+            break
+        row_idx = blocking.max_row + 1
     merged_ranges = [str(merged) for merged in ws.merged_cells.ranges]
     for merged in list(ws.merged_cells.ranges):
         ws.unmerge_cells(str(merged))
@@ -5799,7 +5826,8 @@ def _insert_dashboard_rows_preserving_layout(ws, row_idx: int, amount: int, styl
 
     source_height = ws.row_dimensions[style_row].height
     for target_row in range(row_idx, row_idx + amount):
-        ws.row_dimensions[target_row].height = source_height
+        if source_height is not None:
+            ws.row_dimensions[target_row].height = source_height
         for col in range(1, ws.max_column + 1):
             if _is_merged_non_anchor(ws, target_row, col):
                 continue
@@ -5809,6 +5837,7 @@ def _insert_dashboard_rows_preserving_layout(ws, row_idx: int, amount: int, styl
             target.value = None
             target.comment = None
             target.hyperlink = None
+    return row_idx
 
 
 def _ensure_dashboard_move_duration_rows(ws, diagnostics: Dict[str, Any] | None = None) -> bool:
@@ -5868,7 +5897,7 @@ def _ensure_dashboard_move_duration_rows(ws, diagnostics: Dict[str, Any] | None 
     rows = label_rows()
     if DASHBOARD_MOVE_TO_BREAK_EVEN_LABEL not in rows:
         insert_at = rows.get(DASHBOARD_MOVE_TO_PROFIT_LABEL, duration_row + 1)
-        _insert_dashboard_rows_preserving_layout(ws, insert_at, 1, duration_row)
+        insert_at = _insert_dashboard_rows_preserving_layout(ws, insert_at, 1, duration_row)
         ws.cell(insert_at, label_col).value = DASHBOARD_MOVE_TO_BREAK_EVEN_LABEL
         diagnostics.setdefault("inserted_dashboard_metric_rows", []).append(DASHBOARD_MOVE_TO_BREAK_EVEN_LABEL)
         changed = True
@@ -5877,7 +5906,7 @@ def _ensure_dashboard_move_duration_rows(ws, diagnostics: Dict[str, Any] | None 
     if DASHBOARD_MOVE_TO_PROFIT_LABEL not in rows:
         break_even_row = rows[DASHBOARD_MOVE_TO_BREAK_EVEN_LABEL]
         insert_at = break_even_row + 1
-        _insert_dashboard_rows_preserving_layout(ws, insert_at, 1, duration_row)
+        insert_at = _insert_dashboard_rows_preserving_layout(ws, insert_at, 1, duration_row)
         ws.cell(insert_at, label_col).value = DASHBOARD_MOVE_TO_PROFIT_LABEL
         diagnostics.setdefault("inserted_dashboard_metric_rows", []).append(DASHBOARD_MOVE_TO_PROFIT_LABEL)
         changed = True
@@ -5956,7 +5985,7 @@ def _ensure_dashboard_requested_metric_rows(ws, diagnostics: Dict[str, Any] | No
         if not anchor:
             return None
         insert_at = anchor + 1
-        _insert_dashboard_rows_preserving_layout(ws, insert_at, 1, anchor)
+        insert_at = _insert_dashboard_rows_preserving_layout(ws, insert_at, 1, anchor)
         ws.cell(insert_at, label_col).value = wanted_label
         diagnostics.setdefault("inserted_dashboard_metric_rows", []).append(wanted_label)
         changed = True
@@ -5964,8 +5993,8 @@ def _ensure_dashboard_requested_metric_rows(ws, diagnostics: Dict[str, Any] | No
 
     gross_ir_gain_row = insert_after("Gross percent loss", "Gross IR gain")
     if gross_ir_gain_row and not find_row("Gross IR loss"):
-        _insert_dashboard_rows_preserving_layout(ws, gross_ir_gain_row + 1, 1, gross_ir_gain_row)
-        ws.cell(gross_ir_gain_row + 1, label_col).value = "Gross IR loss"
+        inserted = _insert_dashboard_rows_preserving_layout(ws, gross_ir_gain_row + 1, 1, gross_ir_gain_row)
+        ws.cell(inserted, label_col).value = "Gross IR loss"
         diagnostics.setdefault("inserted_dashboard_metric_rows", []).append("Gross IR loss")
         changed = True
 
@@ -6001,7 +6030,7 @@ def _ensure_dashboard_requested_metric_rows(ws, diagnostics: Dict[str, Any] | No
             if not anchor:
                 continue
             metric_row = anchor + 1
-            _insert_dashboard_rows_preserving_layout(ws, metric_row, 1, anchor)
+            metric_row = _insert_dashboard_rows_preserving_layout(ws, metric_row, 1, anchor)
             ws.cell(metric_row, label_col).value = metric_label
             diagnostics.setdefault("inserted_dashboard_metric_rows", []).append(metric_label)
             changed = True
@@ -6025,8 +6054,14 @@ def _ensure_dashboard_requested_metric_rows(ws, diagnostics: Dict[str, Any] | No
             if next_row <= ws.max_row and label_at(next_row).casefold() == "source":
                 row += 2
                 continue
-            _insert_dashboard_rows_preserving_layout(ws, next_row, 1, row)
-            ws.cell(next_row, label_col).value = "Source"
+            bounds = _merged_bounds(ws, next_row, label_col) if next_row <= ws.max_row else None
+            if bounds and bounds[0] == row and bounds[2] >= next_row:
+                row = bounds[2] + 1
+                continue
+            next_row = _insert_dashboard_rows_preserving_layout(ws, next_row, 1, row)
+            if not _write_value_preserving_cell(ws, next_row, label_col, "Source"):
+                row = next_row + 1
+                continue
             diagnostics.setdefault("inserted_dashboard_source_rows", []).append(metric_label)
             changed = True
             row += 2
@@ -6147,7 +6182,7 @@ def _ensure_dashboard_extended_layout(ws, diagnostics: Dict[str, Any] | None = N
                 cursor += 1
                 continue
             template_row = min(max(section_row + 1, cursor), max(section_row + 1, next_anchor - 1))
-            _insert_dashboard_rows_preserving_layout(ws, cursor, 1, template_row)
+            cursor = _insert_dashboard_rows_preserving_layout(ws, cursor, 1, template_row)
             ws.cell(cursor, 1).value = wanted
             diagnostics.setdefault("inserted_dashboard_metric_rows", []).append(f"{section_name}: {wanted}")
             changed = True
@@ -6394,6 +6429,76 @@ def _update_pnl_calendar_preserving_layout(dst_ws, snapshot: Dict[str, Any], dia
             dst_ws.cell(t_row, c).value = int(vals["count"])
             dst_ws.cell(t_row, c).number_format = "0"
 
+def _normalize_stats2_account_balance_headers(
+    ws,
+    section: Dict[str, int],
+    diagnostics: Dict[str, Any] | None = None,
+) -> None:
+    diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+    start_row = max(1, section.get("start_row", 1))
+    end_row = min(section.get("end_row", ws.max_row), start_row + 7)
+    for row in range(start_row, end_row + 1):
+        headers = {
+            str(ws.cell(row, col).value or "").strip().casefold(): col
+            for col in range(section["start_col"], section["end_col"] + 1)
+            if str(ws.cell(row, col).value or "").strip()
+        }
+        if not {"account", "balance", "currency"}.issubset(headers):
+            continue
+        risk_cols = [
+            col for col in range(section["start_col"], section["end_col"] + 1)
+            if str(ws.cell(row, col).value or "").strip().casefold() == "risk of ruin"
+        ]
+        as_of_cols = [
+            col for col in range(section["start_col"], section["end_col"] + 1)
+            if str(ws.cell(row, col).value or "").strip().casefold() in {"as of", "as_of"}
+        ]
+        net_cols = [
+            col for col in range(section["start_col"], section["end_col"] + 1)
+            if str(ws.cell(row, col).value or "").strip().casefold() in {"net p/l percentage", "net p/l %", "net p/l percent"}
+        ]
+        if len(risk_cols) > 1:
+            for duplicate_col in risk_cols[1:]:
+                if not as_of_cols:
+                    ws.cell(row, duplicate_col).value = "As Of"
+                    as_of_cols.append(duplicate_col)
+                    for data_row in range(row + 1, section["end_row"] + 1):
+                        ws.cell(data_row, duplicate_col).value = None
+                        ws.cell(data_row, duplicate_col).comment = None
+                    diagnostics.setdefault("normalized_stats2_duplicate_headers", []).append("Risk Of Ruin -> As Of")
+                else:
+                    ws.cell(row, duplicate_col).value = None
+                    for data_row in range(row + 1, section["end_row"] + 1):
+                        ws.cell(data_row, duplicate_col).value = None
+                        ws.cell(data_row, duplicate_col).comment = None
+                    diagnostics.setdefault("normalized_stats2_duplicate_headers", []).append("removed duplicate Risk Of Ruin")
+        if not net_cols and ws.title == STATS2_SHEET:
+            last_known = max(
+                [
+                    col for col in [
+                        headers.get("account"),
+                        headers.get("balance"),
+                        headers.get("currency"),
+                        risk_cols[0] if risk_cols else None,
+                        as_of_cols[0] if as_of_cols else None,
+                    ]
+                    if col
+                ],
+                default=section["start_col"],
+            )
+            target_col = last_known + 1
+            if target_col <= section["end_col"]:
+                target_has_content = any(
+                    str(ws.cell(data_row, target_col).value or "").strip()
+                    for data_row in range(row, section["end_row"] + 1)
+                )
+                if target_has_content:
+                    return
+                ws.cell(row, target_col).value = "Net P/L Percentage"
+                diagnostics.setdefault("normalized_stats2_duplicate_headers", []).append("added Net P/L Percentage")
+        return
+
+
 def _find_dashboard_table_headers(ws, section: Dict[str, int], *, scan_rows: int = 8) -> tuple[int | None, Dict[str, int]]:
     required = {"account", "balance", "currency"}
     header_row = None
@@ -6410,11 +6515,11 @@ def _find_dashboard_table_headers(ws, section: Dict[str, int], *, scan_rows: int
                 row_map["balance"] = c
             elif h == "currency":
                 row_map["currency"] = c
-            elif h == "risk of ruin":
+            elif h == "risk of ruin" and "risk_of_ruin" not in row_map:
                 row_map["risk_of_ruin"] = c
-            elif h in {"as of", "as_of"}:
+            elif h in {"as of", "as_of"} and "as_of" not in row_map:
                 row_map["as_of"] = c
-            elif h in {"net p/l percentage", "net p/l %", "net p/l percent"}:
+            elif h in {"net p/l percentage", "net p/l %", "net p/l percent"} and "net_pl_percentage" not in row_map:
                 row_map["net_pl_percentage"] = c
         if required.issubset(row_map.keys()):
             header_row = r
@@ -6431,6 +6536,7 @@ def _repair_stats2_account_balance_formatting(ws, diagnostics: Dict[str, Any] | 
     section = sections.get("Account Balances")
     if not section:
         return
+    _normalize_stats2_account_balance_headers(ws, section, diagnostics)
     header_row, col_map = _find_dashboard_table_headers(ws, section)
     if not header_row or "balance" not in col_map:
         return
@@ -7356,6 +7462,37 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
             ):
                 write_market_metric("Commission", label, _extended_market_values(key))
 
+        if "Drawdown" in anchors:
+            market_cols = _main_dashboard_market_columns()
+            _write_drawdown_detail_rows(
+                dash,
+                "Min drawdown",
+                {
+                    col: (extended_metrics.get(market) or {}).get("min_drawdown_detail")
+                    for market, col in market_cols.items()
+                },
+                diagnostics=diagnostics,
+            )
+            _write_drawdown_detail_rows(
+                dash,
+                "Max drawdown",
+                {
+                    col: (extended_metrics.get(market) or {}).get("max_drawdown_detail")
+                    for market, col in market_cols.items()
+                    },
+                    diagnostics=diagnostics,
+                )
+            anchors = _find_anchor_sections(
+                dash,
+                ["Overall", "Winners", "Losers", "Drawdown"],
+                optional=["Duration", "Side", "Patterns", "Timeframe", "Commission"],
+            )
+            section_sheets = {
+                **{name: dash for name in anchors},
+                **{name: detail_dash for name in detail_anchors},
+            }
+            section_anchors = {**anchors, **detail_anchors}
+
         write_market_metric(
             "Drawdown",
             "Min drawdown",
@@ -7470,6 +7607,7 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
         balances = _canonicalize_and_dedupe_balances(snapshot.get("balances") or [])
         diagnostics.setdefault("non_numeric_balance_accounts", [])
         section = detail_anchors["Account Balances"]
+        _normalize_stats2_account_balance_headers(detail_dash, section, diagnostics)
         header_row, col_map = _find_dashboard_table_headers(detail_dash, section)
         if not header_row or "account" not in col_map or "balance" not in col_map or "currency" not in col_map:
             raise RuntimeError("Account Balances headers missing in section.")

@@ -1,0 +1,155 @@
+"""OANDA bid/ask candle spread fetcher."""
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+import os
+from pathlib import Path
+import sys
+from typing import Any, Callable, Dict, Iterable, List, Optional
+
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+from shared import oanda_api
+from spread_core import TimeframeConfig, make_sample, spread_pct_from_bid_ask
+
+
+MAX_OANDA_CANDLE_COUNT = 5000
+DEFAULT_OANDA_CANDLE_COUNT = 5000
+
+
+def _mode_from_env() -> str:
+    raw = (os.getenv("OANDA_ENV") or os.getenv("OANDA_MODE") or "live").strip().lower()
+    if raw in {"demo", "practice", "test"}:
+        return "demo"
+    return "live"
+
+
+def _count_from_env() -> int:
+    raw = os.getenv("SPREAD_MONITOR_OANDA_CANDLE_COUNT", str(DEFAULT_OANDA_CANDLE_COUNT))
+    try:
+        count = int(raw)
+    except (TypeError, ValueError):
+        count = DEFAULT_OANDA_CANDLE_COUNT
+    return max(1, min(MAX_OANDA_CANDLE_COUNT, count))
+
+
+def _candle_spread_sample(candle: Dict[str, Any]) -> Optional[Dict[str, object]]:
+    bid = candle.get("bid")
+    ask = candle.get("ask")
+    if not isinstance(bid, dict) or not isinstance(ask, dict):
+        return None
+    try:
+        spread_pct = spread_pct_from_bid_ask(bid.get("c"), ask.get("c"))
+    except ValueError:
+        return None
+    return make_sample(candle.get("time"), spread_pct)
+
+
+def parse_oanda_bid_ask_candles(payload: Dict[str, Any]) -> Dict[str, object]:
+    candles = payload.get("candles")
+    if not isinstance(candles, list):
+        return {"samples": [], "latest": None}
+
+    complete_samples: List[Dict[str, object]] = []
+    latest: Optional[Dict[str, object]] = None
+    for candle in candles:
+        if not isinstance(candle, dict):
+            continue
+        sample = _candle_spread_sample(candle)
+        if sample is None:
+            continue
+        latest = sample
+        if candle.get("complete") is True:
+            complete_samples.append(sample)
+    return {"samples": complete_samples, "latest": latest}
+
+
+def _iso(value: datetime) -> str:
+    dt = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def fetch_oanda_spread_samples(
+    instrument: str,
+    timeframe: TimeframeConfig,
+    context: Optional[Dict[str, object]] = None,
+    *,
+    mode: Optional[str] = None,
+    request_func: Optional[Callable[..., Dict[str, Any]]] = None,
+    start: Optional[datetime] = None,
+    end: Optional[datetime] = None,
+    count: Optional[int] = None,
+) -> Dict[str, object]:
+    """Fetch bid/ask candles and return normalized spread samples.
+
+    The endpoint intentionally omits a leading ``/v3`` because
+    ``shared.oanda_api._request`` normalizes the base URL to include it.
+    """
+
+    request = request_func or oanda_api._request
+    requested_count = count
+    if requested_count is None and isinstance(context, dict):
+        raw_count = context.get("requested_count")
+        try:
+            requested_count = int(raw_count) if raw_count is not None else None
+        except (TypeError, ValueError):
+            requested_count = None
+    params: Dict[str, object] = {
+        "granularity": timeframe.oanda_granularity,
+        "price": "BA",
+        "count": max(1, min(MAX_OANDA_CANDLE_COUNT, requested_count or _count_from_env())),
+    }
+    if start is not None:
+        params["from"] = _iso(start)
+    if end is not None:
+        params["to"] = _iso(end)
+    data = request(
+        "GET",
+        f"/instruments/{instrument}/candles",
+        mode=mode or _mode_from_env(),
+        params=params,
+        timeout=10,
+    )
+    parsed = parse_oanda_bid_ask_candles(data)
+    if not parsed.get("latest") and not parsed.get("samples"):
+        parsed["error"] = "No bid/ask candle spread data returned."
+    return parsed
+
+
+def fetch_oanda_spread_windowed(
+    instrument: str,
+    timeframe: TimeframeConfig,
+    *,
+    start: datetime,
+    end: datetime,
+    mode: Optional[str] = None,
+    request_func: Optional[Callable[..., Dict[str, Any]]] = None,
+) -> Dict[str, object]:
+    """Fetch a bounded range, preserving the OANDA count limit per request."""
+
+    parsed = fetch_oanda_spread_samples(
+        instrument,
+        timeframe,
+        mode=mode,
+        request_func=request_func,
+        start=start,
+        end=end,
+        count=MAX_OANDA_CANDLE_COUNT,
+    )
+    return parsed
+
+
+def get_available_oanda_symbols(mode: Optional[str] = None) -> List[str]:
+    try:
+        symbols = oanda_api.get_available_instruments(mode or _mode_from_env())
+    except Exception:
+        return []
+    return sorted(str(item) for item in symbols if str(item).strip())
+
+
+def filter_oanda_symbols(symbols: Iterable[str], available: Iterable[str]) -> List[str]:
+    available_set = {str(item).upper() for item in available}
+    return [symbol for symbol in symbols if symbol.upper() in available_set]
