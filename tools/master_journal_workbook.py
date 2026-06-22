@@ -636,6 +636,23 @@ def _linear_profit_percentage_totals(rows: List[Dict[str, Any]]) -> Dict[str, fl
     }
 
 
+def _net_result_pct_by_account(rows: List[Dict[str, Any]]) -> Dict[str, float]:
+    result: Dict[str, float] = defaultdict(float)
+    seen: Dict[str, int] = defaultdict(int)
+    for row in rows:
+        if str(row.get("row_type") or "trade").strip().lower() != "trade":
+            continue
+        if _is_test_trade_value(row.get("is_test_trade")):
+            continue
+        account = _canonical_account_label(row.get("account_label") or row.get("account") or row.get("source") or "")
+        value = _as_float(row.get("result_pct"))
+        if not account or value is None or not math.isfinite(value):
+            continue
+        result[account] += value
+        seen[account] += 1
+    return {account: value for account, value in result.items() if seen.get(account)}
+
+
 def _merge_metric_buckets(*buckets: Dict[str, Any] | None) -> Dict[str, Any]:
     merged: Dict[str, Any] = {}
     metric_sources: Dict[str, Any] = {}
@@ -1353,6 +1370,123 @@ def _fmt_count_with_detail(value: Any, detail: Any) -> str:
     suffix = _fmt_streak_detail(detail)
     text = str(int(number))
     return f"{text} ({suffix})" if suffix else text
+
+
+_DRAWDOWN_INLINE_RE = re.compile(
+    r"^\s*(?P<pct>[-+]?(?:\d+(?:\.\d*)?|\.\d+))\s*%?\s*(?:\((?P<start>.*?)\s+to\s+(?P<end>.*?)\))?\s*$",
+    re.IGNORECASE,
+)
+
+
+def _drawdown_detail_start_end(detail: Any) -> Tuple[str, str]:
+    if isinstance(detail, dict):
+        return _fmt_detail_datetime(detail.get("start_time")), _fmt_detail_datetime(detail.get("end_time"))
+    text = str(detail or "").strip()
+    if not text:
+        return "", ""
+    match = _DRAWDOWN_INLINE_RE.match(text)
+    if not match:
+        match = re.search(r"\((?P<start>.*?)\s+to\s+(?P<end>.*?)\)", text, re.IGNORECASE)
+    if not match:
+        return "", ""
+    return _fmt_detail_datetime(match.group("start")), _fmt_detail_datetime(match.group("end"))
+
+
+def _drawdown_inline_pct_fraction(value: Any) -> float | None:
+    match = _DRAWDOWN_INLINE_RE.match(str(value or "").strip())
+    if not match:
+        return None
+    number = _as_float(match.group("pct"))
+    return None if number is None else number / 100.0
+
+
+def _drawdown_detail_cell_value(detail: Any, endpoint: str) -> str:
+    start, end = _drawdown_detail_start_end(detail)
+    return start if endpoint == "start" else end
+
+
+def _copy_row_style_without_values(ws, source_row: int, target_row: int) -> None:
+    for col in range(1, ws.max_column + 1):
+        source = ws.cell(source_row, col)
+        target = ws.cell(target_row, col)
+        target.value = None
+        target.number_format = source.number_format
+        target.font = copy(source.font)
+        target.fill = copy(source.fill)
+        target.border = copy(source.border)
+        target.alignment = copy(source.alignment)
+        target.protection = copy(source.protection)
+    ws.row_dimensions[target_row].height = ws.row_dimensions[source_row].height
+
+
+def _ensure_start_end_rows_after(ws, metric_row: int, diagnostics: Dict[str, Any] | None = None) -> Tuple[int, int]:
+    def label_at(row: int) -> str:
+        return str(ws.cell(row, 1).value or "").strip().casefold()
+
+    if label_at(metric_row + 1) == "start" and label_at(metric_row + 2) == "end":
+        return metric_row + 1, metric_row + 2
+    if label_at(metric_row + 1) == "start":
+        ws.insert_rows(metric_row + 2, 1)
+        _copy_row_style_without_values(ws, metric_row + 1, metric_row + 2)
+        ws.cell(metric_row + 2, 1).value = "End"
+        if diagnostics is not None:
+            diagnostics.setdefault("drawdown_detail_rows_inserted", []).append(f"{ws.title}: End")
+        return metric_row + 1, metric_row + 2
+
+    ws.insert_rows(metric_row + 1, 2)
+    _copy_row_style_without_values(ws, metric_row, metric_row + 1)
+    _copy_row_style_without_values(ws, metric_row, metric_row + 2)
+    ws.cell(metric_row + 1, 1).value = "Start"
+    ws.cell(metric_row + 2, 1).value = "End"
+    if diagnostics is not None:
+        diagnostics.setdefault("drawdown_detail_rows_inserted", []).append(f"{ws.title}: Start/End")
+    return metric_row + 1, metric_row + 2
+
+
+def _ensure_drawdown_start_end_rows(ws, diagnostics: Dict[str, Any] | None = None) -> None:
+    metric_rows = [
+        row for row in range(1, ws.max_row + 1)
+        if str(ws.cell(row, 1).value or "").strip().casefold() in {"min drawdown", "max drawdown"}
+    ]
+    for row in sorted(metric_rows, reverse=True):
+        _ensure_start_end_rows_after(ws, row, diagnostics)
+
+
+def _write_drawdown_detail_rows(
+    ws,
+    metric_label: str,
+    details_by_col: Dict[int, Any],
+    *,
+    diagnostics: Dict[str, Any] | None = None,
+) -> None:
+    wanted = metric_label.casefold()
+    metric_rows = [
+        row for row in range(1, ws.max_row + 1)
+        if str(ws.cell(row, 1).value or "").strip().casefold() == wanted
+    ]
+    for metric_row in metric_rows:
+        start_row, end_row = _ensure_start_end_rows_after(ws, metric_row, diagnostics)
+        ws.cell(start_row, 1).value = "Start"
+        ws.cell(end_row, 1).value = "End"
+        _apply_dashboard_source_label_style(ws.cell(start_row, 1))
+        _apply_dashboard_source_label_style(ws.cell(end_row, 1))
+        for col in range(2, ws.max_column + 1):
+            detail = details_by_col.get(col)
+            inline_value = ws.cell(metric_row, col).value
+            inline_start, inline_end = _drawdown_detail_start_end(inline_value)
+            start, end = _drawdown_detail_start_end(detail)
+            start = start or inline_start
+            end = end or inline_end
+            inline_pct = _drawdown_inline_pct_fraction(inline_value)
+            if inline_pct is not None:
+                ws.cell(metric_row, col).value = inline_pct
+                ws.cell(metric_row, col).number_format = "0.00%"
+            if start:
+                ws.cell(start_row, col).value = start
+                ws.cell(start_row, col).number_format = "General"
+            if end:
+                ws.cell(end_row, col).value = end
+                ws.cell(end_row, col).number_format = "General"
 
 
 def _fmt_currency_with_trade_detail(value: Any, currency: str, source: Any) -> str:
@@ -2432,7 +2566,10 @@ def _apply_instrument_averages_requested_style(ws, *, preserve_layout: bool = Fa
                 continue
             for header in duration_headers:
                 if headers.get(header):
-                    ws.cell(row, headers[header]).number_format = DURATION_NUMBER_FORMAT
+                    cell = ws.cell(row, headers[header])
+                    if cell.value not in (None, ""):
+                        cell.value = _duration_display_cell_value(cell.value, cell.number_format)
+                    cell.number_format = "General"
             for header in ("Move to break even", "Move to profit"):
                 if headers.get(header):
                     ws.cell(row, headers[header]).number_format = ZERO_HIDE_FORMAT
@@ -2450,7 +2587,10 @@ def _apply_instrument_averages_requested_style(ws, *, preserve_layout: bool = Fa
             ws.cell(row, col).alignment = alignment
         for header in duration_headers:
             if headers.get(header):
-                ws.cell(row, headers[header]).number_format = DURATION_NUMBER_FORMAT
+                cell = ws.cell(row, headers[header])
+                if cell.value not in (None, ""):
+                    cell.value = _duration_display_cell_value(cell.value, cell.number_format)
+                cell.number_format = "General"
         for header in count_headers:
             if headers.get(header):
                 ws.cell(row, headers[header]).number_format = ZERO_HIDE_FORMAT
@@ -2633,7 +2773,7 @@ def _subtract_range_rectangle(cell_range: str, cut_range: str) -> List[str]:
     ]
 
 def _sanitize_dashboard_semantic_conditional_formatting(ws) -> None:
-    protected_ranges: List[str] = ["B3:D4", "B10:D11", "C10:D11", "C21:D28"]
+    protected_ranges: List[str] = ["B3:D4", "C21:D28"]
     protected_labels = {
         "wins",
         "losses",
@@ -2653,6 +2793,10 @@ def _sanitize_dashboard_semantic_conditional_formatting(ws) -> None:
         "max r loss",
         "avg r loss",
         "min r loss",
+        "best win streak",
+        "winning streak",
+        "worst losing streak",
+        "losing streak",
     }
     for row in range(1, ws.max_row + 1):
         label = str(ws.cell(row, 1).value or "").strip().casefold()
@@ -2704,12 +2848,16 @@ def _sanitize_dashboard_semantic_conditional_formatting(ws) -> None:
 
 def _apply_dashboard_requested_semantic_fills(ws) -> None:
     _sanitize_dashboard_semantic_conditional_formatting(ws)
-    for coordinate in ("B3", "C3", "D3", "B10", "C10", "D10"):
+    for coordinate in ("B3", "C3", "D3"):
         _apply_full_cell_semantic_fill(ws[coordinate], "profit")
-    for coordinate in ("B4", "C4", "D4", "B11", "C11", "D11"):
+    for coordinate in ("B4", "C4", "D4"):
         _apply_full_cell_semantic_fill(ws[coordinate], "loss")
 
     semantic_by_label = {
+        "best win streak": "profit",
+        "winning streak": "profit",
+        "worst losing streak": "loss",
+        "losing streak": "loss",
         "gross percent gain": "profit",
         "gross ir gain": "profit",
         "gross percent loss": "loss",
@@ -2879,6 +3027,14 @@ def _repair_stats1_formatting(
                 repaired += 1
     for row in range(1, ws.max_row + 1):
         label = str(ws.cell(row, 1).value or "").strip().casefold()
+        if label in {"best win streak", "winning streak"}:
+            for col in market_cols.values():
+                _apply_full_cell_semantic_fill(ws.cell(row, col), "profit")
+                repaired += 1
+        elif label in {"worst losing streak", "losing streak"}:
+            for col in market_cols.values():
+                _apply_full_cell_semantic_fill(ws.cell(row, col), "loss")
+                repaired += 1
         if label in {"net p/l", "net p/l %", "net p/l percentage", "gross percent gain", "gross percent loss", "gross gain", "gross loss"}:
             cell = ws.cell(row, market_cols["overall"])
             font = copy(cell.font)
@@ -4047,8 +4203,12 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
         ], True),
         ("Drawdown", [
             ("Min drawdown", "min_drawdown_pct", "pct", "loss"),
+            ("Start", "start:min_drawdown_detail", "drawdown_date", None),
+            ("End", "end:min_drawdown_detail", "drawdown_date", None),
             ("Avg drawdown", "avg_drawdown_pct", "pct", "loss"),
             ("Max drawdown", "max_drawdown_pct", "pct", "loss"),
+            ("Start", "start:max_drawdown_detail", "drawdown_date", None),
+            ("End", "end:max_drawdown_detail", "drawdown_date", None),
         ], True),
     ]
     for title, metrics, show_header in section_specs:
@@ -4076,6 +4236,10 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
                     cell.number_format = "General"
                 elif kind == "duration":
                     cell.value = _format_duration_display(value) if value is not None else ""
+                    cell.number_format = "General"
+                elif kind == "drawdown_date":
+                    endpoint, detail_key = str(key or "").split(":", 1)
+                    cell.value = _drawdown_detail_cell_value(buckets[market].get(detail_key), endpoint)
                     cell.number_format = "General"
                 elif kind == "count":
                     cell.value = "" if value is None else int(value)
@@ -4105,7 +4269,9 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
     detail = _stats2_sheet(wb, required=True)
     balances = _canonicalize_and_dedupe_balances(snapshot.get("balances") or stats.get("balances") or [])
     detail.cell(1, 1, "Account Balances").font = Font(bold=True)
-    for col, header in enumerate(("Account", "Balance", "Currency", "Risk of Ruin", "As Of"), start=1):
+    stats2_headers = ("Account", "Balance", "Currency", "Risk of Ruin", "As Of", "Net P/L Percentage")
+    account_net_pct = _net_result_pct_by_account(rows)
+    for col, header in enumerate(stats2_headers, start=1):
         detail.cell(2, col, header).font = Font(bold=True)
     risk_of_ruin = _risk_of_ruin_by_account(rows)
     for target_row, rec in enumerate(balances, start=3):
@@ -4122,6 +4288,11 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
         detail.cell(target_row, 4).number_format = "0.00%"
         detail.cell(target_row, 4).comment = Comment(_risk_of_ruin_comment_text(risk_payload), "Codex")
         detail.cell(target_row, 5, rec.get("as_of") or "")
+        net_pct = account_net_pct.get(account_label)
+        if net_pct is not None:
+            detail.cell(target_row, 6, net_pct / 100.0)
+            detail.cell(target_row, 6).number_format = adaptive_percent_number_format(detail.cell(target_row, 6).value)
+            _apply_sign_based_full_cell_fill(detail.cell(target_row, 6))
 
     _apply_dashboard_requested_semantic_fills(dash)
 
@@ -4283,9 +4454,9 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
             (netp/100.0 if netp is not None else ''), (avgp/100.0 if avgp is not None else ''),
             rec.get("win_rate_pct"), rec.get('avg_sl_pct_wins'), rec.get('avg_sl_pct_losses'),
             rec.get('avg_tp_pct_wins'), rec.get('avg_tp_pct_losses'),
-            _fmt_duration_full(rec.get("min_trade_duration_seconds", rec.get("shortest_duration_seconds"))),
-            _fmt_duration_full(rec.get("avg_trade_duration_seconds", rec.get("avg_duration_seconds"))),
-            _fmt_duration_full(rec.get("max_trade_duration_seconds", rec.get("longest_duration_seconds"))),
+            _format_duration_display(rec.get("min_trade_duration_seconds", rec.get("shortest_duration_seconds"))),
+            _format_duration_display(rec.get("avg_trade_duration_seconds", rec.get("avg_duration_seconds"))),
+            _format_duration_display(rec.get("max_trade_duration_seconds", rec.get("longest_duration_seconds"))),
         ])
         header_cols = {header: index + 1 for index, header in enumerate(INSTRUMENT_AVERAGES_HEADERS)}
         for header in ("Win Rate %", "Avg stop % (W)", "Avg stop % (L)", "Avg target % (W)", "Avg target % (L)"):
@@ -4311,7 +4482,7 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
             header_cols["Avg duration (DD:HH:MM:SS)"],
             header_cols["Longest duration (DD:HH:MM:SS)"],
         ):
-            inst.cell(row_idx, col).number_format = DURATION_NUMBER_FORMAT
+            inst.cell(row_idx, col).number_format = "General"
         for col in (header_cols["Move to break even"], header_cols["Move to profit"]):
             inst.cell(row_idx, col).number_format = ZERO_HIDE_FORMAT
     _style_table_sheet(inst, INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, 'B3', True)
@@ -4492,8 +4663,12 @@ _REPORT_SPECS = [
     ("R expectancy", "avg_r_multiple_losers", "r", "loss"),
     ("Drawdown", None, "section", None),
     ("Max drawdown", "max_drawdown_pct", "pct", "loss"),
+    ("Start", "start:max_drawdown_detail", "drawdown_date", None),
+    ("End", "end:max_drawdown_detail", "drawdown_date", None),
     ("Avg drawdown", "avg_drawdown_pct", "pct", "loss"),
     ("Min drawdown", "min_drawdown_pct", "pct", "loss"),
+    ("Start", "start:min_drawdown_detail", "drawdown_date", None),
+    ("End", "end:min_drawdown_detail", "drawdown_date", None),
     ("Longs", "long_trades", "count", None),
     ("Long wins", "long_wins", "count", "profit"),
     ("Long losses", "long_losses", "count", "loss"),
@@ -4637,11 +4812,10 @@ def _report_cell_value(bucket: Dict[str, Any], key: str | None, kind: str) -> An
     value = bucket.get(key)
     if kind == "pct":
         number = _as_float(value)
-        if key == "min_drawdown_pct" and number is not None and bucket.get("min_drawdown_detail"):
-            return _fmt_pct_with_detail(number, bucket.get("min_drawdown_detail"))
-        if key == "max_drawdown_pct" and number is not None and bucket.get("max_drawdown_detail"):
-            return _fmt_pct_with_detail(number, bucket.get("max_drawdown_detail"))
         return "" if number is None else number / 100.0
+    if kind == "drawdown_date":
+        endpoint, detail_key = str(key or "").split(":", 1)
+        return _drawdown_detail_cell_value(bucket.get(detail_key), endpoint)
     if kind == "r":
         number = _as_float(value)
         return "" if number is None else number
@@ -4695,6 +4869,8 @@ def _format_report_sheet(ws, last_col: int) -> None:
             elif kind == "count":
                 cell.number_format = "0"
             elif kind == "duration":
+                cell.number_format = "General"
+            elif kind == "drawdown_date":
                 cell.number_format = "General"
             elif kind == "number":
                 cell.number_format = '#,##0.00'
@@ -4806,6 +4982,8 @@ def _repair_report_layout(ws, diagnostics: Dict[str, Any] | None = None) -> None
             ws.delete_rows(source_row, 1)
             diagnostics.setdefault("report_min_drawdown_relocated", []).append(ws.title)
 
+    _ensure_drawdown_start_end_rows(ws, diagnostics)
+
     commission_rows = _report_label_rows(ws, "Commission")
     if commission_rows and not _report_label_rows(ws, "Total Commission"):
         commission_row = commission_rows[0]
@@ -4872,7 +5050,10 @@ def _update_report_sheet_preserving_layout(
     for row, (_label, key, kind, _semantic) in spec_rows:
         for col, bucket in zip(header_cols, buckets):
             cell = ws.cell(row, col)
-            cell.value = _report_cell_value(bucket, key, kind)
+            next_value = _report_cell_value(bucket, key, kind)
+            if next_value in (None, "") and cell.value not in (None, ""):
+                continue
+            cell.value = next_value
             if isinstance(cell.value, str) and cell.value:
                 cell.number_format = "General"
             elif kind == "pct":
@@ -4882,6 +5063,8 @@ def _update_report_sheet_preserving_layout(
             elif kind == "count":
                 cell.number_format = "0"
             elif kind == "duration":
+                cell.number_format = "General"
+            elif kind == "drawdown_date":
                 cell.number_format = "General"
             elif kind == "commission":
                 values = bucket.get(key) if key else None
@@ -4909,8 +5092,6 @@ def _report_rows_for_period(
                 continue
             if str(row.get("row_type") or "trade") != "trade":
                 continue
-            if _is_test_trade_value(row.get("is_test_trade")):
-                continue
             timestamp = _as_datetime(row.get("close_time") or row.get("open_time"))
             if timestamp is None:
                 continue
@@ -4924,6 +5105,134 @@ def _report_rows_for_period(
     return list((cache.get("month") or {}).get((year, month), []))
 
 
+def _report_outcome(row: Dict[str, Any]) -> int:
+    value = _as_float(row.get("result_pct"))
+    if value is None:
+        value = _as_float(row.get("net_profit"))
+    if value is None:
+        value = _as_float(row.get("result_cash"))
+    if value is None or not math.isfinite(value) or value == 0:
+        return 0
+    return 1 if value > 0 else -1
+
+
+def _period_streak_metrics(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    ordered = sorted(
+        rows,
+        key=lambda row: _as_datetime(row.get("close_time") or row.get("open_time")) or datetime.min,
+    )
+    best: Dict[int, Tuple[int, Dict[str, Any] | None]] = {1: (0, None), -1: (0, None)}
+    current_sign = 0
+    current_rows: List[Dict[str, Any]] = []
+    for row in ordered:
+        sign = _report_outcome(row)
+        if sign == 0:
+            current_sign = 0
+            current_rows = []
+            continue
+        if sign != current_sign:
+            current_sign = sign
+            current_rows = [row]
+        else:
+            current_rows.append(row)
+        if len(current_rows) > best[sign][0]:
+            best[sign] = (
+                len(current_rows),
+                {
+                    "start_time": current_rows[0].get("close_time") or current_rows[0].get("open_time"),
+                    "end_time": current_rows[-1].get("close_time") or current_rows[-1].get("open_time"),
+                },
+            )
+    result: Dict[str, Any] = {
+        "winning_streak": best[1][0] or None,
+        "losing_streak": best[-1][0] or None,
+    }
+    if best[1][1]:
+        result["longest_winning_streak"] = best[1][1]
+    if best[-1][1]:
+        result["longest_losing_streak"] = best[-1][1]
+    return result
+
+
+def _period_drawdown_metrics(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    ordered = sorted(
+        rows,
+        key=lambda row: _as_datetime(row.get("close_time") or row.get("open_time")) or datetime.min,
+    )
+    cumulative = 0.0
+    peak = 0.0
+    peak_time: Any = None
+    drawdowns: List[Tuple[float, Any, Any]] = []
+    saw_result = False
+    for row in ordered:
+        value = _as_float(row.get("result_pct"))
+        if value is None or not math.isfinite(value):
+            continue
+        saw_result = True
+        timestamp = row.get("close_time") or row.get("open_time")
+        cumulative += value
+        if cumulative >= peak:
+            peak = cumulative
+            peak_time = timestamp
+        drawdown = max(0.0, peak - cumulative)
+        drawdowns.append((drawdown, peak_time or timestamp, timestamp))
+    if not saw_result:
+        return {}
+    positive = [item for item in drawdowns if item[0] > 0]
+    if not positive:
+        return {"min_drawdown_pct": 0.0, "avg_drawdown_pct": 0.0, "max_drawdown_pct": 0.0}
+    min_item = min(positive, key=lambda item: item[0])
+    max_item = max(positive, key=lambda item: item[0])
+    return {
+        "min_drawdown_pct": min_item[0],
+        "avg_drawdown_pct": sum(item[0] for item in positive) / len(positive),
+        "max_drawdown_pct": max_item[0],
+        "min_drawdown_detail": {"start_time": min_item[1], "end_time": min_item[2]},
+        "max_drawdown_detail": {"start_time": max_item[1], "end_time": max_item[2]},
+    }
+
+
+def _report_bucket_from_period_rows(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    active = [
+        row for row in rows
+        if str(row.get("row_type") or "trade").strip().lower() == "trade"
+        and not _is_test_trade_value(row.get("is_test_trade"))
+    ]
+    outcomes = [_report_outcome(row) for row in active]
+    trades = len(active)
+    duration_samples = [
+        (value, row)
+        for row in active
+        for value in [_as_float(row.get("trade_duration_seconds"))]
+        if value is not None and value >= 0 and math.isfinite(value)
+    ]
+    bucket: Dict[str, Any] = {
+        "trades": trades,
+        "wins": sum(outcome > 0 for outcome in outcomes),
+        "losses": sum(outcome < 0 for outcome in outcomes),
+        "break_even": sum(outcome == 0 for outcome in outcomes),
+        "test_trades": sum(_is_test_trade_value(row.get("is_test_trade")) for row in rows),
+    }
+    bucket["win_rate_pct"] = (bucket["wins"] / trades * 100.0) if trades else None
+    if duration_samples:
+        shortest_value, shortest_row = min(duration_samples, key=lambda item: item[0])
+        longest_value, longest_row = max(duration_samples, key=lambda item: item[0])
+        bucket.update({
+            "shortest_duration_seconds": shortest_value,
+            "longest_duration_seconds": longest_value,
+            "avg_duration_seconds": sum(value for value, _row in duration_samples) / len(duration_samples),
+            "min_duration_seconds": shortest_value,
+            "max_duration_seconds": longest_value,
+            "metric_sources": {
+                "shortest_duration_seconds": _trade_metric_ref(shortest_row, "shortest_duration_seconds", shortest_value),
+                "longest_duration_seconds": _trade_metric_ref(longest_row, "longest_duration_seconds", longest_value),
+            },
+        })
+    bucket.update(_period_streak_metrics(active))
+    bucket.update(_period_drawdown_metrics(active))
+    return bucket
+
+
 def _report_bucket_for_period(
     snapshot: Dict[str, Any],
     *,
@@ -4933,16 +5242,23 @@ def _report_bucket_for_period(
     bucket = _report_bucket_from_stats(_period_report_lookup(snapshot, year=year, month=month))
     rows = _report_rows_for_period(snapshot, year=year, month=month)
     if rows:
-        extended = _dashboard_extended_metrics(rows, {"overall": bucket})["overall"]
-        move_durations = _trade_move_duration_metrics(rows)["overall"]
+        active_rows = [
+            row for row in rows
+            if str(row.get("row_type") or "trade").strip().lower() == "trade"
+            and not _is_test_trade_value(row.get("is_test_trade"))
+        ]
+        fallback = _report_bucket_from_period_rows(rows)
+        extended = _dashboard_extended_metrics(active_rows, {"overall": {**bucket, **fallback}})["overall"]
+        move_durations = _trade_move_duration_metrics(active_rows)["overall"]
         bucket = _merge_metric_buckets(
             bucket,
-            _linear_profit_percentage_totals(rows),
+            fallback,
+            _linear_profit_percentage_totals(active_rows),
             {key: value for key, value in extended.items() if value is not None},
             {key: value for key, value in move_durations.items() if value is not None},
         )
         commission_by_currency: Dict[str, List[float]] = defaultdict(list)
-        for row in rows:
+        for row in active_rows:
             commission = _as_float(row.get("commission"))
             if commission is None or commission == 0:
                 continue
@@ -5084,6 +5400,13 @@ def _is_merged_non_anchor(ws, row: int, col: int) -> bool:
         if merged.min_row <= row <= merged.max_row and merged.min_col <= col <= merged.max_col:
             return not (row == merged.min_row and col == merged.min_col)
     return False
+
+
+def _merged_row_end(ws, row: int, col: int) -> int | None:
+    for merged in ws.merged_cells.ranges:
+        if merged.min_row <= row <= merged.max_row and merged.min_col <= col <= merged.max_col:
+            return merged.max_row if merged.max_row > merged.min_row else None
+    return None
 
 
 def _set_cell_horizontal_alignment(cell, horizontal: str) -> None:
@@ -5803,6 +6126,11 @@ def _ensure_dashboard_extended_layout(ws, diagnostics: Dict[str, Any] | None = N
         for wanted, aliases in desired_by_section[section_name]:
             while cursor <= ws.max_row and str(ws.cell(cursor, 1).value or "").strip().casefold() in {"", "source"}:
                 cursor += 1
+            merged_end = _merged_row_end(ws, cursor, 1)
+            if merged_end and merged_end >= cursor:
+                cursor = merged_end + 1
+                while cursor <= ws.max_row and str(ws.cell(cursor, 1).value or "").strip().casefold() in {"", "source"}:
+                    cursor += 1
             current = str(ws.cell(cursor, 1).value or "").strip()
             if current.lower() in aliases:
                 cursor += 1
@@ -6086,6 +6414,8 @@ def _find_dashboard_table_headers(ws, section: Dict[str, int], *, scan_rows: int
                 row_map["risk_of_ruin"] = c
             elif h in {"as of", "as_of"}:
                 row_map["as_of"] = c
+            elif h in {"net p/l percentage", "net p/l %", "net p/l percent"}:
+                row_map["net_pl_percentage"] = c
         if required.issubset(row_map.keys()):
             header_row = r
             col_map = row_map
@@ -6204,6 +6534,40 @@ def _clear_account_balance_row(ws, row: int, col_map: Dict[str, int]) -> None:
         ws.cell(row, col_map["risk_of_ruin"]).comment = None
     if "as_of" in col_map:
         ws.cell(row, col_map["as_of"]).value = None
+    if "net_pl_percentage" in col_map:
+        ws.cell(row, col_map["net_pl_percentage"]).value = None
+
+
+def _write_stats2_net_pl_percentages(
+    ws,
+    section: Dict[str, int],
+    header_row: int,
+    col_map: Dict[str, int],
+    rows: List[Dict[str, Any]],
+    diagnostics: Dict[str, Any] | None = None,
+) -> None:
+    diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+    net_col = col_map.get("net_pl_percentage")
+    account_col = col_map.get("account")
+    if not net_col or not account_col:
+        return
+    totals = _net_result_pct_by_account(rows)
+    written = 0
+    for row in range(header_row + 1, section["end_row"] + 1):
+        account = _canonical_account_label(ws.cell(row, account_col).value)
+        if not account:
+            continue
+        value = totals.get(account)
+        cell = ws.cell(row, net_col)
+        if value is None:
+            cell.value = None
+            _clear_generated_semantic_fill(cell)
+            continue
+        cell.value = value / 100.0
+        cell.number_format = adaptive_percent_number_format(cell.value)
+        _apply_sign_based_full_cell_fill(cell)
+        written += 1
+    diagnostics["stats2_net_pl_percentage_cells_written"] = written
 
 
 def _write_stats2_risk_of_ruin(
@@ -7003,21 +7367,24 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
         write_market_metric("Drawdown", "Avg drawdown", {"overall": risk.get("avg_drawdown_pct"), "fx": (by_market.get("fx") or {}).get("avg_drawdown_pct"), "crypto": (by_market.get("crypto") or {}).get("avg_drawdown_pct")}, "pct", "drawdown")
         if "Drawdown" in anchors:
             market_cols = _main_dashboard_market_columns()
-            for label, value_key, detail_key in (
-                ("Min drawdown", "min_drawdown_pct", "min_drawdown_detail"),
-                ("Max drawdown", "max_drawdown_pct", "max_drawdown_detail"),
-            ):
-                pos = _find_label_in_section(dash, label, anchors["Drawdown"])
-                if not pos:
-                    continue
-                for market, col in market_cols.items():
-                    value = (extended_metrics.get(market) or {}).get(value_key)
-                    detail = (extended_metrics.get(market) or {}).get(detail_key)
-                    if value is None or not detail:
-                        continue
-                    if _write_value_preserving_cell(dash, pos[0], col, _fmt_pct_with_detail(value, detail)):
-                        dash.cell(pos[0], col).number_format = "General"
-                        diagnostics["updated_cells"] += 1
+            _write_drawdown_detail_rows(
+                dash,
+                "Min drawdown",
+                {
+                    col: (extended_metrics.get(market) or {}).get("min_drawdown_detail")
+                    for market, col in market_cols.items()
+                },
+                diagnostics=diagnostics,
+            )
+            _write_drawdown_detail_rows(
+                dash,
+                "Max drawdown",
+                {
+                    col: (extended_metrics.get(market) or {}).get("max_drawdown_detail")
+                    for market, col in market_cols.items()
+                },
+                diagnostics=diagnostics,
+            )
         duration = groups.get("duration") or {}
         dsrc = duration.get("metric_sources") or {}
         if "FX" in section_sheets:
@@ -7186,6 +7553,7 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
         if diagnostics["account_balance_mismatches"]:
             return {"ok": False, "error": "dashboard_account_balance_verification_failed", "diagnostics": diagnostics}
         _write_stats2_risk_of_ruin(detail_dash, section, header_row, col_map, rows, diagnostics)
+        _write_stats2_net_pl_percentages(detail_dash, section, header_row, col_map, rows, diagnostics)
 
         zero_qty = _collect_zero_qty_validation(rows)
         diagnostics.update(zero_qty)

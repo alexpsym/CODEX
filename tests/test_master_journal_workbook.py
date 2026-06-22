@@ -5,7 +5,7 @@ from datetime import datetime
 import zipfile
 import xml.etree.ElementTree as ET
 from openpyxl import Workbook, load_workbook
-from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 import pytest
 from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, read_master_journal_source, update_master_journal_workbook_data_only, SHEET_ORDER, STATS1_SHEET, STATS2_SHEET, SYMBOLS_SHEET, TRADE_LOG_HEADERS, TRADE_LOG_HEADERS_V1, OLD_TRADE_LOG_HEADERS, PRE_MOVE_TRADE_LOG_HEADERS, MOVE_TO_FIELD_MAP, TRADE_LOG_HEADER_ROWS, TRADE_LOG_DATA_START_ROW, TRADE_LOG_FILTER_HEADER_ROW, TRADE_NUMBER_HEADER, REPORT_YEARLY_SHEET, REPORT_METRIC_LABELS, INSTRUMENT_AVERAGES_HEADERS, INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, INSTRUMENT_AVERAGES_DATA_START_ROW, DASHBOARD_MOVE_TO_BREAK_EVEN_LABEL, DASHBOARD_MOVE_TO_PROFIT_LABEL, DURATION_NUMBER_FORMAT, adaptive_percent_number_format, adaptive_number_format, resolve_trade_folder_link, expected_report_sheet_names, _apply_trade_number_hyperlinks, _ensure_trade_log_schema, _ensure_instrument_averages_schema, _ensure_pnl_calendar_freeze_panes, _repair_trade_log_move_to_durations, _trade_log_header_map, _instrument_averages_header_map, _result_percentage_totals_by_market
 from tools.master_journal_workbook import _format_duration_display, _parse_duration_text, _repair_legacy_duration_number_formats
@@ -868,8 +868,8 @@ def test_balance_after_resolution_and_duration_display(tmp_path: Path):
     inst=wb[SYMBOLS_SHEET]
     inst_headers = _instrument_averages_header_map(inst)
     for header in ("Shortest duration (DD:HH:MM:SS)", "Avg duration (DD:HH:MM:SS)", "Longest duration (DD:HH:MM:SS)"):
-        assert isinstance(inst.cell(INSTRUMENT_AVERAGES_DATA_START_ROW, inst_headers[header]).value, (int, float))
-        assert inst.cell(INSTRUMENT_AVERAGES_DATA_START_ROW, inst_headers[header]).number_format == DURATION_NUMBER_FORMAT
+        assert _parse_duration_text(inst.cell(INSTRUMENT_AVERAGES_DATA_START_ROW, inst_headers[header]).value) is not None
+        assert inst.cell(INSTRUMENT_AVERAGES_DATA_START_ROW, inst_headers[header]).number_format == "General"
 
 def test_sheet_order_and_hidden_meta(tmp_path: Path):
     out=tmp_path/'x.xlsx'; build_master_journal_workbook(sample_snapshot(), out); wb=load_workbook(out)
@@ -1224,13 +1224,13 @@ def test_instrument_averages_op_and_duration_not_blank_after_data_only_update(tm
         for r in range(INSTRUMENT_AVERAGES_DATA_START_ROW, inst2.max_row + 1)
     ]
     assert any(isinstance(v[0], (int, float)) or isinstance(v[1], (int, float)) for v in vals)
-    assert any(all(isinstance(x, (int, float)) for x in v[2:]) for v in vals)
+    assert any(all(isinstance(x, str) and _parse_duration_text(x) is not None for x in v[2:]) for v in vals)
     for row in range(INSTRUMENT_AVERAGES_DATA_START_ROW, inst2.max_row + 1):
         if inst2.cell(row, h2["Symbol"]).value in (None, ""):
             continue
         for col in (s_col, a_col, l_col):
-            assert inst2.cell(row, col).number_format == DURATION_NUMBER_FORMAT
-            assert inst2.cell(row, col).number_format != "General"
+            assert inst2.cell(row, col).number_format == "General"
+            assert _parse_duration_text(inst2.cell(row, col).value) is not None
     for col in (s_col, a_col, l_col):
         header_cell = inst2.cell(INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, col)
         assert header_cell.alignment.wrap_text is True
@@ -2351,6 +2351,163 @@ def test_update_data_only_writes_dashboard_horizontal_core_metric_aliases(tmp_pa
     assert [ws.cell(12, c).value for c in range(2, 5)] == [3, 1, 7]
     assert [ws.cell(17, c).value for c in range(2, 5)] == [pytest.approx(0.095), pytest.approx(0.05), pytest.approx(0.1225)]
     assert [ws.cell(17, c).number_format for c in range(2, 5)] == ["0.00%", "0.00%", "0.00%"]
+    assert all(_cell_fill_rgb(ws.cell(11, col)) == "C6EFCE" for col in range(2, 5))
+    assert all(_cell_font_rgb(ws.cell(11, col)) == "006100" for col in range(2, 5))
+    assert all(_cell_fill_rgb(ws.cell(12, col)) == "FFC7CE" for col in range(2, 5))
+    assert all(_cell_font_rgb(ws.cell(12, col)) == "9C0006" for col in range(2, 5))
+
+
+def test_stats1_manual_a_column_merges_survive_data_only_update(tmp_path: Path):
+    path = tmp_path / "manual-merge.xlsx"
+    snap = sample_snapshot()
+    build_master_journal_workbook(snap, path)
+    wb = load_workbook(path)
+    stats1 = wb[STATS1_SHEET]
+    stats1.merge_cells("A52:A53")
+    stats1["A52"] = "Manual merged note"
+    wb.save(path)
+    wb.close()
+
+    result = update_master_journal_workbook_data_only(path, snap)
+    assert result["ok"] is True
+    Path(result["candidate_path"]).replace(path)
+    out = load_workbook(path)
+    try:
+        assert "A52:A53" in {str(rng) for rng in out[STATS1_SHEET].merged_cells.ranges}
+        assert out[STATS1_SHEET]["A52"].value == "Manual merged note"
+    finally:
+        out.close()
+
+
+def test_drawdown_detail_rows_are_split_for_stats1_and_reports(tmp_path: Path):
+    snap = sample_snapshot()
+    detail = {"start_time": "2026-05-01T01:00:00Z", "end_time": "2026-05-02T02:00:00Z"}
+    by_market = snap["stats"]["groups"]["by_market"]
+    for market in ("overall", "fx", "crypto"):
+        by_market.setdefault(market, {}).update({
+            "min_drawdown_pct": 0.75,
+            "avg_drawdown_pct": 1.0,
+            "max_drawdown_pct": 1.25,
+            "min_drawdown_detail": detail,
+            "max_drawdown_detail": detail,
+        })
+    path = tmp_path / "drawdown-detail.xlsx"
+    build_master_journal_workbook(snap, path)
+    wb = load_workbook(path)
+    try:
+        for sheet_name, header in ((STATS1_SHEET, "Overall"), (REPORT_YEARLY_SHEET, 2026), ("2026", "May")):
+            ws = wb[sheet_name]
+            col = 2 if sheet_name == STATS1_SHEET else next(c for c in range(2, ws.max_column + 1) if ws.cell(1, c).value == header)
+            rows = defaultdict(list)
+            for row in range(1, ws.max_row + 1):
+                rows[str(ws.cell(row, 1).value or "")].append(row)
+            for label in ("Min drawdown", "Max drawdown"):
+                row = rows[label][0]
+                assert ws.cell(row, col).number_format == "0.00%"
+                assert isinstance(ws.cell(row, col).value, (int, float))
+                assert ws.cell(row + 1, 1).value == "Start"
+                assert ws.cell(row + 2, 1).value == "End"
+                assert str(ws.cell(row + 1, col).value).startswith("2026-05-")
+                assert str(ws.cell(row + 2, col).value).startswith("2026-05-")
+    finally:
+        wb.close()
+
+
+def test_data_only_update_splits_existing_inline_drawdown_detail(tmp_path: Path):
+    path = tmp_path / "inline-drawdown.xlsx"
+    snap = sample_snapshot()
+    build_master_journal_workbook(snap, path)
+    wb = load_workbook(path)
+    stats1 = wb[STATS1_SHEET]
+    rows = {str(stats1.cell(row, 1).value or ""): row for row in range(1, stats1.max_row + 1)}
+    min_row = rows["Min drawdown"]
+    stats1.cell(min_row, 2).value = "0.00861227% (2020-04-12 16:42:00 to 2020-04-13 19:21:00)"
+    stats1.cell(min_row + 1, 2).value = None
+    stats1.cell(min_row + 2, 2).value = None
+    wb.save(path)
+    wb.close()
+
+    result = update_master_journal_workbook_data_only(path, snap)
+    assert result["ok"] is True
+    Path(result["candidate_path"]).replace(path)
+    out = load_workbook(path)
+    try:
+        ws = out[STATS1_SHEET]
+        assert ws.cell(min_row, 2).value == pytest.approx(0.0000861227)
+        assert ws.cell(min_row, 2).number_format == "0.00%"
+        assert ws.cell(min_row + 1, 1).value == "Start"
+        assert ws.cell(min_row + 1, 2).value == "2020-04-12 16:42:00"
+        assert ws.cell(min_row + 2, 1).value == "End"
+        assert ws.cell(min_row + 2, 2).value == "2020-04-13 19:21:00"
+    finally:
+        out.close()
+
+
+def test_stats2_net_pl_percentage_update_preserves_borders(tmp_path: Path):
+    path = tmp_path / "stats2-net-pl.xlsx"
+    snap = sample_snapshot()
+    snap["balances"].append({"account_label": "OANDA DEMO", "balance": 980.0, "currency": "AUD"})
+    build_master_journal_workbook(snap, path)
+    wb = load_workbook(path)
+    stats2 = wb[STATS2_SHEET]
+    headers = {str(stats2.cell(2, col).value or ""): col for col in range(1, stats2.max_column + 1)}
+    net_col = headers["Net P/L Percentage"]
+    account_col = headers["Account"]
+    row = next(r for r in range(3, stats2.max_row + 1) if stats2.cell(r, account_col).value == "OANDA DEMO")
+    custom_border = Border(left=Side(style="thick", color="FF123456"), right=Side(style="double", color="FF654321"))
+    stats2.cell(row, net_col).border = custom_border
+    wb.save(path)
+    wb.close()
+
+    result = update_master_journal_workbook_data_only(path, snap)
+    assert result["ok"] is True
+    Path(result["candidate_path"]).replace(path)
+    out = load_workbook(path)
+    try:
+        ws = out[STATS2_SHEET]
+        cell = ws.cell(row, net_col)
+        assert cell.value == pytest.approx(0.023)
+        assert cell.number_format == "0.00%"
+        assert _cell_fill_rgb(cell) == "C6EFCE"
+        assert cell.border.left.style == "thick"
+        assert str(cell.border.left.color.rgb)[-6:] == "123456"
+        assert cell.border.right.style == "double"
+        assert str(cell.border.right.color.rgb)[-6:] == "654321"
+    finally:
+        out.close()
+
+
+def test_report_period_rows_populate_core_counts_duration_and_drawdown(tmp_path: Path):
+    snap = sample_snapshot()
+    snap["period_reports"] = {}
+    snap["items"].append({
+        "id": "test-row", "row_type": "trade", "account": "OANDA DEMO", "symbol": "AUDUSD",
+        "asset_class": "fx", "side": "BUY", "open_time": "2026-05-04T00:00:00Z",
+        "close_time": "2026-05-04T00:01:00Z", "result_pct": 99.0,
+        "net_profit": 99.0, "trade_duration_seconds": 60, "is_test_trade": True,
+    })
+    path = tmp_path / "period-fallback.xlsx"
+    build_master_journal_workbook(snap, path)
+    wb = load_workbook(path)
+    try:
+        for sheet_name, header in ((REPORT_YEARLY_SHEET, 2026), ("2026", "May")):
+            ws = wb[sheet_name]
+            rows = {str(ws.cell(row, 1).value or ""): row for row in range(1, ws.max_row + 1)}
+            col = next(c for c in range(2, ws.max_column + 1) if ws.cell(1, c).value == header)
+            assert ws.cell(rows["Trades"], col).value == 2
+            assert ws.cell(rows["Wins"], col).value == 1
+            assert ws.cell(rows["Losses"], col).value == 1
+            assert ws.cell(rows["Break-even"], col).value == 0
+            assert ws.cell(rows["Test"], col).value == 1
+            assert ws.cell(rows["Win rate"], col).value == pytest.approx(0.5)
+            assert _parse_duration_text(ws.cell(rows["Shortest (DD:HH:MM:SS)"], col).value) is not None
+            assert ws.cell(rows["Max drawdown"], col).value not in (None, "")
+            assert ws.cell(rows["Max drawdown"] + 1, 1).value == "Start"
+            assert ws.cell(rows["Max drawdown"] + 1, col).value not in (None, "")
+            assert ws.cell(rows["Max drawdown"] + 2, 1).value == "End"
+            assert ws.cell(rows["Max drawdown"] + 2, col).value not in (None, "")
+    finally:
+        wb.close()
 
 
 def test_update_data_only_repairs_unknown_currency_formats_after_schema_migration(monkeypatch, tmp_path: Path):
@@ -2930,7 +3087,8 @@ def test_generated_calendar_and_instrument_averages_use_direct_semantic_fills(tm
     assert _cell_fill_rgb(inst.cell(row, headers["Win Rate %"])) == ""
     assert inst.cell(row, headers["Net P/L %"]).number_format == "0.00%"
     assert inst.cell(row, headers["Avg P/L %"]).number_format == "0.00%"
-    assert inst.cell(row, headers["Avg duration (DD:HH:MM:SS)"]).number_format == DURATION_NUMBER_FORMAT
+    assert inst.cell(row, headers["Avg duration (DD:HH:MM:SS)"]).number_format == "General"
+    assert _parse_duration_text(inst.cell(row, headers["Avg duration (DD:HH:MM:SS)"]).value) is not None
 
     cal = wb["P&L Calendar"]
     assert _cell_fill_rgb(cal["F3"]) == "C6EFCE"  # May P/L %
@@ -3213,7 +3371,8 @@ def test_stats_symbols_and_reports_required_repairs(tmp_path: Path):
         "Avg duration (DD:HH:MM:SS)",
         "Longest duration (DD:HH:MM:SS)",
     ):
-        assert symbols.cell(3, headers[header]).number_format == DURATION_NUMBER_FORMAT
+        assert symbols.cell(3, headers[header]).number_format == "General"
+        assert _parse_duration_text(symbols.cell(3, headers[header]).value) is not None
 
     stats2 = wb[STATS2_SHEET]
     stats2_values = [
