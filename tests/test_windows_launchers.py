@@ -1,5 +1,6 @@
 from pathlib import Path
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -345,7 +346,8 @@ def test_run_local_master_parent_logs_are_condensed_and_worker_logs_are_detailed
     assert 'set "LOG_DIR=%ROOT%logs"' in script
     assert 'set "LOCAL_MASTER_WORKER_LOG=%LOG_DIR%\\LocalTradingTools-worker-latest.log"' in script
     assert 'echo [local-master] worker log: %LOCAL_MASTER_WORKER_LOG%' in script
-    assert 'cmd /d /s /v:on /c ""%~f0" __worker" > "!LOCAL_MASTER_WORKER_LOG!" 2>&1' in script
+    assert 'call "%~f0" __worker > "%LOCAL_MASTER_WORKER_LOG%" 2>&1' in script
+    assert 'cmd /d /s /v:on /c ""%~f0" __worker"' not in script
     assert 'echo [local-master] launcher starting.' in script
     assert 'echo [local-master] waiting for %MASTER_HEALTH_URL% ...' in script
     assert 'echo [local-master] worker started at !DATE! !TIME!' in script
@@ -360,7 +362,8 @@ def test_run_local_master_worker_console_stays_visible_on_abnormal_failure() -> 
     assert 'if /I "%~1"=="__worker_console" goto worker_console' in script
     assert 'start "%LOCAL_MASTER_WINDOW_TITLE%" /D "%ROOT%" cmd /d /v:on /k "call ""%~f0"" __worker_console"' in script
     assert ':worker_console' in script
-    assert 'cmd /d /s /v:on /c ""%~f0" __worker" > "!LOCAL_MASTER_WORKER_LOG!" 2>&1' in script
+    assert 'call "%~f0" __worker > "%LOCAL_MASTER_WORKER_LOG%" 2>&1' in script
+    assert 'cmd /d /s /v:on /c ""%~f0" __worker"' not in script
     assert 'Worker failed with exit code !WORKER_EXIT_CODE!' in script
     assert 'Get-Content -LiteralPath $env:LOCAL_MASTER_WORKER_LOG -Tail 40' in script
     assert 'This window is intentionally left open so startup errors stay readable.' in script
@@ -377,6 +380,51 @@ def test_run_local_master_worker_dead_fail_fast_before_health_timeout() -> None:
     assert 'Worker exited before dashboard became ready with exit code !WORKER_EXIT_CODE!' in script
     assert script.index('if defined LOCAL_MASTER_WORKER_FAILED_FILE if exist "%LOCAL_MASTER_WORKER_FAILED_FILE%" goto worker_failed_before_ready') < script.index('if !READY_WAITED! GEQ %MASTER_READY_TIMEOUT_SECONDS% goto master_not_ready')
     assert 'Browser was not opened because the worker is no longer running.' in script
+
+
+def test_run_local_master_worker_console_smoke_has_no_cmd_syntax_error() -> None:
+    cmd_exe = shutil.which('cmd.exe')
+    if not cmd_exe:
+        pytest.skip('cmd.exe is required for Windows BAT smoke test')
+
+    smoke_dir = ROOT / '.pytest_tmp_launcher_smoke'
+    smoke_dir.mkdir(exist_ok=True)
+    worker_log = smoke_dir / 'worker-console-smoke.log'
+    exit_request = smoke_dir / 'exit-smoke.flag'
+    normal_exit = smoke_dir / 'normal-smoke.flag'
+    failed_marker = smoke_dir / 'failed-smoke.flag'
+    for path in (worker_log, exit_request, normal_exit, failed_marker):
+        if path.exists():
+            path.unlink()
+    exit_request.write_text('exit requested\n', encoding='utf-8')
+
+    env = os.environ.copy()
+    env.update(
+        {
+            'SPREAD_MONITOR_SKIP_REQUIREMENTS_INSTALL': '1',
+            'PYTHON': cmd_exe,
+            'LOCAL_MASTER_WINDOW_TITLE': 'Codex BAT Smoke Test',
+            'LOCAL_MASTER_WORKER_LOG': str(worker_log),
+            'LOCAL_MASTER_EXIT_REQUEST': str(exit_request),
+            'LOCAL_MASTER_NORMAL_EXIT_FILE': str(normal_exit),
+            'LOCAL_MASTER_WORKER_FAILED_FILE': str(failed_marker),
+        }
+    )
+    result = subprocess.run(
+        [cmd_exe, '/d', '/c', 'call', str(ROOT / 'run_local_master_control.bat'), '__worker_console'],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=45,
+    )
+    combined_output = f"{result.stdout}\n{result.stderr}"
+    log_text = worker_log.read_text(encoding='utf-8') if worker_log.exists() else ''
+    assert result.returncode == 0, combined_output + '\n' + log_text
+    assert 'The syntax of the command is incorrect.' not in combined_output
+    assert 'The syntax of the command is incorrect.' not in log_text
+    assert 'worker started at' in log_text
+    assert 'local exit requested; closing worker window.' in log_text
 
 
 def test_run_local_master_spread_requirements_skip_condition_uses_valid_nested_if() -> None:

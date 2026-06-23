@@ -400,7 +400,8 @@ def test_run_local_master_control_bat_uses_local_autostart() -> None:
     assert worker_start in content
     assert 'set "LOCAL_MASTER_WORKER_LOG=%LOG_DIR%\\LocalTradingTools-worker-latest.log"' in content
     assert 'set "LOCAL_MASTER_WORKER_FAILED_FILE=%TEMP%\\LocalTradingToolsExit-%LOCAL_LAUNCH_TS%.failed"' in content
-    assert 'cmd /d /s /v:on /c ""%~f0" __worker" > "!LOCAL_MASTER_WORKER_LOG!" 2>&1' in content
+    assert 'call "%~f0" __worker > "%LOCAL_MASTER_WORKER_LOG%" 2>&1' in content
+    assert 'cmd /d /s /v:on /c ""%~f0" __worker"' not in content
     assert 'ERROR: Worker exited before dashboard became ready.' in content
     assert 'This window is intentionally left open so startup errors stay readable.' in content
     assert "http://127.0.0.1:8000/health" in content

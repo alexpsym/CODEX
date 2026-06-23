@@ -156,7 +156,7 @@ echo [local-master] visible worker console started.
 echo [local-master] worker output is being written to:
 echo [local-master]   !LOCAL_MASTER_WORKER_LOG!
 echo [local-master] If startup fails, this window will stay open and print the latest log lines.
-cmd /d /s /v:on /c ""%~f0" __worker" > "!LOCAL_MASTER_WORKER_LOG!" 2>&1
+call "%~f0" __worker > "%LOCAL_MASTER_WORKER_LOG%" 2>&1
 set "WORKER_EXIT_CODE=!ERRORLEVEL!"
 if defined LOCAL_MASTER_NORMAL_EXIT_FILE if exist "!LOCAL_MASTER_NORMAL_EXIT_FILE!" (
   del /q "!LOCAL_MASTER_NORMAL_EXIT_FILE!" >nul 2>nul

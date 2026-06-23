@@ -1,13 +1,12 @@
-Completed the remaining Local Trading Tools launch failure fix after the crash-visibility update.
+Completed the remaining Local Trading Tools CMD syntax crash fix.
 
 Changes made:
-- Replaced the worker wrapper's fragile `call "%~f0" __worker > ...` invocation with `cmd /d /s /v:on /c ""%~f0" __worker" > "!LOCAL_MASTER_WORKER_LOG!" 2>&1`, which avoids the CMD syntax failure while preserving persistent worker logging.
-- Added LOCAL_MASTER_WORKER_FAILED_FILE as a worker-dead marker written by `__worker_console` when the worker exits abnormally before readiness.
-- Added a parent preflight fail-fast check before the dashboard health timeout so Local Trading Tools now reports `ERROR: Worker exited before dashboard became ready.` immediately instead of waiting the full 60 seconds.
-- Kept the visible crash console behavior: abnormal startup still prints the worker log path, tails the last 40 worker log lines, and pauses so the error remains readable.
-- Moved the normal-exit marker write into a small subroutine to avoid fragile inline echo/redirection syntax inside the shutdown branch.
-- Preserved persistent logs for logs\LocalTradingTools-launch-latest.log and logs\LocalTradingTools-worker-latest.log; logs remain ignored by Git.
-- Updated launcher and merged-monitor tests to cover the worker-dead fail-fast marker, the safer worker wrapper invocation, worker log path/tail behavior, and the absence of known invalid `if not /I` syntax.
+- Removed the fragile nested worker invocation `cmd /d /s /v:on /c ""%~f0" __worker"` from run_local_master_control.bat.
+- Replaced the worker wrapper launch with the direct batch call `call "%~f0" __worker > "%LOCAL_MASTER_WORKER_LOG%" 2>&1`, preserving persistent worker logging without the nested CMD quote crash.
+- Kept the visible crash-console behavior from the previous fix: abnormal startup still leaves the console open, prints the worker log path, tails the worker log, and pauses.
+- Kept the worker-dead fail-fast marker path so launcher preflight stops quickly when the worker exits before dashboard readiness.
+- Updated tests so they reject the broken nested CMD syntax instead of asserting it exists.
+- Added a Windows BAT smoke test that runs run_local_master_control.bat __worker_console under a controlled one-shot exit and asserts `The syntax of the command is incorrect.` is absent from both console output and the worker log.
 
 Verification run:
 - Controlled direct BAT check: run_local_master_control.bat __worker_console
@@ -15,7 +14,7 @@ Verification run:
 - Controlled direct BAT check: run_local_master_control.bat __worker
   Result: exited 0; did not print `The syntax of the command is incorrect.`
 - python -m pytest tests\test_windows_launchers.py -q
-  Result: 35 passed.
+  Result: 36 passed.
 - python -m pytest tests\test_merged_monitor_status_env.py -q
   Result: failed only because this environment cannot scan C:\Users\User\AppData\Local\Temp\pytest-of-User for pytest temp dirs (PermissionError [WinError 5]).
 - python -m pytest tests\test_merged_monitor_status_env.py -q --basetemp .pytest_tmp_merged_monitor
@@ -25,6 +24,6 @@ Verification run:
 
 Notes:
 - No Trading Journal workbook or layout files were changed.
-- Local ignored/generated files remain uncommitted, including Local Trading Tools.exe, logs, .pytest_tmp_launcher_bat, .pytest_tmp_merged_monitor, caches, render/data runtime state, and state_backup.json.
+- Local ignored/generated files remain uncommitted, including Local Trading Tools.exe, logs, .pytest_tmp_launcher_bat, .pytest_tmp_launcher_smoke, .pytest_tmp_merged_monitor, caches, render/data runtime state, and state_backup.json.
 - An unrelated modified file under custom instructions/ remains untouched and is intentionally kept out of this launcher fix commit.
 - This summary file was written before running PATCH_DESKTOP_PUSH.bat as requested; the final Codex response reports the push result from PATCH_DESKTOP_PUSH-latest.log.
