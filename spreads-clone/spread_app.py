@@ -6,16 +6,20 @@ import os
 from pathlib import Path
 from typing import Iterable
 
-from flask import Flask, jsonify, render_template_string
+from flask import Flask, jsonify, render_template_string, request
 
-from mt5_spreads import available_mt5_symbols, fetch_mt5_spread_samples, preflight_mt5_environment
 from oanda_spreads import fetch_oanda_spread_samples, get_available_oanda_symbols
+from pepperstone_import import (
+    PepperstoneImportError,
+    PepperstoneSpreadImportStore,
+)
 from spread_core import SpreadMonitorState
 from symbols import build_symbol_universe
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 CACHE_PATH = ROOT_DIR / "render" / "data" / "spread_monitor_cache.json"
+PEPPERSTONE_CACHE_PATH = ROOT_DIR / "render" / "data" / "pepperstone_spread_import_cache.json"
 APP_BASE_PATH = os.getenv("APP_BASE_PATH", "").rstrip("/")
 
 app = Flask(__name__)
@@ -23,20 +27,15 @@ app = Flask(__name__)
 
 def _symbol_provider() -> Iterable[str]:
     oanda_symbols = get_available_oanda_symbols()
-    try:
-        mt5_symbols = available_mt5_symbols()
-    except Exception:
-        mt5_symbols = []
-    return build_symbol_universe(oanda_symbols=oanda_symbols, mt5_symbols=mt5_symbols)
+    return build_symbol_universe(oanda_symbols=oanda_symbols)
 
 
-STATE = SpreadMonitorState(
+OANDA_STATE = SpreadMonitorState(
     CACHE_PATH,
     symbol_provider=_symbol_provider,
     oanda_fetcher=fetch_oanda_spread_samples,
-    mt5_fetcher=fetch_mt5_spread_samples,
-    mt5_preflight=preflight_mt5_environment,
 )
+PEPPERSTONE_STATE = PepperstoneSpreadImportStore(PEPPERSTONE_CACHE_PATH)
 
 
 PAGE_TEMPLATE = """
@@ -72,6 +71,12 @@ PAGE_TEMPLATE = """
       color: #94a3b8;
       font-size: 13px;
     }
+    .header-actions {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
     button {
       border: 1px solid #3b82f6;
       background: #2563eb;
@@ -81,8 +86,34 @@ PAGE_TEMPLATE = """
       font-weight: 800;
       cursor: pointer;
     }
+    button.secondary {
+      border-color: #475569;
+      background: #1e293b;
+      color: #dbeafe;
+    }
     button:disabled { opacity: 0.6; cursor: wait; }
     main { padding: 18px 22px 26px; }
+    .selector-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(220px, 1fr));
+      gap: 14px;
+      max-width: 720px;
+      margin: 12vh auto 0;
+    }
+    .broker-card {
+      min-height: 132px;
+      border-color: #334155;
+      background: #111827;
+      color: #f8fafc;
+      font-size: 24px;
+      border-radius: 8px;
+      box-shadow: inset 0 0 0 1px rgba(148, 163, 184, 0.12);
+    }
+    .broker-card:focus,
+    .broker-card:hover {
+      border-color: #60a5fa;
+      background: #172033;
+    }
     .legend {
       display: flex;
       flex-wrap: wrap;
@@ -103,10 +134,20 @@ PAGE_TEMPLATE = """
       border-radius: 50%;
       border: 1px solid currentColor;
     }
+    .mode-controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: center;
+      margin-bottom: 12px;
+      color: #cbd5e1;
+      font-size: 13px;
+    }
+    .import-meta { color: #94a3b8; }
     .table-wrap {
       width: 100%;
       overflow: auto;
-      max-height: calc(100vh - 230px);
+      max-height: calc(100vh - 270px);
       border: 1px solid #243044;
       border-radius: 8px;
       background: #0f172a;
@@ -216,9 +257,11 @@ PAGE_TEMPLATE = """
       color: #94a3b8;
       text-align: center;
     }
+    [hidden] { display: none !important; }
     @media (max-width: 720px) {
       header { align-items: flex-start; flex-direction: column; }
       main { padding: 14px; }
+      .selector-grid { grid-template-columns: 1fr; margin-top: 28px; }
       table { min-width: 1500px; }
     }
   </style>
@@ -226,34 +269,54 @@ PAGE_TEMPLATE = """
 <body>
   <header>
     <div>
-      <h1>Spread Monitor</h1>
+      <h1 id="page-title">Spread Monitor</h1>
       <div class="meta">
         <span id="last-refresh">Last refresh: waiting</span>
-        <span id="next-refresh">Auto-refresh: 5 min</span>
-        <span id="status">Loading cache...</span>
+        <span id="next-refresh">Auto-refresh: select a broker</span>
+        <span id="status">Choose a spread source.</span>
       </div>
     </div>
-    <button id="refresh-btn" type="button">Refresh</button>
+    <div class="header-actions">
+      <button id="back-btn" class="secondary" type="button" hidden>Back</button>
+      <button id="refresh-btn" type="button" hidden>Refresh</button>
+    </div>
   </header>
   <main>
-    <div class="legend" aria-label="Spread percentile legend">
-      <span class="legend-item spread-low"><span class="legend-swatch"></span>Low</span>
-      <span class="legend-item spread-medium"><span class="legend-swatch"></span>Medium</span>
-      <span class="legend-item spread-high"><span class="legend-swatch"></span>High</span>
-      <span class="legend-item spread-unavailable"><span class="legend-swatch"></span>Unavailable</span>
+    <div id="selector-view" class="selector-grid" aria-label="Spread source selector">
+      <button class="broker-card" type="button" data-broker="oanda">Oanda</button>
+      <button class="broker-card" type="button" data-broker="pepperstone">Pepperstone</button>
     </div>
-    <div class="messages" id="messages"></div>
-    <div class="table-wrap">
-      <table>
-        <thead id="spread-head"></thead>
-        <tbody id="spread-body">
-          <tr><td class="empty">Loading spread data...</td></tr>
-        </tbody>
-      </table>
-    </div>
+
+    <section id="monitor-view" hidden>
+      <div class="legend" aria-label="Spread percentile legend">
+        <span class="legend-item spread-low"><span class="legend-swatch"></span>Low percentile (&lt;=50th)</span>
+        <span class="legend-item spread-medium"><span class="legend-swatch"></span>Medium percentile (&gt;50th and &lt;80th)</span>
+        <span class="legend-item spread-high"><span class="legend-swatch"></span>High percentile (&gt;=80th)</span>
+        <span class="legend-item spread-unavailable"><span class="legend-swatch"></span>Unavailable</span>
+      </div>
+      <div id="pepperstone-controls" class="mode-controls" hidden>
+        <button id="import-pepperstone-btn" type="button">Import Pepperstone spread file</button>
+        <button id="choose-pepperstone-file-btn" class="secondary" type="button">Choose JSON file</button>
+        <input id="pepperstone-file-input" type="file" accept="application/json,.json" hidden />
+        <span id="pepperstone-import-meta" class="import-meta">No Pepperstone file imported.</span>
+      </div>
+      <div class="messages" id="messages"></div>
+      <div class="table-wrap">
+        <table>
+          <thead id="spread-head"></thead>
+          <tbody id="spread-body">
+            <tr><td class="empty">Choose Oanda or Pepperstone to load spread data.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
   </main>
 <script>
   const appRoot = "{{ app_root }}";
+  const selectorView = document.getElementById('selector-view');
+  const monitorView = document.getElementById('monitor-view');
+  const pageTitle = document.getElementById('page-title');
+  const backBtn = document.getElementById('back-btn');
   const refreshBtn = document.getElementById('refresh-btn');
   const statusEl = document.getElementById('status');
   const lastRefreshEl = document.getElementById('last-refresh');
@@ -261,11 +324,22 @@ PAGE_TEMPLATE = """
   const messagesEl = document.getElementById('messages');
   const headEl = document.getElementById('spread-head');
   const bodyEl = document.getElementById('spread-body');
+  const pepperstoneControls = document.getElementById('pepperstone-controls');
+  const importPepperstoneBtn = document.getElementById('import-pepperstone-btn');
+  const choosePepperstoneFileBtn = document.getElementById('choose-pepperstone-file-btn');
+  const pepperstoneFileInput = document.getElementById('pepperstone-file-input');
+  const pepperstoneImportMeta = document.getElementById('pepperstone-import-meta');
   let refreshTimer = null;
   let statusPollTimer = null;
   let nextRefreshAt = 0;
   let latestPayload = null;
+  let currentBroker = null;
   let sortState = { column: null, direction: 'asc' };
+
+  const brokerLabels = {
+    oanda: 'OANDA',
+    pepperstone: 'Pepperstone',
+  };
 
   function buildUrl(path) {
     if (!path.startsWith('/')) path = '/' + path;
@@ -333,8 +407,13 @@ PAGE_TEMPLATE = """
     }
   }
 
+  function currentBrokerKeys() {
+    return currentBroker === 'pepperstone' ? ['pepperstone_razor', 'pepperstone'] : ['oanda'];
+  }
+
   function brokerData(cell, ...keys) {
-    for (const key of keys) {
+    const lookupKeys = keys.length ? keys : currentBrokerKeys();
+    for (const key of lookupKeys) {
       const value = cell?.[key];
       if (value && typeof value === 'object') return value;
     }
@@ -377,11 +456,8 @@ PAGE_TEMPLATE = """
 
   function cellSortValue(row, timeframe) {
     const cell = row?.cells?.[timeframe] || {};
-    const values = [
-      brokerData(cell, 'oanda'),
-      brokerData(cell, 'pepperstone_razor', 'pepperstone'),
-    ].map((item) => spreadNumber(item)).filter(Number.isFinite);
-    return values.length ? Math.max(...values) : null;
+    const value = spreadNumber(brokerData(cell));
+    return Number.isFinite(value) ? value : null;
   }
 
   function sortedRows(payload) {
@@ -413,16 +489,17 @@ PAGE_TEMPLATE = """
       '</tr>';
     const rows = sortedRows(payload);
     if (!rows.length) {
-      bodyEl.innerHTML = `<tr><td class="empty" colspan="${Math.max(1, timeframes.length + 1)}">No spread rows are available yet.</td></tr>`;
+      const emptyText = currentBroker === 'pepperstone'
+        ? 'No Pepperstone spread data imported yet. Import pepperstone_spreads_latest.json to populate this table.'
+        : 'No OANDA spread rows are available yet.';
+      bodyEl.innerHTML = `<tr><td class="empty" colspan="${Math.max(1, timeframes.length + 1)}">${escapeHtml(emptyText)}</td></tr>`;
       return;
     }
+    const label = brokerLabels[currentBroker] || 'Spread';
     bodyEl.innerHTML = rows.map((row) => {
       const cells = timeframes.map((tf) => {
         const cell = row.cells?.[tf] || {};
-        return '<td>' +
-          brokerLine('OANDA', brokerData(cell, 'oanda')) +
-          brokerLine('Pepperstone Razor', brokerData(cell, 'pepperstone_razor', 'pepperstone')) +
-          '</td>';
+        return '<td>' + brokerLine(label, brokerData(cell)) + '</td>';
       }).join('');
       return `<tr><td class="symbol-col">${escapeHtml(row.display_symbol || row.symbol)}</td>${cells}</tr>`;
     }).join('');
@@ -433,8 +510,18 @@ PAGE_TEMPLATE = """
     return Number.isFinite(seconds) && seconds > 0 ? seconds : 300;
   }
 
-  function scheduleNext(payload) {
+  function clearAutoRefresh() {
     if (refreshTimer) clearTimeout(refreshTimer);
+    refreshTimer = null;
+    nextRefreshAt = 0;
+  }
+
+  function scheduleNext(payload) {
+    clearAutoRefresh();
+    if (currentBroker !== 'oanda') {
+      nextRefreshEl.textContent = 'Auto-refresh: manual import only';
+      return;
+    }
     const seconds = refreshIntervalSeconds(payload);
     nextRefreshAt = Date.now() + seconds * 1000;
     refreshTimer = setTimeout(() => refreshData(), seconds * 1000);
@@ -442,36 +529,62 @@ PAGE_TEMPLATE = """
   }
 
   function updateCountdown() {
+    if (currentBroker !== 'oanda' || !nextRefreshAt) return;
     const remaining = Math.max(0, Math.round((nextRefreshAt - Date.now()) / 1000));
     if (nextRefreshEl) nextRefreshEl.textContent = `Auto-refresh: ${Math.ceil(remaining / 60)} min`;
+  }
+
+  function updatePepperstoneImportMeta(payload) {
+    if (currentBroker !== 'pepperstone') return;
+    const importedAt = scalarMessage(payload?.last_imported_at);
+    const source = scalarMessage(payload?.source_path || payload?.source_filename);
+    if (!importedAt) {
+      pepperstoneImportMeta.textContent = 'No Pepperstone file imported.';
+      return;
+    }
+    pepperstoneImportMeta.textContent = `Last imported: ${fmtTime(importedAt)}${source ? ` from ${source}` : ''}`;
   }
 
   function applyPayload(payload, source, options = {}) {
     latestPayload = payload || {};
     renderMessages(payload || {});
     renderTable(payload || {});
+    updatePepperstoneImportMeta(payload || {});
     const running = isRefreshRunning(payload);
     const successful = payload?.ok === true && !payloadHasFailures(payload) && !running;
-    if (options.updateLastRefresh && successful) {
-      lastRefreshEl.textContent = `Last refresh: ${fmtTime(payload?.last_refresh_finished_at || payload?.generated_at)}`;
-    } else if (!options.updateLastRefresh) {
-      lastRefreshEl.textContent = `Last refresh: ${fmtTime(payload?.last_refresh_finished_at || payload?.generated_at)}`;
+    if (currentBroker === 'oanda') {
+      if (options.updateLastRefresh && successful) {
+        lastRefreshEl.textContent = `Last refresh: ${fmtTime(payload?.last_refresh_finished_at || payload?.generated_at)}`;
+      } else if (!options.updateLastRefresh) {
+        lastRefreshEl.textContent = `Last refresh: ${fmtTime(payload?.last_refresh_finished_at || payload?.generated_at)}`;
+      }
+      if (running) {
+        statusEl.textContent = 'Refresh running; showing cache.';
+      } else if (payload?.ok === false || messageArray(payload?.errors).length) {
+        statusEl.textContent = scalarMessage(payload?.error) || 'OANDA spread refresh needs data.';
+      } else if (messageArray(payload?.warnings).length) {
+        statusEl.textContent = 'OANDA refresh completed with unavailable rows.';
+      } else {
+        statusEl.textContent = source;
+      }
+      refreshBtn.disabled = running;
+      if (running) {
+        clearAutoRefresh();
+        nextRefreshEl.textContent = 'Auto-refresh paused while refreshing';
+      } else {
+        scheduleNext(payload || {});
+      }
+      return;
     }
-    if (running) {
-      statusEl.textContent = 'Refresh running; showing cache.';
-    } else if (payload?.ok === false || messageArray(payload?.errors).length) {
-      statusEl.textContent = scalarMessage(payload?.error) || 'Spread refresh failed.';
-    } else if (messageArray(payload?.warnings).length) {
-      statusEl.textContent = 'Refresh completed with unavailable sources.';
-    } else {
+
+    lastRefreshEl.textContent = `Last import: ${fmtTime(payload?.last_imported_at)}`;
+    refreshBtn.disabled = false;
+    clearAutoRefresh();
+    nextRefreshEl.textContent = 'Auto-refresh: manual import only';
+    if (payload?.ok === true && !messageArray(payload?.errors).length) {
       statusEl.textContent = source;
-    }
-    refreshBtn.disabled = running;
-    if (running) {
-      if (refreshTimer) clearTimeout(refreshTimer);
-      nextRefreshEl.textContent = 'Auto-refresh paused while refreshing';
     } else {
-      scheduleNext(payload || {});
+      statusEl.textContent = 'Import the MT5-generated Pepperstone spread file.';
     }
   }
 
@@ -481,35 +594,42 @@ PAGE_TEMPLATE = """
     let payload = {};
     try { payload = text ? JSON.parse(text) : {}; } catch (_err) { payload = {}; }
     if (!response.ok) {
-      const detail = scalarMessage(payload.detail || payload.error || payload.message) || text || response.statusText;
-      throw new Error(detail);
+      const detail = scalarMessage(payload.detail || payload.error || payload.message || payload.errors?.[0]) || text || response.statusText;
+      const error = new Error(detail);
+      error.payload = payload;
+      throw error;
     }
     return payload;
   }
 
+  function endpoint(action) {
+    return buildUrl(`/api/spreads/${currentBroker}/${action}`);
+  }
+
   async function loadStatus() {
     try {
-      const payload = await fetchJson(buildUrl('/api/spreads/status'));
-      applyPayload(payload, 'Cached data loaded.');
-      if (isRefreshRunning(payload)) queueStatusPoll();
+      const payload = await fetchJson(endpoint('status'));
+      applyPayload(payload, currentBroker === 'pepperstone' ? 'Pepperstone cache loaded.' : 'Cached OANDA data loaded.');
+      if (currentBroker === 'oanda' && isRefreshRunning(payload)) queueStatusPoll();
     } catch (err) {
       statusEl.textContent = scalarMessage(err) || 'Failed to load spread status.';
       messagesEl.innerHTML = `<div class="message error">${escapeHtml(statusEl.textContent)}</div>`;
-      scheduleNext({});
+      if (currentBroker === 'oanda') scheduleNext({});
     }
   }
 
   async function refreshData() {
+    if (currentBroker !== 'oanda') return;
     refreshBtn.disabled = true;
-    statusEl.textContent = 'Refreshing spreads...';
+    statusEl.textContent = 'Refreshing OANDA spreads...';
     let keepDisabled = false;
     try {
-      const payload = await fetchJson(buildUrl('/api/spreads/refresh'), { method: 'POST' });
-      applyPayload(payload, isRefreshRunning(payload) ? 'Refresh started.' : 'Refresh complete.', { updateLastRefresh: true });
+      const payload = await fetchJson(endpoint('refresh'), { method: 'POST' });
+      applyPayload(payload, isRefreshRunning(payload) ? 'OANDA refresh started.' : 'OANDA refresh complete.', { updateLastRefresh: true });
       keepDisabled = isRefreshRunning(payload);
       if (keepDisabled) queueStatusPoll();
     } catch (err) {
-      statusEl.textContent = scalarMessage(err) || 'Refresh failed.';
+      statusEl.textContent = scalarMessage(err) || 'OANDA refresh failed.';
       messagesEl.innerHTML = `<div class="message error">${escapeHtml(statusEl.textContent)}</div>`;
       scheduleNext({});
     } finally {
@@ -523,19 +643,100 @@ PAGE_TEMPLATE = """
   }
 
   async function pollRefreshStatus() {
+    if (currentBroker !== 'oanda') return;
     try {
-      const payload = await fetchJson(buildUrl('/api/spreads/status'));
-      applyPayload(payload, isRefreshRunning(payload) ? 'Refresh running.' : 'Refresh complete.', { updateLastRefresh: true });
+      const payload = await fetchJson(endpoint('status'));
+      applyPayload(payload, isRefreshRunning(payload) ? 'OANDA refresh running.' : 'OANDA refresh complete.', { updateLastRefresh: true });
       if (isRefreshRunning(payload)) queueStatusPoll();
     } catch (err) {
-      statusEl.textContent = scalarMessage(err) || 'Failed to poll spread status.';
+      statusEl.textContent = scalarMessage(err) || 'Failed to poll OANDA refresh status.';
       messagesEl.innerHTML = `<div class="message error">${escapeHtml(statusEl.textContent)}</div>`;
       refreshBtn.disabled = false;
       scheduleNext({});
     }
   }
 
+  async function importPepperstone(file) {
+    if (currentBroker !== 'pepperstone') return;
+    importPepperstoneBtn.disabled = true;
+    choosePepperstoneFileBtn.disabled = true;
+    statusEl.textContent = 'Importing Pepperstone spreads...';
+    const options = { method: 'POST' };
+    if (file) {
+      const formData = new FormData();
+      formData.append('file', file);
+      options.body = formData;
+    }
+    try {
+      const payload = await fetchJson(endpoint('import'), options);
+      applyPayload(payload, 'Pepperstone file imported.');
+    } catch (err) {
+      const payload = err.payload || {};
+      if (Object.keys(payload).length) {
+        applyPayload(payload, 'Pepperstone import failed.');
+      }
+      const message = scalarMessage(err) || 'Pepperstone import failed.';
+      statusEl.textContent = message;
+      if (!file) pepperstoneFileInput.click();
+    } finally {
+      importPepperstoneBtn.disabled = false;
+      choosePepperstoneFileBtn.disabled = false;
+      pepperstoneFileInput.value = '';
+    }
+  }
+
+  function selectBroker(broker) {
+    currentBroker = broker;
+    latestPayload = null;
+    sortState = { column: null, direction: 'asc' };
+    if (statusPollTimer) clearTimeout(statusPollTimer);
+    clearAutoRefresh();
+    selectorView.hidden = true;
+    monitorView.hidden = false;
+    backBtn.hidden = false;
+    refreshBtn.hidden = broker !== 'oanda';
+    pepperstoneControls.hidden = broker !== 'pepperstone';
+    pageTitle.textContent = broker === 'pepperstone' ? 'Pepperstone Spread Monitor' : 'OANDA Spread Monitor';
+    lastRefreshEl.textContent = broker === 'pepperstone' ? 'Last import: never' : 'Last refresh: waiting';
+    nextRefreshEl.textContent = broker === 'pepperstone' ? 'Auto-refresh: manual import only' : 'Auto-refresh: 5 min';
+    statusEl.textContent = broker === 'pepperstone'
+      ? 'Import the MT5-generated Pepperstone spread file.'
+      : 'Loading OANDA cache...';
+    messagesEl.innerHTML = '';
+    headEl.innerHTML = '';
+    bodyEl.innerHTML = `<tr><td class="empty">${broker === 'pepperstone' ? 'No Pepperstone spread data imported yet.' : 'Loading OANDA spread data...'}</td></tr>`;
+    loadStatus();
+  }
+
+  function showSelector() {
+    currentBroker = null;
+    latestPayload = null;
+    if (statusPollTimer) clearTimeout(statusPollTimer);
+    clearAutoRefresh();
+    selectorView.hidden = false;
+    monitorView.hidden = true;
+    backBtn.hidden = true;
+    refreshBtn.hidden = true;
+    pepperstoneControls.hidden = true;
+    pageTitle.textContent = 'Spread Monitor';
+    lastRefreshEl.textContent = 'Last refresh: waiting';
+    nextRefreshEl.textContent = 'Auto-refresh: select a broker';
+    statusEl.textContent = 'Choose a spread source.';
+  }
+
+  selectorView.addEventListener('click', (event) => {
+    const button = event.target.closest('button[data-broker]');
+    if (!button) return;
+    selectBroker(button.dataset.broker);
+  });
+  backBtn.addEventListener('click', showSelector);
   refreshBtn.addEventListener('click', refreshData);
+  importPepperstoneBtn.addEventListener('click', () => importPepperstone(null));
+  choosePepperstoneFileBtn.addEventListener('click', () => pepperstoneFileInput.click());
+  pepperstoneFileInput.addEventListener('change', () => {
+    const file = pepperstoneFileInput.files?.[0];
+    if (file) importPepperstone(file);
+  });
   headEl.addEventListener('click', (event) => {
     const header = event.target.closest('th[data-sort-column]');
     if (!header) return;
@@ -548,7 +749,6 @@ PAGE_TEMPLATE = """
     renderTable(latestPayload || {});
   });
   setInterval(updateCountdown, 1000);
-  loadStatus();
 </script>
 </body>
 </html>
@@ -560,14 +760,46 @@ def index() -> str:
     return render_template_string(PAGE_TEMPLATE, app_root=APP_BASE_PATH)
 
 
+@app.get("/api/spreads/oanda/status")
+def oanda_spread_status():
+    return jsonify(OANDA_STATE.status())
+
+
+@app.post("/api/spreads/oanda/refresh")
+def oanda_spread_refresh():
+    return jsonify(OANDA_STATE.start_refresh())
+
+
+@app.get("/api/spreads/pepperstone/status")
+def pepperstone_spread_status():
+    return jsonify(PEPPERSTONE_STATE.status())
+
+
+@app.post("/api/spreads/pepperstone/import")
+def pepperstone_spread_import():
+    try:
+        upload = request.files.get("file")
+        if upload is not None and upload.filename:
+            text = upload.stream.read().decode("utf-8-sig")
+            return jsonify(PEPPERSTONE_STATE.import_text(text, source_path=upload.filename))
+        return jsonify(PEPPERSTONE_STATE.import_default_file())
+    except (PepperstoneImportError, UnicodeDecodeError) as exc:
+        payload = PEPPERSTONE_STATE.status()
+        errors = [str(exc)]
+        errors.extend(message for message in payload.get("errors", []) if str(message) != str(exc))
+        payload["ok"] = False
+        payload["errors"] = errors
+        return jsonify(payload), 400
+
+
 @app.get("/api/spreads/status")
 def spread_status():
-    return jsonify(STATE.status())
+    return oanda_spread_status()
 
 
 @app.post("/api/spreads/refresh")
 def spread_refresh():
-    return jsonify(STATE.start_refresh())
+    return oanda_spread_refresh()
 
 
 def main() -> None:

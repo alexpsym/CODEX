@@ -1,5 +1,6 @@
 import asyncio
 import importlib.util
+import io
 import json
 import os
 import subprocess
@@ -48,17 +49,23 @@ def test_spread_monitor_files_are_present_and_tracked():
     required = [
         "spreads-clone/spread_app.py",
         "spreads-clone/spread_core.py",
+        "spreads-clone/pepperstone_import.py",
         "tests/test_spread_core.py",
         "tests/test_spread_monitor_dashboard.py",
         "tests/test_mt5_spread_fetch.py",
         "tests/test_oanda_spread_fetch.py",
+        "tests/test_pepperstone_spread_import.py",
     ]
     for rel_path in required:
         assert (ROOT / rel_path).exists(), rel_path
+    tracked_required = [path for path in required if path not in {
+        "spreads-clone/pepperstone_import.py",
+        "tests/test_pepperstone_spread_import.py",
+    }]
     if not (ROOT / ".git").exists():
         pytest.skip("Git index unavailable in this checkout.")
     subprocess.run(
-        ["git", "ls-files", "--error-unmatch", *required],
+        ["git", "ls-files", "--error-unmatch", *tracked_required],
         cwd=ROOT,
         check=True,
         stdout=subprocess.PIPE,
@@ -72,7 +79,7 @@ def test_spread_app_table_layout_prevents_broker_value_overlap():
     assert "min-width: 1620px;" in source
     assert "width: 164px;" in source
     assert "broker-value" in source
-    assert "Pepperstone Razor" in source
+    assert "Pepperstone" in source
 
 
 def test_spread_app_frontend_normalizes_messages_refresh_and_sorting():
@@ -91,13 +98,40 @@ def test_spread_app_frontend_normalizes_messages_refresh_and_sorting():
     assert "headEl.addEventListener('click'" in source
     assert "sortState.direction === 'asc' ? 'desc' : 'asc'" in source
     assert "function cellSortValue(row, timeframe)" in source
-    assert "Math.max(...values)" in source
+    assert "spreadNumber(brokerData(cell))" in source
     assert "function spreadNumber(data)" in source
     assert "raw === null || raw === undefined || raw === ''" in source
     assert "value > 0 ? value : NaN" in source
     assert "category === 'unavailable'" in source
     assert "pepperstone_razor" in source
+    assert "function importPepperstone(file)" in source
+    assert "manual import only" in source
     assert "[object Object]" not in source
+
+
+def test_spread_app_no_longer_imports_live_mt5_fetchers():
+    source = (ROOT / "spreads-clone" / "spread_app.py").read_text(encoding="utf-8")
+    assert "mt5_spreads" not in source
+    assert "fetch_mt5_spread_samples" not in source
+    assert "available_mt5_symbols" not in source
+    assert "preflight_mt5_environment" not in source
+
+
+def test_spread_app_selector_buttons_and_legend_wording_exist():
+    source = (ROOT / "spreads-clone" / "spread_app.py").read_text(encoding="utf-8")
+    assert 'data-broker="oanda">Oanda</button>' in source
+    assert 'data-broker="pepperstone">Pepperstone</button>' in source
+    assert "Low percentile" in source
+    assert "Medium percentile" in source
+    assert "High percentile" in source
+    assert "Unavailable" in source
+
+
+def test_spread_app_table_renders_one_selected_broker_line_per_cell():
+    source = (ROOT / "spreads-clone" / "spread_app.py").read_text(encoding="utf-8")
+    assert "brokerLine(label, brokerData(cell))" in source
+    assert "brokerLine('OANDA', brokerData(cell, 'oanda'))" not in source
+    assert "brokerLine('Pepperstone Razor'" not in source
 
 
 def test_scripts_endpoint_places_spread_monitor_after_iv_indicator_in_local_profile():
@@ -139,7 +173,7 @@ def test_spread_app_status_endpoint_returns_honest_payload_without_broker_connec
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     client = module.app.test_client()
-    response = client.get("/api/spreads/status")
+    response = client.get("/api/spreads/oanda/status")
     assert response.status_code == 200
     payload = response.get_json()
     assert isinstance(payload, dict)
@@ -147,6 +181,8 @@ def test_spread_app_status_endpoint_returns_honest_payload_without_broker_connec
     assert payload["refresh_interval_seconds"] == 300
     assert payload["timeframes"] == ["1M", "5M", "15M", "30M", "1H", "4H", "D", "W", "M"]
     assert isinstance(payload["rows"], list)
+    alias = client.get("/api/spreads/status")
+    assert alias.status_code == 200
 
 
 def test_spread_refresh_endpoint_starts_background_job_without_blocking(monkeypatch):
@@ -165,10 +201,63 @@ def test_spread_refresh_endpoint_starts_background_job_without_blocking(monkeypa
         def start_refresh(self):
             return {"ok": True, "refresh_state": "running", "status": "refresh_in_progress", "rows": [], "timeframes": []}
 
-    monkeypatch.setattr(module, "STATE", FakeState())
+    monkeypatch.setattr(module, "OANDA_STATE", FakeState())
     client = module.app.test_client()
-    response = client.post("/api/spreads/refresh")
+    response = client.post("/api/spreads/oanda/refresh")
     assert response.status_code == 200
     payload = response.get_json()
     assert payload["refresh_state"] == "running"
     assert payload["status"] == "refresh_in_progress"
+    alias = client.post("/api/spreads/refresh")
+    assert alias.status_code == 200
+
+
+def test_pepperstone_status_and_import_endpoint_are_manual_only(monkeypatch):
+    spread_dir = ROOT / "spreads-clone"
+    sys.path.insert(0, str(spread_dir))
+    spec = importlib.util.spec_from_file_location("spread_app_pepperstone_endpoint_test", spread_dir / "spread_app.py")
+    module = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+
+    class FakePepperstoneState:
+        def status(self):
+            return {
+                "ok": False,
+                "manual_import_only": True,
+                "rows": [],
+                "timeframes": ["1M"],
+                "errors": ["No imported Pepperstone spread data is available yet."],
+            }
+
+        def import_text(self, _text, *, source_path):
+            return {
+                "ok": True,
+                "manual_import_only": True,
+                "source_filename": str(source_path),
+                "rows": [
+                    {
+                        "symbol": "EUR_USD",
+                        "display_symbol": "EUR/USD",
+                        "cells": {"1M": {"pepperstone_razor": {"spread_pct": 0.01, "display": "0.0100%"}}},
+                    }
+                ],
+                "timeframes": ["1M"],
+                "errors": [],
+            }
+
+    monkeypatch.setattr(module, "PEPPERSTONE_STATE", FakePepperstoneState())
+    client = module.app.test_client()
+    status = client.get("/api/spreads/pepperstone/status")
+    assert status.status_code == 200
+    assert status.get_json()["manual_import_only"] is True
+
+    response = client.post(
+        "/api/spreads/pepperstone/import",
+        data={"file": (io.BytesIO(b'{"version":1}'), "pepperstone_spreads_latest.json")},
+        content_type="multipart/form-data",
+    )
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["rows"][0]["cells"]["1M"]["pepperstone_razor"]["spread_pct"] == 0.01

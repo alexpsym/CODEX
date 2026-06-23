@@ -212,14 +212,8 @@ if barstate.islast and allowBybitTimingLines and showExpiry and timeframe.isintr
 // -----------------------------------------------------------------------------
 // TRADING SESSION OPEN/CLOSE LINES
 // -----------------------------------------------------------------------------
-var line[] sessionLines = array.new_line()
 var label[] sessionLabels = array.new_label()
-sessionMaxLines = 192
-
-sydneyColor = color.rgb(0, 137, 123)
-tokyoColor = color.rgb(245, 124, 0)
-londonColor = color.rgb(63, 81, 181)
-newYorkColor = color.rgb(213, 0, 0)
+sessionMaxLabels = 192
 
 sessionEventTimestamp(simple string sessionTimezone, simple int eventHour, simple int eventMinute) =>
     timestamp(sessionTimezone, year(time, sessionTimezone), month(time, sessionTimezone), dayofmonth(time, sessionTimezone), eventHour, eventMinute)
@@ -228,46 +222,57 @@ isSessionEvent(simple string sessionTimezone, simple int eventHour, simple int e
     eventTs = sessionEventTimestamp(sessionTimezone, eventHour, eventMinute)
     time <= eventTs and eventTs < time_close
 
-drawSessionLine(simple string sessionTimezone, simple int eventHour, simple int eventMinute, color sessionColor, simple string sessionName, simple bool isOpen) =>
+verticalSessionText(simple string sessionCode, simple bool isOpen) =>
+    suffix = isOpen ? "O" : "C"
+    if sessionCode == "SYD"
+        "S\nY\nD\n" + suffix
+    else if sessionCode == "TKY"
+        "T\nK\nY\n" + suffix
+    else if sessionCode == "LDN"
+        "L\nD\nN\n" + suffix
+    else
+        "N\nY\n" + suffix
+
+pushBoundedSessionLabel(label newLabel, int maxObjects) =>
+    array.push(sessionLabels, newLabel)
+    if array.size(sessionLabels) > maxObjects
+        label.delete(array.shift(sessionLabels))
+
+drawSessionMarker(simple string sessionTimezone, simple int eventHour, simple int eventMinute, simple string sessionCode, simple bool isOpen) =>
     eventTs = sessionEventTimestamp(sessionTimezone, eventHour, eventMinute)
-    lineColor = isOpen ? sessionColor : color.new(sessionColor, 65)
-    lineStyle = isOpen ? line.style_solid : line.style_dotted
-    sessionLabelText = sessionName + (isOpen ? " Open" : " Close")
-    sessionLine = line.new(x1=eventTs, y1=low, x2=eventTs, y2=high,
-                           xloc=xloc.bar_time, extend=extend.both,
-                           color=lineColor, style=lineStyle, width=1,
-                           force_overlay=true)
-    sessionLabel = label.new(x=eventTs, y=topPrice100, text=sessionLabelText,
+    candleRange = math.max(high - low, syminfo.mintick * 20)
+    markerY = isOpen ? high + candleRange * 0.18 : low - candleRange * 0.18
+    markerStyle = isOpen ? label.style_arrowdown : label.style_arrowup
+    sessionLabel = label.new(x=eventTs, y=markerY, text=verticalSessionText(sessionCode, isOpen),
                              xloc=xloc.bar_time, yloc=yloc.price,
-                             color=lineColor, textcolor=color.white,
-                             style=label.style_label_down, size=size.small,
+                             color=color.white, textcolor=color.black,
+                             style=markerStyle, size=size.tiny,
                              force_overlay=true)
-    pushBoundedLineAndLabel(sessionLines, sessionLabels, sessionLine, sessionLabel, sessionMaxLines)
+    pushBoundedSessionLabel(sessionLabel, sessionMaxLabels)
 
 if showSessionLines and barstate.isnew
     if showSydneySession
         if showSessionOpens and isSessionEvent("Australia/Sydney", 8, 0)
-            drawSessionLine("Australia/Sydney", 8, 0, sydneyColor, "Sydney", true)
+            drawSessionMarker("Australia/Sydney", 8, 0, "SYD", true)
         if showSessionCloses and isSessionEvent("Australia/Sydney", 17, 0)
-            drawSessionLine("Australia/Sydney", 17, 0, sydneyColor, "Sydney", false)
+            drawSessionMarker("Australia/Sydney", 17, 0, "SYD", false)
 
     if showTokyoSession
         if showSessionOpens and isSessionEvent("Asia/Tokyo", 9, 0)
-            drawSessionLine("Asia/Tokyo", 9, 0, tokyoColor, "Tokyo", true)
+            drawSessionMarker("Asia/Tokyo", 9, 0, "TKY", true)
         if showSessionCloses and isSessionEvent("Asia/Tokyo", 18, 0)
-            drawSessionLine("Asia/Tokyo", 18, 0, tokyoColor, "Tokyo", false)
+            drawSessionMarker("Asia/Tokyo", 18, 0, "TKY", false)
 
     if showLondonSession
         if showSessionOpens and isSessionEvent("Europe/London", 8, 0)
-            drawSessionLine("Europe/London", 8, 0, londonColor, "London", true)
+            drawSessionMarker("Europe/London", 8, 0, "LDN", true)
         if showSessionCloses and isSessionEvent("Europe/London", 17, 0)
-            drawSessionLine("Europe/London", 17, 0, londonColor, "London", false)
+            drawSessionMarker("Europe/London", 17, 0, "LDN", false)
 
     if showNewYorkSession
         if showSessionOpens and isSessionEvent("America/New_York", 8, 0)
-            drawSessionLine("America/New_York", 8, 0, newYorkColor, "New York", true)
+            drawSessionMarker("America/New_York", 8, 0, "NY", true)
         if showSessionCloses and isSessionEvent("America/New_York", 17, 0)
-            drawSessionLine("America/New_York", 17, 0, newYorkColor, "New York", false)
+            drawSessionMarker("America/New_York", 17, 0, "NY", false)
 else if barstate.isnew and not showSessionLines
-    clearLineArray(sessionLines)
     clearLabelArray(sessionLabels)

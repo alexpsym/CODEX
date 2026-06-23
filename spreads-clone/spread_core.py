@@ -43,6 +43,7 @@ TIMEFRAME_BY_LABEL = {tf.label: tf for tf in TIMEFRAMES}
 TIMEFRAME_LABELS = [tf.label for tf in TIMEFRAMES]
 
 BROKERS = ("oanda", "pepperstone")
+OANDA_ONLY_BROKERS = ("oanda",)
 
 
 def utc_now_iso() -> str:
@@ -225,6 +226,82 @@ def default_cache_payload() -> Dict[str, object]:
     }
 
 
+def _symbols_from_cache_payload(cache: Dict[str, object]) -> List[str]:
+    symbols = cache.get("symbols")
+    result = [str(item).strip() for item in symbols if str(item).strip()] if isinstance(symbols, list) else []
+    if result:
+        return sorted(dict.fromkeys(result))
+    records = cache.get("records")
+    found: List[str] = []
+    if isinstance(records, dict):
+        for key in records:
+            _broker, symbol, _timeframe = split_cache_key(str(key))
+            if symbol:
+                found.append(symbol)
+    return sorted(dict.fromkeys(found))
+
+
+def build_spread_payload(
+    cache: Dict[str, object],
+    *,
+    brokers: Iterable[str] = OANDA_ONLY_BROKERS,
+    refresh_status: Optional[Dict[str, object]] = None,
+    refresh_interval_seconds: int = REFRESH_INTERVAL_SECONDS,
+    empty_message: str = "No OANDA spread data is available yet.",
+) -> Dict[str, object]:
+    broker_list = tuple(dict.fromkeys(str(item).strip().lower() for item in brokers if str(item).strip()))
+    symbols = _symbols_from_cache_payload(cache)
+    records = cache.get("records")
+    record_map = records if isinstance(records, dict) else {}
+    rows: List[Dict[str, object]] = []
+
+    for symbol in symbols:
+        cells: Dict[str, object] = {}
+        symbol_has_data = False
+        for timeframe in TIMEFRAME_LABELS:
+            cell: Dict[str, object] = {}
+            for broker in broker_list:
+                record = record_map.get(_cache_key(broker, symbol, timeframe))
+                broker_payload = broker_cell(record if isinstance(record, dict) else None)
+                if broker_payload["spread_pct"] is not None:
+                    symbol_has_data = True
+                cell[broker] = broker_payload
+                if broker == "pepperstone":
+                    cell["pepperstone_razor"] = broker_payload
+            cells[timeframe] = cell
+        if symbol_has_data:
+            rows.append(
+                {
+                    "symbol": symbol,
+                    "display_symbol": symbol.replace("_", "/"),
+                    "cells": cells,
+                }
+            )
+
+    errors = list(cache.get("errors") or [])
+    if not rows and not errors:
+        errors.append(empty_message)
+
+    refresh = dict(refresh_status or {"state": "idle", "started_at": "", "finished_at": "", "error": "", "warnings": []})
+    return {
+        "ok": bool(rows) and not bool(errors),
+        "generated_at": str(cache.get("generated_at") or utc_now_iso()),
+        "refresh_interval_seconds": refresh_interval_seconds,
+        "refresh": refresh,
+        "refresh_state": str(refresh.get("state") or "idle"),
+        "symbols": [row["symbol"] for row in rows],
+        "timeframes": list(TIMEFRAME_LABELS),
+        "rows": rows,
+        "warnings": list(cache.get("warnings") or []),
+        "errors": errors,
+        "last_refresh_started_at": str(cache.get("last_refresh_started_at") or ""),
+        "last_refresh_finished_at": str(cache.get("last_refresh_finished_at") or ""),
+        "last_imported_at": str(cache.get("last_imported_at") or ""),
+        "source_path": str(cache.get("source_path") or ""),
+        "source_filename": str(cache.get("source_filename") or ""),
+    }
+
+
 class SpreadMonitorState:
     """Owns the cache and one-at-a-time refresh behavior for the monitor."""
 
@@ -236,6 +313,7 @@ class SpreadMonitorState:
         oanda_fetcher: Optional[Callable[[str, TimeframeConfig, Dict[str, object]], Dict[str, object]]] = None,
         mt5_fetcher: Optional[Callable[[str, TimeframeConfig, Dict[str, object]], Dict[str, object]]] = None,
         mt5_preflight: Optional[Callable[[], Dict[str, object]]] = None,
+        brokers: Iterable[str] = OANDA_ONLY_BROKERS,
         max_samples: int = MAX_CACHE_SAMPLES,
         refresh_interval_seconds: int = REFRESH_INTERVAL_SECONDS,
     ) -> None:
@@ -244,6 +322,7 @@ class SpreadMonitorState:
         self.oanda_fetcher = oanda_fetcher
         self.mt5_fetcher = mt5_fetcher
         self.mt5_preflight = mt5_preflight
+        self.brokers = tuple(dict.fromkeys(str(item).strip().lower() for item in brokers if str(item).strip()))
         self.max_samples = max_samples
         self.refresh_interval_seconds = refresh_interval_seconds
         self.refresh_lock = threading.Lock()
@@ -368,20 +447,6 @@ class SpreadMonitorState:
         with self._cache_lock:
             return dict(self._refresh_status)
 
-    def _symbols_from_cache(self) -> List[str]:
-        symbols = self._cache.get("symbols")
-        result = [str(item).strip() for item in symbols if str(item).strip()] if isinstance(symbols, list) else []
-        if result:
-            return sorted(dict.fromkeys(result))
-        records = self._cache.get("records")
-        found: List[str] = []
-        if isinstance(records, dict):
-            for key in records:
-                _broker, symbol, _timeframe = split_cache_key(str(key))
-                if symbol:
-                    found.append(symbol)
-        return sorted(dict.fromkeys(found))
-
     def status(self, *, refresh_in_progress: bool = False) -> Dict[str, object]:
         with self._cache_lock:
             payload = self._build_payload()
@@ -459,16 +524,6 @@ class SpreadMonitorState:
             self._cache["errors"] = []
 
         context: Dict[str, object] = {"started_at": started_at}
-        mt5_preflight_error = ""
-        if self.mt5_fetcher is not None and self.mt5_preflight is not None:
-            try:
-                preflight = self.mt5_preflight()
-            except Exception as exc:
-                preflight = {"ok": False, "error": str(exc)}
-            if not bool(preflight.get("ok")):
-                mt5_preflight_error = str(preflight.get("error") or "MT5 unavailable.").strip()
-                warnings.append(f"Pepperstone unavailable: {mt5_preflight_error}")
-
         for symbol in symbols:
             for timeframe in TIMEFRAMES:
                 if self.oanda_fetcher is not None:
@@ -482,20 +537,6 @@ class SpreadMonitorState:
                     if oanda_result.get("error"):
                         warnings.append(f"OANDA {symbol} {timeframe.label}: {oanda_result['error']}")
 
-                if self.mt5_fetcher is not None:
-                    broker_context = self._fetch_context("pepperstone", symbol, timeframe.label, context)
-                    if mt5_preflight_error:
-                        mt5_result = {"error": mt5_preflight_error}
-                    else:
-                        try:
-                            mt5_result = self.mt5_fetcher(symbol, timeframe, broker_context)
-                        except Exception as exc:
-                            mt5_result = {"error": str(exc)}
-                    with self._cache_lock:
-                        self._update_record("pepperstone", symbol, timeframe.label, mt5_result)
-                    if mt5_result.get("error"):
-                        warnings.append(f"Pepperstone unavailable: {mt5_result['error']}")
-
         finished_at = utc_now_iso()
         with self._cache_lock:
             self._cache["generated_at"] = finished_at
@@ -506,49 +547,9 @@ class SpreadMonitorState:
             return self._build_payload()
 
     def _build_payload(self) -> Dict[str, object]:
-        symbols = self._symbols_from_cache()
-        records = self._cache.get("records")
-        record_map = records if isinstance(records, dict) else {}
-        rows: List[Dict[str, object]] = []
-
-        for symbol in symbols:
-            cells: Dict[str, object] = {}
-            symbol_has_data = False
-            for timeframe in TIMEFRAME_LABELS:
-                cell: Dict[str, object] = {}
-                for broker in BROKERS:
-                    record = record_map.get(_cache_key(broker, symbol, timeframe))
-                    broker_payload = broker_cell(record if isinstance(record, dict) else None)
-                    if broker_payload["spread_pct"] is not None:
-                        symbol_has_data = True
-                    cell[broker] = broker_payload
-                    if broker == "pepperstone":
-                        cell["pepperstone_razor"] = broker_payload
-                cells[timeframe] = cell
-            if symbol_has_data:
-                rows.append(
-                    {
-                        "symbol": symbol,
-                        "display_symbol": symbol.replace("_", "/"),
-                        "cells": cells,
-                    }
-                )
-
-        errors = list(self._cache.get("errors") or [])
-        if not rows and not errors:
-            errors.append("No OANDA or Pepperstone spread data is available yet.")
-
-        return {
-            "ok": bool(rows) and not bool(errors),
-            "generated_at": str(self._cache.get("generated_at") or utc_now_iso()),
-            "refresh_interval_seconds": self.refresh_interval_seconds,
-            "refresh": self._current_refresh_status(),
-            "refresh_state": str(self._current_refresh_status().get("state") or "idle"),
-            "symbols": [row["symbol"] for row in rows],
-            "timeframes": list(TIMEFRAME_LABELS),
-            "rows": rows,
-            "warnings": list(self._cache.get("warnings") or []),
-            "errors": errors,
-            "last_refresh_started_at": str(self._cache.get("last_refresh_started_at") or ""),
-            "last_refresh_finished_at": str(self._cache.get("last_refresh_finished_at") or ""),
-        }
+        return build_spread_payload(
+            self._cache,
+            brokers=self.brokers,
+            refresh_status=self._current_refresh_status(),
+            refresh_interval_seconds=self.refresh_interval_seconds,
+        )

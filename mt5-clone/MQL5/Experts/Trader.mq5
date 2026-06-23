@@ -64,6 +64,13 @@ input group "Orders"
 input int    MagicNumber              = 91001;
 input bool   EnforceOneTradeAtATime   = true;
 
+// -------------------- Pepperstone spread export --------------------
+input group "Pepperstone Spread Export"
+input bool   EnablePepperstoneSpreadExport = true;
+input int    PepperstoneSpreadExportIntervalSeconds = 300;
+input string PepperstoneSpreadExportSymbols = "EURUSD,GBPUSD,USDJPY,AUDUSD,NZDUSD,USDCAD,USDCHF,XAUUSD";
+input string PepperstoneSpreadExportPath = "C:\\Users\\User\\Documents\\GPT\\CODEX-master\\mt5-clone\\pepperstone_spreads_latest.json";
+
 // -------------------- Internals --------------------
 string   g_trendName    = "";
 ulong    g_ticket       = 0;
@@ -71,6 +78,7 @@ datetime g_lastBarTime  = 0;
 datetime g_armStartTime = 0;
 datetime g_expireAt     = 0;
 bool     g_wasInPosition = false;
+datetime g_lastPepperstoneSpreadExport = 0;
 
 // EMA handles
 int hFast  = INVALID_HANDLE;
@@ -645,6 +653,168 @@ bool StandardLimitShouldBeActive()
    return true;
 }
 
+// ---------- Pepperstone spread export helpers ----------
+string TrimText(string value)
+{
+   value = StringTrimLeft(value);
+   value = StringTrimRight(value);
+   return value;
+}
+
+string JsonEscape(const string value)
+{
+   string result = "";
+   int len = StringLen(value);
+   for(int i = 0; i < len; i++)
+   {
+      ushort ch = StringGetCharacter(value, i);
+      if(ch == 34) result += "\\\"";
+      else if(ch == 92) result += "\\\\";
+      else if(ch == 10) result += "\\n";
+      else if(ch == 13) result += "\\r";
+      else if(ch == 9) result += "\\t";
+      else result += StringSubstr(value, i, 1);
+   }
+   return result;
+}
+
+string IsoTimeUTC(datetime value)
+{
+   MqlDateTime dt;
+   TimeToStruct(value, dt);
+   return StringFormat("%04d-%02d-%02dT%02d:%02d:%02dZ",
+                       dt.year, dt.mon, dt.day, dt.hour, dt.min, dt.sec);
+}
+
+string FileNameOnly(string path)
+{
+   string normalized = path;
+   StringReplace(normalized, "/", "\\");
+   int lastSlash = -1;
+   int len = StringLen(normalized);
+   for(int i = len - 1; i >= 0; i--)
+   {
+      if(StringGetCharacter(normalized, i) == 92)
+      {
+         lastSlash = i;
+         break;
+      }
+   }
+   if(lastSlash >= 0 && lastSlash < len - 1)
+      return StringSubstr(normalized, lastSlash + 1);
+   if(normalized == "")
+      return "pepperstone_spreads_latest.json";
+   return normalized;
+}
+
+string BuildPepperstoneSpreadJson(datetime generatedAt)
+{
+   string tokens[];
+   int count = StringSplit(PepperstoneSpreadExportSymbols, ',', tokens);
+   string generated = IsoTimeUTC(generatedAt);
+   string entries = "";
+   int written = 0;
+
+   for(int i = 0; i < count; i++)
+   {
+      string symbol = TrimText(tokens[i]);
+      if(symbol == "") continue;
+
+      if(!SymbolSelect(symbol, true))
+      {
+         Print(EA_COMMENT, ": Pepperstone spread export skipped ", symbol, " because SymbolSelect failed.");
+         continue;
+      }
+
+      double bid = SymbolInfoDouble(symbol, SYMBOL_BID);
+      double ask = SymbolInfoDouble(symbol, SYMBOL_ASK);
+      if(bid <= 0.0 || ask <= 0.0 || ask <= bid)
+      {
+         Print(EA_COMMENT, ": Pepperstone spread export skipped ", symbol, " because bid/ask is unavailable.");
+         continue;
+      }
+
+      double midpoint = (ask + bid) / 2.0;
+      if(midpoint <= 0.0) continue;
+      double spreadPct = ((ask - bid) / midpoint) * 100.0;
+      int digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
+      double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
+
+      if(written > 0) entries += ",\n";
+      entries += StringFormat(
+         "    {\"symbol\":\"%s\",\"bid\":%s,\"ask\":%s,\"spread_pct\":%s,\"digits\":%d,\"point\":%s,\"timestamp\":\"%s\"}",
+         JsonEscape(symbol),
+         DoubleToString(bid, digits),
+         DoubleToString(ask, digits),
+         DoubleToString(spreadPct, 10),
+         digits,
+         DoubleToString(point, 10),
+         generated
+      );
+      written++;
+   }
+
+   string json = "{\n";
+   json += "  \"version\": 1,\n";
+   json += "  \"broker\": \"pepperstone\",\n";
+   json += "  \"generated_at\": \"" + generated + "\",\n";
+   json += "  \"account\": {\n";
+   json += "    \"server\": \"" + JsonEscape(AccountInfoString(ACCOUNT_SERVER)) + "\",\n";
+   json += "    \"company\": \"" + JsonEscape(AccountInfoString(ACCOUNT_COMPANY)) + "\",\n";
+   json += "    \"login\": " + IntegerToString((long)AccountInfoInteger(ACCOUNT_LOGIN)) + "\n";
+   json += "  },\n";
+   json += "  \"symbols\": [\n" + entries + "\n  ]\n";
+   json += "}\n";
+   return json;
+}
+
+bool WritePepperstoneSpreadFile(const string requestedPath, const string contents, string &resolvedPath)
+{
+   ResetLastError();
+   int handle = FileOpen(requestedPath, FILE_WRITE | FILE_TXT | FILE_ANSI);
+   if(handle != INVALID_HANDLE)
+   {
+      FileWriteString(handle, contents);
+      FileClose(handle);
+      resolvedPath = requestedPath;
+      return true;
+   }
+
+   int absoluteError = GetLastError();
+   ResetLastError();
+   string fallbackName = FileNameOnly(requestedPath);
+   handle = FileOpen(fallbackName, FILE_WRITE | FILE_TXT | FILE_ANSI);
+   if(handle == INVALID_HANDLE)
+   {
+      int fallbackError = GetLastError();
+      Print(EA_COMMENT, ": Pepperstone spread export failed. requested=", requestedPath,
+            " absolute_error=", absoluteError, " fallback_error=", fallbackError);
+      return false;
+   }
+
+   FileWriteString(handle, contents);
+   FileClose(handle);
+   resolvedPath = TerminalInfoString(TERMINAL_DATA_PATH) + "\\MQL5\\Files\\" + fallbackName;
+   Print(EA_COMMENT, ": MT5 blocked the requested absolute spread export path. Wrote fallback file instead: ", resolvedPath);
+   return true;
+}
+
+void MaybeExportPepperstoneSpreads()
+{
+   if(!EnablePepperstoneSpreadExport) return;
+   int interval = PepperstoneSpreadExportIntervalSeconds;
+   if(interval < 1) interval = 1;
+   datetime now = TimeGMT();
+   if(g_lastPepperstoneSpreadExport > 0 && (now - g_lastPepperstoneSpreadExport) < interval)
+      return;
+
+   g_lastPepperstoneSpreadExport = now;
+   string payload = BuildPepperstoneSpreadJson(now);
+   string writtenPath = "";
+   if(WritePepperstoneSpreadFile(PepperstoneSpreadExportPath, payload, writtenPath))
+      Print(EA_COMMENT, ": Pepperstone spread export wrote ", writtenPath);
+}
+
 int OnInit()
 {
    trade.SetDeviationInPoints(SlippagePoints);
@@ -803,6 +973,8 @@ void OnTick()
 
 void OnTimer()
 {
+   MaybeExportPepperstoneSpreads();
+
    // Mirrors OnTick gating so cancel happens even with no ticks
    if(Strategy == STRAT_STANDARD_LIMIT)
    {

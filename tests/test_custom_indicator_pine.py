@@ -35,5 +35,40 @@ def test_custom_indicator_session_controls_and_timing_labels() -> None:
     assert "sessionLabels" in source
     assert 'text="Funding"' in source
     assert 'text="OP EX"' in source
-    assert 'sessionName + (isOpen ? " Open" : " Close")' in source
     assert "max_labels_count=500" in source
+
+
+def test_custom_indicator_session_labels_are_abbreviated_vertical_and_simple() -> None:
+    source = _source()
+    assert '"S\\nY\\nD\\n" + suffix' in source
+    assert '"T\\nK\\nY\\n" + suffix' in source
+    assert '"L\\nD\\nN\\n" + suffix' in source
+    assert '"N\\nY\\n" + suffix' in source
+    assert '"Sydney Open"' not in source
+    assert '"Tokyo Open"' not in source
+    assert '"London Open"' not in source
+    assert '"New York Open"' not in source
+    assert 'sessionName + (isOpen ? " Open" : " Close")' not in source
+    assert "textcolor=color.black" in source
+    assert "color=color.white" in source
+    assert "size=size.tiny" in source
+
+
+def test_custom_indicator_session_rendering_uses_arrow_markers_not_extend_lines() -> None:
+    source = _source()
+    session_block = source.split("// TRADING SESSION OPEN/CLOSE LINES", 1)[1]
+    assert "drawSessionMarker" in session_block
+    assert "label.style_arrowdown" in session_block
+    assert "label.style_arrowup" in session_block
+    assert "markerY = isOpen ? high + candleRange" in session_block
+    assert "extend=extend.both" not in session_block
+    assert "line.new" not in session_block
+
+
+def test_custom_indicator_funding_and_option_expiry_code_remains_unchanged() -> None:
+    source = _source()
+    assert 'text="Funding"' in source
+    assert 'text="OP EX"' in source
+    assert "fundingLine = line.new" in source
+    assert "expiryLine := line.new" in source
+    assert "extend=extend.both" in source

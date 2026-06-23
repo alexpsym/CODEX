@@ -45,3 +45,15 @@ def test_python_mt5_backtest_fetches_rates_and_warns_not_strategy_tester():
     assert "EMA" in backtest
     assert "ATR" in backtest.lower() or "atr" in backtest
     assert "not the MT5 Strategy Tester" in readme
+
+
+def test_mql5_trader_exports_one_pepperstone_spread_json_file():
+    trader = (ROOT / "mt5-clone" / "MQL5" / "Experts" / "Trader.mq5").read_text(encoding="utf-8")
+    assert "EnablePepperstoneSpreadExport = true" in trader
+    assert "PepperstoneSpreadExportIntervalSeconds = 300" in trader
+    assert "PepperstoneSpreadExportSymbols" in trader
+    assert "pepperstone_spreads_latest.json" in trader
+    assert "MaybeExportPepperstoneSpreads();" in trader
+    assert "BuildPepperstoneSpreadJson" in trader
+    assert "TimeToString" not in trader
+    assert "FileOpen(requestedPath, FILE_WRITE | FILE_TXT | FILE_ANSI)" in trader

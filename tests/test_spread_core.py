@@ -1,6 +1,6 @@
+import json
 import sys
 import time
-import json
 from pathlib import Path
 
 import pytest
@@ -9,7 +9,14 @@ ROOT = Path(__file__).resolve().parents[1]
 SPREAD_DIR = ROOT / "spreads-clone"
 sys.path.insert(0, str(SPREAD_DIR))
 
-from spread_core import SpreadMonitorState, TimeframeConfig, broker_cell, classify_spread, format_spread_pct, spread_pct_from_bid_ask
+from spread_core import (  # noqa: E402
+    SpreadMonitorState,
+    TimeframeConfig,
+    broker_cell,
+    classify_spread,
+    format_spread_pct,
+    spread_pct_from_bid_ask,
+)
 
 
 def _repo_cache_path(name: str) -> Path:
@@ -17,6 +24,13 @@ def _repo_cache_path(name: str) -> Path:
     if path.exists():
         path.unlink()
     return path
+
+
+def _oanda_result(value: float = 0.0123) -> dict:
+    return {
+        "samples": [{"time": "2026-01-01T00:00:00Z", "spread_pct": value}],
+        "latest": {"time": "2026-01-01T00:00:00Z", "spread_pct": value},
+    }
 
 
 def test_spread_pct_formula_uses_midpoint_percentage():
@@ -51,223 +65,40 @@ def test_percentile_classification_thresholds():
     assert classify_spread(1, []) == "unavailable"
 
 
-def test_unavailable_broker_data_does_not_crash_payload():
-    timeframe = TimeframeConfig("1M", "M1", 60, 7)
+def test_oanda_only_refresh_does_not_create_pepperstone_records():
+    mt5_calls = []
 
     def symbols():
         return ["EUR_USD"]
 
     def oanda_fetcher(_symbol, _timeframe, _context):
-        return {
-            "samples": [{"time": "2026-01-01T00:00:00Z", "spread_pct": 0.0123}],
-            "latest": {"time": "2026-01-01T00:00:00Z", "spread_pct": 0.0123},
-        }
+        return _oanda_result()
 
-    cache_path = _repo_cache_path("unavailable")
+    def mt5_fetcher(_symbol, _timeframe, _context):
+        mt5_calls.append((_symbol, _timeframe.label))
+        return _oanda_result(0.0456)
+
+    cache_path = _repo_cache_path("oanda_only")
     try:
         state = SpreadMonitorState(
             cache_path,
             symbol_provider=symbols,
             oanda_fetcher=oanda_fetcher,
-            mt5_fetcher=None,
+            mt5_fetcher=mt5_fetcher,
         )
         payload = state.refresh()
+        cache = json.loads(cache_path.read_text(encoding="utf-8"))
     finally:
         if cache_path.exists():
             cache_path.unlink()
-    cell = payload["rows"][0]["cells"][timeframe.label]
+
+    assert mt5_calls == []
+    cell = payload["rows"][0]["cells"]["1M"]
     assert cell["oanda"]["spread_pct"] == pytest.approx(0.0123)
-    assert cell["pepperstone"]["category"] == "unavailable"
+    assert "pepperstone" not in cell
+    assert "pepperstone_razor" not in cell
+    assert not any(str(key).startswith("pepperstone|") for key in cache["records"])
     assert payload["ok"] is True
-
-
-def test_oanda_and_pepperstone_razor_values_are_both_in_payload():
-    def symbols():
-        return ["EUR_USD"]
-
-    def oanda_fetcher(_symbol, _timeframe, _context):
-        return {
-            "samples": [{"time": "2026-01-01T00:00:00Z", "spread_pct": 0.0123}],
-            "latest": {"time": "2026-01-01T00:00:00Z", "spread_pct": 0.0123},
-        }
-
-    def mt5_fetcher(_symbol, _timeframe, _context):
-        return {
-            "samples": [{"time": "2026-01-01T00:00:00Z", "spread_pct": 0.0456}],
-            "latest": {"time": "2026-01-01T00:00:00Z", "spread_pct": 0.0456},
-        }
-
-    cache_path = _repo_cache_path("pepperstone")
-    try:
-        state = SpreadMonitorState(
-            cache_path,
-            symbol_provider=symbols,
-            oanda_fetcher=oanda_fetcher,
-            mt5_fetcher=mt5_fetcher,
-        )
-        payload = state.refresh()
-    finally:
-        if cache_path.exists():
-            cache_path.unlink()
-
-    cell = payload["rows"][0]["cells"]["1M"]
-    assert cell["oanda"]["display"] == "0.0123%"
-    assert cell["pepperstone"]["display"] == "0.0456%"
-    assert cell["pepperstone_razor"]["spread_pct"] == pytest.approx(0.0456)
-
-
-def test_missing_pepperstone_has_explicit_unavailable_reason():
-    def symbols():
-        return ["EUR_USD"]
-
-    def oanda_fetcher(_symbol, _timeframe, _context):
-        return {
-            "samples": [{"time": "2026-01-01T00:00:00Z", "spread_pct": 0.0123}],
-            "latest": {"time": "2026-01-01T00:00:00Z", "spread_pct": 0.0123},
-        }
-
-    def mt5_fetcher(_symbol, _timeframe, _context):
-        return {"error": "MT5 terminal is not logged in."}
-
-    cache_path = _repo_cache_path("pepperstone_missing")
-    try:
-        state = SpreadMonitorState(
-            cache_path,
-            symbol_provider=symbols,
-            oanda_fetcher=oanda_fetcher,
-            mt5_fetcher=mt5_fetcher,
-        )
-        payload = state.refresh()
-    finally:
-        if cache_path.exists():
-            cache_path.unlink()
-
-    cell = payload["rows"][0]["cells"]["1M"]
-    assert cell["pepperstone_razor"]["category"] == "unavailable"
-    assert cell["pepperstone_razor"]["error"] == "MT5 terminal is not logged in."
-    assert payload["warnings"].count("Pepperstone unavailable: MT5 terminal is not logged in.") == 1
-    assert not any("Pepperstone EUR_USD 1M:" in warning for warning in payload["warnings"])
-
-
-def test_pepperstone_stale_cache_is_not_reused_after_provider_failure():
-    def symbols():
-        return ["EUR_USD"]
-
-    def oanda_fetcher(_symbol, _timeframe, _context):
-        return {
-            "samples": [{"time": "2026-01-01T00:00:00Z", "spread_pct": 0.0123}],
-            "latest": {"time": "2026-01-01T00:00:00Z", "spread_pct": 0.0123},
-        }
-
-    mt5_should_fail = False
-
-    def mt5_fetcher(_symbol, _timeframe, _context):
-        if mt5_should_fail:
-            return {"error": "No module named 'MetaTrader5'"}
-        return {
-            "samples": [{"time": "2026-01-01T00:00:00Z", "spread_pct": 0.0456}],
-            "latest": {"time": "2026-01-01T00:00:00Z", "spread_pct": 0.0456},
-        }
-
-    cache_path = _repo_cache_path("pepperstone_stale")
-    try:
-        state = SpreadMonitorState(
-            cache_path,
-            symbol_provider=symbols,
-            oanda_fetcher=oanda_fetcher,
-            mt5_fetcher=mt5_fetcher,
-        )
-        first = state.refresh()
-        assert first["rows"][0]["cells"]["1M"]["pepperstone_razor"]["spread_pct"] == pytest.approx(0.0456)
-        mt5_should_fail = True
-        second = state.refresh()
-    finally:
-        if cache_path.exists():
-            cache_path.unlink()
-
-    pepperstone = second["rows"][0]["cells"]["1M"]["pepperstone_razor"]
-    assert pepperstone["spread_pct"] is None
-    assert pepperstone["display"] == ""
-    assert pepperstone["category"] == "unavailable"
-    assert pepperstone["error"] == "No module named 'MetaTrader5'"
-
-
-def test_mt5_preflight_failure_marks_provider_unavailable_once_and_skips_fetcher():
-    calls = []
-
-    def symbols():
-        return ["EUR_USD"]
-
-    def oanda_fetcher(_symbol, _timeframe, _context):
-        return {
-            "samples": [{"time": "2026-01-01T00:00:00Z", "spread_pct": 0.0123}],
-            "latest": {"time": "2026-01-01T00:00:00Z", "spread_pct": 0.0123},
-        }
-
-    def mt5_fetcher(_symbol, _timeframe, _context):
-        calls.append((_symbol, _timeframe.label))
-        return {"error": "should not be called"}
-
-    cache_path = _repo_cache_path("pepperstone_preflight")
-    try:
-        state = SpreadMonitorState(
-            cache_path,
-            symbol_provider=symbols,
-            oanda_fetcher=oanda_fetcher,
-            mt5_fetcher=mt5_fetcher,
-            mt5_preflight=lambda: {"ok": False, "error": "No module named 'MetaTrader5'"},
-        )
-        payload = state.refresh()
-    finally:
-        if cache_path.exists():
-            cache_path.unlink()
-
-    assert calls == []
-    assert payload["warnings"].count("Pepperstone unavailable: No module named 'MetaTrader5'") == 1
-    assert payload["rows"][0]["cells"]["1M"]["pepperstone_razor"]["spread_pct"] is None
-
-
-def test_stale_pepperstone_zero_cache_record_does_not_render_zero_percent():
-    cache_path = _repo_cache_path("pepperstone_zero_stale")
-    payload = {
-        "version": 1,
-        "generated_at": "2026-01-01T00:00:00Z",
-        "symbols": ["EUR_USD"],
-        "warnings": [],
-        "errors": [],
-        "records": {
-            "oanda|EUR_USD|1M": {
-                "broker": "oanda",
-                "symbol": "EUR_USD",
-                "timeframe": "1M",
-                "samples": [{"time": "2026-01-01T00:00:00Z", "spread_pct": 0.0123}],
-                "latest": {"time": "2026-01-01T00:00:00Z", "spread_pct": 0.0123},
-                "last_success": "2026-01-01T00:00:00Z",
-                "error": "",
-            },
-            "pepperstone|EUR_USD|1M": {
-                "broker": "pepperstone",
-                "symbol": "EUR_USD",
-                "timeframe": "1M",
-                "samples": [{"time": "2026-01-01T00:00:00Z", "spread_pct": 0.0}],
-                "latest": {"time": "2026-01-01T00:00:00Z", "spread_pct": 0.0},
-                "last_success": "2026-01-01T00:00:00Z",
-                "error": "",
-            },
-        },
-    }
-    try:
-        cache_path.write_text(json.dumps(payload), encoding="utf-8")
-        state = SpreadMonitorState(cache_path, symbol_provider=lambda: ["EUR_USD"])
-        status = state.status()
-    finally:
-        if cache_path.exists():
-            cache_path.unlink()
-
-    pepperstone = status["rows"][0]["cells"]["1M"]["pepperstone_razor"]
-    assert pepperstone["spread_pct"] is None
-    assert pepperstone["display"] == ""
-    assert pepperstone["category"] == "unavailable"
 
 
 def test_background_refresh_returns_running_status_quickly():
@@ -276,10 +107,7 @@ def test_background_refresh_returns_running_status_quickly():
 
     def oanda_fetcher(_symbol, _timeframe, _context):
         time.sleep(0.05)
-        return {
-            "samples": [{"time": "2026-01-01T00:00:00Z", "spread_pct": 0.0123}],
-            "latest": {"time": "2026-01-01T00:00:00Z", "spread_pct": 0.0123},
-        }
+        return _oanda_result()
 
     cache_path = _repo_cache_path("background")
     try:
@@ -287,7 +115,6 @@ def test_background_refresh_returns_running_status_quickly():
             cache_path,
             symbol_provider=symbols,
             oanda_fetcher=oanda_fetcher,
-            mt5_fetcher=None,
         )
         payload = state.start_refresh()
         assert payload["refresh_state"] == "running"
@@ -305,10 +132,7 @@ def test_refresh_lock_returns_cached_data_instead_of_overlapping_refresh():
         return ["EUR_USD"]
 
     def oanda_fetcher(_symbol, _timeframe, _context):
-        return {
-            "samples": [{"time": "2026-01-01T00:00:00Z", "spread_pct": 0.0123}],
-            "latest": {"time": "2026-01-01T00:00:00Z", "spread_pct": 0.0123},
-        }
+        return _oanda_result()
 
     cache_path = _repo_cache_path("lock")
     try:
@@ -316,7 +140,6 @@ def test_refresh_lock_returns_cached_data_instead_of_overlapping_refresh():
             cache_path,
             symbol_provider=symbols,
             oanda_fetcher=oanda_fetcher,
-            mt5_fetcher=None,
         )
         state.refresh()
         assert state.refresh_lock.acquire(blocking=False)
@@ -339,10 +162,7 @@ def test_cached_refresh_uses_incremental_request_count():
 
     def oanda_fetcher(_symbol, _timeframe, context):
         calls.append(context["requested_count"])
-        return {
-            "samples": [{"time": "2026-01-01T00:00:00Z", "spread_pct": 0.0123}],
-            "latest": {"time": "2026-01-01T00:00:00Z", "spread_pct": 0.0123},
-        }
+        return _oanda_result()
 
     cache_path = _repo_cache_path("incremental")
     try:
@@ -350,7 +170,6 @@ def test_cached_refresh_uses_incremental_request_count():
             cache_path,
             symbol_provider=symbols,
             oanda_fetcher=oanda_fetcher,
-            mt5_fetcher=None,
         )
         state.refresh()
         state.refresh()

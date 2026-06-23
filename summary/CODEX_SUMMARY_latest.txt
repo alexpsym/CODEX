@@ -1,39 +1,55 @@
-Completed the Pine/session/spread/Pepperstone calculator fix.
+Completed the Spread Monitor, MT5 Trader EA Pepperstone export, and TradingView session marker update.
 
 Changes made:
+- Updated spreads-clone/spread_app.py:
+  - Removed Spread Monitor imports/wiring for live MT5/Pepperstone fetchers.
+  - Kept OANDA refresh as the automatic refresh path.
+  - Added first-screen Oanda and Pepperstone source buttons.
+  - Added OANDA-only and Pepperstone-only table rendering.
+  - Added /api/spreads/oanda/status, /api/spreads/oanda/refresh, /api/spreads/pepperstone/status, and /api/spreads/pepperstone/import.
+  - Kept /api/spreads/status and /api/spreads/refresh as OANDA aliases.
+  - Added manual Pepperstone import UI with fixed-file import and JSON file-picker fallback.
+  - Updated the legend to Low percentile, Medium percentile, High percentile, and Unavailable.
+- Updated spreads-clone/spread_core.py:
+  - Made payload building broker-aware.
+  - Removed Pepperstone/MT5 fetching from the refresh loop.
+  - Kept OANDA-only refresh records clean, with no Pepperstone records created by normal refresh.
+- Added spreads-clone/pepperstone_import.py:
+  - Parses the MT5 Trader EA JSON export.
+  - Validates version, broker, and generated_at.
+  - Normalizes MT5 symbols to OANDA-style symbols such as EUR_USD.
+  - Converts bid/ask to spread_pct using the shared midpoint formula.
+  - Stores imported Pepperstone data in render/data/pepperstone_spread_import_cache.json.
+  - Preserves the previous successful import if a new import fails.
+  - Does not import or use the MetaTrader5 Python module.
+- Updated mt5-clone/MQL5/Experts/Trader.mq5:
+  - Added Pepperstone spread export inputs.
+  - Writes/overwrites pepperstone_spreads_latest.json every 300 seconds from OnTimer().
+  - Exports version, broker, generated_at, account server/company/login, symbol, bid, ask, spread_pct, digits, point, and timestamp.
+  - Keeps EventSetTimer(1) and gates export with a last-export timestamp.
+  - Falls back to the MT5 terminal MQL5\Files folder if MT5 blocks the requested absolute repo path, and logs the exact written path.
+- Added mt5-clone/copy_pepperstone_spreads_latest.bat:
+  - Copies the MT5 fallback MQL5\Files export back to mt5-clone\pepperstone_spreads_latest.json when needed.
 - Updated pinescripts/custom_indicator.pine:
-  - Removed ATR inputs, ta.atr calculation, and ATR plotting entirely.
-  - Gated Volume, VWAP, VWAP offsets, funding lines, and option expiry lines to crypto charts only via syminfo.type == "crypto".
-  - Added readable Funding and OP EX labels and bounded label arrays alongside line arrays.
-  - Added separate session open/close visibility controls while preserving Sydney, Tokyo, London, and New York toggles.
-  - Added session labels such as Sydney Open and London Close and bounded session labels to avoid object leaks.
-  - Increased max_labels_count.
-- Updated the spread monitor:
-  - Treats spread_pct <= 0 or missing as unavailable in broker_cell and frontend rendering.
-  - Ignores stale Pepperstone zero cached records instead of displaying 0.0000%.
-  - Added MT5 initialize timeout handling using PEPPERSTONE_MT5_INIT_TIMEOUT_MS / MT5_INITIALIZE_TIMEOUT_MS, default 9000 ms.
-  - Uses the timeout-aware initializer in preflight_mt5_environment(), available_mt5_symbols(), and fetch_mt5_spread_samples().
-  - Returns the actionable Pepperstone auth message: MT5 authorization failed. Log into the Pepperstone MT5 terminal, then refresh.
-  - Preserved OANDA spread behavior.
-- Updated the calculator:
-  - Added an FX-only Broker toggle with OANDA default and Pepperstone option.
-  - Preserved the existing OANDA quote path by default.
-  - Added /api/calculator/pepperstone-set for MT5 Expert Set downloads.
-  - Pepperstone .set export is limit-order only; market .set generation is blocked with a clear message because Trader.mq5 has no safe one-shot manual market strategy.
-  - Generated .set files use only Trader.mq5 input names and map StandardLimitSide 0 for buy limit and 1 for sell limit.
-  - SL_DistancePoints equals calculator stop_loss_ticks; NetRR_Target equals calculator risk_reward.
-  - Added a Download .set button after Pepperstone FX limit calculations.
+  - Replaced session open/close full-height vertical lines with small arrow labels near the event candle high/low.
+  - Uses vertical abbreviated labels: SYD O/C, TKY O/C, LDN O/C, NY O/C.
+  - Uses simple black text on white arrow markers with size.tiny.
+  - Left funding-rate and option-expiry vertical lines unchanged.
 - Updated tests:
-  - Added static Pine regressions for ATR removal, crypto-only gates, timing labels, and session controls.
-  - Added spread monitor regressions for zero/unavailable handling and stale Pepperstone zero cache records.
-  - Added MT5 timeout/auth regression coverage.
-  - Added calculator broker-toggle behavior and Pepperstone .set export tests.
-  - Kept a compatibility fix so legacy EMA yes/no quality criteria still normalize as Yes/No while 9/20 EMA values remain supported.
+  - Added Pepperstone import coverage.
+  - Updated spread monitor dashboard/core expectations for OANDA-only refresh and manual Pepperstone import.
+  - Updated Pine tests for abbreviated arrow-style session markers.
+  - Added MT5 Trader export assertions.
 
 Verification run:
-- python -m pytest tests/test_calculator_js_behavior.py tests/test_calculator_js_syntax.py tests/test_master_service_calculator_api.py tests/test_spread_core.py tests/test_spread_monitor_dashboard.py tests/test_mt5_spread_fetch.py tests/test_custom_indicator_pine.py -q
-  Result: 150 passed, 12 existing FastAPI deprecation warnings.
+- py -3 -m pytest ... could not run because the py launcher is not installed.
+- python -m pytest tests/test_spread_core.py tests/test_oanda_spread_fetch.py tests/test_spread_monitor_dashboard.py tests/test_pepperstone_spread_import.py tests/test_custom_indicator_pine.py tests/test_python_mt5_conversion_files.py
+  Result: 42 passed, 8 existing FastAPI deprecation warnings.
+- python -m compileall spreads-clone render tests
+  Result: passed.
+- git diff --check on touched task files
+  Result: passed.
 
 Notes:
-- render/data runtime state files and state_backup.json were dirtied by the calculator tests; PATCH_DESKTOP_PUSH.bat excludes those paths from its staged commit.
-- custom instructions/CODEX_BRIEF_INSTRUCTIONS.txt was already modified before this task. It was not changed for this fix and was temporarily excluded from the auto-commit.
+- Existing unrelated dirty files were left untouched: custom instructions/CODEX_BRIEF_INSTRUCTIONS.txt and render/data runtime state JSON files.
+- Manual MT5 and TradingView visual verification still needs to be performed in those applications.
