@@ -7,6 +7,7 @@ __pycache__/
 *.pyc
 PATCH_DESKTOP_PUSH-latest.log
 INSTALL-latest.log
+logs/
 .env
 .env.*
 *.env

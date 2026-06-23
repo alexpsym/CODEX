@@ -2,6 +2,9 @@
 setlocal EnableExtensions EnableDelayedExpansion
 
 set "ROOT=%~dp0"
+set "LOG_DIR=%ROOT%logs"
+if not exist "%LOG_DIR%\" mkdir "%LOG_DIR%" >nul 2>nul
+if not defined LOCAL_MASTER_WORKER_LOG set "LOCAL_MASTER_WORKER_LOG=%LOG_DIR%\LocalTradingTools-worker-latest.log"
 set "MASTER_ENV_DIR=C:\Users\User\Documents\GPT"
 set "MASTER_ENV_FILE=C:\Users\User\Documents\GPT\env.env"
 set "APP_PROFILE=local"
@@ -82,7 +85,8 @@ set "LOCAL_MASTER_EDGE_PROFILE_DIR=%TEMP%\LocalTradingToolsEdge-%LOCAL_LAUNCH_TS
 set "LOCAL_MASTER_EXIT_REQUEST=%TEMP%\LocalTradingToolsExit-%LOCAL_LAUNCH_TS%.flag"
 set "LOCAL_MASTER_WINDOW_TITLE=Local Master Control - %LOCAL_LAUNCH_TS%"
 if exist "%LOCAL_MASTER_EXIT_REQUEST%" del /q "%LOCAL_MASTER_EXIT_REQUEST%" >nul 2>nul
-start "%LOCAL_MASTER_WINDOW_TITLE%" /D "%ROOT%" cmd /d /v:on /c ""%~f0" __worker"
+echo [local-master] worker log: %LOCAL_MASTER_WORKER_LOG%
+start "%LOCAL_MASTER_WINDOW_TITLE%" /D "%ROOT%" cmd /d /v:on /c "call ""%~f0"" __worker > ""%LOCAL_MASTER_WORKER_LOG%"" 2>&1"
 set "MASTER_READY_TIMEOUT_SECONDS=60"
 set "SCANNER_READY_TIMEOUT_SECONDS=90"
 echo [local-master] waiting for %MASTER_HEALTH_URL% ...
@@ -123,13 +127,13 @@ exit /b 0
 
 :master_not_ready
 echo [local-master] ERROR: dashboard was not ready after %MASTER_READY_TIMEOUT_SECONDS% seconds.
-echo [local-master] Check the "Local Master Control" window for startup errors.
+echo [local-master] Check worker startup log: %LOCAL_MASTER_WORKER_LOG%
 echo [local-master] Browser was not opened to avoid a dead-page / manual-refresh failure.
 exit /b 1
 
 :scanner_not_ready
 echo [local-master] ERROR: scanner did not become ready after %SCANNER_READY_TIMEOUT_SECONDS% seconds.
-echo [local-master] Alerts startup may have failed. Check the "Local Master Control" window/logs for bybit_monitor/oanda_monitor errors.
+echo [local-master] Alerts startup may have failed. Check worker startup log: %LOCAL_MASTER_WORKER_LOG%
 echo [local-master] Browser was not opened to avoid showing a misleading dashboard state.
 exit /b 1
 
@@ -163,11 +167,13 @@ echo [local-master] BYBIT_DEMO_CALC_CONTEXT_LOCAL_PATH=!BYBIT_DEMO_CALC_CONTEXT_
 echo [local-master] User state source: Repo local files
 if /I "!LOCAL_STATE_ONLY!"=="1" echo [local-master] Repo-local state enabled. Ensure Git sync succeeds before replacing the repo clone.
 
-if not /I "!SPREAD_MONITOR_SKIP_REQUIREMENTS_INSTALL!"=="1" if exist "!ROOT!spreads-clone\requirements.txt" (
-  echo [local-master] ensuring Spread Monitor Python requirements with !PYTHON_EXE! ...
-  "!PYTHON_EXE!" -m pip install -r "!ROOT!spreads-clone\requirements.txt"
-  if errorlevel 1 (
-    echo [local-master] WARNING: Spread Monitor requirements install failed. Pepperstone/MT5 may show unavailable until installed.
+if /I not "!SPREAD_MONITOR_SKIP_REQUIREMENTS_INSTALL!"=="1" (
+  if exist "!ROOT!spreads-clone\requirements.txt" (
+    echo [local-master] ensuring Spread Monitor Python requirements with !PYTHON_EXE! ...
+    "!PYTHON_EXE!" -m pip install -r "!ROOT!spreads-clone\requirements.txt"
+    if errorlevel 1 (
+      echo [local-master] WARNING: Spread Monitor requirements install failed. Pepperstone/MT5 may show unavailable until installed.
+    )
   )
 )
 

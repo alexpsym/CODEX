@@ -395,7 +395,9 @@ def test_run_local_master_control_bat_uses_local_autostart() -> None:
     assert '/trading-journal' not in content
     assert "cmd /v:on /k ^" not in content
     assert '"set APP_PROFILE=%APP_PROFILE% && ^' not in content
-    assert 'cmd /d /v:on /k ""%~f0" __worker"' in content
+    worker_start = 'cmd /d /v:on /c "call ""%~f0"" __worker > ""%LOCAL_MASTER_WORKER_LOG%"" 2>&1"'
+    assert worker_start in content
+    assert 'set "LOCAL_MASTER_WORKER_LOG=%LOG_DIR%\\LocalTradingTools-worker-latest.log"' in content
     assert "http://127.0.0.1:8000/health" in content
     assert "MASTER_READY_TIMEOUT_SECONDS" in content
     assert "powershell" in content
@@ -412,13 +414,13 @@ def test_run_local_master_control_bat_uses_local_autostart() -> None:
     assert "[local-master] ERROR: dashboard was not ready after %MASTER_READY_TIMEOUT_SECONDS% seconds." in content
     assert '[local-master] Browser was not opened to avoid a dead-page / manual-refresh failure.' in content
     assert "[local-master] ERROR: scanner did not become ready after %SCANNER_READY_TIMEOUT_SECONDS% seconds." in content
-    assert content.index('cmd /d /v:on /k ""%~f0" __worker"') < content.index('call "%ROOT%tools\\open_edge_url.bat" "%MASTER_BROWSER_URL%"')
+    assert content.index(worker_start) < content.index('call "%ROOT%tools\\open_edge_url.bat" "%MASTER_BROWSER_URL%"')
     assert "timeout /t 2 /nobreak >nul\nstart \"\" \"%MASTER_URL%\"" not in content
 
 
 def test_run_local_master_control_waits_for_health_before_opening_browser() -> None:
     content = (ROOT / "run_local_master_control.bat").read_text(encoding="utf-8")
-    worker_start_idx = content.index('cmd /d /v:on /k ""%~f0" __worker"')
+    worker_start_idx = content.index('cmd /d /v:on /c "call ""%~f0"" __worker > ""%LOCAL_MASTER_WORKER_LOG%"" 2>&1"')
     wait_idx = content.index(":wait_for_master_ready")
     assert "MASTER_BROWSER_URL" in content
     assert "local_launch=" in content
@@ -855,7 +857,7 @@ def test_edge_helper_wiring_for_local_launchers() -> None:
     assert 'start "" "%JOURNAL_URL%"' not in journal
     assert 'start "" "%JOURNAL%"' in journal
 
-    worker_start = master.index('start "Local Master Control"')
+    worker_start = master.index('start "%LOCAL_MASTER_WINDOW_TITLE%"')
     ready_wait = master.index(':wait_for_master_ready')
     scanner_ready = master.index(':scanner_ready')
     edge_call = master.index(master_call)

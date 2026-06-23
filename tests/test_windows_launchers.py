@@ -110,7 +110,7 @@ def test_run_local_master_exit_wiring_and_ordering() -> None:
     assert 'set "LOCAL_MASTER_EXIT_REQUEST=%TEMP%\\LocalTradingToolsExit-%LOCAL_LAUNCH_TS%.flag"' in script
     assert 'set "LOCAL_MASTER_WINDOW_TITLE=Local Master Control - %LOCAL_LAUNCH_TS%"' in script
     assert 'set "LOCAL_MASTER_EDGE_DEBUG_PORT=' in script
-    assert 'start "%LOCAL_MASTER_WINDOW_TITLE%" /D "%ROOT%" cmd /d /v:on /c ""%~f0" __worker"' in script
+    assert 'start "%LOCAL_MASTER_WINDOW_TITLE%" /D "%ROOT%" cmd /d /v:on /c "call ""%~f0"" __worker > ""%LOCAL_MASTER_WORKER_LOG%"" 2>&1"' in script
     assert 'if defined LOCAL_MASTER_WINDOW_TITLE title !LOCAL_MASTER_WINDOW_TITLE!' in script
     assert '/k ""%~f0" __worker"' not in script
     assert 'call "%ROOT%tools\\open_edge_url.bat" "%MASTER_BROWSER_URL%" "%LOCAL_MASTER_EDGE_DEBUG_PORT%" "%LOCAL_MASTER_EDGE_PROFILE_DIR%"' in script
@@ -272,8 +272,13 @@ def test_trading_tools_launcher_runs_hidden_and_shows_clear_errors() -> None:
     assert 'using System.Windows.Forms;' in launcher
     assert 'startInfo.CreateNoWindow = true;' in launcher
     assert 'startInfo.WindowStyle = ProcessWindowStyle.Hidden;' in launcher
+    assert 'startInfo.RedirectStandardOutput = true;' in launcher
+    assert 'startInfo.RedirectStandardError = true;' in launcher
     assert 'MessageBox.Show' in launcher
     assert 'BuildForwardedArgString(args)' in launcher
+    assert 'LocalTradingTools-launch-latest.log' in launcher
+    assert 'LocalTradingTools-worker-latest.log' in launcher
+    assert 'Last useful launch log lines:' in launcher
 
 
 def test_windows_launcher_builder_uses_windows_subsystem_output() -> None:
@@ -335,12 +340,39 @@ def test_installer_captures_launcher_output_and_disables_nested_pause() -> None:
 
 def test_run_local_master_parent_logs_are_condensed_and_worker_logs_are_detailed() -> None:
     script = (ROOT / 'run_local_master_control.bat').read_text(encoding='utf-8')
+    assert 'set "LOG_DIR=%ROOT%logs"' in script
+    assert 'set "LOCAL_MASTER_WORKER_LOG=%LOG_DIR%\\LocalTradingTools-worker-latest.log"' in script
+    assert 'echo [local-master] worker log: %LOCAL_MASTER_WORKER_LOG%' in script
     assert 'echo [local-master] launcher starting.' in script
     assert 'echo [local-master] waiting for %MASTER_HEALTH_URL% ...' in script
     assert 'echo [local-master] worker started at !DATE! !TIME!' in script
+    assert 'Check worker startup log: %LOCAL_MASTER_WORKER_LOG%' in script
     parent_idx = script.find('echo [local-master] launcher starting.')
     worker_idx = script.find(':worker')
     assert parent_idx != -1 and worker_idx != -1 and parent_idx < worker_idx
+
+
+def test_run_local_master_spread_requirements_skip_condition_uses_valid_nested_if() -> None:
+    script = (ROOT / 'run_local_master_control.bat').read_text(encoding='utf-8')
+    assert 'if not /I "!SPREAD_MONITOR_SKIP_REQUIREMENTS_INSTALL!"=="1"' not in script
+    assert 'if /I not "!SPREAD_MONITOR_SKIP_REQUIREMENTS_INSTALL!"=="1" (' in script
+    assert 'if exist "!ROOT!spreads-clone\\requirements.txt" (' in script
+
+
+def test_launcher_logs_are_ignored_by_git() -> None:
+    ignore = (ROOT / '.gitignore').read_text(encoding='utf-8')
+    assert 'logs/' in ignore
+
+
+def test_trading_tools_launcher_failure_message_includes_log_path_and_tail() -> None:
+    launcher = (ROOT / 'tools' / 'windows_launchers' / 'TradingToolsLauncher.cs').read_text(encoding='utf-8')
+    assert '"Log: " + launchLogPath' in launcher
+    assert 'BuildFailureMessage(exitCode, launchLogPath, logTail.ToString(), workerLogPath)' in launcher
+    assert '"\\n\\nWorker log: " + workerLogPath' in launcher
+    assert '"Last useful worker log lines:\\n" + workerLogTail' in launcher
+    assert 'ReadUsefulLogTail(workerLogPath, 18)' in launcher
+    assert 'private sealed class LogTail' in launcher
+    assert 'File.AppendAllText(logPath' in launcher
 
 
 def test_iexpress_fallback_runs_single_launcher_cmd_invocation() -> None:
