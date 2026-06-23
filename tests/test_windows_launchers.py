@@ -108,11 +108,12 @@ def test_run_local_master_uses_uvicorn_log_config_and_access_log_enabled() -> No
 def test_run_local_master_exit_wiring_and_ordering() -> None:
     script = (ROOT / 'run_local_master_control.bat').read_text(encoding='utf-8')
     assert 'set "LOCAL_MASTER_EXIT_REQUEST=%TEMP%\\LocalTradingToolsExit-%LOCAL_LAUNCH_TS%.flag"' in script
+    assert 'set "LOCAL_MASTER_NORMAL_EXIT_FILE=%TEMP%\\LocalTradingToolsExit-%LOCAL_LAUNCH_TS%.normal"' in script
     assert 'set "LOCAL_MASTER_WINDOW_TITLE=Local Master Control - %LOCAL_LAUNCH_TS%"' in script
     assert 'set "LOCAL_MASTER_EDGE_DEBUG_PORT=' in script
-    assert 'start "%LOCAL_MASTER_WINDOW_TITLE%" /D "%ROOT%" cmd /d /v:on /c "call ""%~f0"" __worker > ""%LOCAL_MASTER_WORKER_LOG%"" 2>&1"' in script
+    assert 'start "%LOCAL_MASTER_WINDOW_TITLE%" /D "%ROOT%" cmd /d /v:on /k "call ""%~f0"" __worker_console"' in script
     assert 'if defined LOCAL_MASTER_WINDOW_TITLE title !LOCAL_MASTER_WINDOW_TITLE!' in script
-    assert '/k ""%~f0" __worker"' not in script
+    assert 'cmd /d /v:on /c "call ""%~f0"" __worker > ""%LOCAL_MASTER_WORKER_LOG%"" 2>&1"' not in script
     assert 'call "%ROOT%tools\\open_edge_url.bat" "%MASTER_BROWSER_URL%" "%LOCAL_MASTER_EDGE_DEBUG_PORT%" "%LOCAL_MASTER_EDGE_PROFILE_DIR%"' in script
     assert 'if defined LOCAL_MASTER_EXIT_REQUEST if exist "!LOCAL_MASTER_EXIT_REQUEST!" (' in script
     assert 'goto restart_master' in script
@@ -343,6 +344,7 @@ def test_run_local_master_parent_logs_are_condensed_and_worker_logs_are_detailed
     assert 'set "LOG_DIR=%ROOT%logs"' in script
     assert 'set "LOCAL_MASTER_WORKER_LOG=%LOG_DIR%\\LocalTradingTools-worker-latest.log"' in script
     assert 'echo [local-master] worker log: %LOCAL_MASTER_WORKER_LOG%' in script
+    assert 'call "%~f0" __worker > "!LOCAL_MASTER_WORKER_LOG!" 2>&1' in script
     assert 'echo [local-master] launcher starting.' in script
     assert 'echo [local-master] waiting for %MASTER_HEALTH_URL% ...' in script
     assert 'echo [local-master] worker started at !DATE! !TIME!' in script
@@ -350,6 +352,20 @@ def test_run_local_master_parent_logs_are_condensed_and_worker_logs_are_detailed
     parent_idx = script.find('echo [local-master] launcher starting.')
     worker_idx = script.find(':worker')
     assert parent_idx != -1 and worker_idx != -1 and parent_idx < worker_idx
+
+
+def test_run_local_master_worker_console_stays_visible_on_abnormal_failure() -> None:
+    script = (ROOT / 'run_local_master_control.bat').read_text(encoding='utf-8')
+    assert 'if /I "%~1"=="__worker_console" goto worker_console' in script
+    assert 'start "%LOCAL_MASTER_WINDOW_TITLE%" /D "%ROOT%" cmd /d /v:on /k "call ""%~f0"" __worker_console"' in script
+    assert ':worker_console' in script
+    assert 'call "%~f0" __worker > "!LOCAL_MASTER_WORKER_LOG!" 2>&1' in script
+    assert 'Worker failed with exit code !WORKER_EXIT_CODE!' in script
+    assert 'Get-Content -LiteralPath $env:LOCAL_MASTER_WORKER_LOG -Tail 40' in script
+    assert 'This window is intentionally left open so startup errors stay readable.' in script
+    assert 'pause >nul' in script
+    assert 'if defined LOCAL_MASTER_NORMAL_EXIT_FILE if exist "!LOCAL_MASTER_NORMAL_EXIT_FILE!" (' in script
+    assert 'if defined LOCAL_MASTER_NORMAL_EXIT_FILE echo normal exit requested at !DATE! !TIME!>"!LOCAL_MASTER_NORMAL_EXIT_FILE!"' in script
 
 
 def test_run_local_master_spread_requirements_skip_condition_uses_valid_nested_if() -> None:
@@ -371,6 +387,7 @@ def test_trading_tools_launcher_failure_message_includes_log_path_and_tail() -> 
     assert '"\\n\\nWorker log: " + workerLogPath' in launcher
     assert '"Last useful worker log lines:\\n" + workerLogTail' in launcher
     assert 'ReadUsefulLogTail(workerLogPath, 18)' in launcher
+    assert '(no worker log output captured)' in launcher
     assert 'private sealed class LogTail' in launcher
     assert 'File.AppendAllText(logPath' in launcher
 

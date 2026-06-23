@@ -129,12 +129,13 @@ internal static class Program
             "Last useful launch log lines:\n" + launchLogTail;
 
         string workerLogTail = ReadUsefulLogTail(workerLogPath, 18);
-        if (!string.IsNullOrEmpty(workerLogTail))
+        if (string.IsNullOrEmpty(workerLogTail))
         {
-            message +=
-                "\n\nWorker log: " + workerLogPath + "\n\n" +
-                "Last useful worker log lines:\n" + workerLogTail;
+            workerLogTail = "(no worker log output captured)";
         }
+        message +=
+            "\n\nWorker log: " + workerLogPath + "\n\n" +
+            "Last useful worker log lines:\n" + workerLogTail;
 
         return message;
     }

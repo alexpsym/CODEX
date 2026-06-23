@@ -68,6 +68,7 @@ if not exist "%MASTER_ENV_FILE%" (
 
 call :load_master_env_vars
 
+if /I "%~1"=="__worker_console" goto worker_console
 if /I "%~1"=="__worker" goto worker
 
 echo [local-master] launcher starting.
@@ -83,10 +84,12 @@ if not defined LOCAL_MASTER_EDGE_DEBUG_PORT (
 )
 set "LOCAL_MASTER_EDGE_PROFILE_DIR=%TEMP%\LocalTradingToolsEdge-%LOCAL_LAUNCH_TS%"
 set "LOCAL_MASTER_EXIT_REQUEST=%TEMP%\LocalTradingToolsExit-%LOCAL_LAUNCH_TS%.flag"
+set "LOCAL_MASTER_NORMAL_EXIT_FILE=%TEMP%\LocalTradingToolsExit-%LOCAL_LAUNCH_TS%.normal"
 set "LOCAL_MASTER_WINDOW_TITLE=Local Master Control - %LOCAL_LAUNCH_TS%"
 if exist "%LOCAL_MASTER_EXIT_REQUEST%" del /q "%LOCAL_MASTER_EXIT_REQUEST%" >nul 2>nul
+if exist "%LOCAL_MASTER_NORMAL_EXIT_FILE%" del /q "%LOCAL_MASTER_NORMAL_EXIT_FILE%" >nul 2>nul
 echo [local-master] worker log: %LOCAL_MASTER_WORKER_LOG%
-start "%LOCAL_MASTER_WINDOW_TITLE%" /D "%ROOT%" cmd /d /v:on /c "call ""%~f0"" __worker > ""%LOCAL_MASTER_WORKER_LOG%"" 2>&1"
+start "%LOCAL_MASTER_WINDOW_TITLE%" /D "%ROOT%" cmd /d /v:on /k "call ""%~f0"" __worker_console"
 set "MASTER_READY_TIMEOUT_SECONDS=60"
 set "SCANNER_READY_TIMEOUT_SECONDS=90"
 echo [local-master] waiting for %MASTER_HEALTH_URL% ...
@@ -137,6 +140,34 @@ echo [local-master] Alerts startup may have failed. Check worker startup log: %L
 echo [local-master] Browser was not opened to avoid showing a misleading dashboard state.
 exit /b 1
 
+:worker_console
+if defined LOCAL_MASTER_WINDOW_TITLE title !LOCAL_MASTER_WINDOW_TITLE!
+echo [local-master] visible worker console started.
+echo [local-master] worker output is being written to:
+echo [local-master]   !LOCAL_MASTER_WORKER_LOG!
+echo [local-master] If startup fails, this window will stay open and print the latest log lines.
+call "%~f0" __worker > "!LOCAL_MASTER_WORKER_LOG!" 2>&1
+set "WORKER_EXIT_CODE=!ERRORLEVEL!"
+if defined LOCAL_MASTER_NORMAL_EXIT_FILE if exist "!LOCAL_MASTER_NORMAL_EXIT_FILE!" (
+  del /q "!LOCAL_MASTER_NORMAL_EXIT_FILE!" >nul 2>nul
+  exit
+)
+echo.
+if "!WORKER_EXIT_CODE!"=="0" (
+  echo [local-master] Worker exited before a normal app Exit request.
+) else (
+  echo [local-master] Worker failed with exit code !WORKER_EXIT_CODE!.
+)
+echo [local-master] Startup error log:
+echo [local-master]   !LOCAL_MASTER_WORKER_LOG!
+echo [local-master] Last worker log lines:
+powershell -NoProfile -ExecutionPolicy Bypass -Command "try { Get-Content -LiteralPath $env:LOCAL_MASTER_WORKER_LOG -Tail 40 -ErrorAction Stop } catch { Write-Host $_.Exception.Message }"
+echo.
+echo [local-master] This window is intentionally left open so startup errors stay readable.
+echo [local-master] Press any key to close this window.
+pause >nul
+exit !WORKER_EXIT_CODE!
+
 :worker
 if defined LOCAL_MASTER_WINDOW_TITLE title !LOCAL_MASTER_WINDOW_TITLE!
 cd /d "%ROOT%" || (
@@ -184,6 +215,7 @@ set "EXIT_CODE=!ERRORLEVEL!"
 echo [local-master] uvicorn exited with !EXIT_CODE! at !DATE! !TIME!
 if defined LOCAL_MASTER_EXIT_REQUEST if exist "!LOCAL_MASTER_EXIT_REQUEST!" (
   echo [local-master] local exit requested; closing worker window.
+  if defined LOCAL_MASTER_NORMAL_EXIT_FILE echo normal exit requested at !DATE! !TIME!>"!LOCAL_MASTER_NORMAL_EXIT_FILE!"
   del /q "!LOCAL_MASTER_EXIT_REQUEST!" >nul 2>nul
   if defined LOCAL_MASTER_EDGE_PROFILE_DIR if exist "!LOCAL_MASTER_EDGE_PROFILE_DIR!\" rmdir /s /q "!LOCAL_MASTER_EDGE_PROFILE_DIR!" >nul 2>nul
   echo [local-master] closing Local Master Control command prompt.

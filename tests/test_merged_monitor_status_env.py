@@ -387,6 +387,7 @@ def test_run_local_master_control_bat_uses_local_autostart() -> None:
     assert 'set "APP_PROFILE=local"' in content
     assert 'set "AUTOSTART_SCRIPTS=bybit_monitor,oanda_monitor,fxweekend-clone"' in content
     assert 'set "SCANNER_LOCAL_UI_MODE=1"' not in content
+    assert 'if /I "%~1"=="__worker_console" goto worker_console' in content
     assert 'if /I "%~1"=="__worker" goto worker' in content
     assert ":worker" in content
     assert ":restart_master" in content
@@ -395,9 +396,11 @@ def test_run_local_master_control_bat_uses_local_autostart() -> None:
     assert '/trading-journal' not in content
     assert "cmd /v:on /k ^" not in content
     assert '"set APP_PROFILE=%APP_PROFILE% && ^' not in content
-    worker_start = 'cmd /d /v:on /c "call ""%~f0"" __worker > ""%LOCAL_MASTER_WORKER_LOG%"" 2>&1"'
+    worker_start = 'cmd /d /v:on /k "call ""%~f0"" __worker_console"'
     assert worker_start in content
     assert 'set "LOCAL_MASTER_WORKER_LOG=%LOG_DIR%\\LocalTradingTools-worker-latest.log"' in content
+    assert 'call "%~f0" __worker > "!LOCAL_MASTER_WORKER_LOG!" 2>&1' in content
+    assert 'This window is intentionally left open so startup errors stay readable.' in content
     assert "http://127.0.0.1:8000/health" in content
     assert "MASTER_READY_TIMEOUT_SECONDS" in content
     assert "powershell" in content
@@ -420,7 +423,7 @@ def test_run_local_master_control_bat_uses_local_autostart() -> None:
 
 def test_run_local_master_control_waits_for_health_before_opening_browser() -> None:
     content = (ROOT / "run_local_master_control.bat").read_text(encoding="utf-8")
-    worker_start_idx = content.index('cmd /d /v:on /c "call ""%~f0"" __worker > ""%LOCAL_MASTER_WORKER_LOG%"" 2>&1"')
+    worker_start_idx = content.index('cmd /d /v:on /k "call ""%~f0"" __worker_console"')
     wait_idx = content.index(":wait_for_master_ready")
     assert "MASTER_BROWSER_URL" in content
     assert "local_launch=" in content

@@ -1,26 +1,26 @@
-Completed the Local Trading Tools launcher crash and persistent startup logging fix.
+Completed the follow-up Local Trading Tools launch crash visibility fix.
 
 Changes made:
-- Fixed run_local_master_control.bat so SPREAD_MONITOR_SKIP_REQUIREMENTS_INSTALL uses safe nested batch IF syntax instead of the invalid `if not /I ... if exist ...` chain.
-- Added repo-root logs directory creation during Local Master Control startup.
-- Redirected worker BAT output to logs\LocalTradingTools-worker-latest.log so worker startup crashes persist instead of disappearing with the console.
-- Updated parent launcher failure messages to point users to the worker log when dashboard or scanner readiness fails.
-- Updated tools/windows_launchers/TradingToolsLauncher.cs to create logs\LocalTradingTools-launch-latest.log, capture stdout/stderr from the BAT, and show non-zero failures in a MessageBox with exit code, exact launch log path, last useful launch log lines, and worker log path/tail when available.
-- Added a small launcher log append lock so simultaneous stdout/stderr callbacks do not lose log writes.
-- Added logs/ to .gitignore so startup logs stay local-only.
-- Updated launcher and merged-monitor tests to cover the fixed batch syntax, launch log capture, failure MessageBox log path/tail, worker log path, and preserved Edge/readiness ordering.
+- Changed run_local_master_control.bat so the visible worker window no longer launches through the disappearing `cmd /c` path.
+- Added a `__worker_console` wrapper launched with `cmd /k`; it redirects the real worker to logs\LocalTradingTools-worker-latest.log, then leaves the console open on abnormal worker exit.
+- The worker wrapper now prints the worker log path, prints the last 40 worker log lines on abnormal exit, and waits for a keypress before closing so startup crashes stay readable.
+- Added LOCAL_MASTER_NORMAL_EXIT_FILE so normal user-triggered app Exit can still close the worker console automatically instead of being held open by the new failure pause.
+- Kept persistent logs for logs\LocalTradingTools-launch-latest.log and logs\LocalTradingTools-worker-latest.log; logs remain ignored by Git.
+- Updated TradingToolsLauncher.cs so non-zero launcher failures always include the exact worker log path in the MessageBox, with a useful worker log tail or an explicit no-output placeholder.
+- Updated launcher and merged-monitor tests so they no longer protect the old disappearing `cmd /c` worker command and instead assert the persistent-console abnormal-failure branch.
 
 Verification run:
 - python -m pytest tests\test_windows_launchers.py -q
-  Result: 33 passed.
+  Result: 34 passed.
+- python -m pytest tests\test_merged_monitor_status_env.py -q
+  Result: failed only because this environment cannot scan C:\Users\User\AppData\Local\Temp\pytest-of-User for pytest temp dirs (PermissionError [WinError 5]).
 - python -m pytest tests\test_merged_monitor_status_env.py -q --basetemp .pytest_tmp_merged_monitor
   Result: 42 passed, 4 warnings.
 - build_windows_launchers.bat
   Result: Successfully created C:\Users\User\Documents\GPT\CODEX-master\Local Trading Tools.exe with TT.ico resolved.
 
 Notes:
-- The first exact monitor pytest run hit a local sandbox/temp permission error scanning C:\Users\User\AppData\Local\Temp\pytest-of-User, so it was rerun with the repo-local ignored basetemp shown above.
-- The first launcher build found an old running Local Trading Tools.exe wrapper lock; only those wrapper processes were stopped, then the final build succeeded.
-- Local ignored/generated files remain uncommitted, including Local Trading Tools.exe, .pytest_tmp_merged_monitor, logs, caches, render/data runtime state, and state_backup.json.
+- No Trading Journal workbook or layout files were changed.
+- Local ignored/generated files remain uncommitted, including Local Trading Tools.exe, logs, .pytest_tmp_merged_monitor, caches, render/data runtime state, and state_backup.json.
 - An unrelated modified file under custom instructions/ remains untouched and is intentionally kept out of this launcher fix commit.
 - This summary file was written before running PATCH_DESKTOP_PUSH.bat as requested; the final Codex response reports the push result from PATCH_DESKTOP_PUSH-latest.log.
