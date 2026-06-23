@@ -113,18 +113,20 @@ def test_run_local_master_exit_wiring_and_ordering() -> None:
     assert 'set "LOCAL_MASTER_WORKER_FAILED_FILE=%TEMP%\\LocalTradingToolsExit-%LOCAL_LAUNCH_TS%.failed"' in script
     assert 'set "LOCAL_MASTER_WINDOW_TITLE=Local Master Control - %LOCAL_LAUNCH_TS%"' in script
     assert 'set "LOCAL_MASTER_EDGE_DEBUG_PORT=' in script
-    assert 'start "%LOCAL_MASTER_WINDOW_TITLE%" /D "%ROOT%" cmd /d /v:on /k "call ""%~f0"" __worker_console"' in script
+    assert 'start "%LOCAL_MASTER_WINDOW_TITLE%" /D "%ROOT%" "%ROOT%tools\\windows_launchers\\local_master_worker_console.bat"' in script
+    assert '__worker_console' not in script
     assert 'if defined LOCAL_MASTER_WINDOW_TITLE title !LOCAL_MASTER_WINDOW_TITLE!' in script
     assert 'cmd /d /v:on /c "call ""%~f0"" __worker > ""%LOCAL_MASTER_WORKER_LOG%"" 2>&1"' not in script
+    assert 'cmd /d /v:on /k "call ""%~f0""' not in script
     assert 'call "%ROOT%tools\\open_edge_url.bat" "%MASTER_BROWSER_URL%" "%LOCAL_MASTER_EDGE_DEBUG_PORT%" "%LOCAL_MASTER_EDGE_PROFILE_DIR%"' in script
-    assert 'if defined LOCAL_MASTER_EXIT_REQUEST if exist "!LOCAL_MASTER_EXIT_REQUEST!" (' in script
+    assert 'if defined LOCAL_MASTER_EXIT_REQUEST (\n  if exist "!LOCAL_MASTER_EXIT_REQUEST!" (' in script
     assert 'goto restart_master' in script
     worker_idx = script.find('start "%LOCAL_MASTER_WINDOW_TITLE%"')
     health_idx = script.find(':wait_for_master_ready')
     open_idx = script.find('call "%ROOT%tools\\open_edge_url.bat"')
     assert worker_idx != -1 and health_idx != -1 and open_idx != -1
     assert worker_idx < health_idx < open_idx
-    exit_branch_idx = script.find('if defined LOCAL_MASTER_EXIT_REQUEST if exist "!LOCAL_MASTER_EXIT_REQUEST!" (')
+    exit_branch_idx = script.find('if defined LOCAL_MASTER_EXIT_REQUEST (\n  if exist "!LOCAL_MASTER_EXIT_REQUEST!" (')
     restart_idx = script.find('goto restart_master')
     assert exit_branch_idx != -1 and restart_idx != -1 and exit_branch_idx < restart_idx
     assert '\n  exit /b 0\n)' not in script
@@ -136,7 +138,7 @@ def test_run_local_master_exit_wiring_and_ordering() -> None:
     assert "$allow = @^('WindowsTerminal','wt','OpenConsole','conhost','cmd'^)" in script
     assert "Stop-Process -Id $_.Id -Force -ErrorAction Stop" in script
     assert "Stop-Process -Name WindowsTerminal" not in script
-    assert '\n  exit 0\n)' in script
+    assert '\n    exit 0\n  )\n)' in script
 
 
 def test_open_edge_url_supports_optional_debugging_profile_args() -> None:
@@ -346,7 +348,6 @@ def test_run_local_master_parent_logs_are_condensed_and_worker_logs_are_detailed
     assert 'set "LOG_DIR=%ROOT%logs"' in script
     assert 'set "LOCAL_MASTER_WORKER_LOG=%LOG_DIR%\\LocalTradingTools-worker-latest.log"' in script
     assert 'echo [local-master] worker log: %LOCAL_MASTER_WORKER_LOG%' in script
-    assert 'call "%~f0" __worker > "%LOCAL_MASTER_WORKER_LOG%" 2>&1' in script
     assert 'cmd /d /s /v:on /c ""%~f0" __worker"' not in script
     assert 'echo [local-master] launcher starting.' in script
     assert 'echo [local-master] waiting for %MASTER_HEALTH_URL% ...' in script
@@ -358,27 +359,32 @@ def test_run_local_master_parent_logs_are_condensed_and_worker_logs_are_detailed
 
 
 def test_run_local_master_worker_console_stays_visible_on_abnormal_failure() -> None:
-    script = (ROOT / 'run_local_master_control.bat').read_text(encoding='utf-8')
-    assert 'if /I "%~1"=="__worker_console" goto worker_console' in script
-    assert 'start "%LOCAL_MASTER_WINDOW_TITLE%" /D "%ROOT%" cmd /d /v:on /k "call ""%~f0"" __worker_console"' in script
-    assert ':worker_console' in script
-    assert 'call "%~f0" __worker > "%LOCAL_MASTER_WORKER_LOG%" 2>&1' in script
+    master = (ROOT / 'run_local_master_control.bat').read_text(encoding='utf-8')
+    wrapper = (ROOT / 'tools' / 'windows_launchers' / 'local_master_worker_console.bat')
+    script = wrapper.read_text(encoding='utf-8')
+    assert wrapper.exists()
+    assert 'if /I "%~1"=="__worker_console" goto worker_console' not in master
+    assert 'cmd /d /v:on /k "call ""%~f0"" __worker_console"' not in master
+    assert ':worker_console' not in master
+    assert 'call "%ROOT%run_local_master_control.bat" __worker > "%LOCAL_MASTER_WORKER_LOG%" 2>&1' in script
     assert 'cmd /d /s /v:on /c ""%~f0" __worker"' not in script
+    assert 'cmd /d /v:on /k "call ""%~f0""' not in script
     assert 'Worker failed with exit code !WORKER_EXIT_CODE!' in script
     assert 'Get-Content -LiteralPath $env:LOCAL_MASTER_WORKER_LOG -Tail 40' in script
     assert 'This window is intentionally left open so startup errors stay readable.' in script
     assert 'pause >nul' in script
-    assert 'if defined LOCAL_MASTER_NORMAL_EXIT_FILE if exist "!LOCAL_MASTER_NORMAL_EXIT_FILE!" (' in script
-    assert 'call :write_normal_exit_marker' in script
+    assert 'if defined LOCAL_MASTER_NORMAL_EXIT_FILE (\n  if exist "!LOCAL_MASTER_NORMAL_EXIT_FILE!" (' in script
 
 
 def test_run_local_master_worker_dead_fail_fast_before_health_timeout() -> None:
     script = (ROOT / 'run_local_master_control.bat').read_text(encoding='utf-8')
-    assert 'if defined LOCAL_MASTER_WORKER_FAILED_FILE if exist "%LOCAL_MASTER_WORKER_FAILED_FILE%" goto worker_failed_before_ready' in script
+    wrapper = (ROOT / 'tools' / 'windows_launchers' / 'local_master_worker_console.bat').read_text(encoding='utf-8')
+    worker_dead_check = 'if defined LOCAL_MASTER_WORKER_FAILED_FILE (\n  if exist "%LOCAL_MASTER_WORKER_FAILED_FILE%" goto worker_failed_before_ready\n)'
+    assert worker_dead_check in script
     assert ':worker_failed_before_ready' in script
     assert 'ERROR: Worker exited before dashboard became ready.' in script
-    assert 'Worker exited before dashboard became ready with exit code !WORKER_EXIT_CODE!' in script
-    assert script.index('if defined LOCAL_MASTER_WORKER_FAILED_FILE if exist "%LOCAL_MASTER_WORKER_FAILED_FILE%" goto worker_failed_before_ready') < script.index('if !READY_WAITED! GEQ %MASTER_READY_TIMEOUT_SECONDS% goto master_not_ready')
+    assert 'Worker exited before dashboard became ready with exit code !WORKER_EXIT_CODE!' in wrapper
+    assert script.index(worker_dead_check) < script.index('if !READY_WAITED! GEQ %MASTER_READY_TIMEOUT_SECONDS% goto master_not_ready')
     assert 'Browser was not opened because the worker is no longer running.' in script
 
 
@@ -411,7 +417,7 @@ def test_run_local_master_worker_console_smoke_has_no_cmd_syntax_error() -> None
         }
     )
     result = subprocess.run(
-        [cmd_exe, '/d', '/c', 'call', str(ROOT / 'run_local_master_control.bat'), '__worker_console'],
+        [cmd_exe, '/d', '/c', 'call', str(ROOT / 'tools' / 'windows_launchers' / 'local_master_worker_console.bat')],
         cwd=ROOT,
         env=env,
         capture_output=True,

@@ -68,7 +68,6 @@ if not exist "%MASTER_ENV_FILE%" (
 
 call :load_master_env_vars
 
-if /I "%~1"=="__worker_console" goto worker_console
 if /I "%~1"=="__worker" goto worker
 
 echo [local-master] launcher starting.
@@ -91,7 +90,7 @@ if exist "%LOCAL_MASTER_EXIT_REQUEST%" del /q "%LOCAL_MASTER_EXIT_REQUEST%" >nul
 if exist "%LOCAL_MASTER_NORMAL_EXIT_FILE%" del /q "%LOCAL_MASTER_NORMAL_EXIT_FILE%" >nul 2>nul
 if exist "%LOCAL_MASTER_WORKER_FAILED_FILE%" del /q "%LOCAL_MASTER_WORKER_FAILED_FILE%" >nul 2>nul
 echo [local-master] worker log: %LOCAL_MASTER_WORKER_LOG%
-start "%LOCAL_MASTER_WINDOW_TITLE%" /D "%ROOT%" cmd /d /v:on /k "call ""%~f0"" __worker_console"
+start "%LOCAL_MASTER_WINDOW_TITLE%" /D "%ROOT%" "%ROOT%tools\windows_launchers\local_master_worker_console.bat"
 set "MASTER_READY_TIMEOUT_SECONDS=60"
 set "SCANNER_READY_TIMEOUT_SECONDS=90"
 echo [local-master] waiting for %MASTER_HEALTH_URL% ...
@@ -101,7 +100,9 @@ set /a READY_WAITED=0
 powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $r = Invoke-WebRequest -UseBasicParsing -Uri '%MASTER_HEALTH_URL%' -TimeoutSec 1; if ($r.StatusCode -eq 200 -and (($r.Content | Out-String).Trim() -eq 'ok')) { exit 0 } else { exit 1 } } catch { exit 1 }"
 if not errorlevel 1 goto master_ready
 
-if defined LOCAL_MASTER_WORKER_FAILED_FILE if exist "%LOCAL_MASTER_WORKER_FAILED_FILE%" goto worker_failed_before_ready
+if defined LOCAL_MASTER_WORKER_FAILED_FILE (
+  if exist "%LOCAL_MASTER_WORKER_FAILED_FILE%" goto worker_failed_before_ready
+)
 set /a READY_WAITED+=1
 if !READY_WAITED! GEQ %MASTER_READY_TIMEOUT_SECONDS% goto master_not_ready
 timeout /t 1 /nobreak >nul
@@ -140,7 +141,9 @@ exit /b 1
 :worker_failed_before_ready
 echo [local-master] ERROR: Worker exited before dashboard became ready.
 echo [local-master] Worker startup log: %LOCAL_MASTER_WORKER_LOG%
-if defined LOCAL_MASTER_WORKER_FAILED_FILE if exist "%LOCAL_MASTER_WORKER_FAILED_FILE%" type "%LOCAL_MASTER_WORKER_FAILED_FILE%"
+if defined LOCAL_MASTER_WORKER_FAILED_FILE (
+  if exist "%LOCAL_MASTER_WORKER_FAILED_FILE%" type "%LOCAL_MASTER_WORKER_FAILED_FILE%"
+)
 echo [local-master] Browser was not opened because the worker is no longer running.
 exit /b 1
 
@@ -149,38 +152,6 @@ echo [local-master] ERROR: scanner did not become ready after %SCANNER_READY_TIM
 echo [local-master] Alerts startup may have failed. Check worker startup log: %LOCAL_MASTER_WORKER_LOG%
 echo [local-master] Browser was not opened to avoid showing a misleading dashboard state.
 exit /b 1
-
-:worker_console
-if defined LOCAL_MASTER_WINDOW_TITLE title !LOCAL_MASTER_WINDOW_TITLE!
-echo [local-master] visible worker console started.
-echo [local-master] worker output is being written to:
-echo [local-master]   !LOCAL_MASTER_WORKER_LOG!
-echo [local-master] If startup fails, this window will stay open and print the latest log lines.
-call "%~f0" __worker > "%LOCAL_MASTER_WORKER_LOG%" 2>&1
-set "WORKER_EXIT_CODE=!ERRORLEVEL!"
-if defined LOCAL_MASTER_NORMAL_EXIT_FILE if exist "!LOCAL_MASTER_NORMAL_EXIT_FILE!" (
-  del /q "!LOCAL_MASTER_NORMAL_EXIT_FILE!" >nul 2>nul
-  exit
-)
-if not defined LOCAL_MASTER_WORKER_FAILED_FILE goto worker_console_show_failure
-> "!LOCAL_MASTER_WORKER_FAILED_FILE!" echo Worker exited before dashboard became ready with exit code !WORKER_EXIT_CODE! at !DATE! !TIME!
-
-:worker_console_show_failure
-echo.
-if "!WORKER_EXIT_CODE!"=="0" (
-  echo [local-master] Worker exited before a normal app Exit request.
-) else (
-  echo [local-master] Worker failed with exit code !WORKER_EXIT_CODE!.
-)
-echo [local-master] Startup error log:
-echo [local-master]   !LOCAL_MASTER_WORKER_LOG!
-echo [local-master] Last worker log lines:
-powershell -NoProfile -ExecutionPolicy Bypass -Command "try { Get-Content -LiteralPath $env:LOCAL_MASTER_WORKER_LOG -Tail 40 -ErrorAction Stop } catch { Write-Host $_.Exception.Message }"
-echo.
-echo [local-master] This window is intentionally left open so startup errors stay readable.
-echo [local-master] Press any key to close this window.
-pause >nul
-exit !WORKER_EXIT_CODE!
 
 :worker
 if defined LOCAL_MASTER_WINDOW_TITLE title !LOCAL_MASTER_WINDOW_TITLE!
@@ -227,23 +198,27 @@ echo [local-master] starting uvicorn at !DATE! !TIME!
 "%PYTHON_EXE%" -m uvicorn render.master_service:app --host 127.0.0.1 --port 8000 --log-config "%ROOT%render\local_uvicorn_log_config.json"
 set "EXIT_CODE=!ERRORLEVEL!"
 echo [local-master] uvicorn exited with !EXIT_CODE! at !DATE! !TIME!
-if defined LOCAL_MASTER_EXIT_REQUEST if exist "!LOCAL_MASTER_EXIT_REQUEST!" (
-  echo [local-master] local exit requested; closing worker window.
-  call :write_normal_exit_marker
-  del /q "!LOCAL_MASTER_EXIT_REQUEST!" >nul 2>nul
-  if defined LOCAL_MASTER_EDGE_PROFILE_DIR if exist "!LOCAL_MASTER_EDGE_PROFILE_DIR!\" rmdir /s /q "!LOCAL_MASTER_EDGE_PROFILE_DIR!" >nul 2>nul
-  echo [local-master] closing Local Master Control command prompt.
-  set "LOCAL_MASTER_SHUTDOWN_PS1=%TEMP%\local_master_shutdown_!RANDOM!_!RANDOM!.ps1"
-  > "!LOCAL_MASTER_SHUTDOWN_PS1!" (
-    echo $title = $env:LOCAL_MASTER_WINDOW_TITLE
-    echo Start-Sleep -Milliseconds 750
-    echo if ^([string]::IsNullOrWhiteSpace^($title^)^) { exit 0 }
-    echo $allow = @^('WindowsTerminal','wt','OpenConsole','conhost','cmd'^)
-    echo Get-Process ^| Where-Object { $_.MainWindowTitle -eq $title -and $allow -contains $_.ProcessName } ^| ForEach-Object { try { Stop-Process -Id $_.Id -Force -ErrorAction Stop } catch {} }
-    echo Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
+if defined LOCAL_MASTER_EXIT_REQUEST (
+  if exist "!LOCAL_MASTER_EXIT_REQUEST!" (
+    echo [local-master] local exit requested; closing worker window.
+    call :write_normal_exit_marker
+    del /q "!LOCAL_MASTER_EXIT_REQUEST!" >nul 2>nul
+    if defined LOCAL_MASTER_EDGE_PROFILE_DIR (
+      if exist "!LOCAL_MASTER_EDGE_PROFILE_DIR!\" rmdir /s /q "!LOCAL_MASTER_EDGE_PROFILE_DIR!" >nul 2>nul
+    )
+    echo [local-master] closing Local Master Control command prompt.
+    set "LOCAL_MASTER_SHUTDOWN_PS1=%TEMP%\local_master_shutdown_!RANDOM!_!RANDOM!.ps1"
+    > "!LOCAL_MASTER_SHUTDOWN_PS1!" (
+      echo $title = $env:LOCAL_MASTER_WINDOW_TITLE
+      echo Start-Sleep -Milliseconds 750
+      echo if ^([string]::IsNullOrWhiteSpace^($title^)^) { exit 0 }
+      echo $allow = @^('WindowsTerminal','wt','OpenConsole','conhost','cmd'^)
+      echo Get-Process ^| Where-Object { $_.MainWindowTitle -eq $title -and $allow -contains $_.ProcessName } ^| ForEach-Object { try { Stop-Process -Id $_.Id -Force -ErrorAction Stop } catch {} }
+      echo Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
+    )
+    start "" powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "!LOCAL_MASTER_SHUTDOWN_PS1!"
+    exit 0
   )
-  start "" powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "!LOCAL_MASTER_SHUTDOWN_PS1!"
-  exit 0
 )
 echo [local-master] restarting in 3 seconds. Close this window to stop local master.
 timeout /t 3 /nobreak >nul

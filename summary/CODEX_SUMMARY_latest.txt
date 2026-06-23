@@ -1,17 +1,22 @@
-Completed the remaining Local Trading Tools CMD syntax crash fix.
+Completed the permanent Local Trading Tools startup fix.
 
 Changes made:
-- Removed the fragile nested worker invocation `cmd /d /s /v:on /c ""%~f0" __worker"` from run_local_master_control.bat.
-- Replaced the worker wrapper launch with the direct batch call `call "%~f0" __worker > "%LOCAL_MASTER_WORKER_LOG%" 2>&1`, preserving persistent worker logging without the nested CMD quote crash.
-- Kept the visible crash-console behavior from the previous fix: abnormal startup still leaves the console open, prints the worker log path, tails the worker log, and pauses.
-- Kept the worker-dead fail-fast marker path so launcher preflight stops quickly when the worker exits before dashboard readiness.
-- Updated tests so they reject the broken nested CMD syntax instead of asserting it exists.
-- Added a Windows BAT smoke test that runs run_local_master_control.bat __worker_console under a controlled one-shot exit and asserts `The syntax of the command is incorrect.` is absent from both console output and the worker log.
+- Removed the recursive worker-console self-call from run_local_master_control.bat.
+- Removed the __worker_console dispatch/label from run_local_master_control.bat.
+- Added tools/windows_launchers/local_master_worker_console.bat as the dedicated visible worker-console wrapper.
+- Parent launch now starts the dedicated wrapper directly:
+  start "%LOCAL_MASTER_WINDOW_TITLE%" /D "%ROOT%" "%ROOT%tools\windows_launchers\local_master_worker_console.bat"
+- The wrapper sets the repo root safely, creates logs\, calls run_local_master_control.bat __worker, writes all worker output to logs\LocalTradingTools-worker-latest.log, prints the log tail on abnormal failure, and pauses only on abnormal failure.
+- Normal app Exit still writes the normal-exit marker and closes the worker console automatically.
+- Removed the fragile nested cmd /c and cmd /k self-call patterns from the worker startup path.
+- Replaced remaining worker-startup double-IF checks with nested conditions around the worker-failed marker and normal-exit marker.
+- Preserved launcher crash logging and worker-log tail reporting through logs\LocalTradingTools-launch-latest.log and logs\LocalTradingTools-worker-latest.log.
+- Updated launcher tests to require the dedicated wrapper file, reject recursive %~f0 worker-console calls, reject nested cmd self-call patterns, require persistent worker logging, require visible failure output, and keep the worker-dead fail-fast checks.
 
 Verification run:
-- Controlled direct BAT check: run_local_master_control.bat __worker_console
+- Controlled wrapper smoke: tools\windows_launchers\local_master_worker_console.bat
   Result: exited 0 with worker output captured; did not print `The syntax of the command is incorrect.`
-- Controlled direct BAT check: run_local_master_control.bat __worker
+- Controlled direct worker smoke: run_local_master_control.bat __worker
   Result: exited 0; did not print `The syntax of the command is incorrect.`
 - python -m pytest tests\test_windows_launchers.py -q
   Result: 36 passed.

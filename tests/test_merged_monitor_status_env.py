@@ -387,7 +387,7 @@ def test_run_local_master_control_bat_uses_local_autostart() -> None:
     assert 'set "APP_PROFILE=local"' in content
     assert 'set "AUTOSTART_SCRIPTS=bybit_monitor,oanda_monitor,fxweekend-clone"' in content
     assert 'set "SCANNER_LOCAL_UI_MODE=1"' not in content
-    assert 'if /I "%~1"=="__worker_console" goto worker_console' in content
+    assert 'if /I "%~1"=="__worker_console" goto worker_console' not in content
     assert 'if /I "%~1"=="__worker" goto worker' in content
     assert ":worker" in content
     assert ":restart_master" in content
@@ -396,14 +396,17 @@ def test_run_local_master_control_bat_uses_local_autostart() -> None:
     assert '/trading-journal' not in content
     assert "cmd /v:on /k ^" not in content
     assert '"set APP_PROFILE=%APP_PROFILE% && ^' not in content
-    worker_start = 'cmd /d /v:on /k "call ""%~f0"" __worker_console"'
+    worker_start = 'start "%LOCAL_MASTER_WINDOW_TITLE%" /D "%ROOT%" "%ROOT%tools\\windows_launchers\\local_master_worker_console.bat"'
     assert worker_start in content
     assert 'set "LOCAL_MASTER_WORKER_LOG=%LOG_DIR%\\LocalTradingTools-worker-latest.log"' in content
     assert 'set "LOCAL_MASTER_WORKER_FAILED_FILE=%TEMP%\\LocalTradingToolsExit-%LOCAL_LAUNCH_TS%.failed"' in content
-    assert 'call "%~f0" __worker > "%LOCAL_MASTER_WORKER_LOG%" 2>&1' in content
+    assert 'cmd /d /v:on /k "call ""%~f0"" __worker_console"' not in content
+    assert ':worker_console' not in content
     assert 'cmd /d /s /v:on /c ""%~f0" __worker"' not in content
     assert 'ERROR: Worker exited before dashboard became ready.' in content
-    assert 'This window is intentionally left open so startup errors stay readable.' in content
+    wrapper = (ROOT / "tools" / "windows_launchers" / "local_master_worker_console.bat").read_text(encoding="utf-8")
+    assert 'call "%ROOT%run_local_master_control.bat" __worker > "%LOCAL_MASTER_WORKER_LOG%" 2>&1' in wrapper
+    assert 'This window is intentionally left open so startup errors stay readable.' in wrapper
     assert "http://127.0.0.1:8000/health" in content
     assert "MASTER_READY_TIMEOUT_SECONDS" in content
     assert "powershell" in content
@@ -426,7 +429,7 @@ def test_run_local_master_control_bat_uses_local_autostart() -> None:
 
 def test_run_local_master_control_waits_for_health_before_opening_browser() -> None:
     content = (ROOT / "run_local_master_control.bat").read_text(encoding="utf-8")
-    worker_start_idx = content.index('cmd /d /v:on /k "call ""%~f0"" __worker_console"')
+    worker_start_idx = content.index('start "%LOCAL_MASTER_WINDOW_TITLE%" /D "%ROOT%" "%ROOT%tools\\windows_launchers\\local_master_worker_console.bat"')
     wait_idx = content.index(":wait_for_master_ready")
     assert "MASTER_BROWSER_URL" in content
     assert "local_launch=" in content
