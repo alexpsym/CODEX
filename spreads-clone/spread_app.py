@@ -341,17 +341,26 @@ PAGE_TEMPLATE = """
     return {};
   }
 
+  function spreadNumber(data) {
+    const raw = data?.spread_pct;
+    if (raw === null || raw === undefined || raw === '') return NaN;
+    const value = Number(raw);
+    return Number.isFinite(value) && value > 0 ? value : NaN;
+  }
+
   function brokerLine(label, data) {
     const category = data?.category || 'unavailable';
-    const spreadValue = Number(data?.spread_pct);
+    const spreadValue = spreadNumber(data);
     const error = scalarMessage(data?.error || data?.message || data?.reason);
     const sourceTime = scalarMessage(data?.updated_at);
     let value = scalarMessage(data?.display);
+    const unavailable = category === 'unavailable' || !Number.isFinite(spreadValue);
+    if (unavailable) value = '';
     if (!value && Number.isFinite(spreadValue)) value = `${spreadValue.toFixed(4)}%`;
-    if (!value) value = error ? 'Unavailable' : 'n/a';
+    if (!value) value = error || unavailable ? 'Unavailable' : 'n/a';
     const titleText = error || (sourceTime ? `Source timestamp: ${sourceTime}` : '');
     const title = titleText ? ` title="${escapeHtml(titleText)}"` : '';
-    const errorLine = error && !Number.isFinite(spreadValue)
+    const errorLine = error && unavailable
       ? `<span class="broker-error">${escapeHtml(error)}</span>`
       : '';
     return `<div class="broker-line spread-${escapeHtml(category)}"${title}>` +
@@ -371,7 +380,7 @@ PAGE_TEMPLATE = """
     const values = [
       brokerData(cell, 'oanda'),
       brokerData(cell, 'pepperstone_razor', 'pepperstone'),
-    ].map((item) => Number(item?.spread_pct)).filter(Number.isFinite);
+    ].map((item) => spreadNumber(item)).filter(Number.isFinite);
     return values.length ? Math.max(...values) : null;
   }
 

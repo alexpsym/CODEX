@@ -144,6 +144,7 @@ setTimeout(() => {
     data = json.loads(result.stdout.strip().splitlines()[-1])
     payload = data["payload"]
     assert payload["risk_mode"] == "fixed_aud"
+    assert payload["broker"] == "oanda"
     assert str(payload["risk_value"]) == "10"
     assert "risk_mode=fixed_aud" in data["summary"]
     assert "risk_value=10" in data["summary"]
@@ -151,6 +152,76 @@ setTimeout(() => {
     assert "test=no" in data["summary"]
     assert "timeframe=15m" in data["summary"]
     assert "pending_webhook_id=" in data["summary"]
+
+
+def test_fx_broker_toggle_is_hidden_for_crypto_and_posts_pepperstone() -> None:
+    node = shutil.which("node")
+    assert node, "node is required for JS behavior test"
+    harness = r'''
+const fs = require('fs');
+const source = fs.readFileSync(process.argv[1], 'utf8');
+class E {
+  constructor(id) { this.id=id; this.value=''; this.textContent=''; this.innerHTML=''; this.dataset={}; this.style={}; this.listeners={}; this.buttons=[]; this.classList={toggle:()=>{},add:()=>{},remove:()=>{}}; this.disabled=false; }
+  addEventListener(e,cb){ this.listeners[e]=cb; }
+  querySelectorAll(sel){ return sel==='button' ? this.buttons : []; }
+}
+class B {
+  constructor(v){ this.dataset={v}; this.listeners={}; this.classList={toggle:()=>{},add:()=>{},remove:()=>{}}; this.disabled=false; this._attrs={}; this.title=''; }
+  addEventListener(e,cb){ this.listeners[e]=cb; }
+  click(){ if(this.listeners.click) this.listeners.click(); }
+  setAttribute(k,v){ this._attrs[k]=String(v); }
+  getAttribute(k){ return this._attrs[k]; }
+  removeAttribute(k){ delete this._attrs[k]; }
+}
+const ids=['calc-error','calc-error-debug','calc-success','calc-results','calc-request-summary','calc-canonical-symbol','calc-journal-summary','calc-instrument-specs','risk-toggle-wrap','broker-toggle-wrap','calc-webhook-panel','calc-webhook-url','calc-webhook-json','calc-webhook-copy','calc-webhook-copy-url','risk-toggle','calc-risk-label','broker-toggle','limit-wrap','account-toggle','asset-toggle','side-toggle','order-toggle','webhook-toggle','test-toggle','timeframe-toggle','calc-symbol','calc-limit','calc-sl-ticks','calc-rr','calc-risk','calc-quote','calc-submit','calc-pepperstone-set','calc-quote-status','calc-webhook-status'];
+const el=Object.fromEntries(ids.map((id)=>[id,new E(id)]));
+const mk=(vals)=>vals.map((v)=>new B(v));
+el['risk-toggle'].buttons=mk(['fixed_aud','percent']);
+el['asset-toggle'].buttons=mk(['crypto','fx']);
+el['broker-toggle'].buttons=mk(['oanda','pepperstone']);
+el['account-toggle'].buttons=mk(['live','demo']);
+el['side-toggle'].buttons=mk(['buy','sell']);
+el['order-toggle'].buttons=mk(['market','limit']);
+el['webhook-toggle'].buttons=mk(['no','yes']);
+el['test-toggle'].buttons=mk(['no','yes']);
+el['timeframe-toggle'].buttons=[];
+el['calc-symbol'].value='EUR_USD';
+el['calc-limit'].value='1.1002';
+el['calc-sl-ticks'].value='35';
+el['calc-rr'].value='2';
+el['calc-risk'].value='10';
+let quotePayload=null;
+global.fetch=async (url,opts={})=>{
+  if(url.includes('/api/calculator/bootstrap')) return {ok:true,status:200,statusText:'OK',headers:{get:()=> 'application/json'},text:async()=>JSON.stringify({app_profile:'local',calculator_js_sha256_12:'abc123def456',render_calculator_base_url_configured:true,webhook:{available:true}})};
+  if(url.includes('/api/calculator/quote')){ quotePayload=JSON.parse(opts.body||'{}'); return {ok:true,status:200,statusText:'OK',headers:{get:()=> 'application/json'},text:async()=>JSON.stringify({broker:'pepperstone',symbol:'EUR_USD',tick_size:'0.00001',entry_price:'1.1002',stop_price:'1.09985',target_price:'1.10125',target_distance:'0.00105',quantity:'1000',estimated_fees_or_spread:'1',estimated_total_loss:'10',estimated_total_loss_aud:'10',estimated_reward:'20'})}; }
+  return {ok:true,status:200,statusText:'OK',headers:{get:()=> 'application/json'},text:async()=>JSON.stringify({status:'no_data'})};
+};
+global.document={getElementById:(id)=>el[id]};
+global.navigator={clipboard:{writeText:async()=>{}}};
+global.setTimeout=(fn)=>{ fn(); return 1; };
+global.clearTimeout=()=>{};
+global.setInterval=()=>1;
+global.clearInterval=()=>{};
+eval(source);
+(async()=>{
+  await Promise.resolve(); await Promise.resolve();
+  const hiddenOnCrypto = el['broker-toggle-wrap'].style.display === 'none';
+  el['asset-toggle'].buttons.find((b)=>b.dataset.v==='fx').click();
+  const visibleOnFx = el['broker-toggle-wrap'].style.display === '';
+  el['broker-toggle'].buttons.find((b)=>b.dataset.v==='pepperstone').click();
+  el['order-toggle'].buttons.find((b)=>b.dataset.v==='limit').click();
+  await el['calc-quote'].listeners.click();
+  console.log(JSON.stringify({hiddenOnCrypto,visibleOnFx,broker:quotePayload?.broker,setButton:el['calc-pepperstone-set'].style.display,submit:el['calc-submit'].style.display,summary:el['calc-request-summary'].textContent}));
+})();
+'''
+    out = subprocess.check_output([node, "-e", harness, str(JS_PATH)], text=True)
+    data = json.loads(out.strip().splitlines()[-1])
+    assert data["hiddenOnCrypto"] is True
+    assert data["visibleOnFx"] is True
+    assert data["broker"] == "pepperstone"
+    assert data["setButton"] == ""
+    assert data["submit"] == "none"
+    assert "broker=pepperstone" in data["summary"]
 
 
 def test_submit_visibility_tracks_quote_validity_and_webhook_mode() -> None:

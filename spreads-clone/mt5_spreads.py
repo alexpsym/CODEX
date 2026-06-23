@@ -13,6 +13,8 @@ from symbols import resolve_mt5_symbol
 
 
 DEFAULT_RAZOR_COMMISSION_PER_LOT_PER_SIDE = 3.50
+DEFAULT_MT5_INITIALIZE_TIMEOUT_MS = 9000
+MT5_AUTHORIZATION_FAILED_MESSAGE = "MT5 authorization failed. Log into the Pepperstone MT5 terminal, then refresh."
 
 
 def _import_mt5() -> Any:
@@ -24,6 +26,35 @@ def _last_error(mt5: Any) -> str:
         return str(mt5.last_error())
     except Exception:
         return "unknown MT5 error"
+
+
+def _mt5_initialize_timeout_ms() -> int:
+    raw = os.getenv("PEPPERSTONE_MT5_INIT_TIMEOUT_MS") or os.getenv("MT5_INITIALIZE_TIMEOUT_MS") or str(DEFAULT_MT5_INITIALIZE_TIMEOUT_MS)
+    try:
+        value = int(float(raw))
+    except (TypeError, ValueError):
+        return DEFAULT_MT5_INITIALIZE_TIMEOUT_MS
+    return max(1000, min(value, 30000))
+
+
+def _is_auth_error_text(message: str) -> bool:
+    lower = str(message or "").lower()
+    return "authorization" in lower or "not logged in" in lower or "login" in lower
+
+
+def _format_initialize_error(mt5: Any) -> str:
+    message = _last_error(mt5)
+    if _is_auth_error_text(message):
+        return MT5_AUTHORIZATION_FAILED_MESSAGE
+    return f"MT5 terminal initialize failed: {message}"
+
+
+def _initialize_mt5(mt5: Any) -> bool:
+    timeout_ms = _mt5_initialize_timeout_ms()
+    try:
+        return bool(mt5.initialize(timeout=timeout_ms))
+    except TypeError:
+        return bool(mt5.initialize())
 
 
 def _ensure_utc(value: datetime) -> datetime:
@@ -57,8 +88,8 @@ def preflight_mt5_environment(mt5_module: Optional[Any] = None) -> Dict[str, obj
     initialized_here = mt5_module is None
     if initialized_here:
         try:
-            if not mt5.initialize():
-                return {"ok": False, "error": f"MT5 terminal initialize failed: {_last_error(mt5)}"}
+            if not _initialize_mt5(mt5):
+                return {"ok": False, "error": _format_initialize_error(mt5)}
         except Exception as exc:
             return {"ok": False, "error": f"MT5 terminal initialize failed: {exc}"}
     try:
@@ -67,7 +98,7 @@ def preflight_mt5_environment(mt5_module: Optional[Any] = None) -> Dict[str, obj
         except Exception as exc:
             return {"ok": False, "error": f"MT5 account check failed: {exc}"}
         if account_info is None:
-            return {"ok": False, "error": f"MT5 terminal is not logged in: {_last_error(mt5)}"}
+            return {"ok": False, "error": MT5_AUTHORIZATION_FAILED_MESSAGE}
         try:
             symbols = mt5.symbols_get()
         except Exception as exc:
@@ -231,8 +262,12 @@ def aggregate_tick_spreads(
 def available_mt5_symbols(mt5_module: Optional[Any] = None) -> List[str]:
     mt5 = mt5_module or _import_mt5()
     initialized_here = mt5_module is None
-    if initialized_here and not mt5.initialize():
-        return []
+    if initialized_here:
+        try:
+            if not _initialize_mt5(mt5):
+                return []
+        except Exception:
+            return []
     try:
         symbols = mt5.symbols_get()
         if symbols is None:
@@ -257,13 +292,17 @@ def fetch_mt5_spread_samples(
 ) -> Dict[str, object]:
     mt5 = mt5_module or _import_mt5()
     initialized_here = mt5_module is None
-    if initialized_here and not mt5.initialize():
-        return {"error": f"MT5 terminal initialize failed: {_last_error(mt5)}"}
+    if initialized_here:
+        try:
+            if not _initialize_mt5(mt5):
+                return {"error": _format_initialize_error(mt5)}
+        except Exception as exc:
+            return {"error": f"MT5 terminal initialize failed: {exc}"}
 
     try:
         account_info = mt5.account_info()
         if account_info is None:
-            return {"error": f"MT5 terminal is not logged in: {_last_error(mt5)}"}
+            return {"error": MT5_AUTHORIZATION_FAILED_MESSAGE}
 
         symbol_infos = mt5.symbols_get()
         if symbol_infos is None:

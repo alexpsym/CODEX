@@ -13568,10 +13568,10 @@ def _normalize_ema(value: object) -> str:
     if text in {"20", "20 ema", "ema 20"}:
         return "20"
     if text in {"yes", "y", "true", "1"}:
-        return "9"
+        return "Yes"
     if text in {"no", "n", "false", "0"}:
-        return ""
-    raise ValueError("Invalid EMA. Expected one of: None, 9, 20.")
+        return "No"
+    raise ValueError("Invalid EMA. Expected one of: None, Yes, No, 9, 20.")
 
 
 def _normalize_round_number(value: object) -> str:
@@ -19009,6 +19009,10 @@ CALCULATOR_TEMPLATE = """<!doctype html>
         <label>Asset</label>
         <div class="group toggle" id="asset-toggle"><button type="button" data-v="crypto" class="active">Crypto</button><button type="button" data-v="fx">FX</button></div>
       </div>
+      <div class="row" id="broker-toggle-wrap" style="display:none">
+        <label>Broker</label>
+        <div class="group toggle" id="broker-toggle"><button type="button" data-v="oanda" class="active">OANDA</button><button type="button" data-v="pepperstone">Pepperstone</button></div>
+      </div>
       <div class="row">
         <label>Side</label>
         <div class="group toggle" id="side-toggle"><button type="button" data-v="buy" class="active">Buy</button><button type="button" data-v="sell">Sell</button></div>
@@ -19083,6 +19087,7 @@ CALCULATOR_TEMPLATE = """<!doctype html>
         <div class="group">
           <button id="calc-quote" type="button">Calculate</button>
           <button id="calc-submit" type="button" style="display:none">Submit Order</button>
+          <button id="calc-pepperstone-set" type="button" style="display:none">Download .set</button>
         </div>
         <div id="calc-quote-status" class="muted"></div>
       </div>
@@ -19147,6 +19152,130 @@ def _floor_to_precision(value: Decimal, precision: int) -> Decimal:
 def _fmt_dec(value: Decimal) -> str:
     text = format(value, "f")
     return text.rstrip("0").rstrip(".") if "." in text else text
+
+
+PEPPERSTONE_TRADER_SET_INPUT_NAMES = (
+    "Strategy",
+    "OrdersEnabled",
+    "RiskAUD_Target",
+    "RiskAUD_Min",
+    "RiskAUD_Max",
+    "IncludeCommissionInRisk",
+    "CommissionPerLotPerSide",
+    "RiskSlippageBufferPoints",
+    "SlippagePoints",
+    "SL_DistancePoints",
+    "AutoTP_NetRR_Enabled",
+    "NetRR_Target",
+    "TP_DistancePoints",
+    "StandardLimitSide",
+    "StandardLimitEntryPrice",
+    "MagicNumber",
+    "EnforceOneTradeAtATime",
+)
+
+
+def _pepperstone_trader_set_bool(value: bool) -> str:
+    return "true" if value else "false"
+
+
+def _pepperstone_set_decimal(value: Decimal, *, places: Optional[str] = None) -> str:
+    if places:
+        value = value.quantize(Decimal(places), rounding=ROUND_HALF_UP)
+    return _fmt_dec(value)
+
+
+def _pepperstone_set_positive_int(value: Decimal, field: str) -> int:
+    try:
+        integral = int(value.to_integral_exact())
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"{field} must be a whole number.") from exc
+    if integral <= 0:
+        raise HTTPException(status_code=400, detail=f"{field} must be greater than zero.")
+    return integral
+
+
+def _pepperstone_set_risk_target(payload: Dict[str, object]) -> Decimal:
+    risk_mode = str(payload.get("risk_mode") or "").strip().lower()
+    if risk_mode == "fixed_aud":
+        return _dec(payload.get("risk_value"), "risk_value")
+    for key in ("risk_aud", "estimated_total_loss_aud", "estimated_total_loss", "risk_amount_home"):
+        raw = payload.get(key)
+        if raw is None or str(raw).strip() == "":
+            continue
+        value = _dec(raw, key)
+        if value > 0:
+            return value
+    raise HTTPException(
+        status_code=400,
+        detail="Pepperstone .set export needs fixed AUD risk or a calculated AUD risk amount.",
+    )
+
+
+def _build_pepperstone_trader_set(payload: Dict[str, object]) -> Tuple[str, str]:
+    asset = str(payload.get("asset") or "").strip().lower()
+    broker = str(payload.get("broker") or "").strip().lower()
+    if asset != "fx" or broker != "pepperstone":
+        raise HTTPException(status_code=400, detail="Pepperstone .set export is only available for FX + Pepperstone.")
+
+    order_type = str(payload.get("order_type") or "").strip().lower()
+    if order_type != "limit":
+        raise HTTPException(
+            status_code=400,
+            detail="Pepperstone .set generation is available for limit orders only. Market orders are blocked because Trader.mq5 has no safe one-shot manual market strategy.",
+        )
+
+    side = str(payload.get("side") or payload.get("action") or "").strip().lower()
+    if side not in {"buy", "sell"}:
+        raise HTTPException(status_code=400, detail="side must be buy or sell.")
+
+    entry_raw = payload.get("entry_price") or payload.get("planned_entry_price") or payload.get("StandardLimitEntryPrice")
+    entry = _dec(entry_raw, "entry_price")
+    if entry <= 0:
+        raise HTTPException(status_code=400, detail="entry_price must be greater than zero.")
+
+    stop_ticks = _pepperstone_set_positive_int(_dec(payload.get("stop_loss_ticks") or payload.get("submitted_stop_loss_ticks"), "stop_loss_ticks"), "stop_loss_ticks")
+    rr = _dec(payload.get("risk_reward") or payload.get("requested_rr_net") or payload.get("rr"), "risk_reward")
+    if rr <= 0:
+        raise HTTPException(status_code=400, detail="risk_reward must be greater than zero.")
+
+    risk_target = _pepperstone_set_risk_target(payload)
+    if risk_target <= 0:
+        raise HTTPException(status_code=400, detail="RiskAUD_Target must be greater than zero.")
+    risk_min = risk_target * Decimal("0.90")
+    risk_max = risk_target * Decimal("1.20")
+    tp_points = max(1, int((Decimal(stop_ticks) * rr).to_integral_value(rounding=ROUND_HALF_UP)))
+
+    values = {
+        "Strategy": "2",
+        "OrdersEnabled": _pepperstone_trader_set_bool(True),
+        "RiskAUD_Target": _pepperstone_set_decimal(risk_target, places="0.01"),
+        "RiskAUD_Min": _pepperstone_set_decimal(risk_min, places="0.01"),
+        "RiskAUD_Max": _pepperstone_set_decimal(risk_max, places="0.01"),
+        "IncludeCommissionInRisk": _pepperstone_trader_set_bool(True),
+        "CommissionPerLotPerSide": _pepperstone_set_decimal(Decimal(str(os.getenv("PEPPERSTONE_TRADER_COMMISSION_PER_LOT_PER_SIDE", "3.50") or "3.50")), places="0.01"),
+        "RiskSlippageBufferPoints": str(int(os.getenv("PEPPERSTONE_TRADER_RISK_SLIPPAGE_BUFFER_POINTS", "50") or "50")),
+        "SlippagePoints": str(int(os.getenv("PEPPERSTONE_TRADER_SLIPPAGE_POINTS", "10") or "10")),
+        "SL_DistancePoints": str(stop_ticks),
+        "AutoTP_NetRR_Enabled": _pepperstone_trader_set_bool(True),
+        "NetRR_Target": _pepperstone_set_decimal(rr, places="0.01"),
+        "TP_DistancePoints": str(tp_points),
+        "StandardLimitSide": "0" if side == "buy" else "1",
+        "StandardLimitEntryPrice": _fmt_dec(entry),
+        "MagicNumber": str(int(os.getenv("PEPPERSTONE_TRADER_MAGIC_NUMBER", "91001") or "91001")),
+        "EnforceOneTradeAtATime": _pepperstone_trader_set_bool(True),
+    }
+    unknown = sorted(set(values) - set(PEPPERSTONE_TRADER_SET_INPUT_NAMES))
+    if unknown:
+        raise HTTPException(status_code=500, detail=f"Unexpected Trader.mq5 .set keys: {', '.join(unknown)}")
+
+    content = "\n".join(f"{key}={values[key]}" for key in PEPPERSTONE_TRADER_SET_INPUT_NAMES) + "\n"
+    symbol = str(payload.get("symbol") or "FX").strip().upper().replace("/", "_")
+    symbol = re.sub(r"[^A-Z0-9_]+", "_", symbol).strip("_") or "FX"
+    side_label = "BUY" if side == "buy" else "SELL"
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    filename = f"Pepperstone_Trader_{symbol}_{side_label}_{stamp}.set"
+    return content, filename
 
 
 def _validate_bybit_linear_levels_before_submit(
@@ -19961,6 +20090,16 @@ async def calculator_prewarm_account(payload: Dict[str, object] = Body(default={
     return await calculator_prewarm(account_payload)
 
 
+@app.post("/api/calculator/pepperstone-set")
+async def calculator_pepperstone_set(payload: Dict[str, object] = Body(default={})) -> Response:
+    content, filename = _build_pepperstone_trader_set(dict(payload or {}))
+    return Response(
+        content=content,
+        media_type="text/plain; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 @app.post("/api/calculator/quote")
 async def calculator_quote(request: Request, payload: Dict[str, object] = Body(default={})) -> JSONResponse:
     if isinstance(request, dict) and (not isinstance(payload, dict) or not payload):
@@ -19991,6 +20130,7 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
         side = str(payload.get("side") or "buy").strip().lower()
         order_type = str(payload.get("order_type") or "market").strip().lower()
         risk_mode = str(payload.get("risk_mode") or "percent").strip().lower()
+        broker = str(payload.get("broker") or "").strip().lower()
         symbol_in = str(payload.get("symbol") or "").strip()
         target_mode = str(payload.get("target_mode") or "").strip().lower()
         webhook_mode = str(payload.get("webhook") or payload.get("webhook_mode") or "no").strip().lower()
@@ -20011,6 +20151,17 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
             raise HTTPException(status_code=400, detail="target_mode must be rr or ticks.")
         if webhook_mode not in {"yes", "no", "true", "false", "1", "0"}:
             raise HTTPException(status_code=400, detail="webhook must be yes or no.")
+        if asset == "fx":
+            broker = broker or "oanda"
+            if broker not in {"oanda", "pepperstone"}:
+                raise HTTPException(status_code=400, detail="broker must be oanda or pepperstone for FX.")
+            if broker == "pepperstone" and order_type != "limit":
+                raise HTTPException(
+                    status_code=400,
+                    detail="Pepperstone .set generation is available for limit orders only. Market orders are blocked because Trader.mq5 has no safe one-shot manual market strategy.",
+                )
+        elif asset == "crypto":
+            broker = "bybit"
 
         stop_ticks = _dec(payload.get("stop_loss_ticks"), "stop_loss_ticks")
         if stop_ticks <= 0:
@@ -20035,6 +20186,8 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
                 raise HTTPException(status_code=400, detail="take_profit_ticks must be greater than zero when target_mode=ticks.")
 
         webhook_enabled = webhook_mode in {"yes", "true", "1"}
+        if asset == "fx" and broker == "pepperstone" and webhook_enabled:
+            raise HTTPException(status_code=400, detail="Pepperstone .set export does not use webhook mode. Select Webhook=No and download the MT5 .set file.")
         quote_deadline = quote_started + CALCULATOR_QUOTE_TIMEOUT_S
         try:
             normalized_setup = _normalize_setup(payload.get("setup"))
@@ -20045,7 +20198,7 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-        submitted_debug = _calculator_safe_submitted_payload({"asset": asset, "account": account, "submitted_symbol": symbol_in, "webhook": webhook_mode, "test": "yes" if is_test_trade else "no", "timeframe": _normalize_journal_timeframe(payload.get("timeframe") or ""), "risk_mode": risk_mode, "risk_value": str(payload.get("risk_value") or ""), "stop_loss_ticks": str(payload.get("stop_loss_ticks") or ""), "order_type": order_type, "side": side})
+        submitted_debug = _calculator_safe_submitted_payload({"asset": asset, "broker": broker, "account": account, "submitted_symbol": symbol_in, "webhook": webhook_mode, "test": "yes" if is_test_trade else "no", "timeframe": _normalize_journal_timeframe(payload.get("timeframe") or ""), "risk_mode": risk_mode, "risk_value": str(payload.get("risk_value") or ""), "stop_loss_ticks": str(payload.get("stop_loss_ticks") or ""), "order_type": order_type, "side": side})
         webhook_capability = _calculator_webhook_capability(request)
         webhook_base_url = str(webhook_capability.get("public_webhook_base_url") or "").strip()
         webhook_endpoint_url = str(webhook_capability.get("webhook_endpoint_url") or "").strip()
@@ -20650,7 +20803,7 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
             spread_home = spread_quote * loss_factor * units
             reward_home = max(Decimal("0"), (abs(tp - entry) - spread_quote) * gain_factor * units)
             response_payload = {
-                    "broker": "oanda",
+                    "broker": broker,
                     "symbol": symbol,
                     "tick_size": _fmt_dec(tick_size),
                     "entry_price": _fmt_dec_by_precision(entry, tick_size),

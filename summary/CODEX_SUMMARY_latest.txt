@@ -1,34 +1,39 @@
-Completed the permanent Local Trading Tools startup fix.
+Completed the Pine/session/spread/Pepperstone calculator fix.
 
 Changes made:
-- Removed the recursive worker-console self-call from run_local_master_control.bat.
-- Removed the __worker_console dispatch/label from run_local_master_control.bat.
-- Added tools/windows_launchers/local_master_worker_console.bat as the dedicated visible worker-console wrapper.
-- Parent launch now starts the dedicated wrapper directly:
-  start "%LOCAL_MASTER_WINDOW_TITLE%" /D "%ROOT%" "%ROOT%tools\windows_launchers\local_master_worker_console.bat"
-- The wrapper sets the repo root safely, creates logs\, calls run_local_master_control.bat __worker, writes all worker output to logs\LocalTradingTools-worker-latest.log, prints the log tail on abnormal failure, and pauses only on abnormal failure.
-- Normal app Exit still writes the normal-exit marker and closes the worker console automatically.
-- Removed the fragile nested cmd /c and cmd /k self-call patterns from the worker startup path.
-- Replaced remaining worker-startup double-IF checks with nested conditions around the worker-failed marker and normal-exit marker.
-- Preserved launcher crash logging and worker-log tail reporting through logs\LocalTradingTools-launch-latest.log and logs\LocalTradingTools-worker-latest.log.
-- Updated launcher tests to require the dedicated wrapper file, reject recursive %~f0 worker-console calls, reject nested cmd self-call patterns, require persistent worker logging, require visible failure output, and keep the worker-dead fail-fast checks.
+- Updated pinescripts/custom_indicator.pine:
+  - Removed ATR inputs, ta.atr calculation, and ATR plotting entirely.
+  - Gated Volume, VWAP, VWAP offsets, funding lines, and option expiry lines to crypto charts only via syminfo.type == "crypto".
+  - Added readable Funding and OP EX labels and bounded label arrays alongside line arrays.
+  - Added separate session open/close visibility controls while preserving Sydney, Tokyo, London, and New York toggles.
+  - Added session labels such as Sydney Open and London Close and bounded session labels to avoid object leaks.
+  - Increased max_labels_count.
+- Updated the spread monitor:
+  - Treats spread_pct <= 0 or missing as unavailable in broker_cell and frontend rendering.
+  - Ignores stale Pepperstone zero cached records instead of displaying 0.0000%.
+  - Added MT5 initialize timeout handling using PEPPERSTONE_MT5_INIT_TIMEOUT_MS / MT5_INITIALIZE_TIMEOUT_MS, default 9000 ms.
+  - Uses the timeout-aware initializer in preflight_mt5_environment(), available_mt5_symbols(), and fetch_mt5_spread_samples().
+  - Returns the actionable Pepperstone auth message: MT5 authorization failed. Log into the Pepperstone MT5 terminal, then refresh.
+  - Preserved OANDA spread behavior.
+- Updated the calculator:
+  - Added an FX-only Broker toggle with OANDA default and Pepperstone option.
+  - Preserved the existing OANDA quote path by default.
+  - Added /api/calculator/pepperstone-set for MT5 Expert Set downloads.
+  - Pepperstone .set export is limit-order only; market .set generation is blocked with a clear message because Trader.mq5 has no safe one-shot manual market strategy.
+  - Generated .set files use only Trader.mq5 input names and map StandardLimitSide 0 for buy limit and 1 for sell limit.
+  - SL_DistancePoints equals calculator stop_loss_ticks; NetRR_Target equals calculator risk_reward.
+  - Added a Download .set button after Pepperstone FX limit calculations.
+- Updated tests:
+  - Added static Pine regressions for ATR removal, crypto-only gates, timing labels, and session controls.
+  - Added spread monitor regressions for zero/unavailable handling and stale Pepperstone zero cache records.
+  - Added MT5 timeout/auth regression coverage.
+  - Added calculator broker-toggle behavior and Pepperstone .set export tests.
+  - Kept a compatibility fix so legacy EMA yes/no quality criteria still normalize as Yes/No while 9/20 EMA values remain supported.
 
 Verification run:
-- Controlled wrapper smoke: tools\windows_launchers\local_master_worker_console.bat
-  Result: exited 0 with worker output captured; did not print `The syntax of the command is incorrect.`
-- Controlled direct worker smoke: run_local_master_control.bat __worker
-  Result: exited 0; did not print `The syntax of the command is incorrect.`
-- python -m pytest tests\test_windows_launchers.py -q
-  Result: 36 passed.
-- python -m pytest tests\test_merged_monitor_status_env.py -q
-  Result: failed only because this environment cannot scan C:\Users\User\AppData\Local\Temp\pytest-of-User for pytest temp dirs (PermissionError [WinError 5]).
-- python -m pytest tests\test_merged_monitor_status_env.py -q --basetemp .pytest_tmp_merged_monitor
-  Result: 42 passed, 4 warnings.
-- build_windows_launchers.bat
-  Result: Successfully created C:\Users\User\Documents\GPT\CODEX-master\Local Trading Tools.exe with TT.ico resolved.
+- python -m pytest tests/test_calculator_js_behavior.py tests/test_calculator_js_syntax.py tests/test_master_service_calculator_api.py tests/test_spread_core.py tests/test_spread_monitor_dashboard.py tests/test_mt5_spread_fetch.py tests/test_custom_indicator_pine.py -q
+  Result: 150 passed, 12 existing FastAPI deprecation warnings.
 
 Notes:
-- No Trading Journal workbook or layout files were changed.
-- Local ignored/generated files remain uncommitted, including Local Trading Tools.exe, logs, .pytest_tmp_launcher_bat, .pytest_tmp_launcher_smoke, .pytest_tmp_merged_monitor, caches, render/data runtime state, and state_backup.json.
-- An unrelated modified file under custom instructions/ remains untouched and is intentionally kept out of this launcher fix commit.
-- This summary file was written before running PATCH_DESKTOP_PUSH.bat as requested; the final Codex response reports the push result from PATCH_DESKTOP_PUSH-latest.log.
+- render/data runtime state files and state_backup.json were dirtied by the calculator tests; PATCH_DESKTOP_PUSH.bat excludes those paths from its staged commit.
+- custom instructions/CODEX_BRIEF_INSTRUCTIONS.txt was already modified before this task. It was not changed for this fix and was temporarily excluded from the auto-commit.

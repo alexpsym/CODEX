@@ -3,6 +3,7 @@
   const state = {
     account: 'live',
     asset: 'crypto',
+    broker: 'oanda',
     side: 'buy',
     order_type: 'market',
     risk_mode: 'percent',
@@ -27,6 +28,7 @@
     quotePrewarmStatus: null,
     quotePrewarmPromise: null,
     quotePrewarmContext: null,
+    pepperstoneSetPayload: null,
   };
 
   const $ = (id) => document.getElementById(id);
@@ -39,12 +41,14 @@
   const journalEl = $('calc-journal-summary');
   const specsEl = $('calc-instrument-specs');
   const riskToggleWrap = $('risk-toggle-wrap');
+  const brokerToggleWrap = $('broker-toggle-wrap');
   const webhookPanel = $('calc-webhook-panel');
   const webhookUrlEl = $('calc-webhook-url');
   const webhookJsonEl = $('calc-webhook-json');
   const webhookCopyBtn = $('calc-webhook-copy');
   const webhookCopyUrlBtn = $('calc-webhook-copy-url');
   const submitBtn = $('calc-submit');
+  const pepperstoneSetBtn = $('calc-pepperstone-set');
   const quoteStatusEl = $('calc-quote-status');
   const webhookStatusEl = $('calc-webhook-status');
   const SUBMIT_LABEL = 'Submit Order';
@@ -183,6 +187,22 @@
     if (stateName) submitBtn.dataset.state = stateName;
   }
 
+  function isPepperstoneFx() {
+    return state.asset === 'fx' && state.broker === 'pepperstone';
+  }
+
+  function setPepperstoneSetButton({ visible, enabled = true, reason = '' } = {}) {
+    if (!pepperstoneSetBtn) return;
+    pepperstoneSetBtn.style.display = visible ? '' : 'none';
+    pepperstoneSetBtn.disabled = !enabled;
+    pepperstoneSetBtn.title = reason || '';
+  }
+
+  function clearPepperstoneSetDownload() {
+    state.pepperstoneSetPayload = null;
+    setPepperstoneSetButton({ visible: false, enabled: false });
+  }
+
   function clearSubmitStateResetTimer() {
     if (!submitStateResetTimer) return;
     clearTimeout(submitStateResetTimer);
@@ -203,6 +223,7 @@
 
   function invalidateQuote({ clearResults = true, status = 'stale', reason = '' } = {}) {
     clearSubmitClicked();
+    clearPepperstoneSetDownload();
     state.quote = null;
     state.quoteStatus = status;
     const visible = status === 'idle' ? false : state.hasCalculatedOnce;
@@ -470,6 +491,7 @@
     const lines = [
       `Submitted payload:`,
       `asset=${payload.asset}`,
+      `broker=${payload.broker || state.broker || ''}`,
       `account=${payload.account}`,
       `symbol=${payload.symbol}`,
       `webhook=${payload.webhook}`,
@@ -504,6 +526,50 @@
     });
     requestSummaryEl.style.whiteSpace = 'pre-wrap';
     requestSummaryEl.textContent = lines.join('\n');
+  }
+
+  function buildPepperstoneSetPayload(quote) {
+    return {
+      asset: 'fx',
+      broker: 'pepperstone',
+      account: state.account,
+      symbol: quote?.symbol || state.resolvedSymbol || $('calc-symbol').value,
+      side: state.side,
+      order_type: state.order_type,
+      entry_price: quote?.entry_price || $('calc-limit').value,
+      stop_loss_ticks: $('calc-sl-ticks').value,
+      risk_reward: $('calc-rr').value,
+      risk_mode: state.risk_mode,
+      risk_value: $('calc-risk').value,
+      estimated_total_loss_aud: quote?.estimated_total_loss_aud || quote?.estimated_total_loss || '',
+      estimated_total_loss: quote?.estimated_total_loss || '',
+    };
+  }
+
+  function filenameFromDisposition(disposition, fallback) {
+    const text = String(disposition || '');
+    const match = text.match(/filename\*=UTF-8''([^;]+)|filename="?([^";]+)"?/i);
+    const raw = match ? (match[1] || match[2] || '') : '';
+    try {
+      return raw ? decodeURIComponent(raw) : fallback;
+    } catch (_err) {
+      return raw || fallback;
+    }
+  }
+
+  function saveTextDownload(text, filename) {
+    if (typeof Blob === 'undefined' || typeof URL === 'undefined' || typeof URL.createObjectURL !== 'function' || typeof document.createElement !== 'function') return false;
+    const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = filename;
+    anchor.style.display = 'none';
+    if (document.body && typeof document.body.appendChild === 'function') document.body.appendChild(anchor);
+    if (typeof anchor.click === 'function') anchor.click();
+    if (anchor.parentNode && typeof anchor.parentNode.removeChild === 'function') anchor.parentNode.removeChild(anchor);
+    URL.revokeObjectURL(url);
+    return true;
   }
 
   async function request(url, opts = {}) {
@@ -546,6 +612,19 @@
     }
   }
 
+  function updateBrokerUiForAsset() {
+    const isFx = state.asset === 'fx';
+    if (brokerToggleWrap) brokerToggleWrap.style.display = isFx ? '' : 'none';
+    if (!isFx) state.broker = 'oanda';
+    if (isPepperstoneFx() && state.webhook_mode === 'yes') {
+      state.webhook_mode = 'no';
+      toggleWebhookPanel(false);
+      cleanupPendingWebhook();
+    }
+    syncToggleState('broker-toggle', 'broker');
+    syncToggleState('webhook-toggle', 'webhook_mode');
+  }
+
   function toggleWebhookPanel(show) {
     webhookPanel.style.display = show ? '' : 'none';
     if (!show) {
@@ -584,6 +663,7 @@
   function syncAllToggleStates() {
     syncToggleState('account-toggle', 'account');
     syncToggleState('asset-toggle', 'asset');
+    syncToggleState('broker-toggle', 'broker');
     syncToggleState('side-toggle', 'side');
     syncToggleState('order-toggle', 'order_type');
     syncToggleState('risk-toggle', 'risk_mode');
@@ -593,6 +673,7 @@
 
   function setToggle(id, key, onChange) {
     const root = $(id);
+    if (!root) return;
     root.querySelectorAll('button').forEach((btn) => {
       btn.addEventListener('click', () => {
         const ariaDisabled = typeof btn.getAttribute === 'function' ? btn.getAttribute('aria-disabled') : btn.ariaDisabled;
@@ -867,6 +948,17 @@
         toggleWebhookPanel(false);
         return;
       }
+      if (isPepperstoneFx() && state.order_type !== 'limit') {
+        invalidateQuote({ status: 'error', reason: 'Pepperstone .set export is limit-only.' });
+        errorEl.textContent = 'Pepperstone .set generation is available for limit orders only. Market orders are blocked because Trader.mq5 has no safe one-shot manual market strategy.';
+        return;
+      }
+      if (isPepperstoneFx() && state.webhook_mode === 'yes') {
+        state.webhook_mode = 'no';
+        syncToggleState('webhook-toggle', 'webhook_mode');
+        toggleWebhookPanel(false);
+        cleanupPendingWebhook();
+      }
       if (state.asset === 'crypto' && !state.resolvedSymbol && resolveInFlight) {
         try { await Promise.race([resolveInFlight, new Promise((r) => setTimeout(r, 800))]); } catch (_e) {}
       }
@@ -875,6 +967,7 @@
         ...state,
         submitted_symbol: $('calc-symbol').value,
         symbol: state.resolvedSymbol || $('calc-symbol').value,
+        broker: state.asset === 'fx' ? state.broker : undefined,
         entry_price: $('calc-limit').value,
         stop_loss_ticks: $('calc-sl-ticks').value,
         risk_reward: $('calc-rr').value,
@@ -898,7 +991,14 @@
       renderQuote(quote);
       state.quoteStatus = 'ready';
       setQuoteStatus('Quote ready.');
-      setSubmitState({ visible: state.webhook_mode !== 'yes', enabled: true, reason: '', stateName: 'ready' });
+      if (isPepperstoneFx()) {
+        state.pepperstoneSetPayload = buildPepperstoneSetPayload(quote);
+        setPepperstoneSetButton({ visible: true, enabled: true, reason: 'Download Pepperstone MT5 Expert Set file.' });
+        setSubmitState({ visible: false, enabled: false, reason: 'Pepperstone uses MT5 .set export.', stateName: 'ready' });
+      } else {
+        clearPepperstoneSetDownload();
+        setSubmitState({ visible: state.webhook_mode !== 'yes', enabled: true, reason: '', stateName: 'ready' });
+      }
       if (state.webhook_mode === 'yes' && quote.webhook_payload_json) {
         state.pendingWebhookId = quote.pending_webhook_id || state.pendingWebhookId;
         state.pendingWebhookDeleteUrl = quote.pending_webhook_delete_url || '';
@@ -944,6 +1044,31 @@
     }
   });
 
+  if (pepperstoneSetBtn) pepperstoneSetBtn.addEventListener('click', async () => {
+    clearMessages();
+    try {
+      if (!state.pepperstoneSetPayload) throw new Error('Calculate a Pepperstone FX limit order first.');
+      pepperstoneSetBtn.disabled = true;
+      const res = await fetch('/api/calculator/pepperstone-set', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(state.pepperstoneSetPayload),
+      });
+      const bodyText = await res.text();
+      let bodyJson = null;
+      try { bodyJson = bodyText && /^[\[{]/.test(bodyText.trim()) ? JSON.parse(bodyText) : null; } catch (_err) { bodyJson = null; }
+      if (!res.ok) throw buildFetchError('/api/calculator/pepperstone-set', 'POST', res.status, res.statusText, bodyText, bodyJson);
+      const filename = filenameFromDisposition(res.headers.get('content-disposition'), 'Pepperstone_Trader.set');
+      const downloaded = saveTextDownload(bodyText, filename);
+      okEl.textContent = downloaded ? `Pepperstone .set downloaded: ${filename}` : `Pepperstone .set ready: ${filename}`;
+    } catch (err) {
+      errorEl.textContent = String(err?.message || err);
+      renderErrorDebug(err.detail || (err.debug ? { debug: err.debug } : null));
+    } finally {
+      pepperstoneSetBtn.disabled = false;
+    }
+  });
+
   $('calc-submit').addEventListener('click', async () => {
     if (submitInFlight) return;
     clearMessages();
@@ -962,6 +1087,7 @@
       }
       const payload = {
         asset: state.asset,
+        broker: state.asset === 'fx' ? state.broker : undefined,
         account: state.account,
         symbol: state.quote.symbol,
         action: state.side,
@@ -1011,7 +1137,7 @@
       submitBtn.textContent = SUBMIT_LABEL;
       clearSubmitStateResetTimer();
       submitStateResetTimer = setTimeout(() => {
-        if (state.quoteStatus === 'ready' && state.quote && !submitInFlight) {
+        if (state.quoteStatus === 'ready' && state.quote && !submitInFlight && !isPepperstoneFx()) {
           clearSubmitClicked();
           setSubmitState({ visible: true, enabled: true, reason: '', stateName: 'ready' });
         }
@@ -1021,7 +1147,7 @@
       errorEl.textContent = String(e.message || e);
       renderErrorDebug(e.detail || (e.debug ? { debug: e.debug } : null));
       clearSubmitClicked();
-      if (state.quoteStatus === 'ready' && state.quote && state.webhook_mode !== 'yes' && state.quote.quote_valid_for_submit !== false) {
+      if (state.quoteStatus === 'ready' && state.quote && state.webhook_mode !== 'yes' && !isPepperstoneFx() && state.quote.quote_valid_for_submit !== false) {
         setSubmitState({ visible: true, enabled: true, reason: '', stateName: 'ready' });
       }
     } finally {
@@ -1030,7 +1156,8 @@
   });
 
   setToggle('account-toggle', 'account', () => { refreshPrewarmSchedule(); resolveSymbolAndLoad(); });
-  setToggle('asset-toggle', 'asset', () => { updateRiskUiForAsset(); refreshPrewarmSchedule(); resolveSymbolAndLoad(); });
+  setToggle('asset-toggle', 'asset', () => { updateRiskUiForAsset(); updateBrokerUiForAsset(); refreshPrewarmSchedule(); resolveSymbolAndLoad(); });
+  setToggle('broker-toggle', 'broker', () => { updateBrokerUiForAsset(); resolveSymbolAndLoad(); });
   setToggle('side-toggle', 'side');
   setToggle('order-toggle', 'order_type');
   setToggle('risk-toggle', 'risk_mode');
@@ -1043,6 +1170,7 @@
   setAthsAtlsButtons();
   setRoundNumberButtons();
   updateRiskUiForAsset();
+  updateBrokerUiForAsset();
   syncAllToggleStates();
   const webhookYesBtn = $('webhook-toggle').querySelectorAll('button')[1];
   if (webhookYesBtn) {
@@ -1054,6 +1182,7 @@
   loadBootstrapCapability().finally(syncAllToggleStates);
   refreshPrewarmSchedule();
   setSubmitState({ visible: false, enabled: false, reason: '', stateName: 'idle' });
+  clearPepperstoneSetDownload();
   toggleWebhookPanel(false);
   setJournalState('idle', 'Type a symbol to load journal summary.');
   setSpecsState('idle', 'Enter a symbol to load instrument specs.');

@@ -1,6 +1,7 @@
 import asyncio
 import importlib.util
 import json
+import re
 import sys
 import types
 import importlib.machinery
@@ -1514,6 +1515,89 @@ def test_calculator_quote_oanda_success_has_no_logger_nameerror(monkeypatch: pyt
     assert isinstance(response, master_service.JSONResponse)
     body = json.loads(response.body.decode("utf-8"))
     assert body["broker"] == "oanda"
+
+
+def _parse_set_file(text: str) -> dict:
+    result = {}
+    for line in text.splitlines():
+        if not line.strip() or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        result[key.strip()] = value.strip()
+    return result
+
+
+def _trader_input_names() -> set[str]:
+    source = (ROOT / "mt5-clone" / "MQL5" / "Experts" / "Trader.mq5").read_text(encoding="utf-8")
+    names = set()
+    for line in source.splitlines():
+        match = re.match(r"\s*input\s+(?!group\b)(?:[A-Za-z_][A-Za-z0-9_<>]*\s+)+([A-Za-z_][A-Za-z0-9_]*)\s*=", line)
+        if match:
+            names.add(match.group(1))
+    return names
+
+
+def test_pepperstone_set_export_uses_trader_input_names_and_limit_mapping() -> None:
+    base_payload = {
+        "asset": "fx",
+        "broker": "pepperstone",
+        "account": "demo",
+        "symbol": "EUR_USD",
+        "side": "buy",
+        "order_type": "limit",
+        "entry_price": "1.10020",
+        "risk_mode": "fixed_aud",
+        "risk_value": "10",
+        "stop_loss_ticks": "35",
+        "risk_reward": "2",
+    }
+    response = asyncio.run(master_service.calculator_pepperstone_set(base_payload))
+    assert response.media_type.startswith("text/plain")
+    assert "Pepperstone_Trader_EUR_USD_BUY_" in response.headers["content-disposition"]
+    values = _parse_set_file(response.body.decode("utf-8"))
+    assert set(values).issubset(_trader_input_names())
+    assert values["Strategy"] == "2"
+    assert values["OrdersEnabled"] == "true"
+    assert values["RiskAUD_Target"] == "10"
+    assert values["RiskAUD_Min"] == "9"
+    assert values["RiskAUD_Max"] == "12"
+    assert values["IncludeCommissionInRisk"] == "true"
+    assert values["CommissionPerLotPerSide"] == "3.5"
+    assert values["RiskSlippageBufferPoints"] == "50"
+    assert values["SlippagePoints"] == "10"
+    assert values["SL_DistancePoints"] == "35"
+    assert values["AutoTP_NetRR_Enabled"] == "true"
+    assert values["NetRR_Target"] == "2"
+    assert values["StandardLimitSide"] == "0"
+    assert values["StandardLimitEntryPrice"] == "1.1002"
+    assert values["MagicNumber"] == "91001"
+    assert values["EnforceOneTradeAtATime"] == "true"
+
+    sell_payload = dict(base_payload, side="sell")
+    sell_response = asyncio.run(master_service.calculator_pepperstone_set(sell_payload))
+    sell_values = _parse_set_file(sell_response.body.decode("utf-8"))
+    assert sell_values["StandardLimitSide"] == "1"
+
+
+def test_pepperstone_set_export_blocks_market_orders() -> None:
+    with pytest.raises(master_service.HTTPException) as exc:
+        asyncio.run(
+            master_service.calculator_pepperstone_set(
+                {
+                    "asset": "fx",
+                    "broker": "pepperstone",
+                    "symbol": "EUR_USD",
+                    "side": "buy",
+                    "order_type": "market",
+                    "risk_mode": "fixed_aud",
+                    "risk_value": "10",
+                    "stop_loss_ticks": "35",
+                    "risk_reward": "2",
+                }
+            )
+        )
+    assert exc.value.status_code == 400
+    assert "limit orders only" in str(exc.value.detail)
 
 
 def test_calculator_webhook_direct_dict_call_uses_payload(monkeypatch: pytest.MonkeyPatch) -> None:

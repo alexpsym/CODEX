@@ -10,7 +10,8 @@ ROOT = Path(__file__).resolve().parents[1]
 SPREAD_DIR = ROOT / "spreads-clone"
 sys.path.insert(0, str(SPREAD_DIR))
 
-from mt5_spreads import aggregate_tick_spreads
+import mt5_spreads
+from mt5_spreads import MT5_AUTHORIZATION_FAILED_MESSAGE, aggregate_tick_spreads
 from spread_core import TimeframeConfig
 from symbols import build_symbol_universe, oanda_to_mt5_symbol, resolve_mt5_symbol
 
@@ -83,6 +84,46 @@ def test_mt5_zero_spread_ticks_are_unavailable_not_fake_zero():
     parsed = aggregate_tick_spreads(ticks, timeframe)
     assert parsed["latest"] is None
     assert parsed["error"] == "No MT5 tick bid/ask spread data returned."
+
+
+def test_mt5_initialize_timeout_is_used_for_preflight_symbols_and_fetch(monkeypatch):
+    class FakeMT5:
+        def __init__(self, *, initialize_ok):
+            self.initialize_ok = initialize_ok
+            self.init_kwargs = []
+
+        def initialize(self, **kwargs):
+            self.init_kwargs.append(kwargs)
+            return self.initialize_ok
+
+        def shutdown(self):
+            return None
+
+        def last_error(self):
+            return (-6, "Terminal: Authorization failed")
+
+        def account_info(self):
+            return None
+
+        def symbols_get(self):
+            return []
+
+    preflight_mt5 = FakeMT5(initialize_ok=True)
+    monkeypatch.setattr(mt5_spreads, "_import_mt5", lambda: preflight_mt5)
+    preflight = mt5_spreads.preflight_mt5_environment()
+    assert preflight["error"] == MT5_AUTHORIZATION_FAILED_MESSAGE
+    assert preflight_mt5.init_kwargs[0]["timeout"] == 9000
+
+    symbols_mt5 = FakeMT5(initialize_ok=False)
+    monkeypatch.setattr(mt5_spreads, "_import_mt5", lambda: symbols_mt5)
+    assert mt5_spreads.available_mt5_symbols() == []
+    assert symbols_mt5.init_kwargs[0]["timeout"] == 9000
+
+    fetch_mt5 = FakeMT5(initialize_ok=True)
+    monkeypatch.setattr(mt5_spreads, "_import_mt5", lambda: fetch_mt5)
+    result = mt5_spreads.fetch_mt5_spread_samples("EUR_USD", TimeframeConfig("1M", "M1", 60, 7))
+    assert result["error"] == MT5_AUTHORIZATION_FAILED_MESSAGE
+    assert fetch_mt5.init_kwargs[0]["timeout"] == 9000
 
 
 def test_symbol_universe_includes_available_symbols_by_default():

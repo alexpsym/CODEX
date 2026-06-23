@@ -92,6 +92,10 @@ def test_spread_app_frontend_normalizes_messages_refresh_and_sorting():
     assert "sortState.direction === 'asc' ? 'desc' : 'asc'" in source
     assert "function cellSortValue(row, timeframe)" in source
     assert "Math.max(...values)" in source
+    assert "function spreadNumber(data)" in source
+    assert "raw === null || raw === undefined || raw === ''" in source
+    assert "value > 0 ? value : NaN" in source
+    assert "category === 'unavailable'" in source
     assert "pepperstone_razor" in source
     assert "[object Object]" not in source
 

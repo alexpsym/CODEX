@@ -1,5 +1,6 @@
 import sys
 import time
+import json
 from pathlib import Path
 
 import pytest
@@ -8,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SPREAD_DIR = ROOT / "spreads-clone"
 sys.path.insert(0, str(SPREAD_DIR))
 
-from spread_core import SpreadMonitorState, TimeframeConfig, classify_spread, format_spread_pct, spread_pct_from_bid_ask
+from spread_core import SpreadMonitorState, TimeframeConfig, broker_cell, classify_spread, format_spread_pct, spread_pct_from_bid_ask
 
 
 def _repo_cache_path(name: str) -> Path:
@@ -25,6 +26,20 @@ def test_spread_pct_formula_uses_midpoint_percentage():
 def test_spread_percent_format_switches_precision():
     assert format_spread_pct(0.009876) == "0.00988%"
     assert format_spread_pct(0.01234) == "0.0123%"
+
+
+def test_broker_cell_zero_spread_is_unavailable_not_fake_zero():
+    cell = broker_cell(
+        {
+            "latest": {"time": "2026-01-01T00:00:00Z", "spread_pct": 0.0},
+            "samples": [{"time": "2026-01-01T00:00:00Z", "spread_pct": 0.0}],
+            "last_success": "2026-01-01T00:00:00Z",
+            "error": "",
+        }
+    )
+    assert cell["spread_pct"] is None
+    assert cell["display"] == ""
+    assert cell["category"] == "unavailable"
 
 
 def test_percentile_classification_thresholds():
@@ -210,6 +225,49 @@ def test_mt5_preflight_failure_marks_provider_unavailable_once_and_skips_fetcher
     assert calls == []
     assert payload["warnings"].count("Pepperstone unavailable: No module named 'MetaTrader5'") == 1
     assert payload["rows"][0]["cells"]["1M"]["pepperstone_razor"]["spread_pct"] is None
+
+
+def test_stale_pepperstone_zero_cache_record_does_not_render_zero_percent():
+    cache_path = _repo_cache_path("pepperstone_zero_stale")
+    payload = {
+        "version": 1,
+        "generated_at": "2026-01-01T00:00:00Z",
+        "symbols": ["EUR_USD"],
+        "warnings": [],
+        "errors": [],
+        "records": {
+            "oanda|EUR_USD|1M": {
+                "broker": "oanda",
+                "symbol": "EUR_USD",
+                "timeframe": "1M",
+                "samples": [{"time": "2026-01-01T00:00:00Z", "spread_pct": 0.0123}],
+                "latest": {"time": "2026-01-01T00:00:00Z", "spread_pct": 0.0123},
+                "last_success": "2026-01-01T00:00:00Z",
+                "error": "",
+            },
+            "pepperstone|EUR_USD|1M": {
+                "broker": "pepperstone",
+                "symbol": "EUR_USD",
+                "timeframe": "1M",
+                "samples": [{"time": "2026-01-01T00:00:00Z", "spread_pct": 0.0}],
+                "latest": {"time": "2026-01-01T00:00:00Z", "spread_pct": 0.0},
+                "last_success": "2026-01-01T00:00:00Z",
+                "error": "",
+            },
+        },
+    }
+    try:
+        cache_path.write_text(json.dumps(payload), encoding="utf-8")
+        state = SpreadMonitorState(cache_path, symbol_provider=lambda: ["EUR_USD"])
+        status = state.status()
+    finally:
+        if cache_path.exists():
+            cache_path.unlink()
+
+    pepperstone = status["rows"][0]["cells"]["1M"]["pepperstone_razor"]
+    assert pepperstone["spread_pct"] is None
+    assert pepperstone["display"] == ""
+    assert pepperstone["category"] == "unavailable"
 
 
 def test_background_refresh_returns_running_status_quickly():

@@ -146,7 +146,7 @@ def split_cache_key(key: str) -> tuple[str, str, str]:
 
 def make_sample(time_value: object, spread_pct: object) -> Optional[Dict[str, object]]:
     spread_value = coerce_float(spread_pct)
-    if spread_value is None:
+    if spread_value is None or spread_value <= 0:
         return None
     dt = parse_time(time_value)
     timestamp = dt.isoformat().replace("+00:00", "Z") if dt else utc_now_iso()
@@ -187,7 +187,7 @@ def broker_cell(record: Optional[Dict[str, object]]) -> Dict[str, object]:
     latest_sample = latest if isinstance(latest, dict) else None
     spread_value = coerce_float(latest_sample.get("spread_pct") if latest_sample else None)
     error = str(record.get("error") or "").strip()
-    if spread_value is None:
+    if spread_value is None or spread_value <= 0:
         return {
             "spread_pct": None,
             "display": "",
@@ -327,18 +327,23 @@ class SpreadMonitorState:
 
         incoming_samples = result.get("samples")
         samples_list = incoming_samples if isinstance(incoming_samples, list) else []
-        record["samples"] = _merge_samples(record.get("samples") or [], samples_list, self.max_samples)
+        valid_incoming_samples = _merge_samples([], samples_list, self.max_samples)
 
         latest = result.get("latest")
         latest_sample = latest if isinstance(latest, dict) else None
-        if latest_sample is None and record["samples"]:
-            latest_sample = record["samples"][-1]  # type: ignore[index]
-        if latest_sample is not None:
-            normalized_latest = make_sample(latest_sample.get("time"), latest_sample.get("spread_pct"))
-            if normalized_latest is not None:
-                record["latest"] = normalized_latest
-                record["last_success"] = utc_now_iso()
-                record["error"] = ""
+        normalized_latest = make_sample(latest_sample.get("time"), latest_sample.get("spread_pct")) if latest_sample is not None else None
+        if normalized_latest is None and valid_incoming_samples:
+            normalized_latest = valid_incoming_samples[-1]
+        if normalized_latest is None:
+            record["error"] = "Spread data unavailable."
+            record["latest"] = None
+            record["last_failure"] = utc_now_iso()
+            return
+
+        record["samples"] = _merge_samples(record.get("samples") or [], valid_incoming_samples, self.max_samples)
+        record["latest"] = normalized_latest
+        record["last_success"] = utc_now_iso()
+        record["error"] = ""
 
     def _set_refresh_status(
         self,
