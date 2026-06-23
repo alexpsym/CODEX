@@ -2391,6 +2391,32 @@ def test_stats1_manual_a_column_merges_survive_data_only_update(tmp_path: Path):
         out.close()
 
 
+def test_stats1_manual_merges_prevent_optional_winners_row_insertion(tmp_path: Path):
+    path = tmp_path / "manual-merge-missing-optional.xlsx"
+    snap = sample_snapshot()
+    build_master_journal_workbook(snap, path)
+    wb = load_workbook(path)
+    stats1 = wb[STATS1_SHEET]
+    winners_row = next(row for row in range(1, stats1.max_row + 1) if stats1.cell(row, 1).value == "Winners")
+    stats1.cell(winners_row + 1, 1).value = "Avg stop %"
+    stats1.merge_cells("A52:A53")
+    stats1["A52"] = "Manual merged note"
+    wb.save(path)
+    wb.close()
+
+    result = update_master_journal_workbook_data_only(path, snap)
+    assert result["ok"] is True
+    assert "Winners: Min stop %" in result["diagnostics"].get("skipped_dashboard_metric_rows_due_to_manual_merges", [])
+    Path(result["candidate_path"]).replace(path)
+    out = load_workbook(path)
+    try:
+        ws = out[STATS1_SHEET]
+        assert "A52:A53" in {str(rng) for rng in ws.merged_cells.ranges}
+        assert ws["A52"].value == "Manual merged note"
+    finally:
+        out.close()
+
+
 def test_merged_stats1_metric_source_pairs_do_not_get_forced_source_labels(tmp_path: Path):
     path = tmp_path / "merged-source-pairs.xlsx"
     snap = sample_snapshot()

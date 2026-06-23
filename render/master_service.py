@@ -27954,10 +27954,11 @@ def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, e
                 _, header_map, metric_rows, _ = _find_instrument_leaders_table(detail_dash)
                 metric_rows_normalized = {str(label or "").strip().lower(): row_idx for label, row_idx in (metric_rows or {}).items()}
                 if not header_map:
-                    raise RuntimeError("Trading Journal validation failed: Instrument leaders headers missing.")
+                    validation_warnings.append("Instrument leaders validation skipped: optional Instrument Leaders section/header is missing.")
+                    expected_payloads = {}
                 present_expected_payloads = {label: payload for label, payload in expected_payloads.items() if metric_rows.get(label) or metric_rows_normalized.get(label)}
-                if not present_expected_payloads:
-                    raise RuntimeError("Trading Journal validation failed: Instrument leaders section has no recognized metric rows despite leader stats.")
+                if expected_payloads and not present_expected_payloads:
+                    validation_warnings.append("Instrument leaders validation skipped: optional Instrument Leaders section has no recognized metric rows.")
                 for metric_label in present_expected_payloads:
                     row_idx = metric_rows.get(metric_label) or metric_rows_normalized.get(metric_label)
                     symbol = str(detail_dash.cell(row_idx, header_map["symbol"]).value or "").strip()

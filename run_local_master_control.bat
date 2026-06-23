@@ -163,6 +163,14 @@ echo [local-master] BYBIT_DEMO_CALC_CONTEXT_LOCAL_PATH=!BYBIT_DEMO_CALC_CONTEXT_
 echo [local-master] User state source: Repo local files
 if /I "!LOCAL_STATE_ONLY!"=="1" echo [local-master] Repo-local state enabled. Ensure Git sync succeeds before replacing the repo clone.
 
+if not /I "!SPREAD_MONITOR_SKIP_REQUIREMENTS_INSTALL!"=="1" if exist "!ROOT!spreads-clone\requirements.txt" (
+  echo [local-master] ensuring Spread Monitor Python requirements with !PYTHON_EXE! ...
+  "!PYTHON_EXE!" -m pip install -r "!ROOT!spreads-clone\requirements.txt"
+  if errorlevel 1 (
+    echo [local-master] WARNING: Spread Monitor requirements install failed. Pepperstone/MT5 may show unavailable until installed.
+  )
+)
+
 :restart_master
 echo [local-master] starting uvicorn at !DATE! !TIME!
 "%PYTHON_EXE%" -m uvicorn render.master_service:app --host 127.0.0.1 --port 8000 --log-config "%ROOT%render\local_uvicorn_log_config.json"

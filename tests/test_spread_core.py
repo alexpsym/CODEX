@@ -1,4 +1,5 @@
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -129,7 +130,116 @@ def test_missing_pepperstone_has_explicit_unavailable_reason():
     cell = payload["rows"][0]["cells"]["1M"]
     assert cell["pepperstone_razor"]["category"] == "unavailable"
     assert cell["pepperstone_razor"]["error"] == "MT5 terminal is not logged in."
-    assert any("Pepperstone EUR_USD 1M: MT5 terminal is not logged in." == warning for warning in payload["warnings"])
+    assert payload["warnings"].count("Pepperstone unavailable: MT5 terminal is not logged in.") == 1
+    assert not any("Pepperstone EUR_USD 1M:" in warning for warning in payload["warnings"])
+
+
+def test_pepperstone_stale_cache_is_not_reused_after_provider_failure():
+    def symbols():
+        return ["EUR_USD"]
+
+    def oanda_fetcher(_symbol, _timeframe, _context):
+        return {
+            "samples": [{"time": "2026-01-01T00:00:00Z", "spread_pct": 0.0123}],
+            "latest": {"time": "2026-01-01T00:00:00Z", "spread_pct": 0.0123},
+        }
+
+    mt5_should_fail = False
+
+    def mt5_fetcher(_symbol, _timeframe, _context):
+        if mt5_should_fail:
+            return {"error": "No module named 'MetaTrader5'"}
+        return {
+            "samples": [{"time": "2026-01-01T00:00:00Z", "spread_pct": 0.0456}],
+            "latest": {"time": "2026-01-01T00:00:00Z", "spread_pct": 0.0456},
+        }
+
+    cache_path = _repo_cache_path("pepperstone_stale")
+    try:
+        state = SpreadMonitorState(
+            cache_path,
+            symbol_provider=symbols,
+            oanda_fetcher=oanda_fetcher,
+            mt5_fetcher=mt5_fetcher,
+        )
+        first = state.refresh()
+        assert first["rows"][0]["cells"]["1M"]["pepperstone_razor"]["spread_pct"] == pytest.approx(0.0456)
+        mt5_should_fail = True
+        second = state.refresh()
+    finally:
+        if cache_path.exists():
+            cache_path.unlink()
+
+    pepperstone = second["rows"][0]["cells"]["1M"]["pepperstone_razor"]
+    assert pepperstone["spread_pct"] is None
+    assert pepperstone["display"] == ""
+    assert pepperstone["category"] == "unavailable"
+    assert pepperstone["error"] == "No module named 'MetaTrader5'"
+
+
+def test_mt5_preflight_failure_marks_provider_unavailable_once_and_skips_fetcher():
+    calls = []
+
+    def symbols():
+        return ["EUR_USD"]
+
+    def oanda_fetcher(_symbol, _timeframe, _context):
+        return {
+            "samples": [{"time": "2026-01-01T00:00:00Z", "spread_pct": 0.0123}],
+            "latest": {"time": "2026-01-01T00:00:00Z", "spread_pct": 0.0123},
+        }
+
+    def mt5_fetcher(_symbol, _timeframe, _context):
+        calls.append((_symbol, _timeframe.label))
+        return {"error": "should not be called"}
+
+    cache_path = _repo_cache_path("pepperstone_preflight")
+    try:
+        state = SpreadMonitorState(
+            cache_path,
+            symbol_provider=symbols,
+            oanda_fetcher=oanda_fetcher,
+            mt5_fetcher=mt5_fetcher,
+            mt5_preflight=lambda: {"ok": False, "error": "No module named 'MetaTrader5'"},
+        )
+        payload = state.refresh()
+    finally:
+        if cache_path.exists():
+            cache_path.unlink()
+
+    assert calls == []
+    assert payload["warnings"].count("Pepperstone unavailable: No module named 'MetaTrader5'") == 1
+    assert payload["rows"][0]["cells"]["1M"]["pepperstone_razor"]["spread_pct"] is None
+
+
+def test_background_refresh_returns_running_status_quickly():
+    def symbols():
+        return ["EUR_USD"]
+
+    def oanda_fetcher(_symbol, _timeframe, _context):
+        time.sleep(0.05)
+        return {
+            "samples": [{"time": "2026-01-01T00:00:00Z", "spread_pct": 0.0123}],
+            "latest": {"time": "2026-01-01T00:00:00Z", "spread_pct": 0.0123},
+        }
+
+    cache_path = _repo_cache_path("background")
+    try:
+        state = SpreadMonitorState(
+            cache_path,
+            symbol_provider=symbols,
+            oanda_fetcher=oanda_fetcher,
+            mt5_fetcher=None,
+        )
+        payload = state.start_refresh()
+        assert payload["refresh_state"] == "running"
+        assert payload["status"] == "refresh_in_progress"
+        assert state._refresh_thread is not None
+        state._refresh_thread.join(timeout=2)
+        assert state.status()["refresh_state"] in {"succeeded", "failed"}
+    finally:
+        if cache_path.exists():
+            cache_path.unlink()
 
 
 def test_refresh_lock_returns_cached_data_instead_of_overlapping_refresh():

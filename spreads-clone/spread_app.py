@@ -8,7 +8,7 @@ from typing import Iterable
 
 from flask import Flask, jsonify, render_template_string
 
-from mt5_spreads import available_mt5_symbols, fetch_mt5_spread_samples
+from mt5_spreads import available_mt5_symbols, fetch_mt5_spread_samples, preflight_mt5_environment
 from oanda_spreads import fetch_oanda_spread_samples, get_available_oanda_symbols
 from spread_core import SpreadMonitorState
 from symbols import build_symbol_universe
@@ -35,6 +35,7 @@ STATE = SpreadMonitorState(
     symbol_provider=_symbol_provider,
     oanda_fetcher=fetch_oanda_spread_samples,
     mt5_fetcher=fetch_mt5_spread_samples,
+    mt5_preflight=preflight_mt5_environment,
 )
 
 
@@ -261,6 +262,7 @@ PAGE_TEMPLATE = """
   const headEl = document.getElementById('spread-head');
   const bodyEl = document.getElementById('spread-body');
   let refreshTimer = null;
+  let statusPollTimer = null;
   let nextRefreshAt = 0;
   let latestPayload = null;
   let sortState = { column: null, direction: 'asc' };
@@ -309,6 +311,10 @@ PAGE_TEMPLATE = """
     return messageArray(payload?.errors).length > 0 || messageArray(payload?.warnings).length > 0;
   }
 
+  function isRefreshRunning(payload) {
+    return payload?.refresh_state === 'running' || payload?.refresh?.state === 'running' || payload?.status === 'refresh_in_progress';
+  }
+
   function renderMessages(payload) {
     const errors = messageArray(payload?.errors);
     const warnings = messageArray(payload?.warnings);
@@ -339,10 +345,12 @@ PAGE_TEMPLATE = """
     const category = data?.category || 'unavailable';
     const spreadValue = Number(data?.spread_pct);
     const error = scalarMessage(data?.error || data?.message || data?.reason);
+    const sourceTime = scalarMessage(data?.updated_at);
     let value = scalarMessage(data?.display);
     if (!value && Number.isFinite(spreadValue)) value = `${spreadValue.toFixed(4)}%`;
     if (!value) value = error ? 'Unavailable' : 'n/a';
-    const title = error ? ` title="${escapeHtml(error)}"` : '';
+    const titleText = error || (sourceTime ? `Source timestamp: ${sourceTime}` : '');
+    const title = titleText ? ` title="${escapeHtml(titleText)}"` : '';
     const errorLine = error && !Number.isFinite(spreadValue)
       ? `<span class="broker-error">${escapeHtml(error)}</span>`
       : '';
@@ -433,14 +441,15 @@ PAGE_TEMPLATE = """
     latestPayload = payload || {};
     renderMessages(payload || {});
     renderTable(payload || {});
-    const successful = payload?.ok === true && !payloadHasFailures(payload);
+    const running = isRefreshRunning(payload);
+    const successful = payload?.ok === true && !payloadHasFailures(payload) && !running;
     if (options.updateLastRefresh && successful) {
       lastRefreshEl.textContent = `Last refresh: ${fmtTime(payload?.last_refresh_finished_at || payload?.generated_at)}`;
     } else if (!options.updateLastRefresh) {
       lastRefreshEl.textContent = `Last refresh: ${fmtTime(payload?.last_refresh_finished_at || payload?.generated_at)}`;
     }
-    if (payload?.status === 'refresh_in_progress') {
-      statusEl.textContent = 'Refresh already running; showing cache.';
+    if (running) {
+      statusEl.textContent = 'Refresh running; showing cache.';
     } else if (payload?.ok === false || messageArray(payload?.errors).length) {
       statusEl.textContent = scalarMessage(payload?.error) || 'Spread refresh failed.';
     } else if (messageArray(payload?.warnings).length) {
@@ -448,7 +457,13 @@ PAGE_TEMPLATE = """
     } else {
       statusEl.textContent = source;
     }
-    scheduleNext(payload || {});
+    refreshBtn.disabled = running;
+    if (running) {
+      if (refreshTimer) clearTimeout(refreshTimer);
+      nextRefreshEl.textContent = 'Auto-refresh paused while refreshing';
+    } else {
+      scheduleNext(payload || {});
+    }
   }
 
   async function fetchJson(url, options = {}) {
@@ -467,6 +482,7 @@ PAGE_TEMPLATE = """
     try {
       const payload = await fetchJson(buildUrl('/api/spreads/status'));
       applyPayload(payload, 'Cached data loaded.');
+      if (isRefreshRunning(payload)) queueStatusPoll();
     } catch (err) {
       statusEl.textContent = scalarMessage(err) || 'Failed to load spread status.';
       messagesEl.innerHTML = `<div class="message error">${escapeHtml(statusEl.textContent)}</div>`;
@@ -477,15 +493,36 @@ PAGE_TEMPLATE = """
   async function refreshData() {
     refreshBtn.disabled = true;
     statusEl.textContent = 'Refreshing spreads...';
+    let keepDisabled = false;
     try {
       const payload = await fetchJson(buildUrl('/api/spreads/refresh'), { method: 'POST' });
-      applyPayload(payload, 'Refresh complete.', { updateLastRefresh: true });
+      applyPayload(payload, isRefreshRunning(payload) ? 'Refresh started.' : 'Refresh complete.', { updateLastRefresh: true });
+      keepDisabled = isRefreshRunning(payload);
+      if (keepDisabled) queueStatusPoll();
     } catch (err) {
       statusEl.textContent = scalarMessage(err) || 'Refresh failed.';
       messagesEl.innerHTML = `<div class="message error">${escapeHtml(statusEl.textContent)}</div>`;
       scheduleNext({});
     } finally {
+      if (!keepDisabled) refreshBtn.disabled = false;
+    }
+  }
+
+  function queueStatusPoll() {
+    if (statusPollTimer) clearTimeout(statusPollTimer);
+    statusPollTimer = setTimeout(pollRefreshStatus, 2000);
+  }
+
+  async function pollRefreshStatus() {
+    try {
+      const payload = await fetchJson(buildUrl('/api/spreads/status'));
+      applyPayload(payload, isRefreshRunning(payload) ? 'Refresh running.' : 'Refresh complete.', { updateLastRefresh: true });
+      if (isRefreshRunning(payload)) queueStatusPoll();
+    } catch (err) {
+      statusEl.textContent = scalarMessage(err) || 'Failed to poll spread status.';
+      messagesEl.innerHTML = `<div class="message error">${escapeHtml(statusEl.textContent)}</div>`;
       refreshBtn.disabled = false;
+      scheduleNext({});
     }
   }
 
@@ -502,7 +539,7 @@ PAGE_TEMPLATE = """
     renderTable(latestPayload || {});
   });
   setInterval(updateCountdown, 1000);
-  loadStatus().then(() => refreshData());
+  loadStatus();
 </script>
 </body>
 </html>
@@ -521,7 +558,7 @@ def spread_status():
 
 @app.post("/api/spreads/refresh")
 def spread_refresh():
-    return jsonify(STATE.refresh())
+    return jsonify(STATE.start_refresh())
 
 
 def main() -> None:

@@ -1,5 +1,6 @@
 import importlib
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -58,6 +59,30 @@ def test_mt5_tick_aggregation_can_apply_pepperstone_razor_commission_adjustment(
     )
     raw = ((1.0010 - 1.0000) / 1.0005) * 100
     assert parsed["latest"]["spread_pct"] == pytest.approx(raw + 0.007)
+
+
+def test_mt5_tick_aggregation_selects_tick_at_or_before_lookback_target():
+    timeframe = TimeframeConfig("5M", "M5", 300, 14)
+    ticks = [
+        {"time": 1_767_225_000, "bid": 1.0000, "ask": 1.0010},
+        {"time": 1_767_225_300, "bid": 1.0000, "ask": 1.0040},
+        {"time": 1_767_225_600, "bid": 1.0000, "ask": 1.0080},
+    ]
+    parsed = aggregate_tick_spreads(
+        ticks,
+        timeframe,
+        target_at=datetime.fromtimestamp(1_767_225_350, tz=timezone.utc),
+    )
+    assert parsed["latest"]["time"] == datetime.fromtimestamp(1_767_225_300, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+    assert parsed["latest"]["spread_pct"] == pytest.approx(((1.0040 - 1.0000) / 1.0020) * 100)
+
+
+def test_mt5_zero_spread_ticks_are_unavailable_not_fake_zero():
+    timeframe = TimeframeConfig("1M", "M1", 60, 7)
+    ticks = [{"time": 1_767_225_600, "bid": 1.0000, "ask": 1.0000}]
+    parsed = aggregate_tick_spreads(ticks, timeframe)
+    assert parsed["latest"] is None
+    assert parsed["error"] == "No MT5 tick bid/ask spread data returned."
 
 
 def test_symbol_universe_includes_available_symbols_by_default():

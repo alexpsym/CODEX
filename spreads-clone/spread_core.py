@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 import math
 from pathlib import Path
@@ -67,6 +67,19 @@ def parse_time(value: object) -> Optional[datetime]:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)
+
+
+def lookback_target_for_timeframe(timeframe: TimeframeConfig, now: Optional[datetime] = None) -> datetime:
+    """Return the historical point represented by a table column."""
+
+    reference = now or datetime.now(timezone.utc)
+    if reference.tzinfo is None:
+        reference = reference.replace(tzinfo=timezone.utc)
+    reference = reference.astimezone(timezone.utc)
+    if timeframe.label == "M":
+        return reference - timedelta(days=30)
+    seconds = timeframe.seconds if timeframe.seconds is not None else 60
+    return reference - timedelta(seconds=seconds)
 
 
 def coerce_float(value: object) -> Optional[float]:
@@ -222,6 +235,7 @@ class SpreadMonitorState:
         symbol_provider: Callable[[], Iterable[str]],
         oanda_fetcher: Optional[Callable[[str, TimeframeConfig, Dict[str, object]], Dict[str, object]]] = None,
         mt5_fetcher: Optional[Callable[[str, TimeframeConfig, Dict[str, object]], Dict[str, object]]] = None,
+        mt5_preflight: Optional[Callable[[], Dict[str, object]]] = None,
         max_samples: int = MAX_CACHE_SAMPLES,
         refresh_interval_seconds: int = REFRESH_INTERVAL_SECONDS,
     ) -> None:
@@ -229,11 +243,20 @@ class SpreadMonitorState:
         self.symbol_provider = symbol_provider
         self.oanda_fetcher = oanda_fetcher
         self.mt5_fetcher = mt5_fetcher
+        self.mt5_preflight = mt5_preflight
         self.max_samples = max_samples
         self.refresh_interval_seconds = refresh_interval_seconds
         self.refresh_lock = threading.Lock()
         self._cache_lock = threading.RLock()
         self._cache = self._load_cache()
+        self._refresh_thread: Optional[threading.Thread] = None
+        self._refresh_status: Dict[str, object] = {
+            "state": "idle",
+            "started_at": "",
+            "finished_at": "",
+            "error": "",
+            "warnings": [],
+        }
 
     def _load_cache(self) -> Dict[str, object]:
         if not self.cache_path.exists():
@@ -298,6 +321,9 @@ class SpreadMonitorState:
         error = str(result.get("error") or "").strip()
         if error:
             record["error"] = error
+            record["latest"] = None
+            record["last_failure"] = utc_now_iso()
+            return
 
         incoming_samples = result.get("samples")
         samples_list = incoming_samples if isinstance(incoming_samples, list) else []
@@ -312,7 +338,30 @@ class SpreadMonitorState:
             if normalized_latest is not None:
                 record["latest"] = normalized_latest
                 record["last_success"] = utc_now_iso()
-                record["error"] = error
+                record["error"] = ""
+
+    def _set_refresh_status(
+        self,
+        state: str,
+        *,
+        started_at: Optional[str] = None,
+        finished_at: Optional[str] = None,
+        error: Optional[str] = None,
+        warnings: Optional[Iterable[object]] = None,
+    ) -> None:
+        with self._cache_lock:
+            current_started = str(self._refresh_status.get("started_at") or "")
+            self._refresh_status = {
+                "state": state,
+                "started_at": started_at if started_at is not None else current_started,
+                "finished_at": finished_at if finished_at is not None else str(self._refresh_status.get("finished_at") or ""),
+                "error": error if error is not None else "",
+                "warnings": [str(item) for item in (warnings or []) if str(item).strip()],
+            }
+
+    def _current_refresh_status(self) -> Dict[str, object]:
+        with self._cache_lock:
+            return dict(self._refresh_status)
 
     def _symbols_from_cache(self) -> List[str]:
         symbols = self._cache.get("symbols")
@@ -331,12 +380,48 @@ class SpreadMonitorState:
     def status(self, *, refresh_in_progress: bool = False) -> Dict[str, object]:
         with self._cache_lock:
             payload = self._build_payload()
-        if refresh_in_progress:
+        refresh_state = str(payload.get("refresh_state") or "")
+        if refresh_in_progress or refresh_state == "running":
             payload["status"] = "refresh_in_progress"
             warnings = list(payload.get("warnings") or [])
-            warnings.append("Refresh already running; showing the latest cached spread data.")
+            if "Refresh already running; showing the latest cached spread data." not in warnings:
+                warnings.append("Refresh already running; showing the latest cached spread data.")
             payload["warnings"] = warnings
         return payload
+
+    def start_refresh(self) -> Dict[str, object]:
+        with self._cache_lock:
+            if self._refresh_thread is not None and self._refresh_thread.is_alive():
+                return self.status(refresh_in_progress=True)
+            started_at = utc_now_iso()
+            self._refresh_status = {
+                "state": "running",
+                "started_at": started_at,
+                "finished_at": "",
+                "error": "",
+                "warnings": [],
+            }
+            self._refresh_thread = threading.Thread(
+                target=self._run_background_refresh,
+                name="SpreadMonitorRefresh",
+                daemon=True,
+            )
+            self._refresh_thread.start()
+            return self.status(refresh_in_progress=True)
+
+    def _run_background_refresh(self) -> None:
+        started_at = str(self._current_refresh_status().get("started_at") or utc_now_iso())
+        try:
+            payload = self.refresh()
+            errors = [str(item) for item in (payload.get("errors") or []) if str(item).strip()]
+            warnings = [str(item) for item in (payload.get("warnings") or []) if str(item).strip()]
+            finished_at = utc_now_iso()
+            if errors:
+                self._set_refresh_status("failed", started_at=started_at, finished_at=finished_at, error=" | ".join(errors[:5]), warnings=warnings)
+            else:
+                self._set_refresh_status("succeeded", started_at=started_at, finished_at=finished_at, warnings=warnings)
+        except Exception as exc:
+            self._set_refresh_status("failed", started_at=started_at, finished_at=utc_now_iso(), error=str(exc))
 
     def refresh(self) -> Dict[str, object]:
         if not self.refresh_lock.acquire(blocking=False):
@@ -369,6 +454,16 @@ class SpreadMonitorState:
             self._cache["errors"] = []
 
         context: Dict[str, object] = {"started_at": started_at}
+        mt5_preflight_error = ""
+        if self.mt5_fetcher is not None and self.mt5_preflight is not None:
+            try:
+                preflight = self.mt5_preflight()
+            except Exception as exc:
+                preflight = {"ok": False, "error": str(exc)}
+            if not bool(preflight.get("ok")):
+                mt5_preflight_error = str(preflight.get("error") or "MT5 unavailable.").strip()
+                warnings.append(f"Pepperstone unavailable: {mt5_preflight_error}")
+
         for symbol in symbols:
             for timeframe in TIMEFRAMES:
                 if self.oanda_fetcher is not None:
@@ -384,14 +479,17 @@ class SpreadMonitorState:
 
                 if self.mt5_fetcher is not None:
                     broker_context = self._fetch_context("pepperstone", symbol, timeframe.label, context)
-                    try:
-                        mt5_result = self.mt5_fetcher(symbol, timeframe, broker_context)
-                    except Exception as exc:
-                        mt5_result = {"error": str(exc)}
+                    if mt5_preflight_error:
+                        mt5_result = {"error": mt5_preflight_error}
+                    else:
+                        try:
+                            mt5_result = self.mt5_fetcher(symbol, timeframe, broker_context)
+                        except Exception as exc:
+                            mt5_result = {"error": str(exc)}
                     with self._cache_lock:
                         self._update_record("pepperstone", symbol, timeframe.label, mt5_result)
                     if mt5_result.get("error"):
-                        warnings.append(f"Pepperstone {symbol} {timeframe.label}: {mt5_result['error']}")
+                        warnings.append(f"Pepperstone unavailable: {mt5_result['error']}")
 
         finished_at = utc_now_iso()
         with self._cache_lock:
@@ -439,6 +537,8 @@ class SpreadMonitorState:
             "ok": bool(rows) and not bool(errors),
             "generated_at": str(self._cache.get("generated_at") or utc_now_iso()),
             "refresh_interval_seconds": self.refresh_interval_seconds,
+            "refresh": self._current_refresh_status(),
+            "refresh_state": str(self._current_refresh_status().get("state") or "idle"),
             "symbols": [row["symbol"] for row in rows],
             "timeframes": list(TIMEFRAME_LABELS),
             "rows": rows,

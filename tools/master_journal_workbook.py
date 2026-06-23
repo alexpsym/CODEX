@@ -6157,6 +6157,16 @@ def _ensure_dashboard_extended_layout(ws, diagnostics: Dict[str, Any] | None = N
         ), None)
         if not section_row:
             continue
+        section_end = next((
+            row for row in range(section_row + 1, ws.max_row + 1)
+            if str(ws.cell(row, 1).value or "").strip().lower() in next_sections
+        ), ws.max_row + 1)
+        protect_manual_merges = any(
+            merged.min_col == 1
+            and merged.max_col == 1
+            and section_row < merged.min_row < section_end
+            for merged in ws.merged_cells.ranges
+        )
         cursor = section_row + 1
         for wanted, aliases in desired_by_section[section_name]:
             while cursor <= ws.max_row and str(ws.cell(cursor, 1).value or "").strip().casefold() in {"", "source"}:
@@ -6180,6 +6190,9 @@ def _ensure_dashboard_extended_layout(ws, diagnostics: Dict[str, Any] | None = N
             ), None)
             if found == cursor:
                 cursor += 1
+                continue
+            if protect_manual_merges:
+                diagnostics.setdefault("skipped_dashboard_metric_rows_due_to_manual_merges", []).append(f"{section_name}: {wanted}")
                 continue
             template_row = min(max(section_row + 1, cursor), max(section_row + 1, next_anchor - 1))
             cursor = _insert_dashboard_rows_preserving_layout(ws, cursor, 1, template_row)

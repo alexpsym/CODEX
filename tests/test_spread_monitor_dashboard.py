@@ -37,6 +37,13 @@ def test_dashboard_source_registers_spread_monitor_local_only_web_app():
     assert '.script-toolbar-grid .script-btn[data-script-name="spreads-clone"] { max-width: 148px; }' in source
 
 
+def test_local_launcher_installs_spread_monitor_requirements_with_same_python():
+    source = (ROOT / "run_local_master_control.bat").read_text(encoding="utf-8")
+    assert "spreads-clone\\requirements.txt" in source
+    assert '"!PYTHON_EXE!" -m pip install -r "!ROOT!spreads-clone\\requirements.txt"' in source
+    assert "SPREAD_MONITOR_SKIP_REQUIREMENTS_INSTALL" in source
+
+
 def test_spread_monitor_files_are_present_and_tracked():
     required = [
         "spreads-clone/spread_app.py",
@@ -73,9 +80,14 @@ def test_spread_app_frontend_normalizes_messages_refresh_and_sorting():
     assert "function scalarMessage(value)" in source
     assert "JSON.stringify(value)" in source
     assert "payloadHasFailures(payload)" in source
+    assert "function isRefreshRunning(payload)" in source
     assert "function refreshIntervalSeconds(payload)" in source
     assert "Number.isFinite(seconds) && seconds > 0 ? seconds : 300" in source
     assert "updateLastRefresh: true" in source
+    assert "function queueStatusPoll()" in source
+    assert "function pollRefreshStatus()" in source
+    assert "loadStatus();" in source
+    assert "loadStatus().then(() => refreshData())" not in source
     assert "headEl.addEventListener('click'" in source
     assert "sortState.direction === 'asc' ? 'desc' : 'asc'" in source
     assert "function cellSortValue(row, timeframe)" in source
@@ -131,3 +143,28 @@ def test_spread_app_status_endpoint_returns_honest_payload_without_broker_connec
     assert payload["refresh_interval_seconds"] == 300
     assert payload["timeframes"] == ["1M", "5M", "15M", "30M", "1H", "4H", "D", "W", "M"]
     assert isinstance(payload["rows"], list)
+
+
+def test_spread_refresh_endpoint_starts_background_job_without_blocking(monkeypatch):
+    spread_dir = ROOT / "spreads-clone"
+    sys.path.insert(0, str(spread_dir))
+    spec = importlib.util.spec_from_file_location("spread_app_refresh_endpoint_test", spread_dir / "spread_app.py")
+    module = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+
+    class FakeState:
+        def status(self):
+            return {"ok": True, "refresh_state": "idle", "rows": [], "timeframes": []}
+
+        def start_refresh(self):
+            return {"ok": True, "refresh_state": "running", "status": "refresh_in_progress", "rows": [], "timeframes": []}
+
+    monkeypatch.setattr(module, "STATE", FakeState())
+    client = module.app.test_client()
+    response = client.post("/api/spreads/refresh")
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["refresh_state"] == "running"
+    assert payload["status"] == "refresh_in_progress"

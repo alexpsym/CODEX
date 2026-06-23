@@ -1,4 +1,5 @@
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -7,7 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SPREAD_DIR = ROOT / "spreads-clone"
 sys.path.insert(0, str(SPREAD_DIR))
 
-from oanda_spreads import fetch_oanda_spread_samples, parse_oanda_bid_ask_candles
+from oanda_spreads import fetch_oanda_spread_samples, parse_oanda_bid_ask_candles, parse_oanda_lookback_candles
 from spread_core import TimeframeConfig
 
 
@@ -78,3 +79,72 @@ def test_oanda_fetch_uses_bid_ask_price_parameter_and_single_v3_endpoint():
     assert kwargs["params"]["price"] == "BA"
     assert kwargs["params"]["granularity"] == "M1"
     assert kwargs["params"]["count"] <= 5000
+
+
+def test_oanda_lookback_selects_nearest_complete_candle_at_or_before_target():
+    payload = {
+        "candles": [
+            {
+                "time": "2026-01-01T00:05:00Z",
+                "complete": True,
+                "bid": {"c": "1.0000"},
+                "ask": {"c": "1.0010"},
+            },
+            {
+                "time": "2026-01-01T00:10:00Z",
+                "complete": True,
+                "bid": {"c": "1.0000"},
+                "ask": {"c": "1.0030"},
+            },
+            {
+                "time": "2026-01-01T00:15:00Z",
+                "complete": False,
+                "bid": {"c": "1.0000"},
+                "ask": {"c": "1.0090"},
+            },
+        ]
+    }
+    parsed = parse_oanda_lookback_candles(payload, datetime(2026, 1, 1, 0, 11, tzinfo=timezone.utc))
+    assert parsed["latest"]["time"] == "2026-01-01T00:10:00Z"
+    assert parsed["latest"]["spread_pct"] == pytest.approx(((1.0030 - 1.0000) / 1.0015) * 100)
+
+
+def test_oanda_fetch_treats_columns_as_lookback_offsets_not_latest_copies():
+    calls = []
+
+    def fake_request(method, endpoint, **kwargs):
+        calls.append((method, endpoint, kwargs))
+        return {
+            "candles": [
+                {
+                    "time": "2026-01-01T00:00:00Z",
+                    "complete": True,
+                    "bid": {"c": "1.0000"},
+                    "ask": {"c": "1.0010"},
+                },
+                {
+                    "time": "2026-01-01T00:10:00Z",
+                    "complete": True,
+                    "bid": {"c": "1.0000"},
+                    "ask": {"c": "1.0030"},
+                },
+                {
+                    "time": "2026-01-01T00:14:00Z",
+                    "complete": True,
+                    "bid": {"c": "1.0000"},
+                    "ask": {"c": "1.0050"},
+                },
+            ]
+        }
+
+    now = datetime(2026, 1, 1, 0, 15, tzinfo=timezone.utc)
+    one_min = fetch_oanda_spread_samples("EUR_USD", TimeframeConfig("1M", "M1", 60, 7), request_func=fake_request, end=now)
+    five_min = fetch_oanda_spread_samples("EUR_USD", TimeframeConfig("5M", "M5", 300, 14), request_func=fake_request, end=now)
+    fifteen_min = fetch_oanda_spread_samples("EUR_USD", TimeframeConfig("15M", "M15", 900, 21), request_func=fake_request, end=now)
+
+    assert one_min["latest"]["time"] == "2026-01-01T00:14:00Z"
+    assert five_min["latest"]["time"] == "2026-01-01T00:10:00Z"
+    assert fifteen_min["latest"]["time"] == "2026-01-01T00:00:00Z"
+    values = {one_min["latest"]["spread_pct"], five_min["latest"]["spread_pct"], fifteen_min["latest"]["spread_pct"]}
+    assert len(values) == 3
+    assert all(call[2]["params"]["price"] == "BA" for call in calls)

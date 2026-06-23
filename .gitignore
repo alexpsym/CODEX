@@ -17,6 +17,7 @@ bybit_monitor/runtime_status.json
 bybit_monitor/state.json
 oanda_monitor/runtime_status.json
 state_backup.json
+custom instructions/*CHATGPT_ONLY*
 journal/*.xls
 journal/*.xlsx
 !journal/Trading Journal.xlsx

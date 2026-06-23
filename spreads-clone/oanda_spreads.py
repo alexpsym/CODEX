@@ -13,7 +13,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from shared import oanda_api
-from spread_core import TimeframeConfig, make_sample, spread_pct_from_bid_ask
+from spread_core import TimeframeConfig, lookback_target_for_timeframe, make_sample, parse_time, spread_pct_from_bid_ask
 
 
 MAX_OANDA_CANDLE_COUNT = 5000
@@ -67,6 +67,27 @@ def parse_oanda_bid_ask_candles(payload: Dict[str, Any]) -> Dict[str, object]:
     return {"samples": complete_samples, "latest": latest}
 
 
+def parse_oanda_lookback_candles(payload: Dict[str, Any], target_at: datetime) -> Dict[str, object]:
+    candles = payload.get("candles")
+    if not isinstance(candles, list):
+        return {"samples": [], "latest": None, "target_at": _iso(target_at)}
+
+    complete_samples: List[Dict[str, object]] = []
+    selected: Optional[Dict[str, object]] = None
+    target = target_at.astimezone(timezone.utc)
+    for candle in candles:
+        if not isinstance(candle, dict) or candle.get("complete") is not True:
+            continue
+        sample = _candle_spread_sample(candle)
+        if sample is None:
+            continue
+        complete_samples.append(sample)
+        sample_time = parse_time(sample.get("time"))
+        if sample_time is not None and sample_time <= target:
+            selected = sample
+    return {"samples": complete_samples, "latest": selected, "target_at": _iso(target)}
+
+
 def _iso(value: datetime) -> str:
     dt = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -97,10 +118,17 @@ def fetch_oanda_spread_samples(
             requested_count = int(raw_count) if raw_count is not None else None
         except (TypeError, ValueError):
             requested_count = None
+    reference_end = end
+    if reference_end is None and isinstance(context, dict):
+        reference_end = parse_time(context.get("started_at"))
+    reference_end = reference_end or datetime.now(timezone.utc)
+    target_at = lookback_target_for_timeframe(timeframe, reference_end)
+
     params: Dict[str, object] = {
         "granularity": timeframe.oanda_granularity,
         "price": "BA",
         "count": max(1, min(MAX_OANDA_CANDLE_COUNT, requested_count or _count_from_env())),
+        "to": _iso(reference_end),
     }
     if start is not None:
         params["from"] = _iso(start)
@@ -113,9 +141,11 @@ def fetch_oanda_spread_samples(
         params=params,
         timeout=10,
     )
-    parsed = parse_oanda_bid_ask_candles(data)
+    parsed = parse_oanda_lookback_candles(data, target_at)
     if not parsed.get("latest") and not parsed.get("samples"):
         parsed["error"] = "No bid/ask candle spread data returned."
+    elif not parsed.get("latest"):
+        parsed["error"] = f"No complete bid/ask candle at or before lookback target {_iso(target_at)}."
     return parsed
 
 

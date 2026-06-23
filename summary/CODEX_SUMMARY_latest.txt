@@ -1,0 +1,34 @@
+Completed narrow fixes for Spread Monitor, Trading Journal validation, persistent Codex instructions, temp cleanup, and the end-of-job push workflow.
+
+Changes made:
+- Added custom instructions/CODEX_BRIEF_INSTRUCTIONS.txt with repo-specific standing instructions for narrow patches, workbook preservation, targeted tests, summary logging, and automatic BAT push workflow.
+- Added tools/cleanup_pytest_temp.ps1, a safe cleanup helper that removes only .pytest_tmp*, .pytest_cache, and __pycache__ folders after verifying paths stay inside the repo.
+- Updated .gitignore to keep local-only CHATGPT_ONLY custom-instruction docx files out of automatic commits.
+- Updated run_local_master_control.bat to install spreads-clone/requirements.txt with the same PYTHON_EXE used by Local Master Control, with a non-fatal warning if install fails.
+- Changed Spread Monitor POST /api/spreads/refresh to start a background refresh and return quickly; the UI now polls status, disables Manual Refresh while running, and no longer starts a full refresh on first page load.
+- Added MT5/Pepperstone provider-level preflight so missing MetaTrader5 or unavailable terminal/login produces one provider-level warning, marks Pepperstone unavailable, and avoids per-symbol/timeframe spam.
+- Changed provider-error cache handling so stale Pepperstone latest values are cleared and not reused after MT5 failure.
+- Changed OANDA and MT5/Pepperstone columns to lookback targets, selecting the nearest complete OANDA bid/ask candle or MT5 tick at or before the requested lookback timestamp.
+- Added source timestamps to spread payload/UI tooltip metadata.
+- Changed Trading Journal Instrument Leaders validation so a missing optional Instrument Leaders section/header is a warning, not a fatal resync failure.
+- Protected manually merged STATS1 A-column sections from optional metric-row insertion, preserving source workbook merges such as A52:A53.
+
+Verification run:
+- python -m py_compile render\master_service.py tools\master_journal_workbook.py spreads-clone\spread_app.py spreads-clone\spread_core.py spreads-clone\oanda_spreads.py spreads-clone\mt5_spreads.py
+- python -m pytest tests\test_spread_core.py tests\test_spread_monitor_dashboard.py tests\test_mt5_spread_fetch.py tests\test_oanda_spread_fetch.py tests\test_master_service_journal_validation.py -q --basetemp .pytest_tmp_spread_master
+  Result: 34 passed.
+- python -m pytest tests\test_master_journal_workbook.py -q -k "manual_merges or instrument_leaders or risk_of_ruin or duration or drawdown or yearly" --basetemp .pytest_tmp_master_journal_focus
+  Result: 21 passed.
+- python -m pytest tests\test_patch_desktop_push.py -q --basetemp .pytest_tmp_patch_push
+  Result: 3 passed.
+- node --check render\static\dashboard.js
+- node --check render\static\open_orders.js
+- Ran Trading Journal resync against a copied journal/Trading Journal.xlsx with GitHub sync deferred.
+  Result: master_journal_ok true; warning only: optional Instrument Leaders section/header missing.
+- Copied workbook spot-checks confirmed Best Win Streak green, STATS1 drawdown Start/End rows populated, STATS2 has one Risk Of Ruin column, SYMBOLS AN/AO/AP are text durations with General format, report core rows are populated where data exists, and A52:A53 remains merged.
+- Safe temp cleanup ran successfully and left no .pytest_tmp* folders.
+
+Notes:
+- The full tests/test_master_journal_workbook.py run was attempted but exceeded 5 minutes while still passing in-progress tests; the targeted workbook regression set above completed successfully.
+- Local runtime files render/data/monthly_aud_revaluation_state.json and state_backup.json remain local-only dirty files and should be excluded by PATCH_DESKTOP_PUSH.bat.
+- This summary file was written before running PATCH_DESKTOP_PUSH.bat as requested; the final Codex response reports the push result from PATCH_DESKTOP_PUSH-latest.log.

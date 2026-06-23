@@ -8,7 +8,7 @@ import os
 import statistics
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
-from spread_core import TimeframeConfig, coerce_float, make_sample, spread_pct_from_bid_ask
+from spread_core import TimeframeConfig, coerce_float, lookback_target_for_timeframe, make_sample, parse_time, spread_pct_from_bid_ask
 from symbols import resolve_mt5_symbol
 
 
@@ -44,6 +44,43 @@ def _tick_time_to_dt(value: object) -> Optional[datetime]:
     if number > 1_000_000_000_000:
         number = number / 1000.0
     return datetime.fromtimestamp(number, tz=timezone.utc)
+
+
+def preflight_mt5_environment(mt5_module: Optional[Any] = None) -> Dict[str, object]:
+    try:
+        mt5 = mt5_module or _import_mt5()
+    except ModuleNotFoundError as exc:
+        return {"ok": False, "error": str(exc)}
+    except Exception as exc:
+        return {"ok": False, "error": f"MT5 import failed: {exc}"}
+
+    initialized_here = mt5_module is None
+    if initialized_here:
+        try:
+            if not mt5.initialize():
+                return {"ok": False, "error": f"MT5 terminal initialize failed: {_last_error(mt5)}"}
+        except Exception as exc:
+            return {"ok": False, "error": f"MT5 terminal initialize failed: {exc}"}
+    try:
+        try:
+            account_info = mt5.account_info()
+        except Exception as exc:
+            return {"ok": False, "error": f"MT5 account check failed: {exc}"}
+        if account_info is None:
+            return {"ok": False, "error": f"MT5 terminal is not logged in: {_last_error(mt5)}"}
+        try:
+            symbols = mt5.symbols_get()
+        except Exception as exc:
+            return {"ok": False, "error": f"MT5 symbols unavailable: {exc}"}
+        if symbols is None:
+            return {"ok": False, "error": f"MT5 symbols unavailable: {_last_error(mt5)}"}
+        return {"ok": True, "error": ""}
+    finally:
+        if initialized_here:
+            try:
+                mt5.shutdown()
+            except Exception:
+                pass
 
 
 def _field(row: object, name: str) -> object:
@@ -122,6 +159,8 @@ def _iter_tick_spreads(
             spread_pct = spread_pct_from_bid_ask(bid, ask)
         except ValueError:
             continue
+        if spread_pct <= 0:
+            continue
         if commission_adjustment_pct is not None:
             midpoint = (ask + bid) / 2.0
             spread_pct += max(0.0, commission_adjustment_pct(midpoint))
@@ -149,6 +188,7 @@ def aggregate_tick_spreads(
     timeframe: TimeframeConfig,
     *,
     commission_adjustment_pct: Optional[Callable[[float], float]] = None,
+    target_at: Optional[datetime] = None,
 ) -> Dict[str, object]:
     tick_samples = _iter_tick_spreads(ticks, commission_adjustment_pct)
     if not tick_samples:
@@ -165,8 +205,27 @@ def aggregate_tick_spreads(
         for bucket, values in sorted(grouped.items())
         if values
     ]
-    latest = tick_samples[-1]
-    return {"samples": baseline, "latest": latest}
+    if target_at is not None:
+        target = _ensure_utc(target_at)
+        eligible = []
+        for sample in tick_samples:
+            sample_time = parse_time(sample.get("time"))
+            if sample_time is not None and sample_time <= target:
+                eligible.append(sample)
+        if not eligible:
+            return {
+                "samples": baseline,
+                "latest": None,
+                "target_at": target.isoformat().replace("+00:00", "Z"),
+                "error": f"No MT5 tick at or before lookback target {target.isoformat().replace('+00:00', 'Z')}.",
+            }
+        latest = eligible[-1]
+    else:
+        latest = tick_samples[-1]
+    result = {"samples": baseline, "latest": latest}
+    if target_at is not None:
+        result["target_at"] = _ensure_utc(target_at).isoformat().replace("+00:00", "Z")
+    return result
 
 
 def available_mt5_symbols(mt5_module: Optional[Any] = None) -> List[str]:
@@ -216,7 +275,9 @@ def fetch_mt5_spread_samples(
         if hasattr(mt5, "symbol_select") and not mt5.symbol_select(resolved, True):
             return {"error": f"MT5 symbol_select failed for {resolved}: {_last_error(mt5)}"}
 
-        end = _ensure_utc(date_to_utc or datetime.now(timezone.utc))
+        context_end = parse_time(context.get("started_at")) if isinstance(context, dict) else None
+        end = _ensure_utc(date_to_utc or context_end or datetime.now(timezone.utc))
+        target_at = lookback_target_for_timeframe(timeframe, end)
         lookback_days = timeframe.mt5_lookback_days
         if isinstance(context, dict) and context.get("has_cached_baseline"):
             lookback_days = min(lookback_days, 7)
@@ -234,7 +295,7 @@ def fetch_mt5_spread_samples(
 
         symbol_info = mt5.symbol_info(resolved) if hasattr(mt5, "symbol_info") else None
         commission_adjustment = _razor_commission_adjustment_factory(mt5, resolved, symbol_info)
-        parsed = aggregate_tick_spreads(ticks, timeframe, commission_adjustment_pct=commission_adjustment)
+        parsed = aggregate_tick_spreads(ticks, timeframe, commission_adjustment_pct=commission_adjustment, target_at=target_at)
         parsed["resolved_symbol"] = resolved
         parsed["cost_model"] = "pepperstone_razor_all_in"
         parsed["commission_per_lot_per_side"] = _razor_commission_per_side()
