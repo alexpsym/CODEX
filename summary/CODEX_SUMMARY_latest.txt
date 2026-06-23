@@ -1,17 +1,21 @@
-Completed the follow-up Local Trading Tools launch crash visibility fix.
+Completed the remaining Local Trading Tools launch failure fix after the crash-visibility update.
 
 Changes made:
-- Changed run_local_master_control.bat so the visible worker window no longer launches through the disappearing `cmd /c` path.
-- Added a `__worker_console` wrapper launched with `cmd /k`; it redirects the real worker to logs\LocalTradingTools-worker-latest.log, then leaves the console open on abnormal worker exit.
-- The worker wrapper now prints the worker log path, prints the last 40 worker log lines on abnormal exit, and waits for a keypress before closing so startup crashes stay readable.
-- Added LOCAL_MASTER_NORMAL_EXIT_FILE so normal user-triggered app Exit can still close the worker console automatically instead of being held open by the new failure pause.
-- Kept persistent logs for logs\LocalTradingTools-launch-latest.log and logs\LocalTradingTools-worker-latest.log; logs remain ignored by Git.
-- Updated TradingToolsLauncher.cs so non-zero launcher failures always include the exact worker log path in the MessageBox, with a useful worker log tail or an explicit no-output placeholder.
-- Updated launcher and merged-monitor tests so they no longer protect the old disappearing `cmd /c` worker command and instead assert the persistent-console abnormal-failure branch.
+- Replaced the worker wrapper's fragile `call "%~f0" __worker > ...` invocation with `cmd /d /s /v:on /c ""%~f0" __worker" > "!LOCAL_MASTER_WORKER_LOG!" 2>&1`, which avoids the CMD syntax failure while preserving persistent worker logging.
+- Added LOCAL_MASTER_WORKER_FAILED_FILE as a worker-dead marker written by `__worker_console` when the worker exits abnormally before readiness.
+- Added a parent preflight fail-fast check before the dashboard health timeout so Local Trading Tools now reports `ERROR: Worker exited before dashboard became ready.` immediately instead of waiting the full 60 seconds.
+- Kept the visible crash console behavior: abnormal startup still prints the worker log path, tails the last 40 worker log lines, and pauses so the error remains readable.
+- Moved the normal-exit marker write into a small subroutine to avoid fragile inline echo/redirection syntax inside the shutdown branch.
+- Preserved persistent logs for logs\LocalTradingTools-launch-latest.log and logs\LocalTradingTools-worker-latest.log; logs remain ignored by Git.
+- Updated launcher and merged-monitor tests to cover the worker-dead fail-fast marker, the safer worker wrapper invocation, worker log path/tail behavior, and the absence of known invalid `if not /I` syntax.
 
 Verification run:
+- Controlled direct BAT check: run_local_master_control.bat __worker_console
+  Result: exited 0 with worker output captured; did not print `The syntax of the command is incorrect.`
+- Controlled direct BAT check: run_local_master_control.bat __worker
+  Result: exited 0; did not print `The syntax of the command is incorrect.`
 - python -m pytest tests\test_windows_launchers.py -q
-  Result: 34 passed.
+  Result: 35 passed.
 - python -m pytest tests\test_merged_monitor_status_env.py -q
   Result: failed only because this environment cannot scan C:\Users\User\AppData\Local\Temp\pytest-of-User for pytest temp dirs (PermissionError [WinError 5]).
 - python -m pytest tests\test_merged_monitor_status_env.py -q --basetemp .pytest_tmp_merged_monitor
@@ -21,6 +25,6 @@ Verification run:
 
 Notes:
 - No Trading Journal workbook or layout files were changed.
-- Local ignored/generated files remain uncommitted, including Local Trading Tools.exe, logs, .pytest_tmp_merged_monitor, caches, render/data runtime state, and state_backup.json.
+- Local ignored/generated files remain uncommitted, including Local Trading Tools.exe, logs, .pytest_tmp_launcher_bat, .pytest_tmp_merged_monitor, caches, render/data runtime state, and state_backup.json.
 - An unrelated modified file under custom instructions/ remains untouched and is intentionally kept out of this launcher fix commit.
 - This summary file was written before running PATCH_DESKTOP_PUSH.bat as requested; the final Codex response reports the push result from PATCH_DESKTOP_PUSH-latest.log.

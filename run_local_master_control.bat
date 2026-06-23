@@ -85,9 +85,11 @@ if not defined LOCAL_MASTER_EDGE_DEBUG_PORT (
 set "LOCAL_MASTER_EDGE_PROFILE_DIR=%TEMP%\LocalTradingToolsEdge-%LOCAL_LAUNCH_TS%"
 set "LOCAL_MASTER_EXIT_REQUEST=%TEMP%\LocalTradingToolsExit-%LOCAL_LAUNCH_TS%.flag"
 set "LOCAL_MASTER_NORMAL_EXIT_FILE=%TEMP%\LocalTradingToolsExit-%LOCAL_LAUNCH_TS%.normal"
+set "LOCAL_MASTER_WORKER_FAILED_FILE=%TEMP%\LocalTradingToolsExit-%LOCAL_LAUNCH_TS%.failed"
 set "LOCAL_MASTER_WINDOW_TITLE=Local Master Control - %LOCAL_LAUNCH_TS%"
 if exist "%LOCAL_MASTER_EXIT_REQUEST%" del /q "%LOCAL_MASTER_EXIT_REQUEST%" >nul 2>nul
 if exist "%LOCAL_MASTER_NORMAL_EXIT_FILE%" del /q "%LOCAL_MASTER_NORMAL_EXIT_FILE%" >nul 2>nul
+if exist "%LOCAL_MASTER_WORKER_FAILED_FILE%" del /q "%LOCAL_MASTER_WORKER_FAILED_FILE%" >nul 2>nul
 echo [local-master] worker log: %LOCAL_MASTER_WORKER_LOG%
 start "%LOCAL_MASTER_WINDOW_TITLE%" /D "%ROOT%" cmd /d /v:on /k "call ""%~f0"" __worker_console"
 set "MASTER_READY_TIMEOUT_SECONDS=60"
@@ -99,6 +101,7 @@ set /a READY_WAITED=0
 powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $r = Invoke-WebRequest -UseBasicParsing -Uri '%MASTER_HEALTH_URL%' -TimeoutSec 1; if ($r.StatusCode -eq 200 -and (($r.Content | Out-String).Trim() -eq 'ok')) { exit 0 } else { exit 1 } } catch { exit 1 }"
 if not errorlevel 1 goto master_ready
 
+if defined LOCAL_MASTER_WORKER_FAILED_FILE if exist "%LOCAL_MASTER_WORKER_FAILED_FILE%" goto worker_failed_before_ready
 set /a READY_WAITED+=1
 if !READY_WAITED! GEQ %MASTER_READY_TIMEOUT_SECONDS% goto master_not_ready
 timeout /t 1 /nobreak >nul
@@ -134,6 +137,13 @@ echo [local-master] Check worker startup log: %LOCAL_MASTER_WORKER_LOG%
 echo [local-master] Browser was not opened to avoid a dead-page / manual-refresh failure.
 exit /b 1
 
+:worker_failed_before_ready
+echo [local-master] ERROR: Worker exited before dashboard became ready.
+echo [local-master] Worker startup log: %LOCAL_MASTER_WORKER_LOG%
+if defined LOCAL_MASTER_WORKER_FAILED_FILE if exist "%LOCAL_MASTER_WORKER_FAILED_FILE%" type "%LOCAL_MASTER_WORKER_FAILED_FILE%"
+echo [local-master] Browser was not opened because the worker is no longer running.
+exit /b 1
+
 :scanner_not_ready
 echo [local-master] ERROR: scanner did not become ready after %SCANNER_READY_TIMEOUT_SECONDS% seconds.
 echo [local-master] Alerts startup may have failed. Check worker startup log: %LOCAL_MASTER_WORKER_LOG%
@@ -146,12 +156,16 @@ echo [local-master] visible worker console started.
 echo [local-master] worker output is being written to:
 echo [local-master]   !LOCAL_MASTER_WORKER_LOG!
 echo [local-master] If startup fails, this window will stay open and print the latest log lines.
-call "%~f0" __worker > "!LOCAL_MASTER_WORKER_LOG!" 2>&1
+cmd /d /s /v:on /c ""%~f0" __worker" > "!LOCAL_MASTER_WORKER_LOG!" 2>&1
 set "WORKER_EXIT_CODE=!ERRORLEVEL!"
 if defined LOCAL_MASTER_NORMAL_EXIT_FILE if exist "!LOCAL_MASTER_NORMAL_EXIT_FILE!" (
   del /q "!LOCAL_MASTER_NORMAL_EXIT_FILE!" >nul 2>nul
   exit
 )
+if not defined LOCAL_MASTER_WORKER_FAILED_FILE goto worker_console_show_failure
+> "!LOCAL_MASTER_WORKER_FAILED_FILE!" echo Worker exited before dashboard became ready with exit code !WORKER_EXIT_CODE! at !DATE! !TIME!
+
+:worker_console_show_failure
 echo.
 if "!WORKER_EXIT_CODE!"=="0" (
   echo [local-master] Worker exited before a normal app Exit request.
@@ -215,7 +229,7 @@ set "EXIT_CODE=!ERRORLEVEL!"
 echo [local-master] uvicorn exited with !EXIT_CODE! at !DATE! !TIME!
 if defined LOCAL_MASTER_EXIT_REQUEST if exist "!LOCAL_MASTER_EXIT_REQUEST!" (
   echo [local-master] local exit requested; closing worker window.
-  if defined LOCAL_MASTER_NORMAL_EXIT_FILE echo normal exit requested at !DATE! !TIME!>"!LOCAL_MASTER_NORMAL_EXIT_FILE!"
+  call :write_normal_exit_marker
   del /q "!LOCAL_MASTER_EXIT_REQUEST!" >nul 2>nul
   if defined LOCAL_MASTER_EDGE_PROFILE_DIR if exist "!LOCAL_MASTER_EDGE_PROFILE_DIR!\" rmdir /s /q "!LOCAL_MASTER_EDGE_PROFILE_DIR!" >nul 2>nul
   echo [local-master] closing Local Master Control command prompt.
@@ -252,4 +266,9 @@ if errorlevel 1 (
   )
 )
 if exist "%ENV_PARSE_OUTPUT%" del /q "%ENV_PARSE_OUTPUT%" >nul 2>nul
+goto :eof
+
+:write_normal_exit_marker
+if not defined LOCAL_MASTER_NORMAL_EXIT_FILE goto :eof
+> "!LOCAL_MASTER_NORMAL_EXIT_FILE!" echo normal exit requested at !DATE! !TIME!
 goto :eof
