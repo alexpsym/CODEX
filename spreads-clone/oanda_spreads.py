@@ -134,12 +134,19 @@ def fetch_oanda_spread_samples(
         params["from"] = _iso(start)
     if end is not None:
         params["to"] = _iso(end)
+    timeout = 10
+    if isinstance(context, dict):
+        try:
+            timeout = int(float(context.get("request_timeout_seconds", timeout)))
+        except (TypeError, ValueError):
+            timeout = 10
+    timeout = max(1, min(timeout, 60))
     data = request(
         "GET",
         f"/instruments/{instrument}/candles",
         mode=mode or _mode_from_env(),
         params=params,
-        timeout=10,
+        timeout=timeout,
     )
     parsed = parse_oanda_lookback_candles(data, target_at)
     if not parsed.get("latest") and not parsed.get("samples"):

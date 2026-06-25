@@ -369,6 +369,8 @@ def _repair_legacy_instrument_averages_freeze_pane(wb: Workbook, diagnostics: Di
 def _instrument_averages_header_row(ws) -> int:
     if str(ws.cell(INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, 1).value or "").strip().lower() == "symbol":
         return INSTRUMENT_AVERAGES_FILTER_HEADER_ROW
+    if str(ws.cell(INSTRUMENT_AVERAGES_GROUP_HEADER_ROW, 1).value or "").strip().lower() == "symbol":
+        return INSTRUMENT_AVERAGES_FILTER_HEADER_ROW
     return 1
 
 
@@ -376,13 +378,22 @@ def _instrument_averages_data_start_row(ws) -> int:
     return INSTRUMENT_AVERAGES_DATA_START_ROW if _instrument_averages_header_row(ws) == INSTRUMENT_AVERAGES_FILTER_HEADER_ROW else 2
 
 
+def _vertical_header_anchor_value(ws, col: int) -> str:
+    for merged in ws.merged_cells.ranges:
+        if merged.min_col == col and merged.max_col == col and merged.min_row <= 1 and merged.max_row >= 2:
+            return str(ws.cell(merged.min_row, col).value or "").strip()
+    return ""
+
+
 def _instrument_averages_header_map(ws) -> Dict[str, int]:
     header_row = _instrument_averages_header_row(ws)
-    headers = {
-        str(ws.cell(header_row, col).value or "").strip(): col
-        for col in range(1, ws.max_column + 1)
-        if str(ws.cell(header_row, col).value or "").strip()
-    }
+    headers: Dict[str, int] = {}
+    for col in range(1, ws.max_column + 1):
+        value = str(ws.cell(header_row, col).value or "").strip()
+        if not value and header_row == INSTRUMENT_AVERAGES_FILTER_HEADER_ROW:
+            value = _vertical_header_anchor_value(ws, col) or str(ws.cell(INSTRUMENT_AVERAGES_GROUP_HEADER_ROW, col).value or "").strip()
+        if value:
+            headers[value] = col
     aliases = {
         "Shortest (DD:HH:MM:SS)": "Shortest duration (DD:HH:MM:SS)",
         "Longest (DD:HH:MM:SS)": "Longest duration (DD:HH:MM:SS)",
@@ -390,7 +401,116 @@ def _instrument_averages_header_map(ws) -> Dict[str, int]:
     for alias, canonical in aliases.items():
         if alias in headers and canonical not in headers:
             headers[canonical] = headers[alias]
+    for col in range(1, ws.max_column + 1):
+        canonical = _symbols_canonical_header_for_column(ws, col)
+        if canonical and canonical not in headers:
+            headers[canonical] = col
     return headers
+
+
+SYMBOLS_GROUP_HEADER_LABELS = {
+    "longs", "shorts", "order", "timeframe", "p/l", "pl", "stops", "targets", "duration",
+}
+SYMBOLS_GROUP_WIDTHS = {
+    "longs": 4,
+    "shorts": 4,
+    "order": 2,
+    "timeframe": 12,
+    "p/l": 4,
+    "pl": 4,
+    "stops": 5,
+    "targets": 5,
+    "duration": 3,
+}
+
+
+def _norm_header_token(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").strip().casefold())
+
+
+def _symbols_group_for_column(ws, col: int) -> str:
+    for merged in ws.merged_cells.ranges:
+        if merged.min_row == 1 and merged.max_row == 1 and merged.min_col <= col <= merged.max_col and merged.max_col > merged.min_col:
+            return str(ws.cell(1, merged.min_col).value or "").strip()
+    for cursor in range(1, col + 1):
+        text = str(ws.cell(1, cursor).value or "").strip()
+        if not text:
+            continue
+        token = text.casefold()
+        width = SYMBOLS_GROUP_WIDTHS.get(token)
+        if width and cursor <= col <= cursor + width - 1:
+            return text
+    return ""
+
+
+def _symbols_metric_key_for_column(ws, col: int) -> str:
+    header = str(ws.cell(INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, col).value or "").strip()
+    if not header:
+        header = _vertical_header_anchor_value(ws, col)
+    group = _symbols_group_for_column(ws, col).casefold()
+    token = _norm_header_token(header)
+    if group == "timeframe":
+        return {
+            "1m": "timeframe_1m",
+            "1min": "timeframe_1m",
+            "5m": "timeframe_5m",
+            "5min": "timeframe_5m",
+            "15m": "timeframe_15m",
+            "15min": "timeframe_15m",
+            "30m": "timeframe_30m",
+            "30min": "timeframe_30m",
+            "1h": "timeframe_1h",
+            "4h": "timeframe_4h",
+            "daily": "timeframe_daily",
+            "weekly": "timeframe_weekly",
+            "monthly": "timeframe_monthly",
+        }.get(token, "")
+    if group == "stops":
+        return {
+            "minstop": "min_stop_pct",
+            "minstoppct": "min_stop_pct",
+            "min": "min_stop_pct",
+            "avgstop": "avg_stop_pct",
+            "avgstoppct": "avg_stop_pct",
+            "avg": "avg_stop_pct",
+            "maxstop": "max_stop_pct",
+            "maxstoppct": "max_stop_pct",
+            "max": "max_stop_pct",
+        }.get(token, "")
+    if group == "targets":
+        return {
+            "mintarget": "min_target_pct",
+            "mintargetpct": "min_target_pct",
+            "min": "min_target_pct",
+            "avgtarget": "avg_target_pct",
+            "avgtargetpct": "avg_target_pct",
+            "avg": "avg_target_pct",
+            "maxtarget": "max_target_pct",
+            "maxtargetpct": "max_target_pct",
+            "max": "max_target_pct",
+        }.get(token, "")
+    return ""
+
+
+def _symbols_canonical_header_for_column(ws, col: int) -> str:
+    key = _symbols_metric_key_for_column(ws, col)
+    return {
+        "timeframe_1m": "1M",
+        "timeframe_5m": "5M",
+        "timeframe_15m": "15M",
+        "timeframe_30m": "30M",
+        "timeframe_1h": "1H",
+        "timeframe_4h": "4H",
+        "timeframe_daily": "DAILY",
+        "timeframe_weekly": "WEEKLY",
+        "timeframe_monthly": "MONTHLY",
+        "min_stop_pct": "Min stop %",
+        "avg_stop_pct": "Avg stop %",
+        "max_stop_pct": "Max stop %",
+        "min_target_pct": "Min target %",
+        "avg_target_pct": "Avg target %",
+        "max_target_pct": "Max target %",
+    }.get(key, "")
 
 
 def _apply_symbols_filter_header_layout(ws) -> None:
@@ -495,9 +615,9 @@ def _ensure_symbols_schema(ws, diagnostics: Dict[str, Any] | None = None) -> boo
     if changed:
         headers = _header_map(ws, header_row=header_row)
         if ws.auto_filter and ws.auto_filter.ref:
-            min_col, min_row, _max_col, max_row = range_boundaries(ws.auto_filter.ref)
+            _min_col, _min_row, _max_col, max_row = range_boundaries(ws.auto_filter.ref)
             ws.auto_filter.ref = (
-                f"{get_column_letter(min_col)}{min_row}:"
+                f"A{header_row}:"
                 f"{get_column_letter(max(headers.values()))}{max(max_row, ws.max_row)}"
             )
         diagnostics["migrated_symbols_schema"] = True
@@ -511,9 +631,9 @@ def _ensure_instrument_averages_schema(ws, diagnostics: Dict[str, Any] | None = 
         headers = _instrument_averages_header_map(ws)
         if all(header in headers for header in INSTRUMENT_AVERAGES_HEADERS):
             if ws.auto_filter and ws.auto_filter.ref:
-                min_col, min_row, _max_col, max_row = range_boundaries(ws.auto_filter.ref)
+                _min_col, _min_row, _max_col, max_row = range_boundaries(ws.auto_filter.ref)
                 ws.auto_filter.ref = (
-                    f"{get_column_letter(min_col)}{min_row}:"
+                    f"A{INSTRUMENT_AVERAGES_FILTER_HEADER_ROW}:"
                     f"{get_column_letter(max(headers.values()))}{max(max_row, ws.max_row)}"
                 )
             return changed
@@ -636,21 +756,48 @@ def _linear_profit_percentage_totals(rows: List[Dict[str, Any]]) -> Dict[str, fl
     }
 
 
+def _journal_usdt_to_aud_fallback() -> float:
+    value = _as_float(os.getenv("JOURNAL_USDT_TO_AUD_FALLBACK", "1.45"))
+    return value if value is not None and value > 0 else 1.45
+
+
+def _currency_to_aud_factor(currency: Any) -> float | None:
+    code = str(currency or "").strip().upper()
+    if not code or code == "AUD":
+        return 1.0
+    if code in {"USDT", "USDC", "USD"}:
+        return _journal_usdt_to_aud_fallback()
+    return None
+
+
 def _net_result_pct_by_account(rows: List[Dict[str, Any]]) -> Dict[str, float]:
-    result: Dict[str, float] = defaultdict(float)
-    seen: Dict[str, int] = defaultdict(int)
+    by_account: Dict[str, Dict[str, float]] = defaultdict(lambda: {"pnl": 0.0, "starting": 0.0})
     for row in rows:
         if str(row.get("row_type") or "trade").strip().lower() != "trade":
             continue
         if _is_test_trade_value(row.get("is_test_trade")):
             continue
         account = _canonical_account_label(row.get("account_label") or row.get("account") or row.get("source") or "")
-        value = _as_float(row.get("result_pct"))
-        if not account or value is None or not math.isfinite(value):
+        if not account:
             continue
-        result[account] += value
-        seen[account] += 1
-    return {account: value for account, value in result.items() if seen.get(account)}
+        pnl = _as_float(row.get("net_profit"))
+        if pnl is None:
+            pnl = _as_float(row.get("result_cash"))
+        ending = _as_float(row.get("analysis_balance_after_trade"))
+        if ending is None:
+            ending = _as_float(row.get("balance_after_trade"))
+        if pnl is None or ending is None or not math.isfinite(pnl) or not math.isfinite(ending):
+            continue
+        starting = ending - pnl
+        if starting <= 0 or not math.isfinite(starting):
+            continue
+        by_account[account]["pnl"] += pnl
+        by_account[account]["starting"] += starting
+    return {
+        account: (payload["pnl"] / payload["starting"] * 100.0)
+        for account, payload in by_account.items()
+        if payload["starting"] > 0
+    }
 
 
 def _merge_metric_buckets(*buckets: Dict[str, Any] | None) -> Dict[str, Any]:
@@ -1410,6 +1557,81 @@ def _drawdown_detail_cell_value(detail: Any, endpoint: str) -> str:
     return start if endpoint == "start" else end
 
 
+_STREAK_INLINE_RE = re.compile(
+    r"^\s*(?P<count>\d+(?:\.0+)?)\s*(?:\((?P<start>.*?)\s+to\s+(?P<end>.*?)\))?\s*$",
+    re.IGNORECASE,
+)
+
+
+def _streak_detail_start_end(detail: Any) -> Tuple[str, str]:
+    if isinstance(detail, dict):
+        return _fmt_detail_datetime(detail.get("start_time")), _fmt_detail_datetime(detail.get("end_time"))
+    text = str(detail or "").strip()
+    if not text:
+        return "", ""
+    match = _STREAK_INLINE_RE.match(text)
+    if not match:
+        match = re.search(r"\((?P<start>.*?)\s+to\s+(?P<end>.*?)\)", text, re.IGNORECASE)
+    if not match:
+        return "", ""
+    return _fmt_detail_datetime(match.group("start")), _fmt_detail_datetime(match.group("end"))
+
+
+def _streak_inline_count(value: Any) -> int | None:
+    number = _as_float(value)
+    if number is not None and math.isfinite(number):
+        return int(number)
+    if not isinstance(value, str):
+        return None
+    match = _STREAK_INLINE_RE.match(value.strip())
+    if not match:
+        return None
+    count = _as_float(match.group("count"))
+    return int(count) if count is not None else None
+
+
+def _write_streak_detail_rows(
+    ws,
+    metric_label: str,
+    details_by_col: Dict[int, Any],
+    counts_by_col: Dict[int, Any] | None = None,
+    *,
+    diagnostics: Dict[str, Any] | None = None,
+) -> None:
+    wanted = metric_label.casefold()
+    metric_rows = [
+        row for row in range(1, ws.max_row + 1)
+        if str(ws.cell(row, 1).value or "").strip().casefold() == wanted
+    ]
+    for metric_row in metric_rows:
+        detail_rows = _ensure_start_end_rows_after(ws, metric_row, diagnostics)
+        if detail_rows is None:
+            continue
+        start_row, end_row = detail_rows
+        ws.cell(start_row, 1).value = "Start"
+        ws.cell(end_row, 1).value = "End"
+        _apply_dashboard_source_label_style(ws.cell(start_row, 1))
+        _apply_dashboard_source_label_style(ws.cell(end_row, 1))
+        for col in range(2, ws.max_column + 1):
+            inline_value = ws.cell(metric_row, col).value
+            count = _streak_inline_count((counts_by_col or {}).get(col))
+            if count is None:
+                count = _streak_inline_count(inline_value)
+            if count is not None:
+                ws.cell(metric_row, col).value = count
+                ws.cell(metric_row, col).number_format = "0"
+            inline_start, inline_end = _streak_detail_start_end(inline_value)
+            start, end = _streak_detail_start_end(details_by_col.get(col))
+            start = start or inline_start
+            end = end or inline_end
+            if start:
+                ws.cell(start_row, col).value = start
+                ws.cell(start_row, col).number_format = "General"
+            if end:
+                ws.cell(end_row, col).value = end
+                ws.cell(end_row, col).number_format = "General"
+
+
 def _copy_row_style_without_values(ws, source_row: int, target_row: int) -> None:
     for col in range(1, ws.max_column + 1):
         source = ws.cell(source_row, col)
@@ -1426,12 +1648,27 @@ def _copy_row_style_without_values(ws, source_row: int, target_row: int) -> None
         ws.row_dimensions[target_row].height = source_height
 
 
-def _ensure_start_end_rows_after(ws, metric_row: int, diagnostics: Dict[str, Any] | None = None) -> Tuple[int, int]:
+def _has_dashboard_manual_merge_below(ws, metric_row: int) -> bool:
+    if getattr(ws, "title", "") != STATS1_SHEET:
+        return False
+    return any(
+        merged.min_col == 1
+        and merged.max_col == 1
+        and merged.min_row > metric_row
+        for merged in ws.merged_cells.ranges
+    )
+
+
+def _ensure_start_end_rows_after(ws, metric_row: int, diagnostics: Dict[str, Any] | None = None) -> Tuple[int, int] | None:
     def label_at(row: int) -> str:
         return str(ws.cell(row, 1).value or "").strip().casefold()
 
     if label_at(metric_row + 1) == "start" and label_at(metric_row + 2) == "end":
         return metric_row + 1, metric_row + 2
+    if _has_dashboard_manual_merge_below(ws, metric_row):
+        if diagnostics is not None:
+            diagnostics.setdefault("skipped_detail_rows_due_to_manual_merges", []).append(f"{ws.title}: {metric_row}")
+        return None
     if label_at(metric_row + 1) == "start":
         ws.insert_rows(metric_row + 2, 1)
         _copy_row_style_without_values(ws, metric_row + 1, metric_row + 2)
@@ -1472,7 +1709,10 @@ def _write_drawdown_detail_rows(
         if str(ws.cell(row, 1).value or "").strip().casefold() == wanted
     ]
     for metric_row in metric_rows:
-        start_row, end_row = _ensure_start_end_rows_after(ws, metric_row, diagnostics)
+        detail_rows = _ensure_start_end_rows_after(ws, metric_row, diagnostics)
+        if detail_rows is None:
+            continue
+        start_row, end_row = detail_rows
         ws.cell(start_row, 1).value = "Start"
         ws.cell(end_row, 1).value = "End"
         _apply_dashboard_source_label_style(ws.cell(start_row, 1))
@@ -2581,6 +2821,7 @@ def _apply_instrument_averages_requested_style(ws, *, preserve_layout: bool = Fa
                 if headers.get(header):
                     ws.cell(row, headers[header]).number_format = ZERO_HIDE_FORMAT
         _apply_symbols_filter_header_layout(ws)
+        _repair_symbols_header_merges_preserving_layout(ws)
         return
     for row in range(data_start_row, ws.max_row + 1):
         if ws.cell(row, symbol_col).value in (None, ""):
@@ -2731,6 +2972,85 @@ def _repair_instrument_timeframe_columns(ws) -> None:
             font.color = "FF000000"
             cell.font = font
             cell.number_format = source_cell.number_format
+
+
+def _repair_symbols_header_merges_preserving_layout(ws, diagnostics: Dict[str, Any] | None = None) -> None:
+    header_row = _instrument_averages_header_row(ws)
+    if header_row != INSTRUMENT_AVERAGES_FILTER_HEADER_ROW:
+        return
+    existing = {str(rng) for rng in ws.merged_cells.ranges}
+    group_columns = {
+        col
+        for col in range(1, ws.max_column + 1)
+        if _symbols_group_for_column(ws, col)
+    }
+    created = []
+    for col in range(1, ws.max_column + 1):
+        if col in group_columns:
+            continue
+        if any(rng.min_col == col and rng.max_col == col and rng.min_row <= 1 and rng.max_row >= 2 for rng in ws.merged_cells.ranges):
+            continue
+        label = str(ws.cell(1, col).value or "").strip() or str(ws.cell(2, col).value or "").strip()
+        if not label:
+            continue
+        if ws.cell(1, col).value in (None, ""):
+            if ws.cell(2, col).value not in (None, ""):
+                _copy_cell_style(ws.cell(2, col), ws.cell(1, col))
+            ws.cell(1, col).value = label
+        ws.cell(2, col).value = None
+        ws.merge_cells(start_row=1, start_column=col, end_row=2, end_column=col)
+        created.append(f"{get_column_letter(col)}1:{get_column_letter(col)}2")
+    if diagnostics is not None and created:
+        diagnostics.setdefault("symbols_vertical_header_merges_added", []).extend(
+            item for item in created if item not in existing
+        )
+
+
+def _populate_symbols_metrics_preserving_layout(
+    ws,
+    rows: List[Dict[str, Any]],
+    diagnostics: Dict[str, Any] | None = None,
+) -> None:
+    diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+    headers = _instrument_averages_header_map(ws)
+    symbol_col = headers.get("Symbol", 1)
+    analysis = _instrument_analysis_by_symbol(rows)
+    populated: List[str] = []
+    skipped: List[Dict[str, str]] = []
+    data_start = _instrument_averages_data_start_row(ws)
+    metric_cols = {
+        col: _symbols_metric_key_for_column(ws, col)
+        for col in range(1, ws.max_column + 1)
+    }
+    metric_cols = {col: key for col, key in metric_cols.items() if key}
+    if not metric_cols:
+        return
+    for row in range(data_start, ws.max_row + 1):
+        symbol = str(ws.cell(row, symbol_col).value or "").strip().upper()
+        if not symbol:
+            continue
+        payload = analysis.get(symbol)
+        if not payload:
+            for col, key in metric_cols.items():
+                skipped.append({"column": get_column_letter(col), "metric": key, "reason": "symbol_not_in_trade_log"})
+            continue
+        for col, key in metric_cols.items():
+            cell = ws.cell(row, col)
+            value = payload.get(key)
+            if value is None:
+                skipped.append({"column": get_column_letter(col), "metric": key, "reason": "metric_not_derivable"})
+                continue
+            cell.value = value
+            if key.startswith("timeframe_"):
+                cell.number_format = ZERO_HIDE_FORMAT
+            else:
+                cell.value = value / 100.0
+                cell.number_format = "0.00%"
+            populated.append(f"{get_column_letter(col)}:{key}")
+    if populated:
+        diagnostics["symbols_populated_columns"] = sorted(set(populated))
+    if skipped:
+        diagnostics["symbols_skipped_columns"] = skipped[:200]
 
 
 def _apply_dashboard_source_label_style(cell) -> None:
@@ -2959,6 +3279,8 @@ def _repair_stats1_formatting(
     market_cols = _stats1_market_columns(ws)
     if not market_cols:
         return
+    _write_streak_detail_rows(ws, "Best Win Streak", {}, diagnostics=diagnostics)
+    _write_streak_detail_rows(ws, "Worst Losing Streak", {}, diagnostics=diagnostics)
     repaired = 0
     for row in range(1, ws.max_row + 1):
         cell = ws.cell(row, 1)
@@ -3269,6 +3591,11 @@ def _instrument_analysis_by_symbol(rows: List[Dict[str, Any]]) -> Dict[str, Dict
                 for row in symbol_rows
             ]
             payload[output_key] = _mode_nonblank(values)
+        all_timeframe_counts: Counter[str] = Counter()
+        for row in symbol_rows:
+            timeframe = _canonical_analysis_timeframe(row.get("timeframe"))
+            if timeframe:
+                all_timeframe_counts[timeframe] += 1
         timeframe_totals: Dict[str, float] = defaultdict(float)
         timeframe_counts: Counter[str] = Counter()
         for row in symbol_rows:
@@ -3332,6 +3659,27 @@ def _instrument_analysis_by_symbol(rows: List[Dict[str, Any]]) -> Dict[str, Dict
             "limit_orders": sum("limit" in value for value in order_values),
             "net_r_multiple": sum(r_values) if r_values else None,
         })
+        payload.update({
+            "timeframe_1m": all_timeframe_counts["1MIN"],
+            "timeframe_5m": all_timeframe_counts["5MIN"],
+            "timeframe_15m": all_timeframe_counts["15MIN"],
+            "timeframe_30m": all_timeframe_counts["30MIN"],
+            "timeframe_1h": all_timeframe_counts["1H"],
+            "timeframe_4h": all_timeframe_counts["4H"],
+            "timeframe_daily": all_timeframe_counts["DAILY"],
+            "timeframe_weekly": all_timeframe_counts["WEEKLY"],
+            "timeframe_monthly": all_timeframe_counts["MONTHLY"],
+        })
+        for source_key, prefix in (("stop_loss", "stop"), ("take_profit", "target")):
+            values = [
+                fraction * 100.0
+                for fraction in (_validated_distance_fraction(row, source_key) for row in symbol_rows)
+                if fraction is not None and math.isfinite(fraction)
+            ]
+            if values:
+                payload[f"min_{prefix}_pct"] = min(values)
+                payload[f"avg_{prefix}_pct"] = sum(values) / len(values)
+                payload[f"max_{prefix}_pct"] = max(values)
         payload.update(_linear_profit_percentage_totals(symbol_rows))
         for output_key, field in count_fields.items():
             payload[output_key] = sum(_is_positive_manual_value(row.get(field)) for row in symbol_rows)
@@ -3527,6 +3875,15 @@ def _result_percentage_totals_by_market(
         first_balance = sum(float(segment["starting_capital"]) for segment in valid_segments)
         numerator = sum(float(segment["return_numerator"]) for segment in valid_segments)
         ending = sum(float(segment["ending_equity"]) for segment in valid_segments)
+        pnl_values = []
+        for trade_row in trade_rows:
+            pnl_value = _as_float(trade_row.get("net_profit"))
+            if pnl_value is None:
+                pnl_value = _as_float(trade_row.get("result_cash"))
+            if pnl_value is not None and math.isfinite(pnl_value):
+                pnl_values.append(pnl_value)
+        gross_gain = sum(value for value in pnl_values if value > 0)
+        gross_loss = abs(sum(value for value in pnl_values if value < 0))
         return {
             "available": True,
             "account": account,
@@ -3535,7 +3892,11 @@ def _result_percentage_totals_by_market(
             "ending_equity": ending,
             "net_cashflow": None,
             "return_numerator": numerator,
+            "gross_gain_numerator": gross_gain,
+            "gross_loss_numerator": gross_loss,
             "return_pct": numerator / first_balance * 100.0,
+            "gross_gain_return_pct": gross_gain / first_balance * 100.0,
+            "gross_loss_return_pct": gross_loss / first_balance * 100.0,
             "starting_anchor": "segmented_account_balance",
             "segments": valid_segments,
             "reset_count": reset_count,
@@ -3555,44 +3916,54 @@ def _result_percentage_totals_by_market(
             for account, trade_rows in sorted(by_account.items())
         ]
         available = [item for item in account_returns if item.get("available")]
-        expected_currency = "AUD" if market == "fx" else "USDT" if market == "crypto" else ""
-        unsupported = [
-            item for item in available
-            if expected_currency and str(item.get("currency") or "").upper() != expected_currency
-        ]
-        currencies = {str(item.get("currency") or "").upper() for item in available if item.get("currency")}
         unavailable_reason: str | None = None
         market_return: float | None = None
+        gross_gain_return: float | None = None
+        gross_loss_return: float | None = None
         if not by_account:
             unavailable_reason = "missing_trade_accounts"
-        elif unsupported:
-            unavailable_reason = f"unsupported_{market}_currency"
         elif len(available) != len(by_account):
             unavailable_reason = "missing_balance_anchor"
-        elif market == "overall" and len(currencies) != 1:
-            unavailable_reason = "mixed_currencies"
         elif available:
-            denominator = sum(float(item["starting_capital"]) for item in available)
-            numerator = sum(float(item["return_numerator"]) for item in available)
-            if denominator > 0:
-                market_return = numerator / denominator * 100.0
-                proven_full_loss = any(
-                    float(segment.get("return_numerator") or 0.0) <= -float(segment.get("starting_capital") or 0.0)
-                    for item in available
-                    for segment in (item.get("segments") or [])
-                    if _as_float(segment.get("starting_capital")) is not None
-                )
-                if market_return < -100.0 and not proven_full_loss:
-                    market_return = None
-                    unavailable_reason = "return_below_minus_100_unverified"
+            weighted_items: List[Tuple[Dict[str, Any], float]] = []
+            unsupported = []
+            for item in available:
+                factor = _currency_to_aud_factor(item.get("currency"))
+                if factor is None:
+                    unsupported.append(item)
+                else:
+                    weighted_items.append((item, factor))
+            if unsupported:
+                unavailable_reason = "unsupported_currency_for_aud_weighting"
             else:
-                unavailable_reason = "invalid_combined_starting_capital"
+                denominator = sum(float(item["starting_capital"]) * factor for item, factor in weighted_items)
+                numerator = sum(float(item["return_numerator"]) * factor for item, factor in weighted_items)
+                gross_gain_numerator = sum(float(item.get("gross_gain_numerator") or 0.0) * factor for item, factor in weighted_items)
+                gross_loss_numerator = sum(float(item.get("gross_loss_numerator") or 0.0) * factor for item, factor in weighted_items)
+                if denominator > 0:
+                    market_return = numerator / denominator * 100.0
+                    gross_gain_return = gross_gain_numerator / denominator * 100.0
+                    gross_loss_return = gross_loss_numerator / denominator * 100.0
+                    proven_full_loss = any(
+                        float(segment.get("return_numerator") or 0.0) <= -float(segment.get("starting_capital") or 0.0)
+                        for item in available
+                        for segment in (item.get("segments") or [])
+                        if _as_float(segment.get("starting_capital")) is not None
+                    )
+                    if market_return < -100.0 and not proven_full_loss:
+                        market_return = None
+                        unavailable_reason = "return_below_minus_100_unverified"
+                else:
+                    unavailable_reason = "invalid_combined_starting_capital"
+        totals["net_result_pct"] = market_return
+        totals["gross_gain_result_pct"] = gross_gain_return
+        totals["gross_loss_result_pct"] = gross_loss_return
         result[market] = {
             **totals,
             "market_return_pct": market_return,
-            "gross_gain_return_pct": totals["gross_gain_result_pct"],
-            "gross_loss_return_pct": totals["gross_loss_result_pct"],
-            "return_method": "cashflow_adjusted_account_balance",
+            "gross_gain_return_pct": gross_gain_return,
+            "gross_loss_return_pct": gross_loss_return,
+            "return_method": "capital_weighted_account_return_aud",
             "return_unavailable_reason": unavailable_reason,
             "return_diagnostics": account_returns,
         }
@@ -4035,7 +4406,11 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
         ("Percentage expectancy", "avg_result_pct", "pct", "auto"),
         ("R expectancy", "avg_r_multiple", "r", "auto"),
         ("Best Win Streak", "winning_streak", "count", "profit"),
+        ("Start", "start:longest_winning_streak", "streak_date", None),
+        ("End", "end:longest_winning_streak", "streak_date", None),
         ("Worst Losing Streak", "losing_streak", "count", "loss"),
+        ("Start", "start:longest_losing_streak", "streak_date", None),
+        ("End", "end:longest_losing_streak", "streak_date", None),
         ("Avg stop %", "avg_stop_pct", "pct", None),
         ("Avg target %", "avg_target_pct", "pct", None),
         ("Min stop %", "min_stop_pct", "pct", None),
@@ -4072,6 +4447,11 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
                 cell.number_format = "0"
             elif kind == "duration":
                 cell.value = _format_duration_display(value) if value is not None else ""
+                cell.number_format = "General"
+            elif kind == "streak_date":
+                endpoint, detail_key = str(key or "").split(":", 1)
+                start, end = _streak_detail_start_end(bucket.get(detail_key))
+                cell.value = start if endpoint == "start" else end
                 cell.number_format = "General"
             elif kind == "number":
                 cell.value = "" if value is None else value
@@ -4498,6 +4878,7 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
     _apply_instrument_averages_profit_loss_formatting(inst)
     _apply_instrument_averages_semantic_fills(inst)
     _repair_instrument_timeframe_columns(inst)
+    _populate_symbols_metrics_preserving_layout(inst, rows)
 
     cal=wb['P&L Calendar']; cal.append(['Year'] + [f"{calendar.month_name[m]} P/L %" for m in range(1,13)]); cal.append(['Trades'] + [calendar.month_name[m] for m in range(1,13)])
     monthly=defaultdict(lambda:{'pct':0.0,'trades':0})
@@ -4525,6 +4906,7 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
     if STATS2_SHEET in wb.sheetnames:
         _repair_stats2_account_balance_formatting(wb[STATS2_SHEET])
     _apply_workbook_left_alignment(wb)
+    _repair_stats2_as_of_datetime_style(wb)
     output_path.parent.mkdir(parents=True, exist_ok=True); wb.save(output_path)
     return {'ok':True,'path':str(output_path)}
 
@@ -4630,7 +5012,11 @@ _REPORT_SPECS = [
     ("Gross IR gain", "gross_ir_gain", "r", "profit"),
     ("Gross IR loss", "gross_ir_loss", "r", "loss"),
     ("Best Win Streak", "winning_streak", "count", "profit"),
+    ("Start", "start:longest_winning_streak", "streak_date", None),
+    ("End", "end:longest_winning_streak", "streak_date", None),
     ("Worst Losing Streak", "losing_streak", "count", "loss"),
+    ("Start", "start:longest_losing_streak", "streak_date", None),
+    ("End", "end:longest_losing_streak", "streak_date", None),
     ("Percentage expectancy", "avg_result_pct", "pct", "auto"),
     ("R expectancy", "avg_r_multiple", "r", "auto"),
     ("Avg stop %", "avg_stop_pct", "pct", None),
@@ -4828,11 +5214,11 @@ def _report_cell_value(bucket: Dict[str, Any], key: str | None, kind: str) -> An
         return "" if number is None else number
     if kind == "count":
         number = _as_float(value)
-        if key == "winning_streak" and number is not None and bucket.get("longest_winning_streak"):
-            return _fmt_count_with_detail(number, bucket.get("longest_winning_streak"))
-        if key == "losing_streak" and number is not None and bucket.get("longest_losing_streak"):
-            return _fmt_count_with_detail(number, bucket.get("longest_losing_streak"))
         return "" if number is None else int(number)
+    if kind == "streak_date":
+        endpoint, detail_key = str(key or "").split(":", 1)
+        start, end = _streak_detail_start_end(bucket.get(detail_key))
+        return start if endpoint == "start" else end
     if kind == "duration":
         return _format_duration_display(value) if value not in (None, "") else ""
     if kind == "number":
@@ -4875,6 +5261,8 @@ def _format_report_sheet(ws, last_col: int) -> None:
                 cell.number_format = '0.000"R"'
             elif kind == "count":
                 cell.number_format = "0"
+            elif kind == "streak_date":
+                cell.number_format = "General"
             elif kind == "duration":
                 cell.number_format = "General"
             elif kind == "drawdown_date":
@@ -4992,6 +5380,8 @@ def _repair_report_layout(ws, diagnostics: Dict[str, Any] | None = None) -> None
     _ensure_drawdown_start_end_rows(ws, diagnostics)
     _write_drawdown_detail_rows(ws, "Min drawdown", {}, diagnostics=diagnostics)
     _write_drawdown_detail_rows(ws, "Max drawdown", {}, diagnostics=diagnostics)
+    _write_streak_detail_rows(ws, "Best Win Streak", {}, diagnostics=diagnostics)
+    _write_streak_detail_rows(ws, "Worst Losing Streak", {}, diagnostics=diagnostics)
 
     commission_rows = _report_label_rows(ws, "Commission")
     if commission_rows and not _report_label_rows(ws, "Total Commission"):
@@ -5071,6 +5461,8 @@ def _update_report_sheet_preserving_layout(
                 cell.number_format = '0.000"R"'
             elif kind == "count":
                 cell.number_format = "0"
+            elif kind == "streak_date":
+                cell.number_format = "General"
             elif kind == "duration":
                 cell.number_format = "General"
             elif kind == "drawdown_date":
@@ -5619,6 +6011,8 @@ def _assert_invariants_unchanged(before: Dict[str, Any], after: Dict[str, Any]) 
         "P&L Calendar_layout",
         "dash_cf",
         "dash_styles",
+        "SYMBOLS_layout",
+        "instrument_filter_min_row",
     }
     for key in before.keys() | after.keys():
         if key in skipped:
@@ -6057,6 +6451,10 @@ def _ensure_dashboard_requested_metric_rows(ws, diagnostics: Dict[str, Any] | No
             bounds = _merged_bounds(ws, next_row, label_col) if next_row <= ws.max_row else None
             if bounds and bounds[0] == row and bounds[2] >= next_row:
                 row = bounds[2] + 1
+                continue
+            if _has_dashboard_manual_merge_below(ws, row):
+                diagnostics.setdefault("skipped_dashboard_source_rows_due_to_manual_merges", []).append(metric_label)
+                row += 1
                 continue
             next_row = _insert_dashboard_rows_preserving_layout(ws, next_row, 1, row)
             if not _write_value_preserving_cell(ws, next_row, label_col, "Source"):
@@ -6571,6 +6969,30 @@ def _repair_stats2_account_balance_formatting(ws, diagnostics: Dict[str, Any] | 
         _set_cell_horizontal_alignment(cell, "right")
     if diagnostics is not None:
         diagnostics["repaired_stats2_account_balance_formatting"] = True
+
+
+def _repair_stats2_as_of_datetime_style(wb, diagnostics: Dict[str, Any] | None = None) -> None:
+    if STATS1_SHEET not in wb.sheetnames or STATS2_SHEET not in wb.sheetnames:
+        return
+    stats1 = wb[STATS1_SHEET]
+    stats2 = wb[STATS2_SHEET]
+    style_ref = stats1["B146"]
+    repaired = 0
+    for row in range(3, stats2.max_row + 1):
+        cell = stats2.cell(row, 5)
+        if cell.value in (None, ""):
+            continue
+        value = cell.value
+        _copy_cell_style(style_ref, cell)
+        if isinstance(value, str):
+            value = value.replace("T", " ")
+            if len(value) >= 19:
+                value = value[:19]
+        cell.value = value
+        cell.number_format = style_ref.number_format
+        repaired += 1
+    if diagnostics is not None:
+        diagnostics["repaired_stats2_as_of_datetime_cells"] = repaired
 
 
 def _read_stats2_account_balances(wb) -> List[Dict[str, Any]]:
@@ -7259,22 +7681,23 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
                     if pos:
                         write_market_source_row(pos[0], source_key)
             for labels, detail_key in (
-                (["Best Win Streak", "Winning Streak"], "longest_winning_streak"),
                 (["Worst Losing Streak", "Losing Streak"], "longest_losing_streak"),
+                (["Best Win Streak", "Winning Streak"], "longest_winning_streak"),
             ):
                 rows_for_metric = []
                 for label in labels:
                     rows_for_metric.extend(label_rows.get(label.lower(), []))
                 for row_num in sorted(set(rows_for_metric)):
-                    for market, col in market_cols.items():
-                        bucket = buckets.get(market) or {}
-                        value = bucket.get("winning_streak" if detail_key == "longest_winning_streak" else "losing_streak")
-                        detail = bucket.get(detail_key)
-                        if value is not None and detail:
-                            cell = dash.cell(row_num, col)
-                            if _write_value_preserving_cell(dash, row_num, col, _fmt_count_with_detail(value, detail)):
-                                cell.number_format = "General"
-                                diagnostics["updated_cells"] += 1
+                    metric_label = str(dash.cell(row_num, 1).value or "").strip()
+                    details = {
+                        col: (buckets.get(market) or {}).get(detail_key)
+                        for market, col in market_cols.items()
+                    }
+                    counts = {
+                        col: (buckets.get(market) or {}).get("winning_streak" if detail_key == "longest_winning_streak" else "losing_streak")
+                        for market, col in market_cols.items()
+                    }
+                    _write_streak_detail_rows(dash, metric_label, details, counts, diagnostics=diagnostics)
 
         def write_source_below(section: str, metric_label: str, source_val: Any):
             if source_val is None:
@@ -7842,16 +8265,21 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
                     'rmultiple':['net r multiple','r multiple'],
                     'symbol':['symbol'],'class':['class']
                 }
-                src_header_row = _instrument_averages_header_row(src_ws)
                 dst_header_row = _instrument_averages_header_row(dst_ws)
                 src_start_row = _instrument_averages_data_start_row(src_ws)
                 dst_start_row = _instrument_averages_data_start_row(dst_ws)
-                src_headers=[str(c.value or '').strip().lower() for c in src_ws[src_header_row]]
-                dst_headers=[str(c.value or '').strip().lower() for c in dst_ws[dst_header_row]]
+                src_headers = {
+                    str(header or "").strip().casefold(): col
+                    for header, col in _instrument_averages_header_map(src_ws).items()
+                }
+                dst_headers = {
+                    str(header or "").strip().casefold(): col
+                    for header, col in _instrument_averages_header_map(dst_ws).items()
+                }
                 def find_col(headers, keys):
                     for k in keys:
                         if k in headers:
-                            return headers.index(k)+1
+                            return headers[k]
                     return None
                 pairs=[]
                 for _,keys in aliases.items():
@@ -7882,6 +8310,8 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
                 _apply_instrument_averages_profit_loss_formatting(instrument_ws)
                 _apply_instrument_averages_semantic_fills(instrument_ws)
                 _repair_instrument_timeframe_columns(instrument_ws)
+                _populate_symbols_metrics_preserving_layout(instrument_ws, rows, diagnostics)
+                _repair_symbols_header_merges_preserving_layout(instrument_ws, diagnostics)
             if "P&L Calendar" in wb.sheetnames and "P&L Calendar" in gen.sheetnames:
                 cal_ws = wb["P&L Calendar"]
                 if _detect_calendar_month_columns(cal_ws):
@@ -7916,6 +8346,7 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
         if STATS2_SHEET in wb.sheetnames:
             _repair_stats2_account_balance_formatting(wb[STATS2_SHEET], diagnostics)
         _apply_workbook_left_alignment(wb)
+        _repair_stats2_as_of_datetime_style(wb, diagnostics)
         wb.save(candidate)
         return {"ok": True, "path": str(path), "candidate_path": str(candidate), "diagnostics": diagnostics}
     finally:

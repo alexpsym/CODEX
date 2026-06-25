@@ -126,11 +126,23 @@ def test_mt5_initialize_timeout_is_used_for_preflight_symbols_and_fetch(monkeypa
     assert fetch_mt5.init_kwargs[0]["timeout"] == 9000
 
 
-def test_symbol_universe_includes_available_symbols_by_default():
+def test_symbol_universe_does_not_append_every_available_symbol_by_default():
     missing_journal = ROOT / ".pytest_tmp_missing_spread_journal.xlsx"
     symbols = build_symbol_universe(
         journal_path=missing_journal,
         oanda_symbols=["EUR_USD", "GBP_USD", "AUD_JPY"],
         mt5_symbols=[SimpleNamespace(name="NZDUSD.r")],
+    )
+    assert symbols == ["EUR_USD", "GBP_USD", "NZD_USD"]
+    assert "AUD_JPY" not in symbols
+
+
+def test_symbol_universe_can_opt_in_to_all_available_symbols():
+    missing_journal = ROOT / ".pytest_tmp_missing_spread_journal.xlsx"
+    symbols = build_symbol_universe(
+        journal_path=missing_journal,
+        oanda_symbols=["EUR_USD", "GBP_USD", "AUD_JPY"],
+        mt5_symbols=[SimpleNamespace(name="NZDUSD.r")],
+        include_all_available=True,
     )
     assert symbols == ["AUD_JPY", "EUR_USD", "GBP_USD", "NZD_USD"]

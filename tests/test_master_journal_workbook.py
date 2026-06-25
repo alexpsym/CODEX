@@ -7,8 +7,8 @@ import xml.etree.ElementTree as ET
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 import pytest
-from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, read_master_journal_source, update_master_journal_workbook_data_only, SHEET_ORDER, STATS1_SHEET, STATS2_SHEET, SYMBOLS_SHEET, TRADE_LOG_HEADERS, TRADE_LOG_HEADERS_V1, OLD_TRADE_LOG_HEADERS, PRE_MOVE_TRADE_LOG_HEADERS, MOVE_TO_FIELD_MAP, TRADE_LOG_HEADER_ROWS, TRADE_LOG_DATA_START_ROW, TRADE_LOG_FILTER_HEADER_ROW, TRADE_NUMBER_HEADER, REPORT_YEARLY_SHEET, REPORT_METRIC_LABELS, INSTRUMENT_AVERAGES_HEADERS, INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, INSTRUMENT_AVERAGES_DATA_START_ROW, DASHBOARD_MOVE_TO_BREAK_EVEN_LABEL, DASHBOARD_MOVE_TO_PROFIT_LABEL, DURATION_NUMBER_FORMAT, adaptive_percent_number_format, adaptive_number_format, resolve_trade_folder_link, expected_report_sheet_names, _apply_trade_number_hyperlinks, _ensure_trade_log_schema, _ensure_instrument_averages_schema, _ensure_pnl_calendar_freeze_panes, _repair_trade_log_move_to_durations, _trade_log_header_map, _instrument_averages_header_map, _result_percentage_totals_by_market
-from tools.master_journal_workbook import _format_duration_display, _parse_duration_text, _repair_legacy_duration_number_formats
+from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, read_master_journal_source, update_master_journal_workbook_data_only, SHEET_ORDER, STATS1_SHEET, STATS2_SHEET, SYMBOLS_SHEET, TRADE_LOG_HEADERS, TRADE_LOG_HEADERS_V1, OLD_TRADE_LOG_HEADERS, PRE_MOVE_TRADE_LOG_HEADERS, MOVE_TO_FIELD_MAP, TRADE_LOG_HEADER_ROWS, TRADE_LOG_DATA_START_ROW, TRADE_LOG_FILTER_HEADER_ROW, TRADE_NUMBER_HEADER, REPORT_YEARLY_SHEET, REPORT_METRIC_LABELS, INSTRUMENT_AVERAGES_HEADERS, INSTRUMENT_AVERAGES_GROUP_HEADER_ROW, INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, INSTRUMENT_AVERAGES_DATA_START_ROW, DASHBOARD_MOVE_TO_BREAK_EVEN_LABEL, DASHBOARD_MOVE_TO_PROFIT_LABEL, DURATION_NUMBER_FORMAT, adaptive_percent_number_format, adaptive_number_format, resolve_trade_folder_link, expected_report_sheet_names, _apply_trade_number_hyperlinks, _ensure_trade_log_schema, _ensure_instrument_averages_schema, _ensure_pnl_calendar_freeze_panes, _repair_trade_log_move_to_durations, _trade_log_header_map, _instrument_averages_header_map, _result_percentage_totals_by_market
+from tools.master_journal_workbook import _format_duration_display, _parse_duration_text, _repair_legacy_duration_number_formats, _populate_symbols_metrics_preserving_layout, _repair_symbols_header_merges_preserving_layout
 from openpyxl.utils.cell import coordinate_to_tuple, get_column_letter, range_boundaries
 
 def _cf_ranges(ws):
@@ -199,7 +199,7 @@ def test_dashboard_parity_and_equity(tmp_path: Path):
     assert wb[STATS1_SHEET]["A9"].value == "Net P/L R multiples"
     assert wb[STATS1_SHEET]["A14"].value == "Percentage expectancy"
     assert wb[STATS1_SHEET]["A15"].value == "R expectancy"
-    assert wb[STATS1_SHEET]["B8"].value == pytest.approx(0.012)
+    assert wb[STATS1_SHEET]["B8"].value == pytest.approx(0.0206052801030264)
     assert all(wb[STATS1_SHEET][coord].number_format == '0.00%' for coord in ('C8','D8','C10','D10'))
     assert all(wb[STATS1_SHEET][coord].number_format == '0.000"R"' for coord in ('C9','D9'))
     assert any(
@@ -254,15 +254,58 @@ def test_mixed_currency_overall_return_uses_account_balances():
     )
     assert totals["fx"]["market_return_pct"] == pytest.approx(10.0)
     assert totals["crypto"]["market_return_pct"] == pytest.approx(10.0)
-    assert totals["overall"]["market_return_pct"] is None
-    assert totals["fx"]["net_result_pct"] == pytest.approx(99.0)
-    assert totals["crypto"]["net_result_pct"] == pytest.approx(88.0)
-    assert totals["overall"]["net_result_pct"] == pytest.approx(187.0)
-    assert totals["overall"]["return_unavailable_reason"] == "mixed_currencies"
-    assert totals["overall"]["return_method"] == "cashflow_adjusted_account_balance"
+    assert totals["overall"]["market_return_pct"] == pytest.approx(10.0)
+    assert totals["fx"]["net_result_pct"] == pytest.approx(10.0)
+    assert totals["crypto"]["net_result_pct"] == pytest.approx(10.0)
+    assert totals["overall"]["net_result_pct"] == pytest.approx(10.0)
 
 
-def test_stats1_net_pl_percentage_uses_linear_trade_profit_percent(tmp_path: Path):
+def test_net_pl_percentages_are_capital_weighted_not_summed():
+    rows = [
+        {"row_type": "trade", "account": "A", "asset_class": "fx", "net_profit": -30, "currency": "AUD"},
+        {"row_type": "trade", "account": "B", "asset_class": "fx", "net_profit": -40, "currency": "AUD"},
+        {"row_type": "trade", "account": "C", "asset_class": "fx", "net_profit": -50, "currency": "AUD"},
+    ]
+    balances = [
+        {"account_label": "A", "balance": 970, "currency": "AUD"},
+        {"account_label": "B", "balance": 960, "currency": "AUD"},
+        {"account_label": "C", "balance": 950, "currency": "AUD"},
+    ]
+    totals = _result_percentage_totals_by_market(rows, balances)
+    assert totals["overall"]["net_result_pct"] == pytest.approx(-4.0)
+    assert totals["overall"]["net_result_pct"] != pytest.approx(-12.0)
+
+
+def test_net_pl_percentages_weight_unequal_starting_equity():
+    rows = [
+        {"row_type": "trade", "account": "SMALL", "asset_class": "fx", "net_profit": -10, "currency": "AUD"},
+        {"row_type": "trade", "account": "LARGE", "asset_class": "fx", "net_profit": -100, "currency": "AUD"},
+    ]
+    balances = [
+        {"account_label": "SMALL", "balance": 90, "currency": "AUD"},
+        {"account_label": "LARGE", "balance": 9900, "currency": "AUD"},
+    ]
+    totals = _result_percentage_totals_by_market(rows, balances)
+    assert totals["overall"]["net_result_pct"] == pytest.approx(-110 / 10100 * 100)
+
+
+def test_net_pl_percentages_convert_usdt_to_aud_with_fallback(monkeypatch):
+    monkeypatch.setenv("JOURNAL_USDT_TO_AUD_FALLBACK", "1.45")
+    rows = [
+        {"row_type": "trade", "account": "AUD", "asset_class": "fx", "net_profit": 100, "currency": "AUD"},
+        {"row_type": "trade", "account": "USDT", "asset_class": "crypto", "net_profit": 100, "currency": "USDT"},
+    ]
+    balances = [
+        {"account_label": "AUD", "balance": 1100, "currency": "AUD"},
+        {"account_label": "USDT", "balance": 1100, "currency": "USDT"},
+    ]
+    totals = _result_percentage_totals_by_market(rows, balances)
+    assert totals["overall"]["net_result_pct"] == pytest.approx(((100 + 100 * 1.45) / (1000 + 1000 * 1.45)) * 100)
+    assert totals["overall"]["return_unavailable_reason"] is None
+    assert totals["overall"]["return_method"] == "capital_weighted_account_return_aud"
+
+
+def test_stats1_net_pl_percentage_uses_capital_weighted_account_return(tmp_path: Path):
     snapshot = {
         "items": [
             {
@@ -283,14 +326,123 @@ def test_stats1_net_pl_percentage_uses_linear_trade_profit_percent(tmp_path: Pat
         "balances": [{"account_label": "OANDA DEMO", "balance": 900.0, "currency": "AUD"}],
         "stats": {"totals": {}, "groups": {"by_market": {"overall": {}, "fx": {}, "crypto": {}}, "risk_expectancy": {}, "duration": {}, "leaders": {}}, "by_instrument": []},
     }
-    out = tmp_path / "linear-net-pl.xlsx"
+    out = tmp_path / "weighted-net-pl.xlsx"
     build_master_journal_workbook(snapshot, out)
     stats1 = load_workbook(out, data_only=True)[STATS1_SHEET]
     labels = {str(stats1.cell(row, 1).value or ""): row for row in range(1, stats1.max_row + 1)}
     row = labels["Net P/L Percentage"]
-    assert stats1.cell(row, 2).value == pytest.approx(-0.8)
-    assert stats1.cell(row, 3).value == pytest.approx(-0.8)
+    assert stats1.cell(row, 2).value == pytest.approx(-0.1)
+    assert stats1.cell(row, 3).value == pytest.approx(-0.1)
     assert "Unavailable" not in str(stats1.cell(row, 2).value)
+
+
+def test_streak_rows_split_count_start_end_for_stats1_and_reports(tmp_path: Path):
+    snapshot = sample_snapshot()
+    detail = {"start_time": "2026-05-01T00:00:00Z", "end_time": "2026-05-03T00:00:00Z"}
+    snapshot["stats"]["groups"]["by_market"]["overall"]["winning_streak"] = 2
+    snapshot["stats"]["groups"]["by_market"]["overall"]["longest_winning_streak"] = detail
+    snapshot["stats"]["groups"]["by_market"]["fx"]["winning_streak"] = 2
+    snapshot["stats"]["groups"]["by_market"]["fx"]["longest_winning_streak"] = detail
+    out = tmp_path / "streak-split.xlsx"
+    build_master_journal_workbook(snapshot, out)
+    wb = load_workbook(out, data_only=True)
+    try:
+        stats1 = wb[STATS1_SHEET]
+        labels = defaultdict(list)
+        for row in range(1, stats1.max_row + 1):
+            labels[str(stats1.cell(row, 1).value or "")].append(row)
+        row = labels["Best Win Streak"][0]
+        assert stats1.cell(row, 2).value == 2
+        assert isinstance(stats1.cell(row, 2).value, int)
+        assert stats1.cell(row + 1, 1).value == "Start"
+        assert stats1.cell(row + 2, 1).value == "End"
+        assert stats1.cell(row + 1, 2).value == "2026-05-01 00:00:00"
+        assert stats1.cell(row + 2, 2).value == "2026-05-03 00:00:00"
+
+        yearly = wb[REPORT_YEARLY_SHEET]
+        report_rows = {str(yearly.cell(r, 1).value or ""): r for r in range(1, yearly.max_row + 1)}
+        year_col = next(col for col in range(2, yearly.max_column + 1) if yearly.cell(1, col).value == 2026)
+        assert yearly.cell(report_rows["Best Win Streak"], year_col).value == 1
+        assert yearly.cell(report_rows["Best Win Streak"] + 1, 1).value == "Start"
+        assert yearly.cell(report_rows["Worst Losing Streak"] + 1, 1).value == "Start"
+    finally:
+        wb.close()
+
+
+def test_stats2_as_of_column_matches_stats1_b146_style(tmp_path: Path):
+    out = tmp_path / "stats2-asof-style.xlsx"
+    build_master_journal_workbook(sample_snapshot(), out)
+    wb = load_workbook(out)
+    try:
+        stats1 = wb[STATS1_SHEET]
+        stats2 = wb[STATS2_SHEET]
+        ref = stats1["B146"]
+        for row in range(3, 10):
+            cell = stats2.cell(row, 5)
+            if cell.value in (None, ""):
+                continue
+            assert "T" not in str(cell.value)
+            assert cell.number_format == ref.number_format
+            assert cell._style == ref._style
+    finally:
+        wb.close()
+
+
+def test_symbols_latest_blank_metric_columns_populate_and_header_merges_survive():
+    wb = Workbook()
+    ws = wb.active
+    ws.title = SYMBOLS_SHEET
+    ws.freeze_panes = "B3"
+    ws.auto_filter.ref = "A2:BE3"
+    ws["B1"] = "Class"
+    ws.merge_cells("B1:B2")
+    ws["A2"] = "Symbol"
+    ws["C2"] = "Trades"
+    for col, label in {
+        29: "1M", 30: "5M", 31: "15M", 32: "30M", 33: "1H", 34: "4H",
+        35: "DAILY", 36: "WEEKLY", 37: "MONTHLY",
+    }.items():
+        ws.cell(2, col).value = label
+    ws["AC1"] = "Timeframe"
+    ws.merge_cells("AC1:AK1")
+    ws["AS1"] = "Stops"
+    ws["AS2"] = "Min stop %"
+    ws["AT2"] = "Avg stop %"
+    ws["AU2"] = "Max stop %"
+    ws["AX1"] = "Targets"
+    ws["AX2"] = "Min  %"
+    ws["AY2"] = "Avg  %"
+    ws["AZ2"] = "Max  %"
+    ws["A3"] = "EURUSD"
+    rows = [
+        {
+            "row_type": "trade", "symbol": "EURUSD", "timeframe": "1M",
+            "entry_price": 1.0, "stop_loss": 0.99, "take_profit": 1.02,
+        },
+        {
+            "row_type": "trade", "symbol": "EURUSD", "timeframe": "5M",
+            "entry_price": 1.0, "stop_loss": 0.98, "take_profit": 1.03,
+        },
+    ]
+    diagnostics = {}
+    _populate_symbols_metrics_preserving_layout(ws, rows, diagnostics)
+    _repair_symbols_header_merges_preserving_layout(ws, diagnostics)
+
+    assert ws["AC3"].value == 1
+    assert ws["AD3"].value == 1
+    assert ws["AS3"].value == pytest.approx(0.01)
+    assert ws["AT3"].value == pytest.approx(0.015)
+    assert ws["AU3"].value == pytest.approx(0.02)
+    assert ws["AX3"].value == pytest.approx(0.02)
+    assert ws["AY3"].value == pytest.approx(0.025)
+    assert ws["AZ3"].value == pytest.approx(0.03)
+    merges = {str(rng) for rng in ws.merged_cells.ranges}
+    assert "B1:B2" in merges
+    assert "C1:C2" in merges
+    assert "AC1:AK1" in merges
+    assert "AC1:AC2" not in merges
+    assert ws.freeze_panes == "B3"
+    assert ws.auto_filter.ref == "A2:BE3"
 
 
 def test_move_to_duration_repair_uses_open_and_move_times():
@@ -1242,9 +1394,11 @@ def test_instrument_averages_op_and_duration_not_blank_after_data_only_update(tm
             continue
         for col in (s_col, a_col, l_col):
             assert inst2.cell(row, col).number_format == "General"
-            assert _parse_duration_text(inst2.cell(row, col).value) is not None
+        assert _parse_duration_text(inst2.cell(row, col).value) is not None
     for col in (s_col, a_col, l_col):
         header_cell = inst2.cell(INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, col)
+        if header_cell.value in (None, "") and inst2.cell(INSTRUMENT_AVERAGES_GROUP_HEADER_ROW, col).value not in (None, ""):
+            header_cell = inst2.cell(INSTRUMENT_AVERAGES_GROUP_HEADER_ROW, col)
         assert header_cell.alignment.wrap_text is True
         assert header_cell.alignment.vertical == "center"
     assert inst2.auto_filter.ref
@@ -2360,13 +2514,14 @@ def test_update_data_only_writes_dashboard_horizontal_core_metric_aliases(tmp_pa
     Path(res["candidate_path"]).replace(p)
     ws = load_workbook(p)[STATS1_SHEET]
     assert [ws.cell(11, c).value for c in range(2, 5)] == [4, 2, 6]
-    assert [ws.cell(12, c).value for c in range(2, 5)] == [3, 1, 7]
-    assert [ws.cell(17, c).value for c in range(2, 5)] == [pytest.approx(0.095), pytest.approx(0.05), pytest.approx(0.1225)]
-    assert [ws.cell(17, c).number_format for c in range(2, 5)] == ["0.00%", "0.00%", "0.00%"]
+    assert [ws.cell(14, c).value for c in range(2, 5)] == [3, 1, 7]
+    max_target_row = next(row for row in range(1, ws.max_row + 1) if ws.cell(row, 1).value == "Max target %")
+    assert [ws.cell(max_target_row, c).value for c in range(2, 5)] == [pytest.approx(0.095), pytest.approx(0.05), pytest.approx(0.1225)]
+    assert [ws.cell(max_target_row, c).number_format for c in range(2, 5)] == ["0.00%", "0.00%", "0.00%"]
     assert all(_cell_fill_rgb(ws.cell(11, col)) == "C6EFCE" for col in range(2, 5))
     assert all(_cell_font_rgb(ws.cell(11, col)) == "006100" for col in range(2, 5))
-    assert all(_cell_fill_rgb(ws.cell(12, col)) == "FFC7CE" for col in range(2, 5))
-    assert all(_cell_font_rgb(ws.cell(12, col)) == "9C0006" for col in range(2, 5))
+    assert all(_cell_fill_rgb(ws.cell(14, col)) == "FFC7CE" for col in range(2, 5))
+    assert all(_cell_font_rgb(ws.cell(14, col)) == "9C0006" for col in range(2, 5))
 
 
 def test_stats1_manual_a_column_merges_survive_data_only_update(tmp_path: Path):
@@ -2505,6 +2660,7 @@ def test_data_only_update_splits_existing_inline_drawdown_detail(tmp_path: Path)
     out = load_workbook(path)
     try:
         ws = out[STATS1_SHEET]
+        min_row = next(row for row in range(1, ws.max_row + 1) if ws.cell(row, 1).value == "Min drawdown")
         assert ws.cell(min_row, 2).value == pytest.approx(0.0000861227)
         assert ws.cell(min_row, 2).number_format == "0.00%"
         assert ws.cell(min_row + 1, 1).value == "Start"
@@ -2543,7 +2699,7 @@ def test_stats2_net_pl_percentage_update_preserves_borders(tmp_path: Path):
         assert final_headers[headers["As Of"] - 1] == "As Of"
         assert final_headers[net_col - 1] == "Net P/L Percentage"
         cell = ws.cell(row, net_col)
-        assert cell.value == pytest.approx(0.023)
+        assert cell.value == pytest.approx(0.1370096645821489)
         assert cell.number_format == "0.00%"
         assert _cell_fill_rgb(cell) == "C6EFCE"
         assert cell.border.left.style == "thick"
@@ -3029,10 +3185,10 @@ def test_generated_dashboard_layout_percentages_semantic_fills_and_labels(tmp_pa
     assert dash["B9"].value == pytest.approx(0.4)
     assert dash["C9"].value == pytest.approx(1.2)
     assert dash["D9"].value == pytest.approx(-0.8)
-    assert dash["C10"].value == pytest.approx(0.023)
+    assert dash["C10"].value == pytest.approx(0.1370096645821489)
     assert dash["C11"].value == pytest.approx(0.0)
     assert dash["D10"].value == pytest.approx(0.0)
-    assert dash["D11"].value == pytest.approx(0.011)
+    assert dash["D11"].value == pytest.approx(0.05)
     for coordinate in ("C8", "D8", "C10", "D10", "C11", "D11"):
         assert dash[coordinate].number_format == "0.00%"
         assert not any(token in dash[coordinate].number_format.upper() for token in ("AUD", "USDT", "$"))
@@ -3118,7 +3274,7 @@ def test_update_repairs_dashboard_order_source_style_max_gain_and_stale_cf(tmp_p
     assert "BYBIT DEMO" in _dashboard_account_balances(detail)
     assert dash["A14"].value == "Percentage expectancy"
     assert dash["A15"].value == "R expectancy"
-    assert dash["B8"].value == pytest.approx(0.012)
+    assert dash["B8"].value == pytest.approx(0.0206052801030264)
     assert dash["B8"].number_format == "0.00%"
     rows_by_label = {str(dash.cell(row, 1).value or "").strip(): row for row in range(1, dash.max_row + 1)}
     for label in ("Net P/L Percentage", "Gross percent gain", "Gross percent loss", "Percentage expectancy"):
@@ -3355,7 +3511,7 @@ def test_stats_symbols_and_reports_required_repairs(tmp_path: Path):
     assert stats1["A14"].value == "Percentage expectancy"
     assert stats1["A15"].value == "R expectancy"
     assert labels["Percentage expectancy"] < labels["Winners"]
-    assert stats1.cell(labels["Net P/L Percentage"], 2).value == pytest.approx(0.007)
+    assert stats1.cell(labels["Net P/L Percentage"], 2).value == pytest.approx(0.0120197467267654)
     for label in ("Net P/L Percentage", "Gross percent gain", "Gross percent loss", "Gross IR gain", "Gross IR loss"):
         cell = stats1.cell(labels[label], 2)
         assert cell.alignment.horizontal == "left"

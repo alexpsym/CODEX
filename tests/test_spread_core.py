@@ -12,6 +12,8 @@ sys.path.insert(0, str(SPREAD_DIR))
 from spread_core import (  # noqa: E402
     SpreadMonitorState,
     TimeframeConfig,
+    build_spread_payload,
+    _cache_key,
     broker_cell,
     classify_spread,
     format_spread_pct,
@@ -179,3 +181,84 @@ def test_cached_refresh_uses_incremental_request_count():
 
     assert calls[:9] == [750] * 9
     assert calls[9:] == [250] * 9
+
+
+def test_oanda_payload_sanitizes_legacy_pepperstone_cache_errors():
+    cache = {
+        "generated_at": "2026-01-01T00:00:00Z",
+        "symbols": ["EUR_USD"],
+        "warnings": ["Pepperstone unavailable: MT5 terminal initialize failed: (-6, 'Terminal: Authorization failed')"],
+        "errors": ["pepperstone|EUR_USD|1M import-file cache failed"],
+        "records": {
+            _cache_key("oanda", "EUR_USD", "1M"): _oanda_result(),
+            _cache_key("pepperstone", "EUR_USD", "1M"): {
+                "latest": None,
+                "samples": [],
+                "error": "MT5 terminal initialize failed: Authorization failed",
+            },
+        },
+    }
+    payload = build_spread_payload(cache, brokers=("oanda",))
+    text = json.dumps(payload).lower()
+    assert "pepperstone" not in text
+    assert "mt5" not in text
+    assert "authorization failed" not in text
+    assert payload["rows"][0]["cells"]["1M"]["oanda"]["spread_pct"] == pytest.approx(0.0123)
+
+
+def test_oanda_payload_cells_contain_only_oanda_records():
+    cache = {
+        "generated_at": "2026-01-01T00:00:00Z",
+        "symbols": ["EUR_USD"],
+        "warnings": [],
+        "errors": [],
+        "records": {
+            _cache_key("oanda", "EUR_USD", "1M"): _oanda_result(),
+            _cache_key("pepperstone", "EUR_USD", "1M"): _oanda_result(0.0999),
+        },
+    }
+    payload = build_spread_payload(cache, brokers=("oanda",))
+    cell = payload["rows"][0]["cells"]["1M"]
+    assert list(cell.keys()) == ["oanda"]
+    assert cell["oanda"]["spread_pct"] == pytest.approx(0.0123)
+
+
+def test_refresh_timeout_returns_diagnostics_and_allows_second_attempt():
+    calls = []
+
+    def symbols():
+        return ["EUR_USD"]
+
+    def slow_fetcher(_symbol, _timeframe, _context):
+        calls.append("slow")
+        time.sleep(0.2)
+        return _oanda_result()
+
+    cache_path = _repo_cache_path("timeout")
+    try:
+        state = SpreadMonitorState(
+            cache_path,
+            symbol_provider=symbols,
+            oanda_fetcher=slow_fetcher,
+            oanda_concurrency=1,
+        )
+        state.global_refresh_timeout_seconds = 0.05
+        timed_out = state.refresh()
+        assert timed_out["refresh_state"] == "timed_out"
+        assert "timed out" in timed_out["refresh"]["error"].lower()
+        diagnostics = timed_out["refresh"]["diagnostics"]
+        assert diagnostics["timed_out"] is True
+        assert diagnostics["total_requests_planned"] == 9
+        assert diagnostics["skipped_request_count"] >= 1
+
+        def fast_fetcher(_symbol, _timeframe, _context):
+            return _oanda_result(0.0456)
+
+        state.oanda_fetcher = fast_fetcher
+        state.global_refresh_timeout_seconds = 5
+        second = state.refresh()
+        assert second["refresh_state"] == "succeeded"
+        assert second["rows"][0]["cells"]["1M"]["oanda"]["spread_pct"] == pytest.approx(0.0456)
+    finally:
+        if cache_path.exists():
+            cache_path.unlink()

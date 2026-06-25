@@ -79,6 +79,7 @@ datetime g_armStartTime = 0;
 datetime g_expireAt     = 0;
 bool     g_wasInPosition = false;
 datetime g_lastPepperstoneSpreadExport = 0;
+int      g_lastPepperstoneSpreadExportSymbolCount = 0;
 
 // EMA handles
 int hFast  = INVALID_HANDLE;
@@ -86,6 +87,7 @@ int hSlow  = INVALID_HANDLE;
 int hTrend = INVALID_HANDLE;
 
 string EA_COMMENT = "Trader";
+string EA_VERSION = "2.10";
 
 void Dbg(const string msg){ if(Debug) Print(EA_COMMENT, ": ", msg); }
 bool PlaceOrReplacePendingLimitAtEntry(const bool isBuyLimit,
@@ -754,10 +756,15 @@ string BuildPepperstoneSpreadJson(datetime generatedAt)
       written++;
    }
 
+   g_lastPepperstoneSpreadExportSymbolCount = written;
+   if(written == 0)
+      Print(EA_COMMENT, ": Pepperstone spread export produced zero symbols. Check PepperstoneSpreadExportSymbols and Market Watch availability.");
+
    string json = "{\n";
    json += "  \"version\": 1,\n";
    json += "  \"broker\": \"pepperstone\",\n";
    json += "  \"generated_at\": \"" + generated + "\",\n";
+   json += "  \"symbol_count\": " + IntegerToString(written) + ",\n";
    json += "  \"account\": {\n";
    json += "    \"server\": \"" + JsonEscape(AccountInfoString(ACCOUNT_SERVER)) + "\",\n";
    json += "    \"company\": \"" + JsonEscape(AccountInfoString(ACCOUNT_COMPANY)) + "\",\n";
@@ -799,20 +806,34 @@ bool WritePepperstoneSpreadFile(const string requestedPath, const string content
    return true;
 }
 
-void MaybeExportPepperstoneSpreads()
+void MaybeExportPepperstoneSpreads(const bool force=false)
 {
-   if(!EnablePepperstoneSpreadExport) return;
+   if(!EnablePepperstoneSpreadExport)
+   {
+      if(force)
+         Print(EA_COMMENT, ": Pepperstone spread export is disabled.");
+      return;
+   }
    int interval = PepperstoneSpreadExportIntervalSeconds;
    if(interval < 1) interval = 1;
    datetime now = TimeGMT();
-   if(g_lastPepperstoneSpreadExport > 0 && (now - g_lastPepperstoneSpreadExport) < interval)
+   if(!force && g_lastPepperstoneSpreadExport > 0 && (now - g_lastPepperstoneSpreadExport) < interval)
       return;
 
    g_lastPepperstoneSpreadExport = now;
    string payload = BuildPepperstoneSpreadJson(now);
    string writtenPath = "";
    if(WritePepperstoneSpreadFile(PepperstoneSpreadExportPath, payload, writtenPath))
-      Print(EA_COMMENT, ": Pepperstone spread export wrote ", writtenPath);
+   {
+      if(g_lastPepperstoneSpreadExportSymbolCount <= 0)
+         Print(EA_COMMENT, ": Pepperstone spread export succeeded but wrote zero symbols to ", writtenPath);
+      else
+         Print(EA_COMMENT, ": Pepperstone spread export wrote ", IntegerToString(g_lastPepperstoneSpreadExportSymbolCount), " symbols to ", writtenPath);
+   }
+   else
+   {
+      Print(EA_COMMENT, ": Pepperstone spread export failed. No file was written.");
+   }
 }
 
 int OnInit()
@@ -824,6 +845,14 @@ int OnInit()
 
    // Always run a timer so cancels happen even when market is quiet/no ticks.
    EventSetTimer(1);
+   Print(EA_COMMENT, ": EA version ", EA_VERSION);
+   Print(EA_COMMENT, ": EnablePepperstoneSpreadExport=", (EnablePepperstoneSpreadExport ? "true" : "false"));
+   Print(EA_COMMENT, ": PepperstoneSpreadExportIntervalSeconds=", IntegerToString(PepperstoneSpreadExportIntervalSeconds));
+   Print(EA_COMMENT, ": PepperstoneSpreadExportSymbols=", PepperstoneSpreadExportSymbols);
+   Print(EA_COMMENT, ": PepperstoneSpreadExportPath requested=", PepperstoneSpreadExportPath);
+   Print(EA_COMMENT, ": TERMINAL_DATA_PATH=", TerminalInfoString(TERMINAL_DATA_PATH));
+   Print(EA_COMMENT, ": Expected fallback MQL5\\Files path=", TerminalInfoString(TERMINAL_DATA_PATH), "\\MQL5\\Files\\", FileNameOnly(PepperstoneSpreadExportPath));
+   MaybeExportPepperstoneSpreads(true);
 
    RefreshTrendlineNameFromInputs();
 

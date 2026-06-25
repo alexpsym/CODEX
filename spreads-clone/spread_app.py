@@ -13,7 +13,7 @@ from pepperstone_import import (
     PepperstoneImportError,
     PepperstoneSpreadImportStore,
 )
-from spread_core import SpreadMonitorState
+from spread_core import SpreadMonitorState, refresh_interval_from_env
 from symbols import build_symbol_universe
 
 
@@ -34,6 +34,7 @@ OANDA_STATE = SpreadMonitorState(
     CACHE_PATH,
     symbol_provider=_symbol_provider,
     oanda_fetcher=fetch_oanda_spread_samples,
+    refresh_interval_seconds=refresh_interval_from_env(),
 )
 PEPPERSTONE_STATE = PepperstoneSpreadImportStore(PEPPERSTONE_CACHE_PATH)
 
@@ -334,6 +335,7 @@ PAGE_TEMPLATE = """
   let nextRefreshAt = 0;
   let latestPayload = null;
   let currentBroker = null;
+  let hideOandaCacheUntilFresh = false;
   let sortState = { column: null, direction: 'asc' };
 
   const brokerLabels = {
@@ -510,6 +512,34 @@ PAGE_TEMPLATE = """
     return Number.isFinite(seconds) && seconds > 0 ? seconds : 300;
   }
 
+  function refreshTimeoutSeconds(payload) {
+    const seconds = Number(payload?.refresh?.global_timeout_seconds || payload?.refresh?.diagnostics?.global_timeout_seconds);
+    return Number.isFinite(seconds) && seconds > 0 ? seconds : 120;
+  }
+
+  function renderLoadingTable(text) {
+    const colSpan = latestPayload?.timeframes?.length ? latestPayload.timeframes.length + 1 : 10;
+    bodyEl.innerHTML = `<tr><td class="empty" colspan="${colSpan}">${escapeHtml(text)}</td></tr>`;
+  }
+
+  function refreshProgressText(payload) {
+    const diag = payload?.refresh?.diagnostics || {};
+    const completed = Number(diag.completed_request_count || 0);
+    const failed = Number(diag.failed_request_count || 0);
+    const skipped = Number(diag.skipped_request_count || 0);
+    const total = Number(diag.total_requests_planned || 0);
+    const elapsed = Number(diag.elapsed_seconds || payload?.refresh?.elapsed_seconds || 0);
+    const current = [diag.current_symbol, diag.current_timeframe].map(scalarMessage).filter(Boolean).join(' ');
+    const base = total ? `${completed}/${total} requests complete, ${failed} failed, ${skipped} skipped` : 'Preparing requests';
+    return `${base}; elapsed ${Math.round(elapsed)}s${current ? `; fetching ${current}` : ''}`;
+  }
+
+  function timedOutMessage(payload) {
+    const timeout = refreshTimeoutSeconds(payload);
+    const progress = refreshProgressText(payload);
+    return `OANDA refresh timed out after ${timeout} seconds. ${progress}`;
+  }
+
   function clearAutoRefresh() {
     if (refreshTimer) clearTimeout(refreshTimer);
     refreshTimer = null;
@@ -547,19 +577,28 @@ PAGE_TEMPLATE = """
 
   function applyPayload(payload, source, options = {}) {
     latestPayload = payload || {};
-    renderMessages(payload || {});
-    renderTable(payload || {});
-    updatePepperstoneImportMeta(payload || {});
     const running = isRefreshRunning(payload);
+    const timedOut = payload?.refresh_state === 'timed_out' || payload?.refresh?.state === 'timed_out';
+    const suppressOandaRows = currentBroker === 'oanda' && hideOandaCacheUntilFresh && running;
+    renderMessages(payload || {});
+    if (suppressOandaRows) {
+      renderLoadingTable(`Refreshing OANDA spreads... ${refreshProgressText(payload || {})}`);
+    } else {
+      renderTable(payload || {});
+    }
+    updatePepperstoneImportMeta(payload || {});
     const successful = payload?.ok === true && !payloadHasFailures(payload) && !running;
     if (currentBroker === 'oanda') {
+      if (!running) hideOandaCacheUntilFresh = false;
       if (options.updateLastRefresh && successful) {
         lastRefreshEl.textContent = `Last refresh: ${fmtTime(payload?.last_refresh_finished_at || payload?.generated_at)}`;
       } else if (!options.updateLastRefresh) {
         lastRefreshEl.textContent = `Last refresh: ${fmtTime(payload?.last_refresh_finished_at || payload?.generated_at)}`;
       }
-      if (running) {
-        statusEl.textContent = 'Refresh running; showing cache.';
+      if (timedOut) {
+        statusEl.textContent = timedOutMessage(payload);
+      } else if (running) {
+        statusEl.textContent = `Refreshing OANDA spreads... ${refreshProgressText(payload)}`;
       } else if (payload?.ok === false || messageArray(payload?.errors).length) {
         statusEl.textContent = scalarMessage(payload?.error) || 'OANDA spread refresh needs data.';
       } else if (messageArray(payload?.warnings).length) {
@@ -618,10 +657,14 @@ PAGE_TEMPLATE = """
     }
   }
 
-  async function refreshData() {
+  async function refreshData(options = {}) {
     if (currentBroker !== 'oanda') return;
     refreshBtn.disabled = true;
+    if (options.initial) hideOandaCacheUntilFresh = true;
     statusEl.textContent = 'Refreshing OANDA spreads...';
+    messagesEl.innerHTML = '';
+    renderLoadingTable('Refreshing OANDA spreads...');
+    clearAutoRefresh();
     let keepDisabled = false;
     try {
       const payload = await fetchJson(endpoint('refresh'), { method: 'POST' });
@@ -629,6 +672,7 @@ PAGE_TEMPLATE = """
       keepDisabled = isRefreshRunning(payload);
       if (keepDisabled) queueStatusPoll();
     } catch (err) {
+      hideOandaCacheUntilFresh = false;
       statusEl.textContent = scalarMessage(err) || 'OANDA refresh failed.';
       messagesEl.innerHTML = `<div class="message error">${escapeHtml(statusEl.textContent)}</div>`;
       scheduleNext({});
@@ -688,6 +732,7 @@ PAGE_TEMPLATE = """
   function selectBroker(broker) {
     currentBroker = broker;
     latestPayload = null;
+    hideOandaCacheUntilFresh = broker === 'oanda';
     sortState = { column: null, direction: 'asc' };
     if (statusPollTimer) clearTimeout(statusPollTimer);
     clearAutoRefresh();
@@ -701,16 +746,21 @@ PAGE_TEMPLATE = """
     nextRefreshEl.textContent = broker === 'pepperstone' ? 'Auto-refresh: manual import only' : 'Auto-refresh: 5 min';
     statusEl.textContent = broker === 'pepperstone'
       ? 'Import the MT5-generated Pepperstone spread file.'
-      : 'Loading OANDA cache...';
+      : 'Refreshing OANDA spreads...';
     messagesEl.innerHTML = '';
     headEl.innerHTML = '';
-    bodyEl.innerHTML = `<tr><td class="empty">${broker === 'pepperstone' ? 'No Pepperstone spread data imported yet.' : 'Loading OANDA spread data...'}</td></tr>`;
-    loadStatus();
+    bodyEl.innerHTML = `<tr><td class="empty">${broker === 'pepperstone' ? 'No Pepperstone spread data imported yet.' : 'Refreshing OANDA spreads...'}</td></tr>`;
+    if (broker === 'oanda') {
+      refreshData({ initial: true });
+    } else {
+      loadStatus();
+    }
   }
 
   function showSelector() {
     currentBroker = null;
     latestPayload = null;
+    hideOandaCacheUntilFresh = false;
     if (statusPollTimer) clearTimeout(statusPollTimer);
     clearAutoRefresh();
     selectorView.hidden = false;

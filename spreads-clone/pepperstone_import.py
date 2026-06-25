@@ -25,6 +25,7 @@ from symbols import is_crypto_symbol, normalize_available_mt5_symbols, normalize
 ROOT_DIR = Path(__file__).resolve().parents[1]
 DEFAULT_EXPORT_PATH = ROOT_DIR / "mt5-clone" / "pepperstone_spreads_latest.json"
 DEFAULT_CACHE_PATH = ROOT_DIR / "render" / "data" / "pepperstone_spread_import_cache.json"
+MT5_FALLBACK_EXPORT_HINT = r"%APPDATA%\MetaQuotes\Terminal\<terminal-id>\MQL5\Files\pepperstone_spreads_latest.json"
 
 
 class PepperstoneImportError(ValueError):
@@ -216,7 +217,12 @@ class PepperstoneSpreadImportStore:
     def import_file(self, path: Path) -> Dict[str, object]:
         source = Path(path)
         if not source.exists():
-            raise PepperstoneImportError(f"Pepperstone spread file not found: {source}")
+            raise PepperstoneImportError(
+                "Pepperstone spread file not found. "
+                f"Expected repo import path: {source}. "
+                f"Expected MT5 fallback path: {MT5_FALLBACK_EXPORT_HINT}. "
+                "Run mt5-clone\\copy_pepperstone_spreads_latest.bat after the Trader EA exports the file."
+            )
         text = source.read_text(encoding="utf-8-sig")
         return self.import_text(text, source_path=source)
 

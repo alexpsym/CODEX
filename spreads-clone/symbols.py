@@ -5,11 +5,13 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import re
+import json
 from typing import Iterable, List, Optional, Sequence, Set
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 DEFAULT_JOURNAL_PATH = ROOT_DIR / "journal" / "Trading Journal.xlsx"
+DEFAULT_WATCHLIST_PATH = ROOT_DIR / "watchlist.json"
 
 FX_CODES = {
     "AUD",
@@ -129,6 +131,29 @@ def symbols_from_journal(path: Path = DEFAULT_JOURNAL_PATH) -> List[str]:
     return sorted(found)
 
 
+def symbols_from_watchlist(path: Path = DEFAULT_WATCHLIST_PATH) -> List[str]:
+    if not path.exists():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    raw_values: List[object] = []
+    if isinstance(payload, list):
+        raw_values.extend(payload)
+    elif isinstance(payload, dict):
+        for key in ("symbols", "watchlist", "items"):
+            values = payload.get(key)
+            if isinstance(values, list):
+                raw_values.extend(values)
+    found = []
+    for value in raw_values:
+        symbol = normalize_oanda_symbol(value)
+        if symbol:
+            found.append(symbol)
+    return sorted(dict.fromkeys(found))
+
+
 def normalize_available_oanda_symbols(values: Iterable[object]) -> List[str]:
     found = []
     for value in values:
@@ -191,14 +216,19 @@ def resolve_mt5_symbol(oanda_symbol: str, available_symbols: Sequence[object]) -
 def build_symbol_universe(
     *,
     journal_path: Path = DEFAULT_JOURNAL_PATH,
+    watchlist_path: Path = DEFAULT_WATCHLIST_PATH,
     oanda_symbols: Optional[Iterable[object]] = None,
     mt5_symbols: Optional[Iterable[object]] = None,
+    include_all_available: Optional[bool] = None,
 ) -> List[str]:
     env_symbols = symbols_from_env()
     if env_symbols:
         return env_symbols
+    if include_all_available is None:
+        include_all_available = str(os.getenv("SPREAD_MONITOR_INCLUDE_ALL_OANDA_INSTRUMENTS", "")).strip().lower() in {"1", "true", "yes", "y"}
 
     journal_symbols = symbols_from_journal(journal_path)
+    watchlist_symbols = symbols_from_watchlist(watchlist_path)
     available_symbols: List[str] = []
     if oanda_symbols is not None:
         available_symbols.extend(normalize_available_oanda_symbols(oanda_symbols))
@@ -206,9 +236,12 @@ def build_symbol_universe(
         available_symbols.extend(normalize_available_mt5_symbols(mt5_symbols))
 
     available_set = set(available_symbols)
-    journal_first = [symbol for symbol in journal_symbols if not available_set or symbol in available_set]
-    remaining_available = [symbol for symbol in sorted(available_set) if symbol not in set(journal_first)]
-    found = journal_first + remaining_available
+    requested = list(dict.fromkeys([*journal_symbols, *watchlist_symbols]))
+    found = [symbol for symbol in requested if not available_set or symbol in available_set]
+    if include_all_available:
+        found.extend(symbol for symbol in sorted(available_set) if symbol not in set(found))
+    if not found:
+        found.extend(symbol for symbol in DEFAULT_SYMBOLS if not available_set or symbol in available_set)
     if not found:
         found.extend(DEFAULT_SYMBOLS)
     return list(dict.fromkeys(found))

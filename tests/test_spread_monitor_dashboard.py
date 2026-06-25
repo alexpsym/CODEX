@@ -94,6 +94,9 @@ def test_spread_app_frontend_normalizes_messages_refresh_and_sorting():
     assert "function queueStatusPoll()" in source
     assert "function pollRefreshStatus()" in source
     assert "loadStatus();" in source
+    assert "refreshData({ initial: true })" in source
+    assert "hideOandaCacheUntilFresh" in source
+    assert "Loading OANDA cache" not in source
     assert "loadStatus().then(() => refreshData())" not in source
     assert "headEl.addEventListener('click'" in source
     assert "sortState.direction === 'asc' ? 'desc' : 'asc'" in source
