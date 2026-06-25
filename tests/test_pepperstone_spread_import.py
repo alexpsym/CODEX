@@ -89,6 +89,37 @@ def test_pepperstone_import_rejects_crypto_symbols():
         normalized_cache_from_export(_mt5_payload(symbol="BTCUSD"), source_path="crypto.json")
 
 
+def test_pepperstone_import_default_uses_mt5_fallback_when_repo_file_missing():
+    cache_path = _repo_cache_path("fallback_cache")
+    repo_source = ROOT / ".pytest_tmp_missing_pepperstone_spreads_latest.json"
+    fallback_dir = ROOT / ".pytest_tmp_pepperstone_mt5_files"
+    fallback_source = fallback_dir / "pepperstone_spreads_latest.json"
+    if repo_source.exists():
+        repo_source.unlink()
+    if fallback_source.exists():
+        fallback_source.unlink()
+    fallback_dir.mkdir(exist_ok=True)
+    try:
+        fallback_source.write_text(json.dumps(_mt5_payload()), encoding="utf-8")
+        store = PepperstoneSpreadImportStore(
+            cache_path,
+            default_source_path=repo_source,
+            fallback_source_path=fallback_source,
+        )
+        payload = store.import_default_file()
+    finally:
+        if cache_path.exists():
+            cache_path.unlink()
+        if fallback_source.exists():
+            fallback_source.unlink()
+        if fallback_dir.exists():
+            fallback_dir.rmdir()
+
+    assert payload["broker"] == "pepperstone"
+    assert payload["source_filename"] == "pepperstone_spreads_latest.json"
+    assert payload["rows"][0]["symbol"] == "EUR_USD"
+
+
 def test_pepperstone_import_does_not_use_metatrader5_python_module():
     source = (SPREAD_DIR / "pepperstone_import.py").read_text(encoding="utf-8")
     assert "MetaTrader5" not in source

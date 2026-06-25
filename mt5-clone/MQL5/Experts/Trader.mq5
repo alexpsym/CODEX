@@ -658,9 +658,84 @@ bool StandardLimitShouldBeActive()
 // ---------- Pepperstone spread export helpers ----------
 string TrimText(string value)
 {
-   value = StringTrimLeft(value);
-   value = StringTrimRight(value);
+   StringTrimLeft(value);
+   StringTrimRight(value);
    return value;
+}
+
+string NormalizePepperstoneSpreadSymbol(const string rawSymbol)
+{
+   string symbol = TrimText(rawSymbol);
+   StringToUpper(symbol);
+   return symbol;
+}
+
+bool IsAlphaNumericChar(const ushort ch)
+{
+   if(ch >= 48 && ch <= 57) return true;
+   if(ch >= 65 && ch <= 90) return true;
+   if(ch >= 97 && ch <= 122) return true;
+   return false;
+}
+
+bool IsPepperstoneSpreadSuffix(const string suffix)
+{
+   if(suffix == "") return false;
+   ushort first = StringGetCharacter(suffix, 0);
+   return !IsAlphaNumericChar(first);
+}
+
+bool TrySelectPepperstoneSpreadSymbol(const string requestedSymbol, const string candidate, string &resolvedSymbol)
+{
+   if(candidate == "") return false;
+   if(!SymbolSelect(candidate, true)) return false;
+   resolvedSymbol = candidate;
+   Print(EA_COMMENT, ": Pepperstone spread export resolved ", requestedSymbol, " -> ", resolvedSymbol);
+   return true;
+}
+
+string ResolvePepperstoneSpreadSymbol(const string rawSymbol)
+{
+   string exactSymbol = TrimText(rawSymbol);
+   if(exactSymbol == "") return "";
+
+   string requestedSymbol = exactSymbol;
+   StringToUpper(requestedSymbol);
+
+   string resolvedSymbol = "";
+
+   if(TrySelectPepperstoneSpreadSymbol(requestedSymbol, exactSymbol, resolvedSymbol))
+      return resolvedSymbol;
+   if(exactSymbol != requestedSymbol && TrySelectPepperstoneSpreadSymbol(requestedSymbol, requestedSymbol, resolvedSymbol))
+      return resolvedSymbol;
+
+   int requestedLen = StringLen(requestedSymbol);
+   if(requestedLen <= 0) return "";
+
+   if(StringLen(_Symbol) > requestedLen && StringSubstr(_Symbol, 0, requestedLen) == requestedSymbol)
+   {
+      string chartSuffix = StringSubstr(_Symbol, requestedLen);
+      if(IsPepperstoneSpreadSuffix(chartSuffix))
+      {
+         string inferredSymbol = requestedSymbol + chartSuffix;
+         if(TrySelectPepperstoneSpreadSymbol(requestedSymbol, inferredSymbol, resolvedSymbol))
+            return resolvedSymbol;
+      }
+   }
+
+   int total = SymbolsTotal(false);
+   for(int i = 0; i < total; i++)
+   {
+      string candidate = SymbolName(i, false);
+      if(StringLen(candidate) <= requestedLen) continue;
+      if(StringSubstr(candidate, 0, requestedLen) != requestedSymbol) continue;
+      string suffix = StringSubstr(candidate, requestedLen);
+      if(!IsPepperstoneSpreadSuffix(suffix)) continue;
+      if(TrySelectPepperstoneSpreadSymbol(requestedSymbol, candidate, resolvedSymbol))
+         return resolvedSymbol;
+   }
+
+   return "";
 }
 
 string JsonEscape(const string value)
@@ -719,33 +794,45 @@ string BuildPepperstoneSpreadJson(datetime generatedAt)
 
    for(int i = 0; i < count; i++)
    {
-      string symbol = TrimText(tokens[i]);
+      string symbol = NormalizePepperstoneSpreadSymbol(tokens[i]);
       if(symbol == "") continue;
 
-      if(!SymbolSelect(symbol, true))
+      string mt5Symbol = ResolvePepperstoneSpreadSymbol(tokens[i]);
+      if(mt5Symbol == "")
       {
-         Print(EA_COMMENT, ": Pepperstone spread export skipped ", symbol, " because SymbolSelect failed.");
+         Print(EA_COMMENT, ": Pepperstone spread export skipped ", symbol, " because no matching MT5 symbol was found.");
          continue;
       }
 
-      double bid = SymbolInfoDouble(symbol, SYMBOL_BID);
-      double ask = SymbolInfoDouble(symbol, SYMBOL_ASK);
+      if(!SymbolSelect(mt5Symbol, true))
+      {
+         Print(EA_COMMENT, ": Pepperstone spread export skipped ", symbol, " because SymbolSelect failed for resolved MT5 symbol ", mt5Symbol, ".");
+         continue;
+      }
+
+      double bid = SymbolInfoDouble(mt5Symbol, SYMBOL_BID);
+      double ask = SymbolInfoDouble(mt5Symbol, SYMBOL_ASK);
       if(bid <= 0.0 || ask <= 0.0 || ask <= bid)
       {
-         Print(EA_COMMENT, ": Pepperstone spread export skipped ", symbol, " because bid/ask is unavailable.");
+         Print(EA_COMMENT, ": Pepperstone spread export skipped ", symbol, " because bid/ask is unavailable for resolved MT5 symbol ", mt5Symbol, ".");
          continue;
       }
 
       double midpoint = (ask + bid) / 2.0;
-      if(midpoint <= 0.0) continue;
+      if(midpoint <= 0.0)
+      {
+         Print(EA_COMMENT, ": Pepperstone spread export skipped ", symbol, " because midpoint is unavailable for resolved MT5 symbol ", mt5Symbol, ".");
+         continue;
+      }
       double spreadPct = ((ask - bid) / midpoint) * 100.0;
-      int digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
-      double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
+      int digits = (int)SymbolInfoInteger(mt5Symbol, SYMBOL_DIGITS);
+      double point = SymbolInfoDouble(mt5Symbol, SYMBOL_POINT);
 
       if(written > 0) entries += ",\n";
       entries += StringFormat(
-         "    {\"symbol\":\"%s\",\"bid\":%s,\"ask\":%s,\"spread_pct\":%s,\"digits\":%d,\"point\":%s,\"timestamp\":\"%s\"}",
+         "    {\"symbol\":\"%s\",\"mt5_symbol\":\"%s\",\"bid\":%s,\"ask\":%s,\"spread_pct\":%s,\"digits\":%d,\"point\":%s,\"timestamp\":\"%s\"}",
          JsonEscape(symbol),
+         JsonEscape(mt5Symbol),
          DoubleToString(bid, digits),
          DoubleToString(ask, digits),
          DoubleToString(spreadPct, 10),

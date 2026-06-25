@@ -25,7 +25,18 @@ from symbols import is_crypto_symbol, normalize_available_mt5_symbols, normalize
 ROOT_DIR = Path(__file__).resolve().parents[1]
 DEFAULT_EXPORT_PATH = ROOT_DIR / "mt5-clone" / "pepperstone_spreads_latest.json"
 DEFAULT_CACHE_PATH = ROOT_DIR / "render" / "data" / "pepperstone_spread_import_cache.json"
-MT5_FALLBACK_EXPORT_HINT = r"%APPDATA%\MetaQuotes\Terminal\<terminal-id>\MQL5\Files\pepperstone_spreads_latest.json"
+DEFAULT_MT5_FALLBACK_EXPORT_PATH = (
+    Path.home()
+    / "AppData"
+    / "Roaming"
+    / "MetaQuotes"
+    / "Terminal"
+    / "73B7A2420D6397DFF9014A20F1201F97"
+    / "MQL5"
+    / "Files"
+    / "pepperstone_spreads_latest.json"
+)
+MT5_FALLBACK_EXPORT_HINT = str(DEFAULT_MT5_FALLBACK_EXPORT_PATH)
 
 
 class PepperstoneImportError(ValueError):
@@ -166,10 +177,12 @@ class PepperstoneSpreadImportStore:
         cache_path: Path = DEFAULT_CACHE_PATH,
         *,
         default_source_path: Path = DEFAULT_EXPORT_PATH,
+        fallback_source_path: Optional[Path] = DEFAULT_MT5_FALLBACK_EXPORT_PATH,
         max_samples: int = MAX_CACHE_SAMPLES,
     ) -> None:
         self.cache_path = Path(cache_path)
         self.default_source_path = Path(default_source_path)
+        self.fallback_source_path = Path(fallback_source_path) if fallback_source_path is not None else None
         self.max_samples = max_samples
         self._lock = threading.RLock()
         self._cache = self._load_cache()
@@ -212,19 +225,28 @@ class PepperstoneSpreadImportStore:
         return payload
 
     def import_default_file(self) -> Dict[str, object]:
-        return self.import_file(self.default_source_path)
+        if self.default_source_path.exists():
+            return self.import_file(self.default_source_path)
+        if self.fallback_source_path is not None and self.fallback_source_path.exists():
+            return self.import_file(self.fallback_source_path)
+        raise self._file_not_found_error(self.default_source_path)
 
     def import_file(self, path: Path) -> Dict[str, object]:
         source = Path(path)
         if not source.exists():
-            raise PepperstoneImportError(
-                "Pepperstone spread file not found. "
-                f"Expected repo import path: {source}. "
-                f"Expected MT5 fallback path: {MT5_FALLBACK_EXPORT_HINT}. "
-                "Run mt5-clone\\copy_pepperstone_spreads_latest.bat after the Trader EA exports the file."
-            )
+            raise self._file_not_found_error(source)
         text = source.read_text(encoding="utf-8-sig")
         return self.import_text(text, source_path=source)
+
+    def _file_not_found_error(self, source: Path) -> PepperstoneImportError:
+        fallback = self.fallback_source_path if self.fallback_source_path is not None else MT5_FALLBACK_EXPORT_HINT
+        return PepperstoneImportError(
+            "Pepperstone spread file not found. "
+            f"Requested path: {source}. "
+            f"Expected repo import path: {self.default_source_path}. "
+            f"Expected MT5 fallback path: {fallback}. "
+            "Export the file from the Trader EA or choose a file manually."
+        )
 
     def import_text(self, text: str, *, source_path: object = "") -> Dict[str, object]:
         payload = _load_json_text(text)
