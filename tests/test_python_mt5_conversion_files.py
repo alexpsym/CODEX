@@ -7,14 +7,31 @@ PY_MT5_DIR = ROOT / "mt5-clone" / "python_mt5"
 sys.path.insert(0, str(PY_MT5_DIR))
 
 
+def _chart_suffix_like_pepperstone_export(chart_symbol: str) -> str:
+    chart = chart_symbol.strip()
+    suffix = chart[6:] if len(chart) > 6 else ""
+    if suffix and not suffix[0].isalnum():
+        return suffix
+    return ""
+
+
+def _chart_suffix_attempts_like_pepperstone_export(raw_symbol: str, chart_symbol: str) -> list[str]:
+    exact = raw_symbol.strip()
+    requested = exact.upper()
+    attempts = [exact]
+    if exact != requested:
+        attempts.append(requested)
+    suffix = _chart_suffix_like_pepperstone_export(chart_symbol)
+    if suffix:
+        attempts.append(requested + suffix)
+    return attempts
+
+
 def _resolve_like_pepperstone_export(raw_symbol: str, chart_symbol: str, available_symbols: list[str]) -> str:
+    for candidate in _chart_suffix_attempts_like_pepperstone_export(raw_symbol, chart_symbol):
+        if candidate in available_symbols:
+            return candidate
     requested = raw_symbol.strip().upper()
-    if requested in available_symbols:
-        return requested
-    if chart_symbol.startswith(requested):
-        suffix = chart_symbol[len(requested) :]
-        if suffix and not suffix[0].isalnum() and chart_symbol in available_symbols:
-            return chart_symbol
     for candidate in available_symbols:
         if not candidate.startswith(requested) or len(candidate) <= len(requested):
             continue
@@ -88,9 +105,15 @@ def test_mql5_trader_trimtext_uses_in_place_string_trim_calls():
 def test_mql5_trader_resolves_pepperstone_dot_suffix_symbols():
     trader = (ROOT / "mt5-clone" / "MQL5" / "Experts" / "Trader.mq5").read_text(encoding="utf-8")
     assert _resolve_like_pepperstone_export(" eurusd ", "EURUSD.a", ["GBPUSD.a", "EURUSD.a"]) == "EURUSD.a"
+    assert _resolve_like_pepperstone_export("GBPUSD", "EURUSD.a", ["GBPUSD.a"]) == "GBPUSD.a"
+    assert _resolve_like_pepperstone_export("USDJPY", "EURUSD.a", ["USDJPY.a"]) == "USDJPY.a"
+    assert "GBPUSD.a" in _chart_suffix_attempts_like_pepperstone_export("GBPUSD", "EURUSD.a")
+    assert "USDJPY.a" in _chart_suffix_attempts_like_pepperstone_export("USDJPY", "EURUSD.a")
     assert _resolve_like_pepperstone_export("EURUSD", "GBPUSD.a", ["EURUSDmicro", "EURUSD.a"]) == "EURUSD.a"
     assert "mt5_symbol" in trader
     assert "ResolvePepperstoneSpreadSymbol" in trader
+    assert "ExtractPepperstoneChartSuffix" in trader
+    assert "requestedSymbol + chartSuffix" in trader
     assert "string mt5Symbol = ResolvePepperstoneSpreadSymbol(tokens[i]);" in trader
     assert "SymbolsTotal(false)" in trader
     assert "SymbolName(i, false)" in trader

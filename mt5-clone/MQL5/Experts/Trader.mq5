@@ -685,6 +685,16 @@ bool IsPepperstoneSpreadSuffix(const string suffix)
    return !IsAlphaNumericChar(first);
 }
 
+string ExtractPepperstoneChartSuffix()
+{
+   string chartSymbol = TrimText(_Symbol);
+   int baseLength = 6;
+   if(StringLen(chartSymbol) <= baseLength) return "";
+   string suffix = StringSubstr(chartSymbol, baseLength);
+   if(!IsPepperstoneSpreadSuffix(suffix)) return "";
+   return suffix;
+}
+
 bool TrySelectPepperstoneSpreadSymbol(const string requestedSymbol, const string candidate, string &resolvedSymbol)
 {
    if(candidate == "") return false;
@@ -712,12 +722,12 @@ string ResolvePepperstoneSpreadSymbol(const string rawSymbol)
    int requestedLen = StringLen(requestedSymbol);
    if(requestedLen <= 0) return "";
 
-   if(StringLen(_Symbol) > requestedLen && StringSubstr(_Symbol, 0, requestedLen) == requestedSymbol)
+   string chartSuffix = ExtractPepperstoneChartSuffix();
+   if(chartSuffix != "")
    {
-      string chartSuffix = StringSubstr(_Symbol, requestedLen);
-      if(IsPepperstoneSpreadSuffix(chartSuffix))
+      string inferredSymbol = requestedSymbol + chartSuffix;
+      if(inferredSymbol != exactSymbol && inferredSymbol != requestedSymbol)
       {
-         string inferredSymbol = requestedSymbol + chartSuffix;
          if(TrySelectPepperstoneSpreadSymbol(requestedSymbol, inferredSymbol, resolvedSymbol))
             return resolvedSymbol;
       }
