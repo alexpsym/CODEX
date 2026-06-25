@@ -358,6 +358,8 @@ def test_streak_rows_split_count_start_end_for_stats1_and_reports(tmp_path: Path
         assert stats1.cell(row + 2, 1).value == "End"
         assert stats1.cell(row + 1, 2).value == "2026-05-01 00:00:00"
         assert stats1.cell(row + 2, 2).value == "2026-05-03 00:00:00"
+        assert _cell_font_rgb(stats1.cell(row + 1, 2)) != "9C0006"
+        assert _cell_font_rgb(stats1.cell(row + 2, 2)) != "9C0006"
 
         yearly = wb[REPORT_YEARLY_SHEET]
         report_rows = {str(yearly.cell(r, 1).value or ""): r for r in range(1, yearly.max_row + 1)}
@@ -365,6 +367,7 @@ def test_streak_rows_split_count_start_end_for_stats1_and_reports(tmp_path: Path
         assert yearly.cell(report_rows["Best Win Streak"], year_col).value == 1
         assert yearly.cell(report_rows["Best Win Streak"] + 1, 1).value == "Start"
         assert yearly.cell(report_rows["Worst Losing Streak"] + 1, 1).value == "Start"
+        assert _cell_font_rgb(yearly.cell(report_rows["Best Win Streak"] + 1, year_col)) != "9C0006"
     finally:
         wb.close()
 
@@ -1108,6 +1111,39 @@ def test_update_data_only_preserves_symbols_freeze_pane(tmp_path: Path):
     assert "_Trade Meta" not in repaired.sheetnames
     assert "All Trades" not in repaired.sheetnames
     repaired.close()
+
+
+def test_update_data_only_expands_symbols_filter_for_preserved_manual_rows(tmp_path: Path):
+    out = tmp_path / "Trading Journal.xlsx"
+    snap = sample_snapshot()
+    build_master_journal_workbook(snap, out)
+    wb = load_workbook(out)
+    ws = wb[SYMBOLS_SHEET]
+    manual_col = ws.max_column + 1
+    manual_row = ws.max_row + 5
+    ws.cell(INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, manual_col).value = "Manual Metric"
+    ws.cell(manual_row, manual_col).value = "Keep"
+    ws.auto_filter.ref = (
+        f"A{INSTRUMENT_AVERAGES_FILTER_HEADER_ROW}:"
+        f"{get_column_letter(manual_col)}{INSTRUMENT_AVERAGES_DATA_START_ROW}"
+    )
+    wb.save(out)
+    wb.close()
+
+    result = update_master_journal_workbook_data_only(out, snap)
+    assert result["ok"] is True
+    Path(result["candidate_path"]).replace(out)
+
+    repaired = load_workbook(out)
+    try:
+        ws = repaired[SYMBOLS_SHEET]
+        assert ws.cell(manual_row, manual_col).value == "Keep"
+        _min_col, _min_row, max_col, max_row = range_boundaries(ws.auto_filter.ref)
+        assert max_col >= manual_col
+        assert max_row >= manual_row
+    finally:
+        repaired.close()
+
 
 def test_update_data_only_survivor_guard_fails_when_row_id_header_missing(tmp_path: Path):
     out = tmp_path / "Trading Journal.xlsx"
@@ -3069,6 +3105,26 @@ def _cell_font_rgb(cell) -> str:
     rgb = str(getattr(color, "rgb", "") or "")
     return rgb[-6:].upper() if rgb else ""
 
+def _border_signature(cell):
+    def _color_signature(color):
+        if color is None:
+            return None
+        if color.type == "rgb":
+            return ("rgb", str(color.rgb))
+        if color.type == "indexed":
+            return ("indexed", color.indexed)
+        if color.type == "theme":
+            return ("theme", color.theme, color.tint)
+        return (color.type, str(getattr(color, color.type, "")))
+
+    def _side_signature(side):
+        if side is None:
+            return None
+        return (side.style, _color_signature(side.color))
+
+    border = cell.border
+    return tuple(_side_signature(side) for side in (border.left, border.right, border.top, border.bottom, border.diagonal))
+
 def _cf_fill_intersects(ws, target_range: str, fill_rgb: str) -> bool:
     target_min_col, target_min_row, target_max_col, target_max_row = range_boundaries(target_range)
     for key, rules in ws.conditional_formatting._cf_rules.items():
@@ -3139,6 +3195,54 @@ def test_update_data_only_restores_trade_log_direct_row_fills(tmp_path: Path):
     ws = load_workbook(out)["Trade Log"]
     winning_row = _trade_log_row_by_id(ws, "t1")
     assert all(_cell_fill_rgb(ws.cell(winning_row, col)) == "C6EFCE" for col in [1, 3, _header_col(ws, "Net P/L"), len(TRADE_LOG_HEADERS)])
+
+
+def test_data_only_update_preserves_manual_trade_log_borders(tmp_path: Path):
+    out = tmp_path / "Trading Journal.xlsx"
+    snap = sample_snapshot()
+    build_master_journal_workbook(snap, out)
+    wb = load_workbook(out)
+    try:
+        ws = wb["Trade Log"]
+        headers = _trade_log_header_map(ws)
+        target_borders = {
+            (TRADE_LOG_DATA_START_ROW, headers["Open Time"]): Border(
+                left=Side(style="double", color="FF123456"),
+                right=Side(style="thick", color="FF654321"),
+                top=Side(style="dashed", color="FFABCDEF"),
+                bottom=Side(style="dotted", color="FF111111"),
+            ),
+            (TRADE_LOG_DATA_START_ROW, headers["Net P/L"]): Border(
+                left=Side(style="thick", color="FF222222"),
+                right=Side(style="double", color="FF333333"),
+                top=Side(style="medium", color="FF444444"),
+                bottom=Side(style="dashDot", color="FF555555"),
+            ),
+            (TRADE_LOG_DATA_START_ROW + 1, headers["Symbol"]): Border(
+                left=Side(style="slantDashDot", color="FF666666"),
+                right=Side(style="dashed", color="FF777777"),
+                top=Side(style="thick", color="FF888888"),
+                bottom=Side(style="double", color="FF999999"),
+            ),
+        }
+        before = {}
+        for (row, col), border in target_borders.items():
+            ws.cell(row, col).border = border
+            before[(row, col)] = _border_signature(ws.cell(row, col))
+        wb.save(out)
+    finally:
+        wb.close()
+
+    result = update_master_journal_workbook_data_only(out, snap)
+    assert result["ok"] is True
+    Path(result["candidate_path"]).replace(out)
+    wb = load_workbook(out)
+    try:
+        ws = wb["Trade Log"]
+        for (row, col), signature in before.items():
+            assert _border_signature(ws.cell(row, col)) == signature
+    finally:
+        wb.close()
 
 
 def _dashboard_core_labels(ws):

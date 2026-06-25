@@ -25,15 +25,19 @@ Changes made:
   - Reworked Net P/L % to use capital-weighted account returns instead of summing trade percentages.
   - Converts AUD and USD/USDT/USDC accounts to AUD for overall percentage returns using JOURNAL_USDT_TO_AUD_FALLBACK.
   - Splits STATS1/report streak rows into count-only rows plus Start and End rows.
+  - Forces populated streak Start/End datetime value cells to black font so detail rows do not inherit red losing-streak styling.
   - Preserves manual dashboard merges when inserting optional source/detail rows.
   - Populates SYMBOLS latest timeframe, stop, and target columns dynamically while preserving grouped headers and vertical single-header merges.
+  - Normalizes the SYMBOLS auto-filter after data-only updates so preserved manual rows/columns remain included after resync.
   - Repairs STATS2 As Of column values/styles from STATS1!B146.
-- Updated tests for the new Spread Monitor behavior, OANDA symbol universe, workbook weighted percentages, streak Start/End rows, SYMBOLS latest columns, and STATS2 formatting.
+- Updated tests for the new Spread Monitor behavior, OANDA symbol universe, workbook weighted percentages, streak Start/End rows and fonts, SYMBOLS latest columns/filter range, STATS2 formatting, and Trade Log border preservation across data-only resync.
 - Repaired the checked-in workbook journal/Trading Journal.xlsx directly:
   - STATS1 Best Win Streak row 17 now has count-only B17:D17 = 5, 5, 4; Start row B18:D18 = 2018-10-29 22:34:00, 2018-10-29 22:34:00, 2024-10-27 22:46:00; End row B19:D19 = 2018-10-30 19:39:00, 2018-10-30 19:39:00, 2024-11-14 06:36:00.
   - STATS1 Worst Losing Streak row 20 now has count-only B20:D20 = 22, 15, 16; Start row B21:D21 = 2021-07-20 22:09:00, 2020-07-29 10:12:00, 2021-06-27 10:11:00; End row B22:D22 = 2021-09-04 23:29:00, 2021-01-01 01:16:00, 2021-09-04 23:29:00.
+  - STATS1 datetime value cells B18:D19 and B21:D22 now have font color FF000000 after reopening; their fills, borders, alignment, and number/date formats were verified unchanged.
   - STATS2 E3:E9 now contain space-separated datetime strings with no "T", have General number format, and match STATS1!B146 style signature.
   - SYMBOLS AC:AK, AS:AU, and AX:AZ now have no blank data columns after row 2; reopened verification counted 1080 populated cells in AC:AK, 360 in AS:AU, and 360 in AX:AZ.
+  - The saved workbook was run through the actual data-only resync; reopened verification confirmed Trade Log border signatures were unchanged across 75,852 used-range cells and SYMBOLS filter stayed A2:BE122.
   - YEARLY REPORT and year sheets 2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025, and 2026 now use the split streak layout: Best Win Streak row 13, Start row 14, End row 15, Worst Losing Streak row 16, Start row 17, End row 18.
   - Reopened verification examples: YEARLY REPORT row 13 = 5, 5, 3, 3, 2, 4, 3 for 2018-2024 and row 16 = 14, 9, 13, 22, 7, 6, 10; 2018 row 13 = 1, 4, 2, 4, 3, 5, 2 for May-November and row 16 = 6, 14, 7, 3, 9, 7, 7; 2021 row 13 = 2, 2, 1, 3, 2, 1, 1 for January-July and row 16 = 6, 3, 11, 15, 11, 4, 6.
 
@@ -44,10 +48,14 @@ Verification run:
   Result: 130 passed.
 - python -m compileall spreads-clone render tools tests
   Result: passed.
+- python -m pytest tests/test_master_journal_workbook.py::test_streak_rows_split_count_start_end_for_stats1_and_reports tests/test_master_journal_workbook.py::test_data_only_update_preserves_manual_trade_log_borders tests/test_master_journal_workbook.py::test_update_data_only_expands_symbols_filter_for_preserved_manual_rows -q --basetemp .pytest_tmp_codex_border_font
+  Result: 3 passed.
 - Reopened journal/Trading Journal.xlsx after saving and verified actual workbook cells/styles:
   - STATS1 B17:D17/B20:D20 contain counts only and no inline date ranges; B18:D19 and B21:D22 contain Start/End datetimes.
+  - STATS1 B18:D19 and B21:D22 datetime cells have font color FF000000, not red; fills, borders, alignment, and number/date formats remained unchanged.
   - STATS2 E3:E9 contain no "T", use General format, and match STATS1!B146 style attributes.
   - SYMBOLS AC:AK, AS:AU, and AX:AZ have no blank data columns.
+  - Actual data-only resync preserved Trade Log border signatures for 75,852 used-range cells; SYMBOLS filter reopened as A2:BE122.
   - YEARLY REPORT and every year sheet 2018-2026 have Best Win Streak at row 13, Start row 14, End row 15, Worst Losing Streak at row 16, Start row 17, End row 18; verification found no inline streak date text and no blank Start/End cells where a streak count exists.
 
 Notes:

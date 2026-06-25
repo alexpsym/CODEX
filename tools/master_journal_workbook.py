@@ -550,6 +550,17 @@ def _apply_symbols_filter_header_layout(ws) -> None:
             ws.column_dimensions[letter].width = minimum
 
 
+def _set_instrument_averages_auto_filter_to_populated_range(ws) -> None:
+    header_row = _instrument_averages_header_row(ws)
+    headers = _instrument_averages_header_map(ws)
+    last_col = max(headers.values()) if headers else ws.max_column
+    last_row = header_row
+    for row in range(header_row + 1, ws.max_row + 1):
+        if any(ws.cell(row, col).value not in (None, "") for col in range(1, ws.max_column + 1)):
+            last_row = row
+    ws.auto_filter.ref = f"A{header_row}:{get_column_letter(last_col)}{max(header_row, last_row)}"
+
+
 def _write_instrument_averages_headers(ws, *, preserve_freeze: bool = False) -> None:
     previous_freeze = ws.freeze_panes
     order_start = INSTRUMENT_AVERAGES_HEADERS.index("Market") + 1
@@ -1590,6 +1601,14 @@ def _streak_inline_count(value: Any) -> int | None:
     return int(count) if count is not None else None
 
 
+def _apply_streak_detail_value_font(cell) -> None:
+    if cell.value in (None, ""):
+        return
+    font = copy(cell.font)
+    font.color = "FF000000"
+    cell.font = font
+
+
 def _write_streak_detail_rows(
     ws,
     metric_label: str,
@@ -1630,6 +1649,8 @@ def _write_streak_detail_rows(
             if end:
                 ws.cell(end_row, col).value = end
                 ws.cell(end_row, col).number_format = "General"
+            _apply_streak_detail_value_font(ws.cell(start_row, col))
+            _apply_streak_detail_value_font(ws.cell(end_row, col))
 
 
 def _copy_row_style_without_values(ws, source_row: int, target_row: int) -> None:
@@ -4453,6 +4474,7 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
                 start, end = _streak_detail_start_end(bucket.get(detail_key))
                 cell.value = start if endpoint == "start" else end
                 cell.number_format = "General"
+                _apply_streak_detail_value_font(cell)
             elif kind == "number":
                 cell.value = "" if value is None else value
                 cell.number_format = "#,##0.##########"
@@ -5263,6 +5285,7 @@ def _format_report_sheet(ws, last_col: int) -> None:
                 cell.number_format = "0"
             elif kind == "streak_date":
                 cell.number_format = "General"
+                _apply_streak_detail_value_font(cell)
             elif kind == "duration":
                 cell.number_format = "General"
             elif kind == "drawdown_date":
@@ -5463,6 +5486,7 @@ def _update_report_sheet_preserving_layout(
                 cell.number_format = "0"
             elif kind == "streak_date":
                 cell.number_format = "General"
+                _apply_streak_detail_value_font(cell)
             elif kind == "duration":
                 cell.number_format = "General"
             elif kind == "drawdown_date":
@@ -8312,6 +8336,7 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
                 _repair_instrument_timeframe_columns(instrument_ws)
                 _populate_symbols_metrics_preserving_layout(instrument_ws, rows, diagnostics)
                 _repair_symbols_header_merges_preserving_layout(instrument_ws, diagnostics)
+                _set_instrument_averages_auto_filter_to_populated_range(instrument_ws)
             if "P&L Calendar" in wb.sheetnames and "P&L Calendar" in gen.sheetnames:
                 cal_ws = wb["P&L Calendar"]
                 if _detect_calendar_month_columns(cal_ws):
