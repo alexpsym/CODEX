@@ -38,12 +38,14 @@ def test_custom_indicator_session_controls_and_timing_labels() -> None:
     assert "max_labels_count=500" in source
 
 
-def test_custom_indicator_session_labels_are_abbreviated_vertical_and_simple() -> None:
+def test_custom_indicator_session_labels_are_abbreviated_horizontal_and_larger() -> None:
     source = _source()
-    assert '"S\\nY\\nD\\n" + suffix' in source
-    assert '"T\\nK\\nY\\n" + suffix' in source
-    assert '"L\\nD\\nN\\n" + suffix' in source
-    assert '"N\\nY\\n" + suffix' in source
+    assert "horizontalSessionText" in source
+    assert 'sessionCode + (isOpen ? " O" : " C")' in source
+    assert '"S\\nY\\nD\\n"' not in source
+    assert '"T\\nK\\nY\\n"' not in source
+    assert '"L\\nD\\nN\\n"' not in source
+    assert '"N\\nY\\n"' not in source
     assert '"Sydney Open"' not in source
     assert '"Tokyo Open"' not in source
     assert '"London Open"' not in source
@@ -51,7 +53,8 @@ def test_custom_indicator_session_labels_are_abbreviated_vertical_and_simple() -
     assert 'sessionName + (isOpen ? " Open" : " Close")' not in source
     assert "textcolor=color.black" in source
     assert "color=color.white" in source
-    assert "size=size.tiny" in source
+    assert "size=size.tiny" not in source
+    assert "size=size.normal" in source
 
 
 def test_custom_indicator_session_rendering_uses_arrow_markers_not_extend_lines() -> None:
@@ -60,7 +63,8 @@ def test_custom_indicator_session_rendering_uses_arrow_markers_not_extend_lines(
     assert "drawSessionMarker" in session_block
     assert "label.style_arrowdown" in session_block
     assert "label.style_arrowup" in session_block
-    assert "markerY = isOpen ? high + candleRange" in session_block
+    assert "markerY = isOpen ? high + candleRange * 0.75 : low - candleRange * 0.75" in session_block
+    assert "textalign=text.align_center" in session_block
     assert "extend=extend.both" not in session_block
     assert "line.new" not in session_block
 

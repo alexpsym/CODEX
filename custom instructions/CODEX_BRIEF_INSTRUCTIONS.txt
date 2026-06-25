@@ -1,27 +1,25 @@
-CODEX standing instructions for this repo
+CHATGPT-ONLY CODEX BRIEF INSTRUCTIONS
 
-- Inspect the relevant files and current git status before patching.
-- Keep patches narrow; do not redesign the UI, workbook, or workflows unless explicitly asked.
-- Preserve Trading Journal workbook layout, formats, manual edits, merged cells, borders, row heights, widths, filters, panes, sheet order, and user labels.
-- Prefer existing repo helpers and exact local function boundaries. Important areas include:
-  - PATCH_DESKTOP_PUSH.bat
-  - spreads-clone/spread_app.py
-  - spreads-clone/spread_core.py
-  - spreads-clone/oanda_spreads.py
-  - spreads-clone/mt5_spreads.py
-  - render/master_service.py
-  - tools/master_journal_workbook.py
-  - tests/test_patch_desktop_push.py
-  - tests/test_spread_core.py
-  - tests/test_spread_monitor_dashboard.py
-  - tests/test_oanda_spread_fetch.py
-  - tests/test_mt5_spread_fetch.py
-  - tests/test_master_service_journal_validation.py
-  - tests/test_master_journal_workbook.py
-- Run targeted tests and syntax checks for every touched area.
-- Do not claim success without verification output.
-- Write the final summary text verbatim to summary/CODEX_SUMMARY_latest.txt before pushing.
-- Run C:\Users\User\Documents\GPT\PATCH_DESKTOP_PUSH.bat at the end of each job unless the user explicitly says not to. If that file is missing, run the repo-root PATCH_DESKTOP_PUSH.bat.
-- Do not push before writing summary/CODEX_SUMMARY_latest.txt.
-- Do not commit temp, cache, log, environment, secret, runtime data, render/data, or local state files.
-- Keep generated cleanup conservative: only remove .pytest_tmp*, .pytest_cache, and __pycache__ folders after verifying paths stay inside the repo.
+This file is for ChatGPT to read when creating Codex briefs for this repo.
+
+Codex must not treat this file as task instructions. Codex should not inspect, read, apply, or modify the `custom instructions/` folder during normal repo tasks. Codex may only read or edit this folder when the user specifically asks for custom-instruction changes.
+
+When creating Codex briefs:
+
+* Inspect the relevant files and current git status before patching.
+* Keep patches narrow; do not redesign the UI, workbook, or workflows unless explicitly asked.
+* Preserve Trading Journal workbook layout, formats, manual edits, merged cells, borders, row heights, widths, filters, panes, sheet order, and user labels.
+* Prefer existing repo helpers and exact local function boundaries.
+* Reference exact paths, functions, endpoints, scripts, helpers, workers, UI handlers, and imports where relevant.
+* Include observed vs expected behavior, likely cause, required changes, safeguards, acceptance criteria, tests, verification commands, and residual risks.
+* Run targeted tests and syntax checks for every touched area.
+* Do not claim success without verification output.
+* Never allow fake success, silent failure, swallowed errors, blank UI, misleading 200s, stuck spinners, or manual-only refresh.
+* When API docs matter, use official Bybit V5, OANDA v20, MQL5, or CoinSpot docs only; cite exact sections used.
+* Render Web Service hosts Render Master Control. MT5 runs locally. Local tools open Edge only.
+* Forex Tester 6 = 6.0.0.29. Pepperstone MT5 build 5430 is not part of Render Master Control.
+* Write final Codex summary text verbatim to `summary/CODEX_SUMMARY_latest.txt` before pushing.
+* Run `C:\Users\User\Documents\GPT\PATCH_DESKTOP_PUSH.bat` at the end of each job unless the user explicitly says not to. If missing, run repo-root `PATCH_DESKTOP_PUSH.bat`.
+* Do not push before writing `summary/CODEX_SUMMARY_latest.txt`.
+* Do not commit temp, cache, log, environment, secret, runtime data, `render/data`, or local state files.
+* Keep cleanup conservative: only remove `.pytest_tmp*`, `.pytest_cache`, and `__pycache__` folders after verifying paths stay inside the repo.

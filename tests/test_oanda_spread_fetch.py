@@ -8,7 +8,8 @@ ROOT = Path(__file__).resolve().parents[1]
 SPREAD_DIR = ROOT / "spreads-clone"
 sys.path.insert(0, str(SPREAD_DIR))
 
-from oanda_spreads import fetch_oanda_spread_samples, parse_oanda_bid_ask_candles, parse_oanda_lookback_candles
+import oanda_spreads
+from oanda_spreads import fetch_oanda_current_spreads, fetch_oanda_spread_samples, parse_oanda_bid_ask_candles, parse_oanda_lookback_candles, parse_oanda_pricing
 from spread_core import TimeframeConfig
 
 
@@ -79,6 +80,63 @@ def test_oanda_fetch_uses_bid_ask_price_parameter_and_single_v3_endpoint():
     assert kwargs["params"]["price"] == "BA"
     assert kwargs["params"]["granularity"] == "M1"
     assert kwargs["params"]["count"] <= 5000
+
+
+def test_oanda_pricing_parsing_uses_current_bid_ask_spread_percentage():
+    payload = {
+        "prices": [
+            {
+                "instrument": "EUR_USD",
+                "time": "2026-01-01T00:00:00Z",
+                "bids": [{"price": "1.0000"}],
+                "asks": [{"price": "1.0020"}],
+            }
+        ]
+    }
+    parsed = parse_oanda_pricing(payload)
+    latest = parsed["EUR_USD"]["latest"]
+    assert latest["spread_pct"] == pytest.approx(((1.0020 - 1.0000) / 1.0010) * 100)
+
+
+def test_oanda_current_spread_fetch_batches_account_pricing_request(monkeypatch):
+    calls = []
+    monkeypatch.setattr(oanda_spreads.oanda_api, "_account_id", lambda mode: "101-001")
+
+    def fake_request(method, endpoint, **kwargs):
+        calls.append((method, endpoint, kwargs))
+        return {
+            "prices": [
+                {
+                    "instrument": "EUR_USD",
+                    "time": "2026-01-01T00:00:00Z",
+                    "bids": [{"price": "1.0000"}],
+                    "asks": [{"price": "1.0010"}],
+                },
+                {
+                    "instrument": "GBP_USD",
+                    "time": "2026-01-01T00:00:01Z",
+                    "bids": [{"price": "1.2500"}],
+                    "asks": [{"price": "1.2520"}],
+                },
+            ]
+        }
+
+    parsed = fetch_oanda_current_spreads(
+        ["EUR_USD", "GBP_USD"],
+        {"request_timeout_seconds": 7},
+        mode="demo",
+        request_func=fake_request,
+    )
+
+    assert set(parsed) == {"EUR_USD", "GBP_USD"}
+    assert parsed["GBP_USD"]["latest"]["spread_pct"] == pytest.approx(((1.2520 - 1.2500) / 1.2510) * 100)
+    assert len(calls) == 1
+    method, endpoint, kwargs = calls[0]
+    assert method == "GET"
+    assert endpoint == "/accounts/101-001/pricing"
+    assert kwargs["account_id"] == "101-001"
+    assert kwargs["params"]["instruments"] == "EUR_USD,GBP_USD"
+    assert kwargs["timeout"] == 7
 
 
 def test_oanda_lookback_selects_nearest_complete_candle_at_or_before_target():

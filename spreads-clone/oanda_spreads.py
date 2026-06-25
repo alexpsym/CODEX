@@ -93,6 +93,85 @@ def _iso(value: datetime) -> str:
     return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _first_price(levels: object) -> Optional[object]:
+    if not isinstance(levels, list):
+        return None
+    for level in levels:
+        if isinstance(level, dict) and level.get("price") not in (None, ""):
+            return level.get("price")
+    return None
+
+
+def parse_oanda_pricing(payload: Dict[str, Any]) -> Dict[str, Dict[str, object]]:
+    prices = payload.get("prices")
+    if not isinstance(prices, list):
+        return {}
+
+    results: Dict[str, Dict[str, object]] = {}
+    for price in prices:
+        if not isinstance(price, dict):
+            continue
+        instrument = str(price.get("instrument") or "").strip().upper()
+        if not instrument:
+            continue
+        bid = _first_price(price.get("bids"))
+        ask = _first_price(price.get("asks"))
+        if bid is None:
+            bid = price.get("closeoutBid")
+        if ask is None:
+            ask = price.get("closeoutAsk")
+        try:
+            spread_pct = spread_pct_from_bid_ask(bid, ask)
+        except ValueError as exc:
+            results[instrument] = {"samples": [], "latest": None, "error": str(exc)}
+            continue
+        sample = make_sample(price.get("time"), spread_pct)
+        if sample is None:
+            results[instrument] = {"samples": [], "latest": None, "error": "OANDA current spread is unavailable."}
+            continue
+        results[instrument] = {"samples": [sample], "latest": sample}
+    return results
+
+
+def fetch_oanda_current_spreads(
+    instruments: Iterable[str],
+    context: Optional[Dict[str, object]] = None,
+    *,
+    mode: Optional[str] = None,
+    request_func: Optional[Callable[..., Dict[str, Any]]] = None,
+) -> Dict[str, Dict[str, object]]:
+    requested = sorted(dict.fromkeys(str(item).strip().upper() for item in instruments if str(item).strip()))
+    if not requested:
+        return {}
+
+    request = request_func or oanda_api._request
+    resolved_mode = mode or _mode_from_env()
+    account_id = oanda_api._account_id(resolved_mode)
+    timeout = 10
+    if isinstance(context, dict):
+        try:
+            timeout = int(float(context.get("request_timeout_seconds", timeout)))
+        except (TypeError, ValueError):
+            timeout = 10
+    timeout = max(1, min(timeout, 60))
+
+    data = request(
+        "GET",
+        f"/accounts/{account_id}/pricing",
+        mode=resolved_mode,
+        account_id=account_id,
+        params={"instruments": ",".join(requested)},
+        timeout=timeout,
+    )
+    parsed = parse_oanda_pricing(data)
+    for instrument in requested:
+        parsed.setdefault(
+            instrument,
+            {"samples": [], "latest": None, "error": "No OANDA pricing returned for this instrument."},
+        )
+    return parsed
+
+
 def fetch_oanda_spread_samples(
     instrument: str,
     timeframe: TimeframeConfig,

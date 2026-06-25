@@ -1,11 +1,24 @@
+import asyncio
 import importlib.util
+import json
+import shutil
 import sys
 
 import re
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 MASTER_SERVICE_PATH = ROOT / 'render' / 'master_service.py'
+
+
+def _repo_tmp_dir(name: str) -> Path:
+    path = ROOT / f".pytest_tmp_{name}"
+    if path.exists():
+        shutil.rmtree(path)
+    path.mkdir(parents=True)
+    return path
 
 
 def _extract_html_template(source: str) -> str:
@@ -82,7 +95,11 @@ def test_dashboard_toolbar_css_keeps_scripts_single_row() -> None:
     assert 'text-overflow: ellipsis;' in html
     assert 'white-space: nowrap;' in html
     assert '.script-toolbar-grid .script-btn[data-script-name="history"] { max-width: 96px; }' in html
-    assert '.script-toolbar-grid .script-btn[data-script-name="trading-journal"] { max-width: 150px; }' in html
+    assert '.script-toolbar-grid .script-btn[data-script-name="trading-journal"] { max-width: 96px; }' in html
+    assert '.script-toolbar-grid .script-btn[data-script-name="open-orders"] { max-width: 146px; }' in html
+    assert '.script-toolbar-grid .script-btn[data-script-name="spreads-clone"] { max-width: 96px; }' in html
+    assert '.script-toolbar-grid .script-btn[data-script-name="mt5"] { max-width: 72px; }' in html
+    assert '.script-toolbar-grid .script-btn[data-script-name="pine"] { max-width: 76px; }' in html
     assert '.local-exit-btn{\n            margin-top: 0;' in html
 
 
@@ -137,11 +154,89 @@ def test_local_profile_sets_no_cache_for_home_and_static_assets(monkeypatch) -> 
 def test_local_profile_buttons_use_trading_journal_page_not_merged_route() -> None:
     source = MASTER_SERVICE_PATH.read_text(encoding='utf-8')
     assert '"id": "trading-journal"' in source
+    assert '"label": "Journal"' in source
+    assert '"label": "Orders / Positions"' in source
+    assert '"label": "Spreads"' in source
+    assert '"label": "MT5"' in source
+    assert '"label": "Pine"' in source
     assert '"open_url": "/dashboard/trading-journal"' in source
+    assert '"open_url": "/dashboard/mt5"' in source
+    assert '"open_url": "/dashboard/pine"' in source
     assert '"open_url": "/trading-journal"' not in source
     assert '"open_url": "/merged/trading-journal"' not in source
     assert '@app.get("/dashboard/trading-journal")' in source
     assert '@app.get("/trading-journal", response_class=HTMLResponse)' in source
+    assert '@app.get("/dashboard/mt5", response_class=HTMLResponse)' in source
+    assert '@app.get("/dashboard/pine", response_class=HTMLResponse)' in source
+
+
+def test_mt5_dashboard_api_lists_and_deploys_without_deleting_extras(monkeypatch) -> None:
+    module = _load_master_service_module()
+    tmp_root = _repo_tmp_dir("dashboard_mt5")
+    try:
+        source_mql5 = tmp_root / "repo" / "MQL5"
+        target_mql5 = tmp_root / "terminal" / "MQL5"
+        (source_mql5 / "Experts").mkdir(parents=True)
+        (source_mql5 / "Presets").mkdir(parents=True)
+        (source_mql5 / "Experts" / "Trader.mq5").write_text("repo trader", encoding="utf-8")
+        (source_mql5 / "Presets" / "PullbackEMA_ATR_RR.set").write_text("repo preset", encoding="utf-8")
+        (target_mql5 / "Experts").mkdir(parents=True)
+        (target_mql5 / "Files").mkdir(parents=True)
+        (target_mql5 / "Experts" / "Trader.mq5").write_text("old trader", encoding="utf-8")
+        (target_mql5 / "Files" / "extra.txt").write_text("keep me", encoding="utf-8")
+
+        monkeypatch.setattr(module, "APP_PROFILE", "local")
+        monkeypatch.setattr(module, "MT5_REPO_MQL5_DIR", source_mql5)
+        monkeypatch.setenv("MT5_DATA_MQL5_DIR", str(target_mql5))
+
+        files_response = asyncio.run(module.mt5_files())
+        files_payload = json.loads(files_response.body.decode("utf-8"))
+        assert files_payload["files"] == ["Experts/Trader.mq5", "Presets/PullbackEMA_ATR_RR.set"]
+
+        deploy_response = asyncio.run(module.mt5_deploy())
+        deploy_payload = json.loads(deploy_response.body.decode("utf-8"))
+        assert deploy_response.status_code == 200
+        assert deploy_payload["ok"] is True
+        assert deploy_payload["copied_count"] == 2
+        assert deploy_payload["target_path"] == str(target_mql5.resolve())
+        assert (target_mql5 / "Experts" / "Trader.mq5").read_text(encoding="utf-8") == "repo trader"
+        assert (target_mql5 / "Files" / "extra.txt").read_text(encoding="utf-8") == "keep me"
+    finally:
+        shutil.rmtree(tmp_root, ignore_errors=True)
+
+
+def test_pine_dashboard_api_lists_reads_and_blocks_traversal(monkeypatch) -> None:
+    module = _load_master_service_module()
+    tmp_root = _repo_tmp_dir("dashboard_pine")
+    try:
+        pine_root = tmp_root / "pinescripts"
+        pine_root.mkdir()
+        (pine_root / "custom_indicator.pine").write_text("//@version=6\nindicator('x')\n", encoding="utf-8")
+        (pine_root / "notes.md").write_text("not a pine script", encoding="utf-8")
+        monkeypatch.setattr(module, "APP_PROFILE", "local")
+        monkeypatch.setattr(module, "PINE_SCRIPTS_DIR", pine_root)
+
+        files_response = asyncio.run(module.pine_files())
+        files_payload = json.loads(files_response.body.decode("utf-8"))
+        assert files_payload["files"] == ["custom_indicator.pine"]
+
+        file_response = asyncio.run(module.pine_file("custom_indicator.pine"))
+        file_payload = json.loads(file_response.body.decode("utf-8"))
+        assert file_payload["display_path"] == "pinescripts/custom_indicator.pine"
+        assert file_payload["code"].startswith("//@version=6")
+
+        with pytest.raises(Exception) as excinfo:
+            asyncio.run(module.pine_file("../secret.pine"))
+        assert getattr(excinfo.value, "status_code", None) == 400
+    finally:
+        shutil.rmtree(tmp_root, ignore_errors=True)
+
+
+def test_pine_dashboard_page_has_clipboard_and_textarea_fallback() -> None:
+    source = MASTER_SERVICE_PATH.read_text(encoding="utf-8")
+    assert "navigator.clipboard.writeText(code)" in source
+    assert '<textarea id="fallback" hidden>' in source
+    assert "Clipboard unavailable. Use manual copy below." in source
 
 
 def test_trading_journal_workspace_contains_action_buttons_in_order():

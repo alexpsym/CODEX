@@ -12,6 +12,7 @@ sys.path.insert(0, str(SPREAD_DIR))
 from spread_core import (  # noqa: E402
     SpreadMonitorState,
     TimeframeConfig,
+    OANDA_CURRENT_TIMEFRAME_LABEL,
     build_spread_payload,
     _cache_key,
     broker_cell,
@@ -69,12 +70,14 @@ def test_percentile_classification_thresholds():
 
 def test_oanda_only_refresh_does_not_create_pepperstone_records():
     mt5_calls = []
+    oanda_calls = []
 
     def symbols():
         return ["EUR_USD"]
 
-    def oanda_fetcher(_symbol, _timeframe, _context):
-        return _oanda_result()
+    def oanda_current_fetcher(batch, context):
+        oanda_calls.append((list(batch), dict(context)))
+        return {symbol: _oanda_result() for symbol in batch}
 
     def mt5_fetcher(_symbol, _timeframe, _context):
         mt5_calls.append((_symbol, _timeframe.label))
@@ -85,7 +88,7 @@ def test_oanda_only_refresh_does_not_create_pepperstone_records():
         state = SpreadMonitorState(
             cache_path,
             symbol_provider=symbols,
-            oanda_fetcher=oanda_fetcher,
+            oanda_current_fetcher=oanda_current_fetcher,
             mt5_fetcher=mt5_fetcher,
         )
         payload = state.refresh()
@@ -95,11 +98,16 @@ def test_oanda_only_refresh_does_not_create_pepperstone_records():
             cache_path.unlink()
 
     assert mt5_calls == []
-    cell = payload["rows"][0]["cells"]["1M"]
-    assert cell["oanda"]["spread_pct"] == pytest.approx(0.0123)
-    assert "pepperstone" not in cell
-    assert "pepperstone_razor" not in cell
+    assert len(oanda_calls) == 1
+    assert oanda_calls[0][0] == ["EUR_USD"]
+    assert payload["timeframes"] == []
+    assert payload["columns"] == [
+        {"key": "symbol", "label": "Instrument"},
+        {"key": "current_spread", "label": "Current Spread"},
+    ]
+    assert payload["rows"][0]["current_spread"]["spread_pct"] == pytest.approx(0.0123)
     assert not any(str(key).startswith("pepperstone|") for key in cache["records"])
+    assert _cache_key("oanda", "EUR_USD", OANDA_CURRENT_TIMEFRAME_LABEL) in cache["records"]
     assert payload["ok"] is True
 
 
@@ -221,6 +229,27 @@ def test_oanda_payload_cells_contain_only_oanda_records():
     cell = payload["rows"][0]["cells"]["1M"]
     assert list(cell.keys()) == ["oanda"]
     assert cell["oanda"]["spread_pct"] == pytest.approx(0.0123)
+
+
+def test_oanda_current_payload_uses_current_spread_column_without_timeframes():
+    cache = {
+        "generated_at": "2026-01-01T00:00:00Z",
+        "last_refresh_finished_at": "2026-01-01T00:00:00Z",
+        "symbols": ["EUR_USD"],
+        "warnings": [],
+        "errors": [],
+        "records": {
+            _cache_key("oanda", "EUR_USD", OANDA_CURRENT_TIMEFRAME_LABEL): _oanda_result(),
+            _cache_key("oanda", "EUR_USD", "1M"): _oanda_result(0.0999),
+        },
+    }
+    payload = build_spread_payload(cache, brokers=("oanda",), current_only=True)
+    assert payload["timeframes"] == []
+    assert payload["current_only"] is True
+    assert payload["columns"][0]["label"] == "Instrument"
+    assert payload["columns"][1]["label"] == "Current Spread"
+    assert payload["rows"][0]["current_spread"]["spread_pct"] == pytest.approx(0.0123)
+    assert "1M" not in payload["rows"][0]["cells"]
 
 
 def test_refresh_timeout_returns_diagnostics_and_allows_second_attempt():

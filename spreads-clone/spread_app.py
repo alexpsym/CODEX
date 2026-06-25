@@ -8,7 +8,7 @@ from typing import Iterable
 
 from flask import Flask, jsonify, render_template_string, request
 
-from oanda_spreads import fetch_oanda_spread_samples, get_available_oanda_symbols
+from oanda_spreads import fetch_oanda_current_spreads, get_available_oanda_symbols
 from pepperstone_import import (
     PepperstoneImportError,
     PepperstoneSpreadImportStore,
@@ -33,7 +33,7 @@ def _symbol_provider() -> Iterable[str]:
 OANDA_STATE = SpreadMonitorState(
     CACHE_PATH,
     symbol_provider=_symbol_provider,
-    oanda_fetcher=fetch_oanda_spread_samples,
+    oanda_current_fetcher=fetch_oanda_current_spreads,
     refresh_interval_seconds=refresh_interval_from_env(),
 )
 PEPPERSTONE_STATE = PepperstoneSpreadImportStore(PEPPERSTONE_CACHE_PATH)
@@ -159,6 +159,10 @@ PAGE_TEMPLATE = """
       border-collapse: collapse;
       table-layout: fixed;
     }
+    table.current-only {
+      width: 100%;
+      min-width: 420px;
+    }
     th, td {
       border-bottom: 1px solid #243044;
       border-right: 1px solid #243044;
@@ -199,6 +203,12 @@ PAGE_TEMPLATE = """
       min-width: 164px;
       max-width: 164px;
     }
+    table.current-only th:not(.symbol-col),
+    table.current-only td:not(.symbol-col) {
+      width: auto;
+      min-width: 180px;
+      max-width: none;
+    }
     .broker-line {
       display: flex;
       align-items: baseline;
@@ -226,6 +236,9 @@ PAGE_TEMPLATE = """
       text-overflow: clip;
       font-variant-numeric: tabular-nums;
     }
+    table.current-only .broker-value {
+      max-width: none;
+    }
     .broker-error {
       flex: 0 0 100%;
       color: #94a3b8;
@@ -237,6 +250,7 @@ PAGE_TEMPLATE = """
     .spread-low { color: #86efac; }
     .spread-medium { color: #facc15; }
     .spread-high { color: #fb7185; }
+    .spread-neutral { color: #e2e8f0; }
     .spread-unavailable { color: #64748b; }
     .messages {
       display: grid;
@@ -303,7 +317,7 @@ PAGE_TEMPLATE = """
       </div>
       <div class="messages" id="messages"></div>
       <div class="table-wrap">
-        <table>
+        <table id="spread-table">
           <thead id="spread-head"></thead>
           <tbody id="spread-body">
             <tr><td class="empty">Choose Oanda or Pepperstone to load spread data.</td></tr>
@@ -323,6 +337,7 @@ PAGE_TEMPLATE = """
   const lastRefreshEl = document.getElementById('last-refresh');
   const nextRefreshEl = document.getElementById('next-refresh');
   const messagesEl = document.getElementById('messages');
+  const tableEl = document.getElementById('spread-table');
   const headEl = document.getElementById('spread-head');
   const bodyEl = document.getElementById('spread-body');
   const pepperstoneControls = document.getElementById('pepperstone-controls');
@@ -435,7 +450,7 @@ PAGE_TEMPLATE = """
     const error = scalarMessage(data?.error || data?.message || data?.reason);
     const sourceTime = scalarMessage(data?.updated_at);
     let value = scalarMessage(data?.display);
-    const unavailable = category === 'unavailable' || !Number.isFinite(spreadValue);
+    const unavailable = !Number.isFinite(spreadValue);
     if (unavailable) value = '';
     if (!value && Number.isFinite(spreadValue)) value = `${spreadValue.toFixed(4)}%`;
     if (!value) value = error || unavailable ? 'Unavailable' : 'n/a';
@@ -457,9 +472,19 @@ PAGE_TEMPLATE = """
   }
 
   function cellSortValue(row, timeframe) {
+    if (timeframe === 'current_spread') {
+      const value = spreadNumber(currentSpreadData(row));
+      return Number.isFinite(value) ? value : null;
+    }
     const cell = row?.cells?.[timeframe] || {};
     const value = spreadNumber(brokerData(cell));
     return Number.isFinite(value) ? value : null;
+  }
+
+  function currentSpreadData(row) {
+    const direct = row?.current_spread;
+    if (direct && typeof direct === 'object') return direct;
+    return brokerData(row?.cells?.CURRENT || row?.cells?.current || {});
   }
 
   function sortedRows(payload) {
@@ -485,6 +510,11 @@ PAGE_TEMPLATE = """
   }
 
   function renderTable(payload) {
+    if (currentBroker === 'oanda') {
+      renderOandaCurrentTable(payload);
+      return;
+    }
+    if (tableEl) tableEl.classList.remove('current-only');
     const timeframes = Array.isArray(payload.timeframes) ? payload.timeframes : [];
     headEl.innerHTML = `<tr><th class="symbol-col sortable" data-sort-column="symbol" data-sort-indicator="${sortIndicator('symbol')}">Symbol</th>` +
       timeframes.map((tf) => `<th class="sortable" data-sort-column="${escapeHtml(tf)}" data-sort-indicator="${sortIndicator(tf)}">${escapeHtml(tf)}</th>`).join('') +
@@ -507,6 +537,39 @@ PAGE_TEMPLATE = """
     }).join('');
   }
 
+  function currentSpreadCell(data) {
+    const category = data?.category || 'unavailable';
+    const spreadValue = spreadNumber(data);
+    const error = scalarMessage(data?.error || data?.message || data?.reason);
+    const sourceTime = scalarMessage(data?.updated_at);
+    let value = scalarMessage(data?.display);
+    if (!value && Number.isFinite(spreadValue)) value = `${spreadValue.toFixed(4)}%`;
+    if (!value) value = error || 'Unavailable';
+    const titleText = error || (sourceTime ? `Source timestamp: ${sourceTime}` : '');
+    const title = titleText ? ` title="${escapeHtml(titleText)}"` : '';
+    const errorLine = error && !Number.isFinite(spreadValue)
+      ? `<span class="broker-error">${escapeHtml(error)}</span>`
+      : '';
+    return `<div class="broker-line spread-${escapeHtml(category)}"${title}>` +
+      `<span class="broker-value">${escapeHtml(value)}</span>` +
+      errorLine +
+      `</div>`;
+  }
+
+  function renderOandaCurrentTable(payload) {
+    if (tableEl) tableEl.classList.add('current-only');
+    headEl.innerHTML = `<tr><th class="symbol-col sortable" data-sort-column="symbol" data-sort-indicator="${sortIndicator('symbol')}">Instrument</th>` +
+      `<th class="sortable" data-sort-column="current_spread" data-sort-indicator="${sortIndicator('current_spread')}">Current Spread</th></tr>`;
+    const rows = sortedRows(payload || {});
+    if (!rows.length) {
+      bodyEl.innerHTML = '<tr><td class="empty" colspan="2">No OANDA current spread rows are available yet.</td></tr>';
+      return;
+    }
+    bodyEl.innerHTML = rows.map((row) => {
+      return `<tr><td class="symbol-col">${escapeHtml(row.display_symbol || row.symbol)}</td><td>${currentSpreadCell(currentSpreadData(row))}</td></tr>`;
+    }).join('');
+  }
+
   function refreshIntervalSeconds(payload) {
     const seconds = Number(payload?.refresh_interval_seconds);
     return Number.isFinite(seconds) && seconds > 0 ? seconds : 300;
@@ -518,7 +581,8 @@ PAGE_TEMPLATE = """
   }
 
   function renderLoadingTable(text) {
-    const colSpan = latestPayload?.timeframes?.length ? latestPayload.timeframes.length + 1 : 10;
+    if (tableEl) tableEl.classList.toggle('current-only', currentBroker === 'oanda');
+    const colSpan = currentBroker === 'oanda' ? 2 : (latestPayload?.timeframes?.length ? latestPayload.timeframes.length + 1 : 10);
     bodyEl.innerHTML = `<tr><td class="empty" colspan="${colSpan}">${escapeHtml(text)}</td></tr>`;
   }
 

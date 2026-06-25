@@ -34,8 +34,8 @@ def test_dashboard_source_registers_spread_monitor_local_only_web_app():
     source = MASTER_SERVICE_PATH.read_text(encoding="utf-8")
     assert '"spreads-clone"' in source
     assert '"spreads-clone": ["spread_app.py"]' in source
-    assert '"spreads-clone": "Spread Monitor"' in source
-    assert '.script-toolbar-grid .script-btn[data-script-name="spreads-clone"] { max-width: 148px; }' in source
+    assert '"spreads-clone": "Spreads"' in source
+    assert '.script-toolbar-grid .script-btn[data-script-name="spreads-clone"] { max-width: 96px; }' in source
 
 
 def test_local_launcher_installs_spread_monitor_requirements_with_same_python():
@@ -101,11 +101,14 @@ def test_spread_app_frontend_normalizes_messages_refresh_and_sorting():
     assert "headEl.addEventListener('click'" in source
     assert "sortState.direction === 'asc' ? 'desc' : 'asc'" in source
     assert "function cellSortValue(row, timeframe)" in source
+    assert "renderOandaCurrentTable(payload)" in source
+    assert "Current Spread" in source
     assert "spreadNumber(brokerData(cell))" in source
     assert "function spreadNumber(data)" in source
     assert "raw === null || raw === undefined || raw === ''" in source
     assert "value > 0 ? value : NaN" in source
-    assert "category === 'unavailable'" in source
+    assert "const unavailable = !Number.isFinite(spreadValue);" in source
+    assert ".spread-neutral" in source
     assert "pepperstone_razor" in source
     assert "function importPepperstone(file)" in source
     assert "manual import only" in source
@@ -149,14 +152,22 @@ def test_scripts_endpoint_places_spread_monitor_after_iv_indicator_in_local_prof
         "monitor",
         "ivindicator-clone",
         "spreads-clone",
+        "mt5",
+        "pine",
     ]
     positions = [names.index(name) for name in expected]
     assert positions == sorted(positions)
     assert names.index("spreads-clone") == names.index("ivindicator-clone") + 1
     by_name = {str(item.get("name")): item for item in payload}
-    assert by_name["spreads-clone"]["label"] == "Spread Monitor"
+    assert by_name["spreads-clone"]["label"] == "Spreads"
     assert by_name["spreads-clone"]["open_url"] == "/apps/spreads-clone"
     assert by_name["spreads-clone"]["dashboard_main_view"] is True
+    assert by_name["mt5"]["label"] == "MT5"
+    assert by_name["mt5"]["open_url"] == "/dashboard/mt5"
+    assert by_name["mt5"]["dashboard_main_view"] is True
+    assert by_name["pine"]["label"] == "Pine"
+    assert by_name["pine"]["open_url"] == "/dashboard/pine"
+    assert by_name["pine"]["dashboard_main_view"] is True
 
 
 def test_render_profile_does_not_expose_spread_monitor_or_mt5_app():
@@ -164,7 +175,11 @@ def test_render_profile_does_not_expose_spread_monitor_or_mt5_app():
     payload = json.loads(asyncio.run(master_service.list_scripts()).body.decode("utf-8"))
     names = {str(item.get("name")) for item in payload}
     assert "spreads-clone" not in names
+    assert "mt5" not in names
+    assert "pine" not in names
     assert master_service._render_blocks_path("/apps/spreads-clone") is True
+    assert master_service._render_blocks_path("/dashboard/mt5") is True
+    assert master_service._render_blocks_path("/dashboard/pine") is True
 
 
 def test_spread_app_status_endpoint_returns_honest_payload_without_broker_connections():
@@ -182,7 +197,12 @@ def test_spread_app_status_endpoint_returns_honest_payload_without_broker_connec
     assert isinstance(payload, dict)
     assert "ok" in payload
     assert payload["refresh_interval_seconds"] == 300
-    assert payload["timeframes"] == ["1M", "5M", "15M", "30M", "1H", "4H", "D", "W", "M"]
+    assert payload["timeframes"] == []
+    assert payload["current_only"] is True
+    assert payload["columns"] == [
+        {"key": "symbol", "label": "Instrument"},
+        {"key": "current_spread", "label": "Current Spread"},
+    ]
     assert isinstance(payload["rows"], list)
     alias = client.get("/api/spreads/status")
     assert alias.status_code == 200
