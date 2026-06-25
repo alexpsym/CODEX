@@ -357,6 +357,13 @@ def build_spread_payload(
     symbols = _symbols_from_cache_payload(cache, allowed_brokers=broker_list)
     records = cache.get("records")
     record_map = records if isinstance(records, dict) else {}
+    if current_only:
+        declared_symbols = [
+            str(item).strip()
+            for item in (cache.get("symbols") or [])
+            if str(item).strip()
+        ] if isinstance(cache.get("symbols"), list) else []
+        symbols = sorted(dict.fromkeys([*declared_symbols, *symbols]))
     rows: List[Dict[str, object]] = []
 
     if current_only:
@@ -366,8 +373,6 @@ def build_spread_payload(
                 _record_for_payload(record, "oanda"),
                 min_percentile_samples=MIN_CURRENT_SPREAD_PERCENTILE_SAMPLES,
             )
-            if spread_payload["spread_pct"] is None:
-                continue
             rows.append(
                 {
                     "symbol": symbol,

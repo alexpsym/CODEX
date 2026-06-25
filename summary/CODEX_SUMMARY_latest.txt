@@ -5,6 +5,7 @@ Changes made:
   - OANDA now uses the account pricing endpoint via a batched current bid/ask fetch.
   - OANDA payloads expose no 1M/5M/15M/30M/1H/4H/D/W/M timeframe labels.
   - OANDA table renders Instrument | Current Spread and sorts by both columns.
+  - Current-only OANDA payloads keep every discovered/cache-listed instrument visible; missing or unusable current bid/ask data now renders an Unavailable Current Spread cell instead of dropping the row.
   - Current spread remains the midpoint percentage: ((ask - bid) / midpoint) * 100.
   - Sparse current-spread history displays as neutral instead of inventing a percentile category.
   - Stale cached current data is explicitly messaged.
@@ -32,7 +33,7 @@ Changes made:
 
 Verification run:
 - python -m pytest tests/test_spread_core.py tests/test_oanda_spread_fetch.py tests/test_spread_monitor_dashboard.py -q
-  Result: 32 passed, 8 existing FastAPI deprecation warnings.
+  Result: 32 passed, 8 existing FastAPI deprecation warnings. Rerun after the unavailable-current-spread row fix also passed: 32 passed, 8 existing FastAPI deprecation warnings.
 - python -m pytest tests/test_dashboard_home_layout.py tests/test_dashboard_js_syntax.py -q
   Result: 27 passed, 13 existing FastAPI/httpx deprecation warnings.
 - python -m pytest tests/test_custom_indicator_pine.py -q
@@ -45,4 +46,4 @@ Verification run:
 Notes:
 - Pepperstone live fetching through Python was not reintroduced.
 - Existing unrelated dirty runtime/state files were left untouched.
-- PATCH_DESKTOP_PUSH.bat is being run after writing this summary file.
+- PATCH_DESKTOP_PUSH.bat completed successfully. Exact result: "Push verified: local HEAD matches origin/master."

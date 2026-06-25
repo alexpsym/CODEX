@@ -235,7 +235,7 @@ def test_oanda_current_payload_uses_current_spread_column_without_timeframes():
     cache = {
         "generated_at": "2026-01-01T00:00:00Z",
         "last_refresh_finished_at": "2026-01-01T00:00:00Z",
-        "symbols": ["EUR_USD"],
+        "symbols": ["EUR_USD", "GBP_USD"],
         "warnings": [],
         "errors": [],
         "records": {
@@ -248,8 +248,15 @@ def test_oanda_current_payload_uses_current_spread_column_without_timeframes():
     assert payload["current_only"] is True
     assert payload["columns"][0]["label"] == "Instrument"
     assert payload["columns"][1]["label"] == "Current Spread"
-    assert payload["rows"][0]["current_spread"]["spread_pct"] == pytest.approx(0.0123)
-    assert "1M" not in payload["rows"][0]["cells"]
+    assert payload["symbols"] == ["EUR_USD", "GBP_USD"]
+    by_symbol = {row["symbol"]: row for row in payload["rows"]}
+    assert by_symbol["EUR_USD"]["current_spread"]["spread_pct"] == pytest.approx(0.0123)
+    assert "1M" not in by_symbol["EUR_USD"]["cells"]
+    gbp_cell = by_symbol["GBP_USD"]["current_spread"]
+    assert gbp_cell["spread_pct"] is None
+    assert gbp_cell["category"] == "unavailable"
+    assert gbp_cell["display"] == ""
+    assert "No data cached" in gbp_cell["error"]
 
 
 def test_refresh_timeout_returns_diagnostics_and_allows_second_attempt():
