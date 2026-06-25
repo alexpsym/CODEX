@@ -29,6 +29,11 @@ Changes made:
   - Populates SYMBOLS latest timeframe, stop, and target columns dynamically while preserving grouped headers and vertical single-header merges.
   - Repairs STATS2 As Of column values/styles from STATS1!B146.
 - Updated tests for the new Spread Monitor behavior, OANDA symbol universe, workbook weighted percentages, streak Start/End rows, SYMBOLS latest columns, and STATS2 formatting.
+- Repaired the checked-in workbook journal/Trading Journal.xlsx directly:
+  - STATS1 Best Win Streak row 17 now has count-only B17:D17 = 5, 5, 4; Start row B18:D18 = 2018-10-29 22:34:00, 2018-10-29 22:34:00, 2024-10-27 22:46:00; End row B19:D19 = 2018-10-30 19:39:00, 2018-10-30 19:39:00, 2024-11-14 06:36:00.
+  - STATS1 Worst Losing Streak row 20 now has count-only B20:D20 = 22, 15, 16; Start row B21:D21 = 2021-07-20 22:09:00, 2020-07-29 10:12:00, 2021-06-27 10:11:00; End row B22:D22 = 2021-09-04 23:29:00, 2021-01-01 01:16:00, 2021-09-04 23:29:00.
+  - STATS2 E3:E9 now contain space-separated datetime strings with no "T", have General number format, and match STATS1!B146 style signature.
+  - SYMBOLS AC:AK, AS:AU, and AX:AZ now have no blank data columns after row 2; reopened verification counted 1080 populated cells in AC:AK, 360 in AS:AU, and 360 in AX:AZ.
 
 Verification run:
 - python -m pytest tests/test_spread_core.py tests/test_oanda_spread_fetch.py tests/test_spread_monitor_dashboard.py tests/test_pepperstone_spread_import.py tests/test_mt5_spread_fetch.py tests/test_python_mt5_conversion_files.py -q --basetemp .pytest_tmp_codex_spreadreq
@@ -37,6 +42,10 @@ Verification run:
   Result: 130 passed.
 - python -m compileall spreads-clone render tools tests
   Result: passed.
+- Reopened journal/Trading Journal.xlsx after saving and verified actual workbook cells/styles:
+  - STATS1 B17:D17/B20:D20 contain counts only and no inline date ranges; B18:D19 and B21:D22 contain Start/End datetimes.
+  - STATS2 E3:E9 contain no "T", use General format, and match STATS1!B146 style attributes.
+  - SYMBOLS AC:AK, AS:AU, and AX:AZ have no blank data columns.
 
 Notes:
 - The pytest commands used workspace --basetemp directories because the default Windows temp pytest root hit a permission issue earlier in the run.
