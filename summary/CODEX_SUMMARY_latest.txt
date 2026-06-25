@@ -34,6 +34,8 @@ Changes made:
   - STATS1 Worst Losing Streak row 20 now has count-only B20:D20 = 22, 15, 16; Start row B21:D21 = 2021-07-20 22:09:00, 2020-07-29 10:12:00, 2021-06-27 10:11:00; End row B22:D22 = 2021-09-04 23:29:00, 2021-01-01 01:16:00, 2021-09-04 23:29:00.
   - STATS2 E3:E9 now contain space-separated datetime strings with no "T", have General number format, and match STATS1!B146 style signature.
   - SYMBOLS AC:AK, AS:AU, and AX:AZ now have no blank data columns after row 2; reopened verification counted 1080 populated cells in AC:AK, 360 in AS:AU, and 360 in AX:AZ.
+  - YEARLY REPORT and year sheets 2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025, and 2026 now use the split streak layout: Best Win Streak row 13, Start row 14, End row 15, Worst Losing Streak row 16, Start row 17, End row 18.
+  - Reopened verification examples: YEARLY REPORT row 13 = 5, 5, 3, 3, 2, 4, 3 for 2018-2024 and row 16 = 14, 9, 13, 22, 7, 6, 10; 2018 row 13 = 1, 4, 2, 4, 3, 5, 2 for May-November and row 16 = 6, 14, 7, 3, 9, 7, 7; 2021 row 13 = 2, 2, 1, 3, 2, 1, 1 for January-July and row 16 = 6, 3, 11, 15, 11, 4, 6.
 
 Verification run:
 - python -m pytest tests/test_spread_core.py tests/test_oanda_spread_fetch.py tests/test_spread_monitor_dashboard.py tests/test_pepperstone_spread_import.py tests/test_mt5_spread_fetch.py tests/test_python_mt5_conversion_files.py -q --basetemp .pytest_tmp_codex_spreadreq
@@ -46,6 +48,7 @@ Verification run:
   - STATS1 B17:D17/B20:D20 contain counts only and no inline date ranges; B18:D19 and B21:D22 contain Start/End datetimes.
   - STATS2 E3:E9 contain no "T", use General format, and match STATS1!B146 style attributes.
   - SYMBOLS AC:AK, AS:AU, and AX:AZ have no blank data columns.
+  - YEARLY REPORT and every year sheet 2018-2026 have Best Win Streak at row 13, Start row 14, End row 15, Worst Losing Streak at row 16, Start row 17, End row 18; verification found no inline streak date text and no blank Start/End cells where a streak count exists.
 
 Notes:
 - The pytest commands used workspace --basetemp directories because the default Windows temp pytest root hit a permission issue earlier in the run.
