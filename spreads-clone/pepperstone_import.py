@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import threading
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, List, Optional
 
 from spread_core import (
     MAX_CACHE_SAMPLES,
@@ -19,7 +19,7 @@ from spread_core import (
     spread_pct_from_bid_ask,
     utc_now_iso,
 )
-from symbols import is_crypto_symbol, normalize_available_mt5_symbols, normalize_oanda_symbol
+from symbols import normalize_oanda_symbol
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -86,15 +86,10 @@ def _normalize_mt5_symbol(value: object) -> str:
     raw = str(value or "").strip()
     if not raw:
         raise PepperstoneImportError("Pepperstone import contains a blank symbol.")
-    if is_crypto_symbol(raw):
-        raise PepperstoneImportError(f"Unsupported Pepperstone crypto symbol: {raw}.")
     direct = normalize_oanda_symbol(raw)
     if direct:
         return direct
-    candidates = normalize_available_mt5_symbols([raw])
-    if candidates:
-        return candidates[0]
-    raise PepperstoneImportError(f"Unsupported Pepperstone symbol: {raw}.")
+    return raw
 
 
 def _item_symbol(item: Dict[str, object]) -> str:
@@ -110,6 +105,15 @@ def _item_timestamp(item: Dict[str, object], generated_at: str) -> str:
     if sample is None:
         return generated_at
     return str(sample["time"])
+
+
+def _item_available(item: Dict[str, object]) -> bool:
+    value = item.get("available")
+    if value is None:
+        return True
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() not in {"0", "false", "n", "no"}
 
 
 def normalized_cache_from_export(
@@ -138,31 +142,50 @@ def normalized_cache_from_export(
     symbols: List[str] = []
     for item in items:
         symbol = _item_symbol(item)
-        bid = item.get("bid")
-        ask = item.get("ask")
-        try:
-            spread_pct = spread_pct_from_bid_ask(bid, ask)
-        except ValueError as exc:
-            raise PepperstoneImportError(f"Pepperstone {symbol} bid/ask is invalid: {exc}") from exc
-        sample = make_sample(_item_timestamp(item, generated_at), spread_pct)
-        if sample is None:
-            raise PepperstoneImportError(f"Pepperstone {symbol} spread is unavailable.")
+        sample = None
+        error = str(item.get("error") or "").strip()
+        if _item_available(item):
+            bid = item.get("bid")
+            ask = item.get("ask")
+            try:
+                spread_pct = spread_pct_from_bid_ask(bid, ask)
+            except ValueError:
+                error = error or "bid/ask unavailable"
+            else:
+                sample = make_sample(_item_timestamp(item, generated_at), spread_pct)
+                if sample is None:
+                    error = error or "Spread data unavailable."
+        else:
+            error = error or "bid/ask unavailable"
         symbols.append(symbol)
         for timeframe in TIMEFRAME_LABELS:
             key = _cache_key("pepperstone", symbol, timeframe)
             previous = previous_records.get(key) if isinstance(previous_records, dict) else None
             previous_samples = previous.get("samples") if isinstance(previous, dict) else []
-            samples = _merge_samples(previous_samples or [], [sample], max_samples)
-            records[key] = {
-                "broker": "pepperstone",
-                "symbol": symbol,
-                "timeframe": timeframe,
-                "samples": samples,
-                "latest": sample,
-                "last_success": imported_at,
-                "ttl_seconds": 0,
-                "error": "",
-            }
+            if sample is None:
+                records[key] = {
+                    "broker": "pepperstone",
+                    "symbol": symbol,
+                    "timeframe": timeframe,
+                    "samples": [],
+                    "latest": None,
+                    "last_success": "",
+                    "last_failure": imported_at,
+                    "ttl_seconds": 0,
+                    "error": error or "bid/ask unavailable",
+                }
+            else:
+                samples = _merge_samples(previous_samples or [], [sample], max_samples)
+                records[key] = {
+                    "broker": "pepperstone",
+                    "symbol": symbol,
+                    "timeframe": timeframe,
+                    "samples": samples,
+                    "latest": sample,
+                    "last_success": imported_at,
+                    "ttl_seconds": 0,
+                    "error": "",
+                }
 
     cache["symbols"] = sorted(dict.fromkeys(symbols))
     cache["records"] = records

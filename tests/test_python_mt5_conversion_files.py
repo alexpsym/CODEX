@@ -85,12 +85,26 @@ def test_mql5_trader_exports_one_pepperstone_spread_json_file():
     trader = (ROOT / "mt5-clone" / "MQL5" / "Experts" / "Trader.mq5").read_text(encoding="utf-8")
     assert "EnablePepperstoneSpreadExport = true" in trader
     assert "PepperstoneSpreadExportIntervalSeconds = 300" in trader
-    assert "PepperstoneSpreadExportSymbols" in trader
+    assert 'PepperstoneSpreadExportSymbols = ""' in trader
     assert "pepperstone_spreads_latest.json" in trader
     assert "MaybeExportPepperstoneSpreads();" in trader
     assert "BuildPepperstoneSpreadJson" in trader
     assert "TimeToString" not in trader
     assert "FileOpen(requestedPath, FILE_WRITE | FILE_TXT | FILE_ANSI)" in trader
+
+
+def test_mql5_trader_exports_selected_market_watch_symbols_by_default():
+    trader = (ROOT / "mt5-clone" / "MQL5" / "Experts" / "Trader.mq5").read_text(encoding="utf-8")
+    assert "int marketWatchCount = SymbolsTotal(true);" in trader
+    assert "SymbolName(i, true)" in trader
+    assert "Pepperstone Market Watch symbols found: " in trader
+    assert "Pepperstone spread export wrote " in trader
+    assert " Market Watch symbols" in trader
+    assert "SymbolInfoTick(symbol, tick)" in trader
+    assert r'\"available\":true' in trader
+    assert r'\"available\":false' in trader
+    assert "spread_points" in trader
+    assert trader.find("SymbolsTotal(true)") < trader.find("StringSplit(PepperstoneSpreadExportSymbols")
 
 
 def test_mql5_trader_trimtext_uses_in_place_string_trim_calls():

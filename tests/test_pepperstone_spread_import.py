@@ -84,9 +84,36 @@ def test_pepperstone_import_rejects_malformed_file_without_wiping_previous_cache
     assert after["source_filename"] == "good.json"
 
 
-def test_pepperstone_import_rejects_crypto_symbols():
-    with pytest.raises(PepperstoneImportError, match="crypto"):
-        normalized_cache_from_export(_mt5_payload(symbol="BTCUSD"), source_path="crypto.json")
+def test_pepperstone_import_accepts_market_watch_crypto_symbols():
+    cache = normalized_cache_from_export(_mt5_payload(symbol="BTCUSD.a"), source_path="crypto.json")
+    assert cache["symbols"] == ["BTCUSD.a"]
+
+
+def test_pepperstone_import_keeps_unavailable_market_watch_rows_visible():
+    cache_path = _repo_cache_path("unavailable")
+    payload = _mt5_payload(symbol="AUDCAD.a", bid=1.0, ask=1.0003)
+    payload["symbols"].append(
+        {
+            "symbol": "BTCUSD.a",
+            "mt5_symbol": "BTCUSD.a",
+            "available": False,
+            "error": "bid/ask unavailable",
+            "timestamp": "2026-01-01T00:00:00Z",
+        }
+    )
+    try:
+        store = PepperstoneSpreadImportStore(cache_path)
+        status = store.import_text(json.dumps(payload), source_path="pepperstone_spreads_latest.json")
+    finally:
+        if cache_path.exists():
+            cache_path.unlink()
+
+    rows = {row["symbol"]: row for row in status["rows"]}
+    assert set(rows) == {"AUDCAD.a", "BTCUSD.a"}
+    unavailable = rows["BTCUSD.a"]["cells"]["1M"]["pepperstone_razor"]
+    assert unavailable["category"] == "unavailable"
+    assert unavailable["spread_pct"] is None
+    assert unavailable["error"] == "bid/ask unavailable"
 
 
 def test_pepperstone_import_default_uses_mt5_fallback_when_repo_file_missing():

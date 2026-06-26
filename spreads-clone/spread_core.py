@@ -385,10 +385,13 @@ def build_spread_payload(
         for symbol in symbols:
             cells: Dict[str, object] = {}
             symbol_has_data = False
+            symbol_has_record = False
             for timeframe in TIMEFRAME_LABELS:
                 cell: Dict[str, object] = {}
                 for broker in broker_list:
                     record = record_map.get(_cache_key(broker, symbol, timeframe))
+                    if isinstance(record, dict):
+                        symbol_has_record = True
                     broker_payload = broker_cell(_record_for_payload(record, broker))
                     if broker_payload["spread_pct"] is not None:
                         symbol_has_data = True
@@ -396,7 +399,7 @@ def build_spread_payload(
                     if broker == "pepperstone":
                         cell["pepperstone_razor"] = broker_payload
                 cells[timeframe] = cell
-            if symbol_has_data:
+            if symbol_has_data or (broker_list == ("pepperstone",) and symbol_has_record):
                 rows.append(
                     {
                         "symbol": symbol,

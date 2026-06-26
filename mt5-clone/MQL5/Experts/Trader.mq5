@@ -68,7 +68,7 @@ input bool   EnforceOneTradeAtATime   = true;
 input group "Pepperstone Spread Export"
 input bool   EnablePepperstoneSpreadExport = true;
 input int    PepperstoneSpreadExportIntervalSeconds = 300;
-input string PepperstoneSpreadExportSymbols = "EURUSD,GBPUSD,USDJPY,AUDUSD,NZDUSD,USDCAD,USDCHF,XAUUSD";
+input string PepperstoneSpreadExportSymbols = "";
 input string PepperstoneSpreadExportPath = "C:\\Users\\User\\Documents\\GPT\\CODEX-master\\mt5-clone\\pepperstone_spreads_latest.json";
 
 // -------------------- Internals --------------------
@@ -794,68 +794,119 @@ string FileNameOnly(string path)
    return normalized;
 }
 
-string BuildPepperstoneSpreadJson(datetime generatedAt)
+bool TryGetPepperstoneBidAsk(const string symbol, double &bid, double &ask)
 {
-   string tokens[];
-   int count = StringSplit(PepperstoneSpreadExportSymbols, ',', tokens);
-   string generated = IsoTimeUTC(generatedAt);
-   string entries = "";
-   int written = 0;
+   bid = 0.0;
+   ask = 0.0;
 
-   for(int i = 0; i < count; i++)
+   MqlTick tick;
+   if(SymbolInfoTick(symbol, tick))
    {
-      string symbol = NormalizePepperstoneSpreadSymbol(tokens[i]);
-      if(symbol == "") continue;
-
-      string mt5Symbol = ResolvePepperstoneSpreadSymbol(tokens[i]);
-      if(mt5Symbol == "")
+      if(tick.bid > 0.0 && tick.ask > 0.0 && tick.ask > tick.bid)
       {
-         Print(EA_COMMENT, ": Pepperstone spread export skipped ", symbol, " because no matching MT5 symbol was found.");
-         continue;
+         bid = tick.bid;
+         ask = tick.ask;
+         return true;
       }
+   }
 
-      if(!SymbolSelect(mt5Symbol, true))
-      {
-         Print(EA_COMMENT, ": Pepperstone spread export skipped ", symbol, " because SymbolSelect failed for resolved MT5 symbol ", mt5Symbol, ".");
-         continue;
-      }
+   bid = SymbolInfoDouble(symbol, SYMBOL_BID);
+   ask = SymbolInfoDouble(symbol, SYMBOL_ASK);
+   return (bid > 0.0 && ask > 0.0 && ask > bid);
+}
 
-      double bid = SymbolInfoDouble(mt5Symbol, SYMBOL_BID);
-      double ask = SymbolInfoDouble(mt5Symbol, SYMBOL_ASK);
-      if(bid <= 0.0 || ask <= 0.0 || ask <= bid)
-      {
-         Print(EA_COMMENT, ": Pepperstone spread export skipped ", symbol, " because bid/ask is unavailable for resolved MT5 symbol ", mt5Symbol, ".");
-         continue;
-      }
+void AppendPepperstoneSpreadJsonEntry(const string symbol, const string mt5Symbol, const string generated, string &entries, int &written)
+{
+   double bid = 0.0;
+   double ask = 0.0;
+   bool available = TryGetPepperstoneBidAsk(mt5Symbol, bid, ask);
 
-      double midpoint = (ask + bid) / 2.0;
-      if(midpoint <= 0.0)
-      {
-         Print(EA_COMMENT, ": Pepperstone spread export skipped ", symbol, " because midpoint is unavailable for resolved MT5 symbol ", mt5Symbol, ".");
-         continue;
-      }
-      double spreadPct = ((ask - bid) / midpoint) * 100.0;
-      int digits = (int)SymbolInfoInteger(mt5Symbol, SYMBOL_DIGITS);
-      double point = SymbolInfoDouble(mt5Symbol, SYMBOL_POINT);
+   if(written > 0) entries += ",\n";
 
-      if(written > 0) entries += ",\n";
+   if(!available)
+   {
       entries += StringFormat(
-         "    {\"symbol\":\"%s\",\"mt5_symbol\":\"%s\",\"bid\":%s,\"ask\":%s,\"spread_pct\":%s,\"digits\":%d,\"point\":%s,\"timestamp\":\"%s\"}",
+         "    {\"symbol\":\"%s\",\"mt5_symbol\":\"%s\",\"available\":false,\"error\":\"bid/ask unavailable\",\"timestamp\":\"%s\"}",
          JsonEscape(symbol),
          JsonEscape(mt5Symbol),
-         DoubleToString(bid, digits),
-         DoubleToString(ask, digits),
-         DoubleToString(spreadPct, 10),
-         digits,
-         DoubleToString(point, 10),
          generated
       );
       written++;
+      return;
+   }
+
+   double midpoint = (ask + bid) / 2.0;
+   double spreadPct = ((ask - bid) / midpoint) * 100.0;
+   int digits = (int)SymbolInfoInteger(mt5Symbol, SYMBOL_DIGITS);
+   double point = SymbolInfoDouble(mt5Symbol, SYMBOL_POINT);
+   double spreadPoints = point > 0.0 ? ((ask - bid) / point) : 0.0;
+
+   entries += StringFormat(
+      "    {\"symbol\":\"%s\",\"mt5_symbol\":\"%s\",\"available\":true,\"bid\":%s,\"ask\":%s,\"spread_pct\":%s,\"spread_points\":%s,\"digits\":%d,\"point\":%s,\"timestamp\":\"%s\"}",
+      JsonEscape(symbol),
+      JsonEscape(mt5Symbol),
+      DoubleToString(bid, digits),
+      DoubleToString(ask, digits),
+      DoubleToString(spreadPct, 10),
+      DoubleToString(spreadPoints, 2),
+      digits,
+      DoubleToString(point, 10),
+      generated
+   );
+   written++;
+}
+
+string BuildPepperstoneSpreadJson(datetime generatedAt)
+{
+   string generated = IsoTimeUTC(generatedAt);
+   string entries = "";
+   int written = 0;
+   int marketWatchCount = SymbolsTotal(true);
+   Print(EA_COMMENT, ": Pepperstone Market Watch symbols found: ", IntegerToString(marketWatchCount));
+
+   if(marketWatchCount > 0)
+   {
+      for(int i = 0; i < marketWatchCount; i++)
+      {
+         string mt5Symbol = SymbolName(i, true);
+         mt5Symbol = TrimText(mt5Symbol);
+         if(mt5Symbol == "") continue;
+         SymbolSelect(mt5Symbol, true);
+         AppendPepperstoneSpreadJsonEntry(mt5Symbol, mt5Symbol, generated, entries, written);
+      }
+      Print(EA_COMMENT, ": Pepperstone spread export wrote ", IntegerToString(written), " of ", IntegerToString(marketWatchCount), " Market Watch symbols");
+   }
+   else
+   {
+      string tokens[];
+      int count = StringSplit(PepperstoneSpreadExportSymbols, ',', tokens);
+      for(int i = 0; i < count; i++)
+      {
+         string symbol = NormalizePepperstoneSpreadSymbol(tokens[i]);
+         if(symbol == "") continue;
+
+         string mt5Symbol = ResolvePepperstoneSpreadSymbol(tokens[i]);
+         if(mt5Symbol == "")
+         {
+            if(written > 0) entries += ",\n";
+            entries += StringFormat(
+               "    {\"symbol\":\"%s\",\"mt5_symbol\":\"\",\"available\":false,\"error\":\"no matching MT5 symbol was found\",\"timestamp\":\"%s\"}",
+               JsonEscape(symbol),
+               generated
+            );
+            written++;
+            continue;
+         }
+
+         SymbolSelect(mt5Symbol, true);
+         AppendPepperstoneSpreadJsonEntry(symbol, mt5Symbol, generated, entries, written);
+      }
+      Print(EA_COMMENT, ": Pepperstone spread export wrote ", IntegerToString(written), " configured fallback symbols");
    }
 
    g_lastPepperstoneSpreadExportSymbolCount = written;
    if(written == 0)
-      Print(EA_COMMENT, ": Pepperstone spread export produced zero symbols. Check PepperstoneSpreadExportSymbols and Market Watch availability.");
+      Print(EA_COMMENT, ": Pepperstone spread export produced zero symbols. Check Market Watch availability.");
 
    string json = "{\n";
    json += "  \"version\": 1,\n";
