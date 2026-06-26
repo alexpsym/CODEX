@@ -441,7 +441,14 @@ PAGE_TEMPLATE = """
     const raw = data?.spread_pct;
     if (raw === null || raw === undefined || raw === '') return NaN;
     const value = Number(raw);
-    return Number.isFinite(value) && value > 0 ? value : NaN;
+    return Number.isFinite(value) && value >= 0 ? value : NaN;
+  }
+
+  function spreadPointsText(data) {
+    const value = Number(data?.spread_points);
+    if (!Number.isFinite(value) || value < 0) return '';
+    if (Math.abs(value) < 0.005) return '0 points';
+    return `${value.toFixed(2)} points`;
   }
 
   function brokerLine(label, data) {
@@ -453,6 +460,8 @@ PAGE_TEMPLATE = """
     const unavailable = !Number.isFinite(spreadValue);
     if (unavailable) value = '';
     if (!value && Number.isFinite(spreadValue)) value = `${spreadValue.toFixed(4)}%`;
+    const pointsText = spreadPointsText(data);
+    if (value && pointsText) value = `${value} / ${pointsText}`;
     if (!value) value = error || unavailable ? 'Unavailable' : 'n/a';
     const titleText = error || (sourceTime ? `Source timestamp: ${sourceTime}` : '');
     const title = titleText ? ` title="${escapeHtml(titleText)}"` : '';

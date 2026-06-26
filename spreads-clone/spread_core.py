@@ -196,13 +196,17 @@ def split_cache_key(key: str) -> tuple[str, str, str]:
     return parts[0], parts[1], parts[2]
 
 
-def make_sample(time_value: object, spread_pct: object) -> Optional[Dict[str, object]]:
+def make_sample(time_value: object, spread_pct: object, spread_points: object = None) -> Optional[Dict[str, object]]:
     spread_value = coerce_float(spread_pct)
-    if spread_value is None or spread_value <= 0:
+    if spread_value is None or spread_value < 0:
         return None
     dt = parse_time(time_value)
     timestamp = dt.isoformat().replace("+00:00", "Z") if dt else utc_now_iso()
-    return {"time": timestamp, "spread_pct": spread_value}
+    sample = {"time": timestamp, "spread_pct": spread_value}
+    points_value = coerce_float(spread_points)
+    if points_value is not None and points_value >= 0:
+        sample["spread_points"] = points_value
+    return sample
 
 
 def _sample_sort_key(sample: Dict[str, object]) -> str:
@@ -215,7 +219,7 @@ def _merge_samples(existing: Iterable[object], incoming: Iterable[object], limit
         for item in source:
             if not isinstance(item, dict):
                 continue
-            sample = make_sample(item.get("time"), item.get("spread_pct"))
+            sample = make_sample(item.get("time"), item.get("spread_pct"), item.get("spread_points"))
             if sample is None:
                 continue
             by_time[str(sample["time"])] = sample
@@ -238,10 +242,12 @@ def broker_cell(record: Optional[Dict[str, object]], *, min_percentile_samples: 
     latest = record.get("latest")
     latest_sample = latest if isinstance(latest, dict) else None
     spread_value = coerce_float(latest_sample.get("spread_pct") if latest_sample else None)
+    spread_points = coerce_float(latest_sample.get("spread_points") if latest_sample else None)
     error = str(record.get("error") or "").strip()
-    if spread_value is None or spread_value <= 0:
+    if spread_value is None or spread_value < 0:
         return {
             "spread_pct": None,
+            "spread_points": None,
             "display": "",
             "category": "unavailable",
             "updated_at": str(record.get("last_success") or ""),
@@ -254,13 +260,17 @@ def broker_cell(record: Optional[Dict[str, object]], *, min_percentile_samples: 
         for sample in samples
         if isinstance(sample, dict)
     ] if isinstance(samples, list) else []
-    category = (
-        "neutral"
-        if len(sample_values) < max(1, int(min_percentile_samples))
-        else classify_spread(spread_value, sample_values)
-    )
+    if spread_value == 0:
+        category = "low"
+    else:
+        category = (
+            "neutral"
+            if len(sample_values) < max(1, int(min_percentile_samples))
+            else classify_spread(spread_value, sample_values)
+        )
     return {
         "spread_pct": spread_value,
+        "spread_points": spread_points,
         "display": format_spread_pct(spread_value),
         "category": category,
         "updated_at": str(latest_sample.get("time") or record.get("last_success") or ""),

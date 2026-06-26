@@ -106,7 +106,9 @@ def test_spread_app_frontend_normalizes_messages_refresh_and_sorting():
     assert "spreadNumber(brokerData(cell))" in source
     assert "function spreadNumber(data)" in source
     assert "raw === null || raw === undefined || raw === ''" in source
-    assert "value > 0 ? value : NaN" in source
+    assert "value >= 0 ? value : NaN" in source
+    assert "function spreadPointsText(data)" in source
+    assert "0 points" in source
     assert "const unavailable = !Number.isFinite(spreadValue);" in source
     assert ".spread-neutral" in source
     assert "pepperstone_razor" in source

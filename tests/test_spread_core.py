@@ -45,18 +45,19 @@ def test_spread_percent_format_switches_precision():
     assert format_spread_pct(0.01234) == "0.0123%"
 
 
-def test_broker_cell_zero_spread_is_unavailable_not_fake_zero():
+def test_broker_cell_zero_spread_is_valid_zero():
     cell = broker_cell(
         {
-            "latest": {"time": "2026-01-01T00:00:00Z", "spread_pct": 0.0},
-            "samples": [{"time": "2026-01-01T00:00:00Z", "spread_pct": 0.0}],
+            "latest": {"time": "2026-01-01T00:00:00Z", "spread_pct": 0.0, "spread_points": 0.0},
+            "samples": [{"time": "2026-01-01T00:00:00Z", "spread_pct": 0.0, "spread_points": 0.0}],
             "last_success": "2026-01-01T00:00:00Z",
             "error": "",
         }
     )
-    assert cell["spread_pct"] is None
-    assert cell["display"] == ""
-    assert cell["category"] == "unavailable"
+    assert cell["spread_pct"] == 0
+    assert cell["spread_points"] == 0
+    assert cell["display"] == "0.00000%"
+    assert cell["category"] == "low"
 
 
 def test_percentile_classification_thresholds():

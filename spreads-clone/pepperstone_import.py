@@ -152,7 +152,7 @@ def normalized_cache_from_export(
             except ValueError:
                 error = error or "bid/ask unavailable"
             else:
-                sample = make_sample(_item_timestamp(item, generated_at), spread_pct)
+                sample = make_sample(_item_timestamp(item, generated_at), spread_pct, item.get("spread_points"))
                 if sample is None:
                     error = error or "Spread data unavailable."
         else:

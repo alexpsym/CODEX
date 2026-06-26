@@ -842,10 +842,9 @@ void AppendPepperstoneSpreadJsonEntry(const string symbol, const string mt5Symbo
    int digits = (int)SymbolInfoInteger(mt5Symbol, SYMBOL_DIGITS);
    double point = SymbolInfoDouble(mt5Symbol, SYMBOL_POINT);
    double spreadPoints = point > 0.0 ? ((ask - bid) / point) : 0.0;
-   string spreadNote = (ask == bid) ? ",\"spread_note\":\"rounded_to_zero_at_mt5_precision\"" : "";
 
    entries += StringFormat(
-      "    {\"symbol\":\"%s\",\"mt5_symbol\":\"%s\",\"available\":true,\"bid\":%s,\"ask\":%s,\"spread_pct\":%s,\"spread_points\":%s,\"symbol_spread\":%d,\"digits\":%d,\"point\":%s,\"timestamp\":\"%s\"%s}",
+      "    {\"symbol\":\"%s\",\"mt5_symbol\":\"%s\",\"available\":true,\"bid\":%s,\"ask\":%s,\"spread_pct\":%s,\"spread_points\":%s,\"symbol_spread\":%d,\"digits\":%d,\"point\":%s,\"timestamp\":\"%s\"}",
       JsonEscape(symbol),
       JsonEscape(mt5Symbol),
       DoubleToString(bid, digits),
@@ -855,8 +854,7 @@ void AppendPepperstoneSpreadJsonEntry(const string symbol, const string mt5Symbo
       symbolSpread,
       digits,
       DoubleToString(point, 10),
-      generated,
-      spreadNote
+      generated
    );
    written++;
 }

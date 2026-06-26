@@ -8,7 +8,7 @@ Changes made:
   - Market Watch export rows keep the full broker symbol, e.g. AUDCAD.a/BTCUSD.a, in both symbol and mt5_symbol.
   - Bid/ask lookup now prefers SymbolInfoTick and falls back to SymbolInfoDouble(SYMBOL_BID/SYMBOL_ASK).
   - Available rows now include available=true, bid, ask, spread_pct, spread_points, symbol_spread from SYMBOL_SPREAD, digits, point, and timestamp.
-  - Equal bid/ask quotes with both values above zero are exported as available=true with spread_points=0, spread_pct=0, and spread_note="rounded_to_zero_at_mt5_precision".
+  - Equal bid/ask quotes with both values above zero are exported as available=true with spread_points=0 and spread_pct=0, with no warning or note text.
   - Symbols are only marked unavailable when bid <= 0 or ask <= 0 after SymbolInfoTick and SymbolInfoDouble attempts; unavailable rows are still written with available=false and error="bid/ask unavailable" instead of being silently skipped.
   - Export logs now include Pepperstone Market Watch symbols found: <count> and Pepperstone spread export wrote <count_written> of <count_found> Market Watch symbols.
   - Added Pepperstone symbol resolution for suffix-style broker symbols such as EURUSD.a.
@@ -56,11 +56,11 @@ Changes made:
 
 Verification run:
 - python -m pytest tests/test_pepperstone_spread_import.py tests/test_python_mt5_conversion_files.py tests/test_spread_monitor_dashboard.py tests/test_spread_core.py -q
-  Result: 42 passed, 8 existing FastAPI deprecation warnings. This includes checks for MT5 Market Watch enumeration, available=true/available=false JSON rows, equal bid/ask rounded-zero export notes, unavailable Pepperstone rows staying visible, EURUSD -> EURUSD.a, GBPUSD -> GBPUSD.a, USDJPY -> USDJPY.a, and unchanged OANDA current-only behavior.
+  Result: 42 passed, 8 existing FastAPI deprecation warnings. This includes checks for MT5 Market Watch enumeration, available=true/available=false JSON rows, equal bid/ask zero-spread export without warning text, unavailable Pepperstone rows staying visible, EURUSD -> EURUSD.a, GBPUSD -> GBPUSD.a, USDJPY -> USDJPY.a, and unchanged OANDA current-only behavior.
 - Deployed updated MQL5 files with python mt5-clone\deploy_to_mt5\deploy_to_mt5.py
   Result: completed successfully; 4 files copied/replaced into C:\Users\User\AppData\Roaming\MetaQuotes\Terminal\73B7A2420D6397DFF9014A20F1201F97.
 - Recompiled deployed Trader.mq5 with C:\Program Files\Pepperstone MetaTrader 5\metaeditor64.exe
-  Result: completed successfully; compiler log reported "Result: 0 errors, 0 warnings, 5390 ms elapsed, cpu='X64 Regular'"; deployed Trader.ex5 exists in the MT5 Experts folder.
+  Result: completed successfully; compiler log reported "Result: 0 errors, 0 warnings, 7401 ms elapsed, cpu='X64 Regular'"; deployed Trader.ex5 exists in the MT5 Experts folder.
 - python -m pytest tests/test_spread_core.py tests/test_oanda_spread_fetch.py tests/test_spread_monitor_dashboard.py -q
   Result: 32 passed, 8 existing FastAPI deprecation warnings. Rerun after the unavailable-current-spread row fix also passed: 32 passed, 8 existing FastAPI deprecation warnings.
 - python -m pytest tests/test_dashboard_home_layout.py tests/test_dashboard_js_syntax.py -q

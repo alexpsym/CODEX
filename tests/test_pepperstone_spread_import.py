@@ -116,12 +116,11 @@ def test_pepperstone_import_keeps_unavailable_market_watch_rows_visible():
     assert unavailable["error"] == "bid/ask unavailable"
 
 
-def test_pepperstone_import_keeps_rounded_zero_spread_rows_visible():
+def test_pepperstone_import_displays_zero_spread_rows_as_valid_zero():
     cache_path = _repo_cache_path("rounded_zero")
     payload = _mt5_payload(symbol="EURUSD.a", bid=1.1, ask=1.1)
     payload["symbols"][0]["available"] = True
     payload["symbols"][0]["spread_points"] = 0
-    payload["symbols"][0]["spread_note"] = "rounded_to_zero_at_mt5_precision"
     try:
         store = PepperstoneSpreadImportStore(cache_path)
         status = store.import_text(json.dumps(payload), source_path="pepperstone_spreads_latest.json")
@@ -132,9 +131,11 @@ def test_pepperstone_import_keeps_rounded_zero_spread_rows_visible():
     rows = {row["symbol"]: row for row in status["rows"]}
     assert set(rows) == {"EURUSD.a"}
     cell = rows["EURUSD.a"]["cells"]["1M"]["pepperstone_razor"]
-    assert cell["category"] == "unavailable"
-    assert cell["spread_pct"] is None
-    assert cell["error"] == "Spread data unavailable."
+    assert cell["category"] == "low"
+    assert cell["spread_pct"] == 0
+    assert cell["spread_points"] == 0
+    assert cell["display"] == "0.00000%"
+    assert cell["error"] == ""
 
 
 def test_pepperstone_import_default_uses_mt5_fallback_when_repo_file_missing():
