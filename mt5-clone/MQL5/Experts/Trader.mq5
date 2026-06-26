@@ -802,7 +802,7 @@ bool TryGetPepperstoneBidAsk(const string symbol, double &bid, double &ask)
    MqlTick tick;
    if(SymbolInfoTick(symbol, tick))
    {
-      if(tick.bid > 0.0 && tick.ask > 0.0 && tick.ask > tick.bid)
+      if(tick.bid > 0.0 && tick.ask > 0.0)
       {
          bid = tick.bid;
          ask = tick.ask;
@@ -812,7 +812,7 @@ bool TryGetPepperstoneBidAsk(const string symbol, double &bid, double &ask)
 
    bid = SymbolInfoDouble(symbol, SYMBOL_BID);
    ask = SymbolInfoDouble(symbol, SYMBOL_ASK);
-   return (bid > 0.0 && ask > 0.0 && ask > bid);
+   return (bid > 0.0 && ask > 0.0);
 }
 
 void AppendPepperstoneSpreadJsonEntry(const string symbol, const string mt5Symbol, const string generated, string &entries, int &written)
@@ -820,15 +820,17 @@ void AppendPepperstoneSpreadJsonEntry(const string symbol, const string mt5Symbo
    double bid = 0.0;
    double ask = 0.0;
    bool available = TryGetPepperstoneBidAsk(mt5Symbol, bid, ask);
+   int symbolSpread = (int)SymbolInfoInteger(mt5Symbol, SYMBOL_SPREAD);
 
    if(written > 0) entries += ",\n";
 
    if(!available)
    {
       entries += StringFormat(
-         "    {\"symbol\":\"%s\",\"mt5_symbol\":\"%s\",\"available\":false,\"error\":\"bid/ask unavailable\",\"timestamp\":\"%s\"}",
+         "    {\"symbol\":\"%s\",\"mt5_symbol\":\"%s\",\"available\":false,\"symbol_spread\":%d,\"error\":\"bid/ask unavailable\",\"timestamp\":\"%s\"}",
          JsonEscape(symbol),
          JsonEscape(mt5Symbol),
+         symbolSpread,
          generated
       );
       written++;
@@ -840,18 +842,21 @@ void AppendPepperstoneSpreadJsonEntry(const string symbol, const string mt5Symbo
    int digits = (int)SymbolInfoInteger(mt5Symbol, SYMBOL_DIGITS);
    double point = SymbolInfoDouble(mt5Symbol, SYMBOL_POINT);
    double spreadPoints = point > 0.0 ? ((ask - bid) / point) : 0.0;
+   string spreadNote = (ask == bid) ? ",\"spread_note\":\"rounded_to_zero_at_mt5_precision\"" : "";
 
    entries += StringFormat(
-      "    {\"symbol\":\"%s\",\"mt5_symbol\":\"%s\",\"available\":true,\"bid\":%s,\"ask\":%s,\"spread_pct\":%s,\"spread_points\":%s,\"digits\":%d,\"point\":%s,\"timestamp\":\"%s\"}",
+      "    {\"symbol\":\"%s\",\"mt5_symbol\":\"%s\",\"available\":true,\"bid\":%s,\"ask\":%s,\"spread_pct\":%s,\"spread_points\":%s,\"symbol_spread\":%d,\"digits\":%d,\"point\":%s,\"timestamp\":\"%s\"%s}",
       JsonEscape(symbol),
       JsonEscape(mt5Symbol),
       DoubleToString(bid, digits),
       DoubleToString(ask, digits),
       DoubleToString(spreadPct, 10),
       DoubleToString(spreadPoints, 2),
+      symbolSpread,
       digits,
       DoubleToString(point, 10),
-      generated
+      generated,
+      spreadNote
    );
    written++;
 }

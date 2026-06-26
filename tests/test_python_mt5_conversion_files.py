@@ -41,6 +41,21 @@ def _resolve_like_pepperstone_export(raw_symbol: str, chart_symbol: str, availab
     return ""
 
 
+def _quote_export_like_pepperstone_bid_ask(bid: float, ask: float, point: float = 0.00001) -> dict:
+    if bid <= 0 or ask <= 0:
+        return {"available": False, "error": "bid/ask unavailable"}
+    spread_points = (ask - bid) / point if point > 0 else 0.0
+    midpoint = (ask + bid) / 2.0
+    payload = {
+        "available": True,
+        "spread_pct": ((ask - bid) / midpoint) * 100.0,
+        "spread_points": spread_points,
+    }
+    if ask == bid:
+        payload["spread_note"] = "rounded_to_zero_at_mt5_precision"
+    return payload
+
+
 def test_python_mt5_conversion_files_exist_and_keep_mql5_files():
     assert (ROOT / "mt5-clone" / "MQL5" / "Experts" / "Trader.mq5").exists()
     assert (ROOT / "mt5-clone" / "MQL5" / "Experts" / "Backtest.mq5").exists()
@@ -105,6 +120,27 @@ def test_mql5_trader_exports_selected_market_watch_symbols_by_default():
     assert r'\"available\":false' in trader
     assert "spread_points" in trader
     assert trader.find("SymbolsTotal(true)") < trader.find("StringSplit(PepperstoneSpreadExportSymbols")
+
+
+def test_mql5_trader_treats_equal_bid_ask_as_available_rounded_zero_spread():
+    trader = (ROOT / "mt5-clone" / "MQL5" / "Experts" / "Trader.mq5").read_text(encoding="utf-8")
+    rounded = _quote_export_like_pepperstone_bid_ask(1.1000, 1.1000)
+    unavailable = _quote_export_like_pepperstone_bid_ask(0.0, 1.1000)
+
+    assert rounded["available"] is True
+    assert rounded["spread_points"] == 0
+    assert rounded["spread_pct"] == 0
+    assert rounded["spread_note"] == "rounded_to_zero_at_mt5_precision"
+    assert unavailable["available"] is False
+
+    bid_ask_body = trader.split("bool TryGetPepperstoneBidAsk", 1)[1].split("void AppendPepperstoneSpreadJsonEntry", 1)[0]
+    assert "tick.bid > 0.0 && tick.ask > 0.0" in bid_ask_body
+    assert "tick.ask > tick.bid" not in bid_ask_body
+    assert "return (bid > 0.0 && ask > 0.0);" in bid_ask_body
+    assert "ask > bid" not in bid_ask_body
+    assert "SYMBOL_SPREAD" in trader
+    assert "symbol_spread" in trader
+    assert "rounded_to_zero_at_mt5_precision" in trader
 
 
 def test_mql5_trader_trimtext_uses_in_place_string_trim_calls():
