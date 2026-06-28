@@ -66,7 +66,6 @@ def test_render_profile_blocks_local_only_routes() -> None:
     assert master_service._render_blocks_path("/merged/history") is True
     assert master_service._render_blocks_path("/trading-journal") is True
     assert master_service._render_blocks_path("/dashboard/trading-journal") is True
-    assert master_service._render_blocks_path("/dashboard/mt5") is True
     assert master_service._render_blocks_path("/dashboard/pine") is True
     assert master_service._render_blocks_path("/health") is False
     disabled = master_service._local_only_disabled_response("/trading-journal")
@@ -99,7 +98,7 @@ def test_local_profile_includes_open_orders_and_trading_journal() -> None:
 
     assert "open-orders" in names
     assert "trading-journal" in names
-    assert "mt5" in names
+    assert "mt5" not in names
     assert "pine" in names
 
     trading_journal = by_name["trading-journal"]
@@ -108,7 +107,6 @@ def test_local_profile_includes_open_orders_and_trading_journal() -> None:
     assert trading_journal["open_url"] != "/trading-journal"
     assert trading_journal["dashboard_main_view"] is True
     assert by_name["open-orders"]["label"] == "Orders / Positions"
-    assert by_name["mt5"]["open_url"] == "/dashboard/mt5"
     assert by_name["pine"]["open_url"] == "/dashboard/pine"
 
 

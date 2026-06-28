@@ -167,8 +167,6 @@ SCANNER_HEARTBEAT_GRACE_SECONDS = 30
 SCANNER_LOCAL_UI_MODE = os.getenv("SCANNER_LOCAL_UI_MODE", "0").strip().lower() in {"1", "true", "yes", "on"}
 DEFAULT_RENDER_ALLOWED_APPS = "calculator-webhook,pending-webhooks,fxweekend-clone,bybit_trigger_bounce_trader"
 DEFAULT_LOCAL_ALLOWED_APPS = "bybit_monitor,oanda_monitor,bybithistory-clone,oanda_history-clone,coinspot-clone,open-orders,ivindicator-clone,spreads-clone"
-DEFAULT_MT5_DATA_MQL5_DIR = Path(r"C:\Users\User\AppData\Roaming\MetaQuotes\Terminal\73B7A2420D6397DFF9014A20F1201F97\MQL5")
-MT5_REPO_MQL5_DIR = BASE_DIR / "mt5-clone" / "MQL5"
 PINE_SCRIPTS_DIR = BASE_DIR / "pinescripts"
 PINE_ALLOWED_SUFFIXES = {".pine", ".pinescript", ".txt"}
 
@@ -214,7 +212,6 @@ LOCAL_ONLY_APP_NAMES = {
     "open-orders",
     "ivindicator-clone",
     "spreads-clone",
-    "mt5",
     "pine",
 }
 LOCAL_ONLY_PATH_PREFIXES = (
@@ -225,14 +222,12 @@ LOCAL_ONLY_PATH_PREFIXES = (
     "/coinspot-history",
     "/trading-journal",
     "/dashboard/trading-journal",
-    "/dashboard/mt5",
     "/dashboard/pine",
     "/merged/open-orders",
     "/api/bybit-history",
     "/api/oanda-history",
     "/api/coinspot-history",
     "/api/trading-journal",
-    "/api/mt5",
     "/api/pine",
     "/api/open-orders",
 )
@@ -267,7 +262,6 @@ def _profile_main_buttons() -> List[Dict[str, object]]:
                 {"id": "monitor", "name": "monitor", "label": "Scanner", "open_url": "/merged/monitor", "dashboard_main_view": True},
                 {"id": "ivindicator-clone", "name": "ivindicator-clone", "label": "IV Indicator", "open_url": "/apps/ivindicator-clone", "dashboard_main_view": True},
                 {"id": "spreads-clone", "name": "spreads-clone", "label": "Spreads", "open_url": "/apps/spreads-clone", "dashboard_main_view": True},
-                {"id": "mt5", "name": "mt5", "label": "MT5", "open_url": "/dashboard/mt5", "dashboard_main_view": True},
                 {"id": "pine", "name": "pine", "label": "Pine", "open_url": "/dashboard/pine", "dashboard_main_view": True},
             ]
         )
@@ -9814,7 +9808,6 @@ FRIENDLY_SCRIPT_LABELS: Dict[str, str] = {
     "fxweekend-clone": "FX Weekend",
     "ivindicator-clone": "IV Indicator",
     "journal": "Journal",
-    "mt5": "MT5",
     "oanda_history-clone": "History",
     "open-orders": "Orders / Positions",
     "pine": "Pine",
@@ -11150,7 +11143,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         .script-toolbar-grid .script-btn[data-script-name="spreads-clone"] { max-width: 96px; }
         .script-toolbar-grid .script-btn[data-script-name="trading-journal"] { max-width: 96px; }
         .script-toolbar-grid .script-btn[data-script-name="open-orders"] { max-width: 146px; }
-        .script-toolbar-grid .script-btn[data-script-name="mt5"] { max-width: 72px; }
         .script-toolbar-grid .script-btn[data-script-name="pine"] { max-width: 76px; }
         .exit-button-slot .local-exit-btn{
             flex: 0 0 auto;
@@ -28408,49 +28400,6 @@ def _relative_file_list(root: Path, *, allowed_suffixes: Optional[Set[str]] = No
     return files
 
 
-def _configured_mt5_mql5_dir() -> Path:
-    raw = (
-        os.getenv("MT5_DATA_MQL5_DIR")
-        or os.getenv("MT5_MQL5_DIR")
-        or os.getenv("MT5_DATA_FOLDER")
-        or str(DEFAULT_MT5_DATA_MQL5_DIR)
-    )
-    target = Path(str(raw)).expanduser()
-    if target.name.lower() != "mql5":
-        target = target / "MQL5"
-    return target.resolve()
-
-
-def _load_mt5_deploy_module():
-    module_path = BASE_DIR / "mt5-clone" / "deploy_to_mt5" / "deploy_to_mt5.py"
-    spec = importlib.util.spec_from_file_location("codex_mt5_deploy_to_mt5", module_path)
-    if not spec or not spec.loader:
-        raise RuntimeError(f"Unable to load MT5 deploy helper: {module_path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-def _deploy_mt5_repo_to_data_folder() -> Dict[str, object]:
-    source = MT5_REPO_MQL5_DIR.resolve()
-    target_mql5 = _configured_mt5_mql5_dir()
-    target_terminal = target_mql5.parent.resolve()
-    expected_target = (target_terminal / "MQL5").resolve()
-    if expected_target != target_mql5:
-        raise RuntimeError(f"Configured MT5 target does not resolve to the expected MQL5 folder: {target_mql5}")
-    if not _path_is_within(target_mql5, target_terminal):
-        raise RuntimeError(f"Refusing MT5 deploy outside configured data folder: {target_mql5}")
-    deploy_module = _load_mt5_deploy_module()
-    copied = int(deploy_module.deploy_tree(source, target_terminal))
-    return {
-        "ok": True,
-        "message": f"Copied {copied} MT5 file{'s' if copied != 1 else ''}.",
-        "copied_count": copied,
-        "source_path": str(source),
-        "target_path": str(target_mql5),
-    }
-
-
 def _normalize_pine_name(name: object) -> str:
     raw = str(name or "").strip().replace("\\", "/")
     if raw.startswith("pinescripts/"):
@@ -28473,24 +28422,6 @@ def _resolve_pine_script(name: object) -> Path:
     return path
 
 
-MT5_DASHBOARD_TEMPLATE = """<!DOCTYPE html>
-<html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>MT5</title>
-<style>body{margin:0;background:#0b1220;color:#e2e8f0;font-family:Inter,system-ui,sans-serif}.wrap{max-width:920px;margin:0 auto;padding:22px}h1{margin:0 0 14px;font-size:22px}.status{color:#94a3b8;margin:0 0 12px;white-space:pre-wrap}.panel{border:1px solid #1f2937;background:#111827;border-radius:8px;overflow:hidden}table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:10px 12px;border-bottom:1px solid #1f2937;font-size:13px}th{color:#cbd5e1;background:#0f172a}.deploy{border-top:1px solid #334155;margin-top:18px;padding-top:18px}button{border:1px solid #3b82f6;background:#2563eb;color:#eff6ff;border-radius:6px;padding:9px 13px;font-weight:800;cursor:pointer}button:disabled{opacity:.65;cursor:wait}.error{color:#fecdd3}.ok{color:#bbf7d0}</style></head>
-<body><main class="wrap"><h1>MT5</h1><div id="status" class="status">Loading...</div><section class="panel"><table><thead><tr><th>Repo file</th></tr></thead><tbody id="files"></tbody></table></section><div class="deploy"><button id="deploy-btn" type="button">Copy to data folder</button><div id="deploy-status" class="status"></div></div></main>
-<script>
-const statusEl=document.getElementById('status');
-const filesEl=document.getElementById('files');
-const deployBtn=document.getElementById('deploy-btn');
-const deployStatus=document.getElementById('deploy-status');
-const esc=(v)=>String(v??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;').replaceAll("'","&#39;");
-async function json(url,opts={}){const res=await fetch(url,{cache:'no-store',...opts});const data=await res.json().catch(()=>({}));if(!res.ok)throw new Error(data.detail||data.message||res.statusText);return data;}
-async function loadFiles(){try{const payload=await json('/api/mt5/files');const files=Array.isArray(payload.files)?payload.files:[];statusEl.textContent=`${files.length} file${files.length===1?'':'s'} in mt5-clone/MQL5`;filesEl.innerHTML=files.length?files.map((file)=>`<tr><td>${esc(file)}</td></tr>`).join(''):'<tr><td>No MT5 files found.</td></tr>';}catch(err){statusEl.textContent=err.message||'Failed to load MT5 files.';statusEl.className='status error';}}
-deployBtn.addEventListener('click',async()=>{deployBtn.disabled=true;deployStatus.className='status';deployStatus.textContent='Copying...';try{const payload=await json('/api/mt5/deploy',{method:'POST'});deployStatus.className='status ok';deployStatus.textContent=`${payload.message} Target: ${payload.target_path}`;}catch(err){deployStatus.className='status error';deployStatus.textContent=err.message||'MT5 copy failed.';}finally{deployBtn.disabled=false;}});
-loadFiles();
-</script></body></html>"""
-
-
 PINE_DASHBOARD_TEMPLATE = """<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>Pine</title>
@@ -28507,31 +28438,6 @@ async function copyScript(name){fallback.hidden=true;fallback.value='';statusEl.
 filesEl.addEventListener('click',(event)=>{const button=event.target.closest('button[data-name]');if(button)copyScript(button.dataset.name);});
 loadFiles();
 </script></body></html>"""
-
-
-@app.get("/dashboard/mt5", response_class=HTMLResponse)
-async def mt5_dashboard_workspace() -> Response:
-    if _render_blocks_path("/dashboard/mt5"):
-        return _local_only_disabled_response("/dashboard/mt5")  # type: ignore[return-value]
-    return HTMLResponse(MT5_DASHBOARD_TEMPLATE)
-
-
-@app.get("/api/mt5/files")
-async def mt5_files() -> Response:
-    if _render_blocks_path("/api/mt5/files"):
-        return _local_only_disabled_response("/api/mt5/files", as_json=True)
-    files = _relative_file_list(MT5_REPO_MQL5_DIR)
-    return JSONResponse({"ok": True, "source_path": str(MT5_REPO_MQL5_DIR), "files": files, "count": len(files)})
-
-
-@app.post("/api/mt5/deploy")
-async def mt5_deploy() -> Response:
-    if _render_blocks_path("/api/mt5/deploy"):
-        return _local_only_disabled_response("/api/mt5/deploy", as_json=True)
-    try:
-        return JSONResponse(_deploy_mt5_repo_to_data_folder())
-    except Exception as exc:
-        return JSONResponse({"ok": False, "message": str(exc), "target_path": str(_configured_mt5_mql5_dir())}, status_code=500)
 
 
 @app.get("/dashboard/pine", response_class=HTMLResponse)

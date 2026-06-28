@@ -9,7 +9,7 @@ from typing import Dict, List, Optional
 
 from spread_core import (
     MAX_CACHE_SAMPLES,
-    TIMEFRAME_LABELS,
+    OANDA_CURRENT_TIMEFRAME_LABEL,
     _cache_key,
     _merge_samples,
     build_spread_payload,
@@ -158,34 +158,36 @@ def normalized_cache_from_export(
         else:
             error = error or "bid/ask unavailable"
         symbols.append(symbol)
-        for timeframe in TIMEFRAME_LABELS:
-            key = _cache_key("pepperstone", symbol, timeframe)
-            previous = previous_records.get(key) if isinstance(previous_records, dict) else None
-            previous_samples = previous.get("samples") if isinstance(previous, dict) else []
-            if sample is None:
-                records[key] = {
-                    "broker": "pepperstone",
-                    "symbol": symbol,
-                    "timeframe": timeframe,
-                    "samples": [],
-                    "latest": None,
-                    "last_success": "",
-                    "last_failure": imported_at,
-                    "ttl_seconds": 0,
-                    "error": error or "bid/ask unavailable",
-                }
-            else:
-                samples = _merge_samples(previous_samples or [], [sample], max_samples)
-                records[key] = {
-                    "broker": "pepperstone",
-                    "symbol": symbol,
-                    "timeframe": timeframe,
-                    "samples": samples,
-                    "latest": sample,
-                    "last_success": imported_at,
-                    "ttl_seconds": 0,
-                    "error": "",
-                }
+        key = _cache_key("pepperstone", symbol, OANDA_CURRENT_TIMEFRAME_LABEL)
+        legacy_key = _cache_key("pepperstone", symbol, "1M")
+        previous = previous_records.get(key) if isinstance(previous_records, dict) else None
+        if not isinstance(previous, dict) and isinstance(previous_records, dict):
+            previous = previous_records.get(legacy_key)
+        previous_samples = previous.get("samples") if isinstance(previous, dict) else []
+        if sample is None:
+            records[key] = {
+                "broker": "pepperstone",
+                "symbol": symbol,
+                "timeframe": OANDA_CURRENT_TIMEFRAME_LABEL,
+                "samples": [],
+                "latest": None,
+                "last_success": "",
+                "last_failure": imported_at,
+                "ttl_seconds": 0,
+                "error": error or "bid/ask unavailable",
+            }
+        else:
+            samples = _merge_samples(previous_samples or [], [sample], max_samples)
+            records[key] = {
+                "broker": "pepperstone",
+                "symbol": symbol,
+                "timeframe": OANDA_CURRENT_TIMEFRAME_LABEL,
+                "samples": samples,
+                "latest": sample,
+                "last_success": imported_at,
+                "ttl_seconds": 0,
+                "error": "",
+            }
 
     cache["symbols"] = sorted(dict.fromkeys(symbols))
     cache["records"] = records
@@ -242,6 +244,7 @@ class PepperstoneSpreadImportStore:
                 refresh_status={"state": "manual", "started_at": "", "finished_at": "", "error": "", "warnings": []},
                 refresh_interval_seconds=0,
                 empty_message="No imported Pepperstone spread data is available yet. Import the MT5-generated file to populate this table.",
+                current_only=True,
             )
         payload["broker"] = "pepperstone"
         payload["manual_import_only"] = True

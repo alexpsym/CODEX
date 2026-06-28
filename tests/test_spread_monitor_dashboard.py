@@ -101,7 +101,8 @@ def test_spread_app_frontend_normalizes_messages_refresh_and_sorting():
     assert "headEl.addEventListener('click'" in source
     assert "sortState.direction === 'asc' ? 'desc' : 'asc'" in source
     assert "function cellSortValue(row, timeframe)" in source
-    assert "renderOandaCurrentTable(payload)" in source
+    assert "renderCurrentSpreadTable(payload)" in source
+    assert "payload?.current_only" in source
     assert "Current Spread" in source
     assert "spreadNumber(brokerData(cell))" in source
     assert "function spreadNumber(data)" in source
@@ -125,13 +126,15 @@ def test_spread_app_no_longer_imports_live_mt5_fetchers():
     assert "preflight_mt5_environment" not in source
 
 
-def test_spread_app_selector_buttons_and_legend_wording_exist():
+def test_spread_app_selector_buttons_and_plain_spread_note_exist():
     source = (ROOT / "spreads-clone" / "spread_app.py").read_text(encoding="utf-8")
     assert 'data-broker="oanda">Oanda</button>' in source
     assert 'data-broker="pepperstone">Pepperstone</button>' in source
-    assert "Low percentile" in source
-    assert "Medium percentile" in source
-    assert "High percentile" in source
+    assert "Spread values are shown as percentage of bid/ask midpoint. Points are shown when available." in source
+    assert "Low percentile" not in source
+    assert "Medium percentile" not in source
+    assert "High percentile" not in source
+    assert "Spread percentile legend" not in source
     assert "Unavailable" in source
 
 
@@ -154,7 +157,6 @@ def test_scripts_endpoint_places_spread_monitor_after_iv_indicator_in_local_prof
         "monitor",
         "ivindicator-clone",
         "spreads-clone",
-        "mt5",
         "pine",
     ]
     positions = [names.index(name) for name in expected]
@@ -164,15 +166,13 @@ def test_scripts_endpoint_places_spread_monitor_after_iv_indicator_in_local_prof
     assert by_name["spreads-clone"]["label"] == "Spreads"
     assert by_name["spreads-clone"]["open_url"] == "/apps/spreads-clone"
     assert by_name["spreads-clone"]["dashboard_main_view"] is True
-    assert by_name["mt5"]["label"] == "MT5"
-    assert by_name["mt5"]["open_url"] == "/dashboard/mt5"
-    assert by_name["mt5"]["dashboard_main_view"] is True
+    assert "mt5" not in by_name
     assert by_name["pine"]["label"] == "Pine"
     assert by_name["pine"]["open_url"] == "/dashboard/pine"
     assert by_name["pine"]["dashboard_main_view"] is True
 
 
-def test_render_profile_does_not_expose_spread_monitor_or_mt5_app():
+def test_render_profile_does_not_expose_spread_monitor_or_pine_app():
     master_service = _load_master_service("render_master_service_spread_dashboard_render", "render")
     payload = json.loads(asyncio.run(master_service.list_scripts()).body.decode("utf-8"))
     names = {str(item.get("name")) for item in payload}
@@ -180,7 +180,6 @@ def test_render_profile_does_not_expose_spread_monitor_or_mt5_app():
     assert "mt5" not in names
     assert "pine" not in names
     assert master_service._render_blocks_path("/apps/spreads-clone") is True
-    assert master_service._render_blocks_path("/dashboard/mt5") is True
     assert master_service._render_blocks_path("/dashboard/pine") is True
 
 
@@ -252,23 +251,27 @@ def test_pepperstone_status_and_import_endpoint_are_manual_only(monkeypatch):
                 "ok": False,
                 "manual_import_only": True,
                 "rows": [],
-                "timeframes": ["1M"],
+                "current_only": True,
+                "timeframes": [],
                 "errors": ["No imported Pepperstone spread data is available yet."],
             }
 
         def import_text(self, _text, *, source_path):
+            cell = {"spread_pct": 0.01, "display": "0.0100%"}
             return {
                 "ok": True,
                 "manual_import_only": True,
+                "current_only": True,
                 "source_filename": str(source_path),
                 "rows": [
                     {
                         "symbol": "EUR_USD",
                         "display_symbol": "EUR/USD",
-                        "cells": {"1M": {"pepperstone_razor": {"spread_pct": 0.01, "display": "0.0100%"}}},
+                        "current_spread": cell,
+                        "cells": {"CURRENT": {"pepperstone_razor": cell}},
                     }
                 ],
-                "timeframes": ["1M"],
+                "timeframes": [],
                 "errors": [],
             }
 
@@ -285,4 +288,6 @@ def test_pepperstone_status_and_import_endpoint_are_manual_only(monkeypatch):
     )
     assert response.status_code == 200
     payload = response.get_json()
-    assert payload["rows"][0]["cells"]["1M"]["pepperstone_razor"]["spread_pct"] == 0.01
+    assert payload["current_only"] is True
+    assert payload["timeframes"] == []
+    assert payload["rows"][0]["current_spread"]["spread_pct"] == 0.01

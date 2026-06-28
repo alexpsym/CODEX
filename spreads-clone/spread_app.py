@@ -124,17 +124,6 @@ PAGE_TEMPLATE = """
       color: #cbd5e1;
       font-size: 13px;
     }
-    .legend-item {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-    }
-    .legend-swatch {
-      width: 10px;
-      height: 10px;
-      border-radius: 50%;
-      border: 1px solid currentColor;
-    }
     .mode-controls {
       display: flex;
       flex-wrap: wrap;
@@ -247,9 +236,6 @@ PAGE_TEMPLATE = """
       text-overflow: ellipsis;
       white-space: nowrap;
     }
-    .spread-low { color: #86efac; }
-    .spread-medium { color: #facc15; }
-    .spread-high { color: #fb7185; }
     .spread-neutral { color: #e2e8f0; }
     .spread-unavailable { color: #64748b; }
     .messages {
@@ -303,11 +289,8 @@ PAGE_TEMPLATE = """
     </div>
 
     <section id="monitor-view" hidden>
-      <div class="legend" aria-label="Spread percentile legend">
-        <span class="legend-item spread-low"><span class="legend-swatch"></span>Low percentile (&lt;=50th)</span>
-        <span class="legend-item spread-medium"><span class="legend-swatch"></span>Medium percentile (&gt;50th and &lt;80th)</span>
-        <span class="legend-item spread-high"><span class="legend-swatch"></span>High percentile (&gt;=80th)</span>
-        <span class="legend-item spread-unavailable"><span class="legend-swatch"></span>Unavailable</span>
+      <div class="legend" aria-label="Spread display note">
+        <span>Spread values are shown as percentage of bid/ask midpoint. Points are shown when available.</span>
       </div>
       <div id="pepperstone-controls" class="mode-controls" hidden>
         <button id="import-pepperstone-btn" type="button">Import Pepperstone spread file</button>
@@ -519,8 +502,8 @@ PAGE_TEMPLATE = """
   }
 
   function renderTable(payload) {
-    if (currentBroker === 'oanda') {
-      renderOandaCurrentTable(payload);
+    if (payload?.current_only) {
+      renderCurrentSpreadTable(payload);
       return;
     }
     if (tableEl) tableEl.classList.remove('current-only');
@@ -553,6 +536,8 @@ PAGE_TEMPLATE = """
     const sourceTime = scalarMessage(data?.updated_at);
     let value = scalarMessage(data?.display);
     if (!value && Number.isFinite(spreadValue)) value = `${spreadValue.toFixed(4)}%`;
+    const pointsText = spreadPointsText(data);
+    if (value && pointsText) value = `${value} / ${pointsText}`;
     if (!value) value = error || 'Unavailable';
     const titleText = error || (sourceTime ? `Source timestamp: ${sourceTime}` : '');
     const title = titleText ? ` title="${escapeHtml(titleText)}"` : '';
@@ -565,13 +550,14 @@ PAGE_TEMPLATE = """
       `</div>`;
   }
 
-  function renderOandaCurrentTable(payload) {
+  function renderCurrentSpreadTable(payload) {
     if (tableEl) tableEl.classList.add('current-only');
     headEl.innerHTML = `<tr><th class="symbol-col sortable" data-sort-column="symbol" data-sort-indicator="${sortIndicator('symbol')}">Instrument</th>` +
       `<th class="sortable" data-sort-column="current_spread" data-sort-indicator="${sortIndicator('current_spread')}">Current Spread</th></tr>`;
     const rows = sortedRows(payload || {});
     if (!rows.length) {
-      bodyEl.innerHTML = '<tr><td class="empty" colspan="2">No OANDA current spread rows are available yet.</td></tr>';
+      const label = brokerLabels[currentBroker] || 'Spread';
+      bodyEl.innerHTML = `<tr><td class="empty" colspan="2">No ${escapeHtml(label)} current spread rows are available yet.</td></tr>`;
       return;
     }
     bodyEl.innerHTML = rows.map((row) => {
@@ -590,8 +576,9 @@ PAGE_TEMPLATE = """
   }
 
   function renderLoadingTable(text) {
-    if (tableEl) tableEl.classList.toggle('current-only', currentBroker === 'oanda');
-    const colSpan = currentBroker === 'oanda' ? 2 : (latestPayload?.timeframes?.length ? latestPayload.timeframes.length + 1 : 10);
+    const currentOnly = currentBroker === 'oanda' || latestPayload?.current_only;
+    if (tableEl) tableEl.classList.toggle('current-only', currentOnly);
+    const colSpan = currentOnly ? 2 : (latestPayload?.timeframes?.length ? latestPayload.timeframes.length + 1 : 10);
     bodyEl.innerHTML = `<tr><td class="empty" colspan="${colSpan}">${escapeHtml(text)}</td></tr>`;
   }
 

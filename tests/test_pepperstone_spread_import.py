@@ -13,6 +13,7 @@ from pepperstone_import import (  # noqa: E402
     PepperstoneSpreadImportStore,
     normalized_cache_from_export,
 )
+from spread_core import OANDA_CURRENT_TIMEFRAME_LABEL, _cache_key  # noqa: E402
 
 
 def _mt5_payload(symbol: str = "EURUSD", bid: float = 1.1, ask: float = 1.1002) -> dict:
@@ -27,6 +28,7 @@ def _mt5_payload(symbol: str = "EURUSD", bid: float = 1.1, ask: float = 1.1002) 
                 "bid": bid,
                 "ask": ask,
                 "spread_pct": 999.0,
+                "spread_points": 20.0,
                 "digits": 5,
                 "point": 0.00001,
                 "timestamp": "2026-01-01T00:00:00Z",
@@ -53,17 +55,24 @@ def test_pepperstone_import_parses_valid_mt5_json_and_normalizes_symbol():
 
     assert payload["broker"] == "pepperstone"
     assert payload["manual_import_only"] is True
+    assert payload["current_only"] is True
+    assert payload["timeframes"] == []
     assert payload["source_filename"] == "pepperstone_spreads_latest.json"
     row = payload["rows"][0]
     assert row["symbol"] == "EUR_USD"
-    cell = row["cells"]["1M"]["pepperstone_razor"]
+    cell = row["current_spread"]
+    assert row["cells"][OANDA_CURRENT_TIMEFRAME_LABEL]["pepperstone_razor"] == cell
+    assert cell["category"] == "neutral"
     assert cell["spread_pct"] == pytest.approx(((1.1002 - 1.1) / ((1.1002 + 1.1) / 2.0)) * 100)
+    assert cell["display"] == "0.0182%"
+    assert cell["spread_points"] == 20.0
 
 
 def test_pepperstone_import_uses_bid_ask_formula_not_supplied_spread_pct():
     cache = normalized_cache_from_export(_mt5_payload(bid=1.0, ask=1.1), source_path="x.json")
-    record = cache["records"]["pepperstone|EUR_USD|1M"]
+    record = cache["records"][_cache_key("pepperstone", "EUR_USD", OANDA_CURRENT_TIMEFRAME_LABEL)]
     assert record["latest"]["spread_pct"] == pytest.approx((0.1 / 1.05) * 100)
+    assert not any(key.endswith("|1M") for key in cache["records"])
 
 
 def test_pepperstone_import_rejects_malformed_file_without_wiping_previous_cache():
@@ -110,7 +119,7 @@ def test_pepperstone_import_keeps_unavailable_market_watch_rows_visible():
 
     rows = {row["symbol"]: row for row in status["rows"]}
     assert set(rows) == {"AUDCAD.a", "BTCUSD.a"}
-    unavailable = rows["BTCUSD.a"]["cells"]["1M"]["pepperstone_razor"]
+    unavailable = rows["BTCUSD.a"]["current_spread"]
     assert unavailable["category"] == "unavailable"
     assert unavailable["spread_pct"] is None
     assert unavailable["error"] == "bid/ask unavailable"
@@ -130,8 +139,8 @@ def test_pepperstone_import_displays_zero_spread_rows_as_valid_zero():
 
     rows = {row["symbol"]: row for row in status["rows"]}
     assert set(rows) == {"EURUSD.a"}
-    cell = rows["EURUSD.a"]["cells"]["1M"]["pepperstone_razor"]
-    assert cell["category"] == "low"
+    cell = rows["EURUSD.a"]["current_spread"]
+    assert cell["category"] == "neutral"
     assert cell["spread_pct"] == 0
     assert cell["spread_points"] == 0
     assert cell["display"] == "0.00000%"

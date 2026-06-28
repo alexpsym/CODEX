@@ -16,7 +16,6 @@ from spread_core import (  # noqa: E402
     build_spread_payload,
     _cache_key,
     broker_cell,
-    classify_spread,
     format_spread_pct,
     spread_pct_from_bid_ask,
 )
@@ -57,16 +56,46 @@ def test_broker_cell_zero_spread_is_valid_zero():
     assert cell["spread_pct"] == 0
     assert cell["spread_points"] == 0
     assert cell["display"] == "0.00000%"
-    assert cell["category"] == "low"
+    assert cell["category"] == "neutral"
 
 
-def test_percentile_classification_thresholds():
-    samples = list(range(1, 101))
-    assert classify_spread(50, samples) == "low"
-    assert classify_spread(79, samples) == "medium"
-    assert classify_spread(80, samples) == "high"
-    assert classify_spread(None, samples) == "unavailable"
-    assert classify_spread(1, []) == "unavailable"
+def test_broker_cell_valid_spreads_are_neutral_without_history():
+    sparse = broker_cell(
+        {
+            "latest": {"time": "2026-01-01T00:00:00Z", "spread_pct": 0.0123},
+            "samples": [],
+            "last_success": "2026-01-01T00:00:00Z",
+            "error": "",
+        }
+    )
+    sampled = broker_cell(
+        {
+            "latest": {"time": "2026-01-01T00:00:00Z", "spread_pct": 99.0},
+            "samples": [{"time": f"2026-01-01T00:{minute:02d}:00Z", "spread_pct": minute} for minute in range(60)],
+            "last_success": "2026-01-01T00:00:00Z",
+            "error": "",
+        }
+    )
+    assert sparse["category"] == "neutral"
+    assert sparse["display"] == "0.0123%"
+    assert sampled["category"] == "neutral"
+    assert sampled["display"] == "99.0000%"
+
+
+def test_broker_cell_unavailable_stays_unavailable():
+    cell = broker_cell(
+        {
+            "latest": None,
+            "samples": [],
+            "last_success": "",
+            "error": "bid/ask unavailable",
+        }
+    )
+    assert cell["category"] == "unavailable"
+    assert cell["spread_pct"] is None
+    assert cell["spread_points"] is None
+    assert cell["display"] == ""
+    assert cell["error"] == "bid/ask unavailable"
 
 
 def test_oanda_only_refresh_does_not_create_pepperstone_records():
@@ -258,6 +287,32 @@ def test_oanda_current_payload_uses_current_spread_column_without_timeframes():
     assert gbp_cell["category"] == "unavailable"
     assert gbp_cell["display"] == ""
     assert "No data cached" in gbp_cell["error"]
+
+
+def test_pepperstone_current_payload_uses_snapshot_column_without_timeframes():
+    cache = {
+        "generated_at": "2026-01-01T00:00:00Z",
+        "last_imported_at": "2026-01-01T00:00:00Z",
+        "symbols": ["EUR_USD", "GBP_USD"],
+        "warnings": [],
+        "errors": [],
+        "records": {
+            _cache_key("pepperstone", "EUR_USD", OANDA_CURRENT_TIMEFRAME_LABEL): _oanda_result(),
+            _cache_key("pepperstone", "GBP_USD", "1M"): _oanda_result(0.0456),
+        },
+    }
+    payload = build_spread_payload(cache, brokers=("pepperstone",), current_only=True)
+    assert payload["timeframes"] == []
+    assert payload["current_only"] is True
+    assert payload["columns"] == [
+        {"key": "symbol", "label": "Instrument"},
+        {"key": "current_spread", "label": "Current Spread"},
+    ]
+    by_symbol = {row["symbol"]: row for row in payload["rows"]}
+    assert by_symbol["EUR_USD"]["current_spread"]["spread_pct"] == pytest.approx(0.0123)
+    assert by_symbol["EUR_USD"]["cells"]["CURRENT"]["pepperstone_razor"] == by_symbol["EUR_USD"]["current_spread"]
+    assert by_symbol["GBP_USD"]["current_spread"]["spread_pct"] == pytest.approx(0.0456)
+    assert "1M" not in by_symbol["GBP_USD"]["cells"]
 
 
 def test_refresh_timeout_returns_diagnostics_and_allows_second_attempt():

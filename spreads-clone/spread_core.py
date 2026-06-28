@@ -14,8 +14,6 @@ import time
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
 
-LOW_MAX_PERCENTILE = 50
-HIGH_MIN_PERCENTILE = 80
 REFRESH_INTERVAL_SECONDS = 300
 OANDA_REQUEST_TIMEOUT_SECONDS = 10
 OANDA_REFRESH_TIMEOUT_SECONDS = 120
@@ -51,7 +49,6 @@ TIMEFRAME_LABELS = [tf.label for tf in TIMEFRAMES]
 OANDA_CURRENT_TIMEFRAME_LABEL = "CURRENT"
 OANDA_CURRENT_COLUMN_KEY = "current_spread"
 OANDA_CURRENT_COLUMN_LABEL = "Current Spread"
-MIN_CURRENT_SPREAD_PERCENTILE_SAMPLES = 5
 
 BROKERS = ("oanda", "pepperstone")
 OANDA_ONLY_BROKERS = ("oanda",)
@@ -163,28 +160,6 @@ def format_spread_pct(value: object) -> str:
     return f"{spread_value:.{places}f}%"
 
 
-def percentile_rank(latest: object, samples: Iterable[object]) -> Optional[float]:
-    latest_value = coerce_float(latest)
-    if latest_value is None:
-        return None
-    values = [v for v in (coerce_float(item) for item in samples) if v is not None]
-    if not values:
-        return None
-    below_or_equal = sum(1 for value in values if value <= latest_value)
-    return (below_or_equal / len(values)) * 100.0
-
-
-def classify_spread(latest: object, samples: Iterable[object]) -> str:
-    rank = percentile_rank(latest, samples)
-    if rank is None:
-        return "unavailable"
-    if rank <= LOW_MAX_PERCENTILE:
-        return "low"
-    if rank >= HIGH_MIN_PERCENTILE:
-        return "high"
-    return "medium"
-
-
 def _cache_key(broker: str, symbol: str, timeframe: str) -> str:
     return f"{broker}|{symbol}|{timeframe}"
 
@@ -229,10 +204,11 @@ def _merge_samples(existing: Iterable[object], incoming: Iterable[object], limit
     return ordered
 
 
-def broker_cell(record: Optional[Dict[str, object]], *, min_percentile_samples: int = 1) -> Dict[str, object]:
+def broker_cell(record: Optional[Dict[str, object]]) -> Dict[str, object]:
     if not record:
         return {
             "spread_pct": None,
+            "spread_points": None,
             "display": "",
             "category": "unavailable",
             "updated_at": "",
@@ -254,25 +230,11 @@ def broker_cell(record: Optional[Dict[str, object]], *, min_percentile_samples: 
             "error": error or "Spread data unavailable.",
         }
 
-    samples = record.get("samples")
-    sample_values = [
-        sample.get("spread_pct")
-        for sample in samples
-        if isinstance(sample, dict)
-    ] if isinstance(samples, list) else []
-    if spread_value == 0:
-        category = "low"
-    else:
-        category = (
-            "neutral"
-            if len(sample_values) < max(1, int(min_percentile_samples))
-            else classify_spread(spread_value, sample_values)
-        )
     return {
         "spread_pct": spread_value,
         "spread_points": spread_points,
         "display": format_spread_pct(spread_value),
-        "category": category,
+        "category": "neutral",
         "updated_at": str(latest_sample.get("time") or record.get("last_success") or ""),
         "error": error,
     }
@@ -336,6 +298,15 @@ def _record_for_payload(record: object, broker: str) -> Optional[Dict[str, objec
     return payload
 
 
+def _current_spread_record(record_map: Dict[str, object], broker: str, symbol: str) -> object:
+    record = record_map.get(_cache_key(broker, symbol, OANDA_CURRENT_TIMEFRAME_LABEL))
+    if record is not None:
+        return record
+    if broker == "pepperstone":
+        return record_map.get(_cache_key(broker, symbol, "1M"))
+    return None
+
+
 def _sanitize_cache_for_brokers(cache: Dict[str, object], brokers: Iterable[str]) -> Dict[str, object]:
     if not _oanda_only_brokers(brokers):
         return cache
@@ -362,7 +333,8 @@ def build_spread_payload(
     current_only: bool = False,
 ) -> Dict[str, object]:
     broker_list = tuple(dict.fromkeys(str(item).strip().lower() for item in brokers if str(item).strip()))
-    current_only = bool(current_only and _oanda_only_brokers(broker_list))
+    current_only_broker = broker_list[0] if current_only and len(broker_list) == 1 and broker_list[0] in BROKERS else ""
+    current_only = bool(current_only_broker)
     cache = _sanitize_cache_for_brokers(cache, broker_list)
     symbols = _symbols_from_cache_payload(cache, allowed_brokers=broker_list)
     records = cache.get("records")
@@ -377,18 +349,19 @@ def build_spread_payload(
     rows: List[Dict[str, object]] = []
 
     if current_only:
+        current_broker = current_only_broker
         for symbol in symbols:
-            record = record_map.get(_cache_key("oanda", symbol, OANDA_CURRENT_TIMEFRAME_LABEL))
-            spread_payload = broker_cell(
-                _record_for_payload(record, "oanda"),
-                min_percentile_samples=MIN_CURRENT_SPREAD_PERCENTILE_SAMPLES,
-            )
+            record = _current_spread_record(record_map, current_broker, symbol)
+            spread_payload = broker_cell(_record_for_payload(record, current_broker))
+            cell = {current_broker: spread_payload}
+            if current_broker == "pepperstone":
+                cell["pepperstone_razor"] = spread_payload
             rows.append(
                 {
                     "symbol": symbol,
                     "display_symbol": symbol.replace("_", "/"),
                     OANDA_CURRENT_COLUMN_KEY: spread_payload,
-                    "cells": {OANDA_CURRENT_TIMEFRAME_LABEL: {"oanda": spread_payload}},
+                    "cells": {OANDA_CURRENT_TIMEFRAME_LABEL: cell},
                 }
             )
     else:
@@ -432,7 +405,7 @@ def build_spread_payload(
         last_success = str(cache.get("last_refresh_finished_at") or "")
         suffix = f" Last successful refresh: {last_success}." if last_success else ""
         warnings.append(f"Showing stale/fallback cached OANDA spread data.{suffix}")
-    elif current_only and rows and refresh_state not in {"running"}:
+    elif _oanda_only_brokers(broker_list) and current_only and rows and refresh_state not in {"running"}:
         last_success = str(cache.get("last_refresh_finished_at") or "")
         last_success_dt = parse_time(last_success)
         if last_success_dt is None:

@@ -98,7 +98,7 @@ def test_dashboard_toolbar_css_keeps_scripts_single_row() -> None:
     assert '.script-toolbar-grid .script-btn[data-script-name="trading-journal"] { max-width: 96px; }' in html
     assert '.script-toolbar-grid .script-btn[data-script-name="open-orders"] { max-width: 146px; }' in html
     assert '.script-toolbar-grid .script-btn[data-script-name="spreads-clone"] { max-width: 96px; }' in html
-    assert '.script-toolbar-grid .script-btn[data-script-name="mt5"] { max-width: 72px; }' in html
+    assert '.script-toolbar-grid .script-btn[data-script-name="mt5"]' not in html
     assert '.script-toolbar-grid .script-btn[data-script-name="pine"] { max-width: 76px; }' in html
     assert '.local-exit-btn{\n            margin-top: 0;' in html
 
@@ -157,52 +157,18 @@ def test_local_profile_buttons_use_trading_journal_page_not_merged_route() -> No
     assert '"label": "Journal"' in source
     assert '"label": "Orders / Positions"' in source
     assert '"label": "Spreads"' in source
-    assert '"label": "MT5"' in source
     assert '"label": "Pine"' in source
     assert '"open_url": "/dashboard/trading-journal"' in source
-    assert '"open_url": "/dashboard/mt5"' in source
     assert '"open_url": "/dashboard/pine"' in source
     assert '"open_url": "/trading-journal"' not in source
     assert '"open_url": "/merged/trading-journal"' not in source
     assert '@app.get("/dashboard/trading-journal")' in source
     assert '@app.get("/trading-journal", response_class=HTMLResponse)' in source
-    assert '@app.get("/dashboard/mt5", response_class=HTMLResponse)' in source
     assert '@app.get("/dashboard/pine", response_class=HTMLResponse)' in source
-
-
-def test_mt5_dashboard_api_lists_and_deploys_without_deleting_extras(monkeypatch) -> None:
-    module = _load_master_service_module()
-    tmp_root = _repo_tmp_dir("dashboard_mt5")
-    try:
-        source_mql5 = tmp_root / "repo" / "MQL5"
-        target_mql5 = tmp_root / "terminal" / "MQL5"
-        (source_mql5 / "Experts").mkdir(parents=True)
-        (source_mql5 / "Presets").mkdir(parents=True)
-        (source_mql5 / "Experts" / "Trader.mq5").write_text("repo trader", encoding="utf-8")
-        (source_mql5 / "Presets" / "PullbackEMA_ATR_RR.set").write_text("repo preset", encoding="utf-8")
-        (target_mql5 / "Experts").mkdir(parents=True)
-        (target_mql5 / "Files").mkdir(parents=True)
-        (target_mql5 / "Experts" / "Trader.mq5").write_text("old trader", encoding="utf-8")
-        (target_mql5 / "Files" / "extra.txt").write_text("keep me", encoding="utf-8")
-
-        monkeypatch.setattr(module, "APP_PROFILE", "local")
-        monkeypatch.setattr(module, "MT5_REPO_MQL5_DIR", source_mql5)
-        monkeypatch.setenv("MT5_DATA_MQL5_DIR", str(target_mql5))
-
-        files_response = asyncio.run(module.mt5_files())
-        files_payload = json.loads(files_response.body.decode("utf-8"))
-        assert files_payload["files"] == ["Experts/Trader.mq5", "Presets/PullbackEMA_ATR_RR.set"]
-
-        deploy_response = asyncio.run(module.mt5_deploy())
-        deploy_payload = json.loads(deploy_response.body.decode("utf-8"))
-        assert deploy_response.status_code == 200
-        assert deploy_payload["ok"] is True
-        assert deploy_payload["copied_count"] == 2
-        assert deploy_payload["target_path"] == str(target_mql5.resolve())
-        assert (target_mql5 / "Experts" / "Trader.mq5").read_text(encoding="utf-8") == "repo trader"
-        assert (target_mql5 / "Files" / "extra.txt").read_text(encoding="utf-8") == "keep me"
-    finally:
-        shutil.rmtree(tmp_root, ignore_errors=True)
+    assert '"id": "mt5"' not in source
+    assert '"/dashboard/mt5"' not in source
+    assert '"/api/mt5' not in source
+    assert 'MT5_DASHBOARD_TEMPLATE' not in source
 
 
 def test_pine_dashboard_api_lists_reads_and_blocks_traversal(monkeypatch) -> None:
