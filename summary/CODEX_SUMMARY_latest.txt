@@ -3,7 +3,7 @@ MarketWatchSpreadPercent replacement summary
 Files changed:
 - Deleted obsolete chart-overlay EA:
   - mt5-clone/MQL5/Experts/MarketWatchSpreadPercent.mq5
-- Added feed-only MT5 EA:
+- Added feed-only MT5 EA with optional desktop auto-launch:
   - mt5-clone/MQL5/Experts/MarketWatchSpreadPercentFeed.mq5
 - Added separate desktop pop-out window app:
   - mt5-clone/spread_percent_window.py
@@ -13,6 +13,10 @@ Files changed:
 What changed:
 - Replaced the failed chart-drawn spread table with a two-part spread monitor.
 - The new MT5 EA is feed-only and draws nothing on the chart.
+- The feeder now attempts to auto-launch the separate desktop pop-out when attached to a chart.
+- Auto-launch uses the Windows ShellExecuteW API through shell32.dll, so MT5 must have Allow DLL imports enabled for this EA.
+- DLL imports are only used to open the desktop window; the EA still does not request trading permission and does not trade.
+- If DLL imports are disabled, the feeder continues writing the JSON feed and prints a clear Journal message explaining that auto-launch needs Allow DLL imports.
 - The feeder reads selected Market Watch symbols with SymbolsTotal(true) and SymbolName(index, true).
 - The feeder fetches Bid/Ask with SymbolInfoTick and calculates:
   spread_price = ask - bid
@@ -35,6 +39,13 @@ What changed:
   font size 12
   decimal places 5
   feed file path %APPDATA%\MetaQuotes\Terminal\Common\Files\MarketWatchSpreadPercentFeed.json
+- EA auto-launch defaults:
+  LaunchDesktopWindow = true
+  PythonExecutable = C:\Users\User\miniconda3\python.exe
+  DesktopWindowScriptPath = C:\Users\User\Documents\GPT\CODEX-master\mt5-clone\spread_percent_window.py
+  DesktopWindowRefreshMs = 150
+  DesktopWindowDecimals = 5
+  DesktopWindowShowPoints = false
 - The desktop app handles a missing feed file with a clear status message.
 - The desktop app handles temporary file write/read collisions by retrying instead of crashing.
 - Header sorting is implemented:
@@ -46,15 +57,19 @@ What changed:
 Verification performed:
 - Compiled mt5-clone/MQL5/Experts/MarketWatchSpreadPercentFeed.mq5 with MetaEditor.
   Result: 0 errors, 0 warnings.
+- Copied the auto-launch feeder source into the live MT5 Experts folder and compiled that deployed copy with MetaEditor.
+  Result: 0 errors, 0 warnings.
 - Ran:
   python -m py_compile mt5-clone\spread_percent_window.py
   Result: passed.
 - Scanned new feeder/app files for trading/order APIs.
   Result: no matches for OrderSend, OrderSendAsync, CTrade, trade., PositionOpen, MqlTradeRequest, MqlTradeResult, Buy(, or Sell(.
 - Removed generated .ex5, compiler log, and Python __pycache__ artifacts from the repo workspace after verification.
+- Confirmed the configured Python executable and desktop script path exist on this machine.
 
 Manual verification still required inside a live MT5 session:
-- Attach MarketWatchSpreadPercentFeed.mq5 to a chart and confirm no chart table appears.
+- Attach MarketWatchSpreadPercentFeed.mq5 to a chart with Allow DLL imports enabled and confirm the desktop pop-out opens.
+- Confirm no chart table appears.
 - Confirm MarketWatchSpreadPercentFeed.json is created in the MT5 common files folder.
 - Run:
   python mt5-clone/spread_percent_window.py
