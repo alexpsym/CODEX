@@ -1,45 +1,66 @@
-Spread Monitor percentile display removal summary
+MarketWatchSpreadPercent replacement summary
 
-Spread monitor files changed:
-- spreads-clone/spread_core.py
-- spreads-clone/spread_app.py
-- spreads-clone/pepperstone_import.py
-- tests/test_spread_core.py
-- tests/test_pepperstone_spread_import.py
-- tests/test_spread_monitor_dashboard.py
-- summary/CODEX_SUMMARY_latest.txt
-
-Additional pre-existing local source/test changes picked up by PATCH_DESKTOP_PUSH.bat during the push sequence:
-- mt5-clone/MQL5/Experts/Trader.mq5
-- mt5-clone/MQL5/Experts/MarketWatchSpreadPercent.mq5
-- render/master_service.py
-- tests/test_dashboard_home_layout.py
-- tests/test_master_service_profiles.py
-- tests/test_python_mt5_conversion_files.py
+Files changed:
+- Deleted obsolete chart-overlay EA:
+  - mt5-clone/MQL5/Experts/MarketWatchSpreadPercent.mq5
+- Added feed-only MT5 EA:
+  - mt5-clone/MQL5/Experts/MarketWatchSpreadPercentFeed.mq5
+- Added separate desktop pop-out window app:
+  - mt5-clone/spread_percent_window.py
+- Updated this summary:
+  - summary/CODEX_SUMMARY_latest.txt
 
 What changed:
-- Removed percentile-based spread display/classification from the Spread Monitor UI path.
-- Retired LOW_MAX_PERCENTILE, HIGH_MIN_PERCENTILE, MIN_CURRENT_SPREAD_PERCENTILE_SAMPLES, percentile_rank, and classify_spread from spread_core.py.
-- broker_cell now returns category="neutral" for every valid numeric spread value, including 0.0, regardless of sample count.
-- Missing or invalid spread data still returns category="unavailable".
-- Spread percentages still display in percentage-unit format via format_spread_pct, including 0.00000% for zero spread.
-- Spread points still display when available, including Pepperstone current-only rows as percentage / points.
-- Removed visible percentile legend wording from spread_app.py and replaced it with: "Spread values are shown as percentage of bid/ask midpoint. Points are shown when available."
-- Removed green/orange/red percentile classes from the app stylesheet.
-- Pepperstone remains manual-import only, uses the repo path mt5-clone/pepperstone_spreads_latest.json plus the existing MT5 fallback path, and does not use live MT5 fetchers in the web app.
-- A single Pepperstone import is enough to produce a useful current spread row immediately, without historical sample buildup.
-- OANDA current spread fetch and auto-refresh behavior were kept current-only with no historical-percentile dependency.
-- Existing broker selector buttons for Oanda and Pepperstone remain in spread_app.py.
+- Replaced the failed chart-drawn spread table with a two-part spread monitor.
+- The new MT5 EA is feed-only and draws nothing on the chart.
+- The feeder reads selected Market Watch symbols with SymbolsTotal(true) and SymbolName(index, true).
+- The feeder fetches Bid/Ask with SymbolInfoTick and calculates:
+  spread_price = ask - bid
+  midpoint = (ask + bid) / 2
+  spread_percent = (spread_price / midpoint) * 100
+  spread_points = spread_price / SYMBOL_POINT
+- The feeder writes JSON to the MT5 common files folder using FILE_COMMON.
+- Default feeder output file:
+  MarketWatchSpreadPercentFeed.json
+- Invalid ticks, zero Bid/Ask, zero midpoint, and zero point values export safely with null/N/A fields.
+- The feeder uses EventSetMillisecondTimer with default UpdateIntervalMs = 100 and stops the timer on deinit.
+- The feeder does not include Trade.mqh and does not call trading/order APIs.
+- The desktop app is a real separate Tkinter window that can be moved and resized by the OS window frame.
+- The desktop table defaults to Symbol and Spread % only.
+- Bid and Ask are not shown in the desktop table.
+- Optional Spread Points display is available with:
+  python mt5-clone/spread_percent_window.py --show-points
+- Desktop defaults:
+  refresh interval 150 ms
+  font size 12
+  decimal places 5
+  feed file path %APPDATA%\MetaQuotes\Terminal\Common\Files\MarketWatchSpreadPercentFeed.json
+- The desktop app handles a missing feed file with a clear status message.
+- The desktop app handles temporary file write/read collisions by retrying instead of crashing.
+- Header sorting is implemented:
+  Symbol first click A-Z, second click Z-A
+  Spread % first click largest-smallest, second click smallest-largest
+- N/A spread values sort to the bottom when sorting by Spread %.
+- Symbol suffixes are preserved as supplied by the feed.
 
-Tests run and results:
-- py -3 -m pytest tests/test_spread_core.py tests/test_pepperstone_spread_import.py tests/test_spread_monitor_dashboard.py
-  Result: could not run because the Windows py launcher is not installed or not on PATH in this environment.
-- python -m pytest tests/test_spread_core.py tests/test_pepperstone_spread_import.py tests/test_spread_monitor_dashboard.py
-  Result: 35 passed, 8 existing FastAPI deprecation warnings.
-- python -m pytest tests/test_oanda_spread_fetch.py tests/test_mt5_spread_fetch.py
-  Result: 16 passed.
+Verification performed:
+- Compiled mt5-clone/MQL5/Experts/MarketWatchSpreadPercentFeed.mq5 with MetaEditor.
+  Result: 0 errors, 0 warnings.
+- Ran:
+  python -m py_compile mt5-clone\spread_percent_window.py
+  Result: passed.
+- Scanned new feeder/app files for trading/order APIs.
+  Result: no matches for OrderSend, OrderSendAsync, CTrade, trade., PositionOpen, MqlTradeRequest, MqlTradeResult, Buy(, or Sell(.
+- Removed generated .ex5, compiler log, and Python __pycache__ artifacts from the repo workspace after verification.
 
-Residual risks:
-- Verification used C:\Users\User\miniconda3\python.exe via python because py -3 is unavailable here.
-- PATCH_DESKTOP_PUSH.bat committed and pushed some pre-existing local source/test edits outside the spread-percentile change. Remaining local dirt is limited to runtime/state JSON files excluded by the push script.
-- PATCH_DESKTOP_PUSH.bat completed successfully and verified local HEAD matched origin/master during the push sequence.
+Manual verification still required inside a live MT5 session:
+- Attach MarketWatchSpreadPercentFeed.mq5 to a chart and confirm no chart table appears.
+- Confirm MarketWatchSpreadPercentFeed.json is created in the MT5 common files folder.
+- Run:
+  python mt5-clone/spread_percent_window.py
+- Confirm live Market Watch symbols appear in the separate desktop window.
+- Confirm live spread percentages match manual calculation.
+
+Repo/push notes:
+- Existing unrelated runtime/state JSON dirt was present before this replacement work and was not intentionally edited for this task.
+- PATCH_DESKTOP_PUSH.bat is the requested final push path and should exclude runtime/state artifacts according to its reset rules.
