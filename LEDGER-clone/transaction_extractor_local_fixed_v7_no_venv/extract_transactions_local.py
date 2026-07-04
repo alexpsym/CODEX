@@ -3089,6 +3089,22 @@ def _clean_simple_list_description(text: str) -> str:
     return text
 
 
+def infer_simple_list_side(description: str, negative: bool, raw_amount: str) -> Tuple[str, bool, str]:
+    low = description.lower()
+    raw = _normalise_dashes(raw_amount)
+    has_plus = "+" in raw
+    has_minus = "-" in raw or negative
+    if "transfer from" in low or (has_plus and "transfer to" not in low):
+        return "debit", False, "explicit incoming amount"
+    if "transfer to" in low or has_minus:
+        return "credit", False, "explicit outgoing amount"
+    if any(hint in low for hint in INCOME_HINTS):
+        return "debit", False, "income keyword"
+    if any(hint in low for hint in OUTGOING_HINTS):
+        return "credit", False, "outgoing merchant keyword"
+    return "credit", True, "signless simple-list amount defaulted to money out; verify"
+
+
 def parse_simple_date_amount_list(path: Path, source_name: str) -> Tuple[List[ParsedTransaction], str]:
     img = load_image(path)
     lines = _receipt_ocr_lines(img, scale=4)
@@ -3124,11 +3140,14 @@ def parse_simple_date_amount_list(path: Path, source_name: str) -> Tuple[List[Pa
         if not desc:
             review_parts.append("description not detected")
         value = abs(round(float(amount), 2))
+        side, side_review, side_reason = infer_simple_list_side(desc, negative, raw_amount)
+        if side_review:
+            review_parts.append(side_reason)
         rows.append(ParsedTransaction(
             date=date_value,
             description=desc or "UNKNOWN DESCRIPTION",
-            debit=None if negative else value,
-            credit=value if negative else None,
+            debit=value if side == "debit" else None,
+            credit=value if side == "credit" else None,
             raw_text=f"{current_date_text} | {text}",
             needs_review=bool(review_parts),
             review_reason="; ".join(review_parts),

@@ -17,19 +17,19 @@ SIMPLE_LIST_SCREENSHOT = RUN_DIR / "downloads" / "source_01.jpg"
 BANK_APP_SCREENSHOT = RUN_DIR / "downloads" / "source_02.jpg"
 
 
-# direction is the source-image sign. Final XLSX/CSV cells must still be positive.
+# side is the extractor's ledger side. Final XLSX/CSV cells must still be positive.
 EXPECTED_SIMPLE = [
-    ("source_01.jpg", "04/07/2026", "W2695-Woolworths DARRA", "debit", 29.64, False),
-    ("source_01.jpg", "27/06/2026", "W2695-Woolworths DARRA", "debit", 37.70, False),
-    ("source_01.jpg", "25/06/2026", "W2648-Woolworths FOREST LAKE", "debit", 15.50, False),
-    ("source_01.jpg", "21/06/2026", "W2648-Woolworths FOREST LAKE", "debit", 33.30, False),
-    ("source_01.jpg", "17/06/2026", "W2648-Woolworths FOREST LAKE", "debit", 5.20, False),
-    ("source_01.jpg", "16/06/2026", "W2648-Woolworths FOREST LAKE", "debit", 4.20, False),
-    ("source_01.jpg", "14/06/2026", "W2648-Woolworths FOREST LAKE", "debit", 43.50, False),
-    ("source_01.jpg", "13/06/2026", "W2648-Woolworths FOREST LAKE", "debit", 6.50, False),
-    ("source_01.jpg", "12/06/2026", "W2864-Woolworths BROOKWATER", "debit", 12.80, False),
-    ("source_01.jpg", "11/06/2026", "W2648-Woolworths FOREST LAKE", "debit", 23.99, False),
-    ("source_01.jpg", "07/06/2026", "W2648-Woolworths FOREST LAKE", "debit", 8.00, False),
+    ("source_01.jpg", "04/07/2026", "W2695-Woolworths DARRA", "credit", 29.64, False),
+    ("source_01.jpg", "27/06/2026", "W2695-Woolworths DARRA", "credit", 37.70, False),
+    ("source_01.jpg", "25/06/2026", "W2648-Woolworths FOREST LAKE", "credit", 15.50, False),
+    ("source_01.jpg", "21/06/2026", "W2648-Woolworths FOREST LAKE", "credit", 33.30, False),
+    ("source_01.jpg", "17/06/2026", "W2648-Woolworths FOREST LAKE", "credit", 5.20, False),
+    ("source_01.jpg", "16/06/2026", "W2648-Woolworths FOREST LAKE", "credit", 4.20, False),
+    ("source_01.jpg", "14/06/2026", "W2648-Woolworths FOREST LAKE", "credit", 43.50, False),
+    ("source_01.jpg", "13/06/2026", "W2648-Woolworths FOREST LAKE", "credit", 6.50, False),
+    ("source_01.jpg", "12/06/2026", "W2864-Woolworths BROOKWATER", "credit", 12.80, False),
+    ("source_01.jpg", "11/06/2026", "W2648-Woolworths FOREST LAKE", "credit", 23.99, False),
+    ("source_01.jpg", "07/06/2026", "W2648-Woolworths FOREST LAKE", "credit", 8.00, False),
 ]
 
 EXPECTED_BANK = [

@@ -10,12 +10,13 @@ Files changed:
 Live runtime copy updated:
 - C:\Users\User\Documents\LEDGER\transaction_extractor_local_fixed_v7_no_venv\extract_transactions_local.py
 - Repo and live extractor SHA-256 matched after copy:
-  D3AF3E08B332A48F5BC2E151A1B912191CCE5A485FD2F4BDCF5F01264ABA680D
+  B37298F7533F43256CB1848474E15F2CB61DF40A2986C6F6B3BFB5EBF15D9CE5
 
 What changed:
 - Added a simple date/merchant/amount list parser for screenshots like image(580).png/source_01.jpg.
 - The simple-list parser detects repeated explicit date lines, pairs each date with the following merchant line, and extracts the right-aligned amount from that merchant row.
 - The Woolworths screenshot no longer collapses into one giant segment; it now produces the expected 11 rows.
+- Corrected signless Woolworths/simple-list purchase rows to CREDIT, not DEBIT.
 - Tightened the bank-app transaction parser for image(579).png/source_02.jpg.
 - Date headings are parsed separately from transaction rows and carried down until the next reliable heading.
 - Today and Yesterday remain resolved from the run folder timestamp where available.
@@ -26,6 +27,7 @@ What changed:
 - Preserved the existing extractor/ledger convention:
   source sign determines side
   outgoing negative transactions are written to CREDIT as positive amounts
+  signless simple-list merchant purchases are written to CREDIT as positive amounts
   incoming positive transactions are written to DEBIT as positive amounts
   final CSV/XLSX amount cells are positive
 - Preserved duplicate NOTES workbook headers because that workbook shape is owned by this extractor and used by its existing workflow.
@@ -42,6 +44,7 @@ Regression coverage:
   14 rows from source_02.jpg
 - Tests check dates, descriptions, amounts, side placement, pending flags, review flags, and review reasons.
 - Tests check source_01 simple-list mode no longer collapses to one row.
+- Tests check source_01 Woolworths rows are written to CREDIT even though the source image has signless amounts.
 - Tests check rows sharing one date heading.
 - Tests check +$21L00 normalizes to 211.00.
 - Tests write fresh temp CSV/XLSX outputs and inspect them programmatically.
@@ -59,21 +62,21 @@ Verification performed:
 - Copied the patched extractor into the live C:\Users\User\Documents\LEDGER runtime folder.
 - Ran the live extractor from C:\Users\User\Documents\LEDGER\transaction_extractor_local_fixed_v7_no_venv against the live bad-run source images.
   Live output:
-  C:\Users\User\Documents\LEDGER\transaction_extractor_local_fixed_v7_no_venv\outputs\run_20260704_201918\extracted_transactions_20260704_201918.xlsx
-  C:\Users\User\Documents\LEDGER\transaction_extractor_local_fixed_v7_no_venv\outputs\run_20260704_201918\review_extraction_20260704_201918.csv
+  C:\Users\User\Documents\LEDGER\transaction_extractor_local_fixed_v7_no_venv\outputs\run_20260704_203845\extracted_transactions_20260704_203845.xlsx
+  C:\Users\User\Documents\LEDGER\transaction_extractor_local_fixed_v7_no_venv\outputs\run_20260704_203845\review_extraction_20260704_203845.csv
   Result: 25 rows written, 0 review flags.
 - Programmatically opened the live XLSX/CSV and confirmed:
-  04/07/2026 W2695-Woolworths DARRA DEBIT 29.64
-  27/06/2026 W2695-Woolworths DARRA DEBIT 37.70
-  25/06/2026 W2648-Woolworths FOREST LAKE DEBIT 15.50
-  21/06/2026 W2648-Woolworths FOREST LAKE DEBIT 33.30
-  17/06/2026 W2648-Woolworths FOREST LAKE DEBIT 5.20
-  16/06/2026 W2648-Woolworths FOREST LAKE DEBIT 4.20
-  14/06/2026 W2648-Woolworths FOREST LAKE DEBIT 43.50
-  13/06/2026 W2648-Woolworths FOREST LAKE DEBIT 6.50
-  12/06/2026 W2864-Woolworths BROOKWATER DEBIT 12.80
-  11/06/2026 W2648-Woolworths FOREST LAKE DEBIT 23.99
-  07/06/2026 W2648-Woolworths FOREST LAKE DEBIT 8.00
+  04/07/2026 W2695-Woolworths DARRA CREDIT 29.64
+  27/06/2026 W2695-Woolworths DARRA CREDIT 37.70
+  25/06/2026 W2648-Woolworths FOREST LAKE CREDIT 15.50
+  21/06/2026 W2648-Woolworths FOREST LAKE CREDIT 33.30
+  17/06/2026 W2648-Woolworths FOREST LAKE CREDIT 5.20
+  16/06/2026 W2648-Woolworths FOREST LAKE CREDIT 4.20
+  14/06/2026 W2648-Woolworths FOREST LAKE CREDIT 43.50
+  13/06/2026 W2648-Woolworths FOREST LAKE CREDIT 6.50
+  12/06/2026 W2864-Woolworths BROOKWATER CREDIT 12.80
+  11/06/2026 W2648-Woolworths FOREST LAKE CREDIT 23.99
+  07/06/2026 W2648-Woolworths FOREST LAKE CREDIT 8.00
   04/07/2026 RENDER.COM +14158304762 US CREDIT 10.17 pending
   03/07/2026 Bridgewater Bake House CREDIT 5.50
   03/07/2026 Bridgewater Bake House CREDIT 8.50
