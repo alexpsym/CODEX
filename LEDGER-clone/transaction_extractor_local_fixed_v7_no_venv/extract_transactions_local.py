@@ -2703,7 +2703,6 @@ def normalize_amount_candidate(token: str) -> Optional[Tuple[float, bool, str]]:
     s = s.replace("$", "")
 
     s = s.replace("O", "0").replace("o", "0")
-    s = re.sub(r"(?<=\d)[IL](?=\d{2}\b)", ".", s)
     s = s.replace("I", "1").replace("L", "1")
     s = s.replace("S", "5")
     s = re.sub(r"[^0-9.]", "", s).strip(".")
@@ -3053,6 +3052,126 @@ def parse_image_spatial(path: Path, run_dir: Path, source_name: str) -> Tuple[Li
         ))
 
     return rows, "\n".join(debug_lines)
+
+
+def _rows_look_like_simple_date_amount_list(lines: List[Dict[str, object]], img_width: int) -> bool:
+    if len(lines) < 6:
+        return False
+    date_lines = 0
+    amount_lines = 0
+    paired = 0
+    previous_was_date = False
+    for line in lines:
+        text = str(line.get("text", ""))
+        is_date = parse_explicit_date(text) is not None
+        amount = _receipt_amount_from_line(line, img_width)
+        if is_date:
+            date_lines += 1
+            previous_was_date = True
+            continue
+        if amount is not None:
+            amount_lines += 1
+            if previous_was_date:
+                paired += 1
+            previous_was_date = False
+        elif text.strip():
+            previous_was_date = False
+    return date_lines >= 3 and amount_lines >= 3 and paired >= 3
+
+
+def _clean_simple_list_description(text: str) -> str:
+    text = normalize_token_text(text)
+    text = re.sub(r"\bWoohwvorths\b", "Woolworths", text, flags=re.I)
+    text = re.sub(r"\bWoohvorths\b", "Woolworths", text, flags=re.I)
+    text = re.sub(r"\bWoolvorths\b", "Woolworths", text, flags=re.I)
+    text = re.sub(r"\bWoolwvorths\b", "Woolworths", text, flags=re.I)
+    text = re.sub(r"\s+", " ", text).strip(" -:,;")
+    return text
+
+
+def parse_simple_date_amount_list(path: Path, source_name: str) -> Tuple[List[ParsedTransaction], str]:
+    img = load_image(path)
+    lines = _receipt_ocr_lines(img, scale=4)
+    rows: List[ParsedTransaction] = []
+    debug: List[str] = [f"SIMPLE_LIST_MODE {source_name} {img.width}x{img.height}"]
+    current_date: Optional[dt.date] = None
+    current_date_text = ""
+
+    for line in lines:
+        text = normalize_token_text(str(line.get("text", "")))
+        if not text:
+            continue
+        parsed_date = parse_explicit_date(text)
+        if parsed_date is not None:
+            current_date = parsed_date
+            current_date_text = text
+            debug.append(f"DATE y={float(line['y']):.1f}: {text!r} -> {parsed_date.isoformat()}")
+            continue
+
+        amount_info = _receipt_amount_from_line(line, img.width)
+        debug.append(f"LINE y={float(line['y']):.1f}: {text!r}; amount={amount_info!r}; date={current_date_text!r}")
+        if amount_info is None:
+            continue
+
+        amount, negative, raw_amount, amount_x = amount_info
+        desc = _clean_simple_list_description(_left_text_before_amount(line, amount_x))
+        review_parts: List[str] = []
+        if current_date is None:
+            review_parts.append("date not detected")
+            date_value = ""
+        else:
+            date_value = current_date.strftime("%d/%m/%Y")
+        if not desc:
+            review_parts.append("description not detected")
+        value = abs(round(float(amount), 2))
+        rows.append(ParsedTransaction(
+            date=date_value,
+            description=desc or "UNKNOWN DESCRIPTION",
+            debit=None if negative else value,
+            credit=value if negative else None,
+            raw_text=f"{current_date_text} | {text}",
+            needs_review=bool(review_parts),
+            review_reason="; ".join(review_parts),
+            source_name=source_name,
+            pending=False,
+        ))
+        current_date = None
+        current_date_text = ""
+
+    return rows, "\n".join(debug)
+
+
+def source_to_rows(path: Path, run_dir: Path) -> Tuple[List[ParsedTransaction], str]:
+    ext = path.suffix.lower()
+    if ext in {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}:
+        img = load_image(path)
+        receipt_lines = _receipt_ocr_lines(img, scale=4)
+        if _rows_look_like_simple_date_amount_list(receipt_lines, img.width):
+            return parse_simple_date_amount_list(path, path.name)
+        if _rows_look_like_receipt(receipt_lines, img.width):
+            return parse_receipt_items(path, path.name)
+        return parse_image_spatial(path, run_dir, path.name)
+    if ext == ".pdf":
+        if fitz is None:
+            raise RuntimeError("PyMuPDF is not installed, so PDFs cannot be processed.")
+        doc = fitz.open(path)
+        all_rows: List[ParsedTransaction] = []
+        debug_parts: List[str] = []
+        try:
+            for page_index in range(len(doc)):
+                page = doc[page_index]
+                pix = page.get_pixmap(matrix=fitz.Matrix(3, 3), alpha=False)
+                img_path = run_dir / f"{path.stem}_page_{page_index + 1}.png"
+                pix.save(str(img_path))
+                rows, debug = source_to_rows(img_path, run_dir)
+                for r in rows:
+                    r.source_name = f"{path.name} page {page_index + 1}"
+                all_rows.extend(rows)
+                debug_parts.append(debug)
+        finally:
+            doc.close()
+        return all_rows, "\n\n".join(debug_parts)
+    raise RuntimeError(f"Unsupported file type: {path.name}")
 
 
 def main() -> int:

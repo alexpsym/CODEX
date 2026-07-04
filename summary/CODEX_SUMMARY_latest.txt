@@ -3,59 +3,77 @@ Transaction extractor screenshot OCR fix summary
 Files changed:
 - LEDGER-clone/transaction_extractor_local_fixed_v7_no_venv/extract_transactions_local.py
 - tests/test_transaction_extractor_screenshot.py
+- LEDGER-clone/transaction_extractor_local_fixed_v7_no_venv/outputs/run_20260704_194549/downloads/source_01.jpg
+- LEDGER-clone/transaction_extractor_local_fixed_v7_no_venv/outputs/run_20260704_194549/downloads/source_02.jpg
 - summary/CODEX_SUMMARY_latest.txt
 
 Live runtime copy updated:
 - C:\Users\User\Documents\LEDGER\transaction_extractor_local_fixed_v7_no_venv\extract_transactions_local.py
 - Repo and live extractor SHA-256 matched after copy:
-  CEF48E92136C000D0BF014A3F689A90FD9BCE0F58C60C26C6240815D454FA4AF
+  D3AF3E08B332A48F5BC2E151A1B912191CCE5A485FD2F4BDCF5F01264ABA680D
 
 What changed:
-- Added final v8 extractor overrides for BOQ mobile transaction-list screenshots.
-- Date headings are now parsed separately from transaction rows.
-- Today and Yesterday are resolved from the run folder timestamp when available.
-- The current heading date is carried down to following rows until the next heading.
-- Corrupted row text is no longer used to invent transaction dates.
-- Right-side amount crops are read with stricter exact-cents parsing.
-- Added bounded fallback crop variants for tiny anti-aliased amount text.
-- Added safe handling for common OCR confusions such as S/$/5, O/0, and L as a decimal separator in +$21L00.
-- Rejected unsafe amount tokens such as one-decimal values and signless full-row garbage.
-- Fixed the visible -$10.17 Render row so it no longer becomes +900.17 or -$20.17.
-- Fixed Bridgewater rows to -$5.50 and -$8.50.
-- Fixed Khao Thai to -$29.72 despite the common 9/3 OCR confusion.
-- Preserved transfer direction text:
-  Transfer to Alexander Symoniw
-  Transfer from SaveME
-- Preserved pending state by writing pending into the first NOTES column and into the review CSV pending field.
-- Preserved the duplicate NOTES workbook headers because the extractor README documents that workbook shape.
-- Preserved the existing ledger convention:
-  outgoing payments are written to CREDIT as positive values
-  incoming transfers are written to DEBIT as positive values
-- Did not change BOQ CSV transform/copy scripts.
-- Did not touch Trading Journal workbook layout/formulas or unrelated MT5, Bybit, OANDA, or Render Master Control code.
+- Added a simple date/merchant/amount list parser for screenshots like image(580).png/source_01.jpg.
+- The simple-list parser detects repeated explicit date lines, pairs each date with the following merchant line, and extracts the right-aligned amount from that merchant row.
+- The Woolworths screenshot no longer collapses into one giant segment; it now produces the expected 11 rows.
+- Tightened the bank-app transaction parser for image(579).png/source_02.jpg.
+- Date headings are parsed separately from transaction rows and carried down until the next reliable heading.
+- Today and Yesterday remain resolved from the run folder timestamp where available.
+- Amount extraction is constrained to right-side amount text and pending text no longer contaminates the amount.
+- Safe amount normalization now reads +$21L00 as +211.00.
+- Unsafe amount jumps such as -$10.17 becoming 900.17 are rejected instead of accepted as fake-good values.
+- Description extraction preserves visible title text, including transfer direction text.
+- Preserved the existing extractor/ledger convention:
+  source sign determines side
+  outgoing negative transactions are written to CREDIT as positive amounts
+  incoming positive transactions are written to DEBIT as positive amounts
+  final CSV/XLSX amount cells are positive
+- Preserved duplicate NOTES workbook headers because that workbook shape is owned by this extractor and used by its existing workflow.
+- Did not change BOQ transform/copy scripts.
+- Did not touch Trading Journal workbook layout/formulas or unrelated MT5, Bybit, OANDA, Render, or Render Master Control code.
+- Did not import the bad extracted workbook.
 
 Regression coverage:
-- Added tests using the supplied bad run fixture:
-  LEDGER-clone/transaction_extractor_local_fixed_v7_no_venv/outputs/run_20260704_120627/downloads/source_01.jpg
-- The regression checks all 14 expected transactions, dates, descriptions, pending flags, review flags, and debit/credit placement.
-- The regression checks rows sharing the same 03/07/2026 date heading.
-- The regression writes a fresh temp XLSX/CSV and inspects those outputs programmatically.
+- Added fixtures from the supplied bad live run:
+  LEDGER-clone/transaction_extractor_local_fixed_v7_no_venv/outputs/run_20260704_194549/downloads/source_01.jpg
+  LEDGER-clone/transaction_extractor_local_fixed_v7_no_venv/outputs/run_20260704_194549/downloads/source_02.jpg
+- Regression tests assert exactly 25 rows total:
+  11 rows from source_01.jpg
+  14 rows from source_02.jpg
+- Tests check dates, descriptions, amounts, side placement, pending flags, review flags, and review reasons.
+- Tests check source_01 simple-list mode no longer collapses to one row.
+- Tests check rows sharing one date heading.
+- Tests check +$21L00 normalizes to 211.00.
+- Tests write fresh temp CSV/XLSX outputs and inspect them programmatically.
 
 Verification performed:
 - python -m py_compile LEDGER-clone\transaction_extractor_local_fixed_v7_no_venv\extract_transactions_local.py
   Result: passed.
 - python -m pytest tests\test_transaction_extractor_screenshot.py -q
   Result: 3 passed.
-- Ran repo extractor against the provided screenshot:
-  C:\Users\User\AppData\Local\Temp\codex-clipboard-1322a317-c170-4a3f-9913-49248213b59a.png
-  Result: 14 rows written, 0 review flags.
-- Programmatically opened the generated repo XLSX and confirmed the 14 expected values.
+- Ran the repo extractor against both fixture screenshots:
+  LEDGER-clone\transaction_extractor_local_fixed_v7_no_venv\outputs\run_20260704_194549\downloads\source_01.jpg
+  LEDGER-clone\transaction_extractor_local_fixed_v7_no_venv\outputs\run_20260704_194549\downloads\source_02.jpg
+  Result: 25 rows written, 0 review flags.
+- Programmatically opened the generated repo XLSX/CSV and confirmed exactly the expected 25 rows with positive ledger amounts.
 - Copied the patched extractor into the live C:\Users\User\Documents\LEDGER runtime folder.
-- Ran the live extractor from C:\Users\User\Documents\LEDGER\transaction_extractor_local_fixed_v7_no_venv against the same screenshot.
+- Ran the live extractor from C:\Users\User\Documents\LEDGER\transaction_extractor_local_fixed_v7_no_venv against the live bad-run source images.
   Live output:
-  C:\Users\User\Documents\LEDGER\transaction_extractor_local_fixed_v7_no_venv\outputs\run_20260704_193303\extracted_transactions_20260704_193303.xlsx
-  Result: 14 rows written, 0 review flags.
-- Programmatically opened the live XLSX and confirmed:
+  C:\Users\User\Documents\LEDGER\transaction_extractor_local_fixed_v7_no_venv\outputs\run_20260704_201918\extracted_transactions_20260704_201918.xlsx
+  C:\Users\User\Documents\LEDGER\transaction_extractor_local_fixed_v7_no_venv\outputs\run_20260704_201918\review_extraction_20260704_201918.csv
+  Result: 25 rows written, 0 review flags.
+- Programmatically opened the live XLSX/CSV and confirmed:
+  04/07/2026 W2695-Woolworths DARRA DEBIT 29.64
+  27/06/2026 W2695-Woolworths DARRA DEBIT 37.70
+  25/06/2026 W2648-Woolworths FOREST LAKE DEBIT 15.50
+  21/06/2026 W2648-Woolworths FOREST LAKE DEBIT 33.30
+  17/06/2026 W2648-Woolworths FOREST LAKE DEBIT 5.20
+  16/06/2026 W2648-Woolworths FOREST LAKE DEBIT 4.20
+  14/06/2026 W2648-Woolworths FOREST LAKE DEBIT 43.50
+  13/06/2026 W2648-Woolworths FOREST LAKE DEBIT 6.50
+  12/06/2026 W2864-Woolworths BROOKWATER DEBIT 12.80
+  11/06/2026 W2648-Woolworths FOREST LAKE DEBIT 23.99
+  07/06/2026 W2648-Woolworths FOREST LAKE DEBIT 8.00
   04/07/2026 RENDER.COM +14158304762 US CREDIT 10.17 pending
   03/07/2026 Bridgewater Bake House CREDIT 5.50
   03/07/2026 Bridgewater Bake House CREDIT 8.50
@@ -69,8 +87,7 @@ Verification performed:
   07/06/2026 Transfer from SaveME DEBIT 300.00
   05/06/2026 Robins Pizza/Shop 17/2 CREDIT 19.82
   05/06/2026 Render.Com CREDIT 9.83
-  04/06/2026 Transfer from SaveME DEBIT 21.00
+  04/06/2026 Transfer from SaveME DEBIT 211.00
 
 Repo notes:
 - Existing unrelated render/data JSON changes were present and were not edited for this task.
-- The transaction_extractor_local_fixed_v7_no_venv folder is currently untracked in this repo because it was copied in as the fixture/source package for this task.
