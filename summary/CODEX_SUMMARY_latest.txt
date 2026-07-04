@@ -1,81 +1,76 @@
-MarketWatchSpreadPercent replacement summary
+Transaction extractor screenshot OCR fix summary
 
 Files changed:
-- Deleted obsolete chart-overlay EA:
-  - mt5-clone/MQL5/Experts/MarketWatchSpreadPercent.mq5
-- Added feed-only MT5 EA with optional desktop auto-launch:
-  - mt5-clone/MQL5/Experts/MarketWatchSpreadPercentFeed.mq5
-- Added separate desktop pop-out window app:
-  - mt5-clone/spread_percent_window.py
-- Updated this summary:
-  - summary/CODEX_SUMMARY_latest.txt
+- LEDGER-clone/transaction_extractor_local_fixed_v7_no_venv/extract_transactions_local.py
+- tests/test_transaction_extractor_screenshot.py
+- summary/CODEX_SUMMARY_latest.txt
+
+Live runtime copy updated:
+- C:\Users\User\Documents\LEDGER\transaction_extractor_local_fixed_v7_no_venv\extract_transactions_local.py
+- Repo and live extractor SHA-256 matched after copy:
+  CEF48E92136C000D0BF014A3F689A90FD9BCE0F58C60C26C6240815D454FA4AF
 
 What changed:
-- Replaced the failed chart-drawn spread table with a two-part spread monitor.
-- The new MT5 EA is feed-only and draws nothing on the chart.
-- The feeder now attempts to auto-launch the separate desktop pop-out when attached to a chart.
-- Auto-launch uses the Windows ShellExecuteW API through shell32.dll, so MT5 must have Allow DLL imports enabled for this EA.
-- DLL imports are only used to open the desktop window; the EA still does not request trading permission and does not trade.
-- If DLL imports are disabled, the feeder continues writing the JSON feed and prints a clear Journal message explaining that auto-launch needs Allow DLL imports.
-- The feeder reads selected Market Watch symbols with SymbolsTotal(true) and SymbolName(index, true).
-- The feeder fetches Bid/Ask with SymbolInfoTick and calculates:
-  spread_price = ask - bid
-  midpoint = (ask + bid) / 2
-  spread_percent = (spread_price / midpoint) * 100
-  spread_points = spread_price / SYMBOL_POINT
-- The feeder writes JSON to the MT5 common files folder using FILE_COMMON.
-- Default feeder output file:
-  MarketWatchSpreadPercentFeed.json
-- Invalid ticks, zero Bid/Ask, zero midpoint, and zero point values export safely with null/N/A fields.
-- The feeder uses EventSetMillisecondTimer with default UpdateIntervalMs = 100 and stops the timer on deinit.
-- The feeder does not include Trade.mqh and does not call trading/order APIs.
-- The desktop app is a real separate Tkinter window that can be moved and resized by the OS window frame.
-- The desktop table defaults to Symbol and Spread % only.
-- Bid and Ask are not shown in the desktop table.
-- Optional Spread Points display is available with:
-  python mt5-clone/spread_percent_window.py --show-points
-- Desktop defaults:
-  refresh interval 150 ms
-  font size 12
-  decimal places 5
-  feed file path %APPDATA%\MetaQuotes\Terminal\Common\Files\MarketWatchSpreadPercentFeed.json
-- EA auto-launch defaults:
-  LaunchDesktopWindow = true
-  PythonExecutable = C:\Users\User\miniconda3\python.exe
-  DesktopWindowScriptPath = C:\Users\User\Documents\GPT\CODEX-master\mt5-clone\spread_percent_window.py
-  DesktopWindowRefreshMs = 150
-  DesktopWindowDecimals = 5
-  DesktopWindowShowPoints = false
-- The desktop app handles a missing feed file with a clear status message.
-- The desktop app handles temporary file write/read collisions by retrying instead of crashing.
-- Header sorting is implemented:
-  Symbol first click A-Z, second click Z-A
-  Spread % first click largest-smallest, second click smallest-largest
-- N/A spread values sort to the bottom when sorting by Spread %.
-- Symbol suffixes are preserved as supplied by the feed.
+- Added final v8 extractor overrides for BOQ mobile transaction-list screenshots.
+- Date headings are now parsed separately from transaction rows.
+- Today and Yesterday are resolved from the run folder timestamp when available.
+- The current heading date is carried down to following rows until the next heading.
+- Corrupted row text is no longer used to invent transaction dates.
+- Right-side amount crops are read with stricter exact-cents parsing.
+- Added bounded fallback crop variants for tiny anti-aliased amount text.
+- Added safe handling for common OCR confusions such as S/$/5, O/0, and L as a decimal separator in +$21L00.
+- Rejected unsafe amount tokens such as one-decimal values and signless full-row garbage.
+- Fixed the visible -$10.17 Render row so it no longer becomes +900.17 or -$20.17.
+- Fixed Bridgewater rows to -$5.50 and -$8.50.
+- Fixed Khao Thai to -$29.72 despite the common 9/3 OCR confusion.
+- Preserved transfer direction text:
+  Transfer to Alexander Symoniw
+  Transfer from SaveME
+- Preserved pending state by writing pending into the first NOTES column and into the review CSV pending field.
+- Preserved the duplicate NOTES workbook headers because the extractor README documents that workbook shape.
+- Preserved the existing ledger convention:
+  outgoing payments are written to CREDIT as positive values
+  incoming transfers are written to DEBIT as positive values
+- Did not change BOQ CSV transform/copy scripts.
+- Did not touch Trading Journal workbook layout/formulas or unrelated MT5, Bybit, OANDA, or Render Master Control code.
+
+Regression coverage:
+- Added tests using the supplied bad run fixture:
+  LEDGER-clone/transaction_extractor_local_fixed_v7_no_venv/outputs/run_20260704_120627/downloads/source_01.jpg
+- The regression checks all 14 expected transactions, dates, descriptions, pending flags, review flags, and debit/credit placement.
+- The regression checks rows sharing the same 03/07/2026 date heading.
+- The regression writes a fresh temp XLSX/CSV and inspects those outputs programmatically.
 
 Verification performed:
-- Compiled mt5-clone/MQL5/Experts/MarketWatchSpreadPercentFeed.mq5 with MetaEditor.
-  Result: 0 errors, 0 warnings.
-- Copied the auto-launch feeder source into the live MT5 Experts folder and compiled that deployed copy with MetaEditor.
-  Result: 0 errors, 0 warnings.
-- Ran:
-  python -m py_compile mt5-clone\spread_percent_window.py
+- python -m py_compile LEDGER-clone\transaction_extractor_local_fixed_v7_no_venv\extract_transactions_local.py
   Result: passed.
-- Scanned new feeder/app files for trading/order APIs.
-  Result: no matches for OrderSend, OrderSendAsync, CTrade, trade., PositionOpen, MqlTradeRequest, MqlTradeResult, Buy(, or Sell(.
-- Removed generated .ex5, compiler log, and Python __pycache__ artifacts from the repo workspace after verification.
-- Confirmed the configured Python executable and desktop script path exist on this machine.
+- python -m pytest tests\test_transaction_extractor_screenshot.py -q
+  Result: 3 passed.
+- Ran repo extractor against the provided screenshot:
+  C:\Users\User\AppData\Local\Temp\codex-clipboard-1322a317-c170-4a3f-9913-49248213b59a.png
+  Result: 14 rows written, 0 review flags.
+- Programmatically opened the generated repo XLSX and confirmed the 14 expected values.
+- Copied the patched extractor into the live C:\Users\User\Documents\LEDGER runtime folder.
+- Ran the live extractor from C:\Users\User\Documents\LEDGER\transaction_extractor_local_fixed_v7_no_venv against the same screenshot.
+  Live output:
+  C:\Users\User\Documents\LEDGER\transaction_extractor_local_fixed_v7_no_venv\outputs\run_20260704_193303\extracted_transactions_20260704_193303.xlsx
+  Result: 14 rows written, 0 review flags.
+- Programmatically opened the live XLSX and confirmed:
+  04/07/2026 RENDER.COM +14158304762 US CREDIT 10.17 pending
+  03/07/2026 Bridgewater Bake House CREDIT 5.50
+  03/07/2026 Bridgewater Bake House CREDIT 8.50
+  03/07/2026 ROBINS PIZZA/SHOP 17/2 YE MEADOWBROOK AU CREDIT 19.82 pending
+  01/07/2026 Yummy Fried Rice CREDIT 15.90
+  15/06/2026 Sp Nutra Nourished CREDIT 55.12
+  12/06/2026 Pizza In A Hurryohm Food CREDIT 14.95
+  09/06/2026 Foodworks CREDIT 6.50
+  08/06/2026 Khao Thai Restaurant CREDIT 29.72
+  07/06/2026 Transfer to Alexander Symoniw CREDIT 300.00
+  07/06/2026 Transfer from SaveME DEBIT 300.00
+  05/06/2026 Robins Pizza/Shop 17/2 CREDIT 19.82
+  05/06/2026 Render.Com CREDIT 9.83
+  04/06/2026 Transfer from SaveME DEBIT 21.00
 
-Manual verification still required inside a live MT5 session:
-- Attach MarketWatchSpreadPercentFeed.mq5 to a chart with Allow DLL imports enabled and confirm the desktop pop-out opens.
-- Confirm no chart table appears.
-- Confirm MarketWatchSpreadPercentFeed.json is created in the MT5 common files folder.
-- Run:
-  python mt5-clone/spread_percent_window.py
-- Confirm live Market Watch symbols appear in the separate desktop window.
-- Confirm live spread percentages match manual calculation.
-
-Repo/push notes:
-- Existing unrelated runtime/state JSON dirt was present before this replacement work and was not intentionally edited for this task.
-- PATCH_DESKTOP_PUSH.bat is the requested final push path and should exclude runtime/state artifacts according to its reset rules.
+Repo notes:
+- Existing unrelated render/data JSON changes were present and were not edited for this task.
+- The transaction_extractor_local_fixed_v7_no_venv folder is currently untracked in this repo because it was copied in as the fixture/source package for this task.

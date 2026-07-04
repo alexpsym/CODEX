@@ -1,0 +1,16 @@
+IMAGE source_01.jpg 313x724
+SEGMENTS [(0, 68), (69, 126), (127, 157), (158, 190), (191, 247), (248, 305), (306, 363), (364, 421), (422, 479), (480, 537), (538, 569), (570, 626), (627, 658), (659, 716)]
+ROW 1: segment=(0,68); effective_top=0; date_text='Today'; title='RENOER.COM +141S8304762 US'; amount=900.17; raw='Foxtay | —)> RENOER.COM +141S8304762 US -900.17 | ROENOCR.OOM percing'
+ROW 2: segment=(69,126); effective_top=69; date_text='Vemedsy, J uh 2'; title='Bridgewater Bake House'; amount=5.0; raw='Vemedsy, J uh 2 | © Bridgewater Bake House $5.90 | Onidgevwater V/aah House'
+ROW 3: segment=(127,157); effective_top=127; date_text='3) Bridgewater Bake House'; title='Bridgewater Bake House'; amount=8.5; raw='® Bridgewater Bake House | Onidgevwater V/aah House'
+ROW 4: segment=(158,190); effective_top=158; date_text='> ROBINS PIZ2Z4/SHOP 17/2 YE MEADOWBROOK'; title='RODING Pict OP TH2'; amount=19.82; raw='—> ROBINS PIZ2Z4/SHOP 17/2 YE MEADOWBROOK AU 319.82 | RODING Pict OP TH2 YC percing'
+ROW 5: segment=(191,247); effective_top=191; date_text='Veed reocag, 2h 2026'; title='Yurnmy Fried Rice'; amount=15.9; raw='Veed reocag, 2h 2026 | ® Yurnmy Fried Rice | YUMMY FRICD RICE'
+ROW 6: segment=(248,305); effective_top=248; date_text='Sunday, MM lute 20'; title='Sp Nutra Nourished'; amount=55.12; raw='Sunday, MM lute 20 | ® Sp Nutra Nourished $55.12 | SP NUTRA NOURGIIED'
+ROW 7: segment=(306,363); effective_top=306; date_text='Foca, D lure 2'; title='Pizza in A Hurryohm Food'; amount=14.95; raw='Foca, D lure 2 | ® Pizza in A Hurryohmn Food S14.95 | PIZZA INA IWURRYTOIM FOOD'
+ROW 8: segment=(364,421); effective_top=364; date_text='Tusecty 9 June 200%'; title='Foodworks'; amount=6.0; raw='Tusecty 9 June 200%, | Foodworks $6.90 | FOO OW/ORKS PORCST LAK'
+ROW 9: segment=(422,479); effective_top=422; date_text='Motdyy @ me 2006'; title='Khao Thai Restaurant'; amount=23.72; raw='Motdyy @ me 2006 | ® Khao Thai Restaurant $23.72 | KIVA THAD PTY LTD'
+ROW 10: segment=(480,537); effective_top=480; date_text='Sunday, Tlune 200%'; title='Transfer'; amount=300.0; raw='Sunday, Tlune 200%, | — Transfer -$300.00 | Toc Aeccaridion Syrmornnw'
+ROW 11: segment=(538,569); effective_top=538; date_text='» Transfer'; title='Transfer'; amount=300.0; raw='—» Transfer +$300.00 | Frocex Save NC'
+ROW 12: segment=(570,626); effective_top=570; date_text='Fria, 5 dre 2008'; title='Robins Pizza/Shop 17/2'; amount=19.82; raw='Fria, 5 dre 2008 | ® Robins Pizza/Stvop 17/2 319.82 | RODING Pict EAVOP THs'
+ROW 13: segment=(627,658); effective_top=627; date_text='Render.Com'; title='Render.Com'; amount=9.83; raw='© Render.com -$9.83 | ROENOCR.OOM'
+ROW 14: segment=(659,716); effective_top=659; date_text='Tresteday, 4 ome 2006'; title='ome 2006'; amount=20.0; raw='Tresteday, 4 ome 2006 | —» Transfer +$21L00 | Frocex Save NC'
