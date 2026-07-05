@@ -196,77 +196,33 @@
   },
   "monthly_aud_revaluation_state": {
     "error_detail": null,
-    "last_boundary_resolution": {
-      "end": {
-        "activity_found_after_boundary": false,
-        "balance_source": "current_balance_no_activity_after_boundary",
-        "boundary_brisbane": "2026-07-01T00:00:00+10:00",
-        "boundary_utc": "2026-06-30T14:00:00+00:00",
-        "current_balance": 224.67890689,
-        "current_balance_source": "total_equity",
-        "resolved_balance": 224.67890689
-      },
-      "month_key": "2026-06",
-      "start": {
-        "activity_found_after_boundary": false,
-        "balance_source": "current_balance_no_activity_after_boundary",
-        "boundary_brisbane": "2026-06-01T00:00:00+10:00",
-        "boundary_utc": "2026-05-31T14:00:00+00:00",
-        "current_balance": 224.67800738,
-        "current_balance_source": "total_equity",
-        "resolved_balance": 224.67800738
-      }
-    },
+    "last_boundary_resolution": {},
     "last_error": null,
     "last_error_code": null,
-    "last_oanda_window": {
-      "end_boundary_month": "2026-07",
-      "end_window": {
-        "clamped_end_utc": "2026-07-04T01:42:52.436705+00:00",
-        "now_utc": "2026-07-04T01:42:57.436705+00:00",
-        "request_clamped": "true",
-        "request_end_utc": "2026-07-10T14:00:00+00:00",
-        "request_start_utc": "2026-06-20T14:00:00+00:00"
-      },
-      "month_key": "2026-06",
-      "start_boundary_month": "2026-06",
-      "start_window": {
-        "clamped_end_utc": "2026-06-10T14:00:00+00:00",
-        "now_utc": "2026-07-04T01:42:56.033471+00:00",
-        "request_clamped": "false",
-        "request_end_utc": "2026-06-10T14:00:00+00:00",
-        "request_start_utc": "2026-05-21T14:00:00+00:00"
-      }
-    },
+    "last_oanda_window": {},
     "last_result": {
-      "changed": 1,
+      "changed": 0,
       "failed_months": [],
       "failures": [],
-      "finished_at": "2026-07-04T01:42:59.016480+00:00",
+      "finished_at": "2026-07-05T11:41:29.184768+00:00",
       "mandatory_row_id": "monthly_aud_reval:bybit_live:2026-03",
       "partial": false,
-      "processed_months": [
-        "2026-06"
-      ],
+      "processed_months": [],
       "rows": 4,
-      "started_at": "2026-07-04T01:42:43.768339+00:00",
-      "succeeded_months": [
-        "2026-06"
-      ],
-      "target_months": [
-        "2026-06"
-      ]
+      "started_at": "2026-07-05T11:41:29.182233+00:00",
+      "succeeded_months": [],
+      "target_months": []
     },
-    "last_synced_at": "2026-07-04T01:42:59.016431+00:00",
+    "last_synced_at": "2026-07-05T11:41:29.184735+00:00",
     "month_key": null,
     "ok": true,
     "stage": "complete",
     "traceback": null,
-    "updated_at": "2026-07-04T01:42:59.016472+00:00"
+    "updated_at": "2026-07-05T11:41:29.184761+00:00"
   },
   "oanda_fill_state": {},
   "pending_webhooks": [],
-  "savedAt": "2026-07-04T01:43:01.070494+00:00",
+  "savedAt": "2026-07-05T11:41:31.190193+00:00",
   "source_host": "DESKTOP-1B14EQ6",
   "source_profile": "local",
   "trade_contexts": [
@@ -840,5 +796,5 @@
   "watchlist": [
     "DASHUSDT"
   ],
-  "watchlist_updated_at": "2026-07-04T01:42:09.814614+00:00"
+  "watchlist_updated_at": "2026-07-05T11:41:22.097898+00:00"
 }
