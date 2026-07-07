@@ -362,11 +362,15 @@ def test_run_local_master_worker_console_stays_visible_on_abnormal_failure() -> 
     master = (ROOT / 'run_local_master_control.bat').read_text(encoding='utf-8')
     wrapper = (ROOT / 'tools' / 'windows_launchers' / 'local_master_worker_console.bat')
     script = wrapper.read_text(encoding='utf-8')
+    streamer = (ROOT / 'tools' / 'windows_launchers' / 'stream_local_master_worker.ps1').read_text(encoding='utf-8')
     assert wrapper.exists()
     assert 'if /I "%~1"=="__worker_console" goto worker_console' not in master
     assert 'cmd /d /v:on /k "call ""%~f0"" __worker_console"' not in master
     assert ':worker_console' not in master
-    assert 'call "%ROOT%run_local_master_control.bat" __worker > "%LOCAL_MASTER_WORKER_LOG%" 2>&1' in script
+    assert 'stream_local_master_worker.ps1' in script
+    assert 'worker output will print live below and is also being written to:' in script
+    assert 'Startup progress will update while dashboard health and scanner readiness are checked.' in script
+    assert 'call "%ROOT%run_local_master_control.bat" __worker > "%LOCAL_MASTER_WORKER_LOG%" 2>&1' not in script
     assert 'cmd /d /s /v:on /c ""%~f0" __worker"' not in script
     assert 'cmd /d /v:on /k "call ""%~f0""' not in script
     assert 'Worker failed with exit code !WORKER_EXIT_CODE!' in script
@@ -374,6 +378,13 @@ def test_run_local_master_worker_console_stays_visible_on_abnormal_failure() -> 
     assert 'This window is intentionally left open so startup errors stay readable.' in script
     assert 'pause >nul' in script
     assert 'if defined LOCAL_MASTER_NORMAL_EXIT_FILE (\n  if exist "!LOCAL_MASTER_NORMAL_EXIT_FILE!" (' in script
+    assert 'Write-WorkerLogTail' in streamer
+    assert 'RedirectStandardOutput = $false' in streamer
+    assert '> "{1}" 2>&1' in streamer
+    assert 'Write-StartupProgress -Phase "starting worker process"' in streamer
+    assert 'checking dashboard health at $HealthUrl' in streamer
+    assert 'checking scanner/autostart monitor at $ScriptsUrl' in streamer
+    assert 'startup complete. Live server log remains open below.' in streamer
 
 
 def test_run_local_master_worker_dead_fail_fast_before_health_timeout() -> None:

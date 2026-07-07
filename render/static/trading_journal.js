@@ -522,6 +522,68 @@
     return Number.isFinite(Number(val)) ? `${fmtNum(val, isFx ? 1 : 6)}${suffix}` : '—';
   }
 
+  function recommendationFromAverages(kind, winAvg, lossAvg) {
+    const win = asNum(winAvg);
+    const loss = asNum(lossAvg);
+    const label = kind === 'stop' ? 'stop loss' : 'target';
+    if (!Number.isFinite(win) || !Number.isFinite(loss)) return 'Need wins & losses';
+    const tolerance = Math.max(1e-9, Math.max(Math.abs(win), Math.abs(loss)) * 1e-9);
+    if (Math.abs(win - loss) <= tolerance) return `Keep ${label}`;
+    return win < loss ? `Reduce ${label}` : `Increase ${label}`;
+  }
+
+  function recommendationTone(text) {
+    const lower = String(text || '').toLowerCase();
+    if (lower.startsWith('reduce ') || lower.startsWith('increase ')) return 'tj-rec-action';
+    if (lower.startsWith('keep ')) return 'tj-rec-keep';
+    return 'tj-rec-muted';
+  }
+
+  function directRecommendation(item, kind) {
+    if (!item) return '';
+    return String(
+      kind === 'stop'
+        ? (item.stop_recommendation || item['Stop Loss Recommendation'] || '')
+        : (item.target_recommendation || item['Target Recommendation'] || '')
+    ).trim();
+  }
+
+  function instrumentRecommendation(item, kind) {
+    const direct = directRecommendation(item, kind);
+    if (direct) return direct;
+    if (kind === 'stop') {
+      return recommendationFromAverages(
+        'stop',
+        item?.avg_sl_pct_wins ?? item?.avg_sl_distance_pips_wins ?? item?.avg_sl_distance_quote_wins,
+        item?.avg_sl_pct_losses ?? item?.avg_sl_distance_pips_losses ?? item?.avg_sl_distance_quote_losses
+      );
+    }
+    return recommendationFromAverages(
+      'target',
+      item?.avg_tp_pct_wins ?? item?.avg_tp_distance_pips_wins ?? item?.avg_tp_distance_quote_wins,
+      item?.avg_tp_pct_losses ?? item?.avg_tp_distance_pips_losses ?? item?.avg_tp_distance_quote_losses
+    );
+  }
+
+  function overallRecommendation(kind) {
+    const risk = state.stats?.groups?.risk_expectancy || {};
+    const direct = directRecommendation(risk, kind);
+    if (direct) return direct;
+    return kind === 'stop'
+      ? recommendationFromAverages('stop', risk.avg_stop_pct_winners, risk.avg_stop_pct_losers)
+      : recommendationFromAverages('target', risk.avg_target_pct_winners, risk.avg_target_pct_losers);
+  }
+
+  function rowRecommendation(row, kind) {
+    const rowType = rowTypeOf(row);
+    if (rowType && rowType !== 'trade') return '';
+    const symbol = String(row?.symbol || '').trim().toUpperCase();
+    const item = (Array.isArray(state.stats?.by_instrument) ? state.stats.by_instrument : [])
+      .find((candidate) => String(candidate?.symbol || '').trim().toUpperCase() === symbol);
+    const symbolText = instrumentRecommendation(item, kind);
+    return symbolText && symbolText !== 'Need wins & losses' ? symbolText : overallRecommendation(kind);
+  }
+
   function renderInstrumentView(stats) {
     const body = q('#tj-inst-table tbody');
     const emptyInst = q('#tj-inst-empty');
@@ -553,8 +615,10 @@
       if (key === 'short_losses') return Number.isFinite(Number(item?.short_losses)) ? Number(item.short_losses) : null;
       if (key === 'avg_sl_w') return pickNum(item, 'avg_sl_distance_pips_wins', 'avg_sl_distance_quote_wins');
       if (key === 'avg_sl_l') return pickNum(item, 'avg_sl_distance_pips_losses', 'avg_sl_distance_quote_losses');
+      if (key === 'stop_rec') return instrumentRecommendation(item, 'stop');
       if (key === 'avg_tp_w') return pickNum(item, 'avg_tp_distance_pips_wins', 'avg_tp_distance_quote_wins');
       if (key === 'avg_tp_l') return pickNum(item, 'avg_tp_distance_pips_losses', 'avg_tp_distance_quote_losses');
+      if (key === 'target_rec') return instrumentRecommendation(item, 'target');
       if (key === 'avg_duration') return Number.isFinite(Number(item?.avg_trade_duration_seconds)) ? Number(item.avg_trade_duration_seconds) : null;
       if (key === 'min_trade_duration_seconds') return Number.isFinite(Number(item?.min_trade_duration_seconds)) ? Number(item.min_trade_duration_seconds) : null;
       if (key === 'max_trade_duration_seconds') return Number.isFinite(Number(item?.max_trade_duration_seconds)) ? Number(item.max_trade_duration_seconds) : null;
@@ -597,8 +661,10 @@
         <td style="text-align:right">${fmtNum(item.short_losses,0)}</td>
         <td style="text-align:right">${distanceLabel(item,'sl','wins')}</td>
         <td style="text-align:right">${distanceLabel(item,'sl','losses')}</td>
+        <td class="tj-rec ${recommendationTone(instrumentRecommendation(item,'stop'))}">${instrumentRecommendation(item,'stop')}</td>
         <td style="text-align:right">${distanceLabel(item,'tp','wins')}</td>
         <td style="text-align:right">${distanceLabel(item,'tp','losses')}</td>
+        <td class="tj-rec ${recommendationTone(instrumentRecommendation(item,'target'))}">${instrumentRecommendation(item,'target')}</td>
         <td style="text-align:right">${fmtDuration(item.avg_trade_duration_seconds)}</td>
         <td style="text-align:right">${fmtDuration(item.min_trade_duration_seconds)}</td>
         <td style="text-align:right">${fmtDuration(item.max_trade_duration_seconds)}</td>`;
@@ -983,7 +1049,7 @@
           <td>—</td>
           <td>—</td>
           <td>${r.setup || 'Monthly Bybit Live AUD P/L note - excluded from metrics'}</td>
-          <td>—</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td>
+          <td>—</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td>
           <td class="num ${cls}">${fmtNum(pnl, 4)} ${pnlCcy}</td>
           <td>—</td><td>—</td><td>—</td><td>—</td><td>—</td><td></td><td></td>
         `;
@@ -1006,6 +1072,8 @@
           <td>—</td>
           <td>—</td>
           <td title="${r.cashflow_reason || ''}">${r.cashflow_reason || r.setup || '—'}</td>
+          <td>—</td>
+          <td>—</td>
           <td>—</td>
           <td>—</td>
           <td>—</td>
@@ -1039,7 +1107,9 @@
         <td>${fmtNum(r.entry_price, 6)}</td>
         <td>${fmtNum(r.exit_price, 6)}</td>
         <td>${fmtNum(r.stop_loss, 6)}</td>
+        <td>${fmtPctSmall(priceDistancePct(r.entry_price, r.stop_loss, r.stop_loss_distance_pct), 2)}</td>
         <td>${fmtNum(r.take_profit, 6)}</td>
+        <td>${fmtPctSmall(priceDistancePct(r.entry_price, r.take_profit, r.target_distance_pct), 2)}</td>
         <td>${fmtNum(r.commission ?? r.fees, 4)} ${r.commission_currency || r.fee_currency || ''}</td>
         <td class="num ${Number.isFinite(pnl) ? (pnl > 0 ? 'pos' : (pnl < 0 ? 'neg' : '')) : ''}">${fmtNum(pnl, 4)} ${rowPnlCurrency(r)}</td>
         <td class="num ${asNum(r.result_pct ?? r.profit_pct) > 0 ? 'pos' : (asNum(r.result_pct ?? r.profit_pct) < 0 ? 'neg' : '')}">${fmtProfitPct(r.result_pct ?? r.profit_pct)}</td>

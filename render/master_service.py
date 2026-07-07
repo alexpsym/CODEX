@@ -74,7 +74,7 @@ from shared.symbol_resolution import (
 from shared.atomic_json import write_json_file
 from render.dropbox_sync import download_bytes, list_excel_files, upload_bytes
 from render import dropbox_state_store
-from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, read_master_journal_source, update_master_journal_workbook_data_only, refresh_master_journal_derived_sheets, stable_row_id, SHEET_ORDER, REPORT_YEARLY_SHEET, expected_report_sheet_names, _get_all_trades_sheet, _get_trade_log_sheet, _trade_log_header_map, _trade_log_data_start_row, _find_instrument_leaders_table, LEADER_LABEL_TO_KEY, _repair_or_flag_zero_trade_qty, _canonicalize_and_dedupe_balances, _trade_execution_fingerprint, _trade_row_source_rank, _dedupe_trade_rows_by_execution, _instrument_averages_header_map, INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, INSTRUMENT_AVERAGES_DATA_START_ROW, _result_percentage_totals_by_market, _risk_of_ruin_by_account, _stats1_sheet, _stats2_sheet, _symbols_sheet, STATS1_SHEET, STATS2_SHEET, SYMBOLS_SHEET, _parse_duration_text, _duration_ddhhmmss_cell_to_seconds
+from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, read_master_journal_source, update_master_journal_workbook_data_only, refresh_master_journal_derived_sheets, stable_row_id, SHEET_ORDER, REPORT_YEARLY_SHEET, expected_report_sheet_names, _get_all_trades_sheet, _get_trade_log_sheet, _trade_log_header_map, _trade_log_data_start_row, _find_instrument_leaders_table, LEADER_LABEL_TO_KEY, _repair_or_flag_zero_trade_qty, _canonicalize_and_dedupe_balances, _trade_execution_fingerprint, _trade_row_source_rank, _dedupe_trade_rows_by_execution, _instrument_averages_header_map, INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, INSTRUMENT_AVERAGES_DATA_START_ROW, _result_percentage_totals_by_market, _risk_of_ruin_by_account, _stats1_sheet, _stats2_sheet, _symbols_sheet, STATS1_SHEET, STATS2_SHEET, SYMBOLS_SHEET, _parse_duration_text, _duration_ddhhmmss_cell_to_seconds, _is_ddhhmmss_number_format, STOP_RECOMMENDATION_HEADER, TARGET_RECOMMENDATION_HEADER, _size_recommendation
 from bybit_monitor import bybit_altcoin_monitor as bybit_monitor
 from oanda_monitor import oanda_forex_monitor as oanda_monitor
 from bybit_demo_tpsl_cache import (
@@ -166,7 +166,7 @@ OANDA_RUNTIME_STATUS_PATH = BASE_DIR / "oanda_monitor" / "runtime_status.json"
 SCANNER_HEARTBEAT_GRACE_SECONDS = 30
 SCANNER_LOCAL_UI_MODE = os.getenv("SCANNER_LOCAL_UI_MODE", "0").strip().lower() in {"1", "true", "yes", "on"}
 DEFAULT_RENDER_ALLOWED_APPS = "calculator-webhook,pending-webhooks,fxweekend-clone,bybit_trigger_bounce_trader"
-DEFAULT_LOCAL_ALLOWED_APPS = "bybit_monitor,oanda_monitor,bybithistory-clone,oanda_history-clone,coinspot-clone,open-orders,ivindicator-clone,spreads-clone"
+DEFAULT_LOCAL_ALLOWED_APPS = "bybit_monitor,oanda_monitor,bybithistory-clone,oanda_history-clone,coinspot-clone,open-orders,instrument-lookup,ivindicator-clone,spreads-clone"
 PINE_SCRIPTS_DIR = BASE_DIR / "pinescripts"
 PINE_ALLOWED_SUFFIXES = {".pine", ".pinescript", ".txt"}
 
@@ -210,6 +210,7 @@ LOCAL_ONLY_APP_NAMES = {
     "oanda_history-clone",
     "coinspot-clone",
     "open-orders",
+    "instrument-lookup",
     "ivindicator-clone",
     "spreads-clone",
     "pine",
@@ -224,12 +225,14 @@ LOCAL_ONLY_PATH_PREFIXES = (
     "/dashboard/trading-journal",
     "/dashboard/pine",
     "/merged/open-orders",
+    "/instrument-lookup",
     "/api/bybit-history",
     "/api/oanda-history",
     "/api/coinspot-history",
     "/api/trading-journal",
     "/api/pine",
     "/api/open-orders",
+    "/api/instrument-lookup",
 )
 
 
@@ -258,6 +261,7 @@ def _profile_main_buttons() -> List[Dict[str, object]]:
             [
                 {"id": "trading-journal", "name": "trading-journal", "label": "Journal", "open_url": "/dashboard/trading-journal", "dashboard_main_view": True},
                 {"id": "open-orders", "name": "open-orders", "label": "Orders / Positions", "open_url": "/merged/open-orders", "dashboard_main_view": True},
+                {"id": "instrument-lookup", "name": "instrument-lookup", "label": "Instrument Lookup", "open_url": "/instrument-lookup", "dashboard_main_view": True},
                 {"id": "history", "name": "history", "label": "History", "open_url": "/merged/history", "dashboard_main_view": True},
                 {"id": "monitor", "name": "monitor", "label": "Scanner", "open_url": "/merged/monitor", "dashboard_main_view": True},
                 {"id": "ivindicator-clone", "name": "ivindicator-clone", "label": "IV Indicator", "open_url": "/apps/ivindicator-clone", "dashboard_main_view": True},
@@ -11139,6 +11143,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         .script-toolbar-grid .script-btn[data-script-name="history"] { max-width: 96px; }
         .script-toolbar-grid .script-btn[data-script-name="monitor"] { max-width: 108px; }
         .script-toolbar-grid .script-btn[data-script-name="calculator"] { max-width: 126px; }
+        .script-toolbar-grid .script-btn[data-script-name="instrument-lookup"] { max-width: 150px; }
         .script-toolbar-grid .script-btn[data-script-name="ivindicator-clone"] { max-width: 132px; }
         .script-toolbar-grid .script-btn[data-script-name="spreads-clone"] { max-width: 96px; }
         .script-toolbar-grid .script-btn[data-script-name="trading-journal"] { max-width: 96px; }
@@ -11415,47 +11420,75 @@ INSTRUMENT_SPECS_TEMPLATE = """<!DOCTYPE html>
 <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Instrument Specs</title>
+    <title>Instrument Lookup</title>
     <style>
         :root { color-scheme: light dark; }
         body { font-family: 'Inter', system-ui, -apple-system, sans-serif; margin: 0; padding: 2rem; background: #0b1220; color: #e2e8f0; }
-        .wrap { max-width: 1200px; margin: 0 auto; }
+        .wrap { max-width: 1500px; margin: 0 auto; }
         h1 { margin: 0 0 0.75rem; }
         .meta { color: #94a3b8; margin: 0 0 1.25rem; line-height: 1.5; }
         .bar { display:flex; gap:0.6rem; align-items:center; margin-bottom: 1rem; }
+        .toggle { display:flex; gap:0.4rem; align-items:center; }
         input { flex: 1; min-width: 240px; border-radius: 10px; border: 1px solid #334155; background: #0b1220; color: #e2e8f0; padding: 8px 10px; font-size: 0.95rem; }
         button, .btn { background: #1f2937; color: #e2e8f0; border: 1px solid #334155; border-radius: 10px; padding: 8px 12px; cursor: pointer; font-weight: 900; text-decoration:none; display:inline-flex; align-items:center; }
         button:hover, .btn:hover { background: #334155; }
-        .panel { background: #111827; border: 1px solid #1f2937; border-radius: 16px; padding: 1.25rem; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35); }
+        .toggle button.active { background: #2563eb; border-color: #3b82f6; }
+        .layout { display:grid; grid-template-columns:minmax(360px, 0.9fr) minmax(520px, 1.4fr); gap:1rem; align-items:start; }
+        .panel { background: #111827; border: 1px solid #1f2937; border-radius: 8px; padding: 1.25rem; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35); }
+        .panel h2 { margin:0 0 0.8rem; font-size:1rem; color:#cbd5e1; }
+        .metric-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:0.6rem; margin-bottom:1rem; }
+        .metric { background:#0b1220; border:1px solid #1f2937; border-radius:8px; padding:0.65rem; min-width:0; }
+        .metric-key { color:#94a3b8; font-size:0.78rem; overflow-wrap:anywhere; }
+        .metric-value { margin-top:0.25rem; overflow-wrap:anywhere; }
         .table-wrap { overflow-x: auto; border-radius: 12px; border: 1px solid #1f2937; background: #0b1220; }
         table { width: 100%; border-collapse: collapse; min-width: 720px; }
         th, td { text-align:left; padding:0.6rem 0.75rem; border-bottom:1px solid #1f2937; font-size:0.9rem; }
         th { background:#0f172a; color:#cbd5e1; position:sticky; top:0; z-index:1; }
+        #trade-table { min-width: 1800px; }
         #err { color:#fca5a5; white-space: pre-wrap; }
+        @media (max-width: 980px) { .layout { grid-template-columns: 1fr; } .bar { flex-wrap:wrap; } }
     </style>
 </head>
 <body>
 <div class="wrap">
-    <h1>Instrument Specs</h1>
-    <p class="meta">Type a symbol (e.g. eurusd, BTCUSDT). The tool auto-detects OANDA/Bybit and returns available specs.</p>
+    <h1>Instrument Lookup</h1>
+    <p class="meta">Type a symbol to view broker specs and matching journal metrics.</p>
 
     <div class="bar">
+      <div class="toggle" id="asset-toggle">
+        <button type="button" data-asset="crypto" class="active">Crypto</button>
+        <button type="button" data-asset="fx">FX</button>
+      </div>
       <input id="q" type="text" placeholder="eurusd / BTC" />
       <button id="load" type="button">Load</button>
       <a class="btn" id="download" href="#">Download JPG</a>
     </div>
 
-    <section class="panel">
-      <div class="table-wrap">
-        <table>
-          <thead><tr><th>Field</th><th>Value</th></tr></thead>
-          <tbody id="rows"></tbody>
-        </table>
-      </div>
-      <div id="err"></div>
-    </section>
+    <div class="layout">
+      <section class="panel">
+        <h2>Instrument Specs</h2>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Field</th><th>Value</th></tr></thead>
+            <tbody id="rows"></tbody>
+          </table>
+        </div>
+      </section>
+      <section class="panel">
+        <h2>Journal Metrics</h2>
+        <div id="journal-status" class="meta"></div>
+        <div id="journal-metrics" class="metric-grid"></div>
+        <div class="table-wrap">
+          <table id="trade-table">
+            <thead id="trade-head"></thead>
+            <tbody id="trade-body"></tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+    <div id="err"></div>
 </div>
-<script src="/static/instrument_specs.js"></script>
+<script src="/static/instrument_lookup.js"></script>
 </body>
 </html>"""
 
@@ -18897,6 +18930,8 @@ async def home_page() -> Response:
 
 @app.get("/instrument-specs", response_class=HTMLResponse)
 @app.get("/instrument-specs/", response_class=HTMLResponse)
+@app.get("/instrument-lookup", response_class=HTMLResponse)
+@app.get("/instrument-lookup/", response_class=HTMLResponse)
 async def instrument_specs_page() -> str:
     return INSTRUMENT_SPECS_TEMPLATE
 
@@ -18993,13 +19028,7 @@ CALCULATOR_TEMPLATE = """<!doctype html>
     .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px}
     .grid.compact-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}
     .card{background:#0f172a;border:1px solid #1f2937;border-radius:10px;padding:10px}
-    #calc-instrument-specs .card,#calc-journal-summary .card{padding:8px}
     .muted{color:#94a3b8;font-size:0.9rem}
-    .right-panel-title{margin:0 0 4px;font-size:0.9rem;color:#cbd5e1}
-    #calc-instrument-specs,#calc-journal-summary{width:100%;min-width:0;overflow:hidden}
-    .specs-table{width:100%;border-collapse:collapse;table-layout:fixed}
-    .specs-table td{border-bottom:1px solid #1f2937;padding:4px 5px;font-size:0.76rem;vertical-align:top;overflow-wrap:anywhere;word-break:break-word;line-height:1.3}
-    .btc-reference-row td{color:#94a3b8;font-size:0.72rem}
     @media (max-width:820px){.calc-grid{grid-template-columns:1fr}}
     @media (max-width:900px){.grid.compact-grid{grid-template-columns:1fr}}
   </style>
@@ -19033,14 +19062,6 @@ CALCULATOR_TEMPLATE = """<!doctype html>
       <div class="row">
         <label>Symbol<input id="calc-symbol" class="compact compact-symbol" placeholder="BTC or EUR_USD"/></label>
         <div class="muted" id="calc-canonical-symbol"></div>
-      </div>
-      <div class="row">
-        <h3 class="right-panel-title">Instrument specs</h3>
-        <div id="calc-instrument-specs"></div>
-      </div>
-      <div class="row">
-        <h3 class="right-panel-title">Journal stats</h3>
-        <div class="grid compact-grid" id="calc-journal-summary"></div>
       </div>
       <div class="row" id="limit-wrap" style="display:none">
         <label>Limit entry price<input id="calc-limit" class="compact compact-limit" type="number" step="any"/></label>
@@ -20037,6 +20058,8 @@ async def calculator_journal_summary(asset: str, symbol: str) -> JSONResponse:
             "status": "ok",
             "canonical_symbol": canonical,
             "stats": summary,
+            "metrics": totals,
+            "period_reports": stats.get("period_reports") if isinstance(stats, dict) else None,
             "trades": filtered_sorted,
         }
     )
@@ -21730,10 +21753,6 @@ OPEN_ORDERS_TEMPLATE = """<!doctype html>
     .error-box { display: none; margin-bottom: 10px; border: 1px solid #7f1d1d; background: #3f0d12; color: #fecaca; border-radius: 10px; padding: 10px 12px; }
     .error-box ul { margin: 8px 0 0; padding-left: 20px; }
     #open-orders-empty { margin-top: 10px; display: none; }
-    .subpanel-title { margin: 14px 0 8px; color:#93c5fd; font-size: 14px; font-weight: 700; }
-    .mini-table-wrap { overflow: auto; border: 1px solid #1f2937; border-radius: 10px; background: #0b1220; margin-top: 6px; }
-    table.mini { min-width: 1100px; }
-    .diag-card { border:1px solid #334155; border-radius:10px; padding:10px; background:#0f172a; margin-bottom:10px; }
   </style>
 </head>
 <body>
@@ -21748,10 +21767,6 @@ OPEN_ORDERS_TEMPLATE = """<!doctype html>
         <div><strong>Source errors</strong></div>
         <ul></ul>
       </div>
-      <div class="toolbar">
-        <input id="pending-webhook-id-input" class="btn" style="min-width:420px" placeholder="pending_webhook_id (optional)"/>
-      </div>
-      <div id="webhook-diagnostic-card" class="diag-card muted">Webhook diagnostic idle.</div>
       <div id="open-orders-empty" class="muted">No open orders, positions, or pending webhooks.</div>
       <div class="table-wrap">
         <table id="open-orders-table">
@@ -21775,27 +21790,6 @@ OPEN_ORDERS_TEMPLATE = """<!doctype html>
               <th>Opened</th>
               <th>Status</th>
               <th>Action</th>
-            </tr>
-          </thead>
-          <tbody></tbody>
-        </table>
-      </div>
-      <div class="subpanel-title">Recent Webhook Attempts</div>
-      <div class="mini-table-wrap">
-        <table id="webhook-attempts-table" class="mini">
-          <thead>
-            <tr>
-              <th>Time</th>
-              <th>Symbol</th>
-              <th>Side</th>
-              <th>Account</th>
-              <th>Status</th>
-              <th>retCode</th>
-              <th>retMsg</th>
-              <th>Request ID</th>
-              <th>Pending ID</th>
-              <th>Error</th>
-              <th>Host</th>
             </tr>
           </thead>
           <tbody></tbody>
@@ -21942,6 +21936,10 @@ async def trading_journal_page() -> Response:
     .pill { border:1px solid #334155; border-radius:999px; padding:2px 8px; font-size:12px; }
     .num.pos { color:#86efac; }
     .num.neg { color:#fca5a5; }
+    .tj-rec { white-space:normal; min-width:120px; }
+    .tj-rec-action { color:#facc15; font-weight:700; }
+    .tj-rec-keep { color:#86efac; font-weight:700; }
+    .tj-rec-muted { color:#94a3b8; }
     .btn-danger { background:#b91c1c !important; }
     .tj-modal { position:fixed; inset:0; display:none; align-items:center; justify-content:center; background:rgba(2,6,23,0.75); z-index:10001; }
     .tj-modal.open { display:flex; }
@@ -22031,7 +22029,9 @@ async def trading_journal_page() -> Response:
             <th data-sort="entry_price">Entry</th>
             <th data-sort="exit_price">Exit</th>
             <th data-sort="stop_loss">Stop Loss</th>
+            <th>Recommendation</th>
             <th data-sort="take_profit">Target</th>
+            <th>Recommendation</th>
             <th data-sort="commission">Commission</th>
             <th data-sort="net_profit">Net Profit</th>
             <th data-sort="profit_pct">Profit %</th>
@@ -22064,8 +22064,10 @@ async def trading_journal_page() -> Response:
             <th data-sort="short_losses">Short losses</th>
             <th data-sort="avg_sl_w">Avg stop dist (W)</th>
             <th data-sort="avg_sl_l">Avg stop dist (L)</th>
+            <th data-sort="stop_rec">Recommendation</th>
             <th data-sort="avg_tp_w">Avg target dist (W)</th>
             <th data-sort="avg_tp_l">Avg target dist (L)</th>
+            <th data-sort="target_rec">Recommendation</th>
             <th data-sort="avg_duration">Avg duration</th>
             <th data-sort="min_trade_duration_seconds">Shortest</th>
             <th data-sort="max_trade_duration_seconds">Longest</th>
@@ -23141,11 +23143,17 @@ def _compute_journal_stats(
             )
         winner_r_values = [v for v in _metric_values(winners, "r_multiple") if v > 0]
         loser_r_values = [v for v in _metric_values(losers, "r_multiple") if v < 0]
+        avg_stop_winners = _avg(_stop_pct_values(winners))
+        avg_stop_losers = _avg(_stop_pct_values(losers))
+        avg_target_winners = _avg(_target_pct_values(winners))
+        avg_target_losers = _avg(_target_pct_values(losers))
         return {
-            "avg_stop_pct_winners": _avg(_stop_pct_values(winners)),
-            "avg_stop_pct_losers": _avg(_stop_pct_values(losers)),
-            "avg_target_pct_winners": _avg(_target_pct_values(winners)),
-            "avg_target_pct_losers": _avg(_target_pct_values(losers)),
+            "avg_stop_pct_winners": avg_stop_winners,
+            "avg_stop_pct_losers": avg_stop_losers,
+            "avg_target_pct_winners": avg_target_winners,
+            "avg_target_pct_losers": avg_target_losers,
+            "stop_recommendation": _size_recommendation("stop", avg_stop_winners, avg_stop_losers),
+            "target_recommendation": _size_recommendation("target", avg_target_winners, avg_target_losers),
             "avg_result_pct_winners": _avg(win_results),
             "avg_result_pct_losers": _avg(loss_results),
             "avg_r_multiple_winners": _avg(winner_r_values),
@@ -23304,7 +23312,7 @@ def _compute_journal_stats(
         if _is_valid_price_level(entry) and _is_valid_price_level(sl) and entry:
             pct = _pct_distance(row, "stop_loss")
         else:
-            pct = None
+            pct = _distance_cell_pct_points(row.get("stop_loss_distance_pct"))
         if pct is not None:
             bucket["sl_pct"].append(pct)
             if is_win: bucket.setdefault("sl_pct_wins",[]).append(pct)
@@ -23312,7 +23320,7 @@ def _compute_journal_stats(
         if _is_valid_price_level(entry) and _is_valid_price_level(tp) and entry:
             pct = _pct_distance(row, "take_profit")
         else:
-            pct = None
+            pct = _distance_cell_pct_points(row.get("target_distance_pct"))
         if pct is not None:
             bucket["tp_pct"].append(pct)
             if is_win: bucket.setdefault("tp_pct_wins",[]).append(pct)
@@ -23346,6 +23354,14 @@ def _compute_journal_stats(
         item["avg_sl_pct_losses"]=_avg(item.pop("sl_pct_losses",[]))
         item["avg_tp_pct_wins"]=_avg(item.pop("tp_pct_wins",[]))
         item["avg_tp_pct_losses"]=_avg(item.pop("tp_pct_losses",[]))
+        item[STOP_RECOMMENDATION_HEADER] = _size_recommendation(
+            "stop", item.get("avg_sl_pct_wins"), item.get("avg_sl_pct_losses")
+        )
+        item[TARGET_RECOMMENDATION_HEADER] = _size_recommendation(
+            "target", item.get("avg_tp_pct_wins"), item.get("avg_tp_pct_losses")
+        )
+        item["stop_recommendation"] = item[STOP_RECOMMENDATION_HEADER]
+        item["target_recommendation"] = item[TARGET_RECOMMENDATION_HEADER]
         dur_vals = item.pop("durations", [])
         item["avg_trade_duration_seconds"] = _avg(dur_vals)
         item["min_trade_duration_seconds"] = min(dur_vals) if dur_vals else None
@@ -23942,6 +23958,12 @@ def _compute_journal_stats(
                 "avg_stop_pct_losers": totals.get("avg_stop_pct_losers"),
                 "avg_target_pct_winners": totals.get("avg_target_pct_winners"),
                 "avg_target_pct_losers": totals.get("avg_target_pct_losers"),
+                "stop_recommendation": _size_recommendation(
+                    "stop", totals.get("avg_stop_pct_winners"), totals.get("avg_stop_pct_losers")
+                ),
+                "target_recommendation": _size_recommendation(
+                    "target", totals.get("avg_target_pct_winners"), totals.get("avg_target_pct_losers")
+                ),
                 "avg_result_pct_winners": totals.get("avg_result_pct_winners"),
                 "avg_result_pct_losers": totals.get("avg_result_pct_losers"),
                 "avg_r_multiple_winners": totals.get("avg_r_multiple_winners"),
@@ -23973,6 +23995,12 @@ def _compute_journal_stats(
                 "avg_stop_pct_losers": totals.get("avg_stop_pct_losers"),
                 "avg_target_pct_winners": totals.get("avg_target_pct_winners"),
                 "avg_target_pct_losers": totals.get("avg_target_pct_losers"),
+                "stop_recommendation": _size_recommendation(
+                    "stop", totals.get("avg_stop_pct_winners"), totals.get("avg_stop_pct_losers")
+                ),
+                "target_recommendation": _size_recommendation(
+                    "target", totals.get("avg_target_pct_winners"), totals.get("avg_target_pct_losers")
+                ),
                 "avg_result_pct_winners": totals.get("avg_result_pct_winners"),
                 "avg_result_pct_losers": totals.get("avg_result_pct_losers"),
                 "avg_r_multiple_winners": totals.get("avg_r_multiple_winners"),
@@ -27790,6 +27818,19 @@ def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, e
                 close_col = trade_headers.get("Close Time")
                 dur_col = trade_headers.get("Trade Duration (DD:HH:MM:SS)")
                 currency_cols = [trade_headers.get("Commission"), trade_headers.get("Net P/L")]
+                def _trade_duration_cell_seconds(cell) -> Optional[float]:
+                    value = cell.value
+                    if value in (None, ""):
+                        return None
+                    if _is_ddhhmmss_number_format(cell.number_format):
+                        parsed_ddhhmmss = _duration_ddhhmmss_cell_to_seconds(value)
+                        if parsed_ddhhmmss is not None:
+                            return float(parsed_ddhhmmss)
+                    parsed_text = _parse_duration_text(value)
+                    if parsed_text is not None:
+                        return float(parsed_text)
+                    parsed_ddhhmmss = _duration_ddhhmmss_cell_to_seconds(value)
+                    return float(parsed_ddhhmmss) if parsed_ddhhmmss is not None else None
                 for rr in range(trade_data_start, trade_log.max_row + 1):
                     if open_col:
                         ov = trade_log.cell(rr, open_col).value
@@ -27800,9 +27841,9 @@ def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, e
                         if isinstance(cv, str) and "T" in cv:
                             raise RuntimeError("Trading Journal validation failed: Trade Log Close Time contains ISO 'T' string.")
                     if dur_col:
-                        dv = trade_log.cell(rr, dur_col).value
-                        if dv not in (None, "") and not isinstance(dv, (int, float)):
-                            raise RuntimeError("Trading Journal validation failed: Trade Log duration cells must be numeric DDHHMMSS.")
+                        dur_cell = trade_log.cell(rr, dur_col)
+                        if dur_cell.value not in (None, "") and _trade_duration_cell_seconds(dur_cell) is None:
+                            raise RuntimeError("Trading Journal validation failed: Trade Log duration cells must be duration text or numeric DDHHMMSS.")
                 if open_col and close_col and dur_col:
                     expected_duration_ids: Set[str] = set()
                     for row in visible_trade_rows:
@@ -27820,8 +27861,9 @@ def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, e
                             rid = str(trade_log.cell(rr, row_id_col).value or "").strip()
                             if rid not in expected_duration_ids:
                                 continue
-                            dv = trade_log.cell(rr, dur_col).value
-                            if not isinstance(dv, (int, float)):
+                            dur_cell = trade_log.cell(rr, dur_col)
+                            dv = dur_cell.value
+                            if _trade_duration_cell_seconds(dur_cell) is None:
                                 src = row_lookup.get(rid) or {}
                                 missing_duration_details.append({
                                     "row_id": rid,
@@ -27832,7 +27874,7 @@ def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, e
                                 })
                         if missing_duration_details:
                             raise RuntimeError(
-                                "Trading Journal validation failed: Trade Log duration column blank/non-numeric for trade rows with valid open/close timestamps "
+                                "Trading Journal validation failed: Trade Log duration column blank/unparseable for trade rows with valid open/close timestamps "
                                 f"(sample row IDs: {', '.join(str(d.get('row_id') or '') for d in missing_duration_details[:5])}; "
                                 f"details={missing_duration_details[:3]})."
                             )

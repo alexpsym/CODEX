@@ -97,18 +97,25 @@ def test_dashboard_toolbar_css_keeps_scripts_single_row() -> None:
     assert '.script-toolbar-grid .script-btn[data-script-name="history"] { max-width: 96px; }' in html
     assert '.script-toolbar-grid .script-btn[data-script-name="trading-journal"] { max-width: 96px; }' in html
     assert '.script-toolbar-grid .script-btn[data-script-name="open-orders"] { max-width: 146px; }' in html
+    assert '.script-toolbar-grid .script-btn[data-script-name="instrument-lookup"] { max-width: 150px; }' in html
     assert '.script-toolbar-grid .script-btn[data-script-name="spreads-clone"] { max-width: 96px; }' in html
     assert '.script-toolbar-grid .script-btn[data-script-name="mt5"]' not in html
     assert '.script-toolbar-grid .script-btn[data-script-name="pine"] { max-width: 76px; }' in html
     assert '.local-exit-btn{\n            margin-top: 0;' in html
 
 
-def test_calculator_specs_markup_and_endpoint_are_preserved() -> None:
+def test_instrument_lookup_owns_specs_and_journal_markup() -> None:
     master_service_py = MASTER_SERVICE_PATH.read_text(encoding='utf-8')
     calculator_js = (ROOT / 'render' / 'static' / 'calculator.js').read_text(encoding='utf-8')
+    lookup_js = (ROOT / 'render' / 'static' / 'instrument_lookup.js').read_text(encoding='utf-8')
 
-    assert 'id="calc-instrument-specs"' in master_service_py
-    assert '/api/instrument-specs?query=' in calculator_js
+    assert 'id="calc-instrument-specs"' not in master_service_py
+    assert 'id="calc-journal-summary"' not in master_service_py
+    assert 'Instrument Lookup' in master_service_py
+    assert '"/instrument-lookup"' in master_service_py
+    assert '/api/instrument-specs?query=' not in calculator_js
+    assert '/api/instrument-specs?query=' in lookup_js
+    assert '/api/calculator/journal-summary?asset=' in lookup_js
 
 
 def test_dashboard_home_removed_legacy_open_trading_journal_panel() -> None:

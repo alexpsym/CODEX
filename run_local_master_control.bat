@@ -221,7 +221,7 @@ if defined LOCAL_MASTER_EXIT_REQUEST (
   )
 )
 echo [local-master] restarting in 3 seconds. Close this window to stop local master.
-timeout /t 3 /nobreak >nul
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Sleep -Seconds 3" >nul 2>nul
 goto restart_master
 
 :load_master_env_vars

@@ -252,6 +252,39 @@ def test_compute_journal_stats_distance_fallback_percent_points_are_not_fraction
     assert risk["by_market"]["fx"]["avg_stop_pct_winners"] == pytest.approx(1.0)
 
 
+def test_compute_journal_stats_recommends_stop_and_target_from_win_loss_distances() -> None:
+    rows = [
+        {
+            "row_type": "trade",
+            "asset_class": "fx",
+            "symbol": "EURUSD",
+            "result_pct": 1.0,
+            "net_profit": 10.0,
+            "stop_loss_distance_pct": 1.0,
+            "target_distance_pct": 2.0,
+        },
+        {
+            "row_type": "trade",
+            "asset_class": "fx",
+            "symbol": "EURUSD",
+            "result_pct": -1.0,
+            "net_profit": -5.0,
+            "stop_loss_distance_pct": 2.0,
+            "target_distance_pct": 4.0,
+        },
+    ]
+
+    stats = _compute_journal_stats(rows, balances=[])
+    risk = stats["groups"]["risk_expectancy"]
+    instrument = next(item for item in stats["by_instrument"] if item["symbol"] == "EURUSD")
+
+    assert risk["stop_recommendation"] == "Reduce stop loss"
+    assert risk["target_recommendation"] == "Reduce target"
+    assert risk["by_market"]["fx"]["stop_recommendation"] == "Reduce stop loss"
+    assert instrument["stop_recommendation"] == "Reduce stop loss"
+    assert instrument["target_recommendation"] == "Reduce target"
+
+
 def test_compute_journal_stats_no_zero_count_leaders() -> None:
     rows = [{"row_type": "trade", "asset_class": "fx", "symbol": "EURUSD", "result_pct": 0.0, "r_multiple": 0.0, "net_profit": 0}]
     stats = _compute_journal_stats(rows, balances=[])

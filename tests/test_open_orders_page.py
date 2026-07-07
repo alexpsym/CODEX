@@ -66,7 +66,7 @@ def test_merged_open_orders_route_returns_html() -> None:
     assert 'id="open-orders-errors"' in html
     assert 'id="open-orders-empty"' in html
     assert 'id="open-orders-table"' in html
-    assert 'id="webhook-attempts-table"' in html
+    assert 'id="webhook-attempts-table"' not in html
     assert "<th>Test</th>" in html
     assert "/static/open_orders.js?v=" in html
 
@@ -78,7 +78,7 @@ def test_open_orders_js_uses_version_polling_and_force_query_refresh() -> None:
     assert "POLL_MS" in js
     assert "/api/open-orders/version" in js
     assert "/api/open-orders?force=1" in js
-    assert "/api/calculator/webhook-attempts?limit=20" in js
+    assert "/api/calculator/webhook-attempts?limit=20" not in js
     assert "Unknown source error" not in js
     assert "const formattedErrors=formatSourceErrors(errors);" in js
     assert "retCode=${retCode}" in js
@@ -107,7 +107,7 @@ def test_open_orders_js_treats_webhook_as_cancelable() -> None:
     assert ("type === 'order' || type === 'webhook'" in js) or ("type==='order'||type==='webhook'" in js)
     assert "item.is_test_trade" in js
     assert ("type==='order'||type==='webhook'" in js) or ("actionLabelFor" in js)
-    assert "Failed to load webhook attempts:" in js
+    assert "Failed to load webhook attempts:" not in js
 
 
 def test_close_open_order_invalidates_cache_for_webhook(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -219,10 +219,11 @@ def test_open_orders_hides_failed_pending_webhooks_from_open_items() -> None:
     assert "wh4" not in statuses
 
 
-def test_open_orders_attempt_fetch_error_is_not_rendered_as_empty() -> None:
+def test_open_orders_attempt_fetch_path_is_removed() -> None:
     js = (ROOT / "render" / "static" / "open_orders.js").read_text(encoding="utf-8")
-    assert "Failed to load webhook attempts:" in js
-    assert ("renderWebhookAttempts([], attemptErr?.message" in js) or ("renderWebhookAttempts([],attemptErr?.message" in js)
+    assert "Failed to load webhook attempts:" not in js
+    assert "renderWebhookAttempts" not in js
+    assert "attemptErr" not in js
 
 
 def test_open_orders_js_parses_with_node() -> None:
@@ -290,13 +291,13 @@ def test_verify_action_bybit_position_and_order(monkeypatch: pytest.MonkeyPatch)
     assert payload4["still_open"] is True
 
 
-def test_open_orders_page_contains_webhook_diagnostic_ui() -> None:
+def test_open_orders_page_removes_webhook_diagnostic_ui() -> None:
     html = asyncio.run(master_service.merged_open_orders_page()).body.decode("utf-8")
-    assert 'id="pending-webhook-id-input"' in html
-    assert 'id="webhook-diagnostic-card"' in html
+    assert 'id="pending-webhook-id-input"' not in html
+    assert 'id="webhook-diagnostic-card"' not in html
 
 
-def test_open_orders_js_fetches_webhook_diagnostic() -> None:
+def test_open_orders_js_does_not_fetch_webhook_diagnostic() -> None:
     js = (ROOT / "render" / "static" / "open_orders.js").read_text(encoding="utf-8")
-    assert "pending_webhook_id" in js
-    assert "/api/calculator/webhook-diagnostic/" in js
+    assert "pending_webhook_id" not in js
+    assert "/api/calculator/webhook-diagnostic/" not in js

@@ -35,6 +35,9 @@ REPORT_YEARLY_SHEET = "YEARLY REPORT"
 REPORT_START_YEAR = 2018
 REPORT_MIN_END_YEAR = 2026
 TRADE_NUMBER_HEADER = "Trade Number"
+STOP_RECOMMENDATION_HEADER = "Stop Loss Recommendation"
+TARGET_RECOMMENDATION_HEADER = "Target Recommendation"
+RECOMMENDATION_DISPLAY_HEADER = "Recommendation"
 MOVE_TO_FIELD_MAP = {
     "Move to Break Even Time": "move_to_break_even_time",
     "Move to Break Even Duration": "move_to_break_even_duration",
@@ -75,6 +78,21 @@ TRADE_LOG_HEADERS_V1 = [
     "Cashflow New Balance", "Currency", "Row Type", "Row ID",
 ]
 TRADE_LOG_HEADERS = [TRADE_NUMBER_HEADER, *TRADE_LOG_HEADERS_V1]
+RECOMMENDATION_TRADE_LOG_HEADERS_V1 = [
+    "Open Time", "Close Time", "Account", "Symbol", "Side", "Qty",
+    "Entry Price", "Exit Price", "Stop Loss Price", "Stop Loss Distance",
+    STOP_RECOMMENDATION_HEADER, "Target Price", "Target Distance",
+    TARGET_RECOMMENDATION_HEADER, "Commission", "Net P/L",
+    "Profit %", "R-Multiple", "Balance After",
+    "Trade Duration (DD:HH:MM:SS)", *MOVE_TO_FIELD_MAP.keys(),
+    "Test", "Pattern", "EMA", "ATHS/ATLS", "Order", "Round Number",
+    "Spiked Out", "Close Stopout", "Near Perfect Entry", "Near Win", "Early Close",
+    "Setup", "Timeframe", "Breakeven", "Notes", "Cashflow Amount",
+    "Cashflow New Balance", "Currency", "Row Type", "Row ID",
+]
+RECOMMENDATION_TRADE_LOG_HEADERS = [TRADE_NUMBER_HEADER, *RECOMMENDATION_TRADE_LOG_HEADERS_V1]
+PRE_RECOMMENDATION_TRADE_LOG_HEADERS_V1 = TRADE_LOG_HEADERS_V1
+PRE_RECOMMENDATION_TRADE_LOG_HEADERS = TRADE_LOG_HEADERS
 PRE_MOVE_TRADE_LOG_HEADERS = [
     "Open Time", "Close Time", "Account", "Symbol", "Side", "Qty",
     "Entry Price", "Exit Price", "Stop Loss Price", "Stop Loss Distance",
@@ -123,7 +141,11 @@ SYMBOLS_HEADERS = [
     *LEGACY_INSTRUMENT_AVERAGES_HEADERS[21:28],
     "Most Profitable Timeframe", "Least Profitable Timeframe",
     "Net R Multiple",
-    *LEGACY_INSTRUMENT_AVERAGES_HEADERS[29:],
+    *LEGACY_INSTRUMENT_AVERAGES_HEADERS[29:34],
+    STOP_RECOMMENDATION_HEADER,
+    *LEGACY_INSTRUMENT_AVERAGES_HEADERS[34:36],
+    TARGET_RECOMMENDATION_HEADER,
+    *LEGACY_INSTRUMENT_AVERAGES_HEADERS[36:],
 ]
 INSTRUMENT_AVERAGES_HEADERS = SYMBOLS_HEADERS
 REPORT_METRIC_LABELS = [
@@ -418,10 +440,22 @@ SYMBOLS_GROUP_WIDTHS = {
     "timeframe": 12,
     "p/l": 4,
     "pl": 4,
-    "stops": 5,
-    "targets": 5,
+    "stops": 3,
+    "targets": 3,
     "duration": 3,
 }
+
+
+def _trade_log_visible_header(header: str) -> str:
+    if header in {STOP_RECOMMENDATION_HEADER, TARGET_RECOMMENDATION_HEADER}:
+        return RECOMMENDATION_DISPLAY_HEADER
+    return header
+
+
+def _symbols_visible_header(header: str) -> str:
+    if header in {STOP_RECOMMENDATION_HEADER, TARGET_RECOMMENDATION_HEADER}:
+        return RECOMMENDATION_DISPLAY_HEADER
+    return header
 
 
 def _norm_header_token(value: Any) -> str:
@@ -432,6 +466,20 @@ def _symbols_group_for_column(ws, col: int) -> str:
     for merged in ws.merged_cells.ranges:
         if merged.min_row == 1 and merged.max_row == 1 and merged.min_col <= col <= merged.max_col and merged.max_col > merged.min_col:
             return str(ws.cell(1, merged.min_col).value or "").strip()
+    active_group = ""
+    active_col = 0
+    for cursor in range(1, col + 1):
+        text = str(ws.cell(1, cursor).value or "").strip()
+        if text and text.casefold() in SYMBOLS_GROUP_HEADER_LABELS:
+            active_group = text
+            active_col = cursor
+    if active_group:
+        for cursor in range(active_col + 1, ws.max_column + 1):
+            text = str(ws.cell(1, cursor).value or "").strip()
+            if text and text.casefold() in SYMBOLS_GROUP_HEADER_LABELS:
+                if col < cursor:
+                    return active_group
+                break
     for cursor in range(1, col + 1):
         text = str(ws.cell(1, cursor).value or "").strip()
         if not text:
@@ -476,6 +524,8 @@ def _symbols_metric_key_for_column(ws, col: int) -> str:
             "maxstop": "max_stop_pct",
             "maxstoppct": "max_stop_pct",
             "max": "max_stop_pct",
+            "recommendation": "stop_recommendation",
+            "stoplossrecommendation": "stop_recommendation",
         }.get(token, "")
     if group == "targets":
         return {
@@ -488,6 +538,8 @@ def _symbols_metric_key_for_column(ws, col: int) -> str:
             "maxtarget": "max_target_pct",
             "maxtargetpct": "max_target_pct",
             "max": "max_target_pct",
+            "recommendation": "target_recommendation",
+            "targetrecommendation": "target_recommendation",
         }.get(token, "")
     return ""
 
@@ -510,6 +562,8 @@ def _symbols_canonical_header_for_column(ws, col: int) -> str:
         "min_target_pct": "Min target %",
         "avg_target_pct": "Avg target %",
         "max_target_pct": "Max target %",
+        "stop_recommendation": STOP_RECOMMENDATION_HEADER,
+        "target_recommendation": TARGET_RECOMMENDATION_HEADER,
     }.get(key, "")
 
 
@@ -529,6 +583,8 @@ def _apply_symbols_filter_header_layout(ws) -> None:
         "Longest duration (DD:HH:MM:SS)": 18,
         "Move to break even": 16,
         "Move to profit": 14,
+        STOP_RECOMMENDATION_HEADER: 18,
+        TARGET_RECOMMENDATION_HEADER: 18,
     }
     headers = _instrument_averages_header_map(ws)
     for col in range(1, ws.max_column + 1):
@@ -563,24 +619,32 @@ def _set_instrument_averages_auto_filter_to_populated_range(ws) -> None:
 
 def _write_instrument_averages_headers(ws, *, preserve_freeze: bool = False) -> None:
     previous_freeze = ws.freeze_panes
-    order_start = INSTRUMENT_AVERAGES_HEADERS.index("Market") + 1
-    order_end = INSTRUMENT_AVERAGES_HEADERS.index("Limit") + 1
     for merged in list(ws.merged_cells.ranges):
         if merged.min_row <= INSTRUMENT_AVERAGES_FILTER_HEADER_ROW:
             ws.unmerge_cells(str(merged))
     for col in range(1, len(INSTRUMENT_AVERAGES_HEADERS) + 1):
         ws.cell(INSTRUMENT_AVERAGES_GROUP_HEADER_ROW, col).value = None
-        ws.cell(INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, col).value = INSTRUMENT_AVERAGES_HEADERS[col - 1]
-    ws.merge_cells(
-        start_row=INSTRUMENT_AVERAGES_GROUP_HEADER_ROW,
-        start_column=order_start,
-        end_row=INSTRUMENT_AVERAGES_GROUP_HEADER_ROW,
-        end_column=order_end,
+        ws.cell(INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, col).value = _symbols_visible_header(INSTRUMENT_AVERAGES_HEADERS[col - 1])
+    group_specs = (
+        ("Order", "Market", "Limit"),
+        ("Stops", "Avg stop % (W)", STOP_RECOMMENDATION_HEADER),
+        ("Targets", "Avg target % (W)", TARGET_RECOMMENDATION_HEADER),
     )
-    ws.cell(INSTRUMENT_AVERAGES_GROUP_HEADER_ROW, order_start).value = "Order"
+    for label, first_header, last_header in group_specs:
+        start = INSTRUMENT_AVERAGES_HEADERS.index(first_header) + 1
+        end = INSTRUMENT_AVERAGES_HEADERS.index(last_header) + 1
+        ws.merge_cells(
+            start_row=INSTRUMENT_AVERAGES_GROUP_HEADER_ROW,
+            start_column=start,
+            end_row=INSTRUMENT_AVERAGES_GROUP_HEADER_ROW,
+            end_column=end,
+        )
+        ws.cell(INSTRUMENT_AVERAGES_GROUP_HEADER_ROW, start).value = label
     _style_header_row(ws, INSTRUMENT_AVERAGES_GROUP_HEADER_ROW)
     _style_header_row(ws, INSTRUMENT_AVERAGES_FILTER_HEADER_ROW)
-    ws.cell(INSTRUMENT_AVERAGES_GROUP_HEADER_ROW, order_start).alignment = Alignment(horizontal="center")
+    for _label, first_header, _last_header in group_specs:
+        start = INSTRUMENT_AVERAGES_HEADERS.index(first_header) + 1
+        ws.cell(INSTRUMENT_AVERAGES_GROUP_HEADER_ROW, start).alignment = Alignment(horizontal="center")
     ws.freeze_panes = previous_freeze if preserve_freeze and previous_freeze else "B3"
     ws.auto_filter.ref = (
         f"A{INSTRUMENT_AVERAGES_FILTER_HEADER_ROW}:"
@@ -592,9 +656,13 @@ def _write_instrument_averages_headers(ws, *, preserve_freeze: bool = False) -> 
 def _ensure_symbols_schema(ws, diagnostics: Dict[str, Any] | None = None) -> bool:
     diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
     header_row = _instrument_averages_header_row(ws)
-    headers = _header_map(ws, header_row=header_row)
+    headers = _instrument_averages_header_map(ws)
     if not {"Symbol", "Trades"}.issubset(headers):
         return False
+    legacy_grouped_metrics = any(
+        header in headers
+        for header in ("Min stop %", "Max stop %", "Min target %", "Max target %")
+    )
     changed = False
     rename_map = {
         "Pattern": "Most Traded Pattern",
@@ -605,7 +673,7 @@ def _ensure_symbols_schema(ws, diagnostics: Dict[str, Any] | None = None) -> boo
         if col and new not in headers:
             ws.cell(header_row, col).value = new
             changed = True
-    headers = _header_map(ws, header_row=header_row)
+    headers = _instrument_averages_header_map(ws)
     timeframe_col = headers.get("Most traded timeframe")
     if timeframe_col and (
         "Most Profitable Timeframe" not in headers
@@ -623,14 +691,72 @@ def _ensure_symbols_schema(ws, diagnostics: Dict[str, Any] | None = None) -> boo
         ws.cell(header_row, insert_at).value = "Most Profitable Timeframe"
         ws.cell(header_row, insert_at + 1).value = "Least Profitable Timeframe"
         changed = True
+    headers = _instrument_averages_header_map(ws)
+
+    def grouped_anchor_col(group_name: str) -> int | None:
+        tokens = {"avgstopl", "avgtargetl", "avgl"}
+        for col in range(ws.max_column, 0, -1):
+            if _symbols_group_for_column(ws, col).casefold() != group_name:
+                continue
+            token = _norm_header_token(ws.cell(header_row, col).value)
+            if token in tokens:
+                return col
+        return None
+
+    def expand_group_header(anchor_col: int, insert_at: int) -> None:
+        group_label = _symbols_group_for_column(ws, anchor_col)
+        if not group_label:
+            return
+        for merged in list(ws.merged_cells.ranges):
+            if not (
+                merged.min_row == INSTRUMENT_AVERAGES_GROUP_HEADER_ROW
+                and merged.max_row == INSTRUMENT_AVERAGES_GROUP_HEADER_ROW
+                and merged.min_col <= anchor_col <= merged.max_col
+            ):
+                continue
+            start_col = merged.min_col
+            end_col = merged.max_col + 1 if insert_at > merged.max_col else merged.max_col
+            ws.unmerge_cells(str(merged))
+            ws.merge_cells(
+                start_row=INSTRUMENT_AVERAGES_GROUP_HEADER_ROW,
+                start_column=start_col,
+                end_row=INSTRUMENT_AVERAGES_GROUP_HEADER_ROW,
+                end_column=end_col,
+            )
+            ws.cell(INSTRUMENT_AVERAGES_GROUP_HEADER_ROW, start_col).value = group_label
+            return
+
+    def insert_recommendation_after(anchor_header: str, recommendation_header: str, group_name: str) -> None:
+        nonlocal changed, headers
+        if recommendation_header in headers:
+            return
+        anchor_col = headers.get(anchor_header) or grouped_anchor_col(group_name)
+        if not anchor_col:
+            return
+        insert_at = anchor_col + 1
+        ws.insert_cols(insert_at)
+        expand_group_header(anchor_col, insert_at)
+        for row in range(1, ws.max_row + 1):
+            _copy_cell_style(ws.cell(row, anchor_col), ws.cell(row, insert_at))
+        width = ws.column_dimensions[get_column_letter(anchor_col)].width
+        ws.column_dimensions[get_column_letter(insert_at)].width = max(width or 0, 18) or 18
+        ws.cell(header_row, insert_at).value = _symbols_visible_header(recommendation_header)
+        changed = True
+        headers = _instrument_averages_header_map(ws)
+
+    insert_recommendation_after("Avg stop % (L)", STOP_RECOMMENDATION_HEADER, "stops")
+    insert_recommendation_after("Avg target % (L)", TARGET_RECOMMENDATION_HEADER, "targets")
     if changed:
-        headers = _header_map(ws, header_row=header_row)
+        if not legacy_grouped_metrics:
+            _write_instrument_averages_headers(ws, preserve_freeze=True)
+        headers = _instrument_averages_header_map(ws)
         if ws.auto_filter and ws.auto_filter.ref:
             _min_col, _min_row, _max_col, max_row = range_boundaries(ws.auto_filter.ref)
             ws.auto_filter.ref = (
                 f"A{header_row}:"
                 f"{get_column_letter(max(headers.values()))}{max(max_row, ws.max_row)}"
             )
+        _apply_symbols_filter_header_layout(ws)
         diagnostics["migrated_symbols_schema"] = True
     return changed
 
@@ -744,6 +870,130 @@ def _validated_distance_fraction(row: Dict[str, Any], level_key: str) -> float |
     return distance
 
 
+def _distance_pct_points(row: Dict[str, Any], level_key: str) -> float | None:
+    fraction = _validated_distance_fraction(row, level_key)
+    if fraction is not None:
+        return fraction * 100.0
+    fallback_key = "stop_loss_distance_pct" if level_key == "stop_loss" else "target_distance_pct"
+    fallback = _as_float(row.get(fallback_key))
+    if fallback is None or not math.isfinite(fallback):
+        return None
+    if _trade_row_market(row) == "fx" and abs(fallback) > 50.0:
+        return None
+    return abs(fallback)
+
+
+def _trade_outcome_sign(row: Dict[str, Any]) -> int:
+    for key in ("result_pct", "net_profit", "result_cash"):
+        value = _as_float(row.get(key))
+        if value is None or not math.isfinite(value):
+            continue
+        if value > 0:
+            return 1
+        if value < 0:
+            return -1
+        return 0
+    return 0
+
+
+def _average_float(values: List[float]) -> float | None:
+    clean = [value for value in values if value is not None and math.isfinite(value)]
+    return (sum(clean) / len(clean)) if clean else None
+
+
+def _size_recommendation(kind: str, winner_avg: Any, loser_avg: Any) -> str:
+    win = _as_float(winner_avg)
+    loss = _as_float(loser_avg)
+    label = "stop loss" if kind == "stop" else "target"
+    if win is None or loss is None or not math.isfinite(win) or not math.isfinite(loss):
+        return "Need wins & losses"
+    tolerance = max(1e-9, max(abs(win), abs(loss)) * 1e-9)
+    if abs(win - loss) <= tolerance:
+        return f"Keep {label}"
+    return f"Reduce {label}" if win < loss else f"Increase {label}"
+
+
+def _distance_recommendation_summary(rows: List[Dict[str, Any]]) -> Dict[str, str]:
+    buckets = {
+        "stop_wins": [],
+        "stop_losses": [],
+        "target_wins": [],
+        "target_losses": [],
+    }
+    for row in rows:
+        if str(row.get("row_type") or "trade").strip().lower() != "trade":
+            continue
+        if _is_test_trade_value(row.get("is_test_trade")):
+            continue
+        outcome = _trade_outcome_sign(row)
+        if outcome == 0:
+            continue
+        stop_pct = _distance_pct_points(row, "stop_loss")
+        target_pct = _distance_pct_points(row, "take_profit")
+        suffix = "wins" if outcome > 0 else "losses"
+        if stop_pct is not None:
+            buckets[f"stop_{suffix}"].append(stop_pct)
+        if target_pct is not None:
+            buckets[f"target_{suffix}"].append(target_pct)
+    return {
+        STOP_RECOMMENDATION_HEADER: _size_recommendation(
+            "stop",
+            _average_float(buckets["stop_wins"]),
+            _average_float(buckets["stop_losses"]),
+        ),
+        TARGET_RECOMMENDATION_HEADER: _size_recommendation(
+            "target",
+            _average_float(buckets["target_wins"]),
+            _average_float(buckets["target_losses"]),
+        ),
+    }
+
+
+def _distance_recommendations_by_symbol(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str, str]]:
+    grouped: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    active: List[Dict[str, Any]] = []
+    for row in rows:
+        if str(row.get("row_type") or "trade").strip().lower() != "trade":
+            continue
+        if _is_test_trade_value(row.get("is_test_trade")):
+            continue
+        active.append(row)
+        symbol = str(row.get("symbol") or "").strip().upper()
+        if symbol:
+            grouped[symbol].append(row)
+    overall = _distance_recommendation_summary(active)
+    out = {"": overall}
+    for symbol, symbol_rows in grouped.items():
+        out[symbol] = _distance_recommendation_summary(symbol_rows)
+    return out
+
+
+def _row_distance_recommendation(
+    row: Dict[str, Any],
+    recommendations_by_symbol: Dict[str, Dict[str, str]],
+    header: str,
+) -> str:
+    symbol = str(row.get("symbol") or "").strip().upper()
+    symbol_text = (recommendations_by_symbol.get(symbol) or {}).get(header)
+    if symbol_text and symbol_text != "Need wins & losses":
+        return symbol_text
+    return (recommendations_by_symbol.get("") or {}).get(header) or symbol_text or "Need wins & losses"
+
+
+def _apply_recommendation_cell_style(cell) -> None:
+    alignment = copy(cell.alignment)
+    alignment.wrap_text = True
+    alignment.horizontal = "left"
+    cell.alignment = alignment
+    cell.number_format = "General"
+    if _semantic_fill_rgb(cell) in {PROFIT_FILL, LOSS_FILL, "FFF2CC"}:
+        cell.fill = PatternFill()
+        font = copy(cell.font)
+        if getattr(font.color, "type", None) == "rgb" and str(font.color.rgb or "")[-6:].upper() in {PROFIT_FONT, LOSS_FONT, "9C6500"}:
+            font.color = "000000"
+        cell.font = font
+
+
 def _linear_profit_percentage_totals(rows: List[Dict[str, Any]]) -> Dict[str, float | None]:
     values = [
         value
@@ -782,7 +1032,7 @@ def _currency_to_aud_factor(currency: Any) -> float | None:
 
 
 def _net_result_pct_by_account(rows: List[Dict[str, Any]]) -> Dict[str, float]:
-    by_account: Dict[str, Dict[str, float]] = defaultdict(lambda: {"pnl": 0.0, "starting": 0.0})
+    by_account: Dict[str, float] = defaultdict(float)
     for row in rows:
         if str(row.get("row_type") or "trade").strip().lower() != "trade":
             continue
@@ -791,24 +1041,11 @@ def _net_result_pct_by_account(rows: List[Dict[str, Any]]) -> Dict[str, float]:
         account = _canonical_account_label(row.get("account_label") or row.get("account") or row.get("source") or "")
         if not account:
             continue
-        pnl = _as_float(row.get("net_profit"))
-        if pnl is None:
-            pnl = _as_float(row.get("result_cash"))
-        ending = _as_float(row.get("analysis_balance_after_trade"))
-        if ending is None:
-            ending = _as_float(row.get("balance_after_trade"))
-        if pnl is None or ending is None or not math.isfinite(pnl) or not math.isfinite(ending):
+        result_pct = _as_float(row.get("result_pct"))
+        if result_pct is None or not math.isfinite(result_pct):
             continue
-        starting = ending - pnl
-        if starting <= 0 or not math.isfinite(starting):
-            continue
-        by_account[account]["pnl"] += pnl
-        by_account[account]["starting"] += starting
-    return {
-        account: (payload["pnl"] / payload["starting"] * 100.0)
-        for account, payload in by_account.items()
-        if payload["starting"] > 0
-    }
+        by_account[account] += result_pct
+    return dict(by_account)
 
 
 def _merge_metric_buckets(*buckets: Dict[str, Any] | None) -> Dict[str, Any]:
@@ -2054,7 +2291,7 @@ def _trade_log_two_row_header_values_for(headers: List[str]) -> Tuple[List[str],
             row1.append("Move to Profit" if header == MOVE_TO_PROFIT_HEADERS[0] else "")
             row2.append(MOVE_TO_SUBHEADERS[MOVE_TO_PROFIT_HEADERS.index(header)])
         else:
-            row1.append(header)
+            row1.append(_trade_log_visible_header(header))
             row2.append("")
     return row1, row2
 
@@ -2123,7 +2360,7 @@ def _trade_log_has_two_row_headers(ws) -> bool:
 def _trade_log_has_legacy_duplicate_two_row_headers_for(ws, headers: List[str]) -> bool:
     row1, row2 = _trade_log_two_row_header_values_for(headers)
     duplicate_row2 = [
-        header if header not in MOVE_TO_FIELD_MAP else row2[col - 1]
+        _trade_log_visible_header(header) if header not in MOVE_TO_FIELD_MAP else row2[col - 1]
         for col, header in enumerate(headers, start=1)
     ]
     found1 = [str(ws.cell(1, c).value or "").strip() for c in range(1, len(headers) + 1)]
@@ -2139,12 +2376,54 @@ def _trade_log_has_v1_grouped_two_row_headers(ws) -> bool:
     return _trade_log_has_two_row_headers_for(ws, TRADE_LOG_HEADERS_V1) or _trade_log_has_legacy_duplicate_two_row_headers_for(ws, TRADE_LOG_HEADERS_V1)
 
 
+def _trade_log_has_recommendation_grouped_three_row_headers(ws) -> bool:
+    return _trade_log_has_three_row_headers_for(ws, RECOMMENDATION_TRADE_LOG_HEADERS)
+
+
+def _trade_log_has_recommendation_grouped_two_row_headers(ws) -> bool:
+    return (
+        _trade_log_has_two_row_headers_for(ws, RECOMMENDATION_TRADE_LOG_HEADERS)
+        or _trade_log_has_legacy_duplicate_two_row_headers_for(ws, RECOMMENDATION_TRADE_LOG_HEADERS)
+    )
+
+
+def _trade_log_has_recommendation_v1_grouped_two_row_headers(ws) -> bool:
+    return (
+        _trade_log_has_two_row_headers_for(ws, RECOMMENDATION_TRADE_LOG_HEADERS_V1)
+        or _trade_log_has_legacy_duplicate_two_row_headers_for(ws, RECOMMENDATION_TRADE_LOG_HEADERS_V1)
+    )
+
+
+def _trade_log_has_pre_recommendation_grouped_three_row_headers(ws) -> bool:
+    return _trade_log_has_three_row_headers_for(ws, PRE_RECOMMENDATION_TRADE_LOG_HEADERS)
+
+
+def _trade_log_has_pre_recommendation_grouped_two_row_headers(ws) -> bool:
+    return (
+        _trade_log_has_two_row_headers_for(ws, PRE_RECOMMENDATION_TRADE_LOG_HEADERS)
+        or _trade_log_has_legacy_duplicate_two_row_headers_for(ws, PRE_RECOMMENDATION_TRADE_LOG_HEADERS)
+    )
+
+
+def _trade_log_has_pre_recommendation_v1_grouped_two_row_headers(ws) -> bool:
+    return (
+        _trade_log_has_two_row_headers_for(ws, PRE_RECOMMENDATION_TRADE_LOG_HEADERS_V1)
+        or _trade_log_has_legacy_duplicate_two_row_headers_for(ws, PRE_RECOMMENDATION_TRADE_LOG_HEADERS_V1)
+    )
+
+
 def _trade_log_uses_grouped_two_row_headers(ws) -> bool:
     return (
         _trade_log_has_three_row_headers(ws)
         or _trade_log_has_two_row_headers(ws)
         or _trade_log_has_legacy_duplicate_two_row_headers(ws)
         or _trade_log_has_v1_grouped_two_row_headers(ws)
+        or _trade_log_has_recommendation_grouped_three_row_headers(ws)
+        or _trade_log_has_recommendation_grouped_two_row_headers(ws)
+        or _trade_log_has_recommendation_v1_grouped_two_row_headers(ws)
+        or _trade_log_has_pre_recommendation_grouped_three_row_headers(ws)
+        or _trade_log_has_pre_recommendation_grouped_two_row_headers(ws)
+        or _trade_log_has_pre_recommendation_v1_grouped_two_row_headers(ws)
     )
 
 
@@ -2153,8 +2432,16 @@ def _trade_log_header_map(ws) -> Dict[str, int]:
         return {header: col for col, header in enumerate(TRADE_LOG_HEADERS, start=1)}
     if _trade_log_has_two_row_headers(ws) or _trade_log_has_legacy_duplicate_two_row_headers(ws):
         return {header: col for col, header in enumerate(TRADE_LOG_HEADERS, start=1)}
+    if _trade_log_has_pre_recommendation_grouped_three_row_headers(ws) or _trade_log_has_pre_recommendation_grouped_two_row_headers(ws):
+        return {header: col for col, header in enumerate(PRE_RECOMMENDATION_TRADE_LOG_HEADERS, start=1)}
+    if _trade_log_has_recommendation_grouped_three_row_headers(ws) or _trade_log_has_recommendation_grouped_two_row_headers(ws):
+        return {header: col for col, header in enumerate(RECOMMENDATION_TRADE_LOG_HEADERS, start=1)}
     if _trade_log_has_v1_grouped_two_row_headers(ws):
         return {header: col for col, header in enumerate(TRADE_LOG_HEADERS_V1, start=1)}
+    if _trade_log_has_recommendation_v1_grouped_two_row_headers(ws):
+        return {header: col for col, header in enumerate(RECOMMENDATION_TRADE_LOG_HEADERS_V1, start=1)}
+    if _trade_log_has_pre_recommendation_v1_grouped_two_row_headers(ws):
+        return {header: col for col, header in enumerate(PRE_RECOMMENDATION_TRADE_LOG_HEADERS_V1, start=1)}
     return {
         str(ws.cell(1, c).value or "").strip(): c
         for c in range(1, ws.max_column + 1)
@@ -2165,7 +2452,15 @@ def _trade_log_header_map(ws) -> Dict[str, int]:
 def _trade_log_data_start_row(ws) -> int:
     if _trade_log_has_three_row_headers(ws):
         return TRADE_LOG_DATA_START_ROW
+    if _trade_log_has_recommendation_grouped_three_row_headers(ws):
+        return TRADE_LOG_DATA_START_ROW
+    if _trade_log_has_pre_recommendation_grouped_three_row_headers(ws):
+        return TRADE_LOG_DATA_START_ROW
     if _trade_log_has_two_row_headers(ws) or _trade_log_has_legacy_duplicate_two_row_headers(ws) or _trade_log_has_v1_grouped_two_row_headers(ws):
+        return 3
+    if _trade_log_has_recommendation_grouped_two_row_headers(ws) or _trade_log_has_recommendation_v1_grouped_two_row_headers(ws):
+        return 3
+    if _trade_log_has_pre_recommendation_grouped_two_row_headers(ws) or _trade_log_has_pre_recommendation_v1_grouped_two_row_headers(ws):
         return 3
     return 2
 
@@ -2360,8 +2655,8 @@ def _apply_trade_log_adaptive_formats(ws) -> None:
     headers = _trade_log_header_map(ws)
     profit_col = headers.get("Profit %")
     r_col = headers.get("R-Multiple")
-    duration_cols = [
-        headers.get("Trade Duration (DD:HH:MM:SS)"),
+    trade_duration_col = headers.get("Trade Duration (DD:HH:MM:SS)")
+    move_duration_cols = [
         headers.get("Move to Break Even Duration"),
         headers.get("Move to Profit Duration"),
     ]
@@ -2372,7 +2667,12 @@ def _apply_trade_log_adaptive_formats(ws) -> None:
         if r_col:
             cell = ws.cell(row, r_col)
             cell.number_format = adaptive_number_format(cell.value)
-        for col in duration_cols:
+        if trade_duration_col:
+            cell = ws.cell(row, trade_duration_col)
+            if cell.value not in (None, ""):
+                cell.value = _duration_display_cell_value(cell.value, cell.number_format)
+            cell.number_format = "General"
+        for col in move_duration_cols:
             if col and ws.cell(row, col).value not in (None, ""):
                 ws.cell(row, col).number_format = DURATION_NUMBER_FORMAT
 
@@ -2456,6 +2756,16 @@ def _ensure_trade_log_schema(ws, diagnostics: Dict[str, Any] | None = None) -> N
     legacy_duplicate_headers = _trade_log_has_legacy_duplicate_two_row_headers(ws)
     legacy_v1_grouped_headers = _trade_log_has_two_row_headers_for(ws, TRADE_LOG_HEADERS_V1)
     legacy_v1_duplicate_headers = _trade_log_has_legacy_duplicate_two_row_headers_for(ws, TRADE_LOG_HEADERS_V1)
+    legacy_rec_three_row_headers = _trade_log_has_recommendation_grouped_three_row_headers(ws)
+    legacy_rec_grouped_headers = _trade_log_has_two_row_headers_for(ws, RECOMMENDATION_TRADE_LOG_HEADERS)
+    legacy_rec_duplicate_headers = _trade_log_has_legacy_duplicate_two_row_headers_for(ws, RECOMMENDATION_TRADE_LOG_HEADERS)
+    legacy_rec_v1_grouped_headers = _trade_log_has_two_row_headers_for(ws, RECOMMENDATION_TRADE_LOG_HEADERS_V1)
+    legacy_rec_v1_duplicate_headers = _trade_log_has_legacy_duplicate_two_row_headers_for(ws, RECOMMENDATION_TRADE_LOG_HEADERS_V1)
+    legacy_pre_rec_three_row_headers = _trade_log_has_pre_recommendation_grouped_three_row_headers(ws)
+    legacy_pre_rec_grouped_headers = _trade_log_has_two_row_headers_for(ws, PRE_RECOMMENDATION_TRADE_LOG_HEADERS)
+    legacy_pre_rec_duplicate_headers = _trade_log_has_legacy_duplicate_two_row_headers_for(ws, PRE_RECOMMENDATION_TRADE_LOG_HEADERS)
+    legacy_pre_rec_v1_grouped_headers = _trade_log_has_two_row_headers_for(ws, PRE_RECOMMENDATION_TRADE_LOG_HEADERS_V1)
+    legacy_pre_rec_v1_duplicate_headers = _trade_log_has_legacy_duplicate_two_row_headers_for(ws, PRE_RECOMMENDATION_TRADE_LOG_HEADERS_V1)
     if already_current:
         headers = _trade_log_header_map(ws)
         trade_number_col = headers.get(TRADE_NUMBER_HEADER)
@@ -2471,6 +2781,12 @@ def _ensure_trade_log_schema(ws, diagnostics: Dict[str, Any] | None = None) -> N
         ):
             for row in range(TRADE_LOG_DATA_START_ROW, ws.max_row + 1):
                 ws.cell(row, headers[header]).number_format = "0.00%"
+        for header in (STOP_RECOMMENDATION_HEADER, TARGET_RECOMMENDATION_HEADER):
+            col = headers.get(header)
+            if not col:
+                continue
+            for row in range(TRADE_LOG_DATA_START_ROW, ws.max_row + 1):
+                _apply_recommendation_cell_style(ws.cell(row, col))
         ws.freeze_panes = "A4"
         _hide_trade_log_row_id(ws)
         _set_trade_log_auto_filter(ws)
@@ -2487,20 +2803,56 @@ def _ensure_trade_log_schema(ws, diagnostics: Dict[str, Any] | None = None) -> N
         if legacy_two_row_headers or legacy_duplicate_headers:
             source_headers = list(TRADE_LOG_HEADERS)
             source_start_row = 3
+        elif legacy_rec_three_row_headers:
+            source_headers = list(RECOMMENDATION_TRADE_LOG_HEADERS)
+            source_start_row = TRADE_LOG_DATA_START_ROW
+        elif legacy_rec_grouped_headers or legacy_rec_duplicate_headers:
+            source_headers = list(RECOMMENDATION_TRADE_LOG_HEADERS)
+            source_start_row = 3
+        elif legacy_pre_rec_three_row_headers:
+            source_headers = list(PRE_RECOMMENDATION_TRADE_LOG_HEADERS)
+            source_start_row = TRADE_LOG_DATA_START_ROW
+        elif legacy_pre_rec_grouped_headers or legacy_pre_rec_duplicate_headers:
+            source_headers = list(PRE_RECOMMENDATION_TRADE_LOG_HEADERS)
+            source_start_row = 3
         elif legacy_v1_grouped_headers or legacy_v1_duplicate_headers:
             source_headers = list(TRADE_LOG_HEADERS_V1)
+            source_start_row = 3
+        elif legacy_rec_v1_grouped_headers or legacy_rec_v1_duplicate_headers:
+            source_headers = list(RECOMMENDATION_TRADE_LOG_HEADERS_V1)
+            source_start_row = 3
+        elif legacy_pre_rec_v1_grouped_headers or legacy_pre_rec_v1_duplicate_headers:
+            source_headers = list(PRE_RECOMMENDATION_TRADE_LOG_HEADERS_V1)
             source_start_row = 3
         else:
             source_headers = [str(ws.cell(1, col).value or "").strip() for col in range(1, ws.max_column + 1)]
             while source_headers and not source_headers[-1]:
                 source_headers.pop()
-        if source_headers not in (PRE_MOVE_TRADE_LOG_HEADERS, OLD_TRADE_LOG_HEADERS, TRADE_LOG_HEADERS_V1, TRADE_LOG_HEADERS):
+        if source_headers not in (
+            PRE_MOVE_TRADE_LOG_HEADERS,
+            OLD_TRADE_LOG_HEADERS,
+            PRE_RECOMMENDATION_TRADE_LOG_HEADERS_V1,
+            PRE_RECOMMENDATION_TRADE_LOG_HEADERS,
+            RECOMMENDATION_TRADE_LOG_HEADERS_V1,
+            RECOMMENDATION_TRADE_LOG_HEADERS,
+            TRADE_LOG_HEADERS_V1,
+            TRADE_LOG_HEADERS,
+        ):
             raise RuntimeError(
                 "Trade Log headers cannot be migrated safely: "
                 f"found {source_headers!r}; expected current two-row headers or one of "
-                f"{[PRE_MOVE_TRADE_LOG_HEADERS, OLD_TRADE_LOG_HEADERS, TRADE_LOG_HEADERS_V1, TRADE_LOG_HEADERS]!r}."
+                f"{[PRE_MOVE_TRADE_LOG_HEADERS, OLD_TRADE_LOG_HEADERS, PRE_RECOMMENDATION_TRADE_LOG_HEADERS_V1, PRE_RECOMMENDATION_TRADE_LOG_HEADERS, RECOMMENDATION_TRADE_LOG_HEADERS_V1, RECOMMENDATION_TRADE_LOG_HEADERS, TRADE_LOG_HEADERS_V1, TRADE_LOG_HEADERS]!r}."
             )
-        if not (legacy_two_row_headers or legacy_duplicate_headers or legacy_v1_grouped_headers or legacy_v1_duplicate_headers):
+        if not (
+            legacy_two_row_headers or legacy_duplicate_headers
+            or legacy_v1_grouped_headers or legacy_v1_duplicate_headers
+            or legacy_rec_three_row_headers
+            or legacy_rec_grouped_headers or legacy_rec_duplicate_headers
+            or legacy_rec_v1_grouped_headers or legacy_rec_v1_duplicate_headers
+            or legacy_pre_rec_three_row_headers
+            or legacy_pre_rec_grouped_headers or legacy_pre_rec_duplicate_headers
+            or legacy_pre_rec_v1_grouped_headers or legacy_pre_rec_v1_duplicate_headers
+        ):
             source_start_row = 2
 
     source_by_header = {header: idx for idx, header in enumerate(source_headers, start=1)}
@@ -2519,13 +2871,27 @@ def _ensure_trade_log_schema(ws, diagnostics: Dict[str, Any] | None = None) -> N
         source_row_heights.append(ws.row_dimensions[row].height)
 
     header_templates: Dict[str, Dict[str, Any]] = {}
-    source_header_row = 2 if (already_current or legacy_two_row_headers or legacy_duplicate_headers or legacy_v1_grouped_headers or legacy_v1_duplicate_headers) else 1
+    source_header_row = 2 if (
+        already_current
+        or legacy_two_row_headers or legacy_duplicate_headers
+        or legacy_v1_grouped_headers or legacy_v1_duplicate_headers
+        or legacy_rec_three_row_headers
+        or legacy_rec_grouped_headers or legacy_rec_duplicate_headers
+        or legacy_rec_v1_grouped_headers or legacy_rec_v1_duplicate_headers
+        or legacy_pre_rec_three_row_headers
+        or legacy_pre_rec_grouped_headers or legacy_pre_rec_duplicate_headers
+        or legacy_pre_rec_v1_grouped_headers or legacy_pre_rec_v1_duplicate_headers
+    ) else 1
     for header in TRADE_LOG_HEADERS:
         source_header = header
         if header == "Close Stopout" and source_header not in source_by_header:
             source_header = "Stop Out"
         template_header = source_header if source_header in source_by_header else ("Open Time" if TRADE_NUMBER_HEADER not in source_by_header else "Test")
-        if "Trigger Price" in header:
+        if header == STOP_RECOMMENDATION_HEADER:
+            template_header = "Stop Loss Distance"
+        elif header == TARGET_RECOMMENDATION_HEADER:
+            template_header = "Target Distance"
+        elif "Trigger Price" in header:
             template_header = "Entry Price"
         elif "Distance From" in header:
             template_header = "Stop Loss Distance"
@@ -2552,7 +2918,11 @@ def _ensure_trade_log_schema(ws, diagnostics: Dict[str, Any] | None = None) -> N
     for target_col, header in enumerate(TRADE_LOG_HEADERS, start=1):
         source_header = header if header in source_by_header else ("Stop Out" if header == "Close Stopout" and "Stop Out" in source_by_header else None)
         template_header = source_header or ("Open Time" if TRADE_NUMBER_HEADER not in source_by_header else "Test")
-        if "Trigger Price" in header:
+        if header == STOP_RECOMMENDATION_HEADER:
+            template_header = "Stop Loss Distance"
+        elif header == TARGET_RECOMMENDATION_HEADER:
+            template_header = "Target Distance"
+        elif "Trigger Price" in header:
             template_header = "Entry Price"
         elif "Distance From" in header:
             template_header = "Stop Loss Distance"
@@ -2577,6 +2947,9 @@ def _ensure_trade_log_schema(ws, diagnostics: Dict[str, Any] | None = None) -> N
         elif header == TRADE_NUMBER_HEADER:
             for row in range(TRADE_LOG_DATA_START_ROW, TRADE_LOG_DATA_START_ROW + len(source_data_rows)):
                 ws.cell(row, target_col).number_format = "@"
+        elif header in {STOP_RECOMMENDATION_HEADER, TARGET_RECOMMENDATION_HEADER}:
+            for row in range(TRADE_LOG_DATA_START_ROW, TRADE_LOG_DATA_START_ROW + len(source_data_rows)):
+                _apply_recommendation_cell_style(ws.cell(row, target_col))
         elif "Distance From" in header:
             for row in range(TRADE_LOG_DATA_START_ROW, TRADE_LOG_DATA_START_ROW + len(source_data_rows)):
                 ws.cell(row, target_col).number_format = "0.00%"
@@ -2621,14 +2994,19 @@ def _remove_trade_log_win_loss_row_formatting(ws) -> None:
     for key, rules in list(getattr(cf, "_cf_rules", {}).items()):
         sqref = str(getattr(key, "sqref", key))
         rule_text = " ".join(_conditional_formatting_formula_text(rule) for rule in rules)
+        lower_rule_text = rule_text.lower()
         is_generated_row_rule = (
             sqref.startswith(("A2:", "A3:", "A4:"))
             and '"trade"' in rule_text
             and ("AND(" in rule_text.upper())
             and (">0" in rule_text or "<0" in rule_text)
         )
+        is_generated_recommendation_rule = (
+            "lower(" in lower_rule_text
+            and any(token in lower_rule_text for token in ('"reduce"', '"increase"', '"keep"'))
+        )
         is_stale_old_schema = sqref.startswith(("A2:AB", "A3:AB", "A4:AB")) or "$AA" in rule_text
-        if is_generated_row_rule or is_stale_old_schema:
+        if is_generated_row_rule or is_generated_recommendation_rule or is_stale_old_schema:
             stale_refs.append(sqref)
     for sqref in stale_refs:
         del cf[sqref]
@@ -2678,6 +3056,9 @@ def _apply_trade_log_win_loss_direct_row_fills(ws) -> None:
     if not row_type_col or not net_pl_col:
         return
     last_col = max((col for header, col in headers.items() if header), default=ws.max_column)
+    recommendation_cols = {
+        col for col in (headers.get(STOP_RECOMMENDATION_HEADER), headers.get(TARGET_RECOMMENDATION_HEADER)) if col
+    }
     profit_fill = PatternFill("solid", fgColor=PROFIT_FILL)
     loss_fill = PatternFill("solid", fgColor=LOSS_FILL)
     empty_fill = PatternFill()
@@ -2692,10 +3073,44 @@ def _apply_trade_log_win_loss_direct_row_fills(ws) -> None:
                 fill = loss_fill
         for col in range(1, last_col + 1):
             cell = ws.cell(row, col)
+            if col in recommendation_cols:
+                _apply_recommendation_cell_style(cell)
+                continue
             if fill is not None:
                 cell.fill = fill
             elif _cell_has_generated_trade_log_win_loss_fill(cell):
                 cell.fill = empty_fill
+
+def _apply_trade_log_recommendation_conditional_formatting(ws, start_row: int, last_row: int, headers: Dict[str, int]) -> None:
+    yellow_fill = PatternFill("solid", fgColor="FFF2CC")
+    yellow_font = Font(color="9C6500")
+    keep_fill = PatternFill("solid", fgColor=PROFIT_FILL)
+    keep_font = Font(color=PROFIT_FONT)
+    for header in (STOP_RECOMMENDATION_HEADER, TARGET_RECOMMENDATION_HEADER):
+        col = headers.get(header)
+        if not col:
+            continue
+        letter = get_column_letter(col)
+        cell_ref = f"{letter}{start_row}"
+        cell_range = f"{letter}{start_row}:{letter}{last_row}"
+        ws.conditional_formatting.add(
+            cell_range,
+            FormulaRule(
+                formula=[f'OR(LEFT(LOWER({cell_ref}),6)="reduce",LEFT(LOWER({cell_ref}),8)="increase")'],
+                fill=yellow_fill,
+                font=yellow_font,
+                stopIfTrue=True,
+            ),
+        )
+        ws.conditional_formatting.add(
+            cell_range,
+            FormulaRule(
+                formula=[f'LEFT(LOWER({cell_ref}),4)="keep"'],
+                fill=keep_fill,
+                font=keep_font,
+                stopIfTrue=True,
+            ),
+        )
 
 def _apply_trade_log_win_loss_row_formatting(ws) -> None:
     headers = _trade_log_header_map(ws)
@@ -2713,6 +3128,7 @@ def _apply_trade_log_win_loss_row_formatting(ws) -> None:
     cell_range = f"A{start_row}:{get_column_letter(last_col)}{last_row}"
     profit_fill = PatternFill("solid", fgColor=PROFIT_FILL)
     loss_fill = PatternFill("solid", fgColor=LOSS_FILL)
+    _apply_trade_log_recommendation_conditional_formatting(ws, start_row, last_row, headers)
     ws.conditional_formatting.add(
         cell_range,
         FormulaRule(formula=[f'AND(${row_type_letter}{start_row}="trade",${net_pl_letter}{start_row}>0)'], fill=profit_fill, stopIfTrue=True),
@@ -2841,6 +3257,9 @@ def _apply_instrument_averages_requested_style(ws, *, preserve_layout: bool = Fa
             for header in ("Move to break even", "Move to profit"):
                 if headers.get(header):
                     ws.cell(row, headers[header]).number_format = ZERO_HIDE_FORMAT
+            for header in (STOP_RECOMMENDATION_HEADER, TARGET_RECOMMENDATION_HEADER):
+                if headers.get(header):
+                    _apply_recommendation_cell_style(ws.cell(row, headers[header]))
         _apply_symbols_filter_header_layout(ws)
         _repair_symbols_header_merges_preserving_layout(ws)
         return
@@ -2863,6 +3282,9 @@ def _apply_instrument_averages_requested_style(ws, *, preserve_layout: bool = Fa
         for header in count_headers:
             if headers.get(header):
                 ws.cell(row, headers[header]).number_format = ZERO_HIDE_FORMAT
+        for header in (STOP_RECOMMENDATION_HEADER, TARGET_RECOMMENDATION_HEADER):
+            if headers.get(header):
+                _apply_recommendation_cell_style(ws.cell(row, headers[header]))
         if headers.get("Net R Multiple"):
             ws.cell(row, headers["Net R Multiple"]).number_format = '0.000"R"'
         for header in ("Move to break even", "Move to profit"):
@@ -3064,6 +3486,9 @@ def _populate_symbols_metrics_preserving_layout(
             cell.value = value
             if key.startswith("timeframe_"):
                 cell.number_format = ZERO_HIDE_FORMAT
+            elif key.endswith("_recommendation"):
+                cell.number_format = "General"
+                _apply_recommendation_cell_style(cell)
             else:
                 cell.value = value / 100.0
                 cell.number_format = "0.00%"
@@ -3691,11 +4116,16 @@ def _instrument_analysis_by_symbol(rows: List[Dict[str, Any]]) -> Dict[str, Dict
             "timeframe_weekly": all_timeframe_counts["WEEKLY"],
             "timeframe_monthly": all_timeframe_counts["MONTHLY"],
         })
+        rec_summary = _distance_recommendation_summary(symbol_rows)
+        payload[STOP_RECOMMENDATION_HEADER] = rec_summary.get(STOP_RECOMMENDATION_HEADER)
+        payload[TARGET_RECOMMENDATION_HEADER] = rec_summary.get(TARGET_RECOMMENDATION_HEADER)
+        payload["stop_recommendation"] = payload[STOP_RECOMMENDATION_HEADER]
+        payload["target_recommendation"] = payload[TARGET_RECOMMENDATION_HEADER]
         for source_key, prefix in (("stop_loss", "stop"), ("take_profit", "target")):
             values = [
-                fraction * 100.0
-                for fraction in (_validated_distance_fraction(row, source_key) for row in symbol_rows)
-                if fraction is not None and math.isfinite(fraction)
+                pct
+                for pct in (_distance_pct_points(row, source_key) for row in symbol_rows)
+                if pct is not None and math.isfinite(pct)
             ]
             if values:
                 payload[f"min_{prefix}_pct"] = min(values)
@@ -3976,9 +4406,6 @@ def _result_percentage_totals_by_market(
                         unavailable_reason = "return_below_minus_100_unverified"
                 else:
                     unavailable_reason = "invalid_combined_starting_capital"
-        totals["net_result_pct"] = market_return
-        totals["gross_gain_result_pct"] = gross_gain_return
-        totals["gross_loss_result_pct"] = gross_loss_return
         result[market] = {
             **totals,
             "market_return_pct": market_return,
@@ -4154,16 +4581,10 @@ def _dashboard_extended_metrics(
 
     def _distance_samples(items: List[Dict[str, Any]], key: str) -> List[Tuple[float, Dict[str, Any]]]:
         samples: List[Tuple[float, Dict[str, Any]]] = []
-        fallback_key = "stop_loss_distance_pct" if key == "stop_loss" else "target_distance_pct"
         for item in items:
-            fraction = _validated_distance_fraction(item, key)
-            if fraction is not None:
-                samples.append((fraction * 100.0, item))
-                continue
-            fallback = _as_float(item.get(fallback_key))
-            if fallback is not None and math.isfinite(fallback):
-                if _trade_row_market(item) != "fx" or abs(fallback) <= 50.0:
-                    samples.append((abs(fallback), item))
+            pct = _distance_pct_points(item, key)
+            if pct is not None:
+                samples.append((pct, item))
         return samples
 
     def _distance_values(items: List[Dict[str, Any]], key: str) -> List[float]:
@@ -4332,6 +4753,7 @@ def _dashboard_extended_metrics(
             **{f"timeframe_{label.lower()}_wins": timeframe_wins[label] for label in timeframe_aliases.values()},
             **{f"timeframe_{label.lower()}_losses": timeframe_losses[label] for label in timeframe_aliases.values()},
             **_summary(commissions, "commission"),
+            **_distance_recommendation_summary(items),
             "net_r_multiple": sum(r_values) if r_values else None,
             "gross_ir_gain": sum(value for value in r_values if value > 0) if r_values else None,
             "gross_ir_loss": abs(sum(value for value in r_values if value < 0)) if r_values else None,
@@ -4433,15 +4855,17 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
         ("Start", "start:longest_losing_streak", "streak_date", None),
         ("End", "end:longest_losing_streak", "streak_date", None),
         ("Avg stop %", "avg_stop_pct", "pct", None),
-        ("Avg target %", "avg_target_pct", "pct", None),
         ("Min stop %", "min_stop_pct", "pct", None),
         ("Source", "source:min_stop_pct", "source", None),
         ("Max stop %", "max_stop_pct", "pct", None),
         ("Source", "source:max_stop_pct", "source", None),
+        ("Recommendation", STOP_RECOMMENDATION_HEADER, "text", None),
+        ("Avg target %", "avg_target_pct", "pct", None),
         ("Min target %", "min_target_pct", "pct", None),
         ("Source", "source:min_target_pct", "source", None),
         ("Max target %", "max_target_pct", "pct", None),
         ("Source", "source:max_target_pct", "source", None),
+        ("Recommendation", TARGET_RECOMMENDATION_HEADER, "text", None),
     ]
 
     row = 2
@@ -4706,6 +5130,7 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
     _apply_dashboard_requested_semantic_fills(dash)
 
     resolved_balances = _resolved_all_trade_balances(rows)
+    recommendations_by_symbol = _distance_recommendations_by_symbol(rows)
     ws=_get_all_trades_sheet(wb); headers=TRADE_LOG_HEADERS; ws.append(headers)
     for i, row in enumerate(rows):
         pct = _as_float(row.get('result_pct'))
@@ -4757,10 +5182,19 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
             "Open Time": otv, "Close Time": ctv, "Account": acct, "Symbol": symbol, "Side": side,
             "Qty": row.get('qty'), "Entry Price": row.get('entry_price'), "Exit Price": row.get('exit_price'),
             "Stop Loss Price": stop_loss_price, "Stop Loss Distance": stop_loss_distance,
-            "Target Price": target_price, "Target Distance": target_distance, "Commission": comm_val,
+            STOP_RECOMMENDATION_HEADER: (
+                _row_distance_recommendation(row, recommendations_by_symbol, STOP_RECOMMENDATION_HEADER)
+                if row_type == "trade" else ""
+            ),
+            "Target Price": target_price, "Target Distance": target_distance,
+            TARGET_RECOMMENDATION_HEADER: (
+                _row_distance_recommendation(row, recommendations_by_symbol, TARGET_RECOMMENDATION_HEADER)
+                if row_type == "trade" else ""
+            ),
+            "Commission": comm_val,
             "Net P/L": net_pnl, "Profit %": (pct / 100.0 if pct is not None else ''),
             "R-Multiple": row.get('r_multiple'), "Balance After": resolved_balance,
-            "Trade Duration (DD:HH:MM:SS)": _fmt_duration_full(_infer_trade_duration_seconds(row)),
+            "Trade Duration (DD:HH:MM:SS)": _format_duration_display(_infer_trade_duration_seconds(row)),
             "Test": 'Yes' if _is_test_trade_value(row.get('is_test_trade')) else 'No',
             "Pattern": row.get('pattern') or '', "EMA": row.get('ema') or '', "ATHS/ATLS": row.get('aths_atls') or '',
             "Order": row.get('order_type') or '', "Round Number": row.get('round_number') or '',
@@ -4796,7 +5230,11 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
         _fmt_col(rr, "Open Time", 'yyyy-mm-dd hh:mm:ss')
         _fmt_col(rr, "Close Time", 'yyyy-mm-dd hh:mm:ss')
         _fmt_col(rr, "Stop Loss Distance", "0.00%")
+        if trade_cols.get(STOP_RECOMMENDATION_HEADER):
+            _apply_recommendation_cell_style(ws.cell(rr, trade_cols[STOP_RECOMMENDATION_HEADER]))
         _fmt_col(rr, "Target Distance", "0.00%")
+        if trade_cols.get(TARGET_RECOMMENDATION_HEADER):
+            _apply_recommendation_cell_style(ws.cell(rr, trade_cols[TARGET_RECOMMENDATION_HEADER]))
         if ccy_comm:
             _fmt_col(rr, "Commission", _currency_number_format(ccy_comm))
         if ccy_pnl:
@@ -4805,7 +5243,7 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
         _fmt_col(rr, "R-Multiple", adaptive_number_format(ws.cell(rr, trade_cols["R-Multiple"]).value))
         if ccy_bal:
             _fmt_col(rr, "Balance After", '#,##0.0000000000' if _is_crypto_currency(ccy_bal) else '#,##0.00')
-        _fmt_col(rr, "Trade Duration (DD:HH:MM:SS)", DURATION_NUMBER_FORMAT)
+        _fmt_col(rr, "Trade Duration (DD:HH:MM:SS)", "General")
         _fmt_col(rr, "Move to Break Even Time", 'yyyy-mm-dd hh:mm:ss')
         _fmt_col(rr, "Move to Break Even Duration", DURATION_NUMBER_FORMAT)
         _fmt_col(rr, "Move to Profit Time", 'yyyy-mm-dd hh:mm:ss')
@@ -4862,7 +5300,9 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
             analysis.get("net_r_multiple"),
             (netp/100.0 if netp is not None else ''), (avgp/100.0 if avgp is not None else ''),
             rec.get("win_rate_pct"), rec.get('avg_sl_pct_wins'), rec.get('avg_sl_pct_losses'),
+            analysis.get(STOP_RECOMMENDATION_HEADER) or rec.get(STOP_RECOMMENDATION_HEADER) or rec.get("stop_recommendation") or "",
             rec.get('avg_tp_pct_wins'), rec.get('avg_tp_pct_losses'),
+            analysis.get(TARGET_RECOMMENDATION_HEADER) or rec.get(TARGET_RECOMMENDATION_HEADER) or rec.get("target_recommendation") or "",
             _format_duration_display(rec.get("min_trade_duration_seconds", rec.get("shortest_duration_seconds"))),
             _format_duration_display(rec.get("avg_trade_duration_seconds", rec.get("avg_duration_seconds"))),
             _format_duration_display(rec.get("max_trade_duration_seconds", rec.get("longest_duration_seconds"))),
@@ -4875,6 +5315,8 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
             if val is not None:
                 cell.value = val / 100.0
                 cell.number_format = "0.00%"
+        for header in (STOP_RECOMMENDATION_HEADER, TARGET_RECOMMENDATION_HEADER):
+            _apply_recommendation_cell_style(inst.cell(row_idx, header_cols[header]))
         for zc in [
             4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,
             header_cols["All-time highs"], header_cols["All-time lows"],
@@ -6440,8 +6882,8 @@ def _ensure_dashboard_requested_metric_rows(ws, diagnostics: Dict[str, Any] | No
                 changed = True
             target_row += 1
 
-    cursor_anchor = "Avg target %"
-    for metric_label in ("Min stop %", "Max stop %", "Min target %", "Max target %"):
+    cursor_anchor = "Avg stop %"
+    for metric_label in ("Min stop %", "Max stop %", "Avg target %", "Min target %", "Max target %"):
         metric_row = find_core_row(metric_label)
         if not metric_row:
             anchor = find_core_row(cursor_anchor)
@@ -6489,6 +6931,24 @@ def _ensure_dashboard_requested_metric_rows(ws, diagnostics: Dict[str, Any] | No
             row += 2
             continue
         row += 1
+
+    def ensure_recommendation_after(anchor_label: str) -> int | None:
+        nonlocal changed
+        anchor = find_core_row(anchor_label)
+        if not anchor:
+            return None
+        source_row = anchor + 1 if anchor + 1 <= ws.max_row and label_at(anchor + 1).casefold() == "source" else anchor
+        expected = source_row + 1
+        if expected <= ws.max_row and label_at(expected).casefold() == "recommendation":
+            return expected
+        inserted = _insert_dashboard_rows_preserving_layout(ws, expected, 1, source_row)
+        ws.cell(inserted, label_col).value = "Recommendation"
+        diagnostics.setdefault("inserted_dashboard_metric_rows", []).append(f"{anchor_label}: Recommendation")
+        changed = True
+        return inserted
+
+    ensure_recommendation_after("Max stop %")
+    ensure_recommendation_after("Max target %")
 
     return changed
 
@@ -6996,24 +7456,25 @@ def _repair_stats2_account_balance_formatting(ws, diagnostics: Dict[str, Any] | 
 
 
 def _repair_stats2_as_of_datetime_style(wb, diagnostics: Dict[str, Any] | None = None) -> None:
-    if STATS1_SHEET not in wb.sheetnames or STATS2_SHEET not in wb.sheetnames:
+    if STATS2_SHEET not in wb.sheetnames:
         return
-    stats1 = wb[STATS1_SHEET]
     stats2 = wb[STATS2_SHEET]
-    style_ref = stats1["B146"]
     repaired = 0
     for row in range(3, stats2.max_row + 1):
         cell = stats2.cell(row, 5)
         if cell.value in (None, ""):
             continue
         value = cell.value
-        _copy_cell_style(style_ref, cell)
         if isinstance(value, str):
             value = value.replace("T", " ")
             if len(value) >= 19:
                 value = value[:19]
         cell.value = value
-        cell.number_format = style_ref.number_format
+        cell.fill = PatternFill()
+        font = copy(cell.font)
+        font.color = "FF000000"
+        cell.font = font
+        cell.number_format = "yyyy-mm-dd hh:mm:ss" if isinstance(value, datetime) else "General"
         repaired += 1
     if diagnostics is not None:
         diagnostics["repaired_stats2_as_of_datetime_cells"] = repaired
@@ -7683,6 +8144,28 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
                     if row_num < first_winners_row:
                         write_market_source_row(row_num, source_key)
                         break
+
+            def write_core_recommendation_after(anchor_label: str, key: str) -> None:
+                for row_num in label_rows.get(anchor_label.lower(), []):
+                    if row_num >= first_winners_row:
+                        continue
+                    source_row = row_num + 1 if row_num + 1 <= dash.max_row and str(dash.cell(row_num + 1, 1).value or "").strip().casefold() == "source" else row_num
+                    rec_row = source_row + 1
+                    if rec_row > dash.max_row or str(dash.cell(rec_row, 1).value or "").strip().casefold() != "recommendation":
+                        continue
+                    for market, col in market_cols.items():
+                        value = (buckets.get(market) or {}).get(key)
+                        if value in (None, ""):
+                            continue
+                        if _write_value_preserving_cell(dash, rec_row, col, _excel_scalar(value)):
+                            dash.cell(rec_row, col).number_format = "General"
+                            _apply_recommendation_cell_style(dash.cell(rec_row, col))
+                            diagnostics["updated_cells"] += 1
+                    break
+
+            write_core_recommendation_after("Max stop %", STOP_RECOMMENDATION_HEADER)
+            write_core_recommendation_after("Max target %", TARGET_RECOMMENDATION_HEADER)
+
             for label, source_key in (
                 ("Min Move to Break Even", "min_move_to_break_even_duration_seconds"),
                 ("Max Move to Break Even", "max_move_to_break_even_duration_seconds"),
@@ -8274,6 +8757,8 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
                     'short wins':['short wins'],'short losses':['short losses'],'short break-even':['short break-even'],
                     'net p/l %':['net p/l %'],'avg p/l %':['avg p/l %'],'win rate %':['win rate %'],
                     'avg stop % (w)':['avg stop % (w)'],'avg stop % (l)':['avg stop % (l)'],'avg target % (w)':['avg target % (w)'],'avg target % (l)':['avg target % (l)'],
+                    'stop recommendation':['stop loss recommendation'],
+                    'target recommendation':['target recommendation'],
                     'shortest':['shortest duration (dd:hh:mm:ss)','shortest (dd:hh:mm:ss)'],
                     'avgdur':['avg duration (dd:hh:mm:ss)'],
                     'longest':['longest duration (dd:hh:mm:ss)','longest (dd:hh:mm:ss)'],

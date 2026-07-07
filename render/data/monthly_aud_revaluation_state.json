@@ -8,11 +8,11 @@
   "traceback": null,
   "last_boundary_resolution": {},
   "last_oanda_window": {},
-  "last_synced_at": "2026-06-22T11:38:59.719304+00:00",
-  "updated_at": "2026-06-22T11:38:59.719328+00:00",
+  "last_synced_at": "2026-07-07T06:13:15.912428+00:00",
+  "updated_at": "2026-07-07T06:13:15.912453+00:00",
   "last_result": {
-    "started_at": "2026-06-22T11:38:59.666348+00:00",
-    "finished_at": "2026-06-22T11:38:59.719339+00:00",
+    "started_at": "2026-07-07T06:13:15.861009+00:00",
+    "finished_at": "2026-07-07T06:13:15.912509+00:00",
     "target_months": [],
     "processed_months": [],
     "succeeded_months": [],
@@ -20,7 +20,7 @@
     "failures": [],
     "partial": false,
     "changed": 0,
-    "rows": 3,
+    "rows": 4,
     "mandatory_row_id": "monthly_aud_reval:bybit_live:2026-03"
   }
 }

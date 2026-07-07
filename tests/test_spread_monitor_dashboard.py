@@ -1,6 +1,5 @@
 import asyncio
 import importlib.util
-import io
 import json
 import os
 import subprocess
@@ -79,7 +78,7 @@ def test_spread_app_table_layout_prevents_broker_value_overlap():
     assert "min-width: 1620px;" in source
     assert "width: 164px;" in source
     assert "broker-value" in source
-    assert "Pepperstone" in source
+    assert "Pepperstone" not in source
 
 
 def test_spread_app_frontend_normalizes_messages_refresh_and_sorting():
@@ -93,7 +92,7 @@ def test_spread_app_frontend_normalizes_messages_refresh_and_sorting():
     assert "updateLastRefresh: true" in source
     assert "function queueStatusPoll()" in source
     assert "function pollRefreshStatus()" in source
-    assert "loadStatus();" in source
+    assert "loadStatus();" not in source
     assert "refreshData({ initial: true })" in source
     assert "hideOandaCacheUntilFresh" in source
     assert "Loading OANDA cache" not in source
@@ -108,13 +107,13 @@ def test_spread_app_frontend_normalizes_messages_refresh_and_sorting():
     assert "function spreadNumber(data)" in source
     assert "raw === null || raw === undefined || raw === ''" in source
     assert "value >= 0 ? value : NaN" in source
-    assert "function spreadPointsText(data)" in source
-    assert "0 points" in source
+    assert "function spreadPointsText(data)" not in source
+    assert "0 points" not in source
     assert "const unavailable = !Number.isFinite(spreadValue);" in source
     assert ".spread-neutral" in source
-    assert "pepperstone_razor" in source
-    assert "function importPepperstone(file)" in source
-    assert "manual import only" in source
+    assert "pepperstone_razor" not in source
+    assert "function importPepperstone(file)" not in source
+    assert "manual import only" not in source
     assert "[object Object]" not in source
 
 
@@ -129,8 +128,9 @@ def test_spread_app_no_longer_imports_live_mt5_fetchers():
 def test_spread_app_selector_buttons_and_plain_spread_note_exist():
     source = (ROOT / "spreads-clone" / "spread_app.py").read_text(encoding="utf-8")
     assert 'data-broker="oanda">Oanda</button>' in source
-    assert 'data-broker="pepperstone">Pepperstone</button>' in source
-    assert "Spread values are shown as percentage of bid/ask midpoint. Points are shown when available." in source
+    assert 'data-broker="pepperstone"' not in source
+    assert "Spread values are shown as percentage of bid/ask midpoint." in source
+    assert "Points are shown when available." not in source
     assert "Low percentile" not in source
     assert "Medium percentile" not in source
     assert "High percentile" not in source
@@ -236,58 +236,15 @@ def test_spread_refresh_endpoint_starts_background_job_without_blocking(monkeypa
     assert alias.status_code == 200
 
 
-def test_pepperstone_status_and_import_endpoint_are_manual_only(monkeypatch):
+def test_pepperstone_status_and_import_endpoints_are_removed():
     spread_dir = ROOT / "spreads-clone"
     sys.path.insert(0, str(spread_dir))
-    spec = importlib.util.spec_from_file_location("spread_app_pepperstone_endpoint_test", spread_dir / "spread_app.py")
+    spec = importlib.util.spec_from_file_location("spread_app_oanda_only_endpoint_test", spread_dir / "spread_app.py")
     module = importlib.util.module_from_spec(spec)
     assert spec and spec.loader
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
 
-    class FakePepperstoneState:
-        def status(self):
-            return {
-                "ok": False,
-                "manual_import_only": True,
-                "rows": [],
-                "current_only": True,
-                "timeframes": [],
-                "errors": ["No imported Pepperstone spread data is available yet."],
-            }
-
-        def import_text(self, _text, *, source_path):
-            cell = {"spread_pct": 0.01, "display": "0.0100%"}
-            return {
-                "ok": True,
-                "manual_import_only": True,
-                "current_only": True,
-                "source_filename": str(source_path),
-                "rows": [
-                    {
-                        "symbol": "EUR_USD",
-                        "display_symbol": "EUR/USD",
-                        "current_spread": cell,
-                        "cells": {"CURRENT": {"pepperstone_razor": cell}},
-                    }
-                ],
-                "timeframes": [],
-                "errors": [],
-            }
-
-    monkeypatch.setattr(module, "PEPPERSTONE_STATE", FakePepperstoneState())
     client = module.app.test_client()
-    status = client.get("/api/spreads/pepperstone/status")
-    assert status.status_code == 200
-    assert status.get_json()["manual_import_only"] is True
-
-    response = client.post(
-        "/api/spreads/pepperstone/import",
-        data={"file": (io.BytesIO(b'{"version":1}'), "pepperstone_spreads_latest.json")},
-        content_type="multipart/form-data",
-    )
-    assert response.status_code == 200
-    payload = response.get_json()
-    assert payload["current_only"] is True
-    assert payload["timeframes"] == []
-    assert payload["rows"][0]["current_spread"]["spread_pct"] == 0.01
+    assert client.get("/api/spreads/pepperstone/status").status_code == 404
+    assert client.post("/api/spreads/pepperstone/import").status_code == 404

@@ -111,11 +111,13 @@
   }
 
   function setJournalState(kind, text) {
+    if (!journalEl) return;
     journalEl.dataset.state = kind;
     journalEl.innerHTML = `<div class="muted">${text}</div>`;
   }
 
   function setSpecsState(kind, text) {
+    if (!specsEl) return;
     specsEl.dataset.state = kind;
     const msg = String(text || '').trim();
     specsEl.innerHTML = msg ? `<div class="muted">${msg}</div>` : '';
@@ -238,6 +240,7 @@
   }
 
   function renderSpecs(specs) {
+    if (!specsEl) return;
     const isNumericLike = (v) => {
       if (v === null || v === undefined) return false;
       if (typeof v === 'number') return Number.isFinite(v);
@@ -374,6 +377,7 @@
   };
 
   function renderJournalStats(payload) {
+    if (!journalEl) return;
     const s = payload.stats || {};
     const tradeRows = Array.isArray(payload.trades) ? payload.trades : [];
     const rows = [
@@ -773,8 +777,6 @@
     invalidateQuote();
     canonicalEl.textContent = '';
     if (!symbol) {
-      setJournalState('idle', 'Type a symbol to load journal summary.');
-      setSpecsState('idle', 'Enter a symbol to load instrument specs.');
       return;
     }
     if (resolveController) resolveController.abort();
@@ -785,38 +787,11 @@
       state.resolvedSymbol = instrument.symbol;
       canonicalEl.textContent = `Canonical symbol: ${instrument.symbol}`;
       prewarmQuoteDependencies(instrument.symbol);
-      setSpecsState('loading', 'Loading instrument specs...');
-      const prefer = state.asset === 'fx' ? '&prefer=oanda' : '';
-      try {
-        const specs = await request(`/api/instrument-specs?query=${encodeURIComponent(instrument.symbol)}${prefer}`, { signal: resolveController.signal });
-        renderSpecs(specs);
-      } catch (_specErr) {
-        setSpecsState('error', `Instrument specs unavailable for ${instrument.symbol}.`);
-      }
-      setJournalState('loading', 'Loading journal summary...');
-      if (journalController) journalController.abort();
-      journalController = new AbortController();
-      try {
-        const j = await request(`/api/calculator/journal-summary?asset=${encodeURIComponent(state.asset)}&symbol=${encodeURIComponent(symbol)}`, { signal: journalController.signal });
-        if (j.status === 'no_data') {
-          setJournalState('no_data', `No journal data for ${j.canonical_symbol}.`);
-        } else {
-          renderJournalStats(j);
-        }
-      } catch (_journalErr) {
-        setJournalState('error', `Journal summary unavailable for ${instrument.symbol}.`);
-      }
     } catch (e) {
       if (e.name === 'AbortError') {
-        if (state.resolvedSymbol) {
-          setSpecsState('error', `Instrument specs unavailable for ${state.resolvedSymbol}.`);
-          setJournalState('error', `Journal summary unavailable for ${state.resolvedSymbol}.`);
-        }
         return;
       }
       state.resolvedSymbol = '';
-      setJournalState('unresolved', `Unresolved symbol: ${symbol}`);
-      setSpecsState('unresolved', `Unresolved symbol: ${symbol}`);
       canonicalEl.textContent = '';
     } finally {
       resolveInFlight = null;
@@ -1184,6 +1159,4 @@
   setSubmitState({ visible: false, enabled: false, reason: '', stateName: 'idle' });
   clearPepperstoneSetDownload();
   toggleWebhookPanel(false);
-  setJournalState('idle', 'Type a symbol to load journal summary.');
-  setSpecsState('idle', 'Enter a symbol to load instrument specs.');
 })();

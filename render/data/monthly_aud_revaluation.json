@@ -1,6 +1,43 @@
 {
   "items": [
     {
+      "id": "monthly_aud_reval:bybit_live:2026-06",
+      "row_type": "monthly_aud_reval",
+      "source": "bybit_monthly_aud_reval",
+      "account": "live",
+      "account_label": "Bybit Live",
+      "symbol": "MONTHLY AUD P/L",
+      "side": "",
+      "status": "closed",
+      "open_time": "2026-06-01T00:00:00+10:00",
+      "close_time": "2026-06-30T23:59:59+10:00",
+      "entry_price": 0.717765,
+      "exit_price": 0.68926,
+      "stop_loss": "",
+      "take_profit": "",
+      "fees": "",
+      "result_cash": 12.95,
+      "result_currency": "AUD",
+      "result_pct": "",
+      "outcome": "",
+      "duration_seconds": "",
+      "raw_refs": {
+        "period_month": "2026-06",
+        "start_rate": 0.717765,
+        "end_rate": 0.68926,
+        "fx_close": 0.71842,
+        "fx_next_open": 0.71711,
+        "end_fx_close": 0.68926,
+        "end_fx_next_open": 0.68926,
+        "start_balance_usdt": 224.67800738,
+        "end_balance_usdt": 224.67890689,
+        "start_balance_source": "current_balance_no_activity_after_boundary",
+        "end_balance_source": "current_balance_no_activity_after_boundary",
+        "computed_result_pct": 4.136011607989332
+      },
+      "updated_at": "2026-07-04T01:42:59.013126+00:00"
+    },
+    {
       "id": "monthly_aud_reval:bybit_live:2026-05",
       "row_type": "monthly_aud_reval",
       "source": "bybit_monthly_aud_reval",
@@ -112,5 +149,5 @@
       "updated_at": "2026-05-27T11:02:20.792012+00:00"
     }
   ],
-  "updated_at": "2026-06-02T10:21:29.149744+00:00"
+  "updated_at": "2026-07-04T01:42:59.013554+00:00"
 }

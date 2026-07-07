@@ -12,11 +12,14 @@ if not defined LOCAL_MASTER_WINDOW_TITLE set "LOCAL_MASTER_WINDOW_TITLE=Local Ma
 if defined LOCAL_MASTER_WINDOW_TITLE title !LOCAL_MASTER_WINDOW_TITLE!
 
 echo [local-master] visible worker console started.
-echo [local-master] worker output is being written to:
+echo [local-master] worker output will print live below and is also being written to:
 echo [local-master]   !LOCAL_MASTER_WORKER_LOG!
+echo [local-master] Startup progress will update while dashboard health and scanner readiness are checked.
 echo [local-master] If startup fails, this window will stay open and print the latest log lines.
 
-call "%ROOT%run_local_master_control.bat" __worker > "%LOCAL_MASTER_WORKER_LOG%" 2>&1
+set "STREAM_ROOT=!ROOT!"
+if "!STREAM_ROOT:~-1!"=="\" set "STREAM_ROOT=!STREAM_ROOT:~0,-1!"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%tools\windows_launchers\stream_local_master_worker.ps1" -Root "!STREAM_ROOT!" -WorkerLog "!LOCAL_MASTER_WORKER_LOG!"
 set "WORKER_EXIT_CODE=!ERRORLEVEL!"
 
 if defined LOCAL_MASTER_NORMAL_EXIT_FILE (

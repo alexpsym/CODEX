@@ -1509,7 +1509,7 @@ def test_valid_bybit_import_preserves_existing_rows_and_reports_sync_fields(temp
 
 
 def test_sync_master_journal_duration_validation_still_fails_real_trade_blank_duration(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
-    from tools.master_journal_workbook import build_master_journal_workbook
+    from tools.master_journal_workbook import TRADE_LOG_DATA_START_ROW, build_master_journal_workbook
     mj = temp_state_paths / "Trading Journal.xlsx"
     rows = [{"id": "t1", "row_type": "trade", "source": "manual", "account": "OANDA DEMO", "account_label": "OANDA DEMO", "symbol": "EURUSD", "side": "Buy", "qty": 1.0, "entry_price": 1.1, "exit_price": 1.2, "open_time": "2026-05-01T00:00:00Z", "close_time": "2026-05-01T01:00:00Z", "net_profit": 10.0}]
     build_master_journal_workbook({"items": rows, "stats": {"totals": {}, "groups": {}}, "balances": []}, mj)
@@ -1518,14 +1518,14 @@ def test_sync_master_journal_duration_validation_still_fails_real_trade_blank_du
     ws = wb["Trade Log"]
     headers = [str(c.value or "") for c in ws[1]]
     dur_col = headers.index("Trade Duration (DD:HH:MM:SS)") + 1
-    ws.cell(2, dur_col).value = ""
+    ws.cell(TRADE_LOG_DATA_START_ROW, dur_col).value = ""
     wb.save(mj)
     wb.close()
     monkeypatch.setattr(master_service, "_build_trading_journal_view_snapshot", lambda force=True: {"items": rows, "stats": {"totals": {}, "groups": {}}, "balances": []})
     monkeypatch.setattr(master_service, "update_master_journal_workbook_data_only", lambda *a, **k: {"ok": True, "candidate_path": str(mj)})
     out = master_service._sync_master_journal_workbook(defer_github_sync=True, sync_caller="test")
     assert out.get("ok") is False
-    assert "duration column blank/non-numeric" in str(out.get("master_journal_error") or "")
+    assert "duration column blank/unparseable" in str(out.get("master_journal_error") or "")
 
 
 def test_import_file_endpoint_not_stub_anymore(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
