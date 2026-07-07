@@ -3055,7 +3055,27 @@ async def _bybit_resolve_and_fetch_specs(query: str, *, include_btc_reference: b
         "nextFundingTime": (ticker or {}).get("nextFundingTime"), "launchTime": resolved_inst.get("launchTime"),
         "openInterest": (ticker or {}).get("openInterest"), "openInterestValue": (ticker or {}).get("openInterestValue"),
         "volume24hUsd": (ticker or {}).get("turnover24h"),
+        "contractType": resolved_inst.get("contractType"), "status": resolved_inst.get("status"),
+        "baseCoin": resolved_inst.get("baseCoin"), "quoteCoin": resolved_inst.get("quoteCoin"),
     }
+    price_filter = resolved_inst.get("priceFilter") if isinstance(resolved_inst.get("priceFilter"), dict) else {}
+    lot_filter = resolved_inst.get("lotSizeFilter") if isinstance(resolved_inst.get("lotSizeFilter"), dict) else {}
+    leverage_filter = resolved_inst.get("leverageFilter") if isinstance(resolved_inst.get("leverageFilter"), dict) else {}
+    specs.update(
+        {
+            "tickSize": price_filter.get("tickSize"),
+            "minPrice": price_filter.get("minPrice"),
+            "maxPrice": price_filter.get("maxPrice"),
+            "qtyStep": lot_filter.get("qtyStep"),
+            "minOrderQty": lot_filter.get("minOrderQty"),
+            "maxOrderQty": lot_filter.get("maxOrderQty"),
+            "maxMktOrderQty": lot_filter.get("maxMktOrderQty"),
+            "minNotionalValue": lot_filter.get("minNotionalValue"),
+            "minLeverage": leverage_filter.get("minLeverage"),
+            "maxLeverage": leverage_filter.get("maxLeverage"),
+            "leverageStep": leverage_filter.get("leverageStep"),
+        }
+    )
     avg7d = await _bybit_avg_7d_turnover_usd_async(base_url, str((ticker or {}).get("symbol") or symbol), category)
     if avg7d is not None: specs["avg7dTurnoverUsd"] = avg7d
     range_specs, range_warnings = await _bybit_fetch_range_specs_async(base_url, category, symbol)
@@ -11471,31 +11491,81 @@ INSTRUMENT_SPECS_TEMPLATE = """<!DOCTYPE html>
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Instrument Lookup</title>
     <style>
-        :root { color-scheme: light dark; }
-        body { font-family: 'Inter', system-ui, -apple-system, sans-serif; margin: 0; padding: 2rem; background: #0b1220; color: #e2e8f0; }
+        :root {
+            color-scheme: light dark;
+            --page: #0b1220;
+            --toolbar: #111827;
+            --toolbar-border: #263347;
+            --sheet: #f8fafc;
+            --sheet-alt: #ffffff;
+            --sheet-header: #eaf2f8;
+            --sheet-line: #cfd8e3;
+            --ink: #0f172a;
+            --muted: #64748b;
+            --blue: #2563eb;
+            --green: #dcfce7;
+            --green-ink: #166534;
+            --red: #fee2e2;
+            --red-ink: #991b1b;
+            --amber: #fef3c7;
+        }
+        * { box-sizing: border-box; }
+        body { font-family: 'Inter', system-ui, -apple-system, sans-serif; margin: 0; padding: 1.5rem; background: var(--page); color: #e2e8f0; font-size: 16px; line-height: 1.4; }
         .wrap { max-width: 1500px; margin: 0 auto; }
-        h1 { margin: 0 0 0.75rem; }
-        .meta { color: #94a3b8; margin: 0 0 1.25rem; line-height: 1.5; }
-        .bar { display:flex; gap:0.6rem; align-items:center; margin-bottom: 1rem; }
-        .toggle { display:flex; gap:0.4rem; align-items:center; }
-        input { flex: 1; min-width: 240px; border-radius: 10px; border: 1px solid #334155; background: #0b1220; color: #e2e8f0; padding: 8px 10px; font-size: 0.95rem; }
-        button, .btn { background: #1f2937; color: #e2e8f0; border: 1px solid #334155; border-radius: 10px; padding: 8px 12px; cursor: pointer; font-weight: 900; text-decoration:none; display:inline-flex; align-items:center; }
+        h1 { margin: 0 0 0.35rem; font-size: clamp(1.35rem, 2.2vw, 2rem); }
+        .meta { color: #9fb4d0; margin: 0 0 1rem; line-height: 1.5; }
+        .bar { display:flex; gap:0.6rem; align-items:center; margin-bottom: 1rem; padding: 0.8rem; background: var(--toolbar); border: 1px solid var(--toolbar-border); border-radius: 8px; }
+        .toggle { display:flex; gap:0.35rem; align-items:center; flex: 0 0 auto; }
+        input { flex: 1; min-width: 220px; border-radius: 8px; border: 1px solid #334155; background: #0b1220; color: #e2e8f0; padding: 0.65rem 0.75rem; font-size: 1rem; }
+        button, .btn { background: #1f2937; color: #e2e8f0; border: 1px solid #334155; border-radius: 8px; padding: 0.65rem 0.9rem; cursor: pointer; font-weight: 800; text-decoration:none; display:inline-flex; align-items:center; justify-content:center; min-height: 42px; white-space: nowrap; }
         button:hover, .btn:hover { background: #334155; }
-        .toggle button.active { background: #2563eb; border-color: #3b82f6; }
-        .layout { display:grid; grid-template-columns:minmax(360px, 0.9fr) minmax(520px, 1.4fr); gap:1rem; align-items:start; }
-        .panel { background: #111827; border: 1px solid #1f2937; border-radius: 8px; padding: 1.25rem; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35); }
-        .panel h2 { margin:0 0 0.8rem; font-size:1rem; color:#cbd5e1; }
-        .metric-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:0.6rem; margin-bottom:1rem; }
-        .metric { background:#0b1220; border:1px solid #1f2937; border-radius:8px; padding:0.65rem; min-width:0; }
-        .metric-key { color:#94a3b8; font-size:0.78rem; overflow-wrap:anywhere; }
-        .metric-value { margin-top:0.25rem; overflow-wrap:anywhere; }
-        .table-wrap { overflow-x: auto; border-radius: 12px; border: 1px solid #1f2937; background: #0b1220; }
-        table { width: 100%; border-collapse: collapse; min-width: 720px; }
-        th, td { text-align:left; padding:0.6rem 0.75rem; border-bottom:1px solid #1f2937; font-size:0.9rem; }
-        th { background:#0f172a; color:#cbd5e1; position:sticky; top:0; z-index:1; }
-        #trade-table { min-width: 1800px; }
-        #err { color:#fca5a5; white-space: pre-wrap; }
-        @media (max-width: 980px) { .layout { grid-template-columns: 1fr; } .bar { flex-wrap:wrap; } }
+        .toggle button.active { background: var(--blue); border-color: #60a5fa; color: #ffffff; }
+        .layout { display:grid; grid-template-columns:minmax(300px, 0.82fr) minmax(520px, 1.38fr); gap:1rem; align-items:start; }
+        .panel { background: var(--sheet); border: 1px solid var(--sheet-line); border-radius: 8px; color: var(--ink); box-shadow: 0 12px 28px rgba(0, 0, 0, 0.28); overflow: hidden; }
+        .panel-head { display:flex; gap:0.75rem; align-items:flex-start; justify-content:space-between; padding: 0.85rem 1rem; background: var(--sheet-header); border-bottom: 1px solid var(--sheet-line); }
+        .panel h2 { margin:0; font-size:1rem; color:var(--ink); }
+        .panel-note { color: var(--muted); font-size: 0.82rem; margin-top: 0.2rem; }
+        .panel-body { padding: 0.85rem; }
+        .spec-section, .journal-section { border: 1px solid var(--sheet-line); border-radius: 6px; overflow: hidden; background: var(--sheet-alt); margin-bottom: 0.75rem; }
+        .section-title { display:flex; align-items:center; justify-content:space-between; gap:0.75rem; padding:0.55rem 0.7rem; background: var(--sheet-header); border-bottom: 1px solid var(--sheet-line); font-weight: 800; color: var(--ink); }
+        .section-subtitle { color: var(--muted); font-size: 0.78rem; font-weight: 700; }
+        .spec-row, .metric-row { display:grid; grid-template-columns:minmax(130px, 0.9fr) minmax(0, 1.1fr); min-height: 42px; border-bottom: 1px solid #e5e7eb; }
+        .spec-row:last-child, .metric-row:last-child { border-bottom: 0; }
+        .spec-label, .metric-label { padding:0.55rem 0.7rem; font-weight: 750; color: #1f2937; background: #fbfdff; border-right: 1px solid #e5e7eb; overflow-wrap:anywhere; }
+        .spec-value, .metric-value { padding:0.55rem 0.7rem; font-weight: 760; color: var(--ink); overflow-wrap:anywhere; min-width:0; }
+        .btc-reference-row { display:block; margin-top: 0.2rem; color: var(--muted); font-size:0.8rem; font-weight:700; }
+        .journal-overview { display:grid; grid-template-columns:repeat(auto-fit,minmax(130px,1fr)); gap:0.65rem; margin-bottom:0.8rem; }
+        .stat-card { border:1px solid var(--sheet-line); border-radius:6px; background:#ffffff; padding:0.65rem 0.7rem; min-width:0; border-left:4px solid #94a3b8; }
+        .stat-card.positive { border-left-color:#22c55e; background:var(--green); color:var(--green-ink); }
+        .stat-card.negative { border-left-color:#ef4444; background:var(--red); color:var(--red-ink); }
+        .stat-card.neutral { border-left-color:#3b82f6; }
+        .stat-label { color: var(--muted); font-size:0.76rem; font-weight:800; text-transform:uppercase; letter-spacing:0; }
+        .stat-value { margin-top:0.25rem; font-size:1.25rem; font-weight:900; overflow-wrap:anywhere; }
+        .journal-columns { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:0.75rem; align-items:start; }
+        .wide-section { grid-column:1 / -1; }
+        .metric-row.three { grid-template-columns:minmax(120px, 0.9fr) minmax(0, 1fr) minmax(0, 1fr); }
+        .metric-head { background: var(--sheet-header); font-weight: 850; color: var(--ink); }
+        .metric-value.positive, td.positive { background: var(--green); color: var(--green-ink); }
+        .metric-value.negative, td.negative { background: var(--red); color: var(--red-ink); }
+        .empty-state { padding: 0.85rem; color: var(--muted); background: #ffffff; border:1px dashed var(--sheet-line); border-radius:6px; }
+        .trade-block { margin-top:0.85rem; }
+        .table-wrap { overflow-x: auto; border-radius: 6px; border: 1px solid var(--sheet-line); background: #ffffff; }
+        table { width: 100%; border-collapse: collapse; min-width: 960px; color: var(--ink); }
+        th, td { text-align:left; padding:0.55rem 0.65rem; border-bottom:1px solid #e5e7eb; border-right:1px solid #edf2f7; font-size:0.88rem; vertical-align:top; }
+        th:last-child, td:last-child { border-right:0; }
+        th { background:var(--sheet-header); color:var(--ink); position:sticky; top:0; z-index:1; font-weight:850; }
+        td.numeric, th.numeric { text-align:right; font-variant-numeric: tabular-nums; }
+        td.notes { max-width: 240px; white-space: normal; }
+        #journal-status { color: var(--muted); margin: 0; font-weight: 750; text-align: right; }
+        #err { color:#fecaca; white-space: pre-wrap; margin-top:0.85rem; font-weight:700; }
+        @media (max-width: 980px) {
+            body { padding: 1rem; }
+            .layout, .journal-columns { grid-template-columns: 1fr; }
+            .bar { flex-wrap:wrap; }
+            input { min-width: 100%; }
+            .panel-head { flex-direction: column; }
+            #journal-status { text-align:left; }
+        }
     </style>
 </head>
 <body>
@@ -11515,23 +11585,35 @@ INSTRUMENT_SPECS_TEMPLATE = """<!DOCTYPE html>
 
     <div class="layout">
       <section class="panel">
-        <h2>Instrument Specs</h2>
-        <div class="table-wrap">
-          <table>
-            <thead><tr><th>Field</th><th>Value</th></tr></thead>
-            <tbody id="rows"></tbody>
-          </table>
+        <div class="panel-head">
+          <div>
+            <h2>Instrument Specs</h2>
+            <div class="panel-note">Broker rules, live market context, and movement ranges.</div>
+          </div>
+        </div>
+        <div class="panel-body">
+          <div id="rows"></div>
         </div>
       </section>
       <section class="panel">
-        <h2>Journal Metrics</h2>
-        <div id="journal-status" class="meta"></div>
-        <div id="journal-metrics" class="metric-grid"></div>
-        <div class="table-wrap">
-          <table id="trade-table">
-            <thead id="trade-head"></thead>
-            <tbody id="trade-body"></tbody>
-          </table>
+        <div class="panel-head">
+          <div>
+            <h2>Journal Stats</h2>
+            <div class="panel-note">Filtered to this instrument, excluding test trades.</div>
+          </div>
+          <div id="journal-status"></div>
+        </div>
+        <div class="panel-body">
+          <div id="journal-metrics"></div>
+          <div class="trade-block">
+            <div class="section-title">Recent Trades <span class="section-subtitle">Latest first</span></div>
+            <div class="table-wrap">
+              <table id="trade-table">
+                <thead id="trade-head"></thead>
+                <tbody id="trade-body"></tbody>
+              </table>
+            </div>
+          </div>
         </div>
       </section>
     </div>
