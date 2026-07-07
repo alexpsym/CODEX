@@ -100,6 +100,8 @@ function Wait-HealthDown {
 }
 
 function Stop-ListeningProcess {
+    param([string] $RootPath)
+
     $pids = @()
     try {
         $lines = @(& netstat.exe -ano -p tcp 2>$null)
@@ -122,10 +124,49 @@ function Stop-ListeningProcess {
         return $false
     }
     foreach ($processId in $pids) {
-        Write-Host "[local-master] stopping stale process on port 8000: pid=$processId"
+        Stop-LocalMasterWorkerSupervisor -ListenerProcessId $processId -RootPath $RootPath | Out-Null
+        Write-Host "[local-master] stopping existing process on port 8000: pid=$processId"
         Stop-Process -Id $processId -Force -ErrorAction Stop
     }
     return $true
+}
+
+function Stop-LocalMasterWorkerSupervisor {
+    param(
+        [int] $ListenerProcessId,
+        [string] $RootPath
+    )
+
+    try {
+        $child = Get-CimInstance Win32_Process -Filter ("ProcessId={0}" -f $ListenerProcessId) -ErrorAction Stop
+        if ($null -eq $child -or [int] $child.ParentProcessId -le 0) {
+            return $false
+        }
+        $parentProcessId = [int] $child.ParentProcessId
+        if ($parentProcessId -eq $PID) {
+            return $false
+        }
+        $parent = Get-CimInstance Win32_Process -Filter ("ProcessId={0}" -f $parentProcessId) -ErrorAction Stop
+        if ($null -eq $parent) {
+            return $false
+        }
+        $commandLine = [string] $parent.CommandLine
+        if ([string]::IsNullOrWhiteSpace($commandLine)) {
+            return $false
+        }
+        $expectedWorkerScript = [IO.Path]::GetFullPath((Join-Path $RootPath "run_local_master_control.bat"))
+        $normalizedCommand = $commandLine.Replace("/", "\").ToLowerInvariant()
+        $normalizedScript = $expectedWorkerScript.Replace("/", "\").ToLowerInvariant()
+        if ($normalizedCommand.Contains($normalizedScript) -and $normalizedCommand.Contains("__worker")) {
+            Write-Host "[local-master] stopping existing worker supervisor: pid=$parentProcessId"
+            Stop-Process -Id $parentProcessId -Force -ErrorAction Stop
+            return $true
+        }
+    }
+    catch {
+        return $false
+    }
+    return $false
 }
 
 $rootFull = [IO.Path]::GetFullPath($Root)
@@ -171,31 +212,47 @@ else {
 
 $exitSent = $false
 try {
-    $body = @{ url = ($BaseUrl.TrimEnd("/") + "/") } | ConvertTo-Json -Compress
-    Invoke-RestMethod -Uri ($BaseUrl.TrimEnd("/") + "/api/local-exit") -Method Post -Body $body -ContentType "application/json" -TimeoutSec 3 | Out-Null
+    $body = @{ reason = "launcher_preflight" } | ConvertTo-Json -Compress
+    Invoke-RestMethod -Uri ($BaseUrl.TrimEnd("/") + "/api/local-shutdown") -Method Post -Body $body -ContentType "application/json" -TimeoutSec 3 | Out-Null
     $exitSent = $true
-    Write-Host "[local-master] requested graceful shutdown for stale dashboard server."
+    Write-Host "[local-master] requested controlled shutdown for existing dashboard server."
 }
 catch {
-    Write-Host "[local-master] graceful stale-server shutdown was unavailable: $($_.Exception.Message)"
+    Write-Host "[local-master] controlled shutdown was unavailable: $($_.Exception.Message)"
 }
 
 if ($exitSent -and (Wait-HealthDown -Seconds $ShutdownWaitSeconds)) {
-    Write-Host "[local-master] stale dashboard server stopped; starting a fresh worker."
+    Write-Host "[local-master] existing dashboard server stopped; starting a fresh worker."
     Write-Decision "start"
     exit 0
 }
 
 try {
-    if (Stop-ListeningProcess -and (Wait-HealthDown -Seconds $ShutdownWaitSeconds)) {
-        Write-Host "[local-master] stale dashboard server was force-stopped; starting a fresh worker."
+    $body = @{ url = ($BaseUrl.TrimEnd("/") + "/") } | ConvertTo-Json -Compress
+    Invoke-RestMethod -Uri ($BaseUrl.TrimEnd("/") + "/api/local-exit") -Method Post -Body $body -ContentType "application/json" -TimeoutSec 3 | Out-Null
+    $exitSent = $true
+    Write-Host "[local-master] requested graceful shutdown for existing dashboard server."
+}
+catch {
+    Write-Host "[local-master] graceful shutdown was unavailable: $($_.Exception.Message)"
+}
+
+if ($exitSent -and (Wait-HealthDown -Seconds $ShutdownWaitSeconds)) {
+    Write-Host "[local-master] existing dashboard server stopped; starting a fresh worker."
+    Write-Decision "start"
+    exit 0
+}
+
+try {
+    if ((Stop-ListeningProcess -RootPath $rootFull) -and (Wait-HealthDown -Seconds $ShutdownWaitSeconds)) {
+        Write-Host "[local-master] existing dashboard server was force-stopped; starting a fresh worker."
         Write-Decision "start"
         exit 0
     }
 }
 catch {
-    Write-Host "[local-master] failed to force-stop stale dashboard server: $($_.Exception.Message)"
+    Write-Host "[local-master] failed to force-stop existing dashboard server: $($_.Exception.Message)"
 }
 
-Write-Host "[local-master] ERROR: could not stop the stale dashboard server on port 8000."
+Write-Host "[local-master] ERROR: could not stop the existing dashboard server on port 8000."
 exit 1

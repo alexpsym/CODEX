@@ -355,8 +355,12 @@ def test_run_local_master_parent_logs_are_condensed_and_worker_logs_are_detailed
     assert 'ensure_local_master_server.ps1' in wrapper
     assert wrapper.index('ensure_local_master_server.ps1') < wrapper.index('stream_local_master_worker.ps1')
     assert '/api/local-build-info' in preflight
+    assert '/api/local-shutdown' in preflight
     assert '/api/local-exit' in preflight
     assert 'netstat.exe -ano -p tcp' in preflight
+    assert 'Get-CimInstance Win32_Process' in preflight
+    assert 'run_local_master_control.bat' in preflight
+    assert '__worker' in preflight
     assert 'curl.exe' in preflight
     assert 'Stop-Process -Id $processId -Force' in preflight
     assert 'existing dashboard server has no build-info endpoint; treating it as stale' in preflight

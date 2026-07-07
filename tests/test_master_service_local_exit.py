@@ -50,6 +50,34 @@ def test_local_exit_success(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> 
     assert calls == ["close", "sentinel", "log", "schedule"]
 
 
+def test_local_shutdown_success_without_edge_close(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    client = TestClient(master_service.app)
+    calls: list[str] = []
+    monkeypatch.setattr(master_service, "_resolve_app_profile", lambda: "local")
+    sentinel = tmp_path / "exit.flag"
+    monkeypatch.setenv("LOCAL_MASTER_EXIT_REQUEST", str(sentinel))
+    monkeypatch.setattr(
+        master_service,
+        "_close_local_master_edge_target",
+        lambda _url: (_ for _ in ()).throw(AssertionError("edge close should not be called")),
+    )
+    monkeypatch.setattr(master_service, "_write_local_exit_sentinel", lambda: calls.append("sentinel") or sentinel)
+    monkeypatch.setattr(master_service, "_schedule_local_master_process_exit", lambda delay_seconds=0.75: calls.append("schedule"))
+
+    class FakeLogger:
+        def info(self, _msg: str, *_args: object) -> None:
+            calls.append("log")
+
+    monkeypatch.setattr(master_service, "APP_LOGGER", FakeLogger())
+    res = client.post("/api/local-shutdown", json={"reason": "launcher_preflight"})
+    assert res.status_code == 200
+    payload = res.json()
+    assert payload["ok"] is True
+    assert payload["reason"] == "launcher_preflight"
+    assert payload["sentinel"] == str(sentinel)
+    assert calls == ["sentinel", "log", "schedule"]
+
+
 def test_local_exit_rejected_when_not_local(monkeypatch: pytest.MonkeyPatch) -> None:
     client = TestClient(master_service.app)
     calls: list[str] = []
@@ -58,6 +86,17 @@ def test_local_exit_rejected_when_not_local(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(master_service, "_write_local_exit_sentinel", lambda: calls.append("sentinel"))
     monkeypatch.setattr(master_service, "_schedule_local_master_process_exit", lambda delay_seconds=0.75: calls.append("schedule"))
     res = client.post("/api/local-exit", json={"url": "http://127.0.0.1:8000/"})
+    assert res.status_code >= 400
+    assert calls == []
+
+
+def test_local_shutdown_rejected_when_not_local(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = TestClient(master_service.app)
+    calls: list[str] = []
+    monkeypatch.setattr(master_service, "_resolve_app_profile", lambda: "render")
+    monkeypatch.setattr(master_service, "_write_local_exit_sentinel", lambda: calls.append("sentinel"))
+    monkeypatch.setattr(master_service, "_schedule_local_master_process_exit", lambda delay_seconds=0.75: calls.append("schedule"))
+    res = client.post("/api/local-shutdown", json={"reason": "launcher_preflight"})
     assert res.status_code >= 400
     assert calls == []
 
@@ -84,6 +123,17 @@ def test_local_exit_missing_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LOCAL_MASTER_EXIT_REQUEST", "")
     monkeypatch.setattr(master_service, "_schedule_local_master_process_exit", lambda delay_seconds=0.75: calls.append("schedule"))
     res = client.post("/api/local-exit", json={"url": "http://127.0.0.1:8000/"})
+    assert res.status_code >= 400
+    assert calls == []
+
+
+def test_local_shutdown_missing_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = TestClient(master_service.app)
+    calls: list[str] = []
+    monkeypatch.setattr(master_service, "_resolve_app_profile", lambda: "local")
+    monkeypatch.delenv("LOCAL_MASTER_EXIT_REQUEST", raising=False)
+    monkeypatch.setattr(master_service, "_schedule_local_master_process_exit", lambda delay_seconds=0.75: calls.append("schedule"))
+    res = client.post("/api/local-shutdown", json={"reason": "launcher_preflight"})
     assert res.status_code >= 400
     assert calls == []
 

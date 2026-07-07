@@ -26713,6 +26713,7 @@ async def local_build_info() -> JSONResponse:
         "pid": os.getpid(),
         "app_profile": _resolve_app_profile(),
         "cwd": os.getcwd(),
+        "exit_request_path": str(os.getenv("LOCAL_MASTER_EXIT_REQUEST") or ""),
     }
     return JSONResponse(payload)
 
@@ -29715,6 +29716,24 @@ def _schedule_local_master_process_exit(delay_seconds: float = 0.75) -> None:
     threading.Thread(target=_shutdown, name="local-master-exit", daemon=True).start()
 
 
+@app.post("/api/local-shutdown")
+async def local_shutdown(payload: Dict[str, object] = Body(default_factory=dict)) -> JSONResponse:
+    if not _is_local_exit_allowed():
+        raise HTTPException(status_code=404, detail="Local shutdown is only available in local profile.")
+    reason = str((payload or {}).get("reason") or "launcher_preflight").strip() or "launcher_preflight"
+    try:
+        sentinel_path = _write_local_exit_sentinel()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to schedule local shutdown: {exc}") from exc
+    response_payload = {"ok": True, "sentinel": str(sentinel_path), "reason": reason}
+    response = JSONResponse(response_payload)
+    APP_LOGGER.info("LOCAL_SHUTDOWN_REQUESTED reason=%s sentinel=%s", reason, sentinel_path)
+    _schedule_local_master_process_exit()
+    return response
+
+
 @app.post("/api/local-exit")
 async def local_exit(payload: Dict[str, object] = Body(default_factory=dict)) -> JSONResponse:
     if not _is_local_exit_allowed():
@@ -29737,10 +29756,3 @@ async def local_exit(payload: Dict[str, object] = Body(default_factory=dict)) ->
     APP_LOGGER.info("LOCAL_EXIT_REQUESTED target=%s sentinel=%s", close_info.get("target_url"), sentinel_path)
     _schedule_local_master_process_exit()
     return response
-    def _apply_pnl_to_balance(row: Dict[str, object], pnl: Optional[float]) -> bool:
-        if pnl is None:
-            return False
-        source = str(row.get("source") or "").strip().lower()
-        if source in {"bybit", "bybit_execution_history", "bybit_execution_history_grouped"}:
-            return True
-        return not _is_test_trade_row(row)
