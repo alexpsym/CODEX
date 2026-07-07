@@ -212,9 +212,12 @@ if barstate.islast and allowBybitTimingLines and showExpiry and timeframe.isintr
 // -----------------------------------------------------------------------------
 // TRADING SESSION OPEN/CLOSE LINES
 // -----------------------------------------------------------------------------
+var line[] sessionMarkerLines = array.new_line()
 var label[] sessionLabels = array.new_label()
-sessionMaxLabels = 192
-sessionMarkerOffsetMultiplier = 1.875
+sessionMaxMarkers = 192
+sessionMarkerLineNearMultiplier = 0.35
+sessionMarkerLineFarMultiplier = 2.4
+sessionLabelOffsetMultiplier = 2.65
 
 sessionEventTimestamp(simple string sessionTimezone, simple int eventHour, simple int eventMinute) =>
     timestamp(sessionTimezone, year(time, sessionTimezone), month(time, sessionTimezone), dayofmonth(time, sessionTimezone), eventHour, eventMinute)
@@ -226,22 +229,22 @@ isSessionEvent(simple string sessionTimezone, simple int eventHour, simple int e
 horizontalSessionText(simple string sessionCode, simple bool isOpen) =>
     sessionCode + (isOpen ? " O" : " C")
 
-pushBoundedSessionLabel(label newLabel, int maxObjects) =>
-    array.push(sessionLabels, newLabel)
-    if array.size(sessionLabels) > maxObjects
-        label.delete(array.shift(sessionLabels))
-
 drawSessionMarker(simple string sessionTimezone, simple int eventHour, simple int eventMinute, simple string sessionCode, simple bool isOpen) =>
     eventTs = sessionEventTimestamp(sessionTimezone, eventHour, eventMinute)
     candleRange = math.max(high - low, syminfo.mintick * 20)
-    markerY = isOpen ? high + candleRange * sessionMarkerOffsetMultiplier : low - candleRange * sessionMarkerOffsetMultiplier
-    markerStyle = isOpen ? label.style_arrowdown : label.style_arrowup
-    sessionLabel = label.new(x=eventTs, y=markerY, text=horizontalSessionText(sessionCode, isOpen),
+    lineStartY = isOpen ? high + candleRange * sessionMarkerLineNearMultiplier : low - candleRange * sessionMarkerLineNearMultiplier
+    lineEndY = isOpen ? high + candleRange * sessionMarkerLineFarMultiplier : low - candleRange * sessionMarkerLineFarMultiplier
+    labelY = isOpen ? high + candleRange * sessionLabelOffsetMultiplier : low - candleRange * sessionLabelOffsetMultiplier
+    sessionMarkerLine = line.new(x1=eventTs, y1=lineStartY, x2=eventTs, y2=lineEndY,
+                                 xloc=xloc.bar_time, extend=extend.none,
+                                 color=color.black, style=line.style_dashed, width=2,
+                                 force_overlay=true)
+    sessionLabel = label.new(x=eventTs, y=labelY, text=horizontalSessionText(sessionCode, isOpen),
                              xloc=xloc.bar_time, yloc=yloc.price,
-                             color=color.white, textcolor=color.black,
-                             style=markerStyle, size=size.huge, textalign=text.align_center,
+                             color=color.new(color.white, 100), textcolor=color.black,
+                             style=label.style_none, size=size.large, textalign=text.align_center,
                              force_overlay=true)
-    pushBoundedSessionLabel(sessionLabel, sessionMaxLabels)
+    pushBoundedLineAndLabel(sessionMarkerLines, sessionLabels, sessionMarkerLine, sessionLabel, sessionMaxMarkers)
 
 if showSessionLines and barstate.isnew
     if showSydneySession
@@ -268,4 +271,5 @@ if showSessionLines and barstate.isnew
         if showSessionCloses and isSessionEvent("America/New_York", 17, 0)
             drawSessionMarker("America/New_York", 17, 0, "NY", false)
 else if barstate.isnew and not showSessionLines
+    clearLineArray(sessionMarkerLines)
     clearLabelArray(sessionLabels)

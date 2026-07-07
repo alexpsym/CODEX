@@ -54,23 +54,31 @@ def test_custom_indicator_session_labels_are_abbreviated_horizontal_and_larger()
     assert '"New York Open"' not in source
     assert 'sessionName + (isOpen ? " Open" : " Close")' not in source
     assert "textcolor=color.black" in source
-    assert "color=color.white" in source
+    assert "color=color.new(color.white, 100)" in source
     assert "size=size.tiny" not in source
     assert "size=size.normal" not in source
-    assert "size=size.huge" in source
-    assert "sessionMarkerOffsetMultiplier = 1.875" in source
+    assert "size=size.huge" not in source
+    assert "size=size.large" in source
+    assert "sessionLabelOffsetMultiplier = 2.65" in source
 
 
-def test_custom_indicator_session_rendering_uses_arrow_markers_not_extend_lines() -> None:
+def test_custom_indicator_session_rendering_uses_dashed_lines_not_arrow_markers() -> None:
     source = _source()
     session_block = source.split("// TRADING SESSION OPEN/CLOSE LINES", 1)[1]
     assert "drawSessionMarker" in session_block
-    assert "label.style_arrowdown" in session_block
-    assert "label.style_arrowup" in session_block
-    assert "markerY = isOpen ? high + candleRange * sessionMarkerOffsetMultiplier : low - candleRange * sessionMarkerOffsetMultiplier" in session_block
+    assert "sessionMarkerLines" in session_block
+    assert "label.style_arrowdown" not in session_block
+    assert "label.style_arrowup" not in session_block
+    assert "line.new" in session_block
+    assert "line.style_dashed" in session_block
+    assert "color=color.black" in session_block
+    assert "width=2" in session_block
+    assert "sessionMarkerLineFarMultiplier = 2.4" in session_block
+    assert "style=label.style_none" in session_block
+    assert "pushBoundedLineAndLabel(sessionMarkerLines, sessionLabels, sessionMarkerLine, sessionLabel, sessionMaxMarkers)" in session_block
+    assert "clearLineArray(sessionMarkerLines)" in session_block
     assert "textalign=text.align_center" in session_block
     assert "extend=extend.both" not in session_block
-    assert "line.new" not in session_block
 
 
 def test_custom_indicator_funding_and_option_expiry_code_remains_unchanged() -> None:
