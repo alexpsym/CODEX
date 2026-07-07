@@ -85,10 +85,16 @@ set "LOCAL_MASTER_EDGE_PROFILE_DIR=%TEMP%\LocalTradingToolsEdge-%LOCAL_LAUNCH_TS
 set "LOCAL_MASTER_EXIT_REQUEST=%TEMP%\LocalTradingToolsExit-%LOCAL_LAUNCH_TS%.flag"
 set "LOCAL_MASTER_NORMAL_EXIT_FILE=%TEMP%\LocalTradingToolsExit-%LOCAL_LAUNCH_TS%.normal"
 set "LOCAL_MASTER_WORKER_FAILED_FILE=%TEMP%\LocalTradingToolsExit-%LOCAL_LAUNCH_TS%.failed"
+set "LOCAL_MASTER_PREFLIGHT_DECISION=%TEMP%\LocalTradingToolsExit-%LOCAL_LAUNCH_TS%.preflight"
 set "LOCAL_MASTER_WINDOW_TITLE=Local Master Control - %LOCAL_LAUNCH_TS%"
 if exist "%LOCAL_MASTER_EXIT_REQUEST%" del /q "%LOCAL_MASTER_EXIT_REQUEST%" >nul 2>nul
 if exist "%LOCAL_MASTER_NORMAL_EXIT_FILE%" del /q "%LOCAL_MASTER_NORMAL_EXIT_FILE%" >nul 2>nul
 if exist "%LOCAL_MASTER_WORKER_FAILED_FILE%" del /q "%LOCAL_MASTER_WORKER_FAILED_FILE%" >nul 2>nul
+if exist "%LOCAL_MASTER_PREFLIGHT_DECISION%" del /q "%LOCAL_MASTER_PREFLIGHT_DECISION%" >nul 2>nul
+echo [local-master] checking for an existing dashboard server on port 8000 ...
+powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%tools\windows_launchers\ensure_local_master_server.ps1" -Root "%ROOT%" -DecisionPath "%LOCAL_MASTER_PREFLIGHT_DECISION%" -BaseUrl "%MASTER_URL%" -HealthUrl "%MASTER_HEALTH_URL%"
+if errorlevel 1 goto stale_master_not_stopped
+if exist "%LOCAL_MASTER_PREFLIGHT_DECISION%" del /q "%LOCAL_MASTER_PREFLIGHT_DECISION%" >nul 2>nul
 echo [local-master] worker log: %LOCAL_MASTER_WORKER_LOG%
 start "%LOCAL_MASTER_WINDOW_TITLE%" /D "%ROOT%" "%ROOT%tools\windows_launchers\local_master_worker_console.bat"
 set "MASTER_READY_TIMEOUT_SECONDS=60"
@@ -145,6 +151,12 @@ if defined LOCAL_MASTER_WORKER_FAILED_FILE (
   if exist "%LOCAL_MASTER_WORKER_FAILED_FILE%" type "%LOCAL_MASTER_WORKER_FAILED_FILE%"
 )
 echo [local-master] Browser was not opened because the worker is no longer running.
+exit /b 1
+
+:stale_master_not_stopped
+echo [local-master] ERROR: an existing dashboard server on port 8000 could not be stopped.
+echo [local-master] Close the old Local Master Control window, then run Local Trading Tools again.
+echo [local-master] Browser was not opened to avoid showing stale code.
 exit /b 1
 
 :scanner_not_ready

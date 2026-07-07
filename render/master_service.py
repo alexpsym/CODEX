@@ -40,6 +40,55 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 BASE_DIR = Path(__file__).resolve().parents[1]
+
+LOCAL_BUILD_FILES = (
+    "render/master_service.py",
+    "render/static/calculator.js",
+    "render/static/instrument_lookup.js",
+    "render/static/open_orders.js",
+    "render/static/trading_journal.js",
+    "tools/master_journal_workbook.py",
+    "run_local_master_control.bat",
+    "tools/windows_launchers/local_master_worker_console.bat",
+    "tools/windows_launchers/stream_local_master_worker.ps1",
+    "tools/windows_launchers/ensure_local_master_server.ps1",
+)
+
+
+def _local_source_stamp() -> str:
+    digest = hashlib.sha256()
+    for rel in LOCAL_BUILD_FILES:
+        normalized = rel.replace("\\", "/")
+        digest.update(normalized.encode("utf-8"))
+        digest.update(b"\n")
+        path = BASE_DIR / normalized
+        try:
+            digest.update(path.read_bytes())
+        except FileNotFoundError:
+            digest.update(b"<missing>")
+        digest.update(b"\n")
+    return digest.hexdigest()[:16]
+
+
+def _local_git_commit() -> str:
+    try:
+        return subprocess.check_output(
+            ["git", "-C", str(BASE_DIR), "rev-parse", "HEAD"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+            timeout=2.0,
+        ).strip()
+    except Exception:
+        return ""
+
+
+LOCAL_BUILD_INFO = {
+    "root": str(BASE_DIR),
+    "source_stamp": _local_source_stamp(),
+    "git_commit": _local_git_commit(),
+    "started_at": datetime.now(timezone.utc).isoformat(),
+}
+
 from shared.env_bootstrap import format_env_bootstrap_log, load_master_env
 _MASTER_ENV_INFO = load_master_env(base_dir=BASE_DIR)
 
@@ -26655,6 +26704,17 @@ async def default_webhook(request: Request) -> JSONResponse:
 @app.get("/health")
 async def healthcheck() -> PlainTextResponse:
     return PlainTextResponse("ok")
+
+
+@app.get("/api/local-build-info")
+async def local_build_info() -> JSONResponse:
+    payload = {
+        **LOCAL_BUILD_INFO,
+        "pid": os.getpid(),
+        "app_profile": _resolve_app_profile(),
+        "cwd": os.getcwd(),
+    }
+    return JSONResponse(payload)
 
 
 @app.head("/")

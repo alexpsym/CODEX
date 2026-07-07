@@ -345,8 +345,17 @@ def test_installer_captures_launcher_output_and_disables_nested_pause() -> None:
 
 def test_run_local_master_parent_logs_are_condensed_and_worker_logs_are_detailed() -> None:
     script = (ROOT / 'run_local_master_control.bat').read_text(encoding='utf-8')
+    preflight = (ROOT / 'tools' / 'windows_launchers' / 'ensure_local_master_server.ps1').read_text(encoding='utf-8')
     assert 'set "LOG_DIR=%ROOT%logs"' in script
     assert 'set "LOCAL_MASTER_WORKER_LOG=%LOG_DIR%\\LocalTradingTools-worker-latest.log"' in script
+    assert 'ensure_local_master_server.ps1' in script
+    assert 'checking for an existing dashboard server on port 8000' in script
+    assert 'stale_master_not_stopped' in script
+    assert script.index('ensure_local_master_server.ps1') < script.index('start "%LOCAL_MASTER_WINDOW_TITLE%"')
+    assert '/api/local-build-info' in preflight
+    assert '/api/local-exit' in preflight
+    assert 'Stop-Process -Id $processId -Force' in preflight
+    assert 'existing dashboard server has no build-info endpoint; treating it as stale' in preflight
     assert 'echo [local-master] worker log: %LOCAL_MASTER_WORKER_LOG%' in script
     assert 'cmd /d /s /v:on /c ""%~f0" __worker"' not in script
     assert 'echo [local-master] launcher starting.' in script

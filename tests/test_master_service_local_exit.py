@@ -15,6 +15,19 @@ sys.modules[SPEC.name] = master_service
 SPEC.loader.exec_module(master_service)
 
 
+def test_local_build_info_exposes_source_stamp(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = TestClient(master_service.app)
+    monkeypatch.setattr(master_service, "_resolve_app_profile", lambda: "local")
+    res = client.get("/api/local-build-info")
+    assert res.status_code == 200
+    payload = res.json()
+    assert payload["root"] == str(ROOT)
+    assert isinstance(payload["source_stamp"], str)
+    assert len(payload["source_stamp"]) == 16
+    assert payload["app_profile"] == "local"
+    assert payload["pid"]
+
+
 def test_local_exit_success(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     client = TestClient(master_service.app)
     calls: list[str] = []
