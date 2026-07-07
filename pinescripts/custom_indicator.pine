@@ -214,6 +214,7 @@ if barstate.islast and allowBybitTimingLines and showExpiry and timeframe.isintr
 // -----------------------------------------------------------------------------
 var label[] sessionLabels = array.new_label()
 sessionMaxLabels = 192
+sessionMarkerOffsetMultiplier = 1.875
 
 sessionEventTimestamp(simple string sessionTimezone, simple int eventHour, simple int eventMinute) =>
     timestamp(sessionTimezone, year(time, sessionTimezone), month(time, sessionTimezone), dayofmonth(time, sessionTimezone), eventHour, eventMinute)
@@ -233,12 +234,12 @@ pushBoundedSessionLabel(label newLabel, int maxObjects) =>
 drawSessionMarker(simple string sessionTimezone, simple int eventHour, simple int eventMinute, simple string sessionCode, simple bool isOpen) =>
     eventTs = sessionEventTimestamp(sessionTimezone, eventHour, eventMinute)
     candleRange = math.max(high - low, syminfo.mintick * 20)
-    markerY = isOpen ? high + candleRange * 0.75 : low - candleRange * 0.75
+    markerY = isOpen ? high + candleRange * sessionMarkerOffsetMultiplier : low - candleRange * sessionMarkerOffsetMultiplier
     markerStyle = isOpen ? label.style_arrowdown : label.style_arrowup
     sessionLabel = label.new(x=eventTs, y=markerY, text=horizontalSessionText(sessionCode, isOpen),
                              xloc=xloc.bar_time, yloc=yloc.price,
                              color=color.white, textcolor=color.black,
-                             style=markerStyle, size=size.normal, textalign=text.align_center,
+                             style=markerStyle, size=size.huge, textalign=text.align_center,
                              force_overlay=true)
     pushBoundedSessionLabel(sessionLabel, sessionMaxLabels)
 

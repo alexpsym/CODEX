@@ -54,7 +54,9 @@ def test_custom_indicator_session_labels_are_abbreviated_horizontal_and_larger()
     assert "textcolor=color.black" in source
     assert "color=color.white" in source
     assert "size=size.tiny" not in source
-    assert "size=size.normal" in source
+    assert "size=size.normal" not in source
+    assert "size=size.huge" in source
+    assert "sessionMarkerOffsetMultiplier = 1.875" in source
 
 
 def test_custom_indicator_session_rendering_uses_arrow_markers_not_extend_lines() -> None:
@@ -63,7 +65,7 @@ def test_custom_indicator_session_rendering_uses_arrow_markers_not_extend_lines(
     assert "drawSessionMarker" in session_block
     assert "label.style_arrowdown" in session_block
     assert "label.style_arrowup" in session_block
-    assert "markerY = isOpen ? high + candleRange * 0.75 : low - candleRange * 0.75" in session_block
+    assert "markerY = isOpen ? high + candleRange * sessionMarkerOffsetMultiplier : low - candleRange * sessionMarkerOffsetMultiplier" in session_block
     assert "textalign=text.align_center" in session_block
     assert "extend=extend.both" not in session_block
     assert "line.new" not in session_block
