@@ -48,7 +48,7 @@ showNewYorkSession = input.bool(true, "New York", group=sessionGroup, inline="se
 
 showAnySession = showSydneySession or showTokyoSession or showLondonSession or showNewYorkSession
 showAnySessionVisibility = showSessionOpens or showSessionCloses
-showSessionLines = showAnySession and showAnySessionVisibility and timeframe.isintraday and timeframe.in_seconds(timeframe.period) <= 60 * 60
+showSessionLines = showAnySession and showAnySessionVisibility and timeframe.isintraday and timeframe.in_seconds(timeframe.period) <= 30 * 60
 
 // -----------------------------------------------------------------------------
 // EMA / VWAP / VOLUME

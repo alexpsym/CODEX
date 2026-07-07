@@ -33,6 +33,8 @@ def test_custom_indicator_session_controls_and_timing_labels() -> None:
     assert "showSessionOpens" in source
     assert "showSessionCloses" in source
     assert "sessionLabels" in source
+    assert "timeframe.in_seconds(timeframe.period) <= 30 * 60" in source
+    assert "timeframe.in_seconds(timeframe.period) <= 60 * 60" not in source
     assert 'text="Funding"' in source
     assert 'text="OP EX"' in source
     assert "max_labels_count=500" in source
