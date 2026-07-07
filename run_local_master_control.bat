@@ -91,10 +91,6 @@ if exist "%LOCAL_MASTER_EXIT_REQUEST%" del /q "%LOCAL_MASTER_EXIT_REQUEST%" >nul
 if exist "%LOCAL_MASTER_NORMAL_EXIT_FILE%" del /q "%LOCAL_MASTER_NORMAL_EXIT_FILE%" >nul 2>nul
 if exist "%LOCAL_MASTER_WORKER_FAILED_FILE%" del /q "%LOCAL_MASTER_WORKER_FAILED_FILE%" >nul 2>nul
 if exist "%LOCAL_MASTER_PREFLIGHT_DECISION%" del /q "%LOCAL_MASTER_PREFLIGHT_DECISION%" >nul 2>nul
-echo [local-master] checking for an existing dashboard server on port 8000 ...
-powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%tools\windows_launchers\ensure_local_master_server.ps1" -Root "%ROOT%" -DecisionPath "%LOCAL_MASTER_PREFLIGHT_DECISION%" -BaseUrl "%MASTER_URL%" -HealthUrl "%MASTER_HEALTH_URL%"
-if errorlevel 1 goto stale_master_not_stopped
-if exist "%LOCAL_MASTER_PREFLIGHT_DECISION%" del /q "%LOCAL_MASTER_PREFLIGHT_DECISION%" >nul 2>nul
 echo [local-master] worker log: %LOCAL_MASTER_WORKER_LOG%
 start "%LOCAL_MASTER_WINDOW_TITLE%" /D "%ROOT%" "%ROOT%tools\windows_launchers\local_master_worker_console.bat"
 set "MASTER_READY_TIMEOUT_SECONDS=60"
@@ -111,7 +107,7 @@ if defined LOCAL_MASTER_WORKER_FAILED_FILE (
 )
 set /a READY_WAITED+=1
 if !READY_WAITED! GEQ %MASTER_READY_TIMEOUT_SECONDS% goto master_not_ready
-timeout /t 1 /nobreak >nul
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Sleep -Seconds 1" >nul 2>nul
 goto wait_for_master_ready
 
 :master_ready
@@ -125,7 +121,7 @@ if not errorlevel 1 goto scanner_ready
 
 set /a SCANNER_READY_WAITED+=1
 if !SCANNER_READY_WAITED! GEQ %SCANNER_READY_TIMEOUT_SECONDS% goto scanner_not_ready
-timeout /t 1 /nobreak >nul
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Sleep -Seconds 1" >nul 2>nul
 goto wait_for_scanner_ready
 
 :scanner_ready
@@ -151,12 +147,6 @@ if defined LOCAL_MASTER_WORKER_FAILED_FILE (
   if exist "%LOCAL_MASTER_WORKER_FAILED_FILE%" type "%LOCAL_MASTER_WORKER_FAILED_FILE%"
 )
 echo [local-master] Browser was not opened because the worker is no longer running.
-exit /b 1
-
-:stale_master_not_stopped
-echo [local-master] ERROR: an existing dashboard server on port 8000 could not be stopped.
-echo [local-master] Close the old Local Master Control window, then run Local Trading Tools again.
-echo [local-master] Browser was not opened to avoid showing stale code.
 exit /b 1
 
 :scanner_not_ready

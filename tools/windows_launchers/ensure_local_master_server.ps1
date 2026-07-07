@@ -1,13 +1,17 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)] [string] $Root,
-    [Parameter(Mandatory = $true)] [string] $DecisionPath,
+    [string] $DecisionPath = "",
     [string] $BaseUrl = "http://127.0.0.1:8000",
     [string] $HealthUrl = "http://127.0.0.1:8000/health",
     [int] $ShutdownWaitSeconds = 12
 )
 
 $ErrorActionPreference = "Stop"
+
+if ([string]::IsNullOrWhiteSpace($DecisionPath)) {
+    $DecisionPath = Join-Path ([IO.Path]::GetTempPath()) ("LocalTradingTools-preflight-{0}.txt" -f [Guid]::NewGuid().ToString("N"))
+}
 
 $buildFiles = @(
     "render/master_service.py",
@@ -64,6 +68,16 @@ function Get-LocalSourceStamp {
 }
 
 function Test-HealthReady {
+    $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
+    if ($curl -and $curl.Path) {
+        try {
+            $content = & $curl.Path -s -m 2 $HealthUrl
+            return (($LASTEXITCODE -eq 0) -and ([string] $content).Trim() -eq "ok")
+        }
+        catch {
+        }
+    }
+
     try {
         $response = Invoke-WebRequest -UseBasicParsing -Uri $HealthUrl -TimeoutSec 1
         return ($response.StatusCode -eq 200 -and (($response.Content | Out-String).Trim() -eq "ok"))
@@ -86,8 +100,24 @@ function Wait-HealthDown {
 }
 
 function Stop-ListeningProcess {
-    $connections = @(Get-NetTCPConnection -LocalPort 8000 -State Listen -ErrorAction SilentlyContinue)
-    $pids = @($connections | Select-Object -ExpandProperty OwningProcess -Unique | Where-Object { [int] $_ -gt 0 })
+    $pids = @()
+    try {
+        $lines = @(& netstat.exe -ano -p tcp 2>$null)
+        foreach ($line in $lines) {
+            if ($line -match "^\s*TCP\s+\S+:8000\s+\S+\s+LISTENING\s+(\d+)\s*$") {
+                $pids += [int] $Matches[1]
+            }
+        }
+    }
+    catch {
+    }
+
+    if ($pids.Count -eq 0) {
+        $connections = @(Get-NetTCPConnection -LocalPort 8000 -State Listen -ErrorAction SilentlyContinue)
+        $pids = @($connections | Select-Object -ExpandProperty OwningProcess -Unique | Where-Object { [int] $_ -gt 0 })
+    }
+
+    $pids = @($pids | Sort-Object -Unique | Where-Object { [int] $_ -gt 0 })
     if ($pids.Count -eq 0) {
         return $false
     }

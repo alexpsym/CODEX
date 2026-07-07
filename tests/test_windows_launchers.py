@@ -345,19 +345,24 @@ def test_installer_captures_launcher_output_and_disables_nested_pause() -> None:
 
 def test_run_local_master_parent_logs_are_condensed_and_worker_logs_are_detailed() -> None:
     script = (ROOT / 'run_local_master_control.bat').read_text(encoding='utf-8')
+    wrapper = (ROOT / 'tools' / 'windows_launchers' / 'local_master_worker_console.bat').read_text(encoding='utf-8')
     preflight = (ROOT / 'tools' / 'windows_launchers' / 'ensure_local_master_server.ps1').read_text(encoding='utf-8')
     assert 'set "LOG_DIR=%ROOT%logs"' in script
     assert 'set "LOCAL_MASTER_WORKER_LOG=%LOG_DIR%\\LocalTradingTools-worker-latest.log"' in script
-    assert 'ensure_local_master_server.ps1' in script
-    assert 'checking for an existing dashboard server on port 8000' in script
-    assert 'stale_master_not_stopped' in script
-    assert script.index('ensure_local_master_server.ps1') < script.index('start "%LOCAL_MASTER_WINDOW_TITLE%"')
+    assert 'ensure_local_master_server.ps1' not in script
+    assert 'stale_master_not_stopped' not in script
+    assert 'checking for an existing dashboard server on port 8000' in wrapper
+    assert 'ensure_local_master_server.ps1' in wrapper
+    assert wrapper.index('ensure_local_master_server.ps1') < wrapper.index('stream_local_master_worker.ps1')
     assert '/api/local-build-info' in preflight
     assert '/api/local-exit' in preflight
+    assert 'netstat.exe -ano -p tcp' in preflight
+    assert 'curl.exe' in preflight
     assert 'Stop-Process -Id $processId -Force' in preflight
     assert 'existing dashboard server has no build-info endpoint; treating it as stale' in preflight
     assert 'echo [local-master] worker log: %LOCAL_MASTER_WORKER_LOG%' in script
     assert 'cmd /d /s /v:on /c ""%~f0" __worker"' not in script
+    assert 'timeout /t 1 /nobreak' not in script
     assert 'echo [local-master] launcher starting.' in script
     assert 'echo [local-master] waiting for %MASTER_HEALTH_URL% ...' in script
     assert 'echo [local-master] worker started at !DATE! !TIME!' in script
@@ -377,6 +382,9 @@ def test_run_local_master_worker_console_stays_visible_on_abnormal_failure() -> 
     assert 'cmd /d /v:on /k "call ""%~f0"" __worker_console"' not in master
     assert ':worker_console' not in master
     assert 'stream_local_master_worker.ps1' in script
+    assert 'ensure_local_master_server.ps1' in script
+    assert 'Launcher preflight failed before the dashboard worker started.' in script
+    assert 'This window is intentionally left open so the failure stays readable.' in script
     assert 'worker output will print live below and is also being written to:' in script
     assert 'Startup progress will update while dashboard health and scanner readiness are checked.' in script
     assert 'call "%ROOT%run_local_master_control.bat" __worker > "%LOCAL_MASTER_WORKER_LOG%" 2>&1' not in script

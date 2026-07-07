@@ -17,6 +17,12 @@ echo [local-master]   !LOCAL_MASTER_WORKER_LOG!
 echo [local-master] Startup progress will update while dashboard health and scanner readiness are checked.
 echo [local-master] If startup fails, this window will stay open and print the latest log lines.
 
+set "PREFLIGHT_ROOT=!ROOT!"
+if "!PREFLIGHT_ROOT:~-1!"=="\" set "PREFLIGHT_ROOT=!PREFLIGHT_ROOT:~0,-1!"
+echo [local-master] checking for an existing dashboard server on port 8000 ...
+powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%tools\windows_launchers\ensure_local_master_server.ps1" -Root "!PREFLIGHT_ROOT!" -BaseUrl "http://127.0.0.1:8000" -HealthUrl "http://127.0.0.1:8000/health"
+if errorlevel 1 goto preflight_failed
+
 set "STREAM_ROOT=!ROOT!"
 if "!STREAM_ROOT:~-1!"=="\" set "STREAM_ROOT=!STREAM_ROOT:~0,-1!"
 powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%tools\windows_launchers\stream_local_master_worker.ps1" -Root "!STREAM_ROOT!" -WorkerLog "!LOCAL_MASTER_WORKER_LOG!"
@@ -48,3 +54,15 @@ echo [local-master] This window is intentionally left open so startup errors sta
 echo [local-master] Press any key to close this window.
 pause >nul
 exit !WORKER_EXIT_CODE!
+
+:preflight_failed
+if defined LOCAL_MASTER_WORKER_FAILED_FILE (
+  > "!LOCAL_MASTER_WORKER_FAILED_FILE!" echo Launcher preflight failed before dashboard worker started at !DATE! !TIME!
+)
+echo.
+echo [local-master] Launcher preflight failed before the dashboard worker started.
+echo [local-master] Close any old Local Master Control window, then run Local Trading Tools again.
+echo [local-master] This window is intentionally left open so the failure stays readable.
+echo [local-master] Press any key to close this window.
+pause >nul
+exit 1
