@@ -215,9 +215,10 @@ if barstate.islast and allowBybitTimingLines and showExpiry and timeframe.isintr
 var line[] sessionMarkerLines = array.new_line()
 var label[] sessionLabels = array.new_label()
 sessionMaxMarkers = 192
-sessionMarkerLineNearMultiplier = 0.35
-sessionMarkerLineFarMultiplier = 2.4
-sessionLabelOffsetMultiplier = 2.65
+sessionMarkerWindowBars = 80
+sessionMarkerHalfLengthMultiplier = 0.20
+sessionMarkerRecentHigh = ta.highest(high, sessionMarkerWindowBars)
+sessionMarkerRecentLow = ta.lowest(low, sessionMarkerWindowBars)
 
 sessionEventTimestamp(simple string sessionTimezone, simple int eventHour, simple int eventMinute) =>
     timestamp(sessionTimezone, year(time, sessionTimezone), month(time, sessionTimezone), dayofmonth(time, sessionTimezone), eventHour, eventMinute)
@@ -226,23 +227,30 @@ isSessionEvent(simple string sessionTimezone, simple int eventHour, simple int e
     eventTs = sessionEventTimestamp(sessionTimezone, eventHour, eventMinute)
     time <= eventTs and eventTs < time_close
 
-horizontalSessionText(simple string sessionCode, simple bool isOpen) =>
-    sessionCode + (isOpen ? " O" : " C")
+verticalSessionText(simple string sessionCode, simple bool isOpen) =>
+    suffix = isOpen ? "O" : "C"
+    sessionCode == "NY" ? "N\nY\n" + suffix :
+     sessionCode == "SYD" ? "S\nY\nD\n" + suffix :
+     sessionCode == "TKY" ? "T\nK\nY\n" + suffix :
+     "L\nD\nN\n" + suffix
 
 drawSessionMarker(simple string sessionTimezone, simple int eventHour, simple int eventMinute, simple string sessionCode, simple bool isOpen) =>
     eventTs = sessionEventTimestamp(sessionTimezone, eventHour, eventMinute)
-    candleRange = math.max(high - low, syminfo.mintick * 20)
-    lineStartY = isOpen ? high + candleRange * sessionMarkerLineNearMultiplier : low - candleRange * sessionMarkerLineNearMultiplier
-    lineEndY = isOpen ? high + candleRange * sessionMarkerLineFarMultiplier : low - candleRange * sessionMarkerLineFarMultiplier
-    labelY = isOpen ? high + candleRange * sessionLabelOffsetMultiplier : low - candleRange * sessionLabelOffsetMultiplier
+    recentRange = sessionMarkerRecentHigh - sessionMarkerRecentLow
+    markerRange = math.max(na(recentRange) ? high - low : recentRange, syminfo.mintick * 200)
+    markerMidY = hl2
+    markerHalfLength = markerRange * sessionMarkerHalfLengthMultiplier
+    lineStartY = markerMidY - markerHalfLength
+    lineEndY = markerMidY + markerHalfLength
+    labelY = isOpen ? lineEndY : lineStartY
     sessionMarkerLine = line.new(x1=eventTs, y1=lineStartY, x2=eventTs, y2=lineEndY,
                                  xloc=xloc.bar_time, extend=extend.none,
-                                 color=color.black, style=line.style_dashed, width=2,
+                                 color=color.black, style=line.style_dotted, width=2,
                                  force_overlay=true)
-    sessionLabel = label.new(x=eventTs, y=labelY, text=horizontalSessionText(sessionCode, isOpen),
+    sessionLabel = label.new(x=eventTs, y=labelY, text=verticalSessionText(sessionCode, isOpen),
                              xloc=xloc.bar_time, yloc=yloc.price,
                              color=color.new(color.white, 100), textcolor=color.black,
-                             style=label.style_none, size=size.large, textalign=text.align_center,
+                             style=label.style_none, size=size.normal, textalign=text.align_center,
                              force_overlay=true)
     pushBoundedLineAndLabel(sessionMarkerLines, sessionLabels, sessionMarkerLine, sessionLabel, sessionMaxMarkers)
 
