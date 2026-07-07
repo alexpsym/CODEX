@@ -112,10 +112,17 @@ def test_instrument_lookup_owns_specs_and_journal_markup() -> None:
     assert 'id="calc-instrument-specs"' not in master_service_py
     assert 'id="calc-journal-summary"' not in master_service_py
     assert 'Instrument Lookup' in master_service_py
+    assert 'Journal Stats' in master_service_py
+    assert 'min-width: 1800px' not in master_service_py
     assert '"/instrument-lookup"' in master_service_py
     assert '/api/instrument-specs?query=' not in calculator_js
     assert '/api/instrument-specs?query=' in lookup_js
     assert '/api/calculator/journal-summary?asset=' in lookup_js
+    assert 'Trading Rules' in lookup_js
+    assert 'upgradeLegacyMarkup' in lookup_js
+    assert 'instrument-lookup-runtime-css' in lookup_js
+    assert 'flattenMetrics' not in lookup_js
+    assert 'JSON.stringify(item)' not in lookup_js
 
 
 def test_dashboard_home_removed_legacy_open_trading_journal_panel() -> None:
