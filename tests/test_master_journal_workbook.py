@@ -122,6 +122,100 @@ def test_single_builder_definition():
     assert src.count('def build_master_journal_workbook') == 1
 
 
+def test_stats_and_symbols_fall_back_to_trade_rows_when_stats_are_empty(tmp_path: Path):
+    snapshot = sample_snapshot()
+    snapshot["stats"] = {
+        "totals": {},
+        "groups": {
+            "by_market": {"overall": {}, "fx": {}, "crypto": {}},
+            "risk_expectancy": {},
+            "duration": {},
+            "leaders": {},
+        },
+        "by_instrument": [],
+    }
+    out = tmp_path / "trade-row-derived-stats.xlsx"
+    build_master_journal_workbook(snapshot, out)
+    wb = load_workbook(out)
+    stats1 = wb[STATS1_SHEET]
+    labels = {str(stats1.cell(row, 1).value or "").strip(): row for row in range(1, stats1.max_row + 1)}
+
+    assert stats1.cell(labels["Trades"], 2).value == 2
+    assert stats1.cell(labels["Trades"], 3).value == 1
+    assert stats1.cell(labels["Trades"], 4).value == 1
+    assert stats1.cell(labels["R expectancy"], 2).value == pytest.approx(0.2)
+    assert stats1.cell(labels["R expectancy"], 3).value == pytest.approx(1.2)
+    assert stats1.cell(labels["R expectancy"], 4).value == pytest.approx(-0.8)
+
+    symbols = wb[SYMBOLS_SHEET]
+    headers = _instrument_averages_header_map(symbols)
+    assert headers["Longs"] != headers["Shorts"]
+    symbol_rows = {
+        str(symbols.cell(row, headers["Symbol"]).value or "").strip().upper(): row
+        for row in range(INSTRUMENT_AVERAGES_DATA_START_ROW, symbols.max_row + 1)
+        if str(symbols.cell(row, headers["Symbol"]).value or "").strip()
+    }
+    assert {"EURUSD", "BTCUSDT"}.issubset(symbol_rows)
+    assert symbols.cell(symbol_rows["EURUSD"], headers["Trades"]).value == 1
+    assert symbols.cell(symbol_rows["EURUSD"], headers["Longs"]).value == 1
+    assert symbols.cell(symbol_rows["BTCUSDT"], headers["Shorts"]).value == 1
+    wb.close()
+
+
+def test_stats1_streak_details_are_repaired_under_their_own_streak_rows(tmp_path: Path):
+    snapshot = sample_snapshot()
+    path = tmp_path / "streak-order.xlsx"
+    build_master_journal_workbook(snapshot, path)
+    wb = load_workbook(path)
+    stats1 = wb[STATS1_SHEET]
+    labels = {str(stats1.cell(row, 1).value or "").strip(): row for row in range(1, stats1.max_row + 1)}
+    best = labels["Best Win Streak"]
+    rows = [
+        [stats1.cell(row, col).value for col in range(1, 5)]
+        for row in range(best, best + 6)
+    ]
+    for offset, source in enumerate([0, 3, 1, 2, 4, 5]):
+        for col, value in enumerate(rows[source], start=1):
+            stats1.cell(best + offset, col).value = value
+    wb.save(path)
+    wb.close()
+
+    result = update_master_journal_workbook_data_only(path, snapshot)
+    assert result["ok"] is True
+    Path(result["candidate_path"]).replace(path)
+    wb = load_workbook(path)
+    stats1 = wb[STATS1_SHEET]
+    labels = {str(stats1.cell(row, 1).value or "").strip(): row for row in range(1, stats1.max_row + 1)}
+    best = labels["Best Win Streak"]
+    assert [stats1.cell(best + offset, 1).value for offset in range(6)] == [
+        "Best Win Streak",
+        "Start",
+        "End",
+        "Worst Losing Streak",
+        "Start",
+        "End",
+    ]
+    wb.close()
+
+
+def test_stats_tables_get_clean_group_borders(tmp_path: Path):
+    out = tmp_path / "clean-borders.xlsx"
+    build_master_journal_workbook(sample_snapshot(), out)
+    wb = load_workbook(out)
+    stats1 = wb[STATS1_SHEET]
+    labels = {str(stats1.cell(row, 1).value or "").strip(): row for row in range(1, stats1.max_row + 1)}
+    assert stats1["A1"].border.left.style == "medium"
+    assert stats1.cell(labels["R expectancy"], 4).border.right.style == "medium"
+    assert stats1.cell(labels["Best Win Streak"], 1).border.top.style == "medium"
+    assert not any(rng.min_col <= 4 and rng.min_row <= stats1.max_row for rng in stats1.merged_cells.ranges)
+
+    stats2 = wb[STATS2_SHEET]
+    assert stats2["A1"].border.left.style == "medium"
+    assert stats2["F2"].border.right.style == "medium"
+    assert _cell_fill_rgb(stats2["E3"]) == ""
+    wb.close()
+
+
 @pytest.mark.parametrize(
     ("seconds", "expected"),
     [
@@ -2774,7 +2868,7 @@ def test_stats1_manual_merges_prevent_optional_winners_row_insertion(tmp_path: P
         out.close()
 
 
-def test_merged_stats1_metric_source_pairs_do_not_get_forced_source_labels(tmp_path: Path):
+def test_generated_stats1_metric_source_merges_are_cleaned_without_touching_manual_notes(tmp_path: Path):
     path = tmp_path / "merged-source-pairs.xlsx"
     snap = sample_snapshot()
     build_master_journal_workbook(snap, path)
@@ -2799,10 +2893,11 @@ def test_merged_stats1_metric_source_pairs_do_not_get_forced_source_labels(tmp_p
     out = load_workbook(path)
     try:
         ws = out[STATS1_SHEET]
-        assert f"A{source_metric_row}:A{source_metric_row + 1}" in {str(rng) for rng in ws.merged_cells.ranges}
-        assert ws.cell(source_metric_row + 1, 1).value is None
+        merged_ranges = {str(rng) for rng in ws.merged_cells.ranges}
+        assert f"A{source_metric_row}:A{source_metric_row + 1}" not in merged_ranges
+        assert ws.cell(source_metric_row + 1, 1).value == "Source"
         assert ws.cell(source_metric_row + 1, 2).value not in (None, "")
-        assert "A52:A53" in {str(rng) for rng in ws.merged_cells.ranges}
+        assert "A52:A53" in merged_ranges
         assert ws["A52"].value == "Manual merged note"
     finally:
         out.close()
@@ -2873,7 +2968,7 @@ def test_data_only_update_splits_existing_inline_drawdown_detail(tmp_path: Path)
         out.close()
 
 
-def test_stats2_net_pl_percentage_update_preserves_borders(tmp_path: Path):
+def test_stats2_net_pl_percentage_update_resets_stale_borders(tmp_path: Path):
     path = tmp_path / "stats2-net-pl.xlsx"
     snap = sample_snapshot()
     snap["balances"].append({"account_label": "OANDA DEMO", "balance": 980.0, "currency": "AUD"})
@@ -2903,11 +2998,10 @@ def test_stats2_net_pl_percentage_update_preserves_borders(tmp_path: Path):
         cell = ws.cell(row, net_col)
         assert cell.value == pytest.approx(0.023)
         assert cell.number_format == "0.00%"
-        assert _cell_fill_rgb(cell) == "C6EFCE"
-        assert cell.border.left.style == "thick"
-        assert str(cell.border.left.color.rgb)[-6:] == "123456"
-        assert cell.border.right.style == "double"
-        assert str(cell.border.right.color.rgb)[-6:] == "654321"
+        assert _cell_fill_rgb(cell) == ""
+        assert _cell_font_rgb(cell) == "000000"
+        assert cell.border.left.style == "thin"
+        assert cell.border.right.style == "medium"
     finally:
         out.close()
 
@@ -3786,7 +3880,7 @@ def test_stats_symbols_and_reports_required_repairs(tmp_path: Path):
     assert stats1["A14"].value == "Percentage expectancy"
     assert stats1["A15"].value == "R expectancy"
     assert labels["Percentage expectancy"] < labels["Winners"]
-    assert stats1.cell(labels["Net P/L Percentage"], 2).value == pytest.approx(0.012)
+    assert stats1.cell(labels["Net P/L Percentage"], 2).value == pytest.approx(0.007)
     for label in ("Net P/L Percentage", "Gross percent gain", "Gross percent loss", "Gross IR gain", "Gross IR loss"):
         cell = stats1.cell(labels[label], 2)
         assert cell.alignment.horizontal == "left"

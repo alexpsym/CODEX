@@ -412,6 +412,15 @@ def _instrument_averages_header_map(ws) -> Dict[str, int]:
     headers: Dict[str, int] = {}
     for col in range(1, ws.max_column + 1):
         value = str(ws.cell(header_row, col).value or "").strip()
+        if (
+            header_row == INSTRUMENT_AVERAGES_FILTER_HEADER_ROW
+            and value.casefold() == "total"
+        ):
+            group = _symbols_group_for_column(ws, col).strip().casefold()
+            if group == "longs":
+                value = "Longs"
+            elif group == "shorts":
+                value = "Shorts"
         if not value and header_row == INSTRUMENT_AVERAGES_FILTER_HEADER_ROW:
             value = _vertical_header_anchor_value(ws, col) or str(ws.cell(INSTRUMENT_AVERAGES_GROUP_HEADER_ROW, col).value or "").strip()
         if value:
@@ -3852,6 +3861,7 @@ def _repair_stats1_formatting(
                 cell.number_format = _currency_number_format(currency)
                 _clear_generated_semantic_fill(cell)
             repaired += 3
+    _apply_stats1_clean_table_borders(ws, diagnostics)
     if repaired:
         diagnostics["repaired_stats1_format_cells"] = repaired
 
@@ -4136,6 +4146,78 @@ def _instrument_analysis_by_symbol(rows: List[Dict[str, Any]]) -> Dict[str, Dict
             payload[output_key] = sum(_is_positive_manual_value(row.get(field)) for row in symbol_rows)
         result[symbol] = payload
     return result
+
+
+def _instrument_summary_rows_from_trade_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    grouped: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    display_symbols: Dict[str, str] = {}
+    for row in rows:
+        if str(row.get("row_type") or "trade").strip().lower() != "trade":
+            continue
+        if _is_test_trade_value(row.get("is_test_trade")):
+            continue
+        symbol = str(row.get("symbol") or "").strip()
+        if not symbol:
+            continue
+        key = symbol.upper()
+        display_symbols.setdefault(key, symbol)
+        grouped[key].append(row)
+
+    summaries: List[Dict[str, Any]] = []
+    for symbol_key in sorted(grouped):
+        symbol_rows = grouped[symbol_key]
+        wins = [row for row in symbol_rows if _trade_outcome_sign(row) > 0]
+        losses = [row for row in symbol_rows if _trade_outcome_sign(row) < 0]
+        breakeven = [row for row in symbol_rows if _trade_outcome_sign(row) == 0]
+        longs = [row for row in symbol_rows if str(row.get("side") or "").upper().startswith(("BUY", "LONG"))]
+        shorts = [row for row in symbol_rows if str(row.get("side") or "").upper().startswith(("SELL", "SHORT"))]
+        durations = [
+            value for value in (_infer_trade_duration_seconds(row) for row in symbol_rows)
+            if value is not None and value >= 0
+        ]
+
+        def avg_distance(items: List[Dict[str, Any]], key: str) -> float | None:
+            values = [
+                value for value in (_distance_pct_points(row, key) for row in items)
+                if value is not None and math.isfinite(value)
+            ]
+            return (sum(values) / len(values)) if values else None
+
+        markets = [_trade_row_market(row) for row in symbol_rows]
+        market_counts = Counter(market for market in markets if market)
+        market = market_counts.most_common(1)[0][0] if market_counts else None
+        net_profit_values = [
+            value for value in (_as_float(row.get("net_profit")) for row in symbol_rows)
+            if value is not None and math.isfinite(value)
+        ]
+        summaries.append({
+            "symbol": display_symbols.get(symbol_key) or symbol_key,
+            "asset_class": market,
+            "total_trades": len(symbol_rows),
+            "trades": len(symbol_rows),
+            "wins": len(wins),
+            "losses": len(losses),
+            "break_even": len(breakeven),
+            "long_trades": len(longs),
+            "long_wins": sum(_trade_outcome_sign(row) > 0 for row in longs),
+            "long_losses": sum(_trade_outcome_sign(row) < 0 for row in longs),
+            "long_break_even": sum(_trade_outcome_sign(row) == 0 for row in longs),
+            "short_trades": len(shorts),
+            "short_wins": sum(_trade_outcome_sign(row) > 0 for row in shorts),
+            "short_losses": sum(_trade_outcome_sign(row) < 0 for row in shorts),
+            "short_break_even": sum(_trade_outcome_sign(row) == 0 for row in shorts),
+            "win_rate_pct": (len(wins) / len(symbol_rows) * 100.0) if symbol_rows else None,
+            "net_profit_total": sum(net_profit_values) if net_profit_values else None,
+            "avg_net_profit": (sum(net_profit_values) / len(net_profit_values)) if net_profit_values else None,
+            "avg_sl_pct_wins": avg_distance(wins, "stop_loss"),
+            "avg_sl_pct_losses": avg_distance(losses, "stop_loss"),
+            "avg_tp_pct_wins": avg_distance(wins, "take_profit"),
+            "avg_tp_pct_losses": avg_distance(losses, "take_profit"),
+            "min_trade_duration_seconds": min(durations) if durations else None,
+            "avg_trade_duration_seconds": (sum(durations) / len(durations)) if durations else None,
+            "max_trade_duration_seconds": max(durations) if durations else None,
+        })
+    return summaries
 
 
 def _result_percentage_totals_by_market(
@@ -4571,6 +4653,14 @@ def _dashboard_extended_metrics(
             row for row in active if _trade_row_market(row) == market
         ]
 
+    def _test_subset(market: str) -> List[Dict[str, Any]]:
+        return [
+            row for row in rows
+            if str(row.get("row_type") or "trade") == "trade"
+            and _is_test_trade_value(row.get("is_test_trade"))
+            and (market == "overall" or _trade_row_market(row) == market)
+        ]
+
     def _outcome(row: Dict[str, Any]) -> int:
         value = _as_float(row.get("result_pct"))
         if value is None:
@@ -4696,6 +4786,10 @@ def _dashboard_extended_metrics(
             value for value in (_as_float(item.get("result_pct")) for item in losers)
             if value is not None
         ]
+        result_values = [
+            value for value in (_as_float(item.get("result_pct")) for item in items)
+            if value is not None and math.isfinite(value)
+        ]
         winner_r = [
             value for value in (_as_float(item.get("r_multiple")) for item in winners)
             if value is not None and value > 0
@@ -4728,10 +4822,18 @@ def _dashboard_extended_metrics(
         stats_bucket = by_market.get(market) if isinstance(by_market.get(market), dict) else {}
         min_commission_source = min(commission_rows, key=lambda pair: (pair[0], str(pair[1].get("symbol") or "")))[1] if commission_rows else None
         max_commission_source = max(commission_rows, key=lambda pair: (pair[0], str(pair[1].get("symbol") or "")))[1] if commission_rows else None
+        streaks = _period_streak_metrics(items)
         result[market] = {
+            "trades": len(items),
+            "wins": len(winners),
+            "losses": len(losers),
+            "break_even": sum(_outcome(item) == 0 for item in items),
+            "test_trades": len(_test_subset(market)),
+            "win_rate_pct": (len(winners) / len(items) * 100.0) if items else None,
             **_summary(durations, "duration_seconds"),
             **_summary(break_even_moves, "move_to_break_even_duration_seconds"),
             **_summary(profit_moves, "move_to_profit_duration_seconds"),
+            **_summary(result_values, "result_pct"),
             **_summary(_distance_values(items, "stop_loss"), "stop_pct"),
             **_summary(_distance_values(items, "take_profit"), "target_pct"),
             **_summary(_distance_values(winners, "stop_loss"), "stop_pct_winners"),
@@ -4745,15 +4847,18 @@ def _dashboard_extended_metrics(
             "long_trades": sum(str(item.get("side") or "").upper().startswith(("BUY", "LONG")) for item in items),
             "long_wins": sum(str(item.get("side") or "").upper().startswith(("BUY", "LONG")) and _outcome(item) > 0 for item in items),
             "long_losses": sum(str(item.get("side") or "").upper().startswith(("BUY", "LONG")) and _outcome(item) < 0 for item in items),
+            "long_break_even": sum(str(item.get("side") or "").upper().startswith(("BUY", "LONG")) and _outcome(item) == 0 for item in items),
             "short_trades": sum(str(item.get("side") or "").upper().startswith(("SELL", "SHORT")) for item in items),
             "short_wins": sum(str(item.get("side") or "").upper().startswith(("SELL", "SHORT")) and _outcome(item) > 0 for item in items),
             "short_losses": sum(str(item.get("side") or "").upper().startswith(("SELL", "SHORT")) and _outcome(item) < 0 for item in items),
+            "short_break_even": sum(str(item.get("side") or "").upper().startswith(("SELL", "SHORT")) and _outcome(item) == 0 for item in items),
             **_pattern_metrics(items),
             **{f"timeframe_{label.lower()}": timeframe_counts[label] for label in timeframe_aliases.values()},
             **{f"timeframe_{label.lower()}_wins": timeframe_wins[label] for label in timeframe_aliases.values()},
             **{f"timeframe_{label.lower()}_losses": timeframe_losses[label] for label in timeframe_aliases.values()},
             **_summary(commissions, "commission"),
             **_distance_recommendation_summary(items),
+            "avg_r_multiple": (sum(r_values) / len(r_values)) if r_values else None,
             "net_r_multiple": sum(r_values) if r_values else None,
             "gross_ir_gain": sum(value for value in r_values if value > 0) if r_values else None,
             "gross_ir_loss": abs(sum(value for value in r_values if value < 0)) if r_values else None,
@@ -4783,8 +4888,10 @@ def _dashboard_extended_metrics(
             "max_drawdown_pct": stats_bucket.get("max_drawdown_pct"),
             "min_drawdown_detail": stats_bucket.get("min_drawdown_detail"),
             "max_drawdown_detail": stats_bucket.get("max_drawdown_detail"),
-            "longest_winning_streak": stats_bucket.get("longest_winning_streak"),
-            "longest_losing_streak": stats_bucket.get("longest_losing_streak"),
+            "winning_streak": stats_bucket.get("winning_streak") or streaks.get("winning_streak"),
+            "losing_streak": stats_bucket.get("losing_streak") or streaks.get("losing_streak"),
+            "longest_winning_streak": stats_bucket.get("longest_winning_streak") or streaks.get("longest_winning_streak"),
+            "longest_losing_streak": stats_bucket.get("longest_losing_streak") or streaks.get("longest_losing_streak"),
         }
     return result
 
@@ -5274,7 +5381,8 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
     inst.append(INSTRUMENT_AVERAGES_HEADERS)
     _write_instrument_averages_headers(inst)
     instrument_analysis = _instrument_analysis_by_symbol(rows)
-    for rec in (stats.get('by_instrument') or []):
+    instrument_rows = stats.get('by_instrument') or _instrument_summary_rows_from_trade_rows(rows)
+    for rec in instrument_rows:
         cls=str(rec.get("asset_class") or rec.get("class") or "").lower()
         analysis = instrument_analysis.get(str(rec.get("symbol") or "").strip().upper(), {})
         row_idx = inst.max_row + 1
@@ -5385,6 +5493,294 @@ def _table_border(ws, top_row, left_col, bottom_row, right_col):
                 top=thick if r==top_row else thin,
                 bottom=thick if r==bottom_row else thin,
             )
+
+
+def _clear_borders_in_range(ws, top_row: int, left_col: int, bottom_row: int, right_col: int) -> None:
+    empty = Border()
+    for row in range(top_row, bottom_row + 1):
+        for col in range(left_col, right_col + 1):
+            ws.cell(row, col).border = empty
+
+
+def _apply_group_box_border(
+    ws,
+    top_row: int,
+    left_col: int,
+    bottom_row: int,
+    right_col: int,
+    *,
+    outer_style: str = "medium",
+) -> None:
+    if top_row > bottom_row or left_col > right_col:
+        return
+    inner = Side(style="thin", color="D1D5DB")
+    outer = Side(style=outer_style, color="808080")
+    for row in range(top_row, bottom_row + 1):
+        for col in range(left_col, right_col + 1):
+            ws.cell(row, col).border = Border(
+                left=outer if col == left_col else inner,
+                right=outer if col == right_col else inner,
+                top=outer if row == top_row else inner,
+                bottom=outer if row == bottom_row else inner,
+            )
+
+
+def _last_nonblank_row_in_columns(ws, columns: List[int]) -> int:
+    for row in range(ws.max_row, 0, -1):
+        if any(ws.cell(row, col).value not in (None, "") for col in columns):
+            return row
+    return 1
+
+
+def _stats1_label_at(ws, row: int) -> str:
+    return str(ws.cell(row, 1).value or "").strip()
+
+
+def _find_stats1_first_label(ws, label: str, *, after: int = 0, before: int | None = None) -> int | None:
+    wanted = label.casefold()
+    last = before if before is not None else ws.max_row
+    return next(
+        (
+            row for row in range(max(1, after + 1), min(ws.max_row, last) + 1)
+            if _stats1_label_at(ws, row).casefold() == wanted
+        ),
+        None,
+    )
+
+
+def _apply_stats1_clean_table_borders(ws, diagnostics: Dict[str, Any] | None = None) -> None:
+    diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+    market_cols = _stats1_market_columns(ws)
+    right_col = max(market_cols.values(), default=4)
+    right_col = max(4, min(right_col, ws.max_column))
+    last_row = _last_nonblank_row_in_columns(ws, list(range(1, right_col + 1)))
+    if last_row < 1:
+        return
+
+    generated_merge_labels = {
+        *(label.casefold() for label in REPORT_METRIC_LABELS),
+        "trades",
+        "wins",
+        "losses",
+        "break-even",
+        "test",
+        "win rate",
+        "net p/l percentage",
+        "net p/l r multiples",
+        "gross percent gain",
+        "gross percent loss",
+        "gross ir gain",
+        "gross ir loss",
+        "percentage expectancy",
+        "r expectancy",
+        "best win streak",
+        "worst losing streak",
+        "start",
+        "end",
+        "stops",
+        "targets",
+        "duration",
+        "side",
+        "patterns",
+        "timeframe",
+        "commission",
+        "drawdown",
+        "source",
+        "recommendation",
+        "avg stop %",
+        "min stop %",
+        "max stop %",
+        "avg target %",
+        "min target %",
+        "max target %",
+        "min duration",
+        "avg duration",
+        "max duration",
+        "average",
+        "move to break even",
+        "move to profit",
+        "average move to break even",
+        "average move to profit",
+        "min win %",
+        "avg win %",
+        "max win %",
+        "min r win",
+        "avg r win",
+        "max r win",
+        "most wins",
+        "max loss %",
+        "avg loss %",
+        "min loss %",
+        "max r loss",
+        "avg r loss",
+        "min r loss",
+        "most losses",
+        "long",
+        "short",
+        "channel",
+        "range",
+        "1min",
+        "5min",
+        "15min",
+        "30min",
+        "1h",
+        "4h",
+        "daily",
+        "weekly",
+        "monthly",
+        "min commission",
+        "avg commission",
+        "max commission",
+        "total commission",
+    }
+    unmerged = []
+    for merged in list(ws.merged_cells.ranges):
+        anchor_label = _stats1_label_at(ws, merged.min_row).casefold()
+        if (
+            merged.min_row <= last_row
+            and merged.max_row >= 1
+            and merged.min_col <= right_col
+            and merged.max_col >= 1
+            and anchor_label in generated_merge_labels
+        ):
+            ws.unmerge_cells(str(merged))
+            unmerged.append(str(merged))
+    if unmerged:
+        diagnostics["unmerged_stats1_layout_blocks"] = unmerged
+
+    source_parent_labels = {
+        "min stop %",
+        "max stop %",
+        "min target %",
+        "max target %",
+        "min move to break even",
+        "max move to break even",
+        "min move to profit",
+        "max move to profit",
+    }
+    restored_source_labels = 0
+    for row in range(1, last_row):
+        if _stats1_label_at(ws, row).casefold() not in source_parent_labels:
+            continue
+        if _stats1_label_at(ws, row + 1):
+            continue
+        if not any(ws.cell(row + 1, col).value not in (None, "") for col in market_cols.values()):
+            continue
+        ws.cell(row + 1, 1).value = "Source"
+        _apply_dashboard_source_label_style(ws.cell(row + 1, 1))
+        restored_source_labels += 1
+    if restored_source_labels:
+        diagnostics["restored_stats1_source_labels_after_unmerge"] = restored_source_labels
+
+    _clear_borders_in_range(ws, 1, 1, last_row, right_col)
+
+    static_section_labels = {
+        "stops",
+        "targets",
+        "duration",
+        "drawdown",
+        "side",
+        "patterns",
+        "timeframe",
+        "commission",
+    }
+    section_rows = [
+        row for row in range(1, last_row + 1)
+        if _stats1_label_at(ws, row).casefold() in static_section_labels
+    ]
+
+    ranges: List[Tuple[int, int]] = []
+    first_section = min(section_rows) if section_rows else last_row + 1
+    r_expectancy = _find_stats1_first_label(ws, "R expectancy", before=first_section - 1)
+    if r_expectancy:
+        ranges.append((1, r_expectancy))
+    cursor = r_expectancy or 1
+    best = _find_stats1_first_label(ws, "Best Win Streak", after=cursor - 1, before=first_section - 1)
+    worst = _find_stats1_first_label(ws, "Worst Losing Streak", after=cursor - 1, before=first_section - 1)
+    if best:
+        best_end = best + 2 if best + 2 <= last_row and _stats1_label_at(ws, best + 1).casefold() == "start" else best
+        ranges.append((best, min(best_end, first_section - 1)))
+        cursor = max(cursor, min(best_end, first_section - 1))
+    if worst:
+        worst_end = worst + 2 if worst + 2 <= last_row and _stats1_label_at(ws, worst + 1).casefold() == "start" else worst
+        ranges.append((worst, min(worst_end, first_section - 1)))
+        cursor = max(cursor, min(worst_end, first_section - 1))
+
+    stop_start = _find_stats1_first_label(ws, "Avg stop %", after=cursor, before=first_section - 1)
+    target_start = _find_stats1_first_label(ws, "Avg target %", after=stop_start or cursor, before=first_section - 1)
+    if stop_start:
+        ranges.append((stop_start, (target_start - 1) if target_start else first_section - 1))
+    if target_start:
+        ranges.append((target_start, first_section - 1))
+
+    side_row = _find_stats1_first_label(ws, "Side") or last_row + 1
+    duration_row = _find_stats1_first_label(ws, "Duration") or 0
+    winners_section = _find_stats1_first_label(ws, "Winners", after=duration_row, before=side_row - 1)
+    losers_section = _find_stats1_first_label(ws, "Losers", after=winners_section or duration_row, before=side_row - 1)
+    for row in (winners_section, losers_section):
+        if row and row not in section_rows:
+            section_rows.append(row)
+    section_rows = sorted(set(section_rows))
+
+    for index, start in enumerate(section_rows):
+        end = (section_rows[index + 1] - 1) if index + 1 < len(section_rows) else last_row
+        ranges.append((start, end))
+        for col in range(1, right_col + 1):
+            cell = ws.cell(start, col)
+            font = copy(cell.font)
+            font.bold = True
+            font.color = "FF000000"
+            cell.font = font
+            if col <= right_col:
+                cell.fill = PatternFill("solid", fgColor="EAF2F8")
+
+    normalized_ranges: List[Tuple[int, int]] = []
+    for start, end in ranges:
+        start = max(1, start)
+        end = min(last_row, end)
+        if start > end:
+            continue
+        if normalized_ranges and start <= normalized_ranges[-1][1]:
+            normalized_ranges[-1] = (normalized_ranges[-1][0], max(normalized_ranges[-1][1], end))
+        else:
+            normalized_ranges.append((start, end))
+
+    for start, end in normalized_ranges:
+        _apply_group_box_border(ws, start, 1, end, right_col, outer_style="medium")
+    diagnostics["repaired_stats1_table_borders"] = [f"A{start}:{get_column_letter(right_col)}{end}" for start, end in normalized_ranges]
+
+
+def _apply_stats2_clean_table_borders(
+    ws,
+    section: Dict[str, int],
+    header_row: int,
+    col_map: Dict[str, int],
+    diagnostics: Dict[str, Any] | None = None,
+) -> None:
+    diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+    account_col = col_map.get("account")
+    if not account_col:
+        return
+    left_col = section.get("start_col", 1)
+    right_col = max(col_map.values())
+    last_row = header_row
+    for row in range(header_row + 1, min(ws.max_row, section.get("end_row", ws.max_row)) + 1):
+        if str(ws.cell(row, account_col).value or "").strip():
+            last_row = row
+    top_row = max(1, section.get("anchor_row", 1))
+    _clear_borders_in_range(ws, top_row, left_col, max(last_row, header_row), right_col)
+    for row in range(top_row, max(last_row, header_row) + 1):
+        for col in range(left_col, right_col + 1):
+            cell = ws.cell(row, col)
+            cell.fill = PatternFill()
+            font = copy(cell.font)
+            font.color = "FF000000"
+            font.bold = row in {top_row, header_row}
+            cell.font = font
+    _apply_group_box_border(ws, top_row, left_col, max(last_row, header_row), right_col, outer_style="medium")
+    diagnostics["repaired_stats2_table_borders"] = (
+        f"{get_column_letter(left_col)}{top_row}:{get_column_letter(right_col)}{max(last_row, header_row)}"
+    )
 
 
 def _write_stat_section(ws, start_row, start_col, title, rows, use_detail_col=False, apply_semantic_cf=False):
@@ -6477,6 +6873,7 @@ def _assert_invariants_unchanged(before: Dict[str, Any], after: Dict[str, Any]) 
         "P&L Calendar_layout",
         "dash_cf",
         "dash_styles",
+        "STATS1_layout",
         "SYMBOLS_layout",
         "instrument_filter_min_row",
     }
@@ -6900,8 +7297,6 @@ def _ensure_dashboard_requested_metric_rows(ws, diagnostics: Dict[str, Any] | No
         "Gross IR loss",
         "Percentage expectancy",
         "R expectancy",
-        "Best Win Streak",
-        "Worst Losing Streak",
     ]
     target_row = find_row(canonical_core_order[0])
     if target_row:
@@ -6914,6 +7309,28 @@ def _ensure_dashboard_requested_metric_rows(ws, diagnostics: Dict[str, Any] | No
                 diagnostics.setdefault("reordered_dashboard_core_metric_rows", []).append(metric_label)
                 changed = True
             target_row += 1
+
+    best_streak_row = find_core_row("Best Win Streak") or find_core_row("Winning Streak")
+    if best_streak_row and best_streak_row + 5 < core_boundary_row():
+        labels = [label_at(best_streak_row + offset).casefold() for offset in range(6)]
+        if labels in (
+            ["best win streak", "worst losing streak", "start", "end", "start", "end"],
+            ["winning streak", "losing streak", "start", "end", "start", "end"],
+        ):
+            snapshots = [
+                _dashboard_row_snapshot(ws, best_streak_row),
+                _dashboard_row_snapshot(ws, best_streak_row + 2),
+                _dashboard_row_snapshot(ws, best_streak_row + 3),
+                _dashboard_row_snapshot(ws, best_streak_row + 1),
+                _dashboard_row_snapshot(ws, best_streak_row + 4),
+                _dashboard_row_snapshot(ws, best_streak_row + 5),
+            ]
+            for offset, snapshot in enumerate(snapshots):
+                _restore_dashboard_row_snapshot(ws, best_streak_row + offset, snapshot)
+            diagnostics.setdefault("reordered_dashboard_streak_detail_rows", []).append(
+                f"{best_streak_row}:{best_streak_row + 5}"
+            )
+            changed = True
 
     legacy_expectancy_row = find_core_row("Expectancy")
     if legacy_expectancy_row and find_core_row("Percentage expectancy") and find_core_row("R expectancy"):
@@ -7591,6 +8008,7 @@ def _repair_stats2_account_balance_formatting(ws, diagnostics: Dict[str, Any] | 
         if currency:
             cell.number_format = _currency_number_format(currency, force_decimals=8 if _is_crypto_currency(currency) else 2)
         _set_cell_horizontal_alignment(cell, "right")
+    _apply_stats2_clean_table_borders(ws, section, header_row, col_map, diagnostics)
     if diagnostics is not None:
         diagnostics["repaired_stats2_account_balance_formatting"] = True
 
