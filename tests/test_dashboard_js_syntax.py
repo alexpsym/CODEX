@@ -21,39 +21,32 @@ def test_dashboard_js_no_removed_widget_endpoints_and_keeps_needed_calls() -> No
     assert '/api/state-sync/remote-backup-summary' in js
     assert '/api/oanda-inactivity-status' in js
     assert '/api/local-exit' in js
-    assert 'window.open(' not in js
+    assert "const MAIN_WORKSPACE_URL = '/merged/open-orders';" in js
+    assert '/merged/open-orders' in js
+    assert 'window.open(' in js
     assert 'Loaded ${new Date().toLocaleTimeString()}' not in js
     assert "document.getElementById('dashboard-workspace-frame')" in js
     assert "document.getElementById('dashboard-workspace-title')" in js
     assert "document.getElementById('dashboard-workspace-status')" in js
-    assert "let activeMainLoadState = 'idle';" in js
-    assert "activeMainLoadState = 'loading';" in js
-    assert "activeMainLoadState = 'loaded';" in js
-    assert "activeMainLoadState = 'error';" in js
+    assert "ensureOrdersWorkspace();" in js
+    assert "const scriptTabWindows = new Map();" in js
+    assert "const openScriptTab = (script) => {" in js
     assert "active-script" in js
     assert "const processRunning = script.running === true;" in js
     assert "const processStarting = script.starting === true;" in js
     assert "let dotState = processRunning ? 'running' : (processStarting ? 'starting' : 'stopped');" in js
-    assert "if (isFxWeekend && processRunning && !fxEnabled) {" in js
-    assert "if (dotState === 'stopped' && stopReason) {" in js
-    assert "const isMonitor = String(script.name || '').trim().toLowerCase() === 'monitor';" in js
-    assert "processTitle = processRunning ? 'Scanner running' : (processStarting ? 'Scanner starting' : 'Scanner stopped');" in js
-    assert "processTitle = `Scanner stopped: ${stopReason}`;" in js
+    assert "if (lowerName === 'monitor') {" in js
+    assert "let title = processRunning ? 'Scanner running' : (processStarting ? 'Scanner starting' : 'Scanner stopped');" in js
+    assert "title = `Scanner stopped: ${stopReason}`;" in js
     assert "if (!processRunning && stopReason) {" in js
-    assert "const isActiveMainView = isDashboardMainView(script) && String(script.name) === activeMainScriptName;" in js
-    assert "if (isActiveMainView) {" in js
-    assert "dotState = 'running';" in js
-    assert "} else if (isDashboardMainView(script) && !isMonitor) {" in js
-    assert "workspaceTitle = 'Workspace not selected';" in js
-    assert "workspaceTitle = activeMainLoadState === 'loading'" in js
-    assert "'Open in workspace: loading'" in js
-    assert "'Open in workspace: load failed'" in js
-    assert "'Open in workspace'" in js
-    assert "Select a script from the toolbar above to load it here." in js
+    assert "return { dotState: 'running', dotTitle: 'Shown on dashboard', active: true };" in js
+    assert "return { dotState: 'running', dotTitle: 'Open in a tab', active: true };" in js
+    assert "return { dotState: 'stopped', dotTitle: 'Not open in a tab', active: false };" in js
+    assert "btn.addEventListener('click', () => openScriptTab(script));" in js
+    assert "btn.addEventListener('contextmenu', (event) => {" in js
+    assert "btn.addEventListener('auxclick', (event) => {" in js
+    assert "Select a script from the toolbar above to load it here." not in js
     assert "Select a script from the left to load it here." not in js
-    assert "dotTitle = workspaceTitle ? `${workspaceTitle}; ${processTitle}` : processTitle;" in js
-    assert "syncWorkspaceSelectionFromScripts();" in js
-    assert "syncWorkspaceSelectionFromScripts();\n        renderScripts();" in js
     assert "makeExitButton" in js
     assert "local-exit-btn" in js
     assert "const exitButtonSlot = document.getElementById('exit-button-slot');" in js
@@ -61,7 +54,6 @@ def test_dashboard_js_no_removed_widget_endpoints_and_keeps_needed_calls() -> No
     assert "scriptsState.forEach((item) => scriptsGrid.appendChild(makeScriptButton(item)));" in js
     assert "exitButtonSlot.appendChild(makeExitButton());" in js
     assert "scriptsGrid.appendChild(makeExitButton());" in js
-    assert "if (isMonitor) {" in js
     assert "cache: 'no-store'" in js
     assert "Loading state…" in js
     assert "Saved locally only (repo deletion can lose local state)" in js
@@ -72,6 +64,8 @@ def test_dashboard_js_no_removed_widget_endpoints_and_keeps_needed_calls() -> No
     assert "dotTitle = 'Inactive view';" not in js
     assert "dotTitle = 'Active view loaded';" not in js
     assert "Inactive view" not in js
+    assert "activeMainLoadState" not in js
+    assert "syncWorkspaceSelectionFromScripts" not in js
 
 
 def test_dashboard_js_prefers_post_verified_watchlist_before_remote_summary() -> None:

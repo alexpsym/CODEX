@@ -34,7 +34,8 @@ def test_dashboard_source_registers_spread_monitor_local_only_web_app():
     assert '"spreads-clone"' in source
     assert '"spreads-clone": ["spread_app.py"]' in source
     assert '"spreads-clone": "Spreads"' in source
-    assert '.script-toolbar-grid .script-btn[data-script-name="spreads-clone"] { max-width: 96px; }' in source
+    assert 'id="dashboard-scripts-panel"' in source
+    assert '.script-toolbar-grid .script-btn[data-script-name="spreads-clone"]' not in source
 
 
 def test_local_launcher_installs_spread_monitor_requirements_with_same_python():

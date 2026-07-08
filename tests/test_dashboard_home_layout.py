@@ -8,6 +8,8 @@ import re
 from pathlib import Path
 
 import pytest
+from openpyxl import Workbook, load_workbook
+from openpyxl.styles import PatternFill
 
 ROOT = Path(__file__).resolve().parents[1]
 MASTER_SERVICE_PATH = ROOT / 'render' / 'master_service.py'
@@ -39,17 +41,19 @@ def test_dashboard_home_removes_instrument_specs_recent_trades_open_orders() -> 
     assert '>Scripts<' not in html
     assert 'Watchlist' in html
     assert 'OANDA Inactivity' in html
+    assert 'Orders / Positions' in html
     assert 'id="dashboard-workspace"' in html
     assert 'id="dashboard-workspace-title"' in html
     assert 'id="dashboard-workspace-status"' in html
     assert 'id="dashboard-workspace-empty"' in html
     assert 'id="dashboard-workspace-frame"' in html
-    assert 'Select a script from the toolbar above to load it here.' in html
+    assert 'src="/merged/open-orders?_dashboard=1"' in html
+    assert 'Select a script from the toolbar above to load it here.' not in html
     assert 'Select a script from the left to load it here.' not in html
     assert '.local-exit-btn' in html
-    assert 'class="panel dashboard-script-toolbar"' in html
-    assert 'class="script-toolbar-row"' in html
-    assert 'id="scripts-grid" class="script-stack script-toolbar-grid"' in html
+    assert 'class="panel dashboard-script-panel" id="dashboard-scripts-panel"' in html
+    assert 'class="script-toolbar-row"' not in html
+    assert 'id="scripts-grid" class="script-stack"' in html
     assert 'id="exit-button-slot" class="exit-button-slot"' in html
     assert 'id="exit-panel"' not in html
 
@@ -77,30 +81,29 @@ def test_dashboard_home_removes_instrument_specs_recent_trades_open_orders() -> 
     workspace_start = html.find('<section class="panel" id="dashboard-workspace">')
     rail_html = html[rail_start:workspace_start]
     assert '<aside class="panel sidebar">' not in rail_html
-    assert 'id="scripts-grid"' not in rail_html
+    assert 'id="scripts-grid"' in rail_html
 
 
-def test_dashboard_toolbar_css_keeps_scripts_single_row() -> None:
+def test_dashboard_script_css_keeps_scripts_vertical_above_watchlist() -> None:
     source = MASTER_SERVICE_PATH.read_text(encoding='utf-8')
     html = _extract_html_template(source)
 
-    assert '.dashboard-script-toolbar' in html
-    assert '.script-toolbar-row' in html
-    assert '.script-toolbar-grid' in html
+    assert '.dashboard-script-panel' in html
+    assert '.dashboard-script-toolbar' not in html
+    assert '.script-toolbar-row' not in html
+    assert '.script-toolbar-grid' not in html
     assert 'script-toolbar-title' not in html
     assert '>Scripts<' not in html
-    assert 'flex-wrap: nowrap;' in html
-    assert 'flex: 0 1 auto;' in html
-    assert 'flex: 1 1 0;' not in html
+    assert 'flex-direction:column;' in html
     assert 'text-overflow: ellipsis;' in html
     assert 'white-space: nowrap;' in html
-    assert '.script-toolbar-grid .script-btn[data-script-name="history"] { max-width: 96px; }' in html
-    assert '.script-toolbar-grid .script-btn[data-script-name="trading-journal"] { max-width: 96px; }' in html
-    assert '.script-toolbar-grid .script-btn[data-script-name="open-orders"] { max-width: 146px; }' in html
-    assert '.script-toolbar-grid .script-btn[data-script-name="instrument-lookup"] { max-width: 150px; }' in html
-    assert '.script-toolbar-grid .script-btn[data-script-name="spreads-clone"] { max-width: 96px; }' in html
+    assert '.script-toolbar-grid .script-btn[data-script-name="history"]' not in html
+    assert '.script-toolbar-grid .script-btn[data-script-name="trading-journal"]' not in html
+    assert '.script-toolbar-grid .script-btn[data-script-name="open-orders"]' not in html
+    assert '.script-toolbar-grid .script-btn[data-script-name="instrument-lookup"]' not in html
+    assert '.script-toolbar-grid .script-btn[data-script-name="spreads-clone"]' not in html
     assert '.script-toolbar-grid .script-btn[data-script-name="mt5"]' not in html
-    assert '.script-toolbar-grid .script-btn[data-script-name="pine"] { max-width: 76px; }' in html
+    assert '.script-toolbar-grid .script-btn[data-script-name="pine"]' not in html
     assert '.local-exit-btn{\n            margin-top: 0;' in html
 
 
@@ -229,6 +232,32 @@ def test_trading_journal_workspace_contains_action_buttons_in_order():
     assert "bybit-demo-balance-adjustment-btn" in source
     assert "Bybit Demo Balance Adjustment" in source
     assert source.index("open-journal-btn") < source.index("import-journal-btn") < source.index("journal-resync-btn") < source.index("crypto-monthly-pnl-btn") < source.index("bybit-demo-balance-adjustment-btn")
+
+
+def test_open_master_journal_polish_autofits_and_clears_stale_recommendation_fill(tmp_path: Path):
+    module = _load_master_service_module()
+    path = tmp_path / "Trading Journal.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Stats 1"
+    ws["A1"] = "Recommendation"
+    ws["B1"] = "Reduce target"
+    ws["B1"].fill = PatternFill("solid", fgColor="FFF2CC")
+    ws["C1"] = "A very long journal note that should widen the column before Excel opens"
+    ws.column_dimensions["C"].width = 8
+    wb.save(path)
+    wb.close()
+
+    result = module._polish_master_journal_for_excel_open(path)
+
+    assert result["ok"] is True
+    checked = load_workbook(path)
+    try:
+        ws2 = checked["Stats 1"]
+        assert str(ws2["B1"].fill.fgColor.rgb or "")[-6:].upper() != "FFF2CC"
+        assert float(ws2.column_dimensions["C"].width or 0) > 8
+    finally:
+        checked.close()
 
 
 
