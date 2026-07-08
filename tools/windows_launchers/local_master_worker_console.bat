@@ -20,7 +20,7 @@ echo [local-master] If startup fails, this window will stay open and print the l
 set "PREFLIGHT_ROOT=!ROOT!"
 if "!PREFLIGHT_ROOT:~-1!"=="\" set "PREFLIGHT_ROOT=!PREFLIGHT_ROOT:~0,-1!"
 echo [local-master] checking for an existing dashboard server on port 8000 ...
-powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%tools\windows_launchers\ensure_local_master_server.ps1" -Root "!PREFLIGHT_ROOT!" -BaseUrl "http://127.0.0.1:8000" -HealthUrl "http://127.0.0.1:8000/health"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%tools\windows_launchers\ensure_local_master_server.ps1" -Root "!PREFLIGHT_ROOT!" -DecisionPath "!LOCAL_MASTER_PREFLIGHT_DECISION!" -BaseUrl "http://127.0.0.1:8000" -HealthUrl "http://127.0.0.1:8000/health"
 if errorlevel 1 goto preflight_failed
 
 set "STREAM_ROOT=!ROOT!"
