@@ -214,20 +214,23 @@ def test_merged_calculator_page_returns_200() -> None:
     assert 'target-toggle' not in html
     assert 'tp-ticks-wrap' not in html
     assert 'id="calc-rr"' in html
-    assert 'id="calc-instrument-specs"' in html
     assert "Type a symbol to load instrument specs." not in html
     assert "calc-grid" in html
+    assert "settings-grid" in html
+    assert "grid-template-columns:repeat(3,minmax(0,1fr))" in html
+    assert html.count('class="row full-row"') >= 4
     assert '/static/calculator.js?v=' in html
     import re
     assert re.search(r"/static/calculator\.js\?v=[a-f0-9]{12}", html)
     assert 'id="calc-timeframe"' not in html
     assert 'id="timeframe-toggle"' in html
     assert 'id="test-toggle"' in html
-    assert 'id="calc-instrument-specs"></div>' in html
+    assert 'id="calc-instrument-specs"' not in html
+    assert 'id="calc-journal-summary"' not in html
     assert 'class="card" id="calc-instrument-specs"' not in html
-    assert html.find('id="calc-symbol"') < html.find('id="calc-instrument-specs"')
-    assert html.find('id="calc-instrument-specs"') < html.find('id="calc-journal-summary"')
-    assert html.find('id="calc-journal-summary"') < html.find('id="calc-sl-ticks"')
+    assert html.find('id="account-toggle"') < html.find('id="asset-toggle"') < html.find('id="side-toggle"')
+    assert html.find('id="order-toggle"') < html.find('id="calc-symbol"') < html.find('id="calc-sl-ticks"')
+    assert html.find('id="timeframe-toggle"') < html.find('id="setup-toggle"') < html.find('id="pattern-toggle"')
     assert "calc-right-rail" not in html
     assert 'id="calc-webhook-url"' in html
     assert 'id="calc-webhook-copy-url"' in html

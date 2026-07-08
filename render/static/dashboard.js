@@ -31,7 +31,8 @@
   const oandaErrorDetail = document.getElementById('oanda-inactivity-error-detail');
   const oandaToggleBtn = document.getElementById('oanda-inactivity-toggle');
 
-  const WORKSPACE_STORAGE_KEY = 'dashboard.active_main_script';
+  const MAIN_WORKSPACE_URL = '/merged/open-orders';
+  const scriptTabWindows = new Map();
 
   let scriptsInFlight = null;
   let oandaInFlight = null;
@@ -55,10 +56,6 @@
   let stateSyncState = null;
   let watchlistLoaded = false;
   let scriptsState = [];
-  let activeMainScriptName = '';
-  let activeMainScriptUrl = '';
-  let activeMainLoadState = 'idle';
-  let workspaceLoadToken = 0;
 
   const fmtTime = (v) => {
     if (!v) return '—';
@@ -113,52 +110,28 @@
     return bodyText ? JSON.parse(bodyText) : {};
   };
 
-  const persistActiveWorkspace = () => {
-    const payload = activeMainScriptName && activeMainScriptUrl
-      ? JSON.stringify({ name: activeMainScriptName, url: activeMainScriptUrl })
-      : '';
-    if (!payload) {
-      sessionStorage.removeItem(WORKSPACE_STORAGE_KEY);
-      return;
-    }
-    sessionStorage.setItem(WORKSPACE_STORAGE_KEY, payload);
-  };
-
-  const restoreActiveWorkspace = () => {
-    try {
-      const raw = sessionStorage.getItem(WORKSPACE_STORAGE_KEY);
-      if (!raw) return;
-      const parsed = JSON.parse(raw);
-      activeMainScriptName = String(parsed?.name || '');
-      activeMainScriptUrl = String(parsed?.url || '');
-    } catch {
-      activeMainScriptName = '';
-      activeMainScriptUrl = '';
-    }
-  };
-
   const setWorkspaceMeta = (title, message, isErr = false) => {
-    if (workspaceTitle) workspaceTitle.textContent = title || 'Workspace';
+    if (workspaceTitle) workspaceTitle.textContent = title || 'Orders / Positions';
     if (workspaceStatus) {
       workspaceStatus.textContent = message || '';
       workspaceStatus.style.color = isErr ? '#fca5a5' : '#94a3b8';
     }
   };
 
-  const showWorkspaceEmpty = (message) => {
-    if (workspaceFrame) {
-      workspaceFrame.hidden = true;
-      workspaceFrame.removeAttribute('src');
-    }
-    if (workspaceEmpty) {
-      workspaceEmpty.hidden = false;
-      workspaceEmpty.textContent = message || 'No script selected yet.';
-    }
-  };
-
-  const showWorkspaceFrame = () => {
+  const showOrdersWorkspace = () => {
     if (workspaceEmpty) workspaceEmpty.hidden = true;
     if (workspaceFrame) workspaceFrame.hidden = false;
+  };
+
+  const ensureOrdersWorkspace = () => {
+    if (!workspaceFrame) return;
+    const currentSrc = String(workspaceFrame.getAttribute('src') || '');
+    if (!currentSrc || currentSrc === 'about:blank') {
+      const glue = MAIN_WORKSPACE_URL.includes('?') ? '&' : '?';
+      workspaceFrame.src = `${MAIN_WORKSPACE_URL}${glue}_dashboard=1&_dash_ts=${Date.now()}`;
+    }
+    showOrdersWorkspace();
+    setWorkspaceMeta('Orders / Positions', 'Open orders and positions are shown here.', false);
   };
 
   const renderScripts = () => {
@@ -198,95 +171,80 @@
     return btn;
   };
 
-  const activateWorkspaceScript = (script) => {
-    const name = String(script?.name || '').trim();
-    const targetBase = String(script?.open_url || '').trim() || '/';
-    if (!name || !workspaceFrame) return;
+  const scriptTabKey = (script) => String(script?.name || script?.id || '').trim();
 
-    activeMainScriptName = name;
-    activeMainScriptUrl = targetBase;
-    activeMainLoadState = 'loading';
-    persistActiveWorkspace();
-    renderScripts();
+  const scriptTabName = (script) => {
+    const key = scriptTabKey(script).replace(/[^a-z0-9_-]+/gi, '_') || 'script';
+    return `trading_tools_${key}`;
+  };
 
+  const scriptTabIsOpen = (script) => {
+    const key = scriptTabKey(script);
+    const tab = key ? scriptTabWindows.get(key) : null;
+    if (!tab) return false;
+    if (tab.closed) {
+      scriptTabWindows.delete(key);
+      return false;
+    }
+    return true;
+  };
+
+  const scriptOpenUrl = (script) => {
+    const targetBase = String(script?.open_url || '').trim();
+    if (!targetBase) return '';
     const glue = targetBase.includes('?') ? '&' : '?';
-    const target = `${targetBase}${glue}_dash_ts=${Date.now()}`;
-
-    workspaceLoadToken += 1;
-    const token = workspaceLoadToken;
-
-    if (workspaceFrame) {
-      workspaceFrame.removeAttribute('src');
-      workspaceFrame.hidden = true;
-    }
-    if (workspaceEmpty) {
-      workspaceEmpty.hidden = false;
-      workspaceEmpty.textContent = `Loading ${script.label || name}...`;
-    }
-    setWorkspaceMeta(script.label || name, 'Loading...', false);
-
-    workspaceFrame.onload = () => {
-      if (token !== workspaceLoadToken) return;
-      activeMainLoadState = 'loaded';
-      showWorkspaceFrame();
-      setWorkspaceMeta(script.label || name, 'Rendering response.', false);
-      renderScripts();
-    };
-    workspaceFrame.onerror = () => {
-      if (token !== workspaceLoadToken) return;
-      activeMainLoadState = 'error';
-      setWorkspaceMeta(script.label || name, `Failed to load ${targetBase}`, true);
-      showWorkspaceEmpty(`Unable to load ${script.label || name}.`);
-      renderScripts();
-    };
-    workspaceFrame.src = target;
+    return `${targetBase}${glue}_tab_ts=${Date.now()}`;
   };
 
-  const syncWorkspaceSelectionFromScripts = () => {
-    if (!scriptsState.length) {
-      activeMainScriptName = '';
-      activeMainScriptUrl = '';
-      activeMainLoadState = 'idle';
-      persistActiveWorkspace();
-      showWorkspaceEmpty('No scripts available.');
-      setWorkspaceMeta('Workspace', 'No scripts detected.', true);
+  const openScriptTab = (script) => {
+    const name = String(script?.name || '').trim();
+    const key = scriptTabKey(script);
+    const existing = key ? scriptTabWindows.get(key) : null;
+    if (existing && !existing.closed) {
+      existing.focus?.();
+      setStatus(`${script.label || name} tab focused.`);
+      renderScripts();
       return;
     }
-
-    const allByName = new Map(scriptsState.map((s) => [String(s.name), s]));
-    if (!allByName.has(activeMainScriptName) || !activeMainScriptName) {
-      activeMainScriptName = '';
-      activeMainScriptUrl = '';
-      activeMainLoadState = 'idle';
-      showWorkspaceEmpty('Select a script from the toolbar above to load it here.');
-      setWorkspaceMeta('Workspace', 'Ready to load a script.', false);
-      persistActiveWorkspace();
+    const target = scriptOpenUrl(script);
+    if (!name || !target || !key) {
+      setStatus('Script URL unavailable.', true);
       return;
     }
-
-    const selected = allByName.get(activeMainScriptName);
-    const selectedOpenUrl = String(selected?.open_url || '');
-    if (!selectedOpenUrl) {
-      showWorkspaceEmpty('Selected script does not provide a dashboard URL.');
-      setWorkspaceMeta(selected?.label || selected?.name || 'Workspace', 'Script URL unavailable.', true);
+    const tab = window.open(target, scriptTabName(script));
+    if (!tab) {
+      setStatus(`Browser blocked the ${script.label || name} tab.`, true);
       return;
     }
-
-    if (activeMainScriptUrl !== selectedOpenUrl) {
-      activeMainScriptUrl = selectedOpenUrl;
-      persistActiveWorkspace();
-    }
-
-    const currentSrc = String(workspaceFrame?.getAttribute('src') || '');
-    if (!currentSrc || workspaceFrame?.hidden) {
-      activateWorkspaceScript(selected);
-      return;
-    }
-    showWorkspaceFrame();
-    setWorkspaceMeta(selected?.label || selected?.name || 'Workspace', 'Ready.', false);
+    scriptTabWindows.set(key, tab);
+    tab.focus?.();
+    setStatus(`Opened ${script.label || name} in a new tab.`);
+    renderScripts();
   };
 
-  const isDashboardMainView = (script) => Boolean(script?.dashboard_main_view);
+  const scriptDotState = (script, processRunning, processStarting, processTitle) => {
+    const lowerName = String(script?.name || '').trim().toLowerCase();
+    if (lowerName === 'monitor') {
+      const stopReason = String(script.last_start_error || script.last_exit_reason || '').trim();
+      let dotState = processRunning ? 'running' : (processStarting ? 'starting' : 'stopped');
+      let title = processRunning ? 'Scanner running' : (processStarting ? 'Scanner starting' : 'Scanner stopped');
+      if (!processRunning && stopReason) {
+        title = `Scanner stopped: ${stopReason}`;
+      }
+      if (typeof script.status_detail === 'string' && script.status_detail.trim()) {
+        title = script.status_detail.trim();
+      }
+      return { dotState, dotTitle: title, active: processRunning };
+    }
+    if (lowerName === 'open-orders') {
+      return { dotState: 'running', dotTitle: 'Shown on dashboard', active: true };
+    }
+    const tabOpen = scriptTabIsOpen(script);
+    if (tabOpen) {
+      return { dotState: 'running', dotTitle: 'Open in a tab', active: true };
+    }
+    return { dotState: 'stopped', dotTitle: 'Not open in a tab', active: false };
+  };
 
   const makeScriptButton = (script) => {
     const btn = document.createElement('button');
@@ -301,57 +259,12 @@
     const dot = document.createElement('span');
     const processRunning = script.running === true;
     const processStarting = script.starting === true;
-    const isFxWeekend = String(script.name || '').trim().toLowerCase() === 'fxweekend';
-    const fxEnabled = script.enabled !== false;
-
-    let dotState = processRunning ? 'running' : (processStarting ? 'starting' : 'stopped');
-    let processTitle = processRunning ? 'Process running' : (processStarting ? 'Process starting' : 'Process stopped');
-
-    if (isFxWeekend && processRunning && !fxEnabled) {
-      dotState = 'stopped';
-      processTitle = 'Process running but FX Weekend disabled';
-    }
-
-    const stopReason = String(script.last_start_error || script.last_exit_reason || '').trim();
-    if (dotState === 'stopped' && stopReason) {
-      processTitle = `Process stopped: ${stopReason}`;
-    }
-    if (typeof script.status_detail === 'string' && script.status_detail.trim()) {
-      processTitle = script.status_detail.trim();
-    }
-
-    const isMonitor = String(script.name || '').trim().toLowerCase() === 'monitor';
-    const isActiveMainView = isDashboardMainView(script) && String(script.name) === activeMainScriptName;
-    let workspaceTitle = '';
-    let dotTitle = processTitle;
-    if (isMonitor) {
-      dotState = processRunning ? 'running' : (processStarting ? 'starting' : 'stopped');
-      processTitle = processRunning ? 'Scanner running' : (processStarting ? 'Scanner starting' : 'Scanner stopped');
-      if (!processRunning && stopReason) {
-          processTitle = `Scanner stopped: ${stopReason}`;
-      }
-      if (typeof script.status_detail === 'string' && script.status_detail.trim()) {
-        processTitle = script.status_detail.trim();
-      }
-      dotTitle = processTitle;
-    }
-
-    if (isActiveMainView) {
-      dotState = 'running';
-      workspaceTitle = activeMainLoadState === 'loading'
-        ? 'Open in workspace: loading'
-        : activeMainLoadState === 'error'
-          ? 'Open in workspace: load failed'
-          : 'Open in workspace';
-    } else if (isDashboardMainView(script) && !isMonitor) {
-      dotState = 'stopped';
-      workspaceTitle = 'Workspace not selected';
-    }
-    dotTitle = workspaceTitle ? `${workspaceTitle}; ${processTitle}` : processTitle;
+    const processTitle = processRunning ? 'Process running' : (processStarting ? 'Process starting' : 'Process stopped');
+    const { dotState, dotTitle, active } = scriptDotState(script, processRunning, processStarting, processTitle);
     dot.className = `status-dot ${dotState}`;
     dot.title = dotTitle;
     dot.setAttribute('aria-label', dotTitle);
-    if (isActiveMainView) {
+    if (active) {
       btn.classList.add('active-script');
     }
     btn.title = `${script.label || script.name} (${dotTitle})`;
@@ -359,8 +272,16 @@
     btn.appendChild(name);
     btn.appendChild(dot);
 
-    btn.addEventListener('click', () => {
-      activateWorkspaceScript(script);
+    btn.addEventListener('click', () => openScriptTab(script));
+    btn.addEventListener('contextmenu', (event) => {
+      event.preventDefault();
+      openScriptTab(script);
+    });
+    btn.addEventListener('auxclick', (event) => {
+      if (event.button === 1) {
+        event.preventDefault();
+        openScriptTab(script);
+      }
     });
 
     return btn;
@@ -373,7 +294,6 @@
         setStatus('Loading scripts...');
         const scripts = await fetchJson('/scripts');
         scriptsState = Array.isArray(scripts) ? scripts : [];
-        syncWorkspaceSelectionFromScripts();
         renderScripts();
         setStatus(`Updated ${new Date().toLocaleTimeString()}`);
       } catch (err) {
@@ -761,7 +681,7 @@
     syncOandaDetailsVisibility();
   });
 
-  restoreActiveWorkspace();
+  ensureOrdersWorkspace();
   refreshScripts();
   refreshStateSyncStatus().then(() => {
     const restoreStatus = String(stateSyncState?.restore_status || '').toLowerCase();

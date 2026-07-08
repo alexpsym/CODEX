@@ -401,7 +401,8 @@ eval(source);
     assert data["yesDisabled"] is True
     assert data["payloadWebhook"] == "no"
     assert data["panel"] == "none"
-    assert "blocked" in data["status"].lower() or "build:" in data["status"].lower()
+    assert "blocked" in data["status"].lower()
+    assert "build:" not in data["status"].lower()
 
 
 def test_webhook_enabled_from_bootstrap_allows_yes_mode() -> None:
@@ -426,7 +427,7 @@ eval(source);
     assert data["webhook"] == "yes"
     assert data["panel"] == ""
     assert "https://example.test" in data["url"]
-    assert "Build:" in data["status"]
+    assert data["status"] == ""
 
 
 def test_webhook_stale_runtime_warning_on_old_public_webhook_message() -> None:

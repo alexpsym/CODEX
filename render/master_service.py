@@ -108,6 +108,7 @@ import httpx
 import requests
 import pandas as pd
 from openpyxl import load_workbook
+from openpyxl.utils import get_column_letter
 from PIL import Image, ImageDraw, ImageFont
 from starlette.responses import RedirectResponse
 
@@ -123,7 +124,7 @@ from shared.symbol_resolution import (
 from shared.atomic_json import write_json_file
 from render.dropbox_sync import download_bytes, list_excel_files, upload_bytes
 from render import dropbox_state_store
-from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, read_master_journal_source, update_master_journal_workbook_data_only, refresh_master_journal_derived_sheets, stable_row_id, SHEET_ORDER, REPORT_YEARLY_SHEET, expected_report_sheet_names, _get_all_trades_sheet, _get_trade_log_sheet, _trade_log_header_map, _trade_log_data_start_row, _find_instrument_leaders_table, LEADER_LABEL_TO_KEY, _repair_or_flag_zero_trade_qty, _canonicalize_and_dedupe_balances, _trade_execution_fingerprint, _trade_row_source_rank, _dedupe_trade_rows_by_execution, _instrument_averages_header_map, INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, INSTRUMENT_AVERAGES_DATA_START_ROW, _result_percentage_totals_by_market, _risk_of_ruin_by_account, _stats1_sheet, _stats2_sheet, _symbols_sheet, STATS1_SHEET, STATS2_SHEET, SYMBOLS_SHEET, _parse_duration_text, _duration_ddhhmmss_cell_to_seconds, _is_ddhhmmss_number_format, STOP_RECOMMENDATION_HEADER, TARGET_RECOMMENDATION_HEADER, _size_recommendation
+from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, read_master_journal_source, update_master_journal_workbook_data_only, refresh_master_journal_derived_sheets, stable_row_id, SHEET_ORDER, REPORT_YEARLY_SHEET, expected_report_sheet_names, _get_all_trades_sheet, _get_trade_log_sheet, _trade_log_header_map, _trade_log_data_start_row, _find_instrument_leaders_table, LEADER_LABEL_TO_KEY, _repair_or_flag_zero_trade_qty, _canonicalize_and_dedupe_balances, _trade_execution_fingerprint, _trade_row_source_rank, _dedupe_trade_rows_by_execution, _instrument_averages_header_map, INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, INSTRUMENT_AVERAGES_DATA_START_ROW, _result_percentage_totals_by_market, _risk_of_ruin_by_account, _stats1_sheet, _stats2_sheet, _symbols_sheet, STATS1_SHEET, STATS2_SHEET, SYMBOLS_SHEET, _parse_duration_text, _duration_ddhhmmss_cell_to_seconds, _is_ddhhmmss_number_format, STOP_RECOMMENDATION_HEADER, TARGET_RECOMMENDATION_HEADER, _size_recommendation, _apply_recommendation_cell_style
 from bybit_monitor import bybit_altcoin_monitor as bybit_monitor
 from oanda_monitor import oanda_forex_monitor as oanda_monitor
 from bybit_demo_tpsl_cache import (
@@ -11060,7 +11061,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         body { font-family: 'Inter', system-ui, -apple-system, sans-serif; margin: 0; padding: 2rem; background: #0b1220; color: #e2e8f0; }
         h2 { margin: 0; font-size: 1.35rem; }
         .meta { color: #94a3b8; margin: 0.75rem 0 1.5rem; line-height: 1.5; }
-        .home { max-width: 1400px; margin: 0 auto; }
+        .home { max-width: 1700px; margin: 0 auto; }
         button { padding: 0.55rem 0.9rem; border-radius: 10px; border: none; cursor: pointer; font-weight: 800; }
         .secondary { background: #1f2937; color: #cbd5e1; }
         .refresh { background: #3b82f6; color: #eaf2ff; }
@@ -11071,37 +11072,19 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         .oo-toolbar { display:flex; gap:0.6rem; align-items:center; }
 
         .layout{
-            margin-top: 1rem;
+            margin-top: 0;
             display: grid;
-            grid-template-columns: 260px minmax(0, 1fr);
+            grid-template-columns: 300px minmax(0, 1fr);
             gap: 1rem;
             align-items: start;
         }
-        .dashboard-script-toolbar{
-            padding: 0.65rem 0.75rem;
-        }
-        .script-toolbar-row{
-            display: flex;
-            align-items: center;
-            gap: 0.6rem;
-            flex-wrap: nowrap;
-            min-width: 0;
-        }
-        .script-toolbar-grid{
-            flex: 1 1 auto;
-            min-width: 0;
-            display: flex;
-            flex-direction: row;
-            flex-wrap: nowrap;
-            gap: 0.45rem;
-            overflow: hidden;
+        .dashboard-script-panel{
+            padding: 0.85rem;
         }
         .exit-button-slot{
-            margin-left: auto;
-            flex: 0 0 auto;
             display: flex;
             align-items: center;
-            justify-content: flex-end;
+            justify-content: stretch;
         }
         .dashboard-rail{
             display: flex;
@@ -11112,7 +11095,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             padding: 1rem;
         }
         #dashboard-workspace{
-            min-height: 720px;
+            min-height: 780px;
             display: flex;
             flex-direction: column;
             gap: 0.75rem;
@@ -11138,8 +11121,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         }
         #dashboard-workspace-frame{
             width: 100%;
-            height: calc(100vh - 14rem);
-            min-height: 560px;
+            height: calc(100vh - 7rem);
+            min-height: 680px;
             border: 1px solid #1f2937;
             border-radius: 12px;
             background: #0b1220;
@@ -11167,14 +11150,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             flex-direction:column;
             gap:0.65rem;
         }
-        .script-stack.script-toolbar-grid{
-            flex: 1 1 auto;
-            min-width: 0;
-            flex-direction: row;
-            flex-wrap: nowrap;
-            gap: 0.45rem;
-            overflow: hidden;
-        }
         .local-exit-btn{
             margin-top: 0;
         }
@@ -11195,41 +11170,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         .script-btn:hover { background: #0f172a; }
         .script-btn.active-script { outline: 1px solid rgba(96, 165, 250, 0.8); }
         .script-btn.compact { width: auto; min-width: 190px; padding: 0.75rem 0.9rem; }
-        .script-toolbar-grid .script-btn,
         .exit-button-slot .local-exit-btn{
-            width: auto;
-            min-width: 0;
-            max-width: 170px;
-            height: 34px;
-            padding: 0.38rem 0.55rem;
-            border-radius: 10px;
-            gap: 0.35rem;
-            font-size: 0.78rem;
-            flex: 0 1 auto;
-            white-space: nowrap;
-            overflow: hidden;
-        }
-        .script-toolbar-grid .script-btn[data-script-name="history"] { max-width: 96px; }
-        .script-toolbar-grid .script-btn[data-script-name="monitor"] { max-width: 108px; }
-        .script-toolbar-grid .script-btn[data-script-name="calculator"] { max-width: 126px; }
-        .script-toolbar-grid .script-btn[data-script-name="instrument-lookup"] { max-width: 150px; }
-        .script-toolbar-grid .script-btn[data-script-name="ivindicator-clone"] { max-width: 132px; }
-        .script-toolbar-grid .script-btn[data-script-name="spreads-clone"] { max-width: 96px; }
-        .script-toolbar-grid .script-btn[data-script-name="trading-journal"] { max-width: 96px; }
-        .script-toolbar-grid .script-btn[data-script-name="open-orders"] { max-width: 146px; }
-        .script-toolbar-grid .script-btn[data-script-name="pine"] { max-width: 76px; }
-        .exit-button-slot .local-exit-btn{
-            flex: 0 0 auto;
-            min-width: 64px;
-            max-width: none;
+            width: 100%;
             justify-content: center;
-        }
-        .script-toolbar-grid .status-dot{
-            width: 8px;
-            height: 8px;
-            min-width: 8px;
-            margin-left: 4px;
-            flex: 0 0 auto;
         }
         .script-name {
             font-weight: 900;
@@ -11392,14 +11335,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 </head>
 <body>
     <div class=\"home\">
-        <section class="panel dashboard-script-toolbar">
-            <div class="script-toolbar-row">
-                <div id="scripts-grid" class="script-stack script-toolbar-grid"></div>
-                <div id="exit-button-slot" class="exit-button-slot"></div>
-            </div>
-        </section>
         <div class="layout">
             <div class="dashboard-rail">
+                <section class="panel dashboard-script-panel" id="dashboard-scripts-panel">
+                    <div id="scripts-grid" class="script-stack"></div>
+                    <div id="exit-button-slot" class="exit-button-slot"></div>
+                </section>
+
                 <section class="panel" id="watchlist-widget">
                     <div class="panel-header">
                         <div>
@@ -11465,16 +11407,15 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             <section class="panel" id="dashboard-workspace">
                 <div class="panel-header">
                     <div>
-                        <div id="dashboard-workspace-title">Workspace</div>
-                        <p id="dashboard-workspace-status">Ready to load a script.</p>
+                        <div id="dashboard-workspace-title">Orders / Positions</div>
+                        <p id="dashboard-workspace-status">Loading open orders and positions.</p>
                     </div>
                 </div>
-                <p id="dashboard-workspace-empty">Select a script from the toolbar above to load it here.</p>
+                <p id="dashboard-workspace-empty" hidden>Open orders and positions are unavailable.</p>
                 <iframe
                     id="dashboard-workspace-frame"
-                    title="Dashboard script workspace"
-                    src="about:blank"
-                    hidden
+                    title="Open orders and positions dashboard"
+                    src="/merged/open-orders?_dashboard=1"
                 ></iframe>
             </section>
         </div>
@@ -19140,8 +19081,10 @@ CALCULATOR_TEMPLATE = """<!doctype html>
     .wrap{width:100%;max-width:none;margin:0;padding:18px}
     .panel{background:#111827;border:1px solid #1f2937;border-radius:14px;padding:16px}
     .calc-grid{display:grid;grid-template-columns:minmax(0,1fr);gap:14px;align-items:start}
-    .calc-col{display:flex;flex-direction:column;gap:12px;min-width:0}
-    .row{display:flex;flex-direction:column;gap:6px;align-items:stretch;margin-bottom:12px}
+    .calc-col{display:flex;flex-direction:column;gap:14px;min-width:0}
+    .settings-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;align-items:start}
+    .row{display:flex;flex-direction:column;gap:6px;align-items:stretch;margin-bottom:0;min-width:0}
+    .row.full-row{grid-column:1 / -1}
     .group{display:flex;gap:8px;flex-wrap:wrap}
     label{display:flex;flex-direction:column;gap:6px;font-weight:700;color:#cbd5e1}
     input,select,button{background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:10px;padding:8px 10px}
@@ -19154,13 +19097,15 @@ CALCULATOR_TEMPLATE = """<!doctype html>
     button{cursor:pointer;font-weight:700}
     button:disabled{opacity:.55;cursor:not-allowed}
     .toggle button.active{background:#2563eb;border-color:#3b82f6}
+    .full-row .toggle{display:grid;grid-template-columns:repeat(auto-fit,minmax(88px,auto));justify-content:start}
     .error{color:#fca5a5;min-height:1.2em}
     .ok{color:#86efac}
     .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px}
     .grid.compact-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}
     .card{background:#0f172a;border:1px solid #1f2937;border-radius:10px;padding:10px}
     .muted{color:#94a3b8;font-size:0.9rem}
-    @media (max-width:820px){.calc-grid{grid-template-columns:1fr}}
+    @media (max-width:1100px){.settings-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+    @media (max-width:820px){.calc-grid{grid-template-columns:1fr}.settings-grid{grid-template-columns:1fr}}
     @media (max-width:900px){.grid.compact-grid{grid-template-columns:1fr}}
   </style>
 </head>
@@ -19170,6 +19115,7 @@ CALCULATOR_TEMPLATE = """<!doctype html>
       <h2 style="margin-top:0">Position Size Calculator</h2>
       <div class="calc-grid">
       <div class="calc-col">
+      <div class="settings-grid">
       <div class="row">
         <label>Account</label>
         <div class="group toggle" id="account-toggle"><button type="button" data-v="live" class="active">Live</button><button type="button" data-v="demo">Demo</button></div>
@@ -19220,15 +19166,15 @@ CALCULATOR_TEMPLATE = """<!doctype html>
         <label>Test</label>
         <div class="group toggle" id="test-toggle"><button type="button" data-v="no" class="active">No</button><button type="button" data-v="yes">Yes</button></div>
       </div>
-      <div class="row">
+      <div class="row full-row">
         <label>Timeframe</label>
         <div class="group toggle" id="timeframe-toggle"></div>
       </div>
-      <div class="row">
+      <div class="row full-row">
         <label>Setup</label>
         <div class="group toggle" id="setup-toggle"></div>
       </div>
-      <div class="row">
+      <div class="row full-row">
         <label>Pattern</label>
         <div class="group toggle" id="pattern-toggle"></div>
       </div>
@@ -19236,13 +19182,14 @@ CALCULATOR_TEMPLATE = """<!doctype html>
         <label>EMA</label>
         <div class="group toggle" id="ema-toggle"></div>
       </div>
-      <div class="row">
+      <div class="row full-row">
         <label>All-time high / low</label>
         <div class="group toggle" id="aths-atls-toggle"></div>
       </div>
       <div class="row">
         <label>Round number</label>
         <div class="group toggle" id="round-number-toggle"></div>
+      </div>
       </div>
       <div class="row">
         <div class="group">
@@ -28529,6 +28476,119 @@ def _open_path_with_os(path: Path) -> None:
         subprocess.Popen(["xdg-open", str(path)])
 
 
+def _cell_fill_rgb(cell: object) -> str:
+    fill = getattr(cell, "fill", None)
+    color = getattr(fill, "fgColor", None)
+    rgb = str(getattr(color, "rgb", "") or "")
+    return rgb[-6:].upper() if getattr(fill, "fill_type", None) == "solid" and rgb else ""
+
+
+def _recommendation_text_like(value: object) -> bool:
+    text = str(value or "").strip().casefold()
+    if not text:
+        return False
+    return (
+        text == "recommendation"
+        or text.endswith("recommendation")
+        or "recommendation" in text
+        or text in {
+            "need wins & losses",
+            "reduce stop loss",
+            "increase stop loss",
+            "keep stop loss",
+            "reduce target",
+            "increase target",
+            "keep target",
+        }
+    )
+
+
+def _polish_master_journal_for_excel_open(path: Path) -> Dict[str, object]:
+    diagnostics: Dict[str, object] = {
+        "ok": True,
+        "recommendation_cells_repaired": 0,
+        "columns_resized": 0,
+        "rows_resized": 0,
+    }
+    wb = load_workbook(path, keep_vba=path.suffix.lower() == ".xlsm")
+    try:
+        for ws in wb.worksheets:
+            recommendation_cols: Set[int] = set()
+            for row in ws.iter_rows():
+                for cell in row:
+                    text = str(cell.value or "").strip().casefold()
+                    if text in {
+                        "recommendation",
+                        STOP_RECOMMENDATION_HEADER.casefold(),
+                        TARGET_RECOMMENDATION_HEADER.casefold(),
+                    }:
+                        recommendation_cols.add(int(cell.column))
+
+            for row_idx in range(1, ws.max_row + 1):
+                label = str(ws.cell(row_idx, 1).value or "").strip().casefold()
+                if label == "recommendation":
+                    for col_idx in range(2, ws.max_column + 1):
+                        _apply_recommendation_cell_style(ws.cell(row_idx, col_idx))
+                        diagnostics["recommendation_cells_repaired"] = int(diagnostics["recommendation_cells_repaired"]) + 1
+
+            for col_idx in recommendation_cols:
+                for row_idx in range(1, ws.max_row + 1):
+                    cell = ws.cell(row_idx, col_idx)
+                    if cell.value in (None, ""):
+                        continue
+                    _apply_recommendation_cell_style(cell)
+                    diagnostics["recommendation_cells_repaired"] = int(diagnostics["recommendation_cells_repaired"]) + 1
+
+            for row in ws.iter_rows():
+                for cell in row:
+                    if _cell_fill_rgb(cell) == "FFF2CC" and _recommendation_text_like(cell.value):
+                        _apply_recommendation_cell_style(cell)
+                        diagnostics["recommendation_cells_repaired"] = int(diagnostics["recommendation_cells_repaired"]) + 1
+
+            col_widths: Dict[int, float] = {}
+            row_heights: Dict[int, float] = {}
+            for row in ws.iter_rows():
+                for cell in row:
+                    value = cell.value
+                    if value is None:
+                        continue
+                    text = str(value)
+                    if not text:
+                        continue
+                    lines = text.splitlines() or [text]
+                    longest = max(len(part) for part in lines)
+                    width = min(max(8.0, float(longest) + 2.0), 80.0)
+                    col_widths[int(cell.column)] = max(col_widths.get(int(cell.column), 0.0), width)
+                    line_count = max(1, len(lines))
+                    if longest > 80:
+                        alignment = copy.copy(cell.alignment)
+                        alignment.wrap_text = True
+                        cell.alignment = alignment
+                        line_count = max(line_count, math.ceil(longest / 80))
+                    if line_count > 1:
+                        row_heights[int(cell.row)] = max(row_heights.get(int(cell.row), 0.0), min(120.0, 15.0 * min(line_count, 8)))
+
+            for col_idx, width in col_widths.items():
+                letter = get_column_letter(col_idx)
+                current = ws.column_dimensions[letter].width
+                next_width = round(max(float(current or 0), width), 2)
+                if current != next_width:
+                    ws.column_dimensions[letter].width = next_width
+                    diagnostics["columns_resized"] = int(diagnostics["columns_resized"]) + 1
+
+            for row_idx, height in row_heights.items():
+                current = ws.row_dimensions[row_idx].height
+                next_height = round(max(float(current or 0), height), 2)
+                if current != next_height:
+                    ws.row_dimensions[row_idx].height = next_height
+                    diagnostics["rows_resized"] = int(diagnostics["rows_resized"]) + 1
+
+        wb.save(path)
+        return diagnostics
+    finally:
+        wb.close()
+
+
 def _master_journal_sync_ok(result: Dict[str, object] | None) -> bool:
     if not isinstance(result, dict):
         return False
@@ -29350,11 +29410,26 @@ async def open_master_journal_file() -> JSONResponse:
     path = _master_journal_path()
     if not path.exists():
         raise HTTPException(status_code=404, detail="Trading Journal.xlsx does not exist. Import history or create the journal workbook first.")
+    polish: Dict[str, object] = {}
+    try:
+        polish = await asyncio.to_thread(_polish_master_journal_for_excel_open, path)
+    except PermissionError as exc:
+        polish = {
+            "ok": False,
+            "warning": "Trading Journal.xlsx is already open or locked, so rows/columns and recommendation styling could not be refreshed before opening.",
+            "error": str(exc),
+        }
+    except Exception as exc:
+        polish = {
+            "ok": False,
+            "warning": "Trading Journal.xlsx opened, but pre-open row/column sizing and recommendation styling failed.",
+            "error": str(exc),
+        }
     try:
         _open_path_with_os(path)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to open Trading Journal.xlsx: {exc}")
-    return JSONResponse({"ok": True, "master_journal_path": str(path.resolve())})
+    return JSONResponse({"ok": True, "master_journal_path": str(path.resolve()), "open_polish": polish})
 
 
 
