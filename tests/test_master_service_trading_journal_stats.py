@@ -63,6 +63,7 @@ if _httpx_spec is None:
     sys.modules["httpx"] = httpx_stub
 
 from render.master_service import _compute_journal_stats, _compute_journal_period_stats, _build_journal_balance_timelines
+from tools.master_journal_workbook import _target_r_recommendation
 
 
 def test_compute_journal_stats_winner_loser_splits_and_durations() -> None:
@@ -252,7 +253,7 @@ def test_compute_journal_stats_distance_fallback_percent_points_are_not_fraction
     assert risk["by_market"]["fx"]["avg_stop_pct_winners"] == pytest.approx(1.0)
 
 
-def test_compute_journal_stats_recommends_stop_and_target_from_win_loss_distances() -> None:
+def test_compute_journal_stats_recommends_stop_from_win_loss_distances_but_target_needs_r_data() -> None:
     rows = [
         {
             "row_type": "trade",
@@ -279,10 +280,146 @@ def test_compute_journal_stats_recommends_stop_and_target_from_win_loss_distance
     instrument = next(item for item in stats["by_instrument"] if item["symbol"] == "EURUSD")
 
     assert risk["stop_recommendation"] == "Reduce stop loss"
-    assert risk["target_recommendation"] == "Reduce target"
+    assert risk["target_recommendation"] == "Need more target data"
     assert risk["by_market"]["fx"]["stop_recommendation"] == "Reduce stop loss"
     assert instrument["stop_recommendation"] == "Reduce stop loss"
-    assert instrument["target_recommendation"] == "Reduce target"
+    assert instrument["target_recommendation"] == "Need more target data"
+
+
+def _target_distribution_trade(
+    trade_id: str,
+    r_multiple: object,
+    *,
+    symbol: str = "EURUSD",
+    net_profit: float = 10.0,
+    result_pct: float = 1.0,
+    planned_target_price: float = 140.0,
+    include_plan: bool = True,
+    **overrides: object,
+) -> dict:
+    row = {
+        "id": trade_id,
+        "row_type": "trade",
+        "asset_class": "fx",
+        "account": "OANDA DEMO",
+        "symbol": symbol,
+        "side": "BUY",
+        "entry_price": 100.0,
+        "stop_loss": 90.0,
+        "take_profit": 140.0,
+        "net_profit": net_profit,
+        "result_pct": result_pct,
+        "r_multiple": r_multiple,
+    }
+    if include_plan:
+        row.update({
+            "planned_entry_price": 100.0,
+            "planned_stop_price": 90.0,
+            "planned_target_price": planned_target_price,
+        })
+    row.update(overrides)
+    return row
+
+
+def test_compute_journal_stats_target_recommendation_uses_captured_win_r_distribution() -> None:
+    rows = [
+        _target_distribution_trade(f"win-{idx}", value)
+        for idx, value in enumerate([2.4, 2.5, 2.7, 3.0, 3.1, 3.4, 3.6, 4.8], start=1)
+    ]
+    rows.extend([
+        _target_distribution_trade("loss-excluded", -6.0, net_profit=-5.0, result_pct=-1.0),
+        _target_distribution_trade("test-excluded", 6.0, is_test_trade=True),
+        _target_distribution_trade("be-excluded", 6.0, net_profit=0.0, result_pct=0.0, breakeven="yes"),
+        _target_distribution_trade("invalid-r-excluded", None),
+        _target_distribution_trade(
+            "moved-without-original-excluded",
+            6.0,
+            include_plan=False,
+            move_to_break_even_trigger_price=101.0,
+        ),
+    ])
+
+    stats = _compute_journal_stats(rows, balances=[])
+    risk = stats["groups"]["risk_expectancy"]
+    by_market = stats["groups"]["by_market"]
+    instrument = next(item for item in stats["by_instrument"] if item["symbol"] == "EURUSD")
+    direct_target = _target_r_recommendation(rows)
+
+    assert risk["target_recommendation"] == "Reduce target to 2.5-3.5R"
+    assert risk["eligible_target_r_wins"] == 8
+    assert risk["target_r_increment"] == pytest.approx(0.5)
+    assert risk["target_r_distribution"][4.5] == 1
+    assert risk["target_r_peak_bucket"] == pytest.approx(3.0)
+    assert risk["target_r_peak_instances"] == 3
+    assert risk["target_r_sweet_low"] == pytest.approx(2.5)
+    assert risk["target_r_sweet_high"] == pytest.approx(3.5)
+    assert risk["target_r_low_probability_above"] == pytest.approx(3.5)
+    assert risk["current_avg_original_planned_target_r"] == pytest.approx(4.0)
+    assert risk["target_r_excluded_reasons"]["not_winning_trade"] >= 2
+    assert direct_target["target_r_excluded_reasons"]["test_trade"] == 1
+    assert risk["target_r_excluded_reasons"]["invalid_r_multiple"] == 1
+    assert risk["target_r_excluded_reasons"]["moved_without_original_plan"] == 1
+    assert by_market["overall"]["target_recommendation"] == risk["target_recommendation"]
+    assert by_market["fx"]["target_recommendation"] == risk["target_recommendation"]
+    assert by_market["crypto"]["target_recommendation"] == "Need more target data"
+    assert stats["groups"]["overview"]["target_recommendation"] == risk["target_recommendation"]
+    assert instrument["target_recommendation"] == risk["target_recommendation"]
+
+
+def test_compute_journal_stats_target_recommendation_allows_moved_trade_with_original_plan() -> None:
+    rows = [
+        _target_distribution_trade(f"win-{idx}", value)
+        for idx, value in enumerate([2.4, 2.5, 2.7, 3.0, 3.1, 3.4, 3.6, 4.8], start=1)
+    ]
+    rows.append(
+        _target_distribution_trade(
+            "moved-with-original",
+            3.2,
+            move_to_profit_trigger_price=130.0,
+        )
+    )
+
+    stats = _compute_journal_stats(rows, balances=[])
+    risk = stats["groups"]["risk_expectancy"]
+
+    assert risk["eligible_target_r_wins"] == 9
+    assert risk["target_r_excluded_reasons"].get("moved_without_original_plan") is None
+    assert risk["target_recommendation"].startswith("Reduce target to ")
+
+
+def test_compute_journal_stats_target_planned_r_uses_original_plan_and_validates_side() -> None:
+    invalid_long_rows = [
+        _target_distribution_trade(
+            f"invalid-long-{idx}",
+            value,
+            planned_target_price=80.0,
+        )
+        for idx, value in enumerate([2.4, 2.5, 2.7, 3.0, 3.1, 3.4, 3.6, 4.8], start=1)
+    ]
+
+    invalid_stats = _compute_journal_stats(invalid_long_rows, balances=[])
+    invalid_risk = invalid_stats["groups"]["risk_expectancy"]
+    assert invalid_risk["current_avg_original_planned_target_r"] is None
+    assert invalid_risk["target_recommendation"] == "Target sweet spot 2.5-3.5R"
+
+    short_rows = []
+    for idx, value in enumerate([2.4, 2.5, 2.7, 3.0, 3.1, 3.4, 3.6, 4.8], start=1):
+        short_rows.append(
+            _target_distribution_trade(
+                f"short-{idx}",
+                value,
+                side="SELL",
+                planned_stop_price=110.0,
+                planned_target_price=60.0,
+                stop_loss=110.0,
+                take_profit=60.0,
+            )
+        )
+
+    short_stats = _compute_journal_stats(short_rows, balances=[])
+    short_risk = short_stats["groups"]["risk_expectancy"]
+    assert short_risk["current_avg_original_planned_target_r"] == pytest.approx(4.0)
+    assert short_risk["target_recommendation"] == "Reduce target to 2.5-3.5R"
 
 
 def test_compute_journal_stats_no_zero_count_leaders() -> None:

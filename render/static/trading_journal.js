@@ -558,11 +558,7 @@
         item?.avg_sl_pct_losses ?? item?.avg_sl_distance_pips_losses ?? item?.avg_sl_distance_quote_losses
       );
     }
-    return recommendationFromAverages(
-      'target',
-      item?.avg_tp_pct_wins ?? item?.avg_tp_distance_pips_wins ?? item?.avg_tp_distance_quote_wins,
-      item?.avg_tp_pct_losses ?? item?.avg_tp_distance_pips_losses ?? item?.avg_tp_distance_quote_losses
-    );
+    return 'Need more target data';
   }
 
   function overallRecommendation(kind) {
@@ -571,7 +567,7 @@
     if (direct) return direct;
     return kind === 'stop'
       ? recommendationFromAverages('stop', risk.avg_stop_pct_winners, risk.avg_stop_pct_losers)
-      : recommendationFromAverages('target', risk.avg_target_pct_winners, risk.avg_target_pct_losers);
+      : 'Need more target data';
   }
 
   function rowRecommendation(row, kind) {
@@ -580,6 +576,9 @@
     const symbol = String(row?.symbol || '').trim().toUpperCase();
     const item = (Array.isArray(state.stats?.by_instrument) ? state.stats.by_instrument : [])
       .find((candidate) => String(candidate?.symbol || '').trim().toUpperCase() === symbol);
+    if (kind === 'target') {
+      return directRecommendation(item, 'target') || overallRecommendation('target');
+    }
     const symbolText = instrumentRecommendation(item, kind);
     return symbolText && symbolText !== 'Need wins & losses' ? symbolText : overallRecommendation(kind);
   }

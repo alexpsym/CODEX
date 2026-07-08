@@ -2367,27 +2367,31 @@ def test_recommendations_are_removed_from_trade_log_and_kept_in_symbols_and_stat
     snap = sample_snapshot()
     snap["items"] = [
         {
-            "id": "eur-win", "row_type": "trade", "account": "OANDA DEMO",
+            "id": f"eur-win-{idx}", "row_type": "trade", "account": "OANDA DEMO",
             "asset_class": "fx", "symbol": "EURUSD", "side": "BUY",
-            "open_time": "2026-01-01", "close_time": "2026-01-01",
-            "entry_price": 100.0, "stop_loss": 99.0, "take_profit": 102.0,
-            "net_profit": 10.0, "result_pct": 1.0, "r_multiple": 1.0,
-        },
+            "open_time": f"2026-01-{idx:02d}", "close_time": f"2026-01-{idx:02d}",
+            "entry_price": 100.0, "stop_loss": 99.0, "take_profit": 140.0,
+            "planned_entry_price": 100.0, "planned_stop_price": 90.0, "planned_target_price": 140.0,
+            "net_profit": 10.0, "result_pct": 1.0, "r_multiple": r_multiple,
+        }
+        for idx, r_multiple in enumerate([2.4, 2.5, 2.7, 3.0, 3.1, 3.4, 3.6, 4.8], start=1)
+    ] + [
         {
             "id": "eur-loss", "row_type": "trade", "account": "OANDA DEMO",
             "asset_class": "fx", "symbol": "EURUSD", "side": "BUY",
-            "open_time": "2026-01-02", "close_time": "2026-01-02",
+            "open_time": "2026-01-20", "close_time": "2026-01-20",
             "entry_price": 100.0, "stop_loss": 98.0, "take_profit": 104.0,
+            "planned_entry_price": 100.0, "planned_stop_price": 90.0, "planned_target_price": 140.0,
             "net_profit": -5.0, "result_pct": -0.5, "r_multiple": -0.5,
         },
     ]
     snap["stats"]["by_instrument"] = [
         {
-            "symbol": "EURUSD", "asset_class": "fx", "total_trades": 2,
-            "wins": 1, "losses": 1, "break_even": 0,
-            "long_trades": 2, "short_trades": 0,
+            "symbol": "EURUSD", "asset_class": "fx", "total_trades": 9,
+            "wins": 8, "losses": 1, "break_even": 0,
+            "long_trades": 9, "short_trades": 0,
             "avg_sl_pct_wins": 1.0, "avg_sl_pct_losses": 2.0,
-            "avg_tp_pct_wins": 2.0, "avg_tp_pct_losses": 4.0,
+            "avg_tp_pct_wins": 40.0, "avg_tp_pct_losses": 4.0,
         }
     ]
     build_master_journal_workbook(snap, out)
@@ -2404,7 +2408,7 @@ def test_recommendations_are_removed_from_trade_log_and_kept_in_symbols_and_stat
     assert symbols.cell(INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, symbol_headers[STOP_RECOMMENDATION_HEADER]).value == "Recommendation"
     assert symbols.cell(INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, symbol_headers[TARGET_RECOMMENDATION_HEADER]).value == "Recommendation"
     assert symbols.cell(INSTRUMENT_AVERAGES_DATA_START_ROW, symbol_headers[STOP_RECOMMENDATION_HEADER]).value == "Reduce stop loss"
-    assert symbols.cell(INSTRUMENT_AVERAGES_DATA_START_ROW, symbol_headers[TARGET_RECOMMENDATION_HEADER]).value == "Reduce target"
+    assert symbols.cell(INSTRUMENT_AVERAGES_DATA_START_ROW, symbol_headers[TARGET_RECOMMENDATION_HEADER]).value == "Reduce target to 2.5-3.5R"
     assert _cell_fill_rgb(symbols.cell(INSTRUMENT_AVERAGES_DATA_START_ROW, symbol_headers[STOP_RECOMMENDATION_HEADER])) not in {"FFF2CC", PROFIT_FILL, LOSS_FILL}
     assert _cell_fill_rgb(symbols.cell(INSTRUMENT_AVERAGES_DATA_START_ROW, symbol_headers[TARGET_RECOMMENDATION_HEADER])) not in {"FFF2CC", PROFIT_FILL, LOSS_FILL}
 
@@ -2415,7 +2419,7 @@ def test_recommendations_are_removed_from_trade_log_and_kept_in_symbols_and_stat
     ]
     assert len(recommendation_rows) >= 2
     assert [stats1.cell(recommendation_rows[0], col).value for col in (2, 3, 4)] == ["Reduce stop loss", "Reduce stop loss", "Need wins & losses"]
-    assert [stats1.cell(recommendation_rows[1], col).value for col in (2, 3, 4)] == ["Reduce target", "Reduce target", "Need wins & losses"]
+    assert [stats1.cell(recommendation_rows[1], col).value for col in (2, 3, 4)] == ["Reduce target to 2.5-3.5R", "Reduce target to 2.5-3.5R", "Need more target data"]
     wb.close()
 
 
@@ -2838,7 +2842,7 @@ def test_update_data_only_writes_dashboard_horizontal_core_metric_aliases(tmp_pa
     assert [ws.cell(stop_recommendation_row, c).value for c in range(2, 5)] == ["Need wins & losses", "Need wins & losses", "Need wins & losses"]
     assert ws.cell(max_target_row + 1, 1).value == "Source"
     assert ws.cell(target_recommendation_row, 1).value == "Recommendation"
-    assert [ws.cell(target_recommendation_row, c).value for c in range(2, 5)] == ["Need wins & losses", "Need wins & losses", "Need wins & losses"]
+    assert [ws.cell(target_recommendation_row, c).value for c in range(2, 5)] == ["Increase target", "Keep target", "Reduce target"]
     assert all(_cell_fill_rgb(ws.cell(11, col)) == "C6EFCE" for col in range(2, 5))
     assert all(_cell_font_rgb(ws.cell(11, col)) == "006100" for col in range(2, 5))
     assert all(_cell_fill_rgb(ws.cell(14, col)) == "FFC7CE" for col in range(2, 5))

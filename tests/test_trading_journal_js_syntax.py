@@ -80,6 +80,14 @@ def test_trading_journal_diagnostics_split_balance_anchor_from_parse_sync() -> N
     assert "wrap.innerHTML = [" not in js
 
 
+def test_trading_journal_target_recommendation_does_not_fallback_to_averages() -> None:
+    js = JS_PATH.read_text(encoding="utf-8")
+    assert "recommendationFromAverages('target'" not in js
+    assert "recommendationFromAverages(\n      'target'" not in js
+    assert "return 'Need more target data';" in js
+    assert "return directRecommendation(item, 'target') || overallRecommendation('target');" in js
+
+
 def test_trading_journal_stats_classes_are_value_only_and_net_pl_is_sign_based() -> None:
     js = JS_PATH.read_text(encoding="utf-8")
     assert "const toneBySign = (value) =>" in js
