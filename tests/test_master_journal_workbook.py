@@ -2609,10 +2609,10 @@ def test_update_data_only_writes_dashboard_horizontal_core_metric_aliases(tmp_pa
     wb = Workbook(); ws = wb.active; ws.title = "Dashboard"
     wb.create_sheet("Trade Log"); wb.create_sheet("Instrument Averages"); wb.create_sheet("P&L Calendar")
     ws["B1"] = "Overall"; ws["C1"] = "FX"; ws["D1"] = "Crypto"
-    ws["A11"] = "Best Win Streak"; ws["A12"] = "Worst Losing Streak"; ws["A17"] = "Max target %"
+    ws["A11"] = "Best Win Streak"; ws["A12"] = "Worst Losing Streak"; ws["A15"] = "Avg stop %"; ws["A16"] = "Min stop %"; ws["A17"] = "Max stop %"; ws["A18"] = "Avg target %"; ws["A19"] = "Min target %"; ws["A20"] = "Max target %"
     ws["F1"] = "Winners"; ws["F8"] = "Losers"; ws["F14"] = "Drawdown"; ws["I1"] = "Instrument leaders"; ws["L1"] = "Account Balances"; ws["L2"] = "Account"; ws["M2"] = "Balance"; ws["N2"] = "Currency"; ws["L3"] = "BINANCE"
     _ensure_trade_log_headers(wb); wb.save(p); wb.close()
-    snap = {"stats": {"totals": {}, "groups": {"by_market": {"overall": {"winning_streak": 4, "losing_streak": 3, "max_target_pct": 9.5}, "fx": {"winning_streak": 2, "losing_streak": 1, "max_target_pct": 5.0}, "crypto": {"winning_streak": 6, "losing_streak": 7, "max_target_pct": 12.25}}, "risk_expectancy": {}, "leaders": {}, "duration": {}}}, "balances": [{"account_label": "BINANCE", "balance": 0, "currency": "USDT"}]}
+    snap = {"stats": {"totals": {}, "groups": {"by_market": {"overall": {"winning_streak": 4, "losing_streak": 3, "max_stop_pct": 8.5, "max_target_pct": 9.5, STOP_RECOMMENDATION_HEADER: "Reduce stop loss", TARGET_RECOMMENDATION_HEADER: "Increase target"}, "fx": {"winning_streak": 2, "losing_streak": 1, "max_stop_pct": 4.0, "max_target_pct": 5.0, STOP_RECOMMENDATION_HEADER: "Keep stop loss", TARGET_RECOMMENDATION_HEADER: "Keep target"}, "crypto": {"winning_streak": 6, "losing_streak": 7, "max_stop_pct": 10.75, "max_target_pct": 12.25, STOP_RECOMMENDATION_HEADER: "Increase stop loss", TARGET_RECOMMENDATION_HEADER: "Reduce target"}}, "risk_expectancy": {}, "leaders": {}, "duration": {}}}, "balances": [{"account_label": "BINANCE", "balance": 0, "currency": "USDT"}]}
     res = update_master_journal_workbook_data_only(p, snap)
     assert res["ok"] is True
     Path(res["candidate_path"]).replace(p)
@@ -2622,6 +2622,15 @@ def test_update_data_only_writes_dashboard_horizontal_core_metric_aliases(tmp_pa
     max_target_row = next(row for row in range(1, ws.max_row + 1) if ws.cell(row, 1).value == "Max target %")
     assert [ws.cell(max_target_row, c).value for c in range(2, 5)] == [pytest.approx(0.095), pytest.approx(0.05), pytest.approx(0.1225)]
     assert [ws.cell(max_target_row, c).number_format for c in range(2, 5)] == ["0.00%", "0.00%", "0.00%"]
+    max_stop_row = next(row for row in range(1, ws.max_row + 1) if ws.cell(row, 1).value == "Max stop %")
+    stop_recommendation_row = max_stop_row + 2
+    target_recommendation_row = max_target_row + 2
+    assert ws.cell(max_stop_row + 1, 1).value == "Source"
+    assert ws.cell(stop_recommendation_row, 1).value == "Recommendation"
+    assert [ws.cell(stop_recommendation_row, c).value for c in range(2, 5)] == ["Need wins & losses", "Need wins & losses", "Need wins & losses"]
+    assert ws.cell(max_target_row + 1, 1).value == "Source"
+    assert ws.cell(target_recommendation_row, 1).value == "Recommendation"
+    assert [ws.cell(target_recommendation_row, c).value for c in range(2, 5)] == ["Need wins & losses", "Need wins & losses", "Need wins & losses"]
     assert all(_cell_fill_rgb(ws.cell(11, col)) == "C6EFCE" for col in range(2, 5))
     assert all(_cell_font_rgb(ws.cell(11, col)) == "006100" for col in range(2, 5))
     assert all(_cell_fill_rgb(ws.cell(14, col)) == "FFC7CE" for col in range(2, 5))

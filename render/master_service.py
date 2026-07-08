@@ -124,7 +124,7 @@ from shared.symbol_resolution import (
 from shared.atomic_json import write_json_file
 from render.dropbox_sync import download_bytes, list_excel_files, upload_bytes
 from render import dropbox_state_store
-from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, read_master_journal_source, update_master_journal_workbook_data_only, refresh_master_journal_derived_sheets, stable_row_id, SHEET_ORDER, REPORT_YEARLY_SHEET, expected_report_sheet_names, _get_all_trades_sheet, _get_trade_log_sheet, _trade_log_header_map, _trade_log_data_start_row, _find_instrument_leaders_table, LEADER_LABEL_TO_KEY, _repair_or_flag_zero_trade_qty, _canonicalize_and_dedupe_balances, _trade_execution_fingerprint, _trade_row_source_rank, _dedupe_trade_rows_by_execution, _instrument_averages_header_map, INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, INSTRUMENT_AVERAGES_DATA_START_ROW, _result_percentage_totals_by_market, _risk_of_ruin_by_account, _stats1_sheet, _stats2_sheet, _symbols_sheet, STATS1_SHEET, STATS2_SHEET, SYMBOLS_SHEET, _parse_duration_text, _duration_ddhhmmss_cell_to_seconds, _is_ddhhmmss_number_format, STOP_RECOMMENDATION_HEADER, TARGET_RECOMMENDATION_HEADER, _size_recommendation, _apply_recommendation_cell_style
+from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, read_master_journal_source, update_master_journal_workbook_data_only, refresh_master_journal_derived_sheets, stable_row_id, SHEET_ORDER, REPORT_YEARLY_SHEET, expected_report_sheet_names, _get_all_trades_sheet, _get_trade_log_sheet, _trade_log_header_map, _trade_log_data_start_row, _find_instrument_leaders_table, LEADER_LABEL_TO_KEY, _repair_or_flag_zero_trade_qty, _canonicalize_and_dedupe_balances, _trade_execution_fingerprint, _trade_row_source_rank, _dedupe_trade_rows_by_execution, _instrument_averages_header_map, INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, INSTRUMENT_AVERAGES_DATA_START_ROW, _result_percentage_totals_by_market, _risk_of_ruin_by_account, _stats1_sheet, _stats2_sheet, _symbols_sheet, STATS1_SHEET, STATS2_SHEET, SYMBOLS_SHEET, _parse_duration_text, _duration_ddhhmmss_cell_to_seconds, _is_ddhhmmss_number_format, STOP_RECOMMENDATION_HEADER, TARGET_RECOMMENDATION_HEADER, _size_recommendation, _apply_recommendation_cell_style, _ensure_dashboard_requested_metric_rows, _stats1_market_columns, _stats1_section_bounds
 from bybit_monitor import bybit_altcoin_monitor as bybit_monitor
 from oanda_monitor import oanda_forex_monitor as oanda_monitor
 from bybit_demo_tpsl_cache import (
@@ -28503,6 +28503,113 @@ def _recommendation_text_like(value: object) -> bool:
     )
 
 
+def _repair_stats1_recommendation_rows_for_excel_open(wb: object, diagnostics: Dict[str, object]) -> None:
+    try:
+        ws = _stats1_sheet(wb)
+    except Exception as exc:
+        diagnostics["stats1_recommendation_repair_error"] = str(exc)
+        return
+
+    layout_diagnostics: Dict[str, Any] = {}
+    try:
+        _ensure_dashboard_requested_metric_rows(ws, layout_diagnostics)
+    except Exception as exc:
+        diagnostics["stats1_recommendation_layout_error"] = str(exc)
+        return
+    inserted = layout_diagnostics.get("inserted_dashboard_metric_rows") or []
+    if inserted:
+        diagnostics["stats1_inserted_metric_rows"] = inserted
+    inserted_sources = layout_diagnostics.get("inserted_dashboard_source_rows") or []
+    if inserted_sources:
+        diagnostics["stats1_inserted_source_rows"] = inserted_sources
+
+    market_cols = _stats1_market_columns(ws)
+    if not {"overall", "fx", "crypto"}.issubset(market_cols):
+        diagnostics["stats1_recommendation_repair_warning"] = "Stats 1 market columns were not found."
+        return
+
+    winners = _stats1_section_bounds(ws, "Winners")
+    losers = _stats1_section_bounds(ws, "Losers")
+    if not winners or not losers:
+        diagnostics["stats1_recommendation_repair_warning"] = "Stats 1 winner/loser sections were not found."
+        return
+
+    first_winners_row = winners[0]
+
+    def label_at(row: int) -> str:
+        return str(ws.cell(row, 1).value or "").strip()
+
+    def find_before(label: str, before: int) -> int | None:
+        wanted = label.casefold()
+        return next((row for row in range(1, before) if label_at(row).casefold() == wanted), None)
+
+    def find_in_bounds(bounds: Tuple[int, int], label: str) -> int | None:
+        wanted = label.casefold()
+        start, end = bounds
+        return next((row for row in range(start + 1, end + 1) if label_at(row).casefold() == wanted), None)
+
+    def recommendation_row_after(anchor_label: str) -> int | None:
+        anchor = find_before(anchor_label, first_winners_row)
+        if not anchor:
+            return None
+        row = anchor + 1
+        if row <= ws.max_row and label_at(row).casefold() == "source":
+            row += 1
+        elif row <= ws.max_row and not label_at(row) and any(
+            ws.cell(row, col).value not in (None, "") for col in market_cols.values()
+        ):
+            try:
+                ws.cell(row, 1).value = "Source"
+                diagnostics["stats1_source_rows_labeled"] = int(diagnostics.get("stats1_source_rows_labeled") or 0) + 1
+            except AttributeError:
+                diagnostics["stats1_merged_source_rows_seen"] = int(diagnostics.get("stats1_merged_source_rows_seen") or 0) + 1
+            row += 1
+        return row if row <= ws.max_row and label_at(row).casefold() == "recommendation" else None
+
+    stop_row = recommendation_row_after("Max stop %")
+    target_row = recommendation_row_after("Max target %")
+    metric_rows = {
+        "stop": (
+            stop_row,
+            find_in_bounds(winners, "Avg stop %"),
+            find_in_bounds(losers, "Avg stop %"),
+        ),
+        "target": (
+            target_row,
+            find_in_bounds(winners, "Avg target %"),
+            find_in_bounds(losers, "Avg target %"),
+        ),
+    }
+
+    repaired = 0
+    for kind, (recommendation_row, winner_row, loser_row) in metric_rows.items():
+        if not recommendation_row:
+            diagnostics.setdefault("stats1_missing_recommendation_rows", []).append(kind)
+            continue
+        for _market, col in market_cols.items():
+            winner_avg = ws.cell(winner_row, col).value if winner_row else None
+            loser_avg = ws.cell(loser_row, col).value if loser_row else None
+            cell = ws.cell(recommendation_row, col)
+            cell.value = _size_recommendation(kind, winner_avg, loser_avg)
+            _apply_recommendation_cell_style(cell)
+            repaired += 1
+    if repaired:
+        diagnostics["stats1_recommendation_cells_repaired"] = repaired
+
+    removed_duplicates = 0
+    for row in reversed(range(2, first_winners_row)):
+        if label_at(row).casefold() != "recommendation":
+            continue
+        if label_at(row - 1).casefold() != "recommendation":
+            continue
+        if any(ws.cell(row, col).value not in (None, "") for col in market_cols.values()):
+            continue
+        ws.delete_rows(row, 1)
+        removed_duplicates += 1
+    if removed_duplicates:
+        diagnostics["stats1_duplicate_recommendation_rows_removed"] = removed_duplicates
+
+
 def _polish_master_journal_for_excel_open(path: Path) -> Dict[str, object]:
     diagnostics: Dict[str, object] = {
         "ok": True,
@@ -28512,6 +28619,7 @@ def _polish_master_journal_for_excel_open(path: Path) -> Dict[str, object]:
     }
     wb = load_workbook(path, keep_vba=path.suffix.lower() == ".xlsm")
     try:
+        _repair_stats1_recommendation_rows_for_excel_open(wb, diagnostics)
         for ws in wb.worksheets:
             recommendation_cols: Set[int] = set()
             for row in ws.iter_rows():

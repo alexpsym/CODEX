@@ -260,6 +260,72 @@ def test_open_master_journal_polish_autofits_and_clears_stale_recommendation_fil
         checked.close()
 
 
+def test_open_master_journal_polish_inserts_stats1_recommendation_rows(tmp_path: Path):
+    module = _load_master_service_module()
+    path = tmp_path / "Trading Journal.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "STATS1"
+    ws["B1"] = "Overall"
+    ws["C1"] = "FX"
+    ws["D1"] = "Crypto"
+    ws["A2"] = "Avg stop %"
+    ws["A3"] = "Min stop %"
+    ws["A4"] = "Max stop %"
+    ws["A5"] = "Avg target %"
+    ws["A6"] = "Min target %"
+    ws["A7"] = "Max target %"
+    ws["A8"] = "Winners"
+    ws["A9"] = "Avg stop %"
+    ws["B9"] = 0.01
+    ws["C9"] = 0.02
+    ws["D9"] = 0.03
+    ws["A10"] = "Avg target %"
+    ws["B10"] = 0.04
+    ws["C10"] = 0.01
+    ws["D10"] = 0.05
+    ws["A11"] = "Losers"
+    ws["A12"] = "Avg stop %"
+    ws["B12"] = 0.02
+    ws["C12"] = 0.01
+    ws["D12"] = 0.03
+    ws["A13"] = "Avg target %"
+    ws["B13"] = 0.03
+    ws["C13"] = 0.02
+    ws["D13"] = 0.05
+    wb.save(path)
+    wb.close()
+
+    result = module._polish_master_journal_for_excel_open(path)
+
+    assert result["ok"] is True
+    assert result["stats1_recommendation_cells_repaired"] == 6
+    checked = load_workbook(path)
+    try:
+        ws2 = checked["STATS1"]
+        labels = {row: str(ws2.cell(row, 1).value or "") for row in range(1, ws2.max_row + 1)}
+        max_stop_row = next(row for row, label in labels.items() if label == "Max stop %")
+        stop_recommendation_row = max_stop_row + 2
+        max_target_row = next(row for row, label in labels.items() if label == "Max target %")
+        target_recommendation_row = max_target_row + 2
+        assert ws2.cell(max_stop_row + 1, 1).value == "Source"
+        assert ws2.cell(stop_recommendation_row, 1).value == "Recommendation"
+        assert [ws2.cell(stop_recommendation_row, col).value for col in range(2, 5)] == [
+            "Reduce stop loss",
+            "Increase stop loss",
+            "Keep stop loss",
+        ]
+        assert ws2.cell(max_target_row + 1, 1).value == "Source"
+        assert ws2.cell(target_recommendation_row, 1).value == "Recommendation"
+        assert [ws2.cell(target_recommendation_row, col).value for col in range(2, 5)] == [
+            "Increase target",
+            "Reduce target",
+            "Keep target",
+        ]
+    finally:
+        checked.close()
+
+
 
 def test_trading_journal_actions_crypto_monthly_diagnostics_are_rendered() -> None:
     js = (ROOT / 'render' / 'static' / 'trading_journal_actions.js').read_text(encoding='utf-8')
