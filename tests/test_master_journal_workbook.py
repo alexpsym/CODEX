@@ -9,6 +9,7 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 import pytest
 from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, read_master_journal_source, update_master_journal_workbook_data_only, SHEET_ORDER, STATS1_SHEET, STATS2_SHEET, SYMBOLS_SHEET, TRADE_LOG_HEADERS, TRADE_LOG_HEADERS_V1, OLD_TRADE_LOG_HEADERS, PRE_MOVE_TRADE_LOG_HEADERS, MOVE_TO_FIELD_MAP, TRADE_LOG_HEADER_ROWS, TRADE_LOG_DATA_START_ROW, TRADE_LOG_FILTER_HEADER_ROW, TRADE_NUMBER_HEADER, STOP_RECOMMENDATION_HEADER, TARGET_RECOMMENDATION_HEADER, REPORT_YEARLY_SHEET, REPORT_METRIC_LABELS, INSTRUMENT_AVERAGES_HEADERS, INSTRUMENT_AVERAGES_GROUP_HEADER_ROW, INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, INSTRUMENT_AVERAGES_DATA_START_ROW, DASHBOARD_MOVE_TO_BREAK_EVEN_LABEL, DASHBOARD_MOVE_TO_PROFIT_LABEL, PROFIT_FILL, LOSS_FILL, DURATION_NUMBER_FORMAT, adaptive_percent_number_format, adaptive_number_format, resolve_trade_folder_link, expected_report_sheet_names, _apply_trade_number_hyperlinks, _ensure_trade_log_schema, _ensure_instrument_averages_schema, _ensure_pnl_calendar_freeze_panes, _repair_trade_log_move_to_durations, _trade_log_header_map, _instrument_averages_header_map, _result_percentage_totals_by_market
 from tools.master_journal_workbook import _format_duration_display, _parse_duration_text, _repair_legacy_duration_number_formats, _populate_symbols_metrics_preserving_layout, _repair_symbols_header_merges_preserving_layout
+from tools.master_journal_workbook import RECOMMENDATION_TRADE_LOG_HEADERS, _trade_log_three_row_header_values_for
 from openpyxl.utils.cell import coordinate_to_tuple, get_column_letter, range_boundaries
 
 def _cf_ranges(ws):
@@ -2322,6 +2323,94 @@ def test_recommendations_are_removed_from_trade_log_and_kept_in_symbols_and_stat
     assert [stats1.cell(recommendation_rows[0], col).value for col in (2, 3, 4)] == ["Reduce stop loss", "Reduce stop loss", "Need wins & losses"]
     assert [stats1.cell(recommendation_rows[1], col).value for col in (2, 3, 4)] == ["Reduce target", "Reduce target", "Need wins & losses"]
     wb.close()
+
+
+def test_data_only_update_repairs_stale_recommendation_columns_and_stats1_labels(tmp_path: Path):
+    out = tmp_path / "stale_recommendations.xlsx"
+    snap = sample_snapshot()
+    build_master_journal_workbook(snap, out)
+
+    wb = load_workbook(out)
+    trade_log = wb["Trade Log"]
+    current_header_map = _trade_log_header_map(trade_log)
+    row_snapshots = []
+    for row in range(TRADE_LOG_DATA_START_ROW, trade_log.max_row + 1):
+        if not any(trade_log.cell(row, col).value not in (None, "") for col in current_header_map.values()):
+            continue
+        row_snapshots.append({
+            header: trade_log.cell(row, col).value
+            for header, col in current_header_map.items()
+            if header in TRADE_LOG_HEADERS
+        })
+
+    for merged in list(trade_log.merged_cells.ranges):
+        if merged.min_row <= 3 and merged.max_row >= 1:
+            trade_log.unmerge_cells(str(merged))
+    row1, row2, row3 = _trade_log_three_row_header_values_for(RECOMMENDATION_TRADE_LOG_HEADERS)
+    for col in range(1, max(trade_log.max_column, len(RECOMMENDATION_TRADE_LOG_HEADERS)) + 1):
+        for row in range(1, trade_log.max_row + 1):
+            trade_log.cell(row, col).value = None
+    for col, header in enumerate(RECOMMENDATION_TRADE_LOG_HEADERS, start=1):
+        trade_log.cell(1, col).value = row1[col - 1]
+        trade_log.cell(2, col).value = row2[col - 1]
+        trade_log.cell(3, col).value = row3[col - 1]
+        if header not in MOVE_TO_FIELD_MAP:
+            trade_log.merge_cells(start_row=1, start_column=col, end_row=3, end_column=col)
+        else:
+            trade_log.merge_cells(start_row=2, start_column=col, end_row=3, end_column=col)
+    for group_label, group_headers in (
+        ("Move to Break-Even", list(MOVE_TO_FIELD_MAP)[:5]),
+        ("Move to Profit", list(MOVE_TO_FIELD_MAP)[5:]),
+    ):
+        cols = [RECOMMENDATION_TRADE_LOG_HEADERS.index(header) + 1 for header in group_headers]
+        trade_log.merge_cells(start_row=1, start_column=min(cols), end_row=1, end_column=max(cols))
+        trade_log.cell(1, min(cols)).value = group_label
+    for offset, snapshot in enumerate(row_snapshots):
+        row = TRADE_LOG_DATA_START_ROW + offset
+        for col, header in enumerate(RECOMMENDATION_TRADE_LOG_HEADERS, start=1):
+            if header == STOP_RECOMMENDATION_HEADER:
+                trade_log.cell(row, col).value = "Reduce stop loss"
+            elif header == TARGET_RECOMMENDATION_HEADER:
+                trade_log.cell(row, col).value = "Reduce target"
+            else:
+                trade_log.cell(row, col).value = snapshot.get(header)
+
+    stats1 = wb[STATS1_SHEET]
+    max_target_row = next(row for row in range(1, stats1.max_row + 1) if stats1.cell(row, 1).value == "Max target %")
+    stats1.cell(max_target_row, 1).value = None
+    stats1.cell(max_target_row + 1, 1).value = None
+    stats1.cell(max_target_row + 2, 1).value = None
+    wb.save(out)
+    wb.close()
+
+    result = update_master_journal_workbook_data_only(out, snap)
+    assert result["ok"] is True
+    Path(result["candidate_path"]).replace(out)
+
+    checked = load_workbook(out)
+    try:
+        trade_log = checked["Trade Log"]
+        assert _trade_log_header_map(trade_log) == {header: col for col, header in enumerate(TRADE_LOG_HEADERS, start=1)}
+        assert trade_log.max_column == len(TRADE_LOG_HEADERS)
+        assert trade_log.cell(1, len(TRADE_LOG_HEADERS)).value == "Row ID"
+        assert [
+            trade_log.cell(1, col).value
+            for col in range(1, trade_log.max_column + 1)
+            if str(trade_log.cell(1, col).value or "").strip() == "Recommendation"
+        ] == []
+
+        stats1 = checked[STATS1_SHEET]
+        first_winners_row = next(row for row in range(1, stats1.max_row + 1) if stats1.cell(row, 1).value == "Winners")
+        max_target_row = next(
+            row
+            for row in range(1, first_winners_row)
+            if stats1.cell(row, 1).value == "Max target %"
+        )
+        assert stats1.cell(max_target_row + 1, 1).value == "Source"
+        assert stats1.cell(max_target_row + 2, 1).value == "Recommendation"
+        assert all(stats1.cell(max_target_row + 2, col).value for col in range(2, 5))
+    finally:
+        checked.close()
 
 
 def test_trade_log_new_schema_distances_and_header_aware_update(tmp_path: Path):
