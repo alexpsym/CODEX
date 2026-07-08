@@ -986,10 +986,10 @@ def _apply_recommendation_cell_style(cell) -> None:
     alignment.horizontal = "left"
     cell.alignment = alignment
     cell.number_format = "General"
-    if _semantic_fill_rgb(cell) in {PROFIT_FILL, LOSS_FILL, "FFF2CC"}:
+    if _semantic_fill_rgb(cell) == "FFF2CC":
         cell.fill = PatternFill()
         font = copy(cell.font)
-        if getattr(font.color, "type", None) == "rgb" and str(font.color.rgb or "")[-6:].upper() in {PROFIT_FONT, LOSS_FONT, "9C6500"}:
+        if getattr(font.color, "type", None) == "rgb" and str(font.color.rgb or "")[-6:].upper() == "9C6500":
             font.color = "000000"
         cell.font = font
 
@@ -2767,6 +2767,10 @@ def _ensure_trade_log_schema(ws, diagnostics: Dict[str, Any] | None = None) -> N
     legacy_pre_rec_v1_grouped_headers = _trade_log_has_two_row_headers_for(ws, PRE_RECOMMENDATION_TRADE_LOG_HEADERS_V1)
     legacy_pre_rec_v1_duplicate_headers = _trade_log_has_legacy_duplicate_two_row_headers_for(ws, PRE_RECOMMENDATION_TRADE_LOG_HEADERS_V1)
     if already_current:
+        if ws.max_column > len(TRADE_LOG_HEADERS):
+            extra_count = ws.max_column - len(TRADE_LOG_HEADERS)
+            ws.delete_cols(len(TRADE_LOG_HEADERS) + 1, extra_count)
+            diagnostics["deleted_extra_trade_log_columns"] = extra_count
         headers = _trade_log_header_map(ws)
         trade_number_col = headers.get(TRADE_NUMBER_HEADER)
         if trade_number_col:
@@ -2913,8 +2917,11 @@ def _ensure_trade_log_schema(ws, diagnostics: Dict[str, Any] | None = None) -> N
             cell.value = None
             cell.comment = None
             cell.hyperlink = None
-
     _write_trade_log_three_row_headers(ws, header_templates)
+    if ws.max_column > len(TRADE_LOG_HEADERS):
+        extra_count = ws.max_column - len(TRADE_LOG_HEADERS)
+        ws.delete_cols(len(TRADE_LOG_HEADERS) + 1, extra_count)
+        diagnostics["deleted_extra_trade_log_columns"] = extra_count
     for target_col, header in enumerate(TRADE_LOG_HEADERS, start=1):
         source_header = header if header in source_by_header else ("Stop Out" if header == "Close Stopout" and "Stop Out" in source_by_header else None)
         template_header = source_header or ("Open Time" if TRADE_NUMBER_HEADER not in source_by_header else "Test")
@@ -3056,9 +3063,6 @@ def _apply_trade_log_win_loss_direct_row_fills(ws) -> None:
     if not row_type_col or not net_pl_col:
         return
     last_col = max((col for header, col in headers.items() if header), default=ws.max_column)
-    recommendation_cols = {
-        col for col in (headers.get(STOP_RECOMMENDATION_HEADER), headers.get(TARGET_RECOMMENDATION_HEADER)) if col
-    }
     profit_fill = PatternFill("solid", fgColor=PROFIT_FILL)
     loss_fill = PatternFill("solid", fgColor=LOSS_FILL)
     empty_fill = PatternFill()
@@ -3073,9 +3077,6 @@ def _apply_trade_log_win_loss_direct_row_fills(ws) -> None:
                 fill = loss_fill
         for col in range(1, last_col + 1):
             cell = ws.cell(row, col)
-            if col in recommendation_cols:
-                _apply_recommendation_cell_style(cell)
-                continue
             if fill is not None:
                 cell.fill = fill
             elif _cell_has_generated_trade_log_win_loss_fill(cell):
@@ -3128,7 +3129,6 @@ def _apply_trade_log_win_loss_row_formatting(ws) -> None:
     cell_range = f"A{start_row}:{get_column_letter(last_col)}{last_row}"
     profit_fill = PatternFill("solid", fgColor=PROFIT_FILL)
     loss_fill = PatternFill("solid", fgColor=LOSS_FILL)
-    _apply_trade_log_recommendation_conditional_formatting(ws, start_row, last_row, headers)
     ws.conditional_formatting.add(
         cell_range,
         FormulaRule(formula=[f'AND(${row_type_letter}{start_row}="trade",${net_pl_letter}{start_row}>0)'], fill=profit_fill, stopIfTrue=True),
@@ -6793,6 +6793,38 @@ def _ensure_dashboard_requested_metric_rows(ws, diagnostics: Dict[str, Any] | No
     def label_at(row: int) -> str:
         return str(ws.cell(row, label_col).value or "").strip()
 
+    def market_values_at(row: int) -> List[Any]:
+        if row < 1 or row > ws.max_row:
+            return []
+        return [ws.cell(row, col).value for col in market_cols.values()]
+
+    def row_has_market_values(row: int) -> bool:
+        return any(value not in (None, "") for value in market_values_at(row))
+
+    def row_values_look_like_recommendation(row: int) -> bool:
+        for value in market_values_at(row):
+            text = str(value or "").strip().casefold()
+            if text.startswith(("reduce ", "increase ", "keep ", "need wins")):
+                return True
+        return False
+
+    def row_values_look_like_source(row: int) -> bool:
+        values = [value for value in market_values_at(row) if value not in (None, "")]
+        if not values:
+            return False
+        if row_values_look_like_recommendation(row):
+            return False
+        return any(isinstance(value, str) for value in values)
+
+    def set_blank_label(row: int, label: str, reason: str) -> bool:
+        nonlocal changed
+        if row < 1 or row > ws.max_row or label_at(row) or _is_merged_non_anchor(ws, row, label_col):
+            return False
+        ws.cell(row, label_col).value = label
+        diagnostics.setdefault("repaired_dashboard_blank_metric_labels", []).append(reason)
+        changed = True
+        return True
+
     def find_row(label: str, *, before: int | None = None) -> int | None:
         wanted = label.casefold()
         last_row = min(ws.max_row, before - 1) if before else ws.max_row
@@ -6883,6 +6915,21 @@ def _ensure_dashboard_requested_metric_rows(ws, diagnostics: Dict[str, Any] | No
                 changed = True
             target_row += 1
 
+    legacy_expectancy_row = find_core_row("Expectancy")
+    if legacy_expectancy_row and find_core_row("Percentage expectancy") and find_core_row("R expectancy"):
+        amount = 1
+        if (
+            legacy_expectancy_row + 2 <= ws.max_row
+            and label_at(legacy_expectancy_row + 1).casefold() == "%"
+            and label_at(legacy_expectancy_row + 2).casefold() == "r"
+        ):
+            amount = 3
+        _delete_dashboard_rows_preserving_layout(ws, legacy_expectancy_row, amount)
+        diagnostics.setdefault("removed_dashboard_metric_rows", {})["Expectancy"] = (
+            diagnostics.setdefault("removed_dashboard_metric_rows", {}).get("Expectancy", 0) + amount
+        )
+        changed = True
+
     cursor_anchor = "Avg stop %"
     for metric_label in ("Min stop %", "Max stop %", "Avg target %", "Min target %", "Max target %"):
         metric_row = find_core_row(metric_label)
@@ -6890,11 +6937,25 @@ def _ensure_dashboard_requested_metric_rows(ws, diagnostics: Dict[str, Any] | No
             anchor = find_core_row(cursor_anchor)
             if not anchor:
                 continue
-            metric_row = anchor + 1
-            metric_row = _insert_dashboard_rows_preserving_layout(ws, metric_row, 1, anchor)
-            ws.cell(metric_row, label_col).value = metric_label
-            diagnostics.setdefault("inserted_dashboard_metric_rows", []).append(metric_label)
-            changed = True
+            candidate = anchor + 1
+            if candidate <= ws.max_row and label_at(candidate).casefold() == "source":
+                candidate += 1
+            elif candidate <= ws.max_row and not label_at(candidate) and row_values_look_like_source(candidate):
+                set_blank_label(candidate, "Source", f"{cursor_anchor}: Source")
+                candidate += 1
+            if candidate <= ws.max_row and not label_at(candidate) and row_has_market_values(candidate):
+                if set_blank_label(candidate, metric_label, metric_label):
+                    metric_row = candidate
+                else:
+                    metric_row = None
+            else:
+                metric_row = None
+            if not metric_row:
+                metric_row = anchor + 1
+                metric_row = _insert_dashboard_rows_preserving_layout(ws, metric_row, 1, anchor)
+                ws.cell(metric_row, label_col).value = metric_label
+                diagnostics.setdefault("inserted_dashboard_metric_rows", []).append(metric_label)
+                changed = True
         cursor_anchor = metric_label
 
     source_metric_labels = {
@@ -6918,6 +6979,7 @@ def _ensure_dashboard_requested_metric_rows(ws, diagnostics: Dict[str, Any] | No
             if next_row <= ws.max_row and not label_at(next_row) and any(
                 ws.cell(next_row, col).value not in (None, "") for col in market_cols.values()
             ):
+                set_blank_label(next_row, "Source", f"{metric_label}: Source")
                 row += 2
                 continue
             bounds = _merged_bounds(ws, next_row, label_col) if next_row <= ws.max_row else None
@@ -6947,14 +7009,17 @@ def _ensure_dashboard_requested_metric_rows(ws, diagnostics: Dict[str, Any] | No
         next_row = anchor + 1
         if next_row <= ws.max_row:
             next_label = label_at(next_row).casefold()
-            if next_label == "source" or (
-                not next_label
-                and any(ws.cell(next_row, col).value not in (None, "") for col in market_cols.values())
-            ):
+            if next_label == "source":
+                source_row = next_row
+            elif not next_label and row_has_market_values(next_row) and not row_values_look_like_recommendation(next_row):
+                set_blank_label(next_row, "Source", f"{anchor_label}: Source")
                 source_row = next_row
         expected = source_row + 1
         if expected <= ws.max_row and label_at(expected).casefold() == "recommendation":
             return expected
+        if expected <= ws.max_row and not label_at(expected) and row_values_look_like_recommendation(expected):
+            if set_blank_label(expected, "Recommendation", f"{anchor_label}: Recommendation"):
+                return expected
         inserted = _insert_dashboard_rows_preserving_layout(ws, expected, 1, source_row)
         ws.cell(inserted, label_col).value = "Recommendation"
         diagnostics.setdefault("inserted_dashboard_metric_rows", []).append(f"{anchor_label}: Recommendation")
@@ -6963,6 +7028,67 @@ def _ensure_dashboard_requested_metric_rows(ws, diagnostics: Dict[str, Any] | No
 
     ensure_recommendation_after("Max stop %")
     ensure_recommendation_after("Max target %")
+
+    def compact_recommendation_after(anchor_label: str) -> None:
+        nonlocal changed
+        anchor = find_core_row(anchor_label)
+        if not anchor:
+            return
+        boundary_labels = {"targets", "duration", "winners"}
+        boundary = next(
+            (
+                row
+                for row in range(anchor + 1, ws.max_row + 1)
+                if label_at(row).casefold() in boundary_labels
+            ),
+            ws.max_row + 1,
+        )
+        source_row = anchor
+        next_row = anchor + 1
+        if next_row < boundary:
+            next_label = label_at(next_row).casefold()
+            if next_label == "source":
+                source_row = next_row
+            elif not next_label and row_values_look_like_source(next_row):
+                set_blank_label(next_row, "Source", f"{anchor_label}: Source")
+                source_row = next_row
+        rec_row = source_row + 1
+        if rec_row >= boundary:
+            return
+        for merged in list(ws.merged_cells.ranges):
+            if merged.min_col <= label_col <= merged.max_col and merged.min_row < rec_row <= merged.max_row:
+                ws.unmerge_cells(str(merged))
+                diagnostics.setdefault("unmerged_dashboard_recommendation_label_blocks", []).append(str(merged))
+                changed = True
+        current_label = label_at(rec_row).casefold()
+        later_recommendation_row = next(
+            (
+                row
+                for row in range(rec_row + 1, boundary)
+                if row_values_look_like_recommendation(row)
+            ),
+            None,
+        )
+        if current_label != "recommendation" and (not current_label or later_recommendation_row):
+            ws.cell(rec_row, label_col).value = "Recommendation"
+            diagnostics.setdefault("repaired_dashboard_blank_metric_labels", []).append(f"{anchor_label}: Recommendation")
+            changed = True
+        if not row_values_look_like_recommendation(rec_row) and later_recommendation_row:
+            for col in market_cols.values():
+                source = ws.cell(later_recommendation_row, col)
+                target = ws.cell(rec_row, col)
+                target.value = source.value
+                target.number_format = "General"
+            delete_start = rec_row + 1
+            delete_amount = later_recommendation_row - rec_row
+            _delete_dashboard_rows_preserving_layout(ws, delete_start, delete_amount)
+            diagnostics.setdefault("removed_dashboard_stale_recommendation_rows", []).append(
+                f"{anchor_label}: {delete_start}-{later_recommendation_row}"
+            )
+            changed = True
+
+    compact_recommendation_after("Max stop %")
+    compact_recommendation_after("Max target %")
 
     return changed
 
