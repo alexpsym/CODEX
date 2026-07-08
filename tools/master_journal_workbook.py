@@ -116,6 +116,7 @@ OLD_TRADE_LOG_HEADERS = [
 TRADE_LOG_HEADER_ROWS = 3
 TRADE_LOG_FILTER_HEADER_ROW = 3
 TRADE_LOG_DATA_START_ROW = 4
+TRADE_LOG_DATA_ROW_HEIGHT = 15
 MOVE_TO_BREAK_EVEN_HEADERS = list(MOVE_TO_FIELD_MAP.keys())[:5]
 MOVE_TO_PROFIT_HEADERS = list(MOVE_TO_FIELD_MAP.keys())[5:]
 MOVE_TO_SUBHEADERS = ["Time", "Duration", "Trigger Price", "Distance From Entry %", "Distance From Exit %"]
@@ -2496,6 +2497,21 @@ def _set_trade_log_auto_filter(ws) -> None:
     ws.auto_filter.ref = f"A{TRADE_LOG_FILTER_HEADER_ROW}:{get_column_letter(last_col)}{last_row}"
 
 
+def _normalize_trade_log_row_heights(ws, diagnostics: Dict[str, Any] | None = None) -> None:
+    if getattr(ws, "title", "") not in {TRADE_LOG_SHEET, LEGACY_ALL_TRADES_SHEET}:
+        return
+    row_keys = [idx for idx in ws.row_dimensions.keys() if isinstance(idx, int)]
+    max_row = max([ws.max_row, *row_keys], default=ws.max_row)
+    changed = 0
+    ws.sheet_format.defaultRowHeight = float(TRADE_LOG_DATA_ROW_HEIGHT)
+    for row in range(TRADE_LOG_DATA_START_ROW, max_row + 1):
+        if ws.row_dimensions[row].height != TRADE_LOG_DATA_ROW_HEIGHT:
+            changed += 1
+        ws.row_dimensions[row].height = TRADE_LOG_DATA_ROW_HEIGHT
+    if diagnostics is not None and changed:
+        diagnostics["normalized_trade_log_row_heights"] = changed
+
+
 def _hide_trade_log_row_id(ws) -> None:
     headers = _trade_log_header_map(ws)
     row_id_col = headers.get("Row ID")
@@ -2809,6 +2825,7 @@ def _ensure_trade_log_schema(ws, diagnostics: Dict[str, Any] | None = None) -> N
         _apply_trade_number_hyperlinks(ws, diagnostics)
         _apply_trade_log_win_loss_row_formatting(ws)
         _apply_trade_log_win_loss_direct_row_fills(ws)
+        _normalize_trade_log_row_heights(ws, diagnostics)
         if _trade_log_data_row_count(ws) != before_data_rows:
             raise RuntimeError("Trade Log schema validation changed the data row count unexpectedly.")
         return
@@ -2873,7 +2890,6 @@ def _ensure_trade_log_schema(ws, diagnostics: Dict[str, Any] | None = None) -> N
         raise RuntimeError(f"Trade Log headers cannot be migrated safely because duplicate logical headers were found: {source_headers!r}.")
 
     source_data_rows: List[Dict[str, Dict[str, Any]]] = []
-    source_row_heights: List[float | None] = []
     for row in range(source_start_row, ws.max_row + 1):
         if not any(ws.cell(row, col).value not in (None, "") for col in range(1, len(source_headers) + 1)):
             continue
@@ -2881,7 +2897,6 @@ def _ensure_trade_log_schema(ws, diagnostics: Dict[str, Any] | None = None) -> N
         for header, col in source_by_header.items():
             row_snapshot[header] = _snapshot_cell(ws.cell(row, col))
         source_data_rows.append(row_snapshot)
-        source_row_heights.append(ws.row_dimensions[row].height)
 
     header_templates: Dict[str, Dict[str, Any]] = {}
     source_header_row = 2 if (
@@ -2970,8 +2985,7 @@ def _ensure_trade_log_schema(ws, diagnostics: Dict[str, Any] | None = None) -> N
             for row in range(TRADE_LOG_DATA_START_ROW, TRADE_LOG_DATA_START_ROW + len(source_data_rows)):
                 ws.cell(row, target_col).number_format = "0.00%"
 
-    for offset, height in enumerate(source_row_heights):
-        ws.row_dimensions[TRADE_LOG_DATA_START_ROW + offset].height = height
+    _normalize_trade_log_row_heights(ws, diagnostics)
     ws.row_dimensions[1].height = ws.row_dimensions[1].height or 24
     ws.row_dimensions[2].height = ws.row_dimensions[2].height or 24
     ws.row_dimensions[3].height = ws.row_dimensions[3].height or 24
@@ -9283,6 +9297,7 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
             gen_trade_log = _get_all_trades_sheet(gen, allow_legacy=False)
             live_trade_log = _get_all_trades_sheet(wb, allow_legacy=False)
             _copy_data_rows(gen_trade_log, live_trade_log, TRADE_LOG_DATA_START_ROW, force_all_columns=True)
+            _normalize_trade_log_row_heights(live_trade_log, diagnostics)
             _repair_trade_log_row_ids_from_rows(live_trade_log, rows, diagnostics)
             if expected_survivor_row_ids:
                 header_map = _trade_log_header_map(live_trade_log)

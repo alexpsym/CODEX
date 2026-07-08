@@ -2507,6 +2507,31 @@ def test_data_only_update_repairs_stale_recommendation_columns_and_stats1_labels
         checked.close()
 
 
+def test_trade_log_row_heights_are_normalized_on_data_only_update(tmp_path: Path):
+    path = tmp_path / "trade-log-row-heights.xlsx"
+    snapshot = sample_snapshot()
+    build_master_journal_workbook(snapshot, path)
+    wb = load_workbook(path)
+    trade_log = wb["Trade Log"]
+    trade_log.row_dimensions[TRADE_LOG_DATA_START_ROW].height = 45
+    trade_log.row_dimensions[TRADE_LOG_DATA_START_ROW + 1].height = 30
+    trade_log.row_dimensions[23].height = 60
+    wb.save(path)
+    wb.close()
+
+    result = update_master_journal_workbook_data_only(path, snapshot)
+    assert result["ok"] is True
+    Path(result["candidate_path"]).replace(path)
+    checked = load_workbook(path)
+    try:
+        trade_log = checked["Trade Log"]
+        assert trade_log.row_dimensions[TRADE_LOG_DATA_START_ROW].height == 15
+        assert trade_log.row_dimensions[TRADE_LOG_DATA_START_ROW + 1].height == 15
+        assert trade_log.row_dimensions[23].height == 15
+    finally:
+        checked.close()
+
+
 def test_trade_log_new_schema_distances_and_header_aware_update(tmp_path: Path):
     out = tmp_path / "new_schema.xlsx"
     snap = sample_snapshot()
