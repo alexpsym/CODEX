@@ -6801,15 +6801,16 @@ def _ensure_dashboard_requested_metric_rows(ws, diagnostics: Dict[str, Any] | No
             None,
         )
 
-    core_boundary = min(
-        [
-            row for row in range(1, ws.max_row + 1)
-            if label_at(row).casefold() in {"min duration", "min duration (dd:hh:mm:ss)", "winners"}
-        ] or [ws.max_row + 1]
-    )
+    def core_boundary_row() -> int:
+        return min(
+            [
+                row for row in range(1, ws.max_row + 1)
+                if label_at(row).casefold() in {"min duration", "min duration (dd:hh:mm:ss)", "winners"}
+            ] or [ws.max_row + 1]
+        )
 
     def find_core_row(label: str) -> int | None:
-        return find_row(label, before=core_boundary)
+        return find_row(label, before=core_boundary_row())
 
     replacements = {
         "avg result %": "Percentage expectancy",
@@ -6914,6 +6915,11 @@ def _ensure_dashboard_requested_metric_rows(ws, diagnostics: Dict[str, Any] | No
             if next_row <= ws.max_row and label_at(next_row).casefold() == "source":
                 row += 2
                 continue
+            if next_row <= ws.max_row and not label_at(next_row) and any(
+                ws.cell(next_row, col).value not in (None, "") for col in market_cols.values()
+            ):
+                row += 2
+                continue
             bounds = _merged_bounds(ws, next_row, label_col) if next_row <= ws.max_row else None
             if bounds and bounds[0] == row and bounds[2] >= next_row:
                 row = bounds[2] + 1
@@ -6937,7 +6943,15 @@ def _ensure_dashboard_requested_metric_rows(ws, diagnostics: Dict[str, Any] | No
         anchor = find_core_row(anchor_label)
         if not anchor:
             return None
-        source_row = anchor + 1 if anchor + 1 <= ws.max_row and label_at(anchor + 1).casefold() == "source" else anchor
+        source_row = anchor
+        next_row = anchor + 1
+        if next_row <= ws.max_row:
+            next_label = label_at(next_row).casefold()
+            if next_label == "source" or (
+                not next_label
+                and any(ws.cell(next_row, col).value not in (None, "") for col in market_cols.values())
+            ):
+                source_row = next_row
         expected = source_row + 1
         if expected <= ws.max_row and label_at(expected).casefold() == "recommendation":
             return expected
