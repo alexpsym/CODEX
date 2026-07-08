@@ -87,16 +87,37 @@ function Test-HealthReady {
     }
 }
 
+function Test-PortListening {
+    try {
+        $lines = @(& netstat.exe -ano -p tcp 2>$null)
+        foreach ($line in $lines) {
+            if ($line -match "^\s*TCP\s+\S+:8000\s+\S+\s+LISTENING\s+(\d+)\s*$") {
+                return $true
+            }
+        }
+    }
+    catch {
+    }
+
+    try {
+        $connections = @(Get-NetTCPConnection -LocalPort 8000 -State Listen -ErrorAction SilentlyContinue)
+        return ($connections.Count -gt 0)
+    }
+    catch {
+        return $false
+    }
+}
+
 function Wait-HealthDown {
     param([int] $Seconds)
 
     for ($i = 0; $i -lt $Seconds; $i++) {
-        if (-not (Test-HealthReady)) {
+        if ((-not (Test-HealthReady)) -and (-not (Test-PortListening))) {
             return $true
         }
         Start-Sleep -Seconds 1
     }
-    return -not (Test-HealthReady)
+    return ((-not (Test-HealthReady)) -and (-not (Test-PortListening)))
 }
 
 function Stop-ListeningProcess {

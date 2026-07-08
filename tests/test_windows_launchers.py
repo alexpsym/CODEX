@@ -368,10 +368,13 @@ def test_run_local_master_parent_logs_are_condensed_and_worker_logs_are_detailed
     assert 'stale_master_not_stopped' not in script
     assert 'checking for an existing dashboard server on port 8000' in wrapper
     assert 'ensure_local_master_server.ps1' in wrapper
+    assert '-DecisionPath "!LOCAL_MASTER_PREFLIGHT_DECISION!"' in wrapper
     assert wrapper.index('ensure_local_master_server.ps1') < wrapper.index('stream_local_master_worker.ps1')
     assert '/api/local-build-info' in preflight
     assert '/api/local-shutdown' in preflight
     assert '/api/local-exit' in preflight
+    assert 'function Test-PortListening' in preflight
+    assert '(-not (Test-PortListening))' in preflight
     assert 'netstat.exe -ano -p tcp' in preflight
     assert 'Get-CimInstance Win32_Process' in preflight
     assert 'run_local_master_control.bat' in preflight
@@ -380,6 +383,10 @@ def test_run_local_master_parent_logs_are_condensed_and_worker_logs_are_detailed
     assert 'Stop-Process -Id $processId -Force' in preflight
     assert 'existing dashboard server has no build-info endpoint; treating it as stale' in preflight
     assert 'echo [local-master] worker log: %LOCAL_MASTER_WORKER_LOG%' in script
+    assert 'waiting for launcher preflight to finish' in script
+    assert ':wait_for_launcher_preflight' in script
+    assert 'if exist "%LOCAL_MASTER_PREFLIGHT_DECISION%" goto launcher_preflight_ready' in script
+    assert 'if /I not "!PREFLIGHT_DECISION!"=="start" goto launcher_preflight_not_ready' in script
     assert 'cmd /d /s /v:on /c ""%~f0" __worker"' not in script
     assert 'timeout /t 1 /nobreak' not in script
     assert 'echo [local-master] launcher starting.' in script

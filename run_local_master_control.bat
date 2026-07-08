@@ -94,6 +94,25 @@ if exist "%LOCAL_MASTER_WORKER_FAILED_FILE%" del /q "%LOCAL_MASTER_WORKER_FAILED
 if exist "%LOCAL_MASTER_PREFLIGHT_DECISION%" del /q "%LOCAL_MASTER_PREFLIGHT_DECISION%" >nul 2>nul
 echo [local-master] worker log: %LOCAL_MASTER_WORKER_LOG%
 start "%LOCAL_MASTER_WINDOW_TITLE%" /D "%ROOT%" "%ROOT%tools\windows_launchers\local_master_worker_console.bat"
+set "PREFLIGHT_READY_TIMEOUT_SECONDS=45"
+echo [local-master] waiting for launcher preflight to finish ...
+set /a PREFLIGHT_WAITED=0
+
+:wait_for_launcher_preflight
+if exist "%LOCAL_MASTER_PREFLIGHT_DECISION%" goto launcher_preflight_ready
+if defined LOCAL_MASTER_WORKER_FAILED_FILE (
+  if exist "%LOCAL_MASTER_WORKER_FAILED_FILE%" goto worker_failed_before_ready
+)
+set /a PREFLIGHT_WAITED+=1
+if !PREFLIGHT_WAITED! GEQ %PREFLIGHT_READY_TIMEOUT_SECONDS% goto launcher_preflight_not_ready
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Sleep -Seconds 1" >nul 2>nul
+goto wait_for_launcher_preflight
+
+:launcher_preflight_ready
+set "PREFLIGHT_DECISION="
+set /p PREFLIGHT_DECISION=<"%LOCAL_MASTER_PREFLIGHT_DECISION%"
+if /I not "!PREFLIGHT_DECISION!"=="start" goto launcher_preflight_not_ready
+echo [local-master] launcher preflight ready after !PREFLIGHT_WAITED! seconds.
 set "MASTER_READY_TIMEOUT_SECONDS=60"
 set "SCANNER_READY_TIMEOUT_SECONDS=90"
 echo [local-master] waiting for %MASTER_HEALTH_URL% ...
@@ -154,6 +173,12 @@ exit /b 1
 echo [local-master] ERROR: scanner did not become ready after %SCANNER_READY_TIMEOUT_SECONDS% seconds.
 echo [local-master] Alerts startup may have failed. Check worker startup log: %LOCAL_MASTER_WORKER_LOG%
 echo [local-master] Browser was not opened to avoid showing a misleading dashboard state.
+exit /b 1
+
+:launcher_preflight_not_ready
+echo [local-master] ERROR: launcher preflight did not finish cleanly after %PREFLIGHT_READY_TIMEOUT_SECONDS% seconds.
+echo [local-master] Check the visible Local Master Control window and worker log: %LOCAL_MASTER_WORKER_LOG%
+echo [local-master] Browser was not opened because an old dashboard server may still be shutting down.
 exit /b 1
 
 :worker
