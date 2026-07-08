@@ -42,12 +42,13 @@ def test_custom_indicator_session_controls_and_timing_labels() -> None:
 
 def test_custom_indicator_session_labels_are_abbreviated_horizontal_and_larger() -> None:
     source = _source()
-    assert "verticalSessionText" in source
-    assert 'sessionCode + (isOpen ? " O" : " C")' not in source
-    assert '"S\\nY\\nD\\n" + suffix' in source
-    assert '"T\\nK\\nY\\n" + suffix' in source
-    assert '"L\\nD\\nN\\n" + suffix' in source
-    assert '"N\\nY\\n" + suffix' in source
+    assert "horizontalSessionText" in source
+    assert 'sessionCode + (isOpen ? " O" : " C")' in source
+    assert "verticalSessionText" not in source
+    assert '"S\\nY\\nD\\n"' not in source
+    assert '"T\\nK\\nY\\n"' not in source
+    assert '"L\\nD\\nN\\n"' not in source
+    assert '"N\\nY\\n"' not in source
     assert '"Sydney Open"' not in source
     assert '"Tokyo Open"' not in source
     assert '"London Open"' not in source

@@ -227,12 +227,8 @@ isSessionEvent(simple string sessionTimezone, simple int eventHour, simple int e
     eventTs = sessionEventTimestamp(sessionTimezone, eventHour, eventMinute)
     time <= eventTs and eventTs < time_close
 
-verticalSessionText(simple string sessionCode, simple bool isOpen) =>
-    suffix = isOpen ? "O" : "C"
-    sessionCode == "NY" ? "N\nY\n" + suffix :
-     sessionCode == "SYD" ? "S\nY\nD\n" + suffix :
-     sessionCode == "TKY" ? "T\nK\nY\n" + suffix :
-     "L\nD\nN\n" + suffix
+horizontalSessionText(simple string sessionCode, simple bool isOpen) =>
+    sessionCode + (isOpen ? " O" : " C")
 
 drawSessionMarker(simple string sessionTimezone, simple int eventHour, simple int eventMinute, simple string sessionCode, simple bool isOpen) =>
     eventTs = sessionEventTimestamp(sessionTimezone, eventHour, eventMinute)
@@ -247,7 +243,7 @@ drawSessionMarker(simple string sessionTimezone, simple int eventHour, simple in
                                  xloc=xloc.bar_time, extend=extend.none,
                                  color=color.black, style=line.style_dotted, width=2,
                                  force_overlay=true)
-    sessionLabel = label.new(x=eventTs, y=labelY, text=verticalSessionText(sessionCode, isOpen),
+    sessionLabel = label.new(x=eventTs, y=labelY, text=horizontalSessionText(sessionCode, isOpen),
                              xloc=xloc.bar_time, yloc=yloc.price,
                              color=color.new(color.white, 100), textcolor=color.black,
                              style=label.style_none, size=size.normal, textalign=text.align_center,
