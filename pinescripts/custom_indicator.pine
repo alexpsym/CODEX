@@ -216,7 +216,7 @@ var line[] sessionMarkerLines = array.new_line()
 var label[] sessionLabels = array.new_label()
 sessionMaxMarkers = 192
 sessionMarkerWindowBars = 80
-sessionMarkerHalfLengthMultiplier = 0.20
+sessionMarkerHalfLengthMultiplier = 0.60
 sessionMarkerRecentHigh = ta.highest(high, sessionMarkerWindowBars)
 sessionMarkerRecentLow = ta.lowest(low, sessionMarkerWindowBars)
 

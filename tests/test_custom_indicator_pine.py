@@ -75,7 +75,7 @@ def test_custom_indicator_session_rendering_uses_dotted_lines_not_arrow_markers(
     assert "color=color.black" in session_block
     assert "width=2" in session_block
     assert "sessionMarkerWindowBars = 80" in session_block
-    assert "sessionMarkerHalfLengthMultiplier = 0.20" in session_block
+    assert "sessionMarkerHalfLengthMultiplier = 0.60" in session_block
     assert "lineStartY = markerMidY - markerHalfLength" in session_block
     assert "lineEndY = markerMidY + markerHalfLength" in session_block
     assert "style=label.style_none" in session_block
