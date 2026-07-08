@@ -124,7 +124,7 @@ from shared.symbol_resolution import (
 from shared.atomic_json import write_json_file
 from render.dropbox_sync import download_bytes, list_excel_files, upload_bytes
 from render import dropbox_state_store
-from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, read_master_journal_source, update_master_journal_workbook_data_only, refresh_master_journal_derived_sheets, stable_row_id, SHEET_ORDER, REPORT_YEARLY_SHEET, expected_report_sheet_names, _get_all_trades_sheet, _get_trade_log_sheet, _trade_log_header_map, _trade_log_data_start_row, _find_instrument_leaders_table, LEADER_LABEL_TO_KEY, _repair_or_flag_zero_trade_qty, _canonicalize_and_dedupe_balances, _trade_execution_fingerprint, _trade_row_source_rank, _dedupe_trade_rows_by_execution, _instrument_averages_header_map, INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, INSTRUMENT_AVERAGES_DATA_START_ROW, _result_percentage_totals_by_market, _risk_of_ruin_by_account, _stats1_sheet, _stats2_sheet, _symbols_sheet, STATS1_SHEET, STATS2_SHEET, SYMBOLS_SHEET, _parse_duration_text, _duration_ddhhmmss_cell_to_seconds, _is_ddhhmmss_number_format, STOP_RECOMMENDATION_HEADER, TARGET_RECOMMENDATION_HEADER, _size_recommendation, _apply_recommendation_cell_style, _ensure_dashboard_requested_metric_rows, _stats1_market_columns, _stats1_section_bounds
+from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, read_master_journal_source, update_master_journal_workbook_data_only, refresh_master_journal_derived_sheets, stable_row_id, SHEET_ORDER, REPORT_YEARLY_SHEET, expected_report_sheet_names, _get_all_trades_sheet, _get_trade_log_sheet, _trade_log_header_map, _trade_log_data_start_row, _find_instrument_leaders_table, LEADER_LABEL_TO_KEY, _repair_or_flag_zero_trade_qty, _canonicalize_and_dedupe_balances, _trade_execution_fingerprint, _trade_row_source_rank, _dedupe_trade_rows_by_execution, _instrument_averages_header_map, INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, INSTRUMENT_AVERAGES_DATA_START_ROW, _result_percentage_totals_by_market, _risk_of_ruin_by_account, _stats1_sheet, _stats2_sheet, _symbols_sheet, STATS1_SHEET, STATS2_SHEET, SYMBOLS_SHEET, _parse_duration_text, _duration_ddhhmmss_cell_to_seconds, _is_ddhhmmss_number_format, STOP_RECOMMENDATION_HEADER, TARGET_RECOMMENDATION_HEADER, _size_recommendation, _target_r_recommendation, _apply_recommendation_cell_style, _ensure_dashboard_requested_metric_rows, _stats1_market_columns, _stats1_section_bounds
 from bybit_monitor import bybit_altcoin_monitor as bybit_monitor
 from oanda_monitor import oanda_forex_monitor as oanda_monitor
 from bybit_demo_tpsl_cache import (
@@ -23225,13 +23225,14 @@ def _compute_journal_stats(
         avg_stop_losers = _avg(_stop_pct_values(losers))
         avg_target_winners = _avg(_target_pct_values(winners))
         avg_target_losers = _avg(_target_pct_values(losers))
+        target_payload = _target_r_recommendation(rows_subset)
         return {
             "avg_stop_pct_winners": avg_stop_winners,
             "avg_stop_pct_losers": avg_stop_losers,
             "avg_target_pct_winners": avg_target_winners,
             "avg_target_pct_losers": avg_target_losers,
             "stop_recommendation": _size_recommendation("stop", avg_stop_winners, avg_stop_losers),
-            "target_recommendation": _size_recommendation("target", avg_target_winners, avg_target_losers),
+            **target_payload,
             "avg_result_pct_winners": _avg(win_results),
             "avg_result_pct_losers": _avg(loss_results),
             "avg_r_multiple_winners": _avg(winner_r_values),
@@ -23319,9 +23320,11 @@ def _compute_journal_stats(
                 "result_pct": [],
                 "pnl_by_currency": defaultdict(list),
                 "durations": [],
+                "_rows": [],
                 "quote_currency": "USDT" if not _is_fx_asset_class(row.get("asset_class")) else "",
             }
         bucket = by_instrument[symbol]
+        bucket["_rows"].append(row)
         bucket["total_trades"] += 1
 
         side_norm = str(row.get("side") or "").strip().upper()
@@ -23435,11 +23438,9 @@ def _compute_journal_stats(
         item[STOP_RECOMMENDATION_HEADER] = _size_recommendation(
             "stop", item.get("avg_sl_pct_wins"), item.get("avg_sl_pct_losses")
         )
-        item[TARGET_RECOMMENDATION_HEADER] = _size_recommendation(
-            "target", item.get("avg_tp_pct_wins"), item.get("avg_tp_pct_losses")
-        )
         item["stop_recommendation"] = item[STOP_RECOMMENDATION_HEADER]
-        item["target_recommendation"] = item[TARGET_RECOMMENDATION_HEADER]
+        target_payload = _target_r_recommendation(item.pop("_rows", []))
+        item.update(target_payload)
         dur_vals = item.pop("durations", [])
         item["avg_trade_duration_seconds"] = _avg(dur_vals)
         item["min_trade_duration_seconds"] = min(dur_vals) if dur_vals else None
@@ -23928,6 +23929,7 @@ def _compute_journal_stats(
             "avg_target_pct": _avg(target_vals),
             "min_target_pct": _safe_min(target_vals),
             "max_target_pct": _safe_max(target_vals),
+            **_target_r_recommendation(rows_subset),
             "avg_duration_seconds": _avg(durations),
             "min_duration_seconds": min(durations) if durations else None,
             "max_duration_seconds": max(durations) if durations else None,
@@ -24039,9 +24041,7 @@ def _compute_journal_stats(
                 "stop_recommendation": _size_recommendation(
                     "stop", totals.get("avg_stop_pct_winners"), totals.get("avg_stop_pct_losers")
                 ),
-                "target_recommendation": _size_recommendation(
-                    "target", totals.get("avg_target_pct_winners"), totals.get("avg_target_pct_losers")
-                ),
+                **_target_r_recommendation(trade_rows),
                 "avg_result_pct_winners": totals.get("avg_result_pct_winners"),
                 "avg_result_pct_losers": totals.get("avg_result_pct_losers"),
                 "avg_r_multiple_winners": totals.get("avg_r_multiple_winners"),
@@ -24076,9 +24076,7 @@ def _compute_journal_stats(
                 "stop_recommendation": _size_recommendation(
                     "stop", totals.get("avg_stop_pct_winners"), totals.get("avg_stop_pct_losers")
                 ),
-                "target_recommendation": _size_recommendation(
-                    "target", totals.get("avg_target_pct_winners"), totals.get("avg_target_pct_losers")
-                ),
+                **_target_r_recommendation(trade_rows),
                 "avg_result_pct_winners": totals.get("avg_result_pct_winners"),
                 "avg_result_pct_losers": totals.get("avg_result_pct_losers"),
                 "avg_r_multiple_winners": totals.get("avg_r_multiple_winners"),
@@ -28567,17 +28565,11 @@ def _repair_stats1_recommendation_rows_for_excel_open(wb: object, diagnostics: D
         return row if row <= ws.max_row and label_at(row).casefold() == "recommendation" else None
 
     stop_row = recommendation_row_after("Max stop %")
-    target_row = recommendation_row_after("Max target %")
     metric_rows = {
         "stop": (
             stop_row,
             find_in_bounds(winners, "Avg stop %"),
             find_in_bounds(losers, "Avg stop %"),
-        ),
-        "target": (
-            target_row,
-            find_in_bounds(winners, "Avg target %"),
-            find_in_bounds(losers, "Avg target %"),
         ),
     }
 

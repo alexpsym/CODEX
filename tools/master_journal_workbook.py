@@ -923,12 +923,451 @@ def _size_recommendation(kind: str, winner_avg: Any, loser_avg: Any) -> str:
     return f"Reduce {label}" if win < loss else f"Increase {label}"
 
 
-def _distance_recommendation_summary(rows: List[Dict[str, Any]]) -> Dict[str, str]:
+def _target_r_row_is_test_trade(row: Dict[str, Any]) -> bool:
+    metrics = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
+    for key in ("is_test_trade", "test_trade", "test"):
+        if _is_test_trade_value(row.get(key)):
+            return True
+        if _is_test_trade_value(metrics.get(key)):
+            return True
+    return False
+
+
+def _target_r_meaningful_value(value: Any) -> bool:
+    if value in (None, ""):
+        return False
+    if isinstance(value, bool):
+        return value
+    num = _as_float(value)
+    if num is not None and math.isfinite(num):
+        return abs(num) > 1e-12
+    return bool(str(value).strip())
+
+
+def _target_r_nested_dicts(value: Any) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    if isinstance(value, dict):
+        out.append(value)
+        for child in value.values():
+            out.extend(_target_r_nested_dicts(child))
+    elif isinstance(value, list):
+        for child in value:
+            out.extend(_target_r_nested_dicts(child))
+    return out
+
+
+def _target_r_has_movement_evidence(row: Dict[str, Any]) -> bool:
+    movement_keys = {
+        "move_to_break_even_time",
+        "move_to_break_even_duration",
+        "move_to_break_even_trigger_price",
+        "move_to_profit_time",
+        "move_to_profit_duration",
+        "move_to_profit_trigger_price",
+        "break_even_stop",
+        "breakeven_stop",
+        "profit_protection_stop",
+        "take_profit_adjusted",
+        "take_profit_adjustment",
+        "submit_take_profit_auto_adjusted",
+        "stop_loss_adjusted",
+        "stop_loss_modified",
+        "take_profit_modified",
+        "target_modified",
+        "moved_stop_loss",
+        "moved_take_profit",
+        "adjusted_stop_loss",
+        "adjusted_stop_price",
+        "adjusted_take_profit",
+        "adjusted_target_price",
+        "tp_sl_moved",
+        "tpsl_moved",
+    }
+    for container in _target_r_nested_dicts(row):
+        for key, value in container.items():
+            normalized = str(key or "").strip().casefold()
+            normalized = normalized.replace("-", "_").replace(" ", "_")
+            if normalized in movement_keys and _target_r_meaningful_value(value):
+                return True
+    return False
+
+
+def _target_r_first_float(container: Dict[str, Any], keys: Tuple[str, ...]) -> float | None:
+    normalized = {
+        str(key).strip().casefold().replace("-", "_").replace(" ", "_"): value
+        for key, value in container.items()
+    }
+    for key in keys:
+        value = _as_float(normalized.get(key))
+        if value is not None and math.isfinite(value) and value > 0:
+            return value
+    return None
+
+
+def _target_r_triplet_from_container(container: Dict[str, Any]) -> Dict[str, Any] | None:
+    planned_entry_keys = (
+        "planned_entry_price",
+        "planned_entry",
+        "planned_entry_level",
+    )
+    planned_stop_keys = (
+        "planned_stop_price",
+        "planned_stop_loss",
+        "planned_stop_loss_price",
+    )
+    planned_target_keys = (
+        "planned_target_price",
+        "planned_take_profit",
+        "planned_take_profit_price",
+        "planned_target",
+    )
+    original_entry_keys = (
+        "original_entry_price",
+        "original_entry",
+        "initial_entry_price",
+    )
+    original_stop_keys = (
+        "original_stop_loss",
+        "original_stop_price",
+        "original_stop_loss_price",
+        "initial_stop_loss",
+    )
+    original_target_keys = (
+        "original_take_profit",
+        "original_target_price",
+        "original_take_profit_price",
+        "original_target",
+        "initial_take_profit",
+    )
+    for source, entry_keys, stop_keys, target_keys in (
+        ("planned", planned_entry_keys, planned_stop_keys, planned_target_keys),
+        ("original", original_entry_keys, original_stop_keys, original_target_keys),
+    ):
+        entry = _target_r_first_float(container, entry_keys)
+        stop = _target_r_first_float(container, stop_keys)
+        target = _target_r_first_float(container, target_keys)
+        if entry is not None or stop is not None or target is not None:
+            return {
+                "entry": entry,
+                "stop": stop,
+                "target": target,
+                "source": source,
+                "explicit": True,
+            }
+    return None
+
+
+def _original_plan_levels(row: Dict[str, Any]) -> Dict[str, Any]:
+    for container in [row, *_target_r_nested_dicts(row.get("raw_refs")), *_target_r_nested_dicts(row.get("metrics"))]:
+        if not isinstance(container, dict):
+            continue
+        triplet = _target_r_triplet_from_container(container)
+        if triplet:
+            triplet["movement_evidence"] = _target_r_has_movement_evidence(row)
+            return triplet
+
+    movement_evidence = _target_r_has_movement_evidence(row)
+    if movement_evidence:
+        return {
+            "entry": None,
+            "stop": None,
+            "target": None,
+            "source": "missing_original_after_movement",
+            "explicit": False,
+            "movement_evidence": True,
+        }
+    return {
+        "entry": _as_float(row.get("entry_price")),
+        "stop": _as_float(row.get("stop_loss")),
+        "target": _as_float(row.get("take_profit")),
+        "source": "fallback_current_levels",
+        "explicit": False,
+        "movement_evidence": False,
+    }
+
+
+def _target_r_trade_side(row: Dict[str, Any]) -> str:
+    side = str(row.get("side") or "").strip().upper()
+    if side.startswith("BUY") or side == "LONG":
+        return "long"
+    if side.startswith("SELL") or side == "SHORT":
+        return "short"
+    return ""
+
+
+def _planned_target_r_from_original_plan(row: Dict[str, Any]) -> float | None:
+    levels = _original_plan_levels(row)
+    entry = _as_float(levels.get("entry"))
+    stop = _as_float(levels.get("stop"))
+    target = _as_float(levels.get("target"))
+    if entry is None or stop is None or target is None:
+        return None
+    if not (math.isfinite(entry) and math.isfinite(stop) and math.isfinite(target)):
+        return None
+    if entry <= 0 or stop <= 0 or target <= 0 or abs(entry - stop) <= 1e-12:
+        return None
+    side = _target_r_trade_side(row)
+    if side == "long" and not (stop < entry < target):
+        return None
+    if side == "short" and not (target < entry < stop):
+        return None
+    if not side:
+        if abs(target - entry) <= 1e-12:
+            return None
+    return abs(target - entry) / abs(entry - stop)
+
+
+def _captured_win_r(row: Dict[str, Any]) -> float | None:
+    value = _as_float(row.get("r_multiple"))
+    if value is None or not math.isfinite(value) or value <= 0:
+        return None
+    return value
+
+
+def _target_r_original_risk_trusted(row: Dict[str, Any]) -> Tuple[bool, str]:
+    levels = _original_plan_levels(row)
+    if levels.get("movement_evidence") and not levels.get("explicit"):
+        return False, "moved_without_original_plan"
+    entry = _as_float(levels.get("entry"))
+    stop = _as_float(levels.get("stop"))
+    if entry is None or stop is None:
+        return False, "missing_original_stop_risk"
+    if not (math.isfinite(entry) and math.isfinite(stop)) or entry <= 0 or stop <= 0:
+        return False, "invalid_original_stop_risk"
+    if abs(entry - stop) <= 1e-12:
+        return False, "zero_original_stop_risk"
+    side = _target_r_trade_side(row)
+    if side == "long" and not stop < entry:
+        return False, "invalid_long_original_stop"
+    if side == "short" and not stop > entry:
+        return False, "invalid_short_original_stop"
+    return True, ""
+
+
+def _is_eligible_target_r_win(row: Dict[str, Any]) -> Tuple[bool, str]:
+    if str(row.get("row_type") or "trade").strip().lower() != "trade":
+        return False, "not_trade"
+    if _target_r_row_is_test_trade(row):
+        return False, "test_trade"
+    if _trade_outcome_sign(row) <= 0:
+        return False, "not_winning_trade"
+    if _captured_win_r(row) is None:
+        return False, "invalid_r_multiple"
+    trusted, reason = _target_r_original_risk_trusted(row)
+    if not trusted:
+        return False, reason
+    levels = _original_plan_levels(row)
+    if levels.get("movement_evidence") and levels.get("target") is None:
+        return False, "moved_target_without_original_plan"
+    return True, ""
+
+
+def _target_r_bucket(value: float, increment: float) -> float:
+    return round(math.floor((value + 1e-12) / increment) * increment, 10)
+
+
+def _target_r_distribution(values: List[float], increment: float) -> Dict[float, int]:
+    counts: Counter[float] = Counter()
+    for value in values:
+        if value is None or not math.isfinite(value) or value <= 0:
+            continue
+        counts[_target_r_bucket(value, increment)] += 1
+    return OrderedDict((bucket, counts[bucket]) for bucket in sorted(counts))
+
+
+def _choose_target_r_increment(values: List[float]) -> float:
+    clean = [value for value in values if value is not None and math.isfinite(value) and value > 0]
+    if not clean:
+        return 0.5
+    r_range = max(clean) - min(clean)
+    start = 0.25 if len(clean) >= 50 and r_range <= 6.0 else 0.5
+    allowed = [0.25, 0.5, 1.0, 1.5, 2.0]
+    start_index = allowed.index(start)
+    for increment in allowed[start_index:]:
+        distribution = _target_r_distribution(clean, increment)
+        bucket_count = len(distribution)
+        if bucket_count <= 1:
+            return increment
+        singleton_fraction = sum(1 for count in distribution.values() if count == 1) / bucket_count
+        too_many_buckets = bucket_count > 20
+        too_sparse = singleton_fraction > 0.60 and bucket_count > max(4, len(clean) // 3)
+        if not too_many_buckets and not too_sparse:
+            return increment
+    return 2.0
+
+
+def _target_r_sweet_spot(distribution: Dict[float, int]) -> Dict[str, Any]:
+    buckets = sorted(
+        (float(bucket), int(count))
+        for bucket, count in distribution.items()
+        if count is not None and int(count) > 0
+    )
+    if not buckets:
+        return {"ok": False, "reason": "empty_distribution"}
+    counts = {bucket: count for bucket, count in buckets}
+    keys = [bucket for bucket, _count in buckets]
+    if max(counts.values()) <= 1 and len(keys) > 1:
+        return {"ok": False, "reason": "sparse_distribution"}
+    smoothed: Dict[float, int] = {}
+    for index, bucket in enumerate(keys):
+        total = counts[bucket]
+        if index > 0:
+            total += counts[keys[index - 1]]
+        if index + 1 < len(keys):
+            total += counts[keys[index + 1]]
+        smoothed[bucket] = total
+
+    peak_bucket = max(keys, key=lambda bucket: (smoothed[bucket], counts[bucket], -bucket))
+    peak_smoothed = smoothed[peak_bucket]
+    peak_raw = counts[peak_bucket]
+    total_instances = sum(counts.values())
+    threshold = peak_smoothed * 0.60
+
+    def include_bucket(bucket: float) -> bool:
+        raw_count = counts[bucket]
+        if total_instances >= 12 and raw_count <= 2:
+            return False
+        return smoothed[bucket] >= threshold or raw_count >= max(1, math.ceil(peak_raw * 0.60))
+
+    peak_index = keys.index(peak_bucket)
+    low_index = peak_index
+    while low_index > 0 and include_bucket(keys[low_index - 1]):
+        low_index -= 1
+    high_index = peak_index
+    while high_index + 1 < len(keys) and include_bucket(keys[high_index + 1]):
+        high_index += 1
+
+    sweet_low = keys[low_index]
+    sweet_high = keys[high_index]
+    tail = [bucket for bucket in keys if bucket > sweet_high]
+    low_probability_tail = [
+        bucket for bucket in tail
+        if counts[bucket] <= max(2, math.floor(peak_raw * 0.30))
+    ]
+    return {
+        "ok": True,
+        "sweet_low": sweet_low,
+        "sweet_high": sweet_high,
+        "peak_bucket": peak_bucket,
+        "peak_instances": peak_raw,
+        "low_probability_above": sweet_high if low_probability_tail else None,
+        "smoothed_counts": smoothed,
+    }
+
+
+def _format_target_r_value(value: Any) -> str:
+    num = _as_float(value)
+    if num is None or not math.isfinite(num):
+        return ""
+    if abs(num - round(num)) < 1e-9:
+        return str(int(round(num)))
+    return f"{num:.2f}".rstrip("0").rstrip(".")
+
+
+def _format_target_r_range(low: Any, high: Any) -> str:
+    low_text = _format_target_r_value(low)
+    high_text = _format_target_r_value(high)
+    if not low_text or not high_text:
+        return ""
+    if low_text == high_text:
+        return f"{low_text}R"
+    return f"{low_text}-{high_text}R"
+
+
+def _target_r_empty_payload(reason: str = "not_enough_eligible_wins") -> Dict[str, Any]:
+    return {
+        TARGET_RECOMMENDATION_HEADER: "Need more target data",
+        "target_recommendation": "Need more target data",
+        "eligible_target_r_wins": 0,
+        "target_r_increment": None,
+        "target_r_distribution": {},
+        "target_r_peak_bucket": None,
+        "target_r_peak_instances": None,
+        "target_r_sweet_low": None,
+        "target_r_sweet_high": None,
+        "target_r_low_probability_above": None,
+        "current_avg_original_planned_target_r": None,
+        "target_r_excluded_count": 0,
+        "target_r_excluded_reasons": {reason: 1} if reason else {},
+    }
+
+
+def _target_r_recommendation(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    captured_values: List[float] = []
+    planned_values: List[float] = []
+    excluded: Counter[str] = Counter()
+
+    for row in rows or []:
+        if not isinstance(row, dict):
+            excluded["invalid_row"] += 1
+            continue
+        planned_r = _planned_target_r_from_original_plan(row)
+        if planned_r is not None and math.isfinite(planned_r) and planned_r > 0:
+            if str(row.get("row_type") or "trade").strip().lower() == "trade" and not _target_r_row_is_test_trade(row):
+                planned_values.append(planned_r)
+        ok, reason = _is_eligible_target_r_win(row)
+        if not ok:
+            excluded[reason or "excluded"] += 1
+            continue
+        captured = _captured_win_r(row)
+        if captured is not None:
+            captured_values.append(captured)
+
+    current_avg = (sum(planned_values) / len(planned_values)) if planned_values else None
+    if len(captured_values) < 8:
+        payload = _target_r_empty_payload("not_enough_eligible_wins")
+        payload["eligible_target_r_wins"] = len(captured_values)
+        payload["current_avg_original_planned_target_r"] = current_avg
+        payload["target_r_excluded_count"] = sum(excluded.values())
+        payload["target_r_excluded_reasons"] = dict(excluded)
+        return payload
+
+    increment = _choose_target_r_increment(captured_values)
+    distribution = _target_r_distribution(captured_values, increment)
+    sweet = _target_r_sweet_spot(distribution)
+    if not sweet.get("ok"):
+        payload = _target_r_empty_payload(str(sweet.get("reason") or "sparse_distribution"))
+        payload["eligible_target_r_wins"] = len(captured_values)
+        payload["target_r_increment"] = increment
+        payload["target_r_distribution"] = dict(distribution)
+        payload["current_avg_original_planned_target_r"] = current_avg
+        payload["target_r_excluded_count"] = sum(excluded.values())
+        payload["target_r_excluded_reasons"] = dict(excluded)
+        return payload
+
+    sweet_low = sweet["sweet_low"]
+    sweet_high = sweet["sweet_high"]
+    target_range = _format_target_r_range(sweet_low, sweet_high)
+    if current_avg is None:
+        recommendation = f"Target sweet spot {target_range}"
+    elif current_avg > sweet_high + 1e-12:
+        recommendation = f"Reduce target to {target_range}"
+    elif current_avg < sweet_low - 1e-12:
+        recommendation = f"Increase target to {target_range}"
+    else:
+        recommendation = f"Keep target {target_range}"
+
+    return {
+        TARGET_RECOMMENDATION_HEADER: recommendation,
+        "target_recommendation": recommendation,
+        "eligible_target_r_wins": len(captured_values),
+        "target_r_increment": increment,
+        "target_r_distribution": dict(distribution),
+        "target_r_peak_bucket": sweet.get("peak_bucket"),
+        "target_r_peak_instances": sweet.get("peak_instances"),
+        "target_r_sweet_low": sweet_low,
+        "target_r_sweet_high": sweet_high,
+        "target_r_low_probability_above": sweet.get("low_probability_above"),
+        "current_avg_original_planned_target_r": current_avg,
+        "target_r_excluded_count": sum(excluded.values()),
+        "target_r_excluded_reasons": dict(excluded),
+    }
+
+
+def _distance_recommendation_summary(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     buckets = {
         "stop_wins": [],
         "stop_losses": [],
-        "target_wins": [],
-        "target_losses": [],
     }
     for row in rows:
         if str(row.get("row_type") or "trade").strip().lower() != "trade":
@@ -939,27 +1378,21 @@ def _distance_recommendation_summary(rows: List[Dict[str, Any]]) -> Dict[str, st
         if outcome == 0:
             continue
         stop_pct = _distance_pct_points(row, "stop_loss")
-        target_pct = _distance_pct_points(row, "take_profit")
         suffix = "wins" if outcome > 0 else "losses"
         if stop_pct is not None:
             buckets[f"stop_{suffix}"].append(stop_pct)
-        if target_pct is not None:
-            buckets[f"target_{suffix}"].append(target_pct)
+    target_payload = _target_r_recommendation(rows)
     return {
         STOP_RECOMMENDATION_HEADER: _size_recommendation(
             "stop",
             _average_float(buckets["stop_wins"]),
             _average_float(buckets["stop_losses"]),
         ),
-        TARGET_RECOMMENDATION_HEADER: _size_recommendation(
-            "target",
-            _average_float(buckets["target_wins"]),
-            _average_float(buckets["target_losses"]),
-        ),
+        **target_payload,
     }
 
 
-def _distance_recommendations_by_symbol(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str, str]]:
+def _distance_recommendations_by_symbol(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
     grouped: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     active: List[Dict[str, Any]] = []
     for row in rows:
@@ -980,14 +1413,15 @@ def _distance_recommendations_by_symbol(rows: List[Dict[str, Any]]) -> Dict[str,
 
 def _row_distance_recommendation(
     row: Dict[str, Any],
-    recommendations_by_symbol: Dict[str, Dict[str, str]],
+    recommendations_by_symbol: Dict[str, Dict[str, Any]],
     header: str,
 ) -> str:
+    default_text = "Need more target data" if header == TARGET_RECOMMENDATION_HEADER else "Need wins & losses"
     symbol = str(row.get("symbol") or "").strip().upper()
     symbol_text = (recommendations_by_symbol.get(symbol) or {}).get(header)
-    if symbol_text and symbol_text != "Need wins & losses":
+    if symbol_text and symbol_text not in {"Need wins & losses", "Need more target data"}:
         return symbol_text
-    return (recommendations_by_symbol.get("") or {}).get(header) or symbol_text or "Need wins & losses"
+    return (recommendations_by_symbol.get("") or {}).get(header) or symbol_text or default_text
 
 
 def _apply_recommendation_cell_style(cell) -> None:
@@ -1061,13 +1495,41 @@ def _net_result_pct_by_account(rows: List[Dict[str, Any]]) -> Dict[str, float]:
 def _merge_metric_buckets(*buckets: Dict[str, Any] | None) -> Dict[str, Any]:
     merged: Dict[str, Any] = {}
     metric_sources: Dict[str, Any] = {}
+    target_payload_keys = {
+        TARGET_RECOMMENDATION_HEADER,
+        "target_recommendation",
+        "eligible_target_r_wins",
+        "target_r_increment",
+        "target_r_distribution",
+        "target_r_peak_bucket",
+        "target_r_peak_instances",
+        "target_r_sweet_low",
+        "target_r_sweet_high",
+        "target_r_low_probability_above",
+        "current_avg_original_planned_target_r",
+        "target_r_excluded_count",
+        "target_r_excluded_reasons",
+    }
     for bucket in buckets:
         if not isinstance(bucket, dict):
             continue
+        incoming_target_text = str(
+            bucket.get(TARGET_RECOMMENDATION_HEADER) or bucket.get("target_recommendation") or ""
+        ).strip()
+        existing_target_text = str(
+            merged.get(TARGET_RECOMMENDATION_HEADER) or merged.get("target_recommendation") or ""
+        ).strip()
+        keep_existing_target_payload = (
+            incoming_target_text == "Need more target data"
+            and existing_target_text
+            and existing_target_text != "Need more target data"
+        )
         for key, value in bucket.items():
             if key == "metric_sources":
                 if isinstance(value, dict):
                     metric_sources.update(value)
+            elif keep_existing_target_payload and key in target_payload_keys:
+                continue
             else:
                 merged[key] = value
     if metric_sources:
