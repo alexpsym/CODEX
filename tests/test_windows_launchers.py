@@ -115,7 +115,8 @@ def test_run_local_master_exit_wiring_and_ordering() -> None:
     assert 'set "LOCAL_MASTER_EDGE_DEBUG_PORT=' in script
     assert 'start "%LOCAL_MASTER_WINDOW_TITLE%" /D "%ROOT%" "%ROOT%tools\\windows_launchers\\local_master_worker_console.bat"' in script
     assert '__worker_console' not in script
-    assert 'if defined LOCAL_MASTER_WINDOW_TITLE title !LOCAL_MASTER_WINDOW_TITLE!' in script
+    assert 'if defined LOCAL_MASTER_WINDOW_TITLE (' in script
+    assert 'if /I not "!LOCAL_MASTER_SUPPRESS_WINDOW_CLOSE!"=="1" title !LOCAL_MASTER_WINDOW_TITLE!' in script
     assert 'cmd /d /v:on /c "call ""%~f0"" __worker > ""%LOCAL_MASTER_WORKER_LOG%"" 2>&1"' not in script
     assert 'cmd /d /v:on /k "call ""%~f0""' not in script
     assert 'call "%ROOT%tools\\open_edge_url.bat" "%MASTER_BROWSER_URL%" "%LOCAL_MASTER_EDGE_DEBUG_PORT%" "%LOCAL_MASTER_EDGE_PROFILE_DIR%"' in script
@@ -131,6 +132,8 @@ def test_run_local_master_exit_wiring_and_ordering() -> None:
     assert exit_branch_idx != -1 and restart_idx != -1 and exit_branch_idx < restart_idx
     assert '\n  exit /b 0\n)' not in script
     assert 'LOCAL_MASTER_SHUTDOWN_PS1=%TEMP%\\local_master_shutdown_!RANDOM!_!RANDOM!.ps1' in script
+    assert 'if /I "!LOCAL_MASTER_SUPPRESS_WINDOW_CLOSE!"=="1" (' in script
+    assert 'smoke/test mode: not closing shared console window.' in script
     assert 'start "" powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "!LOCAL_MASTER_SHUTDOWN_PS1!"' in script
     assert 'powershell -NoProfile -WindowStyle Hidden -Command' not in script
     assert "$_.MainWindowTitle -eq $title" in script
@@ -138,6 +141,7 @@ def test_run_local_master_exit_wiring_and_ordering() -> None:
     assert "$allow = @^('WindowsTerminal','wt','OpenConsole','conhost','cmd'^)" in script
     assert "Stop-Process -Id $_.Id -Force -ErrorAction Stop" in script
     assert "Stop-Process -Name WindowsTerminal" not in script
+    assert "taskkill" not in script.lower()
     assert '\n    exit 0\n  )\n)' in script
 
 
@@ -394,6 +398,7 @@ def test_run_local_master_worker_console_stays_visible_on_abnormal_failure() -> 
     assert ':worker_console' not in master
     assert 'stream_local_master_worker.ps1' in script
     assert 'ensure_local_master_server.ps1' in script
+    assert 'smoke/test mode: not changing shared console title.' in script
     assert 'Launcher preflight failed before the dashboard worker started.' in script
     assert 'This window is intentionally left open so the failure stays readable.' in script
     assert 'worker output will print live below and is also being written to:' in script
@@ -448,7 +453,8 @@ def test_run_local_master_worker_console_smoke_has_no_cmd_syntax_error() -> None
         {
             'SPREAD_MONITOR_SKIP_REQUIREMENTS_INSTALL': '1',
             'PYTHON': cmd_exe,
-            'LOCAL_MASTER_WINDOW_TITLE': 'Codex BAT Smoke Test',
+            'LOCAL_MASTER_WINDOW_TITLE': f'Codex BAT Smoke Test {os.getpid()}',
+            'LOCAL_MASTER_SUPPRESS_WINDOW_CLOSE': '1',
             'LOCAL_MASTER_WORKER_LOG': str(worker_log),
             'LOCAL_MASTER_EXIT_REQUEST': str(exit_request),
             'LOCAL_MASTER_NORMAL_EXIT_FILE': str(normal_exit),
@@ -468,8 +474,11 @@ def test_run_local_master_worker_console_smoke_has_no_cmd_syntax_error() -> None
     assert result.returncode == 0, combined_output + '\n' + log_text
     assert 'The syntax of the command is incorrect.' not in combined_output
     assert 'The syntax of the command is incorrect.' not in log_text
+    assert 'smoke/test mode: not changing shared console title.' in combined_output
     assert 'worker started at' in log_text
     assert 'local exit requested; closing worker window.' in log_text
+    assert 'smoke/test mode: not closing shared console window.' in log_text
+    assert 'closing Local Master Control command prompt.' not in log_text
 
 
 def test_run_local_master_spread_requirements_skip_condition_uses_valid_nested_if() -> None:

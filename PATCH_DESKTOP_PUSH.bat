@@ -1,6 +1,6 @@
 @echo off
 setlocal EnableExtensions DisableDelayedExpansion
-title Auto Local Commit Push
+if /I not "%PATCH_DESKTOP_PUSH_SUPPRESS_CONSOLE_TITLE%"=="1" title Auto Local Commit Push
 
 set "DEFAULT_REPO=C:\GPT\CODEX-master"
 set "DEFAULT_LOG=C:\GPT\PATCH_DESKTOP_PUSH-latest.log"
@@ -37,8 +37,12 @@ if "%RC%"=="0" (
   echo FAILED with exit code %RC%.
 )
 echo.
-echo Press any key to close this window.
-pause >nul
+if /I "%PATCH_DESKTOP_PUSH_NONINTERACTIVE%"=="1" (
+  echo Non-interactive mode: closing without pause.
+) else (
+  echo Press any key to close this window.
+  pause >nul
+)
 exit /b %RC%
 
 :Main
