@@ -6,6 +6,30 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def _windows_console_safe_creationflags() -> int:
+    if os.name != "nt":
+        return 0
+
+    flags = getattr(subprocess, "DETACHED_PROCESS", 0)
+    flags |= getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    if flags == 0:
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    return flags
+
+
+def _run_patch_desktop_push(script: Path, cwd: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["cmd.exe", "/d", "/c", "call", str(script)],
+        cwd=cwd,
+        text=True,
+        capture_output=True,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        creationflags=_windows_console_safe_creationflags(),
+        timeout=30,
+    )
+
+
 def test_patch_desktop_push_logs_and_stages_all_changes(tmp_path: Path):
     script = ROOT / "PATCH_DESKTOP_PUSH.bat"
     content = script.read_text(encoding="utf-8")
@@ -26,6 +50,10 @@ def test_patch_desktop_push_logs_and_stages_all_changes(tmp_path: Path):
     assert "call git fetch origin master" in content
     assert "call git rev-parse origin/master" in content
     assert "pause >nul" in content.lower()
+    if os.name == "nt":
+        flags = _windows_console_safe_creationflags()
+        assert flags & getattr(subprocess, "DETACHED_PROCESS", 0)
+        assert flags & getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
 
     gpt_dir = tmp_path / "GPT"
     repo_dir = gpt_dir / "CODEX-master"
@@ -79,15 +107,7 @@ def test_patch_desktop_push_logs_and_stages_all_changes(tmp_path: Path):
     env["PATCH_DESKTOP_PUSH_SUPPRESS_CONSOLE_TITLE"] = "1"
     env["PATCH_DESKTOP_PUSH_NONINTERACTIVE"] = "1"
 
-    result = subprocess.run(
-        ["cmd.exe", "/c", str(script)],
-        cwd=gpt_dir,
-        text=True,
-        capture_output=True,
-        env=env,
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        timeout=30,
-    )
+    result = _run_patch_desktop_push(script, gpt_dir, env)
 
     assert result.returncode == 0, result.stdout + result.stderr
     log_text = latest_log.read_text(encoding="utf-8")
@@ -162,15 +182,7 @@ def test_patch_desktop_push_pushes_existing_commit_when_nothing_new_is_staged(tm
     env["PATCH_DESKTOP_PUSH_SUPPRESS_CONSOLE_TITLE"] = "1"
     env["PATCH_DESKTOP_PUSH_NONINTERACTIVE"] = "1"
 
-    result = subprocess.run(
-        ["cmd.exe", "/c", str(script)],
-        cwd=gpt_dir,
-        text=True,
-        capture_output=True,
-        env=env,
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        timeout=30,
-    )
+    result = _run_patch_desktop_push(script, gpt_dir, env)
 
     assert result.returncode == 0, result.stdout + result.stderr
     log_text = latest_log.read_text(encoding="utf-8")

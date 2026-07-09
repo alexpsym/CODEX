@@ -37,6 +37,7 @@ set "WORKER_EXIT_CODE=!ERRORLEVEL!"
 if defined LOCAL_MASTER_NORMAL_EXIT_FILE (
   if exist "!LOCAL_MASTER_NORMAL_EXIT_FILE!" (
     del /q "!LOCAL_MASTER_NORMAL_EXIT_FILE!" >nul 2>nul
+    if /I "!LOCAL_MASTER_SUPPRESS_WINDOW_CLOSE!"=="1" exit /b 0
     exit
   )
 )

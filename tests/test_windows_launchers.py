@@ -9,6 +9,17 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def _windows_console_safe_creationflags() -> int:
+    if os.name != 'nt':
+        return 0
+
+    flags = getattr(subprocess, 'DETACHED_PROCESS', 0)
+    flags |= getattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 0)
+    if flags == 0:
+        flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+    return flags
+
+
 def _installer_script_path() -> Path:
     modern = ROOT / 'INSTALL.bat'
     legacy = ROOT / 'ExtractLatestCodexMaster.bat'
@@ -403,6 +414,7 @@ def test_run_local_master_worker_console_stays_visible_on_abnormal_failure() -> 
     assert 'Get-Content -LiteralPath $env:LOCAL_MASTER_WORKER_LOG -Tail 40' in script
     assert 'This window is intentionally left open so startup errors stay readable.' in script
     assert 'pause >nul' in script
+    assert 'if /I "!LOCAL_MASTER_SUPPRESS_WINDOW_CLOSE!"=="1" exit /b 0' in script
     assert 'if defined LOCAL_MASTER_NORMAL_EXIT_FILE (\n  if exist "!LOCAL_MASTER_NORMAL_EXIT_FILE!" (' in script
     assert 'Write-WorkerLogTail' in streamer
     assert 'RedirectStandardOutput = $false' in streamer
@@ -458,8 +470,10 @@ def test_run_local_master_worker_console_smoke_has_no_cmd_syntax_error() -> None
         [cmd_exe, '/d', '/c', 'call', str(ROOT / 'tools' / 'windows_launchers' / 'local_master_worker_console.bat')],
         cwd=ROOT,
         env=env,
+        stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
+        creationflags=_windows_console_safe_creationflags(),
         timeout=45,
     )
     combined_output = f"{result.stdout}\n{result.stderr}"
