@@ -1,96 +1,78 @@
-Transaction extractor screenshot OCR fix summary
+Local repo path migration summary
 
 Files changed:
-- LEDGER-clone/transaction_extractor_local_fixed_v7_no_venv/extract_transactions_local.py
-- tests/test_transaction_extractor_screenshot.py
-- LEDGER-clone/transaction_extractor_local_fixed_v7_no_venv/outputs/run_20260704_194549/downloads/source_01.jpg
-- LEDGER-clone/transaction_extractor_local_fixed_v7_no_venv/outputs/run_20260704_194549/downloads/source_02.jpg
+- PATCH_DESKTOP_PUSH.bat
+- run_local_master_control.bat
+- run_scanner_local.bat
+- shared/env_bootstrap.py
+- INSTALL.bat
+- render/master_service.py
+- render/README.md
+- custom instructions/CODEX_BRIEF_INSTRUCTIONS.txt
+- mt5-clone/MQL5/Experts/MarketWatchSpreadPercentFeed.mq5
+- mt5-clone/MQL5/Experts/Trader.mq5
+- tests/test_patch_desktop_push.py
+- tests/test_merged_monitor_status_env.py
 - summary/CODEX_SUMMARY_latest.txt
 
-Live runtime copy updated:
-- C:\Users\User\Documents\LEDGER\transaction_extractor_local_fixed_v7_no_venv\extract_transactions_local.py
-- Repo and live extractor SHA-256 matched after copy:
-  B37298F7533F43256CB1848474E15F2CB61DF40A2986C6F6B3BFB5EBF15D9CE5
+Old path replaced:
+- Old repo root: C:\Users\User\Documents\GPT\CODEX-master
+- Old external GPT/env root default: C:\Users\User\Documents\GPT
+- Old env default: C:\Users\User\Documents\GPT\env.env
+- Old push log default: C:\Users\User\Documents\GPT\PATCH_DESKTOP_PUSH-latest.log
+
+New path used:
+- Repo root default: C:\GPT\CODEX-master
+- External env/log root default: C:\GPT
+- Env file default: C:\GPT\env.env
+- Push log default: C:\GPT\PATCH_DESKTOP_PUSH-latest.log
 
 What changed:
-- Added a simple date/merchant/amount list parser for screenshots like image(580).png/source_01.jpg.
-- The simple-list parser detects repeated explicit date lines, pairs each date with the following merchant line, and extracts the right-aligned amount from that merchant row.
-- The Woolworths screenshot no longer collapses into one giant segment; it now produces the expected 11 rows.
-- Corrected signless Woolworths/simple-list purchase rows to CREDIT, not DEBIT.
-- Tightened the bank-app transaction parser for image(579).png/source_02.jpg.
-- Date headings are parsed separately from transaction rows and carried down until the next reliable heading.
-- Today and Yesterday remain resolved from the run folder timestamp where available.
-- Amount extraction is constrained to right-side amount text and pending text no longer contaminates the amount.
-- Safe amount normalization now reads +$21L00 as +211.00.
-- Unsafe amount jumps such as -$10.17 becoming 900.17 are rejected instead of accepted as fake-good values.
-- Description extraction preserves visible title text, including transfer direction text.
-- Preserved the existing extractor/ledger convention:
-  source sign determines side
-  outgoing negative transactions are written to CREDIT as positive amounts
-  signless simple-list merchant purchases are written to CREDIT as positive amounts
-  incoming positive transactions are written to DEBIT as positive amounts
-  final CSV/XLSX amount cells are positive
-- Preserved duplicate NOTES workbook headers because that workbook shape is owned by this extractor and used by its existing workflow.
-- Did not change BOQ transform/copy scripts.
-- Did not touch Trading Journal workbook layout/formulas or unrelated MT5, Bybit, OANDA, Render, or Render Master Control code.
-- Did not import the bad extracted workbook.
+- PATCH_DESKTOP_PUSH.bat now defaults to C:\GPT\CODEX-master and C:\GPT\PATCH_DESKTOP_PUSH-latest.log.
+- PATCH_DESKTOP_PUSH.bat now fails explicitly if the repo path cannot be opened or if .git is missing, and tells the user not to run git init blindly.
+- run_local_master_control.bat now defaults MASTER_ENV_DIR to C:\GPT and MASTER_ENV_FILE to C:\GPT\env.env.
+- run_scanner_local.bat now defaults MASTER_ENV_FILE to C:\GPT\env.env.
+- Local launcher missing-env messages now tell the user to copy C:\Users\User\Documents\GPT\env.env to C:\GPT\env.env.
+- TRADING_JOURNAL_LOCAL_DIR remains based on %ROOT%journal.
+- shared/env_bootstrap.py now defaults to C:\GPT and C:\GPT\env.env while preserving env override behavior and repo-root .env fallback behavior.
+- INSTALL.bat fallback script directory is now C:\GPT and its existing non-Git-folder recovery path now prints the checked .git path and a no-git-init warning.
+- render/master_service.py and render/README.md now point user-facing local env guidance at C:\GPT\env.env.
+- custom instructions now refer to repo-root PATCH_DESKTOP_PUSH.bat with C:\GPT defaults instead of the old Documents\GPT script path.
+- MT5 default inputs now point at C:\GPT\CODEX-master for the spread window script and Pepperstone spread export file.
+- Tests expecting old Documents\GPT defaults were updated to C:\GPT defaults.
+- A stale launcher assertion in tests/test_merged_monitor_status_env.py was aligned with the existing stream_local_master_worker.ps1 launcher behavior already asserted by tests/test_windows_launchers.py.
 
-Regression coverage:
-- Added fixtures from the supplied bad live run:
-  LEDGER-clone/transaction_extractor_local_fixed_v7_no_venv/outputs/run_20260704_194549/downloads/source_01.jpg
-  LEDGER-clone/transaction_extractor_local_fixed_v7_no_venv/outputs/run_20260704_194549/downloads/source_02.jpg
-- Regression tests assert exactly 25 rows total:
-  11 rows from source_01.jpg
-  14 rows from source_02.jpg
-- Tests check dates, descriptions, amounts, side placement, pending flags, review flags, and review reasons.
-- Tests check source_01 simple-list mode no longer collapses to one row.
-- Tests check source_01 Woolworths rows are written to CREDIT even though the source image has signless amounts.
-- Tests check rows sharing one date heading.
-- Tests check +$21L00 normalizes to 211.00.
-- Tests write fresh temp CSV/XLSX outputs and inspect them programmatically.
+Files deliberately not changed:
+- state_backup.json: pre-existing dirty runtime state; it still contains an old local_dir entry. It was not edited because runtime state must not be committed for this migration.
+- render/data/*: pre-existing dirty runtime data was not edited.
+- logs/*, .pytest_tmp*, .pytest_cache, __pycache__: generated/cache/runtime artifacts were not edited or staged.
+- C:\Users\User\Documents\TRADING, C:\Users\User\Documents\LEDGER, C:\Users\User\Documents\MEDIPORT, C:\Users\User\Downloads, MT5 terminal data paths, and Tesseract install paths were not changed.
+- The old folder C:\Users\User\Documents\GPT\CODEX-master was not deleted.
+
+Search verification:
+- git grep for old repo paths C:\Users\User\Documents\GPT\CODEX-master and Documents\GPT\CODEX-master, excluding state_backup.json: no matches.
+- git grep for old PATCH_DESKTOP_PUSH path C:\Users\User\Documents\GPT\PATCH_DESKTOP_PUSH.bat: no matches.
+- Remaining tracked C:\Users\User\Documents\GPT matches are only:
+  - launcher copy hints telling the user to copy the old env file to C:\GPT\env.env,
+  - the matching test assertion for that hint,
+  - state_backup.json pre-existing runtime state, deliberately not changed.
 
 Verification performed:
-- python -m py_compile LEDGER-clone\transaction_extractor_local_fixed_v7_no_venv\extract_transactions_local.py
+- py -3 -m pytest tests/test_patch_desktop_push.py tests/test_merged_monitor_status_env.py tests/test_windows_launchers.py
+  Result: failed because py is not recognized on PATH in this environment.
+- python --version
+  Result: Python 3.13.2 from C:\Users\User\miniconda3\python.exe.
+- python -m pytest tests/test_patch_desktop_push.py tests/test_merged_monitor_status_env.py tests/test_windows_launchers.py
+  Result: 81 passed, 4 warnings in 32.50s.
+- python -m py_compile shared/env_bootstrap.py render/master_service.py
   Result: passed.
-- python -m pytest tests\test_transaction_extractor_screenshot.py -q
-  Result: 3 passed.
-- Ran the repo extractor against both fixture screenshots:
-  LEDGER-clone\transaction_extractor_local_fixed_v7_no_venv\outputs\run_20260704_194549\downloads\source_01.jpg
-  LEDGER-clone\transaction_extractor_local_fixed_v7_no_venv\outputs\run_20260704_194549\downloads\source_02.jpg
-  Result: 25 rows written, 0 review flags.
-- Programmatically opened the generated repo XLSX/CSV and confirmed exactly the expected 25 rows with positive ledger amounts.
-- Copied the patched extractor into the live C:\Users\User\Documents\LEDGER runtime folder.
-- Ran the live extractor from C:\Users\User\Documents\LEDGER\transaction_extractor_local_fixed_v7_no_venv against the live bad-run source images.
-  Live output:
-  C:\Users\User\Documents\LEDGER\transaction_extractor_local_fixed_v7_no_venv\outputs\run_20260704_203845\extracted_transactions_20260704_203845.xlsx
-  C:\Users\User\Documents\LEDGER\transaction_extractor_local_fixed_v7_no_venv\outputs\run_20260704_203845\review_extraction_20260704_203845.csv
-  Result: 25 rows written, 0 review flags.
-- Programmatically opened the live XLSX/CSV and confirmed:
-  04/07/2026 W2695-Woolworths DARRA CREDIT 29.64
-  27/06/2026 W2695-Woolworths DARRA CREDIT 37.70
-  25/06/2026 W2648-Woolworths FOREST LAKE CREDIT 15.50
-  21/06/2026 W2648-Woolworths FOREST LAKE CREDIT 33.30
-  17/06/2026 W2648-Woolworths FOREST LAKE CREDIT 5.20
-  16/06/2026 W2648-Woolworths FOREST LAKE CREDIT 4.20
-  14/06/2026 W2648-Woolworths FOREST LAKE CREDIT 43.50
-  13/06/2026 W2648-Woolworths FOREST LAKE CREDIT 6.50
-  12/06/2026 W2864-Woolworths BROOKWATER CREDIT 12.80
-  11/06/2026 W2648-Woolworths FOREST LAKE CREDIT 23.99
-  07/06/2026 W2648-Woolworths FOREST LAKE CREDIT 8.00
-  04/07/2026 RENDER.COM +14158304762 US CREDIT 10.17 pending
-  03/07/2026 Bridgewater Bake House CREDIT 5.50
-  03/07/2026 Bridgewater Bake House CREDIT 8.50
-  03/07/2026 ROBINS PIZZA/SHOP 17/2 YE MEADOWBROOK AU CREDIT 19.82 pending
-  01/07/2026 Yummy Fried Rice CREDIT 15.90
-  15/06/2026 Sp Nutra Nourished CREDIT 55.12
-  12/06/2026 Pizza In A Hurryohm Food CREDIT 14.95
-  09/06/2026 Foodworks CREDIT 6.50
-  08/06/2026 Khao Thai Restaurant CREDIT 29.72
-  07/06/2026 Transfer to Alexander Symoniw CREDIT 300.00
-  07/06/2026 Transfer from SaveME DEBIT 300.00
-  05/06/2026 Robins Pizza/Shop 17/2 CREDIT 19.82
-  05/06/2026 Render.Com CREDIT 9.83
-  04/06/2026 Transfer from SaveME DEBIT 211.00
 
-Repo notes:
-- Existing unrelated render/data JSON changes were present and were not edited for this task.
+Manual steps remaining:
+- Copy C:\Users\User\Documents\GPT\env.env to C:\GPT\env.env if it is not already there.
+- Reopen Codex Desktop at C:\GPT\CODEX-master.
+- Let local runtime state regenerate from the new repo path, or handle state_backup.json separately as a local runtime-state maintenance step.
+
+Git safety:
+- git init was not run.
+- The Git remote was not changed.
+- Secrets, env files, logs, cache, runtime state, and generated temp files were not committed.

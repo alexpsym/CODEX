@@ -9,8 +9,9 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_patch_desktop_push_logs_and_stages_all_changes(tmp_path: Path):
     script = ROOT / "PATCH_DESKTOP_PUSH.bat"
     content = script.read_text(encoding="utf-8")
-    assert "C:\\Users\\User\\Documents\\GPT\\CODEX-master" in content
-    assert "C:\\Users\\User\\Documents\\GPT\\PATCH_DESKTOP_PUSH-latest.log" in content
+    assert "C:\\GPT\\CODEX-master" in content
+    assert "C:\\GPT\\PATCH_DESKTOP_PUSH-latest.log" in content
+    assert "This is not a Git checkout. Do not run git init blindly" in content
     assert "call git status --short --branch" in content
     assert "call git status --short --untracked-files=all" in content
     assert "git add -A -- ." in content
@@ -32,6 +33,7 @@ def test_patch_desktop_push_logs_and_stages_all_changes(tmp_path: Path):
     repo_dir.mkdir(parents=True)
     fake_bin.mkdir()
     latest_log.write_text("old log should be overwritten", encoding="utf-8")
+    (repo_dir / ".git").mkdir()
 
     fake_git = fake_bin / "git.bat"
     fake_git.write_text(
@@ -111,6 +113,7 @@ def test_patch_desktop_push_pushes_existing_commit_when_nothing_new_is_staged(tm
     latest_log = gpt_dir / "PATCH_DESKTOP_PUSH-latest.log"
     repo_dir.mkdir(parents=True)
     fake_bin.mkdir()
+    (repo_dir / ".git").mkdir()
 
     fake_git = fake_bin / "git.bat"
     fake_git.write_text(

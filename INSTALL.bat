@@ -1129,6 +1129,8 @@ function Ensure-CodexGitRepo {
     $backupDir = $null
     if (Test-Path -LiteralPath $RepoDir -PathType Container) {
         Write-Section 'Existing CODEX-master folder is not a Git checkout. Moving it aside before clone...'
+        Write-Host "Checked for .git at: $gitDir"
+        Write-Host 'Do not run git init blindly; this installer preserves the folder as a backup and clones origin/master.'
         $timestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
         $backupDir = Join-Path $DestinationRoot "CODEX-master-zip-backup-$timestamp"
         Move-Item -LiteralPath $RepoDir -Destination $backupDir -ErrorAction Stop
@@ -1158,7 +1160,7 @@ Stop-LocalTradingJournalScript
 if ($env:__BATFILE) {
     $scriptDir = Split-Path -Parent $env:__BATFILE
 } else {
-    $scriptDir = 'C:\Users\User\Documents\GPT'
+    $scriptDir = 'C:\GPT'
 }
 
 if ((Split-Path -Leaf $scriptDir) -ieq $repoFolderName) {

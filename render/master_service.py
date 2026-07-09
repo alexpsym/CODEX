@@ -13905,7 +13905,7 @@ def _calculator_webhook_capability(request: Request) -> Dict[str, object]:
     }
     if not available:
         capability["unavailable_code"] = "LOCAL_WEBHOOK_UNREACHABLE"
-        capability["unavailable_message"] = "Set RENDER_CALCULATOR_BASE_URL=https://<your-render-service>.onrender.com in C:\\Users\\User\\Documents\\GPT\\env.env, then restart run_local_master_control.bat."
+        capability["unavailable_message"] = "Set RENDER_CALCULATOR_BASE_URL=https://<your-render-service>.onrender.com in C:\\GPT\\env.env, then restart run_local_master_control.bat."
         capability["resolution"] = "Use a non-local Render URL in RENDER_CALCULATOR_BASE_URL for local Webhook=Yes, or disable Webhook and calculate locally."
     return capability
 
