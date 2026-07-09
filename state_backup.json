@@ -204,39 +204,39 @@
       "changed": 0,
       "failed_months": [],
       "failures": [],
-      "finished_at": "2026-07-08T03:03:47.752067+00:00",
+      "finished_at": "2026-07-09T11:31:26.375895+00:00",
       "mandatory_row_id": "monthly_aud_reval:bybit_live:2026-03",
       "partial": false,
       "processed_months": [],
       "rows": 4,
-      "started_at": "2026-07-08T03:03:47.687022+00:00",
+      "started_at": "2026-07-09T11:31:26.373029+00:00",
       "succeeded_months": [],
       "target_months": []
     },
-    "last_synced_at": "2026-07-08T03:03:47.752008+00:00",
+    "last_synced_at": "2026-07-09T11:31:26.375851+00:00",
     "month_key": null,
     "ok": true,
     "stage": "complete",
     "traceback": null,
-    "updated_at": "2026-07-08T03:03:47.752059+00:00"
+    "updated_at": "2026-07-09T11:31:26.375876+00:00"
   },
   "oanda_fill_state": {
     "diagnostics": {
       "demo": {
         "last_error": null,
         "last_seen_transaction_id": "650",
-        "last_success_at": "2026-07-08T03:03:59.789328+00:00",
+        "last_success_at": "2026-07-09T06:49:54.060539+00:00",
         "startup_recovered_rows": 1,
         "startup_skipped_duplicates": 0,
-        "updated_at": "2026-07-08T03:03:59.789364+00:00"
+        "updated_at": "2026-07-09T06:49:54.060584+00:00"
       },
       "live": {
         "last_error": null,
         "last_seen_transaction_id": "471",
-        "last_success_at": "2026-07-08T03:03:48.230253+00:00",
+        "last_success_at": "2026-07-09T06:49:26.702176+00:00",
         "startup_recovered_rows": 0,
         "startup_skipped_duplicates": 0,
-        "updated_at": "2026-07-08T03:03:48.230289+00:00"
+        "updated_at": "2026-07-09T06:49:26.703936+00:00"
       }
     },
     "last_seen_transaction_id": {
@@ -247,10 +247,10 @@
       "demo": {},
       "live": {}
     },
-    "updated_at": "2026-07-08T03:03:59.789378+00:00"
+    "updated_at": "2026-07-09T06:49:54.060640+00:00"
   },
   "pending_webhooks": [],
-  "savedAt": "2026-07-08T03:10:53.568528+00:00",
+  "savedAt": "2026-07-09T11:31:28.494797+00:00",
   "source_host": "DESKTOP-1B14EQ6",
   "source_profile": "local",
   "trade_contexts": [
@@ -603,7 +603,7 @@
       "broker": "oanda",
       "calculation_context_id": null,
       "category": "forex",
-      "closed_at": "2026-07-08T03:03:59.621080+00:00",
+      "closed_at": "2026-07-09T06:49:53.795316+00:00",
       "created_at": "2026-06-26T16:34:24.766397+00:00",
       "ema": "9",
       "entry_price": null,
@@ -632,7 +632,7 @@
       "timeframe": "1MIN",
       "trade_id": "634",
       "transaction_id": "634",
-      "updated_at": "2026-07-08T03:03:59.621080+00:00"
+      "updated_at": "2026-07-09T06:49:53.795316+00:00"
     }
   ],
   "trading_journal": {
@@ -679,7 +679,7 @@
         "symbol": "EUR_USD",
         "take_profit": "1.33933",
         "timeframe": "1MIN",
-        "updated_at": "2026-07-08T03:03:59.614496+00:00"
+        "updated_at": "2026-07-09T06:49:53.771790+00:00"
       },
       {
         "account": "Bybit Demo",
@@ -748,7 +748,7 @@
         "balance_after_trade": 319.83392824,
         "balance_after_trade_currency": "USDT",
         "balance_reconstructed": true,
-        "balance_snapshot_at": "2026-07-08T03:10:51.136174+00:00",
+        "balance_snapshot_at": "2026-07-09T06:56:15.802075+00:00",
         "balance_source": "bybit_demo_wallet_reverse_pnl",
         "breakeven": "",
         "close_time": "2026-05-05T11:13:46.444000+00:00",
@@ -814,7 +814,7 @@
         "take_profit": null,
         "timeframe": "",
         "trade_management": "",
-        "updated_at": "2026-07-08T03:05:45.227447+00:00"
+        "updated_at": "2026-07-09T06:52:01.712112+00:00"
       },
       {
         "account": "Bybit Demo",
@@ -823,7 +823,7 @@
         "balance_after_trade": 321.49132468,
         "balance_after_trade_currency": "USDT",
         "balance_reconstructed": true,
-        "balance_snapshot_at": "2026-07-08T03:10:51.136174+00:00",
+        "balance_snapshot_at": "2026-07-09T06:56:15.802075+00:00",
         "balance_source": "bybit_demo_wallet_reverse_pnl",
         "breakeven": "",
         "close_time": "2026-05-04T11:18:23.963000+00:00",
@@ -889,10 +889,10 @@
         "take_profit": null,
         "timeframe": "",
         "trade_management": "",
-        "updated_at": "2026-07-08T03:05:45.235484+00:00"
+        "updated_at": "2026-07-09T06:52:01.720037+00:00"
       }
     ],
-    "updated_at": "2026-07-08T03:10:51.185335+00:00"
+    "updated_at": "2026-07-09T06:56:15.813724+00:00"
   },
   "trading_journal_import_cache": {
     "files": {
@@ -907,7 +907,7 @@
           "source": "excel"
         },
         "name": "Bybit Demo.xlsx",
-        "rev": "0165610c7bd029d0000000322e656a1",
+        "rev": "01656280d3205f70000000322e656a1",
         "rows": [
           {
             "account": "Bybit Demo",
@@ -979,7 +979,7 @@
             "take_profit": null,
             "timeframe": "",
             "trade_management": "",
-            "updated_at": "2026-07-08T03:05:45.227447+00:00"
+            "updated_at": "2026-07-09T06:52:01.712112+00:00"
           },
           {
             "account": "Bybit Demo",
@@ -1051,69 +1051,253 @@
             "take_profit": null,
             "timeframe": "",
             "trade_management": "",
-            "updated_at": "2026-07-08T03:05:45.235484+00:00"
+            "updated_at": "2026-07-09T06:52:01.720037+00:00"
           }
         ],
-        "updated_at": "2026-07-08T03:05:45.250833+00:00"
+        "updated_at": "2026-07-09T06:52:01.729308+00:00"
       }
     },
     "source_folder": "/master_control",
-    "updated_at": "2026-07-08T03:05:45.620124+00:00",
+    "updated_at": "2026-07-09T06:52:01.758842+00:00",
     "version": 2
   },
   "trading_journal_state": {
+    "bybit_closed_pnl_last_seen": {
+      "demo": 1782981944155,
+      "live": 1783578980386
+    },
     "bybit_demo_sync": {
+      "bybit_demo_balance_backfill_changed": false,
+      "bybit_demo_balance_backfill_rows_backfilled": 2,
+      "bybit_demo_balance_backfill_rows_seen": 4,
+      "bybit_demo_balance_backfill_snapshot_at": "2026-07-09T08:45:01.778949+00:00",
       "bybit_demo_execution_warning": null,
       "last_captured_row_ids": [],
+      "last_checked_at": "2026-07-09T08:45:04.333071+00:00",
+      "last_error": null,
+      "last_invalid_time_row_details": [],
+      "last_invalid_time_rows_dropped": 0,
       "last_rows_deduped": 0,
       "last_rows_seen": 0,
       "last_rows_upserted": 0,
-      "updated_at": "2026-07-08T03:09:53.740556+00:00"
+      "single_file_mode": false,
+      "updated_at": "2026-07-09T08:45:04.343794+00:00"
     },
     "cashflow_template_created": false,
     "configured_folder": "/master_control",
     "daily_trade_sync": {
-      "last_attempt_at": "2026-07-08T03:09:01.714836+00:00",
-      "last_error": "Workbook schema migration aborted because Trade Log data rows dropped: before=1544, after=9.",
-      "last_reason": "startup_recovery",
+      "last_attempt_at": "2026-07-09T06:49:11.054967+00:00",
+      "last_error": null,
+      "last_reason": "daily",
       "last_result": {
-        "balances_found": 1,
-        "cashflow_rows_loaded": 0,
-        "dedupe_groups": 0,
-        "diagnostics": {
-          "workbook_sync_substage_timings": {
-            "enforce_single_file": 0.0,
-            "final_replace": 0.0,
-            "github_sync": 0.0,
-            "manual_override_read": 8.965793,
-            "snapshot_build": 0.301631,
-            "update_master_journal_workbook_data_only": 0.0,
-            "validation_calendar": 0.0,
-            "validation_dashboard_balances": 0.0,
-            "validation_instrument_averages": 0.0,
-            "validation_leaders": 0.0,
-            "validation_reports": 0.0,
-            "validation_trade_log": 0.0,
-            "workbook_validation_load": 0.0
+        "bybit": {
+          "demo": {
+            "account_mode": "demo",
+            "bybit_demo_credential_source": "DEMO_EXPLICIT",
+            "bybit_demo_credentials_available": true,
+            "bybit_demo_execution_capture_expected": false,
+            "bybit_demo_missing_env_vars": [],
+            "captured_row_ids": [],
+            "captured_rows": [],
+            "end_time": 1783579841539,
+            "error": null,
+            "execution_fetch_error": null,
+            "execution_rows_normalized": 0,
+            "execution_rows_seen": 0,
+            "execution_rows_upserted": 0,
+            "latest_execution_time": null,
+            "max_seen": 1782975101539,
+            "message": "Bybit demo sync completed.",
+            "missing_execution_row_ids": null,
+            "ok": true,
+            "reason": "daily",
+            "rows_deduped": 0,
+            "rows_seen": 0,
+            "rows_upserted": 0,
+            "sanitize_stats": null,
+            "single_file_mode": false,
+            "start_time": 1782975101539,
+            "warning": null
+          },
+          "live": {
+            "account_mode": "live",
+            "bybit_demo_credential_source": "KEY1",
+            "bybit_demo_credentials_available": true,
+            "bybit_demo_execution_capture_expected": false,
+            "bybit_demo_missing_env_vars": [],
+            "captured_row_ids": [],
+            "captured_rows": [],
+            "end_time": 1783579880386,
+            "error": null,
+            "execution_fetch_error": null,
+            "execution_rows_normalized": 0,
+            "execution_rows_seen": 0,
+            "execution_rows_upserted": 0,
+            "latest_execution_time": null,
+            "max_seen": 1783575380386,
+            "message": "Bybit live sync completed.",
+            "missing_execution_row_ids": null,
+            "ok": true,
+            "reason": "daily",
+            "rows_deduped": 0,
+            "rows_seen": 0,
+            "rows_upserted": 0,
+            "sanitize_stats": null,
+            "single_file_mode": false,
+            "start_time": 1783575380386,
+            "warning": null
           }
         },
-        "dropbox_workbooks_seen": 1,
-        "duplicate_rows_dropped": 0,
         "errors": [],
-        "ignored_local_workbooks": [
-          "Trading Journal.xlsx"
-        ],
-        "local_workbook_names": [
-          "Trading Journal.xlsx"
-        ],
-        "local_workbooks_seen": 1,
-        "master_journal_error": "Workbook schema migration aborted because Trade Log data rows dropped: before=1544, after=9.",
-        "master_journal_error_type": "RuntimeError",
-        "master_journal_exists": true,
-        "master_journal_ok": false,
-        "master_journal_path": "C:\\Users\\User\\Documents\\GPT\\CODEX-master\\journal\\Trading Journal.xlsx",
-        "message": "Done",
-        "oanda_recovery": {
+        "finished_at": "2026-07-09T06:52:07.901152+00:00",
+        "import": {
+          "balances_found": 1,
+          "cashflow_rows_loaded": 0,
+          "dedupe_groups": 0,
+          "diagnostics": {
+            "ambiguous_duplicate_execution_groups": [],
+            "authoritative_source": "",
+            "blank_pnl_trade_rows": 2,
+            "bybit_demo_rows_purged": 0,
+            "bybit_demo_workbook_cleared": false,
+            "cashflow_rows_total": 0,
+            "dedupe_groups": 0,
+            "dropbox_workbooks_seen": 1,
+            "duplicate_rows_dropped": 0,
+            "errors": [],
+            "excluded_bybit_demo_rows": 0,
+            "excluded_rows_total": 0,
+            "excluded_test_trade_rows": 1,
+            "ignored_local_workbooks": [
+              "Trading Journal.xlsx"
+            ],
+            "last_sync": {
+              "balances_found": 1,
+              "local_import_enabled": false,
+              "ok": true,
+              "source_mode": "both",
+              "updated_at": "2026-07-09T06:52:07.084074+00:00"
+            },
+            "local_dir": "C:\\Users\\User\\Documents\\GPT\\CODEX-master\\journal",
+            "local_rows_imported_total": 0,
+            "local_rows_parsed_total": 0,
+            "local_workbook_names": [
+              "Trading Journal.xlsx"
+            ],
+            "local_workbooks_seen": 1,
+            "non_excel_rows_removed": 0,
+            "non_local_rows_pruned": 0,
+            "oanda_export_account_label": "",
+            "oanda_export_append_error": "",
+            "oanda_export_append_failed": false,
+            "oanda_export_balance_applied": false,
+            "oanda_export_balance_parsed": null,
+            "oanda_export_balance_parsed_as_of": null,
+            "oanda_export_failure_blocks_balance_update": false,
+            "oanda_export_latest_balance": null,
+            "oanda_export_latest_balance_as_of": null,
+            "oanda_export_rows_persisted": false,
+            "oanda_export_source_path": "",
+            "oanda_export_target_workbook": "",
+            "oanda_export_trades_backfilled": 0,
+            "oanda_export_trades_failed": 0,
+            "oanda_export_trades_seen": 0,
+            "pruned_source_counts": {},
+            "quarantined_invalid_time_rows": 0,
+            "quarantined_rows": 0,
+            "raw_rows_total": 5,
+            "raw_workbook_rows_total": 2,
+            "rows_by_account": {
+              "Bybit Demo": 4,
+              "OANDA Demo": 1
+            },
+            "rows_by_asset_class": {
+              "crypto": 4,
+              "forex": 1
+            },
+            "rows_by_source": {
+              "bybit_execution_history": 2,
+              "excel": 2,
+              "oanda": 1
+            },
+            "rows_total": 5,
+            "source_duplicate_rows_dropped": 0,
+            "source_enforcement_ok": true,
+            "source_mode": "both",
+            "stale_rows_removed": 0,
+            "stats_included_trade_rows_total": 4,
+            "unmatched_manual_rows_ignored": 0,
+            "visible_rows_total": 5,
+            "visible_trade_rows_total": 5,
+            "workbook_invalid_time_order_rows": 0,
+            "workbook_rows_imported": 2
+          },
+          "dropbox_workbooks_seen": 1,
+          "duplicate_rows_dropped": 0,
+          "errors": [],
+          "ignored_local_workbooks": [
+            "Trading Journal.xlsx"
+          ],
+          "local_workbook_names": [
+            "Trading Journal.xlsx"
+          ],
+          "local_workbooks_seen": 1,
+          "message": "Done",
+          "ok": true,
+          "rows_imported": 2,
+          "snapshot_error": null,
+          "snapshot_generated": true,
+          "source_duplicate_rows_dropped": 0,
+          "source_mode": "both",
+          "templates_created": {
+            "cashflow_template_created": false,
+            "demo_workbook_created": false,
+            "trade_history_template_created": false
+          },
+          "warnings": [],
+          "workbooks_changed": 1,
+          "workbooks_scanned": 2
+        },
+        "monthly_aud_revaluation": {
+          "changed": 0,
+          "failed_months": [],
+          "failures": [],
+          "finished_at": "2026-07-09T06:52:07.901110+00:00",
+          "ok": true,
+          "partial": false,
+          "processed_months": [],
+          "reason": "daily:daily",
+          "rows": 4,
+          "started_at": "2026-07-09T06:52:07.865363+00:00",
+          "state": {
+            "error_detail": null,
+            "last_boundary_resolution": {},
+            "last_error": null,
+            "last_error_code": null,
+            "last_oanda_window": {},
+            "last_result": {
+              "changed": 0,
+              "failed_months": [],
+              "failures": [],
+              "finished_at": "2026-07-09T06:52:07.868464+00:00",
+              "mandatory_row_id": "monthly_aud_reval:bybit_live:2026-03",
+              "partial": false,
+              "processed_months": [],
+              "rows": 4,
+              "started_at": "2026-07-09T06:52:07.865726+00:00",
+              "succeeded_months": [],
+              "target_months": []
+            },
+            "last_synced_at": "2026-07-09T06:52:07.868441+00:00",
+            "month_key": null,
+            "ok": true,
+            "stage": "complete",
+            "traceback": null,
+            "updated_at": "2026-07-09T06:52:07.868458+00:00"
+          },
+          "succeeded_months": []
+        },
+        "oanda": {
           "demo": {
             "account": "demo",
             "captured_row_ids": [
@@ -1141,25 +1325,12 @@
             "transactions": 0
           }
         },
-        "ok": false,
-        "rows_imported": 2,
-        "snapshot_error": null,
-        "snapshot_generated": true,
-        "source_duplicate_rows_dropped": 0,
-        "source_mode": "both",
-        "sync_caller": "startup_recovery",
-        "sync_id": "mjsync-179f7c0998fb",
-        "templates_created": {
-          "cashflow_template_created": false,
-          "demo_workbook_created": false,
-          "trade_history_template_created": false
-        },
-        "warnings": [],
-        "workbooks_changed": 1,
-        "workbooks_scanned": 2
+        "ok": true,
+        "started_at": "2026-07-09T06:49:11.054967+00:00"
       },
-      "last_success_at": null,
-      "updated_at": "2026-07-08T03:09:01.715563+00:00"
+      "last_success_at": "2026-07-09T06:52:07.901152+00:00",
+      "running": false,
+      "updated_at": "2026-07-09T06:52:07.901817+00:00"
     },
     "demo_workbook_created": false,
     "errors": [],
@@ -1176,7 +1347,7 @@
     ],
     "source_folder": "/master_control",
     "trade_history_template_created": false,
-    "updated_at": "2026-07-08T03:05:45.614704+00:00",
+    "updated_at": "2026-07-09T06:52:01.747583+00:00",
     "used_recursive_fallback": false,
     "workbooks_reused": 0,
     "workbooks_seen": 1
@@ -1185,5 +1356,5 @@
   "watchlist": [
     "DASHUSDT"
   ],
-  "watchlist_updated_at": "2026-07-08T03:03:31.250372+00:00"
+  "watchlist_updated_at": "2026-07-09T11:31:19.477655+00:00"
 }
