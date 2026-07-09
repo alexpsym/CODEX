@@ -20,6 +20,8 @@ def test_patch_desktop_push_logs_and_stages_all_changes(tmp_path: Path):
     assert '"state_backup.json"' in content
     assert "git add -u" not in content
     assert "-uno" not in content
+    assert "PATCH_DESKTOP_PUSH_SUPPRESS_CONSOLE_TITLE" in content
+    assert "PATCH_DESKTOP_PUSH_NONINTERACTIVE" in content
     assert "call git diff --cached --stat" in content
     assert "call git fetch origin master" in content
     assert "call git rev-parse origin/master" in content
@@ -74,14 +76,16 @@ def test_patch_desktop_push_logs_and_stages_all_changes(tmp_path: Path):
     env["PATCH_DESKTOP_PUSH_LOG"] = str(latest_log)
     env["FAKE_GIT_LOG"] = str(fake_git_log)
     env["PATH"] = str(fake_bin) + os.pathsep + env["PATH"]
+    env["PATCH_DESKTOP_PUSH_SUPPRESS_CONSOLE_TITLE"] = "1"
+    env["PATCH_DESKTOP_PUSH_NONINTERACTIVE"] = "1"
 
     result = subprocess.run(
         ["cmd.exe", "/c", str(script)],
         cwd=gpt_dir,
-        input="\n",
         text=True,
         capture_output=True,
         env=env,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         timeout=30,
     )
 
@@ -93,6 +97,7 @@ def test_patch_desktop_push_logs_and_stages_all_changes(tmp_path: Path):
     assert "?? new_file.py" in log_text
     assert "Staged diff summary:" in log_text
     assert "Push verified: local HEAD matches origin/master." in log_text
+    assert "Non-interactive mode: closing without pause." in result.stdout
 
     git_calls = fake_git_log.read_text(encoding="utf-8")
     assert "status --short --branch" in git_calls
@@ -154,14 +159,16 @@ def test_patch_desktop_push_pushes_existing_commit_when_nothing_new_is_staged(tm
     env["PATCH_DESKTOP_PUSH_LOG"] = str(latest_log)
     env["FAKE_GIT_LOG"] = str(fake_git_log)
     env["PATH"] = str(fake_bin) + os.pathsep + env["PATH"]
+    env["PATCH_DESKTOP_PUSH_SUPPRESS_CONSOLE_TITLE"] = "1"
+    env["PATCH_DESKTOP_PUSH_NONINTERACTIVE"] = "1"
 
     result = subprocess.run(
         ["cmd.exe", "/c", str(script)],
         cwd=gpt_dir,
-        input="\n",
         text=True,
         capture_output=True,
         env=env,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         timeout=30,
     )
 
@@ -169,6 +176,7 @@ def test_patch_desktop_push_pushes_existing_commit_when_nothing_new_is_staged(tm
     log_text = latest_log.read_text(encoding="utf-8")
     assert "Nothing staged after git add -A -- . No new commit will be created." in log_text
     assert "Push verified: local HEAD matches origin/master." in log_text
+    assert "Non-interactive mode: closing without pause." in result.stdout
 
     git_calls = fake_git_log.read_text(encoding="utf-8").splitlines()
     assert "push origin HEAD:master" in git_calls

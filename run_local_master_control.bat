@@ -157,7 +157,9 @@ echo [local-master] Browser was not opened to avoid showing a misleading dashboa
 exit /b 1
 
 :worker
-if defined LOCAL_MASTER_WINDOW_TITLE title !LOCAL_MASTER_WINDOW_TITLE!
+if defined LOCAL_MASTER_WINDOW_TITLE (
+  if /I not "!LOCAL_MASTER_SUPPRESS_WINDOW_CLOSE!"=="1" title !LOCAL_MASTER_WINDOW_TITLE!
+)
 cd /d "%ROOT%" || (
   echo [local-master] ERROR: failed to cd to %ROOT%
   exit /b 1
@@ -208,6 +210,10 @@ if defined LOCAL_MASTER_EXIT_REQUEST (
     del /q "!LOCAL_MASTER_EXIT_REQUEST!" >nul 2>nul
     if defined LOCAL_MASTER_EDGE_PROFILE_DIR (
       if exist "!LOCAL_MASTER_EDGE_PROFILE_DIR!\" rmdir /s /q "!LOCAL_MASTER_EDGE_PROFILE_DIR!" >nul 2>nul
+    )
+    if /I "!LOCAL_MASTER_SUPPRESS_WINDOW_CLOSE!"=="1" (
+      echo [local-master] smoke/test mode: not closing shared console window.
+      exit 0
     )
     echo [local-master] closing Local Master Control command prompt.
     set "LOCAL_MASTER_SHUTDOWN_PS1=%TEMP%\local_master_shutdown_!RANDOM!_!RANDOM!.ps1"

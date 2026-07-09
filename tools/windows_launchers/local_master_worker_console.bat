@@ -9,7 +9,13 @@ set "LOG_DIR=%ROOT%logs"
 if not exist "%LOG_DIR%\" mkdir "%LOG_DIR%" >nul 2>nul
 if not defined LOCAL_MASTER_WORKER_LOG set "LOCAL_MASTER_WORKER_LOG=%LOG_DIR%\LocalTradingTools-worker-latest.log"
 if not defined LOCAL_MASTER_WINDOW_TITLE set "LOCAL_MASTER_WINDOW_TITLE=Local Master Control"
-if defined LOCAL_MASTER_WINDOW_TITLE title !LOCAL_MASTER_WINDOW_TITLE!
+if defined LOCAL_MASTER_WINDOW_TITLE (
+  if /I "!LOCAL_MASTER_SUPPRESS_WINDOW_CLOSE!"=="1" (
+    echo [local-master] smoke/test mode: not changing shared console title.
+  ) else (
+    title !LOCAL_MASTER_WINDOW_TITLE!
+  )
+)
 
 echo [local-master] visible worker console started.
 echo [local-master] worker output will print live below and is also being written to:
