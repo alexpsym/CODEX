@@ -5,8 +5,8 @@ set "ROOT=%~dp0"
 set "LOG_DIR=%ROOT%logs"
 if not exist "%LOG_DIR%\" mkdir "%LOG_DIR%" >nul 2>nul
 if not defined LOCAL_MASTER_WORKER_LOG set "LOCAL_MASTER_WORKER_LOG=%LOG_DIR%\LocalTradingTools-worker-latest.log"
-set "MASTER_ENV_DIR=C:\Users\User\Documents\GPT"
-set "MASTER_ENV_FILE=C:\Users\User\Documents\GPT\env.env"
+set "MASTER_ENV_DIR=C:\GPT"
+set "MASTER_ENV_FILE=C:\GPT\env.env"
 set "APP_PROFILE=local"
 set "AUTOSTART_SCRIPTS=bybit_monitor,oanda_monitor,fxweekend-clone"
 set "PYTHONUNBUFFERED=1"
@@ -63,6 +63,7 @@ if defined PYTHON set "PYTHON_EXE=%PYTHON%"
 
 if not exist "%MASTER_ENV_FILE%" (
   echo [local-master] ERROR: MASTER_ENV_FILE not found at %MASTER_ENV_FILE%
+  echo [local-master] Copy your env file from C:\Users\User\Documents\GPT\env.env to C:\GPT\env.env, then rerun this launcher.
   exit /b 1
 )
 

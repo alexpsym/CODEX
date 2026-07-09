@@ -13,7 +13,7 @@ input string ExportFileName   = "MarketWatchSpreadPercentFeed.json";
 input group "Desktop Window"
 input bool   LaunchDesktopWindow      = true;
 input string PythonExecutable         = "C:\\Users\\User\\miniconda3\\python.exe";
-input string DesktopWindowScriptPath  = "C:\\Users\\User\\Documents\\GPT\\CODEX-master\\mt5-clone\\spread_percent_window.py";
+input string DesktopWindowScriptPath  = "C:\\GPT\\CODEX-master\\mt5-clone\\spread_percent_window.py";
 input int    DesktopWindowRefreshMs   = 150;
 input int    DesktopWindowDecimals    = 5;
 input bool   DesktopWindowShowPoints  = false;

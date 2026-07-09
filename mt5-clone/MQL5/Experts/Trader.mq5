@@ -69,7 +69,7 @@ input group "Pepperstone Spread Export"
 input bool   EnablePepperstoneSpreadExport = true;
 input int    PepperstoneSpreadExportIntervalSeconds = 300;
 input string PepperstoneSpreadExportSymbols = "";
-input string PepperstoneSpreadExportPath = "C:\\Users\\User\\Documents\\GPT\\CODEX-master\\mt5-clone\\pepperstone_spreads_latest.json";
+input string PepperstoneSpreadExportPath = "C:\\GPT\\CODEX-master\\mt5-clone\\pepperstone_spreads_latest.json";
 
 // -------------------- Internals --------------------
 string   g_trendName    = "";

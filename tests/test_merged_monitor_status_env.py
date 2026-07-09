@@ -305,12 +305,12 @@ def test_env_bootstrap_default_dir_and_checked_files_order(monkeypatch: pytest.M
     monkeypatch.delenv("MASTER_ENV_FILE", raising=False)
     monkeypatch.delenv("MASTER_ENV_PROTECTED_KEYS", raising=False)
     info = env_bootstrap.load_master_env(force_reload=True)
-    assert info["configured_dir"] == r"C:\Users\User\Documents\GPT"
+    assert info["configured_dir"] == r"C:\GPT"
     checked_files = info["checked_files"].split(";")
-    assert checked_files[0] == r"C:\Users\User\Documents\GPT\env.env"
-    assert checked_files[1] == r"C:\Users\User\Documents\GPT\.env"
-    assert checked_files[2] == r"C:\Users\User\Documents\GPT\scanner.env"
-    assert checked_files[3] == r"C:\Users\User\Documents\GPT\master.env"
+    assert checked_files[0] == r"C:\GPT\env.env"
+    assert checked_files[1] == r"C:\GPT\.env"
+    assert checked_files[2] == r"C:\GPT\scanner.env"
+    assert checked_files[3] == r"C:\GPT\master.env"
 
 
 def test_env_bootstrap_protected_keys_preserve_existing_values(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -333,7 +333,8 @@ def test_env_bootstrap_protected_keys_preserve_existing_values(tmp_path: Path, m
 
 def test_run_scanner_local_bat_sets_explicit_env_file() -> None:
     content = (ROOT / "run_scanner_local.bat").read_text(encoding="utf-8")
-    assert 'set "MASTER_ENV_FILE=C:\\Users\\User\\Documents\\GPT\\env.env"' in content
+    assert 'set "MASTER_ENV_FILE=C:\\GPT\\env.env"' in content
+    assert r"Copy your env file from C:\Users\User\Documents\GPT\env.env to C:\GPT\env.env" in content
     assert 'if not exist "%MASTER_ENV_FILE%" (' in content
     assert "exit /b 1" in content
 
@@ -405,7 +406,8 @@ def test_run_local_master_control_bat_uses_local_autostart() -> None:
     assert 'cmd /d /s /v:on /c ""%~f0" __worker"' not in content
     assert 'ERROR: Worker exited before dashboard became ready.' in content
     wrapper = (ROOT / "tools" / "windows_launchers" / "local_master_worker_console.bat").read_text(encoding="utf-8")
-    assert 'call "%ROOT%run_local_master_control.bat" __worker > "%LOCAL_MASTER_WORKER_LOG%" 2>&1' in wrapper
+    assert "stream_local_master_worker.ps1" in wrapper
+    assert 'call "%ROOT%run_local_master_control.bat" __worker > "%LOCAL_MASTER_WORKER_LOG%" 2>&1' not in wrapper
     assert 'This window is intentionally left open so startup errors stay readable.' in wrapper
     assert "http://127.0.0.1:8000/health" in content
     assert "MASTER_READY_TIMEOUT_SECONDS" in content
@@ -461,13 +463,13 @@ def test_run_trading_journal_local_bat_profile_and_port() -> None:
 
 
 def test_all_local_bat_launchers_use_consistent_default_master_env_file() -> None:
-    expected = 'set "MASTER_ENV_FILE=C:\\Users\\User\\Documents\\GPT\\env.env"'
+    expected = 'set "MASTER_ENV_FILE=C:\\GPT\\env.env"'
     for name in (
         "run_local_master_control.bat",
         "run_scanner_local.bat",
     ):
         content = (ROOT / name).read_text(encoding="utf-8")
-        assert expected in content, f"{name} should default MASTER_ENV_FILE to Documents/GPT env.env"
+        assert expected in content, f"{name} should default MASTER_ENV_FILE to C:/GPT env.env"
     journal = (ROOT / "run_trading_journal_local.bat").read_text(encoding="utf-8")
     assert "Trading Journal.xlsx" in journal
     assert "MASTER_ENV_FILE" not in journal

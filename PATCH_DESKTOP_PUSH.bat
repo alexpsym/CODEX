@@ -2,8 +2,8 @@
 setlocal EnableExtensions DisableDelayedExpansion
 title Auto Local Commit Push
 
-set "DEFAULT_REPO=C:\Users\User\Documents\GPT\CODEX-master"
-set "DEFAULT_LOG=C:\Users\User\Documents\GPT\PATCH_DESKTOP_PUSH-latest.log"
+set "DEFAULT_REPO=C:\GPT\CODEX-master"
+set "DEFAULT_LOG=C:\GPT\PATCH_DESKTOP_PUSH-latest.log"
 
 if defined PATCH_DESKTOP_PUSH_REPO (
   set "REPO=%PATCH_DESKTOP_PUSH_REPO%"
@@ -55,6 +55,12 @@ echo.
 
 cd /d "%REPO%" || (
   echo FAILED: Could not open repo "%REPO%".
+  exit /b 1
+)
+
+if not exist "%REPO%\.git" (
+  echo FAILED: .git was not found at "%REPO%\.git".
+  echo This is not a Git checkout. Do not run git init blindly; restore or reopen the moved repo with its original .git folder.
   exit /b 1
 )
 

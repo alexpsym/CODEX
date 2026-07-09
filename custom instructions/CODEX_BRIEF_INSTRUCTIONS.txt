@@ -19,7 +19,7 @@ When creating Codex briefs:
 * Render Web Service hosts Render Master Control. MT5 runs locally. Local tools open Edge only.
 * Forex Tester 6 = 6.0.0.29. Pepperstone MT5 build 5430 is not part of Render Master Control.
 * Write final Codex summary text verbatim to `summary/CODEX_SUMMARY_latest.txt` before pushing.
-* Run `C:\Users\User\Documents\GPT\PATCH_DESKTOP_PUSH.bat` at the end of each job unless the user explicitly says not to. If missing, run repo-root `PATCH_DESKTOP_PUSH.bat`.
+* Run repo-root `PATCH_DESKTOP_PUSH.bat` at the end of each job unless the user explicitly says not to. Its default repo is `C:\GPT\CODEX-master` and its default log is `C:\GPT\PATCH_DESKTOP_PUSH-latest.log`.
 * Do not push before writing `summary/CODEX_SUMMARY_latest.txt`.
 * Do not commit temp, cache, log, environment, secret, runtime data, `render/data`, or local state files.
 * Keep cleanup conservative: only remove `.pytest_tmp*`, `.pytest_cache`, and `__pycache__` folders after verifying paths stay inside the repo.
