@@ -1048,7 +1048,7 @@ def _target_r_triplet_from_container(container: Dict[str, Any]) -> Dict[str, Any
         entry = _target_r_first_float(container, entry_keys)
         stop = _target_r_first_float(container, stop_keys)
         target = _target_r_first_float(container, target_keys)
-        if entry is not None or stop is not None or target is not None:
+        if entry is not None and stop is not None and target is not None:
             return {
                 "entry": entry,
                 "stop": stop,
@@ -1059,10 +1059,21 @@ def _target_r_triplet_from_container(container: Dict[str, Any]) -> Dict[str, Any
     return None
 
 
+def _target_r_authoritative_containers(row: Dict[str, Any]) -> List[Dict[str, Any]]:
+    containers: List[Dict[str, Any]] = []
+    seen: set[int] = set()
+    for source in (row, row.get("raw_refs"), row.get("metrics")):
+        for container in _target_r_nested_dicts(source):
+            marker = id(container)
+            if marker in seen:
+                continue
+            seen.add(marker)
+            containers.append(container)
+    return containers
+
+
 def _original_plan_levels(row: Dict[str, Any]) -> Dict[str, Any]:
-    for container in [row, *_target_r_nested_dicts(row.get("raw_refs")), *_target_r_nested_dicts(row.get("metrics"))]:
-        if not isinstance(container, dict):
-            continue
+    for container in _target_r_authoritative_containers(row):
         triplet = _target_r_triplet_from_container(container)
         if triplet:
             triplet["movement_evidence"] = _target_r_has_movement_evidence(row)
@@ -1120,9 +1131,7 @@ def _planned_target_r_from_original_plan(row: Dict[str, Any]) -> float | None:
 
 
 def _target_r_exit_price(row: Dict[str, Any]) -> float | None:
-    for container in [row, *_target_r_nested_dicts(row.get("raw_refs")), *_target_r_nested_dicts(row.get("metrics"))]:
-        if not isinstance(container, dict):
-            continue
+    for container in _target_r_authoritative_containers(row):
         value = _target_r_first_float(
             container,
             (
@@ -1172,21 +1181,325 @@ def _target_r_original_plan_trusted(row: Dict[str, Any]) -> Tuple[bool, str, Dic
     return True, "", levels
 
 
+def _target_r_normalized_map(container: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        str(key).strip().casefold().replace("-", "_").replace(" ", "_"): value
+        for key, value in container.items()
+    }
+
+
+def _target_r_text_from_container(container: Dict[str, Any], keys: Tuple[str, ...]) -> str:
+    normalized = _target_r_normalized_map(container)
+    for key in keys:
+        value = normalized.get(key)
+        text = str(value or "").strip().upper()
+        if text:
+            return text
+    return ""
+
+
+def _target_r_net_profit(row: Dict[str, Any]) -> float | None:
+    for container in _target_r_authoritative_containers(row):
+        value = _target_r_first_float(
+            container,
+            (
+                "net_profit",
+                "net_pnl",
+                "net_pl",
+                "result_cash",
+                "realized_pnl",
+                "realised_pnl",
+                "closed_pnl",
+                "realized_pl",
+                "realised_pl",
+            ),
+        )
+        if value is not None:
+            return value
+    return None
+
+
+def _target_r_net_profit_currency(row: Dict[str, Any]) -> str:
+    explicit = _currency_code(
+        row.get("realized_pnl_currency"),
+        row.get("realised_pnl_currency"),
+        row.get("result_currency"),
+        row.get("currency"),
+        row.get("account_currency"),
+    )
+    if explicit != "UNKNOWN":
+        return explicit
+    inferred = _infer_trade_log_currency(row, field="net_pnl")
+    return inferred or "UNKNOWN"
+
+
+def _target_r_risk_currency_for_key(container: Dict[str, Any], key: str, row: Dict[str, Any]) -> str:
+    normalized = _target_r_normalized_map(container)
+    key_text = str(key or "").strip().casefold()
+    if key_text.endswith("_aud") or key_text in {"risk_aud", "estimated_total_loss_aud"}:
+        return "AUD"
+    if key_text.endswith("_usd") or key_text in {"risk_usd"}:
+        return "USD"
+    if key_text.endswith("_usdt") or key_text in {"risk_usdt"}:
+        return "USDT"
+    if key_text.endswith("_home") or key_text in {"risk_amount_home"}:
+        return _currency_code(
+            normalized.get("home_currency"),
+            normalized.get("account_currency"),
+            row.get("account_currency"),
+            row.get("currency"),
+            row.get("result_currency"),
+        )
+    return _currency_code(
+        normalized.get(f"{key_text}_currency"),
+        normalized.get("risk_currency"),
+        normalized.get("original_risk_currency"),
+        normalized.get("planned_risk_currency"),
+        normalized.get("display_currency"),
+        normalized.get("currency"),
+        normalized.get("account_currency"),
+        row.get("account_currency"),
+        row.get("currency"),
+        row.get("result_currency"),
+    )
+
+
+def _target_r_currency_compatible(candidate_currency: str, net_currency: str) -> bool:
+    candidate = str(candidate_currency or "").strip().upper()
+    net = str(net_currency or "").strip().upper()
+    if not candidate or candidate == "UNKNOWN" or not net or net == "UNKNOWN":
+        return True
+    return candidate == net
+
+
+def _target_r_stored_original_monetary_risk(row: Dict[str, Any]) -> Tuple[float | None, str]:
+    net_currency = _target_r_net_profit_currency(row)
+    risk_keys = (
+        "original_monetary_risk",
+        "planned_monetary_risk",
+        "original_risk_amount",
+        "planned_risk_amount",
+        "initial_risk_amount",
+        "risk_amount_home",
+        "risk_amount",
+        "risk_cash",
+        "risk_money",
+        "risk_value_amount",
+        "risk_aud",
+        "risk_usd",
+        "risk_usdt",
+        "estimated_total_loss",
+        "estimated_total_loss_aud",
+        "estimated_total_loss_usd",
+        "estimated_total_loss_usdt",
+        "estimated_loss",
+        "planned_total_loss",
+        "original_total_loss",
+        "max_loss",
+    )
+    saw_currency_mismatch = False
+    for container in _target_r_authoritative_containers(row):
+        normalized = _target_r_normalized_map(container)
+        for key in risk_keys:
+            value = _as_float(normalized.get(key))
+            if value is None or not math.isfinite(value) or value <= 0:
+                continue
+            risk_currency = _target_r_risk_currency_for_key(container, key, row)
+            if not _target_r_currency_compatible(risk_currency, net_currency):
+                saw_currency_mismatch = True
+                continue
+            return value, ""
+        risk_value = _as_float(normalized.get("risk_value"))
+        risk_mode = str(normalized.get("risk_mode") or "").strip().casefold()
+        if risk_value is not None and math.isfinite(risk_value) and risk_value > 0:
+            fixed_risk_mode = any(token in risk_mode for token in ("fixed", "cash", "amount", "aud", "usd", "usdt"))
+            percent_risk_mode = "percent" in risk_mode or risk_mode in {"pct", "%"}
+            if fixed_risk_mode and not percent_risk_mode:
+                risk_currency = "AUD" if "aud" in risk_mode else ("USDT" if "usdt" in risk_mode else ("USD" if "usd" in risk_mode else "UNKNOWN"))
+                if not _target_r_currency_compatible(risk_currency, net_currency):
+                    saw_currency_mismatch = True
+                    continue
+                return risk_value, ""
+    if saw_currency_mismatch:
+        return None, "stored_risk_currency_mismatch"
+    return None, "missing_stored_original_monetary_risk"
+
+
+def _target_r_quantity(row: Dict[str, Any]) -> float | None:
+    for container in _target_r_authoritative_containers(row):
+        value = _target_r_first_float(
+            container,
+            (
+                "qty",
+                "quantity",
+                "qty_raw",
+                "size",
+                "filled_qty",
+                "closed_size",
+                "exec_qty",
+                "units",
+            ),
+        )
+        if value is not None:
+            return value
+    return None
+
+
+def _target_r_explicit_multiplier(row: Dict[str, Any]) -> float | None:
+    for container in _target_r_authoritative_containers(row):
+        value = _target_r_first_float(
+            container,
+            (
+                "contract_multiplier",
+                "contract_size",
+                "multiplier",
+                "price_to_pnl_multiplier",
+                "point_value",
+                "tick_value",
+            ),
+        )
+        if value is not None:
+            return value
+    return None
+
+
+def _target_r_is_fx_row(row: Dict[str, Any]) -> bool:
+    account = str(row.get("account_label") or row.get("account") or "").upper()
+    symbol = str(row.get("symbol") or "").upper()
+    asset = str(row.get("asset_class") or "").strip().lower()
+    return (
+        asset in {"fx", "forex", "foreign_exchange"}
+        or any(token in account for token in ("OANDA", "PEPPERSTONE", "FOREX", " FX"))
+        or _is_likely_fx_pair(symbol)
+    )
+
+
+def _target_r_is_crypto_row(row: Dict[str, Any]) -> bool:
+    account = str(row.get("account_label") or row.get("account") or "").upper()
+    symbol = str(row.get("symbol") or "").upper()
+    asset = str(row.get("asset_class") or "").strip().lower()
+    return (
+        asset in {"crypto", "cryptocurrency", "digital_asset", "digitalasset"}
+        or any(token in account for token in ("BYBIT", "BINANCE", "COINSPOT"))
+        or bool(_symbol_quote_currency(symbol))
+    )
+
+
+def _target_r_commission_abs(row: Dict[str, Any]) -> float:
+    for container in _target_r_authoritative_containers(row):
+        value = _as_float(container.get("commission"))
+        if value is None:
+            value = _as_float(container.get("fees"))
+        if value is not None and math.isfinite(value):
+            return abs(value)
+    return 0.0
+
+
+def _target_r_fx_units(row: Dict[str, Any], qty: float) -> float | None:
+    unit_text = ""
+    for container in _target_r_authoritative_containers(row):
+        unit_text = _target_r_text_from_container(container, ("quantity_unit", "qty_unit", "size_unit", "unit"))
+        if unit_text:
+            break
+    multiplier = _target_r_explicit_multiplier(row)
+    if multiplier is not None:
+        return qty * multiplier
+    if unit_text in {"UNIT", "UNITS"}:
+        return qty
+    if unit_text in {"LOT", "LOTS", "STANDARD_LOT", "STANDARD_LOTS"}:
+        return qty * 100000.0
+    if 0 < qty < 1000:
+        return qty * 100000.0
+    return qty
+
+
+def _target_r_reconstructed_original_monetary_risk(
+    row: Dict[str, Any],
+    levels: Dict[str, Any],
+    net_profit: float,
+) -> Tuple[float | None, str]:
+    entry = _as_float(levels.get("entry"))
+    stop = _as_float(levels.get("stop"))
+    if entry is None or stop is None or not (math.isfinite(entry) and math.isfinite(stop)):
+        return None, "missing_original_price_risk"
+    price_risk = abs(entry - stop)
+    if price_risk <= 1e-12:
+        return None, "zero_original_stop_risk"
+    qty = _target_r_quantity(row)
+    if qty is None or not math.isfinite(qty) or qty <= 0:
+        return None, "missing_original_risk_quantity"
+
+    net_currency = _target_r_net_profit_currency(row)
+    quote_currency = _symbol_quote_currency(row.get("symbol"))
+    multiplier = _target_r_explicit_multiplier(row)
+    if _target_r_is_crypto_row(row) and not _target_r_is_fx_row(row):
+        multiplier = multiplier if multiplier is not None else 1.0
+        risk_currency = quote_currency or net_currency
+        if not _target_r_currency_compatible(risk_currency, net_currency):
+            return None, "reconstructed_risk_currency_mismatch"
+        risk = price_risk * qty * multiplier
+        if risk > 0 and math.isfinite(risk):
+            return risk, ""
+
+    if _target_r_is_fx_row(row):
+        exit_price = _target_r_exit_price(row)
+        if exit_price is None or not math.isfinite(exit_price) or exit_price <= 0:
+            return None, "missing_fx_conversion"
+        side = _target_r_trade_side(row)
+        favourable_move = (exit_price - entry) if side == "long" else (entry - exit_price)
+        if favourable_move <= 1e-12:
+            return None, "unreliable_fx_conversion"
+        units = _target_r_fx_units(row, qty)
+        if units is None or not math.isfinite(units) or units <= 0:
+            return None, "missing_fx_contract_units"
+        commission = _target_r_commission_abs(row)
+        gross_profit = net_profit + commission
+        if gross_profit <= 0 or not math.isfinite(gross_profit):
+            return None, "unreliable_fx_conversion"
+        conversion = gross_profit / (favourable_move * units)
+        if conversion <= 0 or not math.isfinite(conversion):
+            return None, "unreliable_fx_conversion"
+        risk = (price_risk * units * conversion) + commission
+        if risk > 0 and math.isfinite(risk):
+            return risk, ""
+        return None, "invalid_fx_monetary_risk"
+
+    if multiplier is not None:
+        risk = price_risk * qty * multiplier
+        if risk > 0 and math.isfinite(risk):
+            return risk, ""
+    return None, "missing_original_monetary_risk"
+
+
+def _target_r_original_monetary_risk(
+    row: Dict[str, Any],
+    levels: Dict[str, Any],
+    net_profit: float,
+) -> Tuple[float | None, str]:
+    stored, stored_reason = _target_r_stored_original_monetary_risk(row)
+    if stored is not None:
+        return stored, ""
+    reconstructed, reconstructed_reason = _target_r_reconstructed_original_monetary_risk(row, levels, net_profit)
+    if reconstructed is not None:
+        return reconstructed, ""
+    if stored_reason != "missing_stored_original_monetary_risk":
+        return None, stored_reason
+    return None, reconstructed_reason
+
+
 def _target_r_realized_from_original_plan(row: Dict[str, Any]) -> Tuple[float | None, str]:
     trusted, reason, levels = _target_r_original_plan_trusted(row)
     if not trusted:
         return None, reason
-    entry = _as_float(levels.get("entry"))
-    stop = _as_float(levels.get("stop"))
-    exit_price = _target_r_exit_price(row)
-    if exit_price is None:
-        return None, "missing_exit_price"
-    if not math.isfinite(exit_price) or exit_price <= 0:
-        return None, "invalid_exit_price"
-    side = _target_r_trade_side(row)
-    risk = abs(entry - stop)
-    favourable_move = (exit_price - entry) if side == "long" else (entry - exit_price)
-    realized_r = favourable_move / risk if risk > 0 else None
+    net_profit = _target_r_net_profit(row)
+    if net_profit is None or not math.isfinite(net_profit):
+        return None, "missing_net_profit"
+    if net_profit <= 0:
+        return None, "non_positive_realized_r"
+    risk, risk_reason = _target_r_original_monetary_risk(row, levels, net_profit)
+    if risk is None:
+        return None, risk_reason
+    realized_r = net_profit / risk if risk > 0 else None
     if realized_r is None or not math.isfinite(realized_r):
         return None, "invalid_realized_r"
     if realized_r <= 0:
@@ -1218,6 +1531,19 @@ def _target_r_distribution(values: List[float], increment: float) -> Dict[float,
             continue
         counts[_target_r_bucket(value, increment)] += 1
     return OrderedDict((bucket, counts[bucket]) for bucket in sorted(counts))
+
+
+def _target_r_bucket_label(bucket: float, increment: float) -> str:
+    return f"{_format_target_r_value(bucket)}R-{_format_target_r_value(bucket + increment)}R"
+
+
+def _target_r_bucket_values(values: List[float], increment: float) -> "OrderedDict[float, List[float]]":
+    grouped: Dict[float, List[float]] = defaultdict(list)
+    for value in values:
+        if value is None or not math.isfinite(value) or value <= 0:
+            continue
+        grouped[_target_r_bucket(value, increment)].append(value)
+    return OrderedDict((bucket, grouped[bucket]) for bucket in sorted(grouped))
 
 
 def _target_r_percentile(sorted_values: List[float], percentile: float) -> float | None:
@@ -1269,6 +1595,8 @@ def _target_r_empty_payload(reason: str = "not_enough_eligible_wins") -> Dict[st
         "target_r_increment": None,
         "target_r_distribution": {},
         "target_r_peak_bucket": None,
+        "target_r_peak_bucket_low": None,
+        "target_r_peak_bucket_high": None,
         "target_r_peak_instances": None,
         "target_r_recommended": None,
         "current_median_original_planned_target_r": None,
@@ -1302,31 +1630,49 @@ def _target_r_recommendation(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         realized_values.append(realized_r)
 
     current_median = _target_r_percentile(sorted(planned_values), 0.5) if planned_values else None
+    current_avg = (sum(planned_values) / len(planned_values)) if planned_values else None
     if len(realized_values) < 5:
         payload = _target_r_empty_payload("not_enough_eligible_wins")
         payload["eligible_target_r_wins"] = len(realized_values)
         payload["current_median_original_planned_target_r"] = current_median
-        payload["current_avg_original_planned_target_r"] = current_median
+        payload["current_avg_original_planned_target_r"] = current_avg
         payload["target_r_excluded_count"] = sum(excluded.values())
         payload["target_r_excluded_reasons"] = dict(excluded)
         return payload
 
     increment = _choose_target_r_increment(realized_values)
-    distribution = _target_r_distribution(realized_values, increment)
-    if not distribution:
+    bucket_values = _target_r_bucket_values(realized_values, increment)
+    if not bucket_values:
         payload = _target_r_empty_payload("empty_distribution")
         payload["eligible_target_r_wins"] = len(realized_values)
         payload["target_r_increment"] = increment
         payload["current_median_original_planned_target_r"] = current_median
-        payload["current_avg_original_planned_target_r"] = current_median
+        payload["current_avg_original_planned_target_r"] = current_avg
         payload["target_r_excluded_count"] = sum(excluded.values())
         payload["target_r_excluded_reasons"] = dict(excluded)
         return payload
 
-    recommended_r, peak_instances = max(
-        distribution.items(),
-        key=lambda item: (item[1], -item[0]),
+    peak_bucket, modal_values = max(
+        bucket_values.items(),
+        key=lambda item: (len(item[1]), -item[0]),
     )
+    modal_values_sorted = sorted(modal_values)
+    recommended_r = _target_r_percentile(modal_values_sorted, 0.5)
+    if recommended_r is None or not math.isfinite(recommended_r) or recommended_r <= 0:
+        payload = _target_r_empty_payload("invalid_modal_recommended_r")
+        payload["eligible_target_r_wins"] = len(realized_values)
+        payload["target_r_increment"] = increment
+        payload["current_median_original_planned_target_r"] = current_median
+        payload["current_avg_original_planned_target_r"] = current_avg
+        payload["target_r_excluded_count"] = sum(excluded.values())
+        payload["target_r_excluded_reasons"] = dict(excluded)
+        return payload
+    peak_instances = len(modal_values)
+    distribution = OrderedDict(
+        (_target_r_bucket_label(bucket, increment), len(values))
+        for bucket, values in bucket_values.items()
+    )
+    peak_bucket_label = _target_r_bucket_label(peak_bucket, increment)
     tolerance = increment / 2.0
     if current_median is None:
         direction = "Keep target"
@@ -1346,11 +1692,13 @@ def _target_r_recommendation(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         "eligible_target_r_wins": len(realized_values),
         "target_r_increment": increment,
         "target_r_distribution": dict(distribution),
-        "target_r_peak_bucket": recommended_r,
+        "target_r_peak_bucket": peak_bucket_label,
+        "target_r_peak_bucket_low": peak_bucket,
+        "target_r_peak_bucket_high": peak_bucket + increment,
         "target_r_peak_instances": peak_instances,
         "target_r_recommended": recommended_r,
         "current_median_original_planned_target_r": current_median,
-        "current_avg_original_planned_target_r": current_median,
+        "current_avg_original_planned_target_r": current_avg,
         "target_r_excluded_count": sum(excluded.values()),
         "target_r_excluded_reasons": dict(excluded),
     }
@@ -1494,6 +1842,8 @@ def _merge_metric_buckets(*buckets: Dict[str, Any] | None) -> Dict[str, Any]:
         "target_r_increment",
         "target_r_distribution",
         "target_r_peak_bucket",
+        "target_r_peak_bucket_low",
+        "target_r_peak_bucket_high",
         "target_r_peak_instances",
         "target_r_recommended",
         "current_median_original_planned_target_r",

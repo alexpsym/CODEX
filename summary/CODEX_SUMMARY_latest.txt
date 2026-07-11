@@ -1,46 +1,53 @@
-Codex completion workflow and target recommendation analytics summary
+Codex target recommendation analytics summary
 
 Files changed:
-- AGENTS.md
-- summary/CODEX_SUMMARY_latest.txt
 - tools/master_journal_workbook.py
-- render/static/trading_journal.js
 - tests/test_master_service_trading_journal_stats.py
 - tests/test_master_journal_workbook.py
-- tests/test_trading_journal_js_syntax.py
+- summary/CODEX_SUMMARY_latest.txt
 
-Repository instruction update:
-- Added root-level AGENTS.md for persistent Codex repository instructions.
-- Added the mandatory completion workflow:
-  - write the final summary to summary/CODEX_SUMMARY_latest.txt after every completed task,
-  - run repository-root PATCH_DESKTOP_PUSH.bat after writing the summary,
-  - only skip commit/push when the user explicitly says not to push,
-  - do not report completion until the script succeeds and verifies local HEAD matches origin/master,
-  - report exact script failures and leave work incomplete if the script fails,
-  - do not replace the script with manual Git commands unless the script is broken,
-  - do not commit secrets, env files, logs, caches, runtime data, or local-state files.
-- Clarified that custom instructions/CODEX_BRIEF_INSTRUCTIONS.txt is ChatGPT-only and must not be used as Codex persistent instructions.
+Production update:
+- Corrected target realized R to use net profit after costs divided by original monetary risk.
+- Added stored monetary-risk discovery for planned/original risk amount fields, quote-result estimated total loss, and fixed cash risk values when currencies are compatible.
+- Added conservative reconstruction for crypto and FX when stored monetary risk is unavailable:
+  - crypto uses original price risk, quantity, and multiplier/linear quote currency;
+  - FX requires quantity, original price risk, and an observed conversion from realized gross move, never just gross price-distance R.
+- Kept gross price R-multiple out of target recommendations when monetary risk is unavailable.
+- Fixed original-plan discovery so partial top-level fields no longer block a complete nested planned/original entry-stop-target triplet.
+- Changed target histograms to range labels and recommends the median of actual eligible net-R values inside the modal range.
+- Kept tied modal buckets selecting the lower range while preventing 0R recommendations.
+- Corrected current_avg_original_planned_target_r to be a true arithmetic mean; decision logic still compares against median planned target R.
 
-Target recommendation analytics update:
-- Replaced target recommendation logic based on winner-versus-loser average target distance.
-- Target recommendations now come from eligible positive winning R-multiple frequency distributions.
-- Eligible target analysis requires genuine non-test winning trades with trustworthy original entry, stop, target, side, and exit data.
-- Realized winning R is recalculated from original risk distance instead of trusting a moved-stop or stored R multiple.
-- Original planned target R is compared using the median planned target R for the same scope.
-- Freedman-Diaconis bin width is snapped deterministically to 0.25R, 0.5R, or 1.0R.
-- The modal R bucket becomes the recommended target; tied modal buckets choose the lower R target.
-- Recommendation cells now include both direction and numeric recommendation, for example: Reduce target - Recommended: 3.0R (current median: 4.0R).
-- Insufficient target data now reports: Insufficient eligible wins - recommended target unavailable.
-- JavaScript target recommendation fallback no longer recreates target advice from average winner/loss target distances.
-- Trade Log recommendation columns remain removed from the active schema; SYMBOLS and STATS1 receive the target recommendation strings.
+Workbook refresh and inspection:
+- Refreshed journal/Trading Journal.xlsx through update_master_journal_workbook_data_only using stats rebuilt from the workbook rows.
+- The refreshed workbook was byte-identical to HEAD, but the requested cells were inspected in place.
+- STATS1 target recommendations:
+  - Overall: Keep target - Recommended: 2.03R (current median: 2R)
+  - FX: Keep target - Recommended: 2.05R (current median: 2.0R)
+  - Crypto: Reduce target - Recommended: 1.95R (current median: 2.18R)
+- SYMBOLS target recommendations inspected:
+  - EURUSD: Reduce target - Recommended: 0.16R (current median: 2.0R)
+  - USDJPY: Reduce target - Recommended: 0.44R (current median: 2.0R)
+  - BTCUSDT: Keep target - Recommended: 1.95R (current median: 2.01R)
+  - ETHUSDT: Keep target - Recommended: 1.98R (current median: 2.09R)
+- Trade Log does not contain target recommendation columns.
+- SYMBOLS contains explicit insufficient messages for insufficient symbols.
 
 Verification performed:
-- python -m py_compile tools\master_journal_workbook.py render\master_service.py
-  Result: passed.
-- pytest --basetemp=.pytest_tmp_target_rec tests\test_master_service_trading_journal_stats.py::test_compute_journal_stats_recommends_stop_from_win_loss_distances_but_target_needs_r_data tests\test_master_service_trading_journal_stats.py::test_compute_journal_stats_target_recommendation_uses_realized_original_r_distribution tests\test_master_service_trading_journal_stats.py::test_compute_journal_stats_target_recommendation_allows_moved_trade_with_original_plan tests\test_master_service_trading_journal_stats.py::test_compute_journal_stats_target_planned_r_uses_original_plan_and_validates_side tests\test_master_service_trading_journal_stats.py::test_target_recommendation_recalculates_r_from_original_stop_not_stored_r tests\test_master_service_trading_journal_stats.py::test_target_recommendation_tied_modal_bucket_selects_lower_target tests\test_master_service_trading_journal_stats.py::test_target_recommendation_compares_modal_bucket_to_median_planned_target_r tests\test_master_journal_workbook.py::test_recommendations_are_removed_from_trade_log_and_kept_in_symbols_and_stats1 tests\test_master_journal_workbook.py::test_data_only_update_repairs_stale_recommendation_columns_and_stats1_labels tests\test_master_journal_workbook.py::test_update_data_only_writes_dashboard_horizontal_core_metric_aliases tests\test_trading_journal_js_syntax.py::test_trading_journal_target_recommendation_does_not_fallback_to_averages tests\test_trading_journal_js_syntax.py::test_trading_journal_js_parses_with_node
-  Result: 12 passed, 6 warnings.
+- python -m pytest --basetemp=.pytest_tmp_target_rec -o cache_dir=.pytest_tmp_target_rec_cache tests\test_master_service_trading_journal_stats.py::test_compute_journal_stats_target_recommendation_uses_realized_original_r_distribution tests\test_master_service_trading_journal_stats.py::test_target_recommendation_uses_net_profit_over_original_monetary_risk_not_stored_gross_r tests\test_master_service_trading_journal_stats.py::test_target_realized_r_uses_net_profit_after_costs_over_original_monetary_risk tests\test_master_service_trading_journal_stats.py::test_target_recommendation_does_not_use_gross_price_r_when_monetary_risk_unavailable tests\test_master_service_trading_journal_stats.py::test_target_recommendation_uses_nested_complete_original_plan_after_partial_top_level_plan tests\test_master_service_trading_journal_stats.py::test_target_recommendation_never_recommends_zero_for_small_positive_modal_bucket tests\test_master_service_trading_journal_stats.py::test_target_recommendation_current_avg_original_planned_target_r_is_arithmetic_mean tests\test_master_journal_workbook.py::test_recommendations_are_removed_from_trade_log_and_kept_in_symbols_and_stats1 tests\test_master_journal_workbook.py::test_real_trading_journal_source_data_produces_numeric_target_recommendations
+  Result: 9 passed, 4 warnings.
+- python -m pytest --basetemp=.pytest_tmp_target_rec -o cache_dir=.pytest_tmp_target_rec_cache tests\test_master_journal_workbook.py::test_checked_in_trading_journal_has_no_direction_only_or_zero_target_recommendations
+  Result: 1 passed.
+- python -m pytest --basetemp=.pytest_tmp_target_rec -o cache_dir=.pytest_tmp_target_rec_cache tests\test_master_service_trading_journal_stats.py tests\test_master_journal_workbook.py -k "recommendation or real_trading_journal or checked_in"
+  Result: 13 passed, 153 deselected, 4 warnings.
+- python -m pytest --basetemp=.pytest_tmp_target_rec -o cache_dir=.pytest_tmp_target_rec_cache tests\test_master_service_trading_journal_stats.py
+  Result: 25 passed, 3 failed, 4 warnings.
+  The failing tests were pre-existing/out-of-scope market-return percentage expectations:
+  - test_market_return_percentage_uses_account_balance_return
+  - test_market_return_percentage_is_bounded_by_account_capital
+  - test_market_return_percentage_rejects_mixed_fx_currencies
 
 Git safety notes before push:
-- Pre-existing local/runtime changes were present before this AGENTS.md update.
-- Do not commit runtime/local-state paths such as render/data, render/uploads, state_backup.json, state_manifest.json, or unrelated local monitor state.
+- Pre-existing runtime/local-state changes are still present in bybit_monitor/custom_alerts.json, render/data, state_manifest.json, and render/uploads.
+- Those runtime/local-state files must not be committed.
 - PATCH_DESKTOP_PUSH.bat will be run from the repository root after this summary is written.

@@ -7,7 +7,7 @@ import xml.etree.ElementTree as ET
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 import pytest
-from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, read_master_journal_source, update_master_journal_workbook_data_only, SHEET_ORDER, STATS1_SHEET, STATS2_SHEET, SYMBOLS_SHEET, TRADE_LOG_HEADERS, TRADE_LOG_HEADERS_V1, OLD_TRADE_LOG_HEADERS, PRE_MOVE_TRADE_LOG_HEADERS, MOVE_TO_FIELD_MAP, TRADE_LOG_HEADER_ROWS, TRADE_LOG_DATA_START_ROW, TRADE_LOG_FILTER_HEADER_ROW, TRADE_NUMBER_HEADER, STOP_RECOMMENDATION_HEADER, TARGET_RECOMMENDATION_HEADER, REPORT_YEARLY_SHEET, REPORT_METRIC_LABELS, INSTRUMENT_AVERAGES_HEADERS, INSTRUMENT_AVERAGES_GROUP_HEADER_ROW, INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, INSTRUMENT_AVERAGES_DATA_START_ROW, DASHBOARD_MOVE_TO_BREAK_EVEN_LABEL, DASHBOARD_MOVE_TO_PROFIT_LABEL, PROFIT_FILL, LOSS_FILL, DURATION_NUMBER_FORMAT, adaptive_percent_number_format, adaptive_number_format, resolve_trade_folder_link, expected_report_sheet_names, _apply_trade_number_hyperlinks, _ensure_trade_log_schema, _ensure_instrument_averages_schema, _ensure_pnl_calendar_freeze_panes, _repair_trade_log_move_to_durations, _trade_log_header_map, _instrument_averages_header_map, _result_percentage_totals_by_market
+from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, read_master_journal_source, update_master_journal_workbook_data_only, SHEET_ORDER, STATS1_SHEET, STATS2_SHEET, SYMBOLS_SHEET, TRADE_LOG_HEADERS, TRADE_LOG_HEADERS_V1, OLD_TRADE_LOG_HEADERS, PRE_MOVE_TRADE_LOG_HEADERS, MOVE_TO_FIELD_MAP, TRADE_LOG_HEADER_ROWS, TRADE_LOG_DATA_START_ROW, TRADE_LOG_FILTER_HEADER_ROW, TRADE_NUMBER_HEADER, STOP_RECOMMENDATION_HEADER, TARGET_RECOMMENDATION_HEADER, TARGET_RECOMMENDATION_INSUFFICIENT, REPORT_YEARLY_SHEET, REPORT_METRIC_LABELS, INSTRUMENT_AVERAGES_HEADERS, INSTRUMENT_AVERAGES_GROUP_HEADER_ROW, INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, INSTRUMENT_AVERAGES_DATA_START_ROW, DASHBOARD_MOVE_TO_BREAK_EVEN_LABEL, DASHBOARD_MOVE_TO_PROFIT_LABEL, PROFIT_FILL, LOSS_FILL, DURATION_NUMBER_FORMAT, adaptive_percent_number_format, adaptive_number_format, resolve_trade_folder_link, expected_report_sheet_names, _apply_trade_number_hyperlinks, _ensure_trade_log_schema, _ensure_instrument_averages_schema, _ensure_pnl_calendar_freeze_panes, _repair_trade_log_move_to_durations, _trade_log_header_map, _instrument_averages_header_map, _result_percentage_totals_by_market
 from tools.master_journal_workbook import _format_duration_display, _parse_duration_text, _repair_legacy_duration_number_formats, _populate_symbols_metrics_preserving_layout, _repair_symbols_header_merges_preserving_layout
 from tools.master_journal_workbook import RECOMMENDATION_TRADE_LOG_HEADERS, _trade_log_three_row_header_values_for
 from openpyxl.utils.cell import coordinate_to_tuple, get_column_letter, range_boundaries
@@ -34,6 +34,20 @@ def _header_col(ws, name: str) -> int:
         return _instrument_averages_header_map(ws)[name]
     headers = [ws.cell(1, c).value for c in range(1, ws.max_column + 1)]
     return headers.index(name) + 1
+
+
+def _assert_target_recommendation_is_numeric_or_insufficient(value: object) -> None:
+    text = str(value or "").strip()
+    if text == TARGET_RECOMMENDATION_INSUFFICIENT:
+        return
+    assert "Recommended:" in text
+    assert text not in {"Reduce target", "Increase target", "Keep target"}
+    number_text = text.split("Recommended:", 1)[1].split("R", 1)[0].strip()
+    assert number_text
+    if "." in number_text:
+        assert len(number_text.split(".", 1)[1]) <= 2
+    number = float(number_text)
+    assert number > 0
 
 
 def _move_group_ranges(ws):
@@ -2373,7 +2387,8 @@ def test_recommendations_are_removed_from_trade_log_and_kept_in_symbols_and_stat
             "entry_price": 100.0, "exit_price": 100.0 + (10.0 * r_multiple),
             "stop_loss": 99.0, "take_profit": 140.0,
             "planned_entry_price": 100.0, "planned_stop_price": 90.0, "planned_target_price": 140.0,
-            "net_profit": 10.0, "result_pct": 1.0, "r_multiple": r_multiple,
+            "net_profit": 10.0 * r_multiple, "result_pct": 1.0, "r_multiple": r_multiple,
+            "original_risk_amount": 10.0,
         }
         for idx, r_multiple in enumerate([2.4, 2.5, 2.7, 3.0, 3.1, 3.4, 3.6, 4.8], start=1)
     ] + [
@@ -2409,7 +2424,7 @@ def test_recommendations_are_removed_from_trade_log_and_kept_in_symbols_and_stat
     assert symbols.cell(INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, symbol_headers[STOP_RECOMMENDATION_HEADER]).value == "Recommendation"
     assert symbols.cell(INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, symbol_headers[TARGET_RECOMMENDATION_HEADER]).value == "Recommendation"
     assert symbols.cell(INSTRUMENT_AVERAGES_DATA_START_ROW, symbol_headers[STOP_RECOMMENDATION_HEADER]).value == "Reduce stop loss"
-    assert symbols.cell(INSTRUMENT_AVERAGES_DATA_START_ROW, symbol_headers[TARGET_RECOMMENDATION_HEADER]).value == "Reduce target — Recommended: 3.0R (current median: 4.0R)"
+    assert symbols.cell(INSTRUMENT_AVERAGES_DATA_START_ROW, symbol_headers[TARGET_RECOMMENDATION_HEADER]).value == "Reduce target — Recommended: 3.25R (current median: 4.0R)"
     assert _cell_fill_rgb(symbols.cell(INSTRUMENT_AVERAGES_DATA_START_ROW, symbol_headers[STOP_RECOMMENDATION_HEADER])) not in {"FFF2CC", PROFIT_FILL, LOSS_FILL}
     assert _cell_fill_rgb(symbols.cell(INSTRUMENT_AVERAGES_DATA_START_ROW, symbol_headers[TARGET_RECOMMENDATION_HEADER])) not in {"FFF2CC", PROFIT_FILL, LOSS_FILL}
 
@@ -2421,11 +2436,68 @@ def test_recommendations_are_removed_from_trade_log_and_kept_in_symbols_and_stat
     assert len(recommendation_rows) >= 2
     assert [stats1.cell(recommendation_rows[0], col).value for col in (2, 3, 4)] == ["Reduce stop loss", "Reduce stop loss", "Need wins & losses"]
     assert [stats1.cell(recommendation_rows[1], col).value for col in (2, 3, 4)] == [
-        "Reduce target — Recommended: 3.0R (current median: 4.0R)",
-        "Reduce target — Recommended: 3.0R (current median: 4.0R)",
+        "Reduce target — Recommended: 3.25R (current median: 4.0R)",
+        "Reduce target — Recommended: 3.25R (current median: 4.0R)",
         "Insufficient eligible wins — recommended target unavailable",
     ]
     wb.close()
+
+
+def test_real_trading_journal_source_data_produces_numeric_target_recommendations():
+    source = Path("journal") / "Trading Journal.xlsx"
+    if not source.exists():
+        pytest.skip("checked-in Trading Journal.xlsx is not available")
+    from tools.master_journal_workbook import _target_r_recommendation
+
+    snap = read_master_journal_source(source)
+    active_rows = [
+        row for row in (snap.get("items") or [])
+        if str(row.get("row_type") or "trade").strip().lower() == "trade" and not row.get("is_test_trade")
+    ]
+    groups = {
+        "overall": active_rows,
+        "fx": [row for row in active_rows if str(row.get("asset_class") or "").lower() == "fx"],
+        "crypto": [row for row in active_rows if str(row.get("asset_class") or "").lower() == "crypto"],
+        "EURUSD": [row for row in active_rows if str(row.get("symbol") or "").upper() == "EURUSD"],
+        "USDJPY": [row for row in active_rows if str(row.get("symbol") or "").upper() == "USDJPY"],
+        "BTCUSDT": [row for row in active_rows if str(row.get("symbol") or "").upper() == "BTCUSDT"],
+        "ETHUSDT": [row for row in active_rows if str(row.get("symbol") or "").upper() == "ETHUSDT"],
+    }
+    for rows in groups.values():
+        rec = _target_r_recommendation(rows)
+        _assert_target_recommendation_is_numeric_or_insufficient(rec["target_recommendation"])
+        assert rec["target_recommendation"] != TARGET_RECOMMENDATION_INSUFFICIENT
+
+
+def test_checked_in_trading_journal_has_no_direction_only_or_zero_target_recommendations():
+    path = Path("journal") / "Trading Journal.xlsx"
+    if not path.exists():
+        pytest.skip("checked-in Trading Journal.xlsx is not available")
+    wb = load_workbook(path, data_only=True)
+    try:
+        trade_headers = _trade_log_header_map(wb["Trade Log"])
+        assert TARGET_RECOMMENDATION_HEADER not in trade_headers
+
+        stats1 = wb[STATS1_SHEET]
+        max_target_row = next(row for row in range(1, stats1.max_row + 1) if stats1.cell(row, 1).value == "Max target %")
+        target_recommendation_row = max_target_row + 2
+        for col in (2, 3, 4):
+            _assert_target_recommendation_is_numeric_or_insufficient(stats1.cell(target_recommendation_row, col).value)
+
+        symbols = wb[SYMBOLS_SHEET]
+        symbol_headers = _instrument_averages_header_map(symbols)
+        target_col = symbol_headers[TARGET_RECOMMENDATION_HEADER]
+        symbol_col = symbol_headers["Symbol"]
+        rec_by_symbol = {
+            str(symbols.cell(row, symbol_col).value or "").strip().upper(): symbols.cell(row, target_col).value
+            for row in range(INSTRUMENT_AVERAGES_DATA_START_ROW, symbols.max_row + 1)
+        }
+        for symbol in ("EURUSD", "USDJPY", "BTCUSDT", "ETHUSDT"):
+            _assert_target_recommendation_is_numeric_or_insufficient(rec_by_symbol.get(symbol))
+            assert rec_by_symbol.get(symbol) != TARGET_RECOMMENDATION_INSUFFICIENT
+        assert any(value == TARGET_RECOMMENDATION_INSUFFICIENT for value in rec_by_symbol.values())
+    finally:
+        wb.close()
 
 
 def test_data_only_update_repairs_stale_recommendation_columns_and_stats1_labels(tmp_path: Path):
