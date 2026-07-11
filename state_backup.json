@@ -1,41 +1,7 @@
 {
   "alerts": {
     "bybit": {
-      "alerts": [
-        {
-          "cooldown_seconds": 0,
-          "direction": "either",
-          "enabled": true,
-          "id": "d7f56968ece04ddbac72e8b6f8478a7d",
-          "kind": "move",
-          "symbol": "BRUSDT",
-          "threshold": 10.0,
-          "unit": "pct",
-          "window_seconds": 60
-        },
-        {
-          "cooldown_seconds": 0,
-          "direction": "either",
-          "enabled": true,
-          "id": "3e7bc55e3e994d9ebc4bc95ebff0e4a3",
-          "kind": "move",
-          "symbol": "AKTUSDT",
-          "threshold": 6.0,
-          "unit": "pct",
-          "window_seconds": 60
-        },
-        {
-          "cooldown_seconds": 0,
-          "direction": "either",
-          "enabled": true,
-          "id": "8b3273b6594b406c8f0aeb951d38a1a6",
-          "kind": "move",
-          "symbol": "DOGEUSDT",
-          "threshold": 1.5,
-          "unit": "pct",
-          "window_seconds": 60
-        }
-      ]
+      "alerts": []
     },
     "oanda": {
       "alerts": []
@@ -250,7 +216,7 @@
     "updated_at": "2026-07-09T06:49:54.060640+00:00"
   },
   "pending_webhooks": [],
-  "savedAt": "2026-07-09T11:31:28.494797+00:00",
+  "savedAt": "2026-07-09T12:07:47.910319+00:00",
   "source_host": "DESKTOP-1B14EQ6",
   "source_profile": "local",
   "trade_contexts": [
