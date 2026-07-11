@@ -101,9 +101,12 @@ for %%P in (
   ".env.*"
   "*.env"
   "render/data"
+  "render/uploads"
+  "bybit_monitor/custom_alerts.json"
   "bybit_monitor/runtime_status.json"
   "bybit_monitor/state.json"
   "oanda_monitor/runtime_status.json"
+  "state_manifest.json"
   "state_backup.json"
 ) do (
   call git reset -q -- "%%~P" >nul 2>nul

@@ -5748,6 +5748,7 @@ def _journal_rows_from_oanda_transaction_history_frame(
                     "sl": _to_float(r.get("STOP LOSS")) or pending_context.get("sl"),
                     "tp": _to_float(r.get("TAKE PROFIT")) or pending_context.get("tp"),
                     "spread_cost": _to_float(r.get("SPREAD COST")),
+                    "conversion_rate": _to_float(r.get("CONVERSION RATE")),
                 }
             )
             continue
@@ -5781,6 +5782,7 @@ def _journal_rows_from_oanda_transaction_history_frame(
                     "close_details": details,
                     "exit_price": _to_float(r.get("PRICE")),
                     "close_spread_cost": _to_float(r.get("SPREAD COST")),
+                    "close_conversion_rate": _to_float(r.get("CONVERSION RATE")),
                     "pl": pl,
                     "balance": bal,
                     "commission_raw": _to_float(r.get("COMMISSION")) or 0.0,
@@ -5820,6 +5822,9 @@ def _journal_rows_from_oanda_transaction_history_frame(
         open_spread = _to_float(opened.get("spread_cost"))
         close_spread = _to_float(trade.get("close_spread_cost"))
         total_spread = (open_spread or 0.0) + (close_spread or 0.0)
+        open_conversion_rate = _to_float(opened.get("conversion_rate"))
+        close_conversion_rate = _to_float(trade.get("close_conversion_rate"))
+        conversion_rate = open_conversion_rate if open_conversion_rate is not None else close_conversion_rate
         net = (
             (_to_float(trade.get("pl")) or 0.0)
             + allocated_financing
@@ -5864,6 +5869,9 @@ def _journal_rows_from_oanda_transaction_history_frame(
                         "oanda_raw_gsl_fee": gsl_fee_raw,
                         "oanda_raw_gsl_premium": gsl_premium_raw,
                         "oanda_actual_commission_total": actual_commission,
+                        "oanda_export_conversion_rate": conversion_rate,
+                        "oanda_open_conversion_rate": open_conversion_rate,
+                        "oanda_close_conversion_rate": close_conversion_rate,
                     },
                     "raw_refs": {
                         "source_path": source_path,
@@ -5872,6 +5880,9 @@ def _journal_rows_from_oanda_transaction_history_frame(
                         "close_details": trade.get("close_details"),
                         "transaction_date": trade.get("close_time"),
                         "transactionId": trade.get("close_ticket"),
+                        "conversion_rate": conversion_rate,
+                        "open_conversion_rate": open_conversion_rate,
+                        "close_conversion_rate": close_conversion_rate,
                     },
                     "updated_at": _utc_now_iso(),
                 }
@@ -8777,6 +8788,16 @@ def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[s
                 "take_profit": (trade_ctx or {}).get("take_profit"),
                 "order_id": tx_order_id,
                 "transaction_id": tx_id,
+                "homeConversionFactors": (
+                    trade_opened.get("homeConversionFactors")
+                    or entry.get("homeConversionFactors")
+                    or (trade_ctx or {}).get("homeConversionFactors")
+                ),
+                "plHomeConversionFactors": (
+                    trade_opened.get("plHomeConversionFactors")
+                    or entry.get("plHomeConversionFactors")
+                    or (trade_ctx or {}).get("plHomeConversionFactors")
+                ),
             }
 
     close_legs: List[Dict[str, object]] = []
@@ -8825,6 +8846,18 @@ def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[s
             abs(_to_float(entry.get("commission")) or 0.0)
             + abs(_to_float(entry.get("guaranteedExecutionFee")) or 0.0)
         )
+        home_conversion_factors = (
+            (open_leg or {}).get("homeConversionFactors")
+            or close_leg.get("homeConversionFactors")
+            or entry.get("homeConversionFactors")
+            or (leg_ctx or {}).get("homeConversionFactors")
+        )
+        pl_home_conversion_factors = (
+            (open_leg or {}).get("plHomeConversionFactors")
+            or close_leg.get("plHomeConversionFactors")
+            or entry.get("plHomeConversionFactors")
+            or (leg_ctx or {}).get("plHomeConversionFactors")
+        )
         row_id_suffix = trade_id or f"{tx_id}:{idx}"
         row: Dict[str, object] = {
             "id": f"oanda:{account}:{symbol}:{row_id_suffix}:close",
@@ -8864,10 +8897,18 @@ def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[s
                     "is_test_trade": row_is_test_trade,
                     "oanda_half_spread_cost": spread_cost or None,
                     "oanda_actual_commission_total": fees,
+                    "homeConversionFactors": home_conversion_factors,
+                    "plHomeConversionFactors": pl_home_conversion_factors,
                 }.items()
                 if v not in ("", None)
             },
-            "raw_refs": {"transactionId": tx_id, "orderId": entry.get("orderID"), "tradeId": trade_id},
+            "raw_refs": {
+                "transactionId": tx_id,
+                "orderId": entry.get("orderID"),
+                "tradeId": trade_id,
+                "homeConversionFactors": home_conversion_factors,
+                "plHomeConversionFactors": pl_home_conversion_factors,
+            },
         }
         rows.append(_normalize_journal_profit_fields(row))
         if trade_id and open_leg and leg_units >= abs(_to_float(open_leg.get("units")) or 0.0):

@@ -2389,6 +2389,7 @@ def test_recommendations_are_removed_from_trade_log_and_kept_in_symbols_and_stat
             "planned_entry_price": 100.0, "planned_stop_price": 90.0, "planned_target_price": 140.0,
             "net_profit": 10.0 * r_multiple, "result_pct": 1.0, "r_multiple": r_multiple,
             "original_risk_amount": 10.0,
+            "original_risk_currency": "AUD",
         }
         for idx, r_multiple in enumerate([2.4, 2.5, 2.7, 3.0, 3.1, 3.4, 3.6, 4.8], start=1)
     ] + [
@@ -2463,10 +2464,11 @@ def test_real_trading_journal_source_data_produces_numeric_target_recommendation
         "BTCUSDT": [row for row in active_rows if str(row.get("symbol") or "").upper() == "BTCUSDT"],
         "ETHUSDT": [row for row in active_rows if str(row.get("symbol") or "").upper() == "ETHUSDT"],
     }
-    for rows in groups.values():
+    for name, rows in groups.items():
         rec = _target_r_recommendation(rows)
         _assert_target_recommendation_is_numeric_or_insufficient(rec["target_recommendation"])
-        assert rec["target_recommendation"] != TARGET_RECOMMENDATION_INSUFFICIENT
+        if name in {"overall", "crypto", "BTCUSDT", "ETHUSDT"}:
+            assert rec["target_recommendation"] != TARGET_RECOMMENDATION_INSUFFICIENT
 
 
 def test_checked_in_trading_journal_has_no_direction_only_or_zero_target_recommendations():
@@ -2494,6 +2496,7 @@ def test_checked_in_trading_journal_has_no_direction_only_or_zero_target_recomme
         }
         for symbol in ("EURUSD", "USDJPY", "BTCUSDT", "ETHUSDT"):
             _assert_target_recommendation_is_numeric_or_insufficient(rec_by_symbol.get(symbol))
+        for symbol in ("BTCUSDT", "ETHUSDT"):
             assert rec_by_symbol.get(symbol) != TARGET_RECOMMENDATION_INSUFFICIENT
         assert any(value == TARGET_RECOMMENDATION_INSUFFICIENT for value in rec_by_symbol.values())
     finally:

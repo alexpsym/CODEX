@@ -1256,35 +1256,52 @@ def _target_r_risk_currency_for_key(container: Dict[str, Any], key: str, row: Di
         normalized.get("original_risk_currency"),
         normalized.get("planned_risk_currency"),
         normalized.get("display_currency"),
-        normalized.get("currency"),
-        normalized.get("account_currency"),
-        row.get("account_currency"),
-        row.get("currency"),
-        row.get("result_currency"),
     )
 
 
 def _target_r_currency_compatible(candidate_currency: str, net_currency: str) -> bool:
     candidate = str(candidate_currency or "").strip().upper()
     net = str(net_currency or "").strip().upper()
-    if not candidate or candidate == "UNKNOWN" or not net or net == "UNKNOWN":
-        return True
-    return candidate == net
+    return bool(candidate and candidate != "UNKNOWN" and net and net != "UNKNOWN" and candidate == net)
 
 
-def _target_r_stored_original_monetary_risk(row: Dict[str, Any]) -> Tuple[float | None, str]:
+def _target_r_close_enough(left: Any, right: Any) -> bool:
+    left_num = _as_float(left)
+    right_num = _as_float(right)
+    if left_num is None or right_num is None:
+        return False
+    return math.isclose(left_num, right_num, rel_tol=1e-7, abs_tol=1e-9)
+
+
+def _target_r_quote_triplet_from_container(container: Dict[str, Any]) -> Dict[str, Any] | None:
+    entry = _target_r_first_float(container, ("entry_price", "entry_price_used", "quote_entry_price"))
+    stop = _target_r_first_float(container, ("stop_price", "stop_loss", "stop_loss_price", "quote_stop_price"))
+    target = _target_r_first_float(container, ("target_price", "take_profit", "take_profit_price", "quote_target_price"))
+    if entry is not None and stop is not None and target is not None:
+        return {"entry": entry, "stop": stop, "target": target, "source": "quote", "explicit": True}
+    return None
+
+
+def _target_r_container_matches_original_levels(container: Dict[str, Any], levels: Dict[str, Any]) -> bool:
+    triplet = _target_r_triplet_from_container(container) or _target_r_quote_triplet_from_container(container)
+    if not triplet:
+        return False
+    return (
+        _target_r_close_enough(triplet.get("entry"), levels.get("entry"))
+        and _target_r_close_enough(triplet.get("stop"), levels.get("stop"))
+        and _target_r_close_enough(triplet.get("target"), levels.get("target"))
+    )
+
+
+def _target_r_stored_original_monetary_risk(row: Dict[str, Any], levels: Dict[str, Any]) -> Tuple[float | None, str]:
     net_currency = _target_r_net_profit_currency(row)
-    risk_keys = (
+    verified_risk_keys = (
         "original_monetary_risk",
         "planned_monetary_risk",
         "original_risk_amount",
         "planned_risk_amount",
         "initial_risk_amount",
         "risk_amount_home",
-        "risk_amount",
-        "risk_cash",
-        "risk_money",
-        "risk_value_amount",
         "risk_aud",
         "risk_usd",
         "risk_usdt",
@@ -1292,19 +1309,24 @@ def _target_r_stored_original_monetary_risk(row: Dict[str, Any]) -> Tuple[float 
         "estimated_total_loss_aud",
         "estimated_total_loss_usd",
         "estimated_total_loss_usdt",
-        "estimated_loss",
         "planned_total_loss",
         "original_total_loss",
-        "max_loss",
     )
     saw_currency_mismatch = False
+    saw_unknown_currency = False
     for container in _target_r_authoritative_containers(row):
         normalized = _target_r_normalized_map(container)
-        for key in risk_keys:
+        container_matches_levels = _target_r_container_matches_original_levels(container, levels)
+        for key in verified_risk_keys:
             value = _as_float(normalized.get(key))
             if value is None or not math.isfinite(value) or value <= 0:
                 continue
+            if key.startswith("estimated_total_loss") and not container_matches_levels:
+                continue
             risk_currency = _target_r_risk_currency_for_key(container, key, row)
+            if not risk_currency or risk_currency == "UNKNOWN":
+                saw_unknown_currency = True
+                continue
             if not _target_r_currency_compatible(risk_currency, net_currency):
                 saw_currency_mismatch = True
                 continue
@@ -1314,14 +1336,19 @@ def _target_r_stored_original_monetary_risk(row: Dict[str, Any]) -> Tuple[float 
         if risk_value is not None and math.isfinite(risk_value) and risk_value > 0:
             fixed_risk_mode = any(token in risk_mode for token in ("fixed", "cash", "amount", "aud", "usd", "usdt"))
             percent_risk_mode = "percent" in risk_mode or risk_mode in {"pct", "%"}
-            if fixed_risk_mode and not percent_risk_mode:
+            if fixed_risk_mode and not percent_risk_mode and container_matches_levels:
                 risk_currency = "AUD" if "aud" in risk_mode else ("USDT" if "usdt" in risk_mode else ("USD" if "usd" in risk_mode else "UNKNOWN"))
+                if not risk_currency or risk_currency == "UNKNOWN":
+                    saw_unknown_currency = True
+                    continue
                 if not _target_r_currency_compatible(risk_currency, net_currency):
                     saw_currency_mismatch = True
                     continue
                 return risk_value, ""
     if saw_currency_mismatch:
         return None, "stored_risk_currency_mismatch"
+    if saw_unknown_currency:
+        return None, "missing_independent_original_monetary_risk"
     return None, "missing_stored_original_monetary_risk"
 
 
@@ -1413,6 +1440,37 @@ def _target_r_fx_units(row: Dict[str, Any], qty: float) -> float | None:
     return qty
 
 
+def _target_r_independent_fx_loss_conversion(row: Dict[str, Any]) -> float | None:
+    direct_keys = (
+        "conversion_rate",
+        "conversionrate",
+        "oanda_conversion_rate",
+        "oanda_export_conversion_rate",
+        "oanda_original_loss_conversion_rate",
+        "home_conversion_loss",
+        "home_conversion_factor_loss",
+        "loss_conversion_factor",
+        "account_loss",
+        "accountloss",
+    )
+    nested_factor_keys = ("homeconversionfactors", "plhomeconversionfactors")
+    for container in _target_r_authoritative_containers(row):
+        normalized = _target_r_normalized_map(container)
+        for key in direct_keys:
+            value = _as_float(normalized.get(key))
+            if value is not None and math.isfinite(value) and value > 0:
+                return value
+        for key in nested_factor_keys:
+            factors = normalized.get(key)
+            if isinstance(factors, dict):
+                factor_map = _target_r_normalized_map(factors)
+                for loss_key in ("loss", "accountloss", "account_loss"):
+                    value = _as_float(factor_map.get(loss_key))
+                    if value is not None and math.isfinite(value) and value > 0:
+                        return value
+    return None
+
+
 def _target_r_reconstructed_original_monetary_risk(
     row: Dict[str, Any],
     levels: Dict[str, Any],
@@ -1442,27 +1500,16 @@ def _target_r_reconstructed_original_monetary_risk(
             return risk, ""
 
     if _target_r_is_fx_row(row):
-        exit_price = _target_r_exit_price(row)
-        if exit_price is None or not math.isfinite(exit_price) or exit_price <= 0:
-            return None, "missing_fx_conversion"
-        side = _target_r_trade_side(row)
-        favourable_move = (exit_price - entry) if side == "long" else (entry - exit_price)
-        if favourable_move <= 1e-12:
-            return None, "unreliable_fx_conversion"
         units = _target_r_fx_units(row, qty)
         if units is None or not math.isfinite(units) or units <= 0:
-            return None, "missing_fx_contract_units"
-        commission = _target_r_commission_abs(row)
-        gross_profit = net_profit + commission
-        if gross_profit <= 0 or not math.isfinite(gross_profit):
-            return None, "unreliable_fx_conversion"
-        conversion = gross_profit / (favourable_move * units)
-        if conversion <= 0 or not math.isfinite(conversion):
-            return None, "unreliable_fx_conversion"
-        risk = (price_risk * units * conversion) + commission
+            return None, "missing_independent_original_monetary_risk"
+        conversion = _target_r_independent_fx_loss_conversion(row)
+        if conversion is None:
+            return None, "missing_independent_original_monetary_risk"
+        risk = price_risk * units * conversion
         if risk > 0 and math.isfinite(risk):
             return risk, ""
-        return None, "invalid_fx_monetary_risk"
+        return None, "missing_independent_original_monetary_risk"
 
     if multiplier is not None:
         risk = price_risk * qty * multiplier
@@ -1476,12 +1523,14 @@ def _target_r_original_monetary_risk(
     levels: Dict[str, Any],
     net_profit: float,
 ) -> Tuple[float | None, str]:
-    stored, stored_reason = _target_r_stored_original_monetary_risk(row)
+    stored, stored_reason = _target_r_stored_original_monetary_risk(row, levels)
     if stored is not None:
         return stored, ""
     reconstructed, reconstructed_reason = _target_r_reconstructed_original_monetary_risk(row, levels, net_profit)
     if reconstructed is not None:
         return reconstructed, ""
+    if _target_r_is_fx_row(row):
+        return None, "missing_independent_original_monetary_risk"
     if stored_reason != "missing_stored_original_monetary_risk":
         return None, stored_reason
     return None, reconstructed_reason

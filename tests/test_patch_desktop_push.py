@@ -41,6 +41,9 @@ def test_patch_desktop_push_logs_and_stages_all_changes(tmp_path: Path):
     assert "git add -A -- ." in content
     assert 'call git reset -q -- "%%~P"' in content
     assert '"render/data"' in content
+    assert '"render/uploads"' in content
+    assert '"bybit_monitor/custom_alerts.json"' in content
+    assert '"state_manifest.json"' in content
     assert '"state_backup.json"' in content
     assert "git add -u" not in content
     assert "-uno" not in content
@@ -124,6 +127,9 @@ def test_patch_desktop_push_logs_and_stages_all_changes(tmp_path: Path):
     assert "status --short --untracked-files=all" in git_calls
     assert "add -A -- ." in git_calls
     assert 'reset -q -- "render/data"' in git_calls
+    assert 'reset -q -- "render/uploads"' in git_calls
+    assert 'reset -q -- "bybit_monitor/custom_alerts.json"' in git_calls
+    assert 'reset -q -- "state_manifest.json"' in git_calls
     assert 'reset -q -- "state_backup.json"' in git_calls
     assert "diff --cached --stat" in git_calls
     assert "fetch origin master" in git_calls
@@ -211,9 +217,23 @@ def test_gitignore_excludes_generated_logs_caches_and_local_env_files():
         ".env.*",
         "*.env",
         "render/data/",
+        "render/uploads/",
         "bybit_monitor/runtime_status.json",
         "bybit_monitor/state.json",
+        "bybit_monitor/custom_alerts.json",
         "oanda_monitor/runtime_status.json",
         "state_backup.json",
+        "state_manifest.json",
     }
     assert required.issubset(set(ignore))
+
+
+def test_patch_desktop_push_excludes_confirmed_runtime_local_state_paths():
+    script = (ROOT / "PATCH_DESKTOP_PUSH.bat").read_text(encoding="utf-8")
+    for path in (
+        '"bybit_monitor/custom_alerts.json"',
+        '"state_manifest.json"',
+        '"render/uploads"',
+        '"render/data"',
+    ):
+        assert path in script

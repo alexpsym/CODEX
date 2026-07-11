@@ -62,6 +62,7 @@ if _httpx_spec is None:
     httpx_stub.__spec__ = importlib.machinery.ModuleSpec("httpx", loader=None)
     sys.modules["httpx"] = httpx_stub
 
+import render.master_service as master_service
 from render.master_service import _compute_journal_stats, _compute_journal_period_stats, _build_journal_balance_timelines
 from tools.master_journal_workbook import TARGET_RECOMMENDATION_INSUFFICIENT, _target_r_recommendation, _target_r_realized_from_original_plan
 
@@ -318,6 +319,7 @@ def _target_distribution_trade(
         "net_profit": resolved_net_profit,
         "result_pct": result_pct,
         "r_multiple": r_multiple,
+        "currency": "AUD",
     }
     if include_plan:
         row.update({
@@ -327,6 +329,7 @@ def _target_distribution_trade(
         })
     if realized_r is not None:
         row["original_risk_amount"] = original_risk_amount
+        row["original_risk_currency"] = "AUD"
     row.update(overrides)
     if "exit_price" not in row:
         if realized_r is not None:
@@ -374,7 +377,7 @@ def test_compute_journal_stats_target_recommendation_uses_realized_original_r_di
     assert risk["current_avg_original_planned_target_r"] == pytest.approx(4.0)
     assert risk["target_r_excluded_reasons"]["not_winning_trade"] >= 2
     assert direct_target["target_r_excluded_reasons"]["test_trade"] == 1
-    assert risk["target_r_excluded_reasons"]["missing_original_risk_quantity"] == 1
+    assert risk["target_r_excluded_reasons"]["missing_independent_original_monetary_risk"] == 1
     assert risk["target_r_excluded_reasons"]["moved_without_original_plan"] == 1
     assert by_market["overall"]["target_recommendation"] == risk["target_recommendation"]
     assert by_market["fx"]["target_recommendation"] == risk["target_recommendation"]
@@ -490,6 +493,62 @@ def test_target_realized_r_uses_net_profit_after_costs_over_original_monetary_ri
     assert realized_r == pytest.approx(0.85)
 
 
+def _fx_trade_with_independent_conversion(
+    trade_id: str,
+    *,
+    net_profit: float,
+    conversion: float | None = 1.5,
+    financing: float | None = None,
+) -> dict:
+    row = {
+        "id": trade_id,
+        "row_type": "trade",
+        "asset_class": "fx",
+        "account": "OANDA DEMO",
+        "symbol": "EURUSD",
+        "side": "BUY",
+        "entry_price": 1.1,
+        "exit_price": 1.101,
+        "stop_loss": 1.099,
+        "take_profit": 1.102,
+        "planned_entry_price": 1.1,
+        "planned_stop_price": 1.099,
+        "planned_target_price": 1.102,
+        "qty": 0.1,
+        "qty_raw": 10000,
+        "qty_unit": "lots",
+        "net_profit": net_profit,
+        "currency": "AUD",
+    }
+    if conversion is not None:
+        row["raw_refs"] = {"homeConversionFactors": {"loss": conversion}}
+    if financing is not None:
+        row["swap"] = financing
+    return row
+
+
+def test_fx_net_r_changes_when_net_profit_changes_with_fixed_independent_risk() -> None:
+    first_r, first_reason = _target_r_realized_from_original_plan(
+        _fx_trade_with_independent_conversion("fx-fixed-risk-1", net_profit=15.0)
+    )
+    second_r, second_reason = _target_r_realized_from_original_plan(
+        _fx_trade_with_independent_conversion("fx-fixed-risk-2", net_profit=30.0)
+    )
+
+    assert first_reason == ""
+    assert second_reason == ""
+    assert first_r == pytest.approx(1.0)
+    assert second_r == pytest.approx(2.0)
+
+
+def test_fx_net_profit_cannot_be_cancelled_by_inferred_conversion_rate() -> None:
+    first_row = _fx_trade_with_independent_conversion("fx-no-inferred-1", net_profit=15.0, conversion=None)
+    second_row = _fx_trade_with_independent_conversion("fx-no-inferred-2", net_profit=30.0, conversion=None)
+
+    assert _target_r_realized_from_original_plan(first_row) == (None, "missing_independent_original_monetary_risk")
+    assert _target_r_realized_from_original_plan(second_row) == (None, "missing_independent_original_monetary_risk")
+
+
 def test_target_recommendation_does_not_use_gross_price_r_when_monetary_risk_unavailable() -> None:
     rows = []
     for idx, value in enumerate([1.2, 1.3, 1.4, 1.5, 1.6], start=1):
@@ -501,7 +560,96 @@ def test_target_recommendation_does_not_use_gross_price_r_when_monetary_risk_una
 
     assert risk["eligible_target_r_wins"] == 0
     assert risk["target_recommendation"] == TARGET_RECOMMENDATION_INSUFFICIENT
-    assert risk["target_r_excluded_reasons"]["missing_original_risk_quantity"] == 5
+    assert risk["target_r_excluded_reasons"]["missing_independent_original_monetary_risk"] == 5
+
+
+def test_fx_home_conversion_factors_loss_produces_original_monetary_risk() -> None:
+    realized_r, reason = _target_r_realized_from_original_plan(
+        _fx_trade_with_independent_conversion("fx-home-conv", net_profit=22.5)
+    )
+
+    assert reason == ""
+    assert realized_r == pytest.approx(1.5)
+
+
+def test_fx_financing_changes_net_r_numerator_without_changing_conversion_factor() -> None:
+    base_r, base_reason = _target_r_realized_from_original_plan(
+        _fx_trade_with_independent_conversion("fx-no-financing", net_profit=15.0, financing=0.0)
+    )
+    financed_r, financed_reason = _target_r_realized_from_original_plan(
+        _fx_trade_with_independent_conversion("fx-with-financing", net_profit=14.0, financing=-1.0)
+    )
+
+    assert base_reason == ""
+    assert financed_reason == ""
+    assert base_r == pytest.approx(1.0)
+    assert financed_r == pytest.approx(14.0 / 15.0)
+
+
+def test_unknown_original_risk_currency_is_not_compatible() -> None:
+    row = _target_distribution_trade("unknown-risk-currency", 1.5)
+    row.pop("original_risk_currency", None)
+
+    realized_r, reason = _target_r_realized_from_original_plan(row)
+
+    assert realized_r is None
+    assert reason == "missing_independent_original_monetary_risk"
+
+
+def test_unrelated_max_loss_is_never_used_as_original_risk() -> None:
+    row = _fx_trade_with_independent_conversion("fx-max-loss", net_profit=15.0, conversion=None)
+    row["max_loss"] = 15.0
+
+    realized_r, reason = _target_r_realized_from_original_plan(row)
+
+    assert realized_r is None
+    assert reason == "missing_independent_original_monetary_risk"
+
+
+def test_crypto_reconstructs_original_monetary_risk_independently() -> None:
+    row = {
+        "id": "crypto-risk",
+        "row_type": "trade",
+        "asset_class": "crypto",
+        "account": "BYBIT",
+        "symbol": "BTCUSDT",
+        "side": "BUY",
+        "entry_price": 100.0,
+        "exit_price": 130.0,
+        "stop_loss": 90.0,
+        "take_profit": 130.0,
+        "planned_entry_price": 100.0,
+        "planned_stop_price": 90.0,
+        "planned_target_price": 130.0,
+        "qty": 0.5,
+        "net_profit": 15.0,
+        "currency": "USDT",
+    }
+
+    realized_r, reason = _target_r_realized_from_original_plan(row)
+
+    assert reason == ""
+    assert realized_r == pytest.approx(3.0)
+
+
+def test_oanda_export_conversion_rate_is_retained_and_used_for_target_r() -> None:
+    csv = """TICKET,TRANSACTION DATE,TRANSACTION TYPE,DETAILS,INSTRUMENT,PRICE,UNITS,DIRECTION,SPREAD COST,STOP LOSS,TAKE PROFIT,CONVERSION RATE,FINANCING,COMMISSION,GSL FEE,GSL PREMIUM,PL,BALANCE
+100,2026-01-01 10:00:00 AEST,ORDER_FILL,MARKET_ORDER,EUR_USD,1.10000,10000,Buy,0.0,1.09900,1.10200,1.5,0,0,0,0,0,1000
+101,2026-01-01 11:00:00 AEST,ORDER_FILL,TAKE_PROFIT_ORDER,EUR_USD,1.10200,10000,Sell,0.0,,,1.6,0,0,0,0,30,1030
+"""
+    parsed = master_service._journal_rows_from_oanda_transaction_history_frame(
+        master_service.pd.read_csv(master_service.io.StringIO(csv)),
+        account_mode="demo",
+        account_label="OANDA DEMO",
+        source_path="oanda_conversion.csv",
+    )
+    row = parsed["rows"][0]
+
+    assert row["metrics"]["oanda_export_conversion_rate"] == pytest.approx(1.5)
+    assert row["raw_refs"]["conversion_rate"] == pytest.approx(1.5)
+    realized_r, reason = _target_r_realized_from_original_plan(row)
+    assert reason == ""
+    assert realized_r == pytest.approx(2.0)
 
 
 def test_target_recommendation_uses_nested_complete_original_plan_after_partial_top_level_plan() -> None:

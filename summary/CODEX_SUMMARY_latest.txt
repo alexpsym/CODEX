@@ -1,53 +1,66 @@
-Codex target recommendation analytics summary
+Codex FX target-recommendation and push-safety revision summary
 
 Files changed:
+- .gitignore
+- PATCH_DESKTOP_PUSH.bat
+- render/master_service.py
 - tools/master_journal_workbook.py
 - tests/test_master_service_trading_journal_stats.py
 - tests/test_master_journal_workbook.py
+- tests/test_patch_desktop_push.py
 - summary/CODEX_SUMMARY_latest.txt
 
-Production update:
-- Corrected target realized R to use net profit after costs divided by original monetary risk.
-- Added stored monetary-risk discovery for planned/original risk amount fields, quote-result estimated total loss, and fixed cash risk values when currencies are compatible.
-- Added conservative reconstruction for crypto and FX when stored monetary risk is unavailable:
-  - crypto uses original price risk, quantity, and multiplier/linear quote currency;
-  - FX requires quantity, original price risk, and an observed conversion from realized gross move, never just gross price-distance R.
-- Kept gross price R-multiple out of target recommendations when monetary risk is unavailable.
-- Fixed original-plan discovery so partial top-level fields no longer block a complete nested planned/original entry-stop-target triplet.
-- Changed target histograms to range labels and recommends the median of actual eligible net-R values inside the modal range.
-- Kept tied modal buckets selecting the lower range while preventing 0R recommendations.
-- Corrected current_avg_original_planned_target_r to be a true arithmetic mean; decision logic still compares against median planned target R.
+Target recommendation correction:
+- Removed the circular FX monetary-risk reconstruction that derived conversion from realised P/L and exit movement.
+- FX target-R now requires independently established original monetary risk:
+  - known-currency stored original/planned monetary risk,
+  - verified original calculator/quote estimated_total_loss with known matching currency,
+  - OANDA independent loss conversion factors such as homeConversionFactors.loss, plHomeConversionFactors.loss, or exported CONVERSION RATE.
+- FX trades without independent original monetary risk are excluded with missing_independent_original_monetary_risk.
+- FX monetary risk is now absolute(original entry - original stop) * original units * independent loss conversion factor.
+- Realised commissions, financing, swap, guaranteed-stop fees and other costs remain in the net P/L numerator only.
+- Unknown risk currency is no longer treated as compatible.
+- Broad/unsafe stored-risk fallbacks such as max_loss, generic risk_amount, generic risk_cash, generic risk_money, and generic estimated_loss are no longer accepted.
+- Crypto target-R still uses net P/L divided by independently reconstructed original monetary risk from original price risk, quantity, multiplier and quote currency.
+
+OANDA data preservation:
+- OANDA transaction-history CSV import now preserves exported CONVERSION RATE from open and close rows in metrics/raw_refs.
+- OANDA API/fill row construction now preserves homeConversionFactors and plHomeConversionFactors in metrics/raw_refs.
+- Existing OANDA financing, commission, GSL fee/premium and swap/net-profit handling remains intact.
 
 Workbook refresh and inspection:
-- Refreshed journal/Trading Journal.xlsx through update_master_journal_workbook_data_only using stats rebuilt from the workbook rows.
-- The refreshed workbook was byte-identical to HEAD, but the requested cells were inspected in place.
-- STATS1 target recommendations:
-  - Overall: Keep target - Recommended: 2.03R (current median: 2R)
-  - FX: Keep target - Recommended: 2.05R (current median: 2.0R)
+- Refreshed journal/Trading Journal.xlsx through update_master_journal_workbook_data_only with stats rebuilt from workbook rows.
+- Inspected requested target recommendations after refresh:
+  - Overall: Keep target - Recommended: 1.95R (current median: 2R)
+  - FX: Insufficient eligible wins - recommended target unavailable
   - Crypto: Reduce target - Recommended: 1.95R (current median: 2.18R)
-- SYMBOLS target recommendations inspected:
-  - EURUSD: Reduce target - Recommended: 0.16R (current median: 2.0R)
-  - USDJPY: Reduce target - Recommended: 0.44R (current median: 2.0R)
+  - EURUSD: Insufficient eligible wins - recommended target unavailable
+  - USDJPY: Insufficient eligible wins - recommended target unavailable
   - BTCUSDT: Keep target - Recommended: 1.95R (current median: 2.01R)
   - ETHUSDT: Keep target - Recommended: 1.98R (current median: 2.09R)
-- Trade Log does not contain target recommendation columns.
-- SYMBOLS contains explicit insufficient messages for insufficient symbols.
+- Trade Log still has no Target Recommendation column.
+- The FX recommendations are now insufficient rather than based on circular realised-profit conversion.
+
+Automatic push safety:
+- PATCH_DESKTOP_PUSH.bat now resets confirmed runtime/local-state paths after staging:
+  - render/data
+  - render/uploads
+  - bybit_monitor/custom_alerts.json
+  - state_manifest.json
+- .gitignore now includes render/uploads, bybit_monitor/custom_alerts.json, and state_manifest.json.
+- Added push-script tests that verify the runtime/local-state exclusions.
 
 Verification performed:
-- python -m pytest --basetemp=.pytest_tmp_target_rec -o cache_dir=.pytest_tmp_target_rec_cache tests\test_master_service_trading_journal_stats.py::test_compute_journal_stats_target_recommendation_uses_realized_original_r_distribution tests\test_master_service_trading_journal_stats.py::test_target_recommendation_uses_net_profit_over_original_monetary_risk_not_stored_gross_r tests\test_master_service_trading_journal_stats.py::test_target_realized_r_uses_net_profit_after_costs_over_original_monetary_risk tests\test_master_service_trading_journal_stats.py::test_target_recommendation_does_not_use_gross_price_r_when_monetary_risk_unavailable tests\test_master_service_trading_journal_stats.py::test_target_recommendation_uses_nested_complete_original_plan_after_partial_top_level_plan tests\test_master_service_trading_journal_stats.py::test_target_recommendation_never_recommends_zero_for_small_positive_modal_bucket tests\test_master_service_trading_journal_stats.py::test_target_recommendation_current_avg_original_planned_target_r_is_arithmetic_mean tests\test_master_journal_workbook.py::test_recommendations_are_removed_from_trade_log_and_kept_in_symbols_and_stats1 tests\test_master_journal_workbook.py::test_real_trading_journal_source_data_produces_numeric_target_recommendations
-  Result: 9 passed, 4 warnings.
-- python -m pytest --basetemp=.pytest_tmp_target_rec -o cache_dir=.pytest_tmp_target_rec_cache tests\test_master_journal_workbook.py::test_checked_in_trading_journal_has_no_direction_only_or_zero_target_recommendations
-  Result: 1 passed.
-- python -m pytest --basetemp=.pytest_tmp_target_rec -o cache_dir=.pytest_tmp_target_rec_cache tests\test_master_service_trading_journal_stats.py tests\test_master_journal_workbook.py -k "recommendation or real_trading_journal or checked_in"
-  Result: 13 passed, 153 deselected, 4 warnings.
-- python -m pytest --basetemp=.pytest_tmp_target_rec -o cache_dir=.pytest_tmp_target_rec_cache tests\test_master_service_trading_journal_stats.py
-  Result: 25 passed, 3 failed, 4 warnings.
-  The failing tests were pre-existing/out-of-scope market-return percentage expectations:
-  - test_market_return_percentage_uses_account_balance_return
-  - test_market_return_percentage_is_bounded_by_account_capital
-  - test_market_return_percentage_rejects_mixed_fx_currencies
+- python -m pytest --basetemp=.pytest_tmp_target_revision -o cache_dir=.pytest_tmp_target_revision_cache tests\test_master_service_trading_journal_stats.py::test_fx_net_r_changes_when_net_profit_changes_with_fixed_independent_risk tests\test_master_service_trading_journal_stats.py::test_fx_net_profit_cannot_be_cancelled_by_inferred_conversion_rate tests\test_master_service_trading_journal_stats.py::test_target_recommendation_does_not_use_gross_price_r_when_monetary_risk_unavailable tests\test_master_service_trading_journal_stats.py::test_fx_home_conversion_factors_loss_produces_original_monetary_risk tests\test_master_service_trading_journal_stats.py::test_fx_financing_changes_net_r_numerator_without_changing_conversion_factor tests\test_master_service_trading_journal_stats.py::test_unknown_original_risk_currency_is_not_compatible tests\test_master_service_trading_journal_stats.py::test_unrelated_max_loss_is_never_used_as_original_risk tests\test_master_service_trading_journal_stats.py::test_crypto_reconstructs_original_monetary_risk_independently tests\test_master_service_trading_journal_stats.py::test_oanda_export_conversion_rate_is_retained_and_used_for_target_r tests\test_patch_desktop_push.py
+  Result: 13 passed, 4 warnings.
+- python -m pytest --basetemp=.pytest_tmp_target_revision -o cache_dir=.pytest_tmp_target_revision_cache [18 target/workbook tests] tests\test_patch_desktop_push.py
+  Result: 25 passed, 4 warnings.
+- python -m py_compile tools\master_journal_workbook.py render\master_service.py
+  Result: passed.
+- python -m pytest --basetemp=.pytest_tmp_target_revision -o cache_dir=.pytest_tmp_target_revision_cache tests\test_master_service_oanda_history_export.py::test_oanda_demo_raw_history_spread_cost_not_commission_and_balance_authoritative tests\test_master_service_oanda_history_export.py::test_oanda_demo_attached_style_spread_costs_never_become_commission tests\test_master_service_oanda_history_export.py::test_oanda_live_market_if_touched_open_and_order_closes_parse_canonical_rows
+  Result: 3 passed, 4 warnings.
 
 Git safety notes before push:
-- Pre-existing runtime/local-state changes are still present in bybit_monitor/custom_alerts.json, render/data, state_manifest.json, and render/uploads.
-- Those runtime/local-state files must not be committed.
+- Pre-existing runtime/local-state changes remain in bybit_monitor/custom_alerts.json, render/data, state_manifest.json and render/uploads.
+- PATCH_DESKTOP_PUSH.bat has been updated to exclude these confirmed runtime/local-state paths.
 - PATCH_DESKTOP_PUSH.bat will be run from the repository root after this summary is written.
