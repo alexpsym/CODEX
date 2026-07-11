@@ -1,10 +1,10 @@
 {
   "alerts": {
     "bybit": {
-      "alerts": null
+      "alerts": []
     },
     "oanda": {
-      "alerts": null
+      "alerts": []
     }
   },
   "monthly_aud_revaluation": {
@@ -170,21 +170,21 @@
       "changed": 0,
       "failed_months": [],
       "failures": [],
-      "finished_at": "2026-07-11T06:24:17.286494+00:00",
+      "finished_at": "2026-07-11T09:31:31.574159+00:00",
       "mandatory_row_id": "monthly_aud_reval:bybit_live:2026-03",
       "partial": false,
       "processed_months": [],
       "rows": 4,
-      "started_at": "2026-07-11T06:24:17.272664+00:00",
+      "started_at": "2026-07-11T09:31:31.570155+00:00",
       "succeeded_months": [],
       "target_months": []
     },
-    "last_synced_at": "2026-07-11T06:24:17.285800+00:00",
+    "last_synced_at": "2026-07-11T09:31:31.574135+00:00",
     "month_key": null,
     "ok": true,
     "stage": "complete",
     "traceback": null,
-    "updated_at": "2026-07-11T06:24:17.285822+00:00"
+    "updated_at": "2026-07-11T09:31:31.574153+00:00"
   },
   "oanda_fill_state": {
     "diagnostics": {},
@@ -196,10 +196,10 @@
       "demo": {},
       "live": {}
     },
-    "updated_at": "2026-07-11T07:07:16.049441+00:00"
+    "updated_at": "2026-07-11T09:21:30.083280+00:00"
   },
   "pending_webhooks": [],
-  "savedAt": "2026-07-11T07:07:17.610446+00:00",
+  "savedAt": "2026-07-11T09:31:33.582389+00:00",
   "source_host": "DESKTOP-1B14EQ6",
   "source_profile": "local",
   "trade_contexts": [
@@ -596,7 +596,7 @@
       "timeframe": "1-hour",
       "trade_id": "t1",
       "transaction_id": "100",
-      "updated_at": "2026-07-11T07:07:14.794241+00:00"
+      "updated_at": "2026-07-11T09:21:29.236389+00:00"
     },
     {
       "account": "demo",
@@ -610,7 +610,7 @@
       "take_profit": "1.2200",
       "trade_id": "tgsl",
       "transaction_id": "700",
-      "updated_at": "2026-07-11T07:07:15.212083+00:00"
+      "updated_at": "2026-07-11T09:21:29.368541+00:00"
     },
     {
       "account": "demo",
@@ -624,7 +624,7 @@
       "take_profit": "1.1300",
       "timeframe": "15-minute",
       "trade_id": "t2",
-      "updated_at": "2026-07-11T07:07:15.529914+00:00"
+      "updated_at": "2026-07-11T09:21:29.549161+00:00"
     }
   ],
   "trading_journal": {
@@ -1342,133 +1342,133 @@
     "unresolved_registry": {
       "oanda_context": {
         "demo|100|ord1|t1|EUR_USD": {
-          "count": 2,
+          "count": 7,
           "details": {
             "status": "resolved"
           },
           "first_seen_at": "2026-07-11T07:05:14.204206+00:00",
-          "last_seen_at": "2026-07-11T07:07:15.055849+00:00",
+          "last_seen_at": "2026-07-11T09:21:29.287543+00:00",
           "last_signature": "{\"status\": \"resolved\"}",
           "resolution_source": "direct_refs",
           "resolved": true
         },
         "demo|100||t1|EUR_USD": {
-          "count": 2,
+          "count": 7,
           "details": {
             "status": "resolved"
           },
           "first_seen_at": "2026-07-11T07:05:14.110452+00:00",
-          "last_seen_at": "2026-07-11T07:07:14.716066+00:00",
+          "last_seen_at": "2026-07-11T09:21:29.223241+00:00",
           "last_signature": "{\"status\": \"resolved\"}",
           "resolution_source": "direct_refs",
           "resolved": true
         },
         "demo|101|ord1|t1|EUR_USD": {
-          "count": 2,
+          "count": 7,
           "details": {
             "status": "resolved"
           },
           "first_seen_at": "2026-07-11T07:05:14.284338+00:00",
-          "last_seen_at": "2026-07-11T07:07:15.196065+00:00",
+          "last_seen_at": "2026-07-11T09:21:29.352670+00:00",
           "last_signature": "{\"status\": \"resolved\"}",
           "resolution_source": "direct_refs",
           "resolved": true
         },
         "demo|101|ord1||EUR_USD": {
-          "count": 2,
+          "count": 7,
           "details": {
             "status": "resolved"
           },
           "first_seen_at": "2026-07-11T07:05:14.251708+00:00",
-          "last_seen_at": "2026-07-11T07:07:15.142345+00:00",
+          "last_seen_at": "2026-07-11T09:21:29.323605+00:00",
           "last_signature": "{\"status\": \"resolved\"}",
           "resolution_source": "direct_refs",
           "resolved": true
         },
         "demo|200|ord2|t2|EUR_USD": {
-          "count": 2,
+          "count": 7,
           "details": {
             "status": "resolved"
           },
           "first_seen_at": "2026-07-11T07:05:14.523643+00:00",
-          "last_seen_at": "2026-07-11T07:07:15.627275+00:00",
+          "last_seen_at": "2026-07-11T09:21:29.607690+00:00",
           "last_signature": "{\"status\": \"resolved\"}",
           "resolution_source": "direct_refs",
           "resolved": true
         },
         "demo|201|ord2|t2|EUR_USD": {
-          "count": 2,
+          "count": 7,
           "details": {
             "status": "resolved"
           },
           "first_seen_at": "2026-07-11T07:05:14.596916+00:00",
-          "last_seen_at": "2026-07-11T07:07:15.816035+00:00",
+          "last_seen_at": "2026-07-11T09:21:29.691284+00:00",
           "last_signature": "{\"status\": \"resolved\"}",
           "resolution_source": "direct_refs",
           "resolved": true
         },
         "demo|201|ord2||EUR_USD": {
-          "count": 2,
+          "count": 7,
           "details": {
             "status": "resolved"
           },
           "first_seen_at": "2026-07-11T07:05:14.559397+00:00",
-          "last_seen_at": "2026-07-11T07:07:15.711543+00:00",
+          "last_seen_at": "2026-07-11T09:21:29.656697+00:00",
           "last_signature": "{\"status\": \"resolved\"}",
           "resolution_source": "direct_refs",
           "resolved": true
         },
         "demo|601|599|t1|NZD_USD": {
-          "count": 2,
+          "count": 7,
           "details": {
             "reason": "missing"
           },
           "first_seen_at": "2026-07-11T07:05:14.690821+00:00",
-          "last_seen_at": "2026-07-11T07:07:16.045933+00:00",
+          "last_seen_at": "2026-07-11T09:21:29.801616+00:00",
           "last_signature": "{\"reason\": \"missing\"}",
           "resolution_source": null,
           "resolved": false
         },
         "demo|601|599||NZD_USD": {
-          "count": 2,
+          "count": 7,
           "details": {
             "reason": "missing"
           },
           "first_seen_at": "2026-07-11T07:05:14.661991+00:00",
-          "last_seen_at": "2026-07-11T07:07:15.964951+00:00",
+          "last_seen_at": "2026-07-11T09:21:29.758114+00:00",
           "last_signature": "{\"reason\": \"missing\"}",
           "resolution_source": null,
           "resolved": false
         },
         "demo|700|ord-gsl|tgsl|EUR_USD": {
-          "count": 2,
+          "count": 7,
           "details": {
             "status": "resolved"
           },
           "first_seen_at": "2026-07-11T07:05:14.373543+00:00",
-          "last_seen_at": "2026-07-11T07:07:15.331448+00:00",
+          "last_seen_at": "2026-07-11T09:21:29.453953+00:00",
           "last_signature": "{\"status\": \"resolved\"}",
           "resolution_source": "direct_refs",
           "resolved": true
         },
         "demo|701|ord-gsl|tgsl|EUR_USD": {
-          "count": 2,
+          "count": 7,
           "details": {
             "status": "resolved"
           },
           "first_seen_at": "2026-07-11T07:05:14.441206+00:00",
-          "last_seen_at": "2026-07-11T07:07:15.492570+00:00",
+          "last_seen_at": "2026-07-11T09:21:29.532472+00:00",
           "last_signature": "{\"status\": \"resolved\"}",
           "resolution_source": "direct_refs",
           "resolved": true
         },
         "demo|701|ord-gsl||EUR_USD": {
-          "count": 2,
+          "count": 7,
           "details": {
             "status": "resolved"
           },
           "first_seen_at": "2026-07-11T07:05:14.412754+00:00",
-          "last_seen_at": "2026-07-11T07:07:15.391685+00:00",
+          "last_seen_at": "2026-07-11T09:21:29.499828+00:00",
           "last_signature": "{\"status\": \"resolved\"}",
           "resolution_source": "direct_refs",
           "resolved": true
@@ -1484,5 +1484,5 @@
   "watchlist": [
     "DASHUSDT"
   ],
-  "watchlist_updated_at": null
+  "watchlist_updated_at": "2026-07-11T09:31:26.386581+00:00"
 }
