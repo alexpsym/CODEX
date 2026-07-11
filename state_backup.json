@@ -1,10 +1,10 @@
 {
   "alerts": {
     "bybit": {
-      "alerts": []
+      "alerts": null
     },
     "oanda": {
-      "alerts": []
+      "alerts": null
     }
   },
   "monthly_aud_revaluation": {
@@ -170,53 +170,36 @@
       "changed": 0,
       "failed_months": [],
       "failures": [],
-      "finished_at": "2026-07-09T11:31:26.375895+00:00",
+      "finished_at": "2026-07-11T06:24:17.286494+00:00",
       "mandatory_row_id": "monthly_aud_reval:bybit_live:2026-03",
       "partial": false,
       "processed_months": [],
       "rows": 4,
-      "started_at": "2026-07-09T11:31:26.373029+00:00",
+      "started_at": "2026-07-11T06:24:17.272664+00:00",
       "succeeded_months": [],
       "target_months": []
     },
-    "last_synced_at": "2026-07-09T11:31:26.375851+00:00",
+    "last_synced_at": "2026-07-11T06:24:17.285800+00:00",
     "month_key": null,
     "ok": true,
     "stage": "complete",
     "traceback": null,
-    "updated_at": "2026-07-09T11:31:26.375876+00:00"
+    "updated_at": "2026-07-11T06:24:17.285822+00:00"
   },
   "oanda_fill_state": {
-    "diagnostics": {
-      "demo": {
-        "last_error": null,
-        "last_seen_transaction_id": "650",
-        "last_success_at": "2026-07-09T06:49:54.060539+00:00",
-        "startup_recovered_rows": 1,
-        "startup_skipped_duplicates": 0,
-        "updated_at": "2026-07-09T06:49:54.060584+00:00"
-      },
-      "live": {
-        "last_error": null,
-        "last_seen_transaction_id": "471",
-        "last_success_at": "2026-07-09T06:49:26.702176+00:00",
-        "startup_recovered_rows": 0,
-        "startup_skipped_duplicates": 0,
-        "updated_at": "2026-07-09T06:49:26.703936+00:00"
-      }
-    },
+    "diagnostics": {},
     "last_seen_transaction_id": {
-      "demo": "650",
-      "live": "471"
+      "demo": null,
+      "live": null
     },
     "open_trade_legs": {
       "demo": {},
       "live": {}
     },
-    "updated_at": "2026-07-09T06:49:54.060640+00:00"
+    "updated_at": "2026-07-11T07:07:16.049441+00:00"
   },
   "pending_webhooks": [],
-  "savedAt": "2026-07-09T12:07:47.910319+00:00",
+  "savedAt": "2026-07-11T07:07:17.610446+00:00",
   "source_host": "DESKTOP-1B14EQ6",
   "source_profile": "local",
   "trade_contexts": [
@@ -599,6 +582,49 @@
       "trade_id": "634",
       "transaction_id": "634",
       "updated_at": "2026-07-09T06:49:53.795316+00:00"
+    },
+    {
+      "account": "demo",
+      "broker": "oanda",
+      "created_at": "2026-07-11T07:05:14.125128+00:00",
+      "instrument": "EUR_USD",
+      "order_id": "ord1",
+      "side": "buy",
+      "status": "ACTIVE",
+      "stop_loss": "1.1900",
+      "take_profit": "1.2200",
+      "timeframe": "1-hour",
+      "trade_id": "t1",
+      "transaction_id": "100",
+      "updated_at": "2026-07-11T07:07:14.794241+00:00"
+    },
+    {
+      "account": "demo",
+      "broker": "oanda",
+      "created_at": "2026-07-11T07:05:14.302381+00:00",
+      "instrument": "EUR_USD",
+      "order_id": "ord-gsl",
+      "side": "buy",
+      "status": "ACTIVE",
+      "stop_loss": "1.1900",
+      "take_profit": "1.2200",
+      "trade_id": "tgsl",
+      "transaction_id": "700",
+      "updated_at": "2026-07-11T07:07:15.212083+00:00"
+    },
+    {
+      "account": "demo",
+      "broker": "oanda",
+      "created_at": "2026-07-11T07:05:14.454956+00:00",
+      "instrument": "EUR_USD",
+      "order_id": "ord2",
+      "side": "buy",
+      "status": "ACTIVE",
+      "stop_loss": "1.0900",
+      "take_profit": "1.1300",
+      "timeframe": "15-minute",
+      "trade_id": "t2",
+      "updated_at": "2026-07-11T07:07:15.529914+00:00"
     }
   ],
   "trading_journal": {
@@ -1313,6 +1339,142 @@
     ],
     "source_folder": "/master_control",
     "trade_history_template_created": false,
+    "unresolved_registry": {
+      "oanda_context": {
+        "demo|100|ord1|t1|EUR_USD": {
+          "count": 2,
+          "details": {
+            "status": "resolved"
+          },
+          "first_seen_at": "2026-07-11T07:05:14.204206+00:00",
+          "last_seen_at": "2026-07-11T07:07:15.055849+00:00",
+          "last_signature": "{\"status\": \"resolved\"}",
+          "resolution_source": "direct_refs",
+          "resolved": true
+        },
+        "demo|100||t1|EUR_USD": {
+          "count": 2,
+          "details": {
+            "status": "resolved"
+          },
+          "first_seen_at": "2026-07-11T07:05:14.110452+00:00",
+          "last_seen_at": "2026-07-11T07:07:14.716066+00:00",
+          "last_signature": "{\"status\": \"resolved\"}",
+          "resolution_source": "direct_refs",
+          "resolved": true
+        },
+        "demo|101|ord1|t1|EUR_USD": {
+          "count": 2,
+          "details": {
+            "status": "resolved"
+          },
+          "first_seen_at": "2026-07-11T07:05:14.284338+00:00",
+          "last_seen_at": "2026-07-11T07:07:15.196065+00:00",
+          "last_signature": "{\"status\": \"resolved\"}",
+          "resolution_source": "direct_refs",
+          "resolved": true
+        },
+        "demo|101|ord1||EUR_USD": {
+          "count": 2,
+          "details": {
+            "status": "resolved"
+          },
+          "first_seen_at": "2026-07-11T07:05:14.251708+00:00",
+          "last_seen_at": "2026-07-11T07:07:15.142345+00:00",
+          "last_signature": "{\"status\": \"resolved\"}",
+          "resolution_source": "direct_refs",
+          "resolved": true
+        },
+        "demo|200|ord2|t2|EUR_USD": {
+          "count": 2,
+          "details": {
+            "status": "resolved"
+          },
+          "first_seen_at": "2026-07-11T07:05:14.523643+00:00",
+          "last_seen_at": "2026-07-11T07:07:15.627275+00:00",
+          "last_signature": "{\"status\": \"resolved\"}",
+          "resolution_source": "direct_refs",
+          "resolved": true
+        },
+        "demo|201|ord2|t2|EUR_USD": {
+          "count": 2,
+          "details": {
+            "status": "resolved"
+          },
+          "first_seen_at": "2026-07-11T07:05:14.596916+00:00",
+          "last_seen_at": "2026-07-11T07:07:15.816035+00:00",
+          "last_signature": "{\"status\": \"resolved\"}",
+          "resolution_source": "direct_refs",
+          "resolved": true
+        },
+        "demo|201|ord2||EUR_USD": {
+          "count": 2,
+          "details": {
+            "status": "resolved"
+          },
+          "first_seen_at": "2026-07-11T07:05:14.559397+00:00",
+          "last_seen_at": "2026-07-11T07:07:15.711543+00:00",
+          "last_signature": "{\"status\": \"resolved\"}",
+          "resolution_source": "direct_refs",
+          "resolved": true
+        },
+        "demo|601|599|t1|NZD_USD": {
+          "count": 2,
+          "details": {
+            "reason": "missing"
+          },
+          "first_seen_at": "2026-07-11T07:05:14.690821+00:00",
+          "last_seen_at": "2026-07-11T07:07:16.045933+00:00",
+          "last_signature": "{\"reason\": \"missing\"}",
+          "resolution_source": null,
+          "resolved": false
+        },
+        "demo|601|599||NZD_USD": {
+          "count": 2,
+          "details": {
+            "reason": "missing"
+          },
+          "first_seen_at": "2026-07-11T07:05:14.661991+00:00",
+          "last_seen_at": "2026-07-11T07:07:15.964951+00:00",
+          "last_signature": "{\"reason\": \"missing\"}",
+          "resolution_source": null,
+          "resolved": false
+        },
+        "demo|700|ord-gsl|tgsl|EUR_USD": {
+          "count": 2,
+          "details": {
+            "status": "resolved"
+          },
+          "first_seen_at": "2026-07-11T07:05:14.373543+00:00",
+          "last_seen_at": "2026-07-11T07:07:15.331448+00:00",
+          "last_signature": "{\"status\": \"resolved\"}",
+          "resolution_source": "direct_refs",
+          "resolved": true
+        },
+        "demo|701|ord-gsl|tgsl|EUR_USD": {
+          "count": 2,
+          "details": {
+            "status": "resolved"
+          },
+          "first_seen_at": "2026-07-11T07:05:14.441206+00:00",
+          "last_seen_at": "2026-07-11T07:07:15.492570+00:00",
+          "last_signature": "{\"status\": \"resolved\"}",
+          "resolution_source": "direct_refs",
+          "resolved": true
+        },
+        "demo|701|ord-gsl||EUR_USD": {
+          "count": 2,
+          "details": {
+            "status": "resolved"
+          },
+          "first_seen_at": "2026-07-11T07:05:14.412754+00:00",
+          "last_seen_at": "2026-07-11T07:07:15.391685+00:00",
+          "last_signature": "{\"status\": \"resolved\"}",
+          "resolution_source": "direct_refs",
+          "resolved": true
+        }
+      }
+    },
     "updated_at": "2026-07-09T06:52:01.747583+00:00",
     "used_recursive_fallback": false,
     "workbooks_reused": 0,
@@ -1322,5 +1484,5 @@
   "watchlist": [
     "DASHUSDT"
   ],
-  "watchlist_updated_at": "2026-07-09T11:31:19.477655+00:00"
+  "watchlist_updated_at": null
 }
