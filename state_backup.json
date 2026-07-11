@@ -170,21 +170,21 @@
       "changed": 0,
       "failed_months": [],
       "failures": [],
-      "finished_at": "2026-07-11T09:31:31.574159+00:00",
+      "finished_at": "2026-07-11T13:27:08.687434+00:00",
       "mandatory_row_id": "monthly_aud_reval:bybit_live:2026-03",
       "partial": false,
       "processed_months": [],
       "rows": 4,
-      "started_at": "2026-07-11T09:31:31.570155+00:00",
+      "started_at": "2026-07-11T13:27:08.684678+00:00",
       "succeeded_months": [],
       "target_months": []
     },
-    "last_synced_at": "2026-07-11T09:31:31.574135+00:00",
+    "last_synced_at": "2026-07-11T13:27:08.687410+00:00",
     "month_key": null,
     "ok": true,
     "stage": "complete",
     "traceback": null,
-    "updated_at": "2026-07-11T09:31:31.574153+00:00"
+    "updated_at": "2026-07-11T13:27:08.687428+00:00"
   },
   "oanda_fill_state": {
     "diagnostics": {},
@@ -199,7 +199,7 @@
     "updated_at": "2026-07-11T09:21:30.083280+00:00"
   },
   "pending_webhooks": [],
-  "savedAt": "2026-07-11T09:31:33.582389+00:00",
+  "savedAt": "2026-07-11T13:27:10.723757+00:00",
   "source_host": "DESKTOP-1B14EQ6",
   "source_profile": "local",
   "trade_contexts": [
@@ -1484,5 +1484,5 @@
   "watchlist": [
     "DASHUSDT"
   ],
-  "watchlist_updated_at": "2026-07-11T09:31:26.386581+00:00"
+  "watchlist_updated_at": "2026-07-11T13:27:02.298724+00:00"
 }
