@@ -377,7 +377,7 @@ def test_compute_journal_stats_target_recommendation_uses_realized_original_r_di
     assert risk["current_avg_original_planned_target_r"] == pytest.approx(4.0)
     assert risk["target_r_excluded_reasons"]["not_winning_trade"] >= 2
     assert direct_target["target_r_excluded_reasons"]["test_trade"] == 1
-    assert risk["target_r_excluded_reasons"]["missing_independent_original_monetary_risk"] == 1
+    assert risk["target_r_excluded_reasons"]["missing_original_risk_quantity"] == 1
     assert risk["target_r_excluded_reasons"]["moved_without_original_plan"] == 1
     assert by_market["overall"]["target_recommendation"] == risk["target_recommendation"]
     assert by_market["fx"]["target_recommendation"] == risk["target_recommendation"]
@@ -521,7 +521,7 @@ def _fx_trade_with_independent_conversion(
         "currency": "AUD",
     }
     if conversion is not None:
-        row["raw_refs"] = {"homeConversionFactors": {"loss": conversion}}
+        row["raw_refs"] = {"homeConversionFactors": {"lossQuoteHome": {"factor": str(conversion)}}}
     if financing is not None:
         row["swap"] = financing
     return row
@@ -545,8 +545,8 @@ def test_fx_net_profit_cannot_be_cancelled_by_inferred_conversion_rate() -> None
     first_row = _fx_trade_with_independent_conversion("fx-no-inferred-1", net_profit=15.0, conversion=None)
     second_row = _fx_trade_with_independent_conversion("fx-no-inferred-2", net_profit=30.0, conversion=None)
 
-    assert _target_r_realized_from_original_plan(first_row) == (None, "missing_independent_original_monetary_risk")
-    assert _target_r_realized_from_original_plan(second_row) == (None, "missing_independent_original_monetary_risk")
+    assert _target_r_realized_from_original_plan(first_row) == (None, "missing_opening_loss_conversion_factor")
+    assert _target_r_realized_from_original_plan(second_row) == (None, "missing_opening_loss_conversion_factor")
 
 
 def test_target_recommendation_does_not_use_gross_price_r_when_monetary_risk_unavailable() -> None:
@@ -554,13 +554,16 @@ def test_target_recommendation_does_not_use_gross_price_r_when_monetary_risk_una
     for idx, value in enumerate([1.2, 1.3, 1.4, 1.5, 1.6], start=1):
         row = _target_distribution_trade(f"gross-only-{idx}", value)
         row.pop("original_risk_amount", None)
+        row["qty"] = 0.1
+        row["qty_raw"] = 10000
+        row["qty_unit"] = "lots"
         rows.append(row)
 
     risk = _target_r_recommendation(rows)
 
     assert risk["eligible_target_r_wins"] == 0
     assert risk["target_recommendation"] == TARGET_RECOMMENDATION_INSUFFICIENT
-    assert risk["target_r_excluded_reasons"]["missing_independent_original_monetary_risk"] == 5
+    assert risk["target_r_excluded_reasons"]["missing_opening_loss_conversion_factor"] == 5
 
 
 def test_fx_home_conversion_factors_loss_produces_original_monetary_risk() -> None:
@@ -570,6 +573,26 @@ def test_fx_home_conversion_factors_loss_produces_original_monetary_risk() -> No
 
     assert reason == ""
     assert realized_r == pytest.approx(1.5)
+
+
+def test_fx_deprecated_loss_quote_home_conversion_factor_is_supported() -> None:
+    row = _fx_trade_with_independent_conversion("fx-deprecated-conv", net_profit=15.0, conversion=None)
+    row["lossQuoteHomeConversionFactor"] = "1.5"
+
+    realized_r, reason = _target_r_realized_from_original_plan(row)
+
+    assert reason == ""
+    assert realized_r == pytest.approx(1.0)
+
+
+def test_fx_fake_loss_and_generic_conversion_rate_are_rejected() -> None:
+    fake_loss = _fx_trade_with_independent_conversion("fx-fake-loss", net_profit=15.0, conversion=None)
+    fake_loss["raw_refs"] = {"homeConversionFactors": {"loss": 1.5}}
+    generic = _fx_trade_with_independent_conversion("fx-generic-conv", net_profit=15.0, conversion=None)
+    generic["raw_refs"] = {"conversion_rate": 1.5}
+
+    assert _target_r_realized_from_original_plan(fake_loss) == (None, "missing_opening_loss_conversion_factor")
+    assert _target_r_realized_from_original_plan(generic) == (None, "missing_opening_loss_conversion_factor")
 
 
 def test_fx_financing_changes_net_r_numerator_without_changing_conversion_factor() -> None:
@@ -593,7 +616,7 @@ def test_unknown_original_risk_currency_is_not_compatible() -> None:
     realized_r, reason = _target_r_realized_from_original_plan(row)
 
     assert realized_r is None
-    assert reason == "missing_independent_original_monetary_risk"
+    assert reason == "missing_original_risk_quantity"
 
 
 def test_unrelated_max_loss_is_never_used_as_original_risk() -> None:
@@ -603,7 +626,7 @@ def test_unrelated_max_loss_is_never_used_as_original_risk() -> None:
     realized_r, reason = _target_r_realized_from_original_plan(row)
 
     assert realized_r is None
-    assert reason == "missing_independent_original_monetary_risk"
+    assert reason == "missing_opening_loss_conversion_factor"
 
 
 def test_crypto_reconstructs_original_monetary_risk_independently() -> None:
@@ -646,10 +669,59 @@ def test_oanda_export_conversion_rate_is_retained_and_used_for_target_r() -> Non
     row = parsed["rows"][0]
 
     assert row["metrics"]["oanda_export_conversion_rate"] == pytest.approx(1.5)
-    assert row["raw_refs"]["conversion_rate"] == pytest.approx(1.5)
+    assert row["raw_refs"]["original_loss_conversion_factor"] == pytest.approx(1.5)
+    assert row["original_loss_conversion_factor_source"] == "oanda_export_open_conversion_rate"
     realized_r, reason = _target_r_realized_from_original_plan(row)
     assert reason == ""
     assert realized_r == pytest.approx(2.0)
+
+
+def test_oanda_export_closing_conversion_rate_is_not_used_for_target_r() -> None:
+    csv = """TICKET,TRANSACTION DATE,TRANSACTION TYPE,DETAILS,INSTRUMENT,PRICE,UNITS,DIRECTION,SPREAD COST,STOP LOSS,TAKE PROFIT,CONVERSION RATE,FINANCING,COMMISSION,GSL FEE,GSL PREMIUM,PL,BALANCE
+100,2026-01-01 10:00:00 AEST,ORDER_FILL,MARKET_ORDER,EUR_USD,1.10000,10000,Buy,0.0,1.09900,1.10200,,0,0,0,0,0,1000
+101,2026-01-01 11:00:00 AEST,ORDER_FILL,TAKE_PROFIT_ORDER,EUR_USD,1.10200,10000,Sell,0.0,,,1.5,0,0,0,0,30,1030
+"""
+    parsed = master_service._journal_rows_from_oanda_transaction_history_frame(
+        master_service.pd.read_csv(master_service.io.StringIO(csv)),
+        account_mode="demo",
+        account_label="OANDA DEMO",
+        source_path="oanda_conversion.csv",
+    )
+    row = parsed["rows"][0]
+
+    assert row["metrics"]["oanda_close_conversion_rate"] == pytest.approx(1.5)
+    assert row["raw_refs"]["original_loss_conversion_factor"] is None
+    assert _target_r_realized_from_original_plan(row) == (None, "missing_opening_loss_conversion_factor")
+
+
+def test_overall_target_recommendation_labels_crypto_only_eligible_data() -> None:
+    fx_wins = [
+        _fx_trade_with_independent_conversion(f"fx-missing-{idx}", net_profit=15.0, conversion=None)
+        for idx in range(2)
+    ]
+    crypto_wins = [
+        _target_distribution_trade(
+            f"crypto-{idx}",
+            value,
+            asset_class="crypto",
+            account="BYBIT",
+            symbol="BTCUSDT",
+            currency="USDT",
+            original_risk_currency="USDT",
+        )
+        for idx, value in enumerate([1.0, 1.1, 1.2, 1.3, 1.4], start=1)
+    ]
+
+    risk = _target_r_recommendation(fx_wins + crypto_wins)
+
+    assert risk["target_recommendation"].startswith("Crypto-only eligible data")
+    assert risk["target_r_total_winning_trades"] == 7
+    assert risk["target_r_total_fx_wins"] == 2
+    assert risk["target_r_total_crypto_wins"] == 5
+    assert risk["target_r_eligible_fx_wins"] == 0
+    assert risk["target_r_eligible_crypto_wins"] == 5
+    assert risk["target_r_excluded_winning_trades"] == 2
+    assert risk["target_r_winning_exclusion_reasons"]["missing_opening_loss_conversion_factor"] == 2
 
 
 def test_target_recommendation_uses_nested_complete_original_plan_after_partial_top_level_plan() -> None:

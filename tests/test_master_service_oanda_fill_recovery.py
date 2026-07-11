@@ -110,6 +110,7 @@ def test_journal_rows_from_oanda_close_fill_uses_cached_open_leg():
             "instrument": "EUR_USD",
             "orderID": "ord1",
             "time": "2026-04-10T00:00:00Z",
+            "homeConversionFactors": {"lossQuoteHome": {"factor": "1.5"}},
             "tradeOpened": {"tradeID": "t1", "price": "1.2000", "units": "1000"},
         }
     )
@@ -147,6 +148,62 @@ def test_journal_rows_from_oanda_close_fill_uses_cached_open_leg():
     assert row["timeframe"] == "1-hour"
     assert row["stop_loss"] == "1.1900"
     assert row["take_profit"] == "1.2200"
+    assert row["commission"] == pytest.approx(0.2)
+    assert row["net_profit"] == pytest.approx(12.0)
+    assert row["metrics"]["oanda_api_realized_pl"] == pytest.approx(12.3)
+    assert row["metrics"]["oanda_api_financing"] == pytest.approx(-0.1)
+    assert row["original_loss_conversion_factor"] == pytest.approx(1.5)
+    assert row["original_loss_conversion_factor_source"] == "homeConversionFactors.lossQuoteHome.factor"
+    assert row["original_open_transaction_id"] == "100"
+
+
+def test_journal_rows_from_oanda_close_fill_subtracts_guaranteed_execution_fee():
+    master_service._upsert_trade_context(
+        {
+            "order_id": "ord-gsl",
+            "trade_id": "tgsl",
+            "transaction_id": "700",
+            "broker": "oanda",
+            "account": "demo",
+            "instrument": "EUR_USD",
+            "side": "buy",
+            "stop_loss": "1.1900",
+            "take_profit": "1.2200",
+        }
+    )
+    master_service._journal_rows_from_oanda_order_fill(
+        {
+            "account": "demo",
+            "id": "700",
+            "instrument": "EUR_USD",
+            "orderID": "ord-gsl",
+            "time": "2026-04-10T00:00:00Z",
+            "homeConversionFactors": {"lossQuoteHome": {"factor": "1.5"}},
+            "tradeOpened": {"tradeID": "tgsl", "price": "1.2000", "units": "1000"},
+        }
+    )
+
+    rows = master_service._journal_rows_from_oanda_order_fill(
+        {
+            "account": "demo",
+            "id": "701",
+            "instrument": "EUR_USD",
+            "orderID": "ord-gsl",
+            "time": "2026-04-10T01:00:00Z",
+            "tradesClosed": [{"tradeID": "tgsl", "units": "-1000", "price": "1.2100", "realizedPL": "10", "financing": "-1"}],
+            "commission": "0.5",
+            "guaranteedExecutionFee": "0.25",
+            "guaranteedExecutionPremium": "0.10",
+            "accountCurrency": "AUD",
+        }
+    )
+
+    row = rows[0]
+    assert row["commission"] == pytest.approx(0.85)
+    assert row["net_profit"] == pytest.approx(8.15)
+    assert row["metrics"]["oanda_api_commission_charge"] == pytest.approx(0.5)
+    assert row["metrics"]["oanda_api_guaranteed_execution_fee"] == pytest.approx(0.25)
+    assert row["metrics"]["oanda_api_guaranteed_execution_premium"] == pytest.approx(0.10)
 
 
 def test_journal_rows_from_oanda_partial_close_keeps_metadata():

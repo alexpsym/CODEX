@@ -301,6 +301,23 @@ def save_to_csv(transactions: List[Dict[str, Any]], filename: Path) -> None:
         writer.writerows(rows)
 
 
+def _opening_loss_quote_home_factor(transaction: Dict[str, Any]) -> Any:
+    tx_type = str(transaction.get("type") or "").strip().upper()
+    details = str(transaction.get("reason") or "").strip().upper()
+    opening_reasons = {"MARKET_ORDER", "MARKET_IF_TOUCHED_ORDER"}
+    if tx_type != "ORDER_FILL" or (
+        details not in opening_reasons and not isinstance(transaction.get("tradeOpened"), dict)
+    ):
+        return None
+    return _find_first_value(
+        transaction,
+        ("homeConversionFactors", "lossQuoteHome", "factor"),
+        ("tradeOpened", "homeConversionFactors", "lossQuoteHome", "factor"),
+        ("lossQuoteHomeConversionFactor",),
+        ("tradeOpened", "lossQuoteHomeConversionFactor"),
+    )
+
+
 def _transaction_to_row(transaction: Dict[str, Any]) -> Dict[str, str]:
     """Convert a raw transaction dictionary to the Excel-friendly format."""
 
@@ -331,13 +348,7 @@ def _transaction_to_row(transaction: Dict[str, Any]) -> Dict[str, str]:
         ("tradeReduced", "guaranteedExecutionFee"),
     )
 
-    conversion_rate = _find_first_value(
-        transaction,
-        ("homeConversionFactors", "gain"),
-        ("homeConversionFactors", "loss"),
-        ("plHomeConversionFactors", "gain"),
-        ("plHomeConversionFactors", "loss"),
-    )
+    conversion_rate = _opening_loss_quote_home_factor(transaction)
 
     price = _find_first_value(
         transaction,

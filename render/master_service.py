@@ -5736,6 +5736,7 @@ def _journal_rows_from_oanda_transaction_history_frame(
                 continue
             pending = pending_client.get((symbol, units, direction.lower())) or []
             pending_context = pending.pop(0) if pending else {}
+            open_conversion_rate = _positive_float(r.get("CONVERSION RATE"))
             open_legs[(symbol, units)].append(
                 {
                     "ticket": ticket,
@@ -5748,7 +5749,14 @@ def _journal_rows_from_oanda_transaction_history_frame(
                     "sl": _to_float(r.get("STOP LOSS")) or pending_context.get("sl"),
                     "tp": _to_float(r.get("TAKE PROFIT")) or pending_context.get("tp"),
                     "spread_cost": _to_float(r.get("SPREAD COST")),
-                    "conversion_rate": _to_float(r.get("CONVERSION RATE")),
+                    "original_loss_conversion_factor": open_conversion_rate,
+                    "opening_loss_conversion_factor": open_conversion_rate,
+                    "oanda_export_open_conversion_rate": open_conversion_rate,
+                    "original_loss_conversion_factor_source": (
+                        "oanda_export_open_conversion_rate" if open_conversion_rate is not None else None
+                    ),
+                    "original_loss_conversion_factor_time": when if open_conversion_rate is not None else None,
+                    "original_open_transaction_id": ticket if open_conversion_rate is not None else None,
                 }
             )
             continue
@@ -5822,15 +5830,16 @@ def _journal_rows_from_oanda_transaction_history_frame(
         open_spread = _to_float(opened.get("spread_cost"))
         close_spread = _to_float(trade.get("close_spread_cost"))
         total_spread = (open_spread or 0.0) + (close_spread or 0.0)
-        open_conversion_rate = _to_float(opened.get("conversion_rate"))
-        close_conversion_rate = _to_float(trade.get("close_conversion_rate"))
-        conversion_rate = open_conversion_rate if open_conversion_rate is not None else close_conversion_rate
+        open_conversion_rate = _positive_float(opened.get("original_loss_conversion_factor"))
+        close_conversion_rate = _positive_float(trade.get("close_conversion_rate"))
+        conversion_rate = open_conversion_rate
+        conversion_source = opened.get("original_loss_conversion_factor_source")
+        conversion_time = opened.get("original_loss_conversion_factor_time")
+        open_transaction_id = opened.get("original_open_transaction_id") or opened.get("ticket")
         net = (
             (_to_float(trade.get("pl")) or 0.0)
             + allocated_financing
-            + commission_raw
-            + gsl_fee_raw
-            + gsl_premium_raw
+            - actual_commission
         )
         rows.append(
             _normalize_journal_profit_fields(
@@ -5859,6 +5868,12 @@ def _journal_rows_from_oanda_transaction_history_frame(
                     "realized_pnl": net,
                     "balance_after_trade": trade.get("balance"),
                     "balance_after_trade_currency": "AUD",
+                    "original_loss_conversion_factor": conversion_rate,
+                    "opening_loss_conversion_factor": conversion_rate,
+                    "original_loss_conversion_factor_source": conversion_source,
+                    "original_loss_conversion_factor_time": conversion_time,
+                    "original_open_transaction_id": open_transaction_id,
+                    "oanda_export_open_conversion_rate": open_conversion_rate,
                     "metrics": {
                         "oanda_export_pl": trade.get("pl"),
                         "oanda_export_financing_allocated": allocated_financing,
@@ -5872,6 +5887,10 @@ def _journal_rows_from_oanda_transaction_history_frame(
                         "oanda_export_conversion_rate": conversion_rate,
                         "oanda_open_conversion_rate": open_conversion_rate,
                         "oanda_close_conversion_rate": close_conversion_rate,
+                        "original_loss_conversion_factor": conversion_rate,
+                        "original_loss_conversion_factor_source": conversion_source,
+                        "original_loss_conversion_factor_time": conversion_time,
+                        "original_open_transaction_id": open_transaction_id,
                     },
                     "raw_refs": {
                         "source_path": source_path,
@@ -5880,8 +5899,12 @@ def _journal_rows_from_oanda_transaction_history_frame(
                         "close_details": trade.get("close_details"),
                         "transaction_date": trade.get("close_time"),
                         "transactionId": trade.get("close_ticket"),
-                        "conversion_rate": conversion_rate,
-                        "open_conversion_rate": open_conversion_rate,
+                        "original_loss_conversion_factor": conversion_rate,
+                        "original_loss_conversion_factor_source": conversion_source,
+                        "original_loss_conversion_factor_time": conversion_time,
+                        "original_open_transaction_id": open_transaction_id,
+                        "oanda_open_conversion_rate": open_conversion_rate,
+                        "oanda_export_open_conversion_rate": open_conversion_rate,
                         "close_conversion_rate": close_conversion_rate,
                     },
                     "updated_at": _utc_now_iso(),
@@ -8405,6 +8428,46 @@ def _to_float(value: object) -> Optional[float]:
         return None
 
 
+def _positive_float(value: object) -> Optional[float]:
+    parsed = _to_float(value)
+    if parsed is not None and math.isfinite(parsed) and parsed > 0:
+        return parsed
+    return None
+
+
+def _oanda_loss_quote_home_factor(payload: object) -> Optional[float]:
+    value, _source = _oanda_loss_quote_home_factor_with_source(payload)
+    return value
+
+
+def _oanda_loss_quote_home_factor_with_source(
+    payload: object,
+    *,
+    source_prefix: str = "",
+) -> Tuple[Optional[float], Optional[str]]:
+    if not isinstance(payload, dict):
+        return None, None
+    factors = payload.get("homeConversionFactors")
+    if isinstance(factors, dict):
+        loss_quote_home = factors.get("lossQuoteHome") or factors.get("loss_quote_home")
+        if isinstance(loss_quote_home, dict):
+            value = _positive_float(loss_quote_home.get("factor"))
+            if value is not None:
+                return value, f"{source_prefix}homeConversionFactors.lossQuoteHome.factor"
+        value = _positive_float(factors.get("lossQuoteHomeFactor") or factors.get("loss_quote_home_factor"))
+        if value is not None:
+            return value, f"{source_prefix}homeConversionFactors.lossQuoteHomeFactor"
+    value = _positive_float(payload.get("lossQuoteHomeConversionFactor"))
+    if value is not None:
+        return value, f"{source_prefix}lossQuoteHomeConversionFactor"
+    return None, None
+
+
+def _oanda_abs_charge(value: object) -> float:
+    parsed = _to_float(value)
+    return abs(parsed) if parsed is not None else 0.0
+
+
 def _normalize_journal_profit_fields(row: Dict[str, object]) -> Dict[str, object]:
     normalized = dict(row)
     net_profit = _to_float(normalized.get("net_profit"))
@@ -8774,6 +8837,12 @@ def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[s
         opened_units = _to_float(trade_opened.get("units"))
         trade_ctx = _resolve_context_for_fill(trade_id)
         if trade_id and opened_units not in (None, 0):
+            opening_factor, opening_factor_source = _oanda_loss_quote_home_factor_with_source(
+                trade_opened,
+                source_prefix="tradeOpened.",
+            )
+            if opening_factor is None:
+                opening_factor, opening_factor_source = _oanda_loss_quote_home_factor_with_source(entry)
             legs[trade_id] = {
                 "open_time": close_time,
                 "entry_price": _to_float(trade_opened.get("price")) or _to_float(entry.get("price")),
@@ -8788,15 +8857,18 @@ def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[s
                 "take_profit": (trade_ctx or {}).get("take_profit"),
                 "order_id": tx_order_id,
                 "transaction_id": tx_id,
+                "original_loss_conversion_factor": opening_factor,
+                "opening_loss_conversion_factor": opening_factor,
+                "original_loss_conversion_factor_source": opening_factor_source,
+                "original_loss_conversion_factor_time": close_time if opening_factor is not None else None,
+                "original_open_transaction_id": tx_id if opening_factor is not None else None,
                 "homeConversionFactors": (
                     trade_opened.get("homeConversionFactors")
                     or entry.get("homeConversionFactors")
-                    or (trade_ctx or {}).get("homeConversionFactors")
                 ),
                 "plHomeConversionFactors": (
                     trade_opened.get("plHomeConversionFactors")
                     or entry.get("plHomeConversionFactors")
-                    or (trade_ctx or {}).get("plHomeConversionFactors")
                 ),
             }
 
@@ -8821,6 +8893,15 @@ def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[s
     stop_loss = (base_ctx or {}).get("stop_loss")
     take_profit = (base_ctx or {}).get("take_profit")
     rows: List[Dict[str, object]] = []
+    total_close_units = sum(abs(_to_float(item.get("units")) or 0.0) for item in close_legs)
+    close_count = max(len(close_legs), 1)
+    api_commission_total = _oanda_abs_charge(entry.get("commission"))
+    api_gsl_fee_total = _oanda_abs_charge(entry.get("guaranteedExecutionFee"))
+    api_gsl_premium_total = _oanda_abs_charge(entry.get("guaranteedExecutionPremium"))
+    api_other_charge_total = sum(
+        _oanda_abs_charge(entry.get(key))
+        for key in ("otherCharge", "otherCharges", "otherFee", "otherFees", "tradingCharge", "tradingCharges")
+    )
     for idx, close_leg in enumerate(close_legs):
         trade_id = str(close_leg.get("tradeID") or "").strip()
         leg_units = abs(_to_float(close_leg.get("units")) or 0.0)
@@ -8840,24 +8921,32 @@ def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[s
         if row_is_test_trade is None:
             row_is_test_trade = base_is_test_trade
         exit_price = _to_float(close_leg.get("price")) or _to_float(entry.get("price"))
-        realized_pnl = (_to_float(close_leg.get("realizedPL")) or 0.0) + (_to_float(close_leg.get("financing")) or 0.0)
+        gross_realized_pl = _to_float(close_leg.get("realizedPL")) or 0.0
+        financing = _to_float(close_leg.get("financing"))
+        if financing is None:
+            financing = _to_float(entry.get("financing")) or 0.0
+        charge_share = (leg_units / total_close_units) if total_close_units > 0 else (1.0 / close_count)
+        commission_charge = (api_commission_total * charge_share) + _oanda_abs_charge(close_leg.get("commission"))
+        gsl_fee_charge = (api_gsl_fee_total * charge_share) + _oanda_abs_charge(close_leg.get("guaranteedExecutionFee"))
+        gsl_premium_charge = (api_gsl_premium_total * charge_share) + _oanda_abs_charge(close_leg.get("guaranteedExecutionPremium"))
+        other_charge = (api_other_charge_total * charge_share) + sum(
+            _oanda_abs_charge(close_leg.get(key))
+            for key in ("otherCharge", "otherCharges", "otherFee", "otherFees", "tradingCharge", "tradingCharges")
+        )
+        fees = commission_charge + gsl_fee_charge + gsl_premium_charge + other_charge
+        net_profit = gross_realized_pl + financing - fees
         spread_cost = abs(_to_float(entry.get("halfSpreadCost")) or 0.0)
-        fees = (
-            abs(_to_float(entry.get("commission")) or 0.0)
-            + abs(_to_float(entry.get("guaranteedExecutionFee")) or 0.0)
-        )
-        home_conversion_factors = (
-            (open_leg or {}).get("homeConversionFactors")
-            or close_leg.get("homeConversionFactors")
-            or entry.get("homeConversionFactors")
-            or (leg_ctx or {}).get("homeConversionFactors")
-        )
-        pl_home_conversion_factors = (
-            (open_leg or {}).get("plHomeConversionFactors")
-            or close_leg.get("plHomeConversionFactors")
-            or entry.get("plHomeConversionFactors")
-            or (leg_ctx or {}).get("plHomeConversionFactors")
-        )
+        home_conversion_factors = (open_leg or {}).get("homeConversionFactors")
+        pl_home_conversion_factors = (open_leg or {}).get("plHomeConversionFactors")
+        opening_factor = _positive_float((open_leg or {}).get("original_loss_conversion_factor"))
+        opening_factor_source = (open_leg or {}).get("original_loss_conversion_factor_source")
+        if opening_factor is None and isinstance(open_leg, dict):
+            opening_factor, opening_factor_source = _oanda_loss_quote_home_factor_with_source(
+                open_leg,
+                source_prefix="open_leg.",
+            )
+        opening_factor_time = (open_leg or {}).get("original_loss_conversion_factor_time")
+        open_transaction_id = (open_leg or {}).get("original_open_transaction_id") or (open_leg or {}).get("transaction_id")
         row_id_suffix = trade_id or f"{tx_id}:{idx}"
         row: Dict[str, object] = {
             "id": f"oanda:{account}:{symbol}:{row_id_suffix}:close",
@@ -8880,8 +8969,8 @@ def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[s
             "commission_currency": "AUD",
             "fees": fees or None,
             "fee_currency": "AUD",
-            "realized_pnl": realized_pnl,
-            "net_profit": realized_pnl,
+            "realized_pnl": net_profit,
+            "net_profit": net_profit,
             "realized_pnl_currency": str(entry.get("accountCurrency") or ""),
             "balance_after_trade": _to_float(entry.get("accountBalance")),
             "strategy_tag": "",
@@ -8890,13 +8979,30 @@ def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[s
             "stop_loss": row_stop_loss,
             "take_profit": row_take_profit,
             "is_test_trade": row_is_test_trade,
+            "original_loss_conversion_factor": opening_factor,
+            "opening_loss_conversion_factor": opening_factor,
+            "original_loss_conversion_factor_source": opening_factor_source,
+            "original_loss_conversion_factor_time": opening_factor_time,
+            "original_open_transaction_id": open_transaction_id,
+            "oanda_open_conversion_rate": opening_factor,
             "metrics": {
                 k: v
                 for k, v in {
                     "timeframe": row_timeframe,
                     "is_test_trade": row_is_test_trade,
+                    "oanda_api_realized_pl": gross_realized_pl,
+                    "oanda_api_financing": financing,
                     "oanda_half_spread_cost": spread_cost or None,
                     "oanda_actual_commission_total": fees,
+                    "oanda_api_commission_charge": commission_charge,
+                    "oanda_api_guaranteed_execution_fee": gsl_fee_charge,
+                    "oanda_api_guaranteed_execution_premium": gsl_premium_charge,
+                    "oanda_api_other_trading_charges": other_charge,
+                    "original_loss_conversion_factor": opening_factor,
+                    "original_loss_conversion_factor_source": opening_factor_source,
+                    "original_loss_conversion_factor_time": opening_factor_time,
+                    "original_open_transaction_id": open_transaction_id,
+                    "oanda_open_conversion_rate": opening_factor,
                     "homeConversionFactors": home_conversion_factors,
                     "plHomeConversionFactors": pl_home_conversion_factors,
                 }.items()
@@ -8906,6 +9012,11 @@ def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[s
                 "transactionId": tx_id,
                 "orderId": entry.get("orderID"),
                 "tradeId": trade_id,
+                "original_loss_conversion_factor": opening_factor,
+                "original_loss_conversion_factor_source": opening_factor_source,
+                "original_loss_conversion_factor_time": opening_factor_time,
+                "original_open_transaction_id": open_transaction_id,
+                "oanda_open_conversion_rate": opening_factor,
                 "homeConversionFactors": home_conversion_factors,
                 "plHomeConversionFactors": pl_home_conversion_factors,
             },

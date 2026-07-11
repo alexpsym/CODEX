@@ -63,6 +63,68 @@ assert SPEC and SPEC.loader
 sys.modules[SPEC.name] = master_service
 SPEC.loader.exec_module(master_service)
 
+OANDA_HISTORY_SPEC = importlib.util.spec_from_file_location(
+    "oanda_history_exporter_module", ROOT / "oanda_history-clone" / "oanda_history.py"
+)
+oanda_history_exporter = importlib.util.module_from_spec(OANDA_HISTORY_SPEC)
+assert OANDA_HISTORY_SPEC and OANDA_HISTORY_SPEC.loader
+sys.modules[OANDA_HISTORY_SPEC.name] = oanda_history_exporter
+OANDA_HISTORY_SPEC.loader.exec_module(oanda_history_exporter)
+
+
+def test_oanda_history_exporter_writes_opening_loss_quote_home_factor():
+    row = oanda_history_exporter._transaction_to_row(
+        {
+            "id": "100",
+            "type": "ORDER_FILL",
+            "reason": "MARKET_ORDER",
+            "time": "2026-01-01T00:00:00Z",
+            "instrument": "EUR_USD",
+            "units": "1000",
+            "price": "1.1000",
+            "homeConversionFactors": {"lossQuoteHome": {"factor": "1.5"}},
+            "tradeOpened": {"tradeID": "t1", "units": "1000"},
+        }
+    )
+
+    assert row["CONVERSION RATE"] == "1.5000"
+
+
+def test_oanda_history_exporter_supports_deprecated_loss_quote_home_factor():
+    row = oanda_history_exporter._transaction_to_row(
+        {
+            "id": "100",
+            "type": "ORDER_FILL",
+            "reason": "MARKET_ORDER",
+            "time": "2026-01-01T00:00:00Z",
+            "instrument": "EUR_USD",
+            "units": "1000",
+            "price": "1.1000",
+            "lossQuoteHomeConversionFactor": "1.4",
+            "tradeOpened": {"tradeID": "t1", "units": "1000"},
+        }
+    )
+
+    assert row["CONVERSION RATE"] == "1.4000"
+
+
+def test_oanda_history_exporter_does_not_write_closing_conversion_factor():
+    row = oanda_history_exporter._transaction_to_row(
+        {
+            "id": "101",
+            "type": "ORDER_FILL",
+            "reason": "TAKE_PROFIT_ORDER",
+            "time": "2026-01-01T01:00:00Z",
+            "instrument": "EUR_USD",
+            "units": "-1000",
+            "price": "1.1020",
+            "homeConversionFactors": {"lossQuoteHome": {"factor": "1.6"}},
+            "tradesClosed": [{"tradeID": "t1", "units": "-1000"}],
+        }
+    )
+
+    assert row["CONVERSION RATE"] == ""
+
 
 def test_collect_oanda_history_range_uses_base_url_and_splits_windows(monkeypatch: pytest.MonkeyPatch):
     calls = []
@@ -719,6 +781,57 @@ def test_oanda_live_market_order_position_closeout_parses_as_close():
     assert row["net_profit"] == pytest.approx(24.5718)
     assert row["metrics"]["oanda_total_spread_cost"] == pytest.approx(1.0213)
     assert row["commission"] != pytest.approx(1.0213)
+
+
+def test_oanda_transaction_history_positive_commission_reduces_net_profit_once():
+    csv = """TICKET,TRANSACTION DATE,TRANSACTION TYPE,DETAILS,INSTRUMENT,PRICE,UNITS,DIRECTION,SPREAD COST,STOP LOSS,TAKE PROFIT,CONVERSION RATE,FINANCING,COMMISSION,GSL FEE,GSL PREMIUM,PL,BALANCE
+1,2026-01-01 10:00:00 AEST,ORDER_FILL,MARKET_ORDER,EUR_USD,1.1000,1000,Buy,0,1.0990,1.1020,1.5,0,0,0,0,0,1000
+2,2026-01-01 11:00:00 AEST,ORDER_FILL,TAKE_PROFIT_ORDER,EUR_USD,1.1020,1000,Sell,0,,,,0,0.5,0,0,10,1009.5
+"""
+    parsed = master_service._journal_rows_from_oanda_transaction_history_frame(
+        pd.read_csv(master_service.io.StringIO(csv)),
+        account_mode="demo",
+        account_label="OANDA DEMO",
+        source_path="oanda_history_demo.csv",
+    )
+
+    row = parsed["rows"][0]
+    assert row["commission"] == pytest.approx(0.5)
+    assert row["net_profit"] == pytest.approx(9.5)
+
+
+def test_oanda_transaction_history_negative_export_commission_is_not_double_deducted():
+    csv = """TICKET,TRANSACTION DATE,TRANSACTION TYPE,DETAILS,INSTRUMENT,PRICE,UNITS,DIRECTION,SPREAD COST,STOP LOSS,TAKE PROFIT,CONVERSION RATE,FINANCING,COMMISSION,GSL FEE,GSL PREMIUM,PL,BALANCE
+1,2026-01-01 10:00:00 AEST,ORDER_FILL,MARKET_ORDER,EUR_USD,1.1000,1000,Buy,0,1.0990,1.1020,1.5,0,0,0,0,0,1000
+2,2026-01-01 11:00:00 AEST,ORDER_FILL,TAKE_PROFIT_ORDER,EUR_USD,1.1020,1000,Sell,0,,,,0,-0.5,0,0,10,1009.5
+"""
+    parsed = master_service._journal_rows_from_oanda_transaction_history_frame(
+        pd.read_csv(master_service.io.StringIO(csv)),
+        account_mode="demo",
+        account_label="OANDA DEMO",
+        source_path="oanda_history_demo.csv",
+    )
+
+    row = parsed["rows"][0]
+    assert row["commission"] == pytest.approx(0.5)
+    assert row["net_profit"] == pytest.approx(9.5)
+
+
+def test_oanda_transaction_history_guaranteed_execution_fees_reduce_net_profit():
+    csv = """TICKET,TRANSACTION DATE,TRANSACTION TYPE,DETAILS,INSTRUMENT,PRICE,UNITS,DIRECTION,SPREAD COST,STOP LOSS,TAKE PROFIT,CONVERSION RATE,FINANCING,COMMISSION,GSL FEE,GSL PREMIUM,PL,BALANCE
+1,2026-01-01 10:00:00 AEST,ORDER_FILL,MARKET_ORDER,EUR_USD,1.1000,1000,Buy,0,1.0990,1.1020,1.5,0,0,0,0,0,1000
+2,2026-01-01 11:00:00 AEST,ORDER_FILL,STOP_LOSS_ORDER,EUR_USD,1.0990,1000,Sell,0,,,,0,0,0.25,0.10,10,1009.65
+"""
+    parsed = master_service._journal_rows_from_oanda_transaction_history_frame(
+        pd.read_csv(master_service.io.StringIO(csv)),
+        account_mode="demo",
+        account_label="OANDA DEMO",
+        source_path="oanda_history_demo.csv",
+    )
+
+    row = parsed["rows"][0]
+    assert row["commission"] == pytest.approx(0.35)
+    assert row["net_profit"] == pytest.approx(9.65)
 
 
 def test_oanda_live_ambiguous_daily_financing_is_not_allocated():

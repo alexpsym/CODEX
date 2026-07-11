@@ -14,6 +14,7 @@ from openpyxl.utils import get_column_letter
 from openpyxl.utils.cell import range_boundaries
 import calendar
 from copy import copy
+import json
 import math
 import os
 import re
@@ -25,6 +26,7 @@ LEGACY_ALL_TRADES_SHEET = "All Trades"
 STATS1_SHEET = "STATS1"
 STATS2_SHEET = "STATS2"
 SYMBOLS_SHEET = "SYMBOLS"
+TARGET_R_METADATA_SHEET = "_Target R Metadata"
 LEGACY_DASHBOARD_SHEET = "Dashboard"
 LEGACY_INSTRUMENT_AVERAGES_SHEET = "Instrument Averages"
 # Backward-compatible aliases (do not remove yet; external imports may still reference these).
@@ -1440,34 +1442,51 @@ def _target_r_fx_units(row: Dict[str, Any], qty: float) -> float | None:
     return qty
 
 
+def _target_r_positive_factor(value: Any) -> float | None:
+    factor = _as_float(value)
+    if factor is not None and math.isfinite(factor) and factor > 0:
+        return factor
+    return None
+
+
+def _target_r_loss_quote_home_factor(factors: Any) -> float | None:
+    if not isinstance(factors, dict):
+        return None
+    factor_map = _target_r_normalized_map(factors)
+    for nested_key in ("lossquotehome", "loss_quote_home"):
+        nested = factor_map.get(nested_key)
+        if isinstance(nested, dict):
+            value = _target_r_positive_factor(_target_r_normalized_map(nested).get("factor"))
+            if value is not None:
+                return value
+    for flattened_key in ("lossquotehomefactor", "loss_quote_home_factor"):
+        value = _target_r_positive_factor(factor_map.get(flattened_key))
+        if value is not None:
+            return value
+    return None
+
+
 def _target_r_independent_fx_loss_conversion(row: Dict[str, Any]) -> float | None:
     direct_keys = (
-        "conversion_rate",
-        "conversionrate",
-        "oanda_conversion_rate",
+        "original_loss_conversion_factor",
+        "original_loss_conversion_rate",
+        "opening_loss_conversion_factor",
+        "opening_loss_conversion_rate",
+        "oanda_open_conversion_rate",
+        "oanda_export_open_conversion_rate",
         "oanda_export_conversion_rate",
-        "oanda_original_loss_conversion_rate",
-        "home_conversion_loss",
-        "home_conversion_factor_loss",
-        "loss_conversion_factor",
-        "account_loss",
-        "accountloss",
+        "lossquotehomeconversionfactor",
+        "loss_quote_home_conversion_factor",
     )
-    nested_factor_keys = ("homeconversionfactors", "plhomeconversionfactors")
     for container in _target_r_authoritative_containers(row):
         normalized = _target_r_normalized_map(container)
         for key in direct_keys:
-            value = _as_float(normalized.get(key))
-            if value is not None and math.isfinite(value) and value > 0:
+            value = _target_r_positive_factor(normalized.get(key))
+            if value is not None:
                 return value
-        for key in nested_factor_keys:
-            factors = normalized.get(key)
-            if isinstance(factors, dict):
-                factor_map = _target_r_normalized_map(factors)
-                for loss_key in ("loss", "accountloss", "account_loss"):
-                    value = _as_float(factor_map.get(loss_key))
-                    if value is not None and math.isfinite(value) and value > 0:
-                        return value
+        value = _target_r_loss_quote_home_factor(normalized.get("homeconversionfactors"))
+        if value is not None:
+            return value
     return None
 
 
@@ -1505,11 +1524,11 @@ def _target_r_reconstructed_original_monetary_risk(
             return None, "missing_independent_original_monetary_risk"
         conversion = _target_r_independent_fx_loss_conversion(row)
         if conversion is None:
-            return None, "missing_independent_original_monetary_risk"
+            return None, "missing_opening_loss_conversion_factor"
         risk = price_risk * units * conversion
         if risk > 0 and math.isfinite(risk):
             return risk, ""
-        return None, "missing_independent_original_monetary_risk"
+        return None, "missing_opening_loss_conversion_factor"
 
     if multiplier is not None:
         risk = price_risk * qty * multiplier
@@ -1530,7 +1549,7 @@ def _target_r_original_monetary_risk(
     if reconstructed is not None:
         return reconstructed, ""
     if _target_r_is_fx_row(row):
-        return None, "missing_independent_original_monetary_risk"
+        return None, reconstructed_reason or "missing_opening_loss_conversion_factor"
     if stored_reason != "missing_stored_original_monetary_risk":
         return None, stored_reason
     return None, reconstructed_reason
@@ -1554,6 +1573,137 @@ def _target_r_realized_from_original_plan(row: Dict[str, Any]) -> Tuple[float | 
     if realized_r <= 0:
         return None, "non_positive_realized_r"
     return realized_r, ""
+
+
+def _target_r_metadata_payload(row: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(row, dict) or str(row.get("row_type") or "trade").strip().lower() != "trade":
+        return {}
+    payload: Dict[str, Any] = {}
+    levels = _original_plan_levels(row)
+    for source_key, output_key in (
+        ("entry", "original_entry_price"),
+        ("stop", "original_stop_loss"),
+        ("target", "original_take_profit"),
+    ):
+        value = _target_r_positive_factor(levels.get(source_key))
+        if value is not None:
+            payload[output_key] = value
+    qty = _target_r_quantity(row)
+    if qty is not None and math.isfinite(qty) and qty > 0:
+        payload["original_quantity"] = qty
+        payload.setdefault("qty", qty)
+    for container in _target_r_authoritative_containers(row):
+        normalized = _target_r_normalized_map(container)
+        for key in ("qty_raw", "units"):
+            value = _target_r_positive_factor(normalized.get(key))
+            if value is not None:
+                payload[key] = value
+                break
+        unit_text = _target_r_text_from_container(container, ("qty_unit", "quantity_unit", "size_unit", "unit"))
+        if unit_text:
+            payload["qty_unit"] = unit_text.lower()
+            break
+    net_currency = _target_r_net_profit_currency(row)
+    stored, _stored_reason = _target_r_stored_original_monetary_risk(row, levels)
+    if stored is not None:
+        payload["original_monetary_risk"] = stored
+        payload["original_risk_currency"] = net_currency
+    else:
+        net_profit = _target_r_net_profit(row)
+        if net_profit is not None:
+            reconstructed, _reason = _target_r_reconstructed_original_monetary_risk(row, levels, net_profit)
+            if reconstructed is not None:
+                payload["original_monetary_risk"] = reconstructed
+                payload["original_risk_currency"] = net_currency
+    conversion = _target_r_independent_fx_loss_conversion(row)
+    if conversion is not None:
+        payload["original_loss_conversion_factor"] = conversion
+        payload["opening_loss_conversion_factor"] = conversion
+        payload["original_loss_conversion_factor_source"] = str(
+            row.get("original_loss_conversion_factor_source")
+            or row.get("opening_loss_conversion_factor_source")
+            or "opening_loss_quote_home"
+        )
+        payload["original_loss_conversion_factor_time"] = str(
+            row.get("original_loss_conversion_factor_time")
+            or row.get("opening_loss_conversion_factor_time")
+            or row.get("open_time")
+            or ""
+        )
+    refs = row.get("raw_refs") if isinstance(row.get("raw_refs"), dict) else {}
+    open_tx = (
+        row.get("original_open_transaction_id")
+        or row.get("opening_transaction_id")
+        or refs.get("original_open_transaction_id")
+        or refs.get("open_transaction_id")
+        or refs.get("open_ticket")
+        or refs.get("transactionId")
+    )
+    if open_tx not in (None, ""):
+        payload["original_open_transaction_id"] = str(open_tx)
+    return {key: value for key, value in payload.items() if value not in (None, "")}
+
+
+def _read_target_r_metadata_sheet(wb) -> Dict[str, Dict[str, Any]]:
+    if TARGET_R_METADATA_SHEET not in wb.sheetnames:
+        return {}
+    ws = wb[TARGET_R_METADATA_SHEET]
+    out: Dict[str, Dict[str, Any]] = {}
+    for row_id, payload_json in ws.iter_rows(min_row=2, max_col=2, values_only=True):
+        rid = str(row_id or "").strip()
+        if not rid or not payload_json:
+            continue
+        try:
+            payload = json.loads(str(payload_json))
+        except Exception:
+            continue
+        if isinstance(payload, dict):
+            out[rid] = payload
+    return out
+
+
+def _merge_target_r_metadata(row: Dict[str, Any], metadata: Dict[str, Any]) -> Dict[str, Any]:
+    if not metadata:
+        return row
+    merged = dict(row)
+    for key, value in metadata.items():
+        if key in {"raw_refs", "metrics"} and isinstance(value, dict):
+            existing = merged.get(key) if isinstance(merged.get(key), dict) else {}
+            merged[key] = {**value, **existing}
+            continue
+        if merged.get(key) in (None, ""):
+            merged[key] = value
+    return merged
+
+
+def _write_target_r_metadata_sheet(
+    wb,
+    rows: List[Dict[str, Any]],
+    diagnostics: Dict[str, Any] | None = None,
+) -> None:
+    diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+    if TARGET_R_METADATA_SHEET in wb.sheetnames:
+        ws = wb[TARGET_R_METADATA_SHEET]
+        ws.delete_rows(1, ws.max_row)
+    else:
+        ws = wb.create_sheet(TARGET_R_METADATA_SHEET)
+    ws.sheet_state = "veryHidden"
+    ws.append(["Row ID", "Payload JSON"])
+    written = 0
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        rid = str(row.get("id") or stable_row_id(row)).strip()
+        if not rid:
+            continue
+        payload = _target_r_metadata_payload(row)
+        if not payload:
+            continue
+        ws.append([rid, json.dumps(payload, sort_keys=True, ensure_ascii=True, separators=(",", ":"))])
+        written += 1
+    ws.column_dimensions["A"].width = 36
+    ws.column_dimensions["B"].width = 120
+    diagnostics["target_r_metadata_rows"] = written
 
 
 def _is_eligible_target_r_win(row: Dict[str, Any]) -> Tuple[bool, str]:
@@ -1640,7 +1790,13 @@ def _target_r_empty_payload(reason: str = "not_enough_eligible_wins") -> Dict[st
     return {
         TARGET_RECOMMENDATION_HEADER: TARGET_RECOMMENDATION_INSUFFICIENT,
         "target_recommendation": TARGET_RECOMMENDATION_INSUFFICIENT,
+        "target_r_total_winning_trades": 0,
+        "target_r_total_fx_wins": 0,
+        "target_r_total_crypto_wins": 0,
         "eligible_target_r_wins": 0,
+        "target_r_eligible_winning_trades": 0,
+        "target_r_eligible_fx_wins": 0,
+        "target_r_eligible_crypto_wins": 0,
         "target_r_increment": None,
         "target_r_distribution": {},
         "target_r_peak_bucket": None,
@@ -1651,7 +1807,10 @@ def _target_r_empty_payload(reason: str = "not_enough_eligible_wins") -> Dict[st
         "current_median_original_planned_target_r": None,
         "current_avg_original_planned_target_r": None,
         "target_r_excluded_count": 0,
+        "target_r_excluded_winning_trades": 0,
         "target_r_excluded_reasons": {reason: 1} if reason else {},
+        "target_r_winning_exclusion_reasons": {},
+        "target_r_coverage_note": "",
     }
 
 
@@ -1659,6 +1818,12 @@ def _target_r_recommendation(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     realized_values: List[float] = []
     planned_values: List[float] = []
     excluded: Counter[str] = Counter()
+    winning_excluded: Counter[str] = Counter()
+    total_wins = 0
+    total_fx_wins = 0
+    total_crypto_wins = 0
+    eligible_fx_wins = 0
+    eligible_crypto_wins = 0
 
     for row in rows or []:
         if not isinstance(row, dict):
@@ -1668,18 +1833,55 @@ def _target_r_recommendation(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         if planned_r is not None and math.isfinite(planned_r) and planned_r > 0:
             if str(row.get("row_type") or "trade").strip().lower() == "trade" and not _target_r_row_is_test_trade(row):
                 planned_values.append(planned_r)
+        is_trade = str(row.get("row_type") or "trade").strip().lower() == "trade"
+        is_test = _target_r_row_is_test_trade(row)
+        is_winner = is_trade and not is_test and _trade_outcome_sign(row) > 0
+        if is_winner:
+            total_wins += 1
+            if _target_r_is_fx_row(row):
+                total_fx_wins += 1
+            if _target_r_is_crypto_row(row) and not _target_r_is_fx_row(row):
+                total_crypto_wins += 1
         ok, reason = _is_eligible_target_r_win(row)
         if not ok:
             excluded[reason or "excluded"] += 1
+            if is_winner:
+                winning_excluded[reason or "excluded"] += 1
             continue
         realized_r, reason = _target_r_realized_from_original_plan(row)
         if realized_r is None:
             excluded[reason or "invalid_realized_r"] += 1
+            if is_winner:
+                winning_excluded[reason or "invalid_realized_r"] += 1
             continue
         realized_values.append(realized_r)
+        if _target_r_is_fx_row(row):
+            eligible_fx_wins += 1
+        if _target_r_is_crypto_row(row) and not _target_r_is_fx_row(row):
+            eligible_crypto_wins += 1
 
     current_median = _target_r_percentile(sorted(planned_values), 0.5) if planned_values else None
     current_avg = (sum(planned_values) / len(planned_values)) if planned_values else None
+    coverage_note = ""
+    coverage_label = ""
+    if total_fx_wins > 0 and total_crypto_wins > 0:
+        if eligible_fx_wins == 0 and eligible_crypto_wins > 0:
+            coverage_note = "FX target data unavailable"
+            coverage_label = "Crypto-only eligible data"
+        elif eligible_crypto_wins == 0 and eligible_fx_wins > 0:
+            coverage_note = "Crypto target data unavailable"
+            coverage_label = "FX-only eligible data"
+    coverage_payload = {
+        "target_r_total_winning_trades": total_wins,
+        "target_r_total_fx_wins": total_fx_wins,
+        "target_r_total_crypto_wins": total_crypto_wins,
+        "target_r_eligible_winning_trades": len(realized_values),
+        "target_r_eligible_fx_wins": eligible_fx_wins,
+        "target_r_eligible_crypto_wins": eligible_crypto_wins,
+        "target_r_excluded_winning_trades": sum(winning_excluded.values()),
+        "target_r_winning_exclusion_reasons": dict(winning_excluded),
+        "target_r_coverage_note": coverage_note,
+    }
     if len(realized_values) < 5:
         payload = _target_r_empty_payload("not_enough_eligible_wins")
         payload["eligible_target_r_wins"] = len(realized_values)
@@ -1687,6 +1889,10 @@ def _target_r_recommendation(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         payload["current_avg_original_planned_target_r"] = current_avg
         payload["target_r_excluded_count"] = sum(excluded.values())
         payload["target_r_excluded_reasons"] = dict(excluded)
+        payload.update(coverage_payload)
+        if coverage_note:
+            payload[TARGET_RECOMMENDATION_HEADER] = f"Insufficient overall coverage — {coverage_note}"
+            payload["target_recommendation"] = payload[TARGET_RECOMMENDATION_HEADER]
         return payload
 
     increment = _choose_target_r_increment(realized_values)
@@ -1699,6 +1905,7 @@ def _target_r_recommendation(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         payload["current_avg_original_planned_target_r"] = current_avg
         payload["target_r_excluded_count"] = sum(excluded.values())
         payload["target_r_excluded_reasons"] = dict(excluded)
+        payload.update(coverage_payload)
         return payload
 
     peak_bucket, modal_values = max(
@@ -1715,6 +1922,7 @@ def _target_r_recommendation(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         payload["current_avg_original_planned_target_r"] = current_avg
         payload["target_r_excluded_count"] = sum(excluded.values())
         payload["target_r_excluded_reasons"] = dict(excluded)
+        payload.update(coverage_payload)
         return payload
     peak_instances = len(modal_values)
     distribution = OrderedDict(
@@ -1731,13 +1939,15 @@ def _target_r_recommendation(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         direction = "Increase target"
     else:
         direction = "Keep target"
-    recommendation = f"{direction} — Recommended: {_format_target_r_value(recommended_r)}R"
+    prefix = coverage_label or direction
+    recommendation = f"{prefix} — Recommended: {_format_target_r_value(recommended_r)}R"
     if current_median is not None:
         recommendation += f" (current median: {_format_target_r_value(current_median)}R)"
 
     return {
         TARGET_RECOMMENDATION_HEADER: recommendation,
         "target_recommendation": recommendation,
+        **coverage_payload,
         "eligible_target_r_wins": len(realized_values),
         "target_r_increment": increment,
         "target_r_distribution": dict(distribution),
@@ -6339,6 +6549,7 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
     _apply_pnl_calendar_profit_loss_formatting(cal)
     _ensure_pnl_calendar_freeze_panes(cal)
     _ensure_report_sheets(wb, snapshot)
+    _write_target_r_metadata_sheet(wb, rows)
     _repair_stats1_formatting(dash, extended_metrics)
     _repair_legacy_duration_number_formats(wb)
 
@@ -9083,6 +9294,7 @@ def read_master_journal_source(path: Path) -> Dict[str, Any]:
     wb = load_workbook(path, data_only=True, read_only=True)
     try:
         balances = _read_stats2_account_balances(wb)
+        target_r_metadata = _read_target_r_metadata_sheet(wb)
         ws = _get_all_trades_sheet(wb)
         header_map = _trade_log_header_map(ws)
         headers = list(header_map.keys())
@@ -9198,6 +9410,8 @@ def read_master_journal_source(path: Path) -> Dict[str, Any]:
                         item[field] = raw_value
             if "close_stopout" not in item and "Stop Out" in idx:
                 item["close_stopout"] = r[idx["Stop Out"]] if idx["Stop Out"] < len(r) else ''
+            if row_type == "trade":
+                item = _merge_target_r_metadata(item, target_r_metadata.get(str(item.get("id") or "").strip()) or {})
             if row_type == "monthly_aud_reval":
                 monthly_currency = (currency or str(item.get("result_currency") or "").strip() or "AUD").upper()
                 item["result_cash"] = _num(r[i_pnl]) if i_pnl is not None else None
@@ -9292,6 +9506,7 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
             wb.create_sheet(STATS2_SHEET, 1)
             diagnostics["created_stats2_from_legacy_layout"] = True
         _ensure_report_sheets(wb, snapshot, diagnostics)
+        _write_target_r_metadata_sheet(wb, rows, diagnostics)
         before = _snapshot_invariants(wb)
         groups = stats.get("groups") or {}
         by_market = groups.get("by_market") or {}

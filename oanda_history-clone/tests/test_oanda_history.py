@@ -77,7 +77,7 @@ def test_save_to_csv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
             "financing": "0.00001",
             "commission": "0.1234",
             "guaranteedExecutionFee": "0.0000",
-            "homeConversionFactors": {"gain": "1.1111"},
+            "homeConversionFactors": {"lossQuoteHome": {"factor": "1.1111"}},
             "pl": "1.00000",
             "accountBalance": "100.12",
         },

@@ -1,66 +1,75 @@
-Codex FX target-recommendation and push-safety revision summary
+Codex OANDA target-recommendation conversion and persistence revision summary
 
 Files changed:
-- .gitignore
-- PATCH_DESKTOP_PUSH.bat
+- oanda_history-clone/oanda_history.py
+- oanda_history-clone/tests/test_oanda_history.py
 - render/master_service.py
 - tools/master_journal_workbook.py
 - tests/test_master_service_trading_journal_stats.py
+- tests/test_master_service_oanda_history_export.py
+- tests/test_master_service_oanda_fill_recovery.py
 - tests/test_master_journal_workbook.py
-- tests/test_patch_desktop_push.py
 - summary/CODEX_SUMMARY_latest.txt
 
-Target recommendation correction:
-- Removed the circular FX monetary-risk reconstruction that derived conversion from realised P/L and exit movement.
-- FX target-R now requires independently established original monetary risk:
-  - known-currency stored original/planned monetary risk,
-  - verified original calculator/quote estimated_total_loss with known matching currency,
-  - OANDA independent loss conversion factors such as homeConversionFactors.loss, plHomeConversionFactors.loss, or exported CONVERSION RATE.
-- FX trades without independent original monetary risk are excluded with missing_independent_original_monetary_risk.
-- FX monetary risk is now absolute(original entry - original stop) * original units * independent loss conversion factor.
-- Realised commissions, financing, swap, guaranteed-stop fees and other costs remain in the net P/L numerator only.
-- Unknown risk currency is no longer treated as compatible.
-- Broad/unsafe stored-risk fallbacks such as max_loss, generic risk_amount, generic risk_cash, generic risk_money, and generic estimated_loss are no longer accepted.
-- Crypto target-R still uses net P/L divided by independently reconstructed original monetary risk from original price risk, quantity, multiplier and quote currency.
+OANDA conversion handling:
+- Corrected FX target-R conversion parsing to use the real OANDA schema:
+  homeConversionFactors.lossQuoteHome.factor.
+- Added support for deprecated lossQuoteHomeConversionFactor.
+- Removed acceptance of fake homeConversionFactors.loss/accountLoss/account_loss paths, plHomeConversionFactors fallback, generic conversion_rate, close-row conversion, and realised-P/L inferred conversion.
+- FX trades that need conversion and lack an opening-time loss factor are excluded with missing_opening_loss_conversion_factor.
 
-OANDA data preservation:
-- OANDA transaction-history CSV import now preserves exported CONVERSION RATE from open and close rows in metrics/raw_refs.
-- OANDA API/fill row construction now preserves homeConversionFactors and plHomeConversionFactors in metrics/raw_refs.
-- Existing OANDA financing, commission, GSL fee/premium and swap/net-profit handling remains intact.
+OANDA history export/import:
+- Updated oanda_history-clone/oanda_history.py so only opening ORDER_FILL rows export CONVERSION RATE, sourced from lossQuoteHome.factor or lossQuoteHomeConversionFactor.
+- Closing fill conversion factors are left blank by the exporter and are not accepted as original opening conversion by the importer.
+- OANDA CSV import now persists the opening export conversion as original_loss_conversion_factor with source/time/open transaction provenance.
 
-Workbook refresh and inspection:
-- Refreshed journal/Trading Journal.xlsx through update_master_journal_workbook_data_only with stats rebuilt from workbook rows.
-- Inspected requested target recommendations after refresh:
-  - Overall: Keep target - Recommended: 1.95R (current median: 2R)
+OANDA API fills:
+- Opening API fills now cache original_loss_conversion_factor, source, timestamp, and open transaction ID from opening OrderFillTransaction conversion factors.
+- Closing API rows only reuse conversion factors from the cached opening leg, never from close fill payloads or generic context.
+- Net P/L now uses realisedPL + financing - account-currency charges.
+- Positive API commission and guaranteed-execution fees/premiums reduce net P/L.
+- Export commission sign handling deducts positive and already-negative commission exactly once.
+- Spread remains diagnostic only and is not subtracted separately.
+
+Durable target-R metadata:
+- Added a very-hidden workbook sheet named _Target R Metadata.
+- Metadata is keyed by stable Row ID and stores original entry/stop/target, quantity/units, original monetary risk and currency, opening loss conversion factor, conversion source/time, and open transaction ID.
+- read_master_journal_source merges this metadata back into trade rows before stats/recommendation calculations.
+- update/build workbook flows refresh the hidden metadata sheet without adding visible Trade Log columns.
+
+Recommendation coverage:
+- Backend target-R payloads now include total winning trades, eligible wins, eligible FX/Crypto wins, excluded winning trades, winning exclusion reasons, and a coverage note.
+- Overall recommendations are labeled when only one major asset class has eligible data.
+- The refreshed workbook now shows:
+  - Overall: Crypto-only eligible data - Recommended: 1.95R (current median: 2R)
   - FX: Insufficient eligible wins - recommended target unavailable
   - Crypto: Reduce target - Recommended: 1.95R (current median: 2.18R)
-  - EURUSD: Insufficient eligible wins - recommended target unavailable
-  - USDJPY: Insufficient eligible wins - recommended target unavailable
   - BTCUSDT: Keep target - Recommended: 1.95R (current median: 2.01R)
   - ETHUSDT: Keep target - Recommended: 1.98R (current median: 2.09R)
-- Trade Log still has no Target Recommendation column.
-- The FX recommendations are now insufficient rather than based on circular realised-profit conversion.
-
-Automatic push safety:
-- PATCH_DESKTOP_PUSH.bat now resets confirmed runtime/local-state paths after staging:
-  - render/data
-  - render/uploads
-  - bybit_monitor/custom_alerts.json
-  - state_manifest.json
-- .gitignore now includes render/uploads, bybit_monitor/custom_alerts.json, and state_manifest.json.
-- Added push-script tests that verify the runtime/local-state exclusions.
+- STATS1 and SYMBOLS were inspected against backend calculations and matched.
+- Trade Log still has no visible conversion/target recommendation metadata columns.
 
 Verification performed:
-- python -m pytest --basetemp=.pytest_tmp_target_revision -o cache_dir=.pytest_tmp_target_revision_cache tests\test_master_service_trading_journal_stats.py::test_fx_net_r_changes_when_net_profit_changes_with_fixed_independent_risk tests\test_master_service_trading_journal_stats.py::test_fx_net_profit_cannot_be_cancelled_by_inferred_conversion_rate tests\test_master_service_trading_journal_stats.py::test_target_recommendation_does_not_use_gross_price_r_when_monetary_risk_unavailable tests\test_master_service_trading_journal_stats.py::test_fx_home_conversion_factors_loss_produces_original_monetary_risk tests\test_master_service_trading_journal_stats.py::test_fx_financing_changes_net_r_numerator_without_changing_conversion_factor tests\test_master_service_trading_journal_stats.py::test_unknown_original_risk_currency_is_not_compatible tests\test_master_service_trading_journal_stats.py::test_unrelated_max_loss_is_never_used_as_original_risk tests\test_master_service_trading_journal_stats.py::test_crypto_reconstructs_original_monetary_risk_independently tests\test_master_service_trading_journal_stats.py::test_oanda_export_conversion_rate_is_retained_and_used_for_target_r tests\test_patch_desktop_push.py
-  Result: 13 passed, 4 warnings.
-- python -m pytest --basetemp=.pytest_tmp_target_revision -o cache_dir=.pytest_tmp_target_revision_cache [18 target/workbook tests] tests\test_patch_desktop_push.py
-  Result: 25 passed, 4 warnings.
-- python -m py_compile tools\master_journal_workbook.py render\master_service.py
+- python -m py_compile render\master_service.py tools\master_journal_workbook.py oanda_history-clone\oanda_history.py
   Result: passed.
-- python -m pytest --basetemp=.pytest_tmp_target_revision -o cache_dir=.pytest_tmp_target_revision_cache tests\test_master_service_oanda_history_export.py::test_oanda_demo_raw_history_spread_cost_not_commission_and_balance_authoritative tests\test_master_service_oanda_history_export.py::test_oanda_demo_attached_style_spread_costs_never_become_commission tests\test_master_service_oanda_history_export.py::test_oanda_live_market_if_touched_open_and_order_closes_parse_canonical_rows
-  Result: 3 passed, 4 warnings.
+- python -m pytest oanda_history-clone/tests/test_oanda_history.py -q -p no:cacheprovider --basetemp=pytest_tmp_oanda_clone
+  Result: 9 passed.
+- python -m pytest tests/test_master_service_oanda_history_export.py -q -x -p no:cacheprovider --basetemp=pytest_tmp_oanda_history
+  Result: 37 passed, 4 warnings.
+- python -m pytest tests/test_master_service_oanda_fill_recovery.py -q -x -p no:cacheprovider --basetemp=pytest_tmp_oanda_fill
+  Result: 10 passed, 4 warnings.
+- python -m pytest tests/test_master_service_trading_journal_stats.py -q -p no:cacheprovider --basetemp=pytest_tmp_stats_focus -k "(target_recommendation or fx_ or oanda_export or overall_target) and not market_return"
+  Result: 19 passed, 21 deselected, 4 warnings.
+- python -m pytest tests/test_master_journal_workbook.py -q -p no:cacheprovider --basetemp=pytest_tmp_workbook_focus -k "target_r_metadata or checked_in_trading_journal_target_recommendations_match_backend_calculations or checked_in_trading_journal_has_no_direction_only_or_zero_target_recommendations or real_trading_journal_source_data_produces_numeric_target_recommendations"
+  Result: 4 passed, 136 deselected.
 
-Git safety notes before push:
-- Pre-existing runtime/local-state changes remain in bybit_monitor/custom_alerts.json, render/data, state_manifest.json and render/uploads.
-- PATCH_DESKTOP_PUSH.bat has been updated to exclude these confirmed runtime/local-state paths.
-- PATCH_DESKTOP_PUSH.bat will be run from the repository root after this summary is written.
+Known unrelated test state:
+- Full tests/test_master_service_trading_journal_stats.py still reaches pre-existing market_return percentage failures unrelated to this OANDA target-R revision.
+- Full tests/test_master_journal_workbook.py is very slow in this environment and timed out after progressing through initial tests; the target-R/workbook coverage required for this task passed.
+
+Local-state safety:
+- Existing runtime/local-state files remain modified locally and must not be committed:
+  bybit_monitor/custom_alerts.json, render/data/monthly_aud_revaluation_state.json,
+  render/data/trade_contexts.json, and state_manifest.json.
+- PATCH_DESKTOP_PUSH.bat excludes those runtime/local-state paths and render/data after broad staging.
+- PATCH_DESKTOP_PUSH.bat will be run from the repository root after this summary is written, and completion is not valid until it verifies local HEAD matches origin/master.
