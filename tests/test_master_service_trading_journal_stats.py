@@ -64,7 +64,7 @@ if _httpx_spec is None:
 
 import render.master_service as master_service
 from render.master_service import _compute_journal_stats, _compute_journal_period_stats, _build_journal_balance_timelines
-from tools.master_journal_workbook import MIN_ELIGIBLE_TARGET_R_WINS, TARGET_RECOMMENDATION_INSUFFICIENT, _format_target_r_value, _target_r_recommendation, _target_r_realized_from_original_plan
+from tools.master_journal_workbook import MIN_ELIGIBLE_TARGET_R_WINS, TARGET_RECOMMENDATION_INSUFFICIENT, _distance_recommendation_summary, _format_target_r_value, _target_r_recommendation, _target_r_realized_from_original_plan
 
 
 def test_compute_journal_stats_winner_loser_splits_and_durations() -> None:
@@ -260,6 +260,11 @@ def test_compute_journal_stats_recommends_stop_from_win_loss_distances_but_targe
             "row_type": "trade",
             "asset_class": "fx",
             "symbol": "EURUSD",
+            "side": "BUY",
+            "entry_price": 100.0,
+            "planned_entry_price": 100.0,
+            "planned_stop_price": 99.0,
+            "planned_target_price": 102.0,
             "result_pct": 1.0,
             "net_profit": 10.0,
             "stop_loss_distance_pct": 1.0,
@@ -269,6 +274,11 @@ def test_compute_journal_stats_recommends_stop_from_win_loss_distances_but_targe
             "row_type": "trade",
             "asset_class": "fx",
             "symbol": "EURUSD",
+            "side": "BUY",
+            "entry_price": 100.0,
+            "planned_entry_price": 100.0,
+            "planned_stop_price": 98.0,
+            "planned_target_price": 104.0,
             "result_pct": -1.0,
             "net_profit": -5.0,
             "stop_loss_distance_pct": 2.0,
@@ -280,11 +290,75 @@ def test_compute_journal_stats_recommends_stop_from_win_loss_distances_but_targe
     risk = stats["groups"]["risk_expectancy"]
     instrument = next(item for item in stats["by_instrument"] if item["symbol"] == "EURUSD")
 
-    assert risk["stop_recommendation"] == "Reduce stop loss"
+    expected_stop = "Decrease stop — Recommended: 1.00% (1.00 pp below loss average)"
+    assert risk["stop_recommendation"] == expected_stop
     assert risk["target_recommendation"] == TARGET_RECOMMENDATION_INSUFFICIENT
-    assert risk["by_market"]["fx"]["stop_recommendation"] == "Reduce stop loss"
-    assert instrument["stop_recommendation"] == "Reduce stop loss"
+    assert risk["by_market"]["fx"]["stop_recommendation"] == expected_stop
+    assert instrument["stop_recommendation"] == expected_stop
     assert instrument["target_recommendation"] == TARGET_RECOMMENDATION_INSUFFICIENT
+
+
+def _stop_recommendation_trade(
+    trade_id: str,
+    *,
+    result_pct: float,
+    planned_stop_price: float,
+    is_test_trade: bool = False,
+    row_type: str = "trade",
+) -> dict:
+    return {
+        "id": trade_id,
+        "row_type": row_type,
+        "asset_class": "fx",
+        "symbol": "EURUSD",
+        "side": "BUY",
+        "entry_price": 100.0,
+        "planned_entry_price": 100.0,
+        "planned_stop_price": planned_stop_price,
+        "planned_target_price": 104.0,
+        "net_profit": result_pct,
+        "result_pct": result_pct,
+        "is_test_trade": is_test_trade,
+    }
+
+
+def test_stop_recommendation_uses_original_stop_percentage_distance() -> None:
+    decrease = _distance_recommendation_summary([
+        _stop_recommendation_trade("win", result_pct=1.0, planned_stop_price=99.0),
+        _stop_recommendation_trade("loss", result_pct=-1.0, planned_stop_price=98.0),
+    ])
+    assert decrease["stop_recommendation"] == "Decrease stop — Recommended: 1.00% (1.00 pp below loss average)"
+    assert decrease["stop_loss_winner_mean_pct"] == pytest.approx(1.0)
+    assert decrease["stop_loss_loser_mean_pct"] == pytest.approx(2.0)
+    assert decrease["stop_loss_difference_pp"] == pytest.approx(1.0)
+
+    increase = _distance_recommendation_summary([
+        _stop_recommendation_trade("win", result_pct=1.0, planned_stop_price=97.0),
+        _stop_recommendation_trade("loss", result_pct=-1.0, planned_stop_price=99.0),
+    ])
+    assert increase["stop_recommendation"] == "Increase stop — Recommended: 3.00% (2.00 pp above loss average)"
+
+    equal = _distance_recommendation_summary([
+        _stop_recommendation_trade("win", result_pct=1.0, planned_stop_price=99.0),
+        _stop_recommendation_trade("loss", result_pct=-1.0, planned_stop_price=99.0),
+    ])
+    assert equal["stop_recommendation"] == "Stop averages equal — Recommended: 1.00% (0.00 pp equal to loss average)"
+
+
+def test_stop_recommendation_requires_wins_and_losses_and_reports_exclusions() -> None:
+    summary = _distance_recommendation_summary([
+        _stop_recommendation_trade("valid-win", result_pct=1.0, planned_stop_price=99.0),
+        _stop_recommendation_trade("test", result_pct=1.0, planned_stop_price=99.0, is_test_trade=True),
+        _stop_recommendation_trade("break-even", result_pct=0.0, planned_stop_price=99.0),
+        _stop_recommendation_trade("cashflow", result_pct=1.0, planned_stop_price=99.0, row_type="cashflow"),
+    ])
+
+    assert summary["stop_recommendation"] == "Need wins & losses"
+    assert summary["eligible_stop_loss_wins"] == 1
+    assert summary["eligible_stop_loss_losses"] == 0
+    assert summary["stop_loss_excluded_reasons"]["test_trade"] == 1
+    assert summary["stop_loss_excluded_reasons"]["break_even_or_zero"] == 1
+    assert summary["stop_loss_excluded_reasons"]["not_trade"] == 1
 
 
 def _target_distribution_trade(
@@ -378,7 +452,7 @@ def test_compute_journal_stats_target_recommendation_uses_realized_original_r_di
     assert risk["current_avg_original_planned_target_r"] == pytest.approx(4.0)
     assert risk["target_r_excluded_reasons"]["not_winning_trade"] >= 2
     assert direct_target["target_r_excluded_reasons"]["test_trade"] == 1
-    assert risk["target_r_excluded_reasons"]["missing_original_risk_quantity"] == 1
+    assert risk["target_r_excluded_reasons"]["missing_exit_price"] == 1
     assert risk["target_r_excluded_reasons"]["moved_without_original_plan"] == 1
     assert by_market["overall"]["target_recommendation"] == risk["target_recommendation"]
     assert by_market["fx"]["target_recommendation"] == direct_target["target_recommendation"]
@@ -543,15 +617,20 @@ def test_fx_net_r_changes_when_net_profit_changes_with_fixed_independent_risk() 
     assert second_r == pytest.approx(2.0)
 
 
-def test_fx_net_profit_cannot_be_cancelled_by_inferred_conversion_rate() -> None:
+def test_fx_missing_monetary_conversion_uses_original_price_r_fallback() -> None:
     first_row = _fx_trade_with_independent_conversion("fx-no-inferred-1", net_profit=15.0, conversion=None)
     second_row = _fx_trade_with_independent_conversion("fx-no-inferred-2", net_profit=30.0, conversion=None)
 
-    assert _target_r_realized_from_original_plan(first_row) == (None, "missing_opening_loss_conversion_factor")
-    assert _target_r_realized_from_original_plan(second_row) == (None, "missing_opening_loss_conversion_factor")
+    first_r, first_reason = _target_r_realized_from_original_plan(first_row)
+    second_r, second_reason = _target_r_realized_from_original_plan(second_row)
+
+    assert first_reason == ""
+    assert second_reason == ""
+    assert first_r == pytest.approx(1.0)
+    assert second_r == pytest.approx(1.0)
 
 
-def test_target_recommendation_does_not_use_gross_price_r_when_monetary_risk_unavailable() -> None:
+def test_target_recommendation_uses_original_price_r_when_monetary_risk_unavailable() -> None:
     rows = []
     for idx, value in enumerate([1.2, 1.3, 1.4, 1.5, 1.6], start=1):
         row = _target_distribution_trade(f"gross-only-{idx}", value)
@@ -563,9 +642,9 @@ def test_target_recommendation_does_not_use_gross_price_r_when_monetary_risk_una
 
     risk = _target_r_recommendation(rows)
 
-    assert risk["eligible_target_r_wins"] == 0
-    assert risk["target_recommendation"] == TARGET_RECOMMENDATION_INSUFFICIENT
-    assert risk["target_r_excluded_reasons"]["missing_opening_loss_conversion_factor"] == 5
+    assert risk["eligible_target_r_wins"] == 5
+    assert risk["target_recommendation"].startswith("Reduce target — Recommended: ")
+    assert "missing_opening_loss_conversion_factor" not in risk["target_r_excluded_reasons"]
 
 
 def test_fx_home_conversion_factors_loss_produces_original_monetary_risk() -> None:
@@ -593,8 +672,13 @@ def test_fx_fake_loss_and_generic_conversion_rate_are_rejected() -> None:
     generic = _fx_trade_with_independent_conversion("fx-generic-conv", net_profit=15.0, conversion=None)
     generic["raw_refs"] = {"conversion_rate": 1.5}
 
-    assert _target_r_realized_from_original_plan(fake_loss) == (None, "missing_opening_loss_conversion_factor")
-    assert _target_r_realized_from_original_plan(generic) == (None, "missing_opening_loss_conversion_factor")
+    fake_r, fake_reason = _target_r_realized_from_original_plan(fake_loss)
+    generic_r, generic_reason = _target_r_realized_from_original_plan(generic)
+
+    assert fake_reason == ""
+    assert generic_reason == ""
+    assert fake_r == pytest.approx(1.0)
+    assert generic_r == pytest.approx(1.0)
 
 
 def test_fx_financing_changes_net_r_numerator_without_changing_conversion_factor() -> None:
@@ -611,14 +695,14 @@ def test_fx_financing_changes_net_r_numerator_without_changing_conversion_factor
     assert financed_r == pytest.approx(14.0 / 15.0)
 
 
-def test_unknown_original_risk_currency_is_not_compatible() -> None:
+def test_unknown_original_risk_currency_uses_price_r_fallback() -> None:
     row = _target_distribution_trade("unknown-risk-currency", 1.5)
     row.pop("original_risk_currency", None)
 
     realized_r, reason = _target_r_realized_from_original_plan(row)
 
-    assert realized_r is None
-    assert reason == "missing_original_risk_quantity"
+    assert reason == ""
+    assert realized_r == pytest.approx(1.5)
 
 
 def test_unrelated_max_loss_is_never_used_as_original_risk() -> None:
@@ -627,8 +711,8 @@ def test_unrelated_max_loss_is_never_used_as_original_risk() -> None:
 
     realized_r, reason = _target_r_realized_from_original_plan(row)
 
-    assert realized_r is None
-    assert reason == "missing_opening_loss_conversion_factor"
+    assert reason == ""
+    assert realized_r == pytest.approx(1.0)
 
 
 def test_crypto_reconstructs_original_monetary_risk_independently() -> None:
@@ -693,7 +777,9 @@ def test_oanda_export_closing_conversion_rate_is_not_used_for_target_r() -> None
 
     assert row["metrics"]["oanda_close_conversion_rate"] == pytest.approx(1.5)
     assert row["raw_refs"]["original_loss_conversion_factor"] is None
-    assert _target_r_realized_from_original_plan(row) == (None, "missing_opening_loss_conversion_factor")
+    realized_r, reason = _target_r_realized_from_original_plan(row)
+    assert reason == ""
+    assert realized_r == pytest.approx(2.0)
 
 
 def _fx_target_wins(values: list[float], *, symbol: str = "EURUSD") -> list[dict]:
@@ -1075,9 +1161,9 @@ def test_market_return_percentage_uses_account_balance_return() -> None:
     fx = stats["groups"]["by_market"]["fx"]
     assert fx["market_return_pct"] == pytest.approx(-10.0)
     assert fx["gross_gain_return_pct"] == pytest.approx(0.0)
-    assert fx["gross_loss_return_pct"] == pytest.approx(80.0)
+    assert fx["gross_loss_return_pct"] == pytest.approx(10.0)
     assert fx["gross_ir_loss"] == pytest.approx(0.8)
-    assert fx["return_method"] == "cashflow_adjusted_account_balance"
+    assert fx["return_method"] == "capital_weighted_account_return_aud"
 
 
 def test_market_return_percentage_is_bounded_by_account_capital() -> None:
@@ -1098,10 +1184,10 @@ def test_market_return_percentage_is_bounded_by_account_capital() -> None:
     )
     crypto = stats["groups"]["by_market"]["crypto"]
     assert crypto["market_return_pct"] == pytest.approx(-100.0)
-    assert crypto["gross_loss_return_pct"] == pytest.approx(250.0)
+    assert crypto["gross_loss_return_pct"] == pytest.approx(100.0)
 
 
-def test_market_return_percentage_rejects_mixed_fx_currencies() -> None:
+def test_market_return_percentage_weights_mixed_fx_account_returns() -> None:
     rows = [
         {"row_type": "trade", "asset_class": "fx", "account": "OANDA DEMO", "symbol": "EURUSD", "net_profit": -100.0, "currency": "AUD"},
         {"row_type": "trade", "asset_class": "fx", "account": "FOREX USD", "symbol": "USDJPY", "net_profit": 20.0, "currency": "USD"},
@@ -1114,10 +1200,11 @@ def test_market_return_percentage_rejects_mixed_fx_currencies() -> None:
         ],
     )
     fx = stats["groups"]["by_market"]["fx"]
-    assert fx["market_return_pct"] is None
-    assert fx["gross_gain_return_pct"] is None
-    assert fx["gross_loss_return_pct"] is None
-    assert fx["return_unavailable_reason"] == "unsupported_fx_currency"
+    assert fx["market_return_pct"] == pytest.approx(-4.115942028985507)
+    assert fx["gross_gain_return_pct"] == pytest.approx(1.6811594202898552)
+    assert fx["gross_loss_return_pct"] == pytest.approx(5.797101449275362)
+    assert fx["return_method"] == "capital_weighted_account_return_aud"
+    assert fx["return_unavailable_reason"] is None
 
 
 def test_risk_of_ruin_is_deterministic_and_clamped() -> None:

@@ -1,69 +1,54 @@
-Codex final correction summary - per-asset-class Overall target-R coverage
+Trading Journal regression repair summary
 
-Files changed:
-- render/master_service.py
-- tools/master_journal_workbook.py
-- tests/test_master_service_trading_journal_stats.py
-- tests/test_master_journal_workbook.py
-- summary/CODEX_SUMMARY_latest.txt
+Root causes found:
+- Target recommendations rejected legacy FX winners when monetary opening loss conversion metadata was absent, even when immutable original entry, stop, target, and actual exit prices were present. This made FX unavailable and left Stats 1/Symbols inconsistent.
+- Stop-loss recommendations used older distance/average plumbing and direction-only text, with broad neutral behavior. They were not consistently based on original stop-loss percentage distance, and service/Symbols/Stats 1 had divergent implementations.
+- Stats 1 freeze panes were dropped during workbook repair; historical audit recovered the intended `B88` freeze pane.
+- Stats 1 Drawdown and Most Wins/Most Losses could be blank when upstream stats omitted those fields; the generator lacked row-derived fallbacks.
+- Stats 1 Pattern “Most Profitable” and “Least Profitable” rows were included in generated profit/loss semantic formatting ranges, causing red/green styling on text category cells.
+- Stats 2 Net P/L Percentage values were written without a durable dynamic profit/loss conditional-formatting range.
+- Trade Log row heights were normalized to a constant instead of the live row-5 data height after later copy/style operations, allowing rows such as 28 to stay oversized.
+- P&L Calendar build/update paths preserved the broken two-row layout: duplicated month labels, `{year} Trades` rows, and separate trade-count cells.
 
-Implementation:
-- Added shared `MIN_ELIGIBLE_TARGET_R_WINS = 5`.
-- Added an explicit `scope` parameter to `_target_r_recommendation`; Overall callers now pass `scope="overall"`.
-- Overall coverage now uses:
-  - `fx_sufficient = eligible_fx_wins >= MIN_ELIGIBLE_TARGET_R_WINS`
-  - `crypto_sufficient = eligible_crypto_wins >= MIN_ELIGIBLE_TARGET_R_WINS`
-- Overall recommendations now follow the required matrix:
-  - both sufficient: normal Overall direction/recommended target format;
-  - Crypto sufficient and FX insufficient: `Crypto-only data — Recommended: <value>R — FX: insufficient eligible wins`;
-  - FX sufficient and Crypto insufficient: `FX-only data — Recommended: <value>R — Crypto: insufficient eligible wins`;
-  - neither sufficient: `Insufficient eligible wins — recommended target unavailable`.
-- When Overall is Crypto-only or FX-only, the displayed recommended R is calculated from the sufficient asset class only, so one to four insufficient eligible wins from the other class cannot influence the recommendation.
-- Symbol recommendations, FX-only STATS1, and Crypto-only STATS1 remain on the standard non-Overall target-R format.
-- Workbook-derived STATS1 calculations now pass Overall scope when recomputing the Overall market bucket from workbook rows.
+Files/functions changed:
+- `tools/master_journal_workbook.py`
+  - Added shared stop/target recommendation plumbing via `_distance_recommendation_summary`, `_original_stop_distance_pct_points`, `_stop_recommendation_payload`, and price-R fallback in `_target_r_realized_from_original_plan`.
+  - Added `_instrument_leader_payloads_from_rows` and drawdown fallback usage in `_dashboard_extended_metrics`.
+  - Repaired Stats 1 formatting/freeze behavior in `_repair_stats1_formatting`.
+  - Added durable Stats 2 Net P/L Percentage formatting via `_apply_stats2_net_pl_percentage_conditional_formatting`.
+  - Replaced P&L Calendar generation/update with `_write_pnl_calendar_one_line_layout`.
+  - Normalized Trade Log data-row heights from row 5 in `_normalize_trade_log_row_heights`.
+- `render/master_service.py`
+  - Switched overview, risk, market, and per-symbol recommendation payloads to the shared `_distance_recommendation_summary`.
+  - Fixed Excel-open stop recommendation repair to convert Excel percentage fractions back to percentage points.
+- `tests/test_master_service_trading_journal_stats.py`
+  - Added/updated target and stop recommendation tests for five-win target eligibility, price-R fallback, original stop percentage means, exact equality, exclusions, and shared service payloads.
+  - Updated market-return assertions to the current capital-weighted return method.
+- `tests/test_master_journal_workbook.py`
+  - Added/updated workbook regression tests for Stats 1 freeze/drawdown/leaders/pattern styling, Stats 2 Net P/L CF, Trade Log row heights, Symbols recommendations, and one-line P&L Calendar layout.
 
-Tests added or updated:
-- 4 eligible FX + 5 eligible Crypto returns Crypto-only wording.
-- 5 eligible FX + 4 eligible Crypto returns FX-only wording.
-- 3 eligible FX + 3 eligible Crypto returns insufficient data even though combined eligible wins are six.
-- 0 eligible FX + 5 eligible Crypto returns Crypto-only wording.
-- 5 eligible FX + 0 eligible Crypto returns FX-only wording.
-- 5+ eligible wins in both classes returns the normal Overall recommendation format.
-- Symbol recommendations do not receive Crypto-only or FX-only wording.
-- FX and Crypto STATS1 sections retain normal recommendation formats.
-- Checked-in workbook expected Overall calculations now call `_target_r_recommendation(..., scope="overall")`.
+Calculation rules implemented:
+- Target: realised winning trades only; exclude tests, losses, break-even/zero-R, non-trade/revaluation/cashflow rows, invalid values, missing/untrusted original stops or targets, and moved-plan rows without immutable original levels. Use monetary original risk when available; otherwise use captured price-R from original entry/stop and actual exit. Minimum eligible wins is 5. Histogram uses Freedman-Diaconis bin width snapped to 0.25R/0.5R/1.0R, floor bucketing, lower bucket on ties, and raw-value median of the modal bucket. Direction uses half-bin tolerance versus median original planned target R.
+- Stop: genuine realised winners and losers only; use original stop-loss percentage distance, not pips and not moved/final levels. Requires at least one eligible win and one eligible loss. Recommendation percentage is the winning mean, with increase/decrease/equal direction from unrounded means and displayed percentage-point gap.
 
-Workbook refresh and inspection:
-- Refreshed `journal/Trading Journal.xlsx` through the production workbook refresh path.
-- Refresh succeeded with `target_r_metadata_rows: 1444`.
-- The tracked workbook had no final binary diff after refresh.
-- STATS1 matched backend calculations after the threshold correction:
-  - Overall: `Crypto-only data — Recommended: 1.95R — FX: insufficient eligible wins`
-  - FX: `Insufficient eligible wins — recommended target unavailable`
-  - Crypto: `Reduce target — Recommended: 1.95R (current median: 2.18R)`
-- SYMBOLS BTCUSDT and ETHUSDT retained normal symbol recommendation formats:
-  - BTCUSDT: `Keep target — Recommended: 1.95R (current median: 2.01R)`
-  - ETHUSDT: `Keep target — Recommended: 1.98R (current median: 2.09R)`
-- `_Target R Metadata` remains present and `veryHidden`.
-- No target-R metadata or opening conversion columns are visible in Trade Log.
+Current workbook recommendation diagnostics:
+- Overall: 1409 trades, 400 wins, 993 losses. Stop eligible wins/losses 226/800; means 0.6703% vs 0.7226%; recommendation `Decrease stop — Recommended: 0.67% (0.05 pp below loss average)`. Target eligible wins 217; bin 0.25R; modal bucket `2.0R-2.25R` with 60 instances; recommendation `Keep target — Recommended: 2.03R (current median: 2R)`.
+- FX: 1037 trades, 313 wins, 708 losses. Stop eligible wins/losses 182/632; means 0.1610% vs 0.1349%; recommendation `Increase stop — Recommended: 0.16% (0.03 pp above loss average)`. Target eligible wins 173; bin 0.5R; modal bucket `2.0R-2.5R` with 61 instances; recommendation `Keep target — Recommended: 2.04R (current median: 2.0R)`.
+- Crypto: 372 trades, 87 wins, 285 losses. Stop eligible wins/losses 44/168; means 2.7771% vs 2.9335%; recommendation `Decrease stop — Recommended: 2.78% (0.16 pp below loss average)`. Target eligible wins 44; bin 0.25R; modal bucket `1.75R-2.0R` with 22 instances; recommendation `Reduce target — Recommended: 1.95R (current median: 2.18R)`.
 
-Verification performed:
-- `python -m py_compile render\master_service.py tools\master_journal_workbook.py oanda_history-clone\oanda_history.py tests\test_master_service_trading_journal_stats.py tests\test_master_journal_workbook.py`
-  Result: passed.
-- `python -m pytest tests/test_master_service_trading_journal_stats.py -q -p no:cacheprovider --basetemp=pytest_tmp_overall_threshold_stats2 -k "(target_recommendation or fx_ or oanda_export or overall_target) and not market_return"`
-  Result: 26 passed, 21 deselected, 4 warnings.
-- `python -m pytest tests/test_master_journal_workbook.py -q -p no:cacheprovider --basetemp=pytest_tmp_overall_threshold_workbook_final -k "target_r_metadata or missing_target_r_metadata or checked_in_trading_journal_target_recommendations_match_backend_calculations or checked_in_trading_journal_has_no_direction_only_or_zero_target_recommendations or real_trading_journal_source_data_produces_numeric_target_recommendations"`
-  Result: 7 passed, 136 deselected.
-- `python -m pytest tests/test_master_service_oanda_history_export.py tests/test_master_service_oanda_fill_recovery.py oanda_history-clone/tests/test_oanda_history.py -q -p no:cacheprovider --basetemp=pytest_tmp_overall_threshold_oanda_final`
-  Result: 56 passed, 8 warnings.
+Workbook verification:
+- Official update path completed and replaced `journal/Trading Journal.xlsx`.
+- Reopened workbook verification passed: Stats 1 freeze pane `B88`; Drawdown/Most Wins/Most Losses populated; Pattern profitability rows neutral; Stats 2 Net P/L Percentage CF range `F3:F9`; all populated Trade Log data rows match row-5 height `15.0`; row 28 is `15.0`; P&L Calendar freeze pane `B2`, one year row per year, no `{year} Trades` rows, and month cells use one-line `percentage, count trades` text.
+- Representative Symbols rows now show shared stop/target recommendations with recommended percentages/R values.
 
-Runtime/local-state safety:
-- Existing runtime/local-state files remain modified locally and must not be committed:
-  `bybit_monitor/custom_alerts.json`, `render/data/monthly_aud_revaluation_state.json`, `render/data/trade_contexts.json`, and `state_manifest.json`.
-- `PATCH_DESKTOP_PUSH.bat` excludes those runtime/local-state paths after broad staging.
-- No secrets, environment files, logs, caches, runtime data, or local-state files are intended for commit.
+Tests run:
+- `python -m py_compile tools/master_journal_workbook.py render/master_service.py tests/test_master_journal_workbook.py tests/test_master_service_trading_journal_stats.py` passed.
+- `python -m pytest tests/test_master_service_trading_journal_stats.py -q --basetemp=.pytest_tmp_journal_service -p no:cacheprovider` passed: 49 passed.
+- `python -m pytest tests/test_master_journal_workbook.py -q --basetemp=.pytest_tmp_journal -p no:cacheprovider -k "calendar_month_conditional_formatting_rows or update_data_only_rewrites_calendar_to_one_line_layout or update_data_only_adds_missing_calendar_year_row or dashboard_trade_log_and_pnl_calendar_loss_profit_fills_match or sheet_order_and_hidden_meta"` passed: 5 passed.
+- `python -m pytest tests/test_master_journal_workbook.py -q --basetemp=.pytest_tmp_journal -p no:cacheprovider -k "recommendations_are_removed or missing_target_r_metadata or generated_calendar_and_instrument_averages or generated_workbook_repairs_stats1_stats2_and_calendar_structure or update_normalizes_every_trade_log_data_row_to_row_5_height or pnl_calendar_update_removes_duplicate_generated_profit_loss_rules or generated_pnl_calendar_update_removes_stale_profit_loss_rules"` passed: 7 passed.
+- `git diff --check -- tools/master_journal_workbook.py render/master_service.py tests/test_master_journal_workbook.py tests/test_master_service_trading_journal_stats.py` passed.
 
-Completion evidence note:
-- This summary is written before `PATCH_DESKTOP_PUSH.bat` runs, as required by `AGENTS.md`.
-- Per the user instruction, this committed summary does not attempt to contain the commit's own final hash.
-- The external push log and final Codex response should report the post-push `Commit`, `Local HEAD`, and `origin/master` hashes after `PATCH_DESKTOP_PUSH.bat` completes.
+Remaining limitations:
+- The full workbook test file was not run end-to-end because it exceeds the available tool timeout, but the focused regression coverage for the changed workbook paths passed.
+- Workbook hyperlink diagnostics still report some missing/ambiguous local trade folders; those are pre-existing external folder availability issues, not workbook calculation/layout failures.
+- Commit/push confirmation is pending `PATCH_DESKTOP_PUSH.bat`, which must run after this summary is written.

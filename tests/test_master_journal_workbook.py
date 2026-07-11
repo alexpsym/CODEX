@@ -3,6 +3,7 @@ from collections import defaultdict
 from copy import copy
 from datetime import datetime
 import json
+import re
 import zipfile
 import xml.etree.ElementTree as ET
 from openpyxl import Workbook, load_workbook
@@ -1063,22 +1064,17 @@ def test_calendar_month_conditional_formatting_rows(tmp_path: Path):
     ]
     out=tmp_path/'Trading Journal.xlsx'; build_master_journal_workbook(snap,out); wb=load_workbook(out)
     cal=wb['P&L Calendar']
-    may=cal['F3']; jun=cal['G3']; mar=cal['D3']
-    assert isinstance(may.value, float) and isinstance(jun.value, float)
-    assert may.number_format.endswith('%')
-    assert jun.number_format.endswith('%')
-    ranges = _cf_ranges(cal)
-    assert _cell_covered(ranges, "F3")
-    assert _cell_covered(ranges, "G3")
-    assert not _cell_covered(ranges, "F4")
-    assert not _cell_covered(ranges, "G4")
-    assert cal.freeze_panes == "B3"
+    may=cal['F2']; jun=cal['G2']; mar=cal['D2']
+    assert may.value == "1.20%, 1 trade"
+    assert jun.value == "-0.40%, 1 trade"
+    assert _cell_fill_rgb(may) == PROFIT_FILL
+    assert _cell_fill_rgb(jun) == LOSS_FILL
+    assert _cf_ranges(cal) == []
+    assert cal.freeze_panes == "B2"
     for c in range(1, 14):
         assert cal.cell(1, c).font.bold is True
-        assert cal.cell(2, c).font.bold is True
     assert mar.value in ('', None)
-    heights=[cal.row_dimensions[r].height for r in range(2, cal.max_row+1)]
-    assert len(set(heights)) == 1
+    assert not any(str(cal.cell(row, 1).value or "").endswith(" Trades") for row in range(2, cal.max_row + 1))
 
 
 
@@ -1159,7 +1155,8 @@ def test_sheet_order_and_hidden_meta(tmp_path: Path):
     assert '_Trade Meta' not in wb.sheetnames
     assert len(wb[STATS1_SHEET].conditional_formatting) > 0
     assert len(wb[SYMBOLS_SHEET].conditional_formatting) > 0
-    assert len(wb["P&L Calendar"].conditional_formatting) > 0
+    assert len(wb["P&L Calendar"].conditional_formatting) == 0
+    assert _cell_fill_rgb(wb["P&L Calendar"]["F2"]) == PROFIT_FILL
 
 
 def test_trade_log_preserves_explicit_bybit_execution_row_id(tmp_path: Path):
@@ -2030,20 +2027,25 @@ def test_account_balances_clears_duplicate_stale_bybit_live_alias_row(tmp_path: 
     assert out["T3"].value == "BYBIT"
     assert out["T4"].value in (None, "")
 
-def test_update_data_only_preserves_calendar_merges_and_skips_non_anchor_writes(tmp_path: Path):
-    from openpyxl import Workbook
+def test_update_data_only_rewrites_calendar_to_one_line_layout(tmp_path: Path):
     from tools.master_journal_workbook import update_master_journal_workbook_data_only
     p = tmp_path / "merged-calendar.xlsx"
-    wb = Workbook(); dash = wb.active; dash.title = "Dashboard"; wb.create_sheet("Trade Log"); wb.create_sheet("Instrument Averages"); cal = wb.create_sheet("P&L Calendar")
-    dash["A1"]="Overall"; dash["D1"]="FX"; dash["G1"]="Crypto"; dash["J1"]="Winners"; dash["J8"]="Losers"; dash["J14"]="Drawdown"; dash["M1"]="Instrument leaders"; dash["T1"]="Account Balances"
-    dash["T2"]="Account"; dash["U2"]="Balance"; dash["V2"]="Currency"; dash["W2"]="As Of"
+    build_master_journal_workbook(sample_snapshot(), p)
+    wb = load_workbook(p)
+    cal = wb["P&L Calendar"]
+    for merged in list(cal.merged_cells.ranges):
+        cal.unmerge_cells(str(merged))
+    for row in range(1, cal.max_row + 1):
+        for col in range(1, cal.max_column + 1):
+            cal.cell(row, col).value = None
     months = ["January","February","March","April","May","June","July","August","September","October","November","December"]
     for i, m in enumerate(months, start=3):
         cal.cell(1, i).value = m
     cal.merge_cells("A2:A3"); cal.merge_cells("A4:A5"); cal.merge_cells("A6:A7")
     cal["A2"]=2026; cal["A4"]=2025; cal["A6"]=2024
     cal["B2"]="P/L %"; cal["B3"]="Total Trades"; cal["B4"]="P/L %"; cal["B5"]="Total Trades"; cal["B6"]="P/L %"; cal["B7"]="Total Trades"
-    _ensure_trade_log_headers(wb); wb.save(p)
+    wb.save(p)
+    wb.close()
     snap = {
         "items": [{"id":"t1","row_type":"trade","account":"BYBIT DEMO","symbol":"BTCUSDT","side":"BUY","open_time":"2026-05-01","close_time":"2026-05-01","net_profit":10.0,"result_pct":1.0}],
         "stats":{"totals":{},"groups":{"by_market":{"overall":{},"fx":{},"crypto":{}},"risk_expectancy":{},"leaders":{},"duration":{}}},
@@ -2053,15 +2055,16 @@ def test_update_data_only_preserves_calendar_merges_and_skips_non_anchor_writes(
     Path(res["candidate_path"]).replace(p)
     out = load_workbook(p, data_only=True)
     out_cal = out["P&L Calendar"]
-    merged = {str(rng) for rng in out_cal.merged_cells.ranges}
-    assert {"A2:A3", "A4:A5", "A6:A7"}.issubset(merged)
-    assert out_cal["A3"].value in (None, "")
-    assert out_cal["A5"].value in (None, "")
-    assert float(out_cal["G2"].value) == 0.01
-    assert int(out_cal["G3"].value) == 1
-    d = out[STATS1_SHEET]
-    assert d["T3"].value == "BYBIT DEMO"
-    assert isinstance(d["U3"].value, (int, float))
+    assert list(out_cal.merged_cells.ranges) == []
+    assert out_cal["A1"].value == "Year"
+    assert out_cal["F1"].value == "May"
+    assert out_cal["A2"].value == 2026
+    assert out_cal["F2"].value == "1.00%, 1 trade"
+    assert not any(str(out_cal.cell(row, 1).value or "").endswith(" Trades") for row in range(2, out_cal.max_row + 1))
+    d = out[STATS2_SHEET]
+    values = [d.cell(row, col).value for row in range(1, d.max_row + 1) for col in range(1, d.max_column + 1)]
+    assert "BYBIT DEMO" in values
+    assert any(isinstance(value, (int, float)) and value == 100.0 for value in values)
     out.close()
 
 
@@ -2100,26 +2103,31 @@ def test_zero_qty_fx_is_diagnosed_not_inferred():
     assert fixed["qty"] == 0
     assert "zero_qty_unrepaired_fx" in (fixed.get("diagnostics") or [])
 
-def test_update_data_only_appends_missing_calendar_year_block(tmp_path: Path):
-    from openpyxl import Workbook
+def test_update_data_only_adds_missing_calendar_year_row(tmp_path: Path):
     from tools.master_journal_workbook import update_master_journal_workbook_data_only
     p = tmp_path / "append-year.xlsx"
-    wb = Workbook(); dash = wb.active; dash.title = "Dashboard"; wb.create_sheet("Trade Log"); wb.create_sheet("Instrument Averages"); cal = wb.create_sheet("P&L Calendar")
-    dash["A1"]="Overall"; dash["D1"]="FX"; dash["G1"]="Crypto"; dash["J1"]="Winners"; dash["J8"]="Losers"; dash["J14"]="Drawdown"; dash["M1"]="Instrument leaders"; dash["T1"]="Account Balances"
-    dash["T2"]="Account"; dash["U2"]="Balance"; dash["V2"]="Currency"; dash["W2"]="As Of"
+    build_master_journal_workbook(sample_snapshot(), p)
+    wb = load_workbook(p)
+    cal = wb["P&L Calendar"]
+    for merged in list(cal.merged_cells.ranges):
+        cal.unmerge_cells(str(merged))
+    for row in range(1, cal.max_row + 1):
+        for col in range(1, cal.max_column + 1):
+            cal.cell(row, col).value = None
     for i, m in enumerate(["January","February","March","April","May","June","July","August","September","October","November","December"], start=3):
         cal.cell(1, i).value = m
     cal.merge_cells("A2:A3"); cal["A2"]=2026; cal["B2"]="P/L %"; cal["B3"]="Total Trades"
-    _ensure_trade_log_headers(wb); wb.save(p)
+    wb.save(p)
+    wb.close()
     snap = {"items":[{"id":"t1","row_type":"trade","account":"BYBIT DEMO","symbol":"BTCUSDT","side":"BUY","open_time":"2027-01-05","close_time":"2027-01-05","result_pct":2.0}],
             "stats":{"totals":{},"groups":{"by_market":{"overall":{},"fx":{},"crypto":{}},"risk_expectancy":{},"leaders":{},"duration":{}}},
             "balances":[{"account_label":"BYBIT DEMO","balance":100.0,"currency":"USDT","as_of":"2026-05-16"}]}
     res = update_master_journal_workbook_data_only(p, snap); Path(res["candidate_path"]).replace(p)
     out = load_workbook(p, data_only=True)["P&L Calendar"]
-    assert any(str(rng) == "A4:A5" for rng in out.merged_cells.ranges)
-    assert int(out["A4"].value) == 2027
-    assert float(out["C4"].value) == 0.02
-    assert int(out["C5"].value) == 1
+    assert list(out.merged_cells.ranges) == []
+    assert int(out["A2"].value) == 2027
+    assert out["B2"].value == "2.00%, 1 trade"
+    assert not any(str(out.cell(row, 1).value or "").endswith(" Trades") for row in range(2, out.max_row + 1))
 
 def test_instrument_leaders_custom_layout_populates_values(tmp_path: Path):
     from openpyxl import Workbook
@@ -2579,7 +2587,7 @@ def test_target_r_metadata_ignores_unmatched_and_duplicate_row_ids(tmp_path: Pat
     assert "original_loss_conversion_factor" not in parsed_duplicate_metadata["items"][0]
 
 
-def test_missing_target_r_metadata_produces_opening_conversion_exclusion(tmp_path: Path):
+def test_missing_target_r_metadata_uses_original_price_r_fallback(tmp_path: Path):
     from tools.master_journal_workbook import _target_r_recommendation
 
     rows = _target_r_roundtrip_fx_rows()
@@ -2598,8 +2606,9 @@ def test_missing_target_r_metadata_produces_opening_conversion_exclusion(tmp_pat
 
     risk = _target_r_recommendation(read_master_journal_source(out)["items"])
 
-    assert risk["target_recommendation"] == TARGET_RECOMMENDATION_INSUFFICIENT
-    assert risk["target_r_winning_exclusion_reasons"]["missing_opening_loss_conversion_factor"] == 5
+    assert risk["eligible_target_r_wins"] == 5
+    assert risk["target_recommendation"].startswith("Reduce target — Recommended: ")
+    assert "missing_opening_loss_conversion_factor" not in risk["target_r_winning_exclusion_reasons"]
 
 
 def test_generated_trade_log_distance_fraction_displays_one_percent(tmp_path: Path):
@@ -2643,7 +2652,7 @@ def test_recommendations_are_removed_from_trade_log_and_kept_in_symbols_and_stat
             "asset_class": "fx", "symbol": "EURUSD", "side": "BUY",
             "open_time": "2026-01-20", "close_time": "2026-01-20",
             "entry_price": 100.0, "exit_price": 95.0, "stop_loss": 98.0, "take_profit": 104.0,
-            "planned_entry_price": 100.0, "planned_stop_price": 90.0, "planned_target_price": 140.0,
+            "planned_entry_price": 100.0, "planned_stop_price": 80.0, "planned_target_price": 140.0,
             "net_profit": -5.0, "result_pct": -0.5, "r_multiple": -0.5,
         },
     ]
@@ -2669,7 +2678,8 @@ def test_recommendations_are_removed_from_trade_log_and_kept_in_symbols_and_stat
     assert symbol_headers[TARGET_RECOMMENDATION_HEADER] == symbol_headers["Avg target % (L)"] + 1
     assert symbols.cell(INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, symbol_headers[STOP_RECOMMENDATION_HEADER]).value == "Recommendation"
     assert symbols.cell(INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, symbol_headers[TARGET_RECOMMENDATION_HEADER]).value == "Recommendation"
-    assert symbols.cell(INSTRUMENT_AVERAGES_DATA_START_ROW, symbol_headers[STOP_RECOMMENDATION_HEADER]).value == "Reduce stop loss"
+    expected_stop = "Decrease stop — Recommended: 10.00% (10.00 pp below loss average)"
+    assert symbols.cell(INSTRUMENT_AVERAGES_DATA_START_ROW, symbol_headers[STOP_RECOMMENDATION_HEADER]).value == expected_stop
     assert symbols.cell(INSTRUMENT_AVERAGES_DATA_START_ROW, symbol_headers[TARGET_RECOMMENDATION_HEADER]).value == "Reduce target — Recommended: 3.25R (current median: 4.0R)"
     assert _cell_fill_rgb(symbols.cell(INSTRUMENT_AVERAGES_DATA_START_ROW, symbol_headers[STOP_RECOMMENDATION_HEADER])) not in {"FFF2CC", PROFIT_FILL, LOSS_FILL}
     assert _cell_fill_rgb(symbols.cell(INSTRUMENT_AVERAGES_DATA_START_ROW, symbol_headers[TARGET_RECOMMENDATION_HEADER])) not in {"FFF2CC", PROFIT_FILL, LOSS_FILL}
@@ -2680,9 +2690,9 @@ def test_recommendations_are_removed_from_trade_log_and_kept_in_symbols_and_stat
         if str(stats1.cell(row, 1).value or "").strip() == "Recommendation"
     ]
     assert len(recommendation_rows) >= 2
-    assert [stats1.cell(recommendation_rows[0], col).value for col in (2, 3, 4)] == ["Reduce stop loss", "Reduce stop loss", "Need wins & losses"]
+    assert [stats1.cell(recommendation_rows[0], col).value for col in (2, 3, 4)] == [expected_stop, expected_stop, "Need wins & losses"]
     assert [stats1.cell(recommendation_rows[1], col).value for col in (2, 3, 4)] == [
-        "Reduce target — Recommended: 3.25R (current median: 4.0R)",
+        "FX-only data — Recommended: 3.25R — Crypto: insufficient eligible wins",
         "Reduce target — Recommended: 3.25R (current median: 4.0R)",
         "Insufficient eligible wins — recommended target unavailable",
     ]
@@ -3550,7 +3560,9 @@ def test_conditional_formatting_uses_worksheet_api_not_unbound_class_method():
 
 def test_dashboard_trade_log_and_pnl_calendar_loss_profit_fills_match(tmp_path: Path):
     out = tmp_path / "Trading Journal.xlsx"
-    build_master_journal_workbook(sample_snapshot(), out)
+    snapshot = sample_snapshot()
+    snapshot["items"][1]["close_time"] = "2026-06-02T02:00:00Z"
+    build_master_journal_workbook(snapshot, out)
     wb = load_workbook(out)
     dash = wb[STATS1_SHEET]
     trade = wb["Trade Log"]
@@ -3565,74 +3577,51 @@ def test_dashboard_trade_log_and_pnl_calendar_loss_profit_fills_match(tmp_path: 
     trade_fills = {fill for _range, _formula, fill in trade_row_rules}
     assert trade_fills == {"FFC7CE", "C6EFCE"}
 
-    pnl_fills = {fill for cf_range, _formula, fill in _cf_rule_details(cal) if cf_range.startswith("B")}
-    assert pnl_fills == {"FFC7CE", "C6EFCE"}
+    assert _cf_rule_details(cal) == []
+    assert _cell_fill_rgb(cal["F2"]) == "C6EFCE"
+    assert _cell_fill_rgb(cal["G2"]) == "FFC7CE"
 
 
 def test_pnl_calendar_update_removes_duplicate_generated_profit_loss_rules(tmp_path: Path):
-    from openpyxl import Workbook
     from openpyxl.formatting.rule import CellIsRule
 
     p = tmp_path / "calendar_stale_cf.xlsx"
-    wb = Workbook()
-    dash = wb.active
-    dash.title = "Dashboard"
-    wb.create_sheet("Trade Log")
-    wb.create_sheet("Instrument Averages")
-    cal = wb.create_sheet("P&L Calendar")
-    dash["A1"] = "Overall"
-    dash["D1"] = "FX"
-    dash["G1"] = "Crypto"
-    dash["J1"] = "Winners"
-    dash["J8"] = "Losers"
-    dash["J14"] = "Drawdown"
-    dash["M1"] = "Instrument leaders"
-    dash["T1"] = "Account Balances"
-    dash["T2"] = "Account"
-    dash["U2"] = "Balance"
-    dash["V2"] = "Currency"
-    dash["W2"] = "As Of"
-    months = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
-    for col, month in enumerate(months, start=3):
-        cal.cell(1, col).value = month
-    cal.merge_cells("A2:A3")
-    cal["A2"] = 2026
-    cal["B2"] = "P/L %"
-    cal["B3"] = "Total Trades"
+    build_master_journal_workbook(sample_snapshot(), p)
+    wb = load_workbook(p)
+    cal = wb["P&L Calendar"]
     cal.conditional_formatting.add(
-        "C2:N2",
+        "B2:M2",
         CellIsRule(operator="greaterThan", formula=["0"], fill=PatternFill("solid", fgColor="FFFF00")),
     )
     cal.conditional_formatting.add(
-        "C2:N2",
+        "B2:M2",
         CellIsRule(operator="lessThan", formula=["0"], fill=PatternFill("solid", fgColor="0000FF")),
     )
-    _ensure_trade_log_headers(wb)
     wb.save(p)
     wb.close()
 
-    snap = {
-        "items": [{"id": "t1", "row_type": "trade", "account": "BYBIT", "symbol": "BTCUSDT", "open_time": "2026-05-01", "close_time": "2026-05-01", "net_profit": 10.0, "result_pct": 1.0}],
-        "stats": {"totals": {}, "groups": {"by_market": {"overall": {}, "fx": {}, "crypto": {}}, "risk_expectancy": {}, "leaders": {}, "duration": {}}},
-        "balances": [],
-    }
+    snap = sample_snapshot()
     result = update_master_journal_workbook_data_only(p, snap)
     assert result["ok"] is True
     Path(result["candidate_path"]).replace(p)
     wb = load_workbook(p)
     cal = wb["P&L Calendar"]
-    details = [d for d in _cf_rule_details(cal) if d[0] == "C2:N2"]
-    assert [fill for _range, _formula, fill in details] == ["C6EFCE", "FFC7CE"]
+    details = [d for d in _cf_rule_details(cal) if d[0] == "B2:M2"]
+    assert details == []
     assert "FFFF00" not in {fill for _range, _formula, fill in _cf_rule_details(cal)}
     assert "0000FF" not in {fill for _range, _formula, fill in _cf_rule_details(cal)}
-    assert f"A4:{get_column_letter(len(TRADE_LOG_HEADERS))}4" in " ".join(_cf_ranges(wb["Trade Log"]))
+    assert cal["F2"].value == "1.20%, 2 trades"
+    assert _cell_fill_rgb(cal["F2"]) == "C6EFCE"
+    assert f"A4:{get_column_letter(len(TRADE_LOG_HEADERS))}5" in " ".join(_cf_ranges(wb["Trade Log"]))
 
 
 def test_generated_pnl_calendar_update_removes_stale_profit_loss_rules(tmp_path: Path):
     from openpyxl.formatting.rule import CellIsRule
 
     p = tmp_path / "generated_calendar_stale_cf.xlsx"
-    build_master_journal_workbook(sample_snapshot(), p)
+    snapshot = sample_snapshot()
+    snapshot["items"][1]["close_time"] = "2026-06-02T02:00:00Z"
+    build_master_journal_workbook(snapshot, p)
     wb = load_workbook(p)
     cal = wb["P&L Calendar"]
     cal.conditional_formatting.add(
@@ -3646,13 +3635,15 @@ def test_generated_pnl_calendar_update_removes_stale_profit_loss_rules(tmp_path:
     wb.save(p)
     wb.close()
 
-    result = update_master_journal_workbook_data_only(p, sample_snapshot())
+    result = update_master_journal_workbook_data_only(p, snapshot)
     assert result["ok"] is True
     Path(result["candidate_path"]).replace(p)
     wb = load_workbook(p)
     cal = wb["P&L Calendar"]
     details = [d for d in _cf_rule_details(cal) if d[0] == "B3:M3"]
-    assert [fill for _range, _formula, fill in details] == ["C6EFCE", "FFC7CE"]
+    assert details == []
+    assert _cell_fill_rgb(cal["F2"]) == "C6EFCE"
+    assert _cell_fill_rgb(cal["G2"]) == "FFC7CE"
     assert f"A4:{get_column_letter(len(TRADE_LOG_HEADERS))}5" in " ".join(_cf_ranges(wb["Trade Log"]))
 
 
@@ -3804,6 +3795,83 @@ def _trade_log_row_by_id(ws, row_id: str) -> int:
         if str(ws.cell(row, rid_col).value or "") == row_id:
             return row
     raise AssertionError(f"missing row id {row_id!r}")
+
+
+def test_generated_workbook_repairs_stats1_stats2_and_calendar_structure(tmp_path: Path):
+    snapshot = sample_snapshot()
+    snapshot["items"][0]["pattern"] = "Channel"
+    snapshot["items"][1]["pattern"] = "Range"
+    out = tmp_path / "structure-regressions.xlsx"
+    build_master_journal_workbook(snapshot, out)
+    wb = load_workbook(out)
+    stats1 = wb[STATS1_SHEET]
+    stats2 = wb[STATS2_SHEET]
+    cal = wb["P&L Calendar"]
+
+    assert stats1.freeze_panes == "B88"
+    rows_by_label = {
+        str(stats1.cell(row, 1).value or "").strip(): row
+        for row in range(1, stats1.max_row + 1)
+    }
+    assert stats1.cell(rows_by_label["Min drawdown"], 2).value is not None
+    assert stats1.cell(rows_by_label["Avg drawdown"], 2).value is not None
+    assert stats1.cell(rows_by_label["Max drawdown"], 2).value is not None
+    assert stats1.cell(rows_by_label["Most wins"], 2).value
+    assert stats1.cell(rows_by_label["Most losses"], 2).value
+    for label in ("Most Profitable", "Least Profitable"):
+        row = rows_by_label[label]
+        for col in (3, 4):
+            assert _cell_fill_rgb(stats1.cell(row, col)) not in {PROFIT_FILL, LOSS_FILL}
+        assert not _cf_fill_intersects(stats1, f"C{row}:D{row}", PROFIT_FILL)
+        assert not _cf_fill_intersects(stats1, f"C{row}:D{row}", LOSS_FILL)
+
+    assert _cf_fill_intersects(stats2, "F3:F12", PROFIT_FILL)
+    assert _cf_fill_intersects(stats2, "F3:F12", LOSS_FILL)
+    assert cal.freeze_panes == "B2"
+    assert [cal.cell(1, col).value for col in range(1, 14)] == [
+        "Year", "January", "February", "March", "April", "May", "June",
+        "July", "August", "September", "October", "November", "December",
+    ]
+    assert not any(str(cal.cell(row, 1).value or "").endswith(" Trades") for row in range(2, cal.max_row + 1))
+    assert isinstance(cal["F2"].value, str) and re.match(r"^-?\d+\.\d{2}%, \d+ trades?$", cal["F2"].value)
+    wb.close()
+
+
+def test_update_normalizes_every_trade_log_data_row_to_row_5_height(tmp_path: Path):
+    snapshot = sample_snapshot()
+    template = dict(snapshot["items"][0])
+    snapshot["items"] = [
+        {
+            **template,
+            "id": f"height-{idx}",
+            "open_time": f"2026-05-{(idx % 28) + 1:02d}T00:00:00Z",
+            "close_time": f"2026-05-{(idx % 28) + 1:02d}T01:00:00Z",
+            "net_profit": 10.0 if idx % 2 else -5.0,
+            "result_pct": 1.0 if idx % 2 else -0.5,
+        }
+        for idx in range(1, 31)
+    ]
+    path = tmp_path / "trade-log-heights.xlsx"
+    build_master_journal_workbook(snapshot, path)
+    wb = load_workbook(path)
+    trade_log = wb["Trade Log"]
+    trade_log.row_dimensions[5].height = 21.5
+    trade_log.row_dimensions[28].height = 60.0
+    wb.save(path)
+    wb.close()
+
+    result = update_master_journal_workbook_data_only(path, snapshot)
+    assert result["ok"] is True
+    Path(result["candidate_path"]).replace(path)
+    out = load_workbook(path)
+    try:
+        trade_log = out["Trade Log"]
+        source_height = trade_log.row_dimensions[5].height
+        assert source_height == pytest.approx(21.5)
+        for row in range(TRADE_LOG_DATA_START_ROW, TRADE_LOG_DATA_START_ROW + len(snapshot["items"])):
+            assert trade_log.row_dimensions[row].height == pytest.approx(source_height)
+    finally:
+        out.close()
 
 
 def test_trade_log_direct_row_fills_cover_winning_and_losing_rows(tmp_path: Path):
@@ -4095,10 +4163,14 @@ def test_generated_calendar_and_instrument_averages_use_direct_semantic_fills(tm
     assert _parse_duration_text(inst.cell(row, headers["Avg duration (DD:HH:MM:SS)"]).value) is not None
 
     cal = wb["P&L Calendar"]
-    assert _cell_fill_rgb(cal["F3"]) == "C6EFCE"  # May P/L %
-    assert _cell_fill_rgb(cal["G3"]) == "FFC7CE"  # June P/L %
-    assert _cell_fill_rgb(cal["F4"]) == ""
-    assert _cell_fill_rgb(cal["G4"]) == ""
+    assert cal["A1"].value == "Year"
+    assert cal["F1"].value == "May"
+    assert cal["G1"].value == "June"
+    assert cal["A2"].value == 2026
+    assert cal["F2"].value == "2.30%, 1 trade"
+    assert cal["G2"].value == "-1.10%, 1 trade"
+    assert _cell_fill_rgb(cal["F2"]) == "C6EFCE"
+    assert _cell_fill_rgb(cal["G2"]) == "FFC7CE"
     wb.close()
 
 

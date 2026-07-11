@@ -915,6 +915,20 @@ def _average_float(values: List[float]) -> float | None:
     return (sum(clean) / len(clean)) if clean else None
 
 
+def _format_stop_pct_value(value: Any) -> str:
+    number = _as_float(value)
+    if number is None or not math.isfinite(number):
+        return ""
+    return f"{number:.2f}%"
+
+
+def _format_stop_gap_value(value: Any) -> str:
+    number = _as_float(value)
+    if number is None or not math.isfinite(number):
+        return ""
+    return f"{abs(number):.2f} pp"
+
+
 def _size_recommendation(kind: str, winner_avg: Any, loser_avg: Any) -> str:
     if kind != "stop":
         return TARGET_RECOMMENDATION_INSUFFICIENT
@@ -922,10 +936,21 @@ def _size_recommendation(kind: str, winner_avg: Any, loser_avg: Any) -> str:
     loss = _as_float(loser_avg)
     if win is None or loss is None or not math.isfinite(win) or not math.isfinite(loss):
         return "Need wins & losses"
-    tolerance = max(1e-9, max(abs(win), abs(loss)) * 1e-9)
-    if abs(win - loss) <= tolerance:
-        return "Keep stop loss"
-    return "Reduce stop loss" if win < loss else "Increase stop loss"
+    gap = abs(win - loss)
+    if win == loss:
+        return (
+            f"Stop averages equal \u2014 Recommended: {_format_stop_pct_value(win)} "
+            f"({_format_stop_gap_value(gap)} equal to loss average)"
+        )
+    if win < loss:
+        return (
+            f"Decrease stop \u2014 Recommended: {_format_stop_pct_value(win)} "
+            f"({_format_stop_gap_value(gap)} below loss average)"
+        )
+    return (
+        f"Increase stop \u2014 Recommended: {_format_stop_pct_value(win)} "
+        f"({_format_stop_gap_value(gap)} above loss average)"
+    )
 
 
 def _target_r_row_is_test_trade(row: Dict[str, Any]) -> bool:
@@ -1556,6 +1581,36 @@ def _target_r_original_monetary_risk(
     return None, reconstructed_reason
 
 
+def _target_r_price_capture_from_original_plan(
+    row: Dict[str, Any],
+    levels: Dict[str, Any],
+) -> Tuple[float | None, str]:
+    entry = _as_float(levels.get("entry"))
+    stop = _as_float(levels.get("stop"))
+    exit_price = _target_r_exit_price(row)
+    if entry is None or stop is None:
+        return None, "missing_original_price_risk"
+    if exit_price is None:
+        return None, "missing_exit_price"
+    if not (math.isfinite(entry) and math.isfinite(stop) and math.isfinite(exit_price)):
+        return None, "invalid_exit_price"
+    original_risk = abs(entry - stop)
+    if original_risk <= 1e-12:
+        return None, "zero_original_stop_risk"
+    side = _target_r_trade_side(row)
+    if side == "long":
+        captured = (exit_price - entry) / original_risk
+    elif side == "short":
+        captured = (entry - exit_price) / original_risk
+    else:
+        return None, "missing_trade_side"
+    if not math.isfinite(captured):
+        return None, "invalid_realized_r"
+    if captured <= 0:
+        return None, "non_positive_realized_r"
+    return captured, ""
+
+
 def _target_r_realized_from_original_plan(row: Dict[str, Any]) -> Tuple[float | None, str]:
     trusted, reason, levels = _target_r_original_plan_trusted(row)
     if not trusted:
@@ -1566,14 +1621,17 @@ def _target_r_realized_from_original_plan(row: Dict[str, Any]) -> Tuple[float | 
     if net_profit <= 0:
         return None, "non_positive_realized_r"
     risk, risk_reason = _target_r_original_monetary_risk(row, levels, net_profit)
-    if risk is None:
-        return None, risk_reason
-    realized_r = net_profit / risk if risk > 0 else None
-    if realized_r is None or not math.isfinite(realized_r):
-        return None, "invalid_realized_r"
-    if realized_r <= 0:
-        return None, "non_positive_realized_r"
-    return realized_r, ""
+    if risk is not None:
+        realized_r = net_profit / risk if risk > 0 else None
+        if realized_r is None or not math.isfinite(realized_r):
+            return None, "invalid_realized_r"
+        if realized_r <= 0:
+            return None, "non_positive_realized_r"
+        return realized_r, ""
+    price_r, price_reason = _target_r_price_capture_from_original_plan(row, levels)
+    if price_r is not None:
+        return price_r, ""
+    return None, price_reason or risk_reason
 
 
 def _target_r_metadata_payload(row: Dict[str, Any]) -> Dict[str, Any]:
@@ -1993,29 +2051,95 @@ def _target_r_recommendation(rows: List[Dict[str, Any]], *, scope: str = "standa
     }
 
 
+def _original_stop_distance_pct_points(row: Dict[str, Any]) -> Tuple[float | None, str]:
+    levels = _original_plan_levels(row)
+    if levels.get("movement_evidence") and not levels.get("explicit"):
+        return None, "moved_without_original_stop"
+    entry = _as_float(levels.get("entry"))
+    stop = _as_float(levels.get("stop"))
+    if entry is None:
+        return None, "missing_original_entry"
+    if stop is None:
+        return None, "missing_original_stop"
+    if not (math.isfinite(entry) and math.isfinite(stop)):
+        return None, "invalid_original_stop"
+    if entry <= 0 or stop <= 0:
+        return None, "invalid_original_stop"
+    side = _target_r_trade_side(row)
+    if side == "long" and not stop < entry:
+        return None, "invalid_long_original_stop"
+    if side == "short" and not stop > entry:
+        return None, "invalid_short_original_stop"
+    if not side:
+        return None, "missing_trade_side"
+    pct = abs(entry - stop) / entry * 100.0
+    if not math.isfinite(pct) or pct <= 0:
+        return None, "invalid_original_stop_distance"
+    if _trade_row_market(row) == "fx" and pct > 50.0:
+        return None, "invalid_fx_original_stop_distance"
+    return pct, ""
+
+
+def _stop_recommendation_payload(
+    winner_values: List[float],
+    loser_values: List[float],
+    excluded: Counter[str] | None = None,
+) -> Dict[str, Any]:
+    win_mean = _average_float(winner_values)
+    loss_mean = _average_float(loser_values)
+    recommendation = _size_recommendation("stop", win_mean, loss_mean)
+    gap = None
+    direction = None
+    if win_mean is not None and loss_mean is not None:
+        gap = abs(win_mean - loss_mean)
+        if win_mean == loss_mean:
+            direction = "equal"
+        elif win_mean < loss_mean:
+            direction = "decrease"
+        else:
+            direction = "increase"
+    return {
+        STOP_RECOMMENDATION_HEADER: recommendation,
+        "stop_recommendation": recommendation,
+        "eligible_stop_loss_wins": len(winner_values),
+        "eligible_stop_loss_losses": len(loser_values),
+        "stop_loss_winner_mean_pct": win_mean,
+        "stop_loss_loser_mean_pct": loss_mean,
+        "stop_loss_difference_pp": gap,
+        "stop_loss_recommendation_direction": direction,
+        "stop_loss_excluded_reasons": dict(excluded or {}),
+    }
+
+
 def _distance_recommendation_summary(rows: List[Dict[str, Any]], *, scope: str = "standard") -> Dict[str, Any]:
     buckets = {
         "stop_wins": [],
         "stop_losses": [],
     }
+    stop_excluded: Counter[str] = Counter()
     for row in rows:
         if str(row.get("row_type") or "trade").strip().lower() != "trade":
+            stop_excluded["not_trade"] += 1
             continue
         if _is_test_trade_value(row.get("is_test_trade")):
+            stop_excluded["test_trade"] += 1
             continue
         outcome = _trade_outcome_sign(row)
         if outcome == 0:
+            stop_excluded["break_even_or_zero"] += 1
             continue
-        stop_pct = _distance_pct_points(row, "stop_loss")
+        stop_pct, reason = _original_stop_distance_pct_points(row)
+        if stop_pct is None:
+            stop_excluded[reason or "invalid_original_stop_distance"] += 1
+            continue
         suffix = "wins" if outcome > 0 else "losses"
-        if stop_pct is not None:
-            buckets[f"stop_{suffix}"].append(stop_pct)
+        buckets[f"stop_{suffix}"].append(stop_pct)
     target_payload = _target_r_recommendation(rows, scope=scope)
     return {
-        STOP_RECOMMENDATION_HEADER: _size_recommendation(
-            "stop",
-            _average_float(buckets["stop_wins"]),
-            _average_float(buckets["stop_losses"]),
+        **_stop_recommendation_payload(
+            buckets["stop_wins"],
+            buckets["stop_losses"],
+            stop_excluded,
         ),
         **target_payload,
     }
@@ -3606,13 +3730,15 @@ def _normalize_trade_log_row_heights(ws, diagnostics: Dict[str, Any] | None = No
     row_keys = [idx for idx in ws.row_dimensions.keys() if isinstance(idx, int)]
     max_row = max([ws.max_row, *row_keys], default=ws.max_row)
     changed = 0
-    ws.sheet_format.defaultRowHeight = float(TRADE_LOG_DATA_ROW_HEIGHT)
+    source_height = ws.row_dimensions[5].height or TRADE_LOG_DATA_ROW_HEIGHT
+    ws.sheet_format.defaultRowHeight = float(source_height)
     for row in range(TRADE_LOG_DATA_START_ROW, max_row + 1):
-        if ws.row_dimensions[row].height != TRADE_LOG_DATA_ROW_HEIGHT:
+        if ws.row_dimensions[row].height != source_height:
             changed += 1
-        ws.row_dimensions[row].height = TRADE_LOG_DATA_ROW_HEIGHT
+        ws.row_dimensions[row].height = source_height
     if diagnostics is not None and changed:
         diagnostics["normalized_trade_log_row_heights"] = changed
+        diagnostics["trade_log_row_height_source"] = source_height
 
 
 def _hide_trade_log_row_id(ws) -> None:
@@ -4279,6 +4405,12 @@ def _pnl_calendar_profit_loss_ranges(ws) -> List[str]:
         first_col = min(month_cols.values())
         last_col = max(month_cols.values())
         ranges = []
+        if first_col == 2:
+            for row in range(2, ws.max_row + 1):
+                year_value = _as_float(ws.cell(row, 1).value)
+                if year_value is not None:
+                    ranges.append(f"{get_column_letter(first_col)}{row}:{get_column_letter(last_col)}{row}")
+            return ranges
         for row in range(2, ws.max_row + 1):
             label = str(ws.cell(row, 2).value or "").strip().lower()
             if label == "p/l %":
@@ -4304,26 +4436,33 @@ def _pnl_calendar_profit_loss_ranges(ws) -> List[str]:
     return ranges
 
 def _remove_pnl_calendar_generated_profit_loss_formatting(ws) -> None:
-    ranges = set(_pnl_calendar_profit_loss_ranges(ws))
-    if not ranges:
-        return
     refs_to_remove = []
     for key, rules in list(getattr(ws.conditional_formatting, "_cf_rules", {}).items()):
         sqref = str(getattr(key, "sqref", key))
         sqref_parts = sqref.split()
-        if sqref_parts and all(part in ranges for part in sqref_parts) and all(_is_generated_profit_loss_rule(rule) for rule in rules):
+        if sqref_parts and all(_is_generated_profit_loss_rule(rule) for rule in rules):
             refs_to_remove.append(sqref)
     for sqref in refs_to_remove:
         del ws.conditional_formatting[sqref]
 
 def _apply_pnl_calendar_profit_loss_formatting(ws) -> None:
     _remove_pnl_calendar_generated_profit_loss_formatting(ws)
+    month_cols = _detect_calendar_month_columns(ws)
+    one_line_layout = bool(month_cols and min(month_cols.values()) == 2)
     for cell_range in _pnl_calendar_profit_loss_ranges(ws):
-        _profit_loss_rules(ws, cell_range)
+        if not one_line_layout:
+            _profit_loss_rules(ws, cell_range)
         min_col, min_row, max_col, max_row = range_boundaries(cell_range)
         for row in range(min_row, max_row + 1):
             for col in range(min_col, max_col + 1):
-                _apply_sign_based_full_cell_fill(ws.cell(row, col))
+                cell = ws.cell(row, col)
+                value = _pnl_calendar_text_pct_fraction(cell.value)
+                if value is None or value == 0:
+                    _clear_generated_semantic_fill(cell)
+                elif value > 0:
+                    _apply_full_cell_semantic_fill(cell, "profit")
+                else:
+                    _apply_full_cell_semantic_fill(cell, "loss")
 
     # Total Trades rows are deliberately neutral, including when repairing stale direct fills.
     for row in range(1, ws.max_row + 1):
@@ -4696,6 +4835,8 @@ def _sanitize_dashboard_semantic_conditional_formatting(ws) -> None:
         "winning streak",
         "worst losing streak",
         "losing streak",
+        "most profitable",
+        "least profitable",
     }
     for row in range(1, ws.max_row + 1):
         label = str(ws.cell(row, 1).value or "").strip().casefold()
@@ -4851,6 +4992,10 @@ def _repair_stats1_formatting(
     market_cols = _stats1_market_columns(ws)
     if not market_cols:
         return
+    if ws.freeze_panes != "B88":
+        diagnostics["previous_stats1_freeze_panes"] = str(ws.freeze_panes or "")
+        ws.freeze_panes = "B88"
+        diagnostics["repaired_stats1_freeze_panes"] = "B88"
     _write_streak_detail_rows(ws, "Best Win Streak", {}, diagnostics=diagnostics)
     _write_streak_detail_rows(ws, "Worst Losing Streak", {}, diagnostics=diagnostics)
     repaired = 0
@@ -4894,6 +5039,16 @@ def _repair_stats1_formatting(
             target.fill = PatternFill()
             target.alignment = copy(template.alignment)
             repaired += 1
+            if label in {"most profitable", "least profitable"}:
+                template = ws.cell(row, market_cols["overall"])
+                for col in market_cols.values():
+                    cell = ws.cell(row, col)
+                    value = cell.value
+                    cell.font = copy(template.font)
+                    cell.fill = copy(template.fill)
+                    cell.alignment = copy(template.alignment)
+                    cell.value = value
+                    repaired += 1
     if neutral_overall_ranges:
         cf = ws.conditional_formatting
         for key, rules in list(getattr(cf, "_cf_rules", {}).items()):
@@ -5335,6 +5490,36 @@ def _instrument_summary_rows_from_trade_rows(rows: List[Dict[str, Any]]) -> List
             "max_trade_duration_seconds": max(durations) if durations else None,
         })
     return summaries
+
+
+def _instrument_leader_payloads_from_rows(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    summaries = _instrument_summary_rows_from_trade_rows(rows)
+
+    def pick(metric: str, market: str | None = None) -> Dict[str, Any] | None:
+        candidates = [
+            row for row in summaries
+            if (market is None or str(row.get("asset_class") or "").casefold() == market)
+            and _as_float(row.get(metric)) is not None
+        ]
+        if not candidates:
+            return None
+        return max(
+            candidates,
+            key=lambda row: (
+                _as_float(row.get(metric)) or 0.0,
+                _as_float(row.get("total_trades")) or 0.0,
+                str(row.get("symbol") or ""),
+            ),
+        )
+
+    return {
+        "most_wins_instrument": pick("wins"),
+        "most_losses_instrument": pick("losses"),
+        "fx_most_wins_instrument": pick("wins", "fx"),
+        "fx_most_losses_instrument": pick("losses", "fx"),
+        "crypto_most_wins_instrument": pick("wins", "crypto"),
+        "crypto_most_losses_instrument": pick("losses", "crypto"),
+    }
 
 
 def _result_percentage_totals_by_market(
@@ -5940,6 +6125,7 @@ def _dashboard_extended_metrics(
         min_commission_source = min(commission_rows, key=lambda pair: (pair[0], str(pair[1].get("symbol") or "")))[1] if commission_rows else None
         max_commission_source = max(commission_rows, key=lambda pair: (pair[0], str(pair[1].get("symbol") or "")))[1] if commission_rows else None
         streaks = _period_streak_metrics(items)
+        drawdown = _period_drawdown_metrics(items)
         target_scope = "overall" if market == "overall" else "standard"
         result[market] = {
             "trades": len(items),
@@ -6001,11 +6187,11 @@ def _dashboard_extended_metrics(
                 "min_r_multiple": _metric_extreme_ref(items, "r_multiple", "min", "min_r_multiple"),
                 "max_r_multiple": _metric_extreme_ref(items, "r_multiple", "max", "max_r_multiple"),
             },
-            "min_drawdown_pct": stats_bucket.get("min_drawdown_pct"),
-            "avg_drawdown_pct": stats_bucket.get("avg_drawdown_pct"),
-            "max_drawdown_pct": stats_bucket.get("max_drawdown_pct"),
-            "min_drawdown_detail": stats_bucket.get("min_drawdown_detail"),
-            "max_drawdown_detail": stats_bucket.get("max_drawdown_detail"),
+            "min_drawdown_pct": stats_bucket.get("min_drawdown_pct") if stats_bucket.get("min_drawdown_pct") is not None else drawdown.get("min_drawdown_pct"),
+            "avg_drawdown_pct": stats_bucket.get("avg_drawdown_pct") if stats_bucket.get("avg_drawdown_pct") is not None else drawdown.get("avg_drawdown_pct"),
+            "max_drawdown_pct": stats_bucket.get("max_drawdown_pct") if stats_bucket.get("max_drawdown_pct") is not None else drawdown.get("max_drawdown_pct"),
+            "min_drawdown_detail": stats_bucket.get("min_drawdown_detail") or drawdown.get("min_drawdown_detail"),
+            "max_drawdown_detail": stats_bucket.get("max_drawdown_detail") or drawdown.get("max_drawdown_detail"),
             "winning_streak": stats_bucket.get("winning_streak") or streaks.get("winning_streak"),
             "losing_streak": stats_bucket.get("losing_streak") or streaks.get("losing_streak"),
             "longest_winning_streak": stats_bucket.get("longest_winning_streak") or streaks.get("longest_winning_streak"),
@@ -6031,7 +6217,10 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
     by_market = groups.get("by_market") or {}
     risk = groups.get("risk_expectancy") or {}
     duration = groups.get("duration") or {}
-    leaders = groups.get("leaders") or {}
+    leaders = {
+        **_instrument_leader_payloads_from_rows(metric_rows),
+        **dict(groups.get("leaders") or {}),
+    }
     move_duration_metrics = _trade_move_duration_metrics(metric_rows)
     percentage_totals = _result_percentage_totals_by_market(rows, snapshot.get("balances") or stats.get("balances") or [])
     extended_metrics = _dashboard_extended_metrics(metric_rows, by_market)
@@ -6221,8 +6410,8 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
             ("Losers", "pattern_range_losses", "count", "loss"),
             ("Most Traded", "most_traded_pattern", "text", None),
             ("Least Traded", "least_traded_pattern", "text", None),
-            ("Most Profitable", "most_profitable_pattern", "text", "profit"),
-            ("Least Profitable", "least_profitable_pattern", "text", "loss"),
+            ("Most Profitable", "most_profitable_pattern", "text", None),
+            ("Least Profitable", "least_profitable_pattern", "text", None),
         ], True),
         ("Timeframe", [
             ("1MIN", "timeframe_1min", "count", None),
@@ -6350,7 +6539,6 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
         if net_pct is not None:
             detail.cell(target_row, 6, net_pct / 100.0)
             detail.cell(target_row, 6).number_format = adaptive_percent_number_format(detail.cell(target_row, 6).value)
-            _apply_sign_based_full_cell_fill(detail.cell(target_row, 6))
 
     _apply_dashboard_requested_semantic_fills(dash)
 
@@ -6570,24 +6758,8 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
     _repair_instrument_timeframe_columns(inst)
     _populate_symbols_metrics_preserving_layout(inst, rows)
 
-    cal=wb['P&L Calendar']; cal.append(['Year'] + [f"{calendar.month_name[m]} P/L %" for m in range(1,13)]); cal.append(['Trades'] + [calendar.month_name[m] for m in range(1,13)])
-    monthly=defaultdict(lambda:{'pct':0.0,'trades':0})
-    for r in non_test:
-        d=_as_date(r.get('close_time') or r.get('open_time')); pct=_as_float(r.get('result_pct'))
-        if d and pct is not None: monthly[(d.year,d.month)]['pct']+=pct; monthly[(d.year,d.month)]['trades']+=1
-    for y in sorted({y for y,_ in monthly.keys()}):
-        cal.append([y]+[(monthly[(y,m)]['pct'] / 100.0 if (y,m) in monthly else '') for m in range(1,13)])
-        cal.append([f"{y} Trades"]+[(monthly[(y,m)]['trades'] if (y,m) in monthly else '') for m in range(1,13)])
-    _style_table_sheet(cal,1,'A3',False)
-    _style_header_row(cal, 2)
-    _table_border(cal, 1, 1, cal.max_row, cal.max_column)
-    for rr in range(3, cal.max_row + 1, 2):
-        for cc in range(2, 14):
-            cal.cell(rr, cc).number_format = "0.00%"
-    for rr in range(4, cal.max_row + 1, 2):
-        for cc in range(2, 14):
-            cal.cell(rr, cc).number_format = "0"
-    _apply_pnl_calendar_profit_loss_formatting(cal)
+    cal = wb["P&L Calendar"]
+    _write_pnl_calendar_one_line_layout(cal, {"items": non_test})
     _ensure_pnl_calendar_freeze_panes(cal)
     _ensure_report_sheets(wb, snapshot)
     _write_target_r_metadata_sheet(wb, rows)
@@ -8914,8 +9086,139 @@ def _detect_calendar_month_columns(ws) -> Dict[int, int]:
     return month_cols
 
 
+def _pnl_calendar_monthly_values(snapshot_or_rows: Any) -> Dict[Tuple[int, int], Dict[str, Any]]:
+    rows = snapshot_or_rows.get("items") if isinstance(snapshot_or_rows, dict) else snapshot_or_rows
+    monthly: Dict[Tuple[int, int], Dict[str, Any]] = defaultdict(lambda: {"pct": 0.0, "count": 0})
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        if _is_test_trade_value(row.get("is_test_trade")):
+            continue
+        if str(row.get("row_type") or "trade").strip().lower() != "trade":
+            continue
+        timestamp = _as_date(row.get("close_time") or row.get("open_time"))
+        pct = _as_float(row.get("result_pct"))
+        if not timestamp or pct is None or not math.isfinite(pct):
+            continue
+        key = (timestamp.year, timestamp.month)
+        monthly[key]["pct"] += pct
+        monthly[key]["count"] += 1
+    return monthly
+
+
+def _format_pnl_calendar_month_cell(pct_points: float, count: int) -> str:
+    label = "trade" if int(count) == 1 else "trades"
+    return f"{pct_points:.2f}%, {int(count)} {label}"
+
+
+def _pnl_calendar_text_pct_fraction(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, (int, float)):
+        number = float(value)
+        return number if math.isfinite(number) else None
+    text = str(value).strip()
+    if not text:
+        return None
+    match = re.match(r"^\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+))\s*%", text)
+    if not match:
+        return None
+    try:
+        return float(match.group(1)) / 100.0
+    except ValueError:
+        return None
+
+
+def _copy_calendar_cell_style(src, dst) -> None:
+    if src.has_style:
+        dst._style = copy(src._style)
+    dst.font = copy(src.font)
+    dst.fill = copy(src.fill)
+    dst.border = copy(src.border)
+    dst.alignment = copy(src.alignment)
+    dst.protection = copy(src.protection)
+    dst.number_format = src.number_format
+
+
+def _write_pnl_calendar_one_line_layout(ws, snapshot: Dict[str, Any], diagnostics: Dict[str, Any] | None = None) -> None:
+    diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+    monthly = _pnl_calendar_monthly_values(snapshot)
+    years = sorted({year for year, _month in monthly.keys()})
+    target_rows = max(1, len(years) + 1)
+    target_cols = 13
+
+    row_heights = {idx: dim.height for idx, dim in ws.row_dimensions.items() if dim.height is not None}
+    header_templates = [copy(ws.cell(1, min(col, ws.max_column))) for col in range(1, target_cols + 1)]
+    data_template_row = 2
+    for row in range(2, ws.max_row + 1):
+        if any(ws.cell(row, col).value not in (None, "") for col in range(1, min(ws.max_column, target_cols) + 1)):
+            data_template_row = row
+            break
+    data_templates = [copy(ws.cell(data_template_row, min(col, ws.max_column))) for col in range(1, target_cols + 1)]
+
+    for merged in list(ws.merged_cells.ranges):
+        ws.unmerge_cells(str(merged))
+    if ws.max_row > target_rows:
+        ws.delete_rows(target_rows + 1, ws.max_row - target_rows)
+    if ws.max_column > target_cols:
+        ws.delete_cols(target_cols + 1, ws.max_column - target_cols)
+
+    headers = ["Year", *[calendar.month_name[month] for month in range(1, 13)]]
+    for col, header in enumerate(headers, start=1):
+        cell = ws.cell(1, col)
+        _copy_calendar_cell_style(header_templates[col - 1], cell)
+        cell.value = header
+        cell.number_format = "General"
+        base_alignment = copy(cell.alignment)
+        cell.alignment = Alignment(
+            horizontal=base_alignment.horizontal or "center",
+            vertical=base_alignment.vertical or "center",
+            wrap_text=False,
+        )
+
+    for row_idx, year in enumerate(years, start=2):
+        for col in range(1, target_cols + 1):
+            cell = ws.cell(row_idx, col)
+            _copy_calendar_cell_style(data_templates[col - 1], cell)
+            cell.number_format = "General"
+            base_alignment = copy(cell.alignment)
+            cell.alignment = Alignment(
+                horizontal=base_alignment.horizontal or ("center" if col > 1 else "left"),
+                vertical=base_alignment.vertical or "center",
+                wrap_text=False,
+            )
+            _clear_generated_semantic_fill(cell)
+        ws.cell(row_idx, 1).value = year
+        for month in range(1, 13):
+            values = monthly.get((year, month))
+            cell = ws.cell(row_idx, month + 1)
+            if not values:
+                cell.value = None
+                continue
+            pct = float(values["pct"])
+            count = int(values["count"])
+            cell.value = _format_pnl_calendar_month_cell(pct, count)
+            if pct > 0:
+                _apply_full_cell_semantic_fill(cell, "profit")
+            elif pct < 0:
+                _apply_full_cell_semantic_fill(cell, "loss")
+
+    for idx, height in row_heights.items():
+        if idx <= target_rows:
+            ws.row_dimensions[idx].height = height
+    ws.auto_filter.ref = f"A1:{get_column_letter(target_cols)}{target_rows}"
+    _style_header_row(ws, 1)
+    _table_border(ws, 1, 1, target_rows, target_cols)
+    ws.freeze_panes = "B2"
+    _apply_pnl_calendar_profit_loss_formatting(ws)
+    diagnostics["pnl_calendar_one_line_rows_written"] = len(years)
+
+
 def _ensure_pnl_calendar_freeze_panes(ws) -> None:
     month_cols = _detect_calendar_month_columns(ws)
+    if month_cols and min(month_cols.values()) == 2:
+        ws.freeze_panes = "B2"
+        return
     if month_cols and min(month_cols.values()) == 3:
         ws.freeze_panes = "C2"
         return
@@ -9128,6 +9431,10 @@ def _repair_stats2_account_balance_formatting(ws, diagnostics: Dict[str, Any] | 
             cell.number_format = _currency_number_format(currency, force_decimals=8 if _is_crypto_currency(currency) else 2)
         _set_cell_horizontal_alignment(cell, "right")
     _apply_stats2_clean_table_borders(ws, section, header_row, col_map, diagnostics)
+    if "net_pl_percentage" in col_map:
+        _apply_stats2_net_pl_percentage_conditional_formatting(
+            ws, header_row, section, col_map["net_pl_percentage"]
+        )
     if diagnostics is not None:
         diagnostics["repaired_stats2_account_balance_formatting"] = True
 
@@ -9241,6 +9548,28 @@ def _clear_account_balance_row(ws, row: int, col_map: Dict[str, int]) -> None:
         ws.cell(row, col_map["net_pl_percentage"]).value = None
 
 
+def _apply_stats2_net_pl_percentage_conditional_formatting(
+    ws,
+    header_row: int,
+    section: Dict[str, int],
+    net_col: int,
+) -> None:
+    sanitized = OrderedDict()
+    for key, rules in list(getattr(ws.conditional_formatting, "_cf_rules", {}).items()):
+        manual = [rule for rule in rules if not _is_generated_dashboard_semantic_rule(rule)]
+        if manual:
+            new_key = copy(key)
+            sanitized[new_key] = manual
+    ws.conditional_formatting._cf_rules = sanitized
+    start_row = header_row + 1
+    end_row = max(start_row, section.get("end_row", ws.max_row))
+    col_letter = get_column_letter(net_col)
+    cell_range = f"{col_letter}{start_row}:{col_letter}{end_row}"
+    for row in range(start_row, end_row + 1):
+        _clear_generated_semantic_fill(ws.cell(row, net_col))
+    _profit_loss_rules(ws, cell_range)
+
+
 def _write_stats2_net_pl_percentages(
     ws,
     section: Dict[str, int],
@@ -9268,8 +9597,8 @@ def _write_stats2_net_pl_percentages(
             continue
         cell.value = value / 100.0
         cell.number_format = adaptive_percent_number_format(cell.value)
-        _apply_sign_based_full_cell_fill(cell)
         written += 1
+    _apply_stats2_net_pl_percentage_conditional_formatting(ws, header_row, section, net_col)
     diagnostics["stats2_net_pl_percentage_cells_written"] = written
 
 
@@ -9577,7 +9906,14 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
         groups = stats.get("groups") or {}
         by_market = groups.get("by_market") or {}
         risk = groups.get("risk_expectancy") or {}
-        leaders = groups.get("leaders") or {}
+        metric_rows = [
+            row for row in rows
+            if isinstance(row, dict) and str(row.get("row_type") or "trade").strip().lower() == "trade"
+        ]
+        leaders = {
+            **_instrument_leader_payloads_from_rows(metric_rows),
+            **dict(groups.get("leaders") or {}),
+        }
         totals = stats.get("totals") or {}
         move_duration_metrics = _trade_move_duration_metrics(rows)
         extended_metrics = _dashboard_extended_metrics(rows, by_market)
@@ -10149,8 +10485,8 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
             "pct",
             "drawdown",
         )
-        write_market_metric("Drawdown", "Max drawdown", {"overall": risk.get("max_drawdown_pct"), "fx": (by_market.get("fx") or {}).get("max_drawdown_pct"), "crypto": (by_market.get("crypto") or {}).get("max_drawdown_pct")}, "pct", "drawdown")
-        write_market_metric("Drawdown", "Avg drawdown", {"overall": risk.get("avg_drawdown_pct"), "fx": (by_market.get("fx") or {}).get("avg_drawdown_pct"), "crypto": (by_market.get("crypto") or {}).get("avg_drawdown_pct")}, "pct", "drawdown")
+        write_market_metric("Drawdown", "Max drawdown", _extended_market_values("max_drawdown_pct"), "pct", "drawdown")
+        write_market_metric("Drawdown", "Avg drawdown", _extended_market_values("avg_drawdown_pct"), "pct", "drawdown")
         if "Drawdown" in anchors:
             market_cols = _main_dashboard_market_columns()
             _write_drawdown_detail_rows(
@@ -10531,11 +10867,7 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
                 _set_instrument_averages_auto_filter_to_populated_range(instrument_ws)
             if "P&L Calendar" in wb.sheetnames and "P&L Calendar" in gen.sheetnames:
                 cal_ws = wb["P&L Calendar"]
-                if _detect_calendar_month_columns(cal_ws):
-                    _update_pnl_calendar_preserving_layout(cal_ws, snapshot, diagnostics)
-                else:
-                    _copy_data_rows(gen["P&L Calendar"], cal_ws, 3)
-                _apply_pnl_calendar_profit_loss_formatting(cal_ws)
+                _write_pnl_calendar_one_line_layout(cal_ws, snapshot, diagnostics)
         finally:
             gen.close()
             tmp.unlink(missing_ok=True)

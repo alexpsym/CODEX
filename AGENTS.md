@@ -15,3 +15,15 @@ Keep `custom instructions/CODEX_BRIEF_INSTRUCTIONS.txt` as ChatGPT-only instruct
 * Never claim that work is complete when changes remain only on the local machine.
 * Do not replace this workflow with manual Git commands unless `PATCH_DESKTOP_PUSH.bat` itself is broken.
 * Do not commit secrets, environment files, logs, caches, runtime data or local-state files.
+
+## Machine-safety boundaries
+
+Operate only inside this repository and its explicitly documented output locations.
+
+Do not modify or delete Windows system files, the Windows registry, Windows services, scheduled tasks, startup configuration, environment variables, unrelated user-profile files, unrelated repositories, or files outside the approved project paths.
+
+Do not run recursive deletion commands, disk-management commands, registry commands, system-administration commands, force pushes, Git history rewrites, or commands that discard uncommitted work.
+
+Do not use git reset --hard, git clean -fd, git push --force, git push --force-with-lease, or equivalent destructive commands.
+
+If completing the task genuinely requires any prohibited action, stop and report exactly what is required instead of performing it.
