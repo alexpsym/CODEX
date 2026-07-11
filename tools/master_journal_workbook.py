@@ -1644,21 +1644,32 @@ def _target_r_metadata_payload(row: Dict[str, Any]) -> Dict[str, Any]:
     return {key: value for key, value in payload.items() if value not in (None, "")}
 
 
-def _read_target_r_metadata_sheet(wb) -> Dict[str, Dict[str, Any]]:
+def _read_target_r_metadata_sheet(wb, diagnostics: Dict[str, Any] | None = None) -> Dict[str, Dict[str, Any]]:
     if TARGET_R_METADATA_SHEET not in wb.sheetnames:
         return {}
     ws = wb[TARGET_R_METADATA_SHEET]
     out: Dict[str, Dict[str, Any]] = {}
+    seen: set[str] = set()
+    duplicates: set[str] = set()
     for row_id, payload_json in ws.iter_rows(min_row=2, max_col=2, values_only=True):
         rid = str(row_id or "").strip()
         if not rid or not payload_json:
+            continue
+        if rid in seen:
+            duplicates.add(rid)
+            out.pop(rid, None)
+            continue
+        if rid in duplicates:
             continue
         try:
             payload = json.loads(str(payload_json))
         except Exception:
             continue
         if isinstance(payload, dict):
+            seen.add(rid)
             out[rid] = payload
+    if diagnostics is not None and duplicates:
+        diagnostics["target_r_metadata_duplicate_row_ids"] = sorted(duplicates)
     return out
 
 
@@ -1866,11 +1877,11 @@ def _target_r_recommendation(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     coverage_label = ""
     if total_fx_wins > 0 and total_crypto_wins > 0:
         if eligible_fx_wins == 0 and eligible_crypto_wins > 0:
-            coverage_note = "FX target data unavailable"
-            coverage_label = "Crypto-only eligible data"
+            coverage_note = "FX: insufficient eligible wins"
+            coverage_label = "Crypto-only data"
         elif eligible_crypto_wins == 0 and eligible_fx_wins > 0:
-            coverage_note = "Crypto target data unavailable"
-            coverage_label = "FX-only eligible data"
+            coverage_note = "Crypto: insufficient eligible wins"
+            coverage_label = "FX-only data"
     coverage_payload = {
         "target_r_total_winning_trades": total_wins,
         "target_r_total_fx_wins": total_fx_wins,
@@ -1890,9 +1901,6 @@ def _target_r_recommendation(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         payload["target_r_excluded_count"] = sum(excluded.values())
         payload["target_r_excluded_reasons"] = dict(excluded)
         payload.update(coverage_payload)
-        if coverage_note:
-            payload[TARGET_RECOMMENDATION_HEADER] = f"Insufficient overall coverage — {coverage_note}"
-            payload["target_recommendation"] = payload[TARGET_RECOMMENDATION_HEADER]
         return payload
 
     increment = _choose_target_r_increment(realized_values)
@@ -1939,9 +1947,11 @@ def _target_r_recommendation(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         direction = "Increase target"
     else:
         direction = "Keep target"
-    prefix = coverage_label or direction
-    recommendation = f"{prefix} — Recommended: {_format_target_r_value(recommended_r)}R"
-    if current_median is not None:
+    if coverage_label and coverage_note:
+        recommendation = f"{coverage_label} — Recommended: {_format_target_r_value(recommended_r)}R — {coverage_note}"
+    else:
+        recommendation = f"{direction} — Recommended: {_format_target_r_value(recommended_r)}R"
+    if current_median is not None and not coverage_label:
         recommendation += f" (current median: {_format_target_r_value(current_median)}R)"
 
     return {
@@ -9293,8 +9303,9 @@ def read_master_journal_source(path: Path) -> Dict[str, Any]:
         raise FileNotFoundError(f"Master Journal workbook not found: {path}")
     wb = load_workbook(path, data_only=True, read_only=True)
     try:
+        diagnostics={'repaired_corrupted_row_ids': []}
         balances = _read_stats2_account_balances(wb)
-        target_r_metadata = _read_target_r_metadata_sheet(wb)
+        target_r_metadata = _read_target_r_metadata_sheet(wb, diagnostics)
         ws = _get_all_trades_sheet(wb)
         header_map = _trade_log_header_map(ws)
         headers = list(header_map.keys())
@@ -9303,7 +9314,7 @@ def read_master_journal_source(path: Path) -> Dict[str, Any]:
         required = {'Open Time','Close Time','Account','Symbol','Side'}
         if not required.issubset(set(idx.keys())):
             raise RuntimeError('Master Journal Trade Log headers are invalid.')
-        items=[]; cashflow_ledger=defaultdict(list); diagnostics={'repaired_corrupted_row_ids': []}
+        items=[]; cashflow_ledger=defaultdict(list)
         def _num(v):
             try:
                 if v in (None, ""): return None
@@ -9410,8 +9421,6 @@ def read_master_journal_source(path: Path) -> Dict[str, Any]:
                         item[field] = raw_value
             if "close_stopout" not in item and "Stop Out" in idx:
                 item["close_stopout"] = r[idx["Stop Out"]] if idx["Stop Out"] < len(r) else ''
-            if row_type == "trade":
-                item = _merge_target_r_metadata(item, target_r_metadata.get(str(item.get("id") or "").strip()) or {})
             if row_type == "monthly_aud_reval":
                 monthly_currency = (currency or str(item.get("result_currency") or "").strip() or "AUD").upper()
                 item["result_cash"] = _num(r[i_pnl]) if i_pnl is not None else None
@@ -9429,6 +9438,32 @@ def read_master_journal_source(path: Path) -> Dict[str, Any]:
             items.append(item)
             if row_type=='cashflow':
                 cashflow_ledger[account].append({'account':account,'date':item['close_time'] or item['open_time'],'amount':cashflow_amount,'new_balance':cashflow_new_balance,'currency':str(r[idx.get('Currency')] or '').strip() if 'Currency' in idx else '','reason':item.get('notes') or '', 'side':side})
+        trade_row_id_counts = Counter(
+            str(item.get("id") or "").strip()
+            for item in items
+            if str(item.get("row_type") or "trade").strip().lower() == "trade" and str(item.get("id") or "").strip()
+        )
+        duplicate_trade_row_ids = sorted(rid for rid, count in trade_row_id_counts.items() if count > 1)
+        if duplicate_trade_row_ids:
+            diagnostics["target_r_duplicate_trade_row_ids"] = duplicate_trade_row_ids
+        merged_metadata_rows = 0
+        skipped_duplicate_metadata_rows = 0
+        for index, item in enumerate(items):
+            if str(item.get("row_type") or "trade").strip().lower() != "trade":
+                continue
+            rid = str(item.get("id") or "").strip()
+            metadata = target_r_metadata.get(rid) if rid else None
+            if not metadata:
+                continue
+            if trade_row_id_counts.get(rid, 0) != 1:
+                skipped_duplicate_metadata_rows += 1
+                continue
+            items[index] = _merge_target_r_metadata(item, metadata)
+            merged_metadata_rows += 1
+        if merged_metadata_rows:
+            diagnostics["target_r_metadata_rows_merged"] = merged_metadata_rows
+        if skipped_duplicate_metadata_rows:
+            diagnostics["target_r_metadata_rows_skipped_duplicate_trade_ids"] = skipped_duplicate_metadata_rows
         items, dedupe_diagnostics = _dedupe_trade_rows_by_execution(items)
         diagnostics.update(dedupe_diagnostics)
         return {'items':items,'balances':balances,'cashflow_ledger':dict(cashflow_ledger),'diagnostics':diagnostics}

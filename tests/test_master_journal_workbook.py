@@ -2,6 +2,7 @@ from pathlib import Path
 from collections import defaultdict
 from copy import copy
 from datetime import datetime
+import json
 import zipfile
 import xml.etree.ElementTree as ET
 from openpyxl import Workbook, load_workbook
@@ -2362,39 +2363,95 @@ def test_read_master_journal_source_distance_percent_format_is_source_aware(tmp_
     assert row["target_distance_pct"] == pytest.approx(1.0)
 
 
+def _target_r_roundtrip_fx_rows(count: int = 5) -> list[dict]:
+    return [
+        {
+            "id": f"fx-target-{idx}",
+            "row_type": "trade",
+            "asset_class": "fx",
+            "account": "OANDA DEMO",
+            "symbol": "EURUSD" if idx % 2 else "GBPUSD",
+            "side": "BUY",
+            "open_time": f"2026-01-{idx:02d}T00:00:00Z",
+            "close_time": f"2026-01-{idx:02d}T01:00:00Z",
+            "entry_price": 1.1,
+            "exit_price": 1.1 + (0.001 * (1.0 + (idx / 10.0))),
+            "stop_loss": 1.099,
+            "take_profit": 1.102,
+            "planned_entry_price": 1.1,
+            "planned_stop_price": 1.099,
+            "planned_target_price": 1.102,
+            "qty": 0.1,
+            "qty_raw": 10000,
+            "qty_unit": "lots",
+            "net_profit": 15.0 * (1.0 + (idx / 10.0)),
+            "currency": "AUD",
+            "original_loss_conversion_factor": 1.5,
+            "original_loss_conversion_factor_source": "homeConversionFactors.lossQuoteHome.factor",
+            "original_loss_conversion_factor_time": f"2026-01-{idx:02d}T00:00:00Z",
+            "original_open_transaction_id": f"open-{idx}",
+        }
+        for idx in range(1, count + 1)
+    ]
+
+
+def _target_r_recommendation_cells(path: Path) -> dict:
+    wb = load_workbook(path, data_only=True)
+    try:
+        stats1 = wb[STATS1_SHEET]
+        max_target_row = next(row for row in range(1, stats1.max_row + 1) if stats1.cell(row, 1).value == "Max target %")
+        target_recommendation_row = max_target_row + 2
+        stats1_recs = tuple(stats1.cell(target_recommendation_row, col).value for col in (2, 3, 4))
+        symbols = wb[SYMBOLS_SHEET]
+        headers = _instrument_averages_header_map(symbols)
+        symbol_recs = {
+            str(symbols.cell(row, headers["Symbol"]).value or "").strip().upper(): symbols.cell(row, headers[TARGET_RECOMMENDATION_HEADER]).value
+            for row in range(INSTRUMENT_AVERAGES_DATA_START_ROW, symbols.max_row + 1)
+            if str(symbols.cell(row, headers["Symbol"]).value or "").strip()
+        }
+        return {"stats1": stats1_recs, "symbols": symbol_recs}
+    finally:
+        wb.close()
+
+
+def _visible_workbook_layout_signature(path: Path) -> dict:
+    from tools import master_journal_workbook as mjw
+
+    wb = load_workbook(path, data_only=False)
+    try:
+        visible_names = [name for name in wb.sheetnames if name != TARGET_R_METADATA_SHEET]
+        signature = {"sheetnames": visible_names}
+        for name in visible_names:
+            ws = wb[name]
+            max_style_row = min(ws.max_row or 1, 6)
+            max_style_col = min(ws.max_column or 1, 8)
+            formulas = {}
+            for row in ws.iter_rows():
+                for cell in row:
+                    if isinstance(cell.value, str) and cell.value.startswith("="):
+                        formulas[cell.coordinate] = cell.value
+            signature[name] = {
+                "freeze": ws.freeze_panes,
+                "filter": ws.auto_filter.ref if ws.auto_filter else None,
+                "merged": sorted(str(rng) for rng in ws.merged_cells.ranges),
+                "widths": {key: dim.width for key, dim in ws.column_dimensions.items() if dim.width is not None},
+                "heights": {key: dim.height for key, dim in ws.row_dimensions.items() if dim.height is not None},
+                "formulas": formulas,
+                "styles": {
+                    (row, col): mjw._style_signature(ws.cell(row, col))
+                    for row in range(1, max_style_row + 1)
+                    for col in range(1, max_style_col + 1)
+                },
+            }
+        return signature
+    finally:
+        wb.close()
+
+
 def test_target_r_metadata_survives_workbook_write_read_refresh_round_trip(tmp_path: Path):
     from tools.master_journal_workbook import _target_r_recommendation
 
-    rows = []
-    for idx, realized_r in enumerate([1.0, 1.1, 1.2, 1.3, 1.4], start=1):
-        rows.append(
-            {
-                "id": f"fx-target-{idx}",
-                "row_type": "trade",
-                "asset_class": "fx",
-                "account": "OANDA DEMO",
-                "symbol": "EURUSD",
-                "side": "BUY",
-                "open_time": f"2026-01-{idx:02d}T00:00:00Z",
-                "close_time": f"2026-01-{idx:02d}T01:00:00Z",
-                "entry_price": 1.1,
-                "exit_price": 1.1 + (0.001 * realized_r),
-                "stop_loss": 1.099,
-                "take_profit": 1.102,
-                "planned_entry_price": 1.1,
-                "planned_stop_price": 1.099,
-                "planned_target_price": 1.102,
-                "qty": 0.1,
-                "qty_raw": 10000,
-                "qty_unit": "lots",
-                "net_profit": 15.0 * realized_r,
-                "currency": "AUD",
-                "original_loss_conversion_factor": 1.5,
-                "original_loss_conversion_factor_source": "homeConversionFactors.lossQuoteHome.factor",
-                "original_loss_conversion_factor_time": f"2026-01-{idx:02d}T00:00:00Z",
-                "original_open_transaction_id": f"open-{idx}",
-            }
-        )
+    rows = _target_r_roundtrip_fx_rows()
     out = tmp_path / "Trading Journal.xlsx"
     build_master_journal_workbook({"items": rows, "stats": {"totals": {}, "groups": {}}, "balances": []}, out)
 
@@ -2409,25 +2466,140 @@ def test_target_r_metadata_survives_workbook_write_read_refresh_round_trip(tmp_p
     finally:
         wb.close()
 
-    parsed = read_master_journal_source(out)
-    parsed_rows = parsed["items"]
+    parsed_rows = read_master_journal_source(out)["items"]
     assert parsed_rows[0]["original_loss_conversion_factor"] == pytest.approx(1.5)
-    first_risk = _target_r_recommendation(parsed_rows)
+    assert parsed_rows[0]["original_entry_price"] == pytest.approx(1.1)
+    assert parsed_rows[0]["original_stop_loss"] == pytest.approx(1.099)
+    assert parsed_rows[0]["original_take_profit"] == pytest.approx(1.102)
+    assert parsed_rows[0]["qty_raw"] == pytest.approx(10000)
+    assert parsed_rows[0]["original_monetary_risk"] == pytest.approx(15.0)
+    assert parsed_rows[0]["original_risk_currency"] == "AUD"
+    assert parsed_rows[0]["original_open_transaction_id"] == "open-1"
+
+    first_update = update_master_journal_workbook_data_only(
+        out,
+        {"items": parsed_rows, "stats": {"totals": {}, "groups": {}}, "balances": []},
+    )
+    assert first_update["ok"] is True
+    Path(first_update["candidate_path"]).replace(out)
+
+    reopened = read_master_journal_source(out)
+    reopened_rows = reopened["items"]
+    assert reopened_rows[0]["original_loss_conversion_factor"] == pytest.approx(1.5)
+    assert reopened_rows[0]["original_entry_price"] == pytest.approx(1.1)
+    assert reopened_rows[0]["original_stop_loss"] == pytest.approx(1.099)
+    assert reopened_rows[0]["original_take_profit"] == pytest.approx(1.102)
+    assert reopened_rows[0]["qty_raw"] == pytest.approx(10000)
+    assert reopened_rows[0]["original_monetary_risk"] == pytest.approx(15.0)
+    assert reopened_rows[0]["original_risk_currency"] == "AUD"
+    assert reopened_rows[0]["original_open_transaction_id"] == "open-1"
+    first_risk = _target_r_recommendation(reopened_rows)
     assert first_risk["eligible_target_r_wins"] == 5
     assert first_risk["target_r_eligible_fx_wins"] == 5
     assert "Recommended:" in first_risk["target_recommendation"]
 
-    update = update_master_journal_workbook_data_only(
+    recommendations_before = _target_r_recommendation_cells(out)
+    layout_before = _visible_workbook_layout_signature(out)
+    second_update = update_master_journal_workbook_data_only(
         out,
-        {"items": parsed_rows, "stats": {"totals": {}, "groups": {}}, "balances": []},
+        {"items": reopened_rows, "stats": {"totals": {}, "groups": {}}, "balances": []},
     )
-    assert update["ok"] is True
-    Path(update["candidate_path"]).replace(out)
+    assert second_update["ok"] is True
+    Path(second_update["candidate_path"]).replace(out)
     refreshed = read_master_journal_source(out)
     refreshed_risk = _target_r_recommendation(refreshed["items"])
     assert refreshed_risk["eligible_target_r_wins"] == 5
     assert refreshed_risk["target_r_eligible_fx_wins"] == 5
     assert "Recommended:" in refreshed_risk["target_recommendation"]
+    assert _target_r_recommendation_cells(out) == recommendations_before
+    assert _visible_workbook_layout_signature(out) == layout_before
+    final_wb = load_workbook(out, data_only=True)
+    try:
+        assert final_wb[TARGET_R_METADATA_SHEET].sheet_state == "veryHidden"
+    finally:
+        final_wb.close()
+
+
+def test_target_r_metadata_restores_by_row_id_after_visible_rows_move(tmp_path: Path):
+    rows = _target_r_roundtrip_fx_rows(2)
+    out = tmp_path / "metadata-moved.xlsx"
+    build_master_journal_workbook({"items": rows, "stats": {"totals": {}, "groups": {}}, "balances": []}, out)
+
+    wb = load_workbook(out)
+    ws = wb["Trade Log"]
+    row_a = TRADE_LOG_DATA_START_ROW
+    row_b = TRADE_LOG_DATA_START_ROW + 1
+    for col in range(1, ws.max_column + 1):
+        ws.cell(row_a, col).value, ws.cell(row_b, col).value = ws.cell(row_b, col).value, ws.cell(row_a, col).value
+    wb.save(out)
+    wb.close()
+
+    parsed = read_master_journal_source(out)
+    by_id = {row["id"]: row for row in parsed["items"]}
+    assert by_id["fx-target-1"]["original_open_transaction_id"] == "open-1"
+    assert by_id["fx-target-2"]["original_open_transaction_id"] == "open-2"
+
+
+def test_target_r_metadata_ignores_unmatched_and_duplicate_row_ids(tmp_path: Path):
+    rows = _target_r_roundtrip_fx_rows(2)
+    deleted = tmp_path / "metadata-deleted.xlsx"
+    build_master_journal_workbook({"items": rows, "stats": {"totals": {}, "groups": {}}, "balances": []}, deleted)
+    wb = load_workbook(deleted)
+    wb["Trade Log"].delete_rows(TRADE_LOG_DATA_START_ROW, 1)
+    wb.save(deleted)
+    wb.close()
+    parsed_deleted = read_master_journal_source(deleted)
+    assert [row["id"] for row in parsed_deleted["items"]] == ["fx-target-2"]
+    assert parsed_deleted["items"][0]["original_open_transaction_id"] == "open-2"
+    assert all(row.get("original_open_transaction_id") != "open-1" for row in parsed_deleted["items"])
+
+    duplicate_visible = tmp_path / "metadata-duplicate-visible.xlsx"
+    build_master_journal_workbook({"items": rows, "stats": {"totals": {}, "groups": {}}, "balances": []}, duplicate_visible)
+    wb = load_workbook(duplicate_visible)
+    ws = wb["Trade Log"]
+    row_id_col = _trade_log_header_map(ws)["Row ID"]
+    ws.cell(TRADE_LOG_DATA_START_ROW + 1, row_id_col).value = "fx-target-1"
+    wb.save(duplicate_visible)
+    wb.close()
+    parsed_duplicate = read_master_journal_source(duplicate_visible)
+    assert parsed_duplicate["diagnostics"]["target_r_duplicate_trade_row_ids"] == ["fx-target-1"]
+    assert all("original_loss_conversion_factor" not in row for row in parsed_duplicate["items"])
+
+    duplicate_metadata = tmp_path / "metadata-duplicate-hidden.xlsx"
+    build_master_journal_workbook({"items": rows[:1], "stats": {"totals": {}, "groups": {}}, "balances": []}, duplicate_metadata)
+    wb = load_workbook(duplicate_metadata)
+    wb[TARGET_R_METADATA_SHEET].append([
+        "fx-target-1",
+        json.dumps({"original_loss_conversion_factor": 9.9, "original_open_transaction_id": "wrong"}),
+    ])
+    wb.save(duplicate_metadata)
+    wb.close()
+    parsed_duplicate_metadata = read_master_journal_source(duplicate_metadata)
+    assert parsed_duplicate_metadata["diagnostics"]["target_r_metadata_duplicate_row_ids"] == ["fx-target-1"]
+    assert "original_loss_conversion_factor" not in parsed_duplicate_metadata["items"][0]
+
+
+def test_missing_target_r_metadata_produces_opening_conversion_exclusion(tmp_path: Path):
+    from tools.master_journal_workbook import _target_r_recommendation
+
+    rows = _target_r_roundtrip_fx_rows()
+    for row in rows:
+        row.pop("original_loss_conversion_factor", None)
+        row.pop("original_loss_conversion_factor_source", None)
+        row.pop("original_loss_conversion_factor_time", None)
+        row.pop("original_open_transaction_id", None)
+    out = tmp_path / "metadata-missing.xlsx"
+    build_master_journal_workbook({"items": rows, "stats": {"totals": {}, "groups": {}}, "balances": []}, out)
+    wb = load_workbook(out)
+    if TARGET_R_METADATA_SHEET in wb.sheetnames:
+        del wb[TARGET_R_METADATA_SHEET]
+    wb.save(out)
+    wb.close()
+
+    risk = _target_r_recommendation(read_master_journal_source(out)["items"])
+
+    assert risk["target_recommendation"] == TARGET_RECOMMENDATION_INSUFFICIENT
+    assert risk["target_r_winning_exclusion_reasons"]["missing_opening_loss_conversion_factor"] == 5
 
 
 def test_generated_trade_log_distance_fraction_displays_one_percent(tmp_path: Path):

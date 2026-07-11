@@ -64,7 +64,7 @@ if _httpx_spec is None:
 
 import render.master_service as master_service
 from render.master_service import _compute_journal_stats, _compute_journal_period_stats, _build_journal_balance_timelines
-from tools.master_journal_workbook import TARGET_RECOMMENDATION_INSUFFICIENT, _target_r_recommendation, _target_r_realized_from_original_plan
+from tools.master_journal_workbook import TARGET_RECOMMENDATION_INSUFFICIENT, _format_target_r_value, _target_r_recommendation, _target_r_realized_from_original_plan
 
 
 def test_compute_journal_stats_winner_loser_splits_and_durations() -> None:
@@ -714,7 +714,8 @@ def test_overall_target_recommendation_labels_crypto_only_eligible_data() -> Non
 
     risk = _target_r_recommendation(fx_wins + crypto_wins)
 
-    assert risk["target_recommendation"].startswith("Crypto-only eligible data")
+    recommended = _format_target_r_value(risk["target_r_recommended"])
+    assert risk["target_recommendation"] == f"Crypto-only data — Recommended: {recommended}R — FX: insufficient eligible wins"
     assert risk["target_r_total_winning_trades"] == 7
     assert risk["target_r_total_fx_wins"] == 2
     assert risk["target_r_total_crypto_wins"] == 5
@@ -722,6 +723,52 @@ def test_overall_target_recommendation_labels_crypto_only_eligible_data() -> Non
     assert risk["target_r_eligible_crypto_wins"] == 5
     assert risk["target_r_excluded_winning_trades"] == 2
     assert risk["target_r_winning_exclusion_reasons"]["missing_opening_loss_conversion_factor"] == 2
+
+
+def test_overall_target_recommendation_labels_fx_only_eligible_data() -> None:
+    fx_wins = [
+        _fx_trade_with_independent_conversion(f"fx-{idx}", net_profit=15.0 * value)
+        for idx, value in enumerate([1.0, 1.1, 1.2, 1.3, 1.4], start=1)
+    ]
+    crypto_wins = [
+        _target_distribution_trade(
+            f"crypto-missing-{idx}",
+            value,
+            asset_class="crypto",
+            account="BYBIT",
+            symbol="BTCUSDT",
+            currency="USD",
+            original_risk_currency="USDT",
+        )
+        for idx, value in enumerate([1.0, 1.1], start=1)
+    ]
+
+    risk = _target_r_recommendation(fx_wins + crypto_wins)
+
+    recommended = _format_target_r_value(risk["target_r_recommended"])
+    assert risk["target_recommendation"] == f"FX-only data — Recommended: {recommended}R — Crypto: insufficient eligible wins"
+    assert risk["target_r_eligible_fx_wins"] == 5
+    assert risk["target_r_eligible_crypto_wins"] == 0
+    assert risk["target_r_winning_exclusion_reasons"]["stored_risk_currency_mismatch"] == 2
+
+
+def test_overall_target_recommendation_uses_standard_insufficient_when_neither_class_has_enough_data() -> None:
+    rows = [
+        _fx_trade_with_independent_conversion("fx-one", net_profit=15.0),
+        _target_distribution_trade(
+            "crypto-one",
+            1.0,
+            asset_class="crypto",
+            account="BYBIT",
+            symbol="BTCUSDT",
+            currency="USDT",
+            original_risk_currency="USDT",
+        ),
+    ]
+
+    risk = _target_r_recommendation(rows)
+
+    assert risk["target_recommendation"] == TARGET_RECOMMENDATION_INSUFFICIENT
 
 
 def test_target_recommendation_uses_nested_complete_original_plan_after_partial_top_level_plan() -> None:
