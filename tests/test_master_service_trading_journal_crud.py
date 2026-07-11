@@ -107,6 +107,25 @@ def _json(res):
     return json.loads(res.body.decode("utf-8"))
 
 
+def test_calendar_validation_accepts_one_line_pnl_cells():
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "P&L Calendar"
+    headers = [
+        "Year", "January", "February", "March", "April", "May", "June",
+        "July", "August", "September", "October", "November", "December",
+    ]
+    for col, header in enumerate(headers, 1):
+        ws.cell(1, col).value = header
+    ws.cell(2, 1).value = 2026
+    ws.cell(2, 2).value = "1.00%, 1 trade"
+
+    assert master_service._calendar_has_expected_pl_cells(ws, {(2026, 1)})
+    assert not master_service._calendar_has_expected_pl_cells(ws, {(2026, 2)})
+
+
 def test_create_manual_trade_row(temp_state_paths):
     res = asyncio.run(
         master_service.trading_journal_create_row(

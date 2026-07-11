@@ -64,7 +64,7 @@ if _httpx_spec is None:
 
 import render.master_service as master_service
 from render.master_service import _compute_journal_stats, _compute_journal_period_stats, _build_journal_balance_timelines
-from tools.master_journal_workbook import MIN_ELIGIBLE_TARGET_R_WINS, TARGET_RECOMMENDATION_INSUFFICIENT, _distance_recommendation_summary, _format_target_r_value, _target_r_recommendation, _target_r_realized_from_original_plan
+from tools.master_journal_workbook import TARGET_RECOMMENDATION_INSUFFICIENT, _distance_recommendation_summary, _target_r_recommendation, _target_r_realized_from_original_plan
 
 
 def test_compute_journal_stats_winner_loser_splits_and_durations() -> None:
@@ -254,7 +254,7 @@ def test_compute_journal_stats_distance_fallback_percent_points_are_not_fraction
     assert risk["by_market"]["fx"]["avg_stop_pct_winners"] == pytest.approx(1.0)
 
 
-def test_compute_journal_stats_recommends_stop_from_win_loss_distances_but_target_needs_r_data() -> None:
+def test_compute_journal_stats_recommends_stop_and_target_from_one_win_one_loss() -> None:
     rows = [
         {
             "row_type": "trade",
@@ -267,6 +267,8 @@ def test_compute_journal_stats_recommends_stop_from_win_loss_distances_but_targe
             "planned_target_price": 102.0,
             "result_pct": 1.0,
             "net_profit": 10.0,
+            "original_risk_amount": 10.0,
+            "original_risk_currency": "AUD",
             "stop_loss_distance_pct": 1.0,
             "target_distance_pct": 2.0,
         },
@@ -292,10 +294,11 @@ def test_compute_journal_stats_recommends_stop_from_win_loss_distances_but_targe
 
     expected_stop = "Decrease stop — Recommended: 1.00% (1.00 pp below loss average)"
     assert risk["stop_recommendation"] == expected_stop
-    assert risk["target_recommendation"] == TARGET_RECOMMENDATION_INSUFFICIENT
+    expected_target = "Decrease target \u2014 Recommended: 1.0R (current median: 2.0R)"
+    assert risk["target_recommendation"] == expected_target
     assert risk["by_market"]["fx"]["stop_recommendation"] == expected_stop
     assert instrument["stop_recommendation"] == expected_stop
-    assert instrument["target_recommendation"] == TARGET_RECOMMENDATION_INSUFFICIENT
+    assert instrument["target_recommendation"] == expected_target
 
 
 def _stop_recommendation_trade(
@@ -342,7 +345,10 @@ def test_stop_recommendation_uses_original_stop_percentage_distance() -> None:
         _stop_recommendation_trade("win", result_pct=1.0, planned_stop_price=99.0),
         _stop_recommendation_trade("loss", result_pct=-1.0, planned_stop_price=99.0),
     ])
-    assert equal["stop_recommendation"] == "Stop averages equal — Recommended: 1.00% (0.00 pp equal to loss average)"
+    assert equal["stop_recommendation"] == "Decrease stop \u2014 Recommended: 0.99% (0.01 pp below loss average; exact_tie_goal_preference_decrease)"
+    assert equal["stop_loss_recommendation_direction"] == "decrease"
+    assert equal["stop_loss_exact_tie"] is True
+    assert equal["stop_loss_exact_tie_goal_preference"] is True
 
 
 def test_stop_recommendation_requires_wins_and_losses_and_reports_exclusions() -> None:
@@ -414,6 +420,17 @@ def _target_distribution_trade(
     return row
 
 
+def _target_distribution_loss(trade_id: str = "eligible-loss", **overrides: object) -> dict:
+    row = _target_distribution_trade(
+        trade_id,
+        -1.0,
+        net_profit=-10.0,
+        result_pct=-1.0,
+    )
+    row.update(overrides)
+    return row
+
+
 def test_compute_journal_stats_target_recommendation_uses_realized_original_r_distribution() -> None:
     rows = [
         _target_distribution_trade(f"win-{idx}", value)
@@ -438,9 +455,10 @@ def test_compute_journal_stats_target_recommendation_uses_realized_original_r_di
     instrument = next(item for item in stats["by_instrument"] if item["symbol"] == "EURUSD")
     direct_target = _target_r_recommendation(rows)
 
-    assert risk["target_recommendation"] == "FX-only data — Recommended: 3.25R — Crypto: insufficient eligible wins"
-    assert direct_target["target_recommendation"] == "Reduce target — Recommended: 3.25R (current median: 4.0R)"
+    assert risk["target_recommendation"] == "Decrease target \u2014 Recommended: 3.25R (current median: 4.0R)"
+    assert direct_target["target_recommendation"] == risk["target_recommendation"]
     assert risk["eligible_target_r_wins"] == 8
+    assert risk["eligible_target_r_losses"] == 1
     assert risk["target_r_increment"] == pytest.approx(1.0)
     assert risk["target_r_distribution"]["4.0R-5.0R"] == 1
     assert risk["target_r_peak_bucket"] == "3.0R-4.0R"
@@ -450,7 +468,6 @@ def test_compute_journal_stats_target_recommendation_uses_realized_original_r_di
     assert risk["target_r_recommended"] == pytest.approx(3.25)
     assert risk["current_median_original_planned_target_r"] == pytest.approx(4.0)
     assert risk["current_avg_original_planned_target_r"] == pytest.approx(4.0)
-    assert risk["target_r_excluded_reasons"]["not_winning_trade"] >= 2
     assert direct_target["target_r_excluded_reasons"]["test_trade"] == 1
     assert risk["target_r_excluded_reasons"]["missing_exit_price"] == 1
     assert risk["target_r_excluded_reasons"]["moved_without_original_plan"] == 1
@@ -473,6 +490,7 @@ def test_compute_journal_stats_target_recommendation_allows_moved_trade_with_ori
             move_to_profit_trigger_price=130.0,
         )
     )
+    rows.append(_target_distribution_loss("eligible-loss"))
 
     stats = _compute_journal_stats(rows, balances=[])
     risk = stats["groups"]["risk_expectancy"]
@@ -480,8 +498,8 @@ def test_compute_journal_stats_target_recommendation_allows_moved_trade_with_ori
 
     assert risk["eligible_target_r_wins"] == 9
     assert risk["target_r_excluded_reasons"].get("moved_without_original_plan") is None
-    assert risk["target_recommendation"].startswith("FX-only data — Recommended: ")
-    assert direct_target["target_recommendation"].startswith("Reduce target — Recommended: ")
+    assert risk["target_recommendation"].startswith("Decrease target \u2014 Recommended: ")
+    assert direct_target["target_recommendation"].startswith("Decrease target \u2014 Recommended: ")
 
 
 def test_compute_journal_stats_target_planned_r_uses_original_plan_and_validates_side() -> None:
@@ -514,9 +532,20 @@ def test_compute_journal_stats_target_planned_r_uses_original_plan_and_validates
             )
         )
 
+    short_rows.append(
+        _target_distribution_loss(
+            "short-loss",
+            side="SELL",
+            planned_stop_price=110.0,
+            planned_target_price=60.0,
+            stop_loss=110.0,
+            take_profit=60.0,
+            exit_price=110.0,
+        )
+    )
     short_risk = _target_r_recommendation(short_rows)
     assert short_risk["current_avg_original_planned_target_r"] == pytest.approx(4.0)
-    assert short_risk["target_recommendation"] == "Reduce target — Recommended: 3.25R (current median: 4.0R)"
+    assert short_risk["target_recommendation"] == "Decrease target \u2014 Recommended: 3.25R (current median: 4.0R)"
 
 
 def test_target_recommendation_uses_net_profit_over_original_monetary_risk_not_stored_gross_r() -> None:
@@ -529,12 +558,12 @@ def test_target_recommendation_uses_net_profit_over_original_monetary_risk_not_s
         )
         for idx, realized_r in enumerate([2.4, 2.5, 2.7, 3.0, 3.1, 3.4, 3.6, 4.8], start=1)
     ]
-
+    rows.append(_target_distribution_loss("eligible-loss"))
     risk = _target_r_recommendation(rows)
 
     assert risk["target_r_peak_bucket"] == "3.0R-4.0R"
     assert risk["target_r_recommended"] == pytest.approx(3.25)
-    assert risk["target_recommendation"] == "Reduce target — Recommended: 3.25R (current median: 4.0R)"
+    assert risk["target_recommendation"] == "Decrease target \u2014 Recommended: 3.25R (current median: 4.0R)"
 
 
 def test_target_recommendation_tied_modal_bucket_selects_lower_target() -> None:
@@ -542,6 +571,7 @@ def test_target_recommendation_tied_modal_bucket_selects_lower_target() -> None:
         _target_distribution_trade(f"tie-{idx}", value)
         for idx, value in enumerate([2.0, 2.1, 2.5, 2.6, 5.0], start=1)
     ]
+    rows.append(_target_distribution_loss("eligible-loss"))
 
     risk = _target_r_recommendation(rows)
 
@@ -550,7 +580,7 @@ def test_target_recommendation_tied_modal_bucket_selects_lower_target() -> None:
     assert risk["target_r_distribution"]["2.5R-3.0R"] == 2
     assert risk["target_r_peak_bucket"] == "2.0R-2.5R"
     assert risk["target_r_recommended"] == pytest.approx(2.05)
-    assert risk["target_recommendation"] == "Reduce target — Recommended: 2.05R (current median: 4.0R)"
+    assert risk["target_recommendation"] == "Decrease target \u2014 Recommended: 2.05R (current median: 4.0R)"
 
 
 def test_target_realized_r_uses_net_profit_after_costs_over_original_monetary_risk() -> None:
@@ -640,10 +670,11 @@ def test_target_recommendation_uses_original_price_r_when_monetary_risk_unavaila
         row["qty_unit"] = "lots"
         rows.append(row)
 
+    rows.append(_target_distribution_loss("eligible-loss"))
     risk = _target_r_recommendation(rows)
 
     assert risk["eligible_target_r_wins"] == 5
-    assert risk["target_recommendation"].startswith("Reduce target — Recommended: ")
+    assert risk["target_recommendation"].startswith("Decrease target \u2014 Recommended: ")
     assert "missing_opening_loss_conversion_factor" not in risk["target_r_excluded_reasons"]
 
 
@@ -790,6 +821,10 @@ def _fx_target_wins(values: list[float], *, symbol: str = "EURUSD") -> list[dict
     ]
 
 
+def _fx_target_loss(*, symbol: str = "EURUSD") -> dict:
+    return _fx_trade_with_independent_conversion("fx-eligible-loss", net_profit=-15.0) | {"symbol": symbol}
+
+
 def _crypto_target_wins(values: list[float], *, symbol: str = "BTCUSDT") -> list[dict]:
     return [
         _target_distribution_trade(
@@ -805,74 +840,77 @@ def _crypto_target_wins(values: list[float], *, symbol: str = "BTCUSDT") -> list
     ]
 
 
-@pytest.mark.parametrize(
-    ("fx_values", "crypto_values", "expected_prefix", "expected_note", "sample_count"),
-    [
-        ([8.0, 8.1, 8.2, 8.3], [1.0, 1.1, 1.2, 1.3, 1.4], "Crypto-only data", "FX: insufficient eligible wins", 5),
-        ([1.0, 1.1, 1.2, 1.3, 1.4], [8.0, 8.1, 8.2, 8.3], "FX-only data", "Crypto: insufficient eligible wins", 5),
-        ([], [1.0, 1.1, 1.2, 1.3, 1.4], "Crypto-only data", "FX: insufficient eligible wins", 5),
-        ([1.0, 1.1, 1.2, 1.3, 1.4], [], "FX-only data", "Crypto: insufficient eligible wins", 5),
-    ],
-)
-def test_overall_target_recommendation_uses_per_asset_class_thresholds(
-    fx_values: list[float],
-    crypto_values: list[float],
-    expected_prefix: str,
-    expected_note: str,
-    sample_count: int,
-) -> None:
-    rows = _fx_target_wins(fx_values) + _crypto_target_wins(crypto_values)
+def _crypto_target_loss(*, symbol: str = "BTCUSDT") -> dict:
+    return _target_distribution_loss(
+        "crypto-eligible-loss",
+        asset_class="crypto",
+        account="BYBIT",
+        symbol=symbol,
+        currency="USDT",
+        original_risk_currency="USDT",
+    )
+
+
+def test_overall_target_recommendation_combines_fx_and_crypto_without_asset_thresholds() -> None:
+    rows = _fx_target_wins([1.0]) + _crypto_target_wins([8.0]) + [_fx_target_loss()]
 
     risk = _target_r_recommendation(rows, scope="overall")
 
-    recommended = _format_target_r_value(risk["target_r_recommended"])
-    assert risk["target_recommendation"] == f"{expected_prefix} — Recommended: {recommended}R — {expected_note}"
-    assert risk["eligible_target_r_wins"] == sample_count
-    assert risk["target_r_eligible_winning_trades"] == len(fx_values) + len(crypto_values)
-    assert risk["target_r_fx_sufficient"] is (len(fx_values) >= MIN_ELIGIBLE_TARGET_R_WINS)
-    assert risk["target_r_crypto_sufficient"] is (len(crypto_values) >= MIN_ELIGIBLE_TARGET_R_WINS)
+    assert risk["eligible_target_r_wins"] == 2
+    assert risk["eligible_target_r_losses"] == 1
+    assert risk["target_r_eligible_fx_wins"] == 1
+    assert risk["target_r_eligible_crypto_wins"] == 1
+    assert "FX-only data" not in risk["target_recommendation"]
+    assert "Crypto-only data" not in risk["target_recommendation"]
+    assert risk["target_recommendation"].startswith("Decrease target \u2014 Recommended: ")
 
 
-def test_overall_target_recommendation_is_insufficient_when_neither_asset_class_qualifies() -> None:
-    rows = _fx_target_wins([1.0, 1.1, 1.2]) + _crypto_target_wins([2.0, 2.1, 2.2])
+def test_target_recommendation_reports_exact_reasons_for_missing_wins_or_losses() -> None:
+    no_wins_rows = [_fx_target_loss()]
+    no_losses_rows = _fx_target_wins([1.0])
 
-    risk = _target_r_recommendation(rows, scope="overall")
+    no_wins = _target_r_recommendation(no_wins_rows, scope="overall")
+    no_losses = _target_r_recommendation(no_losses_rows, scope="overall")
 
-    assert risk["target_recommendation"] == TARGET_RECOMMENDATION_INSUFFICIENT
-    assert risk["eligible_target_r_wins"] == 0
-    assert risk["target_r_eligible_winning_trades"] == 6
-    assert risk["target_r_eligible_fx_wins"] == 3
-    assert risk["target_r_eligible_crypto_wins"] == 3
+    assert no_wins["target_recommendation"] == "No eligible winning trades"
+    assert no_losses["target_recommendation"] == "No eligible losing trades"
+    assert no_losses["eligible_target_r_wins"] == 1
+    assert no_losses["eligible_target_r_losses"] == 0
 
 
 def test_overall_target_recommendation_uses_normal_format_when_both_asset_classes_qualify() -> None:
-    rows = _fx_target_wins([1.0, 1.1, 1.2, 1.3, 1.4]) + _crypto_target_wins([2.0, 2.1, 2.2, 2.3, 2.4])
+    rows = (
+        _fx_target_wins([1.0, 1.1])
+        + _crypto_target_wins([2.0, 2.1])
+        + [_fx_target_loss(), _crypto_target_loss()]
+    )
 
     risk = _target_r_recommendation(rows, scope="overall")
 
     assert "Recommended:" in risk["target_recommendation"]
     assert "Crypto-only data" not in risk["target_recommendation"]
     assert "FX-only data" not in risk["target_recommendation"]
-    assert risk["eligible_target_r_wins"] == 10
-    assert risk["target_r_fx_sufficient"] is True
-    assert risk["target_r_crypto_sufficient"] is True
+    assert risk["eligible_target_r_wins"] == 4
+    assert risk["eligible_target_r_losses"] == 2
+    assert "target_r_fx_sufficient" not in risk
+    assert "target_r_crypto_sufficient" not in risk
 
 
 def test_symbol_target_recommendations_do_not_use_overall_coverage_wording() -> None:
-    rows = _crypto_target_wins([1.0, 1.1, 1.2, 1.3, 1.4], symbol="BTCUSDT")
+    rows = _crypto_target_wins([1.0, 1.1], symbol="BTCUSDT") + [_crypto_target_loss(symbol="BTCUSDT")]
 
     stats = _compute_journal_stats(rows, balances=[])
     overall = stats["groups"]["risk_expectancy"]
     instrument = next(item for item in stats["by_instrument"] if item["symbol"] == "BTCUSDT")
 
-    assert overall["target_recommendation"].startswith("Crypto-only data — Recommended: ")
+    assert overall["target_recommendation"].startswith("Decrease target \u2014 Recommended: ")
     assert "Crypto-only data" not in instrument["target_recommendation"]
     assert "FX-only data" not in instrument["target_recommendation"]
     assert "Recommended:" in instrument["target_recommendation"]
 
 
 def test_fx_and_crypto_stats1_sections_keep_normal_target_recommendation_formats() -> None:
-    rows = _fx_target_wins([1.0, 1.1, 1.2, 1.3, 1.4]) + _crypto_target_wins([2.0, 2.1, 2.2, 2.3, 2.4])
+    rows = _fx_target_wins([1.0, 1.1]) + _crypto_target_wins([2.0, 2.1]) + [_fx_target_loss(), _crypto_target_loss()]
 
     stats = _compute_journal_stats(rows, balances=[])
     by_market = stats["groups"]["by_market"]
@@ -906,6 +944,7 @@ def test_target_recommendation_uses_nested_complete_original_plan_after_partial_
         }
         rows.append(row)
 
+    rows.append(_target_distribution_loss("eligible-loss"))
     risk = _target_r_recommendation(rows)
 
     assert risk["eligible_target_r_wins"] == 5
@@ -918,6 +957,7 @@ def test_target_recommendation_never_recommends_zero_for_small_positive_modal_bu
         _target_distribution_trade(f"small-{idx}", value)
         for idx, value in enumerate([0.1, 0.2, 0.3, 0.6, 0.7], start=1)
     ]
+    rows.append(_target_distribution_loss("eligible-loss"))
 
     risk = _target_r_recommendation(rows)
 
@@ -935,6 +975,7 @@ def test_target_recommendation_current_avg_original_planned_target_r_is_arithmet
             start=1,
         )
     ]
+    rows.append(_target_distribution_loss("eligible-loss"))
 
     risk = _target_r_recommendation(rows)
 
@@ -952,12 +993,90 @@ def test_target_recommendation_compares_modal_bucket_to_median_planned_target_r(
         _target_distribution_trade(f"keep-{idx}", value, planned_target_price=130.0)
         for idx, value in enumerate(realized, start=1)
     ]
+    increase_rows.append(_target_distribution_loss("increase-loss"))
+    keep_rows.append(_target_distribution_loss("keep-loss"))
 
     increase_risk = _target_r_recommendation(increase_rows)
     keep_risk = _target_r_recommendation(keep_rows)
 
     assert increase_risk["target_recommendation"] == "Increase target — Recommended: 3.1R (current median: 2.0R)"
-    assert keep_risk["target_recommendation"] == "Keep target — Recommended: 3.1R (current median: 3.0R)"
+    assert keep_risk["target_recommendation"] == "Increase target \u2014 Recommended: 3.1R (current median: 3.0R)"
+
+
+def test_target_recommendation_allows_two_wins_one_loss_and_one_win_two_losses() -> None:
+    two_wins = [
+        _target_distribution_trade("win-a", 2.0),
+        _target_distribution_trade("win-b", 2.5),
+        _target_distribution_loss("loss-a"),
+    ]
+    one_win = [
+        _target_distribution_trade("win-c", 2.0),
+        _target_distribution_loss("loss-b"),
+        _target_distribution_loss("loss-c"),
+    ]
+
+    two_win_risk = _distance_recommendation_summary(two_wins)
+    one_win_risk = _distance_recommendation_summary(one_win)
+
+    for risk in (two_win_risk, one_win_risk):
+        assert risk["stop_recommendation"].startswith(("Increase stop", "Decrease stop"))
+        assert risk["target_recommendation"].startswith(("Increase target", "Decrease target"))
+        assert risk["eligible_target_r_wins"] >= 1
+        assert risk["eligible_target_r_losses"] >= 1
+
+
+def test_target_recommendation_exact_target_tie_increases_with_goal_preference() -> None:
+    rows = [
+        _target_distribution_trade("tie-win", 4.0),
+        _target_distribution_loss("tie-loss"),
+    ]
+
+    risk = _target_r_recommendation(rows)
+
+    assert risk["target_recommendation"] == "Increase target \u2014 Recommended: 4.01R (current median: 4.0R)"
+    assert risk["target_r_exact_tie"] is True
+    assert risk["target_r_exact_tie_goal_preference"] is True
+    assert risk["target_r_tie_break_reason"] == "exact_tie_goal_preference_increase"
+
+
+def test_target_recommendation_excluded_losses_do_not_change_planned_target_baseline() -> None:
+    rows = [
+        _target_distribution_trade("win-a", 2.0, planned_target_price=140.0),
+        _target_distribution_trade("win-b", 2.5, planned_target_price=140.0),
+        _target_distribution_loss("eligible-loss", planned_target_price=900.0),
+        _target_distribution_loss("excluded-loss", planned_target_price=1200.0, is_test_trade=True),
+    ]
+
+    risk = _target_r_recommendation(rows)
+
+    assert risk["eligible_target_r_losses"] == 1
+    assert risk["current_median_original_planned_target_r"] == pytest.approx(4.0)
+    assert risk["current_avg_original_planned_target_r"] == pytest.approx(4.0)
+
+
+def test_target_recommendation_excludes_all_supported_test_markers() -> None:
+    rows = [
+        _target_distribution_trade("real-win", 2.0),
+        _target_distribution_loss("real-loss"),
+        _target_distribution_trade("top-level-test", 3.0, test_trade=True),
+        _target_distribution_trade("metrics-test", 3.0, metrics={"is_test_trade": "yes"}),
+        _target_distribution_trade("source-data-test", 3.0, source_data={"test": True}),
+    ]
+
+    risk = _target_r_recommendation(rows)
+
+    assert risk["eligible_target_r_wins"] == 1
+    assert risk["target_r_excluded_reasons"]["test_trade"] == 3
+
+
+def test_target_realized_r_rejects_price_fallback_when_costs_make_gross_r_unverified() -> None:
+    row = _target_distribution_trade("costly-gross-only", 2.0, commission=1.0)
+    row.pop("original_risk_amount", None)
+
+    realized_r, reason = _target_r_realized_from_original_plan(row)
+
+    assert realized_r is None
+    assert reason == "price_r_not_net_due_to_costs"
 
 
 def test_compute_journal_stats_no_zero_count_leaders() -> None:

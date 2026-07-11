@@ -1,54 +1,42 @@
-Trading Journal regression repair summary
+Trading Journal focused cleanup revision summary
 
-Root causes found:
-- Target recommendations rejected legacy FX winners when monetary opening loss conversion metadata was absent, even when immutable original entry, stop, target, and actual exit prices were present. This made FX unavailable and left Stats 1/Symbols inconsistent.
-- Stop-loss recommendations used older distance/average plumbing and direction-only text, with broad neutral behavior. They were not consistently based on original stop-loss percentage distance, and service/Symbols/Stats 1 had divergent implementations.
-- Stats 1 freeze panes were dropped during workbook repair; historical audit recovered the intended `B88` freeze pane.
-- Stats 1 Drawdown and Most Wins/Most Losses could be blank when upstream stats omitted those fields; the generator lacked row-derived fallbacks.
-- Stats 1 Pattern “Most Profitable” and “Least Profitable” rows were included in generated profit/loss semantic formatting ranges, causing red/green styling on text category cells.
-- Stats 2 Net P/L Percentage values were written without a durable dynamic profit/loss conditional-formatting range.
-- Trade Log row heights were normalized to a constant instead of the live row-5 data height after later copy/style operations, allowing rows such as 28 to stay oversized.
-- P&L Calendar build/update paths preserved the broken two-row layout: duplicated month labels, `{year} Trades` rows, and separate trade-count cells.
+Implemented:
+- Removed the five-win/five-trade target recommendation threshold from the active recommendation path. A scope is now target-eligible with at least one eligible win and at least one eligible loss.
+- Added exact target empty reasons: "No eligible winning trades" and "No eligible losing trades".
+- Removed neutral target/stop outputs from generated recommendations. Exact stop ties prefer a small decrease; exact target ties prefer a small increase and record tie-preference diagnostics.
+- Fixed target baselines so planned target R is calculated only from the same eligible winning rows used for target recommendation comparisons.
+- Kept target recommendation losses out of the captured-R histogram while requiring at least one eligible loss.
+- Kept the adaptive target histogram rules: Freedman-Diaconis width snapped to 0.25R/0.5R/1.0R, floor bucketing, lower modal bucket on ties, and raw median of the modal bucket.
+- Tightened captured-R provenance so target captured R prefers net profit divided by verified original monetary risk, rejects cost/partial-exit price fallbacks, and only uses price-derived R when it is net-equivalent.
+- Expanded shared test-trade exclusion to top-level, alternate marker fields, metrics, raw refs, and source_data.
+- Removed `_Target R Metadata` generation and hidden metadata rehydration; legacy helper sheets are removed on refresh.
+- Preserved prior repairs for Stats 1 freeze/drawdown/leaders, Stats 2 Net P/L conditional formatting, one-line P&L Calendar, Trade Log row heights, and no Trade Log recommendation columns.
+- Updated the service workbook validator to accept the current one-line P&L Calendar cells.
 
-Files/functions changed:
+Files changed:
 - `tools/master_journal_workbook.py`
-  - Added shared stop/target recommendation plumbing via `_distance_recommendation_summary`, `_original_stop_distance_pct_points`, `_stop_recommendation_payload`, and price-R fallback in `_target_r_realized_from_original_plan`.
-  - Added `_instrument_leader_payloads_from_rows` and drawdown fallback usage in `_dashboard_extended_metrics`.
-  - Repaired Stats 1 formatting/freeze behavior in `_repair_stats1_formatting`.
-  - Added durable Stats 2 Net P/L Percentage formatting via `_apply_stats2_net_pl_percentage_conditional_formatting`.
-  - Replaced P&L Calendar generation/update with `_write_pnl_calendar_one_line_layout`.
-  - Normalized Trade Log data-row heights from row 5 in `_normalize_trade_log_row_heights`.
 - `render/master_service.py`
-  - Switched overview, risk, market, and per-symbol recommendation payloads to the shared `_distance_recommendation_summary`.
-  - Fixed Excel-open stop recommendation repair to convert Excel percentage fractions back to percentage points.
-- `tests/test_master_service_trading_journal_stats.py`
-  - Added/updated target and stop recommendation tests for five-win target eligibility, price-R fallback, original stop percentage means, exact equality, exclusions, and shared service payloads.
-  - Updated market-return assertions to the current capital-weighted return method.
 - `tests/test_master_journal_workbook.py`
-  - Added/updated workbook regression tests for Stats 1 freeze/drawdown/leaders/pattern styling, Stats 2 Net P/L CF, Trade Log row heights, Symbols recommendations, and one-line P&L Calendar layout.
+- `tests/test_master_service_trading_journal_stats.py`
+- `tests/test_master_service_trading_journal_crud.py`
 
-Calculation rules implemented:
-- Target: realised winning trades only; exclude tests, losses, break-even/zero-R, non-trade/revaluation/cashflow rows, invalid values, missing/untrusted original stops or targets, and moved-plan rows without immutable original levels. Use monetary original risk when available; otherwise use captured price-R from original entry/stop and actual exit. Minimum eligible wins is 5. Histogram uses Freedman-Diaconis bin width snapped to 0.25R/0.5R/1.0R, floor bucketing, lower bucket on ties, and raw-value median of the modal bucket. Direction uses half-bin tolerance versus median original planned target R.
-- Stop: genuine realised winners and losers only; use original stop-loss percentage distance, not pips and not moved/final levels. Requires at least one eligible win and one eligible loss. Recommendation percentage is the winning mean, with increase/decrease/equal direction from unrounded means and displayed percentage-point gap.
-
-Current workbook recommendation diagnostics:
-- Overall: 1409 trades, 400 wins, 993 losses. Stop eligible wins/losses 226/800; means 0.6703% vs 0.7226%; recommendation `Decrease stop — Recommended: 0.67% (0.05 pp below loss average)`. Target eligible wins 217; bin 0.25R; modal bucket `2.0R-2.25R` with 60 instances; recommendation `Keep target — Recommended: 2.03R (current median: 2R)`.
-- FX: 1037 trades, 313 wins, 708 losses. Stop eligible wins/losses 182/632; means 0.1610% vs 0.1349%; recommendation `Increase stop — Recommended: 0.16% (0.03 pp above loss average)`. Target eligible wins 173; bin 0.5R; modal bucket `2.0R-2.5R` with 61 instances; recommendation `Keep target — Recommended: 2.04R (current median: 2.0R)`.
-- Crypto: 372 trades, 87 wins, 285 losses. Stop eligible wins/losses 44/168; means 2.7771% vs 2.9335%; recommendation `Decrease stop — Recommended: 2.78% (0.16 pp below loss average)`. Target eligible wins 44; bin 0.25R; modal bucket `1.75R-2.0R` with 22 instances; recommendation `Reduce target — Recommended: 1.95R (current median: 2.18R)`.
-
-Workbook verification:
-- Official update path completed and replaced `journal/Trading Journal.xlsx`.
-- Reopened workbook verification passed: Stats 1 freeze pane `B88`; Drawdown/Most Wins/Most Losses populated; Pattern profitability rows neutral; Stats 2 Net P/L Percentage CF range `F3:F9`; all populated Trade Log data rows match row-5 height `15.0`; row 28 is `15.0`; P&L Calendar freeze pane `B2`, one year row per year, no `{year} Trades` rows, and month cells use one-line `percentage, count trades` text.
-- Representative Symbols rows now show shared stop/target recommendations with recommended percentages/R values.
+Workbook regeneration:
+- Regenerated `journal/Trading Journal.xlsx` through `render.master_service._sync_master_journal_workbook(..., defer_github_sync=True)`.
+- Service validation passed: 1,544 source rows, 1,444 source trade rows, 7 balances.
+- Direct workbook inspection passed: no `_Target R Metadata` sheet, no Trade Log stop/target recommendation columns, and no Keep/Maintain/Reduce target/stop recommendation text.
 
 Tests run:
-- `python -m py_compile tools/master_journal_workbook.py render/master_service.py tests/test_master_journal_workbook.py tests/test_master_service_trading_journal_stats.py` passed.
-- `python -m pytest tests/test_master_service_trading_journal_stats.py -q --basetemp=.pytest_tmp_journal_service -p no:cacheprovider` passed: 49 passed.
-- `python -m pytest tests/test_master_journal_workbook.py -q --basetemp=.pytest_tmp_journal -p no:cacheprovider -k "calendar_month_conditional_formatting_rows or update_data_only_rewrites_calendar_to_one_line_layout or update_data_only_adds_missing_calendar_year_row or dashboard_trade_log_and_pnl_calendar_loss_profit_fills_match or sheet_order_and_hidden_meta"` passed: 5 passed.
-- `python -m pytest tests/test_master_journal_workbook.py -q --basetemp=.pytest_tmp_journal -p no:cacheprovider -k "recommendations_are_removed or missing_target_r_metadata or generated_calendar_and_instrument_averages or generated_workbook_repairs_stats1_stats2_and_calendar_structure or update_normalizes_every_trade_log_data_row_to_row_5_height or pnl_calendar_update_removes_duplicate_generated_profit_loss_rules or generated_pnl_calendar_update_removes_stale_profit_loss_rules"` passed: 7 passed.
-- `git diff --check -- tools/master_journal_workbook.py render/master_service.py tests/test_master_journal_workbook.py tests/test_master_service_trading_journal_stats.py` passed.
+- `pytest --basetemp=.pytest_tmp_master_nodes_0 -q @($nodes[0..39])`: 40 passed.
+- `pytest --basetemp=.pytest_tmp_master_nodes_1b -q @($nodes[40..79])`: 40 passed.
+- `pytest --basetemp=.pytest_tmp_master_nodes_2a -q @($nodes[80..100])`: 21 passed.
+- `pytest --basetemp=.pytest_tmp_master_nodes_2b -q @($nodes[104..119])`: 16 passed.
+- `pytest --basetemp=.pytest_tmp_master_nodes_3b -q @($nodes[120..144])`: 25 passed.
+- `pytest --basetemp=.pytest_tmp_checked_workbook2 tests/test_master_journal_workbook.py::test_checked_in_trading_journal_has_no_direction_only_or_zero_target_recommendations tests/test_master_journal_workbook.py::test_checked_in_trading_journal_target_recommendations_match_backend_calculations -q`: 2 passed.
+- `pytest --basetemp=.pytest_tmp_stats_after_legacy_rename tests/test_master_service_trading_journal_stats.py -q`: 51 passed.
+- `pytest --basetemp=.pytest_tmp_calendar_validator tests/test_master_service_trading_journal_crud.py::test_calendar_validation_accepts_one_line_pnl_cells tests/test_master_journal_workbook.py::test_update_data_only_rewrites_calendar_to_one_line_layout tests/test_master_journal_workbook.py::test_report_period_rows_populate_core_counts_duration_and_drawdown -q`: 3 passed.
 
-Remaining limitations:
-- The full workbook test file was not run end-to-end because it exceeds the available tool timeout, but the focused regression coverage for the changed workbook paths passed.
-- Workbook hyperlink diagnostics still report some missing/ambiguous local trade folders; those are pre-existing external folder availability issues, not workbook calculation/layout failures.
-- Commit/push confirmation is pending `PATCH_DESKTOP_PUSH.bat`, which must run after this summary is written.
+Notes:
+- Pytest emitted cache-permission warnings for `.pytest_cache`; test results were otherwise passing.
+- Workbook sync warned that optional Instrument Leaders validation was skipped because the optional section/header is absent.
+- The worktree had pre-existing runtime-state changes in `bybit_monitor/custom_alerts.json`, `render/data/*`, and `state_manifest.json`; these were not part of the code cleanup and are excluded by `PATCH_DESKTOP_PUSH.bat`.
+- Final required repository push workflow is pending `PATCH_DESKTOP_PUSH.bat`.

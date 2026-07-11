@@ -9110,6 +9110,12 @@ def _update_state_sync_status(**updates: object) -> Dict[str, object]:
         return dict(_STATE_SYNC_STATUS)
 
 def _calendar_has_expected_pl_cells(cal_ws, expected_year_months: Set[Tuple[int, int]]) -> bool:
+    def _has_pl_cell_value(value: object) -> bool:
+        if isinstance(value, (int, float)):
+            return True
+        text = str(value or "").strip()
+        return bool(re.match(r"^-?\d+(?:\.\d+)?%,\s+\d+\s+trades?$", text, flags=re.IGNORECASE))
+
     month_to_col_default: Dict[int, int] = {}
     month_to_col_custom: Dict[int, int] = {}
     for cc in range(1, cal_ws.max_column + 1):
@@ -9135,12 +9141,15 @@ def _calendar_has_expected_pl_cells(cal_ws, expected_year_months: Set[Tuple[int,
         col_default = month_to_col_default.get(month)
         row_default = default_year_rows.get(year)
         if col_default and row_default:
-            if isinstance(cal_ws.cell(row_default, col_default).value, (int, float)):
+            if _has_pl_cell_value(cal_ws.cell(row_default, col_default).value):
                 found_numeric = True
         col_custom = month_to_col_custom.get(month)
         row_custom = custom_year_rows.get(year)
         if col_custom and row_custom:
-            if isinstance(cal_ws.cell(row_custom, col_custom).value, (int, float)):
+            if _has_pl_cell_value(cal_ws.cell(row_custom, col_custom).value):
+                found_numeric = True
+        if col_custom and row_default:
+            if _has_pl_cell_value(cal_ws.cell(row_default, col_custom).value):
                 found_numeric = True
         if not found_numeric:
             return False

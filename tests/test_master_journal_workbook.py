@@ -2,14 +2,13 @@ from pathlib import Path
 from collections import defaultdict
 from copy import copy
 from datetime import datetime
-import json
 import re
 import zipfile
 import xml.etree.ElementTree as ET
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 import pytest
-from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, read_master_journal_source, update_master_journal_workbook_data_only, SHEET_ORDER, STATS1_SHEET, STATS2_SHEET, SYMBOLS_SHEET, TARGET_R_METADATA_SHEET, TRADE_LOG_HEADERS, TRADE_LOG_HEADERS_V1, OLD_TRADE_LOG_HEADERS, PRE_MOVE_TRADE_LOG_HEADERS, MOVE_TO_FIELD_MAP, TRADE_LOG_HEADER_ROWS, TRADE_LOG_DATA_START_ROW, TRADE_LOG_FILTER_HEADER_ROW, TRADE_NUMBER_HEADER, STOP_RECOMMENDATION_HEADER, TARGET_RECOMMENDATION_HEADER, TARGET_RECOMMENDATION_INSUFFICIENT, REPORT_YEARLY_SHEET, REPORT_METRIC_LABELS, INSTRUMENT_AVERAGES_HEADERS, INSTRUMENT_AVERAGES_GROUP_HEADER_ROW, INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, INSTRUMENT_AVERAGES_DATA_START_ROW, DASHBOARD_MOVE_TO_BREAK_EVEN_LABEL, DASHBOARD_MOVE_TO_PROFIT_LABEL, PROFIT_FILL, LOSS_FILL, DURATION_NUMBER_FORMAT, adaptive_percent_number_format, adaptive_number_format, resolve_trade_folder_link, expected_report_sheet_names, _apply_trade_number_hyperlinks, _ensure_trade_log_schema, _ensure_instrument_averages_schema, _ensure_pnl_calendar_freeze_panes, _repair_trade_log_move_to_durations, _trade_log_header_map, _instrument_averages_header_map, _result_percentage_totals_by_market
+from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, read_master_journal_source, update_master_journal_workbook_data_only, SHEET_ORDER, STATS1_SHEET, STATS2_SHEET, SYMBOLS_SHEET, TARGET_R_METADATA_SHEET, TRADE_LOG_HEADERS, TRADE_LOG_HEADERS_V1, OLD_TRADE_LOG_HEADERS, PRE_MOVE_TRADE_LOG_HEADERS, MOVE_TO_FIELD_MAP, TRADE_LOG_HEADER_ROWS, TRADE_LOG_DATA_START_ROW, TRADE_LOG_DATA_ROW_HEIGHT, TRADE_LOG_FILTER_HEADER_ROW, TRADE_NUMBER_HEADER, STOP_RECOMMENDATION_HEADER, TARGET_RECOMMENDATION_HEADER, TARGET_RECOMMENDATION_INSUFFICIENT, REPORT_YEARLY_SHEET, REPORT_METRIC_LABELS, INSTRUMENT_AVERAGES_HEADERS, INSTRUMENT_AVERAGES_GROUP_HEADER_ROW, INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, INSTRUMENT_AVERAGES_DATA_START_ROW, DASHBOARD_MOVE_TO_BREAK_EVEN_LABEL, DASHBOARD_MOVE_TO_PROFIT_LABEL, PROFIT_FILL, LOSS_FILL, DURATION_NUMBER_FORMAT, adaptive_percent_number_format, adaptive_number_format, resolve_trade_folder_link, expected_report_sheet_names, _apply_trade_number_hyperlinks, _ensure_trade_log_schema, _ensure_instrument_averages_schema, _ensure_pnl_calendar_freeze_panes, _repair_trade_log_move_to_durations, _trade_log_header_map, _instrument_averages_header_map, _result_percentage_totals_by_market
 from tools.master_journal_workbook import _format_duration_display, _parse_duration_text, _repair_legacy_duration_number_formats, _populate_symbols_metrics_preserving_layout, _repair_symbols_header_merges_preserving_layout
 from tools.master_journal_workbook import RECOMMENDATION_TRADE_LOG_HEADERS, _trade_log_three_row_header_values_for
 from openpyxl.utils.cell import coordinate_to_tuple, get_column_letter, range_boundaries
@@ -40,7 +39,7 @@ def _header_col(ws, name: str) -> int:
 
 def _assert_target_recommendation_is_numeric_or_insufficient(value: object) -> None:
     text = str(value or "").strip()
-    if text == TARGET_RECOMMENDATION_INSUFFICIENT:
+    if text in {TARGET_RECOMMENDATION_INSUFFICIENT, "No eligible losing trades"}:
         return
     assert "Recommended:" in text
     assert text not in {"Reduce target", "Increase target", "Keep target"}
@@ -1524,7 +1523,10 @@ def test_instrument_averages_op_and_duration_not_blank_after_data_only_update(tm
     # mimic live alias header style
     inst.cell(INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, headers.index("Shortest duration (DD:HH:MM:SS)") + 1).value = "Shortest (DD:HH:MM:SS)"
     inst.cell(INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, headers.index("Longest duration (DD:HH:MM:SS)") + 1).value = "Longest (DD:HH:MM:SS)"
-    _ensure_trade_log_headers(wb); wb.save(p); wb.close()
+    _ensure_trade_log_headers(wb)
+    for row in range(TRADE_LOG_DATA_START_ROW, TRADE_LOG_DATA_START_ROW + 2):
+        wb["Trade Log"].row_dimensions[row].height = 15
+    wb.save(p); wb.close()
     res = update_master_journal_workbook_data_only(p, snap)
     Path(res["candidate_path"]).replace(p)
     out = load_workbook(p)
@@ -1602,7 +1604,7 @@ def test_monthly_aud_row_uses_result_currency_and_excluded_from_metrics(tmp_path
     assert "UNKNOWN" not in fmt
     # metrics remain from trade rows only
     cal = wb["P&L Calendar"]
-    assert cal["E4"].value == 1  # April trades count
+    assert cal["E2"].value == "1.00%, 1 trade"  # April trade row only
 
 
 def test_read_master_journal_source_monthly_aud_roundtrip_fields(tmp_path: Path):
@@ -2325,7 +2327,10 @@ def test_update_data_only_writes_overall_fx_crypto_streak_metrics(tmp_path: Path
         ws[f"{col}2"] = "Winning Streak"
         ws[f"{col}3"] = "Losing Streak"
     ws["T2"] = "Account"; ws["U2"] = "Balance"; ws["V2"] = "Currency"; ws["T3"] = "BINANCE"
-    _ensure_trade_log_headers(wb); wb.save(p); wb.close()
+    _ensure_trade_log_headers(wb)
+    for row in range(TRADE_LOG_DATA_START_ROW, TRADE_LOG_DATA_START_ROW + 2):
+        wb["Trade Log"].row_dimensions[row].height = 15
+    wb.save(p); wb.close()
     snap = {"stats":{"totals":{},"groups":{"by_market":{"overall":{"winning_streak":4,"losing_streak":3},"fx":{"winning_streak":2,"losing_streak":1},"crypto":{"winning_streak":5,"losing_streak":6}},"risk_expectancy":{},"leaders":{},"duration":{}}},"balances":[{"account_label":"BINANCE","balance":0,"currency":"USDT"}]}
     res = update_master_journal_workbook_data_only(p, snap)
     assert res["ok"] is True
@@ -2456,79 +2461,42 @@ def _visible_workbook_layout_signature(path: Path) -> dict:
         wb.close()
 
 
-def test_target_r_metadata_survives_workbook_write_read_refresh_round_trip(tmp_path: Path):
-    from tools.master_journal_workbook import _target_r_recommendation
-
+def test_target_r_metadata_sheet_is_not_created_and_legacy_sheet_is_removed(tmp_path: Path):
     rows = _target_r_roundtrip_fx_rows()
+    loss_row = dict(rows[0])
+    loss_row.update({"id": "fx-target-loss", "net_profit": -15.0, "exit_price": 1.099})
+    rows.append(loss_row)
     out = tmp_path / "Trading Journal.xlsx"
     build_master_journal_workbook({"items": rows, "stats": {"totals": {}, "groups": {}}, "balances": []}, out)
 
-    wb = load_workbook(out, data_only=True)
+    wb = load_workbook(out)
     try:
-        assert TARGET_R_METADATA_SHEET in wb.sheetnames
-        assert wb[TARGET_R_METADATA_SHEET].sheet_state == "veryHidden"
-        trade_headers = _trade_log_header_map(wb["Trade Log"])
-        lowered = {str(header).strip().lower() for header in trade_headers}
-        assert "original_loss_conversion_factor" not in lowered
-        assert "opening_loss_conversion_factor" not in lowered
+        assert TARGET_R_METADATA_SHEET not in wb.sheetnames
+        wb.create_sheet(TARGET_R_METADATA_SHEET)
+        wb[TARGET_R_METADATA_SHEET].sheet_state = "veryHidden"
+        wb.save(out)
     finally:
         wb.close()
 
-    parsed_rows = read_master_journal_source(out)["items"]
-    assert parsed_rows[0]["original_loss_conversion_factor"] == pytest.approx(1.5)
-    assert parsed_rows[0]["original_entry_price"] == pytest.approx(1.1)
-    assert parsed_rows[0]["original_stop_loss"] == pytest.approx(1.099)
-    assert parsed_rows[0]["original_take_profit"] == pytest.approx(1.102)
-    assert parsed_rows[0]["qty_raw"] == pytest.approx(10000)
-    assert parsed_rows[0]["original_monetary_risk"] == pytest.approx(15.0)
-    assert parsed_rows[0]["original_risk_currency"] == "AUD"
-    assert parsed_rows[0]["original_open_transaction_id"] == "open-1"
+    parsed = read_master_journal_source(out)
+    assert "original_loss_conversion_factor" not in parsed["items"][0]
+    assert "original_open_transaction_id" not in parsed["items"][0]
 
-    first_update = update_master_journal_workbook_data_only(
+    result = update_master_journal_workbook_data_only(
         out,
-        {"items": parsed_rows, "stats": {"totals": {}, "groups": {}}, "balances": []},
+        {"items": parsed["items"], "stats": {"totals": {}, "groups": {}}, "balances": []},
     )
-    assert first_update["ok"] is True
-    Path(first_update["candidate_path"]).replace(out)
+    assert result["ok"] is True
+    Path(result["candidate_path"]).replace(out)
 
-    reopened = read_master_journal_source(out)
-    reopened_rows = reopened["items"]
-    assert reopened_rows[0]["original_loss_conversion_factor"] == pytest.approx(1.5)
-    assert reopened_rows[0]["original_entry_price"] == pytest.approx(1.1)
-    assert reopened_rows[0]["original_stop_loss"] == pytest.approx(1.099)
-    assert reopened_rows[0]["original_take_profit"] == pytest.approx(1.102)
-    assert reopened_rows[0]["qty_raw"] == pytest.approx(10000)
-    assert reopened_rows[0]["original_monetary_risk"] == pytest.approx(15.0)
-    assert reopened_rows[0]["original_risk_currency"] == "AUD"
-    assert reopened_rows[0]["original_open_transaction_id"] == "open-1"
-    first_risk = _target_r_recommendation(reopened_rows)
-    assert first_risk["eligible_target_r_wins"] == 5
-    assert first_risk["target_r_eligible_fx_wins"] == 5
-    assert "Recommended:" in first_risk["target_recommendation"]
-
-    recommendations_before = _target_r_recommendation_cells(out)
-    layout_before = _visible_workbook_layout_signature(out)
-    second_update = update_master_journal_workbook_data_only(
-        out,
-        {"items": reopened_rows, "stats": {"totals": {}, "groups": {}}, "balances": []},
-    )
-    assert second_update["ok"] is True
-    Path(second_update["candidate_path"]).replace(out)
-    refreshed = read_master_journal_source(out)
-    refreshed_risk = _target_r_recommendation(refreshed["items"])
-    assert refreshed_risk["eligible_target_r_wins"] == 5
-    assert refreshed_risk["target_r_eligible_fx_wins"] == 5
-    assert "Recommended:" in refreshed_risk["target_recommendation"]
-    assert _target_r_recommendation_cells(out) == recommendations_before
-    assert _visible_workbook_layout_signature(out) == layout_before
     final_wb = load_workbook(out, data_only=True)
     try:
-        assert final_wb[TARGET_R_METADATA_SHEET].sheet_state == "veryHidden"
+        assert TARGET_R_METADATA_SHEET not in final_wb.sheetnames
     finally:
         final_wb.close()
 
 
-def test_target_r_metadata_restores_by_row_id_after_visible_rows_move(tmp_path: Path):
+def test_visible_row_ids_survive_visible_rows_move_without_target_r_metadata(tmp_path: Path):
     rows = _target_r_roundtrip_fx_rows(2)
     out = tmp_path / "metadata-moved.xlsx"
     build_master_journal_workbook({"items": rows, "stats": {"totals": {}, "groups": {}}, "balances": []}, out)
@@ -2544,23 +2512,13 @@ def test_target_r_metadata_restores_by_row_id_after_visible_rows_move(tmp_path: 
 
     parsed = read_master_journal_source(out)
     by_id = {row["id"]: row for row in parsed["items"]}
-    assert by_id["fx-target-1"]["original_open_transaction_id"] == "open-1"
-    assert by_id["fx-target-2"]["original_open_transaction_id"] == "open-2"
+    assert set(by_id) == {"fx-target-1", "fx-target-2"}
+    assert all("original_open_transaction_id" not in row for row in parsed["items"])
+    assert all("original_loss_conversion_factor" not in row for row in parsed["items"])
 
 
-def test_target_r_metadata_ignores_unmatched_and_duplicate_row_ids(tmp_path: Path):
+def test_source_ignores_legacy_target_r_metadata_and_diagnoses_visible_duplicate_ids(tmp_path: Path):
     rows = _target_r_roundtrip_fx_rows(2)
-    deleted = tmp_path / "metadata-deleted.xlsx"
-    build_master_journal_workbook({"items": rows, "stats": {"totals": {}, "groups": {}}, "balances": []}, deleted)
-    wb = load_workbook(deleted)
-    wb["Trade Log"].delete_rows(TRADE_LOG_DATA_START_ROW, 1)
-    wb.save(deleted)
-    wb.close()
-    parsed_deleted = read_master_journal_source(deleted)
-    assert [row["id"] for row in parsed_deleted["items"]] == ["fx-target-2"]
-    assert parsed_deleted["items"][0]["original_open_transaction_id"] == "open-2"
-    assert all(row.get("original_open_transaction_id") != "open-1" for row in parsed_deleted["items"])
-
     duplicate_visible = tmp_path / "metadata-duplicate-visible.xlsx"
     build_master_journal_workbook({"items": rows, "stats": {"totals": {}, "groups": {}}, "balances": []}, duplicate_visible)
     wb = load_workbook(duplicate_visible)
@@ -2573,24 +2531,28 @@ def test_target_r_metadata_ignores_unmatched_and_duplicate_row_ids(tmp_path: Pat
     assert parsed_duplicate["diagnostics"]["target_r_duplicate_trade_row_ids"] == ["fx-target-1"]
     assert all("original_loss_conversion_factor" not in row for row in parsed_duplicate["items"])
 
-    duplicate_metadata = tmp_path / "metadata-duplicate-hidden.xlsx"
-    build_master_journal_workbook({"items": rows[:1], "stats": {"totals": {}, "groups": {}}, "balances": []}, duplicate_metadata)
-    wb = load_workbook(duplicate_metadata)
-    wb[TARGET_R_METADATA_SHEET].append([
-        "fx-target-1",
-        json.dumps({"original_loss_conversion_factor": 9.9, "original_open_transaction_id": "wrong"}),
-    ])
-    wb.save(duplicate_metadata)
+    legacy_metadata = tmp_path / "metadata-legacy-hidden.xlsx"
+    build_master_journal_workbook({"items": rows[:1], "stats": {"totals": {}, "groups": {}}, "balances": []}, legacy_metadata)
+    wb = load_workbook(legacy_metadata)
+    ws = wb.create_sheet(TARGET_R_METADATA_SHEET)
+    ws.sheet_state = "veryHidden"
+    ws.append(["Row ID", "Payload JSON"])
+    ws.append(["fx-target-1", '{"original_loss_conversion_factor":9.9,"original_open_transaction_id":"wrong"}'])
+    wb.save(legacy_metadata)
     wb.close()
-    parsed_duplicate_metadata = read_master_journal_source(duplicate_metadata)
-    assert parsed_duplicate_metadata["diagnostics"]["target_r_metadata_duplicate_row_ids"] == ["fx-target-1"]
-    assert "original_loss_conversion_factor" not in parsed_duplicate_metadata["items"][0]
+    parsed_legacy_metadata = read_master_journal_source(legacy_metadata)
+    assert "target_r_metadata_duplicate_row_ids" not in parsed_legacy_metadata["diagnostics"]
+    assert "original_loss_conversion_factor" not in parsed_legacy_metadata["items"][0]
+    assert "original_open_transaction_id" not in parsed_legacy_metadata["items"][0]
 
 
 def test_missing_target_r_metadata_uses_original_price_r_fallback(tmp_path: Path):
     from tools.master_journal_workbook import _target_r_recommendation
 
     rows = _target_r_roundtrip_fx_rows()
+    loss_row = dict(rows[0])
+    loss_row.update({"id": "fx-target-loss", "net_profit": -15.0, "exit_price": 1.099})
+    rows.append(loss_row)
     for row in rows:
         row.pop("original_loss_conversion_factor", None)
         row.pop("original_loss_conversion_factor_source", None)
@@ -2607,7 +2569,8 @@ def test_missing_target_r_metadata_uses_original_price_r_fallback(tmp_path: Path
     risk = _target_r_recommendation(read_master_journal_source(out)["items"])
 
     assert risk["eligible_target_r_wins"] == 5
-    assert risk["target_recommendation"].startswith("Reduce target — Recommended: ")
+    assert risk["eligible_target_r_losses"] == 1
+    assert risk["target_recommendation"].startswith("Decrease target \u2014 Recommended: ")
     assert "missing_opening_loss_conversion_factor" not in risk["target_r_winning_exclusion_reasons"]
 
 
@@ -2680,7 +2643,7 @@ def test_recommendations_are_removed_from_trade_log_and_kept_in_symbols_and_stat
     assert symbols.cell(INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, symbol_headers[TARGET_RECOMMENDATION_HEADER]).value == "Recommendation"
     expected_stop = "Decrease stop — Recommended: 10.00% (10.00 pp below loss average)"
     assert symbols.cell(INSTRUMENT_AVERAGES_DATA_START_ROW, symbol_headers[STOP_RECOMMENDATION_HEADER]).value == expected_stop
-    assert symbols.cell(INSTRUMENT_AVERAGES_DATA_START_ROW, symbol_headers[TARGET_RECOMMENDATION_HEADER]).value == "Reduce target — Recommended: 3.25R (current median: 4.0R)"
+    assert symbols.cell(INSTRUMENT_AVERAGES_DATA_START_ROW, symbol_headers[TARGET_RECOMMENDATION_HEADER]).value == "Decrease target \u2014 Recommended: 3.25R (current median: 4.0R)"
     assert _cell_fill_rgb(symbols.cell(INSTRUMENT_AVERAGES_DATA_START_ROW, symbol_headers[STOP_RECOMMENDATION_HEADER])) not in {"FFF2CC", PROFIT_FILL, LOSS_FILL}
     assert _cell_fill_rgb(symbols.cell(INSTRUMENT_AVERAGES_DATA_START_ROW, symbol_headers[TARGET_RECOMMENDATION_HEADER])) not in {"FFF2CC", PROFIT_FILL, LOSS_FILL}
 
@@ -2692,9 +2655,9 @@ def test_recommendations_are_removed_from_trade_log_and_kept_in_symbols_and_stat
     assert len(recommendation_rows) >= 2
     assert [stats1.cell(recommendation_rows[0], col).value for col in (2, 3, 4)] == [expected_stop, expected_stop, "Need wins & losses"]
     assert [stats1.cell(recommendation_rows[1], col).value for col in (2, 3, 4)] == [
-        "FX-only data — Recommended: 3.25R — Crypto: insufficient eligible wins",
-        "Reduce target — Recommended: 3.25R (current median: 4.0R)",
-        "Insufficient eligible wins — recommended target unavailable",
+        "Decrease target \u2014 Recommended: 3.25R (current median: 4.0R)",
+        "Decrease target \u2014 Recommended: 3.25R (current median: 4.0R)",
+        "No eligible winning trades",
     ]
     wb.close()
 
@@ -3202,7 +3165,10 @@ def test_update_data_only_writes_dashboard_horizontal_core_metric_aliases(tmp_pa
     ws["B1"] = "Overall"; ws["C1"] = "FX"; ws["D1"] = "Crypto"
     ws["A11"] = "Best Win Streak"; ws["A12"] = "Worst Losing Streak"; ws["A15"] = "Avg stop %"; ws["A16"] = "Min stop %"; ws["A17"] = "Max stop %"; ws["A18"] = "Avg target %"; ws["A19"] = "Min target %"; ws["A20"] = "Max target %"
     ws["F1"] = "Winners"; ws["F8"] = "Losers"; ws["F14"] = "Drawdown"; ws["I1"] = "Instrument leaders"; ws["L1"] = "Account Balances"; ws["L2"] = "Account"; ws["M2"] = "Balance"; ws["N2"] = "Currency"; ws["L3"] = "BINANCE"
-    _ensure_trade_log_headers(wb); wb.save(p); wb.close()
+    _ensure_trade_log_headers(wb)
+    for row in range(TRADE_LOG_DATA_START_ROW, TRADE_LOG_DATA_START_ROW + 2):
+        wb["Trade Log"].row_dimensions[row].height = 15
+    wb.save(p); wb.close()
     snap = {"stats": {"totals": {}, "groups": {"by_market": {"overall": {"winning_streak": 4, "losing_streak": 3, "max_stop_pct": 8.5, "max_target_pct": 9.5, STOP_RECOMMENDATION_HEADER: "Reduce stop loss", TARGET_RECOMMENDATION_HEADER: "Increase target — Recommended: 3.0R"}, "fx": {"winning_streak": 2, "losing_streak": 1, "max_stop_pct": 4.0, "max_target_pct": 5.0, STOP_RECOMMENDATION_HEADER: "Keep stop loss", TARGET_RECOMMENDATION_HEADER: "Keep target — Recommended: 2.5R"}, "crypto": {"winning_streak": 6, "losing_streak": 7, "max_stop_pct": 10.75, "max_target_pct": 12.25, STOP_RECOMMENDATION_HEADER: "Increase stop loss", TARGET_RECOMMENDATION_HEADER: "Reduce target — Recommended: 2.0R"}}, "risk_expectancy": {}, "leaders": {}, "duration": {}}}, "balances": [{"account_label": "BINANCE", "balance": 0, "currency": "USDT"}]}
     res = update_master_journal_workbook_data_only(p, snap)
     assert res["ok"] is True
@@ -3221,7 +3187,11 @@ def test_update_data_only_writes_dashboard_horizontal_core_metric_aliases(tmp_pa
     assert [ws.cell(stop_recommendation_row, c).value for c in range(2, 5)] == ["Need wins & losses", "Need wins & losses", "Need wins & losses"]
     assert ws.cell(max_target_row + 1, 1).value == "Source"
     assert ws.cell(target_recommendation_row, 1).value == "Recommendation"
-    assert [ws.cell(target_recommendation_row, c).value for c in range(2, 5)] == ["Increase target — Recommended: 3.0R", "Keep target — Recommended: 2.5R", "Reduce target — Recommended: 2.0R"]
+    assert [ws.cell(target_recommendation_row, c).value for c in range(2, 5)] == [
+        "Increase target — Recommended: 3.0R",
+        "Increase target \u2014 Recommended: 2.5R",
+        "Decrease target \u2014 Recommended: 2.0R",
+    ]
     assert all(_cell_fill_rgb(ws.cell(11, col)) == "C6EFCE" for col in range(2, 5))
     assert all(_cell_font_rgb(ws.cell(11, col)) == "006100" for col in range(2, 5))
     assert all(_cell_fill_rgb(ws.cell(14, col)) == "FFC7CE" for col in range(2, 5))
@@ -3431,12 +3401,12 @@ def test_report_period_rows_populate_core_counts_duration_and_drawdown(tmp_path:
             ws = wb[sheet_name]
             rows = {str(ws.cell(row, 1).value or ""): row for row in range(1, ws.max_row + 1)}
             col = next(c for c in range(2, ws.max_column + 1) if ws.cell(1, c).value == header)
-            assert ws.cell(rows["Trades"], col).value == 3
-            assert ws.cell(rows["Wins"], col).value == 2
+            assert ws.cell(rows["Trades"], col).value == 2
+            assert ws.cell(rows["Wins"], col).value == 1
             assert ws.cell(rows["Losses"], col).value == 1
             assert ws.cell(rows["Break-even"], col).value == 0
-            assert ws.cell(rows["Test"], col).value == 1
-            assert ws.cell(rows["Win rate"], col).value == pytest.approx(2 / 3)
+            assert ws.cell(rows["Test"], col).value == 0
+            assert ws.cell(rows["Win rate"], col).value == pytest.approx(0.5)
             assert _parse_duration_text(ws.cell(rows["Shortest (DD:HH:MM:SS)"], col).value) is not None
             assert ws.cell(rows["Max drawdown"], col).value not in (None, "")
             assert ws.cell(rows["Max drawdown"] + 1, 1).value == "Start"
@@ -3867,7 +3837,7 @@ def test_update_normalizes_every_trade_log_data_row_to_row_5_height(tmp_path: Pa
     try:
         trade_log = out["Trade Log"]
         source_height = trade_log.row_dimensions[5].height
-        assert source_height == pytest.approx(21.5)
+        assert source_height == pytest.approx(TRADE_LOG_DATA_ROW_HEIGHT)
         for row in range(TRADE_LOG_DATA_START_ROW, TRADE_LOG_DATA_START_ROW + len(snapshot["items"])):
             assert trade_log.row_dimensions[row].height == pytest.approx(source_height)
     finally:

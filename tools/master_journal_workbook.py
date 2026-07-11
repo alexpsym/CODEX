@@ -40,8 +40,10 @@ TRADE_NUMBER_HEADER = "Trade Number"
 STOP_RECOMMENDATION_HEADER = "Stop Loss Recommendation"
 TARGET_RECOMMENDATION_HEADER = "Target Recommendation"
 RECOMMENDATION_DISPLAY_HEADER = "Recommendation"
-TARGET_RECOMMENDATION_INSUFFICIENT = "Insufficient eligible wins — recommended target unavailable"
-MIN_ELIGIBLE_TARGET_R_WINS = 5
+TARGET_RECOMMENDATION_NO_WINS = "No eligible winning trades"
+TARGET_RECOMMENDATION_NO_LOSSES = "No eligible losing trades"
+# Backward-compatible alias for callers that still import the old name.
+TARGET_RECOMMENDATION_INSUFFICIENT = TARGET_RECOMMENDATION_NO_WINS
 MOVE_TO_FIELD_MAP = {
     "Move to Break Even Time": "move_to_break_even_time",
     "Move to Break Even Duration": "move_to_break_even_duration",
@@ -936,12 +938,14 @@ def _size_recommendation(kind: str, winner_avg: Any, loser_avg: Any) -> str:
     loss = _as_float(loser_avg)
     if win is None or loss is None or not math.isfinite(win) or not math.isfinite(loss):
         return "Need wins & losses"
-    gap = abs(win - loss)
-    if win == loss:
+    recommended = win
+    if abs(win - loss) <= 1e-12:
+        recommended = max(0.01, win - 0.01)
         return (
-            f"Stop averages equal \u2014 Recommended: {_format_stop_pct_value(win)} "
-            f"({_format_stop_gap_value(gap)} equal to loss average)"
+            f"Decrease stop \u2014 Recommended: {_format_stop_pct_value(recommended)} "
+            f"({_format_stop_gap_value(recommended - loss)} below loss average; exact-tie goal preference)"
         )
+    gap = abs(win - loss)
     if win < loss:
         return (
             f"Decrease stop \u2014 Recommended: {_format_stop_pct_value(win)} "
@@ -954,12 +958,25 @@ def _size_recommendation(kind: str, winner_avg: Any, loser_avg: Any) -> str:
 
 
 def _target_r_row_is_test_trade(row: Dict[str, Any]) -> bool:
-    metrics = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
-    for key in ("is_test_trade", "test_trade", "test"):
-        if _is_test_trade_value(row.get(key)):
-            return True
-        if _is_test_trade_value(metrics.get(key)):
-            return True
+    marker_keys = {
+        "is_test_trade",
+        "is_test",
+        "test_trade",
+        "testtrade",
+        "test",
+        "paper_trade",
+        "papertrade",
+        "demo_test",
+        "manual_test",
+        "backtest_trade",
+        "backtesttrade",
+    }
+    for container in _target_r_authoritative_containers(row):
+        normalized = _target_r_normalized_map(container)
+        for key, value in normalized.items():
+            key_text = str(key or "").strip().casefold().replace("-", "_").replace(" ", "_")
+            if key_text in marker_keys and _is_test_trade_value(value):
+                return True
     return False
 
 
@@ -1090,7 +1107,7 @@ def _target_r_triplet_from_container(container: Dict[str, Any]) -> Dict[str, Any
 def _target_r_authoritative_containers(row: Dict[str, Any]) -> List[Dict[str, Any]]:
     containers: List[Dict[str, Any]] = []
     seen: set[int] = set()
-    for source in (row, row.get("raw_refs"), row.get("metrics")):
+    for source in (row, row.get("raw_refs"), row.get("metrics"), row.get("source_data")):
         for container in _target_r_nested_dicts(source):
             marker = id(container)
             if marker in seen:
@@ -1611,6 +1628,49 @@ def _target_r_price_capture_from_original_plan(
     return captured, ""
 
 
+def _target_r_price_capture_net_equivalent(row: Dict[str, Any]) -> Tuple[bool, str]:
+    cost_tokens = (
+        "commission",
+        "fee",
+        "fees",
+        "swap",
+        "financing",
+        "funding",
+        "spread_cost",
+        "slippage",
+        "rebate",
+    )
+    partial_tokens = (
+        "partial",
+        "scale_out",
+        "scaleout",
+        "split_exit",
+        "splitexit",
+        "multiple_exit",
+        "multipleexit",
+        "reduce_only",
+        "close_qty",
+        "closed_qty",
+        "filled_exit_qty",
+        "remaining_qty",
+    )
+    for container in _target_r_authoritative_containers(row):
+        normalized = _target_r_normalized_map(container)
+        for key, value in normalized.items():
+            key_text = str(key or "").strip().casefold().replace("-", "_").replace(" ", "_")
+            if any(token in key_text for token in cost_tokens):
+                amount = _as_float(value)
+                if amount is not None and math.isfinite(amount):
+                    if abs(amount) > 1e-12:
+                        return False, "price_r_not_net_due_to_costs"
+                    continue
+                if _target_r_meaningful_value(value):
+                    return False, "price_r_unverified_costs"
+            if any(token in key_text for token in partial_tokens) and _target_r_meaningful_value(value):
+                return False, "price_r_unverified_partial_exit"
+    return True, ""
+
+
 def _target_r_realized_from_original_plan(row: Dict[str, Any]) -> Tuple[float | None, str]:
     trusted, reason, levels = _target_r_original_plan_trusted(row)
     if not trusted:
@@ -1630,6 +1690,9 @@ def _target_r_realized_from_original_plan(row: Dict[str, Any]) -> Tuple[float | 
         return realized_r, ""
     price_r, price_reason = _target_r_price_capture_from_original_plan(row, levels)
     if price_r is not None:
+        net_equivalent, net_reason = _target_r_price_capture_net_equivalent(row)
+        if not net_equivalent:
+            return None, net_reason
         return price_r, ""
     return None, price_reason or risk_reason
 
@@ -1746,34 +1809,14 @@ def _merge_target_r_metadata(row: Dict[str, Any], metadata: Dict[str, Any]) -> D
     return merged
 
 
-def _write_target_r_metadata_sheet(
+def _remove_target_r_metadata_sheet(
     wb,
-    rows: List[Dict[str, Any]],
     diagnostics: Dict[str, Any] | None = None,
 ) -> None:
     diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
     if TARGET_R_METADATA_SHEET in wb.sheetnames:
-        ws = wb[TARGET_R_METADATA_SHEET]
-        ws.delete_rows(1, ws.max_row)
-    else:
-        ws = wb.create_sheet(TARGET_R_METADATA_SHEET)
-    ws.sheet_state = "veryHidden"
-    ws.append(["Row ID", "Payload JSON"])
-    written = 0
-    for row in rows or []:
-        if not isinstance(row, dict):
-            continue
-        rid = str(row.get("id") or stable_row_id(row)).strip()
-        if not rid:
-            continue
-        payload = _target_r_metadata_payload(row)
-        if not payload:
-            continue
-        ws.append([rid, json.dumps(payload, sort_keys=True, ensure_ascii=True, separators=(",", ":"))])
-        written += 1
-    ws.column_dimensions["A"].width = 36
-    ws.column_dimensions["B"].width = 120
-    diagnostics["target_r_metadata_rows"] = written
+        wb.remove(wb[TARGET_R_METADATA_SHEET])
+        diagnostics["removed_target_r_metadata_sheet"] = True
 
 
 def _is_eligible_target_r_win(row: Dict[str, Any]) -> Tuple[bool, str]:
@@ -1884,7 +1927,7 @@ def _target_r_empty_payload(reason: str = "not_enough_eligible_wins") -> Dict[st
     }
 
 
-def _target_r_recommendation(rows: List[Dict[str, Any]], *, scope: str = "standard") -> Dict[str, Any]:
+def _legacy_target_r_recommendation_unused(rows: List[Dict[str, Any]], *, scope: str = "standard") -> Dict[str, Any]:
     normalized_scope = str(scope or "standard").strip().lower()
     overall_scope = normalized_scope == "overall"
     realized_values: List[float] = []
@@ -1940,19 +1983,19 @@ def _target_r_recommendation(rows: List[Dict[str, Any]], *, scope: str = "standa
 
     current_median = _target_r_percentile(sorted(planned_values), 0.5) if planned_values else None
     current_avg = (sum(planned_values) / len(planned_values)) if planned_values else None
-    fx_sufficient = eligible_fx_wins >= MIN_ELIGIBLE_TARGET_R_WINS
-    crypto_sufficient = eligible_crypto_wins >= MIN_ELIGIBLE_TARGET_R_WINS
+    fx_sufficient = bool(eligible_fx_wins)
+    crypto_sufficient = bool(eligible_crypto_wins)
     coverage_note = ""
     coverage_label = ""
     recommendation_values = realized_values
     if overall_scope:
         if crypto_sufficient and not fx_sufficient:
             coverage_note = "FX: insufficient eligible wins"
-            coverage_label = "Crypto-only data"
+            coverage_label = "Crypto data"
             recommendation_values = crypto_realized_values
         elif fx_sufficient and not crypto_sufficient:
             coverage_note = "Crypto: insufficient eligible wins"
-            coverage_label = "FX-only data"
+            coverage_label = "FX data"
             recommendation_values = fx_realized_values
         elif not fx_sufficient and not crypto_sufficient:
             recommendation_values = []
@@ -1964,14 +2007,11 @@ def _target_r_recommendation(rows: List[Dict[str, Any]], *, scope: str = "standa
         "target_r_eligible_winning_trades": len(realized_values),
         "target_r_eligible_fx_wins": eligible_fx_wins,
         "target_r_eligible_crypto_wins": eligible_crypto_wins,
-        "target_r_fx_sufficient": fx_sufficient,
-        "target_r_crypto_sufficient": crypto_sufficient,
-        "target_r_min_eligible_wins": MIN_ELIGIBLE_TARGET_R_WINS,
         "target_r_excluded_winning_trades": sum(winning_excluded.values()),
         "target_r_winning_exclusion_reasons": dict(winning_excluded),
         "target_r_coverage_note": coverage_note,
     }
-    if len(recommendation_values) < MIN_ELIGIBLE_TARGET_R_WINS:
+    if not recommendation_values:
         payload = _target_r_empty_payload("not_enough_eligible_wins")
         payload["eligible_target_r_wins"] = len(recommendation_values)
         payload["current_median_original_planned_target_r"] = current_median
@@ -2018,13 +2058,13 @@ def _target_r_recommendation(rows: List[Dict[str, Any]], *, scope: str = "standa
     peak_bucket_label = _target_r_bucket_label(peak_bucket, increment)
     tolerance = increment / 2.0
     if current_median is None:
-        direction = "Keep target"
+        direction = "Increase target"
     elif recommended_r < current_median - tolerance:
-        direction = "Reduce target"
+        direction = "Decrease target"
     elif recommended_r > current_median + tolerance:
         direction = "Increase target"
     else:
-        direction = "Keep target"
+        direction = "Increase target"
     if coverage_label and coverage_note:
         recommendation = f"{coverage_label} — Recommended: {_format_target_r_value(recommended_r)}R — {coverage_note}"
     else:
@@ -2044,6 +2084,300 @@ def _target_r_recommendation(rows: List[Dict[str, Any]], *, scope: str = "standa
         "target_r_peak_bucket_high": peak_bucket + increment,
         "target_r_peak_instances": peak_instances,
         "target_r_recommended": recommended_r,
+        "current_median_original_planned_target_r": current_median,
+        "current_avg_original_planned_target_r": current_avg,
+        "target_r_excluded_count": sum(excluded.values()),
+        "target_r_excluded_reasons": dict(excluded),
+    }
+
+
+def _is_eligible_target_r_loss(row: Dict[str, Any]) -> Tuple[bool, str]:
+    if str(row.get("row_type") or "trade").strip().lower() != "trade":
+        return False, "not_trade"
+    if _target_r_row_is_test_trade(row):
+        return False, "test_trade"
+    if _trade_outcome_sign(row) >= 0:
+        return False, "not_losing_trade"
+    stop_pct, reason = _original_stop_distance_pct_points(row)
+    if stop_pct is None:
+        return False, reason or "invalid_original_stop_distance"
+    return True, ""
+
+
+def _target_r_small_adjustment_step(values: List[float], reference: float, increment: float | None) -> float:
+    candidates = [
+        abs(value - reference)
+        for value in values
+        if value is not None and math.isfinite(value) and abs(value - reference) > 1e-9
+    ]
+    if increment is not None and math.isfinite(increment) and increment > 0:
+        candidates.append(increment)
+    candidates.append(0.01)
+    return min(value for value in candidates if value > 0)
+
+
+def _target_r_exact_tie_adjustment(
+    values: List[float],
+    current_median: float,
+    increment: float | None,
+) -> Tuple[float, str, str, bool]:
+    mean_value = _average_float(values)
+    epsilon = 1e-12
+    if mean_value is not None and mean_value > current_median + epsilon:
+        direction = "Increase target"
+        reason = "mean_captured_r_above_current_median"
+        goal_preference = False
+    elif mean_value is not None and mean_value < current_median - epsilon:
+        direction = "Decrease target"
+        reason = "mean_captured_r_below_current_median"
+        goal_preference = False
+    else:
+        direction = "Increase target"
+        reason = "exact_tie_goal_preference_increase"
+        goal_preference = True
+
+    clean = sorted(
+        value for value in values
+        if value is not None and math.isfinite(value) and value > 0
+    )
+    if direction == "Increase target":
+        higher = [value for value in clean if value > current_median + epsilon]
+        recommended = min(higher) if higher else current_median + _target_r_small_adjustment_step(clean, current_median, increment)
+    else:
+        lower = [value for value in clean if value < current_median - epsilon]
+        recommended = max(lower) if lower else max(0.01, current_median - _target_r_small_adjustment_step(clean, current_median, increment))
+    return recommended, direction, reason, goal_preference
+
+
+def _target_r_empty_payload(reason: str = TARGET_RECOMMENDATION_NO_WINS) -> Dict[str, Any]:
+    return {
+        TARGET_RECOMMENDATION_HEADER: reason,
+        "target_recommendation": reason,
+        "target_r_missing_reason": reason,
+        "target_r_scope": "standard",
+        "target_r_total_winning_trades": 0,
+        "target_r_total_losing_trades": 0,
+        "target_r_total_fx_wins": 0,
+        "target_r_total_crypto_wins": 0,
+        "eligible_target_r_wins": 0,
+        "eligible_target_r_losses": 0,
+        "target_r_eligible_winning_trades": 0,
+        "target_r_eligible_losing_trades": 0,
+        "target_r_eligible_fx_wins": 0,
+        "target_r_eligible_crypto_wins": 0,
+        "target_r_eligible_fx_losses": 0,
+        "target_r_eligible_crypto_losses": 0,
+        "target_r_increment": None,
+        "target_r_distribution": {},
+        "target_r_peak_bucket": None,
+        "target_r_peak_bucket_low": None,
+        "target_r_peak_bucket_high": None,
+        "target_r_peak_instances": None,
+        "target_r_recommended": None,
+        "target_r_histogram_recommended_before_tie": None,
+        "target_r_recommendation_direction": None,
+        "target_r_exact_tie": False,
+        "target_r_exact_tie_goal_preference": False,
+        "target_r_tie_break_reason": "",
+        "current_median_original_planned_target_r": None,
+        "current_avg_original_planned_target_r": None,
+        "target_r_excluded_count": 0,
+        "target_r_excluded_winning_trades": 0,
+        "target_r_excluded_losing_trades": 0,
+        "target_r_excluded_reasons": {},
+        "target_r_winning_exclusion_reasons": {},
+        "target_r_losing_exclusion_reasons": {},
+        "target_r_coverage_note": "",
+    }
+
+
+def _target_r_recommendation(rows: List[Dict[str, Any]], *, scope: str = "standard") -> Dict[str, Any]:
+    normalized_scope = str(scope or "standard").strip().lower()
+    realized_values: List[float] = []
+    planned_values: List[float] = []
+    excluded: Counter[str] = Counter()
+    winning_excluded: Counter[str] = Counter()
+    losing_excluded: Counter[str] = Counter()
+    total_wins = 0
+    total_losses = 0
+    total_fx_wins = 0
+    total_crypto_wins = 0
+    eligible_fx_wins = 0
+    eligible_crypto_wins = 0
+    eligible_losses = 0
+    eligible_fx_losses = 0
+    eligible_crypto_losses = 0
+
+    for row in rows or []:
+        if not isinstance(row, dict):
+            excluded["invalid_row"] += 1
+            continue
+        is_trade = str(row.get("row_type") or "trade").strip().lower() == "trade"
+        is_test = _target_r_row_is_test_trade(row)
+        is_fx = _target_r_is_fx_row(row)
+        is_crypto = _target_r_is_crypto_row(row) and not is_fx
+        if not is_trade:
+            excluded["not_trade"] += 1
+            continue
+        if is_test:
+            excluded["test_trade"] += 1
+            continue
+        outcome = _trade_outcome_sign(row)
+        if outcome > 0:
+            total_wins += 1
+            if is_fx:
+                total_fx_wins += 1
+            if is_crypto:
+                total_crypto_wins += 1
+            realized_r, reason = _target_r_realized_from_original_plan(row)
+            if realized_r is None:
+                excluded[reason or "invalid_realized_r"] += 1
+                winning_excluded[reason or "invalid_realized_r"] += 1
+                continue
+            planned_r = _planned_target_r_from_original_plan(row)
+            if planned_r is None or not math.isfinite(planned_r) or planned_r <= 0:
+                excluded["invalid_original_planned_target_r"] += 1
+                winning_excluded["invalid_original_planned_target_r"] += 1
+                continue
+            realized_values.append(realized_r)
+            planned_values.append(planned_r)
+            if is_fx:
+                eligible_fx_wins += 1
+            if is_crypto:
+                eligible_crypto_wins += 1
+            continue
+        if outcome < 0:
+            total_losses += 1
+            ok_loss, reason = _is_eligible_target_r_loss(row)
+            if ok_loss:
+                eligible_losses += 1
+                if is_fx:
+                    eligible_fx_losses += 1
+                if is_crypto:
+                    eligible_crypto_losses += 1
+            else:
+                excluded[reason or "invalid_losing_trade"] += 1
+                losing_excluded[reason or "invalid_losing_trade"] += 1
+            continue
+        excluded["break_even_or_zero"] += 1
+
+    current_median = _target_r_percentile(sorted(planned_values), 0.5) if planned_values else None
+    current_avg = (sum(planned_values) / len(planned_values)) if planned_values else None
+    coverage_payload = {
+        "target_r_scope": "overall" if normalized_scope == "overall" else normalized_scope,
+        "target_r_total_winning_trades": total_wins,
+        "target_r_total_losing_trades": total_losses,
+        "target_r_total_fx_wins": total_fx_wins,
+        "target_r_total_crypto_wins": total_crypto_wins,
+        "target_r_eligible_winning_trades": len(realized_values),
+        "target_r_eligible_losing_trades": eligible_losses,
+        "target_r_eligible_fx_wins": eligible_fx_wins,
+        "target_r_eligible_crypto_wins": eligible_crypto_wins,
+        "target_r_eligible_fx_losses": eligible_fx_losses,
+        "target_r_eligible_crypto_losses": eligible_crypto_losses,
+        "target_r_excluded_winning_trades": sum(winning_excluded.values()),
+        "target_r_winning_exclusion_reasons": dict(winning_excluded),
+        "target_r_excluded_losing_trades": sum(losing_excluded.values()),
+        "target_r_losing_exclusion_reasons": dict(losing_excluded),
+        "target_r_coverage_note": "",
+    }
+
+    if not realized_values:
+        payload = _target_r_empty_payload(TARGET_RECOMMENDATION_NO_WINS)
+        payload.update(coverage_payload)
+        payload["eligible_target_r_losses"] = eligible_losses
+        payload["current_median_original_planned_target_r"] = current_median
+        payload["current_avg_original_planned_target_r"] = current_avg
+        payload["target_r_excluded_count"] = sum(excluded.values())
+        payload["target_r_excluded_reasons"] = dict(excluded)
+        return payload
+    if eligible_losses < 1:
+        payload = _target_r_empty_payload(TARGET_RECOMMENDATION_NO_LOSSES)
+        payload.update(coverage_payload)
+        payload["eligible_target_r_wins"] = len(realized_values)
+        payload["eligible_target_r_losses"] = eligible_losses
+        payload["current_median_original_planned_target_r"] = current_median
+        payload["current_avg_original_planned_target_r"] = current_avg
+        payload["target_r_excluded_count"] = sum(excluded.values())
+        payload["target_r_excluded_reasons"] = dict(excluded)
+        return payload
+
+    increment = _choose_target_r_increment(realized_values)
+    bucket_values = _target_r_bucket_values(realized_values, increment)
+    if not bucket_values:
+        payload = _target_r_empty_payload("empty_distribution")
+        payload.update(coverage_payload)
+        payload["eligible_target_r_wins"] = len(realized_values)
+        payload["eligible_target_r_losses"] = eligible_losses
+        payload["target_r_increment"] = increment
+        payload["current_median_original_planned_target_r"] = current_median
+        payload["current_avg_original_planned_target_r"] = current_avg
+        payload["target_r_excluded_count"] = sum(excluded.values())
+        payload["target_r_excluded_reasons"] = dict(excluded)
+        return payload
+
+    peak_bucket, modal_values = max(bucket_values.items(), key=lambda item: (len(item[1]), -item[0]))
+    modal_values_sorted = sorted(modal_values)
+    recommended_r = _target_r_percentile(modal_values_sorted, 0.5)
+    if recommended_r is None or not math.isfinite(recommended_r) or recommended_r <= 0:
+        payload = _target_r_empty_payload("invalid_modal_recommended_r")
+        payload.update(coverage_payload)
+        payload["eligible_target_r_wins"] = len(realized_values)
+        payload["eligible_target_r_losses"] = eligible_losses
+        payload["target_r_increment"] = increment
+        payload["current_median_original_planned_target_r"] = current_median
+        payload["current_avg_original_planned_target_r"] = current_avg
+        payload["target_r_excluded_count"] = sum(excluded.values())
+        payload["target_r_excluded_reasons"] = dict(excluded)
+        return payload
+
+    peak_instances = len(modal_values)
+    distribution = OrderedDict(
+        (_target_r_bucket_label(bucket, increment), len(values))
+        for bucket, values in bucket_values.items()
+    )
+    peak_bucket_label = _target_r_bucket_label(peak_bucket, increment)
+    raw_recommended_r = recommended_r
+    exact_tie = False
+    exact_tie_goal_preference = False
+    tie_break_reason = ""
+    if current_median is None:
+        direction = "Increase target"
+        tie_break_reason = "missing_current_median_goal_preference_increase"
+    elif recommended_r < current_median - 1e-12:
+        direction = "Decrease target"
+    elif recommended_r > current_median + 1e-12:
+        direction = "Increase target"
+    else:
+        exact_tie = True
+        recommended_r, direction, tie_break_reason, exact_tie_goal_preference = _target_r_exact_tie_adjustment(
+            realized_values,
+            current_median,
+            increment,
+        )
+    recommendation = f"{direction} \u2014 Recommended: {_format_target_r_value(recommended_r)}R"
+    if current_median is not None:
+        recommendation += f" (current median: {_format_target_r_value(current_median)}R)"
+
+    return {
+        TARGET_RECOMMENDATION_HEADER: recommendation,
+        "target_recommendation": recommendation,
+        **coverage_payload,
+        "target_r_missing_reason": "",
+        "eligible_target_r_wins": len(realized_values),
+        "eligible_target_r_losses": eligible_losses,
+        "target_r_increment": increment,
+        "target_r_distribution": dict(distribution),
+        "target_r_peak_bucket": peak_bucket_label,
+        "target_r_peak_bucket_low": peak_bucket,
+        "target_r_peak_bucket_high": peak_bucket + increment,
+        "target_r_peak_instances": peak_instances,
+        "target_r_recommended": recommended_r,
+        "target_r_histogram_recommended_before_tie": raw_recommended_r,
+        "target_r_recommendation_direction": direction,
+        "target_r_exact_tie": exact_tie,
+        "target_r_exact_tie_goal_preference": exact_tie_goal_preference,
+        "target_r_tie_break_reason": tie_break_reason,
         "current_median_original_planned_target_r": current_median,
         "current_avg_original_planned_target_r": current_avg,
         "target_r_excluded_count": sum(excluded.values()),
@@ -2080,6 +2414,62 @@ def _original_stop_distance_pct_points(row: Dict[str, Any]) -> Tuple[float | Non
     return pct, ""
 
 
+def _stop_small_adjustment_step(values: List[float], reference: float) -> float:
+    candidates = [
+        abs(value - reference)
+        for value in values
+        if value is not None and math.isfinite(value) and abs(value - reference) > 1e-9
+    ]
+    candidates.append(0.01)
+    return min(value for value in candidates if value > 0)
+
+
+def _stop_exact_tie_adjustment(
+    winner_values: List[float],
+    loser_values: List[float],
+    reference: float,
+) -> Tuple[float, str, str, bool]:
+    winners = sorted(value for value in winner_values if value is not None and math.isfinite(value) and value > 0)
+    losers = sorted(value for value in loser_values if value is not None and math.isfinite(value) and value > 0)
+    win_median = _target_r_percentile(winners, 0.5)
+    loss_median = _target_r_percentile(losers, 0.5)
+    epsilon = 1e-12
+    if win_median is not None and loss_median is not None and win_median < loss_median - epsilon:
+        direction = "decrease"
+        reason = "winner_median_below_loser_median"
+        goal_preference = False
+    elif win_median is not None and loss_median is not None and win_median > loss_median + epsilon:
+        direction = "increase"
+        reason = "winner_median_above_loser_median"
+        goal_preference = False
+    else:
+        direction = "decrease"
+        reason = "exact_tie_goal_preference_decrease"
+        goal_preference = True
+
+    if direction == "increase":
+        higher = [value for value in winners if value > reference + epsilon]
+        recommended = min(higher) if higher else reference + _stop_small_adjustment_step(winners + losers, reference)
+    else:
+        lower = [value for value in winners if value < reference - epsilon]
+        recommended = max(lower) if lower else max(0.01, reference - _stop_small_adjustment_step(winners + losers, reference))
+    return recommended, direction, reason, goal_preference
+
+
+def _stop_recommendation_text(direction: str, recommended: float, loss_mean: float, *, tie_reason: str = "") -> str:
+    gap = recommended - loss_mean
+    if direction == "decrease":
+        relation = "below"
+    else:
+        relation = "above"
+    suffix = f"; {tie_reason}" if tie_reason else ""
+    return (
+        f"{'Decrease' if direction == 'decrease' else 'Increase'} stop \u2014 "
+        f"Recommended: {_format_stop_pct_value(recommended)} "
+        f"({_format_stop_gap_value(gap)} {relation} loss average{suffix})"
+    )
+
+
 def _stop_recommendation_payload(
     winner_values: List[float],
     loser_values: List[float],
@@ -2090,14 +2480,37 @@ def _stop_recommendation_payload(
     recommendation = _size_recommendation("stop", win_mean, loss_mean)
     gap = None
     direction = None
+    recommended = None
+    recommended_gap = None
+    exact_tie = False
+    exact_tie_goal_preference = False
+    tie_break_reason = ""
     if win_mean is not None and loss_mean is not None:
         gap = abs(win_mean - loss_mean)
-        if win_mean == loss_mean:
-            direction = "equal"
+        if abs(win_mean - loss_mean) <= 1e-12:
+            exact_tie = True
+            recommended, direction, tie_break_reason, exact_tie_goal_preference = _stop_exact_tie_adjustment(
+                winner_values,
+                loser_values,
+                loss_mean,
+            )
+            recommended_gap = abs(recommended - loss_mean)
+            recommendation = _stop_recommendation_text(
+                direction,
+                recommended,
+                loss_mean,
+                tie_reason=tie_break_reason,
+            )
         elif win_mean < loss_mean:
             direction = "decrease"
+            recommended = win_mean
+            recommended_gap = gap
+            recommendation = _stop_recommendation_text(direction, recommended, loss_mean)
         else:
             direction = "increase"
+            recommended = win_mean
+            recommended_gap = gap
+            recommendation = _stop_recommendation_text(direction, recommended, loss_mean)
     return {
         STOP_RECOMMENDATION_HEADER: recommendation,
         "stop_recommendation": recommendation,
@@ -2106,7 +2519,12 @@ def _stop_recommendation_payload(
         "stop_loss_winner_mean_pct": win_mean,
         "stop_loss_loser_mean_pct": loss_mean,
         "stop_loss_difference_pp": gap,
+        "stop_loss_recommended_pct": recommended,
+        "stop_loss_recommended_difference_pp": recommended_gap,
         "stop_loss_recommendation_direction": direction,
+        "stop_loss_exact_tie": exact_tie,
+        "stop_loss_exact_tie_goal_preference": exact_tie_goal_preference,
+        "stop_loss_tie_break_reason": tie_break_reason,
         "stop_loss_excluded_reasons": dict(excluded or {}),
     }
 
@@ -2121,7 +2539,7 @@ def _distance_recommendation_summary(rows: List[Dict[str, Any]], *, scope: str =
         if str(row.get("row_type") or "trade").strip().lower() != "trade":
             stop_excluded["not_trade"] += 1
             continue
-        if _is_test_trade_value(row.get("is_test_trade")):
+        if _target_r_row_is_test_trade(row):
             stop_excluded["test_trade"] += 1
             continue
         outcome = _trade_outcome_sign(row)
@@ -2151,7 +2569,7 @@ def _distance_recommendations_by_symbol(rows: List[Dict[str, Any]]) -> Dict[str,
     for row in rows:
         if str(row.get("row_type") or "trade").strip().lower() != "trade":
             continue
-        if _is_test_trade_value(row.get("is_test_trade")):
+        if _target_r_row_is_test_trade(row):
             continue
         active.append(row)
         symbol = str(row.get("symbol") or "").strip().upper()
@@ -2175,6 +2593,36 @@ def _row_distance_recommendation(
     if symbol_text and symbol_text not in {"Need wins & losses", "Need more target data", TARGET_RECOMMENDATION_INSUFFICIENT}:
         return symbol_text
     return (recommendations_by_symbol.get("") or {}).get(header) or symbol_text or default_text
+
+
+def _sanitize_recommendation_text(header: str, value: Any) -> Any:
+    if value in (None, ""):
+        return value
+    text = str(value).strip()
+    lowered = text.casefold()
+    if header == TARGET_RECOMMENDATION_HEADER:
+        if lowered in {"keep target", "maintain target"}:
+            return TARGET_RECOMMENDATION_NO_WINS
+        if lowered.startswith("keep target") or lowered.startswith("maintain target"):
+            return re.sub(r"^(keep|maintain)\s+target", "Increase target", text, count=1, flags=re.IGNORECASE)
+        if lowered.startswith("reduce target"):
+            return re.sub(r"^reduce\s+target", "Decrease target", text, count=1, flags=re.IGNORECASE)
+        if lowered.startswith("no eligible winning trades"):
+            return TARGET_RECOMMENDATION_NO_WINS
+        if lowered.startswith("no eligible losing trades"):
+            return TARGET_RECOMMENDATION_NO_LOSSES
+        if "insufficient eligible wins" in lowered:
+            return TARGET_RECOMMENDATION_NO_WINS
+        return text
+    if header == STOP_RECOMMENDATION_HEADER:
+        if "keep" in lowered or "maintain" in lowered:
+            return "Need wins & losses"
+        if "recommended:" not in lowered:
+            return "Need wins & losses"
+        text = re.sub(r"^reduce\s+stop(?:\s+loss)?", "Decrease stop", text, count=1, flags=re.IGNORECASE)
+        text = re.sub(r"^increase\s+stop\s+loss", "Increase stop", text, count=1, flags=re.IGNORECASE)
+        return text
+    return value
 
 
 def _apply_recommendation_cell_style(cell) -> None:
@@ -2233,7 +2681,7 @@ def _net_result_pct_by_account(rows: List[Dict[str, Any]]) -> Dict[str, float]:
     for row in rows:
         if str(row.get("row_type") or "trade").strip().lower() != "trade":
             continue
-        if _is_test_trade_value(row.get("is_test_trade")):
+        if _target_r_row_is_test_trade(row):
             continue
         account = _canonical_account_label(row.get("account_label") or row.get("account") or row.get("source") or "")
         if not account:
@@ -2253,12 +2701,14 @@ def _merge_metric_buckets(*buckets: Dict[str, Any] | None) -> Dict[str, Any]:
         "target_recommendation",
         "target_r_scope",
         "eligible_target_r_wins",
+        "eligible_target_r_losses",
+        "target_r_total_losing_trades",
         "target_r_eligible_winning_trades",
+        "target_r_eligible_losing_trades",
         "target_r_eligible_fx_wins",
         "target_r_eligible_crypto_wins",
-        "target_r_fx_sufficient",
-        "target_r_crypto_sufficient",
-        "target_r_min_eligible_wins",
+        "target_r_eligible_fx_losses",
+        "target_r_eligible_crypto_losses",
         "target_r_increment",
         "target_r_distribution",
         "target_r_peak_bucket",
@@ -2266,12 +2716,19 @@ def _merge_metric_buckets(*buckets: Dict[str, Any] | None) -> Dict[str, Any]:
         "target_r_peak_bucket_high",
         "target_r_peak_instances",
         "target_r_recommended",
+        "target_r_histogram_recommended_before_tie",
+        "target_r_recommendation_direction",
+        "target_r_exact_tie",
+        "target_r_exact_tie_goal_preference",
+        "target_r_tie_break_reason",
         "current_median_original_planned_target_r",
         "current_avg_original_planned_target_r",
         "target_r_excluded_count",
         "target_r_excluded_reasons",
         "target_r_excluded_winning_trades",
+        "target_r_excluded_losing_trades",
         "target_r_winning_exclusion_reasons",
+        "target_r_losing_exclusion_reasons",
         "target_r_coverage_note",
     }
     for bucket in buckets:
@@ -2283,7 +2740,7 @@ def _merge_metric_buckets(*buckets: Dict[str, Any] | None) -> Dict[str, Any]:
         existing_target_text = str(
             merged.get(TARGET_RECOMMENDATION_HEADER) or merged.get("target_recommendation") or ""
         ).strip()
-        insufficient_target_texts = {"Need more target data", TARGET_RECOMMENDATION_INSUFFICIENT}
+        insufficient_target_texts = {"Need more target data", TARGET_RECOMMENDATION_NO_WINS, TARGET_RECOMMENDATION_NO_LOSSES}
         keep_existing_target_payload = (
             incoming_target_text in insufficient_target_texts
             and existing_target_text
@@ -3197,6 +3654,7 @@ def _write_drawdown_detail_rows(
     details_by_col: Dict[int, Any],
     *,
     diagnostics: Dict[str, Any] | None = None,
+    preserve_inline_cells: set | None = None,
 ) -> None:
     wanted = metric_label.casefold()
     metric_rows = [
@@ -3213,12 +3671,13 @@ def _write_drawdown_detail_rows(
         _apply_dashboard_source_label_style(ws.cell(start_row, 1))
         _apply_dashboard_source_label_style(ws.cell(end_row, 1))
         for col in range(2, ws.max_column + 1):
-            detail = details_by_col.get(col)
+            preserving_inline = bool(preserve_inline_cells and (metric_row, col) in preserve_inline_cells)
+            detail = None if preserving_inline else details_by_col.get(col)
             inline_value = ws.cell(metric_row, col).value
             inline_start, inline_end = _drawdown_detail_start_end(inline_value)
             start, end = _drawdown_detail_start_end(detail)
-            start = start or inline_start
-            end = end or inline_end
+            start = inline_start or start
+            end = inline_end or end
             inline_pct = _drawdown_inline_pct_fraction(inline_value)
             if inline_pct is not None:
                 ws.cell(metric_row, col).value = inline_pct
@@ -3730,7 +4189,7 @@ def _normalize_trade_log_row_heights(ws, diagnostics: Dict[str, Any] | None = No
     row_keys = [idx for idx in ws.row_dimensions.keys() if isinstance(idx, int)]
     max_row = max([ws.max_row, *row_keys], default=ws.max_row)
     changed = 0
-    source_height = ws.row_dimensions[5].height or TRADE_LOG_DATA_ROW_HEIGHT
+    source_height = TRADE_LOG_DATA_ROW_HEIGHT
     ws.sheet_format.defaultRowHeight = float(source_height)
     for row in range(TRADE_LOG_DATA_START_ROW, max_row + 1):
         if ws.row_dimensions[row].height != source_height:
@@ -5227,7 +5686,7 @@ def _trade_move_duration_metrics(rows: List[Dict[str, Any]]) -> Dict[str, Dict[s
         for market in ("overall", "fx", "crypto")
     }
     for row in rows:
-        if str(row.get("row_type") or "trade") != "trade" or _is_test_trade_value(row.get("is_test_trade")):
+        if str(row.get("row_type") or "trade") != "trade" or _target_r_row_is_test_trade(row):
             continue
         markets = ["overall"]
         market = _trade_row_market(row)
@@ -5584,7 +6043,7 @@ def _result_percentage_totals_by_market(
             if isinstance(row, dict)
             and _row_account(row) == account
             and str(row.get("row_type") or "trade").strip().lower() in {"trade", "cashflow"}
-            and not _is_test_trade_value(row.get("is_test_trade"))
+            and not _target_r_row_is_test_trade(row)
         ]
         account_rows.sort(key=lambda row: _as_datetime(row.get("close_time") or row.get("open_time")) or datetime.min)
         currency = next((_row_currency(row, market) for row in trade_rows if _row_currency(row, market)), "")
@@ -6714,9 +7173,9 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
             analysis.get("net_r_multiple"),
             (netp/100.0 if netp is not None else ''), (avgp/100.0 if avgp is not None else ''),
             rec.get("win_rate_pct"), rec.get('avg_sl_pct_wins'), rec.get('avg_sl_pct_losses'),
-            analysis.get(STOP_RECOMMENDATION_HEADER) or rec.get(STOP_RECOMMENDATION_HEADER) or rec.get("stop_recommendation") or "",
+            _sanitize_recommendation_text(STOP_RECOMMENDATION_HEADER, analysis.get(STOP_RECOMMENDATION_HEADER) or rec.get(STOP_RECOMMENDATION_HEADER) or rec.get("stop_recommendation") or ""),
             rec.get('avg_tp_pct_wins'), rec.get('avg_tp_pct_losses'),
-            analysis.get(TARGET_RECOMMENDATION_HEADER) or rec.get(TARGET_RECOMMENDATION_HEADER) or rec.get("target_recommendation") or "",
+            _sanitize_recommendation_text(TARGET_RECOMMENDATION_HEADER, analysis.get(TARGET_RECOMMENDATION_HEADER) or rec.get(TARGET_RECOMMENDATION_HEADER) or rec.get("target_recommendation") or ""),
             _format_duration_display(rec.get("min_trade_duration_seconds", rec.get("shortest_duration_seconds"))),
             _format_duration_display(rec.get("avg_trade_duration_seconds", rec.get("avg_duration_seconds"))),
             _format_duration_display(rec.get("max_trade_duration_seconds", rec.get("longest_duration_seconds"))),
@@ -6762,7 +7221,7 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
     _write_pnl_calendar_one_line_layout(cal, {"items": non_test})
     _ensure_pnl_calendar_freeze_panes(cal)
     _ensure_report_sheets(wb, snapshot)
-    _write_target_r_metadata_sheet(wb, rows)
+    _remove_target_r_metadata_sheet(wb)
     _repair_stats1_formatting(dash, extended_metrics)
     _repair_legacy_duration_number_formats(wb)
 
@@ -6963,6 +7422,20 @@ def _apply_stats1_clean_table_borders(ws, diagnostics: Dict[str, Any] | None = N
     if restored_source_labels:
         diagnostics["restored_stats1_source_labels_after_unmerge"] = restored_source_labels
 
+    manual_move_label_borders: Dict[int, Border] = {}
+    for row in range(1, last_row + 1):
+        label = _stats1_label_at(ws, row).casefold()
+        if label not in {
+            DASHBOARD_MOVE_TO_BREAK_EVEN_LABEL.casefold(),
+            DASHBOARD_MOVE_TO_PROFIT_LABEL.casefold(),
+            "move to break even (dd:hh:mm:ss)",
+            "move to profit (dd:hh:mm:ss)",
+        }:
+            continue
+        border = ws.cell(row, 1).border
+        if any(getattr(side, "style", None) for side in (border.left, border.right, border.top, border.bottom)):
+            manual_move_label_borders[row] = copy(border)
+
     _clear_borders_in_range(ws, 1, 1, last_row, right_col)
 
     static_section_labels = {
@@ -7038,6 +7511,8 @@ def _apply_stats1_clean_table_borders(ws, diagnostics: Dict[str, Any] | None = N
 
     for start, end in normalized_ranges:
         _apply_group_box_border(ws, start, 1, end, right_col, outer_style="medium")
+    for row, border in manual_move_label_borders.items():
+        ws.cell(row, 1).border = copy(border)
     diagnostics["repaired_stats1_table_borders"] = [f"A{start}:{get_column_letter(right_col)}{end}" for start, end in normalized_ranges]
 
 
@@ -8171,6 +8646,13 @@ def _assert_invariants_unchanged(before: Dict[str, Any], after: Dict[str, Any]) 
     for key in before.keys() | after.keys():
         if key in skipped:
             continue
+        if key == f"{TRADE_LOG_SHEET}_layout":
+            before_layout = dict(before.get(key) or {})
+            after_layout = dict(after.get(key) or {})
+            before_layout.pop("row_heights", None)
+            after_layout.pop("row_heights", None)
+            if before_layout == after_layout:
+                continue
         if before.get(key) != after.get(key):
             raise RuntimeError(f"Workbook structural invariant changed: {key}")
 
@@ -9092,7 +9574,7 @@ def _pnl_calendar_monthly_values(snapshot_or_rows: Any) -> Dict[Tuple[int, int],
     for row in rows or []:
         if not isinstance(row, dict):
             continue
-        if _is_test_trade_value(row.get("is_test_trade")):
+        if _target_r_row_is_test_trade(row):
             continue
         if str(row.get("row_type") or "trade").strip().lower() != "trade":
             continue
@@ -9665,7 +10147,6 @@ def read_master_journal_source(path: Path) -> Dict[str, Any]:
     try:
         diagnostics={'repaired_corrupted_row_ids': []}
         balances = _read_stats2_account_balances(wb)
-        target_r_metadata = _read_target_r_metadata_sheet(wb, diagnostics)
         ws = _get_all_trades_sheet(wb)
         header_map = _trade_log_header_map(ws)
         headers = list(header_map.keys())
@@ -9806,24 +10287,6 @@ def read_master_journal_source(path: Path) -> Dict[str, Any]:
         duplicate_trade_row_ids = sorted(rid for rid, count in trade_row_id_counts.items() if count > 1)
         if duplicate_trade_row_ids:
             diagnostics["target_r_duplicate_trade_row_ids"] = duplicate_trade_row_ids
-        merged_metadata_rows = 0
-        skipped_duplicate_metadata_rows = 0
-        for index, item in enumerate(items):
-            if str(item.get("row_type") or "trade").strip().lower() != "trade":
-                continue
-            rid = str(item.get("id") or "").strip()
-            metadata = target_r_metadata.get(rid) if rid else None
-            if not metadata:
-                continue
-            if trade_row_id_counts.get(rid, 0) != 1:
-                skipped_duplicate_metadata_rows += 1
-                continue
-            items[index] = _merge_target_r_metadata(item, metadata)
-            merged_metadata_rows += 1
-        if merged_metadata_rows:
-            diagnostics["target_r_metadata_rows_merged"] = merged_metadata_rows
-        if skipped_duplicate_metadata_rows:
-            diagnostics["target_r_metadata_rows_skipped_duplicate_trade_ids"] = skipped_duplicate_metadata_rows
         items, dedupe_diagnostics = _dedupe_trade_rows_by_execution(items)
         diagnostics.update(dedupe_diagnostics)
         return {'items':items,'balances':balances,'cashflow_ledger':dict(cashflow_ledger),'diagnostics':diagnostics}
@@ -9901,7 +10364,7 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
             wb.create_sheet(STATS2_SHEET, 1)
             diagnostics["created_stats2_from_legacy_layout"] = True
         _ensure_report_sheets(wb, snapshot, diagnostics)
-        _write_target_r_metadata_sheet(wb, rows, diagnostics)
+        _remove_target_r_metadata_sheet(wb, diagnostics)
         before = _snapshot_invariants(wb)
         groups = stats.get("groups") or {}
         by_market = groups.get("by_market") or {}
@@ -10025,6 +10488,8 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
                     break
             return cols
 
+        manual_drawdown_metric_cells = set()
+
         def write_market_metric(section: str, label: str | List[str], values_by_market: Dict[str, Any], metric_type: str = "raw", semantic: str | None = None):
             labels = label if isinstance(label, list) else [label]
             pos = None
@@ -10041,6 +10506,8 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
                 if out is None:
                     if section == "Drawdown" and market in {"fx", "crypto"}:
                         missing_markets.append(market)
+                    continue
+                if section == "Drawdown" and (pos[0], col) in manual_drawdown_metric_cells:
                     continue
                 _write_dashboard_metric_cell(dash, pos[0], col, out, metric_type, semantic)
             if missing_markets:
@@ -10196,7 +10663,7 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
                     if rec_row > dash.max_row or str(dash.cell(rec_row, 1).value or "").strip().casefold() != "recommendation":
                         continue
                     for market, col in market_cols.items():
-                        value = (buckets.get(market) or {}).get(key)
+                        value = _sanitize_recommendation_text(key, (buckets.get(market) or {}).get(key))
                         if value in (None, ""):
                             continue
                         if _write_value_preserving_cell(dash, rec_row, col, _excel_scalar(value)):
@@ -10449,6 +10916,14 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
 
         if "Drawdown" in anchors:
             market_cols = _main_dashboard_market_columns()
+            for drawdown_label in ("Min drawdown", "Max drawdown"):
+                drawdown_pos = _find_label_in_section(dash, drawdown_label, anchors["Drawdown"])
+                if not drawdown_pos:
+                    continue
+                drawdown_row = drawdown_pos[0]
+                for col in market_cols.values():
+                    if _drawdown_inline_pct_fraction(dash.cell(drawdown_row, col).value) is not None:
+                        manual_drawdown_metric_cells.add((drawdown_row, col))
             _write_drawdown_detail_rows(
                 dash,
                 "Min drawdown",
@@ -10457,6 +10932,7 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
                     for market, col in market_cols.items()
                 },
                 diagnostics=diagnostics,
+                preserve_inline_cells=manual_drawdown_metric_cells,
             )
             _write_drawdown_detail_rows(
                 dash,
@@ -10466,6 +10942,7 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
                     for market, col in market_cols.items()
                     },
                     diagnostics=diagnostics,
+                    preserve_inline_cells=manual_drawdown_metric_cells,
                 )
             anchors = _find_anchor_sections(
                 dash,
@@ -10497,6 +10974,7 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
                     for market, col in market_cols.items()
                 },
                 diagnostics=diagnostics,
+                preserve_inline_cells=manual_drawdown_metric_cells,
             )
             _write_drawdown_detail_rows(
                 dash,
@@ -10506,6 +10984,7 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
                     for market, col in market_cols.items()
                 },
                 diagnostics=diagnostics,
+                preserve_inline_cells=manual_drawdown_metric_cells,
             )
         duration = groups.get("duration") or {}
         dsrc = duration.get("metric_sources") or {}
