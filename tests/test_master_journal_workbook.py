@@ -2760,7 +2760,7 @@ def test_checked_in_trading_journal_target_recommendations_match_backend_calcula
         if str(row.get("row_type") or "trade").strip().lower() == "trade" and not row.get("is_test_trade")
     ]
     expected_by_group = {
-        "overall": _target_r_recommendation(active_rows)["target_recommendation"],
+        "overall": _target_r_recommendation(active_rows, scope="overall")["target_recommendation"],
         "fx": _target_r_recommendation([row for row in active_rows if str(row.get("asset_class") or "").lower() == "fx"])["target_recommendation"],
         "crypto": _target_r_recommendation([row for row in active_rows if str(row.get("asset_class") or "").lower() == "crypto"])["target_recommendation"],
     }

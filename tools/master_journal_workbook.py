@@ -41,6 +41,7 @@ STOP_RECOMMENDATION_HEADER = "Stop Loss Recommendation"
 TARGET_RECOMMENDATION_HEADER = "Target Recommendation"
 RECOMMENDATION_DISPLAY_HEADER = "Recommendation"
 TARGET_RECOMMENDATION_INSUFFICIENT = "Insufficient eligible wins — recommended target unavailable"
+MIN_ELIGIBLE_TARGET_R_WINS = 5
 MOVE_TO_FIELD_MAP = {
     "Move to Break Even Time": "move_to_break_even_time",
     "Move to Break Even Duration": "move_to_break_even_duration",
@@ -1825,8 +1826,12 @@ def _target_r_empty_payload(reason: str = "not_enough_eligible_wins") -> Dict[st
     }
 
 
-def _target_r_recommendation(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+def _target_r_recommendation(rows: List[Dict[str, Any]], *, scope: str = "standard") -> Dict[str, Any]:
+    normalized_scope = str(scope or "standard").strip().lower()
+    overall_scope = normalized_scope == "overall"
     realized_values: List[float] = []
+    fx_realized_values: List[float] = []
+    crypto_realized_values: List[float] = []
     planned_values: List[float] = []
     excluded: Counter[str] = Counter()
     winning_excluded: Counter[str] = Counter()
@@ -1847,11 +1852,13 @@ def _target_r_recommendation(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         is_trade = str(row.get("row_type") or "trade").strip().lower() == "trade"
         is_test = _target_r_row_is_test_trade(row)
         is_winner = is_trade and not is_test and _trade_outcome_sign(row) > 0
+        is_fx = _target_r_is_fx_row(row)
+        is_crypto = _target_r_is_crypto_row(row) and not is_fx
         if is_winner:
             total_wins += 1
-            if _target_r_is_fx_row(row):
+            if is_fx:
                 total_fx_wins += 1
-            if _target_r_is_crypto_row(row) and not _target_r_is_fx_row(row):
+            if is_crypto:
                 total_crypto_wins += 1
         ok, reason = _is_eligible_target_r_win(row)
         if not ok:
@@ -1866,36 +1873,49 @@ def _target_r_recommendation(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
                 winning_excluded[reason or "invalid_realized_r"] += 1
             continue
         realized_values.append(realized_r)
-        if _target_r_is_fx_row(row):
+        if is_fx:
             eligible_fx_wins += 1
-        if _target_r_is_crypto_row(row) and not _target_r_is_fx_row(row):
+            fx_realized_values.append(realized_r)
+        if is_crypto:
             eligible_crypto_wins += 1
+            crypto_realized_values.append(realized_r)
 
     current_median = _target_r_percentile(sorted(planned_values), 0.5) if planned_values else None
     current_avg = (sum(planned_values) / len(planned_values)) if planned_values else None
+    fx_sufficient = eligible_fx_wins >= MIN_ELIGIBLE_TARGET_R_WINS
+    crypto_sufficient = eligible_crypto_wins >= MIN_ELIGIBLE_TARGET_R_WINS
     coverage_note = ""
     coverage_label = ""
-    if total_fx_wins > 0 and total_crypto_wins > 0:
-        if eligible_fx_wins == 0 and eligible_crypto_wins > 0:
+    recommendation_values = realized_values
+    if overall_scope:
+        if crypto_sufficient and not fx_sufficient:
             coverage_note = "FX: insufficient eligible wins"
             coverage_label = "Crypto-only data"
-        elif eligible_crypto_wins == 0 and eligible_fx_wins > 0:
+            recommendation_values = crypto_realized_values
+        elif fx_sufficient and not crypto_sufficient:
             coverage_note = "Crypto: insufficient eligible wins"
             coverage_label = "FX-only data"
+            recommendation_values = fx_realized_values
+        elif not fx_sufficient and not crypto_sufficient:
+            recommendation_values = []
     coverage_payload = {
+        "target_r_scope": "overall" if overall_scope else normalized_scope,
         "target_r_total_winning_trades": total_wins,
         "target_r_total_fx_wins": total_fx_wins,
         "target_r_total_crypto_wins": total_crypto_wins,
         "target_r_eligible_winning_trades": len(realized_values),
         "target_r_eligible_fx_wins": eligible_fx_wins,
         "target_r_eligible_crypto_wins": eligible_crypto_wins,
+        "target_r_fx_sufficient": fx_sufficient,
+        "target_r_crypto_sufficient": crypto_sufficient,
+        "target_r_min_eligible_wins": MIN_ELIGIBLE_TARGET_R_WINS,
         "target_r_excluded_winning_trades": sum(winning_excluded.values()),
         "target_r_winning_exclusion_reasons": dict(winning_excluded),
         "target_r_coverage_note": coverage_note,
     }
-    if len(realized_values) < 5:
+    if len(recommendation_values) < MIN_ELIGIBLE_TARGET_R_WINS:
         payload = _target_r_empty_payload("not_enough_eligible_wins")
-        payload["eligible_target_r_wins"] = len(realized_values)
+        payload["eligible_target_r_wins"] = len(recommendation_values)
         payload["current_median_original_planned_target_r"] = current_median
         payload["current_avg_original_planned_target_r"] = current_avg
         payload["target_r_excluded_count"] = sum(excluded.values())
@@ -1903,11 +1923,11 @@ def _target_r_recommendation(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         payload.update(coverage_payload)
         return payload
 
-    increment = _choose_target_r_increment(realized_values)
-    bucket_values = _target_r_bucket_values(realized_values, increment)
+    increment = _choose_target_r_increment(recommendation_values)
+    bucket_values = _target_r_bucket_values(recommendation_values, increment)
     if not bucket_values:
         payload = _target_r_empty_payload("empty_distribution")
-        payload["eligible_target_r_wins"] = len(realized_values)
+        payload["eligible_target_r_wins"] = len(recommendation_values)
         payload["target_r_increment"] = increment
         payload["current_median_original_planned_target_r"] = current_median
         payload["current_avg_original_planned_target_r"] = current_avg
@@ -1924,7 +1944,7 @@ def _target_r_recommendation(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     recommended_r = _target_r_percentile(modal_values_sorted, 0.5)
     if recommended_r is None or not math.isfinite(recommended_r) or recommended_r <= 0:
         payload = _target_r_empty_payload("invalid_modal_recommended_r")
-        payload["eligible_target_r_wins"] = len(realized_values)
+        payload["eligible_target_r_wins"] = len(recommendation_values)
         payload["target_r_increment"] = increment
         payload["current_median_original_planned_target_r"] = current_median
         payload["current_avg_original_planned_target_r"] = current_avg
@@ -1958,7 +1978,7 @@ def _target_r_recommendation(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         TARGET_RECOMMENDATION_HEADER: recommendation,
         "target_recommendation": recommendation,
         **coverage_payload,
-        "eligible_target_r_wins": len(realized_values),
+        "eligible_target_r_wins": len(recommendation_values),
         "target_r_increment": increment,
         "target_r_distribution": dict(distribution),
         "target_r_peak_bucket": peak_bucket_label,
@@ -1973,7 +1993,7 @@ def _target_r_recommendation(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
-def _distance_recommendation_summary(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+def _distance_recommendation_summary(rows: List[Dict[str, Any]], *, scope: str = "standard") -> Dict[str, Any]:
     buckets = {
         "stop_wins": [],
         "stop_losses": [],
@@ -1990,7 +2010,7 @@ def _distance_recommendation_summary(rows: List[Dict[str, Any]]) -> Dict[str, An
         suffix = "wins" if outcome > 0 else "losses"
         if stop_pct is not None:
             buckets[f"stop_{suffix}"].append(stop_pct)
-    target_payload = _target_r_recommendation(rows)
+    target_payload = _target_r_recommendation(rows, scope=scope)
     return {
         STOP_RECOMMENDATION_HEADER: _size_recommendation(
             "stop",
@@ -2013,7 +2033,7 @@ def _distance_recommendations_by_symbol(rows: List[Dict[str, Any]]) -> Dict[str,
         symbol = str(row.get("symbol") or "").strip().upper()
         if symbol:
             grouped[symbol].append(row)
-    overall = _distance_recommendation_summary(active)
+    overall = _distance_recommendation_summary(active, scope="overall")
     out = {"": overall}
     for symbol, symbol_rows in grouped.items():
         out[symbol] = _distance_recommendation_summary(symbol_rows)
@@ -2107,7 +2127,14 @@ def _merge_metric_buckets(*buckets: Dict[str, Any] | None) -> Dict[str, Any]:
     target_payload_keys = {
         TARGET_RECOMMENDATION_HEADER,
         "target_recommendation",
+        "target_r_scope",
         "eligible_target_r_wins",
+        "target_r_eligible_winning_trades",
+        "target_r_eligible_fx_wins",
+        "target_r_eligible_crypto_wins",
+        "target_r_fx_sufficient",
+        "target_r_crypto_sufficient",
+        "target_r_min_eligible_wins",
         "target_r_increment",
         "target_r_distribution",
         "target_r_peak_bucket",
@@ -2119,6 +2146,9 @@ def _merge_metric_buckets(*buckets: Dict[str, Any] | None) -> Dict[str, Any]:
         "current_avg_original_planned_target_r",
         "target_r_excluded_count",
         "target_r_excluded_reasons",
+        "target_r_excluded_winning_trades",
+        "target_r_winning_exclusion_reasons",
+        "target_r_coverage_note",
     }
     for bucket in buckets:
         if not isinstance(bucket, dict):
@@ -5910,6 +5940,7 @@ def _dashboard_extended_metrics(
         min_commission_source = min(commission_rows, key=lambda pair: (pair[0], str(pair[1].get("symbol") or "")))[1] if commission_rows else None
         max_commission_source = max(commission_rows, key=lambda pair: (pair[0], str(pair[1].get("symbol") or "")))[1] if commission_rows else None
         streaks = _period_streak_metrics(items)
+        target_scope = "overall" if market == "overall" else "standard"
         result[market] = {
             "trades": len(items),
             "wins": len(winners),
@@ -5944,7 +5975,7 @@ def _dashboard_extended_metrics(
             **{f"timeframe_{label.lower()}_wins": timeframe_wins[label] for label in timeframe_aliases.values()},
             **{f"timeframe_{label.lower()}_losses": timeframe_losses[label] for label in timeframe_aliases.values()},
             **_summary(commissions, "commission"),
-            **_distance_recommendation_summary(items),
+            **_distance_recommendation_summary(items, scope=target_scope),
             "avg_r_multiple": (sum(r_values) / len(r_values)) if r_values else None,
             "net_r_multiple": sum(r_values) if r_values else None,
             "gross_ir_gain": sum(value for value in r_values if value > 0) if r_values else None,

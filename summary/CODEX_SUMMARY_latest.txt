@@ -1,59 +1,60 @@
-Codex final target-recommendation cleanup summary
+Codex final correction summary - per-asset-class Overall target-R coverage
 
 Files changed:
+- render/master_service.py
 - tools/master_journal_workbook.py
-- tests/test_master_journal_workbook.py
 - tests/test_master_service_trading_journal_stats.py
+- tests/test_master_journal_workbook.py
 - summary/CODEX_SUMMARY_latest.txt
 
-Durable target-R metadata:
-- `_Target R Metadata` continues to store target-risk source data outside visible Trade Log columns.
-- Metadata is now restored only by stable Row ID after all visible rows have been parsed.
-- Duplicate hidden metadata Row IDs are detected and ignored safely instead of choosing an arbitrary payload.
-- Duplicate visible Trade Log Row IDs are detected, reported in diagnostics, and skipped for metadata merge so metadata cannot silently attach to the wrong trade.
-- Deleted/unmatched metadata Row IDs remain ignored.
+Implementation:
+- Added shared `MIN_ELIGIBLE_TARGET_R_WINS = 5`.
+- Added an explicit `scope` parameter to `_target_r_recommendation`; Overall callers now pass `scope="overall"`.
+- Overall coverage now uses:
+  - `fx_sufficient = eligible_fx_wins >= MIN_ELIGIBLE_TARGET_R_WINS`
+  - `crypto_sufficient = eligible_crypto_wins >= MIN_ELIGIBLE_TARGET_R_WINS`
+- Overall recommendations now follow the required matrix:
+  - both sufficient: normal Overall direction/recommended target format;
+  - Crypto sufficient and FX insufficient: `Crypto-only data — Recommended: <value>R — FX: insufficient eligible wins`;
+  - FX sufficient and Crypto insufficient: `FX-only data — Recommended: <value>R — Crypto: insufficient eligible wins`;
+  - neither sufficient: `Insufficient eligible wins — recommended target unavailable`.
+- When Overall is Crypto-only or FX-only, the displayed recommended R is calculated from the sufficient asset class only, so one to four insufficient eligible wins from the other class cannot influence the recommendation.
+- Symbol recommendations, FX-only STATS1, and Crypto-only STATS1 remain on the standard non-Overall target-R format.
+- Workbook-derived STATS1 calculations now pass Overall scope when recomputing the Overall market bucket from workbook rows.
 
-Round-trip regression coverage:
-- Added production-style workbook tests that build, refresh/save, close, reopen through `read_master_journal_source`, restore metadata by Row ID, refresh again, and compare STATS1/SYMBOLS target recommendations before and after.
-- Tests assert `_Target R Metadata` remains `veryHidden`.
-- Tests assert original entry, stop, target, quantity, monetary risk, risk currency, opening conversion factor, conversion source/time, and open transaction ID survive the round trip.
-- Tests assert moving visible Trade Log rows does not misassign metadata.
-- Tests assert missing metadata causes FX target recommendations to exclude wins with `missing_opening_loss_conversion_factor` and return insufficient data when appropriate.
-- Tests assert visible sheet order, freeze panes, filters, merged cells, formulas, widths, heights, and style signatures remain stable across the production save/reopen/refresh cycle.
+Tests added or updated:
+- 4 eligible FX + 5 eligible Crypto returns Crypto-only wording.
+- 5 eligible FX + 4 eligible Crypto returns FX-only wording.
+- 3 eligible FX + 3 eligible Crypto returns insufficient data even though combined eligible wins are six.
+- 0 eligible FX + 5 eligible Crypto returns Crypto-only wording.
+- 5 eligible FX + 0 eligible Crypto returns FX-only wording.
+- 5+ eligible wins in both classes returns the normal Overall recommendation format.
+- Symbol recommendations do not receive Crypto-only or FX-only wording.
+- FX and Crypto STATS1 sections retain normal recommendation formats.
+- Checked-in workbook expected Overall calculations now call `_target_r_recommendation(..., scope="overall")`.
 
-Overall coverage wording:
-- Overall target recommendations now use:
-  - `Crypto-only data — Recommended: <value>R — FX: insufficient eligible wins` when only Crypto has sufficient eligible wins.
-  - `FX-only data — Recommended: <value>R — Crypto: insufficient eligible wins` when only FX has sufficient eligible wins.
-  - `Insufficient eligible wins — recommended target unavailable` when neither class has sufficient eligible wins.
-- The R value is calculated by the existing target-R recommendation algorithm and is not hardcoded.
-- The new wording is applied through the backend payload used by STATS1/SYMBOLS and UI consumers.
-
-Tracked workbook refresh and inspection:
-- Ran the production refresh against `journal/Trading Journal.xlsx`.
+Workbook refresh and inspection:
+- Refreshed `journal/Trading Journal.xlsx` through the production workbook refresh path.
 - Refresh succeeded with `target_r_metadata_rows: 1444`.
-- `journal/Trading Journal.xlsx` is tracked, but the refresh produced no final tracked binary diff after the workbook was brought up to date.
-- STATS1 matched backend calculations:
+- The tracked workbook had no final binary diff after refresh.
+- STATS1 matched backend calculations after the threshold correction:
   - Overall: `Crypto-only data — Recommended: 1.95R — FX: insufficient eligible wins`
   - FX: `Insufficient eligible wins — recommended target unavailable`
   - Crypto: `Reduce target — Recommended: 1.95R (current median: 2.18R)`
-- SYMBOLS matched backend calculations, including:
+- SYMBOLS BTCUSDT and ETHUSDT retained normal symbol recommendation formats:
   - BTCUSDT: `Keep target — Recommended: 1.95R (current median: 2.01R)`
   - ETHUSDT: `Keep target — Recommended: 1.98R (current median: 2.09R)`
-- No inspected recommendation displayed `0R`.
-- `_Target R Metadata` is present and `veryHidden`.
+- `_Target R Metadata` remains present and `veryHidden`.
 - No target-R metadata or opening conversion columns are visible in Trade Log.
-- FX remains insufficient in the refreshed workbook because eligible opening-risk conversion data is insufficient.
-- BTCUSDT and ETHUSDT recommendations were verified against backend net-realised-R calculations.
 
 Verification performed:
-- `python -m py_compile render\master_service.py tools\master_journal_workbook.py oanda_history-clone\oanda_history.py`
+- `python -m py_compile render\master_service.py tools\master_journal_workbook.py oanda_history-clone\oanda_history.py tests\test_master_service_trading_journal_stats.py tests\test_master_journal_workbook.py`
   Result: passed.
-- `python -m pytest tests/test_master_service_trading_journal_stats.py -q -p no:cacheprovider --basetemp=pytest_tmp_cleanup_stats_final -k "(target_recommendation or fx_ or oanda_export or overall_target) and not market_return"`
-  Result: 21 passed, 21 deselected, 4 warnings.
-- `python -m pytest tests/test_master_journal_workbook.py -q -p no:cacheprovider --basetemp=pytest_tmp_cleanup_workbook_final -k "target_r_metadata or missing_target_r_metadata or checked_in_trading_journal_target_recommendations_match_backend_calculations or checked_in_trading_journal_has_no_direction_only_or_zero_target_recommendations or real_trading_journal_source_data_produces_numeric_target_recommendations"`
+- `python -m pytest tests/test_master_service_trading_journal_stats.py -q -p no:cacheprovider --basetemp=pytest_tmp_overall_threshold_stats2 -k "(target_recommendation or fx_ or oanda_export or overall_target) and not market_return"`
+  Result: 26 passed, 21 deselected, 4 warnings.
+- `python -m pytest tests/test_master_journal_workbook.py -q -p no:cacheprovider --basetemp=pytest_tmp_overall_threshold_workbook_final -k "target_r_metadata or missing_target_r_metadata or checked_in_trading_journal_target_recommendations_match_backend_calculations or checked_in_trading_journal_has_no_direction_only_or_zero_target_recommendations or real_trading_journal_source_data_produces_numeric_target_recommendations"`
   Result: 7 passed, 136 deselected.
-- `python -m pytest tests/test_master_service_oanda_history_export.py tests/test_master_service_oanda_fill_recovery.py oanda_history-clone/tests/test_oanda_history.py -q -p no:cacheprovider --basetemp=pytest_tmp_cleanup_oanda_final`
+- `python -m pytest tests/test_master_service_oanda_history_export.py tests/test_master_service_oanda_fill_recovery.py oanda_history-clone/tests/test_oanda_history.py -q -p no:cacheprovider --basetemp=pytest_tmp_overall_threshold_oanda_final`
   Result: 56 passed, 8 warnings.
 
 Runtime/local-state safety:
@@ -64,6 +65,5 @@ Runtime/local-state safety:
 
 Completion evidence note:
 - This summary is written before `PATCH_DESKTOP_PUSH.bat` runs, as required by `AGENTS.md`.
-- A commit cannot contain its own final Git hash in this file: editing the file to insert the final hash would create a different final hash.
-- The exact post-push `Commit`, `Local HEAD`, and `origin/master` values must therefore be obtained after `PATCH_DESKTOP_PUSH.bat` completes and reported in the final Codex response.
-- Because runtime/local-state files are intentionally excluded and remain locally modified, the full worktree is not expected to be clean; intended source/test/workbook/summary changes must be clean after the push.
+- Per the user instruction, this committed summary does not attempt to contain the commit's own final hash.
+- The external push log and final Codex response should report the post-push `Commit`, `Local HEAD`, and `origin/master` hashes after `PATCH_DESKTOP_PUSH.bat` completes.

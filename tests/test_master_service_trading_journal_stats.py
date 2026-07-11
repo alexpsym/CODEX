@@ -64,7 +64,7 @@ if _httpx_spec is None:
 
 import render.master_service as master_service
 from render.master_service import _compute_journal_stats, _compute_journal_period_stats, _build_journal_balance_timelines
-from tools.master_journal_workbook import TARGET_RECOMMENDATION_INSUFFICIENT, _format_target_r_value, _target_r_recommendation, _target_r_realized_from_original_plan
+from tools.master_journal_workbook import MIN_ELIGIBLE_TARGET_R_WINS, TARGET_RECOMMENDATION_INSUFFICIENT, _format_target_r_value, _target_r_recommendation, _target_r_realized_from_original_plan
 
 
 def test_compute_journal_stats_winner_loser_splits_and_durations() -> None:
@@ -364,7 +364,8 @@ def test_compute_journal_stats_target_recommendation_uses_realized_original_r_di
     instrument = next(item for item in stats["by_instrument"] if item["symbol"] == "EURUSD")
     direct_target = _target_r_recommendation(rows)
 
-    assert risk["target_recommendation"] == "Reduce target — Recommended: 3.25R (current median: 4.0R)"
+    assert risk["target_recommendation"] == "FX-only data — Recommended: 3.25R — Crypto: insufficient eligible wins"
+    assert direct_target["target_recommendation"] == "Reduce target — Recommended: 3.25R (current median: 4.0R)"
     assert risk["eligible_target_r_wins"] == 8
     assert risk["target_r_increment"] == pytest.approx(1.0)
     assert risk["target_r_distribution"]["4.0R-5.0R"] == 1
@@ -380,10 +381,10 @@ def test_compute_journal_stats_target_recommendation_uses_realized_original_r_di
     assert risk["target_r_excluded_reasons"]["missing_original_risk_quantity"] == 1
     assert risk["target_r_excluded_reasons"]["moved_without_original_plan"] == 1
     assert by_market["overall"]["target_recommendation"] == risk["target_recommendation"]
-    assert by_market["fx"]["target_recommendation"] == risk["target_recommendation"]
+    assert by_market["fx"]["target_recommendation"] == direct_target["target_recommendation"]
     assert by_market["crypto"]["target_recommendation"] == TARGET_RECOMMENDATION_INSUFFICIENT
     assert stats["groups"]["overview"]["target_recommendation"] == risk["target_recommendation"]
-    assert instrument["target_recommendation"] == risk["target_recommendation"]
+    assert instrument["target_recommendation"] == direct_target["target_recommendation"]
 
 
 def test_compute_journal_stats_target_recommendation_allows_moved_trade_with_original_plan() -> None:
@@ -401,10 +402,12 @@ def test_compute_journal_stats_target_recommendation_allows_moved_trade_with_ori
 
     stats = _compute_journal_stats(rows, balances=[])
     risk = stats["groups"]["risk_expectancy"]
+    direct_target = _target_r_recommendation(rows)
 
     assert risk["eligible_target_r_wins"] == 9
     assert risk["target_r_excluded_reasons"].get("moved_without_original_plan") is None
-    assert risk["target_recommendation"].startswith("Reduce target — Recommended: ")
+    assert risk["target_recommendation"].startswith("FX-only data — Recommended: ")
+    assert direct_target["target_recommendation"].startswith("Reduce target — Recommended: ")
 
 
 def test_compute_journal_stats_target_planned_r_uses_original_plan_and_validates_side() -> None:
@@ -437,8 +440,7 @@ def test_compute_journal_stats_target_planned_r_uses_original_plan_and_validates
             )
         )
 
-    short_stats = _compute_journal_stats(short_rows, balances=[])
-    short_risk = short_stats["groups"]["risk_expectancy"]
+    short_risk = _target_r_recommendation(short_rows)
     assert short_risk["current_avg_original_planned_target_r"] == pytest.approx(4.0)
     assert short_risk["target_recommendation"] == "Reduce target — Recommended: 3.25R (current median: 4.0R)"
 
@@ -454,7 +456,7 @@ def test_target_recommendation_uses_net_profit_over_original_monetary_risk_not_s
         for idx, realized_r in enumerate([2.4, 2.5, 2.7, 3.0, 3.1, 3.4, 3.6, 4.8], start=1)
     ]
 
-    risk = _compute_journal_stats(rows, balances=[])["groups"]["risk_expectancy"]
+    risk = _target_r_recommendation(rows)
 
     assert risk["target_r_peak_bucket"] == "3.0R-4.0R"
     assert risk["target_r_recommended"] == pytest.approx(3.25)
@@ -467,7 +469,7 @@ def test_target_recommendation_tied_modal_bucket_selects_lower_target() -> None:
         for idx, value in enumerate([2.0, 2.1, 2.5, 2.6, 5.0], start=1)
     ]
 
-    risk = _compute_journal_stats(rows, balances=[])["groups"]["risk_expectancy"]
+    risk = _target_r_recommendation(rows)
 
     assert risk["target_r_increment"] == pytest.approx(0.5)
     assert risk["target_r_distribution"]["2.0R-2.5R"] == 2
@@ -694,81 +696,106 @@ def test_oanda_export_closing_conversion_rate_is_not_used_for_target_r() -> None
     assert _target_r_realized_from_original_plan(row) == (None, "missing_opening_loss_conversion_factor")
 
 
-def test_overall_target_recommendation_labels_crypto_only_eligible_data() -> None:
-    fx_wins = [
-        _fx_trade_with_independent_conversion(f"fx-missing-{idx}", net_profit=15.0, conversion=None)
-        for idx in range(2)
+def _fx_target_wins(values: list[float], *, symbol: str = "EURUSD") -> list[dict]:
+    return [
+        _fx_trade_with_independent_conversion(f"fx-threshold-{symbol}-{idx}", net_profit=15.0 * value)
+        | {"symbol": symbol}
+        for idx, value in enumerate(values, start=1)
     ]
-    crypto_wins = [
+
+
+def _crypto_target_wins(values: list[float], *, symbol: str = "BTCUSDT") -> list[dict]:
+    return [
         _target_distribution_trade(
-            f"crypto-{idx}",
+            f"crypto-threshold-{symbol}-{idx}",
             value,
             asset_class="crypto",
             account="BYBIT",
-            symbol="BTCUSDT",
+            symbol=symbol,
             currency="USDT",
             original_risk_currency="USDT",
         )
-        for idx, value in enumerate([1.0, 1.1, 1.2, 1.3, 1.4], start=1)
+        for idx, value in enumerate(values, start=1)
     ]
 
-    risk = _target_r_recommendation(fx_wins + crypto_wins)
+
+@pytest.mark.parametrize(
+    ("fx_values", "crypto_values", "expected_prefix", "expected_note", "sample_count"),
+    [
+        ([8.0, 8.1, 8.2, 8.3], [1.0, 1.1, 1.2, 1.3, 1.4], "Crypto-only data", "FX: insufficient eligible wins", 5),
+        ([1.0, 1.1, 1.2, 1.3, 1.4], [8.0, 8.1, 8.2, 8.3], "FX-only data", "Crypto: insufficient eligible wins", 5),
+        ([], [1.0, 1.1, 1.2, 1.3, 1.4], "Crypto-only data", "FX: insufficient eligible wins", 5),
+        ([1.0, 1.1, 1.2, 1.3, 1.4], [], "FX-only data", "Crypto: insufficient eligible wins", 5),
+    ],
+)
+def test_overall_target_recommendation_uses_per_asset_class_thresholds(
+    fx_values: list[float],
+    crypto_values: list[float],
+    expected_prefix: str,
+    expected_note: str,
+    sample_count: int,
+) -> None:
+    rows = _fx_target_wins(fx_values) + _crypto_target_wins(crypto_values)
+
+    risk = _target_r_recommendation(rows, scope="overall")
 
     recommended = _format_target_r_value(risk["target_r_recommended"])
-    assert risk["target_recommendation"] == f"Crypto-only data — Recommended: {recommended}R — FX: insufficient eligible wins"
-    assert risk["target_r_total_winning_trades"] == 7
-    assert risk["target_r_total_fx_wins"] == 2
-    assert risk["target_r_total_crypto_wins"] == 5
-    assert risk["target_r_eligible_fx_wins"] == 0
-    assert risk["target_r_eligible_crypto_wins"] == 5
-    assert risk["target_r_excluded_winning_trades"] == 2
-    assert risk["target_r_winning_exclusion_reasons"]["missing_opening_loss_conversion_factor"] == 2
+    assert risk["target_recommendation"] == f"{expected_prefix} — Recommended: {recommended}R — {expected_note}"
+    assert risk["eligible_target_r_wins"] == sample_count
+    assert risk["target_r_eligible_winning_trades"] == len(fx_values) + len(crypto_values)
+    assert risk["target_r_fx_sufficient"] is (len(fx_values) >= MIN_ELIGIBLE_TARGET_R_WINS)
+    assert risk["target_r_crypto_sufficient"] is (len(crypto_values) >= MIN_ELIGIBLE_TARGET_R_WINS)
 
 
-def test_overall_target_recommendation_labels_fx_only_eligible_data() -> None:
-    fx_wins = [
-        _fx_trade_with_independent_conversion(f"fx-{idx}", net_profit=15.0 * value)
-        for idx, value in enumerate([1.0, 1.1, 1.2, 1.3, 1.4], start=1)
-    ]
-    crypto_wins = [
-        _target_distribution_trade(
-            f"crypto-missing-{idx}",
-            value,
-            asset_class="crypto",
-            account="BYBIT",
-            symbol="BTCUSDT",
-            currency="USD",
-            original_risk_currency="USDT",
-        )
-        for idx, value in enumerate([1.0, 1.1], start=1)
-    ]
+def test_overall_target_recommendation_is_insufficient_when_neither_asset_class_qualifies() -> None:
+    rows = _fx_target_wins([1.0, 1.1, 1.2]) + _crypto_target_wins([2.0, 2.1, 2.2])
 
-    risk = _target_r_recommendation(fx_wins + crypto_wins)
-
-    recommended = _format_target_r_value(risk["target_r_recommended"])
-    assert risk["target_recommendation"] == f"FX-only data — Recommended: {recommended}R — Crypto: insufficient eligible wins"
-    assert risk["target_r_eligible_fx_wins"] == 5
-    assert risk["target_r_eligible_crypto_wins"] == 0
-    assert risk["target_r_winning_exclusion_reasons"]["stored_risk_currency_mismatch"] == 2
-
-
-def test_overall_target_recommendation_uses_standard_insufficient_when_neither_class_has_enough_data() -> None:
-    rows = [
-        _fx_trade_with_independent_conversion("fx-one", net_profit=15.0),
-        _target_distribution_trade(
-            "crypto-one",
-            1.0,
-            asset_class="crypto",
-            account="BYBIT",
-            symbol="BTCUSDT",
-            currency="USDT",
-            original_risk_currency="USDT",
-        ),
-    ]
-
-    risk = _target_r_recommendation(rows)
+    risk = _target_r_recommendation(rows, scope="overall")
 
     assert risk["target_recommendation"] == TARGET_RECOMMENDATION_INSUFFICIENT
+    assert risk["eligible_target_r_wins"] == 0
+    assert risk["target_r_eligible_winning_trades"] == 6
+    assert risk["target_r_eligible_fx_wins"] == 3
+    assert risk["target_r_eligible_crypto_wins"] == 3
+
+
+def test_overall_target_recommendation_uses_normal_format_when_both_asset_classes_qualify() -> None:
+    rows = _fx_target_wins([1.0, 1.1, 1.2, 1.3, 1.4]) + _crypto_target_wins([2.0, 2.1, 2.2, 2.3, 2.4])
+
+    risk = _target_r_recommendation(rows, scope="overall")
+
+    assert "Recommended:" in risk["target_recommendation"]
+    assert "Crypto-only data" not in risk["target_recommendation"]
+    assert "FX-only data" not in risk["target_recommendation"]
+    assert risk["eligible_target_r_wins"] == 10
+    assert risk["target_r_fx_sufficient"] is True
+    assert risk["target_r_crypto_sufficient"] is True
+
+
+def test_symbol_target_recommendations_do_not_use_overall_coverage_wording() -> None:
+    rows = _crypto_target_wins([1.0, 1.1, 1.2, 1.3, 1.4], symbol="BTCUSDT")
+
+    stats = _compute_journal_stats(rows, balances=[])
+    overall = stats["groups"]["risk_expectancy"]
+    instrument = next(item for item in stats["by_instrument"] if item["symbol"] == "BTCUSDT")
+
+    assert overall["target_recommendation"].startswith("Crypto-only data — Recommended: ")
+    assert "Crypto-only data" not in instrument["target_recommendation"]
+    assert "FX-only data" not in instrument["target_recommendation"]
+    assert "Recommended:" in instrument["target_recommendation"]
+
+
+def test_fx_and_crypto_stats1_sections_keep_normal_target_recommendation_formats() -> None:
+    rows = _fx_target_wins([1.0, 1.1, 1.2, 1.3, 1.4]) + _crypto_target_wins([2.0, 2.1, 2.2, 2.3, 2.4])
+
+    stats = _compute_journal_stats(rows, balances=[])
+    by_market = stats["groups"]["by_market"]
+
+    for section in ("fx", "crypto"):
+        recommendation = by_market[section]["target_recommendation"]
+        assert "Recommended:" in recommendation
+        assert "Crypto-only data" not in recommendation
+        assert "FX-only data" not in recommendation
 
 
 def test_target_recommendation_uses_nested_complete_original_plan_after_partial_top_level_plan() -> None:
@@ -840,8 +867,8 @@ def test_target_recommendation_compares_modal_bucket_to_median_planned_target_r(
         for idx, value in enumerate(realized, start=1)
     ]
 
-    increase_risk = _compute_journal_stats(increase_rows, balances=[])["groups"]["risk_expectancy"]
-    keep_risk = _compute_journal_stats(keep_rows, balances=[])["groups"]["risk_expectancy"]
+    increase_risk = _target_r_recommendation(increase_rows)
+    keep_risk = _target_r_recommendation(keep_rows)
 
     assert increase_risk["target_recommendation"] == "Increase target — Recommended: 3.1R (current median: 2.0R)"
     assert keep_risk["target_recommendation"] == "Keep target — Recommended: 3.1R (current median: 3.0R)"

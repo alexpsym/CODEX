@@ -23360,7 +23360,7 @@ def _compute_journal_stats(
                 out.append(pct)
         return out
 
-    def _risk_bucket(rows_subset: List[Dict[str, object]]) -> Dict[str, object]:
+    def _risk_bucket(rows_subset: List[Dict[str, object]], *, scope: str = "standard") -> Dict[str, object]:
         winners = _winner_rows(rows_subset)
         losers = _loser_rows(rows_subset)
         win_results = _metric_values(winners, "result_pct")
@@ -23377,7 +23377,7 @@ def _compute_journal_stats(
         avg_stop_losers = _avg(_stop_pct_values(losers))
         avg_target_winners = _avg(_target_pct_values(winners))
         avg_target_losers = _avg(_target_pct_values(losers))
-        target_payload = _target_r_recommendation(rows_subset)
+        target_payload = _target_r_recommendation(rows_subset, scope=scope)
         return {
             "avg_stop_pct_winners": avg_stop_winners,
             "avg_stop_pct_losers": avg_stop_losers,
@@ -23953,7 +23953,7 @@ def _compute_journal_stats(
         }
 
     risk_by_market = {
-        "overall": {**_risk_bucket(trade_rows), **overall_drawdown},
+        "overall": {**_risk_bucket(trade_rows, scope="overall"), **overall_drawdown},
         "fx": {**_risk_bucket(fx_rows), **fx_drawdown},
         "crypto": {**_risk_bucket(crypto_rows), **crypto_drawdown},
     }
@@ -24051,6 +24051,7 @@ def _compute_journal_stats(
             pattern_breakdowns[f"pattern_{wanted}_losses"] = sum(1 for row in subset if _is_loss(row))
         min_commission_source = min(commission_rows, key=lambda item: (item[0], str(item[1].get("symbol") or "")))[1] if commission_rows else None
         max_commission_source = max(commission_rows, key=lambda item: (item[0], str(item[1].get("symbol") or "")))[1] if commission_rows else None
+        target_scope = "overall" if str(label or "").strip().lower() == "overall" else "standard"
         return {
             "label": label,
             "trades": len(rows_subset),
@@ -24081,7 +24082,7 @@ def _compute_journal_stats(
             "avg_target_pct": _avg(target_vals),
             "min_target_pct": _safe_min(target_vals),
             "max_target_pct": _safe_max(target_vals),
-            **_target_r_recommendation(rows_subset),
+            **_target_r_recommendation(rows_subset, scope=target_scope),
             "avg_duration_seconds": _avg(durations),
             "min_duration_seconds": min(durations) if durations else None,
             "max_duration_seconds": max(durations) if durations else None,
@@ -24193,7 +24194,7 @@ def _compute_journal_stats(
                 "stop_recommendation": _size_recommendation(
                     "stop", totals.get("avg_stop_pct_winners"), totals.get("avg_stop_pct_losers")
                 ),
-                **_target_r_recommendation(trade_rows),
+                **_target_r_recommendation(trade_rows, scope="overall"),
                 "avg_result_pct_winners": totals.get("avg_result_pct_winners"),
                 "avg_result_pct_losers": totals.get("avg_result_pct_losers"),
                 "avg_r_multiple_winners": totals.get("avg_r_multiple_winners"),
@@ -24228,7 +24229,7 @@ def _compute_journal_stats(
                 "stop_recommendation": _size_recommendation(
                     "stop", totals.get("avg_stop_pct_winners"), totals.get("avg_stop_pct_losers")
                 ),
-                **_target_r_recommendation(trade_rows),
+                **_target_r_recommendation(trade_rows, scope="overall"),
                 "avg_result_pct_winners": totals.get("avg_result_pct_winners"),
                 "avg_result_pct_losers": totals.get("avg_result_pct_losers"),
                 "avg_r_multiple_winners": totals.get("avg_r_multiple_winners"),
