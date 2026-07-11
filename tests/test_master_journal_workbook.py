@@ -2370,7 +2370,8 @@ def test_recommendations_are_removed_from_trade_log_and_kept_in_symbols_and_stat
             "id": f"eur-win-{idx}", "row_type": "trade", "account": "OANDA DEMO",
             "asset_class": "fx", "symbol": "EURUSD", "side": "BUY",
             "open_time": f"2026-01-{idx:02d}", "close_time": f"2026-01-{idx:02d}",
-            "entry_price": 100.0, "stop_loss": 99.0, "take_profit": 140.0,
+            "entry_price": 100.0, "exit_price": 100.0 + (10.0 * r_multiple),
+            "stop_loss": 99.0, "take_profit": 140.0,
             "planned_entry_price": 100.0, "planned_stop_price": 90.0, "planned_target_price": 140.0,
             "net_profit": 10.0, "result_pct": 1.0, "r_multiple": r_multiple,
         }
@@ -2380,7 +2381,7 @@ def test_recommendations_are_removed_from_trade_log_and_kept_in_symbols_and_stat
             "id": "eur-loss", "row_type": "trade", "account": "OANDA DEMO",
             "asset_class": "fx", "symbol": "EURUSD", "side": "BUY",
             "open_time": "2026-01-20", "close_time": "2026-01-20",
-            "entry_price": 100.0, "stop_loss": 98.0, "take_profit": 104.0,
+            "entry_price": 100.0, "exit_price": 95.0, "stop_loss": 98.0, "take_profit": 104.0,
             "planned_entry_price": 100.0, "planned_stop_price": 90.0, "planned_target_price": 140.0,
             "net_profit": -5.0, "result_pct": -0.5, "r_multiple": -0.5,
         },
@@ -2408,7 +2409,7 @@ def test_recommendations_are_removed_from_trade_log_and_kept_in_symbols_and_stat
     assert symbols.cell(INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, symbol_headers[STOP_RECOMMENDATION_HEADER]).value == "Recommendation"
     assert symbols.cell(INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, symbol_headers[TARGET_RECOMMENDATION_HEADER]).value == "Recommendation"
     assert symbols.cell(INSTRUMENT_AVERAGES_DATA_START_ROW, symbol_headers[STOP_RECOMMENDATION_HEADER]).value == "Reduce stop loss"
-    assert symbols.cell(INSTRUMENT_AVERAGES_DATA_START_ROW, symbol_headers[TARGET_RECOMMENDATION_HEADER]).value == "Reduce target to 2.5-3.5R"
+    assert symbols.cell(INSTRUMENT_AVERAGES_DATA_START_ROW, symbol_headers[TARGET_RECOMMENDATION_HEADER]).value == "Reduce target — Recommended: 3.0R (current median: 4.0R)"
     assert _cell_fill_rgb(symbols.cell(INSTRUMENT_AVERAGES_DATA_START_ROW, symbol_headers[STOP_RECOMMENDATION_HEADER])) not in {"FFF2CC", PROFIT_FILL, LOSS_FILL}
     assert _cell_fill_rgb(symbols.cell(INSTRUMENT_AVERAGES_DATA_START_ROW, symbol_headers[TARGET_RECOMMENDATION_HEADER])) not in {"FFF2CC", PROFIT_FILL, LOSS_FILL}
 
@@ -2419,7 +2420,11 @@ def test_recommendations_are_removed_from_trade_log_and_kept_in_symbols_and_stat
     ]
     assert len(recommendation_rows) >= 2
     assert [stats1.cell(recommendation_rows[0], col).value for col in (2, 3, 4)] == ["Reduce stop loss", "Reduce stop loss", "Need wins & losses"]
-    assert [stats1.cell(recommendation_rows[1], col).value for col in (2, 3, 4)] == ["Reduce target to 2.5-3.5R", "Reduce target to 2.5-3.5R", "Need more target data"]
+    assert [stats1.cell(recommendation_rows[1], col).value for col in (2, 3, 4)] == [
+        "Reduce target — Recommended: 3.0R (current median: 4.0R)",
+        "Reduce target — Recommended: 3.0R (current median: 4.0R)",
+        "Insufficient eligible wins — recommended target unavailable",
+    ]
     wb.close()
 
 
@@ -2824,7 +2829,7 @@ def test_update_data_only_writes_dashboard_horizontal_core_metric_aliases(tmp_pa
     ws["A11"] = "Best Win Streak"; ws["A12"] = "Worst Losing Streak"; ws["A15"] = "Avg stop %"; ws["A16"] = "Min stop %"; ws["A17"] = "Max stop %"; ws["A18"] = "Avg target %"; ws["A19"] = "Min target %"; ws["A20"] = "Max target %"
     ws["F1"] = "Winners"; ws["F8"] = "Losers"; ws["F14"] = "Drawdown"; ws["I1"] = "Instrument leaders"; ws["L1"] = "Account Balances"; ws["L2"] = "Account"; ws["M2"] = "Balance"; ws["N2"] = "Currency"; ws["L3"] = "BINANCE"
     _ensure_trade_log_headers(wb); wb.save(p); wb.close()
-    snap = {"stats": {"totals": {}, "groups": {"by_market": {"overall": {"winning_streak": 4, "losing_streak": 3, "max_stop_pct": 8.5, "max_target_pct": 9.5, STOP_RECOMMENDATION_HEADER: "Reduce stop loss", TARGET_RECOMMENDATION_HEADER: "Increase target"}, "fx": {"winning_streak": 2, "losing_streak": 1, "max_stop_pct": 4.0, "max_target_pct": 5.0, STOP_RECOMMENDATION_HEADER: "Keep stop loss", TARGET_RECOMMENDATION_HEADER: "Keep target"}, "crypto": {"winning_streak": 6, "losing_streak": 7, "max_stop_pct": 10.75, "max_target_pct": 12.25, STOP_RECOMMENDATION_HEADER: "Increase stop loss", TARGET_RECOMMENDATION_HEADER: "Reduce target"}}, "risk_expectancy": {}, "leaders": {}, "duration": {}}}, "balances": [{"account_label": "BINANCE", "balance": 0, "currency": "USDT"}]}
+    snap = {"stats": {"totals": {}, "groups": {"by_market": {"overall": {"winning_streak": 4, "losing_streak": 3, "max_stop_pct": 8.5, "max_target_pct": 9.5, STOP_RECOMMENDATION_HEADER: "Reduce stop loss", TARGET_RECOMMENDATION_HEADER: "Increase target — Recommended: 3.0R"}, "fx": {"winning_streak": 2, "losing_streak": 1, "max_stop_pct": 4.0, "max_target_pct": 5.0, STOP_RECOMMENDATION_HEADER: "Keep stop loss", TARGET_RECOMMENDATION_HEADER: "Keep target — Recommended: 2.5R"}, "crypto": {"winning_streak": 6, "losing_streak": 7, "max_stop_pct": 10.75, "max_target_pct": 12.25, STOP_RECOMMENDATION_HEADER: "Increase stop loss", TARGET_RECOMMENDATION_HEADER: "Reduce target — Recommended: 2.0R"}}, "risk_expectancy": {}, "leaders": {}, "duration": {}}}, "balances": [{"account_label": "BINANCE", "balance": 0, "currency": "USDT"}]}
     res = update_master_journal_workbook_data_only(p, snap)
     assert res["ok"] is True
     Path(res["candidate_path"]).replace(p)
@@ -2842,7 +2847,7 @@ def test_update_data_only_writes_dashboard_horizontal_core_metric_aliases(tmp_pa
     assert [ws.cell(stop_recommendation_row, c).value for c in range(2, 5)] == ["Need wins & losses", "Need wins & losses", "Need wins & losses"]
     assert ws.cell(max_target_row + 1, 1).value == "Source"
     assert ws.cell(target_recommendation_row, 1).value == "Recommendation"
-    assert [ws.cell(target_recommendation_row, c).value for c in range(2, 5)] == ["Increase target", "Keep target", "Reduce target"]
+    assert [ws.cell(target_recommendation_row, c).value for c in range(2, 5)] == ["Increase target — Recommended: 3.0R", "Keep target — Recommended: 2.5R", "Reduce target — Recommended: 2.0R"]
     assert all(_cell_fill_rgb(ws.cell(11, col)) == "C6EFCE" for col in range(2, 5))
     assert all(_cell_font_rgb(ws.cell(11, col)) == "006100" for col in range(2, 5))
     assert all(_cell_fill_rgb(ws.cell(14, col)) == "FFC7CE" for col in range(2, 5))

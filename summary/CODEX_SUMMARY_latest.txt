@@ -1,78 +1,46 @@
-Local repo path migration summary
+Codex completion workflow and target recommendation analytics summary
 
 Files changed:
-- PATCH_DESKTOP_PUSH.bat
-- run_local_master_control.bat
-- run_scanner_local.bat
-- shared/env_bootstrap.py
-- INSTALL.bat
-- render/master_service.py
-- render/README.md
-- custom instructions/CODEX_BRIEF_INSTRUCTIONS.txt
-- mt5-clone/MQL5/Experts/MarketWatchSpreadPercentFeed.mq5
-- mt5-clone/MQL5/Experts/Trader.mq5
-- tests/test_patch_desktop_push.py
-- tests/test_merged_monitor_status_env.py
+- AGENTS.md
 - summary/CODEX_SUMMARY_latest.txt
+- tools/master_journal_workbook.py
+- render/static/trading_journal.js
+- tests/test_master_service_trading_journal_stats.py
+- tests/test_master_journal_workbook.py
+- tests/test_trading_journal_js_syntax.py
 
-Old path replaced:
-- Old repo root: C:\Users\User\Documents\GPT\CODEX-master
-- Old external GPT/env root default: C:\Users\User\Documents\GPT
-- Old env default: C:\Users\User\Documents\GPT\env.env
-- Old push log default: C:\Users\User\Documents\GPT\PATCH_DESKTOP_PUSH-latest.log
+Repository instruction update:
+- Added root-level AGENTS.md for persistent Codex repository instructions.
+- Added the mandatory completion workflow:
+  - write the final summary to summary/CODEX_SUMMARY_latest.txt after every completed task,
+  - run repository-root PATCH_DESKTOP_PUSH.bat after writing the summary,
+  - only skip commit/push when the user explicitly says not to push,
+  - do not report completion until the script succeeds and verifies local HEAD matches origin/master,
+  - report exact script failures and leave work incomplete if the script fails,
+  - do not replace the script with manual Git commands unless the script is broken,
+  - do not commit secrets, env files, logs, caches, runtime data, or local-state files.
+- Clarified that custom instructions/CODEX_BRIEF_INSTRUCTIONS.txt is ChatGPT-only and must not be used as Codex persistent instructions.
 
-New path used:
-- Repo root default: C:\GPT\CODEX-master
-- External env/log root default: C:\GPT
-- Env file default: C:\GPT\env.env
-- Push log default: C:\GPT\PATCH_DESKTOP_PUSH-latest.log
-
-What changed:
-- PATCH_DESKTOP_PUSH.bat now defaults to C:\GPT\CODEX-master and C:\GPT\PATCH_DESKTOP_PUSH-latest.log.
-- PATCH_DESKTOP_PUSH.bat now fails explicitly if the repo path cannot be opened or if .git is missing, and tells the user not to run git init blindly.
-- run_local_master_control.bat now defaults MASTER_ENV_DIR to C:\GPT and MASTER_ENV_FILE to C:\GPT\env.env.
-- run_scanner_local.bat now defaults MASTER_ENV_FILE to C:\GPT\env.env.
-- Local launcher missing-env messages now tell the user to copy C:\Users\User\Documents\GPT\env.env to C:\GPT\env.env.
-- TRADING_JOURNAL_LOCAL_DIR remains based on %ROOT%journal.
-- shared/env_bootstrap.py now defaults to C:\GPT and C:\GPT\env.env while preserving env override behavior and repo-root .env fallback behavior.
-- INSTALL.bat fallback script directory is now C:\GPT and its existing non-Git-folder recovery path now prints the checked .git path and a no-git-init warning.
-- render/master_service.py and render/README.md now point user-facing local env guidance at C:\GPT\env.env.
-- custom instructions now refer to repo-root PATCH_DESKTOP_PUSH.bat with C:\GPT defaults instead of the old Documents\GPT script path.
-- MT5 default inputs now point at C:\GPT\CODEX-master for the spread window script and Pepperstone spread export file.
-- Tests expecting old Documents\GPT defaults were updated to C:\GPT defaults.
-- A stale launcher assertion in tests/test_merged_monitor_status_env.py was aligned with the existing stream_local_master_worker.ps1 launcher behavior already asserted by tests/test_windows_launchers.py.
-
-Files deliberately not changed:
-- state_backup.json: pre-existing dirty runtime state; it still contains an old local_dir entry. It was not edited because runtime state must not be committed for this migration.
-- render/data/*: pre-existing dirty runtime data was not edited.
-- logs/*, .pytest_tmp*, .pytest_cache, __pycache__: generated/cache/runtime artifacts were not edited or staged.
-- C:\Users\User\Documents\TRADING, C:\Users\User\Documents\LEDGER, C:\Users\User\Documents\MEDIPORT, C:\Users\User\Downloads, MT5 terminal data paths, and Tesseract install paths were not changed.
-- The old folder C:\Users\User\Documents\GPT\CODEX-master was not deleted.
-
-Search verification:
-- git grep for old repo paths C:\Users\User\Documents\GPT\CODEX-master and Documents\GPT\CODEX-master, excluding state_backup.json: no matches.
-- git grep for old PATCH_DESKTOP_PUSH path C:\Users\User\Documents\GPT\PATCH_DESKTOP_PUSH.bat: no matches.
-- Remaining tracked C:\Users\User\Documents\GPT matches are only:
-  - launcher copy hints telling the user to copy the old env file to C:\GPT\env.env,
-  - the matching test assertion for that hint,
-  - state_backup.json pre-existing runtime state, deliberately not changed.
+Target recommendation analytics update:
+- Replaced target recommendation logic based on winner-versus-loser average target distance.
+- Target recommendations now come from eligible positive winning R-multiple frequency distributions.
+- Eligible target analysis requires genuine non-test winning trades with trustworthy original entry, stop, target, side, and exit data.
+- Realized winning R is recalculated from original risk distance instead of trusting a moved-stop or stored R multiple.
+- Original planned target R is compared using the median planned target R for the same scope.
+- Freedman-Diaconis bin width is snapped deterministically to 0.25R, 0.5R, or 1.0R.
+- The modal R bucket becomes the recommended target; tied modal buckets choose the lower R target.
+- Recommendation cells now include both direction and numeric recommendation, for example: Reduce target - Recommended: 3.0R (current median: 4.0R).
+- Insufficient target data now reports: Insufficient eligible wins - recommended target unavailable.
+- JavaScript target recommendation fallback no longer recreates target advice from average winner/loss target distances.
+- Trade Log recommendation columns remain removed from the active schema; SYMBOLS and STATS1 receive the target recommendation strings.
 
 Verification performed:
-- py -3 -m pytest tests/test_patch_desktop_push.py tests/test_merged_monitor_status_env.py tests/test_windows_launchers.py
-  Result: failed because py is not recognized on PATH in this environment.
-- python --version
-  Result: Python 3.13.2 from C:\Users\User\miniconda3\python.exe.
-- python -m pytest tests/test_patch_desktop_push.py tests/test_merged_monitor_status_env.py tests/test_windows_launchers.py
-  Result: 81 passed, 4 warnings in 32.50s.
-- python -m py_compile shared/env_bootstrap.py render/master_service.py
+- python -m py_compile tools\master_journal_workbook.py render\master_service.py
   Result: passed.
+- pytest --basetemp=.pytest_tmp_target_rec tests\test_master_service_trading_journal_stats.py::test_compute_journal_stats_recommends_stop_from_win_loss_distances_but_target_needs_r_data tests\test_master_service_trading_journal_stats.py::test_compute_journal_stats_target_recommendation_uses_realized_original_r_distribution tests\test_master_service_trading_journal_stats.py::test_compute_journal_stats_target_recommendation_allows_moved_trade_with_original_plan tests\test_master_service_trading_journal_stats.py::test_compute_journal_stats_target_planned_r_uses_original_plan_and_validates_side tests\test_master_service_trading_journal_stats.py::test_target_recommendation_recalculates_r_from_original_stop_not_stored_r tests\test_master_service_trading_journal_stats.py::test_target_recommendation_tied_modal_bucket_selects_lower_target tests\test_master_service_trading_journal_stats.py::test_target_recommendation_compares_modal_bucket_to_median_planned_target_r tests\test_master_journal_workbook.py::test_recommendations_are_removed_from_trade_log_and_kept_in_symbols_and_stats1 tests\test_master_journal_workbook.py::test_data_only_update_repairs_stale_recommendation_columns_and_stats1_labels tests\test_master_journal_workbook.py::test_update_data_only_writes_dashboard_horizontal_core_metric_aliases tests\test_trading_journal_js_syntax.py::test_trading_journal_target_recommendation_does_not_fallback_to_averages tests\test_trading_journal_js_syntax.py::test_trading_journal_js_parses_with_node
+  Result: 12 passed, 6 warnings.
 
-Manual steps remaining:
-- Copy C:\Users\User\Documents\GPT\env.env to C:\GPT\env.env if it is not already there.
-- Reopen Codex Desktop at C:\GPT\CODEX-master.
-- Let local runtime state regenerate from the new repo path, or handle state_backup.json separately as a local runtime-state maintenance step.
-
-Git safety:
-- git init was not run.
-- The Git remote was not changed.
-- Secrets, env files, logs, cache, runtime state, and generated temp files were not committed.
+Git safety notes before push:
+- Pre-existing local/runtime changes were present before this AGENTS.md update.
+- Do not commit runtime/local-state paths such as render/data, render/uploads, state_backup.json, state_manifest.json, or unrelated local monitor state.
+- PATCH_DESKTOP_PUSH.bat will be run from the repository root after this summary is written.

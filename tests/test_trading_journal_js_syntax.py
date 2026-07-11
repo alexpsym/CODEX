@@ -84,7 +84,7 @@ def test_trading_journal_target_recommendation_does_not_fallback_to_averages() -
     js = JS_PATH.read_text(encoding="utf-8")
     assert "recommendationFromAverages('target'" not in js
     assert "recommendationFromAverages(\n      'target'" not in js
-    assert "return 'Need more target data';" in js
+    assert "Insufficient eligible wins — recommended target unavailable" in js
     assert "return directRecommendation(item, 'target') || overallRecommendation('target');" in js
 
 

@@ -532,6 +532,8 @@
     return win < loss ? `Reduce ${label}` : `Increase ${label}`;
   }
 
+  const TARGET_RECOMMENDATION_INSUFFICIENT = 'Insufficient eligible wins — recommended target unavailable';
+
   function recommendationTone(text) {
     const lower = String(text || '').toLowerCase();
     if (lower.startsWith('reduce ') || lower.startsWith('increase ')) return 'tj-rec-action';
@@ -558,7 +560,7 @@
         item?.avg_sl_pct_losses ?? item?.avg_sl_distance_pips_losses ?? item?.avg_sl_distance_quote_losses
       );
     }
-    return 'Need more target data';
+    return TARGET_RECOMMENDATION_INSUFFICIENT;
   }
 
   function overallRecommendation(kind) {
@@ -567,7 +569,7 @@
     if (direct) return direct;
     return kind === 'stop'
       ? recommendationFromAverages('stop', risk.avg_stop_pct_winners, risk.avg_stop_pct_losers)
-      : 'Need more target data';
+      : TARGET_RECOMMENDATION_INSUFFICIENT;
   }
 
   function rowRecommendation(row, kind) {
