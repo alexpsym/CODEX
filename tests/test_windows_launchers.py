@@ -26,6 +26,143 @@ def _installer_script_path() -> Path:
     return modern if modern.exists() else legacy
 
 
+def _powershell_exe() -> str:
+    powershell = shutil.which('powershell.exe') or shutil.which('powershell')
+    if not powershell:
+        pytest.skip('PowerShell is required for Windows launcher tests')
+    return powershell
+
+
+def _cmd_exe() -> str:
+    cmd = shutil.which('cmd.exe')
+    if not cmd:
+        pytest.skip('cmd.exe is required for Windows BAT smoke test')
+    return cmd
+
+
+def _normal_marker_payload(reason: str, action: str) -> str:
+    return json.dumps(
+        {
+            'reason': reason,
+            'timestamp': '2026-07-12T00:00:00Z',
+            'server_pid': 12345,
+            'requesting_action': action,
+        },
+        sort_keys=True,
+    )
+
+
+def _run_normal_marker_helper(marker: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            _powershell_exe(),
+            '-NoProfile',
+            '-ExecutionPolicy',
+            'Bypass',
+            '-File',
+            str(ROOT / 'tools' / 'windows_launchers' / 'write_local_master_normal_exit_marker.ps1'),
+            '-MarkerPath',
+            str(marker),
+            '-Reason',
+            'batch_exit_request',
+            '-RequestingAction',
+            'batch_post_uvicorn',
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+
+def _run_worker_console_smoke(smoke_dir: Path, normal_marker_text: str | None = None) -> tuple[subprocess.CompletedProcess[str], str, str, Path]:
+    cmd_exe = _cmd_exe()
+    smoke_dir.mkdir(exist_ok=True)
+    worker_log = smoke_dir / 'worker-console-smoke.log'
+    exit_request = smoke_dir / 'exit-smoke.flag'
+    normal_exit = smoke_dir / 'normal-smoke.flag'
+    failed_marker = smoke_dir / 'failed-smoke.flag'
+    for path in (worker_log, exit_request, normal_exit, failed_marker):
+        if path.exists():
+            path.unlink()
+    exit_request.write_text('exit requested\n', encoding='utf-8')
+    if normal_marker_text is not None:
+        normal_exit.write_text(normal_marker_text, encoding='utf-8')
+
+    env = os.environ.copy()
+    env.update(
+        {
+            'SPREAD_MONITOR_SKIP_REQUIREMENTS_INSTALL': '1',
+            'PYTHON': cmd_exe,
+            'LOCAL_MASTER_WINDOW_TITLE': f'Codex BAT Smoke Test {os.getpid()}',
+            'LOCAL_MASTER_SUPPRESS_WINDOW_CLOSE': '1',
+            'LOCAL_MASTER_WORKER_LOG': str(worker_log),
+            'LOCAL_MASTER_EXIT_REQUEST': str(exit_request),
+            'LOCAL_MASTER_NORMAL_EXIT_FILE': str(normal_exit),
+            'LOCAL_MASTER_WORKER_FAILED_FILE': str(failed_marker),
+        }
+    )
+    result = subprocess.run(
+        [cmd_exe, '/d', '/c', 'call', str(ROOT / 'tools' / 'windows_launchers' / 'local_master_worker_console.bat')],
+        cwd=ROOT,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        creationflags=_windows_console_safe_creationflags(),
+        timeout=45,
+    )
+    combined_output = f"{result.stdout}\n{result.stderr}"
+    log_text = worker_log.read_text(encoding='utf-8') if worker_log.exists() else ''
+    return result, combined_output, log_text, normal_exit
+
+
+def _run_streamer_with_fake_worker(tmp_path: Path, worker_lines: list[str], exit_code: int = 1, normal_marker: str | None = None) -> subprocess.CompletedProcess[str]:
+    cmd_exe = _cmd_exe()
+    fake_root = tmp_path / 'fake-root'
+    fake_root.mkdir()
+    worker_log = tmp_path / 'stream-worker.log'
+    batch = fake_root / 'run_local_master_control.bat'
+    batch_lines = ['@echo off']
+    for line in worker_lines:
+        batch_lines.append(f'echo {line}')
+    batch_lines.append(f'exit /b {exit_code}')
+    batch.write_text('\n'.join(batch_lines) + '\n', encoding='utf-8')
+
+    env = os.environ.copy()
+    env['COMSPEC'] = cmd_exe
+    if normal_marker is not None:
+        marker_path = tmp_path / 'normal-exit.json'
+        marker_path.write_text(normal_marker, encoding='utf-8')
+        env['LOCAL_MASTER_NORMAL_EXIT_FILE'] = str(marker_path)
+    else:
+        env.pop('LOCAL_MASTER_NORMAL_EXIT_FILE', None)
+
+    return subprocess.run(
+        [
+            _powershell_exe(),
+            '-NoProfile',
+            '-ExecutionPolicy',
+            'Bypass',
+            '-File',
+            str(ROOT / 'tools' / 'windows_launchers' / 'stream_local_master_worker.ps1'),
+            '-Root',
+            str(fake_root),
+            '-WorkerLog',
+            str(worker_log),
+            '-MasterReadyTimeoutSeconds',
+            '2',
+            '-ScannerReadyTimeoutSeconds',
+            '2',
+        ],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=45,
+    )
+
+
 def test_run_local_master_loads_env_before_render_url_check() -> None:
     script = (ROOT / 'run_local_master_control.bat').read_text(encoding='utf-8')
     assert 'call :load_master_env_vars' in script
@@ -393,6 +530,7 @@ def test_run_local_master_parent_logs_are_condensed_and_worker_logs_are_detailed
     assert 'echo [local-master] waiting for %MASTER_HEALTH_URL% ...' in script
     assert 'echo [local-master] worker started at !DATE! !TIME!' in script
     assert 'echo [local-master] uvicorn restart generation !LOCAL_MASTER_UVICORN_GENERATION!' in script
+    assert 'write_local_master_normal_exit_marker.ps1' in script
     assert 'Check worker startup log: %LOCAL_MASTER_WORKER_LOG%' in script
     parent_idx = script.find('echo [local-master] launcher starting.')
     worker_idx = script.find(':worker')
@@ -440,8 +578,10 @@ def test_run_local_master_worker_console_stays_visible_on_abnormal_failure() -> 
     assert 'dashboard recovered after worker restart.' in streamer
     assert 'configured autostart targets recovered:' in streamer
     assert 'autostart readiness lost after startup:' in streamer
-    assert 'worker process ended: worker_pid={0} uvicorn_pid=unknown exit_code={1}' in streamer
-    assert 'process disappeared before clean Uvicorn exit logging' in streamer
+    assert 'worker process ended: worker_pid={0} uvicorn_pid=unknown uvicorn_generation={1}' in streamer
+    assert 'latest_uvicorn_exit_code={4} worker_exit_code={5}' in streamer
+    assert 'process disappeared before clean Uvicorn exit logging for generation {0}' in streamer
+    assert 'Select-String -LiteralPath $script:WorkerLogPath -Pattern "uvicorn exited with"' not in streamer
     assert 'startup complete. Live server log remains open below.' in streamer
 
 
@@ -457,47 +597,148 @@ def test_run_local_master_worker_dead_fail_fast_before_health_timeout() -> None:
     assert 'Browser was not opened because the worker is no longer running.' in script
 
 
+def test_batch_normal_exit_marker_fallback_preserves_valid_api_markers(tmp_path: Path) -> None:
+    for reason, action in (
+        ('exit_button', 'local_exit'),
+        ('launcher_preflight', 'local_shutdown'),
+    ):
+        marker = tmp_path / f'{reason}.json'
+        original = _normal_marker_payload(reason, action)
+        marker.write_text(original, encoding='utf-8')
+
+        result = _run_normal_marker_helper(marker)
+
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert json.loads(marker.read_text(encoding='utf-8')) == json.loads(original)
+        assert 'preserving existing normal-exit marker' in result.stdout
+        assert reason in result.stdout
+
+
+def test_batch_normal_exit_marker_fallback_writes_when_missing(tmp_path: Path) -> None:
+    marker = tmp_path / 'missing.json'
+
+    result = _run_normal_marker_helper(marker)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    payload = json.loads(marker.read_text(encoding='utf-8-sig'))
+    assert payload['reason'] == 'batch_exit_request'
+    assert payload['requesting_action'] == 'batch_post_uvicorn'
+    assert payload['timestamp']
+    assert 'wrote fallback normal-exit marker' in result.stdout
+
+
+@pytest.mark.parametrize('initial_text', ['', '{not valid json'])
+def test_batch_normal_exit_marker_fallback_replaces_invalid_marker_with_diagnostic(tmp_path: Path, initial_text: str) -> None:
+    marker = tmp_path / 'corrupt.json'
+    marker.write_text(initial_text, encoding='utf-8')
+
+    result = _run_normal_marker_helper(marker)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    payload = json.loads(marker.read_text(encoding='utf-8-sig'))
+    assert payload['reason'] == 'batch_exit_request'
+    assert payload['requesting_action'] == 'batch_post_uvicorn'
+    assert 'invalid existing normal-exit marker' in result.stdout
+    assert list(tmp_path.glob('corrupt.json.invalid.*'))
+
+
+@pytest.mark.parametrize(
+    ('reason', 'action', 'expected'),
+    [
+        ('exit_button', 'local_exit', 'Controlled Exit-button shutdown completed.'),
+        ('launcher_preflight', 'local_shutdown', 'Controlled replacement by a new launcher completed.'),
+    ],
+)
+def test_worker_console_preserves_api_marker_until_controlled_classification(
+    tmp_path: Path,
+    reason: str,
+    action: str,
+    expected: str,
+) -> None:
+    result, combined_output, log_text, normal_exit = _run_worker_console_smoke(
+        tmp_path,
+        _normal_marker_payload(reason, action),
+    )
+
+    assert result.returncode == 0, combined_output + '\n' + log_text
+    assert expected in combined_output
+    assert 'Normal-exit marker:' in combined_output
+    assert reason in combined_output
+    assert 'Startup failure:' not in combined_output
+    assert 'Unexpected runtime worker exit' not in combined_output
+    assert 'preserving existing normal-exit marker' in log_text
+    assert not normal_exit.exists()
+
+
+def test_streamer_uses_latest_uvicorn_generation_exit_code(tmp_path: Path) -> None:
+    result = _run_streamer_with_fake_worker(
+        tmp_path,
+        [
+            '[local-master] starting uvicorn at old time',
+            '[local-master] uvicorn restart generation 1',
+            '[local-master] uvicorn exited with -1 at old time',
+            '[local-master] starting uvicorn at new time',
+            '[local-master] uvicorn restart generation 2',
+            '[local-master] uvicorn exited with 7 at new time',
+        ],
+        exit_code=7,
+    )
+
+    assert result.returncode == 7, result.stdout + result.stderr
+    assert 'uvicorn_generation=2' in result.stdout
+    assert 'latest_uvicorn_exit_logged=True' in result.stdout
+    assert 'latest_uvicorn_exit_code=7' in result.stdout
+    assert 'latest uvicorn generation 2 exited with 7.' in result.stdout
+    assert 'process disappeared before clean Uvicorn exit logging' not in result.stdout
+
+
+def test_streamer_previous_uvicorn_exit_does_not_satisfy_latest_generation(tmp_path: Path) -> None:
+    result = _run_streamer_with_fake_worker(
+        tmp_path,
+        [
+            '[local-master] starting uvicorn at old time',
+            '[local-master] uvicorn restart generation 1',
+            '[local-master] uvicorn exited with -1 at old time',
+            '[local-master] starting uvicorn at new time',
+            '[local-master] uvicorn restart generation 2',
+            'INFO:     Application startup complete.',
+            '[local-master] dashboard recovered after worker restart.',
+        ],
+        exit_code=1,
+    )
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert 'uvicorn_generation=2' in result.stdout
+    assert 'latest_uvicorn_exit_logged=False' in result.stdout
+    assert 'latest_uvicorn_exit_code=none' in result.stdout
+    assert 'process disappeared before clean Uvicorn exit logging for generation 2' in result.stdout
+    assert 'external/forced termination' in result.stdout
+
+
+def test_streamer_normal_marker_suppresses_external_termination_diagnosis(tmp_path: Path) -> None:
+    result = _run_streamer_with_fake_worker(
+        tmp_path,
+        [
+            '[local-master] starting uvicorn at old time',
+            '[local-master] uvicorn restart generation 1',
+            '[local-master] uvicorn exited with -1 at old time',
+            '[local-master] starting uvicorn at new time',
+            '[local-master] uvicorn restart generation 2',
+        ],
+        exit_code=0,
+        normal_marker=_normal_marker_payload('exit_button', 'local_exit'),
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert 'uvicorn_generation=2' in result.stdout
+    assert 'normal_marker_exists=True' in result.stdout
+    assert 'process disappeared before clean Uvicorn exit logging' not in result.stdout
+
+
 def test_run_local_master_worker_console_smoke_has_no_cmd_syntax_error() -> None:
-    cmd_exe = shutil.which('cmd.exe')
-    if not cmd_exe:
-        pytest.skip('cmd.exe is required for Windows BAT smoke test')
-
     smoke_dir = ROOT / '.pytest_tmp_launcher_smoke'
-    smoke_dir.mkdir(exist_ok=True)
-    worker_log = smoke_dir / 'worker-console-smoke.log'
-    exit_request = smoke_dir / 'exit-smoke.flag'
-    normal_exit = smoke_dir / 'normal-smoke.flag'
-    failed_marker = smoke_dir / 'failed-smoke.flag'
-    for path in (worker_log, exit_request, normal_exit, failed_marker):
-        if path.exists():
-            path.unlink()
-    exit_request.write_text('exit requested\n', encoding='utf-8')
+    result, combined_output, log_text, _normal_exit = _run_worker_console_smoke(smoke_dir)
 
-    env = os.environ.copy()
-    env.update(
-        {
-            'SPREAD_MONITOR_SKIP_REQUIREMENTS_INSTALL': '1',
-            'PYTHON': cmd_exe,
-            'LOCAL_MASTER_WINDOW_TITLE': f'Codex BAT Smoke Test {os.getpid()}',
-            'LOCAL_MASTER_SUPPRESS_WINDOW_CLOSE': '1',
-            'LOCAL_MASTER_WORKER_LOG': str(worker_log),
-            'LOCAL_MASTER_EXIT_REQUEST': str(exit_request),
-            'LOCAL_MASTER_NORMAL_EXIT_FILE': str(normal_exit),
-            'LOCAL_MASTER_WORKER_FAILED_FILE': str(failed_marker),
-        }
-    )
-    result = subprocess.run(
-        [cmd_exe, '/d', '/c', 'call', str(ROOT / 'tools' / 'windows_launchers' / 'local_master_worker_console.bat')],
-        cwd=ROOT,
-        env=env,
-        stdin=subprocess.DEVNULL,
-        capture_output=True,
-        text=True,
-        creationflags=_windows_console_safe_creationflags(),
-        timeout=45,
-    )
-    combined_output = f"{result.stdout}\n{result.stderr}"
-    log_text = worker_log.read_text(encoding='utf-8') if worker_log.exists() else ''
     assert result.returncode == 0, combined_output + '\n' + log_text
     assert 'The syntax of the command is incorrect.' not in combined_output
     assert 'The syntax of the command is incorrect.' not in log_text

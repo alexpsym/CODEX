@@ -17,6 +17,75 @@ $script:LastHealthOkAt = $null
 $script:LastAutostartOkAt = $null
 $script:StartupCompleted = $false
 
+function New-UvicornGenerationEvidence {
+    param(
+        [AllowNull()] [object] $Generation = $null,
+        [bool] $StartLogged = $false,
+        [AllowNull()] [string] $StartLine = ""
+    )
+
+    return [pscustomobject]@{
+        Generation = $Generation
+        StartLogged = $StartLogged
+        StartLine = [string] $StartLine
+        ExitLogged = $false
+        ExitCode = $null
+        ExitLine = ""
+    }
+}
+
+function Get-LatestUvicornGenerationEvidence {
+    param([string] $LogPath)
+
+    $evidence = New-UvicornGenerationEvidence
+    $pendingStartLine = ""
+    if (-not (Test-Path -LiteralPath $LogPath -PathType Leaf)) {
+        return $evidence
+    }
+
+    try {
+        foreach ($line in Get-Content -LiteralPath $LogPath -ErrorAction Stop) {
+            $text = [string] $line
+            if ($text -match "starting uvicorn") {
+                $pendingStartLine = $text
+                if ($null -eq $evidence.Generation -or $evidence.ExitLogged) {
+                    $evidence = New-UvicornGenerationEvidence -StartLogged $true -StartLine $text
+                }
+                else {
+                    $evidence.StartLogged = $true
+                    $evidence.StartLine = $text
+                }
+                continue
+            }
+
+            if ($text -match "uvicorn restart generation\s+([0-9]+)") {
+                $startLine = $text
+                if (-not [string]::IsNullOrWhiteSpace($pendingStartLine)) {
+                    $startLine = $pendingStartLine
+                }
+                $evidence = New-UvicornGenerationEvidence -Generation ([int] $Matches[1]) -StartLogged $true -StartLine $startLine
+                $pendingStartLine = ""
+                continue
+            }
+
+            if ($text -match "uvicorn exited with\s+(-?[0-9]+)") {
+                if ($null -eq $evidence.Generation -and -not $evidence.StartLogged) {
+                    $evidence = New-UvicornGenerationEvidence
+                }
+                $evidence.ExitLogged = $true
+                $evidence.ExitCode = [int] $Matches[1]
+                $evidence.ExitLine = $text
+                $pendingStartLine = ""
+            }
+        }
+    }
+    catch {
+        return $evidence
+    }
+
+    return $evidence
+}
+
 function Write-LiveLine {
     param([AllowNull()] [string] $Line)
 
@@ -384,18 +453,17 @@ $normalMarkerExists = $false
 if (-not [string]::IsNullOrWhiteSpace($normalMarkerPath)) {
     $normalMarkerExists = Test-Path -LiteralPath $normalMarkerPath -PathType Leaf
 }
-$uvicornExitLogged = $false
-if (Test-Path -LiteralPath $script:WorkerLogPath -PathType Leaf) {
-    try {
-        $uvicornExitLogged = [bool] (Select-String -LiteralPath $script:WorkerLogPath -Pattern "uvicorn exited with" -SimpleMatch -Quiet)
-    }
-    catch {
-        $uvicornExitLogged = $false
-    }
+$latestUvicorn = Get-LatestUvicornGenerationEvidence -LogPath $script:WorkerLogPath
+$latestGeneration = if ($null -ne $latestUvicorn.Generation) { [string] $latestUvicorn.Generation } else { "unknown" }
+$latestExitCode = if ($latestUvicorn.ExitLogged) { [string] $latestUvicorn.ExitCode } else { "none" }
+$lastHealthText = if ($script:LastHealthOkAt) { $script:LastHealthOkAt.ToString("o") } else { "never" }
+$lastAutostartText = if ($script:LastAutostartOkAt) { $script:LastAutostartOkAt.ToString("o") } else { "never" }
+Write-LiveLine ("[local-master] worker process ended: worker_pid={0} uvicorn_pid=unknown uvicorn_generation={1} uvicorn_generation_started={2} latest_uvicorn_exit_logged={3} latest_uvicorn_exit_code={4} worker_exit_code={5} runtime_seconds={6} last_health_ok_at={7} last_autostart_ok_at={8} normal_marker_exists={9}" -f $process.Id, $latestGeneration, $latestUvicorn.StartLogged, $latestUvicorn.ExitLogged, $latestExitCode, $process.ExitCode, $runtimeSeconds, $lastHealthText, $lastAutostartText, $normalMarkerExists)
+if ($latestUvicorn.ExitLogged) {
+    Write-LiveLine ("[local-master] latest uvicorn generation {0} exited with {1}." -f $latestGeneration, $latestExitCode)
 }
-Write-LiveLine ("[local-master] worker process ended: worker_pid={0} uvicorn_pid=unknown exit_code={1} runtime_seconds={2} last_health_ok_at={3} last_autostart_ok_at={4} normal_marker_exists={5}" -f $process.Id, $process.ExitCode, $runtimeSeconds, $(if ($script:LastHealthOkAt) { $script:LastHealthOkAt.ToString("o") } else { "never" }), $(if ($script:LastAutostartOkAt) { $script:LastAutostartOkAt.ToString("o") } else { "never" }), $normalMarkerExists)
-if ($script:StartupCompleted -and -not $normalMarkerExists -and -not $uvicornExitLogged) {
-    Write-LiveLine "[local-master] process disappeared before clean Uvicorn exit logging; classify this as external/forced termination unless the worker log shows another cause."
+elseif (-not $normalMarkerExists -and $latestUvicorn.StartLogged) {
+    Write-LiveLine ("[local-master] process disappeared before clean Uvicorn exit logging for generation {0}; classify this as external/forced termination unless the worker log shows another cause." -f $latestGeneration)
 }
 Start-Sleep -Milliseconds 100
 exit $process.ExitCode

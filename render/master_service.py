@@ -52,6 +52,7 @@ LOCAL_BUILD_FILES = (
     "tools/windows_launchers/local_master_worker_console.bat",
     "tools/windows_launchers/stream_local_master_worker.ps1",
     "tools/windows_launchers/ensure_local_master_server.ps1",
+    "tools/windows_launchers/write_local_master_normal_exit_marker.ps1",
 )
 
 

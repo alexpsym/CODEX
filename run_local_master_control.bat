@@ -282,7 +282,8 @@ goto :eof
 
 :write_normal_exit_marker
 if not defined LOCAL_MASTER_NORMAL_EXIT_FILE goto :eof
-set "LOCAL_MASTER_NORMAL_EXIT_TMP=!LOCAL_MASTER_NORMAL_EXIT_FILE!.tmp"
-> "!LOCAL_MASTER_NORMAL_EXIT_TMP!" echo {"reason":"batch_exit_request","timestamp":"!DATE! !TIME!","server_pid":"","requesting_action":"batch_post_uvicorn"}
-move /Y "!LOCAL_MASTER_NORMAL_EXIT_TMP!" "!LOCAL_MASTER_NORMAL_EXIT_FILE!" >nul 2>nul
+powershell -NoProfile -ExecutionPolicy Bypass -File "!ROOT!tools\windows_launchers\write_local_master_normal_exit_marker.ps1" -MarkerPath "!LOCAL_MASTER_NORMAL_EXIT_FILE!" -Reason "batch_exit_request" -RequestingAction "batch_post_uvicorn"
+if errorlevel 1 (
+  echo [local-master] WARNING: failed to write normal-exit marker fallback.
+)
 goto :eof
