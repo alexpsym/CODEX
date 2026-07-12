@@ -1,42 +1,101 @@
-Trading Journal focused cleanup revision summary
+Trading Journal final focused cleanup summary
 
-Implemented:
-- Removed the five-win/five-trade target recommendation threshold from the active recommendation path. A scope is now target-eligible with at least one eligible win and at least one eligible loss.
-- Added exact target empty reasons: "No eligible winning trades" and "No eligible losing trades".
-- Removed neutral target/stop outputs from generated recommendations. Exact stop ties prefer a small decrease; exact target ties prefer a small increase and record tie-preference diagnostics.
-- Fixed target baselines so planned target R is calculated only from the same eligible winning rows used for target recommendation comparisons.
-- Kept target recommendation losses out of the captured-R histogram while requiring at least one eligible loss.
-- Kept the adaptive target histogram rules: Freedman-Diaconis width snapped to 0.25R/0.5R/1.0R, floor bucketing, lower modal bucket on ties, and raw median of the modal bucket.
-- Tightened captured-R provenance so target captured R prefers net profit divided by verified original monetary risk, rejects cost/partial-exit price fallbacks, and only uses price-derived R when it is net-equivalent.
-- Expanded shared test-trade exclusion to top-level, alternate marker fields, metrics, raw refs, and source_data.
-- Removed `_Target R Metadata` generation and hidden metadata rehydration; legacy helper sheets are removed on refresh.
-- Preserved prior repairs for Stats 1 freeze/drawdown/leaders, Stats 2 Net P/L conditional formatting, one-line P&L Calendar, Trade Log row heights, and no Trade Log recommendation columns.
-- Updated the service workbook validator to accept the current one-line P&L Calendar cells.
+Status:
+- Implementation completed locally.
+- Workbook regenerated and reopened for verification.
+- First repository push is pending. This summary will be updated with the verified implementation commit hash after the first push, then pushed again.
 
-Files changed:
+Root causes fixed:
+- Stop and target recommendation direction used hidden numeric tolerances, so genuine tiny differences could be treated as exact ties and pushed into the goal-preference branch.
+- FX target captured-R admitted direct price-R when cost, financing, conversion, and single-exit metadata was merely absent. Missing metadata is now treated as unproven, not proof.
+- Existing OANDA transaction export rows did not expose enough positive proof for future complete-exit/executed-price provenance.
+
+Files and focused functions changed:
 - `tools/master_journal_workbook.py`
+  - Added Decimal parsing/mean/percentile helpers and Decimal original-plan, stop-distance, target-R, monetary-risk, net-profit, and price-capture calculations.
+  - Updated `_size_recommendation`, `_stop_recommendation_payload`, `_stop_exact_tie_adjustment`, `_target_r_recommendation`, and `_target_r_exact_tie_adjustment_decimal` so unrounded Decimal equality is the only tie condition.
+  - Tightened `_target_r_realized_from_original_plan_detail`, `_target_r_original_monetary_risk_detail`, `_target_r_price_capture_net_equivalent`, `_target_r_oanda_net_result_provenance`, and `_target_r_stored_original_net_r`.
+  - Added method and exclusion diagnostics by overall/fx/crypto.
 - `render/master_service.py`
-- `tests/test_master_journal_workbook.py`
+  - Added OANDA opening/closing units, `oanda_single_complete_exit`, and `entry_exit_prices_executed` into parsed rows, metrics, and raw refs.
+  - Added a streaming Trade Log header reader for read-only workbook verification helpers.
 - `tests/test_master_service_trading_journal_stats.py`
-- `tests/test_master_service_trading_journal_crud.py`
+  - Added Decimal tiny-difference regressions for stop and target recommendations.
+  - Added stored `R-Multiple` provenance coverage.
+  - Updated FX provenance tests so unproven price-R fallback is rejected.
+- `tests/test_master_journal_workbook.py`
+  - Updated the old missing-metadata price-R fallback test to assert strict FX exclusion.
 
-Workbook regeneration:
-- Regenerated `journal/Trading Journal.xlsx` through `render.master_service._sync_master_journal_workbook(..., defer_github_sync=True)`.
-- Service validation passed: 1,544 source rows, 1,444 source trade rows, 7 balances.
-- Direct workbook inspection passed: no `_Target R Metadata` sheet, no Trade Log stop/target recommendation columns, and no Keep/Maintain/Reduce target/stop recommendation text.
+Decimal comparison method:
+- Source values are converted with `Decimal(str(value))` without rounding through display precision.
+- Means, medians, planned target R, captured target R, and stop-distance comparisons use Decimal arithmetic.
+- Recommendation direction uses exact Decimal comparisons only:
+  - winner stop mean > loser stop mean: Increase stop
+  - winner stop mean < loser stop mean: Decrease stop
+  - recommended target R > planned-target median: Increase target
+  - recommended target R < planned-target median: Decrease target
+- Exact-tie goal preferences run only when the Decimal values are exactly equal.
 
-Tests run:
-- `pytest --basetemp=.pytest_tmp_master_nodes_0 -q @($nodes[0..39])`: 40 passed.
-- `pytest --basetemp=.pytest_tmp_master_nodes_1b -q @($nodes[40..79])`: 40 passed.
-- `pytest --basetemp=.pytest_tmp_master_nodes_2a -q @($nodes[80..100])`: 21 passed.
-- `pytest --basetemp=.pytest_tmp_master_nodes_2b -q @($nodes[104..119])`: 16 passed.
-- `pytest --basetemp=.pytest_tmp_master_nodes_3b -q @($nodes[120..144])`: 25 passed.
-- `pytest --basetemp=.pytest_tmp_checked_workbook2 tests/test_master_journal_workbook.py::test_checked_in_trading_journal_has_no_direction_only_or_zero_target_recommendations tests/test_master_journal_workbook.py::test_checked_in_trading_journal_target_recommendations_match_backend_calculations -q`: 2 passed.
-- `pytest --basetemp=.pytest_tmp_stats_after_legacy_rename tests/test_master_service_trading_journal_stats.py -q`: 51 passed.
-- `pytest --basetemp=.pytest_tmp_calendar_validator tests/test_master_service_trading_journal_crud.py::test_calendar_validation_accepts_one_line_pnl_cells tests/test_master_journal_workbook.py::test_update_data_only_rewrites_calendar_to_one_line_layout tests/test_master_journal_workbook.py::test_report_period_rows_populate_core_counts_duration_and_drawdown -q`: 3 passed.
+FX net-R recovery priority now enforced:
+- Verified net profit / verified original monetary risk.
+- Verified stored original net R, including stored `R-Multiple` only when provenance proves original entry, original stop, and net result.
+- Reconstructed opening-conversion net R when original entry/stop, units, opening quote-to-home conversion, and net P/L are available.
+- Verified net-equivalent price R only with positive proof.
+- Direct price R is not accepted from missing cost/partial/financing metadata.
 
-Notes:
-- Pytest emitted cache-permission warnings for `.pytest_cache`; test results were otherwise passing.
-- Workbook sync warned that optional Instrument Leaders validation was skipped because the optional section/header is absent.
-- The worktree had pre-existing runtime-state changes in `bybit_monitor/custom_alerts.json`, `render/data/*`, and `state_manifest.json`; these were not part of the code cleanup and are excluded by `PATCH_DESKTOP_PUSH.bat`.
-- Final required repository push workflow is pending `PATCH_DESKTOP_PUSH.bat`.
+Current regenerated recommendations:
+- Overall stop before: Decrease to 0.67%; after: Decrease stop - Recommended: 0.67% (0.05 pp below loss average).
+- Overall target before: Increase to 2.03R; after: Decrease target - Recommended: 1.95R (current median: 2.0R).
+- FX stop before: Increase to 0.16%; after: Increase stop - Recommended: 0.16% (0.03 pp above loss average).
+- FX target before: Increase to 2.05R; after: No eligible winning trades.
+- Crypto stop before: Decrease to 2.78%; after: Decrease stop - Recommended: 2.78% (0.16 pp below loss average).
+- Crypto target before: Decrease to 1.95R; after: Decrease target - Recommended: 1.95R (current median: 2.0R).
+
+Cause of target change:
+- The previous Overall and FX target recommendations were driven by unproven FX direct price-R fallback.
+- After the audit, the current workbook has 173 FX winning trades excluded for missing opening conversion, plus the listed plan/provenance exclusions below.
+- Overall target now follows the 44 eligible Crypto wins with verified net profit over original monetary risk.
+
+Calculation method counts:
+- Overall: `verified_net_profit_over_original_monetary_risk` = 44.
+- FX: no eligible winning trades after provenance audit.
+- Crypto: `verified_net_profit_over_original_monetary_risk` = 44.
+
+Winning exclusion counts:
+- Overall: `missing_opening_conversion` 173, `moved_without_original_plan` 162, `missing_original_stop` 11, `missing_original_target` 8, `invalid_long_original_stop` 1, `non_positive_realized_r` 1.
+- FX: `missing_opening_conversion` 173, `moved_without_original_plan` 122, `missing_original_stop` 8, `missing_original_target` 8, `invalid_long_original_stop` 1, `non_positive_realized_r` 1.
+- Crypto: `moved_without_original_plan` 40, `missing_original_stop` 3.
+
+Workbook regeneration and verification:
+- Regenerated `journal/Trading Journal.xlsx` via `render.master_service._sync_master_journal_workbook(defer_github_sync=True, sync_caller="codex_final_cleanup")`.
+- Sync result: ok, 1,544 source rows, 1,444 source trade rows, 7 balances.
+- Reopened workbook with openpyxl and verified:
+  - Visible sheet order matches expected: STATS1, STATS2, SYMBOLS, Trade Log, P&L Calendar, YEARLY REPORT, 2018-2026.
+  - No hidden/helper worksheets and no `_Target R Metadata` worksheet.
+  - STATS1 freeze pane is `B88`.
+  - STATS1 and SYMBOLS recommendations contain no Keep/Maintain text.
+  - Trade Log sample data row heights match row 5 height of 15.0.
+  - P&L Calendar has one month-header row, no duplicate month headers, no separate year-trades rows, and one-line P/L cells.
+  - STATS2 and Trade Log conditional-formatting rules are present.
+- Workbook sync warning retained: optional Instrument Leaders validation was skipped because that optional section/header is absent.
+
+Complete test accounting:
+- `tests/test_master_service_trading_journal_stats.py`: collected 54; executed 54; passed 54; failed 0; skipped 0.
+- `tests/test_master_journal_workbook.py`: collected 145; executed 145; passed 145; failed 0; skipped 0.
+  - Successful contiguous batches: 0-39 (40), 40-59 (20), 60-79 (20), 80-100 (21), 101-103 (3), 104-119 (16), 120-144 (25).
+  - Sum executed: 145. No gaps. Previously unaccounted nodes 101-103 passed explicitly.
+- `tests/test_master_service_trading_journal_crud.py`: collected 188; executed 188; passed 188; failed 0; skipped 0.
+- Total relevant collected tests: 387. Total executed tests: 387. Total passed: 387.
+- Python compilation passed for `tools/master_journal_workbook.py`, `render/master_service.py`, and the three relevant test files.
+- `git diff --check` passed; only CRLF normalization warnings were printed.
+- Pytest emitted existing FastAPI deprecation warnings only.
+
+Runtime-state note:
+- Pre-existing dirty runtime/local files remain excluded from the commit by `PATCH_DESKTOP_PUSH.bat`: `bybit_monitor/custom_alerts.json`, `render/data/*`, and `state_manifest.json`.
+- Accidental verification churn in `state_backup.json` was restored and is not part of this work.
+
+Push status:
+- Implementation commit hash: pending first `PATCH_DESKTOP_PUSH.bat`.
+- First push verification: pending.
+- Summary-update commit hash: pending second `PATCH_DESKTOP_PUSH.bat`.
+- Final HEAD == origin/master confirmation: pending.

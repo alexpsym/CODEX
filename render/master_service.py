@@ -5785,6 +5785,7 @@ def _journal_rows_from_oanda_transaction_history_frame(
                 {
                     "opened": opened,
                     "close_ticket": ticket,
+                    "close_units": units,
                     "close_time": when,
                     "close_epoch": when_epoch,
                     "close_details": details,
@@ -5836,6 +5837,9 @@ def _journal_rows_from_oanda_transaction_history_frame(
         conversion_source = opened.get("original_loss_conversion_factor_source")
         conversion_time = opened.get("original_loss_conversion_factor_time")
         open_transaction_id = opened.get("original_open_transaction_id") or opened.get("ticket")
+        opened_units = _to_float(opened.get("units")) or 0.0
+        closed_units = _to_float(trade.get("close_units")) or 0.0
+        single_complete_exit = bool(opened_units and closed_units and abs(opened_units) == abs(closed_units))
         net = (
             (_to_float(trade.get("pl")) or 0.0)
             + allocated_financing
@@ -5873,6 +5877,10 @@ def _journal_rows_from_oanda_transaction_history_frame(
                     "original_loss_conversion_factor_source": conversion_source,
                     "original_loss_conversion_factor_time": conversion_time,
                     "original_open_transaction_id": open_transaction_id,
+                    "opening_units": opened_units,
+                    "closing_units": closed_units,
+                    "oanda_single_complete_exit": single_complete_exit,
+                    "entry_exit_prices_executed": True,
                     "oanda_export_open_conversion_rate": open_conversion_rate,
                     "metrics": {
                         "oanda_export_pl": trade.get("pl"),
@@ -5891,6 +5899,10 @@ def _journal_rows_from_oanda_transaction_history_frame(
                         "original_loss_conversion_factor_source": conversion_source,
                         "original_loss_conversion_factor_time": conversion_time,
                         "original_open_transaction_id": open_transaction_id,
+                        "opening_units": opened_units,
+                        "closing_units": closed_units,
+                        "oanda_single_complete_exit": single_complete_exit,
+                        "entry_exit_prices_executed": True,
                     },
                     "raw_refs": {
                         "source_path": source_path,
@@ -5903,6 +5915,10 @@ def _journal_rows_from_oanda_transaction_history_frame(
                         "original_loss_conversion_factor_source": conversion_source,
                         "original_loss_conversion_factor_time": conversion_time,
                         "original_open_transaction_id": open_transaction_id,
+                        "opening_units": opened_units,
+                        "closing_units": closed_units,
+                        "oanda_single_complete_exit": single_complete_exit,
+                        "entry_exit_prices_executed": True,
                         "oanda_open_conversion_rate": open_conversion_rate,
                         "oanda_export_open_conversion_rate": open_conversion_rate,
                         "close_conversion_rate": close_conversion_rate,
@@ -29334,6 +29350,34 @@ async def trading_journal_import_file(file: UploadFile = File(...), account_mode
 
 
 
+def _stream_trade_log_header_map_and_start_row(ws) -> Tuple[Dict[str, int], int]:
+    preview = list(ws.iter_rows(min_row=1, max_row=4, values_only=True))
+    header_map: Dict[str, int] = {}
+    header_row_number = 0
+    for offset, row in enumerate(preview, start=1):
+        current = {
+            str(value or "").strip(): idx
+            for idx, value in enumerate(row or (), start=1)
+            if str(value or "").strip()
+        }
+        if "Row ID" in current:
+            header_map = current
+            header_row_number = offset
+            break
+    if not header_map:
+        return {}, 2
+    row_id_index = header_map["Row ID"] - 1
+    data_start_row = header_row_number + 1
+    if header_row_number == 1 and len(preview) >= 3:
+        row2 = preview[1] if len(preview) > 1 else ()
+        row3 = preview[2] if len(preview) > 2 else ()
+        row2_row_id = str((row2[row_id_index] if row_id_index < len(row2) else "") or "").strip()
+        row3_row_id = str((row3[row_id_index] if row_id_index < len(row3) else "") or "").strip()
+        if not row2_row_id and not row3_row_id:
+            data_start_row = 4
+    return header_map, data_start_row
+
+
 def _verify_trade_log_row_ids_in_workbook(workbook_path: Path, expected_row_ids: List[str]) -> Dict[str, object]:
     expected = [str(x).strip() for x in (expected_row_ids or []) if str(x).strip()]
     if not workbook_path.exists():
@@ -29348,11 +29392,11 @@ def _verify_trade_log_row_ids_in_workbook(workbook_path: Path, expected_row_ids:
             ws = _get_trade_log_sheet(wb, allow_legacy=False)
         except Exception as exc:
             return {"ok": False, "expected_row_ids": expected, "found_row_ids_count": 0, "missing_row_ids": expected, "error": f"Trade Log sheet missing: {exc}"}
-        header_map = _trade_log_header_map(ws)
+        header_map, data_start_row = _stream_trade_log_header_map_and_start_row(ws)
         if "Row ID" not in header_map:
             return {"ok": False, "expected_row_ids": expected, "found_row_ids_count": 0, "missing_row_ids": expected, "error": "Trade Log Row ID column missing."}
         ridx = header_map["Row ID"] - 1
-        for row in ws.iter_rows(min_row=_trade_log_data_start_row(ws), values_only=True):
+        for row in ws.iter_rows(min_row=data_start_row, values_only=True):
             rid = str((row[ridx] if ridx < len(row) else "") or "").strip()
             if rid:
                 found.append(rid)
@@ -29414,7 +29458,7 @@ def _read_monthly_aud_reval_months_from_workbook(workbook_path: Path) -> Dict[st
             ws = _get_trade_log_sheet(wb, allow_legacy=False)
         except Exception as exc:
             return {**base, "ok": False, "error": f"Trade Log sheet missing: {exc}", "workbook_exists": True, "trade_log_exists": False}
-        header_map = _trade_log_header_map(ws)
+        header_map, data_start_row = _stream_trade_log_header_map_and_start_row(ws)
         if "Row ID" not in header_map:
             return {**base, "ok": False, "error": "Trade Log Row ID column missing.", "workbook_exists": True, "trade_log_exists": True, "row_id_column_exists": False}
         idx = {header: col - 1 for header, col in header_map.items()}
@@ -29422,8 +29466,7 @@ def _read_monthly_aud_reval_months_from_workbook(workbook_path: Path) -> Dict[st
         row_ids: List[str] = []
         months: List[str] = []
         ignored: List[Dict[str, object]] = []
-        start_row = _trade_log_data_start_row(ws)
-        for row_num, row in enumerate(ws.iter_rows(min_row=start_row, values_only=True), start=start_row):
+        for row_num, row in enumerate(ws.iter_rows(min_row=data_start_row, values_only=True), start=data_start_row):
             rid = str((row[rid_idx] if rid_idx < len(row) else "") or "").strip()
             if not rid.startswith("monthly_aud_reval:"):
                 continue

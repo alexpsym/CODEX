@@ -351,6 +351,31 @@ def test_stop_recommendation_uses_original_stop_percentage_distance() -> None:
     assert equal["stop_loss_exact_tie_goal_preference"] is True
 
 
+def test_stop_recommendation_uses_unrounded_decimal_difference_for_direction() -> None:
+    increase = _distance_recommendation_summary([
+        _stop_recommendation_trade("tiny-win-higher", result_pct=1.0, planned_stop_price="98.9999999999995"),
+        _stop_recommendation_trade("tiny-loss", result_pct=-1.0, planned_stop_price="99.0"),
+    ])
+    decrease = _distance_recommendation_summary([
+        _stop_recommendation_trade("tiny-win-lower", result_pct=1.0, planned_stop_price="99.0000000000005"),
+        _stop_recommendation_trade("tiny-loss", result_pct=-1.0, planned_stop_price="99.0"),
+    ])
+    exact = _distance_recommendation_summary([
+        _stop_recommendation_trade("exact-win", result_pct=1.0, planned_stop_price="99.0"),
+        _stop_recommendation_trade("exact-loss", result_pct=-1.0, planned_stop_price="99.0"),
+    ])
+
+    assert increase["stop_loss_recommendation_direction"] == "increase"
+    assert increase["stop_loss_exact_tie"] is False
+    assert increase["stop_recommendation"].startswith("Increase stop \u2014 Recommended: 1.00%")
+    assert decrease["stop_loss_recommendation_direction"] == "decrease"
+    assert decrease["stop_loss_exact_tie"] is False
+    assert decrease["stop_recommendation"].startswith("Decrease stop \u2014 Recommended: 1.00%")
+    assert exact["stop_loss_recommendation_direction"] == "decrease"
+    assert exact["stop_loss_exact_tie"] is True
+    assert exact["stop_loss_exact_tie_goal_preference"] is True
+
+
 def test_stop_recommendation_requires_wins_and_losses_and_reports_exclusions() -> None:
     summary = _distance_recommendation_summary([
         _stop_recommendation_trade("valid-win", result_pct=1.0, planned_stop_price=99.0),
@@ -469,7 +494,7 @@ def test_compute_journal_stats_target_recommendation_uses_realized_original_r_di
     assert risk["current_median_original_planned_target_r"] == pytest.approx(4.0)
     assert risk["current_avg_original_planned_target_r"] == pytest.approx(4.0)
     assert direct_target["target_r_excluded_reasons"]["test_trade"] == 1
-    assert risk["target_r_excluded_reasons"]["missing_exit_price"] == 1
+    assert risk["target_r_excluded_reasons"]["missing_actual_exit"] == 1
     assert risk["target_r_excluded_reasons"]["moved_without_original_plan"] == 1
     assert by_market["overall"]["target_recommendation"] == risk["target_recommendation"]
     assert by_market["fx"]["target_recommendation"] == direct_target["target_recommendation"]
@@ -623,11 +648,37 @@ def _fx_trade_with_independent_conversion(
         "qty": 0.1,
         "qty_raw": 10000,
         "qty_unit": "lots",
+        "commission": 0.0,
+        "fees": 0.0,
+        "swap": 0.0 if financing is None else financing,
+        "opening_units": 10000,
+        "closing_units": 10000,
+        "oanda_single_complete_exit": True,
+        "entry_exit_prices_executed": True,
         "net_profit": net_profit,
         "currency": "AUD",
+        "metrics": {
+            "oanda_actual_commission_total": 0.0,
+            "oanda_raw_commission": 0.0,
+            "oanda_raw_gsl_fee": 0.0,
+            "oanda_raw_gsl_premium": 0.0,
+            "oanda_export_financing_allocated": 0.0 if financing is None else financing,
+            "opening_units": 10000,
+            "closing_units": 10000,
+            "oanda_single_complete_exit": True,
+            "entry_exit_prices_executed": True,
+        },
     }
     if conversion is not None:
-        row["raw_refs"] = {"homeConversionFactors": {"lossQuoteHome": {"factor": str(conversion)}}}
+        row["raw_refs"] = {
+            "homeConversionFactors": {"lossQuoteHome": {"factor": str(conversion)}},
+            "open_ticket": f"{trade_id}-open",
+            "close_ticket": f"{trade_id}-close",
+            "opening_units": 10000,
+            "closing_units": 10000,
+            "oanda_single_complete_exit": True,
+            "entry_exit_prices_executed": True,
+        }
     if financing is not None:
         row["swap"] = financing
     return row
@@ -647,35 +698,40 @@ def test_fx_net_r_changes_when_net_profit_changes_with_fixed_independent_risk() 
     assert second_r == pytest.approx(2.0)
 
 
-def test_fx_missing_monetary_conversion_uses_original_price_r_fallback() -> None:
+def test_fx_missing_monetary_conversion_does_not_use_unproven_price_r_fallback() -> None:
     first_row = _fx_trade_with_independent_conversion("fx-no-inferred-1", net_profit=15.0, conversion=None)
     second_row = _fx_trade_with_independent_conversion("fx-no-inferred-2", net_profit=30.0, conversion=None)
 
     first_r, first_reason = _target_r_realized_from_original_plan(first_row)
     second_r, second_reason = _target_r_realized_from_original_plan(second_row)
 
-    assert first_reason == ""
-    assert second_reason == ""
-    assert first_r == pytest.approx(1.0)
-    assert second_r == pytest.approx(1.0)
+    assert first_r is None
+    assert second_r is None
+    assert first_reason == "missing_opening_conversion"
+    assert second_reason == "missing_opening_conversion"
 
 
-def test_target_recommendation_uses_original_price_r_when_monetary_risk_unavailable() -> None:
+def test_target_recommendation_uses_price_r_only_when_net_equivalence_is_verified() -> None:
     rows = []
     for idx, value in enumerate([1.2, 1.3, 1.4, 1.5, 1.6], start=1):
-        row = _target_distribution_trade(f"gross-only-{idx}", value)
+        row = _target_distribution_trade(
+            f"verified-price-r-{idx}",
+            value,
+            asset_class="crypto",
+            account="BYBIT",
+            symbol="BTCUSDT",
+            currency="USDT",
+        )
         row.pop("original_risk_amount", None)
-        row["qty"] = 0.1
-        row["qty_raw"] = 10000
-        row["qty_unit"] = "lots"
+        row["net_equivalent_price_r_verified"] = True
         rows.append(row)
 
-    rows.append(_target_distribution_loss("eligible-loss"))
+    rows.append(_target_distribution_loss("eligible-loss", asset_class="crypto", account="BYBIT", symbol="BTCUSDT", currency="USDT"))
     risk = _target_r_recommendation(rows)
 
     assert risk["eligible_target_r_wins"] == 5
     assert risk["target_recommendation"].startswith("Decrease target \u2014 Recommended: ")
-    assert "missing_opening_loss_conversion_factor" not in risk["target_r_excluded_reasons"]
+    assert risk["target_r_calculation_method_counts"]["verified_net_equivalent_price_r"] == 5
 
 
 def test_fx_home_conversion_factors_loss_produces_original_monetary_risk() -> None:
@@ -706,10 +762,10 @@ def test_fx_fake_loss_and_generic_conversion_rate_are_rejected() -> None:
     fake_r, fake_reason = _target_r_realized_from_original_plan(fake_loss)
     generic_r, generic_reason = _target_r_realized_from_original_plan(generic)
 
-    assert fake_reason == ""
-    assert generic_reason == ""
-    assert fake_r == pytest.approx(1.0)
-    assert generic_r == pytest.approx(1.0)
+    assert fake_r is None
+    assert generic_r is None
+    assert fake_reason == "missing_opening_conversion"
+    assert generic_reason == "missing_opening_conversion"
 
 
 def test_fx_financing_changes_net_r_numerator_without_changing_conversion_factor() -> None:
@@ -726,14 +782,21 @@ def test_fx_financing_changes_net_r_numerator_without_changing_conversion_factor
     assert financed_r == pytest.approx(14.0 / 15.0)
 
 
-def test_unknown_original_risk_currency_uses_price_r_fallback() -> None:
-    row = _target_distribution_trade("unknown-risk-currency", 1.5)
+def test_unknown_original_risk_currency_does_not_use_unverified_price_r_fallback() -> None:
+    row = _target_distribution_trade(
+        "unknown-risk-currency",
+        1.5,
+        asset_class="crypto",
+        account="BYBIT",
+        symbol="BTCUSDT",
+        currency="USDT",
+    )
     row.pop("original_risk_currency", None)
 
     realized_r, reason = _target_r_realized_from_original_plan(row)
 
-    assert reason == ""
-    assert realized_r == pytest.approx(1.5)
+    assert realized_r is None
+    assert reason == "missing_original_risk_currency"
 
 
 def test_unrelated_max_loss_is_never_used_as_original_risk() -> None:
@@ -742,8 +805,8 @@ def test_unrelated_max_loss_is_never_used_as_original_risk() -> None:
 
     realized_r, reason = _target_r_realized_from_original_plan(row)
 
-    assert reason == ""
-    assert realized_r == pytest.approx(1.0)
+    assert realized_r is None
+    assert reason == "missing_opening_conversion"
 
 
 def test_crypto_reconstructs_original_monetary_risk_independently() -> None:
@@ -809,8 +872,8 @@ def test_oanda_export_closing_conversion_rate_is_not_used_for_target_r() -> None
     assert row["metrics"]["oanda_close_conversion_rate"] == pytest.approx(1.5)
     assert row["raw_refs"]["original_loss_conversion_factor"] is None
     realized_r, reason = _target_r_realized_from_original_plan(row)
-    assert reason == ""
-    assert realized_r == pytest.approx(2.0)
+    assert realized_r is None
+    assert reason == "missing_opening_conversion"
 
 
 def _fx_target_wins(values: list[float], *, symbol: str = "EURUSD") -> list[dict]:
@@ -1039,6 +1102,62 @@ def test_target_recommendation_exact_target_tie_increases_with_goal_preference()
     assert risk["target_r_tie_break_reason"] == "exact_tie_goal_preference_increase"
 
 
+def test_target_recommendation_uses_unrounded_decimal_difference_for_direction() -> None:
+    increase_rows = [
+        _target_distribution_trade(
+            "tiny-target-higher",
+            "2.0000000000005",
+            net_profit="20.000000000005",
+            planned_target_price=120.0,
+        ),
+        _target_distribution_loss("tiny-target-higher-loss", planned_target_price=120.0),
+    ]
+    decrease_rows = [
+        _target_distribution_trade(
+            "tiny-target-lower",
+            "1.9999999999995",
+            net_profit="19.999999999995",
+            planned_target_price=120.0,
+        ),
+        _target_distribution_loss("tiny-target-lower-loss", planned_target_price=120.0),
+    ]
+    exact_rows = [
+        _target_distribution_trade("exact-target", "2.0", net_profit="20.0", planned_target_price=120.0),
+        _target_distribution_loss("exact-target-loss", planned_target_price=120.0),
+    ]
+
+    increase = _target_r_recommendation(increase_rows)
+    decrease = _target_r_recommendation(decrease_rows)
+    exact = _target_r_recommendation(exact_rows)
+
+    assert increase["target_r_recommendation_direction"] == "Increase target"
+    assert increase["target_r_exact_tie"] is False
+    assert increase["target_recommendation"] == "Increase target \u2014 Recommended: 2.0R (current median: 2.0R)"
+    assert decrease["target_r_recommendation_direction"] == "Decrease target"
+    assert decrease["target_r_exact_tie"] is False
+    assert decrease["target_recommendation"] == "Decrease target \u2014 Recommended: 2.0R (current median: 2.0R)"
+    assert exact["target_r_recommendation_direction"] == "Increase target"
+    assert exact["target_r_exact_tie"] is True
+    assert exact["target_r_exact_tie_goal_preference"] is True
+
+
+def test_target_recommendation_uses_stored_r_multiple_only_with_net_original_provenance() -> None:
+    row = _target_distribution_trade(
+        "stored-r-multiple",
+        "1.75",
+        net_profit="17.50",
+        r_multiple_provenance="captured net result using original entry and original stop",
+    )
+    row.pop("original_risk_amount", None)
+    rows = [row, _target_distribution_loss("stored-r-multiple-loss")]
+
+    risk = _target_r_recommendation(rows)
+
+    assert risk["eligible_target_r_wins"] == 1
+    assert risk["target_r_recommended"] == pytest.approx(1.75)
+    assert risk["target_r_calculation_method_counts"]["verified_stored_original_net_r"] == 1
+
+
 def test_target_recommendation_excluded_losses_do_not_change_planned_target_baseline() -> None:
     rows = [
         _target_distribution_trade("win-a", 2.0, planned_target_price=140.0),
@@ -1070,7 +1189,15 @@ def test_target_recommendation_excludes_all_supported_test_markers() -> None:
 
 
 def test_target_realized_r_rejects_price_fallback_when_costs_make_gross_r_unverified() -> None:
-    row = _target_distribution_trade("costly-gross-only", 2.0, commission=1.0)
+    row = _target_distribution_trade(
+        "costly-gross-only",
+        2.0,
+        asset_class="crypto",
+        account="BYBIT",
+        symbol="BTCUSDT",
+        currency="USDT",
+        commission=1.0,
+    )
     row.pop("original_risk_amount", None)
 
     realized_r, reason = _target_r_realized_from_original_plan(row)
