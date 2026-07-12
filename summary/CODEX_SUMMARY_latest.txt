@@ -1,9 +1,11 @@
 Trading Journal final narrow stop-polish cleanup summary
 
 Status:
-- Implementation completed locally.
+- Implementation completed and committed.
 - Workbook regenerated and reopened for verification.
-- First repository push is pending. After that push verifies, this summary will be updated with the implementation commit hash and pushed again.
+- First `PATCH_DESKTOP_PUSH.bat` run created implementation commit `8c49dc90737c84388c09517494d45a757105d821`.
+- First push verified: local HEAD and `origin/master` both resolved to `8c49dc90737c84388c09517494d45a757105d821`.
+- This file is the required post-push summary update that records the verified implementation commit and push result.
 
 Root cause:
 - The main stop recommendation path already used Decimal comparisons, but the Excel-open Stats 1 polish path still rebuilt stop recommendations from worksheet average cells.
@@ -74,6 +76,6 @@ Runtime-state note:
 - Pre-existing dirty runtime/local files remain excluded from the commit by `PATCH_DESKTOP_PUSH.bat`: `bybit_monitor/custom_alerts.json`, `render/data/*`, and `state_manifest.json`.
 
 Push status:
-- Implementation commit hash: pending first `PATCH_DESKTOP_PUSH.bat`.
-- First push verification: pending.
-- Summary-update push: pending.
+- Implementation commit hash: `8c49dc90737c84388c09517494d45a757105d821`.
+- First push verification: `PATCH_DESKTOP_PUSH.bat` confirmed local HEAD matched `origin/master` at `8c49dc90737c84388c09517494d45a757105d821`.
+- This post-push summary update records the verified implementation revision; the final response records the final repository HEAD after the required follow-up push.
