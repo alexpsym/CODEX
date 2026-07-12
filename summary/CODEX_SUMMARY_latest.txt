@@ -1,43 +1,28 @@
-Instrument lookup, calculator, dashboard, and Trading Journal repair summary
+Instrument lookup separator cleanup and calculator template cleanup summary
 
 Status:
-- Implementation and workbook repair completed locally.
-- This summary was written before the mandatory PATCH_DESKTOP_PUSH.bat run.
-- Final push verification is recorded in the Codex final response after the script completes.
+- Implementation commit: 118452953302b819cf63898d0fd27d20e8733a87.
+- PATCH_DESKTOP_PUSH.bat completed successfully for the implementation commit.
+- Verification after that push resolved local HEAD and origin/master to the same commit: 118452953302b819cf63898d0fd27d20e8733a87.
 
-Instrument Lookup:
-- Removed the Crypto/FX toggle and JPG download control from the lookup page.
-- Lookup now infers FX versus crypto from the query and keeps history URLs to /instrument-lookup?q=... without an asset parameter.
-- Market snapshot hides raw openInterest and shows openInterestValue as USD.
+Fixes:
+- render/static/instrument_lookup.js now normalizes non-letter separators before FX/metals detection.
+- XAG/USD, XAG-USD, XAG USD, XAG_USD, XAGUSD, EUR/USD, EUR-USD, EUR USD, EUR_USD, and EURUSD all route as FX lookups with OANDA preference.
+- render/master_service.py now has one CALCULATOR_TEMPLATE assignment only.
+- The removed calculator template was the obsolete settings-grid copy; the retained template is the active table-based redesign.
 
-Calculator:
-- Reworked the calculator page into a clearer two-column desktop layout with compact table-style sections and a mobile single-column fallback.
-- Quote results now render as a stable table.
-- Calculator instrument specs and journal summary panels are loaded from the resolved symbol and recover from failures instead of staying in a loading state.
-- Journal summary now reads from the single master workbook when configured, with runtime fallback only when needed.
-- Crypto journal summary matching now requires the canonical normalized symbol instead of unsafe prefix matching, so BTCUSDT/BTC/USDT/Bitcoin USDT aliases resolve to the same workbook rows without cross-symbol leakage.
-
-Dashboard:
-- Local dashboard main buttons no longer expose Open Orders or Pine as standalone main buttons.
-- The Pine scripts area now lives permanently under Orders / Positions with copy buttons and a fallback textarea when clipboard writes are unavailable.
-- The main dashboard workspace is wrapped so local panels remain visually grouped without moving the Pine fallback out of reach.
-
-Trading Journal workbook generation:
-- Stats 1 freeze panes repair to B2 instead of B88.
-- P&L Calendar one-line layout clears stale fills for blank/no-trade months and keeps total-trades rows neutral.
-- Trade Log data row heights remain normalized during data-only updates and Excel-open polish, even for wrapped long notes.
-- Target-R recommendations now enforce a 1.50R floor and avoid displayed recommendations that round to the current median.
-- Checked-in journal/Trading Journal.xlsx was refreshed from its own Trade Log source rows and polished with the new repair rules.
+Regression coverage:
+- Added an instrument lookup JavaScript behavior regression that executes the real lookup script through Node and verifies separator-normalized FX/metals variants call /api/instrument-specs with prefer=oanda and journal-summary with asset=fx.
+- Added calculator rendered-page coverage that verifies every expected calculator element ID occurs exactly once.
+- Added calculator source coverage that verifies only one CALCULATOR_TEMPLATE assignment remains and the obsolete settings-grid calculator block is absent.
 
 Tests and checks:
-- tests/test_dashboard_home_layout.py: 18 passed.
-- tests/test_master_service_trading_journal_stats.py: 58 passed.
-- tests/test_master_journal_workbook.py: 146 passed across chunks.
-- tests/test_master_service_calculator_api.py and tests/test_master_service_instrument_specs.py: 93 passed.
-- tests/test_open_orders_page.py and tests/test_spread_monitor_dashboard.py: 32 passed.
-- tests/test_calculator_js_syntax.py, tests/test_dashboard_js_syntax.py, and tests/test_calculator_js_behavior.py: 44 passed.
-- git diff --check passed with CRLF normalization warnings only.
+- python -m pytest tests/test_dashboard_home_layout.py --maxfail=1 -q --basetemp .pytest_tmp_lookup_cleanup -p no:cacheprovider: 19 passed.
+- python -m pytest tests/test_master_service_calculator_api.py --maxfail=1 -q --basetemp .pytest_tmp_calc_cleanup -p no:cacheprovider: 92 passed.
+- python -m pytest tests/test_calculator_js_syntax.py tests/test_calculator_js_behavior.py tests/test_dashboard_js_syntax.py --maxfail=1 -q --basetemp .pytest_tmp_js_cleanup -p no:cacheprovider: 44 passed.
+- python -m py_compile render/master_service.py: passed.
+- git diff --check: passed with CRLF normalization warnings only.
 
 Runtime-state note:
-- Existing dirty runtime/local files remain intentionally local and are excluded by PATCH_DESKTOP_PUSH.bat, including bybit_monitor/custom_alerts.json, render/data/*, and state_manifest.json.
-- Test-generated changes to render/data/pending_webhooks.json, render/data/webhook_attempts.json, and state_backup.json were restored before summary and push.
+- Existing dirty runtime/local files remained local and were excluded by PATCH_DESKTOP_PUSH.bat: bybit_monitor/custom_alerts.json, render/data/monthly_aud_revaluation_state.json, render/data/trade_contexts.json, and state_manifest.json.
+- Test-generated changes to render/data/pending_webhooks.json and render/data/webhook_attempts.json were restored before the implementation push.
