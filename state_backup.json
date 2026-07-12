@@ -170,36 +170,53 @@
       "changed": 0,
       "failed_months": [],
       "failures": [],
-      "finished_at": "2026-07-11T13:27:08.687434+00:00",
+      "finished_at": "2026-07-12T01:26:10.600809+00:00",
       "mandatory_row_id": "monthly_aud_reval:bybit_live:2026-03",
       "partial": false,
       "processed_months": [],
       "rows": 4,
-      "started_at": "2026-07-11T13:27:08.684678+00:00",
+      "started_at": "2026-07-12T01:26:10.591649+00:00",
       "succeeded_months": [],
       "target_months": []
     },
-    "last_synced_at": "2026-07-11T13:27:08.687410+00:00",
+    "last_synced_at": "2026-07-12T01:26:10.598264+00:00",
     "month_key": null,
     "ok": true,
     "stage": "complete",
     "traceback": null,
-    "updated_at": "2026-07-11T13:27:08.687428+00:00"
+    "updated_at": "2026-07-12T01:26:10.600773+00:00"
   },
   "oanda_fill_state": {
-    "diagnostics": {},
+    "diagnostics": {
+      "demo": {
+        "last_error": null,
+        "last_seen_transaction_id": "650",
+        "last_success_at": "2026-07-12T00:44:03.763374+00:00",
+        "startup_recovered_rows": 0,
+        "startup_skipped_duplicates": 0,
+        "updated_at": "2026-07-12T00:44:03.763395+00:00"
+      },
+      "live": {
+        "last_error": null,
+        "last_seen_transaction_id": "471",
+        "last_success_at": "2026-07-12T00:44:04.855801+00:00",
+        "startup_recovered_rows": 0,
+        "startup_skipped_duplicates": 0,
+        "updated_at": "2026-07-12T00:44:04.855821+00:00"
+      }
+    },
     "last_seen_transaction_id": {
-      "demo": null,
-      "live": null
+      "demo": "650",
+      "live": "471"
     },
     "open_trade_legs": {
       "demo": {},
       "live": {}
     },
-    "updated_at": "2026-07-11T09:21:30.083280+00:00"
+    "updated_at": "2026-07-12T00:44:04.855831+00:00"
   },
   "pending_webhooks": [],
-  "savedAt": "2026-07-11T13:27:10.723757+00:00",
+  "savedAt": "2026-07-12T01:44:33.314460+00:00",
   "source_host": "DESKTOP-1B14EQ6",
   "source_profile": "local",
   "trade_contexts": [
@@ -628,263 +645,8 @@
     }
   ],
   "trading_journal": {
-    "items": [
-      {
-        "account": "demo",
-        "account_label": "OANDA Demo",
-        "asset_class": "forex",
-        "balance_after_trade": 1500.5138,
-        "close_time": "2026-07-06T20:43:03.205707+10:00",
-        "commission": null,
-        "commission_currency": "AUD",
-        "entry_price": null,
-        "exit_price": 1.14187,
-        "fee_currency": "AUD",
-        "fees": null,
-        "id": "oanda:demo:EUR_USD:634:close",
-        "is_test_trade": true,
-        "metrics": {
-          "is_test_trade": true,
-          "oanda_actual_commission_total": 0.0,
-          "oanda_half_spread_cost": 0.0081,
-          "timeframe": "1MIN"
-        },
-        "net_profit": 0.4048,
-        "notes": "partial_oanda_close_missing_open_leg",
-        "notional_usd": null,
-        "open_time": null,
-        "qty": 0.00102,
-        "qty_raw": 102.0,
-        "qty_unit": "lots",
-        "raw_refs": {
-          "orderId": "647",
-          "tradeId": "634",
-          "transactionId": "648"
-        },
-        "realized_pnl": 0.4048,
-        "realized_pnl_currency": "",
-        "side": "Sell",
-        "source": "oanda",
-        "status": "closed",
-        "stop_loss": "1.03906",
-        "strategy_tag": "",
-        "symbol": "EUR_USD",
-        "take_profit": "1.33933",
-        "timeframe": "1MIN",
-        "updated_at": "2026-07-09T06:49:53.771790+00:00"
-      },
-      {
-        "account": "Bybit Demo",
-        "account_label": "Bybit Demo",
-        "asset_class": "crypto",
-        "balance_after_trade": null,
-        "close_time": "2026-05-19T01:13:00+00:00",
-        "commission": 0.01,
-        "currency": "USDT",
-        "entry_price": 100100.0,
-        "exit_price": 100100.0,
-        "fee_rate": null,
-        "id": "bybit:demo:execution:BTCUSDT:E2",
-        "net_profit": null,
-        "notes": "Bybit execution-history row; Net P/L may be inferred from explicit P/L fields or balance continuity when provable.",
-        "open_time": "2026-05-19T01:13:00+00:00",
-        "qty": 0.1,
-        "raw_refs": {
-          "execId": "E2",
-          "orderId": "OID2",
-          "source_file": null,
-          "source_row": null
-        },
-        "row_type": "trade",
-        "side": "Sell",
-        "source": "bybit_execution_history",
-        "status": "closed",
-        "symbol": "BTCUSDT",
-        "trade_duration_seconds": 0,
-        "updated_at": "2026-06-16T01:39:08.784941+00:00"
-      },
-      {
-        "account": "Bybit Demo",
-        "account_label": "Bybit Demo",
-        "asset_class": "crypto",
-        "balance_after_trade": null,
-        "close_time": "2026-05-17T01:13:00+00:00",
-        "commission": 0.01,
-        "currency": "USDT",
-        "entry_price": 100000.0,
-        "exit_price": 100000.0,
-        "fee_rate": null,
-        "id": "bybit:demo:execution:BTCUSDT:E1",
-        "net_profit": null,
-        "notes": "Bybit execution-history row; Net P/L may be inferred from explicit P/L fields or balance continuity when provable.",
-        "open_time": "2026-05-17T01:13:00+00:00",
-        "qty": 0.1,
-        "raw_refs": {
-          "execId": "E1",
-          "orderId": "OID1",
-          "source_file": null,
-          "source_row": null
-        },
-        "row_type": "trade",
-        "side": "Buy",
-        "source": "bybit_execution_history",
-        "status": "closed",
-        "symbol": "BTCUSDT",
-        "trade_duration_seconds": 0,
-        "updated_at": "2026-06-16T01:39:08.784885+00:00"
-      },
-      {
-        "account": "Bybit Demo",
-        "account_label": "Bybit Demo",
-        "asset_class": "crypto",
-        "balance_after_trade": 319.83392824,
-        "balance_after_trade_currency": "USDT",
-        "balance_reconstructed": true,
-        "balance_snapshot_at": "2026-07-09T06:56:15.802075+00:00",
-        "balance_source": "bybit_demo_wallet_reverse_pnl",
-        "breakeven": "",
-        "close_time": "2026-05-05T11:13:46.444000+00:00",
-        "commission": 1.59979644,
-        "commission_currency": "USDT",
-        "currency": "USDT",
-        "entry_comments": "",
-        "entry_price": 80799.4,
-        "exit_comments": "",
-        "exit_price": 80796.2,
-        "fee_currency": "USDT",
-        "fees": 1.59979644,
-        "highest_price": null,
-        "id": "bybit:demo:closedpnl:BTCUSDT:37daf2b3-701c-430a-a924-1837c4b3aaf8",
-        "lowest_price": null,
-        "metrics": {
-          "currency": "USDT",
-          "is_test_trade": "\u2014",
-          "order_id": "37daf2b3-701c-430a-a924-1837c4b3aaf8",
-          "source": "closed_pnl"
-        },
-        "net_profit": -1.65739644,
-        "notes": "",
-        "notional_usd": 1454.3891999999998,
-        "open_time": "2026-05-04T01:17:57.665251+00:00",
-        "pre_trade_comments": "",
-        "qty": 0.018,
-        "qty_raw": 0.018,
-        "qty_unit": "native",
-        "raw_excel": {
-          "balance_after_trade": 319.83392824,
-          "closing_price": 80796.2,
-          "closing_time": "2026-05-05T11:13:46.444000+00:00",
-          "commission": 1.59979644,
-          "currency": "USDT",
-          "entry_price": 80799.4,
-          "is_test_trade": "\u2014",
-          "net_profit": -1.65739644,
-          "opening_time": "2026-05-04T01:17:57.665251+00:00",
-          "order_id": "37daf2b3-701c-430a-a924-1837c4b3aaf8",
-          "size_quantity": 0.018,
-          "source": "closed_pnl",
-          "symbol": "BTCUSDT",
-          "type_buy_sell": "Buy"
-        },
-        "raw_refs": {
-          "dropbox_path": "/master_control/bybit demo.xlsx",
-          "orderId": "37daf2b3-701c-430a-a924-1837c4b3aaf8",
-          "row_index": 0,
-          "sheet": "Trades"
-        },
-        "realized_pnl": -1.65739644,
-        "realized_pnl_currency": "USDT",
-        "setup": "",
-        "sheet": "Trades",
-        "side": "BUY",
-        "source": "excel",
-        "status": "closed",
-        "stop_loss": null,
-        "swap": null,
-        "symbol": "BTCUSDT",
-        "symbol_raw": "BTCUSDT",
-        "take_profit": null,
-        "timeframe": "",
-        "trade_management": "",
-        "updated_at": "2026-07-09T06:52:01.712112+00:00"
-      },
-      {
-        "account": "Bybit Demo",
-        "account_label": "Bybit Demo",
-        "asset_class": "crypto",
-        "balance_after_trade": 321.49132468,
-        "balance_after_trade_currency": "USDT",
-        "balance_reconstructed": true,
-        "balance_snapshot_at": "2026-07-09T06:56:15.802075+00:00",
-        "balance_source": "bybit_demo_wallet_reverse_pnl",
-        "breakeven": "",
-        "close_time": "2026-05-04T11:18:23.963000+00:00",
-        "commission": 1.65147725,
-        "commission_currency": "USDT",
-        "currency": "USDT",
-        "entry_comments": "",
-        "entry_price": 78977.0,
-        "exit_comments": "",
-        "exit_price": 79059.1,
-        "fee_currency": "USDT",
-        "fees": 1.65147725,
-        "highest_price": null,
-        "id": "bybit:demo:closedpnl:BTCUSDT:0fd87df3-ab4d-4cd5-b17d-b3f6a7e8bd5f",
-        "lowest_price": null,
-        "metrics": {
-          "currency": "USDT",
-          "is_test_trade": "\u2014",
-          "order_id": "0fd87df3-ab4d-4cd5-b17d-b3f6a7e8bd5f",
-          "source": "closed_pnl"
-        },
-        "net_profit": -0.09157725,
-        "notes": "",
-        "notional_usd": 1500.5629999999999,
-        "open_time": "2026-05-04T01:17:57.665251+00:00",
-        "pre_trade_comments": "",
-        "qty": 0.019,
-        "qty_raw": 0.019,
-        "qty_unit": "native",
-        "raw_excel": {
-          "balance_after_trade": 321.49132468,
-          "closing_price": 79059.1,
-          "closing_time": "2026-05-04T11:18:23.963000+00:00",
-          "commission": 1.65147725,
-          "currency": "USDT",
-          "entry_price": 78977.0,
-          "is_test_trade": "\u2014",
-          "net_profit": -0.09157725,
-          "opening_time": "2026-05-04T01:17:57.665251+00:00",
-          "order_id": "0fd87df3-ab4d-4cd5-b17d-b3f6a7e8bd5f",
-          "size_quantity": 0.019,
-          "source": "closed_pnl",
-          "symbol": "BTCUSDT",
-          "type_buy_sell": "Sell"
-        },
-        "raw_refs": {
-          "dropbox_path": "/master_control/bybit demo.xlsx",
-          "orderId": "0fd87df3-ab4d-4cd5-b17d-b3f6a7e8bd5f",
-          "row_index": 1,
-          "sheet": "Trades"
-        },
-        "realized_pnl": -0.09157725,
-        "realized_pnl_currency": "USDT",
-        "setup": "",
-        "sheet": "Trades",
-        "side": "SELL",
-        "source": "excel",
-        "status": "closed",
-        "stop_loss": null,
-        "swap": null,
-        "symbol": "BTCUSDT",
-        "symbol_raw": "BTCUSDT",
-        "take_profit": null,
-        "timeframe": "",
-        "trade_management": "",
-        "updated_at": "2026-07-09T06:52:01.720037+00:00"
-      }
-    ],
-    "updated_at": "2026-07-09T06:56:15.813724+00:00"
+    "items": [],
+    "updated_at": "2026-07-12T01:44:31.294299+00:00"
   },
   "trading_journal_import_cache": {
     "files": {
@@ -1054,6 +816,55 @@
     "version": 2
   },
   "trading_journal_state": {
+    "broker_account_balances": [
+      {
+        "account": "Bybit Demo",
+        "account_mode": "demo",
+        "as_of": "2026-07-12T00:43:50.911601+00:00",
+        "balance": 320.26324878,
+        "balance_source": "bybit_wallet_balance",
+        "currency": "USDT",
+        "label": "Bybit Demo",
+        "source": "bybit_wallet_balance"
+      },
+      {
+        "account": "Bybit Live",
+        "account_mode": "live",
+        "as_of": "2026-07-12T00:43:52.797366+00:00",
+        "balance": 224.75424092,
+        "balance_source": "bybit_wallet_balance",
+        "currency": "USDT",
+        "label": "Bybit Live",
+        "source": "bybit_wallet_balance"
+      },
+      {
+        "account": "OANDA DEMO",
+        "account_mode": "demo",
+        "as_of": "2026-07-12T00:43:53.774862+00:00",
+        "balance": 1500.5138,
+        "balance_source": "oanda_account_summary",
+        "currency": "AUD",
+        "label": "OANDA DEMO",
+        "nav": 1500.5138,
+        "source": "oanda_account_summary"
+      },
+      {
+        "account": "OANDA LIVE",
+        "account_mode": "live",
+        "as_of": "2026-07-12T00:43:54.868685+00:00",
+        "balance": 1479.3098,
+        "balance_source": "oanda_account_summary",
+        "currency": "AUD",
+        "label": "OANDA LIVE",
+        "nav": 1479.3098,
+        "source": "oanda_account_summary"
+      }
+    ],
+    "broker_balance_diagnostics": {
+      "bybit_demo_anchor_fingerprint": "19c9ae591d45c45512d9c435097db5159403aab788668339b0c0aff74a97d5db",
+      "updated_at": "2026-07-12T00:43:54.876730+00:00",
+      "warnings": []
+    },
     "bybit_closed_pnl_last_seen": {
       "demo": 1782981944155,
       "live": 1783578980386
@@ -1484,5 +1295,5 @@
   "watchlist": [
     "DASHUSDT"
   ],
-  "watchlist_updated_at": "2026-07-11T13:27:02.298724+00:00"
+  "watchlist_updated_at": null
 }
