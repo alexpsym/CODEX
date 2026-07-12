@@ -3,7 +3,7 @@ Trading Journal final focused cleanup summary
 Status:
 - Implementation completed locally.
 - Workbook regenerated and reopened for verification.
-- First repository push is pending. This summary will be updated with the verified implementation commit hash after the first push, then pushed again.
+- First repository push completed and verified. This summary update will be committed and pushed by the required second `PATCH_DESKTOP_PUSH.bat` run.
 
 Root causes fixed:
 - Stop and target recommendation direction used hidden numeric tolerances, so genuine tiny differences could be treated as exact ties and pushed into the goal-preference branch.
@@ -95,7 +95,7 @@ Runtime-state note:
 - Accidental verification churn in `state_backup.json` was restored and is not part of this work.
 
 Push status:
-- Implementation commit hash: pending first `PATCH_DESKTOP_PUSH.bat`.
-- First push verification: pending.
+- Implementation commit hash: `243ee79b4fa70b5c5f1444c9e46f573b6ab724ed`.
+- First push verification: `PATCH_DESKTOP_PUSH.bat` completed successfully and verified local HEAD matched `origin/master` at `243ee79b4fa70b5c5f1444c9e46f573b6ab724ed`.
 - Summary-update commit hash: pending second `PATCH_DESKTOP_PUSH.bat`.
 - Final HEAD == origin/master confirmation: pending.
