@@ -3252,7 +3252,7 @@ def _stop_recommendation_payload(
     loss_mean_dec = _average_decimal(loser_values)
     win_mean = _decimal_to_float(win_mean_dec)
     loss_mean = _decimal_to_float(loss_mean_dec)
-    recommendation = _size_recommendation("stop", win_mean, loss_mean)
+    recommendation = "Need wins & losses"
     gap = None
     direction = None
     recommended = None

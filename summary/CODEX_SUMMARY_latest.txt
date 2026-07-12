@@ -1,103 +1,79 @@
-Trading Journal final focused cleanup summary
+Trading Journal final narrow stop-polish cleanup summary
 
 Status:
 - Implementation completed locally.
 - Workbook regenerated and reopened for verification.
-- First repository push completed and verified.
-- Required second summary-update push completed and verified.
+- First repository push is pending. After that push verifies, this summary will be updated with the implementation commit hash and pushed again.
 
-Root causes fixed:
-- Stop and target recommendation direction used hidden numeric tolerances, so genuine tiny differences could be treated as exact ties and pushed into the goal-preference branch.
-- FX target captured-R admitted direct price-R when cost, financing, conversion, and single-exit metadata was merely absent. Missing metadata is now treated as unproven, not proof.
-- Existing OANDA transaction export rows did not expose enough positive proof for future complete-exit/executed-price provenance.
+Root cause:
+- The main stop recommendation path already used Decimal comparisons, but the Excel-open Stats 1 polish path still rebuilt stop recommendations from worksheet average cells.
+- That polish path converted Excel percent fractions to float percent points and called the legacy sizing helper, creating a second calculation route that could overwrite a correct Decimal stop recommendation.
 
-Files and focused functions changed:
-- `tools/master_journal_workbook.py`
-  - Added Decimal parsing/mean/percentile helpers and Decimal original-plan, stop-distance, target-R, monetary-risk, net-profit, and price-capture calculations.
-  - Updated `_size_recommendation`, `_stop_recommendation_payload`, `_stop_exact_tie_adjustment`, `_target_r_recommendation`, and `_target_r_exact_tie_adjustment_decimal` so unrounded Decimal equality is the only tie condition.
-  - Tightened `_target_r_realized_from_original_plan_detail`, `_target_r_original_monetary_risk_detail`, `_target_r_price_capture_net_equivalent`, `_target_r_oanda_net_result_provenance`, and `_target_r_stored_original_net_r`.
-  - Added method and exclusion diagnostics by overall/fx/crypto.
-- `render/master_service.py`
-  - Added OANDA opening/closing units, `oanda_single_complete_exit`, and `entry_exit_prices_executed` into parsed rows, metrics, and raw refs.
-  - Added a streaming Trade Log header reader for read-only workbook verification helpers.
-- `tests/test_master_service_trading_journal_stats.py`
-  - Added Decimal tiny-difference regressions for stop and target recommendations.
-  - Added stored `R-Multiple` provenance coverage.
-  - Updated FX provenance tests so unproven price-R fallback is rejected.
-- `tests/test_master_journal_workbook.py`
-  - Updated the old missing-metadata price-R fallback test to assert strict FX exclusion.
+Functions changed:
+- `render/master_service.py::_repair_stats1_recommendation_rows_for_excel_open`
+  - Removed the Stats 1 polish call to `_size_recommendation`.
+  - Added Decimal conversion for Excel percent-fraction cells using `Decimal(str(value)) * Decimal("100")`.
+  - Writes polish-path stop recommendations through the shared `_stop_recommendation_payload`.
+- `tools/master_journal_workbook.py::_stop_recommendation_payload`
+  - Removed the redundant initial `_size_recommendation` call so the active stop payload has a single Decimal decision point.
+- `tools/master_journal_workbook.py::_size_recommendation`
+  - Left in place only as a compatibility helper; it already uses Decimal values and exact equality only.
+- `tests/test_dashboard_home_layout.py`
+  - Updated the Excel-open polish regression to expect current Increase/Decrease recommendation text instead of legacy Reduce/Keep wording.
+  - Added end-to-end workbook-polish regressions for tiny positive difference, tiny negative difference, and exact equality.
 
-Decimal comparison method:
-- Source values are converted with `Decimal(str(value))` without rounding through display precision.
-- Means, medians, planned target R, captured target R, and stop-distance comparisons use Decimal arithmetic.
-- Recommendation direction uses exact Decimal comparisons only:
-  - winner stop mean > loser stop mean: Increase stop
-  - winner stop mean < loser stop mean: Decrease stop
-  - recommended target R > planned-target median: Increase target
-  - recommended target R < planned-target median: Decrease target
-- Exact-tie goal preferences run only when the Decimal values are exactly equal.
+Recommendation-direction tolerance audit:
+- Active service/API, Stats 1 generation/update, Symbols, and Excel-open polish paths now route stop recommendations through `_stop_recommendation_payload`.
+- `_size_recommendation` has no active service call sites.
+- Direction comparisons in active stop/target recommendation paths use exact Decimal equality and direct `<`/`>` checks.
+- Remaining `1e-12`, `math.isclose`, and tolerance hits are in unrelated validation, parser, timestamp, commission, sizing, or balance-check code, not recommendation-direction decisions.
 
-FX net-R recovery priority now enforced:
-- Verified net profit / verified original monetary risk.
-- Verified stored original net R, including stored `R-Multiple` only when provenance proves original entry, original stop, and net result.
-- Reconstructed opening-conversion net R when original entry/stop, units, opening quote-to-home conversion, and net P/L are available.
-- Verified net-equivalent price R only with positive proof.
-- Direct price R is not accepted from missing cost/partial/financing metadata.
+End-to-end polish-path tests:
+- Created real workbook fixtures with Stats 1 winner/loser stop average cells and ran `_polish_master_journal_for_excel_open`.
+- Reopened each workbook and confirmed the polished recommendation cell matched `_stop_recommendation_payload`.
+- Covered:
+  - winner `1.0000000000005`, loser `1.0` -> Increase stop.
+  - winner `0.9999999999995`, loser `1.0` -> Decrease stop.
+  - winner `1.0`, loser `1.0` -> exact-tie goal preference Decrease stop.
 
-Current regenerated recommendations:
-- Overall stop before: Decrease to 0.67%; after: Decrease stop - Recommended: 0.67% (0.05 pp below loss average).
-- Overall target before: Increase to 2.03R; after: Decrease target - Recommended: 1.95R (current median: 2.0R).
-- FX stop before: Increase to 0.16%; after: Increase stop - Recommended: 0.16% (0.03 pp above loss average).
-- FX target before: Increase to 2.05R; after: No eligible winning trades.
-- Crypto stop before: Decrease to 2.78%; after: Decrease stop - Recommended: 2.78% (0.16 pp below loss average).
-- Crypto target before: Decrease to 1.95R; after: Decrease target - Recommended: 1.95R (current median: 2.0R).
-
-Cause of target change:
-- The previous Overall and FX target recommendations were driven by unproven FX direct price-R fallback.
-- After the audit, the current workbook has 173 FX winning trades excluded for missing opening conversion, plus the listed plan/provenance exclusions below.
-- Overall target now follows the 44 eligible Crypto wins with verified net profit over original monetary risk.
-
-Calculation method counts:
-- Overall: `verified_net_profit_over_original_monetary_risk` = 44.
-- FX: no eligible winning trades after provenance audit.
-- Crypto: `verified_net_profit_over_original_monetary_risk` = 44.
-
-Winning exclusion counts:
-- Overall: `missing_opening_conversion` 173, `moved_without_original_plan` 162, `missing_original_stop` 11, `missing_original_target` 8, `invalid_long_original_stop` 1, `non_positive_realized_r` 1.
-- FX: `missing_opening_conversion` 173, `moved_without_original_plan` 122, `missing_original_stop` 8, `missing_original_target` 8, `invalid_long_original_stop` 1, `non_positive_realized_r` 1.
-- Crypto: `moved_without_original_plan` 40, `missing_original_stop` 3.
+Current regenerated workbook recommendations preserved:
+- Overall stop: Decrease stop - Recommended: 0.67% (0.05 pp below loss average).
+- Overall target: Decrease target - Recommended: 1.95R (current median: 2.0R).
+- FX stop: Increase stop - Recommended: 0.16% (0.03 pp above loss average).
+- FX target: No eligible winning trades.
+- Crypto stop: Decrease stop - Recommended: 2.78% (0.16 pp below loss average).
+- Crypto target: Decrease target - Recommended: 1.95R (current median: 2.0R).
 
 Workbook regeneration and verification:
-- Regenerated `journal/Trading Journal.xlsx` via `render.master_service._sync_master_journal_workbook(defer_github_sync=True, sync_caller="codex_final_cleanup")`.
+- Regenerated `journal/Trading Journal.xlsx` via `render.master_service._sync_master_journal_workbook(defer_github_sync=True, sync_caller="codex_narrow_stop_polish_cleanup")`.
 - Sync result: ok, 1,544 source rows, 1,444 source trade rows, 7 balances.
 - Reopened workbook with openpyxl and verified:
-  - Visible sheet order matches expected: STATS1, STATS2, SYMBOLS, Trade Log, P&L Calendar, YEARLY REPORT, 2018-2026.
+  - Visible sheet order still matches expected.
   - No hidden/helper worksheets and no `_Target R Metadata` worksheet.
-  - STATS1 freeze pane is `B88`.
-  - STATS1 and SYMBOLS recommendations contain no Keep/Maintain text.
+  - STATS1 freeze pane remains `B88`.
+  - STATS1 stop/target cells match the current regenerated recommendation results.
+  - SYMBOLS recommendations contain no Keep/Maintain text.
   - Trade Log sample data row heights match row 5 height of 15.0.
-  - P&L Calendar has one month-header row, no duplicate month headers, no separate year-trades rows, and one-line P/L cells.
-  - STATS2 and Trade Log conditional-formatting rules are present.
+  - P&L Calendar has one month-header row, no separate year-trades rows, and one-line cells.
+  - STATS2 conditional formatting remains present.
 - Workbook sync warning retained: optional Instrument Leaders validation was skipped because that optional section/header is absent.
 
 Complete test accounting:
+- `tests/test_dashboard_home_layout.py`: collected 17; executed 17; passed 17; failed 0; skipped 0.
 - `tests/test_master_service_trading_journal_stats.py`: collected 54; executed 54; passed 54; failed 0; skipped 0.
 - `tests/test_master_journal_workbook.py`: collected 145; executed 145; passed 145; failed 0; skipped 0.
   - Successful contiguous batches: 0-39 (40), 40-59 (20), 60-79 (20), 80-100 (21), 101-103 (3), 104-119 (16), 120-144 (25).
-  - Sum executed: 145. No gaps. Previously unaccounted nodes 101-103 passed explicitly.
+  - Sum executed: 145. No gaps.
 - `tests/test_master_service_trading_journal_crud.py`: collected 188; executed 188; passed 188; failed 0; skipped 0.
-- Total relevant collected tests: 387. Total executed tests: 387. Total passed: 387.
-- Python compilation passed for `tools/master_journal_workbook.py`, `render/master_service.py`, and the three relevant test files.
+- Total relevant collected tests: 404. Total executed tests: 404. Total passed: 404.
+- Python compilation passed for `tools/master_journal_workbook.py`, `render/master_service.py`, and the relevant test files.
 - `git diff --check` passed; only CRLF normalization warnings were printed.
-- Pytest emitted existing FastAPI deprecation warnings only.
+- Pytest emitted existing FastAPI/httpx deprecation warnings only.
 
 Runtime-state note:
 - Pre-existing dirty runtime/local files remain excluded from the commit by `PATCH_DESKTOP_PUSH.bat`: `bybit_monitor/custom_alerts.json`, `render/data/*`, and `state_manifest.json`.
-- Accidental verification churn in `state_backup.json` was restored and is not part of this work.
 
 Push status:
-- Implementation commit hash: `243ee79b4fa70b5c5f1444c9e46f573b6ab724ed`.
-- First push verification: `PATCH_DESKTOP_PUSH.bat` completed successfully and verified local HEAD matched `origin/master` at `243ee79b4fa70b5c5f1444c9e46f573b6ab724ed`.
-- Summary-update commit hash from the required second push: `c9725438886a987a95729fbc5e6364d76d5285ac`.
-- Second push verification: `PATCH_DESKTOP_PUSH.bat` completed successfully and verified local HEAD matched `origin/master` at `c9725438886a987a95729fbc5e6364d76d5285ac`.
-- Final HEAD == origin/master confirmation: verified by the push workflow.
+- Implementation commit hash: pending first `PATCH_DESKTOP_PUSH.bat`.
+- First push verification: pending.
+- Summary-update push: pending.

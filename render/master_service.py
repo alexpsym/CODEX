@@ -124,7 +124,7 @@ from shared.symbol_resolution import (
 from shared.atomic_json import write_json_file
 from render.dropbox_sync import download_bytes, list_excel_files, upload_bytes
 from render import dropbox_state_store
-from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, read_master_journal_source, update_master_journal_workbook_data_only, refresh_master_journal_derived_sheets, stable_row_id, SHEET_ORDER, REPORT_YEARLY_SHEET, expected_report_sheet_names, _get_all_trades_sheet, _get_trade_log_sheet, _trade_log_header_map, _trade_log_data_start_row, _find_instrument_leaders_table, LEADER_LABEL_TO_KEY, _repair_or_flag_zero_trade_qty, _canonicalize_and_dedupe_balances, _trade_execution_fingerprint, _trade_row_source_rank, _dedupe_trade_rows_by_execution, _instrument_averages_header_map, INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, INSTRUMENT_AVERAGES_DATA_START_ROW, _result_percentage_totals_by_market, _risk_of_ruin_by_account, _stats1_sheet, _stats2_sheet, _symbols_sheet, STATS1_SHEET, STATS2_SHEET, SYMBOLS_SHEET, _parse_duration_text, _duration_ddhhmmss_cell_to_seconds, _is_ddhhmmss_number_format, STOP_RECOMMENDATION_HEADER, TARGET_RECOMMENDATION_HEADER, _size_recommendation, _distance_recommendation_summary, _excel_fraction_to_pct_points, _apply_recommendation_cell_style, _ensure_dashboard_requested_metric_rows, _stats1_market_columns, _stats1_section_bounds
+from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, read_master_journal_source, update_master_journal_workbook_data_only, refresh_master_journal_derived_sheets, stable_row_id, SHEET_ORDER, REPORT_YEARLY_SHEET, expected_report_sheet_names, _get_all_trades_sheet, _get_trade_log_sheet, _trade_log_header_map, _trade_log_data_start_row, _find_instrument_leaders_table, LEADER_LABEL_TO_KEY, _repair_or_flag_zero_trade_qty, _canonicalize_and_dedupe_balances, _trade_execution_fingerprint, _trade_row_source_rank, _dedupe_trade_rows_by_execution, _instrument_averages_header_map, INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, INSTRUMENT_AVERAGES_DATA_START_ROW, _result_percentage_totals_by_market, _risk_of_ruin_by_account, _stats1_sheet, _stats2_sheet, _symbols_sheet, STATS1_SHEET, STATS2_SHEET, SYMBOLS_SHEET, _parse_duration_text, _duration_ddhhmmss_cell_to_seconds, _is_ddhhmmss_number_format, STOP_RECOMMENDATION_HEADER, TARGET_RECOMMENDATION_HEADER, _distance_recommendation_summary, _stop_recommendation_payload, _apply_recommendation_cell_style, _ensure_dashboard_requested_metric_rows, _stats1_market_columns, _stats1_section_bounds
 from bybit_monitor import bybit_altcoin_monitor as bybit_monitor
 from oanda_monitor import oanda_forex_monitor as oanda_monitor
 from bybit_demo_tpsl_cache import (
@@ -28748,6 +28748,15 @@ def _repair_stats1_recommendation_rows_for_excel_open(wb: object, diagnostics: D
         ),
     }
 
+    def stop_pct_points(value: object) -> Decimal | None:
+        if value in (None, "") or isinstance(value, bool):
+            return None
+        try:
+            number = Decimal(str(value).strip())
+        except Exception:
+            return None
+        return number * Decimal("100") if number.is_finite() else None
+
     repaired = 0
     for kind, (recommendation_row, winner_row, loser_row) in metric_rows.items():
         if not recommendation_row:
@@ -28757,10 +28766,10 @@ def _repair_stats1_recommendation_rows_for_excel_open(wb: object, diagnostics: D
             winner_avg = ws.cell(winner_row, col).value if winner_row else None
             loser_avg = ws.cell(loser_row, col).value if loser_row else None
             if kind == "stop":
-                winner_avg = _excel_fraction_to_pct_points(winner_avg)
-                loser_avg = _excel_fraction_to_pct_points(loser_avg)
+                winner_avg = stop_pct_points(winner_avg)
+                loser_avg = stop_pct_points(loser_avg)
             cell = ws.cell(recommendation_row, col)
-            cell.value = _size_recommendation(kind, winner_avg, loser_avg)
+            cell.value = _stop_recommendation_payload([winner_avg], [loser_avg]).get(STOP_RECOMMENDATION_HEADER)
             _apply_recommendation_cell_style(cell)
             repaired += 1
     if repaired:

@@ -6,6 +6,7 @@ import sys
 
 import re
 from pathlib import Path
+from decimal import Decimal
 
 import pytest
 from openpyxl import Workbook, load_workbook
@@ -299,7 +300,7 @@ def test_open_master_journal_polish_inserts_stats1_recommendation_rows(tmp_path:
     result = module._polish_master_journal_for_excel_open(path)
 
     assert result["ok"] is True
-    assert result["stats1_recommendation_cells_repaired"] == 6
+    assert result["stats1_recommendation_cells_repaired"] == 3
     checked = load_workbook(path)
     try:
         ws2 = checked["STATS1"]
@@ -311,19 +312,70 @@ def test_open_master_journal_polish_inserts_stats1_recommendation_rows(tmp_path:
         assert ws2.cell(max_stop_row + 1, 1).value == "Source"
         assert ws2.cell(stop_recommendation_row, 1).value == "Recommendation"
         assert [ws2.cell(stop_recommendation_row, col).value for col in range(2, 5)] == [
-            "Reduce stop loss",
-            "Increase stop loss",
-            "Keep stop loss",
+            "Decrease stop \u2014 Recommended: 1.00% (1.00 pp below loss average)",
+            "Increase stop \u2014 Recommended: 2.00% (1.00 pp above loss average)",
+            "Decrease stop \u2014 Recommended: 2.99% (0.01 pp below loss average; exact_tie_goal_preference_decrease)",
         ]
         assert ws2.cell(max_target_row + 1, 1).value == "Source"
         assert ws2.cell(target_recommendation_row, 1).value == "Recommendation"
-        assert [ws2.cell(target_recommendation_row, col).value for col in range(2, 5)] == [
-            "Increase target",
-            "Reduce target",
-            "Keep target",
-        ]
+        assert [ws2.cell(target_recommendation_row, col).value for col in range(2, 5)] == [None, None, None]
     finally:
         checked.close()
+
+
+@pytest.mark.parametrize(
+    ("winner_pct", "loser_pct", "prefix"),
+    [
+        ("1.0000000000005", "1.0", "Increase stop"),
+        ("0.9999999999995", "1.0", "Decrease stop"),
+        ("1.0", "1.0", "Decrease stop"),
+    ],
+)
+def test_open_master_journal_polish_uses_decimal_stop_recommendation_payload(
+    tmp_path: Path,
+    winner_pct: str,
+    loser_pct: str,
+    prefix: str,
+):
+    module = _load_master_service_module()
+    path = tmp_path / "Trading Journal.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "STATS1"
+    ws["B1"] = "Overall"
+    ws["C1"] = "FX"
+    ws["D1"] = "Crypto"
+    ws["A2"] = "Avg stop %"
+    ws["A3"] = "Min stop %"
+    ws["A4"] = "Max stop %"
+    ws["A5"] = "Winners"
+    ws["A6"] = "Avg stop %"
+    ws["B6"] = float(Decimal(winner_pct) / Decimal("100"))
+    ws["C6"] = 0.02
+    ws["D6"] = 0.03
+    ws["A7"] = "Losers"
+    ws["A8"] = "Avg stop %"
+    ws["B8"] = float(Decimal(loser_pct) / Decimal("100"))
+    ws["C8"] = 0.01
+    ws["D8"] = 0.04
+    wb.save(path)
+    wb.close()
+
+    result = module._polish_master_journal_for_excel_open(path)
+
+    assert result["ok"] is True
+    checked = load_workbook(path)
+    try:
+        ws2 = checked["STATS1"]
+        max_stop_row = next(row for row in range(1, ws2.max_row + 1) if ws2.cell(row, 1).value == "Max stop %")
+        recommendation = ws2.cell(max_stop_row + 2, 2).value
+    finally:
+        checked.close()
+    expected = module._stop_recommendation_payload([Decimal(winner_pct)], [Decimal(loser_pct)])[module.STOP_RECOMMENDATION_HEADER]
+    assert recommendation == expected
+    assert str(recommendation).startswith(prefix)
+    if winner_pct == loser_pct:
+        assert "exact_tie_goal_preference_decrease" in str(recommendation)
 
 
 
