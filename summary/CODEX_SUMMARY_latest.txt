@@ -1,10 +1,11 @@
 Trading Journal FX target and Local Trading Tools worker correction summary
 
 Status:
-- Implementation completed.
+- Implementation completed and pushed.
 - Workbook regenerated and reopened for verification.
-- Push step 1 is pending at this checkpoint.
-- Push step 2 is pending until the implementation commit hash is recorded below.
+- First `PATCH_DESKTOP_PUSH.bat` run created implementation commit `f7d7cd3bde1bac89994eb84525dd91e0b051411b`.
+- First push verified: local HEAD and `origin/master` both resolved to `f7d7cd3bde1bac89994eb84525dd91e0b051411b`.
+- This file is the required post-push summary update that records the verified implementation commit and push result.
 
 Recommendation-filter root cause:
 - The previous target analysis path had grown into a monetary-accounting audit for FX trades.
@@ -104,7 +105,7 @@ Runtime-state note:
 - Generated FX Weekend log files are now ignored/reset by the push workflow.
 
 Push status:
-- Implementation commit hash: pending first `PATCH_DESKTOP_PUSH.bat` run.
-- First push verification: pending.
-- Final summary update commit: pending.
-- Final HEAD/origin verification: pending.
+- Implementation commit hash: `f7d7cd3bde1bac89994eb84525dd91e0b051411b`.
+- First push verification: `PATCH_DESKTOP_PUSH.bat` confirmed local HEAD matched `origin/master` at `f7d7cd3bde1bac89994eb84525dd91e0b051411b`.
+- Final summary update commit: pending second `PATCH_DESKTOP_PUSH.bat` run.
+- Final HEAD/origin verification: pending second `PATCH_DESKTOP_PUSH.bat` run.
