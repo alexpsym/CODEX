@@ -34,30 +34,65 @@ if "!STREAM_ROOT:~-1!"=="\" set "STREAM_ROOT=!STREAM_ROOT:~0,-1!"
 powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%tools\windows_launchers\stream_local_master_worker.ps1" -Root "!STREAM_ROOT!" -WorkerLog "!LOCAL_MASTER_WORKER_LOG!"
 set "WORKER_EXIT_CODE=!ERRORLEVEL!"
 
+set "LOCAL_MASTER_STARTED=0"
+if exist "!LOCAL_MASTER_WORKER_LOG!" (
+  findstr /C:"Application startup complete" "!LOCAL_MASTER_WORKER_LOG!" >nul 2>nul && set "LOCAL_MASTER_STARTED=1"
+)
+
 if defined LOCAL_MASTER_NORMAL_EXIT_FILE (
   if exist "!LOCAL_MASTER_NORMAL_EXIT_FILE!" (
+    echo.
+    findstr /I /C:"launcher_preflight" /C:"replacement" "!LOCAL_MASTER_NORMAL_EXIT_FILE!" >nul 2>nul
+    if not errorlevel 1 (
+      echo [local-master] Controlled replacement by a new launcher completed.
+    ) else (
+      findstr /I /C:"exit_button" /C:"local_exit" "!LOCAL_MASTER_NORMAL_EXIT_FILE!" >nul 2>nul
+      if not errorlevel 1 (
+        echo [local-master] Controlled Exit-button shutdown completed.
+      ) else (
+        echo [local-master] Controlled local shutdown completed.
+      )
+    )
+    echo [local-master] Normal-exit marker:
+    type "!LOCAL_MASTER_NORMAL_EXIT_FILE!" 2>nul
     del /q "!LOCAL_MASTER_NORMAL_EXIT_FILE!" >nul 2>nul
     if /I "!LOCAL_MASTER_SUPPRESS_WINDOW_CLOSE!"=="1" exit /b 0
     exit
   )
 )
 
-if defined LOCAL_MASTER_WORKER_FAILED_FILE (
+if defined LOCAL_MASTER_WORKER_FAILED_FILE if "!LOCAL_MASTER_STARTED!"=="0" (
   > "!LOCAL_MASTER_WORKER_FAILED_FILE!" echo Worker exited before dashboard became ready with exit code !WORKER_EXIT_CODE! at !DATE! !TIME!
 )
 
 echo.
 if "!WORKER_EXIT_CODE!"=="0" (
-  echo [local-master] Worker exited before a normal app Exit request.
+  if "!LOCAL_MASTER_STARTED!"=="1" (
+    echo [local-master] Worker exited after dashboard startup without a normal-exit marker.
+  ) else (
+    echo [local-master] Worker exited before a normal app Exit request.
+  )
 ) else (
-  echo [local-master] Worker failed with exit code !WORKER_EXIT_CODE!.
+  if "!LOCAL_MASTER_STARTED!"=="1" (
+    echo [local-master] Unexpected runtime worker exit with exit code !WORKER_EXIT_CODE!.
+  ) else (
+    echo [local-master] Startup failure: worker failed with exit code !WORKER_EXIT_CODE!.
+  )
 )
-echo [local-master] Startup error log:
+if "!LOCAL_MASTER_STARTED!"=="1" (
+  echo [local-master] Runtime exit log:
+) else (
+  echo [local-master] Startup error log:
+)
 echo [local-master]   !LOCAL_MASTER_WORKER_LOG!
 echo [local-master] Last worker log lines:
 powershell -NoProfile -ExecutionPolicy Bypass -Command "try { Get-Content -LiteralPath $env:LOCAL_MASTER_WORKER_LOG -Tail 40 -ErrorAction Stop } catch { Write-Host $_.Exception.Message }"
 echo.
-echo [local-master] This window is intentionally left open so startup errors stay readable.
+if "!LOCAL_MASTER_STARTED!"=="1" (
+  echo [local-master] This window is intentionally left open so runtime exits stay readable.
+) else (
+  echo [local-master] This window is intentionally left open so startup errors stay readable.
+)
 echo [local-master] Press any key to close this window.
 pause >nul
 exit !WORKER_EXIT_CODE!

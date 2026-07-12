@@ -1,81 +1,110 @@
-Trading Journal final narrow stop-polish cleanup summary
+Trading Journal FX target and Local Trading Tools worker correction summary
 
 Status:
-- Implementation completed and committed.
+- Implementation completed.
 - Workbook regenerated and reopened for verification.
-- First `PATCH_DESKTOP_PUSH.bat` run created implementation commit `8c49dc90737c84388c09517494d45a757105d821`.
-- First push verified: local HEAD and `origin/master` both resolved to `8c49dc90737c84388c09517494d45a757105d821`.
-- This file is the required post-push summary update that records the verified implementation commit and push result.
+- Push step 1 is pending at this checkpoint.
+- Push step 2 is pending until the implementation commit hash is recorded below.
 
-Root cause:
-- The main stop recommendation path already used Decimal comparisons, but the Excel-open Stats 1 polish path still rebuilt stop recommendations from worksheet average cells.
-- That polish path converted Excel percent fractions to float percent points and called the legacy sizing helper, creating a second calculation route that could overwrite a correct Decimal stop recommendation.
+Recommendation-filter root cause:
+- The previous target analysis path had grown into a monetary-accounting audit for FX trades.
+- It required opening conversion, original monetary risk, OANDA transaction provenance, commission/swap provenance, and related metadata before accepting otherwise valid FX winners.
+- Those strict filters blocked the Trading Journal's recorded chart-distance data and left Stats 1 FX target output at `No eligible winning trades`.
+- The active target path now uses the recorded Trade Log data for chart-distance analysis: positive recorded `R-Multiple` first, then captured price R from entry/exit/original stop distance.
+- Monetary-risk/provenance helpers remain out of the active recommendation path and no service/API wrapper routes back through them.
 
-Functions changed:
-- `render/master_service.py::_repair_stats1_recommendation_rows_for_excel_open`
-  - Removed the Stats 1 polish call to `_size_recommendation`.
-  - Added Decimal conversion for Excel percent-fraction cells using `Decimal(str(value)) * Decimal("100")`.
-  - Writes polish-path stop recommendations through the shared `_stop_recommendation_payload`.
-- `tools/master_journal_workbook.py::_stop_recommendation_payload`
-  - Removed the redundant initial `_size_recommendation` call so the active stop payload has a single Decimal decision point.
-- `tools/master_journal_workbook.py::_size_recommendation`
-  - Left in place only as a compatibility helper; it already uses Decimal values and exact equality only.
-- `tests/test_dashboard_home_layout.py`
-  - Updated the Excel-open polish regression to expect current Increase/Decrease recommendation text instead of legacy Reduce/Keep wording.
-  - Added end-to-end workbook-polish regressions for tiny positive difference, tiny negative difference, and exact equality.
+FX eligibility counts:
+- Before: the strict-filter output surfaced 0 eligible FX target winners and Stats 1 FX showed `No eligible winning trades`.
+- After: FX target analysis has 174 eligible winning trades and 632 eligible losing trades.
+- After: Overall target analysis has 218 eligible winning trades and 800 eligible losing trades.
+- After: Crypto target analysis has 44 eligible winning trades and 168 eligible losing trades.
 
-Recommendation-direction tolerance audit:
-- Active service/API, Stats 1 generation/update, Symbols, and Excel-open polish paths now route stop recommendations through `_stop_recommendation_payload`.
-- `_size_recommendation` has no active service call sites.
-- Direction comparisons in active stop/target recommendation paths use exact Decimal equality and direct `<`/`>` checks.
-- Remaining `1e-12`, `math.isclose`, and tolerance hits are in unrelated validation, parser, timestamp, commission, sizing, or balance-check code, not recommendation-direction decisions.
+Current regenerated workbook recommendations:
+- Overall target: `Increase target — Recommended: 2.03R (current median: 2.0R)`.
+- FX target: `Increase target — Recommended: 2.04R (current median: 2.0R)`.
+- Crypto target: `Decrease target — Recommended: 1.98R (current median: 2.0R)`.
+- Overall stop: `Decrease stop — Recommended: 0.67% (0.06 pp below loss average)`.
+- FX stop: `Increase stop — Recommended: 0.16% (0.03 pp above loss average)`.
+- Crypto stop: `Decrease stop — Recommended: 2.78% (0.16 pp below loss average)`.
+- The FX/Crypto target values differ slightly from earlier approximate notes because the regenerated workbook now uses the current recorded R-Multiple population: 174 FX wins and 44 Crypto wins.
 
-End-to-end polish-path tests:
-- Created real workbook fixtures with Stats 1 winner/loser stop average cells and ran `_polish_master_journal_for_excel_open`.
-- Reopened each workbook and confirmed the polished recommendation cell matched `_stop_recommendation_payload`.
-- Covered:
-  - winner `1.0000000000005`, loser `1.0` -> Increase stop.
-  - winner `0.9999999999995`, loser `1.0` -> Decrease stop.
-  - winner `1.0`, loser `1.0` -> exact-tie goal preference Decrease stop.
+Symbols coverage:
+- FX symbols with valid wins/losses now receive target recommendations from recorded data, including EURUSD, USDJPY, GBPUSD, AUDUSD, USDCAD, USDCHF, EURJPY, GBPJPY, and the other qualifying FX pairs.
+- Crypto symbols with valid wins/losses continue to receive target recommendations, including BTCUSDT and ETHUSDT.
+- Symbols with no eligible losing trades correctly report `No eligible losing trades` instead of inventing a recommendation.
+- Reopened workbook scan confirmed no Stats 1 or Symbols recommendation output contains `Keep` or `Maintain`.
 
-Current regenerated workbook recommendations preserved:
-- Overall stop: Decrease stop - Recommended: 0.67% (0.05 pp below loss average).
-- Overall target: Decrease target - Recommended: 1.95R (current median: 2.0R).
-- FX stop: Increase stop - Recommended: 0.16% (0.03 pp above loss average).
-- FX target: No eligible winning trades.
-- Crypto stop: Decrease stop - Recommended: 2.78% (0.16 pp below loss average).
-- Crypto target: Decrease target - Recommended: 1.95R (current median: 2.0R).
+Target and stop logic changed:
+- `tools/master_journal_workbook.py`
+  - Added recorded distance Decimal parsing for Stop Loss Distance and Target Distance.
+  - Added recorded R-Multiple priority for captured target R.
+  - Added price captured R from recorded stop distance as the fallback after original-plan price capture.
+  - Treats unmoved historical rows' stored stop/target as the original plan.
+  - Excludes only moved trades whose immutable original plan cannot be recovered.
+  - Uses the exact same eligible winning population for captured-R histogram and original planned-target baseline.
+  - Stop recommendations use recorded Stop Loss Distance percentage without monetary-risk or conversion requirements.
 
-Workbook regeneration and verification:
-- Regenerated `journal/Trading Journal.xlsx` via `render.master_service._sync_master_journal_workbook(defer_github_sync=True, sync_caller="codex_narrow_stop_polish_cleanup")`.
+Worker-exit root cause:
+- `/api/local-shutdown` and `/api/local-exit` previously wrote the exit-request marker before SIGTERM, but the normal-exit marker was only written later by the batch loop after Uvicorn returned.
+- If the process tree disappeared before that batch branch ran, the visible wrapper could classify a controlled runtime shutdown as a worker failure.
+- The streamer also stopped rechecking readiness after the first healthy startup, so post-Uvicorn-restart health/autostart recovery was not visibly validated.
+- `fxweekend-clone` was configured in `AUTOSTART_SCRIPTS` but could disappear from resolved autostarts without a visible `/scripts` reason.
+
+Launcher and worker files/functions changed:
+- `render/master_service.py`
+  - Added `fxweekend-clone` to local allowed apps.
+  - Records unavailable configured autostart targets and exposes them in `/scripts`.
+  - Writes local exit and normal-exit markers atomically before scheduling SIGTERM.
+  - Marker payload includes reason, timestamp, server PID, and requesting action.
+- `run_local_master_control.bat`
+  - Logs Uvicorn restart generation.
+  - Writes the post-Uvicorn normal marker atomically as a fallback.
+- `tools/windows_launchers/local_master_worker_console.bat`
+  - Distinguishes startup failure, unexpected runtime exit, controlled Exit-button shutdown, controlled replacement, and local shutdown.
+  - Uses the normal marker even when the worker process is gone before the batch branch runs.
+  - Avoids printing startup-error wording after `Application startup complete`.
+- `tools/windows_launchers/stream_local_master_worker.ps1`
+  - Continues health/autostart supervision for the worker lifetime.
+  - Resets dashboard/scanner readiness after restart detection.
+  - Revalidates configured targets: `bybit_monitor`, `oanda_monitor`, and `fxweekend-clone`.
+  - Logs restart detected, waiting for recovery, dashboard recovered, autostart recovered/lost, final worker PID/exit evidence, last health timestamp, last autostart timestamp, and normal-marker status.
+- `oanda_monitor/oanda_forex_monitor.py`
+  - Timeout/retry logging now includes exception class, useful fallback message, account/mode, endpoint, since window, attempt number, and recovery after success.
+- `.gitignore` and `PATCH_DESKTOP_PUSH.bat`
+  - Added `fxweekend-clone/*.log` so generated FX Weekend runtime logs cannot be committed by the automatic push workflow.
+
+Restart/autostart verification:
+- Windows launcher tests verify Uvicorn restart-generation logging, restart recovery messages, readiness reset/revalidation, configured autostart target checks, controlled normal-marker shutdowns, and runtime-vs-startup wording.
+- `/scripts` test verifies a configured missing `fxweekend-clone` becomes a visible non-operational autostart row with an exact reason.
+- PowerShell parser check passed for `tools/windows_launchers/stream_local_master_worker.ps1`.
+- Actual BAT smoke test passed through `tests/test_windows_launchers.py::test_run_local_master_worker_console_smoke_has_no_cmd_syntax_error`.
+
+Workbook regeneration and reopen verification:
+- Regenerated `journal/Trading Journal.xlsx` via `render.master_service._sync_master_journal_workbook(defer_github_sync=True, sync_caller="codex_fx_target_worker_cleanup")`.
 - Sync result: ok, 1,544 source rows, 1,444 source trade rows, 7 balances.
 - Reopened workbook with openpyxl and verified:
-  - Visible sheet order still matches expected.
-  - No hidden/helper worksheets and no `_Target R Metadata` worksheet.
-  - STATS1 freeze pane remains `B88`.
-  - STATS1 stop/target cells match the current regenerated recommendation results.
-  - SYMBOLS recommendations contain no Keep/Maintain text.
-  - Trade Log sample data row heights match row 5 height of 15.0.
-  - P&L Calendar has one month-header row, no separate year-trades rows, and one-line cells.
-  - STATS2 conditional formatting remains present.
-- Workbook sync warning retained: optional Instrument Leaders validation was skipped because that optional section/header is absent.
+  - Stats 1 Overall/FX/Crypto target cells match backend calculations.
+  - Stats 1 FX target is an Increase recommendation, not unavailable.
+  - Symbols target recommendations match backend calculations.
+  - Stats 1 freeze pane remains `B88`.
+  - No `Keep`/`Maintain` recommendation outputs in Stats 1 or Symbols.
 
-Complete test accounting:
-- `tests/test_dashboard_home_layout.py`: collected 17; executed 17; passed 17; failed 0; skipped 0.
-- `tests/test_master_service_trading_journal_stats.py`: collected 54; executed 54; passed 54; failed 0; skipped 0.
-- `tests/test_master_journal_workbook.py`: collected 145; executed 145; passed 145; failed 0; skipped 0.
-  - Successful contiguous batches: 0-39 (40), 40-59 (20), 60-79 (20), 80-100 (21), 101-103 (3), 104-119 (16), 120-144 (25).
-  - Sum executed: 145. No gaps.
-- `tests/test_master_service_trading_journal_crud.py`: collected 188; executed 188; passed 188; failed 0; skipped 0.
-- Total relevant collected tests: 404. Total executed tests: 404. Total passed: 404.
-- Python compilation passed for `tools/master_journal_workbook.py`, `render/master_service.py`, and the relevant test files.
-- `git diff --check` passed; only CRLF normalization warnings were printed.
-- Pytest emitted existing FastAPI/httpx deprecation warnings only.
+Tests and checks:
+- Python compilation passed for `tools/master_journal_workbook.py`, `render/master_service.py`, and `oanda_monitor/oanda_forex_monitor.py`.
+- PowerShell parser check passed for `tools/windows_launchers/stream_local_master_worker.ps1`.
+- `tests/test_master_service_trading_journal_stats.py`: 57 passed.
+- `tests/test_master_journal_workbook.py`: 145 passed.
+- `tests/test_windows_launchers.py`: 36 passed.
+- `tests/test_merged_monitor_status_env.py`: 44 passed.
+- `tests/test_master_service_local_exit.py`: 10 passed.
+- `git diff --check` passed; Git printed CRLF normalization warnings only.
 
 Runtime-state note:
-- Pre-existing dirty runtime/local files remain excluded from the commit by `PATCH_DESKTOP_PUSH.bat`: `bybit_monitor/custom_alerts.json`, `render/data/*`, and `state_manifest.json`.
+- Pre-existing dirty runtime/local state files remain excluded from the commit by `PATCH_DESKTOP_PUSH.bat`, including `bybit_monitor/custom_alerts.json`, `render/data/*`, `state_manifest.json`, and `state_backup.json`.
+- Generated FX Weekend log files are now ignored/reset by the push workflow.
 
 Push status:
-- Implementation commit hash: `8c49dc90737c84388c09517494d45a757105d821`.
-- First push verification: `PATCH_DESKTOP_PUSH.bat` confirmed local HEAD matched `origin/master` at `8c49dc90737c84388c09517494d45a757105d821`.
-- This post-push summary update records the verified implementation revision; the final response records the final repository HEAD after the required follow-up push.
+- Implementation commit hash: pending first `PATCH_DESKTOP_PUSH.bat` run.
+- First push verification: pending.
+- Final summary update commit: pending.
+- Final HEAD/origin verification: pending.

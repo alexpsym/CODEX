@@ -1294,7 +1294,72 @@ def _target_r_trade_side(row: Dict[str, Any]) -> str:
     return ""
 
 
+def _recorded_distance_pct_decimal(row: Dict[str, Any], level_key: str) -> Tuple[Decimal | None, str]:
+    keys = (
+        ("stop_loss_distance_pct", "stop_loss_distance", "stop_distance_pct", "stop_distance")
+        if level_key == "stop_loss"
+        else ("target_distance_pct", "target_distance", "take_profit_distance_pct", "take_profit_distance")
+    )
+    wanted = tuple(key.casefold().replace("-", "_").replace(" ", "_") for key in keys)
+    for container in _target_r_authoritative_containers(row):
+        normalized = _target_r_normalized_map(container)
+        for key in wanted:
+            if key not in normalized:
+                continue
+            raw = normalized.get(key)
+            if raw in (None, "") or isinstance(raw, bool):
+                continue
+            text = str(raw).strip()
+            if text.endswith("%"):
+                text = text[:-1].strip()
+            try:
+                value = Decimal(text)
+            except (InvalidOperation, ValueError):
+                continue
+            if not value.is_finite() or value == 0:
+                continue
+            value = abs(value)
+            if _trade_row_market(row) == "fx" and value > Decimal("50"):
+                return None, f"invalid_fx_original_{'stop' if level_key == 'stop_loss' else 'target'}_distance"
+            return value, ""
+    return None, f"missing_recorded_{'stop' if level_key == 'stop_loss' else 'target'}_distance"
+
+
+def _planned_target_r_from_recorded_distances_decimal(row: Dict[str, Any]) -> Decimal | None:
+    levels = _original_plan_levels_decimal(row)
+    if levels.get("movement_evidence"):
+        return None
+    stop_pct, _stop_reason = _recorded_distance_pct_decimal(row, "stop_loss")
+    target_pct, _target_reason = _recorded_distance_pct_decimal(row, "take_profit")
+    if stop_pct is None or target_pct is None or stop_pct <= 0 or target_pct <= 0:
+        return None
+    with localcontext() as ctx:
+        ctx.prec = 40
+        return target_pct / stop_pct
+
+
+def _target_r_recorded_r_multiple_decimal(row: Dict[str, Any]) -> Decimal | None:
+    for container in _target_r_authoritative_containers(row):
+        value = _target_r_first_decimal(
+            container,
+            (
+                "r_multiple",
+                "r-multiple",
+                "r",
+                "captured_r",
+                "realized_r",
+                "realised_r",
+            ),
+        )
+        if value is not None and value > 0:
+            return value
+    return None
+
+
 def _planned_target_r_from_original_plan(row: Dict[str, Any]) -> float | None:
+    distance_ratio = _planned_target_r_from_recorded_distances_decimal(row)
+    if distance_ratio is not None:
+        return float(distance_ratio)
     levels = _original_plan_levels(row)
     entry = _as_float(levels.get("entry"))
     stop = _as_float(levels.get("stop"))
@@ -1317,6 +1382,9 @@ def _planned_target_r_from_original_plan(row: Dict[str, Any]) -> float | None:
 
 
 def _planned_target_r_from_original_plan_decimal(row: Dict[str, Any]) -> Decimal | None:
+    distance_ratio = _planned_target_r_from_recorded_distances_decimal(row)
+    if distance_ratio is not None:
+        return distance_ratio
     levels = _original_plan_levels_decimal(row)
     entry = levels.get("entry")
     stop = levels.get("stop")
@@ -2248,6 +2316,36 @@ def _target_r_price_capture_from_original_plan_decimal(
     return captured, ""
 
 
+def _target_r_price_capture_from_recorded_stop_distance_decimal(
+    row: Dict[str, Any],
+    levels: Dict[str, Any],
+) -> Tuple[Decimal | None, str]:
+    entry = levels.get("entry")
+    exit_price = _target_r_exit_price_decimal(row)
+    if not isinstance(entry, Decimal):
+        return None, "missing_original_entry"
+    if exit_price is None:
+        return None, "missing_actual_exit"
+    stop_pct, reason = _recorded_distance_pct_decimal(row, "stop_loss")
+    if stop_pct is None:
+        return None, reason or "missing_recorded_stop_distance"
+    with localcontext() as ctx:
+        ctx.prec = 40
+        original_risk = entry * (stop_pct / Decimal("100"))
+        if original_risk <= 0:
+            return None, "zero_original_stop_risk"
+        side = _target_r_trade_side(row)
+        if side == "long":
+            captured = (exit_price - entry) / original_risk
+        elif side == "short":
+            captured = (entry - exit_price) / original_risk
+        else:
+            return None, "missing_trade_side"
+    if captured <= 0:
+        return None, "non_positive_realized_r"
+    return captured, ""
+
+
 def _target_r_price_capture_net_equivalent(row: Dict[str, Any]) -> Tuple[bool, str]:
     explicit_verified = _target_r_normalized_value(
         row,
@@ -2309,45 +2407,19 @@ def _target_r_price_capture_net_equivalent(row: Dict[str, Any]) -> Tuple[bool, s
 
 
 def _target_r_realized_from_original_plan_detail(row: Dict[str, Any]) -> Tuple[float | None, str, str, Decimal | None]:
-    trusted, reason, levels = _target_r_original_plan_trusted(row)
-    if not trusted:
-        return None, reason, "", None
     decimal_levels = _original_plan_levels_decimal(row)
-    net_profit = _target_r_net_profit_decimal(row)
-    if net_profit is None:
-        return None, "missing_net_profit", "", None
-    if net_profit <= 0:
-        return None, "non_positive_realized_r", "", None
-    risk, risk_reason, method = _target_r_original_monetary_risk_detail(row, decimal_levels)
-    if risk is not None:
-        if risk <= 0:
-            return None, "invalid_realized_r", "", None
-        with localcontext() as ctx:
-            ctx.prec = 40
-            realized_r_dec = net_profit / risk
-        if realized_r_dec <= 0:
-            return None, "non_positive_realized_r", "", None
-        return float(realized_r_dec), "", method, realized_r_dec
-    stored_net_r, stored_net_r_reason = _target_r_stored_original_net_r(row, decimal_levels)
-    if stored_net_r is not None:
-        return float(stored_net_r), "", "verified_stored_original_net_r", stored_net_r
+    if decimal_levels.get("movement_evidence") and not decimal_levels.get("explicit"):
+        return None, "moved_without_original_plan", "", None
+    recorded_r = _target_r_recorded_r_multiple_decimal(row)
+    if recorded_r is not None:
+        return float(recorded_r), "", "recorded_r_multiple", recorded_r
     price_r, price_reason = _target_r_price_capture_from_original_plan_decimal(row, decimal_levels)
     if price_r is not None:
-        net_equivalent, net_reason = _target_r_price_capture_net_equivalent(row)
-        if not net_equivalent:
-            if net_reason in {
-                "price_r_not_net_due_to_costs",
-                "price_r_unverified_costs",
-                "price_r_unverified_partial_exit",
-                "unverified_commission_cost_status",
-                "unverified_financing_swap",
-                "partial_or_multiple_exits_not_reconstructed",
-                "unverified_executed_prices",
-            } and not (risk_reason and str(risk_reason).startswith("missing_opening_conversion")):
-                return None, net_reason, "", None
-            return None, risk_reason or net_reason, "", None
-        return float(price_r), "", "verified_net_equivalent_price_r", price_r
-    return None, price_reason or risk_reason or stored_net_r_reason, "", None
+        return float(price_r), "", "price_captured_r_from_original_plan", price_r
+    distance_r, distance_reason = _target_r_price_capture_from_recorded_stop_distance_decimal(row, decimal_levels)
+    if distance_r is not None:
+        return float(distance_r), "", "price_captured_r_from_recorded_stop_distance", distance_r
+    return None, price_reason or distance_reason or "invalid_realized_r", "", None
 
 
 def _target_r_realized_from_original_plan(row: Dict[str, Any]) -> Tuple[float | None, str]:
@@ -3129,6 +3201,11 @@ def _target_r_recommendation(rows: List[Dict[str, Any]], *, scope: str = "standa
 
 
 def _original_stop_distance_pct_points(row: Dict[str, Any]) -> Tuple[float | None, str]:
+    decimal_pct, reason = _original_stop_distance_pct_points_decimal(row)
+    if decimal_pct is not None:
+        return float(decimal_pct), ""
+    if reason:
+        return None, reason
     levels = _original_plan_levels(row)
     if levels.get("movement_evidence") and not levels.get("explicit"):
         return None, "moved_without_original_stop"
@@ -3161,6 +3238,10 @@ def _original_stop_distance_pct_points_decimal(row: Dict[str, Any]) -> Tuple[Dec
     levels = _original_plan_levels_decimal(row)
     if levels.get("movement_evidence") and not levels.get("explicit"):
         return None, "moved_without_original_stop"
+    if not levels.get("movement_evidence"):
+        recorded_pct, recorded_reason = _recorded_distance_pct_decimal(row, "stop_loss")
+        if recorded_pct is not None:
+            return recorded_pct, ""
     entry = levels.get("entry")
     stop = levels.get("stop")
     if not isinstance(entry, Decimal):

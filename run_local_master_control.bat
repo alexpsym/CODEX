@@ -224,7 +224,10 @@ if /I not "!SPREAD_MONITOR_SKIP_REQUIREMENTS_INSTALL!"=="1" (
 )
 
 :restart_master
+if not defined LOCAL_MASTER_UVICORN_GENERATION set "LOCAL_MASTER_UVICORN_GENERATION=0"
+set /a LOCAL_MASTER_UVICORN_GENERATION+=1
 echo [local-master] starting uvicorn at !DATE! !TIME!
+echo [local-master] uvicorn restart generation !LOCAL_MASTER_UVICORN_GENERATION!
 "%PYTHON_EXE%" -m uvicorn render.master_service:app --host 127.0.0.1 --port 8000 --log-config "%ROOT%render\local_uvicorn_log_config.json"
 set "EXIT_CODE=!ERRORLEVEL!"
 echo [local-master] uvicorn exited with !EXIT_CODE! at !DATE! !TIME!
@@ -279,5 +282,7 @@ goto :eof
 
 :write_normal_exit_marker
 if not defined LOCAL_MASTER_NORMAL_EXIT_FILE goto :eof
-> "!LOCAL_MASTER_NORMAL_EXIT_FILE!" echo normal exit requested at !DATE! !TIME!
+set "LOCAL_MASTER_NORMAL_EXIT_TMP=!LOCAL_MASTER_NORMAL_EXIT_FILE!.tmp"
+> "!LOCAL_MASTER_NORMAL_EXIT_TMP!" echo {"reason":"batch_exit_request","timestamp":"!DATE! !TIME!","server_pid":"","requesting_action":"batch_post_uvicorn"}
+move /Y "!LOCAL_MASTER_NORMAL_EXIT_TMP!" "!LOCAL_MASTER_NORMAL_EXIT_FILE!" >nul 2>nul
 goto :eof

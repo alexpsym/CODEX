@@ -2546,7 +2546,7 @@ def test_source_ignores_legacy_target_r_metadata_and_diagnoses_visible_duplicate
     assert "original_open_transaction_id" not in parsed_legacy_metadata["items"][0]
 
 
-def test_missing_target_r_metadata_excludes_unproven_fx_price_r(tmp_path: Path):
+def test_missing_target_r_metadata_still_allows_recorded_fx_price_r(tmp_path: Path):
     from tools.master_journal_workbook import _target_r_recommendation
 
     rows = _target_r_roundtrip_fx_rows()
@@ -2568,11 +2568,12 @@ def test_missing_target_r_metadata_excludes_unproven_fx_price_r(tmp_path: Path):
 
     risk = _target_r_recommendation(read_master_journal_source(out)["items"])
 
-    assert risk["eligible_target_r_wins"] == 0
+    assert risk["eligible_target_r_wins"] == 5
     assert risk["eligible_target_r_losses"] == 1
-    assert risk["target_recommendation"] == "No eligible winning trades"
-    assert risk["target_r_winning_exclusion_reasons"] == {"missing_opening_conversion": 5}
-    assert risk["target_r_winning_exclusion_reasons_by_market"]["fx"] == {"missing_opening_conversion": 5}
+    assert risk["target_recommendation"].startswith(("Increase target", "Decrease target"))
+    assert risk["target_r_calculation_method_counts"]["price_captured_r_from_original_plan"] == 5
+    assert risk["target_r_winning_exclusion_reasons"] == {}
+    assert risk["target_r_winning_exclusion_reasons_by_market"]["fx"] == {}
 
 
 def test_generated_trade_log_distance_fraction_displays_one_percent(tmp_path: Path):

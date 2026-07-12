@@ -8,6 +8,7 @@ __pycache__/
 PATCH_DESKTOP_PUSH-latest.log
 INSTALL-latest.log
 logs/
+fxweekend-clone/*.log
 .env
 .env.*
 *.env

@@ -939,6 +939,7 @@ def run_monitor() -> None:
     state = _load_state()
     last_logged_settings = None
     iteration = 0
+    consecutive_price_errors = 0
     history_keep_s = int(os.getenv("OANDA_PRICE_HISTORY_SECONDS", "3600"))
     last_successful_scan_at: float | None = None
     _heartbeat(phase="starting", wait_seconds=int(settings["wait_seconds"]))
@@ -960,8 +961,24 @@ def run_monitor() -> None:
             prices, next_since = fetch_prices(base_url, token, account_id, instruments, since)
             if next_since:
                 since = next_since
-        except Exception:
-            log("Could not retrieve data from OANDA during this attempt.")
+            if consecutive_price_errors:
+                log(
+                    "OANDA price fetch recovered "
+                    f"account={account_id} mode={os.getenv('OANDA_ACCOUNT_MODE') or os.getenv('OANDA_ENV') or 'default'} "
+                    f"endpoint={API_PATH_PRICING.format(accountID=account_id)} "
+                    f"attempt={consecutive_price_errors + 1} previous_failures={consecutive_price_errors}."
+                )
+                consecutive_price_errors = 0
+        except Exception as exc:
+            consecutive_price_errors += 1
+            err_message = str(exc).strip() or repr(exc)
+            log(
+                "Could not retrieve data from OANDA during this attempt: "
+                f"err_class={exc.__class__.__name__} err={err_message} "
+                f"account={account_id} mode={os.getenv('OANDA_ACCOUNT_MODE') or os.getenv('OANDA_ENV') or 'default'} "
+                f"endpoint={API_PATH_PRICING.format(accountID=account_id)} "
+                f"since={since or '<initial>'} attempt={consecutive_price_errors}; retrying."
+            )
             print("-" * 80)
             traceback.print_exc()
             print("-" * 80)

@@ -365,6 +365,7 @@ def test_compute_autostart_semantics(monkeypatch: pytest.MonkeyPatch) -> None:
     names_default = master_service._compute_autostart_scripts()
     assert "bybit_monitor" in names_default
     assert "oanda_monitor" in names_default
+    assert "fxweekend-clone" in names_default
 
     monkeypatch.setenv("AUTOSTART_SCRIPTS", "  ")
     assert master_service._compute_autostart_scripts() == []
@@ -383,8 +384,46 @@ def test_compute_autostart_semantics(monkeypatch: pytest.MonkeyPatch) -> None:
     assert master_service._compute_autostart_scripts() == []
 
 
+def test_missing_configured_autostart_target_gets_visible_scripts_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(master_service, "SCANNER_LOCAL_UI_MODE", False)
+    monkeypatch.setattr(master_service, "APP_PROFILE", "local")
+    monkeypatch.setattr(master_service, "_resolve_app_profile", lambda: "local")
+    monkeypatch.setenv("AUTOSTART_SCRIPTS", "bybit_monitor,fxweekend-clone")
+
+    class FakeScript:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+    def fake_get(name: str) -> FakeScript:
+        if name == "fxweekend-clone":
+            raise master_service.HTTPException(status_code=404, detail="script disabled by test")
+        return FakeScript(name)
+
+    monkeypatch.setattr(master_service.script_manager, "get", fake_get)
+    monkeypatch.setattr(
+        master_service.script_manager,
+        "list_scripts",
+        lambda: [{"name": "bybit_monitor", "running": True, "starting": False}],
+    )
+    monkeypatch.setattr(master_service, "get_merged_script_buttons", lambda: [])
+
+    names = master_service._compute_autostart_scripts()
+    assert names == ["bybit_monitor"]
+    assert master_service._LAST_AUTOSTART_UNAVAILABLE["fxweekend-clone"] == "script disabled by test"
+
+    payload = json.loads(asyncio.run(master_service.list_scripts()).body.decode("utf-8"))
+    row = next(item for item in payload if item["name"] == "fxweekend-clone")
+    assert row["autostart_expected"] is True
+    assert row["operational"] is False
+    assert row["status_detail"] == "configured autostart target unavailable: script disabled by test"
+    assert row["last_start_error"] == "script disabled by test"
+
+
 def test_run_local_master_control_bat_uses_local_autostart() -> None:
     content = (ROOT / "run_local_master_control.bat").read_text(encoding="utf-8")
+    assert "fxweekend-clone" in master_service.DEFAULT_LOCAL_ALLOWED_APPS
     assert 'set "APP_PROFILE=local"' in content
     assert 'set "AUTOSTART_SCRIPTS=bybit_monitor,oanda_monitor,fxweekend-clone"' in content
     assert 'set "SCANNER_LOCAL_UI_MODE=1"' not in content
@@ -409,6 +448,7 @@ def test_run_local_master_control_bat_uses_local_autostart() -> None:
     assert "stream_local_master_worker.ps1" in wrapper
     assert 'call "%ROOT%run_local_master_control.bat" __worker > "%LOCAL_MASTER_WORKER_LOG%" 2>&1' not in wrapper
     assert 'This window is intentionally left open so startup errors stay readable.' in wrapper
+    assert 'This window is intentionally left open so runtime exits stay readable.' in wrapper
     assert "http://127.0.0.1:8000/health" in content
     assert "MASTER_READY_TIMEOUT_SECONDS" in content
     assert "powershell" in content
@@ -583,6 +623,59 @@ def test_oanda_run_monitor_resets_baseline_after_long_gap(monkeypatch: pytest.Mo
 
     assert len(alerts) == 1
     assert "1.030000" in alerts[0]
+
+
+def test_oanda_timeout_with_empty_message_logs_exception_class_and_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from oanda_monitor import oanda_forex_monitor
+
+    class EmptyMessageError(Exception):
+        def __str__(self) -> str:
+            return ""
+
+    monkeypatch.setenv("OANDA_INSTRUMENTS", "EUR_USD")
+    monkeypatch.setenv("OANDA_ACCOUNT_MODE", "demo")
+    monkeypatch.setattr(oanda_forex_monitor, "_oanda_token", lambda: "token")
+    monkeypatch.setattr(oanda_forex_monitor, "_oanda_account_id", lambda: "account")
+    monkeypatch.setattr(oanda_forex_monitor, "_oanda_base_url", lambda: "https://example.test")
+    monkeypatch.setattr(
+        oanda_forex_monitor,
+        "get_runtime_settings",
+        lambda force=False: {"wait_seconds": 10, "percent_threshold": 0.10},
+    )
+    monkeypatch.setattr(oanda_forex_monitor, "_heartbeat", lambda **kwargs: None)
+    monkeypatch.setattr(oanda_forex_monitor, "wait_with_heartbeat", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(oanda_forex_monitor, "_load_state", lambda: {"symbols": {}})
+    monkeypatch.setattr(oanda_forex_monitor, "fetch_pip_locations", lambda *_args, **_kwargs: {"EUR_USD": 0.0001})
+    monkeypatch.setattr(oanda_forex_monitor, "get_custom_alerts", lambda force=False: [])
+    monkeypatch.setattr(oanda_forex_monitor, "evaluate_custom_alerts", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(oanda_forex_monitor, "_save_state", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(oanda_forex_monitor, "send_push_notification", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(oanda_forex_monitor.time, "time", lambda: 1000.0)
+
+    attempts = {"count": 0}
+
+    def fake_fetch_prices(*_args, **_kwargs):
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            raise EmptyMessageError()
+        if attempts["count"] == 2:
+            return {"EUR_USD": 1.0000}, "next-since"
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(oanda_forex_monitor, "fetch_prices", fake_fetch_prices)
+
+    with pytest.raises(KeyboardInterrupt):
+        oanda_forex_monitor.run_monitor()
+
+    output = capsys.readouterr().out
+    assert "err_class=EmptyMessageError" in output
+    assert "err=EmptyMessageError()" in output
+    assert "account=account mode=demo endpoint=/v3/accounts/account/pricing" in output
+    assert "since=<initial> attempt=1; retrying." in output
+    assert "OANDA price fetch recovered account=account mode=demo endpoint=/v3/accounts/account/pricing attempt=2 previous_failures=1." in output
 
 
 def test_supervisor_restarts_stopped_scanner(monkeypatch: pytest.MonkeyPatch) -> None:

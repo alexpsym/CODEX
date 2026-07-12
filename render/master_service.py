@@ -216,7 +216,7 @@ OANDA_RUNTIME_STATUS_PATH = BASE_DIR / "oanda_monitor" / "runtime_status.json"
 SCANNER_HEARTBEAT_GRACE_SECONDS = 30
 SCANNER_LOCAL_UI_MODE = os.getenv("SCANNER_LOCAL_UI_MODE", "0").strip().lower() in {"1", "true", "yes", "on"}
 DEFAULT_RENDER_ALLOWED_APPS = "calculator-webhook,pending-webhooks,fxweekend-clone,bybit_trigger_bounce_trader"
-DEFAULT_LOCAL_ALLOWED_APPS = "bybit_monitor,oanda_monitor,bybithistory-clone,oanda_history-clone,coinspot-clone,open-orders,instrument-lookup,ivindicator-clone,spreads-clone"
+DEFAULT_LOCAL_ALLOWED_APPS = "bybit_monitor,oanda_monitor,fxweekend-clone,bybithistory-clone,oanda_history-clone,coinspot-clone,open-orders,instrument-lookup,ivindicator-clone,spreads-clone"
 PINE_SCRIPTS_DIR = BASE_DIR / "pinescripts"
 PINE_ALLOWED_SUFFIXES = {".pine", ".pinescript", ".txt"}
 
@@ -10250,6 +10250,7 @@ COINSPOT_HISTORY_JOBS: Dict[str, CoinspotHistoryJob] = {}
 AUTOSTART_LOGGER = logging.getLogger("uvicorn.error")
 DEFAULT_RENDER_AUTOSTART_SCRIPTS = "fxweekend-clone"
 DEFAULT_LOCAL_AUTOSTART_SCRIPTS = "bybit_monitor,oanda_monitor,fxweekend-clone"
+_LAST_AUTOSTART_UNAVAILABLE: Dict[str, str] = {}
 
 FXWEEKEND_SETTINGS_PATH = BASE_DIR / "fxweekend-clone" / "settings.json"
 FXWEEKEND_DEFAULT_SETTINGS: Dict[str, object] = {
@@ -10291,6 +10292,8 @@ def _compute_autostart_scripts() -> List[str]:
     AUTOSTART_EXCLUDE may contain a comma-separated list of script names to skip.
     """
 
+    global _LAST_AUTOSTART_UNAVAILABLE
+    _LAST_AUTOSTART_UNAVAILABLE = {}
     raw_value = os.getenv("AUTOSTART_SCRIPTS")
     if _is_scanner_local_ui_mode():
         return []
@@ -10322,7 +10325,14 @@ def _compute_autostart_scripts() -> List[str]:
     for name in names:
         try:
             script = script_manager.get(name)
-        except HTTPException:
+        except HTTPException as exc:
+            reason = str(getattr(exc, "detail", "") or exc)
+            _LAST_AUTOSTART_UNAVAILABLE[str(name)] = reason
+            AUTOSTART_LOGGER.error(
+                "AUTOSTART_TARGET_UNAVAILABLE target=%s reason=%s",
+                name,
+                reason,
+            )
             continue
         if script.name in seen:
             continue
@@ -25189,6 +25199,29 @@ async def list_scripts() -> JSONResponse:
         if str(item.get("name")) == "ivindicator-clone":
             item["dashboard_main_view"] = True
     extras.sort(key=lambda s: str(s.get("label") or s.get("name")).lower())
+    existing_names = {
+        str(item.get("name") or "")
+        for item in [*merged, *extras]
+        if str(item.get("name") or "")
+    }
+    for target_name, reason in sorted(_LAST_AUTOSTART_UNAVAILABLE.items()):
+        if target_name in existing_names:
+            continue
+        extras.append(
+            {
+                "id": target_name,
+                "name": target_name,
+                "label": friendly_script_label(target_name),
+                "category": "Autostart",
+                "running": False,
+                "starting": False,
+                "standalone": False,
+                "autostart_expected": True,
+                "operational": False,
+                "status_detail": f"configured autostart target unavailable: {reason}",
+                "last_start_error": reason,
+            }
+        )
 
     return JSONResponse(merged + extras)
 
@@ -30169,13 +30202,42 @@ def _close_local_master_edge_target(current_url: Optional[str]) -> Dict[str, obj
     return {"ok": True, "target_id": target_id, "target_url": str(matched.get("url") or "")}
 
 
-def _write_local_exit_sentinel() -> Path:
+def _write_text_file_atomic(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    temp_path.write_text(text, encoding="utf-8")
+    os.replace(temp_path, path)
+
+
+def _local_exit_marker_payload(reason: str, requesting_action: str) -> str:
+    return json.dumps(
+        {
+            "reason": str(reason or "").strip() or requesting_action,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "server_pid": os.getpid(),
+            "requesting_action": requesting_action,
+        },
+        sort_keys=True,
+    ) + "\n"
+
+
+def _write_local_exit_markers(reason: str, requesting_action: str) -> Tuple[Path, Optional[Path]]:
     sentinel_raw = str(os.getenv("LOCAL_MASTER_EXIT_REQUEST") or "").strip()
     if not sentinel_raw:
         raise HTTPException(status_code=500, detail="LOCAL_MASTER_EXIT_REQUEST is missing.")
     sentinel_path = Path(sentinel_raw)
-    sentinel_path.parent.mkdir(parents=True, exist_ok=True)
-    sentinel_path.write_text(f"exit requested at {datetime.now(timezone.utc).isoformat()}\n", encoding="utf-8")
+    payload = _local_exit_marker_payload(reason, requesting_action)
+    _write_text_file_atomic(sentinel_path, payload)
+
+    normal_raw = str(os.getenv("LOCAL_MASTER_NORMAL_EXIT_FILE") or "").strip()
+    normal_path = Path(normal_raw) if normal_raw else None
+    if normal_path is not None:
+        _write_text_file_atomic(normal_path, payload)
+    return sentinel_path, normal_path
+
+
+def _write_local_exit_sentinel() -> Path:
+    sentinel_path, _normal_path = _write_local_exit_markers("local_exit", "legacy_sentinel")
     return sentinel_path
 
 
@@ -30193,14 +30255,14 @@ async def local_shutdown(payload: Dict[str, object] = Body(default_factory=dict)
         raise HTTPException(status_code=404, detail="Local shutdown is only available in local profile.")
     reason = str((payload or {}).get("reason") or "launcher_preflight").strip() or "launcher_preflight"
     try:
-        sentinel_path = _write_local_exit_sentinel()
+        sentinel_path, normal_path = _write_local_exit_markers(reason, "local_shutdown")
     except HTTPException:
         raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to schedule local shutdown: {exc}") from exc
-    response_payload = {"ok": True, "sentinel": str(sentinel_path), "reason": reason}
+    response_payload = {"ok": True, "sentinel": str(sentinel_path), "normal_marker": str(normal_path or ""), "reason": reason}
     response = JSONResponse(response_payload)
-    APP_LOGGER.info("LOCAL_SHUTDOWN_REQUESTED reason=%s sentinel=%s", reason, sentinel_path)
+    APP_LOGGER.info("LOCAL_SHUTDOWN_REQUESTED reason=%s sentinel=%s normal_marker=%s", reason, sentinel_path, normal_path)
     _schedule_local_master_process_exit()
     return response
 
@@ -30217,13 +30279,13 @@ async def local_exit(payload: Dict[str, object] = Body(default_factory=dict)) ->
     except Exception as exc:
         raise HTTPException(status_code=409, detail=f"Failed to close Local Trading Tools Edge tab: {exc}") from exc
     try:
-        sentinel_path = _write_local_exit_sentinel()
+        sentinel_path, normal_path = _write_local_exit_markers("exit_button", "local_exit")
     except HTTPException:
         raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to schedule local shutdown: {exc}") from exc
-    response_payload = {"ok": True, "target": close_info, "sentinel": str(sentinel_path)}
+    response_payload = {"ok": True, "target": close_info, "sentinel": str(sentinel_path), "normal_marker": str(normal_path or "")}
     response = JSONResponse(response_payload)
-    APP_LOGGER.info("LOCAL_EXIT_REQUESTED target=%s sentinel=%s", close_info.get("target_url"), sentinel_path)
+    APP_LOGGER.info("LOCAL_EXIT_REQUESTED target=%s sentinel=%s normal_marker=%s", close_info.get("target_url"), sentinel_path, normal_path)
     _schedule_local_master_process_exit()
     return response

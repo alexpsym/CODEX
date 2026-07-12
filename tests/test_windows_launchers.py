@@ -392,6 +392,7 @@ def test_run_local_master_parent_logs_are_condensed_and_worker_logs_are_detailed
     assert 'echo [local-master] launcher starting.' in script
     assert 'echo [local-master] waiting for %MASTER_HEALTH_URL% ...' in script
     assert 'echo [local-master] worker started at !DATE! !TIME!' in script
+    assert 'echo [local-master] uvicorn restart generation !LOCAL_MASTER_UVICORN_GENERATION!' in script
     assert 'Check worker startup log: %LOCAL_MASTER_WORKER_LOG%' in script
     parent_idx = script.find('echo [local-master] launcher starting.')
     worker_idx = script.find(':worker')
@@ -417,8 +418,14 @@ def test_run_local_master_worker_console_stays_visible_on_abnormal_failure() -> 
     assert 'call "%ROOT%run_local_master_control.bat" __worker > "%LOCAL_MASTER_WORKER_LOG%" 2>&1' not in script
     assert 'cmd /d /s /v:on /c ""%~f0" __worker"' not in script
     assert 'cmd /d /v:on /k "call ""%~f0""' not in script
-    assert 'Worker failed with exit code !WORKER_EXIT_CODE!' in script
+    assert 'Controlled replacement by a new launcher completed.' in script
+    assert 'Controlled Exit-button shutdown completed.' in script
+    assert 'Unexpected runtime worker exit with exit code !WORKER_EXIT_CODE!.' in script
+    assert 'Startup failure: worker failed with exit code !WORKER_EXIT_CODE!.' in script
     assert 'Get-Content -LiteralPath $env:LOCAL_MASTER_WORKER_LOG -Tail 40' in script
+    assert 'Runtime exit log:' in script
+    assert 'Startup error log:' in script
+    assert 'runtime exits stay readable.' in script
     assert 'This window is intentionally left open so startup errors stay readable.' in script
     assert 'pause >nul' in script
     assert 'if /I "!LOCAL_MASTER_SUPPRESS_WINDOW_CLOSE!"=="1" exit /b 0' in script
@@ -428,7 +435,13 @@ def test_run_local_master_worker_console_stays_visible_on_abnormal_failure() -> 
     assert '> "{1}" 2>&1' in streamer
     assert 'Write-StartupProgress -Phase "starting worker process"' in streamer
     assert 'checking dashboard health at $HealthUrl' in streamer
-    assert 'checking scanner/autostart monitor at $ScriptsUrl' in streamer
+    assert 'checking configured autostart targets at $ScriptsUrl' in streamer
+    assert 'restart detected: dashboard health became unavailable while worker process stayed alive.' in streamer
+    assert 'dashboard recovered after worker restart.' in streamer
+    assert 'configured autostart targets recovered:' in streamer
+    assert 'autostart readiness lost after startup:' in streamer
+    assert 'worker process ended: worker_pid={0} uvicorn_pid=unknown exit_code={1}' in streamer
+    assert 'process disappeared before clean Uvicorn exit logging' in streamer
     assert 'startup complete. Live server log remains open below.' in streamer
 
 
@@ -506,6 +519,7 @@ def test_run_local_master_spread_requirements_skip_condition_uses_valid_nested_i
 def test_launcher_logs_are_ignored_by_git() -> None:
     ignore = (ROOT / '.gitignore').read_text(encoding='utf-8')
     assert 'logs/' in ignore
+    assert 'fxweekend-clone/*.log' in ignore
 
 
 def test_trading_tools_launcher_failure_message_includes_log_path_and_tail() -> None:

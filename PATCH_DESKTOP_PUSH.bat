@@ -97,6 +97,7 @@ for %%P in (
   "*.pyc"
   "PATCH_DESKTOP_PUSH-latest.log"
   "INSTALL-latest.log"
+  "fxweekend-clone/*.log"
   ".env"
   ".env.*"
   "*.env"
