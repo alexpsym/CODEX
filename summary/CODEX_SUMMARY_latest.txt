@@ -1,28 +1,38 @@
-Instrument lookup separator cleanup and calculator template cleanup summary
+Instrument Lookup BTCUSDT runtime JSON-safe fix summary
 
 Status:
-- Implementation commit: 118452953302b819cf63898d0fd27d20e8733a87.
-- PATCH_DESKTOP_PUSH.bat completed successfully for the implementation commit.
-- Verification after that push resolved local HEAD and origin/master to the same commit: 118452953302b819cf63898d0fd27d20e8733a87.
+- Implemented the calculator journal-summary response-boundary serialization fix.
+- Implemented independent Instrument Lookup panel loading for specs and journal stats.
+- Verified BTCUSDT against the real journal/Trading Journal.xlsx source path.
 
-Fixes:
-- render/static/instrument_lookup.js now normalizes non-letter separators before FX/metals detection.
-- XAG/USD, XAG-USD, XAG USD, XAG_USD, XAGUSD, EUR/USD, EUR-USD, EUR USD, EUR_USD, and EURUSD all route as FX lookups with OANDA preference.
-- render/master_service.py now has one CALCULATOR_TEMPLATE assignment only.
-- The removed calculator template was the obsolete settings-grid copy; the retained template is the active table-based redesign.
+Backend fix:
+- render/master_service.py::calculator_journal_summary now builds the complete successful response payload first, then passes that payload through _json_safe() before constructing JSONResponse.
+- Workbook rows, metrics, and period reports are left unchanged for calculations.
+- Serialization is applied only at the response boundary, so Python datetime fields such as move_to_break_even_time become ISO-8601 strings without mutating the source rows.
+
+Instrument Lookup fix:
+- render/static/instrument_lookup.js::load now uses independent Promise.allSettled handling for instrument specs and journal stats.
+- A successful specs response remains displayed when journal stats fail.
+- A successful journal stats response remains displayed when specs fail.
+- The error line identifies whether Instrument specs, Journal stats, or both failed.
+- Failed panels render an empty/error state instead of staying stuck in loading.
 
 Regression coverage:
-- Added an instrument lookup JavaScript behavior regression that executes the real lookup script through Node and verifies separator-normalized FX/metals variants call /api/instrument-specs with prefer=oanda and journal-summary with asset=fx.
-- Added calculator rendered-page coverage that verifies every expected calculator element ID occurs exactly once.
-- Added calculator source coverage that verifies only one CALCULATOR_TEMPLATE assignment remains and the obsolete settings-grid calculator block is absent.
+- Added a calculator API regression using the authoritative workbook source path with a real Python datetime in a BTCUSDT trade.
+- The regression asserts HTTP 200, status ok, BTCUSDT trades returned, datetime serialized via isoformat(), and json.loads(response.body) succeeds.
+- Added an Instrument Lookup JavaScript regression that verifies one panel can render successfully while the sibling request fails.
 
-Tests and checks:
-- python -m pytest tests/test_dashboard_home_layout.py --maxfail=1 -q --basetemp .pytest_tmp_lookup_cleanup -p no:cacheprovider: 19 passed.
-- python -m pytest tests/test_master_service_calculator_api.py --maxfail=1 -q --basetemp .pytest_tmp_calc_cleanup -p no:cacheprovider: 92 passed.
-- python -m pytest tests/test_calculator_js_syntax.py tests/test_calculator_js_behavior.py tests/test_dashboard_js_syntax.py --maxfail=1 -q --basetemp .pytest_tmp_js_cleanup -p no:cacheprovider: 44 passed.
+Verification:
+- python -m pytest tests/test_master_service_calculator_api.py --maxfail=1 -q --basetemp .pytest_tmp_calc_jsonsafe -p no:cacheprovider: 93 passed.
+- python -m pytest tests/test_dashboard_home_layout.py --maxfail=1 -q --basetemp .pytest_tmp_lookup_independent -p no:cacheprovider: 20 passed.
+- python -m pytest tests/test_calculator_js_syntax.py tests/test_calculator_js_behavior.py tests/test_dashboard_js_syntax.py --maxfail=1 -q --basetemp .pytest_tmp_js_jsonsafe -p no:cacheprovider: 44 passed.
 - python -m py_compile render/master_service.py: passed.
+- node --check render/static/instrument_lookup.js: passed.
+- node --check render/static/calculator.js: passed.
+- node --check render/static/dashboard.js: passed.
 - git diff --check: passed with CRLF normalization warnings only.
+- Real journal BTCUSDT check returned HTTP 200, status ok, canonical_symbol BTCUSDT, and 70 non-test trades.
 
 Runtime-state note:
-- Existing dirty runtime/local files remained local and were excluded by PATCH_DESKTOP_PUSH.bat: bybit_monitor/custom_alerts.json, render/data/monthly_aud_revaluation_state.json, render/data/trade_contexts.json, and state_manifest.json.
-- Test-generated changes to render/data/pending_webhooks.json and render/data/webhook_attempts.json were restored before the implementation push.
+- Existing dirty runtime/local files remained local and are excluded by PATCH_DESKTOP_PUSH.bat: bybit_monitor/custom_alerts.json, render/data/monthly_aud_revaluation_state.json, render/data/trade_contexts.json, state_backup.json, and state_manifest.json.
+- Test-generated changes to render/data/pending_webhooks.json and render/data/webhook_attempts.json were restored before the required push.

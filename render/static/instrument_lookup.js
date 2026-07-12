@@ -657,21 +657,32 @@
     const resolved = detectedAsset === 'crypto' ? await resolveBybitSymbol(raw) : raw;
     if (qInput && resolved && resolved !== raw) qInput.value = resolved;
     const prefer = detectedAsset === 'fx' ? '&prefer=oanda' : '';
-    try {
-      const [specs, journal] = await Promise.all([
-        fetchJson(`/api/instrument-specs?query=${encodeURIComponent(resolved)}${prefer}`),
-        fetchJson(`/api/calculator/journal-summary?asset=${encodeURIComponent(detectedAsset)}&symbol=${encodeURIComponent(resolved)}`),
-      ]);
+    const [specsResult, journalResult] = await Promise.allSettled([
+      fetchJson(`/api/instrument-specs?query=${encodeURIComponent(resolved)}${prefer}`),
+      fetchJson(`/api/calculator/journal-summary?asset=${encodeURIComponent(detectedAsset)}&symbol=${encodeURIComponent(resolved)}`),
+    ]);
+
+    const errors = [];
+    let specs = null;
+    if (specsResult.status === 'fulfilled') {
+      specs = specsResult.value || {};
       renderSpecs(specs);
-      renderJournal(journal);
-      history.replaceState(null, '', `/instrument-lookup?q=${encodeURIComponent(resolved)}`);
-      const warnings = Array.isArray(specs?._spec_warnings) ? specs._spec_warnings : [];
-      setErr(warnings.length ? `Some instrument specs could not be loaded: ${warnings.map((w) => `${w.field || 'spec'} ${w.symbol || ''}`.trim()).join(', ')}` : '');
-    } catch (error) {
-      setErr(error?.message || String(error));
+    } else {
       renderSpecs({});
-      renderJournal({ status: 'error', trades: [] });
+      errors.push(`Instrument specs failed: ${specsResult.reason?.message || String(specsResult.reason)}`);
     }
+
+    if (journalResult.status === 'fulfilled') {
+      renderJournal(journalResult.value || { status: 'error', trades: [] });
+    } else {
+      renderJournal({ status: 'error', trades: [] });
+      errors.push(`Journal stats failed: ${journalResult.reason?.message || String(journalResult.reason)}`);
+    }
+
+    history.replaceState(null, '', `/instrument-lookup?q=${encodeURIComponent(resolved)}`);
+    const warnings = Array.isArray(specs?._spec_warnings) ? specs._spec_warnings : [];
+    const warningText = warnings.length ? `Some instrument specs could not be loaded: ${warnings.map((w) => `${w.field || 'spec'} ${w.symbol || ''}`.trim()).join(', ')}` : '';
+    setErr([...errors, warningText].filter(Boolean).join(' | '));
   }
 
   assetToggle?.addEventListener('click', (event) => {

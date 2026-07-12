@@ -5,6 +5,7 @@ import re
 import sys
 import types
 import importlib.machinery
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -1019,6 +1020,55 @@ def test_journal_summary_uses_master_workbook_rows_for_bitcoin_aliases(
     assert body["canonical_symbol"] == "BTCUSDT"
     assert len(body["trades"]) == 2
     assert {trade["id"] for trade in body["trades"]} == {"btc-bybit", "btc-binance"}
+
+
+def test_journal_summary_json_safes_authoritative_workbook_datetime_trade(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workbook = tmp_path / "Trading Journal.xlsx"
+    workbook.write_bytes(b"placeholder")
+    move_time = datetime(2026, 2, 1, 12, 34, 56)
+    rows = [
+        {
+            "id": "btc-datetime",
+            "row_type": "trade",
+            "symbol": "BTCUSDT",
+            "asset_class": "crypto",
+            "account": "BYBIT",
+            "account_label": "BYBIT",
+            "side": "Buy",
+            "close_time": "2026-02-01T01:00:00Z",
+            "open_time": "2026-02-01T00:00:00Z",
+            "move_to_break_even_time": move_time,
+            "entry_price": 100,
+            "exit_price": 102,
+            "stop_loss": 99,
+            "take_profit": 103,
+            "net_profit": 20,
+            "result_pct": 2,
+            "balance_after_trade": 120,
+            "currency": "USDT",
+            "is_test_trade": False,
+        }
+    ]
+    monkeypatch.setattr(master_service, "_master_journal_single_file_mode", lambda: True)
+    monkeypatch.setattr(master_service, "_master_journal_path", lambda: workbook)
+    monkeypatch.setattr(master_service, "_get_trading_journal_rows", lambda: [])
+    monkeypatch.setattr(master_service, "read_master_journal_source", lambda _path: {"items": rows, "balances": []})
+    monkeypatch.setattr(master_service, "_get_excel_account_balances", lambda: [])
+    monkeypatch.setattr(master_service, "resolve_bybit_credentials_for", lambda _account: ("live", "k", "s", "https://bybit.test", "KEY"))
+    monkeypatch.setattr(master_service, "_bybit_get_symbols_by_category_cached", lambda *_args, **_kwargs: asyncio.sleep(0, result=["BTCUSDT"]))
+
+    response = asyncio.run(master_service.calculator_journal_summary(asset="crypto", symbol="BTCUSDT"))
+
+    assert response.status_code == 200
+    body = json.loads(response.body.decode("utf-8"))
+    assert body["status"] == "ok"
+    assert body["canonical_symbol"] == "BTCUSDT"
+    assert len(body["trades"]) == 1
+    assert body["trades"][0]["symbol"] == "BTCUSDT"
+    assert body["trades"][0]["move_to_break_even_time"] == move_time.isoformat()
 
 
 def test_rr_fee_buffer_pushes_target_distance_beyond_plain_rr(monkeypatch: pytest.MonkeyPatch) -> None:

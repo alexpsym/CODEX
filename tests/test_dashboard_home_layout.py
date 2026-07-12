@@ -211,6 +211,92 @@ async function runVariant(query) {
         assert not any("/api/resolve-symbol" in url for url in urls), variant
 
 
+def test_instrument_lookup_keeps_successful_panel_when_sibling_request_fails() -> None:
+    node = shutil.which("node")
+    assert node, "node is required for instrument lookup JS behavior test"
+    harness = r'''
+const fs = require('fs');
+const source = fs.readFileSync(process.argv[1], 'utf8');
+
+class Element {
+  constructor(id) {
+    this.id = id;
+    this.value = '';
+    this.textContent = '';
+    this.innerHTML = '';
+    this.tagName = 'DIV';
+    this.listeners = {};
+    this.classList = { toggle: () => {}, add: () => {}, remove: () => {} };
+    this.dataset = {};
+  }
+  addEventListener(event, callback) { this.listeners[event] = callback; }
+  closest() { return null; }
+  querySelectorAll() { return []; }
+}
+
+async function runScenario(mode) {
+  const elements = Object.fromEntries(['q', 'load', 'rows', 'err', 'journal-status', 'journal-metrics', 'trade-head', 'trade-body'].map((id) => [id, new Element(id)]));
+  global.window = { location: { search: '?q=BTCUSDT' } };
+  global.history = { replaceState: () => {} };
+  global.document = {
+    head: { appendChild: () => {} },
+    createElement: (tag) => new Element(tag),
+    getElementById: (id) => elements[id] || null,
+  };
+  global.fetch = async (url) => {
+    const textUrl = String(url);
+    if (mode === 'journal-fails' && textUrl.includes('/api/calculator/journal-summary')) {
+      return { ok: false, status: 500, statusText: 'Server Error', text: async () => JSON.stringify({ detail: 'journal exploded' }) };
+    }
+    if (mode === 'specs-fails' && textUrl.includes('/api/instrument-specs')) {
+      return { ok: false, status: 502, statusText: 'Bad Gateway', text: async () => JSON.stringify({ detail: 'specs exploded' }) };
+    }
+    if (textUrl.includes('/api/instrument-specs')) {
+      return { ok: true, status: 200, statusText: 'OK', text: async () => JSON.stringify({ resolved_symbol: 'BTCUSDT', lastPrice: '100' }) };
+    }
+    if (textUrl.includes('/api/calculator/journal-summary')) {
+      return { ok: true, status: 200, statusText: 'OK', text: async () => JSON.stringify({ status: 'ok', canonical_symbol: 'BTCUSDT', stats: { total_trades: 1, wins: 1, losses: 0, win_rate: '100.00%' }, metrics: { trades: 1, wins: 1, losses: 0, win_rate_pct: 100, net_profit_total: 10 }, trades: [{ symbol: 'BTCUSDT', close_time: '2026-01-01T00:00:00Z', side: 'Buy', net_profit: 10, result_pct: 1, currency: 'USDT' }] }) };
+    }
+    if (textUrl.includes('/api/resolve-symbol')) {
+      return { ok: true, status: 200, statusText: 'OK', text: async () => JSON.stringify({ resolved_symbol: 'BTCUSDT' }) };
+    }
+    return { ok: true, status: 200, statusText: 'OK', text: async () => '{}' };
+  };
+  eval(source);
+  await Promise.resolve();
+  await Promise.resolve();
+  await new Promise((resolve) => setImmediate(resolve));
+  return {
+    rows: elements.rows.innerHTML,
+    journal: elements['journal-metrics'].innerHTML,
+    tradeBody: elements['trade-body'].innerHTML,
+    err: elements.err.textContent,
+  };
+}
+
+(async () => {
+  console.log(JSON.stringify({
+    journalFails: await runScenario('journal-fails'),
+    specsFails: await runScenario('specs-fails'),
+  }));
+})();
+'''
+    completed = subprocess.run(
+        [node, "-e", harness, str(ROOT / "render" / "static" / "instrument_lookup.js")],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    result = json.loads(completed.stdout)
+    assert "Last price" in result["journalFails"]["rows"]
+    assert "Journal stats failed" in result["journalFails"]["err"]
+    assert "Journal stats are unavailable" in result["journalFails"]["journal"]
+    assert "No instrument specs loaded yet" in result["specsFails"]["rows"]
+    assert "Instrument specs failed" in result["specsFails"]["err"]
+    assert "Trades" in result["specsFails"]["journal"]
+    assert "Buy" in result["specsFails"]["tradeBody"]
+
+
 def test_dashboard_home_removed_legacy_open_trading_journal_panel() -> None:
     source = MASTER_SERVICE_PATH.read_text(encoding='utf-8')
     html = _extract_html_template(source)

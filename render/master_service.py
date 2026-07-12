@@ -20331,16 +20331,15 @@ async def calculator_journal_summary(asset: str, symbol: str) -> JSONResponse:
         "avg_trade_duration": totals.get("avg_duration_seconds"),
         "last_trade_timestamp": last_trade_ts,
     }
-    return JSONResponse(
-        {
-            "status": "ok",
-            "canonical_symbol": canonical,
-            "stats": summary,
-            "metrics": totals,
-            "period_reports": stats.get("period_reports") if isinstance(stats, dict) else None,
-            "trades": filtered_sorted,
-        }
-    )
+    payload = {
+        "status": "ok",
+        "canonical_symbol": canonical,
+        "stats": summary,
+        "metrics": totals,
+        "period_reports": stats.get("period_reports") if isinstance(stats, dict) else None,
+        "trades": filtered_sorted,
+    }
+    return JSONResponse(_json_safe(payload))
 
 
 def _calculator_journal_summary_source_rows() -> Tuple[List[Dict[str, object]], List[Dict[str, object]]]:
