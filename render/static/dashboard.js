@@ -17,6 +17,9 @@
   const watchlistSyncMode = document.getElementById('watchlist-sync-mode');
   const watchlistItems = document.getElementById('watchlist-items');
   const watchlistEmpty = document.getElementById('watchlist-empty');
+  const pineStatus = document.getElementById('pine-status');
+  const pineFiles = document.getElementById('pine-files');
+  const pineFallback = document.getElementById('pine-fallback');
 
   
   const oandaHeadline = document.getElementById('oanda-inactivity-headline');
@@ -109,6 +112,13 @@
     if (bodyJson !== null) return bodyJson;
     return bodyText ? JSON.parse(bodyText) : {};
   };
+
+  const esc = (value) => String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 
   const setWorkspaceMeta = (title, message, isErr = false) => {
     if (workspaceTitle) workspaceTitle.textContent = title || 'Orders / Positions';
@@ -653,6 +663,69 @@
     await saveWatchlist([], 'Watchlist cleared.');
   };
 
+  const setPineStatus = (message, isErr = false) => {
+    if (!pineStatus) return;
+    pineStatus.textContent = message || '';
+    pineStatus.style.color = isErr ? '#fca5a5' : '#94a3b8';
+  };
+
+  const copyPineScript = async (name) => {
+    if (!name) return;
+    if (pineFallback) {
+      pineFallback.hidden = true;
+      pineFallback.value = '';
+    }
+    setPineStatus('Loading script...');
+    try {
+      const payload = await fetchJson(`/api/pine/file?name=${encodeURIComponent(name)}`);
+      const code = String(payload?.code || '');
+      try {
+        await navigator.clipboard.writeText(code);
+        setPineStatus(`Copied pinescripts/${name}`);
+      } catch (_err) {
+        if (pineFallback) {
+          pineFallback.value = code;
+          pineFallback.hidden = false;
+          pineFallback.focus();
+          pineFallback.select();
+        }
+        setPineStatus('Clipboard unavailable. Use manual copy below.');
+      }
+    } catch (err) {
+      console.error(err);
+      setPineStatus(err?.message || 'Failed to copy Pine script.', true);
+    }
+  };
+
+  const renderPineFiles = (files) => {
+    if (!pineFiles) return;
+    const list = Array.isArray(files) ? files : [];
+    if (!list.length) {
+      pineFiles.innerHTML = '<div class="pine-row"><span class="pine-file">No Pine scripts found.</span></div>';
+      return;
+    }
+    pineFiles.innerHTML = list.map((file) => (
+      `<div class="pine-row"><span class="pine-file">pinescripts/${esc(file)}</span><button type="button" class="action-btn" data-pine-name="${esc(file)}">Copy</button></div>`
+    )).join('');
+    pineFiles.querySelectorAll('button[data-pine-name]').forEach((button) => {
+      button.addEventListener('click', () => copyPineScript(button.dataset.pineName || ''));
+    });
+  };
+
+  const refreshPineScripts = async () => {
+    if (!pineFiles) return;
+    try {
+      const payload = await fetchJson('/api/pine/files');
+      const files = Array.isArray(payload?.files) ? payload.files : [];
+      renderPineFiles(files);
+      setPineStatus(`${files.length} script${files.length === 1 ? '' : 's'} in pinescripts`);
+    } catch (err) {
+      console.error(err);
+      renderPineFiles([]);
+      setPineStatus(err?.message || 'Failed to load Pine scripts.', true);
+    }
+  };
+
   const restartPolling = () => {
     [scriptsTimer, oandaTimer].forEach((id) => {
       if (id) clearInterval(id);
@@ -683,6 +756,7 @@
 
   ensureOrdersWorkspace();
   refreshScripts();
+  refreshPineScripts();
   refreshStateSyncStatus().then(() => {
     const restoreStatus = String(stateSyncState?.restore_status || '').toLowerCase();
     if (restoreStatus === 'pending') {

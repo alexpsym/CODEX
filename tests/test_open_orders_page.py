@@ -35,12 +35,10 @@ def _load_master_service(module_name: str, profile: str):
             os.environ["APP_PROFILE"] = old_profile
 
 
-def test_scripts_listing_includes_open_orders_button() -> None:
+def test_scripts_listing_excludes_open_orders_button() -> None:
     payload = json.loads(asyncio.run(master_service.list_scripts()).body.decode("utf-8"))
     row = next((item for item in payload if item.get("name") == "open-orders"), None)
-    assert row is not None
-    assert row.get("open_url") == "/merged/open-orders"
-    assert row.get("dashboard_main_view") is True
+    assert row is None
 
 
 def test_render_profile_hides_open_orders_and_blocks_routes() -> None:

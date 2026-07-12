@@ -2,7 +2,6 @@
   const qs = new URLSearchParams(window.location.search);
   const qInput = document.getElementById('q');
   const loadBtn = document.getElementById('load');
-  const downloadLink = document.getElementById('download');
   let rows = document.getElementById('rows');
   const err = document.getElementById('err');
   const assetToggle = document.getElementById('asset-toggle');
@@ -16,7 +15,7 @@
   const HIDE_SPEC_FIELDS = new Set([
     'fundingHistory.fundingRate', 'fundingHistory.fundingRateTimestamp',
     'indexPrice', 'leverageFilter', 'lotSizeFilter', 'markPrice', 'priceFilter',
-    'query', 'source', 'scannerVolume24h', '_units', '_btc_reference', '_spec_warnings',
+    'openInterest', 'query', 'source', 'scannerVolume24h', '_units', '_btc_reference', '_spec_warnings',
   ]);
 
   const SPEC_LABELS = {
@@ -32,8 +31,7 @@
     fundingRate: 'Funding rate',
     nextFundingTime: 'Next funding',
     launchTime: 'Launch time',
-    openInterest: 'Open interest',
-    openInterestValue: 'Open interest value',
+    openInterestValue: 'Open interest value (USD)',
     volume24hUsd: '24h turnover',
     turnover24h: '24h turnover',
     avg7dTurnoverUsd: '7d avg turnover',
@@ -78,7 +76,7 @@
     {
       title: 'Market Snapshot',
       note: 'Live context',
-      keys: ['lastPrice', 'fundingRate', 'nextFundingTime', 'launchTime', 'openInterest', 'openInterestValue', 'volume24hUsd', 'turnover24h', 'avg7dTurnoverUsd'],
+      keys: ['lastPrice', 'fundingRate', 'nextFundingTime', 'launchTime', 'openInterestValue', 'volume24hUsd', 'turnover24h', 'avg7dTurnoverUsd'],
     },
     {
       title: 'Trading Rules',
@@ -659,7 +657,7 @@
     setErr('Loading...');
     renderSpecs({});
     renderJournal({ status: 'loading', trades: [] });
-    const detectedAsset = isLikelyFxPair(raw) ? 'fx' : state.asset;
+    const detectedAsset = isLikelyFxPair(raw) ? 'fx' : 'crypto';
     setAsset(detectedAsset);
     const resolved = detectedAsset === 'crypto' ? await resolveBybitSymbol(raw) : raw;
     if (qInput && resolved && resolved !== raw) qInput.value = resolved;
@@ -671,8 +669,7 @@
       ]);
       renderSpecs(specs);
       renderJournal(journal);
-      if (downloadLink) downloadLink.href = `/api/instrument-specs.jpg?query=${encodeURIComponent(resolved)}${prefer}`;
-      history.replaceState(null, '', `/instrument-lookup?q=${encodeURIComponent(resolved)}&asset=${encodeURIComponent(detectedAsset)}`);
+      history.replaceState(null, '', `/instrument-lookup?q=${encodeURIComponent(resolved)}`);
       const warnings = Array.isArray(specs?._spec_warnings) ? specs._spec_warnings : [];
       setErr(warnings.length ? `Some instrument specs could not be loaded: ${warnings.map((w) => `${w.field || 'spec'} ${w.symbol || ''}`.trim()).join(', ')}` : '');
     } catch (error) {
@@ -694,7 +691,7 @@
     load();
   });
 
-  setAsset((qs.get('asset') || '').toLowerCase() === 'fx' ? 'fx' : 'crypto');
+  setAsset('crypto');
   upgradeLegacyMarkup();
   const initial = (qs.get('q') || '').trim();
   if (qInput) qInput.value = initial;

@@ -32,6 +32,12 @@
   };
 
   const $ = (id) => document.getElementById(id);
+  const escapeHtml = (value) => String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
   const errorEl = $('calc-error');
   const errorDebugEl = $('calc-error-debug');
   const okEl = $('calc-success');
@@ -61,6 +67,7 @@
   let resolveController = null;
   let resolveInFlight = null;
   let journalController = null;
+  let specsController = null;
   const SPECS_HIDDEN_FIELDS = new Set([
     'contractType',
     'fundingHistory.fundingRate',
@@ -234,7 +241,7 @@
     else if (status === 'stale') setQuoteStatus('Quote changed. Recalculate before submitting.');
     else if (status === 'error') setQuoteStatus('Quote failed. Recalculate before submitting.');
     else if (status === 'idle') setQuoteStatus('');
-    if (clearResults) resultEl.innerHTML = status === 'calculating' ? '<div class="card"><div class="muted">Calculating position…</div></div>' : '';
+    if (clearResults) resultEl.innerHTML = status === 'calculating' ? '<div class="quote-empty">Calculating position...</div>' : '';
     state.quotePrewarmStatus = null;
     state.quotePrewarmContext = null;
   }
@@ -301,9 +308,9 @@
       return;
     }
     const rows=[];
-    for (const [k,v] of entries){ const label=SPECS_FIELD_LABELS[k]||k; rows.push(`<tr><td>${label}</td><td>${formatSpecsValue(k,v)}</td></tr>`); if (btcRef && btcRef[k]!==undefined){ rows.push(`<tr class="btc-reference-row"><td>BTC ${label}</td><td>${formatSpecsValue(k,btcRef[k])}</td></tr>`);} }
+    for (const [k,v] of entries){ const label=SPECS_FIELD_LABELS[k]||k; rows.push(`<tr><td>${escapeHtml(label)}</td><td>${escapeHtml(formatSpecsValue(k,v))}</td></tr>`); if (btcRef && btcRef[k]!==undefined){ rows.push(`<tr class="btc-reference-row"><td>BTC ${escapeHtml(label)}</td><td>${escapeHtml(formatSpecsValue(k,btcRef[k]))}</td></tr>`);} }
     const warnings=Array.isArray(specs?._spec_warnings)?specs._spec_warnings:[];
-    const warnHtml=warnings.length?`<div class="muted">Some instrument specs could not be loaded: ${warnings.map((w)=>`${w.field||'spec'} ${w.symbol||''}`).join(', ')}</div>`:'';
+    const warnHtml=warnings.length?`<div class="muted">Some instrument specs could not be loaded: ${escapeHtml(warnings.map((w)=>`${w.field||'spec'} ${w.symbol||''}`).join(', '))}</div>`:'';
     specsEl.dataset.state = 'ready';
     specsEl.innerHTML = `<div class="card"><table class="specs-table">${rows.join('')}</table>${warnHtml}</div>`;
   }
@@ -398,6 +405,67 @@
     journalEl.innerHTML = summaryCards;
   }
 
+  async function loadJournalSummary(symbol) {
+    if (!journalEl) return;
+    const resolved = String(symbol || '').trim();
+    if (journalController) journalController.abort();
+    if (!resolved) {
+      setJournalState('empty', '');
+      return;
+    }
+    const controller = new AbortController();
+    journalController = controller;
+    const expectedAsset = state.asset;
+    const expectedSymbol = resolved.toUpperCase();
+    setJournalState('loading', 'Loading journal summary...');
+    try {
+      const payload = await request(`/api/calculator/journal-summary?asset=${encodeURIComponent(expectedAsset)}&symbol=${encodeURIComponent(resolved)}`, {
+        cache: 'no-store',
+        signal: controller.signal,
+      });
+      if (state.asset !== expectedAsset || String(state.resolvedSymbol || '').toUpperCase() !== expectedSymbol) return;
+      if (payload.status === 'no_data') {
+        setJournalState('empty', 'No journal rows found for this instrument.');
+        return;
+      }
+      renderJournalStats(payload);
+    } catch (err) {
+      if (err?.name === 'AbortError') return;
+      setJournalState('error', `Journal summary unavailable for ${resolved}: ${err?.message || err}`);
+    } finally {
+      if (journalController === controller) journalController = null;
+    }
+  }
+
+  async function loadInstrumentSpecs(symbol) {
+    if (!specsEl) return;
+    const resolved = String(symbol || '').trim();
+    if (specsController) specsController.abort();
+    if (!resolved) {
+      setSpecsState('empty', '');
+      return;
+    }
+    const controller = new AbortController();
+    specsController = controller;
+    const expectedAsset = state.asset;
+    const expectedSymbol = resolved.toUpperCase();
+    const prefer = expectedAsset === 'fx' ? (state.broker || 'oanda') : 'bybit';
+    setSpecsState('loading', 'Loading instrument specs...');
+    try {
+      const specs = await request(`/api/instrument-specs?query=${encodeURIComponent(resolved)}&prefer=${encodeURIComponent(prefer)}`, {
+        cache: 'no-store',
+        signal: controller.signal,
+      });
+      if (state.asset !== expectedAsset || String(state.resolvedSymbol || '').toUpperCase() !== expectedSymbol) return;
+      renderSpecs(specs);
+    } catch (err) {
+      if (err?.name === 'AbortError') return;
+      setSpecsState('error', `Instrument specs unavailable for ${resolved}: ${err?.message || err}`);
+    } finally {
+      if (specsController === controller) specsController = null;
+    }
+  }
+
   function renderQuote(q) {
     const currency = q.display_currency || q.account_currency || 'AUD';
     const fee = Number(q.estimated_fees_or_spread);
@@ -445,7 +513,7 @@
     if (q.upstream_timings_ms && typeof q.upstream_timings_ms === 'object') {
       Object.entries(q.upstream_timings_ms).forEach(([k, v]) => rows.push([`Timing: ${k}`, (v && typeof v === "object") ? JSON.stringify(v, null, 2) : v]));
     }
-    resultEl.innerHTML = rows.map(([k, v]) => `<div class="card"><div class="muted">${k}</div><div>${v ?? '-'}</div></div>`).join('');
+    resultEl.innerHTML = `<table><tbody>${rows.map(([k, v]) => `<tr><th>${escapeHtml(k)}</th><td>${escapeHtml(v ?? '-')}</td></tr>`).join('')}</tbody></table>`;
   }
 
   const buildFetchError = (url, method, status, statusText, bodyText, bodyJson) => {
@@ -776,6 +844,8 @@
     invalidateQuote();
     canonicalEl.textContent = '';
     if (!symbol) {
+      loadJournalSummary('');
+      loadInstrumentSpecs('');
       return;
     }
     if (resolveController) resolveController.abort();
@@ -785,6 +855,8 @@
       const instrument = await resolveInFlight;
       state.resolvedSymbol = instrument.symbol;
       canonicalEl.textContent = `Canonical symbol: ${instrument.symbol}`;
+      loadJournalSummary(instrument.symbol);
+      loadInstrumentSpecs(instrument.symbol);
       prewarmQuoteDependencies(instrument.symbol);
     } catch (e) {
       if (e.name === 'AbortError') {
@@ -792,6 +864,8 @@
       }
       state.resolvedSymbol = '';
       canonicalEl.textContent = '';
+      loadJournalSummary('');
+      loadInstrumentSpecs('');
     } finally {
       resolveInFlight = null;
     }

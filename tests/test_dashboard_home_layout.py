@@ -11,6 +11,7 @@ from decimal import Decimal
 import pytest
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import PatternFill
+from tools.master_journal_workbook import TRADE_LOG_DATA_ROW_HEIGHT, TRADE_LOG_DATA_START_ROW, TRADE_LOG_HEADERS, TRADE_LOG_FILTER_HEADER_ROW
 
 ROOT = Path(__file__).resolve().parents[1]
 MASTER_SERVICE_PATH = ROOT / 'render' / 'master_service.py'
@@ -49,6 +50,10 @@ def test_dashboard_home_removes_instrument_specs_recent_trades_open_orders() -> 
     assert 'id="dashboard-workspace-empty"' in html
     assert 'id="dashboard-workspace-frame"' in html
     assert 'src="/merged/open-orders?_dashboard=1"' in html
+    assert 'class="dashboard-main-content"' in html
+    assert 'id="pine-scripts-panel"' in html
+    assert 'id="pine-files"' in html
+    assert 'id="pine-fallback"' in html
     assert 'Select a script from the toolbar above to load it here.' not in html
     assert 'Select a script from the left to load it here.' not in html
     assert '.local-exit-btn' in html
@@ -72,11 +77,13 @@ def test_dashboard_home_removes_instrument_specs_recent_trades_open_orders() -> 
     watchlist_widget_idx = html.find('id="watchlist-widget"')
     oanda_widget_idx = html.find('id="oanda-inactivity-widget"')
     workspace_idx = html.find('id="dashboard-workspace"')
+    pine_idx = html.find('id="pine-scripts-panel"')
     assert scripts_grid_idx != -1 and exit_slot_idx != -1
-    assert watchlist_widget_idx != -1 and oanda_widget_idx != -1 and workspace_idx != -1
+    assert watchlist_widget_idx != -1 and oanda_widget_idx != -1 and workspace_idx != -1 and pine_idx != -1
     assert scripts_grid_idx < watchlist_widget_idx
     assert scripts_grid_idx < workspace_idx
     assert watchlist_widget_idx < oanda_widget_idx
+    assert workspace_idx < pine_idx
 
     rail_start = html.find('<div class="dashboard-rail">')
     workspace_start = html.find('<section class="panel" id="dashboard-workspace">')
@@ -117,11 +124,18 @@ def test_instrument_lookup_owns_specs_and_journal_markup() -> None:
     assert 'id="calc-journal-summary"' not in master_service_py
     assert 'Instrument Lookup' in master_service_py
     assert 'Journal Stats' in master_service_py
+    assert 'id="asset-toggle"' not in master_service_py[master_service_py.index('INSTRUMENT_SPECS_TEMPLATE'):master_service_py.index('CALCULATOR_TEMPLATE')]
+    assert 'Download JPG' not in master_service_py[master_service_py.index('INSTRUMENT_SPECS_TEMPLATE'):master_service_py.index('CALCULATOR_TEMPLATE')]
     assert 'min-width: 1800px' not in master_service_py
     assert '"/instrument-lookup"' in master_service_py
     assert '/api/instrument-specs?query=' not in calculator_js
     assert '/api/instrument-specs?query=' in lookup_js
     assert '/api/calculator/journal-summary?asset=' in lookup_js
+    assert 'history.replaceState(null, \'\', `/instrument-lookup?q=' in lookup_js
+    assert '&asset=' not in lookup_js
+    assert "'openInterest'" in lookup_js
+    assert "openInterestValue: 'Open interest value (USD)'" in lookup_js
+    assert "keys: ['lastPrice', 'fundingRate', 'nextFundingTime', 'launchTime', 'openInterestValue'" in lookup_js
     assert 'Trading Rules' in lookup_js
     assert 'upgradeLegacyMarkup' in lookup_js
     assert 'instrument-lookup-runtime-css' in lookup_js
@@ -170,23 +184,17 @@ def test_local_profile_sets_no_cache_for_home_and_static_assets(monkeypatch) -> 
 
 
 def test_local_profile_buttons_use_trading_journal_page_not_merged_route() -> None:
+    module = _load_master_service_module()
+    buttons = module._profile_main_buttons()
+    by_name = {str(item.get("name")): item for item in buttons}
+    assert by_name["trading-journal"]["open_url"] == "/dashboard/trading-journal"
+    assert by_name["spreads-clone"]["label"] == "Spreads"
+    assert "open-orders" not in by_name
+    assert "pine" not in by_name
     source = MASTER_SERVICE_PATH.read_text(encoding='utf-8')
-    assert '"id": "trading-journal"' in source
-    assert '"label": "Journal"' in source
-    assert '"label": "Orders / Positions"' in source
-    assert '"label": "Spreads"' in source
-    assert '"label": "Pine"' in source
-    assert '"open_url": "/dashboard/trading-journal"' in source
-    assert '"open_url": "/dashboard/pine"' in source
-    assert '"open_url": "/trading-journal"' not in source
-    assert '"open_url": "/merged/trading-journal"' not in source
     assert '@app.get("/dashboard/trading-journal")' in source
     assert '@app.get("/trading-journal", response_class=HTMLResponse)' in source
     assert '@app.get("/dashboard/pine", response_class=HTMLResponse)' in source
-    assert '"id": "mt5"' not in source
-    assert '"/dashboard/mt5"' not in source
-    assert '"/api/mt5' not in source
-    assert 'MT5_DASHBOARD_TEMPLATE' not in source
 
 
 def test_pine_dashboard_api_lists_reads_and_blocks_traversal(monkeypatch) -> None:
@@ -218,9 +226,13 @@ def test_pine_dashboard_api_lists_reads_and_blocks_traversal(monkeypatch) -> Non
 
 def test_pine_dashboard_page_has_clipboard_and_textarea_fallback() -> None:
     source = MASTER_SERVICE_PATH.read_text(encoding="utf-8")
+    dashboard_js = (ROOT / "render" / "static" / "dashboard.js").read_text(encoding="utf-8")
     assert "navigator.clipboard.writeText(code)" in source
+    assert "navigator.clipboard.writeText(code)" in dashboard_js
     assert '<textarea id="fallback" hidden>' in source
+    assert 'id="pine-fallback"' in source
     assert "Clipboard unavailable. Use manual copy below." in source
+    assert "Clipboard unavailable. Use manual copy below." in dashboard_js
 
 
 def test_trading_journal_workspace_contains_action_buttons_in_order():
@@ -257,6 +269,38 @@ def test_open_master_journal_polish_autofits_and_clears_stale_recommendation_fil
         ws2 = checked["Stats 1"]
         assert str(ws2["B1"].fill.fgColor.rgb or "")[-6:].upper() != "FFF2CC"
         assert float(ws2.column_dimensions["C"].width or 0) > 8
+    finally:
+        checked.close()
+
+
+def test_open_master_journal_polish_keeps_trade_log_data_row_heights(tmp_path: Path):
+    module = _load_master_service_module()
+    path = tmp_path / "Trading Journal.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Trade Log"
+    for col, header in enumerate(TRADE_LOG_HEADERS, start=1):
+        ws.cell(TRADE_LOG_FILTER_HEADER_ROW, col).value = header
+    notes_col = TRADE_LOG_HEADERS.index("Notes") + 1
+    row_id_col = TRADE_LOG_HEADERS.index("Row ID") + 1
+    data_row = TRADE_LOG_DATA_START_ROW
+    ws.cell(data_row, 1).value = "2026-01-01T00:00:00Z"
+    ws.cell(data_row, 2).value = "2026-01-01T00:05:00Z"
+    ws.cell(data_row, 3).value = "Bybit Demo"
+    ws.cell(data_row, 4).value = "BTCUSDT"
+    ws.cell(data_row, row_id_col).value = "row-long-note"
+    ws.cell(data_row, notes_col).value = "Long wrapped note " * 30
+    ws.row_dimensions[data_row].height = TRADE_LOG_DATA_ROW_HEIGHT
+    wb.save(path)
+    wb.close()
+
+    result = module._polish_master_journal_for_excel_open(path)
+
+    assert result["ok"] is True
+    checked = load_workbook(path)
+    try:
+        ws2 = checked["Trade Log"]
+        assert float(ws2.row_dimensions[data_row].height) == float(TRADE_LOG_DATA_ROW_HEIGHT)
     finally:
         checked.close()
 

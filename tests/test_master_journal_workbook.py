@@ -1073,7 +1073,33 @@ def test_calendar_month_conditional_formatting_rows(tmp_path: Path):
     for c in range(1, 14):
         assert cal.cell(1, c).font.bold is True
     assert mar.value in ('', None)
+    assert _cell_fill_rgb(mar) == ""
     assert not any(str(cal.cell(row, 1).value or "").endswith(" Trades") for row in range(2, cal.max_row + 1))
+
+
+def test_calendar_data_only_update_clears_blank_month_fill(tmp_path: Path):
+    snap = sample_snapshot()
+    snap["items"] = [
+        {"id": "may", "row_type": "trade", "account": "A", "open_time": "2026-05-01", "close_time": "2026-05-01", "net_profit": 10, "result_pct": 1.2, "is_test_trade": False},
+    ]
+    out = tmp_path / "Trading Journal.xlsx"
+    build_master_journal_workbook(snap, out)
+    wb = load_workbook(out)
+    cal = wb["P&L Calendar"]
+    cal["D2"].fill = PatternFill("solid", fgColor="E5E7EB")
+    wb.save(out)
+    wb.close()
+
+    result = update_master_journal_workbook_data_only(out, snap)
+    Path(result["candidate_path"]).replace(out)
+
+    checked = load_workbook(out)
+    try:
+        mar = checked["P&L Calendar"]["D2"]
+        assert mar.value in ("", None)
+        assert _cell_fill_rgb(mar) == ""
+    finally:
+        checked.close()
 
 
 
@@ -3780,7 +3806,7 @@ def test_generated_workbook_repairs_stats1_stats2_and_calendar_structure(tmp_pat
     stats2 = wb[STATS2_SHEET]
     cal = wb["P&L Calendar"]
 
-    assert stats1.freeze_panes == "B88"
+    assert stats1.freeze_panes == "B2"
     rows_by_label = {
         str(stats1.cell(row, 1).value or "").strip(): row
         for row in range(1, stats1.max_row + 1)

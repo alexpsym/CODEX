@@ -153,12 +153,11 @@ def test_scripts_endpoint_places_spread_monitor_after_iv_indicator_in_local_prof
     expected = [
         "calculator",
         "trading-journal",
-        "open-orders",
+        "instrument-lookup",
         "history",
         "monitor",
         "ivindicator-clone",
         "spreads-clone",
-        "pine",
     ]
     positions = [names.index(name) for name in expected]
     assert positions == sorted(positions)
@@ -168,9 +167,8 @@ def test_scripts_endpoint_places_spread_monitor_after_iv_indicator_in_local_prof
     assert by_name["spreads-clone"]["open_url"] == "/apps/spreads-clone"
     assert by_name["spreads-clone"]["dashboard_main_view"] is True
     assert "mt5" not in by_name
-    assert by_name["pine"]["label"] == "Pine"
-    assert by_name["pine"]["open_url"] == "/dashboard/pine"
-    assert by_name["pine"]["dashboard_main_view"] is True
+    assert "open-orders" not in by_name
+    assert "pine" not in by_name
 
 
 def test_render_profile_does_not_expose_spread_monitor_or_pine_app():

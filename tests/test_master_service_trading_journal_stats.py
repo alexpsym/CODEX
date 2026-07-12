@@ -295,7 +295,7 @@ def test_compute_journal_stats_recommends_stop_and_target_from_one_win_one_loss(
 
     expected_stop = "Decrease stop — Recommended: 1.00% (1.00 pp below loss average)"
     assert risk["stop_recommendation"] == expected_stop
-    expected_target = "Decrease target \u2014 Recommended: 1.0R (current median: 2.0R)"
+    expected_target = "Decrease target \u2014 Recommended: 1.5R (current median: 2.0R)"
     assert risk["target_recommendation"] == expected_target
     assert risk["by_market"]["fx"]["stop_recommendation"] == expected_stop
     assert instrument["stop_recommendation"] == expected_stop
@@ -832,7 +832,7 @@ def test_target_recommendation_uses_immutable_originals_for_moved_trade_only() -
     assert risk["target_r_calculation_method_counts"]["price_captured_r_from_original_plan"] == 1
     assert risk["target_r_excluded_reasons"]["moved_without_original_plan"] == 1
     assert risk["current_median_original_planned_target_r"] == pytest.approx(3.0)
-    assert risk["target_recommendation"] == "Decrease target \u2014 Recommended: 1.0R (current median: 3.0R)"
+    assert risk["target_recommendation"] == "Decrease target \u2014 Recommended: 1.5R (current median: 3.0R)"
 
 
 def test_target_recommendation_uses_price_r_without_net_equivalence_provenance() -> None:
@@ -1135,7 +1135,8 @@ def test_target_recommendation_uses_nested_complete_original_plan_after_partial_
     risk = _target_r_recommendation(rows)
 
     assert risk["eligible_target_r_wins"] == 5
-    assert risk["target_r_recommended"] == pytest.approx(1.1)
+    assert risk["target_r_recommended"] == pytest.approx(1.5)
+    assert risk["target_r_recommended"] >= 1.5
     assert risk["current_median_original_planned_target_r"] == pytest.approx(4.0)
 
 
@@ -1149,8 +1150,8 @@ def test_target_recommendation_never_recommends_zero_for_small_positive_modal_bu
     risk = _target_r_recommendation(rows)
 
     assert risk["target_r_peak_bucket"] == "0.0R-0.5R"
-    assert risk["target_r_recommended"] == pytest.approx(0.2)
-    assert risk["target_r_recommended"] > 0
+    assert risk["target_r_recommended"] == pytest.approx(1.5)
+    assert risk["target_r_recommended"] >= 1.5
     assert "Recommended: 0.0R" not in risk["target_recommendation"]
 
 
@@ -1256,13 +1257,40 @@ def test_target_recommendation_uses_unrounded_decimal_difference_for_direction()
 
     assert increase["target_r_recommendation_direction"] == "Increase target"
     assert increase["target_r_exact_tie"] is False
-    assert increase["target_recommendation"] == "Increase target \u2014 Recommended: 2.0R (current median: 2.0R)"
+    assert increase["target_recommendation"] == "Increase target \u2014 Recommended: 2.01R (current median: 2.0R)"
     assert decrease["target_r_recommendation_direction"] == "Decrease target"
     assert decrease["target_r_exact_tie"] is False
-    assert decrease["target_recommendation"] == "Decrease target \u2014 Recommended: 2.0R (current median: 2.0R)"
+    assert decrease["target_recommendation"] == "Decrease target \u2014 Recommended: 1.99R (current median: 2.0R)"
     assert exact["target_r_recommendation_direction"] == "Increase target"
     assert exact["target_r_exact_tie"] is True
     assert exact["target_r_exact_tie_goal_preference"] is True
+
+
+def _recommended_r_from_text(text: str) -> float:
+    return float(text.split("Recommended:", 1)[1].split("R", 1)[0].strip())
+
+
+def test_target_recommendation_floor_applies_to_market_and_symbol_scopes() -> None:
+    rows = (
+        _fx_target_wins([1.0], symbol="EURUSD")
+        + [_fx_target_loss(symbol="EURUSD")]
+        + _crypto_target_wins([1.2], symbol="BTCUSDT")
+        + [_crypto_target_loss(symbol="BTCUSDT")]
+    )
+
+    stats = _compute_journal_stats(rows, balances=[])
+    payloads = [
+        stats["groups"]["by_market"]["overall"],
+        stats["groups"]["by_market"]["fx"],
+        stats["groups"]["by_market"]["crypto"],
+        next(item for item in stats["by_instrument"] if item["symbol"] == "EURUSD"),
+        next(item for item in stats["by_instrument"] if item["symbol"] == "BTCUSDT"),
+    ]
+
+    for payload in payloads:
+        text = payload["target_recommendation"]
+        assert text.startswith(("Increase target", "Decrease target"))
+        assert _recommended_r_from_text(text) >= 1.5
 
 
 def test_target_recommendation_uses_stored_r_multiple_without_net_original_provenance() -> None:

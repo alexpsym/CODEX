@@ -311,13 +311,11 @@ def _profile_main_buttons() -> List[Dict[str, object]]:
         buttons.extend(
             [
                 {"id": "trading-journal", "name": "trading-journal", "label": "Journal", "open_url": "/dashboard/trading-journal", "dashboard_main_view": True},
-                {"id": "open-orders", "name": "open-orders", "label": "Orders / Positions", "open_url": "/merged/open-orders", "dashboard_main_view": True},
                 {"id": "instrument-lookup", "name": "instrument-lookup", "label": "Instrument Lookup", "open_url": "/instrument-lookup", "dashboard_main_view": True},
                 {"id": "history", "name": "history", "label": "History", "open_url": "/merged/history", "dashboard_main_view": True},
                 {"id": "monitor", "name": "monitor", "label": "Scanner", "open_url": "/merged/monitor", "dashboard_main_view": True},
                 {"id": "ivindicator-clone", "name": "ivindicator-clone", "label": "IV Indicator", "open_url": "/apps/ivindicator-clone", "dashboard_main_view": True},
                 {"id": "spreads-clone", "name": "spreads-clone", "label": "Spreads", "open_url": "/apps/spreads-clone", "dashboard_main_view": True},
-                {"id": "pine", "name": "pine", "label": "Pine", "open_url": "/dashboard/pine", "dashboard_main_view": True},
             ]
         )
     return buttons
@@ -11279,6 +11277,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             flex-direction: column;
             gap: 1rem;
         }
+        .dashboard-main-content{
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+            min-width: 0;
+        }
         .sidebar{
             padding: 1rem;
         }
@@ -11314,6 +11318,41 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             border: 1px solid #1f2937;
             border-radius: 12px;
             background: #0b1220;
+        }
+        #pine-scripts-panel{
+            display: flex;
+            flex-direction: column;
+            gap: 0.75rem;
+        }
+        .pine-files{
+            border:1px solid #1f2937;
+            border-radius:8px;
+            overflow:hidden;
+            background:#0b1220;
+        }
+        .pine-row{
+            display:flex;
+            align-items:center;
+            justify-content:space-between;
+            gap:0.75rem;
+            padding:0.65rem 0.75rem;
+            border-bottom:1px solid #1f2937;
+        }
+        .pine-row:last-child{border-bottom:0}
+        .pine-file{
+            color:#e2e8f0;
+            font-weight:800;
+            overflow-wrap:anywhere;
+        }
+        #pine-fallback{
+            width:100%;
+            min-height:180px;
+            border-radius:8px;
+            border:1px solid #334155;
+            background:#0f172a;
+            color:#e2e8f0;
+            padding:10px;
+            font-family:ui-monospace,SFMono-Regular,Consolas,monospace;
         }
         @media (max-width: 980px){
             .layout{ grid-template-columns: 1fr; }
@@ -11592,20 +11631,33 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 </section>
 
             </div>
-            <section class="panel" id="dashboard-workspace">
-                <div class="panel-header">
-                    <div>
-                        <div id="dashboard-workspace-title">Orders / Positions</div>
-                        <p id="dashboard-workspace-status">Loading open orders and positions.</p>
+            <div class="dashboard-main-content">
+                <section class="panel" id="dashboard-workspace">
+                    <div class="panel-header">
+                        <div>
+                            <div id="dashboard-workspace-title">Orders / Positions</div>
+                            <p id="dashboard-workspace-status">Loading open orders and positions.</p>
+                        </div>
                     </div>
-                </div>
-                <p id="dashboard-workspace-empty" hidden>Open orders and positions are unavailable.</p>
-                <iframe
-                    id="dashboard-workspace-frame"
-                    title="Open orders and positions dashboard"
-                    src="/merged/open-orders?_dashboard=1"
-                ></iframe>
-            </section>
+                    <p id="dashboard-workspace-empty" hidden>Open orders and positions are unavailable.</p>
+                    <iframe
+                        id="dashboard-workspace-frame"
+                        title="Open orders and positions dashboard"
+                        src="/merged/open-orders?_dashboard=1"
+                    ></iframe>
+                </section>
+
+                <section class="panel" id="pine-scripts-panel">
+                    <div class="panel-header">
+                        <div>
+                            <h2>Pine Scripts</h2>
+                            <div class="panel-sub" id="pine-status">Loading Pine scripts.</div>
+                        </div>
+                    </div>
+                    <div class="pine-files" id="pine-files"></div>
+                    <textarea id="pine-fallback" hidden></textarea>
+                </section>
+            </div>
         </div>
     </div>
 
@@ -11644,11 +11696,9 @@ INSTRUMENT_SPECS_TEMPLATE = """<!DOCTYPE html>
         h1 { margin: 0 0 0.35rem; font-size: clamp(1.35rem, 2.2vw, 2rem); }
         .meta { color: #9fb4d0; margin: 0 0 1rem; line-height: 1.5; }
         .bar { display:flex; gap:0.6rem; align-items:center; margin-bottom: 1rem; padding: 0.8rem; background: var(--toolbar); border: 1px solid var(--toolbar-border); border-radius: 8px; }
-        .toggle { display:flex; gap:0.35rem; align-items:center; flex: 0 0 auto; }
         input { flex: 1; min-width: 220px; border-radius: 8px; border: 1px solid #334155; background: #0b1220; color: #e2e8f0; padding: 0.65rem 0.75rem; font-size: 1rem; }
         button, .btn { background: #1f2937; color: #e2e8f0; border: 1px solid #334155; border-radius: 8px; padding: 0.65rem 0.9rem; cursor: pointer; font-weight: 800; text-decoration:none; display:inline-flex; align-items:center; justify-content:center; min-height: 42px; white-space: nowrap; }
         button:hover, .btn:hover { background: #334155; }
-        .toggle button.active { background: var(--blue); border-color: #60a5fa; color: #ffffff; }
         .layout { display:grid; grid-template-columns:minmax(300px, 0.82fr) minmax(520px, 1.38fr); gap:1rem; align-items:start; }
         .panel { background: var(--sheet); border: 1px solid var(--sheet-line); border-radius: 8px; color: var(--ink); box-shadow: 0 12px 28px rgba(0, 0, 0, 0.28); overflow: hidden; }
         .panel-head { display:flex; gap:0.75rem; align-items:flex-start; justify-content:space-between; padding: 0.85rem 1rem; background: var(--sheet-header); border-bottom: 1px solid var(--sheet-line); }
@@ -11703,13 +11753,8 @@ INSTRUMENT_SPECS_TEMPLATE = """<!DOCTYPE html>
     <p class="meta">Type a symbol to view broker specs and matching journal metrics.</p>
 
     <div class="bar">
-      <div class="toggle" id="asset-toggle">
-        <button type="button" data-asset="crypto" class="active">Crypto</button>
-        <button type="button" data-asset="fx">FX</button>
-      </div>
-      <input id="q" type="text" placeholder="eurusd / BTC" />
+      <input id="q" type="text" placeholder="BTC, Bitcoin USDT, EURUSD, XAUUSD" />
       <button id="load" type="button">Load</button>
-      <a class="btn" id="download" href="#">Download JPG</a>
     </div>
 
     <div class="layout">
@@ -19265,36 +19310,43 @@ CALCULATOR_TEMPLATE = """<!doctype html>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
   <title>Position Size Calculator</title>
   <style>
-    body{margin:0;background:#0b1220;color:#e2e8f0;font-family:Inter,system-ui,sans-serif}
-    .wrap{width:100%;max-width:none;margin:0;padding:18px}
-    .panel{background:#111827;border:1px solid #1f2937;border-radius:14px;padding:16px}
-    .calc-grid{display:grid;grid-template-columns:minmax(0,1fr);gap:14px;align-items:start}
+    :root{color-scheme:dark;--page:#0b1220;--panel:#111827;--panel-2:#0f172a;--line:#334155;--line-soft:#1f2937;--label:#172033;--ink:#e2e8f0;--muted:#94a3b8;--blue:#2563eb;--green:#86efac;--red:#fca5a5}
+    *{box-sizing:border-box}
+    body{margin:0;background:var(--page);color:var(--ink);font-family:Inter,system-ui,sans-serif}
+    .wrap{width:100%;max-width:1760px;margin:0 auto;padding:18px}
+    .panel{background:var(--panel);border:1px solid var(--line-soft);border-radius:8px;padding:16px}
+    h2{margin:0 0 14px;font-size:1.15rem}
+    .calc-grid{display:grid;grid-template-columns:minmax(420px,0.95fr) minmax(420px,1.05fr);gap:14px;align-items:start}
     .calc-col{display:flex;flex-direction:column;gap:14px;min-width:0}
-    .settings-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;align-items:start}
-    .row{display:flex;flex-direction:column;gap:6px;align-items:stretch;margin-bottom:0;min-width:0}
-    .row.full-row{grid-column:1 / -1}
-    .group{display:flex;gap:8px;flex-wrap:wrap}
-    label{display:flex;flex-direction:column;gap:6px;font-weight:700;color:#cbd5e1}
-    input,select,button{background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:10px;padding:8px 10px}
-    .compact{width:100%}
-    .compact-symbol{max-width:180px}
-    .compact-limit{max-width:160px}
-    .compact-ticks{max-width:90px}
-    .compact-rr{max-width:90px}
-    .compact-risk{max-width:110px}
-    button{cursor:pointer;font-weight:700}
+    .calc-table{width:100%;border-collapse:collapse;border:1px solid var(--line);background:var(--panel-2);table-layout:fixed}
+    .calc-table caption{text-align:left;padding:9px 10px;border:1px solid var(--line);border-bottom:0;background:#0b1220;font-weight:900;color:#e5e7eb}
+    .calc-table th,.calc-table td{border:1px solid var(--line);padding:8px 10px;vertical-align:middle}
+    .calc-table th{width:34%;background:var(--label);color:#cbd5e1;text-align:left;font-size:0.86rem;font-weight:850}
+    .calc-table td{background:#0b1220}
+    .group{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+    .toggle button{min-height:38px}
+    input,select,button{background:var(--panel-2);color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:8px 10px;font:inherit}
+    input{width:100%;min-height:38px}
+    button{cursor:pointer;font-weight:800;min-height:38px}
     button:disabled{opacity:.55;cursor:not-allowed}
-    .toggle button.active{background:#2563eb;border-color:#3b82f6}
-    .full-row .toggle{display:grid;grid-template-columns:repeat(auto-fit,minmax(88px,auto));justify-content:start}
-    .error{color:#fca5a5;min-height:1.2em}
-    .ok{color:#86efac}
+    .toggle button.active{background:var(--blue);border-color:#60a5fa;color:#fff}
+    .wide-toggle{display:grid;grid-template-columns:repeat(auto-fit,minmax(88px,max-content));gap:8px;align-items:center}
+    .status-area{display:flex;flex-direction:column;gap:8px}
+    .action-row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;justify-content:flex-start;padding:10px;border:1px solid var(--line);background:#0b1220}
+    .quote-panel{display:flex;flex-direction:column;gap:12px}
+    .quote-results{border:1px solid var(--line);background:#0b1220;min-height:160px}
+    .quote-results table{width:100%;border-collapse:collapse;table-layout:fixed}
+    .quote-results th,.quote-results td{border-bottom:1px solid var(--line-soft);padding:8px 10px;text-align:left;vertical-align:top}
+    .quote-results th{width:42%;background:var(--label);color:#cbd5e1;font-size:0.86rem}
+    .quote-results tr:last-child th,.quote-results tr:last-child td{border-bottom:0}
+    .quote-empty{padding:12px;color:var(--muted)}
+    .error{color:var(--red);min-height:1.2em}
+    .ok{color:var(--green)}
     .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px}
-    .grid.compact-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}
-    .card{background:#0f172a;border:1px solid #1f2937;border-radius:10px;padding:10px}
-    .muted{color:#94a3b8;font-size:0.9rem}
-    @media (max-width:1100px){.settings-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
-    @media (max-width:820px){.calc-grid{grid-template-columns:1fr}.settings-grid{grid-template-columns:1fr}}
-    @media (max-width:900px){.grid.compact-grid{grid-template-columns:1fr}}
+    .card{background:var(--panel-2);border:1px solid var(--line-soft);border-radius:6px;padding:10px}
+    .muted{color:var(--muted);font-size:0.9rem}
+    @media (max-width:980px){.wrap{padding:12px}.calc-grid{grid-template-columns:1fr}.calc-table th{width:40%}}
+    @media (max-width:620px){.calc-table,.calc-table tbody,.calc-table tr,.calc-table th,.calc-table td{display:block;width:100%}.calc-table th{border-bottom:0}.action-row{align-items:stretch}.action-row button{flex:1 1 150px}}
   </style>
 </head>
 <body>
@@ -19405,6 +19457,133 @@ CALCULATOR_TEMPLATE = """<!doctype html>
         <div class="grid" id="calc-results"></div>
       </div>
       </div>
+      </div>
+    </div>
+  </div>
+  <script src="{{CALCULATOR_JS_URL}}"></script>
+</body>
+</html>"""
+
+
+CALCULATOR_TEMPLATE = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Position Size Calculator</title>
+  <style>
+    :root{color-scheme:dark;--page:#0b1220;--panel:#111827;--panel-2:#0f172a;--line:#334155;--line-soft:#1f2937;--label:#172033;--ink:#e2e8f0;--muted:#94a3b8;--blue:#2563eb;--green:#86efac;--red:#fca5a5}
+    *{box-sizing:border-box}
+    body{margin:0;background:var(--page);color:var(--ink);font-family:Inter,system-ui,sans-serif}
+    .wrap{width:100%;max-width:1760px;margin:0 auto;padding:18px}
+    .panel{background:var(--panel);border:1px solid var(--line-soft);border-radius:8px;padding:16px}
+    h2{margin:0 0 14px;font-size:1.15rem}
+    .calc-grid{display:grid;grid-template-columns:minmax(420px,0.95fr) minmax(420px,1.05fr);gap:14px;align-items:start}
+    .calc-col{display:flex;flex-direction:column;gap:14px;min-width:0}
+    .calc-table{width:100%;border-collapse:collapse;border:1px solid var(--line);background:var(--panel-2);table-layout:fixed}
+    .calc-table caption{text-align:left;padding:9px 10px;border:1px solid var(--line);border-bottom:0;background:#0b1220;font-weight:900;color:#e5e7eb}
+    .calc-table th,.calc-table td{border:1px solid var(--line);padding:8px 10px;vertical-align:middle}
+    .calc-table th{width:34%;background:var(--label);color:#cbd5e1;text-align:left;font-size:0.86rem;font-weight:850}
+    .calc-table td{background:#0b1220}
+    .group{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+    .toggle button{min-height:38px}
+    input,select,button{background:var(--panel-2);color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:8px 10px;font:inherit}
+    input{width:100%;min-height:38px}
+    button{cursor:pointer;font-weight:800;min-height:38px}
+    button:disabled{opacity:.55;cursor:not-allowed}
+    .toggle button.active{background:var(--blue);border-color:#60a5fa;color:#fff}
+    .wide-toggle{display:grid;grid-template-columns:repeat(auto-fit,minmax(88px,max-content));gap:8px;align-items:center}
+    .status-area{display:flex;flex-direction:column;gap:8px}
+    .action-row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;justify-content:flex-start;padding:10px;border:1px solid var(--line);background:#0b1220}
+    .quote-panel{display:flex;flex-direction:column;gap:12px}
+    .quote-results{border:1px solid var(--line);background:#0b1220;min-height:160px}
+    .quote-results table{width:100%;border-collapse:collapse;table-layout:fixed}
+    .quote-results th,.quote-results td{border-bottom:1px solid var(--line-soft);padding:8px 10px;text-align:left;vertical-align:top}
+    .quote-results th{width:42%;background:var(--label);color:#cbd5e1;font-size:0.86rem}
+    .quote-results tr:last-child th,.quote-results tr:last-child td{border-bottom:0}
+    .quote-empty{padding:12px;color:var(--muted)}
+    .error{color:var(--red);min-height:1.2em}
+    .ok{color:var(--green)}
+    .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px}
+    .card{background:var(--panel-2);border:1px solid var(--line-soft);border-radius:6px;padding:10px}
+    .muted{color:var(--muted);font-size:0.9rem}
+    @media (max-width:980px){.wrap{padding:12px}.calc-grid{grid-template-columns:1fr}.calc-table th{width:40%}}
+    @media (max-width:620px){.calc-table,.calc-table tbody,.calc-table tr,.calc-table th,.calc-table td{display:block;width:100%}.calc-table th{border-bottom:0}.action-row{align-items:stretch}.action-row button{flex:1 1 150px}}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="panel">
+      <h2>Position Size Calculator</h2>
+      <div class="calc-grid">
+        <div class="calc-col">
+          <table class="calc-table">
+            <caption>Order</caption>
+            <tbody>
+              <tr><th>Account</th><td><div class="group toggle" id="account-toggle"><button type="button" data-v="live" class="active">Live</button><button type="button" data-v="demo">Demo</button></div></td></tr>
+              <tr><th>Asset</th><td><div class="group toggle" id="asset-toggle"><button type="button" data-v="crypto" class="active">Crypto</button><button type="button" data-v="fx">FX</button></div></td></tr>
+              <tr id="broker-toggle-wrap" style="display:none"><th>Broker</th><td><div class="group toggle" id="broker-toggle"><button type="button" data-v="oanda" class="active">OANDA</button><button type="button" data-v="pepperstone">Pepperstone</button></div></td></tr>
+              <tr><th>Side</th><td><div class="group toggle" id="side-toggle"><button type="button" data-v="buy" class="active">Buy</button><button type="button" data-v="sell">Sell</button></div></td></tr>
+              <tr><th>Order type</th><td><div class="group toggle" id="order-toggle"><button type="button" data-v="market" class="active">Market</button><button type="button" data-v="limit">Limit</button></div></td></tr>
+              <tr><th><label for="calc-symbol">Symbol</label></th><td><input id="calc-symbol" placeholder="BTC or EUR_USD"/><div class="muted" id="calc-canonical-symbol"></div></td></tr>
+              <tr id="limit-wrap" style="display:none"><th><label for="calc-limit">Limit entry</label></th><td><input id="calc-limit" type="number" step="any"/></td></tr>
+            </tbody>
+          </table>
+
+          <table class="calc-table">
+            <caption>Risk</caption>
+            <tbody>
+              <tr><th><label for="calc-sl-ticks">Stop-loss ticks</label></th><td><input id="calc-sl-ticks" type="number" min="1" step="1" value="10"/></td></tr>
+              <tr id="rr-wrap"><th><label for="calc-rr">Risk/reward</label></th><td><input id="calc-rr" type="number" min="0.1" step="0.1" value="2"/></td></tr>
+              <tr id="risk-toggle-wrap"><th>Risk mode</th><td><div class="group toggle" id="risk-toggle"><button type="button" data-v="fixed_aud">Fixed AUD</button><button type="button" data-v="percent" class="active">%</button></div></td></tr>
+              <tr><th><label id="calc-risk-label" for="calc-risk">Risk value (%)</label></th><td><input id="calc-risk" type="number" min="0.0001" step="any" value="1"/></td></tr>
+              <tr><th>Webhook</th><td><div class="group toggle" id="webhook-toggle"><button type="button" data-v="no" class="active">No</button><button type="button" data-v="yes">Yes</button></div><div id="calc-webhook-status" class="muted"></div></td></tr>
+              <tr><th>Test</th><td><div class="group toggle" id="test-toggle"><button type="button" data-v="no" class="active">No</button><button type="button" data-v="yes">Yes</button></div></td></tr>
+            </tbody>
+          </table>
+
+          <table class="calc-table">
+            <caption>Trade classification</caption>
+            <tbody>
+              <tr><th>Timeframe</th><td><div class="group toggle wide-toggle" id="timeframe-toggle"></div></td></tr>
+              <tr><th>Setup</th><td><div class="group toggle wide-toggle" id="setup-toggle"></div></td></tr>
+              <tr><th>Pattern</th><td><div class="group toggle wide-toggle" id="pattern-toggle"></div></td></tr>
+              <tr><th>EMA</th><td><div class="group toggle wide-toggle" id="ema-toggle"></div></td></tr>
+              <tr><th>All-time high/low</th><td><div class="group toggle wide-toggle" id="aths-atls-toggle"></div></td></tr>
+              <tr><th>Round number</th><td><div class="group toggle wide-toggle" id="round-number-toggle"></div></td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="calc-col quote-panel">
+          <div class="action-row">
+            <button id="calc-quote" type="button">Calculate</button>
+            <button id="calc-submit" type="button" style="display:none">Submit Order</button>
+            <button id="calc-pepperstone-set" type="button" style="display:none">Download .set</button>
+            <div id="calc-quote-status" class="muted"></div>
+          </div>
+          <div class="status-area">
+            <div id="calc-error" class="error"></div>
+            <div class="grid" id="calc-error-debug"></div>
+            <div id="calc-success" class="ok"></div>
+            <div id="calc-request-summary" class="muted"></div>
+          </div>
+          <table class="calc-table">
+            <caption>Quote Results</caption>
+            <tbody>
+              <tr><td colspan="2"><div class="quote-results" id="calc-results"></div></td></tr>
+            </tbody>
+          </table>
+          <div id="calc-webhook-panel" class="status-area" style="display:none">
+            <table class="calc-table">
+              <caption>Webhook</caption>
+              <tbody>
+                <tr><th>URL</th><td><pre id="calc-webhook-url" class="card" style="white-space:pre-wrap;word-break:break-word;max-height:80px;overflow:auto"></pre><div class="group"><button id="calc-webhook-copy-url" type="button">Copy URL</button></div></td></tr>
+                <tr><th>Message JSON</th><td><pre id="calc-webhook-json" class="card" style="white-space:pre-wrap;word-break:break-word;max-height:220px;overflow:auto"></pre><div class="group"><button id="calc-webhook-copy" type="button">Copy JSON</button></div></td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
       </div>
     </div>
   </div>
@@ -20235,12 +20414,8 @@ async def calculator_journal_summary(asset: str, symbol: str) -> JSONResponse:
     symbol_in = str(symbol or "").strip()
     if not symbol_in:
         raise HTTPException(status_code=400, detail="symbol is required.")
-    base_rows = [
-        _backfill_trade_row_context_fields(r)
-        for r in _get_trading_journal_rows()
-        if isinstance(r, dict) and not _exclude_bybit_demo_row(r)
-    ]
-    balances = _get_excel_account_balances()
+
+    base_rows, balances = _calculator_journal_summary_source_rows()
     rows = _enrich_trade_row_metrics(_apply_analysis_balances(_calc_balance_after_trade(base_rows, balances)))
 
     canonical = ""
@@ -20284,8 +20459,7 @@ async def calculator_journal_summary(asset: str, symbol: str) -> JSONResponse:
                     if not _is_test_trade_row(r):
                         filtered.append(r)
             continue
-        # crypto: include exact normalized key and shorthand-equivalent variants.
-        if row_key == canonical_key or row_key.startswith(canonical_key) or canonical_key.startswith(row_key):
+        if row_key == canonical_key:
             if not _is_test_trade_row(r):
                 filtered.append(r)
     filtered_sorted = sorted(filtered, key=_row_sort_dt, reverse=True)
@@ -20329,6 +20503,45 @@ async def calculator_journal_summary(asset: str, symbol: str) -> JSONResponse:
             "trades": filtered_sorted,
         }
     )
+
+
+def _calculator_journal_summary_source_rows() -> Tuple[List[Dict[str, object]], List[Dict[str, object]]]:
+    def _runtime_rows() -> List[Dict[str, object]]:
+        return [
+            _backfill_trade_row_context_fields(r)
+            for r in _get_trading_journal_rows()
+            if isinstance(r, dict) and not _exclude_bybit_demo_row(r)
+        ]
+
+    path = _master_journal_path()
+    if path.exists() and _master_journal_single_file_mode():
+        source = read_master_journal_source(path) or {}
+        rows = [
+            _backfill_trade_row_context_fields(r)
+            for r in (source.get("items") or [])
+            if isinstance(r, dict) and not _exclude_bybit_demo_row(r)
+        ]
+        balances = [b for b in (source.get("balances") or []) if isinstance(b, dict)]
+        return rows, balances
+
+    rows = _runtime_rows()
+    if rows:
+        return rows, _get_excel_account_balances()
+
+    if path.exists():
+        try:
+            source = read_master_journal_source(path) or {}
+            rows = [
+                _backfill_trade_row_context_fields(r)
+                for r in (source.get("items") or [])
+                if isinstance(r, dict) and not _exclude_bybit_demo_row(r)
+            ]
+            balances = [b for b in (source.get("balances") or []) if isinstance(b, dict)]
+            if rows:
+                return rows, balances
+        except Exception:
+            pass
+    return rows, _get_excel_account_balances()
 
 
 
@@ -25196,6 +25409,7 @@ async def list_scripts() -> JSONResponse:
     merged_source_names = get_merged_source_names()
     extras = [s for s in raw if str(s.get("name")) not in merged_source_names]
     extras = [s for s in extras if str(s.get("name")) not in {"bybit_monitor", "oanda_monitor"}]
+    extras = [s for s in extras if str(s.get("name")) not in {"open-orders", "pine"}]
     for item in extras:
         if str(item.get("name")) == "ivindicator-clone":
             item["dashboard_main_view"] = True
@@ -28824,6 +29038,8 @@ def _repair_stats1_recommendation_rows_for_excel_open(wb: object, diagnostics: D
 
 
 def _polish_master_journal_for_excel_open(path: Path) -> Dict[str, object]:
+    from tools.master_journal_workbook import _normalize_trade_log_row_heights
+
     diagnostics: Dict[str, object] = {
         "ok": True,
         "recommendation_cells_repaired": 0,
@@ -28834,6 +29050,12 @@ def _polish_master_journal_for_excel_open(path: Path) -> Dict[str, object]:
     try:
         _repair_stats1_recommendation_rows_for_excel_open(wb, diagnostics)
         for ws in wb.worksheets:
+            trade_log_data_start_row: Optional[int] = None
+            if str(getattr(ws, "title", "")) in {"Trade Log", "All Trades"}:
+                try:
+                    trade_log_data_start_row = int(_trade_log_data_start_row(ws))
+                except Exception:
+                    trade_log_data_start_row = None
             recommendation_cols: Set[int] = set()
             for row in ws.iter_rows():
                 for cell in row:
@@ -28886,7 +29108,9 @@ def _polish_master_journal_for_excel_open(path: Path) -> Dict[str, object]:
                         alignment.wrap_text = True
                         cell.alignment = alignment
                         line_count = max(line_count, math.ceil(longest / 80))
-                    if line_count > 1:
+                    if line_count > 1 and not (
+                        trade_log_data_start_row is not None and int(cell.row) >= trade_log_data_start_row
+                    ):
                         row_heights[int(cell.row)] = max(row_heights.get(int(cell.row), 0.0), min(120.0, 15.0 * min(line_count, 8)))
 
             for col_idx, width in col_widths.items():
@@ -28903,6 +29127,9 @@ def _polish_master_journal_for_excel_open(path: Path) -> Dict[str, object]:
                 if current != next_height:
                     ws.row_dimensions[row_idx].height = next_height
                     diagnostics["rows_resized"] = int(diagnostics["rows_resized"]) + 1
+
+        for ws in wb.worksheets:
+            _normalize_trade_log_row_heights(ws, diagnostics)
 
         wb.save(path)
         return diagnostics

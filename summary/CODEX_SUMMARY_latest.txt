@@ -1,90 +1,43 @@
-Local Trading Tools launcher final narrow cleanup summary
+Instrument lookup, calculator, dashboard, and Trading Journal repair summary
 
 Status:
-- Implementation completed and pushed.
-- Trading Journal recommendation logic and workbook output were not changed or regenerated.
-- First `PATCH_DESKTOP_PUSH.bat` run created implementation commit `aa87f168f279020f3b3727e5291b75f91ce6c92f`.
-- First push verified: local HEAD and `origin/master` both resolved to `aa87f168f279020f3b3727e5291b75f91ce6c92f`.
-- This file records the verified implementation commit; the final response records the final repository HEAD after this summary update is pushed.
+- Implementation and workbook repair completed locally.
+- This summary was written before the mandatory PATCH_DESKTOP_PUSH.bat run.
+- Final push verification is recorded in the Codex final response after the script completes.
 
-Marker-overwrite root cause:
-- `/api/local-shutdown` and `/api/local-exit` already wrote detailed atomic normal-exit markers before SIGTERM.
-- The batch worker later called `:write_normal_exit_marker` after Uvicorn returned and unconditionally overwrote that API marker with `batch_exit_request`.
-- Controlled exits were still detected, but the wrapper lost whether the shutdown was an Exit-button shutdown, launcher replacement, or another controlled local shutdown.
+Instrument Lookup:
+- Removed the Crypto/FX toggle and JPG download control from the lookup page.
+- Lookup now infers FX versus crypto from the query and keeps history URLs to /instrument-lookup?q=... without an asset parameter.
+- Market snapshot hides raw openInterest and shows openInterestValue as USD.
 
-Marker-overwrite fix:
-- `run_local_master_control.bat::write_normal_exit_marker` now calls `tools/windows_launchers/write_local_master_normal_exit_marker.ps1`.
-- The helper preserves an existing valid marker unchanged when it has a recognized reason or requesting action, including `exit_button`, `launcher_preflight`, `local_exit`, and `local_shutdown`.
-- The helper writes the `batch_exit_request` marker only as a fallback when no marker exists or when the existing marker is empty/corrupt/unrecognized.
-- Fallback writes remain atomic through temp-file plus move.
-- Corrupt marker evidence is copied to a `.invalid.<timestamp>` file where practical, and the worker log receives a visible diagnostic.
-- `local_master_worker_console.bat` continues to consume and remove the marker only after printing the controlled-exit classification.
+Calculator:
+- Reworked the calculator page into a clearer two-column desktop layout with compact table-style sections and a mobile single-column fallback.
+- Quote results now render as a stable table.
+- Calculator instrument specs and journal summary panels are loaded from the resolved symbol and recover from failures instead of staying in a loading state.
+- Journal summary now reads from the single master workbook when configured, with runtime fallback only when needed.
+- Crypto journal summary matching now requires the canonical normalized symbol instead of unsafe prefix matching, so BTCUSDT/BTC/USDT/Bitcoin USDT aliases resolve to the same workbook rows without cross-symbol leakage.
 
-Latest-generation detection root cause:
-- `stream_local_master_worker.ps1` previously searched the entire worker log for any `uvicorn exited with` line.
-- A previous generation's exit line, such as generation 1 `uvicorn exited with -1`, could incorrectly satisfy evidence for a later generation that disappeared without its own clean Uvicorn exit line.
+Dashboard:
+- Local dashboard main buttons no longer expose Open Orders or Pine as standalone main buttons.
+- The Pine scripts area now lives permanently under Orders / Positions with copy buttons and a fallback textarea when clipboard writes are unavailable.
+- The main dashboard workspace is wrapped so local panels remain visually grouped without moving the Pine fallback out of reach.
 
-Latest-generation detection fix:
-- `stream_local_master_worker.ps1` now parses worker-log lines in order and keeps evidence for the latest Uvicorn generation only.
-- It recognizes `starting uvicorn`, `uvicorn restart generation N`, and `uvicorn exited with ...`.
-- Final evidence now reports worker PID, latest Uvicorn generation, Uvicorn PID as `unknown` when not obtainable, latest-generation startup state, latest-generation exit state, latest-generation exit code, worker exit code, runtime seconds, last successful health timestamp, last successful autostart timestamp, and normal-marker state.
-- Earlier generation exits no longer hide a later process disappearance.
-- If the latest generation has no exit line and no normal marker, the streamer reports that the process disappeared before clean Uvicorn exit logging and classifies it as external/forced termination unless stronger evidence appears.
-- If the latest generation has an exit line, the streamer reports that generation's actual exit code.
-
-Exact files/functions changed:
-- `run_local_master_control.bat::write_normal_exit_marker`
-  - Replaced unconditional marker overwrite with the marker-preserving PowerShell helper.
-- `tools/windows_launchers/write_local_master_normal_exit_marker.ps1`
-  - New helper for marker validation, preservation, corrupt-marker diagnostics, and atomic fallback writes.
-- `tools/windows_launchers/stream_local_master_worker.ps1`
-  - Added latest-generation evidence parser and final latest-generation exit reporting.
-- `render/master_service.py::LOCAL_BUILD_FILES`
-  - Added the new marker helper to the local source-stamp inputs.
-- `tests/test_windows_launchers.py`
-  - Added direct marker-preservation tests, corrupt-marker fallback tests, wrapper classification smoke tests, and latest-generation streamer fixture tests.
-
-Controlled-shutdown classifications verified:
-- Existing API marker `exit_button` plus batch fallback remains `exit_button` and the wrapper prints `Controlled Exit-button shutdown completed.`
-- Existing API marker `launcher_preflight` plus batch fallback remains `launcher_preflight` and the wrapper prints `Controlled replacement by a new launcher completed.`
-- No API marker causes the batch fallback to write `batch_exit_request`.
-- Empty/corrupt markers produce valid fallback markers plus visible diagnostics.
-- Controlled marker paths do not print startup failure or unexpected runtime failure.
-
-Unexpected runtime-exit classification verified:
-- Generation 1 can exit and generation 2 can later exit with a different code; final evidence reports generation 2's exit code.
-- Generation 1 can exit and generation 2 can start then disappear; final evidence reports missing clean exit logging for generation 2.
-- Multiple previous exits cannot satisfy the latest generation.
-- A normal marker suppresses external/forced-termination diagnosis for a controlled disappearance.
-- A real-log-style fixture with earlier `uvicorn exited with -1`, restart generation 2, health recovery text, and no generation-2 exit reports missing clean exit logging for generation 2.
-
-Trading Journal preservation:
-- The checked-in workbook was inspected without regeneration.
-- Stats 1 target recommendations remain:
-  - Overall: `Increase target — Recommended: 2.03R (current median: 2.0R)`.
-  - FX: `Increase target — Recommended: 2.04R (current median: 2.0R)`.
-  - Crypto: `Decrease target — Recommended: 1.98R (current median: 2.0R)`.
-- FX target is not unavailable.
-- Stats 1 and Symbols recommendation outputs contain no `Keep` or `Maintain`.
+Trading Journal workbook generation:
+- Stats 1 freeze panes repair to B2 instead of B88.
+- P&L Calendar one-line layout clears stale fills for blank/no-trade months and keeps total-trades rows neutral.
+- Trade Log data row heights remain normalized during data-only updates and Excel-open polish, even for wrapped long notes.
+- Target-R recommendations now enforce a 1.50R floor and avoid displayed recommendations that round to the current median.
+- Checked-in journal/Trading Journal.xlsx was refreshed from its own Trade Log source rows and polished with the new repair rules.
 
 Tests and checks:
-- PowerShell parser validation passed for:
-  - `tools/windows_launchers/stream_local_master_worker.ps1`.
-  - `tools/windows_launchers/write_local_master_normal_exit_marker.ps1`.
-- Python compilation passed for `render/master_service.py`.
-- Targeted new launcher tests: 10 passed.
-- `tests/test_windows_launchers.py`: 45 passed.
-- `tests/test_master_service_local_exit.py`: 10 passed.
-- Relevant merged-monitor/autostart/OANDA subset: 11 passed.
-- Windows BAT smoke test passed as part of `tests/test_windows_launchers.py`.
-- Trading Journal preservation check passed.
-- `git diff --check` passed; Git printed CRLF normalization warnings only.
+- tests/test_dashboard_home_layout.py: 18 passed.
+- tests/test_master_service_trading_journal_stats.py: 58 passed.
+- tests/test_master_journal_workbook.py: 146 passed across chunks.
+- tests/test_master_service_calculator_api.py and tests/test_master_service_instrument_specs.py: 93 passed.
+- tests/test_open_orders_page.py and tests/test_spread_monitor_dashboard.py: 32 passed.
+- tests/test_calculator_js_syntax.py, tests/test_dashboard_js_syntax.py, and tests/test_calculator_js_behavior.py: 44 passed.
+- git diff --check passed with CRLF normalization warnings only.
 
 Runtime-state note:
-- Existing dirty runtime/local files remain excluded from the commit by `PATCH_DESKTOP_PUSH.bat`, including `bybit_monitor/custom_alerts.json`, `render/data/*`, `state_backup.json`, and `state_manifest.json`.
-
-Push status:
-- Implementation commit hash: `aa87f168f279020f3b3727e5291b75f91ce6c92f`.
-- First push verification: `PATCH_DESKTOP_PUSH.bat` confirmed local HEAD matched `origin/master` at `aa87f168f279020f3b3727e5291b75f91ce6c92f`.
-- Summary update push: completed by the required follow-up `PATCH_DESKTOP_PUSH.bat` run.
-- Final HEAD/origin verification: recorded in the final response after the summary update push.
+- Existing dirty runtime/local files remain intentionally local and are excluded by PATCH_DESKTOP_PUSH.bat, including bybit_monitor/custom_alerts.json, render/data/*, and state_manifest.json.
+- Test-generated changes to render/data/pending_webhooks.json, render/data/webhook_attempts.json, and state_backup.json were restored before summary and push.

@@ -123,7 +123,7 @@ def test_scripts_page_contains_calculator_row() -> None:
 def test_scripts_page_marks_merged_dashboard_views_non_standalone() -> None:
     response = asyncio.run(master_service.list_scripts())
     payload = json.loads(response.body.decode("utf-8"))
-    merged_names = {"calculator", "history", "open-orders", "monitor"}
+    merged_names = {"calculator", "history", "monitor"}
     merged_rows = [row for row in payload if row.get("name") in merged_names]
     assert len(merged_rows) == len(merged_names)
     for row in merged_rows:
@@ -216,9 +216,10 @@ def test_merged_calculator_page_returns_200() -> None:
     assert 'id="calc-rr"' in html
     assert "Type a symbol to load instrument specs." not in html
     assert "calc-grid" in html
-    assert "settings-grid" in html
-    assert "grid-template-columns:repeat(3,minmax(0,1fr))" in html
-    assert html.count('class="row full-row"') >= 4
+    assert "settings-grid" not in html
+    assert "calc-table" in html
+    assert "Quote Results" in html
+    assert html.count('<table class="calc-table">') >= 4
     assert '/static/calculator.js?v=' in html
     import re
     assert re.search(r"/static/calculator\.js\?v=[a-f0-9]{12}", html)
@@ -231,6 +232,7 @@ def test_merged_calculator_page_returns_200() -> None:
     assert html.find('id="account-toggle"') < html.find('id="asset-toggle"') < html.find('id="side-toggle"')
     assert html.find('id="order-toggle"') < html.find('id="calc-symbol"') < html.find('id="calc-sl-ticks"')
     assert html.find('id="timeframe-toggle"') < html.find('id="setup-toggle"') < html.find('id="pattern-toggle"')
+    assert html.find('id="calc-quote"') < html.find('id="calc-results"')
     assert "calc-right-rail" not in html
     assert 'id="calc-webhook-url"' in html
     assert 'id="calc-webhook-copy-url"' in html
@@ -888,6 +890,71 @@ def test_journal_summary_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
     assert len(body["trades"]) == 2
     assert body["trades"][0]["close_time"] == "2026-01-02T01:00:00Z"
     assert body["trades"][1]["close_time"] == "2026-01-01T01:00:00Z"
+
+
+@pytest.mark.parametrize("query", ["BTCUSDT", "BTC/USDT", "Bitcoin USDT"])
+def test_journal_summary_uses_master_workbook_rows_for_bitcoin_aliases(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    query: str,
+) -> None:
+    workbook = tmp_path / "Trading Journal.xlsx"
+    workbook.write_bytes(b"placeholder")
+    rows = [
+        {
+            "id": "btc-bybit",
+            "row_type": "trade",
+            "symbol": "BTCUSDT",
+            "asset_class": "crypto",
+            "account": "BYBIT",
+            "account_label": "BYBIT",
+            "side": "Buy",
+            "close_time": "2026-02-01T00:00:00Z",
+            "open_time": "2026-02-01T00:00:00Z",
+            "entry_price": 100,
+            "exit_price": 101,
+            "net_profit": 10,
+            "result_pct": 1,
+            "balance_after_trade": 110,
+            "currency": "USDT",
+            "is_test_trade": False,
+        },
+        {
+            "id": "btc-binance",
+            "row_type": "trade",
+            "symbol": "BTCUSDT",
+            "asset_class": "crypto",
+            "account": "BINANCE",
+            "account_label": "BINANCE",
+            "side": "Sell",
+            "close_time": "2026-02-02T00:00:00Z",
+            "open_time": "2026-02-02T00:00:00Z",
+            "entry_price": 102,
+            "exit_price": 101,
+            "net_profit": 8,
+            "result_pct": 0.8,
+            "balance_after_trade": 118,
+            "currency": "USDT",
+            "is_test_trade": False,
+        },
+        {"id": "btc-test", "row_type": "trade", "symbol": "BTCUSDT", "asset_class": "crypto", "account": "BYBIT", "is_test_trade": True},
+    ]
+    monkeypatch.setattr(master_service, "_master_journal_single_file_mode", lambda: True)
+    monkeypatch.setattr(master_service, "_master_journal_path", lambda: workbook)
+    monkeypatch.setattr(master_service, "_get_trading_journal_rows", lambda: [])
+    monkeypatch.setattr(master_service, "read_master_journal_source", lambda _path: {"items": rows, "balances": []})
+    monkeypatch.setattr(master_service, "_get_excel_account_balances", lambda: [])
+    monkeypatch.setattr(master_service, "resolve_bybit_credentials_for", lambda _account: ("live", "k", "s", "https://bybit.test", "KEY"))
+    monkeypatch.setattr(master_service, "_bybit_get_symbols_by_category_cached", lambda *_args, **_kwargs: asyncio.sleep(0, result=["BTCUSDT", "ETHUSDT"]))
+    monkeypatch.setattr(master_service, "_bybit_name_aliases_for_choices", lambda *_args, **_kwargs: asyncio.sleep(0, result={"BITCOIN": "BTC"}))
+
+    response = asyncio.run(master_service.calculator_journal_summary(asset="crypto", symbol=query))
+    body = json.loads(response.body.decode("utf-8"))
+
+    assert body["status"] == "ok"
+    assert body["canonical_symbol"] == "BTCUSDT"
+    assert len(body["trades"]) == 2
+    assert {trade["id"] for trade in body["trades"]} == {"btc-bybit", "btc-binance"}
 
 
 def test_rr_fee_buffer_pushes_target_distance_beyond_plain_rr(monkeypatch: pytest.MonkeyPatch) -> None:

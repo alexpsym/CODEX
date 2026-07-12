@@ -1,7 +1,7 @@
 from __future__ import annotations
 from collections import Counter, defaultdict, OrderedDict
 from datetime import datetime, date, timedelta
-from decimal import Decimal, InvalidOperation, localcontext
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP, localcontext
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from openpyxl import Workbook, load_workbook
@@ -43,6 +43,7 @@ TARGET_RECOMMENDATION_HEADER = "Target Recommendation"
 RECOMMENDATION_DISPLAY_HEADER = "Recommendation"
 TARGET_RECOMMENDATION_NO_WINS = "No eligible winning trades"
 TARGET_RECOMMENDATION_NO_LOSSES = "No eligible losing trades"
+TARGET_R_RECOMMENDATION_FLOOR = Decimal("1.50")
 # Backward-compatible alias for callers that still import the old name.
 TARGET_RECOMMENDATION_INSUFFICIENT = TARGET_RECOMMENDATION_NO_WINS
 MOVE_TO_FIELD_MAP = {
@@ -332,6 +333,9 @@ def _clear_generated_semantic_fill(cell) -> None:
     if getattr(font.color, "type", None) == "rgb" and str(font.color.rgb or "")[-6:].upper() in {PROFIT_FONT, LOSS_FONT}:
         font.color = "000000"
     cell.font = font
+    cell.fill = PatternFill()
+
+def _clear_cell_fill(cell) -> None:
     cell.fill = PatternFill()
 
 def _apply_sign_based_full_cell_fill(cell) -> None:
@@ -2629,6 +2633,56 @@ def _format_target_r_value(value: Any) -> str:
     return f"{num:.2f}".rstrip("0").rstrip(".")
 
 
+def _target_r_display_decimal(value: Any) -> Decimal | None:
+    decimal_value = _decimal_from_value(value)
+    if decimal_value is None:
+        return None
+    return decimal_value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+
+def _finalize_target_r_recommendation_decimal(
+    recommended_r_decimal: Decimal,
+    current_median_decimal: Decimal | None,
+    realized_decimal_values: List[Decimal],
+    direction: str,
+) -> Tuple[Decimal, str, str]:
+    recommended = max(recommended_r_decimal, TARGET_R_RECOMMENDATION_FLOOR)
+    recommended_display = _target_r_display_decimal(recommended)
+    current_display = _target_r_display_decimal(current_median_decimal) if current_median_decimal is not None else None
+    if recommended_display is None:
+        return recommended, direction, ""
+    if current_display is None:
+        return recommended, "Increase target", "missing_current_display"
+
+    if recommended_display > current_display:
+        return recommended, "Increase target", "display_actionable"
+    if recommended_display < current_display:
+        return recommended, "Decrease target", "display_actionable"
+
+    clean = sorted(value for value in realized_decimal_values if value is not None and value > 0)
+    preferred_direction = direction if direction in {"Increase target", "Decrease target"} else "Increase target"
+    if preferred_direction == "Increase target":
+        higher = [
+            value for value in clean
+            if (_target_r_display_decimal(value) or Decimal("0")) > current_display
+        ]
+        if higher:
+            return max(min(higher), TARGET_R_RECOMMENDATION_FLOOR), "Increase target", "nearest_data_supported_display_increase"
+        return max(current_display + Decimal("0.01"), TARGET_R_RECOMMENDATION_FLOOR), "Increase target", "final_0_01_display_increase"
+
+    lower = [
+        value for value in clean
+        if (_target_r_display_decimal(value) or Decimal("0")) < current_display
+        and (_target_r_display_decimal(value) or Decimal("0")) >= TARGET_R_RECOMMENDATION_FLOOR
+    ]
+    if lower:
+        return max(max(lower), TARGET_R_RECOMMENDATION_FLOOR), "Decrease target", "nearest_data_supported_display_decrease"
+    lower_adjustment = current_display - Decimal("0.01")
+    if lower_adjustment >= TARGET_R_RECOMMENDATION_FLOOR:
+        return lower_adjustment, "Decrease target", "final_0_01_display_decrease"
+    return current_display + Decimal("0.01"), "Increase target", "floor_prevents_display_decrease"
+
+
 def _target_r_empty_payload(reason: str = "not_enough_eligible_wins") -> Dict[str, Any]:
     return {
         TARGET_RECOMMENDATION_HEADER: TARGET_RECOMMENDATION_INSUFFICIENT,
@@ -3170,6 +3224,14 @@ def _target_r_recommendation(rows: List[Dict[str, Any]], *, scope: str = "standa
             increment,
         )
         recommended_r = float(recommended_r_decimal)
+    recommended_before_actionable_adjustment = _decimal_to_float(recommended_r_decimal)
+    recommended_r_decimal, direction, actionable_adjustment_reason = _finalize_target_r_recommendation_decimal(
+        recommended_r_decimal,
+        current_median_decimal,
+        realized_decimal_values,
+        direction,
+    )
+    recommended_r = float(recommended_r_decimal)
     recommendation = f"{direction} \u2014 Recommended: {_format_target_r_value(recommended_r)}R"
     if current_median is not None:
         recommendation += f" (current median: {_format_target_r_value(current_median)}R)"
@@ -3189,10 +3251,12 @@ def _target_r_recommendation(rows: List[Dict[str, Any]], *, scope: str = "standa
         "target_r_peak_instances": peak_instances,
         "target_r_recommended": recommended_r,
         "target_r_histogram_recommended_before_tie": raw_recommended_r,
+        "target_r_recommended_before_actionable_adjustment": recommended_before_actionable_adjustment,
         "target_r_recommendation_direction": direction,
         "target_r_exact_tie": exact_tie,
         "target_r_exact_tie_goal_preference": exact_tie_goal_preference,
         "target_r_tie_break_reason": tie_break_reason,
+        "target_r_actionable_adjustment_reason": actionable_adjustment_reason,
         "current_median_original_planned_target_r": current_median,
         "current_avg_original_planned_target_r": current_avg,
         "target_r_excluded_count": sum(excluded.values()),
@@ -5775,7 +5839,7 @@ def _apply_pnl_calendar_profit_loss_formatting(ws) -> None:
                 cell = ws.cell(row, col)
                 value = _pnl_calendar_text_pct_fraction(cell.value)
                 if value is None or value == 0:
-                    _clear_generated_semantic_fill(cell)
+                    _clear_cell_fill(cell)
                 elif value > 0:
                     _apply_full_cell_semantic_fill(cell, "profit")
                 else:
@@ -5785,7 +5849,7 @@ def _apply_pnl_calendar_profit_loss_formatting(ws) -> None:
     for row in range(1, ws.max_row + 1):
         if str(ws.cell(row, 2).value or "").strip().lower() == "total trades":
             for col in range(3, ws.max_column + 1):
-                _clear_generated_semantic_fill(ws.cell(row, col))
+                _clear_cell_fill(ws.cell(row, col))
 
 def _apply_instrument_averages_semantic_fills(ws) -> None:
     headers = {header.lower(): col for header, col in _instrument_averages_header_map(ws).items()}
@@ -6309,10 +6373,10 @@ def _repair_stats1_formatting(
     market_cols = _stats1_market_columns(ws)
     if not market_cols:
         return
-    if ws.freeze_panes != "B88":
+    if ws.freeze_panes != "B2":
         diagnostics["previous_stats1_freeze_panes"] = str(ws.freeze_panes or "")
-        ws.freeze_panes = "B88"
-        diagnostics["repaired_stats1_freeze_panes"] = "B88"
+        ws.freeze_panes = "B2"
+        diagnostics["repaired_stats1_freeze_panes"] = "B2"
     _write_streak_detail_rows(ws, "Best Win Streak", {}, diagnostics=diagnostics)
     _write_streak_detail_rows(ws, "Worst Losing Streak", {}, diagnostics=diagnostics)
     repaired = 0
@@ -10527,13 +10591,15 @@ def _write_pnl_calendar_one_line_layout(ws, snapshot: Dict[str, Any], diagnostic
                 vertical=base_alignment.vertical or "center",
                 wrap_text=False,
             )
-            _clear_generated_semantic_fill(cell)
+            if col > 1:
+                _clear_cell_fill(cell)
         ws.cell(row_idx, 1).value = year
         for month in range(1, 13):
             values = monthly.get((year, month))
             cell = ws.cell(row_idx, month + 1)
             if not values:
                 cell.value = None
+                _clear_cell_fill(cell)
                 continue
             pct = float(values["pct"])
             count = int(values["count"])
@@ -10627,9 +10693,13 @@ def _update_pnl_calendar_preserving_layout(dst_ws, snapshot: Dict[str, Any], dia
     for y, (p_row, t_row) in year_blocks.items():
         for m, c in month_cols.items():
             if not _is_merged_non_anchor(dst_ws, p_row, c):
-                dst_ws.cell(p_row, c).value = None
+                cell = dst_ws.cell(p_row, c)
+                cell.value = None
+                _clear_cell_fill(cell)
             if not _is_merged_non_anchor(dst_ws, t_row, c):
-                dst_ws.cell(t_row, c).value = None
+                cell = dst_ws.cell(t_row, c)
+                cell.value = None
+                _clear_cell_fill(cell)
     for (y, m), vals in monthly.items():
         block = year_blocks.get(y)
         if not block or m not in month_cols:
