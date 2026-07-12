@@ -170,39 +170,39 @@
       "changed": 0,
       "failed_months": [],
       "failures": [],
-      "finished_at": "2026-07-12T01:26:10.600809+00:00",
+      "finished_at": "2026-07-12T11:04:21.551920+00:00",
       "mandatory_row_id": "monthly_aud_reval:bybit_live:2026-03",
       "partial": false,
       "processed_months": [],
       "rows": 4,
-      "started_at": "2026-07-12T01:26:10.591649+00:00",
+      "started_at": "2026-07-12T11:04:21.534226+00:00",
       "succeeded_months": [],
       "target_months": []
     },
-    "last_synced_at": "2026-07-12T01:26:10.598264+00:00",
+    "last_synced_at": "2026-07-12T11:04:21.551886+00:00",
     "month_key": null,
     "ok": true,
     "stage": "complete",
     "traceback": null,
-    "updated_at": "2026-07-12T01:26:10.600773+00:00"
+    "updated_at": "2026-07-12T11:04:21.551908+00:00"
   },
   "oanda_fill_state": {
     "diagnostics": {
       "demo": {
         "last_error": null,
         "last_seen_transaction_id": "650",
-        "last_success_at": "2026-07-12T00:44:03.763374+00:00",
+        "last_success_at": "2026-07-12T01:44:43.641631+00:00",
         "startup_recovered_rows": 0,
         "startup_skipped_duplicates": 0,
-        "updated_at": "2026-07-12T00:44:03.763395+00:00"
+        "updated_at": "2026-07-12T01:44:43.641650+00:00"
       },
       "live": {
         "last_error": null,
         "last_seen_transaction_id": "471",
-        "last_success_at": "2026-07-12T00:44:04.855801+00:00",
+        "last_success_at": "2026-07-12T01:44:44.719145+00:00",
         "startup_recovered_rows": 0,
         "startup_skipped_duplicates": 0,
-        "updated_at": "2026-07-12T00:44:04.855821+00:00"
+        "updated_at": "2026-07-12T01:44:44.719185+00:00"
       }
     },
     "last_seen_transaction_id": {
@@ -213,10 +213,10 @@
       "demo": {},
       "live": {}
     },
-    "updated_at": "2026-07-12T00:44:04.855831+00:00"
+    "updated_at": "2026-07-12T01:44:44.719192+00:00"
   },
   "pending_webhooks": [],
-  "savedAt": "2026-07-12T01:44:33.314460+00:00",
+  "savedAt": "2026-07-12T11:04:23.541444+00:00",
   "source_host": "DESKTOP-1B14EQ6",
   "source_profile": "local",
   "trade_contexts": [
@@ -820,7 +820,7 @@
       {
         "account": "Bybit Demo",
         "account_mode": "demo",
-        "as_of": "2026-07-12T00:43:50.911601+00:00",
+        "as_of": "2026-07-12T01:44:32.983919+00:00",
         "balance": 320.26324878,
         "balance_source": "bybit_wallet_balance",
         "currency": "USDT",
@@ -830,8 +830,8 @@
       {
         "account": "Bybit Live",
         "account_mode": "live",
-        "as_of": "2026-07-12T00:43:52.797366+00:00",
-        "balance": 224.75424092,
+        "as_of": "2026-07-12T01:44:34.490169+00:00",
+        "balance": 224.74322191,
         "balance_source": "bybit_wallet_balance",
         "currency": "USDT",
         "label": "Bybit Live",
@@ -840,7 +840,7 @@
       {
         "account": "OANDA DEMO",
         "account_mode": "demo",
-        "as_of": "2026-07-12T00:43:53.774862+00:00",
+        "as_of": "2026-07-12T01:44:35.921863+00:00",
         "balance": 1500.5138,
         "balance_source": "oanda_account_summary",
         "currency": "AUD",
@@ -851,7 +851,7 @@
       {
         "account": "OANDA LIVE",
         "account_mode": "live",
-        "as_of": "2026-07-12T00:43:54.868685+00:00",
+        "as_of": "2026-07-12T01:44:36.807183+00:00",
         "balance": 1479.3098,
         "balance_source": "oanda_account_summary",
         "currency": "AUD",
@@ -861,8 +861,8 @@
       }
     ],
     "broker_balance_diagnostics": {
-      "bybit_demo_anchor_fingerprint": "19c9ae591d45c45512d9c435097db5159403aab788668339b0c0aff74a97d5db",
-      "updated_at": "2026-07-12T00:43:54.876730+00:00",
+      "bybit_demo_anchor_fingerprint": "441db5b5f2947581d478d1fc76f96371d516a4778a00b3491275bc816b8b707d",
+      "updated_at": "2026-07-12T01:44:36.814631+00:00",
       "warnings": []
     },
     "bybit_closed_pnl_last_seen": {
@@ -1295,5 +1295,5 @@
   "watchlist": [
     "DASHUSDT"
   ],
-  "watchlist_updated_at": null
+  "watchlist_updated_at": "2026-07-12T11:04:17.176280+00:00"
 }
