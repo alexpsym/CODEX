@@ -1,10 +1,11 @@
 Local Trading Tools launcher final narrow cleanup summary
 
 Status:
-- Implementation completed.
+- Implementation completed and pushed.
 - Trading Journal recommendation logic and workbook output were not changed or regenerated.
-- First push is pending at this checkpoint.
-- The summary will be updated with the verified implementation commit after the first `PATCH_DESKTOP_PUSH.bat` run.
+- First `PATCH_DESKTOP_PUSH.bat` run created implementation commit `aa87f168f279020f3b3727e5291b75f91ce6c92f`.
+- First push verified: local HEAD and `origin/master` both resolved to `aa87f168f279020f3b3727e5291b75f91ce6c92f`.
+- This file records the verified implementation commit; the final response records the final repository HEAD after this summary update is pushed.
 
 Marker-overwrite root cause:
 - `/api/local-shutdown` and `/api/local-exit` already wrote detailed atomic normal-exit markers before SIGTERM.
@@ -83,7 +84,7 @@ Runtime-state note:
 - Existing dirty runtime/local files remain excluded from the commit by `PATCH_DESKTOP_PUSH.bat`, including `bybit_monitor/custom_alerts.json`, `render/data/*`, `state_backup.json`, and `state_manifest.json`.
 
 Push status:
-- Implementation commit hash: pending first `PATCH_DESKTOP_PUSH.bat` run.
-- First push verification: pending.
-- Summary update push: pending.
-- Final HEAD/origin verification: pending.
+- Implementation commit hash: `aa87f168f279020f3b3727e5291b75f91ce6c92f`.
+- First push verification: `PATCH_DESKTOP_PUSH.bat` confirmed local HEAD matched `origin/master` at `aa87f168f279020f3b3727e5291b75f91ce6c92f`.
+- Summary update push: completed by the required follow-up `PATCH_DESKTOP_PUSH.bat` run.
+- Final HEAD/origin verification: recorded in the final response after the summary update push.
