@@ -238,6 +238,70 @@ def test_merged_calculator_page_returns_200() -> None:
     assert 'id="calc-webhook-copy-url"' in html
 
 
+def test_merged_calculator_page_has_unique_expected_element_ids() -> None:
+    response = asyncio.run(master_service.merged_calculator_page())
+    assert response.status_code == 200
+    html = response.body.decode("utf-8")
+    expected_ids = [
+        "account-toggle",
+        "asset-toggle",
+        "broker-toggle-wrap",
+        "broker-toggle",
+        "side-toggle",
+        "order-toggle",
+        "calc-symbol",
+        "calc-canonical-symbol",
+        "limit-wrap",
+        "calc-limit",
+        "calc-sl-ticks",
+        "rr-wrap",
+        "calc-rr",
+        "risk-toggle-wrap",
+        "risk-toggle",
+        "calc-risk-label",
+        "calc-risk",
+        "webhook-toggle",
+        "calc-webhook-status",
+        "test-toggle",
+        "timeframe-toggle",
+        "setup-toggle",
+        "pattern-toggle",
+        "ema-toggle",
+        "aths-atls-toggle",
+        "round-number-toggle",
+        "calc-quote",
+        "calc-submit",
+        "calc-pepperstone-set",
+        "calc-quote-status",
+        "calc-error",
+        "calc-error-debug",
+        "calc-success",
+        "calc-request-summary",
+        "calc-results",
+        "calc-webhook-panel",
+        "calc-webhook-url",
+        "calc-webhook-copy-url",
+        "calc-webhook-json",
+        "calc-webhook-copy",
+    ]
+    rendered_ids = re.findall(r'\bid="([^"]+)"', html)
+    for element_id in expected_ids:
+        assert rendered_ids.count(element_id) == 1, element_id
+    calculator_ids = [
+        element_id
+        for element_id in rendered_ids
+        if element_id.startswith("calc-") or element_id.endswith("-toggle") or element_id.endswith("-wrap")
+    ]
+    assert len(calculator_ids) == len(set(calculator_ids))
+
+
+def test_calculator_template_has_no_obsolete_duplicate_assignment() -> None:
+    source = (ROOT / "render" / "master_service.py").read_text(encoding="utf-8")
+    assert source.count('CALCULATOR_TEMPLATE = """<!doctype html>') == 1
+    calculator_block = source[source.index('CALCULATOR_TEMPLATE = """<!doctype html>'):source.index('@app.get("/merged/calculator")')]
+    assert "settings-grid" not in calculator_block
+
+
 def test_calculator_js_net_r_only_and_no_idle_specs_placeholder() -> None:
     script = (ROOT / "render" / "static" / "calculator.js").read_text(encoding="utf-8")
     assert "Requested net R" in script

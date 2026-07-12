@@ -220,14 +220,9 @@
 
   function isLikelyFxPair(value) {
     const text = String(value || '').trim().toUpperCase();
-    if (/^[A-Z]{3}_[A-Z]{3}$/.test(text)) {
-      const [base, quote] = text.split('_');
-      return FX_CODES.has(base) && FX_CODES.has(quote);
-    }
-    if (/^[A-Z]{6}$/.test(text)) {
-      return FX_CODES.has(text.slice(0, 3)) && FX_CODES.has(text.slice(3));
-    }
-    return false;
+    const normalized = text.replace(/[^A-Z]/g, '');
+    if (!/^[A-Z]{6}$/.test(normalized)) return false;
+    return FX_CODES.has(normalized.slice(0, 3)) && FX_CODES.has(normalized.slice(3));
   }
 
   function setAsset(asset) {

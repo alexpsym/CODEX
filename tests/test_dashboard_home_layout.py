@@ -2,6 +2,7 @@ import asyncio
 import importlib.util
 import json
 import shutil
+import subprocess
 import sys
 
 import re
@@ -128,7 +129,6 @@ def test_instrument_lookup_owns_specs_and_journal_markup() -> None:
     assert 'Download JPG' not in master_service_py[master_service_py.index('INSTRUMENT_SPECS_TEMPLATE'):master_service_py.index('CALCULATOR_TEMPLATE')]
     assert 'min-width: 1800px' not in master_service_py
     assert '"/instrument-lookup"' in master_service_py
-    assert '/api/instrument-specs?query=' not in calculator_js
     assert '/api/instrument-specs?query=' in lookup_js
     assert '/api/calculator/journal-summary?asset=' in lookup_js
     assert 'history.replaceState(null, \'\', `/instrument-lookup?q=' in lookup_js
@@ -141,6 +141,74 @@ def test_instrument_lookup_owns_specs_and_journal_markup() -> None:
     assert 'instrument-lookup-runtime-css' in lookup_js
     assert 'flattenMetrics' not in lookup_js
     assert 'JSON.stringify(item)' not in lookup_js
+
+
+def test_instrument_lookup_detects_separator_normalized_fx_and_metals() -> None:
+    node = shutil.which("node")
+    assert node, "node is required for instrument lookup JS behavior test"
+    harness = r'''
+const fs = require('fs');
+const source = fs.readFileSync(process.argv[1], 'utf8');
+const variants = JSON.parse(process.argv[2]);
+
+class Element {
+  constructor(id) {
+    this.id = id;
+    this.value = '';
+    this.textContent = '';
+    this.innerHTML = '';
+    this.tagName = 'DIV';
+    this.listeners = {};
+    this.classList = { toggle: () => {}, add: () => {}, remove: () => {} };
+    this.dataset = {};
+  }
+  addEventListener(event, callback) { this.listeners[event] = callback; }
+  closest() { return null; }
+  querySelectorAll() { return []; }
+}
+
+async function runVariant(query) {
+  const elements = Object.fromEntries(['q', 'load', 'rows', 'err', 'journal-status', 'journal-metrics', 'trade-head', 'trade-body'].map((id) => [id, new Element(id)]));
+  const urls = [];
+  global.window = { location: { search: `?q=${encodeURIComponent(query)}` } };
+  global.history = { replaceState: () => {} };
+  global.document = {
+    head: { appendChild: () => {} },
+    createElement: (tag) => new Element(tag),
+    getElementById: (id) => elements[id] || null,
+  };
+  global.fetch = async (url) => {
+    urls.push(String(url));
+    let body = {};
+    if (String(url).includes('/api/calculator/journal-summary')) body = { status: 'no_data', trades: [] };
+    return { ok: true, status: 200, statusText: 'OK', text: async () => JSON.stringify(body) };
+  };
+  eval(source);
+  await Promise.resolve();
+  await Promise.resolve();
+  await new Promise((resolve) => setImmediate(resolve));
+  return urls;
+}
+
+(async () => {
+  const result = {};
+  for (const variant of variants) result[variant] = await runVariant(variant);
+  console.log(JSON.stringify(result));
+})();
+'''
+    variants = ["XAG/USD", "XAG-USD", "XAG USD", "XAG_USD", "XAGUSD", "EUR/USD", "EUR-USD", "EUR USD", "EUR_USD", "EURUSD"]
+    completed = subprocess.run(
+        [node, "-e", harness, str(ROOT / "render" / "static" / "instrument_lookup.js"), json.dumps(variants)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    requested = json.loads(completed.stdout)
+    for variant in variants:
+        urls = requested[variant]
+        assert any("/api/instrument-specs?query=" in url and "&prefer=oanda" in url for url in urls), variant
+        assert any("/api/calculator/journal-summary?asset=fx" in url for url in urls), variant
+        assert not any("/api/resolve-symbol" in url for url in urls), variant
 
 
 def test_dashboard_home_removed_legacy_open_trading_journal_panel() -> None:
