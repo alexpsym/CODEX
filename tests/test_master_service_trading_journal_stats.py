@@ -346,7 +346,7 @@ def test_stop_recommendation_uses_original_stop_percentage_distance() -> None:
         _stop_recommendation_trade("win", result_pct=1.0, planned_stop_price=99.0),
         _stop_recommendation_trade("loss", result_pct=-1.0, planned_stop_price=99.0),
     ])
-    assert equal["stop_recommendation"] == "Decrease stop \u2014 Recommended: 0.99% (0.01 pp below loss average; exact_tie_goal_preference_decrease)"
+    assert equal["stop_recommendation"] == "Decrease stop \u2014 Recommended: 0.99% (0.01 pp below loss average; exact tie, so a small decrease is preferred)"
     assert equal["stop_loss_recommendation_direction"] == "decrease"
     assert equal["stop_loss_exact_tie"] is True
     assert equal["stop_loss_exact_tie_goal_preference"] is True

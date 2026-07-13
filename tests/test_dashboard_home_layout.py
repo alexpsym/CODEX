@@ -55,6 +55,12 @@ def test_dashboard_home_removes_instrument_specs_recent_trades_open_orders() -> 
     assert 'id="pine-scripts-panel"' in html
     assert 'id="pine-files"' in html
     assert 'id="pine-fallback"' in html
+    assert 'id="dashboard-instrument-lookup-panel"' in html
+    assert 'id="dashboard-instrument-lookup-form"' in html
+    assert 'id="dashboard-instrument-lookup-input"' in html
+    assert 'id="dashboard-history-panel"' in html
+    assert '{{HISTORY_EXPORT_TOOL}}' in html
+    assert '{{HISTORY_PAGE_JS_URL}}' in html
     assert 'Select a script from the toolbar above to load it here.' not in html
     assert 'Select a script from the left to load it here.' not in html
     assert '.local-exit-btn' in html
@@ -79,12 +85,16 @@ def test_dashboard_home_removes_instrument_specs_recent_trades_open_orders() -> 
     oanda_widget_idx = html.find('id="oanda-inactivity-widget"')
     workspace_idx = html.find('id="dashboard-workspace"')
     pine_idx = html.find('id="pine-scripts-panel"')
+    lookup_idx = html.find('id="dashboard-instrument-lookup-panel"')
+    history_idx = html.find('id="dashboard-history-panel"')
     assert scripts_grid_idx != -1 and exit_slot_idx != -1
     assert watchlist_widget_idx != -1 and oanda_widget_idx != -1 and workspace_idx != -1 and pine_idx != -1
+    assert lookup_idx != -1 and history_idx != -1
     assert scripts_grid_idx < watchlist_widget_idx
     assert scripts_grid_idx < workspace_idx
     assert watchlist_widget_idx < oanda_widget_idx
     assert workspace_idx < pine_idx
+    assert workspace_idx < pine_idx < lookup_idx < history_idx
 
     rail_start = html.find('<div class="dashboard-rail">')
     workspace_start = html.find('<section class="panel" id="dashboard-workspace">')
@@ -114,6 +124,35 @@ def test_dashboard_script_css_keeps_scripts_vertical_above_watchlist() -> None:
     assert '.script-toolbar-grid .script-btn[data-script-name="mt5"]' not in html
     assert '.script-toolbar-grid .script-btn[data-script-name="pine"]' not in html
     assert '.local-exit-btn{\n            margin-top: 0;' in html
+
+
+def test_dashboard_orders_workspace_uses_content_height_sync() -> None:
+    source = MASTER_SERVICE_PATH.read_text(encoding='utf-8')
+    html = _extract_html_template(source)
+    dashboard_js = (ROOT / "render" / "static" / "dashboard.js").read_text(encoding="utf-8")
+
+    assert 'min-height: 780px' not in html
+    assert 'height: calc(100vh - 7rem)' not in html
+    assert 'min-height: 680px' not in html
+    assert 'height: 70vh' not in html
+    assert 'installWorkspaceHeightSync' in dashboard_js
+    assert 'ResizeObserver' in dashboard_js
+    assert 'MutationObserver' in dashboard_js
+    assert "workspaceFrame?.addEventListener('load', installWorkspaceHeightSync);" in dashboard_js
+
+
+def test_dashboard_home_renders_inline_history_tool_from_shared_markup() -> None:
+    module = _load_master_service_module()
+    response = asyncio.run(module.home_page())
+    body = response.body.decode("utf-8")
+
+    assert 'id="dashboard-history-panel"' in body
+    assert 'id="history-broker"' in body
+    assert 'id="history-account"' in body
+    assert 'id="history-periods"' in body
+    assert 'id="history-export"' in body
+    assert body.count('id="history-export"') == 1
+    assert '/static/history_page.js?v=' in body
 
 
 def test_instrument_lookup_owns_specs_and_journal_markup() -> None:
@@ -343,6 +382,8 @@ def test_local_profile_buttons_use_trading_journal_page_not_merged_route() -> No
     by_name = {str(item.get("name")): item for item in buttons}
     assert by_name["trading-journal"]["open_url"] == "/dashboard/trading-journal"
     assert by_name["spreads-clone"]["label"] == "Spreads"
+    assert "instrument-lookup" not in by_name
+    assert "history" not in by_name
     assert "open-orders" not in by_name
     assert "pine" not in by_name
     source = MASTER_SERVICE_PATH.read_text(encoding='utf-8')
@@ -512,7 +553,7 @@ def test_open_master_journal_polish_inserts_stats1_recommendation_rows(tmp_path:
         assert [ws2.cell(stop_recommendation_row, col).value for col in range(2, 5)] == [
             "Decrease stop \u2014 Recommended: 1.00% (1.00 pp below loss average)",
             "Increase stop \u2014 Recommended: 2.00% (1.00 pp above loss average)",
-            "Decrease stop \u2014 Recommended: 2.99% (0.01 pp below loss average; exact_tie_goal_preference_decrease)",
+            "Decrease stop \u2014 Recommended: 2.99% (0.01 pp below loss average; exact tie, so a small decrease is preferred)",
         ]
         assert ws2.cell(max_target_row + 1, 1).value == "Source"
         assert ws2.cell(target_recommendation_row, 1).value == "Recommendation"
@@ -573,7 +614,8 @@ def test_open_master_journal_polish_uses_decimal_stop_recommendation_payload(
     assert recommendation == expected
     assert str(recommendation).startswith(prefix)
     if winner_pct == loser_pct:
-        assert "exact_tie_goal_preference_decrease" in str(recommendation)
+        assert "exact tie, so a small decrease is preferred" in str(recommendation)
+        assert "exact_tie_goal_preference_decrease" not in str(recommendation)
 
 
 

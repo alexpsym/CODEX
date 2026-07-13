@@ -311,8 +311,6 @@ def _profile_main_buttons() -> List[Dict[str, object]]:
         buttons.extend(
             [
                 {"id": "trading-journal", "name": "trading-journal", "label": "Journal", "open_url": "/dashboard/trading-journal", "dashboard_main_view": True},
-                {"id": "instrument-lookup", "name": "instrument-lookup", "label": "Instrument Lookup", "open_url": "/instrument-lookup", "dashboard_main_view": True},
-                {"id": "history", "name": "history", "label": "History", "open_url": "/merged/history", "dashboard_main_view": True},
                 {"id": "monitor", "name": "monitor", "label": "Scanner", "open_url": "/merged/monitor", "dashboard_main_view": True},
                 {"id": "ivindicator-clone", "name": "ivindicator-clone", "label": "IV Indicator", "open_url": "/apps/ivindicator-clone", "dashboard_main_view": True},
                 {"id": "spreads-clone", "name": "spreads-clone", "label": "Spreads", "open_url": "/apps/spreads-clone", "dashboard_main_view": True},
@@ -11287,10 +11285,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             padding: 1rem;
         }
         #dashboard-workspace{
-            min-height: 780px;
             display: flex;
             flex-direction: column;
             gap: 0.75rem;
+            min-height: 0;
         }
         #dashboard-workspace .panel-header{
             margin-bottom: 0.2rem;
@@ -11313,11 +11311,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         }
         #dashboard-workspace-frame{
             width: 100%;
-            height: calc(100vh - 7rem);
-            min-height: 680px;
+            height: 240px;
+            min-height: 180px;
             border: 1px solid #1f2937;
             border-radius: 12px;
             background: #0b1220;
+            display: block;
         }
         #pine-scripts-panel{
             display: flex;
@@ -11354,14 +11353,100 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             padding:10px;
             font-family:ui-monospace,SFMono-Regular,Consolas,monospace;
         }
+        .dashboard-inline-tool{
+            display:flex;
+            flex-direction:column;
+            gap:0.75rem;
+        }
+        .inline-tool-form{
+            display:grid;
+            grid-template-columns:minmax(220px,1fr) auto;
+            gap:0.65rem;
+            align-items:end;
+        }
+        .inline-tool-label{
+            display:flex;
+            flex-direction:column;
+            gap:0.35rem;
+            color:#cbd5e1;
+            font-weight:800;
+            min-width:0;
+        }
+        .inline-tool-input,
+        #dashboard-history-panel select{
+            width:100%;
+            border-radius:10px;
+            border:1px solid #334155;
+            background:#0b1220;
+            color:#e2e8f0;
+            padding:0.62rem 0.75rem;
+            font-size:0.95rem;
+            min-height:40px;
+        }
+        .inline-tool-form button,
+        #dashboard-history-panel button{
+            border:1px solid #334155;
+            border-radius:10px;
+            background:#1f2937;
+            color:#e2e8f0;
+            min-height:40px;
+        }
+        .inline-tool-form button:hover,
+        #dashboard-history-panel button:hover{
+            background:#334155;
+        }
+        .inline-tool-status{
+            color:#94a3b8;
+            font-size:0.9rem;
+            min-height:1.2em;
+        }
+        #dashboard-history-panel .history-export-tool{
+            display:flex;
+            flex-direction:column;
+            gap:0.75rem;
+        }
+        #dashboard-history-panel .history-tool-head h2{
+            margin:0;
+        }
+        #dashboard-history-panel .muted{
+            color:#94a3b8;
+            font-size:0.9rem;
+            margin:0.2rem 0 0;
+        }
+        #dashboard-history-panel .row{
+            display:flex;
+            flex-wrap:wrap;
+            gap:0.75rem;
+            align-items:end;
+        }
+        #dashboard-history-panel label{
+            display:flex;
+            flex-direction:column;
+            gap:0.35rem;
+            color:#cbd5e1;
+            font-weight:800;
+            min-width:170px;
+        }
+        #dashboard-history-panel .periods{
+            display:grid;
+            grid-template-columns:repeat(auto-fit,minmax(90px,1fr));
+            gap:0.5rem;
+        }
+        #dashboard-history-panel .period-btn.active{
+            background:#2563eb;
+            border-color:#3b82f6;
+        }
+        #dashboard-history-panel .status{
+            color:#93c5fd;
+            min-height:1.2em;
+        }
         @media (max-width: 980px){
             .layout{ grid-template-columns: 1fr; }
-            #dashboard-workspace{
-                min-height: 420px;
-            }
             #dashboard-workspace-frame{
-                height: 70vh;
-                min-height: 420px;
+                min-height: 180px;
+            }
+            .inline-tool-form{
+                grid-template-columns:1fr;
             }
         }
         .category-title{
@@ -11657,11 +11742,32 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     <div class="pine-files" id="pine-files"></div>
                     <textarea id="pine-fallback" hidden></textarea>
                 </section>
+
+                <section class="panel dashboard-inline-tool" id="dashboard-instrument-lookup-panel">
+                    <div class="panel-header">
+                        <div>
+                            <h2>Instrument Lookup</h2>
+                        </div>
+                    </div>
+                    <form class="inline-tool-form" id="dashboard-instrument-lookup-form" novalidate>
+                        <label class="inline-tool-label" for="dashboard-instrument-lookup-input">
+                            <span>Symbol</span>
+                            <input class="inline-tool-input" id="dashboard-instrument-lookup-input" type="text" placeholder="BTC, ETH, EURUSD" autocomplete="off" />
+                        </label>
+                        <button id="dashboard-instrument-lookup-submit" type="submit">Load</button>
+                    </form>
+                    <div class="inline-tool-status" id="dashboard-instrument-lookup-status" role="status" aria-live="polite"></div>
+                </section>
+
+                <section class="panel dashboard-inline-tool" id="dashboard-history-panel">
+{{HISTORY_EXPORT_TOOL}}
+                </section>
             </div>
         </div>
     </div>
 
     <script src=\"{{DASHBOARD_JS_URL}}\"></script>
+    <script src=\"{{HISTORY_PAGE_JS_URL}}\"></script>
 </body>
 </html>"""
 
@@ -19229,7 +19335,12 @@ async def home_page() -> Response:
     if APP_PROFILE == "journal":
         return RedirectResponse(url="/trading-journal", status_code=307)
     dashboard_js_version = _static_asset_version("render/static/dashboard.js")
-    page = HTML_TEMPLATE.replace("{{DASHBOARD_JS_URL}}", f"/static/dashboard.js?v={dashboard_js_version}")
+    history_page_js_version = _static_asset_version("render/static/history_page.js")
+    page = (
+        HTML_TEMPLATE.replace("{{DASHBOARD_JS_URL}}", f"/static/dashboard.js?v={dashboard_js_version}")
+        .replace("{{HISTORY_PAGE_JS_URL}}", f"/static/history_page.js?v={history_page_js_version}")
+        .replace("{{HISTORY_EXPORT_TOOL}}", HISTORY_EXPORT_TOOL)
+    )
     return HTMLResponse(page)
 
 
@@ -21920,6 +22031,45 @@ async def calculator_submit(payload: Dict[str, object] = Body(default={})) -> JS
         raise HTTPException(status_code=502, detail=f"Order submit failed: {exc}") from exc
 
 
+HISTORY_EXPORT_TOOL = """
+      <div class="history-export-tool">
+        <div class="history-tool-head">
+          <h2>History Export</h2>
+          <p class="muted">Unified quick-range history exporter for Bybit, OANDA, and CoinSpot.</p>
+        </div>
+
+        <div class="row">
+          <label>Broker
+            <select id="history-broker">
+              <option value="bybit">Bybit</option>
+              <option value="oanda">OANDA</option>
+              <option value="coinspot">CoinSpot</option>
+            </select>
+          </label>
+          <label id="history-account-wrap">Account
+            <select id="history-account">
+              <option value="demo">Demo</option>
+              <option value="live">Live</option>
+            </select>
+          </label>
+          <button id="history-export" type="button">Export Selected Period</button>
+        </div>
+
+        <div class="periods" id="history-periods">
+          <button class="period-btn" type="button" data-kind="days" data-value="7">7D</button>
+          <button class="period-btn active" type="button" data-kind="days" data-value="30">30D</button>
+          <button class="period-btn" type="button" data-kind="days" data-value="60">60D</button>
+          <button class="period-btn" type="button" data-kind="days" data-value="90">90D</button>
+          <button class="period-btn" type="button" data-kind="days" data-value="180">180D</button>
+          <button class="period-btn" type="button" data-kind="days" data-value="365">365D</button>
+          <button class="period-btn" type="button" data-kind="period" data-value="3y">3Y</button>
+          <button class="period-btn" type="button" data-kind="complete" data-value="1">Complete</button>
+        </div>
+
+        <div class="status" id="history-status">Select broker/account/period and press Export.</div>
+        <div class="muted" id="history-result"></div>
+      </div>"""
+
 HISTORY_PAGE_TEMPLATE = """<!doctype html>
 <html lang="en">
 <head>
@@ -21930,6 +22080,9 @@ HISTORY_PAGE_TEMPLATE = """<!doctype html>
     body { margin:0; background:#0b1220; color:#e2e8f0; font-family:Inter,system-ui,sans-serif; }
     .wrap { max-width: 1200px; margin: 0 auto; padding: 18px; }
     .panel { background:#111827; border:1px solid #1f2937; border-radius:14px; padding:16px; box-shadow:0 10px 30px rgba(0,0,0,0.25); }
+    .history-tool-head { margin-bottom:12px; }
+    .history-tool-head h2 { margin:0; }
+    .history-export-tool { display:flex; flex-direction:column; gap:12px; }
     .row { display:flex; flex-wrap:wrap; gap:12px; align-items:center; margin-bottom:12px; }
     label { display:flex; flex-direction:column; gap:6px; font-weight:700; color:#cbd5e1; }
     select, button { background:#0f172a; color:#e2e8f0; border:1px solid #334155; border-radius:10px; padding:8px 10px; }
@@ -21943,39 +22096,7 @@ HISTORY_PAGE_TEMPLATE = """<!doctype html>
 <body>
   <div class="wrap">
     <div class="panel">
-      <h2 style="margin-top:0">History Export</h2>
-      <p class="muted">Unified quick-range history exporter for Bybit, OANDA, and CoinSpot.</p>
-
-      <div class="row">
-        <label>Broker
-          <select id="history-broker">
-            <option value="bybit">Bybit</option>
-            <option value="oanda">OANDA</option>
-            <option value="coinspot">CoinSpot</option>
-          </select>
-        </label>
-        <label id="history-account-wrap">Account
-          <select id="history-account">
-            <option value="demo">Demo</option>
-            <option value="live">Live</option>
-          </select>
-        </label>
-        <button id="history-export" type="button">Export Selected Period</button>
-      </div>
-
-      <div class="periods" id="history-periods">
-        <button class="period-btn" type="button" data-kind="days" data-value="7">7D</button>
-        <button class="period-btn active" type="button" data-kind="days" data-value="30">30D</button>
-        <button class="period-btn" type="button" data-kind="days" data-value="60">60D</button>
-        <button class="period-btn" type="button" data-kind="days" data-value="90">90D</button>
-        <button class="period-btn" type="button" data-kind="days" data-value="180">180D</button>
-        <button class="period-btn" type="button" data-kind="days" data-value="365">365D</button>
-        <button class="period-btn" type="button" data-kind="period" data-value="3y">3Y</button>
-        <button class="period-btn" type="button" data-kind="complete" data-value="1">Complete</button>
-      </div>
-
-      <div class="status" id="history-status">Select broker/account/period and press Export.</div>
-      <div class="muted" id="history-result"></div>
+{{HISTORY_EXPORT_TOOL}}
     </div>
   </div>
   <script src="/static/history_page.js"></script>
@@ -22121,9 +22242,12 @@ OPEN_ORDERS_TEMPLATE = """<!doctype html>
 @app.get("/merged/history", response_class=HTMLResponse)
 async def merged_history_page() -> Response:
     history_page_js_version = _static_asset_version("render/static/history_page.js")
-    page = HISTORY_PAGE_TEMPLATE.replace(
-        '<script src="/static/history_page.js"></script>',
-        f'<script src="/static/history_page.js?v={history_page_js_version}"></script>',
+    page = (
+        HISTORY_PAGE_TEMPLATE.replace("{{HISTORY_EXPORT_TOOL}}", HISTORY_EXPORT_TOOL)
+        .replace(
+            '<script src="/static/history_page.js"></script>',
+            f'<script src="/static/history_page.js?v={history_page_js_version}"></script>',
+        )
     )
     response = HTMLResponse(page)
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"

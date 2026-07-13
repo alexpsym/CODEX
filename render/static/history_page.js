@@ -7,6 +7,8 @@
   const statusEl = document.getElementById('history-status');
   const resultEl = document.getElementById('history-result');
 
+  if (!brokerSel || !accountSel || !periodWrap || !exportBtn || !statusEl || !resultEl) return;
+
   const PERIOD_DEFAULT = { kind: 'days', value: '30' };
   const PERIOD_COMPLETE = { kind: 'complete', value: '1' };
   let selectedPeriod = { ...PERIOD_DEFAULT };

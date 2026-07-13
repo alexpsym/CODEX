@@ -153,8 +153,6 @@ def test_scripts_endpoint_places_spread_monitor_after_iv_indicator_in_local_prof
     expected = [
         "calculator",
         "trading-journal",
-        "instrument-lookup",
-        "history",
         "monitor",
         "ivindicator-clone",
         "spreads-clone",
@@ -166,6 +164,8 @@ def test_scripts_endpoint_places_spread_monitor_after_iv_indicator_in_local_prof
     assert by_name["spreads-clone"]["label"] == "Spreads"
     assert by_name["spreads-clone"]["open_url"] == "/apps/spreads-clone"
     assert by_name["spreads-clone"]["dashboard_main_view"] is True
+    assert "instrument-lookup" not in by_name
+    assert "history" not in by_name
     assert "mt5" not in by_name
     assert "open-orders" not in by_name
     assert "pine" not in by_name

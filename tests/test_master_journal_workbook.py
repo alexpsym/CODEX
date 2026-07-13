@@ -11,6 +11,7 @@ import pytest
 from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, read_master_journal_source, update_master_journal_workbook_data_only, SHEET_ORDER, STATS1_SHEET, STATS2_SHEET, SYMBOLS_SHEET, TARGET_R_METADATA_SHEET, TRADE_LOG_HEADERS, TRADE_LOG_HEADERS_V1, OLD_TRADE_LOG_HEADERS, PRE_MOVE_TRADE_LOG_HEADERS, MOVE_TO_FIELD_MAP, TRADE_LOG_HEADER_ROWS, TRADE_LOG_DATA_START_ROW, TRADE_LOG_DATA_ROW_HEIGHT, TRADE_LOG_FILTER_HEADER_ROW, TRADE_NUMBER_HEADER, STOP_RECOMMENDATION_HEADER, TARGET_RECOMMENDATION_HEADER, TARGET_RECOMMENDATION_INSUFFICIENT, REPORT_YEARLY_SHEET, REPORT_METRIC_LABELS, INSTRUMENT_AVERAGES_HEADERS, INSTRUMENT_AVERAGES_GROUP_HEADER_ROW, INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, INSTRUMENT_AVERAGES_DATA_START_ROW, DASHBOARD_MOVE_TO_BREAK_EVEN_LABEL, DASHBOARD_MOVE_TO_PROFIT_LABEL, PROFIT_FILL, LOSS_FILL, DURATION_NUMBER_FORMAT, adaptive_percent_number_format, adaptive_number_format, resolve_trade_folder_link, expected_report_sheet_names, _apply_trade_number_hyperlinks, _ensure_trade_log_schema, _ensure_instrument_averages_schema, _ensure_pnl_calendar_freeze_panes, _repair_trade_log_move_to_durations, _trade_log_header_map, _instrument_averages_header_map, _result_percentage_totals_by_market
 from tools.master_journal_workbook import _format_duration_display, _parse_duration_text, _repair_legacy_duration_number_formats, _populate_symbols_metrics_preserving_layout, _repair_symbols_header_merges_preserving_layout
 from tools.master_journal_workbook import RECOMMENDATION_TRADE_LOG_HEADERS, _trade_log_three_row_header_values_for
+from tools.master_journal_workbook import _period_drawdown_metrics, _sanitize_recommendation_text
 from openpyxl.utils.cell import coordinate_to_tuple, get_column_letter, range_boundaries
 
 def _cf_ranges(ws):
@@ -142,6 +143,19 @@ def test_single_builder_definition():
     assert src.count('def build_master_journal_workbook') == 1
 
 
+def test_recommendation_sanitizer_hides_internal_reason_keys():
+    raw = (
+        "Decrease stop \u2014 Recommended: 0.99% "
+        "(0.01 pp below loss average; exact_tie_goal_preference_decrease; "
+        "unexpected_debug_reason_code)"
+    )
+    cleaned = _sanitize_recommendation_text(STOP_RECOMMENDATION_HEADER, raw)
+    assert "exact tie, so a small decrease is preferred" in cleaned
+    assert "unexpected debug reason code" in cleaned
+    assert "exact_tie_goal_preference_decrease" not in cleaned
+    assert "unexpected_debug_reason_code" not in cleaned
+
+
 def test_stats_and_symbols_fall_back_to_trade_rows_when_stats_are_empty(tmp_path: Path):
     snapshot = sample_snapshot()
     snapshot["stats"] = {
@@ -179,6 +193,18 @@ def test_stats_and_symbols_fall_back_to_trade_rows_when_stats_are_empty(tmp_path
     assert symbols.cell(symbol_rows["EURUSD"], headers["Trades"]).value == 1
     assert symbols.cell(symbol_rows["EURUSD"], headers["Longs"]).value == 1
     assert symbols.cell(symbol_rows["BTCUSDT"], headers["Shorts"]).value == 1
+    assert headers["Avg stop %"] == headers["Win Rate %"] + 1
+    assert headers["Avg stop % (W)"] == headers["Avg stop %"] + 1
+    assert headers[STOP_RECOMMENDATION_HEADER] == headers["Avg stop % (L)"] + 1
+    assert headers["Avg target %"] == headers[STOP_RECOMMENDATION_HEADER] + 1
+    assert headers["Avg target % (W)"] == headers["Avg target %"] + 1
+    assert headers[TARGET_RECOMMENDATION_HEADER] == headers["Avg target % (L)"] + 1
+    eurusd = symbol_rows["EURUSD"]
+    btcusdt = symbol_rows["BTCUSDT"]
+    assert symbols.cell(eurusd, headers["Avg stop %"]).value == pytest.approx(abs(1.1 - 1.09) / 1.1)
+    assert symbols.cell(eurusd, headers["Avg target %"]).value == pytest.approx(abs(1.12 - 1.1) / 1.1)
+    assert symbols.cell(btcusdt, headers["Avg stop %"]).value == pytest.approx(abs(61000 - 60000) / 60000)
+    assert symbols.cell(btcusdt, headers["Avg target %"]).value == pytest.approx(abs(59000 - 60000) / 60000)
     wb.close()
 
 
@@ -1389,10 +1415,41 @@ def test_dashboard_layout_style_columns(tmp_path: Path):
         "Min Move to Break Even", "Source", "Average Move to Break Even", "Max Move to Break Even", "Source",
         "Min Move to Profit", "Source", "Average Move to Profit", "Max Move to Profit", "Source",
     ]
-    labels = {str(dash.cell(row, 1).value or "").strip(): row for row in range(1, dash.max_row + 1)}
-    duration_start = labels["Min duration"]
+    labels = defaultdict(list)
+    for row in range(1, dash.max_row + 1):
+        label = str(dash.cell(row, 1).value or "").strip()
+        if label:
+            labels[label].append(row)
+    duration_start = next(row for row in labels["Min duration"] if row < labels["Winners"][0])
     duration_rows = range(duration_start, duration_start + len(expected_duration_labels))
     assert [dash.cell(row, 1).value for row in duration_rows] == expected_duration_labels
+    for source_row in (duration_start + 4, duration_start + 7, duration_start + 9, duration_start + 12):
+        label_cell = dash.cell(source_row, 1)
+        assert label_cell.value == "Source"
+        assert label_cell.font.bold is False
+        assert label_cell.font.italic is True
+        assert label_cell.alignment.horizontal == "right"
+
+    for section, expected_seconds in (("Winners", 3700), ("Losers", 7215)):
+        section_row = labels[section][0]
+        next_section_row = labels["Losers"][0] if section == "Winners" else labels["Side"][0]
+        section_labels = {
+            str(dash.cell(row, 1).value or "").strip(): row
+            for row in range(section_row + 1, next_section_row)
+            if str(dash.cell(row, 1).value or "").strip()
+        }
+        assert [dash.cell(section_labels[label], 1).value for label in ("Min duration", "Avg duration", "Max duration")] == [
+            "Min duration", "Avg duration", "Max duration",
+        ]
+        for label in ("Min duration", "Avg duration", "Max duration"):
+            row = section_labels[label]
+            assert _parse_duration_text(dash.cell(row, 2).value) == expected_seconds
+            assert dash.cell(row, 1).font.bold is False
+            assert dash.cell(row, 1).font.italic is True
+            assert dash.cell(row, 1).alignment.horizontal == "right"
+        section_cell = dash.cell(section_row, 1)
+        assert section_cell.font.bold is True
+        assert section_cell.alignment.horizontal == "left"
 
 def test_read_master_journal_source_parses_core_fields(tmp_path: Path):
     out = tmp_path / "Trading Journal.xlsx"
@@ -3311,6 +3368,21 @@ def test_generated_stats1_metric_source_merges_are_cleaned_without_touching_manu
 
 def test_drawdown_detail_rows_are_split_for_stats1_and_reports(tmp_path: Path):
     snap = sample_snapshot()
+    snap["items"].append({
+        "id": "drawdown-detail-balance-point",
+        "row_type": "trade",
+        "account": "OANDA DEMO",
+        "asset_class": "fx",
+        "symbol": "EURUSD",
+        "side": "SELL",
+        "open_time": "2026-05-02T01:00:00Z",
+        "close_time": "2026-05-02T02:00:00Z",
+        "net_profit": -20.0,
+        "result_pct": -0.2,
+        "r_multiple": -0.2,
+        "analysis_balance_after_trade": 980.0,
+        "trade_duration_seconds": 3600,
+    })
     detail = {"start_time": "2026-05-01T01:00:00Z", "end_time": "2026-05-02T02:00:00Z"}
     by_market = snap["stats"]["groups"]["by_market"]
     for market in ("overall", "fx", "crypto"):
@@ -3416,6 +3488,13 @@ def test_report_period_rows_populate_core_counts_duration_and_drawdown(tmp_path:
     snap = sample_snapshot()
     snap["period_reports"] = {}
     snap["items"].append({
+        "id": "drawdown-row", "row_type": "trade", "account": "OANDA DEMO", "symbol": "EURUSD",
+        "asset_class": "fx", "side": "SELL", "open_time": "2026-05-03T00:00:00Z",
+        "close_time": "2026-05-03T00:02:00Z", "result_pct": -0.2,
+        "net_profit": -20.0, "trade_duration_seconds": 7215,
+        "analysis_balance_after_trade": 980.0,
+    })
+    snap["items"].append({
         "id": "test-row", "row_type": "trade", "account": "OANDA DEMO", "symbol": "AUDUSD",
         "asset_class": "fx", "side": "BUY", "open_time": "2026-05-04T00:00:00Z",
         "close_time": "2026-05-04T00:01:00Z", "result_pct": 99.0,
@@ -3429,13 +3508,19 @@ def test_report_period_rows_populate_core_counts_duration_and_drawdown(tmp_path:
             ws = wb[sheet_name]
             rows = {str(ws.cell(row, 1).value or ""): row for row in range(1, ws.max_row + 1)}
             col = next(c for c in range(2, ws.max_column + 1) if ws.cell(1, c).value == header)
-            assert ws.cell(rows["Trades"], col).value == 2
+            assert ws.cell(rows["Trades"], col).value == 3
             assert ws.cell(rows["Wins"], col).value == 1
-            assert ws.cell(rows["Losses"], col).value == 1
+            assert ws.cell(rows["Losses"], col).value == 2
             assert ws.cell(rows["Break-even"], col).value == 0
-            assert ws.cell(rows["Test"], col).value == 0
-            assert ws.cell(rows["Win rate"], col).value == pytest.approx(0.5)
+            assert ws.cell(rows["Test"], col).value == 1
+            assert ws.cell(rows["Win rate"], col).value == pytest.approx(1 / 3)
             assert _parse_duration_text(ws.cell(rows["Shortest (DD:HH:MM:SS)"], col).value) is not None
+            assert _parse_duration_text(ws.cell(rows["Winners min duration"], col).value) == 3700
+            assert _parse_duration_text(ws.cell(rows["Winners avg duration"], col).value) == 3700
+            assert _parse_duration_text(ws.cell(rows["Winners max duration"], col).value) == 3700
+            assert _parse_duration_text(ws.cell(rows["Losers min duration"], col).value) == 7215
+            assert _parse_duration_text(ws.cell(rows["Losers avg duration"], col).value) == 7215
+            assert _parse_duration_text(ws.cell(rows["Losers max duration"], col).value) == 7215
             assert ws.cell(rows["Max drawdown"], col).value not in (None, "")
             assert ws.cell(rows["Max drawdown"] + 1, 1).value == "Start"
             assert ws.cell(rows["Max drawdown"] + 1, col).value not in (None, "")
@@ -3799,6 +3884,21 @@ def test_generated_workbook_repairs_stats1_stats2_and_calendar_structure(tmp_pat
     snapshot = sample_snapshot()
     snapshot["items"][0]["pattern"] = "Channel"
     snapshot["items"][1]["pattern"] = "Range"
+    snapshot["items"].append({
+        "id": "structure-drawdown-balance-point",
+        "row_type": "trade",
+        "account": "OANDA DEMO",
+        "asset_class": "fx",
+        "symbol": "EURUSD",
+        "side": "SELL",
+        "open_time": "2026-05-02T01:00:00Z",
+        "close_time": "2026-05-02T02:00:00Z",
+        "net_profit": -20.0,
+        "result_pct": -0.2,
+        "r_multiple": -0.2,
+        "analysis_balance_after_trade": 980.0,
+        "trade_duration_seconds": 3600,
+    })
     out = tmp_path / "structure-regressions.xlsx"
     build_master_journal_workbook(snapshot, out)
     wb = load_workbook(out)
@@ -4305,6 +4405,49 @@ def test_result_percentage_totals_segment_demo_balance_resets():
     assert len(account_diag["segments"]) == 2
 
 
+def test_period_drawdown_uses_balance_segments_after_cashflow_resets():
+    rows = [
+        {
+            "id": "seed", "row_type": "cashflow", "account": "OANDA DEMO",
+            "close_time": "2026-01-01", "cashflow_new_balance": 100.0,
+        },
+        {
+            "id": "peak-1", "row_type": "trade", "account": "OANDA DEMO",
+            "close_time": "2026-01-02", "analysis_balance_after_trade": 100.0,
+            "result_pct": 99.0,
+        },
+        {
+            "id": "trough-1", "row_type": "trade", "account": "OANDA DEMO",
+            "close_time": "2026-01-03", "analysis_balance_after_trade": 80.0,
+            "result_pct": -99.0,
+        },
+        {
+            "id": "reset", "row_type": "cashflow", "account": "OANDA DEMO",
+            "close_time": "2026-01-04", "cashflow_new_balance": 50.0,
+        },
+        {
+            "id": "peak-2", "row_type": "trade", "account": "OANDA DEMO",
+            "close_time": "2026-01-05", "analysis_balance_after_trade": 50.0,
+            "result_pct": 99.0,
+        },
+        {
+            "id": "trough-2", "row_type": "trade", "account": "OANDA DEMO",
+            "close_time": "2026-01-06", "analysis_balance_after_trade": 49.0,
+            "result_pct": -99.0,
+        },
+    ]
+    trades = [row for row in rows if row["row_type"] == "trade"]
+    metrics = _period_drawdown_metrics(trades, rows)
+    assert metrics["drawdown_segments_count"] == 2
+    assert metrics["max_drawdown_pct"] == pytest.approx(20.0)
+    assert metrics["avg_drawdown_pct"] == pytest.approx(11.0)
+    assert metrics["min_drawdown_pct"] == pytest.approx(2.0)
+    assert metrics["max_drawdown_detail"]["start_time"] == "2026-01-02"
+    assert metrics["max_drawdown_detail"]["end_time"] == "2026-01-03"
+    assert metrics["min_drawdown_detail"]["start_time"] == "2026-01-05"
+    assert metrics["min_drawdown_detail"]["end_time"] == "2026-01-06"
+
+
 def test_stats_symbols_and_reports_required_repairs(tmp_path: Path):
     snapshot = sample_snapshot()
     snapshot["balances"].append({
@@ -4353,9 +4496,20 @@ def test_stats_symbols_and_reports_required_repairs(tmp_path: Path):
         cell = stats1.cell(labels[label], 2)
         assert cell.alignment.horizontal == "left"
         assert cell.font.bold is False
+    winners_section = label_rows["Winners"][0]
+    losers_section_for_style = next(row for row in label_rows["Losers"] if row < labels["Side"])
+
+    def is_outcome_child_label(row: int) -> bool:
+        return winners_section < row < losers_section_for_style or losers_section_for_style < row < labels["Side"]
+
     for row in range(1, stats1.max_row + 1):
         label_cell = stats1.cell(row, 1)
         if label_cell.value in (None, ""):
+            continue
+        if str(label_cell.value).strip() == "Source" or is_outcome_child_label(row):
+            assert label_cell.font.bold is False
+            assert label_cell.font.italic is True
+            assert label_cell.alignment.horizontal == "right"
             continue
         assert label_cell.font.bold is True
         assert _cell_font_rgb(label_cell) == "000000"

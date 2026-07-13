@@ -1,38 +1,64 @@
-Instrument Lookup BTCUSDT runtime JSON-safe fix summary
+Dashboard inline tools and Trading Journal migration summary
 
 Status:
-- Implemented the calculator journal-summary response-boundary serialization fix.
-- Implemented independent Instrument Lookup panel loading for specs and journal stats.
-- Verified BTCUSDT against the real journal/Trading Journal.xlsx source path.
+- Implemented the dashboard layout, inline Instrument Lookup, inline History Export, and Trading Journal generator/updater changes.
+- Used the existing repository workbook at journal/Trading Journal.xlsx as the authorized baseline per user follow-up.
+- Migrated journal/Trading Journal.xlsx with the updated workbook updater and verified source row identity was preserved.
 
-Backend fix:
-- render/master_service.py::calculator_journal_summary now builds the complete successful response payload first, then passes that payload through _json_safe() before constructing JSONResponse.
-- Workbook rows, metrics, and period reports are left unchanged for calculations.
-- Serialization is applied only at the response boundary, so Python datetime fields such as move_to_break_even_time become ISO-8601 strings without mutating the source rows.
+Files changed:
+- render/master_service.py
+- render/static/dashboard.js
+- render/static/history_page.js
+- tools/master_journal_workbook.py
+- journal/Trading Journal.xlsx
+- tests/test_dashboard_home_layout.py
+- tests/test_dashboard_js_syntax.py
+- tests/test_master_journal_workbook.py
+- tests/test_master_service_profiles.py
+- tests/test_master_service_trading_journal_stats.py
+- tests/test_spread_monitor_dashboard.py
+- summary/CODEX_SUMMARY_latest.txt
 
-Instrument Lookup fix:
-- render/static/instrument_lookup.js::load now uses independent Promise.allSettled handling for instrument specs and journal stats.
-- A successful specs response remains displayed when journal stats fail.
-- A successful journal stats response remains displayed when specs fail.
-- The error line identifies whether Instrument specs, Journal stats, or both failed.
-- Failed panels render an empty/error state instead of staying stuck in loading.
+Dashboard behavior changed:
+- Removed Instrument Lookup and History from the local left-side dashboard tool list while preserving their standalone routes.
+- Removed the fixed/minimum orders workspace height that created the large blank gap.
+- Added same-origin iframe height synchronization using guarded ResizeObserver/MutationObserver logic plus safe fallbacks.
+- Rendered Instrument Lookup inline beneath Pine Scripts. Blank submission stays inline with validation; nonblank submission synchronously opens /instrument-lookup?q=... in a new tab.
+- Rendered the existing History Export controls inline beneath Instrument Lookup and loaded history_page.js on the dashboard with standalone-route guards.
 
-Regression coverage:
-- Added a calculator API regression using the authoritative workbook source path with a real Python datetime in a BTCUSDT trade.
-- The regression asserts HTTP 200, status ok, BTCUSDT trades returned, datetime serialized via isoformat(), and json.loads(response.body) succeeds.
-- Added an Instrument Lookup JavaScript regression that verifies one panel can render successfully while the sibling request fails.
+Workbook schema, values, and formatting changed:
+- Replaced visible exact_tie_goal_preference_decrease recommendation text with human-readable wording and added a generic snake_case sanitizer for workbook-facing recommendation strings.
+- Added/filled the overall STATS1 Target block below the Stop block: Avg target %, Min target %, Source, Max target %, Source, Recommendation.
+- Added Winner/Loser Min duration, Avg duration, and Max duration rows to STATS1 and report schemas.
+- Added SYMBOLS overall Avg stop % and Avg target % columns while preserving W/L averages and recommendation columns.
+- Fixed SYMBOLS header-band migration by unmerging/rebuilding the header rows before schema insertions.
+- Added STATS1 subordinate label styling that copies manual example styles when present and falls back to right-aligned italic non-bold labels for Source and Winner/Loser child rows.
+- Migrated journal/Trading Journal.xlsx. Final workbook audit: STATS1 147x9, SYMBOLS 122x46, Trade Log 1547x49, YEARLY REPORT/2026 127 rows; no visible exact_tie_goal_preference_decrease cells remained.
 
-Verification:
-- python -m pytest tests/test_master_service_calculator_api.py --maxfail=1 -q --basetemp .pytest_tmp_calc_jsonsafe -p no:cacheprovider: 93 passed.
-- python -m pytest tests/test_dashboard_home_layout.py --maxfail=1 -q --basetemp .pytest_tmp_lookup_independent -p no:cacheprovider: 20 passed.
-- python -m pytest tests/test_calculator_js_syntax.py tests/test_calculator_js_behavior.py tests/test_dashboard_js_syntax.py --maxfail=1 -q --basetemp .pytest_tmp_js_jsonsafe -p no:cacheprovider: 44 passed.
-- python -m py_compile render/master_service.py: passed.
-- node --check render/static/instrument_lookup.js: passed.
-- node --check render/static/calculator.js: passed.
+Drawdown audit conclusion:
+- The old report/workbook fallback based on cumulative per-trade percentages was wrong for account drawdown because it could treat deposits, withdrawals, or revaluations as trading drawdowns.
+- The corrected definition uses per-account balance/equity points, preferring analysis_balance_after_trade and falling back to balance_after_trade, segmented by account and cashflow/monthly AUD revaluation anchors.
+- A drawdown observation is prior peak balance to later trough balance within the same account/anchor segment. Start is the peak timestamp; End is the later trough timestamp.
+- Independent recalculation from the authorized repo workbook matched the audit clue:
+  Overall min 0.008612%, avg 10.132670%, max 45.231131%.
+  Forex min 0.013839%, avg 5.042601%, max 23.403578%.
+  Crypto min 0.008612%, avg 22.618807%, max 45.231131%.
+- Final workbook checks confirmed populated drawdown values use distinct peak/trough timestamps where the data supports it.
+
+Workbook verification performed:
+- Opened the workbook in openpyxl formula and data_only modes before and after migration.
+- Baseline source identity: 1,544 rows total; 1,444 trades, 96 cashflows, 4 monthly AUD revaluations; no blank or duplicate IDs.
+- After migration and a second updater run, source row counts and IDs were unchanged.
+- Confirmed STATS1 target block, STATS1 Winner/Loser duration rows, report duration labels, SYMBOLS stop/target columns, filters, panes, merged-range counts, and absence of raw recommendation keys.
+- Visual inspection in Excel/LibreOffice was not run in this automated pass; verification was via openpyxl structural/value inspection and regression tests.
+
+Tests and checks performed:
+- python -m py_compile render/master_service.py tools/master_journal_workbook.py: passed.
 - node --check render/static/dashboard.js: passed.
-- git diff --check: passed with CRLF normalization warnings only.
-- Real journal BTCUSDT check returned HTTP 200, status ok, canonical_symbol BTCUSDT, and 70 non-test trades.
+- node --check render/static/instrument_lookup.js: passed.
+- node --check render/static/history_page.js: passed.
+- python -m pytest -q --basetemp=.pytest_tmp_required_final tests/test_dashboard_home_layout.py tests/test_dashboard_js_syntax.py tests/test_master_journal_workbook.py tests/test_master_service_trading_journal_stats.py tests/test_master_service_profiles.py tests/test_spread_monitor_dashboard.py: 267 passed, 99 warnings.
 
-Runtime-state note:
-- Existing dirty runtime/local files remained local and are excluded by PATCH_DESKTOP_PUSH.bat: bybit_monitor/custom_alerts.json, render/data/monthly_aud_revaluation_state.json, render/data/trade_contexts.json, state_backup.json, and state_manifest.json.
-- Test-generated changes to render/data/pending_webhooks.json and render/data/webhook_attempts.json were restored before the required push.
+Residual risks and notes:
+- The local app/browser workflow was covered by markup/JS/API regression tests, not a manual browser session.
+- Existing dirty runtime/state files remain local and are excluded by PATCH_DESKTOP_PUSH.bat: bybit_monitor/custom_alerts.json, render/data/*, and state_manifest.json.

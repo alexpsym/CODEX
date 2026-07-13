@@ -96,18 +96,18 @@ def test_local_profile_includes_open_orders_and_trading_journal() -> None:
     names = {str(item.get("name")) for item in payload}
     by_name = {str(item.get("name")): item for item in payload}
 
-    assert "open-orders" in names
     assert "trading-journal" in names
+    assert "instrument-lookup" not in names
+    assert "history" not in names
+    assert "open-orders" not in names
     assert "mt5" not in names
-    assert "pine" in names
+    assert "pine" not in names
 
     trading_journal = by_name["trading-journal"]
     assert trading_journal["label"] == "Journal"
     assert trading_journal["open_url"] == "/dashboard/trading-journal"
     assert trading_journal["open_url"] != "/trading-journal"
     assert trading_journal["dashboard_main_view"] is True
-    assert by_name["open-orders"]["label"] == "Orders / Positions"
-    assert by_name["pine"]["open_url"] == "/dashboard/pine"
 
 
 def test_local_trading_journal_dashboard_workspace_is_actions_only() -> None:

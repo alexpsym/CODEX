@@ -8,6 +8,9 @@
   const workspaceStatus = document.getElementById('dashboard-workspace-status');
   const workspaceEmpty = document.getElementById('dashboard-workspace-empty');
   const workspaceFrame = document.getElementById('dashboard-workspace-frame');
+  const lookupForm = document.getElementById('dashboard-instrument-lookup-form');
+  const lookupInput = document.getElementById('dashboard-instrument-lookup-input');
+  const lookupStatus = document.getElementById('dashboard-instrument-lookup-status');
 
   const watchlistCount = document.getElementById('watchlist-count');
   const watchlistInput = document.getElementById('watchlist-input');
@@ -46,6 +49,9 @@
   let scriptsTimer = null;
   let oandaTimer = null;
   let oandaSecondTimer = null;
+  let workspaceResizeObserver = null;
+  let workspaceMutationObserver = null;
+  let workspaceResizeFrame = null;
 
   const POLL_MS = {
     scripts: 15_000,
@@ -142,6 +148,114 @@
     }
     showOrdersWorkspace();
     setWorkspaceMeta('Orders / Positions', 'Open orders and positions are shown here.', false);
+  };
+
+  const cleanupWorkspaceHeightObservers = () => {
+    if (workspaceResizeObserver) {
+      workspaceResizeObserver.disconnect();
+      workspaceResizeObserver = null;
+    }
+    if (workspaceMutationObserver) {
+      workspaceMutationObserver.disconnect();
+      workspaceMutationObserver = null;
+    }
+    if (workspaceResizeFrame) {
+      const cancelFrame = typeof window.cancelAnimationFrame === 'function'
+        ? window.cancelAnimationFrame.bind(window)
+        : window.clearTimeout.bind(window);
+      cancelFrame(workspaceResizeFrame);
+      workspaceResizeFrame = null;
+    }
+  };
+
+  const workspaceFrameDocument = () => {
+    if (!workspaceFrame) return null;
+    try {
+      return workspaceFrame.contentDocument || workspaceFrame.contentWindow?.document || null;
+    } catch (_err) {
+      return null;
+    }
+  };
+
+  const syncWorkspaceFrameHeight = () => {
+    const doc = workspaceFrameDocument();
+    if (!workspaceFrame || !doc) return;
+    const body = doc.body;
+    const html = doc.documentElement;
+    if (!body || !html) return;
+    const contentHeight = Math.max(
+      body.scrollHeight || 0,
+      body.offsetHeight || 0,
+      html.scrollHeight || 0,
+      html.offsetHeight || 0,
+    );
+    if (!contentHeight) return;
+    const nextHeight = Math.min(Math.max(Math.ceil(contentHeight), 180), 8000);
+    const currentHeight = Number.parseFloat(String(workspaceFrame.style.height || workspaceFrame.getAttribute('height') || '0'));
+    if (!Number.isFinite(currentHeight) || Math.abs(currentHeight - nextHeight) > 2) {
+      workspaceFrame.style.height = `${nextHeight}px`;
+    }
+  };
+
+  const scheduleWorkspaceFrameHeightSync = () => {
+    if (!workspaceFrame || workspaceResizeFrame) return;
+    const requestFrame = typeof window.requestAnimationFrame === 'function'
+      ? window.requestAnimationFrame.bind(window)
+      : window.setTimeout.bind(window);
+    workspaceResizeFrame = requestFrame(() => {
+      workspaceResizeFrame = null;
+      syncWorkspaceFrameHeight();
+    });
+  };
+
+  const installWorkspaceHeightSync = () => {
+    cleanupWorkspaceHeightObservers();
+    const doc = workspaceFrameDocument();
+    if (!workspaceFrame || !doc || !doc.body) return;
+    scheduleWorkspaceFrameHeightSync();
+    try {
+      if (typeof ResizeObserver === 'function') {
+        workspaceResizeObserver = new ResizeObserver(scheduleWorkspaceFrameHeightSync);
+        workspaceResizeObserver.observe(doc.body);
+        if (doc.documentElement) workspaceResizeObserver.observe(doc.documentElement);
+      }
+      if (typeof MutationObserver === 'function') {
+        workspaceMutationObserver = new MutationObserver(scheduleWorkspaceFrameHeightSync);
+        workspaceMutationObserver.observe(doc.body, {
+          attributes: true,
+          childList: true,
+          subtree: true,
+          characterData: true,
+        });
+      }
+    } catch (_err) {
+      cleanupWorkspaceHeightObservers();
+    }
+    window.setTimeout(scheduleWorkspaceFrameHeightSync, 250);
+  };
+
+  const setLookupStatus = (message, isErr = false) => {
+    if (!lookupStatus) return;
+    lookupStatus.textContent = message || '';
+    lookupStatus.style.color = isErr ? '#fca5a5' : '#94a3b8';
+  };
+
+  const submitInlineLookup = (event) => {
+    event?.preventDefault();
+    const raw = String(lookupInput?.value || '').trim();
+    if (!raw) {
+      setLookupStatus('Enter a symbol.', true);
+      lookupInput?.focus?.();
+      return;
+    }
+    const target = `/instrument-lookup?q=${encodeURIComponent(raw)}`;
+    const tab = window.open(target, '_blank');
+    if (!tab) {
+      setLookupStatus('Browser blocked the Instrument Lookup tab.', true);
+      return;
+    }
+    tab.focus?.();
+    setLookupStatus(`Opening ${raw.toUpperCase()}...`);
   };
 
   const renderScripts = () => {
@@ -753,8 +867,12 @@
     oandaExpanded = !oandaExpanded;
     syncOandaDetailsVisibility();
   });
+  lookupForm?.addEventListener('submit', submitInlineLookup);
+  workspaceFrame?.addEventListener('load', installWorkspaceHeightSync);
+  window.addEventListener('resize', scheduleWorkspaceFrameHeightSync);
 
   ensureOrdersWorkspace();
+  installWorkspaceHeightSync();
   refreshScripts();
   refreshPineScripts();
   refreshStateSyncStatus().then(() => {
@@ -772,5 +890,6 @@
     [scriptsTimer, oandaTimer, oandaSecondTimer, stateSyncPollTimer].forEach((id) => {
       if (id) clearInterval(id);
     });
+    cleanupWorkspaceHeightObservers();
   });
 })();

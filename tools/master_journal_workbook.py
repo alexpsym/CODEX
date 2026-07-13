@@ -46,6 +46,9 @@ TARGET_RECOMMENDATION_NO_LOSSES = "No eligible losing trades"
 TARGET_R_RECOMMENDATION_FLOOR = Decimal("1.50")
 # Backward-compatible alias for callers that still import the old name.
 TARGET_RECOMMENDATION_INSUFFICIENT = TARGET_RECOMMENDATION_NO_WINS
+RECOMMENDATION_REASON_TEXT = {
+    "exact_tie_goal_preference_decrease": "exact tie, so a small decrease is preferred",
+}
 MOVE_TO_FIELD_MAP = {
     "Move to Break Even Time": "move_to_break_even_time",
     "Move to Break Even Duration": "move_to_break_even_duration",
@@ -150,8 +153,11 @@ SYMBOLS_HEADERS = [
     *LEGACY_INSTRUMENT_AVERAGES_HEADERS[21:28],
     "Most Profitable Timeframe", "Least Profitable Timeframe",
     "Net R Multiple",
-    *LEGACY_INSTRUMENT_AVERAGES_HEADERS[29:34],
+    *LEGACY_INSTRUMENT_AVERAGES_HEADERS[29:32],
+    "Avg stop %",
+    *LEGACY_INSTRUMENT_AVERAGES_HEADERS[32:34],
     STOP_RECOMMENDATION_HEADER,
+    "Avg target %",
     *LEGACY_INSTRUMENT_AVERAGES_HEADERS[34:36],
     TARGET_RECOMMENDATION_HEADER,
     *LEGACY_INSTRUMENT_AVERAGES_HEADERS[36:],
@@ -461,8 +467,8 @@ SYMBOLS_GROUP_WIDTHS = {
     "timeframe": 12,
     "p/l": 4,
     "pl": 4,
-    "stops": 3,
-    "targets": 3,
+    "stops": 4,
+    "targets": 4,
     "duration": 3,
 }
 
@@ -536,12 +542,20 @@ def _symbols_metric_key_for_column(ws, col: int) -> str:
         }.get(token, "")
     if group == "stops":
         return {
+            "avgstopall": "avg_stop_pct",
+            "avgstoppctall": "avg_stop_pct",
             "minstop": "min_stop_pct",
             "minstoppct": "min_stop_pct",
             "min": "min_stop_pct",
             "avgstop": "avg_stop_pct",
             "avgstoppct": "avg_stop_pct",
             "avg": "avg_stop_pct",
+            "avgstopw": "avg_stop_pct_winners",
+            "avgstoppctw": "avg_stop_pct_winners",
+            "avgw": "avg_stop_pct_winners",
+            "avgstopl": "avg_stop_pct_losers",
+            "avgstoppctl": "avg_stop_pct_losers",
+            "avgl": "avg_stop_pct_losers",
             "maxstop": "max_stop_pct",
             "maxstoppct": "max_stop_pct",
             "max": "max_stop_pct",
@@ -550,12 +564,20 @@ def _symbols_metric_key_for_column(ws, col: int) -> str:
         }.get(token, "")
     if group == "targets":
         return {
+            "avgtargetall": "avg_target_pct",
+            "avgtargetpctall": "avg_target_pct",
             "mintarget": "min_target_pct",
             "mintargetpct": "min_target_pct",
             "min": "min_target_pct",
             "avgtarget": "avg_target_pct",
             "avgtargetpct": "avg_target_pct",
             "avg": "avg_target_pct",
+            "avgtargetw": "avg_target_pct_winners",
+            "avgtargetpctw": "avg_target_pct_winners",
+            "avgw": "avg_target_pct_winners",
+            "avgtargetl": "avg_target_pct_losers",
+            "avgtargetpctl": "avg_target_pct_losers",
+            "avgl": "avg_target_pct_losers",
             "maxtarget": "max_target_pct",
             "maxtargetpct": "max_target_pct",
             "max": "max_target_pct",
@@ -580,9 +602,13 @@ def _symbols_canonical_header_for_column(ws, col: int) -> str:
         "min_stop_pct": "Min stop %",
         "avg_stop_pct": "Avg stop %",
         "max_stop_pct": "Max stop %",
+        "avg_stop_pct_winners": "Avg stop % (W)",
+        "avg_stop_pct_losers": "Avg stop % (L)",
         "min_target_pct": "Min target %",
         "avg_target_pct": "Avg target %",
         "max_target_pct": "Max target %",
+        "avg_target_pct_winners": "Avg target % (W)",
+        "avg_target_pct_losers": "Avg target % (L)",
         "stop_recommendation": STOP_RECOMMENDATION_HEADER,
         "target_recommendation": TARGET_RECOMMENDATION_HEADER,
     }.get(key, "")
@@ -638,18 +664,31 @@ def _set_instrument_averages_auto_filter_to_populated_range(ws) -> None:
     ws.auto_filter.ref = f"A{header_row}:{get_column_letter(last_col)}{max(header_row, last_row)}"
 
 
+def _unmerge_instrument_averages_header_rows(ws) -> None:
+    for merged in list(ws.merged_cells.ranges):
+        if (
+            merged.min_row <= INSTRUMENT_AVERAGES_FILTER_HEADER_ROW
+            and merged.max_row >= INSTRUMENT_AVERAGES_GROUP_HEADER_ROW
+        ):
+            ws.unmerge_cells(str(merged))
+    max_col = max(ws.max_column, len(INSTRUMENT_AVERAGES_HEADERS))
+    for row in range(INSTRUMENT_AVERAGES_GROUP_HEADER_ROW, INSTRUMENT_AVERAGES_FILTER_HEADER_ROW + 1):
+        for col in range(1, max_col + 1):
+            cell = ws._cells.get((row, col))
+            if cell is not None and cell.__class__.__name__ == "MergedCell":
+                del ws._cells[(row, col)]
+
+
 def _write_instrument_averages_headers(ws, *, preserve_freeze: bool = False) -> None:
     previous_freeze = ws.freeze_panes
-    for merged in list(ws.merged_cells.ranges):
-        if merged.min_row <= INSTRUMENT_AVERAGES_FILTER_HEADER_ROW:
-            ws.unmerge_cells(str(merged))
+    _unmerge_instrument_averages_header_rows(ws)
     for col in range(1, len(INSTRUMENT_AVERAGES_HEADERS) + 1):
         ws.cell(INSTRUMENT_AVERAGES_GROUP_HEADER_ROW, col).value = None
         ws.cell(INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, col).value = _symbols_visible_header(INSTRUMENT_AVERAGES_HEADERS[col - 1])
     group_specs = (
         ("Order", "Market", "Limit"),
-        ("Stops", "Avg stop % (W)", STOP_RECOMMENDATION_HEADER),
-        ("Targets", "Avg target % (W)", TARGET_RECOMMENDATION_HEADER),
+        ("Stops", "Avg stop %", STOP_RECOMMENDATION_HEADER),
+        ("Targets", "Avg target %", TARGET_RECOMMENDATION_HEADER),
     )
     for label, first_header, last_header in group_specs:
         start = INSTRUMENT_AVERAGES_HEADERS.index(first_header) + 1
@@ -680,6 +719,9 @@ def _ensure_symbols_schema(ws, diagnostics: Dict[str, Any] | None = None) -> boo
     headers = _instrument_averages_header_map(ws)
     if not {"Symbol", "Trades"}.issubset(headers):
         return False
+    if any(header not in headers for header in INSTRUMENT_AVERAGES_HEADERS):
+        _unmerge_instrument_averages_header_rows(ws)
+        headers = _instrument_averages_header_map(ws)
     legacy_grouped_metrics = any(
         header in headers
         for header in ("Min stop %", "Max stop %", "Min target %", "Max target %")
@@ -765,10 +807,32 @@ def _ensure_symbols_schema(ws, diagnostics: Dict[str, Any] | None = None) -> boo
         changed = True
         headers = _instrument_averages_header_map(ws)
 
+    def insert_overall_average_before(anchor_header: str, average_header: str) -> None:
+        nonlocal changed, headers
+        if average_header in headers:
+            return
+        anchor_col = headers.get(anchor_header)
+        if not anchor_col:
+            return
+        insert_at = anchor_col
+        ws.insert_cols(insert_at)
+        template_col = insert_at + 1
+        for row in range(1, ws.max_row + 1):
+            _copy_cell_style(ws.cell(row, template_col), ws.cell(row, insert_at))
+        width = ws.column_dimensions[get_column_letter(template_col)].width
+        ws.column_dimensions[get_column_letter(insert_at)].width = max(width or 0, 14) or 14
+        ws.cell(header_row, insert_at).value = average_header
+        changed = True
+        headers = _instrument_averages_header_map(ws)
+
+    insert_overall_average_before("Avg stop % (W)", "Avg stop %")
+    insert_overall_average_before("Avg target % (W)", "Avg target %")
     insert_recommendation_after("Avg stop % (L)", STOP_RECOMMENDATION_HEADER, "stops")
     insert_recommendation_after("Avg target % (L)", TARGET_RECOMMENDATION_HEADER, "targets")
     if changed:
-        if not legacy_grouped_metrics:
+        if all(header in _instrument_averages_header_map(ws) for header in INSTRUMENT_AVERAGES_HEADERS):
+            _write_instrument_averages_headers(ws, preserve_freeze=True)
+        elif not legacy_grouped_metrics:
             _write_instrument_averages_headers(ws, preserve_freeze=True)
         headers = _instrument_averages_header_map(ws)
         if ws.auto_filter and ws.auto_filter.ref:
@@ -3380,7 +3444,8 @@ def _stop_recommendation_text(direction: str, recommended: float, loss_mean: flo
         relation = "below"
     else:
         relation = "above"
-    suffix = f"; {tie_reason}" if tie_reason else ""
+    visible_reason = RECOMMENDATION_REASON_TEXT.get(str(tie_reason or "").strip(), str(tie_reason or "").strip())
+    suffix = f"; {visible_reason}" if visible_reason else ""
     return (
         f"{'Decrease' if direction == 'decrease' else 'Increase'} stop \u2014 "
         f"Recommended: {_format_stop_pct_value(recommended)} "
@@ -3521,6 +3586,13 @@ def _sanitize_recommendation_text(header: str, value: Any) -> Any:
     if value in (None, ""):
         return value
     text = str(value).strip()
+    for reason_key, visible_reason in RECOMMENDATION_REASON_TEXT.items():
+        text = text.replace(reason_key, visible_reason)
+    text = re.sub(
+        r"\b[a-z][a-z0-9]*(?:_[a-z0-9]+){2,}\b",
+        lambda match: match.group(0).replace("_", " "),
+        text,
+    )
     lowered = text.casefold()
     if header == TARGET_RECOMMENDATION_HEADER:
         if lowered in {"keep target", "maintain target"}:
@@ -6154,6 +6226,105 @@ def _apply_dashboard_source_label_style(cell) -> None:
     alignment.horizontal = "right"
     cell.alignment = alignment
 
+
+def _apply_dashboard_child_label_style(cell) -> None:
+    font = copy(cell.font)
+    font.bold = False
+    font.italic = True
+    font.color = "FF000000"
+    cell.font = font
+    alignment = copy(cell.alignment)
+    alignment.horizontal = "right"
+    cell.alignment = alignment
+
+
+def _repair_stats1_child_label_styles(ws, diagnostics: Dict[str, Any] | None = None) -> None:
+    diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+
+    def has_subordinate_style(cell) -> bool:
+        return (
+            cell.font.bold is False
+            and cell.font.italic is True
+            and str(cell.alignment.horizontal or "").lower() == "right"
+        )
+
+    def first_template(coordinates: Tuple[str, ...], *, source_label: bool):
+        for coordinate in coordinates:
+            cell = ws[coordinate]
+            label = str(cell.value or "").strip().casefold()
+            if not label:
+                continue
+            if source_label and label != "source":
+                continue
+            if not source_label and label in {"source", "winners", "losers"}:
+                continue
+            if _semantic_fill_rgb(cell):
+                continue
+            if not has_subordinate_style(cell):
+                continue
+            return cell
+        return None
+
+    source_template = first_template(("A61",), source_label=True)
+    if source_template is None:
+        source_template = next(
+            (
+                ws.cell(row, 1)
+                for row in range(1, ws.max_row + 1)
+                if _stats1_label_at(ws, row).casefold() == "source"
+                and has_subordinate_style(ws.cell(row, 1))
+            ),
+            None,
+        )
+    child_template = first_template(("A97", "A98"), source_label=False)
+    if child_template is None:
+        for section_name in ("Winners", "Losers"):
+            bounds = _stats1_section_bounds(ws, section_name)
+            if not bounds:
+                continue
+            child_template = next(
+                (
+                    ws.cell(row, 1)
+                    for row in range(bounds[0] + 1, bounds[1] + 1)
+                    if _stats1_label_at(ws, row)
+                    and _stats1_label_at(ws, row).casefold() != "source"
+                    and has_subordinate_style(ws.cell(row, 1))
+                    and not _semantic_fill_rgb(ws.cell(row, 1))
+                ),
+                None,
+            )
+            if child_template is not None:
+                break
+
+    repaired_sources = 0
+    repaired_children = 0
+    for row in range(1, ws.max_row + 1):
+        if _stats1_label_at(ws, row).casefold() == "source":
+            if source_template is not None:
+                _copy_cell_style(source_template, ws.cell(row, 1))
+            else:
+                _apply_dashboard_source_label_style(ws.cell(row, 1))
+            repaired_sources += 1
+    for section_name in ("Winners", "Losers"):
+        bounds = _stats1_section_bounds(ws, section_name)
+        if not bounds:
+            continue
+        for row in range(bounds[0] + 1, bounds[1] + 1):
+            label = _stats1_label_at(ws, row)
+            if not label or label.casefold() == "source":
+                continue
+            if _semantic_fill_rgb(ws.cell(row, 1)) == LIGHT_GREY_FILL_RGB[-6:]:
+                continue
+            if child_template is not None:
+                _copy_cell_style(child_template, ws.cell(row, 1))
+            else:
+                _apply_dashboard_child_label_style(ws.cell(row, 1))
+            repaired_children += 1
+    if repaired_sources:
+        diagnostics["repaired_stats1_source_label_styles"] = repaired_sources
+    if repaired_children:
+        diagnostics["repaired_stats1_child_label_styles"] = repaired_children
+
 def _is_generated_dashboard_semantic_rule(rule) -> bool:
     if getattr(rule, "type", None) != "cellIs":
         return False
@@ -6515,6 +6686,7 @@ def _repair_stats1_formatting(
                 _clear_generated_semantic_fill(cell)
             repaired += 3
     _apply_stats1_clean_table_borders(ws, diagnostics)
+    _repair_stats1_child_label_styles(ws, diagnostics)
     if repaired:
         diagnostics["repaired_stats1_format_cells"] = repaired
 
@@ -6862,8 +7034,10 @@ def _instrument_summary_rows_from_trade_rows(rows: List[Dict[str, Any]]) -> List
             "win_rate_pct": (len(wins) / len(symbol_rows) * 100.0) if symbol_rows else None,
             "net_profit_total": sum(net_profit_values) if net_profit_values else None,
             "avg_net_profit": (sum(net_profit_values) / len(net_profit_values)) if net_profit_values else None,
+            "avg_sl_pct": avg_distance(symbol_rows, "stop_loss"),
             "avg_sl_pct_wins": avg_distance(wins, "stop_loss"),
             "avg_sl_pct_losses": avg_distance(losses, "stop_loss"),
+            "avg_tp_pct": avg_distance(symbol_rows, "take_profit"),
             "avg_tp_pct_wins": avg_distance(wins, "take_profit"),
             "avg_tp_pct_losses": avg_distance(losses, "take_profit"),
             "min_trade_duration_seconds": min(durations) if durations else None,
@@ -7453,6 +7627,14 @@ def _dashboard_extended_metrics(
             value for value in (_as_float(item.get("trade_duration_seconds")) for item in items)
             if value is not None and value >= 0
         ]
+        winner_durations = [
+            value for value in (_as_float(item.get("trade_duration_seconds")) for item in winners)
+            if value is not None and value >= 0
+        ]
+        loser_durations = [
+            value for value in (_as_float(item.get("trade_duration_seconds")) for item in losers)
+            if value is not None and value >= 0
+        ]
         break_even_moves = [
             value for value in (_move_duration_seconds(item, "move_to_break_even") for item in items)
             if value is not None
@@ -7506,7 +7688,7 @@ def _dashboard_extended_metrics(
         min_commission_source = min(commission_rows, key=lambda pair: (pair[0], str(pair[1].get("symbol") or "")))[1] if commission_rows else None
         max_commission_source = max(commission_rows, key=lambda pair: (pair[0], str(pair[1].get("symbol") or "")))[1] if commission_rows else None
         streaks = _period_streak_metrics(items)
-        drawdown = _period_drawdown_metrics(items)
+        drawdown = _period_drawdown_metrics(items, rows)
         target_scope = "overall" if market == "overall" else "standard"
         result[market] = {
             "trades": len(items),
@@ -7516,6 +7698,8 @@ def _dashboard_extended_metrics(
             "test_trades": len(_test_subset(market)),
             "win_rate_pct": (len(winners) / len(items) * 100.0) if items else None,
             **_summary(durations, "duration_seconds"),
+            **_summary(winner_durations, "duration_seconds_winners"),
+            **_summary(loser_durations, "duration_seconds_losers"),
             **_summary(break_even_moves, "move_to_break_even_duration_seconds"),
             **_summary(profit_moves, "move_to_profit_duration_seconds"),
             **_summary(result_values, "result_pct"),
@@ -7604,7 +7788,7 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
     }
     move_duration_metrics = _trade_move_duration_metrics(metric_rows)
     percentage_totals = _result_percentage_totals_by_market(rows, snapshot.get("balances") or stats.get("balances") or [])
-    extended_metrics = _dashboard_extended_metrics(metric_rows, by_market)
+    extended_metrics = _dashboard_extended_metrics(rows, by_market)
     buckets = {
         market: _merge_metric_buckets(
             dict(bucket or {}),
@@ -7747,6 +7931,9 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
             ("Avg target %", "avg_target_pct_winners", "pct", None),
             ("Max target %", "max_target_pct_winners", "pct", None),
             ("Source", "source:max_target_pct_winners", "source", None),
+            ("Min duration", "min_duration_seconds_winners", "duration", None),
+            ("Avg duration", "avg_duration_seconds_winners", "duration", None),
+            ("Max duration", "max_duration_seconds_winners", "duration", None),
             ("Min win %", "min_result_pct_winners", "pct", "profit"),
             ("Avg win %", "avg_result_pct_winners", "pct", "profit"),
             ("Max win %", "max_result_pct_winners", "pct", "profit"),
@@ -7766,6 +7953,9 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
             ("Avg target %", "avg_target_pct_losers", "pct", None),
             ("Max target %", "max_target_pct_losers", "pct", None),
             ("Source", "source:max_target_pct_losers", "source", None),
+            ("Min duration", "min_duration_seconds_losers", "duration", None),
+            ("Avg duration", "avg_duration_seconds_losers", "duration", None),
+            ("Max duration", "max_duration_seconds_losers", "duration", None),
             ("Max loss %", "min_result_pct_losers", "pct", "loss"),
             ("Avg loss %", "avg_result_pct_losers", "pct", "loss"),
             ("Min loss %", "max_result_pct_losers", "pct", "loss"),
@@ -8094,8 +8284,11 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
             analysis.get("most_profitable_timeframe"), analysis.get("least_profitable_timeframe"),
             analysis.get("net_r_multiple"),
             (netp/100.0 if netp is not None else ''), (avgp/100.0 if avgp is not None else ''),
-            rec.get("win_rate_pct"), rec.get('avg_sl_pct_wins'), rec.get('avg_sl_pct_losses'),
+            rec.get("win_rate_pct"),
+            analysis.get("avg_stop_pct") if analysis.get("avg_stop_pct") is not None else rec.get("avg_sl_pct"),
+            rec.get('avg_sl_pct_wins'), rec.get('avg_sl_pct_losses'),
             _sanitize_recommendation_text(STOP_RECOMMENDATION_HEADER, analysis.get(STOP_RECOMMENDATION_HEADER) or rec.get(STOP_RECOMMENDATION_HEADER) or rec.get("stop_recommendation") or ""),
+            analysis.get("avg_target_pct") if analysis.get("avg_target_pct") is not None else rec.get("avg_tp_pct"),
             rec.get('avg_tp_pct_wins'), rec.get('avg_tp_pct_losses'),
             _sanitize_recommendation_text(TARGET_RECOMMENDATION_HEADER, analysis.get(TARGET_RECOMMENDATION_HEADER) or rec.get(TARGET_RECOMMENDATION_HEADER) or rec.get("target_recommendation") or ""),
             _format_duration_display(rec.get("min_trade_duration_seconds", rec.get("shortest_duration_seconds"))),
@@ -8103,7 +8296,7 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
             _format_duration_display(rec.get("max_trade_duration_seconds", rec.get("longest_duration_seconds"))),
         ])
         header_cols = {header: index + 1 for index, header in enumerate(INSTRUMENT_AVERAGES_HEADERS)}
-        for header in ("Win Rate %", "Avg stop % (W)", "Avg stop % (L)", "Avg target % (W)", "Avg target % (L)"):
+        for header in ("Win Rate %", "Avg stop %", "Avg stop % (W)", "Avg stop % (L)", "Avg target %", "Avg target % (W)", "Avg target % (L)"):
             cc = header_cols[header]
             cell = inst.cell(row_idx, cc)
             val = _as_float(cell.value)
@@ -8150,6 +8343,7 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
     if STATS2_SHEET in wb.sheetnames:
         _repair_stats2_account_balance_formatting(wb[STATS2_SHEET])
     _apply_workbook_left_alignment(wb)
+    _repair_stats1_child_label_styles(dash)
     _repair_stats2_as_of_datetime_style(wb)
     output_path.parent.mkdir(parents=True, exist_ok=True); wb.save(output_path)
     return {'ok':True,'path':str(output_path)}
@@ -8597,11 +8791,17 @@ _REPORT_SPECS = [
     ("Avg target %", "avg_target_pct_winners", "pct", None),
     ("Percentage expectancy", "avg_result_pct_winners", "pct", "profit"),
     ("R expectancy", "avg_r_multiple_winners", "r", "profit"),
+    ("Winners min duration", "min_duration_seconds_winners", "duration", None),
+    ("Winners avg duration", "avg_duration_seconds_winners", "duration", None),
+    ("Winners max duration", "max_duration_seconds_winners", "duration", None),
     ("Losers", None, "section", None),
     ("Avg stop %", "avg_stop_pct_losers", "pct", None),
     ("Avg target %", "avg_target_pct_losers", "pct", None),
     ("Percentage expectancy", "avg_result_pct_losers", "pct", "loss"),
     ("R expectancy", "avg_r_multiple_losers", "r", "loss"),
+    ("Losers min duration", "min_duration_seconds_losers", "duration", None),
+    ("Losers avg duration", "avg_duration_seconds_losers", "duration", None),
+    ("Losers max duration", "max_duration_seconds_losers", "duration", None),
     ("Drawdown", None, "section", None),
     ("Max drawdown", "max_drawdown_pct", "pct", "loss"),
     ("Start", "start:max_drawdown_detail", "drawdown_date", None),
@@ -9041,7 +9241,7 @@ def _report_rows_for_period(
         for row in snapshot.get("items") or []:
             if not isinstance(row, dict):
                 continue
-            if str(row.get("row_type") or "trade") != "trade":
+            if str(row.get("row_type") or "trade").strip().lower() not in {"trade", "cashflow", "monthly_aud_reval"}:
                 continue
             timestamp = _as_datetime(row.get("close_time") or row.get("open_time"))
             if timestamp is None:
@@ -9105,42 +9305,116 @@ def _period_streak_metrics(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     return result
 
 
-def _period_drawdown_metrics(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
-    ordered = sorted(
-        rows,
-        key=lambda row: _as_datetime(row.get("close_time") or row.get("open_time")) or datetime.min,
-    )
-    cumulative = 0.0
-    peak = 0.0
-    peak_time: Any = None
-    drawdowns: List[Tuple[float, Any, Any]] = []
-    saw_result = False
-    for row in ordered:
-        value = _as_float(row.get("result_pct"))
-        if value is None or not math.isfinite(value):
+def _drawdown_account_key(row: Dict[str, Any]) -> str:
+    account = _canonical_account_label(row.get("account_label") or row.get("account") or "")
+    return re.sub(r"[^a-z0-9]+", "", account.casefold())
+
+
+def _drawdown_row_timestamp(row: Dict[str, Any]) -> Tuple[float, Any] | None:
+    raw = row.get("close_time") or row.get("open_time")
+    dt = _as_datetime(raw)
+    if dt is None:
+        return None
+    return dt.timestamp(), raw
+
+
+def _period_drawdown_metrics(
+    rows: List[Dict[str, Any]],
+    all_rows: List[Dict[str, Any]] | None = None,
+) -> Dict[str, Any]:
+    anchor_source = all_rows if all_rows is not None else rows
+    events_by_account: Dict[str, List[Tuple[float, str]]] = defaultdict(list)
+    for row in anchor_source:
+        row_type = str(row.get("row_type") or "trade").strip().lower()
+        if row_type not in {"cashflow", "monthly_aud_reval"}:
             continue
-        saw_result = True
-        timestamp = row.get("close_time") or row.get("open_time")
-        cumulative += value
-        if cumulative >= peak:
-            peak = cumulative
-            peak_time = timestamp
-        drawdown = max(0.0, peak - cumulative)
-        drawdowns.append((drawdown, peak_time or timestamp, timestamp))
-    if not saw_result:
-        return {}
-    positive = [item for item in drawdowns if item[0] > 0]
-    if not positive:
-        return {"min_drawdown_pct": 0.0, "avg_drawdown_pct": 0.0, "max_drawdown_pct": 0.0}
-    min_item = min(positive, key=lambda item: item[0])
-    max_item = max(positive, key=lambda item: item[0])
-    return {
-        "min_drawdown_pct": min_item[0],
-        "avg_drawdown_pct": sum(item[0] for item in positive) / len(positive),
-        "max_drawdown_pct": max_item[0],
-        "min_drawdown_detail": {"start_time": min_item[1], "end_time": min_item[2]},
-        "max_drawdown_detail": {"start_time": max_item[1], "end_time": max_item[2]},
-    }
+        account_key = _drawdown_account_key(row)
+        stamped = _drawdown_row_timestamp(row)
+        if not account_key or stamped is None:
+            continue
+        ts, raw_time = stamped
+        events_by_account[account_key].append((ts, str(row.get("id") or raw_time)))
+    for account_key in list(events_by_account):
+        events_by_account[account_key] = sorted(events_by_account[account_key], key=lambda item: item[0])
+
+    segments: Dict[Tuple[str, str], List[Tuple[float, float, Any, str]]] = defaultdict(list)
+    for row in rows:
+        if str(row.get("row_type") or "trade").strip().lower() != "trade":
+            continue
+        account_key = _drawdown_account_key(row)
+        stamped = _drawdown_row_timestamp(row)
+        if not account_key or stamped is None:
+            continue
+        ts, raw_time = stamped
+        balance = _as_float(row.get("analysis_balance_after_trade"))
+        if balance is None:
+            balance = _as_float(row.get("balance_after_trade"))
+        if balance is None or not math.isfinite(balance) or balance <= 0:
+            continue
+        anchor_id = "__no_anchor__"
+        for event_ts, event_id in events_by_account.get(account_key, []):
+            if event_ts <= ts:
+                anchor_id = event_id
+            else:
+                break
+        account_label = str(row.get("account_label") or row.get("account") or account_key).strip()
+        segments[(account_key, anchor_id)].append((ts, balance, raw_time, account_label))
+
+    drawdown_values: List[float] = []
+    drawdown_details: List[Tuple[float, Dict[str, Any]]] = []
+    segment_count = 0
+    balance_points = 0
+    for points in segments.values():
+        ordered = sorted(points, key=lambda item: item[0])
+        if len(ordered) < 2:
+            continue
+        segment_count += 1
+        balance_points += len(ordered)
+        peak: float | None = None
+        peak_time: Any = None
+        peak_account = ""
+        for _ts, balance, raw_time, account in ordered:
+            if peak is None or balance > peak:
+                peak = balance
+                peak_time = raw_time
+                peak_account = account
+            if peak is None or peak <= 0:
+                continue
+            drawdown = (peak - balance) / peak * 100.0
+            if drawdown > 0 and math.isfinite(drawdown):
+                drawdown_values.append(drawdown)
+                drawdown_details.append((
+                    drawdown,
+                    {
+                        "account": account or peak_account,
+                        "start_time": peak_time,
+                        "end_time": raw_time,
+                        "peak": peak,
+                        "trough": balance,
+                    },
+                ))
+
+    if drawdown_values:
+        min_item = min(drawdown_details, key=lambda item: item[0])
+        max_item = max(drawdown_details, key=lambda item: item[0])
+        return {
+            "min_drawdown_pct": min(drawdown_values),
+            "avg_drawdown_pct": sum(drawdown_values) / len(drawdown_values),
+            "max_drawdown_pct": max(drawdown_values),
+            "min_drawdown_detail": min_item[1],
+            "max_drawdown_detail": max_item[1],
+            "drawdown_balance_points": balance_points,
+            "drawdown_segments_count": segment_count,
+        }
+    if segment_count:
+        return {
+            "min_drawdown_pct": 0.0,
+            "avg_drawdown_pct": 0.0,
+            "max_drawdown_pct": 0.0,
+            "drawdown_balance_points": balance_points,
+            "drawdown_segments_count": segment_count,
+        }
+    return {}
 
 
 def _report_bucket_from_period_rows(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -9179,7 +9453,7 @@ def _report_bucket_from_period_rows(rows: List[Dict[str, Any]]) -> Dict[str, Any
             },
         })
     bucket.update(_period_streak_metrics(active))
-    bucket.update(_period_drawdown_metrics(active))
+    bucket.update(_period_drawdown_metrics(active, rows))
     return bucket
 
 
@@ -9198,7 +9472,7 @@ def _report_bucket_for_period(
             and not _is_test_trade_value(row.get("is_test_trade"))
         ]
         fallback = _report_bucket_from_period_rows(rows)
-        extended = _dashboard_extended_metrics(active_rows, {"overall": {**bucket, **fallback}})["overall"]
+        extended = _dashboard_extended_metrics(rows, {"overall": {**bucket, **fallback}})["overall"]
         move_durations = _trade_move_duration_metrics(active_rows)["overall"]
         bucket = _merge_metric_buckets(
             bucket,
@@ -10259,6 +10533,9 @@ def _ensure_dashboard_extended_layout(ws, diagnostics: Dict[str, Any] | None = N
             ("Min target %", {"min target %"}),
             ("Avg target %", {"avg target %"}),
             ("Max target %", {"max target %"}),
+            ("Min duration", {"min duration", "min duration (dd:hh:mm:ss)"}),
+            ("Avg duration", {"avg duration", "avg duration (dd:hh:mm:ss)"}),
+            ("Max duration", {"max duration", "max duration (dd:hh:mm:ss)"}),
             ("Min result %", {"min result %", "min win %"}),
             ("Percentage expectancy", {"percentage expectancy", "avg result %", "avg win %"}),
             ("Max result %", {"max result %", "max win %"}),
@@ -10273,6 +10550,9 @@ def _ensure_dashboard_extended_layout(ws, diagnostics: Dict[str, Any] | None = N
             ("Min target %", {"min target %"}),
             ("Avg target %", {"avg target %"}),
             ("Max target %", {"max target %"}),
+            ("Min duration", {"min duration", "min duration (dd:hh:mm:ss)"}),
+            ("Avg duration", {"avg duration", "avg duration (dd:hh:mm:ss)"}),
+            ("Max duration", {"max duration", "max duration (dd:hh:mm:ss)"}),
             ("Min result %", {"min result %", "max loss %"}),
             ("Percentage expectancy", {"percentage expectancy", "avg result %", "avg loss %"}),
             ("Max result %", {"max result %", "min loss %"}),
@@ -11722,6 +12002,13 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
         write_market_metric("Losers", ["R expectancy", "Avg R", "Avg R loss"], _risk_market_values("avg_r_multiple_losers"), "r", "loss")
         write_market_metric("Losers", "Avg stop %", _risk_market_values("avg_stop_pct_losers"), "pct")
         write_market_metric("Losers", "Avg target %", _risk_market_values("avg_target_pct_losers"), "pct")
+        for section, suffix in (("Winners", "winners"), ("Losers", "losers")):
+            for label, key in (
+                ("Min duration", f"min_duration_seconds_{suffix}"),
+                ("Avg duration", f"avg_duration_seconds_{suffix}"),
+                ("Max duration", f"max_duration_seconds_{suffix}"),
+            ):
+                write_market_metric(section, label, _extended_market_values(key), "duration")
         for section, suffix, semantic in (("Winners", "winners", "profit"), ("Losers", "losers", "loss")):
             label_aliases = {
                 ("Winners", "Min result %"): ["Min result %", "Min win %"],
@@ -12302,6 +12589,7 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
         if STATS2_SHEET in wb.sheetnames:
             _repair_stats2_account_balance_formatting(wb[STATS2_SHEET], diagnostics)
         _apply_workbook_left_alignment(wb)
+        _repair_stats1_child_label_styles(dash, diagnostics)
         _repair_stats2_as_of_datetime_style(wb, diagnostics)
         wb.save(candidate)
         return {"ok": True, "path": str(path), "candidate_path": str(candidate), "diagnostics": diagnostics}
