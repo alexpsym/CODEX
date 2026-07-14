@@ -314,6 +314,7 @@ def _profile_main_buttons() -> List[Dict[str, object]]:
             [
                 {"id": "trading-journal", "name": "trading-journal", "label": "Journal", "open_url": "/dashboard/trading-journal", "dashboard_main_view": True},
                 {"id": "monitor", "name": "monitor", "label": "Scanner", "open_url": "/merged/monitor", "dashboard_main_view": True},
+                {"id": "history", "name": "history", "label": "History Export", "open_url": "/merged/history", "dashboard_main_view": True},
                 {"id": "ivindicator-clone", "name": "ivindicator-clone", "label": "IV Indicator", "open_url": "/apps/ivindicator-clone", "dashboard_main_view": True},
                 {"id": "spreads-clone", "name": "spreads-clone", "label": "Spreads", "open_url": "/apps/spreads-clone", "dashboard_main_view": True},
             ]
@@ -11847,8 +11848,13 @@ INSTRUMENT_SPECS_TEMPLATE = """<!DOCTYPE html>
         .metric-value.positive, td.positive { background: var(--green); color: var(--green-ink); }
         .metric-value.negative, td.negative { background: var(--red); color: var(--red-ink); }
         .empty-state { padding: 0.85rem; color: var(--muted); background: #ffffff; border:1px dashed var(--sheet-line); border-radius:6px; }
-        .trade-block { margin-top:0.85rem; }
+        .trade-block { margin-top:1rem; }
+        .recent-trades-panel { margin-top:1rem; }
+        .recent-trades-panel .section-title { margin:0; }
+        .trade-scroll-top { overflow-x:auto; overflow-y:hidden; height:16px; margin:0.85rem 0.85rem 0.55rem; border:1px solid var(--sheet-line); border-radius:6px; background:#ffffff; }
+        .trade-scroll-spacer { height:1px; min-width:100%; }
         .table-wrap { overflow-x: auto; border-radius: 6px; border: 1px solid var(--sheet-line); background: #ffffff; }
+        .recent-trades-panel .table-wrap { margin:0 0.85rem 0.85rem; }
         table { width: 100%; border-collapse: collapse; min-width: 960px; color: var(--ink); }
         th, td { text-align:left; padding:0.55rem 0.65rem; border-bottom:1px solid #e5e7eb; border-right:1px solid #edf2f7; font-size:0.88rem; vertical-align:top; }
         th:last-child, td:last-child { border-right:0; }
@@ -11882,7 +11888,7 @@ INSTRUMENT_SPECS_TEMPLATE = """<!DOCTYPE html>
         <div class="panel-head">
           <div>
             <h2>Instrument Specs</h2>
-            <div class="panel-note">Broker rules, live market context, and movement ranges.</div>
+            <div class="panel-note">Live market context and movement ranges.</div>
           </div>
         </div>
         <div class="panel-body">
@@ -11899,18 +11905,19 @@ INSTRUMENT_SPECS_TEMPLATE = """<!DOCTYPE html>
         </div>
         <div class="panel-body">
           <div id="journal-metrics"></div>
-          <div class="trade-block">
-            <div class="section-title">Recent Trades <span class="section-subtitle">Latest first</span></div>
-            <div class="table-wrap">
-              <table id="trade-table">
-                <thead id="trade-head"></thead>
-                <tbody id="trade-body"></tbody>
-              </table>
-            </div>
-          </div>
         </div>
       </section>
     </div>
+    <section class="panel trade-block recent-trades-panel" id="recent-trades-section">
+      <div class="trade-scroll-top" id="trade-scroll-top" aria-hidden="true"><div class="trade-scroll-spacer" id="trade-scroll-spacer"></div></div>
+      <div class="section-title">Recent Trades <span class="section-subtitle">Latest first</span></div>
+      <div class="table-wrap" id="trade-table-wrap">
+        <table id="trade-table">
+          <thead id="trade-head"></thead>
+          <tbody id="trade-body"></tbody>
+        </table>
+      </div>
+    </section>
     <div id="err"></div>
 </div>
 <script src="/static/instrument_lookup.js"></script>
@@ -19518,8 +19525,6 @@ CALCULATOR_TEMPLATE = """<!doctype html>
               <tr id="rr-wrap"><th><label for="calc-rr">Risk/reward</label></th><td><input id="calc-rr" type="number" min="0.1" step="0.1" value="2"/></td></tr>
               <tr id="risk-toggle-wrap"><th>Risk mode</th><td><div class="group toggle" id="risk-toggle"><button type="button" data-v="fixed_aud">Fixed AUD</button><button type="button" data-v="percent" class="active">%</button></div></td></tr>
               <tr><th><label id="calc-risk-label" for="calc-risk">Risk value (%)</label></th><td><input id="calc-risk" type="number" min="0.0001" step="any" value="1"/></td></tr>
-              <tr><th>Webhook</th><td><div class="group toggle" id="webhook-toggle"><button type="button" data-v="no" class="active">No</button><button type="button" data-v="yes">Yes</button></div><div id="calc-webhook-status" class="muted"></div></td></tr>
-              <tr><th>Test</th><td><div class="group toggle" id="test-toggle"><button type="button" data-v="no" class="active">No</button><button type="button" data-v="yes">Yes</button></div></td></tr>
             </tbody>
           </table>
         </div>
@@ -19535,6 +19540,8 @@ CALCULATOR_TEMPLATE = """<!doctype html>
               <tr><th>VWAP</th><td><div class="group toggle wide-toggle" id="vwap-toggle"></div></td></tr>
               <tr><th>All-time high/low</th><td><div class="group toggle wide-toggle" id="aths-atls-toggle"></div></td></tr>
               <tr><th>Round number</th><td><div class="group toggle wide-toggle" id="round-number-toggle"></div></td></tr>
+              <tr><th>Webhook</th><td><div class="group toggle" id="webhook-toggle"><button type="button" data-v="no" class="active">No</button><button type="button" data-v="yes">Yes</button></div><div id="calc-webhook-status" class="muted"></div></td></tr>
+              <tr><th>Test</th><td><div class="group toggle" id="test-toggle"><button type="button" data-v="no" class="active">No</button><button type="button" data-v="yes">Yes</button></div></td></tr>
             </tbody>
           </table>
         </div>

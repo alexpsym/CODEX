@@ -1,41 +1,65 @@
-Calculator, STATS1, SYMBOLS, and Instrument Lookup fixes summary
+Follow-up calculator, SYMBOLS, Instrument Lookup, and workbook repair summary
 
 Status:
-- Implemented the attached calculator, workbook, stats, symbols, and instrument lookup fixes.
-- Updated journal/Trading Journal.xlsx with the migrated Trade Log schema, STATS1 label style repair, and SYMBOLS freeze pane repair.
-- Preserved local runtime/state files from the commit path; PATCH_DESKTOP_PUSH.bat excludes those paths.
+- Completed the follow-up brief from current commit 1e19a2c0c1d904199ec9caa59876c2ba35789224.
+- Preserved the previously working VWAP, Trade Log, STATS1, Instrument Lookup, and calculator behavior while applying the requested follow-up fixes.
+- Updated journal/Trading Journal.xlsx with a metadata-only SYMBOLS sheet-view repair.
+- Runtime/state files remain local dirty state and are excluded by PATCH_DESKTOP_PUSH.bat.
 
-Files changed:
+Files changed intentionally:
 - journal/Trading Journal.xlsx
 - render/master_service.py
-- render/static/calculator.js
 - render/static/instrument_lookup.js
 - tools/master_journal_workbook.py
-- tests/test_calculator_js_behavior.py
 - tests/test_dashboard_home_layout.py
 - tests/test_master_journal_workbook.py
 - tests/test_master_service_calculator_api.py
-- tests/test_master_service_trading_journal_stats.py
 - summary/CODEX_SUMMARY_latest.txt
 
-Implementation notes:
-- Added VWAP as a first-class quality-analysis criterion across calculator UI state, quote/submit/webhook payloads, pending webhook context, Bybit/OANDA context preservation, journal row normalization, editable fields, workbook manual fields, and dropdown validation.
-- Migrated Trade Log headers so VWAP sits immediately after EMA, including compatibility paths for old, pre-move, pre-recommendation, and pre-VWAP workbook schemas.
-- Hardened Trade Log schema migration so very old schemas without EMA can still insert VWAP using the nearest available style template.
-- Repaired SYMBOLS freeze panes to B3 during workbook schema setup and data-only refreshes instead of preserving stale pane positions.
-- Reworked STATS1 label style repair so Source and nested Winners/Losers child labels remain subordinate while top-level Winners/Losers metric labels use the main metric style.
-- Added net/average R multiple, shortest/longest duration aliases, and longest winning/losing streak count aliases to journal stats responses used by Instrument Lookup.
-- Simplified Instrument Lookup specs to hide broker rule/noise fields, removed the Trading Rules section, kept distance rows neutral, and rendered count/streak objects as numbers instead of [object Object].
-- Adjusted calculator layout so Order/Risk, Trade classification, and the quote/results panel occupy the requested rows and columns.
+Requirements implemented:
+- SYMBOLS view repair now normalizes the whole worksheet view, not just freeze_panes. It writes the canonical B3 frozen pane with xSplit=1, ySplit=2, topLeftCell=B3, activePane=bottomRight, state=frozen, and exactly one topRight, bottomLeft, and bottomRight selection.
+- SYMBOLS view repair is idempotent across saved/reloaded workbooks and removes duplicate/stale selections such as bottomRight G62.
+- Instrument Lookup no longer displays Avg drawdown or Max drawdown rows in the Timing & Drawdown section. Backend drawdown metrics remain calculated and covered by the trading journal stats tests.
+- Recent Trades is now a separate full-width Instrument Lookup section below the two-column Specs/Journal Stats layout.
+- Recent Trades now has a top horizontal scrollbar before the heading. It syncs both directions with the table viewport, updates spacer width from table scrollWidth, uses ResizeObserver when available, and degrades gracefully without it.
+- Updated both Instrument Lookup markup paths: INSTRUMENT_SPECS_TEMPLATE in render/master_service.py and runtime/legacy markup in render/static/instrument_lookup.js.
+- Calculator Webhook and Test selectors moved out of Risk and into Trade classification after Round number. Existing IDs/listeners/payload behavior are preserved, and generated webhook output remains below Quote Results.
+- Restored the missing local merged History Export script row so the full calculator API suite passes and the existing /merged/history route/status logic is reachable.
 
-Workbook update and audit:
-- Live workbook migration diagnostics included deleted_extra_trade_log_columns=2, repaired_symbols_freeze_pane=True with previous_symbols_freeze_pane=B40, repaired_stats1_source_label_styles=16, repaired_stats1_metric_label_styles=32, and repaired_stats1_nested_outcome_label_styles=26.
-- Direct workbook verification: Trade Log headers match the current schema; quality window is Test, Pattern, EMA, VWAP, ATHS/ATLS, Order, Round Number; Row ID is hidden; SYMBOLS freeze_panes is B3.
+Workbook preservation and audit:
+- Sheet names unchanged.
+- Trade Log remains 1547 rows by 50 columns.
+- Trade Log Row IDs: 1544 nonblank, 1544 unique.
+- Existing values under every non-VWAP/common Trade Log header were unchanged by the workbook repair.
+- VWAP remains directly after EMA.
+- VWAP validation remains formula1=\"Yes,No\", allow_blank=True, range AG4:AG1547.
+- Row ID remains hidden.
+- Trade Log freeze/filter remain A4 and A3:AX1547.
+- STATS1 A47:D88 values/styles snapshot remained unchanged by the workbook repair.
+- SYMBOLS content/formulas/styles/row heights/column widths/merges/filter snapshot remained unchanged; only sheet-view metadata changed.
+- Final SYMBOLS view: freeze=B3, xSplit=1.0, ySplit=2.0, topLeftCell=B3, activePane=bottomRight, state=frozen, selections topRight A1, bottomLeft A1, bottomRight A1 as read by openpyxl after reload.
+- Formula error scan found 0 literal #REF!, #VALUE!, #DIV/0!, or #NAME? errors.
+
+State backup and commit-scope audit:
+- git show --name-status 1e19a2c0c1d904199ec9caa59876c2ba35789224 -- state_backup.json produced no file output, so state_backup.json was not included in the immediately previous 1e19a2c commit.
+- git diff --name-status b644f85de76be359e22cfb10e87d982bdda35d0c 1e19a2c0c1d904199ec9caa59876c2ba35789224 -- state_backup.json shows state_backup.json changed across the broader baseline range.
+- git log for that range attributes the state_backup.json change to commit 96c33af "Update trading journal state".
+- state_backup.json is currently dirty local runtime state. It was not intentionally edited for this follow-up and must not be staged.
 
 Verification performed:
-- Requested command py -3 -m py_compile render/master_service.py tools/master_journal_workbook.py could not run because the Windows py launcher is not installed in this shell.
-- Bundled Python compile passed for render/master_service.py, tools/master_journal_workbook.py, and the changed focused tests.
+- Requested py -3 -m py_compile render/master_service.py tools/master_journal_workbook.py failed because the Windows py launcher is not installed in this shell.
+- python --version: Python 3.13.2.
+- python -m py_compile render/master_service.py tools/master_journal_workbook.py: passed.
 - node --check render/static/calculator.js: passed.
 - node --check render/static/instrument_lookup.js: passed.
-- Focused regression suite passed: 18 passed, 8 existing FastAPI deprecation warnings.
-- Focused suite covered calculator page/IDs/VWAP validation/payloads, calculator JS VWAP behavior, Instrument Lookup spec/stat rendering, journal stats aliases, Trade Log VWAP migration/dropdowns/manual reads, and SYMBOLS freeze repair.
+- python -m pytest -q -p no:cacheprovider --basetemp=.pytest_tmp_calculator_js_full tests/test_calculator_js_behavior.py: 25 passed.
+- python -m pytest -q -p no:cacheprovider --basetemp=.pytest_tmp_dashboard_home_full tests/test_dashboard_home_layout.py: 23 passed, 41 warnings.
+- python -m pytest -q -p no:cacheprovider --basetemp=.pytest_tmp_calculator_api_full tests/test_master_service_calculator_api.py: 95 passed, 4 warnings.
+- python -m pytest -q -p no:cacheprovider --basetemp=.pytest_tmp_stats_full tests/test_master_service_trading_journal_stats.py: 59 passed, 4 warnings.
+- python -m pytest -q -p no:cacheprovider --basetemp=.pytest_tmp_master_journal_full tests/test_master_journal_workbook.py: 148 passed in 20:33.
+- Focused follow-up regression command for SYMBOLS view, Instrument Lookup layout/scroll, and calculator placement: 5 passed, 4 warnings.
+
+Notes:
+- The full workbook suite first hit a stale STATS1 formatting expectation and was updated to the repaired STATS1 contract before the final full pass.
+- One pre-existing ignored temp directory, .pytest_tmp_monitor_verify, could not be removed due to local permission denial; it is not part of the staged commit.
+- Final commit hash and PATCH_DESKTOP_PUSH.bat verification are produced after this summary is written by the required repository push workflow.

@@ -9,6 +9,12 @@
   let journalMetrics = document.getElementById('journal-metrics');
   let tradeHead = document.getElementById('trade-head');
   let tradeBody = document.getElementById('trade-body');
+  let recentTradesSection = document.getElementById('recent-trades-section');
+  let tradeScrollTop = document.getElementById('trade-scroll-top');
+  let tradeScrollSpacer = document.getElementById('trade-scroll-spacer');
+  let tradeTableWrap = document.getElementById('trade-table-wrap');
+  let tradeScrollResizeObserver = null;
+  let tradeScrollSyncing = false;
 
   const state = { asset: 'crypto' };
   const FX_CODES = new Set(['AUD', 'CAD', 'CHF', 'EUR', 'GBP', 'HKD', 'JPY', 'NZD', 'SGD', 'TRY', 'USD', 'ZAR', 'XAU', 'XAG']);
@@ -145,8 +151,13 @@
       .metric-value.positive, td.positive { background:#dcfce7; color:#166534; }
       .metric-value.negative, td.negative { background:#fee2e2; color:#991b1b; }
       .empty-state { padding:0.85rem; color:#64748b; background:#ffffff; border:1px dashed #cfd8e3; border-radius:6px; }
-      .trade-block { margin-top:0.85rem; }
+      .trade-block { margin-top:1rem; }
+      .recent-trades-panel { margin-top:1rem; }
+      .recent-trades-panel .section-title { margin:0; }
+      .trade-scroll-top { overflow-x:auto; overflow-y:hidden; height:16px; margin:0.85rem 0.85rem 0.55rem; border:1px solid #cfd8e3; border-radius:6px; background:#ffffff; }
+      .trade-scroll-spacer { height:1px; min-width:100%; }
       .table-wrap { overflow-x:auto; border-radius:6px; border:1px solid #cfd8e3; background:#ffffff; }
+      .recent-trades-panel .table-wrap { margin:0 0.85rem 0.85rem; }
       #trade-table { min-width:960px !important; }
       #trade-table th, #trade-table td { color:#0f172a; border-bottom:1px solid #e5e7eb; border-right:1px solid #edf2f7; }
       #trade-table th { background:#eaf2f8; font-weight:850; }
@@ -156,6 +167,91 @@
       @media (max-width:980px) { .journal-columns { grid-template-columns:1fr; } .panel-head { flex-direction:column; } #journal-status { text-align:left; } }
     `;
     document.head.appendChild(style);
+  }
+
+  function recentTradesMarkup() {
+    return [
+      '<section class="panel trade-block recent-trades-panel" id="recent-trades-section">',
+      '<div class="trade-scroll-top" id="trade-scroll-top" aria-hidden="true"><div class="trade-scroll-spacer" id="trade-scroll-spacer"></div></div>',
+      '<div class="section-title">Recent Trades <span class="section-subtitle">Latest first</span></div>',
+      '<div class="table-wrap" id="trade-table-wrap"><table id="trade-table"><thead id="trade-head"></thead><tbody id="trade-body"></tbody></table></div>',
+      '</section>',
+    ].join('');
+  }
+
+  function refreshTradeElements() {
+    recentTradesSection = document.getElementById('recent-trades-section');
+    tradeScrollTop = document.getElementById('trade-scroll-top');
+    tradeScrollSpacer = document.getElementById('trade-scroll-spacer');
+    tradeTableWrap = document.getElementById('trade-table-wrap');
+    tradeHead = document.getElementById('trade-head');
+    tradeBody = document.getElementById('trade-body');
+  }
+
+  function ensureRecentTradesSection(journalPanel) {
+    refreshTradeElements();
+    if (recentTradesSection) return;
+    if (!journalPanel || typeof document.createElement !== 'function') return;
+    const holder = document.createElement('div');
+    holder.innerHTML = recentTradesMarkup();
+    const section = holder.firstElementChild;
+    if (!section) return;
+    const layout = typeof document.querySelector === 'function' ? document.querySelector('.layout') : null;
+    if (layout?.parentNode && typeof layout.parentNode.insertBefore === 'function') {
+      layout.parentNode.insertBefore(section, layout.nextSibling);
+    } else if (journalPanel.parentNode && typeof journalPanel.parentNode.appendChild === 'function') {
+      journalPanel.parentNode.appendChild(section);
+    }
+    refreshTradeElements();
+  }
+
+  function syncTradeScroll(source) {
+    if (!tradeScrollTop || !tradeTableWrap || tradeScrollSyncing) return;
+    tradeScrollSyncing = true;
+    if (source === 'top') {
+      tradeTableWrap.scrollLeft = tradeScrollTop.scrollLeft;
+    } else {
+      tradeScrollTop.scrollLeft = tradeTableWrap.scrollLeft;
+    }
+    tradeScrollSyncing = false;
+  }
+
+  function updateTradeTopScrollbar() {
+    refreshTradeElements();
+    if (!tradeScrollTop || !tradeScrollSpacer || !tradeTableWrap) return;
+    const table = document.getElementById('trade-table');
+    const scrollWidth = Math.max(
+      Number(table?.scrollWidth || 0),
+      Number(tradeTableWrap.scrollWidth || 0),
+      Number(tradeTableWrap.clientWidth || 0),
+    );
+    tradeScrollSpacer.style.width = `${Math.max(scrollWidth, 1)}px`;
+    syncTradeScroll('table');
+  }
+
+  function scheduleTradeTopScrollbarUpdate() {
+    const raf = window.requestAnimationFrame || ((callback) => setTimeout(callback, 0));
+    raf(updateTradeTopScrollbar);
+  }
+
+  function bindTradeScrollSync() {
+    refreshTradeElements();
+    if (!tradeScrollTop || !tradeTableWrap) return;
+    if (!tradeScrollTop.dataset.syncBound) {
+      tradeScrollTop.addEventListener('scroll', () => syncTradeScroll('top'));
+      tradeScrollTop.dataset.syncBound = '1';
+    }
+    if (!tradeTableWrap.dataset.syncBound) {
+      tradeTableWrap.addEventListener('scroll', () => syncTradeScroll('table'));
+      tradeTableWrap.dataset.syncBound = '1';
+    }
+    if (!tradeScrollResizeObserver && typeof window.ResizeObserver === 'function') {
+      tradeScrollResizeObserver = new window.ResizeObserver(updateTradeTopScrollbar);
+      tradeScrollResizeObserver.observe(tradeTableWrap);
+      const table = document.getElementById('trade-table');
+      if (table) tradeScrollResizeObserver.observe(table);
+    }
+    updateTradeTopScrollbar();
   }
 
   function upgradeLegacyMarkup() {
@@ -172,13 +268,13 @@
     if (journalPanel && !journalPanel.querySelector('.panel-head')) {
       journalPanel.innerHTML = [
         '<div class="panel-head"><div><h2>Journal Stats</h2><div class="panel-note">Filtered to this instrument, excluding test trades.</div></div><div id="journal-status"></div></div>',
-        '<div class="panel-body"><div id="journal-metrics"></div><div class="trade-block"><div class="section-title">Recent Trades <span class="section-subtitle">Latest first</span></div><div class="table-wrap"><table id="trade-table"><thead id="trade-head"></thead><tbody id="trade-body"></tbody></table></div></div></div>',
+        '<div class="panel-body"><div id="journal-metrics"></div></div>',
       ].join('');
       journalStatus = document.getElementById('journal-status');
       journalMetrics = document.getElementById('journal-metrics');
-      tradeHead = document.getElementById('trade-head');
-      tradeBody = document.getElementById('trade-body');
     }
+    ensureRecentTradesSection(journalPanel);
+    bindTradeScrollSync();
   }
 
   function setErr(message) {
@@ -535,6 +631,7 @@
       journalMetrics.innerHTML = '<div class="empty-state">Loading journal stats.</div>';
       tradeHead.innerHTML = '';
       tradeBody.innerHTML = '';
+      updateTradeTopScrollbar();
       return;
     }
     if (status === 'no_data') {
@@ -542,6 +639,7 @@
       journalMetrics.innerHTML = '<div class="empty-state">No matching non-test trades were found in the journal.</div>';
       tradeHead.innerHTML = '';
       tradeBody.innerHTML = '';
+      updateTradeTopScrollbar();
       return;
     }
     if (status !== 'ok') {
@@ -549,6 +647,7 @@
       journalMetrics.innerHTML = '<div class="empty-state">Journal stats are unavailable for this lookup.</div>';
       tradeHead.innerHTML = '';
       tradeBody.innerHTML = '';
+      updateTradeTopScrollbar();
       return;
     }
 
@@ -596,8 +695,6 @@
         ['Avg duration', firstValue(s.avg_trade_duration, m.avg_duration_seconds), 'duration'],
         ['Shortest duration', firstValue(m.shortest_duration_seconds, m.min_trade_duration_seconds, m.min_duration_seconds), 'duration'],
         ['Longest duration', firstValue(m.longest_duration_seconds, m.max_trade_duration_seconds, m.max_duration_seconds), 'duration'],
-        ['Avg drawdown', m.avg_drawdown_pct, 'pct', 'negative'],
-        ['Max drawdown', m.max_drawdown_pct, 'pct', 'negative'],
         ['Best win streak', firstValue(m.longest_winning_streak_count, streakCount(m.longest_winning_streak), m.winning_streak), 'count', 'positive'],
         ['Worst losing streak', firstValue(m.longest_losing_streak_count, streakCount(m.longest_losing_streak), m.losing_streak), 'count', 'negative'],
       ], currency),
@@ -612,6 +709,7 @@
     if (!trades.length) {
       tradeHead.innerHTML = '';
       tradeBody.innerHTML = '';
+      updateTradeTopScrollbar();
       return;
     }
     const columns = TRADE_COLUMNS.filter((column) => {
@@ -630,6 +728,9 @@
         return `<td class="${escapeHtml(cls)}">${escapeHtml(formatJournalValue(value, column.kind, currency))}</td>`;
       }).join('')}</tr>`
     )).join('');
+    bindTradeScrollSync();
+    updateTradeTopScrollbar();
+    scheduleTradeTopScrollbarUpdate();
   }
 
   async function fetchJson(url, options = {}) {

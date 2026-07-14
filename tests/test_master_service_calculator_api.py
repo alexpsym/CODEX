@@ -234,8 +234,24 @@ def test_merged_calculator_page_returns_200() -> None:
     assert html.find('id="order-toggle"') < html.find('id="calc-symbol"') < html.find('id="calc-sl-ticks"')
     assert html.find('id="timeframe-toggle"') < html.find('id="setup-toggle"') < html.find('id="pattern-toggle"')
     assert html.find('id="ema-toggle"') < html.find('id="vwap-toggle"') < html.find('id="aths-atls-toggle"')
+    def table_block(caption: str) -> str:
+        start = html.index(f"<caption>{caption}</caption>")
+        return html[start:html.index("</table>", start)]
+    risk_block = table_block("Risk")
+    classification_block = table_block("Trade classification")
+    assert 'id="webhook-toggle"' not in risk_block
+    assert 'id="calc-webhook-status"' not in risk_block
+    assert 'id="test-toggle"' not in risk_block
+    assert 'id="webhook-toggle"' in classification_block
+    assert 'id="calc-webhook-status"' in classification_block
+    assert 'id="test-toggle"' in classification_block
+    assert classification_block.find('id="round-number-toggle"') < classification_block.find('id="webhook-toggle"') < classification_block.find('id="test-toggle"')
+    assert html.count('id="webhook-toggle"') == 1
+    assert html.count('id="calc-webhook-status"') == 1
+    assert html.count('id="test-toggle"') == 1
     assert html.find('<caption>Risk</caption>') < html.find('<caption>Trade classification</caption>') < html.find('id="calc-quote"')
     assert html.find('id="calc-quote"') < html.find('id="calc-results"')
+    assert html.find('id="calc-results"') < html.find('id="calc-webhook-panel"')
     assert "calc-right-rail" not in html
     assert 'id="calc-webhook-url"' in html
     assert 'id="calc-webhook-copy-url"' in html

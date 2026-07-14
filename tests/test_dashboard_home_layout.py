@@ -166,13 +166,26 @@ def test_instrument_lookup_owns_specs_and_journal_markup() -> None:
     assert 'id="calc-journal-summary"' not in master_service_py
     assert 'Instrument Lookup' in master_service_py
     assert 'Journal Stats' in master_service_py
-    assert 'id="asset-toggle"' not in master_service_py[master_service_py.index('INSTRUMENT_SPECS_TEMPLATE'):master_service_py.index('CALCULATOR_TEMPLATE')]
-    assert 'Download JPG' not in master_service_py[master_service_py.index('INSTRUMENT_SPECS_TEMPLATE'):master_service_py.index('CALCULATOR_TEMPLATE')]
+    instrument_block = master_service_py[master_service_py.index('INSTRUMENT_SPECS_TEMPLATE'):master_service_py.index('CALCULATOR_TEMPLATE')]
+    assert 'id="asset-toggle"' not in instrument_block
+    assert 'Download JPG' not in instrument_block
+    assert 'Broker rules' not in instrument_block
     assert 'min-width: 1800px' not in master_service_py
     assert '"/instrument-lookup"' in master_service_py
+    assert 'id="recent-trades-section"' in instrument_block
+    assert 'id="trade-scroll-top"' in instrument_block
+    assert 'id="trade-scroll-spacer"' in instrument_block
+    assert 'id="trade-table-wrap"' in instrument_block
+    assert instrument_block.index('id="trade-scroll-top"') < instrument_block.index('Recent Trades <span') < instrument_block.index('id="trade-table-wrap"')
+    journal_panel_block = instrument_block[instrument_block.index('<h2>Journal Stats</h2>'):instrument_block.index('id="recent-trades-section"')]
+    assert 'Recent Trades' not in journal_panel_block
+    assert '.recent-trades-panel { margin-top:1rem; }' in instrument_block
     assert '/api/instrument-specs?query=' in lookup_js
     assert '/api/calculator/journal-summary?asset=' in lookup_js
     assert 'history.replaceState(null, \'\', `/instrument-lookup?q=' in lookup_js
+    assert 'recentTradesMarkup' in lookup_js
+    assert 'syncTradeScroll' in lookup_js
+    assert 'tradeScrollSpacer.style.width' in lookup_js
     assert '&asset=' not in lookup_js
     assert "'openInterest'" in lookup_js
     assert "openInterestValue: 'Open interest value (USD)'" in lookup_js
@@ -204,13 +217,21 @@ class Element {
     this.listeners = {};
     this.classList = { toggle: () => {}, add: () => {}, remove: () => {} };
     this.dataset = {};
+    this.style = {};
+    this.scrollLeft = 0;
+    this.scrollWidth = id === 'trade-table' || id === 'trade-table-wrap' ? 1440 : 0;
+    this.clientWidth = id === 'trade-table-wrap' || id === 'trade-scroll-top' ? 640 : 0;
   }
   addEventListener(event, callback) { this.listeners[event] = callback; }
   closest() { return null; }
   querySelectorAll() { return []; }
 }
 
-const elements = Object.fromEntries(['q', 'load', 'rows', 'err', 'journal-status', 'journal-metrics', 'trade-head', 'trade-body'].map((id) => [id, new Element(id)]));
+const elements = Object.fromEntries([
+  'q', 'load', 'rows', 'err', 'journal-status', 'journal-metrics',
+  'recent-trades-section', 'trade-scroll-top', 'trade-scroll-spacer', 'trade-table-wrap',
+  'trade-table', 'trade-head', 'trade-body'
+].map((id) => [id, new Element(id)]));
 global.window = { location: { search: '?q=BTCUSDT' } };
 global.history = { replaceState: () => {} };
 global.document = {
@@ -256,6 +277,8 @@ global.fetch = async (url) => {
         avg_r_multiple: 0.75,
         shortest_duration_seconds: 60,
         longest_duration_seconds: 120,
+        avg_drawdown_pct: 12.3,
+        max_drawdown_pct: 45.6,
         longest_winning_streak: { trade_count: 3 },
         longest_losing_streak: { trade_count: 2 }
       },
@@ -269,7 +292,21 @@ eval(source);
   await Promise.resolve();
   await Promise.resolve();
   await new Promise((resolve) => setImmediate(resolve));
-  console.log(JSON.stringify({ rows: elements.rows.innerHTML, journal: elements['journal-metrics'].innerHTML }));
+  elements['trade-scroll-top'].scrollLeft = 321;
+  elements['trade-scroll-top'].listeners.scroll();
+  const tableAfterTop = elements['trade-table-wrap'].scrollLeft;
+  elements['trade-table-wrap'].scrollLeft = 123;
+  elements['trade-table-wrap'].listeners.scroll();
+  const topAfterTable = elements['trade-scroll-top'].scrollLeft;
+  console.log(JSON.stringify({
+    rows: elements.rows.innerHTML,
+    journal: elements['journal-metrics'].innerHTML,
+    tradeHead: elements['trade-head'].innerHTML,
+    tradeBody: elements['trade-body'].innerHTML,
+    spacerWidth: elements['trade-scroll-spacer'].style.width,
+    tableAfterTop,
+    topAfterTable
+  }));
 })();
 '''
     completed = subprocess.run(
@@ -288,10 +325,17 @@ eval(source);
     assert "positive" not in distances
     assert "negative" not in distances
     assert "[object Object]" not in journal_html
+    assert "Avg drawdown" not in journal_html
+    assert "Max drawdown" not in journal_html
     assert "Best win streak" in journal_html
     assert ">3<" in journal_html
     assert "Worst losing streak" in journal_html
     assert ">2<" in journal_html
+    assert "Net P/L" in result["tradeHead"]
+    assert "BTCUSDT" in result["tradeBody"] or "Buy" in result["tradeBody"]
+    assert result["spacerWidth"] == "1440px"
+    assert result["tableAfterTop"] == 321
+    assert result["topAfterTable"] == 123
 
 
 def test_instrument_lookup_detects_separator_normalized_fx_and_metals() -> None:

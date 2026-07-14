@@ -7,8 +7,9 @@ import zipfile
 import xml.etree.ElementTree as ET
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.worksheet.views import Selection
 import pytest
-from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, read_master_journal_source, update_master_journal_workbook_data_only, SHEET_ORDER, STATS1_SHEET, STATS2_SHEET, SYMBOLS_SHEET, TARGET_R_METADATA_SHEET, TRADE_LOG_HEADERS, TRADE_LOG_HEADERS_V1, OLD_TRADE_LOG_HEADERS, PRE_MOVE_TRADE_LOG_HEADERS, MOVE_TO_FIELD_MAP, TRADE_LOG_HEADER_ROWS, TRADE_LOG_DATA_START_ROW, TRADE_LOG_DATA_ROW_HEIGHT, TRADE_LOG_FILTER_HEADER_ROW, TRADE_NUMBER_HEADER, STOP_RECOMMENDATION_HEADER, TARGET_RECOMMENDATION_HEADER, TARGET_RECOMMENDATION_INSUFFICIENT, REPORT_YEARLY_SHEET, REPORT_METRIC_LABELS, INSTRUMENT_AVERAGES_HEADERS, INSTRUMENT_AVERAGES_GROUP_HEADER_ROW, INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, INSTRUMENT_AVERAGES_DATA_START_ROW, DASHBOARD_MOVE_TO_BREAK_EVEN_LABEL, DASHBOARD_MOVE_TO_PROFIT_LABEL, PROFIT_FILL, LOSS_FILL, DURATION_NUMBER_FORMAT, adaptive_percent_number_format, adaptive_number_format, resolve_trade_folder_link, expected_report_sheet_names, _apply_trade_number_hyperlinks, _ensure_trade_log_schema, _ensure_instrument_averages_schema, _ensure_pnl_calendar_freeze_panes, _repair_trade_log_move_to_durations, _trade_log_header_map, _instrument_averages_header_map, _result_percentage_totals_by_market
+from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, read_master_journal_source, update_master_journal_workbook_data_only, SHEET_ORDER, STATS1_SHEET, STATS2_SHEET, SYMBOLS_SHEET, TARGET_R_METADATA_SHEET, TRADE_LOG_HEADERS, TRADE_LOG_HEADERS_V1, OLD_TRADE_LOG_HEADERS, PRE_MOVE_TRADE_LOG_HEADERS, MOVE_TO_FIELD_MAP, TRADE_LOG_HEADER_ROWS, TRADE_LOG_DATA_START_ROW, TRADE_LOG_DATA_ROW_HEIGHT, TRADE_LOG_FILTER_HEADER_ROW, TRADE_NUMBER_HEADER, STOP_RECOMMENDATION_HEADER, TARGET_RECOMMENDATION_HEADER, TARGET_RECOMMENDATION_INSUFFICIENT, REPORT_YEARLY_SHEET, REPORT_METRIC_LABELS, INSTRUMENT_AVERAGES_HEADERS, INSTRUMENT_AVERAGES_GROUP_HEADER_ROW, INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, INSTRUMENT_AVERAGES_DATA_START_ROW, DASHBOARD_MOVE_TO_BREAK_EVEN_LABEL, DASHBOARD_MOVE_TO_PROFIT_LABEL, PROFIT_FILL, LOSS_FILL, DURATION_NUMBER_FORMAT, adaptive_percent_number_format, adaptive_number_format, resolve_trade_folder_link, expected_report_sheet_names, _apply_trade_number_hyperlinks, _ensure_trade_log_schema, _ensure_instrument_averages_schema, _ensure_symbols_freeze_panes, _ensure_pnl_calendar_freeze_panes, _repair_trade_log_move_to_durations, _trade_log_header_map, _instrument_averages_header_map, _result_percentage_totals_by_market
 from tools.master_journal_workbook import _format_duration_display, _parse_duration_text, _repair_legacy_duration_number_formats, _populate_symbols_metrics_preserving_layout, _repair_symbols_header_merges_preserving_layout
 from tools.master_journal_workbook import RECOMMENDATION_TRADE_LOG_HEADERS, _trade_log_three_row_header_values_for
 from tools.master_journal_workbook import _period_drawdown_metrics, _sanitize_recommendation_text
@@ -1264,26 +1265,88 @@ def test_update_data_only_migrates_legacy_all_trades_and_removes_trade_meta(tmp_
     assert "_Trade Meta" not in migrated.sheetnames
     migrated.close()
 
-def test_update_data_only_repairs_symbols_freeze_pane(tmp_path: Path):
+def _symbols_sheet_view_snapshot(ws) -> dict:
+    pane = ws.sheet_view.pane
+    def selection_state(selection) -> dict:
+        active_cell = selection.activeCell
+        sqref = str(selection.sqref or "")
+        if selection.pane in {"topRight", "bottomLeft"} and active_cell in (None, "A1") and sqref in ("", "A1"):
+            active_cell = None
+            sqref = ""
+        return {"pane": selection.pane, "activeCell": active_cell, "sqref": sqref}
+
+    return {
+        "freeze_panes": ws.freeze_panes,
+        "pane": {
+            "xSplit": pane.xSplit,
+            "ySplit": pane.ySplit,
+            "topLeftCell": pane.topLeftCell,
+            "activePane": pane.activePane,
+            "state": pane.state,
+        },
+        "selection": [
+            selection_state(selection)
+            for selection in ws.sheet_view.selection
+        ],
+    }
+
+
+def test_update_data_only_repairs_symbols_freeze_pane_and_canonical_selections(tmp_path: Path):
     out = tmp_path / "Trading Journal.xlsx"
     snap = sample_snapshot()
     build_master_journal_workbook(snap, out)
     wb = load_workbook(out)
-    wb[SYMBOLS_SHEET].freeze_panes = "B40"
+    symbols = wb[SYMBOLS_SHEET]
+    symbols.freeze_panes = "B40"
+    symbols.sheet_view.selection = [
+        Selection(pane="topRight", activeCell=None, sqref=None),
+        Selection(pane="bottomLeft", activeCell=None, sqref=None),
+        Selection(pane="bottomRight", activeCell="A1", sqref="A1"),
+        Selection(pane="bottomLeft", activeCell="A1", sqref="A1"),
+        Selection(pane="bottomRight", activeCell="A1", sqref="A1"),
+        Selection(pane="bottomLeft", activeCell="A1", sqref="A1"),
+        Selection(pane="bottomRight", activeCell="G62", sqref="G62"),
+    ]
     wb.save(out)
     wb.close()
 
     result = update_master_journal_workbook_data_only(out, snap)
     assert result["ok"] is True
+    assert result["diagnostics"].get("repaired_symbols_freeze_pane") is True
     Path(result["candidate_path"]).replace(out)
 
     repaired = load_workbook(out)
-    assert repaired[SYMBOLS_SHEET].freeze_panes == "B3"
-    assert repaired.sheetnames[:len(SHEET_ORDER)] == SHEET_ORDER
-    assert _sheetnames_without_target_r_metadata(repaired)[len(SHEET_ORDER):] == expected_report_sheet_names(snap)
-    assert "_Trade Meta" not in repaired.sheetnames
-    assert "All Trades" not in repaired.sheetnames
+    view = _symbols_sheet_view_snapshot(repaired[SYMBOLS_SHEET])
+    assert view["freeze_panes"] == "B3"
+    assert view["pane"] == {
+        "xSplit": 1.0,
+        "ySplit": 2.0,
+        "topLeftCell": "B3",
+        "activePane": "bottomRight",
+        "state": "frozen",
+    }
+    assert view["selection"] == [
+        {"pane": "topRight", "activeCell": None, "sqref": ""},
+        {"pane": "bottomLeft", "activeCell": None, "sqref": ""},
+        {"pane": "bottomRight", "activeCell": "A1", "sqref": "A1"},
+    ]
+    assert "G62" not in {item["activeCell"] for item in view["selection"]}
+    _ensure_symbols_freeze_panes(repaired[SYMBOLS_SHEET], {})
+    second_view = _symbols_sheet_view_snapshot(repaired[SYMBOLS_SHEET])
+    assert second_view == view
+    repaired.save(out)
     repaired.close()
+
+    second = update_master_journal_workbook_data_only(out, snap)
+    assert second["ok"] is True
+    Path(second["candidate_path"]).replace(out)
+    reloaded = load_workbook(out)
+    assert _symbols_sheet_view_snapshot(reloaded[SYMBOLS_SHEET]) == view
+    assert reloaded.sheetnames[:len(SHEET_ORDER)] == SHEET_ORDER
+    assert _sheetnames_without_target_r_metadata(reloaded)[len(SHEET_ORDER):] == expected_report_sheet_names(snap)
+    assert "_Trade Meta" not in reloaded.sheetnames
+    assert "All Trades" not in reloaded.sheetnames
+    reloaded.close()
 
 
 def test_update_data_only_expands_symbols_filter_for_preserved_manual_rows(tmp_path: Path):
@@ -1444,9 +1507,9 @@ def test_dashboard_layout_style_columns(tmp_path: Path):
         for label in ("Min duration", "Avg duration", "Max duration"):
             row = section_labels[label]
             assert _parse_duration_text(dash.cell(row, 2).value) == expected_seconds
-            assert dash.cell(row, 1).font.bold is False
-            assert dash.cell(row, 1).font.italic is True
-            assert dash.cell(row, 1).alignment.horizontal == "right"
+            assert dash.cell(row, 1).font.bold is True
+            assert dash.cell(row, 1).font.italic is False
+            assert dash.cell(row, 1).alignment.horizontal == "left"
         section_cell = dash.cell(section_row, 1)
         assert section_cell.font.bold is True
         assert section_cell.alignment.horizontal == "left"

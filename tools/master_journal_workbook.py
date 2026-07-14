@@ -8,6 +8,7 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.comments import Comment
 from openpyxl.styles import Font
 from openpyxl.worksheet.datavalidation import DataValidation
+from openpyxl.worksheet.views import Pane, Selection
 import hashlib
 from openpyxl.styles import PatternFill, Border, Side, Alignment
 from openpyxl.formatting.rule import CellIsRule, FormulaRule
@@ -443,12 +444,54 @@ def _ensure_symbols_freeze_panes(wb_or_ws: Workbook | Any, diagnostics: Dict[str
         if getattr(ws, "title", "") not in {SYMBOLS_SHEET, LEGACY_INSTRUMENT_AVERAGES_SHEET}:
             return
     previous = str(ws.freeze_panes or "")
-    if previous == "B3":
-        return
-    ws.freeze_panes = "B3"
+    view = ws.sheet_view
+    pane = getattr(view, "pane", None)
+    def _selection_view_state(selection: Any) -> Dict[str, Any]:
+        pane_name = getattr(selection, "pane", None)
+        active_cell = getattr(selection, "activeCell", None)
+        sqref = str(getattr(selection, "sqref", "") or "")
+        if pane_name in {"topRight", "bottomLeft"} and active_cell in (None, "A1") and sqref in ("", "A1"):
+            active_cell = None
+            sqref = ""
+        return {"pane": pane_name, "activeCell": active_cell, "sqref": sqref}
+
+    previous_pane = {
+        "freeze_panes": previous,
+        "xSplit": getattr(pane, "xSplit", None),
+        "ySplit": getattr(pane, "ySplit", None),
+        "topLeftCell": getattr(pane, "topLeftCell", None),
+        "activePane": getattr(pane, "activePane", None),
+        "state": getattr(pane, "state", None),
+        "selection": [
+            _selection_view_state(selection)
+            for selection in (getattr(view, "selection", None) or [])
+        ],
+    }
+    canonical_selection = [
+        Selection(pane="topRight", activeCell=None, sqref=None),
+        Selection(pane="bottomLeft", activeCell=None, sqref=None),
+        Selection(pane="bottomRight", activeCell="A1", sqref="A1"),
+    ]
+    canonical_state = {
+        "freeze_panes": "B3",
+        "xSplit": 1.0,
+        "ySplit": 2.0,
+        "topLeftCell": "B3",
+        "activePane": "bottomRight",
+        "state": "frozen",
+        "selection": [
+            {"pane": "topRight", "activeCell": None, "sqref": ""},
+            {"pane": "bottomLeft", "activeCell": None, "sqref": ""},
+            {"pane": "bottomRight", "activeCell": "A1", "sqref": "A1"},
+        ],
+    }
+    view.pane = Pane(xSplit=1, ySplit=2, topLeftCell="B3", activePane="bottomRight", state="frozen")
+    view.selection = canonical_selection
     key = "symbols" if getattr(ws, "title", "") == SYMBOLS_SHEET else "instrument_averages"
-    diagnostics[f"repaired_{key}_freeze_pane"] = True
-    diagnostics[f"previous_{key}_freeze_pane"] = previous
+    if previous_pane != canonical_state:
+        diagnostics[f"repaired_{key}_freeze_pane"] = True
+        diagnostics[f"previous_{key}_freeze_pane"] = previous
+        diagnostics[f"previous_{key}_sheet_view"] = previous_pane
 
 
 def _instrument_averages_header_row(ws) -> int:
