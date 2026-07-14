@@ -161,30 +161,30 @@
     "updated_at": "2026-07-04T01:42:59.013554+00:00"
   },
   "monthly_aud_revaluation_state": {
-    "error_detail": "Bybit live credentials are missing",
+    "error_detail": null,
     "last_boundary_resolution": {},
-    "last_error": "Bybit live credentials are missing",
-    "last_error_code": "MONTHLY_AUD_REVAL_BYBIT_BALANCE_ERROR",
+    "last_error": null,
+    "last_error_code": null,
     "last_oanda_window": {},
     "last_result": {
       "changed": 0,
       "failed_months": [],
       "failures": [],
-      "finished_at": "2026-07-13T20:41:45.507035+00:00",
+      "finished_at": "2026-07-14T06:24:55.445552+00:00",
       "mandatory_row_id": "monthly_aud_reval:bybit_live:2026-03",
       "partial": false,
       "processed_months": [],
       "rows": 4,
-      "started_at": "2026-07-13T20:41:45.505188+00:00",
+      "started_at": "2026-07-14T06:24:55.409457+00:00",
       "succeeded_months": [],
       "target_months": []
     },
-    "last_synced_at": "2026-07-13T20:41:45.507012+00:00",
+    "last_synced_at": "2026-07-14T06:24:55.445525+00:00",
     "month_key": null,
-    "ok": false,
-    "stage": "credentials",
-    "traceback": "",
-    "updated_at": "2026-07-13T20:45:39.415297+00:00"
+    "ok": true,
+    "stage": "complete",
+    "traceback": null,
+    "updated_at": "2026-07-14T06:24:55.445543+00:00"
   },
   "oanda_fill_state": {
     "diagnostics": {
@@ -216,7 +216,7 @@
     "updated_at": "2026-07-12T01:44:44.719192+00:00"
   },
   "pending_webhooks": [],
-  "savedAt": "2026-07-13T20:50:02.986685+00:00",
+  "savedAt": "2026-07-14T06:24:57.492432+00:00",
   "source_host": "DESKTOP-1B14EQ6",
   "source_profile": "local",
   "trade_contexts": [
@@ -2246,7 +2246,7 @@
   ],
   "trading_journal": {
     "items": [],
-    "updated_at": "2026-07-13T19:58:43.361913+00:00"
+    "updated_at": "2026-07-13T21:31:08.223975+00:00"
   },
   "trading_journal_import_cache": {
     "files": {
@@ -2461,8 +2461,8 @@
       }
     ],
     "broker_balance_diagnostics": {
-      "bybit_demo_anchor_fingerprint": "c7c1ad0838f9cf34ac6c20fce600ada5ccfb54d950898057ce4d36654b13e195",
-      "updated_at": "2026-07-13T19:58:49.056899+00:00",
+      "bybit_demo_anchor_fingerprint": "a7ec813afbd4384a14a9991b3fd8130461fdda90ff7ab31b25e7f84fe4345691",
+      "updated_at": "2026-07-13T21:31:14.744753+00:00",
       "warnings": [
         "Bybit demo balance unavailable: 502: Bybit balance lookup failed path=/v5/account/wallet-balance: All connection attempts failed",
         "Bybit live balance unavailable: 502: Bybit balance lookup failed path=/v5/account/wallet-balance: All connection attempts failed",
@@ -3052,5 +3052,5 @@
   "watchlist": [
     "DASHUSDT"
   ],
-  "watchlist_updated_at": "2026-07-13T20:45:39.402113+00:00"
+  "watchlist_updated_at": "2026-07-14T06:24:50.976688+00:00"
 }
