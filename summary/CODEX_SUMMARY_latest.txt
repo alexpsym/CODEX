@@ -1,65 +1,41 @@
-Follow-up calculator, SYMBOLS, Instrument Lookup, and workbook repair summary
+Final narrow follow-up summary
 
 Status:
-- Completed the follow-up brief from current commit 1e19a2c0c1d904199ec9caa59876c2ba35789224.
-- Preserved the previously working VWAP, Trade Log, STATS1, Instrument Lookup, and calculator behavior while applying the requested follow-up fixes.
-- Updated journal/Trading Journal.xlsx with a metadata-only SYMBOLS sheet-view repair.
-- Runtime/state files remain local dirty state and are excluded by PATCH_DESKTOP_PUSH.bat.
+- Removed the unintended local-profile History Export main script button from _profile_main_buttons().
+- Preserved the inline History Export dashboard panel, /merged/history, legacy broker-history redirects, exporters, and history APIs.
+- Corrected the stale calculator API test to the inline-History contract: Calculator and Scanner remain merged main rows, while History must not appear as a separate scripts-rail row.
+- Added a no-ResizeObserver window resize fallback for the Instrument Lookup Recent Trades top scrollbar.
+- Did not rewrite or resave journal/Trading Journal.xlsx.
+- Did not intentionally edit state_backup.json. It was already dirty local runtime state at the start of this final brief and remains excluded from the intended commit.
 
 Files changed intentionally:
-- journal/Trading Journal.xlsx
 - render/master_service.py
 - render/static/instrument_lookup.js
-- tools/master_journal_workbook.py
 - tests/test_dashboard_home_layout.py
-- tests/test_master_journal_workbook.py
 - tests/test_master_service_calculator_api.py
 - summary/CODEX_SUMMARY_latest.txt
 
-Requirements implemented:
-- SYMBOLS view repair now normalizes the whole worksheet view, not just freeze_panes. It writes the canonical B3 frozen pane with xSplit=1, ySplit=2, topLeftCell=B3, activePane=bottomRight, state=frozen, and exactly one topRight, bottomLeft, and bottomRight selection.
-- SYMBOLS view repair is idempotent across saved/reloaded workbooks and removes duplicate/stale selections such as bottomRight G62.
-- Instrument Lookup no longer displays Avg drawdown or Max drawdown rows in the Timing & Drawdown section. Backend drawdown metrics remain calculated and covered by the trading journal stats tests.
-- Recent Trades is now a separate full-width Instrument Lookup section below the two-column Specs/Journal Stats layout.
-- Recent Trades now has a top horizontal scrollbar before the heading. It syncs both directions with the table viewport, updates spacer width from table scrollWidth, uses ResizeObserver when available, and degrades gracefully without it.
-- Updated both Instrument Lookup markup paths: INSTRUMENT_SPECS_TEMPLATE in render/master_service.py and runtime/legacy markup in render/static/instrument_lookup.js.
-- Calculator Webhook and Test selectors moved out of Risk and into Trade classification after Round number. Existing IDs/listeners/payload behavior are preserved, and generated webhook output remains below Quote Results.
-- Restored the missing local merged History Export script row so the full calculator API suite passes and the existing /merged/history route/status logic is reachable.
-
-Workbook preservation and audit:
-- Sheet names unchanged.
-- Trade Log remains 1547 rows by 50 columns.
-- Trade Log Row IDs: 1544 nonblank, 1544 unique.
-- Existing values under every non-VWAP/common Trade Log header were unchanged by the workbook repair.
-- VWAP remains directly after EMA.
-- VWAP validation remains formula1=\"Yes,No\", allow_blank=True, range AG4:AG1547.
-- Row ID remains hidden.
-- Trade Log freeze/filter remain A4 and A3:AX1547.
-- STATS1 A47:D88 values/styles snapshot remained unchanged by the workbook repair.
-- SYMBOLS content/formulas/styles/row heights/column widths/merges/filter snapshot remained unchanged; only sheet-view metadata changed.
-- Final SYMBOLS view: freeze=B3, xSplit=1.0, ySplit=2.0, topLeftCell=B3, activePane=bottomRight, state=frozen, selections topRight A1, bottomLeft A1, bottomRight A1 as read by openpyxl after reload.
-- Formula error scan found 0 literal #REF!, #VALUE!, #DIV/0!, or #NAME? errors.
-
-State backup and commit-scope audit:
-- git show --name-status 1e19a2c0c1d904199ec9caa59876c2ba35789224 -- state_backup.json produced no file output, so state_backup.json was not included in the immediately previous 1e19a2c commit.
-- git diff --name-status b644f85de76be359e22cfb10e87d982bdda35d0c 1e19a2c0c1d904199ec9caa59876c2ba35789224 -- state_backup.json shows state_backup.json changed across the broader baseline range.
-- git log for that range attributes the state_backup.json change to commit 96c33af "Update trading journal state".
-- state_backup.json is currently dirty local runtime state. It was not intentionally edited for this follow-up and must not be staged.
+Implementation notes:
+- The duplicate main button entry {"id": "history", "name": "history", "label": "History Export", "open_url": "/merged/history", "dashboard_main_view": True} was removed.
+- Instrument Lookup now binds a single guarded window resize listener only when ResizeObserver is unavailable and window.addEventListener exists. The fallback uses the existing scheduled/requestAnimationFrame update path and preserves the existing ResizeObserver path and bidirectional scrollLeft sync.
+- Added a JS behavior test that runs without ResizeObserver, captures the window resize handler, changes simulated table/viewport width, invokes resize, waits for the scheduled update, verifies the top spacer width changes, and confirms top-to-table and table-to-top scrolling still synchronize.
+- Confirmed the source no longer contradicts the local-profile tests: no "name": "history" main button remains, tests/test_master_service_calculator_api.py now has merged_names = {"calculator", "monitor"}, and the dashboard/spread tests still assert "history" not in by_name.
 
 Verification performed:
-- Requested py -3 -m py_compile render/master_service.py tools/master_journal_workbook.py failed because the Windows py launcher is not installed in this shell.
-- python --version: Python 3.13.2.
 - python -m py_compile render/master_service.py tools/master_journal_workbook.py: passed.
 - node --check render/static/calculator.js: passed.
 - node --check render/static/instrument_lookup.js: passed.
-- python -m pytest -q -p no:cacheprovider --basetemp=.pytest_tmp_calculator_js_full tests/test_calculator_js_behavior.py: 25 passed.
-- python -m pytest -q -p no:cacheprovider --basetemp=.pytest_tmp_dashboard_home_full tests/test_dashboard_home_layout.py: 23 passed, 41 warnings.
-- python -m pytest -q -p no:cacheprovider --basetemp=.pytest_tmp_calculator_api_full tests/test_master_service_calculator_api.py: 95 passed, 4 warnings.
-- python -m pytest -q -p no:cacheprovider --basetemp=.pytest_tmp_stats_full tests/test_master_service_trading_journal_stats.py: 59 passed, 4 warnings.
-- python -m pytest -q -p no:cacheprovider --basetemp=.pytest_tmp_master_journal_full tests/test_master_journal_workbook.py: 148 passed in 20:33.
-- Focused follow-up regression command for SYMBOLS view, Instrument Lookup layout/scroll, and calculator placement: 5 passed, 4 warnings.
+- Focused no-ResizeObserver scrollbar and calculator API contract tests: 2 passed, 4 warnings.
+- Requested python -m pytest -q -p no:cacheprovider tests/test_dashboard_home_layout.py: 18 passed before 6 setup errors caused by PermissionError scanning C:\Users\User\AppData\Local\Temp\pytest-of-User.
+- Rerun with repo-local temp, python -m pytest -q -p no:cacheprovider --basetemp=.pytest_tmp_final_narrow_dashboard tests/test_dashboard_home_layout.py: 24 passed, 41 warnings.
+- python -m pytest -q -p no:cacheprovider --basetemp=.pytest_tmp_final_narrow_calc_api tests/test_master_service_calculator_api.py: 95 passed, 4 warnings.
+- python -m pytest -q -p no:cacheprovider --basetemp=.pytest_tmp_final_narrow_spread tests/test_spread_monitor_dashboard.py: 13 passed, 8 warnings.
+- python -m pytest -q -p no:cacheprovider --basetemp=.pytest_tmp_final_narrow_calc_js tests/test_calculator_js_behavior.py: 25 passed.
 
-Notes:
-- The full workbook suite first hit a stale STATS1 formatting expectation and was updated to the repaired STATS1 contract before the final full pass.
-- One pre-existing ignored temp directory, .pytest_tmp_monitor_verify, could not be removed due to local permission denial; it is not part of the staged commit.
-- Final commit hash and PATCH_DESKTOP_PUSH.bat verification are produced after this summary is written by the required repository push workflow.
+Workbook and runtime/state scope:
+- git diff --name-only -- journal/Trading Journal.xlsx returned no output; the workbook was untouched by this correction.
+- state_backup.json remains dirty local runtime state from before this final brief and is excluded by PATCH_DESKTOP_PUSH.bat along with other runtime/data paths.
+- No runtime timestamps, caches, credentials, workbook edits, or local state files are intended for this follow-up commit.
+
+Push workflow:
+- PATCH_DESKTOP_PUSH.bat must run after this summary and verify local HEAD equals origin/master before the task is complete.

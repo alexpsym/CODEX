@@ -14,6 +14,7 @@
   let tradeScrollSpacer = document.getElementById('trade-scroll-spacer');
   let tradeTableWrap = document.getElementById('trade-table-wrap');
   let tradeScrollResizeObserver = null;
+  let tradeScrollResizeFallbackBound = false;
   let tradeScrollSyncing = false;
 
   const state = { asset: 'crypto' };
@@ -250,6 +251,9 @@
       tradeScrollResizeObserver.observe(tradeTableWrap);
       const table = document.getElementById('trade-table');
       if (table) tradeScrollResizeObserver.observe(table);
+    } else if (!tradeScrollResizeObserver && !tradeScrollResizeFallbackBound && typeof window.addEventListener === 'function') {
+      window.addEventListener('resize', scheduleTradeTopScrollbarUpdate);
+      tradeScrollResizeFallbackBound = true;
     }
     updateTradeTopScrollbar();
   }

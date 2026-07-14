@@ -314,7 +314,6 @@ def _profile_main_buttons() -> List[Dict[str, object]]:
             [
                 {"id": "trading-journal", "name": "trading-journal", "label": "Journal", "open_url": "/dashboard/trading-journal", "dashboard_main_view": True},
                 {"id": "monitor", "name": "monitor", "label": "Scanner", "open_url": "/merged/monitor", "dashboard_main_view": True},
-                {"id": "history", "name": "history", "label": "History Export", "open_url": "/merged/history", "dashboard_main_view": True},
                 {"id": "ivindicator-clone", "name": "ivindicator-clone", "label": "IV Indicator", "open_url": "/apps/ivindicator-clone", "dashboard_main_view": True},
                 {"id": "spreads-clone", "name": "spreads-clone", "label": "Spreads", "open_url": "/apps/spreads-clone", "dashboard_main_view": True},
             ]

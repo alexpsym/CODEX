@@ -124,12 +124,18 @@ def test_scripts_page_contains_calculator_row() -> None:
 def test_scripts_page_marks_merged_dashboard_views_non_standalone() -> None:
     response = asyncio.run(master_service.list_scripts())
     payload = json.loads(response.body.decode("utf-8"))
-    merged_names = {"calculator", "history", "monitor"}
+    merged_names = {"calculator", "monitor"}
     merged_rows = [row for row in payload if row.get("name") in merged_names]
     assert len(merged_rows) == len(merged_names)
     for row in merged_rows:
         assert row.get("standalone") is False
         assert row.get("dashboard_main_view") is True
+    assert all(row.get("name") != "history" for row in payload)
+    home = asyncio.run(master_service.home_page()).body.decode("utf-8")
+    assert 'id="dashboard-history-panel"' in home
+    history_page = asyncio.run(master_service.merged_history_page())
+    assert history_page.status_code == 200
+    assert "history-export" in history_page.body.decode("utf-8")
 
 
 def test_render_env_hides_local_only_scanner_scripts(monkeypatch: pytest.MonkeyPatch) -> None:

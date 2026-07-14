@@ -338,6 +338,112 @@ eval(source);
     assert result["topAfterTable"] == 123
 
 
+def test_instrument_lookup_top_scrollbar_updates_on_window_resize_without_resize_observer() -> None:
+    node = shutil.which("node")
+    assert node, "node is required for instrument lookup JS behavior test"
+    harness = r'''
+const fs = require('fs');
+const source = fs.readFileSync(process.argv[1], 'utf8');
+let resizeHandler = null;
+let resizeRegistrations = 0;
+
+class Element {
+  constructor(id) {
+    this.id = id;
+    this.value = '';
+    this.textContent = '';
+    this.innerHTML = '';
+    this.tagName = 'DIV';
+    this.listeners = {};
+    this.classList = { toggle: () => {}, add: () => {}, remove: () => {} };
+    this.dataset = {};
+    this.style = {};
+    this.scrollLeft = 0;
+    this.scrollWidth = id === 'trade-table' || id === 'trade-table-wrap' ? 960 : 0;
+    this.clientWidth = id === 'trade-table-wrap' || id === 'trade-scroll-top' ? 420 : 0;
+  }
+  addEventListener(event, callback) { this.listeners[event] = callback; }
+  closest() { return null; }
+  querySelectorAll() { return []; }
+}
+
+const elements = Object.fromEntries([
+  'q', 'load', 'rows', 'err', 'journal-status', 'journal-metrics',
+  'recent-trades-section', 'trade-scroll-top', 'trade-scroll-spacer', 'trade-table-wrap',
+  'trade-table', 'trade-head', 'trade-body'
+].map((id) => [id, new Element(id)]));
+global.window = {
+  location: { search: '?q=BTCUSDT' },
+  addEventListener: (event, callback) => {
+    if (event === 'resize') {
+      resizeHandler = callback;
+      resizeRegistrations += 1;
+    }
+  },
+  requestAnimationFrame: (callback) => setTimeout(callback, 0),
+};
+global.history = { replaceState: () => {} };
+global.document = {
+  head: { appendChild: () => {} },
+  createElement: (tag) => new Element(tag),
+  getElementById: (id) => elements[id] || null,
+};
+global.fetch = async (url) => {
+  const textUrl = String(url);
+  if (textUrl.includes('/api/instrument-specs')) {
+    return { ok: true, status: 200, statusText: 'OK', text: async () => JSON.stringify({ resolved_symbol: 'BTCUSDT', lastPrice: '100' }) };
+  }
+  if (textUrl.includes('/api/calculator/journal-summary')) {
+    return { ok: true, status: 200, statusText: 'OK', text: async () => JSON.stringify({
+      status: 'ok',
+      canonical_symbol: 'BTCUSDT',
+      stats: { total_trades: 1, wins: 1, losses: 0, win_rate: '100.00%' },
+      metrics: { trades: 1, wins: 1, losses: 0, win_rate_pct: 100, net_profit_total: 10, net_r_multiple: 1, avg_r_multiple: 1 },
+      trades: [{ symbol: 'BTCUSDT', close_time: '2026-01-01T00:00:00Z', side: 'Buy', net_profit: 10, result_pct: 1, currency: 'USDT' }]
+    }) };
+  }
+  return { ok: true, status: 200, statusText: 'OK', text: async () => JSON.stringify({ resolved_symbol: 'BTCUSDT' }) };
+};
+eval(source);
+(async () => {
+  await Promise.resolve();
+  await Promise.resolve();
+  await new Promise((resolve) => setImmediate(resolve));
+  const initialSpacerWidth = elements['trade-scroll-spacer'].style.width;
+  elements['trade-table'].scrollWidth = 1777;
+  elements['trade-table-wrap'].scrollWidth = 1777;
+  if (!resizeHandler) throw new Error('resize handler was not registered');
+  resizeHandler();
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  elements['trade-scroll-top'].scrollLeft = 333;
+  elements['trade-scroll-top'].listeners.scroll();
+  const tableAfterTop = elements['trade-table-wrap'].scrollLeft;
+  elements['trade-table-wrap'].scrollLeft = 222;
+  elements['trade-table-wrap'].listeners.scroll();
+  const topAfterTable = elements['trade-scroll-top'].scrollLeft;
+  console.log(JSON.stringify({
+    resizeRegistrations,
+    initialSpacerWidth,
+    resizedSpacerWidth: elements['trade-scroll-spacer'].style.width,
+    tableAfterTop,
+    topAfterTable,
+  }));
+})();
+'''
+    completed = subprocess.run(
+        [node, "-e", harness, str(ROOT / "render" / "static" / "instrument_lookup.js")],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    result = json.loads(completed.stdout.strip().splitlines()[-1])
+    assert result["resizeRegistrations"] == 1
+    assert result["initialSpacerWidth"] == "960px"
+    assert result["resizedSpacerWidth"] == "1777px"
+    assert result["tableAfterTop"] == 333
+    assert result["topAfterTable"] == 222
+
+
 def test_instrument_lookup_detects_separator_normalized_fx_and_metals() -> None:
     node = shutil.which("node")
     assert node, "node is required for instrument lookup JS behavior test"
