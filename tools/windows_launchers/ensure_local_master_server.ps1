@@ -16,6 +16,8 @@ if ([string]::IsNullOrWhiteSpace($DecisionPath)) {
 $buildFiles = @(
     "render/master_service.py",
     "render/static/calculator.js",
+    "render/static/dashboard.js",
+    "render/static/history_page.js",
     "render/static/instrument_lookup.js",
     "render/static/open_orders.js",
     "render/static/trading_journal.js",
@@ -23,7 +25,8 @@ $buildFiles = @(
     "run_local_master_control.bat",
     "tools/windows_launchers/local_master_worker_console.bat",
     "tools/windows_launchers/stream_local_master_worker.ps1",
-    "tools/windows_launchers/ensure_local_master_server.ps1"
+    "tools/windows_launchers/ensure_local_master_server.ps1",
+    "tools/windows_launchers/write_local_master_normal_exit_marker.ps1"
 )
 
 function Write-Decision {

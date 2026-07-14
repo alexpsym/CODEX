@@ -4502,11 +4502,29 @@ def test_stats_symbols_and_reports_required_repairs(tmp_path: Path):
     def is_outcome_child_label(row: int) -> bool:
         return winners_section < row < losers_section_for_style or losers_section_for_style < row < labels["Side"]
 
+    categorical_section_rows = [
+        row
+        for row in range(1, stats1.max_row + 1)
+        if str(stats1.cell(row, 1).value or "").strip() in {"Side", "Patterns", "Timeframe", "Commission"}
+    ]
+
+    def is_nested_outcome_label(row: int) -> bool:
+        label = str(stats1.cell(row, 1).value or "").strip()
+        if label not in {"Winners", "Losers"}:
+            return False
+        previous_sections = [section_row for section_row in categorical_section_rows if section_row < row]
+        if not previous_sections:
+            return False
+        previous = previous_sections[-1]
+        next_sections = [section_row for section_row in categorical_section_rows if section_row > previous]
+        end = next_sections[0] if next_sections else stats1.max_row + 1
+        return previous < row < end
+
     for row in range(1, stats1.max_row + 1):
         label_cell = stats1.cell(row, 1)
         if label_cell.value in (None, ""):
             continue
-        if str(label_cell.value).strip() == "Source" or is_outcome_child_label(row):
+        if str(label_cell.value).strip() == "Source" or is_outcome_child_label(row) or is_nested_outcome_label(row):
             assert label_cell.font.bold is False
             assert label_cell.font.italic is True
             assert label_cell.alignment.horizontal == "right"
@@ -4525,6 +4543,10 @@ def test_stats_symbols_and_reports_required_repairs(tmp_path: Path):
         )
         assert _cell_fill_rgb(stats1.cell(winner_row, 2)) == "C6EFCE"
         assert _cell_fill_rgb(stats1.cell(loser_row, 2)) == "FFC7CE"
+        for row in (winner_row, loser_row):
+            assert stats1.cell(row, 1).font.bold is False
+            assert stats1.cell(row, 1).font.italic is True
+            assert stats1.cell(row, 1).alignment.horizontal == "right"
     losers_section = next(
         row for row in range(1, stats1.max_row + 1)
         if stats1.cell(row, 1).value == "Losers" and row < labels["Side"]

@@ -1,64 +1,76 @@
-Dashboard inline tools and Trading Journal migration summary
+Dashboard and Trading Journal final cleanup summary
 
 Status:
-- Implemented the dashboard layout, inline Instrument Lookup, inline History Export, and Trading Journal generator/updater changes.
-- Used the existing repository workbook at journal/Trading Journal.xlsx as the authorized baseline per user follow-up.
-- Migrated journal/Trading Journal.xlsx with the updated workbook updater and verified source row identity was preserved.
+- Used the repository workbook at journal/Trading Journal.xlsx as the baseline.
+- Restored journal/Trading Journal.xlsx from the tracked baseline after a temporary refresh attempt reduced the source rows, then refreshed the workbook derived sheets from the full restored 1,544-row source snapshot.
+- Implemented the dashboard/journal cleanup changes and verified the refreshed workbook stayed intact.
 
 Files changed:
+- .gitignore
+- journal/Trading Journal.xlsx
 - render/master_service.py
 - render/static/dashboard.js
-- render/static/history_page.js
 - tools/master_journal_workbook.py
-- journal/Trading Journal.xlsx
+- tools/windows_launchers/ensure_local_master_server.ps1
 - tests/test_dashboard_home_layout.py
-- tests/test_dashboard_js_syntax.py
 - tests/test_master_journal_workbook.py
-- tests/test_master_service_profiles.py
+- tests/test_master_service_local_exit.py
+- tests/test_master_service_master_journal_sync.py
+- tests/test_master_service_oanda_inactivity.py
 - tests/test_master_service_trading_journal_stats.py
-- tests/test_spread_monitor_dashboard.py
 - summary/CODEX_SUMMARY_latest.txt
 
-Dashboard behavior changed:
-- Removed Instrument Lookup and History from the local left-side dashboard tool list while preserving their standalone routes.
-- Removed the fixed/minimum orders workspace height that created the large blank gap.
-- Added same-origin iframe height synchronization using guarded ResizeObserver/MutationObserver logic plus safe fallbacks.
-- Rendered Instrument Lookup inline beneath Pine Scripts. Blank submission stays inline with validation; nonblank submission synchronously opens /instrument-lookup?q=... in a new tab.
-- Rendered the existing History Export controls inline beneath Instrument Lookup and loaded history_page.js on the dashboard with standalone-route guards.
+Implementation notes:
+- Added the shared balance_drawdown_metrics helper in tools/master_journal_workbook.py and routed workbook/report drawdown calculations through it.
+- Updated render/master_service.py to use the shared drawdown helper with all rows available as cashflow/monthly AUD revaluation anchors, while filtered subsets remain the drawdown balance points.
+- Removed the duplicate nested drawdown implementation from render/master_service.py.
+- Restored the _to_ts helper used by streak logic inside _compute_journal_stats.
+- Removed stray _manual_save_set_known_fingerprint(path) calls from non-master-journal paths so webhook/OANDA error paths no longer raise NameError.
+- Added STATS1 repair coverage for nested categorical Winners/Losers labels so those child rows are right-aligned, italic, and non-bold after broad formatting repair.
+- Added dashboard.js and history_page.js to local source stamping in both the service and Windows launcher so static dashboard/history changes trigger a local rebuild.
+- Hardened dashboard iframe height sync by creating ResizeObserver/MutationObserver checks from the iframe document realm and guarding cross-frame reload invalidations.
+- Ignored .codex_tmp*/ so local smoke-server audit files are not staged.
 
-Workbook schema, values, and formatting changed:
-- Replaced visible exact_tie_goal_preference_decrease recommendation text with human-readable wording and added a generic snake_case sanitizer for workbook-facing recommendation strings.
-- Added/filled the overall STATS1 Target block below the Stop block: Avg target %, Min target %, Source, Max target %, Source, Recommendation.
-- Added Winner/Loser Min duration, Avg duration, and Max duration rows to STATS1 and report schemas.
-- Added SYMBOLS overall Avg stop % and Avg target % columns while preserving W/L averages and recommendation columns.
-- Fixed SYMBOLS header-band migration by unmerging/rebuilding the header rows before schema insertions.
-- Added STATS1 subordinate label styling that copies manual example styles when present and falls back to right-aligned italic non-bold labels for Source and Winner/Loser child rows.
-- Migrated journal/Trading Journal.xlsx. Final workbook audit: STATS1 147x9, SYMBOLS 122x46, Trade Log 1547x49, YEARLY REPORT/2026 127 rows; no visible exact_tie_goal_preference_decrease cells remained.
+Workbook refresh and audit:
+- Refresh result: ok=True, updated_cells=457, repaired_stats1_nested_outcome_label_styles=26, repaired_stats1_source_label_styles=16.
+- Source rows after refresh: 1,544 total; 1,444 trade rows, 96 cashflow rows, 4 monthly AUD revaluation rows.
+- Duplicate row IDs after refresh: 0.
+- Sheet dimensions: STATS1 A1:I147, SYMBOLS A1:AT122, Trade Log A1:AW1547, YEARLY REPORT A1:J127, 2026 A1:M127.
+- Formula error scan across STATS1/STATS2/SYMBOLS/Trade Log/YEARLY REPORT/2026: 0.
+- STATS1 style audit: nested Winners/Losers bad styles 0; Manual/Bybit/OANDA source-label bad styles 0.
+- STATS1 top metrics after refresh: Trades 1409 overall, 1037 FX, 372 Crypto; Wins 400 overall; Losses 993 overall; Test rows 35.
 
-Drawdown audit conclusion:
-- The old report/workbook fallback based on cumulative per-trade percentages was wrong for account drawdown because it could treat deposits, withdrawals, or revaluations as trading drawdowns.
-- The corrected definition uses per-account balance/equity points, preferring analysis_balance_after_trade and falling back to balance_after_trade, segmented by account and cashflow/monthly AUD revaluation anchors.
-- A drawdown observation is prior peak balance to later trough balance within the same account/anchor segment. Start is the peak timestamp; End is the later trough timestamp.
-- Independent recalculation from the authorized repo workbook matched the audit clue:
-  Overall min 0.008612%, avg 10.132670%, max 45.231131%.
-  Forex min 0.013839%, avg 5.042601%, max 23.403578%.
-  Crypto min 0.008612%, avg 22.618807%, max 45.231131%.
-- Final workbook checks confirmed populated drawdown values use distinct peak/trough timestamps where the data supports it.
+Drawdown audit values:
+- Min drawdown: Overall 0.008612%, FX 0.013839%, Crypto 0.008612%.
+- Min drawdown start/end: Overall 2020-04-12 16:42:00 to 2020-04-13 19:21:00; FX 2020-04-03 18:19:00 to 2020-04-06 10:35:00; Crypto 2020-04-12 16:42:00 to 2020-04-13 19:21:00.
+- Avg drawdown: Overall 10.132670%, FX 5.042601%, Crypto 22.618807%.
+- Max drawdown: Overall 45.231131%, FX 23.403578%, Crypto 45.231131%.
+- Max drawdown start/end: Overall 2020-10-28 01:44:00 to 2024-10-27 20:47:00; FX 2021-04-29 04:35:00 to 2022-01-26 02:54:36; Crypto 2020-10-28 01:44:00 to 2024-10-27 20:47:00.
 
-Workbook verification performed:
-- Opened the workbook in openpyxl formula and data_only modes before and after migration.
-- Baseline source identity: 1,544 rows total; 1,444 trades, 96 cashflows, 4 monthly AUD revaluations; no blank or duplicate IDs.
-- After migration and a second updater run, source row counts and IDs were unchanged.
-- Confirmed STATS1 target block, STATS1 Winner/Loser duration rows, report duration labels, SYMBOLS stop/target columns, filters, panes, merged-range counts, and absence of raw recommendation keys.
-- Visual inspection in Excel/LibreOffice was not run in this automated pass; verification was via openpyxl structural/value inspection and regression tests.
+Dashboard/browser smoke:
+- Ran a safe local uvicorn smoke server with external broker/Dropbox autostarts disabled.
+- Dashboard zero-order state showed Calculator, Journal, Scanner, IV Indicator, Spreads, and Exit in the left tool list; Instrument Lookup and History Export remained inline below the orders iframe/Pine Scripts area.
+- Populated 28 smoke open orders; dashboard iframe grew to 1655px with no vertical inner scroll and no section overlap.
+- Timestamp-filtered browser console checks after the iframe observer fix returned no new console errors.
+- Blank Instrument Lookup submission stayed inline with validation.
+- Direct /instrument-lookup?q=BTC, ETH, and EURUSD routes returned 200. BTC/ETH specs and journal APIs resolved under the safe server; EURUSD journal stats resolved, while live OANDA specs were unavailable because credentials were intentionally blanked.
+- The real broker History Export download was not run because the normal external-access launcher escalation was rejected; mocked history export/download regression tests passed.
 
-Tests and checks performed:
+Verification performed:
 - python -m py_compile render/master_service.py tools/master_journal_workbook.py: passed.
 - node --check render/static/dashboard.js: passed.
-- node --check render/static/instrument_lookup.js: passed.
 - node --check render/static/history_page.js: passed.
-- python -m pytest -q --basetemp=.pytest_tmp_required_final tests/test_dashboard_home_layout.py tests/test_dashboard_js_syntax.py tests/test_master_journal_workbook.py tests/test_master_service_trading_journal_stats.py tests/test_master_service_profiles.py tests/test_spread_monitor_dashboard.py: 267 passed, 99 warnings.
+- node --check render/static/instrument_lookup.js: passed.
+- Focused dashboard/journal/service regression suite: 171 passed, 70 warnings.
+- Full tests/test_master_journal_workbook.py suite: 148 passed in 21:23.
+- tests/test_windows_launchers.py: 45 passed.
+- tests/test_master_service_trading_journal_crud.py: 188 passed, 4 warnings.
+- Post-restore focused regression suite: 100 passed, 66 warnings.
 
-Residual risks and notes:
-- The local app/browser workflow was covered by markup/JS/API regression tests, not a manual browser session.
-- Existing dirty runtime/state files remain local and are excluded by PATCH_DESKTOP_PUSH.bat: bybit_monitor/custom_alerts.json, render/data/*, and state_manifest.json.
+Local-only dirty files:
+- bybit_monitor/custom_alerts.json
+- render/data/monthly_aud_revaluation_state.json
+- render/data/trade_contexts.json
+- state_backup.json
+- state_manifest.json
+- These are runtime/state files and are excluded by PATCH_DESKTOP_PUSH.bat.

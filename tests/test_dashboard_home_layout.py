@@ -136,8 +136,10 @@ def test_dashboard_orders_workspace_uses_content_height_sync() -> None:
     assert 'min-height: 680px' not in html
     assert 'height: 70vh' not in html
     assert 'installWorkspaceHeightSync' in dashboard_js
-    assert 'ResizeObserver' in dashboard_js
-    assert 'MutationObserver' in dashboard_js
+    assert 'const frameWindow = doc.defaultView || workspaceFrame.contentWindow || window;' in dashboard_js
+    assert 'const FrameResizeObserver = frameWindow.ResizeObserver || window.ResizeObserver;' in dashboard_js
+    assert 'const FrameMutationObserver = frameWindow.MutationObserver || window.MutationObserver;' in dashboard_js
+    assert 'observeNode(workspaceMutationObserver, doc.body' in dashboard_js
     assert "workspaceFrame?.addEventListener('load', installWorkspaceHeightSync);" in dashboard_js
 
 

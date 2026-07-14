@@ -3,6 +3,7 @@
 .pytest_tmp*/
 .pytest_tmp*
 .pytest_*.log
+.codex_tmp*/
 __pycache__/
 *.pyc
 PATCH_DESKTOP_PUSH-latest.log

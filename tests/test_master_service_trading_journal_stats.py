@@ -64,7 +64,7 @@ if _httpx_spec is None:
 
 import render.master_service as master_service
 from render.master_service import _compute_journal_stats, _compute_journal_period_stats, _build_journal_balance_timelines
-from tools.master_journal_workbook import TARGET_RECOMMENDATION_INSUFFICIENT, _distance_recommendation_summary, _target_r_recommendation, _target_r_realized_from_original_plan
+from tools.master_journal_workbook import TARGET_RECOMMENDATION_INSUFFICIENT, _distance_recommendation_summary, _target_r_recommendation, _target_r_realized_from_original_plan, balance_drawdown_metrics
 
 
 def test_compute_journal_stats_winner_loser_splits_and_durations() -> None:
@@ -232,6 +232,37 @@ def test_compute_journal_stats_market_drawdown_uses_cashflow_segments() -> None:
     assert risk_by_market["crypto"]["avg_drawdown_pct"] == by_market["crypto"]["avg_drawdown_pct"]
     assert by_market["fx"]["drawdown_segments_count"] == 2
     assert by_market["crypto"]["drawdown_segments_count"] == 2
+
+
+def test_compute_journal_stats_drawdown_uses_monthly_revaluation_segments() -> None:
+    rows = [
+        {"row_type": "trade", "asset_class": "crypto", "symbol": "BTCUSDT", "account": "BYBIT", "result_pct": 1.0, "r_multiple": 1.0, "net_profit": 10, "analysis_balance_after_trade": 1000, "close_time": "2026-01-01T00:00:00Z"},
+        {"row_type": "trade", "asset_class": "crypto", "symbol": "ETHUSDT", "account": "BYBIT", "result_pct": -1.0, "r_multiple": -1.0, "net_profit": -10, "analysis_balance_after_trade": 900, "close_time": "2026-01-02T00:00:00Z"},
+        {"id": "reval-2026-01", "row_type": "monthly_aud_reval", "account": "BYBIT", "close_time": "2026-01-03T00:00:00Z"},
+        {"row_type": "trade", "asset_class": "crypto", "symbol": "SOLUSDT", "account": "BYBIT", "result_pct": 1.0, "r_multiple": 1.0, "net_profit": 10, "analysis_balance_after_trade": 950, "close_time": "2026-01-04T00:00:00Z"},
+        {"row_type": "trade", "asset_class": "crypto", "symbol": "XRPUSDT", "account": "BYBIT", "result_pct": -1.0, "r_multiple": -1.0, "net_profit": -10, "analysis_balance_after_trade": 902.5, "close_time": "2026-01-05T00:00:00Z"},
+    ]
+
+    stats = _compute_journal_stats(rows, balances=[])
+    by_market = stats["groups"]["by_market"]
+    risk_by_market = stats["groups"]["risk_expectancy"]["by_market"]
+    helper = balance_drawdown_metrics([row for row in rows if row["row_type"] == "trade"], rows)
+
+    assert stats["totals"]["drawdown_segments_count"] == 2
+    assert stats["totals"]["min_drawdown_pct"] == pytest.approx(helper["min_drawdown_pct"])
+    assert stats["totals"]["avg_drawdown_pct"] == pytest.approx(helper["avg_drawdown_pct"])
+    assert stats["totals"]["max_drawdown_pct"] == pytest.approx(helper["max_drawdown_pct"])
+    assert stats["totals"]["max_drawdown_pct"] == pytest.approx(10.0)
+    assert stats["totals"]["avg_drawdown_pct"] == pytest.approx(7.5)
+    assert stats["totals"]["max_drawdown_detail"]["start_time"] == helper["max_drawdown_detail"]["start_time"] == "2026-01-01T00:00:00Z"
+    assert stats["totals"]["max_drawdown_detail"]["end_time"] == helper["max_drawdown_detail"]["end_time"] == "2026-01-02T00:00:00Z"
+    assert stats["totals"]["min_drawdown_detail"]["start_time"] == helper["min_drawdown_detail"]["start_time"] == "2026-01-04T00:00:00Z"
+    assert stats["totals"]["min_drawdown_detail"]["end_time"] == helper["min_drawdown_detail"]["end_time"] == "2026-01-05T00:00:00Z"
+    assert by_market["crypto"]["drawdown_segments_count"] == 2
+    assert by_market["crypto"]["min_drawdown_pct"] == pytest.approx(helper["min_drawdown_pct"])
+    assert by_market["crypto"]["avg_drawdown_pct"] == pytest.approx(helper["avg_drawdown_pct"])
+    assert by_market["crypto"]["max_drawdown_pct"] == pytest.approx(helper["max_drawdown_pct"])
+    assert risk_by_market["crypto"]["avg_drawdown_pct"] == by_market["crypto"]["avg_drawdown_pct"]
 
 
 def test_compute_journal_stats_distance_fallback_percent_points_are_not_fraction_scaled() -> None:

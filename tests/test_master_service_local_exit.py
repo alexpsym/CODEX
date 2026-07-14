@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -14,6 +15,60 @@ master_service = importlib.util.module_from_spec(SPEC)
 assert SPEC and SPEC.loader
 sys.modules[SPEC.name] = master_service
 SPEC.loader.exec_module(master_service)
+
+
+def _launcher_build_files() -> tuple[str, ...]:
+    script = (ROOT / "tools" / "windows_launchers" / "ensure_local_master_server.ps1").read_text(encoding="utf-8")
+    match = re.search(r"\$buildFiles\s*=\s*@\((.*?)\)", script, re.DOTALL)
+    assert match is not None
+    return tuple(re.findall(r'"([^"]+)"', match.group(1)))
+
+
+def test_local_build_file_lists_match_launcher_preflight() -> None:
+    expected = (
+        "render/master_service.py",
+        "render/static/calculator.js",
+        "render/static/dashboard.js",
+        "render/static/history_page.js",
+        "render/static/instrument_lookup.js",
+        "render/static/open_orders.js",
+        "render/static/trading_journal.js",
+        "tools/master_journal_workbook.py",
+        "run_local_master_control.bat",
+        "tools/windows_launchers/local_master_worker_console.bat",
+        "tools/windows_launchers/stream_local_master_worker.ps1",
+        "tools/windows_launchers/ensure_local_master_server.ps1",
+        "tools/windows_launchers/write_local_master_normal_exit_marker.ps1",
+    )
+
+    assert master_service.LOCAL_BUILD_FILES == expected
+    assert _launcher_build_files() == expected
+
+
+def test_local_source_stamp_tracks_dashboard_and_history_static(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    build_files = (
+        "render/master_service.py",
+        "render/static/dashboard.js",
+        "render/static/history_page.js",
+    )
+    for rel in build_files:
+        path = tmp_path / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"initial {rel}\n", encoding="utf-8")
+
+    monkeypatch.setattr(master_service, "BASE_DIR", tmp_path)
+    monkeypatch.setattr(master_service, "LOCAL_BUILD_FILES", build_files)
+    baseline = master_service._local_source_stamp()
+
+    dashboard_path = tmp_path / "render" / "static" / "dashboard.js"
+    dashboard_path.write_text("dashboard changed\n", encoding="utf-8")
+    assert master_service._local_source_stamp() != baseline
+
+    dashboard_path.write_text("initial render/static/dashboard.js\n", encoding="utf-8")
+    history_baseline = master_service._local_source_stamp()
+    history_path = tmp_path / "render" / "static" / "history_page.js"
+    history_path.write_text("history changed\n", encoding="utf-8")
+    assert master_service._local_source_stamp() != history_baseline
 
 
 def test_local_build_info_exposes_source_stamp(monkeypatch: pytest.MonkeyPatch) -> None:

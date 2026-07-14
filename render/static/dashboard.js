@@ -213,15 +213,33 @@
     const doc = workspaceFrameDocument();
     if (!workspaceFrame || !doc || !doc.body) return;
     scheduleWorkspaceFrameHeightSync();
-    try {
-      if (typeof ResizeObserver === 'function') {
-        workspaceResizeObserver = new ResizeObserver(scheduleWorkspaceFrameHeightSync);
-        workspaceResizeObserver.observe(doc.body);
-        if (doc.documentElement) workspaceResizeObserver.observe(doc.documentElement);
+    const frameWindow = doc.defaultView || workspaceFrame.contentWindow || window;
+    const FrameResizeObserver = frameWindow.ResizeObserver || window.ResizeObserver;
+    const FrameMutationObserver = frameWindow.MutationObserver || window.MutationObserver;
+    const FrameNode = frameWindow.Node || window.Node;
+    const canObserveNode = (node) => {
+      if (!node) return false;
+      if (FrameNode && node instanceof FrameNode) return true;
+      return typeof node.nodeType === 'number';
+    };
+    const observeNode = (observer, node, options = null) => {
+      if (!observer || !canObserveNode(node)) return;
+      try {
+        if (options) observer.observe(node, options);
+        else observer.observe(node);
+      } catch (_err) {
+        // Cross-frame reloads can invalidate nodes between lookup and observe.
       }
-      if (typeof MutationObserver === 'function') {
-        workspaceMutationObserver = new MutationObserver(scheduleWorkspaceFrameHeightSync);
-        workspaceMutationObserver.observe(doc.body, {
+    };
+    try {
+      if (typeof FrameResizeObserver === 'function') {
+        workspaceResizeObserver = new FrameResizeObserver(scheduleWorkspaceFrameHeightSync);
+        observeNode(workspaceResizeObserver, doc.body);
+        observeNode(workspaceResizeObserver, doc.documentElement);
+      }
+      if (typeof FrameMutationObserver === 'function') {
+        workspaceMutationObserver = new FrameMutationObserver(scheduleWorkspaceFrameHeightSync);
+        observeNode(workspaceMutationObserver, doc.body, {
           attributes: true,
           childList: true,
           subtree: true,

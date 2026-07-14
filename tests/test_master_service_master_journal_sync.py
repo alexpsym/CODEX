@@ -1464,12 +1464,12 @@ def test_update_oanda_settings_passes_payload():
     assert out.get('wait_seconds')==10
 def test_source_guard_manual_save_fingerprint_only_master_journal_sync():
     src=(ROOT/'render'/'master_service.py').read_text(encoding='utf-8')
-    needle = '_manual_save_set_known_fingerprint(path)'
-    assert src.count(needle) >= 1
-    sync_ix = src.index('_sync_master_journal_workbook')
+    assert '_manual_save_set_known_fingerprint(path)' not in src
+    needle = '_manual_save_set_known_fingerprint(master_path)'
+    assert src.count(needle) == 1
+    sync_ix = src.index('def _manual_save_github_sync_watcher_loop')
     only_ix = src.index(needle)
     assert only_ix > sync_ix
-    assert src.rindex(needle) >= only_ix
 @pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
 def test_existing_workbook_sync_does_not_rebuild_or_refresh_derived(tmp_path, monkeypatch):
     from tools.master_journal_workbook import build_master_journal_workbook

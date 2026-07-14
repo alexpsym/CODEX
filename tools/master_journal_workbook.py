@@ -6320,10 +6320,27 @@ def _repair_stats1_child_label_styles(ws, diagnostics: Dict[str, Any] | None = N
             else:
                 _apply_dashboard_child_label_style(ws.cell(row, 1))
             repaired_children += 1
+    categorical_sections = {"side", "patterns", "timeframe", "commission", "drawdown"}
+    repaired_nested_outcomes = 0
+    for section_name in ("Side", "Patterns", "Timeframe", "Commission"):
+        bounds = _stats1_section_bounds(ws, section_name, categorical_sections)
+        if not bounds:
+            continue
+        for row in range(bounds[0] + 1, bounds[1] + 1):
+            label = _stats1_label_at(ws, row).casefold()
+            if label not in {"winners", "losers"}:
+                continue
+            if child_template is not None:
+                _copy_cell_style(child_template, ws.cell(row, 1))
+            else:
+                _apply_dashboard_child_label_style(ws.cell(row, 1))
+            repaired_nested_outcomes += 1
     if repaired_sources:
         diagnostics["repaired_stats1_source_label_styles"] = repaired_sources
     if repaired_children:
         diagnostics["repaired_stats1_child_label_styles"] = repaired_children
+    if repaired_nested_outcomes:
+        diagnostics["repaired_stats1_nested_outcome_label_styles"] = repaired_nested_outcomes
 
 def _is_generated_dashboard_semantic_rule(rule) -> bool:
     if getattr(rule, "type", None) != "cellIs":
@@ -9318,7 +9335,7 @@ def _drawdown_row_timestamp(row: Dict[str, Any]) -> Tuple[float, Any] | None:
     return dt.timestamp(), raw
 
 
-def _period_drawdown_metrics(
+def balance_drawdown_metrics(
     rows: List[Dict[str, Any]],
     all_rows: List[Dict[str, Any]] | None = None,
 ) -> Dict[str, Any]:
@@ -9415,6 +9432,13 @@ def _period_drawdown_metrics(
             "drawdown_segments_count": segment_count,
         }
     return {}
+
+
+def _period_drawdown_metrics(
+    rows: List[Dict[str, Any]],
+    all_rows: List[Dict[str, Any]] | None = None,
+) -> Dict[str, Any]:
+    return balance_drawdown_metrics(rows, all_rows)
 
 
 def _report_bucket_from_period_rows(rows: List[Dict[str, Any]]) -> Dict[str, Any]:

@@ -127,6 +127,19 @@ def test_oanda_inactivity_status_cached_error_preserves_status_code(monkeypatch:
     assert state["calls"] == 1
 
 
+def test_oanda_inactivity_status_generic_error_returns_payload(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _raise_generic() -> dict:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(master_service, "_build_oanda_inactivity_status", _raise_generic)
+
+    response = asyncio.run(master_service.oanda_inactivity_status())
+    assert response.status_code == 500
+    payload = response.body.decode("utf-8")
+    assert '"status":"unavailable"' in payload
+    assert '"error":"boom"' in payload
+
+
 def test_oanda_inactivity_status_success_returns_200(monkeypatch: pytest.MonkeyPatch) -> None:
     async def _ok_payload() -> dict:
         return {

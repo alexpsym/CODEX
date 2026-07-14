@@ -44,6 +44,8 @@ BASE_DIR = Path(__file__).resolve().parents[1]
 LOCAL_BUILD_FILES = (
     "render/master_service.py",
     "render/static/calculator.js",
+    "render/static/dashboard.js",
+    "render/static/history_page.js",
     "render/static/instrument_lookup.js",
     "render/static/open_orders.js",
     "render/static/trading_journal.js",
@@ -125,7 +127,7 @@ from shared.symbol_resolution import (
 from shared.atomic_json import write_json_file
 from render.dropbox_sync import download_bytes, list_excel_files, upload_bytes
 from render import dropbox_state_store
-from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, read_master_journal_source, update_master_journal_workbook_data_only, refresh_master_journal_derived_sheets, stable_row_id, SHEET_ORDER, REPORT_YEARLY_SHEET, expected_report_sheet_names, _get_all_trades_sheet, _get_trade_log_sheet, _trade_log_header_map, _trade_log_data_start_row, _find_instrument_leaders_table, LEADER_LABEL_TO_KEY, _repair_or_flag_zero_trade_qty, _canonicalize_and_dedupe_balances, _trade_execution_fingerprint, _trade_row_source_rank, _dedupe_trade_rows_by_execution, _instrument_averages_header_map, INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, INSTRUMENT_AVERAGES_DATA_START_ROW, _result_percentage_totals_by_market, _risk_of_ruin_by_account, _stats1_sheet, _stats2_sheet, _symbols_sheet, STATS1_SHEET, STATS2_SHEET, SYMBOLS_SHEET, _parse_duration_text, _duration_ddhhmmss_cell_to_seconds, _is_ddhhmmss_number_format, STOP_RECOMMENDATION_HEADER, TARGET_RECOMMENDATION_HEADER, _distance_recommendation_summary, _stop_recommendation_payload, _apply_recommendation_cell_style, _ensure_dashboard_requested_metric_rows, _stats1_market_columns, _stats1_section_bounds
+from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, read_master_journal_source, update_master_journal_workbook_data_only, refresh_master_journal_derived_sheets, stable_row_id, SHEET_ORDER, REPORT_YEARLY_SHEET, expected_report_sheet_names, _get_all_trades_sheet, _get_trade_log_sheet, _trade_log_header_map, _trade_log_data_start_row, _find_instrument_leaders_table, LEADER_LABEL_TO_KEY, _repair_or_flag_zero_trade_qty, _canonicalize_and_dedupe_balances, _trade_execution_fingerprint, _trade_row_source_rank, _dedupe_trade_rows_by_execution, _instrument_averages_header_map, INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, INSTRUMENT_AVERAGES_DATA_START_ROW, _result_percentage_totals_by_market, _risk_of_ruin_by_account, _stats1_sheet, _stats2_sheet, _symbols_sheet, STATS1_SHEET, STATS2_SHEET, SYMBOLS_SHEET, _parse_duration_text, _duration_ddhhmmss_cell_to_seconds, _is_ddhhmmss_number_format, STOP_RECOMMENDATION_HEADER, TARGET_RECOMMENDATION_HEADER, _distance_recommendation_summary, _stop_recommendation_payload, _apply_recommendation_cell_style, _ensure_dashboard_requested_metric_rows, _stats1_market_columns, _stats1_section_bounds, balance_drawdown_metrics
 from bybit_monitor import bybit_altcoin_monitor as bybit_monitor
 from oanda_monitor import oanda_forex_monitor as oanda_monitor
 from bybit_demo_tpsl_cache import (
@@ -13799,7 +13801,6 @@ def _replace_pending_webhooks(items: object) -> List[Dict[str, object]]:
 def _upsert_pending_webhook(payload: Dict[str, object]) -> Dict[str, object]:
     items = _load_pending_webhooks()
     if not isinstance(payload, dict):
-        _manual_save_set_known_fingerprint(path)
         payload = {}
 
     webhook_id = str(payload.get("id", "")).strip()
@@ -23570,6 +23571,10 @@ def _compute_journal_stats(
                 out.append(pct)
         return out
 
+    ts_cache: Dict[str, float] = {}
+    def _to_ts(value: object) -> float:
+        return _timestamp_epoch_seconds(value, cache=ts_cache)
+
     def _risk_bucket(rows_subset: List[Dict[str, object]], *, scope: str = "standard") -> Dict[str, object]:
         winners = _winner_rows(rows_subset)
         losers = _loser_rows(rows_subset)
@@ -23926,110 +23931,22 @@ def _compute_journal_stats(
     denom_crypto = crypto_wins + crypto_losses
     crypto_win_rate_pct = (crypto_wins / denom_crypto * 100.0) if denom_crypto else None
 
-    ts_cache: Dict[str, float] = {}
-    def _to_ts(value: object) -> float:
-        return _timestamp_epoch_seconds(value, cache=ts_cache)
-
-    # Drawdown stats (%), segmented by cashflow anchors so deposits/withdrawals
-    # do not show up as drawdowns.  The helper is reused for market-specific
-    # subsets so FX/Crypto dashboard drawdown cells are based on the same
-    # cashflow-anchor logic as the overall journal calculation.
-    cashflow_rows = [r for r in rows if _row_type(r) == "cashflow"]
-    events_by_account: Dict[str, List[Tuple[float, str]]] = defaultdict(list)
-    for r in cashflow_rows:
-        account = str(r.get("account_label") or r.get("account") or "").strip()
-        account_key = _norm_account_key(account)
-        event_dt = r.get("close_time") or r.get("open_time")
-        if not account_key or not event_dt:
-            continue
-        ts = _to_ts(event_dt)
-        if math.isfinite(ts):
-            events_by_account[account_key].append((ts, str(event_dt)))
-    for account_key in list(events_by_account.keys()):
-        events_by_account[account_key] = sorted(events_by_account[account_key], key=lambda x: x[0])
-
+    drawdown_anchor_rows = [r for r in rows if isinstance(r, dict)]
     def _drawdown_stats_for_rows(rows_subset: List[Dict[str, object]]) -> Dict[str, object]:
-        segments: Dict[Tuple[str, str], List[Tuple[float, float, object, str]]] = defaultdict(list)
-        for row in rows_subset:
-            account = str(row.get("account_label") or row.get("account") or "").strip()
-            account_key = _norm_account_key(account)
-            if not account_key:
-                continue
-            dt = row.get("close_time") or row.get("open_time")
-            ts = _to_ts(dt)
-            bal = _to_float(row.get("analysis_balance_after_trade"))
-            if bal is None:
-                bal = _to_float(row.get("balance_after_trade"))
-            if bal is None or not math.isfinite(bal) or bal <= 0 or not math.isfinite(ts):
-                continue
-
-            anchor_id = "__no_anchor__"
-            for ev_ts, ev_id in events_by_account.get(account_key, []):
-                if ev_ts <= ts:
-                    anchor_id = ev_id
-                else:
-                    break
-            segments[(account_key, anchor_id)].append((ts, bal, dt, account or account_key))
-
-        dd_vals: List[float] = []
-        dd_details: List[Tuple[float, Dict[str, object]]] = []
-        dd_segment_count = 0
-        dd_balance_points = 0
-        for pts in segments.values():
-            pts_sorted = sorted(pts, key=lambda x: x[0])
-            if len(pts_sorted) < 2:
-                continue
-            dd_segment_count += 1
-            dd_balance_points += len(pts_sorted)
-            peak: Optional[float] = None
-            peak_time: object = None
-            peak_account = ""
-            for _, bal, dt, account in pts_sorted:
-                if peak is None or bal > peak:
-                    peak = bal
-                    peak_time = dt
-                    peak_account = account
-                if peak and peak > 0:
-                    dd = (peak - bal) / peak * 100.0
-                    if dd > 0 and math.isfinite(dd):
-                        dd_vals.append(dd)
-                        dd_details.append((
-                            dd,
-                            {
-                                "account": account or peak_account,
-                                "start_time": peak_time,
-                                "end_time": dt,
-                                "peak": peak,
-                                "trough": bal,
-                            },
-                        ))
-
-        if dd_vals:
-            max_drawdown_pct = max(dd_vals)
-            min_drawdown_pct = min(dd_vals)
-            avg_drawdown_pct = sum(dd_vals) / len(dd_vals)
-            max_drawdown_detail = max(dd_details, key=lambda item: item[0])[1] if dd_details else None
-            min_drawdown_detail = min(dd_details, key=lambda item: item[0])[1] if dd_details else None
-        elif dd_segment_count > 0:
-            max_drawdown_pct = 0.0
-            min_drawdown_pct = 0.0
-            avg_drawdown_pct = 0.0
-            max_drawdown_detail = None
-            min_drawdown_detail = None
-        else:
-            max_drawdown_pct = None
-            min_drawdown_pct = None
-            avg_drawdown_pct = None
-            max_drawdown_detail = None
-            min_drawdown_detail = None
+        metrics = balance_drawdown_metrics(
+            [r for r in rows_subset if isinstance(r, dict)],
+            drawdown_anchor_rows,
+        )
+        if metrics:
+            return metrics
         return {
-            "max_drawdown_pct": max_drawdown_pct,
-            "min_drawdown_pct": min_drawdown_pct,
-            "avg_drawdown_pct": avg_drawdown_pct,
-            "max_drawdown_detail": max_drawdown_detail,
-            "min_drawdown_detail": min_drawdown_detail,
-            "drawdown_balance_points": dd_balance_points,
-            "drawdown_segments_count": dd_segment_count,
+            "max_drawdown_pct": None,
+            "min_drawdown_pct": None,
+            "avg_drawdown_pct": None,
+            "max_drawdown_detail": None,
+            "min_drawdown_detail": None,
+            "drawdown_balance_points": 0,
+            "drawdown_segments_count": 0,
         }
 
     overall_drawdown = _drawdown_stats_for_rows(trade_rows)
@@ -25112,7 +25029,6 @@ async def list_pending_webhooks() -> JSONResponse:
 async def upsert_pending_webhook(request: Request) -> JSONResponse:
     payload = await request.json()
     if payload is None:
-        _manual_save_set_known_fingerprint(path)
         payload = {}
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="Pending webhook payload must be an object.")
@@ -26339,7 +26255,6 @@ async def oanda_inactivity_status() -> JSONResponse:
     except OandaUpstreamHTTPError as exc:
         status_code = 503 if exc.transient else 502
         ttl_seconds = _OANDA_INACTIVITY_ERROR_CACHE_TTL_SECONDS
-        _manual_save_set_known_fingerprint(path)
         payload = {
             "ok": False,
             "mode": "live",
@@ -26363,7 +26278,6 @@ async def oanda_inactivity_status() -> JSONResponse:
     except Exception as exc:
         status_code = 500
         ttl_seconds = _OANDA_INACTIVITY_ERROR_CACHE_TTL_SECONDS
-        _manual_save_set_known_fingerprint(path)
         payload = {
             "ok": False,
             "mode": "live",
