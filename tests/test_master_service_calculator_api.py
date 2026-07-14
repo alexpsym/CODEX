@@ -233,6 +233,8 @@ def test_merged_calculator_page_returns_200() -> None:
     assert html.find('id="account-toggle"') < html.find('id="asset-toggle"') < html.find('id="side-toggle"')
     assert html.find('id="order-toggle"') < html.find('id="calc-symbol"') < html.find('id="calc-sl-ticks"')
     assert html.find('id="timeframe-toggle"') < html.find('id="setup-toggle"') < html.find('id="pattern-toggle"')
+    assert html.find('id="ema-toggle"') < html.find('id="vwap-toggle"') < html.find('id="aths-atls-toggle"')
+    assert html.find('<caption>Risk</caption>') < html.find('<caption>Trade classification</caption>') < html.find('id="calc-quote"')
     assert html.find('id="calc-quote"') < html.find('id="calc-results"')
     assert "calc-right-rail" not in html
     assert 'id="calc-webhook-url"' in html
@@ -268,6 +270,7 @@ def test_merged_calculator_page_has_unique_expected_element_ids() -> None:
         "setup-toggle",
         "pattern-toggle",
         "ema-toggle",
+        "vwap-toggle",
         "aths-atls-toggle",
         "round-number-toggle",
         "calc-quote",
@@ -2122,12 +2125,53 @@ def test_calculator_submit_rejects_invalid_setup_422() -> None:
     assert exc.value.status_code == 422
 
 
+def test_calculator_submit_rejects_invalid_vwap_422() -> None:
+    with pytest.raises(master_service.HTTPException) as exc:
+        asyncio.run(master_service.calculator_submit({"asset": "crypto", "vwap": "maybe"}))
+    assert exc.value.status_code == 422
+    assert "VWAP" in str(exc.value.detail)
+
+
+def test_calculator_quote_and_webhook_reject_invalid_vwap_422(monkeypatch: pytest.MonkeyPatch) -> None:
+    with pytest.raises(master_service.HTTPException) as quote_exc:
+        asyncio.run(master_service.calculator_quote({
+            "asset": "crypto",
+            "account": "demo",
+            "symbol": "BTCUSDT",
+            "side": "buy",
+            "order_type": "market",
+            "risk_mode": "percent",
+            "risk_value": 1,
+            "stop_loss_ticks": 1,
+            "risk_reward": 2,
+            "vwap": "maybe",
+        }))
+    assert quote_exc.value.status_code == 422
+    assert "VWAP" in str(quote_exc.value.detail)
+
+    monkeypatch.setattr(master_service, "_assert_pending_webhook_executable", lambda _payload: None)
+    with pytest.raises(master_service.HTTPException) as webhook_exc:
+        asyncio.run(master_service.calculator_webhook({
+            "asset": "crypto",
+            "pending_webhook_id": "wh-vwap",
+            "account": "demo",
+            "symbol": "BTCUSDT",
+            "action": "buy",
+            "order_type": "market",
+            "quantity": "0.01",
+            "vwap": "maybe",
+        }))
+    assert webhook_exc.value.status_code == 422
+    assert "VWAP" in str(webhook_exc.value.detail)
+
+
 def test_calculator_submit_passes_normalized_setup_to_broker(monkeypatch: pytest.MonkeyPatch) -> None:
     seen = {}
     async def fake_place(payload, request_id):
         seen["setup"] = payload.get("setup")
         seen["pattern"] = payload.get("pattern")
         seen["ema"] = payload.get("ema")
+        seen["vwap"] = payload.get("vwap")
         seen["aths_atls"] = payload.get("aths_atls")
         seen["round_number"] = payload.get("round_number")
         return {"journal_context_saved": True}
@@ -2135,13 +2179,14 @@ def test_calculator_submit_passes_normalized_setup_to_broker(monkeypatch: pytest
     resp = asyncio.run(master_service.calculator_submit({
         "asset":"crypto","account":"demo","symbol":"BTCUSDT","side":"buy","order_type":"market",
         "setup":"news scalp","pattern":"channel","ema":"yes",
-        "aths_atls":"ath","round_number":"no",
+        "vwap":"true","aths_atls":"ath","round_number":"no",
     }))
     body = json.loads(resp.body.decode("utf-8"))
     assert body["ok"] is True
     assert seen["setup"] == "News Scalp"
     assert seen["pattern"] == "channel"
     assert seen["ema"] == "Yes"
+    assert seen["vwap"] == "Yes"
     assert seen["aths_atls"] == "All-Time High"
     assert seen["round_number"] == "No"
 
@@ -2153,13 +2198,16 @@ def test_trade_context_normalizes_and_backfills_quality_criteria(monkeypatch: py
     context = master_service._upsert_trade_context({
         "calculation_context_id": "criteria-1",
         "ema": "y",
+        "vwap": False,
         "aths_atls": "all time low",
         "round_number": False,
     })
     assert context["ema"] == "Yes"
+    assert context["vwap"] == "No"
     assert context["aths_atls"] == "All-Time Low"
     assert context["round_number"] == "No"
     merged = master_service._merge_bybit_demo_calc_context_into_row({"id": "row-1"}, context)
     assert merged["ema"] == "Yes"
+    assert merged["vwap"] == "No"
     assert merged["aths_atls"] == "All-Time Low"
     assert merged["round_number"] == "No"

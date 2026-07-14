@@ -1264,12 +1264,12 @@ def test_update_data_only_migrates_legacy_all_trades_and_removes_trade_meta(tmp_
     assert "_Trade Meta" not in migrated.sheetnames
     migrated.close()
 
-def test_update_data_only_preserves_symbols_freeze_pane(tmp_path: Path):
+def test_update_data_only_repairs_symbols_freeze_pane(tmp_path: Path):
     out = tmp_path / "Trading Journal.xlsx"
     snap = sample_snapshot()
     build_master_journal_workbook(snap, out)
     wb = load_workbook(out)
-    wb[SYMBOLS_SHEET].freeze_panes = "X111"
+    wb[SYMBOLS_SHEET].freeze_panes = "B40"
     wb.save(out)
     wb.close()
 
@@ -1278,7 +1278,7 @@ def test_update_data_only_preserves_symbols_freeze_pane(tmp_path: Path):
     Path(result["candidate_path"]).replace(out)
 
     repaired = load_workbook(out)
-    assert repaired[SYMBOLS_SHEET].freeze_panes == "X111"
+    assert repaired[SYMBOLS_SHEET].freeze_panes == "B3"
     assert repaired.sheetnames[:len(SHEET_ORDER)] == SHEET_ORDER
     assert _sheetnames_without_target_r_metadata(repaired)[len(SHEET_ORDER):] == expected_report_sheet_names(snap)
     assert "_Trade Meta" not in repaired.sheetnames
@@ -3147,6 +3147,10 @@ def test_trade_log_quality_columns_insert_after_test(tmp_path: Path):
     wb.close()
     duration_col = _header_col(ws, "Trade Duration (DD:HH:MM:SS)")
     assert headers[duration_col:duration_col + 10] == list(MOVE_TO_FIELD_MAP)
+    quality_start = _header_col(ws, "Test") - 1
+    assert headers[quality_start:quality_start + 7] == [
+        "Test", "Pattern", "EMA", "VWAP", "ATHS/ATLS", "Order", "Round Number",
+    ]
     assert "Close" not in headers
     assert _header_col(ws, "Close Stopout") > _header_col(ws, "Pattern")
     row_id_letter = get_column_letter(_header_col(ws, "Row ID"))
@@ -3164,7 +3168,7 @@ def test_trade_log_quality_dropdowns(tmp_path: Path):
     assert any(dv.formula1 == '"range,channel"' and dv.allow_blank for dv in validations("Pattern"))
     assert any(dv.formula1 == '"All-Time High,All-Time Low"' and dv.allow_blank for dv in validations("ATHS/ATLS"))
     assert any(dv.formula1 == '"Market,Limit"' and dv.allow_blank for dv in validations("Order"))
-    for header in ["Round Number", "Spiked Out", "Close Stopout", "Near Perfect Entry", "Near Win", "Early Close"]:
+    for header in ["VWAP", "Round Number", "Spiked Out", "Close Stopout", "Near Perfect Entry", "Near Win", "Early Close"]:
         assert any(dv.formula1 == '"Yes,No"' and dv.allow_blank for dv in validations(header))
     assert validations("EMA") == []
 
@@ -3180,6 +3184,7 @@ def test_trade_log_quality_manual_values_survive_resync(tmp_path: Path):
         "Trade Number": "C42",
         "Pattern": "legacy-manual",
         "EMA": "20/50",
+        "VWAP": "Yes",
         "ATHS/ATLS": "All-Time High",
         "Order": "Limit",
         "Round Number": "Yes",
@@ -3217,12 +3222,14 @@ def test_read_master_journal_manual_overrides_reads_quality_columns(tmp_path: Pa
     ws = wb["Trade Log"]
     ws.cell(_trade_data_row(), _header_col(ws, "Pattern"), "Pullback")
     ws.cell(_trade_data_row(), _header_col(ws, "EMA"), "9")
+    ws.cell(_trade_data_row(), _header_col(ws, "VWAP"), "No")
     ws.cell(_trade_data_row(), _header_col(ws, "ATHS/ATLS"), "All-Time Low")
     rid = ws.cell(_trade_data_row(), _header_col(ws, "Row ID")).value
     wb.save(p); wb.close()
     ov = read_master_journal_manual_overrides(p)
     assert ov[rid]["pattern"] == "Pullback"
     assert ov[rid]["ema"] == "9"
+    assert ov[rid]["vwap"] == "No"
     assert ov[rid]["aths_atls"] == "All-Time Low"
 
 
@@ -3232,12 +3239,14 @@ def test_read_master_journal_source_reads_quality_columns(tmp_path: Path):
     wb = load_workbook(p)
     ws = wb["Trade Log"]
     ws.cell(_trade_data_row(), _header_col(ws, "Pattern"), "Range")
+    ws.cell(_trade_data_row(), _header_col(ws, "VWAP"), "Yes")
     ws.cell(_trade_data_row(), _header_col(ws, "Order"), "Market")
     ws.cell(_trade_data_row(), _header_col(ws, "Near Win"), "Yes")
     rid = ws.cell(_trade_data_row(), _header_col(ws, "Row ID")).value
     wb.save(p); wb.close()
     item = next(r for r in read_master_journal_source(p)["items"] if r["id"] == rid)
     assert item["pattern"] == "Range"
+    assert item["vwap"] == "Yes"
     assert item["order_type"] == "Market"
     assert item["near_win"] == "Yes"
 
@@ -4499,9 +4508,6 @@ def test_stats_symbols_and_reports_required_repairs(tmp_path: Path):
     winners_section = label_rows["Winners"][0]
     losers_section_for_style = next(row for row in label_rows["Losers"] if row < labels["Side"])
 
-    def is_outcome_child_label(row: int) -> bool:
-        return winners_section < row < losers_section_for_style or losers_section_for_style < row < labels["Side"]
-
     categorical_section_rows = [
         row
         for row in range(1, stats1.max_row + 1)
@@ -4524,7 +4530,7 @@ def test_stats_symbols_and_reports_required_repairs(tmp_path: Path):
         label_cell = stats1.cell(row, 1)
         if label_cell.value in (None, ""):
             continue
-        if str(label_cell.value).strip() == "Source" or is_outcome_child_label(row) or is_nested_outcome_label(row):
+        if str(label_cell.value).strip() == "Source" or is_nested_outcome_label(row):
             assert label_cell.font.bold is False
             assert label_cell.font.italic is True
             assert label_cell.alignment.horizontal == "right"

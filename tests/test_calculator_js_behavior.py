@@ -720,6 +720,7 @@ def test_quality_criteria_buttons_invalidate_quote_and_are_in_both_payloads() ->
     source = JS_PATH.read_text(encoding="utf-8")
     for function_name, state_field, container_id in (
         ("setEmaButtons", "ema", "ema-toggle"),
+        ("setVwapButtons", "vwap", "vwap-toggle"),
         ("setAthsAtlsButtons", "aths_atls", "aths-atls-toggle"),
         ("setRoundNumberButtons", "round_number", "round-number-toggle"),
     ):
@@ -731,3 +732,29 @@ def test_quality_criteria_buttons_invalidate_quote_and_are_in_both_payloads() ->
         assert f"`{state_field}=${{state.{state_field} || payload.{state_field} || ''}}`" in source
     assert "['All-Time High','All-Time High']" in source
     assert "['All-Time Low','All-Time Low']" in source
+
+
+def test_vwap_toggle_posts_payload_and_invalidates_ready_quote() -> None:
+    node = shutil.which("node")
+    assert node, "node is required for JS behavior test"
+    harness = r'''
+const fs=require('fs');const source=fs.readFileSync(process.argv[1],'utf8');
+class E{constructor(i){this.id=i;this.value='';this.textContent='';this._innerHTML='';this.dataset={};this.style={};this.listeners={};this.buttons=[];this.classList={toggle:()=>{},add:()=>{},remove:()=>{}};this.disabled=false;}set innerHTML(v){this._innerHTML=String(v||'');this.buttons=[...this._innerHTML.matchAll(/data-v="([^"]*)"/g)].map((m)=>new B(m[1]));}get innerHTML(){return this._innerHTML;}addEventListener(e,c){this.listeners[e]=c;}querySelectorAll(s){return s==='button'?this.buttons:[];}}
+class B{constructor(v){this.dataset={v};this.listeners={};this.classList={toggle:()=>{},add:()=>{},remove:()=>{}};this.disabled=false;this._attrs={};}addEventListener(e,c){this.listeners[e]=c;}click(){if(this.listeners.click)this.listeners.click();}setAttribute(k,v){this._attrs[k]=String(v);}getAttribute(k){return this._attrs[k];}removeAttribute(k){delete this._attrs[k];}}
+const ids=['calc-error','calc-error-debug','calc-success','calc-results','calc-request-summary','calc-canonical-symbol','calc-journal-summary','calc-instrument-specs','risk-toggle-wrap','calc-webhook-panel','calc-webhook-url','calc-webhook-json','calc-webhook-copy','calc-webhook-copy-url','risk-toggle','calc-risk-label','limit-wrap','account-toggle','asset-toggle','side-toggle','order-toggle','webhook-toggle','test-toggle','timeframe-toggle','vwap-toggle','calc-symbol','calc-limit','calc-sl-ticks','calc-rr','calc-risk','calc-quote','calc-submit','calc-quote-status','calc-webhook-status','calc-pepperstone-set','broker-toggle-wrap','broker-toggle'];
+const el=Object.fromEntries(ids.map(i=>[i,new E(i)]));const mk=(v)=>v.map(x=>new B(x));
+el['risk-toggle'].buttons=mk(['fixed_aud','percent']);el['asset-toggle'].buttons=mk(['crypto','fx']);el['broker-toggle'].buttons=mk(['oanda','pepperstone']);el['account-toggle'].buttons=mk(['live','demo']);el['side-toggle'].buttons=mk(['buy','sell']);el['order-toggle'].buttons=mk(['market','limit']);el['webhook-toggle'].buttons=mk(['no','yes']);el['test-toggle'].buttons=mk(['no','yes']);el['timeframe-toggle'].buttons=[];
+el['calc-symbol'].value='BTCUSDT';el['calc-sl-ticks'].value='10';el['calc-rr'].value='2';el['calc-risk'].value='1';
+const payloads=[];
+global.fetch=async (url,opts={})=>{if(url.includes('/api/calculator/quote')){payloads.push(JSON.parse(opts.body||'{}'));return {ok:true,status:200,statusText:'OK',headers:{get:()=> 'application/json'},text:async()=>JSON.stringify({broker:'bybit',symbol:'BTCUSDT',tick_size:'1',entry_price:'100',stop_price:'90',target_price:'120',target_distance:'20',quantity:'1',estimated_fees_or_spread:'1',estimated_total_loss:'10',estimated_reward:'20'})};}return {ok:true,status:200,statusText:'OK',headers:{get:()=> 'application/json'},text:async()=>JSON.stringify({status:'no_data'})};};
+global.document={getElementById:(id)=>el[id]};global.navigator={clipboard:{writeText:async()=>{}}};global.setTimeout=(f)=>{f();return 1;};global.clearTimeout=()=>{};global.setInterval=()=>1;global.clearInterval=()=>{};
+eval(source);
+(async()=>{el['vwap-toggle'].buttons.find((b)=>b.dataset.v==='Yes').click();await el['calc-quote'].listeners.click();const ready=el['calc-quote-status'].textContent;el['vwap-toggle'].buttons.find((b)=>b.dataset.v==='No').click();const stale=el['calc-quote-status'].textContent;await el['calc-quote'].listeners.click();console.log(JSON.stringify({payloads,ready,stale,summary:el['calc-request-summary'].textContent}));})();
+'''
+    out = subprocess.run([node, "-e", harness, str(JS_PATH)], check=True, capture_output=True, text=True)
+    data = json.loads(out.stdout.strip().splitlines()[-1])
+    assert data["payloads"][0]["vwap"] == "Yes"
+    assert data["payloads"][1]["vwap"] == "No"
+    assert data["ready"] == "Quote ready."
+    assert "Quote changed" in data["stale"]
+    assert "vwap=No" in data["summary"]

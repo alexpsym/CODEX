@@ -1,76 +1,41 @@
-Dashboard and Trading Journal final cleanup summary
+Calculator, STATS1, SYMBOLS, and Instrument Lookup fixes summary
 
 Status:
-- Used the repository workbook at journal/Trading Journal.xlsx as the baseline.
-- Restored journal/Trading Journal.xlsx from the tracked baseline after a temporary refresh attempt reduced the source rows, then refreshed the workbook derived sheets from the full restored 1,544-row source snapshot.
-- Implemented the dashboard/journal cleanup changes and verified the refreshed workbook stayed intact.
+- Implemented the attached calculator, workbook, stats, symbols, and instrument lookup fixes.
+- Updated journal/Trading Journal.xlsx with the migrated Trade Log schema, STATS1 label style repair, and SYMBOLS freeze pane repair.
+- Preserved local runtime/state files from the commit path; PATCH_DESKTOP_PUSH.bat excludes those paths.
 
 Files changed:
-- .gitignore
 - journal/Trading Journal.xlsx
 - render/master_service.py
-- render/static/dashboard.js
+- render/static/calculator.js
+- render/static/instrument_lookup.js
 - tools/master_journal_workbook.py
-- tools/windows_launchers/ensure_local_master_server.ps1
+- tests/test_calculator_js_behavior.py
 - tests/test_dashboard_home_layout.py
 - tests/test_master_journal_workbook.py
-- tests/test_master_service_local_exit.py
-- tests/test_master_service_master_journal_sync.py
-- tests/test_master_service_oanda_inactivity.py
+- tests/test_master_service_calculator_api.py
 - tests/test_master_service_trading_journal_stats.py
 - summary/CODEX_SUMMARY_latest.txt
 
 Implementation notes:
-- Added the shared balance_drawdown_metrics helper in tools/master_journal_workbook.py and routed workbook/report drawdown calculations through it.
-- Updated render/master_service.py to use the shared drawdown helper with all rows available as cashflow/monthly AUD revaluation anchors, while filtered subsets remain the drawdown balance points.
-- Removed the duplicate nested drawdown implementation from render/master_service.py.
-- Restored the _to_ts helper used by streak logic inside _compute_journal_stats.
-- Removed stray _manual_save_set_known_fingerprint(path) calls from non-master-journal paths so webhook/OANDA error paths no longer raise NameError.
-- Added STATS1 repair coverage for nested categorical Winners/Losers labels so those child rows are right-aligned, italic, and non-bold after broad formatting repair.
-- Added dashboard.js and history_page.js to local source stamping in both the service and Windows launcher so static dashboard/history changes trigger a local rebuild.
-- Hardened dashboard iframe height sync by creating ResizeObserver/MutationObserver checks from the iframe document realm and guarding cross-frame reload invalidations.
-- Ignored .codex_tmp*/ so local smoke-server audit files are not staged.
+- Added VWAP as a first-class quality-analysis criterion across calculator UI state, quote/submit/webhook payloads, pending webhook context, Bybit/OANDA context preservation, journal row normalization, editable fields, workbook manual fields, and dropdown validation.
+- Migrated Trade Log headers so VWAP sits immediately after EMA, including compatibility paths for old, pre-move, pre-recommendation, and pre-VWAP workbook schemas.
+- Hardened Trade Log schema migration so very old schemas without EMA can still insert VWAP using the nearest available style template.
+- Repaired SYMBOLS freeze panes to B3 during workbook schema setup and data-only refreshes instead of preserving stale pane positions.
+- Reworked STATS1 label style repair so Source and nested Winners/Losers child labels remain subordinate while top-level Winners/Losers metric labels use the main metric style.
+- Added net/average R multiple, shortest/longest duration aliases, and longest winning/losing streak count aliases to journal stats responses used by Instrument Lookup.
+- Simplified Instrument Lookup specs to hide broker rule/noise fields, removed the Trading Rules section, kept distance rows neutral, and rendered count/streak objects as numbers instead of [object Object].
+- Adjusted calculator layout so Order/Risk, Trade classification, and the quote/results panel occupy the requested rows and columns.
 
-Workbook refresh and audit:
-- Refresh result: ok=True, updated_cells=457, repaired_stats1_nested_outcome_label_styles=26, repaired_stats1_source_label_styles=16.
-- Source rows after refresh: 1,544 total; 1,444 trade rows, 96 cashflow rows, 4 monthly AUD revaluation rows.
-- Duplicate row IDs after refresh: 0.
-- Sheet dimensions: STATS1 A1:I147, SYMBOLS A1:AT122, Trade Log A1:AW1547, YEARLY REPORT A1:J127, 2026 A1:M127.
-- Formula error scan across STATS1/STATS2/SYMBOLS/Trade Log/YEARLY REPORT/2026: 0.
-- STATS1 style audit: nested Winners/Losers bad styles 0; Manual/Bybit/OANDA source-label bad styles 0.
-- STATS1 top metrics after refresh: Trades 1409 overall, 1037 FX, 372 Crypto; Wins 400 overall; Losses 993 overall; Test rows 35.
-
-Drawdown audit values:
-- Min drawdown: Overall 0.008612%, FX 0.013839%, Crypto 0.008612%.
-- Min drawdown start/end: Overall 2020-04-12 16:42:00 to 2020-04-13 19:21:00; FX 2020-04-03 18:19:00 to 2020-04-06 10:35:00; Crypto 2020-04-12 16:42:00 to 2020-04-13 19:21:00.
-- Avg drawdown: Overall 10.132670%, FX 5.042601%, Crypto 22.618807%.
-- Max drawdown: Overall 45.231131%, FX 23.403578%, Crypto 45.231131%.
-- Max drawdown start/end: Overall 2020-10-28 01:44:00 to 2024-10-27 20:47:00; FX 2021-04-29 04:35:00 to 2022-01-26 02:54:36; Crypto 2020-10-28 01:44:00 to 2024-10-27 20:47:00.
-
-Dashboard/browser smoke:
-- Ran a safe local uvicorn smoke server with external broker/Dropbox autostarts disabled.
-- Dashboard zero-order state showed Calculator, Journal, Scanner, IV Indicator, Spreads, and Exit in the left tool list; Instrument Lookup and History Export remained inline below the orders iframe/Pine Scripts area.
-- Populated 28 smoke open orders; dashboard iframe grew to 1655px with no vertical inner scroll and no section overlap.
-- Timestamp-filtered browser console checks after the iframe observer fix returned no new console errors.
-- Blank Instrument Lookup submission stayed inline with validation.
-- Direct /instrument-lookup?q=BTC, ETH, and EURUSD routes returned 200. BTC/ETH specs and journal APIs resolved under the safe server; EURUSD journal stats resolved, while live OANDA specs were unavailable because credentials were intentionally blanked.
-- The real broker History Export download was not run because the normal external-access launcher escalation was rejected; mocked history export/download regression tests passed.
+Workbook update and audit:
+- Live workbook migration diagnostics included deleted_extra_trade_log_columns=2, repaired_symbols_freeze_pane=True with previous_symbols_freeze_pane=B40, repaired_stats1_source_label_styles=16, repaired_stats1_metric_label_styles=32, and repaired_stats1_nested_outcome_label_styles=26.
+- Direct workbook verification: Trade Log headers match the current schema; quality window is Test, Pattern, EMA, VWAP, ATHS/ATLS, Order, Round Number; Row ID is hidden; SYMBOLS freeze_panes is B3.
 
 Verification performed:
-- python -m py_compile render/master_service.py tools/master_journal_workbook.py: passed.
-- node --check render/static/dashboard.js: passed.
-- node --check render/static/history_page.js: passed.
+- Requested command py -3 -m py_compile render/master_service.py tools/master_journal_workbook.py could not run because the Windows py launcher is not installed in this shell.
+- Bundled Python compile passed for render/master_service.py, tools/master_journal_workbook.py, and the changed focused tests.
+- node --check render/static/calculator.js: passed.
 - node --check render/static/instrument_lookup.js: passed.
-- Focused dashboard/journal/service regression suite: 171 passed, 70 warnings.
-- Full tests/test_master_journal_workbook.py suite: 148 passed in 21:23.
-- tests/test_windows_launchers.py: 45 passed.
-- tests/test_master_service_trading_journal_crud.py: 188 passed, 4 warnings.
-- Post-restore focused regression suite: 100 passed, 66 warnings.
-
-Local-only dirty files:
-- bybit_monitor/custom_alerts.json
-- render/data/monthly_aud_revaluation_state.json
-- render/data/trade_contexts.json
-- state_backup.json
-- state_manifest.json
-- These are runtime/state files and are excluded by PATCH_DESKTOP_PUSH.bat.
+- Focused regression suite passed: 18 passed, 8 existing FastAPI deprecation warnings.
+- Focused suite covered calculator page/IDs/VWAP validation/payloads, calculator JS VWAP behavior, Instrument Lookup spec/stat rendering, journal stats aliases, Trade Log VWAP migration/dropdowns/manual reads, and SYMBOLS freeze repair.

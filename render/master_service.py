@@ -3798,6 +3798,7 @@ def _editable_trading_journal_fields() -> Set[str]:
         "notes",
         "pattern",
         "ema",
+        "vwap",
         "aths_atls",
         "order_type",
         "round_number",
@@ -3890,6 +3891,12 @@ def _normalize_trading_journal_edit_payload(
             continue
         if field == "is_test_trade":
             normalized[field] = _normalize_test_trade_flag(value)
+            continue
+        if field == "vwap":
+            try:
+                normalized[field] = _normalize_vwap(value)
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
             continue
         if field == "symbol":
             symbol = str(value or "").strip()
@@ -4459,6 +4466,7 @@ _OANDA_MANUAL_PRESERVE_FIELDS = {
     "timeframe",
     "pattern",
     "ema",
+    "vwap",
     "aths_atls",
     "order_type",
     "round_number",
@@ -8582,9 +8590,10 @@ def _journal_rows_from_bybit_execution(entry: Dict[str, object]) -> List[Dict[st
     setup = _safe_normalize_setup(entry.get("setup"))
     pattern = _safe_normalize_pattern(entry.get("pattern"))
     ema = str(entry.get("ema") or "").strip()
+    vwap = str(entry.get("vwap") or "").strip()
     aths_atls = str(entry.get("aths_atls") or "").strip()
     round_number = str(entry.get("round_number") or "").strip()
-    if not timeframe or is_test_trade is None or not setup or not pattern or not ema or not aths_atls or not round_number:
+    if not timeframe or is_test_trade is None or not setup or not pattern or not ema or not vwap or not aths_atls or not round_number:
         ctx = _lookup_trade_context_for_journal_row(
             {"raw_refs": {"orderId": order_id, "orderLinkId": entry.get("orderLinkId")}}
         )
@@ -8599,6 +8608,8 @@ def _journal_rows_from_bybit_execution(entry: Dict[str, object]) -> List[Dict[st
                 pattern = _safe_normalize_pattern(ctx.get("pattern"))
             if not ema:
                 ema = str(ctx.get("ema") or "").strip()
+            if not vwap:
+                vwap = str(ctx.get("vwap") or "").strip()
             if not aths_atls:
                 aths_atls = str(ctx.get("aths_atls") or "").strip()
             if not round_number:
@@ -8636,6 +8647,7 @@ def _journal_rows_from_bybit_execution(entry: Dict[str, object]) -> List[Dict[st
             "setup": setup,
             "pattern": pattern,
             "ema": ema,
+            "vwap": vwap,
             "aths_atls": aths_atls,
             "round_number": round_number,
             "metrics": {k: v for k, v in {"timeframe": timeframe, "is_test_trade": is_test_trade}.items() if v not in ("", None)},
@@ -13853,6 +13865,7 @@ def _upsert_pending_webhook(payload: Dict[str, object]) -> Dict[str, object]:
             "setup": entry.get("setup"),
             "pattern": entry.get("pattern"),
             "ema": entry.get("ema"),
+            "vwap": entry.get("vwap"),
             "aths_atls": entry.get("aths_atls"),
             "round_number": entry.get("round_number"),
             "open_time": opened_at_iso,
@@ -14030,6 +14043,10 @@ def _normalize_ema(value: object) -> str:
 
 def _normalize_round_number(value: object) -> str:
     return _normalize_yes_no_criterion(value, "round number")
+
+
+def _normalize_vwap(value: object) -> str:
+    return _normalize_yes_no_criterion(value, "VWAP")
 
 
 def _normalize_aths_atls(value: object) -> str:
@@ -14351,7 +14368,7 @@ def _merge_bybit_demo_calc_context_into_row(row: Dict[str, object], ctx: Dict[st
         ctx_setup = _safe_normalize_setup(ctx.get("setup"))
         if ctx_setup:
             out["setup"] = ctx_setup
-    for field in ("pattern", "ema", "aths_atls", "round_number"):
+    for field in ("pattern", "ema", "vwap", "aths_atls", "round_number"):
         if out.get(field) in (None, "") and ctx.get(field) not in (None, ""):
             out[field] = ctx.get(field)
     out.setdefault("planned_entry_price", ctx.get("entry_price"))
@@ -14405,6 +14422,8 @@ def _upsert_trade_context(payload: Dict[str, object]) -> Dict[str, object]:
         merged_payload["pattern"] = _normalize_pattern(merged_payload.get("pattern"))
     if "ema" in merged_payload:
         merged_payload["ema"] = _normalize_ema(merged_payload.get("ema"))
+    if "vwap" in merged_payload:
+        merged_payload["vwap"] = _normalize_vwap(merged_payload.get("vwap"))
     if "aths_atls" in merged_payload:
         merged_payload["aths_atls"] = _normalize_aths_atls(merged_payload.get("aths_atls"))
     if "round_number" in merged_payload:
@@ -15827,6 +15846,7 @@ async def _place_bybit_order(
             "setup": _normalize_setup(payload.get("setup")),
             "pattern": _normalize_pattern(payload.get("pattern")),
             "ema": _normalize_ema(payload.get("ema")),
+            "vwap": _normalize_vwap(payload.get("vwap")),
             "aths_atls": _normalize_aths_atls(payload.get("aths_atls")),
             "round_number": _normalize_round_number(payload.get("round_number")),
             "is_test_trade": payload.get("is_test_trade"),
@@ -16082,6 +16102,10 @@ async def _place_bybit_order(
                     "timeframe": payload.get("timeframe"),
                     "is_test_trade": payload.get("is_test_trade"),
                     "pattern": _safe_normalize_pattern(payload.get("pattern")),
+                    "ema": _normalize_ema(payload.get("ema")),
+                    "vwap": _normalize_vwap(payload.get("vwap")),
+                    "aths_atls": _normalize_aths_atls(payload.get("aths_atls")),
+                    "round_number": _normalize_round_number(payload.get("round_number")),
                     "open_time": _epoch_or_iso_to_iso(payload.get("opened_at")) or request_open_time_iso,
                     "opened_at": _epoch_or_iso_to_iso(payload.get("opened_at")) or request_open_time_iso,
                     "order_id": str(order_id or "").strip(),
@@ -16419,6 +16443,7 @@ async def _place_oanda_order(
                 "setup": payload.get("setup"),
                 "pattern": _safe_normalize_pattern(payload.get("pattern")),
                 "ema": _normalize_ema(payload.get("ema")),
+                "vwap": _normalize_vwap(payload.get("vwap")),
                 "aths_atls": _normalize_aths_atls(payload.get("aths_atls")),
                 "round_number": _normalize_round_number(payload.get("round_number")),
                 "order_id": str(order_id or "").strip(),
@@ -17390,6 +17415,7 @@ def _normalize_bybit_closed_pnl_row(
     setup = _safe_normalize_setup(ctx.get("setup")) if isinstance(ctx, dict) else ""
     pattern = _safe_normalize_pattern(ctx.get("pattern")) if isinstance(ctx, dict) else ""
     ema = str(ctx.get("ema") or "").strip() if isinstance(ctx, dict) else ""
+    vwap = str(ctx.get("vwap") or "").strip() if isinstance(ctx, dict) else ""
     aths_atls = str(ctx.get("aths_atls") or "").strip() if isinstance(ctx, dict) else ""
     round_number = str(ctx.get("round_number") or "").strip() if isinstance(ctx, dict) else ""
     fallback_attempted = isinstance(ctx, dict)
@@ -17448,6 +17474,7 @@ def _normalize_bybit_closed_pnl_row(
                 "setup": setup,
                 "pattern": pattern,
                 "ema": ema,
+                "vwap": vwap,
                 "aths_atls": aths_atls,
                 "round_number": round_number,
                 "open_time": resolved_open_time,
@@ -17526,6 +17553,7 @@ def _normalize_bybit_closed_pnl_row(
         "setup": setup,
         "pattern": pattern,
         "ema": ema,
+        "vwap": vwap,
         "aths_atls": aths_atls,
         "round_number": round_number,
         "metrics": {k: v for k, v in {"timeframe": timeframe, "is_test_trade": is_test_trade}.items() if v not in ("", None)},
@@ -17549,6 +17577,7 @@ def _backfill_trade_row_context_fields(row: Dict[str, object]) -> Dict[str, obje
     current_setup = str(row.get("setup") or "").strip()
     current_pattern = str(row.get("pattern") or "").strip()
     current_ema = str(row.get("ema") or "").strip()
+    current_vwap = str(row.get("vwap") or "").strip()
     current_aths_atls = str(row.get("aths_atls") or "").strip()
     current_round_number = str(row.get("round_number") or "").strip()
     if (
@@ -17558,6 +17587,7 @@ def _backfill_trade_row_context_fields(row: Dict[str, object]) -> Dict[str, obje
         and current_setup
         and current_pattern
         and current_ema
+        and current_vwap
         and current_aths_atls
         and current_round_number
     ):
@@ -17614,7 +17644,7 @@ def _backfill_trade_row_context_fields(row: Dict[str, object]) -> Dict[str, obje
         ctx_pattern = _safe_normalize_pattern(ctx.get("pattern"))
         if ctx_pattern:
             patched["pattern"] = ctx_pattern
-    for field in ("ema", "aths_atls", "round_number"):
+    for field in ("ema", "vwap", "aths_atls", "round_number"):
         if not str(patched.get(field) or "").strip() and str(ctx.get(field) or "").strip():
             patched[field] = ctx.get(field)
     if patched.get("r_multiple") in (None, ""):
@@ -19446,6 +19476,7 @@ CALCULATOR_TEMPLATE = """<!doctype html>
     .status-area{display:flex;flex-direction:column;gap:8px}
     .action-row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;justify-content:flex-start;padding:10px;border:1px solid var(--line);background:#0b1220}
     .quote-panel{display:flex;flex-direction:column;gap:12px}
+    .calc-results-area{grid-column:1 / -1;min-width:0}
     .quote-results{border:1px solid var(--line);background:#0b1220;min-height:160px}
     .quote-results table{width:100%;border-collapse:collapse;table-layout:fixed}
     .quote-results th,.quote-results td{border-bottom:1px solid var(--line-soft);padding:8px 10px;text-align:left;vertical-align:top}
@@ -19491,7 +19522,9 @@ CALCULATOR_TEMPLATE = """<!doctype html>
               <tr><th>Test</th><td><div class="group toggle" id="test-toggle"><button type="button" data-v="no" class="active">No</button><button type="button" data-v="yes">Yes</button></div></td></tr>
             </tbody>
           </table>
+        </div>
 
+        <div class="calc-col">
           <table class="calc-table">
             <caption>Trade classification</caption>
             <tbody>
@@ -19499,13 +19532,14 @@ CALCULATOR_TEMPLATE = """<!doctype html>
               <tr><th>Setup</th><td><div class="group toggle wide-toggle" id="setup-toggle"></div></td></tr>
               <tr><th>Pattern</th><td><div class="group toggle wide-toggle" id="pattern-toggle"></div></td></tr>
               <tr><th>EMA</th><td><div class="group toggle wide-toggle" id="ema-toggle"></div></td></tr>
+              <tr><th>VWAP</th><td><div class="group toggle wide-toggle" id="vwap-toggle"></div></td></tr>
               <tr><th>All-time high/low</th><td><div class="group toggle wide-toggle" id="aths-atls-toggle"></div></td></tr>
               <tr><th>Round number</th><td><div class="group toggle wide-toggle" id="round-number-toggle"></div></td></tr>
             </tbody>
           </table>
         </div>
 
-        <div class="calc-col quote-panel">
+        <div class="calc-results-area quote-panel">
           <div class="action-row">
             <button id="calc-quote" type="button">Calculate</button>
             <button id="calc-submit" type="button" style="display:none">Submit Order</button>
@@ -20653,6 +20687,7 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
             normalized_setup = _normalize_setup(payload.get("setup"))
             normalized_pattern = _normalize_pattern(payload.get("pattern"))
             normalized_ema = _normalize_ema(payload.get("ema"))
+            normalized_vwap = _normalize_vwap(payload.get("vwap"))
             normalized_aths_atls = _normalize_aths_atls(payload.get("aths_atls"))
             normalized_round_number = _normalize_round_number(payload.get("round_number"))
         except ValueError as exc:
@@ -21012,6 +21047,7 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
                             "setup": normalized_setup,
                             "pattern": normalized_pattern,
                             "ema": normalized_ema,
+                            "vwap": normalized_vwap,
                             "aths_atls": normalized_aths_atls,
                             "round_number": normalized_round_number,
                             "entry_price": response_payload.get("entry_price"),
@@ -21064,6 +21100,7 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
                     "setup": normalized_setup,
                     "pattern": normalized_pattern,
                     "ema": normalized_ema,
+                    "vwap": normalized_vwap,
                     "aths_atls": normalized_aths_atls,
                     "round_number": normalized_round_number,
                     "pending_webhook_id": pending_id,
@@ -21090,6 +21127,7 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
                         "setup": normalized_setup,
                         "pattern": normalized_pattern,
                         "ema": normalized_ema,
+                        "vwap": normalized_vwap,
                         "aths_atls": normalized_aths_atls,
                         "round_number": normalized_round_number,
                         "status": "WAITING",
@@ -21321,6 +21359,7 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
                     "setup": normalized_setup,
                     "pattern": normalized_pattern,
                     "ema": normalized_ema,
+                    "vwap": normalized_vwap,
                     "aths_atls": normalized_aths_atls,
                     "round_number": normalized_round_number,
                     "pending_webhook_id": pending_id,
@@ -21346,6 +21385,7 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
                         "setup": normalized_setup,
                         "pattern": normalized_pattern,
                         "ema": normalized_ema,
+                        "vwap": normalized_vwap,
                         "aths_atls": normalized_aths_atls,
                         "round_number": normalized_round_number,
                         "status": "WAITING",
@@ -21508,6 +21548,7 @@ async def calculator_webhook(request: Request, payload: Dict[str, object] = Body
             normalized_setup = _normalize_setup(payload.get("setup"))
             normalized_pattern = _normalize_pattern(payload.get("pattern"))
             normalized_ema = _normalize_ema(payload.get("ema"))
+            normalized_vwap = _normalize_vwap(payload.get("vwap"))
             normalized_aths_atls = _normalize_aths_atls(payload.get("aths_atls"))
             normalized_round_number = _normalize_round_number(payload.get("round_number"))
         except ValueError as exc:
@@ -21526,6 +21567,7 @@ async def calculator_webhook(request: Request, payload: Dict[str, object] = Body
             "setup": normalized_setup,
             "pattern": normalized_pattern,
             "ema": normalized_ema,
+            "vwap": normalized_vwap,
             "aths_atls": normalized_aths_atls,
             "round_number": normalized_round_number,
             "calculation_context_id": payload.get("calculation_context_id") or payload.get("context_id"),
@@ -21916,6 +21958,7 @@ async def calculator_submit(payload: Dict[str, object] = Body(default={})) -> JS
         normalized_setup = _normalize_setup(payload.get("setup"))
         normalized_pattern = _normalize_pattern(payload.get("pattern"))
         normalized_ema = _normalize_ema(payload.get("ema"))
+        normalized_vwap = _normalize_vwap(payload.get("vwap"))
         normalized_aths_atls = _normalize_aths_atls(payload.get("aths_atls"))
         normalized_round_number = _normalize_round_number(payload.get("round_number"))
     except ValueError as exc:
@@ -21950,6 +21993,7 @@ async def calculator_submit(payload: Dict[str, object] = Body(default={})) -> JS
         "setup": normalized_setup,
         "pattern": normalized_pattern,
         "ema": normalized_ema,
+        "vwap": normalized_vwap,
         "aths_atls": normalized_aths_atls,
         "round_number": normalized_round_number,
     }
@@ -23685,6 +23729,7 @@ def _compute_journal_stats(
                 "tp_pct": [],
                 "pnl": [],
                 "result_pct": [],
+                "r_multiple": [],
                 "pnl_by_currency": defaultdict(list),
                 "durations": [],
                 "_rows": [],
@@ -23757,6 +23802,9 @@ def _compute_journal_stats(
         rp = _to_float(row.get("result_pct"))
         if rp is not None:
             bucket["result_pct"].append(rp)
+        r_mult = _to_float(row.get("r_multiple"))
+        if r_mult is not None:
+            bucket["r_multiple"].append(r_mult)
         if _is_valid_price_level(entry) and _is_valid_price_level(sl) and entry:
             pct = _pct_distance(row, "stop_loss")
         else:
@@ -23781,10 +23829,13 @@ def _compute_journal_stats(
         item["avg_take_profit"] = _avg(item.pop("take_profits"))
         pnl_list=item.pop("pnl",[])
         result_pct_list=item.pop("result_pct",[])
+        r_mult_list=item.pop("r_multiple",[])
         item["net_profit_total"]=sum(pnl_list) if pnl_list else None
         item["avg_net_profit"]=_avg(pnl_list)
         item["net_result_pct"] = sum(result_pct_list) if result_pct_list else None
         item["avg_result_pct"] = _avg(result_pct_list)
+        item["net_r_multiple"] = sum(r_mult_list) if r_mult_list else None
+        item["avg_r_multiple"] = _avg(r_mult_list)
         pnl_by_ccy = item.pop("pnl_by_currency", {})
         net_by_ccy = {k: sum(v) for k, v in pnl_by_ccy.items() if v}
         avg_by_ccy = {k: (_avg(v) or 0.0) for k, v in pnl_by_ccy.items() if v}
@@ -23990,6 +24041,7 @@ def _compute_journal_stats(
             "gross_gain_result_pct": sum(value for value in result_pct_vals if value > 0) if result_pct_vals else None,
             "gross_loss_result_pct": abs(sum(value for value in result_pct_vals if value < 0)) if result_pct_vals else None,
             "avg_r_multiple": _avg(r_mult_vals),
+            "net_r_multiple": sum(r_mult_vals) if r_mult_vals else None,
             "gross_ir_gain": sum(value for value in r_mult_vals if value > 0) if r_mult_vals else None,
             "gross_ir_loss": abs(sum(value for value in r_mult_vals if value < 0)) if r_mult_vals else None,
             "min_result_pct": _safe_min(result_pct_vals),
@@ -24059,6 +24111,8 @@ def _compute_journal_stats(
             "max_crypto_trade_duration_seconds": max_crypto_trade_duration,
             "min_trade_duration_seconds": min_trade_duration,
             "max_trade_duration_seconds": max_trade_duration,
+            "shortest_duration_seconds": min_trade_duration,
+            "longest_duration_seconds": max_trade_duration,
             "win_rate_pct": win_rate_pct,
             "fx_win_rate_pct": fx_win_rate_pct,
             "crypto_win_rate_pct": crypto_win_rate_pct,
@@ -24075,6 +24129,8 @@ def _compute_journal_stats(
             "money_by_currency": totals_money,
             "longest_winning_streak": streaks.get("longest_winning"),
             "longest_losing_streak": streaks.get("longest_losing"),
+            "longest_winning_streak_count": (streaks.get("longest_winning") or {}).get("trade_count"),
+            "longest_losing_streak_count": (streaks.get("longest_losing") or {}).get("trade_count"),
         }
 
     risk_by_market = {
@@ -24197,6 +24253,7 @@ def _compute_journal_stats(
             "min_result_pct": _safe_min(result_vals),
             "max_result_pct": _safe_max(result_vals),
             "avg_r_multiple": _avg(r_vals),
+            "net_r_multiple": sum(r_vals) if r_vals else None,
             "gross_ir_gain": sum(value for value in r_vals if value > 0) if r_vals else None,
             "gross_ir_loss": abs(sum(value for value in r_vals if value < 0)) if r_vals else None,
             "min_r_multiple": _safe_min(r_vals),
@@ -24262,6 +24319,8 @@ def _compute_journal_stats(
             "losing_streak": (losing_streak_detail or {}).get("trade_count"),
             "longest_winning_streak": winning_streak_detail,
             "longest_losing_streak": losing_streak_detail,
+            "longest_winning_streak_count": (winning_streak_detail or {}).get("trade_count"),
+            "longest_losing_streak_count": (losing_streak_detail or {}).get("trade_count"),
             "longest_duration_seconds": max(durations) if durations else None,
             "shortest_duration_seconds": min(durations) if durations else None,
             "metric_sources": {

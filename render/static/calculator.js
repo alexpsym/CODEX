@@ -14,6 +14,7 @@
     setup: '',
     pattern: '',
     ema: '',
+    vwap: '',
     aths_atls: '',
     round_number: '',
     quote: null,
@@ -572,6 +573,7 @@
       `setup=${state.setup || payload.setup || ''}`,
       `pattern=${state.pattern || payload.pattern || ''}`,
       `ema=${state.ema || payload.ema || ''}`,
+      `vwap=${state.vwap || payload.vwap || ''}`,
       `aths_atls=${state.aths_atls || payload.aths_atls || ''}`,
       `round_number=${state.round_number || payload.round_number || ''}`,
       `risk_mode=${payload.risk_mode}`,
@@ -826,6 +828,12 @@
     root.innerHTML = opts.map(([v,l])=>`<button type="button" data-v="${v}" class="${v===state.ema?'active':''}">${l}</button>`).join('');
     root.querySelectorAll('button').forEach((btn)=>btn.addEventListener('click',()=>{state.ema=btn.dataset.v||''; setEmaButtons(); invalidateQuote();}));
   }
+  function setVwapButtons() {
+    const root = $('vwap-toggle'); if (!root) return;
+    const opts = [['','None'],['Yes','Yes'],['No','No']];
+    root.innerHTML = opts.map(([v,l])=>`<button type="button" data-v="${v}" class="${v===state.vwap?'active':''}">${l}</button>`).join('');
+    root.querySelectorAll('button').forEach((btn)=>btn.addEventListener('click',()=>{state.vwap=btn.dataset.v||''; setVwapButtons(); invalidateQuote();}));
+  }
   function setAthsAtlsButtons() {
     const root = $('aths-atls-toggle'); if (!root) return;
     const opts = [['','None'],['All-Time High','All-Time High'],['All-Time Low','All-Time Low']];
@@ -1025,6 +1033,7 @@
         setup: state.setup,
         pattern: state.pattern,
         ema: state.ema,
+        vwap: state.vwap,
         aths_atls: state.aths_atls,
         round_number: state.round_number,
         pending_webhook_id: state.webhook_mode === 'yes' ? (state.pendingWebhookId || undefined) : undefined,
@@ -1149,6 +1158,7 @@
         setup: state.setup,
         pattern: state.pattern,
         ema: state.ema,
+        vwap: state.vwap,
         aths_atls: state.aths_atls,
         round_number: state.round_number,
         planned_entry_price: state.quote.entry_price,
@@ -1215,6 +1225,7 @@
   setSetupButtons();
   setPatternButtons();
   setEmaButtons();
+  setVwapButtons();
   setAthsAtlsButtons();
   setRoundNumberButtons();
   updateRiskUiForAsset();

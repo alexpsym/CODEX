@@ -177,11 +177,121 @@ def test_instrument_lookup_owns_specs_and_journal_markup() -> None:
     assert "'openInterest'" in lookup_js
     assert "openInterestValue: 'Open interest value (USD)'" in lookup_js
     assert "keys: ['lastPrice', 'fundingRate', 'nextFundingTime', 'launchTime', 'openInterestValue'" in lookup_js
-    assert 'Trading Rules' in lookup_js
+    assert 'Trading Rules' not in lookup_js
+    assert 'Broker rules' not in lookup_js
+    assert "'tickSize'" in lookup_js
+    assert "'category', 'status', 'baseCoin', 'quoteCoin'" in lookup_js
     assert 'upgradeLegacyMarkup' in lookup_js
     assert 'instrument-lookup-runtime-css' in lookup_js
     assert 'flattenMetrics' not in lookup_js
     assert 'JSON.stringify(item)' not in lookup_js
+
+
+def test_instrument_lookup_hides_rules_and_renders_journal_counts_neutrally() -> None:
+    node = shutil.which("node")
+    assert node, "node is required for instrument lookup JS behavior test"
+    harness = r'''
+const fs = require('fs');
+const source = fs.readFileSync(process.argv[1], 'utf8');
+
+class Element {
+  constructor(id) {
+    this.id = id;
+    this.value = '';
+    this.textContent = '';
+    this.innerHTML = '';
+    this.tagName = 'DIV';
+    this.listeners = {};
+    this.classList = { toggle: () => {}, add: () => {}, remove: () => {} };
+    this.dataset = {};
+  }
+  addEventListener(event, callback) { this.listeners[event] = callback; }
+  closest() { return null; }
+  querySelectorAll() { return []; }
+}
+
+const elements = Object.fromEntries(['q', 'load', 'rows', 'err', 'journal-status', 'journal-metrics', 'trade-head', 'trade-body'].map((id) => [id, new Element(id)]));
+global.window = { location: { search: '?q=BTCUSDT' } };
+global.history = { replaceState: () => {} };
+global.document = {
+  head: { appendChild: () => {} },
+  createElement: (tag) => new Element(tag),
+  getElementById: (id) => elements[id] || null,
+};
+global.fetch = async (url) => {
+  const textUrl = String(url);
+  if (textUrl.includes('/api/instrument-specs')) {
+    return { ok: true, status: 200, statusText: 'OK', text: async () => JSON.stringify({
+      resolved_symbol: 'BTCUSDT',
+      displayName: 'Bitcoin',
+      category: 'linear',
+      status: 'Trading',
+      baseCoin: 'BTC',
+      quoteCoin: 'USDT',
+      type: 'perpetual',
+      tickSize: '0.10',
+      minOrderQty: '0.001',
+      lastPrice: '100',
+      'range.1m': 0.01
+    }) };
+  }
+  if (textUrl.includes('/api/calculator/journal-summary')) {
+    return { ok: true, status: 200, statusText: 'OK', text: async () => JSON.stringify({
+      status: 'ok',
+      canonical_symbol: 'BTCUSDT',
+      stats: { total_trades: 2, wins: 1, losses: 1, win_rate: '50.00%' },
+      metrics: {
+        trades: 2,
+        wins: 1,
+        losses: 1,
+        win_rate_pct: 50,
+        net_profit_total: 10,
+        avg_stop_pct: -1.2,
+        min_stop_pct: -2.5,
+        max_stop_pct: 3.5,
+        avg_target_pct: 4,
+        min_target_pct: 1,
+        max_target_pct: 8,
+        net_r_multiple: 1.5,
+        avg_r_multiple: 0.75,
+        shortest_duration_seconds: 60,
+        longest_duration_seconds: 120,
+        longest_winning_streak: { trade_count: 3 },
+        longest_losing_streak: { trade_count: 2 }
+      },
+      trades: [{ symbol: 'BTCUSDT', close_time: '2026-01-01T00:00:00Z', side: 'Buy', net_profit: 10, result_pct: 1, currency: 'USDT' }]
+    }) };
+  }
+  return { ok: true, status: 200, statusText: 'OK', text: async () => JSON.stringify({ resolved_symbol: 'BTCUSDT' }) };
+};
+eval(source);
+(async () => {
+  await Promise.resolve();
+  await Promise.resolve();
+  await new Promise((resolve) => setImmediate(resolve));
+  console.log(JSON.stringify({ rows: elements.rows.innerHTML, journal: elements['journal-metrics'].innerHTML }));
+})();
+'''
+    completed = subprocess.run(
+        [node, "-e", harness, str(ROOT / "render" / "static" / "instrument_lookup.js")],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    result = json.loads(completed.stdout.strip().splitlines()[-1])
+    specs_html = result["rows"]
+    journal_html = result["journal"]
+    assert "Trading Rules" not in specs_html
+    for hidden in ("Category", "Status", "Base", "Quote", "Tick size", "Min order qty"):
+        assert hidden not in specs_html
+    distances = journal_html[journal_html.index("Distances"):journal_html.index("Winners / Losers")]
+    assert "positive" not in distances
+    assert "negative" not in distances
+    assert "[object Object]" not in journal_html
+    assert "Best win streak" in journal_html
+    assert ">3<" in journal_html
+    assert "Worst losing streak" in journal_html
+    assert ">2<" in journal_html
 
 
 def test_instrument_lookup_detects_separator_normalized_fx_and_metals() -> None:

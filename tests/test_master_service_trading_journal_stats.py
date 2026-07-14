@@ -1400,16 +1400,21 @@ def test_compute_journal_stats_no_zero_count_leaders() -> None:
 
 def test_compute_journal_stats_expectancy_and_r_filters() -> None:
     rows = [
-        {"row_type": "trade", "asset_class": "fx", "symbol": "EURUSD", "result_pct": 9.0, "r_multiple": 0.0, "net_profit": 9},
-        {"row_type": "trade", "asset_class": "fx", "symbol": "GBPUSD", "result_pct": 9.0, "r_multiple": 2.0, "net_profit": 9},
-        {"row_type": "trade", "asset_class": "fx", "symbol": "USDJPY", "result_pct": -3.0, "r_multiple": 1.0, "net_profit": -3},
-        {"row_type": "trade", "asset_class": "fx", "symbol": "AUDUSD", "result_pct": -3.0, "r_multiple": -0.5, "net_profit": -3},
-        {"row_type": "trade", "asset_class": "fx", "symbol": "NZDUSD", "result_pct": 0.0, "r_multiple": 0.0, "net_profit": 0, "breakeven": "yes"},
+        {"row_type": "trade", "asset_class": "fx", "symbol": "EURUSD", "result_pct": 9.0, "r_multiple": 0.0, "net_profit": 9, "trade_duration_seconds": 300},
+        {"row_type": "trade", "asset_class": "fx", "symbol": "GBPUSD", "result_pct": 9.0, "r_multiple": 2.0, "net_profit": 9, "trade_duration_seconds": 60},
+        {"row_type": "trade", "asset_class": "fx", "symbol": "USDJPY", "result_pct": -3.0, "r_multiple": 1.0, "net_profit": -3, "trade_duration_seconds": 180},
+        {"row_type": "trade", "asset_class": "fx", "symbol": "AUDUSD", "result_pct": -3.0, "r_multiple": -0.5, "net_profit": -3, "trade_duration_seconds": 120},
+        {"row_type": "trade", "asset_class": "fx", "symbol": "NZDUSD", "result_pct": 0.0, "r_multiple": 0.0, "net_profit": 0, "breakeven": "yes", "trade_duration_seconds": 240},
     ]
     stats = _compute_journal_stats(rows, balances=[])
     by_market = stats["groups"]["by_market"]["overall"]
     assert by_market["avg_result_pct"] == pytest.approx(2.4)
     assert by_market["expectancy_pct"] == pytest.approx(3.0)
+    assert by_market["net_r_multiple"] == pytest.approx(2.5)
+    assert stats["totals"]["net_r_multiple"] == pytest.approx(2.5)
+    assert stats["totals"]["avg_r_multiple"] == pytest.approx(0.5)
+    assert stats["totals"]["shortest_duration_seconds"] == 60
+    assert stats["totals"]["longest_duration_seconds"] == 300
     assert by_market["min_r_multiple_winners"] == pytest.approx(2.0)
     assert by_market["avg_r_multiple_winners"] == pytest.approx(2.0)
     assert by_market["min_r_multiple_losers"] == pytest.approx(-0.5)
@@ -1509,12 +1514,14 @@ def test_compute_journal_stats_streaks_and_money_by_currency() -> None:
     stats = _compute_journal_stats(rows, balances=[])
     streaks = stats["groups"]["streaks"]
     assert streaks["longest_winning"]["trade_count"] == 3
+    assert stats["totals"]["longest_winning_streak_count"] == 3
     assert streaks["longest_winning"]["start_time"] == "2026-01-01T00:00:00Z"
     assert streaks["longest_winning"]["end_time"] == "2026-01-03T00:00:00Z"
     assert streaks["longest_winning"]["dominant_symbol"] == "EURUSD"
     assert round(streaks["longest_winning"]["net_r_multiple"], 3) == 3.0
     assert round(streaks["longest_winning"]["net_result_pct"], 3) == 3.0
     assert streaks["longest_losing"]["trade_count"] == 4
+    assert stats["totals"]["longest_losing_streak_count"] == 4
     money = stats["totals"]["money_by_currency"]["net_profit_total"]
     assert money["AUD"] == 30
     assert money["USDT"] == -16

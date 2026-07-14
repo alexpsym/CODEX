@@ -13,9 +13,13 @@
   const state = { asset: 'crypto' };
   const FX_CODES = new Set(['AUD', 'CAD', 'CHF', 'EUR', 'GBP', 'HKD', 'JPY', 'NZD', 'SGD', 'TRY', 'USD', 'ZAR', 'XAU', 'XAG']);
   const HIDE_SPEC_FIELDS = new Set([
+    'category', 'status', 'baseCoin', 'quoteCoin',
     'fundingHistory.fundingRate', 'fundingHistory.fundingRateTimestamp',
     'indexPrice', 'leverageFilter', 'lotSizeFilter', 'markPrice', 'priceFilter',
     'openInterest', 'query', 'source', 'scannerVolume24h', '_units', '_btc_reference', '_spec_warnings',
+    'tickSize', 'minPrice', 'maxPrice', 'qtyStep', 'minOrderQty', 'maxOrderQty', 'maxMktOrderQty',
+    'minNotionalValue', 'minLeverage', 'maxLeverage', 'leverageStep', 'pipLocation', 'displayPrecision',
+    'tradeUnitsPrecision', 'minimumTradeSize', 'maximumOrderUnits', 'maximumPositionSize', 'marginRate',
   ]);
 
   const SPEC_LABELS = {
@@ -71,17 +75,12 @@
     {
       title: 'Instrument',
       note: 'Identity',
-      keys: ['resolved_symbol', 'displayName', 'category', 'type', 'contractType', 'status', 'baseCoin', 'quoteCoin'],
+      keys: ['resolved_symbol', 'displayName', 'type', 'contractType'],
     },
     {
       title: 'Market Snapshot',
       note: 'Live context',
       keys: ['lastPrice', 'fundingRate', 'nextFundingTime', 'launchTime', 'openInterestValue', 'volume24hUsd', 'turnover24h', 'avg7dTurnoverUsd'],
-    },
-    {
-      title: 'Trading Rules',
-      note: 'Order constraints',
-      keys: ['tickSize', 'minPrice', 'maxPrice', 'qtyStep', 'minOrderQty', 'maxOrderQty', 'maxMktOrderQty', 'minNotionalValue', 'minLeverage', 'maxLeverage', 'leverageStep', 'pipLocation', 'displayPrecision', 'tradeUnitsPrecision', 'minimumTradeSize', 'maximumOrderUnits', 'maximumPositionSize', 'marginRate'],
     },
     {
       title: 'Movement Range',
@@ -164,7 +163,7 @@
     const specsPanel = rows?.closest('section.panel');
     if (specsPanel && rows.tagName === 'TBODY') {
       specsPanel.innerHTML = [
-        '<div class="panel-head"><div><h2>Instrument Specs</h2><div class="panel-note">Broker rules, live market context, and movement ranges.</div></div></div>',
+        '<div class="panel-head"><div><h2>Instrument Specs</h2><div class="panel-note">Live market context and movement ranges.</div></div></div>',
         '<div class="panel-body"><div id="rows"></div></div>',
       ].join('');
       rows = document.getElementById('rows');
@@ -362,6 +361,9 @@
       return number === null ? String(value ?? '-') : `${number.toFixed(3).replace(/0+$/, '').replace(/\.$/, '')}R`;
     }
     if (kind === 'count') {
+      if (value && typeof value === 'object' && numeric(value.trade_count) !== null) {
+        return Number(value.trade_count).toLocaleString(undefined, { maximumFractionDigits: 0 });
+      }
       const number = numeric(value);
       return number === null ? String(value ?? '-') : number.toLocaleString(undefined, { maximumFractionDigits: 0 });
     }
@@ -383,6 +385,11 @@
       if (hasValue(value)) return value;
     }
     return null;
+  }
+
+  function streakCount(value) {
+    if (value && typeof value === 'object') return firstValue(value.trade_count, value.count, value.trades);
+    return value;
   }
 
   function inferCurrency(payload) {
@@ -462,7 +469,8 @@
     const body = rowsIn
       .filter((row) => row && row.length >= 3)
       .map(([label, value, kind, tone]) => {
-        const cls = tone || (kind === 'money' || kind === 'pct' || kind === 'r' ? toneClass(value) : '');
+        const autoTone = options.autoTone !== false;
+        const cls = tone || (autoTone && (kind === 'money' || kind === 'pct' || kind === 'r') ? toneClass(value) : '');
         return [
           '<div class="metric-row">',
           `<div class="metric-label">${escapeHtml(label)}</div>`,
@@ -576,7 +584,7 @@
         ['Avg target %', firstValue(s.avg_target_distance, m.avg_target_pct), 'pct'],
         ['Min target %', m.min_target_pct, 'pct'],
         ['Max target %', m.max_target_pct, 'pct'],
-      ], currency),
+      ], currency, { autoTone: false }),
       renderSplitSection('Winners / Losers', 'Winners', 'Losers', [
         ['Avg result %', m.avg_result_pct_winners, m.avg_result_pct_losers, 'pct', 'positive', 'negative'],
         ['Avg R', m.avg_r_multiple_winners, m.avg_r_multiple_losers, 'r', 'positive', 'negative'],
@@ -586,12 +594,12 @@
       renderMetricSection('Timing & Drawdown', [
         ['Last trade', s.last_trade_timestamp, 'date'],
         ['Avg duration', firstValue(s.avg_trade_duration, m.avg_duration_seconds), 'duration'],
-        ['Shortest duration', m.shortest_duration_seconds, 'duration'],
-        ['Longest duration', m.longest_duration_seconds, 'duration'],
+        ['Shortest duration', firstValue(m.shortest_duration_seconds, m.min_trade_duration_seconds, m.min_duration_seconds), 'duration'],
+        ['Longest duration', firstValue(m.longest_duration_seconds, m.max_trade_duration_seconds, m.max_duration_seconds), 'duration'],
         ['Avg drawdown', m.avg_drawdown_pct, 'pct', 'negative'],
         ['Max drawdown', m.max_drawdown_pct, 'pct', 'negative'],
-        ['Best win streak', m.longest_winning_streak, 'count', 'positive'],
-        ['Worst losing streak', m.longest_losing_streak, 'count', 'negative'],
+        ['Best win streak', firstValue(m.longest_winning_streak_count, streakCount(m.longest_winning_streak), m.winning_streak), 'count', 'positive'],
+        ['Worst losing streak', firstValue(m.longest_losing_streak_count, streakCount(m.longest_losing_streak), m.losing_streak), 'count', 'negative'],
       ], currency),
       period ? renderMetricSection(period.title, period.rows, currency, { wide: true, note: 'This instrument only' }) : '',
       '</div>',

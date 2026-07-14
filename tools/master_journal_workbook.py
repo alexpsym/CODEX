@@ -64,6 +64,7 @@ MOVE_TO_FIELD_MAP = {
 QUALITY_ANALYSIS_FIELD_MAP = {
     "Pattern": "pattern",
     "EMA": "ema",
+    "VWAP": "vwap",
     "ATHS/ATLS": "aths_atls",
     "Order": "order_type",
     "Round Number": "round_number",
@@ -77,7 +78,7 @@ TRADE_NUMBER_FIELD_MAP = {TRADE_NUMBER_HEADER: "trade_number"}
 TRADE_LOG_MANUAL_FIELD_MAP = {**TRADE_NUMBER_FIELD_MAP, **MOVE_TO_FIELD_MAP, **QUALITY_ANALYSIS_FIELD_MAP}
 EDITABLE_COLS=["Test",*TRADE_LOG_MANUAL_FIELD_MAP.keys(),"Setup","Timeframe","Breakeven","Notes"]
 
-TRADE_LOG_HEADERS_V1 = [
+PRE_VWAP_TRADE_LOG_HEADERS_V1 = [
     "Open Time", "Close Time", "Account", "Symbol", "Side", "Qty",
     "Entry Price", "Exit Price", "Stop Loss Price", "Stop Loss Distance",
     "Target Price", "Target Distance", "Commission", "Net P/L",
@@ -88,8 +89,20 @@ TRADE_LOG_HEADERS_V1 = [
     "Setup", "Timeframe", "Breakeven", "Notes", "Cashflow Amount",
     "Cashflow New Balance", "Currency", "Row Type", "Row ID",
 ]
+TRADE_LOG_HEADERS_V1 = [
+    "Open Time", "Close Time", "Account", "Symbol", "Side", "Qty",
+    "Entry Price", "Exit Price", "Stop Loss Price", "Stop Loss Distance",
+    "Target Price", "Target Distance", "Commission", "Net P/L",
+    "Profit %", "R-Multiple", "Balance After",
+    "Trade Duration (DD:HH:MM:SS)", *MOVE_TO_FIELD_MAP.keys(),
+    "Test", "Pattern", "EMA", "VWAP", "ATHS/ATLS", "Order", "Round Number",
+    "Spiked Out", "Close Stopout", "Near Perfect Entry", "Near Win", "Early Close",
+    "Setup", "Timeframe", "Breakeven", "Notes", "Cashflow Amount",
+    "Cashflow New Balance", "Currency", "Row Type", "Row ID",
+]
+PRE_VWAP_TRADE_LOG_HEADERS = [TRADE_NUMBER_HEADER, *PRE_VWAP_TRADE_LOG_HEADERS_V1]
 TRADE_LOG_HEADERS = [TRADE_NUMBER_HEADER, *TRADE_LOG_HEADERS_V1]
-RECOMMENDATION_TRADE_LOG_HEADERS_V1 = [
+PRE_VWAP_RECOMMENDATION_TRADE_LOG_HEADERS_V1 = [
     "Open Time", "Close Time", "Account", "Symbol", "Side", "Qty",
     "Entry Price", "Exit Price", "Stop Loss Price", "Stop Loss Distance",
     STOP_RECOMMENDATION_HEADER, "Target Price", "Target Distance",
@@ -101,9 +114,22 @@ RECOMMENDATION_TRADE_LOG_HEADERS_V1 = [
     "Setup", "Timeframe", "Breakeven", "Notes", "Cashflow Amount",
     "Cashflow New Balance", "Currency", "Row Type", "Row ID",
 ]
+RECOMMENDATION_TRADE_LOG_HEADERS_V1 = [
+    "Open Time", "Close Time", "Account", "Symbol", "Side", "Qty",
+    "Entry Price", "Exit Price", "Stop Loss Price", "Stop Loss Distance",
+    STOP_RECOMMENDATION_HEADER, "Target Price", "Target Distance",
+    TARGET_RECOMMENDATION_HEADER, "Commission", "Net P/L",
+    "Profit %", "R-Multiple", "Balance After",
+    "Trade Duration (DD:HH:MM:SS)", *MOVE_TO_FIELD_MAP.keys(),
+    "Test", "Pattern", "EMA", "VWAP", "ATHS/ATLS", "Order", "Round Number",
+    "Spiked Out", "Close Stopout", "Near Perfect Entry", "Near Win", "Early Close",
+    "Setup", "Timeframe", "Breakeven", "Notes", "Cashflow Amount",
+    "Cashflow New Balance", "Currency", "Row Type", "Row ID",
+]
+PRE_VWAP_RECOMMENDATION_TRADE_LOG_HEADERS = [TRADE_NUMBER_HEADER, *PRE_VWAP_RECOMMENDATION_TRADE_LOG_HEADERS_V1]
 RECOMMENDATION_TRADE_LOG_HEADERS = [TRADE_NUMBER_HEADER, *RECOMMENDATION_TRADE_LOG_HEADERS_V1]
-PRE_RECOMMENDATION_TRADE_LOG_HEADERS_V1 = TRADE_LOG_HEADERS_V1
-PRE_RECOMMENDATION_TRADE_LOG_HEADERS = TRADE_LOG_HEADERS
+PRE_RECOMMENDATION_TRADE_LOG_HEADERS_V1 = PRE_VWAP_TRADE_LOG_HEADERS_V1
+PRE_RECOMMENDATION_TRADE_LOG_HEADERS = PRE_VWAP_TRADE_LOG_HEADERS
 PRE_MOVE_TRADE_LOG_HEADERS = [
     "Open Time", "Close Time", "Account", "Symbol", "Side", "Qty",
     "Entry Price", "Exit Price", "Stop Loss Price", "Stop Loss Distance",
@@ -406,6 +432,25 @@ def _repair_legacy_instrument_averages_freeze_pane(wb: Workbook, diagnostics: Di
         diagnostics["previous_instrument_averages_freeze_pane"] = previous
 
 
+def _ensure_symbols_freeze_panes(wb_or_ws: Workbook | Any, diagnostics: Dict[str, Any] | None = None) -> None:
+    diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+    if hasattr(wb_or_ws, "sheetnames"):
+        if SYMBOLS_SHEET not in wb_or_ws.sheetnames:
+            return
+        ws = wb_or_ws[SYMBOLS_SHEET]
+    else:
+        ws = wb_or_ws
+        if getattr(ws, "title", "") not in {SYMBOLS_SHEET, LEGACY_INSTRUMENT_AVERAGES_SHEET}:
+            return
+    previous = str(ws.freeze_panes or "")
+    if previous == "B3":
+        return
+    ws.freeze_panes = "B3"
+    key = "symbols" if getattr(ws, "title", "") == SYMBOLS_SHEET else "instrument_averages"
+    diagnostics[f"repaired_{key}_freeze_pane"] = True
+    diagnostics[f"previous_{key}_freeze_pane"] = previous
+
+
 def _instrument_averages_header_row(ws) -> int:
     if str(ws.cell(INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, 1).value or "").strip().lower() == "symbol":
         return INSTRUMENT_AVERAGES_FILTER_HEADER_ROW
@@ -680,7 +725,6 @@ def _unmerge_instrument_averages_header_rows(ws) -> None:
 
 
 def _write_instrument_averages_headers(ws, *, preserve_freeze: bool = False) -> None:
-    previous_freeze = ws.freeze_panes
     _unmerge_instrument_averages_header_rows(ws)
     for col in range(1, len(INSTRUMENT_AVERAGES_HEADERS) + 1):
         ws.cell(INSTRUMENT_AVERAGES_GROUP_HEADER_ROW, col).value = None
@@ -705,7 +749,7 @@ def _write_instrument_averages_headers(ws, *, preserve_freeze: bool = False) -> 
     for _label, first_header, _last_header in group_specs:
         start = INSTRUMENT_AVERAGES_HEADERS.index(first_header) + 1
         ws.cell(INSTRUMENT_AVERAGES_GROUP_HEADER_ROW, start).alignment = Alignment(horizontal="center")
-    ws.freeze_panes = previous_freeze if preserve_freeze and previous_freeze else "B3"
+    ws.freeze_panes = "B3"
     ws.auto_filter.ref = (
         f"A{INSTRUMENT_AVERAGES_FILTER_HEADER_ROW}:"
         f"{get_column_letter(len(INSTRUMENT_AVERAGES_HEADERS))}{max(INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, ws.max_row)}"
@@ -852,6 +896,7 @@ def _ensure_instrument_averages_schema(ws, diagnostics: Dict[str, Any] | None = 
         changed = _ensure_symbols_schema(ws, diagnostics)
         headers = _instrument_averages_header_map(ws)
         if all(header in headers for header in INSTRUMENT_AVERAGES_HEADERS):
+            _ensure_symbols_freeze_panes(ws, diagnostics)
             if ws.auto_filter and ws.auto_filter.ref:
                 _min_col, _min_row, _max_col, max_row = range_boundaries(ws.auto_filter.ref)
                 ws.auto_filter.ref = (
@@ -867,6 +912,7 @@ def _ensure_instrument_averages_schema(ws, diagnostics: Dict[str, Any] | None = 
         existing_row_two.pop()
     if existing_row_two == INSTRUMENT_AVERAGES_HEADERS:
         _write_instrument_averages_headers(ws, preserve_freeze=True)
+        _ensure_symbols_freeze_panes(ws, diagnostics)
         return False
 
     existing = [str(ws.cell(1, col).value or "").strip() for col in range(1, ws.max_column + 1)]
@@ -924,6 +970,7 @@ def _ensure_instrument_averages_schema(ws, diagnostics: Dict[str, Any] | None = 
         ws.column_dimensions[get_column_letter(old_order_col + 1)].width = order_width
     _write_instrument_averages_headers(ws, preserve_freeze=True)
     _ensure_symbols_schema(ws, diagnostics)
+    _ensure_symbols_freeze_panes(ws, diagnostics)
     diagnostics["migrated_instrument_averages_schema"] = True
     return True
 
@@ -5084,6 +5131,24 @@ def _trade_log_has_recommendation_v1_grouped_two_row_headers(ws) -> bool:
     )
 
 
+def _trade_log_has_pre_vwap_recommendation_grouped_three_row_headers(ws) -> bool:
+    return _trade_log_has_three_row_headers_for(ws, PRE_VWAP_RECOMMENDATION_TRADE_LOG_HEADERS)
+
+
+def _trade_log_has_pre_vwap_recommendation_grouped_two_row_headers(ws) -> bool:
+    return (
+        _trade_log_has_two_row_headers_for(ws, PRE_VWAP_RECOMMENDATION_TRADE_LOG_HEADERS)
+        or _trade_log_has_legacy_duplicate_two_row_headers_for(ws, PRE_VWAP_RECOMMENDATION_TRADE_LOG_HEADERS)
+    )
+
+
+def _trade_log_has_pre_vwap_recommendation_v1_grouped_two_row_headers(ws) -> bool:
+    return (
+        _trade_log_has_two_row_headers_for(ws, PRE_VWAP_RECOMMENDATION_TRADE_LOG_HEADERS_V1)
+        or _trade_log_has_legacy_duplicate_two_row_headers_for(ws, PRE_VWAP_RECOMMENDATION_TRADE_LOG_HEADERS_V1)
+    )
+
+
 def _trade_log_has_pre_recommendation_grouped_three_row_headers(ws) -> bool:
     return _trade_log_has_three_row_headers_for(ws, PRE_RECOMMENDATION_TRADE_LOG_HEADERS)
 
@@ -5111,6 +5176,9 @@ def _trade_log_uses_grouped_two_row_headers(ws) -> bool:
         or _trade_log_has_recommendation_grouped_three_row_headers(ws)
         or _trade_log_has_recommendation_grouped_two_row_headers(ws)
         or _trade_log_has_recommendation_v1_grouped_two_row_headers(ws)
+        or _trade_log_has_pre_vwap_recommendation_grouped_three_row_headers(ws)
+        or _trade_log_has_pre_vwap_recommendation_grouped_two_row_headers(ws)
+        or _trade_log_has_pre_vwap_recommendation_v1_grouped_two_row_headers(ws)
         or _trade_log_has_pre_recommendation_grouped_three_row_headers(ws)
         or _trade_log_has_pre_recommendation_grouped_two_row_headers(ws)
         or _trade_log_has_pre_recommendation_v1_grouped_two_row_headers(ws)
@@ -5126,10 +5194,14 @@ def _trade_log_header_map(ws) -> Dict[str, int]:
         return {header: col for col, header in enumerate(PRE_RECOMMENDATION_TRADE_LOG_HEADERS, start=1)}
     if _trade_log_has_recommendation_grouped_three_row_headers(ws) or _trade_log_has_recommendation_grouped_two_row_headers(ws):
         return {header: col for col, header in enumerate(RECOMMENDATION_TRADE_LOG_HEADERS, start=1)}
+    if _trade_log_has_pre_vwap_recommendation_grouped_three_row_headers(ws) or _trade_log_has_pre_vwap_recommendation_grouped_two_row_headers(ws):
+        return {header: col for col, header in enumerate(PRE_VWAP_RECOMMENDATION_TRADE_LOG_HEADERS, start=1)}
     if _trade_log_has_v1_grouped_two_row_headers(ws):
         return {header: col for col, header in enumerate(TRADE_LOG_HEADERS_V1, start=1)}
     if _trade_log_has_recommendation_v1_grouped_two_row_headers(ws):
         return {header: col for col, header in enumerate(RECOMMENDATION_TRADE_LOG_HEADERS_V1, start=1)}
+    if _trade_log_has_pre_vwap_recommendation_v1_grouped_two_row_headers(ws):
+        return {header: col for col, header in enumerate(PRE_VWAP_RECOMMENDATION_TRADE_LOG_HEADERS_V1, start=1)}
     if _trade_log_has_pre_recommendation_v1_grouped_two_row_headers(ws):
         return {header: col for col, header in enumerate(PRE_RECOMMENDATION_TRADE_LOG_HEADERS_V1, start=1)}
     return {
@@ -5144,11 +5216,15 @@ def _trade_log_data_start_row(ws) -> int:
         return TRADE_LOG_DATA_START_ROW
     if _trade_log_has_recommendation_grouped_three_row_headers(ws):
         return TRADE_LOG_DATA_START_ROW
+    if _trade_log_has_pre_vwap_recommendation_grouped_three_row_headers(ws):
+        return TRADE_LOG_DATA_START_ROW
     if _trade_log_has_pre_recommendation_grouped_three_row_headers(ws):
         return TRADE_LOG_DATA_START_ROW
     if _trade_log_has_two_row_headers(ws) or _trade_log_has_legacy_duplicate_two_row_headers(ws) or _trade_log_has_v1_grouped_two_row_headers(ws):
         return 3
     if _trade_log_has_recommendation_grouped_two_row_headers(ws) or _trade_log_has_recommendation_v1_grouped_two_row_headers(ws):
+        return 3
+    if _trade_log_has_pre_vwap_recommendation_grouped_two_row_headers(ws) or _trade_log_has_pre_vwap_recommendation_v1_grouped_two_row_headers(ws):
         return 3
     if _trade_log_has_pre_recommendation_grouped_two_row_headers(ws) or _trade_log_has_pre_recommendation_v1_grouped_two_row_headers(ws):
         return 3
@@ -5204,7 +5280,7 @@ def _hide_trade_log_row_id(ws) -> None:
 
 def _clear_trade_log_dropdown_validations(ws) -> None:
     keep = []
-    editable_cols = {_trade_log_header_map(ws).get(h) for h in ["Test", "Pattern", "ATHS/ATLS", "Order", "Round Number", "Spiked Out", "Close Stopout", "Near Perfect Entry", "Near Win", "Early Close"]}
+    editable_cols = {_trade_log_header_map(ws).get(h) for h in ["Test", "Pattern", "VWAP", "ATHS/ATLS", "Order", "Round Number", "Spiked Out", "Close Stopout", "Near Perfect Entry", "Near Win", "Early Close"]}
     editable_cols.discard(None)
     for dv in list(ws.data_validations.dataValidation):
         touches_editable = False
@@ -5225,6 +5301,7 @@ def _apply_trade_log_dropdown_validations(ws) -> None:
         "Test": '"Yes,No"',
         "ATHS/ATLS": '"All-Time High,All-Time Low"',
         "Order": '"Market,Limit"',
+        "VWAP": '"Yes,No"',
         "Round Number": '"Yes,No"',
         "Spiked Out": '"Yes,No"',
         "Pattern": '"range,channel"',
@@ -5468,6 +5545,11 @@ def _ensure_trade_log_schema(ws, diagnostics: Dict[str, Any] | None = None) -> N
     legacy_rec_duplicate_headers = _trade_log_has_legacy_duplicate_two_row_headers_for(ws, RECOMMENDATION_TRADE_LOG_HEADERS)
     legacy_rec_v1_grouped_headers = _trade_log_has_two_row_headers_for(ws, RECOMMENDATION_TRADE_LOG_HEADERS_V1)
     legacy_rec_v1_duplicate_headers = _trade_log_has_legacy_duplicate_two_row_headers_for(ws, RECOMMENDATION_TRADE_LOG_HEADERS_V1)
+    legacy_pre_vwap_rec_three_row_headers = _trade_log_has_pre_vwap_recommendation_grouped_three_row_headers(ws)
+    legacy_pre_vwap_rec_grouped_headers = _trade_log_has_two_row_headers_for(ws, PRE_VWAP_RECOMMENDATION_TRADE_LOG_HEADERS)
+    legacy_pre_vwap_rec_duplicate_headers = _trade_log_has_legacy_duplicate_two_row_headers_for(ws, PRE_VWAP_RECOMMENDATION_TRADE_LOG_HEADERS)
+    legacy_pre_vwap_rec_v1_grouped_headers = _trade_log_has_two_row_headers_for(ws, PRE_VWAP_RECOMMENDATION_TRADE_LOG_HEADERS_V1)
+    legacy_pre_vwap_rec_v1_duplicate_headers = _trade_log_has_legacy_duplicate_two_row_headers_for(ws, PRE_VWAP_RECOMMENDATION_TRADE_LOG_HEADERS_V1)
     legacy_pre_rec_three_row_headers = _trade_log_has_pre_recommendation_grouped_three_row_headers(ws)
     legacy_pre_rec_grouped_headers = _trade_log_has_two_row_headers_for(ws, PRE_RECOMMENDATION_TRADE_LOG_HEADERS)
     legacy_pre_rec_duplicate_headers = _trade_log_has_legacy_duplicate_two_row_headers_for(ws, PRE_RECOMMENDATION_TRADE_LOG_HEADERS)
@@ -5521,6 +5603,12 @@ def _ensure_trade_log_schema(ws, diagnostics: Dict[str, Any] | None = None) -> N
         elif legacy_rec_grouped_headers or legacy_rec_duplicate_headers:
             source_headers = list(RECOMMENDATION_TRADE_LOG_HEADERS)
             source_start_row = 3
+        elif legacy_pre_vwap_rec_three_row_headers:
+            source_headers = list(PRE_VWAP_RECOMMENDATION_TRADE_LOG_HEADERS)
+            source_start_row = TRADE_LOG_DATA_START_ROW
+        elif legacy_pre_vwap_rec_grouped_headers or legacy_pre_vwap_rec_duplicate_headers:
+            source_headers = list(PRE_VWAP_RECOMMENDATION_TRADE_LOG_HEADERS)
+            source_start_row = 3
         elif legacy_pre_rec_three_row_headers:
             source_headers = list(PRE_RECOMMENDATION_TRADE_LOG_HEADERS)
             source_start_row = TRADE_LOG_DATA_START_ROW
@@ -5532,6 +5620,9 @@ def _ensure_trade_log_schema(ws, diagnostics: Dict[str, Any] | None = None) -> N
             source_start_row = 3
         elif legacy_rec_v1_grouped_headers or legacy_rec_v1_duplicate_headers:
             source_headers = list(RECOMMENDATION_TRADE_LOG_HEADERS_V1)
+            source_start_row = 3
+        elif legacy_pre_vwap_rec_v1_grouped_headers or legacy_pre_vwap_rec_v1_duplicate_headers:
+            source_headers = list(PRE_VWAP_RECOMMENDATION_TRADE_LOG_HEADERS_V1)
             source_start_row = 3
         elif legacy_pre_rec_v1_grouped_headers or legacy_pre_rec_v1_duplicate_headers:
             source_headers = list(PRE_RECOMMENDATION_TRADE_LOG_HEADERS_V1)
@@ -5545,15 +5636,19 @@ def _ensure_trade_log_schema(ws, diagnostics: Dict[str, Any] | None = None) -> N
             OLD_TRADE_LOG_HEADERS,
             PRE_RECOMMENDATION_TRADE_LOG_HEADERS_V1,
             PRE_RECOMMENDATION_TRADE_LOG_HEADERS,
+            PRE_VWAP_RECOMMENDATION_TRADE_LOG_HEADERS_V1,
+            PRE_VWAP_RECOMMENDATION_TRADE_LOG_HEADERS,
             RECOMMENDATION_TRADE_LOG_HEADERS_V1,
             RECOMMENDATION_TRADE_LOG_HEADERS,
+            PRE_VWAP_TRADE_LOG_HEADERS_V1,
+            PRE_VWAP_TRADE_LOG_HEADERS,
             TRADE_LOG_HEADERS_V1,
             TRADE_LOG_HEADERS,
         ):
             raise RuntimeError(
                 "Trade Log headers cannot be migrated safely: "
                 f"found {source_headers!r}; expected current two-row headers or one of "
-                f"{[PRE_MOVE_TRADE_LOG_HEADERS, OLD_TRADE_LOG_HEADERS, PRE_RECOMMENDATION_TRADE_LOG_HEADERS_V1, PRE_RECOMMENDATION_TRADE_LOG_HEADERS, RECOMMENDATION_TRADE_LOG_HEADERS_V1, RECOMMENDATION_TRADE_LOG_HEADERS, TRADE_LOG_HEADERS_V1, TRADE_LOG_HEADERS]!r}."
+                f"{[PRE_MOVE_TRADE_LOG_HEADERS, OLD_TRADE_LOG_HEADERS, PRE_RECOMMENDATION_TRADE_LOG_HEADERS_V1, PRE_RECOMMENDATION_TRADE_LOG_HEADERS, PRE_VWAP_RECOMMENDATION_TRADE_LOG_HEADERS_V1, PRE_VWAP_RECOMMENDATION_TRADE_LOG_HEADERS, RECOMMENDATION_TRADE_LOG_HEADERS_V1, RECOMMENDATION_TRADE_LOG_HEADERS, PRE_VWAP_TRADE_LOG_HEADERS_V1, PRE_VWAP_TRADE_LOG_HEADERS, TRADE_LOG_HEADERS_V1, TRADE_LOG_HEADERS]!r}."
             )
         if not (
             legacy_two_row_headers or legacy_duplicate_headers
@@ -5561,6 +5656,9 @@ def _ensure_trade_log_schema(ws, diagnostics: Dict[str, Any] | None = None) -> N
             or legacy_rec_three_row_headers
             or legacy_rec_grouped_headers or legacy_rec_duplicate_headers
             or legacy_rec_v1_grouped_headers or legacy_rec_v1_duplicate_headers
+            or legacy_pre_vwap_rec_three_row_headers
+            or legacy_pre_vwap_rec_grouped_headers or legacy_pre_vwap_rec_duplicate_headers
+            or legacy_pre_vwap_rec_v1_grouped_headers or legacy_pre_vwap_rec_v1_duplicate_headers
             or legacy_pre_rec_three_row_headers
             or legacy_pre_rec_grouped_headers or legacy_pre_rec_duplicate_headers
             or legacy_pre_rec_v1_grouped_headers or legacy_pre_rec_v1_duplicate_headers
@@ -5581,6 +5679,12 @@ def _ensure_trade_log_schema(ws, diagnostics: Dict[str, Any] | None = None) -> N
         source_data_rows.append(row_snapshot)
 
     header_templates: Dict[str, Dict[str, Any]] = {}
+    def _first_available_template(*headers: str) -> str:
+        for candidate in headers:
+            if candidate in source_by_header:
+                return candidate
+        return next(iter(source_by_header))
+
     source_header_row = 2 if (
         already_current
         or legacy_two_row_headers or legacy_duplicate_headers
@@ -5588,6 +5692,9 @@ def _ensure_trade_log_schema(ws, diagnostics: Dict[str, Any] | None = None) -> N
         or legacy_rec_three_row_headers
         or legacy_rec_grouped_headers or legacy_rec_duplicate_headers
         or legacy_rec_v1_grouped_headers or legacy_rec_v1_duplicate_headers
+        or legacy_pre_vwap_rec_three_row_headers
+        or legacy_pre_vwap_rec_grouped_headers or legacy_pre_vwap_rec_duplicate_headers
+        or legacy_pre_vwap_rec_v1_grouped_headers or legacy_pre_vwap_rec_v1_duplicate_headers
         or legacy_pre_rec_three_row_headers
         or legacy_pre_rec_grouped_headers or legacy_pre_rec_duplicate_headers
         or legacy_pre_rec_v1_grouped_headers or legacy_pre_rec_v1_duplicate_headers
@@ -5596,7 +5703,9 @@ def _ensure_trade_log_schema(ws, diagnostics: Dict[str, Any] | None = None) -> N
         source_header = header
         if header == "Close Stopout" and source_header not in source_by_header:
             source_header = "Stop Out"
-        template_header = source_header if source_header in source_by_header else ("Open Time" if TRADE_NUMBER_HEADER not in source_by_header else "Test")
+        template_header = source_header if source_header in source_by_header else _first_available_template("Open Time", "Test")
+        if header == "VWAP" and source_header not in source_by_header:
+            template_header = _first_available_template("Round Number", "EMA", "Order", "ATHS/ATLS", "Pattern", "Test", "Setup", "Open Time")
         if header == STOP_RECOMMENDATION_HEADER:
             template_header = "Stop Loss Distance"
         elif header == TARGET_RECOMMENDATION_HEADER:
@@ -5607,6 +5716,8 @@ def _ensure_trade_log_schema(ws, diagnostics: Dict[str, Any] | None = None) -> N
             template_header = "Stop Loss Distance"
         elif header.endswith("Duration"):
             template_header = "Trade Duration (DD:HH:MM:SS)"
+        if template_header not in source_by_header:
+            template_header = _first_available_template("Open Time", "Test", "Setup")
         header_templates[header] = _snapshot_cell(ws.cell(source_header_row, source_by_header[template_header]))
 
     source_dimensions = {
@@ -5630,7 +5741,9 @@ def _ensure_trade_log_schema(ws, diagnostics: Dict[str, Any] | None = None) -> N
         diagnostics["deleted_extra_trade_log_columns"] = extra_count
     for target_col, header in enumerate(TRADE_LOG_HEADERS, start=1):
         source_header = header if header in source_by_header else ("Stop Out" if header == "Close Stopout" and "Stop Out" in source_by_header else None)
-        template_header = source_header or ("Open Time" if TRADE_NUMBER_HEADER not in source_by_header else "Test")
+        template_header = source_header or _first_available_template("Open Time", "Test")
+        if header == "VWAP" and source_header is None:
+            template_header = _first_available_template("Round Number", "EMA", "Order", "ATHS/ATLS", "Pattern", "Test", "Setup", "Open Time")
         if header == STOP_RECOMMENDATION_HEADER:
             template_header = "Stop Loss Distance"
         elif header == TARGET_RECOMMENDATION_HEADER:
@@ -5641,6 +5754,8 @@ def _ensure_trade_log_schema(ws, diagnostics: Dict[str, Any] | None = None) -> N
             template_header = "Stop Loss Distance"
         elif header.endswith("Duration"):
             template_header = "Trade Duration (DD:HH:MM:SS)"
+        if template_header not in source_by_header:
+            template_header = _first_available_template("Open Time", "Test", "Setup")
         dimension = source_dimensions.get(source_header or "") or source_dimensions.get(template_header)
         letter = get_column_letter(target_col)
         ws.column_dimensions[letter].width = dimension.width if dimension and dimension.width else 14
@@ -6248,6 +6363,20 @@ def _repair_stats1_child_label_styles(ws, diagnostics: Dict[str, Any] | None = N
             and str(cell.alignment.horizontal or "").lower() == "right"
         )
 
+    def has_core_metric_style(cell) -> bool:
+        return (
+            cell.font.bold is True
+            and cell.font.italic is not True
+            and str(cell.alignment.horizontal or "").lower() in {"", "left", "general"}
+        )
+
+    def copy_label_style(src, dst) -> None:
+        value = dst.value
+        border = copy(dst.border)
+        _copy_cell_style(src, dst)
+        dst.value = value
+        dst.border = border
+
     def first_template(coordinates: Tuple[str, ...], *, source_label: bool):
         for coordinate in coordinates:
             cell = ws[coordinate]
@@ -6264,6 +6393,24 @@ def _repair_stats1_child_label_styles(ws, diagnostics: Dict[str, Any] | None = N
                 continue
             return cell
         return None
+
+    core_templates: Dict[str, Any] = {}
+    generic_core_template = None
+    first_winners_bounds = _stats1_section_bounds(ws, "Winners")
+    core_end = (first_winners_bounds[0] - 1) if first_winners_bounds else ws.max_row
+    for row in range(1, core_end + 1):
+        cell = ws.cell(row, 1)
+        label = _stats1_label_at(ws, row)
+        label_key = label.casefold()
+        if not label or label_key in {"source", "winners", "losers"}:
+            continue
+        if _semantic_fill_rgb(cell):
+            continue
+        if not has_core_metric_style(cell):
+            continue
+        core_templates.setdefault(label_key, cell)
+        if generic_core_template is None:
+            generic_core_template = cell
 
     source_template = first_template(("A61",), source_label=True)
     if source_template is None:
@@ -6297,11 +6444,11 @@ def _repair_stats1_child_label_styles(ws, diagnostics: Dict[str, Any] | None = N
                 break
 
     repaired_sources = 0
-    repaired_children = 0
+    repaired_metric_labels = 0
     for row in range(1, ws.max_row + 1):
         if _stats1_label_at(ws, row).casefold() == "source":
             if source_template is not None:
-                _copy_cell_style(source_template, ws.cell(row, 1))
+                copy_label_style(source_template, ws.cell(row, 1))
             else:
                 _apply_dashboard_source_label_style(ws.cell(row, 1))
             repaired_sources += 1
@@ -6315,11 +6462,19 @@ def _repair_stats1_child_label_styles(ws, diagnostics: Dict[str, Any] | None = N
                 continue
             if _semantic_fill_rgb(ws.cell(row, 1)) == LIGHT_GREY_FILL_RGB[-6:]:
                 continue
-            if child_template is not None:
-                _copy_cell_style(child_template, ws.cell(row, 1))
+            template = core_templates.get(label.casefold()) or generic_core_template
+            if template is not None:
+                copy_label_style(template, ws.cell(row, 1))
             else:
-                _apply_dashboard_child_label_style(ws.cell(row, 1))
-            repaired_children += 1
+                font = copy(ws.cell(row, 1).font)
+                font.bold = True
+                font.italic = False
+                font.color = "FF000000"
+                ws.cell(row, 1).font = font
+                alignment = copy(ws.cell(row, 1).alignment)
+                alignment.horizontal = "left"
+                ws.cell(row, 1).alignment = alignment
+            repaired_metric_labels += 1
     categorical_sections = {"side", "patterns", "timeframe", "commission", "drawdown"}
     repaired_nested_outcomes = 0
     for section_name in ("Side", "Patterns", "Timeframe", "Commission"):
@@ -6331,14 +6486,14 @@ def _repair_stats1_child_label_styles(ws, diagnostics: Dict[str, Any] | None = N
             if label not in {"winners", "losers"}:
                 continue
             if child_template is not None:
-                _copy_cell_style(child_template, ws.cell(row, 1))
+                copy_label_style(child_template, ws.cell(row, 1))
             else:
                 _apply_dashboard_child_label_style(ws.cell(row, 1))
             repaired_nested_outcomes += 1
     if repaired_sources:
         diagnostics["repaired_stats1_source_label_styles"] = repaired_sources
-    if repaired_children:
-        diagnostics["repaired_stats1_child_label_styles"] = repaired_children
+    if repaired_metric_labels:
+        diagnostics["repaired_stats1_metric_label_styles"] = repaired_metric_labels
     if repaired_nested_outcomes:
         diagnostics["repaired_stats1_nested_outcome_label_styles"] = repaired_nested_outcomes
 
@@ -8197,7 +8352,7 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
             "R-Multiple": row.get('r_multiple'), "Balance After": resolved_balance,
             "Trade Duration (DD:HH:MM:SS)": _format_duration_display(_infer_trade_duration_seconds(row)),
             "Test": 'Yes' if _is_test_trade_value(row.get('is_test_trade')) else 'No',
-            "Pattern": row.get('pattern') or '', "EMA": row.get('ema') or '', "ATHS/ATLS": row.get('aths_atls') or '',
+            "Pattern": row.get('pattern') or '', "EMA": row.get('ema') or '', "VWAP": row.get('vwap') or '', "ATHS/ATLS": row.get('aths_atls') or '',
             "Order": row.get('order_type') or '', "Round Number": row.get('round_number') or '',
             "Spiked Out": row.get('spiked_out') or '', "Close Stopout": close_stopout or '',
             "Near Perfect Entry": row.get('near_perfect_entry') or '', "Near Win": row.get('near_win') or '',
@@ -11536,6 +11691,7 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
         _remove_legacy_trade_meta_sheet(wb, diagnostics)
         instrument_ws = _symbols_sheet(wb)
         _ensure_instrument_averages_schema(instrument_ws, diagnostics)
+        _ensure_symbols_freeze_panes(instrument_ws, diagnostics)
         _apply_instrument_averages_requested_style(instrument_ws, preserve_layout=True)
         def _repair_trade_log_unknown_currency_formats(ws, rows: List[Dict[str, Any]], diagnostics: Dict[str, Any] | None = None) -> None:
             diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
@@ -12583,6 +12739,7 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
                 _populate_symbols_metrics_preserving_layout(instrument_ws, rows, diagnostics)
                 _repair_symbols_header_merges_preserving_layout(instrument_ws, diagnostics)
                 _set_instrument_averages_auto_filter_to_populated_range(instrument_ws)
+                _ensure_symbols_freeze_panes(instrument_ws, diagnostics)
             if "P&L Calendar" in wb.sheetnames and "P&L Calendar" in gen.sheetnames:
                 cal_ws = wb["P&L Calendar"]
                 _write_pnl_calendar_one_line_layout(cal_ws, snapshot, diagnostics)
@@ -12599,6 +12756,7 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
         )
         _assert_filter_covers_data(trade_log, sheet_name="Trade Log", header_row=TRADE_LOG_FILTER_HEADER_ROW, required_headers=["Open Time", "Close Time", "Row ID"], header_map=_trade_log_header_map(trade_log))
         symbols_ws = _symbols_sheet(wb)
+        _ensure_symbols_freeze_panes(symbols_ws, diagnostics)
         _assert_filter_covers_data(
             symbols_ws,
             sheet_name=SYMBOLS_SHEET,
