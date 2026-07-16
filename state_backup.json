@@ -170,39 +170,39 @@
       "changed": 0,
       "failed_months": [],
       "failures": [],
-      "finished_at": "2026-07-16T01:09:10.283146+00:00",
+      "finished_at": "2026-07-16T11:33:03.319866+00:00",
       "mandatory_row_id": "monthly_aud_reval:bybit_live:2026-03",
       "partial": false,
       "processed_months": [],
       "rows": 4,
-      "started_at": "2026-07-16T01:09:09.609424+00:00",
+      "started_at": "2026-07-16T11:33:03.296518+00:00",
       "succeeded_months": [],
       "target_months": []
     },
-    "last_synced_at": "2026-07-16T01:09:10.283118+00:00",
+    "last_synced_at": "2026-07-16T11:33:03.319853+00:00",
     "month_key": null,
     "ok": true,
     "stage": "complete",
     "traceback": null,
-    "updated_at": "2026-07-16T01:09:10.283138+00:00"
+    "updated_at": "2026-07-16T11:33:03.319863+00:00"
   },
   "oanda_fill_state": {
     "diagnostics": {
       "demo": {
         "last_error": null,
         "last_seen_transaction_id": "650",
-        "last_success_at": "2026-07-12T01:44:43.641631+00:00",
+        "last_success_at": "2026-07-16T03:09:48.938077+00:00",
         "startup_recovered_rows": 0,
         "startup_skipped_duplicates": 0,
-        "updated_at": "2026-07-12T01:44:43.641650+00:00"
+        "updated_at": "2026-07-16T03:09:48.938108+00:00"
       },
       "live": {
         "last_error": null,
         "last_seen_transaction_id": "471",
-        "last_success_at": "2026-07-12T01:44:44.719145+00:00",
+        "last_success_at": "2026-07-16T03:09:50.096086+00:00",
         "startup_recovered_rows": 0,
         "startup_skipped_duplicates": 0,
-        "updated_at": "2026-07-12T01:44:44.719185+00:00"
+        "updated_at": "2026-07-16T03:09:50.096106+00:00"
       }
     },
     "last_seen_transaction_id": {
@@ -213,7 +213,7 @@
       "demo": {},
       "live": {}
     },
-    "updated_at": "2026-07-12T01:44:44.719192+00:00"
+    "updated_at": "2026-07-16T03:09:50.096117+00:00"
   },
   "pending_webhooks": [
     {
@@ -478,7 +478,7 @@
       "vwap": ""
     }
   ],
-  "savedAt": "2026-07-16T01:09:11.635554+00:00",
+  "savedAt": "2026-07-16T11:33:05.296185+00:00",
   "source_host": "DESKTOP-1B14EQ6",
   "source_profile": "local",
   "trade_contexts": [
@@ -2876,8 +2876,107 @@
     }
   ],
   "trading_journal": {
-    "items": [],
-    "updated_at": "2026-07-13T21:31:08.223975+00:00"
+    "items": [
+      {
+        "account": "BYBIT DEMO",
+        "aths_atls": "",
+        "breakeven": "",
+        "close_stopout": "",
+        "close_time": "2026-05-01",
+        "early_close": "",
+        "ema": "",
+        "id": "t1",
+        "is_test_trade": false,
+        "manual_override_fields": [
+          "aths_atls",
+          "breakeven",
+          "close_stopout",
+          "early_close",
+          "ema",
+          "is_test_trade",
+          "move_to_break_even_distance_from_entry_pct",
+          "move_to_break_even_distance_from_exit_pct",
+          "move_to_break_even_duration",
+          "move_to_break_even_time",
+          "move_to_break_even_trigger_price",
+          "move_to_profit_distance_from_entry_pct",
+          "move_to_profit_distance_from_exit_pct",
+          "move_to_profit_duration",
+          "move_to_profit_time",
+          "move_to_profit_trigger_price",
+          "near_perfect_entry",
+          "near_win",
+          "notes",
+          "order_type",
+          "pattern",
+          "round_number",
+          "setup",
+          "spiked_out",
+          "timeframe",
+          "trade_number",
+          "vwap"
+        ],
+        "manual_overrides": {
+          "aths_atls": "",
+          "breakeven": "",
+          "close_stopout": "",
+          "early_close": "",
+          "ema": "",
+          "is_test_trade": false,
+          "move_to_break_even_distance_from_entry_pct": null,
+          "move_to_break_even_distance_from_exit_pct": null,
+          "move_to_break_even_duration": null,
+          "move_to_break_even_time": null,
+          "move_to_break_even_trigger_price": null,
+          "move_to_profit_distance_from_entry_pct": null,
+          "move_to_profit_distance_from_exit_pct": null,
+          "move_to_profit_duration": null,
+          "move_to_profit_time": null,
+          "move_to_profit_trigger_price": null,
+          "near_perfect_entry": "",
+          "near_win": "",
+          "notes": "",
+          "order_type": "",
+          "pattern": "",
+          "round_number": "",
+          "setup": "",
+          "spiked_out": "",
+          "timeframe": "",
+          "trade_number": "",
+          "vwap": ""
+        },
+        "manual_updated_at": "2026-07-16T04:15:56.380288+00:00",
+        "move_to_break_even_distance_from_entry_pct": null,
+        "move_to_break_even_distance_from_exit_pct": null,
+        "move_to_break_even_duration": null,
+        "move_to_break_even_time": null,
+        "move_to_break_even_trigger_price": null,
+        "move_to_profit_distance_from_entry_pct": null,
+        "move_to_profit_distance_from_exit_pct": null,
+        "move_to_profit_duration": null,
+        "move_to_profit_time": null,
+        "move_to_profit_trigger_price": null,
+        "near_perfect_entry": "",
+        "near_win": "",
+        "net_profit": 10.0,
+        "notes": "",
+        "open_time": "2026-05-01",
+        "order_type": "",
+        "pattern": "",
+        "realized_pnl": 10.0,
+        "result_pct": 1.0,
+        "round_number": "",
+        "row_type": "trade",
+        "setup": "",
+        "side": "BUY",
+        "spiked_out": "",
+        "symbol": "BTCUSDT",
+        "timeframe": "",
+        "trade_number": "",
+        "vwap": ""
+      }
+    ],
+    "updated_at": "2026-07-16T04:15:56.380334+00:00"
   },
   "trading_journal_import_cache": {
     "files": {
@@ -3051,8 +3150,8 @@
       {
         "account": "Bybit Demo",
         "account_mode": "demo",
-        "as_of": "2026-07-12T01:44:32.983919+00:00",
-        "balance": 320.26324878,
+        "as_of": "2026-07-16T03:09:33.445755+00:00",
+        "balance": 320.25014072,
         "balance_source": "bybit_wallet_balance",
         "currency": "USDT",
         "label": "Bybit Demo",
@@ -3061,8 +3160,8 @@
       {
         "account": "Bybit Live",
         "account_mode": "live",
-        "as_of": "2026-07-12T01:44:34.490169+00:00",
-        "balance": 224.74322191,
+        "as_of": "2026-07-16T03:09:36.237368+00:00",
+        "balance": 224.70027027,
         "balance_source": "bybit_wallet_balance",
         "currency": "USDT",
         "label": "Bybit Live",
@@ -3071,7 +3170,7 @@
       {
         "account": "OANDA DEMO",
         "account_mode": "demo",
-        "as_of": "2026-07-12T01:44:35.921863+00:00",
+        "as_of": "2026-07-16T03:09:37.502359+00:00",
         "balance": 1500.5138,
         "balance_source": "oanda_account_summary",
         "currency": "AUD",
@@ -3082,7 +3181,7 @@
       {
         "account": "OANDA LIVE",
         "account_mode": "live",
-        "as_of": "2026-07-12T01:44:36.807183+00:00",
+        "as_of": "2026-07-16T03:09:38.709966+00:00",
         "balance": 1479.3098,
         "balance_source": "oanda_account_summary",
         "currency": "AUD",
@@ -3092,14 +3191,9 @@
       }
     ],
     "broker_balance_diagnostics": {
-      "bybit_demo_anchor_fingerprint": "a7ec813afbd4384a14a9991b3fd8130461fdda90ff7ab31b25e7f84fe4345691",
-      "updated_at": "2026-07-13T21:31:14.744753+00:00",
-      "warnings": [
-        "Bybit demo balance unavailable: 502: Bybit balance lookup failed path=/v5/account/wallet-balance: All connection attempts failed",
-        "Bybit live balance unavailable: 502: Bybit balance lookup failed path=/v5/account/wallet-balance: All connection attempts failed",
-        "OANDA demo account summary unavailable: name 'OandaUpstreamError' is not defined",
-        "OANDA live account summary unavailable: name 'OandaUpstreamError' is not defined"
-      ]
+      "bybit_demo_anchor_fingerprint": "b90a5f09f3e3aaebe90f60991590c23cd0f0089c5b4f29b49e0ee8f69b0fd96e",
+      "updated_at": "2026-07-16T03:09:38.726488+00:00",
+      "warnings": []
     },
     "bybit_closed_pnl_last_seen": {
       "demo": 1782981944155,
@@ -3773,5 +3867,5 @@
   "watchlist": [
     "DASHUSDT"
   ],
-  "watchlist_updated_at": "2026-07-16T01:09:02.210915+00:00"
+  "watchlist_updated_at": "2026-07-16T11:32:59.474305+00:00"
 }
