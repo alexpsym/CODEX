@@ -2952,76 +2952,38 @@ def _git_workbook_fixture(commit: str, tmp_path: Path) -> Path:
     return path
 
 
-def _symbols_trade_log_layout_signature(path: Path) -> dict:
+def _symbols_a1_at2_border_signatures(path: Path) -> dict:
     wb = load_workbook(path, data_only=False)
     try:
         symbols = wb[SYMBOLS_SHEET]
-        headers = _instrument_averages_header_map(symbols)
-        duration_cols = [
-            headers["Longest duration (DD:HH:MM:SS)"],
-            headers["Avg winning duration (DD:HH:MM:SS)"],
-            headers["Avg losing duration (DD:HH:MM:SS)"],
-        ]
-        trade_log = wb["Trade Log"]
         return {
-            "symbols_header_borders": {
-                (row, col): _border_signature(symbols.cell(row, col))
-                for row in (1, 2)
-                for col in range(1, 47)
-            },
-            "symbols_header_merges": sorted(
-                str(rng)
-                for rng in symbols.merged_cells.ranges
-                if rng.min_row <= 2 and rng.max_row >= 1
-            ),
-            "symbols_duration_widths": {
-                get_column_letter(col): symbols.column_dimensions[get_column_letter(col)].width
-                for col in duration_cols
-            },
-            "symbols_duration_data_right": {
-                (row, get_column_letter(col)): symbols.cell(row, col).border.right.style
-                for row in range(INSTRUMENT_AVERAGES_DATA_START_ROW, min(symbols.max_row, INSTRUMENT_AVERAGES_DATA_START_ROW + 4) + 1)
-                for col in duration_cols
-            },
-            "trade_log_group_edges": {
-                cell: (_border_signature(trade_log[cell]), _cell_fill_rgb(trade_log[cell]))
-                for cell in ("X1", "AC1")
-            },
+            (row, col): _border_signature(symbols.cell(row, col))
+            for row in (1, 2)
+            for col in range(1, 47)
         }
     finally:
         wb.close()
 
 
-def test_772eedb_symbols_trade_log_formatting_migration_restores_manual_layout(tmp_path: Path):
-    work = _git_workbook_fixture("772eedb", tmp_path)
-    baseline = load_workbook(work, data_only=False)
-    try:
-        baseline_symbols = baseline[SYMBOLS_SHEET]
-        baseline_symbol_header_borders = {
-            (row, col): _border_signature(baseline_symbols.cell(row, col))
-            for row in (1, 2)
-            for col in range(1, 47)
-        }
-        baseline_row_heights = {
-            row: baseline_symbols.row_dimensions[row].height
-            for row in (1, 2)
-        }
-    finally:
-        baseline.close()
+def _formula_error_cells(path: Path) -> list[str]:
+    error_tokens = ("#NULL!", "#DIV/0!", "#VALUE!", "#REF!", "#NAME?", "#NUM!", "#N/A")
+    errors: set[str] = set()
+    for data_only in (False, True):
+        wb = load_workbook(path, data_only=data_only, read_only=True)
+        try:
+            for ws in wb.worksheets:
+                for row in ws.iter_rows():
+                    for cell in row:
+                        value = cell.value
+                        if isinstance(value, str) and value.strip().upper().startswith(error_tokens):
+                            errors.add(f"{ws.title}!{cell.coordinate}={value}")
+        finally:
+            wb.close()
+    return sorted(errors)
 
-    snapshot = sample_snapshot()
-    result = update_master_journal_workbook_data_only(work, snapshot)
-    assert result["ok"] is True
-    Path(result["candidate_path"]).replace(work)
-    after_first = _symbols_trade_log_layout_signature(work)
 
-    result = update_master_journal_workbook_data_only(work, snapshot)
-    assert result["ok"] is True
-    Path(result["candidate_path"]).replace(work)
-    after_second = _symbols_trade_log_layout_signature(work)
-    assert after_second == after_first
-
-    wb = load_workbook(work, data_only=False)
+def _assert_symbols_trade_log_layout_contract(path: Path) -> None:
+    wb = load_workbook(path, data_only=False)
     try:
         symbols = wb[SYMBOLS_SHEET]
         headers = _instrument_averages_header_map(symbols)
@@ -3041,38 +3003,65 @@ def test_772eedb_symbols_trade_log_formatting_migration_restores_manual_layout(t
             assert f"{letter}1:{letter}2" in merges
             assert symbols.cell(1, col).value == header
             assert symbols.cell(2, col).value is None
-
-        for key, signature in baseline_symbol_header_borders.items():
-            assert _border_signature(symbols.cell(*key)) == signature
-        assert {row: symbols.row_dimensions[row].height for row in (1, 2)} == baseline_row_heights
-
-        for header in (
-            "Longest duration (DD:HH:MM:SS)",
-            "Avg winning duration (DD:HH:MM:SS)",
-            "Avg losing duration (DD:HH:MM:SS)",
-        ):
-            assert symbols.column_dimensions[get_column_letter(headers[header])].width == 43
+            assert symbols.column_dimensions[letter].width == 43
 
         longest_col = headers["Longest duration (DD:HH:MM:SS)"]
         winning_col = headers["Avg winning duration (DD:HH:MM:SS)"]
         losing_col = headers["Avg losing duration (DD:HH:MM:SS)"]
-        for row in range(INSTRUMENT_AVERAGES_DATA_START_ROW, min(symbols.max_row, INSTRUMENT_AVERAGES_DATA_START_ROW + 4) + 1):
+        for row in range(INSTRUMENT_AVERAGES_DATA_START_ROW, symbols.max_row + 1):
             assert symbols.cell(row, longest_col).border.right.style == "thin"
             assert symbols.cell(row, winning_col).border.right.style == "thin"
             assert symbols.cell(row, losing_col).border.right.style == "thick"
 
         trade_log = wb["Trade Log"]
+        trade_last_col = max(_trade_log_header_map(trade_log).values())
+        assert all(
+            _cell_fill_rgb(trade_log.cell(row, col)) == ""
+            for row in range(1, TRADE_LOG_HEADER_ROWS + 1)
+            for col in range(1, trade_last_col + 1)
+        )
         for cell in ("X1", "AC1"):
             assert trade_log[cell].border.right.style == "medium"
-            assert _cell_fill_rgb(trade_log[cell]) == ""
+        for row in range(TRADE_LOG_DATA_START_ROW, trade_log.max_row + 1):
+            assert trade_log.row_dimensions[row].height == TRADE_LOG_DATA_ROW_HEIGHT
     finally:
         wb.close()
+
+
+def _open_save_reopen_cycle(path: Path) -> None:
+    wb = load_workbook(path, data_only=False)
+    wb.save(path)
+    wb.close()
+    reopened = load_workbook(path, data_only=False)
+    reopened.close()
+
+
+def test_40f2ef3_symbols_formatting_migration_repairs_manual_borders(tmp_path: Path):
+    baseline_path = _git_workbook_fixture("772eedb", tmp_path)
+    damaged_path = _git_workbook_fixture("40f2ef3", tmp_path)
+    baseline_symbol_header_borders = _symbols_a1_at2_border_signatures(baseline_path)
+
+    snapshot = sample_snapshot()
+    result = update_master_journal_workbook_data_only(damaged_path, snapshot)
+    assert result["ok"] is True
+    Path(result["candidate_path"]).replace(damaged_path)
+    _open_save_reopen_cycle(damaged_path)
+
+    assert _symbols_a1_at2_border_signatures(damaged_path) == baseline_symbol_header_borders
+    _assert_symbols_trade_log_layout_contract(damaged_path)
+    assert _formula_error_cells(damaged_path) == []
 
 
 def test_checked_in_trading_journal_resync_preserves_symbols_and_trade_log_borders(tmp_path: Path):
     path = Path("journal") / "Trading Journal.xlsx"
     if not path.exists():
         pytest.skip("checked-in Trading Journal.xlsx is not available")
+    baseline_path = _git_workbook_fixture("772eedb", tmp_path)
+    baseline_symbol_header_borders = _symbols_a1_at2_border_signatures(baseline_path)
+    assert _symbols_a1_at2_border_signatures(path) == baseline_symbol_header_borders
+    _assert_symbols_trade_log_layout_contract(path)
+    assert _formula_error_cells(path) == []
+
     work = tmp_path / "Trading Journal.xlsx"
     shutil.copy2(path, work)
 
@@ -3099,11 +3088,26 @@ def test_checked_in_trading_journal_resync_preserves_symbols_and_trade_log_borde
                     for col in range(1, symbol_last_col + 1)
                 },
                 "symbols_row1_merges": sorted(
-                    str(rng) for rng in symbols.merged_cells.ranges if rng.min_row == 1 and rng.max_row == 1
+                    str(rng) for rng in symbols.merged_cells.ranges if rng.min_row <= 2 and rng.max_row >= 1
                 ),
+                "symbols_widths": {
+                    get_column_letter(col): symbols.column_dimensions[get_column_letter(col)].width
+                    for col in range(1, symbol_last_col + 1)
+                },
+                "symbols_row_heights": {
+                    row: symbols.row_dimensions[row].height
+                    for row in symbol_rows
+                },
                 "trade_log_borders": {
                     (row, col): _border_signature(trade_log.cell(row, col))
                     for row in trade_rows
+                    for col in range(1, trade_last_col + 1)
+                },
+                "trade_log_header_merges": sorted(
+                    str(rng) for rng in trade_log.merged_cells.ranges if rng.min_row <= TRADE_LOG_HEADER_ROWS
+                ),
+                "trade_log_widths": {
+                    get_column_letter(col): trade_log.column_dimensions[get_column_letter(col)].width
                     for col in range(1, trade_last_col + 1)
                 },
                 "trade_log_row_heights": {
@@ -3115,12 +3119,18 @@ def test_checked_in_trading_journal_resync_preserves_symbols_and_trade_log_borde
             wb.close()
 
     before = capture_signatures(work)
-    snapshot = read_master_journal_source(work)
-    result = update_master_journal_workbook_data_only(work, snapshot)
-    assert result["ok"] is True
-    Path(result["candidate_path"]).replace(work)
-    after = capture_signatures(work)
-    assert after == before
+    snapshot = sample_snapshot()
+    for _ in range(2):
+        result = update_master_journal_workbook_data_only(work, snapshot)
+        assert result["ok"] is True
+        Path(result["candidate_path"]).replace(work)
+        assert capture_signatures(work) == before
+
+    _open_save_reopen_cycle(work)
+    assert capture_signatures(work) == before
+    assert _symbols_a1_at2_border_signatures(work) == baseline_symbol_header_borders
+    _assert_symbols_trade_log_layout_contract(work)
+    assert _formula_error_cells(work) == []
 
 
 def test_data_only_update_repairs_stale_recommendation_columns_and_stats1_labels(tmp_path: Path):

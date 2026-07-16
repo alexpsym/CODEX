@@ -10,7 +10,7 @@ from openpyxl.styles import Font
 from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.worksheet.views import Pane, Selection
 import hashlib
-from openpyxl.styles import PatternFill, Border, Side, Alignment
+from openpyxl.styles import PatternFill, Border, Side, Alignment, Color
 from openpyxl.formatting.rule import CellIsRule, FormulaRule
 from openpyxl.utils import get_column_letter
 from openpyxl.utils.cell import range_boundaries
@@ -584,6 +584,19 @@ DURATION_SYMBOLS_METRIC_KEYS = {
     "avgloserdurationddhhmmss": "avg_losing_duration",
 }
 
+# Exact manually drawn SYMBOLS A1:AT2 border sides from the 772eedb workbook.
+# Each four-character code is left/right/top/bottom: thin, medium, or none.
+SYMBOLS_MANUAL_HEADER_BORDER_CODES = (
+    "tntt mmmt mmmt mnmt mmmt nmmt mtmt ttmt ttmt tmmt mtmt ttmt ttmt tmmt "
+    "mmmt mmmt mmmt mmmt mmmt mmmt mtmt ntmt mmmt mmmt mmmt mmmt mmmt mmmt "
+    "mtmt ttmt tmmt mtmt ttmt tmmt mmmt mtmt nnmt nnmt ntmt mtmt nnmt nnmt "
+    "ntmt nttt tttt tttt",
+    "tnnt mmnt mmnt mnnt mmnt nmnt mtnt ttnt ttnt tmnt mtnt ttnt ttnt tmnt "
+    "mmnt mmnt mmnt mmnt mmnt mmnt mttt tmtt mmtt mmtt mmtt mmtt mmtt mmtt "
+    "mttt tttt tmtt mttt tttt tmtt mmtt mttt tttt tttt tmtt mttt tttt tttt "
+    "tmtt ntnt ttnt ttnt",
+)
+
 
 def _trade_log_visible_header(header: str) -> str:
     if header in {STOP_RECOMMENDATION_HEADER, TARGET_RECOMMENDATION_HEADER}:
@@ -864,6 +877,70 @@ def _symbols_outer_duration_right_side(ws, row: int, current_outer_col: int, pre
     return Side(style="thick", color="FFD1D5DB")
 
 
+def _symbols_manual_header_border(code: str) -> Border:
+    def side(token: str) -> Side:
+        if token == "t":
+            return Side(style="thin", color="FFD1D5DB")
+        if token == "m":
+            return Side(style="medium", color=Color(indexed=64))
+        if token == "n":
+            return Side()
+        raise ValueError(f"unsupported SYMBOLS border token: {token!r}")
+
+    if len(code) != 4:
+        raise ValueError(f"invalid SYMBOLS border code: {code!r}")
+    return Border(
+        left=side(code[0]),
+        right=side(code[1]),
+        top=side(code[2]),
+        bottom=side(code[3]),
+        diagonal=Side(),
+        diagonalUp=False,
+        diagonalDown=False,
+        outline=True,
+    )
+
+
+def _repair_symbols_manual_header_borders(
+    ws,
+    diagnostics: Dict[str, Any] | None = None,
+) -> None:
+    if _instrument_averages_header_row(ws) != INSTRUMENT_AVERAGES_FILTER_HEADER_ROW:
+        return
+    headers = _instrument_averages_header_map(ws)
+    if any(
+        headers.get(header) != col
+        for col, header in enumerate(INSTRUMENT_AVERAGES_HEADERS, start=1)
+    ):
+        return
+
+    repaired: List[str] = []
+    for row, encoded_row in enumerate(SYMBOLS_MANUAL_HEADER_BORDER_CODES, start=1):
+        codes = encoded_row.split()
+        if len(codes) != 46:
+            raise ValueError("SYMBOLS manual border oracle must cover A1:AT2")
+        for col, code in enumerate(codes, start=1):
+            cell = ws.cell(row, col)
+            expected = _symbols_manual_header_border(code)
+            if cell.border != expected:
+                cell.border = expected
+                repaired.append(cell.coordinate)
+
+    template_col = headers["Longest duration (DD:HH:MM:SS)"]
+    for header in (AVG_WINNING_DURATION_HEADER, AVG_LOSING_DURATION_HEADER):
+        target_col = headers[header]
+        for row in (INSTRUMENT_AVERAGES_GROUP_HEADER_ROW, INSTRUMENT_AVERAGES_FILTER_HEADER_ROW):
+            source = ws.cell(row, template_col)
+            target = ws.cell(row, target_col)
+            expected = copy(source.border)
+            if target.border != expected:
+                target.border = expected
+                repaired.append(target.coordinate)
+
+    if diagnostics is not None and repaired:
+        diagnostics["symbols_manual_header_borders_repaired"] = repaired
+
+
 def _ensure_symbols_duration_data_boundary(ws) -> None:
     headers = _instrument_averages_header_map(ws)
     longest_col = headers.get("Longest duration (DD:HH:MM:SS)")
@@ -949,6 +1026,7 @@ def _ensure_symbols_duration_header_layout(
             ws.column_dimensions[letter].width = 43
 
     _ensure_symbols_duration_data_boundary(ws)
+    _repair_symbols_manual_header_borders(ws, diagnostics)
     if removed_merges:
         diagnostics.setdefault("symbols_duration_group_merges_removed", []).extend(removed_merges)
     if created_merges:
@@ -1092,7 +1170,6 @@ def _ensure_symbols_schema(ws, diagnostics: Dict[str, Any] | None = None) -> boo
             _write_instrument_averages_headers(ws, preserve_freeze=True)
         headers = _instrument_averages_header_map(ws)
         _ensure_symbols_duration_header_layout(ws, diagnostics)
-        _ensure_symbols_duration_header_layout(ws, diagnostics)
         if ws.auto_filter and ws.auto_filter.ref:
             _min_col, _min_row, _max_col, max_row = range_boundaries(ws.auto_filter.ref)
             ws.auto_filter.ref = (
@@ -1110,7 +1187,6 @@ def _ensure_instrument_averages_schema(ws, diagnostics: Dict[str, Any] | None = 
         changed = _ensure_symbols_schema(ws, diagnostics)
         headers = _instrument_averages_header_map(ws)
         if all(header in headers for header in INSTRUMENT_AVERAGES_HEADERS):
-            _ensure_symbols_duration_header_layout(ws, diagnostics)
             _ensure_symbols_duration_header_layout(ws, diagnostics)
             _apply_symbols_filter_header_layout(ws)
             headers = _instrument_averages_header_map(ws)

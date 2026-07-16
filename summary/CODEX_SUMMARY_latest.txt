@@ -1,33 +1,34 @@
 Final summary
 
 Status:
-- Cleaned `/api/open-orders` so public `items` contain only genuine broker exposure rows, while pending webhook reconciliation remains internal and visible in `source_counts`.
-- Preserved pending webhook records with distinct stable IDs; fingerprint dedupe now applies only to idless pending records.
-- Updated the Open Orders empty state to refer only to open orders/positions.
-- Restored the current workbook's SYMBOLS manual header shape: Stops `AJ1:AM1`, Targets `AN1:AQ1`, vertical duration headers `AR:AV`, AT/AU/AV width 43, and AV as the final thick data boundary.
-- Restored Trade Log merged-group right edges so `X1` and `AC1` reopen with medium right borders and no grey fill.
-- Fixed SYMBOLS data-only resync to avoid blanket header rewrite/merge repair, using targeted duration-header repair instead.
+- Repaired the checked-in `journal/Trading Journal.xlsx` so all 92 SYMBOLS `A1:AT2` border signatures exactly match the manually drawn `772eedb` baseline after save/reopen.
+- Added a schema-guarded, in-code border oracle with no runtime Git dependency. It repairs only the known current SYMBOLS header layout and extends the repaired AT vertical-header border pattern to AU/AV.
+- Preserved the required Stops `AJ1:AM1`, Targets `AN1:AQ1`, and vertical duration `AR1:AV2` merges, widths of 43, AT/AU thin data boundaries, and AV thick final boundary.
+- Removed both duplicated consecutive `_ensure_symbols_duration_header_layout` calls.
+- Strengthened regressions to migrate the damaged `40f2ef3` workbook, compare against the independent `772eedb` baseline, validate the checked-in workbook before resync, and prove two resyncs plus an open/save/reopen cycle cause no border, merge, width, or row-height drift.
+- Preserved Trade Log's current correct formatting: no header fills, medium right edges at X1/AC1, and data-row height 15.
+- Open Orders code and behavior were not changed.
 
 Files changed intentionally:
 - journal/Trading Journal.xlsx
-- render/master_service.py
 - tools/master_journal_workbook.py
-- tests/test_open_orders_page.py
 - tests/test_master_journal_workbook.py
 - summary/CODEX_SUMMARY_latest.txt
 
 Verification performed:
-- `python -m py_compile render/master_service.py tools/master_journal_workbook.py`: passed.
+- `python -m py_compile tools/master_journal_workbook.py tests/test_master_journal_workbook.py`: passed.
 - `node --check render/static/open_orders.js`: passed.
-- `python -m pytest tests/test_open_orders_page.py -q --basetemp .pytest_tmp_open_orders_verify`: 23 passed.
-- `python -m pytest tests/test_master_journal_workbook.py::test_772eedb_symbols_trade_log_formatting_migration_restores_manual_layout tests/test_master_journal_workbook.py::test_checked_in_trading_journal_resync_preserves_symbols_and_trade_log_borders -q --basetemp .pytest_tmp_workbook_final`: 2 passed.
-- Real workbook `journal/Trading Journal.xlsx` was updated with two consecutive source-based data-only resyncs.
-- Real workbook open/save/reopen inspection confirmed SYMBOLS merges, AT/AU/AV widths and data boundaries, and Trade Log `X1`/`AC1` medium right borders with cleared fills.
+- `python -m pytest tests/test_open_orders_page.py -q --basetemp .pytest_tmp_open_orders_followup`: 23 passed.
+- Damaged `40f2ef3` migration regression: 1 passed.
+- Checked-in workbook two-resync and open/save/reopen stability regression: 1 passed.
+- Exact final workbook inspection: 0 `A1:AT2` border mismatches; all required merges and widths present; AT/AU thin and AV thick; X1/AC1 medium; Trade Log row 4 height 15.
+- Artifact-tool read-only inspection and visual render pass covered all 15 workbook sheets plus focused SYMBOLS/Trade Log header views; formula-error scan matched 0 cells.
+- `git diff --check`: passed.
+- Full workbook module: 135 passed, 16 failed in 23m18s. The remaining failures are broader legacy expectations involving vertical-header row placement, calendar/report generation, recommendation fixtures, and layout styling; neither new border regression failed.
 
-Notes and remaining risks:
+Notes:
 - Pytest cache warnings remain due local `.pytest_cache` permissions; repo-local `--basetemp` runs completed.
-- The focused workbook regression pair is slow in this environment, so the full workbook test module was not run end-to-end.
-- Pre-existing runtime/local-state files remain dirty and should stay unstaged: `render/data/*`, `bybit_monitor/custom_alerts.json`, `state_backup.json`, and `state_manifest.json`.
+- Pre-existing runtime/local-state files remain dirty and must stay unstaged: `render/data/*`, `bybit_monitor/custom_alerts.json`, `state_backup.json`, and `state_manifest.json`.
 
 Push workflow:
 - `PATCH_DESKTOP_PUSH.bat` must run after this summary and verify local HEAD equals `origin/master` before the task is complete.
