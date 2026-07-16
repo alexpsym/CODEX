@@ -103,6 +103,16 @@ def test_dashboard_home_removes_instrument_specs_recent_trades_open_orders() -> 
     assert 'id="scripts-grid"' in rail_html
 
 
+def test_dashboard_instrument_lookup_form_uses_non_overlapping_grid() -> None:
+    source = MASTER_SERVICE_PATH.read_text(encoding='utf-8')
+    html = _extract_html_template(source)
+
+    assert 'grid-template-columns:minmax(0,1fr) max-content;' in html
+    assert '.inline-tool-form button{\n                width:100%;\n            }' in html
+    assert 'box-sizing:border-box;' in html
+    assert 'min-width:0;' in html
+
+
 def test_dashboard_script_css_keeps_scripts_vertical_above_watchlist() -> None:
     source = MASTER_SERVICE_PATH.read_text(encoding='utf-8')
     html = _extract_html_template(source)

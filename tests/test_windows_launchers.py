@@ -527,7 +527,10 @@ def test_run_local_master_parent_logs_are_condensed_and_worker_logs_are_detailed
     assert 'cmd /d /s /v:on /c ""%~f0" __worker"' not in script
     assert 'timeout /t 1 /nobreak' not in script
     assert 'echo [local-master] launcher starting.' in script
-    assert 'echo [local-master] waiting for %MASTER_HEALTH_URL% ...' in script
+    assert 'set "MASTER_READINESS_URL=http://127.0.0.1:8000/api/startup-readiness"' in script
+    assert 'echo [local-master] waiting for complete startup readiness via %MASTER_READINESS_URL% ...' in script
+    assert 'Invoke-RestMethod -Uri \'%MASTER_READINESS_URL%\'' in script
+    assert ':master_readiness_failed' in script
     assert 'echo [local-master] worker started at !DATE! !TIME!' in script
     assert 'echo [local-master] uvicorn restart generation !LOCAL_MASTER_UVICORN_GENERATION!' in script
     assert 'write_local_master_normal_exit_marker.ps1' in script

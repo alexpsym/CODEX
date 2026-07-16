@@ -217,6 +217,60 @@ def test_open_orders_hides_failed_pending_webhooks_from_open_items() -> None:
     assert "wh4" not in statuses
 
 
+def test_open_orders_prunes_stale_duplicate_pending_webhooks(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        master_service,
+        "_load_trade_contexts",
+        lambda: [{"pending_webhook_id": "stale-context", "status": "CLOSED"}],
+    )
+    base = {
+        "status": "WAITING",
+        "enabled": True,
+        "account": "demo",
+        "category": "linear",
+        "instrument": "BTCUSDT",
+        "side": "Buy",
+        "size": "1",
+        "order_type": "Limit",
+        "order_price": "100",
+    }
+    pending_items = [
+        {**base, "id": "old-duplicate", "created_at": "2026-01-01T00:00:00Z"},
+        {**base, "id": "new-duplicate", "created_at": "2026-01-01T00:01:00Z"},
+        {**base, "id": "stale-context", "created_at": "2026-01-01T00:02:00Z"},
+        {**base, "id": "orphaned-context", "calculation_context_id": "missing-ctx", "created_at": "2026-01-01T00:03:00Z"},
+        {**base, "id": "consumed-waiting", "consumed_at": "2026-01-01T00:04:00Z"},
+        {**base, "id": "rejected", "status": "REJECTED"},
+    ]
+    diagnostics: dict[str, int] = {}
+
+    filtered, changed = master_service._clean_pending_webhooks_for_open_items(
+        pending_items,
+        [],
+        diagnostics=diagnostics,
+    )
+
+    assert changed is True
+    assert [item["id"] for item in filtered] == ["new-duplicate"]
+    assert diagnostics["duplicate_fingerprint_pruned"] == 1
+    assert diagnostics["stale_context_pruned"] == 2
+    assert diagnostics["consumed_waiting_pruned"] == 1
+    assert diagnostics["terminal_pruned"] == 1
+
+
+def test_open_orders_api_reports_pending_reconciliation_source_counts() -> None:
+    source = (ROOT / "render" / "master_service.py").read_text(encoding="utf-8")
+    assert '"source_counts": source_counts' in source
+    assert '"duplicates_or_stale_pending_pruned"' in source
+    assert '"pending_reconciliation"' in source
+
+
+def test_open_orders_js_renders_actual_broker_value() -> None:
+    js = (ROOT / "render" / "static" / "open_orders.js").read_text(encoding="utf-8")
+    assert "[item.broker,resolveAccountLabel(item)" in js
+    assert "['broker',resolveAccountLabel(item)" not in js
+
+
 def test_open_orders_attempt_fetch_path_is_removed() -> None:
     js = (ROOT / "render" / "static" / "open_orders.js").read_text(encoding="utf-8")
     assert "Failed to load webhook attempts:" not in js

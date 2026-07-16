@@ -125,6 +125,15 @@ def test_calendar_validation_accepts_one_line_pnl_cells():
     assert master_service._calendar_has_expected_pl_cells(ws, {(2026, 1)})
     assert not master_service._calendar_has_expected_pl_cells(ws, {(2026, 2)})
 
+    transposed = Workbook().active
+    transposed.title = "P&L Calendar"
+    transposed["A1"] = "Month"
+    transposed["B1"] = 2026
+    transposed["A2"] = "January"
+    transposed["B2"] = "1.00%, 1 trade"
+    assert master_service._calendar_has_expected_pl_cells(transposed, {(2026, 1)})
+    assert not master_service._calendar_has_expected_pl_cells(transposed, {(2026, 2)})
+
 
 def test_create_manual_trade_row(temp_state_paths):
     res = asyncio.run(

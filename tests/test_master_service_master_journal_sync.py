@@ -587,16 +587,16 @@ def test_sync_master_journal_repairs_legacy_instrument_averages_freeze_pane(tmp_
     snap = {'items':[{'id':'r1','row_type':'trade','account':'A','symbol':'EURUSD','side':'BUY','open_time':'2026-01-01','close_time':'2026-01-01','net_profit':1.0,'result_pct':1.0}], 'stats':{'totals':{}, 'groups':{}, 'by_instrument':[{'symbol':'EURUSD','trades':1}]}, 'balances':[]}
     build_master_journal_workbook(snap, mj)
     wb = load_workbook(mj)
-    wb["Instrument Averages"].freeze_panes = "X111"
+    wb["SYMBOLS"].freeze_panes = "X111"
     wb.save(mj)
     wb.close()
     monkeypatch.setattr(master_service, '_build_trading_journal_view_snapshot', lambda force=True: snap)
     out = master_service._sync_master_journal_workbook(sync_caller="test")
     assert out["master_journal_ok"] is True
     repaired = load_workbook(mj)
-    assert repaired["Instrument Averages"].freeze_panes == "B2"
-    assert repaired.sheetnames[:4] == SHEET_ORDER
-    assert repaired.sheetnames[4:] == expected_report_sheet_names(snap)
+    assert repaired["SYMBOLS"].freeze_panes == "B3"
+    assert repaired.sheetnames[:len(SHEET_ORDER)] == SHEET_ORDER
+    assert repaired.sheetnames[len(SHEET_ORDER):] == expected_report_sheet_names(snap)
     assert "_Trade Meta" not in repaired.sheetnames
     assert "All Trades" not in repaired.sheetnames
     repaired.close()
@@ -640,13 +640,13 @@ def test_sync_validation_detects_instrument_duration_alias_columns_blank(tmp_pat
         out = real_update(path, snapshot)
         cand = Path(out["candidate_path"])
         wb = load_workbook(cand)
-        inst = wb["Instrument Averages"]
-        headers = [str(c.value or "") for c in inst[1]]
-        inst.cell(1, headers.index("Shortest duration (DD:HH:MM:SS)") + 1).value = "Shortest (DD:HH:MM:SS)"
-        inst.cell(1, headers.index("Longest duration (DD:HH:MM:SS)") + 1).value = "Longest (DD:HH:MM:SS)"
-        for r in range(2, inst.max_row + 1):
+        inst = wb["SYMBOLS"]
+        headers = [str(inst.cell(2, c).value or "") for c in range(1, inst.max_column + 1)]
+        inst.cell(2, headers.index("Shortest duration (DD:HH:MM:SS)") + 1).value = "Shortest (DD:HH:MM:SS)"
+        inst.cell(2, headers.index("Longest duration (DD:HH:MM:SS)") + 1).value = "Longest (DD:HH:MM:SS)"
+        for r in range(3, inst.max_row + 1):
             for name in ("Shortest (DD:HH:MM:SS)", "Avg duration (DD:HH:MM:SS)", "Longest (DD:HH:MM:SS)"):
-                c = [str(x.value or "") for x in inst[1]].index(name) + 1
+                c = [str(inst.cell(2, x).value or "") for x in range(1, inst.max_column + 1)].index(name) + 1
                 inst.cell(r, c).value = None
         wb.save(cand); wb.close()
         return out
@@ -674,11 +674,11 @@ def test_existing_master_journal_preserves_restored_layout_and_populates_stats(t
     }
     build_master_journal_workbook(snap, mj)
     wb = load_workbook(mj)
-    dash = wb["Dashboard"]
-    dash["A1"] = "Account Balances"
-    dash["A11"] = "Instrument leaders"
+    dash = wb["STATS1"]
+    dash["T1"] = "Account Balances"
+    dash["M1"] = "Instrument leaders"
     wb["Trade Log"].auto_filter.ref = "A1:Z1511"
-    wb["Instrument Averages"].auto_filter.ref = "A1:X126"
+    wb["SYMBOLS"].auto_filter.ref = "A2:X126"
     wb.save(mj); wb.close()
     monkeypatch.setattr(master_service, '_build_trading_journal_view_snapshot', lambda force=True: snap)
     monkeypatch.setattr(master_service, '_get_excel_account_balances', lambda: [])
@@ -687,9 +687,9 @@ def test_existing_master_journal_preserves_restored_layout_and_populates_stats(t
     if not out["master_journal_ok"]:
         return
     wb2 = load_workbook(mj, data_only=True)
-    dash2 = wb2["Dashboard"]
-    assert str(dash2["A1"].value) == "Account Balances"
-    assert str(dash2["A11"].value) == "Instrument leaders"
+    dash2 = wb2["STATS1"]
+    assert str(dash2["T1"].value) == "Account Balances"
+    assert str(dash2["M1"].value) == "Instrument leaders"
     top_row_tokens = {str(dash2.cell(1, c).value or "").strip() for c in range(1, dash2.max_column + 1)}
     assert {"FX", "Crypto"}.issubset(top_row_tokens)
     at = wb2["Trade Log"]; headers=[str(c.value or "") for c in at[1]]
@@ -698,15 +698,17 @@ def test_existing_master_journal_preserves_restored_layout_and_populates_stats(t
     assert {"t1","t2","c1"}.issubset(ids)
     assert at.auto_filter and at.auto_filter.ref and f"{at.max_row}" in at.auto_filter.ref
     ot_col = headers.index("Open Time")+1; ct_col = headers.index("Close Time")+1
-    assert at.cell(2, ot_col).number_format != "General"
-    assert at.cell(2, ct_col).number_format != "General"
-    inst = wb2["Instrument Averages"]
-    inst_headers=[str(c.value or "") for c in inst[1]]
-    s_col = inst_headers.index("Symbol")+1
-    t_col = inst_headers.index("Trades")+1
-    assert any(str(inst.cell(r,s_col).value or "").strip() and isinstance(inst.cell(r,t_col).value,(int,float)) for r in range(2, inst.max_row+1))
+    assert at.cell(4, ot_col).number_format != "General"
+    assert at.cell(4, ct_col).number_format != "General"
+    from tools.master_journal_workbook import _instrument_averages_header_map, INSTRUMENT_AVERAGES_DATA_START_ROW
+    inst = wb2["SYMBOLS"]
+    inst_headers = _instrument_averages_header_map(inst)
+    s_col = inst_headers["Symbol"]
+    t_col = inst_headers["Trades"]
+    assert any(str(inst.cell(r,s_col).value or "").strip() and isinstance(inst.cell(r,t_col).value,(int,float)) for r in range(INSTRUMENT_AVERAGES_DATA_START_ROW, inst.max_row+1))
     cal = wb2["P&L Calendar"]
-    assert any(isinstance(cal.cell(r,c).value,(int,float)) for r in range(3, cal.max_row+1) for c in range(2,13))
+    assert cal["A1"].value == "Month"
+    assert any("%," in str(cal.cell(r,c).value or "") for r in range(2, cal.max_row+1) for c in range(2, cal.max_column+1))
     if "_Trade Meta" in wb2.sheetnames:
         assert wb2["_Trade Meta"].sheet_state == "hidden"
     wb2.close()

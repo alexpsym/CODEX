@@ -2,6 +2,7 @@ from pathlib import Path
 from collections import defaultdict
 from copy import copy
 from datetime import datetime
+import shutil
 import re
 import zipfile
 import xml.etree.ElementTree as ET
@@ -757,6 +758,20 @@ def test_current_pnl_calendar_layout_freezes_months_and_left_axis():
     assert ws.freeze_panes == "C2"
 
 
+def test_transposed_pnl_calendar_layout_freezes_months_and_years():
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "P&L Calendar"
+    ws["A1"] = "Month"
+    ws["B1"] = 2026
+    ws["A2"] = "January"
+    ws["B2"] = "1.00%, 1 trade"
+
+    _ensure_pnl_calendar_freeze_panes(ws)
+
+    assert ws.freeze_panes == "B2"
+
+
 def test_pre_move_schema_migrates_stop_out_value_and_hides_row_id():
     from openpyxl import Workbook
     wb = Workbook()
@@ -811,6 +826,11 @@ def test_trade_log_three_row_umbrella_headers_and_filter(tmp_path: Path):
     assert ws.auto_filter.ref == f"A3:{last_letter}{ws.max_row}"
     assert ws.cell(4, _header_col(ws, "Row ID")).value == "t1"
     assert ws.column_dimensions[last_letter].hidden is True
+    for row in range(1, TRADE_LOG_HEADER_ROWS + 1):
+        for col in range(1, len(TRADE_LOG_HEADERS) + 1):
+            if ws.cell(row, col).__class__.__name__ == "MergedCell":
+                continue
+            assert _cell_fill_rgb(ws.cell(row, col)) == ""
     pattern_validations = _validation_for_col(ws, get_column_letter(_header_col(ws, "Pattern")))
     assert any(dv.formula1 == '"range,channel"' and dv.allow_blank for dv in pattern_validations)
     wb.close()
@@ -932,6 +952,8 @@ def test_data_only_update_inserts_missing_dashboard_move_rows_and_preserves_metr
     assert result["diagnostics"]["inserted_dashboard_metric_rows"] == [
         DASHBOARD_MOVE_TO_BREAK_EVEN_LABEL,
         DASHBOARD_MOVE_TO_PROFIT_LABEL,
+        "Avg winning trade duration",
+        "Avg losing trade duration",
     ]
     Path(result["candidate_path"]).replace(path)
     wb = load_workbook(path)
@@ -939,10 +961,12 @@ def test_data_only_update_inserts_missing_dashboard_move_rows_and_preserves_metr
     labels = {str(dash.cell(row, 1).value or ""): row for row in range(1, dash.max_row + 1)}
     break_even_row = labels[DASHBOARD_MOVE_TO_BREAK_EVEN_LABEL]
     profit_row = labels[DASHBOARD_MOVE_TO_PROFIT_LABEL]
-    assert break_even_row == 19
-    assert profit_row == 20
-    assert labels["Max loss %"] == 21
-    assert labels["Winners"] == 37
+    assert labels["Avg winning trade duration"] == 19
+    assert labels["Avg losing trade duration"] == 20
+    assert break_even_row == 21
+    assert profit_row == 22
+    assert labels["Max loss %"] == 23
+    assert labels["Winners"] == 39
     assert dash.cell(break_even_row, 2).value == "01 hours, 00 minutes, 00 seconds"
     assert dash.cell(break_even_row, 4).value == "01 hours, 00 minutes, 00 seconds"
     assert dash.cell(profit_row, 2).value == "02 hours, 00 minutes, 00 seconds"
@@ -2204,10 +2228,14 @@ def test_update_data_only_rewrites_calendar_to_one_line_layout(tmp_path: Path):
     out = load_workbook(p, data_only=True)
     out_cal = out["P&L Calendar"]
     assert list(out_cal.merged_cells.ranges) == []
-    assert out_cal["A1"].value == "Year"
-    assert out_cal["F1"].value == "May"
-    assert out_cal["A2"].value == 2026
-    assert out_cal["F2"].value == "1.00%, 1 trade"
+    assert out_cal["A1"].value == "Month"
+    assert [out_cal.cell(1, col).value for col in range(2, 5)] == [2024, 2025, 2026]
+    assert out_cal["A6"].value == "May"
+    assert out_cal["D6"].value == "1.00%, 1 trade"
+    assert out_cal["D2"].value in (None, "")
+    assert _cell_fill_rgb(out_cal["D2"]) == ""
+    assert out_cal.freeze_panes == "B2"
+    assert out_cal.auto_filter.ref == "A1:D13"
     assert not any(str(out_cal.cell(row, 1).value or "").endswith(" Trades") for row in range(2, out_cal.max_row + 1))
     d = out[STATS2_SHEET]
     values = [d.cell(row, col).value for row in range(1, d.max_row + 1) for col in range(1, d.max_column + 1)]
@@ -2911,6 +2939,60 @@ def test_checked_in_trading_journal_target_recommendations_match_backend_calcula
             assert rec_by_symbol.get(symbol) == expected
     finally:
         wb.close()
+
+
+def test_checked_in_trading_journal_resync_preserves_symbols_and_trade_log_borders(tmp_path: Path):
+    path = Path("journal") / "Trading Journal.xlsx"
+    if not path.exists():
+        pytest.skip("checked-in Trading Journal.xlsx is not available")
+    work = tmp_path / "Trading Journal.xlsx"
+    shutil.copy2(path, work)
+
+    def capture_signatures(target: Path) -> dict:
+        wb = load_workbook(target, data_only=False)
+        try:
+            symbols = wb[SYMBOLS_SHEET]
+            symbol_headers = _instrument_averages_header_map(symbols)
+            symbol_last_col = max(symbol_headers.values())
+            symbol_rows = range(1, min(symbols.max_row, INSTRUMENT_AVERAGES_DATA_START_ROW + 5) + 1)
+
+            trade_log = wb["Trade Log"]
+            trade_headers = _trade_log_header_map(trade_log)
+            trade_last_col = max(trade_headers.values())
+            trade_rows = [
+                *range(1, TRADE_LOG_HEADER_ROWS + 1),
+                *range(TRADE_LOG_DATA_START_ROW, min(trade_log.max_row, TRADE_LOG_DATA_START_ROW + 5) + 1),
+            ]
+
+            return {
+                "symbols_borders": {
+                    (row, col): _border_signature(symbols.cell(row, col))
+                    for row in symbol_rows
+                    for col in range(1, symbol_last_col + 1)
+                },
+                "symbols_row1_merges": sorted(
+                    str(rng) for rng in symbols.merged_cells.ranges if rng.min_row == 1 and rng.max_row == 1
+                ),
+                "trade_log_borders": {
+                    (row, col): _border_signature(trade_log.cell(row, col))
+                    for row in trade_rows
+                    for col in range(1, trade_last_col + 1)
+                },
+                "trade_log_row_heights": {
+                    row: trade_log.row_dimensions[row].height
+                    for row in trade_rows
+                },
+            }
+        finally:
+            wb.close()
+
+    before = capture_signatures(work)
+    snapshot = read_master_journal_source(work)
+    result = update_master_journal_workbook_data_only(work, snapshot)
+    assert result["ok"] is True
+    Path(result["candidate_path"]).replace(work)
+    after = capture_signatures(work)
+    assert after == before
 
 
 def test_data_only_update_repairs_stale_recommendation_columns_and_stats1_labels(tmp_path: Path):
@@ -3998,12 +4080,14 @@ def test_generated_workbook_repairs_stats1_stats2_and_calendar_structure(tmp_pat
     assert _cf_fill_intersects(stats2, "F3:F12", PROFIT_FILL)
     assert _cf_fill_intersects(stats2, "F3:F12", LOSS_FILL)
     assert cal.freeze_panes == "B2"
-    assert [cal.cell(1, col).value for col in range(1, 14)] == [
-        "Year", "January", "February", "March", "April", "May", "June",
+    assert cal["A1"].value == "Month"
+    assert cal["B1"].value == 2026
+    assert [cal.cell(row, 1).value for row in range(2, 14)] == [
+        "January", "February", "March", "April", "May", "June",
         "July", "August", "September", "October", "November", "December",
     ]
     assert not any(str(cal.cell(row, 1).value or "").endswith(" Trades") for row in range(2, cal.max_row + 1))
-    assert isinstance(cal["F2"].value, str) and re.match(r"^-?\d+\.\d{2}%, \d+ trades?$", cal["F2"].value)
+    assert isinstance(cal["B6"].value, str) and re.match(r"^-?\d+\.\d{2}%, \d+ trades?$", cal["B6"].value)
     wb.close()
 
 
@@ -4333,14 +4417,14 @@ def test_generated_calendar_and_instrument_averages_use_direct_semantic_fills(tm
     assert _parse_duration_text(inst.cell(row, headers["Avg duration (DD:HH:MM:SS)"]).value) is not None
 
     cal = wb["P&L Calendar"]
-    assert cal["A1"].value == "Year"
-    assert cal["F1"].value == "May"
-    assert cal["G1"].value == "June"
-    assert cal["A2"].value == 2026
-    assert cal["F2"].value == "2.30%, 1 trade"
-    assert cal["G2"].value == "-1.10%, 1 trade"
-    assert _cell_fill_rgb(cal["F2"]) == "C6EFCE"
-    assert _cell_fill_rgb(cal["G2"]) == "FFC7CE"
+    assert cal["A1"].value == "Month"
+    assert cal["B1"].value == 2026
+    assert cal["A6"].value == "May"
+    assert cal["A7"].value == "June"
+    assert cal["B6"].value == "2.30%, 1 trade"
+    assert cal["B7"].value == "-1.10%, 1 trade"
+    assert _cell_fill_rgb(cal["B6"]) == "C6EFCE"
+    assert _cell_fill_rgb(cal["B7"]) == "FFC7CE"
     wb.close()
 
 
@@ -4563,12 +4647,24 @@ def test_stats_symbols_and_reports_required_repairs(tmp_path: Path):
     assert stats1["A14"].value == "Percentage expectancy"
     assert stats1["A15"].value == "R expectancy"
     assert labels["Percentage expectancy"] < labels["Winners"]
+    winners_section = label_rows["Winners"][0]
+    primary_avg_duration = next(row for row in label_rows["Avg duration"] if row < winners_section)
+    primary_avg_winning_duration = next(row for row in label_rows["Avg winning trade duration"] if row < winners_section)
+    primary_avg_losing_duration = next(row for row in label_rows["Avg losing trade duration"] if row < winners_section)
+    primary_max_duration = next(row for row in label_rows["Max duration"] if row < winners_section)
+    assert primary_avg_duration + 1 == primary_avg_winning_duration
+    assert primary_avg_winning_duration + 1 == primary_avg_losing_duration
+    assert primary_avg_losing_duration + 1 == primary_max_duration
+    for label in ("Avg winning trade duration", "Avg losing trade duration"):
+        cell = stats1.cell(next(row for row in label_rows[label] if row < winners_section), 2)
+        assert cell.number_format == "General"
+        assert isinstance(cell.value, str)
+        assert _parse_duration_text(cell.value) is not None
     assert stats1.cell(labels["Net P/L Percentage"], 2).value == pytest.approx(0.007)
     for label in ("Net P/L Percentage", "Gross percent gain", "Gross percent loss", "Gross IR gain", "Gross IR loss"):
         cell = stats1.cell(labels[label], 2)
         assert cell.alignment.horizontal == "left"
         assert cell.font.bold is False
-    winners_section = label_rows["Winners"][0]
     losers_section_for_style = next(row for row in label_rows["Losers"] if row < labels["Side"])
 
     categorical_section_rows = [
@@ -4692,9 +4788,24 @@ def test_stats_symbols_and_reports_required_repairs(tmp_path: Path):
         "Shortest duration (DD:HH:MM:SS)",
         "Avg duration (DD:HH:MM:SS)",
         "Longest duration (DD:HH:MM:SS)",
+        "Avg winning duration (DD:HH:MM:SS)",
+        "Avg losing duration (DD:HH:MM:SS)",
     ):
         assert symbols.cell(3, headers[header]).number_format == "General"
-        assert _parse_duration_text(symbols.cell(3, headers[header]).value) is not None
+    symbol_rows = {
+        str(symbols.cell(row, headers["Symbol"]).value or "").strip().upper(): row
+        for row in range(INSTRUMENT_AVERAGES_DATA_START_ROW, symbols.max_row + 1)
+        if str(symbols.cell(row, headers["Symbol"]).value or "").strip()
+    }
+    eurusd_row = symbol_rows["EURUSD"]
+    for header in (
+        "Shortest duration (DD:HH:MM:SS)",
+        "Avg duration (DD:HH:MM:SS)",
+        "Longest duration (DD:HH:MM:SS)",
+        "Avg winning duration (DD:HH:MM:SS)",
+        "Avg losing duration (DD:HH:MM:SS)",
+    ):
+        assert _parse_duration_text(symbols.cell(eurusd_row, headers[header]).value) is not None
 
     stats2 = wb[STATS2_SHEET]
     stats2_values = [

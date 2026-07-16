@@ -73,8 +73,7 @@ if /I "%~1"=="__worker" goto worker
 
 echo [local-master] launcher starting.
 set "MASTER_URL=http://127.0.0.1:8000"
-set "MASTER_HEALTH_URL=http://127.0.0.1:8000/health"
-set "MASTER_SCRIPTS_URL=http://127.0.0.1:8000/scripts"
+set "MASTER_READINESS_URL=http://127.0.0.1:8000/api/startup-readiness"
 for /f %%I in ('powershell -NoProfile -Command "[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()"') do set "LOCAL_LAUNCH_TS=%%I"
 set "MASTER_BROWSER_URL=%MASTER_URL%/?local_launch=%LOCAL_LAUNCH_TS%"
 for /f %%I in ('powershell -NoProfile -Command "try { $l = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback,0); $l.Start(); $p = $l.LocalEndpoint.Port; $l.Stop(); if($p -gt 0){Write-Output $p; exit 0}; exit 1 } catch { exit 1 }"') do set "LOCAL_MASTER_EDGE_DEBUG_PORT=%%I"
@@ -87,11 +86,13 @@ set "LOCAL_MASTER_EXIT_REQUEST=%TEMP%\LocalTradingToolsExit-%LOCAL_LAUNCH_TS%.fl
 set "LOCAL_MASTER_NORMAL_EXIT_FILE=%TEMP%\LocalTradingToolsExit-%LOCAL_LAUNCH_TS%.normal"
 set "LOCAL_MASTER_WORKER_FAILED_FILE=%TEMP%\LocalTradingToolsExit-%LOCAL_LAUNCH_TS%.failed"
 set "LOCAL_MASTER_PREFLIGHT_DECISION=%TEMP%\LocalTradingToolsExit-%LOCAL_LAUNCH_TS%.preflight"
+set "LOCAL_MASTER_READINESS_STATUS=%TEMP%\LocalTradingToolsExit-%LOCAL_LAUNCH_TS%.readiness"
 set "LOCAL_MASTER_WINDOW_TITLE=Local Master Control - %LOCAL_LAUNCH_TS%"
 if exist "%LOCAL_MASTER_EXIT_REQUEST%" del /q "%LOCAL_MASTER_EXIT_REQUEST%" >nul 2>nul
 if exist "%LOCAL_MASTER_NORMAL_EXIT_FILE%" del /q "%LOCAL_MASTER_NORMAL_EXIT_FILE%" >nul 2>nul
 if exist "%LOCAL_MASTER_WORKER_FAILED_FILE%" del /q "%LOCAL_MASTER_WORKER_FAILED_FILE%" >nul 2>nul
 if exist "%LOCAL_MASTER_PREFLIGHT_DECISION%" del /q "%LOCAL_MASTER_PREFLIGHT_DECISION%" >nul 2>nul
+if exist "%LOCAL_MASTER_READINESS_STATUS%" del /q "%LOCAL_MASTER_READINESS_STATUS%" >nul 2>nul
 echo [local-master] worker log: %LOCAL_MASTER_WORKER_LOG%
 start "%LOCAL_MASTER_WINDOW_TITLE%" /D "%ROOT%" "%ROOT%tools\windows_launchers\local_master_worker_console.bat"
 set "PREFLIGHT_READY_TIMEOUT_SECONDS=45"
@@ -113,14 +114,14 @@ set "PREFLIGHT_DECISION="
 set /p PREFLIGHT_DECISION=<"%LOCAL_MASTER_PREFLIGHT_DECISION%"
 if /I not "!PREFLIGHT_DECISION!"=="start" goto launcher_preflight_not_ready
 echo [local-master] launcher preflight ready after !PREFLIGHT_WAITED! seconds.
-set "MASTER_READY_TIMEOUT_SECONDS=60"
-set "SCANNER_READY_TIMEOUT_SECONDS=90"
-echo [local-master] waiting for %MASTER_HEALTH_URL% ...
+set "MASTER_READY_TIMEOUT_SECONDS=150"
+echo [local-master] waiting for complete startup readiness via %MASTER_READINESS_URL% ...
 set /a READY_WAITED=0
 
 :wait_for_master_ready
-powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $r = Invoke-WebRequest -UseBasicParsing -Uri '%MASTER_HEALTH_URL%' -TimeoutSec 1; if ($r.StatusCode -eq 200 -and (($r.Content | Out-String).Trim() -eq 'ok')) { exit 0 } else { exit 1 } } catch { exit 1 }"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; try { $r = Invoke-RestMethod -Uri '%MASTER_READINESS_URL%' -TimeoutSec 2; $phase = [string]$r.startup_phase; $component = [string]$r.blocking_component; $reason = [string]$r.failure_reason; ('phase=' + $phase + '; component=' + $component + '; reason=' + $reason) | Set-Content -LiteralPath '%LOCAL_MASTER_READINESS_STATUS%' -Encoding UTF8; if ($r.ready -eq $true) { exit 0 }; if ($phase -match 'failed|error|unavailable|disabled') { exit 2 }; exit 1 } catch { ('phase=http_unavailable; component=http_service; reason=' + $_.Exception.Message) | Set-Content -LiteralPath '%LOCAL_MASTER_READINESS_STATUS%' -Encoding UTF8; exit 1 }"
 if not errorlevel 1 goto master_ready
+if errorlevel 2 goto master_readiness_failed
 
 if defined LOCAL_MASTER_WORKER_FAILED_FILE (
   if exist "%LOCAL_MASTER_WORKER_FAILED_FILE%" goto worker_failed_before_ready
@@ -131,33 +132,27 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Sleep -Seconds 1" 
 goto wait_for_master_ready
 
 :master_ready
-echo [local-master] dashboard health ready after !READY_WAITED! seconds.
-echo [local-master] waiting for scanner readiness via %MASTER_SCRIPTS_URL% ...
-set /a SCANNER_READY_WAITED=0
-
-:wait_for_scanner_ready
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; try { $r = Invoke-RestMethod -Uri '%MASTER_SCRIPTS_URL%' -TimeoutSec 2; if ($r -is [System.Array]) { $monitor = $r | Where-Object { $_.name -eq 'monitor' } | Select-Object -First 1 } else { $monitor = $null }; if ($null -ne $monitor -and $monitor.running -eq $true) { exit 0 } else { exit 1 } } catch { exit 1 }"
-if not errorlevel 1 goto scanner_ready
-
-set /a SCANNER_READY_WAITED+=1
-if !SCANNER_READY_WAITED! GEQ %SCANNER_READY_TIMEOUT_SECONDS% goto scanner_not_ready
-powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Sleep -Seconds 1" >nul 2>nul
-goto wait_for_scanner_ready
-
-:scanner_ready
-echo [local-master] scanner ready after !SCANNER_READY_WAITED! seconds.
+echo [local-master] startup readiness complete after !READY_WAITED! seconds.
 call "%ROOT%tools\open_edge_url.bat" "%MASTER_BROWSER_URL%" "%LOCAL_MASTER_EDGE_DEBUG_PORT%" "%LOCAL_MASTER_EDGE_PROFILE_DIR%"
 if errorlevel 1 (
   echo [local-master] ERROR: failed to open Microsoft Edge for %MASTER_BROWSER_URL%.
   exit /b 1
 )
-echo Local master control launch requested with scanner autostart supervision.
+echo Local master control launch requested after complete startup readiness.
 exit /b 0
 
 :master_not_ready
-echo [local-master] ERROR: dashboard was not ready after %MASTER_READY_TIMEOUT_SECONDS% seconds.
+echo [local-master] ERROR: startup readiness was not reached after %MASTER_READY_TIMEOUT_SECONDS% seconds.
+if exist "%LOCAL_MASTER_READINESS_STATUS%" type "%LOCAL_MASTER_READINESS_STATUS%"
 echo [local-master] Check worker startup log: %LOCAL_MASTER_WORKER_LOG%
 echo [local-master] Browser was not opened to avoid a dead-page / manual-refresh failure.
+exit /b 1
+
+:master_readiness_failed
+echo [local-master] ERROR: startup readiness failed.
+if exist "%LOCAL_MASTER_READINESS_STATUS%" type "%LOCAL_MASTER_READINESS_STATUS%"
+echo [local-master] Check worker startup log: %LOCAL_MASTER_WORKER_LOG%
+echo [local-master] Browser was not opened because startup has a blocking readiness error.
 exit /b 1
 
 :worker_failed_before_ready
@@ -167,12 +162,6 @@ if defined LOCAL_MASTER_WORKER_FAILED_FILE (
   if exist "%LOCAL_MASTER_WORKER_FAILED_FILE%" type "%LOCAL_MASTER_WORKER_FAILED_FILE%"
 )
 echo [local-master] Browser was not opened because the worker is no longer running.
-exit /b 1
-
-:scanner_not_ready
-echo [local-master] ERROR: scanner did not become ready after %SCANNER_READY_TIMEOUT_SECONDS% seconds.
-echo [local-master] Alerts startup may have failed. Check worker startup log: %LOCAL_MASTER_WORKER_LOG%
-echo [local-master] Browser was not opened to avoid showing a misleading dashboard state.
 exit /b 1
 
 :launcher_preflight_not_ready

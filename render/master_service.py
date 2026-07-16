@@ -8599,7 +8599,7 @@ def _journal_rows_from_bybit_execution(entry: Dict[str, object]) -> List[Dict[st
         )
         if isinstance(ctx, dict):
             if not timeframe:
-                timeframe = _normalize_journal_timeframe(ctx.get("timeframe"))
+                timeframe = _normalize_timeframe(ctx.get("timeframe"))
             if is_test_trade is None:
                 is_test_trade = _normalize_test_trade_flag(ctx.get("is_test_trade"))
             if not setup:
@@ -9153,6 +9153,20 @@ def _calendar_has_expected_pl_cells(cal_ws, expected_year_months: Set[Tuple[int,
                 month_to_col_custom[mm] = cc
             if token == f"{name} p/l %":
                 month_to_col_default[mm] = cc
+    transposed_year_cols: Dict[int, int] = {}
+    for cc in range(2, cal_ws.max_column + 1):
+        year_value = _safe_float(cal_ws.cell(1, cc).value)
+        if year_value is None:
+            continue
+        year = int(year_value)
+        if 1900 <= year <= 3000:
+            transposed_year_cols[year] = cc
+    transposed_month_rows: Dict[int, int] = {}
+    for rr in range(2, cal_ws.max_row + 1):
+        token = str(cal_ws.cell(rr, 1).value or "").strip().lower()
+        for mm in range(1, 13):
+            if token == calendar.month_name[mm].lower():
+                transposed_month_rows[mm] = rr
     default_year_rows: Dict[int, int] = {}
     custom_year_rows: Dict[int, int] = {}
     for rr in range(2, cal_ws.max_row + 1):
@@ -9177,6 +9191,11 @@ def _calendar_has_expected_pl_cells(cal_ws, expected_year_months: Set[Tuple[int,
                 found_numeric = True
         if col_custom and row_default:
             if _has_pl_cell_value(cal_ws.cell(row_default, col_custom).value):
+                found_numeric = True
+        col_transposed = transposed_year_cols.get(year)
+        row_transposed = transposed_month_rows.get(month)
+        if col_transposed and row_transposed:
+            if _has_pl_cell_value(cal_ws.cell(row_transposed, col_transposed).value):
                 found_numeric = True
         if not found_numeric:
             return False
@@ -9493,6 +9512,20 @@ def _restore_alerts_payload(data: Dict[str, object]) -> Dict[str, object]:
             pruned = _prune_trade_contexts(cleaned)
             _save_trade_contexts(pruned)
             trade_contexts_restored = len(pruned)
+    if pending_restored:
+        pending_restored, pending_reconcile_diag = _reconcile_pending_webhooks_registry()
+        pruned_count = sum(
+            int(value)
+            for key, value in pending_reconcile_diag.items()
+            if key.endswith("_pruned")
+        )
+        if pruned_count:
+            BYBIT_LOGGER.info(
+                "PENDING_WEBHOOK_RESTORE_RECONCILE active=%s pruned=%s diagnostics=%s",
+                len(pending_restored),
+                pruned_count,
+                pending_reconcile_diag,
+            )
 
     journal_restored = 0
     journal_sanitized = 0
@@ -9603,6 +9636,7 @@ async def _dropbox_restore_state_backup_on_startup() -> None:
         for key in required_keys:
             existing = None
             local_existing = None
+            repo_local_invalid = False
             if _state_backup_uses_local_repo_file():
                 try:
                     local_existing = read_repo_state_json(key)
@@ -9611,7 +9645,10 @@ async def _dropbox_restore_state_backup_on_startup() -> None:
                 except Exception as exc:
                     BYBIT_LOGGER.warning("Repo-local state for key '%s' is unreadable: %s", key, exc)
                     invalid.append(key)
+                    repo_local_invalid = True
                     local_existing = None
+                if repo_local_invalid:
+                    continue
                 if local_existing is not None and _is_valid_repo_state_value(key, local_existing):
                     existing = local_existing
                     if key == "watchlist":
@@ -10350,6 +10387,191 @@ def _compute_autostart_scripts() -> List[str]:
         seen.add(script.name)
         filtered.append(script.name)
     return filtered
+
+
+def _script_startup_error(script: "ManagedScript") -> str:
+    return str(script.last_start_error or script.last_exit_reason or "").strip()
+
+
+def _autostart_component_readiness(name: str) -> Dict[str, object]:
+    try:
+        script = script_manager.get(name)
+    except HTTPException as exc:
+        reason = str(getattr(exc, "detail", "") or exc).strip() or f"Script not found: {name}"
+        return {
+            "name": name,
+            "label": friendly_script_label(name),
+            "ready": False,
+            "running": False,
+            "starting": False,
+            "blocking": True,
+            "phase": "autostart_unavailable",
+            "reason": reason,
+        }
+
+    summary = script.to_summary()
+    starting = bool(summary.get("starting"))
+    running = bool(summary.get("running"))
+    reason = _script_startup_error(script)
+    component: Dict[str, object] = {
+        "name": script.name,
+        "label": friendly_script_label(script.name),
+        "ready": False,
+        "running": running,
+        "starting": starting,
+        "blocking": False,
+        "phase": "autostart_pending",
+        "reason": "",
+    }
+
+    if script.name in {"bybit_monitor", "oanda_monitor"}:
+        runtime = _scanner_status_payload(
+            BYBIT_RUNTIME_STATUS_PATH if script.name == "bybit_monitor" else OANDA_RUNTIME_STATUS_PATH
+        )
+        runtime_live = runtime.get("ui_status") == "running"
+        ready = bool(running or runtime_live)
+        component.update(
+            {
+                "ready": ready,
+                "running": ready,
+                "runtime_live": runtime_live,
+                "managed_running": running,
+                "heartbeat_fresh": runtime.get("heartbeat_fresh"),
+                "phase": "ready" if ready else ("autostart_starting" if starting else "autostart_failed" if reason else "autostart_pending"),
+            }
+        )
+        if not ready:
+            component["blocking"] = True
+            component["reason"] = reason or f"{friendly_script_label(script.name)} is not running yet."
+        return component
+
+    enabled = True
+    if script.name == "fxweekend-clone":
+        settings = _load_json_file(FXWEEKEND_SETTINGS_PATH, FXWEEKEND_DEFAULT_SETTINGS)
+        if isinstance(settings, dict):
+            enabled = bool(settings.get("enabled", True))
+        component["enabled"] = enabled
+
+    ready = bool(running and not starting and enabled)
+    component["ready"] = ready
+    if ready:
+        component["phase"] = "ready"
+        return component
+
+    component["blocking"] = True
+    if starting:
+        component["phase"] = "autostart_starting"
+        component["reason"] = f"{friendly_script_label(script.name)} is still starting."
+    elif not enabled:
+        component["phase"] = "autostart_disabled"
+        component["reason"] = f"{friendly_script_label(script.name)} is configured for autostart but disabled."
+    elif reason:
+        component["phase"] = "autostart_failed"
+        component["reason"] = reason
+    else:
+        component["phase"] = "autostart_pending"
+        component["reason"] = f"{friendly_script_label(script.name)} is not running yet."
+    return component
+
+
+def _startup_readiness_status() -> Dict[str, object]:
+    state_sync = _state_sync_status_snapshot()
+    autostart_targets = _compute_autostart_scripts()
+    unavailable = dict(_LAST_AUTOSTART_UNAVAILABLE)
+    components: List[Dict[str, object]] = []
+    payload: Dict[str, object] = {
+        "ready": False,
+        "startup_phase": "checking",
+        "blocking_component": None,
+        "failure_reason": None,
+        "state_sync": state_sync,
+        "autostart_targets": autostart_targets,
+        "components": components,
+        "updated_at": _utc_now_iso(),
+    }
+
+    restore_status = str(state_sync.get("restore_status") or "").strip().lower()
+    restore_enabled = bool(state_sync.get("enabled"))
+    restore_complete = bool(state_sync.get("restore_complete")) or _STARTUP_STATE_RESTORE_DONE.is_set()
+    restore_error = str(state_sync.get("restore_error") or "").strip()
+    restore_component = {
+        "name": "state_restore",
+        "label": "Startup state restore",
+        "ready": (not restore_enabled) or (restore_complete and restore_status not in {"failed", "error"}),
+        "running": restore_enabled and not restore_complete,
+        "starting": restore_enabled and not restore_complete,
+        "blocking": False,
+        "phase": restore_status or ("skipped" if not restore_enabled else "pending"),
+        "reason": restore_error,
+    }
+    components.append(restore_component)
+    if restore_status in {"failed", "error"}:
+        restore_component["blocking"] = True
+        payload.update(
+            {
+                "startup_phase": "state_restore_failed",
+                "blocking_component": "state_restore",
+                "failure_reason": restore_error or "Startup state restore failed.",
+            }
+        )
+        return payload
+    if restore_enabled and not restore_complete:
+        restore_component["blocking"] = True
+        payload.update(
+            {
+                "startup_phase": "state_restore_pending",
+                "blocking_component": "state_restore",
+                "failure_reason": "Startup state restore is still pending.",
+            }
+        )
+        return payload
+
+    if unavailable:
+        for target_name, reason in sorted(unavailable.items()):
+            components.append(
+                {
+                    "name": target_name,
+                    "label": friendly_script_label(target_name),
+                    "ready": False,
+                    "running": False,
+                    "starting": False,
+                    "blocking": True,
+                    "phase": "autostart_unavailable",
+                    "reason": reason,
+                }
+            )
+        first_name, first_reason = next(iter(sorted(unavailable.items())))
+        payload.update(
+            {
+                "startup_phase": "autostart_unavailable",
+                "blocking_component": first_name,
+                "failure_reason": first_reason,
+            }
+        )
+        return payload
+
+    for name in autostart_targets:
+        component = _autostart_component_readiness(name)
+        components.append(component)
+        if not bool(component.get("ready")):
+            payload.update(
+                {
+                    "startup_phase": str(component.get("phase") or "autostart_pending"),
+                    "blocking_component": component.get("name") or name,
+                    "failure_reason": component.get("reason") or f"{friendly_script_label(name)} is not ready.",
+                }
+            )
+            return payload
+
+    payload.update(
+        {
+            "ready": True,
+            "startup_phase": "ready",
+            "blocking_component": None,
+            "failure_reason": None,
+        }
+    )
+    return payload
 
 
 async def _run_startup_recovery_import_if_needed() -> None:
@@ -11374,9 +11596,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         }
         .inline-tool-form{
             display:grid;
-            grid-template-columns:minmax(220px,1fr) auto;
+            grid-template-columns:minmax(0,1fr) max-content;
             gap:0.65rem;
             align-items:end;
+            width:100%;
+            min-width:0;
         }
         .inline-tool-label{
             display:flex;
@@ -11389,6 +11613,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         .inline-tool-input,
         #dashboard-history-panel select{
             width:100%;
+            max-width:100%;
+            box-sizing:border-box;
+            min-width:0;
             border-radius:10px;
             border:1px solid #334155;
             background:#0b1220;
@@ -11404,6 +11631,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             background:#1f2937;
             color:#e2e8f0;
             min-height:40px;
+            box-sizing:border-box;
+            white-space:nowrap;
         }
         .inline-tool-form button:hover,
         #dashboard-history-panel button:hover{
@@ -11461,6 +11690,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             }
             .inline-tool-form{
                 grid-template-columns:1fr;
+            }
+            .inline-tool-form button{
+                width:100%;
             }
         }
         .category-title{
@@ -13812,6 +14044,7 @@ def _normalize_pending_webhooks(items: object) -> List[Dict[str, object]]:
 def _replace_pending_webhooks(items: object) -> List[Dict[str, object]]:
     normalized = _normalize_pending_webhooks(items)
     _save_pending_webhooks(normalized)
+    normalized, _diagnostics = _reconcile_pending_webhooks_registry(prune_orphan_contexts=False)
     _invalidate_open_orders_cache()
     return normalized
 
@@ -14128,11 +14361,19 @@ def _normalize_optional_price(value: object) -> Optional[str]:
 _TRADE_CONTEXTS_CACHE: Dict[str, object] = {"fingerprint": None, "items": None}
 
 def _trade_context_source_fingerprint() -> List[Dict[str, object]]:
-    return [
-        _source_file_fingerprint(TRADE_CONTEXTS_PATH),
-        _source_file_fingerprint(STATE_BACKUP_LOCAL_PATH),
-        _source_file_fingerprint(Path(_bybit_demo_calc_context_path())),
-    ]
+    fingerprints = [_source_file_fingerprint(TRADE_CONTEXTS_PATH)]
+    if _trade_context_backup_fallback_enabled():
+        fingerprints.extend([
+            _source_file_fingerprint(STATE_BACKUP_LOCAL_PATH),
+            _source_file_fingerprint(Path(_bybit_demo_calc_context_path())),
+        ])
+    return fingerprints
+
+def _trade_context_backup_fallback_enabled() -> bool:
+    try:
+        return Path(TRADE_CONTEXTS_PATH).resolve() == (BASE_DIR / "render" / "data" / "trade_contexts.json").resolve()
+    except Exception:
+        return False
 
 def _load_trade_contexts() -> List[Dict[str, object]]:
     fingerprint = _trade_context_source_fingerprint()
@@ -14145,14 +14386,15 @@ def _load_trade_contexts() -> List[Dict[str, object]]:
     if isinstance(payload, dict):
         payload = payload.get("items", [])
     items = [dict(entry) for entry in payload if isinstance(payload, list) and isinstance(entry, dict)]
-    if not items:
+    allow_fallback = _trade_context_backup_fallback_enabled()
+    if not items and allow_fallback:
         backup_payload = _load_json_file(STATE_BACKUP_LOCAL_PATH, {})
         if isinstance(backup_payload, dict):
             raw_backup_items = backup_payload.get("trade_contexts")
             if isinstance(raw_backup_items, list):
                 items = [dict(entry) for entry in raw_backup_items if isinstance(entry, dict)]
 
-    if not items:
+    if not items and allow_fallback:
         calc_payload = _load_json_file(_bybit_demo_calc_context_path(), {})
         if isinstance(calc_payload, dict):
             raw_calc_items = calc_payload.get("items")
@@ -23738,6 +23980,8 @@ def _compute_journal_stats(
                 "r_multiple": [],
                 "pnl_by_currency": defaultdict(list),
                 "durations": [],
+                "winner_durations": [],
+                "loser_durations": [],
                 "_rows": [],
                 "quote_currency": "USDT" if not _is_fx_asset_class(row.get("asset_class")) else "",
             }
@@ -23777,6 +24021,10 @@ def _compute_journal_stats(
         dur = _to_float(row.get("trade_duration_seconds"))
         if dur is not None and dur >= 0:
             bucket["durations"].append(dur)
+            if is_win:
+                bucket["winner_durations"].append(dur)
+            elif is_loss:
+                bucket["loser_durations"].append(dur)
 
         sl = _to_float(row.get("stop_loss"))
         tp = _to_float(row.get("take_profit"))
@@ -23864,9 +24112,13 @@ def _compute_journal_stats(
         item["stop_recommendation"] = item.get(STOP_RECOMMENDATION_HEADER)
         item["target_recommendation"] = item.get(TARGET_RECOMMENDATION_HEADER)
         dur_vals = item.pop("durations", [])
+        winner_dur_vals = item.pop("winner_durations", [])
+        loser_dur_vals = item.pop("loser_durations", [])
         item["avg_trade_duration_seconds"] = _avg(dur_vals)
         item["min_trade_duration_seconds"] = min(dur_vals) if dur_vals else None
         item["max_trade_duration_seconds"] = max(dur_vals) if dur_vals else None
+        item["avg_winning_trade_duration_seconds"] = _avg(winner_dur_vals)
+        item["avg_losing_trade_duration_seconds"] = _avg(loser_dur_vals)
         item["asset_class"] = (
             "fx"
             if any(
@@ -25428,12 +25680,148 @@ PENDING_WEBHOOK_TERMINAL_STATUSES = {
     "FILLED",
     "CLOSED",
     "CANCELLED",
+    "CANCELED",
+    "REJECTED",
+    "EXPIRED",
+    "DISABLED",
+    "BYBIT_REJECTED",
+    "OANDA_REJECTED",
+    "FAILED",
+    "FAILED_BEFORE_SUBMIT",
     "FAILED_AFTER_SUBMIT",
 }
 
 
 def _pending_webhook_is_terminal(status: object) -> bool:
     return str(status or "").strip().upper() in PENDING_WEBHOOK_TERMINAL_STATUSES
+
+
+def _pending_webhook_sort_ts(item: Dict[str, object]) -> float:
+    for key in ("updated_at", "created_at", "opened_at"):
+        value = item.get(key)
+        num = _safe_float(value)
+        if num is not None:
+            return float(num)
+        dt = _parse_iso_datetime(value)
+        if dt is not None:
+            return dt.timestamp()
+    return 0.0
+
+
+def _pending_webhook_fingerprint(item: Dict[str, object]) -> str:
+    meaningful_fields = (
+        "account",
+        "category",
+        "instrument",
+        "side",
+        "size",
+        "entry_price",
+        "order_price",
+        "order_type",
+        "stop_loss",
+        "take_profit",
+        "timeframe",
+        "is_test_trade",
+        "cancel_if_touched_price",
+        "cancel_if_touched_operator",
+        "setup_reference_price",
+        "risk_mode",
+        "risk_value",
+        "stop_loss_ticks",
+        "take_profit_ticks",
+        "target_mode",
+        "risk_reward",
+        "planned_entry_price",
+        "planned_stop_price",
+        "planned_target_price",
+    )
+    normalized: Dict[str, object] = {}
+    for field in meaningful_fields:
+        value = item.get(field)
+        if isinstance(value, str):
+            value = value.strip()
+            if field in {"account", "category", "instrument", "side", "order_type", "timeframe", "cancel_if_touched_operator", "risk_mode", "target_mode"}:
+                value = value.lower()
+            if field == "instrument":
+                value = value.upper()
+        elif isinstance(value, (int, float)):
+            value = float(value)
+        normalized[field] = value
+    return json.dumps(normalized, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _pending_context_matches(item: Dict[str, object], ctx: Dict[str, object]) -> bool:
+    pending_id = str(item.get("id") or "").strip()
+    calculation_context_id = str(item.get("calculation_context_id") or item.get("context_id") or "").strip()
+    if pending_id and str(ctx.get("pending_webhook_id") or "").strip() == pending_id:
+        return True
+    if calculation_context_id and str(ctx.get("calculation_context_id") or ctx.get("context_id") or "").strip() == calculation_context_id:
+        return True
+    return False
+
+
+def _pending_context_lifecycle_reason(
+    item: Dict[str, object],
+    trade_contexts: List[Dict[str, object]],
+    *,
+    prune_orphan_contexts: bool = True,
+) -> Optional[str]:
+    matching = [ctx for ctx in trade_contexts if isinstance(ctx, dict) and _pending_context_matches(item, ctx)]
+    if not matching:
+        if prune_orphan_contexts and str(item.get("calculation_context_id") or item.get("context_id") or "").strip():
+            return "orphaned calculation context"
+        return None
+    has_active = False
+    terminal_reasons: List[str] = []
+    for ctx in matching:
+        status = str(ctx.get("status") or "ACTIVE").strip().upper()
+        if status == "ACTIVE":
+            has_active = True
+            continue
+        if _pending_webhook_is_terminal(status) or status in {"CANCELLED", "CANCELED", "CLOSED", "CONSUMED", "TRIGGERED", "REJECTED", "EXPIRED"}:
+            terminal_reasons.append(status)
+            continue
+        if ctx.get("closed_at") or ctx.get("consumed_at") or ctx.get("triggered_at") or ctx.get("cancelled_at"):
+            terminal_reasons.append(status or "terminal context timestamp")
+    if has_active:
+        return None
+    if terminal_reasons:
+        return f"terminal trade context: {terminal_reasons[-1]}"
+    return None
+
+
+def _pending_superseded_ids(pending_items: List[Dict[str, object]]) -> Set[str]:
+    superseded: Set[str] = set()
+    fields = (
+        "previous_pending_webhook_id",
+        "superseded_pending_webhook_id",
+        "supersedes_pending_webhook_id",
+        "replaces_pending_webhook_id",
+    )
+    for item in pending_items:
+        if not isinstance(item, dict):
+            continue
+        for field in fields:
+            value = str(item.get(field) or "").strip()
+            if value:
+                superseded.add(value)
+    return superseded
+
+
+def _choose_active_pending_webhook(left: Dict[str, object], right: Dict[str, object]) -> Dict[str, object]:
+    left_active = (
+        str(left.get("status") or "").strip().upper() == "WAITING"
+        and bool(left.get("enabled", True))
+        and not (left.get("consumed_at") or left.get("triggered_at"))
+    )
+    right_active = (
+        str(right.get("status") or "").strip().upper() == "WAITING"
+        and bool(right.get("enabled", True))
+        and not (right.get("consumed_at") or right.get("triggered_at"))
+    )
+    if left_active != right_active:
+        return left if left_active else right
+    return right if _pending_webhook_sort_ts(right) >= _pending_webhook_sort_ts(left) else left
 
 
 def _pending_webhook_is_superseded(
@@ -25541,37 +25929,113 @@ def _pending_webhook_is_superseded(
 
 
 def _clean_pending_webhooks_for_open_items(
-    pending_items: List[Dict[str, object]], open_items: List[Dict[str, object]]
+    pending_items: List[Dict[str, object]],
+    open_items: List[Dict[str, object]],
+    diagnostics: Optional[Dict[str, int]] = None,
+    *,
+    prune_orphan_contexts: bool = True,
 ) -> Tuple[List[Dict[str, object]], bool]:
+    diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+    diagnostics.setdefault("input_records", len(pending_items))
     contexts = _load_trade_contexts()
     consumed_open_indices: Set[int] = set()
-    filtered: List[Dict[str, object]] = []
+    active_candidates: List[Dict[str, object]] = []
     changed = False
     visible_statuses = {"WAITING"}
+    superseded_ids = _pending_superseded_ids(pending_items)
     for pending in pending_items:
+        pending_id = str(pending.get("id") or "").strip()
         status = str(pending.get("status") or "").strip().upper()
-        if status in {"CONSUMED", "CLOSED", "CANCELLED"}:
+        if pending_id and pending_id in superseded_ids:
+            diagnostics["superseded_pruned"] = int(diagnostics.get("superseded_pruned", 0)) + 1
+            changed = True
+            continue
+        if _pending_webhook_is_terminal(status):
+            diagnostics["terminal_pruned"] = int(diagnostics.get("terminal_pruned", 0)) + 1
             changed = True
             continue
         if status not in visible_statuses:
+            diagnostics["non_waiting_pruned"] = int(diagnostics.get("non_waiting_pruned", 0)) + 1
             changed = True
             continue
         if not bool(pending.get("enabled", True)):
+            diagnostics["disabled_pruned"] = int(diagnostics.get("disabled_pruned", 0)) + 1
             changed = True
             continue
         if status == "WAITING" and (pending.get("consumed_at") or pending.get("triggered_at")):
+            diagnostics["consumed_waiting_pruned"] = int(diagnostics.get("consumed_waiting_pruned", 0)) + 1
             changed = True
             continue
+        lifecycle_reason = _pending_context_lifecycle_reason(
+            pending,
+            contexts,
+            prune_orphan_contexts=prune_orphan_contexts,
+        )
+        if lifecycle_reason:
+            diagnostics["stale_context_pruned"] = int(diagnostics.get("stale_context_pruned", 0)) + 1
+            changed = True
+            continue
+        active_candidates.append(pending)
+
+    deduped_by_id: Dict[str, Dict[str, object]] = {}
+    no_id_items: List[Dict[str, object]] = []
+    for pending in active_candidates:
+        pending_id = str(pending.get("id") or "").strip()
+        if not pending_id:
+            no_id_items.append(pending)
+            continue
+        previous = deduped_by_id.get(pending_id)
+        if previous is None:
+            deduped_by_id[pending_id] = pending
+            continue
+        deduped_by_id[pending_id] = _choose_active_pending_webhook(previous, pending)
+        diagnostics["duplicate_id_pruned"] = int(diagnostics.get("duplicate_id_pruned", 0)) + 1
+        changed = True
+
+    by_fingerprint: Dict[str, Dict[str, object]] = {}
+    for pending in [*deduped_by_id.values(), *no_id_items]:
+        fingerprint = _pending_webhook_fingerprint(pending)
+        previous = by_fingerprint.get(fingerprint)
+        if previous is None:
+            by_fingerprint[fingerprint] = pending
+            continue
+        by_fingerprint[fingerprint] = _choose_active_pending_webhook(previous, pending)
+        diagnostics["duplicate_fingerprint_pruned"] = int(diagnostics.get("duplicate_fingerprint_pruned", 0)) + 1
+        changed = True
+
+    filtered: List[Dict[str, object]] = []
+    for pending in sorted(by_fingerprint.values(), key=_pending_webhook_sort_ts):
         if _pending_webhook_is_superseded(
             pending,
             open_items,
             trade_contexts=contexts,
             consumed_open_indices=consumed_open_indices,
         ):
+            diagnostics["live_broker_superseded_pruned"] = int(diagnostics.get("live_broker_superseded_pruned", 0)) + 1
             changed = True
             continue
         filtered.append(pending)
+    diagnostics["active_records"] = len(filtered)
     return filtered, changed
+
+
+def _reconcile_pending_webhooks_registry(
+    open_items: Optional[List[Dict[str, object]]] = None,
+    *,
+    prune_orphan_contexts: bool = True,
+) -> Tuple[List[Dict[str, object]], Dict[str, int]]:
+    diagnostics: Dict[str, int] = {}
+    pending_items = _load_pending_webhooks()
+    cleaned, changed = _clean_pending_webhooks_for_open_items(
+        pending_items,
+        open_items or [],
+        diagnostics=diagnostics,
+        prune_orphan_contexts=prune_orphan_contexts,
+    )
+    if changed:
+        _save_pending_webhooks(cleaned)
+        _invalidate_open_orders_cache()
+    return cleaned, diagnostics
 
 
 def _filter_pending_webhooks(
@@ -25775,14 +26239,55 @@ async def list_open_orders(force: bool = Query(False)) -> JSONResponse:
                     }
                 )
 
+        live_broker_items = list(items)
+        pending_diagnostics: Dict[str, int] = {}
         pending = _load_pending_webhooks()
         if pending:
-            pending, pending_changed = _clean_pending_webhooks_for_open_items(pending, items)
+            pending, pending_changed = _clean_pending_webhooks_for_open_items(
+                pending, items, diagnostics=pending_diagnostics
+            )
             if pending_changed:
                 _save_pending_webhooks(pending)
                 _invalidate_open_orders_cache()
                 _schedule_dropbox_upload_state_backup()
             items.extend(pending)
+        else:
+            pending_diagnostics["input_records"] = 0
+            pending_diagnostics["active_records"] = 0
+
+        live_broker_positions = sum(
+            1
+            for row in live_broker_items
+            if str(row.get("broker") or "").strip().lower() not in {"webhook", "bounce"}
+            and str(row.get("type") or "").strip().lower() in {"position", "trade"}
+        )
+        live_broker_orders = sum(
+            1
+            for row in live_broker_items
+            if str(row.get("broker") or "").strip().lower() not in {"webhook", "bounce"}
+            and str(row.get("type") or "").strip().lower() == "order"
+        )
+        pruned_pending = sum(
+            int(value)
+            for key, value in pending_diagnostics.items()
+            if key.endswith("_pruned")
+        )
+        source_counts = {
+            "live_broker_positions": live_broker_positions,
+            "live_broker_orders": live_broker_orders,
+            "active_pending_webhooks": len(pending),
+            "duplicates_or_stale_pending_pruned": pruned_pending,
+            "pending_reconciliation": dict(pending_diagnostics),
+        }
+        BYBIT_LOGGER.info(
+            "OPEN_ORDERS source_counts live_positions=%s live_orders=%s active_pending=%s pruned_pending=%s diagnostics=%s errors=%s",
+            live_broker_positions,
+            live_broker_orders,
+            len(pending),
+            pruned_pending,
+            pending_diagnostics,
+            len(errors),
+        )
 
         try:
             bounce_script_running = script_manager.get("bybit_trigger_bounce_trader").is_running
@@ -25979,6 +26484,7 @@ async def list_open_orders(force: bool = Query(False)) -> JSONResponse:
         payload: Dict[str, object] = {
             "items": grouped,
             "errors": errors,
+            "source_counts": source_counts,
             "stale": bool(errors),
             "updated_at": updated_at,
             "last_success_at": _OPEN_ORDERS_CACHE.get("last_success_at"),
@@ -26129,6 +26635,7 @@ async def recent_trades(limit: int = 25) -> JSONResponse:
                 "account": row.get("account_label") or "Bybit Live",
                 "symbol": row.get("symbol") or "MONTHLY AUD P/L",
                 "side": row.get("side"),
+                "timeframe": "",
                 "opened_at": row.get("open_time") or row.get("opened_at"),
                 "closed_at": closed_at,
                 "stop_loss": row.get("stop_loss"),
@@ -26145,7 +26652,7 @@ async def recent_trades(limit: int = 25) -> JSONResponse:
                 "_row_realized_pnl": result_cash,
                 "_row_updated_at": row.get("updated_at"),
                 "outcome": row.get("outcome"),
-                "duration_seconds": row.get("duration_seconds"),
+                "duration_seconds": row.get("duration_seconds") or None,
                 "chart_row_id": row.get("id"),
                 "chart_available": False,
             }
@@ -26237,7 +26744,13 @@ async def recent_trades(limit: int = 25) -> JSONResponse:
         except Exception:
             return float("-inf")
 
-    items.sort(key=lambda r: _sort_ts(r.get("closed_at")), reverse=True)
+    items.sort(
+        key=lambda r: (
+            1 if _row_type(r.get("_row") if isinstance(r.get("_row"), dict) else {}) == "trade" else 0,
+            _sort_ts(r.get("closed_at")),
+        ),
+        reverse=True,
+    )
     public_items = []
     for item in items[: max(1, min(limit, 200))]:
         copy = dict(item)
@@ -27094,6 +27607,11 @@ async def default_webhook(request: Request) -> JSONResponse:
 @app.get("/health")
 async def healthcheck() -> PlainTextResponse:
     return PlainTextResponse("ok")
+
+
+@app.get("/api/startup-readiness")
+async def startup_readiness() -> JSONResponse:
+    return JSONResponse(_startup_readiness_status())
 
 
 @app.get("/api/local-build-info")

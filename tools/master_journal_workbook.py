@@ -3,7 +3,7 @@ from collections import Counter, defaultdict, OrderedDict
 from datetime import datetime, date, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP, localcontext
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 from openpyxl import Workbook, load_workbook
 from openpyxl.comments import Comment
 from openpyxl.styles import Font
@@ -155,6 +155,8 @@ TRADE_LOG_HEADER_ROWS = 3
 TRADE_LOG_FILTER_HEADER_ROW = 3
 TRADE_LOG_DATA_START_ROW = 4
 TRADE_LOG_DATA_ROW_HEIGHT = 15
+AVG_WINNING_DURATION_HEADER = "Avg winning duration (DD:HH:MM:SS)"
+AVG_LOSING_DURATION_HEADER = "Avg losing duration (DD:HH:MM:SS)"
 MOVE_TO_BREAK_EVEN_HEADERS = list(MOVE_TO_FIELD_MAP.keys())[:5]
 MOVE_TO_PROFIT_HEADERS = list(MOVE_TO_FIELD_MAP.keys())[5:]
 MOVE_TO_SUBHEADERS = ["Time", "Duration", "Trigger Price", "Distance From Entry %", "Distance From Exit %"]
@@ -188,6 +190,8 @@ SYMBOLS_HEADERS = [
     *LEGACY_INSTRUMENT_AVERAGES_HEADERS[34:36],
     TARGET_RECOMMENDATION_HEADER,
     *LEGACY_INSTRUMENT_AVERAGES_HEADERS[36:],
+    AVG_WINNING_DURATION_HEADER,
+    AVG_LOSING_DURATION_HEADER,
 ]
 INSTRUMENT_AVERAGES_HEADERS = SYMBOLS_HEADERS
 REPORT_METRIC_LABELS = [
@@ -557,7 +561,7 @@ SYMBOLS_GROUP_WIDTHS = {
     "pl": 4,
     "stops": 4,
     "targets": 4,
-    "duration": 3,
+    "duration": 5,
 }
 
 
@@ -603,6 +607,25 @@ def _symbols_group_for_column(ws, col: int) -> str:
         width = SYMBOLS_GROUP_WIDTHS.get(token)
         if width and cursor <= col <= cursor + width - 1:
             return text
+    header_token = _norm_header_token(
+        ws.cell(INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, col).value
+        or _vertical_header_anchor_value(ws, col)
+    )
+    if header_token in {
+        "shortestdurationddhhmmss",
+        "shortestddhhmmss",
+        "avgdurationddhhmmss",
+        "averagedurationddhhmmss",
+        "longestdurationddhhmmss",
+        "longestddhhmmss",
+        "avgwinningdurationddhhmmss",
+        "averagewinningdurationddhhmmss",
+        "avgwinnerdurationddhhmmss",
+        "avglosingdurationddhhmmss",
+        "averagelosingdurationddhhmmss",
+        "avgloserdurationddhhmmss",
+    }:
+        return "Duration"
     return ""
 
 
@@ -672,6 +695,21 @@ def _symbols_metric_key_for_column(ws, col: int) -> str:
             "recommendation": "target_recommendation",
             "targetrecommendation": "target_recommendation",
         }.get(token, "")
+    if group == "duration":
+        return {
+            "shortestdurationddhhmmss": "shortest_duration",
+            "shortestddhhmmss": "shortest_duration",
+            "avgdurationddhhmmss": "avg_duration",
+            "averagedurationddhhmmss": "avg_duration",
+            "longestdurationddhhmmss": "longest_duration",
+            "longestddhhmmss": "longest_duration",
+            "avgwinningdurationddhhmmss": "avg_winning_duration",
+            "averagewinningdurationddhhmmss": "avg_winning_duration",
+            "avgwinnerdurationddhhmmss": "avg_winning_duration",
+            "avglosingdurationddhhmmss": "avg_losing_duration",
+            "averagelosingdurationddhhmmss": "avg_losing_duration",
+            "avgloserdurationddhhmmss": "avg_losing_duration",
+        }.get(token, "")
     return ""
 
 
@@ -699,6 +737,11 @@ def _symbols_canonical_header_for_column(ws, col: int) -> str:
         "avg_target_pct_losers": "Avg target % (L)",
         "stop_recommendation": STOP_RECOMMENDATION_HEADER,
         "target_recommendation": TARGET_RECOMMENDATION_HEADER,
+        "shortest_duration": "Shortest duration (DD:HH:MM:SS)",
+        "avg_duration": "Avg duration (DD:HH:MM:SS)",
+        "longest_duration": "Longest duration (DD:HH:MM:SS)",
+        "avg_winning_duration": AVG_WINNING_DURATION_HEADER,
+        "avg_losing_duration": AVG_LOSING_DURATION_HEADER,
     }.get(key, "")
 
 
@@ -716,6 +759,8 @@ def _apply_symbols_filter_header_layout(ws) -> None:
         "Shortest duration (DD:HH:MM:SS)": 18,
         "Avg duration (DD:HH:MM:SS)": 18,
         "Longest duration (DD:HH:MM:SS)": 18,
+        AVG_WINNING_DURATION_HEADER: 18,
+        AVG_LOSING_DURATION_HEADER: 18,
         "Move to break even": 16,
         "Move to profit": 14,
         STOP_RECOMMENDATION_HEADER: 18,
@@ -776,6 +821,7 @@ def _write_instrument_averages_headers(ws, *, preserve_freeze: bool = False) -> 
         ("Order", "Market", "Limit"),
         ("Stops", "Avg stop %", STOP_RECOMMENDATION_HEADER),
         ("Targets", "Avg target %", TARGET_RECOMMENDATION_HEADER),
+        ("Duration", "Shortest duration (DD:HH:MM:SS)", AVG_LOSING_DURATION_HEADER),
     )
     for label, first_header, last_header in group_specs:
         start = INSTRUMENT_AVERAGES_HEADERS.index(first_header) + 1
@@ -912,10 +958,29 @@ def _ensure_symbols_schema(ws, diagnostics: Dict[str, Any] | None = None) -> boo
         changed = True
         headers = _instrument_averages_header_map(ws)
 
+    def insert_duration_header_after(anchor_header: str, wanted_header: str) -> None:
+        nonlocal changed, headers
+        if wanted_header in headers:
+            return
+        anchor_col = headers.get(anchor_header)
+        if not anchor_col:
+            return
+        insert_at = anchor_col + 1
+        ws.insert_cols(insert_at)
+        expand_group_header(anchor_col, insert_at)
+        _copy_column_style_moving_right_boundary(ws, anchor_col, insert_at)
+        width = ws.column_dimensions[get_column_letter(anchor_col)].width
+        ws.column_dimensions[get_column_letter(insert_at)].width = max(width or 0, 18) or 18
+        ws.cell(header_row, insert_at).value = wanted_header
+        changed = True
+        headers = _instrument_averages_header_map(ws)
+
     insert_overall_average_before("Avg stop % (W)", "Avg stop %")
     insert_overall_average_before("Avg target % (W)", "Avg target %")
     insert_recommendation_after("Avg stop % (L)", STOP_RECOMMENDATION_HEADER, "stops")
     insert_recommendation_after("Avg target % (L)", TARGET_RECOMMENDATION_HEADER, "targets")
+    insert_duration_header_after("Longest duration (DD:HH:MM:SS)", AVG_WINNING_DURATION_HEADER)
+    insert_duration_header_after(AVG_WINNING_DURATION_HEADER, AVG_LOSING_DURATION_HEADER)
     if changed:
         if all(header in _instrument_averages_header_map(ws) for header in INSTRUMENT_AVERAGES_HEADERS):
             _write_instrument_averages_headers(ws, preserve_freeze=True)
@@ -5372,6 +5437,33 @@ def _copy_cell_style(src, dst) -> None:
     dst.protection = copy(src.protection)
 
 
+def _border_with_side(border: Border, **sides: Side) -> Border:
+    return Border(
+        left=sides.get("left", border.left),
+        right=sides.get("right", border.right),
+        top=sides.get("top", border.top),
+        bottom=sides.get("bottom", border.bottom),
+        diagonal=border.diagonal,
+        diagonal_direction=border.diagonal_direction,
+        diagonalUp=border.diagonalUp,
+        diagonalDown=border.diagonalDown,
+        outline=border.outline,
+        vertical=border.vertical,
+        horizontal=border.horizontal,
+    )
+
+
+def _copy_column_style_moving_right_boundary(ws, template_col: int, target_col: int) -> None:
+    for row in range(1, ws.max_row + 1):
+        source = ws.cell(row, template_col)
+        target = ws.cell(row, target_col)
+        original_right = copy(source.border.right)
+        internal_right = copy(source.border.left) if source.border.left and source.border.left.style else Side(style="thin", color="D1D5DB")
+        _copy_cell_style(source, target)
+        source.border = _border_with_side(source.border, right=internal_right)
+        target.border = _border_with_side(target.border, right=original_right)
+
+
 def _snapshot_cell(cell) -> Dict[str, Any]:
     return {
         "value": cell.value,
@@ -5438,6 +5530,19 @@ def _write_trade_log_three_row_headers(ws, header_templates: Dict[str, Dict[str,
                 shrink_to_fit=ws.cell(1, col).alignment.shrink_to_fit,
                 indent=ws.cell(1, col).alignment.indent,
             )
+    _normalize_trade_log_header_fills(ws)
+
+
+def _normalize_trade_log_header_fills(ws) -> None:
+    if getattr(ws, "title", "") not in {TRADE_LOG_SHEET, LEGACY_ALL_TRADES_SHEET}:
+        return
+    max_col = max(ws.max_column, len(TRADE_LOG_HEADERS))
+    empty_fill = PatternFill()
+    for row in range(1, TRADE_LOG_HEADER_ROWS + 1):
+        for col in range(1, max_col + 1):
+            if _is_merged_non_anchor(ws, row, col):
+                continue
+            ws.cell(row, col).fill = empty_fill
 
 
 def _write_trade_log_two_row_headers(ws, header_templates: Dict[str, Dict[str, Any]]) -> None:
@@ -5633,6 +5738,7 @@ def _ensure_trade_log_schema(ws, diagnostics: Dict[str, Any] | None = None) -> N
         _apply_trade_log_win_loss_row_formatting(ws)
         _apply_trade_log_win_loss_direct_row_fills(ws)
         _normalize_trade_log_row_heights(ws, diagnostics)
+        _normalize_trade_log_header_fills(ws)
         if _trade_log_data_row_count(ws) != before_data_rows:
             raise RuntimeError("Trade Log schema validation changed the data row count unexpectedly.")
         return
@@ -5838,6 +5944,7 @@ def _ensure_trade_log_schema(ws, diagnostics: Dict[str, Any] | None = None) -> N
     _apply_trade_number_hyperlinks(ws, diagnostics)
     _apply_trade_log_win_loss_row_formatting(ws)
     _apply_trade_log_win_loss_direct_row_fills(ws)
+    _normalize_trade_log_header_fills(ws)
 
     after_data_rows = _trade_log_data_row_count(ws)
     if after_data_rows != before_data_rows:
@@ -6011,6 +6118,16 @@ def _is_generated_profit_loss_rule(rule) -> bool:
     )
 
 def _pnl_calendar_profit_loss_ranges(ws) -> List[str]:
+    year_cols = _detect_calendar_year_columns(ws)
+    month_rows = _detect_calendar_month_rows(ws)
+    if year_cols and month_rows:
+        first_col = min(year_cols.values())
+        last_col = max(year_cols.values())
+        return [
+            f"{get_column_letter(first_col)}{row}:{get_column_letter(last_col)}{row}"
+            for _month, row in sorted(month_rows.items())
+        ]
+
     month_cols = _detect_calendar_month_columns(ws)
     if month_cols:
         first_col = min(month_cols.values())
@@ -6058,10 +6175,11 @@ def _remove_pnl_calendar_generated_profit_loss_formatting(ws) -> None:
 
 def _apply_pnl_calendar_profit_loss_formatting(ws) -> None:
     _remove_pnl_calendar_generated_profit_loss_formatting(ws)
+    transposed_layout = bool(_detect_calendar_year_columns(ws) and _detect_calendar_month_rows(ws))
     month_cols = _detect_calendar_month_columns(ws)
     one_line_layout = bool(month_cols and min(month_cols.values()) == 2)
     for cell_range in _pnl_calendar_profit_loss_ranges(ws):
-        if not one_line_layout:
+        if not (one_line_layout or transposed_layout):
             _profit_loss_rules(ws, cell_range)
         min_col, min_row, max_col, max_row = range_boundaries(cell_range)
         for row in range(min_row, max_row + 1):
@@ -6111,7 +6229,8 @@ def _apply_instrument_averages_requested_style(ws, *, preserve_layout: bool = Fa
     symbol_col = headers.get("Symbol", 1)
     duration_headers = {
         "Shortest duration (DD:HH:MM:SS)", "Avg duration (DD:HH:MM:SS)",
-        "Longest duration (DD:HH:MM:SS)",
+        "Longest duration (DD:HH:MM:SS)", AVG_WINNING_DURATION_HEADER,
+        AVG_LOSING_DURATION_HEADER,
     }
     count_headers = {
         "Trades", "Wins", "Losses", "Break-even", "Longs", "Long wins", "Long losses",
@@ -6365,6 +6484,9 @@ def _populate_symbols_metrics_preserving_layout(
             elif key.endswith("_recommendation"):
                 cell.number_format = "General"
                 _apply_recommendation_cell_style(cell)
+            elif key in {"shortest_duration", "avg_duration", "longest_duration", "avg_winning_duration", "avg_losing_duration"}:
+                cell.value = _format_duration_display(value)
+                cell.number_format = "General"
             else:
                 cell.value = value / 100.0
                 cell.number_format = "0.00%"
@@ -7144,6 +7266,18 @@ def _instrument_analysis_by_symbol(rows: List[Dict[str, Any]]) -> Dict[str, Dict
             value for value in (_as_float(row.get("r_multiple")) for row in symbol_rows)
             if value is not None and math.isfinite(value)
         ]
+        duration_values = [
+            value for value in (_infer_trade_duration_seconds(row) for row in symbol_rows)
+            if value is not None and value >= 0
+        ]
+        winning_duration_values = [
+            value for value in (_infer_trade_duration_seconds(row) for row in symbol_rows if _trade_outcome_sign(row) > 0)
+            if value is not None and value >= 0
+        ]
+        losing_duration_values = [
+            value for value in (_infer_trade_duration_seconds(row) for row in symbol_rows if _trade_outcome_sign(row) < 0)
+            if value is not None and value >= 0
+        ]
         aths_values = [str(row.get("aths_atls") or "").strip().lower() for row in symbol_rows]
         order_values = [str(row.get("order_type") or "").strip().lower() for row in symbol_rows]
         payload.update({
@@ -7154,6 +7288,11 @@ def _instrument_analysis_by_symbol(rows: List[Dict[str, Any]]) -> Dict[str, Dict
             "market_orders": sum("market" in value for value in order_values),
             "limit_orders": sum("limit" in value for value in order_values),
             "net_r_multiple": sum(r_values) if r_values else None,
+            "shortest_duration": min(duration_values) if duration_values else None,
+            "avg_duration": (sum(duration_values) / len(duration_values)) if duration_values else None,
+            "longest_duration": max(duration_values) if duration_values else None,
+            "avg_winning_duration": (sum(winning_duration_values) / len(winning_duration_values)) if winning_duration_values else None,
+            "avg_losing_duration": (sum(losing_duration_values) / len(losing_duration_values)) if losing_duration_values else None,
         })
         payload.update({
             "timeframe_1m": all_timeframe_counts["1MIN"],
@@ -7215,6 +7354,14 @@ def _instrument_summary_rows_from_trade_rows(rows: List[Dict[str, Any]]) -> List
             value for value in (_infer_trade_duration_seconds(row) for row in symbol_rows)
             if value is not None and value >= 0
         ]
+        winning_durations = [
+            value for value in (_infer_trade_duration_seconds(row) for row in wins)
+            if value is not None and value >= 0
+        ]
+        losing_durations = [
+            value for value in (_infer_trade_duration_seconds(row) for row in losses)
+            if value is not None and value >= 0
+        ]
 
         def avg_distance(items: List[Dict[str, Any]], key: str) -> float | None:
             values = [
@@ -7258,6 +7405,8 @@ def _instrument_summary_rows_from_trade_rows(rows: List[Dict[str, Any]]) -> List
             "min_trade_duration_seconds": min(durations) if durations else None,
             "avg_trade_duration_seconds": (sum(durations) / len(durations)) if durations else None,
             "max_trade_duration_seconds": max(durations) if durations else None,
+            "avg_winning_trade_duration_seconds": (sum(winning_durations) / len(winning_durations)) if winning_durations else None,
+            "avg_losing_trade_duration_seconds": (sum(losing_durations) / len(losing_durations)) if losing_durations else None,
         })
     return summaries
 
@@ -8123,6 +8272,8 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
         ("Duration", [
             ("Min duration", "min_duration_seconds", "duration", None),
             ("Avg duration", "avg_duration_seconds", "duration", None),
+            ("Avg winning trade duration", "avg_duration_seconds_winners", "duration", None),
+            ("Avg losing trade duration", "avg_duration_seconds_losers", "duration", None),
             ("Max duration", "max_duration_seconds", "duration", None),
             ("Min Move to Break Even", "min_move_to_break_even_duration_seconds", "duration", None),
             ("Source", "source:min_move_to_break_even_duration_seconds", "source", None),
@@ -8509,6 +8660,8 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
             _format_duration_display(rec.get("min_trade_duration_seconds", rec.get("shortest_duration_seconds"))),
             _format_duration_display(rec.get("avg_trade_duration_seconds", rec.get("avg_duration_seconds"))),
             _format_duration_display(rec.get("max_trade_duration_seconds", rec.get("longest_duration_seconds"))),
+            _format_duration_display(rec.get("avg_winning_trade_duration_seconds", rec.get("avg_winning_duration"))),
+            _format_duration_display(rec.get("avg_losing_trade_duration_seconds", rec.get("avg_losing_duration"))),
         ])
         header_cols = {header: index + 1 for index, header in enumerate(INSTRUMENT_AVERAGES_HEADERS)}
         for header in ("Win Rate %", "Avg stop %", "Avg stop % (W)", "Avg stop % (L)", "Avg target %", "Avg target % (W)", "Avg target % (L)"):
@@ -8535,6 +8688,8 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
             header_cols["Shortest duration (DD:HH:MM:SS)"],
             header_cols["Avg duration (DD:HH:MM:SS)"],
             header_cols["Longest duration (DD:HH:MM:SS)"],
+            header_cols[AVG_WINNING_DURATION_HEADER],
+            header_cols[AVG_LOSING_DURATION_HEADER],
         ):
             inst.cell(row_idx, col).number_format = "General"
         for col in (header_cols["Move to break even"], header_cols["Move to profit"]):
@@ -10698,6 +10853,62 @@ def _ensure_dashboard_requested_metric_rows(ws, diagnostics: Dict[str, Any] | No
     compact_recommendation_after("Max stop %")
     compact_recommendation_after("Max target %")
 
+    first_winners_row = next(
+        (row for row in range(1, ws.max_row + 1) if label_at(row).casefold() == "winners"),
+        ws.max_row + 1,
+    )
+
+    def find_primary_row(label: str) -> int | None:
+        return find_row(label, before=first_winners_row)
+
+    def find_primary_row_any(labels: Tuple[str, ...]) -> int | None:
+        aliases = {label.casefold() for label in labels}
+        return next(
+            (
+                row for row in range(1, first_winners_row)
+                if label_at(row).casefold() in aliases
+            ),
+            None,
+        )
+
+    avg_duration_row = find_primary_row_any(("Avg duration", "Avg duration (DD:HH:MM:SS)"))
+    if avg_duration_row:
+        primary_labels = [label_at(row).casefold() for row in range(1, first_winners_row) if label_at(row)]
+        primary_label_counts = Counter(primary_labels)
+        preserved_primary_heights = {
+            label_at(row).casefold(): ws.row_dimensions[row].height
+            for row in range(1, first_winners_row)
+            if (
+                label_at(row)
+                and label_at(row).casefold() != "source"
+                and primary_label_counts[label_at(row).casefold()] == 1
+                and ws.row_dimensions[row].height is not None
+            )
+        }
+        insert_after_row = avg_duration_row
+        for wanted_label, aliases in (
+            ("Avg winning trade duration", ("Avg winning trade duration", "Avg winning trade duration (DD:HH:MM:SS)")),
+            ("Avg losing trade duration", ("Avg losing trade duration", "Avg losing trade duration (DD:HH:MM:SS)")),
+        ):
+            existing = find_primary_row_any(aliases)
+            if existing:
+                if label_at(existing) != wanted_label:
+                    ws.cell(existing, label_col).value = wanted_label
+                    diagnostics.setdefault("renamed_dashboard_metric_labels", []).append(wanted_label)
+                    changed = True
+                insert_after_row = existing
+                continue
+            inserted = _insert_dashboard_rows_preserving_layout(ws, insert_after_row + 1, 1, insert_after_row)
+            ws.cell(inserted, label_col).value = wanted_label
+            diagnostics.setdefault("inserted_dashboard_metric_rows", []).append(wanted_label)
+            insert_after_row = inserted
+            changed = True
+        if preserved_primary_heights:
+            for row in range(1, ws.max_row + 1):
+                height = preserved_primary_heights.get(label_at(row).casefold())
+                if height is not None:
+                    ws.row_dimensions[row].height = height
+
     return changed
 
 
@@ -10731,6 +10942,10 @@ def _ensure_dashboard_extended_layout(ws, diagnostics: Dict[str, Any] | None = N
     canonical_duration_labels = {
         "min duration (dd:hh:mm:ss)": "Min duration",
         "avg duration (dd:hh:mm:ss)": "Avg duration",
+        "avg winning trade duration (dd:hh:mm:ss)": "Avg winning trade duration",
+        "average winning trade duration (dd:hh:mm:ss)": "Avg winning trade duration",
+        "avg losing trade duration (dd:hh:mm:ss)": "Avg losing trade duration",
+        "average losing trade duration (dd:hh:mm:ss)": "Avg losing trade duration",
         "max duration (dd:hh:mm:ss)": "Max duration",
         "min move to break even (dd:hh:mm:ss)": "Min Move to Break Even",
         "average move to break even (dd:hh:mm:ss)": DASHBOARD_MOVE_TO_BREAK_EVEN_LABEL,
@@ -10992,6 +11207,40 @@ def _detect_calendar_month_columns(ws) -> Dict[int, int]:
     return month_cols
 
 
+def _detect_calendar_month_rows(ws) -> Dict[int, int]:
+    month_rows: Dict[int, int] = {}
+    names = {calendar.month_name[i].lower(): i for i in range(1, 13)}
+    for row in range(2, ws.max_row + 1):
+        token = str(ws.cell(row, 1).value or "").strip().lower()
+        if token in names:
+            month_rows[names[token]] = row
+    return month_rows
+
+
+def _detect_calendar_year_columns(ws) -> Dict[int, int]:
+    year_cols: Dict[int, int] = {}
+    for col in range(2, ws.max_column + 1):
+        year_value = _as_float(ws.cell(1, col).value)
+        if year_value is None:
+            continue
+        year = int(year_value)
+        if 1900 <= year <= 3000:
+            year_cols[year] = col
+    return year_cols
+
+
+def _existing_pnl_calendar_years(ws) -> Set[int]:
+    years = set(_detect_calendar_year_columns(ws).keys())
+    for row in range(2, ws.max_row + 1):
+        year_value = _as_float(ws.cell(row, 1).value)
+        if year_value is None:
+            continue
+        year = int(year_value)
+        if 1900 <= year <= 3000:
+            years.add(year)
+    return years
+
+
 def _pnl_calendar_monthly_values(snapshot_or_rows: Any) -> Dict[Tuple[int, int], Dict[str, Any]]:
     rows = snapshot_or_rows.get("items") if isinstance(snapshot_or_rows, dict) else snapshot_or_rows
     monthly: Dict[Tuple[int, int], Dict[str, Any]] = defaultdict(lambda: {"pct": 0.0, "count": 0})
@@ -11049,18 +11298,15 @@ def _copy_calendar_cell_style(src, dst) -> None:
 def _write_pnl_calendar_one_line_layout(ws, snapshot: Dict[str, Any], diagnostics: Dict[str, Any] | None = None) -> None:
     diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
     monthly = _pnl_calendar_monthly_values(snapshot)
-    years = sorted({year for year, _month in monthly.keys()})
-    target_rows = max(1, len(years) + 1)
-    target_cols = 13
+    years = sorted(_existing_pnl_calendar_years(ws) | {year for year, _month in monthly.keys()})
+    target_rows = 13
+    target_cols = max(1, len(years) + 1)
 
     row_heights = {idx: dim.height for idx, dim in ws.row_dimensions.items() if dim.height is not None}
-    header_templates = [copy(ws.cell(1, min(col, ws.max_column))) for col in range(1, target_cols + 1)]
-    data_template_row = 2
-    for row in range(2, ws.max_row + 1):
-        if any(ws.cell(row, col).value not in (None, "") for col in range(1, min(ws.max_column, target_cols) + 1)):
-            data_template_row = row
-            break
-    data_templates = [copy(ws.cell(data_template_row, min(col, ws.max_column))) for col in range(1, target_cols + 1)]
+    month_header_template = copy(ws.cell(1, 1))
+    year_header_template = copy(ws.cell(1, min(max(ws.max_column, 1), 2)))
+    month_label_template = copy(ws.cell(min(max(ws.max_row, 1), 2), 1))
+    value_template = copy(ws.cell(min(max(ws.max_row, 1), 2), min(max(ws.max_column, 1), 2)))
 
     for merged in list(ws.merged_cells.ranges):
         ws.unmerge_cells(str(merged))
@@ -11069,36 +11315,40 @@ def _write_pnl_calendar_one_line_layout(ws, snapshot: Dict[str, Any], diagnostic
     if ws.max_column > target_cols:
         ws.delete_cols(target_cols + 1, ws.max_column - target_cols)
 
-    headers = ["Year", *[calendar.month_name[month] for month in range(1, 13)]]
-    for col, header in enumerate(headers, start=1):
-        cell = ws.cell(1, col)
-        _copy_calendar_cell_style(header_templates[col - 1], cell)
-        cell.value = header
-        cell.number_format = "General"
-        base_alignment = copy(cell.alignment)
-        cell.alignment = Alignment(
-            horizontal=base_alignment.horizontal or "center",
-            vertical=base_alignment.vertical or "center",
-            wrap_text=False,
-        )
-
-    for row_idx, year in enumerate(years, start=2):
+    for row in range(1, target_rows + 1):
         for col in range(1, target_cols + 1):
-            cell = ws.cell(row_idx, col)
-            _copy_calendar_cell_style(data_templates[col - 1], cell)
+            cell = ws.cell(row, col)
+            template = (
+                month_header_template
+                if row == 1 and col == 1
+                else year_header_template
+                if row == 1
+                else month_label_template
+                if col == 1
+                else value_template
+            )
+            _copy_calendar_cell_style(template, cell)
+            cell.value = None
             cell.number_format = "General"
             base_alignment = copy(cell.alignment)
             cell.alignment = Alignment(
-                horizontal=base_alignment.horizontal or ("center" if col > 1 else "left"),
+                horizontal="center" if col > 1 else (base_alignment.horizontal or "left"),
                 vertical=base_alignment.vertical or "center",
                 wrap_text=False,
             )
-            if col > 1:
+            if row > 1 and col > 1:
                 _clear_cell_fill(cell)
-        ws.cell(row_idx, 1).value = year
-        for month in range(1, 13):
+
+    ws.cell(1, 1).value = "Month"
+    for col_idx, year in enumerate(years, start=2):
+        ws.cell(1, col_idx).value = year
+
+    for month in range(1, 13):
+        row_idx = month + 1
+        ws.cell(row_idx, 1).value = calendar.month_name[month]
+        for col_idx, year in enumerate(years, start=2):
             values = monthly.get((year, month))
-            cell = ws.cell(row_idx, month + 1)
+            cell = ws.cell(row_idx, col_idx)
             if not values:
                 cell.value = None
                 _clear_cell_fill(cell)
@@ -11110,19 +11360,30 @@ def _write_pnl_calendar_one_line_layout(ws, snapshot: Dict[str, Any], diagnostic
                 _apply_full_cell_semantic_fill(cell, "profit")
             elif pct < 0:
                 _apply_full_cell_semantic_fill(cell, "loss")
+            else:
+                _clear_cell_fill(cell)
 
     for idx, height in row_heights.items():
         if idx <= target_rows:
             ws.row_dimensions[idx].height = height
+    ws.column_dimensions["A"].width = max(ws.column_dimensions["A"].width or 0, 12)
+    for col in range(2, target_cols + 1):
+        ws.column_dimensions[get_column_letter(col)].width = max(
+            ws.column_dimensions[get_column_letter(col)].width or 0,
+            18,
+        )
     ws.auto_filter.ref = f"A1:{get_column_letter(target_cols)}{target_rows}"
     _style_header_row(ws, 1)
     _table_border(ws, 1, 1, target_rows, target_cols)
     ws.freeze_panes = "B2"
     _apply_pnl_calendar_profit_loss_formatting(ws)
-    diagnostics["pnl_calendar_one_line_rows_written"] = len(years)
+    diagnostics["pnl_calendar_transposed_years_written"] = len(years)
 
 
 def _ensure_pnl_calendar_freeze_panes(ws) -> None:
+    if _detect_calendar_year_columns(ws) and _detect_calendar_month_rows(ws):
+        ws.freeze_panes = "B2"
+        return
     month_cols = _detect_calendar_month_columns(ws)
     if month_cols and min(month_cols.values()) == 2:
         ws.freeze_panes = "B2"
@@ -11144,76 +11405,7 @@ def _ensure_pnl_calendar_freeze_panes(ws) -> None:
 
 def _update_pnl_calendar_preserving_layout(dst_ws, snapshot: Dict[str, Any], diagnostics: Dict[str, Any] | None = None) -> None:
     diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
-    month_cols = _detect_calendar_month_columns(dst_ws)
-    if not month_cols:
-        return
-    year_blocks: Dict[int, Tuple[int, int]] = {}
-    for r in range(2, dst_ws.max_row + 1):
-        yv = _as_float(dst_ws.cell(r, 1).value)
-        if yv is None:
-            continue
-        y = int(yv)
-        lbl = str(dst_ws.cell(r, 2).value or "").strip().lower()
-        if lbl == "p/l %":
-            trades_row = r + 1
-            if str(dst_ws.cell(trades_row, 2).value or "").strip().lower() == "total trades":
-                year_blocks[y] = (r, trades_row)
-    monthly: Dict[Tuple[int, int], Dict[str, float]] = {}
-    for row in (snapshot.get("items") or []):
-        if not isinstance(row, dict) or _is_test_trade_value(row.get("is_test_trade")):
-            continue
-        if str(row.get("row_type") or "trade").strip().lower() != "trade":
-            continue
-        d = _as_date(row.get("close_time") or row.get("open_time"))
-        pct = _as_float(row.get("result_pct"))
-        if not d or pct is None:
-            continue
-        key = (d.year, d.month)
-        acc = monthly.setdefault(key, {"pct": 0.0, "count": 0.0})
-        acc["pct"] += float(pct) / 100.0
-        acc["count"] += 1.0
-    years_needed = sorted({y for (y, _m) in monthly.keys()})
-    if years_needed and year_blocks:
-        for y in years_needed:
-            if y in year_blocks:
-                continue
-            last_year = max(year_blocks.keys())
-            p_row, t_row = year_blocks[last_year]
-            new_p, new_t = t_row + 1, t_row + 2
-            if any(dst_ws.cell(rr, cc).value not in (None, "") for rr in (new_p, new_t) for cc in range(1, max(month_cols.values()) + 1)):
-                raise RuntimeError(f"P&L Calendar append unsafe for missing year {y}.")
-            dst_ws.merge_cells(start_row=new_p, start_column=1, end_row=new_t, end_column=1)
-            dst_ws.cell(new_p, 1).value = y
-            dst_ws.cell(new_p, 2).value = "P/L %"
-            dst_ws.cell(new_t, 2).value = "Total Trades"
-            for c in range(1, max(month_cols.values()) + 1):
-                for rr, src_rr in ((new_p, p_row), (new_t, t_row)):
-                    dst = dst_ws.cell(rr, c); src = dst_ws.cell(src_rr, c)
-                    dst.number_format = src.number_format
-                    dst.font = copy(src.font); dst.fill = copy(src.fill); dst.border = copy(src.border); dst.alignment = copy(src.alignment); dst.protection = copy(src.protection)
-            year_blocks[y] = (new_p, new_t)
-    for y, (p_row, t_row) in year_blocks.items():
-        for m, c in month_cols.items():
-            if not _is_merged_non_anchor(dst_ws, p_row, c):
-                cell = dst_ws.cell(p_row, c)
-                cell.value = None
-                _clear_cell_fill(cell)
-            if not _is_merged_non_anchor(dst_ws, t_row, c):
-                cell = dst_ws.cell(t_row, c)
-                cell.value = None
-                _clear_cell_fill(cell)
-    for (y, m), vals in monthly.items():
-        block = year_blocks.get(y)
-        if not block or m not in month_cols:
-            continue
-        p_row, t_row = block
-        c = month_cols[m]
-        if not _is_merged_non_anchor(dst_ws, p_row, c):
-            dst_ws.cell(p_row, c).value = vals["pct"]
-            dst_ws.cell(p_row, c).number_format = "0.00%"
-        if not _is_merged_non_anchor(dst_ws, t_row, c):
-            dst_ws.cell(t_row, c).value = int(vals["count"])
-            dst_ws.cell(t_row, c).number_format = "0"
+    _write_pnl_calendar_one_line_layout(dst_ws, snapshot, diagnostics)
 
 def _normalize_stats2_account_balance_headers(
     ws,
@@ -11999,6 +12191,8 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
                 (["Max target %"], "max_target_pct", "pct", None),
                 (["Min duration", "Min duration (DD:HH:MM:SS)"], "min_duration_seconds", "duration", None),
                 (["Avg duration", "Avg duration (DD:HH:MM:SS)"], "avg_duration_seconds", "duration", None),
+                (["Avg winning trade duration", "Avg winning trade duration (DD:HH:MM:SS)"], "avg_duration_seconds_winners", "duration", None),
+                (["Avg losing trade duration", "Avg losing trade duration (DD:HH:MM:SS)"], "avg_duration_seconds_losers", "duration", None),
                 (["Max duration", "Max duration (DD:HH:MM:SS)"], "max_duration_seconds", "duration", None),
                 (["Min Move to Break Even", "Min Move to Break Even (DD:HH:MM:SS)"], "min_move_to_break_even_duration_seconds", "duration", None),
                 ([

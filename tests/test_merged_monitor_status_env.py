@@ -421,6 +421,80 @@ def test_missing_configured_autostart_target_gets_visible_scripts_reason(
     assert row["last_start_error"] == "script disabled by test"
 
 
+def test_startup_readiness_reports_ready_after_state_restore_and_autostart(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeScript:
+        def __init__(self, name: str, *, running: bool = True, starting: bool = False, error: str = "") -> None:
+            self.name = name
+            self.last_start_error = error
+            self.last_exit_reason = ""
+            self._running = running
+            self._starting = starting
+
+        def to_summary(self) -> dict[str, object]:
+            return {"name": self.name, "running": self._running, "starting": self._starting}
+
+    monkeypatch.setattr(
+        master_service,
+        "_state_sync_status_snapshot",
+        lambda: {"enabled": True, "restore_complete": True, "restore_status": "complete", "restore_error": ""},
+    )
+    monkeypatch.setattr(master_service, "_compute_autostart_scripts", lambda: ["bybit_monitor", "fxweekend-clone"])
+    monkeypatch.setattr(master_service, "_LAST_AUTOSTART_UNAVAILABLE", {})
+    monkeypatch.setattr(master_service.script_manager, "get", lambda name: FakeScript(name))
+    monkeypatch.setattr(master_service, "_scanner_status_payload", lambda _path: {"ui_status": "running", "heartbeat_fresh": True})
+    monkeypatch.setattr(master_service, "_load_json_file", lambda _path, default: {"enabled": True})
+
+    payload = master_service._startup_readiness_status()
+
+    assert payload["ready"] is True
+    assert payload["startup_phase"] == "ready"
+    assert payload["blocking_component"] is None
+
+
+def test_startup_readiness_blocks_until_state_restore_completes(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        master_service,
+        "_state_sync_status_snapshot",
+        lambda: {"enabled": True, "restore_complete": False, "restore_status": "pending", "restore_error": ""},
+    )
+    monkeypatch.setattr(master_service, "_compute_autostart_scripts", lambda: ["bybit_monitor"])
+
+    payload = master_service._startup_readiness_status()
+
+    assert payload["ready"] is False
+    assert payload["startup_phase"] == "state_restore_pending"
+    assert payload["blocking_component"] == "state_restore"
+
+
+def test_startup_readiness_reports_autostart_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FailedScript:
+        name = "bybit_monitor"
+        last_start_error = "bad credentials"
+        last_exit_reason = ""
+
+        def to_summary(self) -> dict[str, object]:
+            return {"name": self.name, "running": False, "starting": False}
+
+    monkeypatch.setattr(
+        master_service,
+        "_state_sync_status_snapshot",
+        lambda: {"enabled": True, "restore_complete": True, "restore_status": "complete", "restore_error": ""},
+    )
+    monkeypatch.setattr(master_service, "_compute_autostart_scripts", lambda: ["bybit_monitor"])
+    monkeypatch.setattr(master_service, "_LAST_AUTOSTART_UNAVAILABLE", {})
+    monkeypatch.setattr(master_service.script_manager, "get", lambda _name: FailedScript())
+    monkeypatch.setattr(master_service, "_scanner_status_payload", lambda _path: {"ui_status": "stopped", "heartbeat_fresh": False})
+
+    payload = master_service._startup_readiness_status()
+
+    assert payload["ready"] is False
+    assert payload["startup_phase"] == "autostart_failed"
+    assert payload["blocking_component"] == "bybit_monitor"
+    assert payload["failure_reason"] == "bad credentials"
+
+
 def test_run_local_master_control_bat_uses_local_autostart() -> None:
     content = (ROOT / "run_local_master_control.bat").read_text(encoding="utf-8")
     assert "fxweekend-clone" in master_service.DEFAULT_LOCAL_ALLOWED_APPS
@@ -449,45 +523,43 @@ def test_run_local_master_control_bat_uses_local_autostart() -> None:
     assert 'call "%ROOT%run_local_master_control.bat" __worker > "%LOCAL_MASTER_WORKER_LOG%" 2>&1' not in wrapper
     assert 'This window is intentionally left open so startup errors stay readable.' in wrapper
     assert 'This window is intentionally left open so runtime exits stay readable.' in wrapper
-    assert "http://127.0.0.1:8000/health" in content
+    assert "http://127.0.0.1:8000/api/startup-readiness" in content
+    assert "http://127.0.0.1:8000/health" not in content
     assert "MASTER_READY_TIMEOUT_SECONDS" in content
     assert "powershell" in content
-    assert "Invoke-WebRequest" in content
-    assert ":wait_for_master_ready" in content
-    assert ":wait_for_scanner_ready" in content
-    assert ":master_ready" in content
-    assert ":scanner_ready" in content
-    assert ":scanner_not_ready" in content
-    assert ":master_not_ready" in content
-    assert "MASTER_SCRIPTS_URL" in content
-    assert "SCANNER_READY_TIMEOUT_SECONDS" in content
+    assert "Invoke-WebRequest" not in content
     assert "Invoke-RestMethod" in content
-    assert "[local-master] ERROR: dashboard was not ready after %MASTER_READY_TIMEOUT_SECONDS% seconds." in content
+    assert ":wait_for_master_ready" in content
+    assert ":master_ready" in content
+    assert ":master_readiness_failed" in content
+    assert ":master_not_ready" in content
+    assert "MASTER_SCRIPTS_URL" not in content
+    assert "SCANNER_READY_TIMEOUT_SECONDS" not in content
+    assert "[local-master] ERROR: startup readiness was not reached after %MASTER_READY_TIMEOUT_SECONDS% seconds." in content
+    assert "[local-master] ERROR: startup readiness failed." in content
     assert '[local-master] Browser was not opened to avoid a dead-page / manual-refresh failure.' in content
-    assert "[local-master] ERROR: scanner did not become ready after %SCANNER_READY_TIMEOUT_SECONDS% seconds." in content
+    assert "[local-master] Browser was not opened because startup has a blocking readiness error." in content
     assert content.index(worker_start) < content.index('call "%ROOT%tools\\open_edge_url.bat" "%MASTER_BROWSER_URL%"')
     assert "timeout /t 2 /nobreak >nul\nstart \"\" \"%MASTER_URL%\"" not in content
 
 
-def test_run_local_master_control_waits_for_health_before_opening_browser() -> None:
+def test_run_local_master_control_waits_for_startup_readiness_before_opening_browser() -> None:
     content = (ROOT / "run_local_master_control.bat").read_text(encoding="utf-8")
     worker_start_idx = content.index('start "%LOCAL_MASTER_WINDOW_TITLE%" /D "%ROOT%" "%ROOT%tools\\windows_launchers\\local_master_worker_console.bat"')
     wait_idx = content.index(":wait_for_master_ready")
     assert "MASTER_BROWSER_URL" in content
     assert "local_launch=" in content
     ready_idx = content.index(":master_ready")
-    scanner_wait_idx = content.index(":wait_for_scanner_ready")
-    scanner_ready_idx = content.index(":scanner_ready")
-    scanner_not_ready_idx = content.index(":scanner_not_ready")
+    failed_idx = content.index(":master_readiness_failed")
     browser_idx = content.index('call "%ROOT%tools\\open_edge_url.bat" "%MASTER_BROWSER_URL%"')
     not_ready_idx = content.index(":master_not_ready")
 
-    assert worker_start_idx < wait_idx < ready_idx < scanner_wait_idx < scanner_ready_idx < browser_idx
-    assert browser_idx > scanner_ready_idx
+    assert worker_start_idx < wait_idx < ready_idx < browser_idx
+    assert wait_idx < failed_idx
     not_ready_block = content[not_ready_idx:]
     assert 'call "%ROOT%tools\\open_edge_url.bat" "%MASTER_BROWSER_URL%"' not in not_ready_block
-    scanner_not_ready_block = content[scanner_not_ready_idx:]
-    assert 'call "%ROOT%tools\\open_edge_url.bat" "%MASTER_BROWSER_URL%"' not in scanner_not_ready_block
+    failed_block = content[failed_idx:content.index(":worker_failed_before_ready")]
+    assert 'call "%ROOT%tools\\open_edge_url.bat" "%MASTER_BROWSER_URL%"' not in failed_block
 
 
 def test_run_trading_journal_local_bat_profile_and_port() -> None:
@@ -963,12 +1035,11 @@ def test_edge_helper_wiring_for_local_launchers() -> None:
 
     worker_start = master.index('start "%LOCAL_MASTER_WINDOW_TITLE%"')
     ready_wait = master.index(':wait_for_master_ready')
-    scanner_ready = master.index(':scanner_ready')
     edge_call = master.index(master_call)
-    assert worker_start < ready_wait < scanner_ready < edge_call
+    assert worker_start < ready_wait < edge_call
 
-    assert master_call not in master.split(':master_not_ready', 1)[1].split(':scanner_not_ready', 1)[0]
-    assert master_call not in master.split(':scanner_not_ready', 1)[1].split(':worker', 1)[0]
+    assert master_call not in master.split(':master_not_ready', 1)[1].split(':master_readiness_failed', 1)[0]
+    assert master_call not in master.split(':master_readiness_failed', 1)[1].split(':worker', 1)[0]
 
     assert ':wait_for_journal_health' not in journal
     assert ':journal_ready' not in journal
