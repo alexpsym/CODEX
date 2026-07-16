@@ -550,7 +550,7 @@ def _instrument_averages_header_map(ws) -> Dict[str, int]:
 
 
 SYMBOLS_GROUP_HEADER_LABELS = {
-    "longs", "shorts", "order", "timeframe", "p/l", "pl", "stops", "targets", "duration",
+    "longs", "shorts", "order", "timeframe", "p/l", "pl", "stops", "targets",
 }
 SYMBOLS_GROUP_WIDTHS = {
     "longs": 4,
@@ -561,7 +561,27 @@ SYMBOLS_GROUP_WIDTHS = {
     "pl": 4,
     "stops": 4,
     "targets": 4,
-    "duration": 5,
+}
+DURATION_SYMBOLS_HEADERS = (
+    "Shortest duration (DD:HH:MM:SS)",
+    "Avg duration (DD:HH:MM:SS)",
+    "Longest duration (DD:HH:MM:SS)",
+    AVG_WINNING_DURATION_HEADER,
+    AVG_LOSING_DURATION_HEADER,
+)
+DURATION_SYMBOLS_METRIC_KEYS = {
+    "shortestdurationddhhmmss": "shortest_duration",
+    "shortestddhhmmss": "shortest_duration",
+    "avgdurationddhhmmss": "avg_duration",
+    "averagedurationddhhmmss": "avg_duration",
+    "longestdurationddhhmmss": "longest_duration",
+    "longestddhhmmss": "longest_duration",
+    "avgwinningdurationddhhmmss": "avg_winning_duration",
+    "averagewinningdurationddhhmmss": "avg_winning_duration",
+    "avgwinnerdurationddhhmmss": "avg_winning_duration",
+    "avglosingdurationddhhmmss": "avg_losing_duration",
+    "averagelosingdurationddhhmmss": "avg_losing_duration",
+    "avgloserdurationddhhmmss": "avg_losing_duration",
 }
 
 
@@ -593,12 +613,9 @@ def _symbols_group_for_column(ws, col: int) -> str:
             active_group = text
             active_col = cursor
     if active_group:
-        for cursor in range(active_col + 1, ws.max_column + 1):
-            text = str(ws.cell(1, cursor).value or "").strip()
-            if text and text.casefold() in SYMBOLS_GROUP_HEADER_LABELS:
-                if col < cursor:
-                    return active_group
-                break
+        width = SYMBOLS_GROUP_WIDTHS.get(active_group.casefold())
+        if width and active_col <= col <= active_col + width - 1:
+            return active_group
     for cursor in range(1, col + 1):
         text = str(ws.cell(1, cursor).value or "").strip()
         if not text:
@@ -607,25 +624,6 @@ def _symbols_group_for_column(ws, col: int) -> str:
         width = SYMBOLS_GROUP_WIDTHS.get(token)
         if width and cursor <= col <= cursor + width - 1:
             return text
-    header_token = _norm_header_token(
-        ws.cell(INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, col).value
-        or _vertical_header_anchor_value(ws, col)
-    )
-    if header_token in {
-        "shortestdurationddhhmmss",
-        "shortestddhhmmss",
-        "avgdurationddhhmmss",
-        "averagedurationddhhmmss",
-        "longestdurationddhhmmss",
-        "longestddhhmmss",
-        "avgwinningdurationddhhmmss",
-        "averagewinningdurationddhhmmss",
-        "avgwinnerdurationddhhmmss",
-        "avglosingdurationddhhmmss",
-        "averagelosingdurationddhhmmss",
-        "avgloserdurationddhhmmss",
-    }:
-        return "Duration"
     return ""
 
 
@@ -635,6 +633,9 @@ def _symbols_metric_key_for_column(ws, col: int) -> str:
         header = _vertical_header_anchor_value(ws, col)
     group = _symbols_group_for_column(ws, col).casefold()
     token = _norm_header_token(header)
+    duration_key = DURATION_SYMBOLS_METRIC_KEYS.get(token)
+    if duration_key and group in {"", "duration"}:
+        return duration_key
     if group == "timeframe":
         return {
             "1m": "timeframe_1m",
@@ -695,21 +696,6 @@ def _symbols_metric_key_for_column(ws, col: int) -> str:
             "recommendation": "target_recommendation",
             "targetrecommendation": "target_recommendation",
         }.get(token, "")
-    if group == "duration":
-        return {
-            "shortestdurationddhhmmss": "shortest_duration",
-            "shortestddhhmmss": "shortest_duration",
-            "avgdurationddhhmmss": "avg_duration",
-            "averagedurationddhhmmss": "avg_duration",
-            "longestdurationddhhmmss": "longest_duration",
-            "longestddhhmmss": "longest_duration",
-            "avgwinningdurationddhhmmss": "avg_winning_duration",
-            "averagewinningdurationddhhmmss": "avg_winning_duration",
-            "avgwinnerdurationddhhmmss": "avg_winning_duration",
-            "avglosingdurationddhhmmss": "avg_losing_duration",
-            "averagelosingdurationddhhmmss": "avg_losing_duration",
-            "avgloserdurationddhhmmss": "avg_losing_duration",
-        }.get(token, "")
     return ""
 
 
@@ -756,11 +742,11 @@ def _apply_symbols_filter_header_layout(ws) -> None:
         "Most traded timeframe": 18,
         "Most Profitable Timeframe": 20,
         "Least Profitable Timeframe": 20,
-        "Shortest duration (DD:HH:MM:SS)": 18,
-        "Avg duration (DD:HH:MM:SS)": 18,
-        "Longest duration (DD:HH:MM:SS)": 18,
-        AVG_WINNING_DURATION_HEADER: 18,
-        AVG_LOSING_DURATION_HEADER: 18,
+        "Shortest duration (DD:HH:MM:SS)": 43,
+        "Avg duration (DD:HH:MM:SS)": 43,
+        "Longest duration (DD:HH:MM:SS)": 43,
+        AVG_WINNING_DURATION_HEADER: 43,
+        AVG_LOSING_DURATION_HEADER: 43,
         "Move to break even": 16,
         "Move to profit": 14,
         STOP_RECOMMENDATION_HEADER: 18,
@@ -821,7 +807,6 @@ def _write_instrument_averages_headers(ws, *, preserve_freeze: bool = False) -> 
         ("Order", "Market", "Limit"),
         ("Stops", "Avg stop %", STOP_RECOMMENDATION_HEADER),
         ("Targets", "Avg target %", TARGET_RECOMMENDATION_HEADER),
-        ("Duration", "Shortest duration (DD:HH:MM:SS)", AVG_LOSING_DURATION_HEADER),
     )
     for label, first_header, last_header in group_specs:
         start = INSTRUMENT_AVERAGES_HEADERS.index(first_header) + 1
@@ -843,7 +828,131 @@ def _write_instrument_averages_headers(ws, *, preserve_freeze: bool = False) -> 
         f"A{INSTRUMENT_AVERAGES_FILTER_HEADER_ROW}:"
         f"{get_column_letter(len(INSTRUMENT_AVERAGES_HEADERS))}{max(INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, ws.max_row)}"
     )
+    _repair_symbols_header_merges_preserving_layout(ws)
+    _ensure_symbols_duration_header_layout(ws)
     _apply_symbols_filter_header_layout(ws)
+
+
+def _symbols_exact_vertical_header_merge(ws, col: int) -> bool:
+    return any(
+        rng.min_col == col
+        and rng.max_col == col
+        and rng.min_row == INSTRUMENT_AVERAGES_GROUP_HEADER_ROW
+        and rng.max_row == INSTRUMENT_AVERAGES_FILTER_HEADER_ROW
+        for rng in ws.merged_cells.ranges
+    )
+
+
+def _visible_border_side(side: Side | None) -> bool:
+    return bool(side and side.style)
+
+
+def _symbols_internal_duration_right_side(ws, row: int, fallback_col: int) -> Side:
+    source = ws.cell(row, fallback_col).border.right if fallback_col else None
+    if _visible_border_side(source):
+        return copy(source)
+    return Side(style="thin", color="FFD1D5DB")
+
+
+def _symbols_outer_duration_right_side(ws, row: int, current_outer_col: int, previous_outer_col: int) -> Side:
+    for col in (current_outer_col, previous_outer_col):
+        if not col:
+            continue
+        side = ws.cell(row, col).border.right
+        if _visible_border_side(side) and side.style in {"medium", "thick", "double"}:
+            return copy(side)
+    return Side(style="thick", color="FFD1D5DB")
+
+
+def _ensure_symbols_duration_data_boundary(ws) -> None:
+    headers = _instrument_averages_header_map(ws)
+    longest_col = headers.get("Longest duration (DD:HH:MM:SS)")
+    winning_col = headers.get(AVG_WINNING_DURATION_HEADER)
+    losing_col = headers.get(AVG_LOSING_DURATION_HEADER)
+    if not (longest_col and winning_col and losing_col):
+        return
+    avg_col = headers.get("Avg duration (DD:HH:MM:SS)") or max(1, longest_col - 1)
+    data_start = _instrument_averages_data_start_row(ws)
+    for row in range(data_start, max(data_start, ws.max_row) + 1):
+        outer_right = _symbols_outer_duration_right_side(ws, row, losing_col, longest_col)
+        internal_right = _symbols_internal_duration_right_side(ws, row, avg_col)
+        for col in (longest_col, winning_col):
+            ws.cell(row, col).border = _border_with_side(
+                ws.cell(row, col).border,
+                right=copy(internal_right),
+            )
+        ws.cell(row, losing_col).border = _border_with_side(
+            ws.cell(row, losing_col).border,
+            right=outer_right,
+        )
+
+
+def _ensure_symbols_duration_header_layout(
+    ws,
+    diagnostics: Dict[str, Any] | None = None,
+) -> None:
+    if _instrument_averages_header_row(ws) != INSTRUMENT_AVERAGES_FILTER_HEADER_ROW:
+        return
+    diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+    headers = _instrument_averages_header_map(ws)
+    duration_cols = [
+        (header, headers.get(header))
+        for header in DURATION_SYMBOLS_HEADERS
+        if headers.get(header)
+    ]
+    if not duration_cols:
+        return
+    col_set = {col for _header, col in duration_cols if col}
+    removed_merges: List[str] = []
+    for merged in list(ws.merged_cells.ranges):
+        intersects_duration = any(merged.min_col <= col <= merged.max_col for col in col_set)
+        if not intersects_duration:
+            continue
+        exact_single = (
+            merged.min_col == merged.max_col
+            and merged.min_row == INSTRUMENT_AVERAGES_GROUP_HEADER_ROW
+            and merged.max_row == INSTRUMENT_AVERAGES_FILTER_HEADER_ROW
+        )
+        if exact_single:
+            continue
+        if (
+            merged.min_row <= INSTRUMENT_AVERAGES_FILTER_HEADER_ROW
+            and merged.max_row >= INSTRUMENT_AVERAGES_GROUP_HEADER_ROW
+        ):
+            removed_merges.append(str(merged))
+            ws.unmerge_cells(str(merged))
+
+    created_merges: List[str] = []
+    for header, col in duration_cols:
+        if not col:
+            continue
+        label = _symbols_visible_header(header)
+        if _symbols_exact_vertical_header_merge(ws, col):
+            ws.cell(INSTRUMENT_AVERAGES_GROUP_HEADER_ROW, col).value = label
+        else:
+            row1 = ws.cell(INSTRUMENT_AVERAGES_GROUP_HEADER_ROW, col)
+            row2 = ws.cell(INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, col)
+            if row1.value in (None, "", "Duration") and row2.value not in (None, ""):
+                _copy_cell_style(row2, row1)
+            row1.value = label
+            row2.value = None
+            ws.merge_cells(
+                start_row=INSTRUMENT_AVERAGES_GROUP_HEADER_ROW,
+                start_column=col,
+                end_row=INSTRUMENT_AVERAGES_FILTER_HEADER_ROW,
+                end_column=col,
+            )
+            created_merges.append(f"{get_column_letter(col)}1:{get_column_letter(col)}2")
+        letter = get_column_letter(col)
+        current_width = ws.column_dimensions[letter].width or 0
+        if current_width < 43:
+            ws.column_dimensions[letter].width = 43
+
+    _ensure_symbols_duration_data_boundary(ws)
+    if removed_merges:
+        diagnostics.setdefault("symbols_duration_group_merges_removed", []).extend(removed_merges)
+    if created_merges:
+        diagnostics.setdefault("symbols_duration_vertical_merges_added", []).extend(created_merges)
 
 
 def _ensure_symbols_schema(ws, diagnostics: Dict[str, Any] | None = None) -> bool:
@@ -852,9 +961,6 @@ def _ensure_symbols_schema(ws, diagnostics: Dict[str, Any] | None = None) -> boo
     headers = _instrument_averages_header_map(ws)
     if not {"Symbol", "Trades"}.issubset(headers):
         return False
-    if any(header not in headers for header in INSTRUMENT_AVERAGES_HEADERS):
-        _unmerge_instrument_averages_header_rows(ws)
-        headers = _instrument_averages_header_map(ws)
     legacy_grouped_metrics = any(
         header in headers
         for header in ("Min stop %", "Max stop %", "Min target %", "Max target %")
@@ -970,7 +1076,7 @@ def _ensure_symbols_schema(ws, diagnostics: Dict[str, Any] | None = None) -> boo
         expand_group_header(anchor_col, insert_at)
         _copy_column_style_moving_right_boundary(ws, anchor_col, insert_at)
         width = ws.column_dimensions[get_column_letter(anchor_col)].width
-        ws.column_dimensions[get_column_letter(insert_at)].width = max(width or 0, 18) or 18
+        ws.column_dimensions[get_column_letter(insert_at)].width = max(width or 0, 43) or 43
         ws.cell(header_row, insert_at).value = wanted_header
         changed = True
         headers = _instrument_averages_header_map(ws)
@@ -982,11 +1088,11 @@ def _ensure_symbols_schema(ws, diagnostics: Dict[str, Any] | None = None) -> boo
     insert_duration_header_after("Longest duration (DD:HH:MM:SS)", AVG_WINNING_DURATION_HEADER)
     insert_duration_header_after(AVG_WINNING_DURATION_HEADER, AVG_LOSING_DURATION_HEADER)
     if changed:
-        if all(header in _instrument_averages_header_map(ws) for header in INSTRUMENT_AVERAGES_HEADERS):
-            _write_instrument_averages_headers(ws, preserve_freeze=True)
-        elif not legacy_grouped_metrics:
+        if not all(header in _instrument_averages_header_map(ws) for header in INSTRUMENT_AVERAGES_HEADERS) and not legacy_grouped_metrics:
             _write_instrument_averages_headers(ws, preserve_freeze=True)
         headers = _instrument_averages_header_map(ws)
+        _ensure_symbols_duration_header_layout(ws, diagnostics)
+        _ensure_symbols_duration_header_layout(ws, diagnostics)
         if ws.auto_filter and ws.auto_filter.ref:
             _min_col, _min_row, _max_col, max_row = range_boundaries(ws.auto_filter.ref)
             ws.auto_filter.ref = (
@@ -1004,6 +1110,10 @@ def _ensure_instrument_averages_schema(ws, diagnostics: Dict[str, Any] | None = 
         changed = _ensure_symbols_schema(ws, diagnostics)
         headers = _instrument_averages_header_map(ws)
         if all(header in headers for header in INSTRUMENT_AVERAGES_HEADERS):
+            _ensure_symbols_duration_header_layout(ws, diagnostics)
+            _ensure_symbols_duration_header_layout(ws, diagnostics)
+            _apply_symbols_filter_header_layout(ws)
+            headers = _instrument_averages_header_map(ws)
             _ensure_symbols_freeze_panes(ws, diagnostics)
             if ws.auto_filter and ws.auto_filter.ref:
                 _min_col, _min_row, _max_col, max_row = range_boundaries(ws.auto_filter.ref)
@@ -5543,6 +5653,30 @@ def _normalize_trade_log_header_fills(ws) -> None:
             if _is_merged_non_anchor(ws, row, col):
                 continue
             ws.cell(row, col).fill = empty_fill
+    _restore_trade_log_move_group_header_right_borders(ws)
+
+
+def _restore_trade_log_move_group_header_right_borders(ws) -> None:
+    if getattr(ws, "title", "") not in {TRADE_LOG_SHEET, LEGACY_ALL_TRADES_SHEET}:
+        return
+    headers = _trade_log_header_map(ws)
+    for header in (
+        "Move to Break Even Distance From Exit %",
+        "Move to Profit Distance From Exit %",
+    ):
+        col = headers.get(header)
+        if not col:
+            continue
+        source_side = ws.cell(2, col).border.right
+        if not _visible_border_side(source_side) or source_side.style != "medium":
+            source_side = ws.cell(3, col).border.right
+        right_side = copy(source_side) if _visible_border_side(source_side) else Side(style="medium")
+        ws.cell(1, col).border = _border_with_side(ws.cell(1, col).border, right=right_side)
+        for merged in ws.merged_cells.ranges:
+            if merged.min_row <= 1 <= merged.max_row and merged.min_col <= col <= merged.max_col:
+                anchor = ws.cell(merged.min_row, merged.min_col)
+                anchor.border = _border_with_side(anchor.border, right=copy(right_side))
+                break
 
 
 def _write_trade_log_two_row_headers(ws, header_templates: Dict[str, Dict[str, Any]]) -> None:
@@ -6256,7 +6390,7 @@ def _apply_instrument_averages_requested_style(ws, *, preserve_layout: bool = Fa
                 if headers.get(header):
                     _apply_recommendation_cell_style(ws.cell(row, headers[header]))
         _apply_symbols_filter_header_layout(ws)
-        _repair_symbols_header_merges_preserving_layout(ws)
+        _ensure_symbols_duration_header_layout(ws)
         return
     for row in range(data_start_row, ws.max_row + 1):
         if ws.cell(row, symbol_col).value in (None, ""):
@@ -12974,7 +13108,7 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
                 _apply_instrument_averages_semantic_fills(instrument_ws)
                 _repair_instrument_timeframe_columns(instrument_ws)
                 _populate_symbols_metrics_preserving_layout(instrument_ws, rows, diagnostics)
-                _repair_symbols_header_merges_preserving_layout(instrument_ws, diagnostics)
+                _ensure_symbols_duration_header_layout(instrument_ws, diagnostics)
                 _set_instrument_averages_auto_filter_to_populated_range(instrument_ws)
                 _ensure_symbols_freeze_panes(instrument_ws, diagnostics)
             if "P&L Calendar" in wb.sheetnames and "P&L Calendar" in gen.sheetnames:

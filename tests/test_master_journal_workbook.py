@@ -4,6 +4,7 @@ from copy import copy
 from datetime import datetime
 import shutil
 import re
+import subprocess
 import zipfile
 import xml.etree.ElementTree as ET
 from openpyxl import Workbook, load_workbook
@@ -2937,6 +2938,133 @@ def test_checked_in_trading_journal_target_recommendations_match_backend_calcula
         }
         for symbol, expected in expected_by_symbol.items():
             assert rec_by_symbol.get(symbol) == expected
+    finally:
+        wb.close()
+
+
+def _git_workbook_fixture(commit: str, tmp_path: Path) -> Path:
+    try:
+        blob = subprocess.check_output(["git", "show", f"{commit}:journal/Trading Journal.xlsx"])
+    except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+        pytest.skip(f"baseline workbook {commit} is not available: {exc}")
+    path = tmp_path / f"Trading Journal {commit}.xlsx"
+    path.write_bytes(blob)
+    return path
+
+
+def _symbols_trade_log_layout_signature(path: Path) -> dict:
+    wb = load_workbook(path, data_only=False)
+    try:
+        symbols = wb[SYMBOLS_SHEET]
+        headers = _instrument_averages_header_map(symbols)
+        duration_cols = [
+            headers["Longest duration (DD:HH:MM:SS)"],
+            headers["Avg winning duration (DD:HH:MM:SS)"],
+            headers["Avg losing duration (DD:HH:MM:SS)"],
+        ]
+        trade_log = wb["Trade Log"]
+        return {
+            "symbols_header_borders": {
+                (row, col): _border_signature(symbols.cell(row, col))
+                for row in (1, 2)
+                for col in range(1, 47)
+            },
+            "symbols_header_merges": sorted(
+                str(rng)
+                for rng in symbols.merged_cells.ranges
+                if rng.min_row <= 2 and rng.max_row >= 1
+            ),
+            "symbols_duration_widths": {
+                get_column_letter(col): symbols.column_dimensions[get_column_letter(col)].width
+                for col in duration_cols
+            },
+            "symbols_duration_data_right": {
+                (row, get_column_letter(col)): symbols.cell(row, col).border.right.style
+                for row in range(INSTRUMENT_AVERAGES_DATA_START_ROW, min(symbols.max_row, INSTRUMENT_AVERAGES_DATA_START_ROW + 4) + 1)
+                for col in duration_cols
+            },
+            "trade_log_group_edges": {
+                cell: (_border_signature(trade_log[cell]), _cell_fill_rgb(trade_log[cell]))
+                for cell in ("X1", "AC1")
+            },
+        }
+    finally:
+        wb.close()
+
+
+def test_772eedb_symbols_trade_log_formatting_migration_restores_manual_layout(tmp_path: Path):
+    work = _git_workbook_fixture("772eedb", tmp_path)
+    baseline = load_workbook(work, data_only=False)
+    try:
+        baseline_symbols = baseline[SYMBOLS_SHEET]
+        baseline_symbol_header_borders = {
+            (row, col): _border_signature(baseline_symbols.cell(row, col))
+            for row in (1, 2)
+            for col in range(1, 47)
+        }
+        baseline_row_heights = {
+            row: baseline_symbols.row_dimensions[row].height
+            for row in (1, 2)
+        }
+    finally:
+        baseline.close()
+
+    snapshot = sample_snapshot()
+    result = update_master_journal_workbook_data_only(work, snapshot)
+    assert result["ok"] is True
+    Path(result["candidate_path"]).replace(work)
+    after_first = _symbols_trade_log_layout_signature(work)
+
+    result = update_master_journal_workbook_data_only(work, snapshot)
+    assert result["ok"] is True
+    Path(result["candidate_path"]).replace(work)
+    after_second = _symbols_trade_log_layout_signature(work)
+    assert after_second == after_first
+
+    wb = load_workbook(work, data_only=False)
+    try:
+        symbols = wb[SYMBOLS_SHEET]
+        headers = _instrument_averages_header_map(symbols)
+        merges = {str(rng) for rng in symbols.merged_cells.ranges}
+        assert "AJ1:AM1" in merges
+        assert "AN1:AQ1" in merges
+        assert "AR1:AV1" not in merges
+        for header in (
+            "Shortest duration (DD:HH:MM:SS)",
+            "Avg duration (DD:HH:MM:SS)",
+            "Longest duration (DD:HH:MM:SS)",
+            "Avg winning duration (DD:HH:MM:SS)",
+            "Avg losing duration (DD:HH:MM:SS)",
+        ):
+            col = headers[header]
+            letter = get_column_letter(col)
+            assert f"{letter}1:{letter}2" in merges
+            assert symbols.cell(1, col).value == header
+            assert symbols.cell(2, col).value is None
+
+        for key, signature in baseline_symbol_header_borders.items():
+            assert _border_signature(symbols.cell(*key)) == signature
+        assert {row: symbols.row_dimensions[row].height for row in (1, 2)} == baseline_row_heights
+
+        for header in (
+            "Longest duration (DD:HH:MM:SS)",
+            "Avg winning duration (DD:HH:MM:SS)",
+            "Avg losing duration (DD:HH:MM:SS)",
+        ):
+            assert symbols.column_dimensions[get_column_letter(headers[header])].width == 43
+
+        longest_col = headers["Longest duration (DD:HH:MM:SS)"]
+        winning_col = headers["Avg winning duration (DD:HH:MM:SS)"]
+        losing_col = headers["Avg losing duration (DD:HH:MM:SS)"]
+        for row in range(INSTRUMENT_AVERAGES_DATA_START_ROW, min(symbols.max_row, INSTRUMENT_AVERAGES_DATA_START_ROW + 4) + 1):
+            assert symbols.cell(row, longest_col).border.right.style == "thin"
+            assert symbols.cell(row, winning_col).border.right.style == "thin"
+            assert symbols.cell(row, losing_col).border.right.style == "thick"
+
+        trade_log = wb["Trade Log"]
+        for cell in ("X1", "AC1"):
+            assert trade_log[cell].border.right.style == "medium"
+            assert _cell_fill_rgb(trade_log[cell]) == ""
     finally:
         wb.close()
 

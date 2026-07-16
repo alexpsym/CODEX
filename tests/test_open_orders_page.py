@@ -63,6 +63,8 @@ def test_merged_open_orders_route_returns_html() -> None:
     assert 'id="open-orders-status"' in html
     assert 'id="open-orders-errors"' in html
     assert 'id="open-orders-empty"' in html
+    assert "No open orders or positions." in html
+    assert "No open orders, positions, or pending webhooks." not in html
     assert 'id="open-orders-table"' in html
     assert 'id="webhook-attempts-table"' not in html
     assert "<th>Test</th>" in html
@@ -241,6 +243,8 @@ def test_open_orders_prunes_stale_duplicate_pending_webhooks(monkeypatch: pytest
         {**base, "id": "orphaned-context", "calculation_context_id": "missing-ctx", "created_at": "2026-01-01T00:03:00Z"},
         {**base, "id": "consumed-waiting", "consumed_at": "2026-01-01T00:04:00Z"},
         {**base, "id": "rejected", "status": "REJECTED"},
+        {**base, "created_at": "2026-01-01T00:05:00Z"},
+        {**base, "created_at": "2026-01-01T00:06:00Z"},
     ]
     diagnostics: dict[str, int] = {}
 
@@ -251,11 +255,96 @@ def test_open_orders_prunes_stale_duplicate_pending_webhooks(monkeypatch: pytest
     )
 
     assert changed is True
-    assert [item["id"] for item in filtered] == ["new-duplicate"]
+    assert [item.get("id") for item in filtered if item.get("id")] == ["old-duplicate", "new-duplicate"]
+    idless = [item for item in filtered if not item.get("id")]
+    assert len(idless) == 1
+    assert idless[0]["created_at"] == "2026-01-01T00:06:00Z"
     assert diagnostics["duplicate_fingerprint_pruned"] == 1
     assert diagnostics["stale_context_pruned"] == 2
     assert diagnostics["consumed_waiting_pruned"] == 1
     assert diagnostics["terminal_pruned"] == 1
+
+
+def test_open_orders_api_excludes_pending_registry_rows_but_keeps_broker_exposure(monkeypatch: pytest.MonkeyPatch) -> None:
+    pending_items = [
+        {
+            "id": f"pending-{idx}",
+            "status": "WAITING",
+            "enabled": True,
+            "broker": "WEBHOOK",
+            "type": "webhook",
+            "account": "demo",
+            "category": "linear",
+            "instrument": "BTCUSDT",
+            "side": "Buy",
+            "size": "1",
+            "order_type": "Limit",
+            "order_price": "100",
+            "timeframe": "1H",
+            "calculation_context_id": f"ctx-{idx}",
+            "created_at": f"2026-07-16T00:{idx:02d}:00Z",
+        }
+        for idx in range(9)
+    ]
+    contexts = [
+        {
+            "pending_webhook_id": item["id"],
+            "calculation_context_id": item["calculation_context_id"],
+            "status": "ACTIVE",
+        }
+        for item in pending_items
+    ]
+    saved_pending: list[list[dict[str, object]]] = []
+    bybit_items: list[dict[str, object]] = []
+
+    master_service._OPEN_ORDERS_CACHE["payload"] = None
+    master_service._OPEN_ORDERS_CACHE["expires_at"] = 0.0
+    monkeypatch.setattr(master_service, "_get_oanda_config", lambda account: {"account_id": f"OANDA-{account}", "token": "T", "base_url": "https://example.test"})
+
+    async def fake_get_cached_oanda_accounts(**_kwargs):
+        return []
+
+    async def fake_collect_oanda_open_items(**_kwargs):
+        return {"items": [], "errors": []}
+
+    async def fake_collect_bybit_open_items(**kwargs):
+        return {"items": list(bybit_items) if kwargs.get("account_context") == "live" else [], "errors": []}
+
+    monkeypatch.setattr(master_service, "_get_cached_oanda_accounts", fake_get_cached_oanda_accounts)
+    monkeypatch.setattr(master_service, "_collect_oanda_open_items", fake_collect_oanda_open_items)
+    monkeypatch.setattr(master_service, "resolve_bybit_credentials_for", lambda _account: ("live", "key", "secret", "https://example.test", "test"))
+    monkeypatch.setattr(master_service, "_collect_bybit_open_items", fake_collect_bybit_open_items)
+    monkeypatch.setattr(master_service, "_load_pending_webhooks", lambda: list(pending_items))
+    monkeypatch.setattr(master_service, "_save_pending_webhooks", lambda items: saved_pending.append(list(items)))
+    monkeypatch.setattr(master_service, "_load_trade_contexts", lambda: list(contexts))
+    monkeypatch.setattr(master_service, "_load_bounce_traders", lambda: [])
+    monkeypatch.setattr(master_service, "_schedule_dropbox_upload_state_backup", lambda: None)
+    monkeypatch.setattr(master_service.script_manager, "get", lambda _name: type("S", (), {"is_running": False})())
+
+    payload = json.loads(asyncio.run(master_service.list_open_orders(force=True)).body.decode("utf-8"))
+    assert payload["items"] == []
+    assert payload["errors"] == []
+    assert payload["source_counts"]["active_pending_webhooks"] == 9
+    assert payload["source_counts"]["pending_reconciliation"]["active_records"] == 9
+    assert saved_pending == []
+
+    bybit_items[:] = [
+        {
+            "broker": "Bybit",
+            "account": "live",
+            "category": "linear",
+            "instrument": "BTCUSDT",
+            "type": "order",
+            "side": "Buy",
+            "size": "1",
+            "id": "broker-order-1",
+            "status": "New",
+        }
+    ]
+    payload = json.loads(asyncio.run(master_service.list_open_orders(force=True)).body.decode("utf-8"))
+    assert [item["id"] for item in payload["items"]] == ["broker-order-1"]
+    assert payload["items"][0]["broker"] == "Bybit"
+    assert all(str(item.get("broker")).upper() != "WEBHOOK" for item in payload["items"])
 
 
 def test_open_orders_api_reports_pending_reconciliation_source_counts() -> None:

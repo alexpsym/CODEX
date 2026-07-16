@@ -22497,7 +22497,7 @@ OPEN_ORDERS_TEMPLATE = """<!doctype html>
         <div><strong>Source errors</strong></div>
         <ul></ul>
       </div>
-      <div id="open-orders-empty" class="muted">No open orders, positions, or pending webhooks.</div>
+      <div id="open-orders-empty" class="muted">No open orders or positions.</div>
       <div class="table-wrap">
         <table id="open-orders-table">
           <thead>
@@ -25993,7 +25993,7 @@ def _clean_pending_webhooks_for_open_items(
         changed = True
 
     by_fingerprint: Dict[str, Dict[str, object]] = {}
-    for pending in [*deduped_by_id.values(), *no_id_items]:
+    for pending in no_id_items:
         fingerprint = _pending_webhook_fingerprint(pending)
         previous = by_fingerprint.get(fingerprint)
         if previous is None:
@@ -26004,7 +26004,7 @@ def _clean_pending_webhooks_for_open_items(
         changed = True
 
     filtered: List[Dict[str, object]] = []
-    for pending in sorted(by_fingerprint.values(), key=_pending_webhook_sort_ts):
+    for pending in sorted([*deduped_by_id.values(), *by_fingerprint.values()], key=_pending_webhook_sort_ts):
         if _pending_webhook_is_superseded(
             pending,
             open_items,
@@ -26250,7 +26250,6 @@ async def list_open_orders(force: bool = Query(False)) -> JSONResponse:
                 _save_pending_webhooks(pending)
                 _invalidate_open_orders_cache()
                 _schedule_dropbox_upload_state_backup()
-            items.extend(pending)
         else:
             pending_diagnostics["input_records"] = 0
             pending_diagnostics["active_records"] = 0
@@ -26391,27 +26390,8 @@ async def list_open_orders(force: bool = Query(False)) -> JSONResponse:
                 if not bool(session.get("show_in_open_orders", True)):
                     continue
 
-                items.append(
-                    {
-                        "broker": "BOUNCE",
-                        "account": account,
-                        "category": category,
-                        "instrument": instrument,
-                        "type": "Bounce",
-                        "side": side,
-                        "size": "—",
-                        "entry_price": None,
-                        "order_price": None,
-                        "current_price": None,
-                        "stop_loss": None,
-                        "take_profit": None,
-                        "leverage": None,
-                        "opened_at": session.get("started_at"),
-                        "id": session.get("id"),
-                        "order_link_id": order_link_id,
-                        "status": "WAITING",
-                    }
-                )
+                # Bounce sessions are reconciled internally; this endpoint only exposes broker rows.
+                continue
 
             if changed:
                 _save_bounce_traders(sessions)
