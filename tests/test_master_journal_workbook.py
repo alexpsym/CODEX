@@ -2965,6 +2965,88 @@ def _symbols_a1_at2_border_signatures(path: Path) -> dict:
         wb.close()
 
 
+def _border_with_test_sides(border: Border, *, left: Side | None = None, right: Side | None = None) -> Border:
+    return Border(
+        left=copy(left if left is not None else border.left),
+        right=copy(right if right is not None else border.right),
+        top=copy(border.top),
+        bottom=copy(border.bottom),
+        diagonal=copy(border.diagonal),
+        diagonal_direction=border.diagonal_direction,
+        diagonalUp=border.diagonalUp,
+        diagonalDown=border.diagonalDown,
+        outline=border.outline,
+        vertical=copy(border.vertical),
+        horizontal=copy(border.horizontal),
+        start=copy(border.start),
+        end=copy(border.end),
+    )
+
+
+def _symbols_trade_log_formatting_signatures(path: Path) -> dict:
+    wb = load_workbook(path, data_only=False)
+    try:
+        symbols = wb[SYMBOLS_SHEET]
+        symbol_headers = _instrument_averages_header_map(symbols)
+        symbol_last_col = max(symbol_headers.values())
+        symbol_rows = range(1, symbols.max_row + 1)
+
+        trade_log = wb["Trade Log"]
+        trade_headers = _trade_log_header_map(trade_log)
+        trade_last_col = max(trade_headers.values())
+        trade_rows = range(1, trade_log.max_row + 1)
+
+        return {
+            "symbols_borders": {
+                (row, col): _border_signature(symbols.cell(row, col))
+                for row in symbol_rows
+                for col in range(1, symbol_last_col + 1)
+            },
+            "symbols_row1_merges": sorted(
+                str(rng) for rng in symbols.merged_cells.ranges if rng.min_row <= 2 and rng.max_row >= 1
+            ),
+            "symbols_widths": {
+                get_column_letter(col): symbols.column_dimensions[get_column_letter(col)].width
+                for col in range(1, symbol_last_col + 1)
+            },
+            "symbols_row_heights": {
+                row: symbols.row_dimensions[row].height
+                for row in symbol_rows
+            },
+            "trade_log_borders": {
+                (row, col): _border_signature(trade_log.cell(row, col))
+                for row in trade_rows
+                for col in range(1, trade_last_col + 1)
+            },
+            "trade_log_fills": {
+                (row, col): copy(trade_log.cell(row, col).fill)
+                for row in trade_rows
+                for col in range(1, trade_last_col + 1)
+            },
+            "trade_log_header_merges": sorted(
+                str(rng) for rng in trade_log.merged_cells.ranges if rng.min_row <= TRADE_LOG_HEADER_ROWS
+            ),
+            "trade_log_widths": {
+                get_column_letter(col): trade_log.column_dimensions[get_column_letter(col)].width
+                for col in range(1, trade_last_col + 1)
+            },
+            "trade_log_row_heights": {
+                row: trade_log.row_dimensions[row].height
+                for row in trade_rows
+            },
+        }
+    finally:
+        wb.close()
+
+
+def _symbols_cell_value(path: Path, coordinate: str) -> object:
+    wb = load_workbook(path, data_only=False)
+    try:
+        return wb[SYMBOLS_SHEET][coordinate].value
+    finally:
+        wb.close()
+
+
 def _formula_error_cells(path: Path) -> list[str]:
     error_tokens = ("#NULL!", "#DIV/0!", "#VALUE!", "#REF!", "#NAME?", "#NUM!", "#N/A")
     errors: set[str] = set()
@@ -2982,7 +3064,12 @@ def _formula_error_cells(path: Path) -> list[str]:
     return sorted(errors)
 
 
-def _assert_symbols_trade_log_layout_contract(path: Path) -> None:
+def _assert_symbols_trade_log_layout_contract(
+    path: Path,
+    *,
+    duration_border_exceptions: set[str] | None = None,
+) -> None:
+    duration_border_exceptions = duration_border_exceptions or set()
     wb = load_workbook(path, data_only=False)
     try:
         symbols = wb[SYMBOLS_SHEET]
@@ -3009,9 +3096,14 @@ def _assert_symbols_trade_log_layout_contract(path: Path) -> None:
         winning_col = headers["Avg winning duration (DD:HH:MM:SS)"]
         losing_col = headers["Avg losing duration (DD:HH:MM:SS)"]
         for row in range(INSTRUMENT_AVERAGES_DATA_START_ROW, symbols.max_row + 1):
-            assert symbols.cell(row, longest_col).border.right.style == "thin"
-            assert symbols.cell(row, winning_col).border.right.style == "thin"
-            assert symbols.cell(row, losing_col).border.right.style == "thick"
+            for col, expected in (
+                (longest_col, "thin"),
+                (winning_col, "thin"),
+                (losing_col, "thick"),
+            ):
+                cell = symbols.cell(row, col)
+                if cell.coordinate not in duration_border_exceptions:
+                    assert cell.border.right.style == expected
 
         trade_log = wb["Trade Log"]
         trade_last_col = max(_trade_log_header_map(trade_log).values())
@@ -3049,6 +3141,39 @@ def test_40f2ef3_symbols_formatting_migration_repairs_manual_borders(tmp_path: P
 
     assert _symbols_a1_at2_border_signatures(damaged_path) == baseline_symbol_header_borders
     _assert_symbols_trade_log_layout_contract(damaged_path)
+
+    wb = load_workbook(damaged_path, data_only=False)
+    symbols = wb[SYMBOLS_SHEET]
+    manual_side = Side(style="double", color="FFFF0000")
+    symbols["AJ1"].border = _border_with_test_sides(symbols["AJ1"].border, left=manual_side)
+    wb.save(damaged_path)
+    wb.close()
+    reopened = load_workbook(damaged_path, data_only=False)
+    manual_signature = _border_signature(reopened[SYMBOLS_SHEET]["AJ1"])
+    reopened.close()
+
+    result = update_master_journal_workbook_data_only(damaged_path, snapshot)
+    assert result["ok"] is True
+    Path(result["candidate_path"]).replace(damaged_path)
+    _open_save_reopen_cycle(damaged_path)
+    reopened = load_workbook(damaged_path, data_only=False)
+    assert _border_signature(reopened[SYMBOLS_SHEET]["AJ1"]) == manual_signature
+    reopened.close()
+    assert _formula_error_cells(damaged_path) == []
+
+
+def test_5c88d4a_symbols_formatting_migration_repairs_manual_borders(tmp_path: Path):
+    baseline_path = _git_workbook_fixture("772eedb", tmp_path)
+    damaged_path = _git_workbook_fixture("5c88d4a", tmp_path)
+    baseline_symbol_header_borders = _symbols_a1_at2_border_signatures(baseline_path)
+
+    result = update_master_journal_workbook_data_only(damaged_path, sample_snapshot())
+    assert result["ok"] is True
+    Path(result["candidate_path"]).replace(damaged_path)
+    _open_save_reopen_cycle(damaged_path)
+
+    assert _symbols_a1_at2_border_signatures(damaged_path) == baseline_symbol_header_borders
+    _assert_symbols_trade_log_layout_contract(damaged_path)
     assert _formula_error_cells(damaged_path) == []
 
 
@@ -3065,71 +3190,83 @@ def test_checked_in_trading_journal_resync_preserves_symbols_and_trade_log_borde
     work = tmp_path / "Trading Journal.xlsx"
     shutil.copy2(path, work)
 
-    def capture_signatures(target: Path) -> dict:
-        wb = load_workbook(target, data_only=False)
-        try:
-            symbols = wb[SYMBOLS_SHEET]
-            symbol_headers = _instrument_averages_header_map(symbols)
-            symbol_last_col = max(symbol_headers.values())
-            symbol_rows = range(1, min(symbols.max_row, INSTRUMENT_AVERAGES_DATA_START_ROW + 5) + 1)
-
-            trade_log = wb["Trade Log"]
-            trade_headers = _trade_log_header_map(trade_log)
-            trade_last_col = max(trade_headers.values())
-            trade_rows = [
-                *range(1, TRADE_LOG_HEADER_ROWS + 1),
-                *range(TRADE_LOG_DATA_START_ROW, min(trade_log.max_row, TRADE_LOG_DATA_START_ROW + 5) + 1),
-            ]
-
-            return {
-                "symbols_borders": {
-                    (row, col): _border_signature(symbols.cell(row, col))
-                    for row in symbol_rows
-                    for col in range(1, symbol_last_col + 1)
-                },
-                "symbols_row1_merges": sorted(
-                    str(rng) for rng in symbols.merged_cells.ranges if rng.min_row <= 2 and rng.max_row >= 1
-                ),
-                "symbols_widths": {
-                    get_column_letter(col): symbols.column_dimensions[get_column_letter(col)].width
-                    for col in range(1, symbol_last_col + 1)
-                },
-                "symbols_row_heights": {
-                    row: symbols.row_dimensions[row].height
-                    for row in symbol_rows
-                },
-                "trade_log_borders": {
-                    (row, col): _border_signature(trade_log.cell(row, col))
-                    for row in trade_rows
-                    for col in range(1, trade_last_col + 1)
-                },
-                "trade_log_header_merges": sorted(
-                    str(rng) for rng in trade_log.merged_cells.ranges if rng.min_row <= TRADE_LOG_HEADER_ROWS
-                ),
-                "trade_log_widths": {
-                    get_column_letter(col): trade_log.column_dimensions[get_column_letter(col)].width
-                    for col in range(1, trade_last_col + 1)
-                },
-                "trade_log_row_heights": {
-                    row: trade_log.row_dimensions[row].height
-                    for row in trade_rows
-                },
-            }
-        finally:
-            wb.close()
-
-    before = capture_signatures(work)
+    before = _symbols_trade_log_formatting_signatures(work)
     snapshot = sample_snapshot()
     for _ in range(2):
         result = update_master_journal_workbook_data_only(work, snapshot)
         assert result["ok"] is True
         Path(result["candidate_path"]).replace(work)
-        assert capture_signatures(work) == before
+        after = _symbols_trade_log_formatting_signatures(work)
+        assert {key: value for key, value in after.items() if key != "trade_log_fills"} == {
+            key: value for key, value in before.items() if key != "trade_log_fills"
+        }
 
     _open_save_reopen_cycle(work)
-    assert capture_signatures(work) == before
+    after = _symbols_trade_log_formatting_signatures(work)
+    assert {key: value for key, value in after.items() if key != "trade_log_fills"} == {
+        key: value for key, value in before.items() if key != "trade_log_fills"
+    }
     assert _symbols_a1_at2_border_signatures(work) == baseline_symbol_header_borders
     _assert_symbols_trade_log_layout_contract(work)
+    assert _formula_error_cells(work) == []
+
+
+def test_source_resync_preserves_manual_symbols_header_and_data_borders(tmp_path: Path):
+    checked_in = Path("journal") / "Trading Journal.xlsx"
+    if not checked_in.exists():
+        pytest.skip("checked-in Trading Journal.xlsx is not available")
+    work = tmp_path / "Trading Journal manual borders.xlsx"
+    shutil.copy2(checked_in, work)
+
+    before = _symbols_trade_log_formatting_signatures(work)
+    wb = load_workbook(work, data_only=False)
+    symbols = wb[SYMBOLS_SHEET]
+    headers = _instrument_averages_header_map(symbols)
+    trades_coordinate = f"{get_column_letter(headers['Trades'])}4"
+    expected_trades = symbols[trades_coordinate].value
+    symbols[trades_coordinate].value = -987654
+    manual_side = Side(style="double", color="FFFF0000")
+    symbols["AJ1"].border = _border_with_test_sides(symbols["AJ1"].border, left=manual_side)
+    symbols["AT4"].border = _border_with_test_sides(symbols["AT4"].border, right=manual_side)
+    wb.save(work)
+    wb.close()
+    _open_save_reopen_cycle(work)
+
+    wb = load_workbook(work, data_only=False)
+    expected_aj1_border = _border_signature(wb[SYMBOLS_SHEET]["AJ1"])
+    expected_at4_border = _border_signature(wb[SYMBOLS_SHEET]["AT4"])
+    wb.close()
+
+    for attempt in range(2):
+        source_snapshot = read_master_journal_source(work)
+        result = update_master_journal_workbook_data_only(work, source_snapshot)
+        assert result["ok"] is True
+        Path(result["candidate_path"]).replace(work)
+
+        wb = load_workbook(work, data_only=False)
+        symbols = wb[SYMBOLS_SHEET]
+        assert _border_signature(symbols["AJ1"]) == expected_aj1_border
+        assert _border_signature(symbols["AT4"]) == expected_at4_border
+        wb.close()
+        assert _symbols_cell_value(work, trades_coordinate) == expected_trades
+        after = _symbols_trade_log_formatting_signatures(work)
+        for key in (
+            "trade_log_borders",
+            "trade_log_fills",
+            "trade_log_header_merges",
+            "trade_log_widths",
+            "trade_log_row_heights",
+        ):
+            assert after[key] == before[key], f"Trade Log {key} drifted on resync {attempt + 1}"
+
+    _open_save_reopen_cycle(work)
+    wb = load_workbook(work, data_only=False)
+    symbols = wb[SYMBOLS_SHEET]
+    assert _border_signature(symbols["AJ1"]) == expected_aj1_border
+    assert _border_signature(symbols["AT4"]) == expected_at4_border
+    wb.close()
+    assert _symbols_cell_value(work, trades_coordinate) == expected_trades
+    _assert_symbols_trade_log_layout_contract(work, duration_border_exceptions={"AT4"})
     assert _formula_error_cells(work) == []
 
 

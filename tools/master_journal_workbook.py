@@ -596,6 +596,10 @@ SYMBOLS_MANUAL_HEADER_BORDER_CODES = (
     "mttt tttt tmtt mttt tttt tmtt mmtt mttt tttt tttt tmtt mttt tttt tttt "
     "tmtt ntnt ttnt ttnt",
 )
+KNOWN_FLATTENED_SYMBOLS_HEADER_LAYOUT_FINGERPRINTS = {
+    "145ab5e0c1d88e8ff6114f83c2b8d97eb09fde58bfb689b85680f8a905780dc7": "40f2ef3",
+    "775d5e9f5059e4b32f71a4d173e15b9a105e7c9cecf29035a29c2867374f698d": "5c88d4a",
+}
 
 
 def _trade_log_visible_header(header: str) -> str:
@@ -842,7 +846,7 @@ def _write_instrument_averages_headers(ws, *, preserve_freeze: bool = False) -> 
         f"{get_column_letter(len(INSTRUMENT_AVERAGES_HEADERS))}{max(INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, ws.max_row)}"
     )
     _repair_symbols_header_merges_preserving_layout(ws)
-    _ensure_symbols_duration_header_layout(ws)
+    _ensure_symbols_duration_header_layout(ws, migrate_data_boundaries=True)
     _apply_symbols_filter_header_layout(ws)
 
 
@@ -901,18 +905,90 @@ def _symbols_manual_header_border(code: str) -> Border:
     )
 
 
+def _symbols_current_header_schema_matches(ws) -> bool:
+    if _instrument_averages_header_row(ws) != INSTRUMENT_AVERAGES_FILTER_HEADER_ROW:
+        return False
+    headers = _instrument_averages_header_map(ws)
+    return all(
+        headers.get(header) == col
+        for col, header in enumerate(INSTRUMENT_AVERAGES_HEADERS, start=1)
+    )
+
+
+def _symbols_border_color_signature(color) -> List[Any] | None:
+    if color is None:
+        return None
+    if color.type == "rgb":
+        return ["rgb", str(color.rgb)]
+    if color.type == "indexed":
+        return ["indexed", int(color.indexed)]
+    if color.type == "theme":
+        return ["theme", int(color.theme), float(color.tint)]
+    if color.type == "auto":
+        return ["auto", bool(color.auto)]
+    return [str(color.type), str(color.value)]
+
+
+def _symbols_border_side_signature(side: Side | None) -> List[Any] | None:
+    if side is None:
+        return None
+    return [side.style, _symbols_border_color_signature(side.color)]
+
+
+def _symbols_border_object_signature(border: Border) -> Dict[str, Any]:
+    return {
+        "left": _symbols_border_side_signature(border.left),
+        "right": _symbols_border_side_signature(border.right),
+        "top": _symbols_border_side_signature(border.top),
+        "bottom": _symbols_border_side_signature(border.bottom),
+        "diagonal": _symbols_border_side_signature(border.diagonal),
+        "vertical": _symbols_border_side_signature(border.vertical),
+        "horizontal": _symbols_border_side_signature(border.horizontal),
+        "start": _symbols_border_side_signature(border.start),
+        "end": _symbols_border_side_signature(border.end),
+        "diagonal_direction": border.diagonal_direction,
+        "diagonalUp": bool(border.diagonalUp),
+        "diagonalDown": bool(border.diagonalDown),
+        "outline": bool(border.outline),
+    }
+
+
+def _symbols_header_border_merge_fingerprint(ws) -> str:
+    last_col = len(INSTRUMENT_AVERAGES_HEADERS)
+    if ws.max_column < last_col:
+        return ""
+    payload = {
+        "borders": [
+            _symbols_border_object_signature(ws.cell(row, col).border)
+            for row in (INSTRUMENT_AVERAGES_GROUP_HEADER_ROW, INSTRUMENT_AVERAGES_FILTER_HEADER_ROW)
+            for col in range(1, last_col + 1)
+        ],
+        "merges": sorted(
+            str(merged)
+            for merged in ws.merged_cells.ranges
+            if merged.min_row <= INSTRUMENT_AVERAGES_FILTER_HEADER_ROW
+            and merged.max_row >= INSTRUMENT_AVERAGES_GROUP_HEADER_ROW
+            and merged.min_col <= last_col
+            and merged.max_col >= 1
+        ),
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def _repair_symbols_manual_header_borders(
     ws,
     diagnostics: Dict[str, Any] | None = None,
+    *,
+    legacy_layout_fingerprint: str | None = None,
 ) -> None:
-    if _instrument_averages_header_row(ws) != INSTRUMENT_AVERAGES_FILTER_HEADER_ROW:
+    if not _symbols_current_header_schema_matches(ws):
+        return
+    fingerprint = legacy_layout_fingerprint or _symbols_header_border_merge_fingerprint(ws)
+    legacy_layout = KNOWN_FLATTENED_SYMBOLS_HEADER_LAYOUT_FINGERPRINTS.get(fingerprint)
+    if not legacy_layout:
         return
     headers = _instrument_averages_header_map(ws)
-    if any(
-        headers.get(header) != col
-        for col, header in enumerate(INSTRUMENT_AVERAGES_HEADERS, start=1)
-    ):
-        return
 
     repaired: List[str] = []
     for row, encoded_row in enumerate(SYMBOLS_MANUAL_HEADER_BORDER_CODES, start=1):
@@ -939,6 +1015,7 @@ def _repair_symbols_manual_header_borders(
 
     if diagnostics is not None and repaired:
         diagnostics["symbols_manual_header_borders_repaired"] = repaired
+        diagnostics["symbols_manual_header_borders_legacy_layout"] = legacy_layout
 
 
 def _ensure_symbols_duration_data_boundary(ws) -> None:
@@ -967,6 +1044,8 @@ def _ensure_symbols_duration_data_boundary(ws) -> None:
 def _ensure_symbols_duration_header_layout(
     ws,
     diagnostics: Dict[str, Any] | None = None,
+    *,
+    migrate_data_boundaries: bool = False,
 ) -> None:
     if _instrument_averages_header_row(ws) != INSTRUMENT_AVERAGES_FILTER_HEADER_ROW:
         return
@@ -979,6 +1058,11 @@ def _ensure_symbols_duration_header_layout(
     ]
     if not duration_cols:
         return
+    legacy_layout_fingerprint = ""
+    if _symbols_current_header_schema_matches(ws):
+        candidate = _symbols_header_border_merge_fingerprint(ws)
+        if candidate in KNOWN_FLATTENED_SYMBOLS_HEADER_LAYOUT_FINGERPRINTS:
+            legacy_layout_fingerprint = candidate
     col_set = {col for _header, col in duration_cols if col}
     removed_merges: List[str] = []
     for merged in list(ws.merged_cells.ranges):
@@ -1025,8 +1109,15 @@ def _ensure_symbols_duration_header_layout(
         if current_width < 43:
             ws.column_dimensions[letter].width = 43
 
-    _ensure_symbols_duration_data_boundary(ws)
-    _repair_symbols_manual_header_borders(ws, diagnostics)
+    if migrate_data_boundaries or legacy_layout_fingerprint:
+        _ensure_symbols_duration_data_boundary(ws)
+        diagnostics["symbols_duration_data_boundaries_migrated"] = True
+    if legacy_layout_fingerprint:
+        _repair_symbols_manual_header_borders(
+            ws,
+            diagnostics,
+            legacy_layout_fingerprint=legacy_layout_fingerprint,
+        )
     if removed_merges:
         diagnostics.setdefault("symbols_duration_group_merges_removed", []).extend(removed_merges)
     if created_merges:
@@ -1044,6 +1135,7 @@ def _ensure_symbols_schema(ws, diagnostics: Dict[str, Any] | None = None) -> boo
         for header in ("Min stop %", "Max stop %", "Min target %", "Max target %")
     )
     changed = False
+    duration_columns_added = False
     rename_map = {
         "Pattern": "Most Traded Pattern",
         "EMA": "Most Traded EMA",
@@ -1143,7 +1235,7 @@ def _ensure_symbols_schema(ws, diagnostics: Dict[str, Any] | None = None) -> boo
         headers = _instrument_averages_header_map(ws)
 
     def insert_duration_header_after(anchor_header: str, wanted_header: str) -> None:
-        nonlocal changed, headers
+        nonlocal changed, duration_columns_added, headers
         if wanted_header in headers:
             return
         anchor_col = headers.get(anchor_header)
@@ -1157,6 +1249,7 @@ def _ensure_symbols_schema(ws, diagnostics: Dict[str, Any] | None = None) -> boo
         ws.column_dimensions[get_column_letter(insert_at)].width = max(width or 0, 43) or 43
         ws.cell(header_row, insert_at).value = wanted_header
         changed = True
+        duration_columns_added = True
         headers = _instrument_averages_header_map(ws)
 
     insert_overall_average_before("Avg stop % (W)", "Avg stop %")
@@ -1169,7 +1262,11 @@ def _ensure_symbols_schema(ws, diagnostics: Dict[str, Any] | None = None) -> boo
         if not all(header in _instrument_averages_header_map(ws) for header in INSTRUMENT_AVERAGES_HEADERS) and not legacy_grouped_metrics:
             _write_instrument_averages_headers(ws, preserve_freeze=True)
         headers = _instrument_averages_header_map(ws)
-        _ensure_symbols_duration_header_layout(ws, diagnostics)
+        _ensure_symbols_duration_header_layout(
+            ws,
+            diagnostics,
+            migrate_data_boundaries=duration_columns_added,
+        )
         if ws.auto_filter and ws.auto_filter.ref:
             _min_col, _min_row, _max_col, max_row = range_boundaries(ws.auto_filter.ref)
             ws.auto_filter.ref = (

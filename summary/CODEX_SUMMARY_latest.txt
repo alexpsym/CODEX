@@ -1,34 +1,59 @@
 Final summary
 
 Status:
-- Repaired the checked-in `journal/Trading Journal.xlsx` so all 92 SYMBOLS `A1:AT2` border signatures exactly match the manually drawn `772eedb` baseline after save/reopen.
-- Added a schema-guarded, in-code border oracle with no runtime Git dependency. It repairs only the known current SYMBOLS header layout and extends the repaired AT vertical-header border pattern to AU/AV.
-- Preserved the required Stops `AJ1:AM1`, Targets `AN1:AQ1`, and vertical duration `AR1:AV2` merges, widths of 43, AT/AU thin data boundaries, and AV thick final boundary.
-- Removed both duplicated consecutive `_ensure_symbols_duration_header_layout` calls.
-- Strengthened regressions to migrate the damaged `40f2ef3` workbook, compare against the independent `772eedb` baseline, validate the checked-in workbook before resync, and prove two resyncs plus an open/save/reopen cycle cause no border, merge, width, or row-height drift.
-- Preserved Trade Log's current correct formatting: no header fills, medium right edges at X1/AC1, and data-row height 15.
-- Open Orders code and behavior were not changed.
+- Converted the SYMBOLS manual-header border oracle into a one-time legacy migration.
+- Runtime repair is now gated by exact border-and-merge fingerprints for the known damaged `40f2ef3` and `5c88d4a` layouts, not merely by header names. There is no runtime Git-history dependency.
+- Ordinary data-only resyncs no longer call the duration AT/AU/AV boundary migration. Those borders are applied only while adding duration columns or repairing one of the known damaged layouts.
+- A repaired workbook therefore preserves later manual SYMBOLS border changes exactly, including header and data-row changes.
+- The checked-in `journal/Trading Journal.xlsx` was not modified. Its correct `772eedb` A1:AT2 border baseline, Stops/Targets and AR:AV merges, widths, duration boundaries, Trade Log formatting, and formulas remain intact.
+- Open Orders and all other completed workbook behavior were not changed.
 
 Files changed intentionally:
-- journal/Trading Journal.xlsx
 - tools/master_journal_workbook.py
 - tests/test_master_journal_workbook.py
 - summary/CODEX_SUMMARY_latest.txt
+
+Regression coverage:
+- The `40f2ef3` damaged workbook still migrates to zero A1:AT2 border mismatches against `772eedb` after save/reopen. A manual AJ1 border change made after migration survives a second resync.
+- The `5c88d4a` damaged workbook also migrates to zero A1:AT2 border mismatches against `772eedb`.
+- A copy of the repaired checked-in workbook preserves all SYMBOLS borders, merges, widths, and row heights through two resyncs plus open/save/reopen.
+- The source-based regression changes AJ1 left and AT4 right to red double borders, corrupts a calculated SYMBOLS metric, saves/reopens, and runs two source-based resyncs. Both borders remain exact, the metric refreshes, and Trade Log borders, fills, merges, widths, and row heights remain unchanged.
+- Formula-error scans are empty in the legacy, checked-in, and manual-edit preservation paths.
 
 Verification performed:
 - `python -m py_compile tools/master_journal_workbook.py tests/test_master_journal_workbook.py`: passed.
 - `node --check render/static/open_orders.js`: passed.
 - `python -m pytest tests/test_open_orders_page.py -q --basetemp .pytest_tmp_open_orders_followup`: 23 passed.
-- Damaged `40f2ef3` migration regression: 1 passed.
-- Checked-in workbook two-resync and open/save/reopen stability regression: 1 passed.
-- Exact final workbook inspection: 0 `A1:AT2` border mismatches; all required merges and widths present; AT/AU thin and AV thick; X1/AC1 medium; Trade Log row 4 height 15.
-- Artifact-tool read-only inspection and visual render pass covered all 15 workbook sheets plus focused SYMBOLS/Trade Log header views; formula-error scan matched 0 cells.
+- Manual source-resync preservation regression: 1 passed in 5m12s.
+- Checked-in two-resync preservation regression: 1 passed in 3m47s.
+- Full parent module at `e37aa1d545e63434a512e39b5657a4dd15a42376`: 135 passed, 16 failed in 27m06s.
+- Full follow-up module under the same environment/options: 137 passed, 16 failed in 37m55s.
+- Mechanical JUnit comparison: 16 common failures, 0 added failures, 0 removed failures; the failure-name lists are identical.
+- Artifact-tool read-only inspection found all 15 sheets, confirmed the focused SYMBOLS header values/styles, and matched 0 formula-error entries.
+- Independent openpyxl save/close/reopen inspection: source bytes unchanged; layout snapshot exact; 0 A1:AT2 oracle mismatches; all required merges present; no AR1:AV1 merge; AR:AV widths all 43; 0 AT/AU/AV boundary mismatches; Trade Log headers unfilled; X1/AC1 medium; 0 data-row-height mismatches; 0 formula errors.
 - `git diff --check`: passed.
-- Full workbook module: 135 passed, 16 failed in 23m18s. The remaining failures are broader legacy expectations involving vertical-header row placement, calendar/report generation, recommendation fixtures, and layout styling; neither new border regression failed.
+
+Exact full-module failures at both parent and follow-up:
+1. test_balance_after_resolution_and_duration_display
+2. test_calendar_month_conditional_formatting_rows
+3. test_dashboard_layout_style_columns
+4. test_dashboard_trade_log_and_pnl_calendar_loss_profit_fills_match
+5. test_generated_calendar_and_instrument_averages_use_direct_semantic_fills
+6. test_generated_dashboard_layout_percentages_semantic_fills_and_labels
+7. test_generated_pnl_calendar_update_removes_stale_profit_loss_rules
+8. test_instrument_averages_new_columns_order_formats_and_alignment
+9. test_instrument_averages_op_and_duration_not_blank_after_data_only_update
+10. test_instrument_currency_and_percent_formats
+11. test_monthly_aud_row_uses_result_currency_and_excluded_from_metrics
+12. test_pnl_calendar_update_removes_duplicate_generated_profit_loss_rules
+13. test_recommendations_are_removed_from_trade_log_and_kept_in_symbols_and_stats1
+14. test_sheet_order_and_hidden_meta
+15. test_stats_symbols_and_reports_required_repairs
+16. test_update_data_only_adds_missing_calendar_year_row
 
 Notes:
-- Pytest cache warnings remain due local `.pytest_cache` permissions; repo-local `--basetemp` runs completed.
-- Pre-existing runtime/local-state files remain dirty and must stay unstaged: `render/data/*`, `bybit_monitor/custom_alerts.json`, `state_backup.json`, and `state_manifest.json`.
+- Pytest emitted local `.pytest_cache` permission warnings; all runs used repo-local `--basetemp` directories and completed.
+- Pre-existing runtime/local-state files remain dirty and must stay unstaged: `bybit_monitor/custom_alerts.json`, `render/data/*`, `state_backup.json`, and `state_manifest.json`.
 
 Push workflow:
 - `PATCH_DESKTOP_PUSH.bat` must run after this summary and verify local HEAD equals `origin/master` before the task is complete.
