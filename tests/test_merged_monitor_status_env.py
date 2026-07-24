@@ -395,6 +395,11 @@ def test_missing_configured_autostart_target_gets_visible_scripts_reason(
     class FakeScript:
         def __init__(self, name: str) -> None:
             self.name = name
+            self.last_start_error = ""
+            self.last_exit_reason = ""
+
+        def to_summary(self) -> dict[str, object]:
+            return {"name": self.name, "running": True, "starting": False}
 
     def fake_get(name: str) -> FakeScript:
         if name == "fxweekend-clone":
@@ -408,6 +413,11 @@ def test_missing_configured_autostart_target_gets_visible_scripts_reason(
         lambda: [{"name": "bybit_monitor", "running": True, "starting": False}],
     )
     monkeypatch.setattr(master_service, "get_merged_script_buttons", lambda: [])
+    monkeypatch.setattr(
+        master_service,
+        "_state_sync_status_snapshot",
+        lambda: {"enabled": True, "restore_complete": True, "restore_status": "complete", "restore_error": ""},
+    )
 
     names = master_service._compute_autostart_scripts()
     assert names == ["bybit_monitor"]
@@ -419,6 +429,20 @@ def test_missing_configured_autostart_target_gets_visible_scripts_reason(
     assert row["operational"] is False
     assert row["status_detail"] == "configured autostart target unavailable: script disabled by test"
     assert row["last_start_error"] == "script disabled by test"
+
+    readiness = master_service._startup_readiness_status()
+    warning = next(item for item in readiness["background_warnings"] if item["name"] == "fxweekend-clone")
+    component = next(item for item in readiness["components"] if item["name"] == "fxweekend-clone")
+    assert readiness["ready"] is True
+    assert readiness["core_ready"] is True
+    assert readiness["background_ready"] is False
+    assert readiness["blocking_component"] is None
+    assert readiness["failure_reason"] is None
+    assert readiness["background_warning"] == "fxweekend-clone: script disabled by test"
+    assert warning["reason"] == "script disabled by test"
+    assert warning["blocking"] is False
+    assert component["phase"] == "autostart_unavailable"
+    assert component["blocking"] is False
 
 
 def test_startup_readiness_reports_ready_after_state_restore_and_autostart(
@@ -449,8 +473,13 @@ def test_startup_readiness_reports_ready_after_state_restore_and_autostart(
     payload = master_service._startup_readiness_status()
 
     assert payload["ready"] is True
+    assert payload["core_ready"] is True
+    assert payload["background_ready"] is True
+    assert payload["background_warnings"] == []
+    assert payload["background_warning"] is None
     assert payload["startup_phase"] == "ready"
     assert payload["blocking_component"] is None
+    assert all(component["blocking"] is False for component in payload["components"])
 
 
 def test_startup_readiness_blocks_until_state_restore_completes(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -459,16 +488,50 @@ def test_startup_readiness_blocks_until_state_restore_completes(monkeypatch: pyt
         "_state_sync_status_snapshot",
         lambda: {"enabled": True, "restore_complete": False, "restore_status": "pending", "restore_error": ""},
     )
-    monkeypatch.setattr(master_service, "_compute_autostart_scripts", lambda: ["bybit_monitor"])
+    monkeypatch.setattr(master_service, "_compute_autostart_scripts", lambda: [])
+    monkeypatch.setattr(master_service, "_LAST_AUTOSTART_UNAVAILABLE", {})
 
     payload = master_service._startup_readiness_status()
 
     assert payload["ready"] is False
+    assert payload["core_ready"] is False
+    assert payload["background_ready"] is True
     assert payload["startup_phase"] == "state_restore_pending"
     assert payload["blocking_component"] == "state_restore"
+    assert payload["failure_reason"] == "Startup state restore is still pending."
 
 
-def test_startup_readiness_reports_autostart_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_startup_readiness_preserves_exact_state_restore_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    exact_error = "Repo-local restore failed: invalid pending_webhooks.json"
+    monkeypatch.setattr(
+        master_service,
+        "_state_sync_status_snapshot",
+        lambda: {
+            "enabled": True,
+            "restore_complete": False,
+            "restore_status": "failed",
+            "restore_error": exact_error,
+        },
+    )
+    monkeypatch.setattr(master_service, "_compute_autostart_scripts", lambda: [])
+    monkeypatch.setattr(master_service, "_LAST_AUTOSTART_UNAVAILABLE", {})
+
+    payload = master_service._startup_readiness_status()
+
+    assert payload["ready"] is False
+    assert payload["core_ready"] is False
+    assert payload["background_ready"] is True
+    assert payload["startup_phase"] == "state_restore_failed"
+    assert payload["blocking_component"] == "state_restore"
+    assert payload["failure_reason"] == exact_error
+    state_component = next(item for item in payload["components"] if item["name"] == "state_restore")
+    assert state_component["reason"] == exact_error
+    assert state_component["blocking"] is True
+
+
+def test_startup_readiness_reports_autostart_failure_as_background_warning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     class FailedScript:
         name = "bybit_monitor"
         last_start_error = "bad credentials"
@@ -489,10 +552,60 @@ def test_startup_readiness_reports_autostart_failure(monkeypatch: pytest.MonkeyP
 
     payload = master_service._startup_readiness_status()
 
-    assert payload["ready"] is False
-    assert payload["startup_phase"] == "autostart_failed"
-    assert payload["blocking_component"] == "bybit_monitor"
-    assert payload["failure_reason"] == "bad credentials"
+    assert payload["ready"] is True
+    assert payload["core_ready"] is True
+    assert payload["background_ready"] is False
+    assert payload["startup_phase"] == "ready"
+    assert payload["blocking_component"] is None
+    assert payload["failure_reason"] is None
+    assert payload["background_warning"] == "bybit_monitor: bad credentials"
+    warning = payload["background_warnings"][0]
+    assert warning["name"] == "bybit_monitor"
+    assert warning["phase"] == "autostart_failed"
+    assert warning["reason"] == "bad credentials"
+    assert warning["blocking"] is False
+    component = next(item for item in payload["components"] if item["name"] == "bybit_monitor")
+    assert component["reason"] == "bad credentials"
+    assert component["blocking"] is False
+
+
+def test_startup_readiness_reports_autostart_pending_as_background_warning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class StartingScript:
+        name = "bybit_monitor"
+        last_start_error = ""
+        last_exit_reason = ""
+
+        def to_summary(self) -> dict[str, object]:
+            return {"name": self.name, "running": False, "starting": True}
+
+    monkeypatch.setattr(
+        master_service,
+        "_state_sync_status_snapshot",
+        lambda: {"enabled": True, "restore_complete": True, "restore_status": "complete", "restore_error": ""},
+    )
+    monkeypatch.setattr(master_service, "_compute_autostart_scripts", lambda: ["bybit_monitor"])
+    monkeypatch.setattr(master_service, "_LAST_AUTOSTART_UNAVAILABLE", {})
+    monkeypatch.setattr(master_service.script_manager, "get", lambda _name: StartingScript())
+    monkeypatch.setattr(
+        master_service,
+        "_scanner_status_payload",
+        lambda _path: {"ui_status": "starting", "heartbeat_fresh": False},
+    )
+
+    payload = master_service._startup_readiness_status()
+
+    assert payload["ready"] is True
+    assert payload["core_ready"] is True
+    assert payload["background_ready"] is False
+    assert payload["startup_phase"] == "ready"
+    assert payload["background_warning"] == "bybit_monitor: BYBIT Monitor is not running yet."
+    warning = payload["background_warnings"][0]
+    assert warning["name"] == "bybit_monitor"
+    assert warning["phase"] == "autostart_starting"
+    assert warning["reason"] == "BYBIT Monitor is not running yet."
+    assert warning["blocking"] is False
 
 
 def test_run_local_master_control_bat_uses_local_autostart() -> None:
@@ -751,6 +864,8 @@ def test_oanda_timeout_with_empty_message_logs_exception_class_and_recovery(
 
 
 def test_supervisor_restarts_stopped_scanner(monkeypatch: pytest.MonkeyPatch) -> None:
+    started = asyncio.Event()
+
     class FakeScript:
         def __init__(self) -> None:
             self.is_running = False
@@ -759,25 +874,35 @@ def test_supervisor_restarts_stopped_scanner(monkeypatch: pytest.MonkeyPatch) ->
         async def start(self) -> None:
             self.starts += 1
             self.is_running = True
+            started.set()
 
     fake = FakeScript()
+    real_sleep = asyncio.sleep
+
+    async def immediate_sleep(_delay: float) -> None:
+        await real_sleep(0)
+
     monkeypatch.setattr(master_service, "APP_PROFILE", "local")
     monkeypatch.setattr(master_service, "_scanner_has_external_live_runtime", lambda _name: False)
-    monkeypatch.setattr(master_service, "_SCANNER_SUPERVISOR_BASE_SECONDS", 0.01)
+    monkeypatch.setattr(master_service.asyncio, "sleep", immediate_sleep)
+    monkeypatch.setattr(master_service, "_SCANNER_SUPERVISOR_BACKOFF", {})
+    monkeypatch.setattr(master_service, "_SCANNER_SUPERVISOR_BACKOFF_WINDOW", {})
     monkeypatch.setattr(master_service.script_manager, "get", lambda _name: fake)
 
     async def _run() -> None:
         task = asyncio.create_task(master_service._supervise_autostart_scripts(["bybit_monitor"]))
-        await asyncio.sleep(0.01)
+        await asyncio.wait_for(started.wait(), timeout=1.0)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
 
     asyncio.run(_run())
-    assert fake.starts >= 0
+    assert fake.starts == 1
 
 
 def test_supervisor_skips_restart_when_external_runtime_live(monkeypatch: pytest.MonkeyPatch) -> None:
+    checked = asyncio.Event()
+
     class FakeScript:
         def __init__(self) -> None:
             self.is_running = False
@@ -788,20 +913,128 @@ def test_supervisor_skips_restart_when_external_runtime_live(monkeypatch: pytest
             self.is_running = True
 
     fake = FakeScript()
+    real_sleep = asyncio.sleep
+
+    async def immediate_sleep(_delay: float) -> None:
+        await real_sleep(0)
+
+    def external_runtime_live(_name: str) -> bool:
+        checked.set()
+        return True
+
     monkeypatch.setattr(master_service, "APP_PROFILE", "local")
-    monkeypatch.setattr(master_service, "_scanner_has_external_live_runtime", lambda _name: True)
-    monkeypatch.setattr(master_service, "_SCANNER_SUPERVISOR_BASE_SECONDS", 0.01)
+    monkeypatch.setattr(master_service, "_scanner_has_external_live_runtime", external_runtime_live)
+    monkeypatch.setattr(master_service.asyncio, "sleep", immediate_sleep)
+    monkeypatch.setattr(master_service, "_SCANNER_SUPERVISOR_BACKOFF", {})
+    monkeypatch.setattr(master_service, "_SCANNER_SUPERVISOR_BACKOFF_WINDOW", {})
     monkeypatch.setattr(master_service.script_manager, "get", lambda _name: fake)
 
     async def _run() -> None:
         task = asyncio.create_task(master_service._supervise_autostart_scripts(["oanda_monitor"]))
-        await asyncio.sleep(0.05)
+        await asyncio.wait_for(checked.wait(), timeout=1.0)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
 
     asyncio.run(_run())
     assert fake.starts == 0
+
+
+def test_supervisor_restarts_stopped_fxweekend_autostart(monkeypatch: pytest.MonkeyPatch) -> None:
+    started = asyncio.Event()
+
+    class FakeScript:
+        def __init__(self) -> None:
+            self.is_running = False
+            self.starts = 0
+
+        async def start(self) -> None:
+            self.starts += 1
+            self.is_running = True
+            started.set()
+
+    fake = FakeScript()
+    real_sleep = asyncio.sleep
+
+    async def immediate_sleep(_delay: float) -> None:
+        await real_sleep(0)
+
+    monkeypatch.setattr(master_service, "APP_PROFILE", "local")
+    monkeypatch.setattr(
+        master_service,
+        "_scanner_has_external_live_runtime",
+        lambda _name: (_ for _ in ()).throw(AssertionError("non-scanner must not use scanner runtime state")),
+    )
+    monkeypatch.setattr(master_service.asyncio, "sleep", immediate_sleep)
+    monkeypatch.setattr(master_service, "_SCANNER_SUPERVISOR_BACKOFF", {})
+    monkeypatch.setattr(master_service, "_SCANNER_SUPERVISOR_BACKOFF_WINDOW", {})
+    monkeypatch.setattr(master_service.script_manager, "get", lambda name: fake if name == "fxweekend-clone" else None)
+
+    async def _run() -> None:
+        task = asyncio.create_task(master_service._supervise_autostart_scripts(["fxweekend-clone"]))
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(_run())
+    assert fake.starts == 1
+
+
+def test_supervisor_ignores_non_service_autostart_targets(monkeypatch: pytest.MonkeyPatch) -> None:
+    requested: list[str] = []
+
+    monkeypatch.setattr(master_service, "APP_PROFILE", "local")
+    monkeypatch.setattr(
+        master_service.script_manager,
+        "get",
+        lambda name: requested.append(name),
+    )
+
+    asyncio.run(master_service._supervise_autostart_scripts(["coinspot-clone", "oanda_history-clone"]))
+
+    assert requested == []
+
+
+def test_autostart_supervisor_preserves_restart_failure_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
+    attempted = asyncio.Event()
+
+    class FailedScript:
+        is_running = False
+        starts = 0
+
+        async def start(self) -> None:
+            self.starts += 1
+            attempted.set()
+            raise RuntimeError("restart refused")
+
+    fake = FailedScript()
+    real_sleep = asyncio.sleep
+    backoff: dict[str, float] = {}
+    backoff_window: dict[str, float] = {}
+
+    async def immediate_sleep(_delay: float) -> None:
+        await real_sleep(0)
+
+    monkeypatch.setattr(master_service, "APP_PROFILE", "local")
+    monkeypatch.setattr(master_service.asyncio, "sleep", immediate_sleep)
+    monkeypatch.setattr(master_service.time, "time", lambda: 100.0)
+    monkeypatch.setattr(master_service, "_SCANNER_SUPERVISOR_BACKOFF", backoff)
+    monkeypatch.setattr(master_service, "_SCANNER_SUPERVISOR_BACKOFF_WINDOW", backoff_window)
+    monkeypatch.setattr(master_service.script_manager, "get", lambda _name: fake)
+
+    async def _run() -> None:
+        task = asyncio.create_task(master_service._supervise_autostart_scripts(["fxweekend-clone"]))
+        await asyncio.wait_for(attempted.wait(), timeout=1.0)
+        await real_sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(_run())
+    assert fake.starts == 1
+    assert backoff_window == {"fxweekend-clone": 15.0}
+    assert backoff == {"fxweekend-clone": 115.0}
 
 
 def test_monitor_running_true_when_runtime_status_is_fresh_without_managed_process(

@@ -653,6 +653,7 @@ def test_local_profile_buttons_use_trading_journal_page_not_merged_route() -> No
     buttons = module._profile_main_buttons()
     by_name = {str(item.get("name")): item for item in buttons}
     assert by_name["trading-journal"]["open_url"] == "/dashboard/trading-journal"
+    assert by_name["fxweekend"]["open_url"] == "/apps/fxweekend-clone"
     assert by_name["spreads-clone"]["label"] == "Spreads"
     assert "instrument-lookup" not in by_name
     assert "history" not in by_name

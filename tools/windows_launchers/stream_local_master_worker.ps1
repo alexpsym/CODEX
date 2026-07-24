@@ -3,9 +3,11 @@ param(
     [Parameter(Mandatory = $true)] [string] $Root,
     [Parameter(Mandatory = $true)] [string] $WorkerLog,
     [string] $HealthUrl = "http://127.0.0.1:8000/health",
+    [string] $ReadinessUrl = "http://127.0.0.1:8000/api/startup-readiness",
     [string] $ScriptsUrl = "http://127.0.0.1:8000/scripts",
     [int] $MasterReadyTimeoutSeconds = 60,
-    [int] $ScannerReadyTimeoutSeconds = 90
+    [int] $ScannerReadyTimeoutSeconds = 90,
+    [int] $HealthFailureThreshold = 3
 )
 
 $ErrorActionPreference = "Stop"
@@ -16,6 +18,10 @@ $script:PendingLogText = ""
 $script:LastHealthOkAt = $null
 $script:LastAutostartOkAt = $null
 $script:StartupCompleted = $false
+$script:BackgroundReady = $null
+$script:LastBackgroundDetail = ""
+$script:CanonicalAutostartTargetsKnown = $false
+$script:CanonicalAutostartTargets = @()
 
 function New-UvicornGenerationEvidence {
     param(
@@ -184,9 +190,23 @@ function Write-StartupProgress {
 }
 
 function Test-DashboardHealth {
+    $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
+    if ($curl -and $curl.Path) {
+        try {
+            $content = & $curl.Path -s --noproxy "*" -m 2 $HealthUrl
+            $ok = (($LASTEXITCODE -eq 0) -and ([string] $content).Trim() -eq "ok")
+            if ($ok) {
+                $script:LastHealthOkAt = Get-Date
+                return $true
+            }
+        }
+        catch {
+        }
+    }
+
     try {
-        $response = Invoke-WebRequest -UseBasicParsing -Uri $HealthUrl -TimeoutSec 1
-        $ok = ($response.StatusCode -eq 200 -and (($response.Content | Out-String).Trim() -eq "ok"))
+        $response = Invoke-RestMethod -Uri $HealthUrl -TimeoutSec 2
+        $ok = (([string] $response).Trim() -eq "ok")
         if ($ok) {
             $script:LastHealthOkAt = Get-Date
         }
@@ -208,9 +228,14 @@ function Get-RequiredAutostartTargets {
             Where-Object { $_ -and $_.ToUpperInvariant() -notin @("NONE", "OFF", "DISABLED") }
     )
     if ($tokens.Count -eq 1 -and ($tokens[0] -eq "*" -or $tokens[0].ToUpperInvariant() -eq "ALL")) {
-        return @("bybit_monitor", "oanda_monitor", "fxweekend-clone")
+        $tokens = @("bybit_monitor", "oanda_monitor", "fxweekend-clone")
     }
-    return @($tokens)
+    $excluded = @(
+        ([string] $env:AUTOSTART_EXCLUDE).Split(",") |
+            ForEach-Object { $_.Trim() } |
+            Where-Object { $_ }
+    )
+    return @($tokens | Where-Object { $_ -notin $excluded })
 }
 
 function Get-ScriptRowByName {
@@ -284,7 +309,12 @@ function Test-AutostartTargetsReady {
     try {
         $response = Invoke-RestMethod -Uri $ScriptsUrl -TimeoutSec 2
         $scripts = @($response)
-        $targets = @(Get-RequiredAutostartTargets)
+        $targets = if ($script:CanonicalAutostartTargetsKnown) {
+            @($script:CanonicalAutostartTargets)
+        }
+        else {
+            @(Get-RequiredAutostartTargets)
+        }
         if ($targets.Count -eq 0) {
             $script:LastAutostartOkAt = Get-Date
             return [pscustomobject]@{ Ready = $true; Missing = @(); Detail = "no autostart targets configured" }
@@ -303,8 +333,130 @@ function Test-AutostartTargetsReady {
     }
 }
 
-function Test-ScannerReady {
-    return [bool] (Test-AutostartTargetsReady).Ready
+function ConvertTo-BackgroundWarningText {
+    param([AllowNull()] [object] $Warning)
+
+    if ($null -eq $Warning) {
+        return ""
+    }
+    if ($Warning -is [string]) {
+        return ([string] $Warning).Trim()
+    }
+
+    $name = Select-FirstText @($Warning.name, $Warning.target, $Warning.component, $Warning.label)
+    $reason = Select-FirstText @($Warning.reason, $Warning.detail, $Warning.message, $Warning.phase)
+    if ($name -and $reason) {
+        return "{0} ({1})" -f $name, $reason
+    }
+    return (Select-FirstText @($reason, $name, ($Warning | ConvertTo-Json -Compress -Depth 4)))
+}
+
+function Get-CoreStartupReadiness {
+    try {
+        $response = Invoke-RestMethod -Uri $ReadinessUrl -TimeoutSec 2
+        $autostartTargetsProperty = $response.PSObject.Properties["autostart_targets"]
+        if ($null -ne $autostartTargetsProperty) {
+            $script:CanonicalAutostartTargets = @(
+                $response.autostart_targets |
+                    ForEach-Object { ([string] $_).Trim() } |
+                    Where-Object { $_ }
+            )
+            $script:CanonicalAutostartTargetsKnown = $true
+        }
+        $coreReadyProperty = $response.PSObject.Properties["core_ready"]
+        $coreReady = if ($null -ne $coreReadyProperty) { [bool] $response.core_ready } else { [bool] $response.ready }
+        $backgroundReadyProperty = $response.PSObject.Properties["background_ready"]
+        $backgroundReady = if ($null -ne $backgroundReadyProperty) { [bool] $response.background_ready } else { $null }
+        $warnings = @()
+        if ($null -ne $response.background_warnings) {
+            $warnings += @($response.background_warnings | ForEach-Object { ConvertTo-BackgroundWarningText $_ })
+        }
+        if ($warnings.Count -eq 0 -and -not [string]::IsNullOrWhiteSpace([string] $response.background_warning)) {
+            $warnings += [string] $response.background_warning
+        }
+        if ($warnings.Count -eq 0 -and $null -ne $response.components) {
+            $warnings += @(
+                $response.components |
+                    Where-Object {
+                        [string] $_.name -ne "state_restore" -and
+                        $_.blocking -eq $false -and
+                        $_.ready -eq $false
+                    } |
+                    ForEach-Object { ConvertTo-BackgroundWarningText $_ }
+            )
+        }
+        $warnings = @($warnings | Where-Object { -not [string]::IsNullOrWhiteSpace([string] $_) } | Select-Object -Unique)
+        $phase = Select-FirstText @($response.startup_phase, $(if ($coreReady) { "ready" } else { "checking" }))
+        $component = [string] $response.blocking_component
+        $reason = [string] $response.failure_reason
+        $detailParts = @("phase=$phase")
+        if (-not [string]::IsNullOrWhiteSpace($component)) {
+            $detailParts += "component=$component"
+        }
+        if (-not [string]::IsNullOrWhiteSpace($reason)) {
+            $detailParts += "reason=$reason"
+        }
+        return [pscustomobject]@{
+            Available = $true
+            Ready = $coreReady
+            Phase = $phase
+            BlockingComponent = $component
+            FailureReason = $reason
+            Detail = $detailParts -join "; "
+            BackgroundReady = $backgroundReady
+            BackgroundDetail = $warnings -join "; "
+        }
+    }
+    catch {
+        return [pscustomobject]@{
+            Available = $false
+            Ready = $false
+            Phase = "readiness_unavailable"
+            BlockingComponent = "startup_readiness"
+            FailureReason = "$($_.Exception.GetType().Name): $($_.Exception.Message)"
+            Detail = "failed to query ${ReadinessUrl}: $($_.Exception.GetType().Name): $($_.Exception.Message)"
+            BackgroundReady = $null
+            BackgroundDetail = ""
+        }
+    }
+}
+
+function Update-BackgroundReadiness {
+    param(
+        [AllowNull()] [object] $CoreStatus,
+        [AllowNull()] [object] $AutostartStatus
+    )
+
+    $apiHasStatus = ($null -ne $CoreStatus -and $null -ne $CoreStatus.BackgroundReady)
+    $apiReady = if ($apiHasStatus) { [bool] $CoreStatus.BackgroundReady } else { $true }
+    $scriptsHaveStatus = $null -ne $AutostartStatus
+    $scriptsReady = if ($scriptsHaveStatus) { [bool] $AutostartStatus.Ready } else { $true }
+    $ready = $apiReady -and $scriptsReady
+    $detail = Select-FirstText @(
+        $(if ($apiHasStatus -and -not $apiReady) { $CoreStatus.BackgroundDetail } else { "" }),
+        $(if ($scriptsHaveStatus -and -not $scriptsReady) { $AutostartStatus.Detail } else { "" }),
+        $(if ($ready -and $scriptsHaveStatus) { $AutostartStatus.Detail } else { "" }),
+        $(if ($ready) { "background services ready" } else { "background service readiness unavailable" })
+    )
+
+    if ($ready) {
+        $script:LastAutostartOkAt = Get-Date
+        if ($script:BackgroundReady -eq $false) {
+            Write-LiveLine "[local-master] configured autostart targets recovered: $detail"
+        }
+    }
+    elseif ($script:BackgroundReady -ne $false -or $detail -ne $script:LastBackgroundDetail) {
+        if ($script:BackgroundReady -eq $true) {
+            Write-LiveLine "[local-master] autostart readiness lost after startup: $detail (nonblocking; startup progress remains complete)."
+        }
+        else {
+            Write-LiveLine "[local-master] background startup warning (nonblocking): $detail"
+        }
+        Write-LiveLine "[local-master] background services remain supervised and will continue retrying."
+    }
+
+    $script:BackgroundReady = $ready
+    $script:LastBackgroundDetail = $detail
 }
 
 $rootPath = [IO.Path]::GetFullPath($Root)
@@ -343,14 +495,17 @@ if (-not $process.Start()) {
 $process.StandardInput.Close()
 
 $startedAt = Get-Date
-$scannerStartedAt = $null
+$coreStartedAt = $null
 $dashboardReady = $false
-$scannerReady = $false
+$coreReady = $false
 $lastProgressAt = -100
 $dashboardTimeoutReported = $false
-$scannerTimeoutReported = $false
+$coreTimeoutReported = $false
 $steadyCheckAt = Get-Date
 $restartRecoveryActive = $false
+$lastCoreDetail = ""
+$lastReadinessQueryWarning = ""
+$consecutiveHealthFailures = 0
 
 while (-not $process.WaitForExit(1000)) {
     Write-WorkerLogTail
@@ -360,13 +515,13 @@ while (-not $process.WaitForExit(1000)) {
     if (-not $dashboardReady) {
         if (Test-DashboardHealth) {
             $dashboardReady = $true
-            $scannerStartedAt = Get-Date
+            $consecutiveHealthFailures = 0
+            $coreStartedAt = Get-Date
             $lastProgressAt = -100
             if ($restartRecoveryActive) {
                 Write-LiveLine "[local-master] dashboard recovered after worker restart."
             }
-            Write-StartupProgress -Phase "dashboard health is ready" -ElapsedSeconds $elapsed -TotalSeconds $MasterReadyTimeoutSeconds -Complete:$true
-            Write-LiveLine "[local-master] startup step: waiting for configured autostart targets to report running."
+            Write-LiveLine "[local-master] dashboard health is ready; checking required core state via $ReadinessUrl."
             continue
         }
 
@@ -382,46 +537,71 @@ while (-not $process.WaitForExit(1000)) {
         continue
     }
 
-    if (-not (Test-DashboardHealth)) {
+    $dashboardHealthOk = Test-DashboardHealth
+    if (-not $dashboardHealthOk) {
+        $consecutiveHealthFailures += 1
+        if ($consecutiveHealthFailures -lt [Math]::Max(1, $HealthFailureThreshold)) {
+            if ($consecutiveHealthFailures -eq 1) {
+                Write-LiveLine "[local-master] dashboard health probe missed once; confirming before entering recovery."
+            }
+            continue
+        }
         if (-not $restartRecoveryActive) {
             Write-LiveLine "[local-master] restart detected: dashboard health became unavailable while worker process stayed alive."
-            Write-LiveLine "[local-master] waiting for recovery: dashboard health and configured autostart targets will be rechecked."
+            Write-LiveLine "[local-master] waiting for recovery: dashboard health and core startup readiness will be rechecked."
         }
         $restartRecoveryActive = $true
         $dashboardReady = $false
-        $scannerReady = $false
-        $scannerStartedAt = $null
+        $coreReady = $false
+        $coreStartedAt = $null
         $lastProgressAt = -100
         $dashboardTimeoutReported = $false
-        $scannerTimeoutReported = $false
+        $coreTimeoutReported = $false
+        $lastCoreDetail = ""
+        $consecutiveHealthFailures = 0
         continue
     }
+    if ($consecutiveHealthFailures -gt 0) {
+        Write-LiveLine "[local-master] dashboard health probe recovered before the recovery threshold."
+        $consecutiveHealthFailures = 0
+    }
 
-    if (-not $scannerReady) {
-        $scannerElapsed = [int][Math]::Floor(($now - $scannerStartedAt).TotalSeconds)
-        $autostartStatus = Test-AutostartTargetsReady
-        if ($autostartStatus.Ready) {
-            $scannerReady = $true
+    if (-not $coreReady) {
+        $coreElapsed = [int][Math]::Floor(($now - $coreStartedAt).TotalSeconds)
+        $readinessStatus = Get-CoreStartupReadiness
+        if ($readinessStatus.Ready) {
+            $coreReady = $true
+            if (-not [string]::IsNullOrWhiteSpace($lastReadinessQueryWarning)) {
+                Write-LiveLine "[local-master] startup readiness query recovered."
+                $lastReadinessQueryWarning = ""
+            }
             if ($restartRecoveryActive) {
-                Write-LiveLine "[local-master] configured autostart targets recovered: $($autostartStatus.Detail)"
+                Write-LiveLine "[local-master] core startup readiness recovered after dashboard restart."
                 $restartRecoveryActive = $false
             }
-            Write-StartupProgress -Phase "dashboard and scanner are ready; browser should open now" -ElapsedSeconds $ScannerReadyTimeoutSeconds -TotalSeconds $ScannerReadyTimeoutSeconds -Complete:$true
-            Write-LiveLine "[local-master] startup complete. Live server log remains open below."
-            $script:StartupCompleted = $true
+            Write-StartupProgress -Phase "dashboard health and core state are ready; browser should open now" -ElapsedSeconds $elapsed -TotalSeconds $MasterReadyTimeoutSeconds -Complete:$true
+            if (-not $script:StartupCompleted) {
+                Write-LiveLine "[local-master] startup complete. Live server log remains open below."
+                $script:StartupCompleted = $true
+            }
+            $autostartStatus = Test-AutostartTargetsReady
+            Update-BackgroundReadiness -CoreStatus $readinessStatus -AutostartStatus $autostartStatus
+            $steadyCheckAt = Get-Date
             continue
         }
 
-        if ($scannerElapsed -ge $ScannerReadyTimeoutSeconds -and -not $scannerTimeoutReported) {
-            $scannerTimeoutReported = $true
-            Write-LiveLine "[local-master] recovery failure: configured autostart target readiness has passed the usual $ScannerReadyTimeoutSeconds second window; detail: $($autostartStatus.Detail)"
+        if ($readinessStatus.Detail -ne $lastCoreDetail) {
+            Write-LiveLine "[local-master] core readiness detail: $($readinessStatus.Detail)"
+            $lastCoreDetail = $readinessStatus.Detail
         }
 
-        if (($scannerElapsed -eq 0) -or (($elapsed - $lastProgressAt) -ge 5)) {
-            Write-StartupProgress -Phase "checking configured autostart targets at $ScriptsUrl" -ElapsedSeconds $scannerElapsed -TotalSeconds $ScannerReadyTimeoutSeconds
-            if (-not [string]::IsNullOrWhiteSpace([string] $autostartStatus.Detail)) {
-                Write-LiveLine "[local-master] autostart readiness detail: $($autostartStatus.Detail)"
-            }
+        if ($coreElapsed -ge $MasterReadyTimeoutSeconds -and -not $coreTimeoutReported) {
+            $coreTimeoutReported = $true
+            Write-LiveLine "[local-master] startup note: core readiness has passed the usual $MasterReadyTimeoutSeconds second window; detail: $($readinessStatus.Detail)"
+        }
+
+        if (($coreElapsed -eq 0) -or (($elapsed - $lastProgressAt) -ge 5)) {
+            Write-StartupProgress -Phase "checking core startup readiness at $ReadinessUrl" -ElapsedSeconds $coreElapsed -TotalSeconds $MasterReadyTimeoutSeconds
             $lastProgressAt = $elapsed
         }
         continue
@@ -429,15 +609,33 @@ while (-not $process.WaitForExit(1000)) {
 
     if (($now - $steadyCheckAt).TotalSeconds -ge 5) {
         $steadyCheckAt = $now
-        $autostartStatus = Test-AutostartTargetsReady
-        if (-not $autostartStatus.Ready) {
-            Write-LiveLine "[local-master] autostart readiness lost after startup: $($autostartStatus.Detail)"
-            Write-LiveLine "[local-master] waiting for recovery: configured autostart targets will be revalidated."
-            $scannerReady = $false
-            $scannerStartedAt = Get-Date
-            $scannerTimeoutReported = $false
-            $lastProgressAt = -100
+        $readinessStatus = Get-CoreStartupReadiness
+        if (-not $readinessStatus.Available) {
+            if ($readinessStatus.Detail -ne $lastReadinessQueryWarning) {
+                Write-LiveLine "[local-master] startup readiness query warning after completion: $($readinessStatus.Detail) (nonblocking; startup progress remains complete)."
+                $lastReadinessQueryWarning = $readinessStatus.Detail
+            }
+            $autostartStatus = Test-AutostartTargetsReady
+            Update-BackgroundReadiness -CoreStatus $null -AutostartStatus $autostartStatus
+            continue
         }
+        if (-not [string]::IsNullOrWhiteSpace($lastReadinessQueryWarning)) {
+            Write-LiveLine "[local-master] startup readiness query recovered."
+            $lastReadinessQueryWarning = ""
+        }
+        if (-not $readinessStatus.Ready) {
+            Write-LiveLine "[local-master] core readiness lost after startup: $($readinessStatus.Detail)"
+            Write-LiveLine "[local-master] waiting for recovery: required core state will be revalidated."
+            $coreReady = $false
+            $coreStartedAt = Get-Date
+            $coreTimeoutReported = $false
+            $lastProgressAt = -100
+            $lastCoreDetail = ""
+            $restartRecoveryActive = $true
+            continue
+        }
+        $autostartStatus = Test-AutostartTargetsReady
+        Update-BackgroundReadiness -CoreStatus $readinessStatus -AutostartStatus $autostartStatus
     }
 }
 

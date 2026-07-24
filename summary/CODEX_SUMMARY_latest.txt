@@ -1,59 +1,68 @@
 Final summary
 
 Status:
-- Converted the SYMBOLS manual-header border oracle into a one-time legacy migration.
-- Runtime repair is now gated by exact border-and-merge fingerprints for the known damaged `40f2ef3` and `5c88d4a` layouts, not merely by header names. There is no runtime Git-history dependency.
-- Ordinary data-only resyncs no longer call the duration AT/AU/AV boundary migration. Those borders are applied only while adding duration columns or repairing one of the known damaged layouts.
-- A repaired workbook therefore preserves later manual SYMBOLS border changes exactly, including header and data-row changes.
-- The checked-in `journal/Trading Journal.xlsx` was not modified. Its correct `772eedb` A1:AT2 border baseline, Stops/Targets and AR:AV merges, widths, duration boundaries, Trade Log formatting, and formulas remain intact.
-- Open Orders and all other completed workbook behavior were not changed.
+- Fixed the Local Trading Tools warm-start delay, 99% progress deadlock/regression, authoritative-local Dropbox workbook work, and Open Orders column shift.
+- Kept Instrument Lookup, calculator, journal, monitors, FX Weekend, Open Orders, Edge-only launch, and existing credential/trading paths intact.
+- Did not modify `journal/Trading Journal.xlsx`, `custom instructions/`, `Local Trading Tools.exe`, Instrument Lookup behavior, calculator logic/layout, or the OANDA/Bybit row schema.
+
+Confirmed root causes and fixes:
+1. `run_local_master_control.bat` ran `pip install -r spreads-clone/requirements.txt` on every warm launch. It now performs a fast same-interpreter module-presence probe for Flask, openpyxl, requests, and MetaTrader5 on Windows. Pip runs only when something is missing, the skip override remains supported, and a post-install probe plus clear fatal errors preserves first-run behavior.
+2. Both the PowerShell streamer and `/api/startup-readiness` treated Bybit Monitor, OANDA Monitor, and FX Weekend as global blockers. Core readiness is now dashboard health plus required state restoration. Background readiness is explicit and nonblocking through `core_ready`, `background_ready`, `background_warnings`, and `background_warning`, while all compatibility fields remain.
+3. The streamer now uses `/api/startup-readiness` as the only post-health completion gate. It keeps completed progress at 100% through background failures and transient readiness-query failures, reports exact warnings/recovery, debounces one-off health misses, and still re-enters blocking recovery after three consecutive health failures.
+4. Background supervision/retry/backoff now covers the intended long-running local services only: Bybit Monitor, OANDA Monitor, and FX Weekend. Existing scanner external-runtime bypass behavior remains. `/scripts` checks use the server-provided canonical autostart target list; the legacy fallback also honors `AUTOSTART_EXCLUDE`.
+5. Authoritative `master_journal` single-file startup no longer resolves the Dropbox journal folder or downloads/sanitizes the Dropbox Bybit Demo workbook. Repo-local restoration, state-ready signaling, OANDA persisted-row repair, backup scheduling, and non-authoritative/manual paths remain unchanged.
+6. `OPEN_ORDERS_TEMPLATE` had an unintended empty first `<th>`, producing 18 headers for 17 rendered cells. The empty header was removed; Broker is first and Action remains seventeenth/last.
+7. Live validation found two related presentation/probing defects: the local merged `/scripts` list hid FX Weekend even though it autostarted, and a single slow health probe could briefly regress completed progress. The local FX Weekend row and health-failure threshold were added without redesigning the dashboard.
 
 Files changed intentionally:
-- tools/master_journal_workbook.py
-- tests/test_master_journal_workbook.py
-- summary/CODEX_SUMMARY_latest.txt
+- `run_local_master_control.bat`
+- `render/master_service.py`
+- `tools/windows_launchers/stream_local_master_worker.ps1`
+- `tools/windows_launchers/local_master_worker_console.bat`
+- `tests/test_open_orders_page.py`
+- `tests/test_merged_monitor_status_env.py`
+- `tests/test_master_service_state_sync.py`
+- `tests/test_spread_monitor_dashboard.py`
+- `tests/test_windows_launchers.py`
+- `tests/test_dashboard_home_layout.py`
+- `summary/CODEX_SUMMARY_latest.txt`
 
-Regression coverage:
-- The `40f2ef3` damaged workbook still migrates to zero A1:AT2 border mismatches against `772eedb` after save/reopen. A manual AJ1 border change made after migration survives a second resync.
-- The `5c88d4a` damaged workbook also migrates to zero A1:AT2 border mismatches against `772eedb`.
-- A copy of the repaired checked-in workbook preserves all SYMBOLS borders, merges, widths, and row heights through two resyncs plus open/save/reopen.
-- The source-based regression changes AJ1 left and AT4 right to red double borders, corrupts a calculated SYMBOLS metric, saves/reopens, and runs two source-based resyncs. Both borders remain exact, the metric refreshes, and Trade Log borders, fills, merges, widths, and row heights remain unchanged.
-- Formula-error scans are empty in the legacy, checked-in, and manual-edit preservation paths.
+`tests/test_dashboard_home_layout.py` was additionally necessary to lock the restored local FX Weekend dashboard row discovered during the Windows end-to-end run.
 
-Verification performed:
-- `python -m py_compile tools/master_journal_workbook.py tests/test_master_journal_workbook.py`: passed.
+Before/after timing evidence:
+- Baseline log from 2026-07-23: worker start 20:16:54.91; unconditional pip work occupied the warm path until Uvicorn was requested at 20:16:59.87 (about 4.96 seconds); application ready at 20:17:06; dashboard GET at 20:17:15. The reported meter could remain at 99% for about 935 seconds.
+- Final packaged launch on 2026-07-25: EXE requested at 09:11:19.50; worker at 09:11:36.47; dependency probe completed at 09:11:36.71 (0.24 seconds after worker start) and explicitly skipped pip; Uvicorn requested at 09:11:36.72; state startup and application ready at 09:11:49; visible meter reached 100% at 17 seconds; Edge started at 09:11:53 and loaded `/?local_launch=1784934686804` at 09:11:55 without refresh.
+- The warm dependency phase therefore dropped from about 4.96 seconds of unconditional pip work to a 0.24-second probe. Most importantly, completion changed from a potentially indefinite 99% to a genuine core-ready 100% in 17 seconds.
+
+Windows end-to-end results:
+- Normal `Local Trading Tools.exe` path used; dependency output said requirements were already installed and skipped pip.
+- Readiness returned `ready=true`, `core_ready=true`, `background_ready=true`, all three canonical autostart targets, and nonblocking component records.
+- A deliberately terminated current FX Weekend child produced exact warning `fxweekend-clone: Process exited unexpectedly.` while `ready` and `core_ready` stayed true. The supervisor recovered it in 6.6 seconds.
+- Windows UI Automation found zero sub-100% progress lines after the first 100% line. It also captured the nonblocking failure, retry/start warning, and recovery messages.
+- Main dashboard, Instrument Lookup, calculator, Open Orders, monitor, and FX Weekend pages returned HTTP 200.
+- Instrument Lookup resolved BTC to Bybit `BTCUSDT` with a live price and EURUSD to OANDA `EUR_USD` / `EUR/USD`.
+- A basic live OANDA calculator quote completed for EURUSD and returned entry `1.13715`, stop `1.13705`, target `1.13735`, quantity `23843`, and approximately AUD 10 estimated loss.
+- Forced Open Orders refresh returned three rows with zero source errors. The OANDA Demo EURUSD row reported `category=forex`, `instrument=EUR_USD`, `timeframe=15MIN` (displayed as `15 minutes`), and `is_test_trade=Yes`.
+- The rendered Open Orders page contained exactly the required 17 headers in order, with Action last.
+- Controlled Exit returned `ok=true`, closed the exact TradingTools Edge target, stopped `/health`, closed the visible console, and logged the preserved `exit_button` / `local_exit` normal marker.
+- Six FX Weekend child processes created by repeated E2E relaunch cycles were explicitly stopped afterward; two processes that predated this task were left untouched.
+
+Verification:
+- `python -m pytest -q tests/test_open_orders_page.py tests/test_merged_monitor_status_env.py tests/test_master_service_state_sync.py tests/test_spread_monitor_dashboard.py tests/test_windows_launchers.py --basetemp .pytest_tmp_startup_fix_group1_release`: 166 passed, 31 warnings in 138.76 seconds.
+- `python -m pytest -q tests/test_dashboard_home_layout.py tests/test_master_service_profiles.py tests/test_master_service_local_exit.py --basetemp .pytest_tmp_startup_fix_group2_release`: 48 passed, 100 warnings in 32.26 seconds.
+- Independent full launcher revalidation: 51 passed; full merged-monitor/autostart module: 52 passed.
+- `python -m py_compile render/master_service.py`: passed.
+- PowerShell parser for `tools/windows_launchers/stream_local_master_worker.ps1`: 0 errors.
 - `node --check render/static/open_orders.js`: passed.
-- `python -m pytest tests/test_open_orders_page.py -q --basetemp .pytest_tmp_open_orders_followup`: 23 passed.
-- Manual source-resync preservation regression: 1 passed in 5m12s.
-- Checked-in two-resync preservation regression: 1 passed in 3m47s.
-- Full parent module at `e37aa1d545e63434a512e39b5657a4dd15a42376`: 135 passed, 16 failed in 27m06s.
-- Full follow-up module under the same environment/options: 137 passed, 16 failed in 37m55s.
-- Mechanical JUnit comparison: 16 common failures, 0 added failures, 0 removed failures; the failure-name lists are identical.
-- Artifact-tool read-only inspection found all 15 sheets, confirmed the focused SYMBOLS header values/styles, and matched 0 formula-error entries.
-- Independent openpyxl save/close/reopen inspection: source bytes unchanged; layout snapshot exact; 0 A1:AT2 oracle mismatches; all required merges present; no AR1:AV1 merge; AR:AV widths all 43; 0 AT/AU/AV boundary mismatches; Trade Log headers unfilled; X1/AC1 medium; 0 data-row-height mismatches; 0 formula errors.
 - `git diff --check`: passed.
+- Warnings were existing FastAPI/httpx deprecations, test-mock coroutine warnings, and denied `.pytest_cache` writes; all tests used explicit repo-local `--basetemp` paths and passed.
+- Independent read-only review found and then confirmed resolution of one-shot autostart supervision and canonical target-list edge cases.
 
-Exact full-module failures at both parent and follow-up:
-1. test_balance_after_resolution_and_duration_display
-2. test_calendar_month_conditional_formatting_rows
-3. test_dashboard_layout_style_columns
-4. test_dashboard_trade_log_and_pnl_calendar_loss_profit_fills_match
-5. test_generated_calendar_and_instrument_averages_use_direct_semantic_fills
-6. test_generated_dashboard_layout_percentages_semantic_fills_and_labels
-7. test_generated_pnl_calendar_update_removes_stale_profit_loss_rules
-8. test_instrument_averages_new_columns_order_formats_and_alignment
-9. test_instrument_averages_op_and_duration_not_blank_after_data_only_update
-10. test_instrument_currency_and_percent_formats
-11. test_monthly_aud_row_uses_result_currency_and_excluded_from_metrics
-12. test_pnl_calendar_update_removes_duplicate_generated_profit_loss_rules
-13. test_recommendations_are_removed_from_trade_log_and_kept_in_symbols_and_stats1
-14. test_sheet_order_and_hidden_meta
-15. test_stats_symbols_and_reports_required_repairs
-16. test_update_data_only_adds_missing_calendar_year_row
+Residual risks:
+- OANDA and Bybit are external dependencies. During the longer validation session, OANDA Demo briefly returned maintenance HTTP 503 and Bybit occasionally exceeded its existing quote timeout; later final live lookups, calculator, and Open Orders checks succeeded. No timeout, data-source, or trading-logic behavior was changed.
+- The fast warm-start decision intentionally checks module discoverability instead of importing heavy packages. Missing packages trigger installation and recheck; a corrupt-but-discoverable installation would still surface through the existing application startup error path.
+- Two standalone FX Weekend processes existed before this task and were deliberately not terminated. The repository's existing shutdown lifecycle does not claim ownership of historical external instances; this patch only supervises the current managed instance.
+- Pre-existing runtime/local-state changes remain dirty and must stay unstaged: `bybit_monitor/custom_alerts.json`, `render/data/*`, `state_backup.json`, and `state_manifest.json`.
 
-Notes:
-- Pytest emitted local `.pytest_cache` permission warnings; all runs used repo-local `--basetemp` directories and completed.
-- Pre-existing runtime/local-state files remain dirty and must stay unstaged: `bybit_monitor/custom_alerts.json`, `render/data/*`, `state_backup.json`, and `state_manifest.json`.
-
-Push workflow:
-- `PATCH_DESKTOP_PUSH.bat` must run after this summary and verify local HEAD equals `origin/master` before the task is complete.
+Completion workflow:
+- Run repository-root `PATCH_DESKTOP_PUSH.bat` immediately after this summary. The task is not complete until it commits the intended files, pushes successfully, and verifies local `HEAD` equals `origin/master`.

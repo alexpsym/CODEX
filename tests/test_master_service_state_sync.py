@@ -372,6 +372,62 @@ def test_startup_bootstraps_missing_repo_local_state_from_backup(monkeypatch: py
     assert captured["watchlist"] == ["BOOTUSDT"]
 
 
+def test_master_journal_startup_skips_dropbox_workbook_but_restores_repo_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(master_service, "LOCAL_STATE_ONLY", True)
+    monkeypatch.setattr(master_service, "DROPBOX_SYNC_ENABLED", False)
+    monkeypatch.setattr(master_service, "_master_journal_single_file_mode", lambda: True)
+    monkeypatch.setattr(
+        master_service,
+        "_load_local_state_backup",
+        lambda: json.dumps({"watchlist": ["BACKUPUSDT"]}).encode("utf-8"),
+    )
+    monkeypatch.setattr(
+        master_service,
+        "_resolve_trading_journal_dropbox_folder",
+        lambda: (_ for _ in ()).throw(AssertionError("Dropbox journal folder must not be resolved")),
+    )
+    monkeypatch.setattr(
+        master_service,
+        "_sanitize_bybit_demo_workbook",
+        lambda _folder: (_ for _ in ()).throw(AssertionError("Dropbox workbook must not be sanitized")),
+    )
+    monkeypatch.setattr(
+        master_service,
+        "read_repo_state_json",
+        lambda key: ["LOCALUSDT"] if key == "watchlist" else ([] if key in {"bybit_alerts", "oanda_alerts"} else {}),
+    )
+    restored = {"watchlist": None, "oanda_repair": 0, "backup": 0}
+    monkeypatch.setattr(
+        master_service,
+        "_set_watchlist_local_mirror",
+        lambda items: restored.__setitem__("watchlist", list(items)) or list(items),
+    )
+    monkeypatch.setattr(master_service.bybit_monitor, "replace_custom_alerts", lambda alerts, strict=False: alerts)
+    monkeypatch.setattr(master_service.oanda_monitor, "replace_custom_alerts", lambda alerts: alerts)
+    monkeypatch.setattr(
+        master_service,
+        "_repair_persisted_oanda_trade_rows",
+        lambda: restored.__setitem__("oanda_repair", restored["oanda_repair"] + 1) or 1,
+    )
+    monkeypatch.setattr(
+        master_service,
+        "_schedule_dropbox_upload_state_backup",
+        lambda: restored.__setitem__("backup", restored["backup"] + 1),
+    )
+    master_service._STARTUP_STATE_RESTORE_DONE.clear()
+
+    asyncio.run(master_service._dropbox_restore_state_backup_on_startup())
+
+    status = master_service._state_sync_status_snapshot()
+    assert restored == {"watchlist": ["LOCALUSDT"], "oanda_repair": 1, "backup": 1}
+    assert status["restore_status"] == "done"
+    assert status["restore_complete"] is True
+    assert status["per_file_state_ready"] is True
+    assert master_service._STARTUP_STATE_RESTORE_DONE.is_set()
+
+
 def test_empty_repo_local_states_are_authoritative_over_stale_backup(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(master_service, "LOCAL_STATE_ONLY", True)
     monkeypatch.setattr(master_service, "DROPBOX_SYNC_ENABLED", False)

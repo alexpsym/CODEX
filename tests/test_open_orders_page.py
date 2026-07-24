@@ -2,6 +2,7 @@ import asyncio
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -69,6 +70,101 @@ def test_merged_open_orders_route_returns_html() -> None:
     assert 'id="webhook-attempts-table"' not in html
     assert "<th>Test</th>" in html
     assert "/static/open_orders.js?v=" in html
+
+
+def test_open_orders_headers_and_rendered_cells_have_exact_alignment() -> None:
+    html = asyncio.run(master_service.merged_open_orders_page()).body.decode("utf-8")
+    header_row = re.search(r'<table id="open-orders-table">.*?<thead>\s*<tr>(.*?)</tr>', html, re.DOTALL)
+    assert header_row
+    headers = re.findall(r"<th[^>]*>(.*?)</th>", header_row.group(1), re.DOTALL)
+    assert headers == [
+        "Broker",
+        "Account",
+        "Category",
+        "Instrument",
+        "Timeframe",
+        "Test",
+        "Type",
+        "Side",
+        "Size",
+        "Entry / Order",
+        "Current / Trigger",
+        "Stop Loss",
+        "Take Profit",
+        "Leverage / Margin",
+        "Opened",
+        "Status",
+        "Action",
+    ]
+
+    js = (ROOT / "render" / "static" / "open_orders.js").read_text(encoding="utf-8")
+    rendered_values = re.search(
+        r"\[(item\.broker,resolveAccountLabel\(item\).*?,item\.status)\]\.forEach",
+        js,
+    )
+    assert rendered_values
+    assert rendered_values.group(1).split(",") == [
+        "item.broker",
+        "resolveAccountLabel(item)",
+        "item.category",
+        "item.instrument",
+        "item.timeframe",
+        "item.is_test_trade",
+        "item.type",
+        "item.side",
+        "item.size",
+        "item.entry_price||item.order_price",
+        "item.current_price",
+        "item.stop_loss",
+        "item.take_profit",
+        "item.leverage",
+        "formatTimestamp(item.opened_at)",
+        "item.status",
+    ]
+    assert "renderActionCell(item,actionTd,{allowAction:true}); row.appendChild(actionTd); tbody.appendChild(row);" in js
+    assert len(headers) == len(rendered_values.group(1).split(",")) + 1 == 17
+    assert headers[-1] == "Action"
+
+
+def test_oanda_open_item_values_align_with_open_orders_columns(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_fetch_oanda_json(*, endpoint: str, **_kwargs):
+        if endpoint.endswith("/openTrades"):
+            return {
+                "trades": [
+                    {
+                        "id": "trade-1",
+                        "instrument": "EUR_USD",
+                        "currentUnits": "1000",
+                        "price": "1.0800",
+                        "currentPrice": "1.0810",
+                        "openTime": "2026-07-25T01:02:03Z",
+                        "state": "OPEN",
+                    }
+                ]
+            }
+        return {"orders": []}
+
+    monkeypatch.setattr(master_service, "_fetch_oanda_json", fake_fetch_oanda_json)
+    monkeypatch.setattr(
+        master_service,
+        "_lookup_trade_context_for_open_item",
+        lambda _item: {"timeframe": "15 minutes", "is_test_trade": True},
+    )
+
+    payload = asyncio.run(
+        master_service._collect_oanda_open_items(
+            base_url="https://api-fxpractice.oanda.test",
+            account_id="demo-account",
+            api_key="token",
+            account_context="demo",
+        )
+    )
+
+    item = payload["items"][0]
+    assert item["category"] == "forex"
+    assert item["instrument"] == "EUR_USD"
+    assert item["timeframe"] == "15 minutes"
+    assert item["is_test_trade"] == "Yes"
 
 
 def test_open_orders_js_uses_version_polling_and_force_query_refresh() -> None:

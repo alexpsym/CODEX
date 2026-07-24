@@ -202,12 +202,28 @@ echo [local-master] BYBIT_DEMO_CALC_CONTEXT_LOCAL_PATH=!BYBIT_DEMO_CALC_CONTEXT_
 echo [local-master] User state source: Repo local files
 if /I "!LOCAL_STATE_ONLY!"=="1" echo [local-master] Repo-local state enabled. Ensure Git sync succeeds before replacing the repo clone.
 
-if /I not "!SPREAD_MONITOR_SKIP_REQUIREMENTS_INSTALL!"=="1" (
+if /I "!SPREAD_MONITOR_SKIP_REQUIREMENTS_INSTALL!"=="1" (
+  echo [local-master] Spread Monitor dependency probe and requirements install skipped by SPREAD_MONITOR_SKIP_REQUIREMENTS_INSTALL.
+) else (
   if exist "!ROOT!spreads-clone\requirements.txt" (
-    echo [local-master] ensuring Spread Monitor Python requirements with !PYTHON_EXE! ...
-    "!PYTHON_EXE!" -m pip install -r "!ROOT!spreads-clone\requirements.txt"
+    set "SPREAD_MONITOR_DEPENDENCY_PROBE=import importlib.util, os, sys; required=['flask','openpyxl','requests']+(['MetaTrader5'] if os.name=='nt' else []); missing=[name for name in required if importlib.util.find_spec(name) is None]; print('[local-master] Spread Monitor dependency probe result: '+('missing '+', '.join(missing) if missing else 'ready')); sys.exit(1 if missing else 0)"
+    echo [local-master] probing Spread Monitor Python dependencies with !PYTHON_EXE! ...
+    "!PYTHON_EXE!" -c "!SPREAD_MONITOR_DEPENDENCY_PROBE!"
     if errorlevel 1 (
-      echo [local-master] WARNING: Spread Monitor requirements install failed. Pepperstone/MT5 may show unavailable until installed.
+      echo [local-master] Spread Monitor dependency probe found a missing package; installing requirements ...
+      "!PYTHON_EXE!" -m pip install -r "!ROOT!spreads-clone\requirements.txt"
+      if errorlevel 1 (
+        echo [local-master] ERROR: Spread Monitor requirements installation failed.
+        exit /b 1
+      )
+      "!PYTHON_EXE!" -c "!SPREAD_MONITOR_DEPENDENCY_PROBE!"
+      if errorlevel 1 (
+        echo [local-master] ERROR: Spread Monitor dependencies are still missing after requirements installation.
+        exit /b 1
+      )
+      echo [local-master] Spread Monitor requirements installation and dependency presence verification complete at !DATE! !TIME!.
+    ) else (
+      echo [local-master] Spread Monitor dependency probe complete; requirements already installed, skipping pip at !DATE! !TIME!.
     )
   )
 )

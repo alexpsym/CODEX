@@ -555,7 +555,7 @@ def test_run_local_master_worker_console_stays_visible_on_abnormal_failure() -> 
     assert 'Launcher preflight failed before the dashboard worker started.' in script
     assert 'This window is intentionally left open so the failure stays readable.' in script
     assert 'worker output will print live below and is also being written to:' in script
-    assert 'Startup progress will update while dashboard health and scanner readiness are checked.' in script
+    assert 'Startup progress follows dashboard health and required core state; background services report separately.' in script
     assert 'call "%ROOT%run_local_master_control.bat" __worker > "%LOCAL_MASTER_WORKER_LOG%" 2>&1' not in script
     assert 'cmd /d /s /v:on /c ""%~f0" __worker"' not in script
     assert 'cmd /d /v:on /k "call ""%~f0""' not in script
@@ -576,11 +576,17 @@ def test_run_local_master_worker_console_stays_visible_on_abnormal_failure() -> 
     assert '> "{1}" 2>&1' in streamer
     assert 'Write-StartupProgress -Phase "starting worker process"' in streamer
     assert 'checking dashboard health at $HealthUrl' in streamer
-    assert 'checking configured autostart targets at $ScriptsUrl' in streamer
+    assert 'Get-Command curl.exe -ErrorAction SilentlyContinue' in streamer
+    assert '& $curl.Path -s --noproxy "*" -m 2 $HealthUrl' in streamer
+    assert 'Invoke-RestMethod -Uri $HealthUrl -TimeoutSec 2' in streamer
+    assert '[string] $ReadinessUrl = "http://127.0.0.1:8000/api/startup-readiness"' in streamer
+    assert 'Invoke-RestMethod -Uri $ReadinessUrl -TimeoutSec 2' in streamer
+    assert 'checking core startup readiness at $ReadinessUrl' in streamer
     assert 'restart detected: dashboard health became unavailable while worker process stayed alive.' in streamer
     assert 'dashboard recovered after worker restart.' in streamer
     assert 'configured autostart targets recovered:' in streamer
     assert 'autostart readiness lost after startup:' in streamer
+    assert 'startup progress remains complete' in streamer
     assert 'worker process ended: worker_pid={0} uvicorn_pid=unknown uvicorn_generation={1}' in streamer
     assert 'latest_uvicorn_exit_code={4} worker_exit_code={5}' in streamer
     assert 'process disappeared before clean Uvicorn exit logging for generation {0}' in streamer
@@ -752,12 +758,127 @@ def test_run_local_master_worker_console_smoke_has_no_cmd_syntax_error() -> None
     assert 'closing Local Master Control command prompt.' not in log_text
 
 
-def test_run_local_master_spread_requirements_skip_condition_uses_valid_nested_if() -> None:
+def test_run_local_master_spread_requirements_are_probed_before_conditional_install() -> None:
     script = (ROOT / 'run_local_master_control.bat').read_text(encoding='utf-8')
     assert 'if not /I "!SPREAD_MONITOR_SKIP_REQUIREMENTS_INSTALL!"=="1"' not in script
     assert 'if not /I' not in script
-    assert 'if /I not "!SPREAD_MONITOR_SKIP_REQUIREMENTS_INSTALL!"=="1" (' in script
+    assert 'if /I "!SPREAD_MONITOR_SKIP_REQUIREMENTS_INSTALL!"=="1" (' in script
+    assert 'dependency probe and requirements install skipped by SPREAD_MONITOR_SKIP_REQUIREMENTS_INSTALL' in script
     assert 'if exist "!ROOT!spreads-clone\\requirements.txt" (' in script
+    assert "required=['flask','openpyxl','requests']+(['MetaTrader5'] if os.name=='nt' else [])" in script
+    assert 'importlib.util.find_spec(name)' in script
+    assert "Spread Monitor dependency probe result: '+('missing '+', '.join(missing) if missing else 'ready')" in script
+    probe = '"!PYTHON_EXE!" -c "!SPREAD_MONITOR_DEPENDENCY_PROBE!"'
+    install = '"!PYTHON_EXE!" -m pip install -r "!ROOT!spreads-clone\\requirements.txt"'
+    assert script.count(probe) == 2
+    assert script.count(install) == 1
+    first_probe_idx = script.index(probe)
+    install_idx = script.index(install)
+    second_probe_idx = script.index(probe, first_probe_idx + len(probe))
+    assert first_probe_idx < install_idx < second_probe_idx
+    assert 'ERROR: Spread Monitor requirements installation failed.' in script
+    assert 'ERROR: Spread Monitor dependencies are still missing after requirements installation.' in script
+    assert 'requirements installation and dependency presence verification complete at !DATE! !TIME!.' in script
+    assert 'requirements already installed, skipping pip at !DATE! !TIME!.' in script
+
+
+def test_streamer_uses_core_readiness_as_the_only_startup_completion_gate() -> None:
+    streamer = (ROOT / 'tools' / 'windows_launchers' / 'stream_local_master_worker.ps1').read_text(encoding='utf-8')
+    runtime = streamer[streamer.index('$startedAt = Get-Date'):]
+    completion = (
+        'Write-StartupProgress -Phase "dashboard health and core state are ready; browser should open now" '
+        '-ElapsedSeconds $elapsed -TotalSeconds $MasterReadyTimeoutSeconds -Complete:$true'
+    )
+
+    assert 'function Get-CoreStartupReadiness' in streamer
+    assert '$coreReadyProperty = $response.PSObject.Properties["core_ready"]' in streamer
+    assert 'Available = $true' in streamer
+    assert 'Available = $false' in streamer
+    assert completion in runtime
+    assert runtime.index('if ($readinessStatus.Ready) {') < runtime.index(completion)
+    assert runtime.index(completion) < runtime.index('$autostartStatus = Test-AutostartTargetsReady')
+    assert '$scannerReady' not in streamer
+    assert 'startup step: waiting for configured autostart targets' not in streamer
+
+
+def test_streamer_keeps_background_failures_nonblocking_and_reports_recovery() -> None:
+    streamer = (ROOT / 'tools' / 'windows_launchers' / 'stream_local_master_worker.ps1').read_text(encoding='utf-8')
+    background_function = streamer[
+        streamer.index('function Update-BackgroundReadiness'):
+        streamer.index('$rootPath = [IO.Path]::GetFullPath($Root)')
+    ]
+
+    assert 'background startup warning (nonblocking):' in background_function
+    assert 'autostart readiness lost after startup:' in background_function
+    assert '(nonblocking; startup progress remains complete).' in background_function
+    assert 'background services remain supervised and will continue retrying.' in background_function
+    assert 'configured autostart targets recovered:' in background_function
+    assert 'Write-StartupProgress' not in background_function
+    assert '$coreReady = $false' not in background_function
+
+
+def test_streamer_uses_server_canonical_autostart_targets_for_background_checks() -> None:
+    streamer = (ROOT / 'tools' / 'windows_launchers' / 'stream_local_master_worker.ps1').read_text(encoding='utf-8')
+
+    assert '$response.PSObject.Properties["autostart_targets"]' in streamer
+    assert '$script:CanonicalAutostartTargetsKnown = $true' in streamer
+    assert 'if ($script:CanonicalAutostartTargetsKnown)' in streamer
+    assert '@($script:CanonicalAutostartTargets)' in streamer
+    assert '([string] $env:AUTOSTART_EXCLUDE).Split(",")' in streamer
+    assert 'Where-Object { $_ -notin $excluded }' in streamer
+
+
+def test_streamer_dashboard_health_loss_reenters_core_recovery() -> None:
+    streamer = (ROOT / 'tools' / 'windows_launchers' / 'stream_local_master_worker.ps1').read_text(encoding='utf-8')
+    health_loss_idx = streamer.index('if (-not $dashboardHealthOk) {')
+    core_check_idx = streamer.index('if (-not $coreReady) {', health_loss_idx)
+    health_loss_branch = streamer[health_loss_idx:core_check_idx]
+
+    assert '$consecutiveHealthFailures += 1' in health_loss_branch
+    assert '$consecutiveHealthFailures -lt [Math]::Max(1, $HealthFailureThreshold)' in health_loss_branch
+    assert health_loss_branch.index('$consecutiveHealthFailures -lt [Math]::Max(1, $HealthFailureThreshold)') < health_loss_branch.index('$coreReady = $false')
+    assert 'restart detected: dashboard health became unavailable while worker process stayed alive.' in health_loss_branch
+    assert 'waiting for recovery: dashboard health and core startup readiness will be rechecked.' in health_loss_branch
+    assert '$dashboardReady = $false' in health_loss_branch
+    assert '$coreReady = $false' in health_loss_branch
+    assert '$restartRecoveryActive = $true' in health_loss_branch
+
+
+def test_streamer_single_health_probe_miss_keeps_completed_progress_sticky() -> None:
+    streamer = (ROOT / 'tools' / 'windows_launchers' / 'stream_local_master_worker.ps1').read_text(encoding='utf-8')
+    health_loss_idx = streamer.index('if (-not $dashboardHealthOk) {')
+    core_check_idx = streamer.index('if (-not $coreReady) {', health_loss_idx)
+    health_loss_branch = streamer[health_loss_idx:core_check_idx]
+    debounce_branch = health_loss_branch[
+        health_loss_branch.index('if ($consecutiveHealthFailures -lt'):
+        health_loss_branch.index('if (-not $restartRecoveryActive)')
+    ]
+
+    assert 'dashboard health probe missed once; confirming before entering recovery.' in debounce_branch
+    assert 'continue' in debounce_branch
+    assert '$coreReady = $false' not in debounce_branch
+    assert 'dashboard health probe recovered before the recovery threshold.' in health_loss_branch
+
+
+def test_streamer_transient_readiness_query_failure_does_not_reset_completed_progress() -> None:
+    streamer = (ROOT / 'tools' / 'windows_launchers' / 'stream_local_master_worker.ps1').read_text(encoding='utf-8')
+    runtime = streamer[streamer.index('$startedAt = Get-Date'):]
+    steady_idx = runtime.index('if (($now - $steadyCheckAt).TotalSeconds -ge 5) {')
+    steady = runtime[steady_idx:]
+    unavailable_idx = steady.index('if (-not $readinessStatus.Available) {')
+    explicit_not_ready_idx = steady.index('if (-not $readinessStatus.Ready) {', unavailable_idx)
+    unavailable_branch = steady[unavailable_idx:explicit_not_ready_idx]
+
+    assert 'startup readiness query warning after completion:' in unavailable_branch
+    assert '(nonblocking; startup progress remains complete).' in unavailable_branch
+    assert 'Update-BackgroundReadiness -CoreStatus $null -AutostartStatus $autostartStatus' in unavailable_branch
+    assert 'continue' in unavailable_branch
+    assert '$coreReady = $false' not in unavailable_branch
+    assert 'Write-StartupProgress' not in unavailable_branch
+
+    explicit_not_ready_branch = steady[explicit_not_ready_idx:]
+    assert 'core readiness lost after startup:' in explicit_not_ready_branch
+    assert '$coreReady = $false' in explicit_not_ready_branch
 
 
 def test_launcher_logs_are_ignored_by_git() -> None:

@@ -20,7 +20,7 @@ if defined LOCAL_MASTER_WINDOW_TITLE (
 echo [local-master] visible worker console started.
 echo [local-master] worker output will print live below and is also being written to:
 echo [local-master]   !LOCAL_MASTER_WORKER_LOG!
-echo [local-master] Startup progress will update while dashboard health and scanner readiness are checked.
+echo [local-master] Startup progress follows dashboard health and required core state; background services report separately.
 echo [local-master] If startup fails, this window will stay open and print the latest log lines.
 
 set "PREFLIGHT_ROOT=!ROOT!"

@@ -314,6 +314,7 @@ def _profile_main_buttons() -> List[Dict[str, object]]:
             [
                 {"id": "trading-journal", "name": "trading-journal", "label": "Journal", "open_url": "/dashboard/trading-journal", "dashboard_main_view": True},
                 {"id": "monitor", "name": "monitor", "label": "Scanner", "open_url": "/merged/monitor", "dashboard_main_view": True},
+                {"id": "fxweekend", "name": "fxweekend", "label": "FX Weekend", "open_url": "/apps/fxweekend-clone", "dashboard_main_view": True},
                 {"id": "ivindicator-clone", "name": "ivindicator-clone", "label": "IV Indicator", "open_url": "/apps/ivindicator-clone", "dashboard_main_view": True},
                 {"id": "spreads-clone", "name": "spreads-clone", "label": "Spreads", "open_url": "/apps/spreads-clone", "dashboard_main_view": True},
             ]
@@ -9722,8 +9723,10 @@ async def _dropbox_restore_state_backup_on_startup() -> None:
         if not local_repo_mode:
             data = json.loads(payload.decode("utf-8"))
             restored = _restore_alerts_payload(data)
-        active_folder, _ = await asyncio.to_thread(_resolve_trading_journal_dropbox_folder)
-        workbook_stats = await asyncio.to_thread(_sanitize_bybit_demo_workbook, active_folder)
+        workbook_stats: Dict[str, object] = {}
+        if not _master_journal_single_file_mode():
+            active_folder, _ = await asyncio.to_thread(_resolve_trading_journal_dropbox_folder)
+            workbook_stats = await asyncio.to_thread(_sanitize_bybit_demo_workbook, active_folder)
         oanda_repaired_rows = _repair_persisted_oanda_trade_rows()
         _schedule_dropbox_upload_state_backup()
         BYBIT_LOGGER.info(
@@ -10404,7 +10407,7 @@ def _autostart_component_readiness(name: str) -> Dict[str, object]:
             "ready": False,
             "running": False,
             "starting": False,
-            "blocking": True,
+            "blocking": False,
             "phase": "autostart_unavailable",
             "reason": reason,
         }
@@ -10441,7 +10444,6 @@ def _autostart_component_readiness(name: str) -> Dict[str, object]:
             }
         )
         if not ready:
-            component["blocking"] = True
             component["reason"] = reason or f"{friendly_script_label(script.name)} is not running yet."
         return component
 
@@ -10458,7 +10460,6 @@ def _autostart_component_readiness(name: str) -> Dict[str, object]:
         component["phase"] = "ready"
         return component
 
-    component["blocking"] = True
     if starting:
         component["phase"] = "autostart_starting"
         component["reason"] = f"{friendly_script_label(script.name)} is still starting."
@@ -10479,8 +10480,13 @@ def _startup_readiness_status() -> Dict[str, object]:
     autostart_targets = _compute_autostart_scripts()
     unavailable = dict(_LAST_AUTOSTART_UNAVAILABLE)
     components: List[Dict[str, object]] = []
+    background_warnings: List[Dict[str, object]] = []
     payload: Dict[str, object] = {
         "ready": False,
+        "core_ready": False,
+        "background_ready": False,
+        "background_warnings": background_warnings,
+        "background_warning": None,
         "startup_phase": "checking",
         "blocking_component": None,
         "failure_reason": None,
@@ -10505,6 +10511,35 @@ def _startup_readiness_status() -> Dict[str, object]:
         "reason": restore_error,
     }
     components.append(restore_component)
+
+    if unavailable:
+        for target_name, reason in sorted(unavailable.items()):
+            component = {
+                "name": target_name,
+                "label": friendly_script_label(target_name),
+                "ready": False,
+                "running": False,
+                "starting": False,
+                "blocking": False,
+                "phase": "autostart_unavailable",
+                "reason": reason,
+            }
+            components.append(component)
+            background_warnings.append(dict(component))
+
+    for name in autostart_targets:
+        component = _autostart_component_readiness(name)
+        components.append(component)
+        if not bool(component.get("ready")):
+            background_warnings.append(dict(component))
+
+    payload["background_ready"] = not background_warnings
+    if background_warnings:
+        payload["background_warning"] = "; ".join(
+            f"{warning.get('name')}: {warning.get('reason')}"
+            for warning in background_warnings
+        )
+
     if restore_status in {"failed", "error"}:
         restore_component["blocking"] = True
         payload.update(
@@ -10526,46 +10561,10 @@ def _startup_readiness_status() -> Dict[str, object]:
         )
         return payload
 
-    if unavailable:
-        for target_name, reason in sorted(unavailable.items()):
-            components.append(
-                {
-                    "name": target_name,
-                    "label": friendly_script_label(target_name),
-                    "ready": False,
-                    "running": False,
-                    "starting": False,
-                    "blocking": True,
-                    "phase": "autostart_unavailable",
-                    "reason": reason,
-                }
-            )
-        first_name, first_reason = next(iter(sorted(unavailable.items())))
-        payload.update(
-            {
-                "startup_phase": "autostart_unavailable",
-                "blocking_component": first_name,
-                "failure_reason": first_reason,
-            }
-        )
-        return payload
-
-    for name in autostart_targets:
-        component = _autostart_component_readiness(name)
-        components.append(component)
-        if not bool(component.get("ready")):
-            payload.update(
-                {
-                    "startup_phase": str(component.get("phase") or "autostart_pending"),
-                    "blocking_component": component.get("name") or name,
-                    "failure_reason": component.get("reason") or f"{friendly_script_label(name)} is not ready.",
-                }
-            )
-            return payload
-
     payload.update(
         {
             "ready": True,
+            "core_ready": True,
             "startup_phase": "ready",
             "blocking_component": None,
             "failure_reason": None,
@@ -10886,12 +10885,17 @@ def _scanner_has_external_live_runtime(script_name: str) -> bool:
 async def _supervise_autostart_scripts(names: List[str]) -> None:
     if APP_PROFILE != "local":
         return
-    scanner_targets = [n for n in names if n in {"bybit_monitor", "oanda_monitor"}]
-    if not scanner_targets:
+    supervised_names = {"bybit_monitor", "oanda_monitor", "fxweekend-clone"}
+    autostart_targets = [
+        name
+        for name in dict.fromkeys(names)
+        if name in supervised_names
+    ]
+    if not autostart_targets:
         return
     while True:
         await asyncio.sleep(max(15.0, _SCANNER_SUPERVISOR_BASE_SECONDS))
-        for name in scanner_targets:
+        for name in autostart_targets:
             try:
                 script = script_manager.get(name)
             except HTTPException:
@@ -10899,13 +10903,15 @@ async def _supervise_autostart_scripts(names: List[str]) -> None:
             if script.is_running:
                 _SCANNER_SUPERVISOR_BACKOFF.pop(name, None)
                 continue
-            if _scanner_has_external_live_runtime(name):
+            is_scanner = name in {"bybit_monitor", "oanda_monitor"}
+            if is_scanner and _scanner_has_external_live_runtime(name):
                 continue
             now = time.time()
             retry_after = _SCANNER_SUPERVISOR_BACKOFF.get(name, 0.0)
             if retry_after and now < retry_after:
                 continue
-            AUTOSTART_LOGGER.warning("Scanner supervisor restarting %s", name)
+            supervisor_label = "Scanner supervisor" if is_scanner else "Autostart supervisor"
+            AUTOSTART_LOGGER.warning("%s restarting %s", supervisor_label, name)
             try:
                 await script.start()
                 _SCANNER_SUPERVISOR_BACKOFF.pop(name, None)
@@ -10915,7 +10921,7 @@ async def _supervise_autostart_scripts(names: List[str]) -> None:
                 current_wait = 15.0 if prev_wait <= 0 else min(_SCANNER_SUPERVISOR_MAX_BACKOFF_SECONDS, prev_wait * 2.0)
                 _SCANNER_SUPERVISOR_BACKOFF_WINDOW[name] = current_wait
                 _SCANNER_SUPERVISOR_BACKOFF[name] = now + current_wait
-                AUTOSTART_LOGGER.error("Scanner supervisor failed to restart %s: %s", name, exc)
+                AUTOSTART_LOGGER.error("%s failed to restart %s: %s", supervisor_label, name, exc)
 
 
 @app.on_event("startup")
@@ -22502,7 +22508,6 @@ OPEN_ORDERS_TEMPLATE = """<!doctype html>
         <table id="open-orders-table">
           <thead>
             <tr>
-              <th></th>
               <th>Broker</th>
               <th>Account</th>
               <th>Category</th>
