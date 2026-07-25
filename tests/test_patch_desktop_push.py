@@ -43,6 +43,7 @@ def test_patch_desktop_push_logs_and_stages_all_changes(tmp_path: Path):
     assert '"render/data"' in content
     assert '"render/uploads"' in content
     assert '"bybit_monitor/custom_alerts.json"' in content
+    assert '":(glob)fxweekend-clone/*.tmp"' in content
     assert '"state_manifest.json"' in content
     assert '"state_backup.json"' in content
     assert "git add -u" not in content
@@ -67,6 +68,11 @@ def test_patch_desktop_push_logs_and_stages_all_changes(tmp_path: Path):
     fake_bin.mkdir()
     latest_log.write_text("old log should be overwritten", encoding="utf-8")
     (repo_dir / ".git").mkdir()
+    (repo_dir / "fxweekend-clone").mkdir()
+    (repo_dir / "fxweekend-clone" / "interrupted.tmp").write_text(
+        "partial",
+        encoding="utf-8",
+    )
 
     fake_git = fake_bin / "git.bat"
     fake_git.write_text(
@@ -129,6 +135,7 @@ def test_patch_desktop_push_logs_and_stages_all_changes(tmp_path: Path):
     assert 'reset -q -- "render/data"' in git_calls
     assert 'reset -q -- "render/uploads"' in git_calls
     assert 'reset -q -- "bybit_monitor/custom_alerts.json"' in git_calls
+    assert 'reset -q -- ":(glob)fxweekend-clone/*.tmp"' in git_calls
     assert 'reset -q -- "state_manifest.json"' in git_calls
     assert 'reset -q -- "state_backup.json"' in git_calls
     assert "diff --cached --stat" in git_calls
@@ -213,6 +220,7 @@ def test_gitignore_excludes_generated_logs_caches_and_local_env_files():
         "*.pyc",
         "PATCH_DESKTOP_PUSH-latest.log",
         "INSTALL-latest.log",
+        "fxweekend-clone/*.tmp",
         ".env",
         ".env.*",
         "*.env",

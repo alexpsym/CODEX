@@ -110,10 +110,17 @@
     }
     if (!res.ok) {
       const detail = bodyJson?.detail;
+      const detailMessage = typeof detail === 'object' && detail
+        ? (detail.message || detail.error || '')
+        : '';
       const message = typeof detail === 'string' && detail.trim()
         ? detail.trim()
-        : `${options.method || 'GET'} ${url} failed: ${res.status} ${(bodyText || res.statusText || '').trim()}`;
-      throw new Error(message);
+        : String(bodyJson?.message || bodyJson?.error || detailMessage || '').trim()
+          || `${options.method || 'GET'} ${url} failed: ${res.status} ${(bodyText || res.statusText || '').trim()}`;
+      const error = new Error(message);
+      error.payload = bodyJson;
+      error.status = res.status;
+      throw error;
     }
     if (bodyJson !== null) return bodyJson;
     return bodyText ? JSON.parse(bodyText) : {};
@@ -573,6 +580,7 @@
   const watchlistEditingBlocked = () => {
     const restoreStatus = String(stateSyncState?.restore_status || '').toLowerCase();
     if (restoreStatus === 'pending' || restoreStatus === 'failed') return true;
+    if (stateSyncState?.watchlist_mutation_blocked === true || stateSyncState?.watchlist_indeterminate === true) return true;
     if (stateSyncState?.enabled === false && String(stateSyncState?.effective_local_state_mode || '') !== 'local-only') return true;
     return false;
   };
@@ -652,41 +660,41 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ items: payloadItems }),
         });
-        watchlistState = Array.isArray(payload?.items) ? payload.items : payloadItems;
+        const verifiedItems = Array.isArray(payload?.verified_items) ? payload.verified_items : [];
+        const durableVerified = payload?.durable_verified === true;
+        const requestedNormalized = payloadItems.map((item) => String(item || '').trim().toUpperCase()).filter(Boolean);
+        if (!durableVerified || JSON.stringify(verifiedItems) !== JSON.stringify(Array.isArray(payload?.items) ? payload.items : requestedNormalized)) {
+          throw new Error(payload?.error || 'Durable watchlist verification failed.');
+        }
+        watchlistState = Array.isArray(payload?.items) ? payload.items : verifiedItems;
         watchlistLoaded = true;
         stateSyncState = payload?.state_sync || stateSyncState;
         applyStateSyncModeLabel(stateSyncState);
         renderWatchlist(watchlistState);
         if (successMessage) {
-          const uploadError = stateSyncState?.last_upload_error;
-          const verifiedAt = stateSyncState?.last_verified_at;
-          const verifiedWatchlist = Array.isArray(stateSyncState?.last_verified_watchlist) ? stateSyncState.last_verified_watchlist : [];
-          if (stateSyncState?.enabled === true && !verifiedAt) {
-            setWatchlistStatus('State sync verification missing; save not confirmed durable.', true);
-            return;
-          }
-          if (uploadError) {
-            setWatchlistStatus((String(stateSyncState?.effective_state_source || '').toLowerCase() === 'repo_local' || String(stateSyncState?.effective_state_source || '').toLowerCase() === 'local') ? `Repo-local state write failed: ${uploadError}` : `Saved locally, Dropbox sync failed: ${uploadError}`, true);
-            return;
-          }
-          if (stateSyncState?.enabled === true) {
-            if (verifiedAt && verifiedWatchlist.length) {
-              setWatchlistStatus((String(stateSyncState?.effective_state_source || '').toLowerCase() === 'repo_local' || String(stateSyncState?.effective_state_source || '').toLowerCase() === 'local') ? `Repo-local verified: ${verifiedWatchlist.join(', ') || '(empty)'}` : `Dropbox verified: ${verifiedWatchlist.join(', ') || '(empty)'}`, false);
-              return;
-            }
-            const remoteSummary = await fetchRemoteBackupSummary();
-            const remoteWatchlist = Array.isArray(remoteSummary?.watchlist) ? remoteSummary.watchlist : [];
-            if (verifiedAt && remoteWatchlist.length) {
-              setWatchlistStatus((String(stateSyncState?.effective_state_source || '').toLowerCase() === 'repo_local' || String(stateSyncState?.effective_state_source || '').toLowerCase() === 'local') ? `Repo-local verified: ${remoteWatchlist.join(', ') || '(empty)'}` : `Dropbox verified: ${remoteWatchlist.join(', ') || '(empty)'}`, false);
-              return;
-            }
-            setWatchlistStatus('State sync verification missing; save not confirmed durable.', true);
-            return;
-          }
-          setWatchlistStatus(successMessage, false);
+          const source = String(payload?.effective_state_source || '').toLowerCase();
+          const label = source === 'repo_local' || source === 'local' ? 'Repo-local' : 'Dropbox';
+          setWatchlistStatus(`${successMessage} ${label} verified: ${verifiedItems.join(', ') || '(empty)'}`, false);
         }
       } catch (err) {
         console.error(err);
+        const failurePayload = err?.payload && typeof err.payload === 'object' ? err.payload : null;
+        if (Array.isArray(failurePayload?.items)) {
+          watchlistState = failurePayload.items;
+          watchlistLoaded = true;
+        }
+        if (failurePayload?.state_sync) {
+          stateSyncState = failurePayload.state_sync;
+          applyStateSyncModeLabel(stateSyncState);
+        }
+        try {
+          const authoritative = await fetchJson('/api/watchlist');
+          watchlistState = Array.isArray(authoritative?.items) ? authoritative.items : [];
+          stateSyncState = authoritative?.state_sync || stateSyncState;
+          watchlistLoaded = true;
+        } catch (reloadErr) {
+          console.error(reloadErr);
+        }
         renderWatchlist(watchlistState);
         setWatchlistStatus(err?.message || 'Watchlist update failed.', true);
       } finally {

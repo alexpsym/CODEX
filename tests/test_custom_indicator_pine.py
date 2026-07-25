@@ -1,4 +1,6 @@
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -76,13 +78,63 @@ def test_custom_indicator_session_rendering_uses_dotted_lines_not_arrow_markers(
     assert "width=2" in session_block
     assert "sessionMarkerWindowBars = 80" in session_block
     assert "sessionMarkerHalfLengthMultiplier = 0.60" in session_block
-    assert "lineStartY = markerMidY - markerHalfLength" in session_block
-    assert "lineEndY = markerMidY + markerHalfLength" in session_block
+    assert "sessionCandleGapRangeFraction" in session_block
+    assert "candleGap = math.max(markerRange * sessionCandleGapRangeFraction, syminfo.mintick * 20)" in session_block
+    assert "lowerLineEndY = low - candleGap" in session_block
+    assert "upperLineStartY = high + candleGap" in session_block
+    assert "lowerLineStartY = lowerLineEndY - markerHalfLength" in session_block
+    assert "upperLineEndY = upperLineStartY + markerHalfLength" in session_block
     assert "style=label.style_none" in session_block
-    assert "pushBoundedLineAndLabel(sessionMarkerLines, sessionLabels, sessionMarkerLine, sessionLabel, sessionMaxMarkers)" in session_block
+    assert "pushBoundedSessionMarker(lowerSessionLine, upperSessionLine, sessionLabel, sessionMaxMarkers)" in session_block
+    assert "maxMarkers * 2" in session_block
     assert "clearLineArray(sessionMarkerLines)" in session_block
     assert "textalign=text.align_center" in session_block
     assert "extend=extend.both" not in session_block
+
+
+def test_custom_indicator_suppresses_each_session_event_by_brisbane_weekend() -> None:
+    source = _source()
+    session_block = source.split("// TRADING SESSION OPEN/CLOSE LINES", 1)[1]
+    assert 'eventDay = dayofweek(eventTs, "Australia/Brisbane")' in session_block
+    assert "dayofweek.saturday" in session_block
+    assert "dayofweek.sunday" in session_block
+    assert session_block.count("not isBrisbaneWeekend(sessionEventTimestamp(") == 8
+    assert 'isSessionEvent("America/New_York", 17, 0)' in session_block
+
+
+def test_brisbane_event_timestamp_model_suppresses_weekend_and_retains_weekday() -> None:
+    brisbane = ZoneInfo("Australia/Brisbane")
+    new_york = ZoneInfo("America/New_York")
+    ny_friday_close = datetime(2026, 7, 24, 17, 0, tzinfo=new_york)
+    ny_thursday_close = datetime(2026, 7, 23, 17, 0, tzinfo=new_york)
+    assert ny_friday_close.astimezone(brisbane).weekday() == 5
+    assert ny_thursday_close.astimezone(brisbane).weekday() == 4
+
+
+def test_scale_aware_gap_model_is_positive_and_clears_entire_candle() -> None:
+    recent_range = 100.0
+    minimum_tick = 0.01
+    candle_low = 40.0
+    candle_high = 60.0
+    gap = max(recent_range * 0.03, minimum_tick * 20)
+    lower_endpoint = candle_low - gap
+    upper_endpoint = candle_high + gap
+    assert gap > 0
+    assert lower_endpoint < candle_low
+    assert upper_endpoint > candle_high
+
+
+def test_custom_indicator_labels_are_centered_at_timestamp_and_outside_segments() -> None:
+    source = _source()
+    session_block = source.split("// TRADING SESSION OPEN/CLOSE LINES", 1)[1]
+    assert "labelY = isOpen ? upperLineEndY + labelGap : lowerLineStartY - labelGap" in session_block
+    assert "label.new(x=eventTs, y=labelY" in session_block
+    assert "x1=eventTs" in session_block
+    assert "x2=eventTs" in session_block
+    assert "textalign=text.align_center" in session_block
+    assert "sessionVisibilityKey != previousSessionVisibilityKey" in session_block
+    assert "while array.size(sessionMarkerLines) > maxMarkers * 2" in session_block
+    assert "while array.size(sessionLabels) > maxMarkers" in session_block
 
 
 def test_custom_indicator_funding_and_option_expiry_code_remains_unchanged() -> None:

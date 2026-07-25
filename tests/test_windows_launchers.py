@@ -1063,7 +1063,8 @@ def test_streamer_uses_server_canonical_autostart_targets_for_background_checks(
     assert 'if ($script:CanonicalAutostartTargetsKnown)' in streamer
     assert '@($script:CanonicalAutostartTargets)' in streamer
     assert '([string] $env:AUTOSTART_EXCLUDE).Split(",")' in streamer
-    assert 'Where-Object { $_ -notin $excluded }' in streamer
+    assert '$_ -notin $excluded -and' in streamer
+    assert '$_ -notin @("fxweekend", "fxweekend-clone")' in streamer
 
 
 def test_streamer_dashboard_health_loss_reenters_core_recovery() -> None:
@@ -1123,6 +1124,7 @@ def test_launcher_logs_are_ignored_by_git() -> None:
     ignore = (ROOT / '.gitignore').read_text(encoding='utf-8')
     assert 'logs/' in ignore
     assert 'fxweekend-clone/*.log' in ignore
+    assert 'fxweekend-clone/*.tmp' in ignore
 
 
 def test_trading_tools_launcher_failure_message_includes_log_path_and_tail() -> None:

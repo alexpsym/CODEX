@@ -416,7 +416,8 @@ def test_stop_recommendation_requires_wins_and_losses_and_reports_exclusions() -
         _stop_recommendation_trade("cashflow", result_pct=1.0, planned_stop_price=99.0, row_type="cashflow"),
     ])
 
-    assert summary["stop_recommendation"] == "Need wins & losses"
+    assert summary["stop_recommendation"] == ""
+    assert summary["stop_recommendation_missing_reason"] == "no_eligible_losing_trades"
     assert summary["eligible_stop_loss_wins"] == 1
     assert summary["eligible_stop_loss_losses"] == 0
     assert summary["stop_loss_excluded_reasons"]["test_trade"] == 1
@@ -1090,8 +1091,10 @@ def test_target_recommendation_reports_exact_reasons_for_missing_wins_or_losses(
     no_wins = _target_r_recommendation(no_wins_rows, scope="overall")
     no_losses = _target_r_recommendation(no_losses_rows, scope="overall")
 
-    assert no_wins["target_recommendation"] == "No eligible winning trades"
-    assert no_losses["target_recommendation"] == "No eligible losing trades"
+    assert no_wins["target_recommendation"] == ""
+    assert no_wins["target_recommendation_missing_reason"] == "No eligible winning trades"
+    assert no_losses["target_recommendation"] == ""
+    assert no_losses["target_recommendation_missing_reason"] == "No eligible losing trades"
     assert no_losses["eligible_target_r_wins"] == 1
     assert no_losses["eligible_target_r_losses"] == 0
 

@@ -39,6 +39,16 @@
     status.innerHTML = html || '';
     status.style.color = err ? '#fca5a5' : '#94a3b8';
   };
+  const notifyEquityDataChanged = (reason) => {
+    if (
+      typeof window.dispatchEvent !== 'function'
+      || typeof window.CustomEvent !== 'function'
+    ) return;
+    window.dispatchEvent(new window.CustomEvent(
+      'trading-journal:data-changed',
+      { detail: { reason: String(reason || 'journal-update') } },
+    ));
+  };
   const isExplicitAccountMode = (value) => value === 'demo' || value === 'live';
   const isExcelLockPayload = (payload) => {
     if (payload?.code === 'EXCEL_WORKBOOK_OPEN') return true;
@@ -165,6 +175,7 @@
       const inferred = payload.pnl_inferred_count ?? 0;
       const unresolved = payload.pnl_unresolved_count ?? 0;
       setStatus(`${payload.message || 'Import complete.'}\nRows parsed: ${payload.rows_parsed ?? 0}\nRows upserted: ${payload.rows_upserted ?? 0}\nP/L inferred: ${inferred}\nP/L unresolved: ${unresolved}\nWorkbook: ${payload.master_journal_path || ''}\nMissing Row IDs: ${(payload.missing_row_ids || []).join(', ') || 'none'}${warnings.length ? `\nWarnings:\n- ${warnings.join('\n- ')}` : ''}`);
+      notifyEquityDataChanged('import');
       clearPendingRetry();
     } catch (err) {
       setStatus(err?.message || String(err), true);
@@ -220,6 +231,7 @@
       const diagnostics = payload.master_journal_diagnostics || payload.diagnostics || {};
       const stageTimings = diagnostics.workbook_sync_substage_timings || payload.resync_timings || {};
       setStatus(`Resync complete.\nWorkbook: ${payload.master_journal_path || ''}${formatTimings(stageTimings)}`);
+      notifyEquityDataChanged('resync');
       clearPendingRetry();
     } catch (err) {
       setStatus(err?.message || String(err), true);
@@ -299,6 +311,7 @@
       }
       renderCryptoMonthlyDiagnostics(payload, !res.ok || payload.ok !== true);
       if (!res.ok || payload.ok !== true) return;
+      notifyEquityDataChanged('crypto-monthly-pnl');
       clearPendingRetry();
     } catch (err) { setStatus(err?.message || String(err), true); }
     finally { if (cryptoMonthlyBtn) cryptoMonthlyBtn.disabled = Boolean(pendingRetry.run); }
@@ -331,6 +344,7 @@
         throw new Error(String(payload?.detail || payload?.message || 'Bybit Demo balance adjustment failed.') + errors);
       }
       setStatus(`Success. Previous balance: ${payload.previous_balance} ${payload.currency || 'USDT'}\nAdjustment: ${payload.adjustment_amount} ${payload.currency || 'USDT'}\nNew balance: ${payload.new_balance} ${payload.currency || 'USDT'}\nRow ID: ${payload.row_id || ''}\nWorkbook: ${payload.master_journal_path || ''}`);
+      notifyEquityDataChanged('bybit-demo-balance-adjustment');
       clearPendingRetry();
     } catch (err) {
       setStatus(err?.message || String(err), true);

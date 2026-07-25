@@ -39,13 +39,13 @@ Place these in your Render dashboard or in your local external env file (`C:\GPT
 - `PORT` (Render sets this automatically; only override for local testing).
 - `MASTER_ENV_FILE` overrides the exact local env file path used by `shared.env_bootstrap`.
 - `MASTER_ENV_DIR` overrides the directory searched for `env.env`, `.env`, `scanner.env`, and `master.env` when `MASTER_ENV_FILE` is not explicitly set.
-- `AUTOSTART_SCRIPTS` to override which scripts boot automatically. By default, the service autostarts `fxweekend-clone` when this variable is unset; set it to a comma-separated list such as `bybit_trigger_bounce_trader`, `ALL`, or `*` to change startup behavior, or set it to a blank value to disable autostart entirely.
-- `AUTOSTART_EXCLUDE` to skip specific scripts from the resolved autostart list without changing the main `AUTOSTART_SCRIPTS` value.
+- `AUTOSTART_SCRIPTS` to choose additional scripts that boot automatically. On Render, `fxweekend-clone` is always included as the sole FX Weekend execution authority; values such as `OFF`, `ALL`, or a comma-separated list affect only the other eligible scripts.
+- `AUTOSTART_EXCLUDE` to skip matching optional scripts from the resolved autostart list. It cannot remove the Render-owned `fxweekend-clone` executor.
 - Any other variables referenced by the individual scripts. Because the manager runs each script in its own subprocess with the shared environment, they will read the same `.env`/dashboard values.
 
 ## 4) How the master service works
 - On startup it scans the repository for `*.py` files (skipping `mt5-clone`, virtualenv folders, `LEDGER-clone`, and the `render` folder itself) and exposes each remaining entrypoint in the UI.
-- If `AUTOSTART_SCRIPTS` is unset, the service defaults to autostarting `fxweekend-clone`. Explicit `AUTOSTART_SCRIPTS` values override that default exactly, and `AUTOSTART_EXCLUDE` still removes matching scripts from the final startup queue.
+- Render always supervises exactly one `fxweekend-clone` child, even when `AUTOSTART_SCRIPTS` is `OFF` or `AUTOSTART_EXCLUDE` names it. Durable FX Weekend settings still control whether that child is allowed to act; local profiles never start an FX Weekend fallback.
 - Clicking **Start** launches the chosen script as a background subprocess with unbuffered stdout; logs stream into the UI. Multiple scripts can run concurrently.
 - Clicking **Stop** sends a graceful terminate signal, escalating to a kill if the script does not exit within 10 seconds.
 - The webhook endpoint records the payload to the script log and starts the script if it is not already running.

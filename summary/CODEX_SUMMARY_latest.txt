@@ -1,73 +1,98 @@
-Final summary — dependency bootstrap regression follow-up
+Final summary — FX Weekend ownership, durable watchlist, Pine markers, Journal equity, and recommendation fixes
 
-Status:
-- Fixed the remaining Local Trading Tools dependency-startup regression in `run_local_master_control.bat`.
-- MetaTrader5 is no longer part of the required global dependency probe or required repair install.
-- Missing or failed optional MT5 support cannot prevent the dashboard or OANDA Spread Monitor from starting.
-- The prior readiness/progress, Instrument Lookup, master-journal/Dropbox, state restoration, supervision, Open Orders alignment, calculator, and dashboard fixes were not changed.
+Status before publication:
+- The full requested production implementation, checked-in workbook regeneration, and relevant regression coverage are complete locally.
+- This summary is being written before publication as required.
+- The task is not complete until repository-root PATCH_DESKTOP_PUSH.bat commits the intended files, pushes origin/master, and verifies local HEAD equals origin/master.
 
-Dependency audit:
-- The packaged local launcher autostarts Bybit Monitor, OANDA Monitor, and FX Weekend; none imports MetaTrader5.
-- `render/master_service.py` has no startup MT5 import.
-- The active Spreads entrypoint is `spreads-clone/spread_app.py`, which imports Flask, OANDA fetchers, spread core, and symbols only. Its active UI/data path is OANDA-only.
-- The only Spread Monitor MT5 bridge is the isolated legacy `spreads-clone/mt5_spreads.py`, where MetaTrader5 is imported lazily. No production startup module imports that bridge.
-- The calculator's Pepperstone support remains `.set` file generation and does not restore Python live-MT5 fetching.
+1. FX Weekend — Render is the sole execution authority
+- Removed FX Weekend from every local automatic-start/default-required path, including run_local_master_control.bat, Render local-profile defaults, and the packaged worker helper. Explicit local wildcard/autostart values are filtered so they cannot silently re-enable the executor.
+- Kept the local dashboard entry as "FX Weekend (Render)". It opens the configured Render application URL and reports a clear configuration error when no Render base URL is available; it never opens or mutates the local settings page.
+- Render owns and supervises exactly one enabled FX Weekend child, restarts unexpected exits, publishes heartbeat/running information, and treats a dead or unusable enabled executor as a readiness failure.
+- Extended shared/oanda_api.py with a public account-mode configuration resolver used by the executor. Demo is isolated to practice credentials/URL; Live follows the repository's live/generic credential conventions and live URL. Each selected account is processed and reported independently.
+- Migrated scheduling to Brisbane HH:MM cutoffs while retaining legacy hour keys and the established 05:00 New York-DST / 06:00 standard-time defaults.
+- Durable settings now include selected account modes and retry controls. enabled=false is respected and is never overwritten at startup.
+- Reworked the closure loop to continue polling throughout the closure window, catch positions opened after an earlier flat result, retry transient failures with bounded backoff, preserve per-account/per-position HTTP results, and avoid a one-week completion latch.
+- Success requires a post-close OANDA re-fetch proving the selected account flat. Credential, API, partial-close, retry-pending, missed-window, and market-closed outcomes remain explicit failures rather than manufactured success.
+- Settings and status participate in the authoritative state backup/restore flow. The page exposes enabled state, selected OANDA accounts, Brisbane cutoff/next cutoff, DST regime, heartbeat, attempt and verified-flat timestamps, open counts, and sanitized errors.
+- Secrets and full account identifiers are redacted from status/log output.
 
-Exact changes:
-1. The fast required probe now checks exactly `flask`, `openpyxl`, and `requests`.
-2. A warm required-ready launch skips pip regardless of whether MetaTrader5 exists.
-3. A missing required package triggers same-interpreter installation of only `Flask openpyxl requests`; the launcher no longer installs the full manifest containing MT5.
-4. Required packages are always re-probed after installation. The install process exit code is advisory; startup exits only if the required recheck still reports a missing package.
-5. MetaTrader5 has its own presence probe. Absence produces a clear warning and continues to Uvicorn.
-6. Optional MT5 installation is off by default. If explicitly requested with `SPREAD_MONITOR_INSTALL_OPTIONAL_MT5=1`, a failed install or failed post-install probe warns and remains nonblocking.
-7. `SPREAD_MONITOR_SKIP_REQUIREMENTS_INSTALL` remains supported.
-8. `spreads-clone/requirements.txt` and all MT5/Spread application code were left unchanged; the global launcher simply no longer consumes the optional MT5 entry during required repair.
+2. Watchlist deletion durability
+- Watchlist POST now normalizes the complete proposed sequence, persists it synchronously to the effective durable source, round-trips that source, and confirms success only when the complete normalized sequence matches exactly.
+- A stale remote superset can no longer pass verification, and an empty list is a valid verified result.
+- Responses expose durable_verified, verified_at, verified_items, effective_state_source, pending, and error.
+- Failed durability checks restore/reload the last authoritative watchlist instead of leaving an optimistic deletion visible.
+- The dashboard no longer requires a non-empty verified list and does not announce removal until the item is proven absent.
 
-Files changed intentionally:
-- `run_local_master_control.bat`
-- `tests/test_windows_launchers.py`
-- `tests/test_spread_monitor_dashboard.py`
-- `summary/CODEX_SUMMARY_latest.txt`
+3. TradingView session markers
+- Sydney, Tokyo, London, and New York session events are suppressed when each event timestamp lands on a Brisbane Saturday or Sunday; weekday DST-aware timestamps and the <=30-minute visibility rule remain intact.
+- Funding and Options Expiry behavior is unchanged.
+- Each session event now draws two aligned dotted segments with a candle/wick clearance gap derived from max(recent 80-bar range * 0.03, syminfo.mintick * 20).
+- Open/close labels remain centered at the exact event timestamp and sit beyond the applicable line endpoint with additional clearance.
+- Cleanup accounts for two line objects per event and removes hidden/expired objects within TradingView limits.
 
-Regression coverage:
-- Added a Windows CMD behavioral harness that executes the exact dependency block with a fake Python/pip environment; it never installs or removes real packages.
-- Covered warm required-ready startup skipping pip.
-- Covered missing optional MetaTrader5 warning and continuation with zero pip calls.
-- Covered a directly simulated failed opt-in `pip install MetaTrader5` and confirmed continuation.
-- Covered a missing required dependency installing only Flask/openpyxl/requests and being rechecked.
-- Covered a nonzero required-install exit code followed by a successful required recheck and confirmed continuation.
-- Covered startup failure only when the required recheck remains unavailable.
-- Structural assertions ensure MT5 is absent from the required list/install, optional installation is guarded, and the full requirements manifest is not installed by the launcher.
+4. Journal responsive account equity curve
+- Replaced the centered single stack with a top-aligned responsive workspace: existing controls remain in a narrow left column, and a full remaining-width equity panel occupies the right; mobile stacks without horizontal overflow.
+- Added a separate render/static/trading_journal_equity_curve.js module and a Refresh Equity Curve action.
+- The account selector contains exactly, in order: Binance, Bybit, Oanda demo, Oanda live, Pepperstone demo, Pepperstone live. Bybit Demo is excluded and repository aliases map to the canonical accounts.
+- The curve uses the authoritative /api/trading-journal snapshot, excludes tests and monthly AUD revaluation/non-trade rows, applies the required balance precedence, sorts chronologically, deduplicates stable identities, and renders only one account/currency.
+- Added high-DPI responsive canvas rendering, grid/axes/readable limited date ticks, formatted balances, latest marker, title/current equity/currency/point count, saved selection, automatic account redraw, and explicit loading/empty/error states.
+- Existing workbook/import/resync/drop-zone/monthly P&L/demo-adjustment/status controls retain their behavior.
 
-Automated validation:
-- `python -m pytest -q tests/test_open_orders_page.py tests/test_merged_monitor_status_env.py tests/test_master_service_state_sync.py tests/test_spread_monitor_dashboard.py tests/test_windows_launchers.py --basetemp .pytest_tmp_mt5_release_suite`: 172 passed, 31 warnings in 133.85 seconds.
-- `python -m pytest -q tests/test_dashboard_home_layout.py tests/test_master_service_profiles.py tests/test_master_service_local_exit.py --basetemp .pytest_tmp_mt5_profile_exit`: 48 passed, 100 warnings in 52.17 seconds.
-- Focused dependency CMD cases: 7 passed.
-- Independent read-only audit/review confirmed MT5 is not startup-critical, required and optional paths are fully separated, delayed-expansion/ERRORLEVEL control flow is valid, and optional failure cannot reach the sole fatal exit.
-- Pytest warnings were existing FastAPI/httpx deprecations, state-sync test-mock coroutine warnings, and denied `.pytest_cache` writes.
+5. Blank insufficient-data recommendations and canonical workbook
+- Stop and target recommendations are visibly blank unless the exact scope has at least one eligible winning and one eligible losing trade.
+- Removed symbol-to-overall fallback and visible legacy insufficient-data messages while retaining structured missing reasons, eligible counts, and exclusion diagnostics internally.
+- Actionable one-win/one-loss recommendations remain supported; Keep/Maintain is never emitted, exact-tie behavior remains unchanged, and targets retain the 1.50R floor.
+- API/frontend sanitization blanks legacy insufficient strings and does not reintroduce fallback text.
+- Regenerated journal/Trading Journal.xlsx through the canonical preserve-existing-layout data refresh, not by patching cells. The workbook retains its sheet order, active/selected SIM sheet, panes, merges, filters, formatting, manual fields, widths/heights, and two existing SIM charts; no Equity Curve sheet was added.
 
-Windows packaged warm-start validation:
-- Normal `Local Trading Tools.exe` launch requested at 2026-07-25 14:58:17.90.
-- Required dependency probe reported ready and logged `required packages already installed, skipping pip` at 14:58:32.37.
-- The host's existing MetaTrader5 installation was only reported by the separate optional probe; it was not installed, removed, renamed, or used as a readiness gate.
-- Uvicorn was requested at 14:58:32.84; application startup completed at 14:58:49; Edge loaded the dashboard automatically at 14:58:59.
-- Core and background readiness both reached true.
-- Main dashboard returned HTTP 200.
-- The on-demand OANDA Spread Monitor completed startup and returned HTTP 200; its OANDA status endpoint returned 79 rows, the page identified itself as `OANDA Spread Monitor`, and no Pepperstone UI path was present.
-- Missing-MT5 and failed-MT5-install behavior was validated through the isolated behavioral harness rather than modifying the machine's real MT5 installation.
-- Controlled Exit returned `ok=true`, closed the Edge target, and stopped `/health`.
-- The single FX Weekend child created by this validation was stopped afterward; the two pre-existing processes were left untouched.
+Primary production files changed:
+- fxweekend-clone/liquidate.py
+- fxweekend-clone/settings.json
+- shared/oanda_api.py
+- render/dropbox_state_store.py
+- render/master_service.py
+- run_local_master_control.bat
+- tools/windows_launchers/stream_local_master_worker.ps1
+- render/static/dashboard.js
+- pinescripts/custom_indicator.pine
+- render/static/trading_journal_actions.js
+- render/static/trading_journal_equity_curve.js
+- render/static/trading_journal.js
+- tools/master_journal_workbook.py
+- journal/Trading Journal.xlsx
+- render/README.md
+- .gitignore and PATCH_DESKTOP_PUSH.bat staging hygiene
+- focused tests for FX Weekend, state durability, dashboard/Journal/Pine behavior, workbook recommendations/layout, launchers, and publish exclusions
 
-Syntax/status checks:
-- `python -m py_compile tests/test_windows_launchers.py tests/test_spread_monitor_dashboard.py`: passed.
-- The exact edited batch block executed successfully across all behavioral cases and through the packaged launcher.
-- `git diff --check`: passed.
-- Test-generated `oanda_monitor/custom_alerts.json`, `oanda_monitor/settings.json`, and `watchlist.json` changes were restored before publication.
-- Pre-existing runtime/local-state changes remain dirty and must stay unstaged: `bybit_monitor/custom_alerts.json`, `render/data/*`, `state_backup.json`, and `state_manifest.json`.
+Automated verification:
+- Expanded non-workbook targeted suite covering the requested profile/state/dashboard/Pine/Journal modules plus new FX Weekend, equity-curve, symbol-resolution, launcher, and publish-hygiene coverage: 343 passed, 106 warnings in 299.10 seconds.
+- Focused FX Weekend executor suite: 38 passed, 4 warnings in 37.42 seconds.
+- Focused Journal/dashboard UI suite after the mobile sizing correction: 54 passed, 41 warnings in 54.68 seconds.
+- Post-transfer release-branch smoke suite for FX Weekend, the equity curve, and publish exclusions: 51 passed, 4 warnings in 46.08 seconds.
+- Workbook test collection: 170 tests collected.
+- All 170 workbook cases passed across deterministic exhaustive slices: indices 0-44, 45-89, 90-125, 126, 127, 128-131, 132, 133, 134, 135-150, 151-167, and 168-169.
+- The final long canonical source-resync case passed in 1231.96 seconds; the final quality migration/dropdown/manual-survival cases passed in 51.87, 50.08, and 128.05 seconds respectively.
+- Python compilation passed for fxweekend-clone/liquidate.py, render/master_service.py, tools/master_journal_workbook.py, shared/oanda_api.py, and render/dropbox_state_store.py.
+- node --check passed for dashboard.js, trading_journal_actions.js, trading_journal_equity_curve.js, and trading_journal.js.
+- git diff --check passed; only normal LF-to-CRLF working-copy notices were emitted.
 
-Residual risks:
-- MT5-only legacy tools still require MetaTrader5 when deliberately used. Their dependency is now explicit and optional rather than a global launcher prerequisite.
-- External OANDA availability remains outside the launcher; the final OANDA Spread Monitor live page/status checks succeeded.
+Manual/browser and artifact verification:
+- The actual local dashboard labels the control "FX Weekend (Render)" and opens the configured https://codex-rdqh.onrender.com/apps/fxweekend-clone page. Local /scripts reports remote_owned=true, autostart_expected=false, and no FX child was spawned by the isolated local verifier.
+- Isolated Render-profile checks exposed executor heartbeat, account modes, cutoff/state fields, and readiness behavior without making a Live OANDA request.
+- The authoritative Journal snapshot rendered one readable curve for every requested account:
+  Binance 113 USDT points; Bybit 265 USDT points; Oanda demo 46 AUD points; Oanda live 63 AUD points; Pepperstone demo 824 AUD points; Pepperstone live 193 AUD points.
+- Refresh issued exactly one authoritative Journal request. A 600px viewport had no horizontal overflow and stacked controls/chart correctly; devicePixelRatio=2 produced a 1508px backing canvas for a 754px CSS canvas.
+- Checked-in workbook scan found the expected sheet order through 2026, active/selected " SIM", two existing SIM charts, no Equity Curve sheet, no visible insufficient recommendation messages, and no visible Keep/Maintain recommendation.
+- TradingView compile/import was attempted in the browser but the host was blocked by net::ERR_NETWORK_ACCESS_DENIED. Pine structure and behavior are covered by the passing focused tests; no claim of a successful live TradingView compile is made.
+- A real remote watchlist was deliberately not mutated during verification. Exact add/delete/final-delete/empty/stale-remote/upload-failure/restart behavior was exercised against controlled durable-store responses.
+- No Live OANDA "Run now" action, position close, or account mutation was used during development or verification.
+
+Operational caveats and safety warning:
+- Three local fxweekend-clone/liquidate.py Python processes (PIDs 9240, 24880, and 26200) predated the isolated verifier and remain running. The new local ownership path starts no replacement. They were not terminated because stopping pre-existing user processes requires explicit approval.
+- Runtime/local-state changes remain deliberately unstaged and will be excluded by PATCH_DESKTOP_PUSH.bat: monitor alert/settings files, render/data, state_backup.json, state_manifest.json, and watchlist.json. Test caches, logs, temporary workbooks, FX status/temp files, and environment files are also excluded.
+- IMPORTANT: checked-in FX Weekend settings are enabled=true, account_modes=["live"], and dry_run=false. Deploying this enabled Render executor can close open OANDA Live positions after the configured Brisbane cutoff. Confirm the Render Live credentials and intended schedule before deployment.
 
 Completion workflow:
-- Run repository-root `PATCH_DESKTOP_PUSH.bat` after this summary. The task is not complete until it commits the intended files, pushes successfully, and verifies local `HEAD` equals `origin/master`.
+- Run repository-root PATCH_DESKTOP_PUSH.bat next.
+- Do not treat the task as published or complete unless the batch succeeds and verifies local HEAD equals origin/master.

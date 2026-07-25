@@ -1,10 +1,16 @@
 {
+  "account_modes": [
+    "live"
+  ],
   "check_interval_seconds": 60,
   "close_method": "positions",
   "cutoff_hour_dst": 5,
   "cutoff_hour_standard": 6,
+  "cutoff_time_dst": "05:00",
+  "cutoff_time_standard": "06:00",
   "dry_run": false,
   "enabled": true,
   "instrument_allowlist": [],
+  "max_retry_backoff_seconds": 300,
   "trigger_weekday": 5
 }

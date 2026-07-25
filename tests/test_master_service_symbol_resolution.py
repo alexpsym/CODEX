@@ -52,7 +52,8 @@ def test_watchlist_rejects_invalid_atomically(monkeypatch: pytest.MonkeyPatch) -
             return {"items": ["BTC", "NOPE", "EURUSD"]}
 
     monkeypatch.setattr(master_service, "_resolve_symbol_payload", fake_resolve)
-    monkeypatch.setattr(master_service, "_set_watchlist", fake_set_watchlist)
+    monkeypatch.setattr(master_service, "_set_watchlist_local_mirror", fake_set_watchlist)
+    monkeypatch.setattr(master_service, "_raise_if_watchlist_state_indeterminate", lambda: None)
     monkeypatch.setattr(master_service, "_wait_for_state_restore_or_error", lambda *args, **kwargs: asyncio.sleep(0, result={"enabled": True}))
 
     with pytest.raises(master_service.HTTPException) as exc:
@@ -85,18 +86,34 @@ def test_watchlist_mixed_crypto_fx_persists_canonical_values(monkeypatch: pytest
             return {"items": ["BRUSDT", "EURUSD"]}
 
     monkeypatch.setattr(master_service, "_resolve_symbol_payload", fake_resolve)
-    monkeypatch.setattr(master_service, "_set_watchlist", fake_set_watchlist)
+    monkeypatch.setattr(master_service, "_set_watchlist_local_mirror", fake_set_watchlist)
+    monkeypatch.setattr(master_service, "_get_watchlist", lambda: [])
+    monkeypatch.setattr(master_service, "_raise_if_watchlist_state_indeterminate", lambda: None)
+    monkeypatch.setattr(master_service, "_state_backup_uses_local_repo_file", lambda: True)
     monkeypatch.setattr(master_service, "_wait_for_state_restore_or_error", lambda *args, **kwargs: asyncio.sleep(0, result={"enabled": True}))
-    def fake_upload_and_verify(_key, payload, verifier=None):
-        if verifier:
-            verifier(payload)
+    monkeypatch.setattr(
+        master_service,
+        "write_repo_state_json_and_verify",
+        lambda _key, payload: {"ok": True, "payload": list(payload)},
+    )
+    monkeypatch.setattr(
+        master_service,
+        "_mark_primary_state_local_committed",
+        lambda *_args, **_kwargs: {},
+    )
+
+    async def fake_upload_and_verify(*, expected_watchlist=None, **_kwargs):
         return {
             "enabled": True,
             "last_verified_at": "now",
-            "last_verified_watchlist": ["BRUSDT", "EUR_USD"],
+            "last_verified_watchlist": list(expected_watchlist or []),
         }
 
-    monkeypatch.setattr(master_service.dropbox_state_store, "upload_json_and_verify", fake_upload_and_verify)
+    monkeypatch.setattr(
+        master_service,
+        "_upload_and_verify_state_backup_now",
+        fake_upload_and_verify,
+    )
 
     response = asyncio.run(master_service.set_watchlist(DummyRequest()))
     payload = response.body.decode("utf-8")

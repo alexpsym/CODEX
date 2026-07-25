@@ -45,6 +45,7 @@ showSydneySession = input.bool(true, "Sydney", group=sessionGroup, inline="sessi
 showTokyoSession = input.bool(true, "Tokyo", group=sessionGroup, inline="sessionCustom1")
 showLondonSession = input.bool(true, "London", group=sessionGroup, inline="sessionCustom2")
 showNewYorkSession = input.bool(true, "New York", group=sessionGroup, inline="sessionCustom2")
+sessionCandleGapRangeFraction = input.float(0.03, "Candle clearance (recent-range fraction)", minval=0.0, step=0.005, group=sessionGroup)
 
 showAnySession = showSydneySession or showTokyoSession or showLondonSession or showNewYorkSession
 showAnySessionVisibility = showSessionOpens or showSessionCloses
@@ -214,9 +215,10 @@ if barstate.islast and allowBybitTimingLines and showExpiry and timeframe.isintr
 // -----------------------------------------------------------------------------
 var line[] sessionMarkerLines = array.new_line()
 var label[] sessionLabels = array.new_label()
-sessionMaxMarkers = 192
+sessionMaxMarkers = 96
 sessionMarkerWindowBars = 80
 sessionMarkerHalfLengthMultiplier = 0.60
+sessionLabelOffsetRangeFraction = 0.015
 sessionMarkerRecentHigh = ta.highest(high, sessionMarkerWindowBars)
 sessionMarkerRecentLow = ta.lowest(low, sessionMarkerWindowBars)
 
@@ -227,52 +229,79 @@ isSessionEvent(simple string sessionTimezone, simple int eventHour, simple int e
     eventTs = sessionEventTimestamp(sessionTimezone, eventHour, eventMinute)
     time <= eventTs and eventTs < time_close
 
+isBrisbaneWeekend(int eventTs) =>
+    eventDay = dayofweek(eventTs, "Australia/Brisbane")
+    eventDay == dayofweek.saturday or eventDay == dayofweek.sunday
+
 horizontalSessionText(simple string sessionCode, simple bool isOpen) =>
     sessionCode + (isOpen ? " O" : " C")
+
+pushBoundedSessionMarker(line lowerLine, line upperLine, label markerLabel, int maxMarkers) =>
+    array.push(sessionMarkerLines, lowerLine)
+    array.push(sessionMarkerLines, upperLine)
+    array.push(sessionLabels, markerLabel)
+    while array.size(sessionMarkerLines) > maxMarkers * 2
+        line.delete(array.shift(sessionMarkerLines))
+    while array.size(sessionLabels) > maxMarkers
+        label.delete(array.shift(sessionLabels))
 
 drawSessionMarker(simple string sessionTimezone, simple int eventHour, simple int eventMinute, simple string sessionCode, simple bool isOpen) =>
     eventTs = sessionEventTimestamp(sessionTimezone, eventHour, eventMinute)
     recentRange = sessionMarkerRecentHigh - sessionMarkerRecentLow
     markerRange = math.max(na(recentRange) ? high - low : recentRange, syminfo.mintick * 200)
-    markerMidY = hl2
     markerHalfLength = markerRange * sessionMarkerHalfLengthMultiplier
-    lineStartY = markerMidY - markerHalfLength
-    lineEndY = markerMidY + markerHalfLength
-    labelY = isOpen ? lineEndY : lineStartY
-    sessionMarkerLine = line.new(x1=eventTs, y1=lineStartY, x2=eventTs, y2=lineEndY,
-                                 xloc=xloc.bar_time, extend=extend.none,
-                                 color=color.black, style=line.style_dotted, width=2,
-                                 force_overlay=true)
+    candleGap = math.max(markerRange * sessionCandleGapRangeFraction, syminfo.mintick * 20)
+    labelGap = math.max(markerRange * sessionLabelOffsetRangeFraction, syminfo.mintick * 10)
+    lowerLineEndY = low - candleGap
+    lowerLineStartY = lowerLineEndY - markerHalfLength
+    upperLineStartY = high + candleGap
+    upperLineEndY = upperLineStartY + markerHalfLength
+    labelY = isOpen ? upperLineEndY + labelGap : lowerLineStartY - labelGap
+    lowerSessionLine = line.new(x1=eventTs, y1=lowerLineStartY, x2=eventTs, y2=lowerLineEndY,
+                                xloc=xloc.bar_time, extend=extend.none,
+                                color=color.black, style=line.style_dotted, width=2,
+                                force_overlay=true)
+    upperSessionLine = line.new(x1=eventTs, y1=upperLineStartY, x2=eventTs, y2=upperLineEndY,
+                                xloc=xloc.bar_time, extend=extend.none,
+                                color=color.black, style=line.style_dotted, width=2,
+                                force_overlay=true)
     sessionLabel = label.new(x=eventTs, y=labelY, text=horizontalSessionText(sessionCode, isOpen),
                              xloc=xloc.bar_time, yloc=yloc.price,
                              color=color.new(color.white, 100), textcolor=color.black,
                              style=label.style_none, size=size.normal, textalign=text.align_center,
                              force_overlay=true)
-    pushBoundedLineAndLabel(sessionMarkerLines, sessionLabels, sessionMarkerLine, sessionLabel, sessionMaxMarkers)
+    pushBoundedSessionMarker(lowerSessionLine, upperSessionLine, sessionLabel, sessionMaxMarkers)
+
+sessionVisibilityKey = str.tostring(showSessionOpens) + str.tostring(showSessionCloses) + str.tostring(showSydneySession) + str.tostring(showTokyoSession) + str.tostring(showLondonSession) + str.tostring(showNewYorkSession)
+var string previousSessionVisibilityKey = sessionVisibilityKey
+if barstate.isnew and sessionVisibilityKey != previousSessionVisibilityKey
+    clearLineArray(sessionMarkerLines)
+    clearLabelArray(sessionLabels)
+    previousSessionVisibilityKey := sessionVisibilityKey
 
 if showSessionLines and barstate.isnew
     if showSydneySession
-        if showSessionOpens and isSessionEvent("Australia/Sydney", 8, 0)
+        if showSessionOpens and isSessionEvent("Australia/Sydney", 8, 0) and not isBrisbaneWeekend(sessionEventTimestamp("Australia/Sydney", 8, 0))
             drawSessionMarker("Australia/Sydney", 8, 0, "SYD", true)
-        if showSessionCloses and isSessionEvent("Australia/Sydney", 17, 0)
+        if showSessionCloses and isSessionEvent("Australia/Sydney", 17, 0) and not isBrisbaneWeekend(sessionEventTimestamp("Australia/Sydney", 17, 0))
             drawSessionMarker("Australia/Sydney", 17, 0, "SYD", false)
 
     if showTokyoSession
-        if showSessionOpens and isSessionEvent("Asia/Tokyo", 9, 0)
+        if showSessionOpens and isSessionEvent("Asia/Tokyo", 9, 0) and not isBrisbaneWeekend(sessionEventTimestamp("Asia/Tokyo", 9, 0))
             drawSessionMarker("Asia/Tokyo", 9, 0, "TKY", true)
-        if showSessionCloses and isSessionEvent("Asia/Tokyo", 18, 0)
+        if showSessionCloses and isSessionEvent("Asia/Tokyo", 18, 0) and not isBrisbaneWeekend(sessionEventTimestamp("Asia/Tokyo", 18, 0))
             drawSessionMarker("Asia/Tokyo", 18, 0, "TKY", false)
 
     if showLondonSession
-        if showSessionOpens and isSessionEvent("Europe/London", 8, 0)
+        if showSessionOpens and isSessionEvent("Europe/London", 8, 0) and not isBrisbaneWeekend(sessionEventTimestamp("Europe/London", 8, 0))
             drawSessionMarker("Europe/London", 8, 0, "LDN", true)
-        if showSessionCloses and isSessionEvent("Europe/London", 17, 0)
+        if showSessionCloses and isSessionEvent("Europe/London", 17, 0) and not isBrisbaneWeekend(sessionEventTimestamp("Europe/London", 17, 0))
             drawSessionMarker("Europe/London", 17, 0, "LDN", false)
 
     if showNewYorkSession
-        if showSessionOpens and isSessionEvent("America/New_York", 8, 0)
+        if showSessionOpens and isSessionEvent("America/New_York", 8, 0) and not isBrisbaneWeekend(sessionEventTimestamp("America/New_York", 8, 0))
             drawSessionMarker("America/New_York", 8, 0, "NY", true)
-        if showSessionCloses and isSessionEvent("America/New_York", 17, 0)
+        if showSessionCloses and isSessionEvent("America/New_York", 17, 0) and not isBrisbaneWeekend(sessionEventTimestamp("America/New_York", 17, 0))
             drawSessionMarker("America/New_York", 17, 0, "NY", false)
 else if barstate.isnew and not showSessionLines
     clearLineArray(sessionMarkerLines)

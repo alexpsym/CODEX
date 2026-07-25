@@ -5,6 +5,7 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP, localcontext
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 from openpyxl import Workbook, load_workbook
+from openpyxl.cell.cell import MergedCell
 from openpyxl.comments import Comment
 from openpyxl.styles import Font
 from openpyxl.worksheet.datavalidation import DataValidation
@@ -15,7 +16,7 @@ from openpyxl.formatting.rule import CellIsRule, FormulaRule
 from openpyxl.utils import get_column_letter
 from openpyxl.utils.cell import range_boundaries
 import calendar
-from copy import copy
+from copy import copy, deepcopy
 import json
 import math
 import os
@@ -46,7 +47,7 @@ TARGET_RECOMMENDATION_NO_WINS = "No eligible winning trades"
 TARGET_RECOMMENDATION_NO_LOSSES = "No eligible losing trades"
 TARGET_R_RECOMMENDATION_FLOOR = Decimal("1.50")
 # Backward-compatible alias for callers that still import the old name.
-TARGET_RECOMMENDATION_INSUFFICIENT = TARGET_RECOMMENDATION_NO_WINS
+TARGET_RECOMMENDATION_INSUFFICIENT = ""
 RECOMMENDATION_REASON_TEXT = {
     "exact_tie_goal_preference_decrease": "exact tie, so a small decrease is preferred",
 }
@@ -1063,6 +1064,9 @@ def _ensure_symbols_duration_header_layout(
         candidate = _symbols_header_border_merge_fingerprint(ws)
         if candidate in KNOWN_FLATTENED_SYMBOLS_HEADER_LAYOUT_FINGERPRINTS:
             legacy_layout_fingerprint = candidate
+    normalize_duration_widths = bool(
+        migrate_data_boundaries or legacy_layout_fingerprint
+    )
     col_set = {col for _header, col in duration_cols if col}
     removed_merges: List[str] = []
     for merged in list(ws.merged_cells.ranges):
@@ -1106,7 +1110,7 @@ def _ensure_symbols_duration_header_layout(
             created_merges.append(f"{get_column_letter(col)}1:{get_column_letter(col)}2")
         letter = get_column_letter(col)
         current_width = ws.column_dimensions[letter].width or 0
-        if current_width < 43:
+        if normalize_duration_widths and current_width < 43:
             ws.column_dimensions[letter].width = 43
 
     if migrate_data_boundaries or legacy_layout_fingerprint:
@@ -1444,7 +1448,7 @@ def _size_recommendation(kind: str, winner_avg: Any, loser_avg: Any) -> str:
     win_dec = _decimal_from_value(winner_avg)
     loss_dec = _decimal_from_value(loser_avg)
     if win_dec is None or loss_dec is None:
-        return "Need wins & losses"
+        return ""
     win = float(win_dec)
     loss = float(loss_dec)
     recommended = win_dec
@@ -3465,8 +3469,9 @@ def _target_r_exact_tie_adjustment_decimal(
 
 def _target_r_empty_payload(reason: str = TARGET_RECOMMENDATION_NO_WINS) -> Dict[str, Any]:
     return {
-        TARGET_RECOMMENDATION_HEADER: reason,
-        "target_recommendation": reason,
+        TARGET_RECOMMENDATION_HEADER: "",
+        "target_recommendation": "",
+        "target_recommendation_missing_reason": reason,
         "target_r_missing_reason": reason,
         "target_r_scope": "standard",
         "target_r_total_winning_trades": 0,
@@ -3900,7 +3905,7 @@ def _stop_recommendation_payload(
     loss_mean_dec = _average_decimal(loser_values)
     win_mean = _decimal_to_float(win_mean_dec)
     loss_mean = _decimal_to_float(loss_mean_dec)
-    recommendation = "Need wins & losses"
+    recommendation = ""
     gap = None
     direction = None
     recommended = None
@@ -3939,6 +3944,13 @@ def _stop_recommendation_payload(
     return {
         STOP_RECOMMENDATION_HEADER: recommendation,
         "stop_recommendation": recommendation,
+        "stop_recommendation_missing_reason": (
+            ""
+            if recommendation
+            else "no_eligible_winning_trades"
+            if not winner_values
+            else "no_eligible_losing_trades"
+        ),
         "eligible_stop_loss_wins": len(winner_values),
         "eligible_stop_loss_losses": len(loser_values),
         "stop_loss_winner_mean_pct": win_mean,
@@ -4012,12 +4024,9 @@ def _row_distance_recommendation(
     recommendations_by_symbol: Dict[str, Dict[str, Any]],
     header: str,
 ) -> str:
-    default_text = TARGET_RECOMMENDATION_INSUFFICIENT if header == TARGET_RECOMMENDATION_HEADER else "Need wins & losses"
     symbol = str(row.get("symbol") or "").strip().upper()
     symbol_text = (recommendations_by_symbol.get(symbol) or {}).get(header)
-    if symbol_text and symbol_text not in {"Need wins & losses", "Need more target data", TARGET_RECOMMENDATION_INSUFFICIENT}:
-        return symbol_text
-    return (recommendations_by_symbol.get("") or {}).get(header) or symbol_text or default_text
+    return str(_sanitize_recommendation_text(header, symbol_text) or "")
 
 
 def _sanitize_recommendation_text(header: str, value: Any) -> Any:
@@ -4032,25 +4041,40 @@ def _sanitize_recommendation_text(header: str, value: Any) -> Any:
         text,
     )
     lowered = text.casefold()
+    normalized = re.sub(r"[_\s-]+", " ", lowered).strip()
+    insufficient_fragments = (
+        "need wins & losses",
+        "need more target data",
+        "no eligible winning trades",
+        "no eligible losing trades",
+        "insufficient eligible wins",
+        "insufficient eligible losses",
+        "recommendation unavailable",
+    )
+    insufficient_qualifier = re.search(
+        r"\b(?:need|requires?|missing|not enough|too few|insufficient|no|unavailable)\b",
+        normalized,
+    )
+    insufficient_subject = re.search(
+        r"\b(?:wins?|winning|loss(?:es|ing)?|samples?|data|target|stop|recommendation)\b",
+        normalized,
+    )
+    if (
+        any(fragment in normalized for fragment in insufficient_fragments)
+        or (insufficient_qualifier and insufficient_subject)
+    ):
+        return ""
+    if "keep" in lowered or "maintain" in lowered:
+        return ""
     if header == TARGET_RECOMMENDATION_HEADER:
-        if lowered in {"keep target", "maintain target"}:
-            return TARGET_RECOMMENDATION_NO_WINS
-        if lowered.startswith("keep target") or lowered.startswith("maintain target"):
-            return re.sub(r"^(keep|maintain)\s+target", "Increase target", text, count=1, flags=re.IGNORECASE)
+        if "recommended:" not in lowered:
+            return ""
         if lowered.startswith("reduce target"):
             return re.sub(r"^reduce\s+target", "Decrease target", text, count=1, flags=re.IGNORECASE)
-        if lowered.startswith("no eligible winning trades"):
-            return TARGET_RECOMMENDATION_NO_WINS
-        if lowered.startswith("no eligible losing trades"):
-            return TARGET_RECOMMENDATION_NO_LOSSES
-        if "insufficient eligible wins" in lowered:
-            return TARGET_RECOMMENDATION_NO_WINS
         return text
     if header == STOP_RECOMMENDATION_HEADER:
-        if "keep" in lowered or "maintain" in lowered:
-            return "Need wins & losses"
         if "recommended:" not in lowered:
-            return "Need wins & losses"
+            return ""
         text = re.sub(r"^reduce\s+stop(?:\s+loss)?", "Decrease stop", text, count=1, flags=re.IGNORECASE)
         text = re.sub(r"^increase\s+stop\s+loss", "Increase stop", text, count=1, flags=re.IGNORECASE)
         return text
@@ -6777,12 +6801,21 @@ def _populate_symbols_metrics_preserving_layout(
         payload = analysis.get(symbol)
         if not payload:
             for col, key in metric_cols.items():
+                if key.endswith("_recommendation"):
+                    cell = ws.cell(row, col)
+                    cell.value = ""
+                    cell.number_format = "General"
+                    _apply_recommendation_cell_style(cell)
                 skipped.append({"column": get_column_letter(col), "metric": key, "reason": "symbol_not_in_trade_log"})
             continue
         for col, key in metric_cols.items():
             cell = ws.cell(row, col)
             value = payload.get(key)
             if value is None:
+                if key.endswith("_recommendation"):
+                    cell.value = ""
+                    cell.number_format = "General"
+                    _apply_recommendation_cell_style(cell)
                 skipped.append({"column": get_column_letter(col), "metric": key, "reason": "metric_not_derivable"})
                 continue
             cell.value = value
@@ -8927,22 +8960,21 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
     _apply_trade_log_win_loss_direct_row_fills(ws)
 
     inst=_symbols_sheet(wb)
-    inst.append([""] * len(INSTRUMENT_AVERAGES_HEADERS))
-    inst.append(INSTRUMENT_AVERAGES_HEADERS)
     _write_instrument_averages_headers(inst)
     instrument_analysis = _instrument_analysis_by_symbol(rows)
     instrument_rows = stats.get('by_instrument') or _instrument_summary_rows_from_trade_rows(rows)
+    next_instrument_row = INSTRUMENT_AVERAGES_DATA_START_ROW
     for rec in instrument_rows:
         cls=str(rec.get("asset_class") or rec.get("class") or "").lower()
         analysis = instrument_analysis.get(str(rec.get("symbol") or "").strip().upper(), {})
-        row_idx = inst.max_row + 1
+        row_idx = next_instrument_row
         netp = _as_float(analysis.get("net_result_pct"))
         avgp = _as_float(analysis.get("avg_result_pct"))
         if netp is None:
             netp = _as_float(rec.get("net_result_pct"))
         if avgp is None:
             avgp = _as_float(rec.get("avg_result_pct"))
-        inst.append([
+        instrument_values = [
             rec.get("symbol"), cls.upper() if cls else None, rec.get("total_trades", rec.get("trades")),
             rec.get("wins"), rec.get("losses"), rec.get("break_even"),
             rec.get("long_trades", rec.get("longs")), rec.get("long_wins"), rec.get("long_losses"), rec.get("long_break_even"),
@@ -8960,16 +8992,19 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
             rec.get("win_rate_pct"),
             analysis.get("avg_stop_pct") if analysis.get("avg_stop_pct") is not None else rec.get("avg_sl_pct"),
             rec.get('avg_sl_pct_wins'), rec.get('avg_sl_pct_losses'),
-            _sanitize_recommendation_text(STOP_RECOMMENDATION_HEADER, analysis.get(STOP_RECOMMENDATION_HEADER) or rec.get(STOP_RECOMMENDATION_HEADER) or rec.get("stop_recommendation") or ""),
+            _sanitize_recommendation_text(STOP_RECOMMENDATION_HEADER, analysis.get(STOP_RECOMMENDATION_HEADER) or ""),
             analysis.get("avg_target_pct") if analysis.get("avg_target_pct") is not None else rec.get("avg_tp_pct"),
             rec.get('avg_tp_pct_wins'), rec.get('avg_tp_pct_losses'),
-            _sanitize_recommendation_text(TARGET_RECOMMENDATION_HEADER, analysis.get(TARGET_RECOMMENDATION_HEADER) or rec.get(TARGET_RECOMMENDATION_HEADER) or rec.get("target_recommendation") or ""),
+            _sanitize_recommendation_text(TARGET_RECOMMENDATION_HEADER, analysis.get(TARGET_RECOMMENDATION_HEADER) or ""),
             _format_duration_display(rec.get("min_trade_duration_seconds", rec.get("shortest_duration_seconds"))),
             _format_duration_display(rec.get("avg_trade_duration_seconds", rec.get("avg_duration_seconds"))),
             _format_duration_display(rec.get("max_trade_duration_seconds", rec.get("longest_duration_seconds"))),
             _format_duration_display(rec.get("avg_winning_trade_duration_seconds", rec.get("avg_winning_duration"))),
             _format_duration_display(rec.get("avg_losing_trade_duration_seconds", rec.get("avg_losing_duration"))),
-        ])
+        ]
+        for col_idx, value in enumerate(instrument_values, start=1):
+            inst.cell(row_idx, col_idx).value = value
+        next_instrument_row += 1
         header_cols = {header: index + 1 for index, header in enumerate(INSTRUMENT_AVERAGES_HEADERS)}
         for header in ("Win Rate %", "Avg stop %", "Avg stop % (W)", "Avg stop % (L)", "Avg target %", "Avg target % (W)", "Avg target % (L)"):
             cc = header_cols[header]
@@ -10196,6 +10231,31 @@ def _report_bucket_for_period(
 
 def _ensure_report_sheets(wb, snapshot: Dict[str, Any], diagnostics: Dict[str, Any] | None = None) -> None:
     diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+    current_order = list(wb.sheetnames)
+    current_active = wb.active.title if wb.worksheets else ""
+    current_selected = [
+        ws.title for ws in wb.worksheets if bool(ws.sheet_view.tabSelected)
+    ]
+    structure = (
+        snapshot.get("_workbook_structure")
+        if isinstance(snapshot, dict)
+        and isinstance(snapshot.get("_workbook_structure"), dict)
+        else {}
+    )
+    requested_order = structure.get("sheet_order")
+    preserved_order = (
+        [str(name) for name in requested_order if str(name) in wb.sheetnames]
+        if isinstance(requested_order, list)
+        else current_order
+    )
+    preserved_order = list(dict.fromkeys(preserved_order))
+    preserved_active = str(structure.get("active_sheet") or current_active)
+    requested_selected = structure.get("selected_sheets")
+    preserved_selected = (
+        [str(name) for name in requested_selected if str(name) in wb.sheetnames]
+        if isinstance(requested_selected, list)
+        else current_selected
+    )
     years = _report_trade_years_from_snapshot(snapshot if isinstance(snapshot, dict) else {})
     expected_names = [REPORT_YEARLY_SHEET, *[str(year) for year in years]]
     created: set[str] = set()
@@ -10222,11 +10282,20 @@ def _ensure_report_sheets(wb, snapshot: Dict[str, Any], diagnostics: Dict[str, A
             _write_report_sheet(year_ws, month_headers, month_buckets)
         else:
             _update_report_sheet_preserving_layout(year_ws, month_headers, month_buckets, diagnostics)
-    ordered = [name for name in SHEET_ORDER if name in wb.sheetnames] + expected_names
-    seen = set(ordered)
-    remaining = [sheet.title for sheet in wb._sheets if sheet.title not in seen]
-    wb._sheets = [wb[name] for name in ordered if name in wb.sheetnames] + [wb[name] for name in remaining]
-    _activate_user_facing_sheet(wb)
+    remaining = [
+        sheet.title for sheet in wb._sheets if sheet.title not in preserved_order
+    ]
+    final_order = [*preserved_order, *remaining]
+    wb._sheets = [wb[name] for name in final_order]
+    if preserved_active in wb.sheetnames:
+        wb.active = wb.sheetnames.index(preserved_active)
+    selected_names = {
+        name for name in preserved_selected if name in wb.sheetnames
+    }
+    if not selected_names and preserved_active in wb.sheetnames:
+        selected_names.add(preserved_active)
+    for ws in wb.worksheets:
+        ws.sheet_view.tabSelected = ws.title in selected_names
 
 def _write_instrument_leaders_section(ws, start_row, start_col, leaders):
     ws.merge_cells(start_row=start_row,start_column=start_col,end_row=start_row,end_column=start_col+4)
@@ -12218,13 +12287,83 @@ def read_master_journal_source(path: Path) -> Dict[str, Any]:
             diagnostics["target_r_duplicate_trade_row_ids"] = duplicate_trade_row_ids
         items, dedupe_diagnostics = _dedupe_trade_rows_by_execution(items)
         diagnostics.update(dedupe_diagnostics)
-        return {'items':items,'balances':balances,'cashflow_ledger':dict(cashflow_ledger),'diagnostics':diagnostics}
+        return {
+            'items': items,
+            'balances': balances,
+            'cashflow_ledger': dict(cashflow_ledger),
+            'diagnostics': diagnostics,
+            '_workbook_structure': {
+                'sheet_order': list(wb.sheetnames),
+                'active_sheet': (
+                    wb.sheetnames[
+                        min(
+                            max(int(getattr(wb, "_active_sheet_index", 0)), 0),
+                            len(wb.sheetnames) - 1,
+                        )
+                    ]
+                    if wb.sheetnames
+                    else ''
+                ),
+                'selected_sheets': (
+                    [
+                        wb.sheetnames[
+                            min(
+                                max(
+                                    int(getattr(wb, "_active_sheet_index", 0)),
+                                    0,
+                                ),
+                                len(wb.sheetnames) - 1,
+                            )
+                        ]
+                    ]
+                    if wb.sheetnames
+                    else []
+                ),
+            },
+        }
     finally:
         wb.close()
 
-def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any], expected_survivor_row_ids: Optional[List[str]] = None) -> Dict[str, Any]:
+def update_master_journal_workbook_data_only(
+    path: Path,
+    snapshot: Dict[str, Any],
+    expected_survivor_row_ids: Optional[List[str]] = None,
+    *,
+    preserve_existing_layout: bool = False,
+) -> Dict[str, Any]:
     wb = load_workbook(path)
     diagnostics: Dict[str, Any] = {"missing_accounts": [], "updated_cells": 0}
+    preserved_layout = {
+        ws.title: {
+            "column_widths": {
+                key: dimension.width
+                for key, dimension in ws.column_dimensions.items()
+            },
+            "row_heights": {
+                key: dimension.height
+                for key, dimension in ws.row_dimensions.items()
+            },
+            "freeze_panes": ws.freeze_panes,
+            "views": deepcopy(ws.views),
+            "auto_filter": deepcopy(ws.auto_filter),
+            "merged_cells": [str(item) for item in ws.merged_cells.ranges],
+            "conditional_formatting": deepcopy(
+                ws.conditional_formatting
+            ),
+            "data_validations": deepcopy(ws.data_validations),
+            "sheet_format": deepcopy(ws.sheet_format),
+            "cell_presentations": {
+                coordinate: {
+                    "value": cell.value,
+                    "style": copy(cell._style),
+                    "hyperlink": copy(getattr(cell, "hyperlink", None)),
+                    "comment": copy(getattr(cell, "comment", None)),
+                }
+                for coordinate, cell in ws._cells.items()
+            },
+        }
+        for ws in wb.worksheets
+    } if preserve_existing_layout else {}
     try:
         _repair_legacy_instrument_averages_freeze_pane(wb, diagnostics)
         _migrate_analysis_sheet_names(wb, diagnostics)
@@ -12234,7 +12373,10 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
         instrument_ws = _symbols_sheet(wb)
         _ensure_instrument_averages_schema(instrument_ws, diagnostics)
         _ensure_symbols_freeze_panes(instrument_ws, diagnostics)
-        _apply_instrument_averages_requested_style(instrument_ws, preserve_layout=True)
+        if not preserve_existing_layout:
+            _apply_instrument_averages_requested_style(
+                instrument_ws, preserve_layout=True
+            )
         def _repair_trade_log_unknown_currency_formats(ws, rows: List[Dict[str, Any]], diagnostics: Dict[str, Any] | None = None) -> None:
             diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
             repaired = 0
@@ -12265,11 +12407,12 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
         _ensure_trade_log_schema(trade_log_ws, diagnostics)
         dash = _stats1_sheet(wb)
         detail_dash = _stats2_sheet(wb) or dash
-        _repair_dashboard_core_layout(dash, diagnostics)
-        _ensure_dashboard_expectancy_row(dash, diagnostics)
-        _ensure_dashboard_move_duration_rows(dash, diagnostics)
-        _ensure_dashboard_requested_metric_rows(dash, diagnostics)
-        _ensure_dashboard_extended_layout(dash, diagnostics)
+        if not preserve_existing_layout:
+            _repair_dashboard_core_layout(dash, diagnostics)
+            _ensure_dashboard_expectancy_row(dash, diagnostics)
+            _ensure_dashboard_move_duration_rows(dash, diagnostics)
+            _ensure_dashboard_requested_metric_rows(dash, diagnostics)
+            _ensure_dashboard_extended_layout(dash, diagnostics)
 
         stats = snapshot.get("stats") or {}
         rows = [
@@ -12596,8 +12739,6 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
                         continue
                     for market, col in market_cols.items():
                         value = _sanitize_recommendation_text(key, (buckets.get(market) or {}).get(key))
-                        if value in (None, ""):
-                            continue
                         if _write_value_preserving_cell(dash, rec_row, col, _excel_scalar(value)):
                             dash.cell(rec_row, col).number_format = "General"
                             _apply_recommendation_cell_style(dash.cell(rec_row, col))
@@ -13276,12 +13417,18 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
             if SYMBOLS_SHEET in wb.sheetnames and SYMBOLS_SHEET in gen.sheetnames:
                 instrument_ws = _symbols_sheet(wb)
                 _copy_instrument_rows_header_aware(_symbols_sheet(gen), instrument_ws)
-                _apply_instrument_averages_requested_style(instrument_ws, preserve_layout=True)
+                if not preserve_existing_layout:
+                    _apply_instrument_averages_requested_style(
+                        instrument_ws, preserve_layout=True
+                    )
                 _apply_instrument_averages_profit_loss_formatting(instrument_ws)
                 _apply_instrument_averages_semantic_fills(instrument_ws)
                 _repair_instrument_timeframe_columns(instrument_ws)
                 _populate_symbols_metrics_preserving_layout(instrument_ws, rows, diagnostics)
-                _ensure_symbols_duration_header_layout(instrument_ws, diagnostics)
+                if not preserve_existing_layout:
+                    _ensure_symbols_duration_header_layout(
+                        instrument_ws, diagnostics
+                    )
                 _set_instrument_averages_auto_filter_to_populated_range(instrument_ws)
                 _ensure_symbols_freeze_panes(instrument_ws, diagnostics)
             if "P&L Calendar" in wb.sheetnames and "P&L Calendar" in gen.sheetnames:
@@ -13309,14 +13456,101 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
             header_map=_instrument_averages_header_map(symbols_ws),
         )
 
+        if preserve_existing_layout:
+            for sheet_name, layout in preserved_layout.items():
+                if sheet_name not in wb.sheetnames:
+                    continue
+                ws = wb[sheet_name]
+                for key in list(ws.column_dimensions):
+                    if key not in layout["column_widths"]:
+                        del ws.column_dimensions[key]
+                for key, width in layout["column_widths"].items():
+                    ws.column_dimensions[key].width = width
+                for key in list(ws.row_dimensions):
+                    if key not in layout["row_heights"]:
+                        del ws.row_dimensions[key]
+                for key, height in layout["row_heights"].items():
+                    ws.row_dimensions[key].height = height
+                ws.freeze_panes = layout["freeze_panes"]
+                ws.views = deepcopy(layout["views"])
+                ws.auto_filter = deepcopy(layout["auto_filter"])
+                ws.conditional_formatting = deepcopy(
+                    layout["conditional_formatting"]
+                )
+                ws.data_validations = deepcopy(
+                    layout["data_validations"]
+                )
+                ws.sheet_format = deepcopy(layout["sheet_format"])
+                wanted_merges = set(layout["merged_cells"])
+                current_merges = {
+                    str(item) for item in ws.merged_cells.ranges
+                }
+                for extra in sorted(current_merges - wanted_merges):
+                    ws.unmerge_cells(extra)
+                for missing in sorted(wanted_merges - current_merges):
+                    ws.merge_cells(missing)
+                for coordinate, presentation in layout[
+                    "cell_presentations"
+                ].items():
+                    cell = ws._cells.get(coordinate)
+                    if cell is None:
+                        cell = ws.cell(
+                            row=coordinate[0],
+                            column=coordinate[1],
+                        )
+                    cell._style = copy(presentation["style"])
+                    if (
+                        not isinstance(cell, MergedCell)
+                        and cell.value == presentation["value"]
+                    ):
+                        if hasattr(cell, "_hyperlink"):
+                            cell._hyperlink = copy(
+                                presentation["hyperlink"]
+                            )
+                        if hasattr(cell, "comment"):
+                            cell.comment = copy(
+                                presentation["comment"]
+                            )
+                    elif not isinstance(cell, MergedCell):
+                        old_link = presentation["hyperlink"]
+                        current_link = getattr(cell, "hyperlink", None)
+                        if (
+                            old_link is not None
+                            and current_link is not None
+                            and (
+                                getattr(current_link, "target", None),
+                                getattr(current_link, "location", None),
+                            )
+                            == (
+                                getattr(old_link, "target", None),
+                                getattr(old_link, "location", None),
+                            )
+                        ):
+                            cell._hyperlink = None
+                        old_comment = presentation["comment"]
+                        current_comment = getattr(cell, "comment", None)
+                        if (
+                            old_comment is not None
+                            and current_comment is not None
+                            and (
+                                current_comment.text,
+                                current_comment.author,
+                            )
+                            == (
+                                old_comment.text,
+                                old_comment.author,
+                            )
+                        ):
+                            cell.comment = None
         after = _snapshot_invariants(wb)
         _assert_invariants_unchanged(before, after)
         candidate = path.with_suffix(".update-candidate.tmp.xlsx")
-        if STATS2_SHEET in wb.sheetnames:
+        if STATS2_SHEET in wb.sheetnames and not preserve_existing_layout:
             _repair_stats2_account_balance_formatting(wb[STATS2_SHEET], diagnostics)
-        _apply_workbook_left_alignment(wb)
-        _repair_stats1_child_label_styles(dash, diagnostics)
-        _repair_stats2_as_of_datetime_style(wb, diagnostics)
+        if not preserve_existing_layout:
+            _apply_workbook_left_alignment(wb)
+            _repair_stats1_child_label_styles(dash, diagnostics)
+            _repair_stats2_as_of_datetime_style(wb, diagnostics)
         wb.save(candidate)
         return {"ok": True, "path": str(path), "candidate_path": str(candidate), "diagnostics": diagnostics}
     finally:
@@ -13325,7 +13559,11 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
 def refresh_master_journal_derived_sheets(path: Path, snapshot: Dict[str, Any]) -> Dict[str, Any]:
     if not path.exists():
         raise FileNotFoundError(f"Master Journal workbook not found: {path}")
-    result = update_master_journal_workbook_data_only(path, snapshot)
+    result = update_master_journal_workbook_data_only(
+        path,
+        snapshot,
+        preserve_existing_layout=True,
+    )
     if not result.get("ok"):
         return result
     candidate = Path(str(result.get("candidate_path") or ""))

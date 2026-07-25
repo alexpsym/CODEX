@@ -220,7 +220,7 @@ function Test-DashboardHealth {
 function Get-RequiredAutostartTargets {
     $raw = [string] $env:AUTOSTART_SCRIPTS
     if ([string]::IsNullOrWhiteSpace($raw)) {
-        $raw = "bybit_monitor,oanda_monitor,fxweekend-clone"
+        $raw = "bybit_monitor,oanda_monitor"
     }
     $tokens = @(
         $raw.Split(",") |
@@ -228,14 +228,20 @@ function Get-RequiredAutostartTargets {
             Where-Object { $_ -and $_.ToUpperInvariant() -notin @("NONE", "OFF", "DISABLED") }
     )
     if ($tokens.Count -eq 1 -and ($tokens[0] -eq "*" -or $tokens[0].ToUpperInvariant() -eq "ALL")) {
-        $tokens = @("bybit_monitor", "oanda_monitor", "fxweekend-clone")
+        $tokens = @("bybit_monitor", "oanda_monitor")
     }
     $excluded = @(
         ([string] $env:AUTOSTART_EXCLUDE).Split(",") |
             ForEach-Object { $_.Trim() } |
             Where-Object { $_ }
     )
-    return @($tokens | Where-Object { $_ -notin $excluded })
+    return @(
+        $tokens |
+            Where-Object {
+                $_ -notin $excluded -and
+                $_ -notin @("fxweekend", "fxweekend-clone")
+            }
+    )
 }
 
 function Get-ScriptRowByName {

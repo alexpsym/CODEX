@@ -12,6 +12,8 @@ STATE_FILES = {
     "oanda_alerts": "oanda_monitor/custom_alerts.json",
     "bybit_settings": "bybit_monitor/settings.json",
     "oanda_settings": "oanda_monitor/settings.json",
+    "fxweekend_settings": "fxweekend-clone/settings.json",
+    "fxweekend_status": "fxweekend-clone/status.json",
     "pending_webhooks": "pending_webhooks.json",
     "trade_contexts": "trade_contexts.json",
     "state_manifest": "state_manifest.json",

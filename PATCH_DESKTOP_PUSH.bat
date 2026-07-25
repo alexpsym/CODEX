@@ -91,27 +91,33 @@ echo.
 echo Excluding generated temp/log/cache/runtime files from the staged commit.
 for %%P in (
   ".pytest_cache"
-  ".pytest_tmp*"
-  ".pytest_*.log"
   "__pycache__"
-  "*.pyc"
   "PATCH_DESKTOP_PUSH-latest.log"
   "INSTALL-latest.log"
-  "fxweekend-clone/*.log"
   ".env"
-  ".env.*"
-  "*.env"
   "render/data"
   "render/uploads"
   "bybit_monitor/custom_alerts.json"
+  "bybit_monitor/settings.json"
   "bybit_monitor/runtime_status.json"
   "bybit_monitor/state.json"
+  "oanda_monitor/custom_alerts.json"
+  "oanda_monitor/settings.json"
   "oanda_monitor/runtime_status.json"
+  "watchlist.json"
   "state_manifest.json"
   "state_backup.json"
 ) do (
   call git reset -q -- "%%~P" >nul 2>nul
 )
+call git reset -q -- ":(glob).pytest_tmp*" >nul 2>nul
+call git reset -q -- ":(glob).pytest_*.log" >nul 2>nul
+call git reset -q -- ":(glob)**/__pycache__/**" >nul 2>nul
+call git reset -q -- ":(glob)**/*.pyc" >nul 2>nul
+call git reset -q -- ":(glob)fxweekend-clone/*.log" >nul 2>nul
+call git reset -q -- ":(glob)fxweekend-clone/*.tmp" >nul 2>nul
+call git reset -q -- ":(glob).env.*" >nul 2>nul
+call git reset -q -- ":(glob)**/*.env" >nul 2>nul
 
 echo.
 echo Status after staging:

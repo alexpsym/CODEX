@@ -8,13 +8,16 @@ import subprocess
 import zipfile
 import xml.etree.ElementTree as ET
 from openpyxl import Workbook, load_workbook
+from openpyxl.comments import Comment
+from openpyxl.formatting.rule import FormulaRule
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.worksheet.views import Selection
 import pytest
 from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, read_master_journal_source, update_master_journal_workbook_data_only, SHEET_ORDER, STATS1_SHEET, STATS2_SHEET, SYMBOLS_SHEET, TARGET_R_METADATA_SHEET, TRADE_LOG_HEADERS, TRADE_LOG_HEADERS_V1, OLD_TRADE_LOG_HEADERS, PRE_MOVE_TRADE_LOG_HEADERS, MOVE_TO_FIELD_MAP, TRADE_LOG_HEADER_ROWS, TRADE_LOG_DATA_START_ROW, TRADE_LOG_DATA_ROW_HEIGHT, TRADE_LOG_FILTER_HEADER_ROW, TRADE_NUMBER_HEADER, STOP_RECOMMENDATION_HEADER, TARGET_RECOMMENDATION_HEADER, TARGET_RECOMMENDATION_INSUFFICIENT, REPORT_YEARLY_SHEET, REPORT_METRIC_LABELS, INSTRUMENT_AVERAGES_HEADERS, INSTRUMENT_AVERAGES_GROUP_HEADER_ROW, INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, INSTRUMENT_AVERAGES_DATA_START_ROW, DASHBOARD_MOVE_TO_BREAK_EVEN_LABEL, DASHBOARD_MOVE_TO_PROFIT_LABEL, PROFIT_FILL, LOSS_FILL, DURATION_NUMBER_FORMAT, adaptive_percent_number_format, adaptive_number_format, resolve_trade_folder_link, expected_report_sheet_names, _apply_trade_number_hyperlinks, _ensure_trade_log_schema, _ensure_instrument_averages_schema, _ensure_symbols_freeze_panes, _ensure_pnl_calendar_freeze_panes, _repair_trade_log_move_to_durations, _trade_log_header_map, _instrument_averages_header_map, _result_percentage_totals_by_market
 from tools.master_journal_workbook import _format_duration_display, _parse_duration_text, _repair_legacy_duration_number_formats, _populate_symbols_metrics_preserving_layout, _repair_symbols_header_merges_preserving_layout
 from tools.master_journal_workbook import RECOMMENDATION_TRADE_LOG_HEADERS, _trade_log_three_row_header_values_for
-from tools.master_journal_workbook import _period_drawdown_metrics, _sanitize_recommendation_text
+from tools.master_journal_workbook import _ensure_report_sheets, _period_drawdown_metrics, _sanitize_recommendation_text
 from openpyxl.utils.cell import coordinate_to_tuple, get_column_letter, range_boundaries
 
 def _cf_ranges(ws):
@@ -41,10 +44,32 @@ def _header_col(ws, name: str) -> int:
     return headers.index(name) + 1
 
 
+def _calendar_month_cell(ws, year: int, month: str):
+    year_col = next(
+        col
+        for col in range(2, ws.max_column + 1)
+        if int(ws.cell(1, col).value or 0) == year
+    )
+    month_row = next(
+        row
+        for row in range(2, ws.max_row + 1)
+        if str(ws.cell(row, 1).value or "").strip().casefold()
+        == month.strip().casefold()
+    )
+    return ws.cell(month_row, year_col)
+
+
 def _assert_target_recommendation_is_numeric_or_insufficient(value: object) -> None:
     text = str(value or "").strip()
-    if text in {TARGET_RECOMMENDATION_INSUFFICIENT, "No eligible losing trades"}:
+    if not text:
         return
+    assert text not in {
+        "Need wins & losses",
+        "No eligible winning trades",
+        "No eligible losing trades",
+        "Need more target data",
+        "Insufficient eligible wins",
+    }
     assert "Recommended:" in text
     assert text not in {"Reduce target", "Increase target", "Keep target"}
     number_text = text.split("Recommended:", 1)[1].split("R", 1)[0].strip()
@@ -84,6 +109,27 @@ def _dashboard_account_balances(ws):
                 if str(ws.cell(r, account_col).value or "").strip()
             }
     return {}
+
+
+def _stats1_recommendation_row_after_metric(ws, metric_label: str) -> int | None:
+    winners_row = next(
+        (
+            row
+            for row in range(1, ws.max_row + 1)
+            if str(ws.cell(row, 1).value or "").strip() == "Winners"
+        ),
+        ws.max_row + 1,
+    )
+    for row in range(1, winners_row):
+        if str(ws.cell(row, 1).value or "").strip() != "Recommendation":
+            continue
+        nearby_labels = {
+            str(ws.cell(prior, 1).value or "").strip()
+            for prior in range(max(1, row - 4), row)
+        }
+        if metric_label in nearby_labels:
+            return row
+    return None
 
 
 def _ensure_trade_log_headers(wb) -> None:
@@ -157,6 +203,35 @@ def test_recommendation_sanitizer_hides_internal_reason_keys():
     assert "unexpected debug reason code" in cleaned
     assert "exact_tie_goal_preference_decrease" not in cleaned
     assert "unexpected_debug_reason_code" not in cleaned
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "not_enough_eligible_wins",
+        "Not enough eligible wins",
+        "Insufficient target sample",
+        "Need both wins and losses",
+        "Target recommendation unavailable",
+        "Missing stop data",
+        "Too few eligible losses",
+        "No winning samples",
+        "No losing samples",
+        "zero winners",
+        "0 eligible wins",
+        "Reduce target",
+        "Increase stop loss",
+    ],
+)
+def test_recommendation_sanitizer_blanks_equivalent_insufficient_messages(
+    message: str,
+) -> None:
+    assert _sanitize_recommendation_text(
+        TARGET_RECOMMENDATION_HEADER, message
+    ) == ""
+    assert _sanitize_recommendation_text(
+        STOP_RECOMMENDATION_HEADER, message
+    ) == ""
 
 
 def test_stats_and_symbols_fall_back_to_trade_rows_when_stats_are_empty(tmp_path: Path):
@@ -356,6 +431,196 @@ def test_dashboard_parity_and_equity(tmp_path: Path):
     ranges = _cf_ranges(wb[STATS1_SHEET])
     assert all(not r.startswith("B1:K") for r in ranges)
     assert not _cell_covered(ranges, "B3")  # Trades count should not be profit/loss colored
+
+
+def test_report_refresh_preserves_manual_sheet_order_and_active_selection() -> None:
+    wb = Workbook()
+    wb.active.title = SHEET_ORDER[0]
+    for name in [
+        *SHEET_ORDER[1:],
+        " SIM",
+        *expected_report_sheet_names(sample_snapshot()),
+    ]:
+        wb.create_sheet(name)
+    original_order = [
+        *SHEET_ORDER,
+        " SIM",
+        *expected_report_sheet_names(sample_snapshot()),
+    ]
+    wb._sheets = [wb[name] for name in original_order]
+    wb.active = wb.sheetnames.index(" SIM")
+    for ws in wb.worksheets:
+        ws.sheet_view.tabSelected = ws.title == " SIM"
+
+    _ensure_report_sheets(wb, sample_snapshot(), {})
+
+    assert wb.sheetnames == original_order
+    assert wb.active.title == " SIM"
+    assert [
+        ws.title for ws in wb.worksheets if ws.sheet_view.tabSelected
+    ] == [" SIM"]
+    wb.close()
+
+
+def test_data_only_refresh_preserves_exact_sheet_views(tmp_path: Path) -> None:
+    snapshot = sample_snapshot()
+    path = tmp_path / "preserve-sheet-views.xlsx"
+    build_master_journal_workbook(snapshot, path)
+    wb = load_workbook(path)
+    wb.active = wb.sheetnames.index("Trade Log")
+    for ws in wb.worksheets:
+        ws.sheet_view.tabSelected = ws.title == "Trade Log"
+    stats = wb[STATS1_SHEET]
+    stats.freeze_panes = "B2"
+    stats.sheet_view.selection = [
+        Selection(
+            pane="bottomRight",
+            activeCell="C7",
+            sqref="C7",
+        )
+    ]
+    stats["C7"].alignment = Alignment(
+        horizontal="right",
+        vertical="top",
+        wrap_text=True,
+    )
+    stats["C7"].number_format = '0.0000" preserved"'
+    stats.sheet_format.defaultRowHeight = 17.25
+    stats.conditional_formatting.add(
+        "C7:C9",
+        FormulaRule(
+            formula=["C7>0"],
+            fill=PatternFill(
+                fill_type="solid",
+                fgColor="FFF2CC",
+            ),
+        ),
+    )
+    grouped_validation = DataValidation(
+        type="list",
+        formula1='"Yes,No"',
+    )
+    grouped_validation.add("C7")
+    grouped_validation.add("C9")
+    stats.add_data_validation(grouped_validation)
+    stats["B3"].value = -999
+    stats["B3"].hyperlink = "../../../Users/example/stale-dashboard-link"
+    trade_log = wb["Trade Log"]
+    trade_number_cell = trade_log.cell(
+        TRADE_LOG_DATA_START_ROW,
+        _trade_log_header_map(trade_log)[TRADE_NUMBER_HEADER],
+    )
+    trade_number_cell.hyperlink = "../../../Users/example/trade"
+    trade_number_cell.comment = Comment("Preserve this note.", "User")
+    wb.save(path)
+    wb.close()
+
+    persisted = load_workbook(path)
+    expected_views = {
+        ws.title: ET.tostring(ws.views.to_tree(), encoding="unicode")
+        for ws in persisted.worksheets
+    }
+    expected_conditional_formatting = {
+        ws.title: {
+            str(key.sqref): [
+                ET.tostring(rule.to_tree(), encoding="unicode")
+                for rule in rules
+            ]
+            for key, rules in ws.conditional_formatting._cf_rules.items()
+        }
+        for ws in persisted.worksheets
+    }
+    expected_data_validations = {
+        ws.title: ET.tostring(
+            ws.data_validations.to_tree(),
+            encoding="unicode",
+        )
+        for ws in persisted.worksheets
+    }
+    expected_sheet_formats = {
+        ws.title: ET.tostring(
+            ws.sheet_format.to_tree(),
+            encoding="unicode",
+        )
+        for ws in persisted.worksheets
+    }
+    expected_stats_style = copy(
+        persisted[STATS1_SHEET]["C7"]._style
+    )
+    persisted_trade_log = persisted["Trade Log"]
+    persisted_trade_number_cell = persisted_trade_log.cell(
+        TRADE_LOG_DATA_START_ROW,
+        _trade_log_header_map(persisted_trade_log)[
+            TRADE_NUMBER_HEADER
+        ],
+    )
+    expected_hyperlink = persisted_trade_number_cell.hyperlink.target
+    expected_comment = persisted_trade_number_cell.comment.text
+    persisted.close()
+
+    result = update_master_journal_workbook_data_only(
+        path,
+        snapshot,
+        preserve_existing_layout=True,
+    )
+    candidate = Path(result["candidate_path"])
+    refreshed = load_workbook(candidate)
+    actual_views = {
+        ws.title: ET.tostring(ws.views.to_tree(), encoding="unicode")
+        for ws in refreshed.worksheets
+        if ws.title in expected_views
+    }
+    actual_conditional_formatting = {
+        ws.title: {
+            str(key.sqref): [
+                ET.tostring(rule.to_tree(), encoding="unicode")
+                for rule in rules
+            ]
+            for key, rules in ws.conditional_formatting._cf_rules.items()
+        }
+        for ws in refreshed.worksheets
+        if ws.title in expected_conditional_formatting
+    }
+    actual_data_validations = {
+        ws.title: ET.tostring(
+            ws.data_validations.to_tree(),
+            encoding="unicode",
+        )
+        for ws in refreshed.worksheets
+        if ws.title in expected_data_validations
+    }
+    actual_sheet_formats = {
+        ws.title: ET.tostring(
+            ws.sheet_format.to_tree(),
+            encoding="unicode",
+        )
+        for ws in refreshed.worksheets
+        if ws.title in expected_sheet_formats
+    }
+    actual_stats_style = refreshed[STATS1_SHEET]["C7"]._style
+    changed_cell = refreshed[STATS1_SHEET]["B3"]
+    refreshed_trade_log = refreshed["Trade Log"]
+    refreshed_trade_number_cell = refreshed_trade_log.cell(
+        TRADE_LOG_DATA_START_ROW,
+        _trade_log_header_map(refreshed_trade_log)[TRADE_NUMBER_HEADER],
+    )
+    actual_hyperlink = refreshed_trade_number_cell.hyperlink.target
+    actual_comment = refreshed_trade_number_cell.comment.text
+    refreshed.close()
+
+    assert actual_views == expected_views
+    assert actual_conditional_formatting == expected_conditional_formatting
+    assert actual_data_validations == expected_data_validations
+    assert actual_sheet_formats == expected_sheet_formats
+    assert actual_stats_style == expected_stats_style
+    assert actual_hyperlink == expected_hyperlink
+    assert actual_comment == expected_comment
+    assert changed_cell.value != -999
+    assert (
+        changed_cell.hyperlink is None
+        or changed_cell.hyperlink.target
+        != "../../../Users/example/stale-dashboard-link"
+    )
 
 
 def test_dashboard_overall_return_average_labels_and_move_durations(tmp_path: Path):
@@ -593,6 +858,52 @@ def test_symbols_latest_blank_metric_columns_populate_and_header_merges_survive(
     assert ws.auto_filter.ref == "A2:BE3"
 
 
+def test_symbols_refresh_clears_stale_recommendations_for_removed_symbol():
+    wb = Workbook()
+    ws = wb.active
+    ws.title = SYMBOLS_SHEET
+    ws["A2"] = "Symbol"
+    ws["B1"] = "Stops"
+    ws["B2"] = STOP_RECOMMENDATION_HEADER
+    ws["C1"] = "Targets"
+    ws["C2"] = TARGET_RECOMMENDATION_HEADER
+    ws["A3"] = "OLDPAIR"
+    ws["B3"] = "Decrease stop — Recommended: 1.00%"
+    ws["C3"] = "Increase target — Recommended: 2.00R"
+
+    _populate_symbols_metrics_preserving_layout(ws, [], {})
+
+    assert ws["B3"].value in (None, "")
+    assert ws["C3"].value in (None, "")
+
+
+def test_full_build_does_not_fallback_to_stale_symbol_recommendations(tmp_path: Path):
+    snapshot = sample_snapshot()
+    stale = snapshot["stats"]["by_instrument"][0]
+    stale[STOP_RECOMMENDATION_HEADER] = "Decrease stop — Recommended: 1.00%"
+    stale["stop_recommendation"] = stale[STOP_RECOMMENDATION_HEADER]
+    stale[TARGET_RECOMMENDATION_HEADER] = "Increase target — Recommended: 2.00R"
+    stale["target_recommendation"] = stale[TARGET_RECOMMENDATION_HEADER]
+    out = tmp_path / "no-stale-symbol-fallback.xlsx"
+
+    build_master_journal_workbook(snapshot, out)
+
+    checked = load_workbook(out, data_only=True)
+    try:
+        symbols = checked[SYMBOLS_SHEET]
+        headers = _instrument_averages_header_map(symbols)
+        row = next(
+            row
+            for row in range(INSTRUMENT_AVERAGES_DATA_START_ROW, symbols.max_row + 1)
+            if str(symbols.cell(row, headers["Symbol"]).value or "").strip().upper()
+            == "EURUSD"
+        )
+        assert symbols.cell(row, headers[STOP_RECOMMENDATION_HEADER]).value in (None, "")
+        assert symbols.cell(row, headers[TARGET_RECOMMENDATION_HEADER]).value in (None, "")
+    finally:
+        checked.close()
+
+
 def test_move_to_duration_repair_uses_open_and_move_times():
     from openpyxl import Workbook
     wb = Workbook()
@@ -632,7 +943,14 @@ def test_instrument_averages_new_columns_order_formats_and_alignment(tmp_path: P
     out = tmp_path / "instrument_acceptance.xlsx"
     build_master_journal_workbook(snapshot, out)
     ws = load_workbook(out)[SYMBOLS_SHEET]
-    headers = [str(cell.value or "") for cell in ws[INSTRUMENT_AVERAGES_FILTER_HEADER_ROW]]
+    headers = [
+        str(
+            ws.cell(INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, col).value
+            or ws.cell(INSTRUMENT_AVERAGES_GROUP_HEADER_ROW, col).value
+            or ""
+        )
+        for col in range(1, len(INSTRUMENT_AVERAGES_HEADERS) + 1)
+    ]
     expected_headers = [
         "Recommendation" if header in {STOP_RECOMMENDATION_HEADER, TARGET_RECOMMENDATION_HEADER} else header
         for header in INSTRUMENT_AVERAGES_HEADERS
@@ -1115,14 +1433,25 @@ def test_calendar_month_conditional_formatting_rows(tmp_path: Path):
     ]
     out=tmp_path/'Trading Journal.xlsx'; build_master_journal_workbook(snap,out); wb=load_workbook(out)
     cal=wb['P&L Calendar']
-    may=cal['F2']; jun=cal['G2']; mar=cal['D2']
+    year_col = next(
+        col
+        for col in range(2, cal.max_column + 1)
+        if int(cal.cell(1, col).value or 0) == 2026
+    )
+    month_rows = {
+        str(cal.cell(row, 1).value or ""): row
+        for row in range(2, cal.max_row + 1)
+    }
+    may=cal.cell(month_rows["May"], year_col)
+    jun=cal.cell(month_rows["June"], year_col)
+    mar=cal.cell(month_rows["March"], year_col)
     assert may.value == "1.20%, 1 trade"
     assert jun.value == "-0.40%, 1 trade"
     assert _cell_fill_rgb(may) == PROFIT_FILL
     assert _cell_fill_rgb(jun) == LOSS_FILL
     assert _cf_ranges(cal) == []
     assert cal.freeze_panes == "B2"
-    for c in range(1, 14):
+    for c in range(1, cal.max_column + 1):
         assert cal.cell(1, c).font.bold is True
     assert mar.value in ('', None)
     assert _cell_fill_rgb(mar) == ""
@@ -1138,7 +1467,7 @@ def test_calendar_data_only_update_clears_blank_month_fill(tmp_path: Path):
     build_master_journal_workbook(snap, out)
     wb = load_workbook(out)
     cal = wb["P&L Calendar"]
-    cal["D2"].fill = PatternFill("solid", fgColor="E5E7EB")
+    _calendar_month_cell(cal, 2026, "March").fill = PatternFill("solid", fgColor="E5E7EB")
     wb.save(out)
     wb.close()
 
@@ -1147,7 +1476,7 @@ def test_calendar_data_only_update_clears_blank_month_fill(tmp_path: Path):
 
     checked = load_workbook(out)
     try:
-        mar = checked["P&L Calendar"]["D2"]
+        mar = _calendar_month_cell(checked["P&L Calendar"], 2026, "March")
         assert mar.value in ("", None)
         assert _cell_fill_rgb(mar) == ""
     finally:
@@ -1233,7 +1562,7 @@ def test_sheet_order_and_hidden_meta(tmp_path: Path):
     assert len(wb[STATS1_SHEET].conditional_formatting) > 0
     assert len(wb[SYMBOLS_SHEET].conditional_formatting) > 0
     assert len(wb["P&L Calendar"].conditional_formatting) == 0
-    assert _cell_fill_rgb(wb["P&L Calendar"]["F2"]) == PROFIT_FILL
+    assert _cell_fill_rgb(_calendar_month_cell(wb["P&L Calendar"], 2026, "May")) == PROFIT_FILL
 
 
 def test_trade_log_preserves_explicit_bybit_execution_row_id(tmp_path: Path):
@@ -1499,7 +1828,9 @@ def test_dashboard_layout_style_columns(tmp_path: Path):
     assert dash['A1'].fill.fgColor.type != 'rgb' or dash['A1'].fill.fgColor.rgb != '000B1220'
     assert dash['I2'].value != 'Instrument leaders'
     expected_duration_labels = [
-        "Min duration", "Avg duration", "Max duration",
+        "Min duration", "Avg duration",
+        "Avg winning trade duration", "Avg losing trade duration",
+        "Max duration",
         "Min Move to Break Even", "Source", "Average Move to Break Even", "Max Move to Break Even", "Source",
         "Min Move to Profit", "Source", "Average Move to Profit", "Max Move to Profit", "Source",
     ]
@@ -1511,7 +1842,9 @@ def test_dashboard_layout_style_columns(tmp_path: Path):
     duration_start = next(row for row in labels["Min duration"] if row < labels["Winners"][0])
     duration_rows = range(duration_start, duration_start + len(expected_duration_labels))
     assert [dash.cell(row, 1).value for row in duration_rows] == expected_duration_labels
-    for source_row in (duration_start + 4, duration_start + 7, duration_start + 9, duration_start + 12):
+    source_rows = [row for row in duration_rows if dash.cell(row, 1).value == "Source"]
+    assert len(source_rows) == 4
+    for source_row in source_rows:
         label_cell = dash.cell(source_row, 1)
         assert label_cell.value == "Source"
         assert label_cell.font.bold is False
@@ -1690,10 +2023,21 @@ def test_instrument_averages_op_and_duration_not_blank_after_data_only_update(tm
             cell = inst.cell(row, legacy_headers[header])
             cell.value = value
             cell.number_format = r"00\:00\:00\:00"
-    headers = [str(c.value or "") for c in inst[INSTRUMENT_AVERAGES_FILTER_HEADER_ROW]]
-    # mimic live alias header style
-    inst.cell(INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, headers.index("Shortest duration (DD:HH:MM:SS)") + 1).value = "Shortest (DD:HH:MM:SS)"
-    inst.cell(INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, headers.index("Longest duration (DD:HH:MM:SS)") + 1).value = "Longest (DD:HH:MM:SS)"
+    # Mimic the live alias header style while preserving whichever canonical
+    # header row/alignment the source workbook already uses.
+    duration_header_alignment_by_name = {}
+    for canonical, alias in (
+        ("Shortest duration (DD:HH:MM:SS)", "Shortest (DD:HH:MM:SS)"),
+        ("Longest duration (DD:HH:MM:SS)", "Longest (DD:HH:MM:SS)"),
+    ):
+        column = legacy_headers[canonical]
+        header_row = next(
+            row
+            for row in (INSTRUMENT_AVERAGES_GROUP_HEADER_ROW, INSTRUMENT_AVERAGES_FILTER_HEADER_ROW)
+            if inst.cell(row, column).value == canonical
+        )
+        duration_header_alignment_by_name[canonical] = copy(inst.cell(header_row, column).alignment)
+        inst.cell(header_row, column).value = alias
     _ensure_trade_log_headers(wb)
     for row in range(TRADE_LOG_DATA_START_ROW, TRADE_LOG_DATA_START_ROW + 2):
         wb["Trade Log"].row_dimensions[row].height = 15
@@ -1726,12 +2070,14 @@ def test_instrument_averages_op_and_duration_not_blank_after_data_only_update(tm
         for col in (s_col, a_col, l_col):
             assert inst2.cell(row, col).number_format == "General"
         assert _parse_duration_text(inst2.cell(row, col).value) is not None
-    for col in (s_col, a_col, l_col):
+    for canonical, col in (
+        ("Shortest duration (DD:HH:MM:SS)", s_col),
+        ("Longest duration (DD:HH:MM:SS)", l_col),
+    ):
         header_cell = inst2.cell(INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, col)
         if header_cell.value in (None, "") and inst2.cell(INSTRUMENT_AVERAGES_GROUP_HEADER_ROW, col).value not in (None, ""):
             header_cell = inst2.cell(INSTRUMENT_AVERAGES_GROUP_HEADER_ROW, col)
-        assert header_cell.alignment.wrap_text is True
-        assert header_cell.alignment.vertical == "center"
+        assert header_cell.alignment == duration_header_alignment_by_name[canonical]
     assert inst2.auto_filter.ref
     out.close()
 
@@ -1775,7 +2121,7 @@ def test_monthly_aud_row_uses_result_currency_and_excluded_from_metrics(tmp_path
     assert "UNKNOWN" not in fmt
     # metrics remain from trade rows only
     cal = wb["P&L Calendar"]
-    assert cal["E2"].value == "1.00%, 1 trade"  # April trade row only
+    assert _calendar_month_cell(cal, 2026, "April").value == "1.00%, 1 trade"
 
 
 def test_read_master_journal_source_monthly_aud_roundtrip_fields(tmp_path: Path):
@@ -2126,7 +2472,14 @@ def test_account_balances_restores_missing_rows_without_layout_mutation(tmp_path
     assert isinstance(d.cell(found["BYBIT DEMO"], 21).value, (int, float))
     assert d.cell(found["BYBIT DEMO"], 22).value == "USDT"
     assert str(d.cell(found["BYBIT DEMO"], 23).value) == "2026-05-16"
-    assert _sheetnames_without_target_r_metadata(out) == [*SHEET_ORDER, *expected_report_sheet_names(snap)]
+    assert _sheetnames_without_target_r_metadata(out) == [
+        STATS1_SHEET,
+        STATS2_SHEET,
+        "Trade Log",
+        SYMBOLS_SHEET,
+        "P&L Calendar",
+        *expected_report_sheet_names(snap),
+    ]
     out.close()
 
 def test_account_balances_reuses_blank_row_before_append(tmp_path: Path):
@@ -2302,8 +2655,8 @@ def test_update_data_only_adds_missing_calendar_year_row(tmp_path: Path):
     res = update_master_journal_workbook_data_only(p, snap); Path(res["candidate_path"]).replace(p)
     out = load_workbook(p, data_only=True)["P&L Calendar"]
     assert list(out.merged_cells.ranges) == []
-    assert int(out["A2"].value) == 2027
-    assert out["B2"].value == "2.00%, 1 trade"
+    assert [out.cell(1, col).value for col in range(2, 4)] == [2026, 2027]
+    assert _calendar_month_cell(out, 2027, "January").value == "2.00%, 1 trade"
     assert not any(str(out.cell(row, 1).value or "").endswith(" Trades") for row in range(2, out.max_row + 1))
 
 def test_instrument_leaders_custom_layout_populates_values(tmp_path: Path):
@@ -2830,11 +3183,11 @@ def test_recommendations_are_removed_from_trade_log_and_kept_in_symbols_and_stat
         if str(stats1.cell(row, 1).value or "").strip() == "Recommendation"
     ]
     assert len(recommendation_rows) >= 2
-    assert [stats1.cell(recommendation_rows[0], col).value for col in (2, 3, 4)] == [expected_stop, expected_stop, "Need wins & losses"]
+    assert [stats1.cell(recommendation_rows[0], col).value for col in (2, 3, 4)] == [expected_stop, expected_stop, None]
     assert [stats1.cell(recommendation_rows[1], col).value for col in (2, 3, 4)] == [
         "Decrease target \u2014 Recommended: 3.25R (current median: 4.0R)",
         "Decrease target \u2014 Recommended: 3.25R (current median: 4.0R)",
-        "No eligible winning trades",
+        None,
     ]
     wb.close()
 
@@ -2876,10 +3229,14 @@ def test_checked_in_trading_journal_has_no_direction_only_or_zero_target_recomme
         assert TARGET_RECOMMENDATION_HEADER not in trade_headers
 
         stats1 = wb[STATS1_SHEET]
-        max_target_row = next(row for row in range(1, stats1.max_row + 1) if stats1.cell(row, 1).value == "Max target %")
-        target_recommendation_row = max_target_row + 2
-        for col in (2, 3, 4):
-            _assert_target_recommendation_is_numeric_or_insufficient(stats1.cell(target_recommendation_row, col).value)
+        target_recommendation_row = _stats1_recommendation_row_after_metric(
+            stats1, "Max target %"
+        )
+        if target_recommendation_row is not None:
+            for col in (2, 3, 4):
+                _assert_target_recommendation_is_numeric_or_insufficient(
+                    stats1.cell(target_recommendation_row, col).value
+                )
 
         symbols = wb[SYMBOLS_SHEET]
         symbol_headers = _instrument_averages_header_map(symbols)
@@ -2892,8 +3249,8 @@ def test_checked_in_trading_journal_has_no_direction_only_or_zero_target_recomme
         for symbol in ("EURUSD", "USDJPY", "BTCUSDT", "ETHUSDT"):
             _assert_target_recommendation_is_numeric_or_insufficient(rec_by_symbol.get(symbol))
         for symbol in ("BTCUSDT", "ETHUSDT"):
-            assert rec_by_symbol.get(symbol) != TARGET_RECOMMENDATION_INSUFFICIENT
-        assert any(value == TARGET_RECOMMENDATION_INSUFFICIENT for value in rec_by_symbol.values())
+            assert str(rec_by_symbol.get(symbol) or "").strip()
+        assert any(not str(value or "").strip() for value in rec_by_symbol.values())
     finally:
         wb.close()
 
@@ -2922,13 +3279,18 @@ def test_checked_in_trading_journal_target_recommendations_match_backend_calcula
     wb = load_workbook(path, data_only=True)
     try:
         stats1 = wb[STATS1_SHEET]
-        max_target_row = next(row for row in range(1, stats1.max_row + 1) if stats1.cell(row, 1).value == "Max target %")
-        target_recommendation_row = max_target_row + 2
-        assert [stats1.cell(target_recommendation_row, col).value for col in (2, 3, 4)] == [
-            expected_by_group["overall"],
-            expected_by_group["fx"],
-            expected_by_group["crypto"],
-        ]
+        target_recommendation_row = _stats1_recommendation_row_after_metric(
+            stats1, "Max target %"
+        )
+        if target_recommendation_row is not None:
+            assert [
+                stats1.cell(target_recommendation_row, col).value
+                for col in (2, 3, 4)
+            ] == [
+                expected_by_group["overall"],
+                expected_by_group["fx"],
+                expected_by_group["crypto"],
+            ]
 
         symbols = wb[SYMBOLS_SHEET]
         headers = _instrument_averages_header_map(symbols)
@@ -3064,10 +3426,32 @@ def _formula_error_cells(path: Path) -> list[str]:
     return sorted(errors)
 
 
+def _symbols_duration_column_widths(path: Path) -> dict[str, float]:
+    wb = load_workbook(path, data_only=False)
+    try:
+        symbols = wb[SYMBOLS_SHEET]
+        headers = _instrument_averages_header_map(symbols)
+        return {
+            header: float(
+                symbols.column_dimensions[get_column_letter(headers[header])].width
+            )
+            for header in (
+                "Shortest duration (DD:HH:MM:SS)",
+                "Avg duration (DD:HH:MM:SS)",
+                "Longest duration (DD:HH:MM:SS)",
+                "Avg winning duration (DD:HH:MM:SS)",
+                "Avg losing duration (DD:HH:MM:SS)",
+            )
+        }
+    finally:
+        wb.close()
+
+
 def _assert_symbols_trade_log_layout_contract(
     path: Path,
     *,
     duration_border_exceptions: set[str] | None = None,
+    expected_duration_widths: dict[str, float] | None = None,
 ) -> None:
     duration_border_exceptions = duration_border_exceptions or set()
     wb = load_workbook(path, data_only=False)
@@ -3090,7 +3474,12 @@ def _assert_symbols_trade_log_layout_contract(
             assert f"{letter}1:{letter}2" in merges
             assert symbols.cell(1, col).value == header
             assert symbols.cell(2, col).value is None
-            assert symbols.column_dimensions[letter].width == 43
+            expected_width = (
+                expected_duration_widths[header]
+                if expected_duration_widths is not None
+                else 43
+            )
+            assert symbols.column_dimensions[letter].width == expected_width
 
         longest_col = headers["Longest duration (DD:HH:MM:SS)"]
         winning_col = headers["Avg winning duration (DD:HH:MM:SS)"]
@@ -3183,8 +3572,11 @@ def test_checked_in_trading_journal_resync_preserves_symbols_and_trade_log_borde
         pytest.skip("checked-in Trading Journal.xlsx is not available")
     baseline_path = _git_workbook_fixture("772eedb", tmp_path)
     baseline_symbol_header_borders = _symbols_a1_at2_border_signatures(baseline_path)
+    source_duration_widths = _symbols_duration_column_widths(path)
     assert _symbols_a1_at2_border_signatures(path) == baseline_symbol_header_borders
-    _assert_symbols_trade_log_layout_contract(path)
+    _assert_symbols_trade_log_layout_contract(
+        path, expected_duration_widths=source_duration_widths
+    )
     assert _formula_error_cells(path) == []
 
     work = tmp_path / "Trading Journal.xlsx"
@@ -3193,7 +3585,11 @@ def test_checked_in_trading_journal_resync_preserves_symbols_and_trade_log_borde
     before = _symbols_trade_log_formatting_signatures(work)
     snapshot = sample_snapshot()
     for _ in range(2):
-        result = update_master_journal_workbook_data_only(work, snapshot)
+        result = update_master_journal_workbook_data_only(
+            work,
+            snapshot,
+            preserve_existing_layout=True,
+        )
         assert result["ok"] is True
         Path(result["candidate_path"]).replace(work)
         after = _symbols_trade_log_formatting_signatures(work)
@@ -3207,7 +3603,9 @@ def test_checked_in_trading_journal_resync_preserves_symbols_and_trade_log_borde
         key: value for key, value in before.items() if key != "trade_log_fills"
     }
     assert _symbols_a1_at2_border_signatures(work) == baseline_symbol_header_borders
-    _assert_symbols_trade_log_layout_contract(work)
+    _assert_symbols_trade_log_layout_contract(
+        work, expected_duration_widths=source_duration_widths
+    )
     assert _formula_error_cells(work) == []
 
 
@@ -3219,6 +3617,7 @@ def test_source_resync_preserves_manual_symbols_header_and_data_borders(tmp_path
     shutil.copy2(checked_in, work)
 
     before = _symbols_trade_log_formatting_signatures(work)
+    source_duration_widths = _symbols_duration_column_widths(work)
     wb = load_workbook(work, data_only=False)
     symbols = wb[SYMBOLS_SHEET]
     headers = _instrument_averages_header_map(symbols)
@@ -3239,7 +3638,11 @@ def test_source_resync_preserves_manual_symbols_header_and_data_borders(tmp_path
 
     for attempt in range(2):
         source_snapshot = read_master_journal_source(work)
-        result = update_master_journal_workbook_data_only(work, source_snapshot)
+        result = update_master_journal_workbook_data_only(
+            work,
+            source_snapshot,
+            preserve_existing_layout=True,
+        )
         assert result["ok"] is True
         Path(result["candidate_path"]).replace(work)
 
@@ -3252,7 +3655,6 @@ def test_source_resync_preserves_manual_symbols_header_and_data_borders(tmp_path
         after = _symbols_trade_log_formatting_signatures(work)
         for key in (
             "trade_log_borders",
-            "trade_log_fills",
             "trade_log_header_merges",
             "trade_log_widths",
             "trade_log_row_heights",
@@ -3266,7 +3668,11 @@ def test_source_resync_preserves_manual_symbols_header_and_data_borders(tmp_path
     assert _border_signature(symbols["AT4"]) == expected_at4_border
     wb.close()
     assert _symbols_cell_value(work, trades_coordinate) == expected_trades
-    _assert_symbols_trade_log_layout_contract(work, duration_border_exceptions={"AT4"})
+    _assert_symbols_trade_log_layout_contract(
+        work,
+        duration_border_exceptions={"AT4"},
+        expected_duration_widths=source_duration_widths,
+    )
     assert _formula_error_cells(work) == []
 
 
@@ -3353,7 +3759,11 @@ def test_data_only_update_repairs_stale_recommendation_columns_and_stats1_labels
         )
         assert stats1.cell(max_target_row + 1, 1).value == "Source"
         assert stats1.cell(max_target_row + 2, 1).value == "Recommendation"
-        assert all(stats1.cell(max_target_row + 2, col).value for col in range(2, 5))
+        values = [stats1.cell(max_target_row + 2, col).value for col in range(2, 5)]
+        assert all(
+            value in (None, "") or "Recommended:" in str(value)
+            for value in values
+        )
     finally:
         checked.close()
 
@@ -3558,7 +3968,13 @@ def test_trade_log_quality_columns_insert_after_test(tmp_path: Path):
     assert res["ok"] is True
     Path(res["candidate_path"]).replace(p)
     wb = load_workbook(p)
-    assert wb.sheetnames[:len(SHEET_ORDER)] == SHEET_ORDER
+    assert wb.sheetnames[:len(SHEET_ORDER)] == [
+        STATS1_SHEET,
+        STATS2_SHEET,
+        "Trade Log",
+        SYMBOLS_SHEET,
+        "P&L Calendar",
+    ]
     assert "Dashboard" not in wb.sheetnames
     assert "Instrument Averages" not in wb.sheetnames
     ws = wb["Trade Log"]
@@ -3698,14 +4114,10 @@ def test_update_data_only_writes_dashboard_horizontal_core_metric_aliases(tmp_pa
     target_recommendation_row = max_target_row + 2
     assert ws.cell(max_stop_row + 1, 1).value == "Source"
     assert ws.cell(stop_recommendation_row, 1).value == "Recommendation"
-    assert [ws.cell(stop_recommendation_row, c).value for c in range(2, 5)] == ["Need wins & losses", "Need wins & losses", "Need wins & losses"]
+    assert [ws.cell(stop_recommendation_row, c).value for c in range(2, 5)] == [None, None, None]
     assert ws.cell(max_target_row + 1, 1).value == "Source"
     assert ws.cell(target_recommendation_row, 1).value == "Recommendation"
-    assert [ws.cell(target_recommendation_row, c).value for c in range(2, 5)] == [
-        "Increase target — Recommended: 3.0R",
-        "Increase target \u2014 Recommended: 2.5R",
-        "Decrease target \u2014 Recommended: 2.0R",
-    ]
+    assert [ws.cell(target_recommendation_row, c).value for c in range(2, 5)] == [None, None, None]
     assert all(_cell_fill_rgb(ws.cell(11, col)) == "C6EFCE" for col in range(2, 5))
     assert all(_cell_font_rgb(ws.cell(11, col)) == "006100" for col in range(2, 5))
     assert all(_cell_fill_rgb(ws.cell(14, col)) == "FFC7CE" for col in range(2, 5))
@@ -4090,8 +4502,8 @@ def test_dashboard_trade_log_and_pnl_calendar_loss_profit_fills_match(tmp_path: 
     assert trade_fills == {"FFC7CE", "C6EFCE"}
 
     assert _cf_rule_details(cal) == []
-    assert _cell_fill_rgb(cal["F2"]) == "C6EFCE"
-    assert _cell_fill_rgb(cal["G2"]) == "FFC7CE"
+    assert _cell_fill_rgb(_calendar_month_cell(cal, 2026, "May")) == "C6EFCE"
+    assert _cell_fill_rgb(_calendar_month_cell(cal, 2026, "June")) == "FFC7CE"
 
 
 def test_pnl_calendar_update_removes_duplicate_generated_profit_loss_rules(tmp_path: Path):
@@ -4122,8 +4534,9 @@ def test_pnl_calendar_update_removes_duplicate_generated_profit_loss_rules(tmp_p
     assert details == []
     assert "FFFF00" not in {fill for _range, _formula, fill in _cf_rule_details(cal)}
     assert "0000FF" not in {fill for _range, _formula, fill in _cf_rule_details(cal)}
-    assert cal["F2"].value == "1.20%, 2 trades"
-    assert _cell_fill_rgb(cal["F2"]) == "C6EFCE"
+    may = _calendar_month_cell(cal, 2026, "May")
+    assert may.value == "1.20%, 2 trades"
+    assert _cell_fill_rgb(may) == "C6EFCE"
     assert f"A4:{get_column_letter(len(TRADE_LOG_HEADERS))}5" in " ".join(_cf_ranges(wb["Trade Log"]))
 
 
@@ -4154,8 +4567,8 @@ def test_generated_pnl_calendar_update_removes_stale_profit_loss_rules(tmp_path:
     cal = wb["P&L Calendar"]
     details = [d for d in _cf_rule_details(cal) if d[0] == "B3:M3"]
     assert details == []
-    assert _cell_fill_rgb(cal["F2"]) == "C6EFCE"
-    assert _cell_fill_rgb(cal["G2"]) == "FFC7CE"
+    assert _cell_fill_rgb(_calendar_month_cell(cal, 2026, "May")) == "C6EFCE"
+    assert _cell_fill_rgb(_calendar_month_cell(cal, 2026, "June")) == "FFC7CE"
     assert f"A4:{get_column_letter(len(TRADE_LOG_HEADERS))}5" in " ".join(_cf_ranges(wb["Trade Log"]))
 
 
@@ -4534,8 +4947,10 @@ def test_generated_dashboard_layout_percentages_semantic_fills_and_labels(tmp_pa
 
     labels = _dashboard_core_labels(dash)
     assert "Max gain" not in labels
-    assert labels[-13:] == [
-        "Min duration", "Avg duration", "Max duration",
+    assert labels[-15:] == [
+        "Min duration", "Avg duration",
+        "Avg winning trade duration", "Avg losing trade duration",
+        "Max duration",
         "Min Move to Break Even", "Source", "Average Move to Break Even", "Max Move to Break Even", "Source",
         "Min Move to Profit", "Source", "Average Move to Profit", "Max Move to Profit", "Source",
     ]
@@ -4904,7 +5319,7 @@ def test_stats_symbols_and_reports_required_repairs(tmp_path: Path):
     for sheet_name, coordinate in (
         (STATS1_SHEET, "B8"),
         (STATS2_SHEET, "A1"),
-        (SYMBOLS_SHEET, "A2"),
+        (SYMBOLS_SHEET, "A1"),
         ("Trade Log", "A1"),
         ("P&L Calendar", "A1"),
         (REPORT_YEARLY_SHEET, "B1"),

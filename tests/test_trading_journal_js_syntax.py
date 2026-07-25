@@ -1,3 +1,4 @@
+import json
 import shutil
 import subprocess
 from pathlib import Path
@@ -84,8 +85,56 @@ def test_trading_journal_target_recommendation_does_not_fallback_to_averages() -
     js = JS_PATH.read_text(encoding="utf-8")
     assert "recommendationFromAverages('target'" not in js
     assert "recommendationFromAverages(\n      'target'" not in js
-    assert "Insufficient eligible wins — recommended target unavailable" in js
-    assert "return directRecommendation(item, 'target') || overallRecommendation('target');" in js
+    assert "return instrumentRecommendation(item, kind);" in js
+    assert "directRecommendation(item, 'target') || overallRecommendation('target')" not in js
+    assert "const recommendationVisibleText" in js
+
+
+def test_web_visible_recommendation_sanitizer_blanks_diagnostics_but_keeps_actions() -> None:
+    node = shutil.which("node")
+    assert node, "node is required for JS runtime smoke test"
+    harness = r"""
+const fs = require('fs');
+const source = fs.readFileSync(process.argv[1], 'utf8');
+const match = source.match(/const recommendationVisibleText = \(value\) => \{([\s\S]*?)\n  \};/);
+if (!match) throw new Error('recommendationVisibleText function not found');
+const visible = new Function('value', match[1]);
+const inputs = [
+  'Need wins & losses',
+  'No eligible winning trades',
+  'No eligible losing trades',
+  'Need more target data',
+  'Insufficient eligible wins',
+  'not_enough_eligible_wins',
+  'Not enough eligible wins',
+  'Insufficient target sample',
+  'Need both wins and losses',
+  'Too few eligible losses',
+  'No winning samples',
+  'No losing samples',
+  'zero winners',
+  '0 eligible wins',
+  'Reduce target',
+  'Increase stop loss',
+  'Keep target — Recommended: 2.00R',
+  'Maintain stop',
+  'Increase target — Recommended: 2.00R',
+  'Decrease stop — Recommended: 1.00%',
+];
+process.stdout.write(JSON.stringify(inputs.map(visible)));
+"""
+    completed = subprocess.run(
+        [node, "-e", harness, str(JS_PATH)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    values = json.loads(completed.stdout)
+    assert values[:18] == [""] * 18
+    assert values[18].startswith("Increase target")
+    assert "Recommended: 2.00R" in values[18]
+    assert values[19].startswith("Decrease stop")
+    assert "Recommended: 1.00%" in values[19]
 
 
 def test_trading_journal_stats_classes_are_value_only_and_net_pl_is_sign_based() -> None:
@@ -172,6 +221,18 @@ def test_trading_journal_actions_import_error_shows_payload_errors_and_keeps_byb
     assert "if (!res.ok || payload.ok !== true)" in js
     assert "} catch (err) {" in js
     assert "clearPendingRetry();" in js
+
+
+def test_trading_journal_actions_notifies_equity_curve_after_authoritative_updates() -> None:
+    js = ACTIONS_JS_PATH.read_text(encoding="utf-8")
+    assert "trading-journal:data-changed" in js
+    for reason in (
+        "import",
+        "resync",
+        "crypto-monthly-pnl",
+        "bybit-demo-balance-adjustment",
+    ):
+        assert f"notifyEquityDataChanged('{reason}')" in js
 
 
 def test_trading_journal_actions_excel_lock_retry_controls_and_guards_present() -> None:

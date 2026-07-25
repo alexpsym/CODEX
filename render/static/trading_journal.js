@@ -526,13 +526,25 @@
     const win = asNum(winAvg);
     const loss = asNum(lossAvg);
     const label = kind === 'stop' ? 'stop loss' : 'target';
-    if (!Number.isFinite(win) || !Number.isFinite(loss)) return 'Need wins & losses';
+    if (!Number.isFinite(win) || !Number.isFinite(loss)) return '';
     const tolerance = Math.max(1e-9, Math.max(Math.abs(win), Math.abs(loss)) * 1e-9);
-    if (Math.abs(win - loss) <= tolerance) return `Keep ${label}`;
+    if (Math.abs(win - loss) <= tolerance) return '';
     return win < loss ? `Reduce ${label}` : `Increase ${label}`;
   }
 
-  const TARGET_RECOMMENDATION_INSUFFICIENT = 'Insufficient eligible wins — recommended target unavailable';
+  const recommendationVisibleText = (value) => {
+    const text = String(value || '').trim();
+    const lower = text.toLowerCase();
+    const normalized = lower.replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim();
+    if (!text) return '';
+    if (['need wins & losses', 'need more target data', 'no eligible winning trades', 'no eligible losing trades'].some((message) => normalized.includes(message))) return '';
+    const insufficientQualifier = /\b(?:need|requires?|missing|not enough|too few|insufficient|no|unavailable)\b/.test(normalized);
+    const insufficientSubject = /\b(?:wins?|winning|loss(?:es|ing)?|samples?|data|target|stop|recommendation)\b/.test(normalized);
+    if (insufficientQualifier && insufficientSubject) return '';
+    if (lower.includes('keep') || lower.includes('maintain')) return '';
+    if (!lower.includes('recommended:')) return '';
+    return text;
+  };
 
   function recommendationTone(text) {
     const lower = String(text || '').toLowerCase();
@@ -543,33 +555,24 @@
 
   function directRecommendation(item, kind) {
     if (!item) return '';
-    return String(
+    return recommendationVisibleText(
       kind === 'stop'
         ? (item.stop_recommendation || item['Stop Loss Recommendation'] || '')
         : (item.target_recommendation || item['Target Recommendation'] || '')
-    ).trim();
+    );
   }
 
   function instrumentRecommendation(item, kind) {
     const direct = directRecommendation(item, kind);
     if (direct) return direct;
-    if (kind === 'stop') {
-      return recommendationFromAverages(
-        'stop',
-        item?.avg_sl_pct_wins ?? item?.avg_sl_distance_pips_wins ?? item?.avg_sl_distance_quote_wins,
-        item?.avg_sl_pct_losses ?? item?.avg_sl_distance_pips_losses ?? item?.avg_sl_distance_quote_losses
-      );
-    }
-    return TARGET_RECOMMENDATION_INSUFFICIENT;
+    return '';
   }
 
   function overallRecommendation(kind) {
     const risk = state.stats?.groups?.risk_expectancy || {};
     const direct = directRecommendation(risk, kind);
     if (direct) return direct;
-    return kind === 'stop'
-      ? recommendationFromAverages('stop', risk.avg_stop_pct_winners, risk.avg_stop_pct_losers)
-      : TARGET_RECOMMENDATION_INSUFFICIENT;
+    return '';
   }
 
   function rowRecommendation(row, kind) {
@@ -578,11 +581,7 @@
     const symbol = String(row?.symbol || '').trim().toUpperCase();
     const item = (Array.isArray(state.stats?.by_instrument) ? state.stats.by_instrument : [])
       .find((candidate) => String(candidate?.symbol || '').trim().toUpperCase() === symbol);
-    if (kind === 'target') {
-      return directRecommendation(item, 'target') || overallRecommendation('target');
-    }
-    const symbolText = instrumentRecommendation(item, kind);
-    return symbolText && symbolText !== 'Need wins & losses' ? symbolText : overallRecommendation(kind);
+    return instrumentRecommendation(item, kind);
   }
 
   function renderInstrumentView(stats) {

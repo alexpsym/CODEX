@@ -76,7 +76,14 @@ def _api_key(mode: str = "live") -> str:
             "or OANDA_TOKEN_DEMO for the practice account."
         )
     else:
-        value = os.getenv("OANDA_API_KEY") or os.getenv("OANDA_TOKEN")
+        value = (
+            os.getenv("OANDA_API_KEY_LIVE")
+            or os.getenv("OANDA_ACCESS_TOKEN_LIVE")
+            or os.getenv("OANDA_TOKEN_LIVE")
+            or os.getenv("OANDA_API_KEY")
+            or os.getenv("OANDA_ACCESS_TOKEN")
+            or os.getenv("OANDA_TOKEN")
+        )
         missing_message = (
             "OANDA_API_KEY is missing. Add it to "
             f"{ENV_PATH.resolve()} or export it in your shell."
@@ -97,7 +104,7 @@ def _account_id(mode: str = "live") -> str:
             "practice account number shown in your OANDA dashboard."
         )
     else:
-        value = os.getenv("OANDA_ACCOUNT_ID")
+        value = os.getenv("OANDA_ACCOUNT_ID_LIVE") or os.getenv("OANDA_ACCOUNT_ID")
         missing_message = (
             "OANDA_ACCOUNT_ID is missing or still set to the placeholder. "
             "Update your oanda.env file (or the path in OANDA_ENV_FILE) with the "
@@ -110,6 +117,27 @@ def _account_id(mode: str = "live") -> str:
 
 class OandaAPIError(Exception):
     """Raised when an API request fails or is misconfigured."""
+
+
+def resolve_account_config(mode: str = "live") -> Dict[str, str]:
+    """Resolve one explicit OANDA account mode without exposing private helpers.
+
+    Demo and Live are intentionally isolated: Demo never falls back to generic
+    Live credentials, while Live accepts the repository's Live-specific aliases
+    before its established generic aliases.
+    """
+
+    normalized_mode = str(mode or "").strip().lower()
+    if normalized_mode in {"practice", "test"}:
+        normalized_mode = "demo"
+    if normalized_mode not in {"demo", "live"}:
+        raise OandaAPIError("OANDA account mode must be 'demo' or 'live'.")
+    return {
+        "mode": normalized_mode,
+        "account_id": _account_id(normalized_mode),
+        "api_key": _api_key(normalized_mode),
+        "base_url": _base_url(normalized_mode),
+    }
 
 
 def _token_last4(value: str) -> str:

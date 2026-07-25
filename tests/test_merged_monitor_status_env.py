@@ -365,7 +365,7 @@ def test_compute_autostart_semantics(monkeypatch: pytest.MonkeyPatch) -> None:
     names_default = master_service._compute_autostart_scripts()
     assert "bybit_monitor" in names_default
     assert "oanda_monitor" in names_default
-    assert "fxweekend-clone" in names_default
+    assert "fxweekend-clone" not in names_default
 
     monkeypatch.setenv("AUTOSTART_SCRIPTS", "  ")
     assert master_service._compute_autostart_scripts() == []
@@ -378,10 +378,12 @@ def test_compute_autostart_semantics(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(master_service, "_resolve_app_profile", lambda: "render")
     names_render = master_service._compute_autostart_scripts()
     assert isinstance(names_render, list)
+    assert "fxweekend-clone" in master_service.DEFAULT_RENDER_AUTOSTART_SCRIPTS
 
     monkeypatch.setattr(master_service, "SCANNER_LOCAL_UI_MODE", True)
     monkeypatch.delenv("AUTOSTART_SCRIPTS", raising=False)
     assert master_service._compute_autostart_scripts() == []
+    assert "fxweekend-clone" in master_service._LAST_AUTOSTART_UNAVAILABLE
 
 
 def test_missing_configured_autostart_target_gets_visible_scripts_reason(
@@ -403,7 +405,7 @@ def test_missing_configured_autostart_target_gets_visible_scripts_reason(
 
     def fake_get(name: str) -> FakeScript:
         if name == "fxweekend-clone":
-            raise master_service.HTTPException(status_code=404, detail="script disabled by test")
+            raise AssertionError("local FX Weekend targets must be rejected before script lookup")
         return FakeScript(name)
 
     monkeypatch.setattr(master_service.script_manager, "get", fake_get)
@@ -421,14 +423,17 @@ def test_missing_configured_autostart_target_gets_visible_scripts_reason(
 
     names = master_service._compute_autostart_scripts()
     assert names == ["bybit_monitor"]
-    assert master_service._LAST_AUTOSTART_UNAVAILABLE["fxweekend-clone"] == "script disabled by test"
+    render_owned_reason = (
+        "FX Weekend execution is Render-owned and cannot autostart locally."
+    )
+    assert master_service._LAST_AUTOSTART_UNAVAILABLE["fxweekend-clone"] == render_owned_reason
 
     payload = json.loads(asyncio.run(master_service.list_scripts()).body.decode("utf-8"))
     row = next(item for item in payload if item["name"] == "fxweekend-clone")
     assert row["autostart_expected"] is True
     assert row["operational"] is False
-    assert row["status_detail"] == "configured autostart target unavailable: script disabled by test"
-    assert row["last_start_error"] == "script disabled by test"
+    assert row["status_detail"] == f"configured autostart target unavailable: {render_owned_reason}"
+    assert row["last_start_error"] == render_owned_reason
 
     readiness = master_service._startup_readiness_status()
     warning = next(item for item in readiness["background_warnings"] if item["name"] == "fxweekend-clone")
@@ -438,8 +443,8 @@ def test_missing_configured_autostart_target_gets_visible_scripts_reason(
     assert readiness["background_ready"] is False
     assert readiness["blocking_component"] is None
     assert readiness["failure_reason"] is None
-    assert readiness["background_warning"] == "fxweekend-clone: script disabled by test"
-    assert warning["reason"] == "script disabled by test"
+    assert readiness["background_warning"] == f"fxweekend-clone: {render_owned_reason}"
+    assert warning["reason"] == render_owned_reason
     assert warning["blocking"] is False
     assert component["phase"] == "autostart_unavailable"
     assert component["blocking"] is False
@@ -468,7 +473,28 @@ def test_startup_readiness_reports_ready_after_state_restore_and_autostart(
     monkeypatch.setattr(master_service, "_LAST_AUTOSTART_UNAVAILABLE", {})
     monkeypatch.setattr(master_service.script_manager, "get", lambda name: FakeScript(name))
     monkeypatch.setattr(master_service, "_scanner_status_payload", lambda _path: {"ui_status": "running", "heartbeat_fresh": True})
-    monkeypatch.setattr(master_service, "_load_json_file", lambda _path, default: {"enabled": True})
+    monkeypatch.setattr(
+        master_service,
+        "_load_json_file",
+        lambda path, default: (
+            {
+                "enabled": True,
+                "account_modes": ["live"],
+                "check_interval_seconds": 60,
+            }
+            if path == master_service.FXWEEKEND_SETTINGS_PATH
+            else {
+                "state": "before cutoff",
+                "heartbeat_at": master_service._utc_now_iso(),
+                "accounts": {"live": {"state": "verified flat"}},
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        master_service,
+        "resolve_oanda_account_config",
+        lambda _mode: {"account_id": "id", "api_key": "key", "base_url": "url"},
+    )
 
     payload = master_service._startup_readiness_status()
 
@@ -610,9 +636,14 @@ def test_startup_readiness_reports_autostart_pending_as_background_warning(
 
 def test_run_local_master_control_bat_uses_local_autostart() -> None:
     content = (ROOT / "run_local_master_control.bat").read_text(encoding="utf-8")
-    assert "fxweekend-clone" in master_service.DEFAULT_LOCAL_ALLOWED_APPS
+    worker = (
+        ROOT / "tools" / "windows_launchers" / "stream_local_master_worker.ps1"
+    ).read_text(encoding="utf-8")
+    assert "fxweekend-clone" not in master_service.DEFAULT_LOCAL_ALLOWED_APPS
     assert 'set "APP_PROFILE=local"' in content
-    assert 'set "AUTOSTART_SCRIPTS=bybit_monitor,oanda_monitor,fxweekend-clone"' in content
+    assert 'set "AUTOSTART_SCRIPTS=bybit_monitor,oanda_monitor"' in content
+    assert '$raw = "bybit_monitor,oanda_monitor"' in worker
+    assert '$tokens = @("bybit_monitor", "oanda_monitor")' in worker
     assert 'set "SCANNER_LOCAL_UI_MODE=1"' not in content
     assert 'if /I "%~1"=="__worker_console" goto worker_console' not in content
     assert 'if /I "%~1"=="__worker" goto worker' in content
@@ -940,9 +971,7 @@ def test_supervisor_skips_restart_when_external_runtime_live(monkeypatch: pytest
     assert fake.starts == 0
 
 
-def test_supervisor_restarts_stopped_fxweekend_autostart(monkeypatch: pytest.MonkeyPatch) -> None:
-    started = asyncio.Event()
-
+def test_local_supervisor_ignores_fxweekend_autostart(monkeypatch: pytest.MonkeyPatch) -> None:
     class FakeScript:
         def __init__(self) -> None:
             self.is_running = False
@@ -951,34 +980,16 @@ def test_supervisor_restarts_stopped_fxweekend_autostart(monkeypatch: pytest.Mon
         async def start(self) -> None:
             self.starts += 1
             self.is_running = True
-            started.set()
 
     fake = FakeScript()
-    real_sleep = asyncio.sleep
-
-    async def immediate_sleep(_delay: float) -> None:
-        await real_sleep(0)
 
     monkeypatch.setattr(master_service, "APP_PROFILE", "local")
-    monkeypatch.setattr(
-        master_service,
-        "_scanner_has_external_live_runtime",
-        lambda _name: (_ for _ in ()).throw(AssertionError("non-scanner must not use scanner runtime state")),
-    )
-    monkeypatch.setattr(master_service.asyncio, "sleep", immediate_sleep)
     monkeypatch.setattr(master_service, "_SCANNER_SUPERVISOR_BACKOFF", {})
     monkeypatch.setattr(master_service, "_SCANNER_SUPERVISOR_BACKOFF_WINDOW", {})
     monkeypatch.setattr(master_service.script_manager, "get", lambda name: fake if name == "fxweekend-clone" else None)
 
-    async def _run() -> None:
-        task = asyncio.create_task(master_service._supervise_autostart_scripts(["fxweekend-clone"]))
-        await asyncio.wait_for(started.wait(), timeout=1.0)
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-
-    asyncio.run(_run())
-    assert fake.starts == 1
+    asyncio.run(master_service._supervise_autostart_scripts(["fxweekend-clone"]))
+    assert fake.starts == 0
 
 
 def test_supervisor_ignores_non_service_autostart_targets(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1016,7 +1027,9 @@ def test_autostart_supervisor_preserves_restart_failure_backoff(monkeypatch: pyt
     async def immediate_sleep(_delay: float) -> None:
         await real_sleep(0)
 
-    monkeypatch.setattr(master_service, "APP_PROFILE", "local")
+    monkeypatch.setattr(master_service, "APP_PROFILE", "render")
+    monkeypatch.setattr(master_service, "_persist_fxweekend_status_if_changed", lambda: None)
+    monkeypatch.setattr(master_service, "_fxweekend_start_gate", lambda: (True, ""))
     monkeypatch.setattr(master_service.asyncio, "sleep", immediate_sleep)
     monkeypatch.setattr(master_service.time, "time", lambda: 100.0)
     monkeypatch.setattr(master_service, "_SCANNER_SUPERVISOR_BACKOFF", backoff)

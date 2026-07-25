@@ -67,7 +67,7 @@ def test_dashboard_js_no_removed_widget_endpoints_and_keeps_needed_calls() -> No
     assert "Saved locally only (repo deletion can lose local state)" in js
     assert "State synced" in js
     assert "State sync error" in js
-    assert "State sync verification missing; save not confirmed durable." in js
+    assert "Durable watchlist verification failed." in js
     assert "Watchlist edits blocked until state restore/sync is healthy." in js
     assert "dotTitle = 'Inactive view';" not in js
     assert "dotTitle = 'Active view loaded';" not in js
@@ -76,10 +76,16 @@ def test_dashboard_js_no_removed_widget_endpoints_and_keeps_needed_calls() -> No
     assert "syncWorkspaceSelectionFromScripts" not in js
 
 
-def test_dashboard_js_prefers_post_verified_watchlist_before_remote_summary() -> None:
+def test_dashboard_js_accepts_verified_empty_watchlist_without_remote_fallback() -> None:
     js = JS_PATH.read_text(encoding='utf-8')
-    assert "if (verifiedAt && verifiedWatchlist.length) {" in js
-    assert "const remoteSummary = await fetchRemoteBackupSummary();" in js
+    assert "payload?.durable_verified === true" in js
+    assert "const verifiedItems = Array.isArray(payload?.verified_items) ? payload.verified_items : [];" in js
+    assert "verifiedItems.length" not in js
+    assert "const authoritative = await fetchJson('/api/watchlist');" in js
+    assert "error.payload = bodyJson;" in js
+    assert "failurePayload?.state_sync" in js
+    assert "stateSyncState?.watchlist_mutation_blocked === true" in js
+    assert "stateSyncState?.watchlist_indeterminate === true" in js
 
 
 def test_dashboard_js_removed_sync_journal_wiring():

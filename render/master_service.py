@@ -125,6 +125,7 @@ from shared.symbol_resolution import (
     resolve_bybit_symbol_from_choices,
 )
 from shared.atomic_json import write_json_file
+from shared.oanda_api import OandaAPIError, resolve_account_config as resolve_oanda_account_config
 from render.dropbox_sync import download_bytes, list_excel_files, upload_bytes
 from render import dropbox_state_store
 from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, read_master_journal_source, update_master_journal_workbook_data_only, refresh_master_journal_derived_sheets, stable_row_id, SHEET_ORDER, REPORT_YEARLY_SHEET, expected_report_sheet_names, _get_all_trades_sheet, _get_trade_log_sheet, _trade_log_header_map, _trade_log_data_start_row, _find_instrument_leaders_table, LEADER_LABEL_TO_KEY, _repair_or_flag_zero_trade_qty, _canonicalize_and_dedupe_balances, _trade_execution_fingerprint, _trade_row_source_rank, _dedupe_trade_rows_by_execution, _instrument_averages_header_map, INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, INSTRUMENT_AVERAGES_DATA_START_ROW, _result_percentage_totals_by_market, _risk_of_ruin_by_account, _stats1_sheet, _stats2_sheet, _symbols_sheet, STATS1_SHEET, STATS2_SHEET, SYMBOLS_SHEET, _parse_duration_text, _duration_ddhhmmss_cell_to_seconds, _is_ddhhmmss_number_format, STOP_RECOMMENDATION_HEADER, TARGET_RECOMMENDATION_HEADER, _distance_recommendation_summary, _stop_recommendation_payload, _apply_recommendation_cell_style, _ensure_dashboard_requested_metric_rows, _stats1_market_columns, _stats1_section_bounds, balance_drawdown_metrics
@@ -219,7 +220,7 @@ OANDA_RUNTIME_STATUS_PATH = BASE_DIR / "oanda_monitor" / "runtime_status.json"
 SCANNER_HEARTBEAT_GRACE_SECONDS = 30
 SCANNER_LOCAL_UI_MODE = os.getenv("SCANNER_LOCAL_UI_MODE", "0").strip().lower() in {"1", "true", "yes", "on"}
 DEFAULT_RENDER_ALLOWED_APPS = "calculator-webhook,pending-webhooks,fxweekend-clone,bybit_trigger_bounce_trader"
-DEFAULT_LOCAL_ALLOWED_APPS = "bybit_monitor,oanda_monitor,fxweekend-clone,bybithistory-clone,oanda_history-clone,coinspot-clone,open-orders,instrument-lookup,ivindicator-clone,spreads-clone"
+DEFAULT_LOCAL_ALLOWED_APPS = "bybit_monitor,oanda_monitor,bybithistory-clone,oanda_history-clone,coinspot-clone,open-orders,instrument-lookup,ivindicator-clone,spreads-clone"
 PINE_SCRIPTS_DIR = BASE_DIR / "pinescripts"
 PINE_ALLOWED_SUFFIXES = {".pine", ".pinescript", ".txt"}
 
@@ -293,6 +294,8 @@ def _profile_allows_script(script_name: str) -> bool:
     name = str(script_name or "").strip()
     if not name:
         return False
+    if name == "fxweekend-clone":
+        return APP_PROFILE == "render"
     if APP_PROFILE == "render":
         return name in RENDER_ALLOWED_APPS
     if APP_PROFILE == "journal":
@@ -300,21 +303,36 @@ def _profile_allows_script(script_name: str) -> bool:
     return name in LOCAL_ALLOWED_APPS
 
 
+def _render_fxweekend_base_url() -> str:
+    return str(
+        os.getenv("RENDER_FXWEEKEND_BASE_URL")
+        or os.getenv("RENDER_CALCULATOR_BASE_URL")
+        or ""
+    ).strip().rstrip("/")
+
+
+def _render_fxweekend_page_url() -> str:
+    base_url = _render_fxweekend_base_url()
+    if not base_url:
+        return "/fx-weekend-render-configuration-error"
+    return f"{base_url}/apps/fxweekend-clone"
+
+
 def _profile_main_buttons() -> List[Dict[str, object]]:
     buttons: List[Dict[str, object]] = [
         {"id": "calculator", "name": "calculator", "label": "Calculator", "open_url": "/merged/calculator", "dashboard_main_view": True},
     ]
     if APP_PROFILE == "render":
-        if "fxweekend-clone" in RENDER_ALLOWED_APPS:
-            buttons.append({"id": "fxweekend", "name": "fxweekend", "label": "FX Weekend", "open_url": "/apps/fxweekend-clone", "dashboard_main_view": True})
+        buttons.append({"id": "fxweekend", "name": "fxweekend", "label": "FX Weekend", "open_url": "/apps/fxweekend-clone", "dashboard_main_view": True})
         if "bybit_trigger_bounce_trader" in RENDER_ALLOWED_APPS:
             buttons.append({"id": "bounce-trader", "name": "bounce-trader", "label": "Bounce Trader", "open_url": "/merged/bounce-trader", "dashboard_main_view": True})
     elif APP_PROFILE == "local":
+        render_fxweekend_url = _render_fxweekend_page_url()
         buttons.extend(
             [
                 {"id": "trading-journal", "name": "trading-journal", "label": "Journal", "open_url": "/dashboard/trading-journal", "dashboard_main_view": True},
                 {"id": "monitor", "name": "monitor", "label": "Scanner", "open_url": "/merged/monitor", "dashboard_main_view": True},
-                {"id": "fxweekend", "name": "fxweekend", "label": "FX Weekend", "open_url": "/apps/fxweekend-clone", "dashboard_main_view": True},
+                {"id": "fxweekend", "name": "fxweekend", "label": "FX Weekend (Render)", "open_url": render_fxweekend_url, "dashboard_main_view": True, "remote_owned": True},
                 {"id": "ivindicator-clone", "name": "ivindicator-clone", "label": "IV Indicator", "open_url": "/apps/ivindicator-clone", "dashboard_main_view": True},
                 {"id": "spreads-clone", "name": "spreads-clone", "label": "Spreads", "open_url": "/apps/spreads-clone", "dashboard_main_view": True},
             ]
@@ -323,7 +341,9 @@ def _profile_main_buttons() -> List[Dict[str, object]]:
 
 
 def _profile_merged_source_names() -> Set[str]:
-    names = {"bybit_trigger_bounce_trader", "fxweekend-clone"}
+    names = {"bybit_trigger_bounce_trader"}
+    if APP_PROFILE == "render":
+        names.add("fxweekend-clone")
     if APP_PROFILE == "local":
         names.update(
             {
@@ -2246,6 +2266,7 @@ MONTHLY_AUD_REVALUATION_PATH.parent.mkdir(parents=True, exist_ok=True)
 WEBHOOK_ATTEMPTS_MAX_ITEMS = int(os.getenv("WEBHOOK_ATTEMPTS_MAX_ITEMS", "300") or "300")
 
 _WATCHLIST_CACHE: Optional[List[str]] = None
+_WATCHLIST_MUTATION_LOCK = asyncio.Lock()
 _TRADING_JOURNAL_CACHE: Optional[List[Dict[str, object]]] = None
 _TRADING_JOURNAL_ROWS_LOCK = threading.RLock()
 _STARTUP_STATE_RESTORE_DONE = asyncio.Event()
@@ -2270,6 +2291,11 @@ _STATE_SYNC_STATUS: Dict[str, object] = {
     "last_upload_error": None,
     "last_verified_at": None,
     "last_verified_watchlist": [],
+    "watchlist_indeterminate": False,
+    "watchlist_mutation_blocked": False,
+    "watchlist_rollback_error": None,
+    "fxweekend_state_indeterminate": False,
+    "fxweekend_rollback_error": None,
     "remote_backup_hash": None,
     "pending_upload": False,
     "backup_path": str(STATE_BACKUP_LOCAL_PATH) if _STATE_BACKUP_LOCAL_ACTIVE else DROPBOX_BACKUP_PATH,
@@ -2457,6 +2483,10 @@ def _normalize_watchlist(items: Iterable[object]) -> List[str]:
         if len(normalized) >= WATCHLIST_MAX_ITEMS:
             break
     return normalized
+
+
+def _watchlist_roundtrip_matches(value: object, expected: List[str]) -> bool:
+    return isinstance(value, list) and _normalize_watchlist(value) == list(expected)
 
 
 def _norm_symbol(s: str) -> str:
@@ -3676,6 +3706,8 @@ def state_file_path_for_key(key: str) -> Path:
         "oanda_alerts": OANDA_CUSTOM_ALERTS_PATH,
         "bybit_settings": BYBIT_SETTINGS_PATH,
         "oanda_settings": OANDA_SETTINGS_PATH,
+        "fxweekend_settings": FXWEEKEND_SETTINGS_PATH,
+        "fxweekend_status": FXWEEKEND_STATUS_PATH,
         "state_manifest": STATE_MANIFEST_PATH,
     }
     if key not in mapping:
@@ -3716,7 +3748,13 @@ def read_repo_state_json(key: str) -> object:
 def _is_valid_repo_state_value(key: str, value: object) -> bool:
     if key in {"watchlist", "bybit_alerts", "oanda_alerts"}:
         return isinstance(value, list)
-    if key in {"bybit_settings", "oanda_settings", "state_manifest"}:
+    if key in {
+        "bybit_settings",
+        "oanda_settings",
+        "fxweekend_settings",
+        "fxweekend_status",
+        "state_manifest",
+    }:
         return isinstance(value, dict)
     return False
 
@@ -9091,6 +9129,11 @@ def _build_state_backup_payload() -> bytes:
         "monthly_aud_revaluation_state": _load_json_file(MONTHLY_AUD_REVALUATION_STATE_PATH, {}),
         "oanda_fill_state": _load_json_file(OANDA_FILL_STATE_PATH, {}),
     }
+    if APP_PROFILE == "render":
+        payload["fxweekend_settings"] = _load_json_file(
+            FXWEEKEND_SETTINGS_PATH, FXWEEKEND_DEFAULT_SETTINGS
+        )
+        payload["fxweekend_status"] = _load_json_file(FXWEEKEND_STATUS_PATH, {})
     return json.dumps(payload, indent=2, sort_keys=True).encode("utf-8")
 
 
@@ -9233,9 +9276,29 @@ def _mark_primary_state_local_committed(key: str, payload: object, *, pending_up
         "missing_state_keys": missing_keys,
         "per_file_state_ready": not bool(missing_keys),
     }
-    if key == "watchlist":
-        updates["last_verified_watchlist"] = _normalize_watchlist(payload if isinstance(payload, list) else [])
     return _update_state_sync_status(**updates)
+
+
+def _raise_if_watchlist_state_indeterminate() -> None:
+    status = _state_sync_status_snapshot()
+    if not (
+        bool(status.get("watchlist_indeterminate"))
+        or bool(status.get("watchlist_mutation_blocked"))
+    ):
+        return
+    raise HTTPException(
+        status_code=503,
+        detail={
+            "error": "watchlist_state_indeterminate",
+            "message": (
+                "The last watchlist rollback could not be round-trip verified. "
+                "Watchlist reads and writes are blocked until authoritative state "
+                "is restored or reconciled."
+            ),
+            "rollback_error": status.get("watchlist_rollback_error"),
+            "state_sync": status,
+        },
+    )
 
 
 async def _wait_for_state_restore_or_error(timeout: float = 20.0) -> Dict[str, object]:
@@ -9339,13 +9402,21 @@ def _extract_remote_backup_summary(raw: bytes) -> Dict[str, object]:
         bybit_alerts = [item for item in bybit_block.get("alerts", []) if isinstance(item, dict)]
     if isinstance(oanda_block.get("alerts"), list):
         oanda_alerts = [item for item in oanda_block.get("alerts", []) if isinstance(item, dict)]
-    watchlist = _normalize_watchlist(data.get("watchlist", [])) if isinstance(data.get("watchlist"), list) else []
+    watchlist_present = "watchlist" in data
+    watchlist_valid = isinstance(data.get("watchlist"), list)
+    watchlist = (
+        _normalize_watchlist(data.get("watchlist", []))
+        if watchlist_valid
+        else []
+    )
     summary = {
         "ok": True,
         "backup_path": _state_backup_display_path(),
         "savedAt": data.get("savedAt"),
         "updatedAt": data.get("updatedAt"),
         "watchlist": watchlist,
+        "watchlist_present": watchlist_present,
+        "watchlist_valid": watchlist_valid,
         "bybit_alert_count": len(bybit_alerts),
         "oanda_alert_count": len(oanda_alerts),
         "bybit_alert_ids": sorted(str(item.get("id") or "") for item in bybit_alerts),
@@ -9399,10 +9470,22 @@ async def _upload_and_verify_state_backup_now(
         remote_summary = await _download_remote_backup_summary(timeout=timeout)
         if expected_watchlist is not None:
             expected_norm = _normalize_watchlist(expected_watchlist)
+            if remote_summary.get("watchlist_present") is False:
+                raise ValueError(
+                    "Remote watchlist verification mismatch; watchlist key is missing."
+                )
+            if remote_summary.get("watchlist_valid") is False or not isinstance(
+                remote_summary.get("watchlist"), list
+            ):
+                raise ValueError(
+                    "Remote watchlist verification mismatch; watchlist must be a list."
+                )
             remote_watchlist = _normalize_watchlist(remote_summary.get("watchlist", []))
-            missing = [item for item in expected_norm if item not in remote_watchlist]
-            if missing:
-                raise ValueError(f"Remote watchlist verification mismatch; missing: {', '.join(missing)}")
+            if remote_watchlist != expected_norm:
+                raise ValueError(
+                    "Remote watchlist verification mismatch; "
+                    f"expected exact sequence {expected_norm!r}, got {remote_watchlist!r}"
+                )
         if isinstance(expected_alert_probe, dict):
             expected_bybit = sorted(str(v) for v in (expected_alert_probe.get("bybit_alert_ids") or []))
             expected_oanda = sorted(str(v) for v in (expected_alert_probe.get("oanda_alert_ids") or []))
@@ -9558,7 +9641,6 @@ def _restore_alerts_payload(data: Dict[str, object]) -> Dict[str, object]:
         _save_json_file(OANDA_FILL_STATE_PATH, data["oanda_fill_state"])
         _restore_oanda_fill_state_on_startup()
         oanda_fill_state_restored = True
-
     bybit_restored = bybit_monitor.replace_custom_alerts(bybit_block["alerts"], strict=False)
     oanda_restored = oanda_monitor.replace_custom_alerts(oanda_block["alerts"])
     invalid_bybit_restored = max(0, len(bybit_block["alerts"]) - len(bybit_restored))
@@ -9607,12 +9689,20 @@ async def _dropbox_restore_state_backup_on_startup() -> None:
             return _read_bybit_settings()
         if key == "oanda_settings":
             return _read_oanda_settings()
+        if key == "fxweekend_settings":
+            return _load_json_file(FXWEEKEND_SETTINGS_PATH, FXWEEKEND_DEFAULT_SETTINGS)
+        if key == "fxweekend_status":
+            return _load_json_file(FXWEEKEND_STATUS_PATH, {})
         return None
 
     def _backup_state_for_key(backup: dict, key: str) -> object:
         alerts_block = backup.get("alerts") if isinstance(backup.get("alerts"), dict) else {}
         if key == "watchlist":
-            return _normalize_watchlist(backup.get("watchlist") if isinstance(backup.get("watchlist"), list) else [])
+            if "watchlist" not in backup:
+                return None
+            if not isinstance(backup.get("watchlist"), list):
+                raise ValueError("Backup watchlist must be a list.")
+            return _normalize_watchlist(backup.get("watchlist", []))
         if key == "bybit_alerts":
             return ((alerts_block.get("bybit") or {}).get("alerts") or [])
         if key == "oanda_alerts":
@@ -9621,13 +9711,26 @@ async def _dropbox_restore_state_backup_on_startup() -> None:
             return backup.get("bybit_settings") if isinstance(backup.get("bybit_settings"), dict) else None
         if key == "oanda_settings":
             return backup.get("oanda_settings") if isinstance(backup.get("oanda_settings"), dict) else None
+        if key == "fxweekend_settings":
+            return backup.get("fxweekend_settings") if isinstance(backup.get("fxweekend_settings"), dict) else None
+        if key == "fxweekend_status":
+            return backup.get("fxweekend_status") if isinstance(backup.get("fxweekend_status"), dict) else None
         return None
 
     async def _bootstrap_dropbox_primary_state(keys: Optional[List[str]] = None) -> Dict[str, object]:
-        required_keys = keys or ["watchlist", "bybit_alerts", "oanda_alerts", "bybit_settings", "oanda_settings"]
+        required_keys = keys or [
+            "watchlist",
+            "bybit_alerts",
+            "oanda_alerts",
+            "bybit_settings",
+            "oanda_settings",
+        ]
+        if keys is None and APP_PROFILE == "render":
+            required_keys.extend(["fxweekend_settings", "fxweekend_status"])
         missing: List[str] = []
         migrated: List[str] = []
         invalid: List[str] = []
+        restored_values: Dict[str, object] = {}
         remote_backup: dict = {}
         try:
             payload = await asyncio.to_thread(_load_local_state_backup) if _state_backup_uses_local_repo_file() else await asyncio.to_thread(download_bytes, DROPBOX_BACKUP_PATH)
@@ -9652,12 +9755,17 @@ async def _dropbox_restore_state_backup_on_startup() -> None:
                     continue
                 if local_existing is not None and _is_valid_repo_state_value(key, local_existing):
                     existing = local_existing
+                    restored_values[key] = copy.deepcopy(existing)
                     if key == "watchlist":
                         _set_watchlist_local_mirror(existing if isinstance(existing, list) else [])
                     elif key == "bybit_alerts":
                         bybit_monitor.replace_custom_alerts(existing if isinstance(existing, list) else [], strict=False)
                     elif key == "oanda_alerts":
                         oanda_monitor.replace_custom_alerts(existing if isinstance(existing, list) else [])
+                    elif key == "fxweekend_settings" and isinstance(existing, dict):
+                        _save_json_file(FXWEEKEND_SETTINGS_PATH, existing)
+                    elif key == "fxweekend_status" and isinstance(existing, dict):
+                        _save_json_file(FXWEEKEND_STATUS_PATH, existing)
                     continue
                 if local_existing is not None and not _is_valid_repo_state_value(key, local_existing):
                     BYBIT_LOGGER.warning("Repo-local state for key '%s' has invalid type: %s", key, type(local_existing).__name__)
@@ -9666,12 +9774,40 @@ async def _dropbox_restore_state_backup_on_startup() -> None:
             else:
                 existing = dropbox_state_store.download_json(key, default=None, required=False)
                 if existing is not None:
+                    if not _is_valid_repo_state_value(key, existing):
+                        BYBIT_LOGGER.warning(
+                            "Dropbox state for key '%s' has invalid type: %s",
+                            key,
+                            type(existing).__name__,
+                        )
+                        invalid.append(key)
+                        continue
+                    restored_values[key] = copy.deepcopy(existing)
+                    if key == "watchlist" and isinstance(existing, list):
+                        _set_watchlist_local_mirror(existing)
+                    elif key == "bybit_alerts" and isinstance(existing, list):
+                        bybit_monitor.replace_custom_alerts(existing, strict=False)
+                    elif key == "oanda_alerts" and isinstance(existing, list):
+                        oanda_monitor.replace_custom_alerts(existing)
+                    elif key == "fxweekend_settings" and isinstance(existing, dict):
+                        _save_json_file(FXWEEKEND_SETTINGS_PATH, existing)
+                    elif key == "fxweekend_status" and isinstance(existing, dict):
+                        _save_json_file(FXWEEKEND_STATUS_PATH, existing)
                     continue
             from_backup = _backup_state_for_key(remote_backup, key)
             candidate = from_backup
-            if candidate in (None, []) or (isinstance(candidate, dict) and not candidate):
+            candidate_missing = candidate is None or (
+                key != "watchlist"
+                and (
+                    candidate == []
+                    or (isinstance(candidate, dict) and not candidate)
+                )
+            )
+            if candidate_missing:
                 legacy = _legacy_local_state_for_key(key)
-                if legacy not in (None, []) and not (isinstance(legacy, dict) and not legacy):
+                if legacy not in (None, []) and not (
+                    isinstance(legacy, dict) and not legacy
+                ):
                     candidate = legacy
             if candidate is None:
                 if key in {"watchlist", "bybit_alerts", "oanda_alerts"}:
@@ -9680,22 +9816,51 @@ async def _dropbox_restore_state_backup_on_startup() -> None:
                     candidate = _read_bybit_settings()
                 elif key == "oanda_settings":
                     candidate = _read_oanda_settings()
+                elif key == "fxweekend_settings":
+                    candidate = _load_json_file(
+                        FXWEEKEND_SETTINGS_PATH, FXWEEKEND_DEFAULT_SETTINGS
+                    )
+                elif key == "fxweekend_status":
+                    candidate = _load_json_file(FXWEEKEND_STATUS_PATH, {})
             if _state_backup_uses_local_repo_file():
                 write_repo_state_json_and_verify(key, candidate)
             else:
-                dropbox_state_store.upload_json_and_verify(key, candidate)
+                if key == "watchlist":
+                    expected_watchlist = _normalize_watchlist(
+                        candidate if isinstance(candidate, list) else []
+                    )
+                    dropbox_state_store.upload_json_and_verify(
+                        key,
+                        expected_watchlist,
+                        verifier=lambda value: _watchlist_roundtrip_matches(
+                            value, expected_watchlist
+                        ),
+                    )
+                    candidate = expected_watchlist
+                else:
+                    dropbox_state_store.upload_json_and_verify(key, candidate)
             migrated.append(key)
             existing = candidate
             if existing is None:
                 missing.append(key)
                 continue
+            restored_values[key] = copy.deepcopy(existing)
             if key == "watchlist":
                 _set_watchlist_local_mirror(existing if isinstance(existing, list) else [])
             elif key == "bybit_alerts":
                 bybit_monitor.replace_custom_alerts(existing if isinstance(existing, list) else [], strict=False)
             elif key == "oanda_alerts":
                 oanda_monitor.replace_custom_alerts(existing if isinstance(existing, list) else [])
-        return {"missing": missing, "migrated": migrated, "invalid": invalid}
+            elif key == "fxweekend_settings" and isinstance(existing, dict):
+                _save_json_file(FXWEEKEND_SETTINGS_PATH, existing)
+            elif key == "fxweekend_status" and isinstance(existing, dict):
+                _save_json_file(FXWEEKEND_STATUS_PATH, existing)
+        return {
+            "missing": missing,
+            "migrated": migrated,
+            "invalid": invalid,
+            "restored_values": restored_values,
+        }
 
     try:
         bootstrap = await _bootstrap_dropbox_primary_state()
@@ -9707,8 +9872,14 @@ async def _dropbox_restore_state_backup_on_startup() -> None:
                 payload = b""
                 remote_hash = None
         else:
-            payload = await asyncio.to_thread(download_bytes, DROPBOX_BACKUP_PATH)
-            remote_hash = hashlib.sha256(payload).hexdigest()
+            try:
+                payload = await asyncio.to_thread(download_bytes, DROPBOX_BACKUP_PATH)
+                remote_hash = hashlib.sha256(payload).hexdigest() if payload else None
+            except FileNotFoundError:
+                # Per-file state is authoritative. A missing legacy aggregate backup
+                # must not invalidate successfully restored per-file settings.
+                payload = b""
+                remote_hash = None
         restored = {
             "bybit_restored": 0,
             "bybit_invalid_skipped": 0,
@@ -9720,8 +9891,17 @@ async def _dropbox_restore_state_backup_on_startup() -> None:
             "journal_rows_restored": 0,
             "journal_rows_sanitized": 0,
         }
-        if not local_repo_mode:
+        if not local_repo_mode and payload:
             data = json.loads(payload.decode("utf-8"))
+            restored_values = bootstrap.get("restored_values")
+            primary_watchlist = (
+                restored_values.get("watchlist")
+                if isinstance(restored_values, dict)
+                else None
+            )
+            if isinstance(primary_watchlist, list):
+                data = dict(data)
+                data["watchlist"] = list(primary_watchlist)
             restored = _restore_alerts_payload(data)
         workbook_stats: Dict[str, object] = {}
         if not _master_journal_single_file_mode():
@@ -9753,6 +9933,11 @@ async def _dropbox_restore_state_backup_on_startup() -> None:
             per_file_state_ready=(not bool(bootstrap.get("missing"))) and (not bool(invalid_keys)),
             missing_state_keys=list(bootstrap.get("missing") or []),
             migrated_state_keys=list(bootstrap.get("migrated") or []),
+            watchlist_indeterminate=False,
+            watchlist_mutation_blocked=False,
+            watchlist_rollback_error=None,
+            fxweekend_state_indeterminate=False,
+            fxweekend_rollback_error=None,
         )
     except FileNotFoundError:
         BYBIT_LOGGER.info("Dropbox restore skipped; no backup found at %s", DROPBOX_BACKUP_PATH)
@@ -10300,38 +10485,169 @@ BYBIT_HISTORY_JOBS: Dict[str, BybitHistoryJob] = {}
 COINSPOT_HISTORY_JOBS: Dict[str, CoinspotHistoryJob] = {}
 AUTOSTART_LOGGER = logging.getLogger("uvicorn.error")
 DEFAULT_RENDER_AUTOSTART_SCRIPTS = "fxweekend-clone"
-DEFAULT_LOCAL_AUTOSTART_SCRIPTS = "bybit_monitor,oanda_monitor,fxweekend-clone"
+DEFAULT_LOCAL_AUTOSTART_SCRIPTS = "bybit_monitor,oanda_monitor"
 _LAST_AUTOSTART_UNAVAILABLE: Dict[str, str] = {}
 
 FXWEEKEND_SETTINGS_PATH = BASE_DIR / "fxweekend-clone" / "settings.json"
+FXWEEKEND_STATUS_PATH = BASE_DIR / "fxweekend-clone" / "status.json"
 FXWEEKEND_DEFAULT_SETTINGS: Dict[str, object] = {
     "enabled": True,
     "trigger_weekday": 5,
     "cutoff_hour_dst": 5,
     "cutoff_hour_standard": 6,
+    "cutoff_time_dst": "05:00",
+    "cutoff_time_standard": "06:00",
+    "account_modes": ["live"],
     "check_interval_seconds": 60,
+    "max_retry_backoff_seconds": 300,
     "close_method": "positions",
     "dry_run": False,
     "instrument_allowlist": [],
 }
+_FXWEEKEND_LAST_PERSISTED_STATUS_SIGNATURE = ""
 
 
-def _force_fxweekend_enabled_on_startup() -> None:
-    if _is_scanner_local_ui_mode():
-        return
-    payload = dict(FXWEEKEND_DEFAULT_SETTINGS)
-    try:
-        existing = _load_json_file(FXWEEKEND_SETTINGS_PATH, {})
-        if isinstance(existing, dict):
-            payload.update(existing)
-    except Exception:
-        pass
-    payload["enabled"] = True
-    FXWEEKEND_SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    FXWEEKEND_SETTINGS_PATH.write_text(
-        json.dumps(payload, indent=2, sort_keys=True),
-        encoding="utf-8",
+def _fxweekend_status_signature(payload: object) -> str:
+    data = payload if isinstance(payload, dict) else {}
+    durable = {
+        key: data.get(key)
+        for key in (
+            "state",
+            "state_detail",
+            "selected_accounts",
+            "last_access_check_at",
+            "last_attempt_at",
+            "last_verified_flat_at",
+            "last_verified_window_cutoff",
+            "last_error",
+            "consecutive_failures",
+            "accounts",
+        )
+    }
+    return hashlib.sha256(
+        json.dumps(durable, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _persist_fxweekend_state_key(key: str, payload: Dict[str, object]) -> None:
+    if key not in {"fxweekend_settings", "fxweekend_status"}:
+        raise ValueError(f"Unsupported FX Weekend state key: {key}")
+    if _state_backup_uses_local_repo_file():
+        write_repo_state_json_and_verify(key, payload)
+    else:
+        dropbox_state_store.upload_json_and_verify(
+            key,
+            payload,
+            verifier=lambda roundtrip: roundtrip == payload,
+        )
+
+
+async def _persist_fxweekend_config_with_rollback(
+    previous_settings: Dict[str, object],
+    previous_status: Dict[str, object],
+    *,
+    timeout: float = 10.0,
+) -> Dict[str, object]:
+    durable_settings = _load_json_file(
+        FXWEEKEND_SETTINGS_PATH, FXWEEKEND_DEFAULT_SETTINGS
     )
+    durable_status = _load_json_file(FXWEEKEND_STATUS_PATH, {})
+    try:
+        if not isinstance(durable_settings, dict):
+            raise ValueError("FX Weekend settings response did not produce an object.")
+        if not isinstance(durable_status, dict):
+            raise ValueError("FX Weekend status response did not produce an object.")
+        _persist_fxweekend_state_key("fxweekend_settings", durable_settings)
+        _persist_fxweekend_state_key("fxweekend_status", durable_status)
+        await _upload_and_verify_state_backup_now(timeout=timeout)
+        _update_state_sync_status(
+            fxweekend_state_indeterminate=False,
+            fxweekend_rollback_error=None,
+        )
+        return {"ok": True, "durable_verified": True}
+    except Exception as primary_exc:
+        rollback_errors: List[str] = []
+        try:
+            _save_json_file(FXWEEKEND_SETTINGS_PATH, previous_settings)
+            _save_json_file(FXWEEKEND_STATUS_PATH, previous_status)
+        except Exception as exc:
+            rollback_errors.append(f"local rollback failed: {exc}")
+        for key, payload in (
+            ("fxweekend_settings", previous_settings),
+            ("fxweekend_status", previous_status),
+        ):
+            try:
+                _persist_fxweekend_state_key(key, payload)
+            except Exception as exc:
+                rollback_errors.append(f"{key} rollback failed: {exc}")
+        try:
+            await _upload_and_verify_state_backup_now(timeout=timeout)
+        except Exception as exc:
+            rollback_errors.append(f"aggregate rollback failed: {exc}")
+        rollback_verified = not rollback_errors
+        rollback_error = "; ".join(rollback_errors) or None
+        _update_state_sync_status(
+            fxweekend_state_indeterminate=not rollback_verified,
+            fxweekend_rollback_error=rollback_error,
+        )
+        detail = getattr(primary_exc, "detail", None)
+        message = (
+            str((detail or {}).get("message") or (detail or {}).get("error"))
+            if isinstance(detail, dict)
+            else str(primary_exc)
+        )
+        return {
+            "ok": False,
+            "error": "fxweekend_durable_state_failed",
+            "message": message,
+            "settings_restored": not any(
+                item.startswith("local rollback failed") for item in rollback_errors
+            ),
+            "durable_rollback_verified": rollback_verified,
+            "rollback_error": rollback_error,
+        }
+
+
+def _persist_fxweekend_status_if_changed() -> None:
+    global _FXWEEKEND_LAST_PERSISTED_STATUS_SIGNATURE
+    payload = _load_json_file(FXWEEKEND_STATUS_PATH, {})
+    if not isinstance(payload, dict) or not payload:
+        return
+    signature = _fxweekend_status_signature(payload)
+    if signature == _FXWEEKEND_LAST_PERSISTED_STATUS_SIGNATURE:
+        return
+    _persist_fxweekend_state_key("fxweekend_status", payload)
+    _FXWEEKEND_LAST_PERSISTED_STATUS_SIGNATURE = signature
+
+
+def _fxweekend_start_gate() -> Tuple[bool, str]:
+    """Require a successful authoritative restore before any FX executor start."""
+
+    if APP_PROFILE != "render":
+        return False, "FX Weekend execution is Render-owned; no local fallback is permitted."
+    status = _state_sync_status_snapshot()
+    restore_status = str(status.get("restore_status") or "").strip().lower()
+    restore_complete = bool(status.get("restore_complete")) and _STARTUP_STATE_RESTORE_DONE.is_set()
+    restore_error = str(status.get("restore_error") or "").strip()
+    if not restore_complete:
+        return False, "Authoritative FX Weekend state restore is still pending."
+    if restore_status in {"failed", "error"} or restore_error:
+        return False, restore_error or "Authoritative FX Weekend state restore failed."
+    if not bool(status.get("enabled")):
+        return False, "Durable state synchronization is not enabled for the Render FX Weekend executor."
+    if restore_status != "done":
+        return False, f"Authoritative FX Weekend state restore is not ready ({restore_status or 'unknown'})."
+    if status.get("per_file_state_ready") is False:
+        missing = ", ".join(str(item) for item in (status.get("missing_state_keys") or []))
+        suffix = f": {missing}" if missing else "."
+        return False, f"Authoritative FX Weekend per-file state is incomplete{suffix}"
+    if bool(status.get("fxweekend_state_indeterminate")):
+        return (
+            False,
+            str(status.get("fxweekend_rollback_error") or "")
+            or "FX Weekend durable settings state is indeterminate after rollback failure.",
+        )
+    return True, ""
 
 
 def _compute_autostart_scripts() -> List[str]:
@@ -10346,7 +10662,7 @@ def _compute_autostart_scripts() -> List[str]:
     global _LAST_AUTOSTART_UNAVAILABLE
     _LAST_AUTOSTART_UNAVAILABLE = {}
     raw_value = os.getenv("AUTOSTART_SCRIPTS")
-    if _is_scanner_local_ui_mode():
+    if APP_PROFILE != "render" and _is_scanner_local_ui_mode():
         return []
     if raw_value is None:
         raw_value = (
@@ -10371,9 +10687,19 @@ def _compute_autostart_scripts() -> List[str]:
 
     if autostart_exclude:
         names = [name for name in names if name not in autostart_exclude]
+    if APP_PROFILE == "render" and "fxweekend-clone" not in names:
+        # Render is the sole execution authority. Environment convenience
+        # overrides may tune other children but cannot silently remove this
+        # executor; its durable `enabled` setting still controls all actions.
+        names.append("fxweekend-clone")
     filtered: List[str] = []
     seen: Set[str] = set()
     for name in names:
+        if APP_PROFILE != "render" and str(name).strip() == "fxweekend-clone":
+            _LAST_AUTOSTART_UNAVAILABLE[str(name)] = (
+                "FX Weekend execution is Render-owned and cannot autostart locally."
+            )
+            continue
         try:
             script = script_manager.get(name)
         except HTTPException as exc:
@@ -10394,6 +10720,69 @@ def _compute_autostart_scripts() -> List[str]:
 
 def _script_startup_error(script: "ManagedScript") -> str:
     return str(script.last_start_error or script.last_exit_reason or "").strip()
+
+
+def _fxweekend_enabled() -> bool:
+    settings = _load_json_file(
+        FXWEEKEND_SETTINGS_PATH,
+        FXWEEKEND_DEFAULT_SETTINGS,
+    )
+    return bool(
+        settings.get("enabled", True)
+        if isinstance(settings, dict)
+        else True
+    )
+
+
+def _fxweekend_heartbeat_fresh(
+    settings: Optional[Dict[str, object]] = None,
+    runtime: Optional[Dict[str, object]] = None,
+    *,
+    now: Optional[datetime] = None,
+) -> bool:
+    settings_payload = (
+        settings
+        if isinstance(settings, dict)
+        else _load_json_file(
+            FXWEEKEND_SETTINGS_PATH,
+            FXWEEKEND_DEFAULT_SETTINGS,
+        )
+    )
+    runtime_payload = (
+        runtime
+        if isinstance(runtime, dict)
+        else _load_json_file(FXWEEKEND_STATUS_PATH, {})
+    )
+    heartbeat_raw = str(
+        (runtime_payload or {}).get("heartbeat_at") or ""
+    ).strip()
+    if not heartbeat_raw:
+        return False
+    try:
+        heartbeat_dt = datetime.fromisoformat(
+            heartbeat_raw.replace("Z", "+00:00")
+        )
+        if heartbeat_dt.tzinfo is None:
+            heartbeat_dt = heartbeat_dt.replace(tzinfo=timezone.utc)
+        grace = max(
+            180.0,
+            float(
+                (settings_payload or {}).get(
+                    "check_interval_seconds"
+                )
+                or 60
+            )
+            * 3.0,
+        )
+        current = now or datetime.now(timezone.utc)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        return (
+            current.astimezone(timezone.utc)
+            - heartbeat_dt.astimezone(timezone.utc)
+        ).total_seconds() <= grace
+    except Exception:
+        return False
 
 
 def _autostart_component_readiness(name: str) -> Dict[str, object]:
@@ -10453,6 +10842,106 @@ def _autostart_component_readiness(name: str) -> Dict[str, object]:
         if isinstance(settings, dict):
             enabled = bool(settings.get("enabled", True))
         component["enabled"] = enabled
+        component["blocking"] = bool(enabled and APP_PROFILE == "render")
+        selected_accounts = [
+            str(item).strip().lower()
+            for item in ((settings or {}).get("account_modes") or [])
+            if str(item).strip().lower() in {"demo", "live"}
+        ]
+        runtime = _load_json_file(FXWEEKEND_STATUS_PATH, {})
+        runtime = runtime if isinstance(runtime, dict) else {}
+        component["selected_accounts"] = selected_accounts
+        component["heartbeat_at"] = runtime.get("heartbeat_at")
+        component["last_access_check_at"] = runtime.get("last_access_check_at")
+        component["last_verified_flat_at"] = runtime.get("last_verified_flat_at")
+        component["accounts"] = runtime.get("accounts") or {}
+        state_sync = _state_sync_status_snapshot()
+        component["durable_state_indeterminate"] = bool(
+            state_sync.get("fxweekend_state_indeterminate")
+        )
+        credential_errors: List[str] = []
+        for mode in selected_accounts:
+            try:
+                resolve_oanda_account_config(mode)
+            except OandaAPIError as exc:
+                credential_errors.append(f"{mode}: {exc}")
+        component["credential_errors"] = credential_errors
+        heartbeat_fresh = _fxweekend_heartbeat_fresh(
+            settings,
+            runtime,
+        )
+        component["heartbeat_fresh"] = heartbeat_fresh
+        runtime_failure = str(runtime.get("state") or "") in {
+            "credential failure",
+            "API failure",
+            "partial closure failure",
+            "missed cutoff/market closed",
+        }
+        if not enabled:
+            component.update(
+                {
+                    "ready": True,
+                    "phase": "disabled",
+                    "reason": "FX Weekend execution is durably disabled.",
+                }
+            )
+            return component
+        if component["durable_state_indeterminate"]:
+            component.update(
+                {
+                    "ready": False,
+                    "phase": "durable_state_indeterminate",
+                    "reason": str(
+                        state_sync.get("fxweekend_rollback_error")
+                        or "FX Weekend durable settings rollback could not be verified."
+                    ),
+                }
+            )
+            return component
+        if not selected_accounts:
+            component.update(
+                {
+                    "ready": False,
+                    "phase": "account_configuration_failed",
+                    "reason": "No OANDA account mode is selected.",
+                }
+            )
+            return component
+        if credential_errors:
+            component.update(
+                {
+                    "ready": False,
+                    "phase": "credential_failure",
+                    "reason": "; ".join(credential_errors),
+                }
+            )
+            return component
+        if running and not starting and heartbeat_fresh and not runtime_failure:
+            component.update({"ready": True, "phase": "ready", "reason": ""})
+            return component
+        if runtime_failure:
+            component.update(
+                {
+                    "ready": False,
+                    "phase": str(runtime.get("state") or "executor_failed").replace(" ", "_"),
+                    "reason": str(runtime.get("last_error") or runtime.get("state") or "FX Weekend account check failed."),
+                }
+            )
+            return component
+        component.update(
+            {
+                "ready": False,
+                "phase": "autostart_starting" if starting else "heartbeat_stale" if running else "autostart_pending",
+                "reason": (
+                    "FX Weekend is still starting."
+                    if starting
+                    else "FX Weekend heartbeat is missing or stale."
+                    if running
+                    else reason or "FX Weekend executor is not running."
+                ),
+            }
+        )
+        return component
 
     ready = bool(running and not starting and enabled)
     component["ready"] = ready
@@ -10514,13 +11003,18 @@ def _startup_readiness_status() -> Dict[str, object]:
 
     if unavailable:
         for target_name, reason in sorted(unavailable.items()):
+            blocking = bool(
+                APP_PROFILE == "render"
+                and target_name == "fxweekend-clone"
+                and _fxweekend_enabled()
+            )
             component = {
                 "name": target_name,
                 "label": friendly_script_label(target_name),
                 "ready": False,
                 "running": False,
                 "starting": False,
-                "blocking": False,
+                "blocking": blocking,
                 "phase": "autostart_unavailable",
                 "reason": reason,
             }
@@ -10557,6 +11051,23 @@ def _startup_readiness_status() -> Dict[str, object]:
                 "startup_phase": "state_restore_pending",
                 "blocking_component": "state_restore",
                 "failure_reason": "Startup state restore is still pending.",
+            }
+        )
+        return payload
+
+    blocking_background = [
+        warning for warning in background_warnings if bool(warning.get("blocking"))
+    ]
+    if blocking_background:
+        failure = blocking_background[0]
+        payload.update(
+            {
+                "ready": False,
+                "core_ready": True,
+                "startup_phase": "background_executor_failed",
+                "blocking_component": failure.get("name"),
+                "failure_reason": failure.get("reason")
+                or f"{failure.get('label') or failure.get('name')} is unavailable.",
             }
         )
         return payload
@@ -10882,10 +11393,81 @@ def _scanner_has_external_live_runtime(script_name: str) -> bool:
     return runtime_pid is not None and runtime_pid != script_pid
 
 
+async def _supervise_autostart_scripts_once(
+    autostart_targets: List[str],
+) -> None:
+    for name in autostart_targets:
+        try:
+            script = script_manager.get(name)
+        except HTTPException:
+            continue
+        if name == "fxweekend-clone":
+            allowed, gate_error = _fxweekend_start_gate()
+            if not allowed:
+                if script.is_running:
+                    await script.stop()
+                script.last_start_error = gate_error
+                AUTOSTART_LOGGER.error(
+                    "FX Weekend executor blocked by authoritative-state gate: %s",
+                    gate_error,
+                )
+                continue
+            try:
+                await asyncio.to_thread(_persist_fxweekend_status_if_changed)
+            except Exception as exc:
+                AUTOSTART_LOGGER.error(
+                    "FX Weekend durable status persistence failed: %s", exc
+                )
+            if script.is_running and _fxweekend_enabled():
+                settings = _load_json_file(
+                    FXWEEKEND_SETTINGS_PATH,
+                    FXWEEKEND_DEFAULT_SETTINGS,
+                )
+                runtime = _load_json_file(FXWEEKEND_STATUS_PATH, {})
+                if not _fxweekend_heartbeat_fresh(
+                    settings if isinstance(settings, dict) else None,
+                    runtime if isinstance(runtime, dict) else None,
+                ):
+                    AUTOSTART_LOGGER.error(
+                        "FX Weekend heartbeat is missing or stale; stopping "
+                        "the child so the next supervisor pass can restart it."
+                    )
+                    await script.stop()
+                    _SCANNER_SUPERVISOR_BACKOFF.pop(name, None)
+                    _SCANNER_SUPERVISOR_BACKOFF_WINDOW.pop(name, None)
+                    continue
+        if script.is_running:
+            _SCANNER_SUPERVISOR_BACKOFF.pop(name, None)
+            continue
+        is_scanner = name in {"bybit_monitor", "oanda_monitor"}
+        if is_scanner and _scanner_has_external_live_runtime(name):
+            continue
+        now = time.time()
+        retry_after = _SCANNER_SUPERVISOR_BACKOFF.get(name, 0.0)
+        if retry_after and now < retry_after:
+            continue
+        supervisor_label = "Scanner supervisor" if is_scanner else "Autostart supervisor"
+        AUTOSTART_LOGGER.warning("%s restarting %s", supervisor_label, name)
+        try:
+            await script.start()
+            _SCANNER_SUPERVISOR_BACKOFF.pop(name, None)
+            _SCANNER_SUPERVISOR_BACKOFF_WINDOW.pop(name, None)
+        except Exception as exc:
+            prev_wait = _SCANNER_SUPERVISOR_BACKOFF_WINDOW.get(name, 0.0)
+            current_wait = 15.0 if prev_wait <= 0 else min(_SCANNER_SUPERVISOR_MAX_BACKOFF_SECONDS, prev_wait * 2.0)
+            _SCANNER_SUPERVISOR_BACKOFF_WINDOW[name] = current_wait
+            _SCANNER_SUPERVISOR_BACKOFF[name] = now + current_wait
+            AUTOSTART_LOGGER.error("%s failed to restart %s: %s", supervisor_label, name, exc)
+
+
 async def _supervise_autostart_scripts(names: List[str]) -> None:
-    if APP_PROFILE != "local":
-        return
-    supervised_names = {"bybit_monitor", "oanda_monitor", "fxweekend-clone"}
+    supervised_names = (
+        {"bybit_monitor", "oanda_monitor"}
+        if APP_PROFILE == "local"
+        else {"fxweekend-clone"}
+        if APP_PROFILE == "render"
+        else set()
+    )
     autostart_targets = [
         name
         for name in dict.fromkeys(names)
@@ -10895,33 +11477,7 @@ async def _supervise_autostart_scripts(names: List[str]) -> None:
         return
     while True:
         await asyncio.sleep(max(15.0, _SCANNER_SUPERVISOR_BASE_SECONDS))
-        for name in autostart_targets:
-            try:
-                script = script_manager.get(name)
-            except HTTPException:
-                continue
-            if script.is_running:
-                _SCANNER_SUPERVISOR_BACKOFF.pop(name, None)
-                continue
-            is_scanner = name in {"bybit_monitor", "oanda_monitor"}
-            if is_scanner and _scanner_has_external_live_runtime(name):
-                continue
-            now = time.time()
-            retry_after = _SCANNER_SUPERVISOR_BACKOFF.get(name, 0.0)
-            if retry_after and now < retry_after:
-                continue
-            supervisor_label = "Scanner supervisor" if is_scanner else "Autostart supervisor"
-            AUTOSTART_LOGGER.warning("%s restarting %s", supervisor_label, name)
-            try:
-                await script.start()
-                _SCANNER_SUPERVISOR_BACKOFF.pop(name, None)
-                _SCANNER_SUPERVISOR_BACKOFF_WINDOW.pop(name, None)
-            except Exception as exc:
-                prev_wait = _SCANNER_SUPERVISOR_BACKOFF_WINDOW.get(name, 0.0)
-                current_wait = 15.0 if prev_wait <= 0 else min(_SCANNER_SUPERVISOR_MAX_BACKOFF_SECONDS, prev_wait * 2.0)
-                _SCANNER_SUPERVISOR_BACKOFF_WINDOW[name] = current_wait
-                _SCANNER_SUPERVISOR_BACKOFF[name] = now + current_wait
-                AUTOSTART_LOGGER.error("%s failed to restart %s: %s", supervisor_label, name, exc)
+        await _supervise_autostart_scripts_once(autostart_targets)
 
 
 @app.on_event("startup")
@@ -11035,7 +11591,6 @@ async def _autostart_scripts() -> None:
         asyncio.create_task(_poll_bybit_fills())
     if (not _master_journal_single_file_mode()) and os.getenv("ENABLE_OANDA_FILL_POLL", "0") == "1":
         asyncio.create_task(_start_oanda_fill_poll_after_delay())
-    _force_fxweekend_enabled_on_startup()
     _start_manual_save_github_sync_watcher_if_needed()
     autostart_targets = _compute_autostart_scripts()
     AUTOSTART_LOGGER.info(
@@ -11055,9 +11610,13 @@ async def _autostart_scripts() -> None:
             script.port = _allocate_port()
 
         if script.startup_task is None or script.startup_task.done():
-            script.startup_task = asyncio.create_task(_background_start(script))
-    if APP_PROFILE == "local":
-        asyncio.create_task(_supervise_autostart_scripts(autostart_targets))
+            starter = (
+                _background_start_after_state_restore(script)
+                if script.name == "fxweekend-clone"
+                else _background_start(script)
+            )
+            script.startup_task = asyncio.create_task(starter)
+    asyncio.create_task(_supervise_autostart_scripts(autostart_targets))
 
 
 @app.on_event("shutdown")
@@ -24899,8 +25458,37 @@ async def proxy_app(script_name: str, request: Request, path: str = "") -> Respo
         accepts = str(request.headers.get("accept", "")).lower()
         wants_json = "application/json" in accepts
         return _local_only_disabled_response(f"/apps/{script_name}", as_json=wants_json)
+    if script_name == "fxweekend-clone" and APP_PROFILE != "render":
+        accepts = str(request.headers.get("accept", "")).lower()
+        if "text/html" in accepts:
+            return RedirectResponse("/fx-weekend-render-configuration-error", status_code=307)
+        return JSONResponse(
+            {
+                "error": "render_owned_executor",
+                "message": "FX Weekend execution is Render-owned; no local fallback is permitted.",
+            },
+            status_code=409,
+        )
 
     script = script_manager.get(script_name)
+    fx_previous_settings: Optional[Dict[str, object]] = None
+    fx_previous_status: Optional[Dict[str, object]] = None
+    if (
+        APP_PROFILE == "render"
+        and script.name == "fxweekend-clone"
+        and request.method.upper() == "POST"
+        and path.strip("/") == "api/config"
+    ):
+        current_settings = _load_json_file(
+            FXWEEKEND_SETTINGS_PATH, FXWEEKEND_DEFAULT_SETTINGS
+        )
+        current_status = _load_json_file(FXWEEKEND_STATUS_PATH, {})
+        fx_previous_settings = (
+            dict(current_settings) if isinstance(current_settings, dict) else {}
+        )
+        fx_previous_status = (
+            dict(current_status) if isinstance(current_status, dict) else {}
+        )
     accept = request.headers.get("accept", "")
     wants_html = (
         "text/html" in accept
@@ -24913,7 +25501,12 @@ async def proxy_app(script_name: str, request: Request, path: str = "") -> Respo
                 script.port = _allocate_port()
             if not script.last_start_attempt_at or script.last_start_error:
                 if script.startup_task is None or script.startup_task.done():
-                    script.startup_task = asyncio.create_task(_background_start(script))
+                    starter = (
+                        _background_start_after_state_restore(script)
+                        if script.name == "fxweekend-clone"
+                        else _background_start(script)
+                    )
+                    script.startup_task = asyncio.create_task(starter)
             if wants_html:
                 target_url = f"/apps/{_encoded_script_name(script.name)}"
                 return HTMLResponse(
@@ -25041,6 +25634,17 @@ async def proxy_app(script_name: str, request: Request, path: str = "") -> Respo
         for k, v in resp.headers.items()
         if k.lower() not in PROXY_HOP_HEADERS | PROXY_STRIP_HEADERS
     }
+    if fx_previous_settings is not None and resp.status_code < 400:
+        durability = await _persist_fxweekend_config_with_rollback(
+            fx_previous_settings,
+            fx_previous_status or {},
+            timeout=10.0,
+        )
+        if durability.get("ok") is not True:
+            return JSONResponse(
+                durability,
+                status_code=502,
+            )
     return Response(
         content=resp.content,
         status_code=resp.status_code,
@@ -25398,24 +26002,27 @@ async def set_pending_webhook_enabled(
 @app.get("/api/watchlist")
 async def get_watchlist() -> JSONResponse:
     sync_status = await _wait_for_state_restore_or_error()
-    try:
-        normalized = _get_watchlist()
-        status = _state_sync_status_snapshot()
-        missing_keys = [str(item) for item in (status.get("missing_state_keys") or []) if str(item)]
-        if "watchlist" in missing_keys:
-            status = _update_state_sync_status(
-                missing_state_keys=[item for item in missing_keys if item != "watchlist"],
-                per_file_state_ready=not bool([item for item in missing_keys if item != "watchlist"]),
-            )
-        return JSONResponse({"items": normalized, "state_sync": status})
-    except Exception as exc:
-        err_code = "repo_local_state_unavailable" if _state_source_label() == "repo_local" else ("dropbox_state_unavailable" if _state_source_label() == "dropbox" else "local_state_unavailable")
-        raise HTTPException(status_code=503, detail={"error": err_code, "message": str(exc), "state_sync": sync_status}) from exc
+    async with _WATCHLIST_MUTATION_LOCK:
+        _raise_if_watchlist_state_indeterminate()
+        try:
+            normalized = _get_watchlist()
+            status = _state_sync_status_snapshot()
+            missing_keys = [str(item) for item in (status.get("missing_state_keys") or []) if str(item)]
+            if "watchlist" in missing_keys:
+                status = _update_state_sync_status(
+                    missing_state_keys=[item for item in missing_keys if item != "watchlist"],
+                    per_file_state_ready=not bool([item for item in missing_keys if item != "watchlist"]),
+                )
+            return JSONResponse({"items": normalized, "state_sync": status})
+        except Exception as exc:
+            err_code = "repo_local_state_unavailable" if _state_source_label() == "repo_local" else ("dropbox_state_unavailable" if _state_source_label() == "dropbox" else "local_state_unavailable")
+            raise HTTPException(status_code=503, detail={"error": err_code, "message": str(exc), "state_sync": sync_status}) from exc
 
 
 @app.post("/api/watchlist")
 async def set_watchlist(request: Request) -> JSONResponse:
     await _wait_for_state_restore_or_error()
+    _raise_if_watchlist_state_indeterminate()
     payload = await request.json()
     if payload is None:
         payload = {}
@@ -25439,13 +26046,185 @@ async def set_watchlist(request: Request) -> JSONResponse:
             raise HTTPException(status_code=400, detail=f"Unable to resolve watchlist symbol: {token}")
         resolved_items.append(resolved_symbol)
     normalized = _normalize_watchlist(resolved_items)
-    normalized = _set_watchlist_local_mirror(normalized)
-    write_repo_state_json_and_verify("watchlist", normalized)
-    should_upload = DROPBOX_SYNC_ENABLED and not LOCAL_STATE_ONLY
-    sync_status = _mark_primary_state_local_committed("watchlist", normalized, pending_upload=should_upload)
-    if should_upload:
-        _schedule_dropbox_upload_state_backup()
-    return JSONResponse({"ok": True, "items": normalized, "state_sync": sync_status})
+
+    async def _write_primary_exact(items_to_write: List[str]) -> None:
+        if _state_backup_uses_local_repo_file():
+            await asyncio.to_thread(
+                write_repo_state_json_and_verify, "watchlist", items_to_write
+            )
+            return
+        if dropbox_state_store.dropbox_state_enabled():
+            expected = list(items_to_write)
+            await asyncio.to_thread(
+                dropbox_state_store.upload_json_and_verify,
+                "watchlist",
+                expected,
+                lambda value: _watchlist_roundtrip_matches(value, expected),
+            )
+            return
+        raise RuntimeError("No durable watchlist state source is configured.")
+
+    async with _WATCHLIST_MUTATION_LOCK:
+        _raise_if_watchlist_state_indeterminate()
+        previous = _get_watchlist()
+        effective_source = _state_source_label()
+        try:
+            await _write_primary_exact(normalized)
+            _set_watchlist_local_mirror(normalized)
+            _mark_primary_state_local_committed(
+                "watchlist", normalized, pending_upload=True
+            )
+            sync_status = await _upload_and_verify_state_backup_now(
+                expected_watchlist=normalized,
+                timeout=10.0,
+            )
+            last_verified = sync_status.get("last_verified_watchlist")
+            verified_items = (
+                _normalize_watchlist(last_verified)
+                if isinstance(last_verified, list)
+                else []
+            )
+            verified_at = str(sync_status.get("last_verified_at") or "").strip()
+            if verified_items != normalized:
+                raise RuntimeError(
+                    "Durable watchlist verification returned a different sequence."
+                )
+            if not verified_at:
+                raise RuntimeError(
+                    "Durable watchlist verification did not return a verification timestamp."
+                )
+            sync_status = _update_state_sync_status(
+                watchlist_indeterminate=False,
+                watchlist_mutation_blocked=False,
+                watchlist_rollback_error=None,
+                last_upload_error=None,
+            )
+            return JSONResponse(
+                {
+                    "ok": True,
+                    "items": normalized,
+                    "durable_verified": True,
+                    "verified_at": verified_at,
+                    "verified_items": verified_items,
+                    "effective_state_source": effective_source,
+                    "pending": False,
+                    "error": None,
+                    "state_sync": sync_status,
+                }
+            )
+        except Exception as exc:
+            detail = getattr(exc, "detail", None)
+            if isinstance(detail, dict):
+                error_message = str(
+                    detail.get("message") or detail.get("error") or exc
+                )
+            else:
+                error_message = str(exc)
+
+            rollback_errors: List[str] = []
+            primary_rollback_verified = False
+            local_mirror_restored = False
+            backup_rollback_verified = False
+            try:
+                await _write_primary_exact(previous)
+                primary_rollback_verified = True
+            except Exception as rollback_primary_exc:
+                rollback_errors.append(
+                    f"primary rollback verification failed: {rollback_primary_exc}"
+                )
+
+            try:
+                _set_watchlist_local_mirror(previous)
+                local_mirror_restored = True
+            except Exception as rollback_mirror_exc:
+                rollback_errors.append(
+                    f"local mirror rollback failed: {rollback_mirror_exc}"
+                )
+
+            if primary_rollback_verified and local_mirror_restored:
+                try:
+                    rollback_status = await _upload_and_verify_state_backup_now(
+                        expected_watchlist=previous,
+                        timeout=10.0,
+                    )
+                    rollback_verified_items = rollback_status.get(
+                        "last_verified_watchlist"
+                    )
+                    if not isinstance(rollback_verified_items, list) or (
+                        _normalize_watchlist(rollback_verified_items) != previous
+                    ):
+                        raise RuntimeError(
+                            "Rollback backup verification returned a different sequence."
+                        )
+                    if not str(
+                        rollback_status.get("last_verified_at") or ""
+                    ).strip():
+                        raise RuntimeError(
+                            "Rollback backup verification did not return a verification timestamp."
+                        )
+                    backup_rollback_verified = True
+                except Exception as rollback_backup_exc:
+                    rollback_errors.append(
+                        f"aggregate rollback verification failed: {rollback_backup_exc}"
+                    )
+            else:
+                rollback_errors.append(
+                    "aggregate rollback verification skipped because the primary "
+                    "or local mirror rollback was not verified"
+                )
+
+            rollback_verified = (
+                primary_rollback_verified
+                and local_mirror_restored
+                and backup_rollback_verified
+            )
+            rollback_error = "; ".join(rollback_errors) or None
+            if rollback_verified:
+                sync_status = _update_state_sync_status(
+                    pending_upload=False,
+                    last_upload_error=error_message,
+                    watchlist_indeterminate=False,
+                    watchlist_mutation_blocked=False,
+                    watchlist_rollback_error=None,
+                )
+                response_items: Optional[List[str]] = list(previous)
+                response_verified_items: Optional[List[str]] = list(previous)
+                response_verified_at: Optional[str] = str(
+                    sync_status.get("last_verified_at") or ""
+                ).strip() or None
+            else:
+                sync_status = _update_state_sync_status(
+                    pending_upload=False,
+                    last_upload_error=error_message,
+                    last_verified_at=None,
+                    last_verified_watchlist=None,
+                    watchlist_indeterminate=True,
+                    watchlist_mutation_blocked=True,
+                    watchlist_rollback_error=rollback_error,
+                )
+                response_items = None
+                response_verified_items = None
+                response_verified_at = None
+
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "items": response_items,
+                    "durable_verified": False,
+                    "verified_at": response_verified_at,
+                    "verified_items": response_verified_items,
+                    "effective_state_source": effective_source,
+                    "pending": False,
+                    "error": error_message,
+                    "rollback_verified": rollback_verified,
+                    "rollback_primary_verified": primary_rollback_verified,
+                    "rollback_backup_verified": backup_rollback_verified,
+                    "rollback_error": rollback_error,
+                    "indeterminate": not rollback_verified,
+                    "state_sync": sync_status,
+                },
+                status_code=502,
+            )
 
 
 @app.get("/api/alerts/backup")
@@ -25520,6 +26299,21 @@ async def _background_start(script: ManagedScript) -> None:
             script.startup_task = None
 
 
+async def _background_start_after_state_restore(script: ManagedScript) -> None:
+    try:
+        await asyncio.wait_for(_STARTUP_STATE_RESTORE_DONE.wait(), timeout=30.0)
+    except asyncio.TimeoutError:
+        script.add_log("State restore timed out; FX Weekend executor was not started.")
+        script.last_start_error = "Authoritative state restore timed out."
+        return
+    allowed, gate_error = _fxweekend_start_gate()
+    if not allowed:
+        script.add_log(f"FX Weekend executor was not started: {gate_error}")
+        script.last_start_error = gate_error
+        return
+    await _background_start(script)
+
+
 @app.get("/scripts")
 async def list_scripts() -> JSONResponse:
     runtime_render = _runtime_is_render()
@@ -25560,6 +26354,25 @@ async def list_scripts() -> JSONResponse:
             row["starting"] = bool(by_name.get("bybit_trigger_bounce_trader", {}).get("starting"))
             row["running"] = bool(by_name.get("bybit_trigger_bounce_trader", {}).get("running"))
         elif btn["name"] == "fxweekend":
+            if APP_PROFILE == "local":
+                configured = bool(_render_fxweekend_base_url())
+                row.update(
+                    {
+                        "starting": False,
+                        "running": configured,
+                        "enabled": configured,
+                        "operational": configured,
+                        "remote_owned": True,
+                        "autostart_expected": False,
+                        "status_detail": (
+                            "Render-owned executor"
+                            if configured
+                            else "Render FX Weekend base URL is not configured"
+                        ),
+                    }
+                )
+                merged.append(row)
+                continue
             fx_row = by_name.get("fxweekend-clone", {})
             row["starting"] = bool(fx_row.get("starting"))
             row["running"] = bool(fx_row.get("running"))
@@ -27072,6 +27885,13 @@ async def verify_open_order_action(item: Dict[str, Any] = Body(...)) -> JSONResp
 @app.post("/scripts/{script_name:path}/start")
 async def start_script(script_name: str) -> JSONResponse:
     script = script_manager.get(script_name)
+    if script.name == "fxweekend-clone":
+        allowed, gate_error = _fxweekend_start_gate()
+        if not allowed:
+            raise HTTPException(
+                status_code=409,
+                detail={"error": "fxweekend_start_blocked", "message": gate_error},
+            )
 
     if script.is_running:
         return JSONResponse({"status": "already_running", **script.to_summary()})
@@ -27081,7 +27901,12 @@ async def start_script(script_name: str) -> JSONResponse:
     if script.name in WEB_APPS and script.port is None:
         script.port = _allocate_port()
 
-    script.startup_task = asyncio.create_task(_background_start(script))
+    starter = (
+        _background_start_after_state_restore(script)
+        if script.name == "fxweekend-clone"
+        else _background_start(script)
+    )
+    script.startup_task = asyncio.create_task(starter)
 
     # Respond immediately so no script output can leak into the HTTP response cycle.
     return JSONResponse({"status": "starting", **script.to_summary()}, status_code=202)
@@ -27624,6 +28449,25 @@ async def favicon() -> Response:
     return Response(content=png_bytes, media_type="image/png")
 
 
+@app.get("/fx-weekend-render-configuration-error")
+async def fxweekend_render_configuration_error() -> HTMLResponse:
+    return HTMLResponse(
+        """
+        <!doctype html><html lang="en"><head><meta charset="utf-8">
+        <meta name="viewport" content="width=device-width,initial-scale=1">
+        <title>FX Weekend Render configuration required</title></head>
+        <body style="font-family:system-ui,sans-serif;max-width:760px;margin:48px auto;padding:0 20px">
+        <h1>FX Weekend is owned by Render</h1>
+        <p>The local dashboard will not start a fallback executor.</p>
+        <p>Set <code>RENDER_FXWEEKEND_BASE_URL</code> (or the existing
+        <code>RENDER_CALCULATOR_BASE_URL</code>) to the public Render Master
+        Control base URL, then restart Local Master Control.</p>
+        </body></html>
+        """,
+        status_code=503,
+    )
+
+
 app.mount("/static", StaticFiles(directory=BASE_DIR / "render" / "static"), name="static")
 
 @app.get("/api/trading-journal")
@@ -27718,6 +28562,11 @@ async def trading_journal_items(filter: str = "") -> JSONResponse:
         "items": items,
         "count": len(items),
         "stats": stats,
+        "balances": (
+            snapshot.get("balances")
+            if isinstance(snapshot.get("balances"), list)
+            else (stats.get("balances") if isinstance(stats, dict) else [])
+        ),
         "generated_at": snapshot.get("generated_at"),
         "cache_version": snapshot.get("cache_version"),
         "snapshot_stale": bool(is_stale),
@@ -28673,9 +29522,18 @@ def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, e
 
         if path.exists():
             if expected_survivor_row_ids is None:
-                update_result = update_master_journal_workbook_data_only(path, snapshot)
+                update_result = update_master_journal_workbook_data_only(
+                    path,
+                    snapshot,
+                    preserve_existing_layout=True,
+                )
             else:
-                update_result = update_master_journal_workbook_data_only(path, snapshot, expected_survivor_row_ids=expected_survivor_row_ids)
+                update_result = update_master_journal_workbook_data_only(
+                    path,
+                    snapshot,
+                    expected_survivor_row_ids=expected_survivor_row_ids,
+                    preserve_existing_layout=True,
+                )
             if not bool((update_result or {}).get("ok")):
                 raise RuntimeError(str((update_result or {}).get("error") or "Trading Journal data-only update failed."))
             candidate_path = str((update_result or {}).get("candidate_path") or "").strip()
@@ -29703,14 +30561,35 @@ async def pine_file(name: str = Query(...)) -> Response:
 TRADING_JOURNAL_ACTIONS_TEMPLATE = """<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>Trading Journal Workspace</title>
-<style>body{margin:0;background:#0b1220;color:#e2e8f0;font-family:Inter,system-ui,sans-serif}.wrap{min-height:100vh;display:flex;align-items:center;justify-content:center}.stack{display:flex;flex-direction:column;gap:12px;min-width:280px;max-width:720px}button{padding:12px 14px;border-radius:10px;border:1px solid #334155;background:#1f2937;color:#e2e8f0;font-weight:700;cursor:pointer}.drop-zone{border:1px dashed #475569;border-radius:12px;padding:16px;text-align:center;color:#94a3b8;background:#0f172a;cursor:pointer}.drop-zone.drag-over{border-color:#38bdf8;background:#082f49;color:#e0f2fe}.status{margin-top:8px;white-space:pre-wrap;color:#94a3b8}</style></head>
-<body><div class="wrap"><div class="stack"><button id="open-journal-btn">Open workbook</button><button id="import-journal-btn">Import</button><button id="journal-resync-btn">Resync</button><div id="journal-import-drop-zone" class="drop-zone">Drop .xlsx/.xlsm/.xls/.csv import files here<br/><span style="font-size:12px">or click Import to choose a file</span></div><label style="font-size:12px;color:#94a3b8">Bybit CSV account <select id="journal-account-mode" style="margin-left:8px;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:4px 6px"><option value="" selected disabled>Select Demo or Live</option><option value="demo">Demo</option><option value="live">Live</option></select></label><button id="crypto-monthly-pnl-btn">Crypto Monthly P&L</button><button id="bybit-demo-balance-adjustment-btn">Bybit Demo Balance Adjustment</button><input id="journal-file-input" type="file" accept=".xlsx,.xlsm,.xls,.csv" hidden/><div id="journal-actions-status" class="status"></div></div></div><script src="/static/trading_journal_actions.js?v={{TRADING_JOURNAL_ACTIONS_JS_VERSION}}"></script></body></html>"""
+<style>
+body{margin:0;background:#0b1220;color:#e2e8f0;font-family:Inter,system-ui,sans-serif}.workspace{min-height:100vh;display:grid;grid-template-columns:minmax(300px,340px) minmax(0,1fr);gap:18px;align-items:start;padding:18px;box-sizing:border-box}.controls,.equity-panel{background:#111c30;border:1px solid #334155;border-radius:14px;padding:16px;box-sizing:border-box}.controls{display:flex;flex-direction:column;gap:12px}.equity-panel{min-width:0;min-height:calc(100vh - 36px);display:flex;flex-direction:column}.equity-toolbar{display:flex;gap:12px;align-items:end;flex-wrap:wrap;margin-bottom:12px}.equity-toolbar label{display:flex;flex-direction:column;gap:5px;color:#94a3b8;font-size:12px}.equity-toolbar select{min-width:190px}button{padding:12px 14px;border-radius:10px;border:1px solid #334155;background:#1f2937;color:#e2e8f0;font-weight:700;cursor:pointer}button:disabled{opacity:.55;cursor:wait}select{background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:7px;padding:8px}.drop-zone{border:1px dashed #475569;border-radius:12px;padding:16px;text-align:center;color:#94a3b8;background:#0f172a;cursor:pointer}.drop-zone.drag-over{border-color:#38bdf8;background:#082f49;color:#e0f2fe}.status{margin-top:8px;white-space:pre-wrap;color:#94a3b8;overflow-wrap:anywhere}.equity-summary{display:flex;gap:16px;flex-wrap:wrap;margin:4px 0 12px}.equity-summary strong{font-size:18px}.equity-chart-wrap{position:relative;flex:1;min-width:0;min-height:420px;border:1px solid #26364e;border-radius:10px;background:#0f172a;padding:8px;box-sizing:border-box}.equity-canvas{width:100%;max-width:100%;height:100%;min-height:400px;display:block}.equity-state{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#94a3b8;padding:20px;text-align:center}.equity-state.error{color:#fca5a5}@media(max-width:780px){.workspace{grid-template-columns:minmax(0,1fr);padding:10px}.equity-panel{min-height:560px}.equity-chart-wrap{min-height:380px}}
+</style></head>
+<body><main class="workspace">
+<section class="controls" aria-label="Journal controls">
+  <button id="open-journal-btn">Open workbook</button><button id="import-journal-btn">Import</button><button id="journal-resync-btn">Resync</button>
+  <div id="journal-import-drop-zone" class="drop-zone">Drop .xlsx/.xlsm/.xls/.csv import files here<br/><span style="font-size:12px">or click Import to choose a file</span></div>
+  <label style="font-size:12px;color:#94a3b8">Bybit CSV account <select id="journal-account-mode"><option value="" selected disabled>Select Demo or Live</option><option value="demo">Demo</option><option value="live">Live</option></select></label>
+  <button id="crypto-monthly-pnl-btn">Crypto Monthly P&amp;L</button><button id="bybit-demo-balance-adjustment-btn">Bybit Demo Balance Adjustment</button>
+  <button id="journal-equity-refresh-btn">Refresh Equity Curve</button>
+  <input id="journal-file-input" type="file" accept=".xlsx,.xlsm,.xls,.csv" hidden/><div id="journal-actions-status" class="status"></div>
+</section>
+<section class="equity-panel" aria-label="Account equity curve">
+  <div class="equity-toolbar"><label>Equity account<select id="journal-equity-account"><option value="BINANCE">Binance</option><option value="BYBIT">Bybit</option><option value="OANDA DEMO">Oanda demo</option><option value="OANDA LIVE">Oanda live</option><option value="PEPPERSTONE DEMO">Pepperstone demo</option><option value="PEPPERSTONE LIVE">Pepperstone live</option></select></label></div>
+  <div id="journal-equity-summary" class="equity-summary"></div>
+  <div class="equity-chart-wrap"><canvas id="journal-equity-canvas" class="equity-canvas"></canvas><div id="journal-equity-state" class="equity-state">Loading equity data…</div></div>
+</section>
+</main><script src="/static/trading_journal_actions.js?v={{TRADING_JOURNAL_ACTIONS_JS_VERSION}}"></script><script src="/static/trading_journal_equity_curve.js?v={{TRADING_JOURNAL_EQUITY_JS_VERSION}}"></script></body></html>"""
 
 @app.get("/dashboard/trading-journal")
 @app.get("/merged/trading-journal")
 async def trading_journal_actions_workspace() -> HTMLResponse:
     actions_js_version = _static_asset_version("render/static/trading_journal_actions.js")
-    return HTMLResponse(TRADING_JOURNAL_ACTIONS_TEMPLATE.replace("{{TRADING_JOURNAL_ACTIONS_JS_VERSION}}", actions_js_version))
+    equity_js_version = _static_asset_version("render/static/trading_journal_equity_curve.js")
+    return HTMLResponse(
+        TRADING_JOURNAL_ACTIONS_TEMPLATE
+        .replace("{{TRADING_JOURNAL_ACTIONS_JS_VERSION}}", actions_js_version)
+        .replace("{{TRADING_JOURNAL_EQUITY_JS_VERSION}}", equity_js_version)
+    )
 
 def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, account_mode: Optional[str] = None) -> Dict[str, object]:
     global _PENDING_MANUAL_SYNC_ROWS
