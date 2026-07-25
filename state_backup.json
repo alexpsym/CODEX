@@ -204,21 +204,21 @@
       "changed": 0,
       "failed_months": [],
       "failures": [],
-      "finished_at": "2026-07-25T19:46:00.944192+00:00",
+      "finished_at": "2026-07-25T22:16:32.185083+00:00",
       "mandatory_row_id": "monthly_aud_reval:bybit_live:2026-03",
       "partial": false,
       "processed_months": [],
       "rows": 4,
-      "started_at": "2026-07-25T19:46:00.904513+00:00",
+      "started_at": "2026-07-25T22:16:32.183034+00:00",
       "succeeded_months": [],
       "target_months": []
     },
-    "last_synced_at": "2026-07-25T19:46:00.944164+00:00",
+    "last_synced_at": "2026-07-25T22:16:32.185068+00:00",
     "month_key": null,
     "ok": true,
     "stage": "complete",
     "traceback": null,
-    "updated_at": "2026-07-25T19:46:00.944185+00:00"
+    "updated_at": "2026-07-25T22:16:32.185079+00:00"
   },
   "oanda_fill_state": {
     "diagnostics": {
@@ -512,7 +512,7 @@
       "vwap": ""
     }
   ],
-  "savedAt": "2026-07-25T19:49:52.765926+00:00",
+  "savedAt": "2026-07-25T22:16:34.242653+00:00",
   "source_host": "DESKTOP-1B14EQ6",
   "source_profile": "local",
   "trade_contexts": [
@@ -3941,5 +3941,5 @@
   },
   "version": 4,
   "watchlist": [],
-  "watchlist_updated_at": "2026-07-25T19:49:52.751394+00:00"
+  "watchlist_updated_at": "2026-07-25T22:16:31.487401+00:00"
 }
