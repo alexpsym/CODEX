@@ -38,10 +38,13 @@ def test_dashboard_source_registers_spread_monitor_local_only_web_app():
     assert '.script-toolbar-grid .script-btn[data-script-name="spreads-clone"]' not in source
 
 
-def test_local_launcher_installs_spread_monitor_requirements_with_same_python():
+def test_local_launcher_installs_only_required_spread_dependencies_with_same_python():
     source = (ROOT / "run_local_master_control.bat").read_text(encoding="utf-8")
     assert "spreads-clone\\requirements.txt" in source
-    assert '"!PYTHON_EXE!" -m pip install -r "!ROOT!spreads-clone\\requirements.txt"' in source
+    assert '"!PYTHON_EXE!" -m pip install Flask openpyxl requests' in source
+    assert '"!PYTHON_EXE!" -m pip install MetaTrader5' in source
+    assert 'if /I "!SPREAD_MONITOR_INSTALL_OPTIONAL_MT5!"=="1" (' in source
+    assert '-m pip install -r "!ROOT!spreads-clone\\requirements.txt"' not in source
     assert "SPREAD_MONITOR_SKIP_REQUIREMENTS_INSTALL" in source
 
 

@@ -1,68 +1,73 @@
-Final summary
+Final summary — dependency bootstrap regression follow-up
 
 Status:
-- Fixed the Local Trading Tools warm-start delay, 99% progress deadlock/regression, authoritative-local Dropbox workbook work, and Open Orders column shift.
-- Kept Instrument Lookup, calculator, journal, monitors, FX Weekend, Open Orders, Edge-only launch, and existing credential/trading paths intact.
-- Did not modify `journal/Trading Journal.xlsx`, `custom instructions/`, `Local Trading Tools.exe`, Instrument Lookup behavior, calculator logic/layout, or the OANDA/Bybit row schema.
+- Fixed the remaining Local Trading Tools dependency-startup regression in `run_local_master_control.bat`.
+- MetaTrader5 is no longer part of the required global dependency probe or required repair install.
+- Missing or failed optional MT5 support cannot prevent the dashboard or OANDA Spread Monitor from starting.
+- The prior readiness/progress, Instrument Lookup, master-journal/Dropbox, state restoration, supervision, Open Orders alignment, calculator, and dashboard fixes were not changed.
 
-Confirmed root causes and fixes:
-1. `run_local_master_control.bat` ran `pip install -r spreads-clone/requirements.txt` on every warm launch. It now performs a fast same-interpreter module-presence probe for Flask, openpyxl, requests, and MetaTrader5 on Windows. Pip runs only when something is missing, the skip override remains supported, and a post-install probe plus clear fatal errors preserves first-run behavior.
-2. Both the PowerShell streamer and `/api/startup-readiness` treated Bybit Monitor, OANDA Monitor, and FX Weekend as global blockers. Core readiness is now dashboard health plus required state restoration. Background readiness is explicit and nonblocking through `core_ready`, `background_ready`, `background_warnings`, and `background_warning`, while all compatibility fields remain.
-3. The streamer now uses `/api/startup-readiness` as the only post-health completion gate. It keeps completed progress at 100% through background failures and transient readiness-query failures, reports exact warnings/recovery, debounces one-off health misses, and still re-enters blocking recovery after three consecutive health failures.
-4. Background supervision/retry/backoff now covers the intended long-running local services only: Bybit Monitor, OANDA Monitor, and FX Weekend. Existing scanner external-runtime bypass behavior remains. `/scripts` checks use the server-provided canonical autostart target list; the legacy fallback also honors `AUTOSTART_EXCLUDE`.
-5. Authoritative `master_journal` single-file startup no longer resolves the Dropbox journal folder or downloads/sanitizes the Dropbox Bybit Demo workbook. Repo-local restoration, state-ready signaling, OANDA persisted-row repair, backup scheduling, and non-authoritative/manual paths remain unchanged.
-6. `OPEN_ORDERS_TEMPLATE` had an unintended empty first `<th>`, producing 18 headers for 17 rendered cells. The empty header was removed; Broker is first and Action remains seventeenth/last.
-7. Live validation found two related presentation/probing defects: the local merged `/scripts` list hid FX Weekend even though it autostarted, and a single slow health probe could briefly regress completed progress. The local FX Weekend row and health-failure threshold were added without redesigning the dashboard.
+Dependency audit:
+- The packaged local launcher autostarts Bybit Monitor, OANDA Monitor, and FX Weekend; none imports MetaTrader5.
+- `render/master_service.py` has no startup MT5 import.
+- The active Spreads entrypoint is `spreads-clone/spread_app.py`, which imports Flask, OANDA fetchers, spread core, and symbols only. Its active UI/data path is OANDA-only.
+- The only Spread Monitor MT5 bridge is the isolated legacy `spreads-clone/mt5_spreads.py`, where MetaTrader5 is imported lazily. No production startup module imports that bridge.
+- The calculator's Pepperstone support remains `.set` file generation and does not restore Python live-MT5 fetching.
+
+Exact changes:
+1. The fast required probe now checks exactly `flask`, `openpyxl`, and `requests`.
+2. A warm required-ready launch skips pip regardless of whether MetaTrader5 exists.
+3. A missing required package triggers same-interpreter installation of only `Flask openpyxl requests`; the launcher no longer installs the full manifest containing MT5.
+4. Required packages are always re-probed after installation. The install process exit code is advisory; startup exits only if the required recheck still reports a missing package.
+5. MetaTrader5 has its own presence probe. Absence produces a clear warning and continues to Uvicorn.
+6. Optional MT5 installation is off by default. If explicitly requested with `SPREAD_MONITOR_INSTALL_OPTIONAL_MT5=1`, a failed install or failed post-install probe warns and remains nonblocking.
+7. `SPREAD_MONITOR_SKIP_REQUIREMENTS_INSTALL` remains supported.
+8. `spreads-clone/requirements.txt` and all MT5/Spread application code were left unchanged; the global launcher simply no longer consumes the optional MT5 entry during required repair.
 
 Files changed intentionally:
 - `run_local_master_control.bat`
-- `render/master_service.py`
-- `tools/windows_launchers/stream_local_master_worker.ps1`
-- `tools/windows_launchers/local_master_worker_console.bat`
-- `tests/test_open_orders_page.py`
-- `tests/test_merged_monitor_status_env.py`
-- `tests/test_master_service_state_sync.py`
-- `tests/test_spread_monitor_dashboard.py`
 - `tests/test_windows_launchers.py`
-- `tests/test_dashboard_home_layout.py`
+- `tests/test_spread_monitor_dashboard.py`
 - `summary/CODEX_SUMMARY_latest.txt`
 
-`tests/test_dashboard_home_layout.py` was additionally necessary to lock the restored local FX Weekend dashboard row discovered during the Windows end-to-end run.
+Regression coverage:
+- Added a Windows CMD behavioral harness that executes the exact dependency block with a fake Python/pip environment; it never installs or removes real packages.
+- Covered warm required-ready startup skipping pip.
+- Covered missing optional MetaTrader5 warning and continuation with zero pip calls.
+- Covered a directly simulated failed opt-in `pip install MetaTrader5` and confirmed continuation.
+- Covered a missing required dependency installing only Flask/openpyxl/requests and being rechecked.
+- Covered a nonzero required-install exit code followed by a successful required recheck and confirmed continuation.
+- Covered startup failure only when the required recheck remains unavailable.
+- Structural assertions ensure MT5 is absent from the required list/install, optional installation is guarded, and the full requirements manifest is not installed by the launcher.
 
-Before/after timing evidence:
-- Baseline log from 2026-07-23: worker start 20:16:54.91; unconditional pip work occupied the warm path until Uvicorn was requested at 20:16:59.87 (about 4.96 seconds); application ready at 20:17:06; dashboard GET at 20:17:15. The reported meter could remain at 99% for about 935 seconds.
-- Final packaged launch on 2026-07-25: EXE requested at 09:11:19.50; worker at 09:11:36.47; dependency probe completed at 09:11:36.71 (0.24 seconds after worker start) and explicitly skipped pip; Uvicorn requested at 09:11:36.72; state startup and application ready at 09:11:49; visible meter reached 100% at 17 seconds; Edge started at 09:11:53 and loaded `/?local_launch=1784934686804` at 09:11:55 without refresh.
-- The warm dependency phase therefore dropped from about 4.96 seconds of unconditional pip work to a 0.24-second probe. Most importantly, completion changed from a potentially indefinite 99% to a genuine core-ready 100% in 17 seconds.
+Automated validation:
+- `python -m pytest -q tests/test_open_orders_page.py tests/test_merged_monitor_status_env.py tests/test_master_service_state_sync.py tests/test_spread_monitor_dashboard.py tests/test_windows_launchers.py --basetemp .pytest_tmp_mt5_release_suite`: 172 passed, 31 warnings in 133.85 seconds.
+- `python -m pytest -q tests/test_dashboard_home_layout.py tests/test_master_service_profiles.py tests/test_master_service_local_exit.py --basetemp .pytest_tmp_mt5_profile_exit`: 48 passed, 100 warnings in 52.17 seconds.
+- Focused dependency CMD cases: 7 passed.
+- Independent read-only audit/review confirmed MT5 is not startup-critical, required and optional paths are fully separated, delayed-expansion/ERRORLEVEL control flow is valid, and optional failure cannot reach the sole fatal exit.
+- Pytest warnings were existing FastAPI/httpx deprecations, state-sync test-mock coroutine warnings, and denied `.pytest_cache` writes.
 
-Windows end-to-end results:
-- Normal `Local Trading Tools.exe` path used; dependency output said requirements were already installed and skipped pip.
-- Readiness returned `ready=true`, `core_ready=true`, `background_ready=true`, all three canonical autostart targets, and nonblocking component records.
-- A deliberately terminated current FX Weekend child produced exact warning `fxweekend-clone: Process exited unexpectedly.` while `ready` and `core_ready` stayed true. The supervisor recovered it in 6.6 seconds.
-- Windows UI Automation found zero sub-100% progress lines after the first 100% line. It also captured the nonblocking failure, retry/start warning, and recovery messages.
-- Main dashboard, Instrument Lookup, calculator, Open Orders, monitor, and FX Weekend pages returned HTTP 200.
-- Instrument Lookup resolved BTC to Bybit `BTCUSDT` with a live price and EURUSD to OANDA `EUR_USD` / `EUR/USD`.
-- A basic live OANDA calculator quote completed for EURUSD and returned entry `1.13715`, stop `1.13705`, target `1.13735`, quantity `23843`, and approximately AUD 10 estimated loss.
-- Forced Open Orders refresh returned three rows with zero source errors. The OANDA Demo EURUSD row reported `category=forex`, `instrument=EUR_USD`, `timeframe=15MIN` (displayed as `15 minutes`), and `is_test_trade=Yes`.
-- The rendered Open Orders page contained exactly the required 17 headers in order, with Action last.
-- Controlled Exit returned `ok=true`, closed the exact TradingTools Edge target, stopped `/health`, closed the visible console, and logged the preserved `exit_button` / `local_exit` normal marker.
-- Six FX Weekend child processes created by repeated E2E relaunch cycles were explicitly stopped afterward; two processes that predated this task were left untouched.
+Windows packaged warm-start validation:
+- Normal `Local Trading Tools.exe` launch requested at 2026-07-25 14:58:17.90.
+- Required dependency probe reported ready and logged `required packages already installed, skipping pip` at 14:58:32.37.
+- The host's existing MetaTrader5 installation was only reported by the separate optional probe; it was not installed, removed, renamed, or used as a readiness gate.
+- Uvicorn was requested at 14:58:32.84; application startup completed at 14:58:49; Edge loaded the dashboard automatically at 14:58:59.
+- Core and background readiness both reached true.
+- Main dashboard returned HTTP 200.
+- The on-demand OANDA Spread Monitor completed startup and returned HTTP 200; its OANDA status endpoint returned 79 rows, the page identified itself as `OANDA Spread Monitor`, and no Pepperstone UI path was present.
+- Missing-MT5 and failed-MT5-install behavior was validated through the isolated behavioral harness rather than modifying the machine's real MT5 installation.
+- Controlled Exit returned `ok=true`, closed the Edge target, and stopped `/health`.
+- The single FX Weekend child created by this validation was stopped afterward; the two pre-existing processes were left untouched.
 
-Verification:
-- `python -m pytest -q tests/test_open_orders_page.py tests/test_merged_monitor_status_env.py tests/test_master_service_state_sync.py tests/test_spread_monitor_dashboard.py tests/test_windows_launchers.py --basetemp .pytest_tmp_startup_fix_group1_release`: 166 passed, 31 warnings in 138.76 seconds.
-- `python -m pytest -q tests/test_dashboard_home_layout.py tests/test_master_service_profiles.py tests/test_master_service_local_exit.py --basetemp .pytest_tmp_startup_fix_group2_release`: 48 passed, 100 warnings in 32.26 seconds.
-- Independent full launcher revalidation: 51 passed; full merged-monitor/autostart module: 52 passed.
-- `python -m py_compile render/master_service.py`: passed.
-- PowerShell parser for `tools/windows_launchers/stream_local_master_worker.ps1`: 0 errors.
-- `node --check render/static/open_orders.js`: passed.
+Syntax/status checks:
+- `python -m py_compile tests/test_windows_launchers.py tests/test_spread_monitor_dashboard.py`: passed.
+- The exact edited batch block executed successfully across all behavioral cases and through the packaged launcher.
 - `git diff --check`: passed.
-- Warnings were existing FastAPI/httpx deprecations, test-mock coroutine warnings, and denied `.pytest_cache` writes; all tests used explicit repo-local `--basetemp` paths and passed.
-- Independent read-only review found and then confirmed resolution of one-shot autostart supervision and canonical target-list edge cases.
-
-Residual risks:
-- OANDA and Bybit are external dependencies. During the longer validation session, OANDA Demo briefly returned maintenance HTTP 503 and Bybit occasionally exceeded its existing quote timeout; later final live lookups, calculator, and Open Orders checks succeeded. No timeout, data-source, or trading-logic behavior was changed.
-- The fast warm-start decision intentionally checks module discoverability instead of importing heavy packages. Missing packages trigger installation and recheck; a corrupt-but-discoverable installation would still surface through the existing application startup error path.
-- Two standalone FX Weekend processes existed before this task and were deliberately not terminated. The repository's existing shutdown lifecycle does not claim ownership of historical external instances; this patch only supervises the current managed instance.
+- Test-generated `oanda_monitor/custom_alerts.json`, `oanda_monitor/settings.json`, and `watchlist.json` changes were restored before publication.
 - Pre-existing runtime/local-state changes remain dirty and must stay unstaged: `bybit_monitor/custom_alerts.json`, `render/data/*`, `state_backup.json`, and `state_manifest.json`.
 
+Residual risks:
+- MT5-only legacy tools still require MetaTrader5 when deliberately used. Their dependency is now explicit and optional rather than a global launcher prerequisite.
+- External OANDA availability remains outside the launcher; the final OANDA Spread Monitor live page/status checks succeeded.
+
 Completion workflow:
-- Run repository-root `PATCH_DESKTOP_PUSH.bat` immediately after this summary. The task is not complete until it commits the intended files, pushes successfully, and verifies local `HEAD` equals `origin/master`.
+- Run repository-root `PATCH_DESKTOP_PUSH.bat` after this summary. The task is not complete until it commits the intended files, pushes successfully, and verifies local `HEAD` equals `origin/master`.

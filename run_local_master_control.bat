@@ -206,24 +206,42 @@ if /I "!SPREAD_MONITOR_SKIP_REQUIREMENTS_INSTALL!"=="1" (
   echo [local-master] Spread Monitor dependency probe and requirements install skipped by SPREAD_MONITOR_SKIP_REQUIREMENTS_INSTALL.
 ) else (
   if exist "!ROOT!spreads-clone\requirements.txt" (
-    set "SPREAD_MONITOR_DEPENDENCY_PROBE=import importlib.util, os, sys; required=['flask','openpyxl','requests']+(['MetaTrader5'] if os.name=='nt' else []); missing=[name for name in required if importlib.util.find_spec(name) is None]; print('[local-master] Spread Monitor dependency probe result: '+('missing '+', '.join(missing) if missing else 'ready')); sys.exit(1 if missing else 0)"
-    echo [local-master] probing Spread Monitor Python dependencies with !PYTHON_EXE! ...
-    "!PYTHON_EXE!" -c "!SPREAD_MONITOR_DEPENDENCY_PROBE!"
+    set "SPREAD_MONITOR_REQUIRED_DEPENDENCY_PROBE=import importlib.util, sys; required=['flask','openpyxl','requests']; missing=[name for name in required if importlib.util.find_spec(name) is None]; print('[local-master] Spread Monitor required dependency probe result: '+('missing '+', '.join(missing) if missing else 'ready')); sys.exit(1 if missing else 0)"
+    set "SPREAD_MONITOR_OPTIONAL_MT5_PROBE=import importlib.util, sys; available=importlib.util.find_spec('MetaTrader5') is not None; print('[local-master] Optional MetaTrader5 dependency probe result: '+('available' if available else 'unavailable')); sys.exit(0 if available else 1)"
+    echo [local-master] probing required Spread Monitor Python dependencies with !PYTHON_EXE! ...
+    "!PYTHON_EXE!" -c "!SPREAD_MONITOR_REQUIRED_DEPENDENCY_PROBE!"
     if errorlevel 1 (
-      echo [local-master] Spread Monitor dependency probe found a missing package; installing requirements ...
-      "!PYTHON_EXE!" -m pip install -r "!ROOT!spreads-clone\requirements.txt"
+      echo [local-master] Spread Monitor required dependency probe found a missing package; installing Flask, openpyxl, and requests ...
+      "!PYTHON_EXE!" -m pip install Flask openpyxl requests
+      set "SPREAD_MONITOR_REQUIRED_INSTALL_EXIT_CODE=!ERRORLEVEL!"
+      "!PYTHON_EXE!" -c "!SPREAD_MONITOR_REQUIRED_DEPENDENCY_PROBE!"
       if errorlevel 1 (
-        echo [local-master] ERROR: Spread Monitor requirements installation failed.
+        echo [local-master] ERROR: Required Spread Monitor dependencies are still missing after required-package installation.
         exit /b 1
       )
-      "!PYTHON_EXE!" -c "!SPREAD_MONITOR_DEPENDENCY_PROBE!"
-      if errorlevel 1 (
-        echo [local-master] ERROR: Spread Monitor dependencies are still missing after requirements installation.
-        exit /b 1
-      )
-      echo [local-master] Spread Monitor requirements installation and dependency presence verification complete at !DATE! !TIME!.
+      if not "!SPREAD_MONITOR_REQUIRED_INSTALL_EXIT_CODE!"=="0" echo [local-master] WARNING: Required-package installation reported an error, but all required dashboard and OANDA dependencies are available; continuing.
+      echo [local-master] Spread Monitor required dependency installation and presence verification complete at !DATE! !TIME!.
     ) else (
-      echo [local-master] Spread Monitor dependency probe complete; requirements already installed, skipping pip at !DATE! !TIME!.
+      echo [local-master] Spread Monitor required dependency probe complete; required packages already installed, skipping pip at !DATE! !TIME!.
+    )
+    "!PYTHON_EXE!" -c "!SPREAD_MONITOR_OPTIONAL_MT5_PROBE!"
+    if errorlevel 1 (
+      echo [local-master] WARNING: Optional MetaTrader5 is unavailable. The dashboard and OANDA Spread Monitor will continue; legacy MT5-only tools remain unavailable.
+      if /I "!SPREAD_MONITOR_INSTALL_OPTIONAL_MT5!"=="1" (
+        echo [local-master] Optional MetaTrader5 installation was explicitly requested; attempting a nonblocking install ...
+        "!PYTHON_EXE!" -m pip install MetaTrader5
+        set "SPREAD_MONITOR_OPTIONAL_MT5_INSTALL_EXIT_CODE=!ERRORLEVEL!"
+        if not "!SPREAD_MONITOR_OPTIONAL_MT5_INSTALL_EXIT_CODE!"=="0" (
+          echo [local-master] WARNING: Optional MetaTrader5 installation failed; continuing without MT5-only tools.
+        ) else (
+          "!PYTHON_EXE!" -c "!SPREAD_MONITOR_OPTIONAL_MT5_PROBE!"
+          if errorlevel 1 (
+            echo [local-master] WARNING: Optional MetaTrader5 remains unavailable after installation; continuing without MT5-only tools.
+          ) else (
+            echo [local-master] Optional MetaTrader5 installation and presence verification complete.
+          )
+        )
+      )
     )
   )
 )

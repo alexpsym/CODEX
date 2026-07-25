@@ -4,6 +4,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -161,6 +162,123 @@ def _run_streamer_with_fake_worker(tmp_path: Path, worker_lines: list[str], exit
         text=True,
         timeout=45,
     )
+
+
+def _run_dependency_bootstrap_block(
+    tmp_path: Path,
+    *,
+    required_probe_failures: int,
+    mt5_missing: bool,
+    required_pip_exit_code: int,
+    optional_pip_exit_code: int = 0,
+    install_optional_mt5: bool = False,
+) -> tuple[subprocess.CompletedProcess[str], int, list[str]]:
+    script = (ROOT / 'run_local_master_control.bat').read_text(encoding='utf-8')
+    block_start = script.index('if /I "!SPREAD_MONITOR_SKIP_REQUIREMENTS_INSTALL!"=="1" (')
+    block_end = script.index('\n\n:restart_master', block_start)
+    dependency_block = script[block_start:block_end]
+
+    fake_root = tmp_path / 'fake-root'
+    requirements = fake_root / 'spreads-clone' / 'requirements.txt'
+    requirements.parent.mkdir(parents=True)
+    requirements.write_text('Flask\nopenpyxl\nrequests\nMetaTrader5\n', encoding='utf-8')
+
+    harness_dir = tmp_path / 'python-harness'
+    harness_dir.mkdir()
+    probe_count_path = tmp_path / 'required-probe-count.txt'
+    pip_log_path = tmp_path / 'pip-invocations.txt'
+    (harness_dir / 'sitecustomize.py').write_text(
+        """
+import importlib.util
+import os
+from pathlib import Path
+
+_real_find_spec = importlib.util.find_spec
+
+def _fake_find_spec(name, *args, **kwargs):
+    if name == "flask":
+        count_path = Path(os.environ["FAKE_REQUIRED_PROBE_COUNT_PATH"])
+        count = int(count_path.read_text(encoding="utf-8") or "0") if count_path.exists() else 0
+        count += 1
+        count_path.write_text(str(count), encoding="utf-8")
+        if count <= int(os.environ.get("FAKE_REQUIRED_PROBE_FAILURES", "0")):
+            return None
+        return _real_find_spec("os")
+    if name in {"openpyxl", "requests"}:
+        return _real_find_spec("os")
+    if name == "MetaTrader5":
+        if os.environ.get("FAKE_MT5_MISSING") == "1":
+            return None
+        return _real_find_spec("os")
+    return _real_find_spec(name, *args, **kwargs)
+
+importlib.util.find_spec = _fake_find_spec
+""".strip()
+        + '\n',
+        encoding='utf-8',
+    )
+    fake_pip = harness_dir / 'pip'
+    fake_pip.mkdir()
+    (fake_pip / '__init__.py').write_text('', encoding='utf-8')
+    (fake_pip / '__main__.py').write_text(
+        """
+import os
+import sys
+from pathlib import Path
+
+log_path = Path(os.environ["FAKE_PIP_LOG_PATH"])
+args = sys.argv[1:]
+with log_path.open("a", encoding="utf-8") as handle:
+    handle.write(" ".join(args) + "\\n")
+exit_name = "FAKE_OPTIONAL_PIP_EXIT_CODE" if any(arg.lower() == "metatrader5" for arg in args) else "FAKE_REQUIRED_PIP_EXIT_CODE"
+raise SystemExit(int(os.environ.get(exit_name, "0")))
+""".strip()
+        + '\n',
+        encoding='utf-8',
+    )
+
+    fake_root_text = str(fake_root) + os.sep
+    batch_path = tmp_path / 'dependency-bootstrap-smoke.bat'
+    batch_path.write_text(
+        '\r\n'.join(
+            [
+                '@echo off',
+                'setlocal EnableExtensions EnableDelayedExpansion',
+                f'set "ROOT={fake_root_text}"',
+                f'set "PYTHON_EXE={sys.executable}"',
+                'set "SPREAD_MONITOR_SKIP_REQUIREMENTS_INSTALL=0"',
+                f'set "SPREAD_MONITOR_INSTALL_OPTIONAL_MT5={"1" if install_optional_mt5 else "0"}"',
+                dependency_block,
+                'echo DEPENDENCY_BOOTSTRAP_CONTINUED',
+                'exit /b 0',
+                '',
+            ]
+        ),
+        encoding='utf-8',
+    )
+
+    env = os.environ.copy()
+    existing_pythonpath = env.get('PYTHONPATH')
+    env['PYTHONPATH'] = str(harness_dir) + (os.pathsep + existing_pythonpath if existing_pythonpath else '')
+    env['FAKE_REQUIRED_PROBE_COUNT_PATH'] = str(probe_count_path)
+    env['FAKE_REQUIRED_PROBE_FAILURES'] = str(required_probe_failures)
+    env['FAKE_MT5_MISSING'] = '1' if mt5_missing else '0'
+    env['FAKE_PIP_LOG_PATH'] = str(pip_log_path)
+    env['FAKE_REQUIRED_PIP_EXIT_CODE'] = str(required_pip_exit_code)
+    env['FAKE_OPTIONAL_PIP_EXIT_CODE'] = str(optional_pip_exit_code)
+
+    result = subprocess.run(
+        [_cmd_exe(), '/d', '/c', 'call', str(batch_path)],
+        cwd=ROOT,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    probe_count = int(probe_count_path.read_text(encoding='utf-8')) if probe_count_path.exists() else 0
+    pip_calls = pip_log_path.read_text(encoding='utf-8').splitlines() if pip_log_path.exists() else []
+    return result, probe_count, pip_calls
 
 
 def test_run_local_master_loads_env_before_render_url_check() -> None:
@@ -765,21 +883,141 @@ def test_run_local_master_spread_requirements_are_probed_before_conditional_inst
     assert 'if /I "!SPREAD_MONITOR_SKIP_REQUIREMENTS_INSTALL!"=="1" (' in script
     assert 'dependency probe and requirements install skipped by SPREAD_MONITOR_SKIP_REQUIREMENTS_INSTALL' in script
     assert 'if exist "!ROOT!spreads-clone\\requirements.txt" (' in script
-    assert "required=['flask','openpyxl','requests']+(['MetaTrader5'] if os.name=='nt' else [])" in script
+    assert "required=['flask','openpyxl','requests']" in script
+    assert "required=['flask','openpyxl','requests']+(['MetaTrader5']" not in script
+    assert "find_spec('MetaTrader5')" in script
     assert 'importlib.util.find_spec(name)' in script
-    assert "Spread Monitor dependency probe result: '+('missing '+', '.join(missing) if missing else 'ready')" in script
-    probe = '"!PYTHON_EXE!" -c "!SPREAD_MONITOR_DEPENDENCY_PROBE!"'
-    install = '"!PYTHON_EXE!" -m pip install -r "!ROOT!spreads-clone\\requirements.txt"'
+    assert "Spread Monitor required dependency probe result: '+('missing '+', '.join(missing) if missing else 'ready')" in script
+    probe = '"!PYTHON_EXE!" -c "!SPREAD_MONITOR_REQUIRED_DEPENDENCY_PROBE!"'
+    optional_probe = '"!PYTHON_EXE!" -c "!SPREAD_MONITOR_OPTIONAL_MT5_PROBE!"'
+    install = '"!PYTHON_EXE!" -m pip install Flask openpyxl requests'
+    optional_install = '"!PYTHON_EXE!" -m pip install MetaTrader5'
     assert script.count(probe) == 2
+    assert script.count(optional_probe) == 2
     assert script.count(install) == 1
+    assert script.count(optional_install) == 1
+    assert '-m pip install -r "!ROOT!spreads-clone\\requirements.txt"' not in script
     first_probe_idx = script.index(probe)
     install_idx = script.index(install)
     second_probe_idx = script.index(probe, first_probe_idx + len(probe))
-    assert first_probe_idx < install_idx < second_probe_idx
-    assert 'ERROR: Spread Monitor requirements installation failed.' in script
-    assert 'ERROR: Spread Monitor dependencies are still missing after requirements installation.' in script
-    assert 'requirements installation and dependency presence verification complete at !DATE! !TIME!.' in script
-    assert 'requirements already installed, skipping pip at !DATE! !TIME!.' in script
+    optional_probe_idx = script.index(optional_probe)
+    assert first_probe_idx < install_idx < second_probe_idx < optional_probe_idx
+    assert 'SPREAD_MONITOR_REQUIRED_INSTALL_EXIT_CODE=!ERRORLEVEL!' in script
+    assert 'ERROR: Spread Monitor requirements installation failed.' not in script
+    assert 'ERROR: Required Spread Monitor dependencies are still missing after required-package installation.' in script
+    assert 'Required-package installation reported an error, but all required dashboard and OANDA dependencies are available; continuing.' in script
+    assert 'WARNING: Optional MetaTrader5 is unavailable. The dashboard and OANDA Spread Monitor will continue;' in script
+    assert 'if /I "!SPREAD_MONITOR_INSTALL_OPTIONAL_MT5!"=="1" (' in script
+    assert 'WARNING: Optional MetaTrader5 installation failed; continuing without MT5-only tools.' in script
+    assert 'required dependency installation and presence verification complete at !DATE! !TIME!.' in script
+    assert 'required packages already installed, skipping pip at !DATE! !TIME!.' in script
+
+
+def test_dependency_bootstrap_warm_required_ready_skips_pip(tmp_path: Path) -> None:
+    result, probe_count, pip_calls = _run_dependency_bootstrap_block(
+        tmp_path,
+        required_probe_failures=0,
+        mt5_missing=False,
+        required_pip_exit_code=0,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert 'DEPENDENCY_BOOTSTRAP_CONTINUED' in result.stdout
+    assert 'required packages already installed, skipping pip' in result.stdout
+    assert probe_count == 1
+    assert pip_calls == []
+
+
+def test_dependency_bootstrap_missing_optional_mt5_is_nonfatal(tmp_path: Path) -> None:
+    result, probe_count, pip_calls = _run_dependency_bootstrap_block(
+        tmp_path,
+        required_probe_failures=0,
+        mt5_missing=True,
+        required_pip_exit_code=0,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert 'DEPENDENCY_BOOTSTRAP_CONTINUED' in result.stdout
+    assert 'WARNING: Optional MetaTrader5 is unavailable.' in result.stdout
+    assert 'dashboard and OANDA Spread Monitor will continue' in result.stdout
+    assert probe_count == 1
+    assert pip_calls == []
+
+
+def test_dependency_bootstrap_failed_optional_mt5_install_is_nonfatal(
+    tmp_path: Path,
+) -> None:
+    result, probe_count, pip_calls = _run_dependency_bootstrap_block(
+        tmp_path,
+        required_probe_failures=0,
+        mt5_missing=True,
+        required_pip_exit_code=0,
+        optional_pip_exit_code=1,
+        install_optional_mt5=True,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert 'DEPENDENCY_BOOTSTRAP_CONTINUED' in result.stdout
+    assert 'WARNING: Optional MetaTrader5 is unavailable.' in result.stdout
+    assert 'Optional MetaTrader5 installation failed; continuing without MT5-only tools.' in result.stdout
+    assert probe_count == 1
+    assert len(pip_calls) == 1
+    assert 'MetaTrader5' in pip_calls[0]
+
+
+def test_dependency_bootstrap_missing_required_dependency_is_installed_and_rechecked(
+    tmp_path: Path,
+) -> None:
+    result, probe_count, pip_calls = _run_dependency_bootstrap_block(
+        tmp_path,
+        required_probe_failures=1,
+        mt5_missing=False,
+        required_pip_exit_code=0,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert 'DEPENDENCY_BOOTSTRAP_CONTINUED' in result.stdout
+    assert 'required dependency probe found a missing package; installing Flask, openpyxl, and requests' in result.stdout
+    assert 'required dependency installation and presence verification complete' in result.stdout
+    assert probe_count == 2
+    assert len(pip_calls) == 1
+    assert pip_calls[0].endswith('Flask openpyxl requests')
+
+
+def test_dependency_bootstrap_required_install_error_is_nonfatal_when_recheck_passes(
+    tmp_path: Path,
+) -> None:
+    result, probe_count, pip_calls = _run_dependency_bootstrap_block(
+        tmp_path,
+        required_probe_failures=1,
+        mt5_missing=False,
+        required_pip_exit_code=1,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert 'DEPENDENCY_BOOTSTRAP_CONTINUED' in result.stdout
+    assert 'Required-package installation reported an error' in result.stdout
+    assert 'all required dashboard and OANDA dependencies are available; continuing' in result.stdout
+    assert probe_count == 2
+    assert len(pip_calls) == 1
+    assert pip_calls[0].endswith('Flask openpyxl requests')
+
+
+def test_dependency_bootstrap_fails_only_when_required_recheck_still_fails(
+    tmp_path: Path,
+) -> None:
+    result, probe_count, pip_calls = _run_dependency_bootstrap_block(
+        tmp_path,
+        required_probe_failures=2,
+        mt5_missing=True,
+        required_pip_exit_code=1,
+    )
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert 'ERROR: Required Spread Monitor dependencies are still missing after required-package installation.' in result.stdout
+    assert 'DEPENDENCY_BOOTSTRAP_CONTINUED' not in result.stdout
+    assert probe_count == 2
+    assert len(pip_calls) == 1
 
 
 def test_streamer_uses_core_readiness_as_the_only_startup_completion_gate() -> None:
