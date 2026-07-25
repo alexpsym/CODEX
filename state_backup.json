@@ -1,7 +1,41 @@
 {
   "alerts": {
     "bybit": {
-      "alerts": []
+      "alerts": [
+        {
+          "cooldown_seconds": 0,
+          "direction": "either",
+          "enabled": true,
+          "id": "d7f56968ece04ddbac72e8b6f8478a7d",
+          "kind": "move",
+          "symbol": "BRUSDT",
+          "threshold": 10.0,
+          "unit": "pct",
+          "window_seconds": 60
+        },
+        {
+          "cooldown_seconds": 0,
+          "direction": "either",
+          "enabled": true,
+          "id": "3e7bc55e3e994d9ebc4bc95ebff0e4a3",
+          "kind": "move",
+          "symbol": "AKTUSDT",
+          "threshold": 6.0,
+          "unit": "pct",
+          "window_seconds": 60
+        },
+        {
+          "cooldown_seconds": 0,
+          "direction": "either",
+          "enabled": true,
+          "id": "8b3273b6594b406c8f0aeb951d38a1a6",
+          "kind": "move",
+          "symbol": "DOGEUSDT",
+          "threshold": 1.5,
+          "unit": "pct",
+          "window_seconds": 60
+        }
+      ]
     },
     "oanda": {
       "alerts": []
@@ -170,21 +204,21 @@
       "changed": 0,
       "failed_months": [],
       "failures": [],
-      "finished_at": "2026-07-16T11:33:03.319866+00:00",
+      "finished_at": "2026-07-25T19:46:00.944192+00:00",
       "mandatory_row_id": "monthly_aud_reval:bybit_live:2026-03",
       "partial": false,
       "processed_months": [],
       "rows": 4,
-      "started_at": "2026-07-16T11:33:03.296518+00:00",
+      "started_at": "2026-07-25T19:46:00.904513+00:00",
       "succeeded_months": [],
       "target_months": []
     },
-    "last_synced_at": "2026-07-16T11:33:03.319853+00:00",
+    "last_synced_at": "2026-07-25T19:46:00.944164+00:00",
     "month_key": null,
     "ok": true,
     "stage": "complete",
     "traceback": null,
-    "updated_at": "2026-07-16T11:33:03.319863+00:00"
+    "updated_at": "2026-07-25T19:46:00.944185+00:00"
   },
   "oanda_fill_state": {
     "diagnostics": {
@@ -478,7 +512,7 @@
       "vwap": ""
     }
   ],
-  "savedAt": "2026-07-16T11:33:05.296185+00:00",
+  "savedAt": "2026-07-25T19:49:52.765926+00:00",
   "source_host": "DESKTOP-1B14EQ6",
   "source_profile": "local",
   "trade_contexts": [
@@ -2873,6 +2907,43 @@
       "timeframe": "",
       "updated_at": "2026-07-14T10:23:07.967133+00:00",
       "vwap": ""
+    },
+    {
+      "account": "demo",
+      "aths_atls": "",
+      "broker": "oanda",
+      "calculation_context_id": null,
+      "category": "forex",
+      "created_at": "2026-07-23T11:02:45.861636+00:00",
+      "ema": "",
+      "entry_price": null,
+      "instrument": "EUR_USD",
+      "is_test_trade": true,
+      "order_id": "651",
+      "order_type": "market",
+      "pattern": "",
+      "pending_webhook_id": null,
+      "planned_entry_price": "1.14046",
+      "planned_stop_price": "1.13046",
+      "planned_target_price": "1.16076",
+      "quote_created_at_ms": null,
+      "risk_mode": "percent",
+      "risk_reward": "2",
+      "risk_value": "1",
+      "round_number": "",
+      "setup": "",
+      "side": "buy",
+      "status": "ACTIVE",
+      "stop_loss": "1.13046",
+      "stop_loss_ticks": "1000",
+      "take_profit": "1.16076",
+      "take_profit_ticks": null,
+      "target_mode": "rr",
+      "timeframe": "15MIN",
+      "trade_id": "652",
+      "transaction_id": "652",
+      "updated_at": "2026-07-23T11:02:45.861636+00:00",
+      "vwap": ""
     }
   ],
   "trading_journal": {
@@ -3191,9 +3262,14 @@
       }
     ],
     "broker_balance_diagnostics": {
-      "bybit_demo_anchor_fingerprint": "b90a5f09f3e3aaebe90f60991590c23cd0f0089c5b4f29b49e0ee8f69b0fd96e",
-      "updated_at": "2026-07-16T03:09:38.726488+00:00",
-      "warnings": []
+      "bybit_demo_anchor_fingerprint": "317efc5ae7d13d66c03b83c1bc67dc4c36f88eae09bcb4e7451651737dd6c3c6",
+      "updated_at": "2026-07-25T15:03:39.832996+00:00",
+      "warnings": [
+        "Bybit demo balance unavailable: 502: Bybit balance lookup failed path=/v5/account/wallet-balance: All connection attempts failed",
+        "Bybit live balance unavailable: 502: Bybit balance lookup failed path=/v5/account/wallet-balance: All connection attempts failed",
+        "OANDA demo account summary unavailable: name 'OandaUpstreamError' is not defined",
+        "OANDA live account summary unavailable: name 'OandaUpstreamError' is not defined"
+      ]
     },
     "bybit_closed_pnl_last_seen": {
       "demo": 1782981944155,
@@ -3206,15 +3282,15 @@
       "bybit_demo_balance_backfill_snapshot_at": "2026-07-09T08:45:01.778949+00:00",
       "bybit_demo_execution_warning": null,
       "last_captured_row_ids": [],
-      "last_checked_at": "2026-07-09T08:45:04.333071+00:00",
-      "last_error": null,
+      "last_checked_at": "2026-07-25T15:04:05.236714+00:00",
+      "last_error": "Bybit sync failed path=/v5/order/history retCode=unknown retMsg=[WinError 10013] An attempt was made to access a socket in a way forbidden by its access permissions recv_window=15000 offset_ms=0",
       "last_invalid_time_row_details": [],
       "last_invalid_time_rows_dropped": 0,
       "last_rows_deduped": 0,
       "last_rows_seen": 0,
       "last_rows_upserted": 0,
       "single_file_mode": false,
-      "updated_at": "2026-07-09T08:45:04.343794+00:00"
+      "updated_at": "2026-07-25T15:04:05.239529+00:00"
     },
     "bybit_demo_tpsl_cache": {
       "order_id:oid-1": {
@@ -3864,8 +3940,6 @@
     "workbooks_seen": 1
   },
   "version": 4,
-  "watchlist": [
-    "DASHUSDT"
-  ],
-  "watchlist_updated_at": "2026-07-16T11:32:59.474305+00:00"
+  "watchlist": [],
+  "watchlist_updated_at": "2026-07-25T19:49:52.751394+00:00"
 }
