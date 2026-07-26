@@ -524,7 +524,7 @@ def test_existing_master_journal_update_is_atomic_on_post_update_validation_fail
     mj = tmp_path / "Trading Journal.xlsx"
     snap = {'items':[{'id':'r1','row_type':'trade','symbol':'EURUSD','side':'BUY','open_time':'2026-01-01','close_time':'2026-01-01','net_profit':1.0,'result_pct':1.0}], 'stats':{'totals':{}, 'groups':{}, 'by_instrument':[{'symbol':'EURUSD','trades':1}]}, 'balances':[]}
     build_master_journal_workbook(snap, mj)
-    wb = load_workbook(mj); wb["Dashboard"]["A1"] = "ORIGINAL_SENTINEL"; wb.save(mj); wb.close()
+    wb = load_workbook(mj); wb["STATS1"]["A1"] = "ORIGINAL_SENTINEL"; wb.save(mj); wb.close()
     before = mj.read_bytes()
     snap2 = dict(snap)
     snap2["items"] = snap["items"] + [{'id':'new-row-should-not-survive','row_type':'trade','symbol':'BTCUSDT','side':'SELL','open_time':'2026-01-02','close_time':'2026-01-02','net_profit':2.0,'result_pct':2.0}]
@@ -577,7 +577,7 @@ def test_sync_master_journal_migrates_legacy_all_trades_and_removes_trade_meta(t
     assert "All Trades" not in migrated.sheetnames
     migrated.close()
 @pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
-def test_sync_master_journal_repairs_legacy_instrument_averages_freeze_pane(tmp_path, monkeypatch):
+def test_sync_master_journal_preserves_symbols_freeze_pane(tmp_path, monkeypatch):
     from tools.master_journal_workbook import build_master_journal_workbook
     from tools.master_journal_workbook import SHEET_ORDER, expected_report_sheet_names
     from openpyxl import load_workbook
@@ -594,7 +594,7 @@ def test_sync_master_journal_repairs_legacy_instrument_averages_freeze_pane(tmp_
     out = master_service._sync_master_journal_workbook(sync_caller="test")
     assert out["master_journal_ok"] is True
     repaired = load_workbook(mj)
-    assert repaired["SYMBOLS"].freeze_panes == "B3"
+    assert repaired["SYMBOLS"].freeze_panes == "X111"
     assert repaired.sheetnames[:len(SHEET_ORDER)] == SHEET_ORDER
     assert repaired.sheetnames[len(SHEET_ORDER):] == expected_report_sheet_names(snap)
     assert "_Trade Meta" not in repaired.sheetnames
@@ -627,8 +627,13 @@ def test_sync_master_journal_repairs_unknown_trade_log_currency_formats(tmp_path
         assert "UNKNOWN" not in str(ws2.cell(r, 12).number_format or "")
     repaired.close()
 @pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
-def test_sync_validation_detects_instrument_duration_alias_columns_blank(tmp_path, monkeypatch):
+def test_sync_validation_detects_instrument_duration_columns_blank(tmp_path, monkeypatch):
     from tools.master_journal_workbook import build_master_journal_workbook
+    from tools.master_journal_workbook import (
+        _instrument_averages_data_start_row,
+        _instrument_averages_header_map,
+        _instrument_averages_header_row,
+    )
     from openpyxl import load_workbook
     monkeypatch.setattr(master_service, 'TRADING_JOURNAL_SOURCE', 'master_journal')
     monkeypatch.setattr(master_service, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
@@ -636,17 +641,23 @@ def test_sync_validation_detects_instrument_duration_alias_columns_blank(tmp_pat
     snap = {'items':[{'id':'r1','row_type':'trade','account':'A','symbol':'EURUSD','side':'BUY','open_time':'2026-01-01T00:00:00Z','close_time':'2026-01-01T01:00:00Z','net_profit':1.0,'result_pct':1.0,'trade_duration_seconds':3600}], 'stats':{'totals':{}, 'groups':{}, 'by_instrument':[{'symbol':'EURUSD','trades':1,'min_trade_duration_seconds':3600,'avg_trade_duration_seconds':3600,'max_trade_duration_seconds':3600}]}, 'balances':[]}
     build_master_journal_workbook(snap, mj)
     real_update = master_service.update_master_journal_workbook_data_only
-    def fake_update(path, snapshot):
-        out = real_update(path, snapshot)
+    def fake_update(path, snapshot, **kwargs):
+        out = real_update(path, snapshot, **kwargs)
         cand = Path(out["candidate_path"])
         wb = load_workbook(cand)
         inst = wb["SYMBOLS"]
-        headers = [str(inst.cell(2, c).value or "") for c in range(1, inst.max_column + 1)]
-        inst.cell(2, headers.index("Shortest duration (DD:HH:MM:SS)") + 1).value = "Shortest (DD:HH:MM:SS)"
-        inst.cell(2, headers.index("Longest duration (DD:HH:MM:SS)") + 1).value = "Longest (DD:HH:MM:SS)"
-        for r in range(3, inst.max_row + 1):
-            for name in ("Shortest (DD:HH:MM:SS)", "Avg duration (DD:HH:MM:SS)", "Longest (DD:HH:MM:SS)"):
-                c = [str(inst.cell(2, x).value or "") for x in range(1, inst.max_column + 1)].index(name) + 1
+        header_row = _instrument_averages_header_row(inst)
+        headers = _instrument_averages_header_map(inst)
+        duration_columns = [
+            headers[name]
+            for name in (
+                "Shortest duration (DD:HH:MM:SS)",
+                "Avg duration (DD:HH:MM:SS)",
+                "Longest duration (DD:HH:MM:SS)",
+            )
+        ]
+        for r in range(_instrument_averages_data_start_row(inst), inst.max_row + 1):
+            for c in duration_columns:
                 inst.cell(r, c).value = None
         wb.save(cand); wb.close()
         return out
@@ -730,7 +741,7 @@ def test_existing_master_journal_trade_log_filter_range_can_update_without_invar
     monkeypatch.setattr(master_service, '_build_trading_journal_view_snapshot', lambda force=True: snap)
     monkeypatch.setattr(master_service, '_get_excel_account_balances', lambda: [])
     result = master_service._sync_master_journal_workbook(sync_caller="test")
-    assert result["master_journal_ok"] is True
+    assert result["master_journal_ok"] is True, result.get("master_journal_error")
     out = load_workbook(mj, data_only=True)
     at = out["Trade Log"]; ref = at.auto_filter.ref
     assert ref and ref.startswith("A3:")
@@ -749,6 +760,31 @@ def test_startup_recovery_skips_broker_refresh_in_master_journal_mode(monkeypatc
     monkeypatch.setattr(master_service, '_recover_oanda_recent_fills', lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("should not call")))
     monkeypatch.setattr(master_service, '_run_bybit_closed_pnl_sync', lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("should not call")))
     asyncio.run(master_service._run_startup_recovery_import_if_needed())
+
+
+def test_master_journal_startup_queues_cache_only_equity_build_after_restore(monkeypatch):
+    called = []
+
+    async def _wait(**_kwargs):
+        called.append("restore_wait")
+        return True
+
+    monkeypatch.setattr(master_service, "_wait_for_startup_restore_signal", _wait)
+    monkeypatch.setattr(
+        master_service,
+        "_queue_trading_journal_equity_refresh_if_idle",
+        lambda reason: called.append(reason) or {"running": True, "pending": True},
+    )
+    monkeypatch.setattr(master_service, "TRADING_JOURNAL_EQUITY_REFRESH_TASK", None)
+    monkeypatch.setattr(
+        master_service,
+        "_sync_master_journal_workbook",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("startup equity build must not rewrite workbook")),
+    )
+    asyncio.run(master_service._start_master_journal_equity_cache_after_restore())
+    assert called == ["restore_wait", "startup_master_journal"]
+
+
 @pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
 def test_autostart_skips_fill_polls_in_master_journal_mode(monkeypatch):
     monkeypatch.setattr(master_service, 'TRADING_JOURNAL_SOURCE', 'master_journal')
@@ -771,6 +807,7 @@ def test_autostart_skips_fill_polls_in_master_journal_mode(monkeypatch):
     monkeypatch.setattr(master_service.asyncio, 'create_task', _fake_create_task)
     asyncio.run(master_service._autostart_scripts())
     assert '_start_startup_recovery_import_after_restore' not in scheduled
+    assert '_start_master_journal_equity_cache_after_restore' in scheduled
     assert '_poll_bybit_fills' not in scheduled
     assert '_start_oanda_fill_poll_after_delay' not in scheduled
 @pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
@@ -804,7 +841,7 @@ def test_sync_master_journal_temp_cleanup_on_failure(tmp_path, monkeypatch):
     def bad_builder(_snap, out):
         wb=Workbook(); wb.save(out)
     monkeypatch.setattr(master_service, 'build_master_journal_workbook', bad_builder)
-    monkeypatch.setattr(master_service, 'SHEET_ORDER', ['Dashboard'])
+    monkeypatch.setattr(master_service, 'SHEET_ORDER', ['STATS1'])
     r=master_service._sync_master_journal_workbook(sync_caller="test")
     assert r['master_journal_ok'] is False
     assert not (tmp_path/'Master Journal.tmp.xlsx').exists()
@@ -904,7 +941,7 @@ def test_sync_master_journal_rebuilds_blanked_workbook_sections(tmp_path, monkey
     build_master_journal_workbook(snap, mj)
     wb = load_workbook(mj)
     # blank generated sections
-    for ws_name in ['Trade Log', 'Instrument Averages', 'P&L Calendar']:
+    for ws_name in ['Trade Log', 'SYMBOLS', 'P&L Calendar']:
         ws = wb[ws_name]
         for r in range(2, ws.max_row + 1):
             for c in range(1, ws.max_column + 1):
@@ -912,7 +949,7 @@ def test_sync_master_journal_rebuilds_blanked_workbook_sections(tmp_path, monkey
                 if type(cell).__name__ == "MergedCell":
                     continue
                 cell.value = None
-    dash = wb['Dashboard']
+    dash = wb['STATS2']
     for r in range(1, dash.max_row + 1):
         for c in range(1, dash.max_column + 1):
             v = str(dash.cell(r, c).value or '').strip().lower()
@@ -941,7 +978,7 @@ def test_sync_master_journal_rebuilds_blanked_workbook_sections(tmp_path, monkey
         trade_symbols = [str(trade_log.cell(r, trade_log_symbol_col).value or '').strip() for r in range(2, trade_log.max_row + 1)]
         assert 'EURUSD' in trade_symbols
         assert 'BTCUSDT' in trade_symbols
-        inst = rebuilt['Instrument Averages']
+        inst = rebuilt['SYMBOLS']
         inst_headers = [str(c.value or '').strip() for c in inst[1]]
         symbol_col = inst_headers.index('Symbol') + 1
         trades_col = inst_headers.index('Trades') + 1
@@ -959,7 +996,7 @@ def test_sync_master_journal_rebuilds_blanked_workbook_sections(tmp_path, monkey
                 has_2026_jan = True
                 break
         assert has_2026_jan
-        dash = rebuilt['Dashboard']
+        dash = rebuilt['STATS1']
         balance_anchor = None
         for r in range(1, dash.max_row + 1):
             for c in range(1, dash.max_column + 1):
@@ -1049,7 +1086,7 @@ def test_sync_master_journal_repairs_missing_expected_balance_account_row(tmp_pa
     mj = tmp_path / 'Trading Journal.xlsx'
     build_master_journal_workbook(snap, mj)
     wb = load_workbook(mj)
-    dash = wb['Dashboard']
+    dash = wb['STATS2']
     # remove account B row from balances section
     anchor = None
     for r in range(1, dash.max_row + 1):
@@ -1072,7 +1109,7 @@ def test_sync_master_journal_repairs_missing_expected_balance_account_row(tmp_pa
     monkeypatch.setattr(master_service, '_get_trading_journal_rows', lambda: source_rows)
     result = master_service._sync_master_journal_workbook(sync_caller="test")
     assert result['master_journal_ok'] is True
-    repaired = load_workbook(mj, data_only=True)["Dashboard"]
+    repaired = load_workbook(mj, data_only=True)["STATS2"]
     anchor = None
     for r in range(1, repaired.max_row + 1):
         for c in range(1, repaired.max_column + 1):
@@ -1147,7 +1184,7 @@ def test_sync_master_journal_succeeds_with_merged_calendar_cells(tmp_path, monke
     result = master_service._sync_master_journal_workbook(sync_caller="test")
     assert result["master_journal_ok"] is True
 @pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
-def test_sync_master_journal_populates_instrument_leaders_custom_layout(tmp_path, monkeypatch):
+def test_sync_master_journal_populates_instrument_leaders_canonical_layout(tmp_path, monkeypatch):
     from tools.master_journal_workbook import build_master_journal_workbook
     from openpyxl import load_workbook
     monkeypatch.setattr(master_service, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
@@ -1156,14 +1193,22 @@ def test_sync_master_journal_populates_instrument_leaders_custom_layout(tmp_path
             "stats":{"totals":{},"by_instrument":[{"symbol":"EURUSD","total_trades":1}],"groups":{"leaders":{"most_wins_instrument":{"symbol":"EURUSD","wins":1,"losses":0,"trades":1}}}},
             "balances":[{"account_label":"A","balance":100.0,"currency":"USD"}],"diagnostics":{}}
     build_master_journal_workbook(snap, mj)
-    wb=load_workbook(mj); d=wb["Dashboard"]; d["A11"]="Instrument leaders"; d["A12"]="Metric"; d["B12"]="Symbol"; d["C12"]="Wins"; d["D12"]="Losses"; d["E12"]="Trades"; d["A13"]="Overall most wins"; wb.save(mj); wb.close()
+    wb = load_workbook(mj)
+    d = wb["STATS1"]
+    leader_row = next(
+        row for row in range(1, d.max_row + 1)
+        if str(d.cell(row, 1).value or "").strip() == "Most wins"
+    )
+    d.cell(leader_row, 2).value = None
+    wb.save(mj)
+    wb.close()
     monkeypatch.setattr(master_service, '_build_trading_journal_view_snapshot', lambda force=True: snap)
     monkeypatch.setattr(master_service, '_get_trading_journal_rows', lambda: snap["items"])
     result = master_service._sync_master_journal_workbook(sync_caller="test")
     assert result["master_journal_ok"] is True
-    out=load_workbook(mj, data_only=True)["Dashboard"]
-    assert out["B13"].value == "EURUSD"
-    assert isinstance(out["E13"].value, (int, float))
+    out = load_workbook(mj, data_only=True)["STATS1"]
+    assert "EURUSD" in str(out.cell(leader_row, 2).value or "")
+    out.parent.close()
 @pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
 def test_sync_status_marks_abandoned_running_state_without_active_task(monkeypatch):
     state = dict(master_service.TRADING_JOURNAL_SYNC_STATE)
@@ -1544,7 +1589,7 @@ def test_sync_master_journal_writes_zero_balances_and_validation_detects_mismatc
     assert result['master_journal_ok'] is True
     from openpyxl import load_workbook
     wb = load_workbook(mj, data_only=True)
-    dash = wb['Dashboard']
+    dash = wb['STATS2']
     pairs = {}
     for r in range(1, dash.max_row + 1):
         for c in range(1, dash.max_column):
@@ -1557,12 +1602,12 @@ def test_sync_master_journal_writes_zero_balances_and_validation_detects_mismatc
     # Force workbook-vs-snapshot mismatch by corrupting the candidate workbook after data-only update.
     import tools.master_journal_workbook as mjw
     real_update = mjw.update_master_journal_workbook_data_only
-    def _corrupting_update(path, snapshot):
-        payload = real_update(path, snapshot)
+    def _corrupting_update(path, snapshot, **kwargs):
+        payload = real_update(path, snapshot, **kwargs)
         candidate_path = Path(payload['candidate_path'])
         bad_wb = load_workbook(candidate_path)
         try:
-            bad_dash = bad_wb['Dashboard']
+            bad_dash = bad_wb['STATS2']
             for r in range(1, bad_dash.max_row + 1):
                 for c in range(1, bad_dash.max_column):
                     if str(bad_dash.cell(r, c).value or '').strip() == 'PEPPERSTONE DEMO':
@@ -1777,7 +1822,7 @@ def test_sync_master_journal_uses_zero_cashflow_anchor_when_cashflow_new_balance
     result = master_service._sync_master_journal_workbook(sync_caller="test")
     assert result['master_journal_ok'] is True
     synced = load_workbook(mj, data_only=True)
-    dash = synced['Dashboard']
+    dash = synced['STATS2']
     dash_map = {}
     for r in range(1, dash.max_row + 1):
         for c in range(1, dash.max_column):
@@ -2091,8 +2136,8 @@ def test_manual_import_prebuilt_snapshot_preserves_workbook_zero_cashflow_anchor
         assert result['master_journal_ok'] is True
         synced = load_workbook(mj, data_only=True)
         try:
-            dash = synced['Dashboard']
-            values = {str(dash.cell(r, 6).value or '').strip(): dash.cell(r, 7).value for r in range(1, dash.max_row + 1)}
+            dash = synced['STATS2']
+            values = {str(dash.cell(r, 1).value or '').strip(): dash.cell(r, 2).value for r in range(1, dash.max_row + 1)}
             assert values['BINANCE'] == 0
             assert values['PEPPERSTONE DEMO'] == 0
             trade_log = synced['Trade Log']
@@ -2247,7 +2292,15 @@ def test_sync_and_snapshot_logs_include_sync_id_and_caller(monkeypatch, caplog):
 
     caplog.clear()
     fingerprint = {'fp': 1}
-    existing = {'source_fingerprints': fingerprint, 'items': [], 'balances': [], 'stats': {}}
+    existing = {
+        'cache_version': ms.TRADING_JOURNAL_VIEW_CACHE_VERSION,
+        'generated_at': '2026-07-26T00:00:00Z',
+        'source_fingerprints': fingerprint,
+        'items': [],
+        'balances': [],
+        'stats': {},
+    }
+    ms._attach_trading_journal_equity_metadata(existing)
     monkeypatch.setattr(ms, '_load_trading_journal_view_snapshot', lambda: existing)
     monkeypatch.setattr(ms, '_journal_source_fingerprint', lambda: fingerprint)
     with caplog.at_level('INFO'):
@@ -2427,8 +2480,8 @@ def test_resync_preserves_pepperstone_demo_zero_anchor_without_import_parser(mon
     assert result['master_journal_ok'] is True
     synced = load_workbook(mj, data_only=True)
     try:
-        dash = synced['Dashboard']
-        rows_by_account = {str(dash.cell(r, 6).value or '').strip(): (dash.cell(r, 7).value, dash.cell(r, 8).value) for r in range(1, dash.max_row + 1)}
+        dash = synced['STATS2']
+        rows_by_account = {str(dash.cell(r, 1).value or '').strip(): (dash.cell(r, 2).value, dash.cell(r, 3).value) for r in range(1, dash.max_row + 1)}
         assert rows_by_account['PEPPERSTONE DEMO'] == (0, 'AUD')
         assert rows_by_account['BINANCE'] == (0, 'USDT')
     finally:
@@ -2461,18 +2514,33 @@ def test_master_journal_snapshot_records_substage_timings_and_skips_context_look
             {'id': 't1', 'row_type': 'trade', 'source': 'master_journal', 'account': 'BINANCE', 'account_label': 'BINANCE', 'symbol': 'BTCUSDT', 'side': 'BUY', 'open_time': '2026-01-01', 'close_time': '2026-01-01', 'net_profit': 1.0, 'result_pct': 1.0, 'balance_after_trade': 1.0, 'currency': 'USDT'},
             {'id': 'c1', 'row_type': 'cashflow', 'source': 'master_journal', 'account': 'BINANCE', 'account_label': 'BINANCE', 'symbol': 'CASHFLOW', 'side': 'WITHDRAWAL', 'open_time': '2026-01-02', 'close_time': '2026-01-02', 'cashflow_new_balance': 0.0, 'balance_after_trade': 0.0, 'currency': 'USDT'},
         ],
+        'balances': [
+            {'account': 'BINANCE', 'label': 'BINANCE', 'balance': 0.0, 'currency': 'USDT', 'source': 'stats2_account_balances'},
+        ],
         'cashflow_ledger': {'BINANCE': [{'account': 'BINANCE', 'date': '2026-01-02', 'new_balance': 0.0, 'currency': 'USDT'}]},
     })
     monkeypatch.setattr(ms, '_monthly_aud_revaluation_rows_for_journal_view', lambda: [])
     monkeypatch.setattr(ms, '_load_trade_contexts', lambda: (_ for _ in ()).throw(AssertionError('master_journal snapshot must not load local trade contexts')))
     monkeypatch.setattr(ms, '_save_trading_journal_view_snapshot', lambda _payload: None)
     monkeypatch.setattr(ms, '_persist_trading_journal_sqlite', lambda *_args, **_kwargs: None)
+    captured_seeds = []
+    real_timeline_builder = ms._build_journal_balance_timelines
+
+    def _capture_timeline_seeds(rows, ledger, seeds):
+        captured_seeds.extend(seeds)
+        return real_timeline_builder(rows, ledger, seeds)
+
+    monkeypatch.setattr(ms, '_build_journal_balance_timelines', _capture_timeline_seeds)
     snapshot = ms._build_trading_journal_view_snapshot(force=True, skip_external_balances=True, skip_live_account_refresh=True, sync_id='timing-test', sync_caller='unit-test')
     timings = ((snapshot.get('diagnostics') or {}).get('snapshot_substage_timings') or {})
     assert 'workbook_source_read' in timings
     assert 'trade_context_backfill_initial' in timings
     assert 'balance_timeline_build' in timings
     assert 'stats_dashboard_instrument_calendar_build' in timings
+    assert captured_seeds == [
+        {'account': 'BINANCE', 'label': 'BINANCE', 'balance': 0.0, 'currency': 'USDT', 'source': 'stats2_account_balances'},
+    ]
+    assert snapshot['equity_cache']['point_counts']['BINANCE'] == 2
 
 
 def test_resync_fast_path_miss_reports_changed_fingerprint_components(tmp_path):
@@ -2514,11 +2582,8 @@ def test_resync_persists_post_replace_fingerprint_for_next_fast_path(monkeypatch
 
 
 @pytest.mark.skipif(not HTTPX_AVAILABLE, reason="httpx is not installed")
-def test_sync_repairs_dashboard_stale_semantic_cf_order_source_and_max_gain(tmp_path, monkeypatch):
-    from copy import copy
-    from openpyxl.formatting.rule import CellIsRule
+def test_sync_preserves_canonical_stats1_layout_and_manual_formatting(tmp_path, monkeypatch):
     from openpyxl.styles import Alignment, Font, PatternFill
-    from openpyxl.utils.cell import range_boundaries
     from tools.master_journal_workbook import build_master_journal_workbook
 
     monkeypatch.setattr(master_service, "TRADING_JOURNAL_SOURCE", "master_journal")
@@ -2537,47 +2602,36 @@ def test_sync_repairs_dashboard_stale_semantic_cf_order_source_and_max_gain(tmp_
     build_master_journal_workbook(snapshot, path)
 
     wb = load_workbook(path)
-    dash = wb["Dashboard"]
-    for offset in (0, 1):
-        for col in range(1, dash.max_column + 1):
-            a = dash.cell(21 + offset, col)
-            b = dash.cell(23 + offset, col)
-            a_value, b_value = a.value, b.value
-            a_style, b_style = copy(a._style), copy(b._style)
-            a.value, b.value = b_value, a_value
-            a._style, b._style = b_style, a_style
-    dash.insert_rows(29, 2)
-    dash["A29"] = "Max gain"
-    dash["C29"] = 100.0
-    dash["C29"].number_format = '#,##0.00 "AUD"'
-    dash["A30"] = "Source"
-    dash["A22"].font = Font(bold=True, italic=False)
-    dash["A22"].alignment = Alignment(horizontal="left")
-    stale_rule = CellIsRule(operator="notEqual", formula=["0"], fill=PatternFill("solid", fgColor="FFC7CE"), font=Font(color="9C0006"))
-    dash.conditional_formatting.add("B11:B12", stale_rule)
-    dash.conditional_formatting.add("C10:D12", copy(stale_rule))
+    dash = wb["STATS1"]
+    sheet_order = list(wb.sheetnames)
+    labels_before = [
+        str(dash.cell(row, 1).value or "").strip()
+        for row in range(1, dash.max_row + 1)
+    ]
+    sentinel = dash["I149"]
+    sentinel.value = "CUSTOM LAYOUT SENTINEL"
+    sentinel.font = Font(name="Calibri", size=13, bold=True, color="123456")
+    sentinel.fill = PatternFill("solid", fgColor="ABCDEF")
+    sentinel.alignment = Alignment(horizontal="center")
     wb.save(path)
     wb.close()
 
     result = master_service._sync_master_journal_workbook(prebuilt_snapshot=snapshot, sync_caller="test")
-    assert result["master_journal_ok"] is True
+    assert result["master_journal_ok"] is True, result
     wb = load_workbook(path)
-    dash = wb["Dashboard"]
-    labels = [str(dash.cell(row, 1).value or "").strip() for row in range(1, dash.max_row + 1)]
-    assert "Max gain" not in labels
-    start = labels.index("Max win %")
-    assert labels[start:start + 8] == ["Max win %", "Source", "Max loss %", "Source", "Max R loss", "Source", "Max R win", "Source"]
-    assert all(dash.cell(row, 1).font.italic and not dash.cell(row, 1).font.bold for row in range(1, dash.max_row + 1) if dash.cell(row, 1).value == "Source")
-    assert all(dash.cell(row, 1).alignment.horizontal == "right" for row in range(1, dash.max_row + 1) if dash.cell(row, 1).value == "Source")
-    for coordinate in ("B11", "C11", "D11"):
-        assert str(dash[coordinate].fill.fgColor.rgb)[-6:].upper() == "C6EFCE"
-        assert str(dash[coordinate].font.color.rgb)[-6:].upper() == "006100"
-    for key, rules in dash.conditional_formatting._cf_rules.items():
-        for part in str(key.sqref).split():
-            min_col, min_row, max_col, max_row = range_boundaries(part)
-            if max_col < 2 or min_col > 4 or max_row < 11 or min_row > 11:
-                continue
-            for rule in rules:
-                color = getattr(getattr(getattr(rule, "dxf", None), "fill", None), "fgColor", None)
-                assert str(getattr(color, "rgb", "") or "")[-6:].upper() != "FFC7CE"
+    dash = wb["STATS1"]
+    labels_after = [
+        str(dash.cell(row, 1).value or "").strip()
+        for row in range(1, dash.max_row + 1)
+    ]
+    assert wb.sheetnames == sheet_order
+    assert labels_after == labels_before
+    sentinel = dash["I149"]
+    assert sentinel.value == "CUSTOM LAYOUT SENTINEL"
+    assert sentinel.font.bold is True
+    assert str(sentinel.font.color.rgb)[-6:].upper() == "123456"
+    assert str(sentinel.fill.fgColor.rgb)[-6:].upper() == "ABCDEF"
+    assert sentinel.alignment.horizontal == "center"
+    trades_row = labels_after.index("Trades") + 1
+    assert dash.cell(trades_row, 2).value == 2
     wb.close()

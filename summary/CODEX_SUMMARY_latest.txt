@@ -1,98 +1,131 @@
-Final summary — FX Weekend ownership, durable watchlist, Pine markers, Journal equity, and recommendation fixes
+Final release summary - FX Weekend Demo/Live ownership, Journal equity cache, and Trading Journal workbook repair
 
-Status before publication:
-- The full requested production implementation, checked-in workbook regeneration, and relevant regression coverage are complete locally.
-- This summary is being written before publication as required.
-- The task is not complete until repository-root PATCH_DESKTOP_PUSH.bat commits the intended files, pushes origin/master, and verifies local HEAD equals origin/master.
+Publication status
+- Implementation, workbook repair, test updates, and release verification are complete on branch codex/journal-equity-fx-final-20260726.
+- This report is written before publication as required by AGENTS.md.
+- PATCH_DESKTOP_PUSH.bat must run next. The task is not published or complete until the script succeeds and local HEAD equals origin/master.
 
-1. FX Weekend — Render is the sole execution authority
-- Removed FX Weekend from every local automatic-start/default-required path, including run_local_master_control.bat, Render local-profile defaults, and the packaged worker helper. Explicit local wildcard/autostart values are filtered so they cannot silently re-enable the executor.
-- Kept the local dashboard entry as "FX Weekend (Render)". It opens the configured Render application URL and reports a clear configuration error when no Render base URL is available; it never opens or mutates the local settings page.
-- Render owns and supervises exactly one enabled FX Weekend child, restarts unexpected exits, publishes heartbeat/running information, and treats a dead or unusable enabled executor as a readiness failure.
-- Extended shared/oanda_api.py with a public account-mode configuration resolver used by the executor. Demo is isolated to practice credentials/URL; Live follows the repository's live/generic credential conventions and live URL. Each selected account is processed and reported independently.
-- Migrated scheduling to Brisbane HH:MM cutoffs while retaining legacy hour keys and the established 05:00 New York-DST / 06:00 standard-time defaults.
-- Durable settings now include selected account modes and retry controls. enabled=false is respected and is never overwritten at startup.
-- Reworked the closure loop to continue polling throughout the closure window, catch positions opened after an earlier flat result, retry transient failures with bounded backoff, preserve per-account/per-position HTTP results, and avoid a one-week completion latch.
-- Success requires a post-close OANDA re-fetch proving the selected account flat. Credential, API, partial-close, retry-pending, missed-window, and market-closed outcomes remain explicit failures rather than manufactured success.
-- Settings and status participate in the authoritative state backup/restore flow. The page exposes enabled state, selected OANDA accounts, Brisbane cutoff/next cutoff, DST regime, heartbeat, attempt and verified-flat timestamps, open counts, and sanitized errors.
-- Secrets and full account identifiers are redacted from status/log output.
+1. Journal equity curves
+- Raised the Trading Journal view-cache schema to version 6 and added snapshot IDs, snapshot fingerprints, current-source fingerprints, verified equity metadata, and exact per-account point-count coverage.
+- A missing, incompatible, stale, or unverified cache is never returned as authoritative ok=true data. GET /api/trading-journal now returns an empty 202 while a rebuild is active or an empty 503 with the actual failure/rebuild reason.
+- Added narrow POST /api/trading-journal/equity/refresh and GET /api/trading-journal/equity/refresh/status operations. Refresh is single-flight, queue/poll safe, cancellation safe, and can recover from an orphaned or completed task whose pending flags were stale.
+- Master-journal startup queues a cache-only build after durable restore. The cache-only path does not fetch brokers and does not call a workbook writer.
+- Master-journal timelines now seed from source_payload["balances"] as well as cashflow/trade rows, preserving the authoritative currency and zero-balance anchors needed by workbook rows.
+- The browser refresh action now POSTs a real rebuild request and polls status. It distinguishes building, stale, incompatible, failed, and current states.
+- "No equity data" is shown only when a current-fingerprint, verified snapshot proves zero eligible points for the selected account.
+- The real canonical workbook -> master-journal snapshot -> serialized API response -> actual JavaScript normalizer release path produced:
+  - BINANCE: 113
+  - BYBIT: 265
+  - OANDA DEMO: 46
+  - OANDA LIVE: 63
+  - PEPPERSTONE DEMO: 824
+  - PEPPERSTONE LIVE: 193
+- The end-to-end test blocks broker fetches and workbook writers and proves the workbook SHA-256, size, and modification time do not change.
 
-2. Watchlist deletion durability
-- Watchlist POST now normalizes the complete proposed sequence, persists it synchronously to the effective durable source, round-trips that source, and confirms success only when the complete normalized sequence matches exactly.
-- A stale remote superset can no longer pass verification, and an empty list is a valid verified result.
-- Responses expose durable_verified, verified_at, verified_items, effective_state_source, pending, and error.
-- Failed durability checks restore/reload the last authoritative watchlist instead of leaving an optimistic deletion visible.
-- The dashboard no longer requires a non-empty verified list and does not announce removal until the item is proven absent.
+2. Trading Journal.xlsx repair
+- Backed up the pre-repair canonical workbook before regeneration:
+  C:\Users\User\.codex\visualizations\2026\07\25\019f985c-2b19-7201-b0aa-665075609347\workbook_backups\Trading Journal.pre-external-link-repair.20260726-085324.xlsx
+- Backup SHA-256:
+  97F5633B9767035E742B2D12F996A615C79F1E2F27986A554D3429244
+- Added a guard that scans worksheet formulas, defined names, and chart-series formulas for genuine external workbook dependencies before loading with keep_links=False.
+- Removed the unused, corrupt FOREX JOURNAL.xlsx external-link package through the canonical preserve-existing-layout save path. No arbitrary cell patch and no Equity Curve sheet were used.
+- Added generic OPC relationship validation: every referenced r:id must exist in its source .rels file, and every internal relationship target must exist.
+- Added regressions proving no externalLinks parts, externalReferences entry, external-link content type/relationship, or obsolete FOREX JOURNAL target remains.
+- Corrected the data-only update guard so an invalid legacy Trade Log filter can migrate to the canonical header/required-column range while valid filters remain preserved and revalidated.
+- Updated legacy sync tests to the canonical STATS1, STATS2, and SYMBOLS structure while retaining atomicity, balance, duration, filter, layout, and resync coverage.
+- Added test isolation so no CRUD regression can ever resolve _master_journal_path() to the checked-in workbook.
+- Stopped the task-owned orphaned Excel /automation process after it was detected by a hash guard. Rejected test/Excel-generated 413 KB copies were not installed or committed.
+- Final canonical workbook:
+  - SHA-256: 07B0135C82B3DCEA6D48503DD337D900422542304FBED38120862BD6F1E6497E
+  - Size: 692,723 bytes
+  - 16 sheets in the preserved order
+  - Active/selected sheet: " SIM"
+  - Two charts, both on " SIM" and both using local ranges
+  - 511 formulas
+  - No Equity Curve sheet
+  - No external-link parts/references/content type/relationships
+  - No obsolete FOREX JOURNAL path
+  - Valid OPC relationship graph
+- Installed Microsoft Excel 16.0 opened a byte-identical validation copy in default normal-load, read-only mode with DisplayAlerts enabled. It showed 16 sheets, active " SIM", and two charts, with no recovery/repair prompt and no repaired/removed-records log.
+- Artifact rendering imported and rendered all 16 sheets. Every sheet was visually inspected, both SIM charts rendered, and the formula-error search matched zero cells.
+- PDF export was unavailable because the machine had no available printer driver; this was an environment limitation, not a workbook-load or workbook-repair failure.
 
-3. TradingView session markers
-- Sydney, Tokyo, London, and New York session events are suppressed when each event timestamp lands on a Brisbane Saturday or Sunday; weekday DST-aware timestamps and the <=30-minute visibility rule remain intact.
-- Funding and Options Expiry behavior is unchanged.
-- Each session event now draws two aligned dotted segments with a candle/wick clearance gap derived from max(recent 80-bar range * 0.03, syminfo.mintick * 20).
-- Open/close labels remain centered at the exact event timestamp and sit beyond the applicable line endpoint with additional clearance.
-- Cleanup accounts for two line objects per event and removes hidden/expired objects within TradingView limits.
+3. FX Weekend ownership and Demo + Live accounts
+- Local profile buttons and /scripts rows contain no fxweekend or fxweekend-clone entry. Local autostart has no FX Weekend target.
+- Defensive Local start/proxy denial remains, returning a clear rejection rather than starting a fallback executor.
+- Render retains the FX Weekend button, settings page, supervision, executor, heartbeat, and readiness reporting.
+- Added public shared OANDA account-mode settings support and schema version 1.
+- Checked-in settings and defaults now select ["demo", "live"] in deterministic order.
+- Legacy missing/old-version settings, including restored live-only settings, migrate once to Demo + Live while preserving enabled, cutoffs, dry_run, retry settings, and allowlist.
+- Current-schema user subsets, including an empty account selection, remain durable and are not reset on restart.
+- Durable restore upgrades the settings before exact per-file and aggregate backup verification. Executor start is gated on completed restore, per-file verification, aggregate verification, and current schema.
+- Demo and Live execute independently. A failure in one account does not suppress processing/reporting for the other.
+- Overall verified-flat is allowed only after every selected account is re-fetched and proven flat.
+- Missing credentials, API failures, partial closure, and retry states remain account-specific and make readiness non-operational.
+- Tests used mocked OANDA responses. No real OANDA request, Run now action, or position closure was performed.
 
-4. Journal responsive account equity curve
-- Replaced the centered single stack with a top-aligned responsive workspace: existing controls remain in a narrow left column, and a full remaining-width equity panel occupies the right; mobile stacks without horizontal overflow.
-- Added a separate render/static/trading_journal_equity_curve.js module and a Refresh Equity Curve action.
-- The account selector contains exactly, in order: Binance, Bybit, Oanda demo, Oanda live, Pepperstone demo, Pepperstone live. Bybit Demo is excluded and repository aliases map to the canonical accounts.
-- The curve uses the authoritative /api/trading-journal snapshot, excludes tests and monthly AUD revaluation/non-trade rows, applies the required balance precedence, sorts chronologically, deduplicates stable identities, and renders only one account/currency.
-- Added high-DPI responsive canvas rendering, grid/axes/readable limited date ticks, formatted balances, latest marker, title/current equity/currency/point count, saved selection, automatic account redraw, and explicit loading/empty/error states.
-- Existing workbook/import/resync/drop-zone/monthly P&L/demo-adjustment/status controls retain their behavior.
+4. Prior-brief features retained and reverified
+- The current origin/master already contained the earlier watchlist exact durability, responsive Journal workspace, Pine weekend/session marker, blank recommendation, launcher/autostart, dashboard, and Journal action changes.
+- This release did not add redundant edits to run_local_master_control.bat, render/static/dashboard.js, pinescripts/custom_indicator.pine, render/static/trading_journal_actions.js, or render/static/trading_journal.js.
+- Those files were nevertheless included in the final Node/Pine/launcher/dashboard targeted verification.
 
-5. Blank insufficient-data recommendations and canonical workbook
-- Stop and target recommendations are visibly blank unless the exact scope has at least one eligible winning and one eligible losing trade.
-- Removed symbol-to-overall fallback and visible legacy insufficient-data messages while retaining structured missing reasons, eligible counts, and exclusion diagnostics internally.
-- Actionable one-win/one-loss recommendations remain supported; Keep/Maintain is never emitted, exact-tie behavior remains unchanged, and targets retain the 1.50R floor.
-- API/frontend sanitization blanks legacy insufficient strings and does not reintroduce fallback text.
-- Regenerated journal/Trading Journal.xlsx through the canonical preserve-existing-layout data refresh, not by patching cells. The workbook retains its sheet order, active/selected SIM sheet, panes, merges, filters, formatting, manual fields, widths/heights, and two existing SIM charts; no Equity Curve sheet was added.
+5. Additional regression hardening
+- State-sync test teardown now retries exact-byte runtime-file restoration across transient Windows handle races.
+- Master-journal sync tests use current cache schema/equity proof metadata when asserting a cache hit.
+- Workbook sync tests now distinguish preservation of canonical panes/layout from migration of invalid legacy filters.
+- Runtime-state files and live service state remain outside the release commit.
 
-Primary production files changed:
+Release diff - production/artifact files
 - fxweekend-clone/liquidate.py
 - fxweekend-clone/settings.json
 - shared/oanda_api.py
-- render/dropbox_state_store.py
 - render/master_service.py
-- run_local_master_control.bat
-- tools/windows_launchers/stream_local_master_worker.ps1
-- render/static/dashboard.js
-- pinescripts/custom_indicator.pine
-- render/static/trading_journal_actions.js
 - render/static/trading_journal_equity_curve.js
-- render/static/trading_journal.js
 - tools/master_journal_workbook.py
 - journal/Trading Journal.xlsx
-- render/README.md
-- .gitignore and PATCH_DESKTOP_PUSH.bat staging hygiene
-- focused tests for FX Weekend, state durability, dashboard/Journal/Pine behavior, workbook recommendations/layout, launchers, and publish exclusions
 
-Automated verification:
-- Expanded non-workbook targeted suite covering the requested profile/state/dashboard/Pine/Journal modules plus new FX Weekend, equity-curve, symbol-resolution, launcher, and publish-hygiene coverage: 343 passed, 106 warnings in 299.10 seconds.
-- Focused FX Weekend executor suite: 38 passed, 4 warnings in 37.42 seconds.
-- Focused Journal/dashboard UI suite after the mobile sizing correction: 54 passed, 41 warnings in 54.68 seconds.
-- Post-transfer release-branch smoke suite for FX Weekend, the equity curve, and publish exclusions: 51 passed, 4 warnings in 46.08 seconds.
-- Workbook test collection: 170 tests collected.
-- All 170 workbook cases passed across deterministic exhaustive slices: indices 0-44, 45-89, 90-125, 126, 127, 128-131, 132, 133, 134, 135-150, 151-167, and 168-169.
-- The final long canonical source-resync case passed in 1231.96 seconds; the final quality migration/dropdown/manual-survival cases passed in 51.87, 50.08, and 128.05 seconds respectively.
-- Python compilation passed for fxweekend-clone/liquidate.py, render/master_service.py, tools/master_journal_workbook.py, shared/oanda_api.py, and render/dropbox_state_store.py.
+Release diff - tests
+- tests/test_dashboard_home_layout.py
+- tests/test_fxweekend_executor.py
+- tests/test_master_journal_workbook.py
+- tests/test_master_service_master_journal_sync.py
+- tests/test_master_service_profiles.py
+- tests/test_master_service_state_sync.py
+- tests/test_master_service_trading_journal_crud.py
+- tests/test_merged_monitor_status_env.py
+- tests/test_trading_journal_equity_curve.py
+
+Final automated verification
+- Core profile/state/dashboard/Pine/Journal/equity/stats group: 239 passed, 107 warnings, 160.17 seconds.
+- Trading Journal CRUD/API group under canonical-path isolation: 193 passed, 4 warnings, 221.14 seconds.
+- Master-journal sync module: 120 passed, 137 warnings, 2016.55 seconds.
+- Complete workbook package/regeneration module: 175 passed, 4318.43 seconds.
+- FX Weekend, Windows launcher, workbook workflow, journal validation, and dependency group: 112 passed, 4 warnings, 168.97 seconds.
+- Total non-overlapping targeted tests: 839 passed.
+- Focused canonical workbook -> endpoint -> actual JavaScript normalizer smoke: passed in 111.90 seconds with the exact six release counts above.
+- Focused state-sync race-hardened module: 37 passed.
+- Python py_compile passed for production modules and the modified sync/state/CRUD test modules.
 - node --check passed for dashboard.js, trading_journal_actions.js, trading_journal_equity_curve.js, and trading_journal.js.
+- fxweekend-clone/settings.json parsed successfully.
 - git diff --check passed; only normal LF-to-CRLF working-copy notices were emitted.
+- Final workbook hash/size remained exact after the complete workbook suite and the guarded full CRUD suite.
+- Independent final read-only reviews found no concrete FX or equity-cache correctness issue.
 
-Manual/browser and artifact verification:
-- The actual local dashboard labels the control "FX Weekend (Render)" and opens the configured https://codex-rdqh.onrender.com/apps/fxweekend-clone page. Local /scripts reports remote_owned=true, autostart_expected=false, and no FX child was spawned by the isolated local verifier.
-- Isolated Render-profile checks exposed executor heartbeat, account modes, cutoff/state fields, and readiness behavior without making a Live OANDA request.
-- The authoritative Journal snapshot rendered one readable curve for every requested account:
-  Binance 113 USDT points; Bybit 265 USDT points; Oanda demo 46 AUD points; Oanda live 63 AUD points; Pepperstone demo 824 AUD points; Pepperstone live 193 AUD points.
-- Refresh issued exactly one authoritative Journal request. A 600px viewport had no horizontal overflow and stacked controls/chart correctly; devicePixelRatio=2 produced a 1508px backing canvas for a 754px CSS canvas.
-- Checked-in workbook scan found the expected sheet order through 2026, active/selected " SIM", two existing SIM charts, no Equity Curve sheet, no visible insufficient recommendation messages, and no visible Keep/Maintain recommendation.
-- TradingView compile/import was attempted in the browser but the host was blocked by net::ERR_NETWORK_ACCESS_DENIED. Pine structure and behavior are covered by the passing focused tests; no claim of a successful live TradingView compile is made.
-- A real remote watchlist was deliberately not mutated during verification. Exact add/delete/final-delete/empty/stale-remote/upload-failure/restart behavior was exercised against controlled durable-store responses.
-- No Live OANDA "Run now" action, position close, or account mutation was used during development or verification.
+Unpublished runtime state deliberately excluded
+- oanda_monitor/settings.json
+- render/data/monthly_aud_revaluation_state.json
+- render/data/pending_webhooks.json
+- render/data/trade_contexts.json
+- render/data/webhook_attempts.json
+- state_backup.json
+- state_manifest.json
+- watchlist.json
+- Temporary workbooks, test caches, logs, environment files, and secrets are not part of the release.
 
-Operational caveats and safety warning:
-- Three local fxweekend-clone/liquidate.py Python processes (PIDs 9240, 24880, and 26200) predated the isolated verifier and remain running. The new local ownership path starts no replacement. They were not terminated because stopping pre-existing user processes requires explicit approval.
-- Runtime/local-state changes remain deliberately unstaged and will be excluded by PATCH_DESKTOP_PUSH.bat: monitor alert/settings files, render/data, state_backup.json, state_manifest.json, and watchlist.json. Test caches, logs, temporary workbooks, FX status/temp files, and environment files are also excluded.
-- IMPORTANT: checked-in FX Weekend settings are enabled=true, account_modes=["live"], and dry_run=false. Deploying this enabled Render executor can close open OANDA Live positions after the configured Brisbane cutoff. Confirm the Render Live credentials and intended schedule before deployment.
+Safety warning
+- Checked-in FX Weekend settings are enabled=true, account_modes=["demo","live"], and dry_run=false.
+- Deploying an enabled executor with valid Live OANDA credentials can close open Live positions after the configured Brisbane cutoff. Confirm the intended Live credentials, account selection, and schedule before deployment.
 
-Completion workflow:
-- Run repository-root PATCH_DESKTOP_PUSH.bat next.
-- Do not treat the task as published or complete unless the batch succeeds and verifies local HEAD equals origin/master.
+Mandatory completion step
+- Run repository-root PATCH_DESKTOP_PUSH.bat.
+- Do not report completion unless it succeeds and proves local HEAD equals origin/master.

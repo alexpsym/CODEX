@@ -13,10 +13,46 @@ from shared.env_bootstrap import load_master_env
 
 ENV_INFO = load_master_env()
 ENV_PATH = Path(ENV_INFO.get("loaded_file") or ".env")
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 import requests
 
 LOGGER = logging.getLogger(__name__)
+
+FXWEEKEND_SETTINGS_SCHEMA_VERSION = 1
+FXWEEKEND_DEFAULT_ACCOUNT_MODES = ("demo", "live")
+
+
+def upgrade_fxweekend_settings_schema(
+    data: Any,
+) -> Tuple[Dict[str, Any], bool]:
+    """Upgrade legacy FX Weekend settings without resetting current choices.
+
+    Schema-less and older payloads predate Demo coverage, so their selected
+    account modes are upgraded once to Demo + Live. Once the current schema is
+    present, the user's selected subset (including an empty subset) is retained.
+    """
+
+    source = dict(data) if isinstance(data, dict) else {}
+    try:
+        source_version = int(source.get("schema_version") or 0)
+    except (TypeError, ValueError):
+        source_version = 0
+    schema_migrated = source_version < FXWEEKEND_SETTINGS_SCHEMA_VERSION
+
+    upgraded = dict(source)
+    if schema_migrated:
+        upgraded["schema_version"] = FXWEEKEND_SETTINGS_SCHEMA_VERSION
+        upgraded["account_modes"] = list(FXWEEKEND_DEFAULT_ACCOUNT_MODES)
+        return upgraded, True
+
+    raw_modes = upgraded.get("account_modes")
+    if not isinstance(raw_modes, (list, tuple, set)):
+        raw_modes = FXWEEKEND_DEFAULT_ACCOUNT_MODES
+    selected = {str(item).strip().lower() for item in raw_modes}
+    upgraded["account_modes"] = [
+        mode for mode in FXWEEKEND_DEFAULT_ACCOUNT_MODES if mode in selected
+    ]
+    return upgraded, False
 
 
 def _credential_suffix(mode: str) -> str:

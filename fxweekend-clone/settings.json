@@ -1,5 +1,6 @@
 {
   "account_modes": [
+    "demo",
     "live"
   ],
   "check_interval_seconds": 60,
@@ -12,5 +13,6 @@
   "enabled": true,
   "instrument_allowlist": [],
   "max_retry_backoff_seconds": 300,
+  "schema_version": 1,
   "trigger_weekday": 5
 }

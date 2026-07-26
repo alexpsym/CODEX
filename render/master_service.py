@@ -125,7 +125,13 @@ from shared.symbol_resolution import (
     resolve_bybit_symbol_from_choices,
 )
 from shared.atomic_json import write_json_file
-from shared.oanda_api import OandaAPIError, resolve_account_config as resolve_oanda_account_config
+from shared.oanda_api import (
+    FXWEEKEND_DEFAULT_ACCOUNT_MODES,
+    FXWEEKEND_SETTINGS_SCHEMA_VERSION,
+    OandaAPIError,
+    resolve_account_config as resolve_oanda_account_config,
+    upgrade_fxweekend_settings_schema,
+)
 from render.dropbox_sync import download_bytes, list_excel_files, upload_bytes
 from render import dropbox_state_store
 from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, read_master_journal_source, update_master_journal_workbook_data_only, refresh_master_journal_derived_sheets, stable_row_id, SHEET_ORDER, REPORT_YEARLY_SHEET, expected_report_sheet_names, _get_all_trades_sheet, _get_trade_log_sheet, _trade_log_header_map, _trade_log_data_start_row, _find_instrument_leaders_table, LEADER_LABEL_TO_KEY, _repair_or_flag_zero_trade_qty, _canonicalize_and_dedupe_balances, _trade_execution_fingerprint, _trade_row_source_rank, _dedupe_trade_rows_by_execution, _instrument_averages_header_map, INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, INSTRUMENT_AVERAGES_DATA_START_ROW, _result_percentage_totals_by_market, _risk_of_ruin_by_account, _stats1_sheet, _stats2_sheet, _symbols_sheet, STATS1_SHEET, STATS2_SHEET, SYMBOLS_SHEET, _parse_duration_text, _duration_ddhhmmss_cell_to_seconds, _is_ddhhmmss_number_format, STOP_RECOMMENDATION_HEADER, TARGET_RECOMMENDATION_HEADER, _distance_recommendation_summary, _stop_recommendation_payload, _apply_recommendation_cell_style, _ensure_dashboard_requested_metric_rows, _stats1_market_columns, _stats1_section_bounds, balance_drawdown_metrics
@@ -303,21 +309,6 @@ def _profile_allows_script(script_name: str) -> bool:
     return name in LOCAL_ALLOWED_APPS
 
 
-def _render_fxweekend_base_url() -> str:
-    return str(
-        os.getenv("RENDER_FXWEEKEND_BASE_URL")
-        or os.getenv("RENDER_CALCULATOR_BASE_URL")
-        or ""
-    ).strip().rstrip("/")
-
-
-def _render_fxweekend_page_url() -> str:
-    base_url = _render_fxweekend_base_url()
-    if not base_url:
-        return "/fx-weekend-render-configuration-error"
-    return f"{base_url}/apps/fxweekend-clone"
-
-
 def _profile_main_buttons() -> List[Dict[str, object]]:
     buttons: List[Dict[str, object]] = [
         {"id": "calculator", "name": "calculator", "label": "Calculator", "open_url": "/merged/calculator", "dashboard_main_view": True},
@@ -327,12 +318,10 @@ def _profile_main_buttons() -> List[Dict[str, object]]:
         if "bybit_trigger_bounce_trader" in RENDER_ALLOWED_APPS:
             buttons.append({"id": "bounce-trader", "name": "bounce-trader", "label": "Bounce Trader", "open_url": "/merged/bounce-trader", "dashboard_main_view": True})
     elif APP_PROFILE == "local":
-        render_fxweekend_url = _render_fxweekend_page_url()
         buttons.extend(
             [
                 {"id": "trading-journal", "name": "trading-journal", "label": "Journal", "open_url": "/dashboard/trading-journal", "dashboard_main_view": True},
                 {"id": "monitor", "name": "monitor", "label": "Scanner", "open_url": "/merged/monitor", "dashboard_main_view": True},
-                {"id": "fxweekend", "name": "fxweekend", "label": "FX Weekend (Render)", "open_url": render_fxweekend_url, "dashboard_main_view": True, "remote_owned": True},
                 {"id": "ivindicator-clone", "name": "ivindicator-clone", "label": "IV Indicator", "open_url": "/apps/ivindicator-clone", "dashboard_main_view": True},
                 {"id": "spreads-clone", "name": "spreads-clone", "label": "Spreads", "open_url": "/apps/spreads-clone", "dashboard_main_view": True},
             ]
@@ -702,6 +691,22 @@ TRADING_JOURNAL_IMPORT_STATUS: Dict[str, object] = {
 }
 TRADING_JOURNAL_SYNC_TASK: Optional[asyncio.Task] = None
 TRADING_JOURNAL_SYNC_THREAD: Optional[threading.Thread] = None
+TRADING_JOURNAL_EQUITY_REFRESH_LOCK = threading.RLock()
+TRADING_JOURNAL_EQUITY_REFRESH_TASK: Optional[asyncio.Task] = None
+TRADING_JOURNAL_EQUITY_REFRESH_STATE: Dict[str, object] = {
+    "running": False,
+    "pending": False,
+    "ok": None,
+    "error": None,
+    "message": "",
+    "reason": "",
+    "refresh_id": "",
+    "started_at": None,
+    "finished_at": None,
+    "requested_source_fingerprints": None,
+    "snapshot_id": "",
+    "snapshot_fingerprint": "",
+}
 TRADING_JOURNAL_SYNC_LOGGER = logging.getLogger("uvicorn.error")
 TRADING_JOURNAL_SYNC_STALE_SECONDS = max(10, int(os.getenv("TRADING_JOURNAL_SYNC_STALE_SECONDS", "90") or "90"))
 TRADING_JOURNAL_SYNC_ABANDONED_SECONDS = max(5, int(os.getenv("TRADING_JOURNAL_SYNC_ABANDONED_SECONDS", "15") or "15"))
@@ -1384,7 +1389,181 @@ def _build_authoritative_trading_journal_diagnostics_snapshot(items: List[Dict[s
 
 _TRADING_JOURNAL_VIEW_CACHE: Dict[str, object] = {"key": None, "payload": None}
 _PENDING_MANUAL_SYNC_ROWS: List[Dict[str, object]] = []
-TRADING_JOURNAL_VIEW_CACHE_VERSION = 5
+TRADING_JOURNAL_VIEW_CACHE_VERSION = 6
+TRADING_JOURNAL_EQUITY_CACHE_SCHEMA_VERSION = 1
+TRADING_JOURNAL_EQUITY_ACCOUNTS: Tuple[str, ...] = (
+    "BINANCE",
+    "BYBIT",
+    "OANDA DEMO",
+    "OANDA LIVE",
+    "PEPPERSTONE DEMO",
+    "PEPPERSTONE LIVE",
+)
+
+
+def _equity_account_key(value: object) -> str:
+    if isinstance(value, dict):
+        raw = (
+            value.get("account_label")
+            or value.get("account")
+            or value.get("label")
+            or value.get("provider_account")
+            or ""
+        )
+    else:
+        raw = value
+    normalized = re.sub(r"\s+", " ", re.sub(r"[_-]+", " ", str(raw or "").strip())).upper()
+    aliases = {
+        "BINANCE": "BINANCE",
+        "BYBIT": "BYBIT",
+        "BYBIT LIVE": "BYBIT",
+        "OANDA DEMO": "OANDA DEMO",
+        "OANDA LIVE": "OANDA LIVE",
+        "PEPPERSTONE DEMO": "PEPPERSTONE DEMO",
+        "PEPPERSTONE LIVE": "PEPPERSTONE LIVE",
+    }
+    return aliases.get(normalized, "")
+
+
+def _equity_point_counts(items: object, balances: object) -> Dict[str, int]:
+    balance_currencies: Dict[str, str] = {}
+    for balance in balances if isinstance(balances, list) else []:
+        if not isinstance(balance, dict):
+            continue
+        account = _equity_account_key(balance)
+        currency = str(balance.get("currency") or balance.get("account_currency") or "").strip().upper()
+        if account and currency:
+            balance_currencies[account] = currency
+
+    points: Dict[str, Dict[str, Tuple[float, str]]] = {
+        account: {} for account in TRADING_JOURNAL_EQUITY_ACCOUNTS
+    }
+    for row in items if isinstance(items, list) else []:
+        if not isinstance(row, dict):
+            continue
+        account = _equity_account_key(row)
+        if not account or _is_test_trade_value(row.get("is_test_trade")):
+            continue
+        row_type = re.sub(
+            r"\s+",
+            "_",
+            str(row.get("row_type") or "trade").strip().lower(),
+        )
+        cashflow_balance = _to_float(row.get("cashflow_new_balance"))
+        valid_cashflow = row_type == "cashflow" and cashflow_balance is not None
+        if row_type == "monthly_aud_reval" or (row_type != "trade" and not valid_cashflow):
+            continue
+        timestamp = _timestamp_epoch_seconds(row.get("close_time") or row.get("open_time"))
+        if not math.isfinite(timestamp):
+            continue
+        balance = _to_float(row.get("analysis_balance_after_trade"))
+        if balance is None:
+            balance = _to_float(row.get("balance_after_trade"))
+        if balance is None and valid_cashflow:
+            balance = cashflow_balance
+        currency = str(
+            row.get("balance_after_trade_currency")
+            or row.get("account_currency")
+            or row.get("currency")
+            or balance_currencies.get(account)
+            or ""
+        ).strip().upper()
+        if balance is None or not currency:
+            continue
+        stable_identity = str(
+            row.get("id") or row.get("row_id") or row.get("stable_row_id") or ""
+        ).strip()
+        identity = stable_identity or f"{account}|{timestamp}|{balance}|{currency}"
+        points[account][identity] = (timestamp, currency)
+
+    counts: Dict[str, int] = {}
+    for account in TRADING_JOURNAL_EQUITY_ACCOUNTS:
+        ordered = sorted(points[account].values(), key=lambda point: point[0])
+        latest_currency = ordered[-1][1] if ordered else ""
+        counts[account] = len([point for point in ordered if point[1] == latest_currency])
+    return counts
+
+
+def _stable_json_sha256(value: object) -> str:
+    safe = _json_safe(value)
+    return hashlib.sha256(
+        json.dumps(
+            safe,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _attach_trading_journal_equity_metadata(payload: Dict[str, object]) -> Dict[str, object]:
+    generated_at = str(payload.get("generated_at") or _utc_now_iso())
+    payload["generated_at"] = generated_at
+    snapshot_id = uuid4().hex
+    source_fingerprints = payload.get("source_fingerprints")
+    source_fingerprint_sha256 = _stable_json_sha256(source_fingerprints)
+    point_counts = _equity_point_counts(payload.get("items"), payload.get("balances"))
+    snapshot_fingerprint = _stable_json_sha256(
+        {
+            "snapshot_id": snapshot_id,
+            "generated_at": generated_at,
+            "source_fingerprint_sha256": source_fingerprint_sha256,
+            "point_counts": point_counts,
+        }
+    )
+    payload["snapshot_id"] = snapshot_id
+    payload["snapshot_fingerprint"] = snapshot_fingerprint
+    payload["equity_cache"] = {
+        "schema_version": TRADING_JOURNAL_EQUITY_CACHE_SCHEMA_VERSION,
+        "verified": True,
+        "verified_at": generated_at,
+        "source_fingerprint_sha256": source_fingerprint_sha256,
+        "point_counts": point_counts,
+    }
+    return payload
+
+
+def _trading_journal_snapshot_freshness(
+    snapshot: object,
+    current_fingerprints: Optional[Dict[str, object]] = None,
+) -> Dict[str, object]:
+    reasons: List[str] = []
+    if not isinstance(snapshot, dict):
+        return {"current": False, "reasons": ["snapshot_missing"], "point_counts": {}}
+    if int(snapshot.get("cache_version") or 0) != TRADING_JOURNAL_VIEW_CACHE_VERSION:
+        reasons.append("cache_version_incompatible")
+    fingerprints = (
+        current_fingerprints
+        if isinstance(current_fingerprints, dict)
+        else _journal_source_fingerprint()
+    )
+    if snapshot.get("source_fingerprints") != fingerprints:
+        reasons.append("source_fingerprint_stale")
+    equity_meta = snapshot.get("equity_cache")
+    if not isinstance(equity_meta, dict):
+        reasons.append("equity_proof_missing")
+        equity_meta = {}
+    else:
+        if int(equity_meta.get("schema_version") or 0) != TRADING_JOURNAL_EQUITY_CACHE_SCHEMA_VERSION:
+            reasons.append("equity_schema_incompatible")
+        if equity_meta.get("verified") is not True:
+            reasons.append("equity_not_verified")
+        expected_source_hash = _stable_json_sha256(snapshot.get("source_fingerprints"))
+        if str(equity_meta.get("source_fingerprint_sha256") or "") != expected_source_hash:
+            reasons.append("equity_source_fingerprint_mismatch")
+    actual_counts = _equity_point_counts(snapshot.get("items"), snapshot.get("balances"))
+    if equity_meta.get("point_counts") != actual_counts:
+        reasons.append("equity_point_coverage_mismatch")
+    if not str(snapshot.get("snapshot_id") or "").strip():
+        reasons.append("snapshot_id_missing")
+    if not str(snapshot.get("snapshot_fingerprint") or "").strip():
+        reasons.append("snapshot_fingerprint_missing")
+    return {
+        "current": not reasons,
+        "reasons": reasons,
+        "point_counts": actual_counts,
+        "current_fingerprints": fingerprints,
+    }
 
 
 def _source_file_fingerprint(path: Path) -> Dict[str, object]:
@@ -1516,6 +1695,224 @@ def _invalidate_trading_journal_view_snapshot() -> None:
             TRADING_JOURNAL_VIEW_CACHE_PATH.unlink()
     except Exception as exc:
         BYBIT_LOGGER.warning("Trading journal view cache invalidation failed: %s", exc)
+
+
+def _reconcile_trading_journal_equity_refresh_state_locked() -> None:
+    task = TRADING_JOURNAL_EQUITY_REFRESH_TASK
+    pending = bool(
+        TRADING_JOURNAL_EQUITY_REFRESH_STATE.get("running")
+        or TRADING_JOURNAL_EQUITY_REFRESH_STATE.get("pending")
+    )
+    active_task = isinstance(task, asyncio.Task) and not task.done()
+    if not pending or active_task:
+        return
+
+    if isinstance(task, asyncio.Task) and task.cancelled():
+        error = "Equity cache build was cancelled."
+    elif isinstance(task, asyncio.Task):
+        try:
+            task_error = task.exception()
+        except asyncio.CancelledError:
+            task_error = None
+            error = "Equity cache build was cancelled."
+        except Exception as exc:
+            task_error = exc
+            error = f"Equity cache task status could not be read: {exc}"
+        else:
+            error = (
+                f"Equity cache build stopped unexpectedly: {task_error}"
+                if task_error is not None
+                else "Equity cache build ended without publishing a terminal status."
+            )
+    else:
+        error = "Equity cache build has no active task."
+
+    TRADING_JOURNAL_EQUITY_REFRESH_STATE.update(
+        {
+            "running": False,
+            "pending": False,
+            "ok": False,
+            "error": error,
+            "message": "Equity cache build stopped before completion.",
+            "finished_at": _utc_now_iso(),
+        }
+    )
+
+
+def _trading_journal_equity_refresh_state_snapshot() -> Dict[str, object]:
+    with TRADING_JOURNAL_EQUITY_REFRESH_LOCK:
+        _reconcile_trading_journal_equity_refresh_state_locked()
+        state = dict(TRADING_JOURNAL_EQUITY_REFRESH_STATE)
+        task = TRADING_JOURNAL_EQUITY_REFRESH_TASK
+        state["active_task_known"] = bool(
+            isinstance(task, asyncio.Task) and not task.done()
+        )
+        safe = _json_safe(state)
+        return safe if isinstance(safe, dict) else state
+
+
+def _set_trading_journal_equity_refresh_state(**updates: object) -> Dict[str, object]:
+    with TRADING_JOURNAL_EQUITY_REFRESH_LOCK:
+        TRADING_JOURNAL_EQUITY_REFRESH_STATE.update(updates)
+        safe = _json_safe(TRADING_JOURNAL_EQUITY_REFRESH_STATE)
+        if isinstance(safe, dict):
+            TRADING_JOURNAL_EQUITY_REFRESH_STATE.clear()
+            TRADING_JOURNAL_EQUITY_REFRESH_STATE.update(safe)
+        return dict(TRADING_JOURNAL_EQUITY_REFRESH_STATE)
+
+
+async def _run_trading_journal_equity_refresh_job(
+    *,
+    reason: str,
+    refresh_id: str,
+) -> None:
+    _set_trading_journal_equity_refresh_state(
+        running=True,
+        pending=True,
+        ok=None,
+        error=None,
+        message="Building current equity cache from Trading Journal.xlsx…",
+        reason=reason,
+        refresh_id=refresh_id,
+        started_at=_utc_now_iso(),
+        finished_at=None,
+    )
+    try:
+        snapshot: Dict[str, object] = {}
+        freshness: Dict[str, object] = {"current": False}
+        for attempt in range(2):
+            snapshot = await asyncio.to_thread(
+                _build_trading_journal_view_snapshot,
+                force=True,
+                skip_external_balances=True,
+                skip_live_account_refresh=True,
+                sync_id=refresh_id,
+                sync_caller=f"equity_cache:{reason}",
+            )
+            current_fingerprints = _journal_source_fingerprint()
+            freshness = _trading_journal_snapshot_freshness(
+                snapshot,
+                current_fingerprints,
+            )
+            if freshness.get("current") is True:
+                break
+            if "source_fingerprint_stale" not in list(freshness.get("reasons") or []):
+                break
+            APP_LOGGER.info(
+                "trading_journal_equity_refresh_retry refresh_id=%s reason=%s attempt=%s freshness_reasons=%s",
+                refresh_id,
+                reason,
+                attempt + 1,
+                freshness.get("reasons"),
+            )
+        if freshness.get("current") is not True:
+            raise RuntimeError(
+                "Equity cache build did not produce a current authoritative snapshot: "
+                + ", ".join(str(item) for item in (freshness.get("reasons") or []))
+            )
+        _set_trading_journal_equity_refresh_state(
+            running=False,
+            pending=False,
+            ok=True,
+            error=None,
+            message="Equity cache is current.",
+            finished_at=_utc_now_iso(),
+            snapshot_id=str(snapshot.get("snapshot_id") or ""),
+            snapshot_fingerprint=str(snapshot.get("snapshot_fingerprint") or ""),
+            point_counts=freshness.get("point_counts") or {},
+            completed_source_fingerprints=snapshot.get("source_fingerprints"),
+        )
+    except asyncio.CancelledError:
+        _set_trading_journal_equity_refresh_state(
+            running=False,
+            pending=False,
+            ok=False,
+            error="Equity cache build was cancelled.",
+            message="Equity cache build stopped before completion.",
+            finished_at=_utc_now_iso(),
+        )
+        raise
+    except Exception as exc:
+        APP_LOGGER.exception(
+            "trading_journal_equity_refresh_failed refresh_id=%s reason=%s",
+            refresh_id,
+            reason,
+        )
+        _set_trading_journal_equity_refresh_state(
+            running=False,
+            pending=False,
+            ok=False,
+            error=str(exc),
+            message="Equity cache build failed.",
+            finished_at=_utc_now_iso(),
+        )
+
+
+def _queue_trading_journal_equity_refresh_if_idle(
+    reason: str,
+    *,
+    current_fingerprints: Optional[Dict[str, object]] = None,
+) -> Dict[str, object]:
+    global TRADING_JOURNAL_EQUITY_REFRESH_TASK
+    with TRADING_JOURNAL_EQUITY_REFRESH_LOCK:
+        task = TRADING_JOURNAL_EQUITY_REFRESH_TASK
+        if isinstance(task, asyncio.Task) and not task.done():
+            return _trading_journal_equity_refresh_state_snapshot()
+        refresh_id = f"equity-{uuid4().hex[:12]}"
+        requested_fingerprints = (
+            current_fingerprints
+            if isinstance(current_fingerprints, dict)
+            else _journal_source_fingerprint()
+        )
+        TRADING_JOURNAL_EQUITY_REFRESH_STATE.update(
+            {
+                "running": True,
+                "pending": True,
+                "ok": None,
+                "error": None,
+                "message": "Equity cache build queued…",
+                "reason": str(reason or "equity_refresh"),
+                "refresh_id": refresh_id,
+                "started_at": _utc_now_iso(),
+                "finished_at": None,
+                "requested_source_fingerprints": requested_fingerprints,
+                "snapshot_id": "",
+                "snapshot_fingerprint": "",
+                "point_counts": {},
+            }
+        )
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError as exc:
+            TRADING_JOURNAL_EQUITY_REFRESH_STATE.update(
+                {
+                    "running": False,
+                    "pending": False,
+                    "ok": False,
+                    "error": str(exc),
+                    "message": "Equity cache build could not be queued.",
+                    "finished_at": _utc_now_iso(),
+                }
+            )
+            return _trading_journal_equity_refresh_state_snapshot()
+        TRADING_JOURNAL_EQUITY_REFRESH_TASK = loop.create_task(
+            _run_trading_journal_equity_refresh_job(
+                reason=str(reason or "equity_refresh"),
+                refresh_id=refresh_id,
+            )
+        )
+        return _trading_journal_equity_refresh_state_snapshot()
+
+
+async def _start_master_journal_equity_cache_after_restore() -> None:
+    await _wait_for_startup_restore_signal(
+        timeout=STARTUP_RESTORE_WAIT_TIMEOUT_SECONDS,
+        timeout_warning="EQUITY_CACHE_STARTUP_WAIT_TIMEOUT proceeding without restore signal",
+    )
+    _queue_trading_journal_equity_refresh_if_idle("startup_master_journal")
+    task = TRADING_JOURNAL_EQUITY_REFRESH_TASK
+    if isinstance(task, asyncio.Task) and task is not asyncio.current_task():
+        await asyncio.shield(task)
 
 
 def _ensure_trading_journal_sqlite_schema(conn: sqlite3.Connection) -> None:
@@ -1773,7 +2170,8 @@ def _build_trading_journal_view_snapshot(
     )
     existing = _load_trading_journal_view_snapshot()
     fingerprint = _journal_source_fingerprint()
-    if not local_only and not force and isinstance(existing, dict) and existing.get("source_fingerprints") == fingerprint:
+    existing_freshness = _trading_journal_snapshot_freshness(existing, fingerprint)
+    if not local_only and not force and existing_freshness.get("current") is True:
         APP_LOGGER.info("trading_journal_snapshot_build_done sync_id=%s caller=%s elapsed=%.6fs cached=True", snapshot_sync_id, snapshot_caller, time.perf_counter() - snapshot_started)
         return existing
     source_mode_runtime = str(os.getenv("TRADING_JOURNAL_SOURCE", TRADING_JOURNAL_SOURCE) or "").strip().lower()
@@ -1856,8 +2254,17 @@ def _build_trading_journal_view_snapshot(
             source_payload.get("cashflow_ledger") or {},
             _PENDING_MANUAL_SYNC_ROWS or [],
         )
-        excel_balance_seeds = [] if skip_external_balances else _get_excel_account_balances()
-        timeline = _build_journal_balance_timelines(trade_items, merged_ledger, excel_balance_seeds)
+        source_balance_seeds = _snapshot_balance_items(source_payload)
+        external_balance_seeds = [] if skip_external_balances else _get_excel_account_balances()
+        timeline_balance_seeds = [
+            *[dict(item) for item in source_balance_seeds],
+            *[dict(item) for item in external_balance_seeds if isinstance(item, dict)],
+        ]
+        timeline = _build_journal_balance_timelines(
+            trade_items,
+            merged_ledger,
+            timeline_balance_seeds,
+        )
         _finish_snapshot_substage("balance_timeline_build")
         trade_items = [_backfill_trade_row_context_fields(dict(r)) if isinstance(r, dict) else r for r in (timeline.get("rows") if isinstance(timeline.get("rows"), list) else trade_items)]
         _finish_snapshot_substage("trade_context_backfill_post_timeline")
@@ -1911,6 +2318,7 @@ def _build_trading_journal_view_snapshot(
                 else:
                     normalized_items.append(_normalize_monthly_aud_reval_snapshot_row(item))
             safe_result["items"] = normalized_items
+        _attach_trading_journal_equity_metadata(safe_result)
         _save_trading_journal_view_snapshot(safe_result)
         _finish_snapshot_substage("view_cache_write")
         _persist_trading_journal_sqlite(safe_result)
@@ -2087,6 +2495,7 @@ def _build_trading_journal_view_snapshot(
             else:
                 normalized_items.append(_normalize_monthly_aud_reval_snapshot_row(item))
         safe_payload["items"] = normalized_items
+    _attach_trading_journal_equity_metadata(safe_payload)
     _save_trading_journal_view_snapshot(safe_payload)
     _persist_trading_journal_sqlite(safe_payload)
     _TRADING_JOURNAL_VIEW_CACHE["key"] = "snapshot"
@@ -2296,6 +2705,9 @@ _STATE_SYNC_STATUS: Dict[str, object] = {
     "watchlist_rollback_error": None,
     "fxweekend_state_indeterminate": False,
     "fxweekend_rollback_error": None,
+    "fxweekend_settings_schema_version": None,
+    "fxweekend_settings_schema_migrated": False,
+    "fxweekend_durable_verified": False,
     "remote_backup_hash": None,
     "pending_upload": False,
     "backup_path": str(STATE_BACKUP_LOCAL_PATH) if _STATE_BACKUP_LOCAL_ACTIVE else DROPBOX_BACKUP_PATH,
@@ -9409,6 +9821,10 @@ def _extract_remote_backup_summary(raw: bytes) -> Dict[str, object]:
         if watchlist_valid
         else []
     )
+    fxweekend_settings_present = "fxweekend_settings" in data
+    fxweekend_settings_valid = isinstance(data.get("fxweekend_settings"), dict)
+    fxweekend_status_present = "fxweekend_status" in data
+    fxweekend_status_valid = isinstance(data.get("fxweekend_status"), dict)
     summary = {
         "ok": True,
         "backup_path": _state_backup_display_path(),
@@ -9421,6 +9837,20 @@ def _extract_remote_backup_summary(raw: bytes) -> Dict[str, object]:
         "oanda_alert_count": len(oanda_alerts),
         "bybit_alert_ids": sorted(str(item.get("id") or "") for item in bybit_alerts),
         "oanda_alert_ids": sorted(str(item.get("id") or "") for item in oanda_alerts),
+        "fxweekend_settings_present": fxweekend_settings_present,
+        "fxweekend_settings_valid": fxweekend_settings_valid,
+        "fxweekend_settings": (
+            copy.deepcopy(data.get("fxweekend_settings"))
+            if fxweekend_settings_valid
+            else None
+        ),
+        "fxweekend_status_present": fxweekend_status_present,
+        "fxweekend_status_valid": fxweekend_status_valid,
+        "fxweekend_status": (
+            copy.deepcopy(data.get("fxweekend_status"))
+            if fxweekend_status_valid
+            else None
+        ),
         "hash": hashlib.sha256(raw).hexdigest(),
         "downloaded_at": _utc_now_iso(),
     }
@@ -9439,6 +9869,8 @@ async def _upload_and_verify_state_backup_now(
     *,
     expected_watchlist: Optional[List[str]] = None,
     expected_alert_probe: Optional[Dict[str, object]] = None,
+    expected_fxweekend_settings: Optional[Dict[str, object]] = None,
+    expected_fxweekend_status: Optional[Dict[str, object]] = None,
     timeout: float = 10.0,
 ) -> Dict[str, object]:
     status = _state_sync_status_snapshot()
@@ -9493,6 +9925,30 @@ async def _upload_and_verify_state_backup_now(
                 raise ValueError("Remote Bybit alert verification mismatch.")
             if expected_oanda != list(remote_summary.get("oanda_alert_ids") or []):
                 raise ValueError("Remote OANDA alert verification mismatch.")
+        if isinstance(expected_fxweekend_settings, dict):
+            if remote_summary.get("fxweekend_settings_present") is not True:
+                raise ValueError(
+                    "Remote FX Weekend settings verification mismatch; key is missing."
+                )
+            if remote_summary.get("fxweekend_settings_valid") is not True:
+                raise ValueError(
+                    "Remote FX Weekend settings verification mismatch; value must be an object."
+                )
+            if remote_summary.get("fxweekend_settings") != expected_fxweekend_settings:
+                raise ValueError(
+                    "Remote FX Weekend settings verification mismatch."
+                )
+        if isinstance(expected_fxweekend_status, dict):
+            if remote_summary.get("fxweekend_status_present") is not True:
+                raise ValueError(
+                    "Remote FX Weekend status verification mismatch; key is missing."
+                )
+            if remote_summary.get("fxweekend_status_valid") is not True:
+                raise ValueError(
+                    "Remote FX Weekend status verification mismatch; value must be an object."
+                )
+            if remote_summary.get("fxweekend_status") != expected_fxweekend_status:
+                raise ValueError("Remote FX Weekend status verification mismatch.")
         status = _update_state_sync_status(
             pending_upload=False,
             last_upload_at=_utc_now_iso(),
@@ -9676,6 +10132,9 @@ async def _dropbox_restore_state_backup_on_startup() -> None:
         restore_complete=False,
         restore_status="pending",
         restore_error=None,
+        fxweekend_settings_schema_version=None,
+        fxweekend_settings_schema_migrated=False,
+        fxweekend_durable_verified=False,
         backup_path=(str(STATE_BACKUP_LOCAL_PATH) if local_repo_mode else DROPBOX_BACKUP_PATH),
     )
     def _legacy_local_state_for_key(key: str) -> object:
@@ -9864,6 +10323,17 @@ async def _dropbox_restore_state_backup_on_startup() -> None:
 
     try:
         bootstrap = await _bootstrap_dropbox_primary_state()
+        fxweekend_durability: Dict[str, object] = {
+            "schema_version": None,
+            "schema_migrated": False,
+            "durable_verified": False,
+        }
+        if APP_PROFILE == "render" and not list(bootstrap.get("invalid") or []):
+            fxweekend_durability = (
+                await _upgrade_and_verify_fxweekend_settings_after_restore(
+                    bootstrap
+                )
+            )
         if local_repo_mode:
             try:
                 payload = await asyncio.to_thread(_load_local_state_backup)
@@ -9938,6 +10408,15 @@ async def _dropbox_restore_state_backup_on_startup() -> None:
             watchlist_rollback_error=None,
             fxweekend_state_indeterminate=False,
             fxweekend_rollback_error=None,
+            fxweekend_settings_schema_version=fxweekend_durability.get(
+                "schema_version"
+            ),
+            fxweekend_settings_schema_migrated=bool(
+                fxweekend_durability.get("schema_migrated")
+            ),
+            fxweekend_durable_verified=bool(
+                fxweekend_durability.get("durable_verified")
+            ),
         )
     except FileNotFoundError:
         BYBIT_LOGGER.info("Dropbox restore skipped; no backup found at %s", DROPBOX_BACKUP_PATH)
@@ -9948,6 +10427,7 @@ async def _dropbox_restore_state_backup_on_startup() -> None:
             last_restore_at=_utc_now_iso(),
             remote_backup_hash=None,
             per_file_state_ready=False,
+            fxweekend_durable_verified=False,
         )
     except Exception as exc:  # pragma: no cover - startup failure
         BYBIT_LOGGER.error("Dropbox restore failed: %s", exc)
@@ -9956,6 +10436,8 @@ async def _dropbox_restore_state_backup_on_startup() -> None:
             restore_status="failed",
             restore_error=str(exc),
             last_restore_at=_utc_now_iso(),
+            per_file_state_ready=False,
+            fxweekend_durable_verified=False,
         )
     finally:
         _STARTUP_STATE_RESTORE_DONE.set()
@@ -10491,13 +10973,14 @@ _LAST_AUTOSTART_UNAVAILABLE: Dict[str, str] = {}
 FXWEEKEND_SETTINGS_PATH = BASE_DIR / "fxweekend-clone" / "settings.json"
 FXWEEKEND_STATUS_PATH = BASE_DIR / "fxweekend-clone" / "status.json"
 FXWEEKEND_DEFAULT_SETTINGS: Dict[str, object] = {
+    "schema_version": FXWEEKEND_SETTINGS_SCHEMA_VERSION,
     "enabled": True,
     "trigger_weekday": 5,
     "cutoff_hour_dst": 5,
     "cutoff_hour_standard": 6,
     "cutoff_time_dst": "05:00",
     "cutoff_time_standard": "06:00",
-    "account_modes": ["live"],
+    "account_modes": list(FXWEEKEND_DEFAULT_ACCOUNT_MODES),
     "check_interval_seconds": 60,
     "max_retry_backoff_seconds": 300,
     "close_method": "positions",
@@ -10559,7 +11042,11 @@ async def _persist_fxweekend_config_with_rollback(
             raise ValueError("FX Weekend status response did not produce an object.")
         _persist_fxweekend_state_key("fxweekend_settings", durable_settings)
         _persist_fxweekend_state_key("fxweekend_status", durable_status)
-        await _upload_and_verify_state_backup_now(timeout=timeout)
+        await _upload_and_verify_state_backup_now(
+            expected_fxweekend_settings=durable_settings,
+            expected_fxweekend_status=durable_status,
+            timeout=timeout,
+        )
         _update_state_sync_status(
             fxweekend_state_indeterminate=False,
             fxweekend_rollback_error=None,
@@ -10581,7 +11068,11 @@ async def _persist_fxweekend_config_with_rollback(
             except Exception as exc:
                 rollback_errors.append(f"{key} rollback failed: {exc}")
         try:
-            await _upload_and_verify_state_backup_now(timeout=timeout)
+            await _upload_and_verify_state_backup_now(
+                expected_fxweekend_settings=previous_settings,
+                expected_fxweekend_status=previous_status,
+                timeout=timeout,
+            )
         except Exception as exc:
             rollback_errors.append(f"aggregate rollback failed: {exc}")
         rollback_verified = not rollback_errors
@@ -10606,6 +11097,76 @@ async def _persist_fxweekend_config_with_rollback(
             "durable_rollback_verified": rollback_verified,
             "rollback_error": rollback_error,
         }
+
+
+async def _upgrade_and_verify_fxweekend_settings_after_restore(
+    bootstrap: Dict[str, object],
+    *,
+    timeout: float = 10.0,
+) -> Dict[str, object]:
+    """Upgrade authoritative FX settings and verify both durable stores.
+
+    Account selection changes only for legacy schemas. Current-version choices
+    are preserved, but every Render startup still verifies the per-file state
+    and aggregate backup before the executor gate can open.
+    """
+
+    restored_values = bootstrap.get("restored_values")
+    restored_values = (
+        restored_values if isinstance(restored_values, dict) else {}
+    )
+    authoritative = restored_values.get("fxweekend_settings")
+    if not isinstance(authoritative, dict):
+        authoritative = _load_json_file(
+            FXWEEKEND_SETTINGS_PATH, FXWEEKEND_DEFAULT_SETTINGS
+        )
+    if not isinstance(authoritative, dict):
+        raise RuntimeError(
+            "Authoritative FX Weekend settings did not produce an object."
+        )
+
+    previous_settings = copy.deepcopy(authoritative)
+    upgraded, schema_migrated = upgrade_fxweekend_settings_schema(
+        authoritative
+    )
+    previous_status = _load_json_file(FXWEEKEND_STATUS_PATH, {})
+    if not isinstance(previous_status, dict):
+        raise RuntimeError(
+            "Authoritative FX Weekend status did not produce an object."
+        )
+
+    _save_json_file(FXWEEKEND_SETTINGS_PATH, upgraded)
+    durability = await _persist_fxweekend_config_with_rollback(
+        previous_settings,
+        copy.deepcopy(previous_status),
+        timeout=timeout,
+    )
+    if durability.get("ok") is not True:
+        raise RuntimeError(
+            str(
+                durability.get("message")
+                or durability.get("error")
+                or "FX Weekend durable settings verification failed."
+            )
+        )
+
+    local_roundtrip = _load_json_file(FXWEEKEND_SETTINGS_PATH, None)
+    if local_roundtrip != upgraded:
+        raise RuntimeError(
+            "FX Weekend local settings verification failed after migration."
+        )
+    restored_values["fxweekend_settings"] = copy.deepcopy(upgraded)
+    bootstrap["restored_values"] = restored_values
+    try:
+        schema_version = int(upgraded.get("schema_version") or 0)
+    except (TypeError, ValueError):
+        schema_version = 0
+    return {
+        "settings": upgraded,
+        "schema_version": schema_version,
+        "schema_migrated": schema_migrated,
+        "durable_verified": True,
+    }
 
 
 def _persist_fxweekend_status_if_changed() -> None:
@@ -10637,7 +11198,7 @@ def _fxweekend_start_gate() -> Tuple[bool, str]:
         return False, "Durable state synchronization is not enabled for the Render FX Weekend executor."
     if restore_status != "done":
         return False, f"Authoritative FX Weekend state restore is not ready ({restore_status or 'unknown'})."
-    if status.get("per_file_state_ready") is False:
+    if not bool(status.get("per_file_state_ready")):
         missing = ", ".join(str(item) for item in (status.get("missing_state_keys") or []))
         suffix = f": {missing}" if missing else "."
         return False, f"Authoritative FX Weekend per-file state is incomplete{suffix}"
@@ -10646,6 +11207,25 @@ def _fxweekend_start_gate() -> Tuple[bool, str]:
             False,
             str(status.get("fxweekend_rollback_error") or "")
             or "FX Weekend durable settings state is indeterminate after rollback failure.",
+        )
+    if not bool(status.get("fxweekend_durable_verified")):
+        return (
+            False,
+            "FX Weekend per-file and aggregate settings verification is incomplete.",
+        )
+    settings = _load_json_file(
+        FXWEEKEND_SETTINGS_PATH, FXWEEKEND_DEFAULT_SETTINGS
+    )
+    try:
+        schema_version = int(
+            settings.get("schema_version") if isinstance(settings, dict) else 0
+        )
+    except (TypeError, ValueError):
+        schema_version = 0
+    if schema_version < FXWEEKEND_SETTINGS_SCHEMA_VERSION:
+        return (
+            False,
+            "FX Weekend settings schema migration is incomplete.",
         )
     return True, ""
 
@@ -10696,8 +11276,8 @@ def _compute_autostart_scripts() -> List[str]:
     seen: Set[str] = set()
     for name in names:
         if APP_PROFILE != "render" and str(name).strip() == "fxweekend-clone":
-            _LAST_AUTOSTART_UNAVAILABLE[str(name)] = (
-                "FX Weekend execution is Render-owned and cannot autostart locally."
+            AUTOSTART_LOGGER.warning(
+                "Ignoring local FX Weekend autostart target; execution is Render-owned."
             )
             continue
         try:
@@ -10785,7 +11365,11 @@ def _fxweekend_heartbeat_fresh(
         return False
 
 
-def _autostart_component_readiness(name: str) -> Dict[str, object]:
+def _autostart_component_readiness(
+    name: str,
+    *,
+    summary_override: Optional[Dict[str, object]] = None,
+) -> Dict[str, object]:
     try:
         script = script_manager.get(name)
     except HTTPException as exc:
@@ -10801,10 +11385,19 @@ def _autostart_component_readiness(name: str) -> Dict[str, object]:
             "reason": reason,
         }
 
-    summary = script.to_summary()
+    summary = (
+        dict(summary_override)
+        if isinstance(summary_override, dict)
+        else script.to_summary()
+    )
     starting = bool(summary.get("starting"))
     running = bool(summary.get("running"))
-    reason = _script_startup_error(script)
+    reason = str(
+        summary.get("last_start_error")
+        or summary.get("last_exit_reason")
+        or _script_startup_error(script)
+        or ""
+    ).strip()
     component: Dict[str, object] = {
         "name": script.name,
         "label": friendly_script_label(script.name),
@@ -10838,23 +11431,46 @@ def _autostart_component_readiness(name: str) -> Dict[str, object]:
 
     enabled = True
     if script.name == "fxweekend-clone":
-        settings = _load_json_file(FXWEEKEND_SETTINGS_PATH, FXWEEKEND_DEFAULT_SETTINGS)
-        if isinstance(settings, dict):
-            enabled = bool(settings.get("enabled", True))
+        raw_settings = _load_json_file(
+            FXWEEKEND_SETTINGS_PATH, FXWEEKEND_DEFAULT_SETTINGS
+        )
+        settings, _schema_migrated = upgrade_fxweekend_settings_schema(
+            raw_settings
+        )
+        enabled = bool(settings.get("enabled", True))
         component["enabled"] = enabled
         component["blocking"] = bool(enabled and APP_PROFILE == "render")
-        selected_accounts = [
+        selected_set = {
             str(item).strip().lower()
-            for item in ((settings or {}).get("account_modes") or [])
-            if str(item).strip().lower() in {"demo", "live"}
+            for item in (settings.get("account_modes") or [])
+        }
+        selected_accounts = [
+            mode
+            for mode in FXWEEKEND_DEFAULT_ACCOUNT_MODES
+            if mode in selected_set
         ]
         runtime = _load_json_file(FXWEEKEND_STATUS_PATH, {})
         runtime = runtime if isinstance(runtime, dict) else {}
+        runtime_selected_set = {
+            str(item).strip().lower()
+            for item in (runtime.get("selected_accounts") or [])
+        }
+        runtime_selected_accounts = [
+            mode
+            for mode in FXWEEKEND_DEFAULT_ACCOUNT_MODES
+            if mode in runtime_selected_set
+        ]
+        runtime_accounts = (
+            runtime.get("accounts")
+            if isinstance(runtime.get("accounts"), dict)
+            else {}
+        )
         component["selected_accounts"] = selected_accounts
+        component["runtime_selected_accounts"] = runtime_selected_accounts
         component["heartbeat_at"] = runtime.get("heartbeat_at")
         component["last_access_check_at"] = runtime.get("last_access_check_at")
         component["last_verified_flat_at"] = runtime.get("last_verified_flat_at")
-        component["accounts"] = runtime.get("accounts") or {}
+        component["accounts"] = runtime_accounts
         state_sync = _state_sync_status_snapshot()
         component["durable_state_indeterminate"] = bool(
             state_sync.get("fxweekend_state_indeterminate")
@@ -10866,6 +11482,43 @@ def _autostart_component_readiness(name: str) -> Dict[str, object]:
             except OandaAPIError as exc:
                 credential_errors.append(f"{mode}: {exc}")
         component["credential_errors"] = credential_errors
+        missing_runtime_accounts = [
+            mode
+            for mode in selected_accounts
+            if not isinstance(runtime_accounts.get(mode), dict)
+        ]
+        pending_runtime_accounts: List[str] = []
+        account_errors: List[str] = []
+        account_failure_state: Optional[str] = None
+        account_failure_states = {
+            "credential failure",
+            "api failure",
+            "partial closure failure",
+            "missed cutoff/market closed",
+            "retry pending",
+        }
+        for mode in selected_accounts:
+            account = runtime_accounts.get(mode)
+            if not isinstance(account, dict):
+                continue
+            account_state = str(account.get("state") or "").strip()
+            account_state_normalized = account_state.lower()
+            if account_state_normalized in {"", "checking"}:
+                pending_runtime_accounts.append(mode)
+            if account_state_normalized in account_failure_states:
+                account_failure_state = account_failure_state or account_state
+                account_errors.append(
+                    f"{mode}: "
+                    + str(
+                        account.get("last_error")
+                        or runtime.get("last_error")
+                        or account_state
+                        or "account check failed"
+                    )
+                )
+        component["missing_runtime_accounts"] = missing_runtime_accounts
+        component["pending_runtime_accounts"] = pending_runtime_accounts
+        component["account_errors"] = account_errors
         heartbeat_fresh = _fxweekend_heartbeat_fresh(
             settings,
             runtime,
@@ -10913,6 +11566,49 @@ def _autostart_component_readiness(name: str) -> Dict[str, object]:
                     "ready": False,
                     "phase": "credential_failure",
                     "reason": "; ".join(credential_errors),
+                }
+            )
+            return component
+        if runtime_selected_accounts != selected_accounts:
+            component.update(
+                {
+                    "ready": False,
+                    "phase": "account_selection_pending",
+                    "reason": (
+                        "FX Weekend runtime has not loaded the current selected "
+                        "accounts yet."
+                    ),
+                }
+            )
+            return component
+        if account_errors:
+            component.update(
+                {
+                    "ready": False,
+                    "phase": str(
+                        account_failure_state or "account_failure"
+                    ).replace(" ", "_"),
+                    "reason": "; ".join(account_errors),
+                }
+            )
+            return component
+        if missing_runtime_accounts or pending_runtime_accounts:
+            pending_modes = [
+                *missing_runtime_accounts,
+                *[
+                    mode
+                    for mode in pending_runtime_accounts
+                    if mode not in missing_runtime_accounts
+                ],
+            ]
+            component.update(
+                {
+                    "ready": False,
+                    "phase": "account_checks_pending",
+                    "reason": (
+                        "FX Weekend has not completed a current account check "
+                        f"for: {', '.join(pending_modes)}."
+                    ),
                 }
             )
             return component
@@ -11570,13 +12266,18 @@ async def _autostart_scripts() -> None:
         _set_trading_journal_sync_state(
             running=False,
             progress=100,
-            message="Startup journal sync skipped; use Resync to update Trading Journal.xlsx.",
+            message="Startup workbook sync skipped; equity cache build queued.",
             ok=True,
             error=None,
-            result={"startup_sync_skipped": True, "reason": "master_journal_single_file_mode"},
+            result={
+                "startup_sync_skipped": True,
+                "equity_cache_queued": True,
+                "reason": "master_journal_single_file_mode",
+            },
             finished_at=_utc_now_iso(),
         )
         TRADING_JOURNAL_SYNC_TASK = None
+        asyncio.create_task(_start_master_journal_equity_cache_after_restore())
     else:
         TRADING_JOURNAL_SYNC_TASK = asyncio.create_task(_start_startup_recovery_import_after_restore())
     if (not _trading_journal_excel_only_mode()) and (not _master_journal_single_file_mode()):
@@ -25459,9 +26160,6 @@ async def proxy_app(script_name: str, request: Request, path: str = "") -> Respo
         wants_json = "application/json" in accepts
         return _local_only_disabled_response(f"/apps/{script_name}", as_json=wants_json)
     if script_name == "fxweekend-clone" and APP_PROFILE != "render":
-        accepts = str(request.headers.get("accept", "")).lower()
-        if "text/html" in accepts:
-            return RedirectResponse("/fx-weekend-render-configuration-error", status_code=307)
         return JSONResponse(
             {
                 "error": "render_owned_executor",
@@ -26354,25 +27052,6 @@ async def list_scripts() -> JSONResponse:
             row["starting"] = bool(by_name.get("bybit_trigger_bounce_trader", {}).get("starting"))
             row["running"] = bool(by_name.get("bybit_trigger_bounce_trader", {}).get("running"))
         elif btn["name"] == "fxweekend":
-            if APP_PROFILE == "local":
-                configured = bool(_render_fxweekend_base_url())
-                row.update(
-                    {
-                        "starting": False,
-                        "running": configured,
-                        "enabled": configured,
-                        "operational": configured,
-                        "remote_owned": True,
-                        "autostart_expected": False,
-                        "status_detail": (
-                            "Render-owned executor"
-                            if configured
-                            else "Render FX Weekend base URL is not configured"
-                        ),
-                    }
-                )
-                merged.append(row)
-                continue
             fx_row = by_name.get("fxweekend-clone", {})
             row["starting"] = bool(fx_row.get("starting"))
             row["running"] = bool(fx_row.get("running"))
@@ -26380,27 +27059,60 @@ async def list_scripts() -> JSONResponse:
             row["last_start_error"] = fx_row.get("last_start_error")
             row["last_exit_reason"] = fx_row.get("last_exit_reason")
 
-            fx_settings = _load_json_file(FXWEEKEND_SETTINGS_PATH, FXWEEKEND_DEFAULT_SETTINGS)
-            fx_enabled = True
-            if isinstance(fx_settings, dict):
-                fx_enabled = bool(fx_settings.get("enabled", True))
+            fx_component = _autostart_component_readiness(
+                "fxweekend-clone",
+                summary_override=fx_row,
+            )
+            fx_enabled = bool(fx_component.get("enabled", True))
             row["enabled"] = fx_enabled
             row["autostart_expected"] = "fxweekend-clone" in autostart_targets
+            for key in (
+                "phase",
+                "reason",
+                "heartbeat_at",
+                "heartbeat_fresh",
+                "last_access_check_at",
+                "last_verified_flat_at",
+                "selected_accounts",
+                "runtime_selected_accounts",
+                "accounts",
+                "credential_errors",
+                "account_errors",
+                "missing_runtime_accounts",
+                "pending_runtime_accounts",
+            ):
+                if key in fx_component:
+                    row[key] = fx_component[key]
 
             running = bool(row["running"])
             starting = bool(row["starting"])
-            row["operational"] = running and fx_enabled
+            row["operational"] = bool(
+                fx_enabled and fx_component.get("ready")
+            )
 
             if starting:
                 detail = "starting"
-            elif running and fx_enabled:
+            elif row["operational"]:
                 detail = "running and enabled"
             elif running and not fx_enabled:
                 detail = "process running but disabled in settings"
+            elif fx_enabled and str(fx_component.get("reason") or "").strip():
+                component_reason = str(fx_component.get("reason"))
+                detail = (
+                    component_reason
+                    if running
+                    else f"stopped: {component_reason}"
+                )
             else:
                 stop_reason = str(row.get("last_start_error") or row.get("last_exit_reason") or "").strip()
                 detail = f"stopped: {stop_reason}" if stop_reason else "stopped"
             row["status_detail"] = detail
+            if (
+                not row["operational"]
+                and not row.get("last_error")
+                and str(fx_component.get("reason") or "").strip()
+            ):
+                row["last_error"] = str(fx_component.get("reason"))
         elif btn["name"] == "monitor":
             row.update(_merged_monitor_row(by_name, autostart_targets))
         elif str(btn["name"]) in by_name:
@@ -28449,60 +29161,96 @@ async def favicon() -> Response:
     return Response(content=png_bytes, media_type="image/png")
 
 
-@app.get("/fx-weekend-render-configuration-error")
-async def fxweekend_render_configuration_error() -> HTMLResponse:
-    return HTMLResponse(
-        """
-        <!doctype html><html lang="en"><head><meta charset="utf-8">
-        <meta name="viewport" content="width=device-width,initial-scale=1">
-        <title>FX Weekend Render configuration required</title></head>
-        <body style="font-family:system-ui,sans-serif;max-width:760px;margin:48px auto;padding:0 20px">
-        <h1>FX Weekend is owned by Render</h1>
-        <p>The local dashboard will not start a fallback executor.</p>
-        <p>Set <code>RENDER_FXWEEKEND_BASE_URL</code> (or the existing
-        <code>RENDER_CALCULATOR_BASE_URL</code>) to the public Render Master
-        Control base URL, then restart Local Master Control.</p>
-        </body></html>
-        """,
-        status_code=503,
+app.mount("/static", StaticFiles(directory=BASE_DIR / "render" / "static"), name="static")
+
+
+@app.post("/api/trading-journal/equity/refresh")
+async def trading_journal_equity_refresh() -> JSONResponse:
+    current_fingerprints = _journal_source_fingerprint()
+    state = _queue_trading_journal_equity_refresh_if_idle(
+        "manual_equity_refresh",
+        current_fingerprints=current_fingerprints,
+    )
+    pending = bool(state.get("running") or state.get("pending"))
+    payload = {
+        "ok": bool(state.get("ok") is True and not pending),
+        "pending": pending,
+        "message": state.get("message") or "Equity cache build queued.",
+        "error": state.get("error"),
+        "refresh_id": state.get("refresh_id"),
+        "snapshot_id": state.get("snapshot_id"),
+        "snapshot_fingerprint": state.get("snapshot_fingerprint"),
+        "status_url": "/api/trading-journal/equity/refresh/status",
+    }
+    return JSONResponse(
+        _json_safe(payload),
+        status_code=202 if pending else (200 if payload["ok"] else 503),
     )
 
 
-app.mount("/static", StaticFiles(directory=BASE_DIR / "render" / "static"), name="static")
+@app.get("/api/trading-journal/equity/refresh/status")
+async def trading_journal_equity_refresh_status() -> JSONResponse:
+    state = _trading_journal_equity_refresh_state_snapshot()
+    pending = bool(state.get("running") or state.get("pending"))
+    payload = {
+        **state,
+        "ok": bool(state.get("ok") is True and not pending),
+        "pending": pending,
+        "status_url": "/api/trading-journal/equity/refresh/status",
+    }
+    return JSONResponse(
+        _json_safe(payload),
+        status_code=202 if pending else (200 if payload["ok"] else 503),
+    )
+
 
 @app.get("/api/trading-journal")
 async def trading_journal_items(filter: str = "") -> JSONResponse:
     snapshot = _TRADING_JOURNAL_VIEW_CACHE.get("payload") if _TRADING_JOURNAL_VIEW_CACHE.get("key") == "snapshot" else None
     if not isinstance(snapshot, dict):
         snapshot = _load_trading_journal_view_snapshot()
-    if not isinstance(snapshot, dict):
-        sync_status = _sync_state_snapshot()
-        if bool(sync_status.get("running")):
-            return JSONResponse(
-                _json_safe({"ok": False, "pending": True, "warning": "journal cache building", "items": [], "count": 0, "stats": {}, "sync_status": sync_status}),
-                status_code=202,
-            )
-        if sync_status.get("ok") is False:
-            return JSONResponse(
-                _json_safe({
-                    "ok": False,
-                    "pending": False,
-                    "warning": "journal cache build failed",
-                    "error": sync_status.get("error") or sync_status.get("message") or "journal cache build failed",
-                    "items": [],
-                    "count": 0,
-                    "stats": {},
-                    "sync_status": sync_status,
-                }),
-                status_code=503,
-            )
-        sync_status = _queue_trading_journal_sync_if_idle("first_api_request")
-        return JSONResponse(
-            _json_safe({"ok": False, "pending": True, "warning": "journal cache building", "items": [], "count": 0, "stats": {}, "sync_status": sync_status}),
-            status_code=202,
-        )
     fingerprint_now = _journal_source_fingerprint()
-    is_stale = snapshot.get("source_fingerprints") != fingerprint_now
+    freshness = _trading_journal_snapshot_freshness(snapshot, fingerprint_now)
+    if freshness.get("current") is not True:
+        refresh_state = _trading_journal_equity_refresh_state_snapshot()
+        pending = bool(refresh_state.get("running") or refresh_state.get("pending"))
+        same_failed_fingerprint = bool(
+            refresh_state.get("ok") is False
+            and refresh_state.get("requested_source_fingerprints") == fingerprint_now
+        )
+        if not pending and not same_failed_fingerprint:
+            refresh_state = _queue_trading_journal_equity_refresh_if_idle(
+                "missing_or_stale_api_snapshot",
+                current_fingerprints=fingerprint_now,
+            )
+            pending = bool(refresh_state.get("running") or refresh_state.get("pending"))
+        warning = (
+            "Building current equity data from Trading Journal.xlsx."
+            if pending
+            else "Current equity data is unavailable because the cache rebuild failed."
+        )
+        payload = {
+            "ok": False,
+            "pending": pending,
+            "snapshot_current": False,
+            "snapshot_stale": isinstance(snapshot, dict),
+            "warning": warning,
+            "error": None if pending else (
+                refresh_state.get("error")
+                or refresh_state.get("message")
+                or "Equity cache build failed."
+            ),
+            "items": [],
+            "count": 0,
+            "stats": {},
+            "balances": [],
+            "freshness_reasons": freshness.get("reasons") or [],
+            "refresh_id": refresh_state.get("refresh_id"),
+            "refresh_status": refresh_state,
+            "status_url": "/api/trading-journal/equity/refresh/status",
+        }
+        return JSONResponse(_json_safe(payload), status_code=202 if pending else 503)
+    is_stale = False
     items = list(snapshot.get("items") or [])
     stats = snapshot.get("stats") or {}
     if _trading_journal_local_excel_authoritative():
@@ -28569,11 +29317,15 @@ async def trading_journal_items(filter: str = "") -> JSONResponse:
         ),
         "generated_at": snapshot.get("generated_at"),
         "cache_version": snapshot.get("cache_version"),
-        "snapshot_stale": bool(is_stale),
+        "snapshot_id": snapshot.get("snapshot_id"),
+        "snapshot_fingerprint": snapshot.get("snapshot_fingerprint"),
+        "snapshot_current": True,
+        "snapshot_stale": False,
+        "equity_cache": snapshot.get("equity_cache"),
         "source_mode": _trading_journal_source_mode(),
         "local_dir": str(TRADING_JOURNAL_LOCAL_DIR),
         "excel_only": _trading_journal_excel_only_mode(),
-        "warning": "Cached journal shown. Sync required to include latest workbook changes." if is_stale else "",
+        "warning": "",
     }
     diag_errors = (snapshot.get("diagnostics") or {}).get("errors") if isinstance(snapshot.get("diagnostics"), dict) else []
     missing_demo_anchor = any("Missing balance anchor for accounts: BYBIT DEMO" in str(e) for e in (diag_errors or []))

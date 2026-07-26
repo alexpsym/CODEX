@@ -648,16 +648,16 @@ def test_local_profile_sets_no_cache_for_home_and_static_assets(monkeypatch) -> 
     assert 'no-store' in static_cache or 'no-cache' in static_cache
 
 
-def test_local_profile_buttons_use_trading_journal_page_not_merged_route(monkeypatch) -> None:
+def test_local_profile_buttons_exclude_render_owned_fxweekend(monkeypatch) -> None:
     module = _load_master_service_module()
     monkeypatch.setattr(module, "APP_PROFILE", "local")
     monkeypatch.setenv("RENDER_FXWEEKEND_BASE_URL", "https://fx-weekend.example")
     buttons = module._profile_main_buttons()
     by_name = {str(item.get("name")): item for item in buttons}
     assert by_name["trading-journal"]["open_url"] == "/dashboard/trading-journal"
-    assert by_name["fxweekend"]["label"] == "FX Weekend (Render)"
-    assert by_name["fxweekend"]["open_url"] == "https://fx-weekend.example/apps/fxweekend-clone"
-    assert by_name["fxweekend"]["remote_owned"] is True
+    serialized = json.dumps(buttons).lower()
+    assert "fxweekend" not in serialized
+    assert "fxweekend-clone" not in serialized
     assert by_name["spreads-clone"]["label"] == "Spreads"
     assert "instrument-lookup" not in by_name
     assert "history" not in by_name

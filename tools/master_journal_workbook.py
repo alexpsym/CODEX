@@ -21,6 +21,8 @@ import json
 import math
 import os
 import re
+import zipfile
+import xml.etree.ElementTree as ET
 from zoneinfo import ZoneInfo
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -10493,7 +10495,7 @@ def _auto_filter_layout_signature(ws) -> Any:
 
 def _worksheet_layout_snapshot(ws) -> Dict[str, Any]:
     return {
-        "merged": [str(r) for r in ws.merged_cells.ranges],
+        "merged": sorted(str(r) for r in ws.merged_cells.ranges),
         "row_heights": {k: v.height for k, v in ws.row_dimensions.items() if v.height is not None},
         "col_widths": {k: v.width for k, v in ws.column_dimensions.items()},
         "hidden_cols": {k: bool(v.hidden) for k, v in ws.column_dimensions.items() if v.hidden},
@@ -10591,6 +10593,8 @@ def _assert_invariants_unchanged(before: Dict[str, Any], after: Dict[str, Any]) 
         "STATS1_layout",
         "SYMBOLS_layout",
         "instrument_filter_min_row",
+        "all_trades_filter_min_row",
+        "trade_log_filter_min_row",
     }
     for key in before.keys() | after.keys():
         if key in skipped:
@@ -10603,7 +10607,10 @@ def _assert_invariants_unchanged(before: Dict[str, Any], after: Dict[str, Any]) 
             if before_layout == after_layout:
                 continue
         if before.get(key) != after.get(key):
-            raise RuntimeError(f"Workbook structural invariant changed: {key}")
+            raise RuntimeError(
+                f"Workbook structural invariant changed: {key}; "
+                f"before={before.get(key)!r}; after={after.get(key)!r}"
+            )
 
 
 def _assert_filter_covers_data(ws, *, sheet_name: str, header_row: int = 1, required_headers: List[str] | None = None, header_map: Dict[str, int] | None = None) -> None:
@@ -12324,6 +12331,99 @@ def read_master_journal_source(path: Path) -> Dict[str, Any]:
     finally:
         wb.close()
 
+
+_SPREADSHEETML_NAMESPACE = (
+    "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+)
+_DRAWINGML_CHART_NAMESPACE = (
+    "http://schemas.openxmlformats.org/drawingml/2006/chart"
+)
+_EXTERNAL_WORKBOOK_FILE_REFERENCE = re.compile(
+    r"\[[^\]\r\n]+\.(?:xls|xlsx|xlsm|xlsb|xlt|xltx|xltm|xlam)\]",
+    re.IGNORECASE,
+)
+_EXTERNAL_WORKBOOK_INDEX_REFERENCE = re.compile(
+    r"\[\d+\][^!\r\n]{0,255}!"
+)
+
+
+def _external_workbook_formula_references(path: Path) -> List[str]:
+    """Return formula/name/chart references that depend on another workbook.
+
+    Master Journal workbooks are intentionally self-contained.  This guard is
+    run before loading with ``keep_links=False`` so a genuine dependency can
+    never be removed silently.
+    """
+
+    references: List[str] = []
+    with zipfile.ZipFile(path) as package:
+        members = set(package.namelist())
+        workbook_xml = ET.fromstring(package.read("xl/workbook.xml"))
+        main_namespace = {"x": _SPREADSHEETML_NAMESPACE}
+        has_external_reference_table = bool(
+            workbook_xml.findall(
+                "x:externalReferences/x:externalReference",
+                main_namespace,
+            )
+        )
+
+        def is_external_formula(value: Any) -> bool:
+            text = str(value or "").strip()
+            if not text:
+                return False
+            if _EXTERNAL_WORKBOOK_FILE_REFERENCE.search(text):
+                return True
+            return bool(
+                has_external_reference_table
+                and _EXTERNAL_WORKBOOK_INDEX_REFERENCE.search(text)
+            )
+
+        for part_name in sorted(
+            name
+            for name in members
+            if name.startswith("xl/worksheets/") and name.endswith(".xml")
+        ):
+            root = ET.fromstring(package.read(part_name))
+            for cell in root.findall(
+                f".//{{{_SPREADSHEETML_NAMESPACE}}}c"
+            ):
+                formula = cell.find(
+                    f"{{{_SPREADSHEETML_NAMESPACE}}}f"
+                )
+                if formula is not None and is_external_formula(formula.text):
+                    references.append(
+                        f"{part_name}!{cell.attrib.get('r', '?')}={formula.text}"
+                    )
+
+        for defined_name in workbook_xml.findall(
+            "x:definedNames/x:definedName",
+            main_namespace,
+        ):
+            if is_external_formula(defined_name.text):
+                references.append(
+                    "definedName:"
+                    f"{defined_name.attrib.get('name', '?')}={defined_name.text}"
+                )
+
+        for part_name in sorted(
+            name
+            for name in members
+            if name.startswith("xl/charts/") and name.endswith(".xml")
+        ):
+            root = ET.fromstring(package.read(part_name))
+            for index, formula in enumerate(
+                root.findall(
+                    f".//{{{_DRAWINGML_CHART_NAMESPACE}}}f"
+                ),
+                start=1,
+            ):
+                if is_external_formula(formula.text):
+                    references.append(
+                        f"{part_name}!series[{index}]={formula.text}"
+                    )
+    return references
+
+
 def update_master_journal_workbook_data_only(
     path: Path,
     snapshot: Dict[str, Any],
@@ -12331,7 +12431,14 @@ def update_master_journal_workbook_data_only(
     *,
     preserve_existing_layout: bool = False,
 ) -> Dict[str, Any]:
-    wb = load_workbook(path)
+    external_formula_references = _external_workbook_formula_references(path)
+    if external_formula_references:
+        raise RuntimeError(
+            "Master Journal contains genuine external workbook formula/name/chart "
+            "references; refusing to discard external link metadata: "
+            + "; ".join(external_formula_references[:10])
+        )
+    wb = load_workbook(path, keep_links=False)
     diagnostics: Dict[str, Any] = {"missing_accounts": [], "updated_cells": 0}
     preserved_layout = {
         ws.title: {
@@ -13473,7 +13580,38 @@ def update_master_journal_workbook_data_only(
                     ws.row_dimensions[key].height = height
                 ws.freeze_panes = layout["freeze_panes"]
                 ws.views = deepcopy(layout["views"])
-                ws.auto_filter = deepcopy(layout["auto_filter"])
+                restore_auto_filter = True
+                if sheet_name == TRADE_LOG_SHEET:
+                    preserved_filter = layout["auto_filter"]
+                    preserved_ref = (
+                        preserved_filter.ref
+                        if preserved_filter is not None
+                        else None
+                    )
+                    try:
+                        min_col, min_row, max_col, _max_row = (
+                            range_boundaries(preserved_ref)
+                        )
+                        required_columns = [
+                            _trade_log_header_map(ws).get(header)
+                            for header in ("Open Time", "Close Time", "Row ID")
+                        ]
+                        restore_auto_filter = (
+                            min_col == 1
+                            and min_row == TRADE_LOG_FILTER_HEADER_ROW
+                            and all(
+                                column is not None and column <= max_col
+                                for column in required_columns
+                            )
+                        )
+                    except Exception:
+                        restore_auto_filter = False
+                    if not restore_auto_filter:
+                        diagnostics[
+                            "repaired_trade_log_auto_filter_layout"
+                        ] = True
+                if restore_auto_filter:
+                    ws.auto_filter = deepcopy(layout["auto_filter"])
                 ws.conditional_formatting = deepcopy(
                     layout["conditional_formatting"]
                 )

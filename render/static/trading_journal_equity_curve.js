@@ -244,24 +244,48 @@
 
   let rows = [];
   let balances = [];
+  let equityCoverage = {};
+  let snapshotCurrent = false;
   let loading = false;
+  let reloadQueued = false;
+  let forceReloadQueued = false;
   let resizeTimer = null;
   let userSelected = false;
+  const REFRESH_URL = '/api/trading-journal/equity/refresh';
+  const REFRESH_STATUS_URL = '/api/trading-journal/equity/refresh/status';
+  const REFRESH_TIMEOUT_MS = 10 * 60 * 1000;
+  const REFRESH_POLL_MS = 1250;
 
   const setChartState = (message, error = false) => {
     stateElement.textContent = message || '';
     stateElement.classList.toggle('error', error);
     stateElement.style.display = message ? 'flex' : 'none';
   };
+  const clearChart = () => {
+    const context = canvas.getContext('2d');
+    context?.clearRect(0, 0, canvas.width, canvas.height);
+  };
   const selectedChoice = () => ACCOUNT_CHOICES.find((choice) => choice.value === accountSelect.value) || ACCOUNT_CHOICES[0];
   const render = () => {
     const choice = selectedChoice();
+    if (!snapshotCurrent) {
+      summary.innerHTML = '';
+      clearChart();
+      return;
+    }
     const points = normalizeEquityPoints(rows, choice.value, balances);
     if (!points.length) {
       summary.innerHTML = `<strong>${choice.label}</strong><span>0 points</span>`;
-      setChartState(`No equity data is available for ${choice.label}.`);
-      const context = canvas.getContext('2d');
-      context?.clearRect(0, 0, canvas.width, canvas.height);
+      const provenCount = Number(equityCoverage?.[choice.value]);
+      if (Number.isFinite(provenCount) && provenCount === 0) {
+        setChartState(`No equity data is available for ${choice.label}.`);
+      } else {
+        setChartState(
+          `Current equity data for ${choice.label} could not be verified. Refresh the equity curve.`,
+          true,
+        );
+      }
+      clearChart();
       return;
     }
     const latest = points[points.length - 1];
@@ -270,23 +294,105 @@
     drawChart(canvas, points);
   };
 
-  const load = async () => {
-    if (loading) return;
+  const sleep = (milliseconds) => new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+  const responsePayload = async (response) => response.json().catch(() => ({}));
+  const failureMessage = (payload, fallback) => (
+    payload?.error || payload?.warning || payload?.detail || payload?.message || fallback
+  );
+
+  const waitForRefreshCompletion = async (deadline) => {
+    while (Date.now() < deadline) {
+      const response = await fetch(REFRESH_STATUS_URL, {
+        headers: { Accept: 'application/json' },
+        cache: 'no-store',
+      });
+      const payload = await responsePayload(response);
+      if (response.status === 202 || payload?.pending === true) {
+        setChartState('Building current equity data from Trading Journal.xlsx…');
+        await sleep(REFRESH_POLL_MS);
+        continue;
+      }
+      if (!response.ok || payload?.ok !== true) {
+        throw new Error(failureMessage(payload, 'Equity cache build failed.'));
+      }
+      return payload;
+    }
+    throw new Error('Equity cache build timed out. Try Refresh Equity Curve again.');
+  };
+
+  const requestEquityRefresh = async (deadline) => {
+    const response = await fetch(REFRESH_URL, {
+      method: 'POST',
+      headers: { Accept: 'application/json' },
+      cache: 'no-store',
+    });
+    const payload = await responsePayload(response);
+    if (response.status === 202 || payload?.pending === true) {
+      await waitForRefreshCompletion(deadline);
+      return;
+    }
+    if (!response.ok || payload?.ok !== true) {
+      throw new Error(failureMessage(payload, 'Unable to start the equity cache refresh.'));
+    }
+  };
+
+  const fetchCurrentSnapshot = async (deadline) => {
+    while (Date.now() < deadline) {
+      const response = await fetch('/api/trading-journal', {
+        headers: { Accept: 'application/json' },
+        cache: 'no-store',
+      });
+      const payload = await responsePayload(response);
+      if (response.status === 202 || payload?.pending === true) {
+        setChartState('Building current equity data from Trading Journal.xlsx…');
+        await waitForRefreshCompletion(deadline);
+        continue;
+      }
+      if (
+        !response.ok
+        || payload?.ok !== true
+        || payload?.snapshot_current !== true
+        || payload?.snapshot_stale === true
+      ) {
+        throw new Error(failureMessage(payload, 'Current authoritative equity data is unavailable.'));
+      }
+      if (
+        payload?.equity_cache?.verified !== true
+        || !payload?.equity_cache?.point_counts
+      ) {
+        throw new Error('The current equity snapshot has no verified point coverage.');
+      }
+      return payload;
+    }
+    throw new Error('Equity data refresh timed out. Try Refresh Equity Curve again.');
+  };
+
+  const load = async ({ forceRefresh = false } = {}) => {
+    if (loading) {
+      reloadQueued = true;
+      forceReloadQueued = forceReloadQueued || forceRefresh;
+      return;
+    }
     loading = true;
     refreshButton.disabled = true;
-    setChartState('Loading authoritative Trading Journal data…');
+    snapshotCurrent = false;
+    setChartState(
+      forceRefresh
+        ? 'Refreshing equity data from Trading Journal.xlsx…'
+        : 'Loading authoritative Trading Journal data…',
+    );
+    const deadline = Date.now() + REFRESH_TIMEOUT_MS;
     try {
-      const response = await fetch('/api/trading-journal', { headers: { Accept: 'application/json' }, cache: 'no-store' });
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok || payload?.ok !== true) {
-        throw new Error(payload?.error || payload?.warning || payload?.detail || 'Unable to load Trading Journal data.');
-      }
+      if (forceRefresh) await requestEquityRefresh(deadline);
+      const payload = await fetchCurrentSnapshot(deadline);
       rows = Array.isArray(payload.items) ? payload.items : [];
       balances = Array.isArray(payload.balances)
         ? payload.balances
         : Array.isArray(payload?.stats?.balances)
           ? payload.stats.balances
           : [];
+      equityCoverage = { ...payload.equity_cache.point_counts };
+      snapshotCurrent = true;
       if (!userSelected) {
         accountSelect.value = preferredOrFirstAccountWithData(
           rows, accountSelect.value, balances
@@ -295,11 +401,22 @@
       try { localStorage.setItem(STORAGE_KEY, accountSelect.value); } catch {}
       render();
     } catch (error) {
+      rows = [];
+      balances = [];
+      equityCoverage = {};
+      snapshotCurrent = false;
       summary.innerHTML = '';
+      clearChart();
       setChartState(error?.message || String(error), true);
     } finally {
       loading = false;
       refreshButton.disabled = false;
+    }
+    if (reloadQueued) {
+      const queuedForce = forceReloadQueued;
+      reloadQueued = false;
+      forceReloadQueued = false;
+      return load({ forceRefresh: queuedForce });
     }
   };
 
@@ -314,8 +431,11 @@
     try { localStorage.setItem(STORAGE_KEY, accountSelect.value); } catch {}
     render();
   });
-  refreshButton.addEventListener('click', load);
-  window.addEventListener('trading-journal:data-changed', load);
+  refreshButton.addEventListener('click', () => load({ forceRefresh: true }));
+  window.addEventListener(
+    'trading-journal:data-changed',
+    () => load({ forceRefresh: true }),
+  );
   window.addEventListener('resize', () => {
     if (resizeTimer) window.clearTimeout(resizeTimer);
     resizeTimer = window.setTimeout(render, 120);

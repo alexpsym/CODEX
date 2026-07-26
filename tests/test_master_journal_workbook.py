@@ -1,12 +1,15 @@
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from collections import defaultdict
 from copy import copy
 from datetime import datetime
+import hashlib
+import posixpath
 import shutil
 import re
 import subprocess
 import zipfile
 import xml.etree.ElementTree as ET
+from urllib.parse import unquote, urlsplit
 from openpyxl import Workbook, load_workbook
 from openpyxl.comments import Comment
 from openpyxl.formatting.rule import FormulaRule
@@ -19,6 +22,111 @@ from tools.master_journal_workbook import _format_duration_display, _parse_durat
 from tools.master_journal_workbook import RECOMMENDATION_TRADE_LOG_HEADERS, _trade_log_three_row_header_values_for
 from tools.master_journal_workbook import _ensure_report_sheets, _period_drawdown_metrics, _sanitize_recommendation_text
 from openpyxl.utils.cell import coordinate_to_tuple, get_column_letter, range_boundaries
+
+
+_OFFICE_RELATIONSHIP_NAMESPACE = (
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+)
+_PACKAGE_RELATIONSHIP_NAMESPACE = (
+    "http://schemas.openxmlformats.org/package/2006/relationships"
+)
+_SPREADSHEETML_NAMESPACE = (
+    "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+)
+_DRAWINGML_CHART_NAMESPACE = (
+    "http://schemas.openxmlformats.org/drawingml/2006/chart"
+)
+def _opc_source_part_for_relationships(relationships_part: str) -> str | None:
+    if relationships_part == "_rels/.rels":
+        return ""
+    path = PurePosixPath(relationships_part)
+    if path.parent.name != "_rels" or not path.name.endswith(".rels"):
+        return None
+    return str(path.parent.parent / path.name.removesuffix(".rels"))
+
+
+def _opc_resolve_internal_target(source_part: str, target: str) -> str:
+    target_path = unquote(urlsplit(str(target or "")).path).replace("\\", "/")
+    if target_path.startswith("/"):
+        return posixpath.normpath(target_path.lstrip("/"))
+    return posixpath.normpath(
+        posixpath.join(posixpath.dirname(source_part), target_path)
+    )
+
+
+def _assert_opc_relationship_integrity(path: Path) -> None:
+    """Validate r:id references and internal relationship targets generically."""
+
+    with zipfile.ZipFile(path) as package:
+        members = set(package.namelist())
+        relationships_by_source: dict[str, dict[str, dict[str, str]]] = {}
+        failures: list[str] = []
+
+        for relationships_part in sorted(
+            name for name in members if name.endswith(".rels")
+        ):
+            source_part = _opc_source_part_for_relationships(
+                relationships_part
+            )
+            if source_part is None:
+                continue
+            if source_part and source_part not in members:
+                failures.append(
+                    f"{relationships_part}: source part is missing: {source_part}"
+                )
+            root = ET.fromstring(package.read(relationships_part))
+            relationships: dict[str, dict[str, str]] = {}
+            for relationship in root.findall(
+                f"{{{_PACKAGE_RELATIONSHIP_NAMESPACE}}}Relationship"
+            ):
+                relationship_id = str(relationship.attrib.get("Id") or "")
+                relationships[relationship_id] = dict(relationship.attrib)
+                if (
+                    str(relationship.attrib.get("TargetMode") or "").casefold()
+                    == "external"
+                ):
+                    continue
+                resolved_target = _opc_resolve_internal_target(
+                    source_part,
+                    str(relationship.attrib.get("Target") or ""),
+                )
+                if resolved_target not in members:
+                    failures.append(
+                        f"{relationships_part}:{relationship_id} points to "
+                        f"missing internal part {resolved_target!r}"
+                    )
+            relationships_by_source[source_part] = relationships
+
+        relationship_id_attribute = (
+            f"{{{_OFFICE_RELATIONSHIP_NAMESPACE}}}id"
+        )
+        for source_part in sorted(
+            name
+            for name in members
+            if name.endswith((".xml", ".vml"))
+            and name != "[Content_Types].xml"
+            and not name.endswith(".rels")
+        ):
+            root = ET.fromstring(package.read(source_part))
+            defined_relationship_ids = relationships_by_source.get(
+                source_part, {}
+            )
+            for element in root.iter():
+                relationship_id = element.attrib.get(
+                    relationship_id_attribute
+                )
+                if (
+                    relationship_id is not None
+                    and relationship_id not in defined_relationship_ids
+                ):
+                    failures.append(
+                        f"{source_part}:"
+                        f"{element.tag.rsplit('}', 1)[-1]} uses undefined "
+                        f"r:id={relationship_id!r}"
+                    )
+
+    assert not failures, "\n".join(failures)
+
 
 def _cf_ranges(ws):
     return [str(k.sqref) for k in ws.conditional_formatting._cf_rules.keys()]
@@ -3409,6 +3517,194 @@ def _symbols_cell_value(path: Path, coordinate: str) -> object:
         wb.close()
 
 
+def _external_workbook_package_artifacts(path: Path) -> dict[str, list[str]]:
+    with zipfile.ZipFile(path) as package:
+        members = set(package.namelist())
+        workbook_root = ET.fromstring(package.read("xl/workbook.xml"))
+        workbook_relationships = ET.fromstring(
+            package.read("xl/_rels/workbook.xml.rels")
+        )
+        content_types = ET.fromstring(package.read("[Content_Types].xml"))
+
+        external_reference_nodes = workbook_root.findall(
+            f".//{{{_SPREADSHEETML_NAMESPACE}}}externalReference"
+        )
+        external_relationships = [
+            str(relationship.attrib)
+            for relationship in workbook_relationships.findall(
+                f"{{{_PACKAGE_RELATIONSHIP_NAMESPACE}}}Relationship"
+            )
+            if str(relationship.attrib.get("Type") or "").endswith(
+                ("/externalLink", "/externalLinkPath")
+            )
+        ]
+        external_content_types = [
+            str(node.attrib)
+            for node in list(content_types)
+            if "externallink" in str(node.attrib).casefold()
+        ]
+        obsolete_targets: list[str] = []
+        for relationships_part in sorted(
+            name for name in members if name.endswith(".rels")
+        ):
+            relationships_root = ET.fromstring(
+                package.read(relationships_part)
+            )
+            for relationship in relationships_root.findall(
+                f"{{{_PACKAGE_RELATIONSHIP_NAMESPACE}}}Relationship"
+            ):
+                decoded_target = unquote(
+                    str(relationship.attrib.get("Target") or "")
+                )
+                if "forex journal.xlsx" in decoded_target.casefold():
+                    obsolete_targets.append(
+                        f"{relationships_part}:{decoded_target}"
+                    )
+
+    return {
+        "parts": sorted(
+            name
+            for name in members
+            if name.startswith("xl/externalLinks/")
+        ),
+        "external_references": [
+            str(node.attrib) for node in external_reference_nodes
+        ],
+        "relationships": external_relationships,
+        "content_types": external_content_types,
+        "obsolete_targets": obsolete_targets,
+    }
+
+
+def _chart_formula_signature(path: Path) -> tuple[tuple[str, str], ...]:
+    with zipfile.ZipFile(path) as package:
+        return tuple(
+            sorted(
+                (
+                    part_name,
+                    str(formula.text or ""),
+                )
+                for part_name in package.namelist()
+                if part_name.startswith("xl/charts/")
+                and part_name.endswith(".xml")
+                for formula in ET.fromstring(
+                    package.read(part_name)
+                ).findall(
+                    f".//{{{_DRAWINGML_CHART_NAMESPACE}}}f"
+                )
+            )
+        )
+
+
+def _canonical_preservation_signature(path: Path) -> dict[str, object]:
+    wb = load_workbook(path, data_only=False, keep_links=False)
+    try:
+        formula_cells: list[tuple[str, str, str]] = []
+        label_cells: list[tuple[str, str, str]] = []
+        cell_styles: list[tuple[str, int, int, tuple[int, ...]]] = []
+        for ws in wb.worksheets:
+            for (row, column), cell in ws._cells.items():
+                value = cell.value
+                if isinstance(value, str) and value.startswith("="):
+                    formula_cells.append(
+                        (ws.title, cell.coordinate, value)
+                    )
+                elif (
+                    isinstance(value, str)
+                    and (
+                        ws.title != "Trade Log"
+                        or row < TRADE_LOG_DATA_START_ROW
+                    )
+                ):
+                    label_cells.append(
+                        (ws.title, cell.coordinate, value)
+                    )
+                if cell.has_style:
+                    cell_styles.append(
+                        (
+                            ws.title,
+                            row,
+                            column,
+                            tuple(cell._style),
+                        )
+                    )
+
+        return {
+            "sheetnames": tuple(wb.sheetnames),
+            "active": wb.active.title,
+            "selected": tuple(
+                ws.title
+                for ws in wb.worksheets
+                if ws.sheet_view.tabSelected
+            ),
+            "chart_counts": tuple(
+                (ws.title, len(ws._charts)) for ws in wb.worksheets
+            ),
+            "freeze_panes": tuple(
+                (ws.title, str(ws.freeze_panes or ""))
+                for ws in wb.worksheets
+            ),
+            "filters": tuple(
+                (ws.title, str(ws.auto_filter.ref or ""))
+                for ws in wb.worksheets
+            ),
+            "merges": tuple(
+                (
+                    ws.title,
+                    tuple(
+                        sorted(
+                            str(merged)
+                            for merged in ws.merged_cells.ranges
+                        )
+                    ),
+                )
+                for ws in wb.worksheets
+            ),
+            "column_dimensions": tuple(
+                (
+                    ws.title,
+                    tuple(
+                        sorted(
+                            (
+                                key,
+                                dimension.width,
+                                dimension.hidden,
+                                dimension.bestFit,
+                            )
+                            for key, dimension
+                            in ws.column_dimensions.items()
+                        )
+                    ),
+                )
+                for ws in wb.worksheets
+            ),
+            "row_dimensions": tuple(
+                (
+                    ws.title,
+                    tuple(
+                        sorted(
+                            (
+                                key,
+                                dimension.height,
+                                dimension.hidden,
+                            )
+                            for key, dimension
+                            in ws.row_dimensions.items()
+                        )
+                    ),
+                )
+                for ws in wb.worksheets
+            ),
+            "formulas": tuple(sorted(formula_cells)),
+            "labels": tuple(sorted(label_cells)),
+            "styles": tuple(sorted(cell_styles)),
+            "manual_overrides": read_master_journal_manual_overrides(path),
+            "chart_formulas": _chart_formula_signature(path),
+        }
+    finally:
+        wb.close()
+
+
 def _formula_error_cells(path: Path) -> list[str]:
     error_tokens = ("#NULL!", "#DIV/0!", "#VALUE!", "#REF!", "#NAME?", "#NUM!", "#N/A")
     errors: set[str] = set()
@@ -3674,6 +3970,153 @@ def test_source_resync_preserves_manual_symbols_header_and_data_borders(tmp_path
         expected_duration_widths=source_duration_widths,
     )
     assert _formula_error_cells(work) == []
+
+
+def test_checked_in_trading_journal_opc_relationship_integrity() -> None:
+    path = Path("journal") / "Trading Journal.xlsx"
+    if not path.exists():
+        pytest.skip("checked-in Trading Journal.xlsx is not available")
+    _assert_opc_relationship_integrity(path)
+
+
+def test_checked_in_trading_journal_has_no_external_workbook_artifacts() -> None:
+    from tools import master_journal_workbook as mjw
+
+    path = Path("journal") / "Trading Journal.xlsx"
+    if not path.exists():
+        pytest.skip("checked-in Trading Journal.xlsx is not available")
+
+    assert mjw._external_workbook_formula_references(path) == []
+    assert _external_workbook_package_artifacts(path) == {
+        "parts": [],
+        "external_references": [],
+        "relationships": [],
+        "content_types": [],
+        "obsolete_targets": [],
+    }
+
+
+def test_checked_in_trading_journal_preserves_canonical_sheet_and_chart_layout() -> None:
+    path = Path("journal") / "Trading Journal.xlsx"
+    if not path.exists():
+        pytest.skip("checked-in Trading Journal.xlsx is not available")
+
+    wb = load_workbook(path, data_only=False, keep_links=False)
+    try:
+        assert wb.sheetnames == [
+            STATS1_SHEET,
+            STATS2_SHEET,
+            SYMBOLS_SHEET,
+            "Trade Log",
+            "P&L Calendar",
+            " SIM",
+            REPORT_YEARLY_SHEET,
+            *[str(year) for year in range(2018, 2027)],
+        ]
+        assert len(wb.sheetnames) == 16
+        assert "Equity Curve" not in wb.sheetnames
+        assert wb.active.title == " SIM"
+        assert [
+            ws.title
+            for ws in wb.worksheets
+            if ws.sheet_view.tabSelected
+        ] == [" SIM"]
+        assert len(wb[" SIM"]._charts) == 2
+        assert sum(len(ws._charts) for ws in wb.worksheets) == 2
+    finally:
+        wb.close()
+
+    assert set(_chart_formula_signature(path)) == {
+        ("xl/charts/chart1.xml", "' SIM'!$A$9:$A$109"),
+        ("xl/charts/chart1.xml", "' SIM'!$F$9:$F$109"),
+        ("xl/charts/chart2.xml", "' SIM'!$A$9:$A$109"),
+        ("xl/charts/chart2.xml", "' SIM'!$E$9:$E$109"),
+    }
+
+
+def test_preserve_layout_refresh_removes_acf31f4_unused_external_link(
+    tmp_path: Path,
+) -> None:
+    from tools import master_journal_workbook as mjw
+
+    path = _git_workbook_fixture("acf31f4", tmp_path)
+    before_artifacts = _external_workbook_package_artifacts(path)
+    assert before_artifacts["parts"] == [
+        "xl/externalLinks/_rels/externalLink1.xml.rels",
+        "xl/externalLinks/externalLink1.xml",
+    ]
+    assert before_artifacts["obsolete_targets"]
+    assert mjw._external_workbook_formula_references(path) == []
+    before = _canonical_preservation_signature(path)
+
+    snapshot = read_master_journal_source(path)
+    result = update_master_journal_workbook_data_only(
+        path,
+        snapshot,
+        preserve_existing_layout=True,
+    )
+    assert result["ok"] is True
+    Path(result["candidate_path"]).replace(path)
+
+    _assert_opc_relationship_integrity(path)
+    assert _external_workbook_package_artifacts(path) == {
+        "parts": [],
+        "external_references": [],
+        "relationships": [],
+        "content_types": [],
+        "obsolete_targets": [],
+    }
+    assert mjw._external_workbook_formula_references(path) == []
+    assert _canonical_preservation_signature(path) == before
+
+
+def test_external_dependency_guard_rejects_formula_name_and_chart(
+    tmp_path: Path,
+) -> None:
+    from openpyxl.chart import LineChart, Reference
+    from openpyxl.workbook.defined_name import DefinedName
+    from tools import master_journal_workbook as mjw
+
+    path = tmp_path / "external-dependency.xlsx"
+    build_master_journal_workbook(sample_snapshot(), path)
+    wb = load_workbook(path, data_only=False)
+    stats = wb[STATS1_SHEET]
+    stats["Z250"] = "='[External Formula.xlsx]Data'!$A$1"
+    wb.defined_names.add(
+        DefinedName(
+            "ExternalName",
+            attr_text="='[External Name.xlsx]Data'!$A$1",
+        )
+    )
+    stats["Y250"] = 1
+    stats["Y251"] = 2
+    chart = LineChart()
+    chart.add_data(
+        Reference(stats, min_col=25, min_row=250, max_row=251)
+    )
+    chart.series[0].val.numRef.f = (
+        "'[External Chart.xlsx]Data'!$A$1:$A$2"
+    )
+    stats.add_chart(chart, "Z252")
+    wb.save(path)
+    wb.close()
+
+    references = mjw._external_workbook_formula_references(path)
+    assert any(item.startswith("xl/worksheets/") for item in references)
+    assert any(item.startswith("definedName:") for item in references)
+    assert any(item.startswith("xl/charts/") for item in references)
+    before_hash = hashlib.sha256(path.read_bytes()).hexdigest()
+    with pytest.raises(
+        RuntimeError,
+        match="genuine external workbook formula/name/chart references",
+    ):
+        update_master_journal_workbook_data_only(
+            path,
+            sample_snapshot(),
+            preserve_existing_layout=True,
+        )
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == before_hash
+    assert not path.with_suffix(".update-candidate.tmp.xlsx").exists()
 
 
 def test_data_only_update_repairs_stale_recommendation_columns_and_stats1_labels(tmp_path: Path):

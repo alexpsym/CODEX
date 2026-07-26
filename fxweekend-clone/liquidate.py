@@ -21,7 +21,13 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from shared.env_bootstrap import load_master_env
-from shared.oanda_api import OandaAPIError, resolve_account_config
+from shared.oanda_api import (
+    FXWEEKEND_DEFAULT_ACCOUNT_MODES,
+    FXWEEKEND_SETTINGS_SCHEMA_VERSION,
+    OandaAPIError,
+    resolve_account_config,
+    upgrade_fxweekend_settings_schema,
+)
 
 load_master_env(base_dir=ROOT_DIR)
 
@@ -29,11 +35,12 @@ LOG_FILE = Path(__file__).with_name("trade_closure.log")
 SETTINGS_PATH = Path(os.getenv("FXWEEKEND_SETTINGS_PATH") or Path(__file__).with_name("settings.json"))
 STATUS_PATH = Path(os.getenv("FXWEEKEND_STATUS_PATH") or Path(__file__).with_name("status.json"))
 DEFAULT_SETTINGS: Dict[str, Any] = {
+    "schema_version": FXWEEKEND_SETTINGS_SCHEMA_VERSION,
     "enabled": True,
     "trigger_weekday": 5,
     "cutoff_time_dst": "05:00",
     "cutoff_time_standard": "06:00",
-    "account_modes": ["live"],
+    "account_modes": list(FXWEEKEND_DEFAULT_ACCOUNT_MODES),
     "check_interval_seconds": 60,
     "max_retry_backoff_seconds": 300,
     "close_method": "positions",
@@ -109,7 +116,7 @@ def _normalize_hhmm(value: Any, fallback: str) -> str:
 
 
 def migrate_settings(data: Any) -> Dict[str, Any]:
-    source = data if isinstance(data, dict) else {}
+    source, _schema_migrated = upgrade_fxweekend_settings_schema(data)
     merged = deepcopy(DEFAULT_SETTINGS)
     merged.update(source)
     if "cutoff_time_dst" not in source:
@@ -139,12 +146,7 @@ def migrate_settings(data: Any) -> Dict[str, Any]:
     )
     merged["enabled"] = bool(merged.get("enabled", True))
     merged["dry_run"] = bool(merged.get("dry_run", False))
-    raw_modes = merged.get("account_modes")
-    if not isinstance(raw_modes, list):
-        raw_modes = ["live"]
-    merged["account_modes"] = [
-        mode for mode in ACCOUNT_MODES if mode in {str(item).strip().lower() for item in raw_modes}
-    ]
+    merged["account_modes"] = _ordered_account_modes(merged)
     merged["instrument_allowlist"] = sorted(
         {
             str(item).strip().upper()
@@ -153,6 +155,14 @@ def migrate_settings(data: Any) -> Dict[str, Any]:
         }
     )
     return merged
+
+
+def _ordered_account_modes(settings: Dict[str, Any]) -> List[str]:
+    raw_modes = settings.get("account_modes")
+    if not isinstance(raw_modes, (list, tuple, set)):
+        raw_modes = FXWEEKEND_DEFAULT_ACCOUNT_MODES
+    selected = {str(item).strip().lower() for item in raw_modes}
+    return [mode for mode in ACCOUNT_MODES if mode in selected]
 
 
 def load_settings() -> Dict[str, Any]:
@@ -731,7 +741,7 @@ def run_liquidation(
         Callable[[str, Dict[str, Dict[str, Any]]], None]
     ] = None,
 ) -> Dict[str, Any]:
-    modes = list(settings.get("account_modes") or [])
+    modes = _ordered_account_modes(settings)
     attempted_at = _iso_now()
     account_results: Dict[str, Dict[str, Any]] = {}
     if not modes:
@@ -752,17 +762,36 @@ def run_liquidation(
             if progress_callback is not None:
                 progress_callback(current_mode, deepcopy(account_results))
 
-        account_results[mode] = process_account(
-            mode,
-            settings,
-            can_close=can_close,
-            allow_post_window_flat_verification=(
-                allow_post_window_flat_verification
-            ),
-            on_state_change=report_account_state,
+        try:
+            account_results[mode] = process_account(
+                mode,
+                settings,
+                can_close=can_close,
+                allow_post_window_flat_verification=(
+                    allow_post_window_flat_verification
+                ),
+                on_state_change=report_account_state,
+            )
+        except Exception as exc:
+            account_results[mode] = {
+                "mode": mode,
+                "state": "API failure",
+                "last_attempt_at": _iso_now(),
+                "last_verified_flat_at": None,
+                "position_count": None,
+                "trade_count": None,
+                "open_count": None,
+                "last_error": _safe_error(exc) or "Unexpected account check failure.",
+                "requests": [],
+                "closures": [],
+            }
+    all_flat = (
+        bool(modes)
+        and set(account_results) == set(modes)
+        and all(
+            item.get("state") == "verified flat"
+            for item in account_results.values()
         )
-    all_flat = bool(account_results) and all(
-        item.get("state") == "verified flat" for item in account_results.values()
     )
     errors = [
         f"{mode}: {item.get('last_error')}"
@@ -806,7 +835,7 @@ def run_liquidation(
 def run_read_only_account_check(
     settings: Dict[str, Any], reason: str = "read-only access check"
 ) -> Dict[str, Any]:
-    modes = list(settings.get("account_modes") or [])
+    modes = _ordered_account_modes(settings)
     checked_at = _iso_now()
     accounts: Dict[str, Dict[str, Any]] = {}
     if not modes:
@@ -819,12 +848,26 @@ def run_read_only_account_check(
         }
     log(f"Starting OANDA read-only check ({reason}) for: {', '.join(modes)}.")
     for mode in modes:
-        accounts[mode] = process_account(
-            mode,
-            settings,
-            can_close=False,
-            check_only=True,
-        )
+        try:
+            accounts[mode] = process_account(
+                mode,
+                settings,
+                can_close=False,
+                check_only=True,
+            )
+        except Exception as exc:
+            accounts[mode] = {
+                "mode": mode,
+                "state": "API failure",
+                "last_attempt_at": _iso_now(),
+                "last_verified_flat_at": None,
+                "position_count": None,
+                "trade_count": None,
+                "open_count": None,
+                "last_error": _safe_error(exc) or "Unexpected account check failure.",
+                "requests": [],
+                "closures": [],
+            }
         if accounts[mode].get("state") == "checking":
             accounts[mode]["state"] = "before cutoff"
     errors = [
@@ -865,7 +908,7 @@ def _apply_attempt_status(result: Dict[str, Any]) -> None:
 def _coverage_scope_fingerprint(settings: Dict[str, Any]) -> str:
     scope = {
         "enabled": bool(settings.get("enabled")),
-        "account_modes": list(settings.get("account_modes") or []),
+        "account_modes": _ordered_account_modes(settings),
         "close_method": str(settings.get("close_method") or "positions"),
         "instrument_allowlist": list(settings.get("instrument_allowlist") or []),
         "dry_run": bool(settings.get("dry_run")),
@@ -925,7 +968,7 @@ def _window_coverage_is_current(
     )
     if not isinstance(account_scope_hashes, dict):
         return False
-    selected = list(settings.get("account_modes") or [])
+    selected = _ordered_account_modes(settings)
     if not selected:
         return False
     grace_seconds = max(
@@ -961,7 +1004,7 @@ def scheduler_iteration(
     settings: Dict[str, Any], now: Optional[datetime] = None
 ) -> Dict[str, Any]:
     current = now or _now_brisbane()
-    selected = list(settings.get("account_modes") or [])
+    selected = _ordered_account_modes(settings)
     heartbeat = current.astimezone(BRISBANE_TZ).isoformat()
     if not settings.get("enabled"):
         return update_status(
@@ -1095,6 +1138,9 @@ def scheduler_loop() -> None:
         heartbeat_at=_iso_now(),
         state="checking",
         state_detail="Executor scheduler started.",
+        selected_accounts=[],
+        last_access_check_at=None,
+        accounts={},
     )
     while True:
         settings: Dict[str, Any] = dict(DEFAULT_SETTINGS)
@@ -1300,7 +1346,7 @@ def run_now() -> Any:
         payload = update_status(
             state="disabled",
             state_detail="Manual execution is blocked while FX Weekend is disabled.",
-            selected_accounts=list(settings.get("account_modes") or []),
+            selected_accounts=_ordered_account_modes(settings),
             last_error=None,
         )
         return {
@@ -1311,7 +1357,7 @@ def run_now() -> Any:
             "accounts": payload.get("accounts") or {},
             "verified_flat": False,
         }
-    selected = list(settings.get("account_modes") or [])
+    selected = _ordered_account_modes(settings)
     window = closure_window(settings)
     if "live" in selected and window.get("phase") != "closure":
         message = (
@@ -1365,7 +1411,7 @@ def status() -> Dict[str, Any]:
     return {
         **payload,
         "enabled": settings.get("enabled", False),
-        "selected_accounts": list(settings.get("account_modes") or []),
+        "selected_accounts": _ordered_account_modes(settings),
         "cutoff_time_dst": settings.get("cutoff_time_dst"),
         "cutoff_time_standard": settings.get("cutoff_time_standard"),
         "next_cutoff": compute_next_trigger(settings),
@@ -1376,12 +1422,9 @@ def status() -> Dict[str, Any]:
 @app.get("/api/self_test")
 def self_test() -> Dict[str, Any]:
     settings = load_settings()
-    results = {
-        mode: process_account(
-            mode, settings, can_close=False, check_only=True
-        )
-        for mode in settings.get("account_modes") or []
-    }
+    results = run_read_only_account_check(
+        settings, "self-test read-only account check"
+    ).get("accounts") or {}
     return {
         "ok": bool(results)
         and all(

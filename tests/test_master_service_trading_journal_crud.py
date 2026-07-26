@@ -85,6 +85,19 @@ def _legacy_sync_status_payload():
     return json.loads(response.body.decode("utf-8"))
 
 
+@pytest.fixture(autouse=True)
+def _isolate_canonical_master_journal_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    isolated_workbook = tmp_path / "Trading Journal.xlsx"
+    monkeypatch.setattr(
+        master_service,
+        "_master_journal_path",
+        lambda: isolated_workbook,
+    )
+
+
 @pytest.fixture
 def temp_state_paths(tmp_path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(master_service, "TRADING_JOURNAL_LOCAL_DIR", tmp_path)
@@ -92,11 +105,22 @@ def temp_state_paths(tmp_path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(master_service, "TRADING_JOURNAL_STATE_PATH", tmp_path / "trading_journal_state.json")
     monkeypatch.setattr(master_service, "TRADING_JOURNAL_SYNC_STATE_PATH", tmp_path / "trading_journal_sync_state.json")
     monkeypatch.setattr(master_service, "TRADING_JOURNAL_VIEW_CACHE_PATH", tmp_path / "trading_journal_view_cache.json")
+    monkeypatch.setattr(master_service, "TRADING_JOURNAL_SQLITE_PATH", tmp_path / "trading_journal.sqlite")
     monkeypatch.setattr(master_service, "TRADING_JOURNAL_IMPORT_CACHE_PATH", tmp_path / "trading_journal_import_cache.json")
     monkeypatch.setattr(master_service, "_schedule_dropbox_upload_state_backup", lambda: None)
     monkeypatch.setattr(master_service, "_get_excel_account_balances", lambda: [])
     master_service._TRADING_JOURNAL_VIEW_CACHE["key"] = None
     master_service._TRADING_JOURNAL_VIEW_CACHE["payload"] = None
+    master_service.TRADING_JOURNAL_EQUITY_REFRESH_TASK = None
+    master_service.TRADING_JOURNAL_EQUITY_REFRESH_STATE.update(
+        {
+            "running": False,
+            "pending": False,
+            "ok": None,
+            "error": None,
+            "requested_source_fingerprints": None,
+        }
+    )
     monkeypatch.setattr(master_service, "ENABLE_BYBIT_DEMO_JOURNAL", True)
     monkeypatch.setenv("TRADING_JOURNAL_GITHUB_SYNC_ENABLED", "0")
     monkeypatch.setattr(master_service, "_sync_journal_excel_files_to_github", lambda *_a, **_k: {"github_sync_enabled": False, "github_sync_ok": True, "github_sync_noop": True, "github_sync_error": "", "github_sync_commit": ""})
@@ -631,14 +655,18 @@ def test_diagnostics_local_mode_zeroes_stale_dropbox_counts(monkeypatch: pytest.
 def test_trading_journal_items_first_load_returns_pending_and_queues_sync(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(master_service, "_TRADING_JOURNAL_VIEW_CACHE", {"key": None, "payload": None})
     monkeypatch.setattr(master_service, "_load_trading_journal_view_snapshot", lambda: None)
-    monkeypatch.setattr(master_service, "_sync_state_snapshot", lambda: {"running": False, "ok": None, "message": ""})
+    monkeypatch.setattr(
+        master_service,
+        "_trading_journal_equity_refresh_state_snapshot",
+        lambda: {"running": False, "pending": False, "ok": None},
+    )
     queued = {"called": False}
 
-    def fake_queue(_reason: str):
+    def fake_queue(_reason: str, **_kwargs):
         queued["called"] = True
-        return {"running": True, "ok": None, "message": "queued"}
+        return {"running": True, "pending": True, "ok": None, "message": "queued"}
 
-    monkeypatch.setattr(master_service, "_queue_trading_journal_sync_if_idle", fake_queue)
+    monkeypatch.setattr(master_service, "_queue_trading_journal_equity_refresh_if_idle", fake_queue)
     response = asyncio.run(master_service.trading_journal_items())
     payload = _json(response)
     assert response.status_code == 202
@@ -648,20 +676,250 @@ def test_trading_journal_items_first_load_returns_pending_and_queues_sync(temp_s
 
 
 def test_trading_journal_items_existing_snapshot_returns_200(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
+    fingerprint = {"source_mode": "local", "files": []}
     snapshot = {
         "items": [{"id": "manual:1", "row_type": "trade", "source": "manual"}],
+        "balances": [],
         "stats": {"groups": {}},
         "generated_at": "2026-04-01T00:00:00Z",
-        "cache_version": 1,
-        "source_fingerprints": {"source_mode": "local", "files": []},
+        "cache_version": master_service.TRADING_JOURNAL_VIEW_CACHE_VERSION,
+        "source_fingerprints": fingerprint,
     }
+    master_service._attach_trading_journal_equity_metadata(snapshot)
     monkeypatch.setattr(master_service, "_TRADING_JOURNAL_VIEW_CACHE", {"key": "snapshot", "payload": snapshot})
-    monkeypatch.setattr(master_service, "_journal_source_fingerprint", lambda: {"source_mode": "local", "files": []})
+    monkeypatch.setattr(master_service, "_journal_source_fingerprint", lambda: fingerprint)
     response = asyncio.run(master_service.trading_journal_items())
     payload = _json(response)
     assert response.status_code == 200
     assert payload["count"] == 1
     assert payload["items"][0]["id"] == "manual:1"
+    assert payload["snapshot_current"] is True
+    assert payload["snapshot_stale"] is False
+    assert payload["equity_cache"]["verified"] is True
+
+
+@pytest.mark.parametrize(
+    ("cache_version", "expected_reason"),
+    [
+        (master_service.TRADING_JOURNAL_VIEW_CACHE_VERSION, "equity_proof_missing"),
+        (master_service.TRADING_JOURNAL_VIEW_CACHE_VERSION - 1, "cache_version_incompatible"),
+    ],
+)
+def test_trading_journal_items_stale_empty_or_incompatible_cache_queues_narrow_rebuild(
+    temp_state_paths,
+    monkeypatch: pytest.MonkeyPatch,
+    cache_version: int,
+    expected_reason: str,
+):
+    fingerprint = {"source_mode": "master_journal", "files": [{"sha256": "current"}]}
+    snapshot = {
+        "cache_version": cache_version,
+        "generated_at": "2026-04-01T00:00:00Z",
+        "items": [],
+        "balances": [],
+        "stats": {},
+        "source_fingerprints": fingerprint,
+    }
+    monkeypatch.setattr(
+        master_service,
+        "_TRADING_JOURNAL_VIEW_CACHE",
+        {"key": "snapshot", "payload": snapshot},
+    )
+    monkeypatch.setattr(master_service, "_journal_source_fingerprint", lambda: fingerprint)
+    monkeypatch.setattr(
+        master_service,
+        "_trading_journal_equity_refresh_state_snapshot",
+        lambda: {"running": False, "pending": False, "ok": None},
+    )
+    queued = {"calls": 0}
+
+    def _queue(reason: str, **kwargs):
+        queued["calls"] += 1
+        assert reason == "missing_or_stale_api_snapshot"
+        assert kwargs["current_fingerprints"] == fingerprint
+        return {"running": True, "pending": True, "ok": None, "refresh_id": "eq-test"}
+
+    monkeypatch.setattr(
+        master_service,
+        "_queue_trading_journal_equity_refresh_if_idle",
+        _queue,
+    )
+    response = asyncio.run(master_service.trading_journal_items())
+    payload = _json(response)
+    assert response.status_code == 202
+    assert payload["ok"] is False
+    assert payload["pending"] is True
+    assert payload["snapshot_current"] is False
+    assert payload["items"] == []
+    assert expected_reason in payload["freshness_reasons"]
+    assert queued["calls"] == 1
+
+
+def test_equity_refresh_endpoint_forces_new_snapshot_generation_without_full_sync(
+    temp_state_paths,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    fingerprint = {"source_mode": "master_journal", "files": [{"sha256": "same-source"}]}
+    calls = []
+
+    def _fake_build(**kwargs):
+        calls.append(dict(kwargs))
+        snapshot = {
+            "cache_version": master_service.TRADING_JOURNAL_VIEW_CACHE_VERSION,
+            "generated_at": master_service._utc_now_iso(),
+            "items": [],
+            "balances": [],
+            "stats": {},
+            "source_fingerprints": fingerprint,
+        }
+        master_service._attach_trading_journal_equity_metadata(snapshot)
+        master_service._TRADING_JOURNAL_VIEW_CACHE["key"] = "snapshot"
+        master_service._TRADING_JOURNAL_VIEW_CACHE["payload"] = snapshot
+        return snapshot
+
+    monkeypatch.setattr(master_service, "_journal_source_fingerprint", lambda: fingerprint)
+    monkeypatch.setattr(master_service, "_build_trading_journal_view_snapshot", _fake_build)
+    monkeypatch.setattr(
+        master_service,
+        "_sync_master_journal_workbook",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("equity refresh must not sync workbook")),
+    )
+
+    async def _run_twice():
+        first_response = await master_service.trading_journal_equity_refresh()
+        first_task = master_service.TRADING_JOURNAL_EQUITY_REFRESH_TASK
+        assert isinstance(first_task, asyncio.Task)
+        await first_task
+        first_state = master_service._trading_journal_equity_refresh_state_snapshot()
+        second_response = await master_service.trading_journal_equity_refresh()
+        second_task = master_service.TRADING_JOURNAL_EQUITY_REFRESH_TASK
+        assert isinstance(second_task, asyncio.Task)
+        await second_task
+        second_state = master_service._trading_journal_equity_refresh_state_snapshot()
+        return first_response, first_state, second_response, second_state
+
+    first_response, first_state, second_response, second_state = asyncio.run(_run_twice())
+    assert first_response.status_code == 202
+    assert second_response.status_code == 202
+    assert first_state["ok"] is True
+    assert second_state["ok"] is True
+    assert first_state["snapshot_id"] != second_state["snapshot_id"]
+    assert first_state["snapshot_fingerprint"] != second_state["snapshot_fingerprint"]
+    assert len(calls) == 2
+    assert all(call["force"] is True for call in calls)
+    assert all(call["skip_external_balances"] is True for call in calls)
+    assert all(call["skip_live_account_refresh"] is True for call in calls)
+
+
+def test_cancelled_equity_refresh_clears_pending_state_and_manual_retry_recovers(
+    temp_state_paths,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    fingerprint = {"source_mode": "master_journal", "files": [{"sha256": "same-source"}]}
+    first_build_started = threading.Event()
+    release_first_build = threading.Event()
+    calls = {"count": 0}
+
+    def _fake_build(**_kwargs):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            first_build_started.set()
+            assert release_first_build.wait(timeout=5)
+        snapshot = {
+            "cache_version": master_service.TRADING_JOURNAL_VIEW_CACHE_VERSION,
+            "generated_at": master_service._utc_now_iso(),
+            "items": [],
+            "balances": [],
+            "stats": {},
+            "source_fingerprints": fingerprint,
+        }
+        return master_service._attach_trading_journal_equity_metadata(snapshot)
+
+    monkeypatch.setattr(master_service, "_journal_source_fingerprint", lambda: fingerprint)
+    monkeypatch.setattr(master_service, "_build_trading_journal_view_snapshot", _fake_build)
+
+    async def _cancel_then_retry():
+        first_response = await master_service.trading_journal_equity_refresh()
+        first_task = master_service.TRADING_JOURNAL_EQUITY_REFRESH_TASK
+        assert isinstance(first_task, asyncio.Task)
+        while not first_build_started.is_set():
+            await asyncio.sleep(0)
+        first_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first_task
+        cancelled_state = master_service._trading_journal_equity_refresh_state_snapshot()
+        cancelled_status = await master_service.trading_journal_equity_refresh_status()
+        release_first_build.set()
+
+        retry_response = await master_service.trading_journal_equity_refresh()
+        retry_task = master_service.TRADING_JOURNAL_EQUITY_REFRESH_TASK
+        assert isinstance(retry_task, asyncio.Task)
+        await retry_task
+        retry_state = master_service._trading_journal_equity_refresh_state_snapshot()
+        return (
+            first_response,
+            cancelled_state,
+            cancelled_status,
+            retry_response,
+            retry_state,
+        )
+
+    (
+        first_response,
+        cancelled_state,
+        cancelled_status,
+        retry_response,
+        retry_state,
+    ) = asyncio.run(_cancel_then_retry())
+    assert first_response.status_code == 202
+    assert cancelled_state["running"] is False
+    assert cancelled_state["pending"] is False
+    assert cancelled_state["ok"] is False
+    assert cancelled_state["active_task_known"] is False
+    assert "cancelled" in str(cancelled_state["error"]).lower()
+    assert cancelled_status.status_code == 503
+    assert retry_response.status_code == 202
+    assert retry_state["ok"] is True
+    assert retry_state["pending"] is False
+    assert calls["count"] == 2
+
+
+def test_done_equity_refresh_task_with_pending_flags_is_reconciled_before_get(
+    temp_state_paths,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    fingerprint = {"source_mode": "master_journal", "files": [{"sha256": "current"}]}
+    monkeypatch.setattr(master_service, "_TRADING_JOURNAL_VIEW_CACHE", {"key": None, "payload": None})
+    monkeypatch.setattr(master_service, "_load_trading_journal_view_snapshot", lambda: None)
+    monkeypatch.setattr(master_service, "_journal_source_fingerprint", lambda: fingerprint)
+
+    async def _run():
+        completed_task = asyncio.create_task(asyncio.sleep(0))
+        await completed_task
+        master_service.TRADING_JOURNAL_EQUITY_REFRESH_TASK = completed_task
+        master_service.TRADING_JOURNAL_EQUITY_REFRESH_STATE.update(
+            {
+                "running": True,
+                "pending": True,
+                "ok": None,
+                "error": None,
+                "message": "still running",
+                "requested_source_fingerprints": fingerprint,
+            }
+        )
+        response = await master_service.trading_journal_items()
+        state = master_service._trading_journal_equity_refresh_state_snapshot()
+        return response, state
+
+    response, state = asyncio.run(_run())
+    payload = _json(response)
+    assert response.status_code == 503
+    assert payload["pending"] is False
+    assert payload["ok"] is False
+    assert state["running"] is False
+    assert state["pending"] is False
+    assert state["active_task_known"] is False
+    assert "terminal status" in str(state["error"]).lower()
 
 
 def test_load_view_snapshot_rejects_old_cache_version(temp_state_paths):
@@ -677,18 +935,32 @@ def test_load_view_snapshot_rejects_old_cache_version(temp_state_paths):
 
 
 def test_trading_journal_items_failed_sync_without_snapshot_returns_503(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
+    fingerprint = {"source_mode": "local", "files": []}
     monkeypatch.setattr(master_service, "_TRADING_JOURNAL_VIEW_CACHE", {"key": None, "payload": None})
     monkeypatch.setattr(master_service, "_load_trading_journal_view_snapshot", lambda: None)
+    monkeypatch.setattr(master_service, "_journal_source_fingerprint", lambda: fingerprint)
     monkeypatch.setattr(
         master_service,
-        "_sync_state_snapshot",
-        lambda: {"running": False, "ok": False, "error": "import failed", "message": "import failed"},
+        "_trading_journal_equity_refresh_state_snapshot",
+        lambda: {
+            "running": False,
+            "pending": False,
+            "ok": False,
+            "error": "cache build failed",
+            "message": "cache build failed",
+            "requested_source_fingerprints": fingerprint,
+        },
+    )
+    monkeypatch.setattr(
+        master_service,
+        "_queue_trading_journal_equity_refresh_if_idle",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("same failed fingerprint must not auto-requeue")),
     )
     response = asyncio.run(master_service.trading_journal_items())
     payload = _json(response)
     assert response.status_code == 503
     assert payload["ok"] is False
-    assert "import failed" in str(payload.get("error") or "")
+    assert "cache build failed" in str(payload.get("error") or "")
 
 
 def test_balance_merge_includes_bybit_demo_from_state_when_not_in_cashflow(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
@@ -1541,6 +1813,7 @@ def test_sync_master_journal_duration_validation_still_fails_real_trade_blank_du
     mj = temp_state_paths / "Trading Journal.xlsx"
     rows = [{"id": "t1", "row_type": "trade", "source": "manual", "account": "OANDA DEMO", "account_label": "OANDA DEMO", "symbol": "EURUSD", "side": "Buy", "qty": 1.0, "entry_price": 1.1, "exit_price": 1.2, "open_time": "2026-05-01T00:00:00Z", "close_time": "2026-05-01T01:00:00Z", "net_profit": 10.0}]
     build_master_journal_workbook({"items": rows, "stats": {"totals": {}, "groups": {}}, "balances": []}, mj)
+    monkeypatch.setattr(master_service, "_master_journal_path", lambda: mj)
     from openpyxl import load_workbook
     wb = load_workbook(mj)
     ws = wb["Trade Log"]

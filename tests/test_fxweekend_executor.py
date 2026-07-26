@@ -28,6 +28,19 @@ def _load_executor():
 fx = _load_executor()
 
 
+def _current_settings(account_modes=None, **overrides):
+    payload = {
+        "schema_version": fx.FXWEEKEND_SETTINGS_SCHEMA_VERSION,
+        "account_modes": (
+            list(account_modes)
+            if account_modes is not None
+            else list(fx.FXWEEKEND_DEFAULT_ACCOUNT_MODES)
+        ),
+    }
+    payload.update(overrides)
+    return fx.migrate_settings(payload)
+
+
 def _flat():
     return {"positions": [], "trades": [], "requests": [{"http_status": 200}]}
 
@@ -66,7 +79,7 @@ def test_error_and_log_sanitization_redacts_realistic_oanda_account_ids(
     assert "/accounts/[account]/openTrades" in logged
 
 
-def test_enabled_false_survives_startup_and_legacy_hours_migrate(
+def test_legacy_live_only_settings_migrate_once_to_demo_and_live(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     settings_path = tmp_path / "settings.json"
@@ -76,6 +89,11 @@ def test_enabled_false_survives_startup_and_legacy_hours_migrate(
                 "enabled": False,
                 "cutoff_hour_dst": 5,
                 "cutoff_hour_standard": 6,
+                "account_modes": ["live"],
+                "check_interval_seconds": 17,
+                "max_retry_backoff_seconds": 91,
+                "dry_run": True,
+                "instrument_allowlist": ["EUR_USD"],
             }
         ),
         encoding="utf-8",
@@ -83,9 +101,48 @@ def test_enabled_false_survives_startup_and_legacy_hours_migrate(
     monkeypatch.setattr(fx, "SETTINGS_PATH", settings_path)
     settings = fx.load_settings()
     assert settings["enabled"] is False
+    assert settings["schema_version"] == fx.FXWEEKEND_SETTINGS_SCHEMA_VERSION
+    assert settings["account_modes"] == ["demo", "live"]
     assert settings["cutoff_time_dst"] == "05:00"
     assert settings["cutoff_time_standard"] == "06:00"
-    assert json.loads(settings_path.read_text(encoding="utf-8"))["enabled"] is False
+    assert settings["check_interval_seconds"] == 17
+    assert settings["max_retry_backoff_seconds"] == 91
+    assert settings["dry_run"] is True
+    assert settings["instrument_allowlist"] == ["EUR_USD"]
+    assert json.loads(settings_path.read_text(encoding="utf-8")) == settings
+
+
+@pytest.mark.parametrize("account_modes", [["live"], ["demo"], []])
+def test_current_schema_account_choices_survive_repeated_loads(
+    account_modes, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings_path = tmp_path / "settings.json"
+    expected = _current_settings(account_modes, enabled=False)
+    settings_path.write_text(json.dumps(expected), encoding="utf-8")
+    monkeypatch.setattr(fx, "SETTINGS_PATH", settings_path)
+
+    first = fx.load_settings()
+    second = fx.load_settings()
+
+    assert first["schema_version"] == fx.FXWEEKEND_SETTINGS_SCHEMA_VERSION
+    assert first["account_modes"] == account_modes
+    assert second["account_modes"] == account_modes
+    assert second["enabled"] is False
+
+
+def test_checked_in_and_service_defaults_select_demo_then_live() -> None:
+    from render import master_service
+
+    checked_in = json.loads(
+        (ROOT / "fxweekend-clone" / "settings.json").read_text(encoding="utf-8")
+    )
+    for payload in (
+        fx.DEFAULT_SETTINGS,
+        master_service.FXWEEKEND_DEFAULT_SETTINGS,
+        checked_in,
+    ):
+        assert payload["schema_version"] == fx.FXWEEKEND_SETTINGS_SCHEMA_VERSION
+        assert payload["account_modes"] == ["demo", "live"]
 
 
 def test_dst_and_standard_cutoffs_use_brisbane_hhmm_precision() -> None:
@@ -188,6 +245,59 @@ def test_missing_live_credentials_do_not_hide_demo_result(
     assert result["verified_flat"] is False
 
 
+def test_liquidation_calls_demo_then_live_and_continues_after_unexpected_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = []
+
+    def process(mode, *_args, **_kwargs):
+        calls.append(mode)
+        if mode == "demo":
+            raise RuntimeError("demo transport crashed")
+        return {
+            "mode": mode,
+            "state": "verified flat",
+            "last_attempt_at": "now",
+            "last_verified_flat_at": "now",
+            "open_count": 0,
+            "last_error": None,
+        }
+
+    monkeypatch.setattr(fx, "process_account", process)
+    result = fx.run_liquidation(_current_settings(["live", "demo"]), "test")
+
+    assert calls == ["demo", "live"]
+    assert result["accounts"]["demo"]["state"] == "API failure"
+    assert "demo transport crashed" in result["accounts"]["demo"]["last_error"]
+    assert result["accounts"]["live"]["state"] == "verified flat"
+    assert result["verified_flat"] is False
+
+
+def test_both_selected_accounts_must_be_freshly_checked_before_overall_flat(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = []
+
+    def process(mode, *_args, **_kwargs):
+        calls.append(mode)
+        return {
+            "mode": mode,
+            "state": "verified flat",
+            "last_attempt_at": f"{mode}-checked",
+            "last_verified_flat_at": f"{mode}-flat",
+            "open_count": 0,
+            "last_error": None,
+        }
+
+    monkeypatch.setattr(fx, "process_account", process)
+    result = fx.run_liquidation(_current_settings(), "test")
+
+    assert calls == ["demo", "live"]
+    assert list(result["accounts"]) == ["demo", "live"]
+    assert result["verified_flat"] is True
+    assert result["state"] == "verified flat"
+
+
 def test_partial_close_is_not_success_and_post_close_refetch_is_required(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -219,7 +329,7 @@ def test_partial_close_is_not_success_and_post_close_refetch_is_required(
             }
         ],
     )
-    result = fx.process_account("live", fx.migrate_settings({"account_modes": ["live"]}))
+    result = fx.process_account("live", _current_settings(["live"]))
     assert len(calls) == 2
     assert result["state"] == "partial closure failure"
     assert result["open_count"] == 1
@@ -244,7 +354,7 @@ def test_success_requires_post_close_flat_refetch(
         "_close_requested_scope",
         lambda *_a, **_k: [{"scope": "position", "instrument": "EUR_USD", "ok": True}],
     )
-    result = fx.process_account("live", fx.migrate_settings({"account_modes": ["live"]}))
+    result = fx.process_account("live", _current_settings(["live"]))
     assert result["state"] == "verified flat"
     assert result["last_verified_flat_at"]
 
@@ -292,7 +402,7 @@ def test_close_network_exception_keeps_per_item_results_and_still_refetches(
 
     monkeypatch.setattr(fx, "_request", close_request)
     result = fx.process_account(
-        "live", fx.migrate_settings({"account_modes": ["live"]})
+        "live", _current_settings(["live"])
     )
     assert len(close_calls) == 2
     assert len(result["closures"]) == 2
@@ -341,7 +451,7 @@ def test_each_close_item_emits_progress_for_executor_heartbeat(
     observed_closure_counts = []
     result = fx.process_account(
         "live",
-        fx.migrate_settings({"account_modes": ["live"]}),
+        _current_settings(["live"]),
         on_state_change=lambda state: observed_closure_counts.append(
             len(state.get("closures") or [])
         ),
@@ -354,7 +464,7 @@ def test_each_close_item_emits_progress_for_executor_heartbeat(
 def test_failed_attempt_retries_and_new_position_after_flat_is_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    settings = fx.migrate_settings({"account_modes": ["live"]})
+    settings = _current_settings(["live"])
     cutoff = fx.BRISBANE_TZ.localize(datetime(2026, 7, 25, 5, 0))
     monkeypatch.setattr(
         fx,
@@ -468,7 +578,7 @@ def test_open_item_get_failure_keeps_http_evidence_and_checks_both_scopes(
     monkeypatch.setattr(fx, "_request", request)
     result = fx.process_account(
         "live",
-        fx.migrate_settings({"account_modes": ["live"]}),
+        _current_settings(["live"]),
     )
 
     assert [url.rsplit("/", 1)[-1] for _method, url in calls] == [
@@ -526,7 +636,7 @@ def test_open_item_network_failure_is_retained_without_suppressing_other_scope(
     monkeypatch.setattr(fx, "_request", request)
     result = fx.process_account(
         "live",
-        fx.migrate_settings({"account_modes": ["live"]}),
+        _current_settings(["live"]),
     )
 
     assert len(calls) == 2
@@ -542,7 +652,7 @@ def test_open_item_network_failure_is_retained_without_suppressing_other_scope(
 def test_closing_state_is_persisted_while_close_call_is_in_progress(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    settings = fx.migrate_settings({"account_modes": ["live"]})
+    settings = _current_settings(["live"])
     cutoff = fx.BRISBANE_TZ.localize(datetime(2026, 7, 25, 5, 0))
     monkeypatch.setattr(
         fx,
@@ -590,11 +700,9 @@ def test_scheduler_loop_recovers_after_unexpected_iteration_exception(
     class StopLoop(BaseException):
         pass
 
-    settings = fx.migrate_settings(
-        {
-            "account_modes": ["live"],
-            "check_interval_seconds": 5,
-        }
+    settings = _current_settings(
+        ["live"],
+        check_interval_seconds=5,
     )
     calls = {"iterations": 0}
     updates = []
@@ -635,7 +743,7 @@ def test_scheduler_loop_recovers_after_unexpected_iteration_exception(
 def test_completed_window_requires_fresh_post_window_verification(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    settings = fx.migrate_settings({"account_modes": ["live"]})
+    settings = _current_settings(["live"])
     cutoff = fx.BRISBANE_TZ.localize(datetime(2026, 7, 25, 5, 0))
     market_close = fx.BRISBANE_TZ.localize(
         datetime(2026, 7, 25, 7, 0)
@@ -706,7 +814,7 @@ def test_completed_window_requires_fresh_post_window_verification(
 def test_first_start_after_window_cannot_manufacture_success_from_flat_observation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    settings = fx.migrate_settings({"account_modes": ["live"]})
+    settings = _current_settings(["live"])
     cutoff = fx.BRISBANE_TZ.localize(datetime(2026, 7, 25, 5, 0))
     market_close = fx.BRISBANE_TZ.localize(
         datetime(2026, 7, 25, 7, 0)
@@ -746,7 +854,7 @@ def test_first_start_after_window_cannot_manufacture_success_from_flat_observati
 def test_post_window_flat_refetch_preserves_exact_previously_covered_cutoff(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    settings = fx.migrate_settings({"account_modes": ["live"]})
+    settings = _current_settings(["live"])
     cutoff = fx.BRISBANE_TZ.localize(datetime(2026, 7, 25, 5, 0))
     market_close = fx.BRISBANE_TZ.localize(
         datetime(2026, 7, 25, 7, 0)
@@ -796,7 +904,7 @@ def test_post_window_flat_refetch_preserves_exact_previously_covered_cutoff(
 def test_stale_early_flat_check_does_not_cover_the_completed_window(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    settings = fx.migrate_settings({"account_modes": ["live"]})
+    settings = _current_settings(["live"])
     cutoff = fx.BRISBANE_TZ.localize(datetime(2026, 7, 25, 5, 0))
     market_close = fx.BRISBANE_TZ.localize(
         datetime(2026, 7, 25, 7, 0)
@@ -847,7 +955,7 @@ def test_stale_early_flat_check_does_not_cover_the_completed_window(
 def test_changed_oanda_account_identity_invalidates_window_coverage(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    settings = fx.migrate_settings({"account_modes": ["live"]})
+    settings = _current_settings(["live"])
     cutoff = fx.BRISBANE_TZ.localize(datetime(2026, 7, 25, 5, 0))
     market_close = fx.BRISBANE_TZ.localize(
         datetime(2026, 7, 25, 7, 0)
@@ -903,7 +1011,7 @@ def test_changed_oanda_account_identity_invalidates_window_coverage(
 def test_changed_account_scope_invalidates_post_window_coverage(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    old_settings = fx.migrate_settings({"account_modes": ["live"]})
+    old_settings = _current_settings(["live"])
     settings = fx.migrate_settings({"account_modes": ["demo", "live"]})
     cutoff = fx.BRISBANE_TZ.localize(datetime(2026, 7, 25, 5, 0))
     market_close = fx.BRISBANE_TZ.localize(
@@ -960,7 +1068,7 @@ def test_config_update_clears_prior_window_coverage(
     settings_path = tmp_path / "settings.json"
     status_path = tmp_path / "status.json"
     settings_path.write_text(
-        json.dumps(fx.migrate_settings({"account_modes": ["live"]})),
+        json.dumps(_current_settings(["live"])),
         encoding="utf-8",
     )
     monkeypatch.setattr(fx, "SETTINGS_PATH", settings_path)
@@ -996,7 +1104,7 @@ def test_disabled_manual_run_does_not_call_oanda(
     monkeypatch.setattr(
         fx,
         "load_settings",
-        lambda: fx.migrate_settings({"enabled": False, "account_modes": ["live"]}),
+        lambda: _current_settings(["live"], enabled=False),
     )
     monkeypatch.setattr(fx, "_atomic_json_write", lambda *_a, **_k: None)
     monkeypatch.setattr(
@@ -1018,9 +1126,7 @@ def test_live_manual_run_is_blocked_outside_closure_window(
     monkeypatch.setattr(
         fx,
         "load_settings",
-        lambda: fx.migrate_settings(
-            {"enabled": True, "account_modes": ["live"]}
-        ),
+        lambda: _current_settings(["live"], enabled=True),
     )
     monkeypatch.setattr(
         fx,
@@ -1057,34 +1163,26 @@ def test_status_survives_restart_through_status_file(
     assert restored["running"] is False
 
 
-def test_local_profile_never_autostarts_or_opens_local_fxweekend(
+def test_local_dashboard_and_scripts_contain_no_fxweekend_entries(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from render import master_service
 
     monkeypatch.setattr(master_service, "APP_PROFILE", "local")
     monkeypatch.setenv("AUTOSTART_SCRIPTS", "bybit_monitor,fxweekend-clone")
-    monkeypatch.setenv("RENDER_FXWEEKEND_BASE_URL", "https://render.example.test")
     assert "fxweekend-clone" not in master_service._compute_autostart_scripts()
-    button = next(
-        item for item in master_service._profile_main_buttons() if item["name"] == "fxweekend"
+    assert "fxweekend-clone" not in master_service._LAST_AUTOSTART_UNAVAILABLE
+    assert all(
+        "fxweekend" not in str(item).lower()
+        for item in master_service._profile_main_buttons()
     )
-    assert button["label"] == "FX Weekend (Render)"
-    assert button["open_url"] == "https://render.example.test/apps/fxweekend-clone"
 
-
-def test_local_fxweekend_button_surfaces_missing_render_configuration(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from render import master_service
-
-    monkeypatch.setattr(master_service, "APP_PROFILE", "local")
-    monkeypatch.delenv("RENDER_FXWEEKEND_BASE_URL", raising=False)
-    monkeypatch.delenv("RENDER_CALCULATOR_BASE_URL", raising=False)
-    button = next(
-        item for item in master_service._profile_main_buttons() if item["name"] == "fxweekend"
-    )
-    assert button["open_url"] == "/fx-weekend-render-configuration-error"
+    dashboard = asyncio.run(master_service.home_page()).body.decode("utf-8").lower()
+    scripts = asyncio.run(master_service.list_scripts()).body.decode("utf-8").lower()
+    assert "fxweekend" not in dashboard
+    assert "fxweekend-clone" not in dashboard
+    assert "fxweekend" not in scripts
+    assert "fxweekend-clone" not in scripts
 
 
 def test_render_environment_overrides_cannot_remove_fxweekend_authority(
@@ -1222,7 +1320,13 @@ def test_render_readiness_is_not_fake_when_enabled_executor_is_dead(
 
     settings_path = tmp_path / "settings.json"
     settings_path.write_text(
-        json.dumps({"enabled": True, "account_modes": ["live"]}),
+        json.dumps(
+            {
+                "schema_version": fx.FXWEEKEND_SETTINGS_SCHEMA_VERSION,
+                "enabled": True,
+                "account_modes": ["live"],
+            }
+        ),
         encoding="utf-8",
     )
     monkeypatch.setattr(master_service, "APP_PROFILE", "render")
@@ -1297,6 +1401,7 @@ def test_render_readiness_blocks_before_cutoff_api_access_failure(
     settings_path.write_text(
         json.dumps(
             {
+                "schema_version": fx.FXWEEKEND_SETTINGS_SCHEMA_VERSION,
                 "enabled": True,
                 "account_modes": ["live"],
                 "check_interval_seconds": 60,
@@ -1311,6 +1416,7 @@ def test_render_readiness_blocks_before_cutoff_api_access_failure(
                 "heartbeat_at": datetime.now(pytz.utc).isoformat(),
                 "last_access_check_at": datetime.now(pytz.utc).isoformat(),
                 "last_error": "live: openPositions GET failed with HTTP 401",
+                "selected_accounts": ["live"],
                 "accounts": {
                     "live": {
                         "state": "API failure",
@@ -1350,6 +1456,147 @@ def test_render_readiness_blocks_before_cutoff_api_access_failure(
     assert "401" in component["reason"]
 
 
+def test_render_readiness_exposes_missing_selected_account_credentials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from render import master_service
+
+    class FakeScript:
+        name = "fxweekend-clone"
+        last_start_error = None
+        last_exit_reason = None
+
+        def to_summary(self):
+            return {"starting": False, "running": True}
+
+    settings_path = tmp_path / "settings.json"
+    status_path = tmp_path / "status.json"
+    settings_path.write_text(
+        json.dumps(
+            {
+                "schema_version": fx.FXWEEKEND_SETTINGS_SCHEMA_VERSION,
+                "enabled": True,
+                "account_modes": ["demo", "live"],
+                "check_interval_seconds": 60,
+            }
+        ),
+        encoding="utf-8",
+    )
+    status_path.write_text(
+        json.dumps(
+            {
+                "state": "before cutoff",
+                "heartbeat_at": datetime.now(pytz.utc).isoformat(),
+                "selected_accounts": ["demo", "live"],
+                "accounts": {
+                    "demo": {"state": "before cutoff", "open_count": 0},
+                    "live": {"state": "before cutoff", "open_count": 0},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def resolve(mode):
+        if mode == "demo":
+            raise master_service.OandaAPIError("OANDA_API_KEY_DEMO is missing")
+        return {"account_id": "id", "api_key": "key", "base_url": "url"}
+
+    monkeypatch.setattr(master_service, "APP_PROFILE", "render")
+    monkeypatch.setattr(master_service, "FXWEEKEND_SETTINGS_PATH", settings_path)
+    monkeypatch.setattr(master_service, "FXWEEKEND_STATUS_PATH", status_path)
+    monkeypatch.setattr(master_service.script_manager, "get", lambda _name: FakeScript())
+    monkeypatch.setattr(master_service, "resolve_oanda_account_config", resolve)
+    monkeypatch.setattr(
+        master_service,
+        "_state_sync_status_snapshot",
+        lambda: {"fxweekend_state_indeterminate": False},
+    )
+
+    component = master_service._autostart_component_readiness(
+        "fxweekend-clone"
+    )
+
+    assert component["ready"] is False
+    assert component["phase"] == "credential_failure"
+    assert component["credential_errors"] == [
+        "demo: OANDA_API_KEY_DEMO is missing"
+    ]
+    assert "demo" in component["reason"]
+
+
+def test_render_readiness_rejects_missing_or_failed_selected_runtime_account(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from render import master_service
+
+    class FakeScript:
+        name = "fxweekend-clone"
+        last_start_error = None
+        last_exit_reason = None
+
+        def to_summary(self):
+            return {"starting": False, "running": True}
+
+    settings_path = tmp_path / "settings.json"
+    status_path = tmp_path / "status.json"
+    settings_path.write_text(
+        json.dumps(
+            {
+                "schema_version": fx.FXWEEKEND_SETTINGS_SCHEMA_VERSION,
+                "enabled": True,
+                "account_modes": ["demo", "live"],
+                "check_interval_seconds": 60,
+            }
+        ),
+        encoding="utf-8",
+    )
+    status = {
+        "state": "before cutoff",
+        "heartbeat_at": datetime.now(pytz.utc).isoformat(),
+        "selected_accounts": ["demo", "live"],
+        "accounts": {
+            "demo": {"state": "before cutoff", "open_count": 0},
+        },
+    }
+    status_path.write_text(json.dumps(status), encoding="utf-8")
+    monkeypatch.setattr(master_service, "APP_PROFILE", "render")
+    monkeypatch.setattr(master_service, "FXWEEKEND_SETTINGS_PATH", settings_path)
+    monkeypatch.setattr(master_service, "FXWEEKEND_STATUS_PATH", status_path)
+    monkeypatch.setattr(master_service.script_manager, "get", lambda _name: FakeScript())
+    monkeypatch.setattr(
+        master_service,
+        "resolve_oanda_account_config",
+        lambda _mode: {"account_id": "id", "api_key": "key", "base_url": "url"},
+    )
+    monkeypatch.setattr(
+        master_service,
+        "_state_sync_status_snapshot",
+        lambda: {"fxweekend_state_indeterminate": False},
+    )
+
+    missing = master_service._autostart_component_readiness(
+        "fxweekend-clone"
+    )
+    assert missing["ready"] is False
+    assert missing["phase"] == "account_checks_pending"
+    assert missing["missing_runtime_accounts"] == ["live"]
+
+    status["accounts"]["live"] = {
+        "state": "API failure",
+        "open_count": None,
+        "last_error": "openTrades HTTP 503",
+    }
+    status_path.write_text(json.dumps(status), encoding="utf-8")
+    failed = master_service._autostart_component_readiness(
+        "fxweekend-clone"
+    )
+    assert failed["ready"] is False
+    assert failed["phase"] == "API_failure"
+    assert "live" in failed["reason"]
+    assert "503" in failed["reason"]
+
+
 def test_dropbox_state_store_registers_fxweekend_durable_files() -> None:
     from render import dropbox_state_store
 
@@ -1368,9 +1615,17 @@ def test_fxweekend_config_failure_restores_remote_per_file_and_aggregate_state(
 
     settings_path = tmp_path / "settings.json"
     status_path = tmp_path / "status.json"
-    previous_settings = {"enabled": False, "account_modes": ["demo"]}
+    previous_settings = {
+        "schema_version": fx.FXWEEKEND_SETTINGS_SCHEMA_VERSION,
+        "enabled": False,
+        "account_modes": ["demo"],
+    }
     previous_status = {"state": "disabled", "accounts": {}}
-    new_settings = {"enabled": True, "account_modes": ["live"]}
+    new_settings = {
+        "schema_version": fx.FXWEEKEND_SETTINGS_SCHEMA_VERSION,
+        "enabled": True,
+        "account_modes": ["live"],
+    }
     new_status = {"state": "before cutoff", "accounts": {}}
     settings_path.write_text(json.dumps(new_settings), encoding="utf-8")
     status_path.write_text(json.dumps(new_status), encoding="utf-8")
@@ -1385,8 +1640,8 @@ def test_fxweekend_config_failure_restores_remote_per_file_and_aggregate_state(
 
     aggregate_calls = []
 
-    async def aggregate(*, timeout=10.0, **_kwargs):
-        aggregate_calls.append(timeout)
+    async def aggregate(*, timeout=10.0, **kwargs):
+        aggregate_calls.append({"timeout": timeout, **kwargs})
         if len(aggregate_calls) == 1:
             raise master_service.HTTPException(
                 status_code=502,
@@ -1412,6 +1667,10 @@ def test_fxweekend_config_failure_restores_remote_per_file_and_aggregate_state(
     assert remote["fxweekend_settings"] == previous_settings
     assert remote["fxweekend_status"] == previous_status
     assert len(aggregate_calls) == 2
+    assert aggregate_calls[0]["expected_fxweekend_settings"] == new_settings
+    assert aggregate_calls[0]["expected_fxweekend_status"] == new_status
+    assert aggregate_calls[1]["expected_fxweekend_settings"] == previous_settings
+    assert aggregate_calls[1]["expected_fxweekend_status"] == previous_status
 
 
 def test_failed_authoritative_restore_blocks_background_and_supervisor_start(
@@ -1459,6 +1718,54 @@ def test_failed_authoritative_restore_blocks_background_and_supervisor_start(
     assert fake.last_start_error == "Dropbox unavailable"
 
 
+def test_fxweekend_start_gate_requires_verified_current_schema_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from render import master_service
+
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(
+        json.dumps(
+            {
+                "schema_version": fx.FXWEEKEND_SETTINGS_SCHEMA_VERSION,
+                "enabled": True,
+                "account_modes": ["demo", "live"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    state_sync = {
+        "enabled": True,
+        "restore_complete": True,
+        "restore_status": "done",
+        "restore_error": None,
+        "per_file_state_ready": True,
+        "fxweekend_state_indeterminate": False,
+        "fxweekend_durable_verified": False,
+    }
+    monkeypatch.setattr(master_service, "APP_PROFILE", "render")
+    monkeypatch.setattr(master_service, "FXWEEKEND_SETTINGS_PATH", settings_path)
+    monkeypatch.setattr(
+        master_service, "_state_sync_status_snapshot", lambda: dict(state_sync)
+    )
+    master_service._STARTUP_STATE_RESTORE_DONE.set()
+
+    allowed, reason = master_service._fxweekend_start_gate()
+    assert allowed is False
+    assert "aggregate" in reason
+
+    state_sync["fxweekend_durable_verified"] = True
+    assert master_service._fxweekend_start_gate() == (True, "")
+
+    settings_path.write_text(
+        json.dumps({"enabled": True, "account_modes": ["live"]}),
+        encoding="utf-8",
+    )
+    allowed, reason = master_service._fxweekend_start_gate()
+    assert allowed is False
+    assert "schema migration" in reason
+
+
 def test_local_direct_fxweekend_routes_cannot_start_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1494,5 +1801,5 @@ def test_local_direct_fxweekend_routes_cannot_start_fallback(
         }
     )
     response = asyncio.run(master_service.proxy_app("fxweekend-clone", request))
-    assert response.status_code == 307
-    assert response.headers["location"] == "/fx-weekend-render-configuration-error"
+    assert response.status_code == 409
+    assert json.loads(response.body)["error"] == "render_owned_executor"

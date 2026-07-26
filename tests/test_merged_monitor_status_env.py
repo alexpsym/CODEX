@@ -386,7 +386,7 @@ def test_compute_autostart_semantics(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "fxweekend-clone" in master_service._LAST_AUTOSTART_UNAVAILABLE
 
 
-def test_missing_configured_autostart_target_gets_visible_scripts_reason(
+def test_local_fxweekend_autostart_target_is_ignored_without_ui_row(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(master_service, "SCANNER_LOCAL_UI_MODE", False)
@@ -423,31 +423,21 @@ def test_missing_configured_autostart_target_gets_visible_scripts_reason(
 
     names = master_service._compute_autostart_scripts()
     assert names == ["bybit_monitor"]
-    render_owned_reason = (
-        "FX Weekend execution is Render-owned and cannot autostart locally."
-    )
-    assert master_service._LAST_AUTOSTART_UNAVAILABLE["fxweekend-clone"] == render_owned_reason
+    assert "fxweekend-clone" not in master_service._LAST_AUTOSTART_UNAVAILABLE
 
     payload = json.loads(asyncio.run(master_service.list_scripts()).body.decode("utf-8"))
-    row = next(item for item in payload if item["name"] == "fxweekend-clone")
-    assert row["autostart_expected"] is True
-    assert row["operational"] is False
-    assert row["status_detail"] == f"configured autostart target unavailable: {render_owned_reason}"
-    assert row["last_start_error"] == render_owned_reason
+    assert all("fxweekend" not in json.dumps(item).lower() for item in payload)
 
     readiness = master_service._startup_readiness_status()
-    warning = next(item for item in readiness["background_warnings"] if item["name"] == "fxweekend-clone")
-    component = next(item for item in readiness["components"] if item["name"] == "fxweekend-clone")
     assert readiness["ready"] is True
     assert readiness["core_ready"] is True
-    assert readiness["background_ready"] is False
+    assert readiness["background_ready"] is True
     assert readiness["blocking_component"] is None
     assert readiness["failure_reason"] is None
-    assert readiness["background_warning"] == f"fxweekend-clone: {render_owned_reason}"
-    assert warning["reason"] == render_owned_reason
-    assert warning["blocking"] is False
-    assert component["phase"] == "autostart_unavailable"
-    assert component["blocking"] is False
+    assert all(
+        item.get("name") != "fxweekend-clone"
+        for item in readiness["components"]
+    )
 
 
 def test_startup_readiness_reports_ready_after_state_restore_and_autostart(
@@ -478,6 +468,7 @@ def test_startup_readiness_reports_ready_after_state_restore_and_autostart(
         "_load_json_file",
         lambda path, default: (
             {
+                "schema_version": master_service.FXWEEKEND_SETTINGS_SCHEMA_VERSION,
                 "enabled": True,
                 "account_modes": ["live"],
                 "check_interval_seconds": 60,
@@ -486,6 +477,7 @@ def test_startup_readiness_reports_ready_after_state_restore_and_autostart(
             else {
                 "state": "before cutoff",
                 "heartbeat_at": master_service._utc_now_iso(),
+                "selected_accounts": ["live"],
                 "accounts": {"live": {"state": "verified flat"}},
             }
         ),
@@ -1125,6 +1117,68 @@ def test_monitor_requires_all_configured_scanner_targets_and_exposes_diagnostics
     assert monitor_row["scanner_children"]["oanda_monitor"]["last_exit_reason"] == "exited 1"
 
 
+def _mock_operational_fxweekend_state(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    enabled: bool = True,
+) -> None:
+    class FxScript:
+        name = "fxweekend-clone"
+        last_start_error = None
+        last_exit_reason = None
+
+        def to_summary(self):
+            return {"name": self.name, "running": False, "starting": False}
+
+    original_get = master_service.script_manager.get
+
+    def get_script(name):
+        if name == "fxweekend-clone":
+            return FxScript()
+        return original_get(name)
+
+    monkeypatch.setattr(master_service.script_manager, "get", get_script)
+    settings = {
+        "schema_version": master_service.FXWEEKEND_SETTINGS_SCHEMA_VERSION,
+        "enabled": enabled,
+        "account_modes": ["demo", "live"],
+        "check_interval_seconds": 60,
+    }
+    status = {
+        "state": "before cutoff",
+        "heartbeat_at": master_service._utc_now_iso(),
+        "selected_accounts": ["demo", "live"],
+        "accounts": {
+            "demo": {"state": "before cutoff", "open_count": 0},
+            "live": {"state": "before cutoff", "open_count": 0},
+        },
+    }
+
+    def load(path, default):
+        if path == master_service.FXWEEKEND_SETTINGS_PATH:
+            return settings
+        if path == master_service.FXWEEKEND_STATUS_PATH:
+            return status
+        return default
+
+    monkeypatch.setattr(master_service, "_load_json_file", load)
+    monkeypatch.setattr(
+        master_service,
+        "resolve_oanda_account_config",
+        lambda mode: {
+            "mode": mode,
+            "account_id": f"{mode}-id",
+            "api_key": f"{mode}-key",
+            "base_url": "https://example.invalid/v3",
+        },
+    )
+    monkeypatch.setattr(
+        master_service,
+        "_state_sync_status_snapshot",
+        lambda: {"fxweekend_state_indeterminate": False},
+    )
+
+
 def test_scripts_merged_fxweekend_running_from_fxweekend_clone(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(master_service, "APP_PROFILE", "render")
     monkeypatch.setattr(
@@ -1137,7 +1191,7 @@ def test_scripts_merged_fxweekend_running_from_fxweekend_clone(monkeypatch: pyte
         "list_scripts",
         lambda: [{"name": "fxweekend-clone", "running": True, "starting": False}],
     )
-    monkeypatch.setattr(master_service, "_load_json_file", lambda _p, _d: {"enabled": True})
+    _mock_operational_fxweekend_state(monkeypatch)
     monkeypatch.setattr(master_service, "_compute_autostart_scripts", lambda: ["fxweekend-clone"])
     payload = json.loads(asyncio.run(master_service.list_scripts()).body.decode("utf-8"))
     row = next(item for item in payload if item["name"] == "fxweekend")
@@ -1168,7 +1222,7 @@ def test_scripts_merged_fxweekend_starting_and_errors(monkeypatch: pytest.Monkey
             "last_exit_reason": "exit",
         }],
     )
-    monkeypatch.setattr(master_service, "_load_json_file", lambda _p, _d: {"enabled": True})
+    _mock_operational_fxweekend_state(monkeypatch)
     monkeypatch.setattr(master_service, "_compute_autostart_scripts", lambda: ["fxweekend-clone"])
     payload = json.loads(asyncio.run(master_service.list_scripts()).body.decode("utf-8"))
     row = next(item for item in payload if item["name"] == "fxweekend")
@@ -1221,7 +1275,7 @@ def test_scripts_merged_fxweekend_running_but_disabled_not_operational(monkeypat
         "list_scripts",
         lambda: [{"name": "fxweekend-clone", "running": True, "starting": False}],
     )
-    monkeypatch.setattr(master_service, "_load_json_file", lambda _p, _d: {"enabled": False})
+    _mock_operational_fxweekend_state(monkeypatch, enabled=False)
     monkeypatch.setattr(master_service, "_compute_autostart_scripts", lambda: [])
     payload = json.loads(asyncio.run(master_service.list_scripts()).body.decode("utf-8"))
     row = next(item for item in payload if item["name"] == "fxweekend")
@@ -1244,7 +1298,7 @@ def test_scripts_merged_fxweekend_stopped_includes_error_detail(monkeypatch: pyt
         "list_scripts",
         lambda: [{"name": "fxweekend-clone", "running": False, "starting": False, "last_start_error": "spawn failed"}],
     )
-    monkeypatch.setattr(master_service, "_load_json_file", lambda _p, _d: {"enabled": True})
+    _mock_operational_fxweekend_state(monkeypatch)
     monkeypatch.setattr(master_service, "_compute_autostart_scripts", lambda: ["calculator-webhook"])
     payload = json.loads(asyncio.run(master_service.list_scripts()).body.decode("utf-8"))
     row = next(item for item in payload if item["name"] == "fxweekend")

@@ -31,6 +31,23 @@ _RUNTIME_FILES_TO_PRESERVE = (
 )
 
 
+def _restore_runtime_snapshot(path: Path, original: bytes | None) -> None:
+    last_error: OSError | None = None
+    for _attempt in range(20):
+        try:
+            if original is None:
+                path.unlink(missing_ok=True)
+            else:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(original)
+            return
+        except OSError as exc:
+            last_error = exc
+            time.sleep(0.05)
+    assert last_error is not None
+    raise last_error
+
+
 @pytest.fixture(autouse=True)
 def _reset_state_sync_globals():
     runtime_snapshots = {
@@ -74,12 +91,7 @@ def _reset_state_sync_globals():
     else:
         master_service._STARTUP_STATE_RESTORE_DONE.clear()
     for path, original in runtime_snapshots.items():
-        if original is None:
-            if path.exists():
-                path.unlink()
-        else:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(original)
+        _restore_runtime_snapshot(path, original)
 
 
 class DummyRequest:
@@ -144,7 +156,11 @@ def _isolate_render_watchlist_state(
         "oanda_alerts": [],
         "bybit_settings": {},
         "oanda_settings": {},
-        "fxweekend_settings": {"enabled": False, "account_modes": []},
+        "fxweekend_settings": {
+            "schema_version": master_service.FXWEEKEND_SETTINGS_SCHEMA_VERSION,
+            "enabled": False,
+            "account_modes": [],
+        },
         "fxweekend_status": {},
     }
     verifier_calls: list[str] = []
@@ -174,11 +190,13 @@ def _isolate_render_watchlist_state(
                     "oanda": {"alerts": []},
                 },
                 "watchlist": master_service._get_watchlist(),
-                "fxweekend_settings": {
-                    "enabled": False,
-                    "account_modes": [],
-                },
-                "fxweekend_status": {},
+                "fxweekend_settings": master_service._load_json_file(
+                    master_service.FXWEEKEND_SETTINGS_PATH,
+                    master_service.FXWEEKEND_DEFAULT_SETTINGS,
+                ),
+                "fxweekend_status": master_service._load_json_file(
+                    master_service.FXWEEKEND_STATUS_PATH, {}
+                ),
             },
             sort_keys=True,
         ).encode("utf-8")
@@ -613,6 +631,7 @@ def test_render_restart_restores_authoritative_fxweekend_settings_and_status(
 ) -> None:
     stores = _isolate_render_watchlist_state(tmp_path, monkeypatch, [])
     expected_settings = {
+        "schema_version": master_service.FXWEEKEND_SETTINGS_SCHEMA_VERSION,
         "enabled": True,
         "account_modes": ["demo", "live"],
         "cutoff_time_dst": "05:15",
@@ -646,7 +665,11 @@ def test_render_restart_restores_authoritative_fxweekend_settings_and_status(
     ).encode("utf-8")
     master_service._save_json_file(
         master_service.FXWEEKEND_SETTINGS_PATH,
-        {"enabled": False, "account_modes": []},
+        {
+            "schema_version": master_service.FXWEEKEND_SETTINGS_SCHEMA_VERSION,
+            "enabled": False,
+            "account_modes": [],
+        },
     )
     master_service._save_json_file(
         master_service.FXWEEKEND_STATUS_PATH,
@@ -687,8 +710,95 @@ def test_render_restart_restores_authoritative_fxweekend_settings_and_status(
     assert master_service._load_json_file(
         master_service.FXWEEKEND_STATUS_PATH, {}
     ) == expected_status
+    assert stores["primary"]["fxweekend_settings"] == expected_settings
+    assert json.loads(stores["aggregate"]["payload"].decode("utf-8"))[
+        "fxweekend_settings"
+    ] == expected_settings
     status = master_service._state_sync_status_snapshot()
     assert status["restore_status"] == "done"
+    assert status["fxweekend_durable_verified"] is True
+    assert master_service._STARTUP_STATE_RESTORE_DONE.is_set()
+
+
+def test_render_restart_durably_migrates_legacy_live_only_fxweekend_settings(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    stores = _isolate_render_watchlist_state(tmp_path, monkeypatch, [])
+    legacy_settings = {
+        "enabled": False,
+        "account_modes": ["live"],
+        "cutoff_time_dst": "05:17",
+        "cutoff_time_standard": "06:23",
+        "check_interval_seconds": 19,
+        "max_retry_backoff_seconds": 97,
+        "dry_run": True,
+        "instrument_allowlist": ["EUR_USD"],
+    }
+    expected_settings = {
+        **legacy_settings,
+        "schema_version": master_service.FXWEEKEND_SETTINGS_SCHEMA_VERSION,
+        "account_modes": ["demo", "live"],
+    }
+    expected_status = {"state": "disabled", "accounts": {}}
+    stores["primary"]["fxweekend_settings"] = deepcopy(legacy_settings)
+    stores["primary"]["fxweekend_status"] = deepcopy(expected_status)
+    stores["aggregate"]["payload"] = json.dumps(
+        {
+            "version": 4,
+            "alerts": {
+                "bybit": {"alerts": []},
+                "oanda": {"alerts": []},
+            },
+            "watchlist": [],
+            "fxweekend_settings": legacy_settings,
+            "fxweekend_status": expected_status,
+        }
+    ).encode("utf-8")
+    master_service._save_json_file(
+        master_service.FXWEEKEND_SETTINGS_PATH, legacy_settings
+    )
+    master_service._save_json_file(
+        master_service.FXWEEKEND_STATUS_PATH, expected_status
+    )
+    monkeypatch.setattr(
+        master_service,
+        "_restore_alerts_payload",
+        lambda _data: {
+            "bybit_restored": 0,
+            "bybit_invalid_skipped": 0,
+            "oanda_restored": 0,
+            "watchlist_restored": 0,
+            "pending_webhooks_restored": 0,
+            "trade_contexts_restored": 0,
+            "oanda_fill_state_restored": False,
+            "journal_rows_restored": 0,
+            "journal_rows_sanitized": 0,
+        },
+    )
+    monkeypatch.setattr(
+        master_service, "_master_journal_single_file_mode", lambda: True
+    )
+    monkeypatch.setattr(
+        master_service, "_repair_persisted_oanda_trade_rows", lambda: 0
+    )
+    monkeypatch.setattr(
+        master_service, "_schedule_dropbox_upload_state_backup", lambda: None
+    )
+    master_service._STARTUP_STATE_RESTORE_DONE.clear()
+
+    asyncio.run(master_service._dropbox_restore_state_backup_on_startup())
+
+    assert master_service._load_json_file(
+        master_service.FXWEEKEND_SETTINGS_PATH, {}
+    ) == expected_settings
+    assert stores["primary"]["fxweekend_settings"] == expected_settings
+    aggregate = json.loads(stores["aggregate"]["payload"].decode("utf-8"))
+    assert aggregate["fxweekend_settings"] == expected_settings
+    assert aggregate["fxweekend_status"] == expected_status
+    status = master_service._state_sync_status_snapshot()
+    assert status["restore_status"] == "done"
+    assert status["fxweekend_settings_schema_migrated"] is True
+    assert status["fxweekend_durable_verified"] is True
     assert master_service._STARTUP_STATE_RESTORE_DONE.is_set()
 
 

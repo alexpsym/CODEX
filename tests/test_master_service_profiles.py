@@ -87,7 +87,8 @@ def test_render_profile_scripts_hide_local_only_main_views() -> None:
     assert "bybit_monitor" not in names
     assert "oanda_monitor" not in names
     assert "calculator" in names
-    assert "calculator" in names
+    assert "fxweekend" in names
+    assert "fxweekend-clone" not in names
 
 
 def test_local_profile_includes_open_orders_and_trading_journal() -> None:
@@ -102,6 +103,11 @@ def test_local_profile_includes_open_orders_and_trading_journal() -> None:
     assert "open-orders" not in names
     assert "mt5" not in names
     assert "pine" not in names
+    assert "fxweekend" not in names
+    assert "fxweekend-clone" not in names
+    assert "fxweekend" not in asyncio.run(master_service.home_page()).body.decode(
+        "utf-8"
+    ).lower()
 
     trading_journal = by_name["trading-journal"]
     assert trading_journal["label"] == "Journal"
