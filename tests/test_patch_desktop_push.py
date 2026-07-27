@@ -44,8 +44,9 @@ def test_patch_desktop_push_logs_and_stages_all_changes(tmp_path: Path):
     assert '"render/uploads"' in content
     assert '"bybit_monitor/custom_alerts.json"' in content
     assert '":(glob)fxweekend-clone/*.tmp"' in content
-    assert '"state_manifest.json"' in content
-    assert '"state_backup.json"' in content
+    assert '"watchlist.json"' not in content
+    assert '"state_manifest.json"' not in content
+    assert '"state_backup.json"' not in content
     assert "git add -u" not in content
     assert "-uno" not in content
     assert "PATCH_DESKTOP_PUSH_SUPPRESS_CONSOLE_TITLE" in content
@@ -136,8 +137,9 @@ def test_patch_desktop_push_logs_and_stages_all_changes(tmp_path: Path):
     assert 'reset -q -- "render/uploads"' in git_calls
     assert 'reset -q -- "bybit_monitor/custom_alerts.json"' in git_calls
     assert 'reset -q -- ":(glob)fxweekend-clone/*.tmp"' in git_calls
-    assert 'reset -q -- "state_manifest.json"' in git_calls
-    assert 'reset -q -- "state_backup.json"' in git_calls
+    assert 'reset -q -- "watchlist.json"' not in git_calls
+    assert 'reset -q -- "state_manifest.json"' not in git_calls
+    assert 'reset -q -- "state_backup.json"' not in git_calls
     assert "diff --cached --stat" in git_calls
     assert "fetch origin master" in git_calls
 
@@ -230,18 +232,43 @@ def test_gitignore_excludes_generated_logs_caches_and_local_env_files():
         "bybit_monitor/state.json",
         "bybit_monitor/custom_alerts.json",
         "oanda_monitor/runtime_status.json",
+        "watchlist.json",
         "state_backup.json",
         "state_manifest.json",
+        "stateManifest.json",
     }
     assert required.issubset(set(ignore))
 
 
-def test_patch_desktop_push_excludes_confirmed_runtime_local_state_paths():
+def test_patch_desktop_push_relies_on_gitignore_for_untracked_runtime_state():
     script = (ROOT / "PATCH_DESKTOP_PUSH.bat").read_text(encoding="utf-8")
     for path in (
         '"bybit_monitor/custom_alerts.json"',
-        '"state_manifest.json"',
         '"render/uploads"',
         '"render/data"',
     ):
         assert path in script
+    for path in (
+        '"watchlist.json"',
+        '"state_manifest.json"',
+        '"state_backup.json"',
+    ):
+        assert path not in script
+
+
+def test_user_state_files_are_not_tracked_repository_bootstrap_data():
+    result = subprocess.run(
+        [
+            "git",
+            "ls-files",
+            "--",
+            "watchlist.json",
+            "state_manifest.json",
+            "state_backup.json",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    assert result.stdout.strip() == ""

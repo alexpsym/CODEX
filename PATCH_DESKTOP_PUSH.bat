@@ -104,9 +104,6 @@ for %%P in (
   "oanda_monitor/custom_alerts.json"
   "oanda_monitor/settings.json"
   "oanda_monitor/runtime_status.json"
-  "watchlist.json"
-  "state_manifest.json"
-  "state_backup.json"
 ) do (
   call git reset -q -- "%%~P" >nul 2>nul
 )

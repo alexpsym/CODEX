@@ -13,6 +13,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 JS_PATH = ROOT / "render" / "static" / "trading_journal_equity_curve.js"
 SERVICE_PATH = ROOT / "render" / "master_service.py"
+VERIFIED_BALANCE_SOURCE = "cashflow_anchor_plus_trade_results"
 
 
 def _run_node(expression: str) -> object:
@@ -85,15 +86,54 @@ def test_fixed_six_account_choices_order_aliases_and_bybit_demo_exclusion() -> N
     ]
 
 
-def test_equity_normalization_filters_sorts_dedupes_and_honours_balance_precedence() -> None:
+def test_every_account_curve_starts_at_exactly_100_percent() -> None:
     rows = [
         {
-            "id": "later",
+            "id": f"trade-{account}",
+            "account": account,
+            "row_type": "trade",
+            "close_time": "2026-01-01T00:00:00Z",
+            "analysis_balance_before_trade": 100,
+            "analysis_balance_after_trade": 105,
+            "analysis_balance_before_trade_source": VERIFIED_BALANCE_SOURCE,
+            "net_profit": 5,
+        }
+        for account in (
+            "BINANCE",
+            "BYBIT",
+            "OANDA DEMO",
+            "OANDA LIVE",
+            "PEPPERSTONE DEMO",
+            "PEPPERSTONE LIVE",
+        )
+    ]
+    expression = (
+        "Object.fromEntries(TradingJournalEquityCurve.ACCOUNT_CHOICES.map("
+        "(choice) => [choice.value, TradingJournalEquityCurve.normalizeEquityPoints("
+        + json.dumps(rows)
+        + ", choice.value).map((point) => point.value)]))"
+    )
+    assert _run_node(expression) == {
+        "BINANCE": [100, 105],
+        "BYBIT": [100, 105],
+        "OANDA DEMO": [100, 105],
+        "OANDA LIVE": [100, 105],
+        "PEPPERSTONE DEMO": [100, 105],
+        "PEPPERSTONE LIVE": [100, 105],
+    }
+
+
+def test_equity_normalization_compounds_returns_and_keeps_cashflows_flat() -> None:
+    rows = [
+        {
+            "id": "trade-2",
             "account_label": "Bybit Live",
             "row_type": "trade",
             "close_time": "2026-01-03T00:00:00Z",
-            "analysis_balance_after_trade": 130,
-            "balance_after_trade": 120,
+            "analysis_balance_before_trade": 1495,
+            "analysis_balance_after_trade": 1480.05,
+            "analysis_balance_before_trade_source": VERIFIED_BALANCE_SOURCE,
+            "net_profit": -14.95,
             "currency": "USDT",
         },
         {
@@ -101,7 +141,8 @@ def test_equity_normalization_filters_sorts_dedupes_and_honours_balance_preceden
             "account": "BYBIT",
             "row_type": "trade",
             "close_time": "2026-01-02T00:00:00Z",
-            "balance_after_trade": 999,
+            "analysis_balance_before_trade": 495,
+            "analysis_balance_after_trade": 999,
             "currency": "USDT",
             "is_test_trade": True,
         },
@@ -110,23 +151,43 @@ def test_equity_normalization_filters_sorts_dedupes_and_honours_balance_preceden
             "account": "BYBIT LIVE",
             "row_type": "monthly_aud_reval",
             "close_time": "2026-01-02T00:00:00Z",
-            "balance_after_trade": 888,
+            "analysis_balance_before_trade": 495,
+            "analysis_balance_after_trade": 888,
             "currency": "AUD",
         },
         {
-            "id": "cash",
+            "id": "deposit",
             "account": "BYBIT",
             "row_type": "cashflow",
-            "open_time": "2026-01-01T00:00:00Z",
-            "cashflow_new_balance": 100,
+            "open_time": "2026-01-02T00:00:00Z",
+            "cashflow_new_balance": 1495,
             "currency": "USDT",
         },
         {
-            "id": "cash",
+            "id": "deposit",
             "account": "BYBIT",
             "row_type": "cashflow",
-            "open_time": "2026-01-01T00:00:00Z",
-            "cashflow_new_balance": 100,
+            "open_time": "2026-01-02T00:00:00Z",
+            "cashflow_new_balance": 1495,
+            "currency": "USDT",
+        },
+        {
+            "id": "trade-1",
+            "account": "BYBIT",
+            "row_type": "trade",
+            "close_time": "2026-01-01T00:00:00Z",
+            "analysis_balance_before_trade": 500,
+            "analysis_balance_after_trade": 495,
+            "analysis_balance_before_trade_source": VERIFIED_BALANCE_SOURCE,
+            "net_profit": -5,
+            "currency": "USDT",
+        },
+        {
+            "id": "pre-trade-cashflow",
+            "account": "BYBIT",
+            "row_type": "cashflow",
+            "open_time": "2025-12-31T00:00:00Z",
+            "cashflow_new_balance": 500,
             "currency": "USDT",
         },
         {
@@ -134,76 +195,93 @@ def test_equity_normalization_filters_sorts_dedupes_and_honours_balance_preceden
             "account": "OANDA LIVE",
             "row_type": "trade",
             "close_time": "2026-01-04T00:00:00Z",
-            "balance_after_trade": 777,
+            "analysis_balance_before_trade": 700,
+            "analysis_balance_after_trade": 777,
+            "analysis_balance_before_trade_source": VERIFIED_BALANCE_SOURCE,
+            "net_profit": 77,
             "currency": "AUD",
         },
     ]
     expression = (
         "TradingJournalEquityCurve.normalizeEquityPoints("
         + json.dumps(rows)
-        + ", 'BYBIT').map((point) => [point.timestamp, point.balance, point.currency])"
+        + ", 'BYBIT').map((point) => [point.timestamp, point.value, point.eventType])"
     )
     points = _run_node(expression)
-    assert [point[1] for point in points] == [100, 130]
+    assert [point[1] for point in points] == pytest.approx([100, 99, 99, 98.01])
+    assert [point[2] for point in points] == ["baseline", "trade", "cashflow", "trade"]
     assert [point[0] for point in points] == sorted(point[0] for point in points)
-    assert {point[2] for point in points} == {"USDT"}
 
 
-def test_missing_row_currency_uses_selected_account_balance_currency() -> None:
+def test_risk_based_result_pct_is_not_used_as_an_account_equity_return() -> None:
     rows = [
         {
-            "id": "one",
+            "id": "risk-return-only",
             "account": "BYBIT LIVE",
             "row_type": "trade",
             "close_time": "2026-01-01T00:00:00Z",
-            "balance_after_trade": 100,
-            "currency": "",
+            "balance_after_trade": 105,
+            "result_pct": 50,
         },
         {
-            "id": "two",
+            "id": "verified-equity-return",
             "account": "BYBIT",
             "row_type": "trade",
             "close_time": "2026-01-02T00:00:00Z",
-            "analysis_balance_after_trade": 125,
+            "analysis_balance_before_trade": 100,
+            "analysis_balance_after_trade": 99,
+            "analysis_balance_before_trade_source": VERIFIED_BALANCE_SOURCE,
+            "net_profit": -1,
         },
     ]
-    balances = [{"label": "BYBIT", "currency": "USDT", "balance": 125}]
     expression = (
         "TradingJournalEquityCurve.normalizeEquityPoints("
         + json.dumps(rows)
-        + ", 'BYBIT', "
-        + json.dumps(balances)
-        + ").map((point) => [point.balance, point.currency])"
+        + ", 'BYBIT').map((point) => [point.value, point.eventType])"
     )
-    assert _run_node(expression) == [[100, "USDT"], [125, "USDT"]]
+    assert _run_node(expression) == [[100, "baseline"], [99, "trade"]]
 
 
-def test_result_currency_does_not_override_account_balance_currency() -> None:
+def test_bare_or_contradictory_return_fields_cannot_override_verified_pnl() -> None:
     rows = [
         {
-            "id": "aud-account-usd-pnl",
+            "id": "bare-explicit",
+            "account": "OANDA LIVE",
+            "row_type": "trade",
+            "close_time": "2025-12-31T00:00:00Z",
+            "equity_return_pct": 900,
+        },
+        {
+            "id": "loss",
             "account": "OANDA LIVE",
             "row_type": "trade",
             "close_time": "2026-01-01T00:00:00Z",
-            "balance_after_trade": 1000,
+            "analysis_balance_before_trade": 100,
+            "analysis_balance_after_trade": 1000,
+            "analysis_balance_before_trade_source": VERIFIED_BALANCE_SOURCE,
+            "net_profit": -1,
+            "equity_return_pct": 900,
             "result_currency": "USD",
-        }
-    ]
-    balances = [
+        },
         {
-            "label": "OANDA LIVE",
-            "currency": "AUD",
-            "balance": 1000,
-        }
+            "id": "gain",
+            "account": "OANDA LIVE",
+            "row_type": "trade",
+            "close_time": "2026-01-02T00:00:00Z",
+            "analysis_balance_before_trade": 99,
+            "analysis_balance_after_trade": 1,
+            "analysis_balance_before_trade_source": VERIFIED_BALANCE_SOURCE,
+            "net_profit": 0.99,
+            "equity_return_pct": -50,
+            "result_currency": "AUD",
+        },
     ]
     expression = (
         "TradingJournalEquityCurve.normalizeEquityPoints("
         + json.dumps(rows)
-        + ", 'OANDA LIVE', "
-        + json.dumps(balances)
-        + ").map((point) => [point.balance, point.currency])"
+        + ", 'OANDA LIVE').map((point) => point.value)"
     )
-    assert _run_node(expression) == [[1000, "AUD"]]
+    assert _run_node(expression) == pytest.approx([100, 99, 99.99])
 
 
 def test_saved_account_without_points_falls_back_to_first_account_with_data() -> None:
@@ -213,8 +291,10 @@ def test_saved_account_without_points_falls_back_to_first_account_with_data() ->
             "account": "BYBIT LIVE",
             "row_type": "trade",
             "close_time": "2026-01-01T00:00:00Z",
-            "balance_after_trade": 100,
-            "currency": "USDT",
+            "analysis_balance_before_trade": 100,
+            "analysis_balance_after_trade": 101,
+            "analysis_balance_before_trade_source": VERIFIED_BALANCE_SOURCE,
+            "net_profit": 1,
         }
     ]
     expression = (
@@ -231,7 +311,7 @@ def test_saved_account_without_points_falls_back_to_first_account_with_data() ->
     assert _run_node(preferred_expression) == "BYBIT"
 
 
-def test_chart_y_axis_labels_include_selected_currency_and_dates() -> None:
+def test_chart_y_axis_labels_are_percentages_and_dates_remain_on_x_axis() -> None:
     expression = r"""
 (() => {
   const labels = [];
@@ -246,14 +326,15 @@ def test_chart_y_axis_labels_include_selected_currency_and_dates() -> None:
     getContext: () => context,
   };
   TradingJournalEquityCurve.drawChart(canvas, [
-    { timestamp: Date.parse('2026-01-01T00:00:00Z'), balance: 100, currency: 'USDT' },
-    { timestamp: Date.parse('2026-01-03T00:00:00Z'), balance: 125, currency: 'USDT' },
+    { timestamp: Date.parse('2026-01-01T00:00:00Z'), value: 100 },
+    { timestamp: Date.parse('2026-01-03T00:00:00Z'), value: 125 },
   ]);
   return labels;
 })()
 """
     labels = _run_node(expression)
-    assert sum(label.endswith(" USDT") for label in labels) == 5
+    assert sum(label.endswith("%") for label in labels) == 5
+    assert not any("USDT" in label or "AUD" in label for label in labels)
     assert any("Jan" in label for label in labels)
 
 
@@ -273,13 +354,13 @@ def test_chart_measures_y_labels_and_keeps_them_inside_narrow_canvas() -> None:
     getContext: () => context,
   };
   TradingJournalEquityCurve.drawChart(canvas, [
-    { timestamp: Date.parse('2026-01-01T00:00:00Z'), balance: 123456789, currency: 'USDT' },
-    { timestamp: Date.parse('2026-01-03T00:00:00Z'), balance: 123556789, currency: 'USDT' },
+    { timestamp: Date.parse('2026-01-01T00:00:00Z'), value: 123456789 },
+    { timestamp: Date.parse('2026-01-03T00:00:00Z'), value: 123556789 },
   ]);
   return {
     width: canvas.width,
     leftEdges: labels
-      .filter((item) => item.value.endsWith(' USDT'))
+      .filter((item) => item.value.endsWith('%'))
       .map((item) => item.x - context.measureText(item.value).width),
   };
 })()
@@ -288,6 +369,273 @@ def test_chart_measures_y_labels_and_keeps_them_inside_narrow_canvas() -> None:
     assert result["width"] == 520
     assert result["leftEdges"]
     assert min(result["leftEdges"]) >= 0
+
+
+def test_backend_equity_return_cache_proof_and_browser_coverage_match() -> None:
+    service = _load_master_service_for_equity_integration()
+    spoofed_timeline = service._build_journal_balance_timelines(
+        [
+            {
+                "id": "spoofed-analysis",
+                "row_type": "trade",
+                "source": "manual",
+                "account": "BINANCE",
+                "close_time": "2025-12-31T00:00:00Z",
+                "net_profit": 5,
+                "analysis_balance_before_trade": 1,
+                "analysis_balance_after_trade": 6,
+                "analysis_balance_before_trade_source": VERIFIED_BALANCE_SOURCE,
+                "equity_return_pct": 500,
+            }
+        ],
+        {},
+        [],
+    )
+    spoofed_row = spoofed_timeline["rows"][0]
+    assert "analysis_balance_before_trade" not in spoofed_row
+    assert "analysis_balance_before_trade_source" not in spoofed_row
+    assert service._enrich_trade_row_metrics([spoofed_row])[0][
+        "equity_return_pct"
+    ] is None
+
+    enriched = service._enrich_trade_row_metrics(
+        [
+            {
+                "id": "verified",
+                "row_type": "trade",
+                "account": "BINANCE",
+                "close_time": "2026-01-01T00:00:00Z",
+                "analysis_balance_before_trade": 500,
+                "analysis_balance_after_trade": 495,
+                "analysis_balance_before_trade_source": VERIFIED_BALANCE_SOURCE,
+                "net_profit": -5,
+                "risk_amount": 1,
+            },
+            {
+                "id": "risk-only",
+                "row_type": "trade",
+                "account": "BINANCE",
+                "close_time": "2026-01-02T00:00:00Z",
+                "net_profit": 5,
+                "risk_amount": 1,
+            },
+            {
+                "id": "explicit",
+                "row_type": "trade",
+                "account": "BINANCE",
+                "close_time": "2026-01-03T00:00:00Z",
+                "equity_return_pct": 2.5,
+                "equity_return_basis": "verified_import",
+            },
+            {
+                "id": "missing-pnl",
+                "row_type": "trade",
+                "account": "BINANCE",
+                "close_time": "2026-01-04T00:00:00Z",
+                "analysis_balance_before_trade": 495,
+                "analysis_balance_after_trade": 495,
+                "analysis_balance_before_trade_source": VERIFIED_BALANCE_SOURCE,
+            },
+            {
+                "id": "inconsistent-after",
+                "row_type": "trade",
+                "account": "BINANCE",
+                "close_time": "2026-01-05T00:00:00Z",
+                "analysis_balance_before_trade": 100,
+                "analysis_balance_after_trade": 1000,
+                "analysis_balance_before_trade_source": VERIFIED_BALANCE_SOURCE,
+                "net_profit": 5,
+                "equity_return_pct": 900,
+            },
+        ]
+    )
+    assert enriched[0]["equity_return_pct"] == pytest.approx(-1)
+    assert (
+        enriched[0]["equity_return_basis"]
+        == "net_trade_result_over_analysis_balance_before_trade"
+    )
+    assert enriched[1]["result_pct"] == pytest.approx(500)
+    assert enriched[1]["equity_return_pct"] is None
+    assert enriched[1]["equity_return_basis"] is None
+    assert enriched[2]["equity_return_pct"] is None
+    assert enriched[2]["equity_return_basis"] is None
+    assert enriched[3]["equity_return_pct"] is None
+    assert enriched[3]["equity_return_basis"] is None
+    assert enriched[4]["equity_return_pct"] == pytest.approx(5)
+    assert (
+        enriched[4]["equity_return_basis"]
+        == "net_trade_result_over_analysis_balance_before_trade"
+    )
+
+    items = [
+        {
+            "id": "aaa-same-time-deposit",
+            "row_type": "cashflow",
+            "account": "BINANCE",
+            "close_time": "2026-01-01T00:00:00Z",
+            "cashflow_new_balance": 500,
+        },
+        {
+            "id": "aaa-same-time-deposit",
+            "row_type": "cashflow",
+            "account": "BINANCE",
+            "close_time": "2026-01-01T00:00:00Z",
+            "cashflow_new_balance": 500,
+        },
+        enriched[0],
+        enriched[1],
+        enriched[2],
+        enriched[3],
+        enriched[4],
+    ]
+    assert service._equity_point_counts(items, [])["BINANCE"] == 4
+    expression = (
+        "TradingJournalEquityCurve.normalizeEquityPoints("
+        + json.dumps(items)
+        + ", 'BINANCE').map((point) => point.eventType)"
+    )
+    assert _run_node(expression) == ["baseline", "cashflow", "trade", "trade"]
+
+    fingerprints = {"source": "unit-test"}
+    snapshot = {
+        "cache_version": service.TRADING_JOURNAL_VIEW_CACHE_VERSION,
+        "generated_at": "2026-01-04T00:00:00Z",
+        "items": items,
+        "balances": [],
+        "source_fingerprints": fingerprints,
+    }
+    service._attach_trading_journal_equity_metadata(snapshot)
+    assert snapshot["equity_cache"] == {
+        "schema_version": 2,
+        "verified": True,
+        "verified_at": "2026-01-04T00:00:00Z",
+        "source_fingerprint_sha256": service._stable_json_sha256(fingerprints),
+        "curve_type": "cashflow_neutral_compounded_index",
+        "base_index": 100.0,
+        "return_field": "equity_return_pct",
+        "return_basis": "net_trade_result_over_analysis_balance_before_trade",
+        "point_counts": {
+            "BINANCE": 4,
+            "BYBIT": 0,
+            "OANDA DEMO": 0,
+            "OANDA LIVE": 0,
+            "PEPPERSTONE DEMO": 0,
+            "PEPPERSTONE LIVE": 0,
+        },
+    }
+    old_snapshot = json.loads(json.dumps(snapshot))
+    old_snapshot["equity_cache"]["schema_version"] = 1
+    freshness = service._trading_journal_snapshot_freshness(
+        old_snapshot,
+        current_fingerprints=fingerprints,
+    )
+    assert freshness["current"] is False
+    assert "equity_schema_incompatible" in freshness["reasons"]
+    foreign_snapshot = json.loads(json.dumps(snapshot))
+    foreign_snapshot["equity_cache"]["return_basis"] = "arbitrary_equity_return_pct"
+    freshness = service._trading_journal_snapshot_freshness(
+        foreign_snapshot,
+        current_fingerprints=fingerprints,
+    )
+    assert freshness["current"] is False
+    assert "equity_return_basis_incompatible" in freshness["reasons"]
+
+
+def test_items_endpoint_recomputes_coverage_after_response_row_filters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _load_master_service_for_equity_integration()
+    stale_counts = {
+        account: 99 for account in service.TRADING_JOURNAL_EQUITY_ACCOUNTS
+    }
+    snapshot = {
+        "cache_version": service.TRADING_JOURNAL_VIEW_CACHE_VERSION,
+        "items": [
+            {
+                "id": "local-btc",
+                "row_type": "trade",
+                "source": "local_excel",
+                "account": "BINANCE",
+                "symbol": "BTCUSDT",
+                "close_time": "2026-01-01T00:00:00Z",
+                "analysis_balance_before_trade": 100,
+                "analysis_balance_before_trade_source": VERIFIED_BALANCE_SOURCE,
+                "net_profit": 1,
+            },
+            {
+                "id": "local-eurusd",
+                "row_type": "trade",
+                "source": "local_excel",
+                "account": "OANDA LIVE",
+                "symbol": "EURUSD",
+                "close_time": "2026-01-02T00:00:00Z",
+                "analysis_balance_before_trade": 100,
+                "analysis_balance_before_trade_source": VERIFIED_BALANCE_SOURCE,
+                "net_profit": 1,
+            },
+            {
+                "id": "cached-bybit",
+                "row_type": "trade",
+                "source": "bybit",
+                "account": "BYBIT",
+                "symbol": "BTCUSDT",
+                "close_time": "2026-01-03T00:00:00Z",
+                "analysis_balance_before_trade": 100,
+                "analysis_balance_before_trade_source": VERIFIED_BALANCE_SOURCE,
+                "net_profit": 1,
+            },
+        ],
+        "stats": {},
+        "balances": [],
+        "diagnostics": {},
+        "equity_cache": {
+            "schema_version": 2,
+            "verified": True,
+            "point_counts": stale_counts,
+        },
+    }
+    service._TRADING_JOURNAL_VIEW_CACHE.update(
+        {"key": "snapshot", "payload": snapshot}
+    )
+    monkeypatch.setattr(service, "_journal_source_fingerprint", lambda: {})
+    monkeypatch.setattr(
+        service,
+        "_trading_journal_snapshot_freshness",
+        lambda *_args, **_kwargs: {"current": True, "reasons": []},
+    )
+    monkeypatch.setattr(
+        service,
+        "_trading_journal_local_excel_authoritative",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        service,
+        "_trading_journal_bybit_demo_balance_anchor_enabled",
+        lambda: False,
+    )
+    monkeypatch.setattr(
+        service,
+        "_compute_journal_stats",
+        lambda _items, _balances: {},
+    )
+    monkeypatch.setattr(
+        service,
+        "_compute_journal_period_stats",
+        lambda _items, _balances: {},
+    )
+
+    response = asyncio.run(service.trading_journal_items(filter="btc"))
+    payload = json.loads(response.body.decode("utf-8"))
+    assert [row["id"] for row in payload["items"]] == ["local-btc"]
+    assert payload["equity_cache"]["point_counts"] == {
+        "BINANCE": 2,
+        "BYBIT": 0,
+        "OANDA DEMO": 0,
+        "OANDA LIVE": 0,
+        "PEPPERSTONE DEMO": 0,
+        "PEPPERSTONE LIVE": 0,
+    }
+    assert snapshot["equity_cache"]["point_counts"] == stale_counts
 
 
 def test_canonical_workbook_snapshot_endpoint_and_actual_js_normalizer_release_counts(
@@ -402,10 +750,10 @@ process.stdout.write(JSON.stringify(counts));
     expected_counts = {
         "BINANCE": 113,
         "BYBIT": 265,
-        "OANDA DEMO": 46,
+        "OANDA DEMO": 45,
         "OANDA LIVE": 63,
-        "PEPPERSTONE DEMO": 824,
-        "PEPPERSTONE LIVE": 193,
+        "PEPPERSTONE DEMO": 823,
+        "PEPPERSTONE LIVE": 192,
     }
     assert counts == expected_counts
     assert payload["equity_cache"]["point_counts"] == expected_counts
@@ -497,15 +845,29 @@ const vm = require('vm');
   });
   const queue = [
     authoritative(
-      [{
-        id: 'bybit-1',
-        account: 'BYBIT LIVE',
-        row_type: 'trade',
-        close_time: '2026-01-01T00:00:00Z',
-        balance_after_trade: 100,
-        currency: 'USDT',
-      }],
-      pointCounts({ BYBIT: 1 }),
+      [
+        {
+          id: 'bybit-1',
+          account: 'BYBIT LIVE',
+          row_type: 'trade',
+          close_time: '2026-01-01T00:00:00Z',
+          analysis_balance_before_trade: 100,
+          analysis_balance_after_trade: 100,
+          analysis_balance_before_trade_source: 'cashflow_anchor_plus_trade_results',
+          net_profit: 0,
+        },
+        {
+          id: 'oanda-unverified',
+          account: 'OANDA LIVE',
+          row_type: 'trade',
+          close_time: '2026-01-01T00:00:00Z',
+          analysis_balance_before_trade: 100,
+          analysis_balance_after_trade: 101,
+          analysis_balance_before_trade_source: 'cashflow_anchor_plus_trade_results',
+          net_profit: 1,
+        },
+      ],
+      pointCounts({ BYBIT: 2, 'OANDA LIVE': 3 }),
       [{ label: 'BYBIT', currency: 'USDT' }],
     ),
   ];
@@ -551,7 +913,18 @@ const vm = require('vm');
 
   account.value = 'OANDA LIVE';
   elementListeners['journal-equity-account:change']();
+  const coverageMismatch = {
+    text: state.textContent,
+    error: state.classList.error,
+    summary: summary.innerHTML,
+  };
+
+  account.value = 'PEPPERSTONE LIVE';
+  elementListeners['journal-equity-account:change']();
   const accountEmpty = state.textContent;
+
+  account.value = 'OANDA LIVE';
+  elementListeners['journal-equity-account:change']();
 
   queue.push(
     response({ ok: false, pending: true }, true, 202),
@@ -587,9 +960,11 @@ const vm = require('vm');
       account: 'OANDA LIVE',
       row_type: 'trade',
       close_time: '2026-01-02T00:00:00Z',
-      balance_after_trade: 1200,
-      currency: 'AUD',
-    }], pointCounts({ 'OANDA LIVE': 1 }), [{ label: 'OANDA LIVE', currency: 'AUD' }]),
+      analysis_balance_before_trade: 1200,
+      analysis_balance_after_trade: 1188,
+      analysis_balance_before_trade_source: 'cashflow_anchor_plus_trade_results',
+      net_profit: -12,
+    }], pointCounts({ 'OANDA LIVE': 2 }), [{ label: 'OANDA LIVE', currency: 'AUD' }]),
   );
   await elementListeners['journal-equity-refresh-btn:click']();
   rectWidth = 260;
@@ -598,6 +973,7 @@ const vm = require('vm');
 
   process.stdout.write(JSON.stringify({
     initial,
+    coverageMismatch,
     accountEmpty,
     refreshEmpty,
     staleState,
@@ -623,9 +999,19 @@ const vm = require('vm');
     result = json.loads(completed.stdout)
     assert result["initial"]["account"] == "BYBIT"
     assert "Current equity" in result["initial"]["summary"]
+    assert "100.00%" in result["initial"]["summary"]
+    assert "USDT" not in result["initial"]["summary"]
     assert result["initial"]["stateDisplay"] == "none"
     assert result["initial"]["canvasWidth"] == 1800
-    assert "No equity data is available for Oanda live" in result["accountEmpty"]
+    assert result["coverageMismatch"] == {
+        "text": (
+            "Current equity data for Oanda live could not be verified. "
+            "Refresh the equity curve."
+        ),
+        "error": True,
+        "summary": "<strong>Oanda live</strong><span>2 unverified points</span>",
+    }
+    assert "No equity data is available for Pepperstone live" in result["accountEmpty"]
     assert "No equity data is available for Oanda live" in result["refreshEmpty"]
     assert result["staleState"] == {
         "text": "Cached equity data is stale.",
@@ -635,8 +1021,9 @@ const vm = require('vm');
         "text": "authoritative fetch failed",
         "error": True,
     }
-    assert "1 point" in result["finalSummary"]
-    assert "AUD" in result["finalSummary"]
+    assert "2 points" in result["finalSummary"]
+    assert "99.00%" in result["finalSummary"]
+    assert "AUD" not in result["finalSummary"]
     assert result["resizedWidth"] == 520
     assert result["canvasStyleWidth"] == "100%"
     assert result["drawCount"] >= 3
@@ -649,6 +1036,11 @@ def test_equity_script_has_one_selected_curve_axes_refresh_resize_and_states() -
     service = SERVICE_PATH.read_text(encoding="utf-8")
     assert "accountSelect.value" in source
     assert "drawChart(canvas, points)" in source
+    assert "formatPercentage" in source
+    assert "analysis_balance_before_trade_source" in source
+    assert "equity_return_pct" not in source
+    assert "equity_return_pct" in service
+    assert "formatBalance" not in source
     assert "yTicks = 5" in source
     assert "xTicks = Math.min(6" in source
     assert "formatDate(timestamp)" in source
@@ -665,6 +1057,8 @@ def test_equity_script_has_one_selected_curve_axes_refresh_resize_and_states() -
     assert "setChartState(error?.message" in source
     assert "journal-equity-account" in service
     assert "journal-equity-refresh-btn" in service
+    assert 'TRADING_JOURNAL_EQUITY_CACHE_SCHEMA_VERSION = 2' in service
+    assert 'TRADING_JOURNAL_EQUITY_CURVE_TYPE = "cashflow_neutral_compounded_index"' in service
     assert "grid-template-columns:minmax(300px,340px) minmax(0,1fr)" in service
     assert ".equity-panel{min-width:0;" in service
     assert ".equity-chart-wrap{position:relative;flex:1;min-width:0;" in service

@@ -1091,6 +1091,167 @@ def test_empty_repo_local_states_are_authoritative_over_stale_backup(monkeypatch
     assert seen["oanda"] == []
 
 
+def _configure_local_restart_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    aggregate_watchlist: list[str],
+) -> None:
+    monkeypatch.setattr(master_service, "APP_PROFILE", "local")
+    monkeypatch.setattr(master_service, "LOCAL_STATE_ONLY", True)
+    monkeypatch.setattr(master_service, "DROPBOX_SYNC_ENABLED", False)
+    monkeypatch.setattr(master_service, "WATCHLIST_PATH", tmp_path / "watchlist.json")
+    monkeypatch.setattr(master_service, "STATE_MANIFEST_PATH", tmp_path / "state_manifest.json")
+    monkeypatch.setattr(
+        master_service,
+        "LEGACY_STATE_MANIFEST_CAMEL_PATH",
+        tmp_path / "stateManifest.json",
+    )
+    monkeypatch.setattr(
+        master_service, "STATE_BACKUP_LOCAL_PATH", tmp_path / "state_backup.json"
+    )
+    monkeypatch.setattr(
+        master_service,
+        "BYBIT_CUSTOM_ALERTS_PATH",
+        tmp_path / "bybit_custom_alerts.json",
+    )
+    monkeypatch.setattr(
+        master_service,
+        "OANDA_CUSTOM_ALERTS_PATH",
+        tmp_path / "oanda_custom_alerts.json",
+    )
+    monkeypatch.setattr(
+        master_service, "BYBIT_SETTINGS_PATH", tmp_path / "bybit_settings.json"
+    )
+    monkeypatch.setattr(
+        master_service, "OANDA_SETTINGS_PATH", tmp_path / "oanda_settings.json"
+    )
+    for path, payload in (
+        (master_service.BYBIT_CUSTOM_ALERTS_PATH, []),
+        (master_service.OANDA_CUSTOM_ALERTS_PATH, []),
+        (master_service.BYBIT_SETTINGS_PATH, {}),
+        (master_service.OANDA_SETTINGS_PATH, {}),
+    ):
+        path.write_text(json.dumps(payload), encoding="utf-8")
+    master_service.STATE_BACKUP_LOCAL_PATH.write_text(
+        json.dumps(
+            {
+                "watchlist": aggregate_watchlist,
+                "alerts": {
+                    "bybit": {"alerts": []},
+                    "oanda": {"alerts": []},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(master_service, "_master_journal_single_file_mode", lambda: True)
+    monkeypatch.setattr(master_service, "_repair_persisted_oanda_trade_rows", lambda: 0)
+    monkeypatch.setattr(master_service, "_schedule_dropbox_upload_state_backup", lambda: None)
+    monkeypatch.setattr(
+        master_service.bybit_monitor,
+        "replace_custom_alerts",
+        lambda alerts, strict=False: list(alerts),
+    )
+    monkeypatch.setattr(
+        master_service.oanda_monitor,
+        "replace_custom_alerts",
+        lambda alerts: list(alerts),
+    )
+    master_service._WATCHLIST_CACHE = None
+    master_service._STARTUP_STATE_RESTORE_DONE.clear()
+
+
+def test_missing_watchlist_mirror_honours_verified_empty_manifest_over_stale_aggregate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _configure_local_restart_state(
+        tmp_path, monkeypatch, aggregate_watchlist=["STALEUSDT"]
+    )
+    empty_hash = master_service.hashlib.sha256(
+        json.dumps([], sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    master_service.STATE_MANIFEST_PATH.write_text(
+        json.dumps(
+            {
+                "watchlist": {
+                    "key": "watchlist",
+                    "sha256": empty_hash,
+                    "updated_at": "2026-07-27T00:00:00+00:00",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    asyncio.run(master_service._dropbox_restore_state_backup_on_startup())
+
+    assert master_service._get_watchlist() == []
+    assert json.loads(master_service.WATCHLIST_PATH.read_text(encoding="utf-8")) == []
+
+
+def test_invalid_repo_local_watchlist_does_not_overwrite_healthy_aggregate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _configure_local_restart_state(
+        tmp_path, monkeypatch, aggregate_watchlist=["HEALTHYUSDT"]
+    )
+    master_service.WATCHLIST_PATH.write_text("{invalid json", encoding="utf-8")
+    aggregate_before = master_service.STATE_BACKUP_LOCAL_PATH.read_bytes()
+    calls = {"scheduled": 0}
+
+    def destructive_schedule() -> None:
+        calls["scheduled"] += 1
+        payload = json.loads(
+            master_service.STATE_BACKUP_LOCAL_PATH.read_text(encoding="utf-8")
+        )
+        payload["watchlist"] = master_service._get_watchlist()
+        master_service.STATE_BACKUP_LOCAL_PATH.write_text(
+            json.dumps(payload), encoding="utf-8"
+        )
+
+    monkeypatch.setattr(
+        master_service,
+        "_schedule_dropbox_upload_state_backup",
+        destructive_schedule,
+    )
+
+    asyncio.run(master_service._dropbox_restore_state_backup_on_startup())
+
+    status = master_service._state_sync_status_snapshot()
+    assert status["restore_status"] == "failed"
+    assert "watchlist" in str(status["restore_error"])
+    assert calls["scheduled"] == 0
+    assert master_service.STATE_BACKUP_LOCAL_PATH.read_bytes() == aggregate_before
+    assert json.loads(aggregate_before.decode("utf-8"))["watchlist"] == [
+        "HEALTHYUSDT"
+    ]
+
+
+def test_empty_watchlist_and_legitimate_edits_survive_repeated_local_restarts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _configure_local_restart_state(
+        tmp_path, monkeypatch, aggregate_watchlist=["STALEUSDT"]
+    )
+    master_service.write_repo_state_json_and_verify("watchlist", [])
+
+    for _ in range(2):
+        master_service._WATCHLIST_CACHE = None
+        asyncio.run(master_service._dropbox_restore_state_backup_on_startup())
+        assert master_service._get_watchlist() == []
+
+    master_service.write_repo_state_json_and_verify("watchlist", ["BTCUSDT"])
+    master_service._WATCHLIST_CACHE = None
+    asyncio.run(master_service._dropbox_restore_state_backup_on_startup())
+    assert master_service._get_watchlist() == ["BTCUSDT"]
+
+    master_service.write_repo_state_json_and_verify("watchlist", [])
+    master_service._WATCHLIST_CACHE = None
+    asyncio.run(master_service._dropbox_restore_state_backup_on_startup())
+    assert master_service._get_watchlist() == []
+
+
 def test_invalid_repo_local_json_surfaces_restore_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(master_service, "LOCAL_STATE_ONLY", True)
     monkeypatch.setattr(master_service, "DROPBOX_SYNC_ENABLED", False)

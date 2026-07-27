@@ -60,7 +60,7 @@ def test_dashboard_home_removes_instrument_specs_recent_trades_open_orders() -> 
     assert 'id="dashboard-instrument-lookup-input"' in html
     assert 'id="dashboard-history-panel"' in html
     assert '{{HISTORY_EXPORT_TOOL}}' in html
-    assert '{{HISTORY_PAGE_JS_URL}}' in html
+    assert '{{HISTORY_PAGE_SCRIPT_TAG}}' in html
     assert 'Select a script from the toolbar above to load it here.' not in html
     assert 'Select a script from the left to load it here.' not in html
     assert '.local-exit-btn' in html
@@ -155,6 +155,7 @@ def test_dashboard_orders_workspace_uses_content_height_sync() -> None:
 
 def test_dashboard_home_renders_inline_history_tool_from_shared_markup() -> None:
     module = _load_master_service_module()
+    module.APP_PROFILE = "local"
     response = asyncio.run(module.home_page())
     body = response.body.decode("utf-8")
 
@@ -165,6 +166,29 @@ def test_dashboard_home_renders_inline_history_tool_from_shared_markup() -> None
     assert 'id="history-export"' in body
     assert body.count('id="history-export"') == 1
     assert '/static/history_page.js?v=' in body
+
+
+def test_dashboard_profile_layout_removes_local_columns_server_side() -> None:
+    module = _load_master_service_module()
+
+    module.APP_PROFILE = "local"
+    local_body = asyncio.run(module.home_page()).body.decode("utf-8")
+    assert 'class="layout"' in local_body
+    assert 'class="dashboard-main-content"' in local_body
+    assert 'id="watchlist-widget"' in local_body
+
+    module.APP_PROFILE = "render"
+    render_body = asyncio.run(module.home_page()).body.decode("utf-8")
+    assert 'class="layout render-dashboard-layout"' in render_body
+    assert 'class="dashboard-main-content"' not in render_body
+    assert 'id="watchlist-widget"' not in render_body
+    assert "LOCAL_DASHBOARD_" not in render_body
+
+    source = MASTER_SERVICE_PATH.read_text(encoding="utf-8")
+    html = _extract_html_template(source)
+    assert ".layout.render-dashboard-layout{" in html
+    assert "grid-template-columns: minmax(0, 720px);" in html
+    assert "{{DASHBOARD_LAYOUT_CLASS}}" in html
 
 
 def test_instrument_lookup_owns_specs_and_journal_markup() -> None:

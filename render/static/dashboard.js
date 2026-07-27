@@ -582,6 +582,7 @@
   };
 
   const refreshOandaInactivity = async () => {
+    if (!oandaHeadline) return null;
     if (oandaInFlight) return oandaInFlight;
     oandaInFlight = (async () => {
       try {
@@ -758,6 +759,7 @@
   };
 
   const refreshWatchlist = async () => {
+    if (!watchlistItems) return;
     try {
       const payload = await fetchJson('/api/watchlist');
       watchlistState = Array.isArray(payload?.items) ? payload.items : [];
@@ -773,6 +775,7 @@
   };
 
   const refreshStateSyncStatus = async () => {
+    if (!watchlistItems) return null;
     if (stateSyncInFlight) return stateSyncInFlight;
     stateSyncInFlight = (async () => {
       try {
@@ -799,6 +802,7 @@
   };
 
   const fetchRemoteBackupSummary = async () => {
+    if (!watchlistItems) return null;
     try {
       const payload = await fetchJson('/api/state-sync/remote-backup-summary');
       return payload && typeof payload === 'object' ? payload : null;
@@ -809,6 +813,7 @@
   };
 
   const scheduleStateSyncPolling = () => {
+    if (!watchlistItems) return;
     if (stateSyncPollTimer) clearInterval(stateSyncPollTimer);
     stateSyncPollTimer = setInterval(async () => {
       await refreshStateSyncStatus();
@@ -925,13 +930,15 @@
     if (oandaSecondTimer) clearInterval(oandaSecondTimer);
     const multiplier = document.visibilityState === 'hidden' ? POLL_MS.hiddenMultiplier : 1;
     scriptsTimer = setInterval(() => { refreshScripts(); }, POLL_MS.scripts * multiplier);
-    oandaTimer = setInterval(() => { refreshOandaInactivity(); }, POLL_MS.oandaInactivity * multiplier);
-    oandaSecondTimer = setInterval(() => { tickOandaCountdown(); }, 1000);
+    if (oandaHeadline) {
+      oandaTimer = setInterval(() => { refreshOandaInactivity(); }, POLL_MS.oandaInactivity * multiplier);
+      oandaSecondTimer = setInterval(() => { tickOandaCountdown(); }, 1000);
+    }
   };
 
   refreshBtn?.addEventListener('click', () => {
     refreshScripts();
-    refreshOandaInactivity();
+    if (oandaHeadline) refreshOandaInactivity();
   });
   watchlistAddBtn?.addEventListener('click', () => addWatchlistItems());
   watchlistInput?.addEventListener('keydown', (event) => {
@@ -949,19 +956,25 @@
   workspaceFrame?.addEventListener('load', installWorkspaceHeightSync);
   window.addEventListener('resize', scheduleWorkspaceFrameHeightSync);
 
-  ensureOrdersWorkspace();
-  installWorkspaceHeightSync();
+  if (workspaceFrame) {
+    ensureOrdersWorkspace();
+    installWorkspaceHeightSync();
+  }
   refreshScripts();
   refreshPineScripts();
-  refreshStateSyncStatus().then(() => {
-    const restoreStatus = String(stateSyncState?.restore_status || '').toLowerCase();
-    if (restoreStatus === 'pending') {
-      scheduleStateSyncPolling();
-    }
-    refreshWatchlist();
-  });
-  refreshOandaInactivity();
-  syncOandaDetailsVisibility();
+  if (watchlistItems) {
+    refreshStateSyncStatus().then(() => {
+      const restoreStatus = String(stateSyncState?.restore_status || '').toLowerCase();
+      if (restoreStatus === 'pending') {
+        scheduleStateSyncPolling();
+      }
+      refreshWatchlist();
+    });
+  }
+  if (oandaHeadline) {
+    refreshOandaInactivity();
+    syncOandaDetailsVisibility();
+  }
   restartPolling();
   document.addEventListener('visibilitychange', restartPolling);
   window.addEventListener('beforeunload', () => {

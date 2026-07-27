@@ -23,8 +23,10 @@ bybit_monitor/runtime_status.json
 bybit_monitor/state.json
 bybit_monitor/custom_alerts.json
 oanda_monitor/runtime_status.json
+watchlist.json
 state_backup.json
 state_manifest.json
+stateManifest.json
 custom instructions/*CHATGPT_ONLY*
 journal/*.xls
 journal/*.xlsx

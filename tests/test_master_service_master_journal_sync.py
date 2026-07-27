@@ -2511,7 +2511,7 @@ def test_master_journal_snapshot_records_substage_timings_and_skips_context_look
     monkeypatch.setattr(ms, '_master_journal_path', lambda: tmp_path / 'Trading Journal.xlsx')
     monkeypatch.setattr(ms, 'read_master_journal_source', lambda _path: {
         'items': [
-            {'id': 't1', 'row_type': 'trade', 'source': 'master_journal', 'account': 'BINANCE', 'account_label': 'BINANCE', 'symbol': 'BTCUSDT', 'side': 'BUY', 'open_time': '2026-01-01', 'close_time': '2026-01-01', 'net_profit': 1.0, 'result_pct': 1.0, 'balance_after_trade': 1.0, 'currency': 'USDT'},
+            {'id': 't1', 'row_type': 'trade', 'source': 'master_journal', 'account': 'BINANCE', 'account_label': 'BINANCE', 'symbol': 'BTCUSDT', 'side': 'BUY', 'open_time': '2026-01-01', 'close_time': '2026-01-01', 'net_profit': 1.0, 'result_pct': 1.0, 'balance_after_trade': 101.0, 'currency': 'USDT'},
             {'id': 'c1', 'row_type': 'cashflow', 'source': 'master_journal', 'account': 'BINANCE', 'account_label': 'BINANCE', 'symbol': 'CASHFLOW', 'side': 'WITHDRAWAL', 'open_time': '2026-01-02', 'close_time': '2026-01-02', 'cashflow_new_balance': 0.0, 'balance_after_trade': 0.0, 'currency': 'USDT'},
         ],
         'balances': [
@@ -2540,7 +2540,7 @@ def test_master_journal_snapshot_records_substage_timings_and_skips_context_look
     assert captured_seeds == [
         {'account': 'BINANCE', 'label': 'BINANCE', 'balance': 0.0, 'currency': 'USDT', 'source': 'stats2_account_balances'},
     ]
-    assert snapshot['equity_cache']['point_counts']['BINANCE'] == 2
+    assert snapshot['equity_cache']['point_counts']['BINANCE'] == 3
 
 
 def test_resync_fast_path_miss_reports_changed_fingerprint_components(tmp_path):

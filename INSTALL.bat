@@ -494,6 +494,123 @@ function Move-CheckoutBlockingUntrackedFilesBeforeGitUpdate {
     return $movedCount
 }
 
+function Move-LocalStateFilesRemovedByTargetBeforeGitUpdate {
+    param(
+        [Parameter(Mandatory = $true)] [string] $GitExe,
+        [Parameter(Mandatory = $true)] [string] $RepoDir,
+        [Parameter(Mandatory = $true)] [string] $BackupDir,
+        [Parameter(Mandatory = $true)] [string] $TargetRef
+    )
+
+    $statePaths = @(
+        'watchlist.json',
+        'state_manifest.json',
+        'stateManifest.json',
+        'state_backup.json'
+    )
+    $targetRoot = Join-Path $BackupDir 'checkout-blockers'
+    $movedCount = 0
+    $writeEmptyWatchlistTombstone = $false
+    foreach ($relativePath in $statePaths) {
+        $fullPath = Join-Path $RepoDir $relativePath
+        if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) {
+            continue
+        }
+
+        $localStatus = Invoke-GitText -GitExe $GitExe -Arguments @(
+            'status',
+            '--porcelain',
+            '--untracked-files=all',
+            '--',
+            $relativePath
+        ) -WorkingDirectory $RepoDir -Quiet
+        $hasLocalState = @(
+            $localStatus -split "(`r`n|`n|`r)" |
+                Where-Object { $_ -match '^( M|\?\?) ' }
+        ).Count -gt 0
+        if (-not $hasLocalState) {
+            if ($relativePath -eq 'watchlist.json') {
+                $trackedLocally = Invoke-GitText -GitExe $GitExe -Arguments @(
+                    'ls-files',
+                    '--',
+                    $relativePath
+                ) -WorkingDirectory $RepoDir -Quiet
+                $trackedInTarget = Invoke-GitText -GitExe $GitExe -Arguments @(
+                    'ls-tree',
+                    '--name-only',
+                    $TargetRef,
+                    '--',
+                    $relativePath
+                ) -WorkingDirectory $RepoDir -Quiet
+                $writeEmptyWatchlistTombstone = (
+                    (-not [string]::IsNullOrWhiteSpace($trackedLocally)) -and
+                    [string]::IsNullOrWhiteSpace($trackedInTarget)
+                )
+            }
+            continue
+        }
+
+        $trackedInTarget = Invoke-GitText -GitExe $GitExe -Arguments @(
+            'ls-tree',
+            '--name-only',
+            $TargetRef,
+            '--',
+            $relativePath
+        ) -WorkingDirectory $RepoDir -Quiet
+        if (-not [string]::IsNullOrWhiteSpace($trackedInTarget)) {
+            continue
+        }
+
+        $destPath = Join-Path $targetRoot $relativePath
+        $destDir = Split-Path -Parent $destPath
+        New-Item -ItemType Directory -Force -Path $destDir | Out-Null
+        Move-Item -LiteralPath $fullPath -Destination $destPath -Force -ErrorAction Stop
+        Write-Host "Preserved local state before target untracked it: $fullPath -> $destPath"
+        $movedCount++
+    }
+
+    if ($writeEmptyWatchlistTombstone) {
+        New-Item -ItemType Directory -Force -Path $targetRoot | Out-Null
+        $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+        $watchlistTombstonePath = Join-Path $targetRoot 'watchlist.json'
+        [IO.File]::WriteAllText($watchlistTombstonePath, '[]', $utf8NoBom)
+        $movedCount++
+
+        $manifestPath = Join-Path $targetRoot 'state_manifest.json'
+        $manifestWasBackedUp = Test-Path -LiteralPath $manifestPath -PathType Leaf
+        $manifest = [ordered]@{}
+        if ($manifestWasBackedUp) {
+            $existingManifest = Get-Content -LiteralPath $manifestPath -Raw -ErrorAction Stop |
+                ConvertFrom-Json -ErrorAction Stop
+            foreach ($property in $existingManifest.PSObject.Properties) {
+                $manifest[$property.Name] = $property.Value
+            }
+        }
+        $sha256 = [Security.Cryptography.SHA256]::Create()
+        try {
+            $emptyHashBytes = $sha256.ComputeHash([Text.Encoding]::UTF8.GetBytes('[]'))
+        } finally {
+            $sha256.Dispose()
+        }
+        $emptyHash = -join ($emptyHashBytes | ForEach-Object { $_.ToString('x2') })
+        $manifest['watchlist'] = [ordered]@{
+            key = 'watchlist'
+            updated_at = [DateTimeOffset]::UtcNow.ToString('o')
+            sha256 = $emptyHash
+            source_host = [Environment]::MachineName
+            app_profile = 'installer_migration'
+        }
+        $manifestJson = $manifest | ConvertTo-Json -Depth 20
+        [IO.File]::WriteAllText($manifestPath, $manifestJson, $utf8NoBom)
+        if (-not $manifestWasBackedUp) {
+            $movedCount++
+        }
+        Write-Host "Replaced untouched repository watchlist bootstrap with an authoritative empty tombstone."
+    }
+
+    return $movedCount
+}
+
 function ConvertTo-NativeArgumentString {
     param(
         [Parameter(Mandatory = $true)] [string[]] $Arguments
@@ -1045,14 +1162,28 @@ function Ensure-CodexGitRepo {
             Write-Host "Repo is clean and not ahead (behind=$behindCount). Attempting fast-forward sync..."
             $ffTimestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
             $ffBlockerBackupDir = Join-Path $DestinationRoot "CODEX-master-fastforward-blockers-$ffTimestamp"
-            $ffMovedBlockers = Move-CheckoutBlockingUntrackedFilesBeforeGitUpdate -GitExe $GitExe -RepoDir $RepoDir -BackupDir $ffBlockerBackupDir
-            Invoke-GitCommand -GitExe $GitExe -Arguments @('checkout', $Branch) -WorkingDirectory $RepoDir | Out-Null
-            Invoke-GitCommand -GitExe $GitExe -Arguments @('merge', '--ff-only', "origin/$Branch") -WorkingDirectory $RepoDir | Out-Null
-            if ($ffMovedBlockers -gt 0) {
-                $ffRestoreRoot = Join-Path $ffBlockerBackupDir 'checkout-blockers'
-                Preserve-LocalFilesFromBackup -BackupDir $ffRestoreRoot -NewRepoDir $RepoDir
-                Remove-Item -LiteralPath $ffBlockerBackupDir -Recurse -Force -ErrorAction Stop
-                Remove-OldVersionedDirectories -DestinationRoot $DestinationRoot -Prefix 'CODEX-master-fastforward-blockers-'
+            $ffRestoreRoot = Join-Path $ffBlockerBackupDir 'checkout-blockers'
+            $ffMovedBlockers = 0
+            $ffUpdateCompleted = $false
+            try {
+                $ffMovedBlockers += Move-CheckoutBlockingUntrackedFilesBeforeGitUpdate -GitExe $GitExe -RepoDir $RepoDir -BackupDir $ffBlockerBackupDir
+                $ffMovedBlockers += Move-LocalStateFilesRemovedByTargetBeforeGitUpdate -GitExe $GitExe -RepoDir $RepoDir -BackupDir $ffBlockerBackupDir -TargetRef "origin/$Branch"
+                Invoke-GitCommand -GitExe $GitExe -Arguments @('checkout', $Branch) -WorkingDirectory $RepoDir | Out-Null
+                Invoke-GitCommand -GitExe $GitExe -Arguments @('merge', '--ff-only', "origin/$Branch") -WorkingDirectory $RepoDir | Out-Null
+                $ffUpdateCompleted = $true
+            } finally {
+                $ffPreservedFilesExist = Test-Path -LiteralPath $ffRestoreRoot -PathType Container
+                if ($ffPreservedFilesExist) {
+                    Preserve-LocalFilesFromBackup -BackupDir $ffRestoreRoot -NewRepoDir $RepoDir
+                }
+                if ($ffUpdateCompleted) {
+                    if (Test-Path -LiteralPath $ffBlockerBackupDir -PathType Container) {
+                        Remove-Item -LiteralPath $ffBlockerBackupDir -Recurse -Force -ErrorAction Stop
+                        Remove-OldVersionedDirectories -DestinationRoot $DestinationRoot -Prefix 'CODEX-master-fastforward-blockers-'
+                    }
+                } elseif (Test-Path -LiteralPath $ffBlockerBackupDir -PathType Container) {
+                    Write-Host "Fast-forward failed; restored preserved local files and retained backup: $ffBlockerBackupDir"
+                }
             }
             $headAfterFastForward = Invoke-GitText -GitExe $GitExe -Arguments @('rev-parse', 'HEAD') -WorkingDirectory $RepoDir
             $originAfterFastForward = Invoke-GitText -GitExe $GitExe -Arguments @('rev-parse', "origin/$Branch") -WorkingDirectory $RepoDir

@@ -49,6 +49,19 @@ def test_home_page_local_profile_returns_dashboard_html() -> None:
     body = response.body.decode("utf-8")
     assert "dashboard-workspace" in body
     assert "scripts-grid" in body
+    local_sections = {
+        "History Export": 'id="dashboard-history-panel"',
+        "Open Orders and Positions": 'id="dashboard-workspace"',
+        "Pine Scripts": 'id="pine-scripts-panel"',
+        "Watchlist": 'id="watchlist-widget"',
+        "Instrument Lookup": 'id="dashboard-instrument-lookup-panel"',
+        "OANDA Inactivity": 'id="oanda-inactivity-widget"',
+    }
+    for section_name, marker in local_sections.items():
+        assert marker in body, f"{section_name} must be present in the local dashboard"
+    assert "/merged/open-orders?_dashboard=1" in body
+    assert "/static/history_page.js?v=" in body
+    assert 'class="layout render-dashboard-layout"' not in body
 
 
 def test_home_page_render_profile_returns_dashboard_html() -> None:
@@ -57,8 +70,21 @@ def test_home_page_render_profile_returns_dashboard_html() -> None:
     assert response.status_code == 200
     assert "text/html" in response.headers.get("content-type", "")
     body = response.body.decode("utf-8")
-    assert "dashboard-workspace" in body
     assert "scripts-grid" in body
+    local_sections = {
+        "History Export": 'id="dashboard-history-panel"',
+        "Open Orders and Positions": 'id="dashboard-workspace"',
+        "Pine Scripts": 'id="pine-scripts-panel"',
+        "Watchlist": 'id="watchlist-widget"',
+        "Instrument Lookup": 'id="dashboard-instrument-lookup-panel"',
+        "OANDA Inactivity": 'id="oanda-inactivity-widget"',
+    }
+    for section_name, marker in local_sections.items():
+        assert marker not in body, f"{section_name} must be absent from the Render dashboard"
+    assert "/merged/open-orders?_dashboard=1" not in body
+    assert "/static/history_page.js" not in body
+    assert 'class="layout render-dashboard-layout"' in body
+    assert "LOCAL_DASHBOARD_" not in body
 
 
 def test_render_profile_blocks_local_only_routes() -> None:
@@ -88,6 +114,7 @@ def test_render_profile_scripts_hide_local_only_main_views() -> None:
     assert "oanda_monitor" not in names
     assert "calculator" in names
     assert "fxweekend" in names
+    assert "bounce-trader" in names
     assert "fxweekend-clone" not in names
 
 

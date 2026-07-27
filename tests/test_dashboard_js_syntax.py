@@ -79,6 +79,120 @@ def test_dashboard_js_no_removed_widget_endpoints_and_keeps_needed_calls() -> No
     assert "Inactive view" not in js
     assert "activeMainLoadState" not in js
     assert "syncWorkspaceSelectionFromScripts" not in js
+    assert "if (!oandaHeadline) return null;" in js
+    assert "if (!watchlistItems) return;" in js
+    assert "if (watchlistItems) {" in js
+    assert "if (oandaHeadline) {" in js
+    assert "if (workspaceFrame) {" in js
+
+
+def test_render_dashboard_js_does_not_request_or_poll_local_only_sections() -> None:
+    node = shutil.which("node")
+    assert node, "node is required for Render dashboard request behavior check"
+    harness = r"""
+const fs = require('fs');
+const vm = require('vm');
+const source = fs.readFileSync(process.argv[1], 'utf8');
+
+class Element {
+  constructor(id = '') {
+    this.id = id;
+    this.children = [];
+    this.handlers = {};
+    this.dataset = {};
+    this.style = {};
+    this.textContent = '';
+    this.disabled = false;
+    this.closed = false;
+    this._innerHTML = '';
+    this.classList = {
+      values: new Set(),
+      add: (...items) => items.forEach((item) => this.classList.values.add(item)),
+      remove: (...items) => items.forEach((item) => this.classList.values.delete(item)),
+    };
+  }
+  set innerHTML(value) {
+    this._innerHTML = String(value);
+    if (value === '') this.children = [];
+  }
+  get innerHTML() { return this._innerHTML; }
+  appendChild(child) { this.children.push(child); return child; }
+  addEventListener(event, callback) { this.handlers[event] = callback; }
+  setAttribute(name, value) { this[name] = String(value); }
+}
+
+const elements = {
+  'scripts-grid': new Element('scripts-grid'),
+  'exit-button-slot': new Element('exit-button-slot'),
+};
+const documentHandlers = {};
+const windowHandlers = {};
+const document = {
+  visibilityState: 'visible',
+  getElementById: (id) => elements[id] || null,
+  createElement: () => new Element(),
+  addEventListener: (event, callback) => { documentHandlers[event] = callback; },
+};
+const fetchCalls = [];
+const fetch = async (url) => {
+  fetchCalls.push(String(url));
+  return {
+    ok: true,
+    status: 200,
+    statusText: 'OK',
+    text: async () => JSON.stringify([
+      { name: 'calculator', label: 'Calculator', open_url: '/merged/calculator' },
+      { name: 'fxweekend', label: 'FX Weekend', open_url: '/apps/fxweekend-clone', running: true },
+      { name: 'bounce-trader', label: 'Bounce Trader', open_url: '/merged/bounce-trader' },
+    ]),
+  };
+};
+const intervalCallbacks = [];
+const context = {
+  console,
+  document,
+  fetch,
+  setInterval: (callback) => { intervalCallbacks.push(callback); return intervalCallbacks.length; },
+  clearInterval: () => {},
+  setTimeout: () => 1,
+  clearTimeout: () => {},
+  Date,
+  Map,
+  Promise,
+  URL,
+};
+context.window = {
+  addEventListener: (event, callback) => { windowHandlers[event] = callback; },
+  setTimeout: context.setTimeout,
+  clearTimeout: context.clearTimeout,
+  location: { href: 'https://render.example.invalid/' },
+  open: () => null,
+};
+context.globalThis = context;
+
+(async () => {
+  vm.createContext(context);
+  vm.runInContext(source, context);
+  await new Promise((resolve) => setImmediate(resolve));
+  intervalCallbacks.forEach((callback) => callback());
+  await new Promise((resolve) => setImmediate(resolve));
+
+  if (intervalCallbacks.length !== 1) {
+    throw new Error(`expected only shared scripts polling, got ${intervalCallbacks.length} timers`);
+  }
+  const forbidden = fetchCalls.filter((url) => url !== '/scripts');
+  if (forbidden.length) {
+    throw new Error(`Render requested local-only URLs: ${forbidden.join(', ')}`);
+  }
+  if (!fetchCalls.includes('/scripts')) {
+    throw new Error('Render dashboard did not preserve shared script loading');
+  }
+})().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});
+"""
+    subprocess.run([node, "-e", harness, str(JS_PATH)], check=True)
 
 
 def test_fxweekend_dashboard_health_comes_from_backend_not_browser_tabs() -> None:

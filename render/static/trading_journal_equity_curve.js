@@ -8,6 +8,11 @@
     { value: 'PEPPERSTONE LIVE', label: 'Pepperstone live', aliases: ['PEPPERSTONE LIVE'] },
   ]);
   const STORAGE_KEY = 'tradingJournal.equityAccount';
+  const VERIFIED_BALANCE_PROVENANCE = new Set([
+    'authoritative_after_minus_trade_result',
+    'cashflow_anchor_plus_trade_results',
+    'prior_verified_trade_balance_plus_results',
+  ]);
   const byAlias = new Map();
   ACCOUNT_CHOICES.forEach((choice) => {
     choice.aliases.forEach((alias) => byAlias.set(alias, choice.value));
@@ -46,33 +51,19 @@
     const value = raw ? new Date(raw).getTime() : NaN;
     return Number.isFinite(value) ? value : null;
   };
-  const rowBalance = (row) => {
-    const analysis = asFinite(row?.analysis_balance_after_trade);
-    if (analysis !== null) return analysis;
-    const tradeBalance = asFinite(row?.balance_after_trade);
-    if (tradeBalance !== null) return tradeBalance;
-    return isValidCashflowAnchor(row) ? asFinite(row?.cashflow_new_balance) : null;
-  };
-  const rowCurrency = (row) => normalizeWords(
-    row?.balance_after_trade_currency || row?.account_currency || row?.currency || ''
-  );
-
-  const accountCurrencyMap = (balances) => {
-    const currencies = new Map();
-    (Array.isArray(balances) ? balances : []).forEach((balance) => {
-      if (!balance || typeof balance !== 'object') return;
-      const account = canonicalAccount(balance);
-      const currency = normalizeWords(
-        balance.currency || balance.account_currency || ''
-      );
-      if (account && currency) currencies.set(account, currency);
-    });
-    return currencies;
+  const equityReturnPct = (row) => {
+    const provenance = String(row?.analysis_balance_before_trade_source || '').trim();
+    if (!VERIFIED_BALANCE_PROVENANCE.has(provenance)) return null;
+    const netProfit = asFinite(row?.net_profit);
+    const tradeResult = netProfit !== null ? netProfit : asFinite(row?.realized_pnl);
+    if (tradeResult === null) return null;
+    const before = asFinite(row?.analysis_balance_before_trade);
+    if (before === null || before <= 0) return null;
+    return (tradeResult / before) * 100;
   };
 
-  function normalizeEquityPoints(rows, selectedAccount, balances = []) {
+  function normalizeEquityPoints(rows, selectedAccount, _balances = []) {
     const account = canonicalAccount(selectedAccount);
-    const fallbackCurrency = accountCurrencyMap(balances).get(account) || '';
     const deduped = new Map();
     (Array.isArray(rows) ? rows : []).forEach((row) => {
       if (!row || typeof row !== 'object') return;
@@ -81,19 +72,48 @@
       const type = rowType(row);
       if (type === 'monthly_aud_reval' || (!isTrade(row) && !isValidCashflowAnchor(row))) return;
       const timestamp = canonicalTimestamp(row);
-      const balance = rowBalance(row);
-      const currency = rowCurrency(row) || fallbackCurrency;
-      if (timestamp === null || balance === null || !currency) return;
+      const returnPct = isTrade(row) ? equityReturnPct(row) : null;
+      if (timestamp === null || (isTrade(row) && returnPct === null)) return;
       const stableIdentity = String(row.id || row.row_id || row.stable_row_id || '').trim();
-      const key = stableIdentity || `${account}|${timestamp}|${balance}|${currency}`;
-      deduped.set(key, { timestamp, balance, currency, identity: key });
+      const cashflowBalance = isValidCashflowAnchor(row)
+        ? asFinite(row.cashflow_new_balance)
+        : null;
+      const key = stableIdentity || (
+        `${account}|${type}|${timestamp}|${isTrade(row) ? returnPct : cashflowBalance}`
+      );
+      deduped.set(key, {
+        timestamp,
+        eventType: type,
+        returnPct,
+        identity: key,
+      });
     });
     const ordered = Array.from(deduped.values()).sort((a, b) => (
       a.timestamp - b.timestamp || a.identity.localeCompare(b.identity)
     ));
-    if (!ordered.length) return [];
-    const latestCurrency = ordered[ordered.length - 1].currency;
-    return ordered.filter((point) => point.currency === latestCurrency);
+    const firstTrade = ordered.find((event) => event.eventType === 'trade');
+    if (!firstTrade) return [];
+
+    let currentIndex = 100;
+    const points = [{
+      timestamp: firstTrade.timestamp,
+      value: currentIndex,
+      eventType: 'baseline',
+      identity: `baseline:${firstTrade.identity}`,
+    }];
+    ordered.forEach((event) => {
+      if (event.timestamp < firstTrade.timestamp) return;
+      if (event.eventType === 'trade') {
+        currentIndex *= 1 + (event.returnPct / 100);
+      }
+      points.push({
+        timestamp: event.timestamp,
+        value: currentIndex,
+        eventType: event.eventType,
+        identity: event.identity,
+      });
+    });
+    return points;
   }
 
   function preferredOrFirstAccountWithData(rows, preferred, balances = []) {
@@ -110,11 +130,13 @@
     return first?.value || canonicalPreferred || ACCOUNT_CHOICES[0].value;
   }
 
-  const formatBalance = (value, currency) => {
-    const maximumFractionDigits = ['JPY'].includes(currency) ? 0 : 2;
+  const formatPercentage = (value) => {
     const number = Number(value);
     if (!Number.isFinite(number)) return '—';
-    return `${number.toLocaleString('en-AU', { maximumFractionDigits })} ${currency}`.trim();
+    return `${number.toLocaleString('en-AU', {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    })}%`;
   };
   const formatDate = (timestamp) => new Date(timestamp).toLocaleDateString('en-AU', {
     day: '2-digit', month: 'short', year: '2-digit', timeZone: 'Australia/Brisbane',
@@ -139,18 +161,17 @@
 
     const minTime = points[0].timestamp;
     const maxTime = points[points.length - 1].timestamp;
-    const rawMin = Math.min(...points.map((point) => point.balance));
-    const rawMax = Math.max(...points.map((point) => point.balance));
+    const rawMin = Math.min(...points.map((point) => point.value));
+    const rawMax = Math.max(...points.map((point) => point.value));
     const padding = Math.max((rawMax - rawMin) * 0.08, Math.abs(rawMax || 1) * 0.005, 1e-9);
-    const minBalance = rawMin - padding;
-    const maxBalance = rawMax + padding;
+    const minValue = rawMin - padding;
+    const maxValue = rawMax + padding;
     const timeSpan = Math.max(1, maxTime - minTime);
-    const balanceSpan = Math.max(1e-9, maxBalance - minBalance);
-    const currency = points[points.length - 1].currency;
+    const valueSpan = Math.max(1e-9, maxValue - minValue);
     context.font = '12px system-ui, sans-serif';
     const yTickLabels = Array.from({ length: 5 }, (_unused, index) => {
       const ratio = index / 4;
-      return formatBalance(maxBalance - ratio * balanceSpan, currency);
+      return formatPercentage(maxValue - ratio * valueSpan);
     });
     const widestYLabel = Math.max(
       ...yTickLabels.map((label) => (
@@ -172,7 +193,7 @@
     const plotWidth = Math.max(1, cssWidth - margin.left - margin.right);
     const plotHeight = Math.max(1, cssHeight - margin.top - margin.bottom);
     const x = (value) => margin.left + ((value - minTime) / timeSpan) * plotWidth;
-    const y = (value) => margin.top + ((maxBalance - value) / balanceSpan) * plotHeight;
+    const y = (value) => margin.top + ((maxValue - value) / valueSpan) * plotHeight;
 
     context.lineWidth = 1;
     context.strokeStyle = '#334155';
@@ -181,14 +202,14 @@
     const yTicks = 5;
     for (let index = 0; index < yTicks; index += 1) {
       const ratio = index / (yTicks - 1);
-      const value = maxBalance - ratio * balanceSpan;
+      const value = maxValue - ratio * valueSpan;
       const yy = margin.top + ratio * plotHeight;
       context.beginPath();
       context.moveTo(margin.left, yy);
       context.lineTo(cssWidth - margin.right, yy);
       context.stroke();
       context.textAlign = 'right';
-      context.fillText(formatBalance(value, currency), margin.left - 10, yy);
+      context.fillText(formatPercentage(value), margin.left - 10, yy);
     }
 
     const xTicks = Math.min(6, Math.max(2, points.length));
@@ -210,7 +231,7 @@
     context.beginPath();
     points.forEach((point, index) => {
       const xx = x(point.timestamp);
-      const yy = y(point.balance);
+      const yy = y(point.value);
       if (index === 0) context.moveTo(xx, yy);
       else context.lineTo(xx, yy);
     });
@@ -220,7 +241,7 @@
     context.strokeStyle = '#2563eb';
     context.lineWidth = 2;
     context.beginPath();
-    context.arc(x(latest.timestamp), y(latest.balance), 5, 0, Math.PI * 2);
+    context.arc(x(latest.timestamp), y(latest.value), 5, 0, Math.PI * 2);
     context.fill();
     context.stroke();
   }
@@ -230,7 +251,8 @@
     canonicalAccount,
     normalizeEquityPoints,
     preferredOrFirstAccountWithData,
-    rowBalance,
+    equityReturnPct,
+    formatPercentage,
     drawChart,
   };
   window.TradingJournalEquityCurve = api;
@@ -274,22 +296,24 @@
       return;
     }
     const points = normalizeEquityPoints(rows, choice.value, balances);
+    const provenCount = Number(equityCoverage?.[choice.value]);
+    if (!Number.isFinite(provenCount) || provenCount !== points.length) {
+      summary.innerHTML = `<strong>${choice.label}</strong><span>${points.length} unverified point${points.length === 1 ? '' : 's'}</span>`;
+      setChartState(
+        `Current equity data for ${choice.label} could not be verified. Refresh the equity curve.`,
+        true,
+      );
+      clearChart();
+      return;
+    }
     if (!points.length) {
       summary.innerHTML = `<strong>${choice.label}</strong><span>0 points</span>`;
-      const provenCount = Number(equityCoverage?.[choice.value]);
-      if (Number.isFinite(provenCount) && provenCount === 0) {
-        setChartState(`No equity data is available for ${choice.label}.`);
-      } else {
-        setChartState(
-          `Current equity data for ${choice.label} could not be verified. Refresh the equity curve.`,
-          true,
-        );
-      }
+      setChartState(`No equity data is available for ${choice.label}.`);
       clearChart();
       return;
     }
     const latest = points[points.length - 1];
-    summary.innerHTML = `<strong>${choice.label}</strong><span>Current equity: ${formatBalance(latest.balance, latest.currency)}</span><span>${points.length} point${points.length === 1 ? '' : 's'}</span>`;
+    summary.innerHTML = `<strong>${choice.label}</strong><span>Current equity index: ${formatPercentage(latest.value)}</span><span>${points.length} point${points.length === 1 ? '' : 's'}</span>`;
     setChartState('');
     drawChart(canvas, points);
   };

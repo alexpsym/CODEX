@@ -461,7 +461,8 @@ def test_extract_latest_calls_blocker_helper_before_fast_forward_checkout_merge(
 
 def test_extract_latest_fast_forward_restores_preserved_workbook_and_resolves_collision() -> None:
     script = _installer_script_path().read_text(encoding='utf-8')
-    assert 'if ($ffMovedBlockers -gt 0) {' in script
+    assert '$ffPreservedFilesExist = Test-Path -LiteralPath $ffRestoreRoot -PathType Container' in script
+    assert 'if ($ffPreservedFilesExist) {' in script
     assert "$ffRestoreRoot = Join-Path $ffBlockerBackupDir 'checkout-blockers'" in script
     assert 'Preserve-LocalFilesFromBackup -BackupDir $ffRestoreRoot -NewRepoDir $RepoDir' in script
     assert 'Resolve-JournalWorkbookCollision -JournalDir $newJournal -Context "backup journal preservation"' in script

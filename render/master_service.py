@@ -1390,7 +1390,19 @@ def _build_authoritative_trading_journal_diagnostics_snapshot(items: List[Dict[s
 _TRADING_JOURNAL_VIEW_CACHE: Dict[str, object] = {"key": None, "payload": None}
 _PENDING_MANUAL_SYNC_ROWS: List[Dict[str, object]] = []
 TRADING_JOURNAL_VIEW_CACHE_VERSION = 6
-TRADING_JOURNAL_EQUITY_CACHE_SCHEMA_VERSION = 1
+TRADING_JOURNAL_EQUITY_CACHE_SCHEMA_VERSION = 2
+TRADING_JOURNAL_EQUITY_CURVE_TYPE = "cashflow_neutral_compounded_index"
+TRADING_JOURNAL_EQUITY_BASE_INDEX = 100.0
+TRADING_JOURNAL_EQUITY_RETURN_BASIS = (
+    "net_trade_result_over_analysis_balance_before_trade"
+)
+TRADING_JOURNAL_EQUITY_BALANCE_PROVENANCE = frozenset(
+    {
+        "authoritative_after_minus_trade_result",
+        "cashflow_anchor_plus_trade_results",
+        "prior_verified_trade_balance_plus_results",
+    }
+)
 TRADING_JOURNAL_EQUITY_ACCOUNTS: Tuple[str, ...] = (
     "BINANCE",
     "BYBIT",
@@ -1425,17 +1437,24 @@ def _equity_account_key(value: object) -> str:
     return aliases.get(normalized, "")
 
 
-def _equity_point_counts(items: object, balances: object) -> Dict[str, int]:
-    balance_currencies: Dict[str, str] = {}
-    for balance in balances if isinstance(balances, list) else []:
-        if not isinstance(balance, dict):
-            continue
-        account = _equity_account_key(balance)
-        currency = str(balance.get("currency") or balance.get("account_currency") or "").strip().upper()
-        if account and currency:
-            balance_currencies[account] = currency
+def _equity_trade_return_pct(row: object) -> Optional[float]:
+    if not isinstance(row, dict):
+        return None
+    balance_provenance = str(
+        row.get("analysis_balance_before_trade_source") or ""
+    ).strip()
+    if balance_provenance not in TRADING_JOURNAL_EQUITY_BALANCE_PROVENANCE:
+        return None
+    pnl = _row_pnl(row)
+    balance_before = _to_float(row.get("analysis_balance_before_trade"))
+    if pnl is None or balance_before is None or balance_before <= 0:
+        return None
+    return (pnl / balance_before) * 100.0
 
-    points: Dict[str, Dict[str, Tuple[float, str]]] = {
+
+def _equity_point_counts(items: object, balances: object) -> Dict[str, int]:
+    del balances  # Percentage indices are currency-neutral.
+    events: Dict[str, Dict[str, Tuple[float, str, str]]] = {
         account: {} for account in TRADING_JOURNAL_EQUITY_ACCOUNTS
     }
     for row in items if isinstance(items, list) else []:
@@ -1451,36 +1470,36 @@ def _equity_point_counts(items: object, balances: object) -> Dict[str, int]:
         )
         cashflow_balance = _to_float(row.get("cashflow_new_balance"))
         valid_cashflow = row_type == "cashflow" and cashflow_balance is not None
-        if row_type == "monthly_aud_reval" or (row_type != "trade" and not valid_cashflow):
+        trade_return_pct = _equity_trade_return_pct(row) if row_type == "trade" else None
+        if row_type == "monthly_aud_reval" or (
+            row_type == "trade" and trade_return_pct is None
+        ) or (
+            row_type != "trade" and not valid_cashflow
+        ):
             continue
         timestamp = _timestamp_epoch_seconds(row.get("close_time") or row.get("open_time"))
         if not math.isfinite(timestamp):
             continue
-        balance = _to_float(row.get("analysis_balance_after_trade"))
-        if balance is None:
-            balance = _to_float(row.get("balance_after_trade"))
-        if balance is None and valid_cashflow:
-            balance = cashflow_balance
-        currency = str(
-            row.get("balance_after_trade_currency")
-            or row.get("account_currency")
-            or row.get("currency")
-            or balance_currencies.get(account)
-            or ""
-        ).strip().upper()
-        if balance is None or not currency:
-            continue
         stable_identity = str(
             row.get("id") or row.get("row_id") or row.get("stable_row_id") or ""
         ).strip()
-        identity = stable_identity or f"{account}|{timestamp}|{balance}|{currency}"
-        points[account][identity] = (timestamp, currency)
+        identity = stable_identity or (
+            f"{account}|{row_type}|{int(timestamp * 1000.0)}|"
+            f"{trade_return_pct if row_type == 'trade' else cashflow_balance}"
+        )
+        events[account][identity] = (timestamp, identity, row_type)
 
     counts: Dict[str, int] = {}
     for account in TRADING_JOURNAL_EQUITY_ACCOUNTS:
-        ordered = sorted(points[account].values(), key=lambda point: point[0])
-        latest_currency = ordered[-1][1] if ordered else ""
-        counts[account] = len([point for point in ordered if point[1] == latest_currency])
+        ordered = sorted(events[account].values(), key=lambda event: (event[0], event[1]))
+        first_trade = next((event for event in ordered if event[2] == "trade"), None)
+        if first_trade is None:
+            counts[account] = 0
+            continue
+        first_trade_timestamp = first_trade[0]
+        counts[account] = 1 + sum(
+            1 for event in ordered if event[0] >= first_trade_timestamp
+        )
     return counts
 
 
@@ -1508,6 +1527,9 @@ def _attach_trading_journal_equity_metadata(payload: Dict[str, object]) -> Dict[
             "snapshot_id": snapshot_id,
             "generated_at": generated_at,
             "source_fingerprint_sha256": source_fingerprint_sha256,
+            "equity_schema_version": TRADING_JOURNAL_EQUITY_CACHE_SCHEMA_VERSION,
+            "equity_curve_type": TRADING_JOURNAL_EQUITY_CURVE_TYPE,
+            "equity_return_basis": TRADING_JOURNAL_EQUITY_RETURN_BASIS,
             "point_counts": point_counts,
         }
     )
@@ -1518,6 +1540,10 @@ def _attach_trading_journal_equity_metadata(payload: Dict[str, object]) -> Dict[
         "verified": True,
         "verified_at": generated_at,
         "source_fingerprint_sha256": source_fingerprint_sha256,
+        "curve_type": TRADING_JOURNAL_EQUITY_CURVE_TYPE,
+        "base_index": TRADING_JOURNAL_EQUITY_BASE_INDEX,
+        "return_field": "equity_return_pct",
+        "return_basis": TRADING_JOURNAL_EQUITY_RETURN_BASIS,
         "point_counts": point_counts,
     }
     return payload
@@ -1546,6 +1572,14 @@ def _trading_journal_snapshot_freshness(
     else:
         if int(equity_meta.get("schema_version") or 0) != TRADING_JOURNAL_EQUITY_CACHE_SCHEMA_VERSION:
             reasons.append("equity_schema_incompatible")
+        if str(equity_meta.get("curve_type") or "") != TRADING_JOURNAL_EQUITY_CURVE_TYPE:
+            reasons.append("equity_curve_type_incompatible")
+        if _to_float(equity_meta.get("base_index")) != TRADING_JOURNAL_EQUITY_BASE_INDEX:
+            reasons.append("equity_base_index_incompatible")
+        if str(equity_meta.get("return_field") or "") != "equity_return_pct":
+            reasons.append("equity_return_field_incompatible")
+        if str(equity_meta.get("return_basis") or "") != TRADING_JOURNAL_EQUITY_RETURN_BASIS:
+            reasons.append("equity_return_basis_incompatible")
         if equity_meta.get("verified") is not True:
             reasons.append("equity_not_verified")
         expected_source_hash = _stable_json_sha256(snapshot.get("source_fingerprints"))
@@ -4137,6 +4171,23 @@ def _load_state_manifest() -> Dict[str, Any]:
         write_json_file(STATE_MANIFEST_PATH, manifest, sort_keys=True)
         return manifest
     return {}
+
+
+def _state_manifest_declares_payload(key: str, payload: object) -> bool:
+    """Return whether the durable manifest records this exact state payload."""
+
+    try:
+        manifest = _load_state_manifest()
+    except Exception:
+        return False
+    entry = manifest.get(key)
+    if not isinstance(entry, dict):
+        return False
+    recorded_hash = str(entry.get("sha256") or "").strip().lower()
+    if not recorded_hash:
+        return False
+    blob = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hmac.compare_digest(recorded_hash, hashlib.sha256(blob).hexdigest())
 
 
 def _update_repo_state_manifest_entry(key: str, payload: object) -> None:
@@ -7188,7 +7239,13 @@ def _build_journal_balance_timelines(
             return True
         return not _is_test_trade_row(row)
 
-    out_rows = [dict(r) for r in rows]
+    out_rows: List[Dict[str, object]] = []
+    for source_row in rows:
+        clean_row = dict(source_row)
+        clean_row.pop("analysis_balance_before_trade", None)
+        clean_row.pop("analysis_balance_after_trade", None)
+        clean_row.pop("analysis_balance_before_trade_source", None)
+        out_rows.append(clean_row)
     by_account: Dict[str, Dict[str, object]] = defaultdict(lambda: {"trade_indices": [], "labels": [], "currencies": []})
 
     for idx, row in enumerate(out_rows):
@@ -7259,6 +7316,9 @@ def _build_journal_balance_timelines(
                     before = authoritative_after - pnl if _apply_pnl_to_balance(row, pnl) else authoritative_after
                     row["analysis_balance_before_trade"] = before
                     row["analysis_balance_after_trade"] = authoritative_after
+                    row["analysis_balance_before_trade_source"] = (
+                        "authoritative_after_minus_trade_result"
+                    )
                     last_known_balance = authoritative_after
                     last_known_ts = trade_ts
                     continue
@@ -7275,6 +7335,9 @@ def _build_journal_balance_timelines(
                     segment_running[anchor_idx] = after
                     row["analysis_balance_before_trade"] = before
                     row["analysis_balance_after_trade"] = after
+                    row["analysis_balance_before_trade_source"] = (
+                        "cashflow_anchor_plus_trade_results"
+                    )
                     last_known_balance = after
                     last_known_ts = trade_ts
                     continue
@@ -7284,6 +7347,9 @@ def _build_journal_balance_timelines(
                 before = authoritative_after - pnl if _apply_pnl_to_balance(row, pnl) else authoritative_after
                 row["analysis_balance_before_trade"] = before
                 row["analysis_balance_after_trade"] = authoritative_after
+                row["analysis_balance_before_trade_source"] = (
+                    "authoritative_after_minus_trade_result"
+                )
                 last_known_balance = authoritative_after
                 last_known_ts = trade_ts
                 continue
@@ -7295,6 +7361,9 @@ def _build_journal_balance_timelines(
                     after = before + pnl
                 row["analysis_balance_before_trade"] = before
                 row["analysis_balance_after_trade"] = after
+                row["analysis_balance_before_trade_source"] = (
+                    "prior_verified_trade_balance_plus_results"
+                )
                 last_known_balance = after
                 last_known_ts = trade_ts
 
@@ -10204,7 +10273,20 @@ async def _dropbox_restore_state_backup_on_startup() -> None:
                 try:
                     local_existing = read_repo_state_json(key)
                 except FileNotFoundError:
-                    local_existing = None
+                    # The manifest is also the deletion tombstone for an empty
+                    # watchlist. If an installer/update preserved the verified
+                    # manifest but the small mirror is temporarily absent, do
+                    # not replay an older aggregate list and resurrect symbols.
+                    state_path = state_file_path_for_key(key)
+                    local_existing = (
+                        []
+                        if (
+                            key == "watchlist"
+                            and not state_path.exists()
+                            and _state_manifest_declares_payload(key, [])
+                        )
+                        else None
+                    )
                 except Exception as exc:
                     BYBIT_LOGGER.warning("Repo-local state for key '%s' is unreadable: %s", key, exc)
                     invalid.append(key)
@@ -10378,7 +10460,15 @@ async def _dropbox_restore_state_backup_on_startup() -> None:
             active_folder, _ = await asyncio.to_thread(_resolve_trading_journal_dropbox_folder)
             workbook_stats = await asyncio.to_thread(_sanitize_bybit_demo_workbook, active_folder)
         oanda_repaired_rows = _repair_persisted_oanda_trade_rows()
-        _schedule_dropbox_upload_state_backup()
+        invalid_keys = list(bootstrap.get("invalid") or [])
+        if invalid_keys:
+            BYBIT_LOGGER.warning(
+                "State backup rewrite skipped because authoritative state is invalid "
+                "for keys: %s",
+                ", ".join(invalid_keys),
+            )
+        else:
+            _schedule_dropbox_upload_state_backup()
         BYBIT_LOGGER.info(
             "Dropbox restore complete: bybit=%s skipped_invalid_bybit=%s oanda=%s watchlist=%s pending=%s trade_contexts_restored=%s oanda_fill_state_restored=%s journal_rows=%s journal_sanitized=%s workbook_deduped=%s oanda_rows_repaired=%s",
             restored["bybit_restored"],
@@ -10393,7 +10483,6 @@ async def _dropbox_restore_state_backup_on_startup() -> None:
             int(workbook_stats.get("deduped_by_order_id", 0)) + int(workbook_stats.get("deduped_by_fingerprint", 0)),
             oanda_repaired_rows,
         )
-        invalid_keys = list(bootstrap.get("invalid") or [])
         _update_state_sync_status(
             restore_complete=True,
             restore_status="failed" if invalid_keys else "done",
@@ -13272,6 +13361,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             gap: 1rem;
             align-items: start;
         }
+        .layout.render-dashboard-layout{
+            grid-template-columns: minmax(0, 720px);
+            justify-content: center;
+        }
         .dashboard-script-panel{
             padding: 0.85rem;
         }
@@ -13668,13 +13761,14 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 </head>
 <body>
     <div class=\"home\">
-        <div class="layout">
+        <div class="layout{{DASHBOARD_LAYOUT_CLASS}}">
             <div class="dashboard-rail">
                 <section class="panel dashboard-script-panel" id="dashboard-scripts-panel">
                     <div id="scripts-grid" class="script-stack"></div>
                     <div id="exit-button-slot" class="exit-button-slot"></div>
                 </section>
 
+                <!-- LOCAL_DASHBOARD_RAIL_START -->
                 <section class="panel" id="watchlist-widget">
                     <div class="panel-header">
                         <div>
@@ -13735,8 +13829,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                         <div class="status-detail" id="oanda-inactivity-error-detail"></div>
                     </div>
                 </section>
+                <!-- LOCAL_DASHBOARD_RAIL_END -->
 
             </div>
+            <!-- LOCAL_DASHBOARD_MAIN_START -->
             <div class="dashboard-main-content">
                 <section class="panel" id="dashboard-workspace">
                     <div class="panel-header">
@@ -13784,11 +13880,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 {{HISTORY_EXPORT_TOOL}}
                 </section>
             </div>
+            <!-- LOCAL_DASHBOARD_MAIN_END -->
         </div>
     </div>
 
     <script src=\"{{DASHBOARD_JS_URL}}\"></script>
-    <script src=\"{{HISTORY_PAGE_JS_URL}}\"></script>
+    {{HISTORY_PAGE_SCRIPT_TAG}}
 </body>
 </html>"""
 
@@ -15368,6 +15465,175 @@ async def _build_bybit_signed_headers(
     }
 
 
+def _safe_bybit_endpoint(path: object) -> str:
+    raw = str(path or "").strip()
+    if not raw:
+        return "unknown"
+    try:
+        parsed = urlparse(raw)
+        if parsed.scheme or parsed.netloc:
+            return parsed.path or "/"
+    except Exception:
+        pass
+    return raw.split("?", 1)[0].split("#", 1)[0] or "unknown"
+
+
+def _safe_bybit_diagnostic_text(
+    value: object,
+    *,
+    api_key: str = "",
+    api_secret: str = "",
+    fallback: str = "no diagnostic message supplied",
+    limit: int = 300,
+) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    for secret in (api_key, api_secret):
+        secret_text = str(secret or "").strip()
+        if secret_text:
+            text = text.replace(secret_text, "[redacted]")
+    text = re.sub(
+        r"(?i)\b(api[_-]?key|api[_-]?secret|secret|signature|x-bapi-api-key|x-bapi-sign)"
+        r"\s*[\"']?\s*([=:])\s*(?:\"[^\"]*\"|'[^']*'|[^,\s;&}]+)",
+        r"\1\2[redacted]",
+        text,
+    )
+    text = re.sub(r"https?://[^\s]+", "[redacted URL]", text, flags=re.IGNORECASE)
+    if not text:
+        return fallback
+    if len(text) > limit:
+        return f"{text[:limit]}..."
+    return text
+
+
+class BybitSignedGETError(ValueError):
+    def __init__(
+        self,
+        *,
+        path: str,
+        failure_kind: str,
+        attempts: int,
+        http_status: Optional[int] = None,
+        ret_code: object = None,
+        ret_msg: object = None,
+        error_type: Optional[str] = None,
+        timeout_s: Optional[float] = None,
+    ) -> None:
+        self.path = _safe_bybit_endpoint(path)
+        self.failure_kind = str(failure_kind or "request_failure")
+        self.attempts = max(1, int(attempts or 1))
+        self.http_status = int(http_status) if http_status is not None else None
+        self.ret_code = ret_code
+        self.ret_msg = str(ret_msg or "").strip()
+        self.error_type = str(error_type or "").strip()
+        self.timeout_s = float(timeout_s) if timeout_s is not None else None
+
+        parts = [
+            "Bybit signed GET failed",
+            f"path={self.path}",
+            f"reason={self.failure_kind}",
+            f"attempts={self.attempts}",
+        ]
+        if self.timeout_s is not None:
+            parts.append(f"timeout={self.timeout_s:g}s")
+        if self.error_type:
+            parts.append(f"error_type={self.error_type}")
+        if self.http_status is not None:
+            parts.append(f"http_status={self.http_status}")
+        if self.ret_code not in (None, ""):
+            parts.append(f"retCode={self.ret_code}")
+        if self.ret_msg:
+            parts.append(f"retMsg={self.ret_msg}")
+        super().__init__(" ".join(parts))
+
+
+def _bybit_open_source_error(
+    exc: Exception,
+    *,
+    account: str,
+    category: str,
+    source_type: str,
+    endpoint: str,
+    settlement_coin: Optional[str] = None,
+    api_key: str = "",
+    api_secret: str = "",
+) -> Dict[str, str]:
+    safe_endpoint = _safe_bybit_endpoint(endpoint)
+    error_type = (
+        str(getattr(exc, "error_type", "") or "").strip()
+        or exc.__class__.__name__
+    )
+    failure_kind = str(getattr(exc, "failure_kind", "") or "").strip()
+    http_status: object = getattr(exc, "http_status", None)
+    ret_code: object = getattr(exc, "ret_code", None)
+    ret_msg: object = getattr(exc, "ret_msg", None)
+
+    if isinstance(exc, httpx.TimeoutException):
+        reason = (
+            f"timeout contacting endpoint={safe_endpoint} "
+            f"error_type={error_type}"
+        )
+    elif isinstance(exc, httpx.RequestError):
+        detail = _safe_bybit_diagnostic_text(
+            str(exc),
+            api_key=api_key,
+            api_secret=api_secret,
+            fallback=error_type,
+        )
+        reason = (
+            f"request failure contacting endpoint={safe_endpoint} "
+            f"error_type={error_type} detail={detail}"
+        )
+    else:
+        reason = _safe_bybit_diagnostic_text(
+            str(exc),
+            api_key=api_key,
+            api_secret=api_secret,
+            fallback=f"{error_type} raised without a message",
+        )
+
+    if isinstance(exc, httpx.HTTPStatusError):
+        response = getattr(exc, "response", None)
+        if response is not None:
+            http_status = getattr(response, "status_code", http_status)
+            try:
+                payload = response.json()
+            except Exception:
+                payload = {}
+            if isinstance(payload, dict):
+                ret_code = payload.get("retCode", ret_code)
+                ret_msg = payload.get("retMsg", ret_msg)
+
+    entry: Dict[str, str] = {
+        "broker": "Bybit",
+        "account": str(account or "unknown").strip() or "unknown",
+        "category": str(category or "unknown").strip() or "unknown",
+        "source_type": str(source_type or "request").strip() or "request",
+        "endpoint": safe_endpoint,
+        "settlement_coin": str(settlement_coin or "n/a").strip() or "n/a",
+        "error_type": error_type,
+        "message": reason,
+    }
+    if failure_kind:
+        entry["failure_kind"] = failure_kind
+    if http_status not in (None, ""):
+        entry["http_status"] = str(http_status)
+    if ret_code not in (None, ""):
+        entry["retCode"] = _safe_bybit_diagnostic_text(
+            ret_code,
+            api_key=api_key,
+            api_secret=api_secret,
+            fallback="unknown",
+        )
+    if ret_msg not in (None, ""):
+        entry["retMsg"] = _safe_bybit_diagnostic_text(
+            ret_msg,
+            api_key=api_key,
+            api_secret=api_secret,
+            fallback="Bybit request failed",
+        )
+    return entry
+
+
 async def _bybit_signed_get(
     *,
     base_url: str,
@@ -15382,55 +15648,206 @@ async def _bybit_signed_get(
     query = _build_bybit_query(params)
     normalized_base = _normalize_bybit_base_url(base_url)
     recv_window = _bybit_recv_window_str()
-    url = f"{normalized_base}{path}"
+    safe_path = _safe_bybit_endpoint(path)
+    url = f"{normalized_base}{safe_path}"
     if query:
         url = f"{url}?{query}"
+    force_time_sync = False
+    transient_statuses = {408, 425, 429, 500, 502, 503, 504}
     for attempt in range(1, BYBIT_SIGNED_REQUEST_MAX_RETRIES + 1):
-        headers = await _build_bybit_signed_headers(
-            normalized_base=normalized_base,
-            api_key=api_key,
-            api_secret=api_secret,
-            data_str=query,
-            recv_window=recv_window,
-            force_time_sync=(attempt > 1),
-        )
-        timeout = httpx.Timeout(timeout_s, connect=connect_s, read=(read_s if read_s is not None else timeout_s), write=timeout_s, pool=2.0)
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            resp = await client.get(url, headers=headers)
+        try:
+            headers = await _build_bybit_signed_headers(
+                normalized_base=normalized_base,
+                api_key=api_key,
+                api_secret=api_secret,
+                data_str=query,
+                recv_window=recv_window,
+                force_time_sync=force_time_sync,
+            )
+            timeout = httpx.Timeout(
+                timeout_s,
+                connect=connect_s,
+                read=(read_s if read_s is not None else timeout_s),
+                write=timeout_s,
+                pool=2.0,
+            )
+        except Exception as exc:
+            safe_detail = _safe_bybit_diagnostic_text(
+                str(exc),
+                api_key=api_key,
+                api_secret=api_secret,
+                fallback=exc.__class__.__name__,
+            )
+            BYBIT_LOGGER.error(
+                "BYBIT_SIGNED_GET_SETUP_ERROR path=%s error_type=%s detail=%s",
+                safe_path,
+                exc.__class__.__name__,
+                safe_detail,
+            )
+            raise BybitSignedGETError(
+                path=safe_path,
+                failure_kind="request_setup_error",
+                attempts=attempt,
+                error_type=exc.__class__.__name__,
+                ret_msg=safe_detail,
+            ) from exc
+        force_time_sync = False
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                resp = await client.get(url, headers=headers)
+        except httpx.TimeoutException as exc:
+            should_retry = attempt < BYBIT_SIGNED_REQUEST_MAX_RETRIES
+            BYBIT_LOGGER.warning(
+                "BYBIT_SIGNED_GET_TIMEOUT path=%s error_type=%s attempt=%s/%s retry=%s",
+                safe_path,
+                exc.__class__.__name__,
+                attempt,
+                BYBIT_SIGNED_REQUEST_MAX_RETRIES,
+                should_retry,
+            )
+            if should_retry:
+                await asyncio.sleep(min(0.2 * attempt, 0.5))
+                continue
+            raise BybitSignedGETError(
+                path=safe_path,
+                failure_kind="timeout",
+                attempts=attempt,
+                error_type=exc.__class__.__name__,
+                timeout_s=timeout_s,
+                ret_msg="request timed out",
+            ) from exc
+        except httpx.RequestError as exc:
+            should_retry = attempt < BYBIT_SIGNED_REQUEST_MAX_RETRIES
+            safe_detail = _safe_bybit_diagnostic_text(
+                str(exc),
+                api_key=api_key,
+                api_secret=api_secret,
+                fallback=exc.__class__.__name__,
+            )
+            BYBIT_LOGGER.warning(
+                "BYBIT_SIGNED_GET_REQUEST_ERROR path=%s error_type=%s attempt=%s/%s retry=%s detail=%s",
+                safe_path,
+                exc.__class__.__name__,
+                attempt,
+                BYBIT_SIGNED_REQUEST_MAX_RETRIES,
+                should_retry,
+                safe_detail,
+            )
+            if should_retry:
+                await asyncio.sleep(min(0.2 * attempt, 0.5))
+                continue
+            raise BybitSignedGETError(
+                path=safe_path,
+                failure_kind="request_error",
+                attempts=attempt,
+                error_type=exc.__class__.__name__,
+                ret_msg=safe_detail,
+            ) from exc
+        except Exception as exc:
+            safe_detail = _safe_bybit_diagnostic_text(
+                str(exc),
+                api_key=api_key,
+                api_secret=api_secret,
+                fallback=f"{exc.__class__.__name__} raised without a message",
+            )
+            BYBIT_LOGGER.error(
+                "BYBIT_SIGNED_GET_UNEXPECTED_ERROR path=%s error_type=%s detail=%s",
+                safe_path,
+                exc.__class__.__name__,
+                safe_detail,
+            )
+            raise BybitSignedGETError(
+                path=safe_path,
+                failure_kind="unexpected_request_error",
+                attempts=attempt,
+                error_type=exc.__class__.__name__,
+                ret_msg=safe_detail,
+            ) from exc
         _record_outbound_traffic(
             "bybit",
             bytes_sent=len(url) + sum(len(str(v)) for v in headers.values()),
             bytes_received=len(getattr(resp, "content", b"") or b""),
-            context=path,
+            context=safe_path,
         )
         payload: Dict[str, object] = {}
         try:
-            payload = resp.json()
+            raw_payload = resp.json()
+            if isinstance(raw_payload, dict):
+                payload = raw_payload
         except Exception:
             payload = {}
         ret_code = payload.get("retCode")
-        ret_msg = payload.get("retMsg") or resp.text
+        safe_ret_code: object = (
+            ret_code
+            if isinstance(ret_code, (int, float))
+            else _safe_bybit_diagnostic_text(
+                ret_code,
+                api_key=api_key,
+                api_secret=api_secret,
+                fallback="unknown",
+            )
+        )
+        raw_ret_msg = payload.get("retMsg") or _summarize_upstream_body(resp.text)
+        ret_msg = _safe_bybit_diagnostic_text(
+            raw_ret_msg,
+            api_key=api_key,
+            api_secret=api_secret,
+            fallback="Bybit returned no error message",
+        )
         if resp.status_code >= 400:
-            raise ValueError(
-                f"Bybit signed GET failed path={path} http_status={resp.status_code} retCode={ret_code} retMsg={ret_msg}"
+            should_retry = (
+                resp.status_code in transient_statuses
+                and attempt < BYBIT_SIGNED_REQUEST_MAX_RETRIES
+            )
+            log_fn = BYBIT_LOGGER.warning if should_retry else BYBIT_LOGGER.error
+            log_fn(
+                "BYBIT_SIGNED_GET_HTTP_ERROR path=%s http_status=%s retCode=%s retMsg=%s attempt=%s/%s retry=%s",
+                safe_path,
+                resp.status_code,
+                safe_ret_code,
+                ret_msg,
+                attempt,
+                BYBIT_SIGNED_REQUEST_MAX_RETRIES,
+                should_retry,
+            )
+            if should_retry:
+                await asyncio.sleep(min(0.2 * attempt, 0.5))
+                continue
+            raise BybitSignedGETError(
+                path=safe_path,
+                failure_kind="http_error",
+                attempts=attempt,
+                http_status=resp.status_code,
+                ret_code=safe_ret_code,
+                ret_msg=ret_msg,
             )
         if ret_code in (0, "0"):
             return payload
         if _bybit_timestamp_window_error(ret_code, ret_msg) and attempt < BYBIT_SIGNED_REQUEST_MAX_RETRIES:
             BYBIT_LOGGER.warning(
                 "BYBIT_SIGNED_RETRY path=%s attempt=%s/%s reason=timestamp_window recv_window=%s",
-                path,
+                safe_path,
                 attempt,
                 BYBIT_SIGNED_REQUEST_MAX_RETRIES,
                 recv_window,
             )
+            force_time_sync = True
             continue
         diag = _extract_bybit_timestamp_diag(ret_msg)
-        raise ValueError(
-            f"Bybit signed GET failed path={path} retCode={ret_code} retMsg={ret_msg} recv_window={recv_window}"
-            + (f" {diag}" if diag else "")
+        raise BybitSignedGETError(
+            path=safe_path,
+            failure_kind="api_error",
+            attempts=attempt,
+            http_status=resp.status_code,
+            ret_code=safe_ret_code,
+            ret_msg=f"{ret_msg}{(' ' + diag) if diag else ''}",
         )
-    raise ValueError(f"Bybit signed GET failed path={path} retCode=unknown retMsg=unknown")
+    raise BybitSignedGETError(
+        path=safe_path,
+        failure_kind="retry_exhausted",
+        attempts=BYBIT_SIGNED_REQUEST_MAX_RETRIES,
+        ret_msg="request attempts exhausted",
+    )
 
 
 async def _bybit_signed_post(
@@ -15501,34 +15918,66 @@ async def _fetch_bybit_positions_for_category(
     api_key: str,
     api_secret: str,
     category: str,
-) -> tuple[List[Dict[str, object]], List[str]]:
+    account_context: str = "unknown",
+) -> tuple[List[Dict[str, object]], List[Dict[str, str]]]:
+    endpoint = "/v5/position/list"
     if category == "linear":
         combined: List[Dict[str, object]] = []
-        errors: List[str] = []
+        errors: List[Dict[str, str]] = []
         for settle_coin in ("USDT", "USDC"):
             try:
                 payload = await _bybit_signed_get(
                     base_url=base_url,
                     api_key=api_key,
                     api_secret=api_secret,
-                    path="/v5/position/list",
+                    path=endpoint,
                     params={"category": "linear", "settleCoin": settle_coin},
                 )
-                combined.extend(payload.get("result", {}).get("list", []))
+                result = payload.get("result")
+                rows = result.get("list") if isinstance(result, dict) else None
+                if not isinstance(rows, list):
+                    raise ValueError("Bybit positions response did not contain result.list")
+                combined.extend(row for row in rows if isinstance(row, dict))
             except Exception as exc:
-                errors.append(f"linear {settle_coin}: {exc}")
+                errors.append(
+                    _bybit_open_source_error(
+                        exc,
+                        account=account_context,
+                        category=category,
+                        source_type="positions",
+                        endpoint=endpoint,
+                        settlement_coin=settle_coin,
+                        api_key=api_key,
+                        api_secret=api_secret,
+                    )
+                )
         return combined, errors
     try:
         payload = await _bybit_signed_get(
             base_url=base_url,
             api_key=api_key,
             api_secret=api_secret,
-            path="/v5/position/list",
+            path=endpoint,
             params={"category": category},
         )
+        result = payload.get("result")
+        rows = result.get("list") if isinstance(result, dict) else None
+        if not isinstance(rows, list):
+            raise ValueError("Bybit positions response did not contain result.list")
     except Exception as exc:
-        return [], [str(exc)]
-    return payload.get("result", {}).get("list", []), []
+        return [], [
+            _bybit_open_source_error(
+                exc,
+                account=account_context,
+                category=category,
+                source_type="positions",
+                endpoint=endpoint,
+                settlement_coin="n/a",
+                api_key=api_key,
+                api_secret=api_secret,
+            )
+        ]
+    return [row for row in rows if isinstance(row, dict)], []
 
 
 async def _confirm_bybit_position_still_open(
@@ -15566,45 +16015,77 @@ async def _fetch_bybit_orders_for_category(
     api_key: str,
     api_secret: str,
     category: str,
-) -> tuple[List[Dict[str, object]], List[str]]:
+    account_context: str = "unknown",
+) -> tuple[List[Dict[str, object]], List[Dict[str, str]]]:
+    endpoint = "/v5/order/realtime"
     if category == "linear":
         combined: List[Dict[str, object]] = []
-        errors: List[str] = []
+        errors: List[Dict[str, str]] = []
         for settle_coin in ("USDT", "USDC"):
             try:
                 payload = await _bybit_signed_get(
                     base_url=base_url,
                     api_key=api_key,
                     api_secret=api_secret,
-                    path="/v5/order/realtime",
+                    path=endpoint,
                     params={
                         "category": "linear",
                         "settleCoin": settle_coin,
                         "openOnly": "0",
                     },
                 )
-                combined.extend(payload.get("result", {}).get("list", []))
+                result = payload.get("result")
+                rows = result.get("list") if isinstance(result, dict) else None
+                if not isinstance(rows, list):
+                    raise ValueError("Bybit orders response did not contain result.list")
+                combined.extend(row for row in rows if isinstance(row, dict))
             except Exception as exc:
-                errors.append(f"linear {settle_coin}: {exc}")
+                errors.append(
+                    _bybit_open_source_error(
+                        exc,
+                        account=account_context,
+                        category=category,
+                        source_type="orders",
+                        endpoint=endpoint,
+                        settlement_coin=settle_coin,
+                        api_key=api_key,
+                        api_secret=api_secret,
+                    )
+                )
         return combined, errors
     try:
         payload = await _bybit_signed_get(
             base_url=base_url,
             api_key=api_key,
             api_secret=api_secret,
-            path="/v5/order/realtime",
+            path=endpoint,
             params={"category": category, "openOnly": "0"},
         )
+        result = payload.get("result")
+        rows = result.get("list") if isinstance(result, dict) else None
+        if not isinstance(rows, list):
+            raise ValueError("Bybit orders response did not contain result.list")
     except Exception as exc:
-        return [], [str(exc)]
-    return payload.get("result", {}).get("list", []), []
+        return [], [
+            _bybit_open_source_error(
+                exc,
+                account=account_context,
+                category=category,
+                source_type="orders",
+                endpoint=endpoint,
+                settlement_coin="n/a",
+                api_key=api_key,
+                api_secret=api_secret,
+            )
+        ]
+    return [row for row in rows if isinstance(row, dict)], []
 
 
 async def _collect_bybit_open_items(
     *, base_url: str, api_key: str, api_secret: str, account_context: str
 ) -> Dict[str, List[Dict[str, object]]]:
     items: List[Dict[str, object]] = []
-    errors: List[Dict[str, str]] = []
+    errors: List[Dict[str, object]] = []
     confirmed_demo_linear_symbols: Set[str] = set()
     stale_demo_linear_symbols: Set[str] = set()
     position_categories = ["linear", "inverse", "option"]
@@ -15616,16 +16097,37 @@ async def _collect_bybit_open_items(
             api_key=api_key,
             api_secret=api_secret,
             category=category,
+            account_context=account_context,
         )
-        for message in position_errors:
-            errors.append(
-                {
-                    "broker": "Bybit",
-                    "account": account_context,
-                    "category": category,
-                    "message": message,
-                }
-            )
+        for source_error in position_errors:
+            if isinstance(source_error, dict):
+                entry = dict(source_error)
+                entry.setdefault("broker", "Bybit")
+                entry.setdefault("account", account_context)
+                entry.setdefault("category", category)
+                entry.setdefault("source_type", "positions")
+                entry.setdefault("endpoint", "/v5/position/list")
+                entry.setdefault("settlement_coin", "n/a")
+                entry["message"] = _safe_bybit_diagnostic_text(
+                    entry.get("message"),
+                    api_key=api_key,
+                    api_secret=api_secret,
+                    fallback=f"{entry.get('error_type') or 'Bybit positions request'} failed without a message",
+                )
+                errors.append(entry)
+            else:
+                errors.append(
+                    _bybit_open_source_error(
+                        ValueError(str(source_error or "")),
+                        account=account_context,
+                        category=category,
+                        source_type="positions",
+                        endpoint="/v5/position/list",
+                        settlement_coin="n/a",
+                        api_key=api_key,
+                        api_secret=api_secret,
+                    )
+                )
         for position in positions:
             symbol = str(position.get("symbol") or "").strip().upper()
             size_raw = position.get("size")
@@ -15647,14 +16149,18 @@ async def _collect_bybit_open_items(
                         symbol=symbol,
                     )
                 except Exception as exc:
-                    errors.append(
-                        {
-                            "broker": "Bybit",
-                            "account": account_context,
-                            "category": category,
-                            "message": f"confirm {symbol}: {exc}",
-                        }
+                    confirm_error = _bybit_open_source_error(
+                        exc,
+                        account=account_context,
+                        category=category,
+                        source_type="positions confirmation",
+                        endpoint="/v5/position/list",
+                        settlement_coin="n/a",
+                        api_key=api_key,
+                        api_secret=api_secret,
                     )
+                    confirm_error["instrument"] = symbol
+                    errors.append(confirm_error)
                     still_open = True
                 if not still_open:
                     stale_demo_linear_symbols.add(symbol)
@@ -15689,16 +16195,37 @@ async def _collect_bybit_open_items(
             api_key=api_key,
             api_secret=api_secret,
             category=category,
+            account_context=account_context,
         )
-        for message in order_errors:
-            errors.append(
-                {
-                    "broker": "Bybit",
-                    "account": account_context,
-                    "category": category,
-                    "message": message,
-                }
-            )
+        for source_error in order_errors:
+            if isinstance(source_error, dict):
+                entry = dict(source_error)
+                entry.setdefault("broker", "Bybit")
+                entry.setdefault("account", account_context)
+                entry.setdefault("category", category)
+                entry.setdefault("source_type", "orders")
+                entry.setdefault("endpoint", "/v5/order/realtime")
+                entry.setdefault("settlement_coin", "n/a")
+                entry["message"] = _safe_bybit_diagnostic_text(
+                    entry.get("message"),
+                    api_key=api_key,
+                    api_secret=api_secret,
+                    fallback=f"{entry.get('error_type') or 'Bybit orders request'} failed without a message",
+                )
+                errors.append(entry)
+            else:
+                errors.append(
+                    _bybit_open_source_error(
+                        ValueError(str(source_error or "")),
+                        account=account_context,
+                        category=category,
+                        source_type="orders",
+                        endpoint="/v5/order/realtime",
+                        settlement_coin="n/a",
+                        api_key=api_key,
+                        api_secret=api_secret,
+                    )
+                )
         for order in orders:
             status = order.get("orderStatus")
             if not _is_bybit_open_order(status):
@@ -21411,18 +21938,48 @@ async def fetch_bybit_balance(
 
 
 
+_LOCAL_DASHBOARD_BLOCK_MARKERS = (
+    ("<!-- LOCAL_DASHBOARD_RAIL_START -->", "<!-- LOCAL_DASHBOARD_RAIL_END -->"),
+    ("<!-- LOCAL_DASHBOARD_MAIN_START -->", "<!-- LOCAL_DASHBOARD_MAIN_END -->"),
+)
+
+
+def _render_dashboard_template_for_profile() -> str:
+    local_dashboard = APP_PROFILE == "local"
+    page = HTML_TEMPLATE
+    for start_marker, end_marker in _LOCAL_DASHBOARD_BLOCK_MARKERS:
+        if local_dashboard:
+            page = page.replace(start_marker, "").replace(end_marker, "")
+            continue
+        start_index = page.find(start_marker)
+        end_index = page.find(end_marker, start_index + len(start_marker))
+        if start_index < 0 or end_index < 0:
+            raise RuntimeError(f"Dashboard template marker pair is incomplete: {start_marker}")
+        page = page[:start_index] + page[end_index + len(end_marker):]
+
+    dashboard_js_version = _static_asset_version("render/static/dashboard.js")
+    history_page_script = ""
+    if local_dashboard:
+        history_page_js_version = _static_asset_version("render/static/history_page.js")
+        history_page_script = (
+            f'<script src="/static/history_page.js?v={history_page_js_version}"></script>'
+        )
+    return (
+        page.replace(
+            "{{DASHBOARD_LAYOUT_CLASS}}",
+            "" if local_dashboard else " render-dashboard-layout",
+        )
+        .replace("{{DASHBOARD_JS_URL}}", f"/static/dashboard.js?v={dashboard_js_version}")
+        .replace("{{HISTORY_PAGE_SCRIPT_TAG}}", history_page_script)
+        .replace("{{HISTORY_EXPORT_TOOL}}", HISTORY_EXPORT_TOOL if local_dashboard else "")
+    )
+
+
 @app.get("/", response_class=HTMLResponse, response_model=None)
 async def home_page() -> Response:
     if APP_PROFILE == "journal":
         return RedirectResponse(url="/trading-journal", status_code=307)
-    dashboard_js_version = _static_asset_version("render/static/dashboard.js")
-    history_page_js_version = _static_asset_version("render/static/history_page.js")
-    page = (
-        HTML_TEMPLATE.replace("{{DASHBOARD_JS_URL}}", f"/static/dashboard.js?v={dashboard_js_version}")
-        .replace("{{HISTORY_PAGE_JS_URL}}", f"/static/history_page.js?v={history_page_js_version}")
-        .replace("{{HISTORY_EXPORT_TOOL}}", HISTORY_EXPORT_TOOL)
-    )
-    return HTMLResponse(page)
+    return HTMLResponse(_render_dashboard_template_for_profile())
 
 
 @app.get("/instrument-specs", response_class=HTMLResponse)
@@ -25398,6 +25955,8 @@ def _enrich_trade_row_metrics(rows: List[Dict[str, object]]) -> List[Dict[str, o
 
         if not _is_trade_row(r):
             r.setdefault("result_pct", None)
+            r["equity_return_pct"] = None
+            r["equity_return_basis"] = None
             r.setdefault("price_move_pct", None)
             r.setdefault("profit_pct", None)
             r.setdefault("r_multiple", None)
@@ -25421,9 +25980,16 @@ def _enrich_trade_row_metrics(rows: List[Dict[str, object]]) -> List[Dict[str, o
                 risk_amount = rv
                 break
 
-        result_pct = None
         balance_after = _to_float(r.get("analysis_balance_after_trade"))
         balance_before = _to_float(r.get("analysis_balance_before_trade"))
+        equity_return_pct = _equity_trade_return_pct(r)
+        equity_return_basis = (
+            TRADING_JOURNAL_EQUITY_RETURN_BASIS
+            if equity_return_pct is not None
+            else None
+        )
+
+        result_pct = None
         if balance_after is None:
             balance_after = _to_float(r.get("balance_after_trade"))
         if pnl is not None:
@@ -25444,6 +26010,8 @@ def _enrich_trade_row_metrics(rows: List[Dict[str, object]]) -> List[Dict[str, o
                 r_multiple = move / risk_dist
 
         r["result_pct"] = result_pct
+        r["equity_return_pct"] = equity_return_pct
+        r["equity_return_basis"] = equity_return_basis
         r["price_move_pct"] = price_move_pct
         r["profit_pct"] = result_pct
         r["r_multiple"] = r_multiple
@@ -28313,6 +28881,8 @@ async def list_open_orders(force: bool = Query(False)) -> JSONResponse:
                 )
 
         for account in ("live", "demo"):
+            api_key = ""
+            api_secret = ""
             try:
                 _mode, api_key, api_secret, base_url, _key_source = resolve_bybit_credentials_for(
                     account
@@ -28335,12 +28905,16 @@ async def list_open_orders(force: bool = Query(False)) -> JSONResponse:
                 )
             except Exception as exc:
                 errors.append(
-                    {
-                        "broker": "Bybit",
-                        "account": account,
-                        "category": "unknown",
-                        "message": str(exc),
-                    }
+                    _bybit_open_source_error(
+                        exc,
+                        account=account,
+                        category="unknown",
+                        source_type="collection",
+                        endpoint="open-orders collection",
+                        settlement_coin="n/a",
+                        api_key=api_key,
+                        api_secret=api_secret,
+                    )
                 )
 
         live_broker_items = list(items)
@@ -29005,7 +29579,13 @@ async def _verify_open_order_action(item: Dict[str, Any]) -> Dict[str, Any]:
     elif broker == "bybit":
         _mode, api_key, api_secret, base_url, _ = resolve_bybit_credentials_for("demo" if account in {"demo", "practice"} else "live")
         if action == "close":
-            rows,_errs = await _fetch_bybit_positions_for_category(base_url=base_url, api_key=api_key, api_secret=api_secret, category=category or "linear")
+            rows,_errs = await _fetch_bybit_positions_for_category(
+                base_url=base_url,
+                api_key=api_key,
+                api_secret=api_secret,
+                category=category or "linear",
+                account_context=account or "unknown",
+            )
             pidx = str(item.get("position_idx") or "").strip()
             side = str(item.get("side") or "").strip().lower()
             for row in rows:
@@ -29887,23 +30467,33 @@ async def trading_journal_items(filter: str = "") -> JSONResponse:
 
         items = [r for r in items if match(r)]
 
+    response_balances = (
+        snapshot.get("balances")
+        if isinstance(snapshot.get("balances"), list)
+        else (stats.get("balances") if isinstance(stats, dict) else [])
+    )
+    response_equity_cache = (
+        dict(snapshot.get("equity_cache"))
+        if isinstance(snapshot.get("equity_cache"), dict)
+        else {}
+    )
+    response_equity_cache["point_counts"] = _equity_point_counts(
+        items,
+        response_balances,
+    )
     payload = {
         "ok": True,
         "items": items,
         "count": len(items),
         "stats": stats,
-        "balances": (
-            snapshot.get("balances")
-            if isinstance(snapshot.get("balances"), list)
-            else (stats.get("balances") if isinstance(stats, dict) else [])
-        ),
+        "balances": response_balances,
         "generated_at": snapshot.get("generated_at"),
         "cache_version": snapshot.get("cache_version"),
         "snapshot_id": snapshot.get("snapshot_id"),
         "snapshot_fingerprint": snapshot.get("snapshot_fingerprint"),
         "snapshot_current": True,
         "snapshot_stale": False,
-        "equity_cache": snapshot.get("equity_cache"),
+        "equity_cache": response_equity_cache,
         "source_mode": _trading_journal_source_mode(),
         "local_dir": str(TRADING_JOURNAL_LOCAL_DIR),
         "excel_only": _trading_journal_excel_only_mode(),

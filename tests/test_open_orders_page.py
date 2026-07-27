@@ -181,12 +181,525 @@ def test_open_orders_js_uses_version_polling_and_force_query_refresh() -> None:
     assert "retMsg=${retMsg}" in js
 
 
-def test_open_orders_version_endpoint_returns_cache_version() -> None:
-    master_service._OPEN_ORDERS_CACHE["version"] = 7
-    response = asyncio.run(master_service.open_orders_version())
-    payload = json.loads(response.body.decode("utf-8"))
-    assert payload["version"] == 7
-    assert "updated_at" in payload
+def test_bybit_signed_get_retries_empty_message_timeout_with_safe_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = {"count": 0}
+    sleeps: list[float] = []
+    base_url = "https://api.bybit.test"
+    api_key = "test-api-key-that-must-not-appear"
+    api_secret = "test-api-secret-that-must-not-appear"
+    monkeypatch.setattr(master_service, "BYBIT_SIGNED_REQUEST_MAX_RETRIES", 2)
+    monkeypatch.setitem(
+        master_service._BYBIT_TIME_OFFSET_CACHE,
+        base_url,
+        {
+            "synced_at": int(master_service.time.time() * 1000),
+            "offset_ms": 0,
+            "rtt_ms": 0,
+        },
+    )
+
+    async def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    class TimeoutClient:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, _exc_type, _exc, _tb):
+            return False
+
+        async def get(self, *_args, **_kwargs):
+            calls["count"] += 1
+            raise master_service.httpx.ReadTimeout("")
+
+    monkeypatch.setattr(master_service.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(master_service.httpx, "AsyncClient", TimeoutClient)
+
+    with pytest.raises(master_service.BybitSignedGETError) as exc_info:
+        asyncio.run(
+            master_service._bybit_signed_get(
+                base_url=base_url,
+                api_key=api_key,
+                api_secret=api_secret,
+                path="/v5/position/list",
+                params={"category": "linear", "settleCoin": "USDT"},
+                timeout_s=4.0,
+            )
+        )
+
+    message = str(exc_info.value)
+    assert calls["count"] == 2
+    assert sleeps
+    assert "timeout" in message.lower()
+    assert "path=/v5/position/list" in message
+    assert "ReadTimeout" in message
+    assert api_key not in message
+    assert api_secret not in message
+    assert base_url not in message
+
+
+def test_bybit_signed_get_http_error_keeps_safe_status_and_api_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base_url = "https://api.bybit.test"
+    api_key = "http-test-key"
+    api_secret = "http-test-secret"
+    monkeypatch.setattr(master_service, "BYBIT_SIGNED_REQUEST_MAX_RETRIES", 1)
+    monkeypatch.setitem(
+        master_service._BYBIT_TIME_OFFSET_CACHE,
+        base_url,
+        {
+            "synced_at": int(master_service.time.time() * 1000),
+            "offset_ms": 0,
+            "rtt_ms": 0,
+        },
+    )
+
+    class ErrorResponse:
+        status_code = 503
+        content = b"upstream unavailable"
+
+        @property
+        def text(self) -> str:
+            return json.dumps(self.json())
+
+        def json(self):
+            return {
+                "retCode": 10000,
+                "retMsg": (
+                    f"Server unavailable api_key={api_key} secret={api_secret} "
+                    "https://api.bybit.test/v5/position/list?signature=hidden"
+                ),
+            }
+
+    class ErrorClient:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, _exc_type, _exc, _tb):
+            return False
+
+        async def get(self, *_args, **_kwargs):
+            return ErrorResponse()
+
+    monkeypatch.setattr(master_service.httpx, "AsyncClient", ErrorClient)
+
+    with pytest.raises(master_service.BybitSignedGETError) as exc_info:
+        asyncio.run(
+            master_service._bybit_signed_get(
+                base_url=base_url,
+                api_key=api_key,
+                api_secret=api_secret,
+                path="/v5/position/list",
+                params={"category": "linear", "settleCoin": "USDT"},
+            )
+        )
+
+    exc = exc_info.value
+    message = str(exc)
+    assert exc.http_status == 503
+    assert exc.ret_code == 10000
+    assert "http_status=503" in message
+    assert "retCode=10000" in message
+    assert "retMsg=Server unavailable" in message
+    assert api_key not in message
+    assert api_secret not in message
+    assert "signature=hidden" not in message
+    assert base_url not in message
+
+
+def test_bybit_diagnostic_sanitizer_redacts_quoted_secret_fields() -> None:
+    raw = (
+        '{"signature":"quoted-signature", "api_key": "quoted-key", '
+        "'api_secret': 'quoted secret value', "
+        '"x-bapi-sign":"quoted-header-signature"}'
+    )
+
+    sanitized = master_service._safe_bybit_diagnostic_text(raw)
+
+    assert sanitized.count("[redacted]") == 4
+    assert "quoted-signature" not in sanitized
+    assert "quoted-key" not in sanitized
+    assert "quoted secret value" not in sanitized
+    assert "quoted-header-signature" not in sanitized
+
+
+def test_bybit_position_and_order_errors_identify_source_and_settlement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def empty_timeout(**_kwargs):
+        raise master_service.httpx.ReadTimeout("")
+
+    monkeypatch.setattr(master_service, "_bybit_signed_get", empty_timeout)
+
+    _positions, position_errors = asyncio.run(
+        master_service._fetch_bybit_positions_for_category(
+            base_url="https://api.bybit.test",
+            api_key="key",
+            api_secret="secret",
+            category="linear",
+            account_context="live",
+        )
+    )
+    _orders, order_errors = asyncio.run(
+        master_service._fetch_bybit_orders_for_category(
+            base_url="https://api.bybit.test",
+            api_key="key",
+            api_secret="secret",
+            category="linear",
+            account_context="live",
+        )
+    )
+
+    assert {entry["settlement_coin"] for entry in position_errors} == {"USDT", "USDC"}
+    assert {entry["settlement_coin"] for entry in order_errors} == {"USDT", "USDC"}
+    assert all(entry["source_type"] == "positions" for entry in position_errors)
+    assert all(entry["endpoint"] == "/v5/position/list" for entry in position_errors)
+    assert all(entry["source_type"] == "orders" for entry in order_errors)
+    assert all(entry["endpoint"] == "/v5/order/realtime" for entry in order_errors)
+    for entry in [*position_errors, *order_errors]:
+        assert entry["account"] == "live"
+        assert entry["category"] == "linear"
+        assert "timeout" in entry["message"].lower()
+        assert entry["message"].strip()
+
+
+def test_collect_bybit_open_items_preserves_partial_position_and_order_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def partial_signed_get(*, path: str, params: dict[str, str], **_kwargs):
+        if params.get("category") == "linear" and params.get("settleCoin") == "USDC":
+            if path == "/v5/position/list":
+                raise master_service.httpx.ReadTimeout("")
+            return {
+                "result": {
+                    "list": [
+                        {
+                            "symbol": "ETHUSDC",
+                            "orderId": "order-usdc",
+                            "orderStatus": "New",
+                            "side": "Buy",
+                            "qty": "2",
+                        }
+                    ]
+                }
+            }
+        if params.get("category") == "linear" and params.get("settleCoin") == "USDT":
+            if path == "/v5/order/realtime":
+                raise master_service.httpx.ConnectError("")
+            return {
+                "result": {
+                    "list": [
+                        {
+                            "symbol": "BTCUSDT",
+                            "positionId": "position-usdt",
+                            "side": "Buy",
+                            "size": "1",
+                        }
+                    ]
+                }
+            }
+        return {"result": {"list": []}}
+
+    monkeypatch.setattr(master_service, "_bybit_signed_get", partial_signed_get)
+    monkeypatch.setattr(master_service, "_lookup_trade_context_for_open_item", lambda _item: None)
+
+    payload = asyncio.run(
+        master_service._collect_bybit_open_items(
+            base_url="https://api.bybit.test",
+            api_key="key",
+            api_secret="secret",
+            account_context="live",
+        )
+    )
+
+    assert {(row["type"], row["instrument"]) for row in payload["items"]} == {
+        ("Position", "BTCUSDT"),
+        ("Order", "ETHUSDC"),
+    }
+    assert {(entry["source_type"], entry["settlement_coin"]) for entry in payload["errors"]} == {
+        ("positions", "USDC"),
+        ("orders", "USDT"),
+    }
+
+
+def test_open_orders_browser_renders_meaningful_source_errors_without_secrets() -> None:
+    node = shutil.which("node")
+    assert node, "node is required for browser rendering regression"
+    js_path = ROOT / "render" / "static" / "open_orders.js"
+    source_errors = [
+        {
+            "broker": "Bybit",
+            "account": "live",
+            "category": "linear",
+            "source_type": "positions",
+            "settlement_coin": "USDT",
+            "endpoint": "https://api.bybit.test/v5/position/list?api_key=should-not-render&signature=hidden",
+            "error_type": "ReadTimeout",
+            "message": "",
+        },
+        {
+            "broker": "Bybit",
+            "account": "demo",
+            "category": "inverse",
+            "source_type": "orders",
+            "settlement_coin": "n/a",
+            "endpoint": "/v5/order/realtime",
+            "http_status": 403,
+            "retCode": 10004,
+            "retMsg": "signature error",
+            "message": "Bybit API request failed:",
+        },
+    ]
+    harness = f"""
+const fs = require('fs');
+const errorsList = {{children: [], innerHTML: '', appendChild(node) {{ this.children.push(node); }}}};
+const errorsBox = {{style: {{}}, querySelector() {{ return errorsList; }}}};
+const tbody = {{innerHTML: '', children: [], appendChild(node) {{ this.children.push(node); }}}};
+const table = {{querySelector() {{ return tbody; }}}};
+const refreshButton = {{addEventListener() {{}}}};
+const statusBadge = {{textContent: ''}};
+const emptyState = {{style: {{}}}};
+const elements = {{
+  'refresh-btn': refreshButton,
+  'open-orders-status': statusBadge,
+  'open-orders-table': table,
+  'open-orders-empty': emptyState,
+  'open-orders-errors': errorsBox,
+}};
+global.window = {{}};
+global.document = {{
+  hidden: true,
+  getElementById(id) {{ return elements[id] || null; }},
+  addEventListener() {{}},
+  createElement(tag) {{
+    return {{
+      tagName: tag,
+      children: [],
+      style: {{}},
+      textContent: '',
+      appendChild(node) {{ this.children.push(node); }},
+      addEventListener() {{}},
+    }};
+  }},
+}};
+global.fetch = async () => ({{
+  ok: true,
+  status: 200,
+  statusText: 'OK',
+  text: async () => JSON.stringify({{items: [], errors: {json.dumps(source_errors)}}}),
+}});
+eval(fs.readFileSync({json.dumps(str(js_path))}, 'utf8'));
+setTimeout(() => {{
+  console.log(JSON.stringify(errorsList.children.map((node) => node.textContent)));
+}}, 25);
+"""
+    result = subprocess.run(
+        [node, "-e", harness],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    rendered = json.loads(result.stdout.strip().splitlines()[-1])
+
+    assert len(rendered) == 2
+    assert "Bybit live linear positions settleCoin=USDT /v5/position/list" in rendered[0]
+    assert "ReadTimeout reported without diagnostic text" in rendered[0]
+    assert "Bybit demo inverse orders settleCoin=n/a /v5/order/realtime" in rendered[1]
+    assert "HTTP 403" in rendered[1]
+    assert "retCode=10004" in rendered[1]
+    assert "retMsg=signature error" in rendered[1]
+    assert "should-not-render" not in " ".join(rendered)
+    assert "signature=hidden" not in " ".join(rendered)
+    assert all(not line.rstrip().endswith(":") for line in rendered)
+
+
+def test_open_orders_browser_sanitizes_unstructured_fetch_failures_and_surfaces_reason() -> None:
+    node = shutil.which("node")
+    assert node, "node is required for browser rendering regression"
+    js_path = ROOT / "render" / "static" / "open_orders.js"
+    harness = f"""
+const fs = require('fs');
+let mode = 'body';
+const refreshButton = {{
+  handler: null,
+  addEventListener(event, handler) {{ if (event === 'click') this.handler = handler; }},
+}};
+const statusBadge = {{textContent: ''}};
+const tbody = {{innerHTML: '', appendChild() {{}}}};
+const table = {{querySelector() {{ return tbody; }}}};
+const errorsList = {{innerHTML: '', appendChild() {{}}}};
+const errorsBox = {{style: {{}}, querySelector() {{ return errorsList; }}}};
+const elements = {{
+  'refresh-btn': refreshButton,
+  'open-orders-status': statusBadge,
+  'open-orders-table': table,
+  'open-orders-empty': {{style: {{}}}},
+  'open-orders-errors': errorsBox,
+}};
+global.window = {{}};
+global.document = {{
+  hidden: true,
+  getElementById(id) {{ return elements[id] || null; }},
+  addEventListener() {{}},
+  createElement() {{ return {{textContent: '', appendChild() {{}}, addEventListener() {{}}}}; }},
+}};
+global.fetch = async () => mode === 'body' ? ({{
+  ok: false,
+  status: 502,
+  statusText: 'Bad Gateway',
+  text: async () => JSON.stringify({{
+    detail: 'upstream api_key=body-secret https://api.bybit.test/v5/position/list?signature=body-signature',
+  }}),
+}}) : ({{
+  ok: false,
+  status: 504,
+  statusText: 'Gateway Timeout api_secret=status-secret https://api.bybit.test/v5/order/realtime?signature=status-signature',
+  text: async () => '',
+}});
+eval(fs.readFileSync({json.dumps(str(js_path))}, 'utf8'));
+setTimeout(async () => {{
+  const bodyBadge = statusBadge.textContent;
+  mode = 'status';
+  await refreshButton.handler();
+  console.log(JSON.stringify([bodyBadge, statusBadge.textContent]));
+}}, 25);
+"""
+    result = subprocess.run(
+        [node, "-e", harness],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    body_badge, status_badge = json.loads(result.stdout.strip().splitlines()[-1])
+
+    assert body_badge.startswith(
+        "Stale (refresh failed: GET /api/open-orders failed: HTTP 502"
+    )
+    assert "upstream" in body_badge
+    assert status_badge.startswith(
+        "Stale (refresh failed: GET /api/open-orders failed: HTTP 504"
+    )
+    assert "Gateway Timeout" in status_badge
+    combined = f"{body_badge} {status_badge}"
+    assert "[redacted]" in combined
+    assert "[redacted URL]" in combined
+    assert "body-secret" not in combined
+    assert "body-signature" not in combined
+    assert "status-secret" not in combined
+    assert "status-signature" not in combined
+    assert "force=1" not in combined
+    assert body_badge != "Stale (refresh failed)"
+    assert status_badge != "Stale (refresh failed)"
+
+
+def test_open_orders_browser_sanitizes_action_error_details() -> None:
+    node = shutil.which("node")
+    assert node, "node is required for browser rendering regression"
+    js_path = ROOT / "render" / "static" / "open_orders.js"
+    harness = f"""
+const fs = require('fs');
+class Element {{
+  constructor() {{
+    this.children = [];
+    this.handlers = {{}};
+    this.style = {{}};
+    this.textContent = '';
+    this.innerHTML = '';
+    this.disabled = false;
+  }}
+  appendChild(node) {{ this.children.push(node); return node; }}
+  addEventListener(event, handler) {{ this.handlers[event] = handler; }}
+  querySelector() {{ return null; }}
+}}
+const tbody = new Element();
+const table = new Element();
+table.querySelector = () => tbody;
+const refreshButton = new Element();
+const statusBadge = new Element();
+const errorsBox = new Element();
+const errorsList = new Element();
+errorsBox.querySelector = () => errorsList;
+const elements = {{
+  'refresh-btn': refreshButton,
+  'open-orders-status': statusBadge,
+  'open-orders-table': table,
+  'open-orders-empty': new Element(),
+  'open-orders-errors': errorsBox,
+}};
+global.window = {{}};
+global.document = {{
+  hidden: true,
+  getElementById(id) {{ return elements[id] || null; }},
+  addEventListener() {{}},
+  createElement() {{ return new Element(); }},
+}};
+global.fetch = async (url) => {{
+  if (String(url).includes('/api/open-orders/close')) {{
+    return {{
+      ok: false,
+      status: 500,
+      statusText: 'Server Error signature=status-signature',
+      text: async () => JSON.stringify({{
+        detail: 'api_key=action-key api_secret="action secret with spaces" signature=action-signature https://api.bybit.test/v5/order?signature=url-signature',
+      }}),
+    }};
+  }}
+  return {{
+    ok: true,
+    status: 200,
+    statusText: 'OK',
+    text: async () => JSON.stringify({{
+      items: [{{
+        broker: 'Bybit',
+        account: 'live',
+        category: 'linear',
+        instrument: 'BTCUSDT',
+        id: 'position-1',
+        type: 'position',
+        side: 'Buy',
+        size: '1',
+        status: 'Open',
+      }}],
+      errors: [],
+    }}),
+  }};
+}};
+eval(fs.readFileSync({json.dumps(str(js_path))}, 'utf8'));
+setTimeout(async () => {{
+  const row = tbody.children[0];
+  const actionCell = row.children[row.children.length - 1];
+  const button = actionCell.children[0];
+  await button.handlers.click();
+  console.log(JSON.stringify(statusBadge.textContent));
+}}, 25);
+"""
+    result = subprocess.run(
+        [node, "-e", harness],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    badge = json.loads(result.stdout.strip().splitlines()[-1])
+
+    assert "[redacted]" in badge
+    assert "[redacted URL]" in badge
+    assert "action-key" not in badge
+    assert "action secret with spaces" not in badge
+    assert "action-signature" not in badge
+    assert "url-signature" not in badge
+    assert "status-signature" not in badge
 
 
 def test_open_orders_version_endpoint_returns_cache_version() -> None:
