@@ -2773,8 +2773,71 @@ _OANDA_FILL_FAILURES: Dict[str, int] = {}
 _OANDA_OPEN_TRADE_LEGS: Dict[str, Dict[str, Dict[str, object]]] = {"live": {}, "demo": {}}
 _OANDA_CONTEXT_WARNED_RUNTIME: set[str] = set()
 _OANDA_FILL_DIAGNOSTICS: Dict[str, Dict[str, object]] = {}
-_OANDA_ACCOUNTS_CACHE: Dict[str, Tuple[float, List[Dict[str, object]]]] = {}
-_OANDA_ACCOUNTS_CACHE_TTL_SECONDS = 20.0
+@dataclass(frozen=True)
+class OandaAccountDiscoveryResult:
+    accounts: List[Dict[str, object]]
+    cache_state: str
+    fetched_at: float
+    discovery_error: Optional[Exception] = None
+
+
+class OandaAccountDiscoveryError(ValueError):
+    def __init__(
+        self,
+        *,
+        failure_kind: str,
+        attempts: int,
+        timeout_s: float,
+        error_type: str,
+        http_status: Optional[int] = None,
+    ) -> None:
+        self.failure_kind = str(failure_kind or "request_failure")
+        self.attempts = max(1, int(attempts or 1))
+        self.timeout_s = float(timeout_s)
+        self.error_type = str(error_type or "RequestError")
+        self.http_status = int(http_status) if http_status is not None else None
+        if self.failure_kind == "timeout":
+            detail = (
+                f"timed out after {self.attempts} attempts "
+                f"({self.timeout_s:.1f}s timeout per attempt)"
+            )
+        elif self.failure_kind == "rate_limit":
+            detail = f"was rate limited (HTTP 429) after {self.attempts} attempts"
+        elif self.failure_kind == "http":
+            detail = (
+                f"failed with HTTP {self.http_status} after {self.attempts} attempts"
+            )
+        elif self.failure_kind == "dns":
+            detail = f"failed DNS resolution after {self.attempts} attempts"
+        elif self.failure_kind == "invalid_response":
+            detail = (
+                f"returned an invalid response after {self.attempts} attempts "
+                f"({self.error_type})"
+            )
+        else:
+            detail = (
+                f"failed after {self.attempts} attempts "
+                f"({self.error_type} transport failure)"
+            )
+        super().__init__(f"OANDA account discovery {detail}")
+
+
+_OANDA_ACCOUNTS_CACHE: Dict[str, Dict[str, object]] = {}
+_OANDA_ACCOUNTS_INFLIGHT: Dict[str, "asyncio.Task[List[Dict[str, object]]]"] = {}
+_OANDA_ACCOUNTS_CACHE_TTL_SECONDS = max(
+    60.0,
+    min(
+        float(os.getenv("OANDA_ACCOUNTS_CACHE_TTL_SECONDS", "3600") or 3600),
+        24 * 60 * 60.0,
+    ),
+)
+_OANDA_ACCOUNTS_STALE_TTL_SECONDS = max(
+    _OANDA_ACCOUNTS_CACHE_TTL_SECONDS,
+    min(
+        float(os.getenv("OANDA_ACCOUNTS_STALE_TTL_SECONDS", "86400") or 86400),
+        7 * 24 * 60 * 60.0,
+    ),
+)
 _OANDA_SPECS_CACHE: Dict[str, Tuple[float, Dict[str, object]]] = {}
 _OANDA_SPECS_CACHE_TTL_SECONDS = 30.0
 _OANDA_TRANSIENT_HTTP_STATUS_CODES = {
@@ -2859,6 +2922,37 @@ class BybitPostCreateProtectionError(RuntimeError):
         self.tpsl_error = str(tpsl_error or "")
         self.stage = stage
         super().__init__(f"Bybit order {self.order_id} created but TP/SL application failed at stage={stage}: {self.tpsl_error}")
+
+
+class OandaUpstreamError(ValueError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        upstream_status: Optional[int],
+        upstream_error_message: str,
+        endpoint: str,
+        mode: str,
+        retry_exhausted: bool,
+        maintenance_detected: bool,
+    ) -> None:
+        self.upstream_status = upstream_status
+        self.upstream_error_message = _safe_bybit_diagnostic_text(
+            upstream_error_message,
+            fallback="",
+        )
+        self.endpoint = endpoint
+        self.mode = mode
+        self.retry_exhausted = bool(retry_exhausted)
+        self.maintenance_detected = bool(maintenance_detected)
+        safe_message = _safe_bybit_diagnostic_text(
+            message,
+            fallback="OANDA upstream request failed",
+        )
+        retry_detail = " after retry exhaustion" if self.retry_exhausted else ""
+        super().__init__(
+            f"{safe_message}{retry_detail} mode={mode} endpoint={endpoint}"
+        )
 
 
 class OandaUpstreamHTTPError(ValueError):
@@ -14762,6 +14856,12 @@ def _format_source_exception(
     account_id_label = account_id or "unknown"
     broker_label = broker or "source"
 
+    if isinstance(exc, OandaUpstreamError):
+        return (
+            f"{broker_label} {endpoint_label} failed for "
+            f"{account_label}/{account_id_label}: {str(exc)}"
+        )
+
     if isinstance(exc, OandaUpstreamHTTPError):
         return (
             f"{broker_label} {endpoint_label} failed with HTTP {exc.status_code} "
@@ -14794,7 +14894,7 @@ def _format_source_exception(
     text = str(exc).strip()
     if not text:
         return f"{exc.__class__.__name__} with empty message"
-    return text
+    return _safe_bybit_diagnostic_text(text)
 
 
 def _summarize_upstream_body(body: str, *, limit: int = 240) -> str:
@@ -15070,20 +15170,39 @@ async def _collect_oanda_open_items(
 
     trades_payload: Dict[str, object] = {}
     orders_payload: Dict[str, object] = {}
-    fetch_errors: List[str] = []
+    fetch_errors: List[Dict[str, str]] = []
 
     if isinstance(trades_result, Exception):
-        fetch_errors.append(f"openTrades: {trades_result}")
+        fetch_errors.append(
+            {
+                "endpoint": "/v3/accounts/{accountID}/openTrades",
+                "message": _format_source_exception(
+                    trades_result,
+                    broker="OANDA",
+                    account=account_context,
+                    endpoint="/v3/accounts/{accountID}/openTrades",
+                    account_id=account_id,
+                ),
+            }
+        )
     else:
         trades_payload = trades_result
 
     if isinstance(orders_result, Exception):
-        fetch_errors.append(f"pendingOrders: {orders_result}")
+        fetch_errors.append(
+            {
+                "endpoint": "/v3/accounts/{accountID}/pendingOrders",
+                "message": _format_source_exception(
+                    orders_result,
+                    broker="OANDA",
+                    account=account_context,
+                    endpoint="/v3/accounts/{accountID}/pendingOrders",
+                    account_id=account_id,
+                ),
+            }
+        )
     else:
         orders_payload = orders_result
-
-    if fetch_errors and not trades_payload and not orders_payload:
-        raise ValueError("; ".join(fetch_errors))
 
     items: List[Dict[str, object]] = []
     for trade in trades_payload.get("trades", []):
@@ -15170,98 +15289,260 @@ async def _list_oanda_accounts(*, base_url: str, api_key: str) -> List[Dict[str,
     timeout_s = 6.0
     timeout = httpx.Timeout(timeout_s, connect=min(3.0, timeout_s), read=timeout_s, write=timeout_s, pool=2.0)
     max_attempts = 3
-    transient_statuses = {429, 502, 503, 504}
+    transient_statuses = _OANDA_TRANSIENT_HTTP_STATUS_CODES
     account_context = _oanda_account_context(base_url)
+    resp: Optional[httpx.Response] = None
 
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
         for attempt in range(1, max_attempts + 1):
+            attempt_started = time.monotonic()
             try:
                 resp = await client.get(url, headers=headers)
                 resp.raise_for_status()
+                BYBIT_LOGGER.info(
+                    "OANDA_ACCOUNTS_OK account=%s endpoint=%s attempt=%s/%s elapsed=%.3fs",
+                    account_context,
+                    "/v3/accounts",
+                    attempt,
+                    max_attempts,
+                    time.monotonic() - attempt_started,
+                )
                 break
             except httpx.TimeoutException as exc:
                 should_retry = attempt < max_attempts
                 BYBIT_LOGGER.warning(
-                    "OANDA_ACCOUNTS_TIMEOUT account=%s endpoint=%s attempt=%s/%s retry=%s err=%s",
+                    "OANDA_ACCOUNTS_TIMEOUT account=%s endpoint=%s attempt=%s/%s retry=%s "
+                    "timeout=%.1fs elapsed=%.3fs error_type=%s",
                     account_context,
                     "/v3/accounts",
                     attempt,
                     max_attempts,
                     should_retry,
-                    exc,
+                    timeout_s,
+                    time.monotonic() - attempt_started,
+                    exc.__class__.__name__,
                 )
                 if not should_retry:
-                    message = _format_source_exception(
-                        exc,
-                        broker="OANDA",
-                        account=account_context,
-                        endpoint="/v3/accounts",
-                        account_id="discovery",
+                    raise OandaAccountDiscoveryError(
+                        failure_kind="timeout",
+                        attempts=attempt,
+                        timeout_s=timeout_s,
+                        error_type=exc.__class__.__name__,
                     )
-                    raise ValueError(message) from exc
             except httpx.RequestError as exc:
+                error_text = str(exc or "")
+                is_dns = bool(
+                    re.search(
+                        r"(?:getaddrinfo|name or service not known|nodename nor servname|"
+                        r"temporary failure in name resolution|dns)",
+                        error_text,
+                        flags=re.IGNORECASE,
+                    )
+                )
                 should_retry = attempt < max_attempts
                 BYBIT_LOGGER.warning(
-                    "OANDA_ACCOUNTS_REQUEST_ERR account=%s endpoint=%s attempt=%s/%s retry=%s err=%s",
+                    "OANDA_ACCOUNTS_REQUEST_ERR account=%s endpoint=%s attempt=%s/%s retry=%s "
+                    "elapsed=%.3fs failure_kind=%s error_type=%s",
                     account_context,
                     "/v3/accounts",
                     attempt,
                     max_attempts,
                     should_retry,
-                    exc,
+                    time.monotonic() - attempt_started,
+                    "dns" if is_dns else "transport",
+                    exc.__class__.__name__,
                 )
                 if not should_retry:
-                    message = _format_source_exception(
-                        exc,
-                        broker="OANDA",
-                        account=account_context,
-                        endpoint="/v3/accounts",
-                        account_id="discovery",
+                    raise OandaAccountDiscoveryError(
+                        failure_kind="dns" if is_dns else "transport",
+                        attempts=attempt,
+                        timeout_s=timeout_s,
+                        error_type=exc.__class__.__name__,
                     )
-                    raise ValueError(message) from exc
             except httpx.HTTPStatusError as exc:
                 status = exc.response.status_code
                 should_retry = status in transient_statuses and attempt < max_attempts
-                BYBIT_LOGGER.error(
-                    "OANDA_ACCOUNTS_HTTP_ERR account=%s endpoint=%s status=%s attempt=%s/%s retry=%s body=%s",
+                log_fn = BYBIT_LOGGER.warning if should_retry else BYBIT_LOGGER.error
+                log_fn(
+                    "OANDA_ACCOUNTS_HTTP_ERR account=%s endpoint=%s status=%s attempt=%s/%s "
+                    "retry=%s elapsed=%.3fs body=%s",
                     account_context,
                     "/v3/accounts",
                     status,
                     attempt,
                     max_attempts,
                     should_retry,
-                    exc.response.text[:500],
+                    time.monotonic() - attempt_started,
+                    _safe_bybit_diagnostic_text(
+                        _summarize_upstream_body(exc.response.text),
+                        api_key=token,
+                        fallback="empty response body",
+                    ),
                 )
                 if not should_retry:
-                    message = _format_source_exception(
-                        exc,
-                        broker="OANDA",
-                        account=account_context,
-                        endpoint="/v3/accounts",
-                        account_id="discovery",
+                    raise OandaAccountDiscoveryError(
+                        failure_kind="rate_limit" if status == 429 else "http",
+                        attempts=attempt,
+                        timeout_s=timeout_s,
+                        error_type=exc.__class__.__name__,
+                        http_status=status,
                     )
-                    raise ValueError(message) from exc
 
             backoff = min(0.2 * (2 ** (attempt - 1)), 0.8) + (0.05 * attempt)
             await asyncio.sleep(backoff)
         else:
-            raise ValueError("OANDA account discovery failed after retries")
+            raise OandaAccountDiscoveryError(
+                failure_kind="transport",
+                attempts=max_attempts,
+                timeout_s=timeout_s,
+                error_type="retry_exhausted",
+            )
 
-    payload = resp.json()
-    return payload.get("accounts", []) or []
+    if resp is None:
+        raise OandaAccountDiscoveryError(
+            failure_kind="invalid_response",
+            attempts=max_attempts,
+            timeout_s=timeout_s,
+            error_type="missing_response",
+        )
+    try:
+        payload = resp.json()
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise OandaAccountDiscoveryError(
+            failure_kind="invalid_response",
+            attempts=attempt,
+            timeout_s=timeout_s,
+            error_type=exc.__class__.__name__,
+        ) from exc
+    accounts = payload.get("accounts", []) if isinstance(payload, dict) else []
+    return [dict(account) for account in accounts if isinstance(account, dict)]
 
 
-async def _get_cached_oanda_accounts(*, base_url: str, api_key: str) -> List[Dict[str, object]]:
+def _oanda_discovery_failure_allows_stale(exc: Exception) -> bool:
+    if isinstance(exc, OandaAccountDiscoveryError):
+        if exc.failure_kind in {"timeout", "rate_limit", "dns", "transport"}:
+            return True
+        return bool(
+            exc.failure_kind == "http"
+            and exc.http_status in _OANDA_TRANSIENT_HTTP_STATUS_CODES
+        )
+    return isinstance(exc, (httpx.TimeoutException, httpx.RequestError))
+
+
+async def _get_cached_oanda_accounts(
+    *, base_url: str, api_key: str
+) -> OandaAccountDiscoveryResult:
     token = (api_key or "").strip().strip('"').strip("'")
-    cache_key = f"{base_url.rstrip('/')}:...{token[-6:]}"
+    cache_key = hashlib.sha256(
+        f"{base_url.rstrip('/')}|{token}".encode("utf-8")
+    ).hexdigest()
     now = time.time()
     cached = _OANDA_ACCOUNTS_CACHE.get(cache_key)
-    if cached and cached[0] > now:
-        return list(cached[1])
+    if cached and float(cached.get("fresh_until") or 0.0) > now:
+        return OandaAccountDiscoveryResult(
+            accounts=list(cached.get("accounts") or []),
+            cache_state="fresh",
+            fetched_at=float(cached.get("fetched_at") or now),
+        )
 
-    accounts = await _list_oanda_accounts(base_url=base_url, api_key=api_key)
-    _OANDA_ACCOUNTS_CACHE[cache_key] = (now + _OANDA_ACCOUNTS_CACHE_TTL_SECONDS, accounts)
-    return list(accounts)
+    refresh_task = _OANDA_ACCOUNTS_INFLIGHT.get(cache_key)
+    if refresh_task is None or refresh_task.done():
+        refresh_task = asyncio.create_task(
+            _list_oanda_accounts(base_url=base_url, api_key=api_key)
+        )
+        _OANDA_ACCOUNTS_INFLIGHT[cache_key] = refresh_task
+    try:
+        accounts = await asyncio.shield(refresh_task)
+    except Exception as exc:
+        stale_cached = _OANDA_ACCOUNTS_CACHE.get(cache_key)
+        if (
+            _oanda_discovery_failure_allows_stale(exc)
+            and stale_cached
+            and float(stale_cached.get("stale_until") or 0.0) > time.time()
+        ):
+            return OandaAccountDiscoveryResult(
+                accounts=list(stale_cached.get("accounts") or []),
+                cache_state="stale",
+                fetched_at=float(stale_cached.get("fetched_at") or now),
+                discovery_error=exc,
+            )
+        raise
+    finally:
+        if refresh_task.done() and _OANDA_ACCOUNTS_INFLIGHT.get(cache_key) is refresh_task:
+            _OANDA_ACCOUNTS_INFLIGHT.pop(cache_key, None)
+
+    fetched_at = time.time()
+    _OANDA_ACCOUNTS_CACHE[cache_key] = {
+        "fetched_at": fetched_at,
+        "fresh_until": fetched_at + _OANDA_ACCOUNTS_CACHE_TTL_SECONDS,
+        "stale_until": fetched_at + _OANDA_ACCOUNTS_STALE_TTL_SECONDS,
+        "accounts": list(accounts),
+    }
+    return OandaAccountDiscoveryResult(
+        accounts=list(accounts),
+        cache_state="refreshed",
+        fetched_at=fetched_at,
+    )
+
+
+def _oanda_discovery_warning(
+    *,
+    account: str,
+    exc: Exception,
+    stale_fetched_at: Optional[float],
+    configured_account_refreshed: bool,
+) -> Dict[str, str]:
+    if isinstance(exc, OandaAccountDiscoveryError):
+        diagnostic = str(exc).replace(
+            "OANDA account discovery",
+            "Additional owned-account discovery",
+            1,
+        )
+        error_type = exc.error_type
+    elif isinstance(exc, httpx.TimeoutException):
+        diagnostic = "Additional owned-account discovery timed out"
+        error_type = exc.__class__.__name__
+    elif isinstance(exc, httpx.RequestError):
+        diagnostic = "Additional owned-account discovery had a transport failure"
+        error_type = exc.__class__.__name__
+    else:
+        diagnostic = (
+            "Additional owned-account discovery failed "
+            f"({exc.__class__.__name__ or 'unknown error type'})"
+        )
+        error_type = exc.__class__.__name__
+
+    if stale_fetched_at is not None:
+        age_seconds = max(0, int(time.time() - stale_fetched_at))
+        if age_seconds < 120:
+            age_label = f"{age_seconds} seconds old"
+        elif age_seconds < 7200:
+            age_label = f"{max(1, age_seconds // 60)} minutes old"
+        else:
+            age_label = f"{max(1, age_seconds // 3600)} hours old"
+        scope = (
+            f"A last-known-good owned-account list ({age_label}) was used, and current "
+            "open trades and pending orders were requested for those account IDs."
+        )
+    elif configured_account_refreshed:
+        scope = (
+            "No last-known-good owned-account list was available; only the configured "
+            "account's current open trades and pending orders were confirmed."
+        )
+    else:
+        scope = (
+            "No last-known-good owned-account list was available; only the configured "
+            "account ID could be attempted."
+        )
+    return {
+        "broker": "OANDA",
+        "account": account,
+        "category": "forex",
+        "source_type": "account discovery",
+        "endpoint": "/v3/accounts",
+        "error_type": error_type,
+        "message": f"{diagnostic}. {scope}",
+    }
 
 
 def _build_bybit_query(params: Dict[str, str]) -> str:
@@ -24841,6 +25122,8 @@ OPEN_ORDERS_TEMPLATE = """<!doctype html>
     .action-btn[disabled] { opacity: .6; cursor: default; }
     .error-box { display: none; margin-bottom: 10px; border: 1px solid #7f1d1d; background: #3f0d12; color: #fecaca; border-radius: 10px; padding: 10px 12px; }
     .error-box ul { margin: 8px 0 0; padding-left: 20px; }
+    .warning-box { display: none; margin-bottom: 10px; border: 1px solid #92400e; background: #2b1d0e; color: #fde68a; border-radius: 8px; padding: 7px 10px; font-size: 12px; }
+    .warning-box ul { margin: 4px 0 0; padding-left: 18px; }
     #open-orders-empty { margin-top: 10px; display: none; }
   </style>
 </head>
@@ -24854,6 +25137,10 @@ OPEN_ORDERS_TEMPLATE = """<!doctype html>
       </div>
       <div id="open-orders-errors" class="error-box">
         <div><strong>Source errors</strong></div>
+        <ul></ul>
+      </div>
+      <div id="open-orders-warnings" class="warning-box">
+        <div><strong>Source warnings</strong></div>
         <ul></ul>
       </div>
       <div id="open-orders-empty" class="muted">No open orders or positions.</div>
@@ -28738,9 +29025,11 @@ async def list_open_orders(force: bool = Query(False)) -> JSONResponse:
     expires_at = float(_OPEN_ORDERS_CACHE.get("expires_at") or 0.0)
     if not force and isinstance(cached_payload, dict) and now < expires_at:
         fresh = dict(cached_payload)
-        fresh["stale"] = False
+        fresh["stale"] = bool(fresh.get("errors"))
         fresh.setdefault("updated_at", _utc_now_iso())
         fresh.setdefault("last_success_at", _OPEN_ORDERS_CACHE.get("last_success_at"))
+        fresh["error_count"] = len(fresh.get("errors") or [])
+        fresh["warning_count"] = len(fresh.get("warnings") or [])
         return JSONResponse(fresh)
 
     async with _OPEN_ORDERS_CACHE_LOCK:
@@ -28749,13 +29038,16 @@ async def list_open_orders(force: bool = Query(False)) -> JSONResponse:
         expires_at = float(_OPEN_ORDERS_CACHE.get("expires_at") or 0.0)
         if not force and isinstance(cached_payload, dict) and now < expires_at:
             fresh = dict(cached_payload)
-            fresh["stale"] = False
+            fresh["stale"] = bool(fresh.get("errors"))
             fresh.setdefault("updated_at", _utc_now_iso())
             fresh.setdefault("last_success_at", _OPEN_ORDERS_CACHE.get("last_success_at"))
+            fresh["error_count"] = len(fresh.get("errors") or [])
+            fresh["warning_count"] = len(fresh.get("warnings") or [])
             return JSONResponse(fresh)
 
         items: List[Dict[str, object]] = []
         errors: List[Dict[str, str]] = []
+        warnings: List[Dict[str, str]] = []
 
         for account in ("live", "demo"):
             try:
@@ -28767,26 +29059,24 @@ async def list_open_orders(force: bool = Query(False)) -> JSONResponse:
 
                 owned_accounts: List[Dict[str, object]] = []
                 account_tags: Dict[str, List[str]] = {}
+                discovery_exc: Optional[Exception] = None
+                stale_discovery_fetched_at: Optional[float] = None
                 try:
-                    owned_accounts = await _get_cached_oanda_accounts(
+                    discovery_result = await _get_cached_oanda_accounts(
                         base_url=cfg["base_url"],
                         api_key=cfg["token"],
                     )
-                except Exception as discovery_exc:
-                    errors.append(
-                        {
-                            "broker": "OANDA",
-                            "account": account,
-                            "category": "forex",
-                            "message": _format_source_exception(
-                                discovery_exc,
-                                broker="OANDA",
-                                account=account,
-                                endpoint="/v3/accounts",
-                                account_id="discovery",
-                            ),
-                        }
-                    )
+                    if isinstance(discovery_result, OandaAccountDiscoveryResult):
+                        owned_accounts = list(discovery_result.accounts)
+                        discovery_exc = discovery_result.discovery_error
+                        if discovery_result.cache_state == "stale":
+                            stale_discovery_fetched_at = discovery_result.fetched_at
+                    else:
+                        # Preserve compatibility with local test or extension shims that
+                        # returned the pre-metadata list shape.
+                        owned_accounts = list(discovery_result or [])
+                except Exception as exc:
+                    discovery_exc = exc
 
                 for acct in owned_accounts:
                     acct_id = str(acct.get("id") or "").strip()
@@ -28803,6 +29093,10 @@ async def list_open_orders(force: bool = Query(False)) -> JSONResponse:
                     deduped_ids.append(acct_id)
                     seen_account_ids.add(acct_id)
                 account_ids = deduped_ids
+                if not account_ids:
+                    raise ValueError(
+                        f"No configured or discovered OANDA account IDs are available for {account}."
+                    )
 
                 tasks = [
                     _collect_oanda_open_items(
@@ -28817,13 +29111,21 @@ async def list_open_orders(force: bool = Query(False)) -> JSONResponse:
 
                 oanda_items: List[Dict[str, object]] = []
                 oanda_errors: List[Dict[str, str]] = []
+                account_error_counts: Dict[str, int] = {}
+                refreshed_account_ids: Set[str] = set()
                 for acct_id, result in zip(account_ids, results):
                     if isinstance(result, Exception):
+                        account_error_counts[acct_id] = (
+                            account_error_counts.get(acct_id, 0) + 1
+                        )
                         oanda_errors.append(
                             {
                                 "broker": "OANDA",
                                 "account": account,
                                 "category": "forex",
+                                "source_type": "account data",
+                                "endpoint": "/v3/accounts/{accountID}/openItems",
+                                "account_id": acct_id,
                                 "message": _format_source_exception(
                                     result,
                                     broker="OANDA",
@@ -28835,16 +29137,61 @@ async def list_open_orders(force: bool = Query(False)) -> JSONResponse:
                         )
                         continue
 
-                    result_items = result.get("items", []) if isinstance(result, dict) else []
-                    result_errors = result.get("errors", []) if isinstance(result, dict) else []
-
-                    for endpoint_error in result_errors:
+                    if not isinstance(result, dict) or not {
+                        "items",
+                        "errors",
+                    }.issubset(result):
+                        account_error_counts[acct_id] = (
+                            account_error_counts.get(acct_id, 0) + 1
+                        )
                         oanda_errors.append(
                             {
                                 "broker": "OANDA",
                                 "account": account,
                                 "category": "forex",
-                                "message": f"{acct_id}: {str(endpoint_error).strip() or 'Unknown OANDA endpoint error'}",
+                                "source_type": "account data",
+                                "endpoint": "/v3/accounts/{accountID}/openItems",
+                                "account_id": acct_id,
+                                "message": (
+                                    "OANDA account refresh returned an invalid result "
+                                    f"for {account}/{acct_id}"
+                                ),
+                            }
+                        )
+                        continue
+
+                    refreshed_account_ids.add(acct_id)
+                    result_items = result.get("items", [])
+                    result_errors = result.get("errors", [])
+
+                    for endpoint_error in result_errors:
+                        account_error_counts[acct_id] = (
+                            account_error_counts.get(acct_id, 0) + 1
+                        )
+                        if isinstance(endpoint_error, dict):
+                            endpoint = str(
+                                endpoint_error.get("endpoint")
+                                or "/v3/accounts/{accountID}/openItems"
+                            )
+                            message = str(
+                                endpoint_error.get("message")
+                                or "Unknown OANDA endpoint error"
+                            ).strip()
+                        else:
+                            endpoint = "/v3/accounts/{accountID}/openItems"
+                            message = (
+                                f"{acct_id}: "
+                                f"{str(endpoint_error).strip() or 'Unknown OANDA endpoint error'}"
+                            )
+                        oanda_errors.append(
+                            {
+                                "broker": "OANDA",
+                                "account": account,
+                                "category": "forex",
+                                "source_type": "account data",
+                                "endpoint": endpoint,
+                                "account_id": acct_id,
+                                "message": message,
                             }
                         )
 
@@ -28857,12 +29204,29 @@ async def list_open_orders(force: bool = Query(False)) -> JSONResponse:
 
                 items.extend(oanda_items)
                 errors.extend(oanda_errors)
+                configured_account_refreshed = bool(
+                    configured_account_id
+                    and configured_account_id in refreshed_account_ids
+                    and account_error_counts.get(configured_account_id, 0) == 0
+                )
+                if discovery_exc is not None:
+                    warnings.append(
+                        _oanda_discovery_warning(
+                            account=account,
+                            exc=discovery_exc,
+                            stale_fetched_at=stale_discovery_fetched_at,
+                            configured_account_refreshed=configured_account_refreshed,
+                        )
+                    )
                 BYBIT_LOGGER.info(
-                    "OPEN_ORDERS oanda account=%s owner_accounts=%s items=%s errors=%s",
+                    "OPEN_ORDERS oanda account=%s owner_accounts=%s items=%s errors=%s "
+                    "discovery_warning=%s discovery_cache=%s",
                     account,
                     len(account_ids),
                     len(oanda_items),
                     len(oanda_errors),
+                    discovery_exc is not None,
+                    "stale" if stale_discovery_fetched_at is not None else "current",
                 )
             except Exception as exc:
                 errors.append(
@@ -28955,15 +29319,19 @@ async def list_open_orders(force: bool = Query(False)) -> JSONResponse:
             "active_pending_webhooks": len(pending),
             "duplicates_or_stale_pending_pruned": pruned_pending,
             "pending_reconciliation": dict(pending_diagnostics),
+            "errors": len(errors),
+            "warnings": len(warnings),
         }
         BYBIT_LOGGER.info(
-            "OPEN_ORDERS source_counts live_positions=%s live_orders=%s active_pending=%s pruned_pending=%s diagnostics=%s errors=%s",
+            "OPEN_ORDERS source_counts live_positions=%s live_orders=%s active_pending=%s "
+            "pruned_pending=%s diagnostics=%s errors=%s warnings=%s",
             live_broker_positions,
             live_broker_orders,
             len(pending),
             pruned_pending,
             pending_diagnostics,
             len(errors),
+            len(warnings),
         )
 
         try:
@@ -29142,6 +29510,9 @@ async def list_open_orders(force: bool = Query(False)) -> JSONResponse:
         payload: Dict[str, object] = {
             "items": grouped,
             "errors": errors,
+            "warnings": warnings,
+            "error_count": len(errors),
+            "warning_count": len(warnings),
             "source_counts": source_counts,
             "stale": bool(errors),
             "updated_at": updated_at,

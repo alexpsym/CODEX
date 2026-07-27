@@ -1,108 +1,81 @@
-Final implementation summary - equity curves, Bybit diagnostics, dashboard profiles, and watchlist durability
+Final implementation summary - OANDA Open Orders account-discovery warnings
 
 Publication status
-- Implementation, focused verification, and independent review are complete on branch codex/journal-equity-fx-final-20260726.
+- Work was based on the current origin/master at commit 4c685e2.
+- Implementation and verification are complete on branch codex/journal-equity-fx-final-20260726.
 - This summary is written before publication as required by AGENTS.md.
 - PATCH_DESKTOP_PUSH.bat must run next. The task is not published or complete until that script succeeds and local HEAD equals origin/master.
 
-1. Cashflow-neutral percentage equity curves
-- Replaced the six absolute-balance curves with compounded performance indices for Binance, Bybit, Oanda demo/live, and Pepperstone demo/live.
-- Every curve starts at exactly 100% immediately before its first eligible trade.
-- Trade movement is calculated only as actual net PnL divided by a verified positive analysis balance before the trade.
-- Input analysis fields are cleared before the balance timeline is rebuilt. Accepted balance provenance is explicitly enumerated; arbitrary supplied equity_return_pct values, risk-based result_pct values, and contradictory after-balances are not trusted.
-- Deposits, withdrawals, and transfers can add a flat timestamped point but cannot move the index.
-- Test trades, monthly AUD revaluation rows, invalid trades, and pre-first-trade cashflows remain excluded.
-- Chronological sorting and stable deduplication are preserved.
-- The chart Y-axis and current summary use percentages; the X-axis remains date-based.
-- Equity cache schema 2 identifies cashflow_neutral_compounded_index, base 100, equity_return_pct, and return basis net_trade_result_over_analysis_balance_before_trade. Missing or foreign basis proof makes a snapshot stale.
-- API point counts are recomputed from the exact response rows after response filtering. The browser rejects both zero and nonzero count mismatches.
-- Canonical verified JavaScript/API counts:
-  - BINANCE: 113
-  - BYBIT: 265
-  - OANDA DEMO: 45
-  - OANDA LIVE: 63
-  - PEPPERSTONE DEMO: 823
-  - PEPPERSTONE LIVE: 192
+1. Production-log diagnosis
+- The latest Local Trading Tools run started at 2026-07-27 15:31:13.
+- Demo OANDA /v3/accounts discovery logged three timeout attempts at approximately 15:32:06, 15:32:12, and 15:32:17. The third attempt had retry=False.
+- The logs contain no discovery HTTP response/status, HTTP 429 rate limit, DNS failure, or non-timeout request/transport error. The recorded failure class is timeout; the old logger emitted an empty exception string.
+- After discovery exhausted its retries, the configured demo account completed at 15:32:30 with owner_accounts=1, items=3, and errors=0. Under the collection contract, errors=0 confirms both current openTrades and pendingOrders requests succeeded.
+- Live OANDA activity ran first and experienced recoverable endpoint timeouts before completing with errors=0. Bybit collection began after the demo OANDA account completed; its later requests also experienced recoverable connection timeouts.
+- The startup equity build overlapped the entire Open Orders refresh from 15:31:14 until 15:34:37, along with dashboard/status traffic. This proves concurrent startup work existed, but the logs do not prove it caused the discovery timeout. The later Bybit connection timeouts and earlier live OANDA retries are consistent with transient broader connectivity or contention rather than an OANDA discovery HTTP/rate-limit response.
+- No secrets from the logs are included here.
 
-2. Bybit Open Orders and Positions diagnostics
-- Local runtime logs were inspected. They recorded the Bybit source error count but did not preserve the underlying exception reason, confirming the diagnostic gap.
-- Signed GET timeouts and request failures now use bounded retries from the existing configured retry limit.
-- Every Bybit positions/orders source error records a safe account, source type, endpoint path, category, settlement coin, error type, and meaningful reason.
-- Timeout messages explicitly identify timeout and endpoint. HTTP/API errors retain safe HTTP status, retCode, and retMsg details.
-- Partial success is retained across Bybit settlement coins/categories and across other brokers.
-- Backend and browser sanitizers remove API keys, secrets, signatures, signed URLs, URL queries, and quoted or multiword secret fields. Unstructured fetch, action, and verification errors also pass through the sanitizer.
-- Empty messages receive a useful fallback and the browser never renders a dangling colon.
-- No real order, cancellation, position-close, or broker mutation request was sent during testing.
+2. Blocking errors versus supplementary warnings
+- /v3/accounts discovery failure is now retained as a non-blocking warning instead of a source error.
+- When the configured account's current openTrades and pendingOrders requests succeed, its rows remain current, the payload is not stale, error_count remains zero, and warning_count identifies the discovery warning.
+- The warning explicitly says that additional owned-account discovery failed. Without a last-known-good list, it says only the configured account's current data was confirmed.
+- Required account-data failures remain blocking. A failed openTrades or pendingOrders request produces a red source error, marks the payload stale, identifies the account and exact endpoint, and preserves rows from the other successful endpoint.
+- Failure of a discovered secondary account is also blocking while successful configured-account, other OANDA-account, and Bybit rows remain present.
+- Cached partial/error payloads no longer become incorrectly non-stale during the Open Orders response-cache lifetime.
+- The payload now exposes errors, warnings, error_count, warning_count, and matching source_counts fields. stale continues to derive only from blocking errors.
 
-3. Server-side local-only dashboard sections
-- History Export, Open Orders and Positions, Pine Scripts, Watchlist, Instrument Lookup, and OANDA Inactivity are emitted only when APP_PROFILE=local.
-- Render HTML omits all six sections server-side, omits history_page.js, and uses a centered single-column layout without an empty rail or broken iframe.
-- Shared dashboard JavaScript checks for the relevant DOM before starting local-only refreshes, timers, or requests. The Render browser harness issues only the Render-owned /scripts request.
-- Local section order, Orders/Positions iframe, watchlist editing, layout, and existing behavior remain intact.
-- Calculator, FX Weekend, Bounce Trader, and existing Render-owned behavior remain present.
+3. OANDA account-discovery cache and diagnostics
+- The fresh owned-account cache default is now one hour instead of 20 seconds and is configurable with OANDA_ACCOUNTS_CACHE_TTL_SECONDS.
+- A last-known-good owned-account list is retained for transient failures for one day by default, configurable with OANDA_ACCOUNTS_STALE_TTL_SECONDS and bounded to seven days.
+- Stale membership is used only to choose account IDs. Current openTrades and pendingOrders are always fetched for each configured/cached account; positions and orders themselves are never served from the discovery cache.
+- Non-transient discovery failures such as HTTP 401 do not use stale membership.
+- Concurrent refreshes for the same base/token identity share one in-flight request. Cache keys hash the credentials rather than retaining a token suffix.
+- Discovery remains bounded at three attempts with a six-second per-request timeout and short existing backoffs.
+- Timeout, request/transport, DNS, HTTP status, rate-limit, invalid-response, attempt count, retry exhaustion, timeout, and elapsed-attempt diagnostics are explicit and sanitized. Tokens and credential-bearing URLs are not returned.
+- A missing OandaUpstreamError class was restored so required account endpoint timeout/transport failures retain useful sanitized retry-exhaustion diagnostics instead of degrading into a NameError.
 
-4. Watchlist authority and update durability
-- The live repository-local watchlist is [].
-- The local aggregate backup watchlist is also empty, and the manifest records canonical [] SHA-256:
-  4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945
-- Empty per-file state is authoritative; it is never treated as missing.
-- A matching empty manifest entry acts as a deletion tombstone if the mirror is temporarily absent, preventing replay from an older aggregate.
-- Invalid authoritative per-file JSON now blocks aggregate rewrite, so a corrupt mirror cannot overwrite a healthy aggregate with an accidental empty value.
-- watchlist.json, state_manifest.json, legacy stateManifest.json, and state_backup.json are ignored runtime state. The three formerly tracked state files are removed from Git while their healthy local copies remain intact.
-- PATCH_DESKTOP_PUSH.bat no longer unstages the intended tracked-file removals.
-- INSTALL.bat now handles the one-time tracked-to-ignored migration before a fast-forward merge:
-  - byte-preserves genuinely modified empty or legitimate-symbol state;
-  - allows untouched repository bootstrap state to disappear;
-  - creates a canonical empty watchlist/manifest tombstone when an unrelated modified aggregate could otherwise replay the removed bootstrap watchlist;
-  - restores partially moved files in a finally block and retains the backup if update fails.
-- Isolated restart tests run the startup path twice, verify a legitimate BTCUSDT addition survives, and verify its deletion remains empty.
-- A real temporary Git/PowerShell four-case matrix verifies authoritative empty, legitimate symbol, untouched stale bootstrap, and mixed-status stale aggregate migrations.
-- No production Local Trading Tools process was restarted because that could start configured trading-related components; restart/update semantics were exercised in isolated regression environments.
+4. Browser presentation
+- render/static/open_orders.js now renders warnings independently from errors.
+- Complete success shows Updated.
+- Non-blocking discovery degradation shows Updated (1 warning) with a compact amber Source warnings box.
+- Required source failure shows Stale (1 error) with the existing large red Source errors treatment.
+- Mixed counts use correct singular/plural wording, warnings survive action-row refreshes, and rendered diagnostics do not end in dangling colons.
 
-5. Production and test diff
-Production/configuration:
-- .gitignore
-- INSTALL.bat
-- PATCH_DESKTOP_PUSH.bat
+5. Regression coverage and validation
+- tests/test_open_orders_page.py: 45 passed.
+- Coverage includes:
+  - discovery timeout with no cache and successful configured-account current data;
+  - discovery timeout with last-known-good membership;
+  - transient-only stale-cache fallback and rejection of stale fallback for HTTP 401;
+  - configured openTrades failure;
+  - configured pendingOrders failure;
+  - discovered secondary-account failure;
+  - preservation of successful OANDA and Bybit rows;
+  - exact stale, warning, error, and source counts;
+  - bounded three-attempt retries and sanitized diagnostics;
+  - in-flight discovery coalescing;
+  - separate amber-warning/red-error browser rendering and badge text.
+- Profile, dashboard layout, local-exit, calculator, and merged-monitor/status suites: 196 passed.
+- Timeframe suite excluding one demonstrably pre-existing broken fixture: 22 passed, 1 deselected.
+- The pre-existing failure is test_recent_trades_and_journal_backfill_from_trade_context. Both origin/master production code and the origin/master test show the mismatch: the fixture supplies cache_version="test" and production calls int(cache_version). This unrelated equity-cache behavior was not changed.
+- A broader combined run therefore reported 218 passed and that same one pre-existing failure after repository-local pytest temp isolation.
+- node --check render/static/open_orders.js passed.
+- python -m py_compile render/master_service.py passed.
+- git diff --check passed; only normal LF-to-CRLF working-copy notices were emitted.
+- Default pytest temp/cache locations are permission-restricted on this machine. Repository-local ignored --basetemp directories were used for the clean reruns.
+
+6. Safety and preservation
+- No real order, cancellation, position close, or broker mutation request was made. All broker behavior tests used mocks.
+- Trading Journal.xlsx was not read as a source for this diagnosis and was not modified by this work. Its pre-existing staged working-tree change remains separate from this task.
+- Pre-existing runtime changes under render/data remain separate and must not be published.
+- Completed equity-curve, Render/local profile, Bybit diagnostic, watchlist, FX Weekend, and workbook behavior was not changed.
+- Secrets, environment files, logs, caches, runtime data, and temporary test directories remain excluded.
+
+Changed task files
 - render/master_service.py
-- render/static/dashboard.js
 - render/static/open_orders.js
-- render/static/trading_journal_equity_curve.js
-- Removed tracked bootstrap/runtime copies of watchlist.json, state_manifest.json, and state_backup.json
-
-Tests:
-- tests/test_dashboard_home_layout.py
-- tests/test_dashboard_js_syntax.py
-- tests/test_extract_latest_codex_master_git_status.py
-- tests/test_master_service_master_journal_sync.py
-- tests/test_master_service_profiles.py
-- tests/test_master_service_state_sync.py
 - tests/test_open_orders_page.py
-- tests/test_patch_desktop_push.py
-- tests/test_trading_journal_equity_curve.py
-- tests/test_windows_launchers.py
-
-6. Final verification
-- tests/test_trading_journal_equity_curve.py: 13 passed.
-- Combined profile, layout, dashboard JavaScript, state, installer, launcher, patch, and workbook-update suite: 178 passed.
-- Final stable-tree Open Orders plus installer/launcher/patch suite after the last migration and redaction refinements: 115 passed.
-- Open Orders plus impacted master-journal snapshot smoke: 32 passed; the final Open Orders file alone contains 33 passing tests.
-- Independent acceptance review found no remaining blocker after targeted and broader focused suites.
-- node --check passed for all three modified JavaScript files.
-- Python py_compile passed for render/master_service.py and the modified focused test modules.
-- git diff --check and git diff --cached --check passed; only normal LF-to-CRLF working-copy notices were emitted.
-- One preliminary smoke command used an outdated pluralized pytest node name and stopped at collection with "not found"; the corrected current node was rerun successfully.
-- Reported warnings are existing FastAPI on_event deprecations, existing coroutine-stub RuntimeWarnings in one state test, the existing httpx shortcut deprecation, and pytest cache permission warnings.
-
-7. Workbook and runtime safety
-- Trading Journal.xlsx SHA-256 before changes:
-  07B0135C82B3DCEA6D48503DD337D900422542304FBED38120862BD6F1E6497E
-- Trading Journal.xlsx SHA-256 after all testing:
-  07B0135C82B3DCEA6D48503DD337D900422542304FBED38120862BD6F1E6497E
-- The canonical integration test also verified workbook bytes, file size, and modification time were unchanged.
-- The workbook has no Git diff.
-- Existing runtime changes under render/data remain deliberately unstaged and unpublished.
-- Secrets, environment files, logs, caches, temporary test directories, and other local runtime state remain excluded.
+- summary/CODEX_SUMMARY_latest.txt
 
 Mandatory completion step
 - Run repository-root PATCH_DESKTOP_PUSH.bat.

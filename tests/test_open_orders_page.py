@@ -63,6 +63,7 @@ def test_merged_open_orders_route_returns_html() -> None:
     assert 'id="refresh-btn"' in html
     assert 'id="open-orders-status"' in html
     assert 'id="open-orders-errors"' in html
+    assert 'id="open-orders-warnings"' in html
     assert 'id="open-orders-empty"' in html
     assert "No open orders or positions." in html
     assert "No open orders, positions, or pending webhooks." not in html
@@ -165,6 +166,485 @@ def test_oanda_open_item_values_align_with_open_orders_columns(monkeypatch: pyte
     assert item["instrument"] == "EUR_USD"
     assert item["timeframe"] == "15 minutes"
     assert item["is_test_trade"] == "Yes"
+
+
+@pytest.mark.parametrize(
+    ("failed_suffix", "successful_item_type"),
+    [
+        ("/openTrades", "Order"),
+        ("/pendingOrders", "Position"),
+    ],
+)
+def test_collect_oanda_open_items_reports_each_required_endpoint_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    failed_suffix: str,
+    successful_item_type: str,
+) -> None:
+    async def fake_fetch_oanda_json(*, endpoint: str, **_kwargs):
+        if endpoint.endswith(failed_suffix):
+            request = master_service.httpx.Request(
+                "GET",
+                f"https://demo.oanda.test{endpoint}",
+            )
+            raise master_service.httpx.ReadTimeout("", request=request)
+        if endpoint.endswith("/openTrades"):
+            return {
+                "trades": [
+                    {
+                        "id": "trade-success",
+                        "instrument": "EUR_USD",
+                        "currentUnits": "1000",
+                        "state": "OPEN",
+                    }
+                ]
+            }
+        return {
+            "orders": [
+                {
+                    "id": "order-success",
+                    "instrument": "EUR_USD",
+                    "units": "1000",
+                    "state": "PENDING",
+                }
+            ]
+        }
+
+    monkeypatch.setattr(master_service, "_fetch_oanda_json", fake_fetch_oanda_json)
+    monkeypatch.setattr(
+        master_service,
+        "_lookup_trade_context_for_open_item",
+        lambda _item: None,
+    )
+
+    payload = asyncio.run(
+        master_service._collect_oanda_open_items(
+            base_url="https://demo.oanda.test",
+            account_id="CFG-DEMO",
+            api_key="token",
+            account_context="demo",
+        )
+    )
+
+    assert [item["type"] for item in payload["items"]] == [successful_item_type]
+    assert len(payload["errors"]) == 1
+    assert payload["errors"][0]["endpoint"].endswith(failed_suffix)
+    assert "demo/CFG-DEMO" in payload["errors"][0]["message"]
+
+
+def _stub_open_orders_sources(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    discovery_results: dict[str, object] | None = None,
+    collect_override=None,
+) -> list[tuple[str, str]]:
+    discovery_results = discovery_results or {}
+    collected_accounts: list[tuple[str, str]] = []
+
+    def fake_oanda_config(account: str) -> dict[str, str]:
+        return {
+            "account_id": f"CFG-{account.upper()}",
+            "token": f"TOKEN-{account.upper()}",
+            "base_url": f"https://{account}.oanda.test",
+        }
+
+    async def fake_discovery(*, base_url: str, **_kwargs):
+        account = "demo" if "demo." in base_url else "live"
+        result = discovery_results.get(account, [])
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    async def fake_collect(*, account_context: str, account_id: str, **kwargs):
+        collected_accounts.append((account_context, account_id))
+        if collect_override is not None:
+            overridden = await collect_override(
+                account_context=account_context,
+                account_id=account_id,
+                **kwargs,
+            )
+            if overridden is not None:
+                return overridden
+        return {
+            "items": [
+                {
+                    "broker": "OANDA",
+                    "account": account_context,
+                    "category": "forex",
+                    "instrument": f"{account_context.upper()}_{account_id}",
+                    "type": "Order",
+                    "id": f"oanda-{account_context}-{account_id}",
+                    "status": "PENDING",
+                }
+            ],
+            "errors": [],
+        }
+
+    async def fake_bybit_collect(*, account_context: str, **_kwargs):
+        if account_context != "live":
+            return {"items": [], "errors": []}
+        return {
+            "items": [
+                {
+                    "broker": "Bybit",
+                    "account": "live",
+                    "category": "linear",
+                    "instrument": "BTCUSDT",
+                    "type": "Order",
+                    "id": "bybit-live-order",
+                    "status": "New",
+                }
+            ],
+            "errors": [],
+        }
+
+    monkeypatch.setattr(master_service, "_get_oanda_config", fake_oanda_config)
+    monkeypatch.setattr(master_service, "_get_cached_oanda_accounts", fake_discovery)
+    monkeypatch.setattr(master_service, "_collect_oanda_open_items", fake_collect)
+    monkeypatch.setattr(
+        master_service,
+        "resolve_bybit_credentials_for",
+        lambda account: (
+            account,
+            f"KEY-{account}",
+            f"SECRET-{account}",
+            f"https://{account}.bybit.test",
+            "test",
+        ),
+    )
+    monkeypatch.setattr(master_service, "_collect_bybit_open_items", fake_bybit_collect)
+    monkeypatch.setattr(master_service, "_load_pending_webhooks", lambda: [])
+    monkeypatch.setattr(master_service, "_load_bounce_traders", lambda: [])
+    monkeypatch.setattr(
+        master_service.script_manager,
+        "get",
+        lambda _name: type("S", (), {"is_running": False})(),
+    )
+    return collected_accounts
+
+
+def _discovery_timeout() -> Exception:
+    return master_service.OandaAccountDiscoveryError(
+        failure_kind="timeout",
+        attempts=3,
+        timeout_s=6.0,
+        error_type="ReadTimeout",
+    )
+
+
+def test_discovery_timeout_without_cache_keeps_configured_oanda_and_bybit_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    collected = _stub_open_orders_sources(
+        monkeypatch,
+        discovery_results={"demo": _discovery_timeout()},
+    )
+
+    payload = json.loads(
+        asyncio.run(master_service.list_open_orders(force=True)).body.decode("utf-8")
+    )
+
+    item_ids = {item["id"] for item in payload["items"]}
+    assert "oanda-demo-CFG-DEMO" in item_ids
+    assert "bybit-live-order" in item_ids
+    assert ("demo", "CFG-DEMO") in collected
+    assert payload["stale"] is False
+    assert payload["errors"] == []
+    assert payload["error_count"] == 0
+    assert payload["warning_count"] == 1
+    assert payload["source_counts"]["errors"] == 0
+    assert payload["source_counts"]["warnings"] == 1
+    warning = payload["warnings"][0]
+    assert warning["endpoint"] == "/v3/accounts"
+    assert "timed out after 3 attempts" in warning["message"]
+    assert "only the configured account's current open trades and pending orders were confirmed" in warning["message"]
+    assert "TOKEN-DEMO" not in warning["message"]
+    assert "https://" not in warning["message"]
+
+
+def test_discovery_timeout_uses_last_known_good_ids_only_for_current_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stale_discovery = master_service.OandaAccountDiscoveryResult(
+        accounts=[{"id": "SECONDARY-DEMO", "tags": ["MT4"]}],
+        cache_state="stale",
+        fetched_at=master_service.time.time() - 3600,
+        discovery_error=_discovery_timeout(),
+    )
+    collected = _stub_open_orders_sources(
+        monkeypatch,
+        discovery_results={"demo": stale_discovery},
+    )
+
+    payload = json.loads(
+        asyncio.run(master_service.list_open_orders(force=True)).body.decode("utf-8")
+    )
+
+    assert ("demo", "CFG-DEMO") in collected
+    assert ("demo", "SECONDARY-DEMO") in collected
+    item_ids = {item["id"] for item in payload["items"]}
+    assert "oanda-demo-CFG-DEMO" in item_ids
+    assert "oanda-demo-SECONDARY-DEMO" in item_ids
+    assert "bybit-live-order" in item_ids
+    assert payload["stale"] is False
+    assert payload["error_count"] == 0
+    assert payload["warning_count"] == 1
+    assert "last-known-good owned-account list" in payload["warnings"][0]["message"]
+    assert "current open trades and pending orders were requested" in payload["warnings"][0]["message"]
+
+
+def test_oanda_account_cache_returns_bounded_last_known_good_after_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base_url = "https://demo.oanda.test"
+    token = "cache-token-that-must-not-appear"
+    cache_key = master_service.hashlib.sha256(
+        f"{base_url}|{token}".encode("utf-8")
+    ).hexdigest()
+    now = master_service.time.time()
+    master_service._OANDA_ACCOUNTS_CACHE.clear()
+    master_service._OANDA_ACCOUNTS_INFLIGHT.clear()
+    master_service._OANDA_ACCOUNTS_CACHE[cache_key] = {
+        "fetched_at": now - 120,
+        "fresh_until": now - 1,
+        "stale_until": now + 60,
+        "accounts": [{"id": "SECONDARY-DEMO"}],
+    }
+
+    async def fail_discovery(**_kwargs):
+        raise _discovery_timeout()
+
+    monkeypatch.setattr(master_service, "_list_oanda_accounts", fail_discovery)
+    result = asyncio.run(
+        master_service._get_cached_oanda_accounts(
+            base_url=base_url,
+            api_key=token,
+        )
+    )
+
+    assert result.cache_state == "stale"
+    assert result.accounts == [{"id": "SECONDARY-DEMO"}]
+    assert isinstance(result.discovery_error, master_service.OandaAccountDiscoveryError)
+    assert token not in str(result.discovery_error)
+    master_service._OANDA_ACCOUNTS_CACHE.clear()
+    master_service._OANDA_ACCOUNTS_INFLIGHT.clear()
+
+
+def test_oanda_account_cache_does_not_mask_nontransient_discovery_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base_url = "https://demo.oanda.test"
+    token = "cache-token"
+    cache_key = master_service.hashlib.sha256(
+        f"{base_url}|{token}".encode("utf-8")
+    ).hexdigest()
+    now = master_service.time.time()
+    master_service._OANDA_ACCOUNTS_CACHE.clear()
+    master_service._OANDA_ACCOUNTS_INFLIGHT.clear()
+    master_service._OANDA_ACCOUNTS_CACHE[cache_key] = {
+        "fetched_at": now - 120,
+        "fresh_until": now - 1,
+        "stale_until": now + 60,
+        "accounts": [{"id": "SECONDARY-DEMO"}],
+    }
+    auth_failure = master_service.OandaAccountDiscoveryError(
+        failure_kind="http",
+        attempts=1,
+        timeout_s=6.0,
+        error_type="HTTPStatusError",
+        http_status=401,
+    )
+
+    async def fail_discovery(**_kwargs):
+        raise auth_failure
+
+    monkeypatch.setattr(master_service, "_list_oanda_accounts", fail_discovery)
+    with pytest.raises(master_service.OandaAccountDiscoveryError) as exc_info:
+        asyncio.run(
+            master_service._get_cached_oanda_accounts(
+                base_url=base_url,
+                api_key=token,
+            )
+        )
+
+    assert exc_info.value.http_status == 401
+    master_service._OANDA_ACCOUNTS_CACHE.clear()
+    master_service._OANDA_ACCOUNTS_INFLIGHT.clear()
+
+
+def test_concurrent_oanda_account_discovery_requests_share_one_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = {"count": 0}
+    master_service._OANDA_ACCOUNTS_CACHE.clear()
+    master_service._OANDA_ACCOUNTS_INFLIGHT.clear()
+
+    async def successful_discovery(**_kwargs):
+        calls["count"] += 1
+        await asyncio.sleep(0)
+        return [{"id": "CFG-DEMO"}]
+
+    async def run_concurrently():
+        return await asyncio.gather(
+            master_service._get_cached_oanda_accounts(
+                base_url="https://demo.oanda.test",
+                api_key="token",
+            ),
+            master_service._get_cached_oanda_accounts(
+                base_url="https://demo.oanda.test",
+                api_key="token",
+            ),
+        )
+
+    monkeypatch.setattr(master_service, "_list_oanda_accounts", successful_discovery)
+    results = asyncio.run(run_concurrently())
+
+    assert calls["count"] == 1
+    assert [result.accounts for result in results] == [
+        [{"id": "CFG-DEMO"}],
+        [{"id": "CFG-DEMO"}],
+    ]
+    master_service._OANDA_ACCOUNTS_CACHE.clear()
+    master_service._OANDA_ACCOUNTS_INFLIGHT.clear()
+
+
+@pytest.mark.parametrize(
+    ("failed_endpoint", "successful_type"),
+    [
+        ("/v3/accounts/{accountID}/openTrades", "Order"),
+        ("/v3/accounts/{accountID}/pendingOrders", "Position"),
+    ],
+)
+def test_configured_oanda_endpoint_failure_is_blocking_and_preserves_partial_rows(
+    monkeypatch: pytest.MonkeyPatch,
+    failed_endpoint: str,
+    successful_type: str,
+) -> None:
+    async def collect_override(*, account_context: str, account_id: str, **_kwargs):
+        if account_context != "demo" or account_id != "CFG-DEMO":
+            return None
+        return {
+            "items": [
+                {
+                    "broker": "OANDA",
+                    "account": "demo",
+                    "category": "forex",
+                    "instrument": "EUR_USD",
+                    "type": successful_type,
+                    "id": "oanda-partial-success",
+                    "status": "OPEN",
+                }
+            ],
+            "errors": [
+                {
+                    "endpoint": failed_endpoint,
+                    "message": (
+                        f"OANDA {failed_endpoint} timed out for demo/CFG-DEMO "
+                        "after bounded retries"
+                    ),
+                }
+            ],
+        }
+
+    _stub_open_orders_sources(monkeypatch, collect_override=collect_override)
+    payload = json.loads(
+        asyncio.run(master_service.list_open_orders(force=True)).body.decode("utf-8")
+    )
+
+    item_ids = {item["id"] for item in payload["items"]}
+    assert "oanda-partial-success" in item_ids
+    assert "bybit-live-order" in item_ids
+    assert payload["stale"] is True
+    assert payload["error_count"] == 1
+    assert payload["warning_count"] == 0
+    assert payload["errors"][0]["account_id"] == "CFG-DEMO"
+    assert payload["errors"][0]["endpoint"] == failed_endpoint
+
+
+def test_discovered_secondary_account_failure_is_blocking_but_preserves_other_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def collect_override(*, account_context: str, account_id: str, **_kwargs):
+        if account_context != "demo" or account_id != "SECONDARY-DEMO":
+            return None
+        return {
+            "items": [],
+            "errors": [
+                {
+                    "endpoint": "/v3/accounts/{accountID}/pendingOrders",
+                    "message": "OANDA pending-orders refresh failed for demo/SECONDARY-DEMO",
+                }
+            ],
+        }
+
+    _stub_open_orders_sources(
+        monkeypatch,
+        discovery_results={"demo": [{"id": "SECONDARY-DEMO"}]},
+        collect_override=collect_override,
+    )
+    payload = json.loads(
+        asyncio.run(master_service.list_open_orders(force=True)).body.decode("utf-8")
+    )
+
+    item_ids = {item["id"] for item in payload["items"]}
+    assert "oanda-demo-CFG-DEMO" in item_ids
+    assert "bybit-live-order" in item_ids
+    assert payload["stale"] is True
+    assert payload["error_count"] == 1
+    assert payload["warning_count"] == 0
+    assert payload["errors"][0]["account_id"] == "SECONDARY-DEMO"
+    assert payload["errors"][0]["endpoint"].endswith("/pendingOrders")
+
+
+def test_oanda_discovery_timeout_retries_are_bounded_and_diagnostics_are_sanitized(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = {"count": 0}
+    sleeps: list[float] = []
+    token = "oanda-token-that-must-not-appear"
+    base_url = "https://demo.oanda.test"
+
+    class TimeoutClient:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, _exc_type, _exc, _tb):
+            return False
+
+        async def get(self, url, **_kwargs):
+            calls["count"] += 1
+            request = master_service.httpx.Request("GET", url)
+            raise master_service.httpx.ReadTimeout(
+                f"api_key={token} {base_url}?signature=hidden",
+                request=request,
+            )
+
+    async def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr(master_service.httpx, "AsyncClient", TimeoutClient)
+    monkeypatch.setattr(master_service.asyncio, "sleep", fake_sleep)
+
+    with pytest.raises(master_service.OandaAccountDiscoveryError) as exc_info:
+        asyncio.run(
+            master_service._list_oanda_accounts(
+                base_url=base_url,
+                api_key=token,
+            )
+        )
+
+    message = str(exc_info.value)
+    assert calls["count"] == 3
+    assert len(sleeps) == 2
+    assert exc_info.value.failure_kind == "timeout"
+    assert exc_info.value.attempts == 3
+    assert "6.0s timeout per attempt" in message
+    assert "after 3 attempts" in message
+    assert token not in message
+    assert base_url not in message
+    assert "signature=hidden" not in message
 
 
 def test_open_orders_js_uses_version_polling_and_force_query_refresh() -> None:
@@ -521,6 +1001,121 @@ setTimeout(() => {{
     assert "should-not-render" not in " ".join(rendered)
     assert "signature=hidden" not in " ".join(rendered)
     assert all(not line.rstrip().endswith(":") for line in rendered)
+
+
+def test_open_orders_browser_renders_warnings_separately_from_blocking_errors() -> None:
+    node = shutil.which("node")
+    assert node, "node is required for browser rendering regression"
+    js_path = ROOT / "render" / "static" / "open_orders.js"
+    harness = f"""
+const fs = require('fs');
+class Element {{
+  constructor() {{
+    this.children = [];
+    this.handlers = {{}};
+    this.style = {{}};
+    this.textContent = '';
+    this.innerHTML = '';
+  }}
+  appendChild(node) {{ this.children.push(node); return node; }}
+  addEventListener(event, handler) {{ this.handlers[event] = handler; }}
+  querySelector() {{ return null; }}
+}}
+const refreshButton = new Element();
+const statusBadge = new Element();
+const tbody = new Element();
+const table = new Element();
+table.querySelector = () => tbody;
+const errorsBox = new Element();
+const errorsList = new Element();
+errorsBox.querySelector = () => errorsList;
+const warningsBox = new Element();
+const warningsList = new Element();
+warningsBox.querySelector = () => warningsList;
+const elements = {{
+  'refresh-btn': refreshButton,
+  'open-orders-status': statusBadge,
+  'open-orders-table': table,
+  'open-orders-empty': new Element(),
+  'open-orders-errors': errorsBox,
+  'open-orders-warnings': warningsBox,
+}};
+global.window = {{}};
+global.document = {{
+  hidden: true,
+  getElementById(id) {{ return elements[id] || null; }},
+  addEventListener() {{}},
+  createElement() {{ return new Element(); }},
+}};
+let mode = 'warning';
+global.fetch = async () => ({{
+  ok: true,
+  status: 200,
+  statusText: 'OK',
+  text: async () => JSON.stringify(mode === 'warning' ? {{
+    items: [],
+    errors: [],
+    warnings: [{{
+      broker: 'OANDA',
+      account: 'demo',
+      category: 'forex',
+      source_type: 'account discovery',
+      endpoint: '/v3/accounts',
+      message: 'Additional owned-account discovery timed out; only the configured account was confirmed.',
+    }}],
+    stale: false,
+  }} : {{
+    items: [],
+    errors: [{{
+      broker: 'OANDA',
+      account: 'demo',
+      category: 'forex',
+      source_type: 'account data',
+      endpoint: '/v3/accounts/{{accountID}}/openTrades',
+      message: 'Configured account openTrades timed out.',
+    }}],
+    warnings: [],
+    stale: true,
+  }}),
+}});
+eval(fs.readFileSync({json.dumps(str(js_path))}, 'utf8'));
+setTimeout(async () => {{
+  const warningState = {{
+    badge: statusBadge.textContent,
+    errorsDisplay: errorsBox.style.display,
+    warningsDisplay: warningsBox.style.display,
+    warningText: warningsList.children.map((node) => node.textContent),
+  }};
+  mode = 'error';
+  await refreshButton.handlers.click();
+  const errorState = {{
+    badge: statusBadge.textContent,
+    errorsDisplay: errorsBox.style.display,
+    warningsDisplay: warningsBox.style.display,
+    errorText: errorsList.children.map((node) => node.textContent),
+  }};
+  console.log(JSON.stringify([warningState, errorState]));
+}}, 25);
+"""
+    result = subprocess.run(
+        [node, "-e", harness],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    warning_state, error_state = json.loads(result.stdout.strip().splitlines()[-1])
+
+    assert warning_state["badge"] == "Updated (1 warning)"
+    assert warning_state["errorsDisplay"] == "none"
+    assert warning_state["warningsDisplay"] == "block"
+    assert len(warning_state["warningText"]) == 1
+    assert not warning_state["warningText"][0].rstrip().endswith(":")
+    assert error_state["badge"] == "Stale (1 error)"
+    assert error_state["errorsDisplay"] == "block"
+    assert error_state["warningsDisplay"] == "none"
+    assert len(error_state["errorText"]) == 1
+    assert not error_state["errorText"][0].rstrip().endswith(":")
 
 
 def test_open_orders_browser_sanitizes_unstructured_fetch_failures_and_surfaces_reason() -> None:
