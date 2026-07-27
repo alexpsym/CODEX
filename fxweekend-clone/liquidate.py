@@ -57,9 +57,12 @@ FINAL_FAILURE_STATES = {
     "partial closure failure",
     "missed cutoff/market closed",
 }
+HEARTBEAT_INTERVAL_SECONDS = 30.0
+CLOSURE_RETRY_MAX_DELAY_FRACTION = 0.25
 
 app = Flask(__name__)
 _status_lock = threading.RLock()
+_liquidation_lock = threading.Lock()
 
 
 def _now_brisbane() -> datetime:
@@ -186,8 +189,15 @@ def save_settings(settings: Dict[str, Any]) -> Dict[str, Any]:
 def _empty_status() -> Dict[str, Any]:
     return {
         "running": False,
+        "executor_pid": None,
+        "executor_instance_id": None,
         "executor_started_at": None,
         "heartbeat_at": None,
+        "sleeping": False,
+        "sleep_reason": None,
+        "sleep_started_at": None,
+        "sleep_until": None,
+        "scheduled_delay_seconds": 0.0,
         "state": "checking",
         "state_detail": "Executor has not started.",
         "selected_accounts": [],
@@ -425,12 +435,27 @@ def _scoped_items(
     ]
 
 
+def _close_deadline_is_open(close_deadline: Optional[datetime]) -> bool:
+    if close_deadline is None:
+        return True
+    current = _now_brisbane()
+    if current.tzinfo is None:
+        current = BRISBANE_TZ.localize(current)
+    deadline = close_deadline
+    if deadline.tzinfo is None:
+        deadline = BRISBANE_TZ.localize(deadline)
+    return current.astimezone(BRISBANE_TZ) < deadline.astimezone(
+        BRISBANE_TZ
+    )
+
+
 def _close_requested_scope(
     config: Dict[str, str],
     opened: Dict[str, Any],
     settings: Dict[str, Any],
     *,
     can_close: bool,
+    close_deadline: Optional[datetime] = None,
     on_progress: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
 ) -> List[Dict[str, Any]]:
     mode = settings.get("close_method", "positions")
@@ -445,14 +470,26 @@ def _close_requested_scope(
         if on_progress is not None:
             on_progress(deepcopy(results))
 
+    def closure_request_allowed() -> bool:
+        return bool(
+            can_close
+            and _close_deadline_is_open(close_deadline)
+        )
+
     if mode == "trades":
         trades = _scoped_items(opened.get("trades") or [], allowlist)
         for trade in trades:
             trade_id = str(trade.get("id") or "")
             instrument = str(trade.get("instrument") or "unknown")
             item = {"scope": "trade", "trade_id": trade_id, "instrument": instrument}
-            if not can_close:
-                item.update({"ok": False, "error": "market closing window has ended"})
+            if not closure_request_allowed():
+                item.update(
+                    {
+                        "ok": False,
+                        "window_closed": True,
+                        "error": "market closing window has ended",
+                    }
+                )
             elif settings.get("dry_run"):
                 item.update({"ok": False, "error": "dry run; no close sent"})
             else:
@@ -499,8 +536,14 @@ def _close_requested_scope(
         except (TypeError, ValueError):
             payload = {"longUnits": "ALL", "shortUnits": "ALL"}
         item = {"scope": "position", "instrument": instrument}
-        if not can_close:
-            item.update({"ok": False, "error": "market closing window has ended"})
+        if not closure_request_allowed():
+            item.update(
+                {
+                    "ok": False,
+                    "window_closed": True,
+                    "error": "market closing window has ended",
+                }
+            )
         elif settings.get("dry_run"):
             item.update({"ok": False, "error": "dry run; no close sent"})
         else:
@@ -560,6 +603,7 @@ def process_account(
     settings: Dict[str, Any],
     *,
     can_close: bool = True,
+    close_deadline: Optional[datetime] = None,
     check_only: bool = False,
     allow_post_window_flat_verification: bool = True,
     on_state_change: Optional[Callable[[Dict[str, Any]], None]] = None,
@@ -674,6 +718,7 @@ def process_account(
             opened,
             settings,
             can_close=can_close,
+            close_deadline=close_deadline,
             on_progress=report_closure_progress,
         )
         # The post-close re-fetch is authoritative even if one close response was
@@ -714,6 +759,22 @@ def process_account(
                 }
             )
             return result
+        if any(
+            item.get("window_closed")
+            for item in result["closures"]
+            if isinstance(item, dict)
+        ):
+            result.update(
+                {
+                    "state": "missed cutoff/market closed",
+                    "last_error": (
+                        "Tradable closing window ended with "
+                        f"{result['open_count']} open item(s); no close "
+                        "request was sent after market close."
+                    ),
+                }
+            )
+            return result
         failed = [item for item in result["closures"] if not item.get("ok")]
         result["state"] = "partial closure failure" if failed else "retry pending"
         result["last_error"] = (
@@ -731,11 +792,12 @@ def process_account(
         return result
 
 
-def run_liquidation(
+def _run_liquidation_impl(
     settings: Dict[str, Any],
     reason: str,
     *,
     can_close: bool = True,
+    close_deadline: Optional[datetime] = None,
     allow_post_window_flat_verification: bool = True,
     progress_callback: Optional[
         Callable[[str, Dict[str, Dict[str, Any]]], None]
@@ -767,6 +829,7 @@ def run_liquidation(
                 mode,
                 settings,
                 can_close=can_close,
+                close_deadline=close_deadline,
                 allow_post_window_flat_verification=(
                     allow_post_window_flat_verification
                 ),
@@ -830,6 +893,54 @@ def run_liquidation(
         "accounts": account_results,
         "verified_flat": all_flat,
     }
+
+
+def run_liquidation(
+    settings: Dict[str, Any],
+    reason: str,
+    *,
+    can_close: bool = True,
+    close_deadline: Optional[datetime] = None,
+    lock_timeout: Optional[float] = None,
+    allow_post_window_flat_verification: bool = True,
+    progress_callback: Optional[
+        Callable[[str, Dict[str, Dict[str, Any]]], None]
+    ] = None,
+) -> Dict[str, Any]:
+    """Run one close/verify pass without overlapping another liquidation."""
+
+    if lock_timeout is None:
+        acquired = _liquidation_lock.acquire()
+    else:
+        acquired = _liquidation_lock.acquire(
+            timeout=max(0.0, float(lock_timeout))
+        )
+    if not acquired:
+        attempted_at = _iso_now()
+        return {
+            "state": "liquidation already in progress",
+            "result": "liquidation already in progress",
+            "error": (
+                "Another scheduled or manual liquidation is already in "
+                "progress. No duplicate close request was submitted."
+            ),
+            "last_attempt_at": attempted_at,
+            "accounts": {},
+            "verified_flat": False,
+        }
+    try:
+        return _run_liquidation_impl(
+            settings,
+            reason,
+            can_close=can_close,
+            close_deadline=close_deadline,
+            allow_post_window_flat_verification=(
+                allow_post_window_flat_verification
+            ),
+            progress_callback=progress_callback,
+        )
+    finally:
+        _liquidation_lock.release()
 
 
 def run_read_only_account_check(
@@ -1010,6 +1121,11 @@ def scheduler_iteration(
         return update_status(
             running=True,
             heartbeat_at=heartbeat,
+            sleeping=False,
+            sleep_reason=None,
+            sleep_started_at=None,
+            sleep_until=None,
+            scheduled_delay_seconds=0.0,
             state="disabled",
             state_detail="FX Weekend execution is disabled by durable settings.",
             selected_accounts=selected,
@@ -1023,6 +1139,11 @@ def scheduler_iteration(
         return update_status(
             running=True,
             heartbeat_at=heartbeat,
+            sleeping=False,
+            sleep_reason=None,
+            sleep_started_at=None,
+            sleep_until=None,
+            scheduled_delay_seconds=0.0,
             state=check.get("state"),
             state_detail=(
                 str(check.get("error"))
@@ -1043,6 +1164,11 @@ def scheduler_iteration(
         update_status(
             running=True,
             heartbeat_at=heartbeat,
+            sleeping=False,
+            sleep_reason=None,
+            sleep_started_at=None,
+            sleep_until=None,
+            scheduled_delay_seconds=0.0,
             state="checking",
             state_detail="Checking all selected OANDA accounts.",
             selected_accounts=selected,
@@ -1063,6 +1189,7 @@ def scheduler_iteration(
             settings,
             "scheduled",
             can_close=True,
+            close_deadline=window.get("market_close"),
             progress_callback=report_progress,
         )
         _apply_attempt_status(result)
@@ -1103,6 +1230,11 @@ def scheduler_iteration(
     update_status(
         running=True,
         heartbeat_at=heartbeat,
+        sleeping=False,
+        sleep_reason=None,
+        sleep_started_at=None,
+        sleep_until=None,
+        scheduled_delay_seconds=0.0,
         state="checking",
         state_detail=(
             "Closing window ended; performing a fresh read-only account check. "
@@ -1131,11 +1263,135 @@ def scheduler_iteration(
     return status_snapshot()
 
 
+def _scheduler_delay_seconds(
+    settings: Dict[str, Any],
+    status: Dict[str, Any],
+    now: Optional[datetime] = None,
+) -> float:
+    try:
+        base_interval = max(
+            5,
+            int(settings.get("check_interval_seconds", 60)),
+        )
+    except (TypeError, ValueError):
+        base_interval = 60
+    try:
+        failures = int(status.get("consecutive_failures") or 0)
+    except (AttributeError, TypeError, ValueError):
+        failures = 1
+    retrying_failure = (
+        status.get("state") in FINAL_FAILURE_STATES | {"retry pending"}
+    )
+    if retrying_failure:
+        try:
+            max_backoff = max(
+                base_interval,
+                int(
+                    settings.get(
+                        "max_retry_backoff_seconds",
+                        300,
+                    )
+                ),
+            )
+        except (TypeError, ValueError):
+            max_backoff = 300
+        delay = min(
+            max_backoff,
+            base_interval * (2 ** min(max(failures - 1, 0), 4)),
+        )
+    else:
+        delay = base_interval
+
+    # Never let an intentional failure backoff consume the entire remaining
+    # closure window. Retain bounded headroom for another close/verify attempt;
+    # after market close, the missed-window branch prevents live liquidation.
+    current = now or _now_brisbane()
+    try:
+        window = closure_window(settings, current)
+        market_close = window.get("market_close")
+        if (
+            retrying_failure
+            and window.get("phase") == "closure"
+            and isinstance(
+                market_close, datetime
+            )
+        ):
+            if current.tzinfo is None:
+                current = BRISBANE_TZ.localize(current)
+            remaining = (
+                market_close.astimezone(BRISBANE_TZ)
+                - current.astimezone(BRISBANE_TZ)
+            ).total_seconds()
+            if remaining > 0:
+                closure_retry_delay = min(
+                    remaining,
+                    max(
+                        1.0,
+                        remaining
+                        * CLOSURE_RETRY_MAX_DELAY_FRACTION,
+                    ),
+                )
+                delay = min(
+                    float(delay),
+                    closure_retry_delay,
+                )
+    except Exception as exc:
+        log(
+            "Could not cap the scheduler delay to market close; "
+            f"using the normal delay: {_safe_error(exc)}"
+        )
+    return max(0.0, float(delay))
+
+
+def wait_with_heartbeat(delay_seconds: float, reason: str) -> None:
+    """Wait without allowing an intentional scheduler delay to look stale."""
+    delay = max(0.0, float(delay_seconds))
+    started = _now_brisbane()
+    sleep_until = started + timedelta(seconds=delay)
+    update_status(
+        running=True,
+        heartbeat_at=started.isoformat(),
+        sleeping=delay > 0,
+        sleep_reason=str(reason) if delay > 0 else None,
+        sleep_started_at=started.isoformat() if delay > 0 else None,
+        sleep_until=sleep_until.isoformat() if delay > 0 else None,
+        scheduled_delay_seconds=delay,
+    )
+    remaining = delay
+    while remaining > 0:
+        interval = min(HEARTBEAT_INTERVAL_SECONDS, remaining)
+        time.sleep(interval)
+        remaining = max(0.0, remaining - interval)
+        update_status(
+            running=True,
+            heartbeat_at=_iso_now(),
+            sleeping=remaining > 0,
+            sleep_reason=str(reason) if remaining > 0 else None,
+            sleep_started_at=(
+                started.isoformat() if remaining > 0 else None
+            ),
+            sleep_until=(
+                sleep_until.isoformat() if remaining > 0 else None
+            ),
+            scheduled_delay_seconds=remaining,
+        )
+
+
 def scheduler_loop() -> None:
     update_status(
         running=True,
+        executor_pid=os.getpid(),
+        executor_instance_id=(
+            str(os.getenv("FXWEEKEND_EXECUTOR_INSTANCE_ID") or "").strip()
+            or None
+        ),
         executor_started_at=_iso_now(),
         heartbeat_at=_iso_now(),
+        sleeping=False,
+        sleep_reason=None,
+        sleep_started_at=None,
+        sleep_until=None,
+        scheduled_delay_seconds=0.0,
         state="checking",
         state_detail="Executor scheduler started.",
         selected_accounts=[],
@@ -1166,6 +1422,11 @@ def scheduler_loop() -> None:
                 status = update_status(
                     running=True,
                     heartbeat_at=_iso_now(),
+                    sleeping=False,
+                    sleep_reason=None,
+                    sleep_started_at=None,
+                    sleep_until=None,
+                    scheduled_delay_seconds=0.0,
                     state="retry pending",
                     state_detail=(
                         "Unexpected scheduler failure; the executor will retry."
@@ -1181,37 +1442,16 @@ def scheduler_loop() -> None:
                     f"{_safe_error(status_exc)}"
                 )
                 status = fallback_status
-        try:
-            base_interval = max(
-                5,
-                int(settings.get("check_interval_seconds", 60)),
-            )
-        except (TypeError, ValueError):
-            base_interval = 60
-        try:
-            failures = int(status.get("consecutive_failures") or 0)
-        except (AttributeError, TypeError, ValueError):
-            failures = 1
-        if status.get("state") in FINAL_FAILURE_STATES | {"retry pending"}:
-            try:
-                max_backoff = max(
-                    base_interval,
-                    int(
-                        settings.get(
-                            "max_retry_backoff_seconds",
-                            300,
-                        )
-                    ),
-                )
-            except (TypeError, ValueError):
-                max_backoff = 300
-            delay = min(
-                max_backoff,
-                base_interval * (2 ** min(max(failures - 1, 0), 4)),
-            )
-        else:
-            delay = base_interval
-        time.sleep(max(5, delay))
+        delay = _scheduler_delay_seconds(settings, status)
+        wait_with_heartbeat(
+            delay,
+            (
+                f"failure backoff after {status.get('state')}"
+                if status.get("state")
+                in FINAL_FAILURE_STATES | {"retry pending"}
+                else "scheduled check interval"
+            ),
+        )
 
 
 PAGE_TEMPLATE = """
@@ -1227,6 +1467,8 @@ PAGE_TEMPLATE = """
     .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px}.muted{color:#94a3b8}
     label{display:block;margin:10px 0}input,select{background:#0f172a;color:#e2e8f0;border:1px solid #475569;border-radius:6px;padding:7px}
     button{background:#2563eb;color:white;border:0;border-radius:8px;padding:10px 14px;font-weight:700;cursor:pointer}
+    button:disabled{cursor:not-allowed;opacity:.55}.action-result{margin-top:12px;padding:10px;border-radius:8px;background:#0f172a}
+    .action-result[data-ok="true"]{border:1px solid #16a34a}.action-result[data-ok="false"]{border:1px solid #dc2626}
     table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1px solid #334155;padding:8px}
   </style>
 </head>
@@ -1274,8 +1516,48 @@ PAGE_TEMPLATE = """
     <label><input type="checkbox" name="dry_run" {% if settings.dry_run %}checked{% endif %}> Dry run</label>
     <button type="submit">Save settings</button>
   </form>
-  <form class="card" method="post" action="api/run_now"><p class="muted">Run now acts on every selected account. Live manual execution is permitted only during the configured tradable closure window; the scheduler owns Live execution at all other times. It is blocked while the executor is disabled.</p><button type="submit" {% if not settings.enabled %}disabled{% endif %}>Run now</button></form>
-</main></body></html>
+  <form id="fxweekend-run-liquidation-form" class="card" method="post" action="api/run_now">
+    <h2>Manual liquidation</h2>
+    <p class="muted"><strong>Run liquidation now is not a start button.</strong> It immediately checks and liquidates every selected account. It does not start, enable, or activate the continuously owned scheduler. Live manual liquidation remains blocked outside the configured tradable closure window, and manual liquidation is blocked while the executor is disabled.</p>
+    <button type="submit" {% if not settings.enabled %}disabled{% endif %}>Run liquidation now</button>
+    <div id="fxweekend-liquidation-result" class="action-result" role="status" aria-live="polite" hidden></div>
+  </form>
+</main>
+<script>
+(() => {
+  const form = document.getElementById("fxweekend-run-liquidation-form");
+  const output = document.getElementById("fxweekend-liquidation-result");
+  if (!form || !output) return;
+  const button = form.querySelector('button[type="submit"]');
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (button) button.disabled = true;
+    output.hidden = false;
+    output.dataset.ok = "";
+    output.textContent = "Liquidation request in progress…";
+    try {
+      const response = await fetch(form.action, {
+        method: "POST",
+        headers: {"Accept": "application/json"},
+      });
+      const payload = await response.json().catch(() => ({}));
+      const accountStates = Object.entries(payload.accounts || {})
+        .map(([mode, item]) => `${mode.toUpperCase()}: ${item.state || "unknown"}`)
+        .join("; ");
+      const message = payload.error || payload.result || payload.state
+        || `Request finished with HTTP ${response.status}.`;
+      output.dataset.ok = String(Boolean(response.ok && payload.ok));
+      output.textContent = accountStates ? `${message} ${accountStates}` : message;
+    } catch (_error) {
+      output.dataset.ok = "false";
+      output.textContent = "The liquidation request could not be completed. The scheduler remains independently managed by Render.";
+    } finally {
+      if (button) button.disabled = false;
+    }
+  });
+})();
+</script>
+</body></html>
 """
 
 
@@ -1364,16 +1646,21 @@ def run_now() -> Any:
             "Manual Live closure is blocked outside the configured tradable "
             "closure window."
         )
-        payload = update_status(
-            state=str(window.get("phase") or "before cutoff"),
-            state_detail=message,
-            selected_accounts=selected,
-            last_error=message,
+        # A rejected manual request is not an executor failure and must not
+        # overwrite scheduler state, heartbeat, or retry counters.
+        payload = status_snapshot()
+        log(
+            "Manual Live liquidation request blocked outside the configured "
+            "tradable closure window; scheduler state was left unchanged."
         )
         return (
             {
                 "ok": False,
-                "state": payload.get("state"),
+                "state": str(
+                    payload.get("state")
+                    or window.get("phase")
+                    or "before cutoff"
+                ),
                 "result": "live manual closure blocked",
                 "error": message,
                 "accounts": payload.get("accounts") or {},
@@ -1398,8 +1685,16 @@ def run_now() -> Any:
         settings,
         "manual",
         can_close=True,
+        close_deadline=(
+            window.get("market_close")
+            if "live" in selected
+            else None
+        ),
+        lock_timeout=0.0,
         progress_callback=report_progress,
     )
+    if result.get("state") == "liquidation already in progress":
+        return {"ok": False, **result}, 409
     _apply_attempt_status(result)
     return {"ok": bool(result.get("verified_flat")), **result}
 

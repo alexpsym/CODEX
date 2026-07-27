@@ -10465,7 +10465,16 @@ class ManagedScript:
     startup_started_at: Optional[float] = None
     startup_completed_at: Optional[float] = None
     pid: Optional[int] = None
+    executor_instance_id: Optional[str] = None
+    heartbeat_confirmed_pid: Optional[int] = None
+    operational_started_pid: Optional[int] = None
     startup_task: Optional[asyncio.Task] = field(default=None, repr=False, compare=False)
+    _lifecycle_lock: asyncio.Lock = field(
+        default_factory=asyncio.Lock,
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     @property
     def is_running(self) -> bool:
@@ -10483,6 +10492,7 @@ class ManagedScript:
             "starting": self.is_starting or startup_pending,
             "port": self.port,
             "pid": self.pid,
+            "executor_instance_id": self.executor_instance_id,
             "return_code": None if self.process is None else self.process.returncode,
             "open_url": script_open_url(self),
             "logs_url": script_logs_url(self.name),
@@ -10495,6 +10505,8 @@ class ManagedScript:
             "last_spawn_cwd": self.last_spawn_cwd,
             "startup_started_at": self.startup_started_at,
             "startup_completed_at": self.startup_completed_at,
+            "heartbeat_confirmed_pid": self.heartbeat_confirmed_pid,
+            "operational_started_pid": self.operational_started_pid,
             "standalone": self.name in STANDALONE_SCRIPTS,
         }
 
@@ -10539,13 +10551,26 @@ class ManagedScript:
         }
 
     async def start(self, *, ignore_starting: bool = False) -> None:
+        # Serialize the complete spawn transaction with stop(). In particular,
+        # stop() waits on a child process and must not dereference mutable
+        # self.process state after a concurrent start has installed a new child.
+        async with self._lifecycle_lock:
+            await self._start_locked(ignore_starting=ignore_starting)
+
+    async def _start_locked(self, *, ignore_starting: bool = False) -> None:
         if self.is_running:
             return
-        if self.is_starting and not ignore_starting:
+        # Never bypass the in-flight guard. The legacy flag remains in the
+        # signature for caller compatibility, but allowing it to override
+        # `is_starting` can spawn two children during restore/supervisor races.
+        if self.is_starting:
             return
         if not self.path.exists():
             raise FileNotFoundError(f"Script not found: {self.path}")
 
+        restart_reason = str(
+            self.last_exit_reason or self.last_start_error or "initial autostart"
+        ).strip()
         self.last_start_attempt_at = time.time()
         self.last_start_error = None
         self.last_exit_code = None
@@ -10554,10 +10579,22 @@ class ManagedScript:
         self.startup_started_at = self.last_start_attempt_at
         self.startup_completed_at = None
         self.pid = None
+        self.executor_instance_id = (
+            uuid4().hex if self.name == "fxweekend-clone" else None
+        )
+        self.heartbeat_confirmed_pid = None
+        self.operational_started_pid = None
+        if self.name == "fxweekend-clone":
+            AUTOSTART_LOGGER.info(
+                "FX_WEEKEND_START_REQUESTED reason=%s",
+                restart_reason,
+            )
         self.add_log("Starting script...")
         self.add_log("Spawning subprocess...")
         env = os.environ.copy()
         env.setdefault("PYTHONUNBUFFERED", "1")
+        if self.executor_instance_id:
+            env["FXWEEKEND_EXECUTOR_INSTANCE_ID"] = self.executor_instance_id
         current_pythonpath = env.get("PYTHONPATH", "")
         env["PYTHONPATH"] = (
             f"{BASE_DIR}:{current_pythonpath}" if current_pythonpath else str(BASE_DIR)
@@ -10604,17 +10641,24 @@ class ManagedScript:
 
         self.pid = self.process.pid
         self.add_log(f"Spawned PID {self.pid}. Waiting for monitor output...")
+        if self.name == "fxweekend-clone":
+            AUTOSTART_LOGGER.info(
+                "FX_WEEKEND_CHILD_SPAWNED pid=%s cwd=%s",
+                self.pid,
+                self.last_spawn_cwd,
+            )
         asyncio.create_task(self._capture_output())
 
     async def _capture_output(self) -> None:
         assert self.process is not None
-        if self.process.stdout is None:
+        process = self.process
+        if process.stdout is None:
             return
 
         saw_output = False
         try:
             while True:
-                line = await self.process.stdout.readline()
+                line = await process.stdout.readline()
                 if not line:
                     break
                 if not saw_output:
@@ -10623,26 +10667,58 @@ class ManagedScript:
                     self.startup_completed_at = time.time()
                 self.add_log(line.decode("utf-8", errors="replace"))
         finally:
-            await self.process.wait()
-            self.last_exit_code = self.process.returncode
-            if not saw_output and self.process.returncode is not None:
+            await process.wait()
+            if self.process is not process:
+                if self.name == "fxweekend-clone":
+                    AUTOSTART_LOGGER.warning(
+                        "FX_WEEKEND_TERMINATED pid=%s exit_code=%s "
+                        "reason=superseded process cleanup",
+                        process.pid,
+                        process.returncode,
+                    )
+                return
+            self.last_exit_code = process.returncode
+            if not saw_output and process.returncode is not None:
                 self.last_exit_reason = "Process exited before producing startup output."
                 self.add_log(
-                    f"Process exited before producing startup output (exit code {self.process.returncode})."
+                    f"Process exited before producing startup output (exit code {process.returncode})."
                 )
             elif self.last_exit_reason is None:
                 self.last_exit_reason = (
-                    "Process exited unexpectedly." if self.process.returncode else None
+                    "Process exited unexpectedly." if process.returncode else None
+                )
+            if self.name == "fxweekend-clone":
+                AUTOSTART_LOGGER.warning(
+                    "FX_WEEKEND_TERMINATED pid=%s exit_code=%s reason=%s",
+                    process.pid,
+                    process.returncode,
+                    self.last_exit_reason or "process exited normally",
                 )
             self.is_starting = False
             self.startup_completed_at = self.startup_completed_at or time.time()
             self.pid = None
+            self.executor_instance_id = None
+            self.heartbeat_confirmed_pid = None
+            self.operational_started_pid = None
             self.port = None
 
     async def stop(self) -> None:
+        # Keep the old child identity stable across every await below. A start
+        # requested while termination is in progress waits for cleanup, then
+        # installs its new process and lifecycle metadata after this lock exits.
+        async with self._lifecycle_lock:
+            await self._stop_locked()
+
+    async def _stop_locked(self) -> None:
         if not self.is_running:
             return
         assert self.process is not None
+        if self.name == "fxweekend-clone":
+            AUTOSTART_LOGGER.warning(
+                "FX_WEEKEND_TERMINATION_REQUESTED pid=%s reason=%s",
+                self.process.pid,
+                self.last_exit_reason or "stop requested",
+            )
         if os.name == "nt" and self.process.pid:
             try:
                 os.kill(self.process.pid, signal.CTRL_BREAK_EVENT)
@@ -10659,6 +10735,9 @@ class ManagedScript:
         self.is_starting = False
         self.startup_completed_at = time.time()
         self.pid = None
+        self.executor_instance_id = None
+        self.heartbeat_confirmed_pid = None
+        self.operational_started_pid = None
 
 
 @dataclass
@@ -10988,6 +11067,9 @@ FXWEEKEND_DEFAULT_SETTINGS: Dict[str, object] = {
     "instrument_allowlist": [],
 }
 _FXWEEKEND_LAST_PERSISTED_STATUS_SIGNATURE = ""
+FXWEEKEND_HEARTBEAT_MIN_STALE_SECONDS = 180.0
+FXWEEKEND_HEARTBEAT_MIN_MARGIN_SECONDS = 60.0
+FXWEEKEND_HEARTBEAT_STARTUP_GRACE_SECONDS = 120.0
 
 
 def _fxweekend_status_signature(payload: object) -> str:
@@ -11319,7 +11401,28 @@ def _fxweekend_heartbeat_fresh(
     runtime: Optional[Dict[str, object]] = None,
     *,
     now: Optional[datetime] = None,
+    expected_pid: Optional[int] = None,
+    expected_instance_id: Optional[str] = None,
 ) -> bool:
+    return bool(
+        _fxweekend_heartbeat_diagnostics(
+            settings,
+            runtime,
+            now=now,
+            expected_pid=expected_pid,
+            expected_instance_id=expected_instance_id,
+        )["fresh"]
+    )
+
+
+def _fxweekend_heartbeat_diagnostics(
+    settings: Optional[Dict[str, object]] = None,
+    runtime: Optional[Dict[str, object]] = None,
+    *,
+    now: Optional[datetime] = None,
+    expected_pid: Optional[int] = None,
+    expected_instance_id: Optional[str] = None,
+) -> Dict[str, object]:
     settings_payload = (
         settings
         if isinstance(settings, dict)
@@ -11336,33 +11439,129 @@ def _fxweekend_heartbeat_fresh(
     heartbeat_raw = str(
         (runtime_payload or {}).get("heartbeat_at") or ""
     ).strip()
+    runtime_pid_raw = (runtime_payload or {}).get("executor_pid")
+    try:
+        runtime_pid = (
+            int(runtime_pid_raw)
+            if runtime_pid_raw not in (None, "")
+            else None
+        )
+    except (TypeError, ValueError):
+        runtime_pid = None
+    try:
+        normalized_expected_pid = (
+            int(expected_pid) if expected_pid not in (None, "") else None
+        )
+    except (TypeError, ValueError):
+        normalized_expected_pid = None
+    pid_matches = (
+        normalized_expected_pid is None
+        or runtime_pid == normalized_expected_pid
+    )
+    runtime_instance_id = str(
+        (runtime_payload or {}).get("executor_instance_id") or ""
+    ).strip()
+    normalized_expected_instance_id = str(
+        expected_instance_id or ""
+    ).strip()
+    instance_matches = (
+        not normalized_expected_instance_id
+        or runtime_instance_id == normalized_expected_instance_id
+    )
+    try:
+        check_interval = max(
+            1.0,
+            float((settings_payload or {}).get("check_interval_seconds") or 60),
+        )
+    except (TypeError, ValueError):
+        check_interval = 60.0
+    try:
+        maximum_backoff = max(
+            check_interval,
+            float(
+                (settings_payload or {}).get("max_retry_backoff_seconds")
+                or check_interval
+            ),
+        )
+    except (TypeError, ValueError):
+        maximum_backoff = check_interval
+    stale_after = max(
+        FXWEEKEND_HEARTBEAT_MIN_STALE_SECONDS,
+        check_interval * 3.0,
+        maximum_backoff
+        + max(FXWEEKEND_HEARTBEAT_MIN_MARGIN_SECONDS, check_interval * 2.0),
+    )
+    diagnostics: Dict[str, object] = {
+        "fresh": False,
+        "timestamp_fresh": False,
+        "heartbeat_at": heartbeat_raw or None,
+        "heartbeat_age_seconds": None,
+        "stale_after_seconds": stale_after,
+        "check_interval_seconds": check_interval,
+        "max_retry_backoff_seconds": maximum_backoff,
+        "expected_pid": normalized_expected_pid,
+        "executor_pid": runtime_pid,
+        "pid_matches": pid_matches,
+        "expected_instance_id": normalized_expected_instance_id or None,
+        "executor_instance_id": runtime_instance_id or None,
+        "instance_matches": instance_matches,
+    }
     if not heartbeat_raw:
-        return False
+        return diagnostics
     try:
         heartbeat_dt = datetime.fromisoformat(
             heartbeat_raw.replace("Z", "+00:00")
         )
         if heartbeat_dt.tzinfo is None:
             heartbeat_dt = heartbeat_dt.replace(tzinfo=timezone.utc)
-        grace = max(
-            180.0,
-            float(
-                (settings_payload or {}).get(
-                    "check_interval_seconds"
-                )
-                or 60
-            )
-            * 3.0,
-        )
         current = now or datetime.now(timezone.utc)
         if current.tzinfo is None:
             current = current.replace(tzinfo=timezone.utc)
-        return (
+        age_seconds = (
             current.astimezone(timezone.utc)
             - heartbeat_dt.astimezone(timezone.utc)
-        ).total_seconds() <= grace
+        ).total_seconds()
+        diagnostics["heartbeat_age_seconds"] = max(0.0, age_seconds)
+        diagnostics["timestamp_fresh"] = age_seconds <= stale_after
+        diagnostics["fresh"] = bool(
+            diagnostics["timestamp_fresh"]
+            and pid_matches
+            and instance_matches
+        )
+        return diagnostics
     except Exception:
-        return False
+        return diagnostics
+
+
+def _fxweekend_heartbeat_startup_grace(
+    summary: Dict[str, object],
+    *,
+    now_epoch: Optional[float] = None,
+) -> Dict[str, object]:
+    started_raw = summary.get("startup_started_at")
+    try:
+        started_at = float(started_raw)
+    except (TypeError, ValueError):
+        started_at = 0.0
+    current = time.time() if now_epoch is None else float(now_epoch)
+    age_seconds = max(0.0, current - started_at) if started_at > 0 else None
+    remaining = (
+        max(0.0, FXWEEKEND_HEARTBEAT_STARTUP_GRACE_SECONDS - age_seconds)
+        if age_seconds is not None
+        else 0.0
+    )
+    active = bool(
+        summary.get("running")
+        and summary.get("pid")
+        and age_seconds is not None
+        and age_seconds <= FXWEEKEND_HEARTBEAT_STARTUP_GRACE_SECONDS
+    )
+    return {
+        "active": active,
+        "age_seconds": age_seconds,
+        "remaining_seconds": remaining,
+        "grace_seconds": FXWEEKEND_HEARTBEAT_STARTUP_GRACE_SECONDS,
+    }
 
 
 def _autostart_component_readiness(
@@ -11468,6 +11667,15 @@ def _autostart_component_readiness(
         component["selected_accounts"] = selected_accounts
         component["runtime_selected_accounts"] = runtime_selected_accounts
         component["heartbeat_at"] = runtime.get("heartbeat_at")
+        component["executor_pid"] = runtime.get("executor_pid")
+        component["executor_instance_id"] = runtime.get(
+            "executor_instance_id"
+        )
+        component["executor_started_at"] = runtime.get("executor_started_at")
+        component["process_pid"] = summary.get("pid")
+        component["process_instance_id"] = summary.get(
+            "executor_instance_id"
+        )
         component["last_access_check_at"] = runtime.get("last_access_check_at")
         component["last_verified_flat_at"] = runtime.get("last_verified_flat_at")
         component["accounts"] = runtime_accounts
@@ -11489,14 +11697,15 @@ def _autostart_component_readiness(
         ]
         pending_runtime_accounts: List[str] = []
         account_errors: List[str] = []
+        account_warnings: List[str] = []
         account_failure_state: Optional[str] = None
         account_failure_states = {
             "credential failure",
             "api failure",
             "partial closure failure",
-            "missed cutoff/market closed",
             "retry pending",
         }
+        account_warning_states = {"missed cutoff/market closed"}
         for mode in selected_accounts:
             account = runtime_accounts.get(mode)
             if not isinstance(account, dict):
@@ -11516,26 +11725,63 @@ def _autostart_component_readiness(
                         or "account check failed"
                     )
                 )
+            if account_state_normalized in account_warning_states:
+                account_warnings.append(
+                    f"{mode}: "
+                    + str(
+                        account.get("last_error")
+                        or account_state
+                        or "the cutoff was missed or the market was closed"
+                    )
+                )
         component["missing_runtime_accounts"] = missing_runtime_accounts
         component["pending_runtime_accounts"] = pending_runtime_accounts
         component["account_errors"] = account_errors
-        heartbeat_fresh = _fxweekend_heartbeat_fresh(
+        component["account_warnings"] = account_warnings
+        heartbeat = _fxweekend_heartbeat_diagnostics(
             settings,
             runtime,
+            expected_pid=summary.get("pid"),
+            expected_instance_id=summary.get("executor_instance_id"),
         )
+        heartbeat_fresh = bool(heartbeat["fresh"])
         component["heartbeat_fresh"] = heartbeat_fresh
-        runtime_failure = str(runtime.get("state") or "") in {
+        component["heartbeat_timestamp_fresh"] = heartbeat[
+            "timestamp_fresh"
+        ]
+        component["heartbeat_pid_matches"] = heartbeat["pid_matches"]
+        component["heartbeat_instance_matches"] = heartbeat[
+            "instance_matches"
+        ]
+        component["heartbeat_age_seconds"] = heartbeat["heartbeat_age_seconds"]
+        component["heartbeat_stale_after_seconds"] = heartbeat[
+            "stale_after_seconds"
+        ]
+        startup_grace = _fxweekend_heartbeat_startup_grace(summary)
+        component["heartbeat_startup_grace_active"] = startup_grace["active"]
+        component["heartbeat_startup_grace_remaining_seconds"] = (
+            startup_grace["remaining_seconds"]
+        )
+        runtime_state = str(runtime.get("state") or "").strip()
+        runtime_state_normalized = runtime_state.lower()
+        runtime_failure = runtime_state_normalized in {
             "credential failure",
-            "API failure",
+            "api failure",
             "partial closure failure",
-            "missed cutoff/market closed",
+            "retry pending",
         }
+        runtime_warning = (
+            runtime_state_normalized in account_warning_states
+            or bool(account_warnings)
+        )
         if not enabled:
             component.update(
                 {
                     "ready": True,
                     "phase": "disabled",
                     "reason": "FX Weekend execution is durably disabled.",
+                    "health_state": "disabled",
+                    "health_reason": "FX Weekend execution is durably disabled.",
                 }
             )
             return component
@@ -11548,6 +11794,11 @@ def _autostart_component_readiness(
                         state_sync.get("fxweekend_rollback_error")
                         or "FX Weekend durable settings rollback could not be verified."
                     ),
+                    "health_state": "red",
+                    "health_reason": str(
+                        state_sync.get("fxweekend_rollback_error")
+                        or "FX Weekend durable settings rollback could not be verified."
+                    ),
                 }
             )
             return component
@@ -11557,6 +11808,8 @@ def _autostart_component_readiness(
                     "ready": False,
                     "phase": "account_configuration_failed",
                     "reason": "No OANDA account mode is selected.",
+                    "health_state": "red",
+                    "health_reason": "No OANDA account mode is selected.",
                 }
             )
             return component
@@ -11566,18 +11819,108 @@ def _autostart_component_readiness(
                     "ready": False,
                     "phase": "credential_failure",
                     "reason": "; ".join(credential_errors),
+                    "health_state": "red",
+                    "health_reason": "; ".join(credential_errors),
+                }
+            )
+            return component
+        if not running:
+            stopped_reason = (
+                "FX Weekend is still starting."
+                if starting
+                else reason or "FX Weekend executor is not running."
+            )
+            component.update(
+                {
+                    "ready": False,
+                    "phase": (
+                        "autostart_starting"
+                        if starting
+                        else "autostart_pending"
+                    ),
+                    "reason": stopped_reason,
+                    "health_state": "amber" if starting else "red",
+                    "health_reason": stopped_reason,
+                }
+            )
+            return component
+        if not heartbeat_fresh and bool(startup_grace["active"]):
+            pending_reason = (
+                "FX Weekend is waiting for the current child process to "
+                "publish its first heartbeat."
+            )
+            component.update(
+                {
+                    "ready": False,
+                    "phase": "heartbeat_pending_for_process",
+                    "reason": pending_reason,
+                    "health_state": "amber",
+                    "health_reason": pending_reason,
+                }
+            )
+            return component
+        if not heartbeat_fresh:
+            if bool(heartbeat["timestamp_fresh"]) and (
+                not bool(heartbeat["pid_matches"])
+                or not bool(heartbeat["instance_matches"])
+            ):
+                stale_reason = (
+                    "FX Weekend heartbeat belongs to a previous child "
+                    "process instance."
+                )
+            else:
+                stale_reason = (
+                    "FX Weekend heartbeat is missing or genuinely stale."
+                )
+            component.update(
+                {
+                    "ready": False,
+                    "phase": "heartbeat_stale",
+                    "reason": stale_reason,
+                    "health_state": "red",
+                    "health_reason": stale_reason,
+                }
+            )
+            return component
+        if runtime_failure:
+            failure_reason = str(
+                runtime.get("last_error")
+                or runtime_state
+                or "FX Weekend account check failed."
+            )
+            component.update(
+                {
+                    "ready": False,
+                    "phase": str(runtime_state or "executor_failed").replace(" ", "_"),
+                    "reason": failure_reason,
+                    "health_state": "red",
+                    "health_reason": failure_reason,
+                }
+            )
+            return component
+        if starting:
+            component.update(
+                {
+                    "ready": False,
+                    "phase": "autostart_starting",
+                    "reason": "FX Weekend is still starting.",
+                    "health_state": "amber",
+                    "health_reason": "FX Weekend is still starting.",
                 }
             )
             return component
         if runtime_selected_accounts != selected_accounts:
+            pending_reason = (
+                "FX Weekend runtime has not loaded the current selected "
+                "accounts yet."
+            )
             component.update(
                 {
                     "ready": False,
                     "phase": "account_selection_pending",
-                    "reason": (
-                        "FX Weekend runtime has not loaded the current selected "
-                        "accounts yet."
-                    ),
+                    "reason": pending_reason,
+                    "health_state": "amber",
+                    "health_reason": pending_reason,
                 }
             )
             return component
@@ -11589,6 +11932,8 @@ def _autostart_component_readiness(
                         account_failure_state or "account_failure"
                     ).replace(" ", "_"),
                     "reason": "; ".join(account_errors),
+                    "health_state": "red",
+                    "health_reason": "; ".join(account_errors),
                 }
             )
             return component
@@ -11601,40 +11946,43 @@ def _autostart_component_readiness(
                     if mode not in missing_runtime_accounts
                 ],
             ]
+            pending_reason = (
+                "FX Weekend has not completed a current account check "
+                f"for: {', '.join(pending_modes)}."
+            )
             component.update(
                 {
                     "ready": False,
                     "phase": "account_checks_pending",
-                    "reason": (
-                        "FX Weekend has not completed a current account check "
-                        f"for: {', '.join(pending_modes)}."
-                    ),
+                    "reason": pending_reason,
+                    "health_state": "amber",
+                    "health_reason": pending_reason,
                 }
             )
             return component
-        if running and not starting and heartbeat_fresh and not runtime_failure:
-            component.update({"ready": True, "phase": "ready", "reason": ""})
-            return component
-        if runtime_failure:
+        if runtime_warning:
+            warning_reason = (
+                str(runtime.get("state_detail") or "").strip()
+                or "; ".join(account_warnings)
+                or "The executor is healthy, but the prior cutoff was missed or the market was closed."
+            )
             component.update(
                 {
-                    "ready": False,
-                    "phase": str(runtime.get("state") or "executor_failed").replace(" ", "_"),
-                    "reason": str(runtime.get("last_error") or runtime.get("state") or "FX Weekend account check failed."),
+                    "ready": True,
+                    "phase": "operational_warning",
+                    "reason": warning_reason,
+                    "health_state": "amber",
+                    "health_reason": warning_reason,
                 }
             )
             return component
         component.update(
             {
-                "ready": False,
-                "phase": "autostart_starting" if starting else "heartbeat_stale" if running else "autostart_pending",
-                "reason": (
-                    "FX Weekend is still starting."
-                    if starting
-                    else "FX Weekend heartbeat is missing or stale."
-                    if running
-                    else reason or "FX Weekend executor is not running."
-                ),
+                "ready": True,
+                "phase": "ready",
+                "reason": "",
+                "health_state": "green",
+                "health_reason": "FX Weekend executor is running with a fresh heartbeat.",
             }
         )
         return component
@@ -12089,6 +12437,82 @@ def _scanner_has_external_live_runtime(script_name: str) -> bool:
     return runtime_pid is not None and runtime_pid != script_pid
 
 
+def _managed_script_log(script: object, message: str) -> None:
+    add_log = getattr(script, "add_log", None)
+    if callable(add_log):
+        add_log(message)
+
+
+def _managed_script_summary(script: object) -> Dict[str, object]:
+    to_summary = getattr(script, "to_summary", None)
+    if callable(to_summary):
+        summary = to_summary()
+        if isinstance(summary, dict):
+            return summary
+    return {
+        "running": bool(getattr(script, "is_running", False)),
+        "starting": bool(getattr(script, "is_starting", False)),
+        "pid": getattr(script, "pid", None),
+        "startup_started_at": getattr(script, "startup_started_at", None),
+    }
+
+
+def _confirm_fxweekend_operational_lifecycle(
+    script: ManagedScript,
+    *,
+    settings: Dict[str, object],
+    runtime: Dict[str, object],
+    heartbeat: Dict[str, object],
+) -> None:
+    """Emit each successful FX executor lifecycle milestone once per PID."""
+
+    pid = getattr(script, "pid", None)
+    if not pid:
+        return
+    if getattr(script, "heartbeat_confirmed_pid", None) != pid:
+        script.heartbeat_confirmed_pid = pid
+        if getattr(script, "is_starting", False):
+            script.is_starting = False
+            script.startup_completed_at = time.time()
+        AUTOSTART_LOGGER.info(
+            "FX_WEEKEND_HEARTBEAT_CONFIRMED pid=%s heartbeat_at=%s "
+            "age_seconds=%s stale_after_seconds=%s",
+            pid,
+            heartbeat.get("heartbeat_at"),
+            heartbeat.get("heartbeat_age_seconds"),
+            heartbeat.get("stale_after_seconds"),
+        )
+        _managed_script_log(
+            script,
+            "Scheduler heartbeat confirmed "
+            f"for PID {pid} at {heartbeat.get('heartbeat_at')}.",
+        )
+
+    component = _autostart_component_readiness(
+        "fxweekend-clone",
+        summary_override=_managed_script_summary(script),
+    )
+    if (
+        bool(settings.get("enabled", True))
+        and bool(component.get("ready"))
+        and getattr(script, "operational_started_pid", None) != pid
+    ):
+        script.operational_started_pid = pid
+        AUTOSTART_LOGGER.info(
+            "FX_WEEKEND_OPERATIONAL_STARTUP pid=%s executor_started_at=%s "
+            "health_state=%s runtime_state=%s",
+            pid,
+            runtime.get("executor_started_at"),
+            component.get("health_state"),
+            runtime.get("state"),
+        )
+        _managed_script_log(
+            script,
+            "FX Weekend operational startup confirmed "
+            f"for PID {pid} ({component.get('health_state')}).",
+        )
+
+
 async def _supervise_autostart_scripts_once(
     autostart_targets: List[str],
 ) -> None:
@@ -12101,12 +12525,33 @@ async def _supervise_autostart_scripts_once(
             allowed, gate_error = _fxweekend_start_gate()
             if not allowed:
                 if script.is_running:
+                    stop_reason = (
+                        "authoritative-state gate blocked execution: "
+                        f"{gate_error}"
+                    )
+                    script.last_exit_reason = stop_reason
+                    _managed_script_log(
+                        script,
+                        "FX Weekend termination requested: "
+                        f"{stop_reason}",
+                    )
+                    AUTOSTART_LOGGER.error(
+                        "FX_WEEKEND_RESTART_REQUIRED pid=%s reason=%s",
+                        getattr(script, "pid", None),
+                        stop_reason,
+                    )
                     await script.stop()
+                if script.last_start_error != gate_error:
+                    _managed_script_log(
+                        script,
+                        "FX Weekend executor start blocked by "
+                        f"authoritative-state gate: {gate_error}",
+                    )
+                    AUTOSTART_LOGGER.error(
+                        "FX_WEEKEND_START_BLOCKED reason=%s",
+                        gate_error,
+                    )
                 script.last_start_error = gate_error
-                AUTOSTART_LOGGER.error(
-                    "FX Weekend executor blocked by authoritative-state gate: %s",
-                    gate_error,
-                )
                 continue
             try:
                 await asyncio.to_thread(_persist_fxweekend_status_if_changed)
@@ -12120,20 +12565,67 @@ async def _supervise_autostart_scripts_once(
                     FXWEEKEND_DEFAULT_SETTINGS,
                 )
                 runtime = _load_json_file(FXWEEKEND_STATUS_PATH, {})
-                if not _fxweekend_heartbeat_fresh(
+                settings = settings if isinstance(settings, dict) else {}
+                runtime = runtime if isinstance(runtime, dict) else {}
+                heartbeat = _fxweekend_heartbeat_diagnostics(
                     settings if isinstance(settings, dict) else None,
                     runtime if isinstance(runtime, dict) else None,
-                ):
+                    expected_pid=getattr(script, "pid", None),
+                    expected_instance_id=getattr(
+                        script, "executor_instance_id", None
+                    ),
+                )
+                if not bool(heartbeat["fresh"]):
+                    startup_grace = _fxweekend_heartbeat_startup_grace(
+                        _managed_script_summary(script)
+                    )
+                    if bool(startup_grace["active"]):
+                        _managed_script_log(
+                            script,
+                            "Waiting for the current FX Weekend child "
+                            f"PID {getattr(script, 'pid', None)} to publish "
+                            "its first heartbeat "
+                            f"(startup grace remaining "
+                            f"{startup_grace.get('remaining_seconds')}s).",
+                        )
+                        continue
+                    stale_reason = (
+                        "scheduler heartbeat missing, stale, or owned by a "
+                        "different executor instance "
+                        f"(heartbeat_at={heartbeat.get('heartbeat_at')}, "
+                        f"age_seconds={heartbeat.get('heartbeat_age_seconds')}, "
+                        f"stale_after_seconds={heartbeat.get('stale_after_seconds')}, "
+                        f"managed_pid={getattr(script, 'pid', None)}, "
+                        f"runtime_pid={heartbeat.get('executor_pid')}, "
+                        f"pid_matches={heartbeat.get('pid_matches')}, "
+                        f"instance_matches={heartbeat.get('instance_matches')})"
+                    )
+                    script.last_exit_reason = stale_reason
+                    _managed_script_log(
+                        script,
+                        "FX Weekend termination requested: "
+                        f"{stale_reason}",
+                    )
                     AUTOSTART_LOGGER.error(
-                        "FX Weekend heartbeat is missing or stale; stopping "
-                        "the child so the next supervisor pass can restart it."
+                        "FX_WEEKEND_RESTART_REQUIRED pid=%s reason=%s",
+                        getattr(script, "pid", None),
+                        stale_reason,
                     )
                     await script.stop()
                     _SCANNER_SUPERVISOR_BACKOFF.pop(name, None)
                     _SCANNER_SUPERVISOR_BACKOFF_WINDOW.pop(name, None)
                     continue
+                _confirm_fxweekend_operational_lifecycle(
+                    script,
+                    settings=settings,
+                    runtime=runtime,
+                    heartbeat=heartbeat,
+                )
         if script.is_running:
             _SCANNER_SUPERVISOR_BACKOFF.pop(name, None)
+            continue
+        startup_task = getattr(script, "startup_task", None)
+        if startup_task is not None and not startup_task.done():
             continue
         is_scanner = name in {"bybit_monitor", "oanda_monitor"}
         if is_scanner and _scanner_has_external_live_runtime(name):
@@ -12143,7 +12635,23 @@ async def _supervise_autostart_scripts_once(
         if retry_after and now < retry_after:
             continue
         supervisor_label = "Scanner supervisor" if is_scanner else "Autostart supervisor"
-        AUTOSTART_LOGGER.warning("%s restarting %s", supervisor_label, name)
+        restart_reason = str(
+            getattr(script, "last_exit_reason", None)
+            or getattr(script, "last_start_error", None)
+            or "managed child is not running"
+        ).strip()
+        if name == "fxweekend-clone":
+            _managed_script_log(
+                script,
+                "FX Weekend restart requested: "
+                f"{restart_reason}",
+            )
+            AUTOSTART_LOGGER.warning(
+                "FX_WEEKEND_RESTART_REQUESTED reason=%s",
+                restart_reason,
+            )
+        else:
+            AUTOSTART_LOGGER.warning("%s restarting %s", supervisor_label, name)
         try:
             await script.start()
             _SCANNER_SUPERVISOR_BACKOFF.pop(name, None)
@@ -13033,6 +13541,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         .status-dot.running { background: #22c55e; }
         .status-dot.starting { background: #f59e0b; }
         .status-dot.stopped { background: #ef4444; }
+        .status-dot.disabled { background: #64748b; }
         .empty-state { color: #94a3b8; margin-top: 0.9rem; }
 
         .table-wrap { overflow-x: auto; border-radius: 12px; border: 1px solid #1f2937; background: #0b1220; }
@@ -13734,6 +14243,33 @@ PROXY_HOP_HEADERS = {
 }
 PROXY_STRIP_HEADERS = {"content-encoding", "content-length"}
 PROXY_LOGGER = logging.getLogger("uvicorn.error")
+try:
+    FXWEEKEND_RUN_NOW_PROXY_TIMEOUT_SECONDS = max(
+        30.0,
+        float(
+            os.getenv(
+                "FXWEEKEND_RUN_NOW_PROXY_TIMEOUT_SECONDS",
+                "600",
+            )
+            or 600
+        ),
+    )
+except (TypeError, ValueError):
+    FXWEEKEND_RUN_NOW_PROXY_TIMEOUT_SECONDS = 600.0
+
+
+def _app_proxy_timeout_seconds(
+    script_name: str,
+    path: str,
+    method: str,
+) -> float:
+    if (
+        str(script_name).strip() == "fxweekend-clone"
+        and str(path).strip("/") == "api/run_now"
+        and str(method).strip().upper() == "POST"
+    ):
+        return FXWEEKEND_RUN_NOW_PROXY_TIMEOUT_SECONDS
+    return 30.0
 
 
 def _normalize_bybit_recv_window_ms(raw_value: Optional[str]) -> int:
@@ -26262,7 +26798,12 @@ async def proxy_app(script_name: str, request: Request, path: str = "") -> Respo
         target,
     )
 
-    timeout = httpx.Timeout(30.0, connect=2.0)
+    proxy_timeout_seconds = _app_proxy_timeout_seconds(
+        script.name,
+        path,
+        request.method,
+    )
+    timeout = httpx.Timeout(proxy_timeout_seconds, connect=2.0)
     async with httpx.AsyncClient(follow_redirects=False, timeout=timeout) as client:
         resp = None
         start_time = time.monotonic()
@@ -26988,7 +27529,7 @@ async def _background_start(script: ManagedScript) -> None:
     """Start a script without tying its output or failures to the HTTP response."""
 
     try:
-        await script.start(ignore_starting=True)
+        await script.start()
     except Exception as exc:  # pragma: no cover - runtime protection
         # Capture failures in the per-script log instead of surfacing them to the caller.
         script.add_log(f"Failed to start: {exc}")
@@ -26998,16 +27539,29 @@ async def _background_start(script: ManagedScript) -> None:
 
 
 async def _background_start_after_state_restore(script: ManagedScript) -> None:
-    try:
-        await asyncio.wait_for(_STARTUP_STATE_RESTORE_DONE.wait(), timeout=30.0)
-    except asyncio.TimeoutError:
-        script.add_log("State restore timed out; FX Weekend executor was not started.")
-        script.last_start_error = "Authoritative state restore timed out."
-        return
+    _managed_script_log(
+        script,
+        "FX Weekend start requested; waiting for authoritative state "
+        "restoration and durability verification.",
+    )
+    AUTOSTART_LOGGER.info(
+        "FX_WEEKEND_START_COORDINATION state=waiting_for_authoritative_restore"
+    )
+    await _STARTUP_STATE_RESTORE_DONE.wait()
+    AUTOSTART_LOGGER.info(
+        "FX_WEEKEND_START_COORDINATION state=restore_signal_received"
+    )
     allowed, gate_error = _fxweekend_start_gate()
     if not allowed:
-        script.add_log(f"FX Weekend executor was not started: {gate_error}")
+        _managed_script_log(
+            script,
+            f"FX Weekend executor was not started: {gate_error}",
+        )
         script.last_start_error = gate_error
+        AUTOSTART_LOGGER.error(
+            "FX_WEEKEND_START_BLOCKED reason=%s",
+            gate_error,
+        )
         return
     await _background_start(script)
 
@@ -27055,6 +27609,7 @@ async def list_scripts() -> JSONResponse:
             fx_row = by_name.get("fxweekend-clone", {})
             row["starting"] = bool(fx_row.get("starting"))
             row["running"] = bool(fx_row.get("running"))
+            row["pid"] = fx_row.get("pid")
             row["last_error"] = fx_row.get("last_error")
             row["last_start_error"] = fx_row.get("last_start_error")
             row["last_exit_reason"] = fx_row.get("last_exit_reason")
@@ -27071,6 +27626,18 @@ async def list_scripts() -> JSONResponse:
                 "reason",
                 "heartbeat_at",
                 "heartbeat_fresh",
+                "heartbeat_timestamp_fresh",
+                "heartbeat_pid_matches",
+                "heartbeat_instance_matches",
+                "heartbeat_age_seconds",
+                "heartbeat_stale_after_seconds",
+                "heartbeat_startup_grace_active",
+                "heartbeat_startup_grace_remaining_seconds",
+                "executor_pid",
+                "executor_instance_id",
+                "executor_started_at",
+                "process_pid",
+                "process_instance_id",
                 "last_access_check_at",
                 "last_verified_flat_at",
                 "selected_accounts",
@@ -27078,8 +27645,11 @@ async def list_scripts() -> JSONResponse:
                 "accounts",
                 "credential_errors",
                 "account_errors",
+                "account_warnings",
                 "missing_runtime_accounts",
                 "pending_runtime_accounts",
+                "health_state",
+                "health_reason",
             ):
                 if key in fx_component:
                     row[key] = fx_component[key]
@@ -27090,12 +27660,16 @@ async def list_scripts() -> JSONResponse:
                 fx_enabled and fx_component.get("ready")
             )
 
-            if starting:
+            if not fx_enabled:
+                detail = "disabled"
+            elif starting:
                 detail = "starting"
             elif row["operational"]:
-                detail = "running and enabled"
-            elif running and not fx_enabled:
-                detail = "process running but disabled in settings"
+                detail = (
+                    str(row.get("health_reason") or "").strip()
+                    if row.get("health_state") == "amber"
+                    else "running and enabled"
+                )
             elif fx_enabled and str(fx_component.get("reason") or "").strip():
                 component_reason = str(fx_component.get("reason"))
                 detail = (
@@ -28627,6 +29201,14 @@ async def start_script(script_name: str) -> JSONResponse:
 @app.post("/scripts/{script_name:path}/stop")
 async def stop_script(script_name: str) -> JSONResponse:
     try:
+        script = script_manager.get(script_name)
+        if script.name == "fxweekend-clone":
+            script.last_exit_reason = "manual stop requested through the scripts API"
+            _managed_script_log(
+                script,
+                "FX Weekend termination requested: "
+                f"{script.last_exit_reason}",
+            )
         summary = await script_manager.stop(script_name)
         return JSONResponse(summary)
     except HTTPException:

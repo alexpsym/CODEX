@@ -50,6 +50,11 @@ def test_dashboard_js_no_removed_widget_endpoints_and_keeps_needed_calls() -> No
     assert "return { dotState: 'running', dotTitle: 'Shown on dashboard', active: true };" in js
     assert "return { dotState: 'running', dotTitle: 'Open in a tab', active: true };" in js
     assert "return { dotState: 'stopped', dotTitle: 'Not open in a tab', active: false };" in js
+    assert "if (lowerName === 'fxweekend') {" in js
+    assert "String(script?.health_state || '')" in js
+    assert "String(script?.health_reason || script?.status_detail || '')" in js
+    assert "healthState === 'disabled' ? `${label} (Disabled)` : label" in js
+    assert "scriptTabIsOpen(script)" in js
     assert "btn.addEventListener('click', () => openScriptTab(script));" in js
     assert "btn.addEventListener('contextmenu', (event) => {" in js
     assert "btn.addEventListener('auxclick', (event) => {" in js
@@ -74,6 +79,158 @@ def test_dashboard_js_no_removed_widget_endpoints_and_keeps_needed_calls() -> No
     assert "Inactive view" not in js
     assert "activeMainLoadState" not in js
     assert "syncWorkspaceSelectionFromScripts" not in js
+
+
+def test_fxweekend_dashboard_health_comes_from_backend_not_browser_tabs() -> None:
+    node = shutil.which('node')
+    assert node, 'node is required for FX Weekend dashboard behavior check'
+    harness = r"""
+const fs = require('fs');
+const vm = require('vm');
+const source = fs.readFileSync(process.argv[1], 'utf8');
+
+class Element {
+  constructor(id = '') {
+    this.id = id;
+    this.children = [];
+    this.handlers = {};
+    this.className = '';
+    this.dataset = {};
+    this.style = {};
+    this.textContent = '';
+    this.value = '';
+    this.disabled = false;
+    this.hidden = false;
+    this._innerHTML = '';
+    this.classList = {
+      values: new Set(),
+      add: (...items) => items.forEach((item) => this.classList.values.add(item)),
+      remove: (...items) => items.forEach((item) => this.classList.values.delete(item)),
+      toggle: (item, force) => force ? this.classList.values.add(item) : this.classList.values.delete(item),
+      contains: (item) => this.classList.values.has(item),
+    };
+  }
+  set innerHTML(value) {
+    this._innerHTML = String(value);
+    if (value === '') this.children = [];
+  }
+  get innerHTML() { return this._innerHTML; }
+  appendChild(child) { this.children.push(child); return child; }
+  addEventListener(event, callback) { this.handlers[event] = callback; }
+  removeEventListener() {}
+  querySelector() { return new Element(); }
+  querySelectorAll() { return []; }
+  setAttribute(name, value) { this[name] = String(value); }
+  getAttribute(name) { return this[name] || null; }
+  focus() {}
+  remove() {}
+}
+
+const scriptsGrid = new Element('scripts-grid');
+const exitSlot = new Element('exit-button-slot');
+const refreshButton = new Element('refresh-btn');
+const elements = {
+  'scripts-grid': scriptsGrid,
+  'exit-button-slot': exitSlot,
+  'refresh-btn': refreshButton,
+};
+const rows = [
+  { name: 'fxweekend', label: 'FX Green', open_url: '/apps/fxweekend-clone', health_state: 'green', health_reason: 'fresh heartbeat', enabled: true, running: true, starting: false, operational: true, heartbeat_fresh: true },
+  { name: 'fxweekend', label: 'FX Amber', open_url: '/apps/fxweekend-clone', health_state: 'amber', health_reason: 'healthy missed cutoff', enabled: true, running: true, starting: false, operational: true, heartbeat_fresh: true },
+  { name: 'fxweekend', label: 'FX Red', open_url: '/apps/fxweekend-clone', health_state: 'red', health_reason: 'credentials unavailable', enabled: true, running: false, starting: false, operational: false, heartbeat_fresh: false },
+  { name: 'fxweekend', label: 'FX Disabled', open_url: '/apps/fxweekend-clone', health_state: 'disabled', health_reason: 'disabled in settings', enabled: false, running: false, starting: false, operational: false, heartbeat_fresh: false },
+];
+const document = {
+  visibilityState: 'visible',
+  hidden: false,
+  body: new Element('body'),
+  getElementById: (id) => elements[id] || null,
+  querySelector: () => new Element(),
+  querySelectorAll: () => [],
+  createElement: () => new Element(),
+  addEventListener: () => {},
+};
+const response = (payload) => ({
+  ok: true,
+  status: 200,
+  statusText: 'OK',
+  text: async () => JSON.stringify(payload),
+});
+const fetch = async (url) => {
+  if (String(url) === '/scripts') return response(rows);
+  if (String(url).includes('/api/pine/files')) return response({ files: [] });
+  if (String(url).includes('/api/watchlist')) return response({ items: [] });
+  return response({});
+};
+const openedTabs = [];
+const context = {
+  console,
+  document,
+  fetch,
+  setInterval: () => 1,
+  clearInterval: () => {},
+  setTimeout: () => 1,
+  clearTimeout: () => {},
+  URL,
+  Date,
+  Math,
+  Promise,
+  navigator: { clipboard: { writeText: async () => {} } },
+  location: { href: 'https://example.invalid/' },
+  sessionStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
+  localStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
+};
+context.window = context;
+context.window.addEventListener = () => {};
+context.window.removeEventListener = () => {};
+context.window.open = () => {
+  const tab = { closed: false, focus: () => {} };
+  openedTabs.push(tab);
+  return tab;
+};
+context.globalThis = context;
+
+const states = () => scriptsGrid.children.map((button) => ({
+  label: button.children[0]?.textContent,
+  dot: button.children[1]?.className,
+  title: button.children[1]?.title,
+}));
+
+(async () => {
+  vm.createContext(context);
+  vm.runInContext(source, context, { filename: 'dashboard.js' });
+  await new Promise((resolve) => setImmediate(resolve));
+  const initial = states();
+  scriptsGrid.children[0].handlers.click();
+  const afterOpen = states();
+  openedTabs[0].closed = true;
+  refreshButton.handlers.click();
+  await new Promise((resolve) => setImmediate(resolve));
+  const afterCloseAndRefresh = states();
+  process.stdout.write(JSON.stringify({ initial, afterOpen, afterCloseAndRefresh }));
+})().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});
+"""
+    completed = subprocess.run(
+        [node, '-e', harness, str(JS_PATH)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    payload = __import__('json').loads(completed.stdout)
+    expected_dots = [
+        'status-dot running',
+        'status-dot starting',
+        'status-dot stopped',
+        'status-dot disabled',
+    ]
+    for snapshot_name in ('initial', 'afterOpen', 'afterCloseAndRefresh'):
+        snapshot = payload[snapshot_name]
+        assert [item['dot'] for item in snapshot] == expected_dots
+    assert payload['initial'][1]['title'] == 'healthy missed cutoff'
+    assert payload['initial'][3]['label'] == 'FX Disabled (Disabled)'
 
 
 def test_dashboard_js_accepts_verified_empty_watchlist_without_remote_fallback() -> None:

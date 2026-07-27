@@ -157,7 +157,6 @@ def test_scripts_endpoint_places_spread_monitor_after_iv_indicator_in_local_prof
         "calculator",
         "trading-journal",
         "monitor",
-        "fxweekend",
         "ivindicator-clone",
         "spreads-clone",
     ]
@@ -165,8 +164,8 @@ def test_scripts_endpoint_places_spread_monitor_after_iv_indicator_in_local_prof
     assert positions == sorted(positions)
     assert names.index("spreads-clone") == names.index("ivindicator-clone") + 1
     by_name = {str(item.get("name")): item for item in payload}
-    assert by_name["fxweekend"]["operational"] is False
-    assert by_name["fxweekend"]["autostart_expected"] is True
+    assert "fxweekend" not in by_name
+    assert "fxweekend-clone" not in by_name
     assert by_name["spreads-clone"]["label"] == "Spreads"
     assert by_name["spreads-clone"]["open_url"] == "/apps/spreads-clone"
     assert by_name["spreads-clone"]["dashboard_main_view"] is True

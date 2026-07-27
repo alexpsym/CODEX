@@ -373,6 +373,51 @@
 
   const scriptDotState = (script, processRunning, processStarting, processTitle) => {
     const lowerName = String(script?.name || '').trim().toLowerCase();
+    if (lowerName === 'fxweekend') {
+      const reportedHealth = String(script?.health_state || '').trim().toLowerCase();
+      let healthState = ['green', 'amber', 'red', 'disabled'].includes(reportedHealth)
+        ? reportedHealth
+        : '';
+      if (!healthState) {
+        if (script?.enabled === false) {
+          healthState = 'disabled';
+        } else if (processStarting) {
+          healthState = 'amber';
+        } else if (
+          processRunning
+          && script?.heartbeat_fresh !== false
+          && script?.operational === true
+        ) {
+          healthState = 'green';
+        } else {
+          healthState = 'red';
+        }
+      }
+
+      const reason = String(script?.health_reason || script?.status_detail || '').trim();
+      const titles = {
+        green: 'Enabled process running with a fresh heartbeat',
+        amber: processStarting
+          ? 'FX Weekend is starting'
+          : 'Process healthy; the latest cutoff or market outcome needs attention',
+        red: !processRunning
+          ? 'FX Weekend process stopped'
+          : (script?.heartbeat_fresh === false ? 'FX Weekend heartbeat is stale' : 'FX Weekend execution failed'),
+        disabled: 'FX Weekend is disabled',
+      };
+      const dotStates = {
+        green: 'running',
+        amber: 'starting',
+        red: 'stopped',
+        disabled: 'disabled',
+      };
+      return {
+        dotState: dotStates[healthState],
+        dotTitle: reason || titles[healthState],
+        active: healthState === 'green' || (healthState === 'amber' && processRunning),
+        healthState,
+      };
+    }
     if (lowerName === 'monitor') {
       const stopReason = String(script.last_start_error || script.last_exit_reason || '').trim();
       let dotState = processRunning ? 'running' : (processStarting ? 'starting' : 'stopped');
@@ -401,15 +446,22 @@
     btn.className = 'script-btn';
     btn.dataset.scriptName = String(script.name || '');
 
-    const name = document.createElement('div');
-    name.className = 'script-name';
-    name.textContent = script.label || script.name;
-
-    const dot = document.createElement('span');
     const processRunning = script.running === true;
     const processStarting = script.starting === true;
     const processTitle = processRunning ? 'Process running' : (processStarting ? 'Process starting' : 'Process stopped');
-    const { dotState, dotTitle, active } = scriptDotState(script, processRunning, processStarting, processTitle);
+    const { dotState, dotTitle, active, healthState } = scriptDotState(
+      script,
+      processRunning,
+      processStarting,
+      processTitle,
+    );
+
+    const name = document.createElement('div');
+    name.className = 'script-name';
+    const label = script.label || script.name;
+    name.textContent = healthState === 'disabled' ? `${label} (Disabled)` : label;
+
+    const dot = document.createElement('span');
     dot.className = `status-dot ${dotState}`;
     dot.title = dotTitle;
     dot.setAttribute('aria-label', dotTitle);

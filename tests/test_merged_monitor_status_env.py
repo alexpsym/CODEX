@@ -1283,7 +1283,8 @@ def test_scripts_merged_fxweekend_running_but_disabled_not_operational(monkeypat
     assert row["enabled"] is False
     assert row["operational"] is False
     assert row["autostart_expected"] is False
-    assert row["status_detail"] == "process running but disabled in settings"
+    assert row["health_state"] == "disabled"
+    assert row["status_detail"] == "disabled"
 
 
 def test_scripts_merged_fxweekend_stopped_includes_error_detail(monkeypatch: pytest.MonkeyPatch) -> None:
