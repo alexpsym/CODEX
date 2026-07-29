@@ -1,65 +1,67 @@
-Final implementation summary - Forex history markers and authoritative OANDA backfill
+Final implementation summary - Durable OANDA master-journal export balances
 
 Publication status
 - Work was performed only in C:\GPT\CODEX-master from the current local checkout.
 - This summary is written before publication as required by AGENTS.md.
 - PATCH_DESKTOP_PUSH.bat must run next. The task is not complete until it succeeds and verifies local HEAD equals origin/master.
 
-1. TradingView Forex markers
-- pinescripts/custom_indicator.pine now defaults the adjustable recent-range candle clearance to 0.06 and uses a 40-tick minimum for session and historical marker gaps.
-- Session marker times, DST handling, Brisbane-weekend filtering, labels, 80-bar range, 0.60 half-length multiplier, dotted black width-2 styling, and the <=30-minute session visibility gate remain unchanged.
-- One split upper/lower historical marker is mapped for every requested pair/date. Pair selection uses syminfo.basecurrency plus syminfo.currency, so it is independent of OANDA, FXCM, FOREXCOM, or other ticker prefixes.
-- Every historical timestamp uses exact GMT midnight and xloc.bar_time. Exact switch matches prevent reversed or unlisted pairs from receiving a marker.
-- Historical markers have no label or setting, are independent of showSessionLines and timeframe gates, and use a persistent draw-once guard to prevent duplicate objects.
-- TradingView compilation was not available locally. Static source tests passed, but they do not prove Pine compilation.
-- A feed limitation remains unavoidable: when the loaded broker history has no bar spanning the requested timestamp, the marker is not moved to the broker's first available candle and no substitute history is invented.
+1. Root cause and authoritative import transaction
+- The parsed OANDA transaction-export account balance is now carried beside pending manual-import rows through the rollback-protected authoritative master-journal transaction.
+- Both normal imports and duplicate/no-op imports build the workbook snapshot with the parsed balance seed before updating journal/Trading Journal.xlsx.
+- The importer verifies the parsed balance before workbook sync, rereads Account Balances from the saved workbook, then forces a master-workbook snapshot rebuild and verifies the value and provenance again before completing SQLite persistence and GitHub sync.
+- A failed value or provenance check remains inside the existing rollback scope. Row state, workbook bytes, view cache/SQLite state, and pending import bridges are restored locally. Rollback reporting does not claim GitHub state was restored when a remote sync had started and failed.
+- Imports without a parsed account balance retain their prior workflow and focused compatibility coverage.
 
-2. Master Journal datetime serialization and cache durability
-- read_master_journal_source() and read_master_journal_manual_overrides() now pass Move to Break Even Time and Move to Profit Time through the existing _excel_datetime_to_iso() helper.
-- Excel datetime/date values become ISO strings, existing strings remain strings, and blanks remain blank strings. No json.dumps(default=str) or broad fallback was introduced.
-- _set_trading_journal_rows() now assigns _TRADING_JOURNAL_CACHE only after the durable JSON write succeeds, so a failed write leaves both memory and disk at the previous state.
-- The checked-in journal regression read returned exactly 1,544 rows, contained no datetime/date objects anywhere in the source payload, passed json.dumps(), and preserved the workbook hash.
+2. Durable workbook balance provenance
+- Account Balances now stores hidden workbook metadata keyed by canonical account. It preserves both balance_source and a wall-clock comparison timestamp without changing the visible workbook layout or adding a sheet.
+- read_master_journal_source() recovers this metadata in streaming/read-only mode, so an OANDA transaction-export balance remains authoritative after workbook reread and application restart instead of degrading to stats2_account_balances.
+- The separate comparison timestamp matches the established Trade Log wall-clock serialization while leaving the visible As Of value unchanged.
+- OANDA transaction-export balances are ranked as authoritative account-summary inputs during balance deduplication.
+- A later authoritative account seed now overrides the final trade timeline even when the account has no cashflow ledger entry. An equally timed OANDA export seed also preserves its stronger provenance.
+- The final trade row's balance_after_trade remains the actual closed-trade balance; it is not overwritten with a later financing/deposit/withdrawal/transfer balance.
 
-3. OANDA complete-history backfill
-- Master-journal single-file mode no longer calls _append_oanda_export_rows_to_local_workbook() and does not create OANDA DEMO.xlsx or OANDA LIVE.xlsx.
-- Completed exports are passed to _import_uploaded_trading_journal_file() with the resolved demo/live mode explicitly. This reuses the existing authoritative lock check, parsing, P/L inference, canonical OANDA replacement, upsert, pending-row bridge, workbook sync, rollback, row-ID verification, and GitHub journal-sync transaction.
-- OANDA CSV parsing now honors the explicit account mode even when the filename has no demo/live hint.
-- The endpoint performs an additional Trading Journal.xlsx check for every parsed OANDA trade row ID and verifies the authoritative snapshot contains the correct OANDA account balance matching the export's latest balance.
-- Repeated identical backfills report zero new/updated rows and preserve existing trade/cashflow row IDs without creating a broker workbook.
-- Parse, workbook-lock/import, sync, row-verification, and snapshot/balance failures return JSON-safe structured responses with the existing history-page response fields.
-- The legacy separate-workbook branch remains available only outside master-journal single-file mode.
+3. Truthful endpoint semantics
+- oanda_export_rows_persisted, oanda_export_balance_applied, and snapshot_visible are explicit state fields and are no longer derived from the overall ok flag.
+- If endpoint-level verification fails after the authoritative importer committed and verified rows, the response retains rows_persisted:true.
+- Balance application requires the rebuilt snapshot to match both the export value and oanda_transaction_export_balance provenance.
+- Snapshot verification exceptions preserve already verified authoritative importer state instead of converting known persisted/applied state into false values.
+- The legacy separate-workbook branch remains available outside master-journal mode and now reports row, balance, and visibility state explicitly.
 
-4. Export/backfill browser status
-- render/static/history_page.js resolves the completed export download URL before starting OANDA backfill.
-- A backfill failure now says the export completed but Trading Journal backfill failed; it leaves a manual CSV download link available.
-- Successful behavior remains ordered as requested: export completion, authoritative journal backfill/verification, then automatic CSV download.
-- Automatic download failures continue to expose a manual download link.
+4. Single-file and browser behavior
+- Master-journal mode continues to update only journal/Trading Journal.xlsx. It does not create journal/OANDA LIVE.xlsx or journal/OANDA DEMO.xlsx.
+- The legacy separate-workbook implementation remains outside master-journal mode.
+- render/static/history_page.js was not changed. Successful backfill still precedes automatic CSV download; failed backfill still says the export completed and retains the manual download link.
+- The completed Pine, Move-to-Time datetime serialization, failed-write cache durability, equity cache, and browser-download implementations were not changed.
 
-5. Focused verification
+5. Regression coverage
+- Added a real master-journal regression using a temporary copy of Trading Journal.xlsx with one preserved existing trade and cashflow row.
+- The export contains an opening ORDER_FILL, a closing ORDER_FILL with balance 1010.00, and a later DAILY_FINANCING balance of 1008.75.
+- The regression uses the real parser, authoritative importer, workbook generator/updater, workbook reread, forced snapshot rebuild, SQLite persistence, and duplicate/no-op re-import. Only external GitHub/backup operations and temporary path/config wiring are stubbed.
+- It verifies the stable OANDA row ID exists exactly once, balance_after_trade remains 1010.00, the authoritative account balance remains 1008.75 with OANDA export provenance after reread/rebuild/re-import, existing trade/cashflow IDs survive once, response state is truthful, and no separate OANDA workbook is created.
+- Added a focused no-cashflow timeline regression and a post-import verification-failure response regression that requires rows_persisted:true.
+
+6. Verification
+- tests/test_master_service_oanda_history_export.py: 44 passed.
+- OANDA-selected tests in tests/test_master_service_trading_journal_crud.py: 27 passed, 168 deselected.
+- Manual-import/rollback/duplicate compatibility selection in tests/test_master_service_trading_journal_crud.py: 29 passed, 166 deselected.
+- Existing datetime-serialization checks: 7 passed.
+- Existing failed-write/cache durability and real-workbook equity cache checks: 2 passed.
+- Existing history-page download/UI checks: 3 passed.
 - python -m py_compile render/master_service.py tools/master_journal_workbook.py: passed.
 - node --check render/static/history_page.js: passed.
-- tests/test_custom_indicator_pine.py and tests/test_history_page_js_download.py: 17 passed.
-- New Move-to-Time and real-workbook read-only checks in tests/test_master_journal_workbook.py: 2 passed, 175 deselected.
-- New failed-write cache/disk check in tests/test_master_service_trading_journal_crud.py: 1 passed.
-- Relevant OANDA backfill/account-mode tests in tests/test_master_service_oanda_history_export.py: 11 passed, 32 deselected.
 - git diff --check: passed with only normal LF-to-CRLF working-copy notices.
 - No full test suite and no real broker request were run.
 
-6. Safety and preservation
-- journal/Trading Journal.xlsx had a pre-existing local modification and was treated as protected user work. Its SHA-256 remained exactly 8925B34088B24CB8415A936B8277E6C3F4ABF952A9B8302DB0BF359A05BFED29 before and after development/testing.
-- Pre-existing changes in render/data/monthly_aud_revaluation_state.json, pending_webhooks.json, trade_contexts.json, and webhook_attempts.json were not modified for this task and must remain unstaged/unpublished.
-- No OANDA LIVE.xlsx or OANDA DEMO.xlsx exists in journal/.
-- Repository-local pytest temp directories are ignored by .gitignore and must remain unstaged. Repository policy prohibited recursive deletion, so no deletion workaround was attempted.
-- No archive, custom instructions file, secret, environment file, log, cache, or runtime data was used as task input or included in the intended change set.
+7. Safety and preservation
+- journal/Trading Journal.xlsx had a pre-existing local modification and remained protected. Its SHA-256 stayed exactly 8925B34088B24CB8415A936B8277E6C3F4ABF952A9B8302DB0BF359A05BFED29 throughout development and verification.
+- Pre-existing changes in render/data/monthly_aud_revaluation_state.json, pending_webhooks.json, trade_contexts.json, and webhook_attempts.json were not edited for this task and must remain unstaged/unpublished.
+- journal/OANDA LIVE.xlsx and journal/OANDA DEMO.xlsx do not exist.
+- Repository-local pytest temp directories are ignored and remain unstaged. Repository policy prohibits recursive deletion, so no deletion workaround was used.
+- No custom instructions file, secret, environment file, log, cache, or runtime data is included in the intended commit.
 
 Changed task files
-- pinescripts/custom_indicator.pine
 - render/master_service.py
-- render/static/history_page.js
 - tools/master_journal_workbook.py
-- tests/test_custom_indicator_pine.py
-- tests/test_history_page_js_download.py
-- tests/test_master_journal_workbook.py
 - tests/test_master_service_oanda_history_export.py
 - tests/test_master_service_trading_journal_crud.py
 - summary/CODEX_SUMMARY_latest.txt

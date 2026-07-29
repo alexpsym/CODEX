@@ -2,6 +2,7 @@ import asyncio
 import importlib.util
 import json
 import os
+import shutil
 import sys
 from pathlib import Path
 import types
@@ -573,7 +574,7 @@ def test_oanda_master_journal_backfill_uses_authoritative_import_and_is_idempote
             "balances": [{
                 "label": f"OANDA {account_mode.upper()}",
                 "balance": 1496.92,
-                "balance_source": "authoritative_trade_balance",
+                "balance_source": "oanda_transaction_export_balance",
             }]
         },
     )
@@ -607,6 +608,190 @@ def test_oanda_master_journal_backfill_uses_authoritative_import_and_is_idempote
     assert ids.count(expected_id) == 1
     assert ids.count("existing:trade") == 1
     assert ids.count("cashflow:existing") == 1
+
+
+def test_oanda_master_backfill_persists_later_nontrade_balance_through_workbook_reread(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    journal_dir = tmp_path / "journal"
+    data_dir = tmp_path / "data"
+    journal_dir.mkdir()
+    data_dir.mkdir()
+    master_path = journal_dir / "Trading Journal.xlsx"
+    shutil.copy2(ROOT / "journal" / "Trading Journal.xlsx", master_path)
+    source_before = master_service.read_master_journal_source(master_path)
+    existing_trade_id = next(
+        str(item.get("id"))
+        for item in source_before["items"]
+        if item.get("row_type") == "trade" and item.get("id")
+    )
+    existing_cashflow_id = next(
+        str(item.get("id"))
+        for item in source_before["items"]
+        if item.get("row_type") == "cashflow" and item.get("id")
+    )
+    wb = load_workbook(master_path)
+    trade_log = master_service._get_trade_log_sheet(wb, allow_legacy=False)
+    trade_headers = master_service._trade_log_header_map(trade_log)
+    data_start = master_service._trade_log_data_start_row(trade_log)
+    row_id_col = trade_headers["Row ID"]
+    keep_ids = {existing_trade_id, existing_cashflow_id}
+    keep_values = []
+    for row_idx in range(data_start, trade_log.max_row + 1):
+        if str(trade_log.cell(row_idx, row_id_col).value or "").strip() in keep_ids:
+            keep_values.append(
+                [
+                    trade_log.cell(row_idx, col_idx).value
+                    for col_idx in range(1, trade_log.max_column + 1)
+                ]
+            )
+    assert len(keep_values) == 2
+    for offset, values in enumerate(keep_values):
+        for col_idx, value in enumerate(values, start=1):
+            trade_log.cell(data_start + offset, col_idx).value = value
+    trailing_rows = trade_log.max_row - (data_start + len(keep_values) - 1)
+    if trailing_rows > 0:
+        trade_log.delete_rows(data_start + len(keep_values), trailing_rows)
+    wb.save(master_path)
+    wb.close()
+
+    csv_path = tmp_path / "oanda_history_demo_later_financing.csv"
+    csv_path.write_text(
+        "TICKET,TRANSACTION DATE,TRANSACTION TYPE,DETAILS,INSTRUMENT,PRICE,UNITS,DIRECTION,SPREAD COST,STOP LOSS,TAKE PROFIT,FINANCING,COMMISSION,PL,BALANCE\n"
+        "990001,2030-01-01 10:00:00 AEST,ORDER_FILL,MARKET_ORDER,EUR_USD,1.1000,1000,Buy,0,1.0900,1.1200,,,0,1000.00\n"
+        "990002,2030-01-01 11:00:00 AEST,ORDER_FILL,TAKE_PROFIT_ORDER,EUR_USD,1.1100,-1000,Sell,0,,,,,10.00,1010.00\n"
+        "990003,2030-01-01 12:00:00 AEST,DAILY_FINANCING,DAILY_FINANCING,,,,,,,,-1.25,,,1008.75\n",
+        encoding="utf-8",
+    )
+    csv_path.with_suffix(".json").write_text(
+        json.dumps({"account_mode": "demo"}),
+        encoding="utf-8",
+    )
+    job = master_service.OandaHistoryJob(
+        job_id="master-demo-later-financing",
+        status="done",
+        created_at=0,
+        updated_at=0,
+        params={"account": "demo"},
+        output_path=csv_path,
+    )
+    expected_id = "oanda_export:demo:990001:990002"
+    master_service.OANDA_HISTORY_JOBS[job.job_id] = job
+
+    monkeypatch.setattr(master_service, "TRADING_JOURNAL_LOCAL_DIR", journal_dir)
+    monkeypatch.setattr(master_service, "TRADING_JOURNAL_LOCAL_DIR_EXPLICIT", True)
+    monkeypatch.setattr(master_service, "TRADING_JOURNAL_SOURCE", "master_journal")
+    monkeypatch.setattr(master_service, "TRADING_JOURNAL_PATH", data_dir / "trading_journal.json")
+    monkeypatch.setattr(master_service, "TRADING_JOURNAL_STATE_PATH", data_dir / "trading_journal_state.json")
+    monkeypatch.setattr(master_service, "TRADING_JOURNAL_SYNC_STATE_PATH", data_dir / "trading_journal_sync_state.json")
+    monkeypatch.setattr(master_service, "TRADING_JOURNAL_IMPORT_CACHE_PATH", data_dir / "trading_journal_import_cache.json")
+    monkeypatch.setattr(master_service, "TRADING_JOURNAL_VIEW_CACHE_PATH", data_dir / "trading_journal_view_cache.json")
+    monkeypatch.setattr(master_service, "TRADING_JOURNAL_SQLITE_PATH", data_dir / "trading_journal.sqlite")
+    monkeypatch.setattr(master_service, "TRADING_JOURNAL_RESYNC_CACHE_PATH", data_dir / "trading_journal_resync_cache.json")
+    monkeypatch.setattr(master_service, "MONTHLY_AUD_REVALUATION_PATH", data_dir / "monthly_aud_revaluation.json")
+    monkeypatch.setattr(master_service, "MONTHLY_AUD_REVALUATION_STATE_PATH", data_dir / "monthly_aud_revaluation_state.json")
+    monkeypatch.setattr(master_service, "TRADE_CONTEXTS_PATH", data_dir / "trade_contexts.json")
+    monkeypatch.setattr(master_service, "_master_journal_single_file_mode", lambda: True)
+    monkeypatch.setattr(master_service, "_master_journal_authoritative_enabled", lambda: True)
+    monkeypatch.setattr(master_service, "_master_journal_path", lambda: master_path)
+    monkeypatch.setattr(master_service, "_schedule_dropbox_upload_state_backup", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        master_service,
+        "_sync_journal_excel_files_to_github",
+        lambda *_a, **_k: {
+            "github_sync_enabled": False,
+            "github_sync_ok": True,
+            "github_sync_noop": True,
+            "github_sync_error": "",
+            "github_sync_commit": "",
+        },
+    )
+    monkeypatch.setattr(master_service, "_TRADING_JOURNAL_CACHE", None)
+    monkeypatch.setattr(
+        master_service,
+        "_TRADING_JOURNAL_VIEW_CACHE",
+        {"key": None, "payload": None},
+    )
+    monkeypatch.setattr(master_service, "_PENDING_MANUAL_SYNC_ROWS", [])
+    monkeypatch.setattr(master_service, "_PENDING_MANUAL_SYNC_BALANCES", [])
+
+    try:
+        first = json.loads(
+            asyncio.run(
+                master_service.backfill_oanda_history_export_to_journal(job.job_id)
+            ).body.decode("utf-8")
+        )
+        assert first["ok"] is True, first["error"]
+        workbook_after_first = master_service.read_master_journal_source(master_path)
+        first_ids = [
+            str(item.get("id") or "")
+            for item in workbook_after_first["items"]
+        ]
+        imported_trade = next(
+            item
+            for item in workbook_after_first["items"]
+            if str(item.get("id") or "") == expected_id
+        )
+        first_balance = next(
+            item
+            for item in workbook_after_first["balances"]
+            if str(item.get("account") or "").upper() == "OANDA DEMO"
+        )
+
+        master_service._TRADING_JOURNAL_CACHE = None
+        master_service._TRADING_JOURNAL_VIEW_CACHE = {"key": None, "payload": None}
+        master_service._PENDING_MANUAL_SYNC_ROWS = []
+        master_service._PENDING_MANUAL_SYNC_BALANCES = []
+        master_service._invalidate_trading_journal_view_snapshot()
+        rebuilt = master_service._build_master_journal_verification_snapshot()
+        rebuilt_balance = next(
+            item
+            for item in master_service._snapshot_balance_items(rebuilt)
+            if str(item.get("account") or item.get("label") or "").upper()
+            == "OANDA DEMO"
+        )
+
+        second = json.loads(
+            asyncio.run(
+                master_service.backfill_oanda_history_export_to_journal(job.job_id)
+            ).body.decode("utf-8")
+        )
+        workbook_after_second = master_service.read_master_journal_source(master_path)
+        second_ids = [
+            str(item.get("id") or "")
+            for item in workbook_after_second["items"]
+        ]
+        second_balance = next(
+            item
+            for item in workbook_after_second["balances"]
+            if str(item.get("account") or "").upper() == "OANDA DEMO"
+        )
+    finally:
+        master_service.OANDA_HISTORY_JOBS.pop(job.job_id, None)
+
+    assert first["oanda_export_rows_persisted"] is True
+    assert first["oanda_export_balance_applied"] is True
+    assert first["snapshot_visible"] is True
+    assert first_ids.count(expected_id) == 1
+    assert imported_trade["balance_after_trade"] == pytest.approx(1010.0)
+    assert first_balance["balance"] == pytest.approx(1008.75)
+    assert first_balance["balance_source"] == "oanda_transaction_export_balance"
+    assert rebuilt_balance["balance"] == pytest.approx(1008.75)
+    assert rebuilt_balance["balance_source"] == "oanda_transaction_export_balance"
+
+    assert second["ok"] is True
+    assert second["oanda_export_rows_persisted"] is True
+    assert second["oanda_export_balance_applied"] is True
+    assert second["snapshot_visible"] is True
+    assert second["oanda_export_trades_backfilled"] == 0
+    assert second_ids.count(expected_id) == 1
+    assert second_balance["balance"] == pytest.approx(1008.75)
+    assert second_balance["balance_source"] == "oanda_transaction_export_balance"
+    assert second_ids.count(existing_trade_id) == 1
+    assert second_ids.count(existing_cashflow_id) == 1
+    assert not (journal_dir / "OANDA LIVE.xlsx").exists()
+    assert not (journal_dir / "OANDA DEMO.xlsx").exists()
 
 
 def test_oanda_csv_parser_honors_explicit_account_mode_without_filename_hint(tmp_path: Path):
@@ -733,6 +918,9 @@ def test_oanda_master_backfill_parse_and_verification_failures_are_structured(
                 "ok": True,
                 "rows_upserted": 1,
                 "duplicate_rows_merged": 0,
+                "rows_persisted": True,
+                "balance_applied": True,
+                "snapshot_visible": True,
             },
         )
         monkeypatch.setattr(
@@ -749,6 +937,9 @@ def test_oanda_master_backfill_parse_and_verification_failures_are_structured(
     finally:
         master_service.OANDA_HISTORY_JOBS.pop(job.job_id, None)
     assert verify_payload["ok"] is False
+    assert verify_payload["oanda_export_rows_persisted"] is True
+    assert verify_payload["oanda_export_balance_applied"] is True
+    assert verify_payload["snapshot_visible"] is True
     assert "verification failed" in verify_payload["error"]
     assert verify_payload["sync"]["oanda_backfill_verification"]["missing_row_ids"] == [
         "oanda_export:demo:1:2"

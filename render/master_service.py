@@ -1389,6 +1389,7 @@ def _build_authoritative_trading_journal_diagnostics_snapshot(items: List[Dict[s
 
 _TRADING_JOURNAL_VIEW_CACHE: Dict[str, object] = {"key": None, "payload": None}
 _PENDING_MANUAL_SYNC_ROWS: List[Dict[str, object]] = []
+_PENDING_MANUAL_SYNC_BALANCES: List[Dict[str, object]] = []
 TRADING_JOURNAL_VIEW_CACHE_VERSION = 6
 TRADING_JOURNAL_EQUITY_CACHE_SCHEMA_VERSION = 2
 TRADING_JOURNAL_EQUITY_CURVE_TYPE = "cashflow_neutral_compounded_index"
@@ -2293,6 +2294,7 @@ def _build_trading_journal_view_snapshot(
         timeline_balance_seeds = [
             *[dict(item) for item in source_balance_seeds],
             *[dict(item) for item in external_balance_seeds if isinstance(item, dict)],
+            *[dict(item) for item in _PENDING_MANUAL_SYNC_BALANCES if isinstance(item, dict)],
         ]
         timeline = _build_journal_balance_timelines(
             trade_items,
@@ -2375,6 +2377,10 @@ def _build_trading_journal_view_snapshot(
             if (_row_type(r) != "trade") or str(r.get("source") or "").strip().lower() == "local_excel"
         ]
     excel_balances = [] if skip_external_balances else _get_excel_account_balances()
+    excel_balances = [
+        *[dict(item) for item in excel_balances if isinstance(item, dict)],
+        *[dict(item) for item in _PENDING_MANUAL_SYNC_BALANCES if isinstance(item, dict)],
+    ]
     balances_seed = [b for b in excel_balances if not _is_bybit_demo_account_label(b.get("label") or b.get("account"))]
     state = _load_json_file(TRADING_JOURNAL_STATE_PATH, {})
     if local_only:
@@ -7372,7 +7378,9 @@ def _build_journal_balance_timelines(
         if not excel_as_of:
             excel_as_of = raw_refs.get("transaction_date")
         by_account[key]["excel_balance_as_of"] = excel_as_of
-        by_account[key]["excel_balance_ts"] = _to_ts(excel_as_of)
+        excel_timeline_as_of = bal.get("timeline_as_of") or excel_as_of
+        by_account[key]["excel_balance_timeline_as_of"] = excel_timeline_as_of
+        by_account[key]["excel_balance_ts"] = _to_ts(excel_timeline_as_of)
         by_account[key]["excel_balance_authoritative"] = _is_authoritative_account_balance_seed(bal)
 
     diagnostics: Dict[str, Dict[str, object]] = {}
@@ -7476,7 +7484,10 @@ def _build_journal_balance_timelines(
                 latest_trade_authoritative_as_of = row.get("close_time") or row.get("open_time")
 
         authoritative_seed_balance = _to_float(bucket.get("excel_balance")) if bool(bucket.get("excel_balance_authoritative")) else None
-        authoritative_seed_ts = _to_ts(bucket.get("excel_balance_as_of")) if authoritative_seed_balance is not None else float("-inf")
+        authoritative_seed_ts = _to_ts(
+            bucket.get("excel_balance_timeline_as_of")
+            or bucket.get("excel_balance_as_of")
+        ) if authoritative_seed_balance is not None else float("-inf")
         authoritative_seed_source = str(bucket.get("excel_balance_source") or "excel_account_balance")
 
         display_balance: Optional[float] = None
@@ -7519,9 +7530,26 @@ def _build_journal_balance_timelines(
                 authoritative_balance_source = balance_source
                 latest_authoritative_at = as_of
         elif last_known_balance is not None:
-            display_balance = last_known_balance
-            balance_source = "trade_timeline"
-            as_of = next((out_rows[i].get("close_time") or out_rows[i].get("open_time") for i in reversed(trade_indices) if _to_ts(out_rows[i].get("close_time") or out_rows[i].get("open_time")) == last_known_ts), None)
+            if (
+                selected_authoritative_balance is not None
+                and (
+                    selected_authoritative_ts > last_known_ts
+                    or (
+                        selected_authoritative_ts == last_known_ts
+                        and str(selected_authoritative_source or "")
+                        != "authoritative_trade_balance"
+                    )
+                )
+            ):
+                display_balance = selected_authoritative_balance
+                balance_source = str(
+                    selected_authoritative_source or "authoritative_trade_balance"
+                )
+                as_of = selected_authoritative_as_of
+            else:
+                display_balance = last_known_balance
+                balance_source = "trade_timeline"
+                as_of = next((out_rows[i].get("close_time") or out_rows[i].get("open_time") for i in reversed(trade_indices) if _to_ts(out_rows[i].get("close_time") or out_rows[i].get("open_time")) == last_known_ts), None)
             authoritative_balance_used = selected_authoritative_balance
             authoritative_balance_source = selected_authoritative_source
             latest_authoritative_at = selected_authoritative_as_of if selected_authoritative_balance is not None else latest_authoritative_at
@@ -30407,6 +30435,8 @@ async def backfill_oanda_history_export_to_journal(job_id: str) -> JSONResponse:
         latest_balance_as_of: object = None,
         error: object = None,
         sync: object = None,
+        rows_persisted: bool = False,
+        balance_applied: bool = False,
         snapshot_visible: bool = False,
         status_code: int = 200,
     ) -> JSONResponse:
@@ -30419,8 +30449,8 @@ async def backfill_oanda_history_export_to_journal(job_id: str) -> JSONResponse:
             "oanda_export_source_path": str(source_path or ""),
             "oanda_export_latest_balance": latest_balance,
             "oanda_export_latest_balance_as_of": latest_balance_as_of,
-            "oanda_export_balance_applied": bool(ok),
-            "oanda_export_rows_persisted": bool(ok and trades_seen > 0),
+            "oanda_export_balance_applied": bool(balance_applied),
+            "oanda_export_rows_persisted": bool(rows_persisted),
             "error": None if error in (None, "") else str(error),
             "sync": sync if isinstance(sync, dict) else {},
             "snapshot_visible": bool(snapshot_visible),
@@ -30529,8 +30559,23 @@ async def backfill_oanda_history_export_to_journal(job_id: str) -> JSONResponse:
                 latest_balance_as_of=latest_balance_as_of,
                 error=_import_error(import_result),
                 sync=import_result,
+                rows_persisted=bool(
+                    isinstance(import_result, dict)
+                    and import_result.get("rows_persisted")
+                ),
+                balance_applied=bool(
+                    isinstance(import_result, dict)
+                    and import_result.get("balance_applied")
+                ),
+                snapshot_visible=bool(
+                    isinstance(import_result, dict)
+                    and import_result.get("snapshot_visible")
+                ),
             )
 
+        rows_persisted = bool(import_result.get("rows_persisted"))
+        balance_applied = bool(import_result.get("balance_applied"))
+        snapshot_visible = bool(import_result.get("snapshot_visible"))
         parsed_ids = [
             str(row.get("id") or "").strip()
             for row in mapped
@@ -30553,7 +30598,11 @@ async def backfill_oanda_history_export_to_journal(job_id: str) -> JSONResponse:
                 latest_balance_as_of=latest_balance_as_of,
                 error=message,
                 sync=import_result,
+                rows_persisted=rows_persisted,
+                balance_applied=balance_applied,
+                snapshot_visible=snapshot_visible,
             )
+        rows_persisted = True
 
         rows_upserted = int(import_result.get("rows_upserted") or 0)
         duplicate_rows = int(import_result.get("duplicate_rows_merged") or 0)
@@ -30574,12 +30623,34 @@ async def backfill_oanda_history_export_to_journal(job_id: str) -> JSONResponse:
                 ),
                 None,
             )
+            snapshot_visible = isinstance(target_bal, dict)
             if not isinstance(target_bal, dict) or str(target_bal.get("balance_source") or "") == "cashflow_anchor_plus_trades":
                 visibility_error = "OANDA_BACKFILL_NOT_VISIBLE_IN_JOURNAL_SNAPSHOT"
+                balance_applied = False
             else:
                 expected_balance = _to_float(latest_balance)
                 snapshot_balance = _to_float(target_bal.get("balance"))
-                if expected_balance is not None and (
+                expected_balance_source = str(
+                    (balance or {}).get("balance_source")
+                    or (balance or {}).get("source")
+                    or ""
+                ).strip()
+                snapshot_balance_source = str(
+                    target_bal.get("balance_source")
+                    or target_bal.get("source")
+                    or ""
+                ).strip()
+                if (
+                    expected_balance_source
+                    and snapshot_balance_source != expected_balance_source
+                ):
+                    visibility_error = (
+                        "OANDA_BACKFILL_BALANCE_PROVENANCE_MISMATCH: "
+                        f"export={expected_balance_source} "
+                        f"snapshot={snapshot_balance_source}"
+                    )
+                    balance_applied = False
+                elif expected_balance is not None and (
                     snapshot_balance is None
                     or abs(snapshot_balance - expected_balance) > 1e-6
                 ):
@@ -30587,6 +30658,9 @@ async def backfill_oanda_history_export_to_journal(job_id: str) -> JSONResponse:
                         "OANDA_BACKFILL_BALANCE_MISMATCH: "
                         f"export={expected_balance} snapshot={snapshot_balance}"
                     )
+                    balance_applied = False
+                elif expected_balance is not None:
+                    balance_applied = True
         except Exception as exc:
             visibility_error = f"OANDA_BACKFILL_SNAPSHOT_VERIFICATION_FAILED: {exc}"
         if visibility_error:
@@ -30601,6 +30675,9 @@ async def backfill_oanda_history_export_to_journal(job_id: str) -> JSONResponse:
                 latest_balance_as_of=latest_balance_as_of,
                 error=visibility_error,
                 sync=import_result,
+                rows_persisted=rows_persisted,
+                balance_applied=balance_applied,
+                snapshot_visible=snapshot_visible,
             )
         return _response(
             ok=True,
@@ -30612,7 +30689,9 @@ async def backfill_oanda_history_export_to_journal(job_id: str) -> JSONResponse:
             latest_balance=latest_balance,
             latest_balance_as_of=latest_balance_as_of,
             sync=import_result,
-            snapshot_visible=True,
+            rows_persisted=rows_persisted,
+            balance_applied=balance_applied,
+            snapshot_visible=snapshot_visible,
         )
 
     changed = 0
@@ -30629,6 +30708,7 @@ async def backfill_oanda_history_export_to_journal(job_id: str) -> JSONResponse:
         append_error = str(exc)
     import_result = {"ok": False, "message": "Backfill append failed."}
     snapshot_payload = None
+    target_bal = None
     visibility_error = None
     if append_error is None:
         _invalidate_trading_journal_view_snapshot()
@@ -30643,6 +30723,17 @@ async def backfill_oanda_history_export_to_journal(job_id: str) -> JSONResponse:
             target_bal = next((b for b in balances_now if str((b or {}).get("label") or (b or {}).get("account") or "").strip().upper() == label), None)
             if not isinstance(target_bal, dict) or str(target_bal.get("balance_source") or "") == "cashflow_anchor_plus_trades":
                 visibility_error = "OANDA_BACKFILL_NOT_VISIBLE_IN_JOURNAL_SNAPSHOT"
+            else:
+                expected_balance = _to_float(latest_balance)
+                visible_balance = _to_float(target_bal.get("balance"))
+                if expected_balance is not None and (
+                    visible_balance is None
+                    or abs(visible_balance - expected_balance) > 1e-6
+                ):
+                    visibility_error = (
+                        "OANDA_BACKFILL_BALANCE_MISMATCH: "
+                        f"export={expected_balance} snapshot={visible_balance}"
+                    )
         except Exception:
             visibility_error = "OANDA_BACKFILL_NOT_VISIBLE_IN_JOURNAL_SNAPSHOT"
     ok_flag = bool(append_error is None and bool(import_result.get("ok")) and not visibility_error)
@@ -30657,7 +30748,13 @@ async def backfill_oanda_history_export_to_journal(job_id: str) -> JSONResponse:
         latest_balance_as_of=latest_balance_as_of,
         error=append_error or visibility_error or (None if import_result.get("ok") else _import_error(import_result)),
         sync=import_result,
-        snapshot_visible=visibility_error is None,
+        rows_persisted=bool(append_error is None and mapped),
+        balance_applied=bool(
+            isinstance(target_bal, dict)
+            and visibility_error is None
+            and _to_float(latest_balance) is not None
+        ),
+        snapshot_visible=isinstance(target_bal, dict),
     )
 
 
@@ -32968,6 +33065,94 @@ def _build_manual_import_authoritative_snapshot() -> Dict[str, object]:
         return _build_trading_journal_view_snapshot(force=True) or {}
 
 
+def _build_master_journal_verification_snapshot() -> Dict[str, object]:
+    try:
+        return _build_trading_journal_view_snapshot(
+            force=True,
+            skip_external_balances=True,
+            skip_live_account_refresh=True,
+            sync_caller="manual_import_verification",
+        ) or {}
+    except TypeError as exc:
+        msg = str(exc)
+        if (
+            "unexpected keyword argument" not in msg
+            or (
+                "skip_external_balances" not in msg
+                and "skip_live_account_refresh" not in msg
+                and "sync_caller" not in msg
+            )
+        ):
+            raise
+        return _build_trading_journal_view_snapshot(force=True) or {}
+
+
+def _verify_imported_account_balance_snapshot(
+    snapshot: Dict[str, object],
+    expected_balance: Optional[Dict[str, object]],
+) -> Dict[str, object]:
+    if not isinstance(expected_balance, dict):
+        return {
+            "ok": True,
+            "balance_expected": False,
+            "balance_applied": False,
+            "snapshot_visible": False,
+        }
+    expected_value = _to_float(expected_balance.get("balance"))
+    expected_label = str(
+        expected_balance.get("label")
+        or expected_balance.get("account")
+        or expected_balance.get("account_label")
+        or ""
+    ).strip()
+    expected_source = str(
+        expected_balance.get("balance_source")
+        or expected_balance.get("source")
+        or ""
+    ).strip()
+    expected_as_of = expected_balance.get("as_of")
+    target = next(
+        (
+            dict(item)
+            for item in _snapshot_balance_items(snapshot)
+            if _norm_account_key(
+                item.get("label")
+                or item.get("account")
+                or item.get("account_label")
+            )
+            == _norm_account_key(expected_label)
+        ),
+        None,
+    )
+    snapshot_visible = isinstance(target, dict)
+    actual_value = _to_float((target or {}).get("balance"))
+    actual_source = str(
+        (target or {}).get("balance_source")
+        or (target or {}).get("source")
+        or ""
+    ).strip()
+    value_matches = (
+        expected_value is not None
+        and actual_value is not None
+        and abs(actual_value - expected_value) <= 1e-6
+    )
+    source_matches = not expected_source or actual_source == expected_source
+    applied = bool(snapshot_visible and value_matches and source_matches)
+    return {
+        "ok": applied,
+        "balance_expected": True,
+        "balance_applied": applied,
+        "snapshot_visible": snapshot_visible,
+        "account": expected_label,
+        "expected_balance": expected_value,
+        "actual_balance": actual_value,
+        "expected_source": expected_source,
+        "actual_source": actual_source,
+        "expected_as_of": expected_as_of,
+        "actual_as_of": (target or {}).get("as_of"),
+    }
+
+
 def _path_is_within(path: Path, root: Path) -> bool:
     try:
         path.resolve().relative_to(root.resolve())
@@ -33092,7 +33277,7 @@ async def trading_journal_actions_workspace() -> HTMLResponse:
     )
 
 def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, account_mode: Optional[str] = None) -> Dict[str, object]:
-    global _PENDING_MANUAL_SYNC_ROWS
+    global _PENDING_MANUAL_SYNC_ROWS, _PENDING_MANUAL_SYNC_BALANCES
     name = str(upload_name or "upload").strip() or "upload"
     suffix = Path(name).suffix.lower()
     allowed = {".xlsx", ".xlsm", ".xls", ".csv"}
@@ -33180,6 +33365,7 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
         if not rows:
             return {"ok": False, "status_code": 422, "message": "No trade rows or account balance found in uploaded file.", "uploaded_name": name, "file_type": suffix, "rows_parsed": 0, "errors": ["zero_rows"], "warnings": []}
         previous_rows = copy.deepcopy([r for r in _get_trading_journal_rows() if isinstance(r, dict)])
+        rollback_rows = copy.deepcopy(previous_rows)
         parsed_ids = [str(r.get("id") or "").strip() for r in rows if str(r.get("id") or "").strip()]
         if rows and not parsed_ids:
             return {"ok": False, "status_code": 422, "message": "No verifiable row IDs were parsed from trade rows.", "uploaded_name": name, "file_type": suffix, "rows_parsed": len(rows), "errors": ["no_verifiable_row_ids"], "warnings": []}
@@ -33198,8 +33384,22 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
             pre_import_workbook_row_ids = [str((r or {}).get("id") or "").strip() for r in workbook_existing_rows]
         verify_result: Optional[Dict[str, object]] = None
         sync_result: Optional[Dict[str, object]] = None
+        github_sync_result: Dict[str, object] = {}
+        github_sync_started = False
         manual_import_snapshot: Optional[Dict[str, object]] = None
+        balance_verification: Dict[str, object] = {
+            "ok": not bool(balance),
+            "balance_expected": bool(balance),
+            "balance_applied": False,
+            "snapshot_visible": False,
+        }
+        rows_persisted = False
         previous_pending_rows = [dict(r) for r in (_PENDING_MANUAL_SYNC_ROWS or []) if isinstance(r, dict)]
+        previous_pending_balances = [
+            dict(item)
+            for item in (_PENDING_MANUAL_SYNC_BALANCES or [])
+            if isinstance(item, dict)
+        ]
         pending_restored = False
         duplicate_noop_fast_path_used = False
         try:
@@ -33276,6 +33476,18 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
             )
             workbook_map = {str((r or {}).get("id") or "").strip(): dict(r) for r in workbook_existing_rows if str((r or {}).get("id") or "").strip()}
             parsed_map = {str((r or {}).get("id") or "").strip(): dict(r) for r in rows if str((r or {}).get("id") or "").strip()}
+            pending_balance_map: Dict[str, Dict[str, object]] = {}
+            for item in [*previous_pending_balances, *([balance] if isinstance(balance, dict) else [])]:
+                if not isinstance(item, dict):
+                    continue
+                pending_key = _norm_account_key(
+                    item.get("label")
+                    or item.get("account")
+                    or item.get("account_label")
+                )
+                if pending_key:
+                    pending_balance_map[pending_key] = dict(item)
+            _PENDING_MANUAL_SYNC_BALANCES = list(pending_balance_map.values())
             fast_path_noop = bool(parsed_map) and all(
                 (rid in workbook_map) and (_stable_trade_log_projection(parsed_map[rid]) == _stable_trade_log_projection(workbook_map[rid]))
                 for rid in parsed_map.keys()
@@ -33286,6 +33498,18 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
                 t_stats = time.perf_counter()
                 APP_LOGGER.info("trading_journal_import_stage_start stage=stats_refresh_duplicate_noop upload=%s", name)
                 manual_import_snapshot = _build_manual_import_authoritative_snapshot()
+                pending_balance_verification = _verify_imported_account_balance_snapshot(
+                    manual_import_snapshot,
+                    balance,
+                )
+                if bool(balance) and not bool(pending_balance_verification.get("ok")):
+                    raise RuntimeError(
+                        "Authoritative import snapshot did not apply parsed account balance: "
+                        f"expected={pending_balance_verification.get('expected_balance')} "
+                        f"actual={pending_balance_verification.get('actual_balance')} "
+                        f"expected_source={pending_balance_verification.get('expected_source')} "
+                        f"actual_source={pending_balance_verification.get('actual_source')}"
+                    )
                 refreshed = refresh_master_journal_derived_sheets(_master_journal_path(), manual_import_snapshot)
                 if not bool((refreshed or {}).get("ok")):
                     raise RuntimeError(f"Duplicate import stats refresh failed: {(refreshed or {}).get('error') or 'unknown error'}")
@@ -33294,6 +33518,7 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
                 APP_LOGGER.info("trading_journal_import_stage_done stage=stats_refresh_duplicate_noop elapsed=%.6fs upload=%s", timings["stats_refresh_duplicate_noop"], name)
                 APP_LOGGER.info("trading_journal_import_stage_skip stage=workbook_sync upload=%s reason=duplicate_noop", name)
                 _PENDING_MANUAL_SYNC_ROWS = previous_pending_rows
+                _PENDING_MANUAL_SYNC_BALANCES = previous_pending_balances
                 pending_restored = True
             else:
                 t2 = time.perf_counter()
@@ -33318,6 +33543,18 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
                 _update_trading_journal_import_status(stage="snapshot_build", message="Building authoritative import snapshot")
                 APP_LOGGER.info("trading_journal_import_stage_start stage=snapshot_build upload=%s mode=authoritative_workbook", name)
                 manual_import_snapshot = _build_manual_import_authoritative_snapshot()
+                pending_balance_verification = _verify_imported_account_balance_snapshot(
+                    manual_import_snapshot,
+                    balance,
+                )
+                if bool(balance) and not bool(pending_balance_verification.get("ok")):
+                    raise RuntimeError(
+                        "Authoritative import snapshot did not apply parsed account balance: "
+                        f"expected={pending_balance_verification.get('expected_balance')} "
+                        f"actual={pending_balance_verification.get('actual_balance')} "
+                        f"expected_source={pending_balance_verification.get('expected_source')} "
+                        f"actual_source={pending_balance_verification.get('actual_source')}"
+                    )
                 timings["snapshot_build"] = round(time.perf_counter() - t_snap, 6)
                 APP_LOGGER.info("trading_journal_import_stage_done stage=snapshot_build elapsed=%.6fs upload=%s mode=authoritative_workbook", timings["snapshot_build"], name)
                 t3 = time.perf_counter()
@@ -33336,6 +33573,7 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
                         raise PermissionError(_master_journal_sync_error(sync_result))
                     raise RuntimeError(f"Workbook sync failed: {_master_journal_sync_error(sync_result)}")
                 _PENDING_MANUAL_SYNC_ROWS = previous_pending_rows
+                _PENDING_MANUAL_SYNC_BALANCES = previous_pending_balances
                 pending_restored = True
 
             t4 = time.perf_counter()
@@ -33352,14 +33590,61 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
             )
             if not bool((verify_result or {}).get("ok")):
                 raise RuntimeError(f"Workbook verification failed after import. missing_row_ids={(verify_result or {}).get('missing_row_ids') or []}")
+            rows_persisted = True
+            t5 = time.perf_counter()
+            APP_LOGGER.info("trading_journal_import_stage_start stage=workbook_snapshot_verification upload=%s", name)
+            if bool(balance):
+                workbook_source_after_import = read_master_journal_source(
+                    _master_journal_path()
+                )
+                workbook_balance_verification = _verify_imported_account_balance_snapshot(
+                    {
+                        "balances": (
+                            workbook_source_after_import.get("balances")
+                            if isinstance(workbook_source_after_import, dict)
+                            else []
+                        )
+                    },
+                    balance,
+                )
+                if not bool(workbook_balance_verification.get("ok")):
+                    raise RuntimeError(
+                        "Workbook Account Balances reread failed after import: "
+                        f"expected={workbook_balance_verification.get('expected_balance')} "
+                        f"actual={workbook_balance_verification.get('actual_balance')} "
+                        f"expected_source={workbook_balance_verification.get('expected_source')} "
+                        f"actual_source={workbook_balance_verification.get('actual_source')}"
+                    )
+                snapshot = _build_master_journal_verification_snapshot()
+                balance_verification = _verify_imported_account_balance_snapshot(
+                    snapshot,
+                    balance,
+                )
+                if not bool(balance_verification.get("ok")):
+                    raise RuntimeError(
+                        "Workbook account balance verification failed after import: "
+                        f"expected={balance_verification.get('expected_balance')} "
+                        f"actual={balance_verification.get('actual_balance')} "
+                        f"expected_source={balance_verification.get('expected_source')} "
+                        f"actual_source={balance_verification.get('actual_source')} "
+                        f"workbook_as_of={workbook_balance_verification.get('actual_as_of')} "
+                        f"snapshot_as_of={balance_verification.get('actual_as_of')}"
+                    )
+            else:
+                snapshot = (
+                    manual_import_snapshot
+                    or _build_manual_import_authoritative_snapshot()
+                )
+            timings["workbook_snapshot_verification"] = round(time.perf_counter() - t5, 6)
+            APP_LOGGER.info("trading_journal_import_stage_done stage=workbook_snapshot_verification elapsed=%.6fs upload=%s", timings["workbook_snapshot_verification"], name)
             t5 = time.perf_counter()
             APP_LOGGER.info("trading_journal_import_stage_start stage=snapshot_persist upload=%s", name)
-            snapshot = manual_import_snapshot or _build_manual_import_authoritative_snapshot()
             _persist_trading_journal_sqlite(snapshot, import_meta={"source_mode": "manual_upload", "rows_imported": len(rows), "warnings": [], "errors": []})
             timings["snapshot_persist"] = round(time.perf_counter() - t5, 6)
             APP_LOGGER.info("trading_journal_import_stage_done stage=snapshot_persist elapsed=%.6fs upload=%s", timings["snapshot_persist"], name)
             t6 = time.perf_counter()
             APP_LOGGER.info("trading_journal_import_stage_start stage=github_sync upload=%s", name)
+            github_sync_started = True
             github_sync_result = _sync_journal_excel_files_to_github(_master_journal_path())
             timings["github_sync"] = round(time.perf_counter() - t6, 6)
             APP_LOGGER.info("trading_journal_import_stage_done stage=github_sync elapsed=%.6fs upload=%s", timings["github_sync"], name)
@@ -33368,10 +33653,11 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
         except Exception as exc:
             if not pending_restored:
                 _PENDING_MANUAL_SYNC_ROWS = previous_pending_rows
+                _PENDING_MANUAL_SYNC_BALANCES = previous_pending_balances
             rollback_errors: List[str] = []
             t_rb = time.perf_counter()
             try:
-                _set_trading_journal_rows(previous_rows)
+                _set_trading_journal_rows(rollback_rows)
             except Exception as row_restore_exc:
                 rollback_errors.append(f"could not restore journal rows: {row_restore_exc}")
             try:
@@ -33382,8 +33668,43 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
                     workbook_path.unlink()
             except Exception as restore_exc:
                 rollback_errors.append(f"could not restore workbook: {restore_exc}")
+            workbook_restore_failed = any(
+                error.startswith("could not restore workbook:")
+                for error in rollback_errors
+            )
+            rollback_rows_persisted = bool(
+                parsed_ids
+                and set(parsed_ids).issubset(set(pre_import_workbook_row_ids))
+            )
+            rollback_balance_verification: Dict[str, object] = {
+                "ok": False,
+                "balance_applied": False,
+                "snapshot_visible": False,
+            }
+            if workbook_restore_failed:
+                try:
+                    rollback_row_verification = _verify_trade_log_row_ids_in_workbook(
+                        workbook_path,
+                        parsed_ids,
+                    )
+                    rollback_rows_persisted = bool(
+                        (rollback_row_verification or {}).get("ok")
+                    )
+                except Exception as rollback_verify_exc:
+                    rollback_errors.append(
+                        f"could not verify workbook after rollback: {rollback_verify_exc}"
+                    )
             try:
-                rollback_snapshot = _build_manual_import_authoritative_snapshot()
+                rollback_snapshot = (
+                    _build_master_journal_verification_snapshot()
+                    if bool(balance)
+                    else _build_manual_import_authoritative_snapshot()
+                )
+                if bool(balance):
+                    rollback_balance_verification = _verify_imported_account_balance_snapshot(
+                        rollback_snapshot,
+                        balance,
+                    )
                 _persist_trading_journal_sqlite(rollback_snapshot, import_meta={"source_mode": "manual_upload_rollback", "rows_imported": 0, "warnings": [], "errors": [str(exc), *rollback_errors]})
             except Exception as persist_rollback_exc:
                 rollback_errors.append(f"could not persist rollback snapshot: {persist_rollback_exc}")
@@ -33394,6 +33715,11 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
             missing = (verify_result or {}).get("missing_row_ids") or list((sync_result or {}).get("missing_row_ids") or [])
             if rollback_errors:
                 msg = f"{msg} | rollback failed: {'; '.join(rollback_errors)}"
+            github_state_restored = bool(
+                not github_sync_started
+                or not github_sync_result.get("github_sync_enabled")
+            )
+            rollback_restored = bool(not rollback_errors and github_state_restored)
             if _is_workbook_lock_exception(exc) or (isinstance(sync_result, dict) and sync_result.get("code") == "EXCEL_WORKBOOK_OPEN"):
                 payload = _excel_workbook_open_payload(extra={
                     "uploaded_name": name,
@@ -33405,13 +33731,19 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
                     "import_timings": timings,
                     "master_journal_error": _master_journal_sync_error(sync_result) or msg,
                     "diagnostics": (sync_result or {}).get("diagnostics") if isinstance(sync_result, dict) else None,
+                    "rows_persisted": rollback_rows_persisted,
+                    "balance_applied": bool(rollback_balance_verification.get("balance_applied")),
+                    "snapshot_visible": bool(rollback_balance_verification.get("snapshot_visible")),
+                    "balance_verification": rollback_balance_verification,
+                    "rollback_restored": rollback_restored,
+                    "rollback_github_state_restored": github_state_restored,
                 })
                 payload["errors"] = ["workbook_locked", *rollback_errors]
                 return payload
-            return {"ok": False, "status_code": code, "message": msg, "uploaded_name": name, "file_type": suffix, "rows_parsed": len(rows), "rows_upserted": 0, "missing_row_ids": missing, "errors": [msg, *rollback_errors], "warnings": [], "import_timings": timings, "master_journal_error": _master_journal_sync_error(sync_result), "diagnostics": (sync_result or {}).get("diagnostics")}
+            return {"ok": False, "status_code": code, "message": msg, "uploaded_name": name, "file_type": suffix, "rows_parsed": len(rows), "rows_upserted": 0, "rows_persisted": rollback_rows_persisted, "balance_applied": bool(rollback_balance_verification.get("balance_applied")), "snapshot_visible": bool(rollback_balance_verification.get("snapshot_visible")), "balance_verification": rollback_balance_verification, "rollback_restored": rollback_restored, "rollback_github_state_restored": github_state_restored, "missing_row_ids": missing, "errors": [msg, *rollback_errors], "warnings": [], "import_timings": timings, "master_journal_error": _master_journal_sync_error(sync_result), "diagnostics": (sync_result or {}).get("diagnostics")}
         APP_LOGGER.info("trading_journal_import_success timings=%s upload=%s", timings, name)
         message = "Import complete. Duplicate rows already present; stats refreshed; workbook trade rows unchanged." if duplicate_noop_fast_path_used else "Import complete."
-        return {"ok": True, "status_code": 200, "message": message, "uploaded_name": name, "file_type": suffix, "rows_parsed": len(rows), "rows_upserted": rows_upserted, "duplicate_rows_merged": duplicate_rows_merged, "balance_parsed": bool(balance), "master_journal_path": str(_master_journal_path()), "verified_row_ids_count": len(parsed_ids), "missing_row_ids": [], "warnings": inference_warnings, "errors": [], "import_timings": timings, **inference_diag, **bybit_diag, **github_sync_result, "github_sync_deferred": False, "github_sync_commit_sha": github_sync_result.get("github_sync_commit"), "github_sync_path": str(_master_journal_path()), "github_sync_message": ("GitHub sync disabled" if not github_sync_result.get("github_sync_enabled") else ("GitHub sync complete" if github_sync_result.get("github_sync_ok") else str(github_sync_result.get("github_sync_error") or "")))}
+        return {"ok": True, "status_code": 200, "message": message, "uploaded_name": name, "file_type": suffix, "rows_parsed": len(rows), "rows_upserted": rows_upserted, "duplicate_rows_merged": duplicate_rows_merged, "balance_parsed": bool(balance), "rows_persisted": rows_persisted, "balance_applied": bool(balance_verification.get("balance_applied")), "snapshot_visible": bool(balance_verification.get("snapshot_visible")), "balance_verification": balance_verification, "master_journal_path": str(_master_journal_path()), "verified_row_ids_count": len(parsed_ids), "missing_row_ids": [], "warnings": inference_warnings, "errors": [], "import_timings": timings, **inference_diag, **bybit_diag, **github_sync_result, "github_sync_deferred": False, "github_sync_commit_sha": github_sync_result.get("github_sync_commit"), "github_sync_path": str(_master_journal_path()), "github_sync_message": ("GitHub sync disabled" if not github_sync_result.get("github_sync_enabled") else ("GitHub sync complete" if github_sync_result.get("github_sync_ok") else str(github_sync_result.get("github_sync_error") or "")))}
     except Exception as exc:
         return {"ok": False, "status_code": 500, "message": f"Unexpected import error for {name}.", "uploaded_name": name, "file_type": suffix or "unknown", "rows_parsed": 0, "rows_upserted": 0, "duplicate_rows_merged": 0, "balance_parsed": False, "master_journal_path": str(_master_journal_path()), "verified_row_ids_count": 0, "missing_row_ids": [], "warnings": [], "errors": [str(exc)]}
     finally:

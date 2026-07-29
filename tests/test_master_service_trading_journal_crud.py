@@ -1675,6 +1675,37 @@ def test_newer_oanda_export_account_balance_overrides_older_authoritative_trade_
     assert diag["latest_authoritative_balance_at"] == "2026-04-30T19:46:41"
 
 
+def test_newer_oanda_export_account_balance_overrides_final_trade_without_cashflow():
+    rows = [{
+        "id": "t1",
+        "row_type": "trade",
+        "source": "oanda",
+        "account": "OANDA DEMO",
+        "account_label": "OANDA DEMO",
+        "close_time": "2026-04-08T00:01:00Z",
+        "net_profit": 10.0,
+        "balance_after_trade": 1010.0,
+    }]
+    excel_balances = [{
+        "account": "OANDA DEMO",
+        "label": "OANDA DEMO",
+        "balance": 1008.75,
+        "currency": "AUD",
+        "source": "oanda_transaction_export_balance",
+        "balance_source": "oanda_transaction_export_balance",
+        "as_of": "2026-04-08T01:01:00Z",
+    }]
+    timeline = master_service._build_journal_balance_timelines(
+        rows,
+        {},
+        excel_balances,
+    )
+    bal = timeline["balances"][0]
+    assert bal["balance"] == pytest.approx(1008.75)
+    assert bal["balance_source"] == "oanda_transaction_export_balance"
+    assert timeline["rows"][0]["balance_after_trade"] == pytest.approx(1010.0)
+
+
 def test_oanda_export_aest_dates_pick_latest_balance(monkeypatch: pytest.MonkeyPatch):
     df = master_service.pd.DataFrame([
         {"TICKET": 500, "TRANSACTION DATE": "2026-04-28 19:46:41 AEST", "TRANSACTION TYPE": "ORDER_FILL", "DETAILS": "fill", "INSTRUMENT": "EUR_USD", "PL": 0.0, "BALANCE": 1493.77},
@@ -2094,6 +2125,25 @@ def test_prev_index_does_not_use_wrong_duplicate_row():
 def test_oanda_parser_explicit_realized_pl_reaches_net_profit_after_import(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(master_service, "_sync_master_journal_workbook", lambda **_k: {"ok": True})
     monkeypatch.setattr(master_service, "_verify_trade_log_row_ids_in_workbook", lambda *_a, **_k: {"ok": True, "missing_row_ids": []})
+    verified_balance = {
+        "account": "OANDA DEMO",
+        "label": "OANDA DEMO",
+        "balance": 1008.0,
+        "currency": "AUD",
+        "source": "oanda_transaction_export_balance",
+        "balance_source": "oanda_transaction_export_balance",
+        "as_of": "2026-01-01T11:00:00+10:00",
+    }
+    monkeypatch.setattr(
+        master_service,
+        "read_master_journal_source",
+        lambda *_a, **_k: {"items": [], "balances": [dict(verified_balance)]},
+    )
+    monkeypatch.setattr(
+        master_service,
+        "_build_master_journal_verification_snapshot",
+        lambda: {"items": [], "balances": [dict(verified_balance)]},
+    )
     csv = (
         "TICKET,TRANSACTION DATE,TRANSACTION TYPE,DETAILS,INSTRUMENT,DIRECTION,UNITS,PRICE,STOP LOSS,TAKE PROFIT,SPREAD COST,COMMISSION,GSL FEE,PL,BALANCE\n"
         "1,2026-01-01 10:00:00 AEST,MARKET_ORDER,CLIENT_ORDER,EUR_USD,Buy,100000,1.1,,, -1,0,0,,1000\n"

@@ -8,6 +8,7 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.cell.cell import MergedCell
 from openpyxl.comments import Comment
 from openpyxl.styles import Font
+from openpyxl.workbook.defined_name import DefinedName
 from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.worksheet.views import Pane, Selection
 import hashlib
@@ -4752,7 +4753,12 @@ def _canonicalize_and_dedupe_balances(balances: List[Dict[str, Any]]) -> List[Di
         src = str(value or "").strip().lower()
         if src == "cashflow_anchor_plus_trades":
             return 300
-        if "broker" in src or "account_summary" in src or "wallet_balance_anchor" in src:
+        if (
+            src == "oanda_transaction_export_balance"
+            or "broker" in src
+            or "account_summary" in src
+            or "wallet_balance_anchor" in src
+        ):
             return 200
         if src in {"authoritative_trade_balance", "trade_timeline", "master_journal"}:
             return 100
@@ -4791,6 +4797,90 @@ def _canonicalize_and_dedupe_balances(balances: List[Dict[str, Any]]) -> List[Di
             continue
         merged[key] = _pick(merged[key], payload)
     return [merged[k] for k in order]
+
+
+_ACCOUNT_BALANCE_SOURCE_DEFINED_NAME_PREFIX = "_CODEX_ACCOUNT_BALANCE_SOURCE_"
+
+
+def _account_balance_source_defined_name(account_label: Any) -> str:
+    canonical = _canonical_account_label(account_label).upper()
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:20].upper()
+    return f"{_ACCOUNT_BALANCE_SOURCE_DEFINED_NAME_PREFIX}{digest}"
+
+
+def _read_account_balance_source_metadata(
+    wb,
+    account_label: Any,
+) -> Dict[str, str]:
+    defined = wb.defined_names.get(_account_balance_source_defined_name(account_label))
+    raw = str(getattr(defined, "attr_text", "") or "").strip()
+    if len(raw) >= 2 and raw.startswith('"') and raw.endswith('"'):
+        raw = raw[1:-1].replace('""', '"')
+    raw = raw.strip()
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        parsed = None
+    if isinstance(parsed, dict):
+        return {
+            "source": str(parsed.get("source") or "").strip(),
+            "timeline_as_of": str(parsed.get("timeline_as_of") or "").strip(),
+        }
+    return {"source": raw, "timeline_as_of": ""}
+
+
+def _account_balance_timeline_as_of(value: Any) -> str:
+    if value in (None, ""):
+        return ""
+    if isinstance(value, datetime):
+        return value.replace(tzinfo=None).isoformat()
+    text = str(value).strip()
+    if not text:
+        return ""
+    normalized = text[:-1] + "+00:00" if text.endswith("Z") else text
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except Exception:
+        return text
+    return parsed.replace(tzinfo=None).isoformat()
+
+
+def _write_account_balance_source_metadata(
+    wb,
+    account_label: Any,
+    source: Any,
+    as_of: Any = None,
+) -> None:
+    name = _account_balance_source_defined_name(account_label)
+    wb.defined_names.pop(name, None)
+    clean_source = str(source or "").strip()
+    if not clean_source:
+        return
+    metadata = json.dumps(
+        {
+            "source": clean_source,
+            "timeline_as_of": _account_balance_timeline_as_of(as_of),
+        },
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
+    excel_string = f'"{metadata.replace(chr(34), chr(34) * 2)}"'
+    wb.defined_names.add(
+        DefinedName(
+            name,
+            attr_text=excel_string,
+            hidden=True,
+            description="Codex Account Balances provenance",
+        )
+    )
+
+
+def _clear_account_balance_source_metadata(wb) -> None:
+    for name in list(wb.defined_names.keys()):
+        if str(name).startswith(_ACCOUNT_BALANCE_SOURCE_DEFINED_NAME_PREFIX):
+            wb.defined_names.pop(name, None)
 
 def _currency_code(*values: Any) -> str:
     for value in values:
@@ -8800,6 +8890,7 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
 
     detail = _stats2_sheet(wb, required=True)
     balances = _canonicalize_and_dedupe_balances(snapshot.get("balances") or stats.get("balances") or [])
+    _clear_account_balance_source_metadata(wb)
     detail.cell(1, 1, "Account Balances").font = Font(bold=True)
     stats2_headers = ("Account", "Balance", "Currency", "Risk of Ruin", "As Of", "Net P/L Percentage")
     account_net_pct = _net_result_pct_by_account(rows)
@@ -8813,6 +8904,12 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
         account_label = _canonical_account_label(rec.get("account_label") or rec.get("account") or rec.get("source") or "")
         detail.cell(target_row, 1, account_label)
         detail.cell(target_row, 2, _as_float(rec.get("balance")))
+        _write_account_balance_source_metadata(
+            wb,
+            account_label,
+            rec.get("balance_source") or rec.get("source"),
+            rec.get("as_of"),
+        )
         detail.cell(target_row, 2).number_format = "#,##0.0000000000" if _is_crypto_currency(currency) else "#,##0.00"
         detail.cell(target_row, 3, currency)
         risk_payload = risk_of_ruin.get(account_label) or _empty_risk_of_ruin_payload("no_usable_trade_history")
@@ -11979,17 +12076,21 @@ def _read_stats2_account_balances(wb) -> List[Dict[str, Any]]:
             continue
         balance = _as_float(ws.cell(row, col_map["balance"]).value)
         currency = str(ws.cell(row, col_map["currency"]).value or "").strip().upper()
+        balance_metadata = _read_account_balance_source_metadata(wb, account)
+        balance_source = balance_metadata.get("source") or "stats2_account_balances"
         payload: Dict[str, Any] = {
             "account": account,
             "account_label": account,
             "label": account,
             "balance": balance,
             "currency": currency,
-            "source": "stats2_account_balances",
-            "balance_source": "stats2_account_balances",
+            "source": balance_source,
+            "balance_source": balance_source,
         }
         if "as_of" in col_map:
             payload["as_of"] = _excel_datetime_to_iso(ws.cell(row, col_map["as_of"]).value)
+        if balance_metadata.get("timeline_as_of"):
+            payload["timeline_as_of"] = balance_metadata["timeline_as_of"]
         balances.append(payload)
     return balances
 
@@ -13264,6 +13365,7 @@ def update_master_journal_workbook_data_only(
             diagnostics["cleared_stats2_instrument_leaders_table"] = True
 
         balances = _canonicalize_and_dedupe_balances(snapshot.get("balances") or [])
+        _clear_account_balance_source_metadata(wb)
         diagnostics.setdefault("non_numeric_balance_accounts", [])
         section = detail_anchors["Account Balances"]
         _normalize_stats2_account_balance_headers(detail_dash, section, diagnostics)
@@ -13309,6 +13411,12 @@ def update_master_journal_workbook_data_only(
                 diagnostics["updated_cells"] += 1
             if _write_value_preserving_cell(detail_dash, row, col_map["balance"], bal_num):
                 diagnostics["updated_cells"] += 1
+            _write_account_balance_source_metadata(
+                wb,
+                label,
+                b.get("balance_source") or b.get("source"),
+                b.get("as_of"),
+            )
             curr = str(b.get("currency") or "").strip()
             existing_fmt = str(detail_dash.cell(row, col_map["balance"]).number_format or "")
             if curr:
