@@ -1,5 +1,6 @@
 from datetime import datetime
 from pathlib import Path
+import re
 from zoneinfo import ZoneInfo
 
 
@@ -79,7 +80,8 @@ def test_custom_indicator_session_rendering_uses_dotted_lines_not_arrow_markers(
     assert "sessionMarkerWindowBars = 80" in session_block
     assert "sessionMarkerHalfLengthMultiplier = 0.60" in session_block
     assert "sessionCandleGapRangeFraction" in session_block
-    assert "candleGap = math.max(markerRange * sessionCandleGapRangeFraction, syminfo.mintick * 20)" in session_block
+    assert 'sessionCandleGapRangeFraction = input.float(0.06, "Candle clearance (recent-range fraction)"' in source
+    assert "candleGap = math.max(markerRange * sessionCandleGapRangeFraction, syminfo.mintick * 40)" in session_block
     assert "lowerLineEndY = low - candleGap" in session_block
     assert "upperLineStartY = high + candleGap" in session_block
     assert "lowerLineStartY = lowerLineEndY - markerHalfLength" in session_block
@@ -116,7 +118,7 @@ def test_scale_aware_gap_model_is_positive_and_clears_entire_candle() -> None:
     minimum_tick = 0.01
     candle_low = 40.0
     candle_high = 60.0
-    gap = max(recent_range * 0.03, minimum_tick * 20)
+    gap = max(recent_range * 0.06, minimum_tick * 40)
     lower_endpoint = candle_low - gap
     upper_endpoint = candle_high + gap
     assert gap > 0
@@ -144,3 +146,98 @@ def test_custom_indicator_funding_and_option_expiry_code_remains_unchanged() -> 
     assert "fundingLine = line.new" in source
     assert "expiryLine := line.new" in source
     assert "extend=extend.both" in source
+
+
+def test_custom_indicator_historical_forex_pair_date_mapping_is_exact() -> None:
+    source = _source()
+    historical_block = source.split("// HISTORICAL FOREX START-DATE MARKER (UTC)", 1)[1].split(
+        "sessionVisibilityKey =", 1
+    )[0]
+    expected = {
+        "USDCAD": (1970, 6, 1),
+        "GBPCAD": (1972, 6, 26),
+        "GBPUSD": (1972, 6, 26),
+        "CADCHF": (1973, 1, 23),
+        "GBPCHF": (1973, 1, 23),
+        "USDCHF": (1973, 1, 23),
+        "CADJPY": (1973, 2, 14),
+        "CHFJPY": (1973, 2, 14),
+        "GBPJPY": (1973, 2, 14),
+        "USDJPY": (1973, 2, 14),
+        "AUDCAD": (1983, 12, 12),
+        "AUDCHF": (1983, 12, 12),
+        "AUDJPY": (1983, 12, 12),
+        "AUDSGD": (1983, 12, 12),
+        "AUDUSD": (1983, 12, 12),
+        "GBPAUD": (1983, 12, 12),
+        "AUDNZD": (1985, 3, 4),
+        "GBPNZD": (1985, 3, 4),
+        "NZDCAD": (1985, 3, 4),
+        "NZDCHF": (1985, 3, 4),
+        "NZDJPY": (1985, 3, 4),
+        "NZDUSD": (1985, 3, 4),
+        "EURAUD": (1999, 1, 4),
+        "EURCAD": (1999, 1, 4),
+        "EURCHF": (1999, 1, 4),
+        "EURGBP": (1999, 1, 4),
+        "EURJPY": (1999, 1, 4),
+        "EURNZD": (1999, 1, 4),
+        "EURUSD": (1999, 1, 4),
+        "USDCNH": (2010, 8, 23),
+    }
+    actual = {
+        pair: (int(year), int(month), int(day))
+        for pair, year, month, day in re.findall(
+            r'"([A-Z]{6})"\s*=>\s*timestamp\("GMT",\s*(\d{4}),\s*(\d{1,2}),\s*(\d{1,2}),\s*0,\s*0\)',
+            historical_block,
+        )
+    }
+    assert actual == expected
+
+
+def test_custom_indicator_historical_forex_marker_is_broker_independent_and_exactly_anchored() -> None:
+    source = _source()
+    historical_block = source.split("// HISTORICAL FOREX START-DATE MARKER (UTC)", 1)[1].split(
+        "sessionVisibilityKey =", 1
+    )[0]
+    assert "syminfo.basecurrency" in historical_block
+    assert "syminfo.currency" in historical_block
+    assert "syminfo.tickerid" not in historical_block
+    assert 'syminfo.type == "forex"' in historical_block
+    assert "historicalForexStartTimestampForPair(historicalForexPair)" in historical_block
+    assert "time <= historicalForexStartTimestamp and historicalForexStartTimestamp < time_close" in historical_block
+    assert historical_block.count("xloc=xloc.bar_time") == 2
+    assert historical_block.count("x1=historicalForexStartTimestamp") == 2
+    assert historical_block.count("x2=historicalForexStartTimestamp") == 2
+    assert "showSessionLines" not in historical_block
+    assert "timeframe." not in historical_block
+
+
+def test_custom_indicator_historical_forex_marker_has_no_reverse_or_unlisted_fallback() -> None:
+    source = _source()
+    historical_block = source.split("// HISTORICAL FOREX START-DATE MARKER (UTC)", 1)[1].split(
+        "sessionVisibilityKey =", 1
+    )[0]
+    assert '"CADUSD" =>' not in historical_block
+    assert '"USDEUR" =>' not in historical_block
+    assert '"CNHUSD" =>' not in historical_block
+    assert "=> na" in historical_block
+
+
+def test_custom_indicator_historical_forex_marker_draws_one_split_marker_without_duplicates() -> None:
+    source = _source()
+    historical_block = source.split("// HISTORICAL FOREX START-DATE MARKER (UTC)", 1)[1].split(
+        "sessionVisibilityKey =", 1
+    )[0]
+    assert "var bool historicalForexStartMarkerDrawn = false" in historical_block
+    assert "and not historicalForexStartMarkerDrawn" in historical_block
+    assert historical_block.count("line.new(") == 2
+    assert historical_block.count("historicalForexStartMarkerDrawn := true") == 1
+    assert historical_block.count("style=line.style_dotted") == 2
+    assert historical_block.count("color=color.black") == 2
+    assert historical_block.count("width=2") == 2
+    assert historical_block.count("force_overlay=true") == 2
+    assert "historicalCandleGap = math.max(historicalMarkerRange * sessionCandleGapRangeFraction, syminfo.mintick * 40)" in historical_block
+    assert "historicalLowerEndY = low - historicalCandleGap" in historical_block
+    assert "historicalUpperStartY = high + historicalCandleGap" in historical_block
+    assert "label.new" not in historical_block

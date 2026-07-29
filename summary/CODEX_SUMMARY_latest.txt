@@ -1,80 +1,67 @@
-Final implementation summary - OANDA Open Orders account-discovery warnings
+Final implementation summary - Forex history markers and authoritative OANDA backfill
 
 Publication status
-- Work was based on the current origin/master at commit 4c685e2.
-- Implementation and verification are complete on branch codex/journal-equity-fx-final-20260726.
+- Work was performed only in C:\GPT\CODEX-master from the current local checkout.
 - This summary is written before publication as required by AGENTS.md.
-- PATCH_DESKTOP_PUSH.bat must run next. The task is not published or complete until that script succeeds and local HEAD equals origin/master.
+- PATCH_DESKTOP_PUSH.bat must run next. The task is not complete until it succeeds and verifies local HEAD equals origin/master.
 
-1. Production-log diagnosis
-- The latest Local Trading Tools run started at 2026-07-27 15:31:13.
-- Demo OANDA /v3/accounts discovery logged three timeout attempts at approximately 15:32:06, 15:32:12, and 15:32:17. The third attempt had retry=False.
-- The logs contain no discovery HTTP response/status, HTTP 429 rate limit, DNS failure, or non-timeout request/transport error. The recorded failure class is timeout; the old logger emitted an empty exception string.
-- After discovery exhausted its retries, the configured demo account completed at 15:32:30 with owner_accounts=1, items=3, and errors=0. Under the collection contract, errors=0 confirms both current openTrades and pendingOrders requests succeeded.
-- Live OANDA activity ran first and experienced recoverable endpoint timeouts before completing with errors=0. Bybit collection began after the demo OANDA account completed; its later requests also experienced recoverable connection timeouts.
-- The startup equity build overlapped the entire Open Orders refresh from 15:31:14 until 15:34:37, along with dashboard/status traffic. This proves concurrent startup work existed, but the logs do not prove it caused the discovery timeout. The later Bybit connection timeouts and earlier live OANDA retries are consistent with transient broader connectivity or contention rather than an OANDA discovery HTTP/rate-limit response.
-- No secrets from the logs are included here.
+1. TradingView Forex markers
+- pinescripts/custom_indicator.pine now defaults the adjustable recent-range candle clearance to 0.06 and uses a 40-tick minimum for session and historical marker gaps.
+- Session marker times, DST handling, Brisbane-weekend filtering, labels, 80-bar range, 0.60 half-length multiplier, dotted black width-2 styling, and the <=30-minute session visibility gate remain unchanged.
+- One split upper/lower historical marker is mapped for every requested pair/date. Pair selection uses syminfo.basecurrency plus syminfo.currency, so it is independent of OANDA, FXCM, FOREXCOM, or other ticker prefixes.
+- Every historical timestamp uses exact GMT midnight and xloc.bar_time. Exact switch matches prevent reversed or unlisted pairs from receiving a marker.
+- Historical markers have no label or setting, are independent of showSessionLines and timeframe gates, and use a persistent draw-once guard to prevent duplicate objects.
+- TradingView compilation was not available locally. Static source tests passed, but they do not prove Pine compilation.
+- A feed limitation remains unavoidable: when the loaded broker history has no bar spanning the requested timestamp, the marker is not moved to the broker's first available candle and no substitute history is invented.
 
-2. Blocking errors versus supplementary warnings
-- /v3/accounts discovery failure is now retained as a non-blocking warning instead of a source error.
-- When the configured account's current openTrades and pendingOrders requests succeed, its rows remain current, the payload is not stale, error_count remains zero, and warning_count identifies the discovery warning.
-- The warning explicitly says that additional owned-account discovery failed. Without a last-known-good list, it says only the configured account's current data was confirmed.
-- Required account-data failures remain blocking. A failed openTrades or pendingOrders request produces a red source error, marks the payload stale, identifies the account and exact endpoint, and preserves rows from the other successful endpoint.
-- Failure of a discovered secondary account is also blocking while successful configured-account, other OANDA-account, and Bybit rows remain present.
-- Cached partial/error payloads no longer become incorrectly non-stale during the Open Orders response-cache lifetime.
-- The payload now exposes errors, warnings, error_count, warning_count, and matching source_counts fields. stale continues to derive only from blocking errors.
+2. Master Journal datetime serialization and cache durability
+- read_master_journal_source() and read_master_journal_manual_overrides() now pass Move to Break Even Time and Move to Profit Time through the existing _excel_datetime_to_iso() helper.
+- Excel datetime/date values become ISO strings, existing strings remain strings, and blanks remain blank strings. No json.dumps(default=str) or broad fallback was introduced.
+- _set_trading_journal_rows() now assigns _TRADING_JOURNAL_CACHE only after the durable JSON write succeeds, so a failed write leaves both memory and disk at the previous state.
+- The checked-in journal regression read returned exactly 1,544 rows, contained no datetime/date objects anywhere in the source payload, passed json.dumps(), and preserved the workbook hash.
 
-3. OANDA account-discovery cache and diagnostics
-- The fresh owned-account cache default is now one hour instead of 20 seconds and is configurable with OANDA_ACCOUNTS_CACHE_TTL_SECONDS.
-- A last-known-good owned-account list is retained for transient failures for one day by default, configurable with OANDA_ACCOUNTS_STALE_TTL_SECONDS and bounded to seven days.
-- Stale membership is used only to choose account IDs. Current openTrades and pendingOrders are always fetched for each configured/cached account; positions and orders themselves are never served from the discovery cache.
-- Non-transient discovery failures such as HTTP 401 do not use stale membership.
-- Concurrent refreshes for the same base/token identity share one in-flight request. Cache keys hash the credentials rather than retaining a token suffix.
-- Discovery remains bounded at three attempts with a six-second per-request timeout and short existing backoffs.
-- Timeout, request/transport, DNS, HTTP status, rate-limit, invalid-response, attempt count, retry exhaustion, timeout, and elapsed-attempt diagnostics are explicit and sanitized. Tokens and credential-bearing URLs are not returned.
-- A missing OandaUpstreamError class was restored so required account endpoint timeout/transport failures retain useful sanitized retry-exhaustion diagnostics instead of degrading into a NameError.
+3. OANDA complete-history backfill
+- Master-journal single-file mode no longer calls _append_oanda_export_rows_to_local_workbook() and does not create OANDA DEMO.xlsx or OANDA LIVE.xlsx.
+- Completed exports are passed to _import_uploaded_trading_journal_file() with the resolved demo/live mode explicitly. This reuses the existing authoritative lock check, parsing, P/L inference, canonical OANDA replacement, upsert, pending-row bridge, workbook sync, rollback, row-ID verification, and GitHub journal-sync transaction.
+- OANDA CSV parsing now honors the explicit account mode even when the filename has no demo/live hint.
+- The endpoint performs an additional Trading Journal.xlsx check for every parsed OANDA trade row ID and verifies the authoritative snapshot contains the correct OANDA account balance matching the export's latest balance.
+- Repeated identical backfills report zero new/updated rows and preserve existing trade/cashflow row IDs without creating a broker workbook.
+- Parse, workbook-lock/import, sync, row-verification, and snapshot/balance failures return JSON-safe structured responses with the existing history-page response fields.
+- The legacy separate-workbook branch remains available only outside master-journal single-file mode.
 
-4. Browser presentation
-- render/static/open_orders.js now renders warnings independently from errors.
-- Complete success shows Updated.
-- Non-blocking discovery degradation shows Updated (1 warning) with a compact amber Source warnings box.
-- Required source failure shows Stale (1 error) with the existing large red Source errors treatment.
-- Mixed counts use correct singular/plural wording, warnings survive action-row refreshes, and rendered diagnostics do not end in dangling colons.
+4. Export/backfill browser status
+- render/static/history_page.js resolves the completed export download URL before starting OANDA backfill.
+- A backfill failure now says the export completed but Trading Journal backfill failed; it leaves a manual CSV download link available.
+- Successful behavior remains ordered as requested: export completion, authoritative journal backfill/verification, then automatic CSV download.
+- Automatic download failures continue to expose a manual download link.
 
-5. Regression coverage and validation
-- tests/test_open_orders_page.py: 45 passed.
-- Coverage includes:
-  - discovery timeout with no cache and successful configured-account current data;
-  - discovery timeout with last-known-good membership;
-  - transient-only stale-cache fallback and rejection of stale fallback for HTTP 401;
-  - configured openTrades failure;
-  - configured pendingOrders failure;
-  - discovered secondary-account failure;
-  - preservation of successful OANDA and Bybit rows;
-  - exact stale, warning, error, and source counts;
-  - bounded three-attempt retries and sanitized diagnostics;
-  - in-flight discovery coalescing;
-  - separate amber-warning/red-error browser rendering and badge text.
-- Profile, dashboard layout, local-exit, calculator, and merged-monitor/status suites: 196 passed.
-- Timeframe suite excluding one demonstrably pre-existing broken fixture: 22 passed, 1 deselected.
-- The pre-existing failure is test_recent_trades_and_journal_backfill_from_trade_context. Both origin/master production code and the origin/master test show the mismatch: the fixture supplies cache_version="test" and production calls int(cache_version). This unrelated equity-cache behavior was not changed.
-- A broader combined run therefore reported 218 passed and that same one pre-existing failure after repository-local pytest temp isolation.
-- node --check render/static/open_orders.js passed.
-- python -m py_compile render/master_service.py passed.
-- git diff --check passed; only normal LF-to-CRLF working-copy notices were emitted.
-- Default pytest temp/cache locations are permission-restricted on this machine. Repository-local ignored --basetemp directories were used for the clean reruns.
+5. Focused verification
+- python -m py_compile render/master_service.py tools/master_journal_workbook.py: passed.
+- node --check render/static/history_page.js: passed.
+- tests/test_custom_indicator_pine.py and tests/test_history_page_js_download.py: 17 passed.
+- New Move-to-Time and real-workbook read-only checks in tests/test_master_journal_workbook.py: 2 passed, 175 deselected.
+- New failed-write cache/disk check in tests/test_master_service_trading_journal_crud.py: 1 passed.
+- Relevant OANDA backfill/account-mode tests in tests/test_master_service_oanda_history_export.py: 11 passed, 32 deselected.
+- git diff --check: passed with only normal LF-to-CRLF working-copy notices.
+- No full test suite and no real broker request were run.
 
 6. Safety and preservation
-- No real order, cancellation, position close, or broker mutation request was made. All broker behavior tests used mocks.
-- Trading Journal.xlsx was not read as a source for this diagnosis and was not modified by this work. Its pre-existing staged working-tree change remains separate from this task.
-- Pre-existing runtime changes under render/data remain separate and must not be published.
-- Completed equity-curve, Render/local profile, Bybit diagnostic, watchlist, FX Weekend, and workbook behavior was not changed.
-- Secrets, environment files, logs, caches, runtime data, and temporary test directories remain excluded.
+- journal/Trading Journal.xlsx had a pre-existing local modification and was treated as protected user work. Its SHA-256 remained exactly 8925B34088B24CB8415A936B8277E6C3F4ABF952A9B8302DB0BF359A05BFED29 before and after development/testing.
+- Pre-existing changes in render/data/monthly_aud_revaluation_state.json, pending_webhooks.json, trade_contexts.json, and webhook_attempts.json were not modified for this task and must remain unstaged/unpublished.
+- No OANDA LIVE.xlsx or OANDA DEMO.xlsx exists in journal/.
+- Repository-local pytest temp directories are ignored by .gitignore and must remain unstaged. Repository policy prohibited recursive deletion, so no deletion workaround was attempted.
+- No archive, custom instructions file, secret, environment file, log, cache, or runtime data was used as task input or included in the intended change set.
 
 Changed task files
+- pinescripts/custom_indicator.pine
 - render/master_service.py
-- render/static/open_orders.js
-- tests/test_open_orders_page.py
+- render/static/history_page.js
+- tools/master_journal_workbook.py
+- tests/test_custom_indicator_pine.py
+- tests/test_history_page_js_download.py
+- tests/test_master_journal_workbook.py
+- tests/test_master_service_oanda_history_export.py
+- tests/test_master_service_trading_journal_crud.py
 - summary/CODEX_SUMMARY_latest.txt
 
 Mandatory completion step

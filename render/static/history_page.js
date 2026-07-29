@@ -184,6 +184,17 @@
     }
     return filename;
   };
+
+  const showManualDownload = (url, prefix) => {
+    if (!resultEl || !url) return;
+    resultEl.textContent = prefix;
+    const manual = document.createElement('a');
+    manual.href = url;
+    manual.download = '';
+    manual.textContent = 'Download export file';
+    resultEl.appendChild(manual);
+  };
+
   const runExport = async () => {
     const { broker, payload } = buildPayload();
     const api = API_MAP[broker];
@@ -209,20 +220,28 @@
         const state = String(st.status || '').toLowerCase();
         if (state === 'done') {
           setStatus('Export complete.');
-          if (broker === 'oanda') {
-            const backfillRes = await fetchJson(`/api/oanda-history/export/${encodeURIComponent(jobId)}/backfill-journal`, {
-              method: 'POST',
-            });
-            if (!backfillRes || backfillRes.ok === false) {
-              const detail = backfillRes?.error || backfillRes?.sync?.message || backfillRes?.detail || 'OANDA export backfill failed.';
-              const target = backfillRes?.oanda_export_target_workbook ? ` (${backfillRes.oanda_export_target_workbook})` : '';
-              throw new Error(`Export completed, but Trading Journal backfill failed: ${detail}${target}`);
-            }
-            setStatus(`Export complete. Backfilled ${backfillRes.oanda_export_trades_seen || 0} OANDA ${String(payload.account || '').toUpperCase()} trades into Trading Journal.`);
-          }
           const dl = st.download_url;
           if (!dl) {
             throw new Error('Export completed but no download URL was returned.');
+          }
+          if (broker === 'oanda') {
+            let backfillRes;
+            try {
+              backfillRes = await fetchJson(`/api/oanda-history/export/${encodeURIComponent(jobId)}/backfill-journal`, {
+                method: 'POST',
+              });
+            } catch (backfillErr) {
+              const detail = backfillErr?.message || String(backfillErr) || 'OANDA export backfill failed.';
+              showManualDownload(dl, 'Export completed. Trading Journal backfill failed. Manual download: ');
+              throw new Error(`Export completed, but Trading Journal backfill failed: ${detail}`);
+            }
+            if (!backfillRes || backfillRes.ok === false) {
+              const detail = backfillRes?.error || backfillRes?.sync?.message || backfillRes?.detail || 'OANDA export backfill failed.';
+              const target = backfillRes?.oanda_export_target_workbook ? ` (${backfillRes.oanda_export_target_workbook})` : '';
+              showManualDownload(dl, 'Export completed. Trading Journal backfill failed. Manual download: ');
+              throw new Error(`Export completed, but Trading Journal backfill failed: ${detail}${target}`);
+            }
+            setStatus(`Export complete. Backfilled ${backfillRes.oanda_export_trades_seen || 0} OANDA ${String(payload.account || '').toUpperCase()} trades into Trading Journal.`);
           }
 
           setStatus('Export complete. Downloading file...');
@@ -231,14 +250,7 @@
             setResult(`Downloaded ${filename}.`);
           } catch (downloadErr) {
             setStatus(downloadErr?.message || String(downloadErr), true);
-            if (resultEl) {
-              resultEl.textContent = 'Automatic download failed. Manual download: ';
-              const manual = document.createElement('a');
-              manual.href = dl;
-              manual.download = '';
-              manual.textContent = 'Download export file';
-              resultEl.appendChild(manual);
-            }
+            showManualDownload(dl, 'Automatic download failed. Manual download: ');
             throw downloadErr;
           }
           return;

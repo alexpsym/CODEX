@@ -65,6 +65,10 @@ MOVE_TO_FIELD_MAP = {
     "Move to Profit Distance From Entry %": "move_to_profit_distance_from_entry_pct",
     "Move to Profit Distance From Exit %": "move_to_profit_distance_from_exit_pct",
 }
+MOVE_TO_TIME_FIELDS = {
+    "move_to_break_even_time",
+    "move_to_profit_time",
+}
 QUALITY_ANALYSIS_FIELD_MAP = {
     "Pattern": "pattern",
     "EMA": "ema",
@@ -7412,6 +7416,8 @@ def read_master_journal_manual_overrides(path: Path) -> Dict[str, Dict[str, Any]
                     number_format = str(ws.cell(row_num, i + 1).number_format or "")
                     parsed_duration = _duration_ddhhmmss_cell_to_seconds(raw_value) if _is_ddhhmmss_number_format(number_format) else _parse_duration_text(raw_value)
                     edits[field] = parsed_duration if parsed_duration is not None else raw_value
+                elif field in MOVE_TO_TIME_FIELDS:
+                    edits[field] = _excel_datetime_to_iso(raw_value)
                 elif field in MOVE_TO_FIELD_MAP.values():
                     edits[field] = raw_value
                 else:
@@ -12263,6 +12269,8 @@ def read_master_journal_source(path: Path) -> Dict[str, Any]:
                         number_format = str(row_cells[field_index].number_format or "")
                         parsed_duration = _duration_ddhhmmss_cell_to_seconds(raw_value) if _is_ddhhmmss_number_format(number_format) else _parse_duration_text(raw_value)
                         item[field] = parsed_duration if parsed_duration is not None else raw_value
+                    elif field in MOVE_TO_TIME_FIELDS:
+                        item[field] = _excel_datetime_to_iso(raw_value)
                     else:
                         item[field] = raw_value
             if "close_stopout" not in item and "Stop Out" in idx:

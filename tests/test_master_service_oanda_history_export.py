@@ -1,11 +1,13 @@
 import asyncio
 import importlib.util
+import json
 import os
 import sys
 from pathlib import Path
 import types
 
 import pytest
+from openpyxl import Workbook, load_workbook
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -372,12 +374,13 @@ def test_oanda_history_export_filename_contains_account_mode(monkeypatch: pytest
     assert live_job.output_path.with_suffix(".json").exists()
 
 
-def test_oanda_history_export_backfill_endpoint_writes_oanda_demo_workbook(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+def test_oanda_history_export_backfill_endpoint_preserves_legacy_workbook_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     csv_path = tmp_path / "oanda_history_demo_job.csv"
     csv_path.write_text("TICKET,TRANSACTION DATE,TRANSACTION TYPE,DETAILS,INSTRUMENT,PRICE,UNITS,DIRECTION,SPREAD COST,STOP LOSS,TAKE PROFIT,FINANCING,COMMISSION,PL,BALANCE\n589,2026-04-08 19:50:46 AEST,ORDER_FILL,MARKET_ORDER,NZD_USD,0.58217,2550,Buy,0,0.57864,0.58888,,,0,1493.64\n594,2026-04-09 19:35:17 AEST,ORDER_FILL,MARKET_ORDER_TRADE_CLOSE,NZD_USD,0.58308,-2550,Sell,0,,,,,3.2847,1496.92\n")
     csv_path.with_suffix(".json").write_text('{"account_mode":"demo","account_label":"OANDA DEMO"}')
     job = master_service.OandaHistoryJob(job_id="jobbf", status="done", created_at=0, updated_at=0, params={"account": "demo"}, output_path=csv_path)
     master_service.OANDA_HISTORY_JOBS[job.job_id] = job
+    monkeypatch.setattr(master_service, "_master_journal_single_file_mode", lambda: False)
     monkeypatch.setattr(master_service, "_append_oanda_export_rows_to_local_workbook", lambda *_a, **_k: 1)
     monkeypatch.setattr(master_service, "_import_trading_journal_from_sources", lambda *_a, **_k: {"ok": True, "message": "Done"})
     try:
@@ -396,6 +399,7 @@ def test_oanda_history_export_backfill_endpoint_invalidates_view_cache(monkeypat
     job = master_service.OandaHistoryJob(job_id="jobbf2", status="done", created_at=0, updated_at=0, params={"account": "demo"}, output_path=csv_path)
     master_service.OANDA_HISTORY_JOBS[job.job_id] = job
     called = {"n": 0}
+    monkeypatch.setattr(master_service, "_master_journal_single_file_mode", lambda: False)
     monkeypatch.setattr(master_service, "_append_oanda_export_rows_to_local_workbook", lambda *_a, **_k: 0)
     monkeypatch.setattr(master_service, "_import_trading_journal_from_sources", lambda *_a, **_k: {"ok": True, "message": "Done"})
     monkeypatch.setattr(master_service, "_invalidate_trading_journal_view_snapshot", lambda: called.__setitem__("n", called["n"] + 1))
@@ -413,6 +417,7 @@ def test_oanda_history_backfill_endpoint_accepts_legacy_int_append_stats(monkeyp
     job = master_service.OandaHistoryJob(job_id="legacyint", status="done", created_at=0, updated_at=0, params={"account": "demo"}, output_path=csv_path)
     master_service.OANDA_HISTORY_JOBS[job.job_id] = job
     called = {"n": 0}
+    monkeypatch.setattr(master_service, "_master_journal_single_file_mode", lambda: False)
     monkeypatch.setattr(master_service, "_append_oanda_export_rows_to_local_workbook", lambda *_a, **_k: 0)
     monkeypatch.setattr(master_service, "_import_trading_journal_from_sources", lambda *_a, **_k: {"ok": True, "message": "Done"})
     monkeypatch.setattr(master_service, "_build_trading_journal_view_snapshot", lambda *a, **k: {"balances": [{"label": "OANDA DEMO", "balance_source": "authoritative_trade_balance"}]})
@@ -432,6 +437,7 @@ def test_oanda_backfill_endpoint_fails_if_snapshot_still_stale(monkeypatch: pyte
     csv_path.with_suffix(".json").write_text('{"account_mode":"demo"}')
     job = master_service.OandaHistoryJob(job_id="stale", status="done", created_at=0, updated_at=0, params={"account": "demo"}, output_path=csv_path)
     master_service.OANDA_HISTORY_JOBS[job.job_id] = job
+    monkeypatch.setattr(master_service, "_master_journal_single_file_mode", lambda: False)
     monkeypatch.setattr(master_service, "_append_oanda_export_rows_to_local_workbook", lambda *_a, **_k: {"changed": 0, "inserted": 0, "updated": 0})
     monkeypatch.setattr(master_service, "_import_trading_journal_from_sources", lambda *_a, **_k: {"ok": True, "message": "Done"})
     monkeypatch.setattr(master_service, "_build_trading_journal_view_snapshot", lambda *a, **k: {"balances": [{"label": "OANDA DEMO", "balance_source": "cashflow_anchor_plus_trades"}]})
@@ -473,6 +479,7 @@ def test_oanda_history_export_backfill_endpoint_returns_failure_on_append_error(
     csv_path.with_suffix(".json").write_text('{"account_mode":"demo"}')
     job = master_service.OandaHistoryJob(job_id="jobbf3", status="done", created_at=0, updated_at=0, params={"account": "demo"}, output_path=csv_path)
     master_service.OANDA_HISTORY_JOBS[job.job_id] = job
+    monkeypatch.setattr(master_service, "_master_journal_single_file_mode", lambda: False)
     monkeypatch.setattr(master_service, "_append_oanda_export_rows_to_local_workbook", lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("MISSING_XLRD_FOR_XLS")))
     try:
         res = asyncio.run(master_service.backfill_oanda_history_export_to_journal(job.job_id))
@@ -481,6 +488,271 @@ def test_oanda_history_export_backfill_endpoint_returns_failure_on_append_error(
         assert "MISSING_XLRD_FOR_XLS" in payload
     finally:
         master_service.OANDA_HISTORY_JOBS.pop(job.job_id, None)
+
+
+@pytest.mark.parametrize("account_mode", ["demo", "live"])
+def test_oanda_master_journal_backfill_uses_authoritative_import_and_is_idempotent(
+    account_mode: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    journal_dir = tmp_path / "journal"
+    journal_dir.mkdir()
+    master_path = journal_dir / "Trading Journal.xlsx"
+    csv_path = tmp_path / f"oanda_history_{account_mode}_job.csv"
+    csv_path.write_text(
+        "TICKET,TRANSACTION DATE,TRANSACTION TYPE,DETAILS,INSTRUMENT,PRICE,UNITS,DIRECTION,SPREAD COST,STOP LOSS,TAKE PROFIT,FINANCING,COMMISSION,PL,BALANCE\n"
+        "589,2026-04-08 19:50:46 AEST,ORDER_FILL,MARKET_ORDER,NZD_USD,0.58217,2550,Buy,0,0.57864,0.58888,,,0,1493.64\n"
+        "594,2026-04-09 19:35:17 AEST,ORDER_FILL,MARKET_ORDER_TRADE_CLOSE,NZD_USD,0.58308,-2550,Sell,0,,,,,3.2847,1496.92\n",
+        encoding="utf-8",
+    )
+    csv_path.with_suffix(".json").write_text(
+        json.dumps({"account_mode": account_mode}),
+        encoding="utf-8",
+    )
+    job = master_service.OandaHistoryJob(
+        job_id=f"master-{account_mode}",
+        status="done",
+        created_at=0,
+        updated_at=0,
+        params={"account": account_mode},
+        output_path=csv_path,
+    )
+    master_service.OANDA_HISTORY_JOBS[job.job_id] = job
+    expected_id = f"oanda_export:{account_mode}:589:594"
+    import_modes = []
+
+    def _authoritative_import(_name, _payload, account_mode=None):
+        import_modes.append(account_mode)
+        if master_path.exists():
+            wb = load_workbook(master_path)
+            ws = wb["Trade Log"]
+        else:
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "Trade Log"
+            ws.append(["Row ID"])
+            ws.append(["existing:trade"])
+            ws.append(["cashflow:existing"])
+        existing_ids = {
+            str(ws.cell(row, 1).value or "")
+            for row in range(2, ws.max_row + 1)
+        }
+        if expected_id in existing_ids:
+            rows_upserted = 0
+            duplicate_rows_merged = 1
+        else:
+            ws.append([expected_id])
+            rows_upserted = 1
+            duplicate_rows_merged = 0
+        wb.save(master_path)
+        wb.close()
+        return {
+            "ok": True,
+            "status_code": 200,
+            "message": "Import complete.",
+            "rows_parsed": 1,
+            "rows_upserted": rows_upserted,
+            "duplicate_rows_merged": duplicate_rows_merged,
+            "verified_row_ids_count": 1,
+        }
+
+    monkeypatch.setattr(master_service, "_master_journal_single_file_mode", lambda: True)
+    monkeypatch.setattr(master_service, "_master_journal_path", lambda: master_path)
+    monkeypatch.setattr(master_service, "_import_uploaded_trading_journal_file", _authoritative_import)
+    monkeypatch.setattr(
+        master_service,
+        "_append_oanda_export_rows_to_local_workbook",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("legacy append path must not run")),
+    )
+    monkeypatch.setattr(master_service, "_invalidate_trading_journal_view_snapshot", lambda: None)
+    monkeypatch.setattr(
+        master_service,
+        "_build_trading_journal_view_snapshot",
+        lambda *a, **k: {
+            "balances": [{
+                "label": f"OANDA {account_mode.upper()}",
+                "balance": 1496.92,
+                "balance_source": "authoritative_trade_balance",
+            }]
+        },
+    )
+    try:
+        first = json.loads(
+            asyncio.run(master_service.backfill_oanda_history_export_to_journal(job.job_id)).body.decode("utf-8")
+        )
+        second = json.loads(
+            asyncio.run(master_service.backfill_oanda_history_export_to_journal(job.job_id)).body.decode("utf-8")
+        )
+    finally:
+        master_service.OANDA_HISTORY_JOBS.pop(job.job_id, None)
+
+    assert first["ok"] is True
+    assert first["oanda_export_target_workbook"] == "Trading Journal.xlsx"
+    assert first["oanda_export_trades_backfilled"] == 1
+    assert first["oanda_export_latest_balance"] == pytest.approx(1496.92)
+    assert second["ok"] is True
+    assert second["oanda_export_trades_backfilled"] == 0
+    assert second["oanda_export_trades_updated"] == 0
+    assert second["oanda_export_latest_balance"] == pytest.approx(1496.92)
+    assert import_modes == [account_mode, account_mode]
+    assert not (journal_dir / "OANDA LIVE.xlsx").exists()
+    assert not (journal_dir / "OANDA DEMO.xlsx").exists()
+    json.dumps(first)
+    json.dumps(second)
+
+    wb = load_workbook(master_path, data_only=True, read_only=True)
+    ids = [str(row[0] or "") for row in wb["Trade Log"].iter_rows(min_row=2, values_only=True)]
+    wb.close()
+    assert ids.count(expected_id) == 1
+    assert ids.count("existing:trade") == 1
+    assert ids.count("cashflow:existing") == 1
+
+
+def test_oanda_csv_parser_honors_explicit_account_mode_without_filename_hint(tmp_path: Path):
+    csv_path = tmp_path / "completed_export.csv"
+    csv_path.write_text(
+        "TICKET,TRANSACTION DATE,TRANSACTION TYPE,DETAILS,INSTRUMENT,PRICE,UNITS,DIRECTION,SPREAD COST,STOP LOSS,TAKE PROFIT,FINANCING,COMMISSION,PL,BALANCE\n"
+        "1,2026-01-01 10:00:00 AEST,ORDER_FILL,MARKET_ORDER,EUR_USD,1.1,1000,Buy,0,1.0,1.2,,,0,1000\n"
+        "2,2026-01-01 11:00:00 AEST,ORDER_FILL,TAKE_PROFIT_ORDER,EUR_USD,1.2,-1000,Sell,0,,,,,10,1010\n",
+        encoding="utf-8",
+    )
+    rows, _balance = master_service._parse_local_trading_journal_workbook(
+        csv_path,
+        original_name=csv_path.name,
+        account_mode="live",
+    )
+    assert rows[0]["id"] == "oanda_export:live:1:2"
+    assert rows[0]["account_label"] == "OANDA LIVE"
+
+
+@pytest.mark.parametrize(
+    ("import_result", "expected_error"),
+    [
+        (
+            {
+                "ok": False,
+                "status_code": 423,
+                "code": "EXCEL_WORKBOOK_OPEN",
+                "message": "Close Trading Journal.xlsx in Excel before importing.",
+                "errors": ["workbook_locked"],
+            },
+            "Close Trading Journal.xlsx",
+        ),
+        (
+            {
+                "ok": False,
+                "status_code": 500,
+                "message": "Workbook sync failed: validation failed",
+                "errors": ["validation failed"],
+            },
+            "Workbook sync failed",
+        ),
+    ],
+)
+def test_oanda_master_backfill_surfaces_authoritative_import_failures(
+    import_result,
+    expected_error,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    csv_path = tmp_path / "oanda_history_demo_failure.csv"
+    csv_path.write_text(
+        "TICKET,TRANSACTION DATE,TRANSACTION TYPE,DETAILS,INSTRUMENT,PRICE,UNITS,DIRECTION,SPREAD COST,STOP LOSS,TAKE PROFIT,FINANCING,COMMISSION,PL,BALANCE\n"
+        "1,2026-01-01 10:00:00 AEST,ORDER_FILL,MARKET_ORDER,EUR_USD,1.1,1000,Buy,0,1.0,1.2,,,0,1000\n"
+        "2,2026-01-01 11:00:00 AEST,ORDER_FILL,TAKE_PROFIT_ORDER,EUR_USD,1.2,-1000,Sell,0,,,,,10,1010\n",
+        encoding="utf-8",
+    )
+    csv_path.with_suffix(".json").write_text('{"account_mode":"demo"}', encoding="utf-8")
+    job = master_service.OandaHistoryJob(
+        job_id="master-failure",
+        status="done",
+        created_at=0,
+        updated_at=0,
+        params={"account": "demo"},
+        output_path=csv_path,
+    )
+    master_service.OANDA_HISTORY_JOBS[job.job_id] = job
+    monkeypatch.setattr(master_service, "_master_journal_single_file_mode", lambda: True)
+    monkeypatch.setattr(master_service, "_master_journal_path", lambda: tmp_path / "Trading Journal.xlsx")
+    monkeypatch.setattr(master_service, "_import_uploaded_trading_journal_file", lambda *_a, **_k: import_result)
+    try:
+        payload = json.loads(
+            asyncio.run(master_service.backfill_oanda_history_export_to_journal(job.job_id)).body.decode("utf-8")
+        )
+    finally:
+        master_service.OANDA_HISTORY_JOBS.pop(job.job_id, None)
+    assert payload["ok"] is False
+    assert expected_error in payload["error"]
+    assert payload["oanda_export_target_workbook"] == "Trading Journal.xlsx"
+    assert payload["sync"] == import_result
+
+
+def test_oanda_master_backfill_parse_and_verification_failures_are_structured(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    csv_path = tmp_path / "oanda_history_demo_structured.csv"
+    csv_path.write_text("header\n", encoding="utf-8")
+    csv_path.with_suffix(".json").write_text('{"account_mode":"demo"}', encoding="utf-8")
+    job = master_service.OandaHistoryJob(
+        job_id="master-structured",
+        status="done",
+        created_at=0,
+        updated_at=0,
+        params={"account": "demo"},
+        output_path=csv_path,
+    )
+    master_service.OANDA_HISTORY_JOBS[job.job_id] = job
+    monkeypatch.setattr(master_service, "_master_journal_single_file_mode", lambda: True)
+    monkeypatch.setattr(master_service, "_master_journal_path", lambda: tmp_path / "Trading Journal.xlsx")
+    monkeypatch.setattr(
+        master_service,
+        "_parse_local_trading_journal_workbook",
+        lambda *_a, **_k: (_ for _ in ()).throw(ValueError("bad OANDA CSV")),
+    )
+    try:
+        parse_payload = json.loads(
+            asyncio.run(master_service.backfill_oanda_history_export_to_journal(job.job_id)).body.decode("utf-8")
+        )
+        assert parse_payload["ok"] is False
+        assert "Failed to parse completed OANDA export" in parse_payload["error"]
+
+        monkeypatch.setattr(
+            master_service,
+            "_parse_local_trading_journal_workbook",
+            lambda *_a, **_k: (
+                [{"id": "oanda_export:demo:1:2", "source": "oanda_transaction_export"}],
+                {"balance": 1010.0, "as_of": "2026-01-01T11:00:00+10:00"},
+            ),
+        )
+        monkeypatch.setattr(
+            master_service,
+            "_import_uploaded_trading_journal_file",
+            lambda *_a, **_k: {
+                "ok": True,
+                "rows_upserted": 1,
+                "duplicate_rows_merged": 0,
+            },
+        )
+        monkeypatch.setattr(
+            master_service,
+            "_verify_trade_log_row_ids_in_workbook",
+            lambda *_a, **_k: {
+                "ok": False,
+                "missing_row_ids": ["oanda_export:demo:1:2"],
+            },
+        )
+        verify_payload = json.loads(
+            asyncio.run(master_service.backfill_oanda_history_export_to_journal(job.job_id)).body.decode("utf-8")
+        )
+    finally:
+        master_service.OANDA_HISTORY_JOBS.pop(job.job_id, None)
+    assert verify_payload["ok"] is False
+    assert "verification failed" in verify_payload["error"]
+    assert verify_payload["sync"]["oanda_backfill_verification"]["missing_row_ids"] == [
+        "oanda_export:demo:1:2"
+    ]
 
 
 import pandas as pd

@@ -4902,8 +4902,8 @@ def _set_trading_journal_rows(rows: List[Dict[str, object]]) -> None:
     global _TRADING_JOURNAL_CACHE
     with _TRADING_JOURNAL_ROWS_LOCK:
         normalized_rows = [_normalize_journal_profit_fields(dict(item)) for item in rows if isinstance(item, dict)]
-        _TRADING_JOURNAL_CACHE = [dict(item) for item in normalized_rows]
         _save_json_file(TRADING_JOURNAL_PATH, {"items": normalized_rows, "updated_at": _utc_now_iso()})
+        _TRADING_JOURNAL_CACHE = [dict(item) for item in normalized_rows]
     _invalidate_trading_journal_view_snapshot()
     _schedule_dropbox_upload_state_backup()
 
@@ -8289,9 +8289,9 @@ def _parse_local_trading_journal_workbook(path: Path, *, original_name: Optional
                 raise ValueError("Bybit history CSV account is ambiguous. Select Demo or Live before importing.")
             return _parse_bybit_trade_history_csv(path, account_mode=resolved_mode), None
         if _is_oanda_transaction_history_frame(df):
-            if not hinted_mode:
+            if not resolved_mode:
                 raise ValueError("OANDA CSV account is ambiguous; include demo/live in filename.")
-            account_mode = hinted_mode or "demo"
+            account_mode = resolved_mode
             account_label = "OANDA DEMO" if account_mode == "demo" else "OANDA LIVE"
             parsed = _journal_rows_from_oanda_transaction_history_frame(
                 df,
@@ -30394,23 +30394,227 @@ async def backfill_oanda_history_export_to_journal(job_id: str) -> JSONResponse:
             "legacy_rows_migrated": 0,
             "legacy_migration_performed": False,
         }
+
+    def _response(
+        *,
+        ok: bool,
+        target_workbook: str,
+        source_path: str,
+        trades_seen: int = 0,
+        trades_backfilled: int = 0,
+        trades_updated: int = 0,
+        latest_balance: object = None,
+        latest_balance_as_of: object = None,
+        error: object = None,
+        sync: object = None,
+        snapshot_visible: bool = False,
+        status_code: int = 200,
+    ) -> JSONResponse:
+        payload = {
+            "ok": bool(ok),
+            "oanda_export_trades_seen": int(trades_seen),
+            "oanda_export_trades_backfilled": int(trades_backfilled),
+            "oanda_export_trades_updated": int(trades_updated),
+            "oanda_export_target_workbook": str(target_workbook or ""),
+            "oanda_export_source_path": str(source_path or ""),
+            "oanda_export_latest_balance": latest_balance,
+            "oanda_export_latest_balance_as_of": latest_balance_as_of,
+            "oanda_export_balance_applied": bool(ok),
+            "oanda_export_rows_persisted": bool(ok and trades_seen > 0),
+            "error": None if error in (None, "") else str(error),
+            "sync": sync if isinstance(sync, dict) else {},
+            "snapshot_visible": bool(snapshot_visible),
+        }
+        return JSONResponse(_json_safe(payload), status_code=status_code)
+
+    def _import_error(result: object) -> str:
+        if not isinstance(result, dict):
+            return "OANDA authoritative journal import returned an invalid response."
+        for key in ("message", "master_journal_error", "error"):
+            value = result.get(key)
+            if value not in (None, ""):
+                return str(value)
+        errors = result.get("errors")
+        if isinstance(errors, list) and errors:
+            return "; ".join(str(item) for item in errors if item not in (None, ""))
+        return "OANDA authoritative journal import failed."
+
     job = OANDA_HISTORY_JOBS.get(job_id)
     if job is None:
-        raise HTTPException(status_code=404, detail="Export job not found.")
+        return _response(
+            ok=False,
+            target_workbook="",
+            source_path="",
+            error="Export job not found.",
+            sync={"ok": False, "message": "Export job not found."},
+            status_code=404,
+        )
     if job.status != "done" or job.output_path is None or not job.output_path.exists():
-        raise HTTPException(status_code=400, detail="Export not ready.")
+        return _response(
+            ok=False,
+            target_workbook="",
+            source_path=str(job.output_path or ""),
+            error="Export not ready.",
+            sync={"ok": False, "message": "Export not ready."},
+            status_code=400,
+        )
     sidecar = _load_json_file(job.output_path.with_suffix(".json"), {})
     account_mode = str((sidecar or {}).get("account_mode") or job.params.get("account") or "").strip().lower()
     if account_mode not in {"demo", "live"}:
-        raise HTTPException(status_code=400, detail="Unable to resolve OANDA account mode for backfill.")
-    rows, balance = _parse_local_trading_journal_workbook(job.output_path)
-    mapped = []
+        return _response(
+            ok=False,
+            target_workbook="",
+            source_path=str(job.output_path),
+            error="Unable to resolve OANDA account mode for backfill.",
+            sync={"ok": False, "message": "Unable to resolve OANDA account mode for backfill."},
+            status_code=400,
+        )
+    target_workbook = (
+        _master_journal_path().name
+        if _master_journal_single_file_mode()
+        else _canonical_local_oanda_workbook_name(account_mode)
+    )
+    try:
+        rows, balance = _parse_local_trading_journal_workbook(
+            job.output_path,
+            original_name=job.output_path.name,
+            account_mode=account_mode,
+        )
+    except Exception as exc:
+        message = f"Failed to parse completed OANDA export for journal backfill: {exc}"
+        return _response(
+            ok=False,
+            target_workbook=target_workbook,
+            source_path=str(job.output_path),
+            error=message,
+            sync={"ok": False, "message": message, "errors": [str(exc)]},
+        )
+    mapped: List[Dict[str, object]] = []
     for row in rows:
         if str((row or {}).get("source") or "").strip().lower() != "oanda_transaction_export":
             continue
-        row["account"] = account_mode
-        row["account_label"] = "OANDA DEMO" if account_mode == "demo" else "OANDA LIVE"
-        mapped.append(row)
+        mapped_row = dict(row)
+        mapped_row["account"] = account_mode
+        mapped_row["account_label"] = "OANDA DEMO" if account_mode == "demo" else "OANDA LIVE"
+        mapped.append(mapped_row)
+    latest_balance = (balance or {}).get("balance") if isinstance(balance, dict) else None
+    latest_balance_as_of = (balance or {}).get("as_of") if isinstance(balance, dict) else None
+
+    if _master_journal_single_file_mode():
+        try:
+            import_result = _import_uploaded_trading_journal_file(
+                job.output_path.name,
+                job.output_path.read_bytes(),
+                account_mode=account_mode,
+            )
+        except Exception as exc:
+            message = f"Authoritative Trading Journal backfill failed unexpectedly: {exc}"
+            return _response(
+                ok=False,
+                target_workbook=target_workbook,
+                source_path=str(job.output_path),
+                trades_seen=len(mapped),
+                latest_balance=latest_balance,
+                latest_balance_as_of=latest_balance_as_of,
+                error=message,
+                sync={"ok": False, "message": message, "errors": [str(exc)]},
+            )
+        if not isinstance(import_result, dict) or not bool(import_result.get("ok")):
+            return _response(
+                ok=False,
+                target_workbook=target_workbook,
+                source_path=str(job.output_path),
+                trades_seen=len(mapped),
+                latest_balance=latest_balance,
+                latest_balance_as_of=latest_balance_as_of,
+                error=_import_error(import_result),
+                sync=import_result,
+            )
+
+        parsed_ids = [
+            str(row.get("id") or "").strip()
+            for row in mapped
+            if str(row.get("id") or "").strip()
+        ]
+        verification = _verify_trade_log_row_ids_in_workbook(_master_journal_path(), parsed_ids)
+        import_result = {**import_result, "oanda_backfill_verification": verification}
+        if not bool((verification or {}).get("ok")):
+            missing_ids = list((verification or {}).get("missing_row_ids") or [])
+            message = (
+                "Trading Journal.xlsx verification failed after OANDA backfill. "
+                f"Missing row IDs: {missing_ids}"
+            )
+            return _response(
+                ok=False,
+                target_workbook=target_workbook,
+                source_path=str(job.output_path),
+                trades_seen=len(mapped),
+                latest_balance=latest_balance,
+                latest_balance_as_of=latest_balance_as_of,
+                error=message,
+                sync=import_result,
+            )
+
+        rows_upserted = int(import_result.get("rows_upserted") or 0)
+        duplicate_rows = int(import_result.get("duplicate_rows_merged") or 0)
+        inserted = max(0, len(mapped) - duplicate_rows) if rows_upserted else 0
+        updated = min(duplicate_rows, rows_upserted)
+        _invalidate_trading_journal_view_snapshot()
+        visibility_error = None
+        try:
+            snapshot_payload = _build_trading_journal_view_snapshot(force=True)
+            balances_now = _snapshot_balance_items(snapshot_payload)
+            label = "OANDA DEMO" if account_mode == "demo" else "OANDA LIVE"
+            target_bal = next(
+                (
+                    item
+                    for item in balances_now
+                    if str((item or {}).get("label") or (item or {}).get("account") or "").strip().upper()
+                    == label
+                ),
+                None,
+            )
+            if not isinstance(target_bal, dict) or str(target_bal.get("balance_source") or "") == "cashflow_anchor_plus_trades":
+                visibility_error = "OANDA_BACKFILL_NOT_VISIBLE_IN_JOURNAL_SNAPSHOT"
+            else:
+                expected_balance = _to_float(latest_balance)
+                snapshot_balance = _to_float(target_bal.get("balance"))
+                if expected_balance is not None and (
+                    snapshot_balance is None
+                    or abs(snapshot_balance - expected_balance) > 1e-6
+                ):
+                    visibility_error = (
+                        "OANDA_BACKFILL_BALANCE_MISMATCH: "
+                        f"export={expected_balance} snapshot={snapshot_balance}"
+                    )
+        except Exception as exc:
+            visibility_error = f"OANDA_BACKFILL_SNAPSHOT_VERIFICATION_FAILED: {exc}"
+        if visibility_error:
+            return _response(
+                ok=False,
+                target_workbook=target_workbook,
+                source_path=str(job.output_path),
+                trades_seen=len(mapped),
+                trades_backfilled=inserted,
+                trades_updated=updated,
+                latest_balance=latest_balance,
+                latest_balance_as_of=latest_balance_as_of,
+                error=visibility_error,
+                sync=import_result,
+            )
+        return _response(
+            ok=True,
+            target_workbook=target_workbook,
+            source_path=str(job.output_path),
+            trades_seen=len(mapped),
+            trades_backfilled=inserted,
+            trades_updated=updated,
+            latest_balance=latest_balance,
+            latest_balance_as_of=latest_balance_as_of,
+            sync=import_result,
+            snapshot_visible=True,
+        )
+
     changed = 0
     inserted = 0
     updated = 0
@@ -30428,7 +30632,10 @@ async def backfill_oanda_history_export_to_journal(job_id: str) -> JSONResponse:
     visibility_error = None
     if append_error is None:
         _invalidate_trading_journal_view_snapshot()
-        import_result = _import_trading_journal_from_sources()
+        try:
+            import_result = _import_trading_journal_from_sources()
+        except Exception as exc:
+            import_result = {"ok": False, "message": f"Legacy OANDA journal import failed: {exc}", "errors": [str(exc)]}
         try:
             snapshot_payload = _build_trading_journal_view_snapshot(force=True)
             balances_now = _snapshot_balance_items(snapshot_payload)
@@ -30439,21 +30646,19 @@ async def backfill_oanda_history_export_to_journal(job_id: str) -> JSONResponse:
         except Exception:
             visibility_error = "OANDA_BACKFILL_NOT_VISIBLE_IN_JOURNAL_SNAPSHOT"
     ok_flag = bool(append_error is None and bool(import_result.get("ok")) and not visibility_error)
-    return JSONResponse({
-        "ok": ok_flag,
-        "oanda_export_trades_seen": len(mapped),
-        "oanda_export_trades_backfilled": int(inserted),
-        "oanda_export_trades_updated": int(updated),
-        "oanda_export_target_workbook": _canonical_local_oanda_workbook_name(account_mode),
-        "oanda_export_source_path": str(job.output_path),
-        "oanda_export_latest_balance": (balance or {}).get("balance") if isinstance(balance, dict) else None,
-        "oanda_export_latest_balance_as_of": (balance or {}).get("as_of") if isinstance(balance, dict) else None,
-        "oanda_export_balance_applied": bool(ok_flag),
-        "oanda_export_rows_persisted": bool(ok_flag and len(mapped) > 0),
-        "error": append_error or visibility_error,
-        "sync": import_result,
-        "snapshot_visible": visibility_error is None,
-    })
+    return _response(
+        ok=ok_flag,
+        target_workbook=target_workbook,
+        source_path=str(job.output_path),
+        trades_seen=len(mapped),
+        trades_backfilled=inserted,
+        trades_updated=updated,
+        latest_balance=latest_balance,
+        latest_balance_as_of=latest_balance_as_of,
+        error=append_error or visibility_error or (None if import_result.get("ok") else _import_error(import_result)),
+        sync=import_result,
+        snapshot_visible=visibility_error is None,
+    )
 
 
 @app.post("/api/trading-journal/oanda-demo/repair-balance")

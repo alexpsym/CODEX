@@ -45,7 +45,7 @@ showSydneySession = input.bool(true, "Sydney", group=sessionGroup, inline="sessi
 showTokyoSession = input.bool(true, "Tokyo", group=sessionGroup, inline="sessionCustom1")
 showLondonSession = input.bool(true, "London", group=sessionGroup, inline="sessionCustom2")
 showNewYorkSession = input.bool(true, "New York", group=sessionGroup, inline="sessionCustom2")
-sessionCandleGapRangeFraction = input.float(0.03, "Candle clearance (recent-range fraction)", minval=0.0, step=0.005, group=sessionGroup)
+sessionCandleGapRangeFraction = input.float(0.06, "Candle clearance (recent-range fraction)", minval=0.0, step=0.005, group=sessionGroup)
 
 showAnySession = showSydneySession or showTokyoSession or showLondonSession or showNewYorkSession
 showAnySessionVisibility = showSessionOpens or showSessionCloses
@@ -250,7 +250,7 @@ drawSessionMarker(simple string sessionTimezone, simple int eventHour, simple in
     recentRange = sessionMarkerRecentHigh - sessionMarkerRecentLow
     markerRange = math.max(na(recentRange) ? high - low : recentRange, syminfo.mintick * 200)
     markerHalfLength = markerRange * sessionMarkerHalfLengthMultiplier
-    candleGap = math.max(markerRange * sessionCandleGapRangeFraction, syminfo.mintick * 20)
+    candleGap = math.max(markerRange * sessionCandleGapRangeFraction, syminfo.mintick * 40)
     labelGap = math.max(markerRange * sessionLabelOffsetRangeFraction, syminfo.mintick * 10)
     lowerLineEndY = low - candleGap
     lowerLineStartY = lowerLineEndY - markerHalfLength
@@ -271,6 +271,69 @@ drawSessionMarker(simple string sessionTimezone, simple int eventHour, simple in
                              style=label.style_none, size=size.normal, textalign=text.align_center,
                              force_overlay=true)
     pushBoundedSessionMarker(lowerSessionLine, upperSessionLine, sessionLabel, sessionMaxMarkers)
+
+// -----------------------------------------------------------------------------
+// HISTORICAL FOREX START-DATE MARKER (UTC)
+// -----------------------------------------------------------------------------
+historicalForexStartTimestampForPair(simple string pair) =>
+    switch pair
+        "USDCAD" => timestamp("GMT", 1970, 6, 1, 0, 0)
+        "GBPCAD" => timestamp("GMT", 1972, 6, 26, 0, 0)
+        "GBPUSD" => timestamp("GMT", 1972, 6, 26, 0, 0)
+        "CADCHF" => timestamp("GMT", 1973, 1, 23, 0, 0)
+        "GBPCHF" => timestamp("GMT", 1973, 1, 23, 0, 0)
+        "USDCHF" => timestamp("GMT", 1973, 1, 23, 0, 0)
+        "CADJPY" => timestamp("GMT", 1973, 2, 14, 0, 0)
+        "CHFJPY" => timestamp("GMT", 1973, 2, 14, 0, 0)
+        "GBPJPY" => timestamp("GMT", 1973, 2, 14, 0, 0)
+        "USDJPY" => timestamp("GMT", 1973, 2, 14, 0, 0)
+        "AUDCAD" => timestamp("GMT", 1983, 12, 12, 0, 0)
+        "AUDCHF" => timestamp("GMT", 1983, 12, 12, 0, 0)
+        "AUDJPY" => timestamp("GMT", 1983, 12, 12, 0, 0)
+        "AUDSGD" => timestamp("GMT", 1983, 12, 12, 0, 0)
+        "AUDUSD" => timestamp("GMT", 1983, 12, 12, 0, 0)
+        "GBPAUD" => timestamp("GMT", 1983, 12, 12, 0, 0)
+        "AUDNZD" => timestamp("GMT", 1985, 3, 4, 0, 0)
+        "GBPNZD" => timestamp("GMT", 1985, 3, 4, 0, 0)
+        "NZDCAD" => timestamp("GMT", 1985, 3, 4, 0, 0)
+        "NZDCHF" => timestamp("GMT", 1985, 3, 4, 0, 0)
+        "NZDJPY" => timestamp("GMT", 1985, 3, 4, 0, 0)
+        "NZDUSD" => timestamp("GMT", 1985, 3, 4, 0, 0)
+        "EURAUD" => timestamp("GMT", 1999, 1, 4, 0, 0)
+        "EURCAD" => timestamp("GMT", 1999, 1, 4, 0, 0)
+        "EURCHF" => timestamp("GMT", 1999, 1, 4, 0, 0)
+        "EURGBP" => timestamp("GMT", 1999, 1, 4, 0, 0)
+        "EURJPY" => timestamp("GMT", 1999, 1, 4, 0, 0)
+        "EURNZD" => timestamp("GMT", 1999, 1, 4, 0, 0)
+        "EURUSD" => timestamp("GMT", 1999, 1, 4, 0, 0)
+        "USDCNH" => timestamp("GMT", 2010, 8, 23, 0, 0)
+        => na
+
+historicalForexPair = str.upper(syminfo.basecurrency) + str.upper(syminfo.currency)
+historicalForexStartTimestamp = syminfo.type == "forex" ? historicalForexStartTimestampForPair(historicalForexPair) : na
+historicalForexStartBar = not na(historicalForexStartTimestamp) and time <= historicalForexStartTimestamp and historicalForexStartTimestamp < time_close
+var bool historicalForexStartMarkerDrawn = false
+var line historicalForexStartLowerLine = na
+var line historicalForexStartUpperLine = na
+
+if barstate.isnew and historicalForexStartBar and not historicalForexStartMarkerDrawn
+    historicalRecentRange = sessionMarkerRecentHigh - sessionMarkerRecentLow
+    historicalMarkerRange = math.max(na(historicalRecentRange) ? high - low : historicalRecentRange, syminfo.mintick * 200)
+    historicalMarkerHalfLength = historicalMarkerRange * sessionMarkerHalfLengthMultiplier
+    historicalCandleGap = math.max(historicalMarkerRange * sessionCandleGapRangeFraction, syminfo.mintick * 40)
+    historicalLowerEndY = low - historicalCandleGap
+    historicalLowerStartY = historicalLowerEndY - historicalMarkerHalfLength
+    historicalUpperStartY = high + historicalCandleGap
+    historicalUpperEndY = historicalUpperStartY + historicalMarkerHalfLength
+    historicalForexStartLowerLine := line.new(x1=historicalForexStartTimestamp, y1=historicalLowerStartY, x2=historicalForexStartTimestamp, y2=historicalLowerEndY,
+                                              xloc=xloc.bar_time, extend=extend.none,
+                                              color=color.black, style=line.style_dotted, width=2,
+                                              force_overlay=true)
+    historicalForexStartUpperLine := line.new(x1=historicalForexStartTimestamp, y1=historicalUpperStartY, x2=historicalForexStartTimestamp, y2=historicalUpperEndY,
+                                              xloc=xloc.bar_time, extend=extend.none,
+                                              color=color.black, style=line.style_dotted, width=2,
+                                              force_overlay=true)
+    historicalForexStartMarkerDrawn := true
 
 sessionVisibilityKey = str.tostring(showSessionOpens) + str.tostring(showSessionCloses) + str.tostring(showSydneySession) + str.tostring(showTokyoSession) + str.tostring(showLondonSession) + str.tostring(showNewYorkSession)
 var string previousSessionVisibilityKey = sessionVisibilityKey

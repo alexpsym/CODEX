@@ -1,8 +1,9 @@
 from pathlib import Path, PurePosixPath
 from collections import defaultdict
 from copy import copy
-from datetime import datetime
+from datetime import date, datetime
 import hashlib
+import json
 import posixpath
 import shutil
 import re
@@ -4512,6 +4513,38 @@ def test_read_master_journal_manual_overrides_reads_quality_columns(tmp_path: Pa
     assert ov[rid]["aths_atls"] == "All-Time Low"
 
 
+def test_move_to_time_fields_are_json_safe_in_source_and_manual_overrides(tmp_path: Path):
+    path = tmp_path / "move_to_times.xlsx"
+    build_master_journal_workbook(sample_snapshot(), path)
+    wb = load_workbook(path)
+    ws = wb["Trade Log"]
+    headers = _trade_log_header_map(ws)
+    rows_by_id = {
+        str(ws.cell(row, headers["Row ID"]).value or ""): row
+        for row in range(TRADE_LOG_DATA_START_ROW, ws.max_row + 1)
+    }
+    ws.cell(rows_by_id["t1"], headers["Move to Break Even Time"]).value = datetime(2026, 5, 1, 10, 1, 2)
+    ws.cell(rows_by_id["t1"], headers["Move to Profit Time"]).value = "2026-05-01T11:02:03+10:00"
+    ws.cell(rows_by_id["t2"], headers["Move to Break Even Time"]).value = None
+    ws.cell(rows_by_id["t2"], headers["Move to Profit Time"]).value = date(2026, 5, 2)
+    wb.save(path)
+    wb.close()
+
+    source = read_master_journal_source(path)
+    source_by_id = {row["id"]: row for row in source["items"]}
+    assert source_by_id["t1"]["move_to_break_even_time"] == "2026-05-01T10:01:02"
+    assert source_by_id["t1"]["move_to_profit_time"] == "2026-05-01T11:02:03+10:00"
+    assert source_by_id["t2"]["move_to_break_even_time"] == ""
+    assert source_by_id["t2"]["move_to_profit_time"] == "2026-05-02T00:00:00"
+
+    overrides = read_master_journal_manual_overrides(path)
+    for row_id in ("t1", "t2"):
+        assert overrides[row_id]["move_to_break_even_time"] == source_by_id[row_id]["move_to_break_even_time"]
+        assert overrides[row_id]["move_to_profit_time"] == source_by_id[row_id]["move_to_profit_time"]
+    json.dumps({"items": source["items"]})
+    json.dumps(overrides)
+
+
 def test_read_master_journal_source_reads_quality_columns(tmp_path: Path):
     p = tmp_path / "source_quality.xlsx"
     build_master_journal_workbook(sample_snapshot(), p)
@@ -4528,6 +4561,29 @@ def test_read_master_journal_source_reads_quality_columns(tmp_path: Path):
     assert item["vwap"] == "Yes"
     assert item["order_type"] == "Market"
     assert item["near_win"] == "Yes"
+
+
+def test_checked_in_master_journal_read_is_json_safe_and_read_only() -> None:
+    path = Path("journal") / "Trading Journal.xlsx"
+    if not path.exists():
+        pytest.skip("checked-in Trading Journal.xlsx is not available")
+    before_hash = hashlib.sha256(path.read_bytes()).hexdigest()
+
+    payload = read_master_journal_source(path)
+
+    def _find_non_json_dates(value):
+        if isinstance(value, (date, datetime)):
+            return [value]
+        if isinstance(value, dict):
+            return [item for child in value.values() for item in _find_non_json_dates(child)]
+        if isinstance(value, (list, tuple)):
+            return [item for child in value for item in _find_non_json_dates(child)]
+        return []
+
+    assert len(payload["items"]) == 1544
+    assert _find_non_json_dates(payload) == []
+    json.dumps(payload)
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == before_hash
 
 
 def test_update_data_only_writes_dashboard_horizontal_core_metric_aliases(tmp_path: Path):

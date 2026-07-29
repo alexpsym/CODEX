@@ -131,6 +131,28 @@ def _json(res):
     return json.loads(res.body.decode("utf-8"))
 
 
+def test_set_trading_journal_rows_failed_write_preserves_cache_and_disk(
+    temp_state_paths,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    previous_rows = [{"id": "existing:1", "row_type": "trade", "source": "manual"}]
+    master_service._set_trading_journal_rows(previous_rows)
+    before_bytes = master_service.TRADING_JOURNAL_PATH.read_bytes()
+    master_service._TRADING_JOURNAL_CACHE = [dict(row) for row in previous_rows]
+
+    def _fail_write(*_args, **_kwargs):
+        raise TypeError("Object of type datetime is not JSON serializable")
+
+    monkeypatch.setattr(master_service, "_save_json_file", _fail_write)
+    with pytest.raises(TypeError, match="datetime is not JSON serializable"):
+        master_service._set_trading_journal_rows(
+            [{"id": "new:1", "row_type": "trade", "source": "manual"}]
+        )
+
+    assert master_service._TRADING_JOURNAL_CACHE == previous_rows
+    assert master_service.TRADING_JOURNAL_PATH.read_bytes() == before_bytes
+
+
 def test_calendar_validation_accepts_one_line_pnl_cells():
     from openpyxl import Workbook
 
