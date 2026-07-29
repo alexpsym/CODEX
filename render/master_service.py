@@ -33087,6 +33087,16 @@ def _build_master_journal_verification_snapshot() -> Dict[str, object]:
         return _build_trading_journal_view_snapshot(force=True) or {}
 
 
+def _is_oanda_transaction_export_balance(balance: object) -> bool:
+    if not isinstance(balance, dict):
+        return False
+    return any(
+        str(balance.get(field) or "").strip().lower()
+        == "oanda_transaction_export_balance"
+        for field in ("source", "balance_source")
+    )
+
+
 def _verify_imported_account_balance_snapshot(
     snapshot: Dict[str, object],
     expected_balance: Optional[Dict[str, object]],
@@ -33349,6 +33359,11 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
             }
         timings["parse"] = round(time.perf_counter() - t0, 6)
         APP_LOGGER.info("trading_journal_import_stage_done stage=parse elapsed=%.6fs upload=%s", timings["parse"], name)
+        oanda_transaction_export_balance = (
+            dict(balance)
+            if _is_oanda_transaction_export_balance(balance)
+            else None
+        )
         t1 = time.perf_counter()
         _update_trading_journal_import_status(stage="pnl_inference", message="Inferring P/L")
         APP_LOGGER.info("trading_journal_import_stage_start stage=pnl_inference upload=%s", name)
@@ -33386,10 +33401,11 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
         sync_result: Optional[Dict[str, object]] = None
         github_sync_result: Dict[str, object] = {}
         github_sync_started = False
+        github_sync_returned = False
         manual_import_snapshot: Optional[Dict[str, object]] = None
         balance_verification: Dict[str, object] = {
-            "ok": not bool(balance),
-            "balance_expected": bool(balance),
+            "ok": not bool(oanda_transaction_export_balance),
+            "balance_expected": bool(oanda_transaction_export_balance),
             "balance_applied": False,
             "snapshot_visible": False,
         }
@@ -33477,7 +33493,14 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
             workbook_map = {str((r or {}).get("id") or "").strip(): dict(r) for r in workbook_existing_rows if str((r or {}).get("id") or "").strip()}
             parsed_map = {str((r or {}).get("id") or "").strip(): dict(r) for r in rows if str((r or {}).get("id") or "").strip()}
             pending_balance_map: Dict[str, Dict[str, object]] = {}
-            for item in [*previous_pending_balances, *([balance] if isinstance(balance, dict) else [])]:
+            for item in [
+                *previous_pending_balances,
+                *(
+                    [oanda_transaction_export_balance]
+                    if isinstance(oanda_transaction_export_balance, dict)
+                    else []
+                ),
+            ]:
                 if not isinstance(item, dict):
                     continue
                 pending_key = _norm_account_key(
@@ -33500,9 +33523,9 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
                 manual_import_snapshot = _build_manual_import_authoritative_snapshot()
                 pending_balance_verification = _verify_imported_account_balance_snapshot(
                     manual_import_snapshot,
-                    balance,
+                    oanda_transaction_export_balance,
                 )
-                if bool(balance) and not bool(pending_balance_verification.get("ok")):
+                if bool(oanda_transaction_export_balance) and not bool(pending_balance_verification.get("ok")):
                     raise RuntimeError(
                         "Authoritative import snapshot did not apply parsed account balance: "
                         f"expected={pending_balance_verification.get('expected_balance')} "
@@ -33545,9 +33568,9 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
                 manual_import_snapshot = _build_manual_import_authoritative_snapshot()
                 pending_balance_verification = _verify_imported_account_balance_snapshot(
                     manual_import_snapshot,
-                    balance,
+                    oanda_transaction_export_balance,
                 )
-                if bool(balance) and not bool(pending_balance_verification.get("ok")):
+                if bool(oanda_transaction_export_balance) and not bool(pending_balance_verification.get("ok")):
                     raise RuntimeError(
                         "Authoritative import snapshot did not apply parsed account balance: "
                         f"expected={pending_balance_verification.get('expected_balance')} "
@@ -33593,7 +33616,7 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
             rows_persisted = True
             t5 = time.perf_counter()
             APP_LOGGER.info("trading_journal_import_stage_start stage=workbook_snapshot_verification upload=%s", name)
-            if bool(balance):
+            if bool(oanda_transaction_export_balance):
                 workbook_source_after_import = read_master_journal_source(
                     _master_journal_path()
                 )
@@ -33605,7 +33628,7 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
                             else []
                         )
                     },
-                    balance,
+                    oanda_transaction_export_balance,
                 )
                 if not bool(workbook_balance_verification.get("ok")):
                     raise RuntimeError(
@@ -33618,7 +33641,7 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
                 snapshot = _build_master_journal_verification_snapshot()
                 balance_verification = _verify_imported_account_balance_snapshot(
                     snapshot,
-                    balance,
+                    oanda_transaction_export_balance,
                 )
                 if not bool(balance_verification.get("ok")):
                     raise RuntimeError(
@@ -33646,6 +33669,7 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
             APP_LOGGER.info("trading_journal_import_stage_start stage=github_sync upload=%s", name)
             github_sync_started = True
             github_sync_result = _sync_journal_excel_files_to_github(_master_journal_path())
+            github_sync_returned = True
             timings["github_sync"] = round(time.perf_counter() - t6, 6)
             APP_LOGGER.info("trading_journal_import_stage_done stage=github_sync elapsed=%.6fs upload=%s", timings["github_sync"], name)
             if github_sync_result.get("github_sync_enabled") and github_sync_result.get("github_sync_ok") is False:
@@ -33697,13 +33721,13 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
             try:
                 rollback_snapshot = (
                     _build_master_journal_verification_snapshot()
-                    if bool(balance)
+                    if bool(oanda_transaction_export_balance)
                     else _build_manual_import_authoritative_snapshot()
                 )
-                if bool(balance):
+                if bool(oanda_transaction_export_balance):
                     rollback_balance_verification = _verify_imported_account_balance_snapshot(
                         rollback_snapshot,
-                        balance,
+                        oanda_transaction_export_balance,
                     )
                 _persist_trading_journal_sqlite(rollback_snapshot, import_meta={"source_mode": "manual_upload_rollback", "rows_imported": 0, "warnings": [], "errors": [str(exc), *rollback_errors]})
             except Exception as persist_rollback_exc:
@@ -33715,11 +33739,18 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
             missing = (verify_result or {}).get("missing_row_ids") or list((sync_result or {}).get("missing_row_ids") or [])
             if rollback_errors:
                 msg = f"{msg} | rollback failed: {'; '.join(rollback_errors)}"
+            rollback_local_state_restored = not rollback_errors
             github_state_restored = bool(
                 not github_sync_started
-                or not github_sync_result.get("github_sync_enabled")
+                or (
+                    github_sync_returned
+                    and isinstance(github_sync_result, dict)
+                    and github_sync_result.get("github_sync_enabled") is False
+                )
             )
-            rollback_restored = bool(not rollback_errors and github_state_restored)
+            rollback_restored = bool(
+                rollback_local_state_restored and github_state_restored
+            )
             if _is_workbook_lock_exception(exc) or (isinstance(sync_result, dict) and sync_result.get("code") == "EXCEL_WORKBOOK_OPEN"):
                 payload = _excel_workbook_open_payload(extra={
                     "uploaded_name": name,
@@ -33736,11 +33767,12 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
                     "snapshot_visible": bool(rollback_balance_verification.get("snapshot_visible")),
                     "balance_verification": rollback_balance_verification,
                     "rollback_restored": rollback_restored,
+                    "rollback_local_state_restored": rollback_local_state_restored,
                     "rollback_github_state_restored": github_state_restored,
                 })
                 payload["errors"] = ["workbook_locked", *rollback_errors]
                 return payload
-            return {"ok": False, "status_code": code, "message": msg, "uploaded_name": name, "file_type": suffix, "rows_parsed": len(rows), "rows_upserted": 0, "rows_persisted": rollback_rows_persisted, "balance_applied": bool(rollback_balance_verification.get("balance_applied")), "snapshot_visible": bool(rollback_balance_verification.get("snapshot_visible")), "balance_verification": rollback_balance_verification, "rollback_restored": rollback_restored, "rollback_github_state_restored": github_state_restored, "missing_row_ids": missing, "errors": [msg, *rollback_errors], "warnings": [], "import_timings": timings, "master_journal_error": _master_journal_sync_error(sync_result), "diagnostics": (sync_result or {}).get("diagnostics")}
+            return {"ok": False, "status_code": code, "message": msg, "uploaded_name": name, "file_type": suffix, "rows_parsed": len(rows), "rows_upserted": 0, "rows_persisted": rollback_rows_persisted, "balance_applied": bool(rollback_balance_verification.get("balance_applied")), "snapshot_visible": bool(rollback_balance_verification.get("snapshot_visible")), "balance_verification": rollback_balance_verification, "rollback_restored": rollback_restored, "rollback_local_state_restored": rollback_local_state_restored, "rollback_github_state_restored": github_state_restored, "missing_row_ids": missing, "errors": [msg, *rollback_errors], "warnings": [], "import_timings": timings, "master_journal_error": _master_journal_sync_error(sync_result), "diagnostics": (sync_result or {}).get("diagnostics")}
         APP_LOGGER.info("trading_journal_import_success timings=%s upload=%s", timings, name)
         message = "Import complete. Duplicate rows already present; stats refreshed; workbook trade rows unchanged." if duplicate_noop_fast_path_used else "Import complete."
         return {"ok": True, "status_code": 200, "message": message, "uploaded_name": name, "file_type": suffix, "rows_parsed": len(rows), "rows_upserted": rows_upserted, "duplicate_rows_merged": duplicate_rows_merged, "balance_parsed": bool(balance), "rows_persisted": rows_persisted, "balance_applied": bool(balance_verification.get("balance_applied")), "snapshot_visible": bool(balance_verification.get("snapshot_visible")), "balance_verification": balance_verification, "master_journal_path": str(_master_journal_path()), "verified_row_ids_count": len(parsed_ids), "missing_row_ids": [], "warnings": inference_warnings, "errors": [], "import_timings": timings, **inference_diag, **bybit_diag, **github_sync_result, "github_sync_deferred": False, "github_sync_commit_sha": github_sync_result.get("github_sync_commit"), "github_sync_path": str(_master_journal_path()), "github_sync_message": ("GitHub sync disabled" if not github_sync_result.get("github_sync_enabled") else ("GitHub sync complete" if github_sync_result.get("github_sync_ok") else str(github_sync_result.get("github_sync_error") or "")))}

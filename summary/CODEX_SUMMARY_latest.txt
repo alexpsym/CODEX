@@ -1,68 +1,60 @@
-Final implementation summary - Durable OANDA master-journal export balances
+Final implementation summary - Revision 41 import balance scoping and rollback reporting
 
 Publication status
 - Work was performed only in C:\GPT\CODEX-master from the current local checkout.
 - This summary is written before publication as required by AGENTS.md.
 - PATCH_DESKTOP_PUSH.bat must run next. The task is not complete until it succeeds and verifies local HEAD equals origin/master.
 
-1. Root cause and authoritative import transaction
-- The parsed OANDA transaction-export account balance is now carried beside pending manual-import rows through the rollback-protected authoritative master-journal transaction.
-- Both normal imports and duplicate/no-op imports build the workbook snapshot with the parsed balance seed before updating journal/Trading Journal.xlsx.
-- The importer verifies the parsed balance before workbook sync, rereads Account Balances from the saved workbook, then forces a master-workbook snapshot rebuild and verifies the value and provenance again before completing SQLite persistence and GitHub sync.
-- A failed value or provenance check remains inside the existing rollback scope. Row state, workbook bytes, view cache/SQLite state, and pending import bridges are restored locally. Rollback reporting does not claim GitHub state was restored when a remote sync had started and failed.
-- Imports without a parsed account balance retain their prior workflow and focused compatibility coverage.
+1. Non-OANDA Excel import compatibility
+- Added _is_oanda_transaction_export_balance(), which independently checks source and balance_source for the exact oanda_transaction_export_balance provenance token.
+- _import_uploaded_trading_journal_file() now derives one scoped OANDA transaction-export balance and uses only that value for the pending-balance bridge, pre-sync exact verification, workbook Account Balances reread verification, forced snapshot verification, and rollback balance verification.
+- The original parsed balance remains available for balance_parsed diagnostics and the existing balance-only rejection.
+- Generic local_excel/excel balances no longer become OANDA-style authoritative seeds and no longer block otherwise valid imports when they are absent from the authoritative timeline.
+- Generic uploads retain their existing parsing, P/L inference, upsert, master-workbook sync, row-ID verification, SQLite persistence, and GitHub sync workflow.
+- balance_applied and snapshot_visible remain false for generic parsed balances that were not durably and exactly verified; balance_parsed remains true.
+- The Pepperstone MT5 Excel import succeeds, persists its row, keeps balance_after_trade 1008.5, and calculates net_profit 8.5.
+- A second ordinary non-OANDA Excel workbook with a parsed account balance also succeeds with balance_parsed:true and balance_applied:false.
 
-2. Durable workbook balance provenance
-- Account Balances now stores hidden workbook metadata keyed by canonical account. It preserves both balance_source and a wall-clock comparison timestamp without changing the visible workbook layout or adding a sheet.
-- read_master_journal_source() recovers this metadata in streaming/read-only mode, so an OANDA transaction-export balance remains authoritative after workbook reread and application restart instead of degrading to stats2_account_balances.
-- The separate comparison timestamp matches the established Trade Log wall-clock serialization while leaving the visible As Of value unchanged.
-- OANDA transaction-export balances are ranked as authoritative account-summary inputs during balance deduplication.
-- A later authoritative account seed now overrides the final trade timeline even when the account has no cashflow ledger entry. An equally timed OANDA export seed also preserves its stronger provenance.
-- The final trade row's balance_after_trade remains the actual closed-trade balance; it is not overwritten with a later financing/deposit/withdrawal/transfer balance.
+2. GitHub rollback truthfulness
+- GitHub sync tracking now distinguishes a call that started from a call that returned a result.
+- Sync never started: remote state is reported unaffected/restored.
+- Sync returned and explicitly reported disabled: remote state is reported unaffected/restored.
+- Enabled sync returned failure: remote state is not reported restored.
+- Sync raised before returning: remote state is reported false/unknown, not restored.
+- rollback_local_state_restored now reports successful local journal/workbook/SQLite rollback independently.
+- rollback_restored is true only when both local restoration and remote-state restoration are genuinely established.
 
-3. Truthful endpoint semantics
-- oanda_export_rows_persisted, oanda_export_balance_applied, and snapshot_visible are explicit state fields and are no longer derived from the overall ok flag.
-- If endpoint-level verification fails after the authoritative importer committed and verified rows, the response retains rows_persisted:true.
-- Balance application requires the rebuilt snapshot to match both the export value and oanda_transaction_export_balance provenance.
-- Snapshot verification exceptions preserve already verified authoritative importer state instead of converting known persisted/applied state into false values.
-- The legacy separate-workbook branch remains available outside master-journal mode and now reports row, balance, and visibility state explicitly.
+3. Regression coverage
+- The existing realistic master-journal regression still uses a temporary copy of Trading Journal.xlsx with one existing trade and cashflow row.
+- Its OANDA export contains an opening ORDER_FILL, a closing ORDER_FILL at 1010.00, and a later DAILY_FINANCING balance at 1008.75.
+- It exercises the real parser, authoritative importer, workbook generation/update, workbook reread, cache clearing, forced snapshot rebuild, SQLite persistence, and duplicate import.
+- It verifies the stable row ID exists once, the final trade balance remains 1010.00, the authoritative account balance remains 1008.75 with OANDA provenance, prior trade/cashflow IDs survive, response state is truthful, and no separate OANDA workbook is created.
+- New focused coverage checks both provenance fields independently, Pepperstone compatibility, a second ordinary Excel import, and an exception raised by GitHub sync after the new row/workbook state was locally committed.
+- The raised-sync regression verifies local rollback succeeds while rollback_github_state_restored and rollback_restored both remain false.
 
-4. Single-file and browser behavior
-- Master-journal mode continues to update only journal/Trading Journal.xlsx. It does not create journal/OANDA LIVE.xlsx or journal/OANDA DEMO.xlsx.
-- The legacy separate-workbook implementation remains outside master-journal mode.
-- render/static/history_page.js was not changed. Successful backfill still precedes automatic CSV download; failed backfill still says the export completed and retains the manual download link.
-- The completed Pine, Move-to-Time datetime serialization, failed-write cache durability, equity cache, and browser-download implementations were not changed.
-
-5. Regression coverage
-- Added a real master-journal regression using a temporary copy of Trading Journal.xlsx with one preserved existing trade and cashflow row.
-- The export contains an opening ORDER_FILL, a closing ORDER_FILL with balance 1010.00, and a later DAILY_FINANCING balance of 1008.75.
-- The regression uses the real parser, authoritative importer, workbook generator/updater, workbook reread, forced snapshot rebuild, SQLite persistence, and duplicate/no-op re-import. Only external GitHub/backup operations and temporary path/config wiring are stubbed.
-- It verifies the stable OANDA row ID exists exactly once, balance_after_trade remains 1010.00, the authoritative account balance remains 1008.75 with OANDA export provenance after reread/rebuild/re-import, existing trade/cashflow IDs survive once, response state is truthful, and no separate OANDA workbook is created.
-- Added a focused no-cashflow timeline regression and a post-import verification-failure response regression that requires rows_persisted:true.
-
-6. Verification
+4. Verification
+- New focused importer/rollback regression slice: 4 passed.
 - tests/test_master_service_oanda_history_export.py: 44 passed.
-- OANDA-selected tests in tests/test_master_service_trading_journal_crud.py: 27 passed, 168 deselected.
-- Manual-import/rollback/duplicate compatibility selection in tests/test_master_service_trading_journal_crud.py: 29 passed, 166 deselected.
-- Existing datetime-serialization checks: 7 passed.
-- Existing failed-write/cache durability and real-workbook equity cache checks: 2 passed.
-- Existing history-page download/UI checks: 3 passed.
+- OANDA-selected tests in tests/test_master_service_trading_journal_crud.py: 29 passed, 169 deselected.
+- Pepperstone/non-OANDA/manual-import/duplicate/rollback selection in tests/test_master_service_trading_journal_crud.py: 38 passed, 160 deselected.
+- Existing datetime serialization, failed-write/cache durability, real-workbook equity cache, and history-page UI/download selection: 11 passed.
+- Additional OANDA AEST ordering and Brisbane local-time checks: 2 passed.
 - python -m py_compile render/master_service.py tools/master_journal_workbook.py: passed.
 - node --check render/static/history_page.js: passed.
 - git diff --check: passed with only normal LF-to-CRLF working-copy notices.
-- No full test suite and no real broker request were run.
+- No full suite and no real broker request were run.
+- Diagnostic note: one extra legacy manual-quality resync test was invoked while identifying the datetime slice. It has a pre-existing assertion for a Python datetime where the completed serialization behavior returns an ISO string. Neither that test nor tools/master_journal_workbook.py was changed for this task.
 
-7. Safety and preservation
-- journal/Trading Journal.xlsx had a pre-existing local modification and remained protected. Its SHA-256 stayed exactly 8925B34088B24CB8415A936B8277E6C3F4ABF952A9B8302DB0BF359A05BFED29 throughout development and verification.
+5. Safety and preservation
+- journal/Trading Journal.xlsx had a pre-existing local modification and remained protected. Its SHA-256 stayed exactly 8925B34088B24CB8415A936B8277E6C3F4ABF952A9B8302DB0BF359A05BFED29.
 - Pre-existing changes in render/data/monthly_aud_revaluation_state.json, pending_webhooks.json, trade_contexts.json, and webhook_attempts.json were not edited for this task and must remain unstaged/unpublished.
 - journal/OANDA LIVE.xlsx and journal/OANDA DEMO.xlsx do not exist.
-- Repository-local pytest temp directories are ignored and remain unstaged. Repository policy prohibits recursive deletion, so no deletion workaround was used.
+- The completed Pine, datetime serialization, cache durability, master-workbook balance provenance, and browser-download implementations were not changed.
+- Repository-local pytest temporary directories are ignored and remain unstaged.
 - No custom instructions file, secret, environment file, log, cache, or runtime data is included in the intended commit.
 
 Changed task files
 - render/master_service.py
-- tools/master_journal_workbook.py
-- tests/test_master_service_oanda_history_export.py
 - tests/test_master_service_trading_journal_crud.py
 - summary/CODEX_SUMMARY_latest.txt
 

@@ -2195,8 +2195,77 @@ def test_pepperstone_mt5_parser_profit_commission_swap_reaches_net_profit_after_
     frame.to_excel(bio, index=False)
     payload = master_service._import_uploaded_trading_journal_file("pepperstone_mt5.xlsx", bio.getvalue())
     assert payload["ok"] is True
+    assert payload["rows_persisted"] is True
+    assert payload["balance_parsed"] is True
+    assert payload["balance_applied"] is False
+    assert payload["balance_verification"]["balance_expected"] is False
     row = next(r for r in master_service._get_trading_journal_rows() if "pepperstone" in str(r.get("account_label", "")).lower())
-    assert row["net_profit"] == 8.5
+    assert row["net_profit"] == pytest.approx(8.5)
+    assert row["balance_after_trade"] == pytest.approx(1008.5)
+    assert row["import_source"] == "local_excel"
+
+
+def test_non_oanda_local_excel_balance_does_not_block_import(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(master_service, "_sync_master_journal_workbook", lambda **_k: {"ok": True})
+    monkeypatch.setattr(master_service, "_verify_trade_log_row_ids_in_workbook", lambda *_a, **_k: {"ok": True, "missing_row_ids": []})
+    frame = master_service.pd.DataFrame([
+        {
+            "account": "Ordinary Broker",
+            "symbol": "EURUSD",
+            "side": "Buy",
+            "opening_time": "2026-02-01 10:00:00",
+            "closing_time": "2026-02-01 11:00:00",
+            "size_quantity": 1.0,
+            "entry_price": 1.10,
+            "closing_price": 1.11,
+            "net_profit": 4.25,
+            "balance_after_trade": 504.25,
+            "currency": "USD",
+        }
+    ])
+    bio = io.BytesIO()
+    frame.to_excel(bio, index=False)
+
+    payload = master_service._import_uploaded_trading_journal_file(
+        "ordinary_broker.xlsx",
+        bio.getvalue(),
+    )
+
+    assert payload["ok"] is True
+    assert payload["rows_persisted"] is True
+    assert payload["balance_parsed"] is True
+    assert payload["balance_applied"] is False
+    assert payload["snapshot_visible"] is False
+    assert payload["balance_verification"]["balance_expected"] is False
+    row = next(
+        item
+        for item in master_service._get_trading_journal_rows()
+        if str(item.get("account_label") or "") == "Ordinary Broker"
+    )
+    assert row["import_source"] == "local_excel"
+    assert row["balance_after_trade"] == pytest.approx(504.25)
+    assert row["net_profit"] == pytest.approx(4.25)
+
+
+def test_oanda_transaction_export_balance_scope_checks_each_provenance_field():
+    assert master_service._is_oanda_transaction_export_balance(
+        {
+            "source": "oanda_transaction_export_balance",
+            "balance_source": "local_excel",
+        }
+    )
+    assert master_service._is_oanda_transaction_export_balance(
+        {
+            "source": "local_excel",
+            "balance_source": "oanda_transaction_export_balance",
+        }
+    )
+    assert not master_service._is_oanda_transaction_export_balance(
+        {
+            "source": "local_excel",
+            "balance_source": "excel",
+        }
+    )
 
 
 def test_workbook_net_pl_populates_for_oanda_pepperstone_bybit_after_sync(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
@@ -2307,6 +2376,66 @@ def test_import_file_rolls_back_rows_when_sync_fails(temp_state_paths, monkeypat
     payload = master_service._import_uploaded_trading_journal_file("manual.xlsx", b"x")
     assert payload["ok"] is False
     assert master_service._get_trading_journal_rows() == original
+
+
+def test_import_file_github_sync_exception_reports_remote_state_unknown(
+    temp_state_paths,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    workbook = temp_state_paths / "Trading Journal.xlsx"
+    original = [{"id": "existing:1", "row_type": "trade", "source": "manual"}]
+    master_service._set_trading_journal_rows(original)
+    monkeypatch.setattr(
+        master_service,
+        "_parse_local_trading_journal_workbook",
+        lambda _p, **_k: (
+            [{"id": "new:1", "row_type": "trade", "source": "manual"}],
+            None,
+        ),
+    )
+
+    def _sync_local_workbook(**_kwargs):
+        workbook.write_bytes(b"locally-committed")
+        return {"ok": True}
+
+    committed_state = {"observed": False}
+
+    def _raise_during_github_sync(path):
+        assert path == workbook
+        assert workbook.read_bytes() == b"locally-committed"
+        assert any(
+            str(row.get("id") or "") == "new:1"
+            for row in master_service._get_trading_journal_rows()
+        )
+        committed_state["observed"] = True
+        raise RuntimeError("github sync exploded")
+
+    monkeypatch.setattr(master_service, "_sync_master_journal_workbook", _sync_local_workbook)
+    monkeypatch.setattr(
+        master_service,
+        "_verify_trade_log_row_ids_in_workbook",
+        lambda *_a, **_k: {"ok": True, "missing_row_ids": []},
+    )
+    monkeypatch.setattr(master_service, "_persist_trading_journal_sqlite", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        master_service,
+        "_sync_journal_excel_files_to_github",
+        _raise_during_github_sync,
+    )
+
+    payload = master_service._import_uploaded_trading_journal_file(
+        "manual.xlsx",
+        b"x",
+    )
+
+    assert committed_state["observed"] is True
+    assert payload["ok"] is False
+    assert payload["rollback_local_state_restored"] is True
+    assert payload["rollback_github_state_restored"] is False
+    assert payload["rollback_restored"] is False
+    assert payload["rows_persisted"] is False
+    assert master_service._get_trading_journal_rows() == original
+    assert workbook.exists() is False
 
 
 def test_import_file_accepts_master_journal_ok_without_top_level_ok(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
