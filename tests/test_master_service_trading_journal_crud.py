@@ -2438,6 +2438,70 @@ def test_import_file_github_sync_exception_reports_remote_state_unknown(
     assert workbook.exists() is False
 
 
+def test_import_file_github_sync_failure_reports_remote_state_not_restored(
+    temp_state_paths,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    workbook = temp_state_paths / "Trading Journal.xlsx"
+    original = [{"id": "existing:1", "row_type": "trade", "source": "manual"}]
+    master_service._set_trading_journal_rows(original)
+    monkeypatch.setattr(
+        master_service,
+        "_parse_local_trading_journal_workbook",
+        lambda _p, **_k: (
+            [{"id": "new:1", "row_type": "trade", "source": "manual"}],
+            None,
+        ),
+    )
+
+    def _sync_local_workbook(**_kwargs):
+        workbook.write_bytes(b"locally-committed")
+        return {"ok": True}
+
+    def _failed_github_sync(path):
+        assert path == workbook
+        assert workbook.read_bytes() == b"locally-committed"
+        assert any(
+            str(row.get("id") or "") == "new:1"
+            for row in master_service._get_trading_journal_rows()
+        )
+        return {
+            "github_sync_enabled": True,
+            "github_sync_ok": False,
+            "github_sync_noop": False,
+            "github_sync_error": "remote rejected journal update",
+            "github_sync_commit": "",
+        }
+
+    monkeypatch.setattr(master_service, "_sync_master_journal_workbook", _sync_local_workbook)
+    monkeypatch.setattr(
+        master_service,
+        "_verify_trade_log_row_ids_in_workbook",
+        lambda *_a, **_k: {"ok": True, "missing_row_ids": []},
+    )
+    monkeypatch.setattr(master_service, "_persist_trading_journal_sqlite", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        master_service,
+        "_sync_journal_excel_files_to_github",
+        _failed_github_sync,
+    )
+
+    payload = master_service._import_uploaded_trading_journal_file(
+        "manual.xlsx",
+        b"x",
+    )
+
+    assert payload["ok"] is False
+    assert "GitHub sync failed after local verification" in payload["message"]
+    assert "remote rejected journal update" in payload["message"]
+    assert payload["rollback_local_state_restored"] is True
+    assert payload["rollback_github_state_restored"] is False
+    assert payload["rollback_restored"] is False
+    assert payload["rows_persisted"] is False
+    assert master_service._get_trading_journal_rows() == original
+    assert workbook.exists() is False
+
+
 def test_import_file_accepts_master_journal_ok_without_top_level_ok(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(master_service, "_parse_local_trading_journal_workbook", lambda _p, **_k: ([{"id": "new:1", "row_type": "trade", "source": "manual"}], None))
     monkeypatch.setattr(master_service, "_sync_master_journal_workbook", lambda **_k: {"master_journal_ok": True, "master_journal_path": str(temp_state_paths / "Trading Journal.xlsx")})

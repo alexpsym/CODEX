@@ -32707,7 +32707,6 @@ def _repo_state_files_for_github(master_path: Path, timeout_s: int = 60) -> List
         master_resolved,
         repo_root / "journal" / "Trading Journal.xlsx",
         repo_root / "journal" / "5-digit-demo-calculation-context.json",
-        repo_root / "state_backup.json",
     ]
     files: List[Path] = []
     seen: Set[Path] = set()
@@ -32725,6 +32724,54 @@ def _repo_state_files_for_github(master_path: Path, timeout_s: int = 60) -> List
     if _legacy_master_journal_tracked_and_missing(repo_root, timeout_s):
         files.append((repo_root / "journal" / "Master Journal.xlsx").resolve())
     return files
+
+
+def _git_add_eligible_repo_state_files(
+    repo_root: Path,
+    files: Iterable[Path],
+    timeout_s: int,
+) -> Tuple[List[Path], str]:
+    root = repo_root.resolve()
+    candidates: List[Tuple[str, Path]] = []
+    seen: Set[str] = set()
+    for path in files:
+        resolved = path.expanduser().resolve()
+        try:
+            rel = str(resolved.relative_to(root)).replace("\\", "/")
+        except Exception:
+            continue
+        if not rel or rel in seen:
+            continue
+        seen.add(rel)
+        candidates.append((rel, resolved))
+    if not candidates:
+        return [], ""
+
+    code, out, err = _run_git_command(
+        [
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "--",
+            *[rel for rel, _ in candidates],
+        ],
+        root,
+        timeout_s,
+    )
+    if code != 0:
+        return [], err.strip() or "git ls-files eligibility check failed"
+    eligible_rel = {
+        item.replace("\\", "/")
+        for item in str(out or "").split("\0")
+        if item
+    }
+    return [
+        path
+        for rel, path in candidates
+        if rel in eligible_rel
+    ], ""
 
 
 def _sync_journal_excel_files_to_github(master_path: Path) -> Dict[str, object]:
@@ -32751,11 +32798,35 @@ def _sync_journal_excel_files_to_github(master_path: Path) -> Dict[str, object]:
     files = _repo_state_files_for_github(master_path, timeout_s=timeout_s)
     if not files:
         return {**base, "github_sync_ok": False, "github_sync_noop": False, "github_sync_error": "No eligible repo state files found to sync.", "github_sync_error_type": "NoEligibleFiles"}
-    rel_files = [str(p.relative_to(repo_root)).replace("\\", "/") for p in files]
-    base["github_sync_files"] = rel_files
     code, _, err = _run_git_command(["--version"], repo_root, timeout_s)
     if code != 0:
         return {**base, "github_sync_ok": False, "github_sync_noop": False, "github_sync_error": f"Git is unavailable: {err.strip()}", "github_sync_error_type": "GitNotInstalled"}
+    files, eligibility_error = _git_add_eligible_repo_state_files(
+        repo_root,
+        files,
+        timeout_s,
+    )
+    if eligibility_error:
+        return {**base, "github_sync_ok": False, "github_sync_noop": False, "github_sync_error": f"Failed to filter Git-eligible journal files: {eligibility_error}", "github_sync_error_type": "GitEligibilityFailed"}
+    rel_files = [str(p.relative_to(repo_root)).replace("\\", "/") for p in files]
+    base["github_sync_files"] = rel_files
+    if not rel_files:
+        return base
+    code, out, err = _run_git_command(
+        [
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+            "--",
+            *rel_files,
+        ],
+        repo_root,
+        timeout_s,
+    )
+    if code != 0:
+        return {**base, "github_sync_ok": False, "github_sync_noop": False, "github_sync_error": f"Failed to inspect journal changes: {err.strip()}", "github_sync_error_type": "GitStatusFailed"}
+    if not out.strip():
+        return base
     branch = requested_branch
     if not branch:
         code, out, err = _run_git_command(["rev-parse", "--abbrev-ref", "HEAD"], repo_root, timeout_s)
@@ -32768,13 +32839,15 @@ def _sync_journal_excel_files_to_github(master_path: Path) -> Dict[str, object]:
     code, _, err = _run_git_command(["remote", "get-url", remote], repo_root, timeout_s)
     if code != 0:
         return {**base, "github_sync_ok": False, "github_sync_noop": False, "github_sync_error": f"Git remote '{remote}' is not configured: {err.strip()}", "github_sync_error_type": "RemoteMissing"}
-    code, _, err = _run_git_command(["add", "--", *rel_files], repo_root, timeout_s)
+    code, _, err = _run_git_command(["add", "-A", "--", *rel_files], repo_root, timeout_s)
     if code != 0:
         return {**base, "github_sync_ok": False, "github_sync_noop": False, "github_sync_error": f"Git add failed: {err.strip()}", "github_sync_error_type": "GitAddFailed"}
-    code, _, _ = _run_git_command(["diff", "--cached", "--quiet", "--", *rel_files], repo_root, timeout_s)
+    code, _, err = _run_git_command(["diff", "--cached", "--quiet", "--", *rel_files], repo_root, timeout_s)
     if code == 0:
         return base
-    code, _, err = _run_git_command(["commit", "-m", "Update trading journal state"], repo_root, timeout_s)
+    if code != 1:
+        return {**base, "github_sync_ok": False, "github_sync_noop": False, "github_sync_error": f"Failed to inspect staged journal changes: {err.strip()}", "github_sync_error_type": "GitDiffFailed"}
+    code, _, err = _run_git_command(["commit", "--only", "-m", "Update trading journal state", "--", *rel_files], repo_root, timeout_s)
     if code != 0:
         return {**base, "github_sync_ok": False, "github_sync_noop": False, "github_sync_error": f"Git commit failed: {err.strip()}", "github_sync_error_type": "GitCommitFailed"}
     code, out, err = _run_git_command(["rev-parse", "--short", "HEAD"], repo_root, timeout_s)

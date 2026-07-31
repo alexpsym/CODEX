@@ -3,6 +3,8 @@ import asyncio
 import ctypes
 import json
 from pathlib import Path
+import shutil
+import subprocess
 import sys
 import pytest
 from openpyxl import Workbook
@@ -22,6 +24,91 @@ if HTTPX_AVAILABLE:
 def _legacy_sync_status_payload():
     response = asyncio.run(master_service._legacy_trading_journal_sync_status())
     return json.loads(response.body.decode("utf-8"))
+
+
+def _git(repo: Path, *args: str) -> str:
+    completed = subprocess.run(
+        ["git", *args],
+        cwd=str(repo),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return completed.stdout
+
+
+def _build_temp_journal_git_repo(
+    tmp_path: Path,
+    *,
+    change_master: bool,
+) -> dict:
+    remote = tmp_path / "origin.git"
+    subprocess.run(
+        ["git", "init", "--bare", str(remote)],
+        cwd=str(tmp_path),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-b", "main")
+    _git(repo, "config", "user.name", "Journal Sync Test")
+    _git(repo, "config", "user.email", "journal-sync@example.invalid")
+    _git(repo, "config", "commit.gpgsign", "false")
+
+    journal = repo / "journal"
+    journal.mkdir()
+    master = journal / "Trading Journal.xlsx"
+    master.write_bytes(b"initial workbook")
+    (repo / ".gitignore").write_text(
+        "state_backup.json\n"
+        "ignored-local.txt\n"
+        "journal/*.xlsx\n"
+        "!journal/Trading Journal.xlsx\n",
+        encoding="utf-8",
+    )
+    staged = repo / "unrelated-staged.txt"
+    dirty = repo / "unrelated-dirty.txt"
+    staged.write_text("initial staged file\n", encoding="utf-8")
+    dirty.write_text("initial dirty file\n", encoding="utf-8")
+    _git(
+        repo,
+        "add",
+        "--",
+        ".gitignore",
+        "journal/Trading Journal.xlsx",
+        "unrelated-staged.txt",
+        "unrelated-dirty.txt",
+    )
+    _git(repo, "commit", "-m", "Initial fixture")
+    _git(repo, "remote", "add", "origin", str(remote))
+    _git(repo, "push", "-u", "origin", "main")
+
+    state_backup = repo / "state_backup.json"
+    state_backup.write_text('{"local": true}\n', encoding="utf-8")
+    ignored = repo / "ignored-local.txt"
+    ignored.write_text("ignored local data\n", encoding="utf-8")
+    staged.write_text("user staged change\n", encoding="utf-8")
+    _git(repo, "add", "--", "unrelated-staged.txt")
+    dirty.write_text("user unstaged change\n", encoding="utf-8")
+    untracked = repo / "unrelated-untracked.txt"
+    untracked.write_text("user untracked data\n", encoding="utf-8")
+    if change_master:
+        master.write_bytes(b"updated workbook")
+
+    return {
+        "repo": repo,
+        "remote": remote,
+        "master": master,
+        "state_backup": state_backup,
+        "ignored": ignored,
+        "staged": staged,
+        "dirty": dirty,
+        "untracked": untracked,
+    }
+
+
 def _load_master_service_for_import_test():
     import types
     bm_pkg = types.ModuleType("bybit_monitor")
@@ -1349,15 +1436,234 @@ def test_github_sync_missing_git_checkout(monkeypatch, tmp_path):
     result = master_service._sync_journal_excel_files_to_github(tmp_path / "journal" / "Trading Journal.xlsx")
     assert result["github_sync_ok"] is False
     assert "not a Git checkout" in str(result["github_sync_error"])
+
+
+@pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
+def test_github_sync_empty_allowlist_remains_a_failure(monkeypatch, tmp_path):
+    monkeypatch.setenv("TRADING_JOURNAL_GITHUB_SYNC_ENABLED", "1")
+    monkeypatch.setattr(master_service, "_trading_journal_github_sync_enabled", lambda: True)
+    monkeypatch.setattr(master_service, "BASE_DIR", tmp_path)
+    (tmp_path / ".git").mkdir()
+    monkeypatch.setattr(
+        master_service,
+        "_repo_state_files_for_github",
+        lambda *_a, **_k: [],
+    )
+
+    result = master_service._sync_journal_excel_files_to_github(
+        tmp_path / "journal" / "Trading Journal.xlsx"
+    )
+
+    assert result["github_sync_ok"] is False
+    assert result["github_sync_noop"] is False
+    assert result["github_sync_error_type"] == "NoEligibleFiles"
+
+
 @pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
 def test_github_sync_stages_only_target_file(monkeypatch, tmp_path):
     monkeypatch.setenv("TRADING_JOURNAL_GITHUB_SYNC_ENABLED", "1")
+    monkeypatch.setattr(master_service, "_trading_journal_github_sync_enabled", lambda: True)
     monkeypatch.setattr(master_service, "BASE_DIR", tmp_path)
     (tmp_path / ".git").mkdir()
     journal = tmp_path / "journal"
     journal.mkdir()
     master = journal / "Trading Journal.xlsx"
     master.write_bytes(b"x")
+    state_backup = tmp_path / "state_backup.json"
+    state_backup.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(
+        master_service,
+        "_repo_state_files_for_github",
+        lambda *_a, **_k: [master, state_backup],
+    )
+    commands = []
+
+    def fake_git(args, _cwd, _timeout):
+        commands.append(args)
+        if args == ["--version"]:
+            return 0, "git version 2", ""
+        if args[:2] == ["ls-files", "-z"]:
+            return 0, "journal/Trading Journal.xlsx\0", ""
+        if args and args[0] == "status":
+            return 0, " M journal/Trading Journal.xlsx\n", ""
+        if args[:2] == ["rev-parse", "--abbrev-ref"]:
+            return 0, "main\n", ""
+        if args[:3] == ["remote", "get-url", "origin"]:
+            return 0, "x\n", ""
+        if args[:2] == ["diff", "--cached"]:
+            return 0, "", ""
+        return 0, "", ""
+
+    monkeypatch.setattr(master_service, "_run_git_command", fake_git)
+    result = master_service._sync_journal_excel_files_to_github(master)
+
+    assert result["github_sync_ok"] is True
+    assert result["github_sync_files"] == ["journal/Trading Journal.xlsx"]
+    add_call = next(command for command in commands if command and command[0] == "add")
+    assert "journal/Trading Journal.xlsx" in add_call
+    assert "state_backup.json" not in add_call
+    assert "-f" not in add_call
+
+
+@pytest.mark.skipif(
+    not HTTPX_AVAILABLE or shutil.which("git") is None,
+    reason="httpx and git are required",
+)
+def test_github_sync_real_repo_ignores_state_backup_and_preserves_unrelated_changes(
+    tmp_path,
+    monkeypatch,
+):
+    fixture = _build_temp_journal_git_repo(tmp_path, change_master=True)
+    repo = fixture["repo"]
+    master = fixture["master"]
+    state_backup = fixture["state_backup"]
+    unrelated_paths = [
+        "unrelated-staged.txt",
+        "unrelated-dirty.txt",
+        "unrelated-untracked.txt",
+        "ignored-local.txt",
+    ]
+    unrelated_status_before = _git(
+        repo,
+        "status",
+        "--porcelain=v1",
+        "--",
+        *unrelated_paths,
+    )
+    unrelated_contents_before = {
+        path: (repo / path).read_bytes()
+        for path in unrelated_paths
+    }
+    monkeypatch.setenv("TRADING_JOURNAL_GITHUB_SYNC_ENABLED", "1")
+    monkeypatch.setenv("TRADING_JOURNAL_GITHUB_SYNC_BRANCH", "main")
+    monkeypatch.setenv("TRADING_JOURNAL_GITHUB_SYNC_REMOTE", "origin")
+    monkeypatch.setattr(
+        master_service,
+        "_trading_journal_github_sync_enabled",
+        lambda: True,
+    )
+    monkeypatch.setattr(master_service, "BASE_DIR", repo)
+    monkeypatch.setattr(
+        master_service,
+        "_repo_state_files_for_github",
+        lambda *_a, **_k: [master, state_backup],
+    )
+    real_run_git = master_service._run_git_command
+    commands = []
+
+    def recording_git(args, cwd, timeout):
+        commands.append(list(args))
+        return real_run_git(args, cwd, timeout)
+
+    monkeypatch.setattr(master_service, "_run_git_command", recording_git)
+
+    result = master_service._sync_journal_excel_files_to_github(master)
+
+    assert result["github_sync_ok"] is True
+    assert result["github_sync_noop"] is False
+    assert result["github_sync_files"] == ["journal/Trading Journal.xlsx"]
+    assert "state_backup.json" not in result["github_sync_files"]
+    add_call = next(command for command in commands if command and command[0] == "add")
+    commit_call = next(command for command in commands if command and command[0] == "commit")
+    assert "journal/Trading Journal.xlsx" in add_call
+    assert "state_backup.json" not in add_call
+    assert "-f" not in add_call
+    assert "--only" in commit_call
+    assert all("-f" not in command for command in commands)
+
+    committed_files = [
+        line.strip()
+        for line in _git(repo, "show", "--pretty=format:", "--name-only", "HEAD").splitlines()
+        if line.strip()
+    ]
+    assert committed_files == ["journal/Trading Journal.xlsx"]
+    assert _git(repo, "show", "HEAD:unrelated-staged.txt") == "initial staged file\n"
+    assert _git(repo, "ls-files", "--", "state_backup.json") == ""
+    assert _git(repo, "check-ignore", "--", "state_backup.json").strip() == "state_backup.json"
+    assert _git(repo, "check-ignore", "--", "ignored-local.txt").strip() == "ignored-local.txt"
+    assert state_backup.read_text(encoding="utf-8") == '{"local": true}\n'
+    assert _git(repo, "status", "--porcelain=v1", "--", *unrelated_paths) == unrelated_status_before
+    assert {
+        path: (repo / path).read_bytes()
+        for path in unrelated_paths
+    } == unrelated_contents_before
+    assert _git(repo, "rev-parse", "HEAD") == _git(fixture["remote"], "rev-parse", "refs/heads/main")
+
+
+@pytest.mark.skipif(
+    not HTTPX_AVAILABLE or shutil.which("git") is None,
+    reason="httpx and git are required",
+)
+def test_github_sync_real_repo_without_eligible_diff_is_successful_noop(
+    tmp_path,
+    monkeypatch,
+):
+    fixture = _build_temp_journal_git_repo(tmp_path, change_master=False)
+    repo = fixture["repo"]
+    master = fixture["master"]
+    state_backup = fixture["state_backup"]
+    unrelated_paths = [
+        "unrelated-staged.txt",
+        "unrelated-dirty.txt",
+        "unrelated-untracked.txt",
+        "ignored-local.txt",
+    ]
+    head_before = _git(repo, "rev-parse", "HEAD")
+    unrelated_status_before = _git(
+        repo,
+        "status",
+        "--porcelain=v1",
+        "--",
+        *unrelated_paths,
+    )
+    unrelated_contents_before = {
+        path: (repo / path).read_bytes()
+        for path in unrelated_paths
+    }
+    monkeypatch.setenv("TRADING_JOURNAL_GITHUB_SYNC_ENABLED", "1")
+    monkeypatch.setenv("TRADING_JOURNAL_GITHUB_SYNC_REMOTE", "missing-remote")
+    monkeypatch.setattr(
+        master_service,
+        "_trading_journal_github_sync_enabled",
+        lambda: True,
+    )
+    monkeypatch.setattr(master_service, "BASE_DIR", repo)
+    monkeypatch.setattr(
+        master_service,
+        "_repo_state_files_for_github",
+        lambda *_a, **_k: [master, state_backup],
+    )
+    real_run_git = master_service._run_git_command
+    commands = []
+
+    def recording_git(args, cwd, timeout):
+        commands.append(list(args))
+        return real_run_git(args, cwd, timeout)
+
+    monkeypatch.setattr(master_service, "_run_git_command", recording_git)
+
+    result = master_service._sync_journal_excel_files_to_github(master)
+
+    assert result["github_sync_ok"] is True
+    assert result["github_sync_noop"] is True
+    assert result["github_sync_commit"] == ""
+    assert result["github_sync_files"] == ["journal/Trading Journal.xlsx"]
+    assert _git(repo, "rev-parse", "HEAD") == head_before
+    assert _git(repo, "status", "--porcelain=v1", "--", *unrelated_paths) == unrelated_status_before
+    assert {
+        path: (repo / path).read_bytes()
+        for path in unrelated_paths
+    } == unrelated_contents_before
+    assert not any(
+        command
+        and (
+            command[0] in {"add", "commit", "push"}
+            or command[:2] == ["remote", "get-url"]
+        )
+        for command in commands
+    )
+
+
 @pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
 def test_authoritative_snapshot_does_not_scan_legacy_sources(tmp_path, monkeypatch):
     monkeypatch.setattr(master_service, "TRADING_JOURNAL_LOCAL_DIR", tmp_path)
@@ -1393,6 +1699,8 @@ def test_authoritative_fingerprint_excludes_legacy_files(tmp_path, monkeypatch):
         commands.append(args)
         if args == ["--version"]:
             return 0, "git version 2", ""
+        if args[:2] == ["ls-files", "-z"]:
+            return 0, "Trading Journal.xlsx\0", ""
         if args[:2] == ["rev-parse", "--abbrev-ref"]:
             return 0, "main\n", ""
         if args[:3] == ["remote", "get-url", "origin"]:
@@ -1853,6 +2161,8 @@ def test_repo_state_files_for_github_dedupes_master_journal(tmp_path, monkeypatc
     files = master_service._repo_state_files_for_github(master)
     rel = [str(p.relative_to(tmp_path)).replace("\\", "/") for p in files]
     assert rel.count("journal/Trading Journal.xlsx") == 1
+    assert "journal/5-digit-demo-calculation-context.json" in rel
+    assert "state_backup.json" not in rel
 def test_fetch_bybit_executions_calls_include_end_time():
     src=(Path(__file__).resolve().parents[1]/"render"/"master_service.py").read_text(encoding="utf-8")
     assert "_fetch_bybit_executions(" in src
@@ -2029,6 +2339,10 @@ def test_github_sync_stages_legacy_master_journal_deletion_when_tracked_and_miss
         commands.append(args)
         if args == ["--version"]:
             return 0, "git version 2", ""
+        if args[:2] == ["ls-files", "-z"]:
+            return 0, "journal/Trading Journal.xlsx\0journal/Master Journal.xlsx\0", ""
+        if args and args[0] == "status":
+            return 0, " D journal/Master Journal.xlsx\n", ""
         if args[:2] == ["rev-parse", "--abbrev-ref"]:
             return 0, "main\n", ""
         if args[:3] == ["remote", "get-url", "origin"]:
@@ -2050,6 +2364,7 @@ def test_github_sync_stages_legacy_master_journal_deletion_when_tracked_and_miss
     add_joined = " ".join(add_calls[0])
     assert "journal/Trading Journal.xlsx" in add_joined
     assert "journal/Master Journal.xlsx" in add_joined
+    assert "-f" not in add_calls[0]
 
 
 @pytest.mark.skipif(master_service is None, reason="master_service import unavailable")

@@ -1,60 +1,67 @@
-Final implementation summary - Revision 41 import balance scoping and rollback reporting
+Final implementation summary - OANDA export delivery and journal Git-sync safety
 
 Publication status
 - Work was performed only in C:\GPT\CODEX-master from the current local checkout.
 - This summary is written before publication as required by AGENTS.md.
 - PATCH_DESKTOP_PUSH.bat must run next. The task is not complete until it succeeds and verifies local HEAD equals origin/master.
 
-1. Non-OANDA Excel import compatibility
-- Added _is_oanda_transaction_export_balance(), which independently checks source and balance_source for the exact oanda_transaction_export_balance provenance token.
-- _import_uploaded_trading_journal_file() now derives one scoped OANDA transaction-export balance and uses only that value for the pending-balance bridge, pre-sync exact verification, workbook Account Balances reread verification, forced snapshot verification, and rollback balance verification.
-- The original parsed balance remains available for balance_parsed diagnostics and the existing balance-only rejection.
-- Generic local_excel/excel balances no longer become OANDA-style authoritative seeds and no longer block otherwise valid imports when they are absent from the authoritative timeline.
-- Generic uploads retain their existing parsing, P/L inference, upsert, master-workbook sync, row-ID verification, SQLite persistence, and GitHub sync workflow.
-- balance_applied and snapshot_visible remain false for generic parsed balances that were not durably and exactly verified; balance_parsed remains true.
-- The Pepperstone MT5 Excel import succeeds, persists its row, keeps balance_after_trade 1008.5, and calculates net_profit 8.5.
-- A second ordinary non-OANDA Excel workbook with a parsed account balance also succeeds with balance_parsed:true and balance_applied:false.
+1. Safe journal GitHub synchronization
+- Removed state_backup.json from _repo_state_files_for_github(); .gitignore was not changed and no force-add behavior was introduced.
+- Added a scoped Git eligibility check using git ls-files --cached --others --exclude-standard for only the explicit journal candidates.
+- Ignored untracked candidates are excluded before staging, while tracked files and the tracked missing legacy journal deletion remain eligible.
+- Git staging is path-scoped with git add -A -- <eligible journal paths>.
+- Commits are path-scoped with git commit --only so unrelated pre-existing staged files are not swept into an automatic journal commit.
+- An unchanged eligible journal set returns a successful no-op before remote lookup, staging, commit, or push.
+- A genuinely empty source allowlist retains the existing NoEligibleFiles failure instead of falsely reporting success.
+- Git availability, eligibility, status, add, diff, commit, and push failures remain explicit failures.
 
-2. GitHub rollback truthfulness
-- GitHub sync tracking now distinguishes a call that started from a call that returned a result.
-- Sync never started: remote state is reported unaffected/restored.
-- Sync returned and explicitly reported disabled: remote state is reported unaffected/restored.
-- Enabled sync returned failure: remote state is not reported restored.
-- Sync raised before returning: remote state is reported false/unknown, not restored.
-- rollback_local_state_restored now reports successful local journal/workbook/SQLite rollback independently.
-- rollback_restored is true only when both local restoration and remote-state restoration are genuinely established.
+2. OANDA export delivery workflow
+- When an export job becomes ready, the page immediately displays a persistent manual Download export file link.
+- The automatic browser download is attempted before the OANDA Trading Journal backfill request begins.
+- Status text now distinguishes export creation, the download attempt, journal updating, and the final outcome.
+- A backfill failure no longer blocks automatic delivery of the already-created export and leaves the manual link visible.
+- An automatic-download failure still permits OANDA backfill, reports both outcomes truthfully, and leaves the manual link visible.
+- Combined automatic-download and backfill failures preserve both error outcomes and the manual link.
+- Successful Bybit and CoinSpot flows still perform exactly one download and do not call the OANDA backfill endpoint.
+- Server-side export retention behavior was not changed.
 
-3. Regression coverage
-- The existing realistic master-journal regression still uses a temporary copy of Trading Journal.xlsx with one existing trade and cashflow row.
-- Its OANDA export contains an opening ORDER_FILL, a closing ORDER_FILL at 1010.00, and a later DAILY_FINANCING balance at 1008.75.
-- It exercises the real parser, authoritative importer, workbook generation/update, workbook reread, cache clearing, forced snapshot rebuild, SQLite persistence, and duplicate import.
-- It verifies the stable row ID exists once, the final trade balance remains 1010.00, the authoritative account balance remains 1008.75 with OANDA provenance, prior trade/cashflow IDs survive, response state is truthful, and no separate OANDA workbook is created.
-- New focused coverage checks both provenance fields independently, Pepperstone compatibility, a second ordinary Excel import, and an exception raised by GitHub sync after the new row/workbook state was locally committed.
-- The raised-sync regression verifies local rollback succeeds while rollback_github_state_restored and rollback_restored both remain false.
+3. Backfill and rollback preservation
+- The verified OANDA master-journal import, later non-trade account-balance provenance, workbook reread, forced snapshot rebuild, and duplicate/idempotent re-import behavior were not weakened.
+- Genuine GitHub synchronization exceptions and returned enabled-sync failures still trigger local rollback.
+- Remote state is not reported restored when a GitHub sync call raises or explicitly returns failure.
+- Overall rollback_restored remains false unless both local and remote restoration are genuinely established.
 
-4. Verification
-- New focused importer/rollback regression slice: 4 passed.
+4. Regression coverage
+- Added a real temporary Git-repository fixture with ignored local state, unrelated staged/unstaged/untracked changes, a canonical journal change, and a local bare remote.
+- Verified ignored state_backup.json is absent from github_sync_files, staging, commits, and the remote while the canonical journal change commits and pushes successfully.
+- Verified unrelated staged, unstaged, untracked, and ignored files remain byte-for-byte unchanged and retain their original Git states.
+- Verified an unchanged eligible journal set is a successful no-op without remote lookup, add, commit, or push.
+- Verified a fully empty allowlist remains a NoEligibleFiles failure.
+- Preserved focused coverage for the tracked missing legacy journal deletion.
+- Added executable browser-flow tests for link timing, download-before-backfill ordering, OANDA success, download failure, backfill failure, combined failure, and non-OANDA isolation.
+- Added rollback coverage for a returned enabled GitHub-sync failure after local row/workbook state was committed.
+
+5. Verification
+- tests/test_history_page_js_download.py: 9 passed.
+- Git-sync/repository-state selection in tests/test_master_service_master_journal_sync.py: 9 passed, 114 deselected.
 - tests/test_master_service_oanda_history_export.py: 44 passed.
-- OANDA-selected tests in tests/test_master_service_trading_journal_crud.py: 29 passed, 169 deselected.
-- Pepperstone/non-OANDA/manual-import/duplicate/rollback selection in tests/test_master_service_trading_journal_crud.py: 38 passed, 160 deselected.
-- Existing datetime serialization, failed-write/cache durability, real-workbook equity cache, and history-page UI/download selection: 11 passed.
-- Additional OANDA AEST ordering and Brisbane local-time checks: 2 passed.
-- python -m py_compile render/master_service.py tools/master_journal_workbook.py: passed.
+- Final realistic later-financing OANDA plus raised/returned GitHub rollback spot rerun: 3 passed.
+- python -m py_compile render/master_service.py: passed.
 - node --check render/static/history_page.js: passed.
 - git diff --check: passed with only normal LF-to-CRLF working-copy notices.
-- No full suite and no real broker request were run.
-- Diagnostic note: one extra legacy manual-quality resync test was invoked while identifying the datetime slice. It has a pre-existing assertion for a Python datetime where the completed serialization behavior returns an ISO string. Neither that test nor tools/master_journal_workbook.py was changed for this task.
+- No full suite and no real broker export were run.
+- Pytest emitted existing FastAPI on_event deprecation warnings and could not update the repository pytest cache; all selected tests passed.
 
-5. Safety and preservation
-- journal/Trading Journal.xlsx had a pre-existing local modification and remained protected. Its SHA-256 stayed exactly 8925B34088B24CB8415A936B8277E6C3F4ABF952A9B8302DB0BF359A05BFED29.
-- Pre-existing changes in render/data/monthly_aud_revaluation_state.json, pending_webhooks.json, trade_contexts.json, and webhook_attempts.json were not edited for this task and must remain unstaged/unpublished.
-- journal/OANDA LIVE.xlsx and journal/OANDA DEMO.xlsx do not exist.
-- The completed Pine, datetime serialization, cache durability, master-workbook balance provenance, and browser-download implementations were not changed.
-- Repository-local pytest temporary directories are ignored and remain unstaged.
-- No custom instructions file, secret, environment file, log, cache, or runtime data is included in the intended commit.
+6. Safety and preservation
+- journal/Trading Journal.xlsx had a pre-existing staged modification and was not modified by this task. Its SHA-256 remained exactly 8925B34088B24CB8415A936B8277E6C3F4ABF952A9B8302DB0BF359A05BFED29.
+- Pre-existing unstaged changes in render/data/monthly_aud_revaluation_state.json, pending_webhooks.json, trade_contexts.json, and webhook_attempts.json were not edited for this task and must remain unpublished.
+- No ignored local-state file, environment file, secret, log, cache, or runtime data is included in the intended commit.
 
 Changed task files
 - render/master_service.py
+- render/static/history_page.js
+- tests/test_history_page_js_download.py
+- tests/test_master_service_master_journal_sync.py
 - tests/test_master_service_trading_journal_crud.py
 - summary/CODEX_SUMMARY_latest.txt
 

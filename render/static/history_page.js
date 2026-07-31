@@ -219,40 +219,77 @@
         const st = await fetchJson(api.status(jobId));
         const state = String(st.status || '').toLowerCase();
         if (state === 'done') {
-          setStatus('Export complete.');
           const dl = st.download_url;
           if (!dl) {
             throw new Error('Export completed but no download URL was returned.');
           }
+
+          setStatus('Export created. Starting download...');
+          showManualDownload(dl, 'Export created. Manual download: ');
+          let filename = '';
+          let downloadError = null;
+          try {
+            filename = await downloadExportFile(dl, buildFallbackExportFilename(broker, payload, jobId));
+          } catch (err) {
+            downloadError = err;
+          }
+
           if (broker === 'oanda') {
-            let backfillRes;
+            setStatus(
+              downloadError
+                ? 'Automatic download failed. Updating Trading Journal...'
+                : 'Download requested. Updating Trading Journal...'
+            );
+            let backfillRes = null;
+            let backfillError = null;
             try {
               backfillRes = await fetchJson(`/api/oanda-history/export/${encodeURIComponent(jobId)}/backfill-journal`, {
                 method: 'POST',
               });
-            } catch (backfillErr) {
-              const detail = backfillErr?.message || String(backfillErr) || 'OANDA export backfill failed.';
-              showManualDownload(dl, 'Export completed. Trading Journal backfill failed. Manual download: ');
-              throw new Error(`Export completed, but Trading Journal backfill failed: ${detail}`);
+            } catch (err) {
+              backfillError = err;
             }
-            if (!backfillRes || backfillRes.ok === false) {
+            if (!backfillError && (!backfillRes || backfillRes.ok === false)) {
               const detail = backfillRes?.error || backfillRes?.sync?.message || backfillRes?.detail || 'OANDA export backfill failed.';
               const target = backfillRes?.oanda_export_target_workbook ? ` (${backfillRes.oanda_export_target_workbook})` : '';
-              showManualDownload(dl, 'Export completed. Trading Journal backfill failed. Manual download: ');
-              throw new Error(`Export completed, but Trading Journal backfill failed: ${detail}${target}`);
+              backfillError = new Error(`${detail}${target}`);
             }
-            setStatus(`Export complete. Backfilled ${backfillRes.oanda_export_trades_seen || 0} OANDA ${String(payload.account || '').toUpperCase()} trades into Trading Journal.`);
+            if (backfillError) {
+              const backfillDetail = backfillError?.message || String(backfillError) || 'OANDA export backfill failed.';
+              const downloadOutcome = downloadError
+                ? `Automatic download failed: ${downloadError?.message || String(downloadError)}. `
+                : 'Export downloaded. ';
+              showManualDownload(
+                dl,
+                `${downloadOutcome}Trading Journal backfill failed: ${backfillDetail}. Manual download: `
+              );
+              throw new Error(`${downloadOutcome}Trading Journal backfill failed: ${backfillDetail}`);
+            }
+            if (downloadError) {
+              const detail = downloadError?.message || String(downloadError) || 'Automatic download failed.';
+              setStatus('Automatic download failed, but Trading Journal updated.', true);
+              showManualDownload(
+                dl,
+                `Trading Journal updated. Automatic download failed: ${detail}. Manual download: `
+              );
+              return;
+            }
+            setStatus('Export downloaded and Trading Journal updated.');
+            showManualDownload(
+              dl,
+              `Downloaded ${filename}. Trading Journal updated. Manual download: `
+            );
+            return;
           }
 
-          setStatus('Export complete. Downloading file...');
-          try {
-            const filename = await downloadExportFile(dl, buildFallbackExportFilename(broker, payload, jobId));
-            setResult(`Downloaded ${filename}.`);
-          } catch (downloadErr) {
-            setStatus(downloadErr?.message || String(downloadErr), true);
+          if (downloadError) {
+            const detail = downloadError?.message || String(downloadError) || 'Automatic download failed.';
+            setStatus(`Automatic download failed: ${detail}`, true);
             showManualDownload(dl, 'Automatic download failed. Manual download: ');
-            throw downloadErr;
+            return;
           }
+          setStatus('Export downloaded.');
+          showManualDownload(dl, `Downloaded ${filename}. Manual download: `);
           return;
         }
         if (state === 'error') {
