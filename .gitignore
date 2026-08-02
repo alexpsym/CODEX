@@ -1,5 +1,6 @@
 /Local Trading Tools.exe
 .pytest_cache/
+.pytest-*/
 .pytest_tmp*/
 .pytest_tmp*
 .pytest_*.log

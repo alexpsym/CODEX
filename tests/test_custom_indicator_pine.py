@@ -78,7 +78,7 @@ def test_custom_indicator_session_rendering_uses_dotted_lines_not_arrow_markers(
     assert "color=color.black" in session_block
     assert "width=2" in session_block
     assert "sessionMarkerWindowBars = 80" in session_block
-    assert "sessionMarkerHalfLengthMultiplier = 0.60" in session_block
+    assert "sessionMarkerHalfLengthMultiplier = 0.30" in session_block
     assert "sessionCandleGapRangeFraction" in session_block
     assert 'sessionCandleGapRangeFraction = input.float(0.06, "Candle clearance (recent-range fraction)"' in source
     assert "candleGap = math.max(markerRange * sessionCandleGapRangeFraction, syminfo.mintick * 40)" in session_block
@@ -206,11 +206,43 @@ def test_custom_indicator_historical_forex_marker_is_broker_independent_and_exac
     assert 'syminfo.type == "forex"' in historical_block
     assert "historicalForexStartTimestampForPair(historicalForexPair)" in historical_block
     assert "time <= historicalForexStartTimestamp and historicalForexStartTimestamp < time_close" in historical_block
+    assert "historicalForexStartMarkerTimestamp = historicalForexStartBarSpansTimestamp ? historicalForexStartTimestamp : time" in historical_block
     assert historical_block.count("xloc=xloc.bar_time") == 2
-    assert historical_block.count("x1=historicalForexStartTimestamp") == 2
-    assert historical_block.count("x2=historicalForexStartTimestamp") == 2
+    assert historical_block.count("x1=historicalForexStartMarkerTimestamp") == 2
+    assert historical_block.count("x2=historicalForexStartMarkerTimestamp") == 2
     assert "showSessionLines" not in historical_block
     assert "timeframe." not in historical_block
+
+
+def test_custom_indicator_historical_forex_marker_falls_back_to_earliest_available_candle() -> None:
+    source = _source()
+    historical_block = source.split("// HISTORICAL FOREX START-DATE MARKER (UTC)", 1)[1].split(
+        "sessionVisibilityKey =", 1
+    )[0]
+    assert (
+        "historicalForexStartFallbackBar = not na(historicalForexStartTimestamp) and "
+        "time >= historicalForexStartTimestamp"
+    ) in historical_block
+    assert (
+        "historicalForexStartBar = historicalForexStartBarSpansTimestamp or "
+        "historicalForexStartFallbackBar"
+    ) in historical_block
+
+    configured_timestamp = datetime(1999, 1, 4, tzinfo=ZoneInfo("UTC"))
+    loaded_candles = [
+        (datetime(2001, 5, 7, tzinfo=ZoneInfo("UTC")), datetime(2001, 5, 8, tzinfo=ZoneInfo("UTC"))),
+        (datetime(2001, 5, 8, tzinfo=ZoneInfo("UTC")), datetime(2001, 5, 9, tzinfo=ZoneInfo("UTC"))),
+    ]
+    marker_timestamps = []
+    marker_drawn = False
+    for candle_time, candle_time_close in loaded_candles:
+        spans_timestamp = candle_time <= configured_timestamp < candle_time_close
+        fallback_bar = candle_time >= configured_timestamp
+        if (spans_timestamp or fallback_bar) and not marker_drawn:
+            marker_timestamps.append(configured_timestamp if spans_timestamp else candle_time)
+            marker_drawn = True
+
+    assert marker_timestamps == [loaded_candles[0][0]]
 
 
 def test_custom_indicator_historical_forex_marker_has_no_reverse_or_unlisted_fallback() -> None:

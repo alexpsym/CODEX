@@ -76,7 +76,10 @@ def _build_snapshot(
         "generated_at": master_service._utc_now_iso(),
         "items": snapshot_items,
         "balances": balances,
-        "stats": master_service._compute_journal_stats(snapshot_items, balances),
+        "stats": master_service._compute_journal_stats_with_period_reports(
+            snapshot_items,
+            balances,
+        ),
         "diagnostics": {
             "source": "oanda_transaction_export_repair",
             "account": account_label,
@@ -159,15 +162,35 @@ def repair(
         if master_service._canonical_oanda_account_label(row) == account_label
         and master_service._row_type(row) == "trade"
     ]
-    unsupported_commissions = [
-        str(row.get("id") or "")
-        for row in target_rows
-        if abs(master_service._to_float(row.get("commission")) or 0.0) > 1e-12
-        or abs(master_service._to_float(row.get("fees")) or 0.0) > 1e-12
-    ]
-    if unsupported_commissions:
+    commission_total_mismatches = []
+    for row in target_rows:
+        metrics = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
+        expected = master_service._to_float(
+            metrics.get("oanda_displayed_commission_total")
+        ) or 0.0
+        actual = master_service._to_float(row.get("commission")) or 0.0
+        fees = master_service._to_float(row.get("fees")) or 0.0
+        broker_fees = master_service._to_float(
+            metrics.get("oanda_actual_commission_total")
+        ) or 0.0
+        financing = master_service._to_float(
+            metrics.get("oanda_financing_commission_total")
+        ) or 0.0
+        component_total = abs(broker_fees) + abs(financing)
+        includes_financing = bool(
+            metrics.get("oanda_commission_includes_financing")
+        )
+        if (
+            abs(actual - expected) > 1e-12
+            or abs(fees - expected) > 1e-12
+            or abs(expected - component_total) > 1e-12
+            or includes_financing != (abs(financing) > 1e-12)
+        ):
+            commission_total_mismatches.append(str(row.get("id") or ""))
+    if commission_total_mismatches:
         raise RuntimeError(
-            f"Unsupported {account_label} commissions remain: {unsupported_commissions[:10]}"
+            f"Invalid {account_label} displayed Commission totals remain: "
+            f"{commission_total_mismatches[:10]}"
         )
 
     snapshot = _build_snapshot(
@@ -185,6 +208,7 @@ def repair(
             workbook_path,
             snapshot,
             expected_survivor_row_ids=expected_ids,
+            preserve_existing_layout=True,
         )
         candidate_path = Path(str(update_result.get("candidate_path") or ""))
         if not candidate_path.exists():
@@ -222,7 +246,12 @@ def repair(
         "canonical_rows": len(canonical),
         "stale_ids_removed": sorted(stale_ids),
         "oanda_account_rows_after": len(target_rows),
-        "oanda_nonzero_commissions_after": len(unsupported_commissions),
+        "oanda_nonzero_commissions_after": sum(
+            1
+            for row in target_rows
+            if abs(master_service._to_float(row.get("commission")) or 0.0) > 1e-12
+        ),
+        "oanda_commission_total_mismatches_after": len(commission_total_mismatches),
         "warnings": parsed.get("warnings") or [],
         "unmatched_open_fills": parsed.get("unmatched_open_fills") or [],
         "unmatched_close_fills": parsed.get("unmatched_close_fills") or [],

@@ -1,69 +1,69 @@
-Final implementation summary - OANDA export delivery and journal Git-sync safety
+Final implementation summary - Pine markers, Oanda commission repair, monthly dedupe, workbook formatting, and import performance
 
 Publication status
-- Work was performed only in C:\GPT\CODEX-master from the current local checkout.
+- Work was performed in C:\GPT\CODEX-master.
 - This summary is written before publication as required by AGENTS.md.
 - PATCH_DESKTOP_PUSH.bat must run next. The task is not complete until it succeeds and verifies local HEAD equals origin/master.
 
-1. Safe journal GitHub synchronization
-- Removed state_backup.json from _repo_state_files_for_github(); .gitignore was not changed and no force-add behavior was introduced.
-- Added a scoped Git eligibility check using git ls-files --cached --others --exclude-standard for only the explicit journal candidates.
-- Ignored untracked candidates are excluded before staging, while tracked files and the tracked missing legacy journal deletion remain eligible.
-- Git staging is path-scoped with git add -A -- <eligible journal paths>.
-- Commits are path-scoped with git commit --only so unrelated pre-existing staged files are not swept into an automatic journal commit.
-- An unchanged eligible journal set returns a successful no-op before remote lookup, staging, commit, or push.
-- A genuinely empty source allowlist retains the existing NoEligibleFiles failure instead of falsely reporting success.
-- Git availability, eligibility, status, add, diff, commit, and push failures remain explicit failures.
+1. Pine session and historical FX markers
+- Reduced sessionMarkerHalfLengthMultiplier from 0.60 to 0.30 without changing funding or options-expiry line behavior.
+- Historical FX start markers now use the exact configured timestamp when a loaded candle spans it and otherwise use the first loaded candle at or after the configured start.
+- The marker remains broker-independent, one-time only, and anchored with xloc.bar_time.
+- Preserved every pair/date mapping, including EURUSD => 1999-01-04 00:00 GMT.
 
-2. OANDA export delivery workflow
-- When an export job becomes ready, the page immediately displays a persistent manual Download export file link.
-- The automatic browser download is attempted before the OANDA Trading Journal backfill request begins.
-- Status text now distinguishes export creation, the download attempt, journal updating, and the final outcome.
-- A backfill failure no longer blocks automatic delivery of the already-created export and leaves the manual link visible.
-- An automatic-download failure still permits OANDA backfill, reports both outcomes truthfully, and leaves the manual link visible.
-- Combined automatic-download and backfill failures preserve both error outcomes and the manual link.
-- Successful Bybit and CoinSpot flows still perform exactly one download and do not call the OANDA backfill endpoint.
-- Server-side export retention behavior was not changed.
+2. Oanda financing-aware Commission
+- Displayed Commission now equals absolute broker commission/GSL fees plus absolute allocated financing, funding, or swap.
+- Financing that is already represented in reported Oanda P/L is not subtracted again from Net P/L.
+- Opening and closing transaction fees are aggregated, financing is allocated proportionally for multi-leg API transactions, and funding/financing/swap transaction labels are recognized.
+- Sanitization, canonical replacement, and persisted-row repair retain financing-derived Commission.
+- Added diagnostics for broker commission, financing commission, displayed commission, and whether displayed Commission includes financing.
+- The repaired row oanda_export:demo:652:664 now has Commission/Fees 0.9608, Swap -0.9608, and unchanged Net P/L 17.4233 in both render/data/trading_journal.json and state_backup.json.
 
-3. Backfill and rollback preservation
-- The verified OANDA master-journal import, later non-trade account-balance provenance, workbook reread, forced snapshot rebuild, and duplicate/idempotent re-import behavior were not weakened.
-- Genuine GitHub synchronization exceptions and returned enabled-sync failures still trigger local rollback.
-- Remote state is not reported restored when a GitHub sync call raises or explicitly returns failure.
-- Overall rollback_restored remains false unless both local and remote restoration are genuinely established.
+3. Monthly row dedupe and Trade Log preservation
+- Canonical monthly AUD revaluation Row IDs are deduplicated only within the monthly row class; unrelated ordinary trades are not deduplicated.
+- Duplicate candidates are ranked so the most complete valid monthly record survives.
+- Presentation preservation is now keyed by Row ID, so borders, comments, hyperlinks, row heights, number formats, alignment, protection, and non-colour font properties follow surviving rows when dedupe shifts row numbers.
+- Generated Trade Log fills are reapplied after preserved presentation restoration: wins green, losses red, zero-P/L trades unfilled, and cashflow/monthly rows unfilled.
+- Conditional formatting is rebuilt through the current final populated Trade Log row.
 
-4. Regression coverage
-- Added a real temporary Git-repository fixture with ignored local state, unrelated staged/unstaged/untracked changes, a canonical journal change, and a local bare remote.
-- Verified ignored state_backup.json is absent from github_sync_files, staging, commits, and the remote while the canonical journal change commits and pushes successfully.
-- Verified unrelated staged, unstaged, untracked, and ignored files remain byte-for-byte unchanged and retain their original Git states.
-- Verified an unchanged eligible journal set is a successful no-op without remote lookup, add, commit, or push.
-- Verified a fully empty allowlist remains a NoEligibleFiles failure.
-- Preserved focused coverage for the tracked missing legacy journal deletion.
-- Added executable browser-flow tests for link timing, download-before-backfill ordering, OANDA success, download failure, backfill failure, combined failure, and non-OANDA isolation.
-- Added rollback coverage for a returned enabled GitHub-sync failure after local row/workbook state was committed.
+4. Oanda import performance
+- Identical imports verify uploaded projections and account balance against the workbook source already read during preflight.
+- The duplicate no-op path skips row upsert, authoritative snapshot generation, derived-sheet rebuild, workbook replacement, full snapshot verification, SQLite persistence, and GitHub workbook sync.
+- Changed imports reuse one prebuilt authoritative snapshot through workbook update and verification.
+- Journal row loading uses a path/file-stat cache with defensive deep copies.
+- Recommendation/statistics work reuses row signatures and scoped results within each calculation instead of repeatedly hashing/recalculating overlapping groups.
 
-5. Verification
-- tests/test_history_page_js_download.py: 9 passed.
-- Git-sync/repository-state selection in tests/test_master_service_master_journal_sync.py: 9 passed, 114 deselected.
-- tests/test_master_service_oanda_history_export.py: 44 passed.
-- Final realistic later-financing OANDA plus raised/returned GitHub rollback spot rerun: 3 passed.
-- python -m py_compile render/master_service.py: passed.
-- node --check render/static/history_page.js: passed.
+5. Live workbook repair and verification
+- Repaired journal/Trading Journal.xlsx through the production changed-import path with external Dropbox/GitHub side effects disabled; local JSON, workbook, view-cache, and SQLite persistence remained enabled.
+- Trade Log contains 1,547 populated rows and 1,547 unique Row IDs.
+- Each of the five monthly IDs for 2026-03 through 2026-07 appears exactly once and has no red/green semantic fill.
+- Row oanda_export:demo:652:664 is fully green, Commission is 0.9608, and Net P/L remains 17.4233.
+- Conditional formatting contains the two trade-only win/loss formulas over A4:AX1550, the final populated row.
+- Comparison against the pre-repair HEAD workbook preserved sheet order, active sheet, all formulas, 1,211 Trade Log hyperlinks, all pre-existing comments, borders, column widths, row heights, merges, freeze panes, chart anchors, and seven defined names. One generated STATS2 risk-of-ruin diagnostic comment was added; no existing comment was removed.
+- The repository-native/openpyxl verifier passed. Artifact-tool visual import was not available because an existing chart-axis value in the source workbook exceeds that importer's UInt32 limit; the workbook itself opens and verifies with the repository's native tooling.
+
+6. Measured import timings on the repaired live journal
+- Changed one-row Oanda import: 245.015550 seconds wall time.
+  - Parse 0.122501s; P/L inference 0.001749s; upsert 2.630175s; authoritative snapshot 31.276777s; workbook sync 196.418293s; row-survivor verification 2.323346s; workbook snapshot verification 5.507340s; SQLite persistence 1.395522s.
+- Immediate identical import: 8.759790 seconds wall time.
+  - Parse 0.094030s and P/L inference/preflight 0.358427s.
+  - Upsert, snapshot build, workbook sync, row verification, workbook snapshot verification, snapshot persistence, and GitHub sync each reported exactly 0.0s.
+  - The workbook, journal JSON, view cache, and SQLite size/mtime/hash fingerprints were unchanged by the identical import.
+
+7. Tests and checks
+- tests/test_custom_indicator_pine.py: 15 passed.
+- tests/test_repair_oanda_journal.py: 3 passed.
+- tests/test_master_service_oanda_history_export.py: 46 passed.
+- Broader Oanda CRUD/statistics suites: 274 passed.
+- Focused monthly dedupe, direct-fill, conditional-formatting, and preservation-mode workbook coverage: 10 passed, 171 deselected.
+- python -m py_compile for the changed Python modules and tests: passed.
 - git diff --check: passed with only normal LF-to-CRLF working-copy notices.
-- No full suite and no real broker export were run.
-- Pytest emitted existing FastAPI on_event deprecation warnings and could not update the repository pytest cache; all selected tests passed.
+- Pytest emitted existing FastAPI on_event deprecation warnings and cache/temp permission warnings; all selected tests passed.
 
-6. Safety and preservation
-- journal/Trading Journal.xlsx had a pre-existing staged modification and was not modified by this task. Its SHA-256 remained exactly 8925B34088B24CB8415A936B8277E6C3F4ABF952A9B8302DB0BF359A05BFED29.
-- Pre-existing unstaged changes in render/data/monthly_aud_revaluation_state.json, pending_webhooks.json, trade_contexts.json, and webhook_attempts.json were not edited for this task and must remain unpublished.
-- No ignored local-state file, environment file, secret, log, cache, or runtime data is included in the intended commit.
-
-Changed task files
-- render/master_service.py
-- render/static/history_page.js
-- tests/test_history_page_js_download.py
-- tests/test_master_service_master_journal_sync.py
-- tests/test_master_service_trading_journal_crud.py
-- summary/CODEX_SUMMARY_latest.txt
+8. Safety and repository hygiene
+- Preserved pre-existing runtime-state modifications in render/data/monthly_aud_revaluation.json, monthly_aud_revaluation_state.json, pending_webhooks.json, trade_contexts.json, and webhook_attempts.json; PATCH_DESKTOP_PUSH.bat must leave runtime data unstaged and unpublished.
+- Added .pytest-*/ to .gitignore so the test runner's workspace-local scratch directories cannot be committed; repository policy prohibited recursive deletion, so those scratch directories were left untouched.
+- No secrets, environment files, logs, caches, or unrelated runtime data are intended for the commit.
 
 Mandatory completion step
 - Run repository-root PATCH_DESKTOP_PUSH.bat.

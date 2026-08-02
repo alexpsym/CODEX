@@ -2193,6 +2193,7 @@ def _build_trading_journal_view_snapshot(
     local_only: bool = False,
     skip_external_balances: bool = False,
     skip_live_account_refresh: bool = False,
+    persist_sqlite: bool = True,
     sync_id: Optional[str] = None,
     sync_caller: Optional[str] = None,
 ) -> Dict[str, object]:
@@ -2263,13 +2264,32 @@ def _build_trading_journal_view_snapshot(
             items = list(merged.values())
         merged_items: List[Dict[str, object]] = []
         seen_monthly_ids: Set[str] = set()
+        canonical_monthly_indexes: Dict[str, int] = {}
+        canonical_monthly_ranks: Dict[str, Tuple[int, int, int, int, int, int, str]] = {}
+        duplicate_monthly_rows_removed = 0
+        duplicate_monthly_ids: Set[str] = set()
         for row in items:
             if not _is_monthly_aud_reval_row(row):
                 merged_items.append(row)
                 continue
             row_id = str(row.get("id") or "").strip()
             fallback = monthly_fallback_by_id.get(row_id)
-            merged_items.append(_normalize_monthly_aud_reval_snapshot_row(row, fallback=fallback))
+            normalized_row = _normalize_monthly_aud_reval_snapshot_row(row, fallback=fallback)
+            canonical_month = _canonical_monthly_aud_reval_id_month(row_id)
+            existing_index = canonical_monthly_indexes.get(row_id) if canonical_month else None
+            if existing_index is not None:
+                duplicate_monthly_rows_removed += 1
+                duplicate_monthly_ids.add(row_id)
+                candidate_rank = _monthly_aud_reval_snapshot_record_rank(row)
+                if candidate_rank > canonical_monthly_ranks[row_id]:
+                    merged_items[existing_index] = normalized_row
+                    canonical_monthly_ranks[row_id] = candidate_rank
+                seen_monthly_ids.add(row_id)
+                continue
+            if canonical_month:
+                canonical_monthly_indexes[row_id] = len(merged_items)
+                canonical_monthly_ranks[row_id] = _monthly_aud_reval_snapshot_record_rank(row)
+            merged_items.append(normalized_row)
             if row_id:
                 seen_monthly_ids.add(row_id)
         for row_id, fallback_row in monthly_fallback_by_id.items():
@@ -2316,8 +2336,7 @@ def _build_trading_journal_view_snapshot(
             broker_balances = []
         balances = _merge_missing_timeline_balances_with_broker(balances, broker_balances)
         _finish_snapshot_substage("broker_balance_merge")
-        stats = _compute_journal_stats(items, balances)
-        stats["period_reports"] = _compute_journal_period_stats(items, balances)
+        stats = _compute_journal_stats_with_period_reports(items, balances)
         _finish_snapshot_substage("stats_dashboard_instrument_calendar_build")
         diagnostics = _build_authoritative_trading_journal_diagnostics_snapshot(items)
         _finish_snapshot_substage("diagnostics_build")
@@ -2327,6 +2346,8 @@ def _build_trading_journal_view_snapshot(
             "source_workbooks_scanned": 0,
             "parsed_trade_rows": len(trade_items),
             "parsed_cashflow_rows": len([r for r in non_trade_items if _row_type(r) == "cashflow"]),
+            "duplicate_monthly_aud_reval_rows_removed": duplicate_monthly_rows_removed,
+            "deduplicated_monthly_aud_reval_row_ids": sorted(duplicate_monthly_ids),
             "snapshot_substage_timings": dict(snapshot_substage_timings),
         })
         result = {"cache_version": TRADING_JOURNAL_VIEW_CACHE_VERSION, "generated_at": _utc_now_iso(), "items": items, "balances": balances, "stats": stats, "diagnostics": diagnostics, "source_fingerprints": fingerprint}
@@ -2357,7 +2378,8 @@ def _build_trading_journal_view_snapshot(
         _attach_trading_journal_equity_metadata(safe_result)
         _save_trading_journal_view_snapshot(safe_result)
         _finish_snapshot_substage("view_cache_write")
-        _persist_trading_journal_sqlite(safe_result)
+        if persist_sqlite:
+            _persist_trading_journal_sqlite(safe_result)
         _finish_snapshot_substage("sqlite_snapshot_persist")
         safe_diag = safe_result.get("diagnostics") if isinstance(safe_result.get("diagnostics"), dict) else {}
         if isinstance(safe_diag, dict):
@@ -2399,8 +2421,7 @@ def _build_trading_journal_view_snapshot(
     monthly_note_rows = _monthly_aud_revaluation_rows_for_journal_view()
     combined_items = sorted([*trade_items, *cashflow_rows, *monthly_note_rows], key=_row_sort_dt, reverse=True)
     balances = timeline.get("balances") if isinstance(timeline.get("balances"), list) else []
-    stats = _compute_journal_stats(stats_items, balances)
-    stats["period_reports"] = _compute_journal_period_stats(stats_items, balances)
+    stats = _compute_journal_stats_with_period_reports(stats_items, balances)
     broker_balances = (state or {}).get("broker_account_balances") if isinstance(state, dict) else []
     if not isinstance(broker_balances, list):
         broker_balances = []
@@ -2537,7 +2558,8 @@ def _build_trading_journal_view_snapshot(
         safe_payload["items"] = normalized_items
     _attach_trading_journal_equity_metadata(safe_payload)
     _save_trading_journal_view_snapshot(safe_payload)
-    _persist_trading_journal_sqlite(safe_payload)
+    if persist_sqlite:
+        _persist_trading_journal_sqlite(safe_payload)
     _TRADING_JOURNAL_VIEW_CACHE["key"] = "snapshot"
     _TRADING_JOURNAL_VIEW_CACHE["payload"] = safe_payload
     APP_LOGGER.info("trading_journal_snapshot_build_done sync_id=%s caller=%s elapsed=%.6fs cached=False mode=sources", snapshot_sync_id, snapshot_caller, time.perf_counter() - snapshot_started)
@@ -2717,6 +2739,7 @@ WEBHOOK_ATTEMPTS_MAX_ITEMS = int(os.getenv("WEBHOOK_ATTEMPTS_MAX_ITEMS", "300") 
 _WATCHLIST_CACHE: Optional[List[str]] = None
 _WATCHLIST_MUTATION_LOCK = asyncio.Lock()
 _TRADING_JOURNAL_CACHE: Optional[List[Dict[str, object]]] = None
+_TRADING_JOURNAL_CACHE_KEY: Optional[Tuple[object, ...]] = None
 _TRADING_JOURNAL_ROWS_LOCK = threading.RLock()
 _STARTUP_STATE_RESTORE_DONE = asyncio.Event()
 _DROPBOX_UPLOAD_TASK: Optional[asyncio.Task] = None
@@ -4358,22 +4381,20 @@ def _load_trading_journal() -> List[Dict[str, object]]:
 
 
 def _get_trading_journal() -> List[Dict[str, object]]:
-    global _TRADING_JOURNAL_CACHE
-    if _TRADING_JOURNAL_CACHE is None:
-        _TRADING_JOURNAL_CACHE = _load_trading_journal()
-    return [dict(item) for item in _TRADING_JOURNAL_CACHE]
+    return _get_trading_journal_rows()
 
 
 def _save_trading_journal(rows: List[Dict[str, object]]) -> None:
-    global _TRADING_JOURNAL_CACHE
+    global _TRADING_JOURNAL_CACHE, _TRADING_JOURNAL_CACHE_KEY
     with _TRADING_JOURNAL_ROWS_LOCK:
         sorted_rows = sorted(
             rows,
             key=lambda item: str(item.get("close_time") or item.get("open_time") or ""),
             reverse=True,
         )
-        _TRADING_JOURNAL_CACHE = [dict(item) for item in sorted_rows]
         _save_json_file(TRADING_JOURNAL_PATH, {"items": sorted_rows, "updated_at": _utc_now_iso()})
+        _TRADING_JOURNAL_CACHE = copy.deepcopy(sorted_rows)
+        _TRADING_JOURNAL_CACHE_KEY = _trading_journal_file_cache_key()
     _invalidate_trading_journal_view_snapshot()
     _schedule_dropbox_upload_state_backup()
 
@@ -4895,21 +4916,64 @@ def _save_json_file(path: Path, payload: object) -> None:
     )
 
 
+def _trading_journal_file_cache_key() -> Tuple[object, ...]:
+    path = Path(TRADING_JOURNAL_PATH)
+    try:
+        resolved = str(path.resolve())
+    except Exception:
+        resolved = str(path.absolute())
+    try:
+        stat = path.stat()
+    except OSError:
+        return (resolved, None, None, None, None)
+    return (
+        resolved,
+        getattr(stat, "st_dev", None),
+        getattr(stat, "st_ino", None),
+        int(stat.st_size),
+        int(stat.st_mtime_ns),
+    )
+
+
 def _get_trading_journal_rows() -> List[Dict[str, object]]:
+    global _TRADING_JOURNAL_CACHE, _TRADING_JOURNAL_CACHE_KEY
     with _TRADING_JOURNAL_ROWS_LOCK:
+        cache_key = _trading_journal_file_cache_key()
+        if (
+            _TRADING_JOURNAL_CACHE is not None
+            and _TRADING_JOURNAL_CACHE_KEY == cache_key
+        ):
+            return copy.deepcopy(_TRADING_JOURNAL_CACHE)
         data = _load_json_file(TRADING_JOURNAL_PATH, {"items": []})
         if isinstance(data, list):
-            return [_normalize_journal_profit_fields(row) for row in data if isinstance(row, dict)]
-        items = data.get("items") if isinstance(data, dict) else []
-        return [_normalize_journal_profit_fields(row) for row in items if isinstance(row, dict)] if isinstance(items, list) else []
+            rows = [
+                _normalize_journal_profit_fields(row)
+                for row in data
+                if isinstance(row, dict)
+            ]
+        else:
+            items = data.get("items") if isinstance(data, dict) else []
+            rows = (
+                [
+                    _normalize_journal_profit_fields(row)
+                    for row in items
+                    if isinstance(row, dict)
+                ]
+                if isinstance(items, list)
+                else []
+            )
+        _TRADING_JOURNAL_CACHE = copy.deepcopy(rows)
+        _TRADING_JOURNAL_CACHE_KEY = cache_key
+        return copy.deepcopy(rows)
 
 
 def _set_trading_journal_rows(rows: List[Dict[str, object]]) -> None:
-    global _TRADING_JOURNAL_CACHE
+    global _TRADING_JOURNAL_CACHE, _TRADING_JOURNAL_CACHE_KEY
     with _TRADING_JOURNAL_ROWS_LOCK:
         normalized_rows = [_normalize_journal_profit_fields(dict(item)) for item in rows if isinstance(item, dict)]
         _save_json_file(TRADING_JOURNAL_PATH, {"items": normalized_rows, "updated_at": _utc_now_iso()})
-        _TRADING_JOURNAL_CACHE = [dict(item) for item in normalized_rows]
+        _TRADING_JOURNAL_CACHE = copy.deepcopy(normalized_rows)
+        _TRADING_JOURNAL_CACHE_KEY = _trading_journal_file_cache_key()
     _invalidate_trading_journal_view_snapshot()
     _schedule_dropbox_upload_state_backup()
 
@@ -5062,8 +5126,9 @@ def _canonical_oanda_trade_fingerprint(row: Dict[str, object]) -> Optional[str]:
     )
 
 
-_OANDA_MANUAL_PRESERVE_FIELDS = {
+_JOURNAL_WORKBOOK_MANUAL_PRESERVE_FIELDS = {
     "is_test_trade",
+    "trade_number",
     "setup",
     "timeframe",
     "pattern",
@@ -5097,6 +5162,19 @@ _OANDA_MANUAL_PRESERVE_FIELDS = {
     "manual_override_fields",
     "manual_updated_at",
 }
+_OANDA_MANUAL_PRESERVE_FIELDS = _JOURNAL_WORKBOOK_MANUAL_PRESERVE_FIELDS
+
+
+def _preserve_workbook_manual_fields(
+    current: Dict[str, object], workbook_row: Dict[str, object]
+) -> Dict[str, object]:
+    merged = dict(current)
+    for field in _JOURNAL_WORKBOOK_MANUAL_PRESERVE_FIELDS:
+        if field not in workbook_row:
+            continue
+        value = workbook_row.get(field)
+        merged[field] = copy.deepcopy(value)
+    return merged
 
 
 def _preserve_oanda_manual_fields(
@@ -5353,7 +5431,6 @@ def _sanitize_oanda_commission_fields(
         close_spread = _to_float(metrics.get("oanda_close_spread_cost"))
         if open_spread is not None or close_spread is not None:
             metrics["oanda_total_spread_cost"] = (open_spread or 0.0) + (close_spread or 0.0)
-            row["metrics"] = metrics
 
         authoritative = authoritative_by_fingerprint.get(_canonical_oanda_trade_fingerprint(row) or "")
         if authoritative is None and authoritative_rows:
@@ -5364,21 +5441,94 @@ def _sanitize_oanda_commission_fields(
             ]
             if len(fuzzy) == 1:
                 authoritative = fuzzy[0]
-        if authoritative is not None:
-            commission = _to_float(authoritative.get("commission"))
-            fees = _to_float(authoritative.get("fees"))
-        elif source == "oanda_transaction_export":
-            commission = _to_float(row.get("commission"))
-            fees = _to_float(row.get("fees"))
-        elif source == "oanda" and _to_float(metrics.get("oanda_actual_commission_total")) is not None:
-            commission = _to_float(metrics.get("oanda_actual_commission_total"))
-            fees = commission
-        else:
-            commission = None
-            fees = None
+        commission_source = authoritative if authoritative is not None else row
+        source_metrics = (
+            dict(commission_source.get("metrics") or {})
+            if isinstance(commission_source.get("metrics"), dict)
+            else {}
+        )
 
-        row["commission"] = None if commission is None or math.isclose(commission, 0.0, abs_tol=1e-12) else abs(commission)
-        row["fees"] = None if fees is None or math.isclose(fees, 0.0, abs_tol=1e-12) else abs(fees)
+        financing_raw: Optional[float] = None
+        for key in (
+            "oanda_export_financing_allocated",
+            "oanda_export_funding_allocated",
+            "oanda_api_financing",
+            "oanda_api_funding",
+            "oanda_api_swap",
+        ):
+            if key in source_metrics:
+                candidate = _to_float(source_metrics.get(key))
+                if candidate is not None:
+                    financing_raw = candidate
+                    break
+        if financing_raw is None:
+            for key in ("financing", "funding", "swap"):
+                if key in commission_source:
+                    candidate = _to_float(commission_source.get(key))
+                    if candidate is not None:
+                        financing_raw = candidate
+                        break
+        financing_charge = abs(financing_raw) if financing_raw is not None else 0.0
+
+        broker_charge: Optional[float] = None
+        for key in ("oanda_broker_commission_total", "oanda_actual_commission_total"):
+            if key in source_metrics:
+                candidate = _to_float(source_metrics.get(key))
+                if candidate is not None:
+                    broker_charge = abs(candidate)
+                    break
+        if broker_charge is None:
+            raw_charge_keys = (
+                "oanda_raw_commission",
+                "oanda_raw_gsl_fee",
+                "oanda_raw_gsl_premium",
+                "oanda_api_commission_charge",
+                "oanda_api_guaranteed_execution_fee",
+                "oanda_api_guaranteed_execution_premium",
+                "oanda_api_other_trading_charges",
+            )
+            if any(key in source_metrics for key in raw_charge_keys):
+                broker_charge = sum(
+                    abs(_to_float(source_metrics.get(key)) or 0.0)
+                    for key in raw_charge_keys
+                )
+
+        row_id = str(row.get("id") or "").strip().lower()
+        canonical_persisted_row = row_id.startswith(("oanda_export:", "oanda:"))
+        existing_display = _to_float(commission_source.get("commission"))
+        already_includes_financing = bool(
+            source_metrics.get("oanda_commission_includes_financing")
+        )
+        if broker_charge is not None:
+            displayed_commission = broker_charge + financing_charge
+        elif already_includes_financing and existing_display is not None:
+            displayed_commission = abs(existing_display)
+            broker_charge = max(displayed_commission - financing_charge, 0.0)
+        elif source in {"oanda_transaction_export", "oanda"}:
+            broker_charge = abs(existing_display) if existing_display is not None else 0.0
+            displayed_commission = broker_charge + financing_charge
+        elif canonical_persisted_row:
+            # The workbook only persists the combined Commission column, not Swap or
+            # row metrics. Preserve that canonical displayed total on the next read.
+            displayed_commission = abs(existing_display) if existing_display is not None else financing_charge
+            broker_charge = max(displayed_commission - financing_charge, 0.0)
+        else:
+            # Legacy workbook rows sometimes stored spread cost as Commission. Keep
+            # clearing that unsupported value, while retaining proven financing.
+            broker_charge = 0.0
+            displayed_commission = financing_charge
+
+        metrics["oanda_broker_commission_total"] = broker_charge
+        metrics["oanda_financing_commission_total"] = financing_charge
+        metrics["oanda_displayed_commission_total"] = displayed_commission
+        metrics["oanda_commission_includes_financing"] = bool(financing_charge)
+        row["metrics"] = metrics
+        row["commission"] = (
+            None
+            if math.isclose(displayed_commission, 0.0, abs_tol=1e-12)
+            else displayed_commission
+        )
+        row["fees"] = row["commission"]
         sanitized.append(row)
     return sanitized
 
@@ -6358,6 +6508,9 @@ def _journal_rows_from_oanda_transaction_history_frame(
                     "sl": _to_float(r.get("STOP LOSS")) or pending_context.get("sl"),
                     "tp": _to_float(r.get("TAKE PROFIT")) or pending_context.get("tp"),
                     "spread_cost": _to_float(r.get("SPREAD COST")),
+                    "commission_raw": _to_float(r.get("COMMISSION")) or 0.0,
+                    "gsl_fee_raw": _to_float(r.get("GSL FEE")) or 0.0,
+                    "gsl_premium_raw": _to_float(r.get("GSL PREMIUM")) or 0.0,
                     "original_loss_conversion_factor": open_conversion_rate,
                     "opening_loss_conversion_factor": open_conversion_rate,
                     "oanda_export_open_conversion_rate": open_conversion_rate,
@@ -6369,8 +6522,15 @@ def _journal_rows_from_oanda_transaction_history_frame(
                 }
             )
             continue
-        if tx_type == "DAILY_FINANCING":
-            financing = _to_float(r.get("FINANCING"))
+        if tx_type in {"DAILY_FINANCING", "DAILY_FUNDING", "FUNDING", "SWAP"}:
+            financing = next(
+                (
+                    candidate
+                    for key in ("FINANCING", "FUNDING", "SWAP")
+                    if (candidate := _to_float(r.get(key))) is not None
+                ),
+                None,
+            )
             if financing is not None and when_epoch is not None:
                 financing_events.append(
                     {"ticket": ticket, "epoch": when_epoch, "amount": financing}
@@ -6432,11 +6592,29 @@ def _journal_rows_from_oanda_transaction_history_frame(
     for trade in closed_trades:
         opened = trade.get("opened") if isinstance(trade.get("opened"), dict) else {}
         allocated_financing = _to_float(trade.get("financing")) or 0.0
-        commission_raw = _to_float(trade.get("commission_raw")) or 0.0
-        gsl_fee_raw = _to_float(trade.get("gsl_fee_raw")) or 0.0
-        gsl_premium_raw = _to_float(trade.get("gsl_premium_raw")) or 0.0
-        actual_commission = abs(commission_raw) + abs(gsl_fee_raw) + abs(gsl_premium_raw)
-        commission = None if math.isclose(actual_commission, 0.0, abs_tol=1e-12) else actual_commission
+        open_commission_raw = _to_float(opened.get("commission_raw")) or 0.0
+        close_commission_raw = _to_float(trade.get("commission_raw")) or 0.0
+        open_gsl_fee_raw = _to_float(opened.get("gsl_fee_raw")) or 0.0
+        close_gsl_fee_raw = _to_float(trade.get("gsl_fee_raw")) or 0.0
+        open_gsl_premium_raw = _to_float(opened.get("gsl_premium_raw")) or 0.0
+        close_gsl_premium_raw = _to_float(trade.get("gsl_premium_raw")) or 0.0
+        commission_raw = open_commission_raw + close_commission_raw
+        gsl_fee_raw = open_gsl_fee_raw + close_gsl_fee_raw
+        gsl_premium_raw = open_gsl_premium_raw + close_gsl_premium_raw
+        actual_commission = sum(
+            abs(value)
+            for value in (
+                open_commission_raw,
+                close_commission_raw,
+                open_gsl_fee_raw,
+                close_gsl_fee_raw,
+                open_gsl_premium_raw,
+                close_gsl_premium_raw,
+            )
+        )
+        financing_commission = abs(allocated_financing)
+        displayed_commission = actual_commission + financing_commission
+        commission = None if math.isclose(displayed_commission, 0.0, abs_tol=1e-12) else displayed_commission
         open_spread = _to_float(opened.get("spread_cost"))
         close_spread = _to_float(trade.get("close_spread_cost"))
         total_spread = (open_spread or 0.0) + (close_spread or 0.0)
@@ -6500,7 +6678,17 @@ def _journal_rows_from_oanda_transaction_history_frame(
                         "oanda_raw_commission": commission_raw,
                         "oanda_raw_gsl_fee": gsl_fee_raw,
                         "oanda_raw_gsl_premium": gsl_premium_raw,
+                        "oanda_open_raw_commission": open_commission_raw,
+                        "oanda_close_raw_commission": close_commission_raw,
+                        "oanda_open_raw_gsl_fee": open_gsl_fee_raw,
+                        "oanda_close_raw_gsl_fee": close_gsl_fee_raw,
+                        "oanda_open_raw_gsl_premium": open_gsl_premium_raw,
+                        "oanda_close_raw_gsl_premium": close_gsl_premium_raw,
                         "oanda_actual_commission_total": actual_commission,
+                        "oanda_broker_commission_total": actual_commission,
+                        "oanda_financing_commission_total": financing_commission,
+                        "oanda_displayed_commission_total": displayed_commission,
+                        "oanda_commission_includes_financing": bool(financing_commission),
                         "oanda_export_conversion_rate": conversion_rate,
                         "oanda_open_conversion_rate": open_conversion_rate,
                         "oanda_close_conversion_rate": close_conversion_rate,
@@ -6591,7 +6779,7 @@ def _parse_excel_account_workbook(
         qty_col = _first_present(df, ["size_quantity", "qty", "quantity", "size", "units", "volume"])
         entry_col = _first_present(df, ["entry_price", "entry", "open_price", "price_open"])
         exit_col = _first_present(df, ["closing_price", "exit_price", "exit", "close_price", "price_close"])
-        swap_col = _first_present(df, ["swap"])
+        swap_col = _first_present(df, ["swap", "financing", "funding"])
         commission_col = _first_present(df, ["commission", "fee", "fees", "cost"])
         pnl_col = _first_present(df, ["net_profit", "realized_pnl", "pnl", "profit", "pl", "net_pnl"])
         is_oanda_export_sheet = _is_oanda_transaction_history_frame(df)
@@ -9591,10 +9779,25 @@ def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[s
             row_is_test_trade = base_is_test_trade
         exit_price = _to_float(close_leg.get("price")) or _to_float(entry.get("price"))
         gross_realized_pl = _to_float(close_leg.get("realizedPL")) or 0.0
-        financing = _to_float(close_leg.get("financing"))
-        if financing is None:
-            financing = _to_float(entry.get("financing")) or 0.0
         charge_share = (leg_units / total_close_units) if total_close_units > 0 else (1.0 / close_count)
+        financing = next(
+            (
+                candidate
+                for key in ("financing", "funding", "swap")
+                if (candidate := _to_float(close_leg.get(key))) is not None
+            ),
+            None,
+        )
+        if financing is None:
+            transaction_financing = next(
+                (
+                    candidate
+                    for key in ("financing", "funding", "swap")
+                    if (candidate := _to_float(entry.get(key))) is not None
+                ),
+                0.0,
+            )
+            financing = transaction_financing * charge_share
         commission_charge = (api_commission_total * charge_share) + _oanda_abs_charge(close_leg.get("commission"))
         gsl_fee_charge = (api_gsl_fee_total * charge_share) + _oanda_abs_charge(close_leg.get("guaranteedExecutionFee"))
         gsl_premium_charge = (api_gsl_premium_total * charge_share) + _oanda_abs_charge(close_leg.get("guaranteedExecutionPremium"))
@@ -9602,8 +9805,9 @@ def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[s
             _oanda_abs_charge(close_leg.get(key))
             for key in ("otherCharge", "otherCharges", "otherFee", "otherFees", "tradingCharge", "tradingCharges")
         )
-        fees = commission_charge + gsl_fee_charge + gsl_premium_charge + other_charge
-        net_profit = gross_realized_pl + financing - fees
+        broker_fees = commission_charge + gsl_fee_charge + gsl_premium_charge + other_charge
+        displayed_commission = broker_fees + abs(financing)
+        net_profit = gross_realized_pl + financing - broker_fees
         spread_cost = abs(_to_float(entry.get("halfSpreadCost")) or 0.0)
         home_conversion_factors = (open_leg or {}).get("homeConversionFactors")
         pl_home_conversion_factors = (open_leg or {}).get("plHomeConversionFactors")
@@ -9634,9 +9838,10 @@ def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[s
             "qty_raw": leg_units,
             "qty_unit": "lots",
             "notional_usd": None,
-            "commission": fees or None,
+            "swap": financing or None,
+            "commission": displayed_commission or None,
             "commission_currency": "AUD",
-            "fees": fees or None,
+            "fees": displayed_commission or None,
             "fee_currency": "AUD",
             "realized_pnl": net_profit,
             "net_profit": net_profit,
@@ -9662,7 +9867,11 @@ def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[s
                     "oanda_api_realized_pl": gross_realized_pl,
                     "oanda_api_financing": financing,
                     "oanda_half_spread_cost": spread_cost or None,
-                    "oanda_actual_commission_total": fees,
+                    "oanda_actual_commission_total": broker_fees,
+                    "oanda_broker_commission_total": broker_fees,
+                    "oanda_financing_commission_total": abs(financing),
+                    "oanda_displayed_commission_total": displayed_commission,
+                    "oanda_commission_includes_financing": bool(financing),
                     "oanda_api_commission_charge": commission_charge,
                     "oanda_api_guaranteed_execution_fee": gsl_fee_charge,
                     "oanda_api_guaranteed_execution_premium": gsl_premium_charge,
@@ -23365,8 +23574,7 @@ async def calculator_journal_summary(asset: str, symbol: str) -> JSONResponse:
     filtered_sorted = sorted(filtered, key=_row_sort_dt, reverse=True)
     if not filtered_sorted:
         return JSONResponse({"status": "no_data", "canonical_symbol": canonical, "stats": None, "trades": []})
-    stats = _compute_journal_stats(filtered_sorted, balances)
-    stats["period_reports"] = _compute_journal_period_stats(filtered_sorted, balances)
+    stats = _compute_journal_stats_with_period_reports(filtered_sorted, balances)
     totals = stats.get("totals") if isinstance(stats, dict) else {}
     last_trade_ts = None
     try:
@@ -25735,6 +25943,50 @@ def _normalize_monthly_aud_reval_snapshot_row(
     return out
 
 
+def _canonical_monthly_aud_reval_id_month(row_id: object) -> str:
+    match = re.fullmatch(
+        r"monthly_aud_reval:bybit_live:(\d{4}-\d{2})",
+        str(row_id or "").strip(),
+    )
+    return match.group(1) if match else ""
+
+
+def _monthly_aud_reval_snapshot_record_rank(row: Dict[str, object]) -> Tuple[int, int, int, int, int, int, str]:
+    row_id_month = _canonical_monthly_aud_reval_id_month(row.get("id"))
+    result_cash = _to_float(row.get("result_cash"))
+    currency = str(row.get("result_currency") or "").strip().upper()
+    symbol = str(row.get("symbol") or "").strip().upper()
+    account = str(row.get("account_label") or row.get("account") or "").strip().upper()
+    refs = row.get("raw_refs") if isinstance(row.get("raw_refs"), dict) else {}
+    record_month = str(refs.get("period_month") or "").strip()[:7]
+    if not record_month:
+        record_month = str(row.get("close_time") or row.get("open_time") or "").strip()[:7]
+    semantic = (
+        str(row.get("row_type") or "").strip().lower() == "monthly_aud_reval"
+        and symbol == "MONTHLY AUD P/L"
+        and "BYBIT" in account
+    )
+    result_valid = result_cash is not None and math.isfinite(result_cash)
+    currency_valid = currency == "AUD"
+    month_valid = bool(row_id_month) and (not record_month or record_month == row_id_month)
+    valid = semantic and result_valid and currency_valid and month_valid
+    completeness_fields = (
+        "account", "account_label", "symbol", "open_time", "close_time",
+        "result_cash", "result_currency", "source", "notes", "raw_refs",
+    )
+    completeness = sum(row.get(field) not in (None, "", [], {}) for field in completeness_fields)
+    freshness = str(row.get("updated_at") or row.get("close_time") or "")
+    return (
+        int(valid),
+        int(result_valid),
+        int(currency_valid),
+        int(month_valid),
+        int(semantic),
+        completeness,
+        freshness,
+    )
+
+
 def _is_trade_row(row: Dict[str, object]) -> bool:
     return _row_type(row) == "trade"
 
@@ -26376,7 +26628,10 @@ def _is_crypto_like_row(row: Dict[str, object]) -> bool:
 
 
 def _compute_journal_stats(
-    rows: List[Dict[str, object]], balances: List[Dict[str, object]]
+    rows: List[Dict[str, object]],
+    balances: List[Dict[str, object]],
+    *,
+    _recommendation_cache: Optional[Dict[Tuple[str, Tuple[str, ...]], Dict[str, object]]] = None,
 ) -> Dict[str, object]:
     all_trade_rows = [dict(r) for r in rows if _is_trade_row(r)]
     test_trade_rows = [r for r in all_trade_rows if _is_test_trade_row(r)]
@@ -26385,6 +26640,41 @@ def _compute_journal_stats(
     crypto_rows = [r for r in trade_rows if _canonical_market_for_row(r) == "crypto"]
     fx_test_rows = [r for r in test_trade_rows if _canonical_market_for_row(r) == "fx"]
     crypto_test_rows = [r for r in test_trade_rows if _canonical_market_for_row(r) == "crypto"]
+    recommendation_cache = _recommendation_cache if isinstance(_recommendation_cache, dict) else {}
+    recommendation_row_signatures: Dict[int, str] = {}
+
+    def _recommendation_row_signature(row: Dict[str, object]) -> str:
+        object_id = id(row)
+        cached_signature = recommendation_row_signatures.get(object_id)
+        if cached_signature is not None:
+            return cached_signature
+        signature = hashlib.sha256(
+            json.dumps(
+                row,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            ).encode("utf-8")
+        ).hexdigest()
+        recommendation_row_signatures[object_id] = signature
+        return signature
+
+    def _cached_distance_recommendation_summary(
+        rows_subset: List[Dict[str, object]], *, scope: str = "standard"
+    ) -> Dict[str, object]:
+        row_keys = tuple(
+            sorted(
+                _recommendation_row_signature(row)
+                for row in rows_subset
+            )
+        )
+        cache_key = (scope, row_keys)
+        cached = recommendation_cache.get(cache_key)
+        if isinstance(cached, dict):
+            return dict(cached)
+        calculated = _distance_recommendation_summary(rows_subset, scope=scope)
+        recommendation_cache[cache_key] = dict(calculated)
+        return dict(calculated)
 
     def _is_valid_price_level(val: Optional[float]) -> bool:
         # Some imports represent missing SL/TP/entry as 0.0, which explodes distance metrics.
@@ -26568,7 +26858,7 @@ def _compute_journal_stats(
         avg_stop_losers = _avg(_stop_pct_values(losers))
         avg_target_winners = _avg(_target_pct_values(winners))
         avg_target_losers = _avg(_target_pct_values(losers))
-        recommendation_payload = _distance_recommendation_summary(rows_subset, scope=scope)
+        recommendation_payload = _cached_distance_recommendation_summary(rows_subset, scope=scope)
         return {
             "avg_stop_pct_winners": avg_stop_winners,
             "avg_stop_pct_losers": avg_stop_losers,
@@ -26791,7 +27081,7 @@ def _compute_journal_stats(
         item["avg_sl_pct_losses"]=_avg(item.pop("sl_pct_losses",[]))
         item["avg_tp_pct_wins"]=_avg(item.pop("tp_pct_wins",[]))
         item["avg_tp_pct_losses"]=_avg(item.pop("tp_pct_losses",[]))
-        recommendation_payload = _distance_recommendation_summary(item.pop("_rows", []))
+        recommendation_payload = _cached_distance_recommendation_summary(item.pop("_rows", []))
         item.update(recommendation_payload)
         item["stop_recommendation"] = item.get(STOP_RECOMMENDATION_HEADER)
         item["target_recommendation"] = item.get(TARGET_RECOMMENDATION_HEADER)
@@ -27175,7 +27465,7 @@ def _compute_journal_stats(
         min_commission_source = min(commission_rows, key=lambda item: (item[0], str(item[1].get("symbol") or "")))[1] if commission_rows else None
         max_commission_source = max(commission_rows, key=lambda item: (item[0], str(item[1].get("symbol") or "")))[1] if commission_rows else None
         target_scope = "overall" if str(label or "").strip().lower() == "overall" else "standard"
-        recommendation_payload = _distance_recommendation_summary(rows_subset, scope=target_scope)
+        recommendation_payload = _cached_distance_recommendation_summary(rows_subset, scope=target_scope)
         return {
             "label": label,
             "trades": len(rows_subset),
@@ -27299,7 +27589,10 @@ def _compute_journal_stats(
             "test_trades": 0,
         }
 
-    overall_recommendations = _distance_recommendation_summary(trade_rows, scope="overall")
+    overall_recommendations = _cached_distance_recommendation_summary(trade_rows, scope="overall")
+    overall_market_bucket = _market_bucket(trade_rows, "Overall")
+    fx_market_bucket = _market_bucket(fx_rows, "Forex")
+    crypto_market_bucket = _market_bucket(crypto_rows, "Crypto")
 
     return {
         "totals": totals,
@@ -27335,14 +27628,14 @@ def _compute_journal_stats(
                 "short_win_rate_pct": (short_wins / (short_wins + short_losses) * 100.0) if (short_wins + short_losses) else None,
             },
             "market_breakdown": [
-                _market_bucket(trade_rows, "Overall"),
-                _market_bucket(fx_rows, "Forex"),
-                _market_bucket(crypto_rows, "Crypto"),
+                overall_market_bucket,
+                fx_market_bucket,
+                crypto_market_bucket,
             ],
             "by_market": {
-                "overall": {**_market_bucket(trade_rows, "Overall"), "test_trades": len(test_trade_rows)},
-                "fx": {**_market_bucket(fx_rows, "Forex"), "test_trades": len(fx_test_rows)},
-                "crypto": {**_market_bucket(crypto_rows, "Crypto"), "test_trades": len(crypto_test_rows)},
+                "overall": {**overall_market_bucket, "test_trades": len(test_trade_rows)},
+                "fx": {**fx_market_bucket, "test_trades": len(fx_test_rows)},
+                "crypto": {**crypto_market_bucket, "test_trades": len(crypto_test_rows)},
             },
             "risk_expectancy": {
                 "avg_stop_pct": totals.get("avg_stop_pct"),
@@ -27428,9 +27721,17 @@ def _compute_journal_stats(
 
 
 def _compute_journal_period_stats(
-    rows: List[Dict[str, object]], balances: List[Dict[str, object]]
+    rows: List[Dict[str, object]],
+    balances: List[Dict[str, object]],
+    *,
+    _recommendation_cache: Optional[
+        Dict[Tuple[str, Tuple[str, ...]], Dict[str, object]]
+    ] = None,
 ) -> Dict[str, object]:
     trade_rows = [dict(r) for r in rows or [] if isinstance(r, dict) and _is_trade_row(r)]
+    recommendation_cache = (
+        _recommendation_cache if isinstance(_recommendation_cache, dict) else {}
+    )
 
     def _period_datetime(row: Dict[str, object]) -> Optional[datetime]:
         value = row.get("close_time") or row.get("open_time")
@@ -27461,7 +27762,17 @@ def _compute_journal_period_stats(
         }
 
     def _stats_for(rows_subset: List[Dict[str, object]]) -> Dict[str, object]:
-        stats = _compute_journal_stats(rows_subset, balances or [])
+        try:
+            stats = _compute_journal_stats(
+                rows_subset,
+                balances or [],
+                _recommendation_cache=recommendation_cache,
+            )
+        except TypeError as exc:
+            if "_recommendation_cache" not in str(exc):
+                raise
+            # Some focused tests replace the stats builder with a two-argument stub.
+            stats = _compute_journal_stats(rows_subset, balances or [])
         move_break_even = _move_duration_stats(rows_subset, "move_to_break_even")
         move_profit = _move_duration_stats(rows_subset, "move_to_profit")
         totals = stats.get("totals") if isinstance(stats.get("totals"), dict) else {}
@@ -27495,6 +27806,36 @@ def _compute_journal_period_stats(
             for year, month_map in sorted(months.items())
         },
     }
+
+
+def _compute_journal_stats_with_period_reports(
+    rows: List[Dict[str, object]], balances: List[Dict[str, object]]
+) -> Dict[str, object]:
+    recommendation_cache: Dict[
+        Tuple[str, Tuple[str, ...]], Dict[str, object]
+    ] = {}
+    try:
+        stats = _compute_journal_stats(
+            rows,
+            balances,
+            _recommendation_cache=recommendation_cache,
+        )
+    except TypeError as exc:
+        if "_recommendation_cache" not in str(exc):
+            raise
+        stats = _compute_journal_stats(rows, balances)
+    try:
+        period_reports = _compute_journal_period_stats(
+            rows,
+            balances,
+            _recommendation_cache=recommendation_cache,
+        )
+    except TypeError as exc:
+        if "_recommendation_cache" not in str(exc):
+            raise
+        period_reports = _compute_journal_period_stats(rows, balances)
+    stats["period_reports"] = period_reports
+    return stats
 
 def _read_bybit_settings() -> Dict[str, float]:
     try:
@@ -31096,8 +31437,9 @@ async def trading_journal_items(filter: str = "") -> JSONResponse:
         if len(filtered) != len(items):
             items = filtered
             balances_for_stats = snapshot.get("balances") if isinstance(snapshot.get("balances"), list) else []
-            stats = _compute_journal_stats(items, balances_for_stats)
-            stats["period_reports"] = _compute_journal_period_stats(items, balances_for_stats)
+            stats = _compute_journal_stats_with_period_reports(
+                items, balances_for_stats
+            )
 
     def _norm_search_text(value: object) -> str:
         text = str(value or "").lower()
@@ -33128,12 +33470,25 @@ def _master_journal_sync_error(result: Dict[str, object] | None) -> str:
     )
 
 
-def _build_manual_import_authoritative_snapshot() -> Dict[str, object]:
+def _build_manual_import_authoritative_snapshot(
+    *, persist_sqlite: bool = True
+) -> Dict[str, object]:
     try:
-        return _build_trading_journal_view_snapshot(force=True, local_only=True, skip_external_balances=True, skip_live_account_refresh=True) or {}
+        return _build_trading_journal_view_snapshot(
+            force=True,
+            local_only=True,
+            skip_external_balances=True,
+            skip_live_account_refresh=True,
+            persist_sqlite=persist_sqlite,
+        ) or {}
     except TypeError as exc:
         msg = str(exc)
-        if "unexpected keyword argument" not in msg or ("local_only" not in msg and "skip_external_balances" not in msg and "skip_live_account_refresh" not in msg):
+        if "unexpected keyword argument" not in msg or (
+            "local_only" not in msg
+            and "skip_external_balances" not in msg
+            and "skip_live_account_refresh" not in msg
+            and "persist_sqlite" not in msg
+        ):
             raise
         return _build_trading_journal_view_snapshot(force=True) or {}
 
@@ -33173,6 +33528,8 @@ def _is_oanda_transaction_export_balance(balance: object) -> bool:
 def _verify_imported_account_balance_snapshot(
     snapshot: Dict[str, object],
     expected_balance: Optional[Dict[str, object]],
+    *,
+    allow_equivalent_authoritative_balance: bool = False,
 ) -> Dict[str, object]:
     if not isinstance(expected_balance, dict):
         return {
@@ -33214,13 +33571,67 @@ def _verify_imported_account_balance_snapshot(
         or (target or {}).get("source")
         or ""
     ).strip()
+    expected_currency = str(expected_balance.get("currency") or "").strip().upper()
+    actual_currency = str((target or {}).get("currency") or "").strip().upper()
+    currency_matches = not expected_currency or actual_currency == expected_currency
+    balance_tolerance = (
+        0.005
+        if allow_equivalent_authoritative_balance
+        and expected_currency in {"AUD", "USD", "NZD", "CAD", "EUR", "GBP"}
+        else 1e-6
+    )
     value_matches = (
         expected_value is not None
         and actual_value is not None
-        and abs(actual_value - expected_value) <= 1e-6
+        and abs(actual_value - expected_value) <= balance_tolerance
     )
-    source_matches = not expected_source or actual_source == expected_source
-    applied = bool(snapshot_visible and value_matches and source_matches)
+    expected_source_key = re.sub(r"[^a-z0-9]+", "_", expected_source.lower()).strip("_")
+    actual_source_key = re.sub(r"[^a-z0-9]+", "_", actual_source.lower()).strip("_")
+    source_matches = not expected_source or actual_source_key == expected_source_key
+    actual_as_of = (target or {}).get("as_of")
+    as_of_not_older = True
+    if expected_as_of not in (None, ""):
+        expected_as_of_dt = _parse_iso_datetime(expected_as_of)
+        actual_as_of_dt = _parse_iso_datetime(actual_as_of)
+        as_of_not_older = bool(
+            expected_as_of_dt is not None
+            and actual_as_of_dt is not None
+            and actual_as_of_dt.timestamp() >= expected_as_of_dt.timestamp()
+        )
+    if (
+        allow_equivalent_authoritative_balance
+        and not source_matches
+        and _canonical_oanda_account_label(
+            {
+                "account": expected_label,
+                "account_label": expected_label,
+                "source": expected_source,
+            }
+        )
+        in _OANDA_CANONICAL_ACCOUNT_LABELS
+        and expected_source_key == "oanda_transaction_export_balance"
+    ):
+        source_matches = bool(
+            as_of_not_older
+            and actual_source_key
+            in {
+                "account_summary",
+                "oanda_account_summary",
+                "broker_account_summary",
+                "oanda_broker_summary",
+                "oanda_transaction_export_balance",
+            }
+        )
+    freshness_matches = bool(
+        expected_as_of in (None, "") or as_of_not_older
+    )
+    applied = bool(
+        snapshot_visible
+        and value_matches
+        and source_matches
+        and currency_matches
+        and freshness_matches
+    )
     return {
         "ok": applied,
         "balance_expected": True,
@@ -33232,7 +33643,16 @@ def _verify_imported_account_balance_snapshot(
         "expected_source": expected_source,
         "actual_source": actual_source,
         "expected_as_of": expected_as_of,
-        "actual_as_of": (target or {}).get("as_of"),
+        "actual_as_of": actual_as_of,
+        "allow_equivalent_authoritative_balance": allow_equivalent_authoritative_balance,
+        "balance_tolerance": balance_tolerance,
+        "value_matches": value_matches,
+        "source_matches": source_matches,
+        "currency_matches": currency_matches,
+        "expected_currency": expected_currency,
+        "actual_currency": actual_currency,
+        "as_of_not_older": as_of_not_older,
+        "freshness_matches": freshness_matches,
     }
 
 
@@ -33462,13 +33882,12 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
         workbook_path = _master_journal_path()
         workbook_backup_bytes: Optional[bytes] = None
         workbook_had_original = workbook_path.exists()
-        if workbook_had_original:
-            workbook_backup_bytes = workbook_path.read_bytes()
         pre_import_workbook_row_ids: List[str] = []
         workbook_existing_rows: List[Dict[str, object]] = []
+        workbook_source_preflight: Dict[str, object] = {}
         if workbook_had_original:
-            src = read_master_journal_source(workbook_path) or {}
-            workbook_existing_rows = [dict(r) for r in (src.get("items") or []) if isinstance(r, dict) and str((r or {}).get("id") or "").strip()]
+            workbook_source_preflight = read_master_journal_source(workbook_path) or {}
+            workbook_existing_rows = [dict(r) for r in (workbook_source_preflight.get("items") or []) if isinstance(r, dict) and str((r or {}).get("id") or "").strip()]
             pre_import_workbook_row_ids = [str((r or {}).get("id") or "").strip() for r in workbook_existing_rows]
         verify_result: Optional[Dict[str, object]] = None
         sync_result: Optional[Dict[str, object]] = None
@@ -33492,28 +33911,229 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
         pending_restored = False
         duplicate_noop_fast_path_used = False
         try:
+            def _stable_projection_time(row: Dict[str, object], field: str) -> str:
+                value = row.get(field)
+                if value in (None, ""):
+                    return ""
+                if _canonical_oanda_account_label(row) in _OANDA_CANONICAL_ACCOUNT_LABELS:
+                    try:
+                        parsed = pd.to_datetime(value)
+                        dt = parsed.to_pydatetime()
+                        if dt.tzinfo is not None:
+                            dt = dt.astimezone(JOURNAL_DISPLAY_TZ).replace(tzinfo=None)
+                        return dt.isoformat()
+                    except Exception:
+                        pass
+                return str(value).strip()
+
             def _stable_trade_log_projection(row: Dict[str, object]) -> Dict[str, object]:
+                account = _canonical_oanda_account_label(row) or _canonical_journal_account_label(
+                    row.get("account_label") or row.get("account"),
+                    source=row.get("source"),
+                    account_mode=row.get("account_mode"),
+                )
+                net_profit = _to_float(row.get("net_profit"))
+                if net_profit is None:
+                    net_profit = _to_float(row.get("realized_pnl"))
                 return {
                     "id": str(row.get("id") or "").strip(),
-                    "row_type": str(row.get("row_type") or "").strip().lower(),
-                    "account": str(row.get("account") or row.get("account_label") or "").strip(),
-                    "symbol": str(row.get("symbol") or "").strip(),
-                    "side": str(row.get("side") or "").strip(),
-                    "open_time": str(row.get("open_time") or "").strip(),
-                    "close_time": str(row.get("close_time") or "").strip(),
+                    "row_type": _row_type(row),
+                    "account": account,
+                    "symbol": _canonical_symbol(row.get("symbol") or ""),
+                    "side": str(row.get("side") or "").strip().upper(),
+                    "open_time": _stable_projection_time(row, "open_time"),
+                    "close_time": _stable_projection_time(row, "close_time"),
                     "qty": _to_float(row.get("qty")),
                     "entry_price": _to_float(row.get("entry_price")),
                     "exit_price": _to_float(row.get("exit_price")),
-                    "net_profit": _to_float(row.get("net_profit")),
-                    "realized_pnl": _to_float(row.get("realized_pnl")),
+                    "net_profit": net_profit,
                     "commission": _to_float(row.get("commission")),
                     "balance_after_trade": _to_float(row.get("balance_after_trade")),
-                    "balance_after_trade_currency": str(row.get("balance_after_trade_currency") or "").strip(),
                     "stop_loss": _to_float(row.get("stop_loss")),
                     "take_profit": _to_float(row.get("take_profit")),
                     "result_pct": _to_float(row.get("result_pct")),
                     "r_multiple": _to_float(row.get("r_multiple")),
                 }
+
+            def _uploaded_projection_matches_workbook(
+                uploaded_row: Dict[str, object], workbook_row: Dict[str, object]
+            ) -> bool:
+                uploaded_projection = _stable_trade_log_projection(uploaded_row)
+                workbook_projection = _stable_trade_log_projection(workbook_row)
+                optional_when_missing = {
+                    "stop_loss",
+                    "take_profit",
+                    "result_pct",
+                    "r_multiple",
+                }
+                numeric_fields = {
+                    "qty",
+                    "entry_price",
+                    "exit_price",
+                    "net_profit",
+                    "commission",
+                    "balance_after_trade",
+                    "stop_loss",
+                    "take_profit",
+                    "result_pct",
+                    "r_multiple",
+                }
+                for key, uploaded_value in uploaded_projection.items():
+                    if key in optional_when_missing and uploaded_value in (None, ""):
+                        continue
+                    workbook_value = workbook_projection.get(key)
+                    if key in numeric_fields:
+                        if uploaded_value is None or workbook_value is None:
+                            if uploaded_value is not workbook_value:
+                                return False
+                            continue
+                        if not math.isclose(
+                            float(uploaded_value),
+                            float(workbook_value),
+                            rel_tol=1e-12,
+                            abs_tol=1e-9,
+                        ):
+                            return False
+                    elif workbook_value != uploaded_value:
+                        return False
+                return True
+
+            def _stable_trade_log_projections_equal(
+                left_row: Dict[str, object], right_row: Dict[str, object]
+            ) -> bool:
+                left_projection = _stable_trade_log_projection(left_row)
+                right_projection = _stable_trade_log_projection(right_row)
+                numeric_fields = {
+                    "qty",
+                    "entry_price",
+                    "exit_price",
+                    "net_profit",
+                    "commission",
+                    "balance_after_trade",
+                    "stop_loss",
+                    "take_profit",
+                    "result_pct",
+                    "r_multiple",
+                }
+                for key, left_value in left_projection.items():
+                    right_value = right_projection.get(key)
+                    if key in numeric_fields:
+                        if left_value is None or right_value is None:
+                            if left_value is not right_value:
+                                return False
+                            continue
+                        if not math.isclose(
+                            float(left_value),
+                            float(right_value),
+                            rel_tol=1e-12,
+                            abs_tol=1e-9,
+                        ):
+                            return False
+                    elif left_value != right_value:
+                        return False
+                return True
+            rows = [
+                _backfill_trade_row_context_fields(dict(r)) if isinstance(r, dict) else r
+                for r in rows
+            ]
+            preflight_rows, preflight_replaced_oanda_ids = _prepare_oanda_canonical_replacements(
+                workbook_existing_rows,
+                rows,
+            )
+            workbook_map = {
+                str((r or {}).get("id") or "").strip(): dict(r)
+                for r in workbook_existing_rows
+                if str((r or {}).get("id") or "").strip()
+            }
+            preflight_parsed_map = {
+                str((r or {}).get("id") or "").strip(): dict(r)
+                for r in preflight_rows
+                if str((r or {}).get("id") or "").strip()
+            }
+            preflight_expected_survivors = sorted(
+                (set(pre_import_workbook_row_ids) - preflight_replaced_oanda_ids)
+                | set(preflight_parsed_map)
+            )
+            preflight_balance_verification = _verify_imported_account_balance_snapshot(
+                workbook_source_preflight,
+                oanda_transaction_export_balance,
+                allow_equivalent_authoritative_balance=True,
+            )
+            fast_path_noop = (
+                bool(preflight_parsed_map)
+                and not preflight_replaced_oanda_ids
+                and all(
+                (rid in workbook_map)
+                and _uploaded_projection_matches_workbook(
+                    preflight_parsed_map[rid], workbook_map[rid]
+                )
+                for rid in preflight_parsed_map
+                )
+                and set(preflight_expected_survivors).issubset(
+                    set(pre_import_workbook_row_ids)
+                )
+                and bool(preflight_balance_verification.get("ok"))
+            )
+            if fast_path_noop:
+                duplicate_rows_merged = sum(
+                    1 for rid in preflight_parsed_map if rid in workbook_map
+                )
+                timings.update(
+                    {
+                        "upsert": 0.0,
+                        "snapshot_build": 0.0,
+                        "workbook_sync": 0.0,
+                        "verification": 0.0,
+                        "workbook_snapshot_verification": 0.0,
+                        "snapshot_persist": 0.0,
+                        "github_sync": 0.0,
+                    }
+                )
+                APP_LOGGER.info(
+                    "trading_journal_import_duplicate_noop upload=%s rows=%s balance_expected=%s preflight_source_reused=True",
+                    name,
+                    len(preflight_parsed_map),
+                    bool(oanda_transaction_export_balance),
+                )
+                message = (
+                    "All uploaded rows and the uploaded account balance already existed; "
+                    "no workbook rebuild was required."
+                    if oanda_transaction_export_balance
+                    else "All uploaded rows already existed; no workbook rebuild was required."
+                )
+                return {
+                    "ok": True,
+                    "status_code": 200,
+                    "message": message,
+                    "uploaded_name": name,
+                    "file_type": suffix,
+                    "rows_parsed": len(rows),
+                    "rows_upserted": 0,
+                    "duplicate_rows_merged": duplicate_rows_merged,
+                    "duplicate_noop_fast_path_used": True,
+                    "workbook_rebuild_required": False,
+                    "balance_parsed": bool(balance),
+                    "rows_persisted": True,
+                    "balance_applied": bool(preflight_balance_verification.get("balance_applied")),
+                    "snapshot_visible": bool(preflight_balance_verification.get("snapshot_visible")),
+                    "balance_verification": preflight_balance_verification,
+                    "master_journal_path": str(workbook_path),
+                    "verified_row_ids_count": len(preflight_parsed_map),
+                    "missing_row_ids": [],
+                    "warnings": inference_warnings,
+                    "errors": [],
+                    "import_timings": timings,
+                    **inference_diag,
+                    **bybit_diag,
+                    "github_sync_skipped": True,
+                    "github_sync_deferred": False,
+                    "github_sync_commit_sha": None,
+                    "github_sync_path": str(workbook_path),
+                    "github_sync_message": "GitHub sync skipped because the workbook was unchanged.",
+                }
+
+            if workbook_had_original:
+                workbook_backup_bytes = workbook_path.read_bytes()
             if workbook_existing_rows:
                 current_ids = {str((r or {}).get("id") or "").strip() for r in previous_rows if str((r or {}).get("id") or "").strip()}
                 workbook_ids = {str((r or {}).get("id") or "").strip() for r in workbook_existing_rows if str((r or {}).get("id") or "").strip()}
@@ -33521,7 +34141,9 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
                 workbook_map = {str((r or {}).get("id") or "").strip(): dict(r) for r in workbook_existing_rows if str((r or {}).get("id") or "").strip()}
                 stale_ids = [
                     rid for rid in workbook_ids.intersection(current_ids)
-                    if _stable_trade_log_projection(current_map.get(rid, {})) != _stable_trade_log_projection(workbook_map.get(rid, {}))
+                    if not _stable_trade_log_projections_equal(
+                        current_map.get(rid, {}), workbook_map.get(rid, {})
+                    )
                 ]
                 should_hydrate = (not previous_rows) or (not workbook_ids.issubset(current_ids)) or bool(stale_ids)
                 hydrated_rows_added = 0
@@ -33558,12 +34180,23 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
                 [rid for rid in parsed_ids if rid in existing_ids][:10],
                 duplicate_rows_merged,
             )
-            rows = [_backfill_trade_row_context_fields(dict(r)) if isinstance(r, dict) else r for r in rows]
             rows, replaced_oanda_legacy_ids = _prepare_oanda_canonical_replacements(previous_rows, rows)
+            rows = [
+                _preserve_workbook_manual_fields(
+                    dict(row), workbook_map[str(row.get("id") or "").strip()]
+                )
+                if (
+                    isinstance(row, dict)
+                    and str(row.get("id") or "").strip() in workbook_map
+                    and _canonical_oanda_account_label(row)
+                    in _OANDA_CANONICAL_ACCOUNT_LABELS
+                )
+                else row
+                for row in rows
+            ]
             expected_survivors = sorted(
                 (set(pre_import_workbook_row_ids) - replaced_oanda_legacy_ids) | set(parsed_ids)
             )
-            workbook_map = {str((r or {}).get("id") or "").strip(): dict(r) for r in workbook_existing_rows if str((r or {}).get("id") or "").strip()}
             parsed_map = {str((r or {}).get("id") or "").strip(): dict(r) for r in rows if str((r or {}).get("id") or "").strip()}
             pending_balance_map: Dict[str, Dict[str, object]] = {}
             for item in [
@@ -33584,93 +34217,119 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
                 if pending_key:
                     pending_balance_map[pending_key] = dict(item)
             _PENDING_MANUAL_SYNC_BALANCES = list(pending_balance_map.values())
-            fast_path_noop = bool(parsed_map) and all(
-                (rid in workbook_map) and (_stable_trade_log_projection(parsed_map[rid]) == _stable_trade_log_projection(workbook_map[rid]))
-                for rid in parsed_map.keys()
-            ) and set(expected_survivors).issubset(set(pre_import_workbook_row_ids))
-            if fast_path_noop:
-                timings["upsert"] = 0.0
-                timings["workbook_sync"] = 0.0
-                t_stats = time.perf_counter()
-                APP_LOGGER.info("trading_journal_import_stage_start stage=stats_refresh_duplicate_noop upload=%s", name)
-                manual_import_snapshot = _build_manual_import_authoritative_snapshot()
-                pending_balance_verification = _verify_imported_account_balance_snapshot(
-                    manual_import_snapshot,
-                    oanda_transaction_export_balance,
+            t2 = time.perf_counter()
+            _update_trading_journal_import_status(stage="upsert", message="Saving imported rows")
+            APP_LOGGER.info("trading_journal_import_stage_start stage=upsert upload=%s", name)
+            rows_upserted = _upsert_trading_journal_rows(rows, allow_broker_rows_in_single_file=True)
+            timings["upsert"] = round(time.perf_counter() - t2, 6)
+            APP_LOGGER.info("trading_journal_import_stage_done stage=upsert elapsed=%.6fs upload=%s", timings["upsert"], name)
+            repaired_rows, repaired_changed = _backfill_persisted_bybit_trade_fields(_get_trading_journal_rows())
+            workbook_manual_rows_preserved = 0
+            rows_with_workbook_manual_fields: List[Dict[str, object]] = []
+            for persisted_row in repaired_rows:
+                if not isinstance(persisted_row, dict):
+                    continue
+                rid = str(persisted_row.get("id") or "").strip()
+                workbook_row = workbook_map.get(rid)
+                preserved_row = (
+                    _preserve_workbook_manual_fields(
+                        dict(persisted_row), workbook_row
+                    )
+                    if isinstance(workbook_row, dict)
+                    else dict(persisted_row)
                 )
-                if bool(oanda_transaction_export_balance) and not bool(pending_balance_verification.get("ok")):
-                    raise RuntimeError(
-                        "Authoritative import snapshot did not apply parsed account balance: "
-                        f"expected={pending_balance_verification.get('expected_balance')} "
-                        f"actual={pending_balance_verification.get('actual_balance')} "
-                        f"expected_source={pending_balance_verification.get('expected_source')} "
-                        f"actual_source={pending_balance_verification.get('actual_source')}"
-                    )
-                refreshed = refresh_master_journal_derived_sheets(_master_journal_path(), manual_import_snapshot)
-                if not bool((refreshed or {}).get("ok")):
-                    raise RuntimeError(f"Duplicate import stats refresh failed: {(refreshed or {}).get('error') or 'unknown error'}")
-                duplicate_noop_fast_path_used = True
-                timings["stats_refresh_duplicate_noop"] = round(time.perf_counter() - t_stats, 6)
-                APP_LOGGER.info("trading_journal_import_stage_done stage=stats_refresh_duplicate_noop elapsed=%.6fs upload=%s", timings["stats_refresh_duplicate_noop"], name)
-                APP_LOGGER.info("trading_journal_import_stage_skip stage=workbook_sync upload=%s reason=duplicate_noop", name)
-                _PENDING_MANUAL_SYNC_ROWS = previous_pending_rows
-                _PENDING_MANUAL_SYNC_BALANCES = previous_pending_balances
-                pending_restored = True
-            else:
-                t2 = time.perf_counter()
-                _update_trading_journal_import_status(stage="upsert", message="Saving imported rows")
-                APP_LOGGER.info("trading_journal_import_stage_start stage=upsert upload=%s", name)
-                rows_upserted = _upsert_trading_journal_rows(rows, allow_broker_rows_in_single_file=True)
-                timings["upsert"] = round(time.perf_counter() - t2, 6)
-                APP_LOGGER.info("trading_journal_import_stage_done stage=upsert elapsed=%.6fs upload=%s", timings["upsert"], name)
-                repaired_rows, repaired_changed = _backfill_persisted_bybit_trade_fields(_get_trading_journal_rows())
-                if repaired_changed:
-                    _set_trading_journal_rows(repaired_rows)
-                    rows = [_backfill_trade_row_context_fields(dict(r)) if isinstance(r, dict) else r for r in rows]
+                if preserved_row != persisted_row:
+                    workbook_manual_rows_preserved += 1
+                rows_with_workbook_manual_fields.append(preserved_row)
+            if workbook_manual_rows_preserved:
+                repaired_rows = rows_with_workbook_manual_fields
+                repaired_changed = True
+            if repaired_changed:
+                _set_trading_journal_rows(repaired_rows)
+                rows = [_backfill_trade_row_context_fields(dict(r)) if isinstance(r, dict) else r for r in rows]
+            APP_LOGGER.info(
+                "trading_journal_import_workbook_manual_fields_preserved upload=%s rows=%s",
+                name,
+                workbook_manual_rows_preserved,
+            )
 
-                pending_map: Dict[str, Dict[str, object]] = {}
-                for r in [*rows, *previous_pending_rows]:
-                    rid = str((r or {}).get("id") or "").strip()
-                    if rid:
-                        pending_map[rid] = dict(r)
-                _PENDING_MANUAL_SYNC_ROWS = list(pending_map.values())
-
-                t_snap = time.perf_counter()
-                _update_trading_journal_import_status(stage="snapshot_build", message="Building authoritative import snapshot")
-                APP_LOGGER.info("trading_journal_import_stage_start stage=snapshot_build upload=%s mode=authoritative_workbook", name)
-                manual_import_snapshot = _build_manual_import_authoritative_snapshot()
-                pending_balance_verification = _verify_imported_account_balance_snapshot(
-                    manual_import_snapshot,
-                    oanda_transaction_export_balance,
+            post_upsert_rows_by_id = {
+                str((row or {}).get("id") or "").strip(): dict(row)
+                for row in repaired_rows
+                if isinstance(row, dict) and str(row.get("id") or "").strip()
+            }
+            pending_map: Dict[str, Dict[str, object]] = {}
+            post_upsert_import_rows = [
+                _preserve_workbook_manual_fields(
+                    post_upsert_rows_by_id.get(
+                        str((row or {}).get("id") or "").strip(), dict(row)
+                    ),
+                    workbook_map[str((row or {}).get("id") or "").strip()],
                 )
-                if bool(oanda_transaction_export_balance) and not bool(pending_balance_verification.get("ok")):
-                    raise RuntimeError(
-                        "Authoritative import snapshot did not apply parsed account balance: "
-                        f"expected={pending_balance_verification.get('expected_balance')} "
-                        f"actual={pending_balance_verification.get('actual_balance')} "
-                        f"expected_source={pending_balance_verification.get('expected_source')} "
-                        f"actual_source={pending_balance_verification.get('actual_source')}"
-                    )
-                timings["snapshot_build"] = round(time.perf_counter() - t_snap, 6)
-                APP_LOGGER.info("trading_journal_import_stage_done stage=snapshot_build elapsed=%.6fs upload=%s mode=authoritative_workbook", timings["snapshot_build"], name)
-                t3 = time.perf_counter()
-                _update_trading_journal_import_status(stage="workbook_sync", message="Updating Trading Journal.xlsx")
-                APP_LOGGER.info("trading_journal_import_stage_start stage=workbook_sync upload=%s", name)
-                sync_result = _sync_master_journal_workbook(defer_github_sync=True, expected_survivor_row_ids=expected_survivors, prebuilt_snapshot=manual_import_snapshot, sync_caller="manual_import")
-                timings["workbook_sync"] = round(time.perf_counter() - t3, 6)
-                APP_LOGGER.info("trading_journal_import_stage_done stage=workbook_sync elapsed=%.6fs upload=%s", timings["workbook_sync"], name)
-                if not _master_journal_sync_ok(sync_result):
-                    sync_missing = list((sync_result or {}).get("missing_row_ids") or [])
-                    APP_LOGGER.error(
-                        "trading_journal_import workbook_sync failed upload=%s elapsed=%.6fs missing_row_ids_count=%s missing_row_ids_sample=%s error=%s",
-                        name, timings["workbook_sync"], len(sync_missing), sync_missing[:5], _master_journal_sync_error(sync_result),
-                    )
-                    if isinstance(sync_result, dict) and sync_result.get("code") == "EXCEL_WORKBOOK_OPEN":
-                        raise PermissionError(_master_journal_sync_error(sync_result))
-                    raise RuntimeError(f"Workbook sync failed: {_master_journal_sync_error(sync_result)}")
-                _PENDING_MANUAL_SYNC_ROWS = previous_pending_rows
-                _PENDING_MANUAL_SYNC_BALANCES = previous_pending_balances
-                pending_restored = True
+                if (
+                    str((row or {}).get("id") or "").strip() in workbook_map
+                    and _canonical_oanda_account_label(row)
+                    in _OANDA_CANONICAL_ACCOUNT_LABELS
+                )
+                else post_upsert_rows_by_id.get(
+                    str((row or {}).get("id") or "").strip(), dict(row)
+                )
+                for row in rows
+                if isinstance(row, dict)
+            ]
+            for r in [*post_upsert_import_rows, *previous_pending_rows]:
+                rid = str((r or {}).get("id") or "").strip()
+                if rid:
+                    pending_map[rid] = dict(r)
+            for rid, workbook_row in workbook_map.items():
+                current_row = pending_map.get(rid) or post_upsert_rows_by_id.get(rid)
+                if not isinstance(current_row, dict):
+                    continue
+                preserved_row = _preserve_workbook_manual_fields(
+                    current_row, workbook_row
+                )
+                if preserved_row != current_row:
+                    pending_map[rid] = preserved_row
+            _PENDING_MANUAL_SYNC_ROWS = list(pending_map.values())
+
+            t_snap = time.perf_counter()
+            _update_trading_journal_import_status(stage="snapshot_build", message="Building authoritative import snapshot")
+            APP_LOGGER.info("trading_journal_import_stage_start stage=snapshot_build upload=%s mode=authoritative_workbook", name)
+            manual_import_snapshot = _build_manual_import_authoritative_snapshot(
+                persist_sqlite=False
+            )
+            pending_balance_verification = _verify_imported_account_balance_snapshot(
+                manual_import_snapshot,
+                oanda_transaction_export_balance,
+            )
+            if bool(oanda_transaction_export_balance) and not bool(pending_balance_verification.get("ok")):
+                raise RuntimeError(
+                    "Authoritative import snapshot did not apply parsed account balance: "
+                    f"expected={pending_balance_verification.get('expected_balance')} "
+                    f"actual={pending_balance_verification.get('actual_balance')} "
+                    f"expected_source={pending_balance_verification.get('expected_source')} "
+                    f"actual_source={pending_balance_verification.get('actual_source')}"
+                )
+            timings["snapshot_build"] = round(time.perf_counter() - t_snap, 6)
+            APP_LOGGER.info("trading_journal_import_stage_done stage=snapshot_build elapsed=%.6fs upload=%s mode=authoritative_workbook", timings["snapshot_build"], name)
+            t3 = time.perf_counter()
+            _update_trading_journal_import_status(stage="workbook_sync", message="Updating Trading Journal.xlsx")
+            APP_LOGGER.info("trading_journal_import_stage_start stage=workbook_sync upload=%s", name)
+            sync_result = _sync_master_journal_workbook(defer_github_sync=True, expected_survivor_row_ids=expected_survivors, prebuilt_snapshot=manual_import_snapshot, sync_caller="manual_import")
+            timings["workbook_sync"] = round(time.perf_counter() - t3, 6)
+            APP_LOGGER.info("trading_journal_import_stage_done stage=workbook_sync elapsed=%.6fs upload=%s", timings["workbook_sync"], name)
+            if not _master_journal_sync_ok(sync_result):
+                sync_missing = list((sync_result or {}).get("missing_row_ids") or [])
+                APP_LOGGER.error(
+                    "trading_journal_import workbook_sync failed upload=%s elapsed=%.6fs missing_row_ids_count=%s missing_row_ids_sample=%s error=%s",
+                    name, timings["workbook_sync"], len(sync_missing), sync_missing[:5], _master_journal_sync_error(sync_result),
+                )
+                if isinstance(sync_result, dict) and sync_result.get("code") == "EXCEL_WORKBOOK_OPEN":
+                    raise PermissionError(_master_journal_sync_error(sync_result))
+                raise RuntimeError(f"Workbook sync failed: {_master_journal_sync_error(sync_result)}")
+            _PENDING_MANUAL_SYNC_ROWS = previous_pending_rows
+            _PENDING_MANUAL_SYNC_BALANCES = previous_pending_balances
+            pending_restored = True
 
             t4 = time.perf_counter()
             _update_trading_journal_import_status(stage="verification", message="Verifying workbook rows")
@@ -33689,6 +34348,9 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
             rows_persisted = True
             t5 = time.perf_counter()
             APP_LOGGER.info("trading_journal_import_stage_start stage=workbook_snapshot_verification upload=%s", name)
+            if not isinstance(manual_import_snapshot, dict):
+                raise RuntimeError("Authoritative import snapshot was not retained for verification.")
+            snapshot = manual_import_snapshot
             if bool(oanda_transaction_export_balance):
                 workbook_source_after_import = read_master_journal_source(
                     _master_journal_path()
@@ -33711,7 +34373,6 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
                         f"expected_source={workbook_balance_verification.get('expected_source')} "
                         f"actual_source={workbook_balance_verification.get('actual_source')}"
                     )
-                snapshot = _build_master_journal_verification_snapshot()
                 balance_verification = _verify_imported_account_balance_snapshot(
                     snapshot,
                     oanda_transaction_export_balance,
@@ -33726,11 +34387,6 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
                         f"workbook_as_of={workbook_balance_verification.get('actual_as_of')} "
                         f"snapshot_as_of={balance_verification.get('actual_as_of')}"
                     )
-            else:
-                snapshot = (
-                    manual_import_snapshot
-                    or _build_manual_import_authoritative_snapshot()
-                )
             timings["workbook_snapshot_verification"] = round(time.perf_counter() - t5, 6)
             APP_LOGGER.info("trading_journal_import_stage_done stage=workbook_snapshot_verification elapsed=%.6fs upload=%s", timings["workbook_snapshot_verification"], name)
             t5 = time.perf_counter()

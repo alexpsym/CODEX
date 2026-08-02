@@ -22,6 +22,7 @@ from tools.master_journal_workbook import build_master_journal_workbook, read_ma
 from tools.master_journal_workbook import _format_duration_display, _parse_duration_text, _repair_legacy_duration_number_formats, _populate_symbols_metrics_preserving_layout, _repair_symbols_header_merges_preserving_layout
 from tools.master_journal_workbook import RECOMMENDATION_TRADE_LOG_HEADERS, _trade_log_three_row_header_values_for
 from tools.master_journal_workbook import _ensure_report_sheets, _period_drawdown_metrics, _sanitize_recommendation_text
+from tools.master_journal_workbook import _dedupe_monthly_aud_reval_rows
 from openpyxl.utils.cell import coordinate_to_tuple, get_column_letter, range_boundaries
 
 
@@ -2258,6 +2259,129 @@ def test_read_master_journal_source_monthly_aud_roundtrip_fields(tmp_path: Path)
     assert (monthly.get("raw_refs") or {}).get("period_month") == "2026-04"
     assert monthly.get("net_profit") in (None, "")
     assert monthly.get("realized_pnl") in (None, "")
+
+
+def test_workbook_source_dedupes_canonical_monthly_row_id_and_keeps_best_record(tmp_path: Path):
+    monthly_id = "monthly_aud_reval:bybit_live:2026-04"
+    snapshot = {
+        "items": [
+            {
+                "id": "ordinary-shared-id",
+                "row_type": "trade",
+                "account": "OANDA DEMO",
+                "symbol": "EURUSD",
+                "side": "BUY",
+                "open_time": "2026-04-01T00:00:00Z",
+                "close_time": "2026-04-01T01:00:00Z",
+                "qty": 1,
+                "entry_price": 1.1,
+                "exit_price": 1.2,
+                "net_profit": 10.0,
+            },
+            {
+                "id": "ordinary-shared-id",
+                "row_type": "trade",
+                "account": "OANDA DEMO",
+                "symbol": "GBPUSD",
+                "side": "SELL",
+                "open_time": "2026-04-02T00:00:00Z",
+                "close_time": "2026-04-02T01:00:00Z",
+                "qty": 2,
+                "entry_price": 1.3,
+                "exit_price": 1.2,
+                "net_profit": 20.0,
+            },
+            {
+                "id": monthly_id,
+                "row_type": "monthly_aud_reval",
+                "account": "Bybit Live",
+                "account_label": "Bybit Live",
+                "symbol": "MONTHLY AUD P/L",
+                "open_time": "2026-04-01T00:00:00Z",
+                "close_time": "2026-04-30T23:59:59Z",
+                "result_cash": 123.45,
+                "result_currency": "AUD",
+                "notes": "complete monthly record",
+            },
+        ],
+        "stats": {"totals": {}, "groups": {}},
+        "balances": [],
+    }
+    path = tmp_path / "monthly_duplicate_source.xlsx"
+    build_master_journal_workbook(snapshot, path)
+
+    wb = load_workbook(path)
+    ws = wb["Trade Log"]
+    monthly_row = _trade_log_row_by_id(ws, monthly_id)
+    complete_values = [ws.cell(monthly_row, col).value for col in range(1, len(TRADE_LOG_HEADERS) + 1)]
+    ws.cell(monthly_row, _header_col(ws, "Net P/L")).value = None
+    ws.cell(monthly_row, _header_col(ws, "Currency")).value = ""
+    ws.cell(monthly_row, _header_col(ws, "Notes")).value = ""
+    ws.append(complete_values)
+    wb.save(path)
+    wb.close()
+
+    parsed = read_master_journal_source(path)
+    monthly_rows = [row for row in parsed["items"] if row.get("id") == monthly_id]
+    assert len(monthly_rows) == 1
+    assert monthly_rows[0]["result_cash"] == pytest.approx(123.45)
+    assert monthly_rows[0]["notes"] == "complete monthly record"
+    assert [row.get("id") for row in parsed["items"]].count("ordinary-shared-id") == 2
+    assert parsed["diagnostics"]["duplicate_monthly_aud_reval_rows_removed"] == 1
+    assert parsed["diagnostics"]["deduplicated_monthly_aud_reval_row_ids"] == [monthly_id]
+
+    result = update_master_journal_workbook_data_only(
+        path,
+        parsed,
+        preserve_existing_layout=True,
+    )
+    assert result["ok"] is True
+    Path(result["candidate_path"]).replace(path)
+    repaired_wb = load_workbook(path)
+    try:
+        repaired = repaired_wb["Trade Log"]
+        row_id_col = _header_col(repaired, "Row ID")
+        repaired_ids = [
+            str(repaired.cell(row, row_id_col).value or "")
+            for row in range(TRADE_LOG_DATA_START_ROW, repaired.max_row + 1)
+        ]
+        assert repaired_ids.count(monthly_id) == 1
+        assert repaired_ids.count("ordinary-shared-id") == 2
+    finally:
+        repaired_wb.close()
+
+
+def test_monthly_dedupe_groups_reserved_id_even_when_one_candidate_is_malformed():
+    monthly_id = "monthly_aud_reval:bybit_live:2026-04"
+    rows = [
+        {
+            "id": monthly_id,
+            "row_type": "trade",
+            "symbol": "EURUSD",
+            "net_profit": 999.0,
+        },
+        {
+            "id": monthly_id,
+            "row_type": "monthly_aud_reval",
+            "account": "Bybit Live",
+            "symbol": "MONTHLY AUD P/L",
+            "close_time": "2026-04-30T23:59:59Z",
+            "result_cash": 123.45,
+            "result_currency": "AUD",
+        },
+        {"id": "ordinary-shared-id", "row_type": "trade", "symbol": "EURUSD"},
+        {"id": "ordinary-shared-id", "row_type": "trade", "symbol": "GBPUSD"},
+    ]
+
+    deduped, diagnostics = _dedupe_monthly_aud_reval_rows(rows)
+
+    monthly_rows = [row for row in deduped if row.get("id") == monthly_id]
+    assert len(monthly_rows) == 1
+    assert monthly_rows[0]["row_type"] == "monthly_aud_reval"
+    assert monthly_rows[0]["result_cash"] == pytest.approx(123.45)
+    assert [row.get("id") for row in deduped].count("ordinary-shared-id") == 2
+    assert diagnostics["duplicate_monthly_aud_reval_rows_removed"] == 1
+
 
 def test_trade_log_commission_zero_none_blank_and_nonzero(tmp_path: Path):
     s = sample_snapshot()
@@ -5367,6 +5491,249 @@ def test_update_data_only_restores_trade_log_direct_row_fills(tmp_path: Path):
     ws = load_workbook(out)["Trade Log"]
     winning_row = _trade_log_row_by_id(ws, "t1")
     assert all(_cell_fill_rgb(ws.cell(winning_row, col)) == "C6EFCE" for col in [1, 3, _header_col(ws, "Net P/L"), len(TRADE_LOG_HEADERS)])
+
+
+def test_preservation_mode_reapplies_trade_log_fills_and_current_cf_range(tmp_path: Path):
+    out = tmp_path / "Trading Journal.xlsx"
+    snap = sample_snapshot()
+    snap["items"].extend([
+        {
+            "id": "zero-trade",
+            "row_type": "trade",
+            "account": "OANDA DEMO",
+            "symbol": "AUDUSD",
+            "side": "BUY",
+            "open_time": "2026-05-03T00:00:00Z",
+            "close_time": "2026-05-03T01:00:00Z",
+            "net_profit": 0.0,
+        },
+        {
+            "id": "cashflow-row",
+            "row_type": "cashflow",
+            "account": "OANDA DEMO",
+            "symbol": "CASHFLOW",
+            "open_time": "2026-05-04T00:00:00Z",
+            "close_time": "2026-05-04T00:00:00Z",
+            "cashflow_amount": 100.0,
+            "net_profit": 100.0,
+        },
+        {
+            "id": "monthly_aud_reval:bybit_live:2026-05",
+            "row_type": "monthly_aud_reval",
+            "account": "Bybit Live",
+            "account_label": "Bybit Live",
+            "symbol": "MONTHLY AUD P/L",
+            "open_time": "2026-05-01T00:00:00Z",
+            "close_time": "2026-05-31T23:59:59Z",
+            "result_cash": -25.0,
+            "result_currency": "AUD",
+        },
+    ])
+    build_master_journal_workbook(snap, out)
+
+    wb = load_workbook(out)
+    ws = wb["Trade Log"]
+    winning_row = _trade_log_row_by_id(ws, "t1")
+    losing_row = _trade_log_row_by_id(ws, "t2")
+    zero_row = _trade_log_row_by_id(ws, "zero-trade")
+    cashflow_row = _trade_log_row_by_id(ws, "cashflow-row")
+    monthly_row = _trade_log_row_by_id(ws, "monthly_aud_reval:bybit_live:2026-05")
+    last_populated_row = monthly_row
+    for col in range(1, len(TRADE_LOG_HEADERS) + 1):
+        ws.cell(winning_row, col).fill = PatternFill()
+        ws.cell(zero_row, col).fill = PatternFill("solid", fgColor=LOSS_FILL)
+        ws.cell(cashflow_row, col).fill = PatternFill("solid", fgColor=PROFIT_FILL)
+        ws.cell(monthly_row, col).fill = PatternFill("solid", fgColor=LOSS_FILL)
+
+    net_pl_cell = ws.cell(winning_row, _header_col(ws, "Net P/L"))
+    net_pl_cell.border = Border(
+        left=Side(style="double", color="FF123456"),
+        right=Side(style="thick", color="FF654321"),
+    )
+    expected_border = _border_signature(net_pl_cell)
+    symbol_cell = ws.cell(winning_row, _header_col(ws, "Symbol"))
+    symbol_cell.comment = Comment("authored comment", "Trader")
+    symbol_cell.hyperlink = "https://example.com/authored-trade"
+    ws.column_dimensions["A"].width = 27.25
+    ws.row_dimensions[winning_row].height = 31.5
+
+    row_type_letter = get_column_letter(_header_col(ws, "Row Type"))
+    net_pl_letter = get_column_letter(_header_col(ws, "Net P/L"))
+    last_col_letter = get_column_letter(len(TRADE_LOG_HEADERS))
+    stale_range = f"A{TRADE_LOG_DATA_START_ROW}:{last_col_letter}{winning_row}"
+    ws.conditional_formatting._cf_rules.clear()
+    ws.conditional_formatting.add(
+        stale_range,
+        FormulaRule(
+            formula=[f'AND(${row_type_letter}{TRADE_LOG_DATA_START_ROW}="trade",${net_pl_letter}{TRADE_LOG_DATA_START_ROW}>0)'],
+            fill=PatternFill("solid", fgColor=PROFIT_FILL),
+        ),
+    )
+    ws.conditional_formatting.add(
+        stale_range,
+        FormulaRule(
+            formula=[f'AND(${row_type_letter}{TRADE_LOG_DATA_START_ROW}="trade",${net_pl_letter}{TRADE_LOG_DATA_START_ROW}<0)'],
+            fill=PatternFill("solid", fgColor=LOSS_FILL),
+        ),
+    )
+    ws.cell(last_populated_row + 10, 1).fill = PatternFill("solid", fgColor=LOSS_FILL)
+    wb.save(out)
+    wb.close()
+
+    result = update_master_journal_workbook_data_only(
+        out,
+        snap,
+        preserve_existing_layout=True,
+    )
+    assert result["ok"] is True
+    assert result["diagnostics"]["reapplied_generated_trade_log_formatting_after_layout_restore"] is True
+    Path(result["candidate_path"]).replace(out)
+
+    wb = load_workbook(out)
+    ws = wb["Trade Log"]
+    checked_cols = [1, 3, _header_col(ws, "Net P/L"), len(TRADE_LOG_HEADERS)]
+    assert all(_cell_fill_rgb(ws.cell(winning_row, col)) == "C6EFCE" for col in checked_cols)
+    assert all(_cell_fill_rgb(ws.cell(losing_row, col)) == "FFC7CE" for col in checked_cols)
+    for row in (zero_row, cashflow_row, monthly_row):
+        assert all(_cell_fill_rgb(ws.cell(row, col)) == "" for col in checked_cols)
+
+    expected_range = f"A{TRADE_LOG_DATA_START_ROW}:{last_col_letter}{last_populated_row}"
+    row_rules = [detail for detail in _cf_rule_details(ws) if detail[0] == expected_range]
+    assert len(row_rules) == 2
+    assert stale_range not in _cf_ranges(ws)
+    assert _border_signature(ws.cell(winning_row, _header_col(ws, "Net P/L"))) == expected_border
+    assert ws.column_dimensions["A"].width == pytest.approx(27.25)
+    assert ws.row_dimensions[winning_row].height == pytest.approx(31.5)
+    symbol_cell = ws.cell(winning_row, _header_col(ws, "Symbol"))
+    assert symbol_cell.comment is not None and symbol_cell.comment.text == "authored comment"
+    assert symbol_cell.hyperlink is not None and symbol_cell.hyperlink.target == "https://example.com/authored-trade"
+    wb.close()
+
+
+def test_preservation_mode_moves_trade_presentation_with_row_id_after_monthly_dedupe(
+    tmp_path: Path,
+):
+    out = tmp_path / "Trading Journal.xlsx"
+    monthly_id = "monthly_aud_reval:bybit_live:2026-05"
+    snap = sample_snapshot()
+    snap["items"].insert(
+        0,
+        {
+            "id": monthly_id,
+            "row_type": "monthly_aud_reval",
+            "account": "Bybit Live",
+            "account_label": "Bybit Live",
+            "symbol": "MONTHLY AUD P/L",
+            "open_time": "2026-05-01T00:00:00Z",
+            "close_time": "2026-05-31T23:59:59Z",
+            "result_cash": -25.0,
+            "result_currency": "AUD",
+        },
+    )
+    build_master_journal_workbook(snap, out)
+
+    wb = load_workbook(out)
+    ws = wb["Trade Log"]
+    monthly_row = _trade_log_row_by_id(ws, monthly_id)
+    ws.insert_rows(monthly_row + 1)
+    for col in range(1, len(TRADE_LOG_HEADERS) + 1):
+        source = ws.cell(monthly_row, col)
+        duplicate = ws.cell(monthly_row + 1, col)
+        duplicate.value = source.value
+        duplicate._style = copy(source._style)
+        duplicate._hyperlink = copy(getattr(source, "hyperlink", None))
+        duplicate.comment = copy(getattr(source, "comment", None))
+        source.fill = PatternFill("solid", fgColor=LOSS_FILL)
+        duplicate.fill = PatternFill("solid", fgColor=LOSS_FILL)
+
+    styled_row = _trade_log_row_by_id(ws, "t1")
+    net_pl_col = _header_col(ws, "Net P/L")
+    symbol_col = _header_col(ws, "Symbol")
+    manual_border = Border(
+        left=Side(style="double", color="FF123456"),
+        right=Side(style="thick", color="FF654321"),
+        top=Side(style="dashed", color="FFABCDEF"),
+        bottom=Side(style="dotted", color="FF111111"),
+    )
+    ws.cell(styled_row, net_pl_col).border = manual_border
+    expected_border = _border_signature(ws.cell(styled_row, net_pl_col))
+    ws.cell(styled_row, symbol_col).comment = Comment(
+        "row-aware authored comment", "Trader"
+    )
+    ws.cell(styled_row, symbol_col).hyperlink = (
+        "https://example.com/row-aware-authored-trade"
+    )
+    ws.row_dimensions[styled_row].height = 37.25
+    for col in range(1, len(TRADE_LOG_HEADERS) + 1):
+        ws.cell(styled_row, col).fill = PatternFill()
+    wb.save(out)
+    wb.close()
+
+    parsed = read_master_journal_source(out)
+    assert parsed["diagnostics"]["duplicate_monthly_aud_reval_rows_removed"] == 1
+    assert [row.get("id") for row in parsed["items"]].count(monthly_id) == 1
+
+    result = update_master_journal_workbook_data_only(
+        out,
+        parsed,
+        preserve_existing_layout=True,
+    )
+    assert result["ok"] is True
+    assert result["diagnostics"][
+        "trade_log_row_presentations_restored_by_row_id"
+    ] == len(parsed["items"])
+    Path(result["candidate_path"]).replace(out)
+
+    wb = load_workbook(out)
+    try:
+        ws = wb["Trade Log"]
+        moved_row = _trade_log_row_by_id(ws, "t1")
+        assert moved_row == styled_row - 1
+        assert _border_signature(ws.cell(moved_row, net_pl_col)) == expected_border
+        symbol_cell = ws.cell(moved_row, symbol_col)
+        assert symbol_cell.comment is not None
+        assert symbol_cell.comment.text == "row-aware authored comment"
+        assert symbol_cell.hyperlink is not None
+        assert (
+            symbol_cell.hyperlink.target
+            == "https://example.com/row-aware-authored-trade"
+        )
+        assert ws.row_dimensions[moved_row].height == pytest.approx(37.25)
+        assert all(
+            _cell_fill_rgb(ws.cell(moved_row, col)) == "C6EFCE"
+            for col in range(1, len(TRADE_LOG_HEADERS) + 1)
+        )
+
+        monthly_rows = [
+            row
+            for row in range(TRADE_LOG_DATA_START_ROW, ws.max_row + 1)
+            if str(ws.cell(row, _header_col(ws, "Row ID")).value or "")
+            == monthly_id
+        ]
+        assert len(monthly_rows) == 1
+        assert all(
+            _cell_fill_rgb(ws.cell(monthly_rows[0], col)) == ""
+            for col in range(1, len(TRADE_LOG_HEADERS) + 1)
+        )
+
+        last_populated_row = max(
+            row
+            for row in range(TRADE_LOG_DATA_START_ROW, ws.max_row + 1)
+            if any(
+                ws.cell(row, col).value not in (None, "")
+                for col in range(1, len(TRADE_LOG_HEADERS) + 1)
+            )
+        )
+        expected_range = (
+            f"A{TRADE_LOG_DATA_START_ROW}:"
+            f"{get_column_letter(len(TRADE_LOG_HEADERS))}{last_populated_row}"
+        )
+        row_rules = [
+            detail for detail in _cf_rule_details(ws) if detail[0] == expected_range
+        ]
+        assert len(row_rules) == 2
+    finally:
+        wb.close()
 
 
 def test_data_only_update_preserves_manual_trade_log_borders(tmp_path: Path):

@@ -217,7 +217,7 @@ var line[] sessionMarkerLines = array.new_line()
 var label[] sessionLabels = array.new_label()
 sessionMaxMarkers = 96
 sessionMarkerWindowBars = 80
-sessionMarkerHalfLengthMultiplier = 0.60
+sessionMarkerHalfLengthMultiplier = 0.30
 sessionLabelOffsetRangeFraction = 0.015
 sessionMarkerRecentHigh = ta.highest(high, sessionMarkerWindowBars)
 sessionMarkerRecentLow = ta.lowest(low, sessionMarkerWindowBars)
@@ -311,7 +311,10 @@ historicalForexStartTimestampForPair(simple string pair) =>
 
 historicalForexPair = str.upper(syminfo.basecurrency) + str.upper(syminfo.currency)
 historicalForexStartTimestamp = syminfo.type == "forex" ? historicalForexStartTimestampForPair(historicalForexPair) : na
-historicalForexStartBar = not na(historicalForexStartTimestamp) and time <= historicalForexStartTimestamp and historicalForexStartTimestamp < time_close
+historicalForexStartBarSpansTimestamp = not na(historicalForexStartTimestamp) and time <= historicalForexStartTimestamp and historicalForexStartTimestamp < time_close
+historicalForexStartFallbackBar = not na(historicalForexStartTimestamp) and time >= historicalForexStartTimestamp
+historicalForexStartBar = historicalForexStartBarSpansTimestamp or historicalForexStartFallbackBar
+historicalForexStartMarkerTimestamp = historicalForexStartBarSpansTimestamp ? historicalForexStartTimestamp : time
 var bool historicalForexStartMarkerDrawn = false
 var line historicalForexStartLowerLine = na
 var line historicalForexStartUpperLine = na
@@ -325,11 +328,11 @@ if barstate.isnew and historicalForexStartBar and not historicalForexStartMarker
     historicalLowerStartY = historicalLowerEndY - historicalMarkerHalfLength
     historicalUpperStartY = high + historicalCandleGap
     historicalUpperEndY = historicalUpperStartY + historicalMarkerHalfLength
-    historicalForexStartLowerLine := line.new(x1=historicalForexStartTimestamp, y1=historicalLowerStartY, x2=historicalForexStartTimestamp, y2=historicalLowerEndY,
+    historicalForexStartLowerLine := line.new(x1=historicalForexStartMarkerTimestamp, y1=historicalLowerStartY, x2=historicalForexStartMarkerTimestamp, y2=historicalLowerEndY,
                                               xloc=xloc.bar_time, extend=extend.none,
                                               color=color.black, style=line.style_dotted, width=2,
                                               force_overlay=true)
-    historicalForexStartUpperLine := line.new(x1=historicalForexStartTimestamp, y1=historicalUpperStartY, x2=historicalForexStartTimestamp, y2=historicalUpperEndY,
+    historicalForexStartUpperLine := line.new(x1=historicalForexStartMarkerTimestamp, y1=historicalUpperStartY, x2=historicalForexStartMarkerTimestamp, y2=historicalUpperEndY,
                                               xloc=xloc.bar_time, extend=extend.none,
                                               color=color.black, style=line.style_dotted, width=2,
                                               force_overlay=true)

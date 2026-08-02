@@ -153,6 +153,37 @@ def test_set_trading_journal_rows_failed_write_preserves_cache_and_disk(
     assert master_service.TRADING_JOURNAL_PATH.read_bytes() == before_bytes
 
 
+def test_get_trading_journal_rows_reuses_cache_until_file_identity_changes(
+    temp_state_paths,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    first = {"id": "existing:1", "row_type": "trade", "source": "manual"}
+    second = {"id": "external:2", "row_type": "trade", "source": "manual"}
+    master_service._set_trading_journal_rows([first])
+    master_service._TRADING_JOURNAL_CACHE = None
+    master_service._TRADING_JOURNAL_CACHE_KEY = None
+    real_load = master_service._load_json_file
+    calls = {"loads": 0}
+
+    def counted_load(*args, **kwargs):
+        calls["loads"] += 1
+        return real_load(*args, **kwargs)
+
+    monkeypatch.setattr(master_service, "_load_json_file", counted_load)
+
+    assert master_service._get_trading_journal_rows() == [first]
+    assert master_service._get_trading_journal_rows() == [first]
+    assert calls["loads"] == 1
+
+    master_service._save_json_file(
+        master_service.TRADING_JOURNAL_PATH,
+        {"items": [first, second], "updated_at": master_service._utc_now_iso()},
+    )
+
+    assert master_service._get_trading_journal_rows() == [first, second]
+    assert calls["loads"] == 2
+
+
 def test_calendar_validation_accepts_one_line_pnl_cells():
     from openpyxl import Workbook
 
@@ -1508,6 +1539,62 @@ def test_oanda_rows_set_net_profit_from_realized_pnl(monkeypatch: pytest.MonkeyP
     assert rows[0]["net_profit"] == rows[0]["realized_pnl"]
 
 
+def test_oanda_order_fill_allocates_transaction_financing_across_multiple_close_legs(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(master_service, "_persist_oanda_fill_state", lambda: None)
+    monkeypatch.setattr(master_service, "_load_trade_contexts", lambda: [])
+    monkeypatch.setattr(
+        master_service,
+        "_lookup_trade_context_for_journal_row",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        master_service,
+        "_lookup_trade_context_by_market_window",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        master_service,
+        "_update_unresolved_registry",
+        lambda **_kwargs: (False, {}),
+    )
+
+    rows = master_service._journal_rows_from_oanda_order_fill(
+        {
+            "account": "live",
+            "id": "101",
+            "instrument": "EUR_USD",
+            "time": "2026-04-01T01:00:00Z",
+            "orderID": "201",
+            "units": "-3000",
+            "financing": "-3.00",
+            "tradesClosed": [
+                {
+                    "tradeID": "t1",
+                    "units": "-1000",
+                    "price": "1.2",
+                    "realizedPL": "6",
+                },
+                {
+                    "tradeID": "t2",
+                    "units": "-2000",
+                    "price": "1.2",
+                    "realizedPL": "12",
+                },
+            ],
+            "accountCurrency": "AUD",
+            "price": "1.2",
+        }
+    )
+
+    assert len(rows) == 2
+    assert [row["swap"] for row in rows] == pytest.approx([-1.0, -2.0])
+    assert [row["commission"] for row in rows] == pytest.approx([1.0, 2.0])
+    assert [row["net_profit"] for row in rows] == pytest.approx([5.0, 10.0])
+    assert sum(float(row["swap"]) for row in rows) == pytest.approx(-3.0)
+
+
 def test_manual_sync_calls_bybit_without_manual_cooldown(monkeypatch: pytest.MonkeyPatch):
     calls = []
 
@@ -2725,6 +2812,80 @@ def test_master_journal_authoritative_snapshot_preserves_monthly_aud_reval(monke
     assert "m1" in ids
 
 
+def test_master_journal_authoritative_snapshot_dedupes_only_canonical_monthly_ids(monkeypatch: pytest.MonkeyPatch):
+    monthly_id = "monthly_aud_reval:bybit_live:2026-04"
+    monkeypatch.setattr(master_service, "_load_trading_journal_view_snapshot", lambda: None)
+    monkeypatch.setattr(master_service, "_journal_source_fingerprint", lambda: {"source_mode": "master_journal", "files": []})
+    monkeypatch.setattr(master_service, "_persist_trading_journal_sqlite", lambda *_a, **_k: None)
+    monkeypatch.setattr(master_service, "_save_trading_journal_view_snapshot", lambda *_a, **_k: None)
+    monkeypatch.setattr(master_service, "_master_journal_single_file_mode", lambda: True)
+    monkeypatch.setattr(master_service, "_master_journal_path", lambda: Path("/tmp/Trading Journal.xlsx"))
+    monkeypatch.setattr(master_service, "_get_excel_account_balances", lambda: [])
+    monkeypatch.setattr(master_service, "_load_json_file", lambda *_a, **_k: {})
+    monkeypatch.setattr(master_service, "_monthly_aud_revaluation_rows_for_journal_view", lambda: [])
+    monkeypatch.setattr(
+        master_service,
+        "read_master_journal_source",
+        lambda _p: {
+            "items": [
+                {
+                    "id": "ordinary-shared-id",
+                    "row_type": "trade",
+                    "account": "OANDA DEMO",
+                    "symbol": "EURUSD",
+                    "side": "BUY",
+                    "open_time": "2026-04-01T00:00:00Z",
+                    "close_time": "2026-04-01T01:00:00Z",
+                    "net_profit": 1.0,
+                },
+                {
+                    "id": "ordinary-shared-id",
+                    "row_type": "trade",
+                    "account": "OANDA DEMO",
+                    "symbol": "GBPUSD",
+                    "side": "SELL",
+                    "open_time": "2026-04-02T00:00:00Z",
+                    "close_time": "2026-04-02T01:00:00Z",
+                    "net_profit": 2.0,
+                },
+                {
+                    "id": monthly_id,
+                    "row_type": "monthly_aud_reval",
+                    "account": "Bybit Live",
+                    "symbol": "MONTHLY AUD P/L",
+                    "open_time": "2026-04-01T00:00:00Z",
+                    "close_time": "2026-04-30T23:59:59Z",
+                    "result_cash": None,
+                    "result_currency": "",
+                },
+                {
+                    "id": monthly_id,
+                    "row_type": "monthly_aud_reval",
+                    "account": "Bybit Live",
+                    "account_label": "Bybit Live",
+                    "symbol": "MONTHLY AUD P/L",
+                    "open_time": "2026-04-01T00:00:00Z",
+                    "close_time": "2026-04-30T23:59:59Z",
+                    "result_cash": 55.0,
+                    "result_currency": "AUD",
+                    "notes": "complete canonical row",
+                    "raw_refs": {"period_month": "2026-04"},
+                },
+            ],
+            "cashflow_ledger": {},
+        },
+    )
+
+    snap = master_service._build_trading_journal_view_snapshot(force=True)
+    monthly_rows = [row for row in snap.get("items", []) if row.get("id") == monthly_id]
+    assert len(monthly_rows) == 1
+    assert monthly_rows[0]["result_cash"] == pytest.approx(55.0)
+    assert monthly_rows[0]["notes"] == "complete canonical row"
+    assert [row.get("id") for row in snap.get("items", [])].count("ordinary-shared-id") == 2
+    assert snap["diagnostics"]["duplicate_monthly_aud_reval_rows_removed"] == 1
+    assert snap["diagnostics"]["deduplicated_monthly_aud_reval_row_ids"] == [monthly_id]
+
+
 def test_master_journal_authoritative_snapshot_monthly_uses_json_fallback(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(master_service, "_load_trading_journal_view_snapshot", lambda: None)
     monkeypatch.setattr(master_service, "_journal_source_fingerprint", lambda: {"source_mode": "master_journal", "files": []})
@@ -3611,7 +3772,7 @@ def test_import_hydration_replaces_stale_same_id_rows_from_workbook(temp_state_p
     assert row["net_profit"] == 2.0
 
 
-def test_import_duplicate_rows_merged_recomputed_after_workbook_hydration(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
+def test_import_duplicate_rows_merged_uses_preflight_without_state_hydration(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(master_service, "_master_journal_path", lambda: temp_state_paths / "Trading Journal.xlsx")
     (temp_state_paths / "Trading Journal.xlsx").write_bytes(b"x")
     master_service._set_trading_journal_rows([])
@@ -3627,8 +3788,7 @@ def test_import_duplicate_rows_merged_recomputed_after_workbook_hydration(temp_s
     out = master_service._import_uploaded_trading_journal_file("oanda_demo.csv", b"x")
     assert out["ok"] is True
     assert out["duplicate_rows_merged"] == 1
-    rows = [r for r in master_service._get_trading_journal_rows() if str(r.get("id")) == "oanda_export:demo:626:630"]
-    assert len(rows) == 1
+    assert master_service._get_trading_journal_rows() == []
 
 
 def test_atomic_write_bytes_retries_replace_then_succeeds(tmp_path, monkeypatch: pytest.MonkeyPatch):
@@ -3662,29 +3822,158 @@ def test_atomic_write_bytes_fallback_after_retry_exhaustion(tmp_path, monkeypatc
 def test_import_duplicate_noop_fast_path_skips_workbook_sync(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(master_service, "_master_journal_path", lambda: temp_state_paths / "Trading Journal.xlsx")
     (temp_state_paths / "Trading Journal.xlsx").write_bytes(b"x")
-    parsed = {"id": "oanda_export:demo:626:630", "row_type": "trade", "source": "oanda", "symbol": "EURUSD"}
+    parsed = {
+        "id": "oanda_export:demo:626:630",
+        "row_type": "trade",
+        "source": "oanda",
+        "symbol": "EURUSD",
+        "net_profit": -17.302599999999998,
+        "balance_after_trade": 1479.3099999999997,
+    }
+    workbook_row = {
+        **parsed,
+        "net_profit": -17.3026,
+        "balance_after_trade": 1479.31,
+    }
     master_service._set_trading_journal_rows([])
     monkeypatch.setattr(master_service, "_parse_local_trading_journal_workbook", lambda *_a, **_k: ([dict(parsed)], None))
     monkeypatch.setattr(master_service, "_infer_realized_net_profit_from_balance_continuity", lambda rows, _existing: (rows, [], {"pnl_inferred_count": 0, "pnl_unresolved_count": 0, "pnl_unresolved_row_ids": []}))
-    monkeypatch.setattr(master_service, "read_master_journal_source", lambda _p: {"items": [dict(parsed)]})
-    called = {"sync": 0, "verify": 0, "upsert": 0, "stats_refresh": 0}
+    monkeypatch.setattr(master_service, "read_master_journal_source", lambda _p: {"items": [dict(workbook_row)]})
+    called = {"sync": 0, "verify": 0, "upsert": 0, "stats_refresh": 0, "persist": 0, "github": 0, "snapshot": 0}
     monkeypatch.setattr(master_service, "_sync_master_journal_workbook", lambda **_k: called.__setitem__("sync", called["sync"] + 1) or {"ok": True})
     monkeypatch.setattr(master_service, "_upsert_trading_journal_rows", lambda *_a, **_k: called.__setitem__("upsert", called["upsert"] + 1) or 1)
     monkeypatch.setattr(master_service, "_verify_trade_log_row_ids_in_workbook", lambda *_a, **_k: called.__setitem__("verify", called["verify"] + 1) or {"ok": True, "missing_row_ids": []})
     monkeypatch.setattr(master_service, "refresh_master_journal_derived_sheets", lambda *_a, **_k: called.__setitem__("stats_refresh", called["stats_refresh"] + 1) or {"ok": True})
-    monkeypatch.setattr(master_service, "_persist_trading_journal_sqlite", lambda *_a, **_k: None)
-    monkeypatch.setattr(master_service, "_sync_journal_excel_files_to_github", lambda *_a, **_k: {"github_sync_enabled": False, "github_sync_ok": True, "github_sync_error": "", "github_sync_commit": ""})
+    monkeypatch.setattr(master_service, "_persist_trading_journal_sqlite", lambda *_a, **_k: called.__setitem__("persist", called["persist"] + 1))
+    monkeypatch.setattr(master_service, "_sync_journal_excel_files_to_github", lambda *_a, **_k: called.__setitem__("github", called["github"] + 1) or {"github_sync_enabled": False, "github_sync_ok": True, "github_sync_error": "", "github_sync_commit": ""})
+    monkeypatch.setattr(master_service, "_build_manual_import_authoritative_snapshot", lambda **_k: called.__setitem__("snapshot", called["snapshot"] + 1) or {})
     out = master_service._import_uploaded_trading_journal_file("oanda_demo.csv", b"x")
     assert out["ok"] is True
     assert out["duplicate_rows_merged"] == 1
-    assert "stats refreshed" in str(out["message"]).lower()
+    assert "no workbook rebuild was required" in str(out["message"]).lower()
+    assert out["duplicate_noop_fast_path_used"] is True
+    assert out["github_sync_skipped"] is True
     assert called["sync"] == 0
     assert called["upsert"] == 0
-    assert called["verify"] == 1
-    assert called["stats_refresh"] == 1
+    assert called["verify"] == 0
+    assert called["stats_refresh"] == 0
+    assert called["persist"] == 0
+    assert called["github"] == 0
+    assert called["snapshot"] == 0
 
 
-def test_import_duplicate_noop_preserves_workbook_authored_fields(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
+def test_import_duplicate_does_not_use_noop_fast_path_when_legacy_oanda_row_needs_replacement(
+    temp_state_paths, monkeypatch: pytest.MonkeyPatch
+):
+    workbook = temp_state_paths / "Trading Journal.xlsx"
+    workbook.write_bytes(b"x")
+    monkeypatch.setattr(master_service, "_master_journal_path", lambda: workbook)
+    canonical = {
+        "id": "oanda_export:demo:652:664",
+        "row_type": "trade",
+        "source": "oanda_transaction_export",
+        "account": "demo",
+        "account_label": "OANDA DEMO",
+        "symbol": "EURUSD",
+        "side": "Buy",
+        "open_time": "2026-07-23T21:02:45+10:00",
+        "close_time": "2026-08-01T05:00:01+10:00",
+        "qty": 0.01029,
+        "qty_raw": 1029,
+        "qty_unit": "lots",
+        "entry_price": 1.14042,
+        "exit_price": 1.15312,
+        "commission": 0.9608,
+        "net_profit": 17.4233,
+        "balance_after_trade": 1517.94,
+        "metrics": {
+            "oanda_actual_commission_total": 0.0,
+            "oanda_export_financing_allocated": -0.9608,
+        },
+    }
+    legacy_id = "legacy:oanda:652:664"
+    legacy = {
+        **canonical,
+        "id": legacy_id,
+        "source": "master_journal",
+        "account": "OANDA DEMO",
+    }
+    master_service._set_trading_journal_rows([])
+    monkeypatch.setattr(
+        master_service,
+        "_parse_local_trading_journal_workbook",
+        lambda *_a, **_k: ([dict(canonical)], None),
+    )
+    monkeypatch.setattr(
+        master_service,
+        "_infer_realized_net_profit_from_balance_continuity",
+        lambda rows, _existing: (
+            rows,
+            [],
+            {
+                "pnl_inferred_count": 0,
+                "pnl_unresolved_count": 0,
+                "pnl_unresolved_row_ids": [],
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        master_service,
+        "read_master_journal_source",
+        lambda _p: {"items": [dict(canonical), dict(legacy)]},
+    )
+    calls = {"upsert": 0, "sync": 0}
+    monkeypatch.setattr(
+        master_service,
+        "_upsert_trading_journal_rows",
+        lambda *_a, **_k: calls.__setitem__("upsert", calls["upsert"] + 1) or 1,
+    )
+
+    def fake_sync(**kwargs):
+        calls["sync"] += 1
+        assert legacy_id not in set(kwargs.get("expected_survivor_row_ids") or [])
+        return {"ok": True}
+
+    monkeypatch.setattr(master_service, "_sync_master_journal_workbook", fake_sync)
+    monkeypatch.setattr(
+        master_service,
+        "_build_manual_import_authoritative_snapshot",
+        lambda **_k: {
+            "items": [dict(canonical)],
+            "balances": [],
+            "stats": {},
+            "diagnostics": {},
+        },
+    )
+    monkeypatch.setattr(
+        master_service,
+        "_verify_trade_log_row_ids_in_workbook",
+        lambda *_a, **_k: {"ok": True, "missing_row_ids": []},
+    )
+    monkeypatch.setattr(
+        master_service, "_persist_trading_journal_sqlite", lambda *_a, **_k: None
+    )
+    monkeypatch.setattr(
+        master_service,
+        "_sync_journal_excel_files_to_github",
+        lambda *_a, **_k: {
+            "github_sync_enabled": False,
+            "github_sync_ok": True,
+            "github_sync_error": "",
+            "github_sync_commit": "",
+        },
+    )
+
+    out = master_service._import_uploaded_trading_journal_file(
+        "oanda_demo.csv", b"x"
+    )
+
+    assert out["ok"] is True
+    assert calls == {"upsert": 1, "sync": 1}
+    assert out.get("duplicate_noop_fast_path_used") is not True
+
+
+def test_import_duplicate_noop_preserves_workbook_and_local_state_unchanged(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(master_service, "_master_journal_path", lambda: temp_state_paths / "Trading Journal.xlsx")
     (temp_state_paths / "Trading Journal.xlsx").write_bytes(b"x")
     workbook_row = {"id": "oanda_export:demo:626:630", "row_type": "trade", "source": "oanda", "symbol": "EURUSD", "notes": "from-workbook"}
@@ -3701,8 +3990,8 @@ def test_import_duplicate_noop_preserves_workbook_authored_fields(temp_state_pat
     monkeypatch.setattr(master_service, "_sync_journal_excel_files_to_github", lambda *_a, **_k: {"github_sync_enabled": False, "github_sync_ok": True, "github_sync_error": "", "github_sync_commit": ""})
     out = master_service._import_uploaded_trading_journal_file("oanda_demo.csv", b"x")
     assert out["ok"] is True
-    row = next(r for r in master_service._get_trading_journal_rows() if str(r.get("id")) == "oanda_export:demo:626:630")
-    assert row.get("notes") == "from-workbook"
+    assert master_service._get_trading_journal_rows() == []
+    assert workbook_row["notes"] == "from-workbook"
 
 
 def test_import_changed_row_does_not_use_fast_path(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
@@ -3729,7 +4018,7 @@ def test_import_changed_row_does_not_use_fast_path(temp_state_paths, monkeypatch
     assert "stats refreshed" not in out["message"].lower()
 
 
-def test_import_duplicate_noop_stats_refresh_failure_returns_error(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
+def test_import_duplicate_noop_never_refreshes_stats(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(master_service, "_master_journal_path", lambda: temp_state_paths / "Trading Journal.xlsx")
     (temp_state_paths / "Trading Journal.xlsx").write_bytes(b"x")
     parsed = {"id": "oanda_export:demo:626:630", "row_type": "trade", "source": "oanda", "symbol": "EURUSD"}
@@ -3737,12 +4026,250 @@ def test_import_duplicate_noop_stats_refresh_failure_returns_error(temp_state_pa
     monkeypatch.setattr(master_service, "_parse_local_trading_journal_workbook", lambda *_a, **_k: ([dict(parsed)], None))
     monkeypatch.setattr(master_service, "_infer_realized_net_profit_from_balance_continuity", lambda rows, _existing: (rows, [], {"pnl_inferred_count": 0, "pnl_unresolved_count": 0, "pnl_unresolved_row_ids": []}))
     monkeypatch.setattr(master_service, "read_master_journal_source", lambda _p: {"items": [dict(parsed)]})
-    monkeypatch.setattr(master_service, "refresh_master_journal_derived_sheets", lambda *_a, **_k: {"ok": False, "error": "refresh failed"})
-    monkeypatch.setattr(master_service, "_verify_trade_log_row_ids_in_workbook", lambda *_a, **_k: {"ok": True, "missing_row_ids": []})
-    monkeypatch.setattr(master_service, "_persist_trading_journal_sqlite", lambda *_a, **_k: None)
+    monkeypatch.setattr(master_service, "refresh_master_journal_derived_sheets", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("stats refresh should be skipped")))
+    monkeypatch.setattr(master_service, "_verify_trade_log_row_ids_in_workbook", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("workbook reread should be skipped")))
+    monkeypatch.setattr(master_service, "_persist_trading_journal_sqlite", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("snapshot persistence should be skipped")))
     out = master_service._import_uploaded_trading_journal_file("oanda_demo.csv", b"x")
-    assert out["ok"] is False
-    assert "stats refresh failed" in str(out["message"]).lower()
+    assert out["ok"] is True
+    assert "no workbook rebuild was required" in str(out["message"]).lower()
+
+
+def test_import_duplicate_oanda_balance_is_verified_from_preflight_source(
+    temp_state_paths, monkeypatch: pytest.MonkeyPatch
+):
+    workbook = temp_state_paths / "Trading Journal.xlsx"
+    workbook.write_bytes(b"x")
+    monkeypatch.setattr(master_service, "_master_journal_path", lambda: workbook)
+    parsed = {
+        "id": "oanda_export:demo:652:664",
+        "row_type": "trade",
+        "source": "oanda_transaction_export",
+        "account": "demo",
+        "account_label": "OANDA DEMO",
+        "symbol": "EURUSD",
+        "side": "Buy",
+        "open_time": "2026-07-29T08:00:00+10:00",
+        "close_time": "2026-07-30T08:00:00+10:00",
+        "qty": 0.1,
+        "entry_price": 1.15,
+        "exit_price": 1.16,
+        "commission": 0.9608,
+        "net_profit": 17.4233,
+        "realized_pnl": 17.4233,
+        "balance_after_trade": 1517.42,
+        "balance_after_trade_currency": "AUD",
+        "swap": -0.9608,
+        "metrics": {
+            "oanda_actual_commission_total": 0.0,
+            "oanda_export_financing_allocated": -0.9608,
+        },
+    }
+    workbook_row = {
+        **parsed,
+        "source": "master_journal",
+        "account": "OANDA DEMO",
+        "side": "BUY",
+        "open_time": "2026-07-29T08:00:00",
+        "close_time": "2026-07-30T08:00:00",
+    }
+    workbook_row.pop("metrics")
+    workbook_row.pop("swap")
+    workbook_row.pop("balance_after_trade_currency")
+    balance = {
+        "source": "oanda_transaction_export_balance",
+        "balance_source": "oanda_transaction_export_balance",
+        "account": "OANDA DEMO",
+        "label": "OANDA DEMO",
+        "balance": 1517.42,
+        "currency": "AUD",
+        "as_of": "2026-07-30T08:00:00+10:00",
+    }
+    workbook_balance = {
+        **balance,
+        "source": "account-summary",
+        "balance_source": "account-summary",
+        "balance": 1517.4198,
+        "as_of": "2026-07-31T08:00:00+10:00",
+    }
+    monkeypatch.setattr(
+        master_service,
+        "_parse_local_trading_journal_workbook",
+        lambda *_a, **_k: ([dict(parsed)], dict(balance)),
+    )
+    monkeypatch.setattr(
+        master_service,
+        "_infer_realized_net_profit_from_balance_continuity",
+        lambda rows, _existing: (
+            rows,
+            [],
+            {"pnl_inferred_count": 0, "pnl_unresolved_count": 0, "pnl_unresolved_row_ids": []},
+        ),
+    )
+    monkeypatch.setattr(
+        master_service,
+        "read_master_journal_source",
+        lambda _p: {
+            "items": [dict(workbook_row)],
+            "balances": [dict(workbook_balance)],
+        },
+    )
+    for name in (
+        "_upsert_trading_journal_rows",
+        "_sync_master_journal_workbook",
+        "_verify_trade_log_row_ids_in_workbook",
+        "_build_manual_import_authoritative_snapshot",
+        "_persist_trading_journal_sqlite",
+        "_sync_journal_excel_files_to_github",
+    ):
+        monkeypatch.setattr(
+            master_service,
+            name,
+            lambda *_a, _name=name, **_k: (_ for _ in ()).throw(
+                AssertionError(f"{_name} should be skipped")
+            ),
+        )
+
+    out = master_service._import_uploaded_trading_journal_file(
+        "oanda_demo.csv", b"x"
+    )
+
+    assert out["ok"] is True
+    assert out["balance_applied"] is True
+    assert out["snapshot_visible"] is True
+    assert out["balance_verification"]["actual_balance"] == pytest.approx(1517.4198)
+    assert out["balance_verification"]["balance_tolerance"] == pytest.approx(0.005)
+    assert out["balance_verification"]["source_matches"] is True
+    assert out["balance_verification"]["currency_matches"] is True
+    assert out["balance_verification"]["as_of_not_older"] is True
+    assert out["balance_verification"]["actual_source"] == "account-summary"
+    assert out["balance_verification"]["actual_as_of"] == "2026-07-31T08:00:00+10:00"
+    assert "account balance already existed" in out["message"].lower()
+
+
+def test_oanda_balance_preflight_rejects_stale_or_wrong_currency_summary():
+    expected = {
+        "source": "oanda_transaction_export_balance",
+        "balance_source": "oanda_transaction_export_balance",
+        "account": "OANDA DEMO",
+        "label": "OANDA DEMO",
+        "balance": 1479.31,
+        "currency": "AUD",
+        "as_of": "2026-07-30T08:00:00+10:00",
+    }
+    stale = master_service._verify_imported_account_balance_snapshot(
+        {
+            "balances": [
+                {
+                    "account": "OANDA DEMO",
+                    "label": "OANDA DEMO",
+                    "balance": 1479.3098,
+                    "currency": "AUD",
+                    "source": "account-summary",
+                    "balance_source": "account-summary",
+                    "as_of": "2026-07-29T08:00:00+10:00",
+                }
+            ]
+        },
+        expected,
+        allow_equivalent_authoritative_balance=True,
+    )
+    wrong_currency = master_service._verify_imported_account_balance_snapshot(
+        {
+            "balances": [
+                {
+                    "account": "OANDA DEMO",
+                    "label": "OANDA DEMO",
+                    "balance": 1479.3098,
+                    "currency": "USD",
+                    "source": "account-summary",
+                    "balance_source": "account-summary",
+                    "as_of": "2026-07-31T08:00:00+10:00",
+                }
+            ]
+        },
+        expected,
+        allow_equivalent_authoritative_balance=True,
+    )
+    stale_same_source = master_service._verify_imported_account_balance_snapshot(
+        {
+            "balances": [
+                {
+                    "account": "OANDA DEMO",
+                    "label": "OANDA DEMO",
+                    "balance": 1479.31,
+                    "currency": "AUD",
+                    "source": "oanda_transaction_export_balance",
+                    "balance_source": "oanda_transaction_export_balance",
+                    "as_of": "2026-07-29T08:00:00+10:00",
+                }
+            ]
+        },
+        expected,
+        allow_equivalent_authoritative_balance=True,
+    )
+
+    assert stale["ok"] is False
+    assert stale["as_of_not_older"] is False
+    assert stale["source_matches"] is False
+    assert wrong_currency["ok"] is False
+    assert wrong_currency["currency_matches"] is False
+    assert stale_same_source["source_matches"] is True
+    assert stale_same_source["as_of_not_older"] is False
+    assert stale_same_source["freshness_matches"] is False
+    assert stale_same_source["ok"] is False
+
+
+def test_oanda_balance_changed_path_requires_exact_export_provenance():
+    expected = {
+        "source": "oanda_transaction_export_balance",
+        "balance_source": "oanda_transaction_export_balance",
+        "account": "OANDA DEMO",
+        "label": "OANDA DEMO",
+        "balance": 1479.31,
+        "currency": "AUD",
+        "as_of": "2026-07-30T08:00:00+10:00",
+    }
+    result = master_service._verify_imported_account_balance_snapshot(
+        {
+            "balances": [
+                {
+                    "account": "OANDA DEMO",
+                    "label": "OANDA DEMO",
+                    "balance": 1479.3098,
+                    "currency": "AUD",
+                    "source": "account-summary",
+                    "balance_source": "account-summary",
+                    "as_of": "2026-07-31T08:00:00+10:00",
+                }
+            ]
+        },
+        expected,
+    )
+    stale_same_source = master_service._verify_imported_account_balance_snapshot(
+        {
+            "balances": [
+                {
+                    "account": "OANDA DEMO",
+                    "label": "OANDA DEMO",
+                    "balance": 1479.31,
+                    "currency": "AUD",
+                    "source": "oanda_transaction_export_balance",
+                    "balance_source": "oanda_transaction_export_balance",
+                    "as_of": "2026-07-29T08:00:00+10:00",
+                }
+            ]
+        },
+        expected,
+    )
+
+    assert result["ok"] is False
+    assert result["allow_equivalent_authoritative_balance"] is False
+    assert result["balance_tolerance"] == pytest.approx(1e-6)
+    assert result["source_matches"] is False
+    assert stale_same_source["source_matches"] is True
+    assert stale_same_source["as_of_not_older"] is False
+    assert stale_same_source["freshness_matches"] is False
+    assert stale_same_source["ok"] is False
 
 
 def test_oanda_transaction_export_balance_after_trade_is_authoritative_over_stale_cashflow():
@@ -3802,6 +4329,179 @@ def test_import_changed_oanda_financial_fields_do_not_use_duplicate_fast_path(te
     assert called["sync"] == 1
     assert called["stats_refresh"] == 0
     assert "stats refreshed" not in str(out["message"]).lower()
+
+
+def test_import_changed_same_id_oanda_snapshot_preserves_workbook_manual_fields(
+    temp_state_paths, monkeypatch: pytest.MonkeyPatch
+):
+    workbook = temp_state_paths / "Trading Journal.xlsx"
+    workbook.write_bytes(b"x")
+    monkeypatch.setattr(master_service, "_master_journal_path", lambda: workbook)
+    row_id = "oanda_export:demo:652:664"
+    state_row = {
+        "id": row_id,
+        "row_type": "trade",
+        "source": "oanda_transaction_export",
+        "account": "OANDA DEMO",
+        "account_label": "OANDA DEMO",
+        "symbol": "EURUSD",
+        "side": "BUY",
+        "open_time": "2026-07-29T08:00:00",
+        "close_time": "2026-07-30T08:00:00",
+        "entry_price": 1.15,
+        "exit_price": 1.16,
+        "net_profit": 10.0,
+    }
+    workbook_row = {
+        **state_row,
+        "source": "master_journal",
+        "notes": "keep me",
+        "setup": "Pullback",
+        "timeframe": "5MIN",
+        "pattern": "Channel",
+        "ema": "20/50",
+        "vwap": "Above",
+        "early_close": "No",
+        "is_test_trade": True,
+    }
+    parsed = {
+        **state_row,
+        "source": "oanda_transaction_export",
+        "net_profit": 11.0,
+        "notes": "",
+        "setup": "",
+        "timeframe": "",
+        "pattern": "",
+        "ema": "",
+        "vwap": "",
+        "early_close": "",
+        "is_test_trade": None,
+    }
+    untouched_state_row = {
+        "id": "manual:untouched:1",
+        "row_type": "trade",
+        "source": "master_journal",
+        "account": "BINANCE",
+        "symbol": "BTCUSDT",
+        "side": "SELL",
+        "open_time": "2026-06-01T00:00:00Z",
+        "close_time": "2026-06-01T00:05:00Z",
+        "entry_price": 70000.0,
+        "exit_price": 69900.0,
+        "net_profit": 5.0,
+        "ema": "stale-ema",
+        "vwap": "stale-vwap",
+        "early_close": True,
+        "is_test_trade": True,
+    }
+    untouched_workbook_row = {
+        **untouched_state_row,
+        "notes": "untouched workbook note",
+        "setup": "Breakout",
+        "timeframe": "15MIN",
+        "pattern": "Range",
+        "trade_number": "T-204",
+        "ema": "",
+        "vwap": None,
+        "early_close": False,
+        "is_test_trade": False,
+    }
+    master_service._set_trading_journal_rows(
+        [dict(state_row), dict(untouched_state_row)]
+    )
+    monkeypatch.setattr(
+        master_service,
+        "_parse_local_trading_journal_workbook",
+        lambda *_a, **_k: ([dict(parsed)], None),
+    )
+    monkeypatch.setattr(
+        master_service,
+        "_infer_realized_net_profit_from_balance_continuity",
+        lambda rows, _existing: (
+            rows,
+            [],
+            {
+                "pnl_inferred_count": 0,
+                "pnl_unresolved_count": 0,
+                "pnl_unresolved_row_ids": [],
+            },
+        ),
+    )
+    captured = {"workbook_reads": 0}
+
+    def fake_read_master_source(_path):
+        captured["workbook_reads"] += 1
+        return {"items": [dict(workbook_row), dict(untouched_workbook_row)]}
+
+    monkeypatch.setattr(
+        master_service, "read_master_journal_source", fake_read_master_source
+    )
+
+    def fake_sync(**kwargs):
+        captured["snapshot"] = kwargs.get("prebuilt_snapshot")
+        return {"ok": True, "master_journal_ok": True}
+
+    monkeypatch.setattr(master_service, "_sync_master_journal_workbook", fake_sync)
+    monkeypatch.setattr(
+        master_service,
+        "_verify_trade_log_row_ids_in_workbook",
+        lambda *_a, **_k: {"ok": True, "missing_row_ids": []},
+    )
+    monkeypatch.setattr(
+        master_service, "_persist_trading_journal_sqlite", lambda *_a, **_k: None
+    )
+    monkeypatch.setattr(
+        master_service,
+        "_sync_journal_excel_files_to_github",
+        lambda *_a, **_k: {
+            "github_sync_enabled": False,
+            "github_sync_ok": True,
+            "github_sync_error": "",
+            "github_sync_commit": "",
+        },
+    )
+
+    out = master_service._import_uploaded_trading_journal_file(
+        "oanda_demo.csv", b"x"
+    )
+
+    assert out["ok"] is True
+    snapshot_row = next(
+        row
+        for row in captured["snapshot"]["items"]
+        if str(row.get("id") or "") == row_id
+    )
+    assert snapshot_row["net_profit"] == pytest.approx(11.0)
+    assert snapshot_row["notes"] == "keep me"
+    assert snapshot_row["setup"] == "Pullback"
+    assert snapshot_row["timeframe"] == "5MIN"
+    assert snapshot_row["pattern"] == "Channel"
+    assert snapshot_row["ema"] == "20/50"
+    assert snapshot_row["vwap"] == "Above"
+    assert snapshot_row["early_close"] == "No"
+    assert snapshot_row["is_test_trade"] is True
+    untouched_snapshot_row = next(
+        row
+        for row in captured["snapshot"]["items"]
+        if str(row.get("id") or "") == "manual:untouched:1"
+    )
+    assert untouched_snapshot_row["notes"] == "untouched workbook note"
+    assert untouched_snapshot_row["setup"] == "Breakout"
+    assert untouched_snapshot_row["timeframe"] == "15MIN"
+    assert untouched_snapshot_row["pattern"] == "Range"
+    assert untouched_snapshot_row["trade_number"] == "T-204"
+    assert untouched_snapshot_row["ema"] == ""
+    assert untouched_snapshot_row["vwap"] is None
+    assert untouched_snapshot_row["early_close"] is False
+    assert untouched_snapshot_row["is_test_trade"] is False
+    assert untouched_snapshot_row["net_profit"] == pytest.approx(5.0)
+    assert untouched_snapshot_row["id"] == "manual:untouched:1"
+    assert sum(
+        1
+        for row in captured["snapshot"]["items"]
+        if str(row.get("id") or "") == "manual:untouched:1"
+    ) == 1
+    assert captured["workbook_reads"] == 1
 
 
 def test_oanda_canonical_upsert_replaces_legacy_id_and_preserves_manual_fields(
@@ -3944,8 +4644,8 @@ def test_oanda_live_canonical_upsert_replaces_legacy_id_and_preserves_manual_fie
     assert len(rows) == 1
     repaired = rows[0]
     assert repaired["id"] == "oanda_export:live:460:464"
-    assert repaired["commission"] is None
-    assert repaired["fees"] is None
+    assert repaired["commission"] == pytest.approx(0.9922)
+    assert repaired["fees"] == pytest.approx(0.9922)
     assert repaired["swap"] == pytest.approx(0.9922)
     assert repaired["setup"] == "Pullback"
     assert repaired["timeframe"] == "15MIN"
@@ -3954,6 +4654,7 @@ def test_oanda_live_canonical_upsert_replaces_legacy_id_and_preserves_manual_fie
     assert repaired["notes"] == "keep live note"
     assert repaired["is_test_trade"] is True
     assert repaired["metrics"]["oanda_total_spread_cost"] == pytest.approx(1.0981)
+    assert repaired["metrics"]["oanda_commission_includes_financing"] is True
     assert all(row["id"] != stale_id for row in rows)
 
 
@@ -3990,6 +4691,106 @@ def test_oanda_commission_sanitizer_clears_unsupported_legacy_commission_only():
     assert sanitized[1]["fees"] == pytest.approx(2.5)
     assert sanitized[2]["commission"] is None
     assert sanitized[2]["fees"] is None
+
+
+def test_oanda_commission_sanitizer_repairs_financing_only_without_changing_net_profit():
+    row = {
+        "id": "oanda_export:demo:652:664",
+        "row_type": "trade",
+        "source": "oanda_transaction_export",
+        "account": "demo",
+        "account_label": "OANDA DEMO",
+        "symbol": "EURUSD",
+        "swap": -0.9608,
+        "commission": None,
+        "fees": None,
+        "net_profit": 17.4233,
+        "realized_pnl": 17.4233,
+        "metrics": {
+            "oanda_actual_commission_total": 0.0,
+            "oanda_export_financing_allocated": -0.9608,
+        },
+    }
+
+    repaired = master_service._sanitize_oanda_commission_fields([row])[0]
+    repaired_again = master_service._sanitize_oanda_commission_fields([repaired])[0]
+
+    assert repaired["commission"] == pytest.approx(0.9608)
+    assert repaired["fees"] == pytest.approx(0.9608)
+    assert repaired["net_profit"] == pytest.approx(17.4233)
+    assert repaired["realized_pnl"] == pytest.approx(17.4233)
+    assert repaired["metrics"]["oanda_commission_includes_financing"] is True
+    assert repaired["metrics"]["oanda_displayed_commission_total"] == pytest.approx(0.9608)
+    assert repaired_again == repaired
+
+
+def test_oanda_commission_sanitizer_counts_top_level_funding_without_changing_net_profit():
+    row = {
+        "id": "oanda_export:demo:funding-only",
+        "row_type": "trade",
+        "source": "oanda_transaction_export",
+        "account": "demo",
+        "account_label": "OANDA DEMO",
+        "symbol": "EURUSD",
+        "funding": -1.25,
+        "commission": None,
+        "fees": None,
+        "net_profit": 8.75,
+        "realized_pnl": 8.75,
+        "metrics": {"oanda_actual_commission_total": 0.0},
+    }
+
+    repaired = master_service._sanitize_oanda_commission_fields([row])[0]
+
+    assert repaired["commission"] == pytest.approx(1.25)
+    assert repaired["fees"] == pytest.approx(1.25)
+    assert repaired["net_profit"] == pytest.approx(8.75)
+    assert repaired["realized_pnl"] == pytest.approx(8.75)
+    assert repaired["metrics"]["oanda_financing_commission_total"] == pytest.approx(1.25)
+    assert repaired["metrics"]["oanda_commission_includes_financing"] is True
+
+
+def test_oanda_commission_sanitizer_preserves_canonical_workbook_total():
+    workbook_row = {
+        "id": "oanda_export:demo:652:664",
+        "row_type": "trade",
+        "source": "master_journal",
+        "account": "OANDA DEMO",
+        "symbol": "EURUSD",
+        "commission": 0.9608,
+        "net_profit": 17.4233,
+    }
+
+    repaired = master_service._sanitize_oanda_commission_fields([workbook_row])[0]
+
+    assert repaired["commission"] == pytest.approx(0.9608)
+    assert repaired["fees"] == pytest.approx(0.9608)
+    assert repaired["net_profit"] == pytest.approx(17.4233)
+
+
+def test_repair_persisted_oanda_rows_writes_financing_commission(temp_state_paths):
+    master_service._set_trading_journal_rows([
+        {
+            "id": "oanda_export:demo:652:664",
+            "row_type": "trade",
+            "source": "oanda_transaction_export",
+            "account": "demo",
+            "account_label": "OANDA DEMO",
+            "symbol": "EURUSD",
+            "swap": -0.9608,
+            "commission": None,
+            "net_profit": 17.4233,
+            "metrics": {
+                "oanda_actual_commission_total": 0.0,
+                "oanda_export_financing_allocated": -0.9608,
+            },
+        }
+    ])
+
+    assert master_service._repair_persisted_oanda_trade_rows() == 1
+    repaired = master_service._get_trading_journal_rows()[0]
+    assert repaired["commission"] == pytest.approx(0.9608)
+    assert repaired["net_profit"] == pytest.approx(17.4233)
 
 
 def test_import_preflight_rejects_when_trading_journal_xlsx_locked(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
@@ -4065,14 +4866,22 @@ def test_manual_import_uses_single_local_only_prebuilt_snapshot(temp_state_paths
         "balance_after_trade_currency": "AUD",
     }
     snapshot = {"items": [dict(parsed)], "balances": [{"account": "OANDA DEMO", "label": "OANDA DEMO", "balance": 1500.20, "currency": "AUD"}], "stats": {}, "diagnostics": {}}
-    calls = {"snapshot": 0, "sync": 0}
+    calls = {"snapshot": 0, "sync": 0, "persist": 0}
 
-    def fake_snapshot(*, force=False, local_only=False, skip_external_balances=False, skip_live_account_refresh=False):
+    def fake_snapshot(
+        *,
+        force=False,
+        local_only=False,
+        skip_external_balances=False,
+        skip_live_account_refresh=False,
+        persist_sqlite=True,
+    ):
         calls["snapshot"] += 1
         assert force is True
         assert local_only is True
         assert skip_external_balances is True
         assert skip_live_account_refresh is True
+        assert persist_sqlite is False
         return dict(snapshot)
 
     def fake_sync(**kwargs):
@@ -4087,15 +4896,20 @@ def test_manual_import_uses_single_local_only_prebuilt_snapshot(temp_state_paths
     monkeypatch.setattr(master_service, "read_master_journal_source", lambda _p: {"items": []})
     monkeypatch.setattr(master_service, "_upsert_trading_journal_rows", lambda *_a, **_k: 1)
     monkeypatch.setattr(master_service, "_build_trading_journal_view_snapshot", fake_snapshot)
+    monkeypatch.setattr(master_service, "_build_master_journal_verification_snapshot", lambda: (_ for _ in ()).throw(AssertionError("verification must reuse the prebuilt snapshot")))
     monkeypatch.setattr(master_service, "_sync_master_journal_workbook", fake_sync)
     monkeypatch.setattr(master_service, "_verify_trade_log_row_ids_in_workbook", lambda *_a, **_k: {"ok": True, "missing_row_ids": []})
-    monkeypatch.setattr(master_service, "_persist_trading_journal_sqlite", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        master_service,
+        "_persist_trading_journal_sqlite",
+        lambda *_a, **_k: calls.__setitem__("persist", calls["persist"] + 1),
+    )
     monkeypatch.setattr(master_service, "_sync_journal_excel_files_to_github", lambda *_a, **_k: {"github_sync_enabled": False, "github_sync_ok": True, "github_sync_error": "", "github_sync_commit": ""})
 
     out = master_service._import_uploaded_trading_journal_file("oanda_demo.csv", b"x")
 
     assert out["ok"] is True
-    assert calls == {"snapshot": 1, "sync": 1}
+    assert calls == {"snapshot": 1, "sync": 1, "persist": 1}
     assert out["import_timings"]["snapshot_build"] >= 0
 
 

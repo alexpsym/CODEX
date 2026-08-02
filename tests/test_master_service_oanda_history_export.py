@@ -962,7 +962,10 @@ def test_oanda_transaction_history_allocates_daily_financing_to_single_open_trad
     assert len(parsed['rows']) == 1
     row = parsed['rows'][0]
     assert row['swap'] == pytest.approx(-0.1329)
+    assert row['commission'] == pytest.approx(0.1329)
     assert row['metrics']['oanda_export_pl'] == pytest.approx(3.2847)
+    assert row['metrics']['oanda_commission_includes_financing'] is True
+    assert row['metrics']['oanda_financing_commission_total'] == pytest.approx(0.1329)
     assert row['net_profit'] == pytest.approx(3.1518)
     assert row['balance_after_trade'] == pytest.approx(1496.92)
 
@@ -1208,8 +1211,8 @@ def test_oanda_live_market_if_touched_open_and_order_closes_parse_canonical_rows
     by_id = {row["id"]: row for row in parsed["rows"]}
 
     take_profit = by_id["oanda_export:live:101:103"]
-    assert take_profit["commission"] in (None, 0, 0.0)
-    assert take_profit["fees"] in (None, 0, 0.0)
+    assert take_profit["commission"] == pytest.approx(0.12)
+    assert take_profit["fees"] == pytest.approx(0.12)
     assert take_profit["swap"] == pytest.approx(-0.12)
     assert take_profit["net_profit"] == pytest.approx(7.13)
     assert take_profit["metrics"]["oanda_total_spread_cost"] == pytest.approx(0.59)
@@ -1239,7 +1242,7 @@ def test_oanda_live_market_order_position_closeout_parses_as_close():
     row = parsed["rows"][0]
     assert row["id"] == "oanda_export:live:420:425"
     assert row["raw_refs"]["close_details"] == "MARKET_ORDER_POSITION_CLOSEOUT"
-    assert row["commission"] in (None, 0, 0.0)
+    assert row["commission"] == pytest.approx(0.9771)
     assert row["swap"] == pytest.approx(-0.9771)
     assert row["net_profit"] == pytest.approx(24.5718)
     assert row["metrics"]["oanda_total_spread_cost"] == pytest.approx(1.0213)
@@ -1261,6 +1264,125 @@ def test_oanda_transaction_history_positive_commission_reduces_net_profit_once()
     row = parsed["rows"][0]
     assert row["commission"] == pytest.approx(0.5)
     assert row["net_profit"] == pytest.approx(9.5)
+
+
+def test_oanda_transaction_history_combines_broker_commission_and_financing_for_display_only():
+    frame = pd.DataFrame([
+        {
+            "TICKET": 1,
+            "TRANSACTION DATE": "2026-01-01 10:00:00 AEST",
+            "TRANSACTION TYPE": "ORDER_FILL",
+            "DETAILS": "MARKET_ORDER",
+            "INSTRUMENT": "EUR_USD",
+            "PRICE": 1.1000,
+            "UNITS": 1000,
+            "DIRECTION": "Buy",
+            "STOP LOSS": 1.0990,
+            "TAKE PROFIT": 1.1020,
+            "BALANCE": 1000,
+        },
+        {
+            "TICKET": 2,
+            "TRANSACTION DATE": "2026-01-01 10:30:00 AEST",
+            "TRANSACTION TYPE": "DAILY_FINANCING",
+            "DETAILS": "DAILY_FINANCING",
+            "FINANCING": -0.2,
+            "BALANCE": 999.8,
+        },
+        {
+            "TICKET": 3,
+            "TRANSACTION DATE": "2026-01-01 11:00:00 AEST",
+            "TRANSACTION TYPE": "ORDER_FILL",
+            "DETAILS": "TAKE_PROFIT_ORDER",
+            "INSTRUMENT": "EUR_USD",
+            "PRICE": 1.1020,
+            "UNITS": 1000,
+            "DIRECTION": "Sell",
+            "COMMISSION": 0.5,
+            "PL": 10,
+            "BALANCE": 1009.3,
+        },
+    ])
+    parsed = master_service._journal_rows_from_oanda_transaction_history_frame(
+        frame,
+        account_mode="demo",
+        account_label="OANDA DEMO",
+        source_path="oanda_history_demo.csv",
+    )
+
+    row = parsed["rows"][0]
+    assert row["commission"] == pytest.approx(0.7)
+    assert row["fees"] == pytest.approx(0.7)
+    assert row["swap"] == pytest.approx(-0.2)
+    assert row["net_profit"] == pytest.approx(9.3)
+    assert row["metrics"]["oanda_broker_commission_total"] == pytest.approx(0.5)
+    assert row["metrics"]["oanda_displayed_commission_total"] == pytest.approx(0.7)
+    assert row["metrics"]["oanda_commission_includes_financing"] is True
+
+
+def test_oanda_transaction_history_sums_open_and_close_broker_charges_once():
+    frame = pd.DataFrame([
+        {
+            "TICKET": 1,
+            "TRANSACTION DATE": "2026-01-01 10:00:00 AEST",
+            "TRANSACTION TYPE": "ORDER_FILL",
+            "DETAILS": "MARKET_ORDER",
+            "INSTRUMENT": "EUR_USD",
+            "PRICE": 1.1000,
+            "UNITS": 1000,
+            "DIRECTION": "Buy",
+            "STOP LOSS": 1.0990,
+            "TAKE PROFIT": 1.1020,
+            "COMMISSION": -0.20,
+            "GSL FEE": 0.10,
+            "GSL PREMIUM": -0.05,
+            "BALANCE": 999.65,
+        },
+        {
+            "TICKET": 2,
+            "TRANSACTION DATE": "2026-01-01 10:30:00 AEST",
+            "TRANSACTION TYPE": "DAILY_FINANCING",
+            "DETAILS": "DAILY_FINANCING",
+            "FINANCING": -0.20,
+            "BALANCE": 999.45,
+        },
+        {
+            "TICKET": 3,
+            "TRANSACTION DATE": "2026-01-01 11:00:00 AEST",
+            "TRANSACTION TYPE": "ORDER_FILL",
+            "DETAILS": "TAKE_PROFIT_ORDER",
+            "INSTRUMENT": "EUR_USD",
+            "PRICE": 1.1020,
+            "UNITS": 1000,
+            "DIRECTION": "Sell",
+            "COMMISSION": 0.30,
+            "GSL FEE": -0.15,
+            "GSL PREMIUM": 0.10,
+            "PL": 10.0,
+            "BALANCE": 1008.55,
+        },
+    ])
+
+    parsed = master_service._journal_rows_from_oanda_transaction_history_frame(
+        frame,
+        account_mode="demo",
+        account_label="OANDA DEMO",
+        source_path="oanda_history_demo.csv",
+    )
+
+    row = parsed["rows"][0]
+    assert row["commission"] == pytest.approx(1.10)
+    assert row["fees"] == pytest.approx(1.10)
+    assert row["swap"] == pytest.approx(-0.20)
+    assert row["net_profit"] == pytest.approx(8.90)
+    assert row["metrics"]["oanda_broker_commission_total"] == pytest.approx(0.90)
+    assert row["metrics"]["oanda_financing_commission_total"] == pytest.approx(0.20)
+    assert row["metrics"]["oanda_open_raw_commission"] == pytest.approx(-0.20)
+    assert row["metrics"]["oanda_close_raw_commission"] == pytest.approx(0.30)
+    assert row["metrics"]["oanda_open_raw_gsl_fee"] == pytest.approx(0.10)
+    assert row["metrics"]["oanda_close_raw_gsl_fee"] == pytest.approx(-0.15)
+    assert row["metrics"]["oanda_open_raw_gsl_premium"] == pytest.approx(-0.05)
+    assert row["metrics"]["oanda_close_raw_gsl_premium"] == pytest.approx(0.10)
 
 
 def test_oanda_transaction_history_negative_export_commission_is_not_double_deducted():

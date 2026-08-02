@@ -1489,6 +1489,184 @@ def test_compute_journal_period_stats_year_month_buckets_and_test_counts() -> No
     assert reports["years"][2026]["totals"]["trades"] == 2
 
 
+def test_period_stats_reuses_recommendations_across_year_month_and_market_scopes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = []
+
+    def fake_recommendations(rows, *, scope="standard"):
+        calls.append((scope, tuple(sorted(str(row.get("id") or "") for row in rows))))
+        return {}
+
+    monkeypatch.setattr(
+        master_service,
+        "_distance_recommendation_summary",
+        fake_recommendations,
+    )
+    rows = [
+        {
+            "id": "trade:one",
+            "row_type": "trade",
+            "asset_class": "fx",
+            "account": "OANDA DEMO",
+            "symbol": "EURUSD",
+            "side": "BUY",
+            "open_time": "2026-01-01T00:00:00Z",
+            "close_time": "2026-01-01T00:05:00Z",
+            "entry_price": 1.10,
+            "stop_loss": 1.09,
+            "take_profit": 1.12,
+            "net_profit": 10.0,
+            "result_pct": 1.0,
+            "r_multiple": 1.0,
+        }
+    ]
+
+    reports = _compute_journal_period_stats(rows, balances=[])
+
+    assert reports["years"][2026]["totals"]["trades"] == 1
+    assert reports["months"][2026][1]["totals"]["trades"] == 1
+    assert len(calls) == 3
+    assert set(calls) == {
+        ("overall", ("trade:one",)),
+        ("standard", ("trade:one",)),
+        ("standard", ()),
+    }
+
+
+def test_recommendation_cache_key_includes_inputs_when_row_ids_collide(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = []
+
+    def fake_recommendations(rows, *, scope="standard"):
+        marker = ",".join(sorted(str(row.get("symbol") or "") for row in rows))
+        calls.append((scope, marker))
+        return {"cache_marker": marker}
+
+    monkeypatch.setattr(
+        master_service,
+        "_distance_recommendation_summary",
+        fake_recommendations,
+    )
+    shared_cache = {}
+    eurusd = {
+        "id": "duplicate-id",
+        "row_type": "trade",
+        "asset_class": "fx",
+        "account": "OANDA DEMO",
+        "symbol": "EURUSD",
+        "side": "BUY",
+        "open_time": "2026-01-01T00:00:00Z",
+        "close_time": "2026-01-01T00:05:00Z",
+        "entry_price": 1.10,
+        "stop_loss": 1.09,
+        "take_profit": 1.12,
+        "net_profit": 10.0,
+        "result_pct": 1.0,
+        "r_multiple": 1.0,
+    }
+    gbpusd = {
+        **eurusd,
+        "symbol": "GBPUSD",
+        "entry_price": 1.30,
+        "stop_loss": 1.28,
+        "take_profit": 1.34,
+        "net_profit": -5.0,
+        "result_pct": -0.5,
+        "r_multiple": -0.5,
+    }
+
+    eurusd_stats = master_service._compute_journal_stats(
+        [eurusd], balances=[], _recommendation_cache=shared_cache
+    )
+    gbpusd_stats = master_service._compute_journal_stats(
+        [gbpusd], balances=[], _recommendation_cache=shared_cache
+    )
+
+    assert eurusd_stats["groups"]["overview"]["cache_marker"] == "EURUSD"
+    assert gbpusd_stats["groups"]["overview"]["cache_marker"] == "GBPUSD"
+    assert ("overall", "EURUSD") in calls
+    assert ("overall", "GBPUSD") in calls
+
+
+def test_recommendation_row_signature_is_hashed_once_per_stats_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_sha256 = master_service.hashlib.sha256
+    calls = {"hashes": 0}
+
+    def counted_sha256(*args, **kwargs):
+        calls["hashes"] += 1
+        return real_sha256(*args, **kwargs)
+
+    monkeypatch.setattr(master_service.hashlib, "sha256", counted_sha256)
+    row = {
+        "id": "trade:one",
+        "row_type": "trade",
+        "asset_class": "fx",
+        "account": "OANDA DEMO",
+        "symbol": "EURUSD",
+        "side": "BUY",
+        "open_time": "2026-01-01T00:00:00Z",
+        "close_time": "2026-01-01T00:05:00Z",
+        "entry_price": 1.10,
+        "stop_loss": 1.09,
+        "take_profit": 1.12,
+        "net_profit": 10.0,
+        "result_pct": 1.0,
+        "r_multiple": 1.0,
+    }
+
+    master_service._compute_journal_stats([row], balances=[])
+
+    assert calls["hashes"] == 1
+
+
+def test_top_level_and_period_stats_share_recommendation_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = []
+
+    def fake_recommendations(rows, *, scope="standard"):
+        calls.append((scope, tuple(sorted(str(row.get("id") or "") for row in rows))))
+        return {}
+
+    monkeypatch.setattr(
+        master_service,
+        "_distance_recommendation_summary",
+        fake_recommendations,
+    )
+    row = {
+        "id": "trade:one",
+        "row_type": "trade",
+        "asset_class": "fx",
+        "account": "OANDA DEMO",
+        "symbol": "EURUSD",
+        "side": "BUY",
+        "open_time": "2026-01-01T00:00:00Z",
+        "close_time": "2026-01-01T00:05:00Z",
+        "entry_price": 1.10,
+        "stop_loss": 1.09,
+        "take_profit": 1.12,
+        "net_profit": 10.0,
+        "result_pct": 1.0,
+        "r_multiple": 1.0,
+    }
+
+    stats = master_service._compute_journal_stats_with_period_reports(
+        [row], balances=[]
+    )
+
+    assert stats["period_reports"]["months"][2026][1]["totals"]["trades"] == 1
+    assert len(calls) == 3
+    assert set(calls) == {
+        ("overall", ("trade:one",)),
+        ("standard", ("trade:one",)),
+        ("standard", ()),
+    }
+
+
 def test_compute_journal_stats_drawdown_behaviour() -> None:
     rows = [
         {"row_type": "trade", "asset_class": "fx", "symbol": "EURUSD", "net_profit": 1, "analysis_balance_after_trade": 1000, "account": "a", "close_time": "2026-01-01T00:00:00Z"},

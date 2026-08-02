@@ -20,6 +20,17 @@ from tools.master_journal_workbook import (
 )
 
 
+def _default_demo_csv_path() -> Path:
+    upload_dir = ROOT / "render" / "uploads" / "oanda-history"
+    candidates = list(upload_dir.glob("oanda_history_demo_*.csv"))
+    if not candidates:
+        return upload_dir / "oanda_history_demo.csv"
+    return max(
+        candidates,
+        key=lambda path: (path.stat().st_mtime_ns, path.name),
+    )
+
+
 def _build_snapshot(
     items: List[Dict[str, object]],
     cashflow_ledger: Dict[str, object],
@@ -64,7 +75,10 @@ def _build_snapshot(
         "generated_at": master_service._utc_now_iso(),
         "items": snapshot_items,
         "balances": balances,
-        "stats": master_service._compute_journal_stats(snapshot_items, balances),
+        "stats": master_service._compute_journal_stats_with_period_reports(
+            snapshot_items,
+            balances,
+        ),
         "diagnostics": {
             "source": "oanda_demo_transaction_export_repair",
             "canonical_oanda_rows": 0,
@@ -152,14 +166,35 @@ def repair(
         if master_service._canonical_oanda_account_label(row) == "OANDA DEMO"
         and master_service._row_type(row) == "trade"
     ]
-    unsupported_commissions = [
-        str(row.get("id") or "")
-        for row in demo_rows
-        if abs(master_service._to_float(row.get("commission")) or 0.0) > 1e-12
-    ]
-    if unsupported_commissions:
+    commission_total_mismatches = []
+    for row in demo_rows:
+        metrics = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
+        expected = master_service._to_float(
+            metrics.get("oanda_displayed_commission_total")
+        ) or 0.0
+        actual = master_service._to_float(row.get("commission")) or 0.0
+        fees = master_service._to_float(row.get("fees")) or 0.0
+        broker_fees = master_service._to_float(
+            metrics.get("oanda_actual_commission_total")
+        ) or 0.0
+        financing = master_service._to_float(
+            metrics.get("oanda_financing_commission_total")
+        ) or 0.0
+        component_total = abs(broker_fees) + abs(financing)
+        includes_financing = bool(
+            metrics.get("oanda_commission_includes_financing")
+        )
+        if (
+            abs(actual - expected) > 1e-12
+            or abs(fees - expected) > 1e-12
+            or abs(expected - component_total) > 1e-12
+            or includes_financing != (abs(financing) > 1e-12)
+        ):
+            commission_total_mismatches.append(str(row.get("id") or ""))
+    if commission_total_mismatches:
         raise RuntimeError(
-            f"Unsupported OANDA DEMO commissions remain: {unsupported_commissions[:10]}"
+            "Invalid OANDA DEMO displayed Commission totals remain: "
+            f"{commission_total_mismatches[:10]}"
         )
 
     update_result: Dict[str, object] = {"ok": True, "skipped": True}
@@ -175,6 +210,7 @@ def repair(
             workbook_path,
             snapshot,
             expected_survivor_row_ids=expected_ids,
+            preserve_existing_layout=True,
         )
         candidate_path = Path(str(update_result.get("candidate_path") or ""))
         if not candidate_path.exists():
@@ -209,7 +245,12 @@ def repair(
         "canonical_rows": len(canonical),
         "stale_ids_removed": sorted(stale_ids),
         "oanda_demo_rows_after": len(demo_rows),
-        "oanda_demo_nonzero_commissions_after": len(unsupported_commissions),
+        "oanda_demo_nonzero_commissions_after": sum(
+            1
+            for row in demo_rows
+            if abs(master_service._to_float(row.get("commission")) or 0.0) > 1e-12
+        ),
+        "oanda_demo_commission_total_mismatches_after": len(commission_total_mismatches),
         "warnings": parsed.get("warnings") or [],
         "workbook_update": update_result,
     }
@@ -225,10 +266,7 @@ def main() -> None:
     parser.add_argument(
         "--csv",
         type=Path,
-        default=Path(
-            "render/uploads/oanda-history/"
-            "oanda_history_demo_9eed38bb99994a8684e90e6afd8628d3.csv"
-        ),
+        default=_default_demo_csv_path(),
     )
     parser.add_argument(
         "--journal-state",

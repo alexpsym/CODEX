@@ -4672,6 +4672,67 @@ def _is_monthly_aud_reval_semantic_row(row: Dict[str, Any]) -> bool:
     account = _canonical_account_label(row.get("account_label") or row.get("account"))
     return row_type == "monthly_aud_reval" and symbol == "MONTHLY AUD P/L" and account == "BYBIT"
 
+def _monthly_aud_reval_record_rank(row: Dict[str, Any]) -> Tuple[int, int, int, int, int, int, str]:
+    """Rank canonical monthly rows so duplicate repair keeps the best valid record."""
+    row_id_month = _monthly_aud_reval_row_id_month(row.get("id"))
+    result_cash = _as_float(
+        row.get("result_cash")
+        if row.get("result_cash") not in (None, "")
+        else row.get("net_profit")
+    )
+    currency = str(row.get("result_currency") or row.get("currency") or "").strip().upper()
+    refs = row.get("raw_refs") if isinstance(row.get("raw_refs"), dict) else {}
+    record_month = str(refs.get("period_month") or "").strip()[:7]
+    if not record_month:
+        record_month = str(row.get("close_time") or row.get("open_time") or "").strip()[:7]
+    semantic = _is_monthly_aud_reval_semantic_row(row)
+    result_valid = result_cash is not None and math.isfinite(result_cash)
+    currency_valid = currency == "AUD"
+    month_valid = bool(row_id_month) and (not record_month or record_month == row_id_month)
+    valid = semantic and result_valid and currency_valid and month_valid
+    completeness_fields = (
+        "account", "account_label", "symbol", "open_time", "close_time",
+        "result_cash", "result_currency", "currency", "source", "notes", "raw_refs",
+    )
+    completeness = sum(row.get(field) not in (None, "", [], {}) for field in completeness_fields)
+    freshness = str(row.get("updated_at") or row.get("close_time") or "")
+    return (
+        int(valid),
+        int(result_valid),
+        int(currency_valid),
+        int(month_valid),
+        int(semantic),
+        completeness,
+        freshness,
+    )
+
+def _dedupe_monthly_aud_reval_rows(
+    rows: List[Dict[str, Any]],
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """Deduplicate only canonical monthly P&L IDs, leaving ordinary trades alone."""
+    canonical_indexes: Dict[str, int] = {}
+    result: List[Dict[str, Any]] = []
+    removed_by_id: Counter[str] = Counter()
+    for row in rows:
+        row_id = str(row.get("id") or "").strip()
+        if not _monthly_aud_reval_row_id_month(row_id):
+            result.append(row)
+            continue
+        existing_index = canonical_indexes.get(row_id)
+        if existing_index is None:
+            canonical_indexes[row_id] = len(result)
+            result.append(row)
+            continue
+        removed_by_id[row_id] += 1
+        if _monthly_aud_reval_record_rank(row) > _monthly_aud_reval_record_rank(result[existing_index]):
+            result[existing_index] = row
+    duplicate_ids = sorted(removed_by_id)
+    return result, {
+        "duplicate_monthly_aud_reval_groups_removed": len(duplicate_ids),
+        "duplicate_monthly_aud_reval_rows_removed": sum(removed_by_id.values()),
+        "deduplicated_monthly_aud_reval_row_ids": duplicate_ids,
+    }
+
 def _canonical_account_label(label: Any) -> str:
     raw = str(label or "").strip()
     low = raw.lower().replace("_", " ").replace("-", " ")
@@ -5755,6 +5816,17 @@ def _trade_log_data_row_count(ws) -> int:
     return count
 
 
+def _trade_log_last_populated_row(ws) -> int:
+    headers = _trade_log_header_map(ws)
+    start_row = _trade_log_data_start_row(ws)
+    last_col = max(headers.values(), default=ws.max_column)
+    last_row = start_row
+    for row in range(start_row, ws.max_row + 1):
+        if any(ws.cell(row, col).value not in (None, "") for col in range(1, last_col + 1)):
+            last_row = row
+    return last_row
+
+
 def _set_trade_log_auto_filter(ws) -> None:
     last_col = len(TRADE_LOG_HEADERS)
     last_row = TRADE_LOG_FILTER_HEADER_ROW
@@ -6520,7 +6592,7 @@ def _apply_trade_log_win_loss_row_formatting(ws) -> None:
     _remove_trade_log_generated_value_fill_formatting(ws)
     last_col = max((col for header, col in headers.items() if header), default=ws.max_column)
     start_row = _trade_log_data_start_row(ws)
-    last_row = max(start_row, ws.max_row)
+    last_row = _trade_log_last_populated_row(ws)
     row_type_letter = get_column_letter(row_type_col)
     net_pl_letter = get_column_letter(net_pl_col)
     cell_range = f"A{start_row}:{get_column_letter(last_col)}{last_row}"
@@ -8571,6 +8643,7 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
     for s in SHEET_ORDER: wb.create_sheet(s)
     rows=[_repair_or_flag_zero_trade_qty(dict(r)) for r in (snapshot.get('items') or []) if isinstance(r,dict) and str(r.get('row_type') or 'trade') in {'trade','monthly_aud_reval','cashflow'}]
     rows, _dedupe_diagnostics = _dedupe_trade_rows_by_execution(rows)
+    rows, _monthly_dedupe_diagnostics = _dedupe_monthly_aud_reval_rows(rows)
     metric_rows=[r for r in rows if str(r.get('row_type') or 'trade')=='trade']
     non_test=[r for r in metric_rows if not _is_test_trade_value(r.get('is_test_trade'))]
     stats = snapshot.get('stats') or {}
@@ -10607,6 +10680,175 @@ def _worksheet_layout_snapshot(ws) -> Dict[str, Any]:
     }
 
 
+def _snapshot_trade_log_data_presentations_by_row_id(
+    ws,
+    cell_presentations: Dict[Tuple[int, int], Dict[str, Any]],
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Capture Trade Log data presentation by stable row identity, not coordinate."""
+    headers = _trade_log_header_map(ws)
+    row_id_col = headers.get("Row ID")
+    if not row_id_col:
+        return {}
+
+    presentations_by_row_id: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    header_columns = [(header, col) for header, col in headers.items() if header]
+    for row in range(_trade_log_data_start_row(ws), ws.max_row + 1):
+        row_id = str(ws.cell(row, row_id_col).value or "").strip()
+        if not row_id:
+            continue
+        values: Dict[str, Any] = {}
+        cells: Dict[str, Dict[str, Any]] = {}
+        for header, col in header_columns:
+            coordinate = (row, col)
+            presentation = cell_presentations.get(coordinate)
+            if presentation is None:
+                cell = ws.cell(row, col)
+                presentation = {
+                    "value": cell.value,
+                    "style": copy(cell._style),
+                    "hyperlink": copy(getattr(cell, "hyperlink", None)),
+                    "comment": copy(getattr(cell, "comment", None)),
+                }
+            values[header] = presentation.get("value")
+            cells[header] = presentation
+        presentations_by_row_id[row_id].append(
+            {
+                "source_row": row,
+                "row_height": ws.row_dimensions[row].height,
+                "values": values,
+                "cells": cells,
+            }
+        )
+    return dict(presentations_by_row_id)
+
+
+def _trade_log_presentation_values_equal(left: Any, right: Any) -> bool:
+    if left in (None, "") and right in (None, ""):
+        return True
+    if isinstance(left, (int, float, Decimal)) and not isinstance(left, bool):
+        if isinstance(right, (int, float, Decimal)) and not isinstance(right, bool):
+            try:
+                return abs(Decimal(str(left)) - Decimal(str(right))) <= Decimal("1e-12")
+            except (InvalidOperation, ValueError):
+                pass
+    if left == right:
+        return True
+    return str(left).strip() == str(right).strip()
+
+
+def _trade_log_presentation_match_score(
+    candidate: Dict[str, Any],
+    ws,
+    row: int,
+    headers: Dict[str, int],
+) -> Tuple[int, int, int, int, int, int]:
+    identity_headers = {
+        "Open Time", "Close Time", "Account", "Symbol", "Side",
+        TRADE_NUMBER_HEADER, "Net P/L", "Row Type",
+    }
+    values = candidate.get("values") if isinstance(candidate.get("values"), dict) else {}
+    identity_matches = 0
+    identity_mismatches = 0
+    matches = 0
+    mismatches = 0
+    completeness = 0
+    for header, col in headers.items():
+        if not header or header == "Row ID":
+            continue
+        previous = values.get(header)
+        current = ws.cell(row, col).value
+        if previous not in (None, ""):
+            completeness += 1
+        if previous in (None, "") and current in (None, ""):
+            continue
+        equal = _trade_log_presentation_values_equal(previous, current)
+        if equal:
+            matches += 1
+            if header in identity_headers:
+                identity_matches += 1
+        else:
+            mismatches += 1
+            if header in identity_headers:
+                identity_mismatches += 1
+    source_row = int(candidate.get("source_row") or row)
+    return (
+        identity_matches,
+        -identity_mismatches,
+        matches,
+        -mismatches,
+        completeness,
+        -abs(source_row - row),
+    )
+
+
+def _restore_trade_log_data_presentations_by_row_id(
+    ws,
+    presentations_by_row_id: Dict[str, List[Dict[str, Any]]],
+) -> Dict[str, Any]:
+    """Move authored presentation with surviving Trade Log rows after a rebuild."""
+    headers = _trade_log_header_map(ws)
+    row_id_col = headers.get("Row ID")
+    if not row_id_col or not presentations_by_row_id:
+        return {
+            "trade_log_row_presentations_restored_by_row_id": 0,
+            "trade_log_cell_presentations_restored_by_row_id": 0,
+        }
+
+    used_candidate_indexes: Dict[str, Set[int]] = defaultdict(set)
+    unmatched_row_ids: Set[str] = set()
+    restored_rows = 0
+    restored_cells = 0
+    last_row = _trade_log_last_populated_row(ws)
+    for row in range(_trade_log_data_start_row(ws), last_row + 1):
+        row_id = str(ws.cell(row, row_id_col).value or "").strip()
+        if not row_id:
+            continue
+        candidates = presentations_by_row_id.get(row_id) or []
+        available = [
+            (index, candidate)
+            for index, candidate in enumerate(candidates)
+            if index not in used_candidate_indexes[row_id]
+        ]
+        if not available:
+            unmatched_row_ids.add(row_id)
+            continue
+        candidate_index, candidate = max(
+            available,
+            key=lambda item: _trade_log_presentation_match_score(
+                item[1], ws, row, headers
+            ),
+        )
+        used_candidate_indexes[row_id].add(candidate_index)
+        cells = candidate.get("cells") if isinstance(candidate.get("cells"), dict) else {}
+        for header, col in headers.items():
+            if not header:
+                continue
+            presentation = cells.get(header)
+            if not isinstance(presentation, dict):
+                continue
+            cell = ws.cell(row, col)
+            if isinstance(cell, MergedCell):
+                continue
+            cell._style = copy(presentation["style"])
+            if hasattr(cell, "hyperlink"):
+                cell.hyperlink = copy(presentation.get("hyperlink"))
+            if hasattr(cell, "comment"):
+                cell.comment = copy(presentation.get("comment"))
+            restored_cells += 1
+        ws.row_dimensions[row].height = candidate.get("row_height")
+        restored_rows += 1
+
+    diagnostics: Dict[str, Any] = {
+        "trade_log_row_presentations_restored_by_row_id": restored_rows,
+        "trade_log_cell_presentations_restored_by_row_id": restored_cells,
+    }
+    if unmatched_row_ids:
+        diagnostics["trade_log_row_presentation_unmatched_row_ids"] = sorted(
+            unmatched_row_ids
+        )
+    return diagnostics
+
+
 def _snapshot_invariants(wb) -> Dict[str, Any]:
     out: Dict[str, Any] = {"sheetnames": list(wb.sheetnames)}
     for sheet_name in wb.sheetnames:
@@ -12401,6 +12643,8 @@ def read_master_journal_source(path: Path) -> Dict[str, Any]:
         duplicate_trade_row_ids = sorted(rid for rid, count in trade_row_id_counts.items() if count > 1)
         if duplicate_trade_row_ids:
             diagnostics["target_r_duplicate_trade_row_ids"] = duplicate_trade_row_ids
+        items, monthly_dedupe_diagnostics = _dedupe_monthly_aud_reval_rows(items)
+        diagnostics.update(monthly_dedupe_diagnostics)
         items, dedupe_diagnostics = _dedupe_trade_rows_by_execution(items)
         diagnostics.update(dedupe_diagnostics)
         return {
@@ -12580,6 +12824,20 @@ def update_master_journal_workbook_data_only(
         }
         for ws in wb.worksheets
     } if preserve_existing_layout else {}
+    preserved_trade_log_presentations: Dict[str, List[Dict[str, Any]]] = {}
+    if preserve_existing_layout:
+        try:
+            source_trade_log = _get_all_trades_sheet(wb)
+            source_layout = preserved_layout.get(source_trade_log.title) or {}
+            preserved_trade_log_presentations = (
+                _snapshot_trade_log_data_presentations_by_row_id(
+                    source_trade_log,
+                    source_layout.get("cell_presentations") or {},
+                )
+            )
+        except Exception:
+            wb.close()
+            raise
     try:
         _repair_legacy_instrument_averages_freeze_pane(wb, diagnostics)
         _migrate_analysis_sheet_names(wb, diagnostics)
@@ -12637,6 +12895,8 @@ def update_master_journal_workbook_data_only(
         ]
         rows, dedupe_diagnostics = _dedupe_trade_rows_by_execution(rows)
         diagnostics.update(dedupe_diagnostics)
+        rows, monthly_dedupe_diagnostics = _dedupe_monthly_aud_reval_rows(rows)
+        diagnostics.update(monthly_dedupe_diagnostics)
         if len(rows) != len(snapshot.get("items") or []):
             snapshot = dict(snapshot)
             snapshot["items"] = rows
@@ -13796,6 +14056,17 @@ def update_master_journal_workbook_data_only(
                             )
                         ):
                             cell.comment = None
+        if preserve_existing_layout:
+            trade_log = _get_all_trades_sheet(wb, allow_legacy=False)
+            diagnostics.update(
+                _restore_trade_log_data_presentations_by_row_id(
+                    trade_log,
+                    preserved_trade_log_presentations,
+                )
+            )
+            _apply_trade_log_win_loss_row_formatting(trade_log)
+            _apply_trade_log_win_loss_direct_row_fills(trade_log)
+            diagnostics["reapplied_generated_trade_log_formatting_after_layout_restore"] = True
         after = _snapshot_invariants(wb)
         _assert_invariants_unchanged(before, after)
         candidate = path.with_suffix(".update-candidate.tmp.xlsx")
