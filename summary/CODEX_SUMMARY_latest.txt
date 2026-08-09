@@ -86,4 +86,6 @@ Scope and reviewed base
 
 10. Publication record
 - Pre-publication reviewed HEAD/origin/master: e1fa74933038e2bae393a163354fd6441bcddc85.
-- PATCH_DESKTOP_PUSH.bat publication is the mandatory next step. This record will be updated with the pushed implementation SHA after that script succeeds and verifies local HEAD equals origin/master.
+- Final pushed implementation commit SHA: f70768a55de192b8e4564b308ccab68df967cb3c.
+- The mandatory PATCH_DESKTOP_PUSH.bat run completed successfully, pushed that commit to origin/master, fetched the remote, and verified local HEAD == origin/master == f70768a55de192b8e4564b308ccab68df967cb3c.
+- This completed publication record is the only intended follow-up change after the implementation commit; its summary-only commit is published and verified by a second mandatory PATCH_DESKTOP_PUSH.bat run, with the resulting final repository HEAD reported in the completion response and script log.
