@@ -3,10 +3,11 @@ from collections import Counter, defaultdict, OrderedDict
 from datetime import datetime, date, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP, localcontext
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Collection, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 from openpyxl import Workbook, load_workbook
 from openpyxl.cell.cell import MergedCell
 from openpyxl.comments import Comment
+from openpyxl.formula import Tokenizer
 from openpyxl.styles import Font
 from openpyxl.workbook.defined_name import DefinedName
 from openpyxl.worksheet.datavalidation import DataValidation
@@ -21,10 +22,13 @@ from copy import copy, deepcopy
 import json
 import math
 import os
+import posixpath
 import re
 import zipfile
 import xml.etree.ElementTree as ET
+from xml.sax.saxutils import escape as _xml_escape
 from zoneinfo import ZoneInfo
+from uuid import uuid4
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TRADE_LOG_SHEET = "Trade Log"
@@ -66,6 +70,20 @@ MOVE_TO_FIELD_MAP = {
     "Move to Profit Distance From Entry %": "move_to_profit_distance_from_entry_pct",
     "Move to Profit Distance From Exit %": "move_to_profit_distance_from_exit_pct",
 }
+
+
+class IncrementalWorkbookUpdateNotEligible(RuntimeError):
+    """Raised when a workbook cannot be updated safely with the local row path."""
+
+    def __init__(
+        self,
+        *args: object,
+        unsafe_full_rebuild: bool = False,
+    ) -> None:
+        super().__init__(*args)
+        self.unsafe_full_rebuild = bool(unsafe_full_rebuild)
+
+
 MOVE_TO_TIME_FIELDS = {
     "move_to_break_even_time",
     "move_to_profit_time",
@@ -6463,29 +6481,65 @@ def _conditional_formatting_formula_text(rule) -> str:
         return " ".join(str(part or "") for part in formula)
     return str(formula or "")
 
-def _remove_trade_log_win_loss_row_formatting(ws) -> None:
-    """Remove generated Trade Log row-level win/loss CF, including stale schemas."""
+
+def _is_generated_trade_log_win_loss_row_rule(rule, sqref: str) -> bool:
+    """Identify only the row-level win/loss rules emitted by this module."""
+    formulas = getattr(rule, "formula", None) or []
+    if not isinstance(formulas, (list, tuple)) or len(formulas) != 1:
+        return False
+    formula_text = re.sub(r"\s+", "", str(formulas[0] or ""))
+    match = re.fullmatch(
+        r'AND\(\$([A-Z]{1,3})(\d+)="trade",\$([A-Z]{1,3})(\d+)([<>])0\)',
+        formula_text,
+        flags=re.IGNORECASE,
+    )
+    if not match or match.group(2) != match.group(4):
+        return False
+    try:
+        sqref_parts = str(sqref or "").split()
+        if len(sqref_parts) != 1:
+            return False
+        min_col, min_row, _max_col, _max_row = range_boundaries(sqref_parts[0])
+    except ValueError:
+        return False
+    if min_col != 1 or min_row != int(match.group(2)):
+        return False
+    fill = getattr(getattr(rule, "dxf", None), "fill", None)
+    fill_color = getattr(fill, "fgColor", None)
+    fill_rgb = str(getattr(fill_color, "rgb", "") or "")[-6:].upper()
+    expected_fill = PROFIT_FILL if match.group(5) == ">" else LOSS_FILL
+    return (
+        getattr(rule, "type", None) == "expression"
+        and getattr(fill, "fill_type", None) == "solid"
+        and fill_rgb == expected_fill
+    )
+
+
+def _remove_trade_log_win_loss_row_formatting(ws) -> Dict[str, int]:
+    """Remove only generated Trade Log row-level win/loss CF rules."""
     cf = ws.conditional_formatting
-    stale_refs = []
+    sanitized = OrderedDict()
+    generated_priorities: Dict[str, int] = {}
     for key, rules in list(getattr(cf, "_cf_rules", {}).items()):
         sqref = str(getattr(key, "sqref", key))
-        rule_text = " ".join(_conditional_formatting_formula_text(rule) for rule in rules)
-        lower_rule_text = rule_text.lower()
-        is_generated_row_rule = (
-            sqref.startswith(("A2:", "A3:", "A4:"))
-            and '"trade"' in rule_text
-            and ("AND(" in rule_text.upper())
-            and (">0" in rule_text or "<0" in rule_text)
-        )
-        is_generated_recommendation_rule = (
-            "lower(" in lower_rule_text
-            and any(token in lower_rule_text for token in ('"reduce"', '"increase"', '"keep"'))
-        )
-        is_stale_old_schema = sqref.startswith(("A2:AB", "A3:AB", "A4:AB")) or "$AA" in rule_text
-        if is_generated_row_rule or is_generated_recommendation_rule or is_stale_old_schema:
-            stale_refs.append(sqref)
-    for sqref in stale_refs:
-        del cf[sqref]
+        retained_rules = []
+        for rule in rules:
+            if not _is_generated_trade_log_win_loss_row_rule(rule, sqref):
+                retained_rules.append(rule)
+                continue
+            formula_text = re.sub(
+                r"\s+",
+                "",
+                str((getattr(rule, "formula", None) or [""])[0]),
+            )
+            direction = "profit" if ">0)" in formula_text else "loss"
+            priority = int(getattr(rule, "priority", 0) or 0)
+            if priority > 0:
+                generated_priorities.setdefault(direction, priority)
+        if retained_rules:
+            sanitized[key] = retained_rules
+    cf._cf_rules = sanitized
+    return generated_priorities
 
 def _is_generated_trade_log_value_fill_rule(rule) -> bool:
     formula_text = _conditional_formatting_formula_text(rule).strip()
@@ -6551,6 +6605,37 @@ def _apply_trade_log_win_loss_direct_row_fills(ws) -> None:
             elif _cell_has_generated_trade_log_win_loss_fill(cell):
                 cell.fill = empty_fill
 
+
+def _apply_trade_log_win_loss_direct_row_fills_for_rows(
+    ws,
+    row_numbers: Collection[int],
+) -> None:
+    """Apply generated row fills only to explicitly changed Trade Log rows."""
+    headers = _trade_log_header_map(ws)
+    row_type_col = headers.get("Row Type")
+    net_pl_col = headers.get("Net P/L")
+    if not row_type_col or not net_pl_col:
+        return
+    last_col = max((col for header, col in headers.items() if header), default=ws.max_column)
+    profit_fill = PatternFill("solid", fgColor=PROFIT_FILL)
+    loss_fill = PatternFill("solid", fgColor=LOSS_FILL)
+    empty_fill = PatternFill()
+    for row in sorted({int(value) for value in row_numbers}):
+        row_type = str(ws.cell(row, row_type_col).value or "").strip().lower()
+        net_pl = _as_float(ws.cell(row, net_pl_col).value)
+        fill = None
+        if row_type == "trade" and net_pl is not None:
+            if net_pl > 0:
+                fill = profit_fill
+            elif net_pl < 0:
+                fill = loss_fill
+        for col in range(1, last_col + 1):
+            cell = ws.cell(row, col)
+            if fill is not None:
+                cell.fill = copy(fill)
+            elif _cell_has_generated_trade_log_win_loss_fill(cell):
+                cell.fill = copy(empty_fill)
+
 def _apply_trade_log_recommendation_conditional_formatting(ws, start_row: int, last_row: int, headers: Dict[str, int]) -> None:
     yellow_fill = PatternFill("solid", fgColor="FFF2CC")
     yellow_font = Font(color="9C6500")
@@ -6588,7 +6673,7 @@ def _apply_trade_log_win_loss_row_formatting(ws) -> None:
     net_pl_col = headers.get("Net P/L")
     if not row_type_col or not net_pl_col:
         return
-    _remove_trade_log_win_loss_row_formatting(ws)
+    generated_priorities = _remove_trade_log_win_loss_row_formatting(ws)
     _remove_trade_log_generated_value_fill_formatting(ws)
     last_col = max((col for header, col in headers.items() if header), default=ws.max_column)
     start_row = _trade_log_data_start_row(ws)
@@ -6598,14 +6683,28 @@ def _apply_trade_log_win_loss_row_formatting(ws) -> None:
     cell_range = f"A{start_row}:{get_column_letter(last_col)}{last_row}"
     profit_fill = PatternFill("solid", fgColor=PROFIT_FILL)
     loss_fill = PatternFill("solid", fgColor=LOSS_FILL)
-    ws.conditional_formatting.add(
-        cell_range,
-        FormulaRule(formula=[f'AND(${row_type_letter}{start_row}="trade",${net_pl_letter}{start_row}>0)'], fill=profit_fill, stopIfTrue=True),
+    profit_rule = FormulaRule(
+        formula=[
+            f'AND(${row_type_letter}{start_row}="trade",'
+            f'${net_pl_letter}{start_row}>0)'
+        ],
+        fill=profit_fill,
+        stopIfTrue=True,
     )
-    ws.conditional_formatting.add(
-        cell_range,
-        FormulaRule(formula=[f'AND(${row_type_letter}{start_row}="trade",${net_pl_letter}{start_row}<0)'], fill=loss_fill, stopIfTrue=True),
+    loss_rule = FormulaRule(
+        formula=[
+            f'AND(${row_type_letter}{start_row}="trade",'
+            f'${net_pl_letter}{start_row}<0)'
+        ],
+        fill=loss_fill,
+        stopIfTrue=True,
     )
+    if generated_priorities.get("profit"):
+        profit_rule.priority = generated_priorities["profit"]
+    if generated_priorities.get("loss"):
+        loss_rule.priority = generated_priorities["loss"]
+    ws.conditional_formatting.add(cell_range, profit_rule)
+    ws.conditional_formatting.add(cell_range, loss_rule)
 
 def _is_generated_profit_loss_rule(rule) -> bool:
     formula = getattr(rule, "formula", None) or []
@@ -8638,6 +8737,201 @@ def _dashboard_extended_metrics(
         }
     return result
 
+
+def _trade_log_datetime_value(value: Any) -> Any:
+    if not isinstance(value, str) or not value:
+        parsed = value
+    else:
+        parsed = datetime.fromisoformat(value.replace("Z", ""))
+    if isinstance(parsed, datetime) and parsed.tzinfo is not None:
+        parsed = parsed.replace(tzinfo=None)
+    return parsed
+
+
+def _trade_log_row_values(
+    row: Mapping[str, Any],
+    *,
+    resolved_balance: Any = None,
+    recommendations_by_symbol: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Serialize a journal row to the canonical Trade Log logical columns."""
+    row_map = dict(row)
+    pct = _as_float(row_map.get("result_pct"))
+    is_monthly = str(row_map.get("row_type") or "") == "monthly_aud_reval"
+    symbol = row_map.get("symbol") or ("MONTHLY AUD P/L" if is_monthly else "")
+    account = row_map.get("account_label") or row_map.get("account") or ("BYBIT" if is_monthly else "")
+    notes = row_map.get("notes") or (
+        "Monthly BYBIT AUD P/L bookkeeping note (excluded from metrics)."
+        if is_monthly
+        else ""
+    )
+    net_pnl = (
+        row_map.get("net_profit")
+        if row_map.get("net_profit") is not None
+        else row_map.get("result_cash")
+    )
+    open_time = row_map.get("open_time") or row_map.get("period_month")
+    close_time = row_map.get("close_time") or row_map.get("period_month")
+    commission = _as_float(row_map.get("commission"))
+    commission_value = "" if commission in (None, 0.0) else commission
+    cashflow_new_balance = row_map.get("cashflow_new_balance")
+    row_type = str(row_map.get("row_type") or "trade").strip().lower()
+    if row_type == "cashflow" and cashflow_new_balance in (None, ""):
+        cashflow_new_balance = resolved_balance
+    side = str(row_map.get("side") or "").upper()
+    setup_value = "" if row_type in {"monthly_aud_reval", "cashflow"} else (row_map.get("setup") or "")
+    stop_loss_distance: Any = ""
+    target_distance: Any = ""
+    stop_loss_price = row_map.get("stop_loss")
+    target_price = row_map.get("take_profit")
+    if row_type == "trade":
+        stop_loss_distance = _validated_distance_fraction(row_map, "stop_loss")
+        target_distance = _validated_distance_fraction(row_map, "take_profit")
+        if (
+            _distance_fraction_from_prices(row_map.get("entry_price"), stop_loss_price) is not None
+            and stop_loss_distance is None
+        ):
+            stop_loss_price = ""
+        if (
+            _distance_fraction_from_prices(row_map.get("entry_price"), target_price) is not None
+            and target_distance is None
+        ):
+            target_price = ""
+        stop_loss_distance = "" if stop_loss_distance is None else stop_loss_distance
+        target_distance = "" if target_distance is None else target_distance
+    close_stopout = row_map.get("close_stopout")
+    if close_stopout in (None, ""):
+        close_stopout = row_map.get("close_stop_out")
+    if close_stopout in (None, ""):
+        close_stopout = row_map.get("stop_out")
+    recommendations = dict(recommendations_by_symbol or {})
+    values: Dict[str, Any] = {
+        TRADE_NUMBER_HEADER: str(row_map.get("trade_number") or ""),
+        "Open Time": _trade_log_datetime_value(open_time),
+        "Close Time": _trade_log_datetime_value(close_time),
+        "Account": account,
+        "Symbol": symbol,
+        "Side": side,
+        "Qty": row_map.get("qty"),
+        "Entry Price": row_map.get("entry_price"),
+        "Exit Price": row_map.get("exit_price"),
+        "Stop Loss Price": stop_loss_price,
+        "Stop Loss Distance": stop_loss_distance,
+        STOP_RECOMMENDATION_HEADER: (
+            _row_distance_recommendation(row_map, recommendations, STOP_RECOMMENDATION_HEADER)
+            if row_type == "trade" and recommendations
+            else ""
+        ),
+        "Target Price": target_price,
+        "Target Distance": target_distance,
+        TARGET_RECOMMENDATION_HEADER: (
+            _row_distance_recommendation(row_map, recommendations, TARGET_RECOMMENDATION_HEADER)
+            if row_type == "trade" and recommendations
+            else ""
+        ),
+        "Commission": commission_value,
+        "Net P/L": net_pnl,
+        "Profit %": (pct / 100.0 if pct is not None else ""),
+        "R-Multiple": row_map.get("r_multiple"),
+        "Balance After": resolved_balance,
+        "Trade Duration (DD:HH:MM:SS)": _format_duration_display(
+            _infer_trade_duration_seconds(row_map)
+        ),
+        "Test": "Yes" if _is_test_trade_value(row_map.get("is_test_trade")) else "No",
+        "Pattern": row_map.get("pattern") or "",
+        "EMA": row_map.get("ema") or "",
+        "VWAP": row_map.get("vwap") or "",
+        "ATHS/ATLS": row_map.get("aths_atls") or "",
+        "Order": row_map.get("order_type") or "",
+        "Round Number": row_map.get("round_number") or "",
+        "Spiked Out": row_map.get("spiked_out") or "",
+        "Close Stopout": close_stopout or "",
+        "Near Perfect Entry": row_map.get("near_perfect_entry") or "",
+        "Near Win": row_map.get("near_win") or "",
+        "Early Close": row_map.get("early_close") or "",
+        "Setup": setup_value,
+        "Timeframe": _canonical_journal_timeframe(row_map.get("timeframe") or ""),
+        "Breakeven": row_map.get("breakeven") or "",
+        "Notes": notes,
+        "Cashflow Amount": row_map.get("cashflow_amount"),
+        "Cashflow New Balance": cashflow_new_balance,
+        "Currency": (
+            row_map.get("currency")
+            or row_map.get("account_currency")
+            or row_map.get("result_currency")
+            or ""
+        ),
+        "Row Type": row_map.get("row_type") or "trade",
+        "Row ID": stable_row_id(row_map),
+    }
+    for header, field in MOVE_TO_FIELD_MAP.items():
+        raw_value = row_map.get(field)
+        if field in {"move_to_break_even_duration", "move_to_profit_duration"} and raw_value not in (None, ""):
+            values[header] = _fmt_duration_full(raw_value)
+        else:
+            values[header] = raw_value or ""
+    return values
+
+
+def _apply_trade_log_row_number_formats(
+    ws,
+    row_idx: int,
+    row: Mapping[str, Any],
+) -> Dict[str, str]:
+    """Apply full-builder number formats to one Trade Log row."""
+    headers = _trade_log_header_map(ws)
+    applied: Dict[str, str] = {}
+
+    def set_format(header: str, number_format: str) -> None:
+        col = headers.get(header)
+        if not col:
+            return
+        ws.cell(row_idx, col).number_format = number_format
+        applied[header] = number_format
+
+    commission_currency = _infer_trade_log_currency(dict(row), field="commission")
+    pnl_currency = _infer_trade_log_currency(dict(row), field="net_pnl")
+    balance_currency = _infer_trade_log_currency(dict(row), field="balance_after")
+    set_format(TRADE_NUMBER_HEADER, "@")
+    set_format("Qty", "#,##0.##########")
+    set_format("Open Time", "yyyy-mm-dd hh:mm:ss")
+    set_format("Close Time", "yyyy-mm-dd hh:mm:ss")
+    set_format("Stop Loss Distance", "0.00%")
+    set_format("Target Distance", "0.00%")
+    if commission_currency:
+        set_format("Commission", _currency_number_format(commission_currency))
+    if pnl_currency:
+        set_format("Net P/L", _currency_number_format(pnl_currency))
+    profit_col = headers.get("Profit %")
+    if profit_col:
+        set_format("Profit %", adaptive_percent_number_format(ws.cell(row_idx, profit_col).value))
+    r_col = headers.get("R-Multiple")
+    if r_col:
+        set_format("R-Multiple", adaptive_number_format(ws.cell(row_idx, r_col).value))
+    if balance_currency:
+        set_format(
+            "Balance After",
+            "#,##0.0000000000" if _is_crypto_currency(balance_currency) else "#,##0.00",
+        )
+    set_format("Trade Duration (DD:HH:MM:SS)", "General")
+    set_format("Move to Break Even Time", "yyyy-mm-dd hh:mm:ss")
+    set_format("Move to Break Even Duration", DURATION_NUMBER_FORMAT)
+    set_format("Move to Profit Time", "yyyy-mm-dd hh:mm:ss")
+    set_format("Move to Profit Duration", DURATION_NUMBER_FORMAT)
+    for header in (
+        "Move to Break Even Distance From Entry %",
+        "Move to Break Even Distance From Exit %",
+        "Move to Profit Distance From Entry %",
+        "Move to Profit Distance From Exit %",
+    ):
+        set_format(header, "0.00%")
+    for header in (STOP_RECOMMENDATION_HEADER, TARGET_RECOMMENDATION_HEADER):
+        col = headers.get(header)
+        if col:
+            _apply_recommendation_cell_style(ws.cell(row_idx, col))
+    return applied
+
+
 def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -> Dict[str, Any]:
     wb=Workbook(); wb.remove(wb.active)
     for s in SHEET_ORDER: wb.create_sheet(s)
@@ -9001,128 +9295,17 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
     recommendations_by_symbol = _distance_recommendations_by_symbol(rows)
     ws=_get_all_trades_sheet(wb); headers=TRADE_LOG_HEADERS; ws.append(headers)
     for i, row in enumerate(rows):
-        pct = _as_float(row.get('result_pct'))
-        is_monthly = str(row.get("row_type") or "") == "monthly_aud_reval"
-        symbol = row.get('symbol') or ("MONTHLY AUD P/L" if is_monthly else "")
-        acct = row.get('account_label') or row.get('account') or ("BYBIT" if is_monthly else "")
-        notes = row.get('notes') or ('Monthly BYBIT AUD P/L bookkeeping note (excluded from metrics).' if is_monthly else '')
-        net_pnl = row.get('net_profit') if row.get('net_profit') is not None else row.get('result_cash')
-        ot = row.get('open_time') or row.get("period_month")
-        ct = row.get('close_time') or row.get("period_month")
-        otv = datetime.fromisoformat(str(ot).replace("Z","")) if isinstance(ot, str) and ot else ot
-        ctv = datetime.fromisoformat(str(ct).replace("Z","")) if isinstance(ct, str) and ct else ct
-        if isinstance(otv, datetime) and otv.tzinfo is not None:
-            otv = otv.replace(tzinfo=None)
-        if isinstance(ctv, datetime) and ctv.tzinfo is not None:
-            ctv = ctv.replace(tzinfo=None)
-        comm = _as_float(row.get('commission'))
-        comm_val = '' if comm in (None, 0.0) else comm
         resolved_balance = resolved_balances.get(str(i))
-        cashflow_new_balance = row.get('cashflow_new_balance')
-        row_type = str(row.get('row_type') or 'trade').strip().lower()
-        if row_type == 'cashflow' and cashflow_new_balance in (None, ''):
-            cashflow_new_balance = resolved_balance
-        side = str(row.get('side') or '').upper()
-        if row_type in {'monthly_aud_reval','cashflow'}:
-            setup_val = ''
-        else:
-            setup_val = row.get('setup') or ''
-        stop_loss_distance = ''
-        target_distance = ''
-        stop_loss_price = row.get('stop_loss')
-        target_price = row.get('take_profit')
-        if row_type == 'trade':
-            stop_loss_distance = _validated_distance_fraction(row, 'stop_loss')
-            target_distance = _validated_distance_fraction(row, 'take_profit')
-            if _distance_fraction_from_prices(row.get('entry_price'), stop_loss_price) is not None and stop_loss_distance is None:
-                stop_loss_price = ''
-            if _distance_fraction_from_prices(row.get('entry_price'), target_price) is not None and target_distance is None:
-                target_price = ''
-            stop_loss_distance = '' if stop_loss_distance is None else stop_loss_distance
-            target_distance = '' if target_distance is None else target_distance
-        close_stopout = row.get('close_stopout')
-        if close_stopout in (None, ''):
-            close_stopout = row.get('close_stop_out')
-        if close_stopout in (None, ''):
-            close_stopout = row.get('stop_out')
-        values = {
-            TRADE_NUMBER_HEADER: str(row.get("trade_number") or ""),
-            "Open Time": otv, "Close Time": ctv, "Account": acct, "Symbol": symbol, "Side": side,
-            "Qty": row.get('qty'), "Entry Price": row.get('entry_price'), "Exit Price": row.get('exit_price'),
-            "Stop Loss Price": stop_loss_price, "Stop Loss Distance": stop_loss_distance,
-            STOP_RECOMMENDATION_HEADER: (
-                _row_distance_recommendation(row, recommendations_by_symbol, STOP_RECOMMENDATION_HEADER)
-                if row_type == "trade" else ""
-            ),
-            "Target Price": target_price, "Target Distance": target_distance,
-            TARGET_RECOMMENDATION_HEADER: (
-                _row_distance_recommendation(row, recommendations_by_symbol, TARGET_RECOMMENDATION_HEADER)
-                if row_type == "trade" else ""
-            ),
-            "Commission": comm_val,
-            "Net P/L": net_pnl, "Profit %": (pct / 100.0 if pct is not None else ''),
-            "R-Multiple": row.get('r_multiple'), "Balance After": resolved_balance,
-            "Trade Duration (DD:HH:MM:SS)": _format_duration_display(_infer_trade_duration_seconds(row)),
-            "Test": 'Yes' if _is_test_trade_value(row.get('is_test_trade')) else 'No',
-            "Pattern": row.get('pattern') or '', "EMA": row.get('ema') or '', "VWAP": row.get('vwap') or '', "ATHS/ATLS": row.get('aths_atls') or '',
-            "Order": row.get('order_type') or '', "Round Number": row.get('round_number') or '',
-            "Spiked Out": row.get('spiked_out') or '', "Close Stopout": close_stopout or '',
-            "Near Perfect Entry": row.get('near_perfect_entry') or '', "Near Win": row.get('near_win') or '',
-            "Early Close": row.get('early_close') or '', "Setup": setup_val,
-            "Timeframe": _canonical_journal_timeframe(row.get('timeframe') or ''),
-            "Breakeven": row.get('breakeven') or '', "Notes": notes,
-            "Cashflow Amount": row.get('cashflow_amount'), "Cashflow New Balance": cashflow_new_balance,
-            "Currency": row.get('currency') or row.get('account_currency') or row.get('result_currency') or '',
-            "Row Type": row.get('row_type') or 'trade', "Row ID": stable_row_id(row),
-        }
-        for header, field in MOVE_TO_FIELD_MAP.items():
-            raw_move_value = row.get(field)
-            if field in {"move_to_break_even_duration", "move_to_profit_duration"} and raw_move_value not in (None, ""):
-                values[header] = _fmt_duration_full(raw_move_value)
-            else:
-                values[header] = raw_move_value or ''
+        values = _trade_log_row_values(
+            row,
+            resolved_balance=resolved_balance,
+            recommendations_by_symbol=recommendations_by_symbol,
+        )
         ws.append([values.get(header, '') for header in TRADE_LOG_HEADERS])
     _style_table_sheet(ws,1,'A2',True)
-    trade_cols = _trade_log_header_map(ws)
-    def _fmt_col(row_idx: int, header: str, number_format: str) -> None:
-        col = trade_cols.get(header)
-        if col:
-            ws.cell(row_idx, col).number_format = number_format
     for rr in range(2, ws.max_row + 1):
         row_ctx = rows[rr - 2] if rr - 2 < len(rows) else {}
-        ccy_comm = _infer_trade_log_currency(row_ctx, field="commission")
-        ccy_pnl = _infer_trade_log_currency(row_ctx, field="net_pnl")
-        ccy_bal = _infer_trade_log_currency(row_ctx, field="balance_after")
-        _fmt_col(rr, TRADE_NUMBER_HEADER, "@")
-        _fmt_col(rr, "Qty", '#,##0.##########')
-        _fmt_col(rr, "Open Time", 'yyyy-mm-dd hh:mm:ss')
-        _fmt_col(rr, "Close Time", 'yyyy-mm-dd hh:mm:ss')
-        _fmt_col(rr, "Stop Loss Distance", "0.00%")
-        if trade_cols.get(STOP_RECOMMENDATION_HEADER):
-            _apply_recommendation_cell_style(ws.cell(rr, trade_cols[STOP_RECOMMENDATION_HEADER]))
-        _fmt_col(rr, "Target Distance", "0.00%")
-        if trade_cols.get(TARGET_RECOMMENDATION_HEADER):
-            _apply_recommendation_cell_style(ws.cell(rr, trade_cols[TARGET_RECOMMENDATION_HEADER]))
-        if ccy_comm:
-            _fmt_col(rr, "Commission", _currency_number_format(ccy_comm))
-        if ccy_pnl:
-            _fmt_col(rr, "Net P/L", _currency_number_format(ccy_pnl))
-        _fmt_col(rr, "Profit %", adaptive_percent_number_format(ws.cell(rr, trade_cols["Profit %"]).value))
-        _fmt_col(rr, "R-Multiple", adaptive_number_format(ws.cell(rr, trade_cols["R-Multiple"]).value))
-        if ccy_bal:
-            _fmt_col(rr, "Balance After", '#,##0.0000000000' if _is_crypto_currency(ccy_bal) else '#,##0.00')
-        _fmt_col(rr, "Trade Duration (DD:HH:MM:SS)", "General")
-        _fmt_col(rr, "Move to Break Even Time", 'yyyy-mm-dd hh:mm:ss')
-        _fmt_col(rr, "Move to Break Even Duration", DURATION_NUMBER_FORMAT)
-        _fmt_col(rr, "Move to Profit Time", 'yyyy-mm-dd hh:mm:ss')
-        _fmt_col(rr, "Move to Profit Duration", DURATION_NUMBER_FORMAT)
-        for pct_header in (
-            "Move to Break Even Distance From Entry %",
-            "Move to Break Even Distance From Exit %",
-            "Move to Profit Distance From Entry %",
-            "Move to Profit Distance From Exit %",
-        ):
-            _fmt_col(rr, pct_header, "0.00%")
+        _apply_trade_log_row_number_formats(ws, rr, row_ctx)
     _ensure_trade_log_schema(ws)
     trade_cols = _trade_log_header_map(ws)
     last_trade_row = max(TRADE_LOG_DATA_START_ROW, ws.max_row)
@@ -10709,7 +10892,14 @@ def _snapshot_trade_log_data_presentations_by_row_id(
                     "hyperlink": copy(getattr(cell, "hyperlink", None)),
                     "comment": copy(getattr(cell, "comment", None)),
                 }
-            values[header] = presentation.get("value")
+            presentation = dict(presentation)
+            value = presentation.get("value")
+            presentation["authored_formula"] = (
+                value
+                if isinstance(value, str) and value.startswith("=")
+                else None
+            )
+            values[header] = value
             cells[header] = presentation
         presentations_by_row_id[row_id].append(
             {
@@ -10792,12 +10982,16 @@ def _restore_trade_log_data_presentations_by_row_id(
         return {
             "trade_log_row_presentations_restored_by_row_id": 0,
             "trade_log_cell_presentations_restored_by_row_id": 0,
+            "trade_log_formula_cells_restored_by_row_id": 0,
+            "trade_log_formula_rows_restored_by_row_id": 0,
         }
 
     used_candidate_indexes: Dict[str, Set[int]] = defaultdict(set)
     unmatched_row_ids: Set[str] = set()
     restored_rows = 0
     restored_cells = 0
+    restored_formula_cells = 0
+    restored_formula_row_ids: Set[str] = set()
     last_row = _trade_log_last_populated_row(ws)
     for row in range(_trade_log_data_start_row(ws), last_row + 1):
         row_id = str(ws.cell(row, row_id_col).value or "").strip()
@@ -10830,6 +11024,14 @@ def _restore_trade_log_data_presentations_by_row_id(
             if isinstance(cell, MergedCell):
                 continue
             cell._style = copy(presentation["style"])
+            authored_formula = presentation.get("authored_formula")
+            if (
+                isinstance(authored_formula, str)
+                and authored_formula.startswith("=")
+            ):
+                cell.value = authored_formula
+                restored_formula_cells += 1
+                restored_formula_row_ids.add(row_id)
             if hasattr(cell, "hyperlink"):
                 cell.hyperlink = copy(presentation.get("hyperlink"))
             if hasattr(cell, "comment"):
@@ -10841,6 +11043,10 @@ def _restore_trade_log_data_presentations_by_row_id(
     diagnostics: Dict[str, Any] = {
         "trade_log_row_presentations_restored_by_row_id": restored_rows,
         "trade_log_cell_presentations_restored_by_row_id": restored_cells,
+        "trade_log_formula_cells_restored_by_row_id": restored_formula_cells,
+        "trade_log_formula_rows_restored_by_row_id": len(
+            restored_formula_row_ids
+        ),
     }
     if unmatched_row_ids:
         diagnostics["trade_log_row_presentation_unmatched_row_ids"] = sorted(
@@ -12691,6 +12897,12 @@ _SPREADSHEETML_NAMESPACE = (
 _DRAWINGML_CHART_NAMESPACE = (
     "http://schemas.openxmlformats.org/drawingml/2006/chart"
 )
+_OFFICE_DOCUMENT_RELATIONSHIP_NAMESPACE = (
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+)
+_PACKAGE_RELATIONSHIP_NAMESPACE = (
+    "http://schemas.openxmlformats.org/package/2006/relationships"
+)
 _EXTERNAL_WORKBOOK_FILE_REFERENCE = re.compile(
     r"\[[^\]\r\n]+\.(?:xls|xlsx|xlsm|xlsb|xlt|xltx|xltm|xlam)\]",
     re.IGNORECASE,
@@ -12698,6 +12910,819 @@ _EXTERNAL_WORKBOOK_FILE_REFERENCE = re.compile(
 _EXTERNAL_WORKBOOK_INDEX_REFERENCE = re.compile(
     r"\[\d+\][^!\r\n]{0,255}!"
 )
+
+_TRADE_LOG_FORMULA_CACHE_SAFE_FUNCTIONS = frozenset({
+    "ABS", "AND", "AVERAGE", "CEILING", "CONCATENATE", "COUNT", "COUNTA",
+    "COUNTBLANK", "EXACT", "IF", "IFERROR", "INT", "LEFT", "LEN", "LOWER",
+    "MAX", "MID", "MIN", "MOD", "NOT", "OR", "PRODUCT", "RIGHT", "ROUND",
+    "ROUNDDOWN", "ROUNDUP", "SIGN", "SUM", "TRIM", "TRUNC", "UPPER",
+})
+_TRADE_LOG_FORMULA_CACHE_A1_RANGE = re.compile(
+    r"^\$?[A-Z]{1,3}\$?\d+(?::\$?[A-Z]{1,3}\$?\d+)?$",
+    re.IGNORECASE,
+)
+_TRADE_LOG_FORMULA_CACHE_MAX_DEPENDENCY_CELLS = 4096
+_TRADE_LOG_FORMULA_CACHE_MAX_DEPENDENCY_DEPTH = 32
+
+
+def _worksheet_ooxml_part_name(package: zipfile.ZipFile, sheet_name: str) -> str:
+    workbook_root = ET.fromstring(package.read("xl/workbook.xml"))
+    relationship_id = ""
+    for sheet in workbook_root.findall(
+        f".//{{{_SPREADSHEETML_NAMESPACE}}}sheet"
+    ):
+        if str(sheet.attrib.get("name") or "") == str(sheet_name):
+            relationship_id = str(
+                sheet.attrib.get(
+                    f"{{{_OFFICE_DOCUMENT_RELATIONSHIP_NAMESPACE}}}id"
+                )
+                or ""
+            )
+            break
+    if not relationship_id:
+        raise RuntimeError(f"Worksheet {sheet_name!r} is missing from workbook.xml.")
+    relationships_root = ET.fromstring(
+        package.read("xl/_rels/workbook.xml.rels")
+    )
+    target = ""
+    for relationship in relationships_root.findall(
+        f"{{{_PACKAGE_RELATIONSHIP_NAMESPACE}}}Relationship"
+    ):
+        if str(relationship.attrib.get("Id") or "") == relationship_id:
+            target = str(relationship.attrib.get("Target") or "")
+            break
+    if not target:
+        raise RuntimeError(
+            f"Worksheet relationship {relationship_id!r} has no package target."
+        )
+    if target.startswith("/"):
+        part_name = target.lstrip("/")
+    else:
+        part_name = posixpath.normpath(posixpath.join("xl", target))
+    if part_name not in package.namelist():
+        raise RuntimeError(
+            f"Worksheet package part {part_name!r} is missing for {sheet_name!r}."
+        )
+    return part_name
+
+
+def _workbook_calculation_signature(path: Path) -> Tuple[Tuple[str, str], ...]:
+    with zipfile.ZipFile(path) as package:
+        workbook_root = ET.fromstring(package.read("xl/workbook.xml"))
+    calc_properties = workbook_root.find(
+        f"{{{_SPREADSHEETML_NAMESPACE}}}calcPr"
+    )
+    if calc_properties is None:
+        return ()
+    return tuple(sorted(
+        (str(key), str(value))
+        for key, value in calc_properties.attrib.items()
+    ))
+
+
+def _chart_relationship_signature_from_package(
+    package: zipfile.ZipFile,
+) -> Tuple[Tuple[str, str, str, str, str], ...]:
+    relationships: List[Tuple[str, str, str, str, str]] = []
+    for part_name in sorted(
+        name for name in package.namelist() if name.endswith(".rels")
+    ):
+        root = ET.fromstring(package.read(part_name))
+        for relationship in root.findall(
+            f"{{{_PACKAGE_RELATIONSHIP_NAMESPACE}}}Relationship"
+        ):
+            relationship_type = str(relationship.attrib.get("Type") or "")
+            if not relationship_type.rstrip("/").endswith("/chart"):
+                continue
+            relationships.append((
+                part_name,
+                str(relationship.attrib.get("Id") or ""),
+                relationship_type,
+                str(relationship.attrib.get("Target") or ""),
+                str(relationship.attrib.get("TargetMode") or ""),
+            ))
+    return tuple(sorted(relationships))
+
+
+def _snapshot_chart_ooxml(path: Path) -> Dict[str, Any]:
+    with zipfile.ZipFile(path) as package:
+        parts = {
+            part_name: package.read(part_name)
+            for part_name in sorted(package.namelist())
+            if part_name.startswith("xl/charts/")
+        }
+        relationships = _chart_relationship_signature_from_package(package)
+    return {
+        "parts": parts,
+        "relationships": relationships,
+    }
+
+
+def _verify_chart_ooxml_snapshot(
+    path: Path,
+    snapshot: Mapping[str, Any],
+) -> None:
+    expected_parts = snapshot.get("parts") or {}
+    expected_relationships = tuple(snapshot.get("relationships") or ())
+    with zipfile.ZipFile(path) as package:
+        actual_part_names = {
+            part_name
+            for part_name in package.namelist()
+            if part_name.startswith("xl/charts/")
+        }
+        if actual_part_names != set(expected_parts):
+            raise RuntimeError(
+                "Workbook chart OOXML part set changed during save."
+            )
+        for part_name, expected_payload in expected_parts.items():
+            if package.read(part_name) != expected_payload:
+                raise RuntimeError(
+                    f"Workbook chart OOXML part changed: {part_name}."
+                )
+        if (
+            _chart_relationship_signature_from_package(package)
+            != expected_relationships
+        ):
+            raise RuntimeError(
+                "Workbook chart relationship set changed during save."
+            )
+
+
+def _trade_log_formula_reference_bounds(
+    token_value: str,
+    sheet_name: str,
+) -> Tuple[int, int, int, int]:
+    reference = str(token_value or "").strip()
+    if "!" in reference:
+        sheet_prefix, reference = reference.rsplit("!", 1)
+        sheet_prefix = sheet_prefix.strip()
+        if (
+            len(sheet_prefix) >= 2
+            and sheet_prefix.startswith("'")
+            and sheet_prefix.endswith("'")
+        ):
+            sheet_prefix = sheet_prefix[1:-1].replace("''", "'")
+        if sheet_prefix.casefold() != str(sheet_name or "").casefold():
+            raise ValueError("cross-sheet reference")
+    reference = reference.replace("$", "")
+    if not _TRADE_LOG_FORMULA_CACHE_A1_RANGE.fullmatch(reference):
+        raise ValueError("named, structured, whole-row, or whole-column reference")
+    bounds = range_boundaries(reference)
+    if bounds[2] > 16384 or bounds[3] > 1048576:
+        raise ValueError("reference is outside worksheet bounds")
+    return bounds
+
+
+def _trade_log_formula_dependency_signature(
+    ws,
+    coordinate: str,
+    formula: str,
+) -> Dict[str, Any]:
+    """Return a conservative same-sheet dependency closure for one formula."""
+    dependencies: Dict[str, Tuple[Any, ...]] = {}
+    active: Set[str] = set()
+    checked_cells = 0
+
+    def fail(reason: str) -> Dict[str, Any]:
+        return {
+            "safe": False,
+            "reason": reason,
+            "coordinates": tuple(sorted(dependencies)),
+            "signature": tuple(sorted(dependencies.items())),
+            "checked_cells": checked_cells,
+        }
+
+    def visit_formula(
+        formula_coordinate: str,
+        formula_text: str,
+        depth: int,
+    ) -> Optional[str]:
+        nonlocal checked_cells
+        if depth > _TRADE_LOG_FORMULA_CACHE_MAX_DEPENDENCY_DEPTH:
+            return "formula dependency depth exceeds the conservative limit"
+        if formula_coordinate in active:
+            return "circular formula dependency"
+        active.add(formula_coordinate)
+        try:
+            try:
+                tokens = Tokenizer(formula_text).items
+            except Exception:
+                return "formula could not be tokenized"
+            reference_bounds: List[Tuple[int, int, int, int]] = []
+            for token in tokens:
+                if token.type == "FUNC" and token.subtype == "OPEN":
+                    function_name = str(token.value or "").rstrip("(").upper()
+                    if function_name not in _TRADE_LOG_FORMULA_CACHE_SAFE_FUNCTIONS:
+                        return f"function {function_name or '?'} is not proven deterministic"
+                if token.type == "OPERAND" and token.subtype == "RANGE":
+                    try:
+                        reference_bounds.append(
+                            _trade_log_formula_reference_bounds(token.value, ws.title)
+                        )
+                    except ValueError as exc:
+                        return str(exc)
+            for min_col, min_row, max_col, max_row in reference_bounds:
+                cell_count = (max_col - min_col + 1) * (max_row - min_row + 1)
+                if (
+                    checked_cells + cell_count
+                    > _TRADE_LOG_FORMULA_CACHE_MAX_DEPENDENCY_CELLS
+                ):
+                    return "formula dependency range exceeds the conservative limit"
+                for row in range(min_row, max_row + 1):
+                    for col in range(min_col, max_col + 1):
+                        checked_cells += 1
+                        dependency_coordinate = f"{get_column_letter(col)}{row}"
+                        dependency_cell = ws._cells.get((row, col))
+                        dependency_value = (
+                            dependency_cell.value
+                            if dependency_cell is not None
+                            else None
+                        )
+                        dependency_is_formula = (
+                            dependency_cell is not None
+                            and str(dependency_cell.data_type or "") == "f"
+                        )
+                        if dependency_is_formula and not (
+                            isinstance(dependency_value, str)
+                            and dependency_value.startswith("=")
+                        ):
+                            return (
+                                "dependency uses a non-plain formula "
+                                f"representation at {dependency_coordinate}"
+                            )
+                        if (
+                            isinstance(dependency_value, str)
+                            and dependency_value.startswith("=")
+                        ):
+                            dependencies[dependency_coordinate] = (
+                                "formula",
+                                dependency_value,
+                                dependency_cell.data_type,
+                            )
+                            nested_error = visit_formula(
+                                dependency_coordinate,
+                                dependency_value,
+                                depth + 1,
+                            )
+                            if nested_error:
+                                return nested_error
+                        else:
+                            if isinstance(dependency_value, (datetime, date)):
+                                comparable_value: Any = dependency_value.isoformat()
+                            elif isinstance(dependency_value, Decimal):
+                                comparable_value = str(dependency_value)
+                            else:
+                                comparable_value = dependency_value
+                            dependencies[dependency_coordinate] = (
+                                "value",
+                                (
+                                    dependency_cell.data_type
+                                    if dependency_cell is not None
+                                    else "n"
+                                ),
+                                comparable_value,
+                            )
+            return None
+        finally:
+            active.discard(formula_coordinate)
+
+    error = visit_formula(str(coordinate), str(formula), 0)
+    if error:
+        return fail(error)
+    return {
+        "safe": True,
+        "reason": "",
+        "coordinates": tuple(sorted(dependencies)),
+        "signature": tuple(sorted(dependencies.items())),
+        "checked_cells": checked_cells,
+    }
+
+
+def _trade_log_authored_formula_entries(ws) -> List[Dict[str, Any]]:
+    headers = _trade_log_header_map(ws)
+    row_id_col = headers.get("Row ID")
+    if not row_id_col:
+        return []
+    entries: List[Dict[str, Any]] = []
+    for row in range(_trade_log_data_start_row(ws), _trade_log_last_populated_row(ws) + 1):
+        row_id = str(ws.cell(row, row_id_col).value or "").strip()
+        if not row_id:
+            continue
+        for header, col in headers.items():
+            value = ws.cell(row, col).value
+            if not (isinstance(value, str) and value.startswith("=")):
+                continue
+            entries.append({
+                "row_id": row_id,
+                "header": header,
+                "row": row,
+                "column": col,
+                "coordinate": ws.cell(row, col).coordinate,
+                "formula": value,
+                "dependency": _trade_log_formula_dependency_signature(
+                    ws, ws.cell(row, col).coordinate, value
+                ),
+            })
+    return entries
+
+
+def _incremental_assert_trade_log_formula_dependencies_safe(
+    ws,
+    affected_rows: Collection[int],
+) -> Dict[str, int]:
+    affected = {int(row) for row in affected_rows}
+    entries = _trade_log_authored_formula_entries(ws)
+    checked_dependency_cells = 0
+    for entry in entries:
+        if int(entry["row"]) in affected:
+            raise IncrementalWorkbookUpdateNotEligible(
+                f"Trade Log row {entry['row']} contains a formula in managed "
+                f"column {entry['header']!r}.",
+                unsafe_full_rebuild=True,
+            )
+        dependency = entry["dependency"]
+        checked_dependency_cells += int(dependency.get("checked_cells") or 0)
+        if not dependency.get("safe"):
+            raise IncrementalWorkbookUpdateNotEligible(
+                "Incremental workbook update cannot prove cached formula safety for "
+                f"Trade Log {entry['coordinate']}: {dependency.get('reason') or 'unknown dependency'}.",
+                unsafe_full_rebuild=True,
+            )
+        intersecting = sorted(
+            coordinate
+            for coordinate in dependency.get("coordinates") or ()
+            if range_boundaries(coordinate)[1] in affected
+        )
+        if intersecting:
+            raise IncrementalWorkbookUpdateNotEligible(
+                "Incremental workbook update would invalidate the cached result for "
+                f"Trade Log {entry['coordinate']}; changed dependencies: "
+                + ", ".join(intersecting[:20]),
+                unsafe_full_rebuild=True,
+            )
+    return {
+        "trade_log_authored_formula_cells_checked": len(entries),
+        "trade_log_formula_dependency_cells_checked": checked_dependency_cells,
+    }
+
+
+def _formula_ooxml_signature(formula_element: ET.Element) -> Tuple[Any, ...]:
+    return (
+        str(formula_element.text or ""),
+        tuple(sorted(
+            (str(key), str(value))
+            for key, value in formula_element.attrib.items()
+        )),
+    )
+
+
+def _trade_log_ooxml_formula_records(
+    path: Path,
+    sheet_name: str,
+) -> Tuple[Dict[str, Any], ...]:
+    """Inspect every formula stored in the managed Trade Log data rectangle."""
+    with zipfile.ZipFile(path) as package:
+        part_name = _worksheet_ooxml_part_name(package, sheet_name)
+        root = ET.fromstring(package.read(part_name))
+    records: List[Dict[str, Any]] = []
+    for xml_cell in root.findall(f".//{{{_SPREADSHEETML_NAMESPACE}}}c"):
+        formula_element = xml_cell.find(
+            f"{{{_SPREADSHEETML_NAMESPACE}}}f"
+        )
+        if formula_element is None:
+            continue
+        coordinate = str(xml_cell.attrib.get("r") or "")
+        try:
+            min_col, min_row, max_col, max_row = range_boundaries(coordinate)
+        except (TypeError, ValueError):
+            continue
+        if (
+            min_row != max_row
+            or min_col != max_col
+            or min_row < TRADE_LOG_DATA_START_ROW
+            or min_col < 1
+            or min_col > len(TRADE_LOG_HEADERS)
+        ):
+            continue
+        attributes = {
+            str(key): str(value)
+            for key, value in formula_element.attrib.items()
+        }
+        formula_type = str(attributes.get("t") or "normal").casefold()
+        non_plain_attributes = {
+            key: value
+            for key, value in attributes.items()
+            if key != "t"
+        }
+        records.append({
+            "coordinate": coordinate,
+            "formula_ooxml_signature": _formula_ooxml_signature(
+                formula_element
+            ),
+            "formula_type": formula_type,
+            "non_plain": (
+                formula_type not in {"", "normal"}
+                or bool(non_plain_attributes)
+            ),
+        })
+    return tuple(records)
+
+
+def _trade_log_formula_representation_issue(
+    ws,
+    records: Sequence[Mapping[str, Any]],
+) -> str:
+    non_plain = [record for record in records if record.get("non_plain")]
+    if non_plain:
+        first = non_plain[0]
+        return (
+            f"Trade Log {first.get('coordinate') or '?'} uses non-plain "
+            f"formula representation {first.get('formula_type') or 'unknown'!r}"
+        )
+    mapped_coordinates = {
+        str(entry["coordinate"])
+        for entry in _trade_log_authored_formula_entries(ws)
+    }
+    unmapped = [
+        str(record.get("coordinate") or "?")
+        for record in records
+        if str(record.get("coordinate") or "") not in mapped_coordinates
+    ]
+    if unmapped:
+        return (
+            "Trade Log formula cells have no unambiguous stable Row ID/header "
+            "mapping: " + ", ".join(unmapped[:20])
+        )
+    return ""
+
+
+def _cell_contains_formula(cell) -> bool:
+    value = cell.value
+    return (
+        str(getattr(cell, "data_type", "") or "") == "f"
+        or (isinstance(value, str) and value.startswith("="))
+    )
+
+
+def _managed_stats2_account_balance_formula_cells(wb) -> Tuple[str, ...]:
+    if STATS2_SHEET not in wb.sheetnames:
+        return ()
+    ws = wb[STATS2_SHEET]
+    try:
+        section = _find_anchor_sections(ws, ["Account Balances"])[
+            "Account Balances"
+        ]
+    except Exception:
+        return ()
+    header_row, col_map = _find_dashboard_table_headers(ws, section)
+    if not header_row or not {"account", "balance", "currency"}.issubset(
+        col_map
+    ):
+        return ()
+    managed_columns = [
+        int(col_map[name])
+        for name in ("account", "currency", "balance", "as_of")
+        if name in col_map
+    ]
+    return tuple(
+        ws.cell(row, col).coordinate
+        for row in range(header_row + 1, section["end_row"] + 1)
+        for col in managed_columns
+        if _cell_contains_formula(ws.cell(row, col))
+    )
+
+
+def _snapshot_trade_log_formula_caches(
+    path: Path,
+    ws,
+) -> Dict[Tuple[str, str], Dict[str, Any]]:
+    entries = {
+        str(entry["coordinate"]): entry
+        for entry in _trade_log_authored_formula_entries(ws)
+    }
+    if not entries:
+        return {}
+    with zipfile.ZipFile(path) as package:
+        part_name = _worksheet_ooxml_part_name(package, ws.title)
+        root = ET.fromstring(package.read(part_name))
+    xml_cells = {
+        str(cell.attrib.get("r") or ""): cell
+        for cell in root.findall(f".//{{{_SPREADSHEETML_NAMESPACE}}}c")
+    }
+    records: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    ambiguous: Set[Tuple[str, str]] = set()
+    for coordinate, entry in entries.items():
+        xml_cell = xml_cells.get(coordinate)
+        if xml_cell is None:
+            continue
+        formula_element = xml_cell.find(
+            f"{{{_SPREADSHEETML_NAMESPACE}}}f"
+        )
+        cached_value = xml_cell.find(
+            f"{{{_SPREADSHEETML_NAMESPACE}}}v"
+        )
+        if (
+            formula_element is None
+            or cached_value is None
+            or cached_value.text is None
+        ):
+            continue
+        key = (str(entry["row_id"]), str(entry["header"]))
+        if key in records:
+            ambiguous.add(key)
+            continue
+        records[key] = {
+            **entry,
+            "formula_ooxml_signature": _formula_ooxml_signature(formula_element),
+            "cached_value": str(cached_value.text),
+            "cached_type": xml_cell.attrib.get("t"),
+        }
+    for key in ambiguous:
+        records.pop(key, None)
+    return records
+
+
+def _plan_trade_log_formula_cache_transplant(
+    ws,
+    source_records: Mapping[Tuple[str, str], Mapping[str, Any]],
+    *,
+    strict: bool,
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    headers = _trade_log_header_map(ws)
+    row_id_col = headers.get("Row ID")
+    rows_by_id: Dict[str, List[int]] = defaultdict(list)
+    if row_id_col:
+        for row in range(
+            _trade_log_data_start_row(ws),
+            _trade_log_last_populated_row(ws) + 1,
+        ):
+            row_id = str(ws.cell(row, row_id_col).value or "").strip()
+            if row_id:
+                rows_by_id[row_id].append(row)
+    plan: List[Dict[str, Any]] = []
+    skipped: List[Dict[str, str]] = []
+    for (row_id, header), source_record in source_records.items():
+        target_rows = rows_by_id.get(str(row_id)) or []
+        target_col = headers.get(str(header))
+        reason = ""
+        if len(target_rows) != 1 or not target_col:
+            reason = "stable row/header target is missing or ambiguous"
+        else:
+            target_cell = ws.cell(target_rows[0], target_col)
+            if target_cell.value != source_record.get("formula"):
+                reason = "formula text changed"
+            else:
+                target_dependency = _trade_log_formula_dependency_signature(
+                    ws, target_cell.coordinate, str(target_cell.value)
+                )
+                source_dependency = source_record.get("dependency") or {}
+                if not source_dependency.get("safe"):
+                    reason = str(
+                        source_dependency.get("reason")
+                        or "source dependencies are not proven safe"
+                    )
+                elif not target_dependency.get("safe"):
+                    reason = str(
+                        target_dependency.get("reason")
+                        or "target dependencies are not proven safe"
+                    )
+                elif (
+                    source_dependency.get("signature")
+                    != target_dependency.get("signature")
+                ):
+                    reason = "formula dependency values changed"
+                else:
+                    plan.append({
+                        **dict(source_record),
+                        "target_coordinate": target_cell.coordinate,
+                    })
+        if reason:
+            skipped.append({
+                "row_id": str(row_id),
+                "header": str(header),
+                "reason": reason,
+            })
+    if strict and skipped:
+        first = skipped[0]
+        raise IncrementalWorkbookUpdateNotEligible(
+            "Incremental workbook update cannot preserve a cached authored formula "
+            f"for {first['row_id']!r}/{first['header']!r}: {first['reason']}.",
+            unsafe_full_rebuild=True,
+        )
+    return plan, {
+        "trade_log_formula_cache_source_cells": len(source_records),
+        "trade_log_formula_cache_planned_cells": len(plan),
+        "trade_log_formula_cache_skipped_cells": len(skipped),
+        "trade_log_formula_cache_skipped": skipped,
+    }
+
+
+def _verify_trade_log_formula_cache_transplant(
+    path: Path,
+    sheet_name: str,
+    plan: Sequence[Mapping[str, Any]],
+) -> None:
+    with zipfile.ZipFile(path) as package:
+        part_name = _worksheet_ooxml_part_name(package, sheet_name)
+        root = ET.fromstring(package.read(part_name))
+    xml_cells = {
+        str(cell.attrib.get("r") or ""): cell
+        for cell in root.findall(f".//{{{_SPREADSHEETML_NAMESPACE}}}c")
+    }
+    for record in plan:
+        coordinate = str(record.get("target_coordinate") or "")
+        xml_cell = xml_cells.get(coordinate)
+        if xml_cell is None:
+            raise RuntimeError(
+                f"Formula-cache verification lost Trade Log cell {coordinate}."
+            )
+        formula_element = xml_cell.find(
+            f"{{{_SPREADSHEETML_NAMESPACE}}}f"
+        )
+        cached_value = xml_cell.find(
+            f"{{{_SPREADSHEETML_NAMESPACE}}}v"
+        )
+        if (
+            formula_element is None
+            or _formula_ooxml_signature(formula_element)
+            != record.get("formula_ooxml_signature")
+            or cached_value is None
+            or str(cached_value.text) != str(record.get("cached_value"))
+            or xml_cell.attrib.get("t") != record.get("cached_type")
+        ):
+            raise RuntimeError(
+                f"Formula-cache verification failed for Trade Log {coordinate}."
+            )
+
+
+def _patch_formula_caches_in_worksheet_payload(
+    payload: bytes,
+    plan: Sequence[Mapping[str, Any]],
+) -> bytes:
+    text = payload.decode("utf-8")
+    for record in plan:
+        coordinate = str(record.get("target_coordinate") or "")
+        coordinate_pattern = re.escape(coordinate)
+        cell_pattern = re.compile(
+            r'(<(?:[A-Za-z_][\w.-]*:)?c\b(?=[^>]*\br="'
+            + coordinate_pattern
+            + r'")[^>]*>)(.*?)(</(?:[A-Za-z_][\w.-]*:)?c>)',
+            re.DOTALL,
+        )
+        matches = list(cell_pattern.finditer(text))
+        if len(matches) != 1:
+            raise RuntimeError(
+                f"Formula-cache patch could not uniquely locate Trade Log {coordinate}."
+            )
+        match = matches[0]
+        start_tag, body, end_tag = match.groups()
+        start_tag = re.sub(r'\s+t="[^"]*"', "", start_tag)
+        cached_type = record.get("cached_type")
+        if cached_type is not None:
+            escaped_type = _xml_escape(str(cached_type), {'"': "&quot;"})
+            start_tag = start_tag[:-1] + f' t="{escaped_type}">'
+        cached_text = _xml_escape(str(record.get("cached_value") or ""))
+        value_element = f"<v>{cached_text}</v>"
+        value_pattern = re.compile(
+            r"<(?:[A-Za-z_][\w.-]*:)?v(?:\s[^>]*)?>.*?"
+            r"</(?:[A-Za-z_][\w.-]*:)?v\s*>",
+            re.DOTALL,
+        )
+        if value_pattern.search(body):
+            body = value_pattern.sub(value_element, body, count=1)
+        else:
+            self_closing_value = re.compile(
+                r"<(?:[A-Za-z_][\w.-]*:)?v(?:\s[^>]*)?/\s*>"
+            )
+            if self_closing_value.search(body):
+                body = self_closing_value.sub(value_element, body, count=1)
+            else:
+                formula_close = re.search(
+                    r"</(?:[A-Za-z_][\w.-]*:)?f\s*>", body
+                )
+                if formula_close is None:
+                    raise RuntimeError(
+                        f"Formula-cache patch found no formula at Trade Log {coordinate}."
+                    )
+                body = (
+                    body[:formula_close.end()]
+                    + value_element
+                    + body[formula_close.end():]
+                )
+        replacement = start_tag + body + end_tag
+        text = text[:match.start()] + replacement + text[match.end():]
+    return text.encode("utf-8")
+
+
+def _preserve_candidate_ooxml(
+    candidate_path: Path,
+    sheet_name: str,
+    formula_cache_plan: Sequence[Mapping[str, Any]],
+    chart_snapshot: Mapping[str, Any],
+) -> Dict[str, Any]:
+    expected_chart_parts = dict(chart_snapshot.get("parts") or {})
+    expected_chart_relationships = tuple(
+        chart_snapshot.get("relationships") or ()
+    )
+    replacements: Dict[str, bytes] = dict(expected_chart_parts)
+    with zipfile.ZipFile(candidate_path) as package:
+        candidate_chart_parts = {
+            name for name in package.namelist() if name.startswith("xl/charts/")
+        }
+        if candidate_chart_parts != set(expected_chart_parts):
+            raise RuntimeError(
+                "Workbook chart OOXML part set changed during candidate save."
+            )
+        if (
+            _chart_relationship_signature_from_package(package)
+            != expected_chart_relationships
+        ):
+            raise RuntimeError(
+                "Workbook chart relationship set changed during candidate save."
+            )
+        if formula_cache_plan:
+            worksheet_part = _worksheet_ooxml_part_name(package, sheet_name)
+            worksheet_root = ET.fromstring(package.read(worksheet_part))
+            xml_cells = {
+                str(cell.attrib.get("r") or ""): cell
+                for cell in worksheet_root.findall(
+                    f".//{{{_SPREADSHEETML_NAMESPACE}}}c"
+                )
+            }
+            for record in formula_cache_plan:
+                coordinate = str(record.get("target_coordinate") or "")
+                xml_cell = xml_cells.get(coordinate)
+                formula_element = (
+                    xml_cell.find(f"{{{_SPREADSHEETML_NAMESPACE}}}f")
+                    if xml_cell is not None
+                    else None
+                )
+                if (
+                    formula_element is None
+                    or _formula_ooxml_signature(formula_element)
+                    != record.get("formula_ooxml_signature")
+                ):
+                    raise RuntimeError(
+                        "Formula-cache transplant refused changed formula at "
+                        f"Trade Log {coordinate}."
+                    )
+            replacements[worksheet_part] = (
+                _patch_formula_caches_in_worksheet_payload(
+                    package.read(worksheet_part), formula_cache_plan
+                )
+            )
+        changed_replacements = {
+            part_name: payload
+            for part_name, payload in replacements.items()
+            if package.read(part_name) != payload
+        }
+    if changed_replacements:
+        rewrite_path = candidate_path.with_name(
+            f".{candidate_path.name}.ooxml-preserve-{uuid4().hex}.tmp"
+        )
+        replaced = False
+        try:
+            with zipfile.ZipFile(candidate_path, "r") as source_package:
+                with zipfile.ZipFile(rewrite_path, "w") as target_package:
+                    target_package.comment = source_package.comment
+                    for info in source_package.infolist():
+                        if info.filename in changed_replacements:
+                            payload = changed_replacements[info.filename]
+                        else:
+                            payload = source_package.read(info.filename)
+                        target_package.writestr(info, payload)
+            with rewrite_path.open("r+b") as handle:
+                handle.flush()
+                os.fsync(handle.fileno())
+            if formula_cache_plan:
+                _verify_trade_log_formula_cache_transplant(
+                    rewrite_path, sheet_name, formula_cache_plan
+                )
+            _verify_chart_ooxml_snapshot(rewrite_path, chart_snapshot)
+            os.replace(rewrite_path, candidate_path)
+            replaced = True
+        finally:
+            if not replaced and rewrite_path.exists():
+                rewrite_path.unlink(missing_ok=True)
+    else:
+        if formula_cache_plan:
+            _verify_trade_log_formula_cache_transplant(
+                candidate_path, sheet_name, formula_cache_plan
+            )
+        _verify_chart_ooxml_snapshot(candidate_path, chart_snapshot)
+    changed_chart_parts = sum(
+        1
+        for part_name in expected_chart_parts
+        if part_name in changed_replacements
+    )
+    return {
+        "trade_log_formula_caches_transplanted": len(formula_cache_plan),
+        "trade_log_formula_cache_candidate_verified": True,
+        "chart_ooxml_parts_verified": len(expected_chart_parts),
+        "chart_ooxml_parts_restored": changed_chart_parts,
+        "chart_relationships_verified": len(expected_chart_relationships),
+        "candidate_ooxml_rewritten_once": bool(changed_replacements),
+    }
 
 
 def _external_workbook_formula_references(path: Path) -> List[str]:
@@ -12784,6 +13809,16 @@ def update_master_journal_workbook_data_only(
     *,
     preserve_existing_layout: bool = False,
 ) -> Dict[str, Any]:
+    source_calculation_signature = (
+        _workbook_calculation_signature(path)
+        if preserve_existing_layout
+        else ()
+    )
+    source_chart_snapshot = (
+        _snapshot_chart_ooxml(path)
+        if preserve_existing_layout
+        else {"parts": {}, "relationships": ()}
+    )
     external_formula_references = _external_workbook_formula_references(path)
     if external_formula_references:
         raise RuntimeError(
@@ -12825,15 +13860,48 @@ def update_master_journal_workbook_data_only(
         for ws in wb.worksheets
     } if preserve_existing_layout else {}
     preserved_trade_log_presentations: Dict[str, List[Dict[str, Any]]] = {}
+    preserved_trade_log_formula_caches: Dict[
+        Tuple[str, str], Dict[str, Any]
+    ] = {}
     if preserve_existing_layout:
         try:
             source_trade_log = _get_all_trades_sheet(wb)
+            source_trade_log_formula_records = (
+                _trade_log_ooxml_formula_records(
+                    path, source_trade_log.title
+                )
+            )
+            representation_issue = _trade_log_formula_representation_issue(
+                source_trade_log,
+                source_trade_log_formula_records,
+            )
+            if representation_issue:
+                raise RuntimeError(
+                    "Preservation-mode workbook update cannot safely preserve "
+                    f"{representation_issue}."
+                )
+            stats2_formula_cells = (
+                _managed_stats2_account_balance_formula_cells(wb)
+            )
+            if stats2_formula_cells:
+                raise RuntimeError(
+                    "Preservation-mode workbook update cannot safely preserve "
+                    "a formula in a managed cell of STATS2 Account Balances: "
+                    + ", ".join(stats2_formula_cells[:20])
+                    + "."
+                )
+            diagnostics["trade_log_ooxml_formula_cells_checked"] = len(
+                source_trade_log_formula_records
+            )
             source_layout = preserved_layout.get(source_trade_log.title) or {}
             preserved_trade_log_presentations = (
                 _snapshot_trade_log_data_presentations_by_row_id(
                     source_trade_log,
                     source_layout.get("cell_presentations") or {},
                 )
+            )
+            preserved_trade_log_formula_caches = (
+                _snapshot_trade_log_formula_caches(path, source_trade_log)
             )
         except Exception:
             wb.close()
@@ -14070,6 +15138,16 @@ def update_master_journal_workbook_data_only(
         after = _snapshot_invariants(wb)
         _assert_invariants_unchanged(before, after)
         candidate = path.with_suffix(".update-candidate.tmp.xlsx")
+        formula_cache_plan: List[Dict[str, Any]] = []
+        if preserve_existing_layout:
+            formula_cache_plan, formula_cache_diagnostics = (
+                _plan_trade_log_formula_cache_transplant(
+                    _get_all_trades_sheet(wb, allow_legacy=False),
+                    preserved_trade_log_formula_caches,
+                    strict=False,
+                )
+            )
+            diagnostics.update(formula_cache_diagnostics)
         if STATS2_SHEET in wb.sheetnames and not preserve_existing_layout:
             _repair_stats2_account_balance_formatting(wb[STATS2_SHEET], diagnostics)
         if not preserve_existing_layout:
@@ -14077,9 +15155,836 @@ def update_master_journal_workbook_data_only(
             _repair_stats1_child_label_styles(dash, diagnostics)
             _repair_stats2_as_of_datetime_style(wb, diagnostics)
         wb.save(candidate)
+        if preserve_existing_layout:
+            diagnostics.update(
+                _preserve_candidate_ooxml(
+                    candidate,
+                    TRADE_LOG_SHEET,
+                    formula_cache_plan,
+                    source_chart_snapshot,
+                )
+            )
+            if (
+                _workbook_calculation_signature(candidate)
+                != source_calculation_signature
+            ):
+                raise RuntimeError(
+                    "Master Journal calculation settings changed during preservation update."
+                )
         return {"ok": True, "path": str(path), "candidate_path": str(candidate), "diagnostics": diagnostics}
     finally:
         wb.close()
+
+def _incremental_require_canonical_trade_log(wb) -> Any:
+    try:
+        ws = _get_trade_log_sheet(wb, allow_legacy=False)
+    except Exception as exc:
+        raise IncrementalWorkbookUpdateNotEligible(
+            "Incremental workbook update requires the canonical Trade Log sheet."
+        ) from exc
+    expected = {header: col for col, header in enumerate(TRADE_LOG_HEADERS, start=1)}
+    if (
+        not _trade_log_has_three_row_headers(ws)
+        or _trade_log_header_map(ws) != expected
+        or ws.max_column != len(TRADE_LOG_HEADERS)
+    ):
+        raise IncrementalWorkbookUpdateNotEligible(
+            "Incremental workbook update requires the current canonical Trade Log schema."
+        )
+    return ws
+
+
+def _incremental_trade_log_row_index(ws) -> Tuple[Dict[str, int], int]:
+    headers = _trade_log_header_map(ws)
+    row_id_col = headers.get("Row ID")
+    if not row_id_col:
+        raise IncrementalWorkbookUpdateNotEligible(
+            "Incremental workbook update requires a Row ID column."
+        )
+    row_by_id: Dict[str, int] = {}
+    last_populated = _trade_log_data_start_row(ws) - 1
+    last_col = len(TRADE_LOG_HEADERS)
+    for row in range(_trade_log_data_start_row(ws), ws.max_row + 1):
+        populated = any(
+            ws.cell(row, col).value not in (None, "")
+            for col in range(1, last_col + 1)
+        )
+        if not populated:
+            continue
+        last_populated = row
+        row_id = str(ws.cell(row, row_id_col).value or "").strip()
+        if not row_id:
+            raise IncrementalWorkbookUpdateNotEligible(
+                f"Trade Log row {row} is populated but has no stable Row ID."
+            )
+        if row_id in row_by_id:
+            raise IncrementalWorkbookUpdateNotEligible(
+                f"Trade Log contains duplicate Row ID {row_id!r}."
+            )
+        row_by_id[row_id] = row
+    return row_by_id, last_populated
+
+
+def _incremental_changed_rows_by_id(
+    changed_rows: Sequence[Mapping[str, Any]],
+    *,
+    allow_empty: bool = False,
+) -> Tuple[List[str], Dict[str, Dict[str, Any]]]:
+    order: List[str] = []
+    rows_by_id: Dict[str, Dict[str, Any]] = {}
+    for index, raw_row in enumerate(changed_rows):
+        if not isinstance(raw_row, Mapping):
+            raise IncrementalWorkbookUpdateNotEligible(
+                f"Changed workbook row {index} is not a mapping."
+            )
+        row = dict(raw_row)
+        row_id = str(row.get("id") or row.get("__row_id") or "").strip()
+        if not row_id:
+            raise IncrementalWorkbookUpdateNotEligible(
+                f"Changed workbook row {index} has no stable Row ID."
+            )
+        if row_id in rows_by_id:
+            raise IncrementalWorkbookUpdateNotEligible(
+                f"Changed rows contain duplicate Row ID {row_id!r}."
+            )
+        if stable_row_id(row) != row_id:
+            raise IncrementalWorkbookUpdateNotEligible(
+                f"Changed workbook row {row_id!r} does not have a canonical stable Row ID."
+            )
+        row["id"] = row_id
+        order.append(row_id)
+        rows_by_id[row_id] = row
+    if not order and not allow_empty:
+        raise IncrementalWorkbookUpdateNotEligible(
+            "Incremental workbook update requires at least one changed row."
+        )
+    return order, rows_by_id
+
+
+def _incremental_assert_no_managed_formulas(ws, row: int) -> None:
+    for col, header in enumerate(TRADE_LOG_HEADERS, start=1):
+        if _cell_contains_formula(ws.cell(row, col)):
+            raise IncrementalWorkbookUpdateNotEligible(
+                f"Trade Log row {row} contains a formula in managed column {header!r}.",
+                unsafe_full_rebuild=True,
+            )
+
+
+def _incremental_clone_trade_log_row_presentation(ws, source_row: int, target_row: int) -> None:
+    if source_row < _trade_log_data_start_row(ws):
+        raise IncrementalWorkbookUpdateNotEligible(
+            "Incremental append requires an adjacent canonical Trade Log data row."
+        )
+    if any(
+        item.min_row <= target_row <= item.max_row
+        for item in ws.merged_cells.ranges
+    ):
+        raise IncrementalWorkbookUpdateNotEligible(
+            f"First unused Trade Log row {target_row} contains an authored merge.",
+            unsafe_full_rebuild=True,
+        )
+    for col in range(1, len(TRADE_LOG_HEADERS) + 1):
+        target = ws.cell(target_row, col)
+        if (
+            target.value not in (None, "")
+            or target.comment is not None
+            or target.hyperlink is not None
+        ):
+            raise IncrementalWorkbookUpdateNotEligible(
+                f"First unused Trade Log row {target_row} contains authored content.",
+                unsafe_full_rebuild=True,
+            )
+        source = ws.cell(source_row, col)
+        # A blank row may be intentionally preformatted for the next trade.
+        # Retain any target presentation already present; only fill genuinely
+        # unformatted cells from the adjacent canonical data-row baseline.
+        if target._style is None:
+            target._style = copy(source._style)
+            target.protection = copy(source.protection)
+            target.number_format = source.number_format
+        target.comment = None
+        target.hyperlink = None
+    target_dimension = ws.row_dimensions[target_row]
+    if target_dimension.height is None:
+        target_dimension.height = ws.row_dimensions[source_row].height
+
+
+_INCREMENTAL_GENERATED_DV_FORMULAS = {
+    '"Yes,No"': {
+        "Test", "VWAP", "Round Number", "Spiked Out", "Close Stopout",
+        "Near Perfect Entry", "Near Win", "Early Close",
+    },
+    '"All-Time High,All-Time Low"': {"ATHS/ATLS"},
+    '"Market,Limit"': {"Order"},
+    '"range,channel"': {"Pattern"},
+}
+
+
+def _incremental_generated_validation_ranges(ws, validation) -> Optional[List[Any]]:
+    if str(getattr(validation, "type", "") or "") != "list":
+        return None
+    formula = str(getattr(validation, "formula1", "") or "")
+    expected_headers = _INCREMENTAL_GENERATED_DV_FORMULAS.get(formula)
+    if not expected_headers or not bool(getattr(validation, "allow_blank", False)):
+        return None
+    headers = _trade_log_header_map(ws)
+    expected_cols = {headers.get(header) for header in expected_headers}
+    expected_cols.discard(None)
+    ranges = list(getattr(getattr(validation, "sqref", None), "ranges", []) or [])
+    if not ranges:
+        return None
+    start_row = _trade_log_data_start_row(ws)
+    covered_cols: Set[int] = set()
+    for item in ranges:
+        if item.min_row != start_row:
+            return None
+        item_cols = set(range(item.min_col, item.max_col + 1))
+        if not item_cols or not item_cols.issubset(expected_cols):
+            return None
+        covered_cols.update(item_cols)
+    return ranges if covered_cols else None
+
+
+def _incremental_extend_generated_validations(ws, last_row: int) -> int:
+    extended = 0
+    for validation in list(ws.data_validations.dataValidation):
+        ranges = _incremental_generated_validation_ranges(ws, validation)
+        if not ranges:
+            continue
+        replacements: List[str] = []
+        changed = False
+        for item in ranges:
+            target_last = max(last_row, int(item.max_row))
+            replacements.append(
+                f"{get_column_letter(item.min_col)}{item.min_row}:"
+                f"{get_column_letter(item.max_col)}{target_last}"
+            )
+            changed = changed or target_last != int(item.max_row)
+        if changed:
+            validation.sqref = " ".join(replacements)
+            extended += 1
+    return extended
+
+
+def _incremental_formula_value_signature(value: Any) -> Tuple[Any, ...]:
+    if isinstance(value, str):
+        return ("plain", value)
+    attributes = getattr(value, "__dict__", {})
+    return (
+        "special",
+        f"{type(value).__module__}.{type(value).__qualname__}",
+        tuple(sorted(
+            (str(key), repr(attribute_value))
+            for key, attribute_value in attributes.items()
+        )),
+    )
+
+
+def _incremental_formula_signature(
+    wb,
+) -> Tuple[Tuple[str, str, Tuple[Any, ...]], ...]:
+    return tuple(sorted(
+        (
+            ws.title,
+            cell.coordinate,
+            _incremental_formula_value_signature(cell.value),
+        )
+        for ws in wb.worksheets
+        for cell in ws._cells.values()
+        if _cell_contains_formula(cell)
+    ))
+
+
+def _incremental_defined_name_signature(
+    wb,
+    *,
+    excluded_names: Collection[str] = (),
+) -> Tuple[Tuple[Any, ...], ...]:
+    excluded = {str(name) for name in excluded_names}
+    fields = (
+        "attr_text", "localSheetId", "hidden", "function", "vbProcedure",
+        "xlm", "functionGroupId", "shortcutKey", "publishToServer",
+        "workbookParameter", "description",
+    )
+    return tuple(sorted(
+        (
+            str(name),
+            *(getattr(defined, field, None) for field in fields),
+        )
+        for name, defined in wb.defined_names.items()
+        if str(name) not in excluded
+    ))
+
+
+def _incremental_structural_signature(wb) -> Dict[str, Any]:
+    sheet_layouts: Dict[str, Any] = {}
+    for ws in wb.worksheets:
+        layout = _worksheet_layout_snapshot(ws)
+        if ws.title == TRADE_LOG_SHEET:
+            layout = dict(layout)
+            layout.pop("row_heights", None)
+            layout.pop("auto_filter", None)
+        sheet_layouts[ws.title] = layout
+    return {
+        "sheetnames": tuple(wb.sheetnames),
+        "active": wb.active.title if wb.worksheets else "",
+        "selected": tuple(
+            ws.title for ws in wb.worksheets if bool(ws.sheet_view.tabSelected)
+        ),
+        "sheet_states": tuple((ws.title, ws.sheet_state) for ws in wb.worksheets),
+        "layouts": sheet_layouts,
+        "chart_counts": tuple((ws.title, len(ws._charts)) for ws in wb.worksheets),
+    }
+
+
+def _incremental_serialized_tree(value: Any) -> str:
+    if value is None or not hasattr(value, "to_tree"):
+        return ""
+    return ET.tostring(value.to_tree(), encoding="unicode")
+
+
+def _incremental_trade_log_preservation_signature(ws) -> Dict[str, Any]:
+    """Capture Trade Log state that a balance-only save must not rewrite."""
+    cells: List[Tuple[Any, ...]] = []
+    for (row, col), cell in sorted(ws._cells.items()):
+        hyperlink = cell.hyperlink
+        comment = cell.comment
+        cells.append(
+            (
+                row,
+                col,
+                cell.value,
+                cell.data_type,
+                tuple(cell._style) if cell._style is not None else None,
+                cell.number_format,
+                None
+                if hyperlink is None
+                else (
+                    hyperlink.target,
+                    hyperlink.location,
+                    hyperlink.display,
+                    hyperlink.tooltip,
+                ),
+                None
+                if comment is None
+                else (comment.text, comment.author, comment.width, comment.height),
+            )
+        )
+    conditional_formatting = tuple(
+        (
+            str(getattr(key, "sqref", key)),
+            tuple(_incremental_serialized_tree(rule) for rule in rules),
+        )
+        for key, rules in ws.conditional_formatting._cf_rules.items()
+    )
+    validations = tuple(
+        _incremental_serialized_tree(validation)
+        for validation in ws.data_validations.dataValidation
+    )
+    tables = tuple(
+        (str(table.name), _incremental_serialized_tree(table))
+        for table in sorted(
+            ws.tables.values(), key=lambda value: str(value.name)
+        )
+    )
+    return {
+        "cells": tuple(cells),
+        "merged": tuple(sorted(str(item) for item in ws.merged_cells.ranges)),
+        "row_dimensions": tuple(
+            (str(key), _incremental_serialized_tree(dimension))
+            for key, dimension in sorted(ws.row_dimensions.items())
+        ),
+        "column_dimensions": tuple(
+            (str(key), _incremental_serialized_tree(dimension))
+            for key, dimension in sorted(ws.column_dimensions.items())
+        ),
+        "auto_filter": _incremental_serialized_tree(ws.auto_filter),
+        "conditional_formatting": conditional_formatting,
+        "data_validations": validations,
+        "tables": tables,
+        "views": _incremental_serialized_tree(ws.views),
+        "sheet_properties": _incremental_serialized_tree(ws.sheet_properties),
+        "sheet_format": _incremental_serialized_tree(ws.sheet_format),
+        "protection": _incremental_serialized_tree(ws.protection),
+        "print_options": _incremental_serialized_tree(ws.print_options),
+        "page_margins": _incremental_serialized_tree(ws.page_margins),
+        "page_setup": _incremental_serialized_tree(ws.page_setup),
+        "chart_count": len(ws._charts),
+        "image_count": len(ws._images),
+    }
+
+
+def _incremental_chart_formula_signature(path: Path) -> Tuple[Tuple[str, str], ...]:
+    with zipfile.ZipFile(path) as package:
+        return tuple(sorted(
+            (part_name, str(formula.text or ""))
+            for part_name in package.namelist()
+            if part_name.startswith("xl/charts/") and part_name.endswith(".xml")
+            for formula in ET.fromstring(package.read(part_name)).findall(
+                f".//{{{_DRAWINGML_CHART_NAMESPACE}}}f"
+            )
+        ))
+
+
+def _incremental_value_equal(left: Any, right: Any) -> bool:
+    if left in (None, "") and right in (None, ""):
+        return True
+    if isinstance(left, (int, float, Decimal)) and not isinstance(left, bool):
+        if isinstance(right, (int, float, Decimal)) and not isinstance(right, bool):
+            try:
+                return abs(Decimal(str(left)) - Decimal(str(right))) <= Decimal("1e-9")
+            except (InvalidOperation, ValueError):
+                return False
+    if isinstance(left, (datetime, date)) and isinstance(right, (datetime, date)):
+        return left == right
+    return left == right
+
+
+def _incremental_account_balance_label(account_balance: Optional[Mapping[str, Any]]) -> str:
+    if not isinstance(account_balance, Mapping):
+        return ""
+    return _canonical_account_label(
+        account_balance.get("account_label")
+        or account_balance.get("account")
+        or account_balance.get("label")
+    )
+
+
+def _incremental_update_account_balance(
+    wb,
+    account_balance: Mapping[str, Any],
+) -> Dict[str, Any]:
+    label = _incremental_account_balance_label(account_balance)
+    balance = _as_float(account_balance.get("balance"))
+    if not label or balance is None:
+        raise IncrementalWorkbookUpdateNotEligible(
+            "Incremental account balance update requires an account label and numeric balance."
+        )
+    if STATS2_SHEET not in wb.sheetnames:
+        raise IncrementalWorkbookUpdateNotEligible(
+            "Incremental account balance update requires STATS2."
+        )
+    ws = wb[STATS2_SHEET]
+    try:
+        section = _find_anchor_sections(ws, ["Account Balances"])["Account Balances"]
+    except Exception as exc:
+        raise IncrementalWorkbookUpdateNotEligible(
+            "Incremental account balance update could not locate Account Balances."
+        ) from exc
+    header_row, col_map = _find_dashboard_table_headers(ws, section)
+    if not header_row or not {"account", "balance", "currency"}.issubset(col_map):
+        raise IncrementalWorkbookUpdateNotEligible(
+            "Incremental account balance update requires canonical STATS2 balance headers."
+        )
+    matching_rows = [
+        row
+        for row in range(header_row + 1, section["end_row"] + 1)
+        if _canonical_account_label(ws.cell(row, col_map["account"]).value) == label
+    ]
+    if len(matching_rows) != 1:
+        raise IncrementalWorkbookUpdateNotEligible(
+            f"Incremental account balance update requires exactly one STATS2 row for {label!r}."
+        )
+    row = matching_rows[0]
+    managed_cols = [col_map["balance"], col_map["currency"]]
+    if "as_of" in col_map:
+        managed_cols.append(col_map["as_of"])
+    for col in managed_cols:
+        if _cell_contains_formula(ws.cell(row, col)):
+            raise IncrementalWorkbookUpdateNotEligible(
+                f"STATS2 account balance row {row} contains a formula in a managed cell.",
+                unsafe_full_rebuild=True,
+            )
+    ws.cell(row, col_map["balance"]).value = balance
+    currency = str(account_balance.get("currency") or "").strip().upper()
+    if currency:
+        ws.cell(row, col_map["currency"]).value = currency
+        ws.cell(row, col_map["balance"]).number_format = _currency_number_format(
+            currency,
+            force_decimals=10 if _is_crypto_currency(currency) else 2,
+        )
+    as_of = account_balance.get("as_of")
+    if as_of not in (None, "") and "as_of" in col_map:
+        ws.cell(row, col_map["as_of"]).value = str(as_of)
+    source = account_balance.get("balance_source") or account_balance.get("source")
+    _write_account_balance_source_metadata(wb, label, source, as_of)
+    return {
+        "label": label,
+        "row": row,
+        "balance": balance,
+        "currency": currency,
+        "as_of": "" if as_of in (None, "") else str(as_of),
+        "source": str(source or "").strip(),
+    }
+
+
+def _incremental_validate_account_balance(
+    wb,
+    expected: Mapping[str, Any],
+) -> Dict[str, Any]:
+    balances = {
+        _canonical_account_label(item.get("account_label") or item.get("account")): item
+        for item in _read_stats2_account_balances(wb)
+        if isinstance(item, dict)
+    }
+    actual = balances.get(str(expected.get("label") or ""))
+    if not actual or not _incremental_value_equal(actual.get("balance"), expected.get("balance")):
+        raise RuntimeError("Incremental workbook account balance verification failed.")
+    expected_currency = str(expected.get("currency") or "")
+    if expected_currency and str(actual.get("currency") or "") != expected_currency:
+        raise RuntimeError("Incremental workbook account currency verification failed.")
+    expected_as_of = str(expected.get("as_of") or "")
+    if expected_as_of and _account_balance_timeline_as_of(actual.get("as_of")) != _account_balance_timeline_as_of(expected_as_of):
+        raise RuntimeError("Incremental workbook account balance timestamp verification failed.")
+    metadata = _read_account_balance_source_metadata(wb, expected.get("label"))
+    if str(metadata.get("source") or "") != str(expected.get("source") or ""):
+        raise RuntimeError("Incremental workbook account balance source verification failed.")
+    return {
+        "account_label": str(actual.get("account_label") or actual.get("account") or ""),
+        "row": int(expected.get("row") or 0),
+        "balance": actual.get("balance"),
+        "currency": str(actual.get("currency") or ""),
+        "as_of": str(actual.get("as_of") or ""),
+        "source": str(metadata.get("source") or ""),
+        "provenance_defined_name": (
+            _account_balance_source_defined_name(expected.get("label"))
+            if metadata
+            else ""
+        ),
+    }
+
+
+def _incremental_validate_trade_log_ranges(ws, last_row: int) -> None:
+    expected_filter = (
+        f"A{TRADE_LOG_FILTER_HEADER_ROW}:"
+        f"{get_column_letter(len(TRADE_LOG_HEADERS))}{last_row}"
+    )
+    if not ws.auto_filter or str(ws.auto_filter.ref or "") != expected_filter:
+        raise RuntimeError("Incremental workbook Trade Log filter verification failed.")
+    expected_cf = (
+        f"A{TRADE_LOG_DATA_START_ROW}:"
+        f"{get_column_letter(len(TRADE_LOG_HEADERS))}{last_row}"
+    )
+    generated_ranges: List[str] = []
+    for key, rules in ws.conditional_formatting._cf_rules.items():
+        sqref = str(getattr(key, "sqref", key))
+        for rule in rules:
+            if _is_generated_trade_log_win_loss_row_rule(rule, sqref):
+                generated_ranges.append(sqref)
+    if generated_ranges.count(expected_cf) != 2 or any(
+        item != expected_cf for item in generated_ranges
+    ):
+        raise RuntimeError("Incremental workbook Trade Log conditional formatting verification failed.")
+    for validation in ws.data_validations.dataValidation:
+        ranges = _incremental_generated_validation_ranges(ws, validation)
+        if ranges and any(int(item.max_row) < last_row for item in ranges):
+            raise RuntimeError("Incremental workbook Trade Log validation range verification failed.")
+
+
+def _incremental_validate_changed_rows(
+    wb,
+    changed_order: Sequence[str],
+    rows_by_id: Mapping[str, Mapping[str, Any]],
+    expected_values: Mapping[str, Mapping[str, Any]],
+    expected_formats: Mapping[str, Mapping[str, str]],
+    expected_survivor_row_ids: Optional[Collection[str]],
+) -> Tuple[Dict[str, int], int]:
+    ws = _incremental_require_canonical_trade_log(wb)
+    row_index, last_row = _incremental_trade_log_row_index(ws)
+    for row_id in changed_order:
+        row_number = row_index.get(row_id)
+        if row_number is None:
+            raise RuntimeError(f"Incremental workbook verification lost Row ID {row_id!r}.")
+        projection = expected_values[row_id]
+        for header, col in _trade_log_header_map(ws).items():
+            if not _incremental_value_equal(ws.cell(row_number, col).value, projection.get(header, "")):
+                raise RuntimeError(
+                    f"Incremental workbook value verification failed for {row_id!r} column {header!r}."
+                )
+        for header, number_format in expected_formats[row_id].items():
+            col = _trade_log_header_map(ws).get(header)
+            if col and str(ws.cell(row_number, col).number_format or "") != str(number_format):
+                raise RuntimeError(
+                    f"Incremental workbook number-format verification failed for {row_id!r} column {header!r}."
+                )
+    if expected_survivor_row_ids is not None:
+        expected = {str(value or "").strip() for value in expected_survivor_row_ids}
+        expected.discard("")
+        missing = sorted(expected - set(row_index))
+        if missing:
+            raise IncrementalWorkbookUpdateNotEligible(
+                "Incremental workbook survivor verification failed: " + ", ".join(missing[:20])
+            )
+    _incremental_validate_trade_log_ranges(ws, last_row)
+    return row_index, last_row
+
+
+def update_master_journal_workbook_incremental(
+    path: Path,
+    changed_rows: Sequence[Mapping[str, Any]],
+    *,
+    account_balance: Optional[Mapping[str, Any]] = None,
+    expected_survivor_row_ids: Optional[Collection[str]] = None,
+) -> Dict[str, Any]:
+    """Atomically update only selected canonical Trade Log rows and one balance."""
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"Master Journal workbook not found: {path}")
+    source_calculation_signature = _workbook_calculation_signature(path)
+    source_chart_snapshot = _snapshot_chart_ooxml(path)
+    external_references = _external_workbook_formula_references(path)
+    if external_references:
+        raise IncrementalWorkbookUpdateNotEligible(
+            "Incremental workbook update cannot safely preserve external workbook references.",
+            unsafe_full_rebuild=True,
+        )
+    changed_order, rows_by_id = _incremental_changed_rows_by_id(
+        changed_rows,
+        allow_empty=isinstance(account_balance, Mapping),
+    )
+    candidate = path.with_name(
+        f".{path.stem}.incremental-{uuid4().hex}.tmp{path.suffix}"
+    )
+    wb = load_workbook(path, data_only=False, keep_links=False)
+    balance_name = ""
+    if isinstance(account_balance, Mapping):
+        balance_label = _incremental_account_balance_label(account_balance)
+        if balance_label:
+            balance_name = _account_balance_source_defined_name(balance_label)
+    excluded_names = {balance_name} if balance_name else set()
+    before_formula_signature = _incremental_formula_signature(wb)
+    before_name_signature = _incremental_defined_name_signature(
+        wb, excluded_names=excluded_names
+    )
+    before_structural_signature = _incremental_structural_signature(wb)
+    before_chart_signature = _incremental_chart_formula_signature(path)
+    inserted_ids: List[str] = []
+    updated_ids: List[str] = []
+    affected_rows: List[int] = []
+    expected_values: Dict[str, Dict[str, Any]] = {}
+    expected_formats: Dict[str, Dict[str, str]] = {}
+    balance_expected: Optional[Dict[str, Any]] = None
+    verified_account_balance: Optional[Dict[str, Any]] = None
+    trade_log_preservation_signature: Optional[Dict[str, Any]] = None
+    source_formula_caches: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    formula_cache_plan: List[Dict[str, Any]] = []
+    formula_cache_diagnostics: Dict[str, Any] = {}
+    formula_dependency_diagnostics: Dict[str, int] = {}
+    validation_extended = 0
+    replaced = False
+    try:
+        ws = _incremental_require_canonical_trade_log(wb)
+        source_formula_records = _trade_log_ooxml_formula_records(
+            path, ws.title
+        )
+        representation_issue = _trade_log_formula_representation_issue(
+            ws, source_formula_records
+        )
+        if representation_issue:
+            raise IncrementalWorkbookUpdateNotEligible(
+                "Incremental workbook update cannot safely preserve "
+                f"{representation_issue}.",
+                unsafe_full_rebuild=True,
+            )
+        stats2_formula_cells = _managed_stats2_account_balance_formula_cells(wb)
+        if stats2_formula_cells:
+            raise IncrementalWorkbookUpdateNotEligible(
+                "Incremental workbook update cannot safely preserve a formula in "
+                "a managed cell of STATS2 Account Balances: "
+                + ", ".join(stats2_formula_cells[:20])
+                + ".",
+                unsafe_full_rebuild=True,
+            )
+        row_index, last_populated = _incremental_trade_log_row_index(ws)
+        source_formula_caches = _snapshot_trade_log_formula_caches(path, ws)
+        if not changed_order:
+            trade_log_preservation_signature = (
+                _incremental_trade_log_preservation_signature(ws)
+            )
+        next_append_row = max(_trade_log_data_start_row(ws), last_populated + 1)
+        # Reserve and validate every append row before mutating the adjacent
+        # populated row. This keeps the canonical presentation baseline stable
+        # when one import appends several rows or also updates the former last row.
+        for row_id in changed_order:
+            row_number = row_index.get(row_id)
+            if row_number is None:
+                _incremental_clone_trade_log_row_presentation(
+                    ws, last_populated, next_append_row
+                )
+                row_number = next_append_row
+                next_append_row += 1
+                row_index[row_id] = row_number
+                inserted_ids.append(row_id)
+        planned_affected_rows = [row_index[row_id] for row_id in changed_order]
+        formula_dependency_diagnostics = (
+            _incremental_assert_trade_log_formula_dependencies_safe(
+                ws, planned_affected_rows
+            )
+        )
+        formula_dependency_diagnostics[
+            "trade_log_ooxml_formula_cells_checked"
+        ] = len(source_formula_records)
+        for row_id in changed_order:
+            row = rows_by_id[row_id]
+            row_number = row_index[row_id]
+            if row_id not in inserted_ids:
+                updated_ids.append(row_id)
+            _incremental_assert_no_managed_formulas(ws, row_number)
+            explicit_balance = _as_float(row.get("balance_after_trade"))
+            resolved_balance = (
+                explicit_balance
+                if explicit_balance is not None
+                else _resolve_balance_after(dict(row))
+            )
+            projection = _trade_log_row_values(
+                row,
+                resolved_balance=resolved_balance,
+                recommendations_by_symbol=None,
+            )
+            if str(projection.get("Row ID") or "").strip() != row_id:
+                raise IncrementalWorkbookUpdateNotEligible(
+                    f"Incremental serializer changed Row ID {row_id!r}."
+                )
+            for header, col in _trade_log_header_map(ws).items():
+                ws.cell(row_number, col).value = projection.get(header, "")
+            expected_values[row_id] = dict(projection)
+            expected_formats[row_id] = _apply_trade_log_row_number_formats(
+                ws, row_number, row
+            )
+            affected_rows.append(row_number)
+        if changed_order:
+            _apply_trade_log_win_loss_direct_row_fills_for_rows(ws, affected_rows)
+            _apply_trade_log_win_loss_row_formatting(ws)
+            last_populated = _trade_log_last_populated_row(ws)
+            ws.auto_filter.ref = (
+                f"A{TRADE_LOG_FILTER_HEADER_ROW}:"
+                f"{get_column_letter(len(TRADE_LOG_HEADERS))}{last_populated}"
+            )
+            validation_extended = _incremental_extend_generated_validations(
+                ws, last_populated
+            )
+        if expected_survivor_row_ids is not None:
+            expected_survivors = {
+                str(value or "").strip() for value in expected_survivor_row_ids
+            }
+            expected_survivors.discard("")
+            missing = sorted(expected_survivors - set(row_index))
+            if missing:
+                raise IncrementalWorkbookUpdateNotEligible(
+                    "Incremental workbook survivor verification failed: "
+                    + ", ".join(missing[:20])
+                )
+        if isinstance(account_balance, Mapping):
+            balance_expected = _incremental_update_account_balance(wb, account_balance)
+        formula_cache_plan, formula_cache_diagnostics = (
+            _plan_trade_log_formula_cache_transplant(
+                ws,
+                source_formula_caches,
+                strict=True,
+            )
+        )
+        wb.save(candidate)
+        wb.close()
+        wb = None
+        formula_cache_diagnostics.update(
+            _preserve_candidate_ooxml(
+                candidate,
+                TRADE_LOG_SHEET,
+                formula_cache_plan,
+                source_chart_snapshot,
+            )
+        )
+
+        verification_wb = load_workbook(candidate, data_only=False, keep_links=False)
+        try:
+            if changed_order:
+                verified_index, verified_last_row = _incremental_validate_changed_rows(
+                    verification_wb,
+                    changed_order,
+                    rows_by_id,
+                    expected_values,
+                    expected_formats,
+                    expected_survivor_row_ids,
+                )
+            else:
+                verified_ws = _incremental_require_canonical_trade_log(
+                    verification_wb
+                )
+                verified_index, verified_last_row = _incremental_trade_log_row_index(
+                    verified_ws
+                )
+                if expected_survivor_row_ids is not None:
+                    expected_survivors = {
+                        str(value or "").strip()
+                        for value in expected_survivor_row_ids
+                    }
+                    expected_survivors.discard("")
+                    missing = sorted(expected_survivors - set(verified_index))
+                    if missing:
+                        raise IncrementalWorkbookUpdateNotEligible(
+                            "Incremental workbook survivor verification failed: "
+                            + ", ".join(missing[:20])
+                        )
+                if (
+                    _incremental_trade_log_preservation_signature(verified_ws)
+                    != trade_log_preservation_signature
+                ):
+                    raise RuntimeError(
+                        "Incremental balance-only Trade Log preservation verification failed."
+                    )
+            if balance_expected is not None:
+                verified_account_balance = _incremental_validate_account_balance(
+                    verification_wb, balance_expected
+                )
+            if _incremental_formula_signature(verification_wb) != before_formula_signature:
+                raise RuntimeError("Incremental workbook formula preservation verification failed.")
+            if _incremental_defined_name_signature(
+                verification_wb, excluded_names=excluded_names
+            ) != before_name_signature:
+                raise RuntimeError("Incremental workbook defined-name preservation verification failed.")
+            if _incremental_structural_signature(verification_wb) != before_structural_signature:
+                raise RuntimeError("Incremental workbook structural preservation verification failed.")
+        finally:
+            verification_wb.close()
+        if _incremental_chart_formula_signature(candidate) != before_chart_signature:
+            raise RuntimeError("Incremental workbook chart preservation verification failed.")
+        if (
+            _workbook_calculation_signature(candidate)
+            != source_calculation_signature
+        ):
+            raise RuntimeError(
+                "Incremental workbook calculation settings changed."
+            )
+        with candidate.open("r+b") as handle:
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(candidate, path)
+        replaced = True
+        return {
+            "ok": True,
+            "path": str(path),
+            "incremental": True,
+            "inserted_row_ids": inserted_ids,
+            "updated_row_ids": updated_ids,
+            "affected_row_ids": list(changed_order),
+            "affected_row_numbers": affected_rows,
+            "account_balance_updated": balance_expected is not None,
+            "diagnostics": {
+                "trade_log_last_populated_row": verified_last_row,
+                "trade_log_row_ids_verified": len(verified_index),
+                "generated_data_validations_extended": validation_extended,
+                "candidate_verified_before_replace": True,
+                "verified_account_balance": verified_account_balance,
+                **formula_dependency_diagnostics,
+                **formula_cache_diagnostics,
+            },
+        }
+    finally:
+        if wb is not None:
+            wb.close()
+        if not replaced and candidate.exists():
+            candidate.unlink(missing_ok=True)
+
 
 def refresh_master_journal_derived_sheets(path: Path, snapshot: Dict[str, Any]) -> Dict[str, Any]:
     if not path.exists():

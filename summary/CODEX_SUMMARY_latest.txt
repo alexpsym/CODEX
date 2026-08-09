@@ -1,70 +1,89 @@
-Final implementation summary - Pine markers, Oanda commission repair, monthly dedupe, workbook formatting, and import performance
+Final implementation summary - Oanda incremental import performance and journal preservation
 
-Publication status
-- Work was performed in C:\GPT\CODEX-master.
-- This summary is written before publication as required by AGENTS.md.
-- PATCH_DESKTOP_PUSH.bat must run next. The task is not complete until it succeeds and verifies local HEAD equals origin/master.
+Scope and reviewed base
+- Repository: C:\GPT\CODEX-master
+- Reviewed starting commit: e1fa74933038e2bae393a163354fd6441bcddc85
+- This follow-up finishes the unresolved changed-import performance requirement while retaining the previously reviewed Pine marker, Oanda financing/Commission, monthly P&L dedupe, and live workbook repairs.
 
-1. Pine session and historical FX markers
-- Reduced sessionMarkerHalfLengthMultiplier from 0.60 to 0.30 without changing funding or options-expiry line behavior.
-- Historical FX start markers now use the exact configured timestamp when a loaded candle spans it and otherwise use the first loaded candle at or after the configured start.
-- The marker remains broker-independent, one-time only, and anchored with xloc.bar_time.
-- Preserved every pair/date mapping, including EURUSD => 1999-01-04 00:00 GMT.
+1. Root cause of the changed-import delay
+- A small changed Oanda upload parsed quickly, but the non-noop path unconditionally constructed the complete authoritative journal snapshot, rebuilt every Trade Log/derived workbook area, performed two full verification passes, persisted a full SQLite snapshot, and ran workbook GitHub synchronization.
+- The reviewed one-trade baseline was 245.015550 seconds: 31.276777s authoritative snapshot construction, 196.418293s workbook synchronization, 2.323346s row verification, and 5.507340s workbook-snapshot verification.
+- The old immediate identical-import fast path was 8.759790 seconds.
 
-2. Oanda financing-aware Commission
-- Displayed Commission now equals absolute broker commission/GSL fees plus absolute allocated financing, funding, or swap.
-- Financing that is already represented in reported Oanda P/L is not subtracted again from Net P/L.
-- Opening and closing transaction fees are aggregated, financing is allocated proportionally for multi-leg API transactions, and funding/financing/swap transaction labels are recognized.
-- Sanitization, canonical replacement, and persisted-row repair retain financing-derived Commission.
-- Added diagnostics for broker commission, financing commission, displayed commission, and whether displayed Commission includes financing.
-- The repaired row oanda_export:demo:652:664 now has Commission/Fees 0.9608, Swap -0.9608, and unchanged Net P/L 17.4233 in both render/data/trading_journal.json and state_backup.json.
+2. Incremental import implementation
+- Added a strict current-schema/current-master-workbook incremental path for small Oanda transaction exports. It uses the already-read preflight workbook source, computes normalized state deltas, and caps a transaction at 25 affected/state-delta rows.
+- Immediate duplicate imports compare uploaded row projections and the account balance against that preflight source. They skip JSON upsert, full snapshot/statistics work, workbook replacement, SQLite persistence, full verification, and GitHub synchronization.
+- Changed imports update only the affected canonical Trade Log rows and the imported Oanda account balance. Unchanged parsed history rows are not retimestamped, rewritten, or sent through row-context side effects.
+- Genuine metadata-only JSON changes remain durable but do not cause unrelated workbook or SQLite trade-row updates. The existing repaired Oanda row contributes one genuine metadata enrichment in the live-derived benchmark; only the newly imported row(s) are workbook-affected.
+- Incremental SQLite persistence updates only workbook-affected trade rows plus the balance. Full snapshot/derived work is queued explicitly after the primary stores are durable; GitHub workbook synchronization is explicitly deferred to that derived refresh.
+- Safe incremental ineligibility can use the existing full fallback. Unsafe workbook-owned content (for example a managed formula that cannot be preserved/recalculated) refuses the import and rolls back instead of risking manual content.
 
-3. Monthly row dedupe and Trade Log preservation
-- Canonical monthly AUD revaluation Row IDs are deduplicated only within the monthly row class; unrelated ordinary trades are not deduplicated.
-- Duplicate candidates are ranked so the most complete valid monthly record survives.
-- Presentation preservation is now keyed by Row ID, so borders, comments, hyperlinks, row heights, number formats, alignment, protection, and non-colour font properties follow surviving rows when dedupe shifts row numbers.
-- Generated Trade Log fills are reapplied after preserved presentation restoration: wins green, losses red, zero-P/L trades unfilled, and cashflow/monthly rows unfilled.
-- Conditional formatting is rebuilt through the current final populated Trade Log row.
+3. Durable commit, recovery, locking, and status
+- Durable incremental intent is written before JSON mutation and stores a bounded replay payload (maximum 25 rows / 256 KiB) with prepared, json_committed, workbook_committed, and incremental_committed phases.
+- Restart recovery replays the staged JSON rows, atomic workbook update, balance, and SQLite update before any full derived refresh. Replay failures remain retryable and can never be reported as a stale full-refresh success.
+- A different import cannot replace a nonterminal recovered transaction. Public status/import responses expose only transaction metadata, phases, row counts/IDs, and timestamps; staged row and balance payloads remain internal.
+- The import owns a reentrant workbook-writer lock from authoritative read/backup through commit or rollback. A stale backup cannot overwrite another successful workbook writer.
+- Once SQLite has committed, a later state/defer write failure no longer rewinds JSON/workbook. The coherent primary commit and workbook_committed intent remain available for idempotent replay.
+- Exhausted recovery retries are actionable: the next import requeues the same retained transaction in place, returns an explicit recovery-in-progress 409, and a later retry proceeds after replay. Invalid retained payloads remain explicitly and safely blocked.
+- Derived refresh generations coalesce affected IDs, use bounded exponential retry, expose queued/running/retrying/failed/succeeded state, recover across restart, and clear the staged payload only after successful derived completion.
 
-4. Oanda import performance
-- Identical imports verify uploaded projections and account balance against the workbook source already read during preflight.
-- The duplicate no-op path skips row upsert, authoritative snapshot generation, derived-sheet rebuild, workbook replacement, full snapshot verification, SQLite persistence, and GitHub workbook sync.
-- Changed imports reuse one prebuilt authoritative snapshot through workbook update and verification.
-- Journal row loading uses a path/file-stat cache with defensive deep copies.
-- Recommendation/statistics work reuses row signatures and scoped results within each calculation instead of repeatedly hashing/recalculating overlapping groups.
+4. Atomic workbook and authored-content preservation
+- The incremental workbook helper writes a candidate, reloads and verifies it, fsyncs it, and atomically replaces the source only after row, balance, formula, name, structure, chart, and range checks pass.
+- Existing rows are updated in place by stable Row ID. Appends reserve every blank target before mutation, preserve authored blank-row presentation, allow identical canonical preformatting, and refuse content/comments/links/merges or differing custom presentation that would be overwritten.
+- Authored conditional-format rules sharing the generated A4:AX... range survive. Only the two exact tool-owned win/loss rules are replaced, their priorities are retained, and the generated rules remain unique.
+- All xl/charts/* parts are restored byte-for-byte, and the chart part/relationship sets are verified. The real-workbook audit confirmed chart parts, drawing parts, and every relationship part remain byte-identical.
+- Authored Trade Log formula caches are keyed by stable Row ID and logical header. A cached value is transplanted only when formula OOXML is unchanged and a bounded deterministic same-sheet dependency signature is unchanged; data_only reads and statistics therefore retain safe manual formula results.
+- Formulas with affected dependencies, cross-sheet/named/structured/volatile/unprovable references, or cycles are refused on the incremental path. Array/shared/data-table/dynamic formula representations and any managed STATS2 Account/Currency/Balance/As Of formula are refused before save unless exact safe preservation is available. The original workbook remains byte-identical on refusal.
+- Preservation-mode derived rebuilds restore authored normal Trade Log formulas by stable Row ID without restoring stale ordinary numeric values. Safe unchanged caches move with the Row ID; stale caches are not copied; calcMode/fullCalcOnLoad remain intact.
+- Balance-only updates preserve the complete Trade Log presentation signature. Manual borders, fills, number formats, protection, comments, hyperlinks, row heights, column widths, freeze panes, defined names, chart formulas/anchors, sheet views, and layout remain protected.
 
-5. Live workbook repair and verification
-- Repaired journal/Trading Journal.xlsx through the production changed-import path with external Dropbox/GitHub side effects disabled; local JSON, workbook, view-cache, and SQLite persistence remained enabled.
-- Trade Log contains 1,547 populated rows and 1,547 unique Row IDs.
-- Each of the five monthly IDs for 2026-03 through 2026-07 appears exactly once and has no red/green semantic fill.
-- Row oanda_export:demo:652:664 is fully green, Commission is 0.9608, and Net P/L remains 17.4233.
-- Conditional formatting contains the two trade-only win/loss formulas over A4:AX1550, the final populated row.
-- Comparison against the pre-repair HEAD workbook preserved sheet order, active sheet, all formulas, 1,211 Trade Log hyperlinks, all pre-existing comments, borders, column widths, row heights, merges, freeze panes, chart anchors, and seven defined names. One generated STATS2 risk-of-ruin diagnostic comment was added; no existing comment was removed.
-- The repository-native/openpyxl verifier passed. Artifact-tool visual import was not available because an existing chart-axis value in the source workbook exceeds that importer's UInt32 limit; the workbook itself opens and verifies with the repository's native tooling.
+5. Final isolated performance benchmark
+- Benchmark source: disposable copies of the live canonical workbook and journal JSON, with fresh sandbox SQLite databases. The live workbook/JSON/SQLite size, mtime, and SHA-256 fingerprints were asserted unchanged before/after.
+- Scenario A - one new canonical Oanda trade: 21.566381 seconds wall time (target <30s).
+  - Parse 0.066057s; P/L inference 0.346482s; proportional JSON upsert 1.616065s; atomic incremental workbook update 11.726653s; incremental SQLite 0.075376s.
+  - One workbook-affected Row ID. JSON persisted that row plus one genuine metadata delta for oanda_export:demo:652:664.
+- Scenario B - five new canonical Oanda trades: 22.426492 seconds wall time (target <30s).
+  - Parse 0.129333s; P/L inference 0.286461s; proportional JSON upsert 2.735575s; atomic incremental workbook update 9.651411s; incremental SQLite 0.076362s.
+  - Five workbook-affected Row IDs. JSON persisted those five plus the same one genuine existing-row metadata delta.
+- Scenario C - immediate identical repeat: 4.926560 seconds wall time (target <10s).
+  - Parse 0.049600s; P/L inference/preflight 0.114681s; zero rows upserted and zero workbook-affected rows.
+- In all three scenarios, full snapshot/statistics, full workbook synchronization/derived rebuild, full verification, full SQLite persistence, and GitHub synchronization call counters were exactly zero. Reported snapshot_build, verification, workbook_snapshot_verification, and github_sync timings were also exactly 0.0s.
+- Changed-import time fell from 245.015550s to 21.566381s (about 91.2% faster), while the no-change repeat improved from 8.759790s to 4.926560s.
 
-6. Measured import timings on the repaired live journal
-- Changed one-row Oanda import: 245.015550 seconds wall time.
-  - Parse 0.122501s; P/L inference 0.001749s; upsert 2.630175s; authoritative snapshot 31.276777s; workbook sync 196.418293s; row-survivor verification 2.323346s; workbook snapshot verification 5.507340s; SQLite persistence 1.395522s.
-- Immediate identical import: 8.759790 seconds wall time.
-  - Parse 0.094030s and P/L inference/preflight 0.358427s.
-  - Upsert, snapshot build, workbook sync, row verification, workbook snapshot verification, snapshot persistence, and GitHub sync each reported exactly 0.0s.
-  - The workbook, journal JSON, view cache, and SQLite size/mtime/hash fingerprints were unchanged by the identical import.
+6. Final regression results
+- Full tests/test_master_service_trading_journal_crud.py: 242 passed, 6 warnings, 108.03s.
+- Combined tests/test_master_service_oanda_history_export.py, tests/test_repair_oanda_journal.py, tests/test_master_service_trading_journal_stats.py, and tests/test_custom_indicator_pine.py: 127 passed, 10 warnings, 77.88s.
+  - Component coverage remains 46 Oanda-history, 3 repair, 63 journal-statistics, and 15 Pine tests.
+- Broad tests/test_master_journal_workbook.py selection for incremental, preservation_mode, monthly_pnl, direct_fill, conditional_format, and manual_trade_log_borders: 32 passed, 173 deselected, 2 warnings, 431.47s.
+- Second independent audit: no actionable gaps found. Its final focused evidence included 13 recovery/rollback/locking/status tests and 7 CF/formula/chart/array/STATS2 preservation tests, plus a disposable copy of the real workbook and an exhaustive semantic cell/layout comparison.
+- python -m py_compile for all changed Python modules/tests and the benchmark harness: passed.
+- git diff --check: passed; only normal LF-to-CRLF working-copy notices were emitted.
+- Warnings were existing FastAPI on_event deprecations and pytest cache permission notices; selected tests passed.
 
-7. Tests and checks
-- tests/test_custom_indicator_pine.py: 15 passed.
-- tests/test_repair_oanda_journal.py: 3 passed.
-- tests/test_master_service_oanda_history_export.py: 46 passed.
-- Broader Oanda CRUD/statistics suites: 274 passed.
-- Focused monthly dedupe, direct-fill, conditional-formatting, and preservation-mode workbook coverage: 10 passed, 171 deselected.
-- python -m py_compile for the changed Python modules and tests: passed.
-- git diff --check: passed with only normal LF-to-CRLF working-copy notices.
-- Pytest emitted existing FastAPI on_event deprecation warnings and cache/temp permission warnings; all selected tests passed.
+7. Test isolation and live-state safety
+- Added autouse isolation for Oanda-history endpoint tests, including all journal/runtime paths and deferred timers. The complete 46-test module passed without changing live SQLite counts.
+- Six precisely identified test-only stats/diagnostics rows from earlier unisolated runs were removed transactionally with exact count guards. Final logical SQLite counts are: import_runs 194, trades 1446, cashflows 96, balances 7, notes 5, metrics 1446, stats 480, diagnostics 480.
+- Preserved the five pre-existing unrelated runtime-state modifications in render/data/monthly_aud_revaluation.json, monthly_aud_revaluation_state.json, pending_webhooks.json, trade_contexts.json, and webhook_attempts.json. They are not intended for publication.
+- The temporary benchmark harness was removed after the successful run. No runtime data, uploads, caches, logs, secrets, or environment files are intended for the commit.
 
-8. Safety and repository hygiene
-- Preserved pre-existing runtime-state modifications in render/data/monthly_aud_revaluation.json, monthly_aud_revaluation_state.json, pending_webhooks.json, trade_contexts.json, and webhook_attempts.json; PATCH_DESKTOP_PUSH.bat must leave runtime data unstaged and unpublished.
-- Added .pytest-*/ to .gitignore so the test runner's workspace-local scratch directories cannot be committed; repository policy prohibited recursive deletion, so those scratch directories were left untouched.
-- No secrets, environment files, logs, caches, or unrelated runtime data are intended for the commit.
+8. Live workbook verification
+- journal/Trading Journal.xlsx SHA-256: FF4F7E20E3B39572FE72E7AAA75ED2BD0F1308E9E47897B3A5B259BB940D2226 (unchanged throughout this follow-up).
+- Trade Log has 1,547 populated rows, 1,547 unique Row IDs, and no duplicates.
+- The five monthly_aud_reval:bybit_live IDs for 2026-03 through 2026-07 each occur once and have no red/green trade fill.
+- oanda_export:demo:652:664 remains at Trade Log row 4 with Commission 0.9608, Net P/L 17.4233, and the winning green fill C6EFCE.
+- Generated conditional formatting is exactly the two trade-only win/loss formulas over A4:AX1550.
+- Workbook inventory: 511 formulas, 2 charts, 1,211 Trade Log hyperlinks, 7 comments, and 7 defined names.
+- Sheet order is canonical; Trade Log is active/selected with freeze pane A4; authored column widths and row heights remain present.
+- A native/openpyxl verification was used because artifact-tool import remains blocked by an existing source chart-axis UInt32 incompatibility; repository-native and independent OOXML/semantic checks passed.
 
-Mandatory completion step
-- Run repository-root PATCH_DESKTOP_PUSH.bat.
-- Do not report completion unless it succeeds and proves local HEAD equals origin/master.
+9. Intended files changed
+- render/master_service.py
+- tools/master_journal_workbook.py
+- tests/test_master_service_trading_journal_crud.py
+- tests/test_master_service_oanda_history_export.py
+- tests/test_master_journal_workbook.py
+- summary/CODEX_SUMMARY_latest.txt
+
+10. Publication record
+- Pre-publication reviewed HEAD/origin/master: e1fa74933038e2bae393a163354fd6441bcddc85.
+- PATCH_DESKTOP_PUSH.bat publication is the mandatory next step. This record will be updated with the pushed implementation SHA after that script succeeds and verifies local HEAD equals origin/master.

@@ -16,6 +16,7 @@ from openpyxl.comments import Comment
 from openpyxl.formatting.rule import FormulaRule
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.worksheet.datavalidation import DataValidation
+from openpyxl.worksheet.formula import ArrayFormula
 from openpyxl.worksheet.views import Selection
 import pytest
 from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, read_master_journal_source, update_master_journal_workbook_data_only, SHEET_ORDER, STATS1_SHEET, STATS2_SHEET, SYMBOLS_SHEET, TARGET_R_METADATA_SHEET, TRADE_LOG_HEADERS, TRADE_LOG_HEADERS_V1, OLD_TRADE_LOG_HEADERS, PRE_MOVE_TRADE_LOG_HEADERS, MOVE_TO_FIELD_MAP, TRADE_LOG_HEADER_ROWS, TRADE_LOG_DATA_START_ROW, TRADE_LOG_DATA_ROW_HEIGHT, TRADE_LOG_FILTER_HEADER_ROW, TRADE_NUMBER_HEADER, STOP_RECOMMENDATION_HEADER, TARGET_RECOMMENDATION_HEADER, TARGET_RECOMMENDATION_INSUFFICIENT, REPORT_YEARLY_SHEET, REPORT_METRIC_LABELS, INSTRUMENT_AVERAGES_HEADERS, INSTRUMENT_AVERAGES_GROUP_HEADER_ROW, INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, INSTRUMENT_AVERAGES_DATA_START_ROW, DASHBOARD_MOVE_TO_BREAK_EVEN_LABEL, DASHBOARD_MOVE_TO_PROFIT_LABEL, PROFIT_FILL, LOSS_FILL, DURATION_NUMBER_FORMAT, adaptive_percent_number_format, adaptive_number_format, resolve_trade_folder_link, expected_report_sheet_names, _apply_trade_number_hyperlinks, _ensure_trade_log_schema, _ensure_instrument_averages_schema, _ensure_symbols_freeze_panes, _ensure_pnl_calendar_freeze_panes, _repair_trade_log_move_to_durations, _trade_log_header_map, _instrument_averages_header_map, _result_percentage_totals_by_market
@@ -23,6 +24,7 @@ from tools.master_journal_workbook import _format_duration_display, _parse_durat
 from tools.master_journal_workbook import RECOMMENDATION_TRADE_LOG_HEADERS, _trade_log_three_row_header_values_for
 from tools.master_journal_workbook import _ensure_report_sheets, _period_drawdown_metrics, _sanitize_recommendation_text
 from tools.master_journal_workbook import _dedupe_monthly_aud_reval_rows
+from tools.master_journal_workbook import IncrementalWorkbookUpdateNotEligible, update_master_journal_workbook_incremental
 from openpyxl.utils.cell import coordinate_to_tuple, get_column_letter, range_boundaries
 
 
@@ -3721,6 +3723,87 @@ def _chart_formula_signature(path: Path) -> tuple[tuple[str, str], ...]:
         )
 
 
+def _chart_ooxml_parts(path: Path) -> dict[str, bytes]:
+    with zipfile.ZipFile(path) as package:
+        return {
+            part_name: package.read(part_name)
+            for part_name in sorted(package.namelist())
+            if part_name.startswith("xl/charts/")
+        }
+
+
+def _chart_relationship_signature(
+    path: Path,
+) -> tuple[tuple[str, str, str, str, str], ...]:
+    relationships = []
+    with zipfile.ZipFile(path) as package:
+        for part_name in sorted(
+            name for name in package.namelist() if name.endswith(".rels")
+        ):
+            root = ET.fromstring(package.read(part_name))
+            for relationship in root.findall(
+                f"{{{_PACKAGE_RELATIONSHIP_NAMESPACE}}}Relationship"
+            ):
+                relationship_type = str(
+                    relationship.attrib.get("Type") or ""
+                )
+                if not relationship_type.rstrip("/").endswith("/chart"):
+                    continue
+                relationships.append((
+                    part_name,
+                    str(relationship.attrib.get("Id") or ""),
+                    relationship_type,
+                    str(relationship.attrib.get("Target") or ""),
+                    str(relationship.attrib.get("TargetMode") or ""),
+                ))
+    return tuple(sorted(relationships))
+
+
+def _add_test_chart_with_blank_axis_text(path: Path) -> None:
+    from openpyxl.chart import LineChart, Reference
+
+    wb = load_workbook(path, data_only=False)
+    ws = wb[STATS1_SHEET]
+    ws["Z250"] = 1
+    ws["Z251"] = 2
+    chart = LineChart()
+    chart.add_data(Reference(ws, min_col=26, min_row=250, max_row=251))
+    chart.x_axis.title = "Axis"
+    chart.y_axis.title = "Value"
+    ws.add_chart(chart, "Z253")
+    wb.save(path)
+    wb.close()
+    with zipfile.ZipFile(path, "r") as source_package:
+        chart_part = next(
+            name
+            for name in source_package.namelist()
+            if name.startswith("xl/charts/") and name.endswith(".xml")
+        )
+        infos_and_payloads = [
+            (info, source_package.read(info.filename))
+            for info in source_package.infolist()
+        ]
+        package_comment = source_package.comment
+    chart_payload = next(
+        payload
+        for info, payload in infos_and_payloads
+        if info.filename == chart_part
+    )
+    assert b"<a:t>Axis</a:t>" in chart_payload
+    chart_payload = chart_payload.replace(
+        b"<a:t>Axis</a:t>", b"<a:t></a:t>", 1
+    )
+    rewritten = path.with_name(f".{path.name}.seed-chart.tmp")
+    with zipfile.ZipFile(rewritten, "w") as target_package:
+        target_package.comment = package_comment
+        for info, payload in infos_and_payloads:
+            target_package.writestr(
+                info,
+                chart_payload if info.filename == chart_part else payload,
+            )
+    rewritten.replace(path)
+
+
 def _canonical_preservation_signature(path: Path) -> dict[str, object]:
     wb = load_workbook(path, data_only=False, keep_links=False)
     try:
@@ -5054,6 +5137,142 @@ def _cf_rule_details(ws):
     return details
 
 
+def _test_worksheet_part_name(package: zipfile.ZipFile, sheet_name: str) -> str:
+    workbook_root = ET.fromstring(package.read("xl/workbook.xml"))
+    relationship_id = next(
+        str(
+            sheet.attrib.get(
+                f"{{{_OFFICE_RELATIONSHIP_NAMESPACE}}}id"
+            )
+            or ""
+        )
+        for sheet in workbook_root.findall(
+            f".//{{{_SPREADSHEETML_NAMESPACE}}}sheet"
+        )
+        if str(sheet.attrib.get("name") or "") == sheet_name
+    )
+    relationships_root = ET.fromstring(
+        package.read("xl/_rels/workbook.xml.rels")
+    )
+    target = next(
+        str(relationship.attrib.get("Target") or "")
+        for relationship in relationships_root.findall(
+            f"{{{_PACKAGE_RELATIONSHIP_NAMESPACE}}}Relationship"
+        )
+        if str(relationship.attrib.get("Id") or "") == relationship_id
+    )
+    return (
+        target.lstrip("/")
+        if target.startswith("/")
+        else posixpath.normpath(posixpath.join("xl", target))
+    )
+
+
+def _seed_formula_cached_value(
+    path: Path,
+    sheet_name: str,
+    coordinate: str,
+    cached_value: object,
+) -> None:
+    with zipfile.ZipFile(path, "r") as source_package:
+        part_name = _test_worksheet_part_name(source_package, sheet_name)
+        infos_and_payloads = [
+            (info, source_package.read(info.filename))
+            for info in source_package.infolist()
+        ]
+        package_comment = source_package.comment
+    worksheet_payload = next(
+        payload
+        for info, payload in infos_and_payloads
+        if info.filename == part_name
+    )
+    worksheet_root = ET.fromstring(worksheet_payload)
+    cell = next(
+        item
+        for item in worksheet_root.findall(
+            f".//{{{_SPREADSHEETML_NAMESPACE}}}c"
+        )
+        if str(item.attrib.get("r") or "") == coordinate
+    )
+    assert cell.find(f"{{{_SPREADSHEETML_NAMESPACE}}}f") is not None
+    cached = cell.find(f"{{{_SPREADSHEETML_NAMESPACE}}}v")
+    if cached is None:
+        cached = ET.SubElement(cell, f"{{{_SPREADSHEETML_NAMESPACE}}}v")
+    if isinstance(cached_value, bool):
+        cell.set("t", "b")
+        cached.text = "1" if cached_value else "0"
+    elif isinstance(cached_value, str):
+        cell.set("t", "str")
+        cached.text = cached_value
+    else:
+        cell.attrib.pop("t", None)
+        cached.text = str(cached_value)
+    replacement = ET.tostring(
+        worksheet_root,
+        encoding="utf-8",
+        xml_declaration=True,
+    )
+    rewritten = path.with_name(f".{path.name}.seed-cache.tmp")
+    with zipfile.ZipFile(rewritten, "w") as target_package:
+        target_package.comment = package_comment
+        for info, payload in infos_and_payloads:
+            target_package.writestr(
+                info,
+                replacement if info.filename == part_name else payload,
+            )
+    rewritten.replace(path)
+
+
+def _install_trade_log_formula_cache(
+    path: Path,
+    row_id: str,
+    header: str,
+    formula: str,
+    cached_value: object,
+) -> str:
+    wb = load_workbook(path, data_only=False)
+    ws = wb["Trade Log"]
+    row = _trade_log_row_by_id(ws, row_id)
+    coordinate = ws.cell(row, _header_col(ws, header)).coordinate
+    ws[coordinate] = formula
+    wb.calculation.calcMode = "auto"
+    wb.calculation.fullCalcOnLoad = True
+    wb.save(path)
+    wb.close()
+    _seed_formula_cached_value(
+        path,
+        "Trade Log",
+        coordinate,
+        cached_value,
+    )
+    return coordinate
+
+
+def _install_trade_log_array_formula_cache(
+    path: Path,
+    row_id: str,
+    header: str,
+    formula: str,
+    cached_value: object,
+) -> str:
+    wb = load_workbook(path, data_only=False)
+    ws = wb["Trade Log"]
+    row = _trade_log_row_by_id(ws, row_id)
+    coordinate = ws.cell(row, _header_col(ws, header)).coordinate
+    ws[coordinate] = ArrayFormula(ref=coordinate, text=formula)
+    wb.calculation.calcMode = "auto"
+    wb.calculation.fullCalcOnLoad = True
+    wb.save(path)
+    wb.close()
+    _seed_formula_cached_value(
+        path,
+        "Trade Log",
+        coordinate,
+        cached_value,
+    )
+    return coordinate
+
+
 def test_trade_log_win_loss_row_conditional_formatting_uses_current_schema(tmp_path: Path):
     out = tmp_path / "Trading Journal.xlsx"
     build_master_journal_workbook(sample_snapshot(), out)
@@ -5732,6 +5951,56 @@ def test_preservation_mode_moves_trade_presentation_with_row_id_after_monthly_de
             detail for detail in _cf_rule_details(ws) if detail[0] == expected_range
         ]
         assert len(row_rules) == 2
+    finally:
+        wb.close()
+
+
+def test_preservation_mode_restores_authored_formula_without_stale_row_values(
+    tmp_path: Path,
+):
+    out = tmp_path / "Trading Journal.xlsx"
+    snap = sample_snapshot()
+    snap["items"][0]["commission"] = 1.25
+    snap["items"][1]["commission"] = 2.5
+    build_master_journal_workbook(snap, out)
+
+    wb = load_workbook(out, data_only=False)
+    ws = wb["Trade Log"]
+    unaffected_row = _trade_log_row_by_id(ws, "t2")
+    formula_col = _header_col(ws, "Commission")
+    authored_formula = "=ROUND(1.2345,2)"
+    ws.cell(unaffected_row, formula_col).value = authored_formula
+    changed_row = _trade_log_row_by_id(ws, "t1")
+    net_pl_col = _header_col(ws, "Net P/L")
+    ws.cell(changed_row, net_pl_col).value = -999.0
+    wb.save(out)
+    wb.close()
+
+    snap["items"][0]["net_profit"] = 321.25
+    snap["items"][0]["commission"] = 1.75
+    result = update_master_journal_workbook_data_only(
+        out,
+        snap,
+        preserve_existing_layout=True,
+    )
+
+    assert result["ok"] is True
+    assert result["diagnostics"][
+        "trade_log_formula_cells_restored_by_row_id"
+    ] == 1
+    assert result["diagnostics"][
+        "trade_log_formula_rows_restored_by_row_id"
+    ] == 1
+    Path(result["candidate_path"]).replace(out)
+
+    wb = load_workbook(out, data_only=False)
+    try:
+        ws = wb["Trade Log"]
+        unaffected_row = _trade_log_row_by_id(ws, "t2")
+        changed_row = _trade_log_row_by_id(ws, "t1")
+        assert ws.cell(unaffected_row, formula_col).value == authored_formula
+        assert ws.cell(changed_row, net_pl_col).value == pytest.approx(321.25)
+        assert ws.cell(changed_row, formula_col).value == pytest.approx(1.75)
     finally:
         wb.close()
 
@@ -6436,3 +6705,1088 @@ def test_report_profit_rows_are_linear_percentages(tmp_path: Path):
         assert yearly.cell(rows[label], year_col).number_format == "0.00%"
     for label in ("Gross IR gain", "Gross IR loss"):
         assert yearly.cell(rows[label], year_col).number_format == '0.000"R"'
+
+
+def test_incremental_workbook_updates_existing_row_in_place_and_preserves_presentation(
+    tmp_path: Path,
+):
+    path = tmp_path / "incremental-existing.xlsx"
+    snapshot = sample_snapshot()
+    build_master_journal_workbook(snapshot, path)
+    wb = load_workbook(path)
+    ws = wb["Trade Log"]
+    target_row = _trade_log_row_by_id(ws, "t1")
+    other_row = _trade_log_row_by_id(ws, "t2")
+    net_col = _header_col(ws, "Net P/L")
+    symbol_col = _header_col(ws, "Symbol")
+    authored_border = Border(
+        left=Side(style="double", color="FF123456"),
+        right=Side(style="thick", color="FF654321"),
+    )
+    ws.cell(target_row, net_col).border = authored_border
+    ws.cell(target_row, symbol_col).comment = Comment("keep comment", "Trader")
+    ws.cell(target_row, symbol_col).hyperlink = "https://example.com/keep-link"
+    ws.row_dimensions[target_row].height = 31.25
+    other_values = tuple(
+        ws.cell(other_row, col).value for col in range(1, len(TRADE_LOG_HEADERS) + 1)
+    )
+    other_styles = tuple(
+        tuple(ws.cell(other_row, col)._style)
+        for col in range(1, len(TRADE_LOG_HEADERS) + 1)
+    )
+    wb.save(path)
+    wb.close()
+
+    changed = dict(snapshot["items"][0])
+    changed.update(
+        {
+            "commission": 0.9608,
+            "net_profit": 17.4233,
+            "balance_after_trade": 1234.56,
+            "currency": "AUD",
+        }
+    )
+    result = update_master_journal_workbook_incremental(
+        path,
+        [changed],
+        expected_survivor_row_ids=["t1", "t2"],
+    )
+
+    assert result["ok"] is True
+    assert result["inserted_row_ids"] == []
+    assert result["updated_row_ids"] == ["t1"]
+    assert result["affected_row_numbers"] == [target_row]
+    wb = load_workbook(path)
+    try:
+        ws = wb["Trade Log"]
+        assert _trade_log_row_by_id(ws, "t1") == target_row
+        assert ws.cell(target_row, _header_col(ws, "Commission")).value == pytest.approx(0.9608)
+        assert ws.cell(target_row, net_col).value == pytest.approx(17.4233)
+        assert ws.cell(target_row, _header_col(ws, "Balance After")).value == pytest.approx(1234.56)
+        assert _border_signature(ws.cell(target_row, net_col)) == _border_signature(
+            type("Cell", (), {"border": authored_border})()
+        )
+        symbol_cell = ws.cell(target_row, symbol_col)
+        assert symbol_cell.comment and symbol_cell.comment.text == "keep comment"
+        assert symbol_cell.hyperlink and symbol_cell.hyperlink.target == "https://example.com/keep-link"
+        assert ws.row_dimensions[target_row].height == pytest.approx(31.25)
+        assert tuple(
+            ws.cell(other_row, col).value for col in range(1, len(TRADE_LOG_HEADERS) + 1)
+        ) == other_values
+        assert tuple(
+            tuple(ws.cell(other_row, col)._style)
+            for col in range(1, len(TRADE_LOG_HEADERS) + 1)
+        ) == other_styles
+    finally:
+        wb.close()
+
+
+def test_incremental_workbook_preserves_authored_cf_in_generated_row_rule_bucket(
+    tmp_path: Path,
+):
+    path = tmp_path / "incremental-authored-conditional-formatting.xlsx"
+    snapshot = sample_snapshot()
+    build_master_journal_workbook(snapshot, path)
+    wb = load_workbook(path)
+    ws = wb["Trade Log"]
+    expected_range = (
+        f"A{TRADE_LOG_DATA_START_ROW}:"
+        f"{get_column_letter(len(TRADE_LOG_HEADERS))}{ws.max_row}"
+    )
+    ws.conditional_formatting.add(
+        expected_range,
+        FormulaRule(
+            formula=[f"LEN($B{TRADE_LOG_DATA_START_ROW})>0"],
+            fill=PatternFill("solid", fgColor="FFF2CC"),
+        ),
+    )
+    wb.save(path)
+    wb.close()
+
+    changed = dict(snapshot["items"][0])
+    changed["net_profit"] = 17.4233
+    result = update_master_journal_workbook_incremental(
+        path,
+        [changed],
+        expected_survivor_row_ids=["t1", "t2"],
+    )
+
+    assert result["ok"] is True
+    wb = load_workbook(path)
+    try:
+        ws = wb["Trade Log"]
+        row_type_letter = get_column_letter(_header_col(ws, "Row Type"))
+        net_pl_letter = get_column_letter(_header_col(ws, "Net P/L"))
+        rules = [
+            detail
+            for detail in _cf_rule_details(ws)
+            if detail[0] == expected_range
+        ]
+        formulas = [tuple(detail[1]) for detail in rules]
+        assert formulas.count((f"LEN($B{TRADE_LOG_DATA_START_ROW})>0",)) == 1
+        assert [
+            detail[2]
+            for detail in rules
+            if tuple(detail[1]) == (f"LEN($B{TRADE_LOG_DATA_START_ROW})>0",)
+        ] == ["FFF2CC"]
+        assert formulas.count(
+            (
+                f'AND(${row_type_letter}{TRADE_LOG_DATA_START_ROW}="trade",'
+                f'${net_pl_letter}{TRADE_LOG_DATA_START_ROW}>0)',
+            )
+        ) == 1
+        assert formulas.count(
+            (
+                f'AND(${row_type_letter}{TRADE_LOG_DATA_START_ROW}="trade",'
+                f'${net_pl_letter}{TRADE_LOG_DATA_START_ROW}<0)',
+            )
+        ) == 1
+        assert len(rules) == 3
+    finally:
+        wb.close()
+
+
+def test_incremental_workbook_preserves_safe_authored_formula_cache_and_stats(
+    tmp_path: Path,
+):
+    from tools import master_journal_workbook as mjw
+
+    path = tmp_path / "incremental-authored-formula-cache.xlsx"
+    snapshot = sample_snapshot()
+    snapshot["items"][1]["exit_price"] = 59998.77
+    build_master_journal_workbook(snapshot, path)
+    _add_test_chart_with_blank_axis_text(path)
+    source_wb = load_workbook(path, data_only=False)
+    source_ws = source_wb["Trade Log"]
+    formula_row = _trade_log_row_by_id(source_ws, "t2")
+    entry_letter = get_column_letter(_header_col(source_ws, "Entry Price"))
+    exit_letter = get_column_letter(_header_col(source_ws, "Exit Price"))
+    source_wb.close()
+    formula = (
+        f"=ROUND(ABS({exit_letter}{formula_row}-{entry_letter}{formula_row}),2)"
+    )
+    formula_coordinate = _install_trade_log_formula_cache(
+        path,
+        "t2",
+        "Commission",
+        formula,
+        1.23,
+    )
+    calculation_signature = mjw._workbook_calculation_signature(path)
+    assert dict(calculation_signature)["calcMode"] == "auto"
+    assert dict(calculation_signature)["fullCalcOnLoad"] == "1"
+    chart_parts = _chart_ooxml_parts(path)
+    chart_relationships = _chart_relationship_signature(path)
+    assert chart_parts
+    cached_before = load_workbook(path, data_only=True)
+    try:
+        assert cached_before["Trade Log"][formula_coordinate].value == pytest.approx(1.23)
+    finally:
+        cached_before.close()
+
+    changed = dict(snapshot["items"][0])
+    changed["net_profit"] = 17.4233
+    result = update_master_journal_workbook_incremental(
+        path,
+        [changed],
+        expected_survivor_row_ids=["t1", "t2"],
+    )
+
+    assert result["ok"] is True
+    assert result["diagnostics"]["trade_log_formula_caches_transplanted"] == 1
+    assert result["diagnostics"]["trade_log_formula_cache_candidate_verified"] is True
+    assert result["diagnostics"]["trade_log_authored_formula_cells_checked"] == 1
+    assert result["diagnostics"]["chart_ooxml_parts_verified"] == len(chart_parts)
+    assert result["diagnostics"]["candidate_ooxml_rewritten_once"] is True
+    assert mjw._workbook_calculation_signature(path) == calculation_signature
+    assert _chart_ooxml_parts(path) == chart_parts
+    assert _chart_relationship_signature(path) == chart_relationships
+    formula_wb = load_workbook(path, data_only=False)
+    cached_wb = load_workbook(path, data_only=True)
+    try:
+        assert formula_wb["Trade Log"][formula_coordinate].value == formula
+        assert cached_wb["Trade Log"][formula_coordinate].value == pytest.approx(1.23)
+    finally:
+        formula_wb.close()
+        cached_wb.close()
+    parsed = read_master_journal_source(path)
+    parsed_t2 = next(item for item in parsed["items"] if item["id"] == "t2")
+    assert parsed_t2["commission"] == pytest.approx(1.23)
+    extended = mjw._dashboard_extended_metrics(parsed["items"], {})
+    assert extended["overall"]["total_commission"] == pytest.approx(1.23)
+
+
+def test_preservation_mode_moves_and_preserves_safe_authored_formula_cache(
+    tmp_path: Path,
+):
+    from tools import master_journal_workbook as mjw
+
+    path = tmp_path / "preservation-authored-formula-cache.xlsx"
+    snapshot = sample_snapshot()
+    build_master_journal_workbook(snapshot, path)
+    _add_test_chart_with_blank_axis_text(path)
+    formula = "=ROUND(2.499,1)"
+    source_coordinate = _install_trade_log_formula_cache(
+        path,
+        "t2",
+        "Commission",
+        formula,
+        2.5,
+    )
+    calculation_signature = mjw._workbook_calculation_signature(path)
+    assert dict(calculation_signature)["calcMode"] == "auto"
+    assert dict(calculation_signature)["fullCalcOnLoad"] == "1"
+    chart_parts = _chart_ooxml_parts(path)
+    chart_relationships = _chart_relationship_signature(path)
+    assert chart_parts
+    snapshot["items"] = list(reversed(snapshot["items"]))
+
+    result = update_master_journal_workbook_data_only(
+        path,
+        snapshot,
+        preserve_existing_layout=True,
+    )
+
+    assert result["ok"] is True
+    assert result["diagnostics"]["trade_log_formula_caches_transplanted"] == 1
+    assert result["diagnostics"]["trade_log_formula_cache_candidate_verified"] is True
+    assert result["diagnostics"]["candidate_ooxml_rewritten_once"] is True
+    candidate = Path(result["candidate_path"])
+    assert mjw._workbook_calculation_signature(candidate) == calculation_signature
+    assert _chart_ooxml_parts(candidate) == chart_parts
+    assert _chart_relationship_signature(candidate) == chart_relationships
+    candidate.replace(path)
+    formula_wb = load_workbook(path, data_only=False)
+    cached_wb = load_workbook(path, data_only=True)
+    try:
+        formula_ws = formula_wb["Trade Log"]
+        moved_row = _trade_log_row_by_id(formula_ws, "t2")
+        moved_coordinate = formula_ws.cell(
+            moved_row, _header_col(formula_ws, "Commission")
+        ).coordinate
+        assert moved_coordinate != source_coordinate
+        assert formula_ws[moved_coordinate].value == formula
+        assert cached_wb["Trade Log"][moved_coordinate].value == pytest.approx(2.5)
+    finally:
+        formula_wb.close()
+        cached_wb.close()
+    parsed = read_master_journal_source(path)
+    parsed_t2 = next(item for item in parsed["items"] if item["id"] == "t2")
+    assert parsed_t2["commission"] == pytest.approx(2.5)
+
+
+def test_incremental_workbook_preserves_exact_chart_ooxml_parts(
+    tmp_path: Path,
+):
+    path = tmp_path / "incremental-chart-ooxml.xlsx"
+    snapshot = sample_snapshot()
+    build_master_journal_workbook(snapshot, path)
+    _add_test_chart_with_blank_axis_text(path)
+    chart_parts = _chart_ooxml_parts(path)
+    chart_relationships = _chart_relationship_signature(path)
+    assert chart_parts
+    changed = dict(snapshot["items"][0])
+    changed["net_profit"] = 17.4233
+
+    result = update_master_journal_workbook_incremental(
+        path,
+        [changed],
+        expected_survivor_row_ids=["t1", "t2"],
+    )
+
+    assert result["ok"] is True
+    diagnostics = result["diagnostics"]
+    assert diagnostics["chart_ooxml_parts_verified"] == len(chart_parts)
+    assert diagnostics["chart_ooxml_parts_restored"] >= 1
+    assert diagnostics["chart_relationships_verified"] == len(chart_relationships)
+    assert diagnostics["candidate_ooxml_rewritten_once"] is True
+    assert _chart_ooxml_parts(path) == chart_parts
+    assert _chart_relationship_signature(path) == chart_relationships
+
+
+def test_preservation_mode_does_not_transplant_stale_formula_cache(
+    tmp_path: Path,
+):
+    from tools import master_journal_workbook as mjw
+
+    path = tmp_path / "preservation-stale-formula-cache.xlsx"
+    snapshot = sample_snapshot()
+    snapshot["items"][1]["exit_price"] = 59998.77
+    build_master_journal_workbook(snapshot, path)
+    source_wb = load_workbook(path, data_only=False)
+    source_ws = source_wb["Trade Log"]
+    formula_row = _trade_log_row_by_id(source_ws, "t2")
+    entry_letter = get_column_letter(_header_col(source_ws, "Entry Price"))
+    exit_letter = get_column_letter(_header_col(source_ws, "Exit Price"))
+    source_wb.close()
+    formula = (
+        f"=ROUND(ABS({exit_letter}{formula_row}-{entry_letter}{formula_row}),2)"
+    )
+    formula_coordinate = _install_trade_log_formula_cache(
+        path,
+        "t2",
+        "Commission",
+        formula,
+        1.23,
+    )
+    calculation_signature = mjw._workbook_calculation_signature(path)
+    snapshot["items"][1]["exit_price"] = 59990.0
+
+    result = update_master_journal_workbook_data_only(
+        path,
+        snapshot,
+        preserve_existing_layout=True,
+    )
+
+    assert result["ok"] is True
+    diagnostics = result["diagnostics"]
+    assert diagnostics["trade_log_formula_cache_source_cells"] == 1
+    assert diagnostics["trade_log_formula_cache_planned_cells"] == 0
+    assert diagnostics["trade_log_formula_cache_skipped_cells"] == 1
+    assert diagnostics["trade_log_formula_caches_transplanted"] == 0
+    assert diagnostics["trade_log_formula_cache_skipped"][0]["reason"] == (
+        "formula dependency values changed"
+    )
+    candidate = Path(result["candidate_path"])
+    assert mjw._workbook_calculation_signature(candidate) == calculation_signature
+    formula_wb = load_workbook(candidate, data_only=False)
+    cached_wb = load_workbook(candidate, data_only=True)
+    try:
+        assert formula_wb["Trade Log"][formula_coordinate].value == formula
+        assert cached_wb["Trade Log"][formula_coordinate].value is None
+    finally:
+        formula_wb.close()
+        cached_wb.close()
+
+
+def test_incremental_workbook_rejects_cached_formula_depending_on_changed_row(
+    tmp_path: Path,
+):
+    path = tmp_path / "incremental-stale-formula-cache.xlsx"
+    snapshot = sample_snapshot()
+    build_master_journal_workbook(snapshot, path)
+    wb = load_workbook(path, data_only=False)
+    ws = wb["Trade Log"]
+    changed_row = _trade_log_row_by_id(ws, "t1")
+    net_pl_letter = get_column_letter(_header_col(ws, "Net P/L"))
+    wb.close()
+    _install_trade_log_formula_cache(
+        path,
+        "t2",
+        "Commission",
+        f"={net_pl_letter}{changed_row}",
+        120.5,
+    )
+    before = path.read_bytes()
+    changed = dict(snapshot["items"][0])
+    changed["net_profit"] = 17.4233
+
+    with pytest.raises(
+        IncrementalWorkbookUpdateNotEligible,
+        match="would invalidate the cached result",
+    ) as exc_info:
+        update_master_journal_workbook_incremental(path, [changed])
+
+    assert exc_info.value.unsafe_full_rebuild is True
+    assert path.read_bytes() == before
+
+
+def test_incremental_workbook_rejects_unproven_cached_formula_dependency(
+    tmp_path: Path,
+):
+    path = tmp_path / "incremental-unproven-formula-cache.xlsx"
+    snapshot = sample_snapshot()
+    build_master_journal_workbook(snapshot, path)
+    _install_trade_log_formula_cache(
+        path,
+        "t2",
+        "Commission",
+        "=NOW()",
+        45678.25,
+    )
+    before = path.read_bytes()
+    changed = dict(snapshot["items"][0])
+    changed["net_profit"] = 17.4233
+
+    with pytest.raises(
+        IncrementalWorkbookUpdateNotEligible,
+        match="cannot prove cached formula safety",
+    ) as exc_info:
+        update_master_journal_workbook_incremental(path, [changed])
+
+    assert exc_info.value.unsafe_full_rebuild is True
+    assert path.read_bytes() == before
+
+
+def test_incremental_and_preservation_reject_cached_array_formula_atomically(
+    tmp_path: Path,
+):
+    from tools import master_journal_workbook as mjw
+
+    path = tmp_path / "cached-array-formula.xlsx"
+    snapshot = sample_snapshot()
+    build_master_journal_workbook(snapshot, path)
+    formula_coordinate = _install_trade_log_array_formula_cache(
+        path,
+        "t2",
+        "Commission",
+        "=1+1",
+        2,
+    )
+    cached_wb = load_workbook(path, data_only=True)
+    formula_wb = load_workbook(path, data_only=False)
+    try:
+        assert cached_wb["Trade Log"][formula_coordinate].value == 2
+        formula_cell = formula_wb["Trade Log"][formula_coordinate]
+        assert isinstance(formula_cell.value, ArrayFormula)
+        assert formula_cell.value.text == "=1+1"
+        assert any(
+            sheet_name == "Trade Log" and coordinate == formula_coordinate
+            for sheet_name, coordinate, _value
+            in mjw._incremental_formula_signature(formula_wb)
+        )
+    finally:
+        cached_wb.close()
+        formula_wb.close()
+    before = path.read_bytes()
+    changed = dict(snapshot["items"][0])
+    changed["net_profit"] = 17.4233
+
+    with pytest.raises(
+        IncrementalWorkbookUpdateNotEligible,
+        match="non-plain formula representation 'array'",
+    ) as incremental_error:
+        update_master_journal_workbook_incremental(path, [changed])
+
+    assert incremental_error.value.unsafe_full_rebuild is True
+    assert path.read_bytes() == before
+    with pytest.raises(
+        RuntimeError,
+        match="Preservation-mode.*non-plain formula representation 'array'",
+    ):
+        update_master_journal_workbook_data_only(
+            path,
+            snapshot,
+            preserve_existing_layout=True,
+        )
+    assert path.read_bytes() == before
+
+
+def test_incremental_workbook_appends_without_shifting_and_extends_generated_ranges(
+    tmp_path: Path,
+):
+    from openpyxl.workbook.defined_name import DefinedName
+
+    path = tmp_path / "incremental-append.xlsx"
+    snapshot = sample_snapshot()
+    build_master_journal_workbook(snapshot, path)
+    wb = load_workbook(path)
+    ws = wb["Trade Log"]
+    adjacent_row = _trade_log_row_by_id(ws, "t2")
+    symbol_col = _header_col(ws, "Symbol")
+    net_col = _header_col(ws, "Net P/L")
+    ws.cell(adjacent_row, symbol_col).comment = Comment("do not clone", "Trader")
+    ws.cell(adjacent_row, symbol_col).hyperlink = "https://example.com/do-not-clone"
+    adjacent_border = Border(bottom=Side(style="double", color="FFABCDEF"))
+    ws.cell(adjacent_row, net_col).border = adjacent_border
+    authored_validation = DataValidation(
+        type="custom", formula1="LEN(B4)>0", allow_blank=True
+    )
+    ws.add_data_validation(authored_validation)
+    authored_validation.add("B4:B100")
+    wb[STATS1_SHEET]["Z250"] = "=1+1"
+    wb.defined_names.add(
+        DefinedName("KEEP_INCREMENTAL_NAME", attr_text="'STATS1'!$Z$250")
+    )
+    before_rows = {
+        row_id: _trade_log_row_by_id(ws, row_id) for row_id in ("t1", "t2")
+    }
+    wb.save(path)
+    wb.close()
+    before_charts = _chart_formula_signature(path)
+
+    appended = dict(snapshot["items"][0])
+    appended.update(
+        {
+            "id": "t3",
+            "open_time": "2026-05-03T00:00:00Z",
+            "close_time": "2026-05-03T01:00:00Z",
+            "commission": 0.5,
+            "net_profit": -7.0,
+            "result_pct": -0.25,
+            "r_multiple": -0.2,
+            "balance_after_trade": 1010.0,
+            "currency": "AUD",
+        }
+    )
+    result = update_master_journal_workbook_incremental(
+        path,
+        [appended],
+        expected_survivor_row_ids=["t1", "t2", "t3"],
+    )
+
+    assert result["inserted_row_ids"] == ["t3"]
+    wb = load_workbook(path)
+    try:
+        ws = wb["Trade Log"]
+        assert {_id: _trade_log_row_by_id(ws, _id) for _id in ("t1", "t2")} == before_rows
+        appended_row = _trade_log_row_by_id(ws, "t3")
+        assert appended_row == adjacent_row + 1
+        assert _border_signature(ws.cell(appended_row, net_col)) == _border_signature(
+            type("Cell", (), {"border": adjacent_border})()
+        )
+        assert ws.cell(appended_row, symbol_col).comment is None
+        assert ws.cell(appended_row, symbol_col).hyperlink is None
+        assert _cell_fill_rgb(ws.cell(appended_row, 1)) == LOSS_FILL
+        expected_range = f"A4:{get_column_letter(len(TRADE_LOG_HEADERS))}{appended_row}"
+        row_rules = [detail for detail in _cf_rule_details(ws) if detail[0] == expected_range]
+        assert len(row_rules) == 2
+        assert ws.auto_filter.ref == f"A3:{get_column_letter(len(TRADE_LOG_HEADERS))}{appended_row}"
+        generated_ranges = [
+            item
+            for validation in ws.data_validations.dataValidation
+            if validation.type == "list"
+            for item in validation.sqref.ranges
+        ]
+        assert generated_ranges
+        assert all(item.max_row >= appended_row for item in generated_ranges)
+        custom_validations = [
+            validation
+            for validation in ws.data_validations.dataValidation
+            if validation.type == "custom"
+        ]
+        assert len(custom_validations) == 1
+        assert str(custom_validations[0].sqref) == "B4:B100"
+        assert wb[STATS1_SHEET]["Z250"].value == "=1+1"
+        assert wb.defined_names["KEEP_INCREMENTAL_NAME"].attr_text == "'STATS1'!$Z$250"
+    finally:
+        wb.close()
+    assert _chart_formula_signature(path) == before_charts
+
+
+def test_incremental_workbook_updates_oanda_balance_metadata_without_derived_cells(
+    tmp_path: Path,
+):
+    from tools.master_journal_workbook import _read_account_balance_source_metadata
+
+    path = tmp_path / "incremental-balance.xlsx"
+    snapshot = sample_snapshot()
+    snapshot["balances"].append(
+        {
+            "account_label": "OANDA DEMO",
+            "balance": 1000.0,
+            "currency": "AUD",
+            "as_of": "2026-05-01T00:00:00",
+            "balance_source": "trade_timeline",
+        }
+    )
+    build_master_journal_workbook(snapshot, path)
+    wb = load_workbook(path)
+    stats2 = wb[STATS2_SHEET]
+    headers = {
+        str(stats2.cell(2, col).value or ""): col
+        for col in range(1, stats2.max_column + 1)
+    }
+    account_row = next(
+        row
+        for row in range(3, stats2.max_row + 1)
+        if stats2.cell(row, headers["Account"]).value == "OANDA DEMO"
+    )
+    risk_before = stats2.cell(account_row, headers["Risk of Ruin"]).value
+    net_pct_before = stats2.cell(account_row, headers["Net P/L Percentage"]).value
+    wb.close()
+
+    changed = dict(snapshot["items"][0])
+    result = update_master_journal_workbook_incremental(
+        path,
+        [changed],
+        account_balance={
+            "account_label": "OANDA DEMO",
+            "balance": 4321.25,
+            "currency": "AUD",
+            "as_of": "2026-08-02T12:34:56Z",
+            "balance_source": "oanda_transaction_export_balance",
+        },
+        expected_survivor_row_ids=["t1", "t2"],
+    )
+    assert result["account_balance_updated"] is True
+    verified_balance = result["diagnostics"]["verified_account_balance"]
+    assert verified_balance["account_label"] == "OANDA DEMO"
+    assert verified_balance["balance"] == pytest.approx(4321.25)
+    assert verified_balance["currency"] == "AUD"
+    assert verified_balance["as_of"] == "2026-08-02T12:34:56Z"
+    assert verified_balance["source"] == "oanda_transaction_export_balance"
+    assert verified_balance["provenance_defined_name"]
+    wb = load_workbook(path)
+    try:
+        stats2 = wb[STATS2_SHEET]
+        assert stats2.cell(account_row, headers["Balance"]).value == pytest.approx(4321.25)
+        assert stats2.cell(account_row, headers["Currency"]).value == "AUD"
+        assert stats2.cell(account_row, headers["As Of"]).value == "2026-08-02T12:34:56Z"
+        assert stats2.cell(account_row, headers["Risk of Ruin"]).value == risk_before
+        assert stats2.cell(account_row, headers["Net P/L Percentage"]).value == net_pct_before
+        metadata = _read_account_balance_source_metadata(wb, "OANDA DEMO")
+        assert metadata == {
+            "source": "oanda_transaction_export_balance",
+            "timeline_as_of": "2026-08-02T12:34:56",
+        }
+    finally:
+        wb.close()
+
+
+def test_incremental_workbook_balance_only_preserves_trade_log_and_workbook_structures(
+    tmp_path: Path,
+):
+    from tools import master_journal_workbook as mjw
+
+    path = tmp_path / "incremental-balance-only.xlsx"
+    snapshot = sample_snapshot()
+    snapshot["balances"].append(
+        {
+            "account_label": "OANDA DEMO",
+            "balance": 1000.0,
+            "currency": "AUD",
+            "as_of": "2026-05-01T00:00:00",
+            "balance_source": "trade_timeline",
+        }
+    )
+    build_master_journal_workbook(snapshot, path)
+    wb = load_workbook(path)
+    trade_log = wb["Trade Log"]
+    last_trade_row = max(
+        _trade_log_row_by_id(trade_log, row_id) for row_id in ("t1", "t2")
+    )
+    trade_log.auto_filter.ref = (
+        f"A{TRADE_LOG_FILTER_HEADER_ROW}:"
+        f"{get_column_letter(len(TRADE_LOG_HEADERS))}{last_trade_row - 1}"
+    )
+    authored_validation = DataValidation(
+        type="custom", formula1="LEN(B4)>0", allow_blank=True
+    )
+    trade_log.add_data_validation(authored_validation)
+    authored_validation.add("B4:B100")
+    trade_log.cell(last_trade_row, _header_col(trade_log, "Symbol")).comment = Comment(
+        "preserve balance-only comment", "Trader"
+    )
+    wb[STATS1_SHEET]["Z250"] = "=1+1"
+    wb.save(path)
+    wb.close()
+
+    balance_name = mjw._account_balance_source_defined_name("OANDA DEMO")
+    wb = load_workbook(path, data_only=False, keep_links=False)
+    before_trade_log = mjw._incremental_trade_log_preservation_signature(
+        wb["Trade Log"]
+    )
+    before_formulas = mjw._incremental_formula_signature(wb)
+    before_names = mjw._incremental_defined_name_signature(
+        wb, excluded_names={balance_name}
+    )
+    before_structures = mjw._incremental_structural_signature(wb)
+    wb.close()
+    before_chart_formulas = _chart_formula_signature(path)
+
+    result = update_master_journal_workbook_incremental(
+        path,
+        [],
+        account_balance={
+            "account_label": "OANDA DEMO",
+            "balance": 4321.25,
+            "currency": "AUD",
+            "as_of": "2026-08-02T12:34:56Z",
+            "balance_source": "oanda_transaction_export_balance",
+        },
+        expected_survivor_row_ids=["t1", "t2"],
+    )
+
+    assert result["ok"] is True
+    assert result["inserted_row_ids"] == []
+    assert result["updated_row_ids"] == []
+    assert result["affected_row_ids"] == []
+    assert result["affected_row_numbers"] == []
+    assert result["account_balance_updated"] is True
+    assert result["diagnostics"]["trade_log_row_ids_verified"] == 2
+    assert result["diagnostics"]["verified_account_balance"]["balance"] == pytest.approx(
+        4321.25
+    )
+
+    wb = load_workbook(path, data_only=False, keep_links=False)
+    try:
+        assert (
+            mjw._incremental_trade_log_preservation_signature(wb["Trade Log"])
+            == before_trade_log
+        )
+        assert mjw._incremental_formula_signature(wb) == before_formulas
+        assert mjw._incremental_defined_name_signature(
+            wb, excluded_names={balance_name}
+        ) == before_names
+        assert mjw._incremental_structural_signature(wb) == before_structures
+    finally:
+        wb.close()
+    assert _chart_formula_signature(path) == before_chart_formulas
+
+
+def test_incremental_workbook_rejects_empty_rows_without_balance(
+    tmp_path: Path,
+):
+    path = tmp_path / "incremental-empty-without-balance.xlsx"
+    build_master_journal_workbook(sample_snapshot(), path)
+    before = hashlib.sha256(path.read_bytes()).hexdigest()
+
+    with pytest.raises(
+        IncrementalWorkbookUpdateNotEligible,
+        match="at least one changed row",
+    ) as exc_info:
+        update_master_journal_workbook_incremental(path, [])
+
+    assert exc_info.value.unsafe_full_rebuild is False
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == before
+
+    with pytest.raises(
+        IncrementalWorkbookUpdateNotEligible,
+        match="account label and numeric balance",
+    ) as invalid_balance:
+        update_master_journal_workbook_incremental(
+            path,
+            [],
+            account_balance={},
+        )
+
+    assert invalid_balance.value.unsafe_full_rebuild is False
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == before
+
+
+def test_incremental_workbook_rejects_formula_in_managed_target_without_touching_original(
+    tmp_path: Path,
+):
+    path = tmp_path / "incremental-formula.xlsx"
+    snapshot = sample_snapshot()
+    build_master_journal_workbook(snapshot, path)
+    wb = load_workbook(path)
+    ws = wb["Trade Log"]
+    ws.cell(_trade_log_row_by_id(ws, "t1"), _header_col(ws, "Commission")).value = "=1+1"
+    wb.save(path)
+    wb.close()
+    before = hashlib.sha256(path.read_bytes()).hexdigest()
+
+    with pytest.raises(
+        IncrementalWorkbookUpdateNotEligible, match="formula"
+    ) as exc_info:
+        update_master_journal_workbook_incremental(path, [snapshot["items"][0]])
+
+    assert exc_info.value.unsafe_full_rebuild is True
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == before
+
+
+def test_incremental_workbook_marks_authored_first_unused_row_as_unsafe(
+    tmp_path: Path,
+):
+    path = tmp_path / "incremental-authored-unused-row.xlsx"
+    snapshot = sample_snapshot()
+    build_master_journal_workbook(snapshot, path)
+    wb = load_workbook(path)
+    ws = wb["Trade Log"]
+    first_unused_row = max(
+        _trade_log_row_by_id(ws, row_id) for row_id in ("t1", "t2")
+    ) + 1
+    ws.cell(first_unused_row, _header_col(ws, "Symbol")).comment = Comment(
+        "authored spacer content", "Trader"
+    )
+    wb.save(path)
+    wb.close()
+    before = hashlib.sha256(path.read_bytes()).hexdigest()
+    appended = dict(snapshot["items"][0])
+    appended["id"] = "t3"
+
+    with pytest.raises(
+        IncrementalWorkbookUpdateNotEligible, match="authored content"
+    ) as exc_info:
+        update_master_journal_workbook_incremental(path, [appended])
+
+    assert exc_info.value.unsafe_full_rebuild is True
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == before
+
+
+def test_incremental_workbook_appends_into_identically_preformatted_blank_row(
+    tmp_path: Path,
+):
+    path = tmp_path / "incremental-identical-preformatted-row.xlsx"
+    snapshot = sample_snapshot()
+    build_master_journal_workbook(snapshot, path)
+    wb = load_workbook(path)
+    ws = wb["Trade Log"]
+    source_row = _trade_log_row_by_id(ws, "t2")
+    target_row = source_row + 1
+    for col in range(1, len(TRADE_LOG_HEADERS) + 1):
+        source = ws.cell(source_row, col)
+        target = ws.cell(target_row, col)
+        target._style = copy(source._style)
+        target.protection = copy(source.protection)
+        target.number_format = source.number_format
+    ws.row_dimensions[target_row].height = ws.row_dimensions[source_row].height
+    wb.save(path)
+    wb.close()
+    appended = dict(snapshot["items"][0])
+    appended["id"] = "t3"
+
+    result = update_master_journal_workbook_incremental(
+        path,
+        [appended],
+        expected_survivor_row_ids=["t1", "t2", "t3"],
+    )
+
+    assert result["ok"] is True
+    assert result["inserted_row_ids"] == ["t3"]
+    assert result["affected_row_numbers"] == [target_row]
+    wb = load_workbook(path)
+    try:
+        assert _trade_log_row_by_id(wb["Trade Log"], "t3") == target_row
+    finally:
+        wb.close()
+
+
+@pytest.mark.parametrize("authored_kind", ["cell_style", "row_height"])
+def test_incremental_workbook_preserves_blank_authored_append_presentation(
+    tmp_path: Path,
+    authored_kind: str,
+):
+    path = tmp_path / f"incremental-authored-{authored_kind}.xlsx"
+    snapshot = sample_snapshot()
+    build_master_journal_workbook(snapshot, path)
+    wb = load_workbook(path)
+    ws = wb["Trade Log"]
+    first_unused_row = max(
+        _trade_log_row_by_id(ws, row_id) for row_id in ("t1", "t2")
+    ) + 1
+    if authored_kind == "cell_style":
+        ws.cell(
+            first_unused_row,
+            _header_col(ws, "Commission"),
+        ).border = Border(
+            left=Side(style="double", color="FF123456"),
+            bottom=Side(style="thick", color="FF654321"),
+        )
+    else:
+        ws.row_dimensions[first_unused_row].height = 42.25
+    wb.save(path)
+    wb.close()
+    appended = dict(snapshot["items"][0])
+    appended["id"] = "t3"
+
+    result = update_master_journal_workbook_incremental(
+        path,
+        [appended],
+        expected_survivor_row_ids=["t1", "t2", "t3"],
+    )
+
+    assert result["ok"] is True
+    assert result["inserted_row_ids"] == ["t3"]
+    wb = load_workbook(path)
+    try:
+        ws = wb["Trade Log"]
+        assert _trade_log_row_by_id(ws, "t3") == first_unused_row
+        if authored_kind == "cell_style":
+            styled = ws.cell(
+                first_unused_row,
+                _header_col(ws, "Commission"),
+            )
+            assert styled.border.left.style == "double"
+            assert styled.border.bottom.style == "thick"
+        else:
+            assert ws.row_dimensions[first_unused_row].height == pytest.approx(
+                42.25
+            )
+    finally:
+        wb.close()
+
+
+def test_incremental_workbook_marks_external_formula_reference_as_unsafe(
+    tmp_path: Path,
+):
+    path = tmp_path / "incremental-external-formula.xlsx"
+    snapshot = sample_snapshot()
+    build_master_journal_workbook(snapshot, path)
+    wb = load_workbook(path)
+    wb[STATS1_SHEET]["Z250"] = "='[linked.xlsx]Sheet1'!A1"
+    wb.save(path)
+    wb.close()
+    before = hashlib.sha256(path.read_bytes()).hexdigest()
+
+    with pytest.raises(
+        IncrementalWorkbookUpdateNotEligible, match="external workbook references"
+    ) as exc_info:
+        update_master_journal_workbook_incremental(path, [snapshot["items"][0]])
+
+    assert exc_info.value.unsafe_full_rebuild is True
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == before
+
+
+def test_incremental_workbook_marks_stats2_managed_formula_as_unsafe(
+    tmp_path: Path,
+):
+    path = tmp_path / "incremental-stats2-formula.xlsx"
+    snapshot = sample_snapshot()
+    snapshot["balances"].append(
+        {
+            "account_label": "OANDA DEMO",
+            "balance": 1000.0,
+            "currency": "AUD",
+        }
+    )
+    build_master_journal_workbook(snapshot, path)
+    wb = load_workbook(path)
+    stats2 = wb[STATS2_SHEET]
+    headers = {
+        str(stats2.cell(2, col).value or ""): col
+        for col in range(1, stats2.max_column + 1)
+    }
+    account_row = next(
+        row
+        for row in range(3, stats2.max_row + 1)
+        if stats2.cell(row, headers["Account"]).value == "OANDA DEMO"
+    )
+    stats2.cell(account_row, headers["Balance"]).value = "=1+1"
+    wb.save(path)
+    wb.close()
+    before = hashlib.sha256(path.read_bytes()).hexdigest()
+
+    with pytest.raises(
+        IncrementalWorkbookUpdateNotEligible, match="formula in a managed cell"
+    ) as exc_info:
+        update_master_journal_workbook_incremental(
+            path,
+            [],
+            account_balance={
+                "account_label": "OANDA DEMO",
+                "balance": 2000.0,
+                "currency": "AUD",
+            },
+        )
+
+    assert exc_info.value.unsafe_full_rebuild is True
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == before
+
+
+def test_incremental_and_preservation_reject_unaffected_stats2_cached_formula(
+    tmp_path: Path,
+):
+    path = tmp_path / "incremental-stats2-unaffected-cached-formula.xlsx"
+    snapshot = sample_snapshot()
+    snapshot["balances"].append(
+        {
+            "account_label": "OANDA DEMO",
+            "balance": 1000.0,
+            "currency": "AUD",
+        }
+    )
+    build_master_journal_workbook(snapshot, path)
+    wb = load_workbook(path, data_only=False)
+    stats2 = wb[STATS2_SHEET]
+    headers = {
+        str(stats2.cell(2, col).value or ""): col
+        for col in range(1, stats2.max_column + 1)
+    }
+    formula_row = next(
+        row
+        for row in range(3, stats2.max_row + 1)
+        if stats2.cell(row, headers["Account"]).value == "BYBIT"
+    )
+    formula_coordinate = stats2.cell(
+        formula_row, headers["Balance"]
+    ).coordinate
+    stats2[formula_coordinate] = "=100+1"
+    wb.calculation.calcMode = "auto"
+    wb.calculation.fullCalcOnLoad = True
+    wb.save(path)
+    wb.close()
+    _seed_formula_cached_value(
+        path,
+        STATS2_SHEET,
+        formula_coordinate,
+        101,
+    )
+    cached_wb = load_workbook(path, data_only=True)
+    try:
+        assert cached_wb[STATS2_SHEET][formula_coordinate].value == 101
+    finally:
+        cached_wb.close()
+    parsed = read_master_journal_source(path)
+    bybit_balance = next(
+        balance
+        for balance in parsed["balances"]
+        if balance["account_label"] == "BYBIT"
+    )
+    assert bybit_balance["balance"] == pytest.approx(101)
+    before = path.read_bytes()
+
+    with pytest.raises(
+        IncrementalWorkbookUpdateNotEligible,
+        match=f"formula in a managed cell.*{formula_coordinate}",
+    ) as incremental_error:
+        update_master_journal_workbook_incremental(
+            path,
+            [],
+            account_balance={
+                "account_label": "OANDA DEMO",
+                "balance": 2000.0,
+                "currency": "AUD",
+            },
+        )
+
+    assert incremental_error.value.unsafe_full_rebuild is True
+    assert path.read_bytes() == before
+    with pytest.raises(
+        RuntimeError,
+        match=f"Preservation-mode.*managed cell.*{formula_coordinate}",
+    ):
+        update_master_journal_workbook_data_only(
+            path,
+            snapshot,
+            preserve_existing_layout=True,
+        )
+    assert path.read_bytes() == before
+
+
+def test_incremental_workbook_rejects_duplicate_workbook_row_ids_without_touching_original(
+    tmp_path: Path,
+):
+    path = tmp_path / "incremental-duplicate.xlsx"
+    snapshot = sample_snapshot()
+    build_master_journal_workbook(snapshot, path)
+    wb = load_workbook(path)
+    ws = wb["Trade Log"]
+    ws.cell(_trade_log_row_by_id(ws, "t2"), _header_col(ws, "Row ID")).value = "t1"
+    wb.save(path)
+    wb.close()
+    before = hashlib.sha256(path.read_bytes()).hexdigest()
+
+    with pytest.raises(IncrementalWorkbookUpdateNotEligible, match="duplicate Row ID"):
+        update_master_journal_workbook_incremental(path, [snapshot["items"][0]])
+
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == before
+
+
+def test_incremental_workbook_candidate_validation_failure_is_atomic(
+    tmp_path: Path,
+    monkeypatch,
+):
+    from tools import master_journal_workbook as mjw
+
+    path = tmp_path / "incremental-atomic.xlsx"
+    snapshot = sample_snapshot()
+    build_master_journal_workbook(snapshot, path)
+    before_bytes = path.read_bytes()
+    real_load_workbook = mjw.load_workbook
+
+    def fail_candidate_load(candidate_path, *args, **kwargs):
+        if ".incremental-" in Path(candidate_path).name:
+            raise RuntimeError("simulated candidate validation failure")
+        return real_load_workbook(candidate_path, *args, **kwargs)
+
+    monkeypatch.setattr(mjw, "load_workbook", fail_candidate_load)
+    changed = dict(snapshot["items"][0])
+    changed["net_profit"] = 99.0
+    with pytest.raises(RuntimeError, match="simulated candidate validation failure"):
+        update_master_journal_workbook_incremental(path, [changed])
+
+    assert path.read_bytes() == before_bytes
+    assert list(tmp_path.glob(".*.incremental-*.tmp.xlsx")) == []

@@ -134,7 +134,7 @@ from shared.oanda_api import (
 )
 from render.dropbox_sync import download_bytes, list_excel_files, upload_bytes
 from render import dropbox_state_store
-from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, read_master_journal_source, update_master_journal_workbook_data_only, refresh_master_journal_derived_sheets, stable_row_id, SHEET_ORDER, REPORT_YEARLY_SHEET, expected_report_sheet_names, _get_all_trades_sheet, _get_trade_log_sheet, _trade_log_header_map, _trade_log_data_start_row, _find_instrument_leaders_table, LEADER_LABEL_TO_KEY, _repair_or_flag_zero_trade_qty, _canonicalize_and_dedupe_balances, _trade_execution_fingerprint, _trade_row_source_rank, _dedupe_trade_rows_by_execution, _instrument_averages_header_map, INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, INSTRUMENT_AVERAGES_DATA_START_ROW, _result_percentage_totals_by_market, _risk_of_ruin_by_account, _stats1_sheet, _stats2_sheet, _symbols_sheet, STATS1_SHEET, STATS2_SHEET, SYMBOLS_SHEET, _parse_duration_text, _duration_ddhhmmss_cell_to_seconds, _is_ddhhmmss_number_format, STOP_RECOMMENDATION_HEADER, TARGET_RECOMMENDATION_HEADER, _distance_recommendation_summary, _stop_recommendation_payload, _apply_recommendation_cell_style, _ensure_dashboard_requested_metric_rows, _stats1_market_columns, _stats1_section_bounds, balance_drawdown_metrics
+from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, read_master_journal_source, update_master_journal_workbook_data_only, update_master_journal_workbook_incremental, IncrementalWorkbookUpdateNotEligible, refresh_master_journal_derived_sheets, stable_row_id, SHEET_ORDER, REPORT_YEARLY_SHEET, expected_report_sheet_names, _get_all_trades_sheet, _get_trade_log_sheet, _trade_log_header_map, _trade_log_data_start_row, _find_instrument_leaders_table, LEADER_LABEL_TO_KEY, _repair_or_flag_zero_trade_qty, _canonicalize_and_dedupe_balances, _trade_execution_fingerprint, _trade_row_source_rank, _dedupe_trade_rows_by_execution, _instrument_averages_header_map, INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, INSTRUMENT_AVERAGES_DATA_START_ROW, _result_percentage_totals_by_market, _risk_of_ruin_by_account, _stats1_sheet, _stats2_sheet, _symbols_sheet, STATS1_SHEET, STATS2_SHEET, SYMBOLS_SHEET, _parse_duration_text, _duration_ddhhmmss_cell_to_seconds, _is_ddhhmmss_number_format, STOP_RECOMMENDATION_HEADER, TARGET_RECOMMENDATION_HEADER, _distance_recommendation_summary, _stop_recommendation_payload, _apply_recommendation_cell_style, _ensure_dashboard_requested_metric_rows, _stats1_market_columns, _stats1_section_bounds, balance_drawdown_metrics
 from bybit_monitor import bybit_altcoin_monitor as bybit_monitor
 from oanda_monitor import oanda_forex_monitor as oanda_monitor
 from bybit_demo_tpsl_cache import (
@@ -608,6 +608,42 @@ TRADING_JOURNAL_SYNC_STATE_PATH = BASE_DIR / "render" / "data" / "trading_journa
 TRADING_JOURNAL_IMPORT_CACHE_PATH = BASE_DIR / "render" / "data" / "trading_journal_import_cache.json"
 TRADING_JOURNAL_VIEW_CACHE_PATH = BASE_DIR / "render" / "data" / "trading_journal_view_cache.json"
 TRADING_JOURNAL_SQLITE_PATH = BASE_DIR / "render" / "data" / "trading_journal.sqlite"
+TRADING_JOURNAL_DERIVED_REFRESH_STATE_PATH = BASE_DIR / "render" / "data" / "trading_journal_derived_refresh_state.json"
+TRADING_JOURNAL_DERIVED_REFRESH_DEBOUNCE_SECONDS = max(
+    0.0,
+    float(os.getenv("TRADING_JOURNAL_DERIVED_REFRESH_DEBOUNCE_SECONDS", "30") or "30"),
+)
+TRADING_JOURNAL_DERIVED_REFRESH_MAX_ATTEMPTS = max(
+    1,
+    int(os.getenv("TRADING_JOURNAL_DERIVED_REFRESH_MAX_ATTEMPTS", "3") or "3"),
+)
+TRADING_JOURNAL_DERIVED_REFRESH_RETRY_BASE_SECONDS = max(
+    0.05,
+    float(
+        os.getenv("TRADING_JOURNAL_DERIVED_REFRESH_RETRY_BASE_SECONDS", "5")
+        or "5"
+    ),
+)
+TRADING_JOURNAL_DERIVED_REFRESH_RETRY_MAX_SECONDS = max(
+    TRADING_JOURNAL_DERIVED_REFRESH_RETRY_BASE_SECONDS,
+    float(
+        os.getenv("TRADING_JOURNAL_DERIVED_REFRESH_RETRY_MAX_SECONDS", "60")
+        or "60"
+    ),
+)
+TRADING_JOURNAL_DERIVED_REFRESH_IMPORT_LOCK_RETRY_SECONDS = max(
+    0.05,
+    float(
+        os.getenv(
+            "TRADING_JOURNAL_DERIVED_REFRESH_IMPORT_LOCK_RETRY_SECONDS",
+            "0.25",
+        )
+        or "0.25"
+    ),
+)
+TRADING_JOURNAL_INCREMENTAL_RECOVERY_VERSION = 1
+TRADING_JOURNAL_INCREMENTAL_RECOVERY_MAX_ROWS = 25
+TRADING_JOURNAL_INCREMENTAL_RECOVERY_MAX_BYTES = 256 * 1024
 MASTER_JOURNAL_FILENAME = "Trading Journal.xlsx"
 MASTER_JOURNAL_PATH = BASE_DIR / "journal" / MASTER_JOURNAL_FILENAME
 
@@ -667,7 +703,7 @@ TRADING_JOURNAL_SYNC_STATE: Dict[str, object] = {
 }
 TRADING_JOURNAL_SYNC_LOCK = threading.Lock()
 TRADING_JOURNAL_RESYNC_LOCK = threading.Lock()
-MASTER_JOURNAL_WORKBOOK_SYNC_LOCK = threading.Lock()
+MASTER_JOURNAL_WORKBOOK_SYNC_LOCK = threading.RLock()
 MASTER_JOURNAL_WORKBOOK_SYNC_ACTIVE: Dict[str, object] = {}
 TRADING_JOURNAL_RESYNC_CACHE_SCHEMA_VERSION = 1
 TRADING_JOURNAL_RESYNC_CACHE_PATH = BASE_DIR / "render" / "data" / "trading_journal_resync_cache.json"
@@ -688,6 +724,32 @@ TRADING_JOURNAL_IMPORT_STATUS: Dict[str, object] = {
     "updated_at": None,
     "finished_at": None,
     "upload_name": "",
+}
+TRADING_JOURNAL_DERIVED_REFRESH_LOCK = threading.RLock()
+TRADING_JOURNAL_DERIVED_REFRESH_TIMER: Optional[threading.Timer] = None
+TRADING_JOURNAL_DERIVED_REFRESH_LOADED_PATH = ""
+TRADING_JOURNAL_DERIVED_REFRESH_STATE: Dict[str, object] = {
+    "status": "idle",
+    "queued": False,
+    "running": False,
+    "pending": False,
+    "refresh_required": False,
+    "ok": None,
+    "error": None,
+    "generation": 0,
+    "completed_generation": 0,
+    "affected_row_ids": [],
+    "queued_at": None,
+    "started_at": None,
+    "finished_at": None,
+    "updated_at": None,
+    "not_before": None,
+    "rerun_requested": False,
+    "recovered": False,
+    "attempt_count": 0,
+    "max_attempts": TRADING_JOURNAL_DERIVED_REFRESH_MAX_ATTEMPTS,
+    "last_error": None,
+    "result": None,
 }
 TRADING_JOURNAL_SYNC_TASK: Optional[asyncio.Task] = None
 TRADING_JOURNAL_SYNC_THREAD: Optional[threading.Thread] = None
@@ -1961,9 +2023,16 @@ def _ensure_trading_journal_sqlite_schema(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS journal_stats (snapshot_id TEXT PRIMARY KEY, payload_json TEXT NOT NULL, imported_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS journal_diagnostics (snapshot_id TEXT PRIMARY KEY, payload_json TEXT NOT NULL, imported_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS source_files (absolute_path TEXT PRIMARY KEY, file_size INTEGER, modified_at REAL, content_hash TEXT, last_imported_at TEXT);
-        CREATE TABLE IF NOT EXISTS import_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, started_at TEXT, finished_at TEXT, source_mode TEXT, workbooks_scanned INTEGER, workbooks_changed INTEGER, rows_imported INTEGER, cashflow_rows_loaded INTEGER, warnings_json TEXT, errors_json TEXT);
+        CREATE TABLE IF NOT EXISTS import_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, started_at TEXT, finished_at TEXT, source_mode TEXT, workbooks_scanned INTEGER, workbooks_changed INTEGER, rows_imported INTEGER, cashflow_rows_loaded INTEGER, warnings_json TEXT, errors_json TEXT, metadata_json TEXT);
         """
     )
+    import_run_columns = {
+        str(row[1])
+        for row in conn.execute("PRAGMA table_info(import_runs)").fetchall()
+        if len(row) > 1
+    }
+    if "metadata_json" not in import_run_columns:
+        conn.execute("ALTER TABLE import_runs ADD COLUMN metadata_json TEXT")
 
 
 def _persist_trading_journal_sqlite(snapshot: Dict[str, object], import_meta: Optional[Dict[str, object]] = None) -> None:
@@ -2032,6 +2101,103 @@ def _persist_trading_journal_sqlite(snapshot: Dict[str, object], import_meta: Op
                 ),
             )
         conn.commit()
+    finally:
+        conn.close()
+
+
+def _persist_trading_journal_sqlite_incremental(
+    changed_rows: List[Dict[str, object]],
+    account_balance: Dict[str, object],
+    *,
+    import_meta: Optional[Dict[str, object]] = None,
+    derived_refresh_state: Optional[Dict[str, object]] = None,
+) -> None:
+    safe_rows = _json_safe(
+        [dict(row) for row in changed_rows if isinstance(row, dict)]
+    )
+    if not isinstance(safe_rows, list):
+        safe_rows = []
+    safe_balance = _json_safe(dict(account_balance))
+    if not isinstance(safe_balance, dict):
+        raise ValueError("Incremental journal persistence requires an account balance.")
+    safe_import_meta = _json_safe(import_meta) if isinstance(import_meta, dict) else {}
+    if not isinstance(safe_import_meta, dict):
+        safe_import_meta = {}
+    safe_refresh_state = (
+        _json_safe(
+            _public_trading_journal_derived_refresh_state(
+                derived_refresh_state
+            )
+        )
+        if isinstance(derived_refresh_state, dict)
+        else {}
+    )
+    if not isinstance(safe_refresh_state, dict):
+        safe_refresh_state = {}
+    affected_row_ids = sorted(
+        {
+            str(row.get("id") or "").strip()
+            for row in safe_rows
+            if isinstance(row, dict) and str(row.get("id") or "").strip()
+        }
+    )
+    metadata = {
+        "derived_refresh_pending": True,
+        "derived_refresh": safe_refresh_state,
+        "affected_row_ids": affected_row_ids,
+    }
+    TRADING_JOURNAL_SQLITE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    now_iso = _utc_now_iso()
+    conn = sqlite3.connect(TRADING_JOURNAL_SQLITE_PATH)
+    try:
+        _ensure_trading_journal_sqlite_schema(conn)
+        conn.commit()
+        conn.execute("BEGIN IMMEDIATE")
+        for row in safe_rows:
+            if not isinstance(row, dict) or _row_type(row) != "trade":
+                continue
+            row_id = str(row.get("id") or "").strip()
+            if not row_id:
+                raise ValueError("Incremental journal row is missing a stable ID.")
+            conn.execute(
+                "INSERT OR REPLACE INTO journal_trades(id,payload_json,imported_at) VALUES(?,?,?)",
+                (row_id, json.dumps(row, ensure_ascii=False), now_iso),
+            )
+            metrics = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
+            conn.execute(
+                "INSERT OR REPLACE INTO journal_metrics(id,payload_json,imported_at) VALUES(?,?,?)",
+                (row_id, json.dumps(metrics, ensure_ascii=False), now_iso),
+            )
+        account_key = _norm_account_key(
+            safe_balance.get("account")
+            or safe_balance.get("label")
+            or safe_balance.get("account_label")
+        )
+        if not account_key:
+            raise ValueError("Incremental account balance is missing an account label.")
+        conn.execute(
+            "INSERT OR REPLACE INTO journal_balances(account_key,payload_json,imported_at) VALUES(?,?,?)",
+            (account_key, json.dumps(safe_balance, ensure_ascii=False), now_iso),
+        )
+        conn.execute(
+            "INSERT INTO import_runs(started_at,finished_at,source_mode,workbooks_scanned,workbooks_changed,rows_imported,cashflow_rows_loaded,warnings_json,errors_json,metadata_json) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (
+                str(safe_import_meta.get("started_at") or now_iso),
+                now_iso,
+                str(safe_import_meta.get("source_mode") or "manual_upload_incremental"),
+                int(safe_import_meta.get("workbooks_scanned") or 1),
+                int(safe_import_meta.get("workbooks_changed") or 1),
+                int(safe_import_meta.get("rows_imported") or len(safe_rows)),
+                int(safe_import_meta.get("cashflow_rows_loaded") or 0),
+                json.dumps(safe_import_meta.get("warnings") or [], ensure_ascii=False),
+                json.dumps(safe_import_meta.get("errors") or [], ensure_ascii=False),
+                json.dumps(metadata, ensure_ascii=False),
+            ),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 
@@ -2117,6 +2283,7 @@ def _trading_journal_import_status_snapshot() -> Dict[str, object]:
     status["elapsed_seconds"] = round(max(0.0, time.time() - float(status.get("started_epoch") or time.time())), 3) if status.get("running") else 0.0
     if started and not status.get("running"):
         status.pop("started_epoch", None)
+    status["derived_refresh"] = _trading_journal_derived_refresh_status_snapshot()
     return status
 
 
@@ -4384,7 +4551,12 @@ def _get_trading_journal() -> List[Dict[str, object]]:
     return _get_trading_journal_rows()
 
 
-def _save_trading_journal(rows: List[Dict[str, object]]) -> None:
+def _save_trading_journal(
+    rows: List[Dict[str, object]],
+    *,
+    invalidate_view_snapshot: bool = True,
+    schedule_state_backup: bool = True,
+) -> None:
     global _TRADING_JOURNAL_CACHE, _TRADING_JOURNAL_CACHE_KEY
     with _TRADING_JOURNAL_ROWS_LOCK:
         sorted_rows = sorted(
@@ -4395,8 +4567,10 @@ def _save_trading_journal(rows: List[Dict[str, object]]) -> None:
         _save_json_file(TRADING_JOURNAL_PATH, {"items": sorted_rows, "updated_at": _utc_now_iso()})
         _TRADING_JOURNAL_CACHE = copy.deepcopy(sorted_rows)
         _TRADING_JOURNAL_CACHE_KEY = _trading_journal_file_cache_key()
-    _invalidate_trading_journal_view_snapshot()
-    _schedule_dropbox_upload_state_backup()
+    if invalidate_view_snapshot:
+        _invalidate_trading_journal_view_snapshot()
+    if schedule_state_backup:
+        _schedule_dropbox_upload_state_backup()
 
 
 def _editable_trading_journal_fields() -> Set[str]:
@@ -4597,7 +4771,14 @@ def _find_journal_row_index(row_id: str) -> int:
     return -1
 
 
-def _upsert_trading_journal_rows(rows: Iterable[Dict[str, object]], *, allow_broker_rows_in_single_file: bool = False) -> int:
+def _upsert_trading_journal_rows(
+    rows: Iterable[Dict[str, object]],
+    *,
+    allow_broker_rows_in_single_file: bool = False,
+    invalidate_view_snapshot: bool = True,
+    schedule_state_backup: bool = True,
+    preserve_unaffected_rows: bool = False,
+) -> int:
     incoming_rows = [dict(row) for row in rows if isinstance(row, dict)]
     if _trading_journal_local_excel_authoritative():
         blocked = 0
@@ -4618,7 +4799,37 @@ def _upsert_trading_journal_rows(rows: Iterable[Dict[str, object]], *, allow_bro
     with _TRADING_JOURNAL_ROWS_LOCK:
         existing = _get_trading_journal_rows()
         incoming_rows, stale_oanda_ids = _prepare_oanda_canonical_replacements(existing, incoming_rows)
-        existing = _sanitize_oanda_commission_fields(existing, raw_export_rows=incoming_rows)
+        if preserve_unaffected_rows:
+            incoming_ids = {
+                str(row.get("id") or "").strip()
+                for row in incoming_rows
+                if str(row.get("id") or "").strip()
+            }
+            affected_existing = [
+                row
+                for row in existing
+                if str(row.get("id") or "").strip() in incoming_ids
+            ]
+            sanitized_affected = {
+                str(row.get("id") or "").strip(): row
+                for row in _sanitize_oanda_commission_fields(
+                    affected_existing,
+                    raw_export_rows=incoming_rows,
+                )
+                if str(row.get("id") or "").strip()
+            }
+            existing = [
+                sanitized_affected.get(
+                    str(row.get("id") or "").strip(),
+                    row,
+                )
+                for row in existing
+            ]
+        else:
+            existing = _sanitize_oanda_commission_fields(
+                existing,
+                raw_export_rows=incoming_rows,
+            )
         by_id: Dict[str, Dict[str, object]] = {}
         for row in existing:
             row_id = str(row.get("id") or "").strip()
@@ -4646,8 +4857,11 @@ def _upsert_trading_journal_rows(rows: Iterable[Dict[str, object]], *, allow_bro
                 )
             changed += 1
         if changed:
-            _save_trading_journal(list(by_id.values()))
-            _invalidate_trading_journal_view_snapshot()
+            _save_trading_journal(
+                list(by_id.values()),
+                invalidate_view_snapshot=invalidate_view_snapshot,
+                schedule_state_backup=schedule_state_backup,
+            )
     return changed
 
 
@@ -4916,6 +5130,862 @@ def _save_json_file(path: Path, payload: object) -> None:
     )
 
 
+def _derived_refresh_default_state() -> Dict[str, object]:
+    return {
+        "status": "idle",
+        "queued": False,
+        "running": False,
+        "pending": False,
+        "refresh_required": False,
+        "ok": None,
+        "error": None,
+        "generation": 0,
+        "completed_generation": 0,
+        "affected_row_ids": [],
+        "queued_at": None,
+        "started_at": None,
+        "finished_at": None,
+        "updated_at": None,
+        "not_before": None,
+        "rerun_requested": False,
+        "recovered": False,
+        "attempt_count": 0,
+        "max_attempts": TRADING_JOURNAL_DERIVED_REFRESH_MAX_ATTEMPTS,
+        "last_error": None,
+        "result": None,
+        "intent_kind": "derived_refresh",
+        "incremental_recovery": None,
+    }
+
+
+def _normalize_trading_journal_incremental_recovery_payload(
+    payload: object,
+) -> Dict[str, object]:
+    if not isinstance(payload, dict):
+        raise ValueError("Incremental recovery payload is missing.")
+    version = int(payload.get("version") or 0)
+    if version != TRADING_JOURNAL_INCREMENTAL_RECOVERY_VERSION:
+        raise ValueError(
+            f"Unsupported incremental recovery payload version: {version}."
+        )
+    phase = str(payload.get("phase") or "").strip().lower()
+    if phase not in {
+        "prepared",
+        "json_committed",
+        "workbook_committed",
+        "incremental_committed",
+    }:
+        raise ValueError(f"Invalid incremental recovery phase: {phase or '<blank>'}.")
+
+    def _validated_rows(value: object, label: str) -> List[Dict[str, object]]:
+        if not isinstance(value, list):
+            raise ValueError(f"Incremental recovery {label} must be a list.")
+        if len(value) > TRADING_JOURNAL_INCREMENTAL_RECOVERY_MAX_ROWS:
+            raise ValueError(
+                f"Incremental recovery {label} exceeds the bounded row limit."
+            )
+        rows: List[Dict[str, object]] = []
+        seen_ids: Set[str] = set()
+        for raw in value:
+            if not isinstance(raw, dict):
+                raise ValueError(f"Incremental recovery {label} contains a non-row value.")
+            row = _json_safe(dict(raw))
+            if not isinstance(row, dict):
+                raise ValueError(f"Incremental recovery {label} row is not JSON-safe.")
+            row_id = str(row.get("id") or "").strip()
+            if not row_id:
+                raise ValueError(f"Incremental recovery {label} row is missing an ID.")
+            if row_id in seen_ids:
+                raise ValueError(f"Incremental recovery {label} contains duplicate IDs.")
+            row["id"] = row_id
+            seen_ids.add(row_id)
+            rows.append(row)
+        return rows
+
+    json_rows = _validated_rows(payload.get("json_rows"), "JSON rows")
+    workbook_rows = _validated_rows(
+        payload.get("workbook_rows"), "workbook rows"
+    )
+    json_ids = {str(row["id"]) for row in json_rows}
+    workbook_ids = {str(row["id"]) for row in workbook_rows}
+    if not workbook_ids.issubset(json_ids):
+        raise ValueError(
+            "Incremental recovery workbook rows must be included in the JSON rows."
+        )
+    balance = _json_safe(payload.get("account_balance"))
+    if not isinstance(balance, dict) or _to_float(balance.get("balance")) is None:
+        raise ValueError("Incremental recovery account balance is invalid.")
+    normalized: Dict[str, object] = {
+        "version": version,
+        "transaction_id": str(payload.get("transaction_id") or "").strip()
+        or f"incremental-{uuid4().hex[:12]}",
+        "phase": phase,
+        "json_rows": json_rows,
+        "workbook_rows": workbook_rows,
+        "account_balance": balance,
+        "created_at": str(payload.get("created_at") or "").strip()
+        or _utc_now_iso(),
+        "phase_updated_at": str(payload.get("phase_updated_at") or "").strip()
+        or _utc_now_iso(),
+    }
+    encoded = json.dumps(
+        normalized,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    if len(encoded) > TRADING_JOURNAL_INCREMENTAL_RECOVERY_MAX_BYTES:
+        raise ValueError("Incremental recovery payload exceeds the durable size limit.")
+    return normalized
+
+
+def _set_trading_journal_incremental_recovery_phase(
+    phase: str,
+) -> Dict[str, object]:
+    with TRADING_JOURNAL_DERIVED_REFRESH_LOCK:
+        state = dict(TRADING_JOURNAL_DERIVED_REFRESH_STATE)
+        payload = _normalize_trading_journal_incremental_recovery_payload(
+            state.get("incremental_recovery")
+        )
+        payload["phase"] = str(phase or "").strip().lower()
+        payload["phase_updated_at"] = _utc_now_iso()
+        payload = _normalize_trading_journal_incremental_recovery_payload(payload)
+        next_state = {
+            **state,
+            "intent_kind": "incremental_commit",
+            "incremental_recovery": payload,
+        }
+        _commit_trading_journal_derived_refresh_state_locked(next_state)
+        return copy.deepcopy(TRADING_JOURNAL_DERIVED_REFRESH_STATE)
+
+
+def _trading_journal_incremental_recovery_summary(
+    payload: object,
+) -> Optional[Dict[str, object]]:
+    if payload is None:
+        return None
+    try:
+        normalized = _normalize_trading_journal_incremental_recovery_payload(
+            payload
+        )
+    except Exception:
+        return {
+            "version": None,
+            "transaction_id": None,
+            "phase": "invalid",
+            "created_at": None,
+            "phase_updated_at": None,
+            "json_row_count": 0,
+            "json_row_ids": [],
+            "workbook_row_count": 0,
+            "workbook_row_ids": [],
+        }
+    json_row_ids = [
+        str(row.get("id") or "").strip()
+        for row in (normalized.get("json_rows") or [])
+        if isinstance(row, dict) and str(row.get("id") or "").strip()
+    ]
+    workbook_row_ids = [
+        str(row.get("id") or "").strip()
+        for row in (normalized.get("workbook_rows") or [])
+        if isinstance(row, dict) and str(row.get("id") or "").strip()
+    ]
+    return {
+        "version": normalized.get("version"),
+        "transaction_id": normalized.get("transaction_id"),
+        "phase": normalized.get("phase"),
+        "created_at": normalized.get("created_at"),
+        "phase_updated_at": normalized.get("phase_updated_at"),
+        "json_row_count": len(json_row_ids),
+        "json_row_ids": json_row_ids,
+        "workbook_row_count": len(workbook_row_ids),
+        "workbook_row_ids": workbook_row_ids,
+    }
+
+
+def _public_trading_journal_derived_refresh_state(
+    state: Dict[str, object],
+) -> Dict[str, object]:
+    public_state = copy.deepcopy(dict(state))
+    public_state["incremental_recovery"] = (
+        _trading_journal_incremental_recovery_summary(
+            state.get("incremental_recovery")
+        )
+    )
+    return public_state
+
+
+def _commit_trading_journal_derived_refresh_state_locked(
+    next_state: Dict[str, object],
+) -> None:
+    payload = {**_derived_refresh_default_state(), **dict(next_state)}
+    payload["affected_row_ids"] = sorted(
+        {
+            str(row_id or "").strip()
+            for row_id in (payload.get("affected_row_ids") or [])
+            if str(row_id or "").strip()
+        }
+    )
+    payload["updated_at"] = _utc_now_iso()
+    _save_json_file(TRADING_JOURNAL_DERIVED_REFRESH_STATE_PATH, payload)
+    TRADING_JOURNAL_DERIVED_REFRESH_STATE.clear()
+    TRADING_JOURNAL_DERIVED_REFRESH_STATE.update(payload)
+
+
+def _arm_trading_journal_derived_refresh_timer_locked(
+    delay_seconds: Optional[float] = None,
+) -> None:
+    global TRADING_JOURNAL_DERIVED_REFRESH_TIMER
+    if bool(TRADING_JOURNAL_DERIVED_REFRESH_STATE.get("running")):
+        return
+    current = TRADING_JOURNAL_DERIVED_REFRESH_TIMER
+    if isinstance(current, threading.Timer) and current.is_alive():
+        current.cancel()
+    if delay_seconds is None:
+        not_before = _to_float(
+            TRADING_JOURNAL_DERIVED_REFRESH_STATE.get("not_before")
+        )
+        delay_seconds = max(
+            0.0,
+            (not_before - time.time()) if not_before is not None else 0.0,
+        )
+    timer = threading.Timer(
+        max(0.0, float(delay_seconds or 0.0)),
+        _run_trading_journal_derived_refresh_worker,
+    )
+    timer.daemon = True
+    TRADING_JOURNAL_DERIVED_REFRESH_TIMER = timer
+    timer.start()
+
+
+def _recover_trading_journal_derived_refresh_state_if_needed() -> None:
+    global TRADING_JOURNAL_DERIVED_REFRESH_LOADED_PATH
+    path_key = str(TRADING_JOURNAL_DERIVED_REFRESH_STATE_PATH)
+    with TRADING_JOURNAL_DERIVED_REFRESH_LOCK:
+        if TRADING_JOURNAL_DERIVED_REFRESH_LOADED_PATH == path_key:
+            return
+        current_timer = TRADING_JOURNAL_DERIVED_REFRESH_TIMER
+        if isinstance(current_timer, threading.Timer) and current_timer.is_alive():
+            current_timer.cancel()
+        loaded = _load_json_file(TRADING_JOURNAL_DERIVED_REFRESH_STATE_PATH, {})
+        state = _derived_refresh_default_state()
+        loaded_without_intent_kind = False
+        if isinstance(loaded, dict):
+            state.update(loaded)
+            loaded_without_intent_kind = bool(loaded and "intent_kind" not in loaded)
+        recovered_status = str(state.get("status") or "").strip().lower()
+        recovered_pending = bool(
+            state.get("queued")
+            or state.get("running")
+            or (
+                state.get("pending")
+                and str(state.get("status") or "").strip().lower()
+                in {"queued", "retrying", "running"}
+            )
+        )
+        if recovered_pending:
+            if loaded_without_intent_kind:
+                state["intent_kind"] = "legacy_incremental_unknown"
+            state.update(
+                {
+                    "status": (
+                        "retrying" if recovered_status == "retrying" else "queued"
+                    ),
+                    "queued": True,
+                    "running": False,
+                    "pending": True,
+                    "refresh_required": True,
+                    "ok": None,
+                    "error": None,
+                    "rerun_requested": False,
+                    "recovered": True,
+                    "not_before": max(
+                        time.time(),
+                        _to_float(state.get("not_before")) or 0.0,
+                    ),
+                }
+            )
+        TRADING_JOURNAL_DERIVED_REFRESH_STATE.clear()
+        TRADING_JOURNAL_DERIVED_REFRESH_STATE.update(state)
+        TRADING_JOURNAL_DERIVED_REFRESH_LOADED_PATH = path_key
+        if recovered_pending:
+            _commit_trading_journal_derived_refresh_state_locked(state)
+            _arm_trading_journal_derived_refresh_timer_locked()
+
+
+def _queue_trading_journal_derived_refresh(
+    affected_row_ids: Iterable[object],
+    *,
+    incremental_recovery: Optional[Dict[str, object]] = None,
+) -> Dict[str, object]:
+    _recover_trading_journal_derived_refresh_state_if_needed()
+    with TRADING_JOURNAL_DERIVED_REFRESH_LOCK:
+        state = dict(TRADING_JOURNAL_DERIVED_REFRESH_STATE)
+        existing_recovery = (
+            _normalize_trading_journal_incremental_recovery_payload(
+                state.get("incremental_recovery")
+            )
+            if state.get("incremental_recovery") is not None
+            else None
+        )
+        incoming_recovery = (
+            _normalize_trading_journal_incremental_recovery_payload(
+                incremental_recovery
+            )
+            if incremental_recovery is not None
+            else None
+        )
+        if existing_recovery is not None and incoming_recovery is not None:
+            existing_phase = str(existing_recovery.get("phase") or "")
+            existing_transaction_id = str(
+                existing_recovery.get("transaction_id") or ""
+            )
+            incoming_transaction_id = str(
+                incoming_recovery.get("transaction_id") or ""
+            )
+            if (
+                existing_phase != "incremental_committed"
+                and existing_transaction_id != incoming_transaction_id
+            ):
+                raise RuntimeError(
+                    "A different incremental import transaction is still awaiting "
+                    f"crash recovery (transaction_id={existing_transaction_id}, "
+                    f"phase={existing_phase}); retry after recovery completes."
+                )
+            if existing_transaction_id == incoming_transaction_id and any(
+                existing_recovery.get(key) != incoming_recovery.get(key)
+                for key in ("json_rows", "workbook_rows", "account_balance")
+            ):
+                raise RuntimeError(
+                    "An incremental recovery transaction ID was reused with a "
+                    "different staged payload."
+                )
+            normalized_recovery = (
+                existing_recovery
+                if existing_transaction_id == incoming_transaction_id
+                else incoming_recovery
+            )
+        else:
+            normalized_recovery = incoming_recovery or existing_recovery
+        already_pending = bool(
+            state.get("queued") or state.get("running") or state.get("pending")
+        )
+        merged_ids = (
+            {
+                str(row_id or "").strip()
+                for row_id in (state.get("affected_row_ids") or [])
+                if str(row_id or "").strip()
+            }
+            if already_pending
+            else set()
+        )
+        merged_ids.update(
+            str(row_id or "").strip()
+            for row_id in (affected_row_ids or [])
+            if str(row_id or "").strip()
+        )
+        running = bool(state.get("running"))
+        next_state = {
+            **state,
+            "status": "running" if running else "queued",
+            "queued": True,
+            "running": running,
+            "pending": True,
+            "refresh_required": True,
+            "ok": None,
+            "error": None,
+            "generation": int(state.get("generation") or 0) + 1,
+            "affected_row_ids": sorted(merged_ids),
+            "queued_at": _utc_now_iso(),
+            "not_before": time.time()
+            + float(TRADING_JOURNAL_DERIVED_REFRESH_DEBOUNCE_SECONDS),
+            "rerun_requested": running,
+            "recovered": False,
+            "attempt_count": 0,
+            "max_attempts": TRADING_JOURNAL_DERIVED_REFRESH_MAX_ATTEMPTS,
+            "last_error": None,
+            "intent_kind": (
+                "incremental_commit"
+                if normalized_recovery is not None
+                else str(state.get("intent_kind") or "derived_refresh")
+            ),
+            "incremental_recovery": normalized_recovery,
+        }
+        _commit_trading_journal_derived_refresh_state_locked(next_state)
+        if not running:
+            _arm_trading_journal_derived_refresh_timer_locked(
+                TRADING_JOURNAL_DERIVED_REFRESH_DEBOUNCE_SECONDS
+            )
+        return copy.deepcopy(TRADING_JOURNAL_DERIVED_REFRESH_STATE)
+
+
+def _defer_trading_journal_derived_refresh_after_incremental_commit() -> Dict[str, object]:
+    with TRADING_JOURNAL_DERIVED_REFRESH_LOCK:
+        state = dict(TRADING_JOURNAL_DERIVED_REFRESH_STATE)
+        if not bool(state.get("queued") or state.get("pending")):
+            return copy.deepcopy(state)
+        next_state = {
+            **state,
+            "not_before": time.time()
+            + float(TRADING_JOURNAL_DERIVED_REFRESH_DEBOUNCE_SECONDS),
+        }
+        _commit_trading_journal_derived_refresh_state_locked(next_state)
+        if not bool(next_state.get("running")):
+            _arm_trading_journal_derived_refresh_timer_locked(
+                TRADING_JOURNAL_DERIVED_REFRESH_DEBOUNCE_SECONDS
+            )
+        return copy.deepcopy(TRADING_JOURNAL_DERIVED_REFRESH_STATE)
+
+
+def _replay_trading_journal_incremental_recovery(
+    state: Dict[str, object],
+) -> Optional[Dict[str, object]]:
+    intent_kind = str(state.get("intent_kind") or "").strip().lower()
+    raw_payload = state.get("incremental_recovery")
+    if raw_payload is None:
+        if intent_kind == "legacy_incremental_unknown":
+            raise RuntimeError(
+                "A legacy incremental import intent cannot be safely recovered "
+                "because it has no staged row payload; refusing a stale workbook rebuild."
+            )
+        return None
+    payload = _normalize_trading_journal_incremental_recovery_payload(raw_payload)
+    phase = str(payload.get("phase") or "").strip().lower()
+    if phase == "incremental_committed":
+        return {
+            "ok": True,
+            "replayed": False,
+            "phase": phase,
+            "transaction_id": payload.get("transaction_id"),
+        }
+
+    json_rows = [
+        dict(row)
+        for row in (payload.get("json_rows") or [])
+        if isinstance(row, dict)
+    ]
+    workbook_rows = [
+        dict(row)
+        for row in (payload.get("workbook_rows") or [])
+        if isinstance(row, dict)
+    ]
+    account_balance = dict(payload.get("account_balance") or {})
+    replay_state = dict(state)
+    if phase != "workbook_committed":
+        _upsert_trading_journal_rows(
+            json_rows,
+            allow_broker_rows_in_single_file=True,
+            invalidate_view_snapshot=False,
+            schedule_state_backup=False,
+            preserve_unaffected_rows=True,
+        )
+        replay_state = _set_trading_journal_incremental_recovery_phase(
+            "json_committed"
+        )
+
+        workbook_path = _master_journal_path()
+        if not workbook_path.exists():
+            raise RuntimeError(
+                "Incremental recovery cannot continue because Trading Journal.xlsx is missing."
+            )
+        source = read_master_journal_source(workbook_path) or {}
+        survivor_ids = {
+            str((row or {}).get("id") or "").strip()
+            for row in (source.get("items") or [])
+            if isinstance(row, dict) and str((row or {}).get("id") or "").strip()
+        }
+        survivor_ids.update(
+            str(row.get("id") or "").strip()
+            for row in workbook_rows
+            if str(row.get("id") or "").strip()
+        )
+        sync_id = f"mjsync-incremental-recovery-{uuid4().hex[:12]}"
+        rejected = _reserve_master_journal_workbook_sync(
+            workbook_path,
+            sync_id,
+            "incremental_import_recovery",
+        )
+        if rejected is not None:
+            raise RuntimeError(_master_journal_sync_error(rejected))
+        try:
+            result = update_master_journal_workbook_incremental(
+                workbook_path,
+                workbook_rows,
+                account_balance=account_balance,
+                expected_survivor_row_ids=sorted(survivor_ids),
+            )
+        finally:
+            _release_master_journal_workbook_sync()
+        if not bool((result or {}).get("ok")):
+            raise RuntimeError(
+                "Incremental recovery workbook update failed: "
+                f"{_master_journal_sync_error(result)}"
+            )
+    else:
+        result = {"ok": True, "affected_row_ids": [row["id"] for row in workbook_rows]}
+    expected_affected_ids = sorted(
+        str(row.get("id") or "").strip()
+        for row in workbook_rows
+        if str(row.get("id") or "").strip()
+    )
+    actual_affected_ids = sorted(
+        str(row_id or "").strip()
+        for row_id in ((result or {}).get("affected_row_ids") or [])
+        if str(row_id or "").strip()
+    )
+    if actual_affected_ids != expected_affected_ids:
+        raise RuntimeError(
+            "Incremental recovery workbook update affected an unexpected row set."
+        )
+    if phase != "workbook_committed":
+        diagnostics = (
+            dict((result or {}).get("diagnostics") or {})
+            if isinstance((result or {}).get("diagnostics"), dict)
+            else {}
+        )
+        verified_balance = (
+            dict(diagnostics.get("verified_account_balance") or {})
+            if isinstance(diagnostics.get("verified_account_balance"), dict)
+            else {}
+        )
+        expected_balance = _to_float(account_balance.get("balance"))
+        actual_balance = _to_float(verified_balance.get("balance"))
+        if (
+            not bool((result or {}).get("account_balance_updated"))
+            or expected_balance is None
+            or actual_balance is None
+            or not math.isclose(
+                expected_balance,
+                actual_balance,
+                rel_tol=1e-12,
+                abs_tol=1e-9,
+            )
+        ):
+            raise RuntimeError(
+                "Incremental recovery did not verify the staged account balance."
+            )
+        replay_state = _set_trading_journal_incremental_recovery_phase(
+            "workbook_committed"
+        )
+    _persist_trading_journal_sqlite_incremental(
+        workbook_rows,
+        account_balance,
+        import_meta={
+            "source_mode": "manual_upload_incremental_recovery",
+            "workbooks_scanned": 1,
+            "workbooks_changed": 1,
+            "rows_imported": len(workbook_rows),
+            "warnings": [],
+            "errors": [],
+        },
+        derived_refresh_state=replay_state,
+    )
+    committed_state = _set_trading_journal_incremental_recovery_phase(
+        "incremental_committed"
+    )
+    try:
+        _schedule_dropbox_upload_state_backup()
+    except Exception as exc:
+        APP_LOGGER.warning(
+            "trading_journal_incremental_recovery_backup_schedule_failed error=%s",
+            exc,
+        )
+    return {
+        "ok": True,
+        "replayed": True,
+        "phase": "incremental_committed",
+        "transaction_id": payload.get("transaction_id"),
+        "affected_row_ids": expected_affected_ids,
+        "generation": committed_state.get("generation"),
+    }
+
+
+def _run_trading_journal_derived_refresh_worker() -> None:
+    global TRADING_JOURNAL_DERIVED_REFRESH_TIMER
+    acquired_import_lock = TRADING_JOURNAL_IMPORT_LOCK.acquire(blocking=False)
+    if not acquired_import_lock:
+        with TRADING_JOURNAL_DERIVED_REFRESH_LOCK:
+            TRADING_JOURNAL_DERIVED_REFRESH_TIMER = None
+            state = dict(TRADING_JOURNAL_DERIVED_REFRESH_STATE)
+            if bool(state.get("queued")) and not bool(state.get("running")):
+                _arm_trading_journal_derived_refresh_timer_locked(
+                    max(
+                        float(TRADING_JOURNAL_DERIVED_REFRESH_DEBOUNCE_SECONDS),
+                        float(
+                            TRADING_JOURNAL_DERIVED_REFRESH_IMPORT_LOCK_RETRY_SECONDS
+                        ),
+                    )
+                )
+        return
+    try:
+        with TRADING_JOURNAL_DERIVED_REFRESH_LOCK:
+            TRADING_JOURNAL_DERIVED_REFRESH_TIMER = None
+            state = dict(TRADING_JOURNAL_DERIVED_REFRESH_STATE)
+            if bool(state.get("running")) or not bool(state.get("queued")):
+                return
+            not_before = _to_float(state.get("not_before"))
+            if not_before is not None and not_before > time.time():
+                _arm_trading_journal_derived_refresh_timer_locked(
+                    not_before - time.time()
+                )
+                return
+            run_generation = int(state.get("generation") or 0)
+            run_ids = list(state.get("affected_row_ids") or [])
+            running_state = {
+                **state,
+                "status": "running",
+                "queued": False,
+                "running": True,
+                "pending": True,
+                "refresh_required": True,
+                "ok": None,
+                "error": None,
+                "started_at": _utc_now_iso(),
+                "finished_at": None,
+                "rerun_requested": False,
+                "attempt_count": int(state.get("attempt_count") or 0) + 1,
+                "max_attempts": max(
+                    1,
+                    int(
+                        state.get("max_attempts")
+                        or TRADING_JOURNAL_DERIVED_REFRESH_MAX_ATTEMPTS
+                    ),
+                ),
+            }
+            _commit_trading_journal_derived_refresh_state_locked(running_state)
+
+        try:
+            recovery_result = _replay_trading_journal_incremental_recovery(
+                running_state
+            )
+            raw_result = _sync_master_journal_workbook(
+                sync_caller="incremental_import_derived_refresh"
+            )
+            result = dict(raw_result or {}) if isinstance(raw_result, dict) else {}
+            if recovery_result is not None:
+                result["incremental_recovery"] = _json_safe(recovery_result)
+            ok = _master_journal_sync_ok(result)
+            error = "" if ok else _master_journal_sync_error(result)
+        except Exception as exc:
+            result = {
+                "ok": False,
+                "master_journal_ok": False,
+                "master_journal_error": str(exc),
+                "master_journal_error_type": type(exc).__name__,
+            }
+            ok = False
+            error = str(exc)
+
+        with TRADING_JOURNAL_DERIVED_REFRESH_LOCK:
+            latest = dict(TRADING_JOURNAL_DERIVED_REFRESH_STATE)
+            rerun = bool(
+                int(latest.get("generation") or 0) > run_generation
+                or latest.get("queued")
+                or latest.get("rerun_requested")
+            )
+            if rerun:
+                next_state = {
+                    **latest,
+                    "status": "queued",
+                    "queued": True,
+                    "running": False,
+                    "pending": True,
+                    "refresh_required": True,
+                    "ok": None,
+                    "error": None,
+                    "finished_at": _utc_now_iso(),
+                    "rerun_requested": False,
+                    "result": _json_safe(result),
+                    "not_before": max(
+                        time.time(),
+                        _to_float(latest.get("not_before")) or 0.0,
+                    ),
+                }
+                _commit_trading_journal_derived_refresh_state_locked(next_state)
+                _arm_trading_journal_derived_refresh_timer_locked()
+            else:
+                attempt_count = max(
+                    1,
+                    int(
+                        latest.get("attempt_count")
+                        or running_state.get("attempt_count")
+                        or 1
+                    ),
+                )
+                max_attempts = max(
+                    1,
+                    int(
+                        latest.get("max_attempts")
+                        or TRADING_JOURNAL_DERIVED_REFRESH_MAX_ATTEMPTS
+                    ),
+                )
+                if not ok and attempt_count < max_attempts:
+                    retry_delay = min(
+                        float(TRADING_JOURNAL_DERIVED_REFRESH_RETRY_MAX_SECONDS),
+                        float(TRADING_JOURNAL_DERIVED_REFRESH_RETRY_BASE_SECONDS)
+                        * (2 ** max(0, attempt_count - 1)),
+                    )
+                    retry_state = {
+                        **latest,
+                        "status": "retrying",
+                        "queued": True,
+                        "running": False,
+                        "pending": True,
+                        "refresh_required": True,
+                        "ok": None,
+                        "error": error or "Derived refresh failed.",
+                        "last_error": error or "Derived refresh failed.",
+                        "affected_row_ids": run_ids,
+                        "finished_at": _utc_now_iso(),
+                        "rerun_requested": False,
+                        "result": _json_safe(result),
+                        "not_before": time.time() + retry_delay,
+                        "attempt_count": attempt_count,
+                        "max_attempts": max_attempts,
+                    }
+                    _commit_trading_journal_derived_refresh_state_locked(
+                        retry_state
+                    )
+                    _arm_trading_journal_derived_refresh_timer_locked(retry_delay)
+                else:
+                    completed_state = {
+                        **latest,
+                        "status": "succeeded" if ok else "failed",
+                        "queued": False,
+                        "running": False,
+                        "pending": False,
+                        "refresh_required": not ok,
+                        "ok": bool(ok),
+                        "error": None
+                        if ok
+                        else (error or "Derived refresh failed."),
+                        "last_error": None
+                        if ok
+                        else (error or "Derived refresh failed."),
+                        "completed_generation": (
+                            run_generation
+                            if ok
+                            else int(latest.get("completed_generation") or 0)
+                        ),
+                        "affected_row_ids": run_ids,
+                        "finished_at": _utc_now_iso(),
+                        "rerun_requested": False,
+                        "result": _json_safe(result),
+                        "not_before": None,
+                        "attempt_count": attempt_count,
+                        "max_attempts": max_attempts,
+                        "incremental_recovery": None if ok else latest.get("incremental_recovery"),
+                    }
+                    _commit_trading_journal_derived_refresh_state_locked(
+                        completed_state
+                    )
+    finally:
+        if acquired_import_lock:
+            TRADING_JOURNAL_IMPORT_LOCK.release()
+
+
+def _trading_journal_derived_refresh_status_snapshot() -> Dict[str, object]:
+    _recover_trading_journal_derived_refresh_state_if_needed()
+    with TRADING_JOURNAL_DERIVED_REFRESH_LOCK:
+        timer = TRADING_JOURNAL_DERIVED_REFRESH_TIMER
+        if (
+            bool(TRADING_JOURNAL_DERIVED_REFRESH_STATE.get("queued"))
+            and not bool(TRADING_JOURNAL_DERIVED_REFRESH_STATE.get("running"))
+            and not (isinstance(timer, threading.Timer) and timer.is_alive())
+        ):
+            try:
+                _arm_trading_journal_derived_refresh_timer_locked()
+            except Exception as exc:
+                APP_LOGGER.warning(
+                    "trading_journal_derived_refresh_timer_rearm_failed error=%s",
+                    exc,
+                )
+        status = _public_trading_journal_derived_refresh_state(
+            TRADING_JOURNAL_DERIVED_REFRESH_STATE
+        )
+        timer = TRADING_JOURNAL_DERIVED_REFRESH_TIMER
+        status["timer_scheduled"] = bool(
+            isinstance(timer, threading.Timer) and timer.is_alive()
+        )
+        return status
+
+
+def _mark_trading_journal_derived_refresh_generation_succeeded(
+    generation: int,
+    *,
+    result: Optional[Dict[str, object]] = None,
+) -> Dict[str, object]:
+    """Complete durable intent after an in-request full refresh and GitHub sync."""
+    global TRADING_JOURNAL_DERIVED_REFRESH_TIMER
+    with TRADING_JOURNAL_DERIVED_REFRESH_LOCK:
+        state = dict(TRADING_JOURNAL_DERIVED_REFRESH_STATE)
+        target_generation = max(0, int(generation or 0))
+        current_generation = int(state.get("generation") or 0)
+        if target_generation <= 0:
+            return copy.deepcopy(state)
+        if current_generation > target_generation:
+            next_state = {
+                **state,
+                "completed_generation": max(
+                    int(state.get("completed_generation") or 0),
+                    target_generation,
+                ),
+            }
+            _commit_trading_journal_derived_refresh_state_locked(next_state)
+            return copy.deepcopy(TRADING_JOURNAL_DERIVED_REFRESH_STATE)
+
+        timer = TRADING_JOURNAL_DERIVED_REFRESH_TIMER
+        if isinstance(timer, threading.Timer):
+            timer.cancel()
+        TRADING_JOURNAL_DERIVED_REFRESH_TIMER = None
+        completed_state = {
+            **state,
+            "status": "succeeded",
+            "queued": False,
+            "running": False,
+            "pending": False,
+            "refresh_required": False,
+            "ok": True,
+            "error": None,
+            "last_error": None,
+            "completed_generation": target_generation,
+            "finished_at": _utc_now_iso(),
+            "rerun_requested": False,
+            "result": _json_safe(result or {}),
+            "not_before": None,
+            "incremental_recovery": None,
+        }
+        _commit_trading_journal_derived_refresh_state_locked(completed_state)
+        return copy.deepcopy(TRADING_JOURNAL_DERIVED_REFRESH_STATE)
+
+
+def _restore_trading_journal_derived_refresh_state(
+    *,
+    had_original: bool,
+    backup_bytes: Optional[bytes],
+    memory_state: Optional[Dict[str, object]],
+) -> None:
+    global TRADING_JOURNAL_DERIVED_REFRESH_TIMER
+    with TRADING_JOURNAL_DERIVED_REFRESH_LOCK:
+        timer = TRADING_JOURNAL_DERIVED_REFRESH_TIMER
+        if isinstance(timer, threading.Timer):
+            timer.cancel()
+        TRADING_JOURNAL_DERIVED_REFRESH_TIMER = None
+        if had_original and backup_bytes is not None:
+            _atomic_write_bytes(TRADING_JOURNAL_DERIVED_REFRESH_STATE_PATH, backup_bytes)
+        elif TRADING_JOURNAL_DERIVED_REFRESH_STATE_PATH.exists():
+            TRADING_JOURNAL_DERIVED_REFRESH_STATE_PATH.unlink()
+        restored = (
+            dict(memory_state)
+            if isinstance(memory_state, dict)
+            else _derived_refresh_default_state()
+        )
+        TRADING_JOURNAL_DERIVED_REFRESH_STATE.clear()
+        TRADING_JOURNAL_DERIVED_REFRESH_STATE.update(restored)
+        if bool(restored.get("queued")) and not bool(restored.get("running")):
+            _arm_trading_journal_derived_refresh_timer_locked()
+
+
 def _trading_journal_file_cache_key() -> Tuple[object, ...]:
     path = Path(TRADING_JOURNAL_PATH)
     try:
@@ -4967,15 +6037,22 @@ def _get_trading_journal_rows() -> List[Dict[str, object]]:
         return copy.deepcopy(rows)
 
 
-def _set_trading_journal_rows(rows: List[Dict[str, object]]) -> None:
+def _set_trading_journal_rows(
+    rows: List[Dict[str, object]],
+    *,
+    invalidate_view_snapshot: bool = True,
+    schedule_state_backup: bool = True,
+) -> None:
     global _TRADING_JOURNAL_CACHE, _TRADING_JOURNAL_CACHE_KEY
     with _TRADING_JOURNAL_ROWS_LOCK:
         normalized_rows = [_normalize_journal_profit_fields(dict(item)) for item in rows if isinstance(item, dict)]
         _save_json_file(TRADING_JOURNAL_PATH, {"items": normalized_rows, "updated_at": _utc_now_iso()})
         _TRADING_JOURNAL_CACHE = copy.deepcopy(normalized_rows)
         _TRADING_JOURNAL_CACHE_KEY = _trading_journal_file_cache_key()
-    _invalidate_trading_journal_view_snapshot()
-    _schedule_dropbox_upload_state_backup()
+    if invalidate_view_snapshot:
+        _invalidate_trading_journal_view_snapshot()
+    if schedule_state_backup:
+        _schedule_dropbox_upload_state_backup()
 
 
 def _get_monthly_aud_revaluation_rows() -> List[Dict[str, object]]:
@@ -31388,23 +32465,33 @@ async def trading_journal_items(filter: str = "") -> JSONResponse:
     fingerprint_now = _journal_source_fingerprint()
     freshness = _trading_journal_snapshot_freshness(snapshot, fingerprint_now)
     if freshness.get("current") is not True:
+        derived_refresh = _trading_journal_derived_refresh_status_snapshot()
+        derived_pending = bool(
+            derived_refresh.get("queued")
+            or derived_refresh.get("running")
+            or derived_refresh.get("pending")
+        )
         refresh_state = _trading_journal_equity_refresh_state_snapshot()
         pending = bool(refresh_state.get("running") or refresh_state.get("pending"))
         same_failed_fingerprint = bool(
             refresh_state.get("ok") is False
             and refresh_state.get("requested_source_fingerprints") == fingerprint_now
         )
-        if not pending and not same_failed_fingerprint:
+        if not derived_pending and not pending and not same_failed_fingerprint:
             refresh_state = _queue_trading_journal_equity_refresh_if_idle(
                 "missing_or_stale_api_snapshot",
                 current_fingerprints=fingerprint_now,
             )
             pending = bool(refresh_state.get("running") or refresh_state.get("pending"))
-        warning = (
-            "Building current equity data from Trading Journal.xlsx."
-            if pending
-            else "Current equity data is unavailable because the cache rebuild failed."
-        )
+        if derived_pending:
+            pending = True
+            warning = "Saved journal changes are awaiting the shared derived workbook refresh."
+        else:
+            warning = (
+                "Building current equity data from Trading Journal.xlsx."
+                if pending
+                else "Current equity data is unavailable because the cache rebuild failed."
+            )
         payload = {
             "ok": False,
             "pending": pending,
@@ -31421,9 +32508,18 @@ async def trading_journal_items(filter: str = "") -> JSONResponse:
             "stats": {},
             "balances": [],
             "freshness_reasons": freshness.get("reasons") or [],
-            "refresh_id": refresh_state.get("refresh_id"),
-            "refresh_status": refresh_state,
-            "status_url": "/api/trading-journal/equity/refresh/status",
+            "refresh_id": (
+                derived_refresh.get("generation")
+                if derived_pending
+                else refresh_state.get("refresh_id")
+            ),
+            "refresh_status": derived_refresh if derived_pending else refresh_state,
+            "derived_refresh": derived_refresh,
+            "status_url": (
+                "/api/trading-journal/import/status"
+                if derived_pending
+                else "/api/trading-journal/equity/refresh/status"
+            ),
         }
         return JSONResponse(_json_safe(payload), status_code=202 if pending else 503)
     is_stale = False
@@ -32328,6 +33424,16 @@ def _reserve_master_journal_workbook_sync(path: Path, sync_id: str, caller: str)
             sync_id, caller, MASTER_JOURNAL_WORKBOOK_SYNC_ACTIVE.get("sync_id"), MASTER_JOURNAL_WORKBOOK_SYNC_ACTIVE.get("caller"),
         )
         return _master_journal_active_sync_payload(path, sync_id, caller)
+    owner_thread_id = threading.get_ident()
+    if (
+        MASTER_JOURNAL_WORKBOOK_SYNC_ACTIVE
+        and int(MASTER_JOURNAL_WORKBOOK_SYNC_ACTIVE.get("owner_thread_id") or -1)
+        == owner_thread_id
+    ):
+        MASTER_JOURNAL_WORKBOOK_SYNC_ACTIVE["depth"] = int(
+            MASTER_JOURNAL_WORKBOOK_SYNC_ACTIVE.get("depth") or 1
+        ) + 1
+        return None
     MASTER_JOURNAL_WORKBOOK_SYNC_ACTIVE.clear()
     MASTER_JOURNAL_WORKBOOK_SYNC_ACTIVE.update({
         "sync_id": sync_id,
@@ -32335,12 +33441,18 @@ def _reserve_master_journal_workbook_sync(path: Path, sync_id: str, caller: str)
         "path": str(path),
         "started_at": _utc_now_iso(),
         "started_epoch": time.time(),
+        "owner_thread_id": owner_thread_id,
+        "depth": 1,
     })
     return None
 
 
 def _release_master_journal_workbook_sync() -> None:
-    MASTER_JOURNAL_WORKBOOK_SYNC_ACTIVE.clear()
+    depth = int(MASTER_JOURNAL_WORKBOOK_SYNC_ACTIVE.get("depth") or 1)
+    if depth > 1:
+        MASTER_JOURNAL_WORKBOOK_SYNC_ACTIVE["depth"] = depth - 1
+    else:
+        MASTER_JOURNAL_WORKBOOK_SYNC_ACTIVE.clear()
     MASTER_JOURNAL_WORKBOOK_SYNC_LOCK.release()
 
 
@@ -33781,6 +34893,7 @@ async def trading_journal_actions_workspace() -> HTMLResponse:
 
 def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, account_mode: Optional[str] = None) -> Dict[str, object]:
     global _PENDING_MANUAL_SYNC_ROWS, _PENDING_MANUAL_SYNC_BALANCES
+    global _TRADING_JOURNAL_CACHE, _TRADING_JOURNAL_CACHE_KEY
     name = str(upload_name or "upload").strip() or "upload"
     suffix = Path(name).suffix.lower()
     allowed = {".xlsx", ".xlsm", ".xls", ".csv"}
@@ -33799,6 +34912,7 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
     if not TRADING_JOURNAL_IMPORT_LOCK.acquire(blocking=False):
         return {"ok": False, "status_code": 409, "code": "TRADING_JOURNAL_IMPORT_IN_PROGRESS", "message": "Trading Journal import is still running. Wait for it to complete before opening the workbook.", "uploaded_name": name, "file_type": suffix, "errors": ["import_in_progress"], "warnings": []}
     acquired_import_lock = True
+    master_workbook_reserved = False
     _update_trading_journal_import_status(running=True, stage="preflight", message="Checking workbook lock", started_at=_utc_now_iso(), started_epoch=time.time(), finished_at=None, upload_name=name)
     tmp_path: Optional[Path] = None
     timings: Dict[str, float] = {}
@@ -33868,9 +34982,11 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
         missing_ids = [r for r in rows if str((r or {}).get("row_type") or "trade").strip().lower() == "trade" and not str((r or {}).get("id") or "").strip()]
         if missing_ids:
             return {"ok": False, "status_code": 422, "message": "Parsed trade rows are missing stable row IDs.", "uploaded_name": name, "file_type": suffix, "rows_parsed": len(rows), "errors": ["missing_trade_row_ids"], "warnings": []}
-        if not rows and balance:
+        if not rows and balance and not isinstance(
+            oanda_transaction_export_balance, dict
+        ):
             return {"ok": False, "status_code": 422, "message": "Balance-only import is not implemented yet for manual uploads.", "uploaded_name": name, "file_type": suffix, "rows_parsed": 0, "rows_upserted": 0, "balance_parsed": True, "errors": ["balance_only_not_supported"], "warnings": []}
-        if not rows:
+        if not rows and not oanda_transaction_export_balance:
             return {"ok": False, "status_code": 422, "message": "No trade rows or account balance found in uploaded file.", "uploaded_name": name, "file_type": suffix, "rows_parsed": 0, "errors": ["zero_rows"], "warnings": []}
         previous_rows = copy.deepcopy([r for r in _get_trading_journal_rows() if isinstance(r, dict)])
         rollback_rows = copy.deepcopy(previous_rows)
@@ -33880,8 +34996,152 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
         duplicate_rows_merged = 0
         rows_upserted = 0
         workbook_path = _master_journal_path()
+        import_workbook_sync_id = f"mjsync-import-owner-{uuid4().hex[:12]}"
+        rejected = _reserve_master_journal_workbook_sync(
+            workbook_path,
+            import_workbook_sync_id,
+            "manual_import_transaction",
+        )
+        if rejected is not None:
+            return {
+                **rejected,
+                "uploaded_name": name,
+                "file_type": suffix,
+                "rows_parsed": len(rows),
+                "rows_upserted": 0,
+                "errors": ["workbook_sync_in_progress"],
+                "warnings": [],
+            }
+        master_workbook_reserved = True
+        locked_after_reservation = (
+            _master_journal_lock_status(workbook_path)
+            if workbook_path.exists()
+            else {"locked": False}
+        )
+        if locked_after_reservation.get("locked"):
+            return _excel_workbook_open_payload(
+                extra={
+                    "uploaded_name": name,
+                    "file_type": suffix,
+                    "rows_parsed": len(rows),
+                    "rows_upserted": 0,
+                    "warnings": [],
+                    "lock_status": locked_after_reservation,
+                    "import_timings": timings,
+                }
+            )
+        _recover_trading_journal_derived_refresh_state_if_needed()
+        with TRADING_JOURNAL_DERIVED_REFRESH_LOCK:
+            pending_recovery_state = copy.deepcopy(
+                TRADING_JOURNAL_DERIVED_REFRESH_STATE
+            )
+        pending_recovery_payload = pending_recovery_state.get(
+            "incremental_recovery"
+        )
+        pending_recovery_phase = ""
+        normalized_pending_recovery: Optional[Dict[str, object]] = None
+        if pending_recovery_payload is not None:
+            try:
+                normalized_pending_recovery = (
+                    _normalize_trading_journal_incremental_recovery_payload(
+                        pending_recovery_payload
+                    )
+                )
+                pending_recovery_phase = str(
+                    normalized_pending_recovery.get("phase") or ""
+                )
+            except Exception:
+                pending_recovery_phase = "invalid"
+        legacy_recovery_pending = bool(
+            str(pending_recovery_state.get("intent_kind") or "").strip().lower()
+            == "legacy_incremental_unknown"
+            and (
+                pending_recovery_state.get("queued")
+                or pending_recovery_state.get("running")
+                or pending_recovery_state.get("pending")
+            )
+        )
+        retained_recovery_terminal_failed = bool(
+            normalized_pending_recovery is not None
+            and pending_recovery_phase
+            in {"prepared", "json_committed", "workbook_committed"}
+            and str(pending_recovery_state.get("status") or "")
+            .strip()
+            .lower()
+            == "failed"
+            and not pending_recovery_state.get("queued")
+            and not pending_recovery_state.get("running")
+            and not pending_recovery_state.get("pending")
+        )
+        if retained_recovery_terminal_failed:
+            recovery_row_ids = list(
+                pending_recovery_state.get("affected_row_ids") or []
+            )
+            if not recovery_row_ids:
+                recovery_row_ids = [
+                    str(row.get("id") or "").strip()
+                    for row in (
+                        normalized_pending_recovery.get("json_rows") or []
+                    )
+                    if isinstance(row, dict)
+                    and str(row.get("id") or "").strip()
+                ]
+            requeued_state = _queue_trading_journal_derived_refresh(
+                recovery_row_ids,
+                incremental_recovery=normalized_pending_recovery,
+            )
+            return {
+                "ok": False,
+                "status_code": 409,
+                "code": "TRADING_JOURNAL_INCREMENTAL_RECOVERY_REQUEUED",
+                "message": (
+                    "The retained incremental recovery transaction was requeued. "
+                    "Retry this import after recovery completes."
+                ),
+                "uploaded_name": name,
+                "file_type": suffix,
+                "rows_parsed": len(rows),
+                "rows_upserted": 0,
+                "recovery_requeued": True,
+                "errors": ["recovery_requeued"],
+                "warnings": [],
+                "derived_refresh": _public_trading_journal_derived_refresh_state(
+                    requeued_state
+                ),
+            }
+        if (
+            pending_recovery_phase
+            and pending_recovery_phase != "incremental_committed"
+        ) or legacy_recovery_pending:
+            return {
+                "ok": False,
+                "status_code": 409,
+                "code": "TRADING_JOURNAL_INCREMENTAL_RECOVERY_PENDING",
+                "message": (
+                    "A previous incremental journal import is still being "
+                    "recovered. Retry after recovery completes."
+                ),
+                "uploaded_name": name,
+                "file_type": suffix,
+                "rows_parsed": len(rows),
+                "rows_upserted": 0,
+                "errors": ["incremental_recovery_pending"],
+                "warnings": [],
+                "derived_refresh": (
+                    _public_trading_journal_derived_refresh_state(
+                        pending_recovery_state
+                    )
+                ),
+            }
         workbook_backup_bytes: Optional[bytes] = None
         workbook_had_original = workbook_path.exists()
+        journal_json_had_original = False
+        journal_json_backup_bytes: Optional[bytes] = None
+        journal_cache_before: object = None
+        journal_cache_key_before: object = None
+        derived_refresh_had_original = False
+        derived_refresh_backup_bytes: Optional[bytes] = None
+        derived_refresh_memory_before: Optional[Dict[str, object]] = None
         pre_import_workbook_row_ids: List[str] = []
         workbook_existing_rows: List[Dict[str, object]] = []
         workbook_source_preflight: Dict[str, object] = {}
@@ -33910,6 +35170,19 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
         ]
         pending_restored = False
         duplicate_noop_fast_path_used = False
+        incremental_path_eligible = False
+        incremental_json_upsert_started = False
+        incremental_failure_rollback_required = False
+        incremental_workbook_attempted = False
+        incremental_workbook_update_used = False
+        incremental_full_fallback_started = False
+        incremental_affected_row_ids: List[str] = []
+        incremental_state_delta_row_ids: List[str] = []
+        incremental_json_upsert_row_ids: List[str] = []
+        incremental_fallback_reason = ""
+        incremental_recovery_payload: Optional[Dict[str, object]] = None
+        derived_refresh_state: Dict[str, object] = {}
+        deferred_manual_hydration_rows: Optional[List[Dict[str, object]]] = None
         try:
             def _stable_projection_time(row: Dict[str, object], field: str) -> str:
                 value = row.get(field)
@@ -33963,9 +35236,8 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
                 optional_when_missing = {
                     "stop_loss",
                     "take_profit",
-                    "result_pct",
-                    "r_multiple",
                 }
+                workbook_manual_fields = {"result_pct", "r_multiple"}
                 numeric_fields = {
                     "qty",
                     "entry_price",
@@ -33979,6 +35251,8 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
                     "r_multiple",
                 }
                 for key, uploaded_value in uploaded_projection.items():
+                    if key in workbook_manual_fields:
+                        continue
                     if key in optional_when_missing and uploaded_value in (None, ""):
                         continue
                     workbook_value = workbook_projection.get(key)
@@ -33999,10 +35273,14 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
                 return True
 
             def _stable_trade_log_projections_equal(
-                left_row: Dict[str, object], right_row: Dict[str, object]
+                left_row: Dict[str, object],
+                right_row: Dict[str, object],
+                *,
+                ignore_workbook_manual_fields: bool = False,
             ) -> bool:
                 left_projection = _stable_trade_log_projection(left_row)
                 right_projection = _stable_trade_log_projection(right_row)
+                workbook_manual_fields = {"result_pct", "r_multiple"}
                 numeric_fields = {
                     "qty",
                     "entry_price",
@@ -34016,6 +35294,8 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
                     "r_multiple",
                 }
                 for key, left_value in left_projection.items():
+                    if ignore_workbook_manual_fields and key in workbook_manual_fields:
+                        continue
                     right_value = right_projection.get(key)
                     if key in numeric_fields:
                         if left_value is None or right_value is None:
@@ -34032,9 +35312,98 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
                     elif left_value != right_value:
                         return False
                 return True
+
+            def _normalized_incremental_state(
+                row: Dict[str, object],
+            ) -> Dict[str, object]:
+                normalized = _normalize_journal_profit_fields(dict(row))
+                normalized.pop("updated_at", None)
+                safe = _json_safe(normalized)
+
+                missing = object()
+
+                def compact(value: object, *, parent_key: str = "") -> object:
+                    if value is None or value == "":
+                        return missing
+                    if isinstance(value, dict):
+                        compacted: Dict[str, object] = {}
+                        for raw_key, raw_value in value.items():
+                            key = str(raw_key)
+                            if key == "updated_at":
+                                continue
+                            if parent_key == "raw_refs" and key == "source_path":
+                                # Upload parsing uses a fresh temporary file on
+                                # each request; that path is transport metadata,
+                                # not a durable journal-row change.
+                                continue
+                            compacted_value = compact(raw_value, parent_key=key)
+                            if compacted_value is not missing:
+                                compacted[key] = compacted_value
+                        return compacted if compacted else missing
+                    if isinstance(value, (list, tuple)):
+                        compacted_items = [
+                            compact(item, parent_key=parent_key) for item in value
+                        ]
+                        kept = [item for item in compacted_items if item is not missing]
+                        return kept if kept else missing
+                    return value
+
+                if isinstance(safe, dict) and safe.get("is_test_trade") is False:
+                    safe = dict(safe)
+                    safe.pop("is_test_trade", None)
+                compacted = compact(safe)
+                return dict(compacted) if isinstance(compacted, dict) else {}
+
+            def _incremental_state_delta_ids(
+                incoming: Iterable[Dict[str, object]],
+                persisted: Iterable[Dict[str, object]],
+                workbook_by_id: Dict[str, Dict[str, object]],
+            ) -> List[str]:
+                persisted_by_id = {
+                    str((row or {}).get("id") or "").strip(): dict(row)
+                    for row in persisted
+                    if isinstance(row, dict)
+                    and str((row or {}).get("id") or "").strip()
+                }
+                changed_ids: Set[str] = set()
+                for raw in incoming:
+                    if not isinstance(raw, dict):
+                        continue
+                    row_id = str(raw.get("id") or "").strip()
+                    if not row_id:
+                        continue
+                    candidate = dict(raw)
+                    workbook_row = workbook_by_id.get(row_id)
+                    if (
+                        isinstance(workbook_row, dict)
+                        and _canonical_oanda_account_label(candidate)
+                        in _OANDA_CANONICAL_ACCOUNT_LABELS
+                    ):
+                        candidate = _preserve_workbook_manual_fields(
+                            candidate,
+                            workbook_row,
+                        )
+                    candidate = _normalize_journal_profit_fields(candidate)
+                    candidate["id"] = row_id
+                    existing = persisted_by_id.get(row_id)
+                    if not isinstance(existing, dict):
+                        # Workbook-visible new rows are already included in the
+                        # affected-row set. A missing runtime cache row alone must
+                        # not defeat the established workbook no-op path.
+                        continue
+                    merged = _merge_trading_journal_row(existing, candidate)
+                    normalized_merged = _normalized_incremental_state(merged)
+                    normalized_existing = _normalized_incremental_state(existing)
+                    if normalized_merged != normalized_existing:
+                        changed_ids.add(row_id)
+                return sorted(changed_ids)
+
             rows = [
                 _backfill_trade_row_context_fields(dict(r)) if isinstance(r, dict) else r
                 for r in rows
+            ]
+            incremental_state_source_rows = [
+                dict(row) for row in rows if isinstance(row, dict)
             ]
             preflight_rows, preflight_replaced_oanda_ids = _prepare_oanda_canonical_replacements(
                 workbook_existing_rows,
@@ -34045,6 +35414,11 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
                 for r in workbook_existing_rows
                 if str((r or {}).get("id") or "").strip()
             }
+            preflight_state_delta_row_ids = _incremental_state_delta_ids(
+                incremental_state_source_rows,
+                previous_rows,
+                workbook_map,
+            )
             preflight_parsed_map = {
                 str((r or {}).get("id") or "").strip(): dict(r)
                 for r in preflight_rows
@@ -34060,7 +35434,10 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
                 allow_equivalent_authoritative_balance=True,
             )
             fast_path_noop = (
-                bool(preflight_parsed_map)
+                bool(
+                    preflight_parsed_map
+                    or isinstance(oanda_transaction_export_balance, dict)
+                )
                 and not preflight_replaced_oanda_ids
                 and all(
                 (rid in workbook_map)
@@ -34073,6 +35450,7 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
                     set(pre_import_workbook_row_ids)
                 )
                 and bool(preflight_balance_verification.get("ok"))
+                and not preflight_state_delta_row_ids
             )
             if fast_path_noop:
                 duplicate_rows_merged = sum(
@@ -34101,6 +35479,35 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
                     if oanda_transaction_export_balance
                     else "All uploaded rows already existed; no workbook rebuild was required."
                 )
+                derived_refresh = (
+                    _trading_journal_derived_refresh_status_snapshot()
+                )
+                terminal_failed_refresh = bool(
+                    str(derived_refresh.get("status") or "").strip().lower()
+                    == "failed"
+                    and derived_refresh.get("refresh_required")
+                    and not derived_refresh.get("pending")
+                )
+                if terminal_failed_refresh:
+                    retry_ids = list(
+                        derived_refresh.get("affected_row_ids") or []
+                    ) or list(preflight_parsed_map)
+                    derived_refresh = _queue_trading_journal_derived_refresh(
+                        retry_ids
+                    )
+                derived_pending = bool(
+                    derived_refresh.get("queued")
+                    or derived_refresh.get("running")
+                    or derived_refresh.get("pending")
+                    or str(derived_refresh.get("status") or "")
+                    .strip()
+                    .lower()
+                    == "retrying"
+                )
+                if derived_pending:
+                    message += (
+                        " A derived workbook refresh and GitHub sync are still queued."
+                    )
                 return {
                     "ok": True,
                     "status_code": 200,
@@ -34125,15 +35532,25 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
                     "import_timings": timings,
                     **inference_diag,
                     **bybit_diag,
-                    "github_sync_skipped": True,
-                    "github_sync_deferred": False,
+                    "github_sync_skipped": not derived_pending,
+                    "github_sync_deferred": derived_pending,
                     "github_sync_commit_sha": None,
                     "github_sync_path": str(workbook_path),
-                    "github_sync_message": "GitHub sync skipped because the workbook was unchanged.",
+                    "github_sync_message": (
+                        "GitHub sync deferred until the queued derived workbook refresh."
+                        if derived_pending
+                        else "GitHub sync skipped because the workbook was unchanged."
+                    ),
+                    "incremental_workbook_update_used": False,
+                    "affected_row_ids": [],
+                    "state_delta_row_ids": [],
+                    "json_upsert_row_ids": [],
+                    "derived_refresh": derived_refresh,
                 }
 
             if workbook_had_original:
                 workbook_backup_bytes = workbook_path.read_bytes()
+            should_hydrate = False
             if workbook_existing_rows:
                 current_ids = {str((r or {}).get("id") or "").strip() for r in previous_rows if str((r or {}).get("id") or "").strip()}
                 workbook_ids = {str((r or {}).get("id") or "").strip() for r in workbook_existing_rows if str((r or {}).get("id") or "").strip()}
@@ -34145,10 +35562,28 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
                         current_map.get(rid, {}), workbook_map.get(rid, {})
                     )
                 ]
-                should_hydrate = (not previous_rows) or (not workbook_ids.issubset(current_ids)) or bool(stale_ids)
+                material_stale_ids = [
+                    rid
+                    for rid in workbook_ids.intersection(current_ids)
+                    if not _stable_trade_log_projections_equal(
+                        current_map.get(rid, {}),
+                        workbook_map.get(rid, {}),
+                        ignore_workbook_manual_fields=True,
+                    )
+                ]
+                hydration_required = bool(
+                    (not previous_rows)
+                    or (not workbook_ids.issubset(current_ids))
+                    or stale_ids
+                )
+                should_hydrate = bool(
+                    (not previous_rows)
+                    or (not workbook_ids.issubset(current_ids))
+                    or material_stale_ids
+                )
                 hydrated_rows_added = 0
                 hydrated_rows_replaced = 0
-                if should_hydrate:
+                if hydration_required:
                     merged = dict(current_map)
                     for row in workbook_existing_rows:
                         rid = str((row or {}).get("id") or "").strip()
@@ -34161,16 +35596,34 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
                             merged[rid] = dict(row)
                             hydrated_rows_replaced += 1
                     hydrated_rows = list(merged.values())
-                    _set_trading_journal_rows(hydrated_rows)
-                    previous_rows = copy.deepcopy([r for r in _get_trading_journal_rows() if isinstance(r, dict)])
+                    if should_hydrate:
+                        _set_trading_journal_rows(hydrated_rows)
+                        previous_rows = copy.deepcopy(
+                            [
+                                r
+                                for r in _get_trading_journal_rows()
+                                if isinstance(r, dict)
+                            ]
+                        )
+                    else:
+                        deferred_manual_hydration_rows = [
+                            _normalize_journal_profit_fields(dict(row))
+                            for row in hydrated_rows
+                            if isinstance(row, dict)
+                        ]
+                        previous_rows = copy.deepcopy(
+                            deferred_manual_hydration_rows
+                        )
                 APP_LOGGER.info(
-                    "trading_journal_import_hydration upload=%s workbook_rows_loaded=%s state_rows_before_hydration=%s hydrated_rows_added=%s hydrated_rows_replaced_due_to_stale_state=%s stale_same_id_count=%s",
+                    "trading_journal_import_hydration upload=%s workbook_rows_loaded=%s state_rows_before_hydration=%s hydrated_rows_added=%s hydrated_rows_replaced_due_to_stale_state=%s stale_same_id_count=%s material_stale_same_id_count=%s manual_only_hydration_deferred=%s",
                     name,
                     len(workbook_existing_rows),
                     len(current_map),
                     hydrated_rows_added,
                     hydrated_rows_replaced,
                     len(stale_ids),
+                    len(material_stale_ids),
+                    bool(deferred_manual_hydration_rows),
                 )
             existing_ids = {str((r or {}).get("id") or "").strip() for r in previous_rows if str((r or {}).get("id") or "").strip()}
             duplicate_rows_merged = sum(1 for rid in parsed_ids if rid in existing_ids)
@@ -34198,6 +35651,124 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
                 (set(pre_import_workbook_row_ids) - replaced_oanda_legacy_ids) | set(parsed_ids)
             )
             parsed_map = {str((r or {}).get("id") or "").strip(): dict(r) for r in rows if str((r or {}).get("id") or "").strip()}
+            workbook_structure = (
+                workbook_source_preflight.get("_workbook_structure")
+                if isinstance(workbook_source_preflight, dict)
+                else {}
+            )
+            workbook_sheet_order = (
+                list(workbook_structure.get("sheet_order") or [])
+                if isinstance(workbook_structure, dict)
+                else []
+            )
+            workbook_schema_current = bool(
+                workbook_had_original
+                and "Trade Log" in workbook_sheet_order
+                and "All Trades" not in workbook_sheet_order
+                and all(sheet_name in workbook_sheet_order for sheet_name in SHEET_ORDER)
+                and len(pre_import_workbook_row_ids)
+                == len(set(pre_import_workbook_row_ids))
+            )
+            ordinary_oanda_rows = all(
+                isinstance(row, dict)
+                and _row_type(row) == "trade"
+                and str(row.get("source") or "").strip().lower()
+                == "oanda_transaction_export"
+                and _canonical_oanda_account_label(row)
+                in _OANDA_CANONICAL_ACCOUNT_LABELS
+                and str(row.get("id") or "").strip().startswith("oanda_export:")
+                and _to_float(row.get("balance_after_trade")) is not None
+                for row in rows
+            )
+            incremental_affected_row_ids = sorted(
+                str(row.get("id") or "").strip()
+                for row in rows
+                if str(row.get("id") or "").strip()
+                and (
+                    str(row.get("id") or "").strip() not in workbook_map
+                    or not _stable_trade_log_projections_equal(
+                        row,
+                        workbook_map.get(str(row.get("id") or "").strip(), {}),
+                    )
+                )
+            )
+            incremental_state_delta_row_ids = _incremental_state_delta_ids(
+                incremental_state_source_rows,
+                previous_rows,
+                workbook_map,
+            )
+            incremental_json_upsert_row_ids = sorted(
+                set(incremental_affected_row_ids)
+                | set(incremental_state_delta_row_ids)
+            )
+            incremental_path_eligible = bool(
+                workbook_schema_current
+                and not should_hydrate
+                and isinstance(oanda_transaction_export_balance, dict)
+                and not preflight_replaced_oanda_ids
+                and not replaced_oanda_legacy_ids
+                and ordinary_oanda_rows
+                and len(parsed_ids) == len(set(parsed_ids)) == len(rows)
+                and len(incremental_json_upsert_row_ids)
+                <= TRADING_JOURNAL_INCREMENTAL_RECOVERY_MAX_ROWS
+            )
+            if incremental_path_eligible:
+                json_upsert_id_set = set(incremental_json_upsert_row_ids)
+                workbook_affected_id_set = set(incremental_affected_row_ids)
+                try:
+                    incremental_recovery_payload = (
+                        _normalize_trading_journal_incremental_recovery_payload(
+                            {
+                                "version": TRADING_JOURNAL_INCREMENTAL_RECOVERY_VERSION,
+                                "transaction_id": f"incremental-{uuid4().hex[:12]}",
+                                "phase": "prepared",
+                                "json_rows": [
+                                    dict(row)
+                                    for row in rows
+                                    if str((row or {}).get("id") or "").strip()
+                                    in json_upsert_id_set
+                                ],
+                                "workbook_rows": [
+                                    dict(row)
+                                    for row in rows
+                                    if str((row or {}).get("id") or "").strip()
+                                    in workbook_affected_id_set
+                                ],
+                                "account_balance": dict(
+                                    oanda_transaction_export_balance
+                                ),
+                                "created_at": _utc_now_iso(),
+                            }
+                        )
+                    )
+                except Exception as recovery_payload_exc:
+                    incremental_path_eligible = False
+                    incremental_fallback_reason = (
+                        "durable_recovery_payload_ineligible:"
+                        f"{recovery_payload_exc}"
+                    )
+            if not incremental_path_eligible:
+                if incremental_fallback_reason:
+                    pass
+                elif not workbook_schema_current:
+                    incremental_fallback_reason = "workbook_schema_not_current"
+                elif should_hydrate:
+                    incremental_fallback_reason = "runtime_journal_state_not_current"
+                elif not isinstance(oanda_transaction_export_balance, dict):
+                    incremental_fallback_reason = "oanda_export_balance_missing"
+                elif preflight_replaced_oanda_ids or replaced_oanda_legacy_ids:
+                    incremental_fallback_reason = "canonical_replacement_required"
+                elif not ordinary_oanda_rows:
+                    incremental_fallback_reason = "non_oanda_or_incomplete_trade_rows"
+                elif len(parsed_ids) != len(set(parsed_ids)) or len(parsed_ids) != len(rows):
+                    incremental_fallback_reason = "unstable_or_duplicate_row_ids"
+                elif (
+                    len(incremental_json_upsert_row_ids)
+                    > TRADING_JOURNAL_INCREMENTAL_RECOVERY_MAX_ROWS
+                ):
+                    incremental_fallback_reason = "affected_state_row_limit_exceeded"
+                else:
+                    incremental_fallback_reason = "affected_row_limit_exceeded"
             pending_balance_map: Dict[str, Dict[str, object]] = {}
             for item in [
                 *previous_pending_balances,
@@ -34217,16 +35788,79 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
                 if pending_key:
                     pending_balance_map[pending_key] = dict(item)
             _PENDING_MANUAL_SYNC_BALANCES = list(pending_balance_map.values())
+            if incremental_path_eligible:
+                journal_json_had_original = TRADING_JOURNAL_PATH.exists()
+                journal_json_backup_bytes = (
+                    TRADING_JOURNAL_PATH.read_bytes()
+                    if journal_json_had_original
+                    else None
+                )
+                journal_cache_before = copy.deepcopy(_TRADING_JOURNAL_CACHE)
+                journal_cache_key_before = copy.deepcopy(_TRADING_JOURNAL_CACHE_KEY)
+                _recover_trading_journal_derived_refresh_state_if_needed()
+                with TRADING_JOURNAL_DERIVED_REFRESH_LOCK:
+                    derived_refresh_had_original = (
+                        TRADING_JOURNAL_DERIVED_REFRESH_STATE_PATH.exists()
+                    )
+                    derived_refresh_backup_bytes = (
+                        TRADING_JOURNAL_DERIVED_REFRESH_STATE_PATH.read_bytes()
+                        if derived_refresh_had_original
+                        else None
+                    )
+                    derived_refresh_memory_before = copy.deepcopy(
+                        TRADING_JOURNAL_DERIVED_REFRESH_STATE
+                    )
+                incremental_failure_rollback_required = True
+                derived_refresh_state = _queue_trading_journal_derived_refresh(
+                    incremental_json_upsert_row_ids,
+                    incremental_recovery=incremental_recovery_payload,
+                )
+                incremental_json_upsert_started = True
+                if deferred_manual_hydration_rows is not None:
+                    _set_trading_journal_rows(
+                        deferred_manual_hydration_rows,
+                        invalidate_view_snapshot=False,
+                        schedule_state_backup=False,
+                    )
             t2 = time.perf_counter()
             _update_trading_journal_import_status(stage="upsert", message="Saving imported rows")
             APP_LOGGER.info("trading_journal_import_stage_start stage=upsert upload=%s", name)
-            rows_upserted = _upsert_trading_journal_rows(rows, allow_broker_rows_in_single_file=True)
+            upsert_rows = rows
+            if incremental_path_eligible:
+                incremental_json_upsert_row_id_set = set(
+                    incremental_json_upsert_row_ids
+                )
+                upsert_rows = [
+                    row
+                    for row in rows
+                    if str((row or {}).get("id") or "").strip()
+                    in incremental_json_upsert_row_id_set
+                ]
+            rows_upserted = _upsert_trading_journal_rows(
+                upsert_rows,
+                allow_broker_rows_in_single_file=True,
+                invalidate_view_snapshot=not incremental_path_eligible,
+                schedule_state_backup=not incremental_path_eligible,
+                preserve_unaffected_rows=incremental_path_eligible,
+            )
+            if incremental_path_eligible:
+                derived_refresh_state = (
+                    _set_trading_journal_incremental_recovery_phase(
+                        "json_committed"
+                    )
+                )
             timings["upsert"] = round(time.perf_counter() - t2, 6)
             APP_LOGGER.info("trading_journal_import_stage_done stage=upsert elapsed=%.6fs upload=%s", timings["upsert"], name)
-            repaired_rows, repaired_changed = _backfill_persisted_bybit_trade_fields(_get_trading_journal_rows())
+            if incremental_path_eligible:
+                repaired_rows = _get_trading_journal_rows()
+                repaired_changed = 0
+            else:
+                repaired_rows, repaired_changed = _backfill_persisted_bybit_trade_fields(
+                    _get_trading_journal_rows()
+                )
             workbook_manual_rows_preserved = 0
             rows_with_workbook_manual_fields: List[Dict[str, object]] = []
-            for persisted_row in repaired_rows:
+            for persisted_row in ([] if incremental_path_eligible else repaired_rows):
                 if not isinstance(persisted_row, dict):
                     continue
                 rid = str(persisted_row.get("id") or "").strip()
@@ -34291,6 +35925,282 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
                 if preserved_row != current_row:
                     pending_map[rid] = preserved_row
             _PENDING_MANUAL_SYNC_ROWS = list(pending_map.values())
+
+            if incremental_path_eligible:
+                incremental_rows_by_id = {
+                    str((row or {}).get("id") or "").strip(): dict(row)
+                    for row in post_upsert_import_rows
+                    if isinstance(row, dict)
+                    and str((row or {}).get("id") or "").strip()
+                }
+                incremental_changed_rows = [
+                    incremental_rows_by_id[row_id]
+                    for row_id in incremental_affected_row_ids
+                    if row_id in incremental_rows_by_id
+                ]
+                if len(incremental_changed_rows) != len(
+                    incremental_affected_row_ids
+                ):
+                    raise RuntimeError(
+                        "Incremental import lost an affected row after durable JSON upsert."
+                    )
+
+                t3 = time.perf_counter()
+                _update_trading_journal_import_status(
+                    stage="workbook_sync:incremental",
+                    message="Saving affected Trade Log rows and account balance",
+                )
+                sync_id = f"mjsync-incremental-{uuid4().hex[:12]}"
+                sync_caller = "manual_import_incremental"
+                rejected = _reserve_master_journal_workbook_sync(
+                    workbook_path,
+                    sync_id,
+                    sync_caller,
+                )
+                if rejected is not None:
+                    sync_result = rejected
+                    raise RuntimeError(_master_journal_sync_error(rejected))
+                try:
+                    incremental_workbook_attempted = True
+                    try:
+                        sync_result = update_master_journal_workbook_incremental(
+                            workbook_path,
+                            incremental_changed_rows,
+                            account_balance=oanda_transaction_export_balance,
+                            expected_survivor_row_ids=expected_survivors,
+                        )
+                    except IncrementalWorkbookUpdateNotEligible as exc:
+                        incremental_fallback_reason = (
+                            f"workbook_helper_ineligible:{exc}"
+                        )
+                        if bool(getattr(exc, "unsafe_full_rebuild", False)):
+                            raise RuntimeError(
+                                "Incremental workbook update was refused because a full "
+                                "rebuild could discard workbook-owned content: "
+                                f"{exc}"
+                            ) from exc
+                        incremental_path_eligible = False
+                        incremental_full_fallback_started = True
+                        APP_LOGGER.info(
+                            "trading_journal_import_incremental_ineligible upload=%s reason=%s; using full sync",
+                            name,
+                            exc,
+                        )
+                    else:
+                        if not bool((sync_result or {}).get("ok")):
+                            raise RuntimeError(
+                                "Incremental workbook update failed: "
+                                f"{_master_journal_sync_error(sync_result)}"
+                            )
+                        helper_affected_ids = sorted(
+                            str(row_id or "").strip()
+                            for row_id in ((sync_result or {}).get("affected_row_ids") or [])
+                            if str(row_id or "").strip()
+                        )
+                        if helper_affected_ids != incremental_affected_row_ids:
+                            raise RuntimeError(
+                                "Incremental workbook update affected an unexpected row set."
+                            )
+                        incremental_workbook_update_used = True
+                finally:
+                    _release_master_journal_workbook_sync()
+                timings["workbook_sync"] = round(time.perf_counter() - t3, 6)
+
+                if incremental_workbook_update_used:
+                    diagnostics = (
+                        dict((sync_result or {}).get("diagnostics") or {})
+                        if isinstance((sync_result or {}).get("diagnostics"), dict)
+                        else {}
+                    )
+                    verified_balance = (
+                        dict(diagnostics.get("verified_account_balance") or {})
+                        if isinstance(diagnostics.get("verified_account_balance"), dict)
+                        else {}
+                    )
+                    account_balance_updated = bool(
+                        (sync_result or {}).get("account_balance_updated")
+                    )
+                    if not account_balance_updated:
+                        raise RuntimeError(
+                            "Incremental workbook update did not persist the imported account balance."
+                        )
+                    if not verified_balance:
+                        raise RuntimeError(
+                            "Incremental workbook update did not return verified account balance diagnostics."
+                        )
+                    expected_balance_value = _to_float(
+                        (oanda_transaction_export_balance or {}).get("balance")
+                    )
+                    actual_balance_value = _to_float(verified_balance.get("balance"))
+                    verified_balance_matches = bool(
+                        expected_balance_value is not None
+                        and actual_balance_value is not None
+                        and math.isclose(
+                            expected_balance_value,
+                            actual_balance_value,
+                            rel_tol=1e-12,
+                            abs_tol=1e-9,
+                        )
+                    )
+                    if not verified_balance_matches:
+                        raise RuntimeError(
+                            "Incremental workbook balance diagnostics did not match the imported balance."
+                        )
+                    balance_verification = {
+                        "ok": True,
+                        "balance_expected": True,
+                        "balance_applied": True,
+                        "snapshot_visible": False,
+                        "derived_refresh_pending": True,
+                        "expected_balance": expected_balance_value,
+                        "actual_balance": actual_balance_value,
+                        "actual_currency": verified_balance.get("currency"),
+                        "actual_as_of": verified_balance.get("as_of"),
+                        "actual_source": verified_balance.get("source"),
+                        "provenance_defined_name": verified_balance.get(
+                            "provenance_defined_name"
+                        ),
+                    }
+                    derived_refresh_state = (
+                        _set_trading_journal_incremental_recovery_phase(
+                            "workbook_committed"
+                        )
+                    )
+                    t5 = time.perf_counter()
+                    _persist_trading_journal_sqlite_incremental(
+                        incremental_changed_rows,
+                        oanda_transaction_export_balance,
+                        import_meta={
+                            "source_mode": "manual_upload_incremental",
+                            "workbooks_scanned": 1,
+                            "workbooks_changed": 1,
+                            "rows_imported": len(incremental_changed_rows),
+                            "warnings": [],
+                            "errors": [],
+                        },
+                        derived_refresh_state=derived_refresh_state,
+                    )
+                    timings["snapshot_persist"] = round(
+                        time.perf_counter() - t5,
+                        6,
+                    )
+                    try:
+                        derived_refresh_state = (
+                            _set_trading_journal_incremental_recovery_phase(
+                                "incremental_committed"
+                            )
+                        )
+                        derived_refresh_state = (
+                            _defer_trading_journal_derived_refresh_after_incremental_commit()
+                        )
+                    except Exception as post_commit_exc:
+                        # JSON, workbook, and SQLite are now a coherent primary
+                        # commit. The already-durable workbook_committed phase is
+                        # sufficient for idempotent restart recovery, so a later
+                        # state/debounce write must never roll those stores back.
+                        warning = (
+                            "Incremental import committed, but the derived refresh "
+                            f"state transition will be recovered: {post_commit_exc}"
+                        )
+                        inference_warnings.append(warning)
+                        APP_LOGGER.warning(
+                            "trading_journal_import_post_commit_state_transition_failed upload=%s error=%s",
+                            name,
+                            post_commit_exc,
+                        )
+                        with TRADING_JOURNAL_DERIVED_REFRESH_LOCK:
+                            derived_refresh_state = copy.deepcopy(
+                                TRADING_JOURNAL_DERIVED_REFRESH_STATE
+                            )
+                            if (
+                                bool(derived_refresh_state.get("queued"))
+                                and not bool(derived_refresh_state.get("running"))
+                            ):
+                                try:
+                                    _arm_trading_journal_derived_refresh_timer_locked()
+                                except Exception as arm_exc:
+                                    APP_LOGGER.warning(
+                                        "trading_journal_import_post_commit_timer_rearm_failed upload=%s error=%s",
+                                        name,
+                                        arm_exc,
+                                    )
+                    _PENDING_MANUAL_SYNC_ROWS = previous_pending_rows
+                    _PENDING_MANUAL_SYNC_BALANCES = previous_pending_balances
+                    pending_restored = True
+                    rows_persisted = True
+                    timings.update(
+                        {
+                            "snapshot_build": 0.0,
+                            "verification": 0.0,
+                            "workbook_snapshot_verification": 0.0,
+                            "github_sync": 0.0,
+                        }
+                    )
+                    try:
+                        _schedule_dropbox_upload_state_backup()
+                    except Exception as backup_exc:
+                        APP_LOGGER.warning(
+                            "trading_journal_import_state_backup_schedule_failed upload=%s error=%s",
+                            name,
+                            backup_exc,
+                        )
+                    incremental_failure_rollback_required = False
+                    APP_LOGGER.info(
+                        "trading_journal_import_incremental_success timings=%s upload=%s affected_row_ids=%s generation=%s",
+                        timings,
+                        name,
+                        incremental_affected_row_ids,
+                        derived_refresh_state.get("generation"),
+                    )
+                    return {
+                        "ok": True,
+                        "status_code": 200,
+                        "message": (
+                            "Affected Trade Log rows and the Oanda account balance were saved; derived workbook refresh queued."
+                            if incremental_affected_row_ids
+                            else "The Oanda account balance was saved; derived workbook refresh queued."
+                        ),
+                        "uploaded_name": name,
+                        "file_type": suffix,
+                        "rows_parsed": len(rows),
+                        "rows_upserted": rows_upserted,
+                        "duplicate_rows_merged": duplicate_rows_merged,
+                        "balance_parsed": bool(balance),
+                        "rows_persisted": rows_persisted,
+                        "balance_applied": True,
+                        "snapshot_visible": False,
+                        "balance_verification": balance_verification,
+                        "master_journal_path": str(workbook_path),
+                        "verified_row_ids_count": len(parsed_ids),
+                        "missing_row_ids": [],
+                        "warnings": inference_warnings,
+                        "errors": [],
+                        "import_timings": timings,
+                        **inference_diag,
+                        **bybit_diag,
+                        "incremental_workbook_update_used": True,
+                        "workbook_rebuild_required": False,
+                        "affected_row_ids": incremental_affected_row_ids,
+                        "state_delta_row_ids": incremental_state_delta_row_ids,
+                        "json_upsert_row_ids": incremental_json_upsert_row_ids,
+                        "affected_row_numbers": list(
+                            (sync_result or {}).get("affected_row_numbers") or []
+                        ),
+                        "derived_refresh": (
+                            _public_trading_journal_derived_refresh_state(
+                                derived_refresh_state
+                            )
+                        ),
+                        "github_sync_enabled": _trading_journal_github_sync_enabled(),
+                        "github_sync_ok": None,
+                        "github_sync_noop": False,
+                        "github_sync_deferred": True,
+                        "github_sync_commit": "",
+                        "github_sync_commit_sha": None,
+                        "github_sync_path": str(workbook_path),
+                        "github_sync_message": "GitHub sync deferred until the queued derived workbook refresh.",
+                        "diagnostics": diagnostics,
+                    }
 
             t_snap = time.perf_counter()
             _update_trading_journal_import_status(stage="snapshot_build", message="Building authoritative import snapshot")
@@ -34403,20 +36313,79 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
             APP_LOGGER.info("trading_journal_import_stage_done stage=github_sync elapsed=%.6fs upload=%s", timings["github_sync"], name)
             if github_sync_result.get("github_sync_enabled") and github_sync_result.get("github_sync_ok") is False:
                 raise RuntimeError(f"GitHub sync failed after local verification: {github_sync_result.get('github_sync_error') or 'unknown error'}")
+            if derived_refresh_state:
+                queued_generation = int(
+                    derived_refresh_state.get("generation") or 0
+                )
+                derived_refresh_state = (
+                    _mark_trading_journal_derived_refresh_generation_succeeded(
+                        queued_generation,
+                        result={
+                            "workbook_sync": _json_safe(sync_result or {}),
+                            "github_sync": _json_safe(github_sync_result or {}),
+                            "completed_inline": True,
+                        },
+                    )
+                )
+                incremental_failure_rollback_required = False
+                incremental_json_upsert_started = False
+                try:
+                    _schedule_dropbox_upload_state_backup()
+                except Exception as backup_exc:
+                    APP_LOGGER.warning(
+                        "trading_journal_import_state_backup_schedule_failed upload=%s error=%s",
+                        name,
+                        backup_exc,
+                    )
         except Exception as exc:
             if not pending_restored:
                 _PENDING_MANUAL_SYNC_ROWS = previous_pending_rows
                 _PENDING_MANUAL_SYNC_BALANCES = previous_pending_balances
             rollback_errors: List[str] = []
             t_rb = time.perf_counter()
-            try:
-                _set_trading_journal_rows(rollback_rows)
-            except Exception as row_restore_exc:
-                rollback_errors.append(f"could not restore journal rows: {row_restore_exc}")
+            incremental_exact_rollback = bool(
+                incremental_json_upsert_started
+                or incremental_failure_rollback_required
+            )
+            if incremental_exact_rollback:
+                try:
+                    if journal_json_had_original and journal_json_backup_bytes is not None:
+                        _atomic_write_bytes(
+                            TRADING_JOURNAL_PATH,
+                            journal_json_backup_bytes,
+                        )
+                    elif TRADING_JOURNAL_PATH.exists():
+                        TRADING_JOURNAL_PATH.unlink()
+                    _TRADING_JOURNAL_CACHE = copy.deepcopy(journal_cache_before)
+                    _TRADING_JOURNAL_CACHE_KEY = copy.deepcopy(
+                        journal_cache_key_before
+                    )
+                except Exception as row_restore_exc:
+                    rollback_errors.append(
+                        f"could not restore journal rows: {row_restore_exc}"
+                    )
+                if derived_refresh_memory_before is not None:
+                    try:
+                        _restore_trading_journal_derived_refresh_state(
+                            had_original=derived_refresh_had_original,
+                            backup_bytes=derived_refresh_backup_bytes,
+                            memory_state=derived_refresh_memory_before,
+                        )
+                    except Exception as derived_restore_exc:
+                        rollback_errors.append(
+                            "could not restore derived refresh state: "
+                            f"{derived_restore_exc}"
+                        )
+            else:
+                try:
+                    _set_trading_journal_rows(rollback_rows)
+                except Exception as row_restore_exc:
+                    rollback_errors.append(
+                        f"could not restore journal rows: {row_restore_exc}"
+                    )
             try:
                 if workbook_had_original and workbook_backup_bytes is not None:
-                    workbook_path.parent.mkdir(parents=True, exist_ok=True)
-                    workbook_path.write_bytes(workbook_backup_bytes)
+                    _atomic_write_bytes(workbook_path, workbook_backup_bytes)
                 elif not workbook_had_original and workbook_path.exists():
                     workbook_path.unlink()
             except Exception as restore_exc:
@@ -34447,20 +36416,21 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
                     rollback_errors.append(
                         f"could not verify workbook after rollback: {rollback_verify_exc}"
                     )
-            try:
-                rollback_snapshot = (
-                    _build_master_journal_verification_snapshot()
-                    if bool(oanda_transaction_export_balance)
-                    else _build_manual_import_authoritative_snapshot()
-                )
-                if bool(oanda_transaction_export_balance):
-                    rollback_balance_verification = _verify_imported_account_balance_snapshot(
-                        rollback_snapshot,
-                        oanda_transaction_export_balance,
+            if not incremental_exact_rollback or incremental_full_fallback_started:
+                try:
+                    rollback_snapshot = (
+                        _build_master_journal_verification_snapshot()
+                        if bool(oanda_transaction_export_balance)
+                        else _build_manual_import_authoritative_snapshot()
                     )
-                _persist_trading_journal_sqlite(rollback_snapshot, import_meta={"source_mode": "manual_upload_rollback", "rows_imported": 0, "warnings": [], "errors": [str(exc), *rollback_errors]})
-            except Exception as persist_rollback_exc:
-                rollback_errors.append(f"could not persist rollback snapshot: {persist_rollback_exc}")
+                    if bool(oanda_transaction_export_balance):
+                        rollback_balance_verification = _verify_imported_account_balance_snapshot(
+                            rollback_snapshot,
+                            oanda_transaction_export_balance,
+                        )
+                    _persist_trading_journal_sqlite(rollback_snapshot, import_meta={"source_mode": "manual_upload_rollback", "rows_imported": 0, "warnings": [], "errors": [str(exc), *rollback_errors]})
+                except Exception as persist_rollback_exc:
+                    rollback_errors.append(f"could not persist rollback snapshot: {persist_rollback_exc}")
             timings["rollback"] = round(time.perf_counter() - t_rb, 6)
             APP_LOGGER.warning("trading_journal_import_failed timings=%s upload=%s", timings, name)
             code = 500
@@ -34504,7 +36474,17 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
             return {"ok": False, "status_code": code, "message": msg, "uploaded_name": name, "file_type": suffix, "rows_parsed": len(rows), "rows_upserted": 0, "rows_persisted": rollback_rows_persisted, "balance_applied": bool(rollback_balance_verification.get("balance_applied")), "snapshot_visible": bool(rollback_balance_verification.get("snapshot_visible")), "balance_verification": rollback_balance_verification, "rollback_restored": rollback_restored, "rollback_local_state_restored": rollback_local_state_restored, "rollback_github_state_restored": github_state_restored, "missing_row_ids": missing, "errors": [msg, *rollback_errors], "warnings": [], "import_timings": timings, "master_journal_error": _master_journal_sync_error(sync_result), "diagnostics": (sync_result or {}).get("diagnostics")}
         APP_LOGGER.info("trading_journal_import_success timings=%s upload=%s", timings, name)
         message = "Import complete. Duplicate rows already present; stats refreshed; workbook trade rows unchanged." if duplicate_noop_fast_path_used else "Import complete."
-        return {"ok": True, "status_code": 200, "message": message, "uploaded_name": name, "file_type": suffix, "rows_parsed": len(rows), "rows_upserted": rows_upserted, "duplicate_rows_merged": duplicate_rows_merged, "balance_parsed": bool(balance), "rows_persisted": rows_persisted, "balance_applied": bool(balance_verification.get("balance_applied")), "snapshot_visible": bool(balance_verification.get("snapshot_visible")), "balance_verification": balance_verification, "master_journal_path": str(_master_journal_path()), "verified_row_ids_count": len(parsed_ids), "missing_row_ids": [], "warnings": inference_warnings, "errors": [], "import_timings": timings, **inference_diag, **bybit_diag, **github_sync_result, "github_sync_deferred": False, "github_sync_commit_sha": github_sync_result.get("github_sync_commit"), "github_sync_path": str(_master_journal_path()), "github_sync_message": ("GitHub sync disabled" if not github_sync_result.get("github_sync_enabled") else ("GitHub sync complete" if github_sync_result.get("github_sync_ok") else str(github_sync_result.get("github_sync_error") or "")))}
+        result = {"ok": True, "status_code": 200, "message": message, "uploaded_name": name, "file_type": suffix, "rows_parsed": len(rows), "rows_upserted": rows_upserted, "duplicate_rows_merged": duplicate_rows_merged, "balance_parsed": bool(balance), "rows_persisted": rows_persisted, "balance_applied": bool(balance_verification.get("balance_applied")), "snapshot_visible": bool(balance_verification.get("snapshot_visible")), "balance_verification": balance_verification, "master_journal_path": str(_master_journal_path()), "verified_row_ids_count": len(parsed_ids), "missing_row_ids": [], "warnings": inference_warnings, "errors": [], "import_timings": timings, **inference_diag, **bybit_diag, **github_sync_result, "github_sync_deferred": False, "github_sync_commit_sha": github_sync_result.get("github_sync_commit"), "github_sync_path": str(_master_journal_path()), "github_sync_message": ("GitHub sync disabled" if not github_sync_result.get("github_sync_enabled") else ("GitHub sync complete" if github_sync_result.get("github_sync_ok") else str(github_sync_result.get("github_sync_error") or "")))}
+        result.update(
+            {
+                "incremental_workbook_update_used": False,
+                "workbook_rebuild_required": True,
+                "incremental_fallback_reason": incremental_fallback_reason,
+                "affected_row_ids": [],
+                "derived_refresh": _trading_journal_derived_refresh_status_snapshot(),
+            }
+        )
+        return result
     except Exception as exc:
         return {"ok": False, "status_code": 500, "message": f"Unexpected import error for {name}.", "uploaded_name": name, "file_type": suffix or "unknown", "rows_parsed": 0, "rows_upserted": 0, "duplicate_rows_merged": 0, "balance_parsed": False, "master_journal_path": str(_master_journal_path()), "verified_row_ids_count": 0, "missing_row_ids": [], "warnings": [], "errors": [str(exc)]}
     finally:
@@ -34514,6 +36494,8 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
         except Exception:
             pass
         _update_trading_journal_import_status(running=False, stage="idle", message="", finished_at=_utc_now_iso(), upload_name="")
+        if master_workbook_reserved:
+            _release_master_journal_workbook_sync()
         if acquired_import_lock:
             TRADING_JOURNAL_IMPORT_LOCK.release()
 

@@ -91,11 +91,62 @@ def _isolate_canonical_master_journal_path(
     monkeypatch: pytest.MonkeyPatch,
 ):
     isolated_workbook = tmp_path / "Trading Journal.xlsx"
+    isolated_data = tmp_path / "runtime-data"
     monkeypatch.setattr(
         master_service,
         "_master_journal_path",
         lambda: isolated_workbook,
     )
+    for attr_name, filename in {
+        "TRADING_JOURNAL_PATH": "trading_journal.json",
+        "TRADING_JOURNAL_STATE_PATH": "trading_journal_state.json",
+        "TRADING_JOURNAL_SYNC_STATE_PATH": "trading_journal_sync_state.json",
+        "TRADING_JOURNAL_IMPORT_CACHE_PATH": "trading_journal_import_cache.json",
+        "TRADING_JOURNAL_VIEW_CACHE_PATH": "trading_journal_view_cache.json",
+        "TRADING_JOURNAL_SQLITE_PATH": "trading_journal.sqlite",
+        "TRADING_JOURNAL_DERIVED_REFRESH_STATE_PATH": "trading_journal_derived_refresh_state.json",
+        "TRADING_JOURNAL_RESYNC_CACHE_PATH": "trading_journal_resync_cache.json",
+        "MONTHLY_AUD_REVALUATION_PATH": "monthly_aud_revaluation.json",
+        "MONTHLY_AUD_REVALUATION_STATE_PATH": "monthly_aud_revaluation_state.json",
+        "OANDA_FILL_STATE_PATH": "oanda_fill_state.json",
+        "PENDING_WEBHOOKS_PATH": "pending_webhooks.json",
+        "TRADE_CONTEXTS_PATH": "trade_contexts.json",
+        "WEBHOOK_ATTEMPTS_PATH": "webhook_attempts.json",
+        "BOUNCE_TRADERS_PATH": "bounce_traders.json",
+    }.items():
+        monkeypatch.setattr(master_service, attr_name, isolated_data / filename)
+    monkeypatch.setattr(master_service, "STATE_MANIFEST_PATH", tmp_path / "state_manifest.json")
+    monkeypatch.setattr(master_service, "LEGACY_STATE_MANIFEST_CAMEL_PATH", tmp_path / "stateManifest.json")
+    monkeypatch.setattr(master_service, "_schedule_dropbox_upload_state_backup", lambda: None)
+    master_service._TRADING_JOURNAL_CACHE = None
+    master_service._TRADING_JOURNAL_CACHE_KEY = None
+    master_service._TRADING_JOURNAL_VIEW_CACHE["key"] = None
+    master_service._TRADING_JOURNAL_VIEW_CACHE["payload"] = None
+    master_service._PENDING_MANUAL_SYNC_ROWS = []
+    master_service._PENDING_MANUAL_SYNC_BALANCES = []
+    with master_service.TRADING_JOURNAL_DERIVED_REFRESH_LOCK:
+        timer = master_service.TRADING_JOURNAL_DERIVED_REFRESH_TIMER
+        if isinstance(timer, threading.Timer):
+            timer.cancel()
+        master_service.TRADING_JOURNAL_DERIVED_REFRESH_TIMER = None
+        master_service.TRADING_JOURNAL_DERIVED_REFRESH_LOADED_PATH = ""
+        master_service.TRADING_JOURNAL_DERIVED_REFRESH_STATE.clear()
+        master_service.TRADING_JOURNAL_DERIVED_REFRESH_STATE.update(
+            master_service._derived_refresh_default_state()
+        )
+    yield
+    with master_service.TRADING_JOURNAL_DERIVED_REFRESH_LOCK:
+        timer = master_service.TRADING_JOURNAL_DERIVED_REFRESH_TIMER
+        if isinstance(timer, threading.Timer):
+            timer.cancel()
+        master_service.TRADING_JOURNAL_DERIVED_REFRESH_TIMER = None
+        master_service.TRADING_JOURNAL_DERIVED_REFRESH_LOADED_PATH = ""
+        master_service.TRADING_JOURNAL_DERIVED_REFRESH_STATE.clear()
+        master_service.TRADING_JOURNAL_DERIVED_REFRESH_STATE.update(
+            master_service._derived_refresh_default_state()
+        )
+    master_service._PENDING_MANUAL_SYNC_ROWS = []
+    master_service._PENDING_MANUAL_SYNC_BALANCES = []
 
 
 @pytest.fixture
@@ -106,6 +157,8 @@ def temp_state_paths(tmp_path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(master_service, "TRADING_JOURNAL_SYNC_STATE_PATH", tmp_path / "trading_journal_sync_state.json")
     monkeypatch.setattr(master_service, "TRADING_JOURNAL_VIEW_CACHE_PATH", tmp_path / "trading_journal_view_cache.json")
     monkeypatch.setattr(master_service, "TRADING_JOURNAL_SQLITE_PATH", tmp_path / "trading_journal.sqlite")
+    monkeypatch.setattr(master_service, "TRADING_JOURNAL_DERIVED_REFRESH_STATE_PATH", tmp_path / "trading_journal_derived_refresh_state.json")
+    monkeypatch.setattr(master_service, "TRADING_JOURNAL_DERIVED_REFRESH_DEBOUNCE_SECONDS", 3600.0)
     monkeypatch.setattr(master_service, "TRADING_JOURNAL_IMPORT_CACHE_PATH", tmp_path / "trading_journal_import_cache.json")
     monkeypatch.setattr(master_service, "_schedule_dropbox_upload_state_backup", lambda: None)
     monkeypatch.setattr(master_service, "_get_excel_account_balances", lambda: [])
@@ -121,14 +174,89 @@ def temp_state_paths(tmp_path, monkeypatch: pytest.MonkeyPatch):
             "requested_source_fingerprints": None,
         }
     )
+    with master_service.TRADING_JOURNAL_DERIVED_REFRESH_LOCK:
+        timer = master_service.TRADING_JOURNAL_DERIVED_REFRESH_TIMER
+        if isinstance(timer, threading.Timer):
+            timer.cancel()
+        master_service.TRADING_JOURNAL_DERIVED_REFRESH_TIMER = None
+        master_service.TRADING_JOURNAL_DERIVED_REFRESH_LOADED_PATH = ""
+        master_service.TRADING_JOURNAL_DERIVED_REFRESH_STATE.clear()
+        master_service.TRADING_JOURNAL_DERIVED_REFRESH_STATE.update(
+            master_service._derived_refresh_default_state()
+        )
     monkeypatch.setattr(master_service, "ENABLE_BYBIT_DEMO_JOURNAL", True)
     monkeypatch.setenv("TRADING_JOURNAL_GITHUB_SYNC_ENABLED", "0")
     monkeypatch.setattr(master_service, "_sync_journal_excel_files_to_github", lambda *_a, **_k: {"github_sync_enabled": False, "github_sync_ok": True, "github_sync_noop": True, "github_sync_error": "", "github_sync_commit": ""})
-    return tmp_path
+    yield tmp_path
+    with master_service.TRADING_JOURNAL_DERIVED_REFRESH_LOCK:
+        timer = master_service.TRADING_JOURNAL_DERIVED_REFRESH_TIMER
+        if isinstance(timer, threading.Timer):
+            timer.cancel()
+        master_service.TRADING_JOURNAL_DERIVED_REFRESH_TIMER = None
+        master_service.TRADING_JOURNAL_DERIVED_REFRESH_LOADED_PATH = ""
+        master_service.TRADING_JOURNAL_DERIVED_REFRESH_STATE.clear()
+        master_service.TRADING_JOURNAL_DERIVED_REFRESH_STATE.update(
+            master_service._derived_refresh_default_state()
+        )
 
 
 def _json(res):
     return json.loads(res.body.decode("utf-8"))
+
+
+def test_autouse_fixture_starts_with_empty_pending_manual_import_state():
+    assert master_service._PENDING_MANUAL_SYNC_ROWS == []
+    assert master_service._PENDING_MANUAL_SYNC_BALANCES == []
+
+
+def _strict_oanda_row(
+    row_id: str,
+    *,
+    net_profit: float,
+    balance_after_trade: float,
+    source: str = "oanda_transaction_export",
+) -> dict:
+    sequence = int(str(row_id).rsplit(":", 1)[-1])
+    return {
+        "id": row_id,
+        "row_type": "trade",
+        "source": source,
+        "account": "demo",
+        "account_label": "OANDA DEMO",
+        "symbol": "EURUSD",
+        "side": "BUY",
+        "open_time": f"2026-08-01T0{sequence % 9}:00:00+10:00",
+        "close_time": f"2026-08-01T{10 + (sequence % 9):02d}:00:00+10:00",
+        "qty": 0.1,
+        "entry_price": 1.15,
+        "exit_price": 1.16,
+        "commission": 0.5,
+        "net_profit": net_profit,
+        "realized_pnl": net_profit,
+        "balance_after_trade": balance_after_trade,
+        "balance_after_trade_currency": "AUD",
+        "metrics": {"sequence": sequence},
+    }
+
+
+def _strict_oanda_balance(balance: float = 1517.42) -> dict:
+    return {
+        "source": "oanda_transaction_export_balance",
+        "balance_source": "oanda_transaction_export_balance",
+        "account": "OANDA DEMO",
+        "label": "OANDA DEMO",
+        "balance": balance,
+        "currency": "AUD",
+        "as_of": "2026-08-01T19:00:00+10:00",
+    }
+
+
+def _current_workbook_source(rows: list[dict], balance: dict) -> dict:
+    return {
+        "items": [dict(row) for row in rows],
+        "balances": [dict(balance)],
+        "_workbook_structure": {"sheet_order": list(master_service.SHEET_ORDER)},
+    }
 
 
 def test_set_trading_journal_rows_failed_write_preserves_cache_and_disk(
@@ -1402,11 +1530,15 @@ def test_import_from_sources_clears_existing_rows_on_empty_result_in_local_mode(
     assert not any(str(r.get("id")) == "existing:1" for r in rows)
 
 
-def test_upsert_trading_journal_rows_rejects_broker_rows_in_local_mode(monkeypatch: pytest.MonkeyPatch):
+def test_upsert_trading_journal_rows_rejects_broker_rows_in_local_mode(
+    temp_state_paths,
+    monkeypatch: pytest.MonkeyPatch,
+):
     monkeypatch.setattr(master_service, "TRADING_JOURNAL_SOURCE", "local")
     master_service._set_trading_journal_rows([])
     changed = master_service._upsert_trading_journal_rows([{"id": "oanda:demo:test", "source": "oanda"}])
     assert changed == 0
+    assert master_service._get_trading_journal_rows() == []
 
 
 def test_merge_trading_journal_row_preserves_rich_raw_refs_and_context_fields():
@@ -1437,7 +1569,6 @@ def test_merge_trading_journal_row_preserves_rich_raw_refs_and_context_fields():
     assert merged.get("timeframe") == "1m"
     assert merged.get("is_test_trade") is True
     assert merged.get("r_multiple") == -0.27
-    assert master_service._get_trading_journal_rows() == []
 
 
 def test_trading_journal_js_quarantine_is_not_hard_warning():
@@ -1587,7 +1718,6 @@ def test_oanda_order_fill_allocates_transaction_financing_across_multiple_close_
             "price": "1.2",
         }
     )
-
     assert len(rows) == 2
     assert [row["swap"] for row in rows] == pytest.approx([-1.0, -2.0])
     assert [row["commission"] for row in rows] == pytest.approx([1.0, 2.0])
@@ -4003,6 +4133,13 @@ def test_import_changed_row_does_not_use_fast_path(temp_state_paths, monkeypatch
     monkeypatch.setattr(master_service, "_parse_local_trading_journal_workbook", lambda *_a, **_k: ([dict(parsed)], None))
     monkeypatch.setattr(master_service, "_infer_realized_net_profit_from_balance_continuity", lambda rows, _existing: (rows, [], {"pnl_inferred_count": 0, "pnl_unresolved_count": 0, "pnl_unresolved_row_ids": []}))
     monkeypatch.setattr(master_service, "read_master_journal_source", lambda _p: {"items": [dict(workbook_row)]})
+    monkeypatch.setattr(
+        master_service,
+        "update_master_journal_workbook_incremental",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            AssertionError("ineligible import must use the full fallback")
+        ),
+    )
     called = {"upsert": 0, "sync": 0}
     monkeypatch.setattr(master_service, "_upsert_trading_journal_rows", lambda *_a, **_k: called.__setitem__("upsert", called["upsert"] + 1) or 1)
     monkeypatch.setattr(master_service, "_sync_master_journal_workbook", lambda **_k: called.__setitem__("sync", called["sync"] + 1) or {"ok": True})
@@ -4016,6 +4153,9 @@ def test_import_changed_row_does_not_use_fast_path(temp_state_paths, monkeypatch
     assert called["sync"] == 1
     assert out["message"] == "Import complete."
     assert "stats refreshed" not in out["message"].lower()
+    assert out["incremental_workbook_update_used"] is False
+    assert out["workbook_rebuild_required"] is True
+    assert out["incremental_fallback_reason"] == "workbook_schema_not_current"
 
 
 def test_import_duplicate_noop_never_refreshes_stats(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
@@ -4938,3 +5078,2034 @@ def test_manual_import_local_snapshot_does_not_call_external_refresh_helpers(tem
     assert snapshot["items"]
     bal = next(b for b in snapshot["balances"] if str(b.get("account") or b.get("label")).upper() == "OANDA DEMO")
     assert bal["balance"] == pytest.approx(1500.20)
+
+
+def _install_strict_incremental_import_harness(
+    temp_state_paths: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    workbook_rows: list[dict],
+    incoming_rows: list[dict],
+    incoming_balance: dict,
+    helper_error: Exception | None = None,
+):
+    workbook = temp_state_paths / "Trading Journal.xlsx"
+    workbook.write_bytes(b"workbook-before")
+    state = {
+        "rows": [dict(row) for row in workbook_rows],
+        "balance": _strict_oanda_balance(
+            float(incoming_balance["balance"]) - 1.0
+        ),
+    }
+    master_service._set_trading_journal_rows([dict(row) for row in workbook_rows])
+    monkeypatch.setattr(master_service, "_master_journal_path", lambda: workbook)
+    monkeypatch.setattr(master_service, "_is_bybit_trade_history_csv", lambda *_a, **_k: False)
+    monkeypatch.setattr(
+        master_service,
+        "_parse_local_trading_journal_workbook",
+        lambda *_a, **_k: (
+            [dict(row) for row in incoming_rows],
+            dict(incoming_balance),
+        ),
+    )
+    monkeypatch.setattr(
+        master_service,
+        "_infer_realized_net_profit_from_balance_continuity",
+        lambda rows, _existing: (
+            rows,
+            [],
+            {
+                "pnl_inferred_count": 0,
+                "pnl_unresolved_count": 0,
+                "pnl_unresolved_row_ids": [],
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        master_service,
+        "read_master_journal_source",
+        lambda _path: _current_workbook_source(
+            state["rows"],
+            state["balance"],
+        ),
+    )
+    calls = {
+        "helper": [],
+        "sqlite": [],
+        "full_sync": 0,
+        "github": 0,
+    }
+
+    def fake_incremental(path, changed_rows, **kwargs):
+        calls["helper"].append(
+            {
+                "path": path,
+                "rows": [dict(row) for row in changed_rows],
+                "kwargs": dict(kwargs),
+            }
+        )
+        if helper_error is not None:
+            workbook.write_bytes(b"partial-workbook")
+            raise helper_error
+        rows_by_id = {str(row["id"]): dict(row) for row in state["rows"]}
+        inserted = []
+        updated = []
+        for row in changed_rows:
+            row_id = str(row["id"])
+            (updated if row_id in rows_by_id else inserted).append(row_id)
+            rows_by_id[row_id] = dict(row)
+        state["rows"] = list(rows_by_id.values())
+        state["balance"] = dict(kwargs["account_balance"])
+        workbook.write_bytes(b"workbook-after")
+        affected = sorted(str(row["id"]) for row in changed_rows)
+        return {
+            "ok": True,
+            "path": str(path),
+            "incremental": True,
+            "inserted_row_ids": inserted,
+            "updated_row_ids": updated,
+            "affected_row_ids": affected,
+            "affected_row_numbers": list(range(10, 10 + len(affected))),
+            "account_balance_updated": True,
+            "diagnostics": {
+                "verified_account_balance": {
+                    "account_label": "OANDA DEMO",
+                    "row": 12,
+                    "balance": float(incoming_balance["balance"]),
+                    "currency": incoming_balance["currency"],
+                    "as_of": incoming_balance["as_of"],
+                    "source": incoming_balance["source"],
+                    "provenance_defined_name": True,
+                }
+            },
+        }
+
+    def fake_sqlite(changed_rows, account_balance, **kwargs):
+        calls["sqlite"].append(
+            {
+                "rows": [dict(row) for row in changed_rows],
+                "balance": dict(account_balance),
+                "kwargs": dict(kwargs),
+            }
+        )
+
+    monkeypatch.setattr(
+        master_service,
+        "update_master_journal_workbook_incremental",
+        fake_incremental,
+    )
+    monkeypatch.setattr(
+        master_service,
+        "_persist_trading_journal_sqlite_incremental",
+        fake_sqlite,
+    )
+    monkeypatch.setattr(
+        master_service,
+        "_build_manual_import_authoritative_snapshot",
+        lambda **_k: (_ for _ in ()).throw(
+            AssertionError("full snapshot should not run")
+        ),
+    )
+    monkeypatch.setattr(
+        master_service,
+        "_sync_master_journal_workbook",
+        lambda **_k: calls.__setitem__("full_sync", calls["full_sync"] + 1)
+        or (_ for _ in ()).throw(AssertionError("full sync should not run")),
+    )
+    monkeypatch.setattr(
+        master_service,
+        "_persist_trading_journal_sqlite",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            AssertionError("full SQLite persistence should not run")
+        ),
+    )
+    monkeypatch.setattr(
+        master_service,
+        "_verify_trade_log_row_ids_in_workbook",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            AssertionError("full workbook verification should not run")
+        ),
+    )
+    monkeypatch.setattr(
+        master_service,
+        "_sync_journal_excel_files_to_github",
+        lambda *_a, **_k: calls.__setitem__("github", calls["github"] + 1)
+        or (_ for _ in ()).throw(AssertionError("GitHub should be deferred")),
+    )
+    return workbook, state, calls
+
+
+def test_oanda_changed_row_uses_incremental_update_and_immediate_repeat_is_noop(
+    temp_state_paths,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    row_id = "oanda_export:demo:1"
+    workbook_row = _strict_oanda_row(
+        row_id,
+        net_profit=10.0,
+        balance_after_trade=1516.0,
+    )
+    incoming_row = _strict_oanda_row(
+        row_id,
+        net_profit=11.0,
+        balance_after_trade=1517.42,
+    )
+    incoming_balance = _strict_oanda_balance()
+    _workbook, _state, calls = _install_strict_incremental_import_harness(
+        temp_state_paths,
+        monkeypatch,
+        workbook_rows=[workbook_row],
+        incoming_rows=[incoming_row],
+        incoming_balance=incoming_balance,
+    )
+
+    first = master_service._import_uploaded_trading_journal_file(
+        "oanda_demo.csv", b"x"
+    )
+
+    assert first["ok"] is True
+    assert first["incremental_workbook_update_used"] is True
+    assert first["affected_row_ids"] == [row_id]
+    assert first["workbook_rebuild_required"] is False
+    assert first["github_sync_deferred"] is True
+    assert first["snapshot_visible"] is False
+    assert first["derived_refresh"]["status"] == "queued"
+    assert first["derived_refresh"]["incremental_recovery"]["phase"] == (
+        "incremental_committed"
+    )
+    assert first["derived_refresh"]["incremental_recovery"]["json_row_ids"] == [
+        row_id
+    ]
+    assert "json_rows" not in first["derived_refresh"]["incremental_recovery"]
+    assert "workbook_rows" not in first["derived_refresh"]["incremental_recovery"]
+    assert "account_balance" not in first["derived_refresh"]["incremental_recovery"]
+    assert calls["full_sync"] == 0
+    assert calls["github"] == 0
+    assert [row["id"] for row in calls["helper"][0]["rows"]] == [row_id]
+    assert [row["id"] for row in calls["sqlite"][0]["rows"]] == [row_id]
+    generation = first["derived_refresh"]["generation"]
+
+    second = master_service._import_uploaded_trading_journal_file(
+        "oanda_demo.csv", b"x"
+    )
+
+    assert second["ok"] is True
+    assert second["duplicate_noop_fast_path_used"] is True
+    assert second["rows_upserted"] == 0
+    assert len(calls["helper"]) == 1
+    assert len(calls["sqlite"]) == 1
+    assert second["derived_refresh"]["generation"] == generation
+    assert second["github_sync_deferred"] is True
+    assert second["github_sync_skipped"] is False
+    assert "still queued" in second["message"]
+    assert "deferred" in second["github_sync_message"].lower()
+
+
+def test_oanda_multi_row_incremental_update_passes_only_changed_and_new_rows(
+    temp_state_paths,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    unchanged = _strict_oanda_row(
+        "oanda_export:demo:1",
+        net_profit=10.0,
+        balance_after_trade=1505.0,
+    )
+    changed_before = _strict_oanda_row(
+        "oanda_export:demo:2",
+        net_profit=20.0,
+        balance_after_trade=1510.0,
+    )
+    changed_after = _strict_oanda_row(
+        "oanda_export:demo:2",
+        net_profit=21.0,
+        balance_after_trade=1511.0,
+    )
+    new_row = _strict_oanda_row(
+        "oanda_export:demo:3",
+        net_profit=6.42,
+        balance_after_trade=1517.42,
+    )
+    incoming_balance = _strict_oanda_balance()
+    _workbook, _state, calls = _install_strict_incremental_import_harness(
+        temp_state_paths,
+        monkeypatch,
+        workbook_rows=[unchanged, changed_before],
+        incoming_rows=[unchanged, changed_after, new_row],
+        incoming_balance=incoming_balance,
+    )
+
+    result = master_service._import_uploaded_trading_journal_file(
+        "oanda_demo.csv", b"x"
+    )
+
+    expected = ["oanda_export:demo:2", "oanda_export:demo:3"]
+    assert result["ok"] is True
+    assert result["affected_row_ids"] == expected
+    assert [row["id"] for row in calls["helper"][0]["rows"]] == expected
+    assert [row["id"] for row in calls["sqlite"][0]["rows"]] == expected
+    assert calls["helper"][0]["kwargs"]["expected_survivor_row_ids"] == [
+        "oanda_export:demo:1",
+        "oanda_export:demo:2",
+        "oanda_export:demo:3",
+    ]
+
+
+def test_full_oanda_history_incremental_upserts_only_materially_changed_json_row(
+    temp_state_paths,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    workbook_rows = [
+        {
+            **_strict_oanda_row(
+                "oanda_export:demo:1",
+                net_profit=10.0,
+                balance_after_trade=1505.0,
+            ),
+            "status": "closed",
+            "raw_refs": {"tradeId": "trade-1"},
+        },
+        {
+            **_strict_oanda_row(
+                "oanda_export:demo:2",
+                net_profit=20.0,
+                balance_after_trade=1510.0,
+            ),
+            "status": "closed",
+            "raw_refs": {"tradeId": "trade-2"},
+        },
+        {
+            **_strict_oanda_row(
+                "oanda_export:demo:3",
+                net_profit=5.0,
+                balance_after_trade=1515.0,
+            ),
+            "status": "closed",
+            "raw_refs": {"tradeId": "trade-3"},
+        },
+    ]
+    incoming_rows = [dict(row) for row in workbook_rows]
+    incoming_rows[1] = {
+        **incoming_rows[1],
+        "net_profit": 21.0,
+        "realized_pnl": 21.0,
+        "balance_after_trade": 1516.0,
+    }
+    incoming_balance = _strict_oanda_balance(1516.0)
+    _workbook, _state, calls = _install_strict_incremental_import_harness(
+        temp_state_paths,
+        monkeypatch,
+        workbook_rows=workbook_rows,
+        incoming_rows=incoming_rows,
+        incoming_balance=incoming_balance,
+    )
+    runtime_rows = [
+        {
+            **row,
+            "updated_at": f"2026-07-0{index}T00:00:00+00:00",
+            "content_sentinel": f"unchanged-content-{index}",
+        }
+        for index, row in enumerate(workbook_rows, start=1)
+    ]
+    master_service._set_trading_journal_rows(runtime_rows)
+    before_by_id = {
+        str(row["id"]): dict(row)
+        for row in master_service._get_trading_journal_rows()
+    }
+    context_side_effects = []
+    monkeypatch.setattr(
+        master_service,
+        "_mark_trade_context_closed_or_cancelled",
+        lambda **kwargs: context_side_effects.append(dict(kwargs)),
+    )
+    master_service._PENDING_MANUAL_SYNC_ROWS = [{"id": "pending-before"}]
+    master_service._PENDING_MANUAL_SYNC_BALANCES = [
+        {"label": "PENDING BEFORE", "balance": 5.0}
+    ]
+
+    result = master_service._import_uploaded_trading_journal_file(
+        "oanda_demo.csv", b"x"
+    )
+
+    changed_id = "oanda_export:demo:2"
+    unchanged_ids = ["oanda_export:demo:1", "oanda_export:demo:3"]
+    after_by_id = {
+        str(row["id"]): dict(row)
+        for row in master_service._get_trading_journal_rows()
+    }
+    assert result["ok"] is True
+    assert result["rows_parsed"] == 3
+    assert result["rows_upserted"] == 1, result
+    assert result["affected_row_ids"] == [changed_id]
+    assert [row["id"] for row in calls["helper"][0]["rows"]] == [changed_id]
+    assert [row["id"] for row in calls["sqlite"][0]["rows"]] == [changed_id]
+    assert all(after_by_id[row_id] == before_by_id[row_id] for row_id in unchanged_ids)
+    assert after_by_id[changed_id]["net_profit"] == pytest.approx(21.0)
+    assert after_by_id[changed_id]["updated_at"] != before_by_id[changed_id]["updated_at"]
+    assert context_side_effects == [
+        {"order_id": None, "trade_id": "trade-2", "status": "CLOSED"}
+    ]
+    assert master_service._PENDING_MANUAL_SYNC_ROWS == [{"id": "pending-before"}]
+    assert master_service._PENDING_MANUAL_SYNC_BALANCES == [
+        {"label": "PENDING BEFORE", "balance": 5.0}
+    ]
+
+
+def test_incremental_metadata_only_delta_is_persisted_without_workbook_row_update(
+    temp_state_paths,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    row_id = "oanda_export:demo:99"
+    workbook_row = {
+        **_strict_oanda_row(
+            row_id,
+            net_profit=10.0,
+            balance_after_trade=1516.0,
+        ),
+        "status": "closed",
+        "raw_refs": {"tradeId": "trade-before", "orderId": "order-1"},
+        "updated_at": "2026-07-01T00:00:00+00:00",
+    }
+    incoming_row = {
+        **workbook_row,
+        "raw_refs": {"tradeId": "trade-after", "orderId": "order-1"},
+    }
+    incoming_balance = _strict_oanda_balance(1516.0)
+    _workbook, state, calls = _install_strict_incremental_import_harness(
+        temp_state_paths,
+        monkeypatch,
+        workbook_rows=[workbook_row],
+        incoming_rows=[incoming_row],
+        incoming_balance=incoming_balance,
+    )
+    state["balance"] = dict(incoming_balance)
+    master_service._set_trading_journal_rows([workbook_row])
+
+    result = master_service._import_uploaded_trading_journal_file(
+        "oanda_demo.csv", b"x"
+    )
+
+    persisted = {
+        str(row["id"]): dict(row)
+        for row in master_service._get_trading_journal_rows()
+    }[row_id]
+    assert result["ok"] is True
+    assert result.get("duplicate_noop_fast_path_used") is not True
+    assert result["rows_upserted"] == 1
+    assert result["affected_row_ids"] == []
+    assert result["state_delta_row_ids"] == [row_id]
+    assert result["json_upsert_row_ids"] == [row_id]
+    assert calls["helper"][0]["rows"] == []
+    assert calls["sqlite"][0]["rows"] == []
+    assert persisted["raw_refs"] == {
+        "tradeId": "trade-after",
+        "orderId": "order-1",
+    }
+    assert persisted["updated_at"] != workbook_row["updated_at"]
+
+
+def test_incremental_intent_is_durable_before_json_upsert_and_rolls_back(
+    temp_state_paths,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    row_id = "oanda_export:demo:1"
+    workbook_row = _strict_oanda_row(
+        row_id,
+        net_profit=10.0,
+        balance_after_trade=1516.0,
+    )
+    incoming_row = _strict_oanda_row(
+        row_id,
+        net_profit=11.0,
+        balance_after_trade=1517.42,
+    )
+    workbook, _state, calls = _install_strict_incremental_import_harness(
+        temp_state_paths,
+        monkeypatch,
+        workbook_rows=[workbook_row],
+        incoming_rows=[incoming_row],
+        incoming_balance=_strict_oanda_balance(),
+    )
+    workbook_before = workbook.read_bytes()
+    journal_before = master_service.TRADING_JOURNAL_PATH.read_bytes()
+    observed = {}
+
+    def fail_upsert(*_args, **_kwargs):
+        observed.update(
+            json.loads(
+                master_service.TRADING_JOURNAL_DERIVED_REFRESH_STATE_PATH.read_text(
+                    encoding="utf-8"
+                )
+            )
+        )
+        raise RuntimeError("json upsert exploded")
+
+    monkeypatch.setattr(
+        master_service,
+        "_upsert_trading_journal_rows",
+        fail_upsert,
+    )
+
+    result = master_service._import_uploaded_trading_journal_file(
+        "oanda_demo.csv", b"x"
+    )
+
+    assert result["ok"] is False
+    assert observed["status"] == "queued"
+    assert observed["pending"] is True
+    assert observed["affected_row_ids"] == [row_id]
+    assert observed["intent_kind"] == "incremental_commit"
+    assert observed["incremental_recovery"]["phase"] == "prepared"
+    assert [
+        row["id"] for row in observed["incremental_recovery"]["json_rows"]
+    ] == [row_id]
+    assert [
+        row["id"] for row in observed["incremental_recovery"]["workbook_rows"]
+    ] == [row_id]
+    assert not master_service.TRADING_JOURNAL_DERIVED_REFRESH_STATE_PATH.exists()
+    assert master_service.TRADING_JOURNAL_PATH.read_bytes() == journal_before
+    assert workbook.read_bytes() == workbook_before
+    assert calls["helper"] == []
+
+
+def test_restart_replays_json_committed_incremental_intent_before_full_refresh(
+    temp_state_paths,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    row_id = "oanda_export:demo:1"
+    workbook_row = _strict_oanda_row(
+        row_id,
+        net_profit=10.0,
+        balance_after_trade=1516.0,
+    )
+    incoming_row = _strict_oanda_row(
+        row_id,
+        net_profit=11.0,
+        balance_after_trade=1517.42,
+    )
+    incoming_balance = _strict_oanda_balance()
+    workbook, state, calls = _install_strict_incremental_import_harness(
+        temp_state_paths,
+        monkeypatch,
+        workbook_rows=[workbook_row],
+        incoming_rows=[incoming_row],
+        incoming_balance=incoming_balance,
+    )
+    workbook_before = workbook.read_bytes()
+
+    class SimulatedProcessCrash(BaseException):
+        pass
+
+    monkeypatch.setattr(
+        master_service,
+        "update_master_journal_workbook_incremental",
+        lambda *_a, **_k: (_ for _ in ()).throw(SimulatedProcessCrash()),
+    )
+
+    with pytest.raises(SimulatedProcessCrash):
+        master_service._import_uploaded_trading_journal_file(
+            "oanda_demo.csv", b"x"
+        )
+
+    persisted_intent = json.loads(
+        master_service.TRADING_JOURNAL_DERIVED_REFRESH_STATE_PATH.read_text(
+            encoding="utf-8"
+        )
+    )
+    persisted_payload = json.loads(
+        master_service.TRADING_JOURNAL_PATH.read_text(encoding="utf-8")
+    )
+    persisted_rows = {
+        str(row["id"]): row for row in persisted_payload["items"]
+    }
+    assert persisted_intent["status"] == "queued"
+    assert persisted_intent["incremental_recovery"]["phase"] == "json_committed"
+    assert persisted_rows[row_id]["net_profit"] == pytest.approx(11.0)
+    assert state["rows"][0]["net_profit"] == pytest.approx(10.0)
+    assert workbook.read_bytes() == workbook_before
+
+    replay_order = []
+
+    def replay_incremental(path, changed_rows, **kwargs):
+        replay_order.append("incremental_replay")
+        rows_by_id = {str(row["id"]): dict(row) for row in state["rows"]}
+        for row in changed_rows:
+            rows_by_id[str(row["id"])] = dict(row)
+        state["rows"] = list(rows_by_id.values())
+        state["balance"] = dict(kwargs["account_balance"])
+        workbook.write_bytes(b"workbook-recovered")
+        affected_ids = sorted(str(row["id"]) for row in changed_rows)
+        return {
+            "ok": True,
+            "affected_row_ids": affected_ids,
+            "account_balance_updated": True,
+            "diagnostics": {
+                "verified_account_balance": {
+                    "balance": float(kwargs["account_balance"]["balance"]),
+                    "currency": kwargs["account_balance"]["currency"],
+                    "as_of": kwargs["account_balance"]["as_of"],
+                    "source": kwargs["account_balance"]["source"],
+                }
+            },
+        }
+
+    def full_refresh(**kwargs):
+        replay_order.append("full_refresh")
+        assert kwargs == {"sync_caller": "incremental_import_derived_refresh"}
+        assert state["rows"][0]["net_profit"] == pytest.approx(11.0)
+        json_payload = json.loads(
+            master_service.TRADING_JOURNAL_PATH.read_text(encoding="utf-8")
+        )
+        json_rows = {
+            str(row["id"]): row for row in json_payload["items"]
+        }
+        assert json_rows[row_id]["net_profit"] == pytest.approx(11.0)
+        return {"ok": True, "master_journal_ok": True}
+
+    monkeypatch.setattr(
+        master_service,
+        "update_master_journal_workbook_incremental",
+        replay_incremental,
+    )
+    monkeypatch.setattr(master_service, "_sync_master_journal_workbook", full_refresh)
+    monkeypatch.setattr(
+        master_service,
+        "_arm_trading_journal_derived_refresh_timer_locked",
+        lambda *_a, **_k: None,
+    )
+    master_service._TRADING_JOURNAL_CACHE = None
+    master_service._TRADING_JOURNAL_CACHE_KEY = None
+    with master_service.TRADING_JOURNAL_DERIVED_REFRESH_LOCK:
+        master_service.TRADING_JOURNAL_DERIVED_REFRESH_LOADED_PATH = ""
+        master_service.TRADING_JOURNAL_DERIVED_REFRESH_STATE.clear()
+        master_service.TRADING_JOURNAL_DERIVED_REFRESH_STATE.update(
+            master_service._derived_refresh_default_state()
+        )
+
+    recovered = master_service._trading_journal_derived_refresh_status_snapshot()
+    assert recovered["recovered"] is True
+    with master_service.TRADING_JOURNAL_DERIVED_REFRESH_LOCK:
+        recovered_internal = dict(
+            master_service.TRADING_JOURNAL_DERIVED_REFRESH_STATE
+        )
+        recovered_internal["not_before"] = 0.0
+        master_service._commit_trading_journal_derived_refresh_state_locked(
+            recovered_internal
+        )
+    master_service._run_trading_journal_derived_refresh_worker()
+
+    completed = dict(master_service.TRADING_JOURNAL_DERIVED_REFRESH_STATE)
+    assert replay_order == ["incremental_replay", "full_refresh"]
+    assert state["rows"][0]["net_profit"] == pytest.approx(11.0)
+    assert state["balance"]["balance"] == pytest.approx(
+        incoming_balance["balance"]
+    )
+    assert workbook.read_bytes() == b"workbook-recovered"
+    assert len(calls["sqlite"]) == 1
+    assert calls["sqlite"][0]["rows"][0]["id"] == row_id
+    assert completed["status"] == "succeeded"
+    assert completed["ok"] is True
+    assert completed["pending"] is False
+    assert completed["incremental_recovery"] is None
+
+
+def test_restart_replay_failure_cannot_report_stale_full_refresh_success(
+    temp_state_paths,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    row_id = "oanda_export:demo:1"
+    workbook_row = _strict_oanda_row(
+        row_id,
+        net_profit=10.0,
+        balance_after_trade=1516.0,
+    )
+    incoming_row = _strict_oanda_row(
+        row_id,
+        net_profit=11.0,
+        balance_after_trade=1517.42,
+    )
+    incoming_balance = _strict_oanda_balance()
+    workbook = temp_state_paths / "Trading Journal.xlsx"
+    workbook.write_bytes(b"stale-workbook")
+    monkeypatch.setattr(master_service, "_master_journal_path", lambda: workbook)
+    monkeypatch.setattr(
+        master_service,
+        "_arm_trading_journal_derived_refresh_timer_locked",
+        lambda *_a, **_k: None,
+    )
+    monkeypatch.setattr(
+        master_service,
+        "read_master_journal_source",
+        lambda _path: _current_workbook_source(
+            [workbook_row],
+            _strict_oanda_balance(1516.0),
+        ),
+    )
+    master_service._set_trading_journal_rows([incoming_row])
+    queued = master_service._queue_trading_journal_derived_refresh(
+        [row_id],
+        incremental_recovery={
+            "version": master_service.TRADING_JOURNAL_INCREMENTAL_RECOVERY_VERSION,
+            "phase": "json_committed",
+            "json_rows": [incoming_row],
+            "workbook_rows": [incoming_row],
+            "account_balance": incoming_balance,
+        },
+    )
+    assert queued["incremental_recovery"]["phase"] == "json_committed"
+
+    with master_service.TRADING_JOURNAL_DERIVED_REFRESH_LOCK:
+        master_service.TRADING_JOURNAL_DERIVED_REFRESH_LOADED_PATH = ""
+        master_service.TRADING_JOURNAL_DERIVED_REFRESH_STATE.clear()
+        master_service.TRADING_JOURNAL_DERIVED_REFRESH_STATE.update(
+            master_service._derived_refresh_default_state()
+        )
+    recovered = master_service._trading_journal_derived_refresh_status_snapshot()
+    with master_service.TRADING_JOURNAL_DERIVED_REFRESH_LOCK:
+        recovered_internal = dict(
+            master_service.TRADING_JOURNAL_DERIVED_REFRESH_STATE
+        )
+        recovered_internal["not_before"] = 0.0
+        master_service._commit_trading_journal_derived_refresh_state_locked(
+            recovered_internal
+        )
+    monkeypatch.setattr(
+        master_service,
+        "update_master_journal_workbook_incremental",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            RuntimeError("replay workbook write failed")
+        ),
+    )
+    monkeypatch.setattr(
+        master_service,
+        "_sync_master_journal_workbook",
+        lambda **_k: (_ for _ in ()).throw(
+            AssertionError("stale full refresh must not run after replay failure")
+        ),
+    )
+
+    master_service._run_trading_journal_derived_refresh_worker()
+
+    retrying = dict(master_service.TRADING_JOURNAL_DERIVED_REFRESH_STATE)
+    assert retrying["status"] == "retrying"
+    assert retrying["ok"] is None
+    assert retrying["pending"] is True
+    assert retrying["refresh_required"] is True
+    assert retrying["incremental_recovery"]["phase"] == "json_committed"
+    assert "replay workbook write failed" in str(retrying["error"])
+    assert workbook.read_bytes() == b"stale-workbook"
+
+
+@pytest.mark.parametrize(
+    "recovery_phase",
+    ["prepared", "json_committed", "workbook_committed"],
+)
+def test_terminal_recovery_failure_is_requeued_by_import_then_replays_and_unblocks(
+    temp_state_paths,
+    monkeypatch: pytest.MonkeyPatch,
+    recovery_phase: str,
+):
+    row_id = "oanda_export:demo:1"
+    workbook_row = _strict_oanda_row(
+        row_id,
+        net_profit=10.0,
+        balance_after_trade=1516.0,
+    )
+    incoming_row = _strict_oanda_row(
+        row_id,
+        net_profit=11.0,
+        balance_after_trade=1517.42,
+    )
+    incoming_balance = _strict_oanda_balance()
+    _workbook, state, calls = _install_strict_incremental_import_harness(
+        temp_state_paths,
+        monkeypatch,
+        workbook_rows=[workbook_row],
+        incoming_rows=[incoming_row],
+        incoming_balance=incoming_balance,
+    )
+    monkeypatch.setattr(
+        master_service,
+        "_arm_trading_journal_derived_refresh_timer_locked",
+        lambda *_a, **_k: None,
+    )
+    if recovery_phase in {"json_committed", "workbook_committed"}:
+        master_service._set_trading_journal_rows([incoming_row])
+    if recovery_phase == "workbook_committed":
+        state["rows"] = [dict(incoming_row)]
+        state["balance"] = dict(incoming_balance)
+
+    master_service._queue_trading_journal_derived_refresh(
+        [row_id],
+        incremental_recovery={
+            "version": master_service.TRADING_JOURNAL_INCREMENTAL_RECOVERY_VERSION,
+            "transaction_id": f"terminal-{recovery_phase}",
+            "phase": recovery_phase,
+            "json_rows": [incoming_row],
+            "workbook_rows": [incoming_row],
+            "account_balance": incoming_balance,
+        },
+    )
+    with master_service.TRADING_JOURNAL_DERIVED_REFRESH_LOCK:
+        failed = dict(master_service.TRADING_JOURNAL_DERIVED_REFRESH_STATE)
+        failed.update(
+            {
+                "status": "failed",
+                "queued": False,
+                "running": False,
+                "pending": False,
+                "refresh_required": True,
+                "ok": False,
+                "error": "retry budget exhausted",
+                "last_error": "retry budget exhausted",
+                "attempt_count": int(failed.get("max_attempts") or 3),
+                "not_before": None,
+            }
+        )
+        master_service._commit_trading_journal_derived_refresh_state_locked(
+            failed
+        )
+    retained_before = json.loads(
+        master_service.TRADING_JOURNAL_DERIVED_REFRESH_STATE_PATH.read_text(
+            encoding="utf-8"
+        )
+    )["incremental_recovery"]
+
+    blocked = master_service._import_uploaded_trading_journal_file(
+        "oanda_demo.csv", b"x"
+    )
+
+    requeued = dict(master_service.TRADING_JOURNAL_DERIVED_REFRESH_STATE)
+    retained_after = json.loads(
+        master_service.TRADING_JOURNAL_DERIVED_REFRESH_STATE_PATH.read_text(
+            encoding="utf-8"
+        )
+    )["incremental_recovery"]
+    assert blocked["ok"] is False
+    assert blocked["status_code"] == 409
+    assert blocked["code"] == "TRADING_JOURNAL_INCREMENTAL_RECOVERY_REQUEUED"
+    assert blocked["recovery_requeued"] is True
+    assert blocked["errors"] == ["recovery_requeued"]
+    assert requeued["status"] == "queued"
+    assert requeued["pending"] is True
+    assert requeued["attempt_count"] == 0
+    assert requeued["error"] is None
+    assert retained_after == retained_before
+    assert calls["helper"] == []
+    assert calls["sqlite"] == []
+
+    monkeypatch.setattr(
+        master_service,
+        "_sync_master_journal_workbook",
+        lambda **kwargs: {
+            "ok": kwargs
+            == {"sync_caller": "incremental_import_derived_refresh"},
+            "master_journal_ok": True,
+        },
+    )
+    with master_service.TRADING_JOURNAL_DERIVED_REFRESH_LOCK:
+        requeued["not_before"] = 0.0
+        master_service._commit_trading_journal_derived_refresh_state_locked(
+            requeued
+        )
+    master_service._run_trading_journal_derived_refresh_worker()
+
+    completed = dict(master_service.TRADING_JOURNAL_DERIVED_REFRESH_STATE)
+    assert completed["status"] == "succeeded"
+    assert completed["pending"] is False
+    assert completed["incremental_recovery"] is None
+    assert len(calls["helper"]) == (
+        0 if recovery_phase == "workbook_committed" else 1
+    )
+    assert len(calls["sqlite"]) == 1
+
+    allowed = master_service._import_uploaded_trading_journal_file(
+        "oanda_demo.csv", b"x"
+    )
+    assert allowed["ok"] is True
+    assert allowed["status_code"] == 200
+    assert allowed["duplicate_noop_fast_path_used"] is True
+
+
+def test_terminal_invalid_recovery_payload_remains_blocked_without_requeue(
+    temp_state_paths,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    row = _strict_oanda_row(
+        "oanda_export:demo:1",
+        net_profit=10.0,
+        balance_after_trade=1517.42,
+    )
+    _workbook, _state, calls = _install_strict_incremental_import_harness(
+        temp_state_paths,
+        monkeypatch,
+        workbook_rows=[row],
+        incoming_rows=[row],
+        incoming_balance=_strict_oanda_balance(),
+    )
+    armed = []
+    monkeypatch.setattr(
+        master_service,
+        "_arm_trading_journal_derived_refresh_timer_locked",
+        lambda *_a, **_k: armed.append(True),
+    )
+    invalid_state = {
+        **master_service._derived_refresh_default_state(),
+        "status": "failed",
+        "refresh_required": True,
+        "ok": False,
+        "error": "invalid retained payload",
+        "intent_kind": "incremental_commit",
+        "incremental_recovery": {
+            "version": 999,
+            "phase": "prepared",
+            "json_rows": [row],
+            "workbook_rows": [row],
+            "account_balance": _strict_oanda_balance(),
+        },
+    }
+    master_service.TRADING_JOURNAL_DERIVED_REFRESH_STATE_PATH.write_text(
+        json.dumps(invalid_state),
+        encoding="utf-8",
+    )
+    before = master_service.TRADING_JOURNAL_DERIVED_REFRESH_STATE_PATH.read_bytes()
+    with master_service.TRADING_JOURNAL_DERIVED_REFRESH_LOCK:
+        master_service.TRADING_JOURNAL_DERIVED_REFRESH_LOADED_PATH = ""
+        master_service.TRADING_JOURNAL_DERIVED_REFRESH_STATE.clear()
+        master_service.TRADING_JOURNAL_DERIVED_REFRESH_STATE.update(
+            master_service._derived_refresh_default_state()
+        )
+
+    result = master_service._import_uploaded_trading_journal_file(
+        "oanda_demo.csv", b"x"
+    )
+
+    assert result["ok"] is False
+    assert result["status_code"] == 409
+    assert result["code"] == "TRADING_JOURNAL_INCREMENTAL_RECOVERY_PENDING"
+    assert result.get("recovery_requeued") is not True
+    assert result["derived_refresh"]["incremental_recovery"]["phase"] == "invalid"
+    assert armed == []
+    assert master_service.TRADING_JOURNAL_DERIVED_REFRESH_STATE_PATH.read_bytes() == before
+    assert calls == {"helper": [], "sqlite": [], "full_sync": 0, "github": 0}
+
+
+def test_restart_pending_transaction_rejects_replacement_and_new_import(
+    temp_state_paths,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    row_id = "oanda_export:demo:1"
+    workbook_row = _strict_oanda_row(
+        row_id,
+        net_profit=10.0,
+        balance_after_trade=1516.0,
+    )
+    incoming_row = _strict_oanda_row(
+        row_id,
+        net_profit=11.0,
+        balance_after_trade=1517.42,
+    )
+    incoming_balance = _strict_oanda_balance()
+    _workbook, _state, calls = _install_strict_incremental_import_harness(
+        temp_state_paths,
+        monkeypatch,
+        workbook_rows=[workbook_row],
+        incoming_rows=[incoming_row],
+        incoming_balance=incoming_balance,
+    )
+    monkeypatch.setattr(
+        master_service,
+        "_arm_trading_journal_derived_refresh_timer_locked",
+        lambda *_a, **_k: None,
+    )
+    first_payload = {
+        "version": master_service.TRADING_JOURNAL_INCREMENTAL_RECOVERY_VERSION,
+        "transaction_id": "incremental-before-restart",
+        "phase": "json_committed",
+        "json_rows": [workbook_row],
+        "workbook_rows": [workbook_row],
+        "account_balance": incoming_balance,
+    }
+    master_service._queue_trading_journal_derived_refresh(
+        [row_id], incremental_recovery=first_payload
+    )
+    with master_service.TRADING_JOURNAL_DERIVED_REFRESH_LOCK:
+        master_service.TRADING_JOURNAL_DERIVED_REFRESH_LOADED_PATH = ""
+        master_service.TRADING_JOURNAL_DERIVED_REFRESH_STATE.clear()
+        master_service.TRADING_JOURNAL_DERIVED_REFRESH_STATE.update(
+            master_service._derived_refresh_default_state()
+        )
+    master_service._trading_journal_derived_refresh_status_snapshot()
+    persisted_before = (
+        master_service.TRADING_JOURNAL_DERIVED_REFRESH_STATE_PATH.read_bytes()
+    )
+    replacement_payload = {
+        **first_payload,
+        "transaction_id": "incremental-new-request",
+        "json_rows": [incoming_row],
+        "workbook_rows": [incoming_row],
+    }
+
+    with pytest.raises(RuntimeError, match="different incremental import transaction"):
+        master_service._queue_trading_journal_derived_refresh(
+            [row_id], incremental_recovery=replacement_payload
+        )
+
+    assert (
+        master_service.TRADING_JOURNAL_DERIVED_REFRESH_STATE_PATH.read_bytes()
+        == persisted_before
+    )
+    result = master_service._import_uploaded_trading_journal_file(
+        "oanda_demo.csv", b"x"
+    )
+    persisted_after = json.loads(
+        master_service.TRADING_JOURNAL_DERIVED_REFRESH_STATE_PATH.read_text(
+            encoding="utf-8"
+        )
+    )
+    assert result["ok"] is False
+    assert result["status_code"] == 409
+    assert result["code"] == "TRADING_JOURNAL_INCREMENTAL_RECOVERY_PENDING"
+    assert result["derived_refresh"]["incremental_recovery"] == {
+        "version": master_service.TRADING_JOURNAL_INCREMENTAL_RECOVERY_VERSION,
+        "transaction_id": "incremental-before-restart",
+        "phase": "json_committed",
+        "created_at": persisted_after["incremental_recovery"]["created_at"],
+        "phase_updated_at": persisted_after["incremental_recovery"][
+            "phase_updated_at"
+        ],
+        "json_row_count": 1,
+        "json_row_ids": [row_id],
+        "workbook_row_count": 1,
+        "workbook_row_ids": [row_id],
+    }
+    assert "json_rows" not in result["derived_refresh"]["incremental_recovery"]
+    assert persisted_after["incremental_recovery"]["transaction_id"] == (
+        "incremental-before-restart"
+    )
+    assert persisted_after["incremental_recovery"]["json_rows"] == [
+        master_service._json_safe(workbook_row)
+    ]
+    assert calls == {"helper": [], "sqlite": [], "full_sync": 0, "github": 0}
+
+
+def test_status_redacts_staged_recovery_payload_but_disk_retains_it(
+    temp_state_paths,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    row = {
+        **_strict_oanda_row(
+            "oanda_export:demo:1",
+            net_profit=11.0,
+            balance_after_trade=1517.42,
+        ),
+        "notes": "private-staged-note",
+    }
+    balance = {**_strict_oanda_balance(), "private_marker": "secret-balance"}
+    monkeypatch.setattr(
+        master_service,
+        "_arm_trading_journal_derived_refresh_timer_locked",
+        lambda *_a, **_k: None,
+    )
+    master_service._queue_trading_journal_derived_refresh(
+        [row["id"]],
+        incremental_recovery={
+            "version": master_service.TRADING_JOURNAL_INCREMENTAL_RECOVERY_VERSION,
+            "transaction_id": "incremental-redaction",
+            "phase": "prepared",
+            "json_rows": [row],
+            "workbook_rows": [row],
+            "account_balance": balance,
+        },
+    )
+
+    status = master_service._trading_journal_derived_refresh_status_snapshot()
+    persisted = json.loads(
+        master_service.TRADING_JOURNAL_DERIVED_REFRESH_STATE_PATH.read_text(
+            encoding="utf-8"
+        )
+    )
+    summary = status["incremental_recovery"]
+    assert set(summary) == {
+        "version",
+        "transaction_id",
+        "phase",
+        "created_at",
+        "phase_updated_at",
+        "json_row_count",
+        "json_row_ids",
+        "workbook_row_count",
+        "workbook_row_ids",
+    }
+    assert summary["transaction_id"] == "incremental-redaction"
+    assert summary["json_row_ids"] == [row["id"]]
+    assert summary["workbook_row_ids"] == [row["id"]]
+    assert "private-staged-note" not in json.dumps(status)
+    assert "secret-balance" not in json.dumps(status)
+    assert len(json.dumps(status).encode("utf-8")) < 4096
+    assert persisted["incremental_recovery"]["json_rows"][0]["notes"] == (
+        "private-staged-note"
+    )
+    assert persisted["incremental_recovery"]["account_balance"][
+        "private_marker"
+    ] == "secret-balance"
+
+
+def test_safe_helper_ineligible_keeps_intent_until_inline_full_sync_succeeds(
+    temp_state_paths,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    row_id = "oanda_export:demo:1"
+    workbook_row = _strict_oanda_row(
+        row_id,
+        net_profit=10.0,
+        balance_after_trade=1516.0,
+    )
+    incoming_row = _strict_oanda_row(
+        row_id,
+        net_profit=11.0,
+        balance_after_trade=1517.42,
+    )
+    incoming_balance = _strict_oanda_balance()
+    helper_error = master_service.IncrementalWorkbookUpdateNotEligible(
+        "recognized generated range needs a full refresh"
+    )
+    workbook, state, calls = _install_strict_incremental_import_harness(
+        temp_state_paths,
+        monkeypatch,
+        workbook_rows=[workbook_row],
+        incoming_rows=[incoming_row],
+        incoming_balance=incoming_balance,
+        helper_error=helper_error,
+    )
+    observations = []
+
+    def fake_snapshot(**_kwargs):
+        return {
+            "items": [dict(row) for row in master_service._get_trading_journal_rows()],
+            "balances": [dict(incoming_balance)],
+            "stats": {},
+        }
+
+    def fake_full_sync(**_kwargs):
+        refresh = dict(master_service.TRADING_JOURNAL_DERIVED_REFRESH_STATE)
+        observations.append(("full_sync", refresh["status"], refresh["pending"]))
+        assert refresh["status"] == "queued"
+        assert refresh["pending"] is True
+        state["rows"] = [dict(incoming_row)]
+        state["balance"] = dict(incoming_balance)
+        workbook.write_bytes(b"full-workbook-after")
+        return {"ok": True, "master_journal_ok": True}
+
+    def fake_github(*_args, **_kwargs):
+        refresh = dict(master_service.TRADING_JOURNAL_DERIVED_REFRESH_STATE)
+        observations.append(("github", refresh["status"], refresh["pending"]))
+        assert refresh["status"] == "queued"
+        assert refresh["pending"] is True
+        return {
+            "github_sync_enabled": False,
+            "github_sync_ok": True,
+            "github_sync_noop": True,
+            "github_sync_error": "",
+            "github_sync_commit": "",
+        }
+
+    monkeypatch.setattr(
+        master_service,
+        "_build_manual_import_authoritative_snapshot",
+        fake_snapshot,
+    )
+    monkeypatch.setattr(master_service, "_sync_master_journal_workbook", fake_full_sync)
+    monkeypatch.setattr(
+        master_service,
+        "_verify_trade_log_row_ids_in_workbook",
+        lambda *_a, **_k: {
+            "ok": True,
+            "found_row_ids_count": 1,
+            "missing_row_ids": [],
+        },
+    )
+    monkeypatch.setattr(
+        master_service,
+        "_verify_imported_account_balance_snapshot",
+        lambda *_a, **_k: {
+            "ok": True,
+            "balance_applied": True,
+            "snapshot_visible": True,
+            "expected_balance": incoming_balance["balance"],
+            "actual_balance": incoming_balance["balance"],
+            "expected_source": incoming_balance["source"],
+            "actual_source": incoming_balance["source"],
+        },
+    )
+    monkeypatch.setattr(master_service, "_persist_trading_journal_sqlite", lambda *_a, **_k: None)
+    monkeypatch.setattr(master_service, "_sync_journal_excel_files_to_github", fake_github)
+
+    result = master_service._import_uploaded_trading_journal_file(
+        "oanda_demo.csv", b"x"
+    )
+
+    assert result["ok"] is True
+    assert result["incremental_workbook_update_used"] is False
+    assert "workbook_helper_ineligible" in result["incremental_fallback_reason"]
+    assert observations == [
+        ("full_sync", "queued", True),
+        ("github", "queued", True),
+    ]
+    completed = json.loads(
+        master_service.TRADING_JOURNAL_DERIVED_REFRESH_STATE_PATH.read_text(
+            encoding="utf-8"
+        )
+    )
+    assert completed["status"] == "succeeded"
+    assert completed["pending"] is False
+    assert completed["completed_generation"] == completed["generation"] == 1
+    assert calls["helper"]
+
+
+def test_unsafe_helper_ineligible_refuses_full_fallback_and_rolls_back(
+    temp_state_paths,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    row_id = "oanda_export:demo:1"
+    workbook_row = _strict_oanda_row(
+        row_id,
+        net_profit=10.0,
+        balance_after_trade=1516.0,
+    )
+    incoming_row = _strict_oanda_row(
+        row_id,
+        net_profit=11.0,
+        balance_after_trade=1517.42,
+    )
+    helper_error = master_service.IncrementalWorkbookUpdateNotEligible(
+        "unrecognized workbook-owned validation"
+    )
+    helper_error.unsafe_full_rebuild = True
+    workbook, _state, calls = _install_strict_incremental_import_harness(
+        temp_state_paths,
+        monkeypatch,
+        workbook_rows=[workbook_row],
+        incoming_rows=[incoming_row],
+        incoming_balance=_strict_oanda_balance(),
+        helper_error=helper_error,
+    )
+    workbook_before = workbook.read_bytes()
+    journal_before = master_service.TRADING_JOURNAL_PATH.read_bytes()
+
+    result = master_service._import_uploaded_trading_journal_file(
+        "oanda_demo.csv", b"x"
+    )
+
+    assert result["ok"] is False
+    assert "full rebuild could discard workbook-owned content" in result["message"]
+    assert calls["full_sync"] == 0
+    assert not master_service.TRADING_JOURNAL_DERIVED_REFRESH_STATE_PATH.exists()
+    assert master_service.TRADING_JOURNAL_PATH.read_bytes() == journal_before
+    assert workbook.read_bytes() == workbook_before
+
+
+def test_oanda_balance_only_change_uses_incremental_workbook_update(
+    temp_state_paths,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    workbook_row = _strict_oanda_row(
+        "oanda_export:demo:1",
+        net_profit=10.0,
+        balance_after_trade=1516.0,
+    )
+    incoming_balance = _strict_oanda_balance(1517.42)
+    _workbook, _state, calls = _install_strict_incremental_import_harness(
+        temp_state_paths,
+        monkeypatch,
+        workbook_rows=[workbook_row],
+        incoming_rows=[],
+        incoming_balance=incoming_balance,
+    )
+
+    result = master_service._import_uploaded_trading_journal_file(
+        "oanda_demo.csv", b"x"
+    )
+
+    assert result["ok"] is True
+    assert result["incremental_workbook_update_used"] is True
+    assert result["rows_parsed"] == 0
+    assert result["affected_row_ids"] == []
+    assert result["message"].startswith("The Oanda account balance was saved")
+    assert calls["helper"][0]["rows"] == []
+    assert calls["sqlite"][0]["rows"] == []
+    assert calls["full_sync"] == 0
+
+
+def test_uploaded_noop_ignores_workbook_manual_result_fields(
+    temp_state_paths,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    row_id = "oanda_export:demo:1"
+    workbook_row = {
+        **_strict_oanda_row(
+            row_id,
+            net_profit=10.0,
+            balance_after_trade=1517.42,
+        ),
+        "result_pct": -0.75,
+        "r_multiple": -1.25,
+    }
+    incoming_row = {
+        **_strict_oanda_row(
+            row_id,
+            net_profit=10.0,
+            balance_after_trade=1517.42,
+        ),
+        "result_pct": 99.0,
+        "r_multiple": 42.0,
+    }
+    incoming_balance = _strict_oanda_balance()
+    _workbook, state, calls = _install_strict_incremental_import_harness(
+        temp_state_paths,
+        monkeypatch,
+        workbook_rows=[workbook_row],
+        incoming_rows=[incoming_row],
+        incoming_balance=incoming_balance,
+    )
+    state["balance"] = dict(incoming_balance)
+
+    result = master_service._import_uploaded_trading_journal_file(
+        "oanda_demo.csv", b"x"
+    )
+
+    assert result["ok"] is True
+    assert result["duplicate_noop_fast_path_used"] is True
+    assert calls["helper"] == []
+    assert calls["sqlite"] == []
+
+
+def test_balance_only_incremental_hydrates_manual_result_fields_without_full_fallback(
+    temp_state_paths,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    row_id = "oanda_export:demo:1"
+    workbook_row = {
+        **_strict_oanda_row(
+            row_id,
+            net_profit=10.0,
+            balance_after_trade=1516.0,
+        ),
+        "result_pct": -0.75,
+        "r_multiple": -1.25,
+    }
+    stale_runtime_row = {
+        **workbook_row,
+        "result_pct": 99.0,
+        "r_multiple": 42.0,
+    }
+    incoming_balance = _strict_oanda_balance()
+    _workbook, _state, calls = _install_strict_incremental_import_harness(
+        temp_state_paths,
+        monkeypatch,
+        workbook_rows=[workbook_row],
+        incoming_rows=[],
+        incoming_balance=incoming_balance,
+    )
+    master_service._set_trading_journal_rows([stale_runtime_row])
+
+    result = master_service._import_uploaded_trading_journal_file(
+        "oanda_demo.csv", b"x"
+    )
+
+    assert result["ok"] is True
+    assert result["incremental_workbook_update_used"] is True
+    assert result["affected_row_ids"] == []
+    assert calls["helper"][0]["rows"] == []
+    assert calls["full_sync"] == 0
+    persisted = {
+        str(row.get("id")): row
+        for row in master_service._get_trading_journal_rows()
+    }
+    assert persisted[row_id]["result_pct"] == pytest.approx(-0.75)
+    assert persisted[row_id]["r_multiple"] == pytest.approx(-1.25)
+
+
+def test_identical_noop_requeues_terminal_failed_derived_refresh(
+    temp_state_paths,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    row = _strict_oanda_row(
+        "oanda_export:demo:1",
+        net_profit=10.0,
+        balance_after_trade=1517.42,
+    )
+    incoming_balance = _strict_oanda_balance()
+    _workbook, state, calls = _install_strict_incremental_import_harness(
+        temp_state_paths,
+        monkeypatch,
+        workbook_rows=[row],
+        incoming_rows=[row],
+        incoming_balance=incoming_balance,
+    )
+    state["balance"] = dict(incoming_balance)
+    monkeypatch.setattr(
+        master_service,
+        "_arm_trading_journal_derived_refresh_timer_locked",
+        lambda *_a, **_k: None,
+    )
+    with master_service.TRADING_JOURNAL_DERIVED_REFRESH_LOCK:
+        failed = {
+            **master_service._derived_refresh_default_state(),
+            "status": "failed",
+            "refresh_required": True,
+            "ok": False,
+            "error": "terminal refresh failure",
+            "generation": 4,
+            "completed_generation": 3,
+            "affected_row_ids": [row["id"]],
+        }
+        master_service._commit_trading_journal_derived_refresh_state_locked(
+            failed
+        )
+        master_service.TRADING_JOURNAL_DERIVED_REFRESH_LOADED_PATH = str(
+            master_service.TRADING_JOURNAL_DERIVED_REFRESH_STATE_PATH
+        )
+
+    result = master_service._import_uploaded_trading_journal_file(
+        "oanda_demo.csv", b"x"
+    )
+
+    assert result["ok"] is True
+    assert result["duplicate_noop_fast_path_used"] is True
+    assert result["derived_refresh"]["status"] == "queued"
+    assert result["derived_refresh"]["generation"] == 5
+    assert result["derived_refresh"]["pending"] is True
+    assert result["github_sync_deferred"] is True
+    assert result["github_sync_skipped"] is False
+    assert "still queued" in result["message"]
+    assert calls["helper"] == []
+
+
+def test_incremental_import_failure_restores_workbook_json_pending_and_cache(
+    temp_state_paths,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    row_id = "oanda_export:demo:1"
+    workbook_row = _strict_oanda_row(
+        row_id,
+        net_profit=10.0,
+        balance_after_trade=1516.0,
+    )
+    incoming_row = _strict_oanda_row(
+        row_id,
+        net_profit=11.0,
+        balance_after_trade=1517.42,
+    )
+    workbook, _state, calls = _install_strict_incremental_import_harness(
+        temp_state_paths,
+        monkeypatch,
+        workbook_rows=[workbook_row],
+        incoming_rows=[incoming_row],
+        incoming_balance=_strict_oanda_balance(),
+        helper_error=RuntimeError("incremental save exploded"),
+    )
+    cache_bytes = b'{"cache_version":999,"sentinel":true}'
+    master_service.TRADING_JOURNAL_VIEW_CACHE_PATH.write_bytes(cache_bytes)
+    master_service._TRADING_JOURNAL_VIEW_CACHE.update(
+        {"key": "snapshot", "payload": {"sentinel": True}}
+    )
+    master_service._PENDING_MANUAL_SYNC_ROWS = [{"id": "pending-before"}]
+    master_service._PENDING_MANUAL_SYNC_BALANCES = [
+        {"label": "PENDING BEFORE", "balance": 5.0}
+    ]
+    workbook_before = workbook.read_bytes()
+    journal_before = master_service.TRADING_JOURNAL_PATH.read_bytes()
+
+    result = master_service._import_uploaded_trading_journal_file(
+        "oanda_demo.csv", b"x"
+    )
+
+    assert result["ok"] is False
+    assert result["rollback_restored"] is True
+    assert workbook.read_bytes() == workbook_before
+    assert master_service.TRADING_JOURNAL_PATH.read_bytes() == journal_before
+    assert master_service.TRADING_JOURNAL_VIEW_CACHE_PATH.read_bytes() == cache_bytes
+    assert master_service._TRADING_JOURNAL_VIEW_CACHE == {
+        "key": "snapshot",
+        "payload": {"sentinel": True},
+    }
+    assert master_service._PENDING_MANUAL_SYNC_ROWS == [{"id": "pending-before"}]
+    assert master_service._PENDING_MANUAL_SYNC_BALANCES == [
+        {"label": "PENDING BEFORE", "balance": 5.0}
+    ]
+    assert not master_service.TRADING_JOURNAL_DERIVED_REFRESH_STATE_PATH.exists()
+    assert calls["sqlite"] == []
+    assert calls["github"] == 0
+
+
+def test_post_sqlite_phase_failure_preserves_coherent_commit_for_recovery(
+    temp_state_paths,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    row_id = "oanda_export:demo:1"
+    workbook_row = _strict_oanda_row(
+        row_id,
+        net_profit=10.0,
+        balance_after_trade=1516.0,
+    )
+    incoming_row = _strict_oanda_row(
+        row_id,
+        net_profit=11.0,
+        balance_after_trade=1517.42,
+    )
+    incoming_balance = _strict_oanda_balance()
+    workbook, state, calls = _install_strict_incremental_import_harness(
+        temp_state_paths,
+        monkeypatch,
+        workbook_rows=[workbook_row],
+        incoming_rows=[incoming_row],
+        incoming_balance=incoming_balance,
+    )
+    original_set_phase = (
+        master_service._set_trading_journal_incremental_recovery_phase
+    )
+
+    def fail_after_sqlite(phase):
+        if phase == "incremental_committed":
+            raise RuntimeError("post-sqlite phase write failed")
+        return original_set_phase(phase)
+
+    monkeypatch.setattr(
+        master_service,
+        "_set_trading_journal_incremental_recovery_phase",
+        fail_after_sqlite,
+    )
+
+    result = master_service._import_uploaded_trading_journal_file(
+        "oanda_demo.csv", b"x"
+    )
+
+    persisted_payload = json.loads(
+        master_service.TRADING_JOURNAL_PATH.read_text(encoding="utf-8")
+    )
+    persisted_rows = {
+        str(row["id"]): row for row in persisted_payload["items"]
+    }
+    durable_state = json.loads(
+        master_service.TRADING_JOURNAL_DERIVED_REFRESH_STATE_PATH.read_text(
+            encoding="utf-8"
+        )
+    )
+    assert result["ok"] is True
+    assert "post-sqlite phase write failed" in " ".join(result["warnings"])
+    assert workbook.read_bytes() == b"workbook-after"
+    assert state["rows"][0]["net_profit"] == pytest.approx(11.0)
+    assert persisted_rows[row_id]["net_profit"] == pytest.approx(11.0)
+    assert len(calls["sqlite"]) == 1
+    assert calls["sqlite"][0]["rows"][0]["net_profit"] == pytest.approx(11.0)
+    assert durable_state["incremental_recovery"]["phase"] == (
+        "workbook_committed"
+    )
+    assert result["derived_refresh"]["incremental_recovery"]["phase"] == (
+        "workbook_committed"
+    )
+
+    monkeypatch.setattr(
+        master_service,
+        "_set_trading_journal_incremental_recovery_phase",
+        original_set_phase,
+    )
+    monkeypatch.setattr(
+        master_service,
+        "_arm_trading_journal_derived_refresh_timer_locked",
+        lambda *_a, **_k: None,
+    )
+    monkeypatch.setattr(
+        master_service,
+        "_sync_master_journal_workbook",
+        lambda **_k: {"ok": True, "master_journal_ok": True},
+    )
+    with master_service.TRADING_JOURNAL_DERIVED_REFRESH_LOCK:
+        master_service.TRADING_JOURNAL_DERIVED_REFRESH_LOADED_PATH = ""
+        master_service.TRADING_JOURNAL_DERIVED_REFRESH_STATE.clear()
+        master_service.TRADING_JOURNAL_DERIVED_REFRESH_STATE.update(
+            master_service._derived_refresh_default_state()
+        )
+    recovered = master_service._trading_journal_derived_refresh_status_snapshot()
+    with master_service.TRADING_JOURNAL_DERIVED_REFRESH_LOCK:
+        recovered_internal = dict(master_service.TRADING_JOURNAL_DERIVED_REFRESH_STATE)
+        recovered_internal["not_before"] = 0.0
+        master_service._commit_trading_journal_derived_refresh_state_locked(
+            recovered_internal
+        )
+    master_service._run_trading_journal_derived_refresh_worker()
+
+    completed = dict(master_service.TRADING_JOURNAL_DERIVED_REFRESH_STATE)
+    assert recovered["incremental_recovery"]["phase"] == "workbook_committed"
+    assert len(calls["helper"]) == 1
+    assert len(calls["sqlite"]) == 2
+    assert completed["status"] == "succeeded"
+    assert completed["incremental_recovery"] is None
+
+
+def test_incremental_failure_cannot_restore_over_concurrent_workbook_writer(
+    temp_state_paths,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    row_id = "oanda_export:demo:1"
+    workbook_row = _strict_oanda_row(
+        row_id,
+        net_profit=10.0,
+        balance_after_trade=1516.0,
+    )
+    incoming_row = _strict_oanda_row(
+        row_id,
+        net_profit=11.0,
+        balance_after_trade=1517.42,
+    )
+    workbook, _state, _calls = _install_strict_incremental_import_harness(
+        temp_state_paths,
+        monkeypatch,
+        workbook_rows=[workbook_row],
+        incoming_rows=[incoming_row],
+        incoming_balance=_strict_oanda_balance(),
+        helper_error=RuntimeError("incremental save exploded"),
+    )
+    upsert_reached = threading.Event()
+    writer_attempted = threading.Event()
+    import_finished = threading.Event()
+    writer_observation = {}
+    original_upsert = master_service._upsert_trading_journal_rows
+
+    def blocked_upsert(*args, **kwargs):
+        result = original_upsert(*args, **kwargs)
+        upsert_reached.set()
+        assert writer_attempted.wait(timeout=5.0)
+        return result
+
+    monkeypatch.setattr(
+        master_service,
+        "_upsert_trading_journal_rows",
+        blocked_upsert,
+    )
+
+    def concurrent_writer():
+        assert upsert_reached.wait(timeout=5.0)
+        first = master_service._reserve_master_journal_workbook_sync(
+            workbook,
+            "concurrent-writer-first",
+            "test_concurrent_writer",
+        )
+        writer_observation["first_rejected"] = first is not None
+        if first is None:
+            try:
+                workbook.write_bytes(b"concurrent-success")
+            finally:
+                master_service._release_master_journal_workbook_sync()
+        writer_attempted.set()
+        if first is not None:
+            assert import_finished.wait(timeout=10.0)
+            retry = master_service._reserve_master_journal_workbook_sync(
+                workbook,
+                "concurrent-writer-retry",
+                "test_concurrent_writer",
+            )
+            writer_observation["retry_rejected"] = retry is not None
+            if retry is None:
+                try:
+                    workbook.write_bytes(b"concurrent-success")
+                finally:
+                    master_service._release_master_journal_workbook_sync()
+
+    writer = threading.Thread(target=concurrent_writer, daemon=True)
+    writer.start()
+    try:
+        result = master_service._import_uploaded_trading_journal_file(
+            "oanda_demo.csv", b"x"
+        )
+    finally:
+        import_finished.set()
+        writer.join(timeout=10.0)
+
+    assert not writer.is_alive()
+    assert result["ok"] is False
+    assert writer_observation == {
+        "first_rejected": True,
+        "retry_rejected": False,
+    }
+    assert workbook.read_bytes() == b"concurrent-success"
+
+
+def test_incremental_sqlite_persistence_updates_only_affected_rows_and_metadata(
+    temp_state_paths,
+):
+    unaffected = _strict_oanda_row(
+        "oanda_export:demo:1",
+        net_profit=1.0,
+        balance_after_trade=1501.0,
+    )
+    changed = _strict_oanda_row(
+        "oanda_export:demo:2",
+        net_profit=2.0,
+        balance_after_trade=1503.0,
+    )
+    new_row = _strict_oanda_row(
+        "oanda_export:demo:3",
+        net_profit=3.0,
+        balance_after_trade=1506.0,
+    )
+    conn = sqlite3.connect(master_service.TRADING_JOURNAL_SQLITE_PATH)
+    master_service._ensure_trading_journal_sqlite_schema(conn)
+    conn.execute(
+        "INSERT INTO journal_trades(id,payload_json,imported_at) VALUES(?,?,?)",
+        (unaffected["id"], json.dumps(unaffected), "before"),
+    )
+    conn.execute(
+        "INSERT INTO journal_metrics(id,payload_json,imported_at) VALUES(?,?,?)",
+        (unaffected["id"], json.dumps({"sentinel": True}), "before"),
+    )
+    conn.commit()
+    conn.close()
+    refresh_state = {
+        "status": "queued",
+        "pending": True,
+        "generation": 7,
+        "affected_row_ids": [changed["id"], new_row["id"]],
+    }
+
+    master_service._persist_trading_journal_sqlite_incremental(
+        [changed, new_row],
+        _strict_oanda_balance(1506.0),
+        import_meta={"source_mode": "manual_upload_incremental"},
+        derived_refresh_state=refresh_state,
+    )
+
+    conn = sqlite3.connect(master_service.TRADING_JOURNAL_SQLITE_PATH)
+    trade_rows = {
+        row_id: (json.loads(payload), imported_at)
+        for row_id, payload, imported_at in conn.execute(
+            "SELECT id,payload_json,imported_at FROM journal_trades"
+        ).fetchall()
+    }
+    metric_rows = {
+        row_id: json.loads(payload)
+        for row_id, payload in conn.execute(
+            "SELECT id,payload_json FROM journal_metrics"
+        ).fetchall()
+    }
+    balance_payload = json.loads(
+        conn.execute(
+            "SELECT payload_json FROM journal_balances WHERE account_key=?",
+            (master_service._norm_account_key("OANDA DEMO"),),
+        ).fetchone()[0]
+    )
+    metadata = json.loads(
+        conn.execute(
+            "SELECT metadata_json FROM import_runs ORDER BY id DESC LIMIT 1"
+        ).fetchone()[0]
+    )
+    conn.close()
+
+    assert trade_rows[unaffected["id"]][1] == "before"
+    assert trade_rows[unaffected["id"]][0]["net_profit"] == 1.0
+    assert trade_rows[changed["id"]][0]["net_profit"] == 2.0
+    assert trade_rows[new_row["id"]][0]["net_profit"] == 3.0
+    assert metric_rows[unaffected["id"]] == {"sentinel": True}
+    assert balance_payload["balance"] == 1506.0
+    assert metadata["derived_refresh_pending"] is True
+    assert metadata["derived_refresh"]["generation"] == 7
+    assert metadata["affected_row_ids"] == [changed["id"], new_row["id"]]
+
+
+def test_derived_refresh_queue_is_durable_coalesced_and_drops_completed_ids(
+    temp_state_paths,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(
+        master_service,
+        "_arm_trading_journal_derived_refresh_timer_locked",
+        lambda *_a, **_k: None,
+    )
+
+    first = master_service._queue_trading_journal_derived_refresh(["row:a"])
+    second = master_service._queue_trading_journal_derived_refresh(["row:b"])
+
+    persisted = json.loads(
+        master_service.TRADING_JOURNAL_DERIVED_REFRESH_STATE_PATH.read_text(
+            encoding="utf-8"
+        )
+    )
+    assert first["generation"] == 1
+    assert second["generation"] == 2
+    assert second["affected_row_ids"] == ["row:a", "row:b"]
+    assert persisted["status"] == "queued"
+    assert persisted["pending"] is True
+    assert persisted["affected_row_ids"] == ["row:a", "row:b"]
+
+    with master_service.TRADING_JOURNAL_DERIVED_REFRESH_LOCK:
+        master_service._commit_trading_journal_derived_refresh_state_locked(
+            {
+                **second,
+                "status": "succeeded",
+                "queued": False,
+                "running": False,
+                "pending": False,
+                "refresh_required": False,
+                "ok": True,
+            }
+        )
+    third = master_service._queue_trading_journal_derived_refresh(["row:c"])
+    assert third["generation"] == 3
+    assert third["affected_row_ids"] == ["row:c"]
+
+
+def test_derived_refresh_status_recovers_persisted_running_state(
+    temp_state_paths,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    master_service.TRADING_JOURNAL_DERIVED_REFRESH_STATE_PATH.write_text(
+        json.dumps(
+            {
+                "status": "running",
+                "running": True,
+                "pending": True,
+                "generation": 4,
+                "affected_row_ids": ["row:a"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    master_service.TRADING_JOURNAL_DERIVED_REFRESH_LOADED_PATH = ""
+    armed = []
+    monkeypatch.setattr(
+        master_service,
+        "_arm_trading_journal_derived_refresh_timer_locked",
+        lambda *_a, **_k: armed.append(True),
+    )
+
+    status = master_service._trading_journal_derived_refresh_status_snapshot()
+
+    assert status["status"] == "queued"
+    assert status["queued"] is True
+    assert status["running"] is False
+    assert status["pending"] is True
+    assert status["recovered"] is True
+    assert status["generation"] == 4
+    assert armed
+
+
+def test_derived_refresh_worker_reruns_when_new_generation_arrives(
+    temp_state_paths,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(
+        master_service,
+        "_arm_trading_journal_derived_refresh_timer_locked",
+        lambda *_a, **_k: None,
+    )
+    master_service._queue_trading_journal_derived_refresh(["row:a"])
+    with master_service.TRADING_JOURNAL_DERIVED_REFRESH_LOCK:
+        state = dict(master_service.TRADING_JOURNAL_DERIVED_REFRESH_STATE)
+        state["not_before"] = 0.0
+        master_service._commit_trading_journal_derived_refresh_state_locked(state)
+    calls = []
+
+    def fake_sync(**kwargs):
+        calls.append(dict(kwargs))
+        if len(calls) == 1:
+            running = dict(master_service.TRADING_JOURNAL_DERIVED_REFRESH_STATE)
+            assert running["status"] == "running"
+            master_service._queue_trading_journal_derived_refresh(["row:b"])
+        return {"ok": True}
+
+    monkeypatch.setattr(master_service, "_sync_master_journal_workbook", fake_sync)
+    master_service._run_trading_journal_derived_refresh_worker()
+    after_first = dict(master_service.TRADING_JOURNAL_DERIVED_REFRESH_STATE)
+    assert after_first["status"] == "queued"
+    assert after_first["affected_row_ids"] == ["row:a", "row:b"]
+    with master_service.TRADING_JOURNAL_DERIVED_REFRESH_LOCK:
+        after_first["not_before"] = 0.0
+        master_service._commit_trading_journal_derived_refresh_state_locked(
+            after_first
+        )
+    master_service._run_trading_journal_derived_refresh_worker()
+    completed = dict(master_service.TRADING_JOURNAL_DERIVED_REFRESH_STATE)
+
+    assert len(calls) == 2
+    assert calls == [
+        {"sync_caller": "incremental_import_derived_refresh"},
+        {"sync_caller": "incremental_import_derived_refresh"},
+    ]
+    assert completed["status"] == "succeeded"
+    assert completed["ok"] is True
+    assert completed["pending"] is False
+    assert completed["completed_generation"] == 2
+    assert completed["affected_row_ids"] == ["row:a", "row:b"]
+
+
+def test_derived_refresh_worker_retries_then_persists_terminal_failure_state(
+    temp_state_paths,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(
+        master_service,
+        "TRADING_JOURNAL_DERIVED_REFRESH_MAX_ATTEMPTS",
+        2,
+    )
+    monkeypatch.setattr(
+        master_service,
+        "TRADING_JOURNAL_DERIVED_REFRESH_RETRY_BASE_SECONDS",
+        0.25,
+    )
+    armed = []
+    monkeypatch.setattr(
+        master_service,
+        "_arm_trading_journal_derived_refresh_timer_locked",
+        lambda delay=None: armed.append(delay),
+    )
+    master_service._queue_trading_journal_derived_refresh(["row:a"])
+    with master_service.TRADING_JOURNAL_DERIVED_REFRESH_LOCK:
+        state = dict(master_service.TRADING_JOURNAL_DERIVED_REFRESH_STATE)
+        state["not_before"] = 0.0
+        master_service._commit_trading_journal_derived_refresh_state_locked(state)
+    monkeypatch.setattr(
+        master_service,
+        "_sync_master_journal_workbook",
+        lambda **_k: (_ for _ in ()).throw(RuntimeError("refresh exploded")),
+    )
+
+    master_service._run_trading_journal_derived_refresh_worker()
+
+    retrying = dict(master_service.TRADING_JOURNAL_DERIVED_REFRESH_STATE)
+    assert retrying["status"] == "retrying"
+    assert retrying["queued"] is True
+    assert retrying["pending"] is True
+    assert retrying["attempt_count"] == 1
+    assert armed[-1] == pytest.approx(0.25)
+
+    with master_service.TRADING_JOURNAL_DERIVED_REFRESH_LOCK:
+        retrying["not_before"] = 0.0
+        master_service._commit_trading_journal_derived_refresh_state_locked(
+            retrying
+        )
+    master_service._run_trading_journal_derived_refresh_worker()
+
+    failed = dict(master_service.TRADING_JOURNAL_DERIVED_REFRESH_STATE)
+    persisted = json.loads(
+        master_service.TRADING_JOURNAL_DERIVED_REFRESH_STATE_PATH.read_text(
+            encoding="utf-8"
+        )
+    )
+    assert failed["status"] == "failed"
+    assert failed["ok"] is False
+    assert failed["pending"] is False
+    assert failed["refresh_required"] is True
+    assert failed["attempt_count"] == 2
+    assert "refresh exploded" in str(failed["error"])
+    assert persisted["status"] == "failed"
+
+
+def test_derived_refresh_worker_rearms_instead_of_waiting_on_active_import(
+    temp_state_paths,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    armed = []
+    monkeypatch.setattr(
+        master_service,
+        "_arm_trading_journal_derived_refresh_timer_locked",
+        lambda delay=None: armed.append(delay),
+    )
+    master_service._queue_trading_journal_derived_refresh(["row:a"])
+    armed.clear()
+    monkeypatch.setattr(
+        master_service,
+        "_sync_master_journal_workbook",
+        lambda **_k: (_ for _ in ()).throw(
+            AssertionError("worker must not race an active import")
+        ),
+    )
+    assert master_service.TRADING_JOURNAL_IMPORT_LOCK.acquire(blocking=False)
+    try:
+        master_service._run_trading_journal_derived_refresh_worker()
+    finally:
+        master_service.TRADING_JOURNAL_IMPORT_LOCK.release()
+
+    state = dict(master_service.TRADING_JOURNAL_DERIVED_REFRESH_STATE)
+    assert state["status"] == "queued"
+    assert state["pending"] is True
+    assert armed == [master_service.TRADING_JOURNAL_DERIVED_REFRESH_DEBOUNCE_SECONDS]
+
+
+def test_derived_refresh_import_lock_retry_has_positive_delay_at_zero_debounce(
+    temp_state_paths,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(
+        master_service,
+        "TRADING_JOURNAL_DERIVED_REFRESH_DEBOUNCE_SECONDS",
+        0.0,
+    )
+    monkeypatch.setattr(
+        master_service,
+        "TRADING_JOURNAL_DERIVED_REFRESH_IMPORT_LOCK_RETRY_SECONDS",
+        0.2,
+    )
+    armed = []
+    monkeypatch.setattr(
+        master_service,
+        "_arm_trading_journal_derived_refresh_timer_locked",
+        lambda delay=None: armed.append(delay),
+    )
+    master_service._queue_trading_journal_derived_refresh(["row:a"])
+    armed.clear()
+    assert master_service.TRADING_JOURNAL_IMPORT_LOCK.acquire(blocking=False)
+    try:
+        master_service._run_trading_journal_derived_refresh_worker()
+    finally:
+        master_service.TRADING_JOURNAL_IMPORT_LOCK.release()
+
+    assert armed == [pytest.approx(0.2)]
+    assert armed[0] > 0.0
+
+
+def test_trading_journal_items_reuses_pending_derived_refresh_instead_of_equity_job(
+    temp_state_paths,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    master_service._TRADING_JOURNAL_VIEW_CACHE.update(
+        {"key": "snapshot", "payload": {"items": [], "stats": {}, "balances": []}}
+    )
+    monkeypatch.setattr(master_service, "_journal_source_fingerprint", lambda: {"v": 2})
+    monkeypatch.setattr(
+        master_service,
+        "_trading_journal_snapshot_freshness",
+        lambda *_a, **_k: {"current": False, "reasons": ["journal_changed"]},
+    )
+    derived = {
+        "status": "queued",
+        "queued": True,
+        "running": False,
+        "pending": True,
+        "generation": 3,
+    }
+    monkeypatch.setattr(
+        master_service,
+        "_trading_journal_derived_refresh_status_snapshot",
+        lambda: dict(derived),
+    )
+    monkeypatch.setattr(
+        master_service,
+        "_trading_journal_equity_refresh_state_snapshot",
+        lambda: {"running": False, "pending": False, "ok": None},
+    )
+    monkeypatch.setattr(
+        master_service,
+        "_queue_trading_journal_equity_refresh_if_idle",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            AssertionError("shared derived refresh must suppress a second equity job")
+        ),
+    )
+
+    response = asyncio.run(master_service.trading_journal_items())
+    payload = json.loads(response.body.decode("utf-8"))
+
+    assert response.status_code == 202
+    assert payload["pending"] is True
+    assert payload["derived_refresh"]["generation"] == 3
+    assert payload["refresh_status"]["status"] == "queued"
+    assert payload["status_url"] == "/api/trading-journal/import/status"

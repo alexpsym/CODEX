@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import sys
+import threading
 from pathlib import Path
 import types
 
@@ -73,6 +74,76 @@ oanda_history_exporter = importlib.util.module_from_spec(OANDA_HISTORY_SPEC)
 assert OANDA_HISTORY_SPEC and OANDA_HISTORY_SPEC.loader
 sys.modules[OANDA_HISTORY_SPEC.name] = oanda_history_exporter
 OANDA_HISTORY_SPEC.loader.exec_module(oanda_history_exporter)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_master_service_runtime_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Keep endpoint tests and deferred callbacks away from live journal state."""
+    isolated_workbook = tmp_path / "Trading Journal.xlsx"
+    isolated_data = tmp_path / "runtime-data"
+    monkeypatch.setattr(master_service, "_master_journal_path", lambda: isolated_workbook)
+    for attr_name, filename in {
+        "TRADING_JOURNAL_PATH": "trading_journal.json",
+        "TRADING_JOURNAL_STATE_PATH": "trading_journal_state.json",
+        "TRADING_JOURNAL_SYNC_STATE_PATH": "trading_journal_sync_state.json",
+        "TRADING_JOURNAL_IMPORT_CACHE_PATH": "trading_journal_import_cache.json",
+        "TRADING_JOURNAL_VIEW_CACHE_PATH": "trading_journal_view_cache.json",
+        "TRADING_JOURNAL_SQLITE_PATH": "trading_journal.sqlite",
+        "TRADING_JOURNAL_DERIVED_REFRESH_STATE_PATH": "trading_journal_derived_refresh_state.json",
+        "TRADING_JOURNAL_RESYNC_CACHE_PATH": "trading_journal_resync_cache.json",
+        "MONTHLY_AUD_REVALUATION_PATH": "monthly_aud_revaluation.json",
+        "MONTHLY_AUD_REVALUATION_STATE_PATH": "monthly_aud_revaluation_state.json",
+        "OANDA_FILL_STATE_PATH": "oanda_fill_state.json",
+        "PENDING_WEBHOOKS_PATH": "pending_webhooks.json",
+        "TRADE_CONTEXTS_PATH": "trade_contexts.json",
+        "WEBHOOK_ATTEMPTS_PATH": "webhook_attempts.json",
+        "BOUNCE_TRADERS_PATH": "bounce_traders.json",
+    }.items():
+        monkeypatch.setattr(master_service, attr_name, isolated_data / filename)
+    monkeypatch.setattr(master_service, "STATE_MANIFEST_PATH", tmp_path / "state_manifest.json")
+    monkeypatch.setattr(
+        master_service,
+        "LEGACY_STATE_MANIFEST_CAMEL_PATH",
+        tmp_path / "stateManifest.json",
+    )
+    monkeypatch.setattr(master_service, "_schedule_dropbox_upload_state_backup", lambda: None)
+    monkeypatch.setattr(
+        master_service,
+        "_arm_trading_journal_derived_refresh_timer_locked",
+        lambda *_args, **_kwargs: None,
+    )
+    master_service._TRADING_JOURNAL_CACHE = None
+    master_service._TRADING_JOURNAL_CACHE_KEY = None
+    master_service._TRADING_JOURNAL_VIEW_CACHE["key"] = None
+    master_service._TRADING_JOURNAL_VIEW_CACHE["payload"] = None
+    master_service._PENDING_MANUAL_SYNC_ROWS = []
+    master_service._PENDING_MANUAL_SYNC_BALANCES = []
+    with master_service.TRADING_JOURNAL_DERIVED_REFRESH_LOCK:
+        timer = master_service.TRADING_JOURNAL_DERIVED_REFRESH_TIMER
+        if isinstance(timer, threading.Timer):
+            timer.cancel()
+        master_service.TRADING_JOURNAL_DERIVED_REFRESH_TIMER = None
+        master_service.TRADING_JOURNAL_DERIVED_REFRESH_LOADED_PATH = ""
+        master_service.TRADING_JOURNAL_DERIVED_REFRESH_STATE.clear()
+        master_service.TRADING_JOURNAL_DERIVED_REFRESH_STATE.update(
+            master_service._derived_refresh_default_state()
+        )
+    yield
+    with master_service.TRADING_JOURNAL_DERIVED_REFRESH_LOCK:
+        timer = master_service.TRADING_JOURNAL_DERIVED_REFRESH_TIMER
+        if isinstance(timer, threading.Timer):
+            timer.cancel()
+        master_service.TRADING_JOURNAL_DERIVED_REFRESH_TIMER = None
+        master_service.TRADING_JOURNAL_DERIVED_REFRESH_LOADED_PATH = ""
+        master_service.TRADING_JOURNAL_DERIVED_REFRESH_STATE.clear()
+        master_service.TRADING_JOURNAL_DERIVED_REFRESH_STATE.update(
+            master_service._derived_refresh_default_state()
+        )
+    master_service._PENDING_MANUAL_SYNC_ROWS = []
+    master_service._PENDING_MANUAL_SYNC_BALANCES = []
 
 
 def test_oanda_history_exporter_writes_opening_loss_quote_home_factor():
