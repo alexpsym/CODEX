@@ -1,91 +1,134 @@
-Final implementation summary - Oanda incremental import performance and journal preservation
+Final implementation summary - Trading Tools, Trading Journal, recommendation charts, Pine offset alerts, and brief workflow
 
-Scope and reviewed base
+Scope
 - Repository: C:\GPT\CODEX-master
-- Reviewed starting commit: e1fa74933038e2bae393a163354fd6441bcddc85
-- This follow-up finishes the unresolved changed-import performance requirement while retaining the previously reviewed Pine marker, Oanda financing/Commission, monthly P&L dedupe, and live workbook repairs.
+- Task brief: CODEX_BRIEF_2026-08-10_Trading_Tools_Journal_Pine.txt
+- Pre-publication local HEAD: a9ef9d686b7f07b4e7625613e5cda302c896f1fb
+- Pre-publication origin/master: 615855452d96db82c74ac4c19ba34009aa15b821
+- The task was implemented in the generators, services, routes, tests, documentation, generated workbook, and generated recommendation assets. The workbook was not patched as a one-off.
 
-1. Root cause of the changed-import delay
-- A small changed Oanda upload parsed quickly, but the non-noop path unconditionally constructed the complete authoritative journal snapshot, rebuilt every Trade Log/derived workbook area, performed two full verification passes, persisted a full SQLite snapshot, and ran workbook GitHub synchronization.
-- The reviewed one-trade baseline was 245.015550 seconds: 31.276777s authoritative snapshot construction, 196.418293s workbook synchronization, 2.323346s row verification, and 5.507340s workbook-snapshot verification.
-- The old immediate identical-import fast path was 8.759790 seconds.
+1. Pine Script offset alerts
+- Root cause: the three offset values were rendered only with dashed line.new objects. TradingView could expose the base EMA/VWAP/Volume plots as alert sources, but it had no plot series or alert conditions for the offsets.
+- Added gated hidden plot series titled exactly "9 EMA Offset", "20 EMA Offset", and "VWAP Offset" while retaining all existing base plots and dashed visual offset lines.
+- Added nine unique global alertcondition entries: crossing, crossing above, and crossing below for each supported offset. Every condition references only its corresponding gated offset series.
+- Raw crossover/crossunder expressions are evaluated consistently and gated with barstate.isconfirmed, providing bar-close confirmation and preventing duplicate/repainting behaviour. A disabled line produces na and cannot trigger.
+- No generic alert() call or base-line crossing condition was added. Pine does not guess Buy/Sell from the side of an offset; the calculator-authored webhook URL/JSON remains the source of the intended action.
+- Added static/model regressions for intervening EMA/VWAP crossings, true offset crossings in both directions, each EMA offset, disabled lines, unique selector titles, confirmed-bar gating, and retained plots/visuals.
 
-2. Incremental import implementation
-- Added a strict current-schema/current-master-workbook incremental path for small Oanda transaction exports. It uses the already-read preflight workbook source, computes normalized state deltas, and caps a transaction at 25 affected/state-delta rows.
-- Immediate duplicate imports compare uploaded row projections and the account balance against that preflight source. They skip JSON upsert, full snapshot/statistics work, workbook replacement, SQLite persistence, full verification, and GitHub synchronization.
-- Changed imports update only the affected canonical Trade Log rows and the imported Oanda account balance. Unchanged parsed history rows are not retimestamped, rewritten, or sent through row-context side effects.
-- Genuine metadata-only JSON changes remain durable but do not cause unrelated workbook or SQLite trade-row updates. The existing repaired Oanda row contributes one genuine metadata enrichment in the live-derived benchmark; only the newly imported row(s) are workbook-affected.
-- Incremental SQLite persistence updates only workbook-affected trade rows plus the balance. Full snapshot/derived work is queued explicitly after the primary stores are durable; GitHub workbook synchronization is explicitly deferred to that derived refresh.
-- Safe incremental ineligibility can use the existing full fallback. Unsafe workbook-owned content (for example a managed formula that cannot be preserved/recalculated) refuses the import and rolls back instead of risking manual content.
+2. Trade Log O6 AUD correction
+- Root cause: O6 already held the correct monthly AUD revaluation value (12.95) and AUD row metadata, but preservation-mode style restoration overwrote the regenerated currency format with a stale USDT format.
+- Reapplied generator-owned Trade Log number formats after presentation/layout restoration, driven by the current row currency/type. This corrects every governed row without relabelling or changing the precise underlying value.
+- Final workbook verification: Trade Log!O6 = 12.95, number format `#,##0.00 "AUD"`, Currency AV6 = AUD. Representative BTCUSDT row O10 remains a precise USDT value with `#,##0.######## "USDT"` and AV10 = USDT.
 
-3. Durable commit, recovery, locking, and status
-- Durable incremental intent is written before JSON mutation and stores a bounded replay payload (maximum 25 rows / 256 KiB) with prepared, json_committed, workbook_committed, and incremental_committed phases.
-- Restart recovery replays the staged JSON rows, atomic workbook update, balance, and SQLite update before any full derived refresh. Replay failures remain retryable and can never be reported as a stale full-refresh success.
-- A different import cannot replace a nonterminal recovered transaction. Public status/import responses expose only transaction metadata, phases, row counts/IDs, and timestamps; staged row and balance payloads remain internal.
-- The import owns a reentrant workbook-writer lock from authoritative read/backup through commit or rollback. A stale backup cannot overwrite another successful workbook writer.
-- Once SQLite has committed, a later state/defer write failure no longer rewinds JSON/workbook. The coherent primary commit and workbook_committed intent remain available for idempotent replay.
-- Exhausted recovery retries are actionable: the next import requeues the same retained transaction in place, returns an explicit recovery-in-progress 409, and a later retry proceeds after replay. Invalid retained payloads remain explicitly and safely blocked.
-- Derived refresh generations coalesce affected IDs, use bounded exponential retry, expose queued/running/retrying/failed/succeeded state, recover across restart, and clear the staged payload only after successful derived completion.
+3. Source attribution, compact durations, tie-breaking, and row heights
+- Root cause: STATS1 and report specifications intentionally generated separate Source rows, duration sampling did not retain source-row identity for all extrema, and preservation/polish logic restored expanded row heights and legacy duration representations.
+- Collapsed generated Source/value pairs into the existing metric cells throughout STATS1, YEARLY REPORT, and every year sheet. No merged cells were introduced. Redundant Source rows are migrated/removed and affected references are updated by the layout-aware generator.
+- Added inline source identity to all applicable value, percentage, R, duration, move-to-break-even, and move-to-profit extrema. A source is emitted only when both symbol and canonical trade date are available.
+- Stable equal-value tie rule: choose lexicographically by normalized symbol, then canonical trade date, then stable Row ID. This same deterministic rule is shared across dashboard, yearly, and per-period extrema and is covered by regression tests.
+- Central duration display is compact and day-safe, for example 30S, 10H 6M 36S, and 8D 7H 57M 16S. Legacy verbose and encoded values remain parseable for migration/idempotence.
+- Ordinary populated rows in STATS1, YEARLY REPORT, and all year sheets are normalized to exactly 14.5 points after preservation and polish; intentional titles/headers remain distinct.
+- Test-only trades are excluded from active report aggregates/extrema while their Test counts remain. Stale managed aggregates clear when a period becomes test-only.
+- Final audit: zero literal Source rows across the 11 statistics/report sheets; 2,798/2,798 populated inline extrema have complete SYMBOL YYYY-MM-DD attribution; 3,315 durations are compact with zero verbose/malformed values; 1,212 managed rows are exactly 14.5.
 
-4. Atomic workbook and authored-content preservation
-- The incremental workbook helper writes a candidate, reloads and verifies it, fsyncs it, and atomically replaces the source only after row, balance, formula, name, structure, chart, and range checks pass.
-- Existing rows are updated in place by stable Row ID. Appends reserve every blank target before mutation, preserve authored blank-row presentation, allow identical canonical preformatting, and refuse content/comments/links/merges or differing custom presentation that would be overwritten.
-- Authored conditional-format rules sharing the generated A4:AX... range survive. Only the two exact tool-owned win/loss rules are replaced, their priorities are retained, and the generated rules remain unique.
-- All xl/charts/* parts are restored byte-for-byte, and the chart part/relationship sets are verified. The real-workbook audit confirmed chart parts, drawing parts, and every relationship part remain byte-identical.
-- Authored Trade Log formula caches are keyed by stable Row ID and logical header. A cached value is transplanted only when formula OOXML is unchanged and a bounded deterministic same-sheet dependency signature is unchanged; data_only reads and statistics therefore retain safe manual formula results.
-- Formulas with affected dependencies, cross-sheet/named/structured/volatile/unprovable references, or cycles are refused on the incremental path. Array/shared/data-table/dynamic formula representations and any managed STATS2 Account/Currency/Balance/As Of formula are refused before save unless exact safe preservation is available. The original workbook remains byte-identical on refusal.
-- Preservation-mode derived rebuilds restore authored normal Trade Log formulas by stable Row ID without restoring stale ordinary numeric values. Safe unchanged caches move with the Row ID; stale caches are not copied; calcMode/fullCalcOnLoad remain intact.
-- Balance-only updates preserve the complete Trade Log presentation signature. Manual borders, fills, number formats, protection, comments, hyperlinks, row heights, column widths, freeze panes, defined names, chart formulas/anchors, sheet views, and layout remain protected.
+4. Recommendation explanation charts
+- Root cause: stop/target algorithms existed, but the workbook had no hyperlink/artifact path and no chart renderer. Recomputing observations separately would risk diverging from displayed recommendations.
+- Extended the existing stop and target recommendation algorithms to return the exact eligible observation population, exclusions, and recommended value used by the workbook. No second recommendation calculation was introduced.
+- Generated deterministic, self-contained offline HTML/SVG explanations for every displayed overall/FX/crypto and populated per-symbol stop/target recommendation. Each contains point identity/context, axes/units, sample/exclusion information, and a distinct recommendation marker.
+- Workbook cells use standard relative hyperlinks into `Trading Journal.assets/recommendations/`, so the workbook/folder can move together and no local server, macro, CDN, or network resource is required.
+- Build/resync normalizes rows once, embeds links from that normalized population, validates the candidate, atomically publishes the staged asset set only after workbook replacement, and removes stale managed artifacts.
+- The fast verifier requires exact displayed recommendation text and accepts the full-precision marker only within half one displayed unit, covering Excel boundary behaviour such as 0.667539357955 -> 0.67 and 2.375 -> 2.37 while rejecting stale markers beyond that tolerance.
+- Final audit: 84 unique relative recommendation links (6 STATS1, 78 SYMBOLS), 84 matching recommendation files plus index.html, 84/84 targets resolved, exact text/marker agreement, complete index coverage, and zero stale, missing, unindexed, external, or network-dependent assets.
 
-5. Final isolated performance benchmark
-- Benchmark source: disposable copies of the live canonical workbook and journal JSON, with fresh sandbox SQLite databases. The live workbook/JSON/SQLite size, mtime, and SHA-256 fingerprints were asserted unchanged before/after.
-- Scenario A - one new canonical Oanda trade: 21.566381 seconds wall time (target <30s).
-  - Parse 0.066057s; P/L inference 0.346482s; proportional JSON upsert 1.616065s; atomic incremental workbook update 11.726653s; incremental SQLite 0.075376s.
-  - One workbook-affected Row ID. JSON persisted that row plus one genuine metadata delta for oanda_export:demo:652:664.
-- Scenario B - five new canonical Oanda trades: 22.426492 seconds wall time (target <30s).
-  - Parse 0.129333s; P/L inference 0.286461s; proportional JSON upsert 2.735575s; atomic incremental workbook update 9.651411s; incremental SQLite 0.076362s.
-  - Five workbook-affected Row IDs. JSON persisted those five plus the same one genuine existing-row metadata delta.
-- Scenario C - immediate identical repeat: 4.926560 seconds wall time (target <10s).
-  - Parse 0.049600s; P/L inference/preflight 0.114681s; zero rows upserted and zero workbook-affected rows.
-- In all three scenarios, full snapshot/statistics, full workbook synchronization/derived rebuild, full verification, full SQLite persistence, and GitHub synchronization call counters were exactly zero. Reported snapshot_build, verification, workbook_snapshot_verification, and github_sync timings were also exactly 0.0s.
-- Changed-import time fell from 245.015550s to 21.566381s (about 91.2% faster), while the no-change repeat improved from 8.759790s to 4.926560s.
+5. STATS2 corrections
+- Binance root cause: the workbook was stale relative to the later cashflow withdrawal anchor. The normal balance timeline now selects the latest semantic cashflow anchor and subsequent trades instead of retaining the old snapshot. Zero is data-derived, not hard-coded; a later source event can make the balance nonzero.
+- Removed As Of from the full-build schema and made helpers header-driven/no-op when it is absent, preventing the deleted column from returning or shifting formatting onto Net P/L Percentage.
+- Added an explicit Bybit Demo Net P/L percentage exclusion shared by full builds and preserved updates, so the cell remains blank even if stray/synthetic result data exists.
+- Final STATS2 headers are Account, Balance, Currency, Risk of Ruin, and Net P/L Percentage. Binance is 0 USDT, Bybit Demo Net P/L Percentage is blank, and no As Of header is present.
 
-6. Final regression results
-- Full tests/test_master_service_trading_journal_crud.py: 242 passed, 6 warnings, 108.03s.
-- Combined tests/test_master_service_oanda_history_export.py, tests/test_repair_oanda_journal.py, tests/test_master_service_trading_journal_stats.py, and tests/test_custom_indicator_pine.py: 127 passed, 10 warnings, 77.88s.
-  - Component coverage remains 46 Oanda-history, 3 repair, 63 journal-statistics, and 15 Pine tests.
-- Broad tests/test_master_journal_workbook.py selection for incremental, preservation_mode, monthly_pnl, direct_fill, conditional_format, and manual_trade_log_borders: 32 passed, 173 deselected, 2 warnings, 431.47s.
-- Second independent audit: no actionable gaps found. Its final focused evidence included 13 recovery/rollback/locking/status tests and 7 CF/formula/chart/array/STATS2 preservation tests, plus a disposable copy of the real workbook and an exhaustive semantic cell/layout comparison.
-- python -m py_compile for all changed Python modules/tests and the benchmark harness: passed.
-- git diff --check: passed; only normal LF-to-CRLF working-copy notices were emitted.
-- Warnings were existing FastAPI on_event deprecations and pytest cache permission notices; selected tests passed.
+6. SYMBOLS formats and conditional formatting
+- Root cause: generated semantic fills and number formats were applied before preserved direct styles were restored, so stale/inverted fill/font combinations and General formats returned. Conditional formatting also did not consistently include the first data row.
+- Added a final header-driven normalization for AF:AP. AF uses `0.000"R"`; governed percentage columns use `0.00%` without changing underlying numeric precision or multiplying values.
+- Cleared stale generated direct styles and reapplied established positive green, negative red, and zero/blank neutral semantics. Rebuilt owned conditional-format ranges through the actual last symbol row, including USDCAD.
+- Final audit: 120 symbol rows with USDCAD first; 1,200/1,200 governed formats correct; 360/360 AF:AH semantic cells correct; owned CF ranges are AF3:AF122 and AG3:AH122.
 
-7. Test isolation and live-state safety
-- Added autouse isolation for Oanda-history endpoint tests, including all journal/runtime paths and deferred timers. The complete 46-test module passed without changing live SQLite counts.
-- Six precisely identified test-only stats/diagnostics rows from earlier unisolated runs were removed transactionally with exact count guards. Final logical SQLite counts are: import_runs 194, trades 1446, cashflows 96, balances 7, notes 5, metrics 1446, stats 480, diagnostics 480.
-- Preserved the five pre-existing unrelated runtime-state modifications in render/data/monthly_aud_revaluation.json, monthly_aud_revaluation_state.json, pending_webhooks.json, trade_contexts.json, and webhook_attempts.json. They are not intended for publication.
-- The temporary benchmark harness was removed after the successful run. No runtime data, uploads, caches, logs, secrets, or environment files are intended for the commit.
+7. Bounce Trader content
+- Root cause: Bounce Trader contained a generic specification renderer and a second `/api/instrument-specs` request, causing every non-hidden Instrument Lookup API field to appear in the trading form.
+- Removed only the lookup-spec host/styles/renderer/request from Bounce Trader. Category selection/resolution, canonical-symbol preview via `/api/preview-symbol`, and all algorithm/trading inputs remain.
+- The separate Instrument Lookup template, routes, API, and JavaScript remain unchanged and retain the full specification display.
 
-8. Live workbook verification
-- journal/Trading Journal.xlsx SHA-256: FF4F7E20E3B39572FE72E7AAA75ED2BD0F1308E9E47897B3A5B259BB940D2226 (unchanged throughout this follow-up).
-- Trade Log has 1,547 populated rows, 1,547 unique Row IDs, and no duplicates.
-- The five monthly_aud_reval:bybit_live IDs for 2026-03 through 2026-07 each occur once and have no red/green trade fill.
-- oanda_export:demo:652:664 remains at Trade Log row 4 with Commission 0.9608, Net P/L 17.4233, and the winning green fill C6EFCE.
-- Generated conditional formatting is exactly the two trade-only win/loss formulas over A4:AX1550.
-- Workbook inventory: 511 formulas, 2 charts, 1,211 Trade Log hyperlinks, 7 comments, and 7 defined names.
-- Sheet order is canonical; Trade Log is active/selected with freeze pane A4; authored column widths and row heights remain present.
-- A native/openpyxl verification was used because artifact-tool import remains blocked by an existing source chart-axis UInt32 incompatibility; repository-native and independent OOXML/semantic checks passed.
+8. Local versus Render buttons/routes
+- Root cause: profile navigation was the inverse of the requested ownership model: Calculator appeared for both profiles, while Bounce/FX buttons were Render-only.
+- Local landing now retains its local Calculator and adds normal external links for Bounce Trader and FX Weekend at the configured Render origin. URL validation accepts only HTTP(S) with a non-local hostname; existing `RENDER_CALCULATOR_BASE_URL` is reused with `RENDER_EXTERNAL_URL` fallback.
+- Render landing returns no tool buttons. `/scripts` does not grant local ownership/autostart to the remote tools.
+- Existing Render allowlisting/proxy/deep routes remain operational, including `/merged/bounce-trader` and `/apps/fxweekend-clone`.
 
-9. Intended files changed
+9. ChatGPT-only Codex brief instructions
+- Updated `custom instructions/CODEX_BRIEF_INSTRUCTIONS.txt` with the six standing brief-delivery requirements while preserving all 17 existing standing bullets.
+- Created `custom instructions/CODEX_BRIEF_INSTRUCTIONS_CHATGPT_ONLY.docx` without redesign: two-page Letter reference, one-inch margins, Calibri 11 body, real numbered/bulleted lists, restrained headings/header/footer, and shaded Consolas command blocks.
+- It requires task-specific current model/reasoning selection (not Ultra by default), one self-contained fenced text brief, a plainly named root TXT copy, exact no-placeholder interactive PowerShell launch commands, resume commands, and an accurate CLI-versus-desktop/config-account statement.
+- DOCX structural and visual QA passed: valid OPC package/XML/relationships, 34 body paragraphs, exactly 6 numbered requirements and 17 preserved bullets, no external relationships, no placeholder tokens, and no clipping/overlap/bad wrapping across two rendered pages.
+- DOCX SHA-256: 403746D3D0D35999ED14E9630C3DD8398C0EB4BD5878E6EA76AF02E11A11624C. Because the repository intentionally ignores `*CHATGPT_ONLY*`, this exact file is force-staged for publication.
+
+10. Workbook synchronization safety hardening
+- Added one normalized-row pipeline for build/update/service so repaired rows, deduplication, manual overrides, workbook recommendations, and published HTML cannot diverge.
+- Recommendation assets are never published before candidate validation/replacement. The verifier also accounts for tracked/deleted managed assets.
+- Added a non-authoritative snapshot shrink guard before updater/assets. When an existing workbook has at least 10 trades, a `both`-mode snapshot missing at least 5 and retaining less than 80% by count/stable IDs is rejected with HTTP 409 and `NON_AUTHORITATIVE_SNAPSHOT_SHRINK_BLOCKED`; workbook and assets remain byte-identical. Configured authoritative local/master_journal sources bypass this guard. Same stable all-Test populations remain valid.
+- Preservation-mode SYMBOLS updates now map generated values by Symbol, retain existing survivor row identity/styles, append genuinely new symbols deterministically, and clear removed rows without alphabetically reordering established rows.
+- Trade Log move timestamps are restored as Excel datetimes, move durations serialize directly through the compact formatter, and incremental validation reads hidden timeline provenance now that As Of is absent.
+- Trade Log auto-filter preservation must cover the true last populated row, including trade/cashflow tails. Empty logs keep a valid A3:AX3 filter and valid A4:AX4 generated conditional-format placeholder.
+
+11. Generated workbook and idempotence verification
+- Ran the normal authoritative master-journal resync twice after all fixes. Full rebuild succeeded with 1,446 trade rows and 1,547 total source rows; the second run used the persisted fingerprint fast path and returned the same clean verification result.
+- Final workbook: `journal/Trading Journal.xlsx`, 690,306 bytes, SHA-256 `4a1853323177a6808389d2aa2d6ff8d7a286e246d4dd0eaeb638e9c76a400bb1`.
+- Trade Log has 1,547 populated unique Row IDs through row 1550: 1,446 trade, 96 cashflow, and 5 monthly AUD revaluation rows. Filter is exactly A3:AX1550.
+- STATS1 reconciles 1,408 eligible trades = 400 wins + 992 losses + 16 break-even, plus 38 Test trades.
+- Workbook ZIP/OOXML and all relationships are valid; zero duplicate ZIP members, zero external-workbook artifacts/formulas/relationships, 511 formulas with zero formula-text/cached errors, canonical sheet order/views/panes/merges/filters, and exactly two preserved charts on ` SIM` with canonical formulas.
+- Production fast verification returned ok=true, checked all 84 recommendation links, and found zero content, formula, row-height, AUD-format, or filter-coverage mismatches.
+- Microsoft Excel COM opened a temporary copy, performed CalculateFullRebuild, saved it, and exported images. Visual inspection passed for STATS1, STATS2, SYMBOLS (including AF:AP), YEARLY REPORT, 2018, and 2026: no clipping, corrupted layout, stale source rows, verbose durations, or unintended populated test-only aggregates. The source workbook itself was not opened for destructive editing during QA.
+
+12. Regression commands/results
+- `python -m pytest -q -p no:cacheprovider tests/test_master_service_master_journal_sync.py`
+  - Final: 157 passed, 149 warnings in 902.30s.
+- `python -m pytest -q -p no:cacheprovider tests/test_master_service_trading_journal_stats.py`
+  - Final: 63 passed, 4 warnings in 7.13s.
+- `python -m pytest -q -p no:cacheprovider tests/test_master_journal_workbook.py`
+  - The monolithic run exceeded the 30-minute process ceiling. All 210 collected nodes were then completed across non-overlapping partitions and exact reruns. Final coverage: all 210 passed; the final partition/rerun results included 53/53, 12/12, 5/5, 11/11, and 12/12 passing groups with no unresolved node.
+- `python -m pytest -q -p no:cacheprovider tests/test_custom_indicator_pine.py tests/test_master_service_profiles.py tests/test_dashboard_home_layout.py tests/test_bounce_trader_symbol_resolution.py tests/test_spread_monitor_dashboard.py tests/test_fxweekend_executor.py tests/test_fxweekend_render_supervisor.py tests/test_fxweekend_proxy_reliability.py tests/test_dashboard_js_syntax.py tests/test_master_service_calculator_retirement.py tests/test_master_service_trade_chart.py`
+  - Final: 176 passed, 113 warnings in 32.87s.
+- Focused verifier/report/filter/asset/O6/SYMBOLS/OOXML regressions were also run during development; all final reruns passed.
+- `python -m py_compile render/master_service.py bybit_trigger_bounce_trader/app.py tools/master_journal_workbook.py` and changed Python tests: passed.
+- `git diff --check`: passed; only normal LF-to-CRLF working-copy notices were emitted.
+- Warnings are existing FastAPI `on_event` deprecations, one httpx `app` shortcut deprecation, and expected mocked unawaited-coroutine warnings in one autostart test. There are no test failures.
+
+13. Files intended for publication
+- bybit_trigger_bounce_trader/app.py
+- custom instructions/CODEX_BRIEF_INSTRUCTIONS.txt
+- custom instructions/CODEX_BRIEF_INSTRUCTIONS_CHATGPT_ONLY.docx
+- journal/Trading Journal.xlsx
+- journal/Trading Journal.assets/recommendations/index.html and 84 recommendation HTML files
+- pinescripts/custom_indicator.pine
+- render/README.md
 - render/master_service.py
 - tools/master_journal_workbook.py
-- tests/test_master_service_trading_journal_crud.py
-- tests/test_master_service_oanda_history_export.py
+- tests/test_bounce_trader_symbol_resolution.py
+- tests/test_custom_indicator_pine.py
+- tests/test_dashboard_home_layout.py
+- tests/test_fxweekend_executor.py
 - tests/test_master_journal_workbook.py
+- tests/test_master_service_master_journal_sync.py
+- tests/test_master_service_profiles.py
+- tests/test_spread_monitor_dashboard.py
 - summary/CODEX_SUMMARY_latest.txt
 
-10. Publication record
-- Pre-publication reviewed HEAD/origin/master: e1fa74933038e2bae393a163354fd6441bcddc85.
-- Final pushed implementation commit SHA: f70768a55de192b8e4564b308ccab68df967cb3c.
-- The mandatory PATCH_DESKTOP_PUSH.bat run completed successfully, pushed that commit to origin/master, fetched the remote, and verified local HEAD == origin/master == f70768a55de192b8e4564b308ccab68df967cb3c.
-- This completed publication record is the only intended follow-up change after the implementation commit; its summary-only commit is published and verified by a second mandatory PATCH_DESKTOP_PUSH.bat run, with the resulting final repository HEAD reported in the completion response and script log.
+14. Preserved unrelated/local state
+- Preserved and excluded from publication: the pre-existing root brief input, `journal/5-digit-demo-calculation-context.json`, and five runtime files under render/data (`monthly_aud_revaluation.json`, `monthly_aud_revaluation_state.json`, `pending_webhooks.json`, `trade_contexts.json`, and `webhook_attempts.json`).
+- The apparent `.gitignore` modification has no content difference; HEAD/index/worktree blobs are identical.
+- No secrets, environment files, uploads, runtime data, logs, caches, or QA images are intended for the commit. Ignored local QA staging directories remain outside Git because repository safety rules prohibit broad/recursive cleanup.
+
+15. Residual external/manual verification
+- TradingView compilation and the live alert selector are external to this repository. Manual steps: replace the chart script with the revised source; delete and recreate saved alerts because TradingView snapshots scripts/inputs; choose exactly one dedicated `9 EMA Offset`, `20 EMA Offset`, or `VWAP Offset` crossing/above/below condition; set Once Per Bar Close; paste the calculator-generated webhook URL/JSON for the intended Buy/Sell action; test in demo/test mode; and avoid simultaneously enabling overlapping dedicated conditions unless multiple orders are intentional.
+- The required in-app browser backend was unavailable (`iab` unavailable; browser list empty). Per the browser-control workflow no substitute Chrome/Playwright surface was used. Therefore live supported-desktop local/Render visual navigation and representative default-browser hyperlink clicks remain manual. Static/profile/deep-route/UI tests passed, Excel hyperlink targets resolve offline, and every HTML artifact was inspected programmatically for self-containment and exact recommendation agreement.
+
+16. Publication workflow
+- This summary is written before the mandatory repository publication step. `PATCH_DESKTOP_PUSH.bat` must stage the intended package, commit, pull/rebase safely, push HEAD to origin/master, fetch, and verify local HEAD equals origin/master.
+- The verified final commit hash and clean publication result are reported in the final user handoff and retained in the PATCH log.

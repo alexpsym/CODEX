@@ -672,16 +672,18 @@ def test_local_profile_sets_no_cache_for_home_and_static_assets(monkeypatch) -> 
     assert 'no-store' in static_cache or 'no-cache' in static_cache
 
 
-def test_local_profile_buttons_exclude_render_owned_fxweekend(monkeypatch) -> None:
+def test_local_profile_buttons_use_configured_render_routes(monkeypatch) -> None:
     module = _load_master_service_module()
     monkeypatch.setattr(module, "APP_PROFILE", "local")
-    monkeypatch.setenv("RENDER_FXWEEKEND_BASE_URL", "https://fx-weekend.example")
+    monkeypatch.setenv("RENDER_CALCULATOR_BASE_URL", "https://tools.example/")
     buttons = module._profile_main_buttons()
     by_name = {str(item.get("name")): item for item in buttons}
+    assert by_name["calculator"]["open_url"] == "/merged/calculator"
+    assert by_name["bounce-trader"]["open_url"] == "https://tools.example/merged/bounce-trader"
+    assert by_name["bounce-trader"]["remote_owned"] is True
+    assert by_name["fxweekend"]["open_url"] == "https://tools.example/apps/fxweekend-clone"
+    assert by_name["fxweekend"]["remote_owned"] is True
     assert by_name["trading-journal"]["open_url"] == "/dashboard/trading-journal"
-    serialized = json.dumps(buttons).lower()
-    assert "fxweekend" not in serialized
-    assert "fxweekend-clone" not in serialized
     assert by_name["spreads-clone"]["label"] == "Spreads"
     assert "instrument-lookup" not in by_name
     assert "history" not in by_name
@@ -691,6 +693,28 @@ def test_local_profile_buttons_exclude_render_owned_fxweekend(monkeypatch) -> No
     assert '@app.get("/dashboard/trading-journal")' in source
     assert '@app.get("/trading-journal", response_class=HTMLResponse)' in source
     assert '@app.get("/dashboard/pine", response_class=HTMLResponse)' in source
+
+
+def test_remote_tool_buttons_refuse_localhost_and_render_has_no_tool_buttons(monkeypatch) -> None:
+    module = _load_master_service_module()
+    monkeypatch.setattr(module, "APP_PROFILE", "local")
+    monkeypatch.setenv("RENDER_CALCULATOR_BASE_URL", "http://127.0.0.1:9000")
+    monkeypatch.setenv("RENDER_EXTERNAL_URL", "https://render-fallback.example")
+    fallback_by_name = {str(item.get("name")): item for item in module._profile_main_buttons()}
+    assert fallback_by_name["bounce-trader"]["open_url"] == "https://render-fallback.example/merged/bounce-trader"
+    assert fallback_by_name["fxweekend"]["open_url"] == "https://render-fallback.example/apps/fxweekend-clone"
+
+    monkeypatch.delenv("RENDER_EXTERNAL_URL", raising=False)
+    by_name = {str(item.get("name")): item for item in module._profile_main_buttons()}
+    assert by_name["bounce-trader"]["open_url"] == "/render-tools-configuration-error"
+    assert by_name["fxweekend"]["open_url"] == "/render-tools-configuration-error"
+
+    error_page = asyncio.run(module.render_tools_configuration_error())
+    assert error_page.status_code == 503
+    assert "RENDER_CALCULATOR_BASE_URL" in error_page.body.decode("utf-8")
+
+    monkeypatch.setattr(module, "APP_PROFILE", "render")
+    assert module._profile_main_buttons() == []
 
 
 def test_pine_dashboard_api_lists_reads_and_blocks_traversal(monkeypatch) -> None:
@@ -846,17 +870,16 @@ def test_open_master_journal_polish_inserts_stats1_recommendation_rows(tmp_path:
         ws2 = checked["STATS1"]
         labels = {row: str(ws2.cell(row, 1).value or "") for row in range(1, ws2.max_row + 1)}
         max_stop_row = next(row for row, label in labels.items() if label == "Max stop %")
-        stop_recommendation_row = max_stop_row + 2
+        stop_recommendation_row = max_stop_row + 1
         max_target_row = next(row for row, label in labels.items() if label == "Max target %")
-        target_recommendation_row = max_target_row + 2
-        assert ws2.cell(max_stop_row + 1, 1).value == "Source"
+        target_recommendation_row = max_target_row + 1
+        assert "Source" not in labels.values()
         assert ws2.cell(stop_recommendation_row, 1).value == "Recommendation"
         assert [ws2.cell(stop_recommendation_row, col).value for col in range(2, 5)] == [
             "Decrease stop \u2014 Recommended: 1.00% (1.00 pp below loss average)",
             "Increase stop \u2014 Recommended: 2.00% (1.00 pp above loss average)",
             "Decrease stop \u2014 Recommended: 2.99% (0.01 pp below loss average; exact tie, so a small decrease is preferred)",
         ]
-        assert ws2.cell(max_target_row + 1, 1).value == "Source"
         assert ws2.cell(target_recommendation_row, 1).value == "Recommendation"
         assert [ws2.cell(target_recommendation_row, col).value for col in range(2, 5)] == [None, None, None]
     finally:
@@ -908,7 +931,7 @@ def test_open_master_journal_polish_uses_decimal_stop_recommendation_payload(
     try:
         ws2 = checked["STATS1"]
         max_stop_row = next(row for row in range(1, ws2.max_row + 1) if ws2.cell(row, 1).value == "Max stop %")
-        recommendation = ws2.cell(max_stop_row + 2, 2).value
+        recommendation = ws2.cell(max_stop_row + 1, 2).value
     finally:
         checked.close()
     expected = module._stop_recommendation_payload([Decimal(winner_pct)], [Decimal(loser_pct)])[module.STOP_RECOMMENDATION_HEADER]

@@ -59,6 +59,17 @@ Use the calculator UI (`/merged/calculator`) to generate the exact JSON payload 
 - The API creates a pending-webhook record when the quote is generated (Webhook = Yes), then removes it automatically after a successful execution so Open Orders/Positions does not show duplicates.
 - If execution fails, the pending row remains with an error field so you can retry or diagnose the issue.
 
+### Custom indicator offset alerts
+
+TradingView saves a server-side snapshot of the script, its inputs, symbol, and timeframe when an alert is created. After updating `pinescripts/custom_indicator.pine` on a chart, delete every older alert that used the previous script and create it again; editing the chart or script does not update an existing alert snapshot.
+
+1. Add the revised **Custom Indicator** to the chart and enable the intended 9 EMA, 20 EMA, or VWAP offset line.
+2. Generate the intended Buy or Sell webhook in Calculator with **Webhook = Yes**, preferably against a demo/test account while verifying the alert.
+3. In TradingView's **Create Alert** dialog, choose exactly one dedicated condition: the relevant offset's **Price Crossing**, **Price Crossing Above**, or **Price Crossing Below** condition. Do not select the base 9 EMA, 20 EMA, or VWAP plot.
+4. Set **Frequency** to **Once Per Bar Close**. The script confirms offset crossings at bar close so an intrabar move that retreats before confirmation cannot submit a trade.
+5. Paste the calculator-provided endpoint into **Webhook URL** and its exact server-authored `webhook_payload_json` into **Message**. The payload's Buy/Sell action comes from Calculator, not from the visual side of the offset.
+6. Create only one crossing condition for a given webhook payload. Creating both the general and directional variants for the same payload can send overlapping alerts for one crossing.
+
 ## 6) Notes and tips
 - The manager intentionally ignores the `mt5-clone` directory per your request.
 - Scanner (Bybit/OANDA monitor) is local-only and is not part of the Render-hosted merged dashboard. Run `run_scanner_local.bat` on a local Windows machine when you need scanner windows.

@@ -65,19 +65,20 @@ def test_get_page_hides_save_and_confirmations() -> None:
     assert "confirm_live" not in body
 
 
-def test_get_page_has_specs_host_below_heading() -> None:
+def test_get_page_keeps_canonical_preview_without_instrument_specs() -> None:
     client = app.APP.test_client()
     resp = client.get("/")
     body = resp.get_data(as_text=True)
     heading_idx = body.find("<h1>Bounce Trader</h1>")
     canonical_idx = body.find("id=\"preview-canonical-symbol\"")
-    specs_idx = body.find("id=\"preview-instrument-specs\"")
-    notice_idx = body.find("notice error")
     market_idx = body.find("name=\"market\"")
     assert heading_idx >= 0
-    assert heading_idx < canonical_idx < specs_idx
-    assert specs_idx < notice_idx or notice_idx == -1
-    assert specs_idx < market_idx
+    assert heading_idx < canonical_idx < market_idx
+    assert "preview-instrument-specs" not in body
+    assert "/api/instrument-specs" not in body
+    assert "renderSpecs" not in body
+    assert 'name="category"' in body
+    assert "/api/preview-symbol" in body
 
 
 def test_full_symbol_passes_through_before_spawn(monkeypatch: pytest.MonkeyPatch):

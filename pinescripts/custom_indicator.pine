@@ -79,6 +79,49 @@ plot(showEma9 ? ema9 : na, "9 EMA", color=ema9Color, linewidth=2, format=format.
 plot(showEma20 ? ema20 : na, "20 EMA", color=ema20Color, linewidth=2, format=format.price, force_overlay=true)
 plot(showVwapOnChart ? vwapValue : na, "VWAP", color=color.new(color.purple, 0), linewidth=2, format=format.price, force_overlay=true)
 
+// -----------------------------------------------------------------------------
+// OFFSET ALERT SERIES AND CONDITIONS
+// -----------------------------------------------------------------------------
+// Hidden plots keep the existing dashed visuals while exposing each enabled
+// offset as a uniquely named series in TradingView's alert selector.
+ema9OffsetAlertSeries = showEma9Offset ? ema9Offset : na
+ema20OffsetAlertSeries = showEma20Offset ? ema20Offset : na
+vwapOffsetAlertSeries = showVwapOffsetOnChart ? vwapOffset : na
+
+plot(ema9OffsetAlertSeries, "9 EMA Offset", display=display.none, format=format.price, force_overlay=true)
+plot(ema20OffsetAlertSeries, "20 EMA Offset", display=display.none, format=format.price, force_overlay=true)
+plot(vwapOffsetAlertSeries, "VWAP Offset", display=display.none, format=format.price, force_overlay=true)
+
+// Evaluate the crossing functions on every update, then expose only confirmed
+// bar events. Alerts should be created with Frequency = Once Per Bar Close.
+ema9OffsetCrossAboveRaw = ta.crossover(close, ema9OffsetAlertSeries)
+ema9OffsetCrossBelowRaw = ta.crossunder(close, ema9OffsetAlertSeries)
+ema20OffsetCrossAboveRaw = ta.crossover(close, ema20OffsetAlertSeries)
+ema20OffsetCrossBelowRaw = ta.crossunder(close, ema20OffsetAlertSeries)
+vwapOffsetCrossAboveRaw = ta.crossover(close, vwapOffsetAlertSeries)
+vwapOffsetCrossBelowRaw = ta.crossunder(close, vwapOffsetAlertSeries)
+
+offsetAlertConfirmed = barstate.isconfirmed
+ema9OffsetCrossAbove = offsetAlertConfirmed and ema9OffsetCrossAboveRaw
+ema9OffsetCrossBelow = offsetAlertConfirmed and ema9OffsetCrossBelowRaw
+ema9OffsetCross = ema9OffsetCrossAbove or ema9OffsetCrossBelow
+ema20OffsetCrossAbove = offsetAlertConfirmed and ema20OffsetCrossAboveRaw
+ema20OffsetCrossBelow = offsetAlertConfirmed and ema20OffsetCrossBelowRaw
+ema20OffsetCross = ema20OffsetCrossAbove or ema20OffsetCrossBelow
+vwapOffsetCrossAbove = offsetAlertConfirmed and vwapOffsetCrossAboveRaw
+vwapOffsetCrossBelow = offsetAlertConfirmed and vwapOffsetCrossBelowRaw
+vwapOffsetCross = vwapOffsetCrossAbove or vwapOffsetCrossBelow
+
+alertcondition(ema9OffsetCross, "9 EMA Offset - Price Crossing", 'Price crossed the 9 EMA Offset on {{exchange}}:{{ticker}} at {{close}}. Offset: {{plot("9 EMA Offset")}}')
+alertcondition(ema9OffsetCrossAbove, "9 EMA Offset - Price Crossing Above", 'Price crossed above the 9 EMA Offset on {{exchange}}:{{ticker}} at {{close}}. Offset: {{plot("9 EMA Offset")}}')
+alertcondition(ema9OffsetCrossBelow, "9 EMA Offset - Price Crossing Below", 'Price crossed below the 9 EMA Offset on {{exchange}}:{{ticker}} at {{close}}. Offset: {{plot("9 EMA Offset")}}')
+alertcondition(ema20OffsetCross, "20 EMA Offset - Price Crossing", 'Price crossed the 20 EMA Offset on {{exchange}}:{{ticker}} at {{close}}. Offset: {{plot("20 EMA Offset")}}')
+alertcondition(ema20OffsetCrossAbove, "20 EMA Offset - Price Crossing Above", 'Price crossed above the 20 EMA Offset on {{exchange}}:{{ticker}} at {{close}}. Offset: {{plot("20 EMA Offset")}}')
+alertcondition(ema20OffsetCrossBelow, "20 EMA Offset - Price Crossing Below", 'Price crossed below the 20 EMA Offset on {{exchange}}:{{ticker}} at {{close}}. Offset: {{plot("20 EMA Offset")}}')
+alertcondition(vwapOffsetCross, "VWAP Offset - Price Crossing", 'Price crossed the VWAP Offset on {{exchange}}:{{ticker}} at {{close}}. Offset: {{plot("VWAP Offset")}}')
+alertcondition(vwapOffsetCrossAbove, "VWAP Offset - Price Crossing Above", 'Price crossed above the VWAP Offset on {{exchange}}:{{ticker}} at {{close}}. Offset: {{plot("VWAP Offset")}}')
+alertcondition(vwapOffsetCrossBelow, "VWAP Offset - Price Crossing Below", 'Price crossed below the VWAP Offset on {{exchange}}:{{ticker}} at {{close}}. Offset: {{plot("VWAP Offset")}}')
+
 // plot() cannot draw dashed series lines, so offset lines use recent dashed line segments.
 offsetSegmentLimit = 60
 var line[] ema9OffsetLines = array.new_line()

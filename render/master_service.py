@@ -111,7 +111,7 @@ import httpx
 import requests
 import pandas as pd
 from openpyxl import load_workbook
-from openpyxl.utils import get_column_letter
+from openpyxl.utils import get_column_letter, range_boundaries
 from PIL import Image, ImageDraw, ImageFont
 from starlette.responses import RedirectResponse
 
@@ -134,7 +134,7 @@ from shared.oanda_api import (
 )
 from render.dropbox_sync import download_bytes, list_excel_files, upload_bytes
 from render import dropbox_state_store
-from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, read_master_journal_source, update_master_journal_workbook_data_only, update_master_journal_workbook_incremental, IncrementalWorkbookUpdateNotEligible, refresh_master_journal_derived_sheets, stable_row_id, SHEET_ORDER, REPORT_YEARLY_SHEET, expected_report_sheet_names, _get_all_trades_sheet, _get_trade_log_sheet, _trade_log_header_map, _trade_log_data_start_row, _find_instrument_leaders_table, LEADER_LABEL_TO_KEY, _repair_or_flag_zero_trade_qty, _canonicalize_and_dedupe_balances, _trade_execution_fingerprint, _trade_row_source_rank, _dedupe_trade_rows_by_execution, _instrument_averages_header_map, INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, INSTRUMENT_AVERAGES_DATA_START_ROW, _result_percentage_totals_by_market, _risk_of_ruin_by_account, _stats1_sheet, _stats2_sheet, _symbols_sheet, STATS1_SHEET, STATS2_SHEET, SYMBOLS_SHEET, _parse_duration_text, _duration_ddhhmmss_cell_to_seconds, _is_ddhhmmss_number_format, STOP_RECOMMENDATION_HEADER, TARGET_RECOMMENDATION_HEADER, _distance_recommendation_summary, _stop_recommendation_payload, _apply_recommendation_cell_style, _ensure_dashboard_requested_metric_rows, _stats1_market_columns, _stats1_section_bounds, balance_drawdown_metrics
+from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, read_master_journal_source, update_master_journal_workbook_data_only, update_master_journal_workbook_incremental, IncrementalWorkbookUpdateNotEligible, refresh_master_journal_derived_sheets, stable_row_id, SHEET_ORDER, REPORT_YEARLY_SHEET, expected_report_sheet_names, _get_all_trades_sheet, _get_trade_log_sheet, _trade_log_header_map, _trade_log_data_start_row, _trade_log_last_populated_row, _find_instrument_leaders_table, LEADER_LABEL_TO_KEY, _repair_or_flag_zero_trade_qty, _canonicalize_and_dedupe_balances, _trade_execution_fingerprint, _trade_row_source_rank, _dedupe_trade_rows_by_execution, _normalize_master_journal_rows, _instrument_averages_header_map, INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, INSTRUMENT_AVERAGES_DATA_START_ROW, _result_percentage_totals_by_market, _risk_of_ruin_by_account, _stats1_sheet, _stats2_sheet, _symbols_sheet, STATS1_SHEET, STATS2_SHEET, SYMBOLS_SHEET, _parse_duration_text, _duration_ddhhmmss_cell_to_seconds, _is_ddhhmmss_number_format, STOP_RECOMMENDATION_HEADER, TARGET_RECOMMENDATION_HEADER, _distance_recommendation_summary, _stop_recommendation_payload, _apply_recommendation_cell_style, _ensure_dashboard_requested_metric_rows, _stats1_market_columns, _stats1_section_bounds, balance_drawdown_metrics
 from bybit_monitor import bybit_altcoin_monitor as bybit_monitor
 from oanda_monitor import oanda_forex_monitor as oanda_monitor
 from bybit_demo_tpsl_cache import (
@@ -309,17 +309,48 @@ def _profile_allows_script(script_name: str) -> bool:
     return name in LOCAL_ALLOWED_APPS
 
 
+def _configured_render_tools_base_url() -> str:
+    """Return the configured public Render origin used by local navigation."""
+
+    for candidate in (
+        os.getenv("RENDER_CALCULATOR_BASE_URL"),
+        os.getenv("RENDER_EXTERNAL_URL"),
+    ):
+        raw = str(candidate or "").strip().rstrip("/")
+        if not raw:
+            continue
+        parsed = urlparse(raw)
+        host = str(parsed.hostname or "").strip().lower()
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not host
+            or host in {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
+        ):
+            continue
+        return raw
+    return ""
+
+
+def _render_tools_page_url(path: str) -> str:
+    base_url = _configured_render_tools_base_url()
+    if not base_url:
+        return "/render-tools-configuration-error"
+    normalized_path = "/" + str(path or "").strip().lstrip("/")
+    return f"{base_url}{normalized_path}"
+
+
 def _profile_main_buttons() -> List[Dict[str, object]]:
+    if APP_PROFILE == "render":
+        return []
+
     buttons: List[Dict[str, object]] = [
         {"id": "calculator", "name": "calculator", "label": "Calculator", "open_url": "/merged/calculator", "dashboard_main_view": True},
     ]
-    if APP_PROFILE == "render":
-        buttons.append({"id": "fxweekend", "name": "fxweekend", "label": "FX Weekend", "open_url": "/apps/fxweekend-clone", "dashboard_main_view": True})
-        if "bybit_trigger_bounce_trader" in RENDER_ALLOWED_APPS:
-            buttons.append({"id": "bounce-trader", "name": "bounce-trader", "label": "Bounce Trader", "open_url": "/merged/bounce-trader", "dashboard_main_view": True})
-    elif APP_PROFILE == "local":
+    if APP_PROFILE == "local":
         buttons.extend(
             [
+                {"id": "bounce-trader", "name": "bounce-trader", "label": "Bounce Trader", "open_url": _render_tools_page_url("/merged/bounce-trader"), "dashboard_main_view": True, "remote_owned": True},
+                {"id": "fxweekend", "name": "fxweekend", "label": "FX Weekend", "open_url": _render_tools_page_url("/apps/fxweekend-clone"), "dashboard_main_view": True, "remote_owned": True},
                 {"id": "trading-journal", "name": "trading-journal", "label": "Journal", "open_url": "/dashboard/trading-journal", "dashboard_main_view": True},
                 {"id": "monitor", "name": "monitor", "label": "Scanner", "open_url": "/merged/monitor", "dashboard_main_view": True},
                 {"id": "ivindicator-clone", "name": "ivindicator-clone", "label": "IV Indicator", "open_url": "/apps/ivindicator-clone", "dashboard_main_view": True},
@@ -2315,6 +2346,7 @@ def _cashflow_row_to_ledger_event(row: Dict[str, object]) -> Dict[str, object]:
         "new_balance": new_balance,
         "currency": currency,
         "reason": reason,
+        "side": str(row_data.get("side") or row_data.get("cashflow_type") or "").strip(),
     }
 
 
@@ -2335,7 +2367,23 @@ def _normalize_cashflow_ledger_keys(ledger: Dict[str, object]) -> Dict[str, List
 
 def _merge_pending_cashflow_rows_into_ledger(ledger: Dict[str, object], pending_rows: List[Dict[str, object]]) -> Dict[str, List[Dict[str, object]]]:
     merged = _normalize_cashflow_ledger_keys(ledger if isinstance(ledger, dict) else {})
+    def event_identity(event: Dict[str, object]) -> Tuple[object, ...]:
+        return (
+            _norm_account_key(event.get("account")),
+            round(_timestamp_epoch_seconds(event.get("date")), 6),
+            _to_float(event.get("amount")),
+            _to_float(event.get("new_balance")),
+            str(event.get("currency") or "").strip().upper(),
+        )
+
     seen_ids = {str((ev or {}).get("id") or "").strip() for vals in merged.values() for ev in vals if isinstance(ev, dict)}
+    seen_ids.discard("")
+    seen_events = {
+        event_identity(ev)
+        for vals in merged.values()
+        for ev in vals
+        if isinstance(ev, dict)
+    }
     for row in pending_rows or []:
         if not isinstance(row, dict) or str(row.get("row_type") or "").strip().lower() != "cashflow":
             continue
@@ -2345,10 +2393,14 @@ def _merge_pending_cashflow_rows_into_ledger(ledger: Dict[str, object], pending_
         event = _cashflow_row_to_ledger_event(row)
         if not event:
             continue
+        identity = event_identity(event)
+        if identity in seen_events:
+            continue
         key = _norm_account_key(event.get("account") or row.get("account_label") or row.get("account") or "")
         if not key:
             continue
         merged.setdefault(key, []).append(event)
+        seen_events.add(identity)
         if row_id:
             seen_ids.add(row_id)
     return merged
@@ -2577,16 +2629,24 @@ def _build_trading_journal_view_snapshot(
         ledger = _load_cashflows_from_local(local_cashflow_dir) if (local_cashflow_dir / "account_cashflows.xlsx").exists() else {}
     else:
         ledger = _load_cashflows_for_active_journal_source(state if isinstance(state, dict) else {})
+    source_cashflow_rows = [row for row in rows if _row_type(row) == "cashflow"]
+    other_non_trade_rows = [
+        row for row in rows
+        if _row_type(row) not in {"trade", "cashflow"}
+        and not _is_monthly_aud_reval_row(row)
+    ]
+    ledger = _merge_pending_cashflow_rows_into_ledger(ledger, source_cashflow_rows)
+    timeline_source_rows = [row for row in rows if _row_type(row) == "trade"]
     excel_balances, oanda_balance_warnings = _reconcile_oanda_export_balance_labels(
         excel_balances,
         ledger,
     )
-    timeline = _build_journal_balance_timelines(rows, ledger, excel_balances)
-    trade_items = _enrich_trade_row_metrics(timeline.get("rows") if isinstance(timeline.get("rows"), list) else rows)
+    timeline = _build_journal_balance_timelines(timeline_source_rows, ledger, excel_balances)
+    trade_items = _enrich_trade_row_metrics(timeline.get("rows") if isinstance(timeline.get("rows"), list) else timeline_source_rows)
     cashflow_rows = [r for r in _cashflow_rows_for_journal(ledger) if isinstance(r, dict) and not _exclude_bybit_demo_row(r)]
     stats_items = sorted([*trade_items, *cashflow_rows], key=_row_sort_dt, reverse=True)
     monthly_note_rows = _monthly_aud_revaluation_rows_for_journal_view()
-    combined_items = sorted([*trade_items, *cashflow_rows, *monthly_note_rows], key=_row_sort_dt, reverse=True)
+    combined_items = sorted([*trade_items, *cashflow_rows, *other_non_trade_rows, *monthly_note_rows], key=_row_sort_dt, reverse=True)
     balances = timeline.get("balances") if isinstance(timeline.get("balances"), list) else []
     stats = _compute_journal_stats_with_period_reports(stats_items, balances)
     broker_balances = (state or {}).get("broker_account_balances") if isinstance(state, dict) else []
@@ -9053,9 +9113,13 @@ def _cashflow_rows_for_journal(ledger: Dict[str, List[Dict[str, object]]]) -> Li
                     flow_type = "deposit"
                 elif amount < 0:
                     flow_type = "withdrawal"
+            else:
+                preserved_type = str(ev.get("side") or "").strip().lower()
+                if preserved_type in {"deposit", "withdrawal", "adjustment", "cashflow"}:
+                    flow_type = preserved_type
             rows.append(
                 {
-                    "id": f"cashflow:{account_key}:{event_dt}:{idx}",
+                    "id": str(ev.get("id") or f"cashflow:{account_key}:{event_dt}:{idx}"),
                     "row_type": "cashflow",
                     "cashflow_type": flow_type,
                     "cashflow_reason": reason,
@@ -11069,7 +11133,10 @@ def _update_state_sync_status(**updates: object) -> Dict[str, object]:
         _STATE_SYNC_STATUS.update(updates)
         return dict(_STATE_SYNC_STATUS)
 
-def _calendar_has_expected_pl_cells(cal_ws, expected_year_months: Set[Tuple[int, int]]) -> bool:
+def _calendar_missing_expected_pl_cells(
+    cal_ws,
+    expected_year_months: Set[Tuple[int, int]],
+) -> List[Tuple[int, int]]:
     def _has_pl_cell_value(value: object) -> bool:
         if isinstance(value, (int, float)):
             return True
@@ -11110,6 +11177,7 @@ def _calendar_has_expected_pl_cells(cal_ws, expected_year_months: Set[Tuple[int,
         default_year_rows.setdefault(year, rr)
         if str(cal_ws.cell(rr, 2).value or "").strip().lower() == "p/l %":
             custom_year_rows[year] = rr
+    missing: List[Tuple[int, int]] = []
     for year, month in expected_year_months:
         found_numeric = False
         col_default = month_to_col_default.get(month)
@@ -11131,8 +11199,18 @@ def _calendar_has_expected_pl_cells(cal_ws, expected_year_months: Set[Tuple[int,
             if _has_pl_cell_value(cal_ws.cell(row_transposed, col_transposed).value):
                 found_numeric = True
         if not found_numeric:
-            return False
-    return True
+            missing.append((year, month))
+    return sorted(missing)
+
+
+def _calendar_has_expected_pl_cells(
+    cal_ws,
+    expected_year_months: Set[Tuple[int, int]],
+) -> bool:
+    return not _calendar_missing_expected_pl_cells(
+        cal_ws,
+        expected_year_months,
+    )
 
 
 def _mark_primary_state_verified(key: str, payload: object) -> Dict[str, object]:
@@ -23577,6 +23655,24 @@ async def home_page() -> Response:
     return HTMLResponse(_render_dashboard_template_for_profile())
 
 
+@app.get("/render-tools-configuration-error", response_class=HTMLResponse)
+async def render_tools_configuration_error() -> HTMLResponse:
+    return HTMLResponse(
+        """
+        <!doctype html><html lang="en"><head><meta charset="utf-8">
+        <meta name="viewport" content="width=device-width,initial-scale=1">
+        <title>Render Trading Tools configuration required</title></head>
+        <body style="font-family:system-ui,sans-serif;max-width:760px;margin:48px auto;padding:0 20px">
+        <h1>Render Trading Tools URL is not configured</h1>
+        <p>Bounce Trader and FX Weekend are hosted by Render and are not started locally.</p>
+        <p>Set <code>RENDER_CALCULATOR_BASE_URL</code> to the public Render Trading Tools base URL in
+        <code>C:\\GPT\\env.env</code>, then restart Local Trading Tools.</p>
+        </body></html>
+        """,
+        status_code=503,
+    )
+
+
 @app.get("/instrument-specs", response_class=HTMLResponse)
 @app.get("/instrument-specs/", response_class=HTMLResponse)
 @app.get("/instrument-lookup", response_class=HTMLResponse)
@@ -29892,7 +29988,25 @@ async def list_scripts() -> JSONResponse:
             "standalone": False,
             "dashboard_main_view": bool(btn.get("dashboard_main_view")),
         }
-        if btn["name"] == "history":
+        if bool(btn.get("remote_owned")):
+            row["remote_owned"] = True
+        if APP_PROFILE == "local" and bool(btn.get("remote_owned")):
+            configured = bool(_configured_render_tools_base_url())
+            row.update(
+                {
+                    "starting": False,
+                    "running": configured if btn["name"] == "fxweekend" else False,
+                    "enabled": configured,
+                    "operational": configured,
+                    "autostart_expected": False,
+                    "status_detail": (
+                        "Render destination configured"
+                        if configured
+                        else "Render Trading Tools base URL is not configured"
+                    ),
+                }
+            )
+        elif btn["name"] == "history":
             row["starting"] = bool(
                 by_name.get("bybithistory-clone", {}).get("starting")
                 or by_name.get("oanda_history-clone", {}).get("starting")
@@ -33417,6 +33531,179 @@ def _master_journal_active_sync_payload(path: Path, sync_id: str, caller: str) -
     }
 
 
+class _NonAuthoritativeSnapshotShrinkError(RuntimeError):
+    def __init__(self, diagnostics: Dict[str, object]):
+        self.diagnostics = dict(diagnostics)
+        super().__init__(
+            "Trading Journal sync blocked a destructive non-authoritative snapshot "
+            f"shrink (existing_trades={diagnostics.get('existing_trade_rows')}, "
+            f"incoming_trades={diagnostics.get('incoming_trade_rows')}, "
+            f"retained_ratio={diagnostics.get('effective_retained_ratio')}). "
+            "Restore the complete journal source, or explicitly use local/master_journal "
+            "authoritative mode for an intentional replacement."
+        )
+
+
+def _existing_master_journal_trade_population(path: Path) -> Dict[str, object]:
+    population: Dict[str, object] = {
+        "trade_rows": 0,
+        "trade_row_ids": set(),
+        "inspection_error": None,
+    }
+    if not path.exists():
+        return population
+    try:
+        wb = load_workbook(path, data_only=True, read_only=True)
+    except Exception as exc:
+        population["inspection_error"] = f"Failed to open existing workbook: {exc}"
+        return population
+    try:
+        trade_log = _get_trade_log_sheet(wb, allow_legacy=False)
+        header_map = _trade_log_header_map(trade_log)
+        row_id_index = int(header_map.get("Row ID") or 0) - 1
+        row_type_index = int(header_map.get("Row Type") or 0) - 1
+        symbol_index = int(header_map.get("Symbol") or 0) - 1
+        trade_rows = 0
+        trade_row_ids: Set[str] = set()
+        for values in trade_log.iter_rows(
+            min_row=_trade_log_data_start_row(trade_log),
+            values_only=True,
+        ):
+            row_type = (
+                str(values[row_type_index] or "").strip().lower()
+                if 0 <= row_type_index < len(values)
+                else ""
+            )
+            if row_type and row_type != "trade":
+                continue
+            row_id = (
+                str(values[row_id_index] or "").strip()
+                if 0 <= row_id_index < len(values)
+                else ""
+            )
+            symbol = (
+                str(values[symbol_index] or "").strip()
+                if 0 <= symbol_index < len(values)
+                else ""
+            )
+            if not row_id and not symbol:
+                continue
+            trade_rows += 1
+            if row_id:
+                trade_row_ids.add(row_id)
+        population["trade_rows"] = trade_rows
+        population["trade_row_ids"] = trade_row_ids
+    except Exception as exc:
+        population["inspection_error"] = (
+            f"Failed to inspect existing Trade Log population: {exc}"
+        )
+    finally:
+        wb.close()
+    return population
+
+
+def _non_authoritative_snapshot_shrink_guard(
+    path: Path,
+    snapshot: Dict[str, object],
+) -> Dict[str, object]:
+    source_mode = _trading_journal_source_mode()
+    configured_authoritative = bool(
+        _master_journal_single_file_mode()
+        or _trading_journal_local_excel_authoritative()
+    )
+    diagnostics: Dict[str, object] = {
+        "enabled": not configured_authoritative,
+        "blocked": False,
+        "source_mode": source_mode,
+        "configured_authoritative": configured_authoritative,
+        "minimum_existing_trade_rows": 10,
+        "minimum_missing_trade_rows": 5,
+        "minimum_retained_ratio": 0.80,
+    }
+    if configured_authoritative or not path.exists():
+        diagnostics["reason"] = (
+            "configured_authoritative_source"
+            if configured_authoritative
+            else "workbook_missing"
+        )
+        return diagnostics
+
+    existing = _existing_master_journal_trade_population(path)
+    inspection_error = str(existing.get("inspection_error") or "").strip()
+    diagnostics["inspection_error"] = inspection_error or None
+    if inspection_error:
+        diagnostics["reason"] = "existing_workbook_population_unavailable"
+        return diagnostics
+
+    existing_count = int(existing.get("trade_rows") or 0)
+    existing_ids = {
+        str(row_id or "").strip()
+        for row_id in (existing.get("trade_row_ids") or set())
+        if str(row_id or "").strip()
+    }
+    incoming_rows = [
+        row
+        for row in (snapshot.get("items") or [])
+        if isinstance(row, dict) and _row_type(row) == "trade"
+    ]
+    incoming_count = len(incoming_rows)
+    incoming_ids = {
+        str(row.get("id") or "").strip()
+        for row in incoming_rows
+        if str(row.get("id") or "").strip()
+    }
+    retained_ids = existing_ids & incoming_ids
+    missing_existing_ids = existing_ids - incoming_ids
+    count_retained_ratio = (
+        min(1.0, incoming_count / existing_count)
+        if existing_count > 0
+        else 1.0
+    )
+    id_retained_ratio = (
+        len(retained_ids) / len(existing_ids)
+        if existing_ids
+        else None
+    )
+    effective_retained_ratio = min(
+        count_retained_ratio,
+        id_retained_ratio if id_retained_ratio is not None else 1.0,
+    )
+    missing_trade_rows = max(
+        max(0, existing_count - incoming_count),
+        len(missing_existing_ids),
+    )
+    blocked = bool(
+        existing_count >= 10
+        and missing_trade_rows >= 5
+        and effective_retained_ratio < 0.80
+    )
+    diagnostics.update(
+        {
+            "existing_trade_rows": existing_count,
+            "incoming_trade_rows": incoming_count,
+            "existing_trade_row_ids": len(existing_ids),
+            "incoming_trade_row_ids": len(incoming_ids),
+            "retained_existing_trade_row_ids": len(retained_ids),
+            "missing_existing_trade_rows": missing_trade_rows,
+            "count_retained_ratio": round(count_retained_ratio, 6),
+            "id_retained_ratio": (
+                round(id_retained_ratio, 6)
+                if id_retained_ratio is not None
+                else None
+            ),
+            "effective_retained_ratio": round(effective_retained_ratio, 6),
+            "missing_existing_row_ids_sample": sorted(missing_existing_ids)[:20],
+            "blocked": blocked,
+            "reason": (
+                "destructive_non_authoritative_snapshot_shrink"
+                if blocked
+                else "population_retained"
+            ),
+        }
+    )
+    return diagnostics
+
+
 def _reserve_master_journal_workbook_sync(path: Path, sync_id: str, caller: str) -> Optional[Dict[str, object]]:
     if not MASTER_JOURNAL_WORKBOOK_SYNC_LOCK.acquire(blocking=False):
         APP_LOGGER.warning(
@@ -33497,11 +33784,55 @@ def _sync_master_journal_workbook(*, defer_github_sync: bool = False, expected_s
         _release_master_journal_workbook_sync()
 
 
+def _trade_log_filter_coverage(ws) -> Dict[str, object]:
+    ref = str(ws.auto_filter.ref or "") if ws.auto_filter else ""
+    last_populated_row = _trade_log_last_populated_row(ws)
+    result: Dict[str, object] = {
+        "ref": ref,
+        "last_populated_row": last_populated_row,
+        "ok": False,
+    }
+    if not ref:
+        result["reason"] = "missing"
+        return result
+    try:
+        min_col, min_row, max_col, max_row = range_boundaries(ref)
+    except Exception as exc:
+        result.update({"reason": "invalid_range", "error": str(exc)})
+        return result
+    headers = _trade_log_header_map(ws)
+    required_columns = [
+        headers.get(header) for header in ("Open Time", "Close Time", "Row ID")
+    ]
+    expected_header_row = _trade_log_data_start_row(ws) - 1
+    result.update(
+        {
+            "min_col": min_col,
+            "min_row": min_row,
+            "max_col": max_col,
+            "max_row": max_row,
+            "expected_header_row": expected_header_row,
+        }
+    )
+    if min_col != 1 or min_row != expected_header_row:
+        result["reason"] = "invalid_start"
+        return result
+    if any(column is None or column > max_col for column in required_columns):
+        result["reason"] = "required_columns_excluded"
+        return result
+    if max_row < last_populated_row:
+        result["reason"] = "populated_rows_excluded"
+        return result
+    result.update({"ok": True, "reason": "covered"})
+    return result
+
+
 def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, expected_survivor_row_ids: Optional[List[str]] = None, prebuilt_snapshot: Optional[Dict[str, object]] = None, sync_caller: str = "internal", sync_id: Optional[str] = None) -> Dict[str, object]:
     path = _master_journal_path()
     tmp = path.with_suffix('.tmp.xlsx')
     created_tmp = False
     validation_warnings: List[str] = []
+    snapshot_shrink_guard: Dict[str, object] = {}
     substage_timings: Dict[str, float] = {}
     _substage_t0 = time.perf_counter()
     def _finish_substage(stage: str) -> None:
@@ -33534,42 +33865,71 @@ def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, e
         source_trade_rows = [r for r in source_items if _row_type(r) == "trade"]
         _finish_substage("snapshot_build")
 
-        manual_overrides = {} if isinstance(prebuilt_snapshot, dict) else (read_master_journal_manual_overrides(path) if path.exists() else {})
+        manual_overrides = (
+            read_master_journal_manual_overrides(path)
+            if path.exists()
+            else {}
+        )
         _finish_substage("manual_override_read")
-        if isinstance(manual_overrides, dict) and manual_overrides:
-            from tools.master_journal_workbook import _all_trades_row_fingerprint_from_map
-            if _master_journal_single_file_mode():
-                current_rows = [r for r in source_items if isinstance(r, dict)]
-            else:
-                current_rows = [r for r in _get_trading_journal_rows() if isinstance(r, dict)]
-            merged_rows: List[Dict[str, object]] = []
-            overrides_applied = 0
-            for row in current_rows:
-                key_id = str(row.get('id') or row.get('__row_id') or '').strip()
-                key_sig = _all_trades_row_fingerprint_from_map({
-                    'Account': row.get('account_label') or row.get('account'),
-                    'Symbol': row.get('symbol'),
-                    'Side': row.get('side'),
-                    'Open Time': row.get('open_time'),
-                    'Close Time': row.get('close_time'),
-                    'Qty': row.get('qty'),
-                    'Entry Price': row.get('entry_price'),
-                    'Exit Price': row.get('exit_price'),
-                    'Net P/L': row.get('net_profit'),
-                })
-                ov = manual_overrides.get(key_id) or manual_overrides.get(key_sig) or {}
-                if ov:
-                    overrides_applied += 1
-                merged_rows.append(_apply_trading_journal_manual_overrides(dict(row), ov) if ov else dict(row))
-            if overrides_applied > 0:
-                if _master_journal_single_file_mode():
-                    snapshot = dict(snapshot)
-                    snapshot["items"] = merged_rows
-                else:
-                    _set_trading_journal_rows(merged_rows)
-                    snapshot = _build_manual_import_authoritative_snapshot()
-                source_items = [r for r in (snapshot.get("items") or []) if isinstance(r, dict)]
-                source_trade_rows = [r for r in source_items if _row_type(r) == "trade"]
+        normalization_input = source_items
+        if (
+            isinstance(manual_overrides, dict)
+            and manual_overrides
+            and not isinstance(prebuilt_snapshot, dict)
+            and not _master_journal_single_file_mode()
+        ):
+            normalization_input = [
+                r for r in _get_trading_journal_rows() if isinstance(r, dict)
+            ]
+        normalized_rows, recommendation_row_normalization = (
+            _normalize_master_journal_rows(
+                normalization_input,
+                manual_overrides if isinstance(manual_overrides, dict) else {},
+            )
+        )
+        if (
+            int(recommendation_row_normalization.get("manual_override_rows_applied") or 0) > 0
+            and not isinstance(prebuilt_snapshot, dict)
+            and not _master_journal_single_file_mode()
+        ):
+            _set_trading_journal_rows(normalized_rows)
+            snapshot = _build_manual_import_authoritative_snapshot()
+            normalized_rows, rebuilt_normalization = _normalize_master_journal_rows(
+                [r for r in (snapshot.get("items") or []) if isinstance(r, dict)],
+                manual_overrides if isinstance(manual_overrides, dict) else {},
+            )
+            recommendation_row_normalization = {
+                **recommendation_row_normalization,
+                **rebuilt_normalization,
+            }
+        normalization_changed_rows = normalized_rows != source_items
+        snapshot = dict(snapshot)
+        snapshot["items"] = normalized_rows
+        if normalization_changed_rows:
+            # A manual Test override, execution de-duplication, or row repair can
+            # change which trades contribute to every dashboard/report metric.
+            # Keep the snapshot aggregates tied to the exact normalized rows
+            # written to the workbook and used for recommendation artifacts.
+            snapshot["stats"] = _compute_journal_stats_with_period_reports(
+                normalized_rows,
+                [
+                    balance
+                    for balance in (snapshot.get("balances") or [])
+                    if isinstance(balance, dict)
+                ],
+            )
+            recommendation_row_normalization["stats_recomputed"] = True
+        else:
+            recommendation_row_normalization["stats_recomputed"] = False
+        source_items = normalized_rows
+        source_trade_rows = [r for r in source_items if _row_type(r) == "trade"]
+
+        snapshot_shrink_guard = _non_authoritative_snapshot_shrink_guard(
+            path,
+            snapshot,
+        )
+        if snapshot_shrink_guard.get("blocked"):
+            raise _NonAuthoritativeSnapshotShrinkError(snapshot_shrink_guard)
 
         if path.exists():
             if expected_survivor_row_ids is None:
@@ -33577,6 +33937,7 @@ def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, e
                     path,
                     snapshot,
                     preserve_existing_layout=True,
+                    publish_recommendation_assets=False,
                 )
             else:
                 update_result = update_master_journal_workbook_data_only(
@@ -33584,6 +33945,7 @@ def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, e
                     snapshot,
                     expected_survivor_row_ids=expected_survivor_row_ids,
                     preserve_existing_layout=True,
+                    publish_recommendation_assets=False,
                 )
             if not bool((update_result or {}).get("ok")):
                 raise RuntimeError(str((update_result or {}).get("error") or "Trading Journal data-only update failed."))
@@ -33595,7 +33957,13 @@ def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, e
             validate_path = tmp
             _finish_substage("update_master_journal_workbook_data_only")
         else:
-            build_master_journal_workbook(snapshot, tmp)
+            build_master_journal_workbook(
+                snapshot,
+                tmp,
+                recommendation_workbook_path=path,
+                publish_recommendation_assets=False,
+                manual_overrides={},
+            )
             created_tmp = True
             if not tmp.exists() or tmp.stat().st_size <= 0:
                 raise RuntimeError("Trading Journal temporary workbook was not created.")
@@ -33620,6 +33988,13 @@ def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, e
                 raise RuntimeError("Trading Journal validation failed: '_Trade Meta' must not be present.")
             if not trade_log.auto_filter or not trade_log.auto_filter.ref:
                 raise RuntimeError("Trading Journal validation failed: Trade Log filter missing.")
+            trade_log_filter_coverage = _trade_log_filter_coverage(trade_log)
+            if not trade_log_filter_coverage.get("ok"):
+                raise RuntimeError(
+                    "Trading Journal validation failed: Trade Log filter does not "
+                    "cover its populated data; "
+                    f"diagnostics={trade_log_filter_coverage}."
+                )
             if not inst.auto_filter or not inst.auto_filter.ref:
                 raise RuntimeError("Trading Journal validation failed: SYMBOLS filter missing.")
             def _is_hidden_trade_row(row: Dict[str, object]) -> bool:
@@ -33629,10 +34004,17 @@ def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, e
                         return True
                 return False
 
-            visible_trade_rows = [
+            validation_trade_rows = [
                 _repair_or_flag_zero_trade_qty(dict(r))
                 for r in (snapshot.get("items") or [])
-                if isinstance(r, dict) and _row_type(r) == "trade" and not _is_hidden_trade_row(r)
+                if isinstance(r, dict) and _row_type(r) == "trade"
+            ]
+            validation_trade_rows, _validation_dedupe_diagnostics = (
+                _dedupe_trade_rows_by_execution(validation_trade_rows)
+            )
+            visible_trade_rows = [
+                row for row in validation_trade_rows
+                if not _is_hidden_trade_row(row)
             ]
             crypto_zero_qty_ids: List[str] = []
             fx_zero_qty_ids: List[str] = []
@@ -33856,8 +34238,20 @@ def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, e
                     dt = _journal_as_date(ts_value) if ts_value else None
                     if dt:
                         expected_year_months.add((int(dt.year), int(dt.month)))
-                if expected_year_months and not _calendar_has_expected_pl_cells(cal, expected_year_months):
-                    raise RuntimeError("Trading Journal validation failed: P&L Calendar missing expected dated P/L cells.")
+                missing_calendar_cells = _calendar_missing_expected_pl_cells(
+                    cal,
+                    expected_year_months,
+                )
+                if missing_calendar_cells:
+                    raise RuntimeError(
+                        "Trading Journal validation failed: P&L Calendar missing "
+                        "expected dated P/L cells: "
+                        + ", ".join(
+                            f"{year:04d}-{month:02d}"
+                            for year, month in missing_calendar_cells[:20]
+                        )
+                        + "."
+                    )
             _finish_substage("validation_calendar")
             expected_reports = expected_report_sheet_names(snapshot)
             for sheet_name in expected_reports:
@@ -34059,6 +34453,17 @@ def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, e
             if not enforce_post.get("ok"):
                 raise RuntimeError("Unknown extra Excel files in journal directory after workbook sync: " + ", ".join(enforce_post.get("unknown_extra_excel_files") or []) + ". Move legacy backups outside journal/. Keep only journal/Trading Journal.xlsx.")
         _finish_substage("enforce_single_file")
+        from tools.master_journal_workbook import (
+            _prepare_recommendation_chart_bundle,
+            _publish_recommendation_chart_bundle,
+        )
+        recommendation_chart_bundle = _prepare_recommendation_chart_bundle(
+            source_items,
+            path,
+        )
+        recommendation_chart_asset_directory = (
+            _publish_recommendation_chart_bundle(recommendation_chart_bundle)
+        )
         size = path.stat().st_size
         payload = {
             'master_journal_ok': True,
@@ -34072,7 +34477,14 @@ def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, e
                 'source_rows_total': len(source_items),
                 'source_trade_rows': len(source_trade_rows),
                 'source_balances': len(snapshot.get('balances') or []),
+                'recommendation_row_normalization': dict(
+                    recommendation_row_normalization
+                ),
+                'snapshot_shrink_guard': dict(snapshot_shrink_guard),
                 'workbook_sync_substage_timings': dict(substage_timings),
+                'recommendation_chart_asset_directory': str(
+                    recommendation_chart_asset_directory
+                ),
             },
         }
         if validation_warnings:
@@ -34104,15 +34516,29 @@ def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, e
                 'diagnostics': {'workbook_sync_substage_timings': dict(substage_timings)},
             })
             return payload
-        return {
+        failure_diagnostics: Dict[str, object] = {
+            'workbook_sync_substage_timings': dict(substage_timings),
+        }
+        if snapshot_shrink_guard:
+            failure_diagnostics['snapshot_shrink_guard'] = dict(
+                snapshot_shrink_guard
+            )
+        payload = {
             'ok': False,
             'master_journal_ok': False,
             'master_journal_path': str(path),
             'master_journal_exists': path.exists(),
             'master_journal_error': str(exc),
             'master_journal_error_type': type(exc).__name__,
-            'diagnostics': {'workbook_sync_substage_timings': dict(substage_timings)},
+            'diagnostics': failure_diagnostics,
         }
+        if isinstance(exc, _NonAuthoritativeSnapshotShrinkError):
+            payload.update({
+                'code': 'NON_AUTHORITATIVE_SNAPSHOT_SHRINK_BLOCKED',
+                'status_code': 409,
+                'master_journal_diagnostics': failure_diagnostics,
+            })
+        return payload
 
 def _trading_journal_github_sync_enabled() -> bool:
     raw = str(os.getenv("TRADING_JOURNAL_GITHUB_SYNC_ENABLED", "") or "").strip().lower()
@@ -34157,6 +34583,11 @@ def _legacy_master_journal_tracked_and_missing(repo_root: Path, timeout_s: int) 
 def _repo_state_files_for_github(master_path: Path, timeout_s: int = 60) -> List[Path]:
     repo_root = _repo_root_for_journal_path(master_path).resolve()
     master_resolved = master_path.expanduser().resolve()
+    recommendation_asset_root = (
+        master_resolved.parent
+        / f"{master_resolved.stem}.assets"
+        / "recommendations"
+    ).resolve()
     allowlist = [
         master_resolved,
         repo_root / "journal" / "Trading Journal.xlsx",
@@ -34175,6 +34606,42 @@ def _repo_state_files_for_github(master_path: Path, timeout_s: int = 60) -> List
                 continue
             seen.add(rp)
             files.append(rp)
+    try:
+        recommendation_asset_rel = str(
+            recommendation_asset_root.relative_to(repo_root)
+        ).replace("\\", "/")
+    except ValueError:
+        recommendation_asset_rel = ""
+    if recommendation_asset_rel:
+        for asset in (
+            sorted(recommendation_asset_root.rglob("*.html"))
+            if recommendation_asset_root.is_dir()
+            else []
+        ):
+            resolved_asset = asset.resolve()
+            if resolved_asset in seen:
+                continue
+            seen.add(resolved_asset)
+            files.append(resolved_asset)
+        code, tracked_output, _ = _run_git_command(
+            ["ls-files", "-z", "--", recommendation_asset_rel],
+            repo_root,
+            timeout_s,
+        )
+        if code == 0:
+            for tracked_rel in str(tracked_output or "").split("\0"):
+                normalized_rel = tracked_rel.strip().replace("\\", "/")
+                if not normalized_rel.casefold().endswith(".html"):
+                    continue
+                tracked_path = (repo_root / normalized_rel).resolve()
+                try:
+                    tracked_path.relative_to(recommendation_asset_root)
+                except ValueError:
+                    continue
+                if tracked_path in seen:
+                    continue
+                seen.add(tracked_path)
+                files.append(tracked_path)
     if _legacy_master_journal_tracked_and_missing(repo_root, timeout_s):
         files.append((repo_root / "journal" / "Master Journal.xlsx").resolve())
     return files
@@ -34463,7 +34930,10 @@ def _repair_stats1_recommendation_rows_for_excel_open(wb: object, diagnostics: D
 
 
 def _polish_master_journal_for_excel_open(path: Path) -> Dict[str, object]:
-    from tools.master_journal_workbook import _normalize_trade_log_row_heights
+    from tools.master_journal_workbook import (
+        _normalize_generated_statistics_row_heights,
+        _normalize_trade_log_row_heights,
+    )
 
     diagnostics: Dict[str, object] = {
         "ok": True,
@@ -34555,6 +35025,7 @@ def _polish_master_journal_for_excel_open(path: Path) -> Dict[str, object]:
 
         for ws in wb.worksheets:
             _normalize_trade_log_row_heights(ws, diagnostics)
+        _normalize_generated_statistics_row_heights(wb)
 
         wb.save(path)
         return diagnostics
@@ -37008,15 +37479,34 @@ def _save_resync_success_metadata(path: Path, fingerprint: Dict[str, object], sn
 
 
 def _fast_verify_trading_journal_workbook(path: Path, *, expected_snapshot: Optional[Dict[str, object]] = None) -> Dict[str, object]:
-    diagnostics: Dict[str, object] = {"checked_accounts": [], "formula_error_cells": []}
+    diagnostics: Dict[str, object] = {
+        "checked_accounts": [],
+        "formula_error_cells": [],
+        "managed_source_cells": [],
+        "managed_row_height_mismatches": [],
+        "verbose_duration_cells": [],
+        "recommendation_links_checked": [],
+    }
     if not path.exists():
         return {"ok": False, "error": "Trading Journal.xlsx is missing.", "diagnostics": diagnostics}
     wb = load_workbook(path, data_only=False)
     try:
         expected_order = [*SHEET_ORDER, *expected_report_sheet_names(expected_snapshot)]
         diagnostics["sheet_order"] = list(wb.sheetnames)
-        if list(wb.sheetnames) != expected_order:
-            return {"ok": False, "error": f"sheet_order_mismatch: expected {expected_order}, got {wb.sheetnames}", "diagnostics": diagnostics}
+        missing_sheets = [name for name in expected_order if name not in wb.sheetnames]
+        expected_positions = [wb.sheetnames.index(name) for name in expected_order if name in wb.sheetnames]
+        if missing_sheets or expected_positions != sorted(expected_positions):
+            return {
+                "ok": False,
+                "error": (
+                    "sheet_order_mismatch: required generated sheets must remain "
+                    f"in order; missing={missing_sheets}, got={wb.sheetnames}"
+                ),
+                "diagnostics": diagnostics,
+            }
+        diagnostics["preserved_extra_sheets"] = [
+            name for name in wb.sheetnames if name not in expected_order
+        ]
         dash = _stats1_sheet(wb)
         detail_dash = _stats2_sheet(wb) or dash
         trade_log = wb["Trade Log"]
@@ -37025,6 +37515,14 @@ def _fast_verify_trading_journal_workbook(path: Path, *, expected_snapshot: Opti
         diagnostics["instrument_averages_filter"] = inst.auto_filter.ref
         if not trade_log.auto_filter.ref:
             return {"ok": False, "error": "Trade Log filter is missing.", "diagnostics": diagnostics}
+        trade_log_filter_coverage = _trade_log_filter_coverage(trade_log)
+        diagnostics["trade_log_filter_coverage"] = trade_log_filter_coverage
+        if not trade_log_filter_coverage.get("ok"):
+            return {
+                "ok": False,
+                "error": "trade_log_filter_excludes_populated_rows",
+                "diagnostics": diagnostics,
+            }
         if not inst.auto_filter.ref:
             return {"ok": False, "error": "SYMBOLS filter is missing.", "diagnostics": diagnostics}
         error_tokens = ("#REF!", "#DIV/0!", "#VALUE!", "#NAME?", "#N/A")
@@ -37043,6 +37541,45 @@ def _fast_verify_trading_journal_workbook(path: Path, *, expected_snapshot: Opti
         if diagnostics["formula_error_cells"]:
             return {"ok": False, "error": "formula_error_strings_found", "diagnostics": diagnostics}
 
+        managed_statistics_sheets = [
+            ws
+            for ws in wb.worksheets
+            if ws.title in {STATS1_SHEET, REPORT_YEARLY_SHEET}
+            or (ws.title.isdigit() and int(ws.title) >= 2018)
+        ]
+        verbose_duration_pattern = re.compile(
+            r"\b\d+(?:\.\d+)?\s*(?:days?|hours?|minutes?|seconds?)\b",
+            re.IGNORECASE,
+        )
+        for ws in managed_statistics_sheets:
+            for row_number in range(1, ws.max_row + 1):
+                populated = False
+                for col_number in range(1, ws.max_column + 1):
+                    cell = ws.cell(row_number, col_number)
+                    value = cell.value
+                    if value not in (None, ""):
+                        populated = True
+                    if str(value or "").strip().casefold() == "source":
+                        diagnostics["managed_source_cells"].append(
+                            {"sheet": ws.title, "cell": cell.coordinate}
+                        )
+                    if isinstance(value, str) and verbose_duration_pattern.search(value):
+                        diagnostics["verbose_duration_cells"].append(
+                            {"sheet": ws.title, "cell": cell.coordinate, "value": value}
+                        )
+                if row_number >= 2 and populated:
+                    height = ws.row_dimensions[row_number].height
+                    if height is None or abs(float(height) - 14.5) > 1e-9:
+                        diagnostics["managed_row_height_mismatches"].append(
+                            {"sheet": ws.title, "row": row_number, "height": height}
+                        )
+        if diagnostics["managed_source_cells"]:
+            return {"ok": False, "error": "generated_source_rows_remain", "diagnostics": diagnostics}
+        if diagnostics["managed_row_height_mismatches"]:
+            return {"ok": False, "error": "generated_statistics_row_height_mismatch", "diagnostics": diagnostics}
+        if diagnostics["verbose_duration_cells"]:
+            return {"ok": False, "error": "verbose_duration_text_remains", "diagnostics": diagnostics}
+
         anchor = None
         for rr in range(1, detail_dash.max_row + 1):
             for cc in range(1, detail_dash.max_column + 1):
@@ -37059,7 +37596,7 @@ def _fast_verify_trading_journal_workbook(path: Path, *, expected_snapshot: Opti
             row_map: Dict[str, int] = {}
             for cc in range(anchor[1], min(detail_dash.max_column + 1, anchor[1] + 8)):
                 token = str(detail_dash.cell(rr, cc).value or "").strip().lower().replace("_", " ")
-                if token in {"account", "balance", "currency", "as of"}:
+                if token in {"account", "balance", "currency", "risk of ruin", "net p/l percentage", "as of"}:
                     row_map[token] = cc
             if {"account", "balance", "currency"}.issubset(set(row_map.keys())):
                 header_row = rr
@@ -37067,6 +37604,10 @@ def _fast_verify_trading_journal_workbook(path: Path, *, expected_snapshot: Opti
                 break
         if not header_row:
             return {"ok": False, "error": "Account Balances headers missing.", "diagnostics": diagnostics}
+        if "as of" in header_map:
+            return {"ok": False, "error": "stats2_as_of_column_present", "diagnostics": diagnostics}
+        if "net p/l percentage" not in header_map:
+            return {"ok": False, "error": "stats2_net_pl_percentage_header_missing", "diagnostics": diagnostics}
         actual: Dict[str, Dict[str, object]] = {}
         for rr in range(header_row + 1, min(detail_dash.max_row + 1, header_row + 100)):
             account = str(detail_dash.cell(rr, header_map["account"]).value or "").strip()
@@ -37079,18 +37620,14 @@ def _fast_verify_trading_journal_workbook(path: Path, *, expected_snapshot: Opti
                 "currency": str(detail_dash.cell(rr, header_map["currency"]).value or "").strip().upper(),
             }
         diagnostics["checked_accounts"] = sorted(actual.keys())
-        required = {"BINANCE": (0.0, "USDT"), "PEPPERSTONE DEMO": (0.0, "AUD")}
         mismatches: List[str] = []
-        for account_key, (expected_balance, expected_currency) in required.items():
-            row = actual.get(account_key)
-            if row is None:
-                mismatches.append(f"{account_key}: missing")
-                continue
-            bal = _to_float(row.get("balance"))
-            currency = str(row.get("currency") or "").upper()
-            if bal is None or abs(bal - expected_balance) > 1e-9 or currency != expected_currency:
-                mismatches.append(f"{account_key}: expected={expected_balance} {expected_currency}, actual={row.get('balance')} {currency}")
-        for account_key, expected in _expected_dashboard_balance_map(expected_snapshot).items():
+        expected_balance_map = _expected_dashboard_balance_map(expected_snapshot)
+        diagnostics["source_driven_nonzero_accounts"] = sorted(
+            account_key
+            for account_key, expected in expected_balance_map.items()
+            if (_to_float(expected.get("balance")) or 0.0) != 0.0
+        )
+        for account_key, expected in expected_balance_map.items():
             row = actual.get(account_key)
             expected_balance = _to_float(expected.get("balance"))
             expected_currency = str(expected.get("currency") or "").strip().upper()
@@ -37106,6 +37643,207 @@ def _fast_verify_trading_journal_workbook(path: Path, *, expected_snapshot: Opti
         if mismatches:
             diagnostics["account_balance_mismatches"] = mismatches
             return {"ok": False, "error": "dashboard_account_balance_verification_failed", "diagnostics": diagnostics}
+
+        bybit_demo = actual.get("BYBIT DEMO")
+        if bybit_demo is not None:
+            bybit_demo_value = detail_dash.cell(
+                int(bybit_demo["row"]), header_map["net p/l percentage"]
+            ).value
+            diagnostics["bybit_demo_net_pl_percentage"] = bybit_demo_value
+            if bybit_demo_value not in (None, ""):
+                return {"ok": False, "error": "bybit_demo_net_pl_percentage_not_blank", "diagnostics": diagnostics}
+
+        trade_headers = _trade_log_header_map(trade_log)
+        row_id_col = trade_headers.get("Row ID")
+        currency_col = trade_headers.get("Currency")
+        net_pl_col = trade_headers.get("Net P/L")
+        aud_revaluation_rows: List[int] = []
+        if row_id_col and currency_col and net_pl_col:
+            for row_number in range(_trade_log_data_start_row(trade_log), trade_log.max_row + 1):
+                row_id = str(trade_log.cell(row_number, row_id_col).value or "").strip()
+                if not row_id.startswith("monthly_aud_reval:"):
+                    continue
+                aud_revaluation_rows.append(row_number)
+                currency = str(trade_log.cell(row_number, currency_col).value or "").strip().upper()
+                number_format = str(trade_log.cell(row_number, net_pl_col).number_format or "").upper()
+                if currency != "AUD" or "AUD" not in number_format or "USDT" in number_format:
+                    diagnostics["monthly_aud_revaluation_format_mismatch"] = {
+                        "row": row_number,
+                        "row_id": row_id,
+                        "currency": currency,
+                        "number_format": number_format,
+                    }
+                    return {"ok": False, "error": "monthly_aud_revaluation_currency_format_mismatch", "diagnostics": diagnostics}
+        diagnostics["monthly_aud_revaluation_rows_checked"] = aud_revaluation_rows
+
+        symbol_headers = _instrument_averages_header_map(inst)
+        symbol_col = symbol_headers.get("Symbol", 1)
+        symbol_format_mismatches: List[Dict[str, object]] = []
+        required_symbol_formats = {
+            "Net R Multiple": '0.000"R"',
+            "Net P/L %": "0.00%",
+            "Avg P/L %": "0.00%",
+            "Win Rate %": "0.00%",
+            "Avg stop % (W)": "0.00%",
+            "Avg stop % (L)": "0.00%",
+            "Avg target % (W)": "0.00%",
+            "Avg target % (L)": "0.00%",
+        }
+        for row_number in range(INSTRUMENT_AVERAGES_DATA_START_ROW, inst.max_row + 1):
+            if inst.cell(row_number, symbol_col).value in (None, ""):
+                continue
+            for header, expected_format in required_symbol_formats.items():
+                col_number = symbol_headers.get(header)
+                if not col_number:
+                    continue
+                actual_format = str(inst.cell(row_number, col_number).number_format or "")
+                if actual_format != expected_format:
+                    symbol_format_mismatches.append(
+                        {
+                            "row": row_number,
+                            "symbol": inst.cell(row_number, symbol_col).value,
+                            "header": header,
+                            "expected": expected_format,
+                            "actual": actual_format,
+                        }
+                    )
+        diagnostics["symbols_format_mismatches"] = symbol_format_mismatches
+        if symbol_format_mismatches:
+            return {"ok": False, "error": "symbols_performance_number_format_mismatch", "diagnostics": diagnostics}
+
+        recommendation_cells = []
+        stats_market_cols = _stats1_market_columns(dash)
+        for row_number in range(2, dash.max_row + 1):
+            if str(dash.cell(row_number, 1).value or "").strip().casefold() != "recommendation":
+                continue
+            for col_number in stats_market_cols.values():
+                cell = dash.cell(row_number, col_number)
+                if cell.value not in (None, ""):
+                    recommendation_cells.append(cell)
+        for row_number in range(INSTRUMENT_AVERAGES_DATA_START_ROW, inst.max_row + 1):
+            if inst.cell(row_number, symbol_col).value in (None, ""):
+                continue
+            for header in (STOP_RECOMMENDATION_HEADER, TARGET_RECOMMENDATION_HEADER):
+                col_number = symbol_headers.get(header)
+                if col_number and inst.cell(row_number, col_number).value not in (None, ""):
+                    recommendation_cells.append(inst.cell(row_number, col_number))
+        for cell in recommendation_cells:
+            hyperlink = cell.hyperlink
+            target = str(getattr(hyperlink, "target", "") or "").strip() if hyperlink else ""
+            diagnostics["recommendation_links_checked"].append(
+                {"sheet": cell.parent.title, "cell": cell.coordinate, "target": target}
+            )
+            if not target or urlparse(target).scheme:
+                return {"ok": False, "error": "recommendation_offline_hyperlink_missing", "diagnostics": diagnostics}
+            artifact = (path.parent / Path(target.replace("/", os.sep))).resolve()
+            try:
+                artifact.relative_to(path.parent.resolve())
+            except ValueError:
+                return {"ok": False, "error": "recommendation_hyperlink_outside_workbook_tree", "diagnostics": diagnostics}
+            if not artifact.is_file():
+                diagnostics["missing_recommendation_artifact"] = str(artifact)
+                return {"ok": False, "error": "recommendation_artifact_missing", "diagnostics": diagnostics}
+            html_text = artifact.read_text(encoding="utf-8")
+            html_lower = html_text.casefold()
+            if (
+                "<svg" not in html_lower
+                or "data-recommended-value=" not in html_lower
+                or "http://" in html_lower
+                or "https://" in html_lower
+            ):
+                diagnostics["invalid_recommendation_artifact"] = str(artifact)
+                return {"ok": False, "error": "recommendation_artifact_not_self_contained", "diagnostics": diagnostics}
+            marker_match = re.search(
+                r"data-recommended-value\s*=\s*[\"']([^\"']+)[\"']",
+                html_text,
+                re.IGNORECASE,
+            )
+            recommendation_match = re.search(
+                r"Workbook recommendation</strong>\s*<p>(.*?)</p>",
+                html_text,
+                re.IGNORECASE | re.DOTALL,
+            )
+            expected_text = str(cell.value or "").strip()
+            artifact_text = (
+                html.unescape(re.sub(r"<[^>]+>", "", recommendation_match.group(1))).strip()
+                if recommendation_match
+                else ""
+            )
+            expected_marker_match = re.search(
+                r"\bRecommended:\s*([-+]?(?:\d+(?:\.\d*)?|\.\d+))",
+                expected_text,
+                re.IGNORECASE,
+            )
+            artifact_marker = _to_float(marker_match.group(1)) if marker_match else None
+            expected_marker_token = (
+                expected_marker_match.group(1)
+                if expected_marker_match
+                else ""
+            )
+            expected_marker = (
+                _to_float(expected_marker_token)
+                if expected_marker_match
+                else None
+            )
+            marker_precision_match = re.fullmatch(
+                r"[-+]?(?:\d+)(?:\.(\d*))?",
+                expected_marker_token,
+            )
+            displayed_marker_precision = (
+                len(marker_precision_match.group(1) or "")
+                if marker_precision_match
+                else None
+            )
+            displayed_marker_unit = (
+                10.0 ** (-displayed_marker_precision)
+                if displayed_marker_precision is not None
+                else None
+            )
+            displayed_marker_half_unit = (
+                displayed_marker_unit / 2.0
+                if displayed_marker_unit is not None
+                else None
+            )
+            marker_rounding_epsilon = (
+                max(1e-12, displayed_marker_unit * 1e-9)
+                if displayed_marker_unit is not None
+                else 0.0
+            )
+            marker_matches = (
+                artifact_marker is not None
+                and expected_marker is not None
+                and math.isfinite(artifact_marker)
+                and math.isfinite(expected_marker)
+                and displayed_marker_half_unit is not None
+                # The HTML marker is serialized to 12 significant digits while
+                # workbook text is formatted from the pre-serialization value.
+                # At an exact half-unit boundary (for example, marker 2.375 and
+                # display 2.37), the marker no longer records which side of the
+                # boundary the original binary value occupied.  Accept exactly
+                # one half of the displayed unit; the exact artifact/workbook
+                # recommendation text comparison below remains authoritative.
+                and abs(artifact_marker - expected_marker)
+                <= displayed_marker_half_unit + marker_rounding_epsilon
+            )
+            if artifact_text != expected_text or not marker_matches:
+                diagnostics.setdefault("recommendation_content_mismatches", []).append(
+                    {
+                        "sheet": cell.parent.title,
+                        "cell": cell.coordinate,
+                        "artifact": str(artifact),
+                        "expected_text": expected_text,
+                        "artifact_text": artifact_text,
+                        "expected_recommended_value": expected_marker,
+                        "artifact_recommended_value": artifact_marker,
+                        "displayed_recommended_value_precision": displayed_marker_precision,
+                        "displayed_recommended_value_half_unit": displayed_marker_half_unit,
+                    }
+                )
+                return {
+                    "ok": False,
+                    "error": "recommendation_artifact_content_mismatch",
+                    "diagnostics": diagnostics,
+                }
         return {"ok": True, "diagnostics": diagnostics}
     finally:
         wb.close()

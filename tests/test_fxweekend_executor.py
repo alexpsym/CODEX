@@ -1163,26 +1163,29 @@ def test_status_survives_restart_through_status_file(
     assert restored["running"] is False
 
 
-def test_local_dashboard_and_scripts_contain_no_fxweekend_entries(
+def test_local_dashboard_links_to_render_without_local_fxweekend_authority(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from render import master_service
 
     monkeypatch.setattr(master_service, "APP_PROFILE", "local")
     monkeypatch.setenv("AUTOSTART_SCRIPTS", "bybit_monitor,fxweekend-clone")
+    monkeypatch.setenv("RENDER_CALCULATOR_BASE_URL", "https://render.example.test")
     assert "fxweekend-clone" not in master_service._compute_autostart_scripts()
     assert "fxweekend-clone" not in master_service._LAST_AUTOSTART_UNAVAILABLE
-    assert all(
-        "fxweekend" not in str(item).lower()
-        for item in master_service._profile_main_buttons()
+    button = next(
+        item for item in master_service._profile_main_buttons() if item["name"] == "fxweekend"
     )
+    assert button["open_url"] == "https://render.example.test/apps/fxweekend-clone"
+    assert button["remote_owned"] is True
 
     dashboard = asyncio.run(master_service.home_page()).body.decode("utf-8").lower()
-    scripts = asyncio.run(master_service.list_scripts()).body.decode("utf-8").lower()
+    scripts = json.loads(asyncio.run(master_service.list_scripts()).body.decode("utf-8"))
+    by_name = {str(item.get("name")): item for item in scripts}
     assert "fxweekend" not in dashboard
     assert "fxweekend-clone" not in dashboard
-    assert "fxweekend" not in scripts
-    assert "fxweekend-clone" not in scripts
+    assert by_name["fxweekend"]["open_url"] == "https://render.example.test/apps/fxweekend-clone"
+    assert "fxweekend-clone" not in by_name
 
 
 def test_render_environment_overrides_cannot_remove_fxweekend_authority(
@@ -1210,12 +1213,7 @@ def test_render_environment_overrides_cannot_remove_fxweekend_authority(
 
     assert master_service._profile_allows_script("fxweekend-clone") is True
     assert "fxweekend-clone" in master_service._compute_autostart_scripts()
-    button = next(
-        item
-        for item in master_service._profile_main_buttons()
-        if item["name"] == "fxweekend"
-    )
-    assert button["label"] == "FX Weekend"
+    assert master_service._profile_main_buttons() == []
 
 
 def test_render_supervisor_restarts_crashed_executor(

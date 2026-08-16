@@ -112,14 +112,26 @@ def test_render_profile_scripts_hide_local_only_main_views() -> None:
     assert "pine" not in names
     assert "bybit_monitor" not in names
     assert "oanda_monitor" not in names
-    assert "calculator" in names
-    assert "fxweekend" in names
-    assert "bounce-trader" in names
+    assert "calculator" not in names
+    assert "fxweekend" not in names
+    assert "bounce-trader" not in names
     assert "fxweekend-clone" not in names
+    assert master_service._profile_allows_script("fxweekend-clone") is True
+    assert master_service._profile_allows_script("bybit_trigger_bounce_trader") is True
+    assert master_service.script_manager.get("fxweekend-clone").name == "fxweekend-clone"
+    assert (
+        master_service.script_manager.get("bybit_trigger_bounce_trader").name
+        == "bybit_trigger_bounce_trader"
+    )
+
+    bounce = asyncio.run(master_service.merged_bounce_page())
+    assert bounce.status_code == 307
+    assert bounce.headers.get("location") == "/apps/bybit_trigger_bounce_trader"
 
 
-def test_local_profile_includes_open_orders_and_trading_journal() -> None:
+def test_local_profile_includes_remote_tools_and_local_calculator(monkeypatch) -> None:
     master_service = _load_master_service("render_master_service_profile_local_scripts", "local")
+    monkeypatch.setenv("RENDER_CALCULATOR_BASE_URL", "https://tools.example.test/")
     payload = json.loads(asyncio.run(master_service.list_scripts()).body.decode("utf-8"))
     names = {str(item.get("name")) for item in payload}
     by_name = {str(item.get("name")): item for item in payload}
@@ -130,11 +142,16 @@ def test_local_profile_includes_open_orders_and_trading_journal() -> None:
     assert "open-orders" not in names
     assert "mt5" not in names
     assert "pine" not in names
-    assert "fxweekend" not in names
+    assert "calculator" in names
+    assert "bounce-trader" in names
+    assert "fxweekend" in names
     assert "fxweekend-clone" not in names
-    assert "fxweekend" not in asyncio.run(master_service.home_page()).body.decode(
-        "utf-8"
-    ).lower()
+
+    assert by_name["calculator"]["open_url"] == "/merged/calculator"
+    assert by_name["bounce-trader"]["open_url"] == "https://tools.example.test/merged/bounce-trader"
+    assert by_name["fxweekend"]["open_url"] == "https://tools.example.test/apps/fxweekend-clone"
+    assert by_name["bounce-trader"]["remote_owned"] is True
+    assert by_name["fxweekend"]["remote_owned"] is True
 
     trading_journal = by_name["trading-journal"]
     assert trading_journal["label"] == "Journal"

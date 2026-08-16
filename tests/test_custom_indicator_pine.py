@@ -12,6 +12,21 @@ def _source() -> str:
     return PINE_PATH.read_text(encoding="utf-8")
 
 
+def _cross_flags(
+    previous_price: float,
+    current_price: float,
+    previous_offset: float,
+    current_offset: float,
+    *,
+    enabled: bool = True,
+) -> tuple[bool, bool, bool]:
+    if not enabled:
+        return False, False, False
+    crossed_above = current_price > current_offset and previous_price <= previous_offset
+    crossed_below = current_price < current_offset and previous_price >= previous_offset
+    return crossed_above, crossed_below, crossed_above or crossed_below
+
+
 def test_custom_indicator_removes_atr_inputs_calculation_and_plot() -> None:
     source = _source()
     lower = source.lower()
@@ -29,6 +44,125 @@ def test_custom_indicator_crypto_only_volume_vwap_and_timing_gates() -> None:
     assert "showVwapOffsetOnChart = showVwapOffset and isCrypto" in source
     assert "showVolumeInPane = showVolume and isCrypto" in source
     assert "not isForex" not in source
+
+
+def test_custom_indicator_exposes_three_unique_hidden_offset_alert_series() -> None:
+    source = _source()
+    expected = {
+        "9 EMA Offset": ("ema9OffsetAlertSeries", "showEma9Offset ? ema9Offset : na"),
+        "20 EMA Offset": ("ema20OffsetAlertSeries", "showEma20Offset ? ema20Offset : na"),
+        "VWAP Offset": ("vwapOffsetAlertSeries", "showVwapOffsetOnChart ? vwapOffset : na"),
+    }
+    plot_lines = [line.strip() for line in source.splitlines() if line.strip().startswith("plot(")]
+
+    for title, (series_name, assignment) in expected.items():
+        assert f"{series_name} = {assignment}" in source
+        matching_lines = [line for line in plot_lines if f'"{title}"' in line]
+        assert len(matching_lines) == 1
+        assert matching_lines[0].startswith(f'plot({series_name}, "{title}"')
+        assert "display=display.none" in matching_lines[0]
+        assert "format=format.price" in matching_lines[0]
+
+    assert len(set(expected)) == 3
+
+
+def test_custom_indicator_has_only_dedicated_confirmed_offset_alert_conditions() -> None:
+    source = _source()
+    expected = {
+        "9 EMA Offset - Price Crossing": "ema9OffsetCross",
+        "9 EMA Offset - Price Crossing Above": "ema9OffsetCrossAbove",
+        "9 EMA Offset - Price Crossing Below": "ema9OffsetCrossBelow",
+        "20 EMA Offset - Price Crossing": "ema20OffsetCross",
+        "20 EMA Offset - Price Crossing Above": "ema20OffsetCrossAbove",
+        "20 EMA Offset - Price Crossing Below": "ema20OffsetCrossBelow",
+        "VWAP Offset - Price Crossing": "vwapOffsetCross",
+        "VWAP Offset - Price Crossing Above": "vwapOffsetCrossAbove",
+        "VWAP Offset - Price Crossing Below": "vwapOffsetCrossBelow",
+    }
+    conditions = re.findall(
+        r'^alertcondition\(([^,]+),\s*"([^"]+)",\s*(.+)\)$',
+        source,
+        flags=re.MULTILINE,
+    )
+    actual = {title: condition.strip() for condition, title, _message in conditions}
+
+    assert len(conditions) == 9
+    assert actual == expected
+    assert "offsetAlertConfirmed = barstate.isconfirmed" in source
+    assert re.search(r"^\s*alert\s*\(", source, flags=re.MULTILINE) is None
+
+
+def test_custom_indicator_offset_conditions_reference_only_their_gated_series() -> None:
+    source = _source()
+    expected = {
+        "ema9Offset": "ema9OffsetAlertSeries",
+        "ema20Offset": "ema20OffsetAlertSeries",
+        "vwapOffset": "vwapOffsetAlertSeries",
+    }
+
+    for prefix, series_name in expected.items():
+        assert f"{prefix}CrossAboveRaw = ta.crossover(close, {series_name})" in source
+        assert f"{prefix}CrossBelowRaw = ta.crossunder(close, {series_name})" in source
+        assert f"{prefix}CrossAbove = offsetAlertConfirmed and {prefix}CrossAboveRaw" in source
+        assert f"{prefix}CrossBelow = offsetAlertConfirmed and {prefix}CrossBelowRaw" in source
+        assert f"{prefix}Cross = {prefix}CrossAbove or {prefix}CrossBelow" in source
+
+    alert_block = source.split("// OFFSET ALERT SERIES AND CONDITIONS", 1)[1].split(
+        "// plot() cannot draw dashed series lines", 1
+    )[0]
+    assert "ta.crossover(close, ema9)" not in alert_block
+    assert "ta.crossunder(close, ema9)" not in alert_block
+    assert "ta.crossover(close, ema20)" not in alert_block
+    assert "ta.crossunder(close, ema20)" not in alert_block
+    assert "ta.crossover(close, vwapValue)" not in alert_block
+    assert "ta.crossunder(close, vwapValue)" not in alert_block
+
+
+def test_custom_indicator_offset_alert_messages_identify_the_exact_series() -> None:
+    source = _source()
+    condition_lines = [line for line in source.splitlines() if line.startswith("alertcondition(")]
+    for title in ("9 EMA Offset", "20 EMA Offset", "VWAP Offset"):
+        matching_lines = [line for line in condition_lines if f'"{title} - Price Crossing' in line]
+        assert len(matching_lines) == 3
+        assert all(f'{{{{plot("{title}")}}}}' in line for line in matching_lines)
+
+
+def test_custom_indicator_preserves_base_and_dashed_offset_visuals() -> None:
+    source = _source()
+    assert 'plot(showEma9 ? ema9 : na, "9 EMA"' in source
+    assert 'plot(showEma20 ? ema20 : na, "20 EMA"' in source
+    assert 'plot(showVwapOnChart ? vwapValue : na, "VWAP"' in source
+    assert 'plot(showVolumeInPane ? volume : na, "Volume"' in source
+    assert "drawDashedOffset(ema9OffsetLines, showEma9Offset, ema9Offset" in source
+    assert "drawDashedOffset(ema20OffsetLines, showEma20Offset, ema20Offset" in source
+    assert "drawDashedOffset(vwapOffsetLines, showVwapOffsetOnChart, vwapOffset" in source
+
+
+def test_offset_cross_model_ignores_base_crossings_until_each_offset_is_reached() -> None:
+    scenarios = {
+        "9 EMA Offset": (99.0, 100.25, 101.0),
+        "20 EMA Offset": (99.0, 100.75, 102.0),
+        "VWAP Offset": (99.0, 100.5, 103.0),
+    }
+    for _name, (previous_price, current_price, offset) in scenarios.items():
+        assert _cross_flags(previous_price, current_price, offset, offset) == (False, False, False)
+
+
+def test_offset_cross_model_fires_once_on_each_supported_offset_transition() -> None:
+    for offset in (101.0, 102.0, 103.0):
+        assert _cross_flags(offset - 0.25, offset + 0.25, offset, offset) == (True, False, True)
+        assert _cross_flags(offset + 0.25, offset - 0.25, offset, offset) == (False, True, True)
+
+        prices = (offset - 0.25, offset + 0.25, offset + 0.5)
+        events = [
+            _cross_flags(prices[index - 1], prices[index], offset, offset)[2]
+            for index in range(1, len(prices))
+        ]
+        assert events == [True, False]
+
+
+def test_offset_cross_model_never_fires_for_a_disabled_line() -> None:
+    assert _cross_flags(99.0, 101.0, 100.0, 100.0, enabled=False) == (False, False, False)
 
 
 def test_custom_indicator_session_controls_and_timing_labels() -> None:

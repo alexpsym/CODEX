@@ -1,8 +1,10 @@
+import ast
 import importlib.util
 import asyncio
 import ctypes
 import json
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -909,29 +911,390 @@ def test_sync_master_journal_permission_error(tmp_path, monkeypatch):
 @pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
 def test_sync_master_journal_builder_runtime_error(tmp_path, monkeypatch):
     monkeypatch.setattr(master_service, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
-    monkeypatch.setattr(master_service, 'build_master_journal_workbook', lambda *_: (_ for _ in ()).throw(RuntimeError('boom')))
+    monkeypatch.setattr(master_service, '_build_trading_journal_view_snapshot', lambda **_kwargs: {'items': [], 'stats': {'totals': {}}, 'balances': [], 'diagnostics': {}})
+    def fail_builder(*_args, **kwargs):
+        assert kwargs.get('publish_recommendation_assets') is False
+        raise RuntimeError('boom')
+    monkeypatch.setattr(master_service, 'build_master_journal_workbook', fail_builder)
     r=master_service._sync_master_journal_workbook(sync_caller="test")
     assert r['master_journal_ok'] is False
     assert r['master_journal_error_type'] == 'RuntimeError'
 @pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
 def test_sync_master_journal_validation_failure(tmp_path, monkeypatch):
     monkeypatch.setattr(master_service, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
-    def bad_builder(_snap, out):
+    monkeypatch.setattr(master_service, '_build_trading_journal_view_snapshot', lambda **_kwargs: {'items': [], 'stats': {'totals': {}}, 'balances': [], 'diagnostics': {}})
+    def bad_builder(_snap, out, **kwargs):
+        assert kwargs.get('publish_recommendation_assets') is False
         wb=Workbook(); ws=wb.active; ws.title='Wrong'; wb.save(out)
     monkeypatch.setattr(master_service, 'build_master_journal_workbook', bad_builder)
     r=master_service._sync_master_journal_workbook(sync_caller="test")
     assert r['master_journal_ok'] is False
     assert r['master_journal_error_type'] == 'RuntimeError'
+
+
+def _snapshot_shrink_guard_rows(
+    prefix,
+    count,
+    *,
+    is_test_trade=False,
+):
+    return [
+        {
+            'id': f'{prefix}-{index}',
+            'row_type': 'trade',
+            'source': 'state',
+            'asset_class': 'fx',
+            'account': 'OANDA DEMO',
+            'account_label': 'OANDA DEMO',
+            'symbol': 'EURUSD',
+            'side': 'BUY',
+            'qty': 1.0,
+            'entry_price': 1.10,
+            'exit_price': 1.11,
+            'open_time': f'2026-01-{index + 1:02d}T00:00:00+00:00',
+            'close_time': f'2026-01-{index + 1:02d}T01:00:00+00:00',
+            'net_profit': 1.0,
+            'result_pct': 1.0,
+            'r_multiple': 1.0,
+            'currency': 'AUD',
+            'is_test_trade': is_test_trade,
+        }
+        for index in range(count)
+    ]
+
+
+def _snapshot_for_shrink_guard(ms, rows):
+    return {
+        'items': rows,
+        'stats': ms._compute_journal_stats_with_period_reports(rows, []),
+        'balances': [],
+        'diagnostics': {
+            'authoritative_mode': False,
+            'source': 'trading_journal_sources',
+        },
+    }
+
+
+@pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
+def test_non_authoritative_snapshot_shrink_guard_checks_count_and_stable_ids(
+    tmp_path,
+    monkeypatch,
+):
+    from tools.master_journal_workbook import build_master_journal_workbook
+
+    path = tmp_path / 'Trading Journal.xlsx'
+    existing_rows = _snapshot_shrink_guard_rows('existing', 12)
+    build_master_journal_workbook(
+        _snapshot_for_shrink_guard(master_service, existing_rows),
+        path,
+    )
+    monkeypatch.setattr(master_service, 'TRADING_JOURNAL_SOURCE', 'both')
+    monkeypatch.setenv('TRADING_JOURNAL_SOURCE', 'both')
+    monkeypatch.setenv('TRADING_JOURNAL_MASTER_JOURNAL_AUTHORITATIVE', '0')
+
+    tiny = master_service._non_authoritative_snapshot_shrink_guard(
+        path,
+        _snapshot_for_shrink_guard(master_service, existing_rows[:1]),
+    )
+    assert tiny['blocked'] is True
+    assert tiny['existing_trade_rows'] == 12
+    assert tiny['incoming_trade_rows'] == 1
+    assert tiny['retained_existing_trade_row_ids'] == 1
+
+    same_count_replacement = master_service._non_authoritative_snapshot_shrink_guard(
+        path,
+        _snapshot_for_shrink_guard(
+            master_service,
+            _snapshot_shrink_guard_rows('replacement', 12),
+        ),
+    )
+    assert same_count_replacement['blocked'] is True
+    assert same_count_replacement['count_retained_ratio'] == 1.0
+    assert same_count_replacement['id_retained_ratio'] == 0.0
+
+    all_test_same_rows = master_service._non_authoritative_snapshot_shrink_guard(
+        path,
+        _snapshot_for_shrink_guard(
+            master_service,
+            [dict(row, is_test_trade=True) for row in existing_rows],
+        ),
+    )
+    assert all_test_same_rows['blocked'] is False
+    assert all_test_same_rows['effective_retained_ratio'] == 1.0
+
+    for authoritative_mode in ('local', 'master_journal'):
+        monkeypatch.setattr(
+            master_service,
+            'TRADING_JOURNAL_SOURCE',
+            authoritative_mode,
+        )
+        monkeypatch.setenv('TRADING_JOURNAL_SOURCE', authoritative_mode)
+        authoritative = master_service._non_authoritative_snapshot_shrink_guard(
+            path,
+            _snapshot_for_shrink_guard(master_service, existing_rows[:1]),
+        )
+        assert authoritative['blocked'] is False
+        assert authoritative['enabled'] is False
+        assert authoritative['reason'] == 'configured_authoritative_source'
+
+
+@pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
+def test_sync_blocks_tiny_non_authoritative_snapshot_before_update_or_asset_publish(
+    tmp_path,
+    monkeypatch,
+):
+    from tools.master_journal_workbook import build_master_journal_workbook
+
+    path = tmp_path / 'Trading Journal.xlsx'
+    existing_rows = _snapshot_shrink_guard_rows('existing', 12)
+    build_master_journal_workbook(
+        _snapshot_for_shrink_guard(master_service, existing_rows),
+        path,
+    )
+    asset_dir = tmp_path / 'Trading Journal.assets' / 'recommendations'
+    asset_dir.mkdir(parents=True, exist_ok=True)
+    sentinel = asset_dir / 'production-sentinel.html'
+    sentinel.write_bytes(b'production-assets-must-survive')
+    workbook_before = path.read_bytes()
+    assets_before = {
+        str(candidate.relative_to(asset_dir)): candidate.read_bytes()
+        for candidate in sorted(asset_dir.rglob('*'))
+        if candidate.is_file()
+    }
+
+    monkeypatch.setattr(master_service, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
+    monkeypatch.setattr(master_service, 'TRADING_JOURNAL_SOURCE', 'both')
+    monkeypatch.setenv('TRADING_JOURNAL_SOURCE', 'both')
+    monkeypatch.setenv('TRADING_JOURNAL_MASTER_JOURNAL_AUTHORITATIVE', '0')
+    tiny_snapshot = _snapshot_for_shrink_guard(
+        master_service,
+        existing_rows[:1],
+    )
+    monkeypatch.setattr(master_service, '_master_journal_path', lambda: path)
+    monkeypatch.setattr(
+        master_service,
+        '_master_journal_lock_status',
+        lambda _path: {'locked': False},
+    )
+    monkeypatch.setattr(
+        master_service,
+        '_resync_source_fingerprint',
+        lambda _path: {'test': 'tiny-non-authoritative-source'},
+    )
+    monkeypatch.setattr(
+        master_service,
+        '_resync_fast_path_snapshot',
+        lambda *_args, **_kwargs: (
+            None,
+            'test_forced_full_resync',
+            {'changed_components': []},
+        ),
+    )
+    monkeypatch.setattr(
+        master_service,
+        '_build_trading_journal_view_snapshot',
+        lambda **_kwargs: tiny_snapshot,
+    )
+    monkeypatch.setattr(
+        master_service,
+        'update_master_journal_workbook_data_only',
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError('destructive snapshot must be rejected before update')
+        ),
+    )
+
+    result = master_service._run_trading_journal_resync()
+
+    assets_after = {
+        str(candidate.relative_to(asset_dir)): candidate.read_bytes()
+        for candidate in sorted(asset_dir.rglob('*'))
+        if candidate.is_file()
+    }
+    assert result['ok'] is False
+    assert result['master_journal_ok'] is False
+    assert result['code'] == 'NON_AUTHORITATIVE_SNAPSHOT_SHRINK_BLOCKED'
+    assert result['status_code'] == 409
+    assert result['master_journal_error_type'] == '_NonAuthoritativeSnapshotShrinkError'
+    guard = result['master_journal_diagnostics']['snapshot_shrink_guard']
+    assert guard['blocked'] is True
+    assert guard['existing_trade_rows'] == 12
+    assert guard['incoming_trade_rows'] == 1
+    assert path.read_bytes() == workbook_before
+    assert assets_after == assets_before
+
+
+def _duplicate_execution_recommendation_snapshot():
+    shared = {
+        "row_type": "trade",
+        "account": "BYBIT",
+        "account_label": "BYBIT",
+        "asset_class": "crypto",
+        "symbol": "BTCUSDT",
+        "side": "BUY",
+        "open_time": "2026-01-01T00:00:00+00:00",
+        "close_time": "2026-01-01T01:00:00+00:00",
+        "qty": 1.0,
+        "entry_price": 100.0,
+        "exit_price": 101.0,
+        "stop_loss": 99.0,
+        "take_profit": 102.0,
+        "net_profit": 1.0,
+        "result_pct": 1.0,
+        "r_multiple": 1.0,
+        "currency": "USDT",
+    }
+    return {
+        "items": [
+            {**shared, "id": "bybit:canonical-win", "source": "bybit"},
+            {**shared, "id": "excel:duplicate-win", "source": "excel"},
+            {
+                **shared,
+                "id": "bybit:second-win",
+                "open_time": "2026-01-02T00:00:00+00:00",
+                "close_time": "2026-01-02T01:00:00+00:00",
+                "stop_loss": 98.0,
+                "take_profit": 103.0,
+                "exit_price": 102.0,
+                "net_profit": 2.0,
+                "result_pct": 2.0,
+                "r_multiple": 1.0,
+            },
+            {
+                **shared,
+                "id": "bybit:loss",
+                "open_time": "2026-01-03T00:00:00+00:00",
+                "close_time": "2026-01-03T01:00:00+00:00",
+                "stop_loss": 98.5,
+                "take_profit": 103.0,
+                "exit_price": 98.5,
+                "net_profit": -1.5,
+                "result_pct": -1.5,
+                "r_multiple": -1.0,
+            },
+        ],
+        "stats": {"totals": {}, "groups": {}},
+        "balances": [],
+        "diagnostics": {},
+    }
+
+
+@pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
+def test_sync_validation_failure_does_not_publish_recommendation_assets(
+    tmp_path,
+    monkeypatch,
+):
+    from tools.master_journal_workbook import build_master_journal_workbook as real_builder
+
+    monkeypatch.setattr(master_service, "TRADING_JOURNAL_LOCAL_DIR", tmp_path)
+    monkeypatch.setattr(master_service, "_master_journal_single_file_mode", lambda: False)
+    asset_dir = tmp_path / "Trading Journal.assets" / "recommendations"
+    asset_dir.mkdir(parents=True)
+    (asset_dir / "sentinel.html").write_bytes(b"sentinel-html")
+    (asset_dir / "index.html").write_bytes(b"sentinel-index")
+    before = {
+        str(path.relative_to(asset_dir)): path.read_bytes()
+        for path in sorted(asset_dir.rglob("*"))
+        if path.is_file()
+    }
+
+    def invalid_builder(snapshot, output_path, **kwargs):
+        assert kwargs.get("publish_recommendation_assets") is False
+        real_builder(snapshot, output_path, **kwargs)
+        wb = load_workbook(output_path)
+        wb.remove(wb[master_service.STATS1_SHEET])
+        wb.save(output_path)
+        wb.close()
+
+    monkeypatch.setattr(master_service, "build_master_journal_workbook", invalid_builder)
+    result = master_service._sync_master_journal_workbook(
+        prebuilt_snapshot=_duplicate_execution_recommendation_snapshot(),
+        defer_github_sync=True,
+        sync_caller="test",
+    )
+
+    after = {
+        str(path.relative_to(asset_dir)): path.read_bytes()
+        for path in sorted(asset_dir.rglob("*"))
+        if path.is_file()
+    }
+    assert result["master_journal_ok"] is False
+    assert before == after
+
+
+@pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
+def test_sync_publishes_recommendations_from_same_normalized_rows_as_workbook(
+    tmp_path,
+    monkeypatch,
+):
+    from tools.master_journal_workbook import (
+        _normalize_master_journal_rows,
+        _prepare_recommendation_chart_bundle,
+    )
+
+    snapshot = _duplicate_execution_recommendation_snapshot()
+    workbook_path = tmp_path / "Trading Journal.xlsx"
+    monkeypatch.setattr(master_service, "TRADING_JOURNAL_LOCAL_DIR", tmp_path)
+    monkeypatch.setattr(master_service, "_master_journal_single_file_mode", lambda: False)
+
+    result = master_service._sync_master_journal_workbook(
+        prebuilt_snapshot=snapshot,
+        defer_github_sync=True,
+        sync_caller="test",
+    )
+
+    assert result["master_journal_ok"] is True, result
+    normalized_rows, diagnostics = _normalize_master_journal_rows(
+        snapshot["items"],
+        {},
+    )
+    assert diagnostics["duplicate_execution_rows_removed"] == 1
+    expected_bundle = _prepare_recommendation_chart_bundle(
+        normalized_rows,
+        workbook_path,
+    )
+    raw_bundle = _prepare_recommendation_chart_bundle(
+        snapshot["items"],
+        workbook_path,
+    )
+    wb = load_workbook(workbook_path)
+    stats1 = wb[master_service.STATS1_SHEET]
+    stop_row = next(
+        row
+        for row in range(2, stats1.max_row + 1)
+        if str(stats1.cell(row, 1).value or "").strip().casefold() == "recommendation"
+        and "stop" in str(stats1.cell(row - 1, 1).value or "").strip().casefold()
+    )
+    recommendation_cell = stats1.cell(
+        stop_row,
+        master_service._stats1_market_columns(stats1)["overall"],
+    )
+    target = str(recommendation_cell.hyperlink.target)
+    workbook_text = str(recommendation_cell.value)
+    wb.close()
+    filename = Path(target).name
+    published_html = (workbook_path.parent / Path(target)).read_text(encoding="utf-8")
+
+    assert published_html == expected_bundle["files"][filename]
+    assert published_html != raw_bundle["files"][filename]
+    assert f"<p>{workbook_text}</p>" in published_html
+    marker = re.search(r'data-recommended-value="([^"]+)"', published_html)
+    expected_marker = re.search(r"Recommended:\s*([0-9.]+)", workbook_text)
+    assert marker and expected_marker
+    assert float(marker.group(1)) == pytest.approx(float(expected_marker.group(1)))
+
+
 @pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
 def test_sync_master_journal_temp_cleanup_on_failure(tmp_path, monkeypatch):
     monkeypatch.setattr(master_service, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
-    def bad_builder(_snap, out):
+    monkeypatch.setattr(master_service, '_build_trading_journal_view_snapshot', lambda **_kwargs: {'items': [], 'stats': {'totals': {}}, 'balances': [], 'diagnostics': {}})
+    def bad_builder(_snap, out, **kwargs):
+        assert kwargs.get('publish_recommendation_assets') is False
         wb=Workbook(); wb.save(out)
     monkeypatch.setattr(master_service, 'build_master_journal_workbook', bad_builder)
     monkeypatch.setattr(master_service, 'SHEET_ORDER', ['STATS1'])
     r=master_service._sync_master_journal_workbook(sync_caller="test")
     assert r['master_journal_ok'] is False
-    assert not (tmp_path/'Master Journal.tmp.xlsx').exists()
+    assert not (tmp_path/'Trading Journal.tmp.xlsx').exists()
 @pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
 def test_sync_master_journal_applies_manual_overrides(tmp_path, monkeypatch):
     mj=tmp_path/'Trading Journal.xlsx'
@@ -952,11 +1315,83 @@ def test_sync_master_journal_applies_manual_overrides(tmp_path, monkeypatch):
     monkeypatch.setattr(master_service, '_get_trading_journal_rows', lambda: rows)
     captured={}
     monkeypatch.setattr(master_service, '_set_trading_journal_rows', lambda r: captured.setdefault('rows', r))
-    monkeypatch.setattr(master_service, '_build_trading_journal_view_snapshot', lambda force=True: {'items': captured.get('rows',rows), 'stats':{'totals':{}}, 'balances':[], 'diagnostics':{}})
+    def _snapshot(**_kwargs):
+        current_rows = captured.get('rows', rows)
+        return {
+            'items': current_rows,
+            'stats': master_service._compute_journal_stats_with_period_reports(current_rows, []),
+            'balances': [],
+            'diagnostics': {},
+        }
+    monkeypatch.setattr(master_service, '_build_trading_journal_view_snapshot', _snapshot)
     r=master_service._sync_master_journal_workbook(sync_caller="test")
     assert r['master_journal_ok'] is True
     patched=captured['rows'][0]
     assert patched['is_test_trade'] is True and patched['setup']=='S' and patched['timeframe']=='M5' and patched['notes']=='note'
+
+
+@pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
+def test_sync_master_journal_applies_manual_overrides_to_prebuilt_snapshot(tmp_path, monkeypatch):
+    mj = tmp_path / 'Trading Journal.xlsx'
+    mj.write_bytes(b'workbook placeholder')
+    snapshot = {
+        'items': [
+            {
+                'id': 'prebuilt-r1',
+                'row_type': 'trade',
+                'account': 'OANDA DEMO',
+                'symbol': 'EURUSD',
+                'side': 'BUY',
+                'open_time': '2026-01-01',
+                'close_time': '2026-01-01',
+                'net_profit': 1.0,
+                'is_test_trade': False,
+                'setup': '',
+                'timeframe': '',
+                'notes': '',
+            }
+        ],
+        'stats': {'totals': {}, 'groups': {}},
+        'balances': [],
+    }
+    captured = {}
+
+    monkeypatch.setattr(master_service, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
+    monkeypatch.setattr(master_service, '_master_journal_path', lambda: mj)
+    monkeypatch.setattr(master_service, '_master_journal_single_file_mode', lambda: True)
+    monkeypatch.setattr(
+        master_service,
+        'read_master_journal_manual_overrides',
+        lambda _path: {
+            'prebuilt-r1': {
+                'is_test_trade': True,
+                'setup': 'MANUAL',
+                'timeframe': 'M15',
+                'breakeven': 'No',
+                'notes': 'preserved from workbook',
+            }
+        },
+    )
+
+    def _capture_update(_path, updated_snapshot, **_kwargs):
+        captured['snapshot'] = updated_snapshot
+        return {'ok': False, 'error': 'stop after manual-override capture'}
+
+    monkeypatch.setattr(master_service, 'update_master_journal_workbook_data_only', _capture_update)
+    result = master_service._sync_master_journal_workbook(
+        prebuilt_snapshot=snapshot,
+        sync_caller='test',
+    )
+
+    assert result['master_journal_ok'] is False
+    patched = captured['snapshot']['items'][0]
+    assert patched['is_test_trade'] is True
+    assert patched['setup'] == 'MANUAL'
+    assert patched['timeframe'] == 'M15'
+    assert patched['breakeven'] == 'No'
+    assert patched['notes'] == 'preserved from workbook'
+    assert snapshot['items'][0]['is_test_trade'] is False
+    assert snapshot['items'][0]['setup'] == ''
 @pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
 def test_sync_master_journal_test_yes_excluded_from_aggregates(tmp_path, monkeypatch):
     mj=tmp_path/'Trading Journal.xlsx'
@@ -966,7 +1401,17 @@ def test_sync_master_journal_test_yes_excluded_from_aggregates(tmp_path, monkeyp
     from openpyxl import load_workbook
     wb=load_workbook(mj); ws=wb['Trade Log']; headers=_trade_log_header_map(ws); data_row=_trade_log_data_start_row(ws); ws.cell(data_row, headers["Test"]).value='Yes'; before=[ws.cell(data_row, c).value for c in range(1, len(headers) + 1)]; wb.save(mj)
     monkeypatch.setattr(master_service, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
-    monkeypatch.setattr(master_service, '_build_trading_journal_view_snapshot', lambda force=True: {'items': seed['items'], 'stats': {'totals': {}, 'groups': {}}, 'balances': [], 'diagnostics': {}})
+    state = {'rows': seed['items']}
+    monkeypatch.setattr(master_service, '_get_trading_journal_rows', lambda: state['rows'])
+    monkeypatch.setattr(master_service, '_set_trading_journal_rows', lambda rows: state.update(rows=rows))
+    def _snapshot(**_kwargs):
+        return {
+            'items': state['rows'],
+            'stats': master_service._compute_journal_stats_with_period_reports(state['rows'], []),
+            'balances': [],
+            'diagnostics': {},
+        }
+    monkeypatch.setattr(master_service, '_build_trading_journal_view_snapshot', _snapshot)
     r=master_service._sync_master_journal_workbook(sync_caller="test")
     assert r['master_journal_ok'] is True
     out=load_workbook(mj)
@@ -1270,6 +1715,28 @@ def test_sync_master_journal_succeeds_with_merged_calendar_cells(tmp_path, monke
     monkeypatch.setattr(master_service, '_get_trading_journal_rows', lambda: snap["items"])
     result = master_service._sync_master_journal_workbook(sync_caller="test")
     assert result["master_journal_ok"] is True
+
+
+def test_calendar_missing_expected_pl_cells_reports_exact_sorted_periods():
+    ws = Workbook().active
+    ws['A1'] = 'Year'
+    ws['B1'] = 'January P/L %'
+    ws['C1'] = 'February P/L %'
+    ws['A2'] = 2026
+    ws['B2'] = 1.25
+    ws['C2'] = None
+    ws['A3'] = 2025
+    ws['B3'] = '-2.50%, 3 trades'
+    ws['C3'] = 4.0
+
+    missing = master_service._calendar_missing_expected_pl_cells(
+        ws,
+        {(2026, 2), (2024, 1), (2025, 1), (2026, 1)},
+    )
+
+    assert missing == [(2024, 1), (2026, 2)]
+    assert master_service._calendar_has_expected_pl_cells(ws, {(2025, 1), (2026, 1)}) is True
+    assert master_service._calendar_has_expected_pl_cells(ws, {(2026, 2)}) is False
 @pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
 def test_sync_master_journal_populates_instrument_leaders_canonical_layout(tmp_path, monkeypatch):
     from tools.master_journal_workbook import build_master_journal_workbook
@@ -1503,6 +1970,73 @@ def test_github_sync_stages_only_target_file(monkeypatch, tmp_path):
     assert "journal/Trading Journal.xlsx" in add_call
     assert "state_backup.json" not in add_call
     assert "-f" not in add_call
+
+
+@pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
+def test_github_sync_stages_recommendation_assets_and_tracked_deletions(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("TRADING_JOURNAL_GITHUB_SYNC_ENABLED", "1")
+    monkeypatch.setattr(master_service, "_trading_journal_github_sync_enabled", lambda: True)
+    monkeypatch.setattr(master_service, "BASE_DIR", tmp_path)
+    (tmp_path / ".git").mkdir()
+    journal = tmp_path / "journal"
+    recommendation_dir = journal / "Trading Journal.assets" / "recommendations"
+    recommendation_dir.mkdir(parents=True)
+    master = journal / "Trading Journal.xlsx"
+    current_asset = recommendation_dir / "overall-stop.html"
+    deleted_asset = recommendation_dir / "stale-target.html"
+    unrelated = tmp_path / "state_backup.json"
+    master.write_bytes(b"x")
+    current_asset.write_text("updated", encoding="utf-8")
+    unrelated.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(
+        master_service,
+        "_repo_state_files_for_github",
+        lambda *_a, **_k: [master, current_asset, deleted_asset, unrelated],
+    )
+    eligible = "\0".join(
+        (
+            "journal/Trading Journal.xlsx",
+            "journal/Trading Journal.assets/recommendations/overall-stop.html",
+            "journal/Trading Journal.assets/recommendations/stale-target.html",
+        )
+    ) + "\0"
+    commands = []
+
+    def fake_git(args, _cwd, _timeout):
+        commands.append(args)
+        if args == ["--version"]:
+            return 0, "git version 2", ""
+        if args[:2] == ["ls-files", "-z"]:
+            return 0, eligible, ""
+        if args and args[0] == "status":
+            return 0, " M journal/Trading Journal.xlsx\n M journal/Trading Journal.assets/recommendations/overall-stop.html\n D journal/Trading Journal.assets/recommendations/stale-target.html\n", ""
+        if args[:2] == ["rev-parse", "--abbrev-ref"]:
+            return 0, "main\n", ""
+        if args[:3] == ["remote", "get-url", "origin"]:
+            return 0, "x\n", ""
+        if args[:2] == ["diff", "--cached"]:
+            return 1, "", ""
+        if args[:2] == ["rev-parse", "--short"]:
+            return 0, "abc123\n", ""
+        return 0, "", ""
+
+    monkeypatch.setattr(master_service, "_run_git_command", fake_git)
+    result = master_service._sync_journal_excel_files_to_github(master)
+
+    assert result["github_sync_ok"] is True
+    assert result["github_sync_noop"] is False
+    assert result["github_sync_files"] == [
+        "journal/Trading Journal.xlsx",
+        "journal/Trading Journal.assets/recommendations/overall-stop.html",
+        "journal/Trading Journal.assets/recommendations/stale-target.html",
+    ]
+    add_call = next(command for command in commands if command and command[0] == "add")
+    assert "journal/Trading Journal.assets/recommendations/overall-stop.html" in add_call
+    assert "journal/Trading Journal.assets/recommendations/stale-target.html" in add_call
+    assert "state_backup.json" not in add_call
 
 
 @pytest.mark.skipif(
@@ -2057,6 +2591,66 @@ def test_cashflow_row_to_ledger_event_keeps_zero_anchor_without_amount():
     assert event['new_balance'] == 0
     assert event['amount'] is None
 
+
+def test_cashflow_merge_dedupes_by_semantics_and_preserves_id_and_side_provenance():
+    ms = _load_master_service_for_import_test()
+    existing = {
+        'BINANCE': [
+            {
+                'id': 'ledger-original',
+                'account': 'Binance',
+                'date': '2020-10-26T00:00:00',
+                'amount': None,
+                'new_balance': 0.0,
+                'currency': 'USDT',
+                'reason': 'Withdrawal',
+                'side': 'WITHDRAWAL',
+            }
+        ]
+    }
+    duplicate_with_different_id = {
+        'id': 'workbook-copy',
+        'row_type': 'cashflow',
+        'account': 'BINANCE',
+        'symbol': 'CASHFLOW',
+        'side': 'WITHDRAWAL',
+        'open_time': '2020-10-26T00:00:00',
+        'close_time': '2020-10-26T00:00:00',
+        'cashflow_amount': None,
+        'cashflow_new_balance': 0.0,
+        'currency': 'usdt',
+        'notes': 'Same semantic event with another row ID',
+    }
+    new_event_row = {
+        'id': 'pepperstone-zero-anchor',
+        'row_type': 'cashflow',
+        'account': 'Pepperstone Demo',
+        'symbol': 'CASHFLOW',
+        'cashflow_type': 'withdrawal',
+        'open_time': '2022-12-16T00:00:00',
+        'close_time': '2022-12-16T00:00:00',
+        'cashflow_amount': None,
+        'cashflow_new_balance': 0.0,
+        'currency': 'AUD',
+    }
+
+    merged = ms._merge_pending_cashflow_rows_into_ledger(
+        existing,
+        [duplicate_with_different_id, new_event_row],
+    )
+
+    assert [event['id'] for event in merged['BINANCE']] == ['ledger-original']
+    assert len(merged['PEPPERSTONE DEMO']) == 1
+    merged_event = merged['PEPPERSTONE DEMO'][0]
+    assert merged_event['id'] == 'pepperstone-zero-anchor'
+    assert merged_event['side'] == 'withdrawal'
+
+    journal_rows = ms._cashflow_rows_for_journal({'PEPPERSTONE DEMO': [merged_event]})
+    assert len(journal_rows) == 1
+    assert journal_rows[0]['id'] == 'pepperstone-zero-anchor'
+    assert journal_rows[0]['cashflow_type'] == 'withdrawal'
+    assert journal_rows[0]['side'] == 'WITHDRAWAL'
+
 @pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
 def test_balance_regression_stale_excel_binance_overridden_by_authoritative_zero_source():
     rows = []
@@ -2127,7 +2721,10 @@ def test_sync_master_journal_uses_zero_cashflow_anchor_when_cashflow_new_balance
     assert balances['PEPPERSTONE DEMO']['balance'] == 0
     assert balances['BINANCE'].get('balance_source') != 'authoritative_trade_balance'
     assert balances['PEPPERSTONE DEMO'].get('balance_source') != 'authoritative_trade_balance'
-    result = master_service._sync_master_journal_workbook(sync_caller="test")
+    result = master_service._sync_master_journal_workbook(
+        prebuilt_snapshot=snap2,
+        sync_caller="test",
+    )
     assert result['master_journal_ok'] is True
     synced = load_workbook(mj, data_only=True)
     dash = synced['STATS2']
@@ -2156,12 +2753,26 @@ def test_repo_state_files_for_github_dedupes_master_journal(tmp_path, monkeypatc
     journal_dir.mkdir(parents=True, exist_ok=True)
     master = journal_dir / "Trading Journal.xlsx"
     master.write_bytes(b"x")
+    recommendation_dir = journal_dir / "Trading Journal.assets" / "recommendations"
+    recommendation_dir.mkdir(parents=True)
+    current_asset = recommendation_dir / "overall-stop.html"
+    current_asset.write_text("current", encoding="utf-8")
+    deleted_asset = recommendation_dir / "stale-target.html"
     (journal_dir / "5-digit-demo-calculation-context.json").write_text("{}", encoding="utf-8")
     (tmp_path / "state_backup.json").write_text("{}", encoding="utf-8")
+    def fake_git(args, _cwd, _timeout):
+        if args[:2] == ["ls-files", "-z"]:
+            return 0, "journal/Trading Journal.assets/recommendations/stale-target.html\0", ""
+        if args[:2] == ["ls-files", "--error-unmatch"]:
+            return 1, "", ""
+        return 1, "", ""
+    monkeypatch.setattr(master_service, "_run_git_command", fake_git)
     files = master_service._repo_state_files_for_github(master)
     rel = [str(p.relative_to(tmp_path)).replace("\\", "/") for p in files]
     assert rel.count("journal/Trading Journal.xlsx") == 1
     assert "journal/5-digit-demo-calculation-context.json" in rel
+    assert current_asset in files
+    assert deleted_asset in files
     assert "state_backup.json" not in rel
 def test_fetch_bybit_executions_calls_include_end_time():
     src=(Path(__file__).resolve().parents[1]/"render"/"master_service.py").read_text(encoding="utf-8")
@@ -2527,14 +3138,23 @@ def test_resync_rejects_active_workbook_sync_before_snapshot_build(monkeypatch, 
     path = tmp_path / 'Trading Journal.xlsx'
     monkeypatch.setattr(ms, '_master_journal_path', lambda: path)
     monkeypatch.setattr(ms, '_master_journal_lock_status', lambda _path: {'locked': False})
-    assert ms.MASTER_JOURNAL_WORKBOOK_SYNC_LOCK.acquire(blocking=False) is True
-    try:
-        ms.MASTER_JOURNAL_WORKBOOK_SYNC_ACTIVE.update({'sync_id': 'active-sync', 'caller': 'manual_import', 'path': str(path), 'started_epoch': ms.time.time() - 3.25})
-        monkeypatch.setattr(ms, '_build_trading_journal_view_snapshot', lambda **_kwargs: (_ for _ in ()).throw(AssertionError('resync must reject before snapshot build')))
-        result = ms._run_trading_journal_resync()
-    finally:
-        ms.MASTER_JOURNAL_WORKBOOK_SYNC_ACTIVE.clear()
-        ms.MASTER_JOURNAL_WORKBOOK_SYNC_LOCK.release()
+
+    def _reject_reservation(_path, _sync_id, caller):
+        assert _path == path
+        assert caller == 'resync'
+        return {
+            'ok': False,
+            'status_code': 409,
+            'code': 'MASTER_JOURNAL_SYNC_IN_PROGRESS',
+            'active_sync_id': 'active-sync',
+            'active_caller': 'manual_import',
+            'active_path': str(path),
+            'active_elapsed_seconds': 3.25,
+        }
+
+    monkeypatch.setattr(ms, '_reserve_master_journal_workbook_sync', _reject_reservation)
+    monkeypatch.setattr(ms, '_build_trading_journal_view_snapshot', lambda **_kwargs: (_ for _ in ()).throw(AssertionError('resync must reject before snapshot build')))
+    result = ms._run_trading_journal_resync()
     assert result['ok'] is False
     assert result['status_code'] == 409
     assert result['code'] == 'MASTER_JOURNAL_SYNC_IN_PROGRESS'
@@ -2548,15 +3168,46 @@ def test_resync_rejects_active_workbook_sync_before_snapshot_build(monkeypatch, 
 
 def test_core_workbook_sync_singleflight_rejects_duplicate_before_snapshot_build(monkeypatch, tmp_path):
     ms = _load_master_service_for_import_test()
-    monkeypatch.setattr(ms, '_master_journal_path', lambda: tmp_path / 'Trading Journal.xlsx')
-    assert ms.MASTER_JOURNAL_WORKBOOK_SYNC_LOCK.acquire(blocking=False) is True
+    path = tmp_path / 'Trading Journal.xlsx'
+    monkeypatch.setattr(ms, '_master_journal_path', lambda: path)
+    ready = ms.threading.Event()
+    release = ms.threading.Event()
+    holder_errors = []
+
+    def _hold_active_sync():
+        try:
+            assert ms.MASTER_JOURNAL_WORKBOOK_SYNC_LOCK.acquire(blocking=False) is True
+            ms.MASTER_JOURNAL_WORKBOOK_SYNC_ACTIVE.update({
+                'sync_id': 'active-sync',
+                'caller': 'resync',
+                'path': str(path),
+                'started_epoch': ms.time.time() - 2.0,
+                'owner_thread_id': ms.threading.get_ident(),
+                'depth': 1,
+            })
+            ready.set()
+            assert release.wait(timeout=10)
+        except BaseException as exc:
+            holder_errors.append(exc)
+            ready.set()
+        finally:
+            ms.MASTER_JOURNAL_WORKBOOK_SYNC_ACTIVE.clear()
+            try:
+                ms.MASTER_JOURNAL_WORKBOOK_SYNC_LOCK.release()
+            except RuntimeError:
+                pass
+
+    holder = ms.threading.Thread(target=_hold_active_sync, daemon=True)
+    holder.start()
+    assert ready.wait(timeout=5)
     try:
-        ms.MASTER_JOURNAL_WORKBOOK_SYNC_ACTIVE.update({'sync_id': 'active-sync', 'caller': 'resync', 'path': str(tmp_path / 'Trading Journal.xlsx'), 'started_epoch': ms.time.time() - 2.0})
         monkeypatch.setattr(ms, '_build_trading_journal_view_snapshot', lambda **_kwargs: (_ for _ in ()).throw(AssertionError('duplicate core sync must not build snapshot')))
         result = ms._sync_master_journal_workbook(sync_caller='test-duplicate')
     finally:
-        ms.MASTER_JOURNAL_WORKBOOK_SYNC_ACTIVE.clear()
-        ms.MASTER_JOURNAL_WORKBOOK_SYNC_LOCK.release()
+        release.set()
+        holder.join(timeout=5)
+    assert not holder.is_alive()
+    assert holder_errors == []
     assert result['ok'] is False
     assert result['status_code'] == 409
     assert result['code'] == 'MASTER_JOURNAL_SYNC_IN_PROGRESS'
@@ -2658,6 +3309,632 @@ def test_resync_builds_authoritative_snapshot_once_and_reuses_it(monkeypatch, tm
     assert result['request_id'].startswith('resync-')
 
 
+@pytest.fixture(scope="module")
+def fast_verifier_workbook_fixture(tmp_path_factory):
+    ms = _load_master_service_for_import_test()
+    from tools.master_journal_workbook import build_master_journal_workbook
+
+    fixture_dir = tmp_path_factory.mktemp("fast_verifier_workbook")
+    workbook_path = fixture_dir / "Trading Journal.xlsx"
+    snapshot = {
+        "items": [
+            {
+                "id": "fast-verifier-win",
+                "row_type": "trade",
+                "asset_class": "crypto",
+                "account": "BYBIT",
+                "account_label": "BYBIT",
+                "symbol": "BTCUSDT",
+                "side": "BUY",
+                "qty": 1.0,
+                "entry_price": 100.0,
+                "exit_price": 102.0,
+                "stop_loss": 99.0,
+                "take_profit": 103.0,
+                "open_time": "2026-01-01T00:00:00+10:00",
+                "close_time": "2026-01-01T01:02:03+10:00",
+                "trade_duration_seconds": 3723,
+                "net_profit": 2.0,
+                "result_pct": 2.0,
+                "r_multiple": 2.0,
+                "currency": "USDT",
+                "is_test_trade": False,
+            },
+            {
+                "id": "fast-verifier-loss",
+                "row_type": "trade",
+                "asset_class": "crypto",
+                "account": "BYBIT",
+                "account_label": "BYBIT",
+                "symbol": "BTCUSDT",
+                "side": "BUY",
+                "qty": 1.0,
+                "entry_price": 100.0,
+                "exit_price": 98.0,
+                "stop_loss": 98.0,
+                "take_profit": 104.0,
+                "open_time": "2026-01-02T00:00:00+10:00",
+                "close_time": "2026-01-02T02:03:04+10:00",
+                "trade_duration_seconds": 7384,
+                "net_profit": -2.0,
+                "result_pct": -2.0,
+                "r_multiple": -1.0,
+                "currency": "USDT",
+                "is_test_trade": False,
+            },
+            {
+                "id": "monthly_aud_reval:bybit_live:2026-01",
+                "row_type": "monthly_aud_reval",
+                "account": "BYBIT",
+                "account_label": "BYBIT",
+                "symbol": "MONTHLY AUD P/L",
+                "period_month": "2026-01-01",
+                "open_time": "2026-01-31T23:59:59+10:00",
+                "close_time": "2026-01-31T23:59:59+10:00",
+                "net_profit": 12.34,
+                "currency": "AUD",
+            },
+        ],
+        "stats": {"totals": {}, "groups": {}},
+        "balances": [
+            {
+                "account_label": "BINANCE",
+                "balance": 0.0,
+                "currency": "USDT",
+                "balance_source": "cashflow_anchor_plus_trades",
+            },
+            {
+                "account_label": "PEPPERSTONE DEMO",
+                "balance": 0.0,
+                "currency": "AUD",
+                "balance_source": "cashflow_anchor_plus_trades",
+            },
+            {
+                "account_label": "BYBIT DEMO",
+                "balance": 250.0,
+                "currency": "USDT",
+                "balance_source": "authoritative_trade_balance",
+            },
+        ],
+    }
+    build_master_journal_workbook(snapshot, workbook_path)
+    verification = ms._fast_verify_trading_journal_workbook(
+        workbook_path,
+        expected_snapshot=snapshot,
+    )
+    assert verification["ok"] is True, verification
+    return {"ms": ms, "path": workbook_path, "snapshot": snapshot}
+
+
+def _copy_fast_verifier_workbook(fixture, tmp_path):
+    source = fixture["path"]
+    destination = tmp_path / source.name
+    shutil.copy2(source, destination)
+    source_assets = source.parent / f"{source.stem}.assets"
+    if source_assets.is_dir():
+        shutil.copytree(source_assets, destination.parent / source_assets.name)
+    return destination
+
+
+def _stats2_account_balance_table(ws):
+    anchor_row = None
+    anchor_col = None
+    for row in ws.iter_rows():
+        for cell in row:
+            if str(cell.value or "").strip().casefold() == "account balances":
+                anchor_row, anchor_col = cell.row, cell.column
+                break
+        if anchor_row is not None:
+            break
+    assert anchor_row is not None and anchor_col is not None
+    for row_number in range(anchor_row + 1, min(ws.max_row + 1, anchor_row + 12)):
+        headers = {
+            str(ws.cell(row_number, col_number).value or "").strip().casefold(): col_number
+            for col_number in range(anchor_col, min(ws.max_column + 1, anchor_col + 8))
+        }
+        if {"account", "balance", "currency", "net p/l percentage"}.issubset(headers):
+            return row_number, headers
+    raise AssertionError("STATS2 Account Balances table not found")
+
+
+def test_fast_verifier_accepts_complete_generated_contract(fast_verifier_workbook_fixture):
+    fixture = fast_verifier_workbook_fixture
+    verification = fixture["ms"]._fast_verify_trading_journal_workbook(
+        fixture["path"],
+        expected_snapshot=fixture["snapshot"],
+    )
+    assert verification["ok"] is True, verification
+    diagnostics = verification["diagnostics"]
+    assert diagnostics["managed_source_cells"] == []
+    assert diagnostics["managed_row_height_mismatches"] == []
+    assert diagnostics["verbose_duration_cells"] == []
+    assert diagnostics["bybit_demo_net_pl_percentage"] in (None, "")
+    assert diagnostics["monthly_aud_revaluation_rows_checked"]
+    assert diagnostics["symbols_format_mismatches"] == []
+    assert diagnostics["recommendation_links_checked"]
+    for item in diagnostics["recommendation_links_checked"]:
+        target = str(item["target"])
+        assert "://" not in target
+        assert not Path(target).is_absolute()
+        artifact = fixture["path"].parent / Path(target)
+        assert artifact.is_file()
+        html = artifact.read_text(encoding="utf-8").casefold()
+        assert "<svg" in html
+        assert "data-recommended-value=" in html
+        assert "http://" not in html
+        assert "https://" not in html
+
+
+def test_fast_verifier_rejects_trade_log_filter_before_true_last_populated_row(
+    fast_verifier_workbook_fixture,
+    tmp_path,
+):
+    from openpyxl.utils.cell import get_column_letter, range_boundaries
+
+    fixture = fast_verifier_workbook_fixture
+    workbook_path = _copy_fast_verifier_workbook(fixture, tmp_path)
+    wb = load_workbook(workbook_path)
+    trade_log = wb["Trade Log"]
+    min_col, min_row, max_col, filter_last_row = range_boundaries(
+        trade_log.auto_filter.ref
+    )
+    true_last_row = max(
+        row
+        for row in range(1, trade_log.max_row + 1)
+        if any(
+            trade_log.cell(row, col).value not in (None, "")
+            for col in range(1, trade_log.max_column + 1)
+        )
+    )
+    assert filter_last_row >= true_last_row
+    trade_log.auto_filter.ref = (
+        f"{get_column_letter(min_col)}{min_row}:"
+        f"{get_column_letter(max_col)}{true_last_row - 1}"
+    )
+    wb.save(workbook_path)
+    wb.close()
+
+    verification = fixture["ms"]._fast_verify_trading_journal_workbook(
+        workbook_path,
+        expected_snapshot=fixture["snapshot"],
+    )
+
+    assert verification["ok"] is False
+    assert verification["error"] == "trade_log_filter_excludes_populated_rows"
+    coverage = verification["diagnostics"]["trade_log_filter_coverage"]
+    assert coverage["reason"] == "populated_rows_excluded"
+    assert coverage["max_row"] == true_last_row - 1
+    assert coverage["last_populated_row"] == true_last_row
+
+
+def test_fast_verifier_allows_preserved_unmanaged_extra_sheet(
+    fast_verifier_workbook_fixture,
+    tmp_path,
+):
+    fixture = fast_verifier_workbook_fixture
+    workbook_path = _copy_fast_verifier_workbook(fixture, tmp_path)
+    wb = load_workbook(workbook_path)
+    notes = wb.create_sheet("Preserved Notes")
+    notes["A1"] = "Source"
+    notes["A2"] = "Manual note: 2 hours and 30 minutes"
+    notes.row_dimensions[2].height = 27.0
+    wb.save(workbook_path)
+    wb.close()
+
+    verification = fixture["ms"]._fast_verify_trading_journal_workbook(
+        workbook_path,
+        expected_snapshot=fixture["snapshot"],
+    )
+
+    assert verification["ok"] is True, verification
+    assert verification["diagnostics"]["managed_source_cells"] == []
+    assert verification["diagnostics"]["managed_row_height_mismatches"] == []
+    assert verification["diagnostics"]["verbose_duration_cells"] == []
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_error", "diagnostic_key"),
+    [
+        ("source", "generated_source_rows_remain", "managed_source_cells"),
+        ("row_height", "generated_statistics_row_height_mismatch", "managed_row_height_mismatches"),
+        ("verbose_duration", "verbose_duration_text_remains", "verbose_duration_cells"),
+    ],
+)
+def test_fast_verifier_rejects_generated_statistics_regressions(
+    fast_verifier_workbook_fixture,
+    tmp_path,
+    mutation,
+    expected_error,
+    diagnostic_key,
+):
+    fixture = fast_verifier_workbook_fixture
+    workbook_path = _copy_fast_verifier_workbook(fixture, tmp_path)
+    wb = load_workbook(workbook_path)
+    stats1 = wb[fixture["ms"].STATS1_SHEET]
+    if mutation == "source":
+        stats1.cell(2, 1).value = "Source"
+    elif mutation == "row_height":
+        stats1.row_dimensions[2].height = 20.0
+    else:
+        stats1.cell(2, 2).value = "1 day 02:03:04"
+    wb.save(workbook_path)
+    wb.close()
+
+    verification = fixture["ms"]._fast_verify_trading_journal_workbook(
+        workbook_path,
+        expected_snapshot=fixture["snapshot"],
+    )
+    assert verification["ok"] is False
+    assert verification["error"] == expected_error
+    assert verification["diagnostics"][diagnostic_key]
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_error"),
+    [
+        ("as_of_header", "stats2_as_of_column_present"),
+        ("bybit_demo_percentage", "bybit_demo_net_pl_percentage_not_blank"),
+    ],
+)
+def test_fast_verifier_rejects_stats2_regressions(
+    fast_verifier_workbook_fixture,
+    tmp_path,
+    mutation,
+    expected_error,
+):
+    fixture = fast_verifier_workbook_fixture
+    workbook_path = _copy_fast_verifier_workbook(fixture, tmp_path)
+    wb = load_workbook(workbook_path)
+    stats2 = wb[fixture["ms"].STATS2_SHEET]
+    header_row, headers = _stats2_account_balance_table(stats2)
+    if mutation == "as_of_header":
+        candidate_col = max(headers.values()) + 1
+        stats2.cell(header_row, candidate_col).value = "As Of"
+    else:
+        bybit_row = next(
+            row_number
+            for row_number in range(header_row + 1, stats2.max_row + 1)
+            if str(stats2.cell(row_number, headers["account"]).value or "").strip().casefold()
+            == "bybit demo"
+        )
+        stats2.cell(bybit_row, headers["net p/l percentage"]).value = 0.01
+    wb.save(workbook_path)
+    wb.close()
+
+    verification = fixture["ms"]._fast_verify_trading_journal_workbook(
+        workbook_path,
+        expected_snapshot=fixture["snapshot"],
+    )
+    assert verification["ok"] is False
+    assert verification["error"] == expected_error
+
+
+@pytest.mark.parametrize("mutation", ["currency", "number_format"])
+def test_fast_verifier_rejects_monthly_aud_revaluation_format_regressions(
+    fast_verifier_workbook_fixture,
+    tmp_path,
+    mutation,
+):
+    fixture = fast_verifier_workbook_fixture
+    ms = fixture["ms"]
+    workbook_path = _copy_fast_verifier_workbook(fixture, tmp_path)
+    wb = load_workbook(workbook_path)
+    trade_log = wb["Trade Log"]
+    headers = ms._trade_log_header_map(trade_log)
+    monthly_row = next(
+        row_number
+        for row_number in range(ms._trade_log_data_start_row(trade_log), trade_log.max_row + 1)
+        if str(trade_log.cell(row_number, headers["Row ID"]).value or "").startswith(
+            "monthly_aud_reval:"
+        )
+    )
+    if mutation == "currency":
+        trade_log.cell(monthly_row, headers["Currency"]).value = "USDT"
+    else:
+        trade_log.cell(monthly_row, headers["Net P/L"]).number_format = '0.0000000000 "USDT"'
+    wb.save(workbook_path)
+    wb.close()
+
+    verification = ms._fast_verify_trading_journal_workbook(
+        workbook_path,
+        expected_snapshot=fixture["snapshot"],
+    )
+    assert verification["ok"] is False
+    assert verification["error"] == "monthly_aud_revaluation_currency_format_mismatch"
+    mismatch = verification["diagnostics"]["monthly_aud_revaluation_format_mismatch"]
+    assert mismatch["row"] == monthly_row
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        "Net R Multiple",
+        "Net P/L %",
+        "Avg P/L %",
+        "Win Rate %",
+        "Avg stop % (W)",
+        "Avg stop % (L)",
+        "Avg target % (W)",
+        "Avg target % (L)",
+    ],
+)
+def test_fast_verifier_checks_every_required_symbols_format_on_first_data_row(
+    fast_verifier_workbook_fixture,
+    tmp_path,
+    header,
+):
+    fixture = fast_verifier_workbook_fixture
+    ms = fixture["ms"]
+    workbook_path = _copy_fast_verifier_workbook(fixture, tmp_path)
+    wb = load_workbook(workbook_path)
+    symbols = wb[ms.SYMBOLS_SHEET]
+    headers = ms._instrument_averages_header_map(symbols)
+    first_row = ms.INSTRUMENT_AVERAGES_DATA_START_ROW
+    assert symbols.cell(first_row, headers["Symbol"]).value == "BTCUSDT"
+    symbols.cell(first_row, headers[header]).number_format = "General"
+    wb.save(workbook_path)
+    wb.close()
+
+    verification = ms._fast_verify_trading_journal_workbook(
+        workbook_path,
+        expected_snapshot=fixture["snapshot"],
+    )
+    assert verification["ok"] is False
+    assert verification["error"] == "symbols_performance_number_format_mismatch"
+    mismatches = verification["diagnostics"]["symbols_format_mismatches"]
+    assert any(
+        mismatch["row"] == first_row and mismatch["header"] == header
+        for mismatch in mismatches
+    )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_error"),
+    [
+        ("absolute_link", "recommendation_offline_hyperlink_missing"),
+        ("outside_link", "recommendation_hyperlink_outside_workbook_tree"),
+        ("missing_artifact", "recommendation_artifact_missing"),
+        ("network_reference", "recommendation_artifact_not_self_contained"),
+        ("stale_content", "recommendation_artifact_content_mismatch"),
+    ],
+)
+def test_fast_verifier_rejects_nonportable_recommendation_artifacts(
+    fast_verifier_workbook_fixture,
+    tmp_path,
+    mutation,
+    expected_error,
+):
+    fixture = fast_verifier_workbook_fixture
+    ms = fixture["ms"]
+    workbook_path = _copy_fast_verifier_workbook(fixture, tmp_path)
+    baseline = ms._fast_verify_trading_journal_workbook(
+        workbook_path,
+        expected_snapshot=fixture["snapshot"],
+    )
+    assert baseline["ok"] is True, baseline
+    link = baseline["diagnostics"]["recommendation_links_checked"][0]
+    wb = load_workbook(workbook_path)
+    cell = wb[link["sheet"]][link["cell"]]
+    if mutation == "absolute_link":
+        cell.hyperlink = "https://example.invalid/recommendation.html"
+        wb.save(workbook_path)
+    elif mutation == "outside_link":
+        cell.hyperlink = "../outside-recommendation.html"
+        wb.save(workbook_path)
+    elif mutation == "missing_artifact":
+        cell.hyperlink = "Trading Journal.assets/recommendations/missing.html"
+        wb.save(workbook_path)
+    elif mutation == "network_reference":
+        target = str(cell.hyperlink.target)
+        artifact = workbook_path.parent / Path(target)
+        artifact.write_text(
+            artifact.read_text(encoding="utf-8")
+            + '<img src="https://example.invalid/chart.png">',
+            encoding="utf-8",
+        )
+    else:
+        target = str(cell.hyperlink.target)
+        artifact = workbook_path.parent / Path(target)
+        stale = artifact.read_text(encoding="utf-8")
+        stale = re.sub(
+            r'data-recommended-value="[^"]+"',
+            'data-recommended-value="999"',
+            stale,
+            count=1,
+        )
+        stale = re.sub(
+            r'(Workbook recommendation</strong>\s*<p>).*?(</p>)',
+            r'\1Stale recommendation text\2',
+            stale,
+            count=1,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        artifact.write_text(stale, encoding="utf-8")
+    wb.close()
+
+    verification = ms._fast_verify_trading_journal_workbook(
+        workbook_path,
+        expected_snapshot=fixture["snapshot"],
+    )
+    assert verification["ok"] is False
+    assert verification["error"] == expected_error
+
+
+def test_fast_verifier_accepts_full_precision_markers_for_every_recommendation_link(
+    fast_verifier_workbook_fixture,
+    tmp_path,
+):
+    fixture = fast_verifier_workbook_fixture
+    ms = fixture["ms"]
+    workbook_path = _copy_fast_verifier_workbook(fixture, tmp_path)
+    baseline = ms._fast_verify_trading_journal_workbook(
+        workbook_path,
+        expected_snapshot=fixture["snapshot"],
+    )
+    assert baseline["ok"] is True, baseline
+    links = baseline["diagnostics"]["recommendation_links_checked"]
+    assert len(links) >= 4
+
+    wb = load_workbook(workbook_path)
+    linked_cells = [
+        (
+            link,
+            wb[link["sheet"]][link["cell"]],
+            str(wb[link["sheet"]][link["cell"]].hyperlink.target),
+        )
+        for link in links
+    ]
+    displayed_overrides = {0: "0.67", 1: "2.37"}
+    updated_text_by_index = {}
+    for index, displayed_token in displayed_overrides.items():
+        cell = linked_cells[index][1]
+        updated_text = re.sub(
+            r"(\bRecommended:\s*)[-+]?(?:\d+(?:\.\d*)?|\.\d+)",
+            rf"\g<1>{displayed_token}",
+            str(cell.value),
+            count=1,
+            flags=re.IGNORECASE,
+        )
+        assert updated_text != str(cell.value)
+        cell.value = updated_text
+        updated_text_by_index[index] = updated_text
+    wb.save(workbook_path)
+    wb.close()
+
+    mutated_targets = set()
+    for index, (_link, cell, target) in enumerate(linked_cells):
+        artifact = workbook_path.parent / Path(target)
+        html_text = artifact.read_text(encoding="utf-8")
+        cell_text = updated_text_by_index.get(index, str(cell.value))
+        displayed_match = re.search(
+            r"\bRecommended:\s*([-+]?(?:\d+(?:\.\d*)?|\.\d+))",
+            cell_text,
+            re.IGNORECASE,
+        )
+        assert displayed_match
+        displayed_token = displayed_match.group(1)
+        precision = len(displayed_token.partition(".")[2])
+        displayed_value = float(displayed_token)
+        underlying_value = (
+            0.667539357955
+            if index == 0
+            else 2.375
+            if index == 1
+            else displayed_value + (0.24 * (10 ** -precision))
+        )
+        assert abs(underlying_value - displayed_value) <= (
+            0.5 * (10 ** -precision)
+        ) + 1e-12
+        html_text = re.sub(
+            r'data-recommended-value="[^"]+"',
+            f'data-recommended-value="{underlying_value:.12g}"',
+            html_text,
+            count=1,
+        )
+        if index in updated_text_by_index:
+            html_text = re.sub(
+                r"(Workbook recommendation</strong>\s*<p>).*?(</p>)",
+                lambda match: (
+                    f"{match.group(1)}{updated_text_by_index[index]}{match.group(2)}"
+                ),
+                html_text,
+                count=1,
+                flags=re.IGNORECASE | re.DOTALL,
+            )
+        artifact.write_text(html_text, encoding="utf-8")
+        mutated_targets.add(target)
+
+    assert len(mutated_targets) == len(links)
+
+    verification = ms._fast_verify_trading_journal_workbook(
+        workbook_path,
+        expected_snapshot=fixture["snapshot"],
+    )
+    assert verification["ok"] is True, verification
+
+
+def test_fast_verifier_rejects_marker_outside_half_display_unit(
+    fast_verifier_workbook_fixture,
+    tmp_path,
+):
+    fixture = fast_verifier_workbook_fixture
+    ms = fixture["ms"]
+    workbook_path = _copy_fast_verifier_workbook(fixture, tmp_path)
+    baseline = ms._fast_verify_trading_journal_workbook(
+        workbook_path,
+        expected_snapshot=fixture["snapshot"],
+    )
+    assert baseline["ok"] is True, baseline
+    link = baseline["diagnostics"]["recommendation_links_checked"][0]
+    wb = load_workbook(workbook_path)
+    cell = wb[link["sheet"]][link["cell"]]
+    displayed_match = re.search(
+        r"\bRecommended:\s*([-+]?(?:\d+(?:\.\d*)?|\.\d+))",
+        str(cell.value),
+        re.IGNORECASE,
+    )
+    assert displayed_match
+    displayed_token = displayed_match.group(1)
+    precision = len(displayed_token.partition(".")[2])
+    outside_marker = float(displayed_token) + (0.5001 * (10 ** -precision))
+    target = str(cell.hyperlink.target)
+    wb.close()
+
+    artifact = workbook_path.parent / Path(target)
+    html_text = artifact.read_text(encoding="utf-8")
+    html_text = re.sub(
+        r'data-recommended-value="[^"]+"',
+        f'data-recommended-value="{outside_marker:.12g}"',
+        html_text,
+        count=1,
+    )
+    artifact.write_text(html_text, encoding="utf-8")
+
+    verification = ms._fast_verify_trading_journal_workbook(
+        workbook_path,
+        expected_snapshot=fixture["snapshot"],
+    )
+    assert verification["ok"] is False
+    assert verification["error"] == "recommendation_artifact_content_mismatch"
+
+
+def test_fast_verifier_accepts_source_driven_nonzero_balances(tmp_path):
+    ms = _load_master_service_for_import_test()
+    from tools.master_journal_workbook import build_master_journal_workbook
+
+    workbook_path = tmp_path / "Trading Journal.xlsx"
+    snapshot = {
+        "items": [],
+        "stats": {"totals": {}, "groups": {}},
+        "balances": [
+            {
+                "account_label": "BINANCE",
+                "balance": 396.65720524,
+                "currency": "USDT",
+                "balance_source": "cashflow_anchor_plus_trades",
+            },
+            {
+                "account_label": "PEPPERSTONE DEMO",
+                "balance": 4.78,
+                "currency": "AUD",
+                "balance_source": "cashflow_anchor_plus_trades",
+            },
+        ],
+    }
+    build_master_journal_workbook(snapshot, workbook_path)
+
+    verification = ms._fast_verify_trading_journal_workbook(
+        workbook_path,
+        expected_snapshot=snapshot,
+    )
+
+    assert verification["ok"] is True, verification
+    assert verification["diagnostics"]["source_driven_nonzero_accounts"] == [
+        "BINANCE",
+        "PEPPERSTONE DEMO",
+    ]
+
+
 def test_resync_fast_verification_catches_stale_binance_or_pepperstone(tmp_path):
     ms = _load_master_service_for_import_test()
     from tools.master_journal_workbook import build_master_journal_workbook
@@ -2735,9 +4012,21 @@ def test_resync_concurrent_duplicate_is_rejected_before_snapshot_build(monkeypat
 
 def test_workbook_sync_call_sites_use_explicit_callers():
     source = (ROOT / 'render' / 'master_service.py').read_text(encoding='utf-8')
-    call_lines = [line.strip() for line in source.splitlines() if '_sync_master_journal_workbook(' in line and not line.lstrip().startswith('def ')]
-    assert call_lines
-    assert all('sync_caller=' in line for line in call_lines), call_lines
+    tree = ast.parse(source)
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == '_sync_master_journal_workbook'
+    ]
+    assert calls
+    missing_caller_lines = [
+        node.lineno
+        for node in calls
+        if not any(keyword.arg == 'sync_caller' for keyword in node.keywords)
+    ]
+    assert missing_caller_lines == []
     assert 'caller=unspecified' not in source
 
 
@@ -2919,15 +4208,15 @@ def test_sync_preserves_canonical_stats1_layout_and_manual_formatting(tmp_path, 
     wb = load_workbook(path)
     dash = wb["STATS1"]
     sheet_order = list(wb.sheetnames)
-    labels_before = [
-        str(dash.cell(row, 1).value or "").strip()
-        for row in range(1, dash.max_row + 1)
-    ]
     sentinel = dash["I149"]
     sentinel.value = "CUSTOM LAYOUT SENTINEL"
     sentinel.font = Font(name="Calibri", size=13, bold=True, color="123456")
     sentinel.fill = PatternFill("solid", fgColor="ABCDEF")
     sentinel.alignment = Alignment(horizontal="center")
+    labels_before = [
+        str(dash.cell(row, 1).value or "").strip()
+        for row in range(1, dash.max_row + 1)
+    ]
     wb.save(path)
     wb.close()
 

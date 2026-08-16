@@ -447,7 +447,7 @@ def test_stats_tables_get_clean_group_borders(tmp_path: Path):
 
     stats2 = wb[STATS2_SHEET]
     assert stats2["A1"].border.left.style == "medium"
-    assert stats2["F2"].border.right.style == "medium"
+    assert stats2["E2"].border.right.style == "medium"
     assert _cell_fill_rgb(stats2["E3"]) == ""
     wb.close()
 
@@ -455,15 +455,34 @@ def test_stats_tables_get_clean_group_borders(tmp_path: Path):
 @pytest.mark.parametrize(
     ("seconds", "expected"),
     [
-        (3661, "01 hours, 01 minutes, 01 seconds"),
-        (180, "03 minutes, 00 seconds"),
-        (59, "59 seconds"),
-        (90061, "01 days, 01 hours, 01 minutes, 01 seconds"),
+        (3661, "1H 1M 1S"),
+        (180, "3M 0S"),
+        (59, "59S"),
+        (90061, "1D 1H 1M 1S"),
     ],
 )
 def test_format_duration_display_suppresses_leading_units(seconds, expected):
     assert _format_duration_display(seconds) == expected
     assert _parse_duration_text(expected) == pytest.approx(seconds)
+
+
+def test_deterministic_extreme_ties_ignore_input_order():
+    from tools.master_journal_workbook import _pick_deterministic_extreme
+
+    later = {
+        "id": "trade-b",
+        "symbol": "EURUSD",
+        "close_time": "2026-05-02T00:00:00Z",
+    }
+    earlier = {
+        "id": "trade-a",
+        "symbol": "EURUSD",
+        "close_time": "2026-05-01T00:00:00Z",
+    }
+    samples = [(1.25, later), (1.25, earlier)]
+    assert _pick_deterministic_extreme(samples, "min")[1]["id"] == "trade-a"
+    assert _pick_deterministic_extreme(list(reversed(samples)), "min")[1]["id"] == "trade-a"
+    assert _pick_deterministic_extreme(samples, "max")[1]["id"] == "trade-a"
 
 
 def test_generated_workbook_duration_styles_are_excel_safe(tmp_path: Path):
@@ -749,11 +768,11 @@ def test_dashboard_overall_return_average_labels_and_move_durations(tmp_path: Pa
     labels = {str(dash.cell(row, 1).value or ""): row for row in range(1, dash.max_row + 1)}
     assert labels["Min Move to Break Even"] < labels[DASHBOARD_MOVE_TO_BREAK_EVEN_LABEL] < labels["Max Move to Break Even"]
     assert labels["Min Move to Profit"] < labels[DASHBOARD_MOVE_TO_PROFIT_LABEL] < labels["Max Move to Profit"]
-    assert dash.cell(labels[DASHBOARD_MOVE_TO_BREAK_EVEN_LABEL], 2).value == "01 hours, 00 minutes, 00 seconds"
-    assert dash.cell(labels[DASHBOARD_MOVE_TO_PROFIT_LABEL], 2).value == "02 hours, 00 minutes, 00 seconds"
+    assert dash.cell(labels[DASHBOARD_MOVE_TO_BREAK_EVEN_LABEL], 2).value == "1H 0M 0S"
+    assert dash.cell(labels[DASHBOARD_MOVE_TO_PROFIT_LABEL], 2).value == "2H 0M 0S"
     for label in ("Min Move to Break Even", "Max Move to Break Even", "Min Move to Profit", "Max Move to Profit"):
-        assert dash.cell(labels[label] + 1, 1).value == "Source"
-        assert "EURUSD · 2026-05-01" in str(dash.cell(labels[label] + 1, 2).value)
+        assert "EURUSD 2026-05-01" in str(dash.cell(labels[label], 2).value)
+    assert all(str(dash.cell(row, 1).value or "").strip() != "Source" for row in range(1, dash.max_row + 1))
 
 
 def test_mixed_currency_overall_return_uses_account_balances():
@@ -895,20 +914,30 @@ def test_streak_rows_split_count_start_end_for_stats1_and_reports(tmp_path: Path
         wb.close()
 
 
-def test_stats2_as_of_column_uses_plain_black_and_white_style(tmp_path: Path):
+def test_stats2_omits_as_of_and_keeps_demo_net_pl_blank(tmp_path: Path):
     out = tmp_path / "stats2-asof-style.xlsx"
-    build_master_journal_workbook(sample_snapshot(), out)
+    snapshot = sample_snapshot()
+    snapshot["balances"].append({"account_label": "Bybit Demo", "balance": 10.0, "currency": "USDT"})
+    snapshot["items"].append({
+        "id": "demo-net-pct",
+        "row_type": "trade",
+        "account": "Bybit Demo",
+        "symbol": "BTCUSDT",
+        "result_pct": 12.5,
+    })
+    build_master_journal_workbook(snapshot, out)
     wb = load_workbook(out)
     try:
         stats2 = wb[STATS2_SHEET]
-        for row in range(3, 10):
-            cell = stats2.cell(row, 5)
-            if cell.value in (None, ""):
-                continue
-            assert "T" not in str(cell.value)
-            assert cell.number_format in {"General", "yyyy-mm-dd hh:mm:ss"}
-            assert _cell_fill_rgb(cell) == ""
-            assert _cell_font_rgb(cell) == "000000"
+        headers = [str(stats2.cell(2, col).value or "") for col in range(1, stats2.max_column + 1)]
+        assert headers[:5] == ["Account", "Balance", "Currency", "Risk of Ruin", "Net P/L Percentage"]
+        assert "As Of" not in headers and "As of" not in headers
+        demo_row = next(
+            (row for row in range(3, stats2.max_row + 1) if stats2.cell(row, 1).value == "BYBIT DEMO"),
+            None,
+        )
+        assert demo_row is not None
+        assert stats2.cell(demo_row, 5).value in (None, "")
     finally:
         wb.close()
 
@@ -1024,6 +1053,12 @@ def test_move_to_duration_repair_uses_open_and_move_times():
     for col, header in enumerate(TRADE_LOG_HEADERS, start=1):
         ws.cell(1, col, header)
     _ensure_trade_log_schema(ws)
+    last_letter = get_column_letter(len(TRADE_LOG_HEADERS))
+    assert ws.auto_filter.ref == f"A3:{last_letter}3"
+    assert {
+        str(getattr(key, "sqref", key))
+        for key in ws.conditional_formatting._cf_rules
+    } == {f"A4:{last_letter}4"}
     headers = _trade_log_header_map(ws)
     row = TRADE_LOG_DATA_START_ROW
     ws.cell(row, headers["Open Time"]).value = datetime(2026, 1, 1, 9, 0, 0)
@@ -1309,14 +1344,13 @@ def test_dashboard_build_includes_canonical_move_duration_rows(tmp_path: Path):
     assert DASHBOARD_MOVE_TO_PROFIT_LABEL in labels
     break_even_row = labels[DASHBOARD_MOVE_TO_BREAK_EVEN_LABEL]
     profit_row = labels[DASHBOARD_MOVE_TO_PROFIT_LABEL]
-    assert labels["Min Move to Break Even"] + 2 == break_even_row
+    assert labels["Min Move to Break Even"] + 1 == break_even_row
     assert labels["Max Move to Break Even"] == break_even_row + 1
-    assert dash.cell(labels["Min Move to Break Even"] + 1, 1).value == "Source"
-    assert dash.cell(labels["Max Move to Break Even"] + 1, 1).value == "Source"
-    assert labels["Min Move to Profit"] + 2 == profit_row
+    assert "EURUSD" in str(dash.cell(labels["Min Move to Break Even"], 2).value)
+    assert "EURUSD" in str(dash.cell(labels["Max Move to Break Even"], 2).value)
+    assert labels["Min Move to Profit"] + 1 == profit_row
     assert labels["Max Move to Profit"] == profit_row + 1
-    assert dash.cell(labels["Min Move to Profit"] + 1, 1).value == "Source"
-    assert dash.cell(labels["Max Move to Profit"] + 1, 1).value == "Source"
+    assert all(str(dash.cell(row, 1).value or "").strip() != "Source" for row in range(1, dash.max_row + 1))
     for value_col in (2, 3, 4):
         assert dash.cell(break_even_row, value_col).number_format == "General"
         assert dash.cell(profit_row, value_col).number_format == "General"
@@ -1398,12 +1432,12 @@ def test_data_only_update_inserts_missing_dashboard_move_rows_and_preserves_metr
     assert profit_row == 22
     assert labels["Max loss %"] == 23
     assert labels["Winners"] == 39
-    assert dash.cell(break_even_row, 2).value == "01 hours, 00 minutes, 00 seconds"
-    assert dash.cell(break_even_row, 4).value == "01 hours, 00 minutes, 00 seconds"
-    assert dash.cell(profit_row, 2).value == "02 hours, 00 minutes, 00 seconds"
-    assert dash.cell(profit_row, 4).value == "02 hours, 00 minutes, 00 seconds"
+    assert dash.cell(break_even_row, 2).value == "1H 0M 0S"
+    assert dash.cell(break_even_row, 4).value == "1H 0M 0S"
+    assert dash.cell(profit_row, 2).value == "2H 0M 0S"
+    assert dash.cell(profit_row, 4).value == "2H 0M 0S"
     assert dash.cell(2, 2).value == 1
-    assert dash.row_dimensions[break_even_row].height == 27
+    assert dash.row_dimensions[break_even_row].height == 14.5
     assert dash.cell(break_even_row, 2).number_format == "General"
     trade = wb["Trade Log"]
     merged = {str(rng) for rng in trade.merged_cells.ranges}
@@ -1476,16 +1510,16 @@ def test_dashboard_manual_move_rows_survive_and_populate_by_label(tmp_path: Path
     dash = wb[STATS1_SHEET]
     assert dash["A2"].value == DASHBOARD_MOVE_TO_BREAK_EVEN_LABEL
     assert dash["A3"].value == DASHBOARD_MOVE_TO_PROFIT_LABEL
-    assert dash["B2"].value == "01 hours, 00 minutes, 00 seconds"
-    assert dash["D2"].value == "01 hours, 00 minutes, 00 seconds"
-    assert dash["B3"].value == "02 hours, 00 minutes, 00 seconds"
-    assert dash["D3"].value == "02 hours, 00 minutes, 00 seconds"
+    assert dash["B2"].value == "1H 0M 0S"
+    assert dash["D2"].value == "1H 0M 0S"
+    assert dash["B3"].value == "2H 0M 0S"
+    assert dash["D3"].value == "2H 0M 0S"
     assert dash["B4"].value == 1 and dash["D4"].value == 1
     assert str(dash["A2"].fill.fgColor.rgb).endswith("ABCDEF")
     assert dash["A2"].font.bold is True
     assert dash["A2"].border.bottom.style == "thick"
     assert dash["A2"].alignment.horizontal == "left"
-    assert dash.row_dimensions[2].height == 31
+    assert dash.row_dimensions[2].height == 14.5
     wb.close()
 
 def test_schema_migration_preserves_trade_and_derived_sheet_content(tmp_path: Path):
@@ -1656,8 +1690,8 @@ def test_balance_after_resolution_and_duration_display(tmp_path: Path):
     assert ws.cell(5, _header_col(ws, 'Balance After')).value == 105
     assert ws.cell(6, _header_col(ws, 'Balance After')).value in ("", None)
     assert ws.cell(1, _header_col(ws, 'Trade Duration (DD:HH:MM:SS)')).value == 'Trade Duration (DD:HH:MM:SS)'
-    assert ws.cell(_trade_data_row(), _header_col(ws, 'Trade Duration (DD:HH:MM:SS)')).value == "41 seconds"
-    assert ws.cell(5, _header_col(ws, 'Trade Duration (DD:HH:MM:SS)')).value == "05 minutes, 03 seconds"
+    assert ws.cell(_trade_data_row(), _header_col(ws, 'Trade Duration (DD:HH:MM:SS)')).value == "41S"
+    assert ws.cell(5, _header_col(ws, 'Trade Duration (DD:HH:MM:SS)')).value == "5M 3S"
     assert ws.cell(_trade_data_row(), _header_col(ws, 'Trade Duration (DD:HH:MM:SS)')).number_format == "General"
     inst=wb[SYMBOLS_SHEET]
     inst_headers = _instrument_averages_header_map(inst)
@@ -1928,11 +1962,19 @@ def test_instrument_currency_and_percent_formats(tmp_path: Path):
     inst = wb[SYMBOLS_SHEET]
     headers = _instrument_averages_header_map(inst)
     row = INSTRUMENT_AVERAGES_DATA_START_ROW
-    assert inst.cell(row, headers["Win Rate %"]).number_format == "0.00%"
+    for header in (
+        "Net P/L %", "Avg P/L %", "Win Rate %",
+        "Avg stop %", "Avg stop % (W)", "Avg stop % (L)",
+        "Avg target %", "Avg target % (W)", "Avg target % (L)",
+    ):
+        assert inst.cell(row, headers[header]).number_format == "0.00%"
+    assert inst.cell(row, headers["Net R Multiple"]).number_format == '0.000"R"'
     assert inst.cell(row, headers["Win Rate %"]).value == 1.0
     assert inst.cell(row, headers["Net P/L %"]).number_format == "0.00%"
     assert inst.cell(row, headers["Wins"]).number_format == "0;-0;;@"
     assert inst.cell(row, headers["Losses"]).number_format == "0;-0;;@"
+    for header in ("Net R Multiple", "Net P/L %", "Avg P/L %"):
+        assert _cell_fill_rgb(inst.cell(row, headers[header])) == PROFIT_FILL
 
 def test_dashboard_layout_style_columns(tmp_path: Path):
     out=tmp_path/'db.xlsx'; build_master_journal_workbook(sample_snapshot(), out); wb=load_workbook(out)
@@ -1943,8 +1985,8 @@ def test_dashboard_layout_style_columns(tmp_path: Path):
         "Min duration", "Avg duration",
         "Avg winning trade duration", "Avg losing trade duration",
         "Max duration",
-        "Min Move to Break Even", "Source", "Average Move to Break Even", "Max Move to Break Even", "Source",
-        "Min Move to Profit", "Source", "Average Move to Profit", "Max Move to Profit", "Source",
+        "Min Move to Break Even", "Average Move to Break Even", "Max Move to Break Even",
+        "Min Move to Profit", "Average Move to Profit", "Max Move to Profit",
     ]
     labels = defaultdict(list)
     for row in range(1, dash.max_row + 1):
@@ -1954,14 +1996,7 @@ def test_dashboard_layout_style_columns(tmp_path: Path):
     duration_start = next(row for row in labels["Min duration"] if row < labels["Winners"][0])
     duration_rows = range(duration_start, duration_start + len(expected_duration_labels))
     assert [dash.cell(row, 1).value for row in duration_rows] == expected_duration_labels
-    source_rows = [row for row in duration_rows if dash.cell(row, 1).value == "Source"]
-    assert len(source_rows) == 4
-    for source_row in source_rows:
-        label_cell = dash.cell(source_row, 1)
-        assert label_cell.value == "Source"
-        assert label_cell.font.bold is False
-        assert label_cell.font.italic is True
-        assert label_cell.alignment.horizontal == "right"
+    assert all(str(dash.cell(row, 1).value or "").strip() != "Source" for row in range(1, dash.max_row + 1))
 
     for section, expected_seconds in (("Winners", 3700), ("Losers", 7215)):
         section_row = labels[section][0]
@@ -2263,6 +2298,98 @@ def test_read_master_journal_source_monthly_aud_roundtrip_fields(tmp_path: Path)
     assert monthly.get("realized_pnl") in (None, "")
 
 
+def test_preservation_refresh_keeps_o6_monthly_value_aud_and_crypto_usdt(
+    tmp_path: Path,
+):
+    monthly_id = "monthly_aud_reval:bybit_live:2026-06"
+    snapshot = {
+        "items": [
+            {
+                "id": "crypto-usdt-row",
+                "row_type": "trade",
+                "account": "BYBIT",
+                "asset_class": "crypto",
+                "symbol": "BTCUSDT",
+                "side": "BUY",
+                "open_time": "2026-06-01T00:00:00Z",
+                "close_time": "2026-06-01T01:00:00Z",
+                "entry_price": 100.0,
+                "exit_price": 101.0,
+                "net_profit": 5.5,
+                "currency": "USDT",
+                "result_currency": "USDT",
+            },
+            {
+                "id": "fx-aud-row",
+                "row_type": "trade",
+                "account": "OANDA DEMO",
+                "asset_class": "fx",
+                "symbol": "EURUSD",
+                "side": "BUY",
+                "open_time": "2026-06-02T00:00:00Z",
+                "close_time": "2026-06-02T01:00:00Z",
+                "entry_price": 1.1,
+                "exit_price": 1.11,
+                "net_profit": 2.0,
+                "currency": "AUD",
+                "result_currency": "AUD",
+            },
+            {
+                "id": monthly_id,
+                "row_type": "monthly_aud_reval",
+                "account": "BYBIT",
+                "account_label": "BYBIT",
+                "symbol": "MONTHLY AUD P/L",
+                "open_time": "2026-06-01T00:00:00Z",
+                "close_time": "2026-06-30T23:59:59Z",
+                "result_cash": 12.95,
+                "result_currency": "AUD",
+                "currency": "AUD",
+            },
+        ],
+        "stats": {"totals": {}, "groups": {}},
+        "balances": [],
+    }
+    path = tmp_path / "o6-aud-preservation.xlsx"
+    build_master_journal_workbook(snapshot, path)
+    wb = load_workbook(path)
+    trade_log = wb["Trade Log"]
+    net_col = _header_col(trade_log, "Net P/L")
+    currency_col = _header_col(trade_log, "Currency")
+    monthly_row = _trade_log_row_by_id(trade_log, monthly_id)
+    crypto_row = _trade_log_row_by_id(trade_log, "crypto-usdt-row")
+    assert monthly_row == 6
+    assert net_col == 15
+    assert trade_log["O6"].value == pytest.approx(12.95)
+    trade_log.cell(monthly_row, net_col).number_format = '#,##0.######## "USDT"'
+    trade_log.cell(crypto_row, net_col).number_format = '#,##0.00 "AUD"'
+    wb.save(path)
+    wb.close()
+
+    result = update_master_journal_workbook_data_only(
+        path,
+        snapshot,
+        preserve_existing_layout=True,
+    )
+    assert result["ok"] is True
+    Path(result["candidate_path"]).replace(path)
+
+    wb = load_workbook(path)
+    try:
+        trade_log = wb["Trade Log"]
+        monthly_row = _trade_log_row_by_id(trade_log, monthly_id)
+        crypto_row = _trade_log_row_by_id(trade_log, "crypto-usdt-row")
+        monthly_cell = trade_log.cell(monthly_row, net_col)
+        crypto_cell = trade_log.cell(crypto_row, net_col)
+        assert monthly_row == 6 and monthly_cell.value == pytest.approx(12.95)
+        assert trade_log.cell(monthly_row, currency_col).value == "AUD"
+        assert "AUD" in monthly_cell.number_format and "USDT" not in monthly_cell.number_format
+        assert trade_log.cell(crypto_row, currency_col).value == "USDT"
+        assert "USDT" in crypto_cell.number_format and "AUD" not in crypto_cell.number_format
+    finally:
+        wb.close()
+
+
 def test_workbook_source_dedupes_canonical_monthly_row_id_and_keeps_best_record(tmp_path: Path):
     monthly_id = "monthly_aud_reval:bybit_live:2026-04"
     snapshot = {
@@ -2557,7 +2684,8 @@ def test_metric_refresh_same_row_sections_and_non_a_balance_block(tmp_path: Path
     assert d['B4'].value==0.5 and d['E4'].value==0.25 and d['H4'].value==0.75
     assert d['Q3'].value == 12.5
     assert d['R3'].value == 'USDT'
-    assert 'GBPUSD' in str(d['E6'].value)
+    assert 'GBPUSD 2026-01-02' in str(d['E5'].value)
+    assert all(str(d.cell(row, 1).value or "").strip() != "Source" for row in range(1, d.max_row + 1))
 
 def test_embedded_fx_crypto_duration_without_duration_section(tmp_path: Path):
     from openpyxl import Workbook
@@ -2572,11 +2700,11 @@ def test_embedded_fx_crypto_duration_without_duration_section(tmp_path: Path):
     snap={'stats':{'totals':{},'groups':{'by_market':{'overall':{},'fx':{},'crypto':{}},'risk_expectancy':{},'leaders':{},'duration':{'fx_shortest_seconds':10,'fx_longest_seconds':20,'crypto_shortest_seconds':30,'crypto_longest_seconds':40,'metric_sources':{'fx_shortest_seconds':{'symbol':'EURUSD','date':'2026-01-01'},'fx_longest_seconds':{'symbol':'GBPUSD','date':'2026-01-02'},'crypto_shortest_seconds':{'symbol':'BTCUSDT','date':'2026-01-03'},'crypto_longest_seconds':{'symbol':'ETHUSDT','date':'2026-01-04'}}}}},'balances':[{'account_label':'BYBIT','balance':1,'currency':'USDT'}]}
     res = update_master_journal_workbook_data_only(p,snap); Path(res["candidate_path"]).replace(p)
     out=load_workbook(p)[STATS1_SHEET]
-    assert out['E2'].value == "10 seconds" and out['E2'].number_format == "General"
-    assert out['E4'].value == "20 seconds" and out['E4'].number_format == "General"
-    assert out['H2'].value == "30 seconds" and out['H2'].number_format == "General"
-    assert out['H4'].value == "40 seconds" and out['H4'].number_format == "General"
-    assert 'EURUSD' in str(out['E3'].value) and 'ETHUSDT' in str(out['H5'].value)
+    assert out['E2'].value == "10S - EURUSD 2026-01-01" and out['E2'].number_format == "General"
+    assert out['E3'].value == "20S - GBPUSD 2026-01-02" and out['E3'].number_format == "General"
+    assert out['H2'].value == "30S - BTCUSDT 2026-01-03" and out['H2'].number_format == "General"
+    assert out['H3'].value == "40S - ETHUSDT 2026-01-04" and out['H3'].number_format == "General"
+    assert all(str(out.cell(row, 1).value or "").strip() != "Source" for row in range(1, out.max_row + 1))
 
 def test_read_master_journal_source_asset_class_regressions(tmp_path: Path):
     from openpyxl import Workbook
@@ -2706,7 +2834,10 @@ def test_account_balances_restores_missing_rows_without_layout_mutation(tmp_path
     assert "BYBIT DEMO" in found and "BYBIT" in found
     assert isinstance(d.cell(found["BYBIT DEMO"], 21).value, (int, float))
     assert d.cell(found["BYBIT DEMO"], 22).value == "USDT"
-    assert str(d.cell(found["BYBIT DEMO"], 23).value) == "2026-05-16"
+    assert all(
+        str(d.cell(2, col).value or "").strip().casefold() != "as of"
+        for col in range(1, d.max_column + 1)
+    )
     assert _sheetnames_without_target_r_metadata(out) == [
         STATS1_SHEET,
         STATS2_SHEET,
@@ -3175,8 +3306,10 @@ def _target_r_recommendation_cells(path: Path) -> dict:
     wb = load_workbook(path, data_only=True)
     try:
         stats1 = wb[STATS1_SHEET]
-        max_target_row = next(row for row in range(1, stats1.max_row + 1) if stats1.cell(row, 1).value == "Max target %")
-        target_recommendation_row = max_target_row + 2
+        target_recommendation_row = _stats1_recommendation_row_after_metric(
+            stats1, "Max target %"
+        )
+        assert target_recommendation_row is not None
         stats1_recs = tuple(stats1.cell(target_recommendation_row, col).value for col in (2, 3, 4))
         symbols = wb[SYMBOLS_SHEET]
         headers = _instrument_averages_header_map(symbols)
@@ -4223,12 +4356,12 @@ def test_checked_in_trading_journal_preserves_canonical_sheet_and_chart_layout()
         ]
         assert len(wb.sheetnames) == 16
         assert "Equity Curve" not in wb.sheetnames
-        assert wb.active.title == " SIM"
+        assert wb.active.title == REPORT_YEARLY_SHEET
         assert [
             ws.title
             for ws in wb.worksheets
             if ws.sheet_view.tabSelected
-        ] == [" SIM"]
+        ] == [REPORT_YEARLY_SHEET]
         assert len(wb[" SIM"]._charts) == 2
         assert sum(len(ws._charts) for ws in wb.worksheets) == 2
     finally:
@@ -4275,7 +4408,40 @@ def test_preserve_layout_refresh_removes_acf31f4_unused_external_link(
         "obsolete_targets": [],
     }
     assert mjw._external_workbook_formula_references(path) == []
-    assert _canonical_preservation_signature(path) == before
+    normalized = _canonical_preservation_signature(path)
+    assert normalized["manual_overrides"] == before["manual_overrides"]
+
+    second_snapshot = read_master_journal_source(path)
+    second_result = update_master_journal_workbook_data_only(
+        path,
+        second_snapshot,
+        preserve_existing_layout=True,
+    )
+    assert second_result["ok"] is True
+    Path(second_result["candidate_path"]).replace(path)
+    after = _canonical_preservation_signature(path)
+    for key, expected in normalized.items():
+        if key == "row_dimensions":
+            continue
+        assert after[key] == expected, key
+
+    wb = load_workbook(path, data_only=False, keep_links=False)
+    try:
+        for sheet_name in (
+            STATS1_SHEET,
+            REPORT_YEARLY_SHEET,
+            *[str(year) for year in range(2018, 2027)],
+        ):
+            ws = wb[sheet_name]
+            for row in range(2, ws.max_row + 1):
+                if not any(
+                    ws.cell(row, col).value not in (None, "")
+                    for col in range(1, ws.max_column + 1)
+                ):
+                    continue
+                assert ws.row_dimensions[row].height == pytest.approx(14.5)
+    finally:
+        wb.close()
 
 
 def test_external_dependency_guard_rejects_formula_name_and_chart(
@@ -4381,7 +4547,6 @@ def test_data_only_update_repairs_stale_recommendation_columns_and_stats1_labels
     max_target_row = next(row for row in range(1, stats1.max_row + 1) if stats1.cell(row, 1).value == "Max target %")
     stats1.cell(max_target_row, 1).value = None
     stats1.cell(max_target_row + 1, 1).value = None
-    stats1.cell(max_target_row + 2, 1).value = None
     wb.save(out)
     wb.close()
 
@@ -4408,9 +4573,8 @@ def test_data_only_update_repairs_stale_recommendation_columns_and_stats1_labels
             for row in range(1, first_winners_row)
             if stats1.cell(row, 1).value == "Max target %"
         )
-        assert stats1.cell(max_target_row + 1, 1).value == "Source"
-        assert stats1.cell(max_target_row + 2, 1).value == "Recommendation"
-        values = [stats1.cell(max_target_row + 2, col).value for col in range(2, 5)]
+        assert stats1.cell(max_target_row + 1, 1).value == "Recommendation"
+        values = [stats1.cell(max_target_row + 1, col).value for col in range(2, 5)]
         assert all(
             value in (None, "") or "Recommended:" in str(value)
             for value in values
@@ -4776,6 +4940,26 @@ def test_checked_in_master_journal_read_is_json_safe_and_read_only() -> None:
         pytest.skip("checked-in Trading Journal.xlsx is not available")
     before_hash = hashlib.sha256(path.read_bytes()).hexdigest()
 
+    wb = load_workbook(path, data_only=True, read_only=True)
+    try:
+        trade_log = wb["Trade Log"]
+        headers = _trade_log_header_map(trade_log)
+        row_type_index = headers["Row Type"] - 1
+        row_id_index = headers["Row ID"] - 1
+        max_required_index = max(row_type_index, row_id_index)
+        canonical_row_ids = []
+        for values in trade_log.iter_rows(
+            min_row=TRADE_LOG_DATA_START_ROW,
+            max_col=max_required_index + 1,
+            values_only=True,
+        ):
+            row_type = str(values[row_type_index] or "trade").strip().lower()
+            row_id = str(values[row_id_index] or "").strip()
+            if row_type in {"trade", "cashflow", "monthly_aud_reval"} and row_id:
+                canonical_row_ids.append(row_id)
+    finally:
+        wb.close()
+
     payload = read_master_journal_source(path)
 
     def _find_non_json_dates(value):
@@ -4787,7 +4971,10 @@ def test_checked_in_master_journal_read_is_json_safe_and_read_only() -> None:
             return [item for child in value for item in _find_non_json_dates(child)]
         return []
 
-    assert len(payload["items"]) == 1544
+    payload_row_ids = [str(item.get("id") or "").strip() for item in payload["items"]]
+    assert len(canonical_row_ids) == len(set(canonical_row_ids))
+    assert len(payload_row_ids) == len(canonical_row_ids)
+    assert set(payload_row_ids) == set(canonical_row_ids)
     assert _find_non_json_dates(payload) == []
     json.dumps(payload)
     assert hashlib.sha256(path.read_bytes()).hexdigest() == before_hash
@@ -4816,14 +5003,13 @@ def test_update_data_only_writes_dashboard_horizontal_core_metric_aliases(tmp_pa
     assert [ws.cell(max_target_row, c).value for c in range(2, 5)] == [pytest.approx(0.095), pytest.approx(0.05), pytest.approx(0.1225)]
     assert [ws.cell(max_target_row, c).number_format for c in range(2, 5)] == ["0.00%", "0.00%", "0.00%"]
     max_stop_row = next(row for row in range(1, ws.max_row + 1) if ws.cell(row, 1).value == "Max stop %")
-    stop_recommendation_row = max_stop_row + 2
-    target_recommendation_row = max_target_row + 2
-    assert ws.cell(max_stop_row + 1, 1).value == "Source"
+    stop_recommendation_row = max_stop_row + 1
+    target_recommendation_row = max_target_row + 1
     assert ws.cell(stop_recommendation_row, 1).value == "Recommendation"
     assert [ws.cell(stop_recommendation_row, c).value for c in range(2, 5)] == [None, None, None]
-    assert ws.cell(max_target_row + 1, 1).value == "Source"
     assert ws.cell(target_recommendation_row, 1).value == "Recommendation"
     assert [ws.cell(target_recommendation_row, c).value for c in range(2, 5)] == [None, None, None]
+    assert all(str(ws.cell(row, 1).value or "").strip() != "Source" for row in range(1, ws.max_row + 1))
     assert all(_cell_fill_rgb(ws.cell(11, col)) == "C6EFCE" for col in range(2, 5))
     assert all(_cell_font_rgb(ws.cell(11, col)) == "006100" for col in range(2, 5))
     assert all(_cell_fill_rgb(ws.cell(14, col)) == "FFC7CE" for col in range(2, 5))
@@ -4878,7 +5064,7 @@ def test_stats1_manual_merges_prevent_optional_winners_row_insertion(tmp_path: P
         out.close()
 
 
-def test_generated_stats1_metric_source_merges_are_cleaned_without_touching_manual_notes(tmp_path: Path):
+def test_legacy_stats1_metric_source_merges_are_cleaned_without_touching_manual_notes(tmp_path: Path):
     path = tmp_path / "merged-source-pairs.xlsx"
     snap = sample_snapshot()
     build_master_journal_workbook(snap, path)
@@ -4888,12 +5074,13 @@ def test_generated_stats1_metric_source_merges_are_cleaned_without_touching_manu
     for row in range(1, stats1.max_row + 1):
         rows[str(stats1.cell(row, 1).value or "")].append(row)
     source_metric_row = rows["Min stop %"][0]
-    assert stats1.cell(source_metric_row + 1, 1).value == "Source"
+    stats1.insert_rows(source_metric_row + 1, 1)
     stats1.merge_cells(start_row=source_metric_row, start_column=1, end_row=source_metric_row + 1, end_column=1)
     stats1.cell(source_metric_row, 1).value = "Min stop %"
-    stats1.cell(source_metric_row + 1, 2).value = "EURUSD source detail"
-    stats1.merge_cells("A52:A53")
-    stats1["A52"] = "Manual merged note"
+    stats1.cell(source_metric_row + 1, 2).value = "Source"
+    stats1.cell(source_metric_row + 1, 3).value = "EURUSD source detail"
+    stats1.merge_cells("A200:A201")
+    stats1["A200"] = "Manual merged note"
     wb.save(path)
     wb.close()
 
@@ -4905,10 +5092,15 @@ def test_generated_stats1_metric_source_merges_are_cleaned_without_touching_manu
         ws = out[STATS1_SHEET]
         merged_ranges = {str(rng) for rng in ws.merged_cells.ranges}
         assert f"A{source_metric_row}:A{source_metric_row + 1}" not in merged_ranges
-        assert ws.cell(source_metric_row + 1, 1).value == "Source"
-        assert ws.cell(source_metric_row + 1, 2).value not in (None, "")
-        assert "A52:A53" in merged_ranges
-        assert ws["A52"].value == "Manual merged note"
+        assert all(
+            str(ws.cell(row, col).value or "").strip() != "Source"
+            for row in range(1, ws.max_row + 1)
+            for col in range(1, ws.max_column + 1)
+        )
+        metric_row = next(row for row in range(1, ws.max_row + 1) if ws.cell(row, 1).value == "Min stop %")
+        assert "EURUSD" in str(ws.cell(metric_row, 2).value)
+        manual_cell = next(cell for row in ws.iter_rows() for cell in row if cell.value == "Manual merged note")
+        assert any(rng.min_row <= manual_cell.row <= rng.max_row and rng.min_col == 1 for rng in ws.merged_cells.ranges)
     finally:
         out.close()
 
@@ -5000,11 +5192,15 @@ def test_stats2_net_pl_percentage_update_resets_stale_borders(tmp_path: Path):
     build_master_journal_workbook(snap, path)
     wb = load_workbook(path)
     stats2 = wb[STATS2_SHEET]
+    # Recreate the obsolete six-column layout so refresh must migrate the
+    # As Of column away and retain Net P/L Percentage in canonical column E.
+    stats2.insert_cols(5, 1)
+    stats2.cell(2, 5).value = "As Of"
     headers = {str(stats2.cell(2, col).value or ""): col for col in range(1, stats2.max_column + 1)}
     net_col = headers["Net P/L Percentage"]
     account_col = headers["Account"]
-    stats2.cell(2, headers["As Of"]).value = "Risk Of Ruin"
     row = next(r for r in range(3, stats2.max_row + 1) if stats2.cell(r, account_col).value == "OANDA DEMO")
+    stats2.cell(row, headers["As Of"]).value = "2026-05-31T00:00:00Z"
     custom_border = Border(left=Side(style="thick", color="FF123456"), right=Side(style="double", color="FF654321"))
     stats2.cell(row, net_col).border = custom_border
     wb.save(path)
@@ -5018,9 +5214,10 @@ def test_stats2_net_pl_percentage_update_resets_stale_borders(tmp_path: Path):
         ws = out[STATS2_SHEET]
         final_headers = [str(ws.cell(2, col).value or "") for col in range(1, ws.max_column + 1)]
         assert sum(header.casefold() == "risk of ruin" for header in final_headers) == 1
-        assert final_headers[headers["As Of"] - 1] == "As Of"
-        assert final_headers[net_col - 1] == "Net P/L Percentage"
-        cell = ws.cell(row, net_col)
+        assert all(header.casefold() != "as of" for header in final_headers)
+        assert final_headers[4] == "Net P/L Percentage"
+        assert final_headers[5] == ""
+        cell = ws.cell(row, 5)
         assert cell.value == pytest.approx(0.023)
         assert cell.number_format == "0.00%"
         assert _cell_fill_rgb(cell) == ""
@@ -5077,6 +5274,231 @@ def test_report_period_rows_populate_core_counts_duration_and_drawdown(tmp_path:
         wb.close()
 
 
+def test_report_periods_exclude_test_only_aggregates_and_clear_stale_extrema(
+    tmp_path: Path,
+):
+    from tools import master_journal_workbook as mjw
+
+    durations = [
+        38,
+        (8 * 24 * 60 * 60) + (7 * 60 * 60) + (57 * 60) + 16,
+        *[300 + (index * 61) for index in range(12)],
+    ]
+    items = []
+    for index, duration in enumerate(durations, start=1):
+        winner = index % 2 == 1
+        items.append(
+            {
+                "id": f"real-shaped-2026-test-{index:02d}",
+                "row_type": "trade",
+                "account": "OANDA DEMO",
+                "asset_class": "fx",
+                "symbol": "EURUSD" if winner else "AUDUSD",
+                "side": "BUY" if winner else "SELL",
+                "open_time": f"2026-01-{index:02d}T00:00:00Z",
+                "close_time": f"2026-01-{index:02d}T01:00:00Z",
+                "entry_price": 1.1,
+                "exit_price": 1.11 if winner else 1.09,
+                "stop_loss": 1.09 if winner else 1.11,
+                "take_profit": 1.12 if winner else 1.08,
+                "net_profit": 10.0 if winner else -7.0,
+                "result_pct": 1.25 if winner else -0.75,
+                "r_multiple": 1.5 if winner else -1.0,
+                "trade_duration_seconds": duration,
+                "move_to_break_even_duration": max(0, duration // 3),
+                "move_to_profit_duration": max(0, duration // 2),
+                "analysis_balance_after_trade": 1000.0 + index,
+                "is_test_trade": False,
+            }
+        )
+    snapshot = {
+        "items": items,
+        "stats": {"totals": {}, "groups": {}},
+        "balances": [],
+    }
+    path = tmp_path / "test-only-report-contract.xlsx"
+    build_master_journal_workbook(
+        snapshot,
+        path,
+        publish_recommendation_assets=False,
+    )
+
+    source_suffix = re.compile(r" - [A-Z0-9/]+ 2026-\d{2}-\d{2}$")
+    inline_specs = [
+        (row, label, key)
+        for row, (label, key, _kind, _semantic) in enumerate(
+            mjw._REPORT_SPECS,
+            start=2,
+        )
+        if key in mjw.INLINE_SOURCE_METRIC_KEYS
+    ]
+    initial = load_workbook(path, data_only=True)
+    try:
+        populated_inline = 0
+        for sheet_name, header in (
+            (REPORT_YEARLY_SHEET, 2026),
+            ("2026", "January"),
+        ):
+            ws = initial[sheet_name]
+            col = next(
+                column
+                for column in range(2, ws.max_column + 1)
+                if ws.cell(1, column).value == header
+            )
+            for row, label, _key in inline_specs:
+                assert ws.cell(row, 1).value == label
+                value = ws.cell(row, col).value
+                if value in (None, ""):
+                    continue
+                populated_inline += 1
+                assert source_suffix.search(str(value)), (
+                    sheet_name,
+                    ws.cell(row, col).coordinate,
+                    value,
+                )
+        assert populated_inline > 0
+    finally:
+        initial.close()
+
+    for row in snapshot["items"]:
+        row["is_test_trade"] = True
+    fallback = mjw._report_bucket_from_period_rows(snapshot["items"])
+    assert fallback["trades"] == 0
+    assert fallback["wins"] == 0
+    assert fallback["losses"] == 0
+    assert fallback["test_trades"] == 14
+    assert fallback.get("shortest_duration_seconds") is None
+    assert fallback.get("longest_duration_seconds") is None
+    assert not fallback.get("metric_sources")
+
+    result = update_master_journal_workbook_data_only(
+        path,
+        snapshot,
+        preserve_existing_layout=True,
+        publish_recommendation_assets=False,
+    )
+    assert result["ok"] is True
+    updated = load_workbook(Path(result["candidate_path"]), data_only=True)
+    try:
+        for sheet_name, header in (
+            (REPORT_YEARLY_SHEET, 2026),
+            ("2026", "January"),
+        ):
+            ws = updated[sheet_name]
+            col = next(
+                column
+                for column in range(2, ws.max_column + 1)
+                if ws.cell(1, column).value == header
+            )
+            label_rows = defaultdict(list)
+            for row in range(2, ws.max_row + 1):
+                label_rows[str(ws.cell(row, 1).value or "")].append(row)
+            assert ws.cell(label_rows["Trades"][0], col).value == 0
+            assert ws.cell(label_rows["Wins"][0], col).value == 0
+            assert ws.cell(label_rows["Losses"][0], col).value == 0
+            assert ws.cell(label_rows["Break-even"][0], col).value == 0
+            assert ws.cell(label_rows["Test"][0], col).value == 14
+            for row, label, _key in inline_specs:
+                assert ws.cell(row, 1).value == label
+                assert ws.cell(row, col).value in (None, ""), (
+                    sheet_name,
+                    ws.cell(row, col).coordinate,
+                    ws.cell(row, col).value,
+                )
+            for label in (
+                "Win rate",
+                "Net P/L",
+                "Gross percent gain",
+                "Gross percent loss",
+                "Gross IR gain",
+                "Gross IR loss",
+                "Percentage expectancy",
+                "R expectancy",
+                "Avg duration (DD:HH:MM:SS)",
+            ):
+                assert all(
+                    ws.cell(row, col).value in (None, "")
+                    for row in label_rows[label]
+                ), (sheet_name, label)
+    finally:
+        updated.close()
+
+
+def test_data_only_update_expands_trade_log_filter_through_trade_and_cashflow_tail(
+    tmp_path: Path,
+):
+    path = tmp_path / "trade-log-filter-tail.xlsx"
+    snapshot = sample_snapshot()
+    build_master_journal_workbook(
+        snapshot,
+        path,
+        publish_recommendation_assets=False,
+    )
+    original = load_workbook(path)
+    try:
+        original_filter = original["Trade Log"].auto_filter.ref
+    finally:
+        original.close()
+
+    snapshot["items"].extend(
+        [
+            {
+                "id": "filter-tail-trade",
+                "row_type": "trade",
+                "account": "OANDA DEMO",
+                "asset_class": "fx",
+                "symbol": "NZDUSD",
+                "side": "BUY",
+                "open_time": "2026-05-03T00:00:00Z",
+                "close_time": "2026-05-03T01:00:00Z",
+                "net_profit": 3.0,
+                "result_pct": 0.3,
+            },
+            {
+                "id": "filter-tail-cashflow",
+                "row_type": "cashflow",
+                "account": "OANDA DEMO",
+                "symbol": "CASHFLOW",
+                "side": "DEPOSIT",
+                "open_time": "2026-05-04T00:00:00Z",
+                "close_time": "2026-05-04T00:00:00Z",
+                "cashflow_amount": 100.0,
+                "cashflow_new_balance": 1100.0,
+                "currency": "AUD",
+            },
+        ]
+    )
+    result = update_master_journal_workbook_data_only(
+        path,
+        snapshot,
+        preserve_existing_layout=True,
+        publish_recommendation_assets=False,
+    )
+    assert result["ok"] is True
+    assert result["diagnostics"]["repaired_trade_log_auto_filter_layout"] is True
+
+    updated = load_workbook(Path(result["candidate_path"]), data_only=True)
+    try:
+        ws = updated["Trade Log"]
+        headers = _trade_log_header_map(ws)
+        row_id_col = headers["Row ID"]
+        row_by_id = {
+            str(ws.cell(row, row_id_col).value or ""): row
+            for row in range(TRADE_LOG_DATA_START_ROW, ws.max_row + 1)
+        }
+        assert row_by_id["filter-tail-cashflow"] > row_by_id["filter-tail-trade"]
+        min_col, min_row, max_col, max_row = range_boundaries(ws.auto_filter.ref)
+        true_last_row = max(row_by_id.values())
+        assert original_filter != ws.auto_filter.ref
+        assert min_col == 1
+        assert min_row == TRADE_LOG_FILTER_HEADER_ROW
+        assert max_col == len(TRADE_LOG_HEADERS)
+        assert max_row == true_last_row
+        assert max_row >= row_by_id["filter-tail-cashflow"]
+    finally:
+        updated.close()
+
+
 def test_update_data_only_repairs_unknown_currency_formats_after_schema_migration(monkeypatch, tmp_path: Path):
     from tools import master_journal_workbook as mjw
 
@@ -5100,8 +5522,8 @@ def test_update_data_only_repairs_unknown_currency_formats_after_schema_migratio
     }
     real_build = mjw.build_master_journal_workbook
 
-    def build_with_unknown_formats(snapshot, output_path):
-        result = real_build(snapshot, output_path)
+    def build_with_unknown_formats(snapshot, output_path, **kwargs):
+        result = real_build(snapshot, output_path, **kwargs)
         wb = load_workbook(output_path)
         ws = wb["Trade Log"]
         ws.cell(_trade_data_row(), _header_col(ws, "Commission")).number_format = '#,##0.00 "UNKNOWN"'
@@ -5607,8 +6029,8 @@ def test_generated_workbook_repairs_stats1_stats2_and_calendar_structure(tmp_pat
         assert not _cf_fill_intersects(stats1, f"C{row}:D{row}", PROFIT_FILL)
         assert not _cf_fill_intersects(stats1, f"C{row}:D{row}", LOSS_FILL)
 
-    assert _cf_fill_intersects(stats2, "F3:F12", PROFIT_FILL)
-    assert _cf_fill_intersects(stats2, "F3:F12", LOSS_FILL)
+    assert _cf_fill_intersects(stats2, "E3:E12", PROFIT_FILL)
+    assert _cf_fill_intersects(stats2, "E3:E12", LOSS_FILL)
     assert cal.freeze_panes == "B2"
     assert cal["A1"].value == "Month"
     assert cal["B1"].value == 2026
@@ -6082,16 +6504,16 @@ def test_generated_dashboard_layout_percentages_semantic_fills_and_labels(tmp_pa
 
     labels = _dashboard_core_labels(dash)
     assert "Max gain" not in labels
-    assert labels[-15:] == [
+    assert labels[-11:] == [
         "Min duration", "Avg duration",
         "Avg winning trade duration", "Avg losing trade duration",
         "Max duration",
-        "Min Move to Break Even", "Source", "Average Move to Break Even", "Max Move to Break Even", "Source",
-        "Min Move to Profit", "Source", "Average Move to Profit", "Max Move to Profit", "Source",
+        "Min Move to Break Even", "Average Move to Break Even", "Max Move to Break Even",
+        "Min Move to Profit", "Average Move to Profit", "Max Move to Profit",
     ]
-    assert detail["F2"].value == "Net P/L Percentage"
-    assert any(detail.cell(row, 6).value not in (None, "") for row in range(3, 12))
-    assert all(detail.cell(row, col).value in (None, "") for row in range(1, 12) for col in range(7, 15))
+    assert detail["E2"].value == "Net P/L Percentage"
+    assert any(detail.cell(row, 5).value not in (None, "") for row in range(3, 12))
+    assert all(detail.cell(row, col).value in (None, "") for row in range(1, 12) for col in range(6, 15))
     assert "BYBIT DEMO" in _dashboard_account_balances(detail)
 
     assert 0 < dash["C8"].value < 1
@@ -6182,9 +6604,9 @@ def test_update_repairs_dashboard_order_source_style_max_gain_and_stale_cf(tmp_p
     detail = wb[STATS2_SHEET]
     labels = _dashboard_core_labels(dash)
     assert "Max gain" not in labels
-    assert detail["F2"].value == "Net P/L Percentage"
-    assert any(detail.cell(row, 6).value not in (None, "") for row in range(3, 12))
-    assert all(detail.cell(row, col).value in (None, "") for row in range(1, 12) for col in range(7, 15))
+    assert detail["E2"].value == "Net P/L Percentage"
+    assert any(detail.cell(row, 5).value not in (None, "") for row in range(3, 12))
+    assert all(detail.cell(row, col).value in (None, "") for row in range(1, 12) for col in range(6, 15))
     assert "BYBIT DEMO" in _dashboard_account_balances(detail)
     assert dash["A14"].value == "Percentage expectancy"
     assert dash["A15"].value == "R expectancy"
@@ -6436,9 +6858,13 @@ def test_stats_symbols_and_reports_required_repairs(tmp_path: Path):
     })
     snapshot["items"][0].update({
         "pattern": "Range", "ema": "20", "timeframe": "1H", "commission": 1.25,
+        "move_to_break_even_duration": 1800,
+        "move_to_profit_duration": 3600,
     })
     snapshot["items"][1].update({
         "pattern": "Breakout", "ema": "50", "timeframe": "4H", "commission": 0.75,
+        "move_to_break_even_duration": 2700,
+        "move_to_profit_duration": 5400,
     })
     snapshot["items"].append({
         "id": "t3", "row_type": "trade", "symbol": "EURUSD", "asset_class": "fx",
@@ -6514,7 +6940,7 @@ def test_stats_symbols_and_reports_required_repairs(tmp_path: Path):
         label_cell = stats1.cell(row, 1)
         if label_cell.value in (None, ""):
             continue
-        if str(label_cell.value).strip() == "Source" or is_nested_outcome_label(row):
+        if is_nested_outcome_label(row):
             assert label_cell.font.bold is False
             assert label_cell.font.italic is True
             assert label_cell.alignment.horizontal == "right"
@@ -6543,10 +6969,35 @@ def test_stats_symbols_and_reports_required_repairs(tmp_path: Path):
     )
     loser_row = losers_section + 1
     assert all(stats1.cell(loser_row, col).alignment.horizontal == "left" for col in (2, 3, 4))
+    assert all(
+        str(stats1.cell(row, 1).value or "").strip() != "Source"
+        for row in range(1, stats1.max_row + 1)
+    )
     for label in ("Min stop %", "Max stop %", "Min target %", "Max target %"):
         row = label_rows[label][0]
-        assert stats1.cell(row + 1, 1).value == "Source"
-        assert "·" in str(stats1.cell(row + 1, 2).value)
+        value = str(stats1.cell(row, 2).value or "")
+        assert " - " in value
+        assert re.search(r"[A-Z0-9/]+ 2026-\d{2}-\d{2}$", value)
+    extrema_labels = {
+        "Min stop %", "Max stop %", "Min target %", "Max target %",
+        "Max win %", "Max loss %", "Max R loss", "Max R win",
+        "Min duration", "Max duration",
+        "Min Move to Break Even", "Max Move to Break Even",
+        "Min Move to Profit", "Max Move to Profit",
+    }
+    for row in range(1, stats1.max_row + 1):
+        if str(stats1.cell(row, 1).value or "").strip() not in extrema_labels:
+            continue
+        for col in (2, 3, 4):
+            value = stats1.cell(row, col).value
+            if value in (None, ""):
+                continue
+            assert re.search(r" - [A-Z0-9/]+ 2026-\d{2}-\d{2}$", str(value))
+    assert all(
+        stats1.row_dimensions[row].height == pytest.approx(14.5)
+        for row in range(2, stats1.max_row + 1)
+        if any(stats1.cell(row, col).value not in (None, "") for col in range(1, stats1.max_column + 1))
+    )
     for label, expected_fx, expected_crypto in (
         ("Min Commission", 1.25, 0.75),
         ("Avg Commission", 1.625, 0.75),
@@ -6587,8 +7038,10 @@ def test_stats_symbols_and_reports_required_repairs(tmp_path: Path):
                     cell = stats1.cell(row, col)
                     assert cell.number_format == "General"
                     assert isinstance(cell.value, str)
-                    assert not str(cell.value).startswith(("00 days", "00 hours"))
-                    assert _parse_duration_text(cell.value) is not None
+                    duration_text = str(cell.value).split(" - ", 1)[0]
+                    assert not re.search(r"\b(days?|hours?|minutes?|seconds?)\b", duration_text, re.IGNORECASE)
+                    assert re.fullmatch(r"(?:\d+D )?(?:\d+H )?(?:\d+M )?\d+S", duration_text)
+                    assert _parse_duration_text(duration_text) is not None
 
     symbols = wb[SYMBOLS_SHEET]
     headers = _instrument_averages_header_map(symbols)
@@ -6668,10 +7121,40 @@ def test_stats_symbols_and_reports_required_repairs(tmp_path: Path):
             col for col in range(2, report.max_column + 1)
             if report.cell(1, col).value == period_header
         )
+        assert all(
+            str(report.cell(row, 1).value or "").strip() != "Source"
+            for row in range(1, report.max_row + 1)
+        )
         for label in ("Min stop %", "Max stop %", "Min target %", "Max target %"):
             row = report_label_rows[label][0]
-            assert report.cell(row + 1, 1).value == "Source"
-            assert "·" in str(report.cell(row + 1, period_col).value)
+            value = str(report.cell(row, period_col).value or "")
+            assert " - " in value
+            assert re.search(r"[A-Z0-9/]+ 2026-\d{2}-\d{2}$", value)
+        report_extrema_labels = {
+            "Min stop %", "Max stop %", "Min target %", "Max target %",
+            "Max win %", "Max loss %", "Max R loss", "Max R win",
+            "Shortest (DD:HH:MM:SS)", "Longest (DD:HH:MM:SS)",
+            "Winners min duration", "Winners max duration",
+            "Losers min duration", "Losers max duration",
+            "Min duration", "Max duration",
+            "Min Move to Break Even", "Max Move to Break Even",
+            "Min Move to Profit", "Max Move to Profit",
+            "Winners min stop %", "Winners max stop %",
+            "Winners min target %", "Winners max target %",
+            "Losers min stop %", "Losers max stop %",
+            "Losers min target %", "Losers max target %",
+        }
+        for row in range(2, report.max_row + 1):
+            if str(report.cell(row, 1).value or "").strip() not in report_extrema_labels:
+                continue
+            value = report.cell(row, period_col).value
+            if value not in (None, ""):
+                assert re.search(r" - [A-Z0-9/]+ 2026-\d{2}-\d{2}$", str(value))
+        assert all(
+            report.row_dimensions[row].height == pytest.approx(14.5)
+            for row in range(2, report.max_row + 1)
+            if any(report.cell(row, col).value not in (None, "") for col in range(1, report.max_column + 1))
+        )
         total_commission = report.cell(report_rows["Total Commission"], period_col)
         assert "AUD 3.25" in str(total_commission.value)
         assert "USDT 0.75" in str(total_commission.value)
@@ -6681,8 +7164,97 @@ def test_stats_symbols_and_reports_required_repairs(tmp_path: Path):
         duration_cell = report.cell(duration_row, period_col)
         assert duration_cell.number_format == "General"
         assert isinstance(duration_cell.value, str)
-        assert not duration_cell.value.startswith(("00 days", "00 hours"))
-        assert _parse_duration_text(duration_cell.value) is not None
+        duration_text = duration_cell.value.split(" - ", 1)[0]
+        assert not re.search(r"\b(days?|hours?|minutes?|seconds?)\b", duration_text, re.IGNORECASE)
+        assert re.fullmatch(r"(?:\d+D )?(?:\d+H )?(?:\d+M )?\d+S", duration_text)
+        assert _parse_duration_text(duration_text) is not None
+    wb.close()
+
+
+def test_generated_extrema_values_include_source_on_every_statistics_report_sheet(
+    tmp_path: Path,
+):
+    snapshot = sample_snapshot()
+    output = tmp_path / "extrema-source-contract.xlsx"
+    build_master_journal_workbook(snapshot, output)
+    wb = load_workbook(output)
+    source_suffix = re.compile(r" - [A-Z0-9/]+ \d{4}-\d{2}-\d{2}$")
+    stats1_extrema = {
+        "Min stop %",
+        "Max stop %",
+        "Min target %",
+        "Max target %",
+        "Max win %",
+        "Max loss %",
+        "Max R loss",
+        "Max R win",
+        "Min duration",
+        "Max duration",
+        "Min Move to Break Even",
+        "Max Move to Break Even",
+        "Min Move to Profit",
+        "Max Move to Profit",
+    }
+    report_extrema = {
+        "Min stop %",
+        "Max stop %",
+        "Min target %",
+        "Max target %",
+        "Max win %",
+        "Max loss %",
+        "Max R loss",
+        "Max R win",
+        "Shortest (DD:HH:MM:SS)",
+        "Longest (DD:HH:MM:SS)",
+        "Winners min duration",
+        "Winners max duration",
+        "Losers min duration",
+        "Losers max duration",
+        "Min duration",
+        "Max duration",
+        "Min Move to Break Even",
+        "Max Move to Break Even",
+        "Min Move to Profit",
+        "Max Move to Profit",
+        "Winners min stop %",
+        "Winners max stop %",
+        "Winners min target %",
+        "Winners max target %",
+        "Losers min stop %",
+        "Losers max stop %",
+        "Losers min target %",
+        "Losers max target %",
+    }
+    populated_by_sheet = {}
+    for sheet_name in [
+        STATS1_SHEET,
+        REPORT_YEARLY_SHEET,
+        *[name for name in wb.sheetnames if name.isdigit()],
+    ]:
+        ws = wb[sheet_name]
+        labels = stats1_extrema if sheet_name == STATS1_SHEET else report_extrema
+        populated = 0
+        for row in range(2, ws.max_row + 1):
+            if str(ws.cell(row, 1).value or "").strip() not in labels:
+                continue
+            for col in range(2, ws.max_column + 1):
+                value = ws.cell(row, col).value
+                if value in (None, ""):
+                    continue
+                populated += 1
+                assert source_suffix.search(str(value)), (
+                    sheet_name,
+                    ws.cell(row, col).coordinate,
+                    value,
+                )
+        populated_by_sheet[sheet_name] = populated
+    assert populated_by_sheet[STATS1_SHEET] > 0
+    assert populated_by_sheet[REPORT_YEARLY_SHEET] > 0
+    assert any(
+        count > 0
+        for sheet_name, count in populated_by_sheet.items()
+        if sheet_name.isdigit()
+    )
     wb.close()
 
 
@@ -7322,7 +7894,11 @@ def test_incremental_workbook_updates_oanda_balance_metadata_without_derived_cel
         stats2 = wb[STATS2_SHEET]
         assert stats2.cell(account_row, headers["Balance"]).value == pytest.approx(4321.25)
         assert stats2.cell(account_row, headers["Currency"]).value == "AUD"
-        assert stats2.cell(account_row, headers["As Of"]).value == "2026-08-02T12:34:56Z"
+        refreshed_headers = {
+            str(stats2.cell(2, col).value or ""): col
+            for col in range(1, stats2.max_column + 1)
+        }
+        assert "As Of" not in refreshed_headers
         assert stats2.cell(account_row, headers["Risk of Ruin"]).value == risk_before
         assert stats2.cell(account_row, headers["Net P/L Percentage"]).value == net_pct_before
         metadata = _read_account_balance_source_metadata(wb, "OANDA DEMO")

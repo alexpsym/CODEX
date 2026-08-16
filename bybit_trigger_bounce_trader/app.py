@@ -578,17 +578,13 @@ FORM_HTML = """
       th, td { text-align:left; border-bottom:1px solid #1f2937; padding:0.5rem 0.4rem; font-size:0.9rem; }
       .warning { color:#facc15; font-size:0.9rem; margin-top: 0.85rem; }
       .fx-only, .crypto-only { display: none; }
-      .card { background:#0f172a;border:1px solid #1f2937;border-radius:10px;padding:10px }
       .muted{color:#94a3b8;font-size:0.9rem}
-      .specs-table{width:100%;border-collapse:collapse;table-layout:fixed;margin-top:0}
-      .specs-table td{border-bottom:1px solid #1f2937;padding:4px 5px;font-size:0.76rem;vertical-align:top;overflow-wrap:anywhere;word-break:break-word;line-height:1.3}
     </style>
   </head>
   <body>
     <div class="panel">
       <h1>Bounce Trader</h1>
       <div class="muted" id="preview-canonical-symbol"></div>
-      <div id="preview-instrument-specs"></div>
       {% if error %}<div class="notice error">{{ error }}</div>{% endif %}
       {% if message %}<div class="notice ok">{{ message }}</div>{% endif %}
 
@@ -734,96 +730,13 @@ FORM_HTML = """
       <script>
         const APP_ROOT = ({{ app_root|tojson }} || '').replace(/\\/$/, '');
         const previewCanonicalEl = document.getElementById('preview-canonical-symbol');
-        const previewSpecsEl = document.getElementById('preview-instrument-specs');
         const symbolsInput = document.querySelector('input[name="symbols"]');
         const marketSelect = document.getElementById('market');
         const categorySelect = document.querySelector('select[name="category"]');
         let previewTimer = null;
         let previewController = null;
-        let specsController = null;
-
-        const SPECS_HIDDEN_FIELDS = new Set([
-          'contractType','fundingHistory.fundingRate','fundingHistory.fundingRateTimestamp','indexPrice','leverageFilter',
-          'lotSizeFilter','markPrice','priceFilter','query','baseCoin','quoteCoin','source','status','scannerVolume24h',
-          'openInterest','_units',
-        ]);
-        const SPECS_FIELD_LABELS = {
-          resolved_symbol: 'resolved_symbol',
-          category: 'category',
-          lastPrice: 'lastPrice (price)',
-          fundingRate: 'fundingRate (%)',
-          nextFundingTime: 'nextFundingTime (Brisbane time)',
-          launchTime: 'launchTime (Brisbane time)',
-          openInterestValue: 'openInterestValue (USD)',
-          turnover24h: 'turnover24h (USD)',
-          volume24h: 'volume24h (base units)',
-          avg7dTurnoverUsd: 'avg7dVolume (USD)',
-        };
-
-        function setSpecsState(text) {
-          const msg = String(text || '').trim();
-          previewSpecsEl.innerHTML = msg ? `<div class="muted">${msg}</div>` : '';
-        }
         function clearPreview() {
           previewCanonicalEl.textContent = '';
-          setSpecsState('');
-        }
-        function renderSpecs(specs) {
-          const isNumericLike = (v) => {
-            if (v === null || v === undefined) return false;
-            if (typeof v === 'number') return Number.isFinite(v);
-            if (typeof v !== 'string') return false;
-            const s = v.trim();
-            return s !== '' && /^-?\\d+(\\.\\d+)?$/.test(s);
-          };
-          const compactNumber = (n, decimals = 2) => {
-            const num = Number(n);
-            if (!Number.isFinite(num)) return String(n ?? '—');
-            const abs = Math.abs(num);
-            if (abs >= 1e12) return `${(num / 1e12).toFixed(decimals).replace(/\\.00$/, '')}T`;
-            if (abs >= 1e9) return `${(num / 1e9).toFixed(decimals).replace(/\\.00$/, '')}B`;
-            if (abs >= 1e6) return `${(num / 1e6).toFixed(decimals).replace(/\\.00$/, '')}M`;
-            if (abs >= 1e3) return `${(num / 1e3).toFixed(decimals).replace(/\\.00$/, '')}K`;
-            return num.toFixed(decimals).replace(/\\.00$/, '');
-          };
-          const formatPercentFromFraction = (v, decimals = 4) => {
-            const n = Number(v);
-            if (!Number.isFinite(n)) return String(v ?? '—');
-            return `${(n * 100).toFixed(decimals).replace(/0+$/, '').replace(/\\.$/, '')}%`;
-          };
-          const formatTimestampBrisbane = (value) => {
-            if (!isNumericLike(value)) return null;
-            const n = Number(value);
-            if (!Number.isFinite(n)) return null;
-            const ms = n < 1e12 ? n * 1000 : n;
-            const d = new Date(ms);
-            if (Number.isNaN(d.getTime())) return null;
-            return new Intl.DateTimeFormat('en-AU', {
-              timeZone: 'Australia/Brisbane',
-              year: 'numeric', month: '2-digit', day: '2-digit',
-              hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
-            }).format(d) + ' (Brisbane)';
-          };
-          const formatSpecsValue = (key, value) => {
-            if (key === 'launchTime' || key === 'nextFundingTime' || /(time|timestamp)$/i.test(key)) {
-              const ts = formatTimestampBrisbane(value);
-              if (ts) return ts;
-            }
-            if (key === 'fundingRate' || key.endsWith('.fundingRate')) return formatPercentFromFraction(value);
-            if (/^(turnover24h|openInterestValue|avg7dTurnoverUsd)$/i.test(key)) return `$${compactNumber(value)}`;
-            if (/^volume24h$/i.test(key)) return compactNumber(value);
-            if (typeof value === 'object' && value !== null) return JSON.stringify(value);
-            return String(value ?? '—');
-          };
-          const entries = Object.entries(specs || {})
-            .filter(([k]) => !SPECS_HIDDEN_FIELDS.has(k))
-            .sort((a, b) => String(a[0]).localeCompare(String(b[0])));
-          if (!entries.length) {
-            setSpecsState('');
-            return;
-          }
-          const rows = entries.map(([k, v]) => `<tr><td>${SPECS_FIELD_LABELS[k] || k}</td><td>${formatSpecsValue(k, v)}</td></tr>`).join('');
-          previewSpecsEl.innerHTML = `<div class="card"><table class="specs-table">${rows}</table></div>`;
         }
         async function fetchJson(url, controller) {
           const response = await fetch(url, { signal: controller.signal });
@@ -846,11 +759,7 @@ FORM_HTML = """
             return;
           }
           previewController?.abort();
-          specsController?.abort();
           previewController = new AbortController();
-          setSpecsState('');
-          let canonical = '';
-          let specsPrefer = '';
           try {
             const query = new URLSearchParams({ market, category, symbols });
             const preview = await fetchJson(`${appApiPath('/api/preview-symbol')}?${query.toString()}`, previewController);
@@ -860,36 +769,21 @@ FORM_HTML = """
             }
             if (preview.status === 'multi') {
               previewCanonicalEl.textContent = 'Multiple symbols entered; single-symbol preview disabled.';
-              setSpecsState('');
               return;
             }
             if (preview.status !== 'resolved') {
-              previewCanonicalEl.textContent = 'Unresolved symbol/instrument.';
-              setSpecsState(preview.error || 'Unable to resolve symbol/instrument.');
+              previewCanonicalEl.textContent = preview.error || 'Unresolved symbol/instrument.';
               return;
             }
-            canonical = String(preview.canonical || '').trim();
-            specsPrefer = String(preview.prefer || '').trim();
+            const canonical = String(preview.canonical || '').trim();
             previewCanonicalEl.textContent = canonical ? `Canonical: ${canonical}` : '';
             if (!canonical) {
-              setSpecsState('Unable to resolve symbol/instrument.');
+              previewCanonicalEl.textContent = 'Unable to resolve symbol/instrument.';
               return;
             }
           } catch (err) {
             if (err?.name === 'AbortError') return;
-            previewCanonicalEl.textContent = 'Symbol preview lookup failed.';
-            setSpecsState(err?.message || 'Symbol preview lookup failed.');
-            return;
-          }
-
-          try {
-            specsController = new AbortController();
-            const specsQuery = new URLSearchParams({ query: canonical, prefer: specsPrefer });
-            const specsPayload = await fetchJson(`/api/instrument-specs?${specsQuery.toString()}`, specsController);
-            renderSpecs(specsPayload);
-          } catch (err) {
-            if (err?.name === 'AbortError') return;
-            setSpecsState(`Instrument specs lookup failed for ${canonical || 'resolved symbol'}: ${err?.message || String(err)}`);
+            previewCanonicalEl.textContent = err?.message || 'Symbol preview lookup failed.';
           }
         }
         function schedulePreview() {
