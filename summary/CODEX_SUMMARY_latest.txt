@@ -1,134 +1,91 @@
-Final implementation summary - Trading Tools, Trading Journal, recommendation charts, Pine offset alerts, and brief workflow
+Final implementation summary - Trading Journal formatting repair (Brief 1)
 
 Scope
 - Repository: C:\GPT\CODEX-master
-- Task brief: CODEX_BRIEF_2026-08-10_Trading_Tools_Journal_Pine.txt
-- Pre-publication local HEAD: a9ef9d686b7f07b4e7625613e5cda302c896f1fb
-- Pre-publication origin/master: 615855452d96db82c74ac4c19ba34009aa15b821
-- The task was implemented in the generators, services, routes, tests, documentation, generated workbook, and generated recommendation assets. The workbook was not patched as a one-off.
+- Brief: CODEX_BRIEF_2026-08-20_Trading_Journal_Formatting_Repair.txt
+- Starting branch: codex/journal-equity-fx-final-20260726
+- Starting HEAD: db58d4357b5ad59896977ea6a0ce0175aae744fe
+- The repair was implemented in the workbook generator/preservation path and tests, then applied to the authoritative workbook and its generated recommendation assets. No one-off workbook-only patch was used.
 
-1. Pine Script offset alerts
-- Root cause: the three offset values were rendered only with dashed line.new objects. TradingView could expose the base EMA/VWAP/Volume plots as alert sources, but it had no plot series or alert conditions for the offsets.
-- Added gated hidden plot series titled exactly "9 EMA Offset", "20 EMA Offset", and "VWAP Offset" while retaining all existing base plots and dashed visual offset lines.
-- Added nine unique global alertcondition entries: crossing, crossing above, and crossing below for each supported offset. Every condition references only its corresponding gated offset series.
-- Raw crossover/crossunder expressions are evaluated consistently and gated with barstate.isconfirmed, providing bar-close confirmation and preventing duplicate/repainting behaviour. A disabled line produces na and cannot trigger.
-- No generic alert() call or base-line crossing condition was added. Pine does not guess Buy/Sell from the side of an offset; the calculator-authored webhook URL/JSON remains the source of the intended action.
-- Added static/model regressions for intervening EMA/VWAP crossings, true offset crossings in both directions, each EMA offset, disabled lines, unique selector titles, confirmed-bar gating, and retained plots/visuals.
+1. Recommendation explanation HTML/SVG
+- Reworked the self-contained offline recommendation chart layout to a 1040 x 520 SVG with explicit plot margins, point insets, responsive sizing, visible overflow, and clamped labels.
+- Preserved recommendation calculations, point data, tooltips, colors, marker semantics, links, and asset filenames.
+- Published 85 authoritative recommendation HTML files. No page references an external script, image, or stylesheet asset.
+- Added a parsed wide/narrow bounds regression that checks the 1280 px and 360 px render geometries, including plot points, labels, legends, titles, and axes.
 
-2. Trade Log O6 AUD correction
-- Root cause: O6 already held the correct monthly AUD revaluation value (12.95) and AUD row metadata, but preservation-mode style restoration overwrote the regenerated currency format with a stale USDT format.
-- Reapplied generator-owned Trade Log number formats after presentation/layout restoration, driven by the current row currency/type. This corrects every governed row without relabelling or changing the precise underlying value.
-- Final workbook verification: Trade Log!O6 = 12.95, number format `#,##0.00 "AUD"`, Currency AV6 = AUD. Representative BTCUSDT row O10 remains a precise USDT value with `#,##0.######## "USDT"` and AV10 = USDT.
+2. Shared statistics semantic policy
+- Added one semantic formatting policy shared by STATS1, YEARLY REPORT, and report sheets 2018 through 2026.
+- Counts use integer display, percentages use 0.00%, R values use 0.000"R", duration/date/text values use General, FX currency uses AUD, and crypto currency uses USDT with precision retained.
+- Winner/profit metrics use the established green fill, loser/loss metrics use the established red fill, and neutral/blank metrics use a genuine no-fill state.
+- Removed blanket section fills and stale generated conditional formatting while preserving manual conditional formatting.
 
-3. Source attribution, compact durations, tie-breaking, and row heights
-- Root cause: STATS1 and report specifications intentionally generated separate Source rows, duration sampling did not retain source-row identity for all extrema, and preservation/polish logic restored expanded row heights and legacy duration representations.
-- Collapsed generated Source/value pairs into the existing metric cells throughout STATS1, YEARLY REPORT, and every year sheet. No merged cells were introduced. Redundant Source rows are migrated/removed and affected references are updated by the layout-aware generator.
-- Added inline source identity to all applicable value, percentage, R, duration, move-to-break-even, and move-to-profit extrema. A source is emitted only when both symbol and canonical trade date are available.
-- Stable equal-value tie rule: choose lexicographically by normalized symbol, then canonical trade date, then stable Row ID. This same deterministic rule is shared across dashboard, yearly, and per-period extrema and is covered by regression tests.
-- Central duration display is compact and day-safe, for example 30S, 10H 6M 36S, and 8D 7H 57M 16S. Legacy verbose and encoded values remain parseable for migration/idempotence.
-- Ordinary populated rows in STATS1, YEARLY REPORT, and all year sheets are normalized to exactly 14.5 points after preservation and polish; intentional titles/headers remain distinct.
-- Test-only trades are excluded from active report aggregates/extrema while their Test counts remain. Stale managed aggregates clear when a period becomes test-only.
-- Final audit: zero literal Source rows across the 11 statistics/report sheets; 2,798/2,798 populated inline extrema have complete SYMBOL YYYY-MM-DD attribution; 3,315 durations are compact with zero verbose/malformed values; 1,212 managed rows are exactly 14.5.
+3. STATS1 and report repair
+- Repaired the detailed STATS1 percentage, R, count, duration, commission, drawdown, timeframe, and neutral-fill cases required by the brief.
+- Applied the same semantic formats/fills to YEARLY REPORT and every 2018-2026 report sheet, including trailing blank-row cleanup.
+- Preserved canonical STATS1 label typography and every STATS1 border edge.
+- Preserved user layout/content, formulas, comments, hyperlinks, views, panes, merges, dimensions, validations, manual conditional formatting, print settings, sheet order, active sheet, selected sheet, chart OOXML, and calculation settings.
 
-4. Recommendation explanation charts
-- Root cause: stop/target algorithms existed, but the workbook had no hyperlink/artifact path and no chart renderer. Recomputing observations separately would risk diverging from displayed recommendations.
-- Extended the existing stop and target recommendation algorithms to return the exact eligible observation population, exclusions, and recommended value used by the workbook. No second recommendation calculation was introduced.
-- Generated deterministic, self-contained offline HTML/SVG explanations for every displayed overall/FX/crypto and populated per-symbol stop/target recommendation. Each contains point identity/context, axes/units, sample/exclusion information, and a distinct recommendation marker.
-- Workbook cells use standard relative hyperlinks into `Trading Journal.assets/recommendations/`, so the workbook/folder can move together and no local server, macro, CDN, or network resource is required.
-- Build/resync normalizes rows once, embeds links from that normalized population, validates the candidate, atomically publishes the staged asset set only after workbook replacement, and removes stale managed artifacts.
-- The fast verifier requires exact displayed recommendation text and accepts the full-precision marker only within half one displayed unit, covering Excel boundary behaviour such as 0.667539357955 -> 0.67 and 2.375 -> 2.37 while rejecting stale markers beyond that tolerance.
-- Final audit: 84 unique relative recommendation links (6 STATS1, 78 SYMBOLS), 84 matching recommendation files plus index.html, 84/84 targets resolved, exact text/marker agreement, complete index coverage, and zero stale, missing, unindexed, external, or network-dependent assets.
+4. Preservation and migration hardening
+- Trade Log annotations, formulas, hyperlinks, and custom row dimensions are preserved by stable Row ID/header identity so they move safely with surviving rows.
+- Generator-owned STATS1/recommendation hyperlinks and STATS2 risk comments can be refreshed without weakening authored-content protection.
+- Canonical STATS1 is preserved strictly; historical Source-row schemas remain eligible for the existing structural migration.
+- Legacy _Trade Meta removal is recognized as an intentional generator migration.
+- A malformed Trade Log filter may be repaired only to the exact canonical footprint; valid authored filter footprints remain protected.
+- Candidate updates remain fail closed: the live workbook is adopted only after preservation, chart, calculation, semantic, and fingerprint checks pass.
 
-5. STATS2 corrections
-- Binance root cause: the workbook was stale relative to the later cashflow withdrawal anchor. The normal balance timeline now selects the latest semantic cashflow anchor and subsequent trades instead of retaining the old snapshot. Zero is data-derived, not hard-coded; a later source event can make the balance nonzero.
-- Removed As Of from the full-build schema and made helpers header-driven/no-op when it is absent, preventing the deleted column from returning or shifting formatting onto Net P/L Percentage.
-- Added an explicit Bybit Demo Net P/L percentage exclusion shared by full builds and preserved updates, so the cell remains blank even if stray/synthetic result data exists.
-- Final STATS2 headers are Account, Balance, Currency, Risk of Ruin, and Net P/L Percentage. Binance is 0 USDT, Bybit Demo Net P/L Percentage is blank, and no As Of header is present.
+5. Authoritative workbook and assets
+- Original workbook and safety snapshot SHA-256 before repair: 924FE19F16707B8D6E37D6C27D2872C16CEB1AF1CA626701465CAD8082B358CC.
+- Final authoritative workbook: journal/Trading Journal.xlsx.
+- Final workbook SHA-256: 4EE3387AAB44A32B6F99E3024421A3412022172312FA803EBA1E98DDCE8286DC.
+- Final semantic/idempotence fingerprint: ff0c8adb240ad52f6dfdb8e1d476c3de51bbbedf94503b7be0e72812829b658d.
+- Preservation contract SHA-256: c315c921587b5cbd656dc909ec575a9448c2935c1eac275a8c5c7b624e777fdd.
+- Managed statistics presentation SHA-256: f2d11e8299891968ebe144e03b0ca776775f4949b415a6300f02315176dc7bba.
+- STATS1 label SHA-256: 5c72767d2a173072c90cafcc77acd771ba76e00da8eaadfaccc9f625509b8c93.
+- STATS1 border SHA-256: 308d8e083d60d405811e86f77297897a025b1433b998d75c8f7a78f497769125.
+- Sheet order remains STATS1, STATS2, SYMBOLS, Trade Log, P&L Calendar, ` SIM`, YEARLY REPORT, and 2018-2026. STATS1 remains active and selected.
+- Authoritative diagnostics verified two chart OOXML parts, two chart relationships, the preservation contract, and the managed presentation contract.
 
-6. SYMBOLS formats and conditional formatting
-- Root cause: generated semantic fills and number formats were applied before preserved direct styles were restored, so stale/inverted fill/font combinations and General formats returned. Conditional formatting also did not consistently include the first data row.
-- Added a final header-driven normalization for AF:AP. AF uses `0.000"R"`; governed percentage columns use `0.00%` without changing underlying numeric precision or multiplying values.
-- Cleared stale generated direct styles and reapplied established positive green, negative red, and zero/blank neutral semantics. Rebuilt owned conditional-format ranges through the actual last symbol row, including USDCAD.
-- Final audit: 120 symbol rows with USDCAD first; 1,200/1,200 governed formats correct; 360/360 AF:AH semantic cells correct; owned CF ranges are AF3:AF122 and AG3:AH122.
+6. Real-workbook idempotence and visual QA
+- Two preservation-mode resyncs were run from the same verified original snapshot.
+- Both runs reported zero semantic problems and the identical full fingerprint ff0c8adb240ad52f6dfdb8e1d476c3de51bbbedf94503b7be0e72812829b658d.
+- Both runs retained the same sheet order, active/selected sheet, preservation hash, managed-format hash, STATS1 label hash, and STATS1 border hash.
+- Microsoft Excel COM exported STATS1, YEARLY REPORT, 2018, 2021, 2025, and 2026 to PDF; 14 rendered pages were inspected. Managed content was legible and unclipped. Extra blank print pages contained no managed content and came from the preserved print area.
+- The visually inspected workbook and final authoritative workbook share the exact managed statistics presentation hash f2d11e8299891968ebe144e03b0ca776775f4949b415a6300f02315176dc7bba.
 
-7. Bounce Trader content
-- Root cause: Bounce Trader contained a generic specification renderer and a second `/api/instrument-specs` request, causing every non-hidden Instrument Lookup API field to appear in the trading form.
-- Removed only the lookup-spec host/styles/renderer/request from Bounce Trader. Category selection/resolution, canonical-symbol preview via `/api/preview-symbol`, and all algorithm/trading inputs remain.
-- The separate Instrument Lookup template, routes, API, and JavaScript remain unchanged and retain the full specification display.
+7. Verification results
+- tests/test_master_journal_workbook.py: all 212 collected tests passed across four non-overlapping 53-test shards.
+  - 53 passed in 569.30s.
+  - 53 passed in 1674.17s.
+  - 53 passed in 5676.87s.
+  - 53 passed in 2774.13s.
+- tests/test_master_service_master_journal_sync.py: 157 passed, 149 warnings in 4725.80s after the preservation compatibility fix.
+- The two previously failing legacy/filter compatibility cases passed together: 2 passed in 267.54s.
+- Focused canonical-filter, legacy metadata, tail-filter, and comprehensive semantic/idempotence regressions: 4 passed in 506.73s.
+- Final authoritative workbook recommendation, resync, border/layout, OPC, external-link, canonical-chart, and wide/narrow SVG checks: 7 passed in 683.63s.
+- Python compilation passed for tools/master_journal_workbook.py and the affected test files.
+- git diff --check passed for all intended files; output contained only normal LF-to-CRLF working-copy notices.
+- The 149 service-suite warnings are existing FastAPI on_event/httpx deprecations and expected mocked unawaited-coroutine warnings; there are no test failures.
 
-8. Local versus Render buttons/routes
-- Root cause: profile navigation was the inverse of the requested ownership model: Calculator appeared for both profiles, while Bounce/FX buttons were Render-only.
-- Local landing now retains its local Calculator and adds normal external links for Bounce Trader and FX Weekend at the configured Render origin. URL validation accepts only HTTP(S) with a non-local hostname; existing `RENDER_CALCULATOR_BASE_URL` is reused with `RENDER_EXTERNAL_URL` fallback.
-- Render landing returns no tool buttons. `/scripts` does not grant local ownership/autostart to the remote tools.
-- Existing Render allowlisting/proxy/deep routes remain operational, including `/merged/bounce-trader` and `/apps/fxweekend-clone`.
+8. Browser limitation
+- The browser-control workflow was followed, including the required connection-troubleshooting check.
+- Browser discovery returned an empty list, so no real browser was available for the requested wide/narrow page render.
+- No unrelated browser or standalone Playwright fallback was used, as required by the browser-control workflow.
+- Responsive geometry is covered by the passing parsed 1280 px/360 px bounds test, and all 85 published pages passed the offline external-asset scan. A live browser screenshot remains the only unavailable evidence item.
 
-9. ChatGPT-only Codex brief instructions
-- Updated `custom instructions/CODEX_BRIEF_INSTRUCTIONS.txt` with the six standing brief-delivery requirements while preserving all 17 existing standing bullets.
-- Created `custom instructions/CODEX_BRIEF_INSTRUCTIONS_CHATGPT_ONLY.docx` without redesign: two-page Letter reference, one-inch margins, Calibri 11 body, real numbered/bulleted lists, restrained headings/header/footer, and shaded Consolas command blocks.
-- It requires task-specific current model/reasoning selection (not Ultra by default), one self-contained fenced text brief, a plainly named root TXT copy, exact no-placeholder interactive PowerShell launch commands, resume commands, and an accurate CLI-versus-desktop/config-account statement.
-- DOCX structural and visual QA passed: valid OPC package/XML/relationships, 34 body paragraphs, exactly 6 numbered requirements and 17 preserved bullets, no external relationships, no placeholder tokens, and no clipping/overlap/bad wrapping across two rendered pages.
-- DOCX SHA-256: 403746D3D0D35999ED14E9630C3DD8398C0EB4BD5878E6EA76AF02E11A11624C. Because the repository intentionally ignores `*CHATGPT_ONLY*`, this exact file is force-staged for publication.
-
-10. Workbook synchronization safety hardening
-- Added one normalized-row pipeline for build/update/service so repaired rows, deduplication, manual overrides, workbook recommendations, and published HTML cannot diverge.
-- Recommendation assets are never published before candidate validation/replacement. The verifier also accounts for tracked/deleted managed assets.
-- Added a non-authoritative snapshot shrink guard before updater/assets. When an existing workbook has at least 10 trades, a `both`-mode snapshot missing at least 5 and retaining less than 80% by count/stable IDs is rejected with HTTP 409 and `NON_AUTHORITATIVE_SNAPSHOT_SHRINK_BLOCKED`; workbook and assets remain byte-identical. Configured authoritative local/master_journal sources bypass this guard. Same stable all-Test populations remain valid.
-- Preservation-mode SYMBOLS updates now map generated values by Symbol, retain existing survivor row identity/styles, append genuinely new symbols deterministically, and clear removed rows without alphabetically reordering established rows.
-- Trade Log move timestamps are restored as Excel datetimes, move durations serialize directly through the compact formatter, and incremental validation reads hidden timeline provenance now that As Of is absent.
-- Trade Log auto-filter preservation must cover the true last populated row, including trade/cashflow tails. Empty logs keep a valid A3:AX3 filter and valid A4:AX4 generated conditional-format placeholder.
-
-11. Generated workbook and idempotence verification
-- Ran the normal authoritative master-journal resync twice after all fixes. Full rebuild succeeded with 1,446 trade rows and 1,547 total source rows; the second run used the persisted fingerprint fast path and returned the same clean verification result.
-- Final workbook: `journal/Trading Journal.xlsx`, 690,306 bytes, SHA-256 `4a1853323177a6808389d2aa2d6ff8d7a286e246d4dd0eaeb638e9c76a400bb1`.
-- Trade Log has 1,547 populated unique Row IDs through row 1550: 1,446 trade, 96 cashflow, and 5 monthly AUD revaluation rows. Filter is exactly A3:AX1550.
-- STATS1 reconciles 1,408 eligible trades = 400 wins + 992 losses + 16 break-even, plus 38 Test trades.
-- Workbook ZIP/OOXML and all relationships are valid; zero duplicate ZIP members, zero external-workbook artifacts/formulas/relationships, 511 formulas with zero formula-text/cached errors, canonical sheet order/views/panes/merges/filters, and exactly two preserved charts on ` SIM` with canonical formulas.
-- Production fast verification returned ok=true, checked all 84 recommendation links, and found zero content, formula, row-height, AUD-format, or filter-coverage mismatches.
-- Microsoft Excel COM opened a temporary copy, performed CalculateFullRebuild, saved it, and exported images. Visual inspection passed for STATS1, STATS2, SYMBOLS (including AF:AP), YEARLY REPORT, 2018, and 2026: no clipping, corrupted layout, stale source rows, verbose durations, or unintended populated test-only aggregates. The source workbook itself was not opened for destructive editing during QA.
-
-12. Regression commands/results
-- `python -m pytest -q -p no:cacheprovider tests/test_master_service_master_journal_sync.py`
-  - Final: 157 passed, 149 warnings in 902.30s.
-- `python -m pytest -q -p no:cacheprovider tests/test_master_service_trading_journal_stats.py`
-  - Final: 63 passed, 4 warnings in 7.13s.
-- `python -m pytest -q -p no:cacheprovider tests/test_master_journal_workbook.py`
-  - The monolithic run exceeded the 30-minute process ceiling. All 210 collected nodes were then completed across non-overlapping partitions and exact reruns. Final coverage: all 210 passed; the final partition/rerun results included 53/53, 12/12, 5/5, 11/11, and 12/12 passing groups with no unresolved node.
-- `python -m pytest -q -p no:cacheprovider tests/test_custom_indicator_pine.py tests/test_master_service_profiles.py tests/test_dashboard_home_layout.py tests/test_bounce_trader_symbol_resolution.py tests/test_spread_monitor_dashboard.py tests/test_fxweekend_executor.py tests/test_fxweekend_render_supervisor.py tests/test_fxweekend_proxy_reliability.py tests/test_dashboard_js_syntax.py tests/test_master_service_calculator_retirement.py tests/test_master_service_trade_chart.py`
-  - Final: 176 passed, 113 warnings in 32.87s.
-- Focused verifier/report/filter/asset/O6/SYMBOLS/OOXML regressions were also run during development; all final reruns passed.
-- `python -m py_compile render/master_service.py bybit_trigger_bounce_trader/app.py tools/master_journal_workbook.py` and changed Python tests: passed.
-- `git diff --check`: passed; only normal LF-to-CRLF working-copy notices were emitted.
-- Warnings are existing FastAPI `on_event` deprecations, one httpx `app` shortcut deprecation, and expected mocked unawaited-coroutine warnings in one autostart test. There are no test failures.
-
-13. Files intended for publication
-- bybit_trigger_bounce_trader/app.py
-- custom instructions/CODEX_BRIEF_INSTRUCTIONS.txt
-- custom instructions/CODEX_BRIEF_INSTRUCTIONS_CHATGPT_ONLY.docx
-- journal/Trading Journal.xlsx
-- journal/Trading Journal.assets/recommendations/index.html and 84 recommendation HTML files
-- pinescripts/custom_indicator.pine
-- render/README.md
-- render/master_service.py
+9. Files intended for publication
 - tools/master_journal_workbook.py
-- tests/test_bounce_trader_symbol_resolution.py
-- tests/test_custom_indicator_pine.py
-- tests/test_dashboard_home_layout.py
-- tests/test_fxweekend_executor.py
 - tests/test_master_journal_workbook.py
-- tests/test_master_service_master_journal_sync.py
-- tests/test_master_service_profiles.py
-- tests/test_spread_monitor_dashboard.py
+- journal/Trading Journal.xlsx
+- journal/Trading Journal.assets/recommendations/*.html (85 files)
 - summary/CODEX_SUMMARY_latest.txt
 
-14. Preserved unrelated/local state
-- Preserved and excluded from publication: the pre-existing root brief input, `journal/5-digit-demo-calculation-context.json`, and five runtime files under render/data (`monthly_aud_revaluation.json`, `monthly_aud_revaluation_state.json`, `pending_webhooks.json`, `trade_contexts.json`, and `webhook_attempts.json`).
-- The apparent `.gitignore` modification has no content difference; HEAD/index/worktree blobs are identical.
-- No secrets, environment files, uploads, runtime data, logs, caches, or QA images are intended for the commit. Ignored local QA staging directories remain outside Git because repository safety rules prohibit broad/recursive cleanup.
+10. Preserved unrelated/local state
+- Preserved and excluded from publication: custom instructions/CODEX_BRIEF_INSTRUCTIONS.txt and custom instructions/CODEX_BRIEF_INSTRUCTIONS_CHATGPT_ONLY.docx.
+- Preserved and excluded from publication: render/data/monthly_aud_revaluation.json, monthly_aud_revaluation_state.json, pending_webhooks.json, trade_contexts.json, and webhook_attempts.json.
+- Preserved and excluded from publication: CODEX_BRIEF_2026-08-20_Trading_Journal_Formatting_Repair.txt and CODEX_BRIEF_2026-08-20_Trading_Tools_Brokers_Pine_FXWeekend.txt.
+- No secrets, environment files, logs, caches, runtime data, QA images, safety copies, candidate workbooks, or task helper scripts are intended for the commit.
 
-15. Residual external/manual verification
-- TradingView compilation and the live alert selector are external to this repository. Manual steps: replace the chart script with the revised source; delete and recreate saved alerts because TradingView snapshots scripts/inputs; choose exactly one dedicated `9 EMA Offset`, `20 EMA Offset`, or `VWAP Offset` crossing/above/below condition; set Once Per Bar Close; paste the calculator-generated webhook URL/JSON for the intended Buy/Sell action; test in demo/test mode; and avoid simultaneously enabling overlapping dedicated conditions unless multiple orders are intentional.
-- The required in-app browser backend was unavailable (`iab` unavailable; browser list empty). Per the browser-control workflow no substitute Chrome/Playwright surface was used. Therefore live supported-desktop local/Render visual navigation and representative default-browser hyperlink clicks remain manual. Static/profile/deep-route/UI tests passed, Excel hyperlink targets resolve offline, and every HTML artifact was inspected programmatically for self-containment and exact recommendation agreement.
-
-16. Publication workflow
-- This summary is written before the mandatory repository publication step. `PATCH_DESKTOP_PUSH.bat` must stage the intended package, commit, pull/rebase safely, push HEAD to origin/master, fetch, and verify local HEAD equals origin/master.
-- The verified final commit hash and clean publication result are reported in the final user handoff and retained in the PATCH log.
+11. Publication workflow
+- This summary is written before the mandatory repository publication step.
+- PATCH_DESKTOP_PUSH.bat must commit the intended Brief 1 package, pull/rebase safely, push HEAD to origin/master, fetch, and verify that local HEAD equals origin/master.
+- The pre-existing unrelated working-tree state is protected before publication and restored afterward.

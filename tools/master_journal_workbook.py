@@ -27,6 +27,7 @@ import re
 import zipfile
 import xml.etree.ElementTree as ET
 from xml.sax.saxutils import escape as _xml_escape
+from urllib.parse import unquote
 from zoneinfo import ZoneInfo
 from uuid import uuid4
 
@@ -373,6 +374,22 @@ PROFIT_FONT = "006100"
 LOSS_FILL = "FFC7CE"
 LOSS_FONT = "9C0006"
 
+# Generator-owned presentation for statistics metrics.  Row-label fonts,
+# alignment, indentation, and the STATS1 border grouping are deliberately not
+# part of this policy: those are user-owned presentation in preservation mode.
+SEMANTIC_FORMAT_POLICY = {
+    "section": "General",
+    "count": "0",
+    "pct": "0.00%",
+    "r": '0.000"R"',
+    "duration": "General",
+    "text": "General",
+    "date": "General",
+    "streak_date": "General",
+    "drawdown_date": "General",
+    "commission": None,
+}
+
 def _semantic_fill_rgb(cell) -> str:
     fill = getattr(cell, "fill", None)
     color = getattr(fill, "fgColor", None)
@@ -400,6 +417,72 @@ def _clear_generated_semantic_fill(cell) -> None:
 
 def _clear_cell_fill(cell) -> None:
     cell.fill = PatternFill()
+
+
+def _semantic_metric_number_format(
+    kind: str,
+    value: Any,
+    *,
+    currency: str | None = None,
+) -> str:
+    """Return the explicit Excel format for a managed statistics value."""
+    if isinstance(value, str) and value:
+        return "General"
+    if kind == "commission":
+        return _currency_number_format(currency) if currency else "General"
+    return SEMANTIC_FORMAT_POLICY.get(kind, "General") or "General"
+
+
+def _reset_managed_metric_fill(cell) -> None:
+    """Restore Excel's genuine no-fill state and remove generated font colour."""
+    font = copy(cell.font)
+    color = getattr(font, "color", None)
+    if (
+        getattr(color, "type", None) == "rgb"
+        and str(getattr(color, "rgb", "") or "")[-6:].upper()
+        in {PROFIT_FONT, LOSS_FONT}
+    ):
+        font.color = "FF000000"
+    cell.font = font
+    cell.fill = PatternFill()
+
+
+def _apply_semantic_metric_policy(
+    cell,
+    *,
+    kind: str,
+    semantic: str | None = None,
+    currency: str | None = None,
+    populated_only_fill: bool = True,
+) -> None:
+    """Apply number format and direct fill from semantic meaning, never position."""
+    cell.number_format = _semantic_metric_number_format(
+        kind,
+        cell.value,
+        currency=currency,
+    )
+    _reset_managed_metric_fill(cell)
+
+    # Managed statistics values are body text.  This removes the known style
+    # shifts that made duration/count cells bold while retaining the existing
+    # font family, size, underline, and other authored font properties.
+    font = copy(cell.font)
+    font.bold = False
+    font.italic = False
+    cell.font = font
+
+    populated = cell.value not in (None, "")
+    if populated_only_fill and not populated:
+        return
+    if semantic in {"profit", "loss"}:
+        _apply_full_cell_semantic_fill(cell, semantic)
+    elif semantic == "auto":
+        value = _as_float(cell.value)
+        if value is not None and value != 0:
+            _apply_full_cell_semantic_fill(
+                cell,
+                "profit" if value > 0 else "loss",
+            )
 
 def _apply_sign_based_full_cell_fill(cell) -> None:
     value = _as_float(cell.value)
@@ -4141,39 +4224,58 @@ def _recommendation_svg(
     padding = max((y_max - y_min) * 0.08, 0.01)
     y_min -= padding
     y_max += padding
-    width, height = 1040, 430
-    left, right, top, bottom = 84, 28, 30, 64
+    # The chart deliberately keeps generous viewBox padding because the SVG is
+    # responsive: at narrow browser widths every label scales with the plot.
+    # Keep these margins in sync with the focused bounds regression test.
+    width, height = 1040, 520
+    left, right, top, bottom = 118, 44, 48, 104
     plot_width = width - left - right
     plot_height = height - top - bottom
+    point_inset = 10.0
 
     def x_pos(index: int) -> float:
-        return left + (plot_width / 2.0 if len(points) <= 1 else index * plot_width / (len(points) - 1))
+        usable_width = max(0.0, plot_width - (point_inset * 2.0))
+        return left + point_inset + (
+            usable_width / 2.0
+            if len(points) <= 1
+            else index * usable_width / (len(points) - 1)
+        )
 
     def y_pos(value: float) -> float:
         return top + (y_max - value) / (y_max - y_min) * plot_height
 
     svg: List[str] = [
-        f'<svg class="chart" viewBox="0 0 {width} {height}" role="img" aria-label="Eligible trade observations and recommended value">',
-        f'<rect x="{left}" y="{top}" width="{plot_width}" height="{plot_height}" fill="#fbfdff" stroke="#cbd5e1"/>',
+        f'<svg class="chart" viewBox="0 0 {width} {height}" '
+        f'data-plot-left="{left}" data-plot-right="{width-right}" '
+        f'data-plot-top="{top}" data-plot-bottom="{height-bottom}" '
+        'role="img" aria-label="Eligible trade observations and recommended value">',
+        f'<rect data-role="plot-border" x="{left}" y="{top}" width="{plot_width}" height="{plot_height}" fill="#fbfdff" stroke="#cbd5e1"/>',
     ]
     for tick in range(6):
         value = y_min + (y_max - y_min) * tick / 5.0
         y = y_pos(value)
         svg.append(f'<line x1="{left}" y1="{y:.2f}" x2="{width-right}" y2="{y:.2f}" stroke="#e2e8f0"/>')
-        svg.append(f'<text x="{left-10}" y="{y+4:.2f}" text-anchor="end" class="axis-label">{value:.3f}{_recommendation_html_escape(unit)}</text>')
+        svg.append(f'<text data-role="tick-label" x="{left-14}" y="{y+4:.2f}" text-anchor="end" class="axis-label">{value:.3f}{_recommendation_html_escape(unit)}</text>')
     rec_y = y_pos(float(recommended))
     svg.append(f'<line x1="{left}" y1="{rec_y:.2f}" x2="{width-right}" y2="{rec_y:.2f}" stroke="#7c3aed" stroke-width="3" stroke-dasharray="10 6"/>')
-    svg.append(f'<text x="{width-right-4}" y="{rec_y-8:.2f}" text-anchor="end" class="recommendation-label">Recommended {recommended:.8g}{_recommendation_html_escape(unit)}</text>')
+    recommendation_label_y = (
+        rec_y + 22.0 if rec_y - top < 28.0 else rec_y - 10.0
+    )
+    recommendation_label_y = min(
+        height - bottom - 10.0,
+        max(top + 16.0, recommendation_label_y),
+    )
+    svg.append(f'<text data-role="recommendation-label" x="{width-right-8}" y="{recommendation_label_y:.2f}" text-anchor="end" class="recommendation-label">Recommended {recommended:.8g}{_recommendation_html_escape(unit)}</text>')
     for index, item in enumerate(points):
         value = float(item["value"])
         colour = "#15803d" if item.get("outcome") == "winner" else "#b91c1c"
         title = _recommendation_html_escape(f"{item['label']}: {value:.8g}{unit} — {item.get('outcome')}")
         svg.append(
-            f'<circle cx="{x_pos(index):.2f}" cy="{y_pos(value):.2f}" r="5.5" fill="{colour}" stroke="#ffffff" stroke-width="1.5"><title>{title}</title></circle>'
+            f'<circle data-role="observation" cx="{x_pos(index):.2f}" cy="{y_pos(value):.2f}" r="5.5" fill="{colour}" stroke="#ffffff" stroke-width="1.5"><title>{title}</title></circle>'
         )
     svg.extend([
-        f'<text x="{left + plot_width/2:.2f}" y="{height-18}" text-anchor="middle" class="axis-title">Eligible trade observations (deterministic input order)</text>',
-        f'<text x="20" y="{top + plot_height/2:.2f}" text-anchor="middle" transform="rotate(-90 20 {top + plot_height/2:.2f})" class="axis-title">Value ({_recommendation_html_escape(unit or 'R')})</text>',
+        f'<text data-role="x-axis-title" x="{left + plot_width/2:.2f}" y="{height-28}" text-anchor="middle" class="axis-title">Eligible trade observations (deterministic input order)</text>',
+        f'<text data-role="y-axis-title" x="26" y="{top + plot_height/2:.2f}" text-anchor="middle" transform="rotate(-90 26 {top + plot_height/2:.2f})" class="axis-title">Value ({_recommendation_html_escape(unit or 'R')})</text>',
         "</svg>",
     ])
     return "".join(svg)
@@ -4244,7 +4346,7 @@ def _recommendation_chart_html(
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{_recommendation_html_escape(scope_label)} — {_recommendation_html_escape(metric_label)}</title>
 <style>
-body{{margin:0;background:#f1f5f9;color:#0f172a;font:15px/1.45 Segoe UI,Arial,sans-serif}}main{{max-width:1180px;margin:0 auto;padding:28px}}h1{{margin:.2rem 0}}h2{{margin-top:2rem}}.sub{{color:#475569}}.cards{{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin:18px 0}}.card,section{{background:white;border:1px solid #cbd5e1;border-radius:10px;padding:16px;box-shadow:0 1px 2px #0001}}.card b{{display:block;font-size:1.25rem}}.recommendation{{border-left:5px solid #7c3aed}}.chart{{width:100%;height:auto;background:white;border-radius:8px}}.axis-label{{font-size:11px;fill:#475569}}.axis-title{{font-size:13px;fill:#334155}}.recommendation-label{{font-size:13px;font-weight:700;fill:#6d28d9}}table{{width:100%;border-collapse:collapse;background:white}}th,td{{padding:8px;border-bottom:1px solid #e2e8f0;text-align:left;vertical-align:top}}th{{background:#e2e8f0;position:sticky;top:0}}.table-wrap{{overflow:auto;max-height:520px;border:1px solid #cbd5e1;border-radius:8px}}pre{{white-space:pre-wrap}}.bar-row{{display:grid;grid-template-columns:140px 1fr 48px;gap:8px;align-items:center;margin:7px 0}}.bar{{height:14px;background:#e2e8f0;border-radius:99px;overflow:hidden}}.bar i{{display:block;height:100%;background:#2563eb}}.offline{{font-size:.85rem;color:#475569}}
+body{{margin:0;background:#f1f5f9;color:#0f172a;font:15px/1.45 Segoe UI,Arial,sans-serif}}main{{max-width:1180px;margin:0 auto;padding:28px}}h1{{margin:.2rem 0}}h2{{margin-top:2rem}}.sub{{color:#475569}}.cards{{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin:18px 0}}.card,section{{background:white;border:1px solid #cbd5e1;border-radius:10px;padding:16px;box-shadow:0 1px 2px #0001}}.card b{{display:block;font-size:1.25rem}}.recommendation{{border-left:5px solid #7c3aed}}.chart{{display:block;width:100%;max-width:100%;height:auto;overflow:visible;background:white;border-radius:8px}}.axis-label{{font-size:11px;fill:#475569}}.axis-title{{font-size:13px;fill:#334155}}.recommendation-label{{font-size:13px;font-weight:700;fill:#6d28d9}}table{{width:100%;border-collapse:collapse;background:white}}th,td{{padding:8px;border-bottom:1px solid #e2e8f0;text-align:left;vertical-align:top}}th{{background:#e2e8f0;position:sticky;top:0}}.table-wrap{{overflow:auto;max-height:520px;border:1px solid #cbd5e1;border-radius:8px}}pre{{white-space:pre-wrap}}.bar-row{{display:grid;grid-template-columns:140px 1fr 48px;gap:8px;align-items:center;margin:7px 0}}.bar{{height:14px;background:#e2e8f0;border-radius:99px;overflow:hidden}}.bar i{{display:block;height:100%;background:#2563eb}}.offline{{font-size:.85rem;color:#475569}}@media(max-width:600px){{main{{padding:12px}}.card,section{{padding:10px}}}}
 </style></head><body><main>
 <p class="offline">Self-contained offline artifact. No Trading Tools server or network connection is required.</p>
 <h1>{_recommendation_html_escape(scope_label)} — {_recommendation_html_escape(metric_label)}</h1>
@@ -4325,7 +4427,16 @@ def _apply_recommendation_chart_hyperlinks(wb, bundle: Mapping[str, Any]) -> Non
         return
 
     def apply_link(cell, target: str | None) -> None:
-        cell.hyperlink = target or None
+        current = getattr(cell, "hyperlink", None)
+        current_target = str(getattr(current, "target", "") or "")
+        targets_match = bool(target) and (
+            unquote(current_target).replace("\\", "/")
+            == unquote(str(target)).replace("\\", "/")
+        )
+        # Retain the authored relationship object (including its percent
+        # encoding) when it already resolves to the generated offline asset.
+        if not targets_match:
+            cell.hyperlink = target or None
         if target:
             font = copy(cell.font)
             font.color = "0563C1"
@@ -7908,6 +8019,13 @@ def _subtract_range_rectangle(cell_range: str, cut_range: str) -> List[str]:
 
 def _sanitize_dashboard_semantic_conditional_formatting(ws) -> None:
     protected_ranges: List[str] = ["B3:D4", "C21:D28"]
+    market_cols = _stats1_market_columns(ws)
+    managed_rows = _stats1_semantic_row_policies(ws) if market_cols else {}
+    if managed_rows:
+        protected_ranges.append(
+            f"{get_column_letter(min(market_cols.values()))}{min(managed_rows)}:"
+            f"{get_column_letter(max(market_cols.values()))}{max(managed_rows)}"
+        )
     protected_labels = {
         "wins",
         "losses",
@@ -8018,8 +8136,6 @@ def _apply_dashboard_requested_semantic_fills(ws) -> None:
     }
     for row in range(1, ws.max_row + 1):
         label = str(ws.cell(row, 1).value or "").strip().lower()
-        if label == "source":
-            _apply_dashboard_source_label_style(ws.cell(row, 1))
         semantic = semantic_by_label.get(label)
         if semantic:
             for col in (2, 3, 4):
@@ -8083,7 +8199,144 @@ def _stats1_section_bounds(
     return start, end
 
 
-def _repair_stats1_formatting(
+def _stats1_semantic_row_policies(
+    ws,
+) -> Dict[int, Tuple[str, str | None, str]]:
+    """Map STATS1 rows to (kind, fill semantic, semantic section)."""
+    categorical_sections = {"side", "patterns", "timeframe", "commission", "drawdown"}
+    bounds: Dict[str, Tuple[int, int]] = {}
+    for section_name in ("Winners", "Losers"):
+        section_bounds = _stats1_section_bounds(ws, section_name)
+        if section_bounds:
+            bounds[section_name.casefold()] = section_bounds
+    for section_name in ("Side", "Patterns", "Timeframe", "Commission", "Drawdown"):
+        section_bounds = _stats1_section_bounds(
+            ws,
+            section_name,
+            categorical_sections,
+        )
+        if section_bounds:
+            bounds[section_name.casefold()] = section_bounds
+
+    def section_for_row(row: int) -> str:
+        for section_name, (start, end) in bounds.items():
+            if start <= row <= end:
+                return section_name
+        return "core"
+
+    policies: Dict[int, Tuple[str, str | None, str]] = {}
+    for row in range(2, ws.max_row + 1):
+        label = _stats1_label_at(ws, row)
+        if not label:
+            continue
+        label_key = " ".join(label.strip().casefold().split())
+        section = section_for_row(row)
+        section_start = bounds.get(section, (0, 0))[0]
+        if row == section_start and section != "core":
+            policies[row] = ("section", None, section)
+            continue
+
+        kind = "text"
+        semantic: str | None = None
+        if section == "commission":
+            kind = "commission"
+            semantic = "loss"
+        elif section == "drawdown":
+            if label_key in {"start", "end"}:
+                kind = "drawdown_date"
+            elif "drawdown" in label_key:
+                kind = "pct"
+                semantic = "loss"
+        elif section in {"side", "timeframe"}:
+            kind = "count"
+            if label_key in {"winners", "winner"}:
+                semantic = "profit"
+            elif label_key in {"losers", "loser", "losses"}:
+                semantic = "loss"
+        elif section == "patterns":
+            if label_key in {
+                "most traded", "least traded", "most profitable", "least profitable"
+            }:
+                kind = "text"
+            else:
+                kind = "count"
+                if label_key in {"winners", "winner"}:
+                    semantic = "profit"
+                elif label_key in {"losers", "loser", "losses"}:
+                    semantic = "loss"
+        elif section in {"winners", "losers"}:
+            if "duration" in label_key or "move to" in label_key:
+                kind = "duration"
+            elif label_key in {"most wins", "most losses"}:
+                kind = "text"
+            elif (
+                label_key.startswith(("min r", "avg r", "max r", "r expectancy"))
+                or " r " in f" {label_key} "
+            ):
+                kind = "r"
+            elif "%" in label_key or "percent" in label_key or "expectancy" in label_key:
+                kind = "pct"
+            if section == "winners" and (
+                "win %" in label_key
+                or "r win" in label_key
+                or label_key in {"percentage expectancy", "r expectancy", "min result %", "max result %", "min r", "max r"}
+            ):
+                semantic = "profit"
+            elif section == "losers" and (
+                "loss %" in label_key
+                or "r loss" in label_key
+                or label_key in {"percentage expectancy", "r expectancy", "min result %", "max result %", "min r", "max r"}
+            ):
+                semantic = "loss"
+        else:
+            if label_key in {
+                "trades", "wins", "losses", "break-even", "break even", "test",
+                "best win streak", "winning streak", "worst losing streak", "losing streak",
+            }:
+                kind = "count"
+            elif label_key in {"start", "end"}:
+                kind = "streak_date"
+            elif "duration" in label_key or "move to" in label_key:
+                kind = "duration"
+            elif (
+                "r multiple" in label_key
+                or "gross ir" in label_key
+                or label_key in {"r expectancy", "avg r", "average r"}
+            ):
+                kind = "r"
+            elif (
+                "%" in label_key
+                or "percent" in label_key
+                or "win rate" in label_key
+                or label_key in {"percentage expectancy", "avg result", "average result"}
+            ):
+                kind = "pct"
+
+            if label_key == "wins" or label_key in {"best win streak", "winning streak"}:
+                semantic = "profit"
+            elif label_key == "losses" or label_key in {"worst losing streak", "losing streak"}:
+                semantic = "loss"
+            elif label_key in {
+                "gross percent gain", "gross ir gain", "max win %", "avg win %",
+                "min win %", "max r win", "avg r win", "min r win",
+            }:
+                semantic = "profit"
+            elif label_key in {
+                "gross percent loss", "gross ir loss", "max loss %", "avg loss %",
+                "min loss %", "max r loss", "avg r loss", "min r loss",
+            }:
+                semantic = "loss"
+            elif label_key in {
+                "net p/l", "net p/l percentage", "net p/l %", "net p/l r multiples",
+                "percentage expectancy", "r expectancy", "avg result %", "avg r",
+            }:
+                semantic = "auto"
+
+        policies[row] = (kind, semantic, section)
+    return policies
+
+
+def _apply_stats1_semantic_formatting(
     ws,
     extended_metrics: Dict[str, Dict[str, Any]] | None = None,
     diagnostics: Dict[str, Any] | None = None,
@@ -8092,151 +8345,123 @@ def _repair_stats1_formatting(
     market_cols = _stats1_market_columns(ws)
     if not market_cols:
         return
-    if ws.freeze_panes != "B2":
+    policies = _stats1_semantic_row_policies(ws)
+    commission_keys = {
+        "min": "min_commission",
+        "min commission": "min_commission",
+        "avg": "avg_commission",
+        "average": "avg_commission",
+        "avg commission": "avg_commission",
+        "max": "max_commission",
+        "max commission": "max_commission",
+        "total": "total_commission",
+        "total commission": "total_commission",
+    }
+    repaired = 0
+    for row, (kind, semantic, section) in policies.items():
+        label_cell = ws.cell(row, 1)
+        # STATS1 labels are user-owned except for the known corrupted fills.
+        # Setting PatternFill() leaves every font/alignment/indent/border intact.
+        label_cell.fill = PatternFill()
+        label_key = " ".join(str(label_cell.value or "").strip().casefold().split())
+
+        commission_key = commission_keys.get(label_key) if section == "commission" else None
+        if commission_key:
+            overall = ws.cell(row, market_cols["overall"])
+            overall.value = None
+            _apply_semantic_metric_policy(overall, kind="text")
+            repaired += 1
+            for market, currency in (("fx", "AUD"), ("crypto", "USDT")):
+                cell = ws.cell(row, market_cols[market])
+                value = ((extended_metrics or {}).get(market) or {}).get(commission_key)
+                if value is not None:
+                    cell.value = value
+                elif cell.value in (None, ""):
+                    diagnostics.setdefault("missing_stats1_commission_values", []).append(
+                        f"{market} {commission_key}"
+                    )
+                _apply_semantic_metric_policy(
+                    cell,
+                    kind="commission",
+                    semantic="loss",
+                    currency=currency,
+                )
+                repaired += 1
+            continue
+
+        for market, col in market_cols.items():
+            cell = ws.cell(row, col)
+            currency = None
+            if kind == "commission" and market in {"fx", "crypto"}:
+                currency = "AUD" if market == "fx" else "USDT"
+            cell_semantic = semantic
+            if kind == "commission" and market == "overall":
+                cell_semantic = None
+            _apply_semantic_metric_policy(
+                cell,
+                kind=kind,
+                semantic=cell_semantic,
+                currency=currency,
+            )
+            repaired += 1
+    if repaired:
+        diagnostics["repaired_stats1_semantic_metric_cells"] = repaired
+
+
+def _repair_stats1_formatting(
+    ws,
+    extended_metrics: Dict[str, Dict[str, Any]] | None = None,
+    diagnostics: Dict[str, Any] | None = None,
+    *,
+    preserve_user_presentation: bool = False,
+) -> None:
+    diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+    market_cols = _stats1_market_columns(ws)
+    if not market_cols:
+        return
+    if not preserve_user_presentation and ws.freeze_panes != "B2":
         diagnostics["previous_stats1_freeze_panes"] = str(ws.freeze_panes or "")
         ws.freeze_panes = "B2"
         diagnostics["repaired_stats1_freeze_panes"] = "B2"
     _write_streak_detail_rows(ws, "Best Win Streak", {}, diagnostics=diagnostics)
     _write_streak_detail_rows(ws, "Worst Losing Streak", {}, diagnostics=diagnostics)
-    repaired = 0
-    for row in range(1, ws.max_row + 1):
-        cell = ws.cell(row, 1)
-        if cell.value in (None, ""):
-            continue
-        font = copy(cell.font)
-        font.bold = True
-        font.color = "FF000000"
-        cell.font = font
-        alignment = copy(cell.alignment)
-        alignment.horizontal = "left"
-        cell.alignment = alignment
-        repaired += 1
-    neutral_overall_ranges: List[str] = []
-    categorical_sections = {"side", "patterns", "timeframe", "commission", "drawdown"}
-    for section_name in ("Timeframe", "Patterns", "Side"):
-        bounds = _stats1_section_bounds(ws, section_name, categorical_sections)
-        if not bounds:
-            continue
-        neutral_overall_ranges.append(
-            f"{get_column_letter(market_cols['overall'])}{bounds[0] + 1}:"
-            f"{get_column_letter(market_cols['overall'])}{bounds[1]}"
-        )
-        for row in range(bounds[0] + 1, bounds[1] + 1):
-            target = ws.cell(row, market_cols["overall"])
-            label = str(ws.cell(row, 1).value or "").strip().casefold()
-            if label == "winners":
-                _apply_full_cell_semantic_fill(target, "profit")
-                repaired += 1
+    if not preserve_user_presentation:
+        # A newly generated workbook has no user-authored label typography to
+        # retain, so establish its template defaults before the role-specific
+        # child-label pass below.  Preservation mode never enters this branch.
+        for row in range(2, ws.max_row + 1):
+            label_cell = ws.cell(row, 1)
+            if label_cell.value in (None, ""):
                 continue
-            if label in {"losers", "losses"}:
-                _apply_full_cell_semantic_fill(target, "loss")
-                repaired += 1
-                continue
-            template = ws.cell(row, market_cols["fx"])
-            font = copy(template.font)
-            font.color = "000000"
-            target.font = font
-            target.fill = PatternFill()
-            target.alignment = copy(template.alignment)
-            repaired += 1
-            if label in {"most profitable", "least profitable"}:
-                template = ws.cell(row, market_cols["overall"])
-                for col in market_cols.values():
-                    cell = ws.cell(row, col)
-                    value = cell.value
-                    cell.font = copy(template.font)
-                    cell.fill = copy(template.fill)
-                    cell.alignment = copy(template.alignment)
-                    cell.value = value
-                    repaired += 1
-    if neutral_overall_ranges:
-        cf = ws.conditional_formatting
-        for key, rules in list(getattr(cf, "_cf_rules", {}).items()):
-            if not rules or not all(_is_generated_dashboard_semantic_rule(rule) for rule in rules):
-                continue
-            sqref = str(getattr(key, "sqref", key))
-            replacement_ranges: List[str] = []
-            changed = False
-            for part in sqref.split():
-                remaining = [part]
-                for neutral_range in neutral_overall_ranges:
-                    remaining = [
-                        piece
-                        for current in remaining
-                        for piece in _subtract_range_rectangle(current, neutral_range)
-                    ]
-                replacement_ranges.extend(remaining)
-                changed = changed or remaining != [part]
-            if not changed:
-                continue
-            del cf[sqref]
-            for replacement in replacement_ranges:
-                for rule in rules:
-                    cf.add(replacement, copy(rule))
-    losers = _stats1_section_bounds(ws, "Losers")
-    if losers:
-        for row in range(losers[0] + 1, losers[1] + 1):
+            font = copy(label_cell.font)
+            font.bold = True
+            font.italic = False
+            font.color = "FF000000"
+            label_cell.font = font
+            alignment = copy(label_cell.alignment)
+            alignment.horizontal = "left"
+            label_cell.alignment = alignment
+    for row in range(2, ws.max_row + 1):
+        label = str(ws.cell(row, 1).value or "").strip().casefold()
+        if "duration" in label or label.startswith(
+            ("min move to ", "average move to ", "max move to ")
+        ):
+            for col in market_cols.values():
+                cell = ws.cell(row, col)
+                if cell.value not in (None, ""):
+                    cell.value = _duration_display_cell_value(
+                        cell.value,
+                        cell.number_format,
+                    )
+    _apply_stats1_semantic_formatting(ws, extended_metrics, diagnostics)
+    if not preserve_user_presentation:
+        for row in _stats1_semantic_row_policies(ws):
             for col in market_cols.values():
                 alignment = copy(ws.cell(row, col).alignment)
                 alignment.horizontal = "left"
                 ws.cell(row, col).alignment = alignment
-                repaired += 1
-    for row in range(1, ws.max_row + 1):
-        label = str(ws.cell(row, 1).value or "").strip().casefold()
-        if label in {"best win streak", "winning streak"}:
-            for col in market_cols.values():
-                _apply_full_cell_semantic_fill(ws.cell(row, col), "profit")
-                repaired += 1
-        elif label in {"worst losing streak", "losing streak"}:
-            for col in market_cols.values():
-                _apply_full_cell_semantic_fill(ws.cell(row, col), "loss")
-                repaired += 1
-        if label in {"net p/l", "net p/l %", "net p/l percentage", "gross percent gain", "gross percent loss", "gross gain", "gross loss"}:
-            cell = ws.cell(row, market_cols["overall"])
-            font = copy(cell.font)
-            font.bold = False
-            cell.font = font
-            alignment = copy(cell.alignment)
-            alignment.horizontal = "left"
-            cell.alignment = alignment
-            repaired += 1
-        if "duration" in label or label.startswith(("min move to ", "average move to ", "max move to ")):
-            for col in market_cols.values():
-                cell = ws.cell(row, col)
-                if cell.value not in (None, ""):
-                    cell.value = _duration_display_cell_value(cell.value, cell.number_format)
-                    cell.number_format = "General"
-    commission = _stats1_section_bounds(ws, "Commission")
-    if commission:
-        metrics = extended_metrics or {}
-        metric_keys = {
-            "min commission": "min_commission",
-            "avg commission": "avg_commission",
-            "max commission": "max_commission",
-            "total commission": "total_commission",
-        }
-        for row in range(commission[0] + 1, commission[1] + 1):
-            key = metric_keys.get(str(ws.cell(row, 1).value or "").strip().casefold())
-            if not key:
-                continue
-            overall_cell = ws.cell(row, market_cols["overall"])
-            overall_cell.value = None
-            overall_cell.number_format = "General"
-            _clear_generated_semantic_fill(overall_cell)
-            for market, currency in (("fx", "AUD"), ("crypto", "USDT")):
-                cell = ws.cell(row, market_cols[market])
-                value = (metrics.get(market) or {}).get(key)
-                if value is None:
-                    diagnostics.setdefault("missing_stats1_commission_values", []).append(f"{market} {key}")
-                else:
-                    cell.value = value
-                cell.number_format = _currency_number_format(currency)
-                _clear_generated_semantic_fill(cell)
-            repaired += 3
-    _apply_stats1_clean_table_borders(ws, diagnostics)
-    _repair_stats1_child_label_styles(ws, diagnostics)
-    if repaired:
-        diagnostics["repaired_stats1_format_cells"] = repaired
+        _apply_stats1_clean_table_borders(ws, diagnostics)
+        _repair_stats1_child_label_styles(ws, diagnostics)
 
 def read_master_journal_manual_overrides(path: Path) -> Dict[str, Dict[str, Any]]:
     out: Dict[str, Dict[str, Any]] = {}
@@ -10350,8 +10575,9 @@ def _apply_stats1_clean_table_borders(ws, diagnostics: Dict[str, Any] | None = N
             font.bold = True
             font.color = "FF000000"
             cell.font = font
-            if col <= right_col:
-                cell.fill = PatternFill("solid", fgColor="EAF2F8")
+            # Section rows are intentionally neutral.  A genuine no-fill is
+            # required so the generator cannot reintroduce shifted grey fills.
+            cell.fill = PatternFill()
 
     normalized_ranges: List[Tuple[int, int]] = []
     for start, end in ranges:
@@ -10592,6 +10818,274 @@ _REPORT_SPECS = [
 ]
 REPORT_METRIC_LABELS = [label for label, _key, _kind, _semantic in _REPORT_SPECS]
 
+# Semantic groups parallel the authoritative STATS1 grouping without assuming
+# identical labels or row numbers on the report sheets.
+_REPORT_GROUP_SPEC_RANGES = (
+    (0, 18),    # core counts / percentages / R metrics
+    (19, 24),   # stops and targets
+    (25, 27),   # duration and move averages
+    (28, 31),   # result / R extrema
+    (32, 33),   # duration extrema
+    (34, 41),   # winner section
+    (42, 49),   # loser section
+    (50, 57),   # drawdown section
+    (58, 65),   # side counts
+    (66, 71),   # duration extrema
+    (72, 79),   # winner extrema
+    (80, 87),   # loser extrema
+    (88, 92),   # patterns
+    (93, 102),  # timeframe
+    (103, 107), # commission
+)
+
+
+def _effective_semantic_fill(kind: str, semantic: str | None) -> str | None:
+    if kind == "commission":
+        return "loss"
+    if kind in {
+        "section", "duration", "text", "date", "streak_date", "drawdown_date"
+    }:
+        return None
+    return semantic
+
+
+def _currency_from_number_format(number_format: str) -> str:
+    text = str(number_format or "").upper()
+    for currency in ("USDT", "USDC", "AUD", "USD", "BTC", "ETH", "SOL", "XRP"):
+        if currency in text:
+            return currency
+    return ""
+
+
+def _report_trailing_blank_rows(ws) -> List[int]:
+    spec_rows = _report_spec_rows(ws)
+    if not spec_rows:
+        return []
+    last_managed_row = max(row for row, _spec in spec_rows)
+    return [
+        row
+        for row in range(last_managed_row + 1, ws.max_row + 1)
+        if all(
+            ws.cell(row, col).value in (None, "")
+            for col in range(1, ws.max_column + 1)
+        )
+    ]
+
+
+def _apply_report_semantic_formatting(
+    ws,
+    *,
+    header_cols: Sequence[int] | None = None,
+    buckets: Sequence[Dict[str, Any]] | None = None,
+    diagnostics: Dict[str, Any] | None = None,
+) -> None:
+    diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+    bucket_by_col = {
+        col: bucket
+        for col, bucket in zip(header_cols or (), buckets or ())
+    }
+    repaired = 0
+    for row, (_label, key, kind, semantic) in _report_spec_rows(ws):
+        ws.cell(row, 1).fill = PatternFill()
+        for col in range(2, ws.max_column + 1):
+            cell = ws.cell(row, col)
+            currency = ""
+            if kind == "commission" and key:
+                values = (bucket_by_col.get(col) or {}).get(key)
+                if isinstance(values, dict) and len(values) == 1:
+                    currency = _currency_code(next(iter(values)))
+                if not currency:
+                    currency = _currency_from_number_format(cell.number_format)
+            _apply_semantic_metric_policy(
+                cell,
+                kind=kind,
+                semantic=_effective_semantic_fill(kind, semantic),
+                currency=currency or None,
+            )
+            repaired += 1
+    if repaired:
+        diagnostics.setdefault("repaired_report_semantic_metric_cells", {})[
+            ws.title
+        ] = repaired
+    trailing_cells = 0
+    for row in _report_trailing_blank_rows(ws):
+        for col in range(1, ws.max_column + 1):
+            _apply_semantic_metric_policy(ws.cell(row, col), kind="text")
+            trailing_cells += 1
+    if trailing_cells:
+        diagnostics.setdefault("neutralized_report_trailing_blank_cells", {})[
+            ws.title
+        ] = trailing_cells
+
+
+def _apply_report_semantic_group_borders(
+    ws,
+    diagnostics: Dict[str, Any] | None = None,
+) -> None:
+    diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+    spec_rows = _report_spec_rows(ws)
+    rows_by_index = {
+        index: row
+        for index, (row, _spec) in enumerate(spec_rows)
+    }
+    if not rows_by_index:
+        return
+    last_col = max(1, ws.max_column)
+    last_managed_row = max(rows_by_index.values())
+    _clear_borders_in_range(ws, 1, 1, last_managed_row, last_col)
+    for row in _report_trailing_blank_rows(ws):
+        for col in range(1, last_col + 1):
+            ws.cell(row, col).border = Border()
+    applied: List[str] = []
+    for start_index, end_index in _REPORT_GROUP_SPEC_RANGES:
+        rows = [
+            rows_by_index[index]
+            for index in range(start_index, end_index + 1)
+            if index in rows_by_index
+        ]
+        if not rows:
+            continue
+        start_row = 1 if start_index == 0 else min(rows)
+        end_row = max(rows)
+        _apply_group_box_border(
+            ws,
+            start_row,
+            1,
+            end_row,
+            last_col,
+            outer_style="medium",
+        )
+        applied.append(
+            f"A{start_row}:{get_column_letter(last_col)}{end_row}"
+        )
+    diagnostics.setdefault("repaired_report_semantic_border_groups", {})[
+        ws.title
+    ] = applied
+
+
+def _report_stats1_style_context(spec_index: int) -> str:
+    if 34 <= spec_index <= 41 or 72 <= spec_index <= 79:
+        return "winners"
+    if 42 <= spec_index <= 49 or 80 <= spec_index <= 87:
+        return "losers"
+    if 50 <= spec_index <= 57:
+        return "drawdown"
+    if 58 <= spec_index <= 65:
+        return "side"
+    if 88 <= spec_index <= 92:
+        return "patterns"
+    if 93 <= spec_index <= 102:
+        return "timeframe"
+    if 103 <= spec_index <= 107:
+        return "commission"
+    return "core"
+
+
+def _stats1_label_template_for_report(
+    stats1,
+    *,
+    spec_index: int,
+    label: str,
+):
+    context = _report_stats1_style_context(spec_index)
+    label_key = " ".join(str(label or "").strip().casefold().split())
+    aliases = {
+        "net p/l": "net p/l percentage",
+        "avg duration (dd:hh:mm:ss)": "avg duration",
+        "move to break even (dd:hh:mm:ss)": "average move to break even",
+        "move to profit (dd:hh:mm:ss)": "average move to profit",
+        "shortest (dd:hh:mm:ss)": "min duration",
+        "longest (dd:hh:mm:ss)": "max duration",
+        "longs": "long",
+        "shorts": "short",
+        "min commission": "min",
+        "avg commission": "avg",
+        "max commission": "max",
+        "total commission": "total",
+    }
+    candidate = aliases.get(label_key, label_key)
+    if label_key.startswith("winners "):
+        candidate = label_key[len("winners "):]
+    elif label_key.startswith("losers "):
+        candidate = label_key[len("losers "):]
+    if context == "side":
+        if "wins" in label_key:
+            candidate = "winners"
+        elif "loss" in label_key:
+            candidate = "losers"
+        elif "long" in label_key:
+            candidate = "long"
+        elif "short" in label_key:
+            candidate = "short"
+
+    categorical_sections = {"side", "patterns", "timeframe", "commission", "drawdown"}
+    if context == "core":
+        rows = range(1, (_stats1_section_bounds(stats1, "Winners") or (stats1.max_row + 1, 0))[0])
+    else:
+        section_bounds = _stats1_section_bounds(
+            stats1,
+            context.title(),
+            categorical_sections if context in categorical_sections else None,
+        )
+        rows = range(section_bounds[0], section_bounds[1] + 1) if section_bounds else ()
+    for row in rows:
+        if " ".join(_stats1_label_at(stats1, row).strip().casefold().split()) == candidate:
+            return stats1.cell(row, 1)
+
+    # Fallbacks retain the authoritative typography roles even where a report
+    # label has no exact STATS1 counterpart.
+    fallback_candidates = []
+    if context in {"winners", "losers"}:
+        fallback_candidates = ["avg stop %", context]
+    elif context == "side":
+        fallback_candidates = ["winners" if "win" in label_key else "losers" if "loss" in label_key else "long"]
+    elif context == "commission":
+        fallback_candidates = ["min", "commission"]
+    elif context in categorical_sections:
+        fallback_candidates = [context]
+    else:
+        fallback_candidates = ["trades"]
+    for fallback in fallback_candidates:
+        for row in range(1, stats1.max_row + 1):
+            if " ".join(_stats1_label_at(stats1, row).strip().casefold().split()) == fallback:
+                return stats1.cell(row, 1)
+    return None
+
+
+def _apply_report_label_fonts_from_stats1(stats1, report_ws) -> None:
+    for spec_index, (row, spec) in enumerate(_report_spec_rows(report_ws)):
+        template = _stats1_label_template_for_report(
+            stats1,
+            spec_index=spec_index,
+            label=spec[0],
+        )
+        if template is None:
+            continue
+        target = report_ws.cell(row, 1)
+        target.font = copy(template.font)
+        target.alignment = copy(template.alignment)
+        target.fill = PatternFill()
+
+
+def _apply_report_workbook_semantic_presentation(
+    wb,
+    diagnostics: Dict[str, Any] | None = None,
+) -> None:
+    diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+    if STATS1_SHEET not in wb.sheetnames:
+        return
+    stats1 = wb[STATS1_SHEET]
+    for sheet_name in (
+        REPORT_YEARLY_SHEET,
+        *[name for name in wb.sheetnames if name.isdigit() and int(name) >= REPORT_START_YEAR],
+    ):
+        if sheet_name not in wb.sheetnames:
+            continue
+        report_ws = wb[sheet_name]
+        _apply_report_semantic_formatting(report_ws, diagnostics=diagnostics)
+        _apply_report_label_fonts_from_stats1(stats1, report_ws)
+        _apply_report_semantic_group_borders(report_ws, diagnostics)
+
 
 def _report_trade_years_from_snapshot(snapshot: Dict[str, Any]) -> List[int]:
     years = {REPORT_START_YEAR, REPORT_MIN_END_YEAR, datetime.now(JOURNAL_DISPLAY_TZ).year}
@@ -10716,45 +11210,10 @@ def _format_report_sheet(ws, last_col: int) -> None:
     for col in range(2, last_col + 1):
         ws.column_dimensions[get_column_letter(col)].width = 14
     _style_header_row(ws, 1)
-    _table_border(ws, 1, 1, len(REPORT_METRIC_LABELS) + 1, last_col)
     for row in range(2, len(REPORT_METRIC_LABELS) + 2):
         ws.row_dimensions[row].height = 14.5
-        label = str(ws.cell(row, 1).value or "")
-        ws.cell(row, 1).font = Font(name="Calibri", size=11, bold=True)
-        if label in _REPORT_SECTION_ROWS:
-            for col in range(1, last_col + 1):
-                ws.cell(row, col).font = Font(name="Calibri", size=11, bold=True)
-                ws.cell(row, col).fill = PatternFill("solid", fgColor="EAF2F8")
-        if label == "Source":
-            _apply_dashboard_source_label_style(ws.cell(row, 1))
-    for idx, (_label, _key, kind, semantic) in enumerate(_REPORT_SPECS, start=2):
-        for col in range(2, last_col + 1):
-            cell = ws.cell(idx, col)
-            if isinstance(cell.value, str) and cell.value:
-                cell.number_format = "General"
-            elif kind == "pct":
-                cell.number_format = "0.00%"
-            elif kind == "r":
-                cell.number_format = '0.000"R"'
-            elif kind == "count":
-                cell.number_format = "0"
-            elif kind == "streak_date":
-                cell.number_format = "General"
-                _apply_streak_detail_value_font(cell)
-            elif kind == "duration":
-                cell.number_format = "General"
-            elif kind == "drawdown_date":
-                cell.number_format = "General"
-            elif kind == "number":
-                cell.number_format = '#,##0.00'
-            elif kind == "commission":
-                cell.number_format = '#,##0.00'
-            if semantic == "profit":
-                _apply_full_cell_semantic_fill(cell, "profit")
-            elif semantic == "loss":
-                _apply_full_cell_semantic_fill(cell, "loss")
-            elif semantic == "auto":
-                _apply_sign_based_full_cell_fill(cell)
+    _apply_report_semantic_formatting(ws)
+    _apply_report_semantic_group_borders(ws)
 
 
 def _normalize_generated_statistics_row_heights(wb) -> None:
@@ -10831,6 +11290,12 @@ def _write_report_sheet(ws, headers: List[Any], buckets: List[Dict[str, Any]]) -
                 ws.cell(row_idx, col).number_format = _currency_number_format(next(iter(values)))
             elif isinstance(values, dict) and len(values) > 1:
                 ws.cell(row_idx, col).number_format = "General"
+    _apply_report_semantic_formatting(
+        ws,
+        header_cols=list(range(2, len(headers) + 2)),
+        buckets=buckets,
+    )
+    _apply_report_semantic_group_borders(ws)
 
 
 def _copy_report_row(ws, source_row: int, target_row: int) -> None:
@@ -11001,7 +11466,14 @@ def _update_report_sheet_preserving_layout(
                 elif isinstance(values, dict) and len(values) > 1:
                     cell.number_format = "General"
                 else:
-                    cell.number_format = '#,##0.00'
+                    cell.number_format = "General"
+    _apply_report_semantic_formatting(
+        ws,
+        header_cols=header_cols,
+        buckets=buckets,
+        diagnostics=diagnostics,
+    )
+    _apply_report_semantic_group_borders(ws, diagnostics)
     diagnostics.setdefault("updated_report_sheets", []).append(ws.title)
 
 
@@ -11366,6 +11838,7 @@ def _ensure_report_sheets(wb, snapshot: Dict[str, Any], diagnostics: Dict[str, A
         selected_names.add(preserved_active)
     for ws in wb.worksheets:
         ws.sheet_view.tabSelected = ws.title in selected_names
+    _apply_report_workbook_semantic_presentation(wb, diagnostics)
 
 def _write_instrument_leaders_section(ws, start_row, start_col, leaders):
     ws.merge_cells(start_row=start_row,start_column=start_col,end_row=start_row,end_column=start_col+4)
@@ -11566,6 +12039,27 @@ def _auto_filter_layout_signature(ws) -> Any:
         return ref
 
 
+def _trade_log_auto_filter_signature_is_acceptable(signature: Any) -> bool:
+    """Return whether a captured Trade Log filter covers the canonical header."""
+    if not isinstance(signature, (tuple, list)) or len(signature) != 3:
+        return False
+    min_col, min_row, max_col = signature
+    return (
+        min_col == 1
+        and min_row == TRADE_LOG_FILTER_HEADER_ROW
+        and isinstance(max_col, int)
+        and max_col >= len(TRADE_LOG_HEADERS)
+    )
+
+
+def _trade_log_auto_filter_signature_is_canonical(signature: Any) -> bool:
+    return signature == (
+        1,
+        TRADE_LOG_FILTER_HEADER_ROW,
+        len(TRADE_LOG_HEADERS),
+    )
+
+
 def _worksheet_layout_snapshot(ws) -> Dict[str, Any]:
     return {
         "merged": sorted(str(r) for r in ws.merged_cells.ranges),
@@ -11575,6 +12069,808 @@ def _worksheet_layout_snapshot(ws) -> Dict[str, Any]:
         "freeze": ws.freeze_panes,
         "auto_filter": _auto_filter_layout_signature(ws),
     }
+
+
+def _contract_xml(value: Any) -> str:
+    """Return a stable XML representation for an openpyxl serialisable value."""
+    if value is None:
+        return ""
+    to_tree = getattr(value, "to_tree", None)
+    if not callable(to_tree):
+        return str(value)
+    return ET.tostring(to_tree(), encoding="unicode")
+
+
+def _contract_cell_value(value: Any) -> Any:
+    if isinstance(value, (datetime, date)):
+        return {"type": type(value).__name__, "value": value.isoformat()}
+    if isinstance(value, Decimal):
+        return {"type": "Decimal", "value": str(value)}
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    if hasattr(value, "text") or hasattr(value, "ref"):
+        return {
+            "type": type(value).__name__,
+            "text": str(getattr(value, "text", "") or ""),
+            "ref": str(getattr(value, "ref", "") or ""),
+        }
+    return {"type": type(value).__name__, "value": str(value)}
+
+
+def _dimension_contract(dimension: Any, *, column: bool) -> Dict[str, Any]:
+    attributes = (
+        (
+            "width", "hidden", "bestFit", "outlineLevel", "collapsed",
+            "style_id", "min", "max",
+        )
+        if column
+        else (
+            "height", "hidden", "outlineLevel", "collapsed", "style_id",
+            "thickTop", "thickBot",
+        )
+    )
+    return {
+        attribute: getattr(dimension, attribute, None)
+        for attribute in attributes
+    }
+
+
+def _row_dimensions_preservation_contract(ws) -> Dict[str, Any]:
+    if ws.title != TRADE_LOG_SHEET:
+        return {
+            str(key): _dimension_contract(dimension, column=False)
+            for key, dimension in sorted(ws.row_dimensions.items())
+        }
+
+    headers = _trade_log_header_map(ws)
+    row_id_col = headers.get("Row ID")
+    data_start = _trade_log_data_start_row(ws)
+    coordinate_dimensions: Dict[str, Any] = {}
+    dimensions_by_row_id: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for key, dimension in sorted(ws.row_dimensions.items()):
+        signature = _dimension_contract(dimension, column=False)
+        if not isinstance(key, int) or key < data_start:
+            coordinate_dimensions[str(key)] = signature
+            continue
+
+        is_generated_data_height = (
+            signature.get("height") in (None, TRADE_LOG_DATA_ROW_HEIGHT)
+            and not bool(signature.get("hidden"))
+            and int(signature.get("outlineLevel") or 0) == 0
+            and not bool(signature.get("collapsed"))
+            and int(signature.get("style_id") or 0) == 0
+            and not bool(signature.get("thickTop"))
+            and not bool(signature.get("thickBot"))
+        )
+        if is_generated_data_height:
+            continue
+
+        row_id = (
+            str(ws.cell(key, row_id_col).value or "").strip()
+            if row_id_col
+            else ""
+        )
+        if row_id:
+            dimensions_by_row_id[row_id].append(signature)
+        else:
+            coordinate_dimensions[str(key)] = signature
+
+    return {
+        "coordinates": coordinate_dimensions,
+        "data_rows_by_id": {
+            row_id: sorted(
+                signatures,
+                key=lambda item: json.dumps(item, sort_keys=True, default=str),
+            )
+            for row_id, signatures in sorted(dimensions_by_row_id.items())
+        },
+    }
+
+
+def _conditional_formatting_contract(ws) -> List[Dict[str, Any]]:
+    def generator_owned(key, rule) -> bool:
+        sqref = str(getattr(key, "sqref", key))
+        if ws.title in {STATS1_SHEET, STATS2_SHEET}:
+            return _is_generated_dashboard_semantic_rule(rule)
+        if ws.title == SYMBOLS_SHEET:
+            return _is_generated_profit_loss_rule(rule)
+        if ws.title in {TRADE_LOG_SHEET, LEGACY_ALL_TRADES_SHEET}:
+            return (
+                _is_generated_trade_log_win_loss_row_rule(rule, sqref)
+                or _is_generated_trade_log_value_fill_rule(rule)
+            )
+        if ws.title == "P&L Calendar":
+            return _is_generated_profit_loss_rule(rule)
+        return False
+
+    def rule_xml(rule) -> str:
+        tree = rule.to_tree()
+        # dxfId is a package-local style-table index and can be reassigned by
+        # openpyxl while the differential formatting itself remains identical.
+        tree.attrib.pop("dxfId", None)
+        return ET.tostring(tree, encoding="unicode")
+
+    entries: List[Dict[str, Any]] = []
+    for key, rules in getattr(
+        ws.conditional_formatting, "_cf_rules", {}
+    ).items():
+        kept_rules = [
+            rule
+            for rule in rules
+            if not generator_owned(key, rule)
+        ]
+        if not kept_rules:
+            continue
+        entries.append(
+            {
+                "sqref": str(key.sqref),
+                "rules": [
+                    {
+                        "rule": rule_xml(rule),
+                        "dxf": _contract_xml(getattr(rule, "dxf", None)),
+                    }
+                    for rule in kept_rules
+                ],
+            }
+        )
+    return entries
+
+
+def _is_managed_derived_sheet(sheet_name: str) -> bool:
+    return sheet_name in {
+        STATS1_SHEET,
+        STATS2_SHEET,
+        SYMBOLS_SHEET,
+        TRADE_LOG_SHEET,
+        LEGACY_ALL_TRADES_SHEET,
+        "P&L Calendar",
+        REPORT_YEARLY_SHEET,
+    } or (sheet_name.isdigit() and int(sheet_name) >= REPORT_START_YEAR)
+
+
+def _is_generator_owned_hyperlink_cell(
+    ws,
+    row: int,
+    col: int,
+) -> bool:
+    """Return whether a managed value cell owns its hyperlink presentation."""
+    if ws.title == STATS1_SHEET:
+        # All STATS1 market metrics are regenerated.  Their hyperlinks may be
+        # added (recommendation rows) or cleared (ordinary metric rows) as the
+        # corresponding generated value changes.  Label-column links remain
+        # user-owned and are still covered by the preservation contract.
+        return row >= 2 and col in set(_stats1_market_columns(ws).values())
+
+    if ws.title == SYMBOLS_SHEET:
+        headers = _instrument_averages_header_map(ws)
+        recommendation_columns = {
+            value
+            for value in (
+                headers.get(STOP_RECOMMENDATION_HEADER),
+                headers.get(TARGET_RECOMMENDATION_HEADER),
+            )
+            if value is not None
+        }
+        return (
+            row >= _instrument_averages_data_start_row(ws)
+            and col in recommendation_columns
+        )
+
+    if ws.title == TRADE_LOG_SHEET:
+        headers = _trade_log_header_map(ws)
+        recommendation_columns = {
+            value
+            for value in (
+                headers.get(STOP_RECOMMENDATION_HEADER),
+                headers.get(TARGET_RECOMMENDATION_HEADER),
+            )
+            if value is not None
+        }
+        return (
+            row >= _trade_log_data_start_row(ws)
+            and col in recommendation_columns
+        )
+
+    return False
+
+
+def _is_generator_owned_comment_cell(ws, row: int, col: int) -> bool:
+    if ws.title != STATS2_SHEET:
+        return False
+    for header_row in range(max(1, row - 8), row):
+        if (
+            str(ws.cell(header_row, col).value or "").strip().casefold()
+            != "risk of ruin"
+        ):
+            continue
+        row_headers = {
+            str(ws.cell(header_row, candidate_col).value or "")
+            .strip()
+            .casefold()
+            for candidate_col in range(1, ws.max_column + 1)
+        }
+        if {"account", "balance", "currency"}.issubset(row_headers):
+            return True
+    return False
+
+
+def _comment_preservation_value(comment) -> Dict[str, Any]:
+    return {
+        "text": comment.text,
+        "author": comment.author,
+        "height": comment.height,
+        "width": comment.width,
+    }
+
+
+def _hyperlink_preservation_value(hyperlink) -> Dict[str, Any]:
+    return {
+        # OOXML consumers treat percent-encoded and literal spaces in an
+        # internal relationship target equivalently.
+        "target": unquote(
+            str(getattr(hyperlink, "target", "") or "")
+        ).replace("\\", "/"),
+        "location": str(getattr(hyperlink, "location", "") or ""),
+        "display": str(getattr(hyperlink, "display", "") or ""),
+        "tooltip": str(getattr(hyperlink, "tooltip", "") or ""),
+    }
+
+
+def _trade_log_annotation_contract(ws) -> Dict[str, Any]:
+    headers = _trade_log_header_map(ws)
+    row_id_col = headers.get("Row ID")
+    if not row_id_col:
+        return {"row_ids": [], "records_by_row_id": {}}
+    header_by_col = {col: header for header, col in headers.items() if header}
+    records_by_row_id: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for row in range(_trade_log_data_start_row(ws), ws.max_row + 1):
+        row_id = str(ws.cell(row, row_id_col).value or "").strip()
+        if not row_id:
+            continue
+        record: Dict[str, Dict[str, Any]] = {
+            "comments": {},
+            "formulas": {},
+            "hyperlinks": {},
+        }
+        for col in range(1, ws.max_column + 1):
+            cell = ws.cell(row, col)
+            header = header_by_col.get(col, f"column:{col}")
+            if cell.comment is not None:
+                record["comments"][header] = _comment_preservation_value(
+                    cell.comment
+                )
+            if cell.data_type == "f" or (
+                isinstance(cell.value, str) and cell.value.startswith("=")
+            ):
+                record["formulas"][header] = _contract_cell_value(cell.value)
+            hyperlink = getattr(cell, "hyperlink", None)
+            if (
+                hyperlink is not None
+                and not _is_generator_owned_hyperlink_cell(ws, row, col)
+            ):
+                record["hyperlinks"][header] = (
+                    _hyperlink_preservation_value(hyperlink)
+                )
+        records_by_row_id[row_id].append(record)
+    return {
+        "row_ids": sorted(records_by_row_id),
+        "records_by_row_id": {
+            row_id: sorted(
+                records,
+                key=lambda item: json.dumps(item, sort_keys=True, default=str),
+            )
+            for row_id, records in sorted(records_by_row_id.items())
+        },
+    }
+
+
+def _stats1_schema_is_canonical(ws) -> bool:
+    labels = [
+        str(ws.cell(row, 1).value or "").strip().casefold()
+        for row in range(1, ws.max_row + 1)
+        if str(ws.cell(row, 1).value or "").strip()
+    ]
+    required = {
+        "avg winning trade duration",
+        "avg losing trade duration",
+        "average move to break even",
+        "average move to profit",
+        "commission",
+        "drawdown",
+    }
+    return (
+        "source" not in labels
+        and required.issubset(labels)
+        and labels.count("recommendation") == 2
+    )
+
+
+def _workbook_preservation_contract(wb) -> Dict[str, Any]:
+    """Snapshot user-owned state that preservation mode must not mutate.
+
+    Statistics value/fill formats and report border groups are intentionally
+    absent: those are generator-owned by the semantic repair.  STATS1 label
+    typography and every STATS1 border edge are explicitly retained.
+    """
+    active = wb.active
+    workbook_views = [
+        _contract_xml(view)
+        for view in (getattr(wb, "views", None) or [])
+    ]
+    contract: Dict[str, Any] = {
+        "sheet_order": list(wb.sheetnames),
+        "active_sheet": active.title if active is not None else None,
+        "selected_sheets": [
+            ws.title
+            for ws in wb.worksheets
+            if bool(getattr(ws.sheet_view, "tabSelected", False))
+        ],
+        "workbook_views": workbook_views,
+        "sheets": {},
+        "formulas": {},
+        "unmanaged_values": {},
+        "comments": {},
+        "hyperlinks": {},
+        "trade_log_annotations": {
+            "row_ids": [],
+            "records_by_row_id": {},
+        },
+        "stats1_schema_canonical": False,
+    }
+    for ws in wb.worksheets:
+        trade_log_annotation_rows: Set[int] = set()
+        if ws.title == TRADE_LOG_SHEET:
+            contract["trade_log_annotations"] = (
+                _trade_log_annotation_contract(ws)
+            )
+            row_id_col = _trade_log_header_map(ws).get("Row ID")
+            if row_id_col:
+                trade_log_annotation_rows = {
+                    row
+                    for row in range(
+                        _trade_log_data_start_row(ws),
+                        ws.max_row + 1,
+                    )
+                    if str(ws.cell(row, row_id_col).value or "").strip()
+                }
+        contract["sheets"][ws.title] = {
+            "state": ws.sheet_state,
+            "merged": sorted(str(item) for item in ws.merged_cells.ranges),
+            "freeze": str(ws.freeze_panes or ""),
+            "column_dimensions": {
+                str(key): _dimension_contract(dimension, column=True)
+                for key, dimension in sorted(ws.column_dimensions.items())
+            },
+            "row_dimensions": _row_dimensions_preservation_contract(ws),
+            # The terminal row of a Trade Log filter may legitimately grow or
+            # shrink with the managed data.  Its header/column footprint may not.
+            "auto_filter": _auto_filter_layout_signature(ws),
+            "data_validations": _contract_xml(ws.data_validations),
+            "manual_conditional_formatting": _conditional_formatting_contract(ws),
+            "views": _contract_xml(ws.views),
+            "sheet_properties": _contract_xml(ws.sheet_properties),
+            "sheet_format": _contract_xml(ws.sheet_format),
+            "page_margins": _contract_xml(ws.page_margins),
+            "page_setup": _contract_xml(ws.page_setup),
+            "print_options": _contract_xml(ws.print_options),
+            "print_area": str(ws.print_area or ""),
+            "print_title_rows": str(ws.print_title_rows or ""),
+            "print_title_cols": str(ws.print_title_cols or ""),
+        }
+        formulas: Dict[str, Any] = {}
+        unmanaged_values: Dict[str, Any] = {}
+        comments: Dict[str, Any] = {}
+        hyperlinks: Dict[str, Any] = {}
+        for (row, col), cell in sorted(ws._cells.items()):
+            coordinate = f"{get_column_letter(col)}{row}"
+            if (
+                (
+                    cell.data_type == "f"
+                    or (
+                        isinstance(cell.value, str)
+                        and cell.value.startswith("=")
+                    )
+                )
+                and row not in trade_log_annotation_rows
+            ):
+                formulas[coordinate] = _contract_cell_value(cell.value)
+            if (
+                not _is_managed_derived_sheet(ws.title)
+                and cell.value not in (None, "")
+            ):
+                unmanaged_values[coordinate] = _contract_cell_value(cell.value)
+            if (
+                cell.comment is not None
+                and not _is_generator_owned_comment_cell(ws, row, col)
+                and row not in trade_log_annotation_rows
+            ):
+                comments[coordinate] = _comment_preservation_value(cell.comment)
+            hyperlink = getattr(cell, "hyperlink", None)
+            if (
+                hyperlink is not None
+                and not _is_generator_owned_hyperlink_cell(
+                    ws,
+                    row,
+                    col,
+                )
+                and row not in trade_log_annotation_rows
+            ):
+                hyperlinks[coordinate] = _hyperlink_preservation_value(
+                    hyperlink
+                )
+        if formulas:
+            contract["formulas"][ws.title] = formulas
+        if unmanaged_values:
+            contract["unmanaged_values"][ws.title] = unmanaged_values
+        if comments:
+            contract["comments"][ws.title] = comments
+        if hyperlinks:
+            contract["hyperlinks"][ws.title] = hyperlinks
+
+    if STATS1_SHEET in wb.sheetnames:
+        stats1 = wb[STATS1_SHEET]
+        contract["stats1_schema_canonical"] = (
+            _stats1_schema_is_canonical(stats1)
+        )
+        contract["stats1_row_labels"] = {
+            str(row): {
+                "value": _contract_cell_value(stats1.cell(row, 1).value),
+                "font": _contract_xml(stats1.cell(row, 1).font),
+                "alignment": _contract_xml(stats1.cell(row, 1).alignment),
+            }
+            for row in range(1, stats1.max_row + 1)
+            if stats1.cell(row, 1).value not in (None, "")
+        }
+        contract["stats1_borders"] = {
+            f"{get_column_letter(col)}{row}": _contract_xml(
+                stats1.cell(row, col).border
+            )
+            for row in range(1, stats1.max_row + 1)
+            for col in range(1, min(4, stats1.max_column) + 1)
+        }
+    return contract
+
+
+def _contract_sha256(contract: Mapping[str, Any]) -> str:
+    payload = json.dumps(
+        contract,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _assert_trade_log_annotations_preserved(
+    before: Mapping[str, Any],
+    after: Mapping[str, Any],
+) -> None:
+    before_contract = before.get("trade_log_annotations") or {}
+    after_contract = after.get("trade_log_annotations") or {}
+    after_row_ids = set(after_contract.get("row_ids") or [])
+    before_records = before_contract.get("records_by_row_id") or {}
+    after_records = after_contract.get("records_by_row_id") or {}
+    changes = []
+
+    def contains_annotations(candidate: Mapping[str, Any], source: Mapping[str, Any]) -> bool:
+        for kind in ("comments", "formulas", "hyperlinks"):
+            candidate_items = candidate.get(kind) or {}
+            for header, value in (source.get(kind) or {}).items():
+                if candidate_items.get(header) != value:
+                    return False
+        return True
+
+    for row_id, source_records in before_records.items():
+        if row_id not in after_row_ids:
+            continue
+        candidate_records = list(after_records.get(row_id) or [])
+        used: Set[int] = set()
+        for source_record in source_records:
+            if not any(
+                source_record.get(kind)
+                for kind in ("comments", "formulas", "hyperlinks")
+            ):
+                continue
+            matching_index = next(
+                (
+                    index
+                    for index, candidate in enumerate(candidate_records)
+                    if index not in used
+                    and contains_annotations(candidate, source_record)
+                ),
+                None,
+            )
+            if matching_index is None:
+                changes.append(
+                    (row_id, source_record, candidate_records)
+                )
+            else:
+                used.add(matching_index)
+
+    if changes:
+        preview = changes[:20]
+        remainder = len(changes) - len(preview)
+        suffix = f" (+{remainder} more)" if remainder else ""
+        raise RuntimeError(
+            "Workbook preservation contract changed Trade Log annotations/formulas "
+            f"for surviving rows: {preview!r}{suffix}."
+        )
+
+
+def _assert_trade_log_row_dimensions_preserved(
+    before_sheet: Mapping[str, Any],
+    after_sheet: Mapping[str, Any],
+    after_row_ids: Set[str],
+) -> None:
+    before_contract = before_sheet.get("row_dimensions") or {}
+    after_contract = after_sheet.get("row_dimensions") or {}
+    before_coordinates = before_contract.get("coordinates") or {}
+    after_coordinates = after_contract.get("coordinates") or {}
+    coordinate_changes = [
+        (
+            coordinate,
+            signature,
+            after_coordinates.get(coordinate),
+        )
+        for coordinate, signature in before_coordinates.items()
+        if after_coordinates.get(coordinate) != signature
+    ]
+    coordinate_changes.extend(
+        [
+            (
+                coordinate,
+                None,
+                after_coordinates.get(coordinate),
+            )
+            for coordinate in set(after_coordinates) - set(before_coordinates)
+            if (
+                not str(coordinate).isdigit()
+                or int(coordinate) < TRADE_LOG_DATA_START_ROW
+            )
+        ]
+    )
+    if coordinate_changes:
+        coordinate_changes.sort(
+            key=lambda item: (
+                not str(item[0]).isdigit(),
+                int(item[0]) if str(item[0]).isdigit() else str(item[0]),
+            )
+        )
+        preview = coordinate_changes[:20]
+        remainder = len(coordinate_changes) - len(preview)
+        suffix = f" (+{remainder} more)" if remainder else ""
+        raise RuntimeError(
+            "Workbook preservation contract changed coordinate-owned Trade "
+            f"Log row dimensions: {preview!r}{suffix}."
+        )
+
+    before_by_id = before_contract.get("data_rows_by_id") or {}
+    after_by_id = after_contract.get("data_rows_by_id") or {}
+    changes = []
+    for row_id, source_signatures in before_by_id.items():
+        if row_id not in after_row_ids:
+            continue
+        candidate_signatures = list(after_by_id.get(row_id) or [])
+        used: Set[int] = set()
+        for signature in source_signatures:
+            matching_index = next(
+                (
+                    index
+                    for index, candidate in enumerate(candidate_signatures)
+                    if index not in used and candidate == signature
+                ),
+                None,
+            )
+            if matching_index is None:
+                changes.append((row_id, signature, candidate_signatures))
+            else:
+                used.add(matching_index)
+    if changes:
+        preview = changes[:20]
+        remainder = len(changes) - len(preview)
+        suffix = f" (+{remainder} more)" if remainder else ""
+        raise RuntimeError(
+            "Workbook preservation contract changed custom Trade Log row "
+            f"dimensions for surviving rows: {preview!r}{suffix}."
+        )
+
+
+def _assert_workbook_preservation_contract(
+    before: Mapping[str, Any],
+    after: Mapping[str, Any],
+) -> None:
+    before_order = list(before.get("sheet_order") or [])
+    after_order = list(after.get("sheet_order") or [])
+    retained_before_order = [
+        name for name in before_order if name != "_Trade Meta"
+    ]
+    existing_after = [
+        name for name in after_order if name in retained_before_order
+    ]
+    if existing_after != retained_before_order:
+        raise RuntimeError(
+            "Workbook preservation contract changed existing sheet order: "
+            f"before={before_order!r}; after={after_order!r}."
+        )
+    unexpected_new = [
+        name
+        for name in after_order
+        if name not in before_order and not _is_managed_derived_sheet(name)
+    ]
+    if unexpected_new:
+        raise RuntimeError(
+            "Workbook preservation contract added unexpected sheets: "
+            f"{unexpected_new!r}."
+        )
+
+    scalar_keys = [
+        "active_sheet", "selected_sheets", "workbook_views", "formulas",
+        "unmanaged_values", "comments", "hyperlinks",
+    ]
+    # Canonical STATS1 is the user's authoritative presentation and must be
+    # identical.  Historical Source-row schemas are intentionally compacted by
+    # the existing migration path, so their row coordinates and border edges
+    # cannot be compared before versus after that structural migration.
+    if bool(before.get("stats1_schema_canonical")):
+        scalar_keys.extend(("stats1_row_labels", "stats1_borders"))
+    for key in scalar_keys:
+        if before.get(key) != after.get(key):
+            detail = ""
+            if key in {"comments", "hyperlinks"}:
+                before_links = before.get(key) or {}
+                after_links = after.get(key) or {}
+                changes = []
+                for sheet_name in sorted(set(before_links) | set(after_links)):
+                    sheet_before = before_links.get(sheet_name) or {}
+                    sheet_after = after_links.get(sheet_name) or {}
+                    for coordinate in sorted(
+                        set(sheet_before) | set(sheet_after)
+                    ):
+                        if sheet_before.get(coordinate) != sheet_after.get(coordinate):
+                            changes.append(
+                                (
+                                    sheet_name,
+                                    coordinate,
+                                    sheet_before.get(coordinate),
+                                    sheet_after.get(coordinate),
+                                )
+                            )
+                preview = changes[:20]
+                remainder = len(changes) - len(preview)
+                suffix = f" (+{remainder} more)" if remainder else ""
+                detail = f" at {preview!r}{suffix}"
+            elif key == "stats1_row_labels":
+                before_labels = before.get(key) or {}
+                after_labels = after.get(key) or {}
+                changes = [
+                    (
+                        row,
+                        before_labels.get(row),
+                        after_labels.get(row),
+                    )
+                    for row in sorted(
+                        set(before_labels) | set(after_labels),
+                        key=lambda value: (
+                            not str(value).isdigit(),
+                            int(value) if str(value).isdigit() else str(value),
+                        ),
+                    )
+                    if before_labels.get(row) != after_labels.get(row)
+                ]
+                preview = changes[:20]
+                remainder = len(changes) - len(preview)
+                suffix = f" (+{remainder} more)" if remainder else ""
+                detail = f" at {preview!r}{suffix}"
+            raise RuntimeError(
+                f"Workbook preservation contract changed {key}{detail}."
+            )
+    _assert_trade_log_annotations_preserved(before, after)
+    before_sheets = before.get("sheets") or {}
+    after_sheets = after.get("sheets") or {}
+    for sheet_name, sheet_before in before_sheets.items():
+        sheet_after = after_sheets.get(sheet_name)
+        if sheet_name == "_Trade Meta" and sheet_after is None:
+            continue
+        comparable_before = dict(sheet_before)
+        comparable_after = dict(sheet_after or {})
+        if sheet_name == TRADE_LOG_SHEET:
+            _assert_trade_log_row_dimensions_preserved(
+                sheet_before,
+                sheet_after or {},
+                set(
+                    (
+                        after.get("trade_log_annotations") or {}
+                    ).get("row_ids")
+                    or []
+                ),
+            )
+            comparable_before.pop("row_dimensions", None)
+            comparable_after.pop("row_dimensions", None)
+            before_filter = comparable_before.get("auto_filter")
+            after_filter = comparable_after.get("auto_filter")
+            if (
+                before_filter != after_filter
+                and not _trade_log_auto_filter_signature_is_acceptable(
+                    before_filter
+                )
+                and _trade_log_auto_filter_signature_is_canonical(
+                    after_filter
+                )
+            ):
+                comparable_before["auto_filter"] = after_filter
+        if comparable_after != comparable_before:
+            changed = sorted(
+                key
+                for key in set(comparable_before) | set(comparable_after)
+                if comparable_before.get(key) != comparable_after.get(key)
+            )
+            raise RuntimeError(
+                "Workbook preservation contract changed user-owned layout on "
+                f"{sheet_name}: {changed!r}."
+            )
+
+
+def _managed_statistics_presentation_contract(wb) -> Dict[str, Any]:
+    """Fingerprint generator-owned metric formats/fills and report borders."""
+    contract: Dict[str, Any] = {}
+    if STATS1_SHEET in wb.sheetnames:
+        ws = wb[STATS1_SHEET]
+        market_cols = _stats1_market_columns(ws)
+        policies = _stats1_semantic_row_policies(ws)
+        contract[STATS1_SHEET] = {
+            f"{get_column_letter(col)}{row}": {
+                "kind": policies[row][0],
+                "semantic": policies[row][1],
+                "number_format": ws.cell(row, col).number_format,
+                "fill": _contract_xml(ws.cell(row, col).fill),
+                "font": _contract_xml(ws.cell(row, col).font),
+            }
+            for row in sorted(policies)
+            for col in sorted(market_cols.values())
+        }
+    for sheet_name in wb.sheetnames:
+        if not (
+            sheet_name == REPORT_YEARLY_SHEET
+            or (sheet_name.isdigit() and int(sheet_name) >= REPORT_START_YEAR)
+        ):
+            continue
+        ws = wb[sheet_name]
+        rows = _report_spec_rows(ws)
+        report_contract: Dict[str, Any] = {}
+        for row, (_label, _key, kind, semantic) in rows:
+            for col in range(2, ws.max_column + 1):
+                cell = ws.cell(row, col)
+                report_contract[f"{get_column_letter(col)}{row}"] = {
+                    "kind": kind,
+                    "semantic": _effective_semantic_fill(kind, semantic),
+                    "number_format": cell.number_format,
+                    "fill": _contract_xml(cell.fill),
+                    "font": _contract_xml(cell.font),
+                }
+        trailing_rows = _report_trailing_blank_rows(ws)
+        for row in trailing_rows:
+            for col in range(1, ws.max_column + 1):
+                cell = ws.cell(row, col)
+                report_contract[f"{get_column_letter(col)}{row}"] = {
+                    "kind": "trailing_blank",
+                    "semantic": None,
+                    "number_format": cell.number_format,
+                    "fill": _contract_xml(cell.fill),
+                    "font": _contract_xml(cell.font),
+                }
+        last_contract_row = max(
+            [r for r, _spec in rows] + trailing_rows,
+            default=0,
+        )
+        report_contract["__borders__"] = {
+            f"{get_column_letter(col)}{row}": _contract_xml(
+                ws.cell(row, col).border
+            )
+            for row in range(1, last_contract_row + 1)
+            for col in range(1, ws.max_column + 1)
+        }
+        contract[sheet_name] = report_contract
+    return contract
 
 
 def _snapshot_trade_log_data_presentations_by_row_id(
@@ -14609,6 +15905,15 @@ def update_master_journal_workbook_data_only(
         )
     wb = load_workbook(path, keep_links=False)
     diagnostics: Dict[str, Any] = {"missing_accounts": [], "updated_cells": 0}
+    source_preservation_contract = (
+        _workbook_preservation_contract(wb)
+        if preserve_existing_layout
+        else {}
+    )
+    if source_preservation_contract:
+        diagnostics["preservation_contract_source_sha256"] = (
+            _contract_sha256(source_preservation_contract)
+        )
     preserved_layout = {
         ws.title: {
             "column_widths": {
@@ -14632,6 +15937,12 @@ def update_master_journal_workbook_data_only(
                 coordinate: {
                     "value": cell.value,
                     "style": copy(cell._style),
+                    "font": copy(cell.font),
+                    "fill": copy(cell.fill),
+                    "border": copy(cell.border),
+                    "alignment": copy(cell.alignment),
+                    "number_format": cell.number_format,
+                    "protection": copy(cell.protection),
                     "hyperlink": copy(getattr(cell, "hyperlink", None)),
                     "comment": copy(getattr(cell, "comment", None)),
                 }
@@ -15560,7 +16871,12 @@ def update_master_journal_workbook_data_only(
             return {"ok": False, "error": f"Unrepaired crypto zero-quantity trade rows detected: {sample}", "diagnostics": diagnostics}
 
         _apply_dashboard_requested_semantic_fills(dash)
-        _repair_stats1_formatting(dash, extended_metrics, diagnostics)
+        _repair_stats1_formatting(
+            dash,
+            extended_metrics,
+            diagnostics,
+            preserve_user_presentation=preserve_existing_layout,
+        )
         _repair_legacy_duration_number_formats(wb, diagnostics)
 
         tmp = path.with_suffix(".update.tmp.xlsx")
@@ -15924,6 +17240,26 @@ def update_master_journal_workbook_data_only(
                     ws.unmerge_cells(extra)
                 for missing in sorted(wanted_merges - current_merges):
                     ws.merge_cells(missing)
+                stats1_managed_rows: set[int] = set()
+                stats1_last_managed_col = 0
+                report_managed_rows: set[int] = set()
+                if sheet_name == STATS1_SHEET:
+                    stats1_managed_rows = set(
+                        _stats1_semantic_row_policies(ws)
+                    )
+                    stats1_last_managed_col = max(
+                        _stats1_market_columns(ws).values(),
+                        default=4,
+                    )
+                elif sheet_name == REPORT_YEARLY_SHEET or (
+                    sheet_name.isdigit() and int(sheet_name) >= REPORT_START_YEAR
+                ):
+                    report_managed_rows = {
+                        row for row, _spec in _report_spec_rows(ws)
+                    }
+                    report_managed_rows.update(
+                        _report_trailing_blank_rows(ws)
+                    )
                 for coordinate, presentation in layout[
                     "cell_presentations"
                 ].items():
@@ -15933,7 +17269,27 @@ def update_master_journal_workbook_data_only(
                             row=coordinate[0],
                             column=coordinate[1],
                         )
-                    cell._style = copy(presentation["style"])
+                    managed_statistics_cell = False
+                    if sheet_name == STATS1_SHEET and coordinate[0] >= 2:
+                        managed_statistics_cell = (
+                            coordinate[0] in stats1_managed_rows
+                            and coordinate[1] <= stats1_last_managed_col
+                        )
+                    elif (
+                        sheet_name == REPORT_YEARLY_SHEET
+                        or (sheet_name.isdigit() and int(sheet_name) >= REPORT_START_YEAR)
+                    ) and coordinate[0] >= 2:
+                        managed_statistics_cell = coordinate[0] in report_managed_rows
+
+                    if managed_statistics_cell:
+                        # User-owned presentation survives, while number formats
+                        # and semantic fills remain generator-owned.
+                        cell.font = copy(presentation["font"])
+                        cell.border = copy(presentation["border"])
+                        cell.alignment = copy(presentation["alignment"])
+                        cell.protection = copy(presentation["protection"])
+                    else:
+                        cell._style = copy(presentation["style"])
                     if (
                         not isinstance(cell, MergedCell)
                         and cell.value == presentation["value"]
@@ -15977,6 +17333,13 @@ def update_master_journal_workbook_data_only(
                             )
                         ):
                             cell.comment = None
+            _sanitize_dashboard_semantic_conditional_formatting(dash)
+            _apply_stats1_semantic_formatting(
+                dash,
+                extended_metrics,
+                diagnostics,
+            )
+            _apply_report_workbook_semantic_presentation(wb, diagnostics)
         if preserve_existing_layout:
             trade_log = _get_all_trades_sheet(wb, allow_legacy=False)
             diagnostics.update(
@@ -16037,7 +17400,8 @@ def update_master_journal_workbook_data_only(
             _apply_workbook_left_alignment(wb)
             _repair_stats1_child_label_styles(dash, diagnostics)
             _repair_stats2_as_of_datetime_style(wb, diagnostics)
-        _normalize_generated_statistics_row_heights(wb)
+        if not preserve_existing_layout:
+            _normalize_generated_statistics_row_heights(wb)
         _normalize_generated_duration_text(wb)
         if preserve_existing_layout:
             _apply_workbook_calculation_signature(
@@ -16061,6 +17425,31 @@ def update_master_journal_workbook_data_only(
                 raise RuntimeError(
                     "Master Journal calculation settings changed during preservation update."
                 )
+            candidate_wb = load_workbook(
+                candidate,
+                data_only=False,
+                keep_links=False,
+            )
+            try:
+                candidate_preservation_contract = (
+                    _workbook_preservation_contract(candidate_wb)
+                )
+                _assert_workbook_preservation_contract(
+                    source_preservation_contract,
+                    candidate_preservation_contract,
+                )
+                managed_presentation_contract = (
+                    _managed_statistics_presentation_contract(candidate_wb)
+                )
+                diagnostics["preservation_contract_candidate_sha256"] = (
+                    _contract_sha256(candidate_preservation_contract)
+                )
+                diagnostics["managed_statistics_presentation_sha256"] = (
+                    _contract_sha256(managed_presentation_contract)
+                )
+                diagnostics["preservation_contract_verified"] = True
+            finally:
+                candidate_wb.close()
         if publish_recommendation_assets:
             diagnostics["recommendation_chart_asset_directory"] = str(
                 _publish_recommendation_chart_bundle(chart_bundle)

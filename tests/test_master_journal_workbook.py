@@ -19,6 +19,7 @@ from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.worksheet.formula import ArrayFormula
 from openpyxl.worksheet.views import Selection
 import pytest
+import tools.master_journal_workbook as mjw
 from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, read_master_journal_source, update_master_journal_workbook_data_only, SHEET_ORDER, STATS1_SHEET, STATS2_SHEET, SYMBOLS_SHEET, TARGET_R_METADATA_SHEET, TRADE_LOG_HEADERS, TRADE_LOG_HEADERS_V1, OLD_TRADE_LOG_HEADERS, PRE_MOVE_TRADE_LOG_HEADERS, MOVE_TO_FIELD_MAP, TRADE_LOG_HEADER_ROWS, TRADE_LOG_DATA_START_ROW, TRADE_LOG_DATA_ROW_HEIGHT, TRADE_LOG_FILTER_HEADER_ROW, TRADE_NUMBER_HEADER, STOP_RECOMMENDATION_HEADER, TARGET_RECOMMENDATION_HEADER, TARGET_RECOMMENDATION_INSUFFICIENT, REPORT_YEARLY_SHEET, REPORT_METRIC_LABELS, INSTRUMENT_AVERAGES_HEADERS, INSTRUMENT_AVERAGES_GROUP_HEADER_ROW, INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, INSTRUMENT_AVERAGES_DATA_START_ROW, DASHBOARD_MOVE_TO_BREAK_EVEN_LABEL, DASHBOARD_MOVE_TO_PROFIT_LABEL, PROFIT_FILL, LOSS_FILL, DURATION_NUMBER_FORMAT, adaptive_percent_number_format, adaptive_number_format, resolve_trade_folder_link, expected_report_sheet_names, _apply_trade_number_hyperlinks, _ensure_trade_log_schema, _ensure_instrument_averages_schema, _ensure_symbols_freeze_panes, _ensure_pnl_calendar_freeze_panes, _repair_trade_log_move_to_durations, _trade_log_header_map, _instrument_averages_header_map, _result_percentage_totals_by_market
 from tools.master_journal_workbook import _format_duration_display, _parse_duration_text, _repair_legacy_duration_number_formats, _populate_symbols_metrics_preserving_layout, _repair_symbols_header_merges_preserving_layout
 from tools.master_journal_workbook import RECOMMENDATION_TRADE_LOG_HEADERS, _trade_log_three_row_header_values_for
@@ -675,9 +676,13 @@ def test_data_only_refresh_preserves_exact_sheet_views(tmp_path: Path) -> None:
         )
         for ws in persisted.worksheets
     }
-    expected_stats_style = copy(
-        persisted[STATS1_SHEET]["C7"]._style
-    )
+    persisted_stats_cell = persisted[STATS1_SHEET]["C7"]
+    expected_stats_user_style = {
+        "font": copy(persisted_stats_cell.font),
+        "border": copy(persisted_stats_cell.border),
+        "alignment": copy(persisted_stats_cell.alignment),
+        "protection": copy(persisted_stats_cell.protection),
+    }
     persisted_trade_log = persisted["Trade Log"]
     persisted_trade_number_cell = persisted_trade_log.cell(
         TRADE_LOG_DATA_START_ROW,
@@ -728,7 +733,7 @@ def test_data_only_refresh_preserves_exact_sheet_views(tmp_path: Path) -> None:
         for ws in refreshed.worksheets
         if ws.title in expected_sheet_formats
     }
-    actual_stats_style = refreshed[STATS1_SHEET]["C7"]._style
+    actual_stats_cell = refreshed[STATS1_SHEET]["C7"]
     changed_cell = refreshed[STATS1_SHEET]["B3"]
     refreshed_trade_log = refreshed["Trade Log"]
     refreshed_trade_number_cell = refreshed_trade_log.cell(
@@ -743,7 +748,11 @@ def test_data_only_refresh_preserves_exact_sheet_views(tmp_path: Path) -> None:
     assert actual_conditional_formatting == expected_conditional_formatting
     assert actual_data_validations == expected_data_validations
     assert actual_sheet_formats == expected_sheet_formats
-    assert actual_stats_style == expected_stats_style
+    assert actual_stats_cell.font == expected_stats_user_style["font"]
+    assert actual_stats_cell.border == expected_stats_user_style["border"]
+    assert actual_stats_cell.alignment == expected_stats_user_style["alignment"]
+    assert actual_stats_cell.protection == expected_stats_user_style["protection"]
+    assert actual_stats_cell.number_format == "0.00%"
     assert actual_hyperlink == expected_hyperlink
     assert actual_comment == expected_comment
     assert changed_cell.value != -999
@@ -1515,7 +1524,7 @@ def test_dashboard_manual_move_rows_survive_and_populate_by_label(tmp_path: Path
     assert dash["B3"].value == "2H 0M 0S"
     assert dash["D3"].value == "2H 0M 0S"
     assert dash["B4"].value == 1 and dash["D4"].value == 1
-    assert str(dash["A2"].fill.fgColor.rgb).endswith("ABCDEF")
+    assert dash["A2"].fill.patternType is None
     assert dash["A2"].font.bold is True
     assert dash["A2"].border.bottom.style == "thick"
     assert dash["A2"].alignment.horizontal == "left"
@@ -1705,7 +1714,7 @@ def test_sheet_order_and_hidden_meta(tmp_path: Path):
     assert wb.sheetnames[:len(SHEET_ORDER)] == SHEET_ORDER
     assert _sheetnames_without_target_r_metadata(wb)[len(SHEET_ORDER):] == expected_report_sheet_names(sample_snapshot())
     assert '_Trade Meta' not in wb.sheetnames
-    assert len(wb[STATS1_SHEET].conditional_formatting) > 0
+    assert len(wb[STATS1_SHEET].conditional_formatting) == 0
     assert len(wb[SYMBOLS_SHEET].conditional_formatting) > 0
     assert len(wb["P&L Calendar"].conditional_formatting) == 0
     assert _cell_fill_rgb(_calendar_month_cell(wb["P&L Calendar"], 2026, "May")) == PROFIT_FILL
@@ -4356,12 +4365,12 @@ def test_checked_in_trading_journal_preserves_canonical_sheet_and_chart_layout()
         ]
         assert len(wb.sheetnames) == 16
         assert "Equity Curve" not in wb.sheetnames
-        assert wb.active.title == REPORT_YEARLY_SHEET
+        assert wb.active.title == STATS1_SHEET
         assert [
             ws.title
             for ws in wb.worksheets
             if ws.sheet_view.tabSelected
-        ] == [REPORT_YEARLY_SHEET]
+        ] == [STATS1_SHEET]
         assert len(wb[" SIM"]._charts) == 2
         assert sum(len(ws._charts) for ws in wb.worksheets) == 2
     finally:
@@ -4421,27 +4430,7 @@ def test_preserve_layout_refresh_removes_acf31f4_unused_external_link(
     Path(second_result["candidate_path"]).replace(path)
     after = _canonical_preservation_signature(path)
     for key, expected in normalized.items():
-        if key == "row_dimensions":
-            continue
         assert after[key] == expected, key
-
-    wb = load_workbook(path, data_only=False, keep_links=False)
-    try:
-        for sheet_name in (
-            STATS1_SHEET,
-            REPORT_YEARLY_SHEET,
-            *[str(year) for year in range(2018, 2027)],
-        ):
-            ws = wb[sheet_name]
-            for row in range(2, ws.max_row + 1):
-                if not any(
-                    ws.cell(row, col).value not in (None, "")
-                    for col in range(1, ws.max_column + 1)
-                ):
-                    continue
-                assert ws.row_dimensions[row].height == pytest.approx(14.5)
-    finally:
-        wb.close()
 
 
 def test_external_dependency_guard_rejects_formula_name_and_chart(
@@ -4724,7 +4713,7 @@ def test_dashboard_market_risk_cells_and_grey_no_metric_cells(tmp_path: Path):
     assert d.cell(winners_stop, 3).value == pytest.approx(0.015)
     assert d.cell(winners_stop, 4).value in (None, "")
     assert d.cell(winners_stop, 3).number_format == "0.00%"
-    assert d.cell(winners_stop, 4).number_format != "0.00%"
+    assert d.cell(winners_stop, 4).number_format == "0.00%"
     assert d.cell(winners_r, 3).value == pytest.approx(1.5)
     assert d.cell(winners_r, 4).value == pytest.approx(2.5)
     assert d.cell(winners_r, 3).number_format == '0.000"R"'
@@ -5756,7 +5745,11 @@ def test_dashboard_trade_log_and_pnl_calendar_loss_profit_fills_match(tmp_path: 
     trade = wb["Trade Log"]
     cal = wb["P&L Calendar"]
 
-    dashboard_fills = {fill for _range, _formula, fill in _cf_rule_details(dash) if fill}
+    dashboard_fills = {
+        _cell_fill_rgb(dash.cell(row, col))
+        for row in range(1, dash.max_row + 1)
+        for col in range(1, dash.max_column + 1)
+    }
     assert "FFC7CE" in dashboard_fills
     assert "C6EFCE" in dashboard_fills
 
@@ -8366,3 +8359,680 @@ def test_incremental_workbook_candidate_validation_failure_is_atomic(
 
     assert path.read_bytes() == before_bytes
     assert list(tmp_path.glob(".*.incremental-*.tmp.xlsx")) == []
+
+
+def _font_alignment_signature(cell):
+    return (
+        mjw._contract_xml(cell.font),
+        mjw._contract_xml(cell.alignment),
+    )
+
+
+def _workbook_semantic_idempotence_fingerprint(path: Path) -> str:
+    wb = load_workbook(path, data_only=False, keep_links=False)
+    try:
+        values = {
+            ws.title: {
+                f"{get_column_letter(col)}{row}": mjw._contract_cell_value(
+                    cell.value
+                )
+                for (row, col), cell in sorted(ws._cells.items())
+                if cell.value not in (None, "")
+            }
+            for ws in wb.worksheets
+        }
+        report_label_presentation = {
+            ws.title: {
+                str(row): {
+                    "font": mjw._contract_xml(ws.cell(row, 1).font),
+                    "alignment": mjw._contract_xml(
+                        ws.cell(row, 1).alignment
+                    ),
+                    "fill": mjw._contract_xml(ws.cell(row, 1).fill),
+                }
+                for row, _spec in mjw._report_spec_rows(ws)
+            }
+            for ws in wb.worksheets
+            if ws.title == REPORT_YEARLY_SHEET
+            or (ws.title.isdigit() and int(ws.title) >= 2018)
+        }
+        payload = {
+            "preservation": mjw._workbook_preservation_contract(wb),
+            "managed_statistics": (
+                mjw._managed_statistics_presentation_contract(wb)
+            ),
+            "values": values,
+            "report_label_presentation": report_label_presentation,
+        }
+    finally:
+        wb.close()
+    chart_snapshot = mjw._snapshot_chart_ooxml(path)
+    payload["charts"] = {
+        "parts": {
+            name: hashlib.sha256(content).hexdigest()
+            for name, content in chart_snapshot["parts"].items()
+        },
+        "relationships": list(chart_snapshot["relationships"]),
+    }
+    return hashlib.sha256(
+        json.dumps(
+            payload,
+            sort_keys=True,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def test_recommendation_svg_and_html_bounds_scale_inside_wide_and_narrow_views():
+    observations = [
+        {
+            "label": "EURUSD 2026-01-01 t1",
+            "symbol": "EURUSD",
+            "date": "2026-01-01",
+            "id": "t1",
+            "outcome": "winner",
+            "value": 0.00123456,
+            "context": "original stop distance",
+        },
+        {
+            "label": "BTCUSDT 2026-01-02 t2",
+            "symbol": "BTCUSDT",
+            "date": "2026-01-02",
+            "id": "t2",
+            "outcome": "loser",
+            "value": 12.98765432,
+            "context": "original stop distance",
+        },
+        {
+            "label": "XAUUSD 2026-01-03 t3",
+            "symbol": "XAUUSD",
+            "date": "2026-01-03",
+            "id": "t3",
+            "outcome": "winner",
+            "value": 6.25,
+            "context": "original stop distance",
+        },
+    ]
+    payload = {
+        STOP_RECOMMENDATION_HEADER: "Decrease stop — Recommended: 5.25%",
+        "stop_loss_recommended_pct": 5.25,
+        "eligible_stop_loss_wins": 2,
+        "eligible_stop_loss_losses": 1,
+        "stop_loss_excluded_reasons": {},
+    }
+    html = mjw._recommendation_chart_html(
+        scope_label="Overall",
+        metric="stop",
+        payload=payload,
+        observations=observations,
+        excluded=[],
+    )
+    svg_match = re.search(r"(<svg\b.*?</svg>)", html, re.DOTALL)
+    assert svg_match is not None
+    root = ET.fromstring(svg_match.group(1))
+    min_x, min_y, width, height = map(float, root.attrib["viewBox"].split())
+    max_x, max_y = min_x + width, min_y + height
+    plot_left = float(root.attrib["data-plot-left"])
+    plot_right = float(root.attrib["data-plot-right"])
+    plot_top = float(root.attrib["data-plot-top"])
+    plot_bottom = float(root.attrib["data-plot-bottom"])
+    assert (plot_left, plot_right, plot_top, plot_bottom) == (
+        118.0,
+        996.0,
+        48.0,
+        416.0,
+    )
+
+    computed_bounds = []
+    for element in root.iter():
+        role = element.attrib.get("data-role")
+        if role == "plot-border":
+            x = float(element.attrib["x"])
+            y = float(element.attrib["y"])
+            computed_bounds.append(
+                (
+                    x,
+                    y,
+                    x + float(element.attrib["width"]),
+                    y + float(element.attrib["height"]),
+                    role,
+                )
+            )
+        elif role == "observation":
+            x = float(element.attrib["cx"])
+            y = float(element.attrib["cy"])
+            radius = float(element.attrib["r"])
+            computed_bounds.append(
+                (x - radius, y - radius, x + radius, y + radius, role)
+            )
+        elif role in {
+            "tick-label",
+            "recommendation-label",
+            "x-axis-title",
+            "y-axis-title",
+        }:
+            text_value = "".join(element.itertext())
+            font_size = 11.0 if role == "tick-label" else 13.0
+            text_width = max(font_size * 0.62 * len(text_value), font_size)
+            x = float(element.attrib["x"])
+            y = float(element.attrib["y"])
+            if role == "y-axis-title":
+                computed_bounds.append(
+                    (
+                        x - font_size * 0.65,
+                        y - text_width / 2,
+                        x + font_size * 0.65,
+                        y + text_width / 2,
+                        role,
+                    )
+                )
+            else:
+                anchor = element.attrib.get("text-anchor", "start")
+                left = (
+                    x - text_width
+                    if anchor == "end"
+                    else x - text_width / 2
+                    if anchor == "middle"
+                    else x
+                )
+                computed_bounds.append(
+                    (
+                        left,
+                        y - font_size,
+                        left + text_width,
+                        y + font_size * 0.3,
+                        role,
+                    )
+                )
+
+    assert {bound[4] for bound in computed_bounds} >= {
+        "plot-border",
+        "observation",
+        "tick-label",
+        "recommendation-label",
+        "x-axis-title",
+        "y-axis-title",
+    }
+    for left, top, right, bottom, role in computed_bounds:
+        assert min_x <= left <= right <= max_x, (role, left, right)
+        assert min_y <= top <= bottom <= max_y, (role, top, bottom)
+
+    # CSS scales the complete viewBox, including its margins, at both desktop
+    # and narrow widths.  Recheck every computed bound after that transform.
+    assert re.search(
+        r"\.chart\{[^}]*width:100%;[^}]*max-width:100%;"
+        r"[^}]*height:auto;[^}]*overflow:visible",
+        html,
+    )
+    assert "@media(max-width:600px)" in html
+    for viewport_width, main_padding, section_padding in (
+        (1280.0, 28.0, 16.0),
+        (360.0, 12.0, 10.0),
+    ):
+        rendered_width = viewport_width - 2 * (
+            main_padding + section_padding
+        )
+        scale = rendered_width / width
+        for left, top, right, bottom, role in computed_bounds:
+            assert 0 <= (left - min_x) * scale
+            assert (right - min_x) * scale <= rendered_width, role
+            assert 0 <= (top - min_y) * scale
+            assert (bottom - min_y) * scale <= height * scale, role
+
+    assert "Eligible trade observations (deterministic input order)" in html
+    assert not re.search(r"<(?:script|iframe)\b|\bhttps?://", html)
+
+
+def test_preservation_resync_repairs_semantic_statistics_and_is_idempotent(
+    tmp_path: Path,
+):
+    snapshot = sample_snapshot()
+    snapshot["items"][0].update(
+        commission=0.01,
+        commission_currency="AUD",
+        timeframe="1H",
+        pattern="Channel",
+        analysis_balance_after_trade=1120.5,
+    )
+    snapshot["items"][1].update(
+        open_time="2026-06-02T00:00:00Z",
+        close_time="2026-06-02T02:00:00Z",
+        commission=0.00187644,
+        commission_currency="USDT",
+        timeframe="4H",
+        pattern="Range",
+    )
+    third = dict(snapshot["items"][0])
+    third.update(
+        id="t3",
+        side="SELL",
+        open_time="2026-05-03T00:00:00Z",
+        close_time="2026-05-03T01:30:00Z",
+        net_profit=-120.5,
+        result_pct=-1.5,
+        r_multiple=-0.9,
+        stop_loss=1.11,
+        take_profit=1.08,
+        trade_duration_seconds=5400,
+        analysis_balance_after_trade=1000.0,
+        commission=0.02,
+        commission_currency="AUD",
+        timeframe="5MIN",
+        pattern="Range",
+    )
+    snapshot["items"].append(third)
+
+    path = tmp_path / "Trading Journal.xlsx"
+    build_master_journal_workbook(
+        snapshot,
+        path,
+        publish_recommendation_assets=False,
+    )
+    wb = load_workbook(path)
+    stats1 = wb[STATS1_SHEET]
+
+    # Deliberately mixed, user-authored row-label typography must survive.
+    label_styles = {
+        43: Font(
+            name="Aptos",
+            size=10,
+            bold=False,
+            italic=True,
+            color="FF123456",
+        ),
+        49: Font(
+            name="Calibri",
+            size=12,
+            bold=True,
+            italic=False,
+            color="FF654321",
+        ),
+        84: Font(
+            name="Arial",
+            size=9,
+            bold=False,
+            italic=True,
+            color="FF234567",
+        ),
+    }
+    for index, (row, font) in enumerate(label_styles.items(), start=1):
+        stats1.cell(row, 1).font = font
+        stats1.cell(row, 1).alignment = Alignment(
+            horizontal=("right" if index % 2 else "left"),
+            vertical="center",
+            indent=index,
+        )
+    stats1["A49"].fill = PatternFill("solid", fgColor="FFD9E1F2")
+
+    # Give A26:D29 a distinctive thick outer group and thin interior edges.
+    thick = Side(style="thick", color="FF315A7D")
+    thin = Side(style="thin", color="FF789ABC")
+    for row in range(26, 30):
+        for col in range(1, 5):
+            stats1.cell(row, col).border = Border(
+                left=thick if col == 1 else thin,
+                right=thick if col == 4 else thin,
+                top=thick if row == 26 else thin,
+                bottom=thick if row == 29 else thin,
+            )
+
+    green = PatternFill("solid", fgColor=PROFIT_FILL)
+    red = PatternFill("solid", fgColor=LOSS_FILL)
+    grey = PatternFill("solid", fgColor="FFE5E7EB")
+    white = PatternFill("solid", fgColor="FFFFFFFF")
+    corrupt_rows = set(range(63, 69)) | {43, 46, 49, 55, 76, 78, 79}
+    corrupt_rows |= set(range(84, 90)) | set(range(93, 134))
+    for row in sorted(corrupt_rows):
+        for col in range(2, 5):
+            cell = stats1.cell(row, col)
+            cell.number_format = "0.00%"
+            cell.fill = (
+                green
+                if 63 <= row <= 68
+                else red
+                if 84 <= row <= 89
+                else white
+            )
+            font = copy(cell.font)
+            font.bold = True
+            font.italic = True
+            cell.font = font
+    for coordinate in ("A63", "A84", "A93", "A121", "A126"):
+        stats1[coordinate].fill = grey
+
+    manual_rule = FormulaRule(
+        formula=["E20=5"],
+        fill=PatternFill("solid", fgColor="FFF2CC"),
+    )
+    stats1.conditional_formatting.add("E20", manual_rule)
+    validation = DataValidation(type="list", formula1='"Keep,Manual"')
+    stats1.add_data_validation(validation)
+    validation.add("E20")
+
+    # Exercise preservation of unrelated values, formulas, merges, comments,
+    # hyperlinks, dimensions, active/selected sheets, and report layout.
+    sim_name = "MANUAL"
+    sim = wb.create_sheet(sim_name)
+    sim["N200"] = "manual sentinel"
+    sim["N200"].comment = Comment("keep this comment", "Codex test")
+    sim["N200"].hyperlink = "https://example.invalid/manual-sentinel"
+    sim.merge_cells("N200:O200")
+    sim.column_dimensions["N"].width = 27.25
+    sim.row_dimensions[200].height = 31.5
+    wb.active = wb.sheetnames.index("2021")
+    for sheet in wb.worksheets:
+        sheet.sheet_view.tabSelected = sheet.title == "2021"
+
+    yearly = wb[REPORT_YEARLY_SHEET]
+    yearly.freeze_panes = "B5"
+    yearly.column_dimensions["A"].width = 37.25
+    yearly.row_dimensions[2].height = 23.125
+    report_names = [REPORT_YEARLY_SHEET, *[str(year) for year in range(2018, 2027)]]
+    for sheet_name in report_names:
+        report = wb[sheet_name]
+        for row, _spec in mjw._report_spec_rows(report):
+            report.cell(row, 1).fill = grey
+            for col in range(2, report.max_column + 1):
+                cell = report.cell(row, col)
+                cell.number_format = "0.00%"
+                cell.fill = green
+                font = copy(cell.font)
+                font.bold = True
+                font.italic = True
+                cell.font = font
+        trailing_row = report.max_row + 1
+        for col in range(1, report.max_column + 1):
+            report.cell(trailing_row, col).fill = red if col % 2 else green
+            report.cell(trailing_row, col).number_format = "0.00%"
+            report.cell(trailing_row, col).border = Border(
+                left=thin,
+                right=thin,
+                top=thin,
+                bottom=thin,
+            )
+    wb.save(path)
+    wb.close()
+
+    source_wb = load_workbook(path)
+    try:
+        source_stats1 = source_wb[STATS1_SHEET]
+        label_signature_before = {
+            row: _font_alignment_signature(source_stats1.cell(row, 1))
+            for row in range(1, source_stats1.max_row + 1)
+            if source_stats1.cell(row, 1).value not in (None, "")
+        }
+        stats1_borders_before = {
+            (row, col): _border_signature(source_stats1.cell(row, col))
+            for row in range(1, source_stats1.max_row + 1)
+            for col in range(1, 5)
+        }
+    finally:
+        source_wb.close()
+
+    first = update_master_journal_workbook_data_only(
+        path,
+        snapshot,
+        preserve_existing_layout=True,
+        publish_recommendation_assets=False,
+    )
+    assert first["ok"] is True
+    assert first["diagnostics"]["preservation_contract_verified"] is True
+    assert first["diagnostics"]["preservation_contract_source_sha256"] == (
+        first["diagnostics"]["preservation_contract_candidate_sha256"]
+    )
+    Path(first["candidate_path"]).replace(path)
+
+    wb = load_workbook(path)
+    try:
+        stats1 = wb[STATS1_SHEET]
+        label_signature_after = {
+            row: _font_alignment_signature(stats1.cell(row, 1))
+            for row in range(1, stats1.max_row + 1)
+            if stats1.cell(row, 1).value not in (None, "")
+        }
+        assert label_signature_after == label_signature_before
+        assert {
+            (row, col): _border_signature(stats1.cell(row, col))
+            for row in range(1, stats1.max_row + 1)
+            for col in range(1, 5)
+        } == stats1_borders_before
+        assert all(
+            _cell_fill_rgb(stats1.cell(row, 1)) == ""
+            for row in mjw._stats1_semantic_row_policies(stats1)
+        )
+
+        market_cols = mjw._stats1_market_columns(stats1)
+        policies = mjw._stats1_semantic_row_policies(stats1)
+        for row, (kind, semantic, _section) in policies.items():
+            for market, col in market_cols.items():
+                cell = stats1.cell(row, col)
+                if isinstance(cell.value, str) and cell.value:
+                    expected_format = "General"
+                elif kind == "commission":
+                    expected_format = (
+                        "General"
+                        if market == "overall"
+                        else mjw._currency_number_format(
+                            "AUD" if market == "fx" else "USDT"
+                        )
+                    )
+                else:
+                    expected_format = (
+                        mjw.SEMANTIC_FORMAT_POLICY.get(kind) or "General"
+                    )
+                assert cell.number_format == expected_format, (
+                    cell.coordinate,
+                    kind,
+                    cell.value,
+                )
+                expected_fill = ""
+                if cell.value not in (None, ""):
+                    if semantic == "profit":
+                        expected_fill = PROFIT_FILL
+                    elif semantic == "loss":
+                        expected_fill = LOSS_FILL
+                    elif semantic == "auto":
+                        numeric = mjw._as_float(cell.value)
+                        if numeric is not None and numeric != 0:
+                            expected_fill = (
+                                PROFIT_FILL if numeric > 0 else LOSS_FILL
+                            )
+                assert _cell_fill_rgb(cell) == expected_fill, (
+                    cell.coordinate,
+                    kind,
+                    semantic,
+                    cell.value,
+                )
+                assert cell.font.bold is False
+                assert cell.font.italic is False
+
+        assert all(stats1.cell(43, col).number_format == "0.00%" for col in range(2, 5))
+        assert all(stats1.cell(46, col).number_format == "0.00%" for col in range(2, 5))
+        assert all(stats1.cell(55, col).number_format == '0.000"R"' for col in range(2, 5))
+        assert stats1["B55"].value == pytest.approx(1.2)
+        assert all(_cell_fill_rgb(stats1.cell(49, col)) == "" for col in range(1, 5))
+        assert all(stats1.cell(49, col).font.bold is False for col in range(2, 5))
+        assert all(_cell_fill_rgb(stats1.cell(row, col)) != PROFIT_FILL for row in range(63, 69) for col in range(2, 5))
+        assert all(stats1.cell(row, col).number_format == "0" for row in (76, 78, 79) for col in range(2, 5))
+        assert all(_cell_fill_rgb(stats1.cell(84, col)) == PROFIT_FILL for col in range(2, 5))
+        assert all(_cell_fill_rgb(stats1.cell(85, col)) == LOSS_FILL for col in range(2, 5))
+        assert all(_cell_fill_rgb(stats1.cell(86, col)) == "" for col in range(2, 5))
+        assert all(_cell_fill_rgb(stats1.cell(93, col)) == "" for col in range(2, 5))
+        assert all(_cell_fill_rgb(stats1.cell(94, col)) == "" for col in range(2, 5))
+        assert all(_cell_fill_rgb(stats1.cell(95, col)) == PROFIT_FILL for col in range(2, 5))
+        assert all(_cell_fill_rgb(stats1.cell(96, col)) == LOSS_FILL for col in range(2, 5))
+
+        for row in range(122, 126):
+            assert stats1.cell(row, 2).value is None
+            assert stats1.cell(row, 2).number_format == "General"
+            assert _cell_fill_rgb(stats1.cell(row, 2)) == ""
+            assert "AUD" in stats1.cell(row, 3).number_format
+            assert _cell_fill_rgb(stats1.cell(row, 3)) == LOSS_FILL
+            assert "USDT" in stats1.cell(row, 4).number_format
+            assert "#" in stats1.cell(row, 4).number_format
+            assert _cell_fill_rgb(stats1.cell(row, 4)) == LOSS_FILL
+        assert stats1["C122"].value == pytest.approx(0.01)
+        assert stats1["D122"].value == pytest.approx(0.00187644)
+
+        drawdown_pct_rows = [127, 130, 131]
+        assert any(
+            stats1.cell(row, col).value not in (None, "")
+            for row in drawdown_pct_rows
+            for col in range(2, 5)
+        )
+        for row in drawdown_pct_rows:
+            for col in range(2, 5):
+                cell = stats1.cell(row, col)
+                assert cell.number_format == "0.00%"
+                assert _cell_fill_rgb(cell) == (
+                    LOSS_FILL if cell.value not in (None, "") else ""
+                )
+        for row in (126, 128, 129, 132, 133):
+            assert all(
+                _cell_fill_rgb(stats1.cell(row, col)) == ""
+                for col in range(2, 5)
+            )
+        manual_formulas = [
+            formula
+            for rules in stats1.conditional_formatting._cf_rules.values()
+            for rule in rules
+            for formula in (getattr(rule, "formula", None) or [])
+        ]
+        assert "E20=5" in manual_formulas
+        assert any(
+            "E20" in str(validation.sqref)
+            for validation in stats1.data_validations.dataValidation
+        )
+
+        assert wb.active.title == "2021"
+        assert [
+            sheet.title
+            for sheet in wb.worksheets
+            if bool(sheet.sheet_view.tabSelected)
+        ] == ["2021"]
+        sim = wb[sim_name]
+        assert sim["N200"].value == "manual sentinel"
+        assert sim["N200"].comment.text == "keep this comment"
+        assert sim["N200"].hyperlink.target == (
+            "https://example.invalid/manual-sentinel"
+        )
+        assert "N200:O200" in {str(item) for item in sim.merged_cells.ranges}
+        assert sim.column_dimensions["N"].width == pytest.approx(27.25)
+        assert sim.row_dimensions[200].height == pytest.approx(31.5)
+        assert wb[REPORT_YEARLY_SHEET].freeze_panes == "B5"
+        assert wb[REPORT_YEARLY_SHEET].column_dimensions["A"].width == pytest.approx(37.25)
+        assert wb[REPORT_YEARLY_SHEET].row_dimensions[2].height == pytest.approx(23.125)
+
+        stats1_for_templates = wb[STATS1_SHEET]
+        for sheet_name in report_names:
+            report = wb[sheet_name]
+            spec_rows = mjw._report_spec_rows(report)
+            assert len(spec_rows) == len(mjw._REPORT_SPECS)
+            for spec_index, (row, (label, _key, kind, semantic)) in enumerate(spec_rows):
+                label_cell = report.cell(row, 1)
+                assert _cell_fill_rgb(label_cell) == ""
+                template = mjw._stats1_label_template_for_report(
+                    stats1_for_templates,
+                    spec_index=spec_index,
+                    label=label,
+                )
+                assert template is not None
+                assert _font_alignment_signature(label_cell) == (
+                    _font_alignment_signature(template)
+                )
+                effective_semantic = mjw._effective_semantic_fill(kind, semantic)
+                for col in range(2, report.max_column + 1):
+                    cell = report.cell(row, col)
+                    if isinstance(cell.value, str) and cell.value:
+                        expected_format = "General"
+                    elif kind == "commission":
+                        expected_format = (
+                            cell.number_format
+                            if cell.value not in (None, "")
+                            else "General"
+                        )
+                    else:
+                        expected_format = (
+                            mjw.SEMANTIC_FORMAT_POLICY.get(kind) or "General"
+                        )
+                    assert cell.number_format == expected_format
+                    expected_fill = ""
+                    if cell.value not in (None, ""):
+                        if effective_semantic == "profit":
+                            expected_fill = PROFIT_FILL
+                        elif effective_semantic == "loss":
+                            expected_fill = LOSS_FILL
+                        elif effective_semantic == "auto":
+                            numeric = mjw._as_float(cell.value)
+                            if numeric is not None and numeric != 0:
+                                expected_fill = (
+                                    PROFIT_FILL if numeric > 0 else LOSS_FILL
+                                )
+                    assert _cell_fill_rgb(cell) == expected_fill
+
+            rows_by_index = {
+                index: row
+                for index, (row, _spec) in enumerate(spec_rows)
+            }
+            for start_index, end_index in mjw._REPORT_GROUP_SPEC_RANGES:
+                grouped_rows = [
+                    rows_by_index[index]
+                    for index in range(start_index, end_index + 1)
+                ]
+                start_row = 1 if start_index == 0 else min(grouped_rows)
+                end_row = max(grouped_rows)
+                assert report.cell(start_row, 1).border.left.style == "medium"
+                assert report.cell(start_row, 1).border.top.style == "medium"
+                assert report.cell(end_row, 1).border.bottom.style == "medium"
+                assert report.cell(start_row, report.max_column).border.right.style == "medium"
+            trailing_rows = mjw._report_trailing_blank_rows(report)
+            assert trailing_rows
+            for row in trailing_rows:
+                for col in range(1, report.max_column + 1):
+                    cell = report.cell(row, col)
+                    assert cell.number_format == "General"
+                    assert _cell_fill_rgb(cell) == ""
+                    assert all(
+                        side is None or side.style is None
+                        for side in (
+                            cell.border.left,
+                            cell.border.right,
+                            cell.border.top,
+                            cell.border.bottom,
+                        )
+                    )
+
+        report_2026 = wb["2026"]
+        month_cols = {
+            str(report_2026.cell(1, col).value): col
+            for col in range(2, report_2026.max_column + 1)
+        }
+        commission_rows = {
+            spec[0]: row
+            for row, spec in mjw._report_spec_rows(report_2026)
+            if spec[2] == "commission"
+        }
+        for row in commission_rows.values():
+            assert "AUD" in report_2026.cell(row, month_cols["May"]).number_format
+            assert _cell_fill_rgb(report_2026.cell(row, month_cols["May"])) == LOSS_FILL
+            assert "USDT" in report_2026.cell(row, month_cols["June"]).number_format
+            assert "#" in report_2026.cell(row, month_cols["June"]).number_format
+            assert _cell_fill_rgb(report_2026.cell(row, month_cols["June"])) == LOSS_FILL
+    finally:
+        wb.close()
+
+    first_fingerprint = _workbook_semantic_idempotence_fingerprint(path)
+    second = update_master_journal_workbook_data_only(
+        path,
+        snapshot,
+        preserve_existing_layout=True,
+        publish_recommendation_assets=False,
+    )
+    assert second["ok"] is True
+    assert second["diagnostics"]["preservation_contract_verified"] is True
+    assert second["diagnostics"]["managed_statistics_presentation_sha256"] == (
+        first["diagnostics"]["managed_statistics_presentation_sha256"]
+    )
+    Path(second["candidate_path"]).replace(path)
+    assert _workbook_semantic_idempotence_fingerprint(path) == first_fingerprint
