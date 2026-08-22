@@ -8,6 +8,7 @@ import re
 import shutil
 import subprocess
 import sys
+from urllib.parse import unquote
 import pytest
 from openpyxl import Workbook
 from openpyxl import load_workbook
@@ -1272,7 +1273,7 @@ def test_sync_publishes_recommendations_from_same_normalized_rows_as_workbook(
     workbook_text = str(recommendation_cell.value)
     wb.close()
     filename = Path(target).name
-    published_html = (workbook_path.parent / Path(target)).read_text(encoding="utf-8")
+    published_html = (workbook_path.parent / Path(unquote(target))).read_text(encoding="utf-8")
 
     assert published_html == expected_bundle["files"][filename]
     assert published_html != raw_bundle["files"][filename]
@@ -3456,7 +3457,7 @@ def test_fast_verifier_accepts_complete_generated_contract(fast_verifier_workboo
         target = str(item["target"])
         assert "://" not in target
         assert not Path(target).is_absolute()
-        artifact = fixture["path"].parent / Path(target)
+        artifact = fixture["path"].parent / Path(unquote(target))
         assert artifact.is_file()
         html = artifact.read_text(encoding="utf-8").casefold()
         assert "<svg" in html
@@ -3726,7 +3727,7 @@ def test_fast_verifier_rejects_nonportable_recommendation_artifacts(
         wb.save(workbook_path)
     elif mutation == "network_reference":
         target = str(cell.hyperlink.target)
-        artifact = workbook_path.parent / Path(target)
+        artifact = workbook_path.parent / Path(unquote(target))
         artifact.write_text(
             artifact.read_text(encoding="utf-8")
             + '<img src="https://example.invalid/chart.png">',
@@ -3734,7 +3735,7 @@ def test_fast_verifier_rejects_nonportable_recommendation_artifacts(
         )
     else:
         target = str(cell.hyperlink.target)
-        artifact = workbook_path.parent / Path(target)
+        artifact = workbook_path.parent / Path(unquote(target))
         stale = artifact.read_text(encoding="utf-8")
         stale = re.sub(
             r'data-recommended-value="[^"]+"',
@@ -3803,7 +3804,7 @@ def test_fast_verifier_accepts_full_precision_markers_for_every_recommendation_l
 
     mutated_targets = set()
     for index, (_link, cell, target) in enumerate(linked_cells):
-        artifact = workbook_path.parent / Path(target)
+        artifact = workbook_path.parent / Path(unquote(target))
         html_text = artifact.read_text(encoding="utf-8")
         cell_text = updated_text_by_index.get(index, str(cell.value))
         displayed_match = re.search(
@@ -3880,7 +3881,7 @@ def test_fast_verifier_rejects_marker_outside_half_display_unit(
     target = str(cell.hyperlink.target)
     wb.close()
 
-    artifact = workbook_path.parent / Path(target)
+    artifact = workbook_path.parent / Path(unquote(target))
     html_text = artifact.read_text(encoding="utf-8")
     html_text = re.sub(
         r'data-recommended-value="[^"]+"',

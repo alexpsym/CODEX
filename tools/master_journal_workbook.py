@@ -27,7 +27,7 @@ import re
 import zipfile
 import xml.etree.ElementTree as ET
 from xml.sax.saxutils import escape as _xml_escape
-from urllib.parse import unquote
+from urllib.parse import quote, unquote
 from zoneinfo import ZoneInfo
 from uuid import uuid4
 
@@ -403,8 +403,11 @@ def _apply_full_cell_semantic_fill(cell, semantic: str | None) -> None:
     fill_rgb, font_rgb = (PROFIT_FILL, PROFIT_FONT) if semantic == "profit" else (LOSS_FILL, LOSS_FONT)
     font = copy(cell.font)
     font.color = font_rgb
-    cell.font = font
-    cell.fill = PatternFill(fill_type="solid", fgColor=fill_rgb)
+    if cell.font != font:
+        cell.font = font
+    fill = PatternFill(fill_type="solid", fgColor=fill_rgb)
+    if cell.fill != fill:
+        cell.fill = fill
 
 def _clear_generated_semantic_fill(cell) -> None:
     if _semantic_fill_rgb(cell) not in {PROFIT_FILL, LOSS_FILL}:
@@ -412,11 +415,16 @@ def _clear_generated_semantic_fill(cell) -> None:
     font = copy(cell.font)
     if getattr(font.color, "type", None) == "rgb" and str(font.color.rgb or "")[-6:].upper() in {PROFIT_FONT, LOSS_FONT}:
         font.color = "000000"
-    cell.font = font
-    cell.fill = PatternFill()
+    if cell.font != font:
+        cell.font = font
+    empty_fill = PatternFill()
+    if cell.fill != empty_fill:
+        cell.fill = empty_fill
 
 def _clear_cell_fill(cell) -> None:
-    cell.fill = PatternFill()
+    empty_fill = PatternFill()
+    if cell.fill != empty_fill:
+        cell.fill = empty_fill
 
 
 def _semantic_metric_number_format(
@@ -443,8 +451,11 @@ def _reset_managed_metric_fill(cell) -> None:
         in {PROFIT_FONT, LOSS_FONT}
     ):
         font.color = "FF000000"
-    cell.font = font
-    cell.fill = PatternFill()
+    if cell.font != font:
+        cell.font = font
+    empty_fill = PatternFill()
+    if cell.fill != empty_fill:
+        cell.fill = empty_fill
 
 
 def _apply_semantic_metric_policy(
@@ -456,11 +467,13 @@ def _apply_semantic_metric_policy(
     populated_only_fill: bool = True,
 ) -> None:
     """Apply number format and direct fill from semantic meaning, never position."""
-    cell.number_format = _semantic_metric_number_format(
+    number_format = _semantic_metric_number_format(
         kind,
         cell.value,
         currency=currency,
     )
+    if cell.number_format != number_format:
+        cell.number_format = number_format
     _reset_managed_metric_fill(cell)
 
     # Managed statistics values are body text.  This removes the known style
@@ -469,7 +482,8 @@ def _apply_semantic_metric_policy(
     font = copy(cell.font)
     font.bold = False
     font.italic = False
-    cell.font = font
+    if cell.font != font:
+        cell.font = font
 
     populated = cell.value not in (None, "")
     if populated_only_fill and not populated:
@@ -483,6 +497,28 @@ def _apply_semantic_metric_policy(
                 cell,
                 "profit" if value > 0 else "loss",
             )
+
+
+def _reindex_cell_style_registry(wb: Workbook) -> Dict[str, int]:
+    """Repair openpyxl's style lookup after in-place StyleArray mutations.
+
+    Style descriptors mutate a cell's StyleArray, which may also be an object
+    already indexed by the loaded workbook.  Its hash lookup then becomes
+    stale and openpyxl can append byte-identical cellXfs during save.  Rebuild
+    only the lookup dictionary against the existing order: no style is
+    deleted, remapped, or renumbered.
+    """
+    styles = wb._cell_styles
+    registry: Dict[Any, int] = {}
+    for index, style in enumerate(styles):
+        registry.setdefault(style, index)
+    styles._dict = registry
+    styles.clean = True
+    return {
+        "declared": len(styles),
+        "unique": len(registry),
+        "duplicates": len(styles) - len(registry),
+    }
 
 def _apply_sign_based_full_cell_fill(cell) -> None:
     value = _as_float(cell.value)
@@ -4361,7 +4397,12 @@ body{{margin:0;background:#f1f5f9;color:#0f172a;font:15px/1.45 Segoe UI,Arial,sa
 
 
 def _recommendation_asset_relative_path(workbook_path: Path, filename: str) -> str:
-    return posixpath.join(f"{workbook_path.stem}.assets", "recommendations", filename)
+    relative = posixpath.join(
+        f"{workbook_path.stem}.assets",
+        "recommendations",
+        filename,
+    )
+    return quote(unquote(relative).replace("\\", "/"), safe="/")
 
 
 def _prepare_recommendation_chart_bundle(
@@ -4429,19 +4470,22 @@ def _apply_recommendation_chart_hyperlinks(wb, bundle: Mapping[str, Any]) -> Non
     def apply_link(cell, target: str | None) -> None:
         current = getattr(cell, "hyperlink", None)
         current_target = str(getattr(current, "target", "") or "")
-        targets_match = bool(target) and (
-            unquote(current_target).replace("\\", "/")
-            == unquote(str(target)).replace("\\", "/")
+        canonical_target = (
+            quote(
+                unquote(str(target)).replace("\\", "/"),
+                safe="/",
+            )
+            if target
+            else ""
         )
-        # Retain the authored relationship object (including its percent
-        # encoding) when it already resolves to the generated offline asset.
-        if not targets_match:
-            cell.hyperlink = target or None
-        if target:
+        if current_target != canonical_target:
+            cell.hyperlink = canonical_target or None
+        if canonical_target:
             font = copy(cell.font)
             font.color = "0563C1"
             font.underline = "single"
-            cell.font = font
+            if cell.font != font:
+                cell.font = font
 
     if STATS1_SHEET in wb.sheetnames:
         ws = wb[STATS1_SHEET]
@@ -8155,9 +8199,44 @@ def _apply_dashboard_requested_semantic_fills(ws) -> None:
                 for col in (2, 3, 4):
                     _apply_full_cell_semantic_fill(ws.cell(row, col), "loss")
 
-    for row in range(13, 17):
-        _apply_full_cell_semantic_fill(ws.cell(row, 8), "profit")
-        _apply_full_cell_semantic_fill(ws.cell(row, 9), "loss")
+    _remove_orphan_dashboard_semantic_fill_cells(ws)
+
+
+def _remove_orphan_dashboard_semantic_fill_cells(ws) -> List[str]:
+    """Drop style-only cells outside the dashboard's semantic market columns.
+
+    An earlier layout path created a fixed green/red block in otherwise absent
+    columns.  Treat a column as absent only when it has no populated cells and
+    is not part of a merge, so future nonblank dashboard columns are retained.
+    """
+    market_cols = _stats1_market_columns(ws)
+    if not market_cols:
+        return []
+    last_market_col = max(market_cols.values())
+    populated_columns = {
+        col
+        for (_row, col), cell in ws._cells.items()
+        if cell.value not in (None, "")
+    }
+    merged_columns = {
+        col
+        for merged in ws.merged_cells.ranges
+        for col in range(merged.min_col, merged.max_col + 1)
+    }
+    removed: List[str] = []
+    for coordinate, cell in list(ws._cells.items()):
+        row, col = coordinate
+        if (
+            col <= last_market_col
+            or col in populated_columns
+            or col in merged_columns
+            or cell.value not in (None, "")
+            or _semantic_fill_rgb(cell) not in {PROFIT_FILL, LOSS_FILL}
+        ):
+            continue
+        removed.append(f"{get_column_letter(col)}{row}")
+        del ws._cells[coordinate]
+    return removed
 
 
 def _stats1_market_columns(ws) -> Dict[str, int]:
@@ -9529,6 +9608,7 @@ def _dashboard_extended_metrics(
             **_summary(_distance_values(losers, "take_profit"), "target_pct_losers"),
             **_summary(loser_results, "result_pct_losers"),
             **_summary(loser_r, "r_multiple_losers"),
+            **_summary(r_values, "r_multiple"),
             "long_trades": sum(str(item.get("side") or "").upper().startswith(("BUY", "LONG")) for item in items),
             "long_wins": sum(str(item.get("side") or "").upper().startswith(("BUY", "LONG")) and _outcome(item) > 0 for item in items),
             "long_losses": sum(str(item.get("side") or "").upper().startswith(("BUY", "LONG")) and _outcome(item) < 0 for item in items),
@@ -10910,7 +10990,13 @@ def _apply_report_semantic_formatting(
     trailing_cells = 0
     for row in _report_trailing_blank_rows(ws):
         for col in range(1, ws.max_column + 1):
-            _apply_semantic_metric_policy(ws.cell(row, col), kind="text")
+            # Trailing blank rows are outside the managed report metrics.
+            # Normalize their fill/format without touching user-owned font
+            # flags, which may be restored from an older workbook layout.
+            cell = ws.cell(row, col)
+            if cell.number_format != "General":
+                cell.number_format = "General"
+            _clear_cell_fill(cell)
             trailing_cells += 1
     if trailing_cells:
         diagnostics.setdefault("neutralized_report_trailing_blank_cells", {})[
@@ -11168,9 +11254,12 @@ def _report_cell_value(bucket: Dict[str, Any], key: str | None, kind: str) -> An
     value = bucket.get(key)
     inline_source = _inline_metric_source(bucket, key)
     if key in INLINE_SOURCE_METRIC_KEYS and kind in {"pct", "r", "duration"}:
-        if not _inline_metric_source_has_symbol_and_date(inline_source):
-            return ""
-        return _format_inline_metric_value(value, kind, inline_source)
+        if _inline_metric_source_has_symbol_and_date(inline_source):
+            return _format_inline_metric_value(value, kind, inline_source)
+        # A new workbook may still expose a valid numeric extrema when the
+        # upstream source metadata is incomplete.  Preservation mode applies
+        # the stronger existing-value guard in
+        # _update_report_sheet_preserving_layout.
     if kind == "pct":
         number = _as_float(value)
         return "" if number is None else number / 100.0
@@ -11442,7 +11531,32 @@ def _update_report_sheet_preserving_layout(
     for row, (_label, key, kind, _semantic) in spec_rows:
         for col, bucket in zip(header_cols, buckets):
             cell = ws.cell(row, col)
-            next_value = _report_cell_value(bucket, key, kind)
+            inline_source = _inline_metric_source(bucket, key) if key else None
+            bucket_trades = _as_float(bucket.get("trades"))
+            bucket_test_trades = _as_float(bucket.get("test_trades"))
+            test_only_bucket = (
+                (bucket_trades is None or bucket_trades == 0)
+                and bucket_test_trades is not None
+                and bucket_test_trades > 0
+            )
+            preserve_existing_inline = (
+                key in INLINE_SOURCE_METRIC_KEYS
+                and kind in {"pct", "r", "duration"}
+                and cell.value not in (None, "")
+                and not test_only_bucket
+                and not _inline_metric_source_has_symbol_and_date(
+                    inline_source
+                )
+            )
+            next_value = (
+                cell.value
+                if preserve_existing_inline
+                else _report_cell_value(bucket, key, kind)
+            )
+            if preserve_existing_inline:
+                diagnostics.setdefault(
+                    "preserved_report_values_without_safe_source", {}
+                ).setdefault(ws.title, []).append(cell.coordinate)
             cell.value = next_value
             if isinstance(cell.value, str) and cell.value:
                 cell.number_format = "General"
@@ -11514,6 +11628,34 @@ def _report_outcome(row: Dict[str, Any]) -> int:
     if value is None or not math.isfinite(value) or value == 0:
         return 0
     return 1 if value > 0 else -1
+
+
+def _symbol_win_rate_snapshot_fingerprint(
+    rows: Sequence[Mapping[str, Any]],
+) -> str:
+    """Fingerprint only the authoritative inputs that can change win rates."""
+    samples: List[Tuple[str, str, bool, int]] = []
+    for source in rows:
+        row = dict(source)
+        if str(row.get("row_type") or "trade").strip().casefold() != "trade":
+            continue
+        identity = str(row.get("id") or "").strip()
+        if not identity:
+            identity = _trade_execution_fingerprint(row) or ""
+        samples.append(
+            (
+                identity,
+                str(row.get("symbol") or "").strip().upper(),
+                _is_test_trade_value(row.get("is_test_trade")),
+                _trade_outcome_sign(row),
+            )
+        )
+    payload = json.dumps(
+        sorted(samples),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 def _period_streak_metrics(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -15886,6 +16028,20 @@ def update_master_journal_workbook_data_only(
     preserve_existing_layout: bool = False,
     publish_recommendation_assets: bool = True,
 ) -> Dict[str, Any]:
+    existing_symbol_win_rate_fingerprint: str | None = None
+    symbol_win_rate_fingerprint_error = ""
+    if preserve_existing_layout:
+        try:
+            existing_symbol_win_rate_fingerprint = (
+                _symbol_win_rate_snapshot_fingerprint(
+                    read_master_journal_source(path).get("items") or []
+                )
+            )
+        except Exception as exc:
+            # A failed comparison must never freeze a derived metric.  The
+            # normal regeneration path remains safe and the reason is exposed
+            # in diagnostics.
+            symbol_win_rate_fingerprint_error = str(exc)
     source_calculation_signature = (
         _workbook_calculation_signature(path)
         if preserve_existing_layout
@@ -15905,6 +16061,10 @@ def update_master_journal_workbook_data_only(
         )
     wb = load_workbook(path, keep_links=False)
     diagnostics: Dict[str, Any] = {"missing_accounts": [], "updated_cells": 0}
+    if symbol_win_rate_fingerprint_error:
+        diagnostics["symbol_win_rate_fingerprint_error"] = (
+            symbol_win_rate_fingerprint_error
+        )
     source_preservation_contract = (
         _workbook_preservation_contract(wb)
         if preserve_existing_layout
@@ -16058,6 +16218,21 @@ def update_master_journal_workbook_data_only(
         diagnostics.update(row_normalization_diagnostics)
         snapshot = dict(snapshot)
         snapshot["items"] = rows
+        incoming_symbol_win_rate_fingerprint = (
+            _symbol_win_rate_snapshot_fingerprint(rows)
+        )
+        preserve_symbol_win_rates = bool(
+            preserve_existing_layout
+            and existing_symbol_win_rate_fingerprint
+            and existing_symbol_win_rate_fingerprint
+            == incoming_symbol_win_rate_fingerprint
+        )
+        diagnostics["symbol_win_rate_input_fingerprint"] = (
+            incoming_symbol_win_rate_fingerprint
+        )
+        diagnostics["symbol_win_rate_inputs_unchanged"] = (
+            preserve_symbol_win_rates
+        )
         if STATS2_SHEET not in wb.sheetnames:
             wb.create_sheet(STATS2_SHEET, 1)
             diagnostics["created_stats2_from_legacy_layout"] = True
@@ -16483,14 +16658,34 @@ def update_master_journal_workbook_data_only(
                 for market in ("overall", "fx", "crypto")
             }
 
-        write_market_metric("Winners", ["Percentage expectancy", "Avg result %", "Avg win %"], _risk_market_values("avg_result_pct_winners"), "pct", "profit_loss")
-        write_market_metric("Winners", ["R expectancy", "Avg R", "Avg R win"], _risk_market_values("avg_r_multiple_winners"), "r", "profit_loss")
-        write_market_metric("Winners", "Avg stop %", _risk_market_values("avg_stop_pct_winners"), "pct")
-        write_market_metric("Winners", "Avg target %", _risk_market_values("avg_target_pct_winners"), "pct")
-        write_market_metric("Losers", ["Percentage expectancy", "Avg result %", "Avg loss %"], _risk_market_values("avg_result_pct_losers"), "pct", "loss")
-        write_market_metric("Losers", ["R expectancy", "Avg R", "Avg R loss"], _risk_market_values("avg_r_multiple_losers"), "r", "loss")
-        write_market_metric("Losers", "Avg stop %", _risk_market_values("avg_stop_pct_losers"), "pct")
-        write_market_metric("Losers", "Avg target %", _risk_market_values("avg_target_pct_losers"), "pct")
+        def _winner_loser_market_values(key: str) -> Dict[str, Any]:
+            """Prefer values derived from the matching outcome subset.
+
+            Some upstream risk payloads historically exposed unfiltered market
+            averages under winner/loser keys.  The normalized trade rows are
+            authoritative whenever they can derive the requested metric; the
+            key-specific risk value remains a fallback for snapshots that do
+            not include rows.
+            """
+            derived = _extended_market_values(key)
+            fallback = _risk_market_values(key)
+            return {
+                market: (
+                    derived.get(market)
+                    if derived.get(market) is not None
+                    else fallback.get(market)
+                )
+                for market in ("overall", "fx", "crypto")
+            }
+
+        write_market_metric("Winners", ["Percentage expectancy", "Avg result %", "Avg win %"], _winner_loser_market_values("avg_result_pct_winners"), "pct", "profit_loss")
+        write_market_metric("Winners", ["R expectancy", "Avg R", "Avg R win"], _winner_loser_market_values("avg_r_multiple_winners"), "r", "profit_loss")
+        write_market_metric("Winners", "Avg stop %", _winner_loser_market_values("avg_stop_pct_winners"), "pct")
+        write_market_metric("Winners", "Avg target %", _winner_loser_market_values("avg_target_pct_winners"), "pct")
+        write_market_metric("Losers", ["Percentage expectancy", "Avg result %", "Avg loss %"], _winner_loser_market_values("avg_result_pct_losers"), "pct", "loss")
+        write_market_metric("Losers", ["R expectancy", "Avg R", "Avg R loss"], _winner_loser_market_values("avg_r_multiple_losers"), "r", "loss")
+        write_market_metric("Losers", "Avg stop %", _winner_loser_market_values("avg_stop_pct_losers"), "pct")
+        write_market_metric("Losers", "Avg target %", _winner_loser_market_values("avg_target_pct_losers"), "pct")
         for section, suffix in (("Winners", "winners"), ("Losers", "losers")):
             for label, key in (
                 ("Min duration", f"min_duration_seconds_{suffix}"),
@@ -17124,6 +17319,30 @@ def update_master_journal_workbook_data_only(
                 )
             if SYMBOLS_SHEET in wb.sheetnames and SYMBOLS_SHEET in gen.sheetnames:
                 instrument_ws = _symbols_sheet(wb)
+                preserved_win_rates: Dict[str, List[Any]] = defaultdict(list)
+                if preserve_symbol_win_rates:
+                    existing_headers = _instrument_averages_header_map(
+                        instrument_ws
+                    )
+                    existing_symbol_col = existing_headers.get("Symbol")
+                    existing_win_rate_col = existing_headers.get("Win Rate %")
+                    if existing_symbol_col and existing_win_rate_col:
+                        for existing_row in range(
+                            _instrument_averages_data_start_row(instrument_ws),
+                            instrument_ws.max_row + 1,
+                        ):
+                            symbol = str(
+                                instrument_ws.cell(
+                                    existing_row, existing_symbol_col
+                                ).value
+                                or ""
+                            ).strip().upper()
+                            if symbol:
+                                preserved_win_rates[symbol].append(
+                                    instrument_ws.cell(
+                                        existing_row, existing_win_rate_col
+                                    ).value
+                                )
                 _copy_instrument_rows_header_aware(_symbols_sheet(gen), instrument_ws)
                 if not preserve_existing_layout:
                     _apply_instrument_averages_requested_style(
@@ -17133,6 +17352,39 @@ def update_master_journal_workbook_data_only(
                 _apply_instrument_averages_semantic_fills(instrument_ws)
                 _repair_instrument_timeframe_columns(instrument_ws)
                 _populate_symbols_metrics_preserving_layout(instrument_ws, rows, diagnostics)
+                if preserved_win_rates:
+                    current_headers = _instrument_averages_header_map(
+                        instrument_ws
+                    )
+                    current_symbol_col = current_headers.get("Symbol")
+                    current_win_rate_col = current_headers.get("Win Rate %")
+                    restored_win_rates = 0
+                    if current_symbol_col and current_win_rate_col:
+                        remaining = {
+                            symbol: list(values)
+                            for symbol, values in preserved_win_rates.items()
+                        }
+                        for current_row in range(
+                            _instrument_averages_data_start_row(instrument_ws),
+                            instrument_ws.max_row + 1,
+                        ):
+                            symbol = str(
+                                instrument_ws.cell(
+                                    current_row, current_symbol_col
+                                ).value
+                                or ""
+                            ).strip().upper()
+                            values = remaining.get(symbol) or []
+                            if not values:
+                                continue
+                            prior_value = values.pop(0)
+                            instrument_ws.cell(
+                                current_row, current_win_rate_col
+                            ).value = prior_value
+                            restored_win_rates += 1
+                    diagnostics[
+                        "symbols_win_rates_preserved_for_unchanged_inputs"
+                    ] = restored_win_rates
                 if not preserve_existing_layout:
                     _ensure_symbols_duration_header_layout(
                         instrument_ws, diagnostics
@@ -17283,11 +17535,17 @@ def update_master_journal_workbook_data_only(
 
                     if managed_statistics_cell:
                         # User-owned presentation survives, while number formats
-                        # and semantic fills remain generator-owned.
-                        cell.font = copy(presentation["font"])
-                        cell.border = copy(presentation["border"])
-                        cell.alignment = copy(presentation["alignment"])
-                        cell.protection = copy(presentation["protection"])
+                        # and semantic fills remain generator-owned.  Restore
+                        # component ids directly so duplicate-but-equivalent
+                        # legacy fonts/borders cannot be remapped to a different
+                        # id on the next openpyxl save.
+                        source_style = presentation["style"]
+                        managed_style = copy(cell._style or source_style)
+                        managed_style.fontId = source_style.fontId
+                        managed_style.borderId = source_style.borderId
+                        managed_style.alignmentId = source_style.alignmentId
+                        managed_style.protectionId = source_style.protectionId
+                        cell._style = managed_style
                     else:
                         cell._style = copy(presentation["style"])
                     if (
@@ -17339,6 +17597,13 @@ def update_master_journal_workbook_data_only(
                 extended_metrics,
                 diagnostics,
             )
+            removed_orphan_fills = (
+                _remove_orphan_dashboard_semantic_fill_cells(dash)
+            )
+            if removed_orphan_fills:
+                diagnostics[
+                    "removed_orphan_stats1_semantic_fill_cells"
+                ] = removed_orphan_fills
             _apply_report_workbook_semantic_presentation(wb, diagnostics)
         if preserve_existing_layout:
             trade_log = _get_all_trades_sheet(wb, allow_legacy=False)
@@ -17408,6 +17673,9 @@ def update_master_journal_workbook_data_only(
                 wb,
                 source_calculation_signature,
             )
+        diagnostics["cell_style_registry_before_save"] = (
+            _reindex_cell_style_registry(wb)
+        )
         wb.save(candidate)
         if preserve_existing_layout:
             diagnostics.update(

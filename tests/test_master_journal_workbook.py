@@ -1,6 +1,6 @@
 from pathlib import Path, PurePosixPath
 from collections import defaultdict
-from copy import copy
+from copy import copy, deepcopy
 from datetime import date, datetime
 import hashlib
 import json
@@ -285,6 +285,39 @@ def _custom_number_formats(path: Path):
     return [
         str(node.attrib.get("formatCode") or "")
         for node in root.findall(".//x:numFmt", ns)
+    ]
+
+
+def _style_table_signature(path: Path) -> tuple[dict[str, int], str]:
+    with zipfile.ZipFile(path) as package:
+        root = ET.fromstring(package.read("xl/styles.xml"))
+    ns = {"x": _SPREADSHEETML_NAMESPACE}
+    counts = {}
+    for name in ("cellXfs", "fonts", "fills", "borders", "numFmts"):
+        element = root.find(f"x:{name}", ns)
+        counts[name] = len(element) if element is not None else 0
+    semantic_xml = ET.tostring(root, encoding="utf-8")
+    return counts, hashlib.sha256(semantic_xml).hexdigest()
+
+
+def _worksheet_relationship_targets(path: Path, sheet_name: str) -> list[str]:
+    with zipfile.ZipFile(path) as package:
+        worksheet_part = mjw._worksheet_ooxml_part_name(
+            package,
+            sheet_name,
+        )
+        worksheet_path = PurePosixPath(worksheet_part)
+        relationships_part = str(
+            worksheet_path.parent
+            / "_rels"
+            / f"{worksheet_path.name}.rels"
+        )
+        root = ET.fromstring(package.read(relationships_part))
+    return [
+        str(node.attrib.get("Target") or "")
+        for node in root.findall(
+            f"{{{_PACKAGE_RELATIONSHIP_NAMESPACE}}}Relationship"
+        )
     ]
 
 
@@ -1915,8 +1948,11 @@ def test_conditional_format_colors_and_dashboard_semantics(tmp_path: Path):
     assert "Expectancy %" not in labels
     assert _cell_fill_rgb(dash.cell(labels["Min win %"], 2)) == "C6EFCE"
     assert _cell_fill_rgb(dash.cell(labels["Max loss %"], 2)) == "FFC7CE"
-    assert _cell_fill_rgb(dash["H13"]) == "C6EFCE"
-    assert _cell_fill_rgb(dash["I13"]) == "FFC7CE"
+    assert dash.max_column == 4
+    for row in range(13, 17):
+        for col in (8, 9):
+            assert dash.cell(row, col).value in (None, "")
+            assert _cell_fill_rgb(dash.cell(row, col)) == ""
 
     # Trade Log row-level rules cover the full visible row without overlapping value-cell fill rules.
     tr = _cf_ranges(trade_log)
@@ -8422,6 +8458,397 @@ def _workbook_semantic_idempotence_fingerprint(path: Path) -> str:
             separators=(",", ":"),
         ).encode("utf-8")
     ).hexdigest()
+
+
+def test_report_inline_extrema_use_numeric_fallback_and_preserve_existing_source_text():
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "2018"
+    bucket = {
+        "min_r_multiple": -1.25,
+        "max_r_multiple": 2.5,
+    }
+    mjw._write_report_sheet(ws, ["January"], [bucket])
+    rows = {
+        spec[0]: row
+        for row, spec in mjw._report_spec_rows(ws)
+        if spec[0] in {"Max R loss", "Max R win"}
+    }
+    assert ws.cell(rows["Max R loss"], 2).value == pytest.approx(-1.25)
+    assert ws.cell(rows["Max R win"], 2).value == pytest.approx(2.5)
+
+    existing = "-1.250R - EURUSD 2018-01-03"
+    ws.cell(rows["Max R loss"], 2).value = existing
+    diagnostics = {}
+    mjw._update_report_sheet_preserving_layout(
+        ws,
+        ["January"],
+        [bucket],
+        diagnostics,
+    )
+    assert ws.cell(rows["Max R loss"], 2).value == existing
+    assert ws.cell(rows["Max R loss"], 2).coordinate in diagnostics[
+        "preserved_report_values_without_safe_source"
+    ]["2018"]
+    wb.close()
+
+
+def test_recommendation_relationship_targets_are_canonically_percent_encoded(
+    tmp_path: Path,
+):
+    path = tmp_path / "Trading Journal.xlsx"
+    build_master_journal_workbook(
+        sample_snapshot(),
+        path,
+        publish_recommendation_assets=False,
+    )
+    wb = load_workbook(path)
+    stats1 = wb[STATS1_SHEET]
+    market_cols = mjw._stats1_market_columns(stats1)
+    expected = set()
+    links = {}
+    for metric in ("stop", "target"):
+        for market in ("overall", "fx", "crypto"):
+            target = mjw._recommendation_asset_relative_path(
+                path,
+                f"{market}-{metric}.html",
+            )
+            expected.add(target)
+            links[(market, metric)] = target
+    for row in range(2, stats1.max_row + 1):
+        if str(stats1.cell(row, 1).value or "").strip().casefold() != "recommendation":
+            continue
+        previous = str(stats1.cell(row - 1, 1).value or "").casefold()
+        metric = "stop" if "stop" in previous else "target"
+        for market, col in market_cols.items():
+            stats1.cell(row, col).value = "Open chart"
+            stats1.cell(row, col).hyperlink = (
+                f"Trading Journal.assets/recommendations/{market}-{metric}.html"
+            )
+    mjw._apply_recommendation_chart_hyperlinks(
+        wb,
+        {"links": links},
+    )
+    wb.save(path)
+    wb.close()
+
+    assert expected == {
+        f"Trading%20Journal.assets/recommendations/{market}-{metric}.html"
+        for metric in ("stop", "target")
+        for market in ("overall", "fx", "crypto")
+    }
+    wb = load_workbook(path, data_only=False)
+    try:
+        actual = {
+            cell.hyperlink.target
+            for row in wb[STATS1_SHEET].iter_rows()
+            for cell in row
+            if cell.hyperlink
+            and "recommendations" in str(cell.hyperlink.target)
+        }
+    finally:
+        wb.close()
+    assert actual == expected
+    relationship_targets = set(
+        _worksheet_relationship_targets(path, STATS1_SHEET)
+    )
+    assert expected.issubset(relationship_targets)
+    assert not any("Trading Journal.assets" in target for target in relationship_targets)
+
+
+def test_preservation_resync_uses_outcome_subsets_preserves_unchanged_win_rates_and_has_stable_styles(
+    tmp_path: Path,
+):
+    snapshot = sample_snapshot()
+    fx_loss = dict(snapshot["items"][0])
+    fx_loss.update(
+        id="t3",
+        symbol="EURUSD",
+        open_time="2026-05-03T00:00:00Z",
+        close_time="2026-05-03T01:00:00Z",
+        net_profit=-30.0,
+        result_pct=-0.7,
+        r_multiple=-0.5,
+        stop_loss=1.08,
+        take_profit=1.14,
+    )
+    crypto_win = dict(snapshot["items"][1])
+    crypto_win.update(
+        id="t4",
+        symbol="BTCUSDT",
+        open_time="2026-05-04T00:00:00Z",
+        close_time="2026-05-04T01:00:00Z",
+        net_profit=80.0,
+        result_pct=1.4,
+        r_multiple=1.1,
+        stop_loss=58000,
+        take_profit=63000,
+    )
+    snapshot["items"].extend([fx_loss, crypto_win])
+    wrong_keys = (
+        "avg_stop_pct_winners",
+        "avg_target_pct_winners",
+        "avg_stop_pct_losers",
+        "avg_target_pct_losers",
+    )
+    wrong_bucket = {key: 99.0 for key in wrong_keys}
+    risk = snapshot["stats"]["groups"]["risk_expectancy"]
+    risk.update(wrong_bucket)
+    risk["by_market"] = {
+        "overall": dict(wrong_bucket),
+        "fx": dict(wrong_bucket),
+        "crypto": dict(wrong_bucket),
+    }
+
+    path = tmp_path / "Trading Journal.xlsx"
+    build_master_journal_workbook(
+        snapshot,
+        path,
+        publish_recommendation_assets=False,
+    )
+    wb = load_workbook(path)
+    stats1 = wb[STATS1_SHEET]
+    for section, labels in (
+        ("Winners", ("Avg stop %", "Avg target %")),
+        ("Losers", ("Avg stop %", "Avg target %")),
+    ):
+        start, end = mjw._stats1_section_bounds(stats1, section)
+        for label in labels:
+            row = next(
+                row
+                for row in range(start + 1, end + 1)
+                if str(stats1.cell(row, 1).value or "").strip() == label
+            )
+            for col in (2, 3, 4):
+                stats1.cell(row, col).value = 0.99
+    for row in range(13, 17):
+        stats1.cell(row, 8).fill = PatternFill("solid", fgColor=PROFIT_FILL)
+        stats1.cell(row, 9).fill = PatternFill("solid", fgColor=LOSS_FILL)
+
+    symbols = wb[SYMBOLS_SHEET]
+    symbol_headers = _instrument_averages_header_map(symbols)
+    eurusd_row = next(
+        row
+        for row in range(INSTRUMENT_AVERAGES_DATA_START_ROW, symbols.max_row + 1)
+        if str(symbols.cell(row, symbol_headers["Symbol"]).value or "").upper()
+        == "EURUSD"
+    )
+    sentinel_win_rate = 0.777
+    symbols.cell(eurusd_row, symbol_headers["Win Rate %"]).value = (
+        sentinel_win_rate
+    )
+    wb.save(path)
+    wb.close()
+
+    expected_metrics = mjw._dashboard_extended_metrics(
+        snapshot["items"],
+        {},
+    )
+
+    def resync(active_snapshot):
+        result = update_master_journal_workbook_data_only(
+            path,
+            active_snapshot,
+            preserve_existing_layout=True,
+            publish_recommendation_assets=False,
+        )
+        assert result["ok"] is True
+        Path(result["candidate_path"]).replace(path)
+        return result
+
+    first = resync(snapshot)
+    first_style_signature = _style_table_signature(path)
+    first_value_fingerprint = _workbook_semantic_idempotence_fingerprint(path)
+    second = resync(snapshot)
+    assert _style_table_signature(path) == first_style_signature
+    assert _workbook_semantic_idempotence_fingerprint(path) == (
+        first_value_fingerprint
+    )
+    assert first["diagnostics"]["symbol_win_rate_inputs_unchanged"] is True
+    assert second["diagnostics"]["symbol_win_rate_inputs_unchanged"] is True
+
+    wb = load_workbook(path, data_only=False)
+    try:
+        stats1 = wb[STATS1_SHEET]
+        assert stats1.max_column == 4
+        assert not any(col > 4 for _row, col in stats1._cells)
+        market_cols = mjw._stats1_market_columns(stats1)
+        for section, suffix in (("Winners", "winners"), ("Losers", "losers")):
+            start, end = mjw._stats1_section_bounds(stats1, section)
+            for label, key in (
+                ("Avg stop %", f"avg_stop_pct_{suffix}"),
+                ("Avg target %", f"avg_target_pct_{suffix}"),
+            ):
+                row = next(
+                    row
+                    for row in range(start + 1, end + 1)
+                    if str(stats1.cell(row, 1).value or "").strip() == label
+                )
+                for market, col in market_cols.items():
+                    assert stats1.cell(row, col).value == pytest.approx(
+                        expected_metrics[market][key] / 100.0
+                    )
+        symbols = wb[SYMBOLS_SHEET]
+        headers = _instrument_averages_header_map(symbols)
+        eurusd_row = next(
+            row
+            for row in range(INSTRUMENT_AVERAGES_DATA_START_ROW, symbols.max_row + 1)
+            if str(symbols.cell(row, headers["Symbol"]).value or "").upper()
+            == "EURUSD"
+        )
+        assert symbols.cell(eurusd_row, headers["Win Rate %"]).value == pytest.approx(
+            sentinel_win_rate
+        )
+    finally:
+        wb.close()
+
+    changed_snapshot = deepcopy(snapshot)
+    changed_snapshot["items"][0]["net_profit"] = -120.5
+    changed_snapshot["items"][0]["result_pct"] = -2.3
+    changed_snapshot["items"][0]["r_multiple"] = -1.2
+    changed_snapshot["stats"]["by_instrument"][0]["wins"] = 0
+    changed_snapshot["stats"]["by_instrument"][0]["losses"] = 2
+    changed_snapshot["stats"]["by_instrument"][0]["win_rate_pct"] = 0
+    changed = resync(changed_snapshot)
+    assert changed["diagnostics"]["symbol_win_rate_inputs_unchanged"] is False
+    wb = load_workbook(path, data_only=False)
+    try:
+        symbols = wb[SYMBOLS_SHEET]
+        headers = _instrument_averages_header_map(symbols)
+        eurusd_row = next(
+            row
+            for row in range(INSTRUMENT_AVERAGES_DATA_START_ROW, symbols.max_row + 1)
+            if str(symbols.cell(row, headers["Symbol"]).value or "").upper()
+            == "EURUSD"
+        )
+        assert symbols.cell(eurusd_row, headers["Win Rate %"]).value == 0
+    finally:
+        wb.close()
+
+
+def test_checked_in_follow_up_workbook_matches_parent_regression_values(
+    tmp_path: Path,
+):
+    parent_path = _git_workbook_fixture(
+        "db58d4357b5ad59896977ea6a0ce0175aae744fe",
+        tmp_path,
+    )
+    current_path = Path("journal/Trading Journal.xlsx")
+    parent = load_workbook(parent_path, data_only=False)
+    current = load_workbook(current_path, data_only=False)
+    try:
+        expected_stats1 = {
+            "B43": 0.00825001214023611,
+            "C43": 0.001408374914534827,
+            "D43": 0.03301022305229791,
+            "B46": 0.02050432835416064,
+            "C46": 0.00331716938910343,
+            "D46": 0.07937528664826464,
+            "B60": 0.01095291800287766,
+            "C60": 0.001450852693278441,
+            "D60": 0.03447221440748848,
+            "B63": 0.032589728043436,
+            "C63": 0.003853497734971225,
+            "D63": 0.1005498639554257,
+        }
+        stats1 = current[STATS1_SHEET]
+        assert {
+            coordinate: stats1[coordinate].value
+            for coordinate in expected_stats1
+        } == expected_stats1
+        assert stats1.max_column == 4
+        assert not any(col > 4 for _row, col in stats1._cells)
+
+        def symbol_win_rates(wb):
+            ws = wb[SYMBOLS_SHEET]
+            headers = _instrument_averages_header_map(ws)
+            return {
+                str(ws.cell(row, headers["Symbol"]).value or "").strip().upper():
+                ws.cell(row, headers["Win Rate %"]).value
+                for row in range(
+                    INSTRUMENT_AVERAGES_DATA_START_ROW,
+                    ws.max_row + 1,
+                )
+                if ws.cell(row, headers["Symbol"]).value not in (None, "")
+            }
+
+        assert symbol_win_rates(current) == symbol_win_rates(parent)
+        assert {
+            symbol: symbol_win_rates(current)[symbol]
+            for symbol in (
+                "USDCAD",
+                "GBPUSD",
+                "EURUSD",
+                "USDJPY",
+                "USDCHF",
+                "NZDUSD",
+                "CHFJPY",
+            )
+        } == {
+            "USDCAD": 0.3680555555555556,
+            "GBPUSD": 0.319672131147541,
+            "EURUSD": 0.3916666666666667,
+            "USDJPY": 0.2978723404255319,
+            "USDCHF": 0.3970588235294117,
+            "NZDUSD": 0.2142857142857143,
+            "CHFJPY": 0.3076923076923077,
+        }
+
+        populated_extrema = 0
+        for sheet_name in (
+            REPORT_YEARLY_SHEET,
+            *[str(year) for year in range(2018, 2027)],
+        ):
+            parent_sheet = parent[sheet_name]
+            current_sheet = current[sheet_name]
+            for label in ("Max R loss", "Max R win"):
+                parent_row = next(
+                    row
+                    for row in range(1, parent_sheet.max_row + 1)
+                    if str(parent_sheet.cell(row, 1).value or "").strip()
+                    == label
+                )
+                current_row = next(
+                    row
+                    for row in range(1, current_sheet.max_row + 1)
+                    if str(current_sheet.cell(row, 1).value or "").strip()
+                    == label
+                )
+                parent_values = [
+                    parent_sheet.cell(parent_row, col).value
+                    for col in range(2, parent_sheet.max_column + 1)
+                ]
+                current_values = [
+                    current_sheet.cell(current_row, col).value
+                    for col in range(2, current_sheet.max_column + 1)
+                ]
+                assert current_values == parent_values
+                populated_extrema += sum(
+                    value not in (None, "") for value in current_values
+                )
+                if sheet_name == "2026":
+                    assert all(value in (None, "") for value in current_values)
+        assert populated_extrema == 176
+
+        expected_links = {
+            "B25": "Trading%20Journal.assets/recommendations/overall-stop.html",
+            "C25": "Trading%20Journal.assets/recommendations/fx-stop.html",
+            "D25": "Trading%20Journal.assets/recommendations/crypto-stop.html",
+            "B29": "Trading%20Journal.assets/recommendations/overall-target.html",
+            "C29": "Trading%20Journal.assets/recommendations/fx-target.html",
+            "D29": "Trading%20Journal.assets/recommendations/crypto-target.html",
+        }
+        assert {
+            coordinate: stats1[coordinate].hyperlink.target
+            for coordinate in expected_links
+        } == expected_links
+    finally:
+        current.close()
+        parent.close()
+
+    assert set(expected_links.values()).issubset(
+        set(_worksheet_relationship_targets(current_path, STATS1_SHEET))
+    )
 
 
 def test_recommendation_svg_and_html_bounds_scale_inside_wide_and_narrow_views():

@@ -1,91 +1,89 @@
-Final implementation summary - Trading Journal formatting repair (Brief 1)
+Final implementation summary - Trading Journal Brief 1 follow-up
 
 Scope
 - Repository: C:\GPT\CODEX-master
-- Brief: CODEX_BRIEF_2026-08-20_Trading_Journal_Formatting_Repair.txt
+- Brief: CODEX_BRIEF_2026-08-22_Trading_Journal_Brief1_Follow_Up.txt
 - Starting branch: codex/journal-equity-fx-final-20260726
-- Starting HEAD: db58d4357b5ad59896977ea6a0ce0175aae744fe
-- The repair was implemented in the workbook generator/preservation path and tests, then applied to the authoritative workbook and its generated recommendation assets. No one-off workbook-only patch was used.
+- Starting HEAD and origin/master: 6f2382c1fa8844bf5caf1495ae1ddcbb5ad04c27
+- Parent read-only workbook baseline: db58d4357b5ad59896977ea6a0ce0175aae744fe
+- This was the narrow Brief 1 corrective follow-up only. No Brief 2, calculator, broker, Open Orders, Pine, equity-curve, or FX Weekend behavior was changed.
 
-1. Recommendation explanation HTML/SVG
-- Reworked the self-contained offline recommendation chart layout to a 1040 x 520 SVG with explicit plot margins, point insets, responsive sizing, visible overflow, and clamped labels.
-- Preserved recommendation calculations, point data, tooltips, colors, marker semantics, links, and asset filenames.
-- Published 85 authoritative recommendation HTML files. No page references an external script, image, or stylesheet asset.
-- Added a parsed wide/narrow bounds regression that checks the 1280 px and 360 px render geometries, including plot points, labels, legends, titles, and axes.
+1. STATS1 winner/loser averages
+- Restored all 12 parent-baseline winner/loser Avg stop % and Avg target % values in B/C/D for rows 43, 46, 60, and 63.
+- The production resync now derives winner values from winner-only trades and loser values from loser-only trades for Overall, FX, and Crypto. It does not substitute unfiltered market averages when outcome-specific rows are available.
+- The values retain 0.00% formatting and neutral fills.
+- A two-pass preservation regression proves the 12 metrics remain outcome-specific and stable.
 
-2. Shared statistics semantic policy
-- Added one semantic formatting policy shared by STATS1, YEARLY REPORT, and report sheets 2018 through 2026.
-- Counts use integer display, percentages use 0.00%, R values use 0.000"R", duration/date/text values use General, FX currency uses AUD, and crypto currency uses USDT with precision retained.
-- Winner/profit metrics use the established green fill, loser/loss metrics use the established red fill, and neutral/blank metrics use a genuine no-fill state.
-- Removed blanket section fills and stale generated conditional formatting while preserving manual conditional formatting.
+2. Report Max R restoration and fallback
+- Restored all 176 populated Max R loss/Max R win cells from the parent workbook across YEARLY REPORT and 2018-2025, including their exact instrument/date source text.
+- 2026 remains blank for these extrema, as in the parent workbook.
+- Preservation mode retains an existing sourced string whenever a safe replacement source cannot be derived, except for an explicitly test-only bucket where stale extrema must clear.
+- New workbooks now write a valid numeric R value with the normal 0.000"R" format when source metadata is unavailable; no instrument/date text is fabricated.
 
-3. STATS1 and report repair
-- Repaired the detailed STATS1 percentage, R, count, duration, commission, drawdown, timeframe, and neutral-fill cases required by the brief.
-- Applied the same semantic formats/fills to YEARLY REPORT and every 2018-2026 report sheet, including trailing blank-row cleanup.
-- Preserved canonical STATS1 label typography and every STATS1 border edge.
-- Preserved user layout/content, formulas, comments, hyperlinks, views, panes, merges, dimensions, validations, manual conditional formatting, print settings, sheet order, active sheet, selected sheet, chart OOXML, and calculation settings.
+3. SYMBOLS Win Rate preservation
+- Restored the seven parent-baseline Win Rate % values for USDCAD, GBPUSD, EURUSD, USDJPY, USDCHF, NZDUSD, and CHFJPY.
+- A source-input fingerprint now covers the trade identity, symbol, test-trade state, and outcome inputs that can affect win rate.
+- Preservation mode retains existing Win Rate % values only when that fingerprint is unchanged; a genuinely changed source snapshot follows the normal recalculation path.
+- The repaired parent/run-1/run-2 input fingerprint is c7eb747cc8ff0fec8f9456fc71cc4dae2bd69a5ecb703b37c588cbc9c5406bb6. The defective workbook fingerprint was 58a8e236087e107c079cde1b3850666b1fb3c1d69e92d40b7e7087edbece0f95.
 
-4. Preservation and migration hardening
-- Trade Log annotations, formulas, hyperlinks, and custom row dimensions are preserved by stable Row ID/header identity so they move safely with surviving rows.
-- Generator-owned STATS1/recommendation hyperlinks and STATS2 risk comments can be refreshed without weakening authored-content protection.
-- Canonical STATS1 is preserved strictly; historical Source-row schemas remain eligible for the existing structural migration.
-- Legacy _Trade Meta removal is recognized as an intentional generator migration.
-- A malformed Trade Log filter may be repaired only to the exact canonical footprint; valid authored filter footprints remain protected.
-- Candidate updates remain fail closed: the live workbook is adopted only after preservation, chart, calculation, semantic, and fingerprint checks pass.
+4. STATS1 used range and hyperlink policy
+- Removed the eight empty semantic-fill cells at H13:I16. The current STATS1 used range ends at column D and no styled/materialized cell remains beyond D.
+- Orphan fill cleanup is gated by discovered market columns, populated columns, and merged ranges, so a future legitimate nonblank column is not cleared.
+- All six recommendation hyperlinks now use one canonical encoded relative-target policy:
+  Trading%20Journal.assets/recommendations/{overall|fx|crypto}-{stop|target}.html
+- The service verifier decodes the URI target only when resolving the corresponding local file, retaining the exact encoded workbook relationship.
+- Tests inspect both openpyxl hyperlink values and worksheet relationship XML.
 
-5. Authoritative workbook and assets
-- Original workbook and safety snapshot SHA-256 before repair: 924FE19F16707B8D6E37D6C27D2872C16CEB1AF1CA626701465CAD8082B358CC.
-- Final authoritative workbook: journal/Trading Journal.xlsx.
-- Final workbook SHA-256: 4EE3387AAB44A32B6F99E3024421A3412022172312FA803EBA1E98DDCE8286DC.
-- Final semantic/idempotence fingerprint: ff0c8adb240ad52f6dfdb8e1d476c3de51bbbedf94503b7be0e72812829b658d.
-- Preservation contract SHA-256: c315c921587b5cbd656dc909ec575a9448c2935c1eac275a8c5c7b624e777fdd.
-- Managed statistics presentation SHA-256: f2d11e8299891968ebe144e03b0ca776775f4949b415a6300f02315176dc7bba.
-- STATS1 label SHA-256: 5c72767d2a173072c90cafcc77acd771ba76e00da8eaadfaccc9f625509b8c93.
-- STATS1 border SHA-256: 308d8e083d60d405811e86f77297897a025b1433b998d75c8f7a78f497769125.
-- Sheet order remains STATS1, STATS2, SYMBOLS, Trade Log, P&L Calendar, ` SIM`, YEARLY REPORT, and 2018-2026. STATS1 remains active and selected.
-- Authoritative diagnostics verified two chart OOXML parts, two chart relationships, the preservation contract, and the managed presentation contract.
+5. Style-table stability
+- Style component counts (cellXfs, fonts, fills, borders, custom numFmts):
+  - Parent baseline: 511, 38, 23, 113, 16.
+  - Defective Brief 1 workbook before this follow-up: 894, 47, 26, 136, 21.
+  - Follow-up run 1: 894, 47, 26, 136, 21.
+  - Follow-up run 2: 894, 47, 26, 136, 21.
+- Exact parent-to-defective deltas were +383 cellXfs, +9 fonts, +3 fills, +23 borders, and +5 custom number formats. The follow-up adds zero entries to every table on either pass.
+- The inherited 894-entry table was not destructively compacted because deletion/remapping could renumber unrelated cell styles and violate the workbook preservation contract. The repair instead avoids equivalent component assignments, restores authored component IDs directly where required, and rebuilds only openpyxl's in-memory lookup map without deleting or renumbering styles.
+- Run-1 and run-2 styles.xml SHA-256 are identical: eaf6754e93f5dbef5151739407186104334e1c6d922b699894fd87e1bd6e1a73.
 
-6. Real-workbook idempotence and visual QA
-- Two preservation-mode resyncs were run from the same verified original snapshot.
-- Both runs reported zero semantic problems and the identical full fingerprint ff0c8adb240ad52f6dfdb8e1d476c3de51bbbedf94503b7be0e72812829b658d.
-- Both runs retained the same sheet order, active/selected sheet, preservation hash, managed-format hash, STATS1 label hash, and STATS1 border hash.
-- Microsoft Excel COM exported STATS1, YEARLY REPORT, 2018, 2021, 2025, and 2026 to PDF; 14 rendered pages were inspected. Managed content was legible and unclipped. Extra blank print pages contained no managed content and came from the preserved print area.
-- The visually inspected workbook and final authoritative workbook share the exact managed statistics presentation hash f2d11e8299891968ebe144e03b0ca776775f4949b415a6300f02315176dc7bba.
+6. Real-workbook fingerprints and preservation audit
+- Parent workbook SHA-256: 924fe19f16707b8d6e37d6c27d2872c16ceb1af1ca626701465cad8082b358cc.
+- Defective authoritative safety copy SHA-256: 4ee3387aab44a32b6f99e3024421a3412022172312fa803eba1e98ddce8286dc.
+- Follow-up run-1 SHA-256: a71c91b0d2f4f577c1c0d1b673e16d5e160028558096dbe1645a8208b3cca72e.
+- Follow-up run-2 and final authoritative workbook SHA-256: baaac1c2f0b51bf1372f8804989325dc972cc3cb4490d3ae77e2a9331509ba17.
+- Run-1, run-2, and authoritative semantic idempotence fingerprint: d776a806e1f65fef991f7dc78c98b8b40070e0bcb092dcc7b9a67fd727a472c2.
+- Run-1 and run-2 targeted values, presentation semantics, recommendation relationships, and styles are identical.
+- chart1.xml, chart2.xml, their anchors, and chart relationships are preserved from the successful Brief 1 workbook.
+- The preservation audit also passed sheet order/selection, merges, panes, dimensions, filters, validations, formulas, Trade Log comments/hyperlinks, STATS1 typography and every border edge, semantic formats/fills, and the repaired recommendation SVG bounds.
 
-7. Verification results
-- tests/test_master_journal_workbook.py: all 212 collected tests passed across four non-overlapping 53-test shards.
-  - 53 passed in 569.30s.
-  - 53 passed in 1674.17s.
-  - 53 passed in 5676.87s.
-  - 53 passed in 2774.13s.
-- tests/test_master_service_master_journal_sync.py: 157 passed, 149 warnings in 4725.80s after the preservation compatibility fix.
-- The two previously failing legacy/filter compatibility cases passed together: 2 passed in 267.54s.
-- Focused canonical-filter, legacy metadata, tail-filter, and comprehensive semantic/idempotence regressions: 4 passed in 506.73s.
-- Final authoritative workbook recommendation, resync, border/layout, OPC, external-link, canonical-chart, and wide/narrow SVG checks: 7 passed in 683.63s.
-- Python compilation passed for tools/master_journal_workbook.py and the affected test files.
-- git diff --check passed for all intended files; output contained only normal LF-to-CRLF working-copy notices.
-- The 149 service-suite warnings are existing FastAPI on_event/httpx deprecations and expected mocked unawaited-coroutine warnings; there are no test failures.
+7. Final verification results
+- Focused checked-in parent/current regression: 1 passed, 2 pytest-cache warnings in 3.62s.
+- Exact workbook suite: 216 passed, 2 pytest-cache warnings in 6624.35s (1:50:24).
+- Exact master-service synchronization suite: 157 passed, 151 warnings in 2324.09s (0:38:44).
+- The full workbook suite includes every new focused follow-up regression: exact 12-cell restoration, outcome-subset sourcing, all 176 report cells, numeric/preservation fallback, seven Win Rate values plus changed-input behavior, STATS1 used range, six exact relationship targets, and two-pass style/value stability.
+- Python compilation passed for tools/master_journal_workbook.py, render/master_service.py, tests/test_master_journal_workbook.py, and tests/test_master_service_master_journal_sync.py.
+- git diff --check passed; output contained only normal LF-to-CRLF working-copy notices.
+- The service warnings are existing FastAPI lifecycle/httpx deprecations, mocked coroutine resource warnings, and pytest-cache access warnings; there are no test failures.
 
-8. Browser limitation
-- The browser-control workflow was followed, including the required connection-troubleshooting check.
-- Browser discovery returned an empty list, so no real browser was available for the requested wide/narrow page render.
-- No unrelated browser or standalone Playwright fallback was used, as required by the browser-control workflow.
-- Responsive geometry is covered by the passing parsed 1280 px/360 px bounds test, and all 85 published pages passed the offline external-asset scan. A live browser screenshot remains the only unavailable evidence item.
+8. Visual and browser verification
+- Microsoft Excel opened the exact final authoritative workbook read-only and rendered STATS1, SYMBOLS, YEARLY REPORT, 2018, 2021, 2025, and 2026 to PNG.
+- All seven final renders were inspected. Managed content is legible and unclipped; STATS1 ends at D without the H/I block; SYMBOLS and report layouts remain intact; sourced extrema are visible through 2025; and the 2026 extrema remain blank.
+- No live in-app browser instance was available after the required browser-control discovery/troubleshooting check.
+- The existing parsed desktop/narrow-width SVG bounds regression passed in the 216-test workbook suite, and chart OOXML preservation passed. Live browser screenshots are the only unavailable evidence item.
 
 9. Files intended for publication
 - tools/master_journal_workbook.py
+- render/master_service.py
 - tests/test_master_journal_workbook.py
+- tests/test_master_service_master_journal_sync.py
 - journal/Trading Journal.xlsx
-- journal/Trading Journal.assets/recommendations/*.html (85 files)
 - summary/CODEX_SUMMARY_latest.txt
 
 10. Preserved unrelated/local state
 - Preserved and excluded from publication: custom instructions/CODEX_BRIEF_INSTRUCTIONS.txt and custom instructions/CODEX_BRIEF_INSTRUCTIONS_CHATGPT_ONLY.docx.
 - Preserved and excluded from publication: render/data/monthly_aud_revaluation.json, monthly_aud_revaluation_state.json, pending_webhooks.json, trade_contexts.json, and webhook_attempts.json.
-- Preserved and excluded from publication: CODEX_BRIEF_2026-08-20_Trading_Journal_Formatting_Repair.txt and CODEX_BRIEF_2026-08-20_Trading_Tools_Brokers_Pine_FXWeekend.txt.
-- No secrets, environment files, logs, caches, runtime data, QA images, safety copies, candidate workbooks, or task helper scripts are intended for the commit.
+- Preserved and excluded from publication: CODEX_BRIEF_2026-08-20_Trading_Journal_Formatting_Repair.txt, CODEX_BRIEF_2026-08-20_Trading_Tools_Brokers_Pine_FXWeekend.txt, and CODEX_BRIEF_2026-08-22_Trading_Journal_Brief1_Follow_Up.txt.
+- No secrets, environment files, logs, caches, runtime data, safety copies, candidate workbooks, QA images, or task helper scripts are intended for the commit.
 
 11. Publication workflow
 - This summary is written before the mandatory repository publication step.
-- PATCH_DESKTOP_PUSH.bat must commit the intended Brief 1 package, pull/rebase safely, push HEAD to origin/master, fetch, and verify that local HEAD equals origin/master.
-- The pre-existing unrelated working-tree state is protected before publication and restored afterward.
+- The pre-existing unrelated working-tree files are temporarily isolated, PATCH_DESKTOP_PUSH.bat is run on only the intended follow-up package, and those unrelated files are then restored unchanged.
+- Completion is not claimed until the script succeeds and local HEAD is independently verified equal to origin/master.

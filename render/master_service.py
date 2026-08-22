@@ -37730,12 +37730,13 @@ def _fast_verify_trading_journal_workbook(path: Path, *, expected_snapshot: Opti
         for cell in recommendation_cells:
             hyperlink = cell.hyperlink
             target = str(getattr(hyperlink, "target", "") or "").strip() if hyperlink else ""
+            decoded_target = unquote(target)
             diagnostics["recommendation_links_checked"].append(
                 {"sheet": cell.parent.title, "cell": cell.coordinate, "target": target}
             )
-            if not target or urlparse(target).scheme:
+            if not target or urlparse(decoded_target).scheme:
                 return {"ok": False, "error": "recommendation_offline_hyperlink_missing", "diagnostics": diagnostics}
-            artifact = (path.parent / Path(target.replace("/", os.sep))).resolve()
+            artifact = (path.parent / Path(decoded_target.replace("/", os.sep))).resolve()
             try:
                 artifact.relative_to(path.parent.resolve())
             except ValueError:
