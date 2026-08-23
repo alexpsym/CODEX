@@ -311,18 +311,50 @@ def test_custom_indicator_moving_100_marker_counts_current_forming_bar_exactly()
     assert "if showHundredCandleMarker and hundredMarkerHasHistory" in marker_block
 
 
-def test_session_event_boundary_keeps_a_final_friday_close_without_duplicate_next_bar() -> None:
+def test_session_markers_wait_until_event_time_on_5_15_and_30_minute_bars() -> None:
     source = _source()
     session_block = source.split("// TRADING SESSION OPEN/CLOSE LINES", 1)[1].split(
         "// MOVING 100-CANDLE MARKER", 1
     )[0]
     assert "time < eventTs and eventTs <= time_close" in session_block
     assert "time <= eventTs and eventTs < time_close" not in session_block
+    assert "if showSessionLines and barstate.isconfirmed" in source
+    assert "if showSessionLines and barstate.isnew" not in source
 
     event_ts = 17 * 60
-    bars = [(16 * 60 + 30, 17 * 60), (17 * 60, 17 * 60 + 30)]
-    matches = [start < event_ts <= end for start, end in bars]
-    assert matches == [True, False]
+    for timeframe_minutes in (5, 15, 30):
+        bar_open = event_ts - timeframe_minutes
+        bar_close = event_ts
+        realtime_updates = [
+            (bar_open, False),
+            (bar_open + timeframe_minutes / 2, False),
+            (bar_close, True),
+        ]
+        marker_creation_times = [
+            update_time
+            for update_time, confirmed in realtime_updates
+            if bar_open < event_ts <= bar_close and confirmed
+        ]
+        assert marker_creation_times == [event_ts]
+
+
+def test_final_friday_new_york_close_uses_confirmed_final_bar_without_a_next_bar() -> None:
+    source = _source()
+    event_ts = 17 * 60
+    final_friday_bar = (16 * 60 + 30, event_ts)
+    start, end = final_friday_bar
+    realtime_updates = [(start, False), (end, True)]
+    marker_creation_times = [
+        update_time
+        for update_time, confirmed in realtime_updates
+        if start < event_ts <= end and confirmed
+    ]
+
+    assert "time < eventTs and eventTs <= time_close" in source
+    assert "if showSessionLines and barstate.isconfirmed" in source
+    assert start < event_ts <= end
+    assert end == event_ts
+    assert marker_creation_times == [event_ts]
 
 
 def test_custom_indicator_moving_100_marker_has_one_bounded_split_lifecycle() -> None:

@@ -1162,6 +1162,51 @@ def _status_datetime(value: Any) -> Optional[datetime]:
     return parsed.astimezone(BRISBANE_TZ)
 
 
+def _news_verification_datetime(value: Any) -> Optional[datetime]:
+    """Parse only explicit timezone-aware evidence for a news cutoff."""
+
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed.astimezone(BRISBANE_TZ)
+
+
+def _news_selected_scope_verified_at(
+    result: Dict[str, Any], selected: List[str]
+) -> Optional[datetime]:
+    """Return the latest trustworthy flat time for the full selected scope."""
+
+    if not result.get("verified_flat") or not selected:
+        return None
+    accounts = result.get("accounts")
+    if not isinstance(accounts, dict):
+        return None
+    verified_times: List[datetime] = []
+    for mode in selected:
+        account = accounts.get(mode)
+        if (
+            not isinstance(account, dict)
+            or account.get("state") != "verified flat"
+        ):
+            return None
+        verified_at = _news_verification_datetime(
+            account.get("last_verified_flat_at")
+        )
+        if verified_at is None:
+            return None
+        verified_times.append(verified_at)
+    return max(verified_times) if verified_times else None
+
+
 def _as_brisbane(value: datetime) -> datetime:
     if value.tzinfo is None:
         return BRISBANE_TZ.localize(value)
@@ -1388,8 +1433,12 @@ def _run_due_news_events(
                 }
             )
             prior = {"scope_history": history[-20:]}
+        prior_cutoff_missed = (
+            prior.get("cutoff_met") is False
+            or "cutoff missed" in str(prior.get("state") or "").lower()
+        )
         cutoff_met = prior.get("cutoff_met")
-        if current > cutoff:
+        if prior_cutoff_missed or current > cutoff:
             cutoff_met = False
         audit[event_id] = {
             **prior,
@@ -1466,10 +1515,21 @@ def _run_due_news_events(
     _apply_attempt_status(result)
 
     verified = bool(result.get("verified_flat"))
+    latest_scope_verification = _news_selected_scope_verified_at(
+        result, selected
+    )
     verified_at = (
-        str(result.get("last_verified_flat_at") or attempt_at)
-        if verified
+        latest_scope_verification.isoformat()
+        if latest_scope_verification is not None
         else None
+    )
+    verification_evidence_error = (
+        None
+        if not verified or latest_scope_verification is not None
+        else (
+            "Verified-flat result lacked a valid timezone-aware verification "
+            "timestamp for every selected account."
+        )
     )
     outcomes = _news_account_outcomes(result)
     cutoff_results: List[bool] = []
@@ -1478,11 +1538,13 @@ def _run_due_news_events(
         release_at, cutoff = _news_event_times(event)
         entry = audit[event_id]
         if verified:
-            # The scheduler's sampled time is the strict boundary: an exact
-            # cutoff iteration may meet the guarantee, while any late wake is
-            # permanently recorded as missed even if flatness is later proven.
+            # A scheduler wake at the boundary is insufficient evidence. Every
+            # selected account must have actually been verified flat by it.
             cutoff_met = bool(
-                entry.get("cutoff_met") is not False and current <= cutoff
+                entry.get("cutoff_met") is not False
+                and current <= cutoff
+                and latest_scope_verification is not None
+                and latest_scope_verification <= cutoff
             )
             state = (
                 "verified flat at news cutoff"
@@ -1494,9 +1556,11 @@ def _run_due_news_events(
                     "verified_flat_at": verified_at,
                     "cutoff_met": cutoff_met,
                     "state": state,
-                    "last_error": None,
+                    "last_error": verification_evidence_error,
                 }
             )
+            if current >= release_at and latest_scope_verification is None:
+                entry["post_release_attempted_at"] = attempt_at
         else:
             cutoff_met = False
             state = (
@@ -1535,7 +1599,7 @@ def _run_due_news_events(
         "account_outcomes": deepcopy(outcomes),
         "verified_flat_at": verified_at,
         "cutoff_met": bool(verified and all(cutoff_results)),
-        "error": result.get("error"),
+        "error": result.get("error") or verification_evidence_error,
     }
     status_with_audit = {
         **status_snapshot(),
@@ -2114,8 +2178,8 @@ PAGE_TEMPLATE = """
     {% for event_id, audit in status.news_audit | dictsort %}
       <tr>
         <td>{{ event_id }}</td>
-        <td>{{ audit.get("release_at") or "â€”" }}</td>
-        <td>{{ audit.get("liquidation_cutoff") or "â€”" }}</td>
+        <td>{{ audit.get("release_at") or "—" }}</td>
+        <td>{{ audit.get("liquidation_cutoff") or "—" }}</td>
         <td>{{ audit.get("attempt_at") or "Never" }}</td>
         <td>{{ audit.get("verified_flat_at") or "No" }}</td>
         <td>{{ "Yes" if audit.get("cutoff_met") is sameas true else "No" if audit.get("cutoff_met") is sameas false else "Pending" }}</td>
@@ -2159,7 +2223,7 @@ PAGE_TEMPLATE = """
       event.preventDefault();
       output.hidden = false;
       output.dataset.ok = "";
-      output.textContent = "Saving news releaseâ€¦";
+      output.textContent = "Saving news release…";
       try {
         const response = await fetch(form.action, {
           method: "POST",

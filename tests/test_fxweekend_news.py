@@ -28,6 +28,7 @@ def _load_executor():
 
 
 fx = _load_executor()
+DEFAULT_VERIFIED_AT = "2026-08-24T10:00:00+10:00"
 
 
 def _settings(releases=(), account_modes=("demo", "live"), **overrides):
@@ -43,8 +44,14 @@ def _settings(releases=(), account_modes=("demo", "live"), **overrides):
     return fx.migrate_settings(payload)
 
 
-def _account(mode: str, state: str = "verified flat") -> dict:
-    verified_at = "2026-08-24T10:00:00+10:00" if state == "verified flat" else None
+def _account(
+    mode: str,
+    state: str = "verified flat",
+    *,
+    verified_at: str | None = DEFAULT_VERIFIED_AT,
+) -> dict:
+    if state != "verified flat":
+        verified_at = None
     return {
         "mode": mode,
         "state": state,
@@ -65,10 +72,18 @@ def _result(
     *,
     verified: bool,
     state: str | None = None,
+    verification_times: dict[str, str | None] | None = None,
+    aggregate_verified_at: str | None = DEFAULT_VERIFIED_AT,
 ) -> dict:
     resolved_state = state or ("verified flat" if verified else "API failure")
     accounts = {
-        mode: _account(mode, "verified flat" if verified else resolved_state)
+        mode: _account(
+            mode,
+            "verified flat" if verified else resolved_state,
+            verified_at=(verification_times or {}).get(
+                mode, DEFAULT_VERIFIED_AT
+            ),
+        )
         for mode in modes
     }
     return {
@@ -76,9 +91,7 @@ def _result(
         "result": resolved_state,
         "error": None if verified else "selected account close was not verified",
         "last_attempt_at": "2026-08-24T10:00:00+10:00",
-        "last_verified_flat_at": (
-            "2026-08-24T10:00:00+10:00" if verified else None
-        ),
+        "last_verified_flat_at": aggregate_verified_at if verified else None,
         "accounts": accounts,
         "verified_flat": verified,
     }
@@ -391,7 +404,14 @@ def test_failed_cutoff_retries_before_release_and_never_retroactively_meets_cuto
     attempts = iter(
         (
             _result(("demo",), verified=False, state="partial closure failure"),
-            _result(("demo",), verified=True),
+            _result(
+                ("demo",),
+                verified=True,
+                verification_times={
+                    "demo": "2026-08-24T10:01:00+10:00"
+                },
+                aggregate_verified_at="2026-08-24T10:01:00+10:00",
+            ),
         )
     )
     monkeypatch.setattr(fx, "run_liquidation", lambda *_args, **_kwargs: next(attempts))
@@ -414,6 +434,37 @@ def test_failed_cutoff_retries_before_release_and_never_retroactively_meets_cuto
     assert second["news_last_result"]["cutoff_met"] is False
 
 
+def test_attempt_at_cutoff_with_late_actual_verification_misses_cutoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings([("2026-08-24", "10:15")], account_modes=("demo",))
+    cutoff = fx.BRISBANE_TZ.localize(datetime(2026, 8, 24, 10, 0))
+    event_id = settings["news_events"][0]["id"]
+    late_verified_at = "2026-08-24T10:00:05+10:00"
+    monkeypatch.setattr(
+        fx,
+        "run_liquidation",
+        lambda *_args, **_kwargs: _result(
+            ("demo",),
+            verified=True,
+            verification_times={"demo": late_verified_at},
+            aggregate_verified_at=late_verified_at,
+        ),
+    )
+    monkeypatch.setattr(
+        fx,
+        "closure_window",
+        lambda *_args, **_kwargs: {"phase": "before cutoff"},
+    )
+
+    status = fx.scheduler_iteration(settings, cutoff)
+    audit = status["news_audit"][event_id]
+
+    assert audit["verified_flat_at"] == late_verified_at
+    assert audit["cutoff_met"] is False
+    assert "cutoff missed" in audit["state"]
+
+
 def test_cutoff_met_is_strict_at_equality_and_missed_one_second_late(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -421,7 +472,14 @@ def test_cutoff_met_is_strict_at_equality_and_missed_one_second_late(
     cutoff = fx.BRISBANE_TZ.localize(datetime(2026, 8, 24, 10, 0))
     event_id = settings["news_events"][0]["id"]
     monkeypatch.setattr(
-        fx, "run_liquidation", lambda *_args, **_kwargs: _result(("demo",), verified=True)
+        fx,
+        "run_liquidation",
+        lambda *_args, **_kwargs: _result(
+            ("demo",),
+            verified=True,
+            verification_times={"demo": DEFAULT_VERIFIED_AT},
+            aggregate_verified_at=DEFAULT_VERIFIED_AT,
+        ),
     )
     monkeypatch.setattr(
         fx,
@@ -436,6 +494,81 @@ def test_cutoff_met_is_strict_at_equality_and_missed_one_second_late(
     late = fx.scheduler_iteration(settings, cutoff + timedelta(seconds=1))
     assert late["news_audit"][event_id]["cutoff_met"] is False
     assert "cutoff missed" in late["news_audit"][event_id]["state"]
+
+
+def test_one_late_account_misses_cutoff_for_the_full_selected_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings(
+        [("2026-08-24", "10:15")], account_modes=("demo", "live")
+    )
+    cutoff = fx.BRISBANE_TZ.localize(datetime(2026, 8, 24, 10, 0))
+    event_id = settings["news_events"][0]["id"]
+    live_verified_at = "2026-08-24T10:00:01+10:00"
+    monkeypatch.setattr(
+        fx,
+        "run_liquidation",
+        lambda *_args, **_kwargs: _result(
+            ("demo", "live"),
+            verified=True,
+            verification_times={
+                "demo": DEFAULT_VERIFIED_AT,
+                "live": live_verified_at,
+            },
+            aggregate_verified_at=live_verified_at,
+        ),
+    )
+    monkeypatch.setattr(
+        fx,
+        "closure_window",
+        lambda *_args, **_kwargs: {"phase": "before cutoff"},
+    )
+
+    status = fx.scheduler_iteration(settings, cutoff)
+    audit = status["news_audit"][event_id]
+
+    assert audit["verified_flat_at"] == live_verified_at
+    assert audit["cutoff_met"] is False
+    assert audit["account_outcomes"]["demo"]["verified_flat_at"] == DEFAULT_VERIFIED_AT
+    assert audit["account_outcomes"]["live"]["verified_flat_at"] == live_verified_at
+
+
+@pytest.mark.parametrize(
+    "untrustworthy_timestamp",
+    [None, "not-a-timestamp", "2026-08-24T10:00:00"],
+)
+def test_missing_invalid_or_naive_verification_evidence_never_meets_cutoff(
+    monkeypatch: pytest.MonkeyPatch,
+    untrustworthy_timestamp: str | None,
+) -> None:
+    settings = _settings([("2026-08-24", "10:15")], account_modes=("demo",))
+    cutoff = fx.BRISBANE_TZ.localize(datetime(2026, 8, 24, 10, 0))
+    event_id = settings["news_events"][0]["id"]
+    monkeypatch.setattr(
+        fx,
+        "run_liquidation",
+        lambda *_args, **_kwargs: _result(
+            ("demo",),
+            verified=True,
+            verification_times={"demo": untrustworthy_timestamp},
+            # A populated aggregate must not replace selected-account evidence.
+            aggregate_verified_at=DEFAULT_VERIFIED_AT,
+        ),
+    )
+    monkeypatch.setattr(
+        fx,
+        "closure_window",
+        lambda *_args, **_kwargs: {"phase": "before cutoff"},
+    )
+
+    status = fx.scheduler_iteration(settings, cutoff)
+    audit = status["news_audit"][event_id]
+
+    assert audit["verified_flat_at"] is None
+    assert audit["cutoff_met"] is False
+    assert "timezone-aware verification timestamp" in audit["last_error"]
+    assert status["news_last_result"]["verified_flat_at"] is None
+    assert status["news_last_result"]["cutoff_met"] is False
 
 
 def test_post_release_failure_gets_one_immediate_attempt_and_no_fake_success(
@@ -629,6 +762,16 @@ def test_news_html_and_api_are_date_time_only_and_do_not_guess_blackout(
     rendered = page.get_data(as_text=True)
     assert "News audit history" in rendered
     assert event["id"] in rendered
+
+
+def test_news_template_uses_valid_utf8_audit_placeholders_and_progress_text() -> None:
+    source = fx.PAGE_TEMPLATE
+
+    assert 'audit.get("release_at") or "—"' in source
+    assert 'audit.get("liquidation_cutoff") or "—"' in source
+    assert 'output.textContent = "Saving news release…";' in source
+    assert "â€”" not in source
+    assert "â€¦" not in source
 
 
 def test_render_defaults_status_signature_readiness_and_news_route_ownership(

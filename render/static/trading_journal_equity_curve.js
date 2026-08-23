@@ -155,7 +155,7 @@
 
   const formatHoverPercentage = (value) => {
     const number = Number(value);
-    if (!Number.isFinite(number)) return 'â€”';
+    if (!Number.isFinite(number)) return '—';
     return `${number.toLocaleString('en-AU', {
       minimumFractionDigits: 2,
       maximumFractionDigits: 6,

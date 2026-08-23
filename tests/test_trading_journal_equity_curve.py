@@ -338,6 +338,17 @@ def test_chart_y_axis_labels_are_percentages_and_dates_remain_on_x_axis() -> Non
     assert any("Jan" in label for label in labels)
 
 
+def test_invalid_percentage_placeholders_are_single_utf8_em_dashes() -> None:
+    code_points = _run_node(
+        "[TradingJournalEquityCurve.formatPercentage(NaN), "
+        "TradingJournalEquityCurve.formatHoverPercentage(NaN)]"
+        ".map((value) => Array.from(value).map((character) => "
+        "character.codePointAt(0)))"
+    )
+
+    assert code_points == [[0x2014], [0x2014]]
+
+
 def test_chart_measures_y_labels_and_keeps_them_inside_narrow_canvas() -> None:
     expression = r"""
 (() => {

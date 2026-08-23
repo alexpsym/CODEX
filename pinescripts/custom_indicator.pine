@@ -452,7 +452,10 @@ if barstate.isnew and sessionVisibilityKey != previousSessionVisibilityKey
     clearLabelArray(sessionLabels)
     previousSessionVisibilityKey := sessionVisibilityKey
 
-if showSessionLines and barstate.isnew
+// Confirm the containing bar before creating a marker. This prevents realtime
+// bars from drawing an event at their opening tick while retaining a final
+// Friday New York close on the bar whose confirmed close is the event time.
+if showSessionLines and barstate.isconfirmed
     if showSydneySession
         if showSessionOpens and isSessionEvent("Australia/Sydney", 8, 0) and not isSessionLocalWeekend(sessionEventTimestamp("Australia/Sydney", 8, 0), "Australia/Sydney")
             drawSessionMarker("Australia/Sydney", 8, 0, "SYD", true)
