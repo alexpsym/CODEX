@@ -15,6 +15,8 @@ if ([string]::IsNullOrWhiteSpace($DecisionPath)) {
 
 $buildFiles = @(
     "render/master_service.py",
+    "render/atr_scanner.py",
+    "render/static/atr_scanner.js",
     "render/static/calculator.js",
     "render/static/dashboard.js",
     "render/static/history_page.js",

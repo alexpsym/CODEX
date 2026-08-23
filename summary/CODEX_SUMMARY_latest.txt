@@ -1,97 +1,151 @@
-CODEX FOLLOW-UP SUMMARY
-Brief: BRIEF 2 FOLLOW-UP — TARGETED DEFECT REPAIR AND BYBIT DEMO CREDENTIAL CLEANUP
+CODEX COMPLETION SUMMARY
+Brief: CODEX_BRIEF_2026-08-24_ATR_Volatility_Scanner_Alerts_Pine.txt
 Recorded: 2026-08-24 (Australia/Brisbane)
-Status: targeted repository repairs complete and verified; Process-scope credential cleanup remains blocked by the active workspace safety policy
+Status: implementation and targeted verification complete; repository push workflow is the next required action
 
-BASELINE AND PRESERVATION
+BASELINE, SCOPE, AND PRESERVATION
 
-- Resumed branch codex/journal-equity-fx-final-20260726 at HEAD ffc2676e29f8465c36b789896d60b1fcefdb4540, matching origin/master.
-- Read repository-root AGENTS.md, the complete original CODEX_BRIEF_2026-08-20_Trading_Tools_Brokers_Pine_FXWeekend.txt, and the prior summary before editing.
-- Preserved the five pre-existing runtime changes under render/data/: monthly_aud_revaluation.json, monthly_aud_revaluation_state.json, pending_webhooks.json, trade_contexts.json, and webhook_attempts.json.
-- Did not inspect or modify custom-instruction files, C:\GPT\env.env, credentials, runtime state, or unrelated components.
-- Trading Journal.xlsx remained byte-for-byte unchanged. SHA-256 before and after: BAAAC1C2F0B51BF1372F8804989325DC972CC3CB4490D3AE77E2A9331509BA17.
-- No order, cancellation, position closure, liquidation, or other broker mutation was performed.
+- Worked in C:\GPT\CODEX-master on branch codex/journal-equity-fx-final-20260726 from HEAD 9fed3baa3cb64f54312ba9d6fb86de60d7299891. Initial HEAD matched origin/master (0 ahead, 0 behind).
+- Read AGENTS.md, this brief, the prior summary, and the relevant dashboard, alert-monitor, public Bybit, Pine, MT5 spread-feed/window, launcher, and test sources before editing.
+- Did not inspect or modify custom instructions/. No order, cancellation, amendment, position close, account mutation, or other live-money action was performed.
+- Preserved the five pre-existing user/runtime changes under render/data/: monthly_aud_revaluation.json, monthly_aud_revaluation_state.json, pending_webhooks.json, trade_contexts.json, and webhook_attempts.json. They must remain unstaged by PATCH_DESKTOP_PUSH.bat.
+- Did not change either Bybit credential pair or any credential variable. The crypto scanner uses unsigned public live market-data requests only.
+- Preserved the existing Market Watch spread EA/window source files byte-for-byte; the ATR feed/window use distinct files, IPC names, window title, styles, timer, and process guard.
 
-IMPLEMENTED REPAIRS
+IMPLEMENTED BEHAVIOUR
 
-1. FX Weekend news cutoff evidence
+1. Alerts and Scanner are now distinct local tools
 
-- fxweekend-clone/liquidate.py now derives news cutoff success from the authoritative last_verified_flat_at timestamp recorded after each selected account's zero-open-items verification.
-- Added strict news-only parsing that accepts timezone-aware datetime/ISO evidence, converts it to Australia/Brisbane, and rejects missing, malformed, or timezone-naive values. The legacy weekend timestamp parser was intentionally left unchanged.
-- Every selected account must exist in the result, report state=verified flat, and provide valid timezone-aware verification evidence. The latest selected-account timestamp is the persisted verified-flat time and determines whether all required accounts were flat by the cutoff.
-- Removed the fallback that substituted the scheduler attempt timestamp for missing verification evidence.
-- cutoff_met is true only when the attempt was not already late, all selected-account evidence is complete, the latest actual verification is no later than the cutoff, and neither cutoff_met=False nor a prior missed-cutoff state already exists.
-- Late valid flat evidence remains recorded with cutoff_met=False. Missing/invalid evidence records no verified-flat timestamp, cannot become on-time success, and retains the existing bounded retry/post-release completion behavior. Previously missed guarantees remain missed after later closure.
-- Existing selected-account scope, account-wide news liquidation, overlapping-event coalescing, retry/backoff, deletion audit, persistence, and weekend paths were not redesigned.
+- The existing percentage-move tool is visibly labelled Alerts on the local dashboard, page heading, breadcrumb, accessibility text, launcher, and supervisor diagnostics. Its internal monitor names, settings/data, APIs, and working /merged/monitor deep link remain intact.
+- /merged/alerts opens the existing alert tool. The legacy /merged/scanner bookmark remains backward compatible by redirecting to /merged/monitor.
+- A separate local-only Scanner card opens /merged/atr-scanner. Render continues to hide/block this local market-data feature.
+- Updated local build-stamp/preflight lists so changes to the scanner module or JavaScript trigger the established launcher refresh behaviour.
 
-2. Pine session marker timing
+2. Local Bybit ATR-percentage and liquidity scanner
 
-- pinescripts/custom_indicator.pine retains the end-inclusive event boundary time < eventTs and eventTs <= time_close, session-local timezone/weekday filtering, xloc.bar_time positioning, and the <=30-minute visibility gate.
-- Session objects are now created only when the containing bar is confirmed, instead of when it is new. Realtime 5-, 15-, and 30-minute bars therefore do not create a marker at the preceding candle's opening or mid-bar update.
-- The confirmed end-inclusive bar still creates Friday's 17:00 America/New_York close at the actual event timestamp when no following market candle exists.
-- One confirmed execution per containing bar preserves realtime deduplication. Label spacing, bounded marker arrays, visibility cleanup, and the moving 100-candle marker were unchanged.
+- Added render/atr_scanner.py, render/static/atr_scanner.js, local page/API routes in render/master_service.py, and documentation in render/README.md.
+- Instrument discovery paginates public V5 Get Instruments Info and retains only status=Trading, contractType=LinearPerpetual, quoteCoin=USDT, settleCoin=USDT, non-prelisting contracts. It is not tied to the Alerts symbol list.
+- Tickers are fetched once. Liquidity uses turnover24h (not volume24h), exact midpoint spread `(ask-bid)/((ask+bid)/2)*100`, then per-symbol order-book quote notional `price*quantity` inside the inclusive configured band on each side.
+- Every liquidity gate uses AND. Invalid, missing, crossed, stale, or unverified data fails closed. ATR is fetched only after instrument, manual-exclusion, turnover, spread, and order-book gates.
+- Defaults are: minimum turnover 20,000,000 USDT; maximum spread 0.10%; depth band +/-0.10% of midpoint; minimum bid depth 25,000 USDT; minimum ask depth 25,000 USDT; maximum book age 30 seconds; ATR length 14; rank by 1m; Top 10; automatic refresh every 60 seconds.
+- ATR is Wilder/RMA true range: max(high-low, abs(high-previous close), abs(low-previous close)). ATR percentage is ATR divided by the same timeframe closed-candle close, multiplied by 100. The still-forming candle is excluded using Bybit/server interval boundaries.
+- The six unambiguous timeframes are 1m, 5m, 1h, 1D, 1W, and 1Mo, mapped to Bybit intervals 1, 5, 60, D, W, and M. Requests ask for 201 rows so 200 closed candles remain when the newest row is forming; newer instruments are accepted only with enough valid contiguous closed history.
+- Raw values rank descending with a deterministic symbol tie-break. Formatting uses five ATR decimal places but never affects rank. Missing values are N/A and cannot rank for the selected timeframe.
+- The table shows all six ATR values, turnover, spread, bid/ask depth, liquidity/data state, exact ranking basis, eligible/excluded counts and reasons, progress, freshness, and last successful update. Changing timeframe or Top N reranks locally and recomputes the Qualified/Excluded views and basis without contradictory saved-timeframe counts.
+- Persisted local settings cover every threshold and manual exclusions; Reset restores defaults. Manual exclusions accept comma/newline input, normalize/deduplicate case and whitespace, and are bounded to 1,000 symbols and 50,000 input characters. All numeric/text settings have server-side type/range checks.
+- Explicit exclusion reasons cover inactive, wrong product, manual exclusion, turnover, spread, bid depth, ask depth, missing/invalid market data, insufficient ATR history, and transient upstream failure. Kline reasons are preserved per timeframe rather than conflating malformed data with a network failure.
+- Requests use bounded concurrency, pacing, timeout, retries, and backoff. ATR caches are keyed by symbol/timeframe/length and remain valid until the next candle boundary, so daily/weekly/monthly history is not fetched each minute.
+- Browser callers share one in-flight refresh. A settings save during refresh queues one non-overlapping follow-up. Transient failures retain visibly stale last-known-good data with age and scoped error; first-load/all-scope failures return explicit errors rather than an empty HTTP-200 success.
+- The public source resolver allows only canonical HTTPS api.bybit.com or api.bytick.com origins, strips no credentials because none are accepted, rejects paths/query/fragments/lookalikes/testnet/demo hosts, and reports authenticated=false.
+- Help text states that turnover, spread, and order-book depth are liquidity proxies and cannot guarantee fills or future liquidity.
 
-3. Display character repair
+3. Separate Pepperstone Market Watch ATR feed and desktop window
 
-- Replaced both FX Weekend news audit-table mojibake placeholders with valid UTF-8 em dashes (—).
-- Replaced the FX Weekend save-progress mojibake with a valid UTF-8 ellipsis (…).
-- Replaced the equity hover invalid-percentage mojibake with a valid UTF-8 em dash (—). The existing base percentage formatter already contained the correct em dash and remains covered by the regression.
-- Narrow tests verify the template strings and the exact U+2014 runtime output from both equity percentage formatters.
+- Added mt5-clone/MQL5/Experts/MarketWatchATRPercentFeed.mq5, mt5-clone/atr_percent_window.py, and mt5-clone/MARKET_WATCH_ATR_FEED.md.
+- The EA enumerates selected Market Watch symbols with SymbolsTotal(true)/SymbolName(index,true), classifies forex using SYMBOL_TRADE_CALC_MODE_FOREX or SYMBOL_TRADE_CALC_MODE_FOREX_NO_LEVERAGE, and keeps non-forex/unavailable entries diagnostic rather than inventing a volume filter.
+- It lazily creates iATR handles for PERIOD_M1, PERIOD_M5, PERIOD_H1, PERIOD_D1, PERIOD_W1, and PERIOD_MN1; waits for history; reads CopyBuffer shift 1 and iClose shift 1; rejects EMPTY_VALUE, non-finite, missing, and zero-close data; and publishes `(ATR/close)*100`.
+- A bounded 500 ms timer processes four symbols per pass and skips unchanged closed bars. Handles are reused and every valid handle is released in OnDeinit. OnTick is empty and no trade function exists.
+- The independent JSON feed and Python window show all six timeframes, selected-timeframe Top 10 rank, deterministic ties, refresh time, Loading/N/A/Error/Stale state, last-good retention, and a diagnostic tab. They do not share the spread feed/window's IPC, title, styles, or process identity.
 
-BYBIT CREDENTIAL CLEANUP AND READ-ONLY VERIFICATION
+4. TradingView offset visibility
 
-- The active workspace-level machine-safety instruction prohibits modifying environment variables. The user supplied an exception to AGENTS.md, but it cannot override that higher-priority restriction. No environment variable was changed, no process was terminated, and Local Trading Tools was not restarted.
-- Secret-safe presence checks displayed booleans only. At check time, BYBIT_DEMO_API_KEY and BYBIT_DEMO_API_SECRET were already absent from Windows User scope but remained present in the PowerShell Process scope inherited by this Codex session.
-- After the normal application environment bootstrap loaded C:\GPT\env.env without displaying its contents, sanitized readiness confirmed a complete Live KEY1 pair and a complete Demo KEY2 pair. Demo also detected the inherited complete DEMO_EXPLICIT pair, so the intended conflict guard stopped readiness.
-- Bybit Live: PASS. Exactly one private read-only preflight endpoint was used: GET https://api.bybit.com/v5/user/query-api. It authenticated with source KEY1. Returned metadata reported readOnly=0 and one IP binding; therefore the credential is trading-capable, although this verification performed GET only.
-- Bybit Demo: NOT RUN. The resolver detected differing complete KEY2 and DEMO_EXPLICIT sources and stopped before network access, so no Demo request was made and no credentials were sent to any endpoint.
-- No secret value, key character, signature, bearer token, signed URL, or env-file content was displayed, logged, copied, or committed.
-
-Remaining manual credential action:
-
-The inherited Process-scope obsolete pair must be cleared from the shell/process that starts Local Trading Tools. The idempotent User-scope calls are included because existing long-lived processes may have inherited the old pair:
-
-[Environment]::SetEnvironmentVariable('BYBIT_DEMO_API_KEY', $null, 'User')
-[Environment]::SetEnvironmentVariable('BYBIT_DEMO_API_SECRET', $null, 'User')
-Remove-Item Env:BYBIT_DEMO_API_KEY,Env:BYBIT_DEMO_API_SECRET -ErrorAction SilentlyContinue
-
-After those commands, Local Trading Tools must be started/restarted only through the repository-owned run_local_master_control.bat launcher from that cleared shell. A subsequent Demo GET /v5/user/query-api preflight is still required to verify the KEY2 credentials. Until then, the overall environment-cleanup requirement and Demo authentication verification remain incomplete.
-
-TARGETED VERIFICATION RESULTS
-
-1. python -B -m pytest tests/test_fxweekend_news.py -q -p no:cacheprovider
-   RESULT: 23 passed, 4 existing FastAPI deprecation warnings in 12.25s.
-   Coverage includes exact-cutoff verification, cutoff-start/late-finish, one late account in a multi-account scope, missing/malformed/naive verification timestamps, prior-missed permanence, retries/coalescing, persistence/deletion, and corrected display strings.
-
-2. python -B -m pytest tests/test_custom_indicator_pine.py -q -p no:cacheprovider
-   FINAL RESULT: 29 passed in 0.39s.
-   The focused timing model covers 5-, 15-, and 30-minute realtime updates and the final Friday New York close without a following bar. The final run followed a test-only strengthening of the Friday model.
-
-3. python -B -m pytest tests/test_trading_journal_equity_curve.py::test_invalid_percentage_placeholders_are_single_utf8_em_dashes -q -p no:cacheprovider
-   RESULT: 1 passed in 1.13s.
-
-4. node --check render/static/trading_journal_equity_curve.js
-   RESULT: PASS.
-
-5. In-memory compile() of every changed Python file (fxweekend-clone/liquidate.py and the three changed Python test files)
-   RESULT: PASS; no bytecode/cache output requested.
-
-6. git diff --check
-   RESULT: PASS. Git emitted only the repository's existing LF-to-CRLF working-copy notices.
-
-7. Targeted mojibake scan of fxweekend-clone/liquidate.py and render/static/trading_journal_equity_curve.js
-   RESULT: PASS; no remaining â/Ã sequences were found in those files.
-
-No full Brief 2 matrix, Open Orders suite, calculator suite, broker service suite, MQL compilation, workbook suite, browser smoke test, or external TradingView compilation was run. This follows the follow-up's targeted verification/credit-control requirement. Pine verification for this repair is static/regression-based only.
+- In pinescripts/custom_indicator.pine, only the three helper call sites for the 9 EMA, 20 EMA, and VWAP offset visuals changed to opaque color.black.
+- The existing dashed line style, width, formulas, placement, base indicator colours, alerts/webhooks, Volume, ATR pane, sessions, 100-candle marker, and pinescripts/atr_percentage.pine are unchanged.
 
 CHANGED TASK FILES
 
-- fxweekend-clone/liquidate.py
+- CODEX_BRIEF_2026-08-24_ATR_Volatility_Scanner_Alerts_Pine.txt (user-supplied brief retained)
+- render/atr_scanner.py
+- render/static/atr_scanner.js
+- render/master_service.py
+- render/static/dashboard.js
+- render/README.md
+- run_scanner_local.bat
+- tools/windows_launchers/ensure_local_master_server.ps1
+- tools/windows_launchers/stream_local_master_worker.ps1
+- mt5-clone/MQL5/Experts/MarketWatchATRPercentFeed.mq5
+- mt5-clone/atr_percent_window.py
+- mt5-clone/MARKET_WATCH_ATR_FEED.md
 - pinescripts/custom_indicator.pine
-- render/static/trading_journal_equity_curve.js
-- tests/test_fxweekend_news.py
+- tests/test_atr_scanner.py
+- tests/test_atr_scanner_ui.py
+- tests/test_mt5_atr_percent_feed.py
 - tests/test_custom_indicator_pine.py
-- tests/test_trading_journal_equity_curve.py
+- tests/test_dashboard_home_layout.py
+- tests/test_dashboard_js_syntax.py
+- tests/test_master_service_calculator_api.py
+- tests/test_master_service_local_exit.py
+- tests/test_merged_monitor_status_env.py
+- tests/test_spread_monitor_dashboard.py
 - summary/CODEX_SUMMARY_latest.txt
 
-PATCH_DESKTOP_PUSH.bat is required immediately after this summary is written. The final assistant response will report the script's actual result and independent local/remote HEAD comparison; this summary does not pre-claim that outcome.
+TARGETED VERIFICATION RESULTS
+
+1. `python -B -m pytest tests\test_atr_scanner.py -q -p no:cacheprovider`
+   FINAL RESULT: 35 passed in 1.57s.
+   Covers ATR fixtures/closed-candle boundaries, all timeframes, ordering/ties, validation/manual bounds, pagination, every liquidity gate, quote-notional depth, public-request safety, caching, shared/queued refreshes, stale fallback, scoped failures, and reason preservation.
+
+2. `python -B -m pytest tests\test_atr_scanner_ui.py -q -p no:cacheprovider`
+   FINAL RESULT: 8 passed, 24 existing FastAPI deprecation warnings, in 31.46s.
+   Covers distinct Alerts/Scanner cards and routes, Render boundary, controls/table/accessibility, API settings/refresh/errors, canonical public origin, all-six-timeframe client reranking, Top N, N/A, stale/partial states, and dynamic exclusions.
+
+3. `python -B -m pytest tests\test_custom_indicator_pine.py tests\test_atr_percentage_pine.py -q -p no:cacheprovider`
+   RESULT: 33 passed in 0.70s.
+
+4. `python -B -m pytest tests\test_mt5_atr_percent_feed.py tests\test_python_mt5_conversion_files.py tests\test_mt5_spread_fetch.py -q -p no:cacheprovider`
+   RESULT: 30 passed in 3.36s.
+   Covers MQL5 source contracts, Python parser/ranking/startup behaviour, independent names, no trading/volume logic, and preservation of the existing spread implementation.
+
+5. `python -B -m pytest tests\test_merged_monitor_status_env.py tests\test_merged_alerts_runtime.py -q -p no:cacheprovider`
+   RESULT: 55 passed, 4 existing FastAPI deprecation warnings, in 13.84s.
+   Confirms the existing percentage-move Alerts runtime/settings/status behaviour remains green.
+
+6. `python -B -m pytest tests\test_master_service_local_exit.py tests\test_dashboard_js_syntax.py -q -p no:cacheprovider`
+   RESULT: 29 passed, 13 existing FastAPI deprecation warnings, in 15.40s.
+
+7. `python -B -m pytest tests\test_merged_monitor_status_env.py::test_run_local_master_control_bat_uses_local_autostart tests\test_windows_launchers.py::test_streamer_uses_core_readiness_as_the_only_startup_completion_gate tests\test_windows_launchers.py::test_streamer_keeps_background_failures_nonblocking_and_reports_recovery tests\test_windows_launchers.py::test_streamer_uses_server_canonical_autostart_targets_for_background_checks -q -p no:cacheprovider`
+   FINAL RESULT: 4 passed, 4 existing FastAPI deprecation warnings, in 23.08s.
+
+8. In-memory Python `compile()` check of all 13 changed Python source/test files.
+   RESULT: PASS with no bytecode output.
+
+9. `node --check render\static\atr_scanner.js` and `node --check render\static\dashboard.js`
+   RESULT: PASS for both files.
+
+10. `git diff --check`
+    RESULT: PASS; Git emitted only line-ending notices.
+
+11. MetaEditor compile of a SHA-256-identical temporary copy of the final MarketWatchATRPercentFeed.mq5 with `C:\Program Files\Pepperstone MetaTrader 5\metaeditor64.exe` (version/build 5.0.0.6090).
+    FINAL COMPILER LOG RESULT: 0 errors, 0 warnings, 3506 ms, cpu='X64 Regular'. MetaEditor returned process code 1 despite its authoritative log reporting compile success. The temporary .mq5/.ex5/log and task-created Python cache files were individually removed; no generated compile artifact is in the repository.
+
+PUBLIC BYBIT READ-ONLY CHECKS ACTUALLY PERFORMED
+
+- Used only unauthenticated GET market-data calls to https://api.bybit.com; no credential or trading endpoint was used.
+- Instruments Info `category=linear&limit=1000`: retCode 0, 833 instruments returned, no remaining cursor; 725 matched Trading LinearPerpetual USDT quote/settlement metadata at check time.
+- Tickers: retCode 0; turnover24h, volume24h, bid1Price, and ask1Price fields were present, confirming the implementation can deliberately use quote turnover rather than base volume.
+- Orderbook: retCode 0; a 50-level shape check returned bids/asks and timestamps, and `limit=1000` returned 1,000 bids and 1,000 asks for BTCUSDT.
+- Kline intervals 1, 5, 60, D, W, and M: retCode 0 and newest-first ordering. A final BTCUSDT `interval=1&limit=201` request returned exactly 201 rows, newest-first.
+- A full live end-to-end scan was intentionally not run because it would make hundreds of public order-book calls plus six kline calls per liquidity-qualified symbol. Deterministic mocks cover that pipeline and the live checks validate the public endpoint shapes/limits without depending on current internet data in automated tests.
+
+EXTERNAL/UI CHECKS AND LIMITATIONS
+
+- Microsoft Edge smoke: NOT RUN. The required in-app browser attempt returned exactly `Browser is not available: edge`; per the browser-control contract, no substitute browser was used. Launch, refresh, threshold/manual-exclusion changes, and mocked-failure recovery remain unverified in Edge until the ChatGPT browser extension is configured under Settings -> Computer use. Equivalent route/API and JavaScript state transitions are covered by deterministic tests, but those are not claimed as an Edge smoke.
+- TradingView Pine Editor compile: NOT RUN. Edge was unavailable and no local `pine`, `pinescript`, or `pinec` compiler command exists. Static focused Pine regressions pass, but external TradingView compilation remains unverified.
+- MT5 terminal runtime: NOT RUN. The new EA compiled cleanly in the installed Pepperstone MetaEditor, and the independent Python window passed syntax/import/`--help` startup tests, but the EA was not attached to a live terminal chart and the desktop window was not interactively inspected.
+- Liquidity thresholds are screening proxies, not execution guarantees. Turnover, current spread, and snapshot depth cannot guarantee a future fill or future liquidity.
+- Existing FastAPI `on_event` deprecation warnings remain unchanged and are outside this task.
+
+OFFICIAL DOCUMENTATION USED
+
+- Bybit V5 Get Instruments Info (filters, linear pagination, nextPageCursor): https://bybit-exchange.github.io/docs/v5/market/instrument
+- Bybit V5 Get Tickers (turnover24h, bid1Price, ask1Price): https://bybit-exchange.github.io/docs/v5/market/tickers
+- Bybit V5 Get Orderbook (snapshot levels, limit, timestamp): https://bybit-exchange.github.io/docs/v5/market/orderbook
+- Bybit V5 Get Kline (intervals, row layout, newest-first response): https://bybit-exchange.github.io/docs/v5/market/kline
+- MQL5 iATR (handle creation): https://www.mql5.com/en/docs/indicators/iatr
+- MQL5 CopyBuffer (buffer indexing/start position): https://www.mql5.com/en/docs/series/copybuffer
+- MQL5 SymbolsTotal (selected Market Watch enumeration): https://www.mql5.com/en/docs/marketinformation/symbolstotal
+- MQL5 SymbolName (selected-symbol lookup): https://www.mql5.com/en/docs/marketinformation/symbolname
+- TradingView Pine colours (opaque color.black): https://www.tradingview.com/pine-script-docs/visuals/colors/
+- TradingView Pine lines and boxes (line styling/lifecycle): https://www.tradingview.com/pine-script-docs/visuals/lines-and-boxes/
+
+PATCH_DESKTOP_PUSH.bat is required immediately after this summary is written. The final assistant response will report the script's actual result and an independent local/origin HEAD comparison; this summary does not pre-claim that outcome.

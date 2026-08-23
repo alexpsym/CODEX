@@ -282,7 +282,7 @@ function Get-AutostartTargetStatus {
         if ($null -ne $monitor -and $null -ne $monitor.scanner_children) {
             $child = $monitor.scanner_children.$Target
             if ($null -ne $child) {
-                $childDetail = Select-FirstText @($child.last_start_error, $child.last_exit_reason, "missing live scanner")
+                $childDetail = Select-FirstText @($child.last_start_error, $child.last_exit_reason, "missing live alert monitor")
                 return [pscustomobject]@{
                     Target = $Target
                     Ready = [bool] $child.running

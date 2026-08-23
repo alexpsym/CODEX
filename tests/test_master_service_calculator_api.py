@@ -124,7 +124,7 @@ def test_scripts_page_contains_calculator_row() -> None:
 def test_scripts_page_marks_merged_dashboard_views_non_standalone() -> None:
     response = asyncio.run(master_service.list_scripts())
     payload = json.loads(response.body.decode("utf-8"))
-    merged_names = {"calculator", "monitor"}
+    merged_names = {"calculator", "monitor", "atr-scanner"}
     merged_rows = [row for row in payload if row.get("name") in merged_names]
     assert len(merged_rows) == len(merged_names)
     for row in merged_rows:
@@ -155,12 +155,15 @@ def test_render_env_hides_local_only_scanner_scripts(monkeypatch: pytest.MonkeyP
 def test_scanner_merged_routes_return_gone_on_render(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("RENDER", "1")
     monitor = asyncio.run(master_service.merged_monitor_page())
-    scanner = asyncio.run(master_service.merged_scanner_redirect())
+    legacy_scanner = asyncio.run(master_service.merged_scanner_redirect())
+    atr_scanner = asyncio.run(master_service.atr_scanner_page())
     assert monitor.status_code == 410
-    assert scanner.status_code == 410
-    message = "Scanner is local-only. Run run_scanner_local.bat on your PC."
+    assert legacy_scanner.status_code == 410
+    assert atr_scanner.status_code == 410
+    message = "Alerts are local-only. Run run_local_master_control.bat on your PC."
     assert monitor.body.decode("utf-8") == message
-    assert scanner.body.decode("utf-8") == message
+    assert legacy_scanner.body.decode("utf-8") == message
+    assert "local-only" in atr_scanner.body.decode("utf-8")
 
 
 def test_scanner_merged_routes_work_locally(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -169,10 +172,15 @@ def test_scanner_merged_routes_work_locally(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.delenv("RENDER_EXTERNAL_URL", raising=False)
     monkeypatch.delenv("RENDER_EXTERNAL_HOSTNAME", raising=False)
     monitor = asyncio.run(master_service.merged_monitor_page())
-    scanner = asyncio.run(master_service.merged_scanner_redirect())
+    alerts_alias = asyncio.run(master_service.merged_monitor_page())
+    legacy_scanner = asyncio.run(master_service.merged_scanner_redirect())
+    atr_scanner = asyncio.run(master_service.atr_scanner_page())
     assert monitor.status_code == 200
-    assert scanner.status_code == 307
-    assert scanner.headers.get("location") == "/merged/monitor"
+    assert alerts_alias.status_code == 200
+    assert legacy_scanner.status_code == 307
+    assert legacy_scanner.headers.get("location") == "/merged/monitor"
+    assert atr_scanner.status_code == 200
+    assert "Ranks currently Trading Bybit linear USDT perpetuals" in atr_scanner.body.decode("utf-8")
     html = monitor.body.decode("utf-8")
     assert "Monitor controls" in html
     assert 'id="monitor-target"' in html

@@ -159,11 +159,13 @@ def test_scripts_endpoint_places_spread_monitor_after_iv_indicator_in_local_prof
         "fxweekend",
         "trading-journal",
         "monitor",
+        "atr-scanner",
         "ivindicator-clone",
         "spreads-clone",
     ]
     positions = [names.index(name) for name in expected]
     assert positions == sorted(positions)
+    assert names.index("atr-scanner") == names.index("monitor") + 1
     assert names.index("spreads-clone") == names.index("ivindicator-clone") + 1
     by_name = {str(item.get("name")): item for item in payload}
     assert by_name["bounce-trader"]["remote_owned"] is True
@@ -172,6 +174,8 @@ def test_scripts_endpoint_places_spread_monitor_after_iv_indicator_in_local_prof
     assert by_name["spreads-clone"]["label"] == "Spreads"
     assert by_name["spreads-clone"]["open_url"] == "/apps/spreads-clone"
     assert by_name["spreads-clone"]["dashboard_main_view"] is True
+    assert by_name["monitor"]["label"] == "Alerts"
+    assert by_name["atr-scanner"]["label"] == "Scanner"
     assert "instrument-lookup" not in by_name
     assert "history" not in by_name
     assert "mt5" not in by_name

@@ -72,7 +72,8 @@ TradingView saves a server-side snapshot of the script, its inputs, symbol, and 
 
 ## 6) Notes and tips
 - The manager intentionally ignores the `mt5-clone` directory per your request.
-- Scanner (Bybit/OANDA monitor) is local-only and is not part of the Render-hosted merged dashboard. Run `run_scanner_local.bat` on a local Windows machine when you need scanner windows.
+- Alerts (the existing Bybit/OANDA percentage-move monitors) and the ATR/liquidity Scanner are local-only and are not part of Render Master Control. Run `run_local_master_control.bat` on the local Windows machine to use them.
+- The local Scanner uses unauthenticated live Bybit V5 market data. It first requires each Trading linear USDT perpetual to pass the configured 24h quote-turnover, midpoint-spread, and bid/ask quote-depth gates, then ranks qualified instruments by Wilder ATR divided by the same timeframe's last fully closed candle close. Its defaults are ATR(14), Top 10 by 1m, 20 million USDT turnover, 0.10% maximum spread, and at least 25,000 USDT on each side within a ±0.10% midpoint band. These are liquidity proxies, not guarantees of fills or future liquidity.
 - Because each script runs as its own Python process, they can block or run forever without stopping the others. Monitor CPU/RAM usage in Render if you run many at once.
 - Logs are kept in-memory (last 400 lines per script) for quick viewing. Persist long-term logs by piping to a file inside each script if needed.
 - If you need to pin a different Python binary, set the `PYTHON` environment variable and the manager will use it when spawning scripts.

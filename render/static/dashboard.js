@@ -421,9 +421,9 @@
     if (lowerName === 'monitor') {
       const stopReason = String(script.last_start_error || script.last_exit_reason || '').trim();
       let dotState = processRunning ? 'running' : (processStarting ? 'starting' : 'stopped');
-      let title = processRunning ? 'Scanner running' : (processStarting ? 'Scanner starting' : 'Scanner stopped');
+      let title = processRunning ? 'Alerts running' : (processStarting ? 'Alerts starting' : 'Alerts stopped');
       if (!processRunning && stopReason) {
-        title = `Scanner stopped: ${stopReason}`;
+        title = `Alerts stopped: ${stopReason}`;
       }
       if (typeof script.status_detail === 'string' && script.status_detail.trim()) {
         title = script.status_detail.trim();

@@ -1,0 +1,331 @@
+CODEX IMPLEMENTATION BRIEF
+ATR-percentage volatility scanner, crypto liquidity filtering, Alerts/Scanner dashboard labels, Pepperstone ATR EA, and black Pine offset lines
+
+REPOSITORY
+
+C:\GPT\CODEX-master
+
+RECOMMENDED CODEX CONFIGURATION
+
+Use gpt-5.6-sol with ultra reasoning. This job crosses the local Trading Tools web application, Bybit public market-data ingestion, caching and ranking logic, a separate Pepperstone MT5/MQL5 EA and desktop window, Pine Script, tests, and deployment safeguards. Ultra is proportionate because errors could silently rank the wrong markets or disturb working broker tools. Subagents may investigate bounded, non-overlapping areas, but the primary agent must own integration, final verification, and every shared-file edit.
+
+PRIMARY OBJECTIVE
+
+Implement all four outcomes below without redesigning the existing tools:
+
+1. Preserve the existing percentage-move alert tool exactly, but change its visible name from "Scanner" to "Alerts".
+2. Add a new local Trading Tools feature labelled "Scanner". It must rank currently tradable Bybit USDT perpetual instruments by ATR as a percentage, and it must exclude crypto instruments unless they pass every configured liquidity requirement.
+3. Add a separate Pepperstone MT5 expert adviser and separate desktop table for ranking Market Watch forex instruments by ATR percentage. It must remain separate from the working Market Spread expert adviser/window.
+4. In the existing TradingView custom indicator, make every 9 EMA, 20 EMA, and VWAP offset line opaque black while preserving the current dashed pattern, calculations, alerts, placement, and unrelated colours.
+
+Do not stop after planning. Inspect the actual implementation, make narrow source-of-truth changes, test them, and complete the repository workflow unless a genuine external blocker is reached.
+
+MANDATORY PREFLIGHT
+
+1. Set the working directory to C:\GPT\CODEX-master.
+2. Read AGENTS.md completely and obey it.
+3. Read summary/CODEX_SUMMARY_latest.txt and inspect the most recent relevant Trading Tools/Pine/MT5 changes before editing.
+4. Record the branch and HEAD. Run git status --short and inspect the current diff. Preserve every unrelated or user-authored change. Never reset, discard, overwrite, or reformat unrelated files.
+5. Do not inspect or modify the custom instructions/ folder. It is outside this task.
+6. Locate the actual source-of-truth files and functions for:
+   - the local Trading Tools launcher/dashboard button list and route table;
+   - the existing visible "Scanner" percentage-move alerts page, backend, settings, and tests;
+   - Bybit public market-data clients, HTTP helpers, caching, status/error handling, and local runtime settings;
+   - local versus Render navigation and service ownership;
+   - pinescripts/custom_indicator.pine and tests/test_custom_indicator_pine.py;
+   - mt5-clone/MQL5/Experts/MarketWatchSpreadPercentFeed.mq5;
+   - mt5-clone/spread_percent_window.py and its data/launch protocol;
+   - relevant dashboard, Bybit, Pine, MQL5 conversion, and desktop-window tests.
+7. Inspect current working behaviour before choosing file names or routes. Reuse existing helpers and conventions. Update generators/source configuration instead of patching generated outputs.
+8. Keep the working Market Watch spread feed resolved. Do not reopen or redesign it. The normal configured Python script path is C:\GPT\CODEX-master\mt5-clone\spread_percent_window.py, and a repository move requires updating the EA input.
+
+GLOBAL SAFETY AND SCOPE RULES
+
+- Keep changes narrow. Do not redesign the dashboard, calculator, Open Orders, Trading Journal, FX Weekend, Bounce Trader, Market Spread window, or unrelated workflows.
+- Preserve the existing local/Render boundary. This request is for the local Trading Tools dashboard. Do not accidentally add a local desktop/MT5 tool to Render Master Control or remove a working direct Render route.
+- Local tools must continue to open Microsoft Edge using the established launcher behaviour.
+- Never place, cancel, amend, or close an order. Scanner verification is market-data-only.
+- Never print, return, persist, screenshot, log, or commit API keys, secrets, signatures, tokens, .env contents, account identifiers, or signed URLs.
+- Do not change, delete, rename, or reconcile any Bybit credential variables in this task. BYBIT_API_KEY1/BYBIT_API_SECRET1 are live credentials; BYBIT_API_KEY2/BYBIT_API_SECRET2 are demo credentials. Preserve the repository's completed live/demo credential work.
+- The crypto scanner must use public live Bybit market-data endpoints without private authentication. It must not depend on either the live or demo trading key pair and must not use the demo host as its instrument-selection market feed.
+- Use only official Bybit V5, MQL5, and TradingView Pine documentation when API or language behaviour matters. Cite the exact official sections used in the final summary.
+- Automated tests must use deterministic fixtures/mocks, not live Bybit availability.
+- No fake success, silent failure, swallowed error, blank successful response, misleading zero, stuck spinner, or manual-only recovery.
+
+AUTHORITATIVE ATR DEFINITION
+
+Use one definition across the local crypto scanner, Pepperstone EA, fixtures, labels, and documentation:
+
+- Default ATR length: 14, configurable where the existing UI/EA convention supports inputs.
+- Smoothing: Wilder/RMA, consistent with TradingView ta.atr(14) and MetaTrader iATR.
+- True range for each bar: max(high - low, abs(high - previous close), abs(low - previous close)).
+- Normalisation: ATR percentage = ATR / the same timeframe candle's close * 100.
+- Guard zero, missing, non-finite, malformed, and insufficient-history values. They are unavailable, never 0.0000%.
+- Default calculation/ranking basis: the latest fully closed candle, not the still-forming candle. Clearly state "last closed candle" in the UI. This prevents intrabar rank flicker and makes tests reproducible.
+- Timeframes: 1 minute, 5 minutes, 1 hour, 1 day, 1 week, and 1 month.
+- UI labels must distinguish 1m from monthly. Use 1m, 5m, 1h, 1D, 1W, and 1Mo (or an equally unambiguous existing convention). Never label monthly as another ambiguous "1M" beside 1m.
+- These are ATR(14) readings on six chart timeframes. They are not simple percentage movement during only the latest minute/hour/day.
+- Retrieve enough ordered history to seed and advance Wilder ATR reliably. Do not approximate ATR(14) from only the latest 14 displayed rows. Use at least 200 available candles when the source permits, while accepting newer instruments only when enough valid closed history exists.
+
+WORKSTREAM 1 - PRESERVE THE OLD TOOL AND CORRECT THE DASHBOARD LABELS
+
+Observed state:
+
+- The current local tool visibly labelled "Scanner" lets the user create alerts when an instrument rises or falls by a configured percentage.
+- That existing function is not the new ATR scanner and must not be replaced.
+
+Required changes:
+
+1. Change the old tool's user-visible dashboard button/card label from "Scanner" to "Alerts".
+2. Change its user-visible page heading, navigation label, breadcrumb, launcher text, and accessible label to "Alerts" where those strings refer to the existing percentage-move alert function.
+3. Preserve its calculations, alert records, settings, persistence, API behaviour, process launch, and current route/deep links. Do not rename internal modules, files, endpoints, or database keys merely for cosmetic consistency if that risks breakage.
+4. If a new /alerts route is added, retain a backward-compatible alias/redirect for the old route and test both. Prefer the narrowest approach supported by the existing router.
+5. Add a distinct local dashboard button/card visibly labelled "Scanner" for the new ATR-percentage volatility scanner. It must launch the new function, not the old alerts page.
+6. Ensure there is no duplicate DOM ID, route collision, launcher collision, or ambiguous process name.
+
+Acceptance checks:
+
+- Clicking Alerts opens the unchanged percentage-move alert tool and existing saved settings/data remain intact.
+- Clicking Scanner opens the new ATR/liquidity scanner.
+- No button labelled Scanner opens the old percentage-move tool.
+- Existing bookmarks/API clients for the old tool still work.
+
+WORKSTREAM 2 - LOCAL BYBIT ATR-PERCENTAGE AND LIQUIDITY SCANNER
+
+A. Instrument universe
+
+1. The default crypto universe is all currently Trading Bybit linear USDT-settled perpetual contracts, not a small hard-coded symbol list and not only symbols already used by the Alerts tool.
+2. Use official V5 Get Instruments Info and paginate through nextPageCursor. Bybit documents more than 500 linear instruments, so a single default page is not sufficient.
+3. Require the appropriate perpetual contract type, status=Trading, and USDT quote/settlement metadata. Exclude PreLaunch, Delivering, expired/delisted, options, inverse contracts, dated futures, and unavailable tickers.
+4. Use the configured public live Bybit market-data base URL/helper if an established safe abstraction exists. Do not duplicate private trading/authentication code.
+
+B. Liquidity qualification
+
+The user requires crypto to be liquid AND volatile. Implement liquidity as a hard eligibility gate, then rank eligible instruments only by ATR percentage. Never use a blended score in which extreme volatility can compensate for failed liquidity.
+
+Use these editable starting defaults, presented as configurable screening defaults rather than a guarantee of execution quality:
+
+- Minimum 24-hour quote turnover: 20,000,000 USDT.
+- Maximum current bid/ask spread: 0.10%.
+- Order-book depth band: 0.10% from the midpoint on each side.
+- Minimum cumulative bid depth within that band: 25,000 USDT.
+- Minimum cumulative ask depth within that band: 25,000 USDT.
+
+Required implementation:
+
+1. Fetch V5 tickers once for the eligible category. Use turnover24h, not base-coin volume24h, because quote turnover is comparable across USDT contracts.
+2. Calculate spread percentage as (best ask - best bid) / midpoint * 100, where midpoint=(best ask+best bid)/2. Invalid, crossed, missing, or zero quotes fail liquidity.
+3. Apply the turnover prefilter before order-book calls. For remaining symbols, use V5 Get Orderbook snapshots and sum price*quantity in USDT within the configured percentage band separately for bids and asks.
+4. An instrument is liquidity-qualified only when every enabled threshold passes. Use AND, never OR.
+5. If turnover, spread, either depth side, or snapshot freshness cannot be verified, mark liquidity Unknown/Failed and exclude it from the ranked top list by default. Never silently treat unavailable liquidity as passed.
+6. Provide persisted local settings for all thresholds and a Reset to defaults action. Store them through the repository's existing safe local-state mechanism; do not commit runtime settings.
+7. Provide a persistent manual symbol exclusion list, accepting comma/newline-separated symbols and normalising case/whitespace. Manual exclusions must remain excluded regardless of liquidity/ATR.
+8. Show excluded counts and specific reasons: inactive, wrong product, manual exclusion, turnover below minimum, spread above maximum, bid depth below minimum, ask depth below minimum, missing/invalid market data, insufficient ATR history, or transient upstream failure.
+9. Explain in compact help text that turnover, spread, and order-book depth are liquidity proxies and cannot guarantee fills or future liquidity.
+
+C. ATR data acquisition and calculation
+
+1. Use official V5 Get Kline intervals 1, 5, 60, D, W, and M.
+2. Bybit returns klines newest-first and the newest close can represent an open candle. Sort chronologically and exclude the still-forming candle using interval boundaries and Bybit server time or an established trustworthy server timestamp.
+3. Fetch ATR history only after the inexpensive instrument/ticker and liquidity gates. Use bounded concurrency, timeouts, rate limiting, and transient-error backoff.
+4. Cache by symbol and timeframe. Refresh 1m data after a new 1m candle closes, 5m after a new 5m candle, and higher timeframes only when their candle closes or the cached value is missing/stale. A 60-second UI refresh must not refetch unchanged daily, weekly, and monthly history for every symbol.
+5. Manual refresh may bypass the display cache but must still respect rate limits and must not create overlapping refresh jobs.
+6. Preserve the last-known-good result during a transient refresh failure, visibly mark it Stale with age, and show the scoped error. Do not replace it with an empty successful table.
+7. Do not block the entire page until all symbols/timeframes finish. Show bounded progress/partial availability using the application's established pattern, then complete or report the exact failed scope.
+
+D. Scanner table and controls
+
+Create an easy-to-read table that matches the existing Trading Tools visual language without redesigning the dashboard.
+
+Required controls:
+
+- Rank by timeframe selector with 1m as the default.
+- Top N, default 10.
+- ATR length, default 14, if changing it can be supported without compromising caching; otherwise expose it in one scanner settings panel and rebuild the relevant cache safely.
+- Liquidity thresholds and manual exclusion list.
+- Refresh action and automatic-refresh status.
+- Qualified and Excluded views or an equally compact way to inspect why symbols were rejected.
+
+Required ranked columns:
+
+- Rank
+- Instrument
+- ATR% 1m
+- ATR% 5m
+- ATR% 1h
+- ATR% 1D
+- ATR% 1W
+- ATR% 1Mo
+- 24h turnover (USDT)
+- Spread %
+- Bid depth and ask depth within the configured band, or a clear minimum-side depth plus drill-down
+- Liquidity status
+- Data timestamp/staleness where useful without making the table unreadable
+
+Behaviour:
+
+1. Sort qualified rows descending by the selected timeframe's ATR percentage, with a deterministic symbol tie-break.
+2. Display all six ATR percentages for each ranked row, even though one timeframe controls the order.
+3. Use enough decimal places to distinguish small 1m ATR readings. Preserve numeric precision internally; formatting must not alter ranking.
+4. Missing ATR is N/A and cannot rank for that selected timeframe. It is never zero.
+5. Do not combine volatility and liquidity into one opaque score. The table must make both dimensions inspectable.
+6. Display the exact ranking basis: ATR length, selected timeframe, last-closed-candle basis, thresholds, eligible count, and last successful update time.
+7. Keep the layout usable at the existing supported desktop widths and provide accessible table headers/status text.
+
+E. API and service behaviour
+
+1. Reuse the existing local service/router and response/error conventions. Do not create a second unnecessary server if the current application can own the endpoints.
+2. Validate and bound every user setting server-side. Reject negative/NaN thresholds, unsupported timeframes, unreasonable Top N/ATR lengths, and malformed symbols with actionable errors.
+3. Ensure concurrent browser requests share one in-flight refresh rather than multiplying Bybit calls.
+4. Return explicit source, freshness, partial/stale state, and failure scope. HTTP 200 with an empty table is not success when upstream acquisition failed.
+5. Keep runtime caches, settings, and snapshots out of git.
+
+WORKSTREAM 3 - SEPARATE PEPPERSTONE FOREX ATR-PERCENTAGE EA AND WINDOW
+
+The requested Pepperstone tool is separate from MarketWatchSpreadPercentFeed.mq5 and spread_percent_window.py. Both windows must be able to run at the same time without sharing or colliding in process guards, window titles, IPC/JSON files, temporary paths, timers, or object names.
+
+Required design:
+
+1. Inspect and mirror the established working Market Watch spread-feed architecture rather than inventing an unrelated UI stack.
+2. Add a plainly named separate EA, preferably mt5-clone/MQL5/Experts/MarketWatchATRPercentFeed.mq5 unless repository conventions require a different exact name.
+3. Add a plainly named separate desktop window script, preferably mt5-clone/atr_percent_window.py, if the existing architecture uses the EA-to-Python desktop-window pattern.
+4. Give the EA configurable PythonExecutable and DesktopWindowScriptPath inputs consistent with the spread EA. Default/document the repository's current C:\GPT\CODEX-master location without hard-coding a path where the working component already uses an input.
+5. Enumerate the user's selected Market Watch symbols with SymbolsTotal(true) and SymbolName(i,true). Do not hard-code Pepperstone suffixes.
+6. Include forex instruments only, using reliable symbol metadata/current repository classification. Do not use tick volume, real volume, or a crypto-style liquidity filter; forex has no centralised exchange volume available here.
+7. For PERIOD_M1, PERIOD_M5, PERIOD_H1, PERIOD_D1, PERIOD_W1, and PERIOD_MN1, obtain iATR handles with the configured length, read the latest closed value with CopyBuffer shift 1, and calculate (ATR / iClose(symbol,timeframe,1)) * 100.
+8. Handle history loading correctly. CopyBuffer can initially return unavailable while MT5 downloads/builds series; show Loading/N/A and retry on a timer rather than publishing 0%.
+9. Reuse handles safely or rebuild only when inputs/universe change. Release every valid indicator handle in OnDeinit and avoid per-tick handle leaks.
+10. Refresh on a bounded timer and skip recomputation for unchanged closed bars where practical. The EA must not freeze MT5 while many Market Watch symbols initialise.
+11. The desktop table must support the same six unambiguous timeframe columns, a selected rank timeframe, Top 10 default, deterministic sorting, refresh time, stale/loading/error state, and readable percentage precision.
+12. Rank solely by ATR percentage. Do not add forex volume or pretend Pepperstone tick volume represents centralised liquidity.
+13. Keep unavailable Market Watch instruments visible in a diagnostic/excluded view rather than silently losing them.
+14. Preserve the working spread EA, its feed JSON, its window behaviour, and its fallback path. Change it only if a focused shared-helper extraction is necessary and fully regression-tested.
+15. Compile the new .mq5 in MetaEditor for the user's Pepperstone MT5 build when available and record the exact result. If MetaEditor/MT5 is unavailable, run all possible static/source tests and state the compile limitation; never claim a compile occurred when it did not.
+
+WORKSTREAM 4 - TRADINGVIEW CUSTOM INDICATOR OFFSET-LINE VISIBILITY
+
+Relevant file: pinescripts/custom_indicator.pine.
+
+Required changes:
+
+1. Locate every line.new, line.set_color, plot, or helper path responsible specifically for the visual offset lines belonging to the 9 EMA, 20 EMA, and VWAP.
+2. Set every such offset line to opaque color.black. Do not use light blue, grey, transparency, theme-derived colour, or color.new(color.black, nonzero transparency).
+3. Preserve the current dashed/dotted pattern exactly. Preserve width unless the actual code proves width is the reason the line remains unreadable after opaque black is applied; do not widen unrelated lines.
+4. Cover every supported upper/lower, positive/negative, active/inactive, historical/current, or dynamically recreated instance so a later update does not restore an old colour.
+5. Do not change the base 9 EMA, base 20 EMA, base VWAP, Volume, ATR-percentage pane, session markers, 100-candle marker, formulas, inputs, alerts, webhook logic, object placement, or labels.
+6. Update focused static tests to assert the offset-line colour path is black and that the established dashed style/calculation/alert logic remains present.
+7. Paste/compile the revised script in TradingView Pine Editor if available and record zero compile errors. Otherwise state that external compilation remains unverified.
+
+OFFICIAL DOCUMENTATION TO VERIFY
+
+- Bybit V5 Get Instruments Info: https://bybit-exchange.github.io/docs/v5/market/instrument
+- Bybit V5 Get Tickers: https://bybit-exchange.github.io/docs/v5/market/tickers
+- Bybit V5 Get Orderbook: https://bybit-exchange.github.io/docs/v5/market/orderbook
+- Bybit V5 Get Kline: https://bybit-exchange.github.io/docs/v5/market/kline
+- MQL5 iATR: https://www.mql5.com/en/docs/indicators/iatr
+- MQL5 CopyBuffer: https://www.mql5.com/en/docs/series/copybuffer
+- MQL5 SymbolsTotal: https://www.mql5.com/en/docs/marketinformation/symbolstotal
+- MQL5 SymbolName: https://www.mql5.com/en/docs/marketinformation/symbolname
+- TradingView Pine lines and boxes: https://www.tradingview.com/pine-script-docs/visuals/lines-and-boxes/
+- TradingView Pine colours: https://www.tradingview.com/pine-script-docs/visuals/colors/
+
+TEST REQUIREMENTS
+
+Add focused tests in the repository's established test locations. Do not make automated tests depend on current internet data.
+
+ATR calculation tests:
+
+- fixed OHLC fixture proves true range, Wilder seed/recursion, and ATR% formula;
+- gaps from previous close are included;
+- latest forming candle is excluded;
+- Bybit reverse ordering is normalised correctly;
+- 1/5/60/D/W/M map to the six intended labels;
+- zero close, malformed numbers, NaN/infinity, missing candles, and insufficient history return unavailable;
+- formatting cannot alter numeric sort order;
+- deterministic ties use symbol order.
+
+Liquidity tests:
+
+- turnover24h is used rather than base volume24h;
+- midpoint spread formula is exact;
+- order-book depth is summed in quote notional inside the configured band separately for bids and asks;
+- threshold boundaries are explicit and tested;
+- all enabled gates use AND;
+- a volatile but illiquid instrument is excluded;
+- a liquid but low-volatility instrument remains eligible but does not outrank higher ATR instruments;
+- missing/stale/crossed book data fails closed;
+- manual exclusions persist and normalise symbols;
+- Get Instruments Info pagination covers more than 500 instruments and excludes non-Trading/non-USDT/non-perpetual products.
+
+Service/cache tests:
+
+- one in-flight refresh is shared;
+- higher-timeframe caches are not refetched every minute;
+- manual refresh cannot overlap itself;
+- transient failure preserves visibly stale last-known-good data;
+- upstream failure cannot become a blank HTTP-200 success;
+- validation bounds settings and errors are actionable;
+- no credential variable or secret appears in requests, logs, API responses, fixtures, or committed files.
+
+Dashboard/UI tests:
+
+- old Scanner visible label is now Alerts and still maps to the old percentage-move function;
+- new Scanner maps only to the ATR scanner;
+- route aliases/backward compatibility work;
+- local/Render dashboard expectations remain correct;
+- sorting each timeframe, Top 10, N/A, excluded reasons, progress, stale status, and settings persistence render correctly;
+- Edge smoke test covers launch, refresh, sorting, threshold change, manual exclusion, and recovery from a mocked failure.
+
+Pepperstone tests:
+
+- Market Watch enumeration uses selected symbols and reliable forex filtering;
+- the six MQL5 timeframe constants, iATR length, CopyBuffer shift 1, iClose shift 1, percent normalisation, loading state, timer, and IndicatorRelease lifecycle are present/correct;
+- new ATR IPC/window/process names cannot collide with the spread feed;
+- Top 10 sorting and unavailable rows work with deterministic fixture data;
+- existing Market Watch spread tests remain green;
+- the new MQL5 source compiles in MetaEditor when available and the separate Python window passes syntax/import/startup tests.
+
+Pine tests:
+
+- every 9 EMA, 20 EMA, and VWAP offset visual uses opaque black;
+- dashed/dotted style and offset formulas remain unchanged;
+- base-line colours, alerts, sessions, 100-candle marker, and separate atr_percentage.pine are not changed by this task.
+
+Run the exact existing relevant suites discovered during preflight plus new tests. At minimum, run commands equivalent to:
+
+- python -m pytest tests/test_dashboard_home_layout.py tests/test_custom_indicator_pine.py -q
+- python -m pytest tests/test_python_mt5_conversion_files.py tests/test_mt5_spread_fetch.py -q
+- the new scanner calculation, Bybit market-data, service/cache, UI, and Pepperstone ATR tests
+- Python syntax/compile checks for every touched Python file
+- node --check for every touched JavaScript file
+- MetaEditor compile for the new EA when available
+- TradingView Pine Editor compile for custom_indicator.pine when available
+
+Then run the broader affected test suite required by AGENTS.md. Record exact commands, pass/fail counts, skipped external checks, and any residual limitations. Do not claim an Edge, Bybit, MetaEditor, MT5, or TradingView check happened unless it actually did.
+
+FINAL ACCEPTANCE CRITERIA
+
+1. The local dashboard has two distinct working entries: Alerts for the unchanged percentage-move alert tool, and Scanner for the new ATR/liquidity tool.
+2. The new crypto Scanner discovers all active Bybit USDT linear perpetuals, not a hard-coded subset.
+3. Every displayed ATR is the same Wilder ATR(14)/closed-candle-close*100 definition on 1m, 5m, 1h, 1D, 1W, or 1Mo.
+4. A crypto instrument appears in the ranked list only if it passes turnover, spread, bid-depth, ask-depth, data-validity, and manual-exclusion rules. Volatility can never override failed liquidity.
+5. The default view shows the top 10 by 1m ATR%, and selecting another timeframe deterministically reranks the table while retaining all six columns.
+6. Missing data is N/A/Loading/Error/Stale as appropriate, never a misleading zero or empty success.
+7. Public scanner market data does not read or modify live/demo private credentials.
+8. Pepperstone has a separate ATR-percentage EA/window that ranks Market Watch forex without volume and does not disturb the existing Market Spread EA/window.
+9. Every 9 EMA, 20 EMA, and VWAP offset line in custom_indicator.pine is opaque black and retains the existing dashed pattern; unrelated Pine behaviour is unchanged.
+10. No live-money action, secret leak, Render/local routing regression, dashboard redesign, or unrelated file change occurs.
+
+COMPLETION WORKFLOW
+
+1. Review the final diff and git status --short. Remove only verified repo-local test/cache artefacts allowed by AGENTS.md. Never remove unrelated files.
+2. Write a factual final summary to summary/CODEX_SUMMARY_latest.txt before pushing. Include:
+   - exact changed files and behaviour;
+   - ATR and liquidity definitions/defaults;
+   - exact test commands and results;
+   - actual Edge, Bybit, MetaEditor/MT5, and TradingView checks performed;
+   - official documentation sections used;
+   - residual risks/limitations, including that liquidity proxies do not guarantee future fills.
+3. Run repository-root PATCH_DESKTOP_PUSH.bat.
+4. Do not push before the summary is written. Do not commit temp, cache, log, environment, secret, runtime-data, Render data, or local-state files.
+5. Do not report completion unless PATCH_DESKTOP_PUSH.bat succeeds and verifies local HEAD equals origin/master. If an external compile, GUI, or live public-data smoke check is unavailable, report that exact unverified item rather than claiming success.

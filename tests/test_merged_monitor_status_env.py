@@ -44,6 +44,8 @@ def test_merged_monitor_html_removed_controls_and_logs(monkeypatch: pytest.Monke
     assert 'id="bybit-log-box"' not in html
     assert 'id="oanda-log-box"' not in html
     assert html.count('id="monitor-control-panel"') == 1
+    assert 'aria-label="Breadcrumb"' in html
+    assert "Trading Tools</a> / Alerts" in html
     assert 'id="monitor-target"' in html
     assert 'id="monitor-status" class="badge">Checking…</span>' in html
     assert 'id="monitor-wait-seconds"' in html
@@ -51,7 +53,7 @@ def test_merged_monitor_html_removed_controls_and_logs(monkeypatch: pytest.Monke
     assert 'id="monitor-custom-alerts"' in html
     assert 'Bybit monitor controls' not in html
     assert 'OANDA monitor controls' not in html
-    assert "polls local scanner status every 2 seconds" in html
+    assert "polls local alert-monitor status every 2 seconds" in html
     assert "/static/merged_alerts.js?v=" in html
     assert "/static/merged_monitor.js" not in html
     assert response.headers.get("Cache-Control") == "no-store, no-cache, must-revalidate, max-age=0"
@@ -636,6 +638,8 @@ def test_run_local_master_control_bat_uses_local_autostart() -> None:
     assert 'set "AUTOSTART_SCRIPTS=bybit_monitor,oanda_monitor"' in content
     assert '$raw = "bybit_monitor,oanda_monitor"' in worker
     assert '$tokens = @("bybit_monitor", "oanda_monitor")' in worker
+    assert '"missing live alert monitor"' in worker
+    assert '"missing live scanner"' not in worker
     assert 'set "SCANNER_LOCAL_UI_MODE=1"' not in content
     assert 'if /I "%~1"=="__worker_console" goto worker_console' not in content
     assert 'if /I "%~1"=="__worker" goto worker' in content
@@ -1045,7 +1049,7 @@ def test_autostart_supervisor_preserves_restart_failure_backoff(monkeypatch: pyt
 def test_monitor_running_true_when_runtime_status_is_fresh_without_managed_process(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(master_service, "get_merged_script_buttons", lambda: [{"id": "monitor", "name": "monitor", "label": "Scanner", "open_url": "/merged/monitor"}])
+    monkeypatch.setattr(master_service, "get_merged_script_buttons", lambda: [{"id": "monitor", "name": "monitor", "label": "Alerts", "open_url": "/merged/monitor"}])
     monkeypatch.setattr(master_service.script_manager, "list_scripts", lambda: [])
     monkeypatch.setattr(master_service, "_scanner_runtime_is_live", lambda name: name == "bybit_monitor")
     monkeypatch.setattr(master_service, "_compute_autostart_scripts", lambda: ["bybit_monitor"])
@@ -1057,7 +1061,7 @@ def test_monitor_running_true_when_runtime_status_is_fresh_without_managed_proce
 def test_monitor_running_false_when_runtime_status_is_stale_without_managed_process(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(master_service, "get_merged_script_buttons", lambda: [{"id": "monitor", "name": "monitor", "label": "Scanner", "open_url": "/merged/monitor"}])
+    monkeypatch.setattr(master_service, "get_merged_script_buttons", lambda: [{"id": "monitor", "name": "monitor", "label": "Alerts", "open_url": "/merged/monitor"}])
     monkeypatch.setattr(master_service.script_manager, "list_scripts", lambda: [])
     monkeypatch.setattr(master_service, "_scanner_runtime_is_live", lambda _name: False)
     monkeypatch.setattr(master_service, "_compute_autostart_scripts", lambda: ["bybit_monitor", "oanda_monitor"])
@@ -1069,7 +1073,7 @@ def test_monitor_running_false_when_runtime_status_is_stale_without_managed_proc
 def test_monitor_running_true_when_managed_subprocess_is_running(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(master_service, "get_merged_script_buttons", lambda: [{"id": "monitor", "name": "monitor", "label": "Scanner", "open_url": "/merged/monitor"}])
+    monkeypatch.setattr(master_service, "get_merged_script_buttons", lambda: [{"id": "monitor", "name": "monitor", "label": "Alerts", "open_url": "/merged/monitor"}])
     monkeypatch.setattr(
         master_service.script_manager,
         "list_scripts",
@@ -1088,7 +1092,7 @@ def test_monitor_running_true_when_managed_subprocess_is_running(
 def test_monitor_requires_all_configured_scanner_targets_and_exposes_diagnostics(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(master_service, "get_merged_script_buttons", lambda: [{"id": "monitor", "name": "monitor", "label": "Scanner", "open_url": "/merged/monitor"}])
+    monkeypatch.setattr(master_service, "get_merged_script_buttons", lambda: [{"id": "monitor", "name": "monitor", "label": "Alerts", "open_url": "/merged/monitor"}])
     monkeypatch.setattr(
         master_service.script_manager,
         "list_scripts",
@@ -1109,7 +1113,7 @@ def test_monitor_requires_all_configured_scanner_targets_and_exposes_diagnostics
     monitor_row = next(row for row in payload if row["name"] == "monitor")
     assert monitor_row["running"] is False
     assert monitor_row["starting"] is True
-    assert "missing live scanner(s): oanda_monitor" in monitor_row["status_detail"]
+    assert "missing live alert monitor(s): oanda_monitor" in monitor_row["status_detail"]
     assert monitor_row["scanner_required_targets"] == ["bybit_monitor", "oanda_monitor"]
     assert monitor_row["scanner_children"]["bybit_monitor"]["running"] is True
     assert monitor_row["scanner_children"]["oanda_monitor"]["running"] is False

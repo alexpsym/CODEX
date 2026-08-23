@@ -129,13 +129,22 @@ def test_custom_indicator_offset_alert_messages_identify_the_exact_series() -> N
 
 def test_custom_indicator_preserves_base_and_dashed_offset_visuals() -> None:
     source = _source()
-    assert 'plot(showEma9 ? ema9 : na, "9 EMA"' in source
-    assert 'plot(showEma20 ? ema20 : na, "20 EMA"' in source
-    assert 'plot(showVwapOnChart ? vwapValue : na, "VWAP"' in source
+    assert 'ema9Color = color.rgb(57, 255, 20)' in source
+    assert 'ema20Color = color.blue' in source
+    assert 'plot(showEma9 ? ema9 : na, "9 EMA", color=ema9Color, linewidth=2' in source
+    assert 'plot(showEma20 ? ema20 : na, "20 EMA", color=ema20Color, linewidth=2' in source
+    assert 'plot(showVwapOnChart ? vwapValue : na, "VWAP", color=color.new(color.purple, 0), linewidth=2' in source
     assert 'plot(showVolumeInPane ? volume : na, "Volume"' in source
-    assert "drawDashedOffset(ema9OffsetLines, showEma9Offset, ema9Offset" in source
-    assert "drawDashedOffset(ema20OffsetLines, showEma20Offset, ema20Offset" in source
-    assert "drawDashedOffset(vwapOffsetLines, showVwapOffsetOnChart, vwapOffset" in source
+    assert "applyPercentOffset(baseLine, distancePercent, offsetSide)" in source
+    assert 'offsetSide == "Above" ? 1.0 + offsetFactor : 1.0 - offsetFactor' in source
+    assert "color=lineColor, style=line.style_dashed, width=1" in source
+    assert "drawDashedOffset(ema9OffsetLines, showEma9Offset, ema9Offset, color.black)" in source
+    assert "drawDashedOffset(ema20OffsetLines, showEma20Offset, ema20Offset, color.black)" in source
+    assert "drawDashedOffset(vwapOffsetLines, showVwapOffsetOnChart, vwapOffset, color.black)" in source
+    offset_calls = source[source.index("drawDashedOffset(ema9OffsetLines"):source.index('plot(showVolumeInPane ? volume : na')]
+    assert "color.new(ema9Color" not in offset_calls
+    assert "color.new(ema20Color" not in offset_calls
+    assert "color.new(color.purple" not in offset_calls
 
 
 def test_offset_cross_model_ignores_base_crossings_until_each_offset_is_reached() -> None:

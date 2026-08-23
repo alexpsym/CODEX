@@ -43,6 +43,8 @@ BASE_DIR = Path(__file__).resolve().parents[1]
 
 LOCAL_BUILD_FILES = (
     "render/master_service.py",
+    "render/atr_scanner.py",
+    "render/static/atr_scanner.js",
     "render/static/calculator.js",
     "render/static/dashboard.js",
     "render/static/history_page.js",
@@ -122,6 +124,11 @@ from bybit_credentials import (
     resolve_bybit_credentials_for,
 )
 from render.monthly_aud_revaluation import MonthlyAudRevalError, sync_monthly_aud_revaluation
+from render.atr_scanner import (
+    ATRScannerService,
+    DEFAULT_SETTINGS as ATR_SCANNER_DEFAULT_SETTINGS,
+    ScannerValidationError,
+)
 from shared.bybit_option_resolver import resolve_option_by_target_risk
 from shared.symbol_resolution import (
     is_likely_oanda_pair,
@@ -283,6 +290,7 @@ LOCAL_ONLY_APP_NAMES = {
 LOCAL_ONLY_PATH_PREFIXES = (
     "/merged/history",
     "/merged/alerts",
+    "/merged/atr-scanner",
     "/bybit-history",
     "/oanda-history",
     "/coinspot-history",
@@ -298,6 +306,7 @@ LOCAL_ONLY_PATH_PREFIXES = (
     "/api/pine",
     "/api/open-orders",
     "/api/instrument-lookup",
+    "/api/atr-scanner",
 )
 
 
@@ -357,7 +366,8 @@ def _profile_main_buttons() -> List[Dict[str, object]]:
                 {"id": "bounce-trader", "name": "bounce-trader", "label": "Bounce Trader", "open_url": _render_tools_page_url("/merged/bounce-trader"), "dashboard_main_view": True, "remote_owned": True},
                 {"id": "fxweekend", "name": "fxweekend", "label": "FX Weekend", "open_url": _render_tools_page_url("/apps/fxweekend-clone"), "dashboard_main_view": True, "remote_owned": True},
                 {"id": "trading-journal", "name": "trading-journal", "label": "Journal", "open_url": "/dashboard/trading-journal", "dashboard_main_view": True},
-                {"id": "monitor", "name": "monitor", "label": "Scanner", "open_url": "/merged/monitor", "dashboard_main_view": True},
+                {"id": "monitor", "name": "monitor", "label": "Alerts", "open_url": "/merged/monitor", "dashboard_main_view": True},
+                {"id": "atr-scanner", "name": "atr-scanner", "label": "Scanner", "open_url": "/merged/atr-scanner", "dashboard_main_view": True},
                 {"id": "ivindicator-clone", "name": "ivindicator-clone", "label": "IV Indicator", "open_url": "/apps/ivindicator-clone", "dashboard_main_view": True},
                 {"id": "spreads-clone", "name": "spreads-clone", "label": "Spreads", "open_url": "/apps/spreads-clone", "dashboard_main_view": True},
             ]
@@ -613,7 +623,7 @@ def _merged_monitor_row(
     else:
         detail = "stopped"
     if failed_required:
-        detail = f"{detail}: missing live scanner(s): {', '.join(failed_required)}"
+        detail = f"{detail}: missing live alert monitor(s): {', '.join(failed_required)}"
 
     return {
         "running": running,
@@ -3419,6 +3429,54 @@ async def _bybit_get_async(base_url: str, path: str, params: Dict[str, object], 
         res = await client.get(f"{base_url}{path}", params=params)
     res.raise_for_status()
     return res.json()
+
+
+ATR_SCANNER_SETTINGS_PATH = BASE_DIR / "render" / "data" / "atr_scanner_settings.json"
+
+
+def _atr_scanner_public_base_url() -> str:
+    """Resolve only a public live Bybit market-data origin for the scanner."""
+
+    raw = str(os.getenv("BYBIT_PUBLIC_MARKET_BASE_URL") or BYBIT_BASE).strip().rstrip("/")
+    parsed = urlparse(raw)
+    host = str(parsed.hostname or "").strip().lower()
+    try:
+        port = parsed.port
+    except ValueError:
+        port = -1
+    if (
+        parsed.scheme == "https"
+        and host in {"api.bybit.com", "api.bytick.com"}
+        and parsed.username is None
+        and parsed.password is None
+        and port in {None, 443}
+        and parsed.path in {"", "/"}
+        and not parsed.params
+        and not parsed.query
+        and not parsed.fragment
+    ):
+        return f"https://{host}"
+    return BYBIT_BASE
+
+
+async def _atr_scanner_fetch_public_json(
+    path: str, params: Dict[str, object]
+) -> Dict[str, object]:
+    return await _bybit_get_async(
+        _atr_scanner_public_base_url(),
+        path,
+        params,
+        timeout_s=12.0,
+        connect_s=3.0,
+        read_s=12.0,
+    )
+
+
+ATR_SCANNER_SERVICE = ATRScannerService(
+    fetch_json=_atr_scanner_fetch_public_json,
+    settings_path=ATR_SCANNER_SETTINGS_PATH,
+    source_base_url=_atr_scanner_public_base_url(),
+)
 
 
 async def _bybit_avg_7d_turnover_usd_async(
@@ -14282,7 +14340,7 @@ async def _supervise_autostart_scripts_once(
         retry_after = _SCANNER_SUPERVISOR_BACKOFF.get(name, 0.0)
         if retry_after and now < retry_after:
             continue
-        supervisor_label = "Scanner supervisor" if is_scanner else "Autostart supervisor"
+        supervisor_label = "Alerts supervisor" if is_scanner else "Autostart supervisor"
         restart_reason = str(
             getattr(script, "last_exit_reason", None)
             or getattr(script, "last_start_error", None)
@@ -27128,9 +27186,10 @@ MERGED_MONITOR_TEMPLATE = """<!doctype html>
 </head>
 <body>
   <div class="wrap">
+    <nav aria-label="Breadcrumb"><a href="/" style="color:#93c5fd">Trading Tools</a> / Alerts</nav>
     <h2 style="margin-top:0">Alerts</h2>
     <p class="meta">Local merged controls for Bybit and OANDA alerts.</p>
-    <p class="notice">This page polls local scanner status every 2 seconds. Closing this tab only stops these status requests/log lines; scanner processes keep running independently.</p>
+    <p class="notice">This page polls local alert-monitor status every 2 seconds. Closing this tab only stops these status requests/log lines; alert-monitor processes keep running independently.</p>
     <div class="grid">
       <section class="panel" id="monitor-control-panel">
         <h3 style="margin-top:0">Monitor controls</h3>
@@ -27163,6 +27222,129 @@ MERGED_MONITOR_TEMPLATE = """<!doctype html>
     </div>
   </div>
   <script src="{{MERGED_MONITOR_JS_URL}}"></script>
+</body>
+</html>"""
+
+ATR_SCANNER_TEMPLATE = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Scanner - Bybit ATR %</title>
+  <style>
+    :root { color-scheme:dark; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:#0b1220; color:#e2e8f0; font-family:Inter,system-ui,sans-serif; }
+    .wrap { max-width:1680px; margin:0 auto; padding:18px; }
+    .crumb { color:#93c5fd; font-size:.88rem; margin-bottom:8px; }
+    .crumb a { color:inherit; }
+    h1 { margin:0 0 4px; font-size:1.55rem; }
+    .muted { color:#94a3b8; font-size:.9rem; line-height:1.45; }
+    .panel { margin-top:14px; padding:14px; background:#111827; border:1px solid #1f2937; border-radius:14px; box-shadow:0 10px 30px rgba(0,0,0,.22); }
+    .settings-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(175px,1fr)); gap:10px; }
+    label { display:flex; flex-direction:column; gap:5px; color:#cbd5e1; font-size:.86rem; font-weight:700; }
+    input, select, textarea, button { background:#0f172a; color:#e2e8f0; border:1px solid #334155; border-radius:9px; padding:8px 10px; font:inherit; }
+    textarea { min-height:78px; resize:vertical; }
+    button { cursor:pointer; font-weight:800; }
+    button:hover { background:#1e293b; }
+    button[disabled] { cursor:wait; opacity:.6; }
+    .wide { grid-column:1 / -1; }
+    .actions { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-top:10px; }
+    .status { min-height:1.35em; color:#93c5fd; }
+    .status.error { color:#fca5a5; }
+    .status.stale { color:#fcd34d; }
+    .basis { display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); gap:8px; margin-top:10px; }
+    .basis > div { background:#0b1220; border:1px solid #1f2937; border-radius:9px; padding:9px; }
+    .basis strong { color:#93c5fd; }
+    .tabs { display:flex; gap:8px; margin-bottom:10px; }
+    .tabs button[aria-selected="true"] { background:#2563eb; border-color:#3b82f6; }
+    .table-wrap { overflow:auto; border:1px solid #1f2937; border-radius:10px; }
+    table { border-collapse:collapse; width:100%; min-width:1420px; }
+    th, td { padding:8px 9px; border-bottom:1px solid #1f2937; white-space:nowrap; text-align:right; font-size:.82rem; }
+    th { position:sticky; top:0; z-index:1; background:#0f172a; color:#93c5fd; }
+    th:nth-child(2), td:nth-child(2), .left { text-align:left; }
+    tr:hover td { background:#0f172a; }
+    tr.stale td { color:#fcd34d; }
+    .reason-list { white-space:normal; min-width:280px; }
+    .progress { width:min(460px,100%); height:8px; overflow:hidden; border-radius:999px; background:#1f2937; }
+    .progress > span { display:block; height:100%; width:0; background:#3b82f6; transition:width .2s ease; }
+    [hidden] { display:none !important; }
+    @media (max-width:720px) { .wrap { padding:10px; } .panel { padding:10px; } }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <nav class="crumb" aria-label="Breadcrumb"><a href="/">Trading Tools</a> / Scanner</nav>
+    <h1>Scanner</h1>
+    <p class="muted">Ranks currently Trading Bybit linear USDT perpetuals by Wilder ATR percentage after every liquidity gate passes. Readings use the last closed candle.</p>
+
+    <section class="panel" aria-labelledby="scanner-settings-heading">
+      <h2 id="scanner-settings-heading" style="margin-top:0">Scanner settings</h2>
+      <div class="settings-grid">
+        <label for="scanner-rank-timeframe">Rank timeframe
+          <select id="scanner-rank-timeframe">
+            <option value="1m">1m</option><option value="5m">5m</option><option value="1h">1h</option>
+            <option value="1D">1D</option><option value="1W">1W</option><option value="1Mo">1Mo</option>
+          </select>
+        </label>
+        <label for="scanner-top-n">Top N<input id="scanner-top-n" type="number" min="1" max="100" step="1"/></label>
+        <label for="scanner-atr-length">ATR length<input id="scanner-atr-length" type="number" min="2" max="100" step="1"/></label>
+        <label for="scanner-min-turnover">Minimum 24h turnover (USDT)<input id="scanner-min-turnover" type="number" min="0" step="100000"/></label>
+        <label for="scanner-max-spread">Maximum spread (%)<input id="scanner-max-spread" type="number" min="0" max="100" step="0.001"/></label>
+        <label for="scanner-depth-band">Depth band from midpoint (%)<input id="scanner-depth-band" type="number" min="0.000001" max="10" step="0.01"/></label>
+        <label for="scanner-min-bid-depth">Minimum bid depth (USDT)<input id="scanner-min-bid-depth" type="number" min="0" step="1000"/></label>
+        <label for="scanner-min-ask-depth">Minimum ask depth (USDT)<input id="scanner-min-ask-depth" type="number" min="0" step="1000"/></label>
+        <label class="wide" for="scanner-exclusions">Manual symbol exclusions (comma or newline separated)
+          <textarea id="scanner-exclusions" spellcheck="false" placeholder="Example: BTCUSDT, ETHUSDT"></textarea>
+        </label>
+      </div>
+      <div class="actions">
+        <button id="scanner-save" type="button">Save settings</button>
+        <button id="scanner-reset" type="button">Reset to defaults</button>
+        <button id="scanner-refresh" type="button">Refresh now</button>
+        <span id="scanner-auto-status" class="muted">Automatic refresh: every 60 seconds</span>
+      </div>
+      <div id="scanner-action-status" class="status" role="status" aria-live="polite"></div>
+      <div class="progress" aria-hidden="true"><span id="scanner-progress-bar"></span></div>
+      <p id="scanner-progress-text" class="muted" role="status" aria-live="polite"></p>
+      <p class="muted">Turnover, spread, and order-book depth are liquidity proxies. They cannot guarantee fills or future liquidity.</p>
+    </section>
+
+    <section class="panel" aria-labelledby="scanner-results-heading">
+      <h2 id="scanner-results-heading" style="margin-top:0">ATR percentage rankings</h2>
+      <div id="scanner-basis" class="basis" aria-live="polite"></div>
+      <div class="tabs" role="tablist" aria-label="Scanner result view">
+        <button id="scanner-qualified-tab" type="button" role="tab" aria-selected="true" aria-controls="scanner-qualified-panel">Qualified</button>
+        <button id="scanner-excluded-tab" type="button" role="tab" aria-selected="false" aria-controls="scanner-excluded-panel">Excluded</button>
+      </div>
+      <div id="scanner-qualified-panel" role="tabpanel" aria-labelledby="scanner-qualified-tab">
+        <div class="table-wrap">
+          <table id="scanner-qualified-table">
+            <thead><tr>
+              <th scope="col">Rank</th><th scope="col">Instrument</th>
+              <th scope="col">ATR% 1m</th><th scope="col">ATR% 5m</th><th scope="col">ATR% 1h</th>
+              <th scope="col">ATR% 1D</th><th scope="col">ATR% 1W</th><th scope="col">ATR% 1Mo</th>
+              <th scope="col">24h turnover (USDT)</th><th scope="col">Spread %</th>
+              <th scope="col">Bid depth</th><th scope="col">Ask depth</th>
+              <th scope="col">Liquidity</th><th scope="col">Data state</th>
+            </tr></thead>
+            <tbody id="scanner-qualified-body"></tbody>
+          </table>
+        </div>
+        <p id="scanner-qualified-empty" class="muted" hidden>No rank-eligible instruments for the selected timeframe.</p>
+      </div>
+      <div id="scanner-excluded-panel" role="tabpanel" aria-labelledby="scanner-excluded-tab" hidden>
+        <div class="table-wrap">
+          <table id="scanner-excluded-table">
+            <thead><tr><th scope="col" class="left">Instrument</th><th scope="col" class="left">Reason(s)</th><th scope="col">24h turnover (USDT)</th><th scope="col">Spread %</th><th scope="col">Bid depth</th><th scope="col">Ask depth</th></tr></thead>
+            <tbody id="scanner-excluded-body"></tbody>
+          </table>
+        </div>
+        <p id="scanner-excluded-empty" class="muted" hidden>No excluded instruments.</p>
+      </div>
+    </section>
+  </main>
+  <script src="{{ATR_SCANNER_JS_URL}}"></script>
 </body>
 </html>"""
 
@@ -27294,6 +27476,93 @@ async def merged_monitor_page() -> Response:
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
     response.headers["Pragma"] = "no-cache"
     return response
+
+
+@app.get("/merged/atr-scanner", response_class=HTMLResponse)
+async def atr_scanner_page() -> Response:
+    if _runtime_is_render():
+        return _local_only_disabled_response("/merged/atr-scanner")
+    scanner_js_version = _static_asset_version("render/static/atr_scanner.js")
+    page = ATR_SCANNER_TEMPLATE.replace(
+        "{{ATR_SCANNER_JS_URL}}", f"/static/atr_scanner.js?v={scanner_js_version}"
+    )
+    response = HTMLResponse(page)
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    return response
+
+
+@app.get("/api/atr-scanner/settings")
+async def atr_scanner_settings() -> Response:
+    if _runtime_is_render():
+        return _local_only_disabled_response("/api/atr-scanner/settings", as_json=True)
+    try:
+        return JSONResponse(
+            {
+                "settings": ATR_SCANNER_SERVICE.load_settings(),
+                "defaults": dict(ATR_SCANNER_DEFAULT_SETTINGS),
+            }
+        )
+    except ScannerValidationError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/atr-scanner/settings")
+async def update_atr_scanner_settings(
+    payload: Dict[str, object] = Body(...),
+) -> Response:
+    if _runtime_is_render():
+        return _local_only_disabled_response("/api/atr-scanner/settings", as_json=True)
+    try:
+        settings = ATR_SCANNER_SERVICE.save_settings(payload)
+        refresh = await ATR_SCANNER_SERVICE.start_refresh(manual=True)
+        return JSONResponse({"settings": settings, "refresh": refresh})
+    except ScannerValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/atr-scanner/settings/reset")
+async def reset_atr_scanner_settings() -> Response:
+    if _runtime_is_render():
+        return _local_only_disabled_response(
+            "/api/atr-scanner/settings/reset", as_json=True
+        )
+    settings = ATR_SCANNER_SERVICE.reset_settings()
+    refresh = await ATR_SCANNER_SERVICE.start_refresh(manual=True)
+    return JSONResponse({"settings": settings, "refresh": refresh})
+
+
+@app.post("/api/atr-scanner/refresh")
+async def refresh_atr_scanner(
+    payload: Optional[Dict[str, object]] = Body(default=None),
+) -> Response:
+    if _runtime_is_render():
+        return _local_only_disabled_response("/api/atr-scanner/refresh", as_json=True)
+    manual_value = True if payload is None else payload.get("manual", True)
+    if not isinstance(manual_value, bool):
+        raise HTTPException(status_code=400, detail="manual must be true or false.")
+    try:
+        started = await ATR_SCANNER_SERVICE.start_refresh(manual=manual_value)
+    except ScannerValidationError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return JSONResponse(started, status_code=202 if started.get("started") else 200)
+
+
+@app.get("/api/atr-scanner/status")
+@app.get("/api/atr-scanner/snapshot")
+async def atr_scanner_status() -> Response:
+    if _runtime_is_render():
+        return _local_only_disabled_response("/api/atr-scanner/status", as_json=True)
+    payload = ATR_SCANNER_SERVICE.status_payload()
+    if payload.get("ok") is True:
+        status_code = 200
+    elif (payload.get("progress") or {}).get("in_progress"):
+        status_code = 202
+    elif payload.get("state") == "not_started":
+        status_code = 202
+    else:
+        status_code = 502
+    return JSONResponse(payload, status_code=status_code)
 
 
 @app.get("/merged/bounce-trader")
@@ -38897,7 +39166,7 @@ def _runtime_is_render() -> bool:
 
 def _scanner_local_only_response(path: str) -> PlainTextResponse:
     return PlainTextResponse(
-        "Scanner is local-only. Run run_scanner_local.bat on your PC.",
+        "Alerts are local-only. Run run_local_master_control.bat on your PC.",
         status_code=410,
         headers={"cache-control": "no-store, max-age=0", "x-disabled-path": path},
     )

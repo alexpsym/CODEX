@@ -149,9 +149,9 @@ drawDashedOffset(array<line> offsetLines, bool enabled, float value, color lineC
                     line.delete(array.get(offsetLines, i))
                 array.clear(offsetLines)
 
-drawDashedOffset(ema9OffsetLines, showEma9Offset, ema9Offset, color.new(ema9Color, 30))
-drawDashedOffset(ema20OffsetLines, showEma20Offset, ema20Offset, color.new(ema20Color, 30))
-drawDashedOffset(vwapOffsetLines, showVwapOffsetOnChart, vwapOffset, color.new(color.purple, 30))
+drawDashedOffset(ema9OffsetLines, showEma9Offset, ema9Offset, color.black)
+drawDashedOffset(ema20OffsetLines, showEma20Offset, ema20Offset, color.black)
+drawDashedOffset(vwapOffsetLines, showVwapOffsetOnChart, vwapOffset, color.black)
 
 plot(showVolumeInPane ? volume : na, "Volume", color=volumeColor, style=plot.style_columns, format=format.volume)
 

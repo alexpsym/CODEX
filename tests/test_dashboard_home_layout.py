@@ -684,6 +684,11 @@ def test_local_profile_buttons_use_configured_render_routes(monkeypatch) -> None
     assert by_name["fxweekend"]["open_url"] == "https://tools.example/apps/fxweekend-clone"
     assert by_name["fxweekend"]["remote_owned"] is True
     assert by_name["trading-journal"]["open_url"] == "/dashboard/trading-journal"
+    assert by_name["monitor"]["label"] == "Alerts"
+    assert by_name["monitor"]["open_url"] == "/merged/monitor"
+    assert by_name["atr-scanner"]["label"] == "Scanner"
+    assert by_name["atr-scanner"]["open_url"] == "/merged/atr-scanner"
+    assert by_name["monitor"]["id"] != by_name["atr-scanner"]["id"]
     assert by_name["spreads-clone"]["label"] == "Spreads"
     assert "instrument-lookup" not in by_name
     assert "history" not in by_name

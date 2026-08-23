@@ -44,8 +44,8 @@ def test_dashboard_js_no_removed_widget_endpoints_and_keeps_needed_calls() -> No
     assert "const processStarting = script.starting === true;" in js
     assert "let dotState = processRunning ? 'running' : (processStarting ? 'starting' : 'stopped');" in js
     assert "if (lowerName === 'monitor') {" in js
-    assert "let title = processRunning ? 'Scanner running' : (processStarting ? 'Scanner starting' : 'Scanner stopped');" in js
-    assert "title = `Scanner stopped: ${stopReason}`;" in js
+    assert "let title = processRunning ? 'Alerts running' : (processStarting ? 'Alerts starting' : 'Alerts stopped');" in js
+    assert "title = `Alerts stopped: ${stopReason}`;" in js
     assert "if (!processRunning && stopReason) {" in js
     assert "return { dotState: 'running', dotTitle: 'Shown on dashboard', active: true };" in js
     assert "return { dotState: 'running', dotTitle: 'Open in a tab', active: true };" in js
