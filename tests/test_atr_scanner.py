@@ -159,36 +159,87 @@ def test_orderbook_depth_sums_quote_notional_inside_inclusive_band_per_side():
     payload = {
         "result": {
             "ts": 1_000_000,
-            "b": [["100", "2"], ["99.9", "3"], ["99.89", "100"]],
+            "b": [["100", "2"], ["99.91", "3"], ["99.9", "100"]],
             "a": [["100.01", "4"], ["100.1", "5"], ["100.11", "100"]],
         }
     }
     depth = calculate_orderbook_depth(
         payload,
-        midpoint=100,
         band_pct=0.1,
         server_time_ms=1_005_000,
         max_age_seconds=30,
     )
     assert depth is not None
-    assert depth["bid_depth_usdt"] == pytest.approx(100 * 2 + 99.9 * 3)
+    assert depth["best_bid"] == 100
+    assert depth["best_ask"] == 100.01
+    assert depth["midpoint"] == pytest.approx(100.005)
+    assert depth["spread_pct"] == pytest.approx(
+        calculate_spread_percent(100, 100.01)
+    )
+    assert depth["bid_depth_usdt"] == pytest.approx(100 * 2 + 99.91 * 3)
     assert depth["ask_depth_usdt"] == pytest.approx(100.01 * 4 + 100.1 * 5)
     assert depth["book_age_seconds"] == pytest.approx(5)
+
+
+def test_moved_orderbook_uses_its_own_midpoint_spread_and_quote_depth():
+    payload = {
+        "result": {
+            "ts": 1_000_000,
+            "b": [["100.95", "500"]],
+            "a": [["101.05", "500"]],
+        }
+    }
+    snapshot = calculate_orderbook_depth(
+        payload,
+        band_pct=0.1,
+        server_time_ms=1_000_000,
+        max_age_seconds=30,
+    )
+    assert snapshot is not None
+    assert snapshot["best_bid"] == pytest.approx(100.95)
+    assert snapshot["best_ask"] == pytest.approx(101.05)
+    assert snapshot["midpoint"] == pytest.approx(101.0)
+    assert snapshot["spread_pct"] == pytest.approx((101.05 - 100.95) / 101 * 100)
+    assert snapshot["bid_depth_usdt"] == pytest.approx(50_475)
+    assert snapshot["ask_depth_usdt"] == pytest.approx(50_525)
+
+
+def test_orderbook_depth_band_boundaries_are_inclusive():
+    snapshot = calculate_orderbook_depth(
+        {
+            "result": {
+                "ts": 1_000_000,
+                "b": [["99.95", "1"], ["99.9", "2"], ["99.899", "100"]],
+                "a": [["100.05", "1"], ["100.1", "2"], ["100.101", "100"]],
+            }
+        },
+        band_pct=0.1,
+        server_time_ms=1_000_000,
+        max_age_seconds=30,
+    )
+    assert snapshot is not None
+    assert snapshot["midpoint"] == pytest.approx(100)
+    assert snapshot["bid_depth_usdt"] == pytest.approx(99.95 + 99.9 * 2)
+    assert snapshot["ask_depth_usdt"] == pytest.approx(100.05 + 100.1 * 2)
 
 
 @pytest.mark.parametrize(
     "payload",
     [
-        {"result": {"ts": 1, "b": [["101", "1"]], "a": [["100", "1"]]}},
+        {"result": {"ts": 100_000, "b": [["101", "1"]], "a": [["100", "1"]]}},
         {"result": {"b": [["99", "1"]], "a": [["101", "1"]]}},
-        {"result": {"ts": 1, "b": [["bad", "1"]], "a": [["101", "1"]]}},
-        {"result": {"ts": 1, "b": [], "a": [["101", "1"]]}},
+        {"result": {"ts": 1, "b": [["99", "1"]], "a": [["101", "1"]]}},
+        {"result": {"ts": 100_000, "b": [["bad", "1"]], "a": [["101", "1"]]}},
+        {"result": {"ts": 100_000, "b": [], "a": [["101", "1"]]}},
+        {"result": {"ts": 100_000, "b": [["nan", "1"]], "a": [["101", "1"]]}},
+        {"result": {"ts": 100_000, "b": [["99", "1"]], "a": [["inf", "1"]]}},
+        {"result": {"ts": 100_000, "b": [["0", "1"]], "a": [["101", "1"]]}},
+        {"result": {"ts": 100_000, "b": [["99", "-1"]], "a": [["101", "1"]]}},
     ],
 )
 def test_missing_stale_crossed_or_malformed_orderbook_fails_closed(payload):
     assert calculate_orderbook_depth(
         payload,
-        midpoint=100,
         band_pct=0.1,
         server_time_ms=100_000,
         max_age_seconds=30,
@@ -252,6 +303,12 @@ class FakeBybit:
         self.fail_scope = None
         self.slow_gate = slow_gate
         self.fail_kline_interval = None
+        self.ticker_quotes = {}
+        self.orderbooks = {}
+
+    def ticker_row(self, symbol, *, turnover):
+        bid, ask = self.ticker_quotes.get(symbol, ("99.99", "100.01"))
+        return _ticker(symbol, turnover=turnover, bid=bid, ask=ask)
 
     async def __call__(self, path, params):
         self.calls.append((path, dict(params)))
@@ -282,21 +339,25 @@ class FakeBybit:
                 "time": self.now_ref[0],
                 "result": {
                     "list": [
-                        _ticker("ALPHAUSDT", turnover="50000000"),
-                        _ticker("BETAUSDT", turnover="50000000"),
-                        _ticker("ILLIQUSDT", turnover="100"),
+                        self.ticker_row("ALPHAUSDT", turnover="50000000"),
+                        self.ticker_row("BETAUSDT", turnover="50000000"),
+                        self.ticker_row("ILLIQUSDT", turnover="100"),
                     ]
                 },
             }
         if path == "/v5/market/orderbook":
-            return {
-                "retCode": 0,
-                "time": self.now_ref[0],
-                "result": {
+            result = self.orderbooks.get(
+                params["symbol"],
+                {
                     "ts": self.now_ref[0],
                     "b": [["99.99", "1000"]],
                     "a": [["100.01", "1000"]],
                 },
+            )
+            return {
+                "retCode": 0,
+                "time": self.now_ref[0],
+                "result": result,
             }
         if path == "/v5/market/kline":
             symbol = params["symbol"]
@@ -331,13 +392,13 @@ def _instrument(symbol, *, status="Trading", contract_type="LinearPerpetual"):
     }
 
 
-def _ticker(symbol, *, turnover):
+def _ticker(symbol, *, turnover, bid="99.99", ask="100.01"):
     return {
         "symbol": symbol,
         "turnover24h": turnover,
         "volume24h": "999999999999",  # must never be used for the turnover gate
-        "bid1Price": "99.99",
-        "ask1Price": "100.01",
+        "bid1Price": bid,
+        "ask1Price": ask,
     }
 
 
@@ -365,6 +426,13 @@ def test_full_service_uses_all_liquidity_gates_then_ranks_only_by_atr(tmp_path: 
     ]
     assert result["ranked_rows"][0]["atr_pct"]["1m"] > result["ranked_rows"][1]["atr_pct"]["1m"]
     assert all(set(row["atr_pct"]) == set(TIMEFRAME_KEYS) for row in result["ranked_rows"])
+    assert all(row["best_bid"] == 99.99 for row in result["ranked_rows"])
+    assert all(row["best_ask"] == 100.01 for row in result["ranked_rows"])
+    assert all(row["midpoint"] == 100 for row in result["ranked_rows"])
+    assert all(
+        row["spread_pct"] == pytest.approx(calculate_spread_percent(99.99, 100.01))
+        for row in result["ranked_rows"]
+    )
     excluded = {row["symbol"]: row["reasons"] for row in result["excluded_rows"]}
     assert "turnover_below_minimum" in excluded["ILLIQUSDT"]
     assert "inactive" in excluded["OLDUSDT"]
@@ -388,6 +456,95 @@ def test_full_service_uses_all_liquidity_gates_then_ranks_only_by_atr(tmp_path: 
         assert path.startswith("/v5/market/")
         lowered_keys = {str(key).lower() for key in params}
         assert not lowered_keys.intersection({"api_key", "apikey", "signature", "sign", "secret"})
+
+
+def test_service_qualifies_liquid_book_after_price_moves_from_ticker(tmp_path: Path):
+    now_ref = [DEFAULT_NOW_MS]
+    fake = FakeBybit(now_ref)
+    fake.orderbooks["ALPHAUSDT"] = {
+        "ts": now_ref[0],
+        "b": [["100.95", "500"]],
+        "a": [["101.05", "500"]],
+    }
+    service = _make_service(tmp_path, fake, now_ref)
+    result = asyncio.run(service.refresh(manual=True))
+
+    assert [row["symbol"] for row in result["ranked_rows"]] == [
+        "ALPHAUSDT",
+        "BETAUSDT",
+    ]
+    alpha = next(row for row in result["ranked_rows"] if row["symbol"] == "ALPHAUSDT")
+    assert alpha["best_bid"] == pytest.approx(100.95)
+    assert alpha["best_ask"] == pytest.approx(101.05)
+    assert alpha["midpoint"] == pytest.approx(101)
+    assert alpha["spread_pct"] == pytest.approx((101.05 - 100.95) / 101 * 100)
+    assert alpha["bid_depth_usdt"] == pytest.approx(50_475)
+    assert alpha["ask_depth_usdt"] == pytest.approx(50_525)
+
+
+def test_current_book_not_older_ticker_controls_final_spread_gate(tmp_path: Path):
+    now_ref = [DEFAULT_NOW_MS]
+    fake = FakeBybit(now_ref)
+    fake.ticker_quotes["ALPHAUSDT"] = ("99.8", "100.2")
+    service = _make_service(tmp_path, fake, now_ref)
+    qualified = asyncio.run(service.refresh(manual=True))
+    assert {row["symbol"] for row in qualified["ranked_rows"]} == {
+        "ALPHAUSDT",
+        "BETAUSDT",
+    }
+    assert any(
+        path == "/v5/market/orderbook" and params["symbol"] == "ALPHAUSDT"
+        for path, params in fake.calls
+    )
+
+    fake.ticker_quotes["ALPHAUSDT"] = ("99.99", "100.01")
+    fake.orderbooks["ALPHAUSDT"] = {
+        "ts": now_ref[0],
+        "b": [["100.94", "500"]],
+        "a": [["101.06", "500"]],
+    }
+    excluded = asyncio.run(service.refresh(manual=True))
+    assert "ALPHAUSDT" not in {
+        row["symbol"] for row in excluded["ranked_rows"]
+    }
+    alpha = next(row for row in excluded["excluded_rows"] if row["symbol"] == "ALPHAUSDT")
+    assert alpha["reasons"] == ["spread_above_maximum"]
+    assert alpha["midpoint"] == pytest.approx(101)
+    assert alpha["spread_pct"] == pytest.approx((101.06 - 100.94) / 101 * 100)
+    assert alpha["bid_depth_usdt"] == pytest.approx(50_470)
+    assert alpha["ask_depth_usdt"] == pytest.approx(50_530)
+
+
+@pytest.mark.parametrize(
+    "invalid_book",
+    [
+        {"ts": DEFAULT_NOW_MS, "b": [["101", "1"]], "a": [["100", "1"]]},
+        {"ts": DEFAULT_NOW_MS, "b": [], "a": [["101", "1"]]},
+        {"b": [["99", "1"]], "a": [["101", "1"]]},
+        {"ts": DEFAULT_NOW_MS - 31_000, "b": [["99", "1"]], "a": [["101", "1"]]},
+        {"ts": DEFAULT_NOW_MS, "b": [["bad", "1"]], "a": [["101", "1"]]},
+        {"ts": DEFAULT_NOW_MS, "b": [["nan", "1"]], "a": [["101", "1"]]},
+        {"ts": DEFAULT_NOW_MS, "b": [["0", "1"]], "a": [["101", "1"]]},
+        {"ts": DEFAULT_NOW_MS, "b": [["99", "-1"]], "a": [["101", "1"]]},
+    ],
+)
+def test_invalid_current_book_fails_closed_with_explicit_reason(
+    tmp_path: Path, invalid_book
+):
+    now_ref = [DEFAULT_NOW_MS]
+    fake = FakeBybit(now_ref)
+    fake.orderbooks["ALPHAUSDT"] = invalid_book
+    service = _make_service(tmp_path, fake, now_ref)
+    result = asyncio.run(service.refresh(manual=True))
+
+    assert result["ok"] is True
+    assert result["state"] == "partial"
+    assert [row["symbol"] for row in result["ranked_rows"]] == ["BETAUSDT"]
+    alpha = next(row for row in result["excluded_rows"] if row["symbol"] == "ALPHAUSDT")
+    assert alpha["reasons"] == ["missing_invalid_market_data"]
+    assert {error["scope"] for error in result["errors"]} >= {
+        "orderbook:ALPHAUSDT"
+    }
 
 
 def test_each_orderbook_uses_its_own_response_time_for_freshness(tmp_path: Path):

@@ -1,151 +1,113 @@
-CODEX COMPLETION SUMMARY
-Brief: CODEX_BRIEF_2026-08-24_ATR_Volatility_Scanner_Alerts_Pine.txt
+CODEX FOLLOW-UP COMPLETION SUMMARY
+Brief: FIX ATR SCANNER LIQUIDITY SNAPSHOT AND PEPPERSTONE FALSE-STALE STATE
 Recorded: 2026-08-24 (Australia/Brisbane)
-Status: implementation and targeted verification complete; repository push workflow is the next required action
+Status: both narrow fixes and all available verification are complete; PATCH_DESKTOP_PUSH.bat is the next required action
 
-BASELINE, SCOPE, AND PRESERVATION
+BASELINE AND PRESERVATION
 
-- Worked in C:\GPT\CODEX-master on branch codex/journal-equity-fx-final-20260726 from HEAD 9fed3baa3cb64f54312ba9d6fb86de60d7299891. Initial HEAD matched origin/master (0 ahead, 0 behind).
-- Read AGENTS.md, this brief, the prior summary, and the relevant dashboard, alert-monitor, public Bybit, Pine, MT5 spread-feed/window, launcher, and test sources before editing.
-- Did not inspect or modify custom instructions/. No order, cancellation, amendment, position close, account mutation, or other live-money action was performed.
-- Preserved the five pre-existing user/runtime changes under render/data/: monthly_aud_revaluation.json, monthly_aud_revaluation_state.json, pending_webhooks.json, trade_contexts.json, and webhook_attempts.json. They must remain unstaged by PATCH_DESKTOP_PUSH.bat.
-- Did not change either Bybit credential pair or any credential variable. The crypto scanner uses unsigned public live market-data requests only.
-- Preserved the existing Market Watch spread EA/window source files byte-for-byte; the ATR feed/window use distinct files, IPC names, window title, styles, timer, and process guard.
+- Started in the existing C:\GPT\CODEX-master clone on branch codex/journal-equity-fx-final-20260726.
+- Starting HEAD and origin/master were both 40825706a79731b854449f4d7628fb6d12ced869, with 0 commits ahead and 0 behind.
+- Read the current AGENTS.md and inspected the actual scanner, Pepperstone ATR window/EA, tests, routes, JavaScript, Pine, spread tool, and push workflow before editing.
+- Preserved the five pre-existing tracked runtime modifications under render/data/: monthly_aud_revaluation.json, monthly_aud_revaluation_state.json, pending_webhooks.json, trade_contexts.json, and webhook_attempts.json. They are unrelated and must remain unstaged.
+- Did not inspect or modify credentials, secrets, environment files, custom instructions, accounts, orders, positions, workbooks, Render data, scanner settings/snapshots, or unrelated local state. No live-money or deployment action occurred.
+- Final pushed commit is assigned by the mandatory push workflow after this summary is written; the assistant response must report that hash and independently verify it equals origin/master.
 
-IMPLEMENTED BEHAVIOUR
+DEFECT 1: BYBIT SAME-SNAPSHOT LIQUIDITY
 
-1. Alerts and Scanner are now distinct local tools
+Root cause:
 
-- The existing percentage-move tool is visibly labelled Alerts on the local dashboard, page heading, breadcrumb, accessibility text, launcher, and supervisor diagnostics. Its internal monitor names, settings/data, APIs, and working /merged/monitor deep link remain intact.
-- /merged/alerts opens the existing alert tool. The legacy /merged/scanner bookmark remains backward compatible by redirecting to /merged/monitor.
-- A separate local-only Scanner card opens /merged/atr-scanner. Render continues to hide/block this local market-data feature.
-- Updated local build-stamp/preflight lists so changes to the scanner module or JavaScript trigger the established launcher refresh behaviour.
+- render/atr_scanner.py previously treated ticker bid/ask/spread as final gates, stored the ticker midpoint, and later measured a separately fetched order book around that older midpoint. A fast price move could therefore produce zero in-band depth and false exclusion, while spread and depth described different snapshots.
 
-2. Local Bybit ATR-percentage and liquidity scanner
+Exact fix:
 
-- Added render/atr_scanner.py, render/static/atr_scanner.js, local page/API routes in render/master_service.py, and documentation in render/README.md.
-- Instrument discovery paginates public V5 Get Instruments Info and retains only status=Trading, contractType=LinearPerpetual, quoteCoin=USDT, settleCoin=USDT, non-prelisting contracts. It is not tied to the Alerts symbol list.
-- Tickers are fetched once. Liquidity uses turnover24h (not volume24h), exact midpoint spread `(ask-bid)/((ask+bid)/2)*100`, then per-symbol order-book quote notional `price*quantity` inside the inclusive configured band on each side.
-- Every liquidity gate uses AND. Invalid, missing, crossed, stale, or unverified data fails closed. ATR is fetched only after instrument, manual-exclusion, turnover, spread, and order-book gates.
-- Defaults are: minimum turnover 20,000,000 USDT; maximum spread 0.10%; depth band +/-0.10% of midpoint; minimum bid depth 25,000 USDT; minimum ask depth 25,000 USDT; maximum book age 30 seconds; ATR length 14; rank by 1m; Top 10; automatic refresh every 60 seconds.
-- ATR is Wilder/RMA true range: max(high-low, abs(high-previous close), abs(low-previous close)). ATR percentage is ATR divided by the same timeframe closed-candle close, multiplied by 100. The still-forming candle is excluded using Bybit/server interval boundaries.
-- The six unambiguous timeframes are 1m, 5m, 1h, 1D, 1W, and 1Mo, mapped to Bybit intervals 1, 5, 60, D, W, and M. Requests ask for 201 rows so 200 closed candles remain when the newest row is forming; newer instruments are accepted only with enough valid contiguous closed history.
-- Raw values rank descending with a deterministic symbol tie-break. Formatting uses five ATR decimal places but never affects rank. Missing values are N/A and cannot rank for the selected timeframe.
-- The table shows all six ATR values, turnover, spread, bid/ask depth, liquidity/data state, exact ranking basis, eligible/excluded counts and reasons, progress, freshness, and last successful update. Changing timeframe or Top N reranks locally and recomputes the Qualified/Excluded views and basis without contradictory saved-timeframe counts.
-- Persisted local settings cover every threshold and manual exclusions; Reset restores defaults. Manual exclusions accept comma/newline input, normalize/deduplicate case and whitespace, and are bounded to 1,000 symbols and 50,000 input characters. All numeric/text settings have server-side type/range checks.
-- Explicit exclusion reasons cover inactive, wrong product, manual exclusion, turnover, spread, bid depth, ask depth, missing/invalid market data, insufficient ATR history, and transient upstream failure. Kline reasons are preserved per timeframe rather than conflating malformed data with a network failure.
-- Requests use bounded concurrency, pacing, timeout, retries, and backoff. ATR caches are keyed by symbol/timeframe/length and remain valid until the next candle boundary, so daily/weekly/monthly history is not fetched each minute.
-- Browser callers share one in-flight refresh. A settings save during refresh queues one non-overlapping follow-up. Transient failures retain visibly stale last-known-good data with age and scoped error; first-load/all-scope failures return explicit errors rather than an empty HTTP-200 success.
-- The public source resolver allows only canonical HTTPS api.bybit.com or api.bytick.com origins, strips no credentials because none are accepted, rejects paths/query/fragments/lookalikes/testnet/demo hosts, and reports authenticated=false.
-- Help text states that turnover, spread, and order-book depth are liquidity proxies and cannot guarantee fills or future liquidity.
+- Ticker processing now uses only turnover24h as the comparable 24-hour quote-turnover source and prefilter. volume24h remains unused. Ticker bid, ask, spread, and midpoint neither exclude a turnover-qualified symbol nor influence its depth.
+- Every turnover-qualified, non-manually-excluded instrument reaches the existing paced/concurrent order-book stage.
+- calculate_orderbook_depth now parses one fresh order-book response and derives authoritative best_bid, best_ask, midpoint, spread_pct, bid_depth_usdt, ask_depth_usdt, book timestamp, and age from that response alone.
+- Midpoint is `(best bid + best ask) / 2`; spread is `(best ask - best bid) / midpoint * 100`; bid/ask depth remains price-times-quantity quote notional inside the inclusive configured band around that midpoint.
+- Final gates run deterministically against that same snapshot: spread above maximum, bid depth below minimum, then ask depth below minimum. Existing comparison semantics remain spread <= maximum and each depth >= minimum.
+- Authoritative best bid/ask, midpoint, spread, depth, timestamp, and age remain in qualified rows and valid liquidity/ATR-excluded payload rows. The unchanged UI reads the corrected spread/depth fields; no JavaScript change was needed.
+- Missing timestamp, stale, crossed, empty, malformed, non-finite, zero, or negative order books fail closed as missing_invalid_market_data with a scoped order-book error. No stale ticker liquidity value is substituted.
+- Existing request pacing, concurrency, shared refresh, caching, settings, manual exclusions, six ATR timeframes, last-known-good behavior, Top 10 ranking, and public-only source behavior are unchanged.
 
-3. Separate Pepperstone Market Watch ATR feed and desktop window
+DEFECT 2: PEPPERSTONE FALSE GLOBAL STALE
 
-- Added mt5-clone/MQL5/Experts/MarketWatchATRPercentFeed.mq5, mt5-clone/atr_percent_window.py, and mt5-clone/MARKET_WATCH_ATR_FEED.md.
-- The EA enumerates selected Market Watch symbols with SymbolsTotal(true)/SymbolName(index,true), classifies forex using SYMBOL_TRADE_CALC_MODE_FOREX or SYMBOL_TRADE_CALC_MODE_FOREX_NO_LEVERAGE, and keeps non-forex/unavailable entries diagnostic rather than inventing a volume filter.
-- It lazily creates iATR handles for PERIOD_M1, PERIOD_M5, PERIOD_H1, PERIOD_D1, PERIOD_W1, and PERIOD_MN1; waits for history; reads CopyBuffer shift 1 and iClose shift 1; rejects EMPTY_VALUE, non-finite, missing, and zero-close data; and publishes `(ATR/close)*100`.
-- A bounded 500 ms timer processes four symbols per pass and skips unchanged closed bars. Handles are reused and every valid handle is released in OnDeinit. OnTick is empty and no trade function exists.
-- The independent JSON feed and Python window show all six timeframes, selected-timeframe Top 10 rank, deterministic ties, refresh time, Loading/N/A/Error/Stale state, last-good retention, and a diagnostic tab. They do not share the spread feed/window's IPC, title, styles, or process identity.
+Root cause:
 
-4. TradingView offset visibility
+- mt5-clone/atr_percent_window.py compared last_successful_refresh_epoch_ms with the desktop clock and forced global Stale after 30 seconds. That timestamp advances only when a new fully closed bar produces a new ATR value, so healthy cached Ready values falsely became Stale between minute closes or while markets were closed.
 
-- In pinescripts/custom_indicator.pine, only the three helper call sites for the 9 EMA, 20 EMA, and VWAP offset visuals changed to opaque color.black.
-- The existing dashed line style, width, formulas, placement, base indicator colours, alerts/webhooks, Volume, ATR pane, sessions, 100-candle marker, and pinescripts/atr_percentage.pine are unchanged.
+Exact fix:
+
+- Added pure classify_window_state logic that uses the local feed file mtime as the EA-to-window heartbeat, with the existing tolerance `max(5 seconds, refresh_ms * 6 // 1000)`.
+- State priority is: old feed file or explicit forex row/timeframe Stale -> Stale; otherwise Error -> Error; otherwise Loading or no successful parsed ATR value -> Loading; otherwise Ready.
+- Both aggregate row status and all six per-timeframe states are inspected.
+- last_successful_refresh, last_successful_refresh_epoch_ms, and generated_at remain informational broker/closed-bar metadata only. They are not clock-based freshness authorities.
+- The existing MQL5 EA already calls ExportATRFeed on every healthy timer pass and closes the written feed, so file mtime is an adequate local heartbeat. MarketWatchATRPercentFeed.mq5 did not need modification; its closed-bar caching and all six calculations remain unchanged.
+- The Tk UI, columns, ranking, Top 10, refresh cadence, last-known-good behavior, feed identity, and separation from Market Spread are unchanged.
 
 CHANGED TASK FILES
 
-- CODEX_BRIEF_2026-08-24_ATR_Volatility_Scanner_Alerts_Pine.txt (user-supplied brief retained)
 - render/atr_scanner.py
-- render/static/atr_scanner.js
-- render/master_service.py
-- render/static/dashboard.js
-- render/README.md
-- run_scanner_local.bat
-- tools/windows_launchers/ensure_local_master_server.ps1
-- tools/windows_launchers/stream_local_master_worker.ps1
-- mt5-clone/MQL5/Experts/MarketWatchATRPercentFeed.mq5
-- mt5-clone/atr_percent_window.py
-- mt5-clone/MARKET_WATCH_ATR_FEED.md
-- pinescripts/custom_indicator.pine
 - tests/test_atr_scanner.py
-- tests/test_atr_scanner_ui.py
+- mt5-clone/atr_percent_window.py
 - tests/test_mt5_atr_percent_feed.py
-- tests/test_custom_indicator_pine.py
-- tests/test_dashboard_home_layout.py
-- tests/test_dashboard_js_syntax.py
-- tests/test_master_service_calculator_api.py
-- tests/test_master_service_local_exit.py
-- tests/test_merged_monitor_status_env.py
-- tests/test_spread_monitor_dashboard.py
 - summary/CODEX_SUMMARY_latest.txt
 
-TARGETED VERIFICATION RESULTS
+No other task file changed. In particular, render/master_service.py, render/static/atr_scanner.js, render/static/dashboard.js, both MQL5 EAs, mt5-clone/spread_percent_window.py, pinescripts/custom_indicator.pine, and pinescripts/atr_percentage.pine have zero diff.
+
+REPRODUCTIONS BEFORE THE FIX
+
+1. `python -B -m pytest tests\test_atr_scanner.py::test_moved_orderbook_uses_its_own_midpoint_spread_and_quote_depth tests\test_atr_scanner.py::test_service_qualifies_liquid_book_after_price_moves_from_ticker tests\test_atr_scanner.py::test_current_book_not_older_ticker_controls_final_spread_gate -q -p no:cacheprovider`
+   EXPECTED PRE-FIX RESULT: 3 failed. The helper required the stale external midpoint, moved ALPHA was excluded, and a wide old ticker spread blocked the current qualifying book.
+
+2. `python -B -m pytest tests\test_mt5_atr_percent_feed.py::test_fresh_ready_feed_ignores_closed_bar_calculation_timestamp tests\test_mt5_atr_percent_feed.py::test_window_state_uses_file_heartbeat_and_explicit_row_timeframe_states -q -p no:cacheprovider`
+   EXPECTED PRE-FIX RESULT: 4 failed, 2 passed. Ages 31, 59, and 86,400 seconds falsely reported Stale and the new pure classifier was not yet present.
+
+FINAL AUTOMATED VERIFICATION
 
 1. `python -B -m pytest tests\test_atr_scanner.py -q -p no:cacheprovider`
-   FINAL RESULT: 35 passed in 1.57s.
-   Covers ATR fixtures/closed-candle boundaries, all timeframes, ordering/ties, validation/manual bounds, pagination, every liquidity gate, quote-notional depth, public-request safety, caching, shared/queued refreshes, stale fallback, scoped failures, and reason preservation.
+   FINAL RESULT: 52 passed in 3.46s.
+   Includes moved midpoint 100 -> 101, correct current spread/depth payloads, both ticker/book spread directions, inclusive band and exact gate boundaries, turnover24h versus volume24h, AND gates, and explicit crossed/empty/missing/stale/malformed/non-finite/zero/negative book failures.
 
-2. `python -B -m pytest tests\test_atr_scanner_ui.py -q -p no:cacheprovider`
-   FINAL RESULT: 8 passed, 24 existing FastAPI deprecation warnings, in 31.46s.
-   Covers distinct Alerts/Scanner cards and routes, Render boundary, controls/table/accessibility, API settings/refresh/errors, canonical public origin, all-six-timeframe client reranking, Top N, N/A, stale/partial states, and dynamic exclusions.
+2. `python -B -m pytest tests\test_mt5_atr_percent_feed.py -q -p no:cacheprovider`
+   FINAL RESULT: 15 passed in 1.49s.
+   Includes fresh Ready feeds with ATR metadata aged 29, 31, 59, and 86,400 seconds plus future/timezone skew; exact 5-second Ready/6-second Stale heartbeat boundary; row/timeframe Stale, Error, Loading priority; no-value Loading; six-timeframe parsing/ranking; Top 10 ties; diagnostics; startup help; and spread identity separation.
 
-3. `python -B -m pytest tests\test_custom_indicator_pine.py tests\test_atr_percentage_pine.py -q -p no:cacheprovider`
-   RESULT: 33 passed in 0.70s.
+3. `python -B -m pytest tests\test_atr_scanner_ui.py -q -p no:cacheprovider`
+   RESULT: 8 passed, 24 existing FastAPI deprecation warnings, in 55.89s.
+   Confirms Scanner page/API contracts, public-origin security, settings/states, and distinct Alerts/Scanner cards and legacy routes remain green.
 
-4. `python -B -m pytest tests\test_mt5_atr_percent_feed.py tests\test_python_mt5_conversion_files.py tests\test_mt5_spread_fetch.py -q -p no:cacheprovider`
-   RESULT: 30 passed in 3.36s.
-   Covers MQL5 source contracts, Python parser/ranking/startup behaviour, independent names, no trading/volume logic, and preservation of the existing spread implementation.
+4. `python -B -m pytest tests\test_master_service_calculator_api.py::test_scanner_merged_routes_work_locally tests\test_dashboard_home_layout.py::test_local_profile_buttons_use_configured_render_routes tests\test_spread_monitor_dashboard.py::test_scripts_endpoint_places_spread_monitor_after_iv_indicator_in_local_profile tests\test_dashboard_js_syntax.py::test_dashboard_js_no_removed_widget_endpoints_and_keeps_needed_calls -q -p no:cacheprovider`
+   RESULT: 4 passed, 12 existing FastAPI deprecation warnings, in 37.17s.
+   Confirms local Scanner routing, Alerts/Scanner dashboard separation, spread card placement, and dashboard JavaScript contract.
 
-5. `python -B -m pytest tests\test_merged_monitor_status_env.py tests\test_merged_alerts_runtime.py -q -p no:cacheprovider`
-   RESULT: 55 passed, 4 existing FastAPI deprecation warnings, in 13.84s.
-   Confirms the existing percentage-move Alerts runtime/settings/status behaviour remains green.
+5. `python -B -m pytest tests\test_python_mt5_conversion_files.py tests\test_mt5_spread_fetch.py -q -p no:cacheprovider`
+   RESULT: 21 passed in 4.74s. The separate working Market Spread EA/window remains unchanged and green.
 
-6. `python -B -m pytest tests\test_master_service_local_exit.py tests\test_dashboard_js_syntax.py -q -p no:cacheprovider`
-   RESULT: 29 passed, 13 existing FastAPI deprecation warnings, in 15.40s.
+6. `python -B -m pytest tests\test_custom_indicator_pine.py tests\test_atr_percentage_pine.py -q -p no:cacheprovider`
+   RESULT: 33 passed in 1.72s. The three opaque-black offset paths and all Pine preservation contracts remain green; Pine source was not changed.
 
-7. `python -B -m pytest tests\test_merged_monitor_status_env.py::test_run_local_master_control_bat_uses_local_autostart tests\test_windows_launchers.py::test_streamer_uses_core_readiness_as_the_only_startup_completion_gate tests\test_windows_launchers.py::test_streamer_keeps_background_failures_nonblocking_and_reports_recovery tests\test_windows_launchers.py::test_streamer_uses_server_canonical_autostart_targets_for_background_checks -q -p no:cacheprovider`
-   FINAL RESULT: 4 passed, 4 existing FastAPI deprecation warnings, in 23.08s.
-
-8. In-memory Python `compile()` check of all 13 changed Python source/test files.
+7. In-memory Python `compile()` check of render/atr_scanner.py, mt5-clone/atr_percent_window.py, tests/test_atr_scanner.py, and tests/test_mt5_atr_percent_feed.py.
    RESULT: PASS with no bytecode output.
 
-9. `node --check render\static\atr_scanner.js` and `node --check render\static\dashboard.js`
-   RESULT: PASS for both files.
+8. `git diff --check`
+   RESULT: PASS; only repository line-ending notices were emitted.
 
-10. `git diff --check`
-    RESULT: PASS; Git emitted only line-ending notices.
+PRACTICAL AND EXTERNAL CHECKS
 
-11. MetaEditor compile of a SHA-256-identical temporary copy of the final MarketWatchATRPercentFeed.mq5 with `C:\Program Files\Pepperstone MetaTrader 5\metaeditor64.exe` (version/build 5.0.0.6090).
-    FINAL COMPILER LOG RESULT: 0 errors, 0 warnings, 3506 ms, cpu='X64 Regular'. MetaEditor returned process code 1 despite its authoritative log reporting compile success. The temporary .mq5/.ex5/log and task-created Python cache files were individually removed; no generated compile artifact is in the repository.
+- Pepperstone window heartbeat smoke: PASS. An actual hidden Tk ATRPercentWindow ran for 62.3 seconds against a deterministic feed rewritten every 250 ms while last_successful_refresh_epoch_ms remained one hour old. The window reported Ready at 0, 31, and 59 seconds. After heartbeat writes stopped and the file was aged to 7 seconds, the same window reported Stale. The temporary feed was created outside the repository and removed automatically.
+- Public Bybit smoke: PASS. One unauthenticated read-only GET to `https://api.bybit.com/v5/market/orderbook?category=linear&symbol=BTCUSDT&limit=1000` returned retCode 0 with 1,000 bid and 1,000 ask levels. The corrected production helper derived, from that one response, best bid 77,240.5, best ask 77,240.6, midpoint 77,240.55, spread 0.00012946567574392045%, bid depth 11,264,121.5331 USDT, ask depth 17,457,499.2137 USDT, and book age 0.014 seconds at check time. No key, secret, auth header, private endpoint, account, or trading action was used.
+- Edge/local-service visual smoke: NOT RUN. The required Edge selector returned exactly `Browser is not available: edge`, and browser discovery returned no connected instances. Per the browser-control contract, no other browser was substituted. Edge needs the ChatGPT browser extension configured under Settings -> Computer use. Deterministic API/UI tests passed but are not claimed as an Edge smoke.
+- Live MT5 EA runtime: NOT RUN. This follow-up changed only the Python window; neither MQL5 EA was edited. The existing EA heartbeat behavior was confirmed from source, and the real Tk window state path was exercised with a deterministic feed, but no live Pepperstone terminal/chart was touched.
+- MetaEditor compile: NOT RUN because no MQL5 file changed. The prior compiled EA source remains byte-for-byte unchanged.
+- TradingView compile: NOT RUN because Pine was explicitly out of scope and has zero diff. Static Pine regressions passed.
+- JavaScript `node --check`: NOT RUN because no JavaScript file changed, as expected by this brief.
+- The first attempt to launch the 60-second Tk smoke had a command-string quoting SyntaxError before any window or temporary file activity. The corrected encoded in-memory invocation is the 62.3-second PASS recorded above.
 
-PUBLIC BYBIT READ-ONLY CHECKS ACTUALLY PERFORMED
+RESIDUAL LIMITATIONS
 
-- Used only unauthenticated GET market-data calls to https://api.bybit.com; no credential or trading endpoint was used.
-- Instruments Info `category=linear&limit=1000`: retCode 0, 833 instruments returned, no remaining cursor; 725 matched Trading LinearPerpetual USDT quote/settlement metadata at check time.
-- Tickers: retCode 0; turnover24h, volume24h, bid1Price, and ask1Price fields were present, confirming the implementation can deliberately use quote turnover rather than base volume.
-- Orderbook: retCode 0; a 50-level shape check returned bids/asks and timestamps, and `limit=1000` returned 1,000 bids and 1,000 asks for BTCUSDT.
-- Kline intervals 1, 5, 60, D, W, and M: retCode 0 and newest-first ordering. A final BTCUSDT `interval=1&limit=201` request returned exactly 201 rows, newest-first.
-- A full live end-to-end scan was intentionally not run because it would make hundreds of public order-book calls plus six kline calls per liquidity-qualified symbol. Deterministic mocks cover that pipeline and the live checks validate the public endpoint shapes/limits without depending on current internet data in automated tests.
+- A short public order-book snapshot proves only request/shape and same-snapshot calculation behavior at that moment. Turnover, spread, and depth remain liquidity proxies and cannot guarantee fills or future liquidity.
+- Edge interaction and live MT5 attachment remain externally unverified for the reasons stated above.
+- Existing FastAPI `on_event` deprecation warnings are unchanged and outside this narrow follow-up.
+- No task-specific EX5, feed JSON, log, cache, temporary file, PID, or untracked artifact remains in the repository. Pre-existing ignored cache directories were preserved rather than cleaned.
 
-EXTERNAL/UI CHECKS AND LIMITATIONS
-
-- Microsoft Edge smoke: NOT RUN. The required in-app browser attempt returned exactly `Browser is not available: edge`; per the browser-control contract, no substitute browser was used. Launch, refresh, threshold/manual-exclusion changes, and mocked-failure recovery remain unverified in Edge until the ChatGPT browser extension is configured under Settings -> Computer use. Equivalent route/API and JavaScript state transitions are covered by deterministic tests, but those are not claimed as an Edge smoke.
-- TradingView Pine Editor compile: NOT RUN. Edge was unavailable and no local `pine`, `pinescript`, or `pinec` compiler command exists. Static focused Pine regressions pass, but external TradingView compilation remains unverified.
-- MT5 terminal runtime: NOT RUN. The new EA compiled cleanly in the installed Pepperstone MetaEditor, and the independent Python window passed syntax/import/`--help` startup tests, but the EA was not attached to a live terminal chart and the desktop window was not interactively inspected.
-- Liquidity thresholds are screening proxies, not execution guarantees. Turnover, current spread, and snapshot depth cannot guarantee a future fill or future liquidity.
-- Existing FastAPI `on_event` deprecation warnings remain unchanged and are outside this task.
-
-OFFICIAL DOCUMENTATION USED
-
-- Bybit V5 Get Instruments Info (filters, linear pagination, nextPageCursor): https://bybit-exchange.github.io/docs/v5/market/instrument
-- Bybit V5 Get Tickers (turnover24h, bid1Price, ask1Price): https://bybit-exchange.github.io/docs/v5/market/tickers
-- Bybit V5 Get Orderbook (snapshot levels, limit, timestamp): https://bybit-exchange.github.io/docs/v5/market/orderbook
-- Bybit V5 Get Kline (intervals, row layout, newest-first response): https://bybit-exchange.github.io/docs/v5/market/kline
-- MQL5 iATR (handle creation): https://www.mql5.com/en/docs/indicators/iatr
-- MQL5 CopyBuffer (buffer indexing/start position): https://www.mql5.com/en/docs/series/copybuffer
-- MQL5 SymbolsTotal (selected Market Watch enumeration): https://www.mql5.com/en/docs/marketinformation/symbolstotal
-- MQL5 SymbolName (selected-symbol lookup): https://www.mql5.com/en/docs/marketinformation/symbolname
-- TradingView Pine colours (opaque color.black): https://www.tradingview.com/pine-script-docs/visuals/colors/
-- TradingView Pine lines and boxes (line styling/lifecycle): https://www.tradingview.com/pine-script-docs/visuals/lines-and-boxes/
-
-PATCH_DESKTOP_PUSH.bat is required immediately after this summary is written. The final assistant response will report the script's actual result and an independent local/origin HEAD comparison; this summary does not pre-claim that outcome.
+PATCH_DESKTOP_PUSH.bat is required immediately after this summary. The final assistant response must report its actual result and the independent local HEAD versus origin/master equality check; this summary does not pre-claim that outcome.

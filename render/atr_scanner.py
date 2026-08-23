@@ -445,14 +445,24 @@ def calculate_spread_percent(bid_value: object, ask_value: object) -> Optional[f
 def calculate_orderbook_depth(
     payload: object,
     *,
-    midpoint: float,
     band_pct: float,
     server_time_ms: int,
     max_age_seconds: float,
 ) -> Optional[dict[str, float | int]]:
-    """Sum bid/ask quote notional inside an inclusive midpoint band."""
+    """Derive one authoritative book snapshot and its inclusive-band depth."""
 
-    if not isinstance(payload, dict) or midpoint <= 0 or band_pct <= 0:
+    band = _finite_number(band_pct)
+    server_timestamp = _finite_number(server_time_ms)
+    max_age = _finite_number(max_age_seconds)
+    if (
+        not isinstance(payload, dict)
+        or band is None
+        or band <= 0
+        or server_timestamp is None
+        or not server_timestamp.is_integer()
+        or max_age is None
+        or max_age < 0
+    ):
         return None
     result = payload.get("result")
     if not isinstance(result, dict):
@@ -462,8 +472,8 @@ def calculate_orderbook_depth(
         book_timestamp = _finite_number(result.get("cts"))
     if book_timestamp is None or not book_timestamp.is_integer():
         return None
-    age_ms = int(server_time_ms) - int(book_timestamp)
-    if age_ms < -5_000 or age_ms > float(max_age_seconds) * 1000.0:
+    age_ms = int(server_timestamp) - int(book_timestamp)
+    if age_ms < -5_000 or age_ms > max_age * 1000.0:
         return None
 
     def parse_side(raw_side: object) -> Optional[list[tuple[float, float]]]:
@@ -488,8 +498,12 @@ def calculate_orderbook_depth(
     best_ask = min(price for price, _quantity in asks)
     if best_bid >= best_ask:
         return None
+    midpoint = (best_bid + best_ask) / 2.0
+    spread_pct = calculate_spread_percent(best_bid, best_ask)
+    if spread_pct is None or midpoint <= 0 or not math.isfinite(midpoint):
+        return None
 
-    band_fraction = band_pct / 100.0
+    band_fraction = band / 100.0
     bid_floor = midpoint * (1.0 - band_fraction)
     ask_ceiling = midpoint * (1.0 + band_fraction)
     bid_depth = sum(
@@ -501,6 +515,10 @@ def calculate_orderbook_depth(
     if not all(math.isfinite(value) and value >= 0 for value in (bid_depth, ask_depth)):
         return None
     return {
+        "best_bid": best_bid,
+        "best_ask": best_ask,
+        "midpoint": midpoint,
+        "spread_pct": spread_pct,
         "bid_depth_usdt": bid_depth,
         "ask_depth_usdt": ask_depth,
         "book_timestamp_ms": int(book_timestamp),
@@ -1080,31 +1098,25 @@ class ATRScannerService:
                 )
                 continue
             turnover = _finite_number(ticker.get("turnover24h"))
-            bid = _finite_number(ticker.get("bid1Price"))
-            ask = _finite_number(ticker.get("ask1Price"))
-            spread = calculate_spread_percent(bid, ask)
             reasons: list[str] = []
-            if turnover is None or turnover < 0 or spread is None or bid is None or ask is None:
+            if turnover is None or turnover < 0:
                 reasons.append("missing_invalid_market_data")
                 ticker_data_failures += 1
                 scoped_errors.append(
                     {
                         "scope": f"ticker:{symbol}",
-                        "message": "Ticker turnover or bid/ask data was missing or invalid.",
+                        "message": "Ticker quote turnover was missing or invalid.",
                     }
                 )
             else:
                 if turnover < float(settings["min_turnover_usdt"]):
                     reasons.append("turnover_below_minimum")
-                if spread > float(settings["max_spread_pct"]):
-                    reasons.append("spread_above_maximum")
             if reasons:
                 excluded.append(
                     _excluded_row(
                         symbol,
                         reasons,
                         turnover24h_usdt=turnover,
-                        spread_pct=spread,
                     )
                 )
                 continue
@@ -1112,8 +1124,6 @@ class ATRScannerService:
                 {
                     "symbol": symbol,
                     "turnover24h_usdt": turnover,
-                    "spread_pct": spread,
-                    "midpoint": (float(bid) + float(ask)) / 2.0,
                 }
             )
         if active_instruments and ticker_data_failures == len(active_instruments):
@@ -1126,7 +1136,7 @@ class ATRScannerService:
             "orderbooks",
             completed=0,
             total=len(liquidity_candidates),
-            detail="Checking bid and ask depth for turnover/spread-qualified symbols.",
+            detail="Checking spread and bid/ask depth for turnover-qualified symbols.",
         )
         progress_lock = asyncio.Lock()
         book_completed = 0
@@ -1145,7 +1155,6 @@ class ATRScannerService:
                 book_server_time_ms = self._server_time_ms(payload) or self._now_ms()
                 depth = calculate_orderbook_depth(
                     payload,
-                    midpoint=float(candidate["midpoint"]),
                     band_pct=float(settings["depth_band_pct"]),
                     server_time_ms=book_server_time_ms,
                     max_age_seconds=float(settings["max_book_age_seconds"]),
@@ -1164,6 +1173,10 @@ class ATRScannerService:
                         },
                     )
                 reasons: list[str] = []
+                if float(depth["spread_pct"]) > float(
+                    settings["max_spread_pct"]
+                ):
+                    reasons.append("spread_above_maximum")
                 if float(depth["bid_depth_usdt"]) < float(
                     settings["min_bid_depth_usdt"]
                 ):
@@ -1407,6 +1420,9 @@ def _market_fields(row: Mapping[str, object]) -> dict[str, object]:
         key: row.get(key)
         for key in (
             "turnover24h_usdt",
+            "best_bid",
+            "best_ask",
+            "midpoint",
             "spread_pct",
             "bid_depth_usdt",
             "ask_depth_usdt",

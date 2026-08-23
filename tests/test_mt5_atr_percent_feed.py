@@ -1,5 +1,7 @@
 import importlib.util
+import json
 import math
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -173,6 +175,121 @@ def test_window_deterministic_ties_top_n_and_each_timeframe():
         assert window.diagnostic_rows(rows, timeframe) == []
     with pytest.raises(ValueError, match="Unsupported rank timeframe"):
         window.rank_rows(rows, "1M", 10)
+
+
+def _ready_row(window, *, status="Ready", frame_state="Ready", with_value=True):
+    return window.ATRRow(
+        symbol="EURUSD.a",
+        is_forex=True,
+        status=status,
+        reason="",
+        atr_percent={
+            label: (0.1 if with_value else None) for label in window.TIMEFRAME_LABELS
+        },
+        frame_states={label: frame_state for label in window.TIMEFRAME_LABELS},
+    )
+
+
+@pytest.mark.parametrize("calculation_age_seconds", [29, 31, 59, 86_400, -3_600])
+def test_fresh_ready_feed_ignores_closed_bar_calculation_timestamp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, calculation_age_seconds: int
+):
+    window = _load_window_module()
+    now = 1_800_000_000.0
+    feed_path = tmp_path / "MarketWatchATRPercentFeed.json"
+    feed = {
+        "generated_at": "broker-clock-informational",
+        "last_successful_refresh": "closed-bar metadata only",
+        "last_successful_refresh_epoch_ms": int(
+            (now - calculation_age_seconds) * 1000
+        ),
+        "atr_length": 14,
+        "symbols": [
+            {
+                "symbol": "EURUSD.a",
+                "is_forex": True,
+                "status": "Ready",
+                "reason": "",
+                **{
+                    f"atr_percent_{key}": 0.1
+                    for _label, key in window.TIMEFRAMES
+                },
+                **{f"state_{key}": "Ready" for _label, key in window.TIMEFRAMES},
+            }
+        ],
+    }
+    feed_path.write_text(json.dumps(feed), encoding="utf-8")
+    os.utime(feed_path, (now, now))
+
+    class StatusValue:
+        value = ""
+
+        def set(self, value):
+            self.value = value
+
+    instance = object.__new__(window.ATRPercentWindow)
+    instance.feed_path = feed_path
+    instance.refresh_ms = 500
+    instance.last_good_feed = None
+    instance.rows = []
+    instance.status_var = StatusValue()
+    instance._render_rows = lambda: None
+    instance._schedule_refresh = lambda _delay_ms=None: None
+    monkeypatch.setattr(window.time, "time", lambda: now)
+
+    instance._refresh()
+    assert instance.status_var.value.startswith("Ready |")
+
+
+def test_window_state_uses_file_heartbeat_and_explicit_row_timeframe_states():
+    window = _load_window_module()
+    ready = _ready_row(window)
+    assert window.classify_window_state(
+        [ready], feed_age_seconds=5, heartbeat_tolerance_seconds=5
+    ) == "Ready"
+    assert window.classify_window_state(
+        [ready], feed_age_seconds=6, heartbeat_tolerance_seconds=5
+    ) == "Stale"
+    assert window.classify_window_state(
+        [_ready_row(window, status="Stale")],
+        feed_age_seconds=0,
+        heartbeat_tolerance_seconds=5,
+    ) == "Stale"
+    assert window.classify_window_state(
+        [_ready_row(window, frame_state="Stale")],
+        feed_age_seconds=0,
+        heartbeat_tolerance_seconds=5,
+    ) == "Stale"
+    assert window.classify_window_state(
+        [_ready_row(window, status="Error", frame_state="Stale")],
+        feed_age_seconds=0,
+        heartbeat_tolerance_seconds=5,
+    ) == "Stale"
+    assert window.classify_window_state(
+        [_ready_row(window, status="Error")],
+        feed_age_seconds=0,
+        heartbeat_tolerance_seconds=5,
+    ) == "Error"
+    assert window.classify_window_state(
+        [_ready_row(window, frame_state="Error")],
+        feed_age_seconds=0,
+        heartbeat_tolerance_seconds=5,
+    ) == "Error"
+    assert window.classify_window_state(
+        [_ready_row(window, status="Loading")],
+        feed_age_seconds=0,
+        heartbeat_tolerance_seconds=5,
+    ) == "Loading"
+    assert window.classify_window_state(
+        [_ready_row(window, frame_state="Loading")],
+        feed_age_seconds=0,
+        heartbeat_tolerance_seconds=5,
+    ) == "Loading"
+    assert window.classify_window_state(
+        [_ready_row(window, with_value=False)],
+        feed_age_seconds=0,
+        heartbeat_tolerance_seconds=5,
+    ) == "Loading"
 
 
 def test_window_module_help_is_a_non_gui_startup_smoke():

@@ -131,6 +131,39 @@ def diagnostic_rows(rows: list[ATRRow], timeframe: str) -> list[ATRRow]:
     return diagnostics
 
 
+def classify_window_state(
+    rows: list[ATRRow],
+    *,
+    feed_age_seconds: float,
+    heartbeat_tolerance_seconds: float,
+) -> str:
+    """Classify feed health from local heartbeat age and explicit ATR states."""
+
+    if feed_age_seconds > heartbeat_tolerance_seconds:
+        return "Stale"
+    forex_rows = [row for row in rows if row.is_forex]
+    if not forex_rows:
+        return "Ready"
+    states = {
+        str(state).strip().casefold()
+        for row in forex_rows
+        for state in (row.status, *row.frame_states.values())
+        if str(state).strip()
+    }
+    if "stale" in states:
+        return "Stale"
+    if "error" in states:
+        return "Error"
+    if "loading" in states:
+        return "Loading"
+    has_successful_value = any(
+        value is not None
+        for row in forex_rows
+        for value in row.atr_percent.values()
+    )
+    return "Ready" if has_successful_value else "Loading"
+
+
 class ATRPercentWindow:
     def __init__(self, root: tk.Tk, args: argparse.Namespace) -> None:
         self.root = root
@@ -276,28 +309,13 @@ class ATRPercentWindow:
         except OSError:
             age_seconds = 0
         forex_count = sum(1 for row in self.rows if row.is_forex)
-        row_states = {row.status.casefold() for row in self.rows if row.is_forex}
-        last_success_ms = optional_positive_float(feed.get("last_successful_refresh_epoch_ms"))
-        success_age_seconds = (
-            max(0, int(time.time() - last_success_ms / 1000.0))
-            if last_success_ms is not None
-            else None
+        state = classify_window_state(
+            self.rows,
+            feed_age_seconds=age_seconds,
+            heartbeat_tolerance_seconds=max(
+                5, self.refresh_ms * 6 // 1000
+            ),
         )
-        if forex_count == 0:
-            state = "Ready"
-        elif "stale" in row_states or (
-            success_age_seconds is not None
-            and success_age_seconds > max(30, self.refresh_ms * 12 // 1000)
-        ):
-            state = "Stale"
-        elif "error" in row_states:
-            state = "Error"
-        elif "loading" in row_states or last_success_ms is None:
-            state = "Loading"
-        elif age_seconds > max(5, self.refresh_ms * 6 // 1000):
-            state = "Stale"
-        else:
-            state = "Ready"
         self.status_var.set(
             f"{state} | {forex_count}/{len(self.rows)} selected symbols are forex | ATR({atr_length}) | "
             f"Last successful ATR refresh {last_success} | feed written {generated_at} | file age {age_seconds}s"
