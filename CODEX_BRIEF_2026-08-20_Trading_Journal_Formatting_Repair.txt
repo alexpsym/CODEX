@@ -1,0 +1,159 @@
+TRADING JOURNAL FORMATTING, REPORT, AND RECOMMENDATION-CHART REPAIR
+
+Recommended execution: gpt-5.6-sol with model_reasoning_effort="max". This is a narrow but high-risk OOXML/Excel preservation job: it needs strong repository reasoning and exhaustive verification, while Ultra is unnecessary because this brief deliberately excludes the unrelated trading-tools work.
+
+Repository and operating rules
+
+- Work in the current `C:\GPT\CODEX-master` repository and obey `AGENTS.md`.
+- This brief is Job 1 only. Do not work on the calculator, brokers, Open Orders, Pine scripts, equity curve, or FX Weekend in this run.
+- Before editing, run `git status --short`, record the current branch and HEAD, and inspect all relevant code and tests. Preserve all pre-existing user changes and unrelated dirty files. Never reset, discard, or broadly rewrite them.
+- Treat the user's current `journal/Trading Journal.xlsx` as the authoritative workbook. It contains manual formatting that is not reconstructible from the generator. Do not replace it with a generated template or a stale copy.
+- If the workbook is open/locked, stop safely and report that exact blocker. Never fake a successful resync.
+- Before the first workbook write, make a repo-local temporary safety copy and compute a semantic/layout/style fingerprint. Do not commit the safety copy.
+- Keep the patch narrow. Do not redesign the workbook or change unrelated values, formulas, sheets, labels, hyperlinks, charts, or workflow.
+- Do not inspect or modify `custom instructions/`; it is outside this task.
+
+Primary evidence and precedence
+
+- Screenshot of the broken recommendation chart: `https://snipboard.io/Ei0wpQ.jpg`.
+- The user's final instruction about STATS1 row-label fonts supersedes an earlier blanket request for every row label to be bold/non-italic. The current intentional mixture of bold and italic row-label fonts in STATS1 is authoritative. Preserve each current row label's font family, size, bold, italic, colour, alignment, and indentation unless a specifically named defect below requires otherwise.
+- The current STATS1 border grouping is authoritative. Preserve it exactly, including the user's thick outside border around `A26:D29` and all other thick/thin group boundaries. Apply the same grouping logic by semantic section to `YEARLY REPORT` and the year sheets `2018` through `2026`, without assuming that their row numbers or row sets are identical to STATS1.
+- Preserve all other manual edits: merged cells, panes, selected/active sheet, sheet order, widths, heights, filters, hidden state, print/layout settings, conditional formatting not owned by this repair, hyperlinks, comments, and existing charts/relationships.
+- Specific defects and semantic requirements in this brief take precedence over blindly preserving an already-corrupted fill or number format. In particular, preserve STATS1's row-label font/border choices, but do not preserve the known stray grey, green, or red fills and wrong number formats listed below.
+
+Observed implementation hazards
+
+- `tools/master_journal_workbook.py::_recommendation_svg()` currently uses a `1040 x 430` SVG with `bottom = 64`; `_recommendation_chart_html()` uses `.chart{width:100%;height:auto}`. The generated chart shown in the evidence has its bottom content clipped/crowded.
+- `tools/master_journal_workbook.py::_repair_stats1_formatting()` currently forces every nonblank column-A label to bold and left aligned. That destroys the user's intentional mixed bold/italic style.
+- `_repair_stats1_formatting()`, `_repair_stats1_child_label_styles()`, `_apply_stats1_clean_table_borders()`, `_apply_dashboard_requested_semantic_fills()`, and the blanket presentation-restoration path inside `update_master_journal_workbook_data_only(..., preserve_existing_layout=True)` interact in a dangerous way. The current preservation pass restores every old cell style after managed formatting is repaired, so it can restore corrupted metric fills/number formats; the repair helpers can also overwrite user-authored row-label fonts and borders.
+- `_format_report_sheet()`, `_write_report_sheet()`, `_update_report_sheet_preserving_layout()`, and `_ensure_report_sheets()` currently have separate report styling logic instead of using a single semantic style policy shared with STATS1.
+- Do not solve this by copying one row's entire style to unrelated rows or by applying formats based only on fixed row numbers. Use semantic labels/sections and explicit metric kinds.
+
+Required repair 1: recommendation HTML chart must not clip
+
+1. Repair `_recommendation_svg()` and, if necessary, `_recommendation_chart_html()` so every generated stop and target chart has sufficient bottom, top, left, and right padding at desktop and narrow browser widths.
+2. The plot border, every point, all tick labels, the recommendation label, both axis titles, and the full x-axis title must remain inside the SVG viewBox and visible. Text must not overlap the chart edge or be cut off by the containing section.
+3. Keep the artifact self-contained and offline. Do not add a JavaScript/charting CDN or network dependency.
+4. Preserve the existing deterministic observations, recommendation mathematics, tooltips, colours, tables, filtering, hyperlink targets, and filename layout. This is a rendering/layout fix, not an algorithm change.
+5. Add a focused regression test that parses the SVG/HTML and proves the computed element bounds and margins remain inside the viewBox. Also render at representative wide and narrow widths in a real browser and retain visual-verification evidence in the final summary.
+
+Required repair 2: establish one semantic formatting policy
+
+Create or refactor a small, explicit semantic formatting policy used by STATS1 and the report sheets. It must distinguish at least:
+
+- section/header row;
+- plain count;
+- percentage stored as an Excel fraction;
+- R multiple;
+- duration/text;
+- date/timestamp;
+- AUD commission;
+- crypto commission with suitable optional precision;
+- winner/profit fill;
+- loser/loss/drawdown/commission fill;
+- intentionally neutral/unfilled cell.
+
+Requirements for that policy:
+
+- Counts display as whole numbers (`0`), never percentages.
+- Percentages display as actual percentages, normally `0.00%`, without multiplying the stored value again.
+- R values display as R multiples, normally `0.000"R"`, never percentages.
+- Text, duration strings, and timestamps use a neutral text/date format and no profit/loss fill unless explicitly required.
+- AUD commission values use the existing currency helper and display to cents.
+- Crypto commission values use the existing crypto-currency helper/logic with optional decimals sufficient to show small nonzero USDT values; do not round small values to zero or all values to whole numbers. Keep at most the existing supported eight optional decimals unless the current helper is deliberately and safely extended.
+- A neutral cell must use the workbook's genuine no-fill/default fill (`PatternFill()`/equivalent), not an artificial solid-white fill.
+- Generated semantic fills may be repaired, but unrelated user conditional formatting must survive.
+- Formatting must be derived from the metric's semantic key/label and its section, not from the previous row's style ID or a fragile alternating-row assumption.
+
+Required repair 3: correct STATS1 without destroying manual formatting
+
+Inspect the actual current workbook before changing it. At minimum, repair and regression-test all of the following:
+
+- Winner `Avg stop %` (row 43 in the current workbook): the raw values such as `B43 = 0.008250012...` are fractions and must display as percentages. Apply the correct percentage format across Overall, FX, and Crypto.
+- Winner `Avg target %` (current row 46) and the corresponding loser averages must display as percentages across all three market columns.
+- Current row 49 `Avg duration`: remove the stray grey fill and unintended bold formatting from the statistic cells and row-label fill. Its data-cell presentation must match the neutral duration presentation of current row 50 `Max duration`, while retaining the row label's current intended font choice and the correct border position.
+- Current row 55 `Avg R win`: values such as `B55 = 1.900253963...` must display as `1.900R` (subject to normal rounding), not `190.025%`. Apply the R format across Overall, FX, and Crypto.
+- Current rows 63 through 68: remove the stray green data-cell fills. Apply percentage, duration/text, or source-text formats according to each row's semantic meaning; do not infer the format from the corrupted neighbour.
+- Current rows 76, 78, and 79, plus every other Side/Patterns/Timeframe count row: counts such as `B76 = 897` must display as `897`, not `89,700%`.
+- Current rows 84 through 89: remove the blanket red fills. Counts use whole-number formats. Winner rows alone receive green data-cell fills; loser rows alone receive red data-cell fills; neutral pattern totals/text rows remain unfilled.
+- Current Timeframe section, approximately rows 93 through 120: the Timeframe section header and timeframe-name/total rows remain unfilled; each row labelled `Winners` is green only in the market data cells; each row labelled `Losers`/`Losses` is red only in the market data cells. Specifically, current row 93 must not be green, row 94 must not be red merely because of its position, current row 95 must be green, and current row 96 must be red. Apply this semantic rule through the end of the section.
+- Commission section: section/header cells remain neutral. Overall commission cells are blank and genuinely untouched/default—no value and no red, green, or solid-white fill. FX commission values use AUD cents. Crypto commission values use suitable USDT precision. Only populated FX/Crypto commission value cells receive red loss fill. A value such as current `C122 = 0.01` must visibly display as a nonzero AUD amount; small crypto averages/minima must not display as zero, and maxima must not be rounded to misleading whole numbers.
+- Drawdown section: only populated drawdown-percentage value cells receive red fill. There must be no green cells. Section/header rows, Start/End date or timestamp rows, and blank cells remain neutral. Drawdown fractions must display as percentages rather than zeros. Do not change the already-verified drawdown calculation or timestamps unless a test proves a calculation defect; this task primarily repairs their presentation.
+- Search the full STATS1 managed range for the same corruption patterns, not only the example coordinates. Repair every cell whose semantic kind contradicts its number format/fill, but leave unrelated presentation untouched.
+
+Do not reinstate the earlier blanket label-font rule. Capture the current STATS1 row-label font/alignment signature before updating and assert it is unchanged afterward, except that a specifically defective background fill such as the current row-49 grey fill is removed. Do not make A40, A43, or any other label bold/non-italic simply because an earlier paragraph requested it; the final mixed-style instruction is authoritative.
+
+Required repair 4: apply the same standard to YEARLY REPORT and 2018-2026
+
+1. Audit `YEARLY REPORT` and every year sheet from `2018` through `2026` for the same shifted number formats, fills, and accidental bold/grey styles.
+2. Use `_REPORT_SPECS` kinds/semantics (or a safely refactored equivalent) to assign formats explicitly. Do not copy the corruption from the current report sheets.
+3. Apply the STATS1 row-label font and border-group pattern by matching semantic labels and sections. Where the report row set differs from STATS1, preserve the report's data layout and map only the applicable semantic group boundaries; never add duplicate rows merely to imitate STATS1.
+4. Report section/header rows are neutral unless the user's current STATS1 pattern explicitly calls for a row-label presentation; do not blanket-fill a whole section row grey.
+5. Commission, drawdown, count, percentage, R, duration, and date rules must match the STATS1 policy described above.
+6. Preserve month/year headers, existing column order, current panes, widths, heights, and all manual layout features.
+
+Required repair 5: preservation-mode and resync idempotence
+
+The normal resync/derived-sheet path must keep these repairs and all manual formatting.
+
+1. Refactor the preservation boundary so it distinguishes user-owned presentation from generator-owned metric presentation. Do not blindly restore an old corrupted style into a managed value cell after semantic formatting has run.
+2. Row-label font/alignment and the user's border grouping are user-owned. Metric number formats and the explicitly managed semantic fills described in this brief are generator-owned. Merges, dimensions, panes, sheet order, filters, and unrelated conditional formatting remain user-owned.
+3. Avoid destructive unmerge/remerge, full-sheet clear/rewrite, or style-table churn on existing sheets. `_apply_stats1_clean_table_borders()` and `_repair_stats1_child_label_styles()` must be made safe or bypassed where they conflict with the captured authoritative presentation.
+4. Run the real derived-sheet resync twice on a temporary copy of the current workbook using the same authoritative snapshot. The second run must produce no semantic or presentation change.
+5. Compare fingerprints before/after and between run 1/run 2 for:
+   - sheet order and active/selected sheets;
+   - merged ranges;
+   - freeze panes;
+   - widths and heights;
+   - auto-filters and data validations;
+   - chart parts and relationships;
+   - formulas and values outside the explicitly managed derived cells;
+   - STATS1 row-label fonts/alignment;
+   - STATS1 and report border edges;
+   - number formats and fills in managed metric cells;
+   - conditional-formatting rules not owned by this repair.
+6. Fail closed if a preservation invariant changes unexpectedly. Do not replace the authoritative workbook unless the candidate passes validation.
+
+Testing and verification
+
+Add focused tests in the existing relevant files, principally `tests/test_master_journal_workbook.py` and/or `tests/test_master_service_master_journal_sync.py`. Cover at least:
+
+- percentage, R, count, duration, AUD, and USDT number formats;
+- no-fill versus solid-white behaviour;
+- winner/loser fills selected by semantic label in Side, Patterns, and Timeframe sections;
+- Commission Overall blank/default cells and FX/Crypto red populated cells;
+- Drawdown red percentage cells with neutral Start/End cells;
+- preservation of a deliberately mixed bold/italic STATS1 row-label fixture;
+- preservation of thick border groups including `A26:D29`;
+- YEARLY REPORT and every 2018-2026 sheet receiving the correct semantic formats;
+- two-run idempotence in preservation mode;
+- recommendation SVG/HTML bounds at wide and narrow sizes;
+- no formula, chart relationship, merge, pane, dimension, filter, sheet-order, or manual-format regression.
+
+Run the smallest relevant tests first, then the complete affected suites. At minimum run commands equivalent to:
+
+- `python -m pytest tests/test_master_journal_workbook.py -q`
+- `python -m pytest tests/test_master_service_master_journal_sync.py -q`
+- any existing recommendation-chart or workbook-preservation tests found during inspection
+- syntax/compile checks for every touched Python file
+
+Then update a temporary copy of the real workbook, validate it, and visually inspect STATS1, YEARLY REPORT, representative populated year sheets (including 2018, 2021, 2025, and 2026), plus the recommendation chart in a real browser at desktop and narrow widths. After those pass, update the tracked authoritative workbook and recommendation assets through the normal safe code path. Do not hand-edit only the binary workbook; the code must prevent recurrence.
+
+Acceptance criteria
+
+- The recommendation chart is fully visible and unclipped.
+- Every reported STATS1 defect is corrected by semantic meaning.
+- YEARLY REPORT and all 2018-2026 sheets follow the same semantic standard.
+- The current intentional STATS1 row-label bold/italic mixture and border grouping survive exactly.
+- Manual workbook layout and unrelated content survive.
+- A normal resync cannot recreate the corruption.
+- Two identical resyncs are idempotent.
+- All targeted tests and visual checks pass with recorded evidence.
+- No unrelated files or behaviours change.
+
+Completion workflow
+
+1. Review the final diff and `git status --short`; remove only verified repo-local test/cache artefacts allowed by `AGENTS.md`.
+2. Write a factual final summary, including test commands/results, workbook fingerprint/idempotence results, visual checks, changed files, and any residual limitations, to `summary/CODEX_SUMMARY_latest.txt`.
+3. Run repository-root `PATCH_DESKTOP_PUSH.bat`.
+4. Do not report completion unless that script succeeds and verifies local HEAD equals `origin/master`. If anything is blocked or unverified, say so exactly instead of claiming success.

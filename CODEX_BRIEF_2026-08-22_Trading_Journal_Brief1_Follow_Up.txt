@@ -1,0 +1,176 @@
+TRADING JOURNAL BRIEF 1 FOLLOW-UP: REPAIR VERIFIED REGRESSIONS
+
+Recommended execution: gpt-5.6-sol with model_reasoning_effort="max".
+
+Purpose
+
+This is a narrow corrective follow-up to `CODEX_BRIEF_2026-08-20_Trading_Journal_Formatting_Repair.txt`. The Brief 1 implementation was pushed as commit `6f2382c1fa8844bf5caf1495ae1ddcbb5ad04c27`, but independent before/after inspection found data-loss and preservation regressions. Fix every defect below without undoing the successful recommendation-chart and semantic-formatting repairs.
+
+Repository and operating rules
+
+- Work in the current `C:\GPT\CODEX-master` repository and obey `AGENTS.md`.
+- This follow-up is still Job 1 only. Do not start Brief 2 and do not change the calculator, brokers, Open Orders, Pine scripts, equity curve, or FX Weekend.
+- Do not inspect or modify `custom instructions/`.
+- Before editing, record `git status --short`, the current branch, and HEAD. Preserve all pre-existing user changes and unrelated dirty files.
+- Treat commit `6f2382c1fa8844bf5caf1495ae1ddcbb5ad04c27` as the defective Brief 1 result and its parent, `db58d4357b5ad59896977ea6a0ce0175aae744fe`, as the read-only before-repair workbook baseline. Use `git show` or a temporary detached worktree to inspect the parent workbook. Never reset, check out over, or discard the user's current worktree.
+- Treat the current `journal/Trading Journal.xlsx` as authoritative except for the verified regressions explicitly identified below. Make a temporary repo-local safety copy before writing and do not commit it.
+- Keep the patch narrow. Do not redesign, rebuild from a stale template, broadly restyle, or change unrelated workbook values or behaviour.
+- Preserve the successful Brief 1 fixes: the 1040 x 520 recommendation SVG layout, responsive unclipped chart, semantic number formats and fills, genuine no-fill handling, STATS1 mixed bold/italic row-label typography, STATS1 borders including A26:D29, report border grouping, workbook layout, and existing chart parts.
+
+Verified regression 1: STATS1 winner and loser averages were overwritten
+
+The Brief 1 resync replaced distinct winner/loser stop and target averages with the Overall averages. Restore the correct values and fix the data-writing path so another resync cannot repeat this.
+
+The parent workbook contains these authoritative values:
+
+- Winners / Avg stop %: B43 `0.00825001214023611`, C43 `0.001408374914534827`, D43 `0.03301022305229791`.
+- Winners / Avg target %: B46 `0.02050432835416064`, C46 `0.00331716938910343`, D46 `0.07937528664826464`.
+- Losers / Avg stop %: B60 `0.01095291800287766`, C60 `0.001450852693278441`, D60 `0.03447221440748848`.
+- Losers / Avg target %: B63 `0.032589728043436`, C63 `0.003853497734971225`, D63 `0.1005498639554257`.
+
+Requirements:
+
+1. Restore those twelve values in the authoritative workbook while keeping their correct `0.00%` number format and neutral fill.
+2. Correct the semantic data source used by the resync. Winner metrics must come from winner-only trades and loser metrics from loser-only trades for Overall, FX, and Crypto. Do not substitute the unfiltered Overall/market average.
+3. Do not hard-code the cell coordinates or the twelve numbers into production logic. Locate the section and label semantically and derive the metrics from the authoritative snapshot/trades. The explicit values above are validation expectations for this workbook.
+4. Add a regression proving all twelve values remain distinct from the corresponding unfiltered averages where the data differs and remain unchanged after two sequential preservation-mode resyncs.
+
+Verified regression 2: report Max R values were erased
+
+`YEARLY REPORT` and sheets `2018` through `2025` lost 176 previously populated cells from the rows labelled `Max R loss` and `Max R win`. The cells are blank in the defective workbook. Sheet `2026` had no populated values and must remain blank.
+
+Requirements:
+
+1. Restore every previously populated `Max R loss` and `Max R win` value exactly from the parent workbook, including the instrument/date source text already embedded in those cells.
+2. Fix `_report_cell_value()`, `_update_report_sheet_preserving_layout()`, the report bucket/source construction, or the correct underlying path so a missing inline `metric_sources` entry never turns a valid existing value into blank.
+3. In preservation mode, when a new sourced value cannot be derived safely, retain the existing nonblank report value instead of replacing it with blank.
+4. For a new workbook, if a valid numeric R value exists but its instrument/date source is unavailable, write the numeric R value with the normal `0.000"R"` format rather than silently discarding it.
+5. Do not fabricate instrument names, dates, or source references.
+6. Add tests comparing every populated parent-baseline `Max R loss`/`Max R win` cell with the repaired workbook and proving two sequential resyncs retain them.
+
+Verified regression 3: unrelated SYMBOLS Win Rate values changed
+
+The follow-up audit found seven unauthorized changes in `SYMBOLS`, column AI (`Win Rate %`):
+
+- USDCAD: `0.3680555555555556` became `0.363013698630137`.
+- GBPUSD: `0.319672131147541` became `0.3095238095238095`.
+- EURUSD: `0.3916666666666667` became `0.3852459016393442`.
+- USDJPY: `0.2978723404255319` became `0.288659793814433`.
+- USDCHF: `0.3970588235294117` became `0.3802816901408451`.
+- NZDUSD: `0.2142857142857143` became `0.2093023255813954`.
+- CHFJPY: `0.3076923076923077` became `0.2857142857142857`.
+
+Requirements:
+
+1. Restore the parent-baseline values exactly.
+2. Identify why a formatting-only resync recalculated these seven unrelated metrics. Prevent this narrow repair/resync from changing `SYMBOLS` values when the underlying authoritative trade snapshot has not changed.
+3. Do not freeze all future legitimate SYMBOLS updates. The guard must distinguish an unchanged snapshot from genuinely changed source data.
+4. Preserve the existing SYMBOLS layout, formulas, labels, conditional formatting, and other values.
+5. Add a regression that fingerprints SYMBOLS values before and after two sequential formatting/preservation resyncs.
+
+Verified regression 4: empty coloured STATS1 cells expanded the used range
+
+The defective workbook contains eight empty but styled cells at `H13:I16`: H cells have green fills and I cells have red fills. The original STATS1 used range ended at column D; the defective workbook now reports a maximum column of I.
+
+Requirements:
+
+1. Remove all values and styles from `H13:I16` so the current STATS1 used range ends at column D again.
+2. Fix `_apply_dashboard_requested_semantic_fills()` or the responsible legacy path. Never materialize/style H/I cells unless those columns actually exist and contain the semantic metrics the code expects.
+3. Do not clear legitimate nonblank cells outside A:D if a future valid workbook uses them. Gate the legacy styling by actual headers, labels, and populated cells rather than fixed coordinates.
+4. Add a regression proving the present workbook has no materialized/styled cells beyond column D and remains that way after two sequential resyncs.
+
+Verified regression 5: stop-chart hyperlink targets changed
+
+The three STATS1 stop recommendation links changed from the existing encoded targets to literal-space targets:
+
+- `Trading%20Journal.assets/recommendations/overall-stop.html`
+- `Trading%20Journal.assets/recommendations/fx-stop.html`
+- `Trading%20Journal.assets/recommendations/crypto-stop.html`
+
+The target recommendation links retained `%20` encoding.
+
+Requirements:
+
+1. Restore the three exact encoded stop targets above.
+2. Use one canonical relative-path/URI encoding policy for all six stop/target recommendation hyperlinks.
+3. Preserve the filenames and offline relative-link layout.
+4. Add a regression checking the exact hyperlink targets in both openpyxl and the worksheet relationship XML.
+
+Verified regression 6: excessive style-table churn
+
+The workbook's cell-style table grew from 511 to 894 entries during the Brief 1 repair, with hundreds of redundant or unused styles. This conflicts with the requirement to avoid style-table churn and creates a risk that repeated resyncs will keep bloating the file.
+
+Requirements:
+
+1. Identify the code paths creating redundant font/fill/border/number-format combinations, especially whole-report semantic formatting and repeated `copy()`-then-assign operations.
+2. Reuse canonical immutable style components where safe and avoid assigning a new style when the cell already has the required semantic presentation.
+3. Do not perform a destructive whole-workbook style rebuild and do not renumber styles in a way that changes unrelated cells.
+4. Remove redundant/unused styles only if it can be done safely without changing any cell's effective presentation or workbook OOXML relationships.
+5. At minimum, two sequential resyncs must produce identical `styles.xml` semantics and must not increase cellXfs, fonts, fills, borders, or custom number formats on the second run. Add this to the preservation fingerprint and fail closed if it changes.
+6. Record before, run-1, and run-2 style counts in the final summary. If the original 511-entry count cannot be restored safely because the new report border policy legitimately requires additional unique styles, explain the exact justified delta; do not leave unexplained redundant growth.
+
+Preservation checks that must continue to pass
+
+The independent audit confirmed these areas survived Brief 1. Do not regress them:
+
+- sheet order and active/selected sheet;
+- merges, freeze panes, column widths, row heights, filters, and data validations;
+- all formulas;
+- Trade Log comments and hyperlinks;
+- STATS1 row-label font/alignment signatures;
+- every STATS1 border edge, including A26:D29;
+- chart1.xml and chart2.xml content and both chart anchors/relationships;
+- the repaired STATS1/report semantic number formats and fills;
+- the recommendation SVG viewBox/bounds fix and all offline chart assets.
+
+Required testing
+
+Add or correct focused tests so the current suite cannot pass while the regressions above remain. The tests must use the real parent/current workbook comparison where required, not only a synthetic fixture that begins with already-incorrect values.
+
+At minimum cover:
+
+- exact restoration and two-run retention of the twelve STATS1 winner/loser averages;
+- no winner/loser metric fallback to the unfiltered Overall average;
+- all 176 populated parent-baseline report Max R cells restored and retained;
+- missing inline source metadata preserving an existing nonblank report value;
+- the seven SYMBOLS Win Rate values unchanged when the snapshot is unchanged;
+- STATS1 current used range ending at D, with no styled empty H13:I16 cells;
+- exact `%20` encoding for all six recommendation hyperlink relationship targets;
+- stable styles.xml component counts and semantic hash across two sequential resyncs;
+- all prior Brief 1 semantic formats/fills, fonts, borders, layout, formulas, chart parts, and SVG bounds still passing.
+
+Run at least:
+
+- `python -m pytest tests/test_master_journal_workbook.py -q`
+- `python -m pytest tests/test_master_service_master_journal_sync.py -q`
+- every focused test added for this follow-up;
+- Python compile checks for every touched Python file;
+- `git diff --check`.
+
+Real-workbook verification
+
+1. Create a temporary candidate from the current authoritative workbook.
+2. Apply the repaired preservation-mode resync twice sequentially to that same candidate, using the same authoritative snapshot.
+3. Compare the parent baseline, defective Brief 1 workbook, run 1, and run 2.
+4. Verify all six regressions are repaired and all successful Brief 1 changes remain.
+5. Visually inspect STATS1, SYMBOLS, YEARLY REPORT, 2018, 2021, 2025, and 2026 in Microsoft Excel or another genuine spreadsheet renderer. Confirm the chart HTML at desktop and narrow widths if a real browser is available; otherwise retain the existing parsed-bounds test and state the limitation accurately.
+6. Do not replace `journal/Trading Journal.xlsx` unless the candidate passes every preservation and regression check.
+
+Acceptance criteria
+
+- All twelve STATS1 winner/loser averages equal the parent-baseline values and remain correctly formatted.
+- All 176 previously populated report Max R cells are restored exactly; no valid metric is blanked by missing source metadata.
+- The seven unrelated SYMBOLS Win Rate values equal the parent baseline when the source snapshot is unchanged.
+- STATS1 has no styled empty H13:I16 cells and its present used range ends at column D.
+- All six recommendation hyperlinks use the exact canonical `%20`-encoded relative targets.
+- Sequential resync run 2 causes no value, presentation, relationship, or style-table change from run 1.
+- The successful Brief 1 chart, formatting, font, border, layout, formula, and chart-preservation fixes remain intact.
+- No Brief 2 or unrelated behaviour is changed.
+- All affected tests pass.
+
+Completion workflow
+
+1. Review the final diff and `git status --short`; remove only verified temporary artefacts allowed by `AGENTS.md`.
+2. Write a factual final report to `summary/CODEX_SUMMARY_latest.txt`, including exact restored-cell counts, before/after/run-2 fingerprints, style counts, tests, visual checks, changed files, and any genuine limitation.
+3. Run repository-root `PATCH_DESKTOP_PUSH.bat`.
+4. Do not claim completion unless that script succeeds and verifies local HEAD equals `origin/master`.

@@ -1,6 +1,6 @@
 #property strict
-#property description "Trader EA: (1) Trendline limit-order execution auto-armed by TrendlineObjectName; (2) EMA bounce market execution derived from Backtest signal logic. SL/TP are set by DISTANCE in MT5 POINTS, with optional AutoTP NetRR."
-#property version   "2.10"
+#property description "Trader EA: trendline/standard limits, EMA bounce, and token-gated one-shot standard market execution. SL/TP are set by DISTANCE in MT5 POINTS, with optional AutoTP NetRR."
+#property version   "2.20"
 
 #include <Trade/Trade.mqh>
 CTrade trade;
@@ -10,7 +10,8 @@ enum StrategyMode
 {
    STRAT_TRENDLINE_LIMIT = 0,
    STRAT_EMA_BOUNCE      = 1,
-   STRAT_STANDARD_LIMIT  = 2
+   STRAT_STANDARD_LIMIT  = 2,
+   STRAT_STANDARD_MARKET = 3
 };
 
 input group "Strategy"
@@ -51,6 +52,12 @@ enum StandardLimitDirection { STD_BUY_LIMIT=0, STD_SELL_LIMIT=1 };
 input StandardLimitDirection StandardLimitSide = STD_BUY_LIMIT;
 input double StandardLimitEntryPrice = 0.0;
 
+// -------------------- Inputs (Standard one-shot market strategy only) --------------------
+input group "Standard market strategy (one-shot)"
+enum StandardMarketDirection { STD_MARKET_BUY=0, STD_MARKET_SELL=1 };
+input StandardMarketDirection StandardMarketSide = STD_MARKET_BUY;
+input string StandardMarketExecutionToken = "";
+
 // -------------------- Inputs (EMA bounce strategy only) --------------------
 input group "EMA bounce strategy (derived from Backtest)"
 input bool   UseDualEMA       = true;
@@ -80,6 +87,19 @@ datetime g_expireAt     = 0;
 bool     g_wasInPosition = false;
 datetime g_lastPepperstoneSpreadExport = 0;
 int      g_lastPepperstoneSpreadExportSymbolCount = 0;
+bool     g_marketExecutionHandled = false;
+bool     g_standardLimitStructuralBlock = false;
+bool     g_standardLimitAcceptanceMismatch = false;
+bool     g_standardLimitPlacementConfirmed = false;
+bool     g_standardLimitExpired = false;
+int      g_standardLimitAttemptCount = 0;
+datetime g_standardLimitNextAttemptAt = 0;
+string   g_standardLimitLastReason = "";
+bool     g_lastPendingFailureStructural = false;
+bool     g_lastPendingAcceptanceMismatch = false;
+
+const int STANDARD_LIMIT_MAX_ATTEMPTS = 6;
+const int STANDARD_LIMIT_MAX_BACKOFF_SECONDS = 30;
 
 // EMA handles
 int hFast  = INVALID_HANDLE;
@@ -87,13 +107,15 @@ int hSlow  = INVALID_HANDLE;
 int hTrend = INVALID_HANDLE;
 
 string EA_COMMENT = "Trader";
-string EA_VERSION = "2.10";
+string EA_VERSION = "2.20";
 
 void Dbg(const string msg){ if(Debug) Print(EA_COMMENT, ": ", msg); }
 bool PlaceOrReplacePendingLimitAtEntry(const bool isBuyLimit,
                                        const double rawEntry,
                                        const bool allowReplace,
                                        string &why);
+bool IsTradePlacementAccepted(const uint retcode);
+bool StandardLimitShouldBeActive();
 
 bool IsNewBar()
 {
@@ -378,6 +400,359 @@ bool InPosition()
    return PositionSelect(_Symbol);
 }
 
+string ShortStableFingerprint(const string value)
+{
+   long h1 = 5381;
+   long h2 = 52711;
+   int len = StringLen(value);
+   for(int i = 0; i < len; i++)
+   {
+      long ch = (long)StringGetCharacter(value, i);
+      h1 = (h1 * 33 + ch) % 2147483647;
+      h2 = (h2 * 131 + ch) % 2147483629;
+   }
+   return StringFormat("%08X%08X", (uint)h1, (uint)h2);
+}
+
+string StandardMarketTokenFingerprint()
+{
+   return ShortStableFingerprint(StandardMarketExecutionToken);
+}
+
+string StandardMarketGlobalKey()
+{
+   long login = (long)AccountInfoInteger(ACCOUNT_LOGIN);
+   string identity = (string)login + "|" + _Symbol + "|" +
+                     IntegerToString(MagicNumber) + "|" + StandardMarketExecutionToken;
+   string fingerprint = ShortStableFingerprint(identity);
+   string key = "TraderMkt." + (string)login + "." +
+                IntegerToString(MagicNumber) + "." + fingerprint;
+   if(StringLen(key) > 63)
+      key = "TraderMkt." + fingerprint;
+   return key;
+}
+
+bool ValidateTradingReadiness(const bool isBuy, string &why)
+{
+   if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED))
+   { why = "Terminal AutoTrading is disabled."; return false; }
+   if(!MQLInfoInteger(MQL_TRADE_ALLOWED))
+   { why = "EA trading is disabled; enable Allow Algo Trading for this Expert."; return false; }
+   if(!AccountInfoInteger(ACCOUNT_TRADE_ALLOWED))
+   { why = "Trading is not allowed for this account."; return false; }
+   if(!AccountInfoInteger(ACCOUNT_TRADE_EXPERT))
+   { why = "Expert trading is not allowed for this account."; return false; }
+
+   long tradeMode = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_MODE);
+   if(tradeMode == SYMBOL_TRADE_MODE_DISABLED)
+   { why = "Trading is disabled for this symbol."; return false; }
+   if(tradeMode == SYMBOL_TRADE_MODE_CLOSEONLY)
+   { why = "Symbol is close-only; a new order is not allowed."; return false; }
+   if(isBuy && tradeMode == SYMBOL_TRADE_MODE_SHORTONLY)
+   { why = "Symbol is short-only; Buy is not allowed."; return false; }
+   if(!isBuy && tradeMode == SYMBOL_TRADE_MODE_LONGONLY)
+   { why = "Symbol is long-only; Sell is not allowed."; return false; }
+
+   if(!SymbolSelect(_Symbol, true))
+   { why = "Chart symbol could not be selected in Market Watch."; return false; }
+   why = "";
+   return true;
+}
+
+bool ValidateVolumeForBroker(const double volume, string &why)
+{
+   double vmin = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double vmax = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+   double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   if(vmin <= 0.0 || vmax <= 0.0 || step <= 0.0)
+   { why = "Broker volume minimum/maximum/step is unavailable."; return false; }
+   if(volume < vmin - 1e-9)
+   { why = "Calculated volume is below the broker minimum."; return false; }
+   if(volume > vmax + 1e-9)
+   { why = "Calculated volume exceeds the broker maximum."; return false; }
+   double stepCount = volume / step;
+   if(MathAbs(stepCount - MathRound(stepCount)) > 1e-7)
+   { why = "Calculated volume is not aligned to the broker volume step."; return false; }
+   why = "";
+   return true;
+}
+
+bool ValidateMarketStopsAtLiveQuote(const bool isBuy,
+                                    const double bid,
+                                    const double ask,
+                                    const double sl,
+                                    const double tp,
+                                    string &why)
+{
+   int stopsLevel = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+   int freezeLevel = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_FREEZE_LEVEL);
+   int requiredPoints = MathMax(stopsLevel, freezeLevel);
+   double requiredDistance = (double)requiredPoints * _Point;
+   double closeSideAnchor = isBuy ? bid : ask;
+
+   if(isBuy)
+   {
+      if(!(sl < closeSideAnchor && tp > closeSideAnchor))
+      { why = "Buy SL/TP are on an invalid side of the live Bid."; return false; }
+      if(requiredPoints > 0 && ((closeSideAnchor - sl) < requiredDistance || (tp - closeSideAnchor) < requiredDistance))
+      { why = "Buy SL/TP violate the broker stop/freeze distance at the live Bid."; return false; }
+   }
+   else
+   {
+      if(!(sl > closeSideAnchor && tp < closeSideAnchor))
+      { why = "Sell SL/TP are on an invalid side of the live Ask."; return false; }
+      if(requiredPoints > 0 && ((sl - closeSideAnchor) < requiredDistance || (closeSideAnchor - tp) < requiredDistance))
+      { why = "Sell SL/TP violate the broker stop/freeze distance at the live Ask."; return false; }
+   }
+   why = "";
+   return true;
+}
+
+void LogStandardMarketOutcome(const string outcome,
+                              const bool isBuy,
+                              const double entry,
+                              const double sl,
+                              const double tp,
+                              const double volume,
+                              const double risk,
+                              const string tokenFingerprint,
+                              const uint retcode,
+                              const string retcodeDescription,
+                              const ulong orderTicket,
+                              const ulong dealTicket,
+                              const string reason)
+{
+   int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+   Print(EA_COMMENT,
+         ": mode=standard_market outcome=", outcome,
+         " symbol=", _Symbol,
+         " side=", (isBuy ? "buy" : "sell"),
+         " entry=", DoubleToString(entry, digits),
+         " sl=", DoubleToString(sl, digits),
+         " tp=", DoubleToString(tp, digits),
+         " volume=", DoubleToString(volume, 8),
+         " risk=", DoubleToString(risk, 2),
+         " token_fp=", tokenFingerprint,
+         " retcode=", (string)retcode,
+         " retcode_description=", retcodeDescription,
+         " order=", (string)orderTicket,
+         " deal=", (string)dealTicket,
+         " reason=", reason);
+}
+
+bool AcquireStandardMarketGateLock(int &lockHandle, string &why)
+{
+   lockHandle = INVALID_HANDLE;
+   string lockName = "TraderMarketExecutionGate.lck";
+   for(int attempt = 0; attempt < 20; attempt++)
+   {
+      ResetLastError();
+      lockHandle = FileOpen(lockName, FILE_READ | FILE_WRITE | FILE_BIN | FILE_COMMON);
+      if(lockHandle != INVALID_HANDLE)
+      {
+         why = "";
+         return true;
+      }
+      Sleep(25);
+   }
+   why = "Could not acquire the exclusive terminal-common execution gate lock. error=" + IntegerToString(GetLastError());
+   return false;
+}
+
+bool HasBlockingPendingOrderForMarket(ulong &ticketOut)
+{
+   ticketOut = 0;
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = OrderGetTicket(i);
+      if(ticket == 0 || !OrderSelect(ticket)) continue;
+      if(OrderGetString(ORDER_SYMBOL) != _Symbol) continue;
+      if((int)OrderGetInteger(ORDER_MAGIC) != MagicNumber) continue;
+      ticketOut = ticket;
+      return true;
+   }
+   return false;
+}
+
+bool ConsumeStandardMarketToken(string &why, bool &alreadyConsumed)
+{
+   alreadyConsumed = false;
+   string key = StandardMarketGlobalKey();
+   if(StringLen(key) > 63)
+   { why = "Internal token-gate key exceeds the MT5 63-character limit."; return false; }
+
+   int lockHandle = INVALID_HANDLE;
+   if(!AcquireStandardMarketGateLock(lockHandle, why)) return false;
+
+   if(GlobalVariableCheck(key))
+   {
+      double currentValue = GlobalVariableGet(key);
+      if(currentValue != 0.0)
+      {
+         alreadyConsumed = true;
+         why = "Execution token was already consumed; download a newly generated market .set for an explicit retry.";
+         FileClose(lockHandle);
+         return false;
+      }
+   }
+
+   double marker = (double)TimeLocal();
+   if(marker <= 0.0) marker = 1.0;
+   ResetLastError();
+   bool marked = GlobalVariableCheck(key)
+      ? GlobalVariableSetOnCondition(key, marker, 0.0)
+      : (GlobalVariableSet(key, marker) != 0);
+   if(!marked)
+   {
+      if(GlobalVariableCheck(key) && GlobalVariableGet(key) != 0.0)
+      {
+         alreadyConsumed = true;
+         why = "Execution token was already consumed; download a newly generated market .set for an explicit retry.";
+      }
+      else
+      {
+         why = "Could not atomically consume the terminal-global execution token. error=" + IntegerToString(GetLastError());
+      }
+      FileClose(lockHandle);
+      return false;
+   }
+   GlobalVariablesFlush();
+   FileClose(lockHandle);
+   why = "";
+   return true;
+}
+
+bool ExecuteStandardMarketOnce()
+{
+   if(g_marketExecutionHandled) return false;
+   g_marketExecutionHandled = true;
+
+   bool isBuy = (StandardMarketSide == STD_MARKET_BUY);
+   string tokenFingerprint = StandardMarketTokenFingerprint();
+   string why = "";
+   if(!OrdersEnabled)
+   {
+      LogStandardMarketOutcome("orders_disabled", isBuy, 0, 0, 0, 0, 0, tokenFingerprint, 0, "not_sent", 0, 0,
+                               "OrdersEnabled is false; no token was consumed and no order was sent.");
+      return false;
+   }
+   if(StringLen(StandardMarketExecutionToken) < 16)
+   {
+      LogStandardMarketOutcome("invalid_token", isBuy, 0, 0, 0, 0, 0, tokenFingerprint, 0, "not_sent", 0, 0,
+                               "StandardMarketExecutionToken is missing/too short; download a new market .set.");
+      return false;
+   }
+   if(EnforceOneTradeAtATime && PositionSelect(_Symbol))
+   {
+      LogStandardMarketOutcome("blocked_one_trade_rule", isBuy, 0, 0, 0, 0, 0, tokenFingerprint, 0, "not_sent", 0, 0,
+                               "An open position already exists for this symbol; no token was consumed.");
+      return false;
+   }
+   ulong blockingPendingTicket = 0;
+   if(EnforceOneTradeAtATime && HasBlockingPendingOrderForMarket(blockingPendingTicket))
+   {
+      LogStandardMarketOutcome("blocked_one_trade_rule", isBuy, 0, 0, 0, 0, 0, tokenFingerprint, 0, "not_sent", blockingPendingTicket, 0,
+                               "This EA already has a pending order for the symbol/magic; no token was consumed.");
+      return false;
+   }
+   if(!ValidateTradingReadiness(isBuy, why))
+   {
+      LogStandardMarketOutcome("blocked_trade_readiness", isBuy, 0, 0, 0, 0, 0, tokenFingerprint, 0, "not_sent", 0, 0, why);
+      return false;
+   }
+
+   MqlTick liveTick;
+   if(!SymbolInfoTick(_Symbol, liveTick) || liveTick.bid <= 0.0 || liveTick.ask <= 0.0)
+   {
+      LogStandardMarketOutcome("blocked_live_quote", isBuy, 0, 0, 0, 0, 0, tokenFingerprint, 0, "not_sent", 0, 0,
+                               "Live Bid/Ask is unavailable; no token was consumed.");
+      return false;
+   }
+
+   double entry = NormalizePrice(isBuy ? liveTick.ask : liveTick.bid);
+   double sl = 0.0;
+   double tp = 0.0;
+   double volume = 0.0;
+   double riskRounded = 0.0;
+   if(!BuildSLFromDistance(entry, isBuy, sl, why))
+   {
+      LogStandardMarketOutcome("invalid_stops", isBuy, entry, sl, tp, volume, riskRounded, tokenFingerprint, 0, "not_sent", 0, 0, why);
+      return false;
+   }
+   if(!ComputeVolumeFromRisk(entry, sl, volume, riskRounded, why))
+   {
+      LogStandardMarketOutcome("invalid_risk", isBuy, entry, sl, tp, volume, riskRounded, tokenFingerprint, 0, "not_sent", 0, 0, why);
+      return false;
+   }
+   if(!ValidateVolumeForBroker(volume, why))
+   {
+      LogStandardMarketOutcome("invalid_volume", isBuy, entry, sl, tp, volume, riskRounded, tokenFingerprint, 0, "not_sent", 0, 0, why);
+      return false;
+   }
+
+   int autoTpPts = 0;
+   double effectiveNetRR = 0.0;
+   if(AutoTP_NetRR_Enabled)
+   {
+      if(!ComputeAutoTP_NetRR(entry, isBuy, volume, riskRounded, tp, autoTpPts, effectiveNetRR, why))
+      {
+         LogStandardMarketOutcome("invalid_stops", isBuy, entry, sl, tp, volume, riskRounded, tokenFingerprint, 0, "not_sent", 0, 0, why);
+         return false;
+      }
+   }
+   else if(!BuildTPManualFromDistance(entry, isBuy, tp, why))
+   {
+      LogStandardMarketOutcome("invalid_stops", isBuy, entry, sl, tp, volume, riskRounded, tokenFingerprint, 0, "not_sent", 0, 0, why);
+      return false;
+   }
+   if(!ValidateMarketStopsAtLiveQuote(isBuy, liveTick.bid, liveTick.ask, sl, tp, why))
+   {
+      LogStandardMarketOutcome("invalid_stops", isBuy, entry, sl, tp, volume, riskRounded, tokenFingerprint, 0, "not_sent", 0, 0, why);
+      return false;
+   }
+
+   Print(EA_COMMENT,
+         ": mode=standard_market preflight symbol=", _Symbol,
+         " side=", (isBuy ? "buy" : "sell"),
+         " live_bid=", DoubleToString(liveTick.bid, (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS)),
+         " live_ask=", DoubleToString(liveTick.ask, (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS)),
+         " entry=", DoubleToString(entry, (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS)),
+         " sl=", DoubleToString(sl, (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS)),
+         " tp=", DoubleToString(tp, (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS)),
+         " volume=", DoubleToString(volume, 8),
+         " risk=", DoubleToString(riskRounded, 2),
+         " token_fp=", tokenFingerprint);
+
+   bool alreadyConsumed = false;
+   if(!ConsumeStandardMarketToken(why, alreadyConsumed))
+   {
+      LogStandardMarketOutcome(alreadyConsumed ? "already_consumed_token" : "token_gate_error",
+                               isBuy, entry, sl, tp, volume, riskRounded, tokenFingerprint,
+                               0, "not_sent", 0, 0, why);
+      return false;
+   }
+
+   bool sendOk = isBuy
+      ? trade.Buy(volume, _Symbol, 0.0, sl, tp, EA_COMMENT + " standard market")
+      : trade.Sell(volume, _Symbol, 0.0, sl, tp, EA_COMMENT + " standard market");
+   uint retcode = trade.ResultRetcode();
+   string retcodeDescription = trade.ResultRetcodeDescription();
+   ulong orderTicket = (ulong)trade.ResultOrder();
+   ulong dealTicket = (ulong)trade.ResultDeal();
+   bool accepted = sendOk && IsTradePlacementAccepted(retcode) && (orderTicket > 0 || dealTicket > 0);
+   if(accepted)
+   {
+      LogStandardMarketOutcome("accepted", isBuy, entry, sl, tp, volume, riskRounded, tokenFingerprint,
+                               retcode, retcodeDescription, orderTicket, dealTicket, "Broker accepted the one-shot market request.");
+      return true;
+   }
+
+   LogStandardMarketOutcome("rejected", isBuy, entry, sl, tp, volume, riskRounded, tokenFingerprint,
+                            retcode, retcodeDescription, orderTicket, dealTicket,
+                            "The token remains consumed for safety; download a newly generated market .set for an explicit retry.");
+   return false;
+}
+
 void CancelAllPendingByMagic()
 {
    int total = OrdersTotal();
@@ -525,7 +900,73 @@ bool PlaceOrReplacePendingTrendline()
 
 bool IsTradePlacementAccepted(const uint retcode)
 {
-   return (retcode == TRADE_RETCODE_DONE || retcode == TRADE_RETCODE_PLACED);
+   return (retcode == TRADE_RETCODE_DONE ||
+           retcode == TRADE_RETCODE_DONE_PARTIAL ||
+           retcode == TRADE_RETCODE_PLACED);
+}
+
+bool IsPendingLimitTicketMatching(const ulong ticket,
+                                  const bool isBuyLimit,
+                                  const double entry)
+{
+   if(ticket == 0 || !OrderSelect(ticket)) return false;
+   if(OrderGetString(ORDER_SYMBOL) != _Symbol) return false;
+   if((int)OrderGetInteger(ORDER_MAGIC) != MagicNumber) return false;
+   long requiredType = isBuyLimit ? ORDER_TYPE_BUY_LIMIT : ORDER_TYPE_SELL_LIMIT;
+   if(OrderGetInteger(ORDER_TYPE) != requiredType) return false;
+   double orderPrice = OrderGetDouble(ORDER_PRICE_OPEN);
+   double tolerance = MathMax(_Point * 0.5, 1e-10);
+   return (MathAbs(orderPrice - entry) <= tolerance);
+}
+
+bool FindMatchingPendingLimit(const bool isBuyLimit,
+                              const double entry,
+                              ulong &ticketOut)
+{
+   ticketOut = 0;
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = OrderGetTicket(i);
+      if(IsPendingLimitTicketMatching(ticket, isBuyLimit, entry))
+      {
+         ticketOut = ticket;
+         return true;
+      }
+   }
+   return false;
+}
+
+bool FindAnyPendingLimitForEA(ulong &ticketOut)
+{
+   ticketOut = 0;
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = OrderGetTicket(i);
+      if(ticket == 0 || !OrderSelect(ticket)) continue;
+      if(OrderGetString(ORDER_SYMBOL) != _Symbol) continue;
+      if((int)OrderGetInteger(ORDER_MAGIC) != MagicNumber) continue;
+      long type = OrderGetInteger(ORDER_TYPE);
+      if(type == ORDER_TYPE_BUY_LIMIT || type == ORDER_TYPE_SELL_LIMIT)
+      {
+         ticketOut = ticket;
+         return true;
+      }
+   }
+   return false;
+}
+
+bool IsTransientPendingRetcode(const uint retcode)
+{
+   return (retcode == TRADE_RETCODE_REQUOTE ||
+           retcode == TRADE_RETCODE_TIMEOUT ||
+           retcode == TRADE_RETCODE_PRICE_CHANGED ||
+           retcode == TRADE_RETCODE_PRICE_OFF ||
+           retcode == TRADE_RETCODE_TOO_MANY_REQUESTS ||
+           retcode == TRADE_RETCODE_LOCKED ||
+           retcode == TRADE_RETCODE_CONNECTION ||
+           retcode == TRADE_RETCODE_MARKET_CLOSED ||
+           retcode == TRADE_RETCODE_SERVER_DISABLES_AT ||
+           retcode == TRADE_RETCODE_CLIENT_DISABLES_AT);
 }
 
 bool PlaceOrReplacePendingLimitAtEntry(const bool isBuyLimit,
@@ -533,8 +974,11 @@ bool PlaceOrReplacePendingLimitAtEntry(const bool isBuyLimit,
                                        const bool allowReplace,
                                        string &why)
 {
+   g_lastPendingFailureStructural = false;
+   g_lastPendingAcceptanceMismatch = false;
    if(rawEntry <= 0.0)
    {
+      g_lastPendingFailureStructural = true;
       why = "Invalid manual entry price (must be > 0).";
       Print(EA_COMMENT, ": ", why, " rawEntry=", DoubleToString(rawEntry, 8));
       return false;
@@ -543,17 +987,29 @@ bool PlaceOrReplacePendingLimitAtEntry(const bool isBuyLimit,
    double entry = NormalizePrice(rawEntry);
    if(entry <= 0.0)
    {
+      g_lastPendingFailureStructural = true;
       why = "Normalized entry price is invalid/non-positive.";
       Print(EA_COMMENT, ": ", why);
       return false;
    }
 
-   if(!allowReplace && g_ticket > 0) return true;
+   if(!allowReplace && g_ticket > 0)
+   {
+      if(IsPendingLimitTicketMatching(g_ticket, isBuyLimit, entry)) return true;
+      g_ticket = 0;
+   }
 
    double sl=0.0, tp=0.0, vol=0.0, riskRounded=0.0;
 
+   if(!ValidateTradingReadiness(isBuyLimit, why))
+   {
+      Print(EA_COMMENT, ": Pending limit trade-readiness preflight blocked. ", why);
+      return false;
+   }
+
    if(!IsLimitPriceValid(entry, isBuyLimit, why))
    {
+      g_lastPendingFailureStructural = (why != "Bid/Ask not available.");
       Print(EA_COMMENT, ": Wrong-side/too-close limit price. ", why,
             " entry=", DoubleToString(entry, (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS)));
       return false;
@@ -561,13 +1017,21 @@ bool PlaceOrReplacePendingLimitAtEntry(const bool isBuyLimit,
 
    if(!BuildSLFromDistance(entry, isBuyLimit, sl, why))
    {
+      g_lastPendingFailureStructural = true;
       Print(EA_COMMENT, ": Failed to build SL. ", why);
       return false;
    }
 
    if(!ComputeVolumeFromRisk(entry, sl, vol, riskRounded, why))
    {
+      g_lastPendingFailureStructural = true;
       Print(EA_COMMENT, ": Risk sizing failure. ", why);
+      return false;
+   }
+   if(!ValidateVolumeForBroker(vol, why))
+   {
+      g_lastPendingFailureStructural = true;
+      Print(EA_COMMENT, ": Broker volume preflight failed. ", why);
       return false;
    }
 
@@ -577,6 +1041,7 @@ bool PlaceOrReplacePendingLimitAtEntry(const bool isBuyLimit,
    {
       if(!ComputeAutoTP_NetRR(entry, isBuyLimit, vol, riskRounded, tp, autoTpPts, effNetRR, why))
       {
+         g_lastPendingFailureStructural = true;
          Print(EA_COMMENT, ": Failed to build AutoTP. ", why);
          return false;
       }
@@ -585,6 +1050,7 @@ bool PlaceOrReplacePendingLimitAtEntry(const bool isBuyLimit,
    {
       if(!BuildTPManualFromDistance(entry, isBuyLimit, tp, why))
       {
+         g_lastPendingFailureStructural = true;
          Print(EA_COMMENT, ": Failed to build manual TP (possibly too close). ", why);
          return false;
       }
@@ -602,6 +1068,20 @@ bool PlaceOrReplacePendingLimitAtEntry(const bool isBuyLimit,
       exp = g_expireAt;
    }
 
+   MqlTick liveTick;
+   bool hasLiveTick = SymbolInfoTick(_Symbol, liveTick);
+   Print(EA_COMMENT,
+         ": mode=standard_limit preflight symbol=", _Symbol,
+         " side=", (isBuyLimit ? "buy" : "sell"),
+         " entry=", DoubleToString(entry, (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS)),
+         " live_bid=", DoubleToString(hasLiveTick ? liveTick.bid : 0.0, (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS)),
+         " live_ask=", DoubleToString(hasLiveTick ? liveTick.ask : 0.0, (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS)),
+         " sl=", DoubleToString(sl, (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS)),
+         " tp=", DoubleToString(tp, (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS)),
+         " volume=", DoubleToString(vol, 8),
+         " risk=", DoubleToString(riskRounded, 2),
+         " expiration=", TimeToString(exp, TIME_DATE | TIME_SECONDS));
+
    bool sendOk=false;
    if(isBuyLimit) sendOk = trade.BuyLimit(vol, entry, _Symbol, sl, tp, tt, exp, EA_COMMENT);
    else           sendOk = trade.SellLimit(vol, entry, _Symbol, sl, tp, tt, exp, EA_COMMENT);
@@ -609,9 +1089,16 @@ bool PlaceOrReplacePendingLimitAtEntry(const bool isBuyLimit,
    uint retcode = trade.ResultRetcode();
    ulong orderTicket = (ulong)trade.ResultOrder();
    bool accepted = IsTradePlacementAccepted(retcode) && orderTicket > 0;
+   Print(EA_COMMENT, ": mode=standard_limit broker_result retcode=", retcode,
+         " description=", trade.ResultRetcodeDescription(),
+         " order=", (string)orderTicket,
+         " sendOk=", (sendOk ? "true" : "false"));
    if(!sendOk || !accepted)
    {
-      why = "Broker/server rejected pending placement.";
+      g_lastPendingFailureStructural = !IsTransientPendingRetcode(retcode);
+      why = g_lastPendingFailureStructural
+         ? "Broker/server rejected pending placement with a non-retryable result."
+         : "Transient broker/transport failure while placing the pending order.";
       Print(EA_COMMENT, ": Pending limit placement failed. retcode=", retcode,
             " (", trade.ResultRetcodeDescription(), ")",
             ", order=", (string)orderTicket,
@@ -619,7 +1106,24 @@ bool PlaceOrReplacePendingLimitAtEntry(const bool isBuyLimit,
       return false;
    }
 
-   g_ticket = orderTicket;
+   ulong observedTicket = 0;
+   if(IsPendingLimitTicketMatching(orderTicket, isBuyLimit, entry))
+      observedTicket = orderTicket;
+   else
+      FindMatchingPendingLimit(isBuyLimit, entry, observedTicket);
+   if(observedTicket == 0)
+   {
+      g_lastPendingAcceptanceMismatch = true;
+      why = "Broker reported accepted order ticket " + (string)orderTicket +
+            " but no matching pending order is observable; automatic retry is blocked to prevent a duplicate.";
+      Print(EA_COMMENT, ": mode=standard_limit outcome=accepted_not_observable ", why);
+      return false;
+   }
+
+   g_ticket = observedTicket;
+   why = "";
+   Print(EA_COMMENT, ": mode=standard_limit outcome=confirmed_pending order=", (string)g_ticket,
+         " symbol=", _Symbol, " magic=", IntegerToString(MagicNumber));
    return true;
 }
 
@@ -627,7 +1131,165 @@ bool PlacePendingStandardLimit()
 {
    bool isBuyLimit = (StandardLimitSide == STD_BUY_LIMIT);
    string why="";
-   return PlaceOrReplacePendingLimitAtEntry(isBuyLimit, StandardLimitEntryPrice, false, why);
+   bool placed = PlaceOrReplacePendingLimitAtEntry(isBuyLimit, StandardLimitEntryPrice, false, why);
+   g_standardLimitLastReason = why;
+   return placed;
+}
+
+void ArmStandardLimitPlacementWindow()
+{
+   if(g_armStartTime <= 0) g_armStartTime = TimeCurrent();
+   if(PendingCancelAfterMinutes > 0 && g_expireAt <= 0)
+      g_expireAt = ComputeExpireAt();
+}
+
+int StandardLimitRetryDelaySeconds(const int completedAttempts)
+{
+   int delaySeconds = 2;
+   for(int i = 1; i < completedAttempts; i++)
+   {
+      delaySeconds *= 2;
+      if(delaySeconds >= STANDARD_LIMIT_MAX_BACKOFF_SECONDS)
+         return STANDARD_LIMIT_MAX_BACKOFF_SECONDS;
+   }
+   return (int)MathMin(delaySeconds, STANDARD_LIMIT_MAX_BACKOFF_SECONDS);
+}
+
+void AdoptObservedStandardLimit(const ulong ticket, const string source)
+{
+   g_ticket = ticket;
+   g_standardLimitPlacementConfirmed = true;
+   if(OrderSelect(ticket))
+   {
+      datetime setupTime = (datetime)OrderGetInteger(ORDER_TIME_SETUP);
+      datetime expiration = (datetime)OrderGetInteger(ORDER_TIME_EXPIRATION);
+      if(setupTime > 0) g_armStartTime = setupTime;
+      if(expiration > 0) g_expireAt = expiration;
+   }
+   Print(EA_COMMENT, ": mode=standard_limit outcome=confirmed_existing source=", source,
+         " order=", (string)ticket, " symbol=", _Symbol,
+         " magic=", IntegerToString(MagicNumber));
+}
+
+void MaintainStandardLimit(const string source)
+{
+   if(!StandardLimitShouldBeActive()) return;
+   if(g_standardLimitStructuralBlock ||
+      g_standardLimitAcceptanceMismatch ||
+      g_standardLimitExpired)
+      return;
+
+   if(InPosition())
+   {
+      CancelAllPendingByMagic();
+      g_standardLimitPlacementConfirmed = true;
+      Print(EA_COMMENT, ": mode=standard_limit outcome=blocked_one_trade_rule source=", source,
+            " reason=An open position exists for this symbol.");
+      return;
+   }
+
+   ArmStandardLimitPlacementWindow();
+   if(PendingAgeExpired() || (g_expireAt > 0 && TimeCurrent() >= g_expireAt))
+   {
+      CancelAllPendingByMagic();
+      g_standardLimitExpired = true;
+      Print(EA_COMMENT, ": mode=standard_limit outcome=expired source=", source,
+            " reason=The placement window expired; load a new .set to arm another attempt.");
+      return;
+   }
+
+   bool isBuyLimit = (StandardLimitSide == STD_BUY_LIMIT);
+   double entry = NormalizePrice(StandardLimitEntryPrice);
+   ulong matchingTicket = 0;
+   if(FindMatchingPendingLimit(isBuyLimit, entry, matchingTicket))
+   {
+      if(!g_standardLimitPlacementConfirmed || g_ticket != matchingTicket)
+         AdoptObservedStandardLimit(matchingTicket, source);
+      return;
+   }
+
+   if(g_standardLimitPlacementConfirmed || g_ticket > 0)
+   {
+      g_standardLimitAcceptanceMismatch = true;
+      Print(EA_COMMENT, ": mode=standard_limit outcome=previously_confirmed_not_observable source=", source,
+            " order=", (string)g_ticket,
+            " reason=Automatic replacement is blocked to prevent a duplicate; inspect MT5 Orders/History and load a new .set if needed.");
+      return;
+   }
+
+   datetime now = TimeCurrent();
+   if(g_standardLimitNextAttemptAt > 0 && now < g_standardLimitNextAttemptAt) return;
+   if(g_standardLimitAttemptCount >= STANDARD_LIMIT_MAX_ATTEMPTS)
+   {
+      g_standardLimitStructuralBlock = true;
+      Print(EA_COMMENT, ": mode=standard_limit outcome=retry_exhausted source=", source,
+            " attempts=", IntegerToString(g_standardLimitAttemptCount),
+            " reason=", g_standardLimitLastReason,
+            " action=Load a corrected/new .set after resolving trading readiness or transport.");
+      return;
+   }
+
+   ulong otherPendingTicket = 0;
+   if(FindAnyPendingLimitForEA(otherPendingTicket))
+   {
+      g_standardLimitStructuralBlock = true;
+      Print(EA_COMMENT, ": mode=standard_limit outcome=blocked_nonmatching_pending source=", source,
+            " order=", (string)otherPendingTicket,
+            " reason=Another pending limit with this symbol/magic exists; automatic placement is blocked to prevent a duplicate.");
+      return;
+   }
+
+   g_standardLimitAttemptCount++;
+   MqlTick liveTick;
+   bool hasLiveTick = SymbolInfoTick(_Symbol, liveTick);
+   Print(EA_COMMENT,
+         ": mode=standard_limit attempt source=", source,
+         " attempt=", IntegerToString(g_standardLimitAttemptCount),
+         "/", IntegerToString(STANDARD_LIMIT_MAX_ATTEMPTS),
+         " symbol=", _Symbol,
+         " side=", (isBuyLimit ? "buy" : "sell"),
+         " entry=", DoubleToString(entry, (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS)),
+         " live_bid=", DoubleToString(hasLiveTick ? liveTick.bid : 0.0, (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS)),
+         " live_ask=", DoubleToString(hasLiveTick ? liveTick.ask : 0.0, (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS)));
+
+   if(PlacePendingStandardLimit())
+   {
+      g_standardLimitPlacementConfirmed = true;
+      g_standardLimitNextAttemptAt = 0;
+      return;
+   }
+   if(g_lastPendingAcceptanceMismatch)
+   {
+      g_standardLimitAcceptanceMismatch = true;
+      Print(EA_COMMENT, ": mode=standard_limit outcome=accepted_not_observable source=", source,
+            " reason=", g_standardLimitLastReason);
+      return;
+   }
+   if(g_lastPendingFailureStructural)
+   {
+      g_standardLimitStructuralBlock = true;
+      Print(EA_COMMENT, ": mode=standard_limit outcome=structural_block source=", source,
+            " reason=", g_standardLimitLastReason,
+            " action=Correct the limit price/settings and load a new .set; this EA will not retry this invalid request.");
+      return;
+   }
+
+   if(g_standardLimitAttemptCount >= STANDARD_LIMIT_MAX_ATTEMPTS)
+   {
+      g_standardLimitStructuralBlock = true;
+      Print(EA_COMMENT, ": mode=standard_limit outcome=retry_exhausted source=", source,
+            " attempts=", IntegerToString(g_standardLimitAttemptCount),
+            " reason=", g_standardLimitLastReason,
+            " action=Resolve the readiness/transport problem and load a new .set.");
+      return;
+   }
+
+   int delaySeconds = StandardLimitRetryDelaySeconds(g_standardLimitAttemptCount);
+   g_standardLimitNextAttemptAt = now + delaySeconds;
+   Print(EA_COMMENT, ": mode=standard_limit outcome=retry_scheduled source=", source,
+         " attempt=", IntegerToString(g_standardLimitAttemptCount),
+         " next_attempt_seconds=", IntegerToString(delaySeconds),
+         " reason=", g_standardLimitLastReason);
 }
 
 void RefreshTrendlineNameFromInputs()
@@ -1047,9 +1709,12 @@ int OnInit()
       }
       else
       {
-         if(!PlacePendingStandardLimit())
-            Print(EA_COMMENT, ": Failed to place standard limit order on init.");
+         MaintainStandardLimit("OnInit");
       }
+   }
+   else if(Strategy == STRAT_STANDARD_MARKET)
+   {
+      ExecuteStandardMarketOnce();
    }
    else
    {
@@ -1126,21 +1791,13 @@ void OnTick()
          CancelAllPendingByMagic();
          return;
       }
-
-      if(InPosition())
-      {
-         CancelAllPendingByMagic();
-         return;
-      }
-
-      if(PendingAgeExpired())
-      {
-         CancelAllPendingByMagic();
-         return;
-      }
-
+      MaintainStandardLimit("OnTick");
       return;
    }
+
+   // Standard manual market execution is deliberately OnInit-only. Reinitialization
+   // is guarded by the persistent terminal-global token; ticks never submit it.
+   if(Strategy == STRAT_STANDARD_MARKET) return;
 
    // EMA bounce strategy
    if(Strategy == STRAT_EMA_BOUNCE)
@@ -1163,20 +1820,12 @@ void OnTimer()
          CancelAllPendingByMagic();
          return;
       }
-
-      if(InPosition())
-      {
-         CancelAllPendingByMagic();
-         return;
-      }
-
-      if(PendingAgeExpired())
-      {
-         CancelAllPendingByMagic();
-         return;
-      }
+      MaintainStandardLimit("OnTimer");
       return;
    }
+
+   // The one-shot market strategy is never driven by the timer.
+   if(Strategy == STRAT_STANDARD_MARKET) return;
 
    if(Strategy != STRAT_TRENDLINE_LIMIT) return;
 

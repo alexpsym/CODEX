@@ -175,3 +175,121 @@ def test_load_trade_contexts_falls_back_to_state_backup(master_service, monkeypa
     monkeypatch.setattr(master_service, "_load_json_file", lambda path, default=None: {"trade_contexts": [{"order_id": "oid-x", "stop_loss": 1.0}]} if str(path).endswith("state_backup.json") else {"items": []})
     items = master_service._load_trade_contexts()
     assert items and items[0].get("order_id") == "oid-x"
+
+
+def test_open_item_enrichment_preserves_btc_demo_15m_test_yes_and_blank_pattern(
+    master_service, monkeypatch
+):
+    context = {
+        "calculation_context_id": "calcctx-btc-demo",
+        "order_id": "order-btc-demo",
+        "broker": "bybit",
+        "asset": "crypto",
+        "account": "demo",
+        "category": "linear",
+        "instrument": "BTCUSDT",
+        "side": "buy",
+        "order_type": "market",
+        "stop_loss_ticks": "35",
+        "target_mode": "rr",
+        "take_profit_ticks": None,
+        "risk_mode": "percent",
+        "risk_value": "1",
+        "risk_reward": "2",
+        "timeframe": "15m",
+        "is_test_trade": True,
+        "setup": "breakout",
+        "pattern": "",
+        "ema": "Yes",
+        "vwap": "No",
+        "aths_atls": "Yes",
+        "round_number": "No",
+        "webhook_mode": "No",
+        "planned_entry_price": "65000",
+        "planned_stop_price": "64965",
+        "planned_target_price": "65070",
+        "status": "ACTIVE",
+        "created_at": "2026-08-20T01:00:00+00:00",
+    }
+    monkeypatch.setattr(master_service, "_load_trade_contexts", lambda: [context])
+    item = {
+        "broker": "Bybit",
+        "account": "demo",
+        "category": "linear",
+        "instrument": "BTCUSDT",
+        "side": "Buy",
+        "type": "order",
+        "id": "order-btc-demo",
+        "opened_at": "2026-08-20T01:00:10+00:00",
+    }
+
+    enriched = master_service._enrich_open_item_with_trade_context(item)
+
+    assert enriched["context_linked"] is True
+    assert enriched["venue"] == "Bybit"
+    assert enriched["asset"] == "crypto"
+    assert enriched["order_type"] == "Market"
+    assert enriched["timeframe"] == "15MIN"
+    assert enriched["is_test_trade"] == "Yes"
+    assert enriched["pattern"] == "None"
+    assert enriched["risk_value_display"] == "1%"
+    assert enriched["target_mode_display"] == "Risk/Reward"
+    assert enriched["planned_stop_price"] == "64965"
+
+
+def test_position_fallback_requires_one_unambiguous_active_context_in_time_window(
+    master_service, monkeypatch
+):
+    base = {
+        "broker": "bybit",
+        "account": "demo",
+        "category": "linear",
+        "instrument": "BTCUSDT",
+        "side": "buy",
+        "status": "ACTIVE",
+    }
+    first = {
+        **base,
+        "calculation_context_id": "first",
+        "created_at": "2026-08-20T01:00:00+00:00",
+    }
+    second = {
+        **base,
+        "calculation_context_id": "second",
+        "created_at": "2026-08-20T01:20:00+00:00",
+    }
+    item = {
+        "broker": "Bybit",
+        "account": "demo",
+        "category": "linear",
+        "instrument": "BTCUSDT",
+        "side": "Buy",
+        "type": "position",
+        "opened_at": "2026-08-20T01:15:00+00:00",
+    }
+
+    monkeypatch.setattr(master_service, "_load_trade_contexts", lambda: [first, second])
+    assert master_service._lookup_trade_context_for_open_item(item) is None
+
+    monkeypatch.setattr(master_service, "_load_trade_contexts", lambda: [first])
+    assert master_service._lookup_trade_context_for_open_item(item) == first
+
+    stale = {**first, "created_at": "2026-08-19T20:00:00+00:00"}
+    monkeypatch.setattr(master_service, "_load_trade_contexts", lambda: [stale])
+    assert master_service._lookup_trade_context_for_open_item(item) is None
+
+
+def test_exact_calculation_context_id_wins_over_same_symbol_fallback(
+    master_service, monkeypatch
+):
+    contexts = [
+        {"calculation_context_id": "older", "timeframe": "5m"},
+        {"calculation_context_id": "wanted", "timeframe": "15m"},
+    ]
+    monkeypatch.setattr(master_service, "_load_trade_contexts", lambda: contexts)
+
+    matched = master_service._lookup_trade_context_for_open_item(
+        {"calculation_context_id": "wanted", "type": "position"}
+    )
+
+    assert matched == contexts[1]

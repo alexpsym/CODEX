@@ -636,6 +636,7 @@ def test_render_restart_restores_authoritative_fxweekend_settings_and_status(
         "account_modes": ["demo", "live"],
         "cutoff_time_dst": "05:15",
         "cutoff_time_standard": "06:30",
+        "news_events": [],
     }
     expected_status = {
         "state": "verified flat",
@@ -738,6 +739,7 @@ def test_render_restart_durably_migrates_legacy_live_only_fxweekend_settings(
         **legacy_settings,
         "schema_version": master_service.FXWEEKEND_SETTINGS_SCHEMA_VERSION,
         "account_modes": ["demo", "live"],
+        "news_events": [],
     }
     expected_status = {"state": "disabled", "accounts": {}}
     stores["primary"]["fxweekend_settings"] = deepcopy(legacy_settings)

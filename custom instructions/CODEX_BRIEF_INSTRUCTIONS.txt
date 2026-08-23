@@ -11,18 +11,17 @@ Every future Codex brief must include all six requirements below.
 1. Exact model and reasoning recommendation. Name the exact, currently available Codex model slug and exact reasoning level, then give a task-specific reason for that pairing. Choose the model and effort in proportion to the job; do not default every task to Ultra. Current examples include `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna`, with supported reasoning values such as `low`, `medium`, `high`, `xhigh`, `max`, or `ultra` as appropriate for the selected model.
 2. One complete fenced brief. Put the entire Codex-facing brief in one standalone fenced `text` block. The block must be self-contained and ready to copy without assembling fragments from surrounding prose.
 3. Plainly named text copy. Save the exact same brief as a plainly named `.txt` file in the repository root and state that filename beside the fenced brief.
-4. Exact PowerShell launch snippet. Provide a separate fenced `powershell` block that sets the repository location, reads the named brief with `Get-Content -Raw`, and launches interactive `codex` with the exact recommended model and reasoning value. The delivered command must contain the actual brief filename, model slug, and reasoning value, with no placeholders. This is a concrete syntax example using an actual brief filename:
+4. Exact PowerShell launch snippet. Provide a separate fenced `powershell` block that sets the repository location and launches interactive `codex` with the exact recommended model and reasoning value, followed by a short literal prompt telling Codex to read the named brief completely and carry out every requirement. Never load the brief into a PowerShell variable or pass its multiline contents to `codex`; that method can be misparsed as CLI arguments. The delivered command must contain the actual brief filename, model slug, and reasoning value, with no placeholders. Example:
 
 ```powershell
-Set-Location C:\GPT\CODEX-master
-$brief = Get-Content -Raw -LiteralPath ".\CODEX_BRIEF_2026-08-10_Trading_Tools_Journal_Pine.txt"
-codex --model gpt-5.6-sol --config 'model_reasoning_effort="ultra"' $brief
+Set-Location "C:\GPT\CODEX-master"
+codex --model gpt-5.6-sol --config 'model_reasoning_effort="ultra"' 'Read .\CODEX_BRIEF_2026-08-10_Trading_Tools_Journal_Pine.txt completely, then carry out every requirement in it.'
 ```
 
 5. Resume commands. Include the exact continuation commands when relevant. Always provide the current-directory form below. When the exact session ID is known, also provide a second command containing that literal ID; never leave a generic session-ID placeholder in a delivered command.
 
 ```powershell
-Set-Location C:\GPT\CODEX-master
+Set-Location "C:\GPT\CODEX-master"
 codex resume --last
 ```
 
@@ -47,3 +46,12 @@ When creating Codex briefs:
 * Do not push before writing `summary/CODEX_SUMMARY_latest.txt`.
 * Do not commit temp, cache, log, environment, secret, runtime data, `render/data`, or local state files.
 * Keep cleanup conservative: only remove `.pytest_tmp*`, `.pytest_cache`, and `__pycache__` folders after verifying paths stay inside the repo.
+
+VERIFICATION AND MODEL SELECTION
+
+- For complex Trading Journal preservation work, recommend gpt-5.6-sol with xhigh reasoning unless the specific task demonstrably requires max.
+- Do not recommend ultra unless meaningful independent parallel subtasks justify it.
+- Require focused regression tests and directly affected integration checks.
+- Never require complete workbook and service suites by default.
+- Require a full workbook suite only when shared-core changes genuinely justify it, and run it once after focused tests pass.
+- For isolated service changes, require only relevant verifier and integration tests.

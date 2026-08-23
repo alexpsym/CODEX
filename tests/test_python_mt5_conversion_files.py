@@ -96,13 +96,14 @@ def test_python_mt5_backtest_fetches_rates_and_warns_not_strategy_tester():
 
 def test_mql5_trader_exports_one_pepperstone_spread_json_file():
     trader = (ROOT / "mt5-clone" / "MQL5" / "Experts" / "Trader.mq5").read_text(encoding="utf-8")
+    spread_export = trader.split("// ---------- Pepperstone spread export helpers ----------", 1)[1]
     assert "EnablePepperstoneSpreadExport = true" in trader
     assert "PepperstoneSpreadExportIntervalSeconds = 300" in trader
     assert 'PepperstoneSpreadExportSymbols = ""' in trader
     assert "pepperstone_spreads_latest.json" in trader
     assert "MaybeExportPepperstoneSpreads();" in trader
     assert "BuildPepperstoneSpreadJson" in trader
-    assert "TimeToString" not in trader
+    assert "TimeToString" not in spread_export
     assert "FileOpen(requestedPath, FILE_WRITE | FILE_TXT | FILE_ANSI)" in trader
 
 
@@ -166,3 +167,88 @@ def test_mql5_trader_resolves_pepperstone_dot_suffix_symbols():
     assert "SymbolsTotal(false)" in trader
     assert "SymbolName(i, false)" in trader
     assert "Pepperstone spread export resolved " in trader
+
+
+def test_mql5_trader_standard_market_is_live_quote_anchored_and_terminal_token_gated():
+    trader = (ROOT / "mt5-clone" / "MQL5" / "Experts" / "Trader.mq5").read_text(encoding="utf-8")
+    market = trader.split("bool ExecuteStandardMarketOnce()", 1)[1].split("void CancelAllPendingByMagic()", 1)[0]
+    consume = trader.split("bool ConsumeStandardMarketToken", 1)[1].split("bool ExecuteStandardMarketOnce()", 1)[0]
+
+    assert "STRAT_STANDARD_MARKET = 3" in trader
+    assert "input StandardMarketDirection StandardMarketSide" in trader
+    assert "input string StandardMarketExecutionToken" in trader
+    assert "SymbolInfoTick(_Symbol, liveTick)" in market
+    assert "isBuy ? liveTick.ask : liveTick.bid" in market
+    assert "BuildSLFromDistance(entry, isBuy" in market
+    assert "ComputeVolumeFromRisk(entry, sl" in market
+    assert "ComputeAutoTP_NetRR(entry, isBuy" in market
+    assert "ValidateMarketStopsAtLiveQuote" in market
+    assert "SYMBOL_TRADE_STOPS_LEVEL" in trader
+    assert "SYMBOL_TRADE_FREEZE_LEVEL" in trader
+    assert "SYMBOL_VOLUME_MIN" in trader and "SYMBOL_VOLUME_STEP" in trader and "SYMBOL_VOLUME_MAX" in trader
+    assert "GlobalVariableCheck(key)" in consume
+    assert "GlobalVariableSetOnCondition(key, marker, 0.0)" in consume
+    assert "GlobalVariableSet(key, 0.0)" not in consume
+    assert "AcquireStandardMarketGateLock(lockHandle" in consume
+    assert "FILE_COMMON" in trader
+    assert consume.index("AcquireStandardMarketGateLock(lockHandle") < consume.index("GlobalVariableCheck(key)")
+    assert "GlobalVariablesFlush()" in consume
+    assert "StringLen(key) > 63" in consume
+    assert market.index("ConsumeStandardMarketToken") < market.index("trade.Buy")
+    assert "already_consumed_token" in market
+    assert "blocked_one_trade_rule" in market
+    assert "HasBlockingPendingOrderForMarket" in market
+    assert "invalid_stops" in market
+    assert 'LogStandardMarketOutcome("accepted"' in market
+    assert 'LogStandardMarketOutcome("rejected"' in market
+    assert "token_fp=" in trader
+    assert trader.count("ExecuteStandardMarketOnce();") == 1
+    assert "if(Strategy == STRAT_STANDARD_MARKET) return;" in trader
+
+
+def test_mql5_trader_standard_limit_retries_transient_failures_without_duplicate_send():
+    trader = (ROOT / "mt5-clone" / "MQL5" / "Experts" / "Trader.mq5").read_text(encoding="utf-8")
+    maintain = trader.split("void MaintainStandardLimit", 1)[1].split("void RefreshTrendlineNameFromInputs", 1)[0]
+    placement = trader.split("bool PlaceOrReplacePendingLimitAtEntry", 2)[2].split("bool PlacePendingStandardLimit", 1)[0]
+
+    assert 'MaintainStandardLimit("OnInit")' in trader
+    assert 'MaintainStandardLimit("OnTick")' in trader
+    assert 'MaintainStandardLimit("OnTimer")' in trader
+    assert "STANDARD_LIMIT_MAX_ATTEMPTS" in maintain
+    assert "g_standardLimitNextAttemptAt" in maintain
+    assert "StandardLimitRetryDelaySeconds" in maintain
+    assert maintain.index("FindMatchingPendingLimit") < maintain.index("PlacePendingStandardLimit")
+    assert "FindAnyPendingLimitForEA" in maintain
+    assert "blocked_nonmatching_pending" in maintain
+    assert "g_standardLimitStructuralBlock" in maintain
+    assert "Wrong-side/too-close limit price" in placement
+    assert "mode=standard_limit preflight" in placement
+    assert "mode=standard_limit broker_result" in placement
+    assert "accepted_not_observable" in placement
+    assert "IsPendingLimitTicketMatching(orderTicket" in placement
+    cancel = trader.split("void CancelAllPendingByMagic()", 1)[1].split("datetime ComputeExpireAt", 1)[0]
+    assert "ORDER_SYMBOL" in cancel
+    assert "ORDER_MAGIC" in cancel
+
+
+def test_market_watch_feed_validates_configured_desktop_paths_without_false_success():
+    feed_path = ROOT / "mt5-clone" / "MQL5" / "Experts" / "MarketWatchSpreadPercentFeed.mq5"
+    feed = feed_path.read_text(encoding="utf-8")
+    docs = (ROOT / "mt5-clone" / "MARKET_WATCH_SPREAD_FEED.md").read_text(encoding="utf-8")
+
+    assert 'input string PythonExecutable' in feed
+    assert 'input string DesktopWindowScriptPath' in feed
+    assert 'DesktopWindowScriptPath  = "C:\\\\GPT\\\\CODEX-master\\\\mt5-clone\\\\spread_percent_window.py"' in feed
+    assert "MQLInfoInteger(MQL_DLLS_ALLOWED)" in feed
+    assert "Allow DLL imports" in feed
+    assert 'GetFileAttributesW(string file_name)' in feed
+    assert "ConfiguredLaunchFileExists(python)" in feed
+    assert "ConfiguredLaunchFileExists(script)" in feed
+    assert "configured PythonExecutable does not exist or is not a file" in feed
+    assert "configured DesktopWindowScriptPath does not exist or is not a file" in feed
+    assert "ShellExecuteW accepted" in feed
+    assert "Process startup is not yet confirmed" in feed
+    assert "launched desktop spread window" not in feed
+    assert r"C:\GPT\CODEX-master\mt5-clone\spread_percent_window.py" in docs
+    assert "repository is moved" in docs
+    assert "Allow DLL imports" in docs

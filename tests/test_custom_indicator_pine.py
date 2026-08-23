@@ -228,23 +228,30 @@ def test_custom_indicator_session_rendering_uses_dotted_lines_not_arrow_markers(
     assert "extend=extend.both" not in session_block
 
 
-def test_custom_indicator_suppresses_each_session_event_by_brisbane_weekend() -> None:
+def test_custom_indicator_filters_each_session_event_by_its_local_weekday() -> None:
     source = _source()
     session_block = source.split("// TRADING SESSION OPEN/CLOSE LINES", 1)[1]
-    assert 'eventDay = dayofweek(eventTs, "Australia/Brisbane")' in session_block
+    assert "isSessionLocalWeekend" in session_block
+    assert "eventDay = dayofweek(eventTs, sessionTimezone)" in session_block
     assert "dayofweek.saturday" in session_block
     assert "dayofweek.sunday" in session_block
-    assert session_block.count("not isBrisbaneWeekend(sessionEventTimestamp(") == 8
+    assert "isBrisbaneWeekend" not in session_block
+    assert session_block.count("not isSessionLocalWeekend(sessionEventTimestamp(") == 8
     assert 'isSessionEvent("America/New_York", 17, 0)' in session_block
+    assert (
+        'not isSessionLocalWeekend(sessionEventTimestamp("America/New_York", 17, 0), '
+        '"America/New_York")'
+    ) in session_block
 
 
-def test_brisbane_event_timestamp_model_suppresses_weekend_and_retains_weekday() -> None:
+def test_new_york_local_weekday_model_keeps_friday_close_even_on_brisbane_saturday() -> None:
     brisbane = ZoneInfo("Australia/Brisbane")
     new_york = ZoneInfo("America/New_York")
     ny_friday_close = datetime(2026, 7, 24, 17, 0, tzinfo=new_york)
-    ny_thursday_close = datetime(2026, 7, 23, 17, 0, tzinfo=new_york)
     assert ny_friday_close.astimezone(brisbane).weekday() == 5
-    assert ny_thursday_close.astimezone(brisbane).weekday() == 4
+    assert ny_friday_close.weekday() == 4
+    ny_saturday_event = datetime(2026, 7, 25, 17, 0, tzinfo=new_york)
+    assert ny_saturday_event.weekday() == 5
 
 
 def test_scale_aware_gap_model_is_positive_and_clears_entire_candle() -> None:
@@ -271,6 +278,101 @@ def test_custom_indicator_labels_are_centered_at_timestamp_and_outside_segments(
     assert "sessionVisibilityKey != previousSessionVisibilityKey" in session_block
     assert "while array.size(sessionMarkerLines) > maxMarkers * 2" in session_block
     assert "while array.size(sessionLabels) > maxMarkers" in session_block
+
+
+def test_custom_indicator_session_label_gap_has_a_configurable_visible_floor() -> None:
+    source = _source()
+    session_block = source.split("// TRADING SESSION OPEN/CLOSE LINES", 1)[1].split(
+        "// MOVING 100-CANDLE MARKER", 1
+    )[0]
+    assert (
+        'sessionLabelGapRangeFraction = input.float(0.05, '
+        '"Label clearance (recent-range fraction)", minval=0.01'
+    ) in source
+    assert (
+        "labelGap = math.max(markerRange * sessionLabelGapRangeFraction, "
+        "syminfo.mintick * 50)"
+    ) in session_block
+    assert "labelY = isOpen ? upperLineEndY + labelGap : lowerLineStartY - labelGap" in session_block
+
+
+def test_custom_indicator_moving_100_marker_counts_current_forming_bar_exactly() -> None:
+    source = _source()
+    marker_block = source.split("// MOVING 100-CANDLE MARKER", 1)[1].split(
+        "// HISTORICAL FOREX START-DATE MARKER", 1
+    )[0]
+    assert 'showHundredCandleMarker = input.bool(true, "Show 100-candle marker"' in source
+    assert "hundredMarkerHasHistory = bar_index >= 99" in marker_block
+    assert "hundredTargetBarIndex = bar_index - 99" in marker_block
+    assert "bar_index - 100" not in marker_block
+    assert "hundredTargetHigh = high[99]" in marker_block
+    assert "hundredTargetLow = low[99]" in marker_block
+    assert "timeframe." not in marker_block
+    assert "if showHundredCandleMarker and hundredMarkerHasHistory" in marker_block
+
+
+def test_session_event_boundary_keeps_a_final_friday_close_without_duplicate_next_bar() -> None:
+    source = _source()
+    session_block = source.split("// TRADING SESSION OPEN/CLOSE LINES", 1)[1].split(
+        "// MOVING 100-CANDLE MARKER", 1
+    )[0]
+    assert "time < eventTs and eventTs <= time_close" in session_block
+    assert "time <= eventTs and eventTs < time_close" not in session_block
+
+    event_ts = 17 * 60
+    bars = [(16 * 60 + 30, 17 * 60), (17 * 60, 17 * 60 + 30)]
+    matches = [start < event_ts <= end for start, end in bars]
+    assert matches == [True, False]
+
+
+def test_custom_indicator_moving_100_marker_has_one_bounded_split_lifecycle() -> None:
+    source = _source()
+    marker_block = source.split("// MOVING 100-CANDLE MARKER", 1)[1].split(
+        "// HISTORICAL FOREX START-DATE MARKER", 1
+    )[0]
+    assert marker_block.count("var line hundredMarker") == 2
+    assert marker_block.count("var label hundredMarkerLabel") == 1
+    assert marker_block.count("line.delete(hundredMarker") == 2
+    assert marker_block.count("label.delete(hundredMarkerLabel)") == 1
+    assert marker_block.count("line.new(") == 2
+    assert marker_block.count("label.new(") == 1
+    assert marker_block.count("xloc=xloc.bar_index") == 3
+    assert marker_block.count("style=line.style_dotted") == 2
+    assert "extend=extend.both" not in marker_block
+    assert 'text="100"' in marker_block
+    assert "hundredMarkerColor = color.rgb(18, 52, 120)" in marker_block
+
+
+def test_custom_indicator_100_marker_gap_exceeds_session_marker_gap() -> None:
+    source = _source()
+    marker_block = source.split("// MOVING 100-CANDLE MARKER", 1)[1].split(
+        "// HISTORICAL FOREX START-DATE MARKER", 1
+    )[0]
+    assert (
+        "hundredEffectiveGapFraction = math.max(hundredMarkerGapRangeFraction, "
+        "sessionCandleGapRangeFraction + 0.02)"
+    ) in marker_block
+    assert "syminfo.mintick * 80" in marker_block
+    assert "syminfo.mintick * 60" in marker_block
+    assert "hundredTargetSessionRecentHigh = sessionMarkerRecentHigh[99]" in marker_block
+    assert "hundredTargetSessionRecentLow = sessionMarkerRecentLow[99]" in marker_block
+    assert "hundredHistoricalSessionGap + hundredGapClearance" in marker_block
+    assert "hundredLowerEndY = hundredTargetLow - hundredCandleGap" in marker_block
+    assert "hundredUpperStartY = hundredTargetHigh + hundredCandleGap" in marker_block
+    assert "hundredLabelY = hundredUpperEndY + hundredLabelGap" in marker_block
+
+    # A contracted current range must still clear the larger historical
+    # session gap that was used when the target candle was current.
+    mintick = 0.00001
+    current_range = 0.002
+    historical_session_range = 0.020
+    session_gap = max(historical_session_range * 0.06, mintick * 40)
+    clearance = max(current_range * 0.01, mintick * 10)
+    hundred_gap = max(
+        max(current_range * 0.12, mintick * 80),
+        session_gap + clearance,
+    )
+    assert hundred_gap > session_gap
 
 
 def test_custom_indicator_funding_and_option_expiry_code_remains_unchanged() -> None:

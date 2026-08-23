@@ -529,7 +529,7 @@ def test_place_bybit_order_secondary_context_failure_adds_warning(monkeypatch: p
         return [{"size": "1", "takeProfit": "110", "stopLoss": "95"}]
 
     calls = {"n": 0}
-    def fake_upsert(_payload, require_durable=True):
+    def fake_upsert(_payload, require_durable=True, invalidate_cache=True):
         calls["n"] += 1
         if calls["n"] == 2:
             raise RuntimeError("secondary-fail")
@@ -869,7 +869,7 @@ def test_oanda_rejects_max_units_and_margin(monkeypatch: pytest.MonkeyPatch) -> 
 def test_submit_routes_to_existing_order_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = {"bybit": 0, "oanda": 0}
 
-    async def fake_bybit(payload, *, request_id):
+    async def fake_bybit(payload, *, request_id, **_kwargs):
         calls["bybit"] += 1
         assert payload["timeframe"] == "15MIN"
         assert payload["is_test_trade"] is True
@@ -885,8 +885,8 @@ def test_submit_routes_to_existing_order_helpers(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(master_service, "_place_bybit_order", fake_bybit)
     monkeypatch.setattr(master_service, "_place_oanda_order", fake_oanda)
 
-    asyncio.run(master_service.calculator_submit({
-        "asset": "crypto", "account": "live", "symbol": "BTCUSDT", "action": "buy", "order_type": "market",
+    crypto_response = asyncio.run(master_service.calculator_submit({
+        "asset": "crypto", "broker": "oanda", "account": "live", "symbol": "BTCUSDT", "action": "buy", "order_type": "market",
         "entry_price": "100", "stop_loss_price": "1", "take_profit_price": "2", "quantity": "0.01", "timeframe": "15m", "test": "yes",
     }))
     asyncio.run(master_service.calculator_submit({
@@ -894,10 +894,24 @@ def test_submit_routes_to_existing_order_helpers(monkeypatch: pytest.MonkeyPatch
         "entry_price": "1.2", "stop_loss_price": "1.3", "take_profit_price": "1.1", "quantity": "1000", "timeframe": "1h",
     }))
     assert calls == {"bybit": 1, "oanda": 1}
+    crypto_body = json.loads(crypto_response.body.decode("utf-8"))
+    assert crypto_body["broker"] == "bybit"
+    assert crypto_body["venue"] == "Bybit"
+
+
+def test_submit_never_routes_pepperstone_through_oanda(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def forbidden_oanda(*_args, **_kwargs):
+        raise AssertionError("Pepperstone must not route through OANDA submit")
+
+    monkeypatch.setattr(master_service, "_place_oanda_order", forbidden_oanda)
+    with pytest.raises(master_service.HTTPException) as exc:
+        asyncio.run(master_service.calculator_submit({"asset": "fx", "broker": "pepperstone", "symbol": "EUR_USD"}))
+    assert exc.value.status_code == 400
+    assert "downloaded MT5 .set" in str(exc.value.detail)
 
 
 def test_submit_and_webhook_bubble_context_warning_fields(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def fake_bybit(payload, *, request_id):
+    async def fake_bybit(payload, *, request_id, **_kwargs):
         return {"order": {"orderId": "oid"}, "journal_context_saved": False, "warnings": ["warn"], "context_save_error": "boom"}
 
     monkeypatch.setattr(master_service, "_place_bybit_order", fake_bybit)
@@ -1181,7 +1195,7 @@ def test_balance_failure_returns_endpoint_specific_error(monkeypatch: pytest.Mon
 
 
 def test_submit_translates_bybit_errors_to_http_exception(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def fake_bybit(_payload, *, request_id):
+    async def fake_bybit(_payload, *, request_id, **_kwargs):
         assert request_id
         raise ValueError("retCode=10001 request parameter error")
 
@@ -1206,7 +1220,7 @@ def test_submit_translates_bybit_errors_to_http_exception(monkeypatch: pytest.Mo
 def test_webhook_uses_keyword_request_id_for_bybit(monkeypatch: pytest.MonkeyPatch) -> None:
     seen = {"request_id": "", "is_test_trade": None}
 
-    async def fake_bybit(_payload, *, request_id):
+    async def fake_bybit(_payload, *, request_id, **_kwargs):
         seen["request_id"] = request_id
         seen["is_test_trade"] = _payload.get("is_test_trade")
         return {"ok": True}
@@ -1235,7 +1249,7 @@ def test_webhook_uses_keyword_request_id_for_bybit(monkeypatch: pytest.MonkeyPat
 
 
 def test_webhook_consumes_pending_before_order_placement(monkeypatch: pytest.MonkeyPatch) -> None:
-    seen = {"consumed": False, "request_id": ""}
+    seen = {"consumed": False, "request_id": "", "submit_invalidate_cache": None}
 
     def fake_assert(_payload):
         return None
@@ -1247,9 +1261,10 @@ def test_webhook_consumes_pending_before_order_placement(monkeypatch: pytest.Mon
         seen["request_id"] = request_id
         return True
 
-    async def fake_bybit(_payload, *, request_id):
+    async def fake_bybit(_payload, *, request_id, **_kwargs):
         assert seen["consumed"] is False
         assert isinstance(request_id, str) and request_id.startswith("calc-webhook-")
+        seen["submit_invalidate_cache"] = _kwargs.get("invalidate_cache")
         return {"ok": True, "order": {"orderId": "oid-1", "orderLinkId": "ol-1"}}
 
     monkeypatch.setattr(master_service, "_assert_pending_webhook_executable", fake_assert)
@@ -1273,6 +1288,7 @@ def test_webhook_consumes_pending_before_order_placement(monkeypatch: pytest.Mon
     body = json.loads(response.body.decode("utf-8"))
     assert body["ok"] is True
     assert seen["consumed"] is True
+    assert seen["submit_invalidate_cache"] is False
 
 
 def test_webhook_attempts_endpoint_returns_recent_items(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1305,7 +1321,7 @@ def test_webhook_records_bybit_rejection_attempt(monkeypatch: pytest.MonkeyPatch
         events["update"].append((request_id, dict(updates)))
         return updates
 
-    async def fake_bybit(_payload, *, request_id):
+    async def fake_bybit(_payload, *, request_id, **_kwargs):
         raise master_service.BybitOrderRejected(
             ret_code=10001,
             ret_msg="request parameter error",
@@ -1344,6 +1360,9 @@ def test_webhook_records_bybit_rejection_attempt(monkeypatch: pytest.MonkeyPatch
 
 
 def test_calculator_quote_returns_absolute_webhook_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    pending_state = []
+    saved_contexts = []
+    invalidations = {"count": 0}
     monkeypatch.setenv("PUBLIC_WEBHOOK_BASE_URL", "https://codex-rdqh.onrender.com")
     monkeypatch.setattr(master_service, "resolve_bybit_credentials_for", lambda _a: ("live", "k", "s", "https://bybit.test", "KEY1"))
     monkeypatch.setattr(master_service, "_bybit_get_symbols_by_category_cached", lambda *_args, **_kwargs: asyncio.sleep(0, result=["BTCUSDT"]))
@@ -1355,8 +1374,18 @@ def test_calculator_quote_returns_absolute_webhook_url(monkeypatch: pytest.Monke
     monkeypatch.setattr(master_service, "_bybit_get_async", fake_get)
     monkeypatch.setattr(master_service, "_bybit_signed_get", lambda **_kwargs: asyncio.sleep(0, result={"result": {"list": [{"makerFeeRate": "0", "takerFeeRate": "0"}]}}))
     monkeypatch.setattr(master_service, "_fetch_bybit_balance_usdt", lambda *_args, **_kwargs: asyncio.sleep(0, result={"available_usdt": "1000", "total_equity": "1000"}))
+    monkeypatch.setattr(master_service, "_load_pending_webhooks", lambda: [dict(row) for row in pending_state])
+    monkeypatch.setattr(master_service, "_save_pending_webhooks", lambda rows: pending_state.__setitem__(slice(None), [dict(row) for row in rows]))
+    monkeypatch.setattr(master_service, "_upsert_trade_context", lambda row: saved_contexts.append(dict(row)) or row)
+    monkeypatch.setattr(master_service, "_invalidate_open_orders_cache", lambda: invalidations.__setitem__("count", invalidations["count"] + 1))
     body = json.loads(asyncio.run(master_service.calculator_quote({"asset": "crypto", "account": "live", "symbol": "BTC", "side": "buy", "order_type": "market", "risk_mode": "percent", "risk_value": 1, "stop_loss_ticks": 1, "take_profit_ticks": 2, "webhook": "yes"})).body.decode("utf-8"))
     assert body["webhook_endpoint_url"] == "https://codex-rdqh.onrender.com/api/calculator/webhook"
+    assert len(pending_state) == 1
+    assert invalidations["count"] == 1
+    assert saved_contexts[-1]["broker"] == "bybit"
+    assert saved_contexts[-1]["category"] == "linear"
+    assert saved_contexts[-1]["calculation_context_id"] == body["calculation_context_id"]
+    assert saved_contexts[-1]["stop_loss_ticks"] == "1"
 
 
 def test_calculator_bootstrap_reports_local_webhook_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1690,7 +1719,9 @@ def test_oanda_nzdusd_35_ticks_fixed_aud_10_demo_flat_account_quotes_successfull
 
 def test_calculator_quote_bybit_success_has_no_logger_nameerror(monkeypatch: pytest.MonkeyPatch) -> None:
     saved_context = {}
+    invalidations = {"count": 0}
     monkeypatch.setattr(master_service, "_upsert_bybit_demo_calc_context", lambda payload, **_kwargs: saved_context.update(payload))
+    monkeypatch.setattr(master_service, "_invalidate_open_orders_cache", lambda: invalidations.__setitem__("count", invalidations["count"] + 1))
     monkeypatch.setattr(master_service, "resolve_bybit_credentials_for", lambda _a: ("demo", "k", "s", "https://bybit.test", "KEY1"))
     monkeypatch.setattr(master_service, "_bybit_get_symbols_by_category_cached", lambda *_args, **_kwargs: asyncio.sleep(0, result=["LABUSDT"]))
     monkeypatch.setattr(master_service, "_fetch_oanda_mid_prices_batch", lambda **_kwargs: asyncio.sleep(0, result={"AUD_USD": 1}))
@@ -1709,21 +1740,45 @@ def test_calculator_quote_bybit_success_has_no_logger_nameerror(monkeypatch: pyt
     body = json.loads(response.body.decode("utf-8"))
     assert body["broker"] == "bybit"
     assert saved_context["pattern"] == "channel"
+    assert saved_context["category"] == "linear"
+    assert saved_context["calculation_context_id"] == body["calculation_context_id"]
+    assert invalidations["count"] == 1
     for k in ("quantity", "entry_price", "stop_price", "target_price"):
         assert k in body
 
 
 def test_calculator_quote_oanda_success_has_no_logger_nameerror(monkeypatch: pytest.MonkeyPatch) -> None:
+    saved_context = {}
+    invalidations = {"count": 0}
     monkeypatch.setattr(master_service, "_get_oanda_config", lambda _a: {"base_url": "https://oanda.test", "account_id": "acct", "token": "tok"})
     monkeypatch.setattr(master_service, "_fetch_oanda_instrument_meta", lambda **_kwargs: asyncio.sleep(0, result={"displayPrecision": 5, "tradeUnitsPrecision": 0, "minimumTradeSize": "1", "marginRate": "0.05"}))
     monkeypatch.setattr(master_service, "_fetch_oanda_json", lambda **_kwargs: asyncio.sleep(0, result={"prices": [{"bids": [{"price": "1.10000"}], "asks": [{"price": "1.10020"}]}], "homeConversions": [{"currency": "USD", "accountGain": "1", "accountLoss": "1", "positionValue": "1"}]}))
     monkeypatch.setattr(master_service, "_fetch_oanda_account_summary", lambda _a: asyncio.sleep(0, result={"currency": "USD", "nav": 1000000, "marginAvailable": 1000000, "marginRate": 0.05}))
     monkeypatch.setattr(master_service, "_fetch_oanda_mid_prices_batch", lambda **_kwargs: asyncio.sleep(0, result={"AUD_USD": 1}))
 
+    monkeypatch.setattr(master_service, "_upsert_calculator_trade_context", lambda payload, **_kwargs: saved_context.update(payload) or payload)
+    monkeypatch.setattr(master_service, "_invalidate_open_orders_cache", lambda: invalidations.__setitem__("count", invalidations["count"] + 1))
+
     response = asyncio.run(master_service.calculator_quote({"asset": "fx", "account": "demo", "symbol": "eurusd", "side": "buy", "order_type": "market", "risk_mode": "fixed_aud", "risk_value": 10, "stop_loss_ticks": 10, "take_profit_ticks": 20}))
     assert isinstance(response, master_service.JSONResponse)
     body = json.loads(response.body.decode("utf-8"))
     assert body["broker"] == "oanda"
+    assert saved_context["category"] == "forex"
+    assert saved_context["calculation_context_id"] == body["calculation_context_id"]
+    assert invalidations["count"] == 1
+
+
+def test_calculator_quote_pepperstone_market_is_supported_and_resolves_venue(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(master_service, "_get_oanda_config", lambda _a: {"base_url": "https://oanda.test", "account_id": "acct", "token": "tok"})
+    monkeypatch.setattr(master_service, "_fetch_oanda_instrument_meta", lambda **_kwargs: asyncio.sleep(0, result={"displayPrecision": 5, "tradeUnitsPrecision": 0, "minimumTradeSize": "1", "marginRate": "0.05"}))
+    monkeypatch.setattr(master_service, "_fetch_oanda_json", lambda **_kwargs: asyncio.sleep(0, result={"prices": [{"bids": [{"price": "1.10000"}], "asks": [{"price": "1.10020"}]}], "homeConversions": [{"currency": "USD", "accountGain": "1", "accountLoss": "1", "positionValue": "1"}]}))
+    monkeypatch.setattr(master_service, "_fetch_oanda_account_summary", lambda _a: asyncio.sleep(0, result={"currency": "USD", "nav": 1000000, "marginAvailable": 1000000, "marginRate": 0.05}))
+    monkeypatch.setattr(master_service, "_fetch_oanda_mid_prices_batch", lambda **_kwargs: asyncio.sleep(0, result={"AUD_USD": 1}))
+    response = asyncio.run(master_service.calculator_quote({"asset": "fx", "broker": "pepperstone", "account": "demo", "symbol": "eurusd", "side": "buy", "order_type": "market", "risk_mode": "fixed_aud", "risk_value": 10, "stop_loss_ticks": 35, "take_profit_ticks": 70}))
+    body = json.loads(response.body.decode("utf-8"))
+    assert body["broker"] == "pepperstone"
+    assert body["venue"] == "Pepperstone"
+    assert body["resolved_venue"] == "Pepperstone"
 
 
 def _parse_set_file(text: str) -> dict:
@@ -1762,7 +1817,7 @@ def test_pepperstone_set_export_uses_trader_input_names_and_limit_mapping() -> N
     }
     response = asyncio.run(master_service.calculator_pepperstone_set(base_payload))
     assert response.media_type.startswith("text/plain")
-    assert "Pepperstone_Trader_EUR_USD_BUY_" in response.headers["content-disposition"]
+    assert "Pepperstone_Trader_EUR_USD_BUY_LIMIT_" in response.headers["content-disposition"]
     values = _parse_set_file(response.body.decode("utf-8"))
     assert set(values).issubset(_trader_input_names())
     assert values["Strategy"] == "2"
@@ -1779,6 +1834,8 @@ def test_pepperstone_set_export_uses_trader_input_names_and_limit_mapping() -> N
     assert values["NetRR_Target"] == "2"
     assert values["StandardLimitSide"] == "0"
     assert values["StandardLimitEntryPrice"] == "1.1002"
+    assert "StandardMarketSide" not in values
+    assert "StandardMarketExecutionToken" not in values
     assert values["MagicNumber"] == "91001"
     assert values["EnforceOneTradeAtATime"] == "true"
 
@@ -1788,25 +1845,52 @@ def test_pepperstone_set_export_uses_trader_input_names_and_limit_mapping() -> N
     assert sell_values["StandardLimitSide"] == "1"
 
 
-def test_pepperstone_set_export_blocks_market_orders() -> None:
-    with pytest.raises(master_service.HTTPException) as exc:
-        asyncio.run(
-            master_service.calculator_pepperstone_set(
-                {
-                    "asset": "fx",
-                    "broker": "pepperstone",
-                    "symbol": "EUR_USD",
-                    "side": "buy",
-                    "order_type": "market",
-                    "risk_mode": "fixed_aud",
-                    "risk_value": "10",
-                    "stop_loss_ticks": "35",
-                    "risk_reward": "2",
-                }
-            )
-        )
-    assert exc.value.status_code == 400
-    assert "limit orders only" in str(exc.value.detail)
+def test_pepperstone_set_export_maps_market_side_and_generates_unique_one_shot_token() -> None:
+    base_payload = {
+        "asset": "fx",
+        "broker": "pepperstone",
+        "symbol": "EUR_USD",
+        "side": "buy",
+        "order_type": "market",
+        "risk_mode": "fixed_aud",
+        "risk_value": "10",
+        "stop_loss_ticks": "35",
+        "risk_reward": "2",
+    }
+    first = asyncio.run(master_service.calculator_pepperstone_set(base_payload))
+    second = asyncio.run(master_service.calculator_pepperstone_set(base_payload))
+    first_values = _parse_set_file(first.body.decode("utf-8"))
+    second_values = _parse_set_file(second.body.decode("utf-8"))
+
+    assert "Pepperstone_Trader_EUR_USD_BUY_MARKET_" in first.headers["content-disposition"]
+    assert set(first_values).issubset(_trader_input_names())
+    assert first_values["Strategy"] == "3"
+    assert first_values["StandardMarketSide"] == "0"
+    assert len(first_values["StandardMarketExecutionToken"]) >= 16
+    assert first_values["StandardMarketExecutionToken"] != second_values["StandardMarketExecutionToken"]
+    assert "StandardLimitSide" not in first_values
+    assert "StandardLimitEntryPrice" not in first_values
+    for key in (
+        "OrdersEnabled",
+        "RiskAUD_Target",
+        "RiskAUD_Min",
+        "RiskAUD_Max",
+        "IncludeCommissionInRisk",
+        "CommissionPerLotPerSide",
+        "RiskSlippageBufferPoints",
+        "SlippagePoints",
+        "SL_DistancePoints",
+        "AutoTP_NetRR_Enabled",
+        "NetRR_Target",
+        "TP_DistancePoints",
+        "MagicNumber",
+        "EnforceOneTradeAtATime",
+    ):
+        assert key in first_values
+
+    sell = asyncio.run(master_service.calculator_pepperstone_set(dict(base_payload, side="sell")))
+    sell_values = _parse_set_file(sell.body.decode("utf-8"))
+    assert sell_values["StandardMarketSide"] == "1"
 
 
 def test_calculator_webhook_direct_dict_call_uses_payload(monkeypatch: pytest.MonkeyPatch) -> None:

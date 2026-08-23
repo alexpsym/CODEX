@@ -1,6 +1,7 @@
 import asyncio
 import importlib.util
 import json
+import logging
 import os
 import sys
 from datetime import datetime
@@ -8,6 +9,8 @@ from pathlib import Path
 
 import pytest
 import pytz
+
+from shared import oanda_api
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -26,6 +29,39 @@ def _load_executor():
 
 
 fx = _load_executor()
+
+
+def test_shared_oanda_diagnostics_never_reveal_token_characters(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    token = "oanda-diagnostic-secret-TAILZ9Q8"
+
+    class UnauthorizedResponse:
+        ok = False
+        status_code = 401
+        text = f"unauthorized credential={token}"
+
+    monkeypatch.setattr(oanda_api, "_api_key", lambda _mode: token)
+    monkeypatch.setattr(oanda_api, "_base_url", lambda _mode: "https://api-fxpractice.oanda.com/v3")
+    monkeypatch.setattr(oanda_api.requests, "request", lambda *_args, **_kwargs: UnauthorizedResponse())
+    monkeypatch.setattr(oanda_api.requests, "get", lambda *_args, **_kwargs: UnauthorizedResponse())
+
+    with caplog.at_level(logging.WARNING, logger=oanda_api.LOGGER.name):
+        with pytest.raises(oanda_api.OandaAPIError) as exc_info:
+            oanda_api._request(
+                "GET", "/accounts/configured/openTrades", mode="demo", account_id="configured"
+            )
+
+    logged = caplog.text
+    surfaced = str(exc_info.value)
+    assert token not in logged
+    assert token[-4:] not in logged
+    assert token not in surfaced
+    assert token[-4:] not in surfaced
+    assert "token_last4" not in logged
+    assert "[redacted]" in logged
+    assert "[redacted]" in surfaced
+    assert oanda_api._credential_fingerprint(token) in logged
 
 
 def _current_settings(account_modes=None, **overrides):
@@ -139,10 +175,16 @@ def test_checked_in_and_service_defaults_select_demo_then_live() -> None:
     for payload in (
         fx.DEFAULT_SETTINGS,
         master_service.FXWEEKEND_DEFAULT_SETTINGS,
-        checked_in,
     ):
         assert payload["schema_version"] == fx.FXWEEKEND_SETTINGS_SCHEMA_VERSION
         assert payload["account_modes"] == ["demo", "live"]
+        assert payload["news_events"] == []
+    # settings.json is durable runtime state, not a release template. Loading it
+    # performs the schema migration without requiring a source-tree edit.
+    migrated = fx.migrate_settings(checked_in)
+    assert migrated["schema_version"] == fx.FXWEEKEND_SETTINGS_SCHEMA_VERSION
+    assert migrated["account_modes"] == ["demo", "live"]
+    assert migrated["news_events"] == []
 
 
 def test_dst_and_standard_cutoffs_use_brisbane_hhmm_precision() -> None:
@@ -728,7 +770,14 @@ def test_scheduler_loop_recovers_after_unexpected_iteration_exception(
     monkeypatch.setattr(fx, "status_snapshot", lambda: {"consecutive_failures": 0})
     monkeypatch.setattr(fx, "update_status", update)
     monkeypatch.setattr(fx, "log", lambda _message: None)
-    monkeypatch.setattr(fx.time, "sleep", lambda _seconds: None)
+    class NeverWake:
+        def wait(self, _seconds):
+            return False
+
+        def clear(self):
+            return None
+
+    monkeypatch.setattr(fx, "_scheduler_wakeup", NeverWake())
 
     with pytest.raises(StopLoop):
         fx.scheduler_loop()

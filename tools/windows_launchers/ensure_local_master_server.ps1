@@ -21,6 +21,7 @@ $buildFiles = @(
     "render/static/instrument_lookup.js",
     "render/static/open_orders.js",
     "render/static/trading_journal.js",
+    "render/static/trading_journal_equity_curve.js",
     "tools/master_journal_workbook.py",
     "run_local_master_control.bat",
     "tools/windows_launchers/local_master_worker_console.bat",

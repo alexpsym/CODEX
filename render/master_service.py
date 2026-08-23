@@ -49,6 +49,7 @@ LOCAL_BUILD_FILES = (
     "render/static/instrument_lookup.js",
     "render/static/open_orders.js",
     "render/static/trading_journal.js",
+    "render/static/trading_journal_equity_curve.js",
     "tools/master_journal_workbook.py",
     "run_local_master_control.bat",
     "tools/windows_launchers/local_master_worker_console.bat",
@@ -115,7 +116,11 @@ from openpyxl.utils import get_column_letter, range_boundaries
 from PIL import Image, ImageDraw, ImageFont
 from starlette.responses import RedirectResponse
 
-from bybit_credentials import resolve_bybit_credentials_for, describe_bybit_credentials_for
+from bybit_credentials import (
+    BybitCredentialConflictError,
+    describe_bybit_credentials_for,
+    resolve_bybit_credentials_for,
+)
 from render.monthly_aud_revaluation import MonthlyAudRevalError, sync_monthly_aud_revaluation
 from shared.bybit_option_resolver import resolve_option_by_target_risk
 from shared.symbol_resolution import (
@@ -3094,6 +3099,13 @@ _OANDA_ACCOUNTS_STALE_TTL_SECONDS = max(
         7 * 24 * 60 * 60.0,
     ),
 )
+_OANDA_DISCOVERY_AUTH_ANOMALY_RETRY_DELAY_SECONDS = max(
+    0.05,
+    min(
+        float(os.getenv("OANDA_DISCOVERY_AUTH_ANOMALY_RETRY_DELAY_SECONDS", "0.35") or 0.35),
+        1.0,
+    ),
+)
 _OANDA_SPECS_CACHE: Dict[str, Tuple[float, Dict[str, object]]] = {}
 _OANDA_SPECS_CACHE_TTL_SECONDS = 30.0
 _OANDA_TRANSIENT_HTTP_STATUS_CODES = {
@@ -3116,6 +3128,7 @@ _OPEN_ORDERS_CACHE: Dict[str, object] = {
     "payload": None,
     "version": 0,
 }
+_OPEN_ORDERS_LAST_GOOD_ITEMS: Dict[str, List[Dict[str, object]]] = {}
 
 
 class BybitOrderRejected(RuntimeError):
@@ -6887,7 +6900,17 @@ def _sanitize_bybit_demo_rows(rows: List[Dict[str, object]]) -> tuple[List[Dict[
     dedup_fallback: Dict[str, Dict[str, object]] = {}
     fallback_dropped = 0
     for row in after_order:
-        key = _canonical_bybit_demo_trade_signature(row)
+        if _is_bybit_execution_history_row(row):
+            refs = row.get("raw_refs") if isinstance(row.get("raw_refs"), dict) else {}
+            execution_id = str(
+                refs.get("execId")
+                or refs.get("exec_id")
+                or row.get("id")
+                or ""
+            ).strip()
+            key = f"execution:{execution_id}" if execution_id else None
+        else:
+            key = _canonical_bybit_demo_trade_signature(row)
         if not key:
             key = f"rowid:{str(row.get('id') or '')}"
         prev = dedup_fallback.get(key)
@@ -12640,6 +12663,7 @@ FXWEEKEND_DEFAULT_SETTINGS: Dict[str, object] = {
     "close_method": "positions",
     "dry_run": False,
     "instrument_allowlist": [],
+    "news_events": [],
 }
 _FXWEEKEND_LAST_PERSISTED_STATUS_SIGNATURE = ""
 FXWEEKEND_HEARTBEAT_MIN_STALE_SECONDS = 180.0
@@ -12659,6 +12683,11 @@ def _fxweekend_status_signature(payload: object) -> str:
             "last_attempt_at",
             "last_verified_flat_at",
             "last_verified_window_cutoff",
+            "next_news_release",
+            "next_news_liquidation_cutoff",
+            "news_status",
+            "news_last_result",
+            "news_audit",
             "last_error",
             "consecutive_failures",
             "accounts",
@@ -13254,6 +13283,25 @@ def _autostart_component_readiness(
         component["last_access_check_at"] = runtime.get("last_access_check_at")
         component["last_verified_flat_at"] = runtime.get("last_verified_flat_at")
         component["accounts"] = runtime_accounts
+        news_events = [
+            item
+            for item in (settings.get("news_events") or [])
+            if isinstance(item, dict)
+        ]
+        active_news_ids = {
+            str(item.get("id") or "") for item in news_events if item.get("id")
+        }
+        news_last_result = (
+            runtime.get("news_last_result")
+            if isinstance(runtime.get("news_last_result"), dict)
+            else {}
+        )
+        component["next_news_release"] = runtime.get("next_news_release")
+        component["next_news_liquidation_cutoff"] = runtime.get(
+            "next_news_liquidation_cutoff"
+        )
+        component["news_status"] = runtime.get("news_status")
+        component["news_last_result"] = news_last_result or None
         state_sync = _state_sync_status_snapshot()
         component["durable_state_indeterminate"] = bool(
             state_sync.get("fxweekend_state_indeterminate")
@@ -13339,15 +13387,37 @@ def _autostart_component_readiness(
         )
         runtime_state = str(runtime.get("state") or "").strip()
         runtime_state_normalized = runtime_state.lower()
+        last_news_event_ids = {
+            str(item)
+            for item in (news_last_result.get("event_ids") or [])
+            if str(item)
+        }
+        active_news_result = bool(
+            active_news_ids.intersection(last_news_event_ids)
+        )
+        news_result_state = str(
+            news_last_result.get("state") or ""
+        ).strip()
+        news_failure = bool(
+            active_news_result
+            and news_last_result.get("verified_flat") is not True
+            and news_result_state
+        )
+        news_warning = bool(
+            active_news_result
+            and news_last_result.get("verified_flat") is True
+            and news_last_result.get("cutoff_met") is False
+        )
         runtime_failure = runtime_state_normalized in {
             "credential failure",
             "api failure",
             "partial closure failure",
             "retry pending",
-        }
+        } or news_failure
         runtime_warning = (
             runtime_state_normalized in account_warning_states
             or bool(account_warnings)
+            or news_warning
         )
         if not enabled:
             component.update(
@@ -13459,7 +13529,9 @@ def _autostart_component_readiness(
             return component
         if runtime_failure:
             failure_reason = str(
-                runtime.get("last_error")
+                news_last_result.get("error")
+                or (news_result_state if news_failure else "")
+                or runtime.get("last_error")
                 or runtime_state
                 or "FX Weekend account check failed."
             )
@@ -13537,7 +13609,8 @@ def _autostart_component_readiness(
             return component
         if runtime_warning:
             warning_reason = (
-                str(runtime.get("state_detail") or "").strip()
+                (news_result_state if news_warning else "")
+                or str(runtime.get("state_detail") or "").strip()
                 or "; ".join(account_warnings)
                 or "The executor is healthy, but the prior cutoff was missed or the market was closed."
             )
@@ -16392,7 +16465,11 @@ async def _fetch_oanda_json(
                     ) from exc
             except httpx.HTTPStatusError as exc:
                 status = exc.response.status_code
-                body_summary = _summarize_upstream_body(exc.response.text)
+                body_summary = _safe_bybit_diagnostic_text(
+                    _summarize_upstream_body(exc.response.text),
+                    api_key=token,
+                    fallback="empty response body",
+                )
                 should_retry = status in transient_statuses and attempt < max_attempts
                 log_fn = BYBIT_LOGGER.warning if should_retry else BYBIT_LOGGER.error
                 log_fn(
@@ -16422,7 +16499,16 @@ async def _fetch_oanda_json(
             raise OandaUpstreamError(
                 "OANDA request failed after retries",
                 upstream_status=resp.status_code if resp is not None else None,
-                upstream_error_message=(resp.text or "").strip()[:500] if resp is not None else "",
+                upstream_error_message=(
+                    _safe_bybit_diagnostic_text(
+                        resp.text,
+                        api_key=token,
+                        fallback="empty response body",
+                        limit=500,
+                    )
+                    if resp is not None
+                    else ""
+                ),
                 endpoint=endpoint,
                 mode=mode,
                 retry_exhausted=True,
@@ -16434,7 +16520,11 @@ async def _fetch_oanda_json(
     try:
         return resp.json()
     except json.JSONDecodeError as exc:
-        body = _summarize_upstream_body(resp.text)
+        body = _safe_bybit_diagnostic_text(
+            _summarize_upstream_body(resp.text),
+            api_key=token,
+            fallback="empty response body",
+        )
         raise ValueError(
             f"OANDA returned non-JSON success response mode={mode} account={account_id} "
             f"endpoint={endpoint}: {body}"
@@ -16479,51 +16569,59 @@ async def _oanda_preflight(
         "Content-Type": "application/json",
     }
     url = _build_oanda_v3_url(base_url, "/accounts")
-    token_last4 = token[-4:] if token else None
     BYBIT_LOGGER.info(
-        "OANDA_CFG mode=%s base=%s account_id=%s token_last4=%s",
+        "OANDA_CFG mode=%s base=%s account_id=%s token_configured=%s",
         mode,
         base_url,
         account_id,
-        token_last4,
+        bool(token),
     )
     BYBIT_LOGGER.info(
-        "OANDA_CALL mode=%s base=%s account_id=%s token_last4=%s url=%s",
+        "OANDA_CALL mode=%s base=%s account_id=%s token_configured=%s url=%s",
         mode,
         base_url,
         account_id,
-        token_last4,
+        bool(token),
         url,
     )
     async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
         try:
             resp = await client.get(url, headers=headers)
             BYBIT_LOGGER.info(
-                "OANDA_RESP mode=%s status=%s url=%s body=%s",
+                "OANDA_RESP mode=%s status=%s endpoint=%s",
                 mode,
                 resp.status_code,
-                url,
-                resp.text[:200],
+                "/v3/accounts",
             )
             if 300 <= resp.status_code < 400:
                 BYBIT_LOGGER.info(
-                    "OANDA_REDIRECT mode=%s status=%s url=%s location=%s",
+                    "OANDA_REDIRECT mode=%s status=%s endpoint=%s location=%s",
                     mode,
                     resp.status_code,
-                    url,
-                    resp.headers.get("location"),
+                    "/v3/accounts",
+                    _safe_bybit_diagnostic_text(
+                        resp.headers.get("location"),
+                        api_key=token,
+                        fallback="not supplied",
+                    ),
                 )
             resp.raise_for_status()
         except httpx.HTTPStatusError as exc:
+            safe_body = _safe_bybit_diagnostic_text(
+                _summarize_upstream_body(exc.response.text),
+                api_key=token,
+                fallback="empty response body",
+                limit=500,
+            )
             BYBIT_LOGGER.error(
-                "OANDA_HTTP_ERR mode=%s status=%s url=%s body=%s",
+                "OANDA_HTTP_ERR mode=%s status=%s endpoint=%s body=%s",
                 mode,
                 exc.response.status_code,
-                str(exc.request.url),
-                exc.response.text[:500],
+                "/v3/accounts",
+                safe_body,
             )
             raise ValueError(
-                f"OANDA preflight failed ({exc.response.status_code}): {exc.response.text}"
+                f"OANDA preflight failed ({exc.response.status_code}): {safe_body}"
             ) from exc
     payload = resp.json()
     accounts = [acct.get("id") for acct in payload.get("accounts", [])]
@@ -16663,11 +16761,7 @@ async def _collect_oanda_open_items(
         )
     for item in items:
         ctx = _lookup_trade_context_for_open_item(item)
-        timeframe = _normalize_timeframe(item.get("timeframe"))
-        if not timeframe and isinstance(ctx, dict):
-            timeframe = _normalize_journal_timeframe(ctx.get("timeframe"))
-        item["timeframe"] = timeframe
-        item["is_test_trade"] = _display_test_trade(ctx if isinstance(ctx, dict) else item)
+        _enrich_open_item_with_trade_context(item, ctx)
     return {"items": items, "errors": fetch_errors}
 
 
@@ -16810,8 +16904,12 @@ async def _list_oanda_accounts(*, base_url: str, api_key: str) -> List[Dict[str,
     return [dict(account) for account in accounts if isinstance(account, dict)]
 
 
-def _oanda_discovery_failure_allows_stale(exc: Exception) -> bool:
+def _oanda_discovery_failure_allows_stale(
+    exc: Exception, *, allow_auth_anomaly: bool = False
+) -> bool:
     if isinstance(exc, OandaAccountDiscoveryError):
+        if allow_auth_anomaly and exc.failure_kind == "http" and exc.http_status == 401:
+            return True
         if exc.failure_kind in {"timeout", "rate_limit", "dns", "transport"}:
             return True
         return bool(
@@ -16821,8 +16919,19 @@ def _oanda_discovery_failure_allows_stale(exc: Exception) -> bool:
     return isinstance(exc, (httpx.TimeoutException, httpx.RequestError))
 
 
+def _oanda_discovery_is_http_401(exc: Optional[Exception]) -> bool:
+    return bool(
+        isinstance(exc, OandaAccountDiscoveryError)
+        and exc.failure_kind == "http"
+        and exc.http_status == 401
+    )
+
+
 async def _get_cached_oanda_accounts(
-    *, base_url: str, api_key: str
+    *,
+    base_url: str,
+    api_key: str,
+    allow_auth_anomaly_stale: bool = False,
 ) -> OandaAccountDiscoveryResult:
     token = (api_key or "").strip().strip('"').strip("'")
     cache_key = hashlib.sha256(
@@ -16848,7 +16957,9 @@ async def _get_cached_oanda_accounts(
     except Exception as exc:
         stale_cached = _OANDA_ACCOUNTS_CACHE.get(cache_key)
         if (
-            _oanda_discovery_failure_allows_stale(exc)
+            _oanda_discovery_failure_allows_stale(
+                exc, allow_auth_anomaly=allow_auth_anomaly_stale
+            )
             and stale_cached
             and float(stale_cached.get("stale_until") or 0.0) > time.time()
         ):
@@ -17170,6 +17281,13 @@ def _safe_bybit_diagnostic_text(
         r"\1\2[redacted]",
         text,
     )
+    text = re.sub(r"(?i)\bBearer\s+[^\s,;\"']+", "Bearer [redacted]", text)
+    text = re.sub(
+        r"(?i)\b(access[_-]?token|token|authorization)"
+        r"\s*[\"']?\s*([=:])\s*(?:\"[^\"]*\"|'[^']*'|[^,\s;&}]+)",
+        r"\1\2[redacted]",
+        text,
+    )
     text = re.sub(r"https?://[^\s]+", "[redacted URL]", text, flags=re.IGNORECASE)
     if not text:
         return fallback
@@ -17305,6 +17423,134 @@ def _bybit_open_source_error(
             fallback="Bybit request failed",
         )
     return entry
+
+
+def _bybit_credential_fingerprint(api_key: str, api_secret: str) -> str:
+    if not api_key or not api_secret:
+        return "unavailable"
+    return hashlib.sha256(f"{api_key}\0{api_secret}".encode("utf-8")).hexdigest()[:12]
+
+
+def _bybit_auth_failure_classification(exc: Exception) -> str:
+    http_status = getattr(exc, "http_status", None)
+    ret_code = str(getattr(exc, "ret_code", "") or "").strip()
+    ret_msg = str(getattr(exc, "ret_msg", "") or "").lower()
+    if ret_code == "10002" or _bybit_timestamp_window_error(ret_code, ret_msg):
+        return "timestamp_window_error"
+    if ret_code == "10003":
+        return "invalid_credentials_or_wrong_environment_domain"
+    if ret_code in {"-2015", "33004"} or "expired" in ret_msg:
+        return "expired_api_key"
+    if ret_code == "10005" or "permission" in ret_msg:
+        return "missing_api_permission"
+    if ret_code == "10010" or "unmatched ip" in ret_msg:
+        return "ip_restriction"
+    if ret_code in {"10004", "10007"}:
+        return "invalid_credentials_or_signature"
+    if ret_code in {"10009", "10024"}:
+        return "regional_or_compliance_restriction"
+    if http_status == 401:
+        return "invalid_credentials_or_auth_headers"
+    if http_status == 403:
+        return "ip_permission_or_region_restriction"
+    failure_kind = str(getattr(exc, "failure_kind", "") or "").strip()
+    return failure_kind or "auth_preflight_failed"
+
+
+async def _bybit_read_only_auth_preflight(
+    *,
+    base_url: str,
+    api_key: str,
+    api_secret: str,
+    account_context: str,
+    key_source: str,
+) -> Dict[str, object]:
+    """Authenticate once before category fan-out using Bybit's read-only key-info API."""
+
+    host = str(urlparse(base_url).hostname or "unknown")
+    fingerprint = _bybit_credential_fingerprint(api_key, api_secret)
+    pair_complete = bool(api_key and api_secret)
+    BYBIT_LOGGER.info(
+        "BYBIT_AUTH_PREFLIGHT mode=%s host=%s credential_source=%s pair_complete=%s fingerprint=%s",
+        account_context,
+        host,
+        key_source or "unknown",
+        str(pair_complete).lower(),
+        fingerprint,
+    )
+    try:
+        payload = await _bybit_signed_get(
+            base_url=base_url,
+            api_key=api_key,
+            api_secret=api_secret,
+            path="/v5/user/query-api",
+            params={},
+        )
+    except Exception as exc:
+        classification = _bybit_auth_failure_classification(exc)
+        source_error = _bybit_open_source_error(
+            exc,
+            account=account_context,
+            category="account",
+            source_type="auth preflight",
+            endpoint="/v5/user/query-api",
+            settlement_coin="n/a",
+            api_key=api_key,
+            api_secret=api_secret,
+        )
+        source_error.update(
+            {
+                "auth_failure": "true",
+                "auth_classification": classification,
+                "mode": account_context,
+                "base_host": host,
+                "credential_source": key_source or "unknown",
+                "pair_complete": str(pair_complete).lower(),
+                "credential_fingerprint": fingerprint,
+            }
+        )
+        upstream_detail = str(source_error.get("message") or "").strip()
+        source_error["message"] = (
+            f"Bybit read-only authentication preflight failed: {classification}; "
+            f"mode={account_context} host={host} credential_source={key_source or 'unknown'} "
+            f"pair_complete={str(pair_complete).lower()} fingerprint={fingerprint}. "
+            f"{upstream_detail}"
+        )
+        raise BybitAuthPreflightError(source_error) from exc
+
+    result = payload.get("result") if isinstance(payload, dict) else {}
+    result = result if isinstance(result, dict) else {}
+    permissions = result.get("permissions") if isinstance(result.get("permissions"), dict) else {}
+    permission_groups = sorted(str(name) for name in permissions.keys())
+    ips = result.get("ips") if isinstance(result.get("ips"), list) else []
+    diagnostic = {
+        "mode": account_context,
+        "base_host": host,
+        "credential_source": key_source or "unknown",
+        "pair_complete": pair_complete,
+        "credential_fingerprint": fingerprint,
+        "read_only": result.get("readOnly"),
+        "ip_binding_count": len(ips),
+        "permission_groups": permission_groups,
+    }
+    BYBIT_LOGGER.info(
+        "BYBIT_AUTH_PREFLIGHT_OK mode=%s host=%s credential_source=%s fingerprint=%s "
+        "read_only=%s ip_binding_count=%s permission_groups=%s",
+        account_context,
+        host,
+        key_source or "unknown",
+        fingerprint,
+        result.get("readOnly"),
+        len(ips),
+        permission_groups,
+    )
+    return diagnostic
+
+
+class BybitAuthPreflightError(ValueError):
+    def __init__(self, diagnostic: Dict[str, str]) -> None:
+        self.diagnostic = dict(diagnostic)
+        super().__init__(str(self.diagnostic.get("message") or "Bybit auth preflight failed"))
 
 
 async def _bybit_signed_get(
@@ -17755,10 +18001,40 @@ async def _fetch_bybit_orders_for_category(
 
 
 async def _collect_bybit_open_items(
-    *, base_url: str, api_key: str, api_secret: str, account_context: str
-) -> Dict[str, List[Dict[str, object]]]:
+    *,
+    base_url: str,
+    api_key: str,
+    api_secret: str,
+    account_context: str,
+    key_source: str = "unknown",
+) -> Dict[str, object]:
     items: List[Dict[str, object]] = []
     errors: List[Dict[str, object]] = []
+    try:
+        auth_diagnostic = await _bybit_read_only_auth_preflight(
+            base_url=base_url,
+            api_key=api_key,
+            api_secret=api_secret,
+            account_context=account_context,
+            key_source=key_source,
+        )
+    except BybitAuthPreflightError as exc:
+        return {
+            "items": [],
+            "errors": [dict(exc.diagnostic)],
+            "auth_failed": True,
+            "auth_diagnostic": {
+                key: exc.diagnostic.get(key)
+                for key in (
+                    "mode",
+                    "base_host",
+                    "credential_source",
+                    "pair_complete",
+                    "credential_fingerprint",
+                    "auth_classification",
+                )
+            },
+        }
     confirmed_demo_linear_symbols: Set[str] = set()
     stale_demo_linear_symbols: Set[str] = set()
     position_categories = ["linear", "inverse", "option"]
@@ -17855,9 +18131,13 @@ async def _collect_bybit_open_items(
                     "take_profit": position.get("takeProfit"),
                     "leverage": position.get("leverage")
                     or position.get("positionMargin"),
-                    "opened_at": position.get("updatedTime") or position.get("createdTime"),
+                    # updatedTime is mutable and cannot establish the original
+                    # position-open window used for calculator-context linkage.
+                    "opened_at": position.get("createdTime"),
                     "id": position.get("positionId") or position.get("positionIdx"),
                     "position_idx": position.get("positionIdx"),
+                    "order_id": position.get("orderId"),
+                    "order_link_id": position.get("orderLinkId"),
                     "status": "OPEN",
                 }
             )
@@ -17939,12 +18219,13 @@ async def _collect_bybit_open_items(
             )
     for item in items:
         ctx = _lookup_trade_context_for_open_item(item)
-        timeframe = _normalize_timeframe(item.get("timeframe"))
-        if not timeframe and isinstance(ctx, dict):
-            timeframe = _normalize_journal_timeframe(ctx.get("timeframe"))
-        item["timeframe"] = timeframe
-        item["is_test_trade"] = _display_test_trade(ctx if isinstance(ctx, dict) else item)
-    return {"items": items, "errors": errors}
+        _enrich_open_item_with_trade_context(item, ctx)
+    return {
+        "items": items,
+        "errors": errors,
+        "auth_failed": False,
+        "auth_diagnostic": auth_diagnostic,
+    }
 
 
 def _load_bounce_traders() -> List[Dict[str, object]]:
@@ -18046,12 +18327,19 @@ def _normalize_pending_webhooks(items: object) -> List[Dict[str, object]]:
 def _replace_pending_webhooks(items: object) -> List[Dict[str, object]]:
     normalized = _normalize_pending_webhooks(items)
     _save_pending_webhooks(normalized)
-    normalized, _diagnostics = _reconcile_pending_webhooks_registry(prune_orphan_contexts=False)
+    normalized, _diagnostics = _reconcile_pending_webhooks_registry(
+        prune_orphan_contexts=False,
+        invalidate_cache=False,
+    )
     _invalidate_open_orders_cache()
     return normalized
 
 
-def _upsert_pending_webhook(payload: Dict[str, object]) -> Dict[str, object]:
+def _upsert_pending_webhook(
+    payload: Dict[str, object],
+    *,
+    invalidate_cache: bool = True,
+) -> Dict[str, object]:
     items = _load_pending_webhooks()
     if not isinstance(payload, dict):
         payload = {}
@@ -18087,53 +18375,80 @@ def _upsert_pending_webhook(payload: Dict[str, object]) -> Dict[str, object]:
         items.append(entry)
 
     _save_pending_webhooks(items)
-    _invalidate_open_orders_cache()
     opened_at_iso = _epoch_or_iso_to_iso(entry.get("opened_at"))
-    _upsert_trade_context(
-        {
-            "pending_webhook_id": webhook_id,
-            "broker": str(entry.get("category") or entry.get("broker") or "").strip().lower(),
-            "account": str(entry.get("account") or "").strip().lower(),
-            "category": str(entry.get("category") or "").strip().lower(),
-            "instrument": str(entry.get("instrument") or "").strip().upper(),
-            "side": str(entry.get("side") or "").strip().lower(),
-            "order_type": str(entry.get("order_type") or "").strip().lower(),
-            "entry_price": entry.get("entry_price"),
-            "stop_loss": entry.get("stop_loss"),
-            "take_profit": entry.get("take_profit"),
-            "timeframe": entry.get("timeframe"),
-            "is_test_trade": entry.get("is_test_trade"),
-            "setup": entry.get("setup"),
-            "pattern": entry.get("pattern"),
-            "ema": entry.get("ema"),
-            "vwap": entry.get("vwap"),
-            "aths_atls": entry.get("aths_atls"),
-            "round_number": entry.get("round_number"),
-            "open_time": opened_at_iso,
-            "status": "ACTIVE",
-                "calculation_context_id": payload.get("calculation_context_id"),
-                "quote_created_at_ms": payload.get("quote_created_at_ms"),
-                "risk_mode": payload.get("risk_mode"),
-                "risk_value": payload.get("risk_value"),
-                "stop_loss_ticks": payload.get("stop_loss_ticks"),
-                "take_profit_ticks": payload.get("take_profit_ticks"),
-                "target_mode": payload.get("target_mode"),
-                "risk_reward": payload.get("risk_reward"),
-                "planned_entry_price": payload.get("planned_entry_price"),
-                "planned_stop_price": payload.get("planned_stop_price"),
-                "planned_target_price": payload.get("planned_target_price"),
-            "cancel_if_touched_price": entry.get("cancel_if_touched_price"),
-            "cancel_if_touched_operator": entry.get("cancel_if_touched_operator"),
-            "setup_reference_price": entry.get("setup_reference_price"),
-            "price_source": entry.get("price_source"),
-            "cancel_reason": entry.get("cancel_reason"),
-            "cancelled_at": entry.get("cancelled_at"),
-        }
+    raw_category = str(entry.get("category") or "").strip().lower()
+    resolved_broker = str(
+        entry.get("resolved_broker")
+        or entry.get("venue")
+        or (raw_category if raw_category in {"bybit", "oanda"} else "")
+        or ("bybit" if str(entry.get("asset") or "").strip().lower() == "crypto" else "")
+        or ("oanda" if str(entry.get("asset") or "").strip().lower() == "fx" else "")
+    ).strip().lower()
+    context_category = (
+        "linear"
+        if raw_category == "bybit"
+        else "forex"
+        if raw_category == "oanda"
+        else raw_category
     )
+    context_payload = {
+        "pending_webhook_id": webhook_id,
+        "broker": resolved_broker,
+        "asset": entry.get("asset"),
+        "account": str(entry.get("account") or "").strip().lower(),
+        "category": context_category,
+        "instrument": str(entry.get("instrument") or "").strip().upper(),
+        "side": str(entry.get("side") or "").strip().lower(),
+        "order_type": str(entry.get("order_type") or "").strip().lower(),
+        "entry_price": entry.get("entry_price"),
+        "stop_loss": entry.get("stop_loss"),
+        "take_profit": entry.get("take_profit"),
+        "timeframe": entry.get("timeframe"),
+        "is_test_trade": entry.get("is_test_trade"),
+        "webhook_mode": "Yes",
+        "webhook_status": str(entry.get("status") or "WAITING").title(),
+        "setup": entry.get("setup"),
+        "pattern": entry.get("pattern"),
+        "ema": entry.get("ema"),
+        "vwap": entry.get("vwap"),
+        "aths_atls": entry.get("aths_atls"),
+        "round_number": entry.get("round_number"),
+        "open_time": opened_at_iso,
+        "status": "ACTIVE",
+        "calculation_context_id": payload.get("calculation_context_id"),
+        "quote_created_at_ms": payload.get("quote_created_at_ms"),
+        "risk_mode": payload.get("risk_mode"),
+        "risk_value": payload.get("risk_value"),
+        "stop_loss_ticks": payload.get("stop_loss_ticks"),
+        "take_profit_ticks": payload.get("take_profit_ticks"),
+        "target_mode": payload.get("target_mode"),
+        "risk_reward": payload.get("risk_reward"),
+        "planned_entry_price": payload.get("planned_entry_price"),
+        "planned_stop_price": payload.get("planned_stop_price"),
+        "planned_target_price": payload.get("planned_target_price"),
+        "cancel_if_touched_price": entry.get("cancel_if_touched_price"),
+        "cancel_if_touched_operator": entry.get("cancel_if_touched_operator"),
+        "setup_reference_price": entry.get("setup_reference_price"),
+        "price_source": entry.get("price_source"),
+        "cancel_reason": entry.get("cancel_reason"),
+        "cancelled_at": entry.get("cancelled_at"),
+    }
+    try:
+        _upsert_trade_context(context_payload)
+    finally:
+        # The registry write is already durable even if the companion context
+        # write fails, so expose exactly one new version in either outcome.
+        if invalidate_cache:
+            _invalidate_open_orders_cache()
     return entry
 
 
-def _update_pending_webhook(webhook_id: str, updates: Dict[str, object]) -> Optional[Dict[str, object]]:
+def _update_pending_webhook(
+    webhook_id: str,
+    updates: Dict[str, object],
+    *,
+    invalidate_cache: bool = True,
+) -> Optional[Dict[str, object]]:
     items = _load_pending_webhooks()
     for idx, entry in enumerate(items):
         if str(entry.get("id", "")).strip() == webhook_id:
@@ -18143,7 +18458,8 @@ def _update_pending_webhook(webhook_id: str, updates: Dict[str, object]) -> Opti
             merged["type"] = "webhook"
             items[idx] = merged
             _save_pending_webhooks(items)
-            _invalidate_open_orders_cache()
+            if invalidate_cache:
+                _invalidate_open_orders_cache()
             return merged
     return None
 
@@ -18159,13 +18475,18 @@ def _set_pending_webhook_enabled(webhook_id: str, enabled: bool) -> Dict[str, ob
     raise HTTPException(status_code=404, detail="Pending webhook not found.")
 
 
-def _delete_pending_webhook(webhook_id: str) -> bool:
+def _delete_pending_webhook(
+    webhook_id: str,
+    *,
+    invalidate_cache: bool = True,
+) -> bool:
     items = _load_pending_webhooks()
     remaining = [entry for entry in items if str(entry.get("id", "")).strip() != webhook_id]
     if len(remaining) == len(items):
         return False
     _save_pending_webhooks(remaining)
-    _invalidate_open_orders_cache()
+    if invalidate_cache:
+        _invalidate_open_orders_cache()
     return True
 
 
@@ -18176,7 +18497,7 @@ def _consume_pending_webhook(
     if not pending_id:
         raise ValueError("pending_webhook_id is required to consume pending webhook.")
     now_iso = _utc_now_iso()
-    deleted = _delete_pending_webhook(pending_id)
+    deleted = _delete_pending_webhook(pending_id, invalidate_cache=False)
     BYBIT_LOGGER.info(
         "PENDING_WEBHOOK_CONSUME request_id=%s pending_webhook_id=%s deleted=%s reason=%s",
         request_id,
@@ -18184,16 +18505,22 @@ def _consume_pending_webhook(
         str(deleted).lower(),
         reason,
     )
-    _upsert_trade_context(
-        {
-            "pending_webhook_id": pending_id,
-            "status": "CONSUMED" if deleted else "TRIGGERING",
-            "consumed_at": now_iso,
-            "triggered_at": now_iso,
-            "request_id": request_id,
-            "consume_reason": str(reason or "").strip() or "webhook_received",
-        }
-    )
+    context_saved = False
+    try:
+        _upsert_trade_context(
+            {
+                "pending_webhook_id": pending_id,
+                "status": "CONSUMED" if deleted else "TRIGGERING",
+                "consumed_at": now_iso,
+                "triggered_at": now_iso,
+                "request_id": request_id,
+                "consume_reason": str(reason or "").strip() or "webhook_received",
+            }
+        )
+        context_saved = True
+    finally:
+        if deleted or context_saved:
+            _invalidate_open_orders_cache()
     if not deleted:
         raise ValueError("Pending webhook missing or no longer active.")
     _schedule_dropbox_upload_state_backup()
@@ -18425,9 +18752,16 @@ def _load_calculator_trade_contexts() -> List[Dict[str, object]]:
 def _save_calculator_trade_contexts(items: List[Dict[str, object]]) -> None:
     _save_trade_contexts(items)
 
-def _upsert_calculator_trade_context(payload: Dict[str, object], require_durable: bool = True) -> Dict[str, object]:
+def _upsert_calculator_trade_context(
+    payload: Dict[str, object],
+    require_durable: bool = True,
+    invalidate_cache: bool = True,
+) -> Dict[str, object]:
     try:
-        return _upsert_trade_context(payload)
+        saved = _upsert_trade_context(payload)
+        if invalidate_cache:
+            _invalidate_open_orders_cache()
+        return saved
     except Exception:
         if require_durable:
             raise
@@ -18570,7 +18904,12 @@ def _prune_trade_contexts(items: List[Dict[str, object]]) -> List[Dict[str, obje
     return kept
 
 
-def _upsert_bybit_demo_calc_context(context: Dict[str, object], active_folder: Optional[str] = None, require_durable: bool = True) -> Dict[str, object]:
+def _upsert_bybit_demo_calc_context(
+    context: Dict[str, object],
+    active_folder: Optional[str] = None,
+    require_durable: bool = True,
+    invalidate_cache: bool = False,
+) -> Dict[str, object]:
     now = _utc_now_iso()
     ctx = dict(_sanitize_calc_context_obj(context) if isinstance(context, dict) else {})
     ctx["calculation_context_id"] = str(ctx.get("calculation_context_id") or "").strip() or f"calcctx_bybit_demo_{uuid4().hex}"
@@ -18586,6 +18925,8 @@ def _upsert_bybit_demo_calc_context(context: Dict[str, object], active_folder: O
     state["items"] = items[-1000:]
     try:
         _save_bybit_demo_calc_contexts(state, active_folder)
+        if invalidate_cache:
+            _invalidate_open_orders_cache()
     except Exception:
         if require_durable:
             raise
@@ -18781,6 +19122,7 @@ def _lookup_trade_context_for_open_item(item: Dict[str, object]) -> Optional[Dic
     refs = item.get("raw_refs") if isinstance(item.get("raw_refs"), dict) else {}
     broker = str(item.get("broker") or "").strip().lower()
     account = str(item.get("account") or "").strip().lower()
+    category = str(item.get("category") or "").strip().lower()
     instrument = str(item.get("instrument") or "").strip().upper()
     side = _normalize_side_for_comparison(item.get("side"))
     calculation_context_id = str(
@@ -18790,7 +19132,12 @@ def _lookup_trade_context_for_open_item(item: Dict[str, object]) -> Optional[Dic
         or refs.get("context_id")
         or ""
     ).strip()
-    order_id = str(item.get("id") or item.get("order_id") or "").strip()
+    item_type = str(item.get("type") or "").strip().lower()
+    order_id = str(
+        item.get("order_id")
+        or (item.get("id") if item_type in {"order", "webhook"} else "")
+        or ""
+    ).strip()
     order_ids: List[str] = []
     raw_order_ids = refs.get("order_ids")
     if isinstance(raw_order_ids, list):
@@ -18836,18 +19183,19 @@ def _lookup_trade_context_for_open_item(item: Dict[str, object]) -> Optional[Dic
         for ctx in contexts
         if str(ctx.get("broker") or "").strip().lower() == broker
         and str(ctx.get("account") or "").strip().lower() == account
+        and str(ctx.get("category") or "").strip().lower() == category
         and str(ctx.get("instrument") or "").strip().upper() == instrument
         and _normalize_side_for_comparison(ctx.get("side")) == side
-        and str(ctx.get("status") or "ACTIVE").strip().upper() == "ACTIVE"
+        and str(ctx.get("status") or "ACTIVE").strip().upper()
+        in {"ACTIVE", "PENDING_ENTRY", "SUBMITTED"}
     ]
-    if not candidates:
+    if not candidates or not all((broker, account, category, instrument, side)):
         return None
-    if len(candidates) == 1:
-        return candidates[0]
     opened_ts = _canonical_trade_epoch_second(item.get("opened_at") or item.get("created_at"))
     if opened_ts is None:
         return None
-    scored: List[Tuple[int, int, Dict[str, object]]] = []
+    window_candidates: List[Dict[str, object]] = []
+    max_window_seconds = 90 * 60
     for ctx in candidates:
         ctx_opened_ts = (
             _canonical_trade_epoch_second(ctx.get("open_time"))
@@ -18857,12 +19205,135 @@ def _lookup_trade_context_for_open_item(item: Dict[str, object]) -> Optional[Dic
         if ctx_opened_ts is None:
             continue
         delta = abs(opened_ts - ctx_opened_ts)
-        ctx_status_boost = 0 if str(ctx.get("status") or "").strip().upper() == "ACTIVE" else 1
-        scored.append((delta, ctx_status_boost, ctx))
-    if scored:
-        scored.sort(key=lambda item: (item[0], item[1]))
-        return scored[0][2]
+        if delta <= max_window_seconds:
+            window_candidates.append(ctx)
+    if len(window_candidates) == 1:
+        return window_candidates[0]
     return None
+
+
+def _enrich_open_item_with_trade_context(
+    item: Dict[str, object],
+    context: Optional[Dict[str, object]] = None,
+) -> Dict[str, object]:
+    """Attach calculator intent without inventing it for broker-originated rows."""
+
+    ctx = context if isinstance(context, dict) else _lookup_trade_context_for_open_item(item)
+    broker = str(item.get("broker") or "").strip()
+    broker_norm = broker.lower()
+    item["venue"] = broker or None
+    if isinstance(ctx, dict):
+        item["asset"] = (
+            ctx.get("asset")
+            or ("crypto" if broker_norm == "bybit" else "fx" if broker_norm == "oanda" else None)
+        )
+        order_type = str(ctx.get("order_type") or "").strip().lower()
+        item["order_type"] = order_type.title() if order_type else None
+        item["stop_loss_ticks"] = ctx.get("stop_loss_ticks")
+        item["take_profit_ticks"] = ctx.get("take_profit_ticks")
+        item["target_mode"] = ctx.get("target_mode")
+        target_mode = str(ctx.get("target_mode") or "").strip().lower()
+        item["target_mode_display"] = (
+            "Risk/Reward" if target_mode == "rr" else "Ticks" if target_mode == "ticks" else None
+        )
+        item["risk_mode"] = ctx.get("risk_mode")
+        risk_mode = str(ctx.get("risk_mode") or "").strip().lower()
+        item["risk_mode_display"] = (
+            "Percent" if risk_mode == "percent" else "Fixed AUD" if risk_mode == "fixed_aud" else None
+        )
+        item["risk_value"] = ctx.get("risk_value")
+        item["risk_unit"] = "%" if risk_mode == "percent" else "AUD" if risk_mode == "fixed_aud" else None
+        if ctx.get("risk_value") not in (None, ""):
+            if risk_mode == "percent":
+                item["risk_value_display"] = f"{ctx.get('risk_value')}%"
+            elif risk_mode == "fixed_aud":
+                item["risk_value_display"] = f"AUD {ctx.get('risk_value')}"
+            else:
+                item["risk_value_display"] = str(ctx.get("risk_value"))
+        else:
+            item["risk_value_display"] = None
+        item["risk_reward"] = ctx.get("risk_reward")
+        item["timeframe"] = _normalize_journal_timeframe(
+            ctx.get("timeframe") or item.get("timeframe")
+        )
+        item["is_test_trade"] = _display_test_trade(ctx)
+        item["setup"] = ctx.get("setup") or None
+        pattern = _safe_normalize_pattern(ctx.get("pattern"))
+        item["pattern"] = pattern.title() if pattern else "None"
+        item["ema"] = ctx.get("ema") or None
+        item["vwap"] = ctx.get("vwap") or None
+        item["aths_atls"] = ctx.get("aths_atls") or None
+        item["round_number"] = ctx.get("round_number") or None
+        pending_webhook_id = str(ctx.get("pending_webhook_id") or "").strip()
+        webhook_flag = _normalize_test_trade_flag(
+            ctx.get("webhook_mode", ctx.get("webhook"))
+        )
+        if pending_webhook_id:
+            item["webhook_mode"] = "Yes"
+            item["webhook_status"] = (
+                str(item.get("status") or "Waiting")
+                if broker_norm == "webhook"
+                else str(ctx.get("webhook_status") or "Triggered")
+            )
+        else:
+            item["webhook_mode"] = "Yes" if webhook_flag is True else "No"
+            item["webhook_status"] = (
+                str(ctx.get("webhook_status") or "Not used")
+                if webhook_flag is not True
+                else str(ctx.get("webhook_status") or "Configured")
+            )
+        item["planned_entry_price"] = (
+            ctx.get("planned_entry_price")
+            if ctx.get("planned_entry_price") not in (None, "")
+            else ctx.get("entry_price")
+        )
+        item["planned_stop_price"] = (
+            ctx.get("planned_stop_price")
+            if ctx.get("planned_stop_price") not in (None, "")
+            else ctx.get("stop_loss")
+        )
+        item["planned_target_price"] = (
+            ctx.get("planned_target_price")
+            if ctx.get("planned_target_price") not in (None, "")
+            else ctx.get("take_profit")
+        )
+        item["calculation_context_id"] = (
+            item.get("calculation_context_id")
+            or ctx.get("calculation_context_id")
+            or ctx.get("context_id")
+        )
+        item["context_linked"] = True
+    else:
+        item["asset"] = "crypto" if broker_norm == "bybit" else "fx" if broker_norm == "oanda" else None
+        item["timeframe"] = _normalize_journal_timeframe(item.get("timeframe"))
+        item["is_test_trade"] = _display_test_trade(item)
+        for field in (
+            "order_type",
+            "stop_loss_ticks",
+            "take_profit_ticks",
+            "target_mode",
+            "target_mode_display",
+            "risk_mode",
+            "risk_mode_display",
+            "risk_value",
+            "risk_unit",
+            "risk_value_display",
+            "risk_reward",
+            "setup",
+            "pattern",
+            "ema",
+            "vwap",
+            "aths_atls",
+            "round_number",
+            "webhook_mode",
+            "webhook_status",
+            "planned_entry_price",
+            "planned_stop_price",
+            "planned_target_price",
+        ):
+            item.setdefault(field, None)
+        item["context_linked"] = False
+    return item
 
 
 def _lookup_trade_context_for_journal_row(row: Dict[str, object]) -> Optional[Dict[str, object]]:
@@ -19700,7 +20171,7 @@ def _entry_price_for_bybit_submit_validation(
 
 
 async def _place_bybit_order(
-    payload: Dict[str, object], *, request_id: str
+    payload: Dict[str, object], *, request_id: str, invalidate_cache: bool = True
 ) -> Dict[str, object]:
     request_open_time_iso = _utc_now_iso()
     symbol = str(payload.get("symbol", "")).upper()
@@ -20086,6 +20557,7 @@ async def _place_bybit_order(
             {
             "pending_webhook_id": str(payload.get("pending_webhook_id") or "").strip(),
             "broker": "bybit",
+            "asset": "crypto",
             "account": account,
             "category": category,
             "instrument": symbol,
@@ -20100,6 +20572,8 @@ async def _place_bybit_order(
             "aths_atls": _normalize_aths_atls(payload.get("aths_atls")),
             "round_number": _normalize_round_number(payload.get("round_number")),
             "is_test_trade": payload.get("is_test_trade"),
+            "webhook_mode": "Yes" if str(payload.get("pending_webhook_id") or "").strip() else "No",
+            "webhook_status": "Triggered" if str(payload.get("pending_webhook_id") or "").strip() else "Not used",
             "created_at": request_open_time_iso,
             "open_time": _epoch_or_iso_to_iso(payload.get("opened_at")) or request_open_time_iso,
             "opened_at": _epoch_or_iso_to_iso(payload.get("opened_at")) or request_open_time_iso,
@@ -20119,7 +20593,8 @@ async def _place_bybit_order(
             "planned_target_price": planned_target_price,
             "stop_loss": initial_stop_loss,
             "take_profit": initial_take_profit,
-        }
+        },
+            invalidate_cache=False,
         )
     except Exception as exc:
         journal_context_saved = False
@@ -20341,6 +20816,7 @@ async def _place_bybit_order(
                     {
                     "pending_webhook_id": str(payload.get("pending_webhook_id") or "").strip(),
                     "broker": "bybit",
+                    "asset": "crypto",
                     "account": account,
                     "category": category,
                     "instrument": symbol,
@@ -20351,6 +20827,8 @@ async def _place_bybit_order(
                     "take_profit": tp_target,
                     "timeframe": payload.get("timeframe"),
                     "is_test_trade": payload.get("is_test_trade"),
+                    "webhook_mode": "Yes" if str(payload.get("pending_webhook_id") or "").strip() else "No",
+                    "webhook_status": "Triggered" if str(payload.get("pending_webhook_id") or "").strip() else "Not used",
                     "pattern": _safe_normalize_pattern(payload.get("pattern")),
                     "ema": _normalize_ema(payload.get("ema")),
                     "vwap": _normalize_vwap(payload.get("vwap")),
@@ -20374,6 +20852,7 @@ async def _place_bybit_order(
                     "planned_target_price": payload.get("planned_target_price"),
                     },
                     require_durable=True,
+                    invalidate_cache=False,
                 )
             except Exception:
                 secondary_ctx_update_failed = True
@@ -20484,7 +20963,8 @@ async def _place_bybit_order(
             )
         )
 
-    _invalidate_open_orders_cache()
+    if invalidate_cache:
+        _invalidate_open_orders_cache()
     return {
         "account": account,
         "category": category,
@@ -20510,7 +20990,7 @@ async def _place_bybit_order(
 
 
 async def _place_oanda_order(
-    payload: Dict[str, object], *, request_id: str
+    payload: Dict[str, object], *, request_id: str, invalidate_cache: bool = True
 ) -> Dict[str, object]:
     symbol = str(payload.get("symbol", "")).upper()
     action = str(payload.get("action", "")).lower()
@@ -20630,13 +21110,12 @@ async def _place_oanda_order(
         "Authorization": f"Bearer {cfg['token']}",
         "Content-Type": "application/json",
     }
-    token_last4 = cfg["token"][-4:] if cfg.get("token") else None
     BYBIT_LOGGER.info(
-        "OANDA order cfg mode=%s base=%s account_id=%s token_last4=%s",
+        "OANDA order cfg mode=%s base=%s account_id=%s token_configured=%s",
         account,
         cfg["base_url"],
         cfg["account_id"],
-        token_last4,
+        bool(cfg.get("token")),
     )
     _log_webhook_event(
         request_id,
@@ -20646,13 +21125,19 @@ async def _place_oanda_order(
     async with httpx.AsyncClient(timeout=10) as client:
         response = await client.post(url, headers=headers, json={"order": order_payload})
     if response.status_code >= 400:
+        safe_body = _safe_bybit_diagnostic_text(
+            _summarize_upstream_body(response.text),
+            api_key=str(cfg.get("token") or ""),
+            fallback="empty response body",
+            limit=500,
+        )
         BYBIT_LOGGER.error(
             "OANDA order failed status=%s response=%s",
             response.status_code,
-            response.text,
+            safe_body,
         )
         raise ValueError(
-            f"OANDA order failed ({response.status_code}): {response.text}"
+            f"OANDA order failed ({response.status_code}): {safe_body}"
         )
     result = response.json()
     if not isinstance(result, dict):
@@ -20680,6 +21165,7 @@ async def _place_oanda_order(
             {
                 "pending_webhook_id": pending_id or None,
                 "broker": "oanda",
+                "asset": "fx",
                 "account": account,
                 "category": "forex",
                 "instrument": symbol,
@@ -20690,6 +21176,8 @@ async def _place_oanda_order(
                 "take_profit": (order_payload.get("takeProfitOnFill") or {}).get("price"),
                 "timeframe": payload.get("timeframe"),
                 "is_test_trade": payload.get("is_test_trade"),
+                "webhook_mode": "Yes" if pending_id else "No",
+                "webhook_status": "Triggered" if pending_id else "Not used",
                 "setup": payload.get("setup"),
                 "pattern": _safe_normalize_pattern(payload.get("pattern")),
                 "ema": _normalize_ema(payload.get("ema")),
@@ -20711,7 +21199,8 @@ async def _place_oanda_order(
                 "planned_entry_price": payload.get("planned_entry_price"),
                 "planned_stop_price": payload.get("planned_stop_price"),
                 "planned_target_price": payload.get("planned_target_price"),
-            }
+            },
+            invalidate_cache=False,
         )
         _schedule_dropbox_upload_state_backup()
         if not pending_id:
@@ -20725,7 +21214,7 @@ async def _place_oanda_order(
         if pending_id:
             # Once the webhook has fired, remove it immediately so it doesn't linger
             # in the Open Orders / Positions table.
-            if _delete_pending_webhook(pending_id):
+            if _delete_pending_webhook(pending_id, invalidate_cache=False):
                 _schedule_dropbox_upload_state_backup()
     except Exception as exc:
         warning = "Order accepted by OANDA, but post-submit bookkeeping failed."
@@ -20772,6 +21261,9 @@ async def _place_oanda_order(
             result["context_save_error"] = context_save_error
     else:
         result["journal_context_saved"] = True
+
+    if invalidate_cache:
+        _invalidate_open_orders_cache()
 
     return result
 
@@ -21145,6 +21637,7 @@ async def _poll_pending_webhook_invalidations() -> None:
                             "cancel_reason": "cancel_price_touched",
                             "cancelled_at": now_iso,
                         },
+                        invalidate_cache=False,
                     )
                     _upsert_trade_context(
                         {
@@ -23927,6 +24420,8 @@ PEPPERSTONE_TRADER_SET_INPUT_NAMES = (
     "TP_DistancePoints",
     "StandardLimitSide",
     "StandardLimitEntryPrice",
+    "StandardMarketSide",
+    "StandardMarketExecutionToken",
     "MagicNumber",
     "EnforceOneTradeAtATime",
 )
@@ -23976,20 +24471,21 @@ def _build_pepperstone_trader_set(payload: Dict[str, object]) -> Tuple[str, str]
         raise HTTPException(status_code=400, detail="Pepperstone .set export is only available for FX + Pepperstone.")
 
     order_type = str(payload.get("order_type") or "").strip().lower()
-    if order_type != "limit":
-        raise HTTPException(
-            status_code=400,
-            detail="Pepperstone .set generation is available for limit orders only. Market orders are blocked because Trader.mq5 has no safe one-shot manual market strategy.",
-        )
+    if order_type not in {"limit", "market"}:
+        raise HTTPException(status_code=400, detail="order_type must be limit or market.")
 
     side = str(payload.get("side") or payload.get("action") or "").strip().lower()
     if side not in {"buy", "sell"}:
         raise HTTPException(status_code=400, detail="side must be buy or sell.")
 
-    entry_raw = payload.get("entry_price") or payload.get("planned_entry_price") or payload.get("StandardLimitEntryPrice")
-    entry = _dec(entry_raw, "entry_price")
-    if entry <= 0:
-        raise HTTPException(status_code=400, detail="entry_price must be greater than zero.")
+    entry: Optional[Decimal] = None
+    if order_type == "limit":
+        entry_raw = payload.get("entry_price") or payload.get("planned_entry_price") or payload.get("StandardLimitEntryPrice")
+        if entry_raw is None or str(entry_raw).strip() == "":
+            raise HTTPException(status_code=400, detail="Limit Pepperstone .set files require entry_price.")
+        entry = _dec(entry_raw, "entry_price")
+        if entry <= 0:
+            raise HTTPException(status_code=400, detail="entry_price must be greater than zero.")
 
     stop_ticks = _pepperstone_set_positive_int(_dec(payload.get("stop_loss_ticks") or payload.get("submitted_stop_loss_ticks"), "stop_loss_ticks"), "stop_loss_ticks")
     rr = _dec(payload.get("risk_reward") or payload.get("requested_rr_net") or payload.get("rr"), "risk_reward")
@@ -24004,7 +24500,7 @@ def _build_pepperstone_trader_set(payload: Dict[str, object]) -> Tuple[str, str]
     tp_points = max(1, int((Decimal(stop_ticks) * rr).to_integral_value(rounding=ROUND_HALF_UP)))
 
     values = {
-        "Strategy": "2",
+        "Strategy": "2" if order_type == "limit" else "3",
         "OrdersEnabled": _pepperstone_trader_set_bool(True),
         "RiskAUD_Target": _pepperstone_set_decimal(risk_target, places="0.01"),
         "RiskAUD_Min": _pepperstone_set_decimal(risk_min, places="0.01"),
@@ -24017,21 +24513,34 @@ def _build_pepperstone_trader_set(payload: Dict[str, object]) -> Tuple[str, str]
         "AutoTP_NetRR_Enabled": _pepperstone_trader_set_bool(True),
         "NetRR_Target": _pepperstone_set_decimal(rr, places="0.01"),
         "TP_DistancePoints": str(tp_points),
-        "StandardLimitSide": "0" if side == "buy" else "1",
-        "StandardLimitEntryPrice": _fmt_dec(entry),
         "MagicNumber": str(int(os.getenv("PEPPERSTONE_TRADER_MAGIC_NUMBER", "91001") or "91001")),
         "EnforceOneTradeAtATime": _pepperstone_trader_set_bool(True),
     }
+    if order_type == "limit":
+        values.update(
+            {
+                "StandardLimitSide": "0" if side == "buy" else "1",
+                "StandardLimitEntryPrice": _fmt_dec(entry),
+            }
+        )
+    else:
+        values.update(
+            {
+                "StandardMarketSide": "0" if side == "buy" else "1",
+                "StandardMarketExecutionToken": f"mkt_{uuid4().hex}",
+            }
+        )
     unknown = sorted(set(values) - set(PEPPERSTONE_TRADER_SET_INPUT_NAMES))
     if unknown:
         raise HTTPException(status_code=500, detail=f"Unexpected Trader.mq5 .set keys: {', '.join(unknown)}")
 
-    content = "\n".join(f"{key}={values[key]}" for key in PEPPERSTONE_TRADER_SET_INPUT_NAMES) + "\n"
+    content = "\n".join(f"{key}={values[key]}" for key in PEPPERSTONE_TRADER_SET_INPUT_NAMES if key in values) + "\n"
     symbol = str(payload.get("symbol") or "FX").strip().upper().replace("/", "_")
     symbol = re.sub(r"[^A-Z0-9_]+", "_", symbol).strip("_") or "FX"
     side_label = "BUY" if side == "buy" else "SELL"
+    order_label = "LIMIT" if order_type == "limit" else "MARKET"
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    filename = f"Pepperstone_Trader_{symbol}_{side_label}_{stamp}.set"
+    filename = f"Pepperstone_Trader_{symbol}_{side_label}_{order_label}_{stamp}.set"
     return content, filename
 
 
@@ -24946,11 +25455,6 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
             broker = broker or "oanda"
             if broker not in {"oanda", "pepperstone"}:
                 raise HTTPException(status_code=400, detail="broker must be oanda or pepperstone for FX.")
-            if broker == "pepperstone" and order_type != "limit":
-                raise HTTPException(
-                    status_code=400,
-                    detail="Pepperstone .set generation is available for limit orders only. Market orders are blocked because Trader.mq5 has no safe one-shot manual market strategy.",
-                )
         elif asset == "crypto":
             broker = "bybit"
 
@@ -25284,6 +25788,8 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
                 raise HTTPException(status_code=400, detail={"code": exc.code, "message": exc.message, "debug": exc.debug}) from exc
             response_payload: Dict[str, object] = {
                 "broker": "bybit",
+                "venue": "Bybit",
+                "resolved_venue": "Bybit",
                 "symbol": resolved_symbol,
                 "tick_size": _fmt_dec(tick_size),
                 "last_price": _fmt_dec(last),
@@ -25320,49 +25826,69 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
             }
             if warnings:
                 response_payload["warnings"] = warnings
-            calculation_context_id = str(payload.get("calculation_context_id") or "").strip() or f"calcctx_bybit_demo_{uuid4().hex}"
+            calculation_context_id = (
+                str(payload.get("calculation_context_id") or "").strip()
+                or f"calcctx_bybit_{account}_{uuid4().hex}"
+            )
             response_payload["calculation_context_id"] = calculation_context_id
-            if account == "demo":
-                try:
+            quote_context_payload = {
+                "calculation_context_id": calculation_context_id,
+                "broker": "bybit",
+                "venue": "Bybit",
+                "account": account,
+                "asset": "crypto",
+                "category": "linear",
+                "instrument": resolved_symbol,
+                "symbol": resolved_symbol,
+                "side": side,
+                "order_type": order_type,
+                "target_mode": target_mode,
+                "risk_mode": risk_mode,
+                "risk_value": _fmt_dec(risk_val),
+                "stop_loss_ticks": _fmt_dec(stop_ticks),
+                "take_profit_ticks": _fmt_dec(tp_ticks) if tp_ticks is not None else None,
+                "risk_reward": _fmt_dec(rr_requested) if rr_requested is not None else None,
+                "timeframe": _normalize_journal_timeframe(payload.get("timeframe") or ""),
+                "is_test_trade": is_test_trade,
+                "setup": normalized_setup,
+                "pattern": normalized_pattern,
+                "ema": normalized_ema,
+                "vwap": normalized_vwap,
+                "aths_atls": normalized_aths_atls,
+                "round_number": normalized_round_number,
+                "webhook_mode": "Yes" if webhook_enabled else "No",
+                "webhook_status": "Waiting" if webhook_enabled else "Not used",
+                "entry_price": response_payload.get("entry_price"),
+                "planned_entry_price": response_payload.get("entry_price"),
+                "stop_loss": response_payload.get("stop_price"),
+                "planned_stop_price": response_payload.get("stop_price"),
+                "take_profit": response_payload.get("target_price"),
+                "planned_target_price": response_payload.get("target_price"),
+                "quantity": response_payload.get("quantity"),
+                "notional": response_payload.get("notional"),
+                "last_price": response_payload.get("quote_last_price"),
+                "tick_size": response_payload.get("quote_tick_size"),
+                "quote_created_at_ms": response_payload.get("quote_created_at_ms"),
+                "status": "QUOTED",
+                "quote_payload": payload,
+                "quote_result": response_payload,
+            }
+            try:
+                if account == "demo":
                     _upsert_bybit_demo_calc_context(
-                        {
-                            "calculation_context_id": calculation_context_id,
-                            "broker": "bybit",
-                            "account": "demo",
-                            "asset": "crypto",
-                            "symbol": resolved_symbol,
-                            "side": side,
-                            "order_type": order_type,
-                            "target_mode": target_mode,
-                            "risk_mode": risk_mode,
-                            "risk_value": _fmt_dec(risk_val),
-                            "stop_loss_ticks": _fmt_dec(stop_ticks),
-                            "take_profit_ticks": _fmt_dec(tp_ticks) if tp_ticks is not None else None,
-                            "risk_reward": _fmt_dec(rr_requested) if rr_requested is not None else None,
-                            "timeframe": _normalize_journal_timeframe(payload.get("timeframe") or ""),
-                            "is_test_trade": is_test_trade,
-                            "setup": normalized_setup,
-                            "pattern": normalized_pattern,
-                            "ema": normalized_ema,
-                            "vwap": normalized_vwap,
-                            "aths_atls": normalized_aths_atls,
-                            "round_number": normalized_round_number,
-                            "entry_price": response_payload.get("entry_price"),
-                            "stop_loss": response_payload.get("stop_price"),
-                            "take_profit": response_payload.get("target_price"),
-                            "quantity": response_payload.get("quantity"),
-                            "notional": response_payload.get("notional"),
-                            "last_price": response_payload.get("quote_last_price"),
-                            "tick_size": response_payload.get("quote_tick_size"),
-                            "quote_created_at_ms": response_payload.get("quote_created_at_ms"),
-                            "status": "QUOTED",
-                            "quote_payload": payload,
-                            "quote_result": response_payload,
-                        },
+                        quote_context_payload,
                         require_durable=True,
+                        invalidate_cache=False,
                     )
-                    response_payload["calculation_context_saved"] = True
-                except Exception as exc:
+                else:
+                    _upsert_calculator_trade_context(
+                        quote_context_payload,
+                        require_durable=True,
+                        invalidate_cache=False,
+                    )
+                response_payload["calculation_context_saved"] = True
+            except Exception as exc:
+                if account == "demo":
                     raise HTTPException(
                         status_code=502,
                         detail=_build_bybit_demo_calc_context_save_error(
@@ -25375,7 +25901,18 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
                             pending_dependencies=pending_dependencies,
                         ),
                     ) from exc
+                raise HTTPException(
+                    status_code=502,
+                    detail={
+                        "code": "CALC_CONTEXT_SAVE_FAILED",
+                        "message": (
+                            "The quote was calculated, but its trade context could not be "
+                            "saved durably. Retry the quote before submitting."
+                        ),
+                    },
+                ) from exc
 
+            quote_version_invalidated = False
             if webhook_enabled:
                 pending_id = existing_pending_id or f"calc_bybit_{uuid4().hex[:16]}"
                 webhook_payload = {
@@ -25394,6 +25931,13 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
                     "level_anchor_mode": "actual_fill",
                     "timeframe": _normalize_journal_timeframe(payload.get("timeframe") or ""),
                     "is_test_trade": is_test_trade,
+                    "risk_mode": risk_mode,
+                    "risk_value": _fmt_dec(risk_val),
+                    "stop_loss_ticks": _fmt_dec(stop_ticks),
+                    "target_mode": target_mode,
+                    "take_profit_ticks": _fmt_dec(tp_ticks) if tp_ticks is not None else None,
+                    "risk_reward": _fmt_dec(rr_requested) if rr_requested is not None else None,
+                    "quote_created_at_ms": response_payload.get("quote_created_at_ms"),
                     "setup": normalized_setup,
                     "pattern": normalized_pattern,
                     "ema": normalized_ema,
@@ -25410,7 +25954,9 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
                 pending_item = _upsert_pending_webhook(
                     {
                         "id": pending_id,
-                        "category": "bybit",
+                        "asset": "crypto",
+                        "category": "linear",
+                        "resolved_broker": "bybit",
                         "account": account,
                         "instrument": resolved_symbol,
                         "side": side,
@@ -25421,6 +25967,16 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
                         "size": _fmt_dec(qty),
                         "timeframe": webhook_payload.get("timeframe") or "",
                         "is_test_trade": is_test_trade,
+                        "risk_mode": risk_mode,
+                        "risk_value": _fmt_dec(risk_val),
+                        "stop_loss_ticks": _fmt_dec(stop_ticks),
+                        "target_mode": target_mode,
+                        "take_profit_ticks": _fmt_dec(tp_ticks) if tp_ticks is not None else None,
+                        "risk_reward": _fmt_dec(rr_requested) if rr_requested is not None else None,
+                        "planned_entry_price": _fmt_dec(snapped_entry),
+                        "planned_stop_price": _fmt_dec(snapped_sl),
+                        "planned_target_price": _fmt_dec(snapped_tp),
+                        "quote_created_at_ms": response_payload.get("quote_created_at_ms"),
                         "setup": normalized_setup,
                         "pattern": normalized_pattern,
                         "ema": normalized_ema,
@@ -25432,14 +25988,17 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
                         "calculation_context_id": calculation_context_id,
                     }
                 )
+                quote_version_invalidated = True
                 response_payload["pending_webhook_id"] = pending_item.get("id")
                 response_payload["webhook_endpoint"] = "/api/calculator/webhook"
                 response_payload["webhook_endpoint_url"] = webhook_endpoint_url
                 response_payload["webhook_payload_json"] = json.dumps(webhook_payload, separators=(",", ":"))
                 if previous_pending_id and previous_pending_id != pending_id:
-                    _delete_pending_webhook(previous_pending_id)
+                    _delete_pending_webhook(previous_pending_id, invalidate_cache=False)
             elif previous_pending_id:
-                _delete_pending_webhook(previous_pending_id)
+                quote_version_invalidated = _delete_pending_webhook(previous_pending_id)
+            if not quote_version_invalidated:
+                _invalidate_open_orders_cache()
 
             response_payload["quote_latency_ms"] = int((time.perf_counter() - quote_started) * 1000)
             timings_ms["quote_total_ms"] = int(response_payload["quote_latency_ms"])
@@ -25599,6 +26158,8 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
             reward_home = max(Decimal("0"), (abs(tp - entry) - spread_quote) * gain_factor * units)
             response_payload = {
                     "broker": broker,
+                    "venue": "Pepperstone" if broker == "pepperstone" else "OANDA",
+                    "resolved_venue": "Pepperstone" if broker == "pepperstone" else "OANDA",
                     "symbol": symbol,
                     "tick_size": _fmt_dec(tick_size),
                     "entry_price": _fmt_dec_by_precision(entry, tick_size),
@@ -25636,6 +26197,67 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
                     "effective_rr_net": _fmt_dec_by_precision(effective_rr_net, Decimal("0.01")) if effective_rr_net is not None else None,
                     "fee_buffer_r": _fmt_dec_by_precision(fee_buffer_r, Decimal("0.01")) if fee_buffer_r is not None else None,
                 }
+            calculation_context_id = (
+                str(payload.get("calculation_context_id") or "").strip()
+                or f"calcctx_{broker}_{account}_{uuid4().hex}"
+            )
+            response_payload["calculation_context_id"] = calculation_context_id
+            response_payload["quote_created_at_ms"] = int(time.time() * 1000)
+            try:
+                _upsert_calculator_trade_context(
+                    {
+                        "calculation_context_id": calculation_context_id,
+                        "broker": broker,
+                        "venue": response_payload.get("venue"),
+                        "asset": "fx",
+                        "account": account,
+                        "category": "forex",
+                        "instrument": symbol,
+                        "symbol": symbol,
+                        "side": side,
+                        "order_type": order_type,
+                        "target_mode": target_mode,
+                        "risk_mode": risk_mode,
+                        "risk_value": _fmt_dec(risk_val),
+                        "stop_loss_ticks": _fmt_dec(stop_ticks),
+                        "take_profit_ticks": _fmt_dec(tp_ticks) if tp_ticks is not None else None,
+                        "risk_reward": _fmt_dec(rr_requested) if rr_requested is not None else None,
+                        "timeframe": _normalize_journal_timeframe(payload.get("timeframe") or ""),
+                        "is_test_trade": is_test_trade,
+                        "setup": normalized_setup,
+                        "pattern": normalized_pattern,
+                        "ema": normalized_ema,
+                        "vwap": normalized_vwap,
+                        "aths_atls": normalized_aths_atls,
+                        "round_number": normalized_round_number,
+                        "webhook_mode": "Yes" if webhook_enabled else "No",
+                        "webhook_status": "Waiting" if webhook_enabled else "Not used",
+                        "entry_price": response_payload.get("entry_price"),
+                        "planned_entry_price": response_payload.get("entry_price"),
+                        "stop_loss": response_payload.get("stop_price"),
+                        "planned_stop_price": response_payload.get("stop_price"),
+                        "take_profit": response_payload.get("target_price"),
+                        "planned_target_price": response_payload.get("target_price"),
+                        "quantity": response_payload.get("quantity"),
+                        "quote_created_at_ms": response_payload.get("quote_created_at_ms"),
+                        "status": "QUOTED",
+                    },
+                    require_durable=True,
+                    invalidate_cache=False,
+                )
+                response_payload["calculation_context_saved"] = True
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=502,
+                    detail={
+                        "code": "CALC_CONTEXT_SAVE_FAILED",
+                        "message": (
+                            "The quote was calculated, but its trade context could not be "
+                            "saved durably. Retry the quote before submitting."
+                        ),
+                    },
+                ) from exc
+            quote_version_invalidated = False
             if webhook_enabled:
                 pending_id = existing_pending_id or f"calc_oanda_{uuid4().hex[:16]}"
                 webhook_payload = {
@@ -25653,6 +26275,13 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
                     "planned_target_price": _fmt_dec(tp),
                     "timeframe": _normalize_journal_timeframe(payload.get("timeframe") or ""),
                     "is_test_trade": is_test_trade,
+                    "risk_mode": risk_mode,
+                    "risk_value": _fmt_dec(risk_val),
+                    "stop_loss_ticks": _fmt_dec(stop_ticks),
+                    "target_mode": target_mode,
+                    "take_profit_ticks": _fmt_dec(tp_ticks) if tp_ticks is not None else None,
+                    "risk_reward": _fmt_dec(rr_requested) if rr_requested is not None else None,
+                    "quote_created_at_ms": response_payload.get("quote_created_at_ms"),
                     "setup": normalized_setup,
                     "pattern": normalized_pattern,
                     "ema": normalized_ema,
@@ -25660,6 +26289,7 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
                     "aths_atls": normalized_aths_atls,
                     "round_number": normalized_round_number,
                     "pending_webhook_id": pending_id,
+                    "calculation_context_id": calculation_context_id,
                     "webhook_endpoint_url": webhook_endpoint_url,
                     "webhook_origin_host": webhook_origin_host,
                     "webhook_origin_profile": webhook_origin_profile,
@@ -25668,7 +26298,9 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
                 pending_item = _upsert_pending_webhook(
                     {
                         "id": pending_id,
-                        "category": "oanda",
+                        "asset": "fx",
+                        "category": "forex",
+                        "resolved_broker": "oanda",
                         "account": account,
                         "instrument": symbol,
                         "side": side,
@@ -25679,6 +26311,16 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
                         "size": _fmt_dec(units),
                         "timeframe": webhook_payload.get("timeframe") or "",
                         "is_test_trade": is_test_trade,
+                        "risk_mode": risk_mode,
+                        "risk_value": _fmt_dec(risk_val),
+                        "stop_loss_ticks": _fmt_dec(stop_ticks),
+                        "target_mode": target_mode,
+                        "take_profit_ticks": _fmt_dec(tp_ticks) if tp_ticks is not None else None,
+                        "risk_reward": _fmt_dec(rr_requested) if rr_requested is not None else None,
+                        "planned_entry_price": _fmt_dec(entry),
+                        "planned_stop_price": _fmt_dec(sl),
+                        "planned_target_price": _fmt_dec(tp),
+                        "quote_created_at_ms": response_payload.get("quote_created_at_ms"),
                         "setup": normalized_setup,
                         "pattern": normalized_pattern,
                         "ema": normalized_ema,
@@ -25687,16 +26329,20 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
                         "round_number": normalized_round_number,
                         "status": "WAITING",
                         "enabled": True,
+                        "calculation_context_id": calculation_context_id,
                     }
                 )
+                quote_version_invalidated = True
                 response_payload["pending_webhook_id"] = pending_item.get("id")
                 response_payload["webhook_endpoint"] = "/api/calculator/webhook"
                 response_payload["webhook_endpoint_url"] = webhook_endpoint_url
                 response_payload["webhook_payload_json"] = json.dumps(webhook_payload, separators=(",", ":"))
                 if previous_pending_id and previous_pending_id != pending_id:
-                    _delete_pending_webhook(previous_pending_id)
+                    _delete_pending_webhook(previous_pending_id, invalidate_cache=False)
             elif previous_pending_id:
-                _delete_pending_webhook(previous_pending_id)
+                quote_version_invalidated = _delete_pending_webhook(previous_pending_id)
+            if not quote_version_invalidated:
+                _invalidate_open_orders_cache()
             response_payload["quote_latency_ms"] = int((time.perf_counter() - quote_started) * 1000)
             response_payload["upstream_timings_ms"] = timings_ms
             CALCULATOR_LOGGER.info("CALCULATOR_QUOTE_TIMING asset=%s account=%s symbol=%s total_ms=%s timings=%s", asset, account, symbol, response_payload["quote_latency_ms"], timings_ms)
@@ -25898,9 +26544,9 @@ async def calculator_webhook(request: Request, payload: Dict[str, object] = Body
             result = await _place_bybit_order(
                 canonical,
                 request_id=request_id,
+                invalidate_cache=not bool(pending_id),
             )
             bybit_result = result.get("order") if isinstance(result, dict) else {}
-            _invalidate_open_orders_cache()
             live_state_present = False
             try:
                 live_payload = await list_open_orders(force=True)
@@ -25968,6 +26614,8 @@ async def calculator_webhook(request: Request, payload: Dict[str, object] = Body
             return JSONResponse({
                 "ok": True,
                 "broker": "bybit",
+                "venue": "Bybit",
+                "resolved_venue": "Bybit",
                 "result": result,
                 "journal_context_saved": result.get("journal_context_saved", True),
                 "warnings": result.get("warnings"),
@@ -25982,6 +26630,8 @@ async def calculator_webhook(request: Request, payload: Dict[str, object] = Body
             return JSONResponse({
                 "ok": True,
                 "broker": "oanda",
+                "venue": "OANDA",
+                "resolved_venue": "OANDA",
                 "result": result,
                 "journal_context_saved": result.get("journal_context_saved", True),
                 "warnings": result.get("warnings"),
@@ -26251,6 +26901,12 @@ async def calculator_webhook_diagnostic(pending_webhook_id: str) -> JSONResponse
 @app.post("/api/calculator/submit")
 async def calculator_submit(payload: Dict[str, object] = Body(default={})) -> JSONResponse:
     asset = str(payload.get("asset") or "").strip().lower()
+    requested_broker = str(payload.get("broker") or "").strip().lower()
+    if asset == "fx" and requested_broker == "pepperstone":
+        raise HTTPException(
+            status_code=400,
+            detail="Pepperstone orders are user-mediated through a downloaded MT5 .set file; Render cannot submit them.",
+        )
     try:
         normalized_setup = _normalize_setup(payload.get("setup"))
         normalized_pattern = _normalize_pattern(payload.get("pattern"))
@@ -26304,6 +26960,8 @@ async def calculator_submit(payload: Dict[str, object] = Body(default={})) -> JS
             return JSONResponse({
                 "ok": True,
                 "broker": "bybit",
+                "venue": "Bybit",
+                "resolved_venue": "Bybit",
                 "result": result,
                 "submit_level_adjustments": canonical.get("_submit_level_adjustments"),
                 "journal_context_saved": result.get("journal_context_saved", True),
@@ -26318,6 +26976,8 @@ async def calculator_submit(payload: Dict[str, object] = Body(default={})) -> JS
             return JSONResponse({
                 "ok": True,
                 "broker": "oanda",
+                "venue": "OANDA",
+                "resolved_venue": "OANDA",
                 "result": result,
                 "journal_context_saved": result.get("journal_context_saved", True),
                 "warnings": result.get("warnings"),
@@ -26522,10 +27182,12 @@ OPEN_ORDERS_TEMPLATE = """<!doctype html>
     .btn { border: 1px solid #334155; border-radius: 8px; background: #0f172a; color: #e5e7eb; padding: 7px 12px; cursor: pointer; }
     .btn:hover { background: #1e293b; }
     .table-wrap { overflow: auto; border: 1px solid #1f2937; border-radius: 10px; background: #0b1220; }
-    table { border-collapse: collapse; width: 100%; min-width: 1400px; }
+    table { border-collapse: collapse; width: 100%; min-width: 3400px; }
     th, td { padding: 8px 10px; border-bottom: 1px solid #1f2937; white-space: nowrap; text-align: left; font-size: 13px; }
     th { position: sticky; top: 0; z-index: 2; background: #0f172a; color: #93c5fd; }
     tr:hover td { background: #0f172a; }
+    tr.stale-row td { background: rgba(146, 64, 14, .18); color: #fde68a; }
+    tr.stale-row:hover td { background: rgba(146, 64, 14, .28); }
     .muted { color: #94a3b8; font-size: 13px; }
     .action-btn { border: 1px solid #334155; border-radius: 8px; background: #1f2937; color: #e5e7eb; padding: 5px 10px; cursor: pointer; }
     .action-btn[disabled] { opacity: .6; cursor: default; }
@@ -26557,14 +27219,33 @@ OPEN_ORDERS_TEMPLATE = """<!doctype html>
         <table id="open-orders-table">
           <thead>
             <tr>
-              <th>Broker</th>
+              <th>Broker / Venue</th>
               <th>Account</th>
+              <th>Asset</th>
               <th>Category</th>
+              <th>Side</th>
+              <th>Order Type</th>
               <th>Instrument</th>
+              <th>Stop-loss Ticks</th>
+              <th>Target Mode</th>
+              <th>Take-profit Ticks</th>
+              <th>Risk Mode</th>
+              <th>Risk Value</th>
+              <th>Risk / Reward</th>
               <th>Timeframe</th>
               <th>Test</th>
+              <th>Setup</th>
+              <th>Pattern</th>
+              <th>EMA</th>
+              <th>VWAP</th>
+              <th>ATH / ATL</th>
+              <th>Round Number</th>
+              <th>Webhook Mode</th>
+              <th>Webhook Status</th>
+              <th>Planned Entry</th>
+              <th>Planned Stop</th>
+              <th>Planned Target</th>
               <th>Type</th>
-              <th>Side</th>
               <th>Size</th>
               <th>Entry / Order</th>
               <th>Current / Trigger</th>
@@ -29107,8 +29788,12 @@ async def proxy_app(script_name: str, request: Request, path: str = "") -> Respo
     if (
         APP_PROFILE == "render"
         and script.name == "fxweekend-clone"
-        and request.method.upper() == "POST"
-        and path.strip("/") == "api/config"
+        and request.method.upper() in {"POST", "PUT", "PATCH", "DELETE"}
+        and (
+            path.strip("/") == "api/config"
+            or path.strip("/") == "api/news"
+            or path.strip("/").startswith("api/news/")
+        )
     ):
         current_settings = _load_json_file(
             FXWEEKEND_SETTINGS_PATH, FXWEEKEND_DEFAULT_SETTINGS
@@ -30542,6 +31227,7 @@ def _reconcile_pending_webhooks_registry(
     open_items: Optional[List[Dict[str, object]]] = None,
     *,
     prune_orphan_contexts: bool = True,
+    invalidate_cache: bool = True,
 ) -> Tuple[List[Dict[str, object]], Dict[str, int]]:
     diagnostics: Dict[str, int] = {}
     pending_items = _load_pending_webhooks()
@@ -30553,7 +31239,8 @@ def _reconcile_pending_webhooks_registry(
     )
     if changed:
         _save_pending_webhooks(cleaned)
-        _invalidate_open_orders_cache()
+        if invalidate_cache:
+            _invalidate_open_orders_cache()
     return cleaned, diagnostics
 
 
@@ -30605,6 +31292,11 @@ async def list_open_orders(force: bool = Query(False)) -> JSONResponse:
             fresh["warning_count"] = len(fresh.get("warnings") or [])
             return JSONResponse(fresh)
 
+        # This version describes the state for which this broker read began. If
+        # another durable transition invalidates the cache while reads are in
+        # flight, the returned payload keeps this older version and is not
+        # cached. The browser will observe the newer version and render again.
+        collection_version = int(_OPEN_ORDERS_CACHE.get("version") or 0)
         items: List[Dict[str, object]] = []
         errors: List[Dict[str, str]] = []
         warnings: List[Dict[str, str]] = []
@@ -30769,6 +31461,132 @@ async def list_open_orders(force: bool = Query(False)) -> JSONResponse:
                     and configured_account_id in refreshed_account_ids
                     and account_error_counts.get(configured_account_id, 0) == 0
                 )
+                if configured_account_refreshed and _oanda_discovery_is_http_401(discovery_exc):
+                    BYBIT_LOGGER.warning(
+                        "OANDA_DISCOVERY_AUTH_ANOMALY mode=%s configured_account=%s "
+                        "configured_endpoints_ok=true retry_delay=%.2fs",
+                        account,
+                        configured_account_id,
+                        _OANDA_DISCOVERY_AUTH_ANOMALY_RETRY_DELAY_SECONDS,
+                    )
+                    await asyncio.sleep(_OANDA_DISCOVERY_AUTH_ANOMALY_RETRY_DELAY_SECONDS)
+                    retry_owned_accounts: List[Dict[str, object]] = []
+                    try:
+                        retry_discovery = await _get_cached_oanda_accounts(
+                            base_url=cfg["base_url"],
+                            api_key=cfg["token"],
+                            allow_auth_anomaly_stale=True,
+                        )
+                        if isinstance(retry_discovery, OandaAccountDiscoveryResult):
+                            retry_owned_accounts = list(retry_discovery.accounts)
+                            discovery_exc = retry_discovery.discovery_error
+                            stale_discovery_fetched_at = (
+                                retry_discovery.fetched_at
+                                if retry_discovery.cache_state == "stale"
+                                else None
+                            )
+                        else:
+                            retry_owned_accounts = list(retry_discovery or [])
+                            discovery_exc = None
+                            stale_discovery_fetched_at = None
+                    except Exception as retry_exc:
+                        discovery_exc = retry_exc
+                        stale_discovery_fetched_at = None
+
+                    if discovery_exc is None:
+                        BYBIT_LOGGER.info(
+                            "OANDA_DISCOVERY_AUTH_ANOMALY_RECOVERED mode=%s configured_account=%s",
+                            account,
+                            configured_account_id,
+                        )
+
+                    retry_account_ids: List[str] = []
+                    for acct in retry_owned_accounts:
+                        acct_id = str(acct.get("id") or "").strip()
+                        if not acct_id or acct_id in seen_account_ids:
+                            continue
+                        seen_account_ids.add(acct_id)
+                        account_ids.append(acct_id)
+                        retry_account_ids.append(acct_id)
+                        account_tags[acct_id] = [
+                            str(tag).upper() for tag in (acct.get("tags") or [])
+                        ]
+
+                    if retry_account_ids:
+                        retry_tasks = [
+                            _collect_oanda_open_items(
+                                base_url=cfg["base_url"],
+                                account_id=acct_id,
+                                api_key=cfg["token"],
+                                account_context=account,
+                            )
+                            for acct_id in retry_account_ids
+                        ]
+                        retry_results = await asyncio.gather(
+                            *retry_tasks, return_exceptions=True
+                        )
+                        retry_items: List[Dict[str, object]] = []
+                        retry_errors: List[Dict[str, str]] = []
+                        for acct_id, retry_result in zip(retry_account_ids, retry_results):
+                            if isinstance(retry_result, Exception):
+                                retry_errors.append(
+                                    {
+                                        "broker": "OANDA",
+                                        "account": account,
+                                        "category": "forex",
+                                        "source_type": "account data",
+                                        "endpoint": "/v3/accounts/{accountID}/openItems",
+                                        "account_id": acct_id,
+                                        "message": _format_source_exception(
+                                            retry_result,
+                                            broker="OANDA",
+                                            account=account,
+                                            endpoint="/v3/accounts/{accountID}/openItems",
+                                            account_id=acct_id,
+                                        ),
+                                    }
+                                )
+                                continue
+                            if not isinstance(retry_result, dict):
+                                retry_errors.append(
+                                    {
+                                        "broker": "OANDA",
+                                        "account": account,
+                                        "category": "forex",
+                                        "source_type": "account data",
+                                        "endpoint": "/v3/accounts/{accountID}/openItems",
+                                        "account_id": acct_id,
+                                        "message": "OANDA account refresh returned an invalid result after discovery retry.",
+                                    }
+                                )
+                                continue
+                            result_endpoint_errors = retry_result.get("errors") or []
+                            for endpoint_error in result_endpoint_errors:
+                                endpoint_error = endpoint_error if isinstance(endpoint_error, dict) else {"message": endpoint_error}
+                                retry_errors.append(
+                                    {
+                                        "broker": "OANDA",
+                                        "account": account,
+                                        "category": "forex",
+                                        "source_type": "account data",
+                                        "endpoint": str(endpoint_error.get("endpoint") or "/v3/accounts/{accountID}/openItems"),
+                                        "account_id": acct_id,
+                                        "message": str(endpoint_error.get("message") or "Unknown OANDA endpoint error"),
+                                    }
+                                )
+                            tags = account_tags.get(acct_id, [])
+                            for row in retry_result.get("items") or []:
+                                if not isinstance(row, dict):
+                                    continue
+                                row["account_id"] = acct_id
+                                if "MT4" in tags:
+                                    row["account_label_suffix"] = "MT4"
+                                retry_items.append(row)
+                        oanda_items.extend(retry_items)
+                        oanda_errors.extend(retry_errors)
+                        items.extend(retry_items)
+                        errors.extend(retry_errors)
+
                 if discovery_exc is not None:
                     warnings.append(
                         _oanda_discovery_warning(
@@ -30818,28 +31636,81 @@ async def list_open_orders(force: bool = Query(False)) -> JSONResponse:
                     api_key=api_key,
                     api_secret=api_secret,
                     account_context=account,
+                    key_source=_key_source,
                 )
-                items.extend(result.get("items", []))
-                errors.extend(result.get("errors", []))
+                result_items = [
+                    dict(row)
+                    for row in (result.get("items", []) or [])
+                    if isinstance(row, dict)
+                ]
+                result_errors = [
+                    dict(row)
+                    for row in (result.get("errors", []) or [])
+                    if isinstance(row, dict)
+                ]
+                source_key = f"bybit:{account}"
+                if bool(result.get("auth_failed")):
+                    stale_items = [
+                        dict(row)
+                        for row in _OPEN_ORDERS_LAST_GOOD_ITEMS.get(source_key, [])
+                        if isinstance(row, dict)
+                    ]
+                    for row in stale_items:
+                        row["source_stale"] = True
+                        row["stale_reason"] = (
+                            "Bybit authentication failed; showing last-known-good broker state."
+                        )
+                    items.extend(stale_items)
+                else:
+                    items.extend(result_items)
+                    if not result_errors:
+                        _OPEN_ORDERS_LAST_GOOD_ITEMS[source_key] = [
+                            dict(row) for row in result_items
+                        ]
+                errors.extend(result_errors)
                 BYBIT_LOGGER.info(
-                    "OPEN_ORDERS bybit account=%s items=%s errors=%s",
+                    "OPEN_ORDERS bybit account=%s items=%s errors=%s auth_failed=%s",
                     account,
-                    len(result.get("items", [])),
-                    len(result.get("errors", [])),
+                    len(result_items),
+                    len(result_errors),
+                    bool(result.get("auth_failed")),
                 )
             except Exception as exc:
-                errors.append(
-                    _bybit_open_source_error(
-                        exc,
-                        account=account,
-                        category="unknown",
-                        source_type="collection",
-                        endpoint="open-orders collection",
-                        settlement_coin="n/a",
-                        api_key=api_key,
-                        api_secret=api_secret,
-                    )
+                source_error = _bybit_open_source_error(
+                    exc,
+                    account=account,
+                    category="account",
+                    source_type=(
+                        "credential readiness"
+                        if isinstance(exc, BybitCredentialConflictError)
+                        else "collection"
+                    ),
+                    endpoint="open-orders collection",
+                    settlement_coin="n/a",
+                    api_key=api_key,
+                    api_secret=api_secret,
                 )
+                if isinstance(exc, BybitCredentialConflictError):
+                    source_error.update(
+                        {
+                            "auth_failure": "true",
+                            "auth_classification": "credential_source_conflict",
+                            "credential_source": "CONFLICT",
+                            "pair_complete": "false",
+                        }
+                    )
+                errors.append(source_error)
+                stale_items = [
+                    dict(row)
+                    for row in _OPEN_ORDERS_LAST_GOOD_ITEMS.get(f"bybit:{account}", [])
+                    if isinstance(row, dict)
+                ]
+                for row in stale_items:
+                    row["source_stale"] = True
+                    row["stale_reason"] = (
+                        "Bybit authentication/configuration failed; showing last-known-good broker state."
+                    )
+                items.extend(stale_items)
 
         live_broker_items = list(items)
         pending_diagnostics: Dict[str, int] = {}
@@ -31077,12 +31948,15 @@ async def list_open_orders(force: bool = Query(False)) -> JSONResponse:
             "stale": bool(errors),
             "updated_at": updated_at,
             "last_success_at": _OPEN_ORDERS_CACHE.get("last_success_at"),
-            "version": int(_OPEN_ORDERS_CACHE.get("version") or 0),
+            "version": collection_version,
         }
 
-        _OPEN_ORDERS_CACHE["payload"] = dict(payload)
-        _OPEN_ORDERS_CACHE["expires_at"] = time.time() + _OPEN_ORDERS_CACHE_TTL_SECONDS
-        if not errors:
+        version_unchanged = int(_OPEN_ORDERS_CACHE.get("version") or 0) == collection_version
+        payload["refresh_superseded"] = not version_unchanged
+        if version_unchanged:
+            _OPEN_ORDERS_CACHE["payload"] = dict(payload)
+            _OPEN_ORDERS_CACHE["expires_at"] = time.time() + _OPEN_ORDERS_CACHE_TTL_SECONDS
+        if not errors and version_unchanged:
             _OPEN_ORDERS_CACHE["last_success_at"] = updated_at
             payload["last_success_at"] = updated_at
 
@@ -31563,7 +32437,7 @@ async def close_open_order(item: Dict[str, Any] = Body(...)) -> JSONResponse:
                 pending_webhook_id=item_id,
                 status="CANCELLED",
             )
-            _delete_pending_webhook(item_id)
+            _delete_pending_webhook(item_id, invalidate_cache=False)
             action = "cancel"
             action_requested = True
         elif broker == "bybit":
@@ -35333,7 +36207,7 @@ TRADING_JOURNAL_ACTIONS_TEMPLATE = """<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>Trading Journal Workspace</title>
 <style>
-body{margin:0;background:#0b1220;color:#e2e8f0;font-family:Inter,system-ui,sans-serif}.workspace{min-height:100vh;display:grid;grid-template-columns:minmax(300px,340px) minmax(0,1fr);gap:18px;align-items:start;padding:18px;box-sizing:border-box}.controls,.equity-panel{background:#111c30;border:1px solid #334155;border-radius:14px;padding:16px;box-sizing:border-box}.controls{display:flex;flex-direction:column;gap:12px}.equity-panel{min-width:0;min-height:calc(100vh - 36px);display:flex;flex-direction:column}.equity-toolbar{display:flex;gap:12px;align-items:end;flex-wrap:wrap;margin-bottom:12px}.equity-toolbar label{display:flex;flex-direction:column;gap:5px;color:#94a3b8;font-size:12px}.equity-toolbar select{min-width:190px}button{padding:12px 14px;border-radius:10px;border:1px solid #334155;background:#1f2937;color:#e2e8f0;font-weight:700;cursor:pointer}button:disabled{opacity:.55;cursor:wait}select{background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:7px;padding:8px}.drop-zone{border:1px dashed #475569;border-radius:12px;padding:16px;text-align:center;color:#94a3b8;background:#0f172a;cursor:pointer}.drop-zone.drag-over{border-color:#38bdf8;background:#082f49;color:#e0f2fe}.status{margin-top:8px;white-space:pre-wrap;color:#94a3b8;overflow-wrap:anywhere}.equity-summary{display:flex;gap:16px;flex-wrap:wrap;margin:4px 0 12px}.equity-summary strong{font-size:18px}.equity-chart-wrap{position:relative;flex:1;min-width:0;min-height:420px;border:1px solid #26364e;border-radius:10px;background:#0f172a;padding:8px;box-sizing:border-box}.equity-canvas{width:100%;max-width:100%;height:100%;min-height:400px;display:block}.equity-state{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#94a3b8;padding:20px;text-align:center}.equity-state.error{color:#fca5a5}@media(max-width:780px){.workspace{grid-template-columns:minmax(0,1fr);padding:10px}.equity-panel{min-height:560px}.equity-chart-wrap{min-height:380px}}
+body{margin:0;background:#0b1220;color:#e2e8f0;font-family:Inter,system-ui,sans-serif}.workspace{min-height:100vh;display:grid;grid-template-columns:minmax(300px,340px) minmax(0,1fr);gap:18px;align-items:start;padding:18px;box-sizing:border-box}.controls,.equity-panel{background:#111c30;border:1px solid #334155;border-radius:14px;padding:16px;box-sizing:border-box}.controls{display:flex;flex-direction:column;gap:12px}.equity-panel{min-width:0;min-height:calc(100vh - 36px);display:flex;flex-direction:column}.equity-toolbar{display:flex;gap:12px;align-items:end;flex-wrap:wrap;margin-bottom:12px}.equity-toolbar label{display:flex;flex-direction:column;gap:5px;color:#94a3b8;font-size:12px}.equity-toolbar select{min-width:190px}button{padding:12px 14px;border-radius:10px;border:1px solid #334155;background:#1f2937;color:#e2e8f0;font-weight:700;cursor:pointer}button:disabled{opacity:.55;cursor:wait}select{background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:7px;padding:8px}.drop-zone{border:1px dashed #475569;border-radius:12px;padding:16px;text-align:center;color:#94a3b8;background:#0f172a;cursor:pointer}.drop-zone.drag-over{border-color:#38bdf8;background:#082f49;color:#e0f2fe}.status{margin-top:8px;white-space:pre-wrap;color:#94a3b8;overflow-wrap:anywhere}.equity-summary{display:flex;gap:16px;flex-wrap:wrap;margin:4px 0 12px}.equity-summary strong{font-size:18px}.equity-chart-wrap{position:relative;flex:1;min-width:0;min-height:420px;border:1px solid #26364e;border-radius:10px;background:#0f172a;padding:8px;box-sizing:border-box}.equity-chart-stack{position:relative;width:100%;height:100%;min-height:400px}.equity-canvas{width:100%;max-width:100%;height:100%;min-height:400px;display:block}.equity-overlay-canvas{position:absolute;inset:0;z-index:2;touch-action:pan-y}.equity-state{position:absolute;inset:0;z-index:3;pointer-events:none;display:flex;align-items:center;justify-content:center;color:#94a3b8;padding:20px;text-align:center}.equity-state.error{color:#fca5a5}.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}@media(max-width:780px){.workspace{grid-template-columns:minmax(0,1fr);padding:10px}.equity-panel{min-height:560px}.equity-chart-wrap{min-height:380px}}
 </style></head>
 <body><main class="workspace">
 <section class="controls" aria-label="Journal controls">
@@ -35347,7 +36221,7 @@ body{margin:0;background:#0b1220;color:#e2e8f0;font-family:Inter,system-ui,sans-
 <section class="equity-panel" aria-label="Account equity curve">
   <div class="equity-toolbar"><label>Equity account<select id="journal-equity-account"><option value="BINANCE">Binance</option><option value="BYBIT">Bybit</option><option value="OANDA DEMO">Oanda demo</option><option value="OANDA LIVE">Oanda live</option><option value="PEPPERSTONE DEMO">Pepperstone demo</option><option value="PEPPERSTONE LIVE">Pepperstone live</option></select></label></div>
   <div id="journal-equity-summary" class="equity-summary"></div>
-  <div class="equity-chart-wrap"><canvas id="journal-equity-canvas" class="equity-canvas"></canvas><div id="journal-equity-state" class="equity-state">Loading equity data…</div></div>
+  <div class="equity-chart-wrap"><div class="equity-chart-stack"><canvas id="journal-equity-canvas" class="equity-canvas" aria-label="Account equity curve"></canvas><canvas id="journal-equity-overlay-canvas" class="equity-canvas equity-overlay-canvas" aria-label="Interactive equity crosshair"></canvas></div><div id="journal-equity-state" class="equity-state">Loading equity data…</div><div id="journal-equity-hover-live" class="sr-only" aria-live="polite" aria-atomic="true"></div></div>
 </section>
 </main><script src="/static/trading_journal_actions.js?v={{TRADING_JOURNAL_ACTIONS_JS_VERSION}}"></script><script src="/static/trading_journal_equity_curve.js?v={{TRADING_JOURNAL_EQUITY_JS_VERSION}}"></script></body></html>"""
 

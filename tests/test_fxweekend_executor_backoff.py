@@ -91,7 +91,15 @@ def test_300_second_backoff_refreshes_heartbeat_without_changing_process_identit
     )
     monkeypatch.setattr(fx, "_atomic_json_write", lambda *_args, **_kwargs: None)
     sleeps = []
-    monkeypatch.setattr(fx.time, "sleep", lambda seconds: sleeps.append(seconds))
+    class NeverWake:
+        def wait(self, seconds):
+            sleeps.append(seconds)
+            return False
+
+        def clear(self):
+            return None
+
+    monkeypatch.setattr(fx, "_scheduler_wakeup", NeverWake())
     heartbeat_times = iter(
         (
             fx.BRISBANE_TZ.localize(datetime(2026, 7, 27, 18, 7, 18))

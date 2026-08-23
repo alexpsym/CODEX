@@ -5,8 +5,10 @@ These utilities are shared by OANDA-related services in this repository.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
+import re
 
 from pathlib import Path
 from shared.env_bootstrap import load_master_env
@@ -18,7 +20,7 @@ import requests
 
 LOGGER = logging.getLogger(__name__)
 
-FXWEEKEND_SETTINGS_SCHEMA_VERSION = 1
+FXWEEKEND_SETTINGS_SCHEMA_VERSION = 2
 FXWEEKEND_DEFAULT_ACCOUNT_MODES = ("demo", "live")
 
 
@@ -27,9 +29,10 @@ def upgrade_fxweekend_settings_schema(
 ) -> Tuple[Dict[str, Any], bool]:
     """Upgrade legacy FX Weekend settings without resetting current choices.
 
-    Schema-less and older payloads predate Demo coverage, so their selected
-    account modes are upgraded once to Demo + Live. Once the current schema is
-    present, the user's selected subset (including an empty subset) is retained.
+    Schema-less payloads predate Demo coverage, so their selected account modes
+    are upgraded once to Demo + Live. Schema version 2 adds durable news release
+    entries. Existing version-1 account choices (including an empty subset) are
+    retained while receiving an empty news list.
     """
 
     source = dict(data) if isinstance(data, dict) else {}
@@ -40,19 +43,22 @@ def upgrade_fxweekend_settings_schema(
     schema_migrated = source_version < FXWEEKEND_SETTINGS_SCHEMA_VERSION
 
     upgraded = dict(source)
+    if source_version < 1:
+        upgraded["account_modes"] = list(FXWEEKEND_DEFAULT_ACCOUNT_MODES)
+    else:
+        raw_modes = upgraded.get("account_modes")
+        if not isinstance(raw_modes, (list, tuple, set)):
+            raw_modes = FXWEEKEND_DEFAULT_ACCOUNT_MODES
+        selected = {str(item).strip().lower() for item in raw_modes}
+        upgraded["account_modes"] = [
+            mode for mode in FXWEEKEND_DEFAULT_ACCOUNT_MODES if mode in selected
+        ]
+
+    if not isinstance(upgraded.get("news_events"), list):
+        upgraded["news_events"] = []
     if schema_migrated:
         upgraded["schema_version"] = FXWEEKEND_SETTINGS_SCHEMA_VERSION
-        upgraded["account_modes"] = list(FXWEEKEND_DEFAULT_ACCOUNT_MODES)
-        return upgraded, True
-
-    raw_modes = upgraded.get("account_modes")
-    if not isinstance(raw_modes, (list, tuple, set)):
-        raw_modes = FXWEEKEND_DEFAULT_ACCOUNT_MODES
-    selected = {str(item).strip().lower() for item in raw_modes}
-    upgraded["account_modes"] = [
-        mode for mode in FXWEEKEND_DEFAULT_ACCOUNT_MODES if mode in selected
-    ]
-    return upgraded, False
+    return upgraded, schema_migrated
 
 
 def _credential_suffix(mode: str) -> str:
@@ -176,8 +182,25 @@ def resolve_account_config(mode: str = "live") -> Dict[str, str]:
     }
 
 
-def _token_last4(value: str) -> str:
-    return value[-4:] if value else ""
+def _credential_fingerprint(value: str) -> str:
+    """Return a non-reversible diagnostic identifier without exposing token characters."""
+
+    token = str(value or "")
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()[:12] if token else "unavailable"
+
+
+def _safe_diagnostic(value: Any, *, credential: str = "", limit: int = 200) -> str:
+    text = str(value or "")
+    if credential:
+        text = text.replace(credential, "[redacted]")
+    text = re.sub(r"(?i)\bBearer\s+[^\s,;\"']+", "Bearer [redacted]", text)
+    text = re.sub(
+        r"(?i)\b(api[_-]?key|api[_-]?secret|access[_-]?token|token|authorization)"
+        r"\s*[\"']?\s*([=:])\s*(?:\"[^\"]*\"|'[^']*'|[^,\s;&}]+)",
+        r"\1\2[redacted]",
+        text,
+    )
+    return " ".join(text.split())[: max(0, int(limit))]
 
 
 def _ensure_endpoint(endpoint: str) -> str:
@@ -199,23 +222,23 @@ def _preflight_account_check(
         resp = requests.get(url, headers=headers, timeout=10)
     except Exception as exc:  # pragma: no cover - network dependent
         LOGGER.warning(
-            "OANDA_PREFLIGHT_ERROR mode=%s base=%s account_id=%s token_last4=%s error=%s",
+            "OANDA_PREFLIGHT_ERROR mode=%s base=%s account_id=%s credential_fingerprint=%s error=%s",
             mode,
             base_url,
             account_id,
-            _token_last4(api_key),
-            exc,
+            _credential_fingerprint(api_key),
+            _safe_diagnostic(exc, credential=api_key),
         )
         return None
     if not resp.ok:
         LOGGER.warning(
-            "OANDA_PREFLIGHT_FAIL mode=%s base=%s account_id=%s token_last4=%s status=%s body=%s",
+            "OANDA_PREFLIGHT_FAIL mode=%s base=%s account_id=%s credential_fingerprint=%s status=%s body=%s",
             mode,
             base_url,
             account_id,
-            _token_last4(api_key),
+            _credential_fingerprint(api_key),
             resp.status_code,
-            resp.text[:200],
+            _safe_diagnostic(resp.text, credential=api_key),
         )
         return None
     payload = resp.json()
@@ -245,15 +268,15 @@ def _request(
         if resp.status_code in {401, 403}:
             account_id = account_id or ""
             LOGGER.warning(
-                "OANDA_AUTH_FAIL mode=%s base=%s account_id=%s token_last4=%s endpoint=%s url=%s status=%s body=%s",
+                "OANDA_AUTH_FAIL mode=%s base=%s account_id=%s credential_fingerprint=%s endpoint=%s url=%s status=%s body=%s",
                 mode,
                 base_url,
                 account_id,
-                _token_last4(api_key),
+                _credential_fingerprint(api_key),
                 endpoint,
                 url,
                 resp.status_code,
-                resp.text[:200],
+                _safe_diagnostic(resp.text, credential=api_key),
             )
             available_accounts = None
             if account_id:
@@ -277,7 +300,7 @@ def _request(
             f"Status: {resp.status_code}. "
             "Token/account/environment mismatch; check "
             "OANDA_API_KEY_DEMO + OANDA_ACCOUNT_ID_DEMO vs practice base URL. "
-            f"Details: {resp.text}"
+            f"Details: {_safe_diagnostic(resp.text, credential=api_key)}"
         )
     return resp.json()
 

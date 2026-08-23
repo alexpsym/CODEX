@@ -1,0 +1,22 @@
+//@version=6
+indicator("ATR Percentage", shorttitle="ATR %", overlay=false, format=format.percent, precision=4)
+
+settingsGroup = "ATR Percentage"
+length = input.int(14, "ATR length", minval=1, group=settingsGroup)
+plotColor = input.color(color.orange, "Plot colour", group=settingsGroup)
+plotWidth = input.int(2, "Plot width", minval=1, maxval=5, group=settingsGroup)
+thresholdPercent = input.float(1.0, "Alert threshold (%)", minval=0.0, step=0.05, group=settingsGroup)
+
+atrValue = ta.atr(length)
+atrPercent = na(close) or close == 0.0 ? na : atrValue / close * 100.0
+
+plot(atrPercent, "ATR %", color=plotColor, linewidth=plotWidth, format=format.percent)
+plot(thresholdPercent, "Alert threshold %", color=color.new(color.gray, 35), linewidth=1, format=format.percent)
+
+crossedAboveThresholdRaw = ta.crossover(atrPercent, thresholdPercent)
+crossedBelowThresholdRaw = ta.crossunder(atrPercent, thresholdPercent)
+crossedAboveThreshold = barstate.isconfirmed and crossedAboveThresholdRaw
+crossedBelowThreshold = barstate.isconfirmed and crossedBelowThresholdRaw
+
+alertcondition(crossedAboveThreshold, "ATR % - Crossed Above Threshold", 'ATR % crossed above the threshold on {{exchange}}:{{ticker}} ({{interval}}) at {{time}}. ATR percentage: {{plot("ATR %")}}%.')
+alertcondition(crossedBelowThreshold, "ATR % - Crossed Below Threshold", 'ATR % crossed below the threshold on {{exchange}}:{{ticker}} ({{interval}}) at {{time}}. ATR percentage: {{plot("ATR %")}}%.')

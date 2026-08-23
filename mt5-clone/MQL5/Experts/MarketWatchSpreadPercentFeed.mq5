@@ -1,9 +1,13 @@
 #property strict
 #property description "Feed selected Market Watch symbol spread percentages to a FILE_COMMON JSON file and optionally launch the desktop pop-out. Display-only; no trading."
-#property version   "1.10"
+#property version   "1.11"
 
 #import "shell32.dll"
 long ShellExecuteW(long hwnd, string operation, string file, string parameters, string directory, int show_cmd);
+#import
+
+#import "kernel32.dll"
+uint GetFileAttributesW(string file_name);
 #import
 
 input group "Feed"
@@ -19,7 +23,10 @@ input int    DesktopWindowDecimals    = 5;
 input bool   DesktopWindowShowPoints  = false;
 
 const string DEFAULT_EXPORT_FILE = "MarketWatchSpreadPercentFeed.json";
+const string NORMAL_DESKTOP_SCRIPT_PATH = "C:\\GPT\\CODEX-master\\mt5-clone\\spread_percent_window.py";
 const int    SW_SHOWNORMAL = 1;
+const uint   INVALID_FILE_ATTRIBUTES = 0xFFFFFFFF;
+const uint   FILE_ATTRIBUTE_DIRECTORY = 0x00000010;
 
 int SafeUpdateInterval()
 {
@@ -104,6 +111,13 @@ string CommonFeedPath()
    return common + "\\Files\\" + file_name;
 }
 
+bool ConfiguredLaunchFileExists(const string path)
+{
+   ResetLastError();
+   uint attributes = GetFileAttributesW(path);
+   return (attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0);
+}
+
 bool LaunchWindow()
 {
    if(!LaunchDesktopWindow)
@@ -117,9 +131,28 @@ bool LaunchWindow()
 
    string python = Trimmed(PythonExecutable);
    string script = Trimmed(DesktopWindowScriptPath);
-   if(python == "" || script == "")
+   if(python == "")
    {
-      Print("MarketWatchSpreadPercentFeed: desktop window launch skipped because PythonExecutable or DesktopWindowScriptPath is blank.");
+      Print("MarketWatchSpreadPercentFeed: configured PythonExecutable is blank. Set it to an existing python.exe. 'Allow DLL imports' must remain enabled for auto-launch.");
+      return false;
+   }
+   if(script == "")
+   {
+      Print("MarketWatchSpreadPercentFeed: configured DesktopWindowScriptPath is blank. Normal installation path is ", NORMAL_DESKTOP_SCRIPT_PATH,
+            ". Update this EA input after moving the repository. 'Allow DLL imports' must remain enabled for auto-launch.");
+      return false;
+   }
+   if(!ConfiguredLaunchFileExists(python))
+   {
+      Print("MarketWatchSpreadPercentFeed: configured PythonExecutable does not exist or is not a file: ", python,
+            ". Correct the EA input; no desktop launch was attempted. 'Allow DLL imports' must be enabled for auto-launch.");
+      return false;
+   }
+   if(!ConfiguredLaunchFileExists(script))
+   {
+      Print("MarketWatchSpreadPercentFeed: configured DesktopWindowScriptPath does not exist or is not a file: ", script,
+            ". Normal installation path is ", NORMAL_DESKTOP_SCRIPT_PATH,
+            ". Update this EA input after moving the repository; no desktop launch was attempted. 'Allow DLL imports' must be enabled for auto-launch.");
       return false;
    }
 
@@ -140,7 +173,8 @@ bool LaunchWindow()
       return false;
    }
 
-   Print("MarketWatchSpreadPercentFeed: launched desktop spread window.");
+   Print("MarketWatchSpreadPercentFeed: ShellExecuteW accepted the desktop spread window launch request. PythonExecutable=", python,
+         " Script=", script, ". Process startup is not yet confirmed; if no window appears, inspect the configured paths and enable 'Allow DLL imports'.");
    return true;
 }
 

@@ -3,7 +3,9 @@
   const state = {
     account: 'live',
     asset: 'crypto',
-    broker: 'oanda',
+    broker: 'bybit',
+    fx_broker: 'oanda',
+    resolvedVenue: 'Bybit',
     side: 'buy',
     order_type: 'market',
     risk_mode: 'percent',
@@ -474,7 +476,7 @@
     const reward = Number(q.estimated_reward);
     const tickSize = q.tick_size;
     const rows = [
-      ['Resolved broker', q.broker], ['Resolved symbol', q.symbol],
+      ['Resolved broker', q.broker], ['Resolved venue', q.resolved_venue || q.venue], ['Resolved symbol', q.symbol],
       ['Entry price', fmtPriceLike(q.entry_price, tickSize)], ['Stop price', fmtPriceLike(q.stop_price, tickSize)], ['Target price', fmtPriceLike(q.target_price, tickSize)],
       ['TP distance', fmtPriceLike(q.target_distance, tickSize)], ['Qty / units', q.quantity],
       ['Estimated fees / spread', `${Number.isFinite(fee) ? fee.toFixed(2) : '-'} ${currency}`],
@@ -560,11 +562,18 @@
     errorDebugEl.innerHTML = rows;
   }
 
-  function renderRequestSummary(payload) {
+  function renderRequestSummary(payload, resolved = null) {
+    const asset = String(payload?.asset || state.asset || '').toLowerCase();
+    const resolvedBroker = String(resolved?.broker || payload?.broker || (asset === 'crypto' ? 'bybit' : state.broker) || '').toLowerCase();
+    const resolvedVenue = String(
+      resolved?.resolved_venue || resolved?.venue ||
+      (resolvedBroker === 'bybit' ? 'Bybit' : (resolvedBroker === 'pepperstone' ? 'Pepperstone' : (resolvedBroker === 'oanda' ? 'OANDA' : '')))
+    );
     const lines = [
       `Submitted payload:`,
       `asset=${payload.asset}`,
-      `broker=${payload.broker || state.broker || ''}`,
+      `broker=${resolvedBroker}`,
+      `venue=${resolvedVenue}`,
       `account=${payload.account}`,
       `symbol=${payload.symbol}`,
       `webhook=${payload.webhook}`,
@@ -603,14 +612,13 @@
   }
 
   function buildPepperstoneSetPayload(quote) {
-    return {
+    const payload = {
       asset: 'fx',
       broker: 'pepperstone',
       account: state.account,
       symbol: quote?.symbol || state.resolvedSymbol || $('calc-symbol').value,
       side: state.side,
       order_type: state.order_type,
-      entry_price: quote?.entry_price || $('calc-limit').value,
       stop_loss_ticks: $('calc-sl-ticks').value,
       risk_reward: $('calc-rr').value,
       risk_mode: state.risk_mode,
@@ -618,6 +626,8 @@
       estimated_total_loss_aud: quote?.estimated_total_loss_aud || quote?.estimated_total_loss || '',
       estimated_total_loss: quote?.estimated_total_loss || '',
     };
+    if (state.order_type === 'limit') payload.entry_price = quote?.entry_price || $('calc-limit').value;
+    return payload;
   }
 
   function filenameFromDisposition(disposition, fallback) {
@@ -669,6 +679,32 @@
     return request(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), ...opts });
   }
 
+  function notifyOpenOrdersStateChanged(details = {}) {
+    const message = {
+      type: 'state-changed',
+      action: 'submit',
+      submittedAt: Date.now(),
+      broker: String(details.broker || ''),
+      account: String(details.account || ''),
+      symbol: String(details.symbol || ''),
+      calculationContextId: String(details.calculationContextId || ''),
+      orderId: String(details.orderId || ''),
+      orderLinkId: String(details.orderLinkId || ''),
+    };
+    try {
+      if (typeof BroadcastChannel === 'function') {
+        const channel = new BroadcastChannel('trading-tools-open-orders');
+        channel.postMessage(message);
+        channel.close();
+      }
+    } catch (_err) {}
+    try {
+      if (typeof localStorage !== 'undefined' && typeof localStorage.setItem === 'function') {
+        localStorage.setItem('trading-tools-open-orders-event', JSON.stringify(message));
+      }
+    } catch (_err) {}
+  }
+
   function updateRiskUiForAsset() {
     const isFx = state.asset === 'fx';
     riskToggleWrap.style.display = isFx ? '' : 'none';
@@ -689,7 +725,14 @@
   function updateBrokerUiForAsset() {
     const isFx = state.asset === 'fx';
     if (brokerToggleWrap) brokerToggleWrap.style.display = isFx ? '' : 'none';
-    if (!isFx) state.broker = 'oanda';
+    if (isFx) {
+      if (state.broker === 'oanda' || state.broker === 'pepperstone') state.fx_broker = state.broker;
+      else state.broker = state.fx_broker || 'oanda';
+    } else {
+      if (state.broker === 'oanda' || state.broker === 'pepperstone') state.fx_broker = state.broker;
+      state.broker = 'bybit';
+      state.resolvedVenue = 'Bybit';
+    }
     if (isPepperstoneFx() && state.webhook_mode === 'yes') {
       state.webhook_mode = 'no';
       toggleWebhookPanel(false);
@@ -1004,11 +1047,6 @@
         toggleWebhookPanel(false);
         return;
       }
-      if (isPepperstoneFx() && state.order_type !== 'limit') {
-        invalidateQuote({ status: 'error', reason: 'Pepperstone .set export is limit-only.' });
-        errorEl.textContent = 'Pepperstone .set generation is available for limit orders only. Market orders are blocked because Trader.mq5 has no safe one-shot manual market strategy.';
-        return;
-      }
       if (isPepperstoneFx() && state.webhook_mode === 'yes') {
         state.webhook_mode = 'no';
         syncToggleState('webhook-toggle', 'webhook_mode');
@@ -1023,7 +1061,7 @@
         ...state,
         submitted_symbol: $('calc-symbol').value,
         symbol: state.resolvedSymbol || $('calc-symbol').value,
-        broker: state.asset === 'fx' ? state.broker : undefined,
+        broker: state.asset === 'crypto' ? 'bybit' : state.broker,
         entry_price: $('calc-limit').value,
         stop_loss_ticks: $('calc-sl-ticks').value,
         risk_reward: $('calc-rr').value,
@@ -1045,13 +1083,19 @@
       const quote = await post('/api/calculator/quote', payload, { signal: state.quoteController.signal });
       if (seq !== state.quoteRequestSeq) return;
       state.quote = quote;
+      if (state.asset === 'crypto') state.broker = 'bybit';
+      state.resolvedVenue = quote?.resolved_venue || quote?.venue || (state.asset === 'crypto' ? 'Bybit' : state.broker);
+      renderRequestSummary(payload, quote);
       renderQuote(quote);
       state.quoteStatus = 'ready';
       setQuoteStatus('Quote ready.');
       if (isPepperstoneFx()) {
         state.pepperstoneSetPayload = buildPepperstoneSetPayload(quote);
-        setPepperstoneSetButton({ visible: true, enabled: true, reason: 'Download Pepperstone MT5 Expert Set file.' });
+        setPepperstoneSetButton({ visible: true, enabled: true, reason: 'Download the user-mediated Pepperstone MT5 Expert Set file.' });
         setSubmitState({ visible: false, enabled: false, reason: 'Pepperstone uses MT5 .set export.', stateName: 'ready' });
+        setQuoteStatus(state.order_type === 'market'
+          ? 'Quote ready. Download the one-shot market .set and check the local MT5 Experts journal for the execution outcome.'
+          : 'Quote ready. Download the limit .set and check the local MT5 Experts journal for confirmed placement or an exact rejection reason.');
       } else {
         clearPepperstoneSetDownload();
         setSubmitState({ visible: state.webhook_mode !== 'yes', enabled: true, reason: '', stateName: 'ready' });
@@ -1104,7 +1148,7 @@
   if (pepperstoneSetBtn) pepperstoneSetBtn.addEventListener('click', async () => {
     clearMessages();
     try {
-      if (!state.pepperstoneSetPayload) throw new Error('Calculate a Pepperstone FX limit order first.');
+      if (!state.pepperstoneSetPayload) throw new Error('Calculate a Pepperstone FX order first.');
       pepperstoneSetBtn.disabled = true;
       const res = await fetch('/api/calculator/pepperstone-set', {
         method: 'POST',
@@ -1117,7 +1161,10 @@
       if (!res.ok) throw buildFetchError('/api/calculator/pepperstone-set', 'POST', res.status, res.statusText, bodyText, bodyJson);
       const filename = filenameFromDisposition(res.headers.get('content-disposition'), 'Pepperstone_Trader.set');
       const downloaded = saveTextDownload(bodyText, filename);
-      okEl.textContent = downloaded ? `Pepperstone .set downloaded: ${filename}` : `Pepperstone .set ready: ${filename}`;
+      const journalHint = state.order_type === 'market'
+        ? 'Load it in local MT5 once. Reapplying the same token is blocked; check Experts for accepted, rejected, one-trade-blocked, invalid-stops, or already-consumed.'
+        : 'Load it in local MT5 and check Experts for a confirmed pending ticket or the exact preflight/broker reason.';
+      okEl.textContent = `${downloaded ? `Pepperstone .set downloaded: ${filename}` : `Pepperstone .set ready: ${filename}`} ${journalHint}`;
     } catch (err) {
       errorEl.textContent = String(err?.message || err);
       renderErrorDebug(err.detail || (err.debug ? { debug: err.debug } : null));
@@ -1144,7 +1191,7 @@
       }
       const payload = {
         asset: state.asset,
-        broker: state.asset === 'fx' ? state.broker : undefined,
+        broker: state.asset === 'crypto' ? 'bybit' : state.broker,
         account: state.account,
         symbol: state.quote.symbol,
         action: state.side,
@@ -1180,6 +1227,17 @@
       if (!submitResp || submitResp.ok !== true) {
         throw buildFetchError('/api/calculator/submit', 'POST', 400, 'Bad Request', '', submitResp || {});
       }
+      renderRequestSummary(payload, submitResp);
+      const brokerResult = submitResp?.result || {};
+      const brokerOrder = brokerResult?.order || {};
+      notifyOpenOrdersStateChanged({
+        broker: submitResp?.broker || payload.broker,
+        account: payload.account,
+        symbol: payload.symbol,
+        calculationContextId: payload.calculation_context_id,
+        orderId: brokerOrder?.orderId || brokerResult?.order_id || brokerResult?.orderId,
+        orderLinkId: brokerOrder?.orderLinkId || brokerResult?.order_link_id || brokerResult?.orderLinkId,
+      });
       const adj = submitResp?.submit_level_adjustments || {};
       if (adj && adj.submit_take_profit_auto_adjusted) okEl.textContent = `Order submitted. TP adjusted from ${adj.original_take_profit_price} to ${adj.adjusted_take_profit_price} because LastPrice moved since quote.`;
       else okEl.textContent = 'Order submitted successfully.';

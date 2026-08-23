@@ -1,0 +1,328 @@
+TRADING TOOLS: PEPPERSTONE, OPEN ORDERS, BROKER AUTH, EQUITY CURVE, PINE, AND FX WEEKEND
+
+Recommended execution: gpt-5.6-sol with model_reasoning_effort="ultra". This job spans safety-critical MQL5 execution, two broker integrations, durable trade context, browser UI state, Pine v6, and a scheduled liquidation service. Ultra is justified here because the work crosses several independently stateful systems and must be verified without risking a live order.
+
+Repository and operating rules
+
+- Work in the current `C:\GPT\CODEX-master` repository and obey `AGENTS.md`.
+- This is Job 2 only. Do not touch Trading Journal.xlsx formatting, report-sheet formatting, or recommendation-chart layout; those belong to the preceding brief.
+- Before editing, run `git status --short`, record the branch and HEAD, and inspect the current implementation/tests. Preserve all pre-existing user changes and unrelated dirty files. Never reset or discard them.
+- Keep changes narrow and reuse existing helpers. Do not redesign the dashboard or replace working workflows.
+- Never print, persist, return, screenshot, commit, or partially reveal API keys, secrets, signatures, bearer tokens, `.env` contents, account tokens, or signed URLs. Safe diagnostics may name an environment-variable source, mode, hostname, key length, and a short one-way hash fingerprint, but never key characters.
+- Do not place, cancel, or close a live-money order during verification. Broker API verification must be read-only or use explicitly confirmed demo/practice accounts. A manual Pepperstone demo smoke test may be documented; never silently operate MT5 or a live account.
+- Render Web Service hosts Render Master Control. MT5 runs locally and is outside Render Master Control. Local tools open Edge only.
+- When broker or Pine/MQL5 documentation matters, use only official Bybit V5, OANDA v20, MQL5, or TradingView Pine documentation and cite the exact official sections in the final summary.
+- Do not inspect or modify `custom instructions/`; it is outside this task.
+
+Evidence already established
+
+Screenshots:
+
+- Pepperstone market calculation block: `https://snipboard.io/S4QvO5.jpg`.
+- Bybit demo BTCUSDT row with blank Timeframe and Test: `https://snipboard.io/d1yaYf.jpg`.
+- Crypto calculator summary incorrectly printing `broker=oanda` while the submission says BTCUSDT/crypto/demo: `https://snipboard.io/uGpFm7.jpg`.
+- Bybit demo history proving the BTCUSDT orders actually reached Bybit: `https://snipboard.io/lkZGwJ.jpg`.
+- Noninteractive equity curve: `https://snipboard.io/87j3IC.jpg`.
+- TradingView chart showing crowded session labels, missing Friday New York close, and the current separate ATR pane: `https://snipboard.io/ohBaLe.jpg`.
+- Resolved Market Watch feed window/path evidence: `https://snipboard.io/tqd4R7.jpg` and `https://snipboard.io/tN9vhj.jpg`.
+- Transient OANDA additional-account-discovery warning: `https://snipboard.io/9BCSNL.jpg`.
+
+The supplied 15-August worker console proves the BTCUSDT submissions used `https://api-demo.bybit.com`, `key_source=DEMO_EXPLICIT`, returned Bybit `retCode=0`, and had matched TP/SL. It also showed `live_positions=1` and `live_orders=2` during the relevant interval. Therefore the `broker=oanda` screenshot is a calculator display/source-of-truth defect, not evidence that the BTCUSDT order was routed through OANDA.
+
+The supplied 20-August console excerpt is a different failure: repeated HTTP 401 responses with an empty body for Bybit demo `/v5/position/list` and `/v5/order/realtime`, ultimately producing nine errors. Treat that as an authentication/configuration diagnostic problem; do not conflate it with the successful 15-August routing.
+
+The exact GBPUSD `.set` file referenced by the user was inspected. It contains:
+
+`Strategy=2`
+`OrdersEnabled=true`
+`RiskAUD_Target=10`
+`RiskAUD_Min=9`
+`RiskAUD_Max=12`
+`IncludeCommissionInRisk=true`
+`CommissionPerLotPerSide=3.5`
+`RiskSlippageBufferPoints=50`
+`SlippagePoints=10`
+`SL_DistancePoints=30`
+`AutoTP_NetRR_Enabled=true`
+`NetRR_Target=2`
+`TP_DistancePoints=60`
+`StandardLimitSide=0`
+`StandardLimitEntryPrice=1.34863`
+`MagicNumber=91001`
+`EnforceOneTradeAtATime=true`
+
+In the current `mt5-clone/MQL5/Experts/Trader.mq5`, `Strategy=2` means `STRAT_STANDARD_LIMIT`. It attempts `PlacePendingStandardLimit()` during `OnInit()`, but if placement fails at that moment, the standard-limit `OnTick()`/`OnTimer()` path never retries placement. This can produce “EA loaded” with no pending order. A wrong-side/too-close price, unavailable Bid/Ask, temporary trade readiness, existing position, or broker rejection must be surfaced distinctly.
+
+PART A — PEPPERSTONE MARKET `.set` AND RELIABLE STANDARD LIMIT PLACEMENT
+
+Relevant code:
+
+- `render/static/calculator.js`, especially `updateBrokerUiForAsset()`, `renderRequestSummary()`, `buildPepperstoneSetPayload()`, Calculate, and Download `.set` handlers.
+- `render/master_service.py::PEPPERSTONE_TRADER_SET_INPUT_NAMES`, `_build_pepperstone_trader_set()`, `/api/calculator/pepperstone-set`, `/api/calculator/quote`, and `/api/calculator/submit`.
+- `mt5-clone/MQL5/Experts/Trader.mq5`, especially `StrategyMode`, `PlaceMarketEmaBounce()`, `PlaceOrReplacePendingLimitAtEntry()`, `PlacePendingStandardLimit()`, `OnInit()`, `OnTick()`, and `OnTimer()`.
+- Existing Pepperstone calculator and MQL5 tests in `tests/test_master_service_calculator_api.py`, `tests/test_calculator_js_behavior.py`, and `tests/test_python_mt5_conversion_files.py`.
+
+Required market-order design:
+
+1. Add a dedicated safe manual market strategy to `Trader.mq5`; do not misuse `STRAT_EMA_BOUNCE`. Use an explicit new enum value such as `STRAT_STANDARD_MARKET` and explicit Buy/Sell input.
+2. It must be truly one-shot. Loading/applying the same `.set`, a chart refresh, terminal reconnect, tick storm, `OnTimer()`, or EA reinitialization must never submit the same intended order twice.
+3. Include a unique non-secret execution token/nonce in each generated market `.set`. Persist an at-most-once marker using an appropriate MT5 terminal-global mechanism keyed by account, symbol, magic number, and token. Keep the key within MQL5 length constraints. Mark the attempt before sending so a crash/reinit cannot duplicate it. A retry after a rejected attempt must require a newly generated token/file and must be explicit in the journal message.
+4. Enforce `OrdersEnabled`, `EnforceOneTradeAtATime`, symbol/trading readiness, broker minimum/step/maximum volume, stop/freeze levels, and the current risk limits.
+5. Derive the market entry from the live Ask for a buy or Bid for a sell at the execution moment. Recalculate volume, stop price, and automatic TP from that actual execution anchor and the `.set` distances/risk settings. Do not use a stale calculator quote as the execution price.
+6. Use the existing commission-aware risk and Net-RR helpers. Preserve the configured slippage/deviation and magic number.
+7. Log one sanitized, actionable outcome: mode, symbol, side, calculated entry/SL/TP/volume/risk, token fingerprint, MT5 retcode/description, and accepted order/deal ticket. Never log credentials. The UI and final summary must distinguish accepted, rejected, blocked by one-trade rule, invalid stops, and already-consumed token.
+8. Market execution remains user-mediated through downloading and loading a `.set` in local MT5. Do not add a fake Pepperstone REST submit button or claim Render can place the MT5 order.
+
+Required calculator/backend changes:
+
+1. Remove the client and backend limit-only market block for FX + Pepperstone after the safe MQL5 strategy exists.
+2. `_build_pepperstone_trader_set()` must accept both `limit` and `market`, validate their different required fields, emit only real `Trader.mq5` input names, select the correct strategy/side inputs, and generate the unique market token. A market `.set` must not require or pretend to use `StandardLimitEntryPrice`.
+3. Update `PEPPERSTONE_TRADER_SET_INPUT_NAMES`, filename labelling, payload building, UI text, and tests. The `.set` must still carry stop ticks, risk target/range, commission settings, Net RR, slippage, magic number, and one-trade enforcement.
+4. Preserve limit `.set` behaviour but fix its silent one-shot failure. While a standard limit strategy is armed, no position is open, no matching pending order exists, and the order has not expired, retry transient readiness/transport failures on a bounded timer/backoff. Do not retry a structurally invalid wrong-side/too-close limit forever; show the exact reason and require a corrected price/new `.set`.
+5. On every standard-limit attempt, print a sanitized preflight and broker result. Confirm the returned order ticket and current pending-order presence. If placement was accepted but the ticket cannot be observed, report that mismatch instead of success.
+6. Prevent duplicate limit orders across `OnInit()`, `OnTick()`, and `OnTimer()`. Respect expiry and cancel only this EA's matching magic/symbol orders.
+7. Keep the existing trendline and EMA strategies unchanged except for shared helpers that are demonstrably safe.
+
+Pepperstone tests/acceptance:
+
+- Generated limit and market `.set` keys are a subset of actual MQL5 inputs.
+- Buy/sell and limit/market mappings are exact.
+- Market `.set` generation no longer returns the “limit orders only” error.
+- MQL5 static tests prove the dedicated strategy, token gate, actual Bid/Ask anchoring, and no tick/timer resubmission.
+- Compile `Trader.mq5` with the installed MetaEditor/MT5 build and record zero errors. If GUI compilation is unavailable, report that limitation; do not claim it compiled.
+- On Pepperstone demo only, manually verify one safe market file produces exactly one order and reapplying the same file produces no second order; safely close the demo position. Verify the supplied limit scenario either creates the pending order or displays the precise invalid/rejected reason. Never run this smoke test on live.
+
+PART B — OPEN ORDERS/POSITIONS CONTEXT, COMPLETE COLUMNS, AND LIVE REFRESH
+
+Relevant code:
+
+- `render/master_service.py::_collect_bybit_open_items()`, `_lookup_trade_context_for_open_item()`, `_upsert_calculator_trade_context()`, `_place_bybit_order()`, OANDA open-item construction, the pending-webhook item path, `OPEN_ORDERS_TEMPLATE`, `_invalidate_open_orders_cache()`, `/api/open-orders`, and `/api/open-orders/version`.
+- `render/static/open_orders.js`.
+- `tests/test_open_orders_page.py`, calculator tests, and Bybit-context/backfill tests.
+
+Required context model and columns:
+
+1. Retain every existing column and add a column for every calculator field/criterion that describes the intended trade. The final table must include, in a sensible stable order:
+   - resolved Broker/Venue;
+   - Account;
+   - Asset/Category;
+   - Side;
+   - Order Type;
+   - Instrument/Symbol;
+   - Stop-loss ticks;
+   - Target mode and take-profit ticks when used;
+   - Risk mode;
+   - Risk value, with its unit clear (`%` or fixed AUD);
+   - Risk/Reward;
+   - Timeframe;
+   - Test;
+   - Setup;
+   - Pattern;
+   - EMA;
+   - VWAP;
+   - ATH/ATL;
+   - Round Number;
+   - Webhook mode/status;
+   - Planned Entry, Planned Stop, and Planned Target;
+   - actual Entry/Order, Current/Trigger, current Stop Loss, current Take Profit, Size/Quantity, Leverage/Margin, Opened, Status, and Action.
+2. Do not remove data already shown. Horizontal scrolling is acceptable; keep the existing responsive table rather than redesigning the page.
+3. Render absent Pattern as `None`, and valid values as `Range` or `Channel`. Render explicit false/Test No as `No`, not an em dash. Use `—` only for information that was genuinely never specified or cannot be recovered.
+4. The backend must enrich every open item with its calculator context; the JS must display server-authoritative fields rather than guess them.
+5. Preserve the full calculator context on successful quote/submit, including all fields above, calculation-context ID, order ID, order-link ID, account, category, symbol, side, order type, and timestamps. A broker-accepted order whose context cannot be durably saved must return a visible warning, not silent success.
+6. Make Bybit linkage robust for both orders and positions. Prefer exact calculation-context/order/order-link IDs. For positions that do not expose the originating order ID, match only an unambiguous active context using account/category/symbol/side and a defensible creation/open-time window. Do not use a mutable Bybit `updatedTime` as if it were the original open time. Multiple sequential same-symbol positions must not inherit stale context.
+7. Apply equivalent enrichment to OANDA items and pending webhooks where the context exists. Never fabricate criteria for broker-originated trades that were not created by the calculator.
+8. Fix the demonstrated BTCUSDT `15m`/`Test Yes` blank display end to end and add a regression fixture reproducing it.
+
+Required refresh/cache behaviour:
+
+1. A successful broker submission, close, cancel, context save, pending-webhook change, or reconciliation must invalidate the server cache and increment the observable version exactly once after the state transition is durable.
+2. The Open Orders page must show a newly opened order/position without restarting Local Trading Tools. Manual Refresh must force a broker read. A hidden tab must refresh immediately when visible again if the version changed.
+3. Keep version polling, but eliminate initialization/race cases in which `knownVersion` is advanced without rendering the corresponding state. Couple the rendered payload to its version.
+4. Add a same-origin `BroadcastChannel` notification from successful calculator submission/close/cancel to the Open Orders page, with a `storage`-event or version-poll fallback. The notification triggers a forced refresh; it is not a replacement for server invalidation.
+5. Add bounded post-submit verification/backoff so the page can bridge normal broker eventual consistency. Show `Submitted; waiting for broker visibility` rather than remaining silently stale. Stop after a bounded interval with an actionable warning.
+6. Keep static-asset cache busting and ensure all touched client assets remain in the service/Windows source-stamp lists.
+7. Add tests for a submit occurring during the first refresh, a hidden/visible tab, unchanged and changed versions, two rapid submissions, eventual broker visibility, and no 12-hour/restart dependency.
+
+PART C — CRYPTO BROKER LABEL IS BYBIT, NOT OANDA
+
+1. In `render/static/calculator.js`, `state.broker` currently starts as `oanda`; `updateBrokerUiForAsset()` explicitly sets it to `oanda` for non-FX; and `renderRequestSummary()` falls back to that state when the crypto payload omits `broker`. This is the demonstrated display defect.
+2. Use a server-authoritative resolved venue. For crypto, quote and submit responses must identify Bybit; the request summary must display `broker=bybit`/`venue=Bybit`. Do not leave hidden OANDA state behind.
+3. Preserve the backend's current rule that crypto routes to Bybit. Add a test that BTCUSDT can never route to OANDA and a separate test that the displayed summary matches the actual route.
+4. Preserve OANDA/Pepperstone selection for FX.
+
+PART D — BYBIT DEMO HTTP 401 AFTER KEY REPLACEMENT
+
+Likely configuration defect to investigate explicitly:
+
+- `bybit_credentials.py::resolve_bybit_credentials_for("demo")` currently gives `BYBIT_DEMO_API_KEY`/`BYBIT_DEMO_API_SECRET` precedence over `BYBIT_API_KEY2`/`BYBIT_API_SECRET2`, while calculator UI guidance tells the user to replace KEY2/SECRET2. If both pairs exist and the older explicit pair is stale, editing KEY2 does not change the credentials actually used. The prior successful log's `key_source=DEMO_EXPLICIT` makes this a concrete possibility, not a conclusion. Diagnose it without exposing values.
+
+Required changes:
+
+1. Use official Bybit V5 documentation to verify the differences among Demo Trading (`api-demo.bybit.com`), Testnet (`api-testnet.bybit.com`), and live, plus authentication/permission/IP restrictions relevant to HTTP 401.
+2. Define and document one consistent demo credential precedence used by calculator, Open Orders, history/sync, and status. Preserve backward compatibility where safe.
+3. If more than one complete demo credential pair is present and their one-way fingerprints differ, fail readiness with one actionable, sanitized conflict message naming the active sources and telling the user which variables must be reconciled. Do not silently choose a stale pair.
+4. Add a read-only auth preflight once per account refresh. On an HTTP 401/403, fail fast for that account; do not fan the same invalid credentials across every category/endpoint and produce nine duplicate errors.
+5. Do not retry a definitive 401 as a transient transport error. Continue timestamp resync/retry only for the documented timestamp-window cases.
+6. Surface one sanitized diagnostic containing mode, base host, credential source, pair completeness, and safe one-way fingerprint; never any key characters. Distinguish invalid credentials, wrong environment/domain, missing permissions, IP restriction, timestamp error, and empty upstream body when the evidence permits.
+7. Preserve the last-known-good Open Orders payload as visibly stale when auth fails; never replace known rows with a misleading empty success. Do not conceal the auth failure.
+8. Add tests for conflicting env pairs, KEY2-only, legacy-only, explicit-only, wrong domain coercion, HTTP 401 empty body, one-error fail-fast, timestamp retry, stale payload fallback, and secret-redaction in logs/API/UI.
+
+PART E — OANDA ADDITIONAL ACCOUNT DISCOVERY WARNING
+
+Current behaviour uses `_list_oanda_accounts()`, `_get_cached_oanda_accounts()`, `_oanda_discovery_failure_allows_stale()`, and `_oanda_discovery_warning()`. The in-memory last-known-good cache is lost on full restart, and HTTP 401 is not eligible for stale fallback. The screenshot shows additional owned-account discovery briefly failed while the configured account still refreshed, then cleared on manual refresh.
+
+Required changes:
+
+1. Treat `/v3/accounts` discovery as auxiliary when the configured account's authenticated open-trades/pending-orders calls succeed. Do not mark all OANDA data unavailable or show a blocking error in that case.
+2. If the configured-account authenticated call succeeds but discovery returns a contradictory 401, perform one bounded delayed retry and classify it as a transient discovery anomaly if the retry succeeds. Do not generally retry or hide a real token-wide 401.
+3. Preserve/use a bounded last-known-good owned-account list across a normal process restart through the repository's existing safe runtime-state mechanism if one already exists; do not commit runtime/account state. If no safe durable mechanism exists, keep the in-memory fallback and state that limitation instead of inventing one.
+4. Show one concise nonblocking warning with its exact scope and last-known-good age. Clear it automatically after a successful refresh. Never claim unqueried discovered accounts were confirmed.
+5. Add tests for startup without cache, configured-account success plus transient discovery 401, token-wide 401, stale fallback, restart restoration if implemented, warning auto-clear, and redaction.
+
+PART F — INTERACTIVE EQUITY CURVE
+
+Relevant code is `render/static/trading_journal_equity_curve.js`, its containing template/styles in `render/master_service.py`, and the existing equity-curve tests.
+
+Required behaviour:
+
+1. Add a TradingView-like pointer crosshair over the existing curve without changing the authoritative equity calculations.
+2. While the pointer is inside the plot, draw a vertical and horizontal guide. Show an x-axis badge with the Brisbane date/time corresponding to the cursor and a y-axis badge with the exact percentage/equity-index coordinate.
+3. Also identify the nearest actual curve point and show a compact tooltip with its exact Brisbane date/time and equity-index percentage; visibly mark that point. Do not imply an interpolated cursor coordinate is an actual trade observation.
+4. Support mouse, pointer, and touch; clear the overlay on pointer leave/cancel; remain correct after resize, DPR changes, account changes, and data refresh.
+5. Keep canvas sizing responsive. Prefer a dedicated transparent overlay canvas or an equally clean redraw boundary so pointer movement cannot erase/corrupt the base chart.
+6. Expose the current hover value through accessible live text. Do not add a large charting dependency solely for this feature.
+7. Factor coordinate transforms/nearest-point selection into testable pure helpers. Add JS tests for margins, min/max spans, date mapping, y mapping, nearest-point selection, edges, resize, and clear behaviour, plus a real Edge smoke test.
+
+PART G — SEPARATE ATR PERCENTAGE PINE INDICATOR
+
+1. Add a separate Pine v6 file, plainly named `pinescripts/atr_percentage.pine`. Do not put ATR back into `custom_indicator.pine`; the user needs a distinct lower panel beside the existing volume panel.
+2. Default to TradingView's normal ATR length 14 and RMA-based `ta.atr(length)`. Plot `ta.atr(length) / close * 100` as a percentage, guarding missing/zero close values. Label the plot clearly and use percentage formatting.
+3. Provide sensible inputs for length, plot colour/width, and an alert threshold percentage. Add confirmed-bar alert conditions for crossing above and crossing below the threshold, with exact ticker/timeframe/value context available in the alert message. If intrabar alerts are offered, make confirmed-bar the safe default.
+4. Keep the script compact and independent. Do not alter existing custom-indicator volume/VWAP/EMA/funding logic.
+5. Add static tests that verify Pine version, overlay=false/separate pane, exact percent formula, zero guard, `ta.atr`, threshold plots/alerts, and no ATR code reintroduced into `custom_indicator.pine`. Ensure `/api/pine/files` lists both scripts and the copy UI works.
+
+PART H — CUSTOM PINE SESSION MARKERS AND MOVING 100-CANDLE MARKER
+
+Relevant code/tests are `pinescripts/custom_indicator.pine` and `tests/test_custom_indicator_pine.py`.
+
+Session fixes:
+
+1. Ensure a session label never touches either split dotted line segment. Keep the text centred on the event timestamp, but give the label a guaranteed visible gap beyond its segment endpoint at normal zoom. Use a configurable range/mintick minimum and visually test light/dark themes and overlapping session events.
+2. Fix the missing Friday New York close. The current code filters session events with `isBrisbaneWeekend(eventTs)`, so Friday 17:00 New York occurs on Saturday Brisbane and is incorrectly suppressed. Determine weekday in the session's own timezone: Monday-Friday New York events, including Friday 17:00, must render; genuine Saturday/Sunday session-local events must not.
+3. Update the existing tests that currently enshrine Brisbane-weekend suppression. Preserve Sydney/Tokyo/London/New York DST correctness and the existing <=30-minute session visibility rule unless a test proves a separate defect.
+
+100-candle marker:
+
+1. Add an on/off input, default on, for one moving marker labelled exactly `100`.
+2. Include the current forming candle in the count. Therefore the 100th candle is exactly `bar_index - 99`, not `bar_index - 100`. Do not draw until at least 100 bars exist.
+3. Draw at that candle on every supported chart timeframe using `xloc.bar_index`. Delete/update the previous marker so only the current marker exists and object counts remain bounded.
+4. Use a dark-blue dotted/dashed vertical split marker. Its upper/lower segments must begin farther from the target candle's high/low than the session marker segments, so both remain distinguishable when they share a candle. Its `100` label must also remain separated from the blue segments.
+5. Base the y extents/gaps on the target candle and a stable recent-range/mintick floor so the marker remains visible without touching the candle. Do not use `extend.both` through the candle.
+6. Add tests for the exact `-99` count, current forming bar inclusion, all-timeframe gating, insufficient history, one-object lifecycle, colour/style, larger gap than sessions, and exact label.
+7. Paste/compile both Pine scripts in TradingView Pine Editor and record zero compile errors. If external compilation is unavailable, say so and do not claim success.
+
+PART I — MARKET WATCH SPREAD FEED IS RESOLVED; REGRESSION SAFEGUARD ONLY
+
+The user resolved the missing desktop window by correcting the Python/script path after moving the repository. The screenshots show the feed and EAs working. Do not redesign or reopen this as an active defect.
+
+Add only a narrow regression safeguard around `mt5-clone/MQL5/Experts/MarketWatchSpreadPercentFeed.mq5` and existing tests/documentation:
+
+- keep the current configurable `PythonExecutable` and `DesktopWindowScriptPath` inputs;
+- make launch diagnostics explicitly identify an invalid/missing configured path and the required `Allow DLL imports` state without reporting false success;
+- test/document the normal `C:\GPT\CODEX-master\mt5-clone\spread_percent_window.py` installation path and confirm a repo move requires updating the EA input;
+- preserve the feed JSON, window behaviour, and working fallback path.
+
+Do not change this component unless a focused regression test demonstrates a necessary change.
+
+PART J — FX WEEKEND NEWS RELEASE AUTO-LIQUIDATION
+
+Relevant code:
+
+- `fxweekend-clone/liquidate.py`, its `PAGE_TEMPLATE`, settings migration/load/save, scheduler, closure-window, account processing, status, and API handlers.
+- `fxweekend-clone/settings.json`.
+- `shared/oanda_api.py::FXWEEKEND_SETTINGS_SCHEMA_VERSION` and `upgrade_fxweekend_settings_schema()`.
+- `render/master_service.py` FX Weekend defaults/readiness/state ownership.
+- Existing `tests/test_fxweekend_executor.py`, `tests/test_fxweekend_executor_backoff.py`, `tests/test_fxweekend_render_supervisor.py`, and state-sync tests.
+
+Exact trading-plan rules:
+
+- Highest-risk news: no new trades in the 60 minutes before release; close any open intraday trade 15 minutes before release.
+- Other high-impact news: no new trades in the 30 minutes before release; close any open intraday trade 15 minutes before release.
+- After a release, the earliest possible entry is 15 minutes later and only after the initial move occurred, spread is near normal, liquidity is stable, a new impulse/pullback and post-release structure exist, the trade still offers at least 2R, and no related event is imminent.
+
+The user has made a final UI decision: each news event accepts release date and time only. Do not add symbol, currency, event category, or impact inputs. Because both event categories have the same open-position liquidation cutoff, this feature can safely enforce the requested flat-at-15-minutes rule. The 60/30-minute new-entry blackout cannot be inferred from date/time alone and is not to be guessed or silently enforced by this FX Weekend liquidation feature. Show the trading-plan reminder in the UI, but keep calculator entry blocking outside this task.
+
+Required implementation:
+
+1. Add a clear `News` section to the FX Weekend settings page. It must support adding/removing multiple durable release date/time entries. The only user-entered fields per event are date and time, presented and interpreted explicitly in `Australia/Brisbane` time.
+2. Internally assign a stable event ID/status as needed, but do not ask the user for a symbol/type. Normalize to an unambiguous timezone-aware timestamp and preserve exact values across save/restart.
+3. Bump/migrate the settings schema safely. Existing weekend settings and selected accounts must survive byte-for-byte semantically; old files receive an empty news-event list. Keep executor and Render defaults in sync.
+4. For each upcoming event, compute `liquidation_cutoff = release_at - 15 minutes`. At that cutoff, use the existing safe OANDA demo/live account coverage and closure machinery to close all qualifying open OANDA FX positions/trades for the selected accounts, with no symbol filter. Do not claim this closes Pepperstone/MT5 positions; the current service is explicitly OANDA-only.
+5. Generalize the scheduler carefully so it wakes for the earliest weekend or news deadline, without weakening the weekend guarantee. Multiple/overlapping events must coalesce into an idempotent flat verification rather than duplicate close calls.
+6. At and after the 15-minute cutoff, retry recoverable failures with bounded backoff while time remains before the release. If flatness was not verified by the cutoff, mark the guarantee missed and continue an immediate safe-close attempt where the market/API permits; never record on-time success retroactively.
+7. Persist enough status to survive a worker restart and avoid re-liquidating an already verified-flat event. Record event ID, release time, cutoff, attempt time, selected-account scope fingerprint, per-account outcome, verified-flat time, and whether the cutoff was met. Do not commit runtime status.
+8. Respect `enabled`, selected demo/live accounts, `dry_run`, close method, credentials, executor ownership, and current safety/backoff rules. Saving a news event must not itself liquidate immediately unless its cutoff is already due; if due/past, show an explicit state and follow the defined safe scheduler behaviour.
+9. The UI must show the next news release, next news liquidation cutoff, status, and last result. Deleting an event prevents future execution but must not erase audit/status history silently.
+10. Keep all closures server-authoritative and verified against OANDA. A 200 response without verified flatness is not success.
+
+News tests must cover:
+
+- schema migration and preservation of existing weekend settings;
+- Brisbane parsing, exact 15-minute boundary, and UTC conversion;
+- multiple events, duplicates, deletion, past events, and restart idempotence;
+- earliest-deadline scheduling with a weekend cutoff;
+- demo/live selected scopes, dry run, disabled state, and account failures;
+- verified flat, partial failure, retry before release, missed cutoff, and no fake success;
+- no symbol/category fields in HTML/API/settings;
+- no new-trade blackout guessed from the date/time-only input;
+- status/readiness/state-sync compatibility and no regression to the current weekend-close tests.
+
+FINAL TEST AND VERIFICATION MATRIX
+
+Run targeted tests after each part, then all affected suites. At minimum, run commands equivalent to:
+
+- `python -m pytest tests/test_master_service_calculator_api.py tests/test_calculator_js_behavior.py -q`
+- `python -m pytest tests/test_open_orders_page.py tests/test_master_service_bybit_demo_sync.py tests/test_master_service_bybit_context_backfill.py tests/test_bybit_credentials_resolution.py -q`
+- `python -m pytest tests/test_custom_indicator_pine.py tests/test_dashboard_home_layout.py -q`
+- new ATR Pine tests
+- `python -m pytest tests/test_fxweekend_executor.py tests/test_fxweekend_executor_backoff.py tests/test_fxweekend_render_supervisor.py tests/test_fxweekend_proxy_reliability.py tests/test_master_service_state_sync.py -q`
+- `python -m pytest tests/test_python_mt5_conversion_files.py tests/test_mt5_spread_fetch.py -q`
+- `node --check render/static/calculator.js`
+- `node --check render/static/open_orders.js`
+- `node --check render/static/trading_journal_equity_curve.js`
+- Python syntax/compile checks for every touched Python file
+
+Also perform real UI smoke tests in Edge for:
+
+- Pepperstone market calculation and `.set` download;
+- crypto request summary showing Bybit;
+- a mocked or safe demo submit appearing in Open Orders without service restart;
+- every new Open Orders column, including `15MIN`, `Yes`, and Pattern rendering;
+- Bybit/OANDA warning scope and automatic recovery;
+- equity crosshair/axis badges/tooltip at desktop and narrow widths;
+- Pine file listing/copy;
+- FX Weekend News add/save/reload/delete and next-cutoff display.
+
+Use read-only broker preflights for real credentials and record only sanitized results. Compile MQL5/Pine in their official editors where available. Never claim a manual/external compile or demo-order smoke test happened unless it actually did.
+
+Global acceptance criteria
+
+- Pepperstone market `.set` files are supported through a safe dedicated one-shot strategy; the same file cannot duplicate an order.
+- Standard limit placement either creates a confirmed pending order or shows the exact reason it did not; “EA loaded” alone is never success.
+- BTCUSDT remains routed to Bybit and the UI says Bybit.
+- Open Orders displays every calculator criterion and preserves `15MIN`/`Test Yes`; new state appears without restarting the service.
+- Bybit 401 diagnostics are singular, actionable, environment-aware, and secret-safe; conflicting credential sources cannot be silently selected.
+- OANDA auxiliary discovery failures do not falsely invalidate a successfully refreshed configured account and recover automatically.
+- Equity hover/crosshair gives exact cursor coordinates and nearest actual point details.
+- `atr_percentage.pine` is a separate, alert-capable percentage ATR panel.
+- Friday New York close renders, session labels do not touch markers, and the `100` marker is exactly 99 bars behind the current forming bar.
+- The resolved Market Watch feed remains working.
+- FX Weekend closes selected OANDA FX accounts at the news release minus 15 minutes using date/time-only events, without inventing symbols/categories or weakening weekend closure.
+- No live-money operation, secret leak, fake success, silent failure, stuck stale state, or unrelated regression occurs.
+
+Completion workflow
+
+1. Review the final diff and `git status --short`; remove only verified repo-local test/cache artefacts allowed by `AGENTS.md`.
+2. Write a factual final summary, including exact test commands/results, official documentation sections used, browser/external compile checks actually performed, demo-only verification actually performed, changed files, and residual limitations, to `summary/CODEX_SUMMARY_latest.txt`.
+3. Run repository-root `PATCH_DESKTOP_PUSH.bat`.
+4. Do not report completion unless that script succeeds and verifies local HEAD equals `origin/master`. If a broker credential, MT5, TradingView, or GUI step is unavailable, report the exact unverified item instead of claiming success.

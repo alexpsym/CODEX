@@ -1,89 +1,189 @@
-Final implementation summary - Trading Journal Brief 1 follow-up
+CODEX COMPLETION SUMMARY
+Brief: CODEX_BRIEF_2026-08-20_Trading_Tools_Brokers_Pine_FXWeekend.txt
+Completed: 2026-08-23 (Australia/Brisbane)
 
-Scope
-- Repository: C:\GPT\CODEX-master
-- Brief: CODEX_BRIEF_2026-08-22_Trading_Journal_Brief1_Follow_Up.txt
-- Starting branch: codex/journal-equity-fx-final-20260726
-- Starting HEAD and origin/master: 6f2382c1fa8844bf5caf1495ae1ddcbb5ad04c27
-- Parent read-only workbook baseline: db58d4357b5ad59896977ea6a0ce0175aae744fe
-- This was the narrow Brief 1 corrective follow-up only. No Brief 2, calculator, broker, Open Orders, Pine, equity-curve, or FX Weekend behavior was changed.
+BASELINE AND SCOPE
 
-1. STATS1 winner/loser averages
-- Restored all 12 parent-baseline winner/loser Avg stop % and Avg target % values in B/C/D for rows 43, 46, 60, and 63.
-- The production resync now derives winner values from winner-only trades and loser values from loser-only trades for Overall, FX, and Crypto. It does not substitute unfiltered market averages when outcome-specific rows are available.
-- The values retain 0.00% formatting and neutral fills.
-- A two-pass preservation regression proves the 12 metrics remain outcome-specific and stable.
+- Work resumed on branch codex/journal-equity-fx-final-20260726 at baseline HEAD b2d84d36fb3139eb42525420c974ae88596ba91d, which matched origin/master before this task's mandatory push.
+- The complete brief was read before implementation. Existing work was preserved. No reset, clean, checkout, destructive command, or manual Git replacement for PATCH_DESKTOP_PUSH.bat was used.
+- Pre-existing user/runtime changes remained present, including AGENTS.md, both files under custom instructions/, monthly AUD revaluation state, pending webhook/trade-context/webhook-attempt state, and unrelated untracked briefs. The custom-instruction files were not inspected or edited by this work.
+- Trading Journal.xlsx formatting, report-sheet formatting, and recommendation-chart layout were not changed.
+- No order, close, cancellation, liquidation, or other broker mutation was performed during verification.
 
-2. Report Max R restoration and fallback
-- Restored all 176 populated Max R loss/Max R win cells from the parent workbook across YEARLY REPORT and 2018-2025, including their exact instrument/date source text.
-- 2026 remains blank for these extrema, as in the parent workbook.
-- Preservation mode retains an existing sourced string whenever a safe replacement source cannot be derived, except for an explicitly test-only bucket where stale extrema must clear.
-- New workbooks now write a valid numeric R value with the normal 0.000"R" format when source metadata is unavailable; no instrument/date text is fabricated.
+IMPLEMENTATION RESULTS
 
-3. SYMBOLS Win Rate preservation
-- Restored the seven parent-baseline Win Rate % values for USDCAD, GBPUSD, EURUSD, USDJPY, USDCHF, NZDUSD, and CHFJPY.
-- A source-input fingerprint now covers the trade identity, symbol, test-trade state, and outcome inputs that can affect win rate.
-- Preservation mode retains existing Win Rate % values only when that fingerprint is unchanged; a genuinely changed source snapshot follows the normal recalculation path.
-- The repaired parent/run-1/run-2 input fingerprint is c7eb747cc8ff0fec8f9456fc71cc4dae2bd69a5ecb703b37c588cbc9c5406bb6. The defective workbook fingerprint was 58a8e236087e107c079cde1b3850666b1fb3c1d69e92d40b7e7087edbece0f95.
+PART A / PART C — Pepperstone safe market execution and correct broker authority
 
-4. STATS1 used range and hyperlink policy
-- Removed the eight empty semantic-fill cells at H13:I16. The current STATS1 used range ends at column D and no styled/materialized cell remains beyond D.
-- Orphan fill cleanup is gated by discovered market columns, populated columns, and merged ranges, so a future legitimate nonblank column is not cleared.
-- All six recommendation hyperlinks now use one canonical encoded relative-target policy:
-  Trading%20Journal.assets/recommendations/{overall|fx|crypto}-{stop|target}.html
-- The service verifier decodes the URI target only when resolving the corresponding local file, retaining the exact encoded workbook relationship.
-- Tests inspect both openpyxl hyperlink values and worksheet relationship XML.
+- Added Trader.mq5 strategy STRAT_STANDARD_MARKET=3 with explicit buy/sell input and a unique per-download StandardMarketExecutionToken.
+- Market tokens are guarded by terminal-global state keyed by account, symbol, magic number, and token fingerprint. The attempt is consumed before send, so refresh, reconnect, OnInit/OnTick/OnTimer overlap, or a crash cannot duplicate the same intended market order. A rejected attempt requires a newly generated .set/token.
+- Market entry is anchored to the live Ask for buys or Bid for sells. Volume, SL, TP, commission-aware risk, and Net-RR are recalculated from the live execution anchor. OrdersEnabled, one-trade enforcement, trade/symbol readiness, volume min/step/max, stop/freeze levels, deviation, magic number, and risk limits are enforced.
+- Sanitized outcomes distinguish accepted, rejected, one-trade blocked, invalid stops/risk/volume, readiness/quote failures, token-gate errors, and already-consumed tokens, including safe token fingerprint, MT5 retcode/description, and observed order/deal tickets.
+- Standard-limit behavior remains user-mediated and preserves existing inputs. It now prevents duplicate attempts across callbacks, observes the returned pending-order ticket, retries only transient readiness/transport failures with bounded exponential backoff (six attempts), stops on structural invalidity, and reports accepted-but-not-observed mismatches.
+- Calculator/backend generation supports real limit and market Trader.mq5 inputs, unique market tokens and market-labelled filenames, with no fake Pepperstone REST submit path. Market .set files do not emit StandardLimitEntryPrice.
+- Crypto quote/submit responses and request summaries now use server-authoritative venue=Bybit/broker=bybit. FX still supports OANDA or Pepperstone selection.
 
-5. Style-table stability
-- Style component counts (cellXfs, fonts, fills, borders, custom numFmts):
-  - Parent baseline: 511, 38, 23, 113, 16.
-  - Defective Brief 1 workbook before this follow-up: 894, 47, 26, 136, 21.
-  - Follow-up run 1: 894, 47, 26, 136, 21.
-  - Follow-up run 2: 894, 47, 26, 136, 21.
-- Exact parent-to-defective deltas were +383 cellXfs, +9 fonts, +3 fills, +23 borders, and +5 custom number formats. The follow-up adds zero entries to every table on either pass.
-- The inherited 894-entry table was not destructively compacted because deletion/remapping could renumber unrelated cell styles and violate the workbook preservation contract. The repair instead avoids equivalent component assignments, restores authored component IDs directly where required, and rebuilds only openpyxl's in-memory lookup map without deleting or renumbering styles.
-- Run-1 and run-2 styles.xml SHA-256 are identical: eaf6754e93f5dbef5151739407186104334e1c6d922b699894fd87e1bd6e1a73.
+PART B — Open Orders/Positions context and live refresh
 
-6. Real-workbook fingerprints and preservation audit
-- Parent workbook SHA-256: 924fe19f16707b8d6e37d6c27d2872c16ceb1af1ca626701465cad8082b358cc.
-- Defective authoritative safety copy SHA-256: 4ee3387aab44a32b6f99e3024421a3412022172312fa803eba1e98ddce8286dc.
-- Follow-up run-1 SHA-256: a71c91b0d2f4f577c1c0d1b673e16d5e160028558096dbe1645a8208b3cca72e.
-- Follow-up run-2 and final authoritative workbook SHA-256: baaac1c2f0b51bf1372f8804989325dc972cc3cb4490d3ae77e2a9331509ba17.
-- Run-1, run-2, and authoritative semantic idempotence fingerprint: d776a806e1f65fef991f7dc78c98b8b40070e0bcb092dcc7b9a67fd727a472c2.
-- Run-1 and run-2 targeted values, presentation semantics, recommendation relationships, and styles are identical.
-- chart1.xml, chart2.xml, their anchors, and chart relationships are preserved from the successful Brief 1 workbook.
-- The preservation audit also passed sheet order/selection, merges, panes, dimensions, filters, validations, formulas, Trade Log comments/hyperlinks, STATS1 typography and every border edge, semantic formats/fills, and the repaired recommendation SVG bounds.
+- The table retains existing broker fields and adds the complete calculator intent/context set: resolved venue, account/category/symbol/side/order type, timeframe, test flag, risk mode/value, SL/TP ticks and planned values, target mode/RR, setup/pattern/EMA/VWAP/ATHS-ATLS/order/round number, webhook mode/status, calculation context, IDs, timestamps, actual broker prices/SL/TP/size/leverage/open time/status/actions.
+- Absent Pattern renders as None; explicit false/Test No renders as No; an em dash is reserved for genuinely unknown data.
+- Quote, pending-webhook and successful submit paths preserve normalized full context (including canonical 15MIN), calculation/order/order-link/trade/transaction IDs, account/category/symbol/side/order type, and timestamps. Persistence failures surface warnings.
+- Bybit linkage prefers exact context/order/order-link IDs, then only an unambiguous active account/category/symbol/side match within the defensible 90-minute created/open-time window. Mutable updatedTime is not treated as open time. OANDA and pending webhooks receive equivalent enrichment without inventing broker-originated criteria.
+- Distinct Bybit execution IDs are now preserved by sanitizer fallback dedupe even when fill price/time/quantity match; duplicate copies of the same execId still dedupe.
+- Each durable submission/close/cancel/context/pending/reconciliation transition invalidates and increments the Open Orders version exactly once. Server collection races return the collection-start version with refresh_superseded=true rather than caching mismatched data.
+- Client refresh couples rendered data to its version, handles initialization races, version polling, visibility changes, BroadcastChannel plus storage fallback, rapid submits, manual force refresh, bounded eventual-consistency backoff, and actionable waiting/timeout status. All touched client files are covered by service and Windows source stamps.
 
-7. Final verification results
-- Focused checked-in parent/current regression: 1 passed, 2 pytest-cache warnings in 3.62s.
-- Exact workbook suite: 216 passed, 2 pytest-cache warnings in 6624.35s (1:50:24).
-- Exact master-service synchronization suite: 157 passed, 151 warnings in 2324.09s (0:38:44).
-- The full workbook suite includes every new focused follow-up regression: exact 12-cell restoration, outcome-subset sourcing, all 176 report cells, numeric/preservation fallback, seven Win Rate values plus changed-input behavior, STATS1 used range, six exact relationship targets, and two-pass style/value stability.
-- Python compilation passed for tools/master_journal_workbook.py, render/master_service.py, tests/test_master_journal_workbook.py, and tests/test_master_service_master_journal_sync.py.
-- git diff --check passed; output contained only normal LF-to-CRLF working-copy notices.
-- The service warnings are existing FastAPI lifecycle/httpx deprecations, mocked coroutine resource warnings, and pytest-cache access warnings; there are no test failures.
+PART D — Bybit Demo authentication
 
-8. Visual and browser verification
-- Microsoft Excel opened the exact final authoritative workbook read-only and rendered STATS1, SYMBOLS, YEARLY REPORT, 2018, 2021, 2025, and 2026 to PNG.
-- All seven final renders were inspected. Managed content is legible and unclipped; STATS1 ends at D without the H/I block; SYMBOLS and report layouts remain intact; sourced extrema are visible through 2025; and the 2026 extrema remain blank.
-- No live in-app browser instance was available after the required browser-control discovery/troubleshooting check.
-- The existing parsed desktop/narrow-width SVG bounds regression passed in the 216-test workbook suite, and chart OOXML preservation passed. Live browser screenshots are the only unavailable evidence item.
+- Demo credential priority is KEY2, then DEMO_EXPLICIT, then LEGACY, using atomic complete pairs. Testnet deliberately excludes the mainnet-demo-only explicit pair.
+- Differing complete demo pairs fail readiness with one sanitized conflict message naming only the environment-variable sources. No key characters or last-four fragments are exposed.
+- Hosts are canonicalized by mode to the official HTTPS roots (api.bybit.com, api-demo.bybit.com, api-testnet.bybit.com); environment candidates, including lookalike domains, are never propagated.
+- A single GET /v5/user/query-api authentication preflight runs before category fan-out. Definitive 401/403 failures do not retry or fan out. Timestamp-window errors alone trigger forced clock resync/retry.
+- Diagnostics include only mode, official host, credential source, pair completeness, one-way SHA-256 fingerprint, status/classification, and safe metadata. Secret-like fields, bearer values, signed URLs, and upstream echoes are redacted in logs, API payloads, UI text, and shared OANDA errors.
+- Auth failures preserve the last-known-good Open Orders rows as visibly stale and retain the actionable error rather than returning misleading empty success.
 
-9. Files intended for publication
-- tools/master_journal_workbook.py
+PART E — OANDA auxiliary account discovery
+
+- The configured account remains authoritative when its open-trades/pending-orders reads succeed. Auxiliary /v3/accounts discovery failure no longer blocks otherwise valid configured-account data.
+- A contradictory discovery 401 receives one bounded delayed retry only when configured-account authentication succeeded. Token-wide 401 remains blocking.
+- Warnings state their auxiliary scope and last-known-good age, never claim unqueried accounts, and clear on the next successful refresh.
+- No safe existing durable account-ID cache was available. The bounded owned-account fallback remains in memory and is therefore lost on a full process restart; this limitation is explicit rather than inventing a new persistent account-state store.
+
+PART F — Interactive equity curve
+
+- Added a separate transparent hover overlay with pointer/mouse/touch crosshair, exact cursor Brisbane x-axis date/time badge, exact y-axis equity-index percentage badge, nearest actual observation marker, and compact actual-point tooltip.
+- Cursor coordinates are not presented as actual observations. Accessible live text announces the nearest real value.
+- Pure coordinate/nearest-point helpers and canvas state handle margins, zero/min/max spans, edges, resize, DPR changes, account/data changes, pointer leave/cancel, touch, narrow canvases, bounded labels, and three-line tooltip wrapping without corrupting the base chart.
+
+PART G / PART H — Pine scripts
+
+- Added independent pinescripts/atr_percentage.pine (Pine v6, overlay=false, percent formatting, precision 4). It uses ta.atr(length) with default length 14 and exact guarded formula atrValue / close * 100.0, configurable colour/width/threshold, threshold plot, and confirmed-bar cross-above/cross-below alerts with ticker/timeframe/value placeholders.
+- custom_indicator.pine keeps ATR out of the main indicator. Session markers use exchange-appropriate time zones, separated label/line gaps, bounded objects, and end-inclusive deduped Friday New York 17:00 handling.
+- The moving 100-candle marker is exactly bar_index - 99 (including the forming candle), waits for 100 bars, works on every timeframe, uses xloc.bar_index, maintains a single bounded marker/label lifecycle, and uses a dark-blue dotted split line with a provably larger target-candle gap than session markers.
+
+PART I — Market Watch safeguard
+
+- Preserved the existing feed JSON/window behavior and configurable PythonExecutable/DesktopWindowScriptPath inputs.
+- MarketWatchSpreadPercentFeed.mq5 version 1.11 now validates configured files with GetFileAttributesW before launch and reports missing/invalid paths and the required Allow DLL imports setting without false launch success.
+- Added mt5-clone/MARKET_WATCH_SPREAD_FEED.md documenting the normal C:\GPT\CODEX-master\mt5-clone\spread_percent_window.py path, fallback behavior, and the need to update the EA input after a repository move.
+
+PART J — FX Weekend News liquidation
+
+- Settings schema is version 2. Existing enabled/dry-run/close-method/account selections migrate semantically unchanged; old settings receive an empty durable news list.
+- News UI/API accepts release date and time only, explicitly in Australia/Brisbane. Stable UUID event IDs, timezone-aware release_at, exact cutoff=release_at-15 minutes, status, next release/cutoff, last result, and durable audit/tombstone state are maintained across save/restart/delete.
+- The scheduler selects the earliest weekend or news deadline. Overlapping events coalesce into an idempotent account-scope flat verification; selected OANDA Demo/Live accounts are closed account-wide with no symbol/category guess. Pepperstone/MT5 coverage is not claimed.
+- Recoverable failures use bounded backoff before release. Missing on-time flat verification marks the guarantee missed and continues safe close/verification without retroactive success. HTTP 200 alone is never treated as flat success.
+- Enabled, selected accounts, dry-run, close method, credentials, executor ownership and existing weekend safeguards are respected. The UI shows the trading-plan blackout reminder but does not guess a date/time-only new-entry blackout.
+
+VERIFICATION RESULTS
+
+Final affected-suite matrix:
+
+1. python -m pytest tests/test_master_service_calculator_api.py tests/test_calculator_js_behavior.py -q
+   RESULT: 122 passed, 6 warnings in 15.15s.
+
+2. python -m pytest tests/test_open_orders_page.py tests/test_master_service_bybit_demo_sync.py tests/test_master_service_bybit_context_backfill.py tests/test_bybit_credentials_resolution.py -q
+   RESULT: 165 passed, 23 warnings in 674.03s (11m14s).
+
+3. python -m pytest tests/test_custom_indicator_pine.py tests/test_dashboard_home_layout.py tests/test_atr_percentage_pine.py -q
+   RESULT: 59 passed, 51 warnings in 16.21s.
+
+4. python -m pytest tests/test_fxweekend_executor.py tests/test_fxweekend_executor_backoff.py tests/test_fxweekend_news.py tests/test_fxweekend_render_supervisor.py tests/test_fxweekend_proxy_reliability.py tests/test_master_service_state_sync.py -q
+   RESULT: 127 passed, 16 warnings in 11.33s.
+
+5. python -m pytest tests/test_python_mt5_conversion_files.py tests/test_mt5_spread_fetch.py -q
+   RESULT: 21 passed, 2 warnings in 1.49s.
+
+6. python -m pytest tests/test_trading_journal_equity_curve.py -q
+   RESULT: 15 passed, 14 warnings in 38.22s.
+
+7. python -m pytest tests/test_master_service_local_exit.py -q
+   RESULT: 12 passed, 15 warnings in 5.49s.
+
+- node --check render/static/calculator.js: PASS.
+- node --check render/static/open_orders.js: PASS.
+- node --check render/static/trading_journal_equity_curve.js: PASS.
+- In-memory compile() syntax check of all 20 changed/untracked Python files: PASS (no .pyc/cache output).
+- git diff --check: PASS.
+- No .pytest_cache, __pycache__, .pyc, or temporary preflight artifact exists in the repository.
+- Expected warnings were limited to existing FastAPI/httpx deprecations, pytest cache-write denial in this managed workspace, one pandas date-parsing warning, and mocked-coroutine cleanup warnings in the state-sync harness; no test failed.
+
+Official-editor compilation:
+
+- MetaEditor hidden command-line compilation of Trader.mq5: 0 errors, 0 warnings.
+- MetaEditor hidden command-line compilation of MarketWatchSpreadPercentFeed.mq5: 0 errors, 0 warnings.
+- TradingView Pine Editor compilation was unavailable and was not claimed. Pine verification is static/test-based only.
+
+Sanitized real read-only broker preflights (GET only; no IDs or secrets printed):
+
+- Bybit Demo: NOT RUN. Readiness correctly detected conflicting complete KEY2 and DEMO_EXPLICIT sources and stopped before network access.
+- Bybit Live: PASS against api.bybit.com using KEY1, fingerprint 51d24c8a053c; GET /v5/user/query-api authenticated. Bybit metadata reported readOnly=0, so the credential itself is trading-capable even though this verification issued GET only.
+- OANDA Demo: PASS against api-fxpractice.oanda.com, fingerprint f7cb0d390a0d; configured-account summary and owned-account discovery both succeeded.
+- OANDA Live: PASS against api-fxtrade.oanda.com, fingerprint 95988ae9d0e0; configured-account summary and owned-account discovery both succeeded.
+
+EXTERNAL / MANUAL LIMITATIONS
+
+- In-app Edge control returned exactly: Browser is not available: edge. Therefore the requested real Edge UI smoke matrix (calculator download, crypto summary, simulated submit visibility, all Open Orders columns/warnings, equity pointer at desktop/narrow widths, Pine copy UI, and FX Weekend News add/save/reload/delete) was not performed and is not claimed. Automated backend, static HTML/JS, Node harness, touch/resize/DPR, and API tests cover those flows.
+- TradingView Pine Editor was unavailable, so neither Pine script has an externally recorded TradingView zero-error compile.
+- No Pepperstone demo order/manual MT5 terminal smoke, Bybit/OANDA demo order, live order, cancellation, closure, or liquidation was performed. MQL verification was compilation plus static/regression tests only.
+- OANDA last-known-good owned-account discovery remains process-memory-only, as noted above.
+
+OFFICIAL DOCUMENTATION USED
+
+Bybit V5:
+
+- Demo Trading Service — Introduction, Create API Key, Usage rules, Domain, Tips, Available API List:
+  https://bybit-exchange.github.io/docs/v5/demo
+- Integration Guidance — Authentication; HTTP Headers for Authenticated Endpoints:
+  https://bybit-exchange.github.io/docs/v5/guide
+- Error Codes — HTTP Code; UTA:
+  https://bybit-exchange.github.io/docs/v5/error
+- Get API Key Information — GET /v5/user/query-api:
+  https://bybit-exchange.github.io/docs/v5/user/apikey-info
+- FAQ — Why I get 10003 API key is invalid?:
+  https://bybit-exchange.github.io/docs/faq
+
+OANDA v20:
+
+- Authentication — Overview; Personal Strategy Traders; Obtaining/Using a Personal Access Token:
+  https://developer.oanda.com/rest-live-v20/authentication/
+- Account Endpoints — GET /v3/accounts and account details:
+  https://developer.oanda.com/rest-live-v20/account-ep/
+- Trade Endpoints — account trade close endpoint:
+  https://developer.oanda.com/rest-live-v20/trade-ep/
+
+MQL5:
+
+- GlobalVariableSet: https://www.mql5.com/en/docs/globals/globalvariableset
+- GlobalVariableSetOnCondition: https://www.mql5.com/en/docs/globals/globalvariablesetoncondition
+- GlobalVariableCheck: https://www.mql5.com/en/docs/globals/globalvariablecheck
+- SymbolInfoTick: https://www.mql5.com/en/docs/marketinformation/symbolinfotick
+- FileOpen: https://www.mql5.com/en/docs/files/fileopen
+- File opening flags: https://www.mql5.com/en/docs/constants/io_constants/fileflags
+- CTrade::Buy: https://www.mql5.com/en/docs/standardlibrary/tradeclasses/ctrade/ctradebuy
+
+TradingView Pine:
+
+- Bar states (including confirmed bars): https://www.tradingview.com/pine-script-docs/concepts/bar-states/
+- Time and time zones: https://www.tradingview.com/pine-script-docs/concepts/time/
+- Alerts: https://www.tradingview.com/pine-script-docs/concepts/alerts/
+- Declaration statements (format and precision): https://www.tradingview.com/pine-script-docs/language/declaration-statements/
+- Plots: https://www.tradingview.com/pine-script-docs/visuals/plots/
+
+CHANGED IMPLEMENTATION / DOCUMENTATION AREAS
+
+- bybit_credentials.py
+- fxweekend-clone/liquidate.py
+- mt5-clone/MQL5/Experts/Trader.mq5
+- mt5-clone/MQL5/Experts/MarketWatchSpreadPercentFeed.mq5
+- mt5-clone/MARKET_WATCH_SPREAD_FEED.md
+- pinescripts/custom_indicator.pine
+- pinescripts/atr_percentage.pine
 - render/master_service.py
-- tests/test_master_journal_workbook.py
-- tests/test_master_service_master_journal_sync.py
-- journal/Trading Journal.xlsx
-- summary/CODEX_SUMMARY_latest.txt
+- render/static/calculator.js
+- render/static/open_orders.js
+- render/static/trading_journal_equity_curve.js
+- shared/oanda_api.py
+- tools/windows_launchers/ensure_local_master_server.ps1
+- Focused regression files under tests/ for calculator, Open Orders/Bybit/OANDA, Pine/ATR, equity, MQL/Market Watch, FX Weekend News, state sync, and local source stamps.
 
-10. Preserved unrelated/local state
-- Preserved and excluded from publication: custom instructions/CODEX_BRIEF_INSTRUCTIONS.txt and custom instructions/CODEX_BRIEF_INSTRUCTIONS_CHATGPT_ONLY.docx.
-- Preserved and excluded from publication: render/data/monthly_aud_revaluation.json, monthly_aud_revaluation_state.json, pending_webhooks.json, trade_contexts.json, and webhook_attempts.json.
-- Preserved and excluded from publication: CODEX_BRIEF_2026-08-20_Trading_Journal_Formatting_Repair.txt, CODEX_BRIEF_2026-08-20_Trading_Tools_Brokers_Pine_FXWeekend.txt, and CODEX_BRIEF_2026-08-22_Trading_Journal_Brief1_Follow_Up.txt.
-- No secrets, environment files, logs, caches, runtime data, safety copies, candidate workbooks, QA images, or task helper scripts are intended for the commit.
-
-11. Publication workflow
-- This summary is written before the mandatory repository publication step.
-- The pre-existing unrelated working-tree files are temporarily isolated, PATCH_DESKTOP_PUSH.bat is run on only the intended follow-up package, and those unrelated files are then restored unchanged.
-- Completion is not claimed until the script succeeds and local HEAD is independently verified equal to origin/master.
+PATCH_DESKTOP_PUSH.bat is required immediately after this summary is written. The final assistant response will report the script's actual result and remote HEAD verification; this file does not pre-claim that outcome.

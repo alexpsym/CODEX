@@ -724,18 +724,24 @@ def test_pine_dashboard_api_lists_reads_and_blocks_traversal(monkeypatch) -> Non
         pine_root = tmp_root / "pinescripts"
         pine_root.mkdir()
         (pine_root / "custom_indicator.pine").write_text("//@version=6\nindicator('x')\n", encoding="utf-8")
+        (pine_root / "atr_percentage.pine").write_text("//@version=6\nindicator('atr')\n", encoding="utf-8")
         (pine_root / "notes.md").write_text("not a pine script", encoding="utf-8")
         monkeypatch.setattr(module, "APP_PROFILE", "local")
         monkeypatch.setattr(module, "PINE_SCRIPTS_DIR", pine_root)
 
         files_response = asyncio.run(module.pine_files())
         files_payload = json.loads(files_response.body.decode("utf-8"))
-        assert files_payload["files"] == ["custom_indicator.pine"]
+        assert files_payload["files"] == ["atr_percentage.pine", "custom_indicator.pine"]
 
         file_response = asyncio.run(module.pine_file("custom_indicator.pine"))
         file_payload = json.loads(file_response.body.decode("utf-8"))
         assert file_payload["display_path"] == "pinescripts/custom_indicator.pine"
         assert file_payload["code"].startswith("//@version=6")
+
+        atr_response = asyncio.run(module.pine_file("atr_percentage.pine"))
+        atr_payload = json.loads(atr_response.body.decode("utf-8"))
+        assert atr_payload["display_path"] == "pinescripts/atr_percentage.pine"
+        assert "indicator('atr')" in atr_payload["code"]
 
         with pytest.raises(Exception) as excinfo:
             asyncio.run(module.pine_file("../secret.pine"))

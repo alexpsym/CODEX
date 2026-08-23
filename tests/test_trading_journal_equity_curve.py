@@ -371,6 +371,73 @@ def test_chart_measures_y_labels_and_keeps_them_inside_narrow_canvas() -> None:
     assert min(result["leftEdges"]) >= 0
 
 
+def test_hover_geometry_maps_plot_edges_and_constant_spans_exactly() -> None:
+    result = _run_node(
+        """(() => {
+          const api = TradingJournalEquityCurve;
+          const points = [
+            {timestamp: 1000, value: 90, eventType: 'trade'},
+            {timestamp: 2000, value: 110, eventType: 'trade'},
+          ];
+          const geometry = api.buildChartGeometry(points, 500, 400, 40);
+          const constant = api.buildChartGeometry([
+            {timestamp: 1234, value: 100, eventType: 'trade'},
+          ], 260, 360, 120);
+          return {
+            margin: geometry.margin,
+            plotWidth: geometry.plotWidth,
+            plotHeight: geometry.plotHeight,
+            minTime: geometry.minTime,
+            maxTime: geometry.maxTime,
+            leftTime: api.timestampForX(geometry, geometry.margin.left),
+            rightTime: api.timestampForX(geometry, geometry.margin.left + geometry.plotWidth),
+            topValue: api.valueForY(geometry, geometry.margin.top),
+            bottomValue: api.valueForY(geometry, geometry.margin.top + geometry.plotHeight),
+            xRoundTrip: api.timestampForX(geometry, api.xForTimestamp(geometry, 1500)),
+            yRoundTrip: api.valueForY(geometry, api.yForValue(geometry, 100)),
+            brisbaneDateTime: api.formatDateTime(Date.parse('2026-01-01T00:00:00Z')),
+            constantTimeSpan: constant.timeSpan,
+            constantValueSpan: constant.valueSpan,
+            constantLeftMargin: constant.margin.left,
+          };
+        })()"""
+    )
+    assert result["margin"] == {"left": 64, "right": 28, "top": 24, "bottom": 54}
+    assert result["plotWidth"] == 408
+    assert result["plotHeight"] == 322
+    assert result["minTime"] == result["leftTime"] == 1000
+    assert result["maxTime"] == result["rightTime"] == 2000
+    assert result["topValue"] == pytest.approx(111.6)
+    assert result["bottomValue"] == pytest.approx(88.4)
+    assert result["xRoundTrip"] == pytest.approx(1500)
+    assert result["yRoundTrip"] == pytest.approx(100)
+    assert result["brisbaneDateTime"] == "01 Jan 2026, 10:00:00"
+    assert result["constantTimeSpan"] == 1
+    assert result["constantValueSpan"] == pytest.approx(1)
+    assert result["constantLeftMargin"] == 138
+
+
+def test_nearest_actual_point_skips_synthetic_baseline_and_handles_edges_and_ties() -> None:
+    result = _run_node(
+        """(() => {
+          const points = [
+            {timestamp: 1000, value: 100, eventType: 'baseline', identity: 'baseline'},
+            {timestamp: 1000, value: 101, eventType: 'trade', identity: 'first'},
+            {timestamp: 2000, value: 102, eventType: 'trade', identity: 'second'},
+            {timestamp: 4000, value: 103, eventType: 'cashflow', identity: 'third'},
+          ];
+          const nearest = TradingJournalEquityCurve.nearestActualPoint;
+          return [
+            nearest(points, -1)?.identity,
+            nearest(points, 1500)?.identity,
+            nearest(points, 3999)?.identity,
+            nearest([{timestamp: 1, value: 100, eventType: 'baseline'}], 1),
+          ];
+        })()"""
+    )
+    assert result == ["first", "first", "third", None]
+
+
 def test_backend_equity_return_cache_proof_and_browser_coverage_match() -> None:
     service = _load_master_service_for_equity_integration()
     spoofed_timeline = service._build_journal_balance_timelines(
@@ -750,7 +817,7 @@ process.stdout.write(JSON.stringify(counts));
     expected_counts = {
         "BINANCE": 113,
         "BYBIT": 265,
-        "OANDA DEMO": 45,
+        "OANDA DEMO": 44,
         "OANDA LIVE": 63,
         "PEPPERSTONE DEMO": 823,
         "PEPPERSTONE LIVE": 192,
@@ -781,6 +848,7 @@ const vm = require('vm');
   let rectWidth = 900;
   let drawCount = 0;
   let fetchCount = 0;
+  const fillTextCalls = [];
   const makeElement = (id) => ({
     id,
     value: id === 'journal-equity-account' ? 'BINANCE' : '',
@@ -803,7 +871,8 @@ const vm = require('vm');
   const context2d = {
     setTransform() { drawCount += 1; },
     clearRect() {}, beginPath() {}, moveTo() {}, lineTo() {}, stroke() {},
-    arc() {}, fill() {}, fillText() {},
+    arc() {}, fill() {}, fillText(...args) { fillTextCalls.push(args); }, fillRect() {}, setLineDash() {},
+    measureText(text) { return { width: String(text).length * 7 }; },
   };
   const canvas = {
     ...makeElement('journal-equity-canvas'),
@@ -814,10 +883,22 @@ const vm = require('vm');
     getBoundingClientRect: () => ({ width: rectWidth, height: 440 }),
     getContext: () => context2d,
   };
+  const overlay = {
+    ...makeElement('journal-equity-overlay-canvas'),
+    width: 0,
+    height: 0,
+    clientWidth: 900,
+    clientHeight: 440,
+    getBoundingClientRect: () => ({ left: 0, top: 0, width: rectWidth, height: 440 }),
+    getContext: () => context2d,
+  };
+  const hoverLive = makeElement('journal-equity-hover-live');
   const elements = {
     'journal-equity-account': account,
     'journal-equity-refresh-btn': refresh,
     'journal-equity-canvas': canvas,
+    'journal-equity-overlay-canvas': overlay,
+    'journal-equity-hover-live': hoverLive,
     'journal-equity-summary': summary,
     'journal-equity-state': state,
   };
@@ -910,6 +991,11 @@ const vm = require('vm');
     stateDisplay: state.style.display,
     canvasWidth: canvas.width,
   };
+  elementListeners['journal-equity-overlay-canvas:pointermove']({ clientX: 300, clientY: 200 });
+  const hoverText = hoverLive.textContent;
+  const overlayWidth = overlay.width;
+  elementListeners['journal-equity-overlay-canvas:pointerleave']();
+  const clearedHoverText = hoverLive.textContent;
 
   account.value = 'OANDA LIVE';
   elementListeners['journal-equity-account:change']();
@@ -968,11 +1054,25 @@ const vm = require('vm');
   );
   await elementListeners['journal-equity-refresh-btn:click']();
   rectWidth = 260;
+  context.devicePixelRatio = 3;
   windowListeners.resize();
   while (timers.length) timers.shift()();
+  const narrowFillStart = fillTextCalls.length;
+  elementListeners['journal-equity-overlay-canvas:pointermove']({ clientX: 130, clientY: 200 });
+  const narrowHoverText = hoverLive.textContent;
+  const narrowFillTextCalls = fillTextCalls.slice(narrowFillStart);
+  elementListeners['journal-equity-overlay-canvas:pointercancel']();
+  const pointerCancelText = hoverLive.textContent;
+  elementListeners['journal-equity-overlay-canvas:touchmove']({ touches: [{ clientX: 130, clientY: 200 }] });
+  const touchHoverText = hoverLive.textContent;
+  elementListeners['journal-equity-overlay-canvas:touchcancel']();
+  const touchCancelText = hoverLive.textContent;
 
   process.stdout.write(JSON.stringify({
     initial,
+    hoverText,
+    overlayWidth,
+    clearedHoverText,
     coverageMismatch,
     accountEmpty,
     refreshEmpty,
@@ -980,6 +1080,12 @@ const vm = require('vm');
     failureState,
     finalSummary: summary.innerHTML,
     resizedWidth: canvas.width,
+    resizedOverlayWidth: overlay.width,
+    narrowHoverText,
+    narrowFillTextCalls,
+    pointerCancelText,
+    touchHoverText,
+    touchCancelText,
     canvasStyleWidth: canvas.style.width,
     drawCount,
     fetchCount,
@@ -1003,6 +1109,12 @@ const vm = require('vm');
     assert "USDT" not in result["initial"]["summary"]
     assert result["initial"]["stateDisplay"] == "none"
     assert result["initial"]["canvasWidth"] == 1800
+    assert "Cursor " in result["hoverText"]
+    assert "Nearest actual point" in result["hoverText"]
+    assert "Brisbane" in result["hoverText"]
+    assert "%" in result["hoverText"]
+    assert result["overlayWidth"] == 1800
+    assert result["clearedHoverText"] == ""
     assert result["coverageMismatch"] == {
         "text": (
             "Current equity data for Oanda live could not be verified. "
@@ -1024,7 +1136,20 @@ const vm = require('vm');
     assert "2 points" in result["finalSummary"]
     assert "99.00%" in result["finalSummary"]
     assert "AUD" not in result["finalSummary"]
-    assert result["resizedWidth"] == 520
+    assert result["resizedWidth"] == 780
+    assert result["resizedOverlayWidth"] == 780
+    assert "Nearest actual point" in result["narrowHoverText"]
+    assert "Brisbane" in result["narrowHoverText"]
+    constrained_hover_text = [
+        call
+        for call in result["narrowFillTextCalls"]
+        if call and ("Brisbane" in str(call[0]) or "Equity index:" in str(call[0]))
+    ]
+    assert constrained_hover_text
+    assert all(len(call) == 4 and 0 < call[3] <= 252 for call in constrained_hover_text)
+    assert result["pointerCancelText"] == ""
+    assert "Nearest actual point" in result["touchHoverText"]
+    assert result["touchCancelText"] == ""
     assert result["canvasStyleWidth"] == "100%"
     assert result["drawCount"] >= 3
     assert result["fetchCount"] == 11
@@ -1045,6 +1170,17 @@ def test_equity_script_has_one_selected_curve_axes_refresh_resize_and_states() -
     assert "xTicks = Math.min(6" in source
     assert "formatDate(timestamp)" in source
     assert "devicePixelRatio" in source
+    assert "buildChartGeometry" in source
+    assert "nearestActualPoint" in source
+    assert "drawHoverOverlay" in source
+    assert "journal-equity-overlay-canvas" in source
+    assert "journal-equity-hover-live" in source
+    assert "addEventListener('pointermove'" in source
+    assert "addEventListener('pointerleave'" in source
+    assert "addEventListener('pointercancel'" in source
+    assert "addEventListener('mousemove'" in source
+    assert "addEventListener('touchmove'" in source
+    assert "addEventListener('touchcancel'" in source
     assert "window.addEventListener('resize'" in source
     assert "refreshButton.addEventListener('click', () => load({ forceRefresh: true }))" in source
     assert "'trading-journal:data-changed'" in source
@@ -1062,6 +1198,10 @@ def test_equity_script_has_one_selected_curve_axes_refresh_resize_and_states() -
     assert "grid-template-columns:minmax(300px,340px) minmax(0,1fr)" in service
     assert ".equity-panel{min-width:0;" in service
     assert ".equity-chart-wrap{position:relative;flex:1;min-width:0;" in service
+    assert ".equity-chart-stack{position:relative;" in service
     assert ".equity-canvas{width:100%;max-width:100%;" in service
+    assert ".equity-overlay-canvas{position:absolute;inset:0;" in service
+    assert 'id="journal-equity-hover-live"' in service
+    assert 'aria-live="polite"' in service
     assert ".workspace{grid-template-columns:minmax(0,1fr);padding:10px}" in service
     assert "@media(max-width:780px)" in service

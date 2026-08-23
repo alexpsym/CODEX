@@ -79,14 +79,33 @@ def test_open_orders_headers_and_rendered_cells_have_exact_alignment() -> None:
     assert header_row
     headers = re.findall(r"<th[^>]*>(.*?)</th>", header_row.group(1), re.DOTALL)
     assert headers == [
-        "Broker",
+        "Broker / Venue",
         "Account",
+        "Asset",
         "Category",
+        "Side",
+        "Order Type",
         "Instrument",
+        "Stop-loss Ticks",
+        "Target Mode",
+        "Take-profit Ticks",
+        "Risk Mode",
+        "Risk Value",
+        "Risk / Reward",
         "Timeframe",
         "Test",
+        "Setup",
+        "Pattern",
+        "EMA",
+        "VWAP",
+        "ATH / ATL",
+        "Round Number",
+        "Webhook Mode",
+        "Webhook Status",
+        "Planned Entry",
+        "Planned Stop",
+        "Planned Target",
         "Type",
-        "Side",
         "Size",
         "Entry / Order",
         "Current / Trigger",
@@ -100,19 +119,38 @@ def test_open_orders_headers_and_rendered_cells_have_exact_alignment() -> None:
 
     js = (ROOT / "render" / "static" / "open_orders.js").read_text(encoding="utf-8")
     rendered_values = re.search(
-        r"\[(item\.broker,resolveAccountLabel\(item\).*?,item\.status)\]\.forEach",
+        r"\[(item\.venue\|\|item\.broker,resolveAccountLabel\(item\).*?,item\.status)\]\.forEach",
         js,
     )
     assert rendered_values
     assert rendered_values.group(1).split(",") == [
-        "item.broker",
+        "item.venue||item.broker",
         "resolveAccountLabel(item)",
+        "item.asset",
         "item.category",
+        "item.side",
+        "item.order_type",
         "item.instrument",
+        "item.stop_loss_ticks",
+        "item.target_mode_display",
+        "item.take_profit_ticks",
+        "item.risk_mode_display",
+        "item.risk_value_display",
+        "item.risk_reward",
         "item.timeframe",
         "item.is_test_trade",
+        "item.setup",
+        "item.pattern",
+        "item.ema",
+        "item.vwap",
+        "item.aths_atls",
+        "item.round_number",
+        "item.webhook_mode",
+        "item.webhook_status",
+        "item.planned_entry_price",
+        "item.planned_stop_price",
+        "item.planned_target_price",
         "item.type",
-        "item.side",
         "item.size",
         "item.entry_price||item.order_price",
         "item.current_price",
@@ -123,7 +161,7 @@ def test_open_orders_headers_and_rendered_cells_have_exact_alignment() -> None:
         "item.status",
     ]
     assert "renderActionCell(item,actionTd,{allowAction:true}); row.appendChild(actionTd); tbody.appendChild(row);" in js
-    assert len(headers) == len(rendered_values.group(1).split(",")) + 1 == 17
+    assert len(headers) == len(rendered_values.group(1).split(",")) + 1 == 36
     assert headers[-1] == "Action"
 
 
@@ -812,6 +850,20 @@ def test_bybit_diagnostic_sanitizer_redacts_quoted_secret_fields() -> None:
     assert "quoted-header-signature" not in sanitized
 
 
+def test_broker_diagnostic_sanitizer_redacts_generic_bearer_and_token_fields() -> None:
+    raw = (
+        "Authorization: Bearer never-show-this "
+        "access_token=also-never-show token='nor-this'"
+    )
+
+    sanitized = master_service._safe_bybit_diagnostic_text(raw)
+
+    assert "never-show-this" not in sanitized
+    assert "also-never-show" not in sanitized
+    assert "nor-this" not in sanitized
+    assert sanitized.count("[redacted]") >= 3
+
+
 def test_bybit_position_and_order_errors_identify_source_and_settlement(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1318,7 +1370,7 @@ def test_close_open_order_invalidates_cache_for_webhook(monkeypatch: pytest.Monk
     calls = {"invalidate": 0, "mark": 0, "delete": 0, "backup": 0}
 
     monkeypatch.setattr(master_service, "_mark_trade_context_closed_or_cancelled", lambda **_kwargs: calls.__setitem__("mark", calls["mark"] + 1))
-    monkeypatch.setattr(master_service, "_delete_pending_webhook", lambda _item_id: calls.__setitem__("delete", calls["delete"] + 1) or True)
+    monkeypatch.setattr(master_service, "_delete_pending_webhook", lambda _item_id, **_kwargs: calls.__setitem__("delete", calls["delete"] + 1) or True)
     monkeypatch.setattr(master_service, "_invalidate_open_orders_cache", lambda: calls.__setitem__("invalidate", calls["invalidate"] + 1))
     monkeypatch.setattr(master_service, "_schedule_dropbox_upload_state_backup", lambda: calls.__setitem__("backup", calls["backup"] + 1))
 
@@ -1560,7 +1612,7 @@ def test_open_orders_api_reports_pending_reconciliation_source_counts() -> None:
 
 def test_open_orders_js_renders_actual_broker_value() -> None:
     js = (ROOT / "render" / "static" / "open_orders.js").read_text(encoding="utf-8")
-    assert "[item.broker,resolveAccountLabel(item)" in js
+    assert "[item.venue||item.broker,resolveAccountLabel(item)" in js
     assert "['broker',resolveAccountLabel(item)" not in js
 
 
@@ -1646,3 +1698,598 @@ def test_open_orders_js_does_not_fetch_webhook_diagnostic() -> None:
     js = (ROOT / "render" / "static" / "open_orders.js").read_text(encoding="utf-8")
     assert "pending_webhook_id" not in js
     assert "/api/calculator/webhook-diagnostic/" not in js
+
+
+def test_bybit_auth_preflight_fails_fast_before_category_fanout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = {"preflight": 0, "fanout": 0}
+
+    async def failed_preflight(**_kwargs):
+        calls["preflight"] += 1
+        raise master_service.BybitAuthPreflightError(
+            {
+                "message": "Bybit auth failed safely",
+                "auth_failure": "true",
+                "auth_classification": "invalid_credentials_or_auth_headers",
+                "mode": "demo",
+            }
+        )
+
+    async def forbidden_fanout(**_kwargs):
+        calls["fanout"] += 1
+        raise AssertionError("category fan-out must not run after failed auth preflight")
+
+    monkeypatch.setattr(master_service, "_bybit_read_only_auth_preflight", failed_preflight)
+    monkeypatch.setattr(master_service, "_fetch_bybit_positions_for_category", forbidden_fanout)
+    monkeypatch.setattr(master_service, "_fetch_bybit_orders_for_category", forbidden_fanout)
+
+    payload = asyncio.run(
+        master_service._collect_bybit_open_items(
+            base_url="https://api-demo.bybit.test",
+            api_key="configured-key",
+            api_secret="configured-secret",
+            account_context="demo",
+            key_source="KEY2",
+        )
+    )
+
+    assert calls == {"preflight": 1, "fanout": 0}
+    assert payload["auth_failed"] is True
+    assert len(payload["errors"]) == 1
+    assert payload["errors"][0]["auth_classification"] == "invalid_credentials_or_auth_headers"
+
+
+def test_bybit_http_401_empty_body_is_not_retried_and_is_classified(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = {"get": 0}
+
+    async def fake_headers(**_kwargs):
+        return {"X-BAPI-API-KEY": "header-redacted-by-test"}
+
+    class Response:
+        status_code = 401
+        content = b""
+        text = ""
+
+        def json(self):
+            raise ValueError("empty")
+
+    class Client:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def get(self, *_args, **_kwargs):
+            calls["get"] += 1
+            return Response()
+
+    monkeypatch.setattr(master_service, "_build_bybit_signed_headers", fake_headers)
+    monkeypatch.setattr(master_service.httpx, "AsyncClient", Client)
+
+    with pytest.raises(master_service.BybitSignedGETError) as exc_info:
+        asyncio.run(
+            master_service._bybit_signed_get(
+                base_url="https://api-demo.bybit.test",
+                api_key="key",
+                api_secret="secret",
+                path="/v5/user/query-api",
+                params={},
+            )
+        )
+
+    assert calls["get"] == 1
+    assert exc_info.value.http_status == 401
+    assert "empty" in exc_info.value.ret_msg.lower()
+    assert master_service._bybit_auth_failure_classification(exc_info.value) == "invalid_credentials_or_auth_headers"
+
+
+def test_bybit_timestamp_window_error_retries_once_with_forced_time_sync(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    force_sync_values: list[bool] = []
+    responses = [
+        {"retCode": 10002, "retMsg": "request time exceeds recv_window"},
+        {"retCode": 0, "retMsg": "OK", "result": {"readOnly": 1}},
+    ]
+
+    async def fake_headers(*, force_time_sync: bool, **_kwargs):
+        force_sync_values.append(force_time_sync)
+        return {"X-BAPI-API-KEY": "safe"}
+
+    class Response:
+        status_code = 200
+        content = b"{}"
+
+        def __init__(self, payload):
+            self.payload = payload
+            self.text = json.dumps(payload)
+
+        def json(self):
+            return self.payload
+
+    class Client:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def get(self, *_args, **_kwargs):
+            return Response(responses.pop(0))
+
+    monkeypatch.setattr(master_service, "_build_bybit_signed_headers", fake_headers)
+    monkeypatch.setattr(master_service.httpx, "AsyncClient", Client)
+
+    payload = asyncio.run(
+        master_service._bybit_signed_get(
+            base_url="https://api-demo.bybit.test",
+            api_key="key",
+            api_secret="secret",
+            path="/v5/user/query-api",
+            params={},
+        )
+    )
+
+    assert payload["retCode"] == 0
+    assert force_sync_values == [False, True]
+
+
+def test_bybit_preflight_diagnostic_redacts_echoed_credentials(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    api_key = "sensitive-auth-key-ALPHA9876"
+    api_secret = "sensitive-auth-secret-OMEGA5432"
+
+    async def failed_signed_get(**_kwargs):
+        raise master_service.BybitSignedGETError(
+            path="/v5/user/query-api",
+            failure_kind="http_error",
+            attempts=1,
+            http_status=401,
+            ret_msg=f"api_key={api_key} secret={api_secret}",
+        )
+
+    monkeypatch.setattr(master_service, "_bybit_signed_get", failed_signed_get)
+    caplog.set_level("INFO")
+
+    with pytest.raises(master_service.BybitAuthPreflightError) as exc_info:
+        asyncio.run(
+            master_service._bybit_read_only_auth_preflight(
+                base_url="https://api-demo.bybit.com",
+                api_key=api_key,
+                api_secret=api_secret,
+                account_context="demo",
+                key_source="KEY2",
+            )
+        )
+
+    rendered = json.dumps(exc_info.value.diagnostic, sort_keys=True) + " " + caplog.text
+    assert api_key not in rendered
+    assert api_secret not in rendered
+    assert api_key[-4:] not in rendered
+    assert api_secret[-4:] not in rendered
+    assert "token_last4" not in rendered
+    assert "[redacted]" in rendered
+    assert master_service._bybit_credential_fingerprint(api_key, api_secret) in rendered
+
+
+def test_bybit_auth_failure_preserves_last_known_good_rows_as_stale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cache_snapshot = dict(master_service._OPEN_ORDERS_CACHE)
+    last_good_snapshot = {
+        key: [dict(row) for row in rows]
+        for key, rows in master_service._OPEN_ORDERS_LAST_GOOD_ITEMS.items()
+    }
+    try:
+        master_service._OPEN_ORDERS_CACHE.update({"payload": None, "expires_at": 0.0, "version": 21})
+        master_service._OPEN_ORDERS_LAST_GOOD_ITEMS.clear()
+        master_service._OPEN_ORDERS_LAST_GOOD_ITEMS["bybit:demo"] = [
+            {
+                "broker": "Bybit",
+                "account": "demo",
+                "category": "linear",
+                "instrument": "BTCUSDT",
+                "type": "Order",
+                "id": "last-good-order",
+                "status": "New",
+            }
+        ]
+
+        monkeypatch.setattr(master_service, "_get_oanda_config", lambda _account: (_ for _ in ()).throw(ValueError("not configured")))
+        monkeypatch.setattr(master_service, "resolve_bybit_credentials_for", lambda account: (account, "key", "secret", "https://bybit.test", "KEY2"))
+
+        async def fake_bybit_collect(*, account_context: str, **_kwargs):
+            if account_context == "demo":
+                return {
+                    "items": [],
+                    "errors": [{"broker": "Bybit", "account": "demo", "message": "sanitized auth failure"}],
+                    "auth_failed": True,
+                }
+            return {"items": [], "errors": []}
+
+        monkeypatch.setattr(master_service, "_collect_bybit_open_items", fake_bybit_collect)
+        monkeypatch.setattr(master_service, "_load_pending_webhooks", lambda: [])
+        monkeypatch.setattr(master_service, "_load_bounce_traders", lambda: [])
+        monkeypatch.setattr(master_service.script_manager, "get", lambda _name: type("S", (), {"is_running": False})())
+
+        payload = json.loads(asyncio.run(master_service.list_open_orders(force=True)).body.decode("utf-8"))
+
+        stale_row = next(row for row in payload["items"] if row.get("id") == "last-good-order")
+        assert stale_row["source_stale"] is True
+        assert "last-known-good" in stale_row["stale_reason"]
+        assert any("auth failure" in str(error.get("message")) for error in payload["errors"])
+    finally:
+        master_service._OPEN_ORDERS_CACHE.clear()
+        master_service._OPEN_ORDERS_CACHE.update(cache_snapshot)
+        master_service._OPEN_ORDERS_LAST_GOOD_ITEMS.clear()
+        master_service._OPEN_ORDERS_LAST_GOOD_ITEMS.update(last_good_snapshot)
+
+
+def test_oanda_configured_account_success_retries_transient_discovery_401_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    collected = _stub_open_orders_sources(monkeypatch)
+    calls = {"demo": 0, "live": 0}
+    auth_401 = master_service.OandaAccountDiscoveryError(
+        failure_kind="http",
+        attempts=1,
+        timeout_s=6.0,
+        error_type="HTTPStatusError",
+        http_status=401,
+    )
+
+    async def discovery(*, base_url: str, **_kwargs):
+        account = "demo" if "demo." in base_url else "live"
+        calls[account] += 1
+        if account == "demo" and calls[account] == 1:
+            raise auth_401
+        if account == "demo":
+            return master_service.OandaAccountDiscoveryResult(
+                accounts=[{"id": "SECONDARY-DEMO", "tags": ["MT4"]}],
+                cache_state="refreshed",
+                fetched_at=master_service.time.time(),
+            )
+        return []
+
+    monkeypatch.setattr(master_service, "_get_cached_oanda_accounts", discovery)
+    monkeypatch.setattr(master_service, "_OANDA_DISCOVERY_AUTH_ANOMALY_RETRY_DELAY_SECONDS", 0.0)
+
+    payload = json.loads(asyncio.run(master_service.list_open_orders(force=True)).body.decode("utf-8"))
+
+    assert calls["demo"] == 2
+    assert ("demo", "CFG-DEMO") in collected
+    assert ("demo", "SECONDARY-DEMO") in collected
+    assert not [warning for warning in payload["warnings"] if warning.get("account") == "demo"]
+    assert payload["error_count"] == 0
+
+
+def test_oanda_token_wide_401_is_blocking_and_not_retried_as_discovery_anomaly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = {"demo": 0}
+    auth_401 = master_service.OandaAccountDiscoveryError(
+        failure_kind="http",
+        attempts=1,
+        timeout_s=6.0,
+        error_type="HTTPStatusError",
+        http_status=401,
+    )
+
+    async def collect_override(*, account_context: str, account_id: str, **_kwargs):
+        if account_context == "demo" and account_id == "CFG-DEMO":
+            return {
+                "items": [],
+                "errors": [
+                    {
+                        "endpoint": "/v3/accounts/{accountID}/openTrades",
+                        "message": "OANDA HTTP 401 for configured account",
+                    }
+                ],
+            }
+        return None
+
+    _stub_open_orders_sources(monkeypatch, collect_override=collect_override)
+
+    async def discovery(*, base_url: str, **_kwargs):
+        if "demo." in base_url:
+            calls["demo"] += 1
+            raise auth_401
+        return []
+
+    monkeypatch.setattr(master_service, "_get_cached_oanda_accounts", discovery)
+    monkeypatch.setattr(master_service, "_OANDA_DISCOVERY_AUTH_ANOMALY_RETRY_DELAY_SECONDS", 0.0)
+
+    payload = json.loads(asyncio.run(master_service.list_open_orders(force=True)).body.decode("utf-8"))
+
+    assert calls["demo"] == 1
+    assert any(error.get("account") == "demo" and "401" in error.get("message", "") for error in payload["errors"])
+    assert any(warning.get("account") == "demo" for warning in payload["warnings"])
+    assert payload["stale"] is True
+
+
+def test_oanda_discovery_warning_clears_after_next_successful_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = {"demo": 0}
+    _stub_open_orders_sources(monkeypatch)
+
+    async def discovery(*, base_url: str, **_kwargs):
+        if "demo." not in base_url:
+            return []
+        calls["demo"] += 1
+        if calls["demo"] == 1:
+            raise _discovery_timeout()
+        return []
+
+    monkeypatch.setattr(master_service, "_get_cached_oanda_accounts", discovery)
+
+    first = json.loads(asyncio.run(master_service.list_open_orders(force=True)).body.decode("utf-8"))
+    second = json.loads(asyncio.run(master_service.list_open_orders(force=True)).body.decode("utf-8"))
+
+    assert any(warning.get("account") == "demo" for warning in first["warnings"])
+    assert not [warning for warning in second["warnings"] if warning.get("account") == "demo"]
+
+
+@pytest.mark.parametrize(
+    ("raw_category", "asset", "expected_broker", "expected_category"),
+    [
+        ("linear", "crypto", "bybit", "linear"),
+        ("bybit", "crypto", "bybit", "linear"),
+        ("forex", "fx", "oanda", "forex"),
+        ("oanda", "fx", "oanda", "forex"),
+    ],
+)
+def test_pending_webhook_context_preserves_broker_and_market_category(
+    monkeypatch: pytest.MonkeyPatch,
+    raw_category: str,
+    asset: str,
+    expected_broker: str,
+    expected_category: str,
+) -> None:
+    saved_registry: list[list[dict[str, object]]] = []
+    saved_contexts: list[dict[str, object]] = []
+    invalidations = {"count": 0}
+    monkeypatch.setattr(master_service, "_load_pending_webhooks", lambda: [])
+    monkeypatch.setattr(master_service, "_save_pending_webhooks", lambda rows: saved_registry.append([dict(row) for row in rows]))
+    monkeypatch.setattr(master_service, "_upsert_trade_context", lambda row: saved_contexts.append(dict(row)) or row)
+    monkeypatch.setattr(master_service, "_invalidate_open_orders_cache", lambda: invalidations.__setitem__("count", invalidations["count"] + 1))
+
+    master_service._upsert_pending_webhook(
+        {
+            "id": "pending-1",
+            "asset": asset,
+            "category": raw_category,
+            "account": "demo",
+            "instrument": "BTCUSDT" if asset == "crypto" else "EUR_USD",
+            "side": "buy",
+            "order_type": "market",
+            "calculation_context_id": "ctx-1",
+            "timeframe": "15MIN",
+            "is_test_trade": False,
+            "risk_mode": "fixed_aud",
+            "risk_value": "10",
+            "stop_loss_ticks": "35",
+            "take_profit_ticks": "70",
+            "target_mode": "ticks",
+            "risk_reward": "2",
+            "planned_entry_price": "1.1",
+            "planned_stop_price": "1.0",
+            "planned_target_price": "1.2",
+        }
+    )
+
+    assert len(saved_registry) == 1
+    assert len(saved_contexts) == 1
+    context = saved_contexts[0]
+    assert context["broker"] == expected_broker
+    assert context["category"] == expected_category
+    assert context["calculation_context_id"] == "ctx-1"
+    assert context["timeframe"] == "15MIN"
+    assert context["is_test_trade"] is False
+    assert context["planned_target_price"] == "1.2"
+    assert invalidations["count"] == 1
+
+
+def test_pending_webhook_consume_invalidates_exactly_once_after_durable_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    invalidations = {"count": 0}
+    deleted_flags: list[bool] = []
+    contexts: list[dict[str, object]] = []
+
+    def delete(_webhook_id, *, invalidate_cache=True):
+        deleted_flags.append(invalidate_cache)
+        return True
+
+    monkeypatch.setattr(master_service, "_delete_pending_webhook", delete)
+    monkeypatch.setattr(master_service, "_upsert_trade_context", lambda row: contexts.append(dict(row)) or row)
+    monkeypatch.setattr(master_service, "_invalidate_open_orders_cache", lambda: invalidations.__setitem__("count", invalidations["count"] + 1))
+    monkeypatch.setattr(master_service, "_schedule_dropbox_upload_state_backup", lambda: None)
+
+    assert master_service._consume_pending_webhook("pending-1", request_id="request-1") is True
+    assert deleted_flags == [False]
+    assert contexts[0]["status"] == "CONSUMED"
+    assert invalidations["count"] == 1
+
+
+def test_open_orders_collection_version_is_not_advanced_without_rendered_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cache_snapshot = dict(master_service._OPEN_ORDERS_CACHE)
+    trigger = {"done": False}
+
+    async def collect_override(*, account_context: str, account_id: str, **_kwargs):
+        if not trigger["done"]:
+            trigger["done"] = True
+            master_service._invalidate_open_orders_cache()
+        return {
+            "items": [
+                {
+                    "broker": "OANDA",
+                    "account": account_context,
+                    "category": "forex",
+                    "instrument": "EUR_USD",
+                    "type": "Order",
+                    "id": f"{account_context}-{account_id}",
+                    "status": "PENDING",
+                }
+            ],
+            "errors": [],
+        }
+
+    try:
+        master_service._OPEN_ORDERS_CACHE.update({"payload": None, "expires_at": 0.0, "version": 40})
+        _stub_open_orders_sources(monkeypatch, collect_override=collect_override)
+
+        first = json.loads(asyncio.run(master_service.list_open_orders(force=True)).body.decode("utf-8"))
+        assert first["version"] == 40
+        assert first["refresh_superseded"] is True
+        assert master_service._OPEN_ORDERS_CACHE["version"] == 41
+        assert master_service._OPEN_ORDERS_CACHE["payload"] is None
+
+        second = json.loads(asyncio.run(master_service.list_open_orders(force=True)).body.decode("utf-8"))
+        assert second["version"] == 41
+        assert second["refresh_superseded"] is False
+        assert master_service._OPEN_ORDERS_CACHE["payload"]["version"] == 41
+    finally:
+        master_service._OPEN_ORDERS_CACHE.clear()
+        master_service._OPEN_ORDERS_CACHE.update(cache_snapshot)
+
+
+def test_open_orders_browser_handles_refresh_races_visibility_and_bounded_submit_backoff() -> None:
+    node = shutil.which("node")
+    assert node, "node is required for Open Orders browser-state regression"
+    js_path = ROOT / "render" / "static" / "open_orders.js"
+    harness = r"""
+const fs = require('fs');
+class Element {
+  constructor() { this.children=[]; this.handlers={}; this.style={}; this.textContent=''; this._innerHTML=''; this.className=''; this.title=''; }
+  set innerHTML(value) { this._innerHTML=value; if(value==='') this.children=[]; }
+  get innerHTML() { return this._innerHTML; }
+  appendChild(node) { this.children.push(node); return node; }
+  addEventListener(event, handler) { this.handlers[event]=handler; }
+  querySelector() { return null; }
+}
+const refreshButton=new Element();
+const statusBadge=new Element();
+const tbody=new Element();
+const table=new Element(); table.querySelector=()=>tbody;
+const errorsBox=new Element(); const errorsList=new Element(); errorsBox.querySelector=()=>errorsList;
+const warningsBox=new Element(); const warningsList=new Element(); warningsBox.querySelector=()=>warningsList;
+const documentHandlers={}; const windowHandlers={};
+const elements={
+  'refresh-btn':refreshButton,
+  'open-orders-status':statusBadge,
+  'open-orders-table':table,
+  'open-orders-empty':new Element(),
+  'open-orders-errors':errorsBox,
+  'open-orders-warnings':warningsBox,
+};
+global.window={__OPEN_ORDERS_TESTING__:true,addEventListener(event,handler){windowHandlers[event]=handler;}};
+global.document={
+  hidden:false,
+  getElementById(id){return elements[id]||null;},
+  addEventListener(event,handler){documentHandlers[event]=handler;},
+  createElement(){return new Element();},
+};
+global.localStorage={setItem(){}};
+global.BroadcastChannel=undefined;
+global.setInterval=()=>1; global.clearInterval=()=>{};
+global.setTimeout=(fn,_delay)=>{queueMicrotask(fn);return 1;};
+const makeResponse=(payload)=>({ok:true,status:200,statusText:'OK',text:async()=>JSON.stringify(payload)});
+let serverVersion=1;
+let openItems=[{broker:'Bybit',account:'demo',category:'linear',instrument:'BTCUSDT',type:'Order',id:'initial',status:'New'}];
+let openCalls=0; let versionCalls=0; let resolveInitial=null;
+let visibilityMode='off'; let visibilityReads=0;
+global.fetch=async(url)=>{
+  const value=String(url);
+  if(value.includes('/api/open-orders/version')){versionCalls+=1;return makeResponse({version:serverVersion});}
+  openCalls+=1;
+  if(openCalls===1){return await new Promise((resolve)=>{resolveInitial=()=>resolve(makeResponse({items:[{id:'old'}],errors:[],warnings:[],version:1,stale:false}));});}
+  if(visibilityMode==='eventual'){
+    visibilityReads+=1;
+    if(visibilityReads>=2){openItems=[
+      {broker:'Bybit',account:'demo',category:'linear',instrument:'BTCUSDT',type:'Order',id:'a',calculation_context_id:'ctx-a',status:'New'},
+      {broker:'Bybit',account:'demo',category:'linear',instrument:'ETHUSDT',type:'Order',id:'b',calculation_context_id:'ctx-b',status:'New'},
+    ];}
+  }
+  return makeResponse({items:openItems,errors:[],warnings:[],version:serverVersion,stale:false});
+};
+eval(fs.readFileSync(__JS_PATH__,'utf8'));
+const hooks=window.__openOrdersTestHooks;
+const flush=async(count=40)=>{for(let i=0;i<count;i+=1)await new Promise((resolve)=>setImmediate(resolve));};
+(async()=>{
+  const queued=hooks.refresh('broadcast');
+  serverVersion=2;
+  openItems=[{broker:'Bybit',account:'demo',category:'linear',instrument:'BTCUSDT',type:'Order',id:'raced',status:'New'}];
+  resolveInitial();
+  await queued; await flush();
+  const race={state:hooks.getState(),ids:(window.__openOrdersItems||[]).map((row)=>row.id),openCalls};
+
+  const unchangedBefore=openCalls;
+  await hooks.pollVersion(); await flush();
+  const unchangedAfter=openCalls;
+
+  serverVersion=3;
+  openItems=[{broker:'Bybit',account:'demo',category:'linear',instrument:'ETHUSDT',type:'Order',id:'changed',status:'New'}];
+  await hooks.pollVersion(); await flush();
+  const changed={state:hooks.getState(),ids:(window.__openOrdersItems||[]).map((row)=>row.id)};
+
+  document.hidden=true; documentHandlers.visibilitychange();
+  serverVersion=4;
+  const hiddenBefore=openCalls;
+  await hooks.pollVersion(); await flush();
+  const hiddenAfter=openCalls;
+  openItems=[{broker:'Bybit',account:'demo',category:'linear',instrument:'SOLUSDT',type:'Order',id:'visible',status:'New'}];
+  document.hidden=false; documentHandlers.visibilitychange(); await flush();
+  const visible={state:hooks.getState(),ids:(window.__openOrdersItems||[]).map((row)=>row.id)};
+
+  serverVersion=5; openItems=[]; visibilityMode='eventual'; visibilityReads=0;
+  hooks.handleStateChange({type:'state-changed',action:'submit',eventId:'event-a',submittedAt:Date.now(),broker:'bybit',account:'demo',symbol:'BTCUSDT',calculationContextId:'ctx-a'});
+  hooks.handleStateChange({type:'state-changed',action:'submit',eventId:'event-b',submittedAt:Date.now(),broker:'bybit',account:'demo',symbol:'ETHUSDT',calculationContextId:'ctx-b'});
+  await flush(100);
+  const rapid={state:hooks.getState(),ids:(window.__openOrdersItems||[]).map((row)=>row.calculation_context_id),visibilityReads};
+
+  visibilityMode='missing'; openItems=[];
+  hooks.handleStateChange({type:'state-changed',action:'submit',eventId:'event-missing',submittedAt:Date.now(),broker:'bybit',account:'demo',symbol:'XRPUSDT',calculationContextId:'ctx-missing'});
+  await flush(140);
+  const bounded={state:hooks.getState(),badge:statusBadge.textContent};
+
+  process.stdout.write(JSON.stringify({race,unchangedBefore,unchangedAfter,changed,hiddenBefore,hiddenAfter,visible,rapid,bounded,versionCalls}));
+})().catch((error)=>{console.error(error);process.exit(1);});
+""".replace("__JS_PATH__", json.dumps(str(js_path)))
+
+    result = subprocess.run(
+        [node, "-e", harness],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    state = json.loads(result.stdout)
+
+    assert state["race"]["state"]["knownVersion"] == 2
+    assert state["race"]["ids"] == ["raced"]
+    assert state["race"]["openCalls"] >= 2
+    assert state["unchangedAfter"] == state["unchangedBefore"]
+    assert state["changed"]["state"]["knownVersion"] == 3
+    assert state["changed"]["ids"] == ["changed"]
+    assert state["hiddenAfter"] == state["hiddenBefore"]
+    assert state["visible"]["state"]["knownVersion"] == 4
+    assert state["visible"]["ids"] == ["visible"]
+    assert state["rapid"]["state"]["pendingVisibilityChecks"] == 0
+    assert sorted(state["rapid"]["ids"]) == ["ctx-a", "ctx-b"]
+    assert state["rapid"]["visibilityReads"] >= 2
+    assert state["bounded"]["state"]["pendingVisibilityChecks"] == 0
+    assert "visibility was not confirmed" in state["bounded"]["badge"]

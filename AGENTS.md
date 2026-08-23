@@ -27,3 +27,14 @@ Do not run recursive deletion commands, disk-management commands, registry comma
 Do not use git reset --hard, git clean -fd, git push --force, git push --force-with-lease, or equivalent destructive commands.
 
 If completing the task genuinely requires any prohibited action, stop and report exactly what is required instead of performing it.
+
+## Targeted verification and credit control
+
+- Identify the changed code and affected behavior before selecting tests.
+- Add and run focused regression tests for every reported issue, plus existing tests covering directly affected code and preservation contracts.
+- Do not run unrelated tests or entire service suites for isolated service changes.
+- Run a complete workbook suite only when changes to shared workbook-generation code genuinely require broad regression coverage, and run it once after the implementation is stable.
+- Do not rerun previously passing suites unless relevant code or fixtures changed.
+- Preserve all workbook values, formulas, formatting, charts, borders, merged cells, row heights, column widths, filters, panes, and sheet order.
+- Verify real-workbook behavior and repeated-resync stability when relevant.
+- Keep test output concise and avoid unnecessary repeated polling.

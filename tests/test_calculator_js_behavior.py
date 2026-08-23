@@ -154,7 +154,7 @@ setTimeout(() => {
     assert "pending_webhook_id=" in data["summary"]
 
 
-def test_fx_broker_toggle_is_hidden_for_crypto_and_posts_pepperstone() -> None:
+def test_fx_broker_toggle_is_hidden_for_crypto_and_supports_pepperstone_market_set() -> None:
     node = shutil.which("node")
     assert node, "node is required for JS behavior test"
     harness = r'''
@@ -191,9 +191,11 @@ el['calc-sl-ticks'].value='35';
 el['calc-rr'].value='2';
 el['calc-risk'].value='10';
 let quotePayload=null;
+let setPayload=null;
 global.fetch=async (url,opts={})=>{
   if(url.includes('/api/calculator/bootstrap')) return {ok:true,status:200,statusText:'OK',headers:{get:()=> 'application/json'},text:async()=>JSON.stringify({app_profile:'local',calculator_js_sha256_12:'abc123def456',render_calculator_base_url_configured:true,webhook:{available:true}})};
-  if(url.includes('/api/calculator/quote')){ quotePayload=JSON.parse(opts.body||'{}'); return {ok:true,status:200,statusText:'OK',headers:{get:()=> 'application/json'},text:async()=>JSON.stringify({broker:'pepperstone',symbol:'EUR_USD',tick_size:'0.00001',entry_price:'1.1002',stop_price:'1.09985',target_price:'1.10125',target_distance:'0.00105',quantity:'1000',estimated_fees_or_spread:'1',estimated_total_loss:'10',estimated_total_loss_aud:'10',estimated_reward:'20'})}; }
+  if(url.includes('/api/calculator/quote')){ quotePayload=JSON.parse(opts.body||'{}'); return {ok:true,status:200,statusText:'OK',headers:{get:()=> 'application/json'},text:async()=>JSON.stringify({broker:'pepperstone',venue:'Pepperstone',resolved_venue:'Pepperstone',symbol:'EUR_USD',tick_size:'0.00001',entry_price:'1.1002',stop_price:'1.09985',target_price:'1.10125',target_distance:'0.00105',quantity:'1000',estimated_fees_or_spread:'1',estimated_total_loss:'10',estimated_total_loss_aud:'10',estimated_reward:'20'})}; }
+  if(url.includes('/api/calculator/pepperstone-set')){ setPayload=JSON.parse(opts.body||'{}'); return {ok:true,status:200,statusText:'OK',headers:{get:(k)=>k==='content-disposition'?'attachment; filename="Pepperstone_Trader_EUR_USD_BUY_MARKET_x.set"':'text/plain'},text:async()=> 'Strategy=3\nStandardMarketSide=0\nStandardMarketExecutionToken=mkt_test\n'}; }
   return {ok:true,status:200,statusText:'OK',headers:{get:()=> 'application/json'},text:async()=>JSON.stringify({status:'no_data'})};
 };
 global.document={getElementById:(id)=>el[id]};
@@ -209,9 +211,9 @@ eval(source);
   el['asset-toggle'].buttons.find((b)=>b.dataset.v==='fx').click();
   const visibleOnFx = el['broker-toggle-wrap'].style.display === '';
   el['broker-toggle'].buttons.find((b)=>b.dataset.v==='pepperstone').click();
-  el['order-toggle'].buttons.find((b)=>b.dataset.v==='limit').click();
   await el['calc-quote'].listeners.click();
-  console.log(JSON.stringify({hiddenOnCrypto,visibleOnFx,broker:quotePayload?.broker,setButton:el['calc-pepperstone-set'].style.display,submit:el['calc-submit'].style.display,summary:el['calc-request-summary'].textContent}));
+  await el['calc-pepperstone-set'].listeners.click();
+  console.log(JSON.stringify({hiddenOnCrypto,visibleOnFx,broker:quotePayload?.broker,setPayload,setButton:el['calc-pepperstone-set'].style.display,submit:el['calc-submit'].style.display,summary:el['calc-request-summary'].textContent}));
 })();
 '''
     out = subprocess.check_output([node, "-e", harness, str(JS_PATH)], text=True)
@@ -219,9 +221,12 @@ eval(source);
     assert data["hiddenOnCrypto"] is True
     assert data["visibleOnFx"] is True
     assert data["broker"] == "pepperstone"
+    assert data["setPayload"]["order_type"] == "market"
+    assert "entry_price" not in data["setPayload"]
     assert data["setButton"] == ""
     assert data["submit"] == "none"
     assert "broker=pepperstone" in data["summary"]
+    assert "venue=Pepperstone" in data["summary"]
 
 
 def test_submit_visibility_tracks_quote_validity_and_webhook_mode() -> None:
@@ -473,16 +478,26 @@ const ids=['calc-error','calc-error-debug','calc-success','calc-results','calc-r
 const el=Object.fromEntries(ids.map(i=>[i,new E(i)]));const mk=(v)=>v.map(x=>new B(x));el['risk-toggle'].buttons=mk(['fixed_aud','percent']);el['asset-toggle'].buttons=mk(['crypto','fx']);el['account-toggle'].buttons=mk(['live','demo']);el['side-toggle'].buttons=mk(['buy','sell']);el['order-toggle'].buttons=mk(['market','limit']);el['webhook-toggle'].buttons=mk(['no','yes']);el['test-toggle'].buttons=mk(['no','yes']);
 el['calc-symbol'].value='BTCUSDT';el['calc-risk'].value='1';el['calc-sl-ticks'].value='1999';el['calc-rr'].value='1';
 let submitted=null;
-global.fetch=async (url,opts={})=>{if(url.includes('/quote'))return {ok:true,status:200,headers:{get:()=> 'application/json'},text:async()=>JSON.stringify({broker:'bybit',symbol:'BTCUSDT',entry_price:'79300',stop_price:'78784.5',target_price:'79669',quantity:'0.012',calculation_context_id:'ctx1',quote_created_at_ms:123})};if(url.includes('/submit')){submitted=JSON.parse(opts.body||'{}');return {ok:true,status:200,headers:{get:()=> 'application/json'},text:async()=>JSON.stringify({ok:true})};}return {ok:true,status:200,headers:{get:()=> 'application/json'},text:async()=>JSON.stringify({status:'no_data'})};};
+let broadcasts=[];let storageEvents=[];
+global.BroadcastChannel=class{constructor(name){this.name=name;}postMessage(msg){broadcasts.push({name:this.name,msg});}close(){}};
+global.localStorage={setItem:(key,value)=>storageEvents.push({key,value:JSON.parse(value)})};
+global.fetch=async (url,opts={})=>{if(url.includes('/quote'))return {ok:true,status:200,headers:{get:()=> 'application/json'},text:async()=>JSON.stringify({broker:'bybit',venue:'Bybit',resolved_venue:'Bybit',symbol:'BTCUSDT',entry_price:'79300',stop_price:'78784.5',target_price:'79669',quantity:'0.012',calculation_context_id:'ctx1',quote_created_at_ms:123})};if(url.includes('/submit')){submitted=JSON.parse(opts.body||'{}');return {ok:true,status:200,headers:{get:()=> 'application/json'},text:async()=>JSON.stringify({ok:true,broker:'bybit',venue:'Bybit',resolved_venue:'Bybit'})};}return {ok:true,status:200,headers:{get:()=> 'application/json'},text:async()=>JSON.stringify({status:'no_data'})};};
 global.document={getElementById:(id)=>el[id]};global.navigator={clipboard:{writeText:async()=>{}}};global.setTimeout=(f)=>{f();return 1;};global.clearTimeout=()=>{};eval(source);
-(async()=>{await el['calc-quote'].listeners.click();await el['calc-submit'].listeners.click();console.log(JSON.stringify({submitted,summary:el['calc-request-summary'].textContent}));})();
+(async()=>{await el['calc-quote'].listeners.click();await el['calc-submit'].listeners.click();console.log(JSON.stringify({submitted,summary:el['calc-request-summary'].textContent,broadcasts,storageEvents}));})();
 '''
     out = subprocess.run([node, '-e', harness, str(JS_PATH)], check=True, capture_output=True, text=True)
     data = json.loads(out.stdout.strip().splitlines()[-1])
     assert data['submitted']['planned_entry_price'] == '79300'
     assert data['submitted']['stop_loss_price'] == '78784.5'
+    assert data['submitted']['broker'] == 'bybit'
     assert 'planned_entry_price=79300' in data['summary']
     assert 'take_profit_price=79669' in data['summary']
+    assert 'broker=bybit' in data['summary']
+    assert 'venue=Bybit' in data['summary']
+    assert data['broadcasts'][0]['name'] == 'trading-tools-open-orders'
+    assert data['broadcasts'][0]['msg']['type'] == 'state-changed'
+    assert data['broadcasts'][0]['msg']['action'] == 'submit'
+    assert data['storageEvents'][0]['key'] == 'trading-tools-open-orders-event'
 
 
 def test_crypto_calculate_attempts_quote_when_prewarm_wallet_unavailable() -> None:
