@@ -366,10 +366,12 @@ def _profile_main_buttons() -> List[Dict[str, object]]:
                 {"id": "bounce-trader", "name": "bounce-trader", "label": "Bounce Trader", "open_url": _render_tools_page_url("/merged/bounce-trader"), "dashboard_main_view": True, "remote_owned": True},
                 {"id": "fxweekend", "name": "fxweekend", "label": "FX Weekend", "open_url": _render_tools_page_url("/apps/fxweekend-clone"), "dashboard_main_view": True, "remote_owned": True},
                 {"id": "trading-journal", "name": "trading-journal", "label": "Journal", "open_url": "/dashboard/trading-journal", "dashboard_main_view": True},
+                {"id": "instrument-lookup", "name": "instrument-lookup", "label": "Instrument Lookup", "open_url": "/instrument-lookup", "dashboard_main_view": True},
+                {"id": "history", "name": "history", "label": "History Export", "open_url": "/merged/history", "dashboard_main_view": True},
                 {"id": "monitor", "name": "monitor", "label": "Alerts", "open_url": "/merged/monitor", "dashboard_main_view": True},
                 {"id": "atr-scanner", "name": "atr-scanner", "label": "Scanner", "open_url": "/merged/atr-scanner", "dashboard_main_view": True},
                 {"id": "ivindicator-clone", "name": "ivindicator-clone", "label": "IV Indicator", "open_url": "/apps/ivindicator-clone", "dashboard_main_view": True},
-                {"id": "spreads-clone", "name": "spreads-clone", "label": "Spreads", "open_url": "/apps/spreads-clone", "dashboard_main_view": True},
+                {"id": "spreads-clone", "name": "spreads-clone", "label": "Oanda Spreads", "open_url": "/apps/spreads-clone", "dashboard_main_view": True},
             ]
         )
     return buttons
@@ -12516,7 +12518,7 @@ FRIENDLY_SCRIPT_LABELS: Dict[str, str] = {
     "open-orders": "Orders / Positions",
     "pine": "Pine",
     "pinescripts": "Pine Scripts",
-    "spreads-clone": "Spreads",
+    "spreads-clone": "Oanda Spreads",
     "trading-journal": "Journal",
 }
 
@@ -15073,110 +15075,99 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             padding:10px;
             font-family:ui-monospace,SFMono-Regular,Consolas,monospace;
         }
-        .dashboard-inline-tool{
+        #journal-equity-panel{
             display:flex;
             flex-direction:column;
             gap:0.75rem;
-        }
-        .inline-tool-form{
-            display:grid;
-            grid-template-columns:minmax(0,1fr) max-content;
-            gap:0.65rem;
-            align-items:end;
-            width:100%;
             min-width:0;
         }
-        .inline-tool-label{
+        #journal-equity-panel .panel-header{
+            align-items:flex-end;
+            flex-wrap:wrap;
+            margin-bottom:0;
+        }
+        .journal-equity-toolbar{
+            display:flex;
+            align-items:flex-end;
+            justify-content:flex-end;
+            flex-wrap:wrap;
+            gap:0.65rem;
+            min-width:0;
+        }
+        .journal-equity-toolbar label{
             display:flex;
             flex-direction:column;
             gap:0.35rem;
-            color:#cbd5e1;
-            font-weight:800;
-            min-width:0;
+            color:#94a3b8;
+            font-size:0.8rem;
+            font-weight:700;
+            min-width:min(190px,100%);
         }
-        .inline-tool-input,
-        #dashboard-history-panel select{
-            width:100%;
+        #journal-equity-account{
+            min-width:190px;
             max-width:100%;
             box-sizing:border-box;
-            min-width:0;
-            border-radius:10px;
             border:1px solid #334155;
-            background:#0b1220;
+            border-radius:9px;
+            background:#0f172a;
             color:#e2e8f0;
-            padding:0.62rem 0.75rem;
-            font-size:0.95rem;
-            min-height:40px;
+            padding:0.55rem 0.7rem;
         }
-        .inline-tool-form button,
-        #dashboard-history-panel button{
+        #journal-equity-refresh-btn{
             border:1px solid #334155;
-            border-radius:10px;
             background:#1f2937;
             color:#e2e8f0;
-            min-height:40px;
-            box-sizing:border-box;
             white-space:nowrap;
         }
-        .inline-tool-form button:hover,
-        #dashboard-history-panel button:hover{
-            background:#334155;
-        }
-        .inline-tool-status{
-            color:#94a3b8;
-            font-size:0.9rem;
-            min-height:1.2em;
-        }
-        #dashboard-history-panel .history-export-tool{
+        .equity-summary{
             display:flex;
-            flex-direction:column;
-            gap:0.75rem;
-        }
-        #dashboard-history-panel .history-tool-head h2{
+            gap:1rem;
+            flex-wrap:wrap;
+            min-height:1.6rem;
             margin:0;
         }
-        #dashboard-history-panel .muted{
-            color:#94a3b8;
-            font-size:0.9rem;
-            margin:0.2rem 0 0;
+        .equity-summary strong{font-size:1.1rem}
+        .equity-chart-wrap{
+            position:relative;
+            min-width:0;
+            min-height:420px;
+            height:min(560px,65vh);
+            border:1px solid #26364e;
+            border-radius:10px;
+            background:#0f172a;
+            padding:8px;
+            box-sizing:border-box;
         }
-        #dashboard-history-panel .row{
-            display:flex;
-            flex-wrap:wrap;
-            gap:0.75rem;
-            align-items:end;
-        }
-        #dashboard-history-panel label{
-            display:flex;
-            flex-direction:column;
-            gap:0.35rem;
-            color:#cbd5e1;
-            font-weight:800;
-            min-width:170px;
-        }
-        #dashboard-history-panel .periods{
-            display:grid;
-            grid-template-columns:repeat(auto-fit,minmax(90px,1fr));
-            gap:0.5rem;
-        }
-        #dashboard-history-panel .period-btn.active{
-            background:#2563eb;
-            border-color:#3b82f6;
-        }
-        #dashboard-history-panel .status{
-            color:#93c5fd;
-            min-height:1.2em;
-        }
+        .equity-chart-stack{position:relative;width:100%;height:100%;min-height:400px}
+        .equity-canvas{width:100%;max-width:100%;height:100%;min-height:400px;display:block}
+        .equity-overlay-canvas{position:absolute;inset:0;z-index:2;touch-action:pan-y}
+        .equity-state{position:absolute;inset:0;z-index:3;pointer-events:none;display:flex;align-items:center;justify-content:center;color:#94a3b8;padding:20px;text-align:center}
+        .equity-state.error{color:#fca5a5}
+        .sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
         @media (max-width: 980px){
             .layout{ grid-template-columns: 1fr; }
             #dashboard-workspace-frame{
                 min-height: 180px;
             }
-            .inline-tool-form{
-                grid-template-columns:1fr;
-            }
-            .inline-tool-form button{
+            .journal-equity-toolbar{
                 width:100%;
+                justify-content:stretch;
+            }
+            .journal-equity-toolbar label{
+                flex:1 1 190px;
+            }
+            #journal-equity-refresh-btn{
+                flex:1 1 190px;
+            }
+        }
+        @media (max-width: 560px){
+            .equity-chart-wrap{
+                min-height:360px;
+                height:58vh;
+            }
+            .equity-chart-stack,
+            .equity-canvas{
+                min-height:340px;
             }
         }
         .category-title{
@@ -15466,6 +15457,23 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     ></iframe>
                 </section>
 
+                <section class="panel" id="journal-equity-panel" aria-label="Account equity curve">
+                    <div class="panel-header">
+                        <div>
+                            <h2>Equity Curve</h2>
+                            <div class="panel-sub">Authoritative account equity from Trading Journal.xlsx.</div>
+                        </div>
+                        <div class="journal-equity-toolbar">
+                            <label>Equity account
+                                <select id="journal-equity-account"><option value="BINANCE">Binance</option><option value="BYBIT">Bybit</option><option value="OANDA DEMO">Oanda demo</option><option value="OANDA LIVE">Oanda live</option><option value="PEPPERSTONE DEMO">Pepperstone demo</option><option value="PEPPERSTONE LIVE">Pepperstone live</option></select>
+                            </label>
+                            <button id="journal-equity-refresh-btn" type="button">Refresh Equity Curve</button>
+                        </div>
+                    </div>
+                    <div id="journal-equity-summary" class="equity-summary"></div>
+                    <div class="equity-chart-wrap"><div class="equity-chart-stack"><canvas id="journal-equity-canvas" class="equity-canvas" aria-label="Account equity curve"></canvas><canvas id="journal-equity-overlay-canvas" class="equity-canvas equity-overlay-canvas" aria-label="Interactive equity crosshair"></canvas></div><div id="journal-equity-state" class="equity-state">Loading equity dataâ€¦</div><div id="journal-equity-hover-live" class="sr-only" aria-live="polite" aria-atomic="true"></div></div>
+                </section>
+
                 <section class="panel" id="pine-scripts-panel">
                     <div class="panel-header">
                         <div>
@@ -15476,33 +15484,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     <div class="pine-files" id="pine-files"></div>
                     <textarea id="pine-fallback" hidden></textarea>
                 </section>
-
-                <section class="panel dashboard-inline-tool" id="dashboard-instrument-lookup-panel">
-                    <div class="panel-header">
-                        <div>
-                            <h2>Instrument Lookup</h2>
-                        </div>
-                    </div>
-                    <form class="inline-tool-form" id="dashboard-instrument-lookup-form" novalidate>
-                        <label class="inline-tool-label" for="dashboard-instrument-lookup-input">
-                            <span>Symbol</span>
-                            <input class="inline-tool-input" id="dashboard-instrument-lookup-input" type="text" placeholder="BTC, ETH, EURUSD" autocomplete="off" />
-                        </label>
-                        <button id="dashboard-instrument-lookup-submit" type="submit">Load</button>
-                    </form>
-                    <div class="inline-tool-status" id="dashboard-instrument-lookup-status" role="status" aria-live="polite"></div>
-                </section>
-
-                <section class="panel dashboard-inline-tool" id="dashboard-history-panel">
-{{HISTORY_EXPORT_TOOL}}
-                </section>
             </div>
             <!-- LOCAL_DASHBOARD_MAIN_END -->
         </div>
     </div>
 
     <script src=\"{{DASHBOARD_JS_URL}}\"></script>
-    {{HISTORY_PAGE_SCRIPT_TAG}}
+    {{TRADING_JOURNAL_EQUITY_SCRIPT_TAG}}
 </body>
 </html>"""
 
@@ -24182,11 +24170,14 @@ def _render_dashboard_template_for_profile() -> str:
         page = page[:start_index] + page[end_index + len(end_marker):]
 
     dashboard_js_version = _static_asset_version("render/static/dashboard.js")
-    history_page_script = ""
+    equity_curve_script = ""
     if local_dashboard:
-        history_page_js_version = _static_asset_version("render/static/history_page.js")
-        history_page_script = (
-            f'<script src="/static/history_page.js?v={history_page_js_version}"></script>'
+        equity_curve_js_version = _static_asset_version(
+            "render/static/trading_journal_equity_curve.js"
+        )
+        equity_curve_script = (
+            '<script src="/static/trading_journal_equity_curve.js?'
+            f'v={equity_curve_js_version}"></script>'
         )
     return (
         page.replace(
@@ -24194,8 +24185,7 @@ def _render_dashboard_template_for_profile() -> str:
             "" if local_dashboard else " render-dashboard-layout",
         )
         .replace("{{DASHBOARD_JS_URL}}", f"/static/dashboard.js?v={dashboard_js_version}")
-        .replace("{{HISTORY_PAGE_SCRIPT_TAG}}", history_page_script)
-        .replace("{{HISTORY_EXPORT_TOOL}}", HISTORY_EXPORT_TOOL if local_dashboard else "")
+        .replace("{{TRADING_JOURNAL_EQUITY_SCRIPT_TAG}}", equity_curve_script)
     )
 
 
@@ -36476,7 +36466,7 @@ TRADING_JOURNAL_ACTIONS_TEMPLATE = """<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>Trading Journal Workspace</title>
 <style>
-body{margin:0;background:#0b1220;color:#e2e8f0;font-family:Inter,system-ui,sans-serif}.workspace{min-height:100vh;display:grid;grid-template-columns:minmax(300px,340px) minmax(0,1fr);gap:18px;align-items:start;padding:18px;box-sizing:border-box}.controls,.equity-panel{background:#111c30;border:1px solid #334155;border-radius:14px;padding:16px;box-sizing:border-box}.controls{display:flex;flex-direction:column;gap:12px}.equity-panel{min-width:0;min-height:calc(100vh - 36px);display:flex;flex-direction:column}.equity-toolbar{display:flex;gap:12px;align-items:end;flex-wrap:wrap;margin-bottom:12px}.equity-toolbar label{display:flex;flex-direction:column;gap:5px;color:#94a3b8;font-size:12px}.equity-toolbar select{min-width:190px}button{padding:12px 14px;border-radius:10px;border:1px solid #334155;background:#1f2937;color:#e2e8f0;font-weight:700;cursor:pointer}button:disabled{opacity:.55;cursor:wait}select{background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:7px;padding:8px}.drop-zone{border:1px dashed #475569;border-radius:12px;padding:16px;text-align:center;color:#94a3b8;background:#0f172a;cursor:pointer}.drop-zone.drag-over{border-color:#38bdf8;background:#082f49;color:#e0f2fe}.status{margin-top:8px;white-space:pre-wrap;color:#94a3b8;overflow-wrap:anywhere}.equity-summary{display:flex;gap:16px;flex-wrap:wrap;margin:4px 0 12px}.equity-summary strong{font-size:18px}.equity-chart-wrap{position:relative;flex:1;min-width:0;min-height:420px;border:1px solid #26364e;border-radius:10px;background:#0f172a;padding:8px;box-sizing:border-box}.equity-chart-stack{position:relative;width:100%;height:100%;min-height:400px}.equity-canvas{width:100%;max-width:100%;height:100%;min-height:400px;display:block}.equity-overlay-canvas{position:absolute;inset:0;z-index:2;touch-action:pan-y}.equity-state{position:absolute;inset:0;z-index:3;pointer-events:none;display:flex;align-items:center;justify-content:center;color:#94a3b8;padding:20px;text-align:center}.equity-state.error{color:#fca5a5}.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}@media(max-width:780px){.workspace{grid-template-columns:minmax(0,1fr);padding:10px}.equity-panel{min-height:560px}.equity-chart-wrap{min-height:380px}}
+body{margin:0;background:#0b1220;color:#e2e8f0;font-family:Inter,system-ui,sans-serif}.workspace{min-height:100vh;display:flex;align-items:flex-start;justify-content:center;padding:18px;box-sizing:border-box}.controls{width:min(420px,100%);background:#111c30;border:1px solid #334155;border-radius:14px;padding:16px;box-sizing:border-box;display:flex;flex-direction:column;gap:12px}button{padding:12px 14px;border-radius:10px;border:1px solid #334155;background:#1f2937;color:#e2e8f0;font-weight:700;cursor:pointer}button:disabled{opacity:.55;cursor:wait}select{background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:7px;padding:8px}.drop-zone{border:1px dashed #475569;border-radius:12px;padding:16px;text-align:center;color:#94a3b8;background:#0f172a;cursor:pointer}.drop-zone.drag-over{border-color:#38bdf8;background:#082f49;color:#e0f2fe}.status{margin-top:8px;white-space:pre-wrap;color:#94a3b8;overflow-wrap:anywhere}@media(max-width:560px){.workspace{padding:10px}}
 </style></head>
 <body><main class="workspace">
 <section class="controls" aria-label="Journal controls">
@@ -36484,25 +36474,17 @@ body{margin:0;background:#0b1220;color:#e2e8f0;font-family:Inter,system-ui,sans-
   <div id="journal-import-drop-zone" class="drop-zone">Drop .xlsx/.xlsm/.xls/.csv import files here<br/><span style="font-size:12px">or click Import to choose a file</span></div>
   <label style="font-size:12px;color:#94a3b8">Bybit CSV account <select id="journal-account-mode"><option value="" selected disabled>Select Demo or Live</option><option value="demo">Demo</option><option value="live">Live</option></select></label>
   <button id="crypto-monthly-pnl-btn">Crypto Monthly P&amp;L</button><button id="bybit-demo-balance-adjustment-btn">Bybit Demo Balance Adjustment</button>
-  <button id="journal-equity-refresh-btn">Refresh Equity Curve</button>
   <input id="journal-file-input" type="file" accept=".xlsx,.xlsm,.xls,.csv" hidden/><div id="journal-actions-status" class="status"></div>
 </section>
-<section class="equity-panel" aria-label="Account equity curve">
-  <div class="equity-toolbar"><label>Equity account<select id="journal-equity-account"><option value="BINANCE">Binance</option><option value="BYBIT">Bybit</option><option value="OANDA DEMO">Oanda demo</option><option value="OANDA LIVE">Oanda live</option><option value="PEPPERSTONE DEMO">Pepperstone demo</option><option value="PEPPERSTONE LIVE">Pepperstone live</option></select></label></div>
-  <div id="journal-equity-summary" class="equity-summary"></div>
-  <div class="equity-chart-wrap"><div class="equity-chart-stack"><canvas id="journal-equity-canvas" class="equity-canvas" aria-label="Account equity curve"></canvas><canvas id="journal-equity-overlay-canvas" class="equity-canvas equity-overlay-canvas" aria-label="Interactive equity crosshair"></canvas></div><div id="journal-equity-state" class="equity-state">Loading equity data…</div><div id="journal-equity-hover-live" class="sr-only" aria-live="polite" aria-atomic="true"></div></div>
-</section>
-</main><script src="/static/trading_journal_actions.js?v={{TRADING_JOURNAL_ACTIONS_JS_VERSION}}"></script><script src="/static/trading_journal_equity_curve.js?v={{TRADING_JOURNAL_EQUITY_JS_VERSION}}"></script></body></html>"""
+</main><script src="/static/trading_journal_actions.js?v={{TRADING_JOURNAL_ACTIONS_JS_VERSION}}"></script></body></html>"""
 
 @app.get("/dashboard/trading-journal")
 @app.get("/merged/trading-journal")
 async def trading_journal_actions_workspace() -> HTMLResponse:
     actions_js_version = _static_asset_version("render/static/trading_journal_actions.js")
-    equity_js_version = _static_asset_version("render/static/trading_journal_equity_curve.js")
     return HTMLResponse(
         TRADING_JOURNAL_ACTIONS_TEMPLATE
         .replace("{{TRADING_JOURNAL_ACTIONS_JS_VERSION}}", actions_js_version)
-        .replace("{{TRADING_JOURNAL_EQUITY_JS_VERSION}}", equity_js_version)
     )
 
 def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, account_mode: Optional[str] = None) -> Dict[str, object]:
@@ -39212,7 +39194,10 @@ def _close_local_master_edge_target(current_url: Optional[str]) -> Dict[str, obj
 def _write_text_file_atomic(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
-    temp_path.write_text(text, encoding="utf-8")
+    with temp_path.open("w", encoding="utf-8", newline="") as handle:
+        handle.write(text)
+        handle.flush()
+        os.fsync(handle.fileno())
     os.replace(temp_path, path)
 
 
@@ -39233,13 +39218,15 @@ def _write_local_exit_markers(reason: str, requesting_action: str) -> Tuple[Path
     if not sentinel_raw:
         raise HTTPException(status_code=500, detail="LOCAL_MASTER_EXIT_REQUEST is missing.")
     sentinel_path = Path(sentinel_raw)
-    payload = _local_exit_marker_payload(reason, requesting_action)
-    _write_text_file_atomic(sentinel_path, payload)
-
     normal_raw = str(os.getenv("LOCAL_MASTER_NORMAL_EXIT_FILE") or "").strip()
-    normal_path = Path(normal_raw) if normal_raw else None
-    if normal_path is not None:
-        _write_text_file_atomic(normal_path, payload)
+    if not normal_raw:
+        raise HTTPException(status_code=500, detail="LOCAL_MASTER_NORMAL_EXIT_FILE is missing.")
+    normal_path = Path(normal_raw)
+    payload = _local_exit_marker_payload(reason, requesting_action)
+    _write_text_file_atomic(normal_path, payload)
+    # Publish the worker-watched sentinel last so shutdown cannot begin before
+    # the normal-exit marker has been flushed successfully.
+    _write_text_file_atomic(sentinel_path, payload)
     return sentinel_path, normal_path
 
 
@@ -39278,21 +39265,24 @@ async def local_shutdown(payload: Dict[str, object] = Body(default_factory=dict)
 async def local_exit(payload: Dict[str, object] = Body(default_factory=dict)) -> JSONResponse:
     if not _is_local_exit_allowed():
         raise HTTPException(status_code=404, detail="Local exit is only available in local profile.")
-    current_url = str((payload or {}).get("url") or "").strip() or None
-    try:
-        close_info = _close_local_master_edge_target(current_url)
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=409, detail=f"Failed to close Local Trading Tools Edge tab: {exc}") from exc
     try:
         sentinel_path, normal_path = _write_local_exit_markers("exit_button", "local_exit")
     except HTTPException:
         raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to schedule local shutdown: {exc}") from exc
-    response_payload = {"ok": True, "target": close_info, "sentinel": str(sentinel_path), "normal_marker": str(normal_path or "")}
+    response_payload = {
+        "ok": True,
+        "sentinel": str(sentinel_path),
+        "normal_marker": str(normal_path),
+        "reason": "exit_button",
+        "action": "local_exit",
+    }
     response = JSONResponse(response_payload)
-    APP_LOGGER.info("LOCAL_EXIT_REQUESTED target=%s sentinel=%s normal_marker=%s", close_info.get("target_url"), sentinel_path, normal_path)
+    APP_LOGGER.info(
+        "LOCAL_EXIT_REQUESTED reason=exit_button action=local_exit sentinel=%s normal_marker=%s",
+        sentinel_path,
+        normal_path,
+    )
     _schedule_local_master_process_exit()
     return response

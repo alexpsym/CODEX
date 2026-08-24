@@ -28,13 +28,11 @@ def test_dashboard_js_no_removed_widget_endpoints_and_keeps_needed_calls() -> No
     assert "document.getElementById('dashboard-workspace-frame')" in js
     assert "document.getElementById('dashboard-workspace-title')" in js
     assert "document.getElementById('dashboard-workspace-status')" in js
-    assert "document.getElementById('dashboard-instrument-lookup-form')" in js
-    assert "document.getElementById('dashboard-instrument-lookup-input')" in js
+    assert "document.getElementById('dashboard-instrument-lookup-form')" not in js
+    assert "document.getElementById('dashboard-instrument-lookup-input')" not in js
     assert "ensureOrdersWorkspace();" in js
     assert "installWorkspaceHeightSync();" in js
-    assert "submitInlineLookup" in js
-    assert "window.open(target, '_blank')" in js
-    assert "encodeURIComponent(raw)" in js
+    assert "submitInlineLookup" not in js
     assert "ResizeObserver" in js
     assert "MutationObserver" in js
     assert "const scriptTabWindows = new Map();" in js
@@ -452,121 +450,20 @@ vm.runInContext(source, context, { filename: 'dashboard.js' });
     subprocess.run([node, '-e', harness, str(JS_PATH)], check=True)
 
 
-def test_dashboard_js_inline_lookup_submit_opens_results_only_for_symbol():
-    node = shutil.which('node')
-    assert node, 'node is required for JS behavior check'
-    harness = r"""
-const fs = require('fs');
-const vm = require('vm');
-const source = fs.readFileSync(process.argv[1], 'utf8');
+def test_dashboard_js_removes_only_dead_inline_lookup_wiring() -> None:
+    js = JS_PATH.read_text(encoding='utf-8')
+    for token in (
+        "dashboard-instrument-lookup-form",
+        "dashboard-instrument-lookup-input",
+        "dashboard-instrument-lookup-status",
+        "submitInlineLookup",
+        "setLookupStatus",
+    ):
+        assert token not in js
 
-const handlers = {};
-let focused = null;
-function element(id) {
-  const attrs = id === 'dashboard-workspace-frame' ? { src: '/merged/open-orders?_dashboard=1' } : {};
-  return {
-    id,
-    addEventListener: (event, callback) => { handlers[`${id}:${event}`] = callback; },
-    removeEventListener: () => {},
-    classList: { add: () => {}, remove: () => {}, toggle: () => {}, contains: () => false },
-    style: {},
-    dataset: {},
-    textContent: '',
-    innerHTML: '',
-    value: '',
-    disabled: false,
-    hidden: false,
-    appendChild: () => {},
-    remove: () => {},
-    focus: () => { focused = id; },
-    querySelector: () => element(`${id}:child`),
-    querySelectorAll: () => [],
-    setAttribute: (name, value) => { attrs[name] = String(value); },
-    getAttribute: (name) => attrs[name] || null,
-  };
-}
-
-const ids = [
-  'dashboard-workspace-frame',
-  'dashboard-instrument-lookup-form',
-  'dashboard-instrument-lookup-input',
-  'dashboard-instrument-lookup-status',
-  'scripts-grid',
-  'exit-button-slot',
-];
-const elements = Object.fromEntries(ids.map((id) => [id, element(id)]));
-const opens = [];
-const document = {
-  visibilityState: 'visible',
-  hidden: false,
-  body: element('body'),
-  getElementById: (id) => elements[id] || element(id),
-  querySelector: () => element('query'),
-  querySelectorAll: () => [],
-  createElement: () => element('created'),
-  addEventListener: () => {},
-};
-const fetch = async (url) => ({
-  ok: true,
-  status: 200,
-  statusText: 'OK',
-  text: async () => {
-    if (String(url).includes('/scripts')) return '[]';
-    if (String(url).includes('/api/pine/files')) return '{"files":[]}';
-    if (String(url).includes('/api/watchlist')) return '{"items":[]}';
-    if (String(url).includes('/api/state-sync/status')) return '{}';
-    if (String(url).includes('/api/oanda-inactivity-status')) return '{}';
-    return '{}';
-  },
-});
-const context = {
-  console,
-  document,
-  fetch,
-  setInterval: () => 1,
-  clearInterval: () => {},
-  setTimeout: (fn) => { if (typeof fn === 'function') fn(); return 1; },
-  clearTimeout: () => {},
-  URL: URL,
-  Date: Date,
-  Math: Math,
-  Promise: Promise,
-  navigator: { clipboard: { writeText: async () => {} } },
-  location: { href: 'http://127.0.0.1:8000/' },
-  sessionStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
-  localStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
-};
-context.window = context;
-context.window.addEventListener = () => {};
-context.window.removeEventListener = () => {};
-context.window.open = (url, name) => {
-  opens.push({ url, name });
-  return { focus: () => { opens[opens.length - 1].focused = true; } };
-};
-context.globalThis = context;
-
-vm.createContext(context);
-vm.runInContext(source, context, { filename: 'dashboard.js' });
-
-const submit = handlers['dashboard-instrument-lookup-form:submit'];
-if (typeof submit !== 'function') throw new Error('submit handler missing');
-const event = { prevented: false, preventDefault() { this.prevented = true; } };
-submit(event);
-if (!event.prevented) throw new Error('blank submit did not prevent default');
-if (opens.length !== 0) throw new Error('blank submit opened a tab');
-if (!String(elements['dashboard-instrument-lookup-status'].textContent).includes('Enter a symbol')) throw new Error('blank submit status missing');
-if (focused !== 'dashboard-instrument-lookup-input') throw new Error('blank submit did not focus input');
-
-elements['dashboard-instrument-lookup-input'].value = 'BTC/USDT?demo=1';
-const event2 = { prevented: false, preventDefault() { this.prevented = true; } };
-submit(event2);
-if (!event2.prevented) throw new Error('symbol submit did not prevent default');
-if (opens.length !== 1) throw new Error(`expected one tab, got ${opens.length}`);
-if (opens[0].name !== '_blank') throw new Error('lookup target should open in a new tab');
-if (opens[0].url !== '/instrument-lookup?q=BTC%2FUSDT%3Fdemo%3D1') throw new Error(`bad lookup URL ${opens[0].url}`);
-if (!opens[0].focused) throw new Error('lookup tab was not focused');
-"""
-    subprocess.run([node, '-e', harness, str(JS_PATH)], check=True)
+    standalone = (ROOT / 'render' / 'static' / 'instrument_lookup.js').read_text(encoding='utf-8')
+    assert '/api/instrument-specs?query=' in standalone
+    assert "history.replaceState(null, '', `/instrument-lookup?q=" in standalone
 
 
 def test_dashboard_js_user_facing_trading_journal_wording():

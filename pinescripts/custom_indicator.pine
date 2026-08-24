@@ -1,5 +1,5 @@
 //@version=6
-indicator("Custom Indicator", overlay=false, max_lines_count=500, max_labels_count=500)
+indicator("Custom Indicator", overlay=false, format=format.volume, max_lines_count=500, max_labels_count=500)
 
 // -----------------------------------------------------------------------------
 // SYMBOL FILTERS

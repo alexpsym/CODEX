@@ -1,113 +1,100 @@
-CODEX FOLLOW-UP COMPLETION SUMMARY
-Brief: FIX ATR SCANNER LIQUIDITY SNAPSHOT AND PEPPERSTONE FALSE-STALE STATE
+CODEX COMPLETION SUMMARY
+Brief: LOCAL TRADING TOOLS — DASHBOARD, LAUNCHER, JOURNAL, PINE, AND WORKBOOK FIXES
 Recorded: 2026-08-24 (Australia/Brisbane)
-Status: both narrow fixes and all available verification are complete; PATCH_DESKTOP_PUSH.bat is the next required action
+Status: implementation and scoped verification complete; PATCH_DESKTOP_PUSH.bat is the next required action
 
-BASELINE AND PRESERVATION
+BASELINE AND SAFETY
 
-- Started in the existing C:\GPT\CODEX-master clone on branch codex/journal-equity-fx-final-20260726.
-- Starting HEAD and origin/master were both 40825706a79731b854449f4d7628fb6d12ced869, with 0 commits ahead and 0 behind.
-- Read the current AGENTS.md and inspected the actual scanner, Pepperstone ATR window/EA, tests, routes, JavaScript, Pine, spread tool, and push workflow before editing.
-- Preserved the five pre-existing tracked runtime modifications under render/data/: monthly_aud_revaluation.json, monthly_aud_revaluation_state.json, pending_webhooks.json, trade_contexts.json, and webhook_attempts.json. They are unrelated and must remain unstaged.
-- Did not inspect or modify credentials, secrets, environment files, custom instructions, accounts, orders, positions, workbooks, Render data, scanner settings/snapshots, or unrelated local state. No live-money or deployment action occurred.
-- Final pushed commit is assigned by the mandatory push workflow after this summary is written; the assistant response must report that hash and independently verify it equals origin/master.
+- Worked in C:\GPT\CODEX-master on branch codex/journal-equity-fx-final-20260726.
+- Starting local HEAD was 72b60a2e7c4901d5c6f3c3c17d2ae2bbc9df0d08. Fetched origin/master was ee960739f15fc3590d234cd9f1c16f48d355b6b6; the existing branch was two commits ahead. The existing authoritative workbook/branch history was preserved.
+- Read AGENTS.md, custom instructions/CODEX_BRIEF_INSTRUCTIONS.txt, the prior summary, and LOCAL_TRADING_TOOLS_DASHBOARD_AND_JOURNAL_FIXES.txt before editing.
+- Preserved unrelated user/runtime changes in bybit_monitor/custom_alerts.json and render/data/*.json. They must remain unstaged after delivery. The untracked requirements brief must also remain uncommitted.
+- Did not inspect credentials or place/cancel/modify trades. A controlled local launcher smoke run started only the normal monitoring/dashboard services and was shut down via the application Exit endpoint.
 
-DEFECT 1: BYBIT SAME-SNAPSHOT LIQUIDITY
+IMPLEMENTED CHANGES
 
-Root cause:
+1. Readiness-gated launcher with no browser auto-open
 
-- render/atr_scanner.py previously treated ticker bid/ask/spread as final gates, stored the ticker midpoint, and later measured a separately fetched order book around that older midpoint. A fast price move could therefore produce zero in-band depth and false exclusion, while spread and depth described different snapshots.
+- run_local_master_control.bat retains the real /api/startup-readiness poll but removes MASTER_BROWSER_URL, Edge debug-port allocation, the temporary Edge profile, and the tools/open_edge_url.bat invocation. On ready:true it returns zero and leaves the worker running; all failure paths explicitly state that no ready notification was sent.
+- tools/windows_launchers/TradingToolsLauncher.cs now has an STA entry point and creates exactly one NotifyIcon only after a zero batch exit. Title: "Local Trading Tools". Body: "Local Trading Tools is ready to use." The icon remains active for five seconds and the NotifyIcon/extracted executable icon are disposed even on exceptions. Notification failure is logged and does not stop the backend.
+- A real Windows smoke run exposed and fixed an inherited-output-pipe wait: the long-lived worker could hold the wrapper's redirected handles open, delaying the notification until shutdown. The wrapper now waits only for the direct readiness cmd process with the timed WaitForExit overload and cancels asynchronous reads afterward.
+- tools/windows_launchers/build_windows_launchers.ps1 references System.Drawing for both supported compilation paths.
+- Rebuilt root Local Trading Tools.exe from the final source. SHA-256: FA964C8AFC10E71B8559F8974553579A774DE64EAC38A7E6101D2F3F1DAC6762. The root executable was previously ignored/untracked; the task explicitly requires it checked in, so it must be force-staged once.
 
-Exact fix:
+2. Browser-agnostic clean Exit
 
-- Ticker processing now uses only turnover24h as the comparable 24-hour quote-turnover source and prefilter. volume24h remains unused. Ticker bid, ask, spread, and midpoint neither exclude a turnover-qualified symbol nor influence its depth.
-- Every turnover-qualified, non-manually-excluded instrument reaches the existing paced/concurrent order-book stage.
-- calculate_orderbook_depth now parses one fresh order-book response and derives authoritative best_bid, best_ask, midpoint, spread_pct, bid_depth_usdt, ask_depth_usdt, book timestamp, and age from that response alone.
-- Midpoint is `(best bid + best ask) / 2`; spread is `(best ask - best bid) / midpoint * 100`; bid/ask depth remains price-times-quantity quote notional inside the inclusive configured band around that midpoint.
-- Final gates run deterministically against that same snapshot: spread above maximum, bid depth below minimum, then ask depth below minimum. Existing comparison semantics remain spread <= maximum and each depth >= minimum.
-- Authoritative best bid/ask, midpoint, spread, depth, timestamp, and age remain in qualified rows and valid liquidity/ATR-excluded payload rows. The unchanged UI reads the corrected spread/depth fields; no JavaScript change was needed.
-- Missing timestamp, stale, crossed, empty, malformed, non-finite, zero, or negative order books fail closed as missing_invalid_market_data with a scoped order-book error. No stale ticker liquidity value is substituted.
-- Existing request pacing, concurrency, shared refresh, caching, settings, manual exclusions, six ATR timeframes, last-known-good behavior, Top 10 ranking, and public-only source behavior are unchanged.
+- /api/local-exit no longer calls or depends on _close_local_master_edge_target, an Edge debug port, or current_url. The local-profile guard remains.
+- Both LOCAL_MASTER_NORMAL_EXIT_FILE and LOCAL_MASTER_EXIT_REQUEST are required. The normal marker is atomically written/flushed first and the worker-watched sentinel last. The endpoint logs reason=exit_button/action=local_exit, returns successful JSON, and only then schedules the delayed SIGTERM path.
+- /api/local-shutdown shares the marker helper without changing its contract.
 
-DEFECT 2: PEPPERSTONE FALSE GLOBAL STALE
+3. Dashboard navigation and equity placement
 
-Root cause:
+- The local button order is exactly Calculator, Bounce Trader, FX Weekend, Journal, Instrument Lookup, History Export, Alerts, Scanner, IV Indicator, Oanda Spreads.
+- Instrument Lookup opens /instrument-lookup and History Export opens /merged/history. Both remain local-only dashboard main-view tools.
+- Removed the embedded lookup/history panels and their home-page history script injection. Removed only the now-dead inline lookup bindings from dashboard.js; standalone routes/scripts remain.
+- Moved the complete equity component, with the existing journal-equity-* IDs, from /dashboard/trading-journal to the local home immediately after Open Orders and Positions and before Pine Scripts. The account selector and Refresh button use a responsive toolbar. The local home loads the versioned equity script; Render home does not.
+- Journal actions retains open/import/resync functions but has no duplicate equity markup/script.
+- trading_journal_actions.js and trading_journal_equity_curve.js use a narrowly scoped BroadcastChannel named trading-journal-equity-data for cross-tab freshness while retaining the same-window CustomEvent and manual/load refresh behavior. Channels are closed on unload.
+- Renamed user-facing spreads-clone labels/headings to exactly Oanda Spreads while preserving its internal identifier, route, process, API, and settings.
 
-- mt5-clone/atr_percent_window.py compared last_successful_refresh_epoch_ms with the desktop clock and forced global Stale after 30 seconds. That timestamp advances only when a new fully closed bar produces a new ATR value, so healthy cached Ready values falsely became Stale between minute closes or while markets were closed.
+4. Pine volume formatting
 
-Exact fix:
+- pinescripts/custom_indicator.pine declares format=format.volume. The volume plot retains format.volume and price/EMA/VWAP/hidden offset plots retain explicit format.price. No calculation, value, color, input, visibility, or signal logic changed.
 
-- Added pure classify_window_state logic that uses the local feed file mtime as the EA-to-window heartbeat, with the existing tolerance `max(5 seconds, refresh_ms * 6 // 1000)`.
-- State priority is: old feed file or explicit forex row/timeframe Stale -> Stale; otherwise Error -> Error; otherwise Loading or no successful parsed ATR value -> Loading; otherwise Ready.
-- Both aggregate row status and all six per-timeframe states are inspected.
-- last_successful_refresh, last_successful_refresh_epoch_ms, and generated_at remain informational broker/closed-bar metadata only. They are not clock-based freshness authorities.
-- The existing MQL5 EA already calls ExportATRFeed on every healthy timer pass and closes the written feed, so file mtime is an adequate local heartbeat. MarketWatchATRPercentFeed.mq5 did not need modification; its closed-bar caching and all six calculations remain unchanged.
-- The Tk UI, columns, ranking, Top 10, refresh cadence, last-known-good behavior, feed identity, and separation from Market Spread are unchanged.
+5. Dense recommendation charts
 
-CHANGED TASK FILES
+- _recommendation_svg now calculates dynamic horizontal width from the full marker extent (radius 5.5 plus half the 1.5 stroke), a two-pixel gap, and one deterministic center per numeric observation. It retains a 1040-pixel minimum width and fixed 520-pixel height.
+- Y mapping uses the full marker extent as top/bottom inset. SVG geometry/count/index metadata supports exact regression checks and every numeric observation retains one circle, original order, value, outcome color, and tooltip.
+- Generated HTML uses an overflow-x:auto wrapper with no vertical clipping; the detailed SVG uses intrinsic width rather than squeezing dense points into the viewport.
+- Regenerated all 85 tracked journal/Trading Journal.assets/recommendations/*.html files through the normal bundle path.
 
-- render/atr_scanner.py
-- tests/test_atr_scanner.py
-- mt5-clone/atr_percent_window.py
-- tests/test_mt5_atr_percent_feed.py
-- summary/CODEX_SUMMARY_latest.txt
+6. Preservation-safe workbook repairs
 
-No other task file changed. In particular, render/master_service.py, render/static/atr_scanner.js, render/static/dashboard.js, both MQL5 EAs, mt5-clone/spread_percent_window.py, pinescripts/custom_indicator.pine, and pinescripts/atr_percentage.pine have zero diff.
+- SYMBOLS generator-owned count columns use ZERO_HIDE_FORMAT after preservation restoration for every populated instrument row. Numeric zeros remain numeric and display blank; nonzero counts display normally. The rule is semantic and not hard-coded to USDCAD.
+- P&L Calendar profit/loss fills are reapplied after restoration. Blank/no-eligible/zero months are neutral, positives green, negatives red, so stale 2026 direct green fills cannot win.
+- YEARLY REPORT and every numeric generated year sheet from 2018 onward receive explicit horizontal="left" across their managed report ranges after restoration, including styled blanks. Merged non-anchor cells are skipped. Only the horizontal alignment component changes.
+- Added custom-number-format registry normalization before save so openpyxl's reload-time numFmt ordering cannot create first-run/second-run style churn.
+- Added focused preservation regressions for corrupted SYMBOLS formats, stale 2026 fills, legitimate historical positive/negative fills, managed report-table alignment, repeated resync, and custom-number-format stability.
 
-REPRODUCTIONS BEFORE THE FIX
+REAL WORKBOOK AND GENERATED ARTIFACTS
 
-1. `python -B -m pytest tests\test_atr_scanner.py::test_moved_orderbook_uses_its_own_midpoint_spread_and_quote_depth tests\test_atr_scanner.py::test_service_qualifies_liquid_book_after_price_moves_from_ticker tests\test_atr_scanner.py::test_current_book_not_older_ticker_controls_final_spread_gate -q -p no:cacheprovider`
-   EXPECTED PRE-FIX RESULT: 3 failed. The helper required the stale external midpoint, moved ALPHA was excluded, and a wide old ticker spread blocked the current qualifying book.
+- Confirmed Excel was not running before replacement.
+- Made a repository-local safety copy, generated a preserve_existing_layout=True candidate against the real workbook, ran the same resync a second time, and compared the source/candidates before replacing journal/Trading Journal.xlsx.
+- Strict preservation checks covered Trade Log/manual values, formulas, workbook/sheet order, active sheet, merges, panes, dimensions, validations, filters, hyperlinks, comments, chart OOXML parts/relationships, row heights, column widths, and unrelated presentation.
+- First- and second-pass raw styles signatures are identical: 594dfe31a5143d052a5485ed164e275670e713586064c3b5664121184ede2286.
+- First/second style counts are identical: cellXfs=935, fonts=47, fills=26, borders=136, custom numFmts=21. The second run produced no style-table churn.
+- Final workbook semantic audit: 120 SYMBOLS rows; 1,884 numeric zero count cells and 996 nonzero count cells use the zero-hide format; 2026 calendar cells are blank/neutral; 56 legitimate historical negative and 24 positive calendar cells retain semantic fills; 13,407 managed report cells are explicitly left-aligned; six recommendation hyperlinks resolve to the generated bundle; 85 recommendation assets exist.
+- Final journal/Trading Journal.xlsx SHA-256: 22301E114EA0DF3C583D10C61C58DE172E9A56A617FB7ACC87BE7F4984C4E866.
+- After comparison, removed the task-created safety workbook, two pass candidates, working candidate, empty task work directory, and two task-only diagnostic scripts. These temporary files are not recoverable, but the verified authoritative workbook remains.
 
-2. `python -B -m pytest tests\test_mt5_atr_percent_feed.py::test_fresh_ready_feed_ignores_closed_bar_calculation_timestamp tests\test_mt5_atr_percent_feed.py::test_window_state_uses_file_heartbeat_and_explicit_row_timeframe_states -q -p no:cacheprovider`
-   EXPECTED PRE-FIX RESULT: 4 failed, 2 passed. Ages 31, 59, and 86,400 seconds falsely reported Stale and the new pure classifier was not yet present.
+VERIFICATION COMPLETED
 
-FINAL AUTOMATED VERIFICATION
+- python -m py_compile render/master_service.py tools/master_journal_workbook.py: passed.
+- node --check on dashboard.js, trading_journal_actions.js, and trading_journal_equity_curve.js: passed.
+- git diff --check: passed after final source edits.
+- Dashboard/shutdown/profile/spread/JS/equity/Pine focused command: 128 passed.
+- Launcher/environment focused command completed before the final inherited-pipe integration fix: 110 passed. It was not repeated after the user directed that broad launcher suites stop.
+- Final launcher-only regressions after the inherited-pipe fix: 2 passed in 0.88s (notification ordering/exactly-once source contract and no descendant-pipe wait).
+- Dense recommendation focused checks, including the representative 1,026-observation case: 2 passed.
+- Combined two-pass SYMBOLS/P&L/report preservation regression: 1 passed (218 deselected).
+- Repeated master-service journal sync preservation regression: 1 passed (156 deselected).
+- Existing comprehensive workbook preservation regression: 1 passed (217 deselected).
+- Custom number-format reload stability plus dense chart regression: 2 passed (217 deselected).
+- A requested full workbook/journal-sync run was started, then stopped immediately when the user directed Codex to conserve credits and not run broad or complete test files. It has no claimed result and was not repeated.
+- Final Windows build completed successfully with the supported builder.
+- Final real Windows success smoke: launcher exit code 0 in 23.1 seconds; readiness was reached before notification logging; the backend still listened on port 8000 after the wrapper exited; no new Chrome or Edge process appeared; the launch log records one "Ready notification displayed." attempt.
+- Real Exit smoke: POST /api/local-exit with a Chrome-shaped current_url returned ok=true/reason=exit_button/action=local_exit; the log recorded the request before the delayed termination; the worker used the normal marker path; port 8000 and the launcher process were both gone after shutdown. No browser process was closed.
+- Nonzero/preflight behavior is covered by the targeted launcher ordering regression: the nonzero return precedes the only notification call. An interactive failure-popup smoke was not repeated after the user's credit-conservation instruction.
 
-1. `python -B -m pytest tests\test_atr_scanner.py -q -p no:cacheprovider`
-   FINAL RESULT: 52 passed in 3.46s.
-   Includes moved midpoint 100 -> 101, correct current spread/depth payloads, both ticker/book spread directions, inclusive band and exact gate boundaries, turnover24h versus volume24h, AND gates, and explicit crossed/empty/missing/stale/malformed/non-finite/zero/negative book failures.
+UNAVAILABLE VISUAL/EXTERNAL CHECKS
 
-2. `python -B -m pytest tests\test_mt5_atr_percent_feed.py -q -p no:cacheprovider`
-   FINAL RESULT: 15 passed in 1.49s.
-   Includes fresh Ready feeds with ATR metadata aged 29, 31, 59, and 86,400 seconds plus future/timezone skew; exact 5-second Ready/6-second Stale heartbeat boundary; row/timeframe Stale, Error, Loading priority; no-value Loading; six-timeframe parsing/ranking; Top 10 ties; diagnostics; startup help; and spread identity separation.
+- The required standalone spreadsheet artifact runtime and a connected/live Excel control session were unavailable, so no desktop Excel visual-render pass could be performed. Workbook semantics and preservation were instead verified directly against the real XLSX and its OOXML structure; do not describe this as a desktop Excel visual pass.
+- Browser discovery returned no available in-app or connected external browser. Therefore the real-browser desktop/narrow recommendation visual pass and interactive dashboard click/layout pass were unavailable. Exact HTML/DOM/CSS/SVG geometry and route contracts are covered by focused regressions; do not describe them as browser visual checks.
+- TradingView/Pine editor compilation and the 50K/50M/100M visual scale check were unavailable for the same browser reason. The static Pine regression passed. A saved TradingView chart instance may need its source updated or the indicator removed/re-added before it displays the new declaration-level format.
+- The Windows notification source/log path was verified, but the automation surface could not independently observe the Windows notification center to attest to its rendered appearance.
 
-3. `python -B -m pytest tests\test_atr_scanner_ui.py -q -p no:cacheprovider`
-   RESULT: 8 passed, 24 existing FastAPI deprecation warnings, in 55.89s.
-   Confirms Scanner page/API contracts, public-origin security, settings/states, and distinct Alerts/Scanner cards and legacy routes remain green.
+DELIVERY
 
-4. `python -B -m pytest tests\test_master_service_calculator_api.py::test_scanner_merged_routes_work_locally tests\test_dashboard_home_layout.py::test_local_profile_buttons_use_configured_render_routes tests\test_spread_monitor_dashboard.py::test_scripts_endpoint_places_spread_monitor_after_iv_indicator_in_local_profile tests\test_dashboard_js_syntax.py::test_dashboard_js_no_removed_widget_endpoints_and_keeps_needed_calls -q -p no:cacheprovider`
-   RESULT: 4 passed, 12 existing FastAPI deprecation warnings, in 37.17s.
-   Confirms local Scanner routing, Alerts/Scanner dashboard separation, spread card placement, and dashboard JavaScript contract.
-
-5. `python -B -m pytest tests\test_python_mt5_conversion_files.py tests\test_mt5_spread_fetch.py -q -p no:cacheprovider`
-   RESULT: 21 passed in 4.74s. The separate working Market Spread EA/window remains unchanged and green.
-
-6. `python -B -m pytest tests\test_custom_indicator_pine.py tests\test_atr_percentage_pine.py -q -p no:cacheprovider`
-   RESULT: 33 passed in 1.72s. The three opaque-black offset paths and all Pine preservation contracts remain green; Pine source was not changed.
-
-7. In-memory Python `compile()` check of render/atr_scanner.py, mt5-clone/atr_percent_window.py, tests/test_atr_scanner.py, and tests/test_mt5_atr_percent_feed.py.
-   RESULT: PASS with no bytecode output.
-
-8. `git diff --check`
-   RESULT: PASS; only repository line-ending notices were emitted.
-
-PRACTICAL AND EXTERNAL CHECKS
-
-- Pepperstone window heartbeat smoke: PASS. An actual hidden Tk ATRPercentWindow ran for 62.3 seconds against a deterministic feed rewritten every 250 ms while last_successful_refresh_epoch_ms remained one hour old. The window reported Ready at 0, 31, and 59 seconds. After heartbeat writes stopped and the file was aged to 7 seconds, the same window reported Stale. The temporary feed was created outside the repository and removed automatically.
-- Public Bybit smoke: PASS. One unauthenticated read-only GET to `https://api.bybit.com/v5/market/orderbook?category=linear&symbol=BTCUSDT&limit=1000` returned retCode 0 with 1,000 bid and 1,000 ask levels. The corrected production helper derived, from that one response, best bid 77,240.5, best ask 77,240.6, midpoint 77,240.55, spread 0.00012946567574392045%, bid depth 11,264,121.5331 USDT, ask depth 17,457,499.2137 USDT, and book age 0.014 seconds at check time. No key, secret, auth header, private endpoint, account, or trading action was used.
-- Edge/local-service visual smoke: NOT RUN. The required Edge selector returned exactly `Browser is not available: edge`, and browser discovery returned no connected instances. Per the browser-control contract, no other browser was substituted. Edge needs the ChatGPT browser extension configured under Settings -> Computer use. Deterministic API/UI tests passed but are not claimed as an Edge smoke.
-- Live MT5 EA runtime: NOT RUN. This follow-up changed only the Python window; neither MQL5 EA was edited. The existing EA heartbeat behavior was confirmed from source, and the real Tk window state path was exercised with a deterministic feed, but no live Pepperstone terminal/chart was touched.
-- MetaEditor compile: NOT RUN because no MQL5 file changed. The prior compiled EA source remains byte-for-byte unchanged.
-- TradingView compile: NOT RUN because Pine was explicitly out of scope and has zero diff. Static Pine regressions passed.
-- JavaScript `node --check`: NOT RUN because no JavaScript file changed, as expected by this brief.
-- The first attempt to launch the 60-second Tk smoke had a command-string quoting SyntaxError before any window or temporary file activity. The corrected encoded in-memory invocation is the 62.3-second PASS recorded above.
-
-RESIDUAL LIMITATIONS
-
-- A short public order-book snapshot proves only request/shape and same-snapshot calculation behavior at that moment. Turnover, spread, and depth remain liquidity proxies and cannot guarantee fills or future liquidity.
-- Edge interaction and live MT5 attachment remain externally unverified for the reasons stated above.
-- Existing FastAPI `on_event` deprecation warnings are unchanged and outside this narrow follow-up.
-- No task-specific EX5, feed JSON, log, cache, temporary file, PID, or untracked artifact remains in the repository. Pre-existing ignored cache directories were preserved rather than cleaned.
-
-PATCH_DESKTOP_PUSH.bat is required immediately after this summary. The final assistant response must report its actual result and the independent local HEAD versus origin/master equality check; this summary does not pre-claim that outcome.
+- Preserve the unrelated runtime JSON modifications and the untracked requirements brief outside the staged commit.
+- Force-stage only the rebuilt root Local Trading Tools.exe in addition to normal task files because .gitignore currently ignores it.
+- Run PATCH_DESKTOP_PUSH.bat, then independently verify local HEAD equals origin/master and report the resulting commit hash and residual unstaged user/runtime changes.

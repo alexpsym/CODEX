@@ -2,6 +2,7 @@ from pathlib import Path, PurePosixPath
 from collections import defaultdict
 from copy import copy, deepcopy
 from datetime import date, datetime
+import calendar
 import hashlib
 import json
 import posixpath
@@ -298,6 +299,33 @@ def _style_table_signature(path: Path) -> tuple[dict[str, int], str]:
         counts[name] = len(element) if element is not None else 0
     semantic_xml = ET.tostring(root, encoding="utf-8")
     return counts, hashlib.sha256(semantic_xml).hexdigest()
+
+
+def test_custom_number_format_registry_is_stable_across_reload(tmp_path: Path):
+    first_path = tmp_path / "first.xlsx"
+    second_path = tmp_path / "second.xlsx"
+    dollar = '_("$"* #,##0.00_);_("$"* \\(#,##0.00\\);_("$"* "-"??_);_(@_)'
+    duration = "00\\:00\\:00\\:00"
+    zero_hide = mjw.ZERO_HIDE_FORMAT
+
+    wb = Workbook()
+    ws = wb.active
+    wb._number_formats = mjw.IndexedList([dollar, duration, zero_hide])
+    for row, number_format in enumerate((zero_hide, dollar, duration), start=1):
+        ws.cell(row, 1).value = row
+        ws.cell(row, 1).number_format = number_format
+        _ = ws.cell(row, 1).style_id
+
+    diagnostics = mjw._normalize_custom_number_format_registry(wb)
+    assert diagnostics["changed"] is True
+    assert list(wb._number_formats) == [zero_hide, dollar, duration]
+    wb.save(first_path)
+    wb.close()
+
+    reloaded = load_workbook(first_path)
+    reloaded.save(second_path)
+    reloaded.close()
+    assert _style_table_signature(first_path) == _style_table_signature(second_path)
 
 
 def _worksheet_relationship_targets(path: Path, sheet_name: str) -> list[str]:
@@ -8930,8 +8958,10 @@ def test_recommendation_svg_and_html_bounds_scale_inside_wide_and_narrow_views()
             x = float(element.attrib["cx"])
             y = float(element.attrib["cy"])
             radius = float(element.attrib["r"])
+            stroke_extent = float(element.attrib["stroke-width"]) / 2.0
+            extent = radius + stroke_extent
             computed_bounds.append(
-                (x - radius, y - radius, x + radius, y + radius, role)
+                (x - extent, y - extent, x + extent, y + extent, role)
             )
         elif role in {
             "tick-label",
@@ -8985,30 +9015,291 @@ def test_recommendation_svg_and_html_bounds_scale_inside_wide_and_narrow_views()
         assert min_x <= left <= right <= max_x, (role, left, right)
         assert min_y <= top <= bottom <= max_y, (role, top, bottom)
 
-    # CSS scales the complete viewBox, including its margins, at both desktop
-    # and narrow widths.  Recheck every computed bound after that transform.
+    assert '<div class="recommendation-chart-scroll"><svg' in html
+    assert ".recommendation-chart-scroll{overflow-x:auto}" in html
     assert re.search(
-        r"\.chart\{[^}]*width:100%;[^}]*max-width:100%;"
-        r"[^}]*height:auto;[^}]*overflow:visible",
+        r"\.chart\{[^}]*width:auto;[^}]*max-width:none;"
+        r"[^}]*height:520px;[^}]*min-width:1040px;[^}]*overflow:visible",
         html,
     )
+    assert "overflow-y:" not in html
     assert "@media(max-width:600px)" in html
-    for viewport_width, main_padding, section_padding in (
-        (1280.0, 28.0, 16.0),
-        (360.0, 12.0, 10.0),
-    ):
-        rendered_width = viewport_width - 2 * (
-            main_padding + section_padding
-        )
-        scale = rendered_width / width
-        for left, top, right, bottom, role in computed_bounds:
-            assert 0 <= (left - min_x) * scale
-            assert (right - min_x) * scale <= rendered_width, role
-            assert 0 <= (top - min_y) * scale
-            assert (bottom - min_y) * scale <= height * scale, role
+    assert float(root.attrib["width"]) == width == 1040.0
+    assert float(root.attrib["height"]) == height == 520.0
 
     assert "Eligible trade observations (deterministic input order)" in html
     assert not re.search(r"<(?:script|iframe)\b|\bhttps?://", html)
+
+
+def test_recommendation_svg_high_density_preserves_every_marker_without_x_compression():
+    observation_count = 1026
+    observations = [
+        {
+            "label": f"EURUSD 2026-01-01 dense-{index:04d}",
+            "symbol": "EURUSD",
+            "date": "2026-01-01",
+            "id": f"dense-{index:04d}",
+            "outcome": "winner" if index % 2 == 0 else "loser",
+            "value": (index % 101) / 10.0,
+            "context": "representative dense original stop distance",
+        }
+        for index in range(observation_count)
+    ]
+    payload = {
+        STOP_RECOMMENDATION_HEADER: "Decrease stop — Recommended: 5.25%",
+        "stop_loss_recommended_pct": 5.25,
+        "eligible_stop_loss_wins": observation_count // 2,
+        "eligible_stop_loss_losses": observation_count // 2,
+        "stop_loss_excluded_reasons": {},
+    }
+
+    html = mjw._recommendation_chart_html(
+        scope_label="Overall",
+        metric="stop",
+        payload=payload,
+        observations=observations,
+        excluded=[],
+    )
+    svg_match = re.search(r"(<svg\b.*?</svg>)", html, re.DOTALL)
+    assert svg_match is not None
+    root = ET.fromstring(svg_match.group(1))
+    circles = [
+        element
+        for element in root.iter()
+        if element.attrib.get("data-role") == "observation"
+    ]
+
+    assert int(root.attrib["data-observation-count"]) == observation_count
+    assert len(circles) == observation_count
+    assert [int(circle.attrib["data-observation-index"]) for circle in circles] == list(
+        range(observation_count)
+    )
+    assert [next(iter(circle)).text for circle in circles[:3]] == [
+        "EURUSD 2026-01-01 dense-0000: 0% — winner",
+        "EURUSD 2026-01-01 dense-0001: 0.1% — loser",
+        "EURUSD 2026-01-01 dense-0002: 0.2% — winner",
+    ]
+
+    width = float(root.attrib["width"])
+    height = float(root.attrib["height"])
+    plot_left = float(root.attrib["data-plot-left"])
+    plot_right = float(root.attrib["data-plot-right"])
+    plot_top = float(root.attrib["data-plot-top"])
+    plot_bottom = float(root.attrib["data-plot-bottom"])
+    radius = float(root.attrib["data-marker-radius"])
+    stroke_width = float(root.attrib["data-marker-stroke-width"])
+    minimum_center_spacing = float(root.attrib["data-marker-center-spacing"])
+    extent = radius + stroke_width / 2.0
+    centers = [float(circle.attrib["cx"]) for circle in circles]
+
+    assert width > 1040.0
+    assert height == 520.0
+    assert min(b - a for a, b in zip(centers, centers[1:])) + 0.011 >= (
+        minimum_center_spacing
+    )
+    assert centers[0] - extent >= plot_left
+    assert centers[-1] + extent <= plot_right
+    for circle in circles:
+        cy = float(circle.attrib["cy"])
+        assert plot_top <= cy - extent
+        assert cy + extent <= plot_bottom
+
+    assert '<div class="recommendation-chart-scroll"><svg' in html
+    assert ".recommendation-chart-scroll{overflow-x:auto}" in html
+    assert "overflow-y:" not in html
+    assert "max-height:520px" in html  # observation tables only
+    assert not re.search(r"\.recommendation-chart-scroll\{[^}]*height:", html)
+
+
+def test_preservation_resync_reapplies_symbols_calendar_and_report_owned_presentation(
+    tmp_path: Path,
+):
+    snapshot = sample_snapshot()
+    snapshot["items"][0].update(
+        symbol="USDCAD",
+        open_time="2024-05-01T00:00:00Z",
+        close_time="2024-05-01T01:00:00Z",
+    )
+    snapshot["items"][1].update(
+        symbol="BTCUSDT",
+        open_time="2025-06-01T00:00:00Z",
+        close_time="2025-06-01T02:00:00Z",
+        aths_atls="All-time low",
+        near_win=True,
+        early_close=True,
+    )
+    test_january = deepcopy(snapshot["items"][0])
+    test_january.update(
+        id="test-2026-jan",
+        open_time="2026-01-02T00:00:00Z",
+        close_time="2026-01-02T01:00:00Z",
+        is_test_trade=True,
+    )
+    test_august = deepcopy(snapshot["items"][1])
+    test_august.update(
+        id="test-2026-aug",
+        open_time="2026-08-02T00:00:00Z",
+        close_time="2026-08-02T01:00:00Z",
+        is_test_trade=True,
+    )
+    snapshot["items"].extend([test_january, test_august])
+    summaries = {
+        str(item["symbol"]).upper(): item
+        for item in mjw._instrument_summary_rows_from_trade_rows(snapshot["items"])
+    }
+    snapshot["stats"]["by_instrument"] = [
+        summaries["USDCAD"],
+        summaries["BTCUSDT"],
+    ]
+
+    path = tmp_path / "Trading Journal.xlsx"
+    build_master_journal_workbook(
+        snapshot,
+        path,
+        publish_recommendation_assets=False,
+    )
+    wb = load_workbook(path)
+    symbols = wb[SYMBOLS_SHEET]
+    headers = _instrument_averages_header_map(symbols)
+    assert {headers[name] for name in ("All-time highs", "All-time lows", "Near win", "Early close")} == {
+        19,
+        20,
+        27,
+        28,
+    }
+    assert symbols["A3"].value == "USDCAD"
+    assert [symbols[coordinate].value for coordinate in ("S3", "T3", "AA3", "AB3")] == [
+        0,
+        0,
+        0,
+        0,
+    ]
+    for row in range(INSTRUMENT_AVERAGES_DATA_START_ROW, symbols.max_row + 1):
+        if symbols.cell(row, headers["Symbol"]).value in (None, ""):
+            continue
+        for header in mjw.SYMBOLS_ZERO_HIDE_COUNT_HEADERS:
+            symbols.cell(row, headers[header]).number_format = "General"
+
+    calendar_ws = wb["P&L Calendar"]
+    for col, year in enumerate(range(2018, 2027), start=2):
+        template_col = 2 if col % 2 == 0 else 3
+        for row in range(1, 14):
+            target = calendar_ws.cell(row, col)
+            template = calendar_ws.cell(row, template_col)
+            target._style = copy(template._style)
+            if row > 1:
+                target.value = None
+        calendar_ws.cell(1, col).value = year
+    assert calendar_ws["J1"].value == 2026
+    calendar_ws["J2"].fill = PatternFill("solid", fgColor=PROFIT_FILL)
+    calendar_ws["J9"].fill = PatternFill("solid", fgColor=PROFIT_FILL)
+
+    report_names = [REPORT_YEARLY_SHEET, *[str(year) for year in range(2018, 2027)]]
+    non_horizontal_alignment = {}
+    for sheet_name in report_names:
+        report = wb[sheet_name]
+        last_managed_row = max(row for row, _spec in mjw._report_spec_rows(report))
+        for row in range(1, last_managed_row + 1):
+            for col in range(1, report.max_column + 1):
+                if mjw._is_merged_non_anchor(report, row, col):
+                    continue
+                alignment = copy(report.cell(row, col).alignment)
+                alignment.horizontal = "right" if (row + col) % 2 else None
+                report.cell(row, col).alignment = alignment
+        sentinel = report["B2"]
+        sentinel.alignment = Alignment(
+            horizontal="right",
+            vertical="center",
+            text_rotation=11,
+            wrap_text=True,
+            shrink_to_fit=True,
+            indent=1,
+            readingOrder=1,
+        )
+        alignment_without_horizontal = copy(sentinel.alignment)
+        alignment_without_horizontal.horizontal = None
+        non_horizontal_alignment[sheet_name] = mjw._contract_xml(
+            alignment_without_horizontal
+        )
+    wb.save(path)
+    wb.close()
+
+    def assert_requested_presentation() -> None:
+        checked = load_workbook(path, data_only=False)
+        try:
+            symbols = checked[SYMBOLS_SHEET]
+            headers = _instrument_averages_header_map(symbols)
+            assert symbols["A3"].value == "USDCAD"
+            for coordinate in ("S3", "T3", "AA3", "AB3"):
+                assert symbols[coordinate].value == 0
+                assert isinstance(symbols[coordinate].value, (int, float))
+                assert symbols[coordinate].number_format == mjw.ZERO_HIDE_FORMAT
+            btc_row = next(
+                row
+                for row in range(INSTRUMENT_AVERAGES_DATA_START_ROW, symbols.max_row + 1)
+                if symbols.cell(row, headers["Symbol"]).value == "BTCUSDT"
+            )
+            assert symbols.cell(btc_row, headers["All-time lows"]).value == 1
+            assert symbols.cell(btc_row, headers["Near win"]).value == 1
+            assert symbols.cell(btc_row, headers["Early close"]).value == 1
+            for row in range(INSTRUMENT_AVERAGES_DATA_START_ROW, symbols.max_row + 1):
+                if symbols.cell(row, headers["Symbol"]).value in (None, ""):
+                    continue
+                for header in mjw.SYMBOLS_ZERO_HIDE_COUNT_HEADERS:
+                    cell = symbols.cell(row, headers[header])
+                    assert cell.number_format == mjw.ZERO_HIDE_FORMAT
+                    if cell.value is not None:
+                        assert isinstance(cell.value, (int, float))
+
+            calendar_ws = checked["P&L Calendar"]
+            for month in [calendar.month_name[index] for index in range(1, 13)]:
+                cell = _calendar_month_cell(calendar_ws, 2026, month)
+                assert cell.value in (None, "")
+                assert _cell_fill_rgb(cell) == ""
+            assert _cell_fill_rgb(_calendar_month_cell(calendar_ws, 2024, "May")) == PROFIT_FILL
+            assert _cell_fill_rgb(_calendar_month_cell(calendar_ws, 2025, "June")) == LOSS_FILL
+
+            for sheet_name in report_names:
+                report = checked[sheet_name]
+                last_managed_row = max(
+                    row for row, _spec in mjw._report_spec_rows(report)
+                )
+                for row in range(1, last_managed_row + 1):
+                    for col in range(1, report.max_column + 1):
+                        if mjw._is_merged_non_anchor(report, row, col):
+                            continue
+                        assert report.cell(row, col).alignment.horizontal == "left"
+                sentinel_alignment = copy(report["B2"].alignment)
+                sentinel_alignment.horizontal = None
+                assert mjw._contract_xml(sentinel_alignment) == (
+                    non_horizontal_alignment[sheet_name]
+                )
+        finally:
+            checked.close()
+
+    first = update_master_journal_workbook_data_only(
+        path,
+        snapshot,
+        preserve_existing_layout=True,
+        publish_recommendation_assets=False,
+    )
+    assert first["ok"] is True
+    Path(first["candidate_path"]).replace(path)
+    assert_requested_presentation()
+    first_style_signature = _style_table_signature(path)
+    first_semantic_fingerprint = _workbook_semantic_idempotence_fingerprint(path)
+
+    second = update_master_journal_workbook_data_only(
+        path,
+        snapshot,
+        preserve_existing_layout=True,
+        publish_recommendation_assets=False,
+    )
+    assert second["ok"] is True
+    Path(second["candidate_path"]).replace(path)
+    assert_requested_presentation()
+    assert _style_table_signature(path) == first_style_signature
+    assert _workbook_semantic_idempotence_fingerprint(path) == first_semantic_fingerprint
 
 
 def test_preservation_resync_repairs_semantic_statistics_and_is_idempotent(
@@ -9365,9 +9656,17 @@ def test_preservation_resync_repairs_semantic_statistics_and_is_idempotent(
                     label=label,
                 )
                 assert template is not None
-                assert _font_alignment_signature(label_cell) == (
-                    _font_alignment_signature(template)
+                assert mjw._contract_xml(label_cell.font) == mjw._contract_xml(
+                    template.font
                 )
+                label_alignment = copy(label_cell.alignment)
+                template_alignment = copy(template.alignment)
+                label_alignment.horizontal = None
+                template_alignment.horizontal = None
+                assert mjw._contract_xml(label_alignment) == mjw._contract_xml(
+                    template_alignment
+                )
+                assert label_cell.alignment.horizontal == "left"
                 effective_semantic = mjw._effective_semantic_fill(kind, semantic)
                 for col in range(2, report.max_column + 1):
                     cell = report.cell(row, col)

@@ -119,6 +119,7 @@ function Build-WithCsc {
             "/target:winexe",
             "/optimize+",
             "/reference:System.Windows.Forms.dll",
+            "/reference:System.Drawing.dll",
             ("/win32icon:{0}" -f $Icon),
             ("/out:{0}" -f $tempOutputPath),
             $tempSourcePath
@@ -188,7 +189,7 @@ function Build-WithAddType {
 
     try {
         $compilerOptions = "/win32icon:`"$Icon`""
-        Add-Type -LiteralPath $tempSourcePath -OutputAssembly $tempOutputPath -OutputType WindowsApplication -ReferencedAssemblies @('System.Windows.Forms.dll', 'System.dll') -CompilerOptions $compilerOptions -Language CSharp -ErrorAction Stop | Out-Null
+        Add-Type -LiteralPath $tempSourcePath -OutputAssembly $tempOutputPath -OutputType WindowsApplication -ReferencedAssemblies @('System.Windows.Forms.dll', 'System.Drawing.dll', 'System.dll') -CompilerOptions $compilerOptions -Language CSharp -ErrorAction Stop | Out-Null
         if (-not (Test-Path -LiteralPath $tempOutputPath)) {
             Write-Warning "Add-Type reported success but output file is missing: $tempOutputPath"
             Write-Warning "Generated C# source preserved at: $tempSourcePath"

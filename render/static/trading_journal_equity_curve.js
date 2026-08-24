@@ -501,6 +501,8 @@
   const REFRESH_STATUS_URL = '/api/trading-journal/equity/refresh/status';
   const REFRESH_TIMEOUT_MS = 10 * 60 * 1000;
   const REFRESH_POLL_MS = 1250;
+  const EQUITY_DATA_CHANNEL_NAME = 'trading-journal-equity-data';
+  let equityDataChannel = null;
 
   const setChartState = (message, error = false) => {
     stateElement.textContent = message || '';
@@ -731,6 +733,15 @@
     render();
   });
   refreshButton.addEventListener('click', () => load({ forceRefresh: true }));
+  try {
+    if (typeof window.BroadcastChannel === 'function') {
+      equityDataChannel = new window.BroadcastChannel(EQUITY_DATA_CHANNEL_NAME);
+      equityDataChannel.addEventListener(
+        'message',
+        () => load({ forceRefresh: true }),
+      );
+    }
+  } catch {}
   window.addEventListener(
     'trading-journal:data-changed',
     () => load({ forceRefresh: true }),
@@ -751,5 +762,8 @@
     overlayCanvas.addEventListener('touchend', clearHover);
     overlayCanvas.addEventListener('touchcancel', clearHover);
   }
+  window.addEventListener('beforeunload', () => {
+    try { equityDataChannel?.close(); } catch {}
+  });
   load();
 })();

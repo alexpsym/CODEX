@@ -55,12 +55,24 @@ def test_dashboard_home_removes_instrument_specs_recent_trades_open_orders() -> 
     assert 'id="pine-scripts-panel"' in html
     assert 'id="pine-files"' in html
     assert 'id="pine-fallback"' in html
-    assert 'id="dashboard-instrument-lookup-panel"' in html
-    assert 'id="dashboard-instrument-lookup-form"' in html
-    assert 'id="dashboard-instrument-lookup-input"' in html
-    assert 'id="dashboard-history-panel"' in html
-    assert '{{HISTORY_EXPORT_TOOL}}' in html
-    assert '{{HISTORY_PAGE_SCRIPT_TAG}}' in html
+    assert 'id="dashboard-instrument-lookup-panel"' not in html
+    assert 'id="dashboard-instrument-lookup-form"' not in html
+    assert 'id="dashboard-instrument-lookup-input"' not in html
+    assert 'id="dashboard-history-panel"' not in html
+    assert '{{HISTORY_EXPORT_TOOL}}' not in html
+    assert '{{HISTORY_PAGE_SCRIPT_TAG}}' not in html
+    for equity_id in (
+        "journal-equity-panel",
+        "journal-equity-account",
+        "journal-equity-refresh-btn",
+        "journal-equity-summary",
+        "journal-equity-canvas",
+        "journal-equity-overlay-canvas",
+        "journal-equity-state",
+        "journal-equity-hover-live",
+    ):
+        assert f'id="{equity_id}"' in html
+    assert '{{TRADING_JOURNAL_EQUITY_SCRIPT_TAG}}' in html
     assert 'Select a script from the toolbar above to load it here.' not in html
     assert 'Select a script from the left to load it here.' not in html
     assert '.local-exit-btn' in html
@@ -84,17 +96,14 @@ def test_dashboard_home_removes_instrument_specs_recent_trades_open_orders() -> 
     watchlist_widget_idx = html.find('id="watchlist-widget"')
     oanda_widget_idx = html.find('id="oanda-inactivity-widget"')
     workspace_idx = html.find('id="dashboard-workspace"')
+    equity_idx = html.find('id="journal-equity-panel"')
     pine_idx = html.find('id="pine-scripts-panel"')
-    lookup_idx = html.find('id="dashboard-instrument-lookup-panel"')
-    history_idx = html.find('id="dashboard-history-panel"')
     assert scripts_grid_idx != -1 and exit_slot_idx != -1
-    assert watchlist_widget_idx != -1 and oanda_widget_idx != -1 and workspace_idx != -1 and pine_idx != -1
-    assert lookup_idx != -1 and history_idx != -1
+    assert watchlist_widget_idx != -1 and oanda_widget_idx != -1 and workspace_idx != -1 and equity_idx != -1 and pine_idx != -1
     assert scripts_grid_idx < watchlist_widget_idx
     assert scripts_grid_idx < workspace_idx
     assert watchlist_widget_idx < oanda_widget_idx
-    assert workspace_idx < pine_idx
-    assert workspace_idx < pine_idx < lookup_idx < history_idx
+    assert workspace_idx < equity_idx < pine_idx
 
     rail_start = html.find('<div class="dashboard-rail">')
     workspace_start = html.find('<section class="panel" id="dashboard-workspace">')
@@ -103,12 +112,16 @@ def test_dashboard_home_removes_instrument_specs_recent_trades_open_orders() -> 
     assert 'id="scripts-grid"' in rail_html
 
 
-def test_dashboard_instrument_lookup_form_uses_non_overlapping_grid() -> None:
+def test_dashboard_equity_toolbar_is_responsive_and_non_overlapping() -> None:
     source = MASTER_SERVICE_PATH.read_text(encoding='utf-8')
     html = _extract_html_template(source)
 
-    assert 'grid-template-columns:minmax(0,1fr) max-content;' in html
-    assert '.inline-tool-form button{\n                width:100%;\n            }' in html
+    assert '.journal-equity-toolbar{' in html
+    assert 'align-items:flex-end;' in html
+    assert 'flex-wrap:wrap;' in html
+    assert '#journal-equity-refresh-btn{' in html
+    assert '.equity-chart-wrap{' in html
+    assert 'min-height:420px;' in html
     assert 'box-sizing:border-box;' in html
     assert 'min-width:0;' in html
 
@@ -153,19 +166,17 @@ def test_dashboard_orders_workspace_uses_content_height_sync() -> None:
     assert "workspaceFrame?.addEventListener('load', installWorkspaceHeightSync);" in dashboard_js
 
 
-def test_dashboard_home_renders_inline_history_tool_from_shared_markup() -> None:
+def test_dashboard_home_loads_equity_script_without_inline_history_tool() -> None:
     module = _load_master_service_module()
     module.APP_PROFILE = "local"
     response = asyncio.run(module.home_page())
     body = response.body.decode("utf-8")
 
-    assert 'id="dashboard-history-panel"' in body
-    assert 'id="history-broker"' in body
-    assert 'id="history-account"' in body
-    assert 'id="history-periods"' in body
-    assert 'id="history-export"' in body
-    assert body.count('id="history-export"') == 1
-    assert '/static/history_page.js?v=' in body
+    assert 'id="dashboard-history-panel"' not in body
+    assert 'id="history-export"' not in body
+    assert '/static/history_page.js' not in body
+    assert body.count('id="journal-equity-canvas"') == 1
+    assert '/static/trading_journal_equity_curve.js?v=' in body
 
 
 def test_dashboard_profile_layout_removes_local_columns_server_side() -> None:
@@ -689,9 +700,23 @@ def test_local_profile_buttons_use_configured_render_routes(monkeypatch) -> None
     assert by_name["atr-scanner"]["label"] == "Scanner"
     assert by_name["atr-scanner"]["open_url"] == "/merged/atr-scanner"
     assert by_name["monitor"]["id"] != by_name["atr-scanner"]["id"]
-    assert by_name["spreads-clone"]["label"] == "Spreads"
-    assert "instrument-lookup" not in by_name
-    assert "history" not in by_name
+    assert by_name["instrument-lookup"]["open_url"] == "/instrument-lookup"
+    assert by_name["instrument-lookup"]["dashboard_main_view"] is True
+    assert by_name["history"]["open_url"] == "/merged/history"
+    assert by_name["history"]["dashboard_main_view"] is True
+    assert by_name["spreads-clone"]["label"] == "Oanda Spreads"
+    assert [item["name"] for item in buttons] == [
+        "calculator",
+        "bounce-trader",
+        "fxweekend",
+        "trading-journal",
+        "instrument-lookup",
+        "history",
+        "monitor",
+        "atr-scanner",
+        "ivindicator-clone",
+        "spreads-clone",
+    ]
     assert "open-orders" not in by_name
     assert "pine" not in by_name
     source = MASTER_SERVICE_PATH.read_text(encoding='utf-8')

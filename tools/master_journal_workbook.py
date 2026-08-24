@@ -14,9 +14,11 @@ from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.worksheet.views import Pane, Selection
 import hashlib
 from openpyxl.styles import PatternFill, Border, Side, Alignment, Color
+from openpyxl.styles.numbers import BUILTIN_FORMATS_MAX_SIZE
 from openpyxl.formatting.rule import CellIsRule, FormulaRule
 from openpyxl.utils import get_column_letter
 from openpyxl.utils.cell import range_boundaries
+from openpyxl.utils.indexed_list import IndexedList
 import calendar
 from copy import copy, deepcopy
 import json
@@ -518,6 +520,86 @@ def _reindex_cell_style_registry(wb: Workbook) -> Dict[str, int]:
         "declared": len(styles),
         "unique": len(registry),
         "duplicates": len(styles) - len(registry),
+    }
+
+
+def _normalize_custom_number_format_registry(wb: Workbook) -> Dict[str, Any]:
+    """Match openpyxl's reload-time custom number-format ordering before save.
+
+    openpyxl rebases custom formats by their first appearance in ``cellXfs``
+    when it loads a workbook. If a generator appends a new format, the first
+    preservation save can therefore write one order and the next save another
+    even though every worksheet style ID is unchanged. Normalize that registry
+    up front so the first and second candidates use the same numFmt IDs.
+    """
+    # Ensure styles attached to cells have entered the workbook registry before
+    # deriving the first-use order that the loader will apply on the next pass.
+    for ws in wb.worksheets:
+        for _coordinate, cell in sorted(ws._cells.items()):
+            if cell._style is not None:
+                wb._cell_styles.add(cell._style)
+
+    old_formats = list(wb._number_formats)
+    if not old_formats:
+        return {"changed": False, "before": [], "after": []}
+
+    ordered_formats: List[str] = []
+    seen: Set[str] = set()
+
+    def remember_style(style) -> None:
+        number_format_id = int(getattr(style, "numFmtId", 0) or 0)
+        index = number_format_id - BUILTIN_FORMATS_MAX_SIZE
+        if not (0 <= index < len(old_formats)):
+            return
+        code = old_formats[index]
+        if code not in seen:
+            seen.add(code)
+            ordered_formats.append(code)
+
+    for style in wb._cell_styles:
+        remember_style(style)
+    for named_style in wb._named_styles:
+        remember_style(named_style._style)
+    for code in old_formats:
+        if code not in seen:
+            seen.add(code)
+            ordered_formats.append(code)
+
+    old_id_by_code = {
+        code: BUILTIN_FORMATS_MAX_SIZE + index
+        for index, code in enumerate(old_formats)
+    }
+    new_id_by_code = {
+        code: BUILTIN_FORMATS_MAX_SIZE + index
+        for index, code in enumerate(ordered_formats)
+    }
+    id_mapping = {
+        old_id_by_code[code]: new_id_by_code[code]
+        for code in old_formats
+    }
+    style_objects = [*wb._cell_styles]
+    style_objects.extend(
+        cell._style
+        for ws in wb.worksheets
+        for cell in ws._cells.values()
+        if cell._style is not None
+    )
+    style_objects.extend(named_style._style for named_style in wb._named_styles)
+    updated_objects: Set[int] = set()
+    for style in style_objects:
+        identity = id(style)
+        if identity in updated_objects:
+            continue
+        updated_objects.add(identity)
+        current_id = int(getattr(style, "numFmtId", 0) or 0)
+        if current_id in id_mapping:
+            style.numFmtId = id_mapping[current_id]
+
+    wb._number_formats = IndexedList(ordered_formats)
+    return {
+        "changed": ordered_formats != old_formats,
+        "before": old_formats,
+        "after": ordered_formats,
     }
 
 def _apply_sign_based_full_cell_fill(cell) -> None:
@@ -4260,30 +4342,41 @@ def _recommendation_svg(
     padding = max((y_max - y_min) * 0.08, 0.01)
     y_min -= padding
     y_max += padding
-    # The chart deliberately keeps generous viewBox padding because the SVG is
-    # responsive: at narrow browser widths every label scales with the plot.
-    # Keep these margins in sync with the focused bounds regression test.
-    width, height = 1040, 520
+    # Preserve every observation at an inspectable size. Dense datasets expand
+    # horizontally instead of compressing markers into the desktop viewport.
+    min_width, height = 1040, 520
     left, right, top, bottom = 118, 44, 48, 104
+    marker_radius = 5.5
+    marker_stroke_width = 1.5
+    marker_extent = marker_radius + (marker_stroke_width / 2.0)
+    minimum_marker_gap = 2.0
+    center_spacing = (marker_extent * 2.0) + minimum_marker_gap
+    detailed_width = math.ceil(
+        left
+        + right
+        + (marker_extent * 2.0)
+        + (max(0, len(points) - 1) * center_spacing)
+    )
+    width = max(min_width, detailed_width)
     plot_width = width - left - right
     plot_height = height - top - bottom
-    point_inset = 10.0
 
     def x_pos(index: int) -> float:
-        usable_width = max(0.0, plot_width - (point_inset * 2.0))
-        return left + point_inset + (
-            usable_width / 2.0
-            if len(points) <= 1
-            else index * usable_width / (len(points) - 1)
-        )
+        if len(points) <= 1:
+            return left + (plot_width / 2.0)
+        usable_center_width = max(0.0, plot_width - (marker_extent * 2.0))
+        return left + marker_extent + index * usable_center_width / (len(points) - 1)
 
     def y_pos(value: float) -> float:
-        return top + (y_max - value) / (y_max - y_min) * plot_height
+        usable_height = max(0.0, plot_height - (marker_extent * 2.0))
+        return top + marker_extent + (y_max - value) / (y_max - y_min) * usable_height
 
     svg: List[str] = [
-        f'<svg class="chart" viewBox="0 0 {width} {height}" '
+        f'<svg class="chart" width="{width}" height="{height}" viewBox="0 0 {width} {height}" '
         f'data-plot-left="{left}" data-plot-right="{width-right}" '
         f'data-plot-top="{top}" data-plot-bottom="{height-bottom}" '
+        f'data-marker-radius="{marker_radius}" data-marker-stroke-width="{marker_stroke_width}" '
+        f'data-marker-center-spacing="{center_spacing}" data-observation-count="{len(points)}" '
         'role="img" aria-label="Eligible trade observations and recommended value">',
         f'<rect data-role="plot-border" x="{left}" y="{top}" width="{plot_width}" height="{plot_height}" fill="#fbfdff" stroke="#cbd5e1"/>',
     ]
@@ -4307,7 +4400,7 @@ def _recommendation_svg(
         colour = "#15803d" if item.get("outcome") == "winner" else "#b91c1c"
         title = _recommendation_html_escape(f"{item['label']}: {value:.8g}{unit} — {item.get('outcome')}")
         svg.append(
-            f'<circle data-role="observation" cx="{x_pos(index):.2f}" cy="{y_pos(value):.2f}" r="5.5" fill="{colour}" stroke="#ffffff" stroke-width="1.5"><title>{title}</title></circle>'
+            f'<circle data-role="observation" data-observation-index="{index}" cx="{x_pos(index):.2f}" cy="{y_pos(value):.2f}" r="{marker_radius}" fill="{colour}" stroke="#ffffff" stroke-width="{marker_stroke_width}"><title>{title}</title></circle>'
         )
     svg.extend([
         f'<text data-role="x-axis-title" x="{left + plot_width/2:.2f}" y="{height-28}" text-anchor="middle" class="axis-title">Eligible trade observations (deterministic input order)</text>',
@@ -4382,14 +4475,14 @@ def _recommendation_chart_html(
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{_recommendation_html_escape(scope_label)} — {_recommendation_html_escape(metric_label)}</title>
 <style>
-body{{margin:0;background:#f1f5f9;color:#0f172a;font:15px/1.45 Segoe UI,Arial,sans-serif}}main{{max-width:1180px;margin:0 auto;padding:28px}}h1{{margin:.2rem 0}}h2{{margin-top:2rem}}.sub{{color:#475569}}.cards{{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin:18px 0}}.card,section{{background:white;border:1px solid #cbd5e1;border-radius:10px;padding:16px;box-shadow:0 1px 2px #0001}}.card b{{display:block;font-size:1.25rem}}.recommendation{{border-left:5px solid #7c3aed}}.chart{{display:block;width:100%;max-width:100%;height:auto;overflow:visible;background:white;border-radius:8px}}.axis-label{{font-size:11px;fill:#475569}}.axis-title{{font-size:13px;fill:#334155}}.recommendation-label{{font-size:13px;font-weight:700;fill:#6d28d9}}table{{width:100%;border-collapse:collapse;background:white}}th,td{{padding:8px;border-bottom:1px solid #e2e8f0;text-align:left;vertical-align:top}}th{{background:#e2e8f0;position:sticky;top:0}}.table-wrap{{overflow:auto;max-height:520px;border:1px solid #cbd5e1;border-radius:8px}}pre{{white-space:pre-wrap}}.bar-row{{display:grid;grid-template-columns:140px 1fr 48px;gap:8px;align-items:center;margin:7px 0}}.bar{{height:14px;background:#e2e8f0;border-radius:99px;overflow:hidden}}.bar i{{display:block;height:100%;background:#2563eb}}.offline{{font-size:.85rem;color:#475569}}@media(max-width:600px){{main{{padding:12px}}.card,section{{padding:10px}}}}
+body{{margin:0;background:#f1f5f9;color:#0f172a;font:15px/1.45 Segoe UI,Arial,sans-serif}}main{{max-width:1180px;margin:0 auto;padding:28px}}h1{{margin:.2rem 0}}h2{{margin-top:2rem}}.sub{{color:#475569}}.cards{{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin:18px 0}}.card,section{{background:white;border:1px solid #cbd5e1;border-radius:10px;padding:16px;box-shadow:0 1px 2px #0001}}.card b{{display:block;font-size:1.25rem}}.recommendation{{border-left:5px solid #7c3aed}}.recommendation-chart-scroll{{overflow-x:auto}}.chart{{display:block;width:auto;max-width:none;height:520px;min-width:1040px;overflow:visible;background:white;border-radius:8px}}.axis-label{{font-size:11px;fill:#475569}}.axis-title{{font-size:13px;fill:#334155}}.recommendation-label{{font-size:13px;font-weight:700;fill:#6d28d9}}table{{width:100%;border-collapse:collapse;background:white}}th,td{{padding:8px;border-bottom:1px solid #e2e8f0;text-align:left;vertical-align:top}}th{{background:#e2e8f0;position:sticky;top:0}}.table-wrap{{overflow:auto;max-height:520px;border:1px solid #cbd5e1;border-radius:8px}}pre{{white-space:pre-wrap}}.bar-row{{display:grid;grid-template-columns:140px 1fr 48px;gap:8px;align-items:center;margin:7px 0}}.bar{{height:14px;background:#e2e8f0;border-radius:99px;overflow:hidden}}.bar i{{display:block;height:100%;background:#2563eb}}.offline{{font-size:.85rem;color:#475569}}@media(max-width:600px){{main{{padding:12px}}.card,section{{padding:10px}}}}
 </style></head><body><main>
 <p class="offline">Self-contained offline artifact. No Trading Tools server or network connection is required.</p>
 <h1>{_recommendation_html_escape(scope_label)} — {_recommendation_html_escape(metric_label)}</h1>
 <p class="sub">{_recommendation_html_escape(method)}</p>
 <section class="recommendation" data-recommended-value="{recommended:.12g}"><strong>Workbook recommendation</strong><p>{_recommendation_html_escape(recommendation)}</p></section>
 <div class="cards"><div class="card">Eligible algorithm sample<b>{eligible_count}</b></div><div class="card">Plotted numeric observations<b>{len(numeric_observations)}</b></div><div class="card">Eligible loss-gate observations<b>{len(gate_observations)}</b></div><div class="card">Excluded observations<b>{len(excluded)}</b></div></div>
-<section>{_recommendation_svg(observations, recommended, unit)}</section>
+<section><div class="recommendation-chart-scroll">{_recommendation_svg(observations, recommended, unit)}</div></section>
 {distribution_html}
 <h2>Eligible observations</h2><div class="table-wrap"><table><thead><tr><th>Symbol</th><th>Date</th><th>Trade ID</th><th>Role</th><th>Value</th><th>Context</th></tr></thead><tbody>{rows_html}</tbody></table></div>
 <h2>Excluded observations and filtering</h2><p>Global filters exclude non-trades and test trades before scope analysis. Algorithm-specific exclusion counts:</p><pre>{exclusion_json}</pre><div class="table-wrap"><table><thead><tr><th>Symbol</th><th>Date</th><th>Trade ID</th><th>Reason</th></tr></thead><tbody>{excluded_rows}</tbody></table></div>
@@ -5204,6 +5297,14 @@ def _resolved_all_trade_balances(rows: List[Dict[str, Any]]) -> Dict[str, float]
     return out
 
 ZERO_HIDE_FORMAT = "0;-0;;@"
+
+SYMBOLS_ZERO_HIDE_COUNT_HEADERS = frozenset({
+    "Trades", "Wins", "Losses", "Break-even", "Longs", "Long wins", "Long losses",
+    "Long break-even", "Shorts", "Short wins", "Short losses", "Short break-even",
+    "All-time highs", "All-time lows", "Market", "Limit", "Round number", "Spiked out",
+    "Close stop out", "Near perfect entry", "Near win", "Early close",
+    "Move to break even", "Move to profit",
+})
 
 _MONTHLY_AUD_REVAL_ROW_ID_RE = re.compile(r"^monthly_aud_reval:bybit_live:(\d{4}-\d{2})$")
 
@@ -7543,13 +7644,6 @@ def _apply_instrument_averages_requested_style(ws, *, preserve_layout: bool = Fa
         "Longest duration (DD:HH:MM:SS)", AVG_WINNING_DURATION_HEADER,
         AVG_LOSING_DURATION_HEADER,
     }
-    count_headers = {
-        "Trades", "Wins", "Losses", "Break-even", "Longs", "Long wins", "Long losses",
-        "Long break-even", "Shorts", "Short wins", "Short losses", "Short break-even",
-        "All-time highs", "All-time lows", "Market", "Limit", "Round number", "Spiked out",
-        "Close stop out", "Near perfect entry", "Near win", "Early close",
-        "Move to break even", "Move to profit",
-    }
     if preserve_layout:
         for row in range(data_start_row, ws.max_row + 1):
             if ws.cell(row, symbol_col).value in (None, ""):
@@ -7585,7 +7679,7 @@ def _apply_instrument_averages_requested_style(ws, *, preserve_layout: bool = Fa
                 if cell.value not in (None, ""):
                     cell.value = _duration_display_cell_value(cell.value, cell.number_format)
                 cell.number_format = "General"
-        for header in count_headers:
+        for header in SYMBOLS_ZERO_HIDE_COUNT_HEADERS:
             if headers.get(header):
                 ws.cell(row, headers[header]).number_format = ZERO_HIDE_FORMAT
         for header in (STOP_RECOMMENDATION_HEADER, TARGET_RECOMMENDATION_HEADER):
@@ -7624,6 +7718,25 @@ def _apply_instrument_averages_requested_style(ws, *, preserve_layout: bool = Fa
     if not preserve_layout:
         _write_instrument_averages_headers(ws)
     _apply_symbols_filter_header_layout(ws)
+
+
+def _apply_symbols_zero_hidden_count_formats(ws) -> int:
+    """Keep generated count zeros numeric while rendering them as blank."""
+    headers = _instrument_averages_header_map(ws)
+    symbol_col = headers.get("Symbol", 1)
+    repaired = 0
+    for row in range(_instrument_averages_data_start_row(ws), ws.max_row + 1):
+        if ws.cell(row, symbol_col).value in (None, ""):
+            continue
+        for header in SYMBOLS_ZERO_HIDE_COUNT_HEADERS:
+            col = headers.get(header)
+            if not col:
+                continue
+            cell = ws.cell(row, col)
+            if cell.number_format != ZERO_HIDE_FORMAT:
+                cell.number_format = ZERO_HIDE_FORMAT
+                repaired += 1
+    return repaired
 
 
 def _apply_instrument_averages_profit_loss_formatting(ws) -> None:
@@ -7706,6 +7819,7 @@ def _normalize_symbols_performance_formatting(ws) -> None:
             _apply_sign_based_full_cell_fill(ws.cell(row, col))
 
     _apply_instrument_averages_profit_loss_formatting(ws)
+    _apply_symbols_zero_hidden_count_formats(ws)
 
 
 def _repair_instrument_timeframe_columns(ws) -> None:
@@ -12138,6 +12252,43 @@ def _apply_workbook_left_alignment(wb) -> None:
                 target_style.alignmentId = target_alignment_id
                 style_cache[style_key] = target_style
             cell._style = target_style
+
+
+def _apply_report_managed_left_alignment(
+    wb,
+    diagnostics: Dict[str, Any] | None = None,
+) -> None:
+    """Left-align only the generated report tables, including styled blanks."""
+    diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+    repaired_by_sheet: Dict[str, int] = {}
+    for sheet_name in (
+        REPORT_YEARLY_SHEET,
+        *[
+            name
+            for name in wb.sheetnames
+            if name.isdigit() and int(name) >= REPORT_START_YEAR
+        ],
+    ):
+        if sheet_name not in wb.sheetnames:
+            continue
+        ws = wb[sheet_name]
+        spec_rows = _report_spec_rows(ws)
+        if not spec_rows:
+            continue
+        last_managed_row = max(row for row, _spec in spec_rows)
+        repaired = 0
+        for row in range(1, last_managed_row + 1):
+            for col in range(1, ws.max_column + 1):
+                if _is_merged_non_anchor(ws, row, col):
+                    continue
+                cell = ws.cell(row, col)
+                if isinstance(cell, MergedCell):
+                    continue
+                if cell.alignment.horizontal != "left":
+                    _set_cell_horizontal_alignment(cell, "left")
+                    repaired += 1
+        repaired_by_sheet[sheet_name] = repaired
+    diagnostics["report_managed_left_alignment_cells_repaired"] = repaired_by_sheet
 
 
 def _header_map(ws, header_row: int = 1) -> Dict[str, int]:
@@ -17643,6 +17794,8 @@ def update_master_journal_workbook_data_only(
             ),
         )
         _normalize_trade_log_display_durations(_get_trade_log_sheet(wb, allow_legacy=False))
+        if "P&L Calendar" in wb.sheetnames:
+            _apply_pnl_calendar_profit_loss_formatting(wb["P&L Calendar"])
         _normalize_symbols_performance_formatting(_symbols_sheet(wb))
         chart_bundle = _prepare_recommendation_chart_bundle(rows, path)
         _apply_recommendation_chart_hyperlinks(wb, chart_bundle)
@@ -17668,11 +17821,15 @@ def update_master_journal_workbook_data_only(
         if not preserve_existing_layout:
             _normalize_generated_statistics_row_heights(wb)
         _normalize_generated_duration_text(wb)
+        _apply_report_managed_left_alignment(wb, diagnostics)
         if preserve_existing_layout:
             _apply_workbook_calculation_signature(
                 wb,
                 source_calculation_signature,
             )
+        diagnostics["custom_number_format_registry_before_save"] = (
+            _normalize_custom_number_format_registry(wb)
+        )
         diagnostics["cell_style_registry_before_save"] = (
             _reindex_cell_style_registry(wb)
         )

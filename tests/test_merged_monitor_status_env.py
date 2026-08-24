@@ -677,29 +677,33 @@ def test_run_local_master_control_bat_uses_local_autostart() -> None:
     assert "SCANNER_READY_TIMEOUT_SECONDS" not in content
     assert "[local-master] ERROR: startup readiness was not reached after %MASTER_READY_TIMEOUT_SECONDS% seconds." in content
     assert "[local-master] ERROR: startup readiness failed." in content
-    assert '[local-master] Browser was not opened to avoid a dead-page / manual-refresh failure.' in content
-    assert "[local-master] Browser was not opened because startup has a blocking readiness error." in content
-    assert content.index(worker_start) < content.index('call "%ROOT%tools\\open_edge_url.bat" "%MASTER_BROWSER_URL%"')
+    assert '[local-master] Ready notification was not sent because startup timed out.' in content
+    assert "[local-master] Ready notification was not sent because startup has a blocking readiness error." in content
+    assert 'Local master control is ready. No browser was opened.' in content
+    assert 'open_edge_url.bat' not in content
+    assert content.index(worker_start) < content.index(':wait_for_master_ready') < content.index(':master_ready')
     assert "timeout /t 2 /nobreak >nul\nstart \"\" \"%MASTER_URL%\"" not in content
 
 
-def test_run_local_master_control_waits_for_startup_readiness_before_opening_browser() -> None:
+def test_run_local_master_control_waits_for_startup_readiness_then_returns_without_browser() -> None:
     content = (ROOT / "run_local_master_control.bat").read_text(encoding="utf-8")
     worker_start_idx = content.index('start "%LOCAL_MASTER_WINDOW_TITLE%" /D "%ROOT%" "%ROOT%tools\\windows_launchers\\local_master_worker_console.bat"')
     wait_idx = content.index(":wait_for_master_ready")
-    assert "MASTER_BROWSER_URL" in content
-    assert "local_launch=" in content
     ready_idx = content.index(":master_ready")
     failed_idx = content.index(":master_readiness_failed")
-    browser_idx = content.index('call "%ROOT%tools\\open_edge_url.bat" "%MASTER_BROWSER_URL%"')
     not_ready_idx = content.index(":master_not_ready")
+    ready_return_idx = content.index("exit /b 0", ready_idx)
 
-    assert worker_start_idx < wait_idx < ready_idx < browser_idx
+    assert worker_start_idx < wait_idx < ready_idx < ready_return_idx
     assert wait_idx < failed_idx
+    assert "MASTER_BROWSER_URL" not in content
+    assert "LOCAL_MASTER_EDGE_DEBUG_PORT" not in content
+    assert "LOCAL_MASTER_EDGE_PROFILE_DIR" not in content
+    assert "open_edge_url.bat" not in content
     not_ready_block = content[not_ready_idx:]
-    assert 'call "%ROOT%tools\\open_edge_url.bat" "%MASTER_BROWSER_URL%"' not in not_ready_block
+    assert "exit /b 1" in not_ready_block
     failed_block = content[failed_idx:content.index(":worker_failed_before_ready")]
-    assert 'call "%ROOT%tools\\open_edge_url.bat" "%MASTER_BROWSER_URL%"' not in failed_block
+    assert "exit /b 1" in failed_block
 
 
 def test_run_trading_journal_local_bat_profile_and_port() -> None:
@@ -1321,18 +1325,17 @@ def test_merged_monitor_js_uses_unified_monitor_controller() -> None:
     assert "statusId: 'oanda-status'" not in script
 
 
-def test_edge_helper_wiring_for_local_launchers() -> None:
+def test_local_master_does_not_use_edge_helper_and_independent_helper_remains() -> None:
     master = (ROOT / "run_local_master_control.bat").read_text(encoding="utf-8")
     journal = (ROOT / "run_trading_journal_local.bat").read_text(encoding="utf-8")
 
     assert 'start "" "%MASTER_URL%"' not in master
     assert 'start "" "%JOURNAL_URL%"' not in journal
 
-    master_call = 'call "%ROOT%tools\\open_edge_url.bat" "%MASTER_BROWSER_URL%"'
-    assert master_call in master
-    assert "MASTER_BROWSER_URL" in master
-    assert "local_launch=" in master
-    assert 'call "%ROOT%tools\\open_edge_url.bat" "%MASTER_URL%"' not in master
+    assert "open_edge_url.bat" not in master
+    assert "MASTER_BROWSER_URL" not in master
+    assert "LOCAL_MASTER_EDGE_DEBUG_PORT" not in master
+    assert "LOCAL_MASTER_EDGE_PROFILE_DIR" not in master
     assert "JOURNAL_URL" not in journal
     assert "open_edge_url.bat" not in journal
     assert 'start "" "%JOURNAL_URL%"' not in journal
@@ -1340,11 +1343,8 @@ def test_edge_helper_wiring_for_local_launchers() -> None:
 
     worker_start = master.index('start "%LOCAL_MASTER_WINDOW_TITLE%"')
     ready_wait = master.index(':wait_for_master_ready')
-    edge_call = master.index(master_call)
-    assert worker_start < ready_wait < edge_call
-
-    assert master_call not in master.split(':master_not_ready', 1)[1].split(':master_readiness_failed', 1)[0]
-    assert master_call not in master.split(':master_readiness_failed', 1)[1].split(':worker', 1)[0]
+    ready_return = master.index('exit /b 0', master.index(':master_ready'))
+    assert worker_start < ready_wait < ready_return
 
     assert ':wait_for_journal_health' not in journal
     assert ':journal_ready' not in journal

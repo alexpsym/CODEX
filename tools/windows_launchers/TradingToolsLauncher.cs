@@ -2,8 +2,10 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Drawing;
 using System.Linq;
 using System.Text;
+using System.Threading;
 using System.Windows.Forms;
 
 internal static class Program
@@ -11,6 +13,7 @@ internal static class Program
     private const string TargetBat = "__TARGET_BAT__";
     private static readonly object LogFileLock = new object();
 
+    [STAThread]
     public static int Main(string[] args)
     {
         try
@@ -61,22 +64,94 @@ internal static class Program
                 }
                 process.BeginOutputReadLine();
                 process.BeginErrorReadLine();
-                process.WaitForExit();
-                process.WaitForExit();
+                // The visible worker intentionally outlives this readiness batch
+                // and can inherit the redirected pipe handles. The parameterless
+                // overload also waits for those pipes to close, which would delay
+                // the ready notification until the backend shuts down.
+                while (!process.WaitForExit(250))
+                {
+                }
                 int exitCode = process.ExitCode;
+                TryCancelAsyncRead(process, true);
+                TryCancelAsyncRead(process, false);
                 AppendLogLine(launchLogPath, logTail, "Launcher target exited with code " + exitCode + ".", false);
                 if (exitCode != 0)
                 {
                     ShowError(BuildFailureMessage(exitCode, launchLogPath, logTail.ToString(), workerLogPath));
+                    return exitCode;
                 }
 
-                return exitCode;
+                TryShowReadyNotification(launchLogPath, logTail);
+                return 0;
             }
         }
         catch (Exception ex)
         {
             ShowError("Failed to launch target batch file:\n" + ex.Message);
             return 1;
+        }
+    }
+
+    private static void TryCancelAsyncRead(Process process, bool standardOutput)
+    {
+        try
+        {
+            if (standardOutput)
+            {
+                process.CancelOutputRead();
+            }
+            else
+            {
+                process.CancelErrorRead();
+            }
+        }
+        catch (InvalidOperationException)
+        {
+        }
+    }
+
+    private static void TryShowReadyNotification(string launchLogPath, LogTail logTail)
+    {
+        try
+        {
+            Icon executableIcon = null;
+            try
+            {
+                try
+                {
+                    executableIcon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
+                }
+                catch
+                {
+                }
+
+                using (NotifyIcon notification = new NotifyIcon())
+                {
+                    notification.Icon = executableIcon ?? SystemIcons.Application;
+                    notification.BalloonTipTitle = "Local Trading Tools";
+                    notification.BalloonTipText = "Local Trading Tools is ready to use.";
+                    notification.BalloonTipIcon = ToolTipIcon.Info;
+                    notification.Text = "Local Trading Tools";
+                    notification.Visible = true;
+                    notification.ShowBalloonTip(5000);
+                    Application.DoEvents();
+                    Thread.Sleep(5000);
+                    Application.DoEvents();
+                    notification.Visible = false;
+                }
+            }
+            finally
+            {
+                if (executableIcon != null)
+                {
+                    executableIcon.Dispose();
+                }
+            }
+            AppendLogLine(launchLogPath, logTail, "Ready notification displayed.", false);
+        }
+        catch (Exception ex)
+        {
+            AppendLogLine(launchLogPath, logTail, "Ready notification failed: " + ex.Message, true);
         }
     }
 

@@ -2,6 +2,7 @@ import ast
 import importlib.util
 import asyncio
 import ctypes
+from copy import copy
 import json
 from pathlib import Path
 import re
@@ -4190,6 +4191,7 @@ def test_resync_persists_post_replace_fingerprint_for_next_fast_path(monkeypatch
 def test_sync_preserves_canonical_stats1_layout_and_manual_formatting(tmp_path, monkeypatch):
     from openpyxl.styles import Alignment, Font, PatternFill
     from tools.master_journal_workbook import build_master_journal_workbook
+    import tools.master_journal_workbook as journal_module
 
     monkeypatch.setattr(master_service, "TRADING_JOURNAL_SOURCE", "master_journal")
     monkeypatch.setattr(master_service, "TRADING_JOURNAL_LOCAL_DIR", tmp_path)
@@ -4214,6 +4216,37 @@ def test_sync_preserves_canonical_stats1_layout_and_manual_formatting(tmp_path, 
     sentinel.font = Font(name="Calibri", size=13, bold=True, color="123456")
     sentinel.fill = PatternFill("solid", fgColor="ABCDEF")
     sentinel.alignment = Alignment(horizontal="center")
+    symbols = wb["SYMBOLS"]
+    for coordinate in ("S3", "T3", "AA3", "AB3"):
+        assert symbols[coordinate].value == 0
+        symbols[coordinate].number_format = "General"
+    calendar = wb["P&L Calendar"]
+    year_col = next(
+        col
+        for col in range(2, calendar.max_column + 1)
+        if calendar.cell(1, col).value == 2026
+    )
+    february_row = next(
+        row
+        for row in range(2, calendar.max_row + 1)
+        if calendar.cell(row, 1).value == "February"
+    )
+    calendar.cell(february_row, year_col).fill = PatternFill(
+        "solid",
+        fgColor="C6EFCE",
+    )
+    report_names = ["YEARLY REPORT", *[str(year) for year in range(2018, 2027)]]
+    for sheet_name in report_names:
+        report = wb[sheet_name]
+        last_managed_row = max(
+            row
+            for row, _spec in journal_module._report_spec_rows(report)
+        )
+        for row in range(1, last_managed_row + 1):
+            for col in range(1, report.max_column + 1):
+                alignment = copy(report.cell(row, col).alignment)
+                alignment.horizontal = "right"
+                report.cell(row, col).alignment = alignment
     labels_before = [
         str(dash.cell(row, 1).value or "").strip()
         for row in range(1, dash.max_row + 1)
@@ -4240,3 +4273,45 @@ def test_sync_preserves_canonical_stats1_layout_and_manual_formatting(tmp_path, 
     trades_row = labels_after.index("Trades") + 1
     assert dash.cell(trades_row, 2).value == 2
     wb.close()
+
+    def assert_generator_owned_repairs() -> None:
+        checked = load_workbook(path)
+        try:
+            symbols = checked["SYMBOLS"]
+            for coordinate in ("S3", "T3", "AA3", "AB3"):
+                assert symbols[coordinate].value == 0
+                assert symbols[coordinate].number_format == "0;-0;;@"
+            calendar = checked["P&L Calendar"]
+            year_col = next(
+                col
+                for col in range(2, calendar.max_column + 1)
+                if calendar.cell(1, col).value == 2026
+            )
+            february_row = next(
+                row
+                for row in range(2, calendar.max_row + 1)
+                if calendar.cell(row, 1).value == "February"
+            )
+            february = calendar.cell(february_row, year_col)
+            assert february.value in (None, "")
+            assert getattr(february.fill, "fill_type", None) is None
+            for sheet_name in report_names:
+                report = checked[sheet_name]
+                last_managed_row = max(
+                    row for row, _spec in journal_module._report_spec_rows(report)
+                )
+                for row in range(1, last_managed_row + 1):
+                    for col in range(1, report.max_column + 1):
+                        if journal_module._is_merged_non_anchor(report, row, col):
+                            continue
+                        assert report.cell(row, col).alignment.horizontal == "left"
+        finally:
+            checked.close()
+
+    assert_generator_owned_repairs()
+    second = master_service._sync_master_journal_workbook(
+        prebuilt_snapshot=snapshot,
+        sync_caller="test-second-pass",
+    )
+    assert second["master_journal_ok"] is True, second
+    assert_generator_owned_repairs()

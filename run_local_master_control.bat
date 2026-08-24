@@ -72,16 +72,8 @@ call :load_master_env_vars
 if /I "%~1"=="__worker" goto worker
 
 echo [local-master] launcher starting.
-set "MASTER_URL=http://127.0.0.1:8000"
 set "MASTER_READINESS_URL=http://127.0.0.1:8000/api/startup-readiness"
 for /f %%I in ('powershell -NoProfile -Command "[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()"') do set "LOCAL_LAUNCH_TS=%%I"
-set "MASTER_BROWSER_URL=%MASTER_URL%/?local_launch=%LOCAL_LAUNCH_TS%"
-for /f %%I in ('powershell -NoProfile -Command "try { $l = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback,0); $l.Start(); $p = $l.LocalEndpoint.Port; $l.Stop(); if($p -gt 0){Write-Output $p; exit 0}; exit 1 } catch { exit 1 }"') do set "LOCAL_MASTER_EDGE_DEBUG_PORT=%%I"
-if not defined LOCAL_MASTER_EDGE_DEBUG_PORT (
-  echo [local-master] ERROR: failed to allocate LOCAL_MASTER_EDGE_DEBUG_PORT.
-  exit /b 1
-)
-set "LOCAL_MASTER_EDGE_PROFILE_DIR=%TEMP%\LocalTradingToolsEdge-%LOCAL_LAUNCH_TS%"
 set "LOCAL_MASTER_EXIT_REQUEST=%TEMP%\LocalTradingToolsExit-%LOCAL_LAUNCH_TS%.flag"
 set "LOCAL_MASTER_NORMAL_EXIT_FILE=%TEMP%\LocalTradingToolsExit-%LOCAL_LAUNCH_TS%.normal"
 set "LOCAL_MASTER_WORKER_FAILED_FILE=%TEMP%\LocalTradingToolsExit-%LOCAL_LAUNCH_TS%.failed"
@@ -133,26 +125,21 @@ goto wait_for_master_ready
 
 :master_ready
 echo [local-master] startup readiness complete after !READY_WAITED! seconds.
-call "%ROOT%tools\open_edge_url.bat" "%MASTER_BROWSER_URL%" "%LOCAL_MASTER_EDGE_DEBUG_PORT%" "%LOCAL_MASTER_EDGE_PROFILE_DIR%"
-if errorlevel 1 (
-  echo [local-master] ERROR: failed to open Microsoft Edge for %MASTER_BROWSER_URL%.
-  exit /b 1
-)
-echo Local master control launch requested after complete startup readiness.
+echo Local master control is ready. No browser was opened.
 exit /b 0
 
 :master_not_ready
 echo [local-master] ERROR: startup readiness was not reached after %MASTER_READY_TIMEOUT_SECONDS% seconds.
 if exist "%LOCAL_MASTER_READINESS_STATUS%" type "%LOCAL_MASTER_READINESS_STATUS%"
 echo [local-master] Check worker startup log: %LOCAL_MASTER_WORKER_LOG%
-echo [local-master] Browser was not opened to avoid a dead-page / manual-refresh failure.
+echo [local-master] Ready notification was not sent because startup timed out.
 exit /b 1
 
 :master_readiness_failed
 echo [local-master] ERROR: startup readiness failed.
 if exist "%LOCAL_MASTER_READINESS_STATUS%" type "%LOCAL_MASTER_READINESS_STATUS%"
 echo [local-master] Check worker startup log: %LOCAL_MASTER_WORKER_LOG%
-echo [local-master] Browser was not opened because startup has a blocking readiness error.
+echo [local-master] Ready notification was not sent because startup has a blocking readiness error.
 exit /b 1
 
 :worker_failed_before_ready
@@ -161,13 +148,13 @@ echo [local-master] Worker startup log: %LOCAL_MASTER_WORKER_LOG%
 if defined LOCAL_MASTER_WORKER_FAILED_FILE (
   if exist "%LOCAL_MASTER_WORKER_FAILED_FILE%" type "%LOCAL_MASTER_WORKER_FAILED_FILE%"
 )
-echo [local-master] Browser was not opened because the worker is no longer running.
+echo [local-master] Ready notification was not sent because the worker is no longer running.
 exit /b 1
 
 :launcher_preflight_not_ready
 echo [local-master] ERROR: launcher preflight did not finish cleanly after %PREFLIGHT_READY_TIMEOUT_SECONDS% seconds.
 echo [local-master] Check the visible Local Master Control window and worker log: %LOCAL_MASTER_WORKER_LOG%
-echo [local-master] Browser was not opened because an old dashboard server may still be shutting down.
+echo [local-master] Ready notification was not sent because an old dashboard server may still be shutting down.
 exit /b 1
 
 :worker
@@ -259,9 +246,6 @@ if defined LOCAL_MASTER_EXIT_REQUEST (
     echo [local-master] local exit requested; closing worker window.
     call :write_normal_exit_marker
     del /q "!LOCAL_MASTER_EXIT_REQUEST!" >nul 2>nul
-    if defined LOCAL_MASTER_EDGE_PROFILE_DIR (
-      if exist "!LOCAL_MASTER_EDGE_PROFILE_DIR!\" rmdir /s /q "!LOCAL_MASTER_EDGE_PROFILE_DIR!" >nul 2>nul
-    )
     if /I "!LOCAL_MASTER_SUPPRESS_WINDOW_CLOSE!"=="1" (
       echo [local-master] smoke/test mode: not closing shared console window.
       exit 0

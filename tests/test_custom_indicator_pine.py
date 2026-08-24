@@ -46,6 +46,22 @@ def test_custom_indicator_crypto_only_volume_vwap_and_timing_gates() -> None:
     assert "not isForex" not in source
 
 
+def test_custom_indicator_uses_compact_volume_scale_and_explicit_price_formats() -> None:
+    source = _source()
+    declaration = next(line for line in source.splitlines() if line.startswith("indicator("))
+    assert "format=format.volume" in declaration
+
+    plot_lines = [line.strip() for line in source.splitlines() if line.strip().startswith("plot(")]
+    volume_lines = [line for line in plot_lines if '"Volume"' in line]
+    assert len(volume_lines) == 1
+    assert "format=format.volume" in volume_lines[0]
+
+    for title in ("9 EMA", "20 EMA", "VWAP", "9 EMA Offset", "20 EMA Offset", "VWAP Offset"):
+        matches = [line for line in plot_lines if f'"{title}"' in line]
+        assert len(matches) == 1
+        assert "format=format.price" in matches[0]
+
+
 def test_custom_indicator_exposes_three_unique_hidden_offset_alert_series() -> None:
     source = _source()
     expected = {

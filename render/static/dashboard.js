@@ -8,9 +8,6 @@
   const workspaceStatus = document.getElementById('dashboard-workspace-status');
   const workspaceEmpty = document.getElementById('dashboard-workspace-empty');
   const workspaceFrame = document.getElementById('dashboard-workspace-frame');
-  const lookupForm = document.getElementById('dashboard-instrument-lookup-form');
-  const lookupInput = document.getElementById('dashboard-instrument-lookup-input');
-  const lookupStatus = document.getElementById('dashboard-instrument-lookup-status');
 
   const watchlistCount = document.getElementById('watchlist-count');
   const watchlistInput = document.getElementById('watchlist-input');
@@ -257,30 +254,6 @@
       cleanupWorkspaceHeightObservers();
     }
     window.setTimeout(scheduleWorkspaceFrameHeightSync, 250);
-  };
-
-  const setLookupStatus = (message, isErr = false) => {
-    if (!lookupStatus) return;
-    lookupStatus.textContent = message || '';
-    lookupStatus.style.color = isErr ? '#fca5a5' : '#94a3b8';
-  };
-
-  const submitInlineLookup = (event) => {
-    event?.preventDefault();
-    const raw = String(lookupInput?.value || '').trim();
-    if (!raw) {
-      setLookupStatus('Enter a symbol.', true);
-      lookupInput?.focus?.();
-      return;
-    }
-    const target = `/instrument-lookup?q=${encodeURIComponent(raw)}`;
-    const tab = window.open(target, '_blank');
-    if (!tab) {
-      setLookupStatus('Browser blocked the Instrument Lookup tab.', true);
-      return;
-    }
-    tab.focus?.();
-    setLookupStatus(`Opening ${raw.toUpperCase()}...`);
   };
 
   const renderScripts = () => {
@@ -952,7 +925,6 @@
     oandaExpanded = !oandaExpanded;
     syncOandaDetailsVisibility();
   });
-  lookupForm?.addEventListener('submit', submitInlineLookup);
   workspaceFrame?.addEventListener('load', installWorkspaceHeightSync);
   window.addEventListener('resize', scheduleWorkspaceFrameHeightSync);
 

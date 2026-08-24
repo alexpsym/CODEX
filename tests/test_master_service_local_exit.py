@@ -101,13 +101,23 @@ def test_local_exit_success(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> 
     client = TestClient(master_service.app)
     calls: list[str] = []
     monkeypatch.setattr(master_service, "_resolve_app_profile", lambda: "local")
-    monkeypatch.setenv("LOCAL_MASTER_EDGE_DEBUG_PORT", "9222")
     sentinel = tmp_path / "exit.flag"
     normal = tmp_path / "exit.normal"
     monkeypatch.setenv("LOCAL_MASTER_EXIT_REQUEST", str(sentinel))
     monkeypatch.setenv("LOCAL_MASTER_NORMAL_EXIT_FILE", str(normal))
-    monkeypatch.setattr(master_service, "_close_local_master_edge_target", lambda _url: calls.append("close") or {"ok": True})
-    monkeypatch.setattr(master_service, "_write_local_exit_markers", lambda _reason, _action: calls.append("markers") or (sentinel, normal))
+    monkeypatch.delenv("LOCAL_MASTER_EDGE_DEBUG_PORT", raising=False)
+    monkeypatch.setattr(
+        master_service,
+        "_close_local_master_edge_target",
+        lambda _url: (_ for _ in ()).throw(AssertionError("Edge close must not be called")),
+    )
+
+    def write_markers(reason: str, action: str) -> tuple[Path, Path]:
+        assert (reason, action) == ("exit_button", "local_exit")
+        calls.append("markers")
+        return sentinel, normal
+
+    monkeypatch.setattr(master_service, "_write_local_exit_markers", write_markers)
     monkeypatch.setattr(master_service, "_schedule_local_master_process_exit", lambda delay_seconds=0.75: calls.append("schedule"))
 
     class FakeLogger:
@@ -115,11 +125,16 @@ def test_local_exit_success(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> 
             calls.append("log")
 
     monkeypatch.setattr(master_service, "APP_LOGGER", FakeLogger())
-    res = client.post("/api/local-exit", json={"url": "http://127.0.0.1:8000/"})
+    res = client.post("/api/local-exit", json={"url": "https://chrome.example/bookmarked-dashboard"})
     assert res.status_code == 200
-    assert res.json().get("ok") is True
-    assert res.json()["normal_marker"] == str(normal)
-    assert calls == ["close", "markers", "log", "schedule"]
+    assert res.json() == {
+        "ok": True,
+        "sentinel": str(sentinel),
+        "normal_marker": str(normal),
+        "reason": "exit_button",
+        "action": "local_exit",
+    }
+    assert calls == ["markers", "log", "schedule"]
 
 
 def test_local_shutdown_success_without_edge_close(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -172,6 +187,26 @@ def test_local_exit_markers_are_written_before_sigterm(monkeypatch: pytest.Monke
     assert normal_payload["timestamp"]
 
 
+def test_local_exit_flushes_normal_marker_before_watched_sentinel(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    sentinel = tmp_path / "exit.flag"
+    normal = tmp_path / "exit.normal"
+    writes: list[Path] = []
+    monkeypatch.setenv("LOCAL_MASTER_EXIT_REQUEST", str(sentinel))
+    monkeypatch.setenv("LOCAL_MASTER_NORMAL_EXIT_FILE", str(normal))
+    monkeypatch.setattr(
+        master_service,
+        "_write_text_file_atomic",
+        lambda path, _text: writes.append(path),
+    )
+
+    master_service._write_local_exit_markers("exit_button", "local_exit")
+
+    assert writes == [normal, sentinel]
+
+
 def test_local_exit_rejected_when_not_local(monkeypatch: pytest.MonkeyPatch) -> None:
     client = TestClient(master_service.app)
     calls: list[str] = []
@@ -195,29 +230,30 @@ def test_local_shutdown_rejected_when_not_local(monkeypatch: pytest.MonkeyPatch)
     assert calls == []
 
 
-def test_local_exit_edge_close_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_local_exit_missing_env(monkeypatch: pytest.MonkeyPatch) -> None:
     client = TestClient(master_service.app)
     calls: list[str] = []
     monkeypatch.setattr(master_service, "_resolve_app_profile", lambda: "local")
-    monkeypatch.setenv("LOCAL_MASTER_EDGE_DEBUG_PORT", "9222")
-    monkeypatch.setenv("LOCAL_MASTER_EXIT_REQUEST", "C:\\temp\\flag.txt")
-    monkeypatch.setattr(master_service, "_close_local_master_edge_target", lambda _url: (_ for _ in ()).throw(RuntimeError("boom")))
-    monkeypatch.setattr(master_service, "_write_local_exit_markers", lambda _reason, _action: calls.append("markers"))
+    monkeypatch.setenv("LOCAL_MASTER_EXIT_REQUEST", "")
+    monkeypatch.setenv("LOCAL_MASTER_NORMAL_EXIT_FILE", "C:\\temp\\normal.txt")
     monkeypatch.setattr(master_service, "_schedule_local_master_process_exit", lambda delay_seconds=0.75: calls.append("schedule"))
     res = client.post("/api/local-exit", json={"url": "http://127.0.0.1:8000/"})
     assert res.status_code >= 400
     assert calls == []
 
 
-def test_local_exit_missing_env(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_local_exit_missing_normal_marker_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     client = TestClient(master_service.app)
     calls: list[str] = []
     monkeypatch.setattr(master_service, "_resolve_app_profile", lambda: "local")
-    monkeypatch.delenv("LOCAL_MASTER_EDGE_DEBUG_PORT", raising=False)
-    monkeypatch.setenv("LOCAL_MASTER_EXIT_REQUEST", "")
+    monkeypatch.setenv("LOCAL_MASTER_EXIT_REQUEST", str(tmp_path / "exit.flag"))
+    monkeypatch.delenv("LOCAL_MASTER_NORMAL_EXIT_FILE", raising=False)
     monkeypatch.setattr(master_service, "_schedule_local_master_process_exit", lambda delay_seconds=0.75: calls.append("schedule"))
-    res = client.post("/api/local-exit", json={"url": "http://127.0.0.1:8000/"})
+
+    res = client.post("/api/local-exit", json={"url": "https://chrome.example/"})
+
     assert res.status_code >= 400
+    assert "LOCAL_MASTER_NORMAL_EXIT_FILE" in res.text
     assert calls == []
 
 
@@ -235,12 +271,10 @@ def test_local_shutdown_missing_env(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_local_exit_uses_defined_app_logger(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     client = TestClient(master_service.app)
     monkeypatch.setattr(master_service, "_resolve_app_profile", lambda: "local")
-    monkeypatch.setenv("LOCAL_MASTER_EDGE_DEBUG_PORT", "9222")
     sentinel = tmp_path / "exit.flag"
     normal = tmp_path / "exit.normal"
     monkeypatch.setenv("LOCAL_MASTER_EXIT_REQUEST", str(sentinel))
     monkeypatch.setenv("LOCAL_MASTER_NORMAL_EXIT_FILE", str(normal))
-    monkeypatch.setattr(master_service, "_close_local_master_edge_target", lambda _url: {"ok": True, "target_url": "http://127.0.0.1:8000/"})
     monkeypatch.setattr(master_service, "_write_local_exit_markers", lambda _reason, _action: (sentinel, normal))
     monkeypatch.setattr(master_service, "_schedule_local_master_process_exit", lambda delay_seconds=0.75: None)
 

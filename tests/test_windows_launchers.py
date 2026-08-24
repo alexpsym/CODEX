@@ -378,21 +378,25 @@ def test_run_local_master_exit_wiring_and_ordering() -> None:
     assert 'set "LOCAL_MASTER_NORMAL_EXIT_FILE=%TEMP%\\LocalTradingToolsExit-%LOCAL_LAUNCH_TS%.normal"' in script
     assert 'set "LOCAL_MASTER_WORKER_FAILED_FILE=%TEMP%\\LocalTradingToolsExit-%LOCAL_LAUNCH_TS%.failed"' in script
     assert 'set "LOCAL_MASTER_WINDOW_TITLE=Local Master Control - %LOCAL_LAUNCH_TS%"' in script
-    assert 'set "LOCAL_MASTER_EDGE_DEBUG_PORT=' in script
+    assert 'LOCAL_MASTER_EDGE_DEBUG_PORT' not in script
+    assert 'LOCAL_MASTER_EDGE_PROFILE_DIR' not in script
+    assert 'MASTER_BROWSER_URL' not in script
     assert 'start "%LOCAL_MASTER_WINDOW_TITLE%" /D "%ROOT%" "%ROOT%tools\\windows_launchers\\local_master_worker_console.bat"' in script
     assert '__worker_console' not in script
     assert 'if defined LOCAL_MASTER_WINDOW_TITLE (' in script
     assert 'if /I not "!LOCAL_MASTER_SUPPRESS_WINDOW_CLOSE!"=="1" title !LOCAL_MASTER_WINDOW_TITLE!' in script
     assert 'cmd /d /v:on /c "call ""%~f0"" __worker > ""%LOCAL_MASTER_WORKER_LOG%"" 2>&1"' not in script
     assert 'cmd /d /v:on /k "call ""%~f0""' not in script
-    assert 'call "%ROOT%tools\\open_edge_url.bat" "%MASTER_BROWSER_URL%" "%LOCAL_MASTER_EDGE_DEBUG_PORT%" "%LOCAL_MASTER_EDGE_PROFILE_DIR%"' in script
+    assert 'open_edge_url.bat' not in script
+    assert 'Local master control is ready. No browser was opened.' in script
     assert 'if defined LOCAL_MASTER_EXIT_REQUEST (\n  if exist "!LOCAL_MASTER_EXIT_REQUEST!" (' in script
     assert 'goto restart_master' in script
     worker_idx = script.find('start "%LOCAL_MASTER_WINDOW_TITLE%"')
     health_idx = script.find(':wait_for_master_ready')
-    open_idx = script.find('call "%ROOT%tools\\open_edge_url.bat"')
-    assert worker_idx != -1 and health_idx != -1 and open_idx != -1
-    assert worker_idx < health_idx < open_idx
+    ready_idx = script.find(':master_ready')
+    success_idx = script.find('exit /b 0', ready_idx)
+    assert worker_idx != -1 and health_idx != -1 and ready_idx != -1 and success_idx != -1
+    assert worker_idx < health_idx < ready_idx < success_idx
     exit_branch_idx = script.find('if defined LOCAL_MASTER_EXIT_REQUEST (\n  if exist "!LOCAL_MASTER_EXIT_REQUEST!" (')
     restart_idx = script.find('goto restart_master')
     assert exit_branch_idx != -1 and restart_idx != -1 and exit_branch_idx < restart_idx
@@ -557,6 +561,41 @@ def test_trading_tools_launcher_runs_hidden_and_shows_clear_errors() -> None:
     assert 'Last useful launch log lines:' in launcher
 
 
+def test_trading_tools_launcher_notifies_exactly_once_only_after_ready_exit() -> None:
+    launcher = (ROOT / 'tools' / 'windows_launchers' / 'TradingToolsLauncher.cs').read_text(encoding='utf-8')
+    assert launcher.count('ShowBalloonTip(') == 1
+    assert 'BalloonTipTitle = "Local Trading Tools";' in launcher
+    assert 'BalloonTipText = "Local Trading Tools is ready to use.";' in launcher
+    assert 'BalloonTipIcon = ToolTipIcon.Info;' in launcher
+    assert 'using (NotifyIcon notification = new NotifyIcon())' in launcher
+    assert 'Thread.Sleep(5000);' in launcher
+    assert 'Ready notification displayed.' in launcher
+    assert 'Ready notification failed:' in launcher
+
+    failure_idx = launcher.index('if (exitCode != 0)')
+    failure_return_idx = launcher.index('return exitCode;', failure_idx)
+    notification_idx = launcher.index('TryShowReadyNotification(launchLogPath, logTail);')
+    success_return_idx = launcher.index('return 0;', notification_idx)
+    assert failure_idx < failure_return_idx < notification_idx < success_return_idx
+
+    catch_idx = launcher.index('catch (Exception ex)')
+    assert notification_idx < catch_idx or 'TryShowReadyNotification' not in launcher[catch_idx:]
+
+
+def test_trading_tools_launcher_does_not_wait_for_worker_inherited_output_pipes() -> None:
+    launcher = (ROOT / 'tools' / 'windows_launchers' / 'TradingToolsLauncher.cs').read_text(encoding='utf-8')
+    assert 'while (!process.WaitForExit(250))' in launcher
+    assert 'process.WaitForExit();' not in launcher
+    assert 'process.CancelOutputRead();' in launcher
+    assert 'process.CancelErrorRead();' in launcher
+
+    wait_idx = launcher.index('while (!process.WaitForExit(250))')
+    exit_code_idx = launcher.index('int exitCode = process.ExitCode;', wait_idx)
+    cancel_idx = launcher.index('TryCancelAsyncRead(process, true);', exit_code_idx)
+    notification_idx = launcher.index('TryShowReadyNotification(launchLogPath, logTail);', cancel_idx)
+    assert wait_idx < exit_code_idx < cancel_idx < notification_idx
+
+
 def test_windows_launcher_builder_uses_windows_subsystem_output() -> None:
     ps1 = (ROOT / 'tools' / 'windows_launchers' / 'build_windows_launchers.ps1').read_text(encoding='utf-8')
     assert '/target:winexe' in ps1
@@ -568,7 +607,8 @@ def test_windows_launcher_builder_uses_windows_subsystem_output() -> None:
 def test_windows_launcher_builder_references_windows_forms_for_message_box() -> None:
     ps1 = (ROOT / 'tools' / 'windows_launchers' / 'build_windows_launchers.ps1').read_text(encoding='utf-8')
     assert '/reference:System.Windows.Forms.dll' in ps1
-    assert "-ReferencedAssemblies @('System.Windows.Forms.dll', 'System.dll')" in ps1
+    assert '/reference:System.Drawing.dll' in ps1
+    assert "-ReferencedAssemblies @('System.Windows.Forms.dll', 'System.Drawing.dll', 'System.dll')" in ps1
 
 
 def test_windows_launcher_builder_embeds_repo_icon() -> None:
@@ -722,7 +762,7 @@ def test_run_local_master_worker_dead_fail_fast_before_health_timeout() -> None:
     assert 'ERROR: Worker exited before dashboard became ready.' in script
     assert 'Worker exited before dashboard became ready with exit code !WORKER_EXIT_CODE!' in wrapper
     assert script.index(worker_dead_check) < script.index('if !READY_WAITED! GEQ %MASTER_READY_TIMEOUT_SECONDS% goto master_not_ready')
-    assert 'Browser was not opened because the worker is no longer running.' in script
+    assert 'Ready notification was not sent because the worker is no longer running.' in script
 
 
 def test_batch_normal_exit_marker_fallback_preserves_valid_api_markers(tmp_path: Path) -> None:

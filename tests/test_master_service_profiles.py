@@ -50,17 +50,20 @@ def test_home_page_local_profile_returns_dashboard_html() -> None:
     assert "dashboard-workspace" in body
     assert "scripts-grid" in body
     local_sections = {
-        "History Export": 'id="dashboard-history-panel"',
         "Open Orders and Positions": 'id="dashboard-workspace"',
+        "Equity Curve": 'id="journal-equity-panel"',
         "Pine Scripts": 'id="pine-scripts-panel"',
         "Watchlist": 'id="watchlist-widget"',
-        "Instrument Lookup": 'id="dashboard-instrument-lookup-panel"',
         "OANDA Inactivity": 'id="oanda-inactivity-widget"',
     }
     for section_name, marker in local_sections.items():
         assert marker in body, f"{section_name} must be present in the local dashboard"
     assert "/merged/open-orders?_dashboard=1" in body
-    assert "/static/history_page.js?v=" in body
+    assert 'id="dashboard-history-panel"' not in body
+    assert 'id="dashboard-instrument-lookup-panel"' not in body
+    assert "/static/history_page.js" not in body
+    assert "/static/trading_journal_equity_curve.js?v=" in body
+    assert body.index('id="dashboard-workspace"') < body.index('id="journal-equity-panel"') < body.index('id="pine-scripts-panel"')
     assert 'class="layout render-dashboard-layout"' not in body
 
 
@@ -74,6 +77,7 @@ def test_home_page_render_profile_returns_dashboard_html() -> None:
     local_sections = {
         "History Export": 'id="dashboard-history-panel"',
         "Open Orders and Positions": 'id="dashboard-workspace"',
+        "Equity Curve": 'id="journal-equity-panel"',
         "Pine Scripts": 'id="pine-scripts-panel"',
         "Watchlist": 'id="watchlist-widget"',
         "Instrument Lookup": 'id="dashboard-instrument-lookup-panel"',
@@ -83,6 +87,7 @@ def test_home_page_render_profile_returns_dashboard_html() -> None:
         assert marker not in body, f"{section_name} must be absent from the Render dashboard"
     assert "/merged/open-orders?_dashboard=1" not in body
     assert "/static/history_page.js" not in body
+    assert "/static/trading_journal_equity_curve.js" not in body
     assert 'class="layout render-dashboard-layout"' in body
     assert "LOCAL_DASHBOARD_" not in body
 
@@ -137,8 +142,8 @@ def test_local_profile_includes_remote_tools_and_local_calculator(monkeypatch) -
     by_name = {str(item.get("name")): item for item in payload}
 
     assert "trading-journal" in names
-    assert "instrument-lookup" not in names
-    assert "history" not in names
+    assert "instrument-lookup" in names
+    assert "history" in names
     assert "open-orders" not in names
     assert "mt5" not in names
     assert "pine" not in names
@@ -146,6 +151,19 @@ def test_local_profile_includes_remote_tools_and_local_calculator(monkeypatch) -
     assert "bounce-trader" in names
     assert "fxweekend" in names
     assert "fxweekend-clone" not in names
+
+    assert [str(item.get("name")) for item in payload] == [
+        "calculator",
+        "bounce-trader",
+        "fxweekend",
+        "trading-journal",
+        "instrument-lookup",
+        "history",
+        "monitor",
+        "atr-scanner",
+        "ivindicator-clone",
+        "spreads-clone",
+    ]
 
     assert by_name["calculator"]["open_url"] == "/merged/calculator"
     assert by_name["bounce-trader"]["open_url"] == "https://tools.example.test/merged/bounce-trader"
@@ -158,6 +176,11 @@ def test_local_profile_includes_remote_tools_and_local_calculator(monkeypatch) -
     assert trading_journal["open_url"] == "/dashboard/trading-journal"
     assert trading_journal["open_url"] != "/trading-journal"
     assert trading_journal["dashboard_main_view"] is True
+    assert by_name["instrument-lookup"]["open_url"] == "/instrument-lookup"
+    assert by_name["instrument-lookup"]["dashboard_main_view"] is True
+    assert by_name["history"]["open_url"] == "/merged/history"
+    assert by_name["history"]["dashboard_main_view"] is True
+    assert by_name["spreads-clone"]["label"] == "Oanda Spreads"
 
 
 def test_local_trading_journal_dashboard_workspace_is_actions_only() -> None:
@@ -175,6 +198,18 @@ def test_local_trading_journal_dashboard_workspace_is_actions_only() -> None:
         "bybit-demo-balance-adjustment-btn",
     ]:
         assert token in body
+
+    for token in [
+        "journal-equity-account",
+        "journal-equity-refresh-btn",
+        "journal-equity-summary",
+        "journal-equity-canvas",
+        "journal-equity-overlay-canvas",
+        "journal-equity-state",
+        "journal-equity-hover-live",
+        "trading_journal_equity_curve.js",
+    ]:
+        assert token not in body
 
     for token in [
         "All trades",

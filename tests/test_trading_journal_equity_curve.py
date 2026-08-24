@@ -1195,6 +1195,9 @@ def test_equity_script_has_one_selected_curve_axes_refresh_resize_and_states() -
     assert "window.addEventListener('resize'" in source
     assert "refreshButton.addEventListener('click', () => load({ forceRefresh: true }))" in source
     assert "'trading-journal:data-changed'" in source
+    assert "new window.BroadcastChannel(EQUITY_DATA_CHANNEL_NAME)" in source
+    assert "equityDataChannel.addEventListener" in source
+    assert "equityDataChannel?.close()" in source
     assert "REFRESH_STATUS_URL" in source
     assert "payload?.snapshot_current !== true" in source
     assert "payload?.snapshot_stale === true" in source
@@ -1206,13 +1209,20 @@ def test_equity_script_has_one_selected_curve_axes_refresh_resize_and_states() -
     assert "journal-equity-refresh-btn" in service
     assert 'TRADING_JOURNAL_EQUITY_CACHE_SCHEMA_VERSION = 2' in service
     assert 'TRADING_JOURNAL_EQUITY_CURVE_TYPE = "cashflow_neutral_compounded_index"' in service
-    assert "grid-template-columns:minmax(300px,340px) minmax(0,1fr)" in service
-    assert ".equity-panel{min-width:0;" in service
-    assert ".equity-chart-wrap{position:relative;flex:1;min-width:0;" in service
+    assert 'id="journal-equity-panel"' in service
+    assert ".journal-equity-toolbar{" in service
+    assert ".equity-chart-wrap{" in service
     assert ".equity-chart-stack{position:relative;" in service
     assert ".equity-canvas{width:100%;max-width:100%;" in service
     assert ".equity-overlay-canvas{position:absolute;inset:0;" in service
     assert 'id="journal-equity-hover-live"' in service
     assert 'aria-live="polite"' in service
-    assert ".workspace{grid-template-columns:minmax(0,1fr);padding:10px}" in service
-    assert "@media(max-width:780px)" in service
+    assert "@media (max-width: 980px)" in service
+
+
+def test_journal_actions_broadcasts_equity_changes_across_tabs() -> None:
+    actions = (ROOT / "render" / "static" / "trading_journal_actions.js").read_text(encoding="utf-8")
+    assert "const EQUITY_DATA_CHANNEL_NAME = 'trading-journal-equity-data';" in actions
+    assert "new window.BroadcastChannel(EQUITY_DATA_CHANNEL_NAME)" in actions
+    assert "equityDataChannel?.postMessage(detail)" in actions
+    assert "equityDataChannel?.close()" in actions

@@ -33,7 +33,7 @@ def test_dashboard_source_registers_spread_monitor_local_only_web_app():
     source = MASTER_SERVICE_PATH.read_text(encoding="utf-8")
     assert '"spreads-clone"' in source
     assert '"spreads-clone": ["spread_app.py"]' in source
-    assert '"spreads-clone": "Spreads"' in source
+    assert '"spreads-clone": "Oanda Spreads"' in source
     assert 'id="dashboard-scripts-panel"' in source
     assert '.script-toolbar-grid .script-btn[data-script-name="spreads-clone"]' not in source
 
@@ -158,6 +158,8 @@ def test_scripts_endpoint_places_spread_monitor_after_iv_indicator_in_local_prof
         "bounce-trader",
         "fxweekend",
         "trading-journal",
+        "instrument-lookup",
+        "history",
         "monitor",
         "atr-scanner",
         "ivindicator-clone",
@@ -171,13 +173,13 @@ def test_scripts_endpoint_places_spread_monitor_after_iv_indicator_in_local_prof
     assert by_name["bounce-trader"]["remote_owned"] is True
     assert by_name["fxweekend"]["remote_owned"] is True
     assert "fxweekend-clone" not in by_name
-    assert by_name["spreads-clone"]["label"] == "Spreads"
+    assert by_name["spreads-clone"]["label"] == "Oanda Spreads"
     assert by_name["spreads-clone"]["open_url"] == "/apps/spreads-clone"
     assert by_name["spreads-clone"]["dashboard_main_view"] is True
     assert by_name["monitor"]["label"] == "Alerts"
     assert by_name["atr-scanner"]["label"] == "Scanner"
-    assert "instrument-lookup" not in by_name
-    assert "history" not in by_name
+    assert by_name["instrument-lookup"]["open_url"] == "/instrument-lookup"
+    assert by_name["history"]["open_url"] == "/merged/history"
     assert "mt5" not in by_name
     assert "open-orders" not in by_name
     assert "pine" not in by_name

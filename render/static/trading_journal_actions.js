@@ -10,6 +10,13 @@
   const status = document.getElementById('journal-actions-status');
   const BYBIT_AMBIGUITY_MSG = 'Select Demo or Live in Bybit CSV account, then import this file again.';
   const IMPORT_WATCHDOG_MS = 15000;
+  const EQUITY_DATA_CHANNEL_NAME = 'trading-journal-equity-data';
+  let equityDataChannel = null;
+  try {
+    if (typeof window.BroadcastChannel === 'function') {
+      equityDataChannel = new window.BroadcastChannel(EQUITY_DATA_CHANNEL_NAME);
+    }
+  } catch {}
   const formatElapsed = (ms) => {
     const total = Math.max(0, Math.floor(ms / 1000));
     const minutes = String(Math.floor(total / 60)).padStart(2, '0');
@@ -40,14 +47,19 @@
     status.style.color = err ? '#fca5a5' : '#94a3b8';
   };
   const notifyEquityDataChanged = (reason) => {
+    const detail = { reason: String(reason || 'journal-update') };
     if (
       typeof window.dispatchEvent !== 'function'
       || typeof window.CustomEvent !== 'function'
-    ) return;
-    window.dispatchEvent(new window.CustomEvent(
-      'trading-journal:data-changed',
-      { detail: { reason: String(reason || 'journal-update') } },
-    ));
+    ) {
+      // The cross-tab notification below remains available without CustomEvent.
+    } else {
+      window.dispatchEvent(new window.CustomEvent(
+        'trading-journal:data-changed',
+        { detail },
+      ));
+    }
+    try { equityDataChannel?.postMessage(detail); } catch {}
   };
   const isExplicitAccountMode = (value) => value === 'demo' || value === 'live';
   const isExcelLockPayload = (payload) => {
@@ -363,5 +375,11 @@
     const reason = reasonRaw === null ? '' : String(reasonRaw || '').trim();
     await runBybitAdjust(amount, reason);
   });
+
+  if (typeof window.addEventListener === 'function') {
+    window.addEventListener('beforeunload', () => {
+      try { equityDataChannel?.close(); } catch {}
+    });
+  }
 
 })();;
