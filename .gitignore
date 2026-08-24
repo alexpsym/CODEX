@@ -29,6 +29,8 @@ state_backup.json
 state_manifest.json
 stateManifest.json
 custom instructions/*CHATGPT_ONLY*
+LOCAL_TRADING_TOOLS_DASHBOARD_AND_JOURNAL_FIXES.txt
+LOCAL_TRADING_TOOLS_TWO_MINOR_FOLLOW_UP_FIXES.txt
 journal/*.xls
 journal/*.xlsx
 !journal/Trading Journal.xlsx

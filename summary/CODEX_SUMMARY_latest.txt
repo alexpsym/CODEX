@@ -25,4 +25,5 @@ VERIFICATION
 DELIVERY NOTES
 
 - Preserved unrelated unstaged runtime changes in bybit_monitor/custom_alerts.json and render/data/*.json.
-- Preserved the two untracked requirements briefs. No temporary workbook remains.
+- PATCH_DESKTOP_PUSH.bat initially staged the two pre-existing local briefs despite their required exclusion. A corrective workflow commit removes them from tracking while preserving the files locally; .gitignore now excludes those exact brief names from future automatic staging.
+- No temporary workbook remains.
