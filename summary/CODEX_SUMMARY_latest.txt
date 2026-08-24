@@ -1,100 +1,28 @@
 CODEX COMPLETION SUMMARY
-Brief: LOCAL TRADING TOOLS — DASHBOARD, LAUNCHER, JOURNAL, PINE, AND WORKBOOK FIXES
+Brief: LOCAL TRADING TOOLS — TWO MINOR FOLLOW-UP FIXES
 Recorded: 2026-08-24 (Australia/Brisbane)
-Status: implementation and scoped verification complete; PATCH_DESKTOP_PUSH.bat is the next required action
 
-BASELINE AND SAFETY
+IMPLEMENTED
 
-- Worked in C:\GPT\CODEX-master on branch codex/journal-equity-fx-final-20260726.
-- Starting local HEAD was 72b60a2e7c4901d5c6f3c3c17d2ae2bbc9df0d08. Fetched origin/master was ee960739f15fc3590d234cd9f1c16f48d355b6b6; the existing branch was two commits ahead. The existing authoritative workbook/branch history was preserved.
-- Read AGENTS.md, custom instructions/CODEX_BRIEF_INSTRUCTIONS.txt, the prior summary, and LOCAL_TRADING_TOOLS_DASHBOARD_AND_JOURNAL_FIXES.txt before editing.
-- Preserved unrelated user/runtime changes in bybit_monitor/custom_alerts.json and render/data/*.json. They must remain unstaged after delivery. The untracked requirements brief must also remain uncommitted.
-- Did not inspect credentials or place/cancel/modify trades. A controlled local launcher smoke run started only the normal monitoring/dashboard services and was shut down via the application Exit endpoint.
+- Replaced the local-home Equity Curve fallback with the ASCII-safe exact text: Loading equity data...
+- Added the two requested assertions to the existing dashboard-home regression, including the absence of the mojibake ellipsis.
+- In preservation-mode Trade Log rebuilds, snapshot exact numeric non-formula Profit % fractions by Row ID and restore them only when the incoming result_pct exactly equals the percentage-points value derived from the source fraction. Genuine upstream changes therefore continue to write normally.
+- Added diagnostics key exact_trade_log_profit_percent_fractions_restored.
+- Added the single requested regression test: test_preservation_resync_preserves_exact_trade_log_profit_percent_fractions. It covers exact preservation over two resyncs, a genuine changed result_pct, unrelated values, and number formats.
+- Repaired only journal/Trading Journal.xlsx!P126, P275, P376, P404, P413, P713, P841, P1216, P1253, P1323, and P1398 to their specified exact fractions.
 
-IMPLEMENTED CHANGES
+VERIFICATION
 
-1. Readiness-gated launcher with no browser auto-open
+- Ran exactly the permitted pytest command, once:
+  python -B -m pytest tests/test_dashboard_home_layout.py::test_dashboard_home_loads_equity_script_without_inline_history_tool tests/test_master_journal_workbook.py::test_preservation_resync_preserves_exact_trade_log_profit_percent_fractions -q -p no:cacheprovider
+  Result: 2 passed.
+- No broader pytest nodes, full suites, rebuilds, browser/Excel launches, service launches, or recommendation generation were run.
+- git diff --check passed.
+- Direct local-home source/render inspection confirmed Loading equity data... is present and the mojibake ellipsis is absent.
+- Candidate preservation resync was run twice after the eleven-cell repair. Both passes retained all eleven exact values; their style-table counts were identical.
+- Final Trade Log value comparison against commit 8d8ceb866b9b9bcf75757ae8304aa3e4c4980b63 found exactly eleven differences, all the specified Profit % cells, with the required values.
 
-- run_local_master_control.bat retains the real /api/startup-readiness poll but removes MASTER_BROWSER_URL, Edge debug-port allocation, the temporary Edge profile, and the tools/open_edge_url.bat invocation. On ready:true it returns zero and leaves the worker running; all failure paths explicitly state that no ready notification was sent.
-- tools/windows_launchers/TradingToolsLauncher.cs now has an STA entry point and creates exactly one NotifyIcon only after a zero batch exit. Title: "Local Trading Tools". Body: "Local Trading Tools is ready to use." The icon remains active for five seconds and the NotifyIcon/extracted executable icon are disposed even on exceptions. Notification failure is logged and does not stop the backend.
-- A real Windows smoke run exposed and fixed an inherited-output-pipe wait: the long-lived worker could hold the wrapper's redirected handles open, delaying the notification until shutdown. The wrapper now waits only for the direct readiness cmd process with the timed WaitForExit overload and cancels asynchronous reads afterward.
-- tools/windows_launchers/build_windows_launchers.ps1 references System.Drawing for both supported compilation paths.
-- Rebuilt root Local Trading Tools.exe from the final source. SHA-256: FA964C8AFC10E71B8559F8974553579A774DE64EAC38A7E6101D2F3F1DAC6762. The root executable was previously ignored/untracked; the task explicitly requires it checked in, so it must be force-staged once.
+DELIVERY NOTES
 
-2. Browser-agnostic clean Exit
-
-- /api/local-exit no longer calls or depends on _close_local_master_edge_target, an Edge debug port, or current_url. The local-profile guard remains.
-- Both LOCAL_MASTER_NORMAL_EXIT_FILE and LOCAL_MASTER_EXIT_REQUEST are required. The normal marker is atomically written/flushed first and the worker-watched sentinel last. The endpoint logs reason=exit_button/action=local_exit, returns successful JSON, and only then schedules the delayed SIGTERM path.
-- /api/local-shutdown shares the marker helper without changing its contract.
-
-3. Dashboard navigation and equity placement
-
-- The local button order is exactly Calculator, Bounce Trader, FX Weekend, Journal, Instrument Lookup, History Export, Alerts, Scanner, IV Indicator, Oanda Spreads.
-- Instrument Lookup opens /instrument-lookup and History Export opens /merged/history. Both remain local-only dashboard main-view tools.
-- Removed the embedded lookup/history panels and their home-page history script injection. Removed only the now-dead inline lookup bindings from dashboard.js; standalone routes/scripts remain.
-- Moved the complete equity component, with the existing journal-equity-* IDs, from /dashboard/trading-journal to the local home immediately after Open Orders and Positions and before Pine Scripts. The account selector and Refresh button use a responsive toolbar. The local home loads the versioned equity script; Render home does not.
-- Journal actions retains open/import/resync functions but has no duplicate equity markup/script.
-- trading_journal_actions.js and trading_journal_equity_curve.js use a narrowly scoped BroadcastChannel named trading-journal-equity-data for cross-tab freshness while retaining the same-window CustomEvent and manual/load refresh behavior. Channels are closed on unload.
-- Renamed user-facing spreads-clone labels/headings to exactly Oanda Spreads while preserving its internal identifier, route, process, API, and settings.
-
-4. Pine volume formatting
-
-- pinescripts/custom_indicator.pine declares format=format.volume. The volume plot retains format.volume and price/EMA/VWAP/hidden offset plots retain explicit format.price. No calculation, value, color, input, visibility, or signal logic changed.
-
-5. Dense recommendation charts
-
-- _recommendation_svg now calculates dynamic horizontal width from the full marker extent (radius 5.5 plus half the 1.5 stroke), a two-pixel gap, and one deterministic center per numeric observation. It retains a 1040-pixel minimum width and fixed 520-pixel height.
-- Y mapping uses the full marker extent as top/bottom inset. SVG geometry/count/index metadata supports exact regression checks and every numeric observation retains one circle, original order, value, outcome color, and tooltip.
-- Generated HTML uses an overflow-x:auto wrapper with no vertical clipping; the detailed SVG uses intrinsic width rather than squeezing dense points into the viewport.
-- Regenerated all 85 tracked journal/Trading Journal.assets/recommendations/*.html files through the normal bundle path.
-
-6. Preservation-safe workbook repairs
-
-- SYMBOLS generator-owned count columns use ZERO_HIDE_FORMAT after preservation restoration for every populated instrument row. Numeric zeros remain numeric and display blank; nonzero counts display normally. The rule is semantic and not hard-coded to USDCAD.
-- P&L Calendar profit/loss fills are reapplied after restoration. Blank/no-eligible/zero months are neutral, positives green, negatives red, so stale 2026 direct green fills cannot win.
-- YEARLY REPORT and every numeric generated year sheet from 2018 onward receive explicit horizontal="left" across their managed report ranges after restoration, including styled blanks. Merged non-anchor cells are skipped. Only the horizontal alignment component changes.
-- Added custom-number-format registry normalization before save so openpyxl's reload-time numFmt ordering cannot create first-run/second-run style churn.
-- Added focused preservation regressions for corrupted SYMBOLS formats, stale 2026 fills, legitimate historical positive/negative fills, managed report-table alignment, repeated resync, and custom-number-format stability.
-
-REAL WORKBOOK AND GENERATED ARTIFACTS
-
-- Confirmed Excel was not running before replacement.
-- Made a repository-local safety copy, generated a preserve_existing_layout=True candidate against the real workbook, ran the same resync a second time, and compared the source/candidates before replacing journal/Trading Journal.xlsx.
-- Strict preservation checks covered Trade Log/manual values, formulas, workbook/sheet order, active sheet, merges, panes, dimensions, validations, filters, hyperlinks, comments, chart OOXML parts/relationships, row heights, column widths, and unrelated presentation.
-- First- and second-pass raw styles signatures are identical: 594dfe31a5143d052a5485ed164e275670e713586064c3b5664121184ede2286.
-- First/second style counts are identical: cellXfs=935, fonts=47, fills=26, borders=136, custom numFmts=21. The second run produced no style-table churn.
-- Final workbook semantic audit: 120 SYMBOLS rows; 1,884 numeric zero count cells and 996 nonzero count cells use the zero-hide format; 2026 calendar cells are blank/neutral; 56 legitimate historical negative and 24 positive calendar cells retain semantic fills; 13,407 managed report cells are explicitly left-aligned; six recommendation hyperlinks resolve to the generated bundle; 85 recommendation assets exist.
-- Final journal/Trading Journal.xlsx SHA-256: 22301E114EA0DF3C583D10C61C58DE172E9A56A617FB7ACC87BE7F4984C4E866.
-- After comparison, removed the task-created safety workbook, two pass candidates, working candidate, empty task work directory, and two task-only diagnostic scripts. These temporary files are not recoverable, but the verified authoritative workbook remains.
-
-VERIFICATION COMPLETED
-
-- python -m py_compile render/master_service.py tools/master_journal_workbook.py: passed.
-- node --check on dashboard.js, trading_journal_actions.js, and trading_journal_equity_curve.js: passed.
-- git diff --check: passed after final source edits.
-- Dashboard/shutdown/profile/spread/JS/equity/Pine focused command: 128 passed.
-- Launcher/environment focused command completed before the final inherited-pipe integration fix: 110 passed. It was not repeated after the user directed that broad launcher suites stop.
-- Final launcher-only regressions after the inherited-pipe fix: 2 passed in 0.88s (notification ordering/exactly-once source contract and no descendant-pipe wait).
-- Dense recommendation focused checks, including the representative 1,026-observation case: 2 passed.
-- Combined two-pass SYMBOLS/P&L/report preservation regression: 1 passed (218 deselected).
-- Repeated master-service journal sync preservation regression: 1 passed (156 deselected).
-- Existing comprehensive workbook preservation regression: 1 passed (217 deselected).
-- Custom number-format reload stability plus dense chart regression: 2 passed (217 deselected).
-- A requested full workbook/journal-sync run was started, then stopped immediately when the user directed Codex to conserve credits and not run broad or complete test files. It has no claimed result and was not repeated.
-- Final Windows build completed successfully with the supported builder.
-- Final real Windows success smoke: launcher exit code 0 in 23.1 seconds; readiness was reached before notification logging; the backend still listened on port 8000 after the wrapper exited; no new Chrome or Edge process appeared; the launch log records one "Ready notification displayed." attempt.
-- Real Exit smoke: POST /api/local-exit with a Chrome-shaped current_url returned ok=true/reason=exit_button/action=local_exit; the log recorded the request before the delayed termination; the worker used the normal marker path; port 8000 and the launcher process were both gone after shutdown. No browser process was closed.
-- Nonzero/preflight behavior is covered by the targeted launcher ordering regression: the nonzero return precedes the only notification call. An interactive failure-popup smoke was not repeated after the user's credit-conservation instruction.
-
-UNAVAILABLE VISUAL/EXTERNAL CHECKS
-
-- The required standalone spreadsheet artifact runtime and a connected/live Excel control session were unavailable, so no desktop Excel visual-render pass could be performed. Workbook semantics and preservation were instead verified directly against the real XLSX and its OOXML structure; do not describe this as a desktop Excel visual pass.
-- Browser discovery returned no available in-app or connected external browser. Therefore the real-browser desktop/narrow recommendation visual pass and interactive dashboard click/layout pass were unavailable. Exact HTML/DOM/CSS/SVG geometry and route contracts are covered by focused regressions; do not describe them as browser visual checks.
-- TradingView/Pine editor compilation and the 50K/50M/100M visual scale check were unavailable for the same browser reason. The static Pine regression passed. A saved TradingView chart instance may need its source updated or the indicator removed/re-added before it displays the new declaration-level format.
-- The Windows notification source/log path was verified, but the automation surface could not independently observe the Windows notification center to attest to its rendered appearance.
-
-DELIVERY
-
-- Preserve the unrelated runtime JSON modifications and the untracked requirements brief outside the staged commit.
-- Force-stage only the rebuilt root Local Trading Tools.exe in addition to normal task files because .gitignore currently ignores it.
-- Run PATCH_DESKTOP_PUSH.bat, then independently verify local HEAD equals origin/master and report the resulting commit hash and residual unstaged user/runtime changes.
+- Preserved unrelated unstaged runtime changes in bybit_monitor/custom_alerts.json and render/data/*.json.
+- Preserved the two untracked requirements briefs. No temporary workbook remains.

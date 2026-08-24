@@ -1,0 +1,156 @@
+LOCAL TRADING TOOLS — TWO MINOR FOLLOW-UP FIXES
+
+Recommended Codex configuration
+- Model: gpt-5.6-terra
+- Reasoning effort: high
+- Repository: C:\GPT\CODEX-master
+
+Why this model and effort
+This is a narrow two-defect follow-up, so do not use Sol Max, Ultra, subagents, or broad exploration. Terra is the cost-conscious everyday coding model. High reasoning is sufficient for the one preservation-sensitive workbook change while keeping usage materially below the previous large job.
+
+Primary outcome
+Fix exactly two residual defects from commit 8d8ceb866b9b9bcf75757ae8304aa3e4c4980b63:
+1. Replace the corrupted Equity Curve loading text shown as “Loading equity dataâ€¦”.
+2. Prevent preservation-mode Trading Journal resync from changing unchanged Trade Log “Profit %” values by microscopic floating-point amounts, and restore the eleven values altered by the previous job.
+
+Do not expand this task beyond those two defects.
+
+MANDATORY CREDIT AND TIME LIMIT
+
+This is the software equivalent of replacing one windscreen-wiper blade. Verification must be proportional to the two changed behaviours.
+
+- Run only the two exact pytest node IDs listed under “Permitted verification”.
+- Do not run an entire test file.
+- Do not run any full workbook, journal-sync, service, dashboard, launcher, Pine, recommendation, integration, or repository-wide suite.
+- Do not run test discovery, coverage, every test matching a broad keyword, or unrelated smoke tests.
+- Do not rerun a test that has already passed unless code directly exercised by that exact test changed afterward.
+- If one permitted test fails, diagnose it and rerun only that failed node after the fix. Do not broaden testing automatically.
+- Do not rebuild Local Trading Tools.exe.
+- Do not regenerate recommendation HTML.
+- Do not launch Local Trading Tools, browsers, TradingView, Excel, broker connections, monitors, or background services for this follow-up.
+- Do not inspect or test unrelated launcher, shutdown, dashboard-button, equity-chart drawing, Pine, scatter-plot, calendar, SYMBOLS, or report-alignment behaviour. Those areas were already checked.
+
+Start safely
+1. Read AGENTS.md, summary/CODEX_SUMMARY_latest.txt, and this brief. Do not read or modify the “custom instructions” folder; AGENTS.md identifies it as ChatGPT-only.
+2. Confirm the current branch, HEAD, origin/master, and worktree status. Work from the latest pushed state. Preserve all unrelated user/runtime changes and never reset, clean, discard, or overwrite them.
+3. Inspect only the exact functions, templates, tests, and workbook cells named below. Keep the patch narrow.
+4. Do not inspect credentials and do not perform any live trading action.
+
+Observed evidence and root causes
+
+Equity loading text
+- render/master_service.py currently places the literal text “Loading equity dataâ€¦” in HTML_TEMPLATE inside journal-equity-state.
+- The previous Journal template contained the proper ellipsis. The text became mojibake when it was moved to the dashboard.
+
+Profit % preservation
+- The authoritative workbook after the previous job differs from its immediate pre-job parent only in eleven Trade Log values, all in column P (“Profit %”), and only at floating-point precision below 1e-18.
+- A plain openpyxl load/save of the pre-job workbook preserves every one of those original values exactly. Therefore ordinary XLSX serialization is not the cause.
+- The generator reads the stored Excel fraction through _excel_fraction_to_pct_points and later writes it through _trade_log_row_values as pct / 100.0. That float multiply/divide round trip is not bit-for-bit reversible for these eleven values.
+- Current approximate-value tests do not detect this preservation defect.
+
+Required change 1 — fix the corrupted loading text
+
+In render/master_service.py, change the journal-equity-state fallback text in HTML_TEMPLATE to the ASCII-safe exact text:
+
+Loading equity data...
+
+- Do not change the Equity Curve layout, CSS, IDs, scripts, data loading, refresh behaviour, account selector, canvas, accessibility attributes, or any other dashboard content.
+- In tests/test_dashboard_home_layout.py, add two assertions to the existing test_dashboard_home_loads_equity_script_without_inline_history_tool test:
+  - the rendered local home contains “Loading equity data...”;
+  - the rendered local home does not contain “â€¦”.
+- Do not add a new dashboard test and do not run the full dashboard test file.
+
+Required change 2 — preserve exact unchanged Profit % fractions
+
+Fix tools/master_journal_workbook.py only in the preservation-mode Trade Log path.
+
+- Before the preservation rebuild replaces Trade Log rows, snapshot each existing non-formula numeric “Profit %” cell by stable Row ID. Retain the exact stored Excel fraction and its corresponding percentage-points value.
+- After regenerated Trade Log rows have been copied and stable Row IDs resolved, restore the exact original fraction only when all of these conditions are true:
+  1. the Row ID still exists and matches the source row;
+  2. the source “Profit %” cell was numeric and not a formula;
+  3. the incoming/current row result_pct is semantically the same value produced from that exact source fraction;
+  4. no legitimate upstream import or changed snapshot value requires a different Profit %.
+- If the trade’s Profit % genuinely changed, write the new value normally. Never restore a stale source fraction merely because the difference is small.
+- Apply this only when preserve_existing_layout=True. Do not change fresh workbook generation, incremental imports, percentage calculations, displayed number formats, formulas, row ordering, Row IDs, or any other Trade Log field.
+- Do not solve this by globally rounding Profit %, changing calculation precision, using approximate equality as the saved value, or hard-coding the eleven coordinates into generator source.
+- Add a concise diagnostic count for exact Profit % values restored during preservation resync.
+
+Add exactly one focused regression to tests/test_master_journal_workbook.py named:
+
+test_preservation_resync_preserves_exact_trade_log_profit_percent_fractions
+
+The one test must use at least one fraction known to fail the current multiply/divide round trip, such as -0.003551221861081017, and must prove:
+- preservation resync once keeps the exact value, using equality rather than pytest.approx;
+- preservation resync a second time still keeps the exact value;
+- a separate row whose incoming result_pct is deliberately changed receives the new value instead of being incorrectly restored;
+- unrelated Trade Log values and the Profit % number format remain unchanged.
+
+Do not add several overlapping tests. Keep all directly related assertions in this single regression.
+
+Repair the authoritative workbook narrowly
+
+Update journal/Trading Journal.xlsx after the source fix. Do not replace the whole workbook with an older version.
+
+Use the immediate pre-job parent commit 72b60a2e7c4901d5c6f3c3c17d2ae2bbc9df0d08 only as the evidence source for the eleven original Trade Log values below:
+
+- P126 = -0.003551221861081017
+- P275 = -0.005111909943335211
+- P376 = -0.005815704283670855
+- P404 = -0.005572732914888462
+- P413 = -0.005371069173914217
+- P713 = -0.006920978707812563
+- P841 = -0.0004478447471543197
+- P1216 = -0.003243361700573431
+- P1253 = 0.0003544477880685785
+- P1323 = 0.003273121535093999
+- P1398 = -0.002728213490545328
+
+- Restore only those eleven current workbook cells to the listed exact values.
+- Run the corrected preservation resync twice against the repaired current workbook and confirm all eleven remain exactly equal after each pass.
+- The final Trade Log must match the current pre-follow-up workbook from commit 8d8ceb866b9b9bcf75757ae8304aa3e4c4980b63 everywhere except those eleven cells, which must match the listed pre-job values.
+- Preserve every formula, value outside those eleven cells, style, number format, comment, hyperlink, chart part/relationship, sheet order, active sheet, merge, pane, row height, column width, validation, filter, and workbook property.
+- Do not touch SYMBOLS, P&L Calendar, YEARLY REPORT, year sheets, recommendation assets, or unrelated workbook presentation.
+- Use a temporary safety copy/candidate only as required by the existing safe workbook workflow. Do not commit temporary files.
+
+Permitted verification — run exactly this and nothing broader
+
+Run this single command after implementation is stable:
+
+python -B -m pytest tests/test_dashboard_home_layout.py::test_dashboard_home_loads_equity_script_without_inline_history_tool tests/test_master_journal_workbook.py::test_preservation_resync_preserves_exact_trade_log_profit_percent_fractions -q -p no:cacheprovider
+
+Then perform only these lightweight direct checks:
+
+1. git diff --check
+2. Inspect the rendered-template source/result to confirm “Loading equity data...” is present and “â€¦” is absent.
+3. Read the eleven final workbook cells and compare them with the exact values listed above.
+4. Compare the final Trade Log against commit 8d8ceb866b9b9bcf75757ae8304aa3e4c4980b63 and confirm the only value differences are the eleven listed Profit % cells.
+5. Confirm a second preservation resync does not change the eleven values or create style-count churn.
+
+These direct checks are not permission to run more pytest nodes or suites.
+
+Expected changed files
+
+- render/master_service.py
+- tools/master_journal_workbook.py
+- tests/test_dashboard_home_layout.py
+- tests/test_master_journal_workbook.py
+- journal/Trading Journal.xlsx
+- summary/CODEX_SUMMARY_latest.txt
+
+Do not modify or regenerate other source or generated artifacts unless an unavoidable dependency is demonstrated first. If another file appears changed incidentally, leave it out and report it rather than expanding scope.
+
+Definition of done
+
+- The dashboard fallback text reads exactly “Loading equity data...” with no mojibake.
+- Preservation resync retains exact unchanged Profit % fractions and still permits genuine updates.
+- The eleven authoritative workbook values are restored exactly and survive two preservation passes.
+- Only the two permitted pytest nodes were run, once each after the implementation became stable, except that a failed node may be rerun alone after its direct fix.
+- No broad/full suite, unrelated smoke test, executable rebuild, browser launch, Excel launch, background service, or recommendation regeneration occurred.
+- No unrelated user/runtime file was modified or committed.
+
+Completion and delivery
+
+1. Review git diff and git status. Confirm only the intended task files are staged and no temporary workbook, cache, log, environment, secret, runtime, or local-state file is included.
+2. Write a factual summary/CODEX_SUMMARY_latest.txt stating the exact two pytest node results, the eleven-cell exact comparison, the second-pass result, and that no broader tests were run.
+3. Run the repository-root PATCH_DESKTOP_PUSH.bat workflow.
+4. Verify and report the actual commit hash, push result, final status, and whether HEAD equals origin/master. Preserve unrelated unstaged runtime changes.

@@ -8754,6 +8754,106 @@ def test_preservation_resync_uses_outcome_subsets_preserves_unchanged_win_rates_
         wb.close()
 
 
+def test_preservation_resync_preserves_exact_trade_log_profit_percent_fractions(
+    tmp_path: Path,
+):
+    exact_fraction = -0.003551221861081017
+    stale_changed_fraction = 0.0043210987654321
+    changed_result_pct = -1.2345
+    snapshot = sample_snapshot()
+    snapshot["items"][0]["result_pct"] = exact_fraction * 100.0
+    path = tmp_path / "Trading Journal.xlsx"
+    build_master_journal_workbook(
+        snapshot,
+        path,
+        publish_recommendation_assets=False,
+    )
+
+    wb = load_workbook(path, data_only=False)
+    try:
+        trade_log = wb[mjw.TRADE_LOG_SHEET]
+        headers = _trade_log_header_map(trade_log)
+        row_id_col = headers["Row ID"]
+        profit_col = headers["Profit %"]
+        rows_by_id = {
+            str(trade_log.cell(row, row_id_col).value): row
+            for row in range(TRADE_LOG_DATA_START_ROW, trade_log.max_row + 1)
+        }
+        unchanged_row = rows_by_id["t1"]
+        changed_row = rows_by_id["t2"]
+        unchanged_profit = trade_log.cell(unchanged_row, profit_col)
+        changed_profit = trade_log.cell(changed_row, profit_col)
+        unchanged_profit.value = exact_fraction
+        changed_profit.value = stale_changed_fraction
+        unchanged_profit_format = unchanged_profit.number_format
+        unrelated_values = {
+            "unchanged_symbol": trade_log.cell(unchanged_row, headers["Symbol"]).value,
+            "unchanged_net_pnl": trade_log.cell(unchanged_row, headers["Net P/L"]).value,
+            "changed_net_pnl": trade_log.cell(changed_row, headers["Net P/L"]).value,
+        }
+        wb.save(path)
+    finally:
+        wb.close()
+
+    changed_snapshot = deepcopy(snapshot)
+    changed_snapshot["items"][1]["result_pct"] = changed_result_pct
+
+    def resync():
+        result = update_master_journal_workbook_data_only(
+            path,
+            changed_snapshot,
+            preserve_existing_layout=True,
+            publish_recommendation_assets=False,
+        )
+        assert result["ok"] is True
+        Path(result["candidate_path"]).replace(path)
+        return result
+
+    first = resync()
+    assert first["diagnostics"]["exact_trade_log_profit_percent_fractions_restored"] >= 1
+    wb = load_workbook(path, data_only=False)
+    try:
+        trade_log = wb[mjw.TRADE_LOG_SHEET]
+        headers = _trade_log_header_map(trade_log)
+        row_id_col = headers["Row ID"]
+        profit_col = headers["Profit %"]
+        rows_by_id = {
+            str(trade_log.cell(row, row_id_col).value): row
+            for row in range(TRADE_LOG_DATA_START_ROW, trade_log.max_row + 1)
+        }
+        unchanged_row = rows_by_id["t1"]
+        changed_row = rows_by_id["t2"]
+        assert trade_log.cell(unchanged_row, profit_col).value == exact_fraction
+        assert trade_log.cell(changed_row, profit_col).value == changed_result_pct / 100.0
+        assert trade_log.cell(changed_row, profit_col).value != stale_changed_fraction
+        assert trade_log.cell(unchanged_row, profit_col).number_format == unchanged_profit_format
+        assert trade_log.cell(unchanged_row, headers["Symbol"]).value == unrelated_values["unchanged_symbol"]
+        assert trade_log.cell(unchanged_row, headers["Net P/L"]).value == unrelated_values["unchanged_net_pnl"]
+        assert trade_log.cell(changed_row, headers["Net P/L"]).value == unrelated_values["changed_net_pnl"]
+        changed_profit_format = trade_log.cell(changed_row, profit_col).number_format
+    finally:
+        wb.close()
+
+    second = resync()
+    assert second["diagnostics"]["exact_trade_log_profit_percent_fractions_restored"] >= 1
+    wb = load_workbook(path, data_only=False)
+    try:
+        trade_log = wb[mjw.TRADE_LOG_SHEET]
+        headers = _trade_log_header_map(trade_log)
+        row_id_col = headers["Row ID"]
+        profit_col = headers["Profit %"]
+        rows_by_id = {
+            str(trade_log.cell(row, row_id_col).value): row
+            for row in range(TRADE_LOG_DATA_START_ROW, trade_log.max_row + 1)
+        }
+        assert trade_log.cell(rows_by_id["t1"], profit_col).value == exact_fraction
+        assert trade_log.cell(rows_by_id["t2"], profit_col).value == changed_result_pct / 100.0
+        assert trade_log.cell(rows_by_id["t1"], profit_col).number_format == unchanged_profit_format
+        assert trade_log.cell(rows_by_id["t2"], profit_col).number_format == changed_profit_format
+    finally:
+        wb.close()
+
+
 def test_checked_in_follow_up_workbook_matches_parent_regression_values(
     tmp_path: Path,
 ):

@@ -13215,6 +13215,84 @@ def _snapshot_trade_log_data_presentations_by_row_id(
     return dict(presentations_by_row_id)
 
 
+def _snapshot_trade_log_profit_percent_fractions_by_row_id(
+    ws,
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Capture exact stored numeric Profit % fractions before a preserved rebuild."""
+    headers = _trade_log_header_map(ws)
+    row_id_col = headers.get("Row ID")
+    profit_col = headers.get("Profit %")
+    if not row_id_col or not profit_col:
+        return {}
+
+    fractions_by_row_id: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for row in range(_trade_log_data_start_row(ws), ws.max_row + 1):
+        row_id = str(ws.cell(row, row_id_col).value or "").strip()
+        cell = ws.cell(row, profit_col)
+        value = cell.value
+        if (
+            not row_id
+            or cell.data_type == "f"
+            or isinstance(value, bool)
+            or not isinstance(value, (int, float, Decimal))
+        ):
+            continue
+        fraction = _as_float(value)
+        if fraction is None:
+            continue
+        fractions_by_row_id[row_id].append(
+            {
+                "source_row": row,
+                "fraction": fraction,
+                "pct_points": _excel_fraction_to_pct_points(fraction),
+            }
+        )
+    return dict(fractions_by_row_id)
+
+
+def _restore_unchanged_trade_log_profit_percent_fractions(
+    ws,
+    fractions_by_row_id: Dict[str, List[Dict[str, Any]]],
+    rows: Sequence[Mapping[str, Any]],
+) -> int:
+    """Restore only exact source fractions whose incoming percentage is unchanged."""
+    headers = _trade_log_header_map(ws)
+    row_id_col = headers.get("Row ID")
+    profit_col = headers.get("Profit %")
+    if not row_id_col or not profit_col or not fractions_by_row_id:
+        return 0
+
+    incoming_by_row_id: Dict[str, List[Mapping[str, Any]]] = defaultdict(list)
+    for row in rows:
+        row_id = str(row.get("id") or stable_row_id(dict(row))).strip()
+        if row_id:
+            incoming_by_row_id[row_id].append(row)
+
+    used_candidates: Dict[str, int] = defaultdict(int)
+    used_incoming: Dict[str, int] = defaultdict(int)
+    restored = 0
+    for row_number in range(_trade_log_data_start_row(ws), ws.max_row + 1):
+        row_id = str(ws.cell(row_number, row_id_col).value or "").strip()
+        candidates = fractions_by_row_id.get(row_id) or []
+        incoming_rows = incoming_by_row_id.get(row_id) or []
+        candidate_index = used_candidates[row_id]
+        incoming_index = used_incoming[row_id]
+        if candidate_index >= len(candidates) or incoming_index >= len(incoming_rows):
+            continue
+        candidate = candidates[candidate_index]
+        incoming = incoming_rows[incoming_index]
+        used_candidates[row_id] += 1
+        used_incoming[row_id] += 1
+        incoming_pct = _as_float(incoming.get("result_pct"))
+        # Exact comparison intentionally distinguishes a genuine upstream
+        # change, even one smaller than ordinary display precision.
+        if incoming_pct != candidate.get("pct_points"):
+            continue
+        ws.cell(row_number, profit_col).value = candidate["fraction"]
+        restored += 1
+    return restored
+
+
 def _trade_log_presentation_values_equal(left: Any, right: Any) -> bool:
     if left in (None, "") and right in (None, ""):
         return True
@@ -16266,6 +16344,9 @@ def update_master_journal_workbook_data_only(
     preserved_trade_log_formula_caches: Dict[
         Tuple[str, str], Dict[str, Any]
     ] = {}
+    preserved_trade_log_profit_percent_fractions: Dict[
+        str, List[Dict[str, Any]]
+    ] = {}
     if preserve_existing_layout:
         try:
             source_trade_log = _get_all_trades_sheet(wb)
@@ -16301,6 +16382,11 @@ def update_master_journal_workbook_data_only(
                 _snapshot_trade_log_data_presentations_by_row_id(
                     source_trade_log,
                     source_layout.get("cell_presentations") or {},
+                )
+            )
+            preserved_trade_log_profit_percent_fractions = (
+                _snapshot_trade_log_profit_percent_fractions_by_row_id(
+                    source_trade_log
                 )
             )
             preserved_trade_log_formula_caches = (
@@ -17311,6 +17397,13 @@ def update_master_journal_workbook_data_only(
             _copy_data_rows(gen_trade_log, live_trade_log, TRADE_LOG_DATA_START_ROW, force_all_columns=True)
             _normalize_trade_log_row_heights(live_trade_log, diagnostics)
             _repair_trade_log_row_ids_from_rows(live_trade_log, rows, diagnostics)
+            diagnostics["exact_trade_log_profit_percent_fractions_restored"] = (
+                _restore_unchanged_trade_log_profit_percent_fractions(
+                    live_trade_log,
+                    preserved_trade_log_profit_percent_fractions,
+                    rows,
+                )
+            )
             if expected_survivor_row_ids:
                 header_map = _trade_log_header_map(live_trade_log)
                 ridx = header_map.get("Row ID")

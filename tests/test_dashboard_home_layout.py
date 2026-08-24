@@ -177,6 +177,8 @@ def test_dashboard_home_loads_equity_script_without_inline_history_tool() -> Non
     assert '/static/history_page.js' not in body
     assert body.count('id="journal-equity-canvas"') == 1
     assert '/static/trading_journal_equity_curve.js?v=' in body
+    assert "Loading equity data..." in body
+    assert "â€¦" not in body
 
 
 def test_dashboard_profile_layout_removes_local_columns_server_side() -> None:

@@ -15471,7 +15471,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                         </div>
                     </div>
                     <div id="journal-equity-summary" class="equity-summary"></div>
-                    <div class="equity-chart-wrap"><div class="equity-chart-stack"><canvas id="journal-equity-canvas" class="equity-canvas" aria-label="Account equity curve"></canvas><canvas id="journal-equity-overlay-canvas" class="equity-canvas equity-overlay-canvas" aria-label="Interactive equity crosshair"></canvas></div><div id="journal-equity-state" class="equity-state">Loading equity dataâ€¦</div><div id="journal-equity-hover-live" class="sr-only" aria-live="polite" aria-atomic="true"></div></div>
+                    <div class="equity-chart-wrap"><div class="equity-chart-stack"><canvas id="journal-equity-canvas" class="equity-canvas" aria-label="Account equity curve"></canvas><canvas id="journal-equity-overlay-canvas" class="equity-canvas equity-overlay-canvas" aria-label="Interactive equity crosshair"></canvas></div><div id="journal-equity-state" class="equity-state">Loading equity data...</div><div id="journal-equity-hover-live" class="sr-only" aria-live="polite" aria-atomic="true"></div></div>
                 </section>
 
                 <section class="panel" id="pine-scripts-panel">
