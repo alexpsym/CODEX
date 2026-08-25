@@ -1,9 +1,13 @@
 #property strict
 #property description "Trader EA: trendline/standard limits, EMA bounce, and token-gated one-shot standard market execution. SL/TP are set by DISTANCE in MT5 POINTS, with optional AutoTP NetRR."
-#property version   "2.20"
+#property version   "2.30"
 
 #include <Trade/Trade.mqh>
 CTrade trade;
+
+#import "shell32.dll"
+long ShellExecuteW(long hwnd, string operation, string file, string parameters, string directory, int show_cmd);
+#import
 
 // -------------------- Strategy selection --------------------
 enum StrategyMode
@@ -78,6 +82,16 @@ input int    PepperstoneSpreadExportIntervalSeconds = 300;
 input string PepperstoneSpreadExportSymbols = "";
 input string PepperstoneSpreadExportPath = "C:\\GPT\\CODEX-master\\mt5-clone\\pepperstone_spreads_latest.json";
 
+// -------------------- Unified Market Watch spread + ATR feed --------------------
+input group "Unified Market Watch"
+input bool   EnableUnifiedMarketWatch = true;
+input int    UnifiedATRLength = 14;
+input int    UnifiedSymbolsPerTimer = 4;
+input string UnifiedMarketWatchFileName = "MarketWatchUnifiedFeed.json";
+input bool   LaunchUnifiedMarketWatchWindow = true;
+input string UnifiedPythonExecutable = "C:\\Users\\User\\miniconda3\\python.exe";
+input string UnifiedWindowScriptPath = "C:\\GPT\\CODEX-master\\mt5-clone\\atr_percent_window.py";
+
 // -------------------- Internals --------------------
 string   g_trendName    = "";
 ulong    g_ticket       = 0;
@@ -97,6 +111,21 @@ datetime g_standardLimitNextAttemptAt = 0;
 string   g_standardLimitLastReason = "";
 bool     g_lastPendingFailureStructural = false;
 bool     g_lastPendingAcceptanceMismatch = false;
+const string STANDARD_MARKET_EXECUTE_BUTTON = "TraderExecuteStandardMarket";
+
+void RefreshStandardMarketExecuteButton()
+{
+   ObjectDelete(0, STANDARD_MARKET_EXECUTE_BUTTON);
+   if(Strategy != STRAT_STANDARD_MARKET) return;
+   ObjectCreate(0, STANDARD_MARKET_EXECUTE_BUTTON, OBJ_BUTTON, 0, 0, 0);
+   ObjectSetInteger(0, STANDARD_MARKET_EXECUTE_BUTTON, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+   ObjectSetInteger(0, STANDARD_MARKET_EXECUTE_BUTTON, OBJPROP_XDISTANCE, 12);
+   ObjectSetInteger(0, STANDARD_MARKET_EXECUTE_BUTTON, OBJPROP_YDISTANCE, 22);
+   ObjectSetInteger(0, STANDARD_MARKET_EXECUTE_BUTTON, OBJPROP_XSIZE, 260);
+   ObjectSetInteger(0, STANDARD_MARKET_EXECUTE_BUTTON, OBJPROP_YSIZE, 26);
+   ObjectSetString(0, STANDARD_MARKET_EXECUTE_BUTTON, OBJPROP_TEXT,
+                   "EXECUTE " + string(StandardMarketSide == STD_MARKET_BUY ? "BUY" : "SELL") + " " + _Symbol + " | acct " + IntegerToString((long)AccountInfoInteger(ACCOUNT_LOGIN)));
+}
 
 const int STANDARD_LIMIT_MAX_ATTEMPTS = 6;
 const int STANDARD_LIMIT_MAX_BACKOFF_SECONDS = 30;
@@ -108,6 +137,165 @@ int hTrend = INVALID_HANDLE;
 
 string EA_COMMENT = "Trader";
 string EA_VERSION = "2.20";
+
+const int UNIFIED_FRAME_COUNT = 6;
+ENUM_TIMEFRAMES g_unifiedPeriods[6] = {PERIOD_M1, PERIOD_M5, PERIOD_H1, PERIOD_D1, PERIOD_W1, PERIOD_MN1};
+string g_unifiedKeys[6] = {"m1", "m5", "h1", "d1", "w1", "mn1"};
+string g_unifiedSymbols[];
+bool g_unifiedForex[];
+int g_unifiedHandles[];
+double g_unifiedAtrPercent[];
+string g_unifiedFrameState[];
+int g_unifiedFrameError[];
+int g_unifiedRetryCount[];
+datetime g_unifiedRetryAt[];
+int g_unifiedCursor = 0;
+string g_unifiedSignature = "";
+
+bool UnifiedIsCurrency(const string value)
+{
+   return value=="AUD" || value=="CAD" || value=="CHF" || value=="EUR" || value=="GBP" || value=="JPY" || value=="NZD" || value=="USD";
+}
+
+bool UnifiedIsForex(const string symbol)
+{
+   if(StringLen(symbol) < 6) return false;
+   string base=StringSubstr(symbol,0,3), quote=StringSubstr(symbol,3,3);
+   StringToUpper(base); StringToUpper(quote);
+   return UnifiedIsCurrency(base) && UnifiedIsCurrency(quote) && base != quote;
+}
+
+int UnifiedIndex(const int symbolIndex,const int frameIndex) { return symbolIndex*UNIFIED_FRAME_COUNT+frameIndex; }
+
+string UnifiedSignature()
+{
+   string value="";
+   for(int i=0;i<SymbolsTotal(true);i++) value += SymbolName(i,true)+"|";
+   return value;
+}
+
+void UnifiedReleaseHandles()
+{
+   for(int i=0;i<ArraySize(g_unifiedHandles);i++)
+      if(g_unifiedHandles[i] != INVALID_HANDLE) { IndicatorRelease(g_unifiedHandles[i]); g_unifiedHandles[i]=INVALID_HANDLE; }
+}
+
+void UnifiedRebuildUniverse()
+{
+   UnifiedReleaseHandles();
+   int count=SymbolsTotal(true);
+   ArrayResize(g_unifiedSymbols,count); ArrayResize(g_unifiedForex,count);
+   int slots=count*UNIFIED_FRAME_COUNT;
+   ArrayResize(g_unifiedHandles,slots); ArrayResize(g_unifiedAtrPercent,slots); ArrayResize(g_unifiedFrameState,slots);
+   ArrayResize(g_unifiedFrameError,slots); ArrayResize(g_unifiedRetryCount,slots); ArrayResize(g_unifiedRetryAt,slots);
+   for(int i=0;i<count;i++)
+   {
+      g_unifiedSymbols[i]=SymbolName(i,true); g_unifiedForex[i]=UnifiedIsForex(g_unifiedSymbols[i]);
+      for(int f=0;f<UNIFIED_FRAME_COUNT;f++)
+      {
+         int slot=UnifiedIndex(i,f); g_unifiedHandles[slot]=INVALID_HANDLE; g_unifiedAtrPercent[slot]=0.0;
+         g_unifiedFrameState[slot]=g_unifiedForex[i]?"Loading":"N/A"; g_unifiedFrameError[slot]=0;
+         g_unifiedRetryCount[slot]=0; g_unifiedRetryAt[slot]=0;
+      }
+   }
+   g_unifiedCursor=0; g_unifiedSignature=UnifiedSignature();
+}
+
+void UnifiedScheduleRetry(const int slot,const string symbol,const int frameIndex,const int errorCode,const string reason)
+{
+   g_unifiedFrameError[slot]=errorCode; g_unifiedRetryCount[slot]++;
+   int waitSeconds=(int)MathMin(60,MathPow(2,MathMin(g_unifiedRetryCount[slot],5)));
+   g_unifiedRetryAt[slot]=TimeCurrent()+waitSeconds;
+   g_unifiedFrameState[slot]=(g_unifiedAtrPercent[slot]>0.0?"Stale":(errorCode==0?"Loading":"Error "+IntegerToString(errorCode)));
+   if(g_unifiedRetryCount[slot] <= 3)
+      Print(EA_COMMENT, ": ATR ", symbol, " ", g_unifiedKeys[frameIndex], " failed error=", IntegerToString(errorCode), " reason=", reason, " retry_seconds=", IntegerToString(waitSeconds));
+}
+
+void UnifiedRefreshFrame(const int symbolIndex,const int frameIndex)
+{
+   if(!g_unifiedForex[symbolIndex]) return;
+   int slot=UnifiedIndex(symbolIndex,frameIndex); string symbol=g_unifiedSymbols[symbolIndex];
+   if(TimeCurrent() < g_unifiedRetryAt[slot]) return;
+   long synchronized=0;
+   if(!SymbolSelect(symbol,true) || !SeriesInfoInteger(symbol,g_unifiedPeriods[frameIndex],SERIES_SYNCHRONIZED,synchronized) || synchronized==0 || Bars(symbol,g_unifiedPeriods[frameIndex]) < MathMax(20,UnifiedATRLength+2))
+   {
+      UnifiedScheduleRetry(slot,symbol,frameIndex,0,"series not synchronized or insufficient bars"); return;
+   }
+   if(g_unifiedHandles[slot] == INVALID_HANDLE)
+   {
+      ResetLastError(); g_unifiedHandles[slot]=iATR(symbol,g_unifiedPeriods[frameIndex],MathMax(2,MathMin(100,UnifiedATRLength)));
+      if(g_unifiedHandles[slot] == INVALID_HANDLE)
+      {
+         int errorCode=GetLastError(); UnifiedScheduleRetry(slot,symbol,frameIndex,errorCode,"iATR handle creation failed"); return;
+      }
+   }
+   double buffer[1]; ResetLastError();
+   int copied=CopyBuffer(g_unifiedHandles[slot],0,1,1,buffer); double close=iClose(symbol,g_unifiedPeriods[frameIndex],1);
+   if(copied != 1 || buffer[0] <= 0.0 || close <= 0.0)
+   {
+      int errorCode=GetLastError();
+      if(errorCode != 0) { IndicatorRelease(g_unifiedHandles[slot]); g_unifiedHandles[slot]=INVALID_HANDLE; }
+      UnifiedScheduleRetry(slot,symbol,frameIndex,errorCode,"closed-candle ATR/close unavailable"); return;
+   }
+   g_unifiedAtrPercent[slot]=(buffer[0]/close)*100.0; g_unifiedFrameState[slot]="Ready";
+   g_unifiedFrameError[slot]=0; g_unifiedRetryCount[slot]=0; g_unifiedRetryAt[slot]=0;
+}
+
+void UnifiedProcessBatch()
+{
+   int count=ArraySize(g_unifiedSymbols); if(count<=0) return;
+   int batch=MathMax(1,MathMin(50,UnifiedSymbolsPerTimer));
+   for(int n=0;n<batch;n++)
+   {
+      int index=g_unifiedCursor%count;
+      for(int f=0;f<UNIFIED_FRAME_COUNT;f++) UnifiedRefreshFrame(index,f);
+      g_unifiedCursor=(g_unifiedCursor+1)%count;
+   }
+}
+
+bool UnifiedExportFeed()
+{
+   int handle=FileOpen(UnifiedMarketWatchFileName,FILE_WRITE|FILE_TXT|FILE_ANSI|FILE_COMMON);
+   if(handle==INVALID_HANDLE) { Print(EA_COMMENT, ": unified feed open failed error=",IntegerToString(GetLastError())); return false; }
+   string json="{\r\n  \"name\":\"MarketWatchUnifiedFeed\",\r\n  \"generated_at\":\""+IsoTimeUTC(TimeGMT())+"\",\r\n  \"atr_length\":"+IntegerToString(UnifiedATRLength)+",\r\n  \"symbols\":[\r\n";
+   for(int i=0;i<ArraySize(g_unifiedSymbols);i++)
+   {
+      string symbol=g_unifiedSymbols[i]; MqlTick tick; double point=SymbolInfoDouble(symbol,SYMBOL_POINT);
+      bool spreadOk=SymbolInfoTick(symbol,tick) && tick.bid>0.0 && tick.ask>=tick.bid && point>0.0;
+      double midpoint=spreadOk?(tick.ask+tick.bid)/2.0:0.0;
+      double spreadPct=(spreadOk && midpoint>0.0)?((tick.ask-tick.bid)/midpoint)*100.0:0.0;
+      double spreadPoints=spreadOk?(tick.ask-tick.bid)/point:0.0;
+      if(i>0) json+=",\r\n";
+      json+="    {\"symbol\":\""+JsonEscape(symbol)+"\",\"is_forex\":"+(g_unifiedForex[i]?"true":"false")+",\"status\":\""+(g_unifiedForex[i]?"Ready":"N/A")+"\",\"reason\":\""+(g_unifiedForex[i]?"":"ATR not applicable")+"\",\"spread_percent\":"+(spreadOk?DoubleToString(spreadPct,10):"null")+",\"spread_points\":"+(spreadOk?DoubleToString(spreadPoints,2):"null");
+      for(int f=0;f<UNIFIED_FRAME_COUNT;f++)
+      {
+         int slot=UnifiedIndex(i,f);
+         json+=",\"atr_percent_"+g_unifiedKeys[f]+"\":"+(g_unifiedAtrPercent[slot]>0.0?DoubleToString(g_unifiedAtrPercent[slot],10):"null");
+         json+=",\"state_"+g_unifiedKeys[f]+"\":\""+g_unifiedFrameState[slot]+"\",\"error_"+g_unifiedKeys[f]+"\":"+IntegerToString(g_unifiedFrameError[slot]);
+      }
+      json+="}";
+   }
+   json+="\r\n  ]\r\n}\r\n"; FileWriteString(handle,json); FileClose(handle); return true;
+}
+
+string UnifiedQuote(const string value) { string escaped=value; StringReplace(escaped,"\"","\\\""); return "\""+escaped+"\""; }
+
+void UnifiedLaunchWindow()
+{
+   if(!LaunchUnifiedMarketWatchWindow) return;
+   string feedPath=TerminalInfoString(TERMINAL_COMMONDATA_PATH)+"\\Files\\"+UnifiedMarketWatchFileName;
+   string parameters=UnifiedQuote(UnifiedWindowScriptPath)+" --file "+UnifiedQuote(feedPath)+" --refresh-ms 500 --decimals 5 --top-n 10 --rank-timeframe 1m";
+   long result=ShellExecuteW(0,"open",UnifiedPythonExecutable,parameters,"",1);
+   if(result<=32) Print(EA_COMMENT, ": unified desktop window launch failed code=",IntegerToString((int)result));
+}
+
+void UnifiedMarketWatchInit() { if(!EnableUnifiedMarketWatch) return; UnifiedRebuildUniverse(); UnifiedProcessBatch(); UnifiedExportFeed(); UnifiedLaunchWindow(); }
+void UnifiedMarketWatchTimer()
+{
+   if(!EnableUnifiedMarketWatch) return;
+   if(UnifiedSignature()!=g_unifiedSignature) UnifiedRebuildUniverse();
+   UnifiedProcessBatch(); UnifiedExportFeed();
+}
 
 void Dbg(const string msg){ if(Debug) Print(EA_COMMENT, ": ", msg); }
 bool PlaceOrReplacePendingLimitAtEntry(const bool isBuyLimit,
@@ -1666,6 +1854,7 @@ int OnInit()
    Print(EA_COMMENT, ": TERMINAL_DATA_PATH=", TerminalInfoString(TERMINAL_DATA_PATH));
    Print(EA_COMMENT, ": Expected fallback MQL5\\Files path=", TerminalInfoString(TERMINAL_DATA_PATH), "\\MQL5\\Files\\", FileNameOnly(PepperstoneSpreadExportPath));
    MaybeExportPepperstoneSpreads(true);
+   UnifiedMarketWatchInit();
 
    RefreshTrendlineNameFromInputs();
 
@@ -1714,7 +1903,8 @@ int OnInit()
    }
    else if(Strategy == STRAT_STANDARD_MARKET)
    {
-      ExecuteStandardMarketOnce();
+      Print(EA_COMMENT, ": Standard Market loaded for ", _Symbol, ". Review account/side and click EXECUTE; no automatic order is sent.");
+      RefreshStandardMarketExecuteButton();
    }
    else
    {
@@ -1731,6 +1921,14 @@ void OnDeinit(const int reason)
    if(hFast  != INVALID_HANDLE) IndicatorRelease(hFast);
    if(hSlow  != INVALID_HANDLE) IndicatorRelease(hSlow);
    if(hTrend != INVALID_HANDLE) IndicatorRelease(hTrend);
+   UnifiedReleaseHandles();
+   ObjectDelete(0, STANDARD_MARKET_EXECUTE_BUTTON);
+}
+
+void OnChartEvent(const int id, const long &lparam, const double &dparam, const string &sparam)
+{
+   if(id == CHARTEVENT_OBJECT_CLICK && sparam == STANDARD_MARKET_EXECUTE_BUTTON && Strategy == STRAT_STANDARD_MARKET)
+      ExecuteStandardMarketOnce();
 }
 
 void OnTick()
@@ -1811,6 +2009,7 @@ void OnTick()
 void OnTimer()
 {
    MaybeExportPepperstoneSpreads();
+   UnifiedMarketWatchTimer();
 
    // Mirrors OnTick gating so cancel happens even with no ticks
    if(Strategy == STRAT_STANDARD_LIMIT)

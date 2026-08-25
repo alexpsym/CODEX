@@ -55,7 +55,8 @@ TARGET_RECOMMENDATION_HEADER = "Target Recommendation"
 RECOMMENDATION_DISPLAY_HEADER = "Recommendation"
 TARGET_RECOMMENDATION_NO_WINS = "No eligible winning trades"
 TARGET_RECOMMENDATION_NO_LOSSES = "No eligible losing trades"
-TARGET_R_RECOMMENDATION_FLOOR = Decimal("1.50")
+# Recommendations are prospective controls, never a rewrite of historical targets.
+TARGET_R_RECOMMENDATION_FLOOR = Decimal("2.00")
 # Backward-compatible alias for callers that still import the old name.
 TARGET_RECOMMENDATION_INSUFFICIENT = ""
 RECOMMENDATION_REASON_TEXT = {
@@ -3378,6 +3379,7 @@ def _finalize_target_r_recommendation_decimal(
     realized_decimal_values: List[Decimal],
     direction: str,
 ) -> Tuple[Decimal, str, str]:
+    was_floor_clamped = recommended_r_decimal < TARGET_R_RECOMMENDATION_FLOOR
     recommended = max(recommended_r_decimal, TARGET_R_RECOMMENDATION_FLOOR)
     recommended_display = _target_r_display_decimal(recommended)
     current_display = _target_r_display_decimal(current_median_decimal) if current_median_decimal is not None else None
@@ -3385,6 +3387,13 @@ def _finalize_target_r_recommendation_decimal(
         return recommended, direction, ""
     if current_display is None:
         return recommended, "Increase target", "missing_current_display"
+
+    # A floor is a safety rule, not an excuse to fabricate a 2.01R actionable
+    # adjustment.  In particular, a current 2R median remains an unchanged 2R.
+    if was_floor_clamped and recommended_display == TARGET_R_RECOMMENDATION_FLOOR:
+        if current_display == TARGET_R_RECOMMENDATION_FLOOR:
+            return recommended, "Target unchanged", "floor_matches_current_display"
+        return recommended, ("Increase target" if recommended_display > current_display else "Decrease target"), "floor_clamped"
 
     if recommended_display > current_display:
         return recommended, "Increase target", "display_actionable"
@@ -12207,6 +12216,13 @@ def _set_cell_horizontal_alignment(cell, horizontal: str) -> None:
 
 
 def _apply_workbook_left_alignment(wb) -> None:
+    """Left-align populated Trade Log data only.
+
+    STATS1 and the other presentation sheets are user-owned; changing their
+    General alignment would silently restyle a manually curated workbook.
+    """
+    ws = _get_trade_log_sheet(wb, allow_legacy=False)
+    data_start = _trade_log_data_start_row(ws)
     left_alignment_id_by_source: Dict[int, int] = {}
 
     def left_alignment_id(source_id: int) -> int:
@@ -12223,16 +12239,17 @@ def _apply_workbook_left_alignment(wb) -> None:
         return target_id
 
     default_left_alignment = Alignment(horizontal="left")
-    for ws in wb.worksheets:
-        non_anchor_cells = {
+    non_anchor_cells = {
             (row, col)
             for merged in ws.merged_cells.ranges
             for row in range(merged.min_row, merged.max_row + 1)
             for col in range(merged.min_col, merged.max_col + 1)
             if not (row == merged.min_row and col == merged.min_col)
-        }
-        style_cache: Dict[Tuple[int, ...], Any] = {}
-        for (row, col), cell in list(ws._cells.items()):
+    }
+    style_cache: Dict[Tuple[int, ...], Any] = {}
+    for (row, col), cell in list(ws._cells.items()):
+            if row < data_start:
+                continue
             if (row, col) in non_anchor_cells:
                 continue
             if cell.value in (None, ""):
@@ -16444,7 +16461,8 @@ def update_master_journal_workbook_data_only(
             _ensure_dashboard_move_duration_rows(dash, diagnostics)
             _ensure_dashboard_requested_metric_rows(dash, diagnostics)
             _ensure_dashboard_extended_layout(dash, diagnostics)
-        _remove_stats1_generated_source_rows(dash, diagnostics)
+        if not preserve_existing_layout:
+            _remove_stats1_generated_source_rows(dash, diagnostics)
 
         stats = snapshot.get("stats") or {}
         existing_manual_overrides = read_master_journal_manual_overrides(path) if path.exists() else {}
@@ -17777,7 +17795,7 @@ def update_master_journal_workbook_data_only(
                     ) and coordinate[0] >= 2:
                         managed_statistics_cell = coordinate[0] in report_managed_rows
 
-                    if managed_statistics_cell:
+                    if managed_statistics_cell and sheet_name != STATS1_SHEET:
                         # User-owned presentation survives, while number formats
                         # and semantic fills remain generator-owned.  Restore
                         # component ids directly so duplicate-but-equivalent
@@ -17835,19 +17853,6 @@ def update_master_journal_workbook_data_only(
                             )
                         ):
                             cell.comment = None
-            _sanitize_dashboard_semantic_conditional_formatting(dash)
-            _apply_stats1_semantic_formatting(
-                dash,
-                extended_metrics,
-                diagnostics,
-            )
-            removed_orphan_fills = (
-                _remove_orphan_dashboard_semantic_fill_cells(dash)
-            )
-            if removed_orphan_fills:
-                diagnostics[
-                    "removed_orphan_stats1_semantic_fill_cells"
-                ] = removed_orphan_fills
             _apply_report_workbook_semantic_presentation(wb, diagnostics)
         if preserve_existing_layout:
             trade_log = _get_all_trades_sheet(wb, allow_legacy=False)
@@ -17907,8 +17912,8 @@ def update_master_journal_workbook_data_only(
             diagnostics.update(formula_cache_diagnostics)
         if STATS2_SHEET in wb.sheetnames:
             _repair_stats2_account_balance_formatting(wb[STATS2_SHEET], diagnostics)
+        _apply_workbook_left_alignment(wb)
         if not preserve_existing_layout:
-            _apply_workbook_left_alignment(wb)
             _repair_stats1_child_label_styles(dash, diagnostics)
             _repair_stats2_as_of_datetime_style(wb, diagnostics)
         if not preserve_existing_layout:

@@ -171,8 +171,11 @@ def test_mql5_trader_resolves_pepperstone_dot_suffix_symbols():
 
 def test_mql5_trader_standard_market_is_live_quote_anchored_and_terminal_token_gated():
     trader = (ROOT / "mt5-clone" / "MQL5" / "Experts" / "Trader.mq5").read_text(encoding="utf-8")
+    unified_window = (ROOT / "mt5-clone" / "atr_percent_window.py").read_text(encoding="utf-8")
     market = trader.split("bool ExecuteStandardMarketOnce()", 1)[1].split("void CancelAllPendingByMagic()", 1)[0]
     consume = trader.split("bool ConsumeStandardMarketToken", 1)[1].split("bool ExecuteStandardMarketOnce()", 1)[0]
+    on_init = trader.split("int OnInit()", 1)[1].split("void OnDeinit", 1)[0]
+    chart_event = trader.split("void OnChartEvent", 1)[1].split("void OnTick", 1)[0]
 
     assert "STRAT_STANDARD_MARKET = 3" in trader
     assert "input StandardMarketDirection StandardMarketSide" in trader
@@ -203,7 +206,21 @@ def test_mql5_trader_standard_market_is_live_quote_anchored_and_terminal_token_g
     assert 'LogStandardMarketOutcome("rejected"' in market
     assert "token_fp=" in trader
     assert trader.count("ExecuteStandardMarketOnce();") == 1
+    assert "ExecuteStandardMarketOnce();" not in on_init
+    assert "ExecuteStandardMarketOnce();" in chart_event
+    assert "STANDARD_MARKET_EXECUTE_BUTTON" in chart_event
     assert "if(Strategy == STRAT_STANDARD_MARKET) return;" in trader
+    assert "MarketWatchUnifiedFeed.json" in trader
+    assert "SymbolsTotal(true)" in trader and "SymbolName(i,true)" in trader
+    assert "PERIOD_M1, PERIOD_M5, PERIOD_H1, PERIOD_D1, PERIOD_W1, PERIOD_MN1" in trader
+    assert "SeriesInfoInteger(symbol,g_unifiedPeriods[frameIndex],SERIES_SYNCHRONIZED" in trader
+    assert "iATR(symbol,g_unifiedPeriods[frameIndex]" in trader
+    assert "IndicatorRelease(g_unifiedHandles[slot])" in trader
+    assert "UnifiedScheduleRetry" in trader and "MathMin(60" in trader
+    assert "UnifiedMarketWatchTimer();" in trader
+    assert '"spread_percent"' in unified_window and '"spread_points"' in unified_window
+    assert "def _toggle_sort" in unified_window and "def _sorted_rows" in unified_window
+    assert "self.sort_column" in unified_window and "self.sort_desc" in unified_window
 
 
 def test_mql5_trader_standard_limit_retries_transient_failures_without_duplicate_send():

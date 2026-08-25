@@ -8,6 +8,7 @@ import json
 import locale
 import math
 import os
+import socket
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -66,6 +67,8 @@ class ATRRow:
     reason: str
     atr_percent: Mapping[str, float | None]
     frame_states: Mapping[str, str]
+    spread_percent: float | None = None
+    spread_points: float | None = None
 
 
 def optional_positive_float(value: Any) -> float | None:
@@ -103,11 +106,23 @@ def parse_feed_rows(feed: Mapping[str, Any]) -> list[ATRRow]:
                 is_forex=raw.get("is_forex") is True,
                 status=str(raw.get("status") or "Unknown"),
                 reason=str(raw.get("reason") or ""),
+                spread_percent=optional_nonnegative_float(raw.get("spread_percent", raw.get("spread_pct"))),
+                spread_points=optional_nonnegative_float(raw.get("spread_points")),
                 atr_percent=values,
                 frame_states=states,
             )
         )
     return parsed
+
+
+def optional_nonnegative_float(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) and parsed >= 0.0 else None
 
 
 def rank_rows(rows: list[ATRRow], timeframe: str = "1m", top_n: int = 10) -> list[ATRRow]:
@@ -172,12 +187,14 @@ class ATRPercentWindow:
         self.decimals = clamp(args.decimals, 0, 8)
         self.font_size = clamp(args.font_size, 8, 22)
         self.rows: list[ATRRow] = []
+        self.sort_column = "symbol"
+        self.sort_desc = False
         self.last_good_feed: dict[str, Any] | None = None
         self.rank_timeframe = tk.StringVar(value=args.rank_timeframe if args.rank_timeframe in TIMEFRAME_KEYS else "1m")
         self.top_n = tk.IntVar(value=clamp(args.top_n, 1, 100))
 
-        self.root.title("Market Watch Forex ATR %")
-        self.root.geometry("1120x660")
+        self.root.title("Unified MT5 Market Watch — Spread and ATR %")
+        self.root.geometry("1420x700")
         self.root.minsize(820, 360)
 
         self._build_styles()
@@ -230,10 +247,10 @@ class ATRPercentWindow:
         notebook.grid(row=1, column=0, sticky="nsew")
         ranked_frame = ttk.Frame(notebook)
         diagnostic_frame = ttk.Frame(notebook)
-        notebook.add(ranked_frame, text="Ranked forex")
-        notebook.add(diagnostic_frame, text="Diagnostics / unavailable")
-        self.ranked_tree = self._build_tree(ranked_frame, include_rank=True)
-        self.diagnostic_tree = self._build_tree(diagnostic_frame, include_rank=False)
+        notebook.add(ranked_frame, text="All Market Watch")
+        notebook.add(diagnostic_frame, text="ATR ranking")
+        self.ranked_tree = self._build_tree(ranked_frame, include_rank=False)
+        self.diagnostic_tree = self._build_tree(diagnostic_frame, include_rank=True)
 
         self.status_var = tk.StringVar(value="Loading ATR feed...")
         ttk.Label(frame, textvariable=self.status_var, style="ATR.Status.TLabel", anchor="w").grid(
@@ -243,15 +260,19 @@ class ATRPercentWindow:
     def _build_tree(self, parent: ttk.Frame, *, include_rank: bool) -> ttk.Treeview:
         parent.columnconfigure(0, weight=1)
         parent.rowconfigure(0, weight=1)
-        columns = (["rank"] if include_rank else []) + ["symbol"] + [key for _label, key in TIMEFRAMES] + ["status"]
+        columns = (["rank"] if include_rank else []) + ["symbol", "spread_percent", "spread_points"] + [key for _label, key in TIMEFRAMES] + ["status"]
         tree = ttk.Treeview(parent, columns=columns, show="headings", style="ATR.Treeview")
         if include_rank:
             tree.heading("rank", text="Rank")
             tree.column("rank", width=54, minwidth=48, anchor="e", stretch=False)
-        tree.heading("symbol", text="Instrument")
+        tree.heading("symbol", text="Instrument", command=lambda: self._toggle_sort("symbol"))
         tree.column("symbol", width=150, minwidth=110, anchor="w", stretch=True)
+        tree.heading("spread_percent", text="Spread %", command=lambda: self._toggle_sort("spread_percent"))
+        tree.column("spread_percent", width=105, minwidth=85, anchor="e", stretch=False)
+        tree.heading("spread_points", text="Spread points", command=lambda: self._toggle_sort("spread_points"))
+        tree.column("spread_points", width=110, minwidth=90, anchor="e", stretch=False)
         for label, key in TIMEFRAMES:
-            tree.heading(key, text=f"ATR% {label}")
+            tree.heading(key, text=f"ATR% {label}", command=lambda selected=label: self._toggle_sort(selected))
             tree.column(key, width=100, minwidth=82, anchor="e", stretch=False)
         tree.heading("status", text="Status / reason")
         tree.column("status", width=260, minwidth=180, anchor="w", stretch=True)
@@ -265,6 +286,36 @@ class ATRPercentWindow:
         y_scroll.grid(row=0, column=1, sticky="ns")
         x_scroll.grid(row=1, column=0, sticky="ew")
         return tree
+
+    def _toggle_sort(self, column: str) -> None:
+        if self.sort_column == column:
+            self.sort_desc = not self.sort_desc
+        else:
+            self.sort_column = column
+            self.sort_desc = column != "symbol"
+        self._update_headings()
+        self._render_rows()
+
+    def _update_headings(self) -> None:
+        labels = {"symbol": "Instrument", "spread_percent": "Spread %", "spread_points": "Spread points", **{label: f"ATR% {label}" for label in TIMEFRAME_LABELS}}
+        keys = {"symbol": "symbol", "spread_percent": "spread_percent", "spread_points": "spread_points", **{label: TIMEFRAME_KEYS[label] for label in TIMEFRAME_LABELS}}
+        suffix = " ↓" if self.sort_desc else " ↑"
+        for tree in (self.ranked_tree, self.diagnostic_tree):
+            for column, label in labels.items():
+                tree.heading(keys[column], text=label + (suffix if self.sort_column == column else ""), command=lambda selected=column: self._toggle_sort(selected))
+
+    def _sorted_rows(self, rows: list[ATRRow]) -> list[ATRRow]:
+        if self.sort_column == "symbol":
+            return sorted(rows, key=lambda row: (row.symbol.casefold(), row.symbol), reverse=self.sort_desc)
+        def value(row: ATRRow) -> float | None:
+            if self.sort_column == "spread_percent": return row.spread_percent
+            if self.sort_column == "spread_points": return row.spread_points
+            return row.atr_percent.get(self.sort_column)
+        valid = [row for row in rows if value(row) is not None]
+        invalid = [row for row in rows if value(row) is None]
+        valid.sort(key=lambda row: float(value(row) or 0.0), reverse=self.sort_desc)
+        invalid.sort(key=lambda row: (row.symbol.casefold(), row.symbol))
+        return valid + invalid
 
     def _controls_changed(self, _event: object | None = None) -> None:
         self._render_rows()
@@ -336,7 +387,7 @@ class ATRPercentWindow:
         return "N/A" if value is None else f"{value:.{self.decimals}f}%"
 
     def _row_values(self, row: ATRRow, rank: int | None) -> tuple[str, ...]:
-        values = ([] if rank is None else [str(rank)]) + [row.symbol]
+        values = ([] if rank is None else [str(rank)]) + [row.symbol, self._format_percent(row.spread_percent), "N/A" if row.spread_points is None else f"{row.spread_points:.2f}"]
         values.extend(self._format_percent(row.atr_percent.get(label)) for label in TIMEFRAME_LABELS)
         state = row.status
         selected_state = row.frame_states.get(self.rank_timeframe.get(), "N/A")
@@ -370,15 +421,22 @@ class ATRPercentWindow:
         if timeframe not in TIMEFRAME_KEYS:
             timeframe = "1m"
             self.rank_timeframe.set(timeframe)
-        ranked = rank_rows(self.rows, timeframe, self._safe_top_n())
-        diagnostics = diagnostic_rows(self.rows, timeframe)
-        self._replace_tree_rows(self.ranked_tree, ranked, ranked=True)
-        self._replace_tree_rows(self.diagnostic_tree, diagnostics, ranked=False)
+        all_rows = self._sorted_rows(self.rows)
+        ranked = self._sorted_rows(rank_rows(self.rows, timeframe, self._safe_top_n()))
+        self._replace_tree_rows(self.ranked_tree, all_rows, ranked=False)
+        self._replace_tree_rows(self.diagnostic_tree, ranked, ranked=True)
 
 
 def main(argv: list[str] | None = None) -> None:
+    singleton = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        singleton.bind(("127.0.0.1", 41973))
+        singleton.listen(1)
+    except OSError:
+        return
     args = parse_args(argv)
     root = tk.Tk()
+    root._unified_market_watch_singleton = singleton  # keep the process lock for the window lifetime
     ATRPercentWindow(root, args)
     root.mainloop()
 

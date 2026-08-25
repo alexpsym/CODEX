@@ -48,6 +48,17 @@ def test_local_build_file_lists_match_launcher_preflight() -> None:
     assert _launcher_build_files() == expected
 
 
+def test_local_html_pages_receive_exit_control_only_in_local_profile(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = TestClient(master_service.app)
+    monkeypatch.setattr(master_service, "_resolve_app_profile", lambda: "local")
+    local = client.get("/instrument-lookup")
+    assert local.status_code == 200
+    assert 'id="local-exit-control"' in local.text
+    monkeypatch.setattr(master_service, "_resolve_app_profile", lambda: "render")
+    public = client.get("/instrument-lookup")
+    assert 'id="local-exit-control"' not in public.text
+
+
 def test_local_source_stamp_tracks_dashboard_history_and_atr_scanner(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     build_files = (
         "render/master_service.py",

@@ -914,15 +914,22 @@ MANUAL_SAVE_GITHUB_SYNC_STATE: Dict[str, object] = {
     "manual_save_last_detected_save_at": None,
     "manual_save_last_attempt_at": None,
     "manual_save_last_success_at": None,
+    "manual_save_last_push_at": None,
     "manual_save_last_error": "",
+    "manual_save_last_error_type": "",
     "manual_save_last_commit": "",
     "manual_save_last_files": [],
+    "manual_save_pending": False,
+    "manual_save_retry_count": 0,
+    "manual_save_next_retry_at": None,
 }
 _MANUAL_SAVE_WATCHER_THREAD: Optional[threading.Thread] = None
 _MANUAL_SAVE_WATCHER_STOP = threading.Event()
 _MANUAL_SAVE_KNOWN_FINGERPRINT = None
 _MANUAL_SAVE_PENDING_FINGERPRINT = None
 _MANUAL_SAVE_PENDING_SINCE = None
+_MANUAL_SAVE_RETRY_COUNT = 0
+_MANUAL_SAVE_NEXT_RETRY_AT = 0.0
 
 def _manual_save_watcher_enabled() -> bool:
     raw = str(os.getenv("TRADING_JOURNAL_GITHUB_SYNC_ON_MANUAL_SAVE_ENABLED", "") or "").strip().lower()
@@ -963,14 +970,18 @@ def _run_manual_save_github_sync_once(master_path: Path) -> Dict[str, object]:
     enabled=bool((res or {}).get('github_sync_enabled'))
     ok=bool((res or {}).get('github_sync_ok'))
     noop=bool((res or {}).get('github_sync_noop'))
+    verified=bool((res or {}).get('github_sync_verified'))
     if not enabled:
         err = err or 'GitHub sync is disabled.'
-    success_at = _utc_now_iso() if (enabled and ok and not noop and not err) else None
+    successful = enabled and ok and not err and (not noop or verified)
+    success_at = _utc_now_iso() if successful else None
     _manual_save_state_update(
         manual_save_last_error=err,
+        manual_save_last_error_type=str((res or {}).get('github_sync_error_type') or ''),
         manual_save_last_commit=str((res or {}).get('github_sync_commit') or ''),
         manual_save_last_files=list((res or {}).get('github_sync_files') or []),
         manual_save_last_success_at=success_at,
+        manual_save_last_push_at=(success_at if successful and not noop else MANUAL_SAVE_GITHUB_SYNC_STATE.get("manual_save_last_push_at")),
     )
     return res
 
@@ -987,6 +998,7 @@ def _manual_save_known_fingerprint():
 
 def _manual_save_scan_once(now: float, master_path: Path | None = None) -> None:
     global _MANUAL_SAVE_PENDING_FINGERPRINT, _MANUAL_SAVE_PENDING_SINCE, _MANUAL_SAVE_KNOWN_FINGERPRINT
+    global _MANUAL_SAVE_RETRY_COUNT, _MANUAL_SAVE_NEXT_RETRY_AT
     master_path = master_path or _master_journal_path()
     if _should_ignore_manual_save_path(master_path) or not master_path.exists():
         return
@@ -996,11 +1008,15 @@ def _manual_save_scan_once(now: float, master_path: Path | None = None) -> None:
         return
     if fp == _MANUAL_SAVE_KNOWN_FINGERPRINT:
         _MANUAL_SAVE_PENDING_FINGERPRINT = None; _MANUAL_SAVE_PENDING_SINCE = None
+        _MANUAL_SAVE_RETRY_COUNT = 0; _MANUAL_SAVE_NEXT_RETRY_AT = 0.0
+        _manual_save_state_update(manual_save_pending=False, manual_save_retry_count=0, manual_save_next_retry_at=None)
         return
-    _manual_save_state_update(manual_save_last_detected_save_at=_utc_now_iso())
     if _MANUAL_SAVE_PENDING_FINGERPRINT != fp:
         _MANUAL_SAVE_PENDING_FINGERPRINT = fp
         _MANUAL_SAVE_PENDING_SINCE = now
+        _MANUAL_SAVE_RETRY_COUNT = 0
+        _MANUAL_SAVE_NEXT_RETRY_AT = 0.0
+        _manual_save_state_update(manual_save_last_detected_save_at=_utc_now_iso(), manual_save_pending=True, manual_save_retry_count=0, manual_save_next_retry_at=None)
         return
     if (now - float(_MANUAL_SAVE_PENDING_SINCE or now)) < _manual_save_watcher_debounce_seconds():
         return
@@ -1009,9 +1025,24 @@ def _manual_save_scan_once(now: float, master_path: Path | None = None) -> None:
         _MANUAL_SAVE_PENDING_FINGERPRINT = fp2
         _MANUAL_SAVE_PENDING_SINCE = now
         return
-    _run_manual_save_github_sync_once(master_path)
-    _MANUAL_SAVE_KNOWN_FINGERPRINT = fp2
-    _MANUAL_SAVE_PENDING_FINGERPRINT = None; _MANUAL_SAVE_PENDING_SINCE = None
+    if now < _MANUAL_SAVE_NEXT_RETRY_AT:
+        return
+    try:
+        result = _run_manual_save_github_sync_once(master_path)
+    except Exception as exc:
+        result = {"github_sync_enabled": True, "github_sync_ok": False, "github_sync_noop": False, "github_sync_error": str(exc), "github_sync_error_type": type(exc).__name__}
+        _manual_save_state_update(manual_save_last_attempt_at=_utc_now_iso(), manual_save_last_error=str(exc), manual_save_last_error_type=type(exc).__name__)
+    success = bool(result.get("github_sync_enabled")) and bool(result.get("github_sync_ok")) and not str(result.get("github_sync_error") or "") and (not bool(result.get("github_sync_noop")) or bool(result.get("github_sync_verified")))
+    if success:
+        _MANUAL_SAVE_KNOWN_FINGERPRINT = fp2
+        _MANUAL_SAVE_PENDING_FINGERPRINT = None; _MANUAL_SAVE_PENDING_SINCE = None
+        _MANUAL_SAVE_RETRY_COUNT = 0; _MANUAL_SAVE_NEXT_RETRY_AT = 0.0
+        _manual_save_state_update(manual_save_pending=False, manual_save_retry_count=0, manual_save_next_retry_at=None)
+        return
+    _MANUAL_SAVE_RETRY_COUNT += 1
+    retry_delay = min(60.0, max(1.0, 2.0 ** min(_MANUAL_SAVE_RETRY_COUNT - 1, 6)))
+    _MANUAL_SAVE_NEXT_RETRY_AT = now + retry_delay
+    _manual_save_state_update(manual_save_pending=True, manual_save_retry_count=_MANUAL_SAVE_RETRY_COUNT, manual_save_next_retry_at=datetime.fromtimestamp(_MANUAL_SAVE_NEXT_RETRY_AT, timezone.utc).isoformat())
 def _manual_save_github_sync_watcher_loop() -> None:
     master_path=_master_journal_path()
     if _should_ignore_manual_save_path(master_path):
@@ -12663,6 +12694,28 @@ class ScriptManager:
 
 script_manager = ScriptManager(discover_scripts())
 app = FastAPI(title="TradingTools", version="1.0")
+
+
+def _local_exit_control_html() -> str:
+    """Shared local-only control for every locally served HTML tool page."""
+    return '''<style id="local-exit-control-style">#local-exit-control{position:fixed;z-index:2147483647;top:10px;right:12px}#local-exit-control button{background:#7f1d1d;color:#fff;border:1px solid #fecaca;border-radius:6px;padding:7px 12px;font:600 13px system-ui;cursor:pointer}</style><div id="local-exit-control"><button type="button">Exit local tools</button></div><script id="local-exit-control-script">(()=>{const b=document.querySelector('#local-exit-control button');if(!b)return;b.onclick=async()=>{if(b.disabled)return;b.disabled=true;b.textContent='Exiting…';try{const r=await fetch('/api/local-exit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:location.href})});if(!r.ok)throw new Error(await r.text())}catch(e){b.disabled=false;b.textContent='Exit local tools';alert('Exit failed: '+(e.message||e))}}})()</script>'''
+
+
+@app.middleware("http")
+async def inject_local_exit_control(request: Request, call_next):
+    response = await call_next(request)
+    if not _is_local_exit_allowed() or request.url.path.startswith("/api/"):
+        return response
+    if "text/html" not in response.headers.get("content-type", "").lower():
+        return response
+    body = b"".join([chunk async for chunk in response.body_iterator])
+    page = body.decode("utf-8", errors="replace")
+    if "local-exit-control" not in page:
+        control = _local_exit_control_html()
+        page = page.replace("</body>", control + "</body>") if "</body>" in page else control + page
+    headers = dict(response.headers)
+    headers.pop("content-length", None)
+    return HTMLResponse(page, status_code=response.status_code, headers=headers)
 
 
 def _static_asset_version(relative_path: str) -> str:
@@ -35843,6 +35896,7 @@ def _sync_journal_excel_files_to_github(master_path: Path) -> Dict[str, object]:
         "github_sync_files": [],
         "github_sync_error": "",
         "github_sync_error_type": "",
+        "github_sync_verified": False,
     }
     if not enabled:
         return base
@@ -35866,6 +35920,19 @@ def _sync_journal_excel_files_to_github(master_path: Path) -> Dict[str, object]:
     base["github_sync_files"] = rel_files
     if not rel_files:
         return base
+    branch = requested_branch
+    if not branch:
+        code, out, err = _run_git_command(["rev-parse", "--abbrev-ref", "HEAD"], repo_root, timeout_s)
+        if code != 0:
+            return {**base, "github_sync_ok": False, "github_sync_noop": False, "github_sync_error": f"Failed to detect branch: {err.strip()}", "github_sync_error_type": "BranchDetectFailed"}
+        branch = out.strip()
+        if branch == "HEAD" or not branch:
+            return {**base, "github_sync_ok": False, "github_sync_noop": False, "github_sync_error": "Git branch is detached (HEAD); set TRADING_JOURNAL_GITHUB_SYNC_BRANCH.", "github_sync_error_type": "DetachedHead"}
+    base["github_sync_branch"] = branch
+    code, _, err = _run_git_command(["remote", "get-url", remote], repo_root, timeout_s)
+    if code != 0:
+        return {**base, "github_sync_ok": False, "github_sync_noop": False, "github_sync_error": f"Git remote '{remote}' is not configured: {err.strip()}", "github_sync_error_type": "RemoteMissing"}
+
     code, out, err = _run_git_command(
         [
             "status",
@@ -35880,19 +35947,17 @@ def _sync_journal_excel_files_to_github(master_path: Path) -> Dict[str, object]:
     if code != 0:
         return {**base, "github_sync_ok": False, "github_sync_noop": False, "github_sync_error": f"Failed to inspect journal changes: {err.strip()}", "github_sync_error_type": "GitStatusFailed"}
     if not out.strip():
-        return base
-    branch = requested_branch
-    if not branch:
-        code, out, err = _run_git_command(["rev-parse", "--abbrev-ref", "HEAD"], repo_root, timeout_s)
+        code, local_head, err = _run_git_command(["rev-parse", "HEAD"], repo_root, timeout_s)
         if code != 0:
-            return {**base, "github_sync_ok": False, "github_sync_noop": False, "github_sync_error": f"Failed to detect branch: {err.strip()}", "github_sync_error_type": "BranchDetectFailed"}
-        branch = out.strip()
-        if branch == "HEAD" or not branch:
-            return {**base, "github_sync_ok": False, "github_sync_noop": False, "github_sync_error": "Git branch is detached (HEAD); set TRADING_JOURNAL_GITHUB_SYNC_BRANCH.", "github_sync_error_type": "DetachedHead"}
-    base["github_sync_branch"] = branch
-    code, _, err = _run_git_command(["remote", "get-url", remote], repo_root, timeout_s)
-    if code != 0:
-        return {**base, "github_sync_ok": False, "github_sync_noop": False, "github_sync_error": f"Git remote '{remote}' is not configured: {err.strip()}", "github_sync_error_type": "RemoteMissing"}
+            return {**base, "github_sync_ok": False, "github_sync_noop": False, "github_sync_error": f"Failed to inspect local HEAD: {err.strip()}", "github_sync_error_type": "HeadInspectFailed"}
+        code, remote_out, err = _run_git_command(["ls-remote", "--heads", remote, f"refs/heads/{branch}"], repo_root, timeout_s)
+        remote_head = remote_out.split()[0] if code == 0 and remote_out.split() else ""
+        if code == 0 and remote_head == local_head.strip():
+            return {**base, "github_sync_verified": True}
+        code, _, err = _run_git_command(["push", remote, f"HEAD:{branch}"], repo_root, timeout_s)
+        if code != 0:
+            return {**base, "github_sync_ok": False, "github_sync_noop": False, "github_sync_error": f"Git push retry failed: {err.strip()}", "github_sync_error_type": "GitPushFailed"}
+        return {**base, "github_sync_noop": False, "github_sync_verified": True, "github_sync_commit": local_head.strip()[:12]}
     code, _, err = _run_git_command(["add", "-A", "--", *rel_files], repo_root, timeout_s)
     if code != 0:
         return {**base, "github_sync_ok": False, "github_sync_noop": False, "github_sync_error": f"Git add failed: {err.strip()}", "github_sync_error_type": "GitAddFailed"}
@@ -35906,10 +35971,15 @@ def _sync_journal_excel_files_to_github(master_path: Path) -> Dict[str, object]:
         return {**base, "github_sync_ok": False, "github_sync_noop": False, "github_sync_error": f"Git commit failed: {err.strip()}", "github_sync_error_type": "GitCommitFailed"}
     code, out, err = _run_git_command(["rev-parse", "--short", "HEAD"], repo_root, timeout_s)
     commit = out.strip() if code == 0 else ""
-    code, _, err = _run_git_command(["push", remote, branch], repo_root, timeout_s)
+    code, _, err = _run_git_command(["push", remote, f"HEAD:{branch}"], repo_root, timeout_s)
     if code != 0:
         return {**base, "github_sync_ok": False, "github_sync_noop": False, "github_sync_commit": commit, "github_sync_error": f"Git push failed: {err.strip()}", "github_sync_error_type": "GitPushFailed"}
-    return {**base, "github_sync_ok": True, "github_sync_noop": False, "github_sync_commit": commit}
+    code, remote_out, verify_err = _run_git_command(["ls-remote", "--heads", remote, f"refs/heads/{branch}"], repo_root, timeout_s)
+    remote_head = remote_out.split()[0] if code == 0 and remote_out.split() else ""
+    code_head, local_head, _ = _run_git_command(["rev-parse", "HEAD"], repo_root, timeout_s)
+    if code != 0 or code_head != 0 or remote_head != local_head.strip():
+        return {**base, "github_sync_ok": False, "github_sync_noop": False, "github_sync_commit": commit, "github_sync_error": f"Push verification failed: {verify_err.strip() or 'origin branch does not match local HEAD'}", "github_sync_error_type": "GitPushVerificationFailed"}
+    return {**base, "github_sync_ok": True, "github_sync_noop": False, "github_sync_verified": True, "github_sync_commit": commit}
 
 
 
@@ -35956,19 +36026,6 @@ def _repair_stats1_recommendation_rows_for_excel_open(wb: object, diagnostics: D
         diagnostics["stats1_recommendation_repair_error"] = str(exc)
         return
 
-    layout_diagnostics: Dict[str, Any] = {}
-    try:
-        _ensure_dashboard_requested_metric_rows(ws, layout_diagnostics)
-    except Exception as exc:
-        diagnostics["stats1_recommendation_layout_error"] = str(exc)
-        return
-    inserted = layout_diagnostics.get("inserted_dashboard_metric_rows") or []
-    if inserted:
-        diagnostics["stats1_inserted_metric_rows"] = inserted
-    inserted_sources = layout_diagnostics.get("inserted_dashboard_source_rows") or []
-    if inserted_sources:
-        diagnostics["stats1_inserted_source_rows"] = inserted_sources
-
     market_cols = _stats1_market_columns(ws)
     if not {"overall", "fx", "crypto"}.issubset(market_cols):
         diagnostics["stats1_recommendation_repair_warning"] = "Stats 1 market columns were not found."
@@ -36000,15 +36057,6 @@ def _repair_stats1_recommendation_rows_for_excel_open(wb: object, diagnostics: D
             return None
         row = anchor + 1
         if row <= ws.max_row and label_at(row).casefold() == "source":
-            row += 1
-        elif row <= ws.max_row and not label_at(row) and any(
-            ws.cell(row, col).value not in (None, "") for col in market_cols.values()
-        ):
-            try:
-                ws.cell(row, 1).value = "Source"
-                diagnostics["stats1_source_rows_labeled"] = int(diagnostics.get("stats1_source_rows_labeled") or 0) + 1
-            except AttributeError:
-                diagnostics["stats1_merged_source_rows_seen"] = int(diagnostics.get("stats1_merged_source_rows_seen") or 0) + 1
             row += 1
         return row if row <= ws.max_row and label_at(row).casefold() == "recommendation" else None
 
@@ -36048,18 +36096,7 @@ def _repair_stats1_recommendation_rows_for_excel_open(wb: object, diagnostics: D
     if repaired:
         diagnostics["stats1_recommendation_cells_repaired"] = repaired
 
-    removed_duplicates = 0
-    for row in reversed(range(2, first_winners_row)):
-        if label_at(row).casefold() != "recommendation":
-            continue
-        if label_at(row - 1).casefold() != "recommendation":
-            continue
-        if any(ws.cell(row, col).value not in (None, "") for col in market_cols.values()):
-            continue
-        ws.delete_rows(row, 1)
-        removed_duplicates += 1
-    if removed_duplicates:
-        diagnostics["stats1_duplicate_recommendation_rows_removed"] = removed_duplicates
+    # Never insert, delete, label, or restyle rows here. STATS1 layout is user-owned.
 
 
 def _polish_master_journal_for_excel_open(path: Path) -> Dict[str, object]:
