@@ -4,6 +4,7 @@ from copy import copy, deepcopy
 from datetime import date, datetime
 import calendar
 import hashlib
+from html import unescape
 import json
 import posixpath
 import shutil
@@ -460,7 +461,7 @@ def test_stats_and_symbols_fall_back_to_trade_rows_when_stats_are_empty(tmp_path
     wb.close()
 
 
-def test_preservation_update_keeps_full_stats1_presentation_and_authoritative_recommendations(tmp_path: Path):
+def test_preservation_update_keeps_full_stats1_presentation_and_authoritative_recommendations(tmp_path: Path, monkeypatch):
     """Regression: STATS1 is an authored dashboard, not a semantic template."""
     snapshot = sample_snapshot()
     fx_loss = dict(snapshot["items"][0])
@@ -470,6 +471,18 @@ def test_preservation_update_keeps_full_stats1_presentation_and_authoritative_re
     snapshot["items"].extend((fx_loss, crypto_win))
     path = tmp_path / "Trading Journal.xlsx"
     build_master_journal_workbook(snapshot, path, publish_recommendation_assets=False)
+    template = tmp_path / "existing-layout-template.xlsx"
+    shutil.copyfile(path, template)
+
+    # The data-only update itself is the unit under test.  Its internal fresh
+    # workbook build is only used as a non-STATS1 template source and accounts
+    # for most of this focused fixture's runtime, so reuse the equivalent
+    # already-built layout rather than perform a second unrelated full build.
+    monkeypatch.setattr(
+        mjw,
+        "build_master_journal_workbook",
+        lambda _snapshot, output_path, **_kwargs: shutil.copyfile(template, output_path),
+    )
 
     wb = load_workbook(path)
     try:
@@ -509,7 +522,7 @@ def test_preservation_update_keeps_full_stats1_presentation_and_authoritative_re
         assert after["stats1_presentation"] == before["stats1_presentation"]
         assert after["stats1_static_values"] == before["stats1_static_values"]
         stats1 = after_wb[STATS1_SHEET]
-        for market, col, filename in (
+        for market, col, scope in (
             ("overall", 2, "overall"), ("fx", 3, "fx"), ("crypto", 4, "crypto"),
         ):
             expected = mjw._distance_recommendation_summary(
@@ -520,11 +533,29 @@ def test_preservation_update_keeps_full_stats1_presentation_and_authoritative_re
             )
             assert stats1.cell(26, col).value == expected[STOP_RECOMMENDATION_HEADER]
             assert stats1.cell(31, col).value == expected[TARGET_RECOMMENDATION_HEADER]
-            assert "data-recommended-value=" in (
-                path.parent / "Trading Journal.assets" / "recommendations" / f"{filename}-stop.html"
-            ).read_text(encoding="utf-8")
-            assert "Recommended:" in str(stats1.cell(31, col).value or "")
-            assert float(str(stats1.cell(31, col).value).split("Recommended:", 1)[1].split("R", 1)[0]) >= 2.0
+            for metric, row, header, unit, marker_key in (
+                ("stop", 26, STOP_RECOMMENDATION_HEADER, "%", "stop_loss_recommended_pct"),
+                ("target", 31, TARGET_RECOMMENDATION_HEADER, "R", "target_r_recommended"),
+            ):
+                workbook_text = str(stats1.cell(row, col).value or "")
+                artifact = (
+                    path.parent / "Trading Journal.assets" / "recommendations" / f"{scope}-{metric}.html"
+                ).read_text(encoding="utf-8")
+                visible = unescape(re.search(
+                    r'<section class="recommendation"[^>]*><strong>Workbook recommendation</strong><p>(.*?)</p>',
+                    artifact,
+                ).group(1))
+                marker = float(re.search(
+                    r'data-recommended-value="([0-9.]+)"', artifact,
+                ).group(1))
+                value = float(re.search(
+                    rf"Recommended:\\s*([0-9.]+){unit}", workbook_text,
+                ).group(1))
+                assert workbook_text == visible
+                assert value == pytest.approx(marker)
+                assert workbook_text == expected[header]
+                if metric == "target":
+                    assert value >= 2.0
     finally:
         after_wb.close()
 

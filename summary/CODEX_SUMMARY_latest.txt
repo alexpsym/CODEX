@@ -20,9 +20,15 @@ RESULTS
 - The corrected stop values match overall-stop.html, fx-stop.html, and crypto-stop.html. Target recommendations remain 2.03R, 2.04R, and 2.0R respectively, match their linked pages, and satisfy the 2R floor.
 - The before/after STATS1 presentation and static-layout fingerprints matched exactly. No labels, section positions, formatting, dimensions, panes, views, or authored cell presentation changed.
 
+REGRESSION TEST AND RUNTIME-FILE DELIVERY FIX
+
+- The focused fixture now reuses its already-built equivalent layout solely for the update routine's internal non-STATS1 template source. It still calls update_master_journal_workbook_data_only in preservation mode and retains the full STATS1 presentation/static-layout assertions.
+- The test verifies exact visible recommendation text, data-recommended-value, and parsed numeric recommendation for all six linked artifacts (overall/fx/crypto stop and target); each target is asserted to be at least 2R.
+- Exact pytest node: tests/test_master_journal_workbook.py::test_preservation_update_keeps_full_stats1_presentation_and_authoritative_recommendations. It completed successfully in approximately 104 seconds. No other pytest node was run.
+- journal/5-digit-demo-calculation-context.json is restored in Git's index from e0b7712b5ad4f246f2eabc33c8af2611f0c8ad70. Its current runtime bytes remain in the working tree as an unstaged local change and are excluded from this delivery.
+
 VERIFICATION
 
-- One focused pytest node was selected: tests/test_master_journal_workbook.py::test_preservation_update_keeps_full_stats1_presentation_and_authoritative_recommendations. It was stopped after exceeding two minutes while rebuilding its isolated workbook fixture; no other pytest node was run.
 - Performed exactly one controlled real journal resync using the current local workbook and current journal data, with GitHub publication deferred until this completion workflow.
 - Post-resync fingerprint comparison confirmed presentation_same=true and static_same=true. Direct workbook/artifact checks confirmed the corrected stop values and preserved target values.
 - No MT5 compilation, launcher, watcher, dashboard, Trade Log, or unrelated test was run.
