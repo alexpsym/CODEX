@@ -1,69 +1,62 @@
 CODEX COMPLETION SUMMARY
-Brief: TRADING JOURNAL PRESERVATION, RECOMMENDATIONS, LOCAL EXIT, UNIFIED MT5 EA, AND MANUAL-SAVE GITHUB SYNC
+Brief: VERIFIED EXCEL-TO-GITHUB SAVE FAILURE AND UNIFIED MT5 WINDOW CLEANUP
 Recorded: 2026-08-25 (Australia/Brisbane)
 
-PREVIOUS FAILED JOB / STARTING STATE
+STARTING STATE AND PRESERVED PRIOR WORK
 
-- The local summary was stale and described an unrelated August 24 task. The unfinished state was recovered from the working-tree diff and prior-turn diagnostics.
-- The prior job had started the 2R floor, Trade Log alignment scope, shared local Exit injection, and explicit Standard Market chart button.
-- It could not be completed because the Market Watch EAs were not merged, the unified EA had not compiled or deployed, the real workbook was not updated, targeted-test results were not captured, and nothing was delivered.
-- Pre-existing render/data JSON, custom-alert, and journal calculation-context changes were unrelated runtime/user state. They did not cause the failed delivery: PATCH_DESKTOP_PUSH.bat was never run because implementation was incomplete.
-- At follow-up start, journal/Trading Journal.xlsx matched the tracked Git blob byte-for-byte. Its current STATS1 was captured and treated as the authoritative presentation baseline.
+- The previous job’s journal preservation, shared recommendation calculation, 2.00R recommendation floor, Trade Log left alignment, local-only Exit injection, unified Trader EA, explicit market-order execution button, token safeguards, and bounded ATR retry/resource handling were already present and were preserved.
+- The prior completion push had not proven the user’s real Excel-save workflow. At inspection the local worker was stopped, and origin/master was still at 7c3debe while the local feature branch contained eight later journal commits.
+- The worker log showed that Local Trading Tools opened and watched the canonical C:\GPT\CODEX-master\journal\Trading Journal.xlsx. There was no alternate workbook path and the browser change was unrelated.
+- Unrelated local runtime/user files under bybit_monitor, render/data, and journal/5-digit-demo-calculation-context.json were preserved unstaged and were not included in delivery.
 
-MANUAL EXCEL SAVE TO GITHUB SYNC
+ROOT CAUSE AND WATCHER FIX
 
-- Root cause: _manual_save_scan_once advanced _MANUAL_SAVE_KNOWN_FINGERPRINT and cleared pending state even when commit/push failed. If commit succeeded but push failed, the next attempt saw no eligible file diff and incorrectly returned a no-op without retrying the unpushed commit.
-- Failed saves now remain pending with bounded exponential retry backoff capped at 60 seconds. State exposes pending status, retry count, next retry, last detection, attempt, error type/message, commit, affected files, successful verification, and successful push time.
-- No-op handling verifies local HEAD against the configured remote branch. An unpushed committed save is pushed on retry and verified instead of being consumed.
-- Existing safe handling for Excel temporary names, stable-fingerprint debounce, atomic replacement, file locks/read failures, and service-generated-write suppression remains.
-- Only the canonical workbook and eligible related recommendation HTML assets are staged with path-scoped Git commands. Unrelated staged and unstaged changes remain untouched.
-- run_local_master_control.bat explicitly enables and protects TRADING_JOURNAL_GITHUB_SYNC_ON_MANUAL_SAVE_ENABLED=1. LOCAL_STATE_ONLY=1 and the selected browser do not disable or affect the watcher.
+- The confirmed save failure was a branch-target error: TRADING_JOURNAL_GITHUB_SYNC_BRANCH was unset, so the watcher resolved the current feature branch and pushed the user’s workbook commits to origin/codex/journal-equity-fx-final-20260726 instead of origin/master. The GitHub master ZIP therefore could not contain the new sheet even though the watcher had committed and pushed locally.
+- run_local_master_control.bat now explicitly defaults TRADING_JOURNAL_GITHUB_SYNC_BRANCH=master, and that key remains protected from profile/env overrides. LOCAL_STATE_ONLY=1 and Edge/Chrome selection do not disable or alter the independent journal GitHub watcher.
+- A second verified defect was fixed: watcher startup no longer accepts the current workbook fingerprint as an already-clean baseline. It immediately reconciles the existing canonical workbook, so a save made while the worker was stopped, restarted, or recovering remains eligible for synchronization.
+- Existing retry/backoff, stable-fingerprint debounce, Excel temporary/atomic-write handling, service-write suppression, path-scoped staging, and verified no-op behavior remain.
+- journal/5-digit-demo-calculation-context.json was removed from the watcher allowlist. Its earlier committed change was neutralized in the delivered master tree while its current local runtime bytes remained untouched.
+- /api/trading-journal/sync/status is now a working local-only diagnostic endpoint. It reports watcher enablement and thread liveness, canonical path, pending/unsynchronized state, retries, timestamps, commit/files/errors, PID, source stamp, and worker Git identity. Public profiles receive 404.
 
-WORKBOOK AND RECOMMENDATIONS
+REAL AUTOMATIC WORKBOOK-TO-GITHUB PROOF
 
-- Existing-workbook updates preserve STATS1 presentation exactly: authored rows/content, style records, fonts, fills, borders, alignments, number formats, merges, dimensions, panes, filters, and sheet order are not repaired, inserted, deleted, relabelled, or semantically restyled.
-- Only existing recommendation values and hyperlinks are refreshed. Excel-open polishing no longer inserts/removes/relabels STATS1 recommendation/source rows.
-- Workbook recommendation cells and HTML artifacts use the same normalized, deduplicated trade rows and the same recommendation calculation. HTML text, data-recommended-value, and SVG markers derive from that payload.
-- The authoritative normalized calculation produces the overall stop recommendation 0.67%. The former 0.83% came from a winners-only average, not the final recommendation calculation.
-- TARGET_R_RECOMMENDATION_FLOOR is 2.00R. Below-floor results clamp to exactly 2.00R; a current 2.00R median is labelled Target unchanged and is not changed to 2.01R.
-- The controlled real resync updated journal/Trading Journal.xlsx and affected target recommendation HTML. Verification found zero STATS1 differences outside allowed recommendation cells, zero populated Trade Log cells without explicit left alignment, zero recommendations below 2R, and no workbook/HTML recommendation mismatch.
-- No Master Journal.xlsx was created or restored.
+- The exact latest locally recorded workbook bytes containing the user’s blank Sheet1 were recovered from local commit 2e3bf72; the workbook was not rebuilt, resynced, or replaced from GitHub.
+- Before watcher startup, its sheet order was confirmed as STATS1, Sheet1, STATS2, SYMBOLS, Trade Log, P&L Calendar, SIM, YEARLY REPORT, and 2018 through 2026.
+- The corrected worker started from C:\GPT\CODEX-master with PID 32840, source stamp 326b00fda36bebd6, and code commit 2d6d91a354225bd01cb074de8cc45a9e3509ed02. Diagnostics reported enabled=true, thread_alive=true, and the exact canonical workbook path.
+- Startup reconciliation automatically detected the already-saved workbook and created/pushed commit 55967b39672084601c408f7afb183dc79376b358 to origin/master. This was the watcher’s automatic workflow, not a manual git push and not PATCH_DESKTOP_PUSH.bat.
+- Diagnostics recorded last detection 2026-08-25T06:39:55.381326+00:00, attempt 2026-08-25T06:39:55.389727+00:00, successful push 2026-08-25T06:40:06.510403+00:00, commit 55967b3, no error, no pending retry, and unsynchronized_change=false.
+- A fresh git fetch of origin/master succeeded. Directly reading journal/Trading Journal.xlsx from the fetched remote revision confirmed Sheet1 exactly between STATS1 and STATS2.
+- The local and remote workbook Git blob IDs both equal 71a7c8da3abc72c5ccef19c57333fe288e0c0ad7.
+- Commit 55967b3 contains exactly one changed path: journal/Trading Journal.xlsx. The unrelated runtime/user files were not included.
+- No additional workbook edit, Excel save cycle, journal resync, or workbook rebuild was performed.
 
-LOCAL EXIT CONTROL
+UNIFIED MT5 WINDOW AND GUIDANCE
 
-- Shared local-profile HTML injection adds one fixed top-right Exit local tools control to locally served merged, app, individual-tool, and script-view HTML pages.
-- It reuses POST /api/local-exit, prevents duplicate submission, reports failures visibly, preserves the dashboard Exit button, and is absent from Render/public profiles and API responses.
+- mt5-clone/atr_percent_window.py no longer creates a ttk.Notebook or separate All Market Watch and ATR ranking Treeviews. The single desktop window now contains exactly one visible Treeview.
+- That one table contains rank, instrument, spread percentage, spread points, all six ATR-percentage timeframes, and status/reason. Existing numeric/name header sorting and selected sort direction persist through refreshes.
+- Rank timeframe and Top N remain available. “Show ATR Top N only” filters/ranks the same table rather than opening a second table, tab, or window.
+- Missing-feed guidance now tells the user to attach Trader.mq5, enable Unified Market Watch, and enable DLL imports only for automatic window launch. It no longer directs users to attach MarketWatchATRPercentFeed.mq5 or a retired spread EA.
+- The default feed filename is MarketWatchUnifiedFeed.json.
 
-UNIFIED MT5 EXPERT ADVISOR
+GENUINE ATR SUCCESS TIMESTAMP
 
-- Trader.mq5 version 2.30 is the single user-facing EA. Its existing timer runs trading lifecycle work, compatibility spread export, and a bounded unified Market Watch scheduler.
-- The unified feed retains every selected Market Watch symbol and suffix. Rows contain instrument, spread percentage, spread points, and ATR percentages for M1, M5, H1, D1, W1, and MN1. Non-FX instruments remain visible with ATR N/A.
-- ATR work validates selection, series synchronization, and bar readiness before iATR creation. Handles are reused; invalid handles are released. Failures retain last-known values as Stale where available. Loading, Stale, N/A, and Error <code> remain distinct. Capped backoff and three-log limits prevent EURJPY.a error 4805 from creating unlimited handles/logs or blocking other instruments.
-- Trader launches only the unified atr_percent_window.py process. A local singleton prevents duplicate windows. Its All Market Watch table combines spread and ATR; instrument, spread, and ATR columns sort in both directions, show direction, keep unavailable values last, and preserve selection through refreshes. ATR timeframe/Top-N ranking remains.
-- Old separate EA sources remain only for compatibility/reference and are not required by the normal Trader-only workflow.
+- Trader.mq5 version 2.31 tracks g_unifiedLastSuccessfulAtr only after CopyBuffer and the closed-candle price have both produced a valid positive ATR calculation.
+- The unified JSON now publishes last_successful_refresh as that genuine calculation timestamp, or null before the first success. It does not substitute the feed file-write time.
+- The desktop status shows “Waiting for first successful ATR calculation” before success and the actual last-success timestamp afterward.
 
-MARKET .SET AND EXPLICIT EXECUTION
+TARGETED VERIFICATION
 
-- Exported names match actual Trader inputs. Strategy=3 maps to STRAT_STANDARD_MARKET=3; limit Strategy=2 remains unchanged.
-- The practical mismatch was a stale installed/compiled Trader: the terminal source/executable predated the intended repo source. Corrected source and freshly compiled EX5 are deployed together with matching hashes.
-- Standard Market no longer executes from OnInit, timer, tick, attach, refresh, restart, or settings import. The chart shows EXECUTE BUY/SELL symbol | account; only its chart-click event calls ExecuteStandardMarketOnce.
-- Existing live bid/ask anchoring, SL/TP and risk checks, broker stop/freeze/volume validation, one-trade-at-a-time protection, persistent token gate, and outcome diagnostics remain.
-- No live or demo trade was placed.
+- Two unique pytest node IDs were used; none of the previous job’s six passing tests was rerun:
+  1. tests/test_master_service_master_journal_sync.py::test_manual_save_watcher_startup_reconciles_existing_workbook_and_exposes_local_status — passed once.
+  2. tests/test_python_mt5_conversion_files.py::test_unified_market_watch_uses_one_table_trader_guidance_and_successful_atr_timestamp — initially failed only because the new source assertion did not account for MQL string escaping; the assertion was corrected and only this failed node was rerun, then passed.
+- No complete test file, suite, broad integration test, unrelated smoke test, or trade execution ran.
+- Trader.mq5 was compiled exactly once with the installed Pepperstone MetaEditor. Result: 0 errors, 0 warnings, X64 Regular, 3702 ms. MetaEditor’s process exit code was 1 despite the compiler log’s explicit successful result.
+- The repository source and installed Trader.mq5 are both 76,239 bytes with SHA-256 88432664BE8C27915E6342164EB949E25A8C7A2611E779F90026CA0A4C80EA1F.
+- The deployed Trader.ex5 is 120,918 bytes with SHA-256 EC112FA1D7ADC59B9C902B3E94301065124588F224D4F2AFC04750911FEBCD18.
+- The temporary compiler log was removed and was not committed. No live or demo trade was placed.
 
-VERIFICATION
+DELIVERY STATE BEFORE FINAL PATCH
 
-- Exactly six pytest nodes ran once; result: 6 passed, 9 deprecation warnings:
-  1. tests/test_master_service_master_journal_sync.py::test_manual_save_failed_sync_keeps_fingerprint_pending_then_retries_successfully
-  2. tests/test_master_service_master_journal_sync.py::test_github_sync_real_repo_ignores_state_backup_and_preserves_unrelated_changes
-  3. tests/test_master_service_master_journal_sync.py::test_sync_preserves_canonical_stats1_layout_and_manual_formatting
-  4. tests/test_master_service_master_journal_sync.py::test_sync_publishes_recommendations_from_same_normalized_rows_as_workbook
-  5. tests/test_python_mt5_conversion_files.py::test_mql5_trader_standard_market_is_live_quote_anchored_and_terminal_token_gated
-  6. tests/test_master_service_local_exit.py::test_local_html_pages_receive_exit_control_only_in_local_profile
-- One controlled real journal resync occurred. It succeeded without external balance refresh or GitHub push.
-- MetaEditor compiled only Trader.mq5, once: 0 errors, 0 warnings. Repository-local compiler log/EX5 artifacts were removed after deployment and were not committed.
-- The established deploy_to_mt5 workflow copied the unified source/EX5 to terminal 73B7A2420D6397DFF9014A20F1201F97. Installed and compiled source/executable SHA-256 hashes matched.
-- git diff --check passed. No broad suite, complete test file, live browser workflow, second resync, second compile, or trade execution ran.
-
-OPERATIONAL NOTE
-
-- Use only Trader on one MT5 chart and enable Allow DLL imports for automatic window launch. Remove already-attached legacy ATR/spread EAs from their charts to stop obsolete compatibility feeds; the unified singleton prevents duplicate UI processes.
+- The real automatic workbook push reached origin/master at 55967b3, and local HEAD matched that revision before this summary update.
+- The corrected Local Trading Tools worker remained running from the intended checkout with its watcher alive.
+- PATCH_DESKTOP_PUSH.bat is run exactly once after this summary is written; its final result and final HEAD/origin equality are verified immediately afterward.
