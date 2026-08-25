@@ -36054,83 +36054,13 @@ def _recommendation_text_like(value: object) -> bool:
 
 
 def _repair_stats1_recommendation_rows_for_excel_open(wb: object, diagnostics: Dict[str, object]) -> None:
-    try:
-        ws = _stats1_sheet(wb)
-    except Exception as exc:
-        diagnostics["stats1_recommendation_repair_error"] = str(exc)
-        return
-
-    market_cols = _stats1_market_columns(ws)
-    if not {"overall", "fx", "crypto"}.issubset(market_cols):
-        diagnostics["stats1_recommendation_repair_warning"] = "Stats 1 market columns were not found."
-        return
-
-    winners = _stats1_section_bounds(ws, "Winners")
-    losers = _stats1_section_bounds(ws, "Losers")
-    if not winners or not losers:
-        diagnostics["stats1_recommendation_repair_warning"] = "Stats 1 winner/loser sections were not found."
-        return
-
-    first_winners_row = winners[0]
-
-    def label_at(row: int) -> str:
-        return str(ws.cell(row, 1).value or "").strip()
-
-    def find_before(label: str, before: int) -> int | None:
-        wanted = label.casefold()
-        return next((row for row in range(1, before) if label_at(row).casefold() == wanted), None)
-
-    def find_in_bounds(bounds: Tuple[int, int], label: str) -> int | None:
-        wanted = label.casefold()
-        start, end = bounds
-        return next((row for row in range(start + 1, end + 1) if label_at(row).casefold() == wanted), None)
-
-    def recommendation_row_after(anchor_label: str) -> int | None:
-        anchor = find_before(anchor_label, first_winners_row)
-        if not anchor:
-            return None
-        row = anchor + 1
-        if row <= ws.max_row and label_at(row).casefold() == "source":
-            row += 1
-        return row if row <= ws.max_row and label_at(row).casefold() == "recommendation" else None
-
-    stop_row = recommendation_row_after("Max stop %")
-    metric_rows = {
-        "stop": (
-            stop_row,
-            find_in_bounds(winners, "Avg stop %"),
-            find_in_bounds(losers, "Avg stop %"),
-        ),
-    }
-
-    def stop_pct_points(value: object) -> Decimal | None:
-        if value in (None, "") or isinstance(value, bool):
-            return None
-        try:
-            number = Decimal(str(value).strip())
-        except Exception:
-            return None
-        return number * Decimal("100") if number.is_finite() else None
-
-    repaired = 0
-    for kind, (recommendation_row, winner_row, loser_row) in metric_rows.items():
-        if not recommendation_row:
-            diagnostics.setdefault("stats1_missing_recommendation_rows", []).append(kind)
-            continue
-        for _market, col in market_cols.items():
-            winner_avg = ws.cell(winner_row, col).value if winner_row else None
-            loser_avg = ws.cell(loser_row, col).value if loser_row else None
-            if kind == "stop":
-                winner_avg = stop_pct_points(winner_avg)
-                loser_avg = stop_pct_points(loser_avg)
-            cell = ws.cell(recommendation_row, col)
-            cell.value = _stop_recommendation_payload([winner_avg], [loser_avg]).get(STOP_RECOMMENDATION_HEADER)
-            _apply_recommendation_cell_style(cell)
-            repaired += 1
-    if repaired:
-        diagnostics["stats1_recommendation_cells_repaired"] = repaired
-
-    # Never insert, delete, label, or restyle rows here. STATS1 layout is user-owned.
+    # Recommendation values are calculated from normalized trade rows during
+    # the data-only update.  Excel-open polish has no authoritative snapshot;
+    # deriving stops from rendered winner/loser averages here previously
+    # replaced those values with a different algorithm and restyled the cells.
+    diagnostics["stats1_recommendation_repair_skipped"] = (
+        "authoritative recommendation snapshot required"
+    )
 
 
 def _polish_master_journal_for_excel_open(path: Path) -> Dict[str, object]:
@@ -36149,6 +36079,8 @@ def _polish_master_journal_for_excel_open(path: Path) -> Dict[str, object]:
     try:
         _repair_stats1_recommendation_rows_for_excel_open(wb, diagnostics)
         for ws in wb.worksheets:
+            if ws.title == STATS1_SHEET:
+                continue
             trade_log_data_start_row: Optional[int] = None
             if str(getattr(ws, "title", "")) in {"Trade Log", "All Trades"}:
                 try:
@@ -36229,7 +36161,10 @@ def _polish_master_journal_for_excel_open(path: Path) -> Dict[str, object]:
 
         for ws in wb.worksheets:
             _normalize_trade_log_row_heights(ws, diagnostics)
-        _normalize_generated_statistics_row_heights(wb)
+        _normalize_generated_statistics_row_heights(
+            wb,
+            preserve_stats1_presentation=True,
+        )
 
         wb.save(path)
         return diagnostics

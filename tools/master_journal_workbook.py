@@ -4564,12 +4564,17 @@ def _prepare_recommendation_chart_bundle(
     return {"files": files, "links": links, "workbook_path": Path(workbook_path)}
 
 
-def _apply_recommendation_chart_hyperlinks(wb, bundle: Mapping[str, Any]) -> None:
+def _apply_recommendation_chart_hyperlinks(
+    wb,
+    bundle: Mapping[str, Any],
+    *,
+    preserve_stats1_presentation: bool = False,
+) -> None:
     links = bundle.get("links") if isinstance(bundle, Mapping) else {}
     if not isinstance(links, Mapping):
         return
 
-    def apply_link(cell, target: str | None) -> None:
+    def apply_link(cell, target: str | None, *, preserve_style: bool = False) -> None:
         current = getattr(cell, "hyperlink", None)
         current_target = str(getattr(current, "target", "") or "")
         canonical_target = (
@@ -4582,7 +4587,7 @@ def _apply_recommendation_chart_hyperlinks(wb, bundle: Mapping[str, Any]) -> Non
         )
         if current_target != canonical_target:
             cell.hyperlink = canonical_target or None
-        if canonical_target:
+        if canonical_target and not preserve_style:
             font = copy(cell.font)
             font.color = "0563C1"
             font.underline = "single"
@@ -4601,7 +4606,11 @@ def _apply_recommendation_chart_hyperlinks(wb, bundle: Mapping[str, Any]) -> Non
                 continue
             for market, col in market_cols.items():
                 target = links.get((market, metric)) if ws.cell(row, col).value not in (None, "") else None
-                apply_link(ws.cell(row, col), target)
+                apply_link(
+                    ws.cell(row, col),
+                    target,
+                    preserve_style=preserve_stats1_presentation,
+                )
 
     if SYMBOLS_SHEET in wb.sheetnames:
         ws = wb[SYMBOLS_SHEET]
@@ -8621,6 +8630,11 @@ def _repair_stats1_formatting(
     market_cols = _stats1_market_columns(ws)
     if not market_cols:
         return
+    if preserve_user_presentation:
+        # Existing STATS1 is wholly user-authored.  In preservation mode this
+        # function must not recolour metrics, normalise durations, or alter any
+        # presentation property; values are written by the data-only writer.
+        return
     if not preserve_user_presentation and ws.freeze_panes != "B2":
         diagnostics["previous_stats1_freeze_panes"] = str(ws.freeze_panes or "")
         ws.freeze_panes = "B2"
@@ -11428,7 +11442,11 @@ def _format_report_sheet(ws, last_col: int) -> None:
     _apply_report_semantic_group_borders(ws)
 
 
-def _normalize_generated_statistics_row_heights(wb) -> None:
+def _normalize_generated_statistics_row_heights(
+    wb,
+    *,
+    preserve_stats1_presentation: bool = False,
+) -> None:
     managed = [
         ws.title
         for ws in wb.worksheets
@@ -11436,6 +11454,8 @@ def _normalize_generated_statistics_row_heights(wb) -> None:
         or (ws.title.isdigit() and int(ws.title) >= REPORT_START_YEAR)
     ]
     for sheet_name in managed:
+        if preserve_stats1_presentation and sheet_name == STATS1_SHEET:
+            continue
         if sheet_name not in wb.sheetnames:
             continue
         ws = wb[sheet_name]
@@ -11444,7 +11464,11 @@ def _normalize_generated_statistics_row_heights(wb) -> None:
                 ws.row_dimensions[row].height = 14.5
 
 
-def _normalize_generated_duration_text(wb) -> None:
+def _normalize_generated_duration_text(
+    wb,
+    *,
+    preserve_stats1_presentation: bool = False,
+) -> None:
     managed_names = {
         STATS1_SHEET,
         SYMBOLS_SHEET,
@@ -11457,6 +11481,8 @@ def _normalize_generated_duration_text(wb) -> None:
     }
     verbose_pattern = re.compile(r"\b\d+(?:\.\d+)?\s*(?:days?|hours?|minutes?|seconds?)\b", re.IGNORECASE)
     for sheet_name in managed_names:
+        if preserve_stats1_presentation and sheet_name == STATS1_SHEET:
+            continue
         if sheet_name not in wb.sheetnames:
             continue
         ws = wb[sheet_name]
@@ -12698,9 +12724,10 @@ def _stats1_schema_is_canonical(ws) -> bool:
 def _workbook_preservation_contract(wb) -> Dict[str, Any]:
     """Snapshot user-owned state that preservation mode must not mutate.
 
-    Statistics value/fill formats and report border groups are intentionally
-    absent: those are generator-owned by the semantic repair.  STATS1 label
-    typography and every STATS1 border edge are explicitly retained.
+    STATS1 is an authored dashboard in preservation mode.  Its complete cell
+    presentation (including styled blanks) is retained; only regenerated
+    metric/recommendation values and their recommendation hyperlink targets may
+    differ.  Other derived sheets retain their existing scoped contracts.
     """
     active = wb.active
     workbook_views = [
@@ -12837,6 +12864,42 @@ def _workbook_preservation_contract(wb) -> Dict[str, Any]:
             )
             for row in range(1, stats1.max_row + 1)
             for col in range(1, min(4, stats1.max_column) + 1)
+        }
+        # Do not use ``_cells`` alone: a user may intentionally style a blank
+        # cell inside the visible dashboard rectangle.  Coordinates and every
+        # visible cell presentation property are part of the authored layout.
+        stats1_cells = {
+            (cell.row, cell.column)
+            for cell in stats1._cells.values()
+        }
+        stats1_cells.update(
+            (row, col)
+            for row in range(1, stats1.max_row + 1)
+            for col in range(1, stats1.max_column + 1)
+        )
+        contract["stats1_presentation"] = {
+            f"{get_column_letter(col)}{row}": {
+                "style": _contract_xml(cell._style),
+                "font": _contract_xml(cell.font),
+                "fill": _contract_xml(cell.fill),
+                "border": _contract_xml(cell.border),
+                "alignment": _contract_xml(cell.alignment),
+                "number_format": cell.number_format,
+                "protection": _contract_xml(cell.protection),
+                "comment": _comment_preservation_value(cell.comment)
+                if cell.comment is not None else None,
+            }
+            for row, col in sorted(stats1_cells)
+            for cell in [stats1.cell(row, col)]
+        }
+        # Dashboard labels and market headers are structural content, not
+        # regenerated statistics.  All market data rows remain value-mutable.
+        contract["stats1_static_values"] = {
+            f"{get_column_letter(col)}{row}": _contract_cell_value(
+                stats1.cell(row, col).value
+            )
+            for row, col in sorted(stats1_cells)
+            if col == 1 or row == 1
         }
     return contract
 
@@ -13022,7 +13085,12 @@ def _assert_workbook_preservation_contract(
     # the existing migration path, so their row coordinates and border edges
     # cannot be compared before versus after that structural migration.
     if bool(before.get("stats1_schema_canonical")):
-        scalar_keys.extend(("stats1_row_labels", "stats1_borders"))
+        scalar_keys.extend((
+            "stats1_row_labels",
+            "stats1_borders",
+            "stats1_presentation",
+            "stats1_static_values",
+        ))
     for key in scalar_keys:
         if before.get(key) != after.get(key):
             detail = ""
@@ -16826,10 +16894,26 @@ def update_master_journal_workbook_data_only(
                     if rec_row > dash.max_row or str(dash.cell(rec_row, 1).value or "").strip().casefold() != "recommendation":
                         continue
                     for market, col in market_cols.items():
-                        value = _sanitize_recommendation_text(key, (buckets.get(market) or {}).get(key))
+                        scope_rows = (
+                            rows
+                            if market == "overall"
+                            else [
+                                item for item in rows
+                                if _trade_row_market(item) == market
+                            ]
+                        )
+                        authoritative = _distance_recommendation_summary(
+                            scope_rows,
+                            scope="overall" if market == "overall" else "standard",
+                        )
+                        value = _sanitize_recommendation_text(
+                            key,
+                            authoritative.get(key),
+                        )
                         if _write_value_preserving_cell(dash, rec_row, col, _excel_scalar(value)):
-                            dash.cell(rec_row, col).number_format = "General"
-                            _apply_recommendation_cell_style(dash.cell(rec_row, col))
+                            if not preserve_existing_layout:
+                                dash.cell(rec_row, col).number_format = "General"
+                                _apply_recommendation_cell_style(dash.cell(rec_row, col))
                             diagnostics["updated_cells"] += 1
                     break
 
@@ -17320,7 +17404,8 @@ def update_master_journal_workbook_data_only(
             sample = ", ".join(str(x.get("id") or x.get("symbol") or "?") for x in zero_qty["crypto_zero_qty_unrepaired"][:5])
             return {"ok": False, "error": f"Unrepaired crypto zero-quantity trade rows detected: {sample}", "diagnostics": diagnostics}
 
-        _apply_dashboard_requested_semantic_fills(dash)
+        if not preserve_existing_layout:
+            _apply_dashboard_requested_semantic_fills(dash)
         _repair_stats1_formatting(
             dash,
             extended_metrics,
@@ -17896,7 +17981,11 @@ def update_master_journal_workbook_data_only(
             _apply_pnl_calendar_profit_loss_formatting(wb["P&L Calendar"])
         _normalize_symbols_performance_formatting(_symbols_sheet(wb))
         chart_bundle = _prepare_recommendation_chart_bundle(rows, path)
-        _apply_recommendation_chart_hyperlinks(wb, chart_bundle)
+        _apply_recommendation_chart_hyperlinks(
+            wb,
+            chart_bundle,
+            preserve_stats1_presentation=preserve_existing_layout,
+        )
         after = _snapshot_invariants(wb)
         _assert_invariants_unchanged(before, after)
         candidate = path.with_suffix(".update-candidate.tmp.xlsx")
@@ -17918,7 +18007,10 @@ def update_master_journal_workbook_data_only(
             _repair_stats2_as_of_datetime_style(wb, diagnostics)
         if not preserve_existing_layout:
             _normalize_generated_statistics_row_heights(wb)
-        _normalize_generated_duration_text(wb)
+        _normalize_generated_duration_text(
+            wb,
+            preserve_stats1_presentation=preserve_existing_layout,
+        )
         _apply_report_managed_left_alignment(wb, diagnostics)
         if preserve_existing_layout:
             _apply_workbook_calculation_signature(

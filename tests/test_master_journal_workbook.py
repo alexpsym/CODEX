@@ -460,6 +460,75 @@ def test_stats_and_symbols_fall_back_to_trade_rows_when_stats_are_empty(tmp_path
     wb.close()
 
 
+def test_preservation_update_keeps_full_stats1_presentation_and_authoritative_recommendations(tmp_path: Path):
+    """Regression: STATS1 is an authored dashboard, not a semantic template."""
+    snapshot = sample_snapshot()
+    fx_loss = dict(snapshot["items"][0])
+    fx_loss.update(id="fx-loss", net_profit=-40.0, result_pct=-1.0, r_multiple=-1.0, stop_loss=1.08)
+    crypto_win = dict(snapshot["items"][1])
+    crypto_win.update(id="crypto-win", net_profit=30.0, result_pct=1.2, r_multiple=2.4, stop_loss=59400)
+    snapshot["items"].extend((fx_loss, crypto_win))
+    path = tmp_path / "Trading Journal.xlsx"
+    build_master_journal_workbook(snapshot, path, publish_recommendation_assets=False)
+
+    wb = load_workbook(path)
+    try:
+        stats1 = wb[STATS1_SHEET]
+        # Deliberately author non-template presentation on populated and blank
+        # dashboard cells, plus a non-default view/dimension state.
+        for coordinate in ("B26", "C26", "D26", "B31", "C31", "D31", "D136"):
+            cell = stats1[coordinate]
+            cell.font = Font(name="Calibri", size=11, bold=True, italic=True, color="123456")
+            cell.fill = PatternFill("solid", fgColor="ABCDEF")
+            cell.number_format = '0.0000" authored"'
+            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True, indent=1, text_rotation=13)
+        stats1.column_dimensions["B"].width = 65
+        stats1.row_dimensions[26].height = 14.5
+        stats1.freeze_panes = "B2"
+        stats1.sheet_view.zoomScale = 115
+        wb.save(path)
+    finally:
+        wb.close()
+
+    before_wb = load_workbook(path, data_only=False)
+    try:
+        before = mjw._workbook_preservation_contract(before_wb)
+    finally:
+        before_wb.close()
+    result = update_master_journal_workbook_data_only(
+        path,
+        snapshot,
+        preserve_existing_layout=True,
+        publish_recommendation_assets=True,
+    )
+    assert result["ok"] is True, result
+    Path(result["candidate_path"]).replace(path)
+    after_wb = load_workbook(path, data_only=False)
+    try:
+        after = mjw._workbook_preservation_contract(after_wb)
+        assert after["stats1_presentation"] == before["stats1_presentation"]
+        assert after["stats1_static_values"] == before["stats1_static_values"]
+        stats1 = after_wb[STATS1_SHEET]
+        for market, col, filename in (
+            ("overall", 2, "overall"), ("fx", 3, "fx"), ("crypto", 4, "crypto"),
+        ):
+            expected = mjw._distance_recommendation_summary(
+                snapshot["items"] if market == "overall" else [
+                    row for row in snapshot["items"] if row["asset_class"] == market
+                ],
+                scope="overall" if market == "overall" else "standard",
+            )
+            assert stats1.cell(26, col).value == expected[STOP_RECOMMENDATION_HEADER]
+            assert stats1.cell(31, col).value == expected[TARGET_RECOMMENDATION_HEADER]
+            assert "data-recommended-value=" in (
+                path.parent / "Trading Journal.assets" / "recommendations" / f"{filename}-stop.html"
+            ).read_text(encoding="utf-8")
+            assert "Recommended:" in str(stats1.cell(31, col).value or "")
+            assert float(str(stats1.cell(31, col).value).split("Recommended:", 1)[1].split("R", 1)[0]) >= 2.0
+    finally:
+        after_wb.close()
+
+
 def test_stats1_streak_details_are_repaired_under_their_own_streak_rows(tmp_path: Path):
     snapshot = sample_snapshot()
     path = tmp_path / "streak-order.xlsx"
