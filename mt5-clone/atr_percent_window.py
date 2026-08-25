@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Desktop ATR-percentage table for MarketWatchATRPercentFeed.mq5."""
+"""Desktop unified spread and ATR-percentage table for Trader.mq5."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ import tkinter as tk
 from tkinter import ttk
 
 
-DEFAULT_FEED_NAME = "MarketWatchATRPercentFeed.json"
+DEFAULT_FEED_NAME = "MarketWatchUnifiedFeed.json"
 TIMEFRAMES: tuple[tuple[str, str], ...] = (
     ("1m", "m1"),
     ("5m", "m5"),
@@ -192,6 +192,7 @@ class ATRPercentWindow:
         self.last_good_feed: dict[str, Any] | None = None
         self.rank_timeframe = tk.StringVar(value=args.rank_timeframe if args.rank_timeframe in TIMEFRAME_KEYS else "1m")
         self.top_n = tk.IntVar(value=clamp(args.top_n, 1, 100))
+        self.ranked_only = tk.BooleanVar(value=False)
 
         self.root.title("Unified MT5 Market Watch — Spread and ATR %")
         self.root.geometry("1420x700")
@@ -237,34 +238,34 @@ class ATRPercentWindow:
         top_n.grid(row=0, column=3)
         top_n.bind("<Return>", self._controls_changed)
         top_n.bind("<FocusOut>", self._controls_changed)
+        ttk.Checkbutton(
+            controls,
+            text="Show ATR Top N only",
+            variable=self.ranked_only,
+            command=self._ranking_mode_changed,
+        ).grid(row=0, column=4, padx=(14, 0))
         ttk.Label(
             controls,
             text="Wilder iATR / same timeframe close; last closed candle; no volume ranking",
-        ).grid(row=0, column=4, padx=(18, 0), sticky="w")
-        controls.columnconfigure(4, weight=1)
+        ).grid(row=0, column=5, padx=(18, 0), sticky="w")
+        controls.columnconfigure(5, weight=1)
 
-        notebook = ttk.Notebook(frame)
-        notebook.grid(row=1, column=0, sticky="nsew")
-        ranked_frame = ttk.Frame(notebook)
-        diagnostic_frame = ttk.Frame(notebook)
-        notebook.add(ranked_frame, text="All Market Watch")
-        notebook.add(diagnostic_frame, text="ATR ranking")
-        self.ranked_tree = self._build_tree(ranked_frame, include_rank=False)
-        self.diagnostic_tree = self._build_tree(diagnostic_frame, include_rank=True)
+        table_frame = ttk.Frame(frame)
+        table_frame.grid(row=1, column=0, sticky="nsew")
+        self.tree = self._build_tree(table_frame)
 
         self.status_var = tk.StringVar(value="Loading ATR feed...")
         ttk.Label(frame, textvariable=self.status_var, style="ATR.Status.TLabel", anchor="w").grid(
             row=2, column=0, sticky="ew"
         )
 
-    def _build_tree(self, parent: ttk.Frame, *, include_rank: bool) -> ttk.Treeview:
+    def _build_tree(self, parent: ttk.Frame) -> ttk.Treeview:
         parent.columnconfigure(0, weight=1)
         parent.rowconfigure(0, weight=1)
-        columns = (["rank"] if include_rank else []) + ["symbol", "spread_percent", "spread_points"] + [key for _label, key in TIMEFRAMES] + ["status"]
+        columns = ["rank", "symbol", "spread_percent", "spread_points"] + [key for _label, key in TIMEFRAMES] + ["status"]
         tree = ttk.Treeview(parent, columns=columns, show="headings", style="ATR.Treeview")
-        if include_rank:
-            tree.heading("rank", text="Rank")
-            tree.column("rank", width=54, minwidth=48, anchor="e", stretch=False)
+        tree.heading("rank", text="Rank")
+        tree.column("rank", width=54, minwidth=48, anchor="e", stretch=False)
         tree.heading("symbol", text="Instrument", command=lambda: self._toggle_sort("symbol"))
         tree.column("symbol", width=150, minwidth=110, anchor="w", stretch=True)
         tree.heading("spread_percent", text="Spread %", command=lambda: self._toggle_sort("spread_percent"))
@@ -300,9 +301,8 @@ class ATRPercentWindow:
         labels = {"symbol": "Instrument", "spread_percent": "Spread %", "spread_points": "Spread points", **{label: f"ATR% {label}" for label in TIMEFRAME_LABELS}}
         keys = {"symbol": "symbol", "spread_percent": "spread_percent", "spread_points": "spread_points", **{label: TIMEFRAME_KEYS[label] for label in TIMEFRAME_LABELS}}
         suffix = " ↓" if self.sort_desc else " ↑"
-        for tree in (self.ranked_tree, self.diagnostic_tree):
-            for column, label in labels.items():
-                tree.heading(keys[column], text=label + (suffix if self.sort_column == column else ""), command=lambda selected=column: self._toggle_sort(selected))
+        for column, label in labels.items():
+            self.tree.heading(keys[column], text=label + (suffix if self.sort_column == column else ""), command=lambda selected=column: self._toggle_sort(selected))
 
     def _sorted_rows(self, rows: list[ATRRow]) -> list[ATRRow]:
         if self.sort_column == "symbol":
@@ -318,6 +318,17 @@ class ATRPercentWindow:
         return valid + invalid
 
     def _controls_changed(self, _event: object | None = None) -> None:
+        if self.ranked_only.get():
+            self.sort_column = self.rank_timeframe.get()
+            self.sort_desc = True
+            self._update_headings()
+        self._render_rows()
+
+    def _ranking_mode_changed(self) -> None:
+        if self.ranked_only.get():
+            self.sort_column = self.rank_timeframe.get()
+            self.sort_desc = True
+            self._update_headings()
         self._render_rows()
 
     def _schedule_refresh(self, delay_ms: int | None = None) -> None:
@@ -339,7 +350,10 @@ class ATRPercentWindow:
             parsed_rows = parse_feed_rows(feed)
         except FileNotFoundError:
             if self.last_good_feed is None:
-                self.status_var.set(f"Loading: attach MarketWatchATRPercentFeed.mq5 in MT5; feed missing: {self.feed_path}")
+                self.status_var.set(
+                    f"Loading: attach Trader.mq5 in MT5 and enable Unified Market Watch; "
+                    f"enable DLL imports only for automatic window launch; feed missing: {self.feed_path}"
+                )
             else:
                 self.status_var.set(f"Stale: last-known-good retained; feed file is missing: {self.feed_path}")
             self._schedule_refresh()
@@ -353,7 +367,7 @@ class ATRPercentWindow:
         self.last_good_feed = feed
         self.rows = parsed_rows
         generated_at = str(feed.get("generated_at") or "unknown")
-        last_success = str(feed.get("last_successful_refresh") or "none yet")
+        last_success = feed.get("last_successful_refresh")
         atr_length = feed.get("atr_length", "unknown")
         try:
             age_seconds = max(0, int(time.time() - self.feed_path.stat().st_mtime))
@@ -367,9 +381,14 @@ class ATRPercentWindow:
                 5, self.refresh_ms * 6 // 1000
             ),
         )
+        refresh_text = (
+            f"Last successful ATR refresh {last_success}"
+            if last_success
+            else "Waiting for first successful ATR calculation"
+        )
         self.status_var.set(
             f"{state} | {forex_count}/{len(self.rows)} selected symbols are forex | ATR({atr_length}) | "
-            f"Last successful ATR refresh {last_success} | feed written {generated_at} | file age {age_seconds}s"
+            f"{refresh_text} | feed written {generated_at} | file age {age_seconds}s"
         )
         self._render_rows()
         self._schedule_refresh()
@@ -386,8 +405,8 @@ class ATRPercentWindow:
     def _format_percent(self, value: float | None) -> str:
         return "N/A" if value is None else f"{value:.{self.decimals}f}%"
 
-    def _row_values(self, row: ATRRow, rank: int | None) -> tuple[str, ...]:
-        values = ([] if rank is None else [str(rank)]) + [row.symbol, self._format_percent(row.spread_percent), "N/A" if row.spread_points is None else f"{row.spread_points:.2f}"]
+    def _row_values(self, row: ATRRow, rank: int) -> tuple[str, ...]:
+        values = [str(rank), row.symbol, self._format_percent(row.spread_percent), "N/A" if row.spread_points is None else f"{row.spread_points:.2f}"]
         values.extend(self._format_percent(row.atr_percent.get(label)) for label in TIMEFRAME_LABELS)
         state = row.status
         selected_state = row.frame_states.get(self.rank_timeframe.get(), "N/A")
@@ -398,7 +417,8 @@ class ATRPercentWindow:
         values.append(state)
         return tuple(values)
 
-    def _replace_tree_rows(self, tree: ttk.Treeview, rows: list[ATRRow], *, ranked: bool) -> None:
+    def _replace_tree_rows(self, rows: list[ATRRow]) -> None:
+        tree = self.tree
         wanted: set[str] = set()
         for index, row in enumerate(rows):
             iid = row.symbol
@@ -406,7 +426,7 @@ class ATRPercentWindow:
             tags = ["even" if index % 2 == 0 else "odd"]
             if row.atr_percent.get(self.rank_timeframe.get()) is None:
                 tags.append("na")
-            values = self._row_values(row, index + 1 if ranked else None)
+            values = self._row_values(row, index + 1)
             if tree.exists(iid):
                 tree.item(iid, values=values, tags=tuple(tags))
             else:
@@ -421,10 +441,10 @@ class ATRPercentWindow:
         if timeframe not in TIMEFRAME_KEYS:
             timeframe = "1m"
             self.rank_timeframe.set(timeframe)
-        all_rows = self._sorted_rows(self.rows)
-        ranked = self._sorted_rows(rank_rows(self.rows, timeframe, self._safe_top_n()))
-        self._replace_tree_rows(self.ranked_tree, all_rows, ranked=False)
-        self._replace_tree_rows(self.diagnostic_tree, ranked, ranked=True)
+        visible_rows = self.rows
+        if self.ranked_only.get():
+            visible_rows = rank_rows(self.rows, timeframe, self._safe_top_n())
+        self._replace_tree_rows(self._sorted_rows(visible_rows))
 
 
 def main(argv: list[str] | None = None) -> None:

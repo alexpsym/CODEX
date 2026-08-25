@@ -2342,6 +2342,55 @@ def test_manual_save_failed_sync_keeps_fingerprint_pending_then_retries_successf
     assert state['manual_save_pending'] is False
     assert state['manual_save_last_commit'] == 'abc'
     assert state['manual_save_last_error'] == ''
+
+
+@pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
+def test_manual_save_watcher_startup_reconciles_existing_workbook_and_exposes_local_status(tmp_path, monkeypatch):
+    workbook = tmp_path / 'Trading Journal.xlsx'
+    workbook.write_bytes(b'already saved while worker was stopped')
+    stop = master_service.threading.Event()
+    stop.set()
+    calls = []
+    monkeypatch.setattr(master_service, '_master_journal_path', lambda: workbook)
+    monkeypatch.setattr(master_service, '_MANUAL_SAVE_WATCHER_STOP', stop)
+    monkeypatch.setattr(master_service, '_MANUAL_SAVE_KNOWN_FINGERPRINT', None)
+    monkeypatch.setattr(master_service, '_MANUAL_SAVE_PENDING_FINGERPRINT', None)
+    monkeypatch.setattr(master_service, '_MANUAL_SAVE_PENDING_SINCE', None)
+    monkeypatch.setattr(master_service, '_MANUAL_SAVE_RETRY_COUNT', 0)
+    monkeypatch.setattr(master_service, '_MANUAL_SAVE_NEXT_RETRY_AT', 0.0)
+    monkeypatch.setattr(master_service, '_manual_save_watcher_debounce_seconds', lambda: 0.2)
+    monkeypatch.setattr(
+        master_service,
+        '_sync_journal_excel_files_to_github',
+        lambda path: calls.append(path) or {
+            'github_sync_enabled': True,
+            'github_sync_ok': True,
+            'github_sync_noop': False,
+            'github_sync_verified': True,
+            'github_sync_error': '',
+            'github_sync_error_type': '',
+            'github_sync_files': ['journal/Trading Journal.xlsx'],
+            'github_sync_commit': 'startup123',
+        },
+    )
+
+    master_service._manual_save_github_sync_watcher_loop()
+
+    assert calls == [workbook]
+    assert master_service._manual_save_known_fingerprint() == master_service._manual_save_file_fingerprint(workbook)
+    state = master_service._manual_save_state_snapshot()
+    assert state['manual_save_pending'] is False
+    assert state['manual_save_unsynchronized_change'] is False
+    assert state['manual_save_last_commit'] == 'startup123'
+    assert state['manual_save_monitored_workbook_path'] == str(workbook.resolve())
+    monkeypatch.setattr(master_service, '_resolve_app_profile', lambda: 'local')
+    response = asyncio.run(master_service.trading_journal_sync_status())
+    payload = json.loads(response.body.decode('utf-8'))
+    assert response.status_code == 200
+    assert payload['ok'] is True
+    assert payload['manual_save_worker_pid'] == master_service.os.getpid()
+
+
 @pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
 def test_manual_save_disabled_github_no_fake_success(monkeypatch, tmp_path):
     p=tmp_path/'Trading Journal.xlsx'; p.write_bytes(b'x')

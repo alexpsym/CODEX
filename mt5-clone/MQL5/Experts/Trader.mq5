@@ -1,6 +1,6 @@
 #property strict
 #property description "Trader EA: trendline/standard limits, EMA bounce, and token-gated one-shot standard market execution. SL/TP are set by DISTANCE in MT5 POINTS, with optional AutoTP NetRR."
-#property version   "2.30"
+#property version   "2.31"
 
 #include <Trade/Trade.mqh>
 CTrade trade;
@@ -151,6 +151,7 @@ int g_unifiedRetryCount[];
 datetime g_unifiedRetryAt[];
 int g_unifiedCursor = 0;
 string g_unifiedSignature = "";
+datetime g_unifiedLastSuccessfulAtr = 0;
 
 bool UnifiedIsCurrency(const string value)
 {
@@ -238,6 +239,7 @@ void UnifiedRefreshFrame(const int symbolIndex,const int frameIndex)
       UnifiedScheduleRetry(slot,symbol,frameIndex,errorCode,"closed-candle ATR/close unavailable"); return;
    }
    g_unifiedAtrPercent[slot]=(buffer[0]/close)*100.0; g_unifiedFrameState[slot]="Ready";
+   g_unifiedLastSuccessfulAtr=TimeGMT();
    g_unifiedFrameError[slot]=0; g_unifiedRetryCount[slot]=0; g_unifiedRetryAt[slot]=0;
 }
 
@@ -257,7 +259,8 @@ bool UnifiedExportFeed()
 {
    int handle=FileOpen(UnifiedMarketWatchFileName,FILE_WRITE|FILE_TXT|FILE_ANSI|FILE_COMMON);
    if(handle==INVALID_HANDLE) { Print(EA_COMMENT, ": unified feed open failed error=",IntegerToString(GetLastError())); return false; }
-   string json="{\r\n  \"name\":\"MarketWatchUnifiedFeed\",\r\n  \"generated_at\":\""+IsoTimeUTC(TimeGMT())+"\",\r\n  \"atr_length\":"+IntegerToString(UnifiedATRLength)+",\r\n  \"symbols\":[\r\n";
+   string lastSuccessful=(g_unifiedLastSuccessfulAtr>0?"\""+IsoTimeUTC(g_unifiedLastSuccessfulAtr)+"\"":"null");
+   string json="{\r\n  \"name\":\"MarketWatchUnifiedFeed\",\r\n  \"generated_at\":\""+IsoTimeUTC(TimeGMT())+"\",\r\n  \"last_successful_refresh\":"+lastSuccessful+",\r\n  \"atr_length\":"+IntegerToString(UnifiedATRLength)+",\r\n  \"symbols\":[\r\n";
    for(int i=0;i<ArraySize(g_unifiedSymbols);i++)
    {
       string symbol=g_unifiedSymbols[i]; MqlTick tick; double point=SymbolInfoDouble(symbol,SYMBOL_POINT);

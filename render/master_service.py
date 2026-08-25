@@ -953,7 +953,19 @@ def _manual_save_state_update(**kw: object) -> None:
 
 def _manual_save_state_snapshot() -> Dict[str, object]:
     with MANUAL_SAVE_GITHUB_SYNC_LOCK:
-        return dict(MANUAL_SAVE_GITHUB_SYNC_STATE)
+        snapshot = dict(MANUAL_SAVE_GITHUB_SYNC_STATE)
+    thread = _MANUAL_SAVE_WATCHER_THREAD
+    snapshot.update(
+        {
+            "manual_save_watcher_thread_alive": bool(thread and thread.is_alive()),
+            "manual_save_monitored_workbook_path": str(_master_journal_path().resolve()),
+            "manual_save_unsynchronized_change": bool(_MANUAL_SAVE_PENDING_FINGERPRINT),
+            "manual_save_worker_pid": os.getpid(),
+            "manual_save_worker_source_stamp": str(LOCAL_BUILD_INFO.get("source_stamp") or ""),
+            "manual_save_worker_git_commit": str(LOCAL_BUILD_INFO.get("git_commit") or ""),
+        }
+    )
+    return snapshot
 
 def _should_ignore_manual_save_path(path: Path) -> bool:
     n=path.name.lower()
@@ -1044,10 +1056,31 @@ def _manual_save_scan_once(now: float, master_path: Path | None = None) -> None:
     _MANUAL_SAVE_NEXT_RETRY_AT = now + retry_delay
     _manual_save_state_update(manual_save_pending=True, manual_save_retry_count=_MANUAL_SAVE_RETRY_COUNT, manual_save_next_retry_at=datetime.fromtimestamp(_MANUAL_SAVE_NEXT_RETRY_AT, timezone.utc).isoformat())
 def _manual_save_github_sync_watcher_loop() -> None:
+    global _MANUAL_SAVE_KNOWN_FINGERPRINT, _MANUAL_SAVE_PENDING_FINGERPRINT, _MANUAL_SAVE_PENDING_SINCE
+    global _MANUAL_SAVE_RETRY_COUNT, _MANUAL_SAVE_NEXT_RETRY_AT
     master_path=_master_journal_path()
     if _should_ignore_manual_save_path(master_path):
         return
-    _manual_save_set_known_fingerprint(master_path)
+    # Reconcile on every worker start instead of accepting the current bytes as
+    # clean. This catches a workbook saved while the worker was stopped and a
+    # locally committed workbook whose prior push never reached the target branch.
+    try:
+        fp = _manual_save_file_fingerprint(master_path)
+        now = time.time()
+        _MANUAL_SAVE_KNOWN_FINGERPRINT = ("startup_unreconciled",)
+        _MANUAL_SAVE_PENDING_FINGERPRINT = fp
+        _MANUAL_SAVE_PENDING_SINCE = now - _manual_save_watcher_debounce_seconds()
+        _MANUAL_SAVE_RETRY_COUNT = 0
+        _MANUAL_SAVE_NEXT_RETRY_AT = 0.0
+        _manual_save_state_update(
+            manual_save_last_detected_save_at=_utc_now_iso(),
+            manual_save_pending=True,
+            manual_save_retry_count=0,
+            manual_save_next_retry_at=None,
+        )
+        _manual_save_scan_once(now, master_path)
+    except Exception as exc:
+        _manual_save_state_update(manual_save_last_error=str(exc), manual_save_last_error_type=type(exc).__name__, manual_save_pending=True)
     while not _MANUAL_SAVE_WATCHER_STOP.is_set():
         try:
             _manual_save_scan_once(time.time(), master_path)
@@ -34073,7 +34106,9 @@ async def trading_journal_delete_row(row_id: str) -> JSONResponse:
 
 @app.get("/api/trading-journal/sync/status")
 async def trading_journal_sync_status() -> JSONResponse:
-    return JSONResponse({"ok": False, "message": "Trading Journal sync has been retired. Use Import on the Trading Journal workspace."}, status_code=410)
+    if _resolve_app_profile() != "local":
+        return JSONResponse({"ok": False, "message": "Local workbook synchronization diagnostics are unavailable in this profile."}, status_code=404)
+    return JSONResponse({"ok": True, **_manual_save_state_snapshot()})
 
 async def _legacy_trading_journal_sync_status() -> JSONResponse:
     global TRADING_JOURNAL_SYNC_TASK, TRADING_JOURNAL_SYNC_THREAD
@@ -35777,7 +35812,6 @@ def _repo_state_files_for_github(master_path: Path, timeout_s: int = 60) -> List
     allowlist = [
         master_resolved,
         repo_root / "journal" / "Trading Journal.xlsx",
-        repo_root / "journal" / "5-digit-demo-calculation-context.json",
     ]
     files: List[Path] = []
     seen: Set[Path] = set()

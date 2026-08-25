@@ -223,6 +223,30 @@ def test_mql5_trader_standard_market_is_live_quote_anchored_and_terminal_token_g
     assert "self.sort_column" in unified_window and "self.sort_desc" in unified_window
 
 
+def test_unified_market_watch_uses_one_table_trader_guidance_and_successful_atr_timestamp():
+    trader = (ROOT / "mt5-clone" / "MQL5" / "Experts" / "Trader.mq5").read_text(encoding="utf-8")
+    window = (ROOT / "mt5-clone" / "atr_percent_window.py").read_text(encoding="utf-8")
+
+    assert "ttk.Notebook" not in window
+    assert window.count("ttk.Treeview(") == 1
+    assert "self.ranked_tree" not in window
+    assert "self.diagnostic_tree" not in window
+    assert "Show ATR Top N only" in window
+    assert "rank_rows(self.rows, timeframe, self._safe_top_n())" in window
+    assert "attach Trader.mq5 in MT5 and enable Unified Market Watch" in window
+    assert "enable DLL imports only for automatic window launch" in window
+    assert "attach MarketWatchATRPercentFeed.mq5" not in window
+    assert "Waiting for first successful ATR calculation" in window
+
+    refresh = trader.split("void UnifiedRefreshFrame", 1)[1].split("void UnifiedProcessBatch", 1)[0]
+    export = trader.split("bool UnifiedExportFeed", 1)[1].split("string UnifiedQuote", 1)[0]
+    assert "g_unifiedLastSuccessfulAtr=TimeGMT();" in refresh
+    assert refresh.index("g_unifiedAtrPercent[slot]=") < refresh.index("g_unifiedLastSuccessfulAtr=TimeGMT();")
+    assert 'last_successful_refresh' in export
+    assert 'g_unifiedLastSuccessfulAtr>0' in export
+    assert '"null"' in export
+
+
 def test_mql5_trader_standard_limit_retries_transient_failures_without_duplicate_send():
     trader = (ROOT / "mt5-clone" / "MQL5" / "Experts" / "Trader.mq5").read_text(encoding="utf-8")
     maintain = trader.split("void MaintainStandardLimit", 1)[1].split("void RefreshTrendlineNameFromInputs", 1)[0]
