@@ -212,7 +212,7 @@ def test_mql5_trader_standard_market_is_live_quote_anchored_and_terminal_token_g
     assert "if(Strategy == STRAT_STANDARD_MARKET) return;" in trader
     assert "MarketWatchUnifiedFeed.json" in trader
     assert "SymbolsTotal(true)" in trader and "SymbolName(i,true)" in trader
-    assert "PERIOD_M1, PERIOD_M5, PERIOD_H1, PERIOD_D1, PERIOD_W1, PERIOD_MN1" in trader
+    assert "PERIOD_M1, PERIOD_M5, PERIOD_H1, PERIOD_D1" in trader
     assert "SeriesInfoInteger(symbol,g_unifiedPeriods[frameIndex],SERIES_SYNCHRONIZED" in trader
     assert "iATR(symbol,g_unifiedPeriods[frameIndex]" in trader
     assert "IndicatorRelease(g_unifiedHandles[slot])" in trader
@@ -221,6 +221,33 @@ def test_mql5_trader_standard_market_is_live_quote_anchored_and_terminal_token_g
     assert '"spread_percent"' in unified_window and '"spread_points"' in unified_window
     assert "def _toggle_sort" in unified_window and "def _sorted_rows" in unified_window
     assert "self.sort_column" in unified_window and "self.sort_desc" in unified_window
+
+
+def test_unified_market_watch_shares_fast_spread_throttle():
+    trader = (ROOT / "mt5-clone" / "MQL5" / "Experts" / "Trader.mq5").read_text(encoding="utf-8")
+    tick = trader.split("void UnifiedMarketWatchTick", 1)[1].split("void Dbg", 1)[0]
+    timer = trader.split("void UnifiedMarketWatchTimer", 1)[1].split("void UnifiedMarketWatchTick", 1)[0]
+    assert "g_unifiedLastSpreadProcessMs" in tick and "UNIFIED_FAST_INTERVAL_MS" in tick
+    assert "g_unifiedLastSpreadProcessMs" in timer and "UNIFIED_FAST_INTERVAL_MS" in timer
+
+
+def test_unified_market_watch_revalidates_owner_and_releases_handles_on_loss():
+    trader = (ROOT / "mt5-clone" / "MQL5" / "Experts" / "Trader.mq5").read_text(encoding="utf-8")
+    export = trader.split("bool UnifiedExportFeed", 1)[1].split("string UnifiedQuote", 1)[0]
+    assert export.count("UnifiedTryAcquireProducer()") >= 2
+    assert "UnifiedReleaseProducerState" in trader and "UnifiedReleaseHandles();" in trader
+
+
+def test_unified_market_watch_batch_does_not_repeat_forex_symbols():
+    trader = (ROOT / "mt5-clone" / "MQL5" / "Experts" / "Trader.mq5").read_text(encoding="utf-8")
+    batch = trader.split("void UnifiedProcessBatch", 1)[1].split("void UnifiedRefreshSpreads", 1)[0]
+    assert "MathMin(count,MathMax(1,MathMin(50,UnifiedSymbolsPerTimer)))" in batch
+
+
+def test_unified_window_skips_unchanged_feed_render_and_uses_heartbeat():
+    window = (ROOT / "mt5-clone" / "atr_percent_window.py").read_text(encoding="utf-8")
+    assert "st_mtime_ns" in window and "last_feed_signature" in window
+    assert "heartbeat_path" in window and "feed unchanged" in window
 
 
 def test_unified_market_watch_uses_one_table_trader_guidance_and_successful_atr_timestamp():

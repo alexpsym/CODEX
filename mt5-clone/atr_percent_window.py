@@ -181,6 +181,7 @@ class ATRPercentWindow:
     def __init__(self, root: tk.Tk, args: argparse.Namespace) -> None:
         self.root = root
         self.feed_path = Path(args.file)
+        self.heartbeat_path = self.feed_path.with_name(self.feed_path.name + ".heartbeat")
         self.refresh_ms = clamp(args.refresh_ms, 100, 5000)
         self.decimals = clamp(args.decimals, 0, 8)
         self.font_size = clamp(args.font_size, 8, 22)
@@ -188,6 +189,7 @@ class ATRPercentWindow:
         self.sort_column = "symbol"
         self.sort_desc = False
         self.last_good_feed: dict[str, Any] | None = None
+        self.last_feed_signature: tuple[int, int] | None = None
         self.rank_timeframe = tk.StringVar(value=args.rank_timeframe if args.rank_timeframe in TIMEFRAME_KEYS else "1m")
         self.top_n = tk.IntVar(value=clamp(args.top_n, 1, 100))
         self.ranked_only = tk.BooleanVar(value=False)
@@ -342,7 +344,27 @@ class ATRPercentWindow:
             raise ValueError("ATR feed root is not an object")
         return parsed
 
+    def _file_signature(self) -> tuple[int, int] | None:
+        try:
+            stat = self.feed_path.stat()
+        except OSError:
+            return None
+        return stat.st_mtime_ns, stat.st_size
+
+    def _heartbeat_age_seconds(self) -> float:
+        try:
+            return max(0.0, time.time() - self.heartbeat_path.stat().st_mtime)
+        except OSError:
+            return float("inf")
+
     def _refresh(self) -> None:
+        signature = self._file_signature()
+        if signature is not None and signature == self.last_feed_signature and self.last_good_feed is not None:
+            age_seconds = self._heartbeat_age_seconds()
+            state = classify_window_state(self.rows, feed_age_seconds=age_seconds, heartbeat_tolerance_seconds=max(5, self.refresh_ms * 6 // 1000))
+            self.status_var.set(f"{state} | {sum(1 for row in self.rows if row.is_forex)}/{len(self.rows)} selected symbols are forex | feed unchanged | heartbeat age {int(age_seconds)}s")
+            self._schedule_refresh()
+            return
         try:
             feed = self._read_feed()
             parsed_rows = parse_feed_rows(feed)
@@ -363,12 +385,13 @@ class ATRPercentWindow:
             return
 
         self.last_good_feed = feed
+        self.last_feed_signature = signature
         self.rows = parsed_rows
         generated_at = str(feed.get("generated_at") or "unknown")
         last_success = feed.get("last_successful_refresh")
         atr_length = feed.get("atr_length", "unknown")
         try:
-            age_seconds = max(0, int(time.time() - self.feed_path.stat().st_mtime))
+            age_seconds = int(self._heartbeat_age_seconds())
         except OSError:
             age_seconds = 0
         forex_count = sum(1 for row in self.rows if row.is_forex)

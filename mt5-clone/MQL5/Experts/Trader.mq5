@@ -164,6 +164,10 @@ string g_unifiedLeaseName = "";
 double g_unifiedOwnerToken = 0.0;
 ulong g_unifiedLastAtrProcessMs = 0;
 ulong g_unifiedLastMaintenanceMs = 0;
+ulong g_unifiedLastSpreadProcessMs = 0;
+ulong g_unifiedLastHeartbeatMs = 0;
+const ulong UNIFIED_FAST_INTERVAL_MS = 150;
+const ulong UNIFIED_HEARTBEAT_INTERVAL_MS = 1000;
 
 bool UnifiedIsCurrency(const string value)
 {
@@ -253,6 +257,7 @@ void UnifiedRefreshFrame(const int symbolIndex,const int frameIndex)
    if(copied != 1 || buffer[0] == EMPTY_VALUE || !MathIsValidNumber(buffer[0]) || buffer[0] <= 0.0 || close == EMPTY_VALUE || !MathIsValidNumber(close) || close <= 0.0)
    {
       int errorCode=GetLastError();
+      if(errorCode!=0 && g_unifiedHandles[slot]!=INVALID_HANDLE) { IndicatorRelease(g_unifiedHandles[slot]); g_unifiedHandles[slot]=INVALID_HANDLE; }
       UnifiedScheduleRetry(slot,symbol,frameIndex,errorCode,"closed-candle ATR/close unavailable"); return;
    }
    double percent=(buffer[0]/close)*100.0;
@@ -267,7 +272,7 @@ void UnifiedRefreshFrame(const int symbolIndex,const int frameIndex)
 void UnifiedProcessBatch()
 {
    int count=ArraySize(g_unifiedForexWorklist); if(count<=0) return;
-   int batch=MathMax(1,MathMin(50,UnifiedSymbolsPerTimer));
+   int batch=MathMin(count,MathMax(1,MathMin(50,UnifiedSymbolsPerTimer)));
    for(int n=0;n<batch;n++)
    {
       int index=g_unifiedForexWorklist[g_unifiedCursor%count];
@@ -292,6 +297,7 @@ void UnifiedRefreshSpreads()
 bool UnifiedExportFeed()
 {
    if(!g_unifiedFeedDirty) return true;
+   if(!UnifiedTryAcquireProducer()) return false;
    int handle=FileOpen(UnifiedMarketWatchFileName,FILE_WRITE|FILE_TXT|FILE_ANSI|FILE_COMMON);
    if(handle==INVALID_HANDLE) { Print(EA_COMMENT, ": unified feed open failed error=",IntegerToString(GetLastError())); return false; }
    string lastSuccessful=(g_unifiedLastSuccessfulAtr>0?"\""+IsoTimeUTC(g_unifiedLastSuccessfulAtr)+"\"":"null");
@@ -309,6 +315,7 @@ bool UnifiedExportFeed()
       }
       json+="}";
    }
+   if(!UnifiedTryAcquireProducer()) { FileClose(handle); return false; }
    json+="\r\n  ]\r\n}\r\n"; FileWriteString(handle,json); FileClose(handle); g_unifiedFeedDirty=false; return true;
 }
 
@@ -325,7 +332,9 @@ void UnifiedLaunchWindow()
 
 void UnifiedConfigureOwnership()
 {
-   string suffix=IntegerToString((long)AccountInfoInteger(ACCOUNT_LOGIN))+"_"+IntegerToString(StringLen(UnifiedMarketWatchFileName));
+   uint hash=2166136261;
+   for(int i=0;i<StringLen(UnifiedMarketWatchFileName);i++) hash=(hash ^ (uint)StringGetCharacter(UnifiedMarketWatchFileName,i))*16777619;
+   string suffix=IntegerToString((long)AccountInfoInteger(ACCOUNT_LOGIN))+"_"+IntegerToString((long)TerminalInfoInteger(TERMINAL_BUILD))+"_"+IntegerToString((long)hash);
    g_unifiedOwnerName="TraderUnifiedOwner_"+suffix; g_unifiedLeaseName="TraderUnifiedLease_"+suffix; g_unifiedOwnerToken=(double)ChartID();
 }
 
@@ -339,6 +348,19 @@ bool UnifiedTryAcquireProducer()
    g_unifiedIsProducer=false; return false;
 }
 
+void UnifiedReleaseProducerState()
+{
+   UnifiedReleaseHandles(); ArrayResize(g_unifiedSymbols,0); ArrayResize(g_unifiedForexWorklist,0); g_unifiedFeedDirty=false;
+}
+
+void UnifiedWriteHeartbeat()
+{
+   ulong now=GetTickCount64();
+   if(now-g_unifiedLastHeartbeatMs<UNIFIED_HEARTBEAT_INTERVAL_MS || !UnifiedTryAcquireProducer()) return;
+   int handle=FileOpen(UnifiedMarketWatchFileName+".heartbeat",FILE_WRITE|FILE_TXT|FILE_ANSI|FILE_COMMON);
+   if(handle!=INVALID_HANDLE) { FileWriteString(handle,IntegerToString((long)TimeGMT())); FileClose(handle); g_unifiedLastHeartbeatMs=now; }
+}
+
 void UnifiedReleaseOwnership()
 {
    if(g_unifiedIsProducer && GlobalVariableCheck(g_unifiedOwnerName) && GlobalVariableGet(g_unifiedOwnerName)==g_unifiedOwnerToken)
@@ -346,18 +368,19 @@ void UnifiedReleaseOwnership()
    g_unifiedIsProducer=false;
 }
 
-void UnifiedMarketWatchInit() { if(!EnableUnifiedMarketWatch) return; UnifiedConfigureOwnership(); if(UnifiedTryAcquireProducer()) { UnifiedRebuildUniverse(); UnifiedRefreshSpreads(); UnifiedProcessBatch(); UnifiedExportFeed(); } UnifiedLaunchWindow(); }
+void UnifiedMarketWatchInit() { if(!EnableUnifiedMarketWatch) return; UnifiedConfigureOwnership(); if(UnifiedTryAcquireProducer()) { UnifiedRebuildUniverse(); UnifiedRefreshSpreads(); UnifiedProcessBatch(); UnifiedExportFeed(); UnifiedWriteHeartbeat(); UnifiedLaunchWindow(); } }
 void UnifiedMarketWatchTimer()
 {
    if(!EnableUnifiedMarketWatch) return;
-   if(!UnifiedTryAcquireProducer()) return;
-   UnifiedRefreshSpreads();
+   if(!UnifiedTryAcquireProducer()) { UnifiedReleaseProducerState(); return; }
    ulong now=GetTickCount64();
-   if(now-g_unifiedLastAtrProcessMs>=1000) { if(UnifiedSignature()!=g_unifiedSignature) UnifiedRebuildUniverse(); UnifiedProcessBatch(); g_unifiedLastAtrProcessMs=now; }
+   if(now-g_unifiedLastSpreadProcessMs>=UNIFIED_FAST_INTERVAL_MS) { UnifiedRefreshSpreads(); g_unifiedLastSpreadProcessMs=now; }
+   UnifiedWriteHeartbeat();
+   if(now-g_unifiedLastAtrProcessMs>=1000) { if(UnifiedSignature()!=g_unifiedSignature) UnifiedRebuildUniverse(); UnifiedTryAcquireProducer(); UnifiedProcessBatch(); g_unifiedLastAtrProcessMs=now; if(!UnifiedTryAcquireProducer()) { UnifiedReleaseProducerState(); return; } }
    UnifiedExportFeed();
 }
 
-void UnifiedMarketWatchTick() { if(EnableUnifiedMarketWatch && UnifiedTryAcquireProducer()) { UnifiedRefreshSpreads(); UnifiedExportFeed(); } }
+void UnifiedMarketWatchTick() { if(!EnableUnifiedMarketWatch || !g_unifiedIsProducer) return; ulong now=GetTickCount64(); if(now-g_unifiedLastSpreadProcessMs<UNIFIED_FAST_INTERVAL_MS) return; if(!UnifiedTryAcquireProducer()) { UnifiedReleaseProducerState(); return; } UnifiedRefreshSpreads(); g_unifiedLastSpreadProcessMs=now; UnifiedExportFeed(); }
 
 void Dbg(const string msg){ if(Debug) Print(EA_COMMENT, ": ", msg); }
 bool PlaceOrReplacePendingLimitAtEntry(const bool isBuyLimit,
