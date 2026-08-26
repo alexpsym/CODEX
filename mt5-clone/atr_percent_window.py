@@ -391,13 +391,11 @@ class ATRPercentWindow:
         generated_at = str(feed.get("generated_at") or "unknown")
         last_success = feed.get("last_successful_refresh")
         atr_length = feed.get("atr_length", "unknown")
-        try:
-            heartbeat_age = self._heartbeat_age_seconds()
-            age_seconds = int(heartbeat_age) if heartbeat_age is not None else 999999
-        except OSError:
-            age_seconds = 999999
+        heartbeat_age = self._heartbeat_age_seconds()
+        age_seconds = heartbeat_age if heartbeat_age is not None else 0.0
+        heartbeat_text = "unavailable" if heartbeat_age is None else f"{int(heartbeat_age)}s"
         forex_count = sum(1 for row in self.rows if row.is_forex)
-        state = classify_window_state(
+        state = "Stale" if heartbeat_age is None else classify_window_state(
             self.rows,
             feed_age_seconds=age_seconds,
             heartbeat_tolerance_seconds=max(
@@ -411,7 +409,7 @@ class ATRPercentWindow:
         )
         self.status_var.set(
             f"{state} | {forex_count}/{len(self.rows)} selected symbols are forex | ATR({atr_length}) | "
-            f"{refresh_text} | feed written {generated_at} | file age {age_seconds}s"
+            f"{refresh_text} | feed written {generated_at} | heartbeat age {heartbeat_text}"
         )
         self._render_rows()
         self._schedule_refresh()

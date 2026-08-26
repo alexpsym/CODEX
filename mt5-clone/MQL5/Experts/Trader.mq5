@@ -168,6 +168,7 @@ ulong g_unifiedLastSpreadProcessMs = 0;
 ulong g_unifiedLastHeartbeatMs = 0;
 const ulong UNIFIED_FAST_INTERVAL_MS = 150;
 const ulong UNIFIED_HEARTBEAT_INTERVAL_MS = 1000;
+const double UNIFIED_LEASE_SECONDS = 15.0;
 
 bool UnifiedIsCurrency(const string value)
 {
@@ -269,16 +270,18 @@ void UnifiedRefreshFrame(const int symbolIndex,const int frameIndex)
    if(changed) g_unifiedFeedDirty=true;
 }
 
-void UnifiedProcessBatch()
+bool UnifiedProcessBatch()
 {
-   int count=ArraySize(g_unifiedForexWorklist); if(count<=0) return;
+   int count=ArraySize(g_unifiedForexWorklist); if(count<=0) return true;
    int batch=MathMin(count,MathMax(1,MathMin(50,UnifiedSymbolsPerTimer)));
    for(int n=0;n<batch;n++)
    {
+      if(!UnifiedTryAcquireProducer()) return false;
       int index=g_unifiedForexWorklist[g_unifiedCursor%count];
       for(int f=0;f<UNIFIED_FRAME_COUNT;f++) UnifiedRefreshFrame(index,f);
       g_unifiedCursor=(g_unifiedCursor+1)%count;
    }
+   return true;
 }
 
 void UnifiedRefreshSpreads()
@@ -317,9 +320,10 @@ bool UnifiedExportFeed()
    string temporary=UnifiedMarketWatchFileName+"."+IntegerToString((long)ChartID())+".tmp";
    int handle=FileOpen(temporary,FILE_WRITE|FILE_TXT|FILE_ANSI|FILE_COMMON);
    if(handle==INVALID_HANDLE) { Print(EA_COMMENT, ": unified feed open failed error=",IntegerToString(GetLastError())); return false; }
-   FileWriteString(handle,json); FileClose(handle);
+   uint written=FileWriteString(handle,json); FileClose(handle);
+   if(written!=(uint)StringLen(json)) { FileDelete(temporary,FILE_COMMON); return false; }
    if(!UnifiedTryAcquireProducer()) { FileDelete(temporary,FILE_COMMON); return false; }
-   if(!FileMove(temporary,FILE_COMMON,UnifiedMarketWatchFileName,FILE_REWRITE)) { FileDelete(temporary,FILE_COMMON); return false; }
+   if(!FileMove(temporary,FILE_COMMON,UnifiedMarketWatchFileName,FILE_COMMON|FILE_REWRITE)) { FileDelete(temporary,FILE_COMMON); return false; }
    g_unifiedFeedDirty=false; return true;
 }
 
@@ -345,13 +349,13 @@ void UnifiedConfigureOwnership()
 bool UnifiedTryAcquireProducer()
 {
    if(g_unifiedOwnerName=="") UnifiedConfigureOwnership();
-   if(!GlobalVariableCheck(g_unifiedOwnerName)) GlobalVariableSet(g_unifiedOwnerName,0.0);
+   if(!GlobalVariableCheck(g_unifiedOwnerName) && GlobalVariableTemp(g_unifiedOwnerName)==0) return false;
    double observed=GlobalVariableGet(g_unifiedOwnerName), now=(double)TimeLocal();
    bool current=(g_unifiedIsProducer && observed==g_unifiedOwnerState);
    bool stale=(MathFloor(observed)<now);
    if(!current && !stale) { g_unifiedIsProducer=false; return false; }
    g_unifiedOwnerGeneration++;
-   double renewed=now+3.0+((double)(g_unifiedOwnerGeneration%100000)/100000.0);
+   double renewed=now+UNIFIED_LEASE_SECONDS+((double)(g_unifiedOwnerGeneration%100000)/100000.0);
    if(GlobalVariableSetOnCondition(g_unifiedOwnerName,renewed,observed))
    { g_unifiedOwnerState=renewed; g_unifiedIsProducer=true; return true; }
    g_unifiedIsProducer=false; return false;
@@ -377,20 +381,33 @@ void UnifiedReleaseOwnership()
    g_unifiedIsProducer=false;
 }
 
-void UnifiedMarketWatchInit() { if(!EnableUnifiedMarketWatch) return; UnifiedConfigureOwnership(); if(UnifiedTryAcquireProducer()) { UnifiedRebuildUniverse(); UnifiedRefreshSpreads(); UnifiedProcessBatch(); UnifiedExportFeed(); UnifiedWriteHeartbeat(); UnifiedLaunchWindow(); } }
+void UnifiedMarketWatchInit()
+{
+   if(!EnableUnifiedMarketWatch) return;
+   UnifiedConfigureOwnership();
+   if(!UnifiedTryAcquireProducer()) return;
+   UnifiedRebuildUniverse();
+   if(!UnifiedTryAcquireProducer()) { UnifiedReleaseProducerState(); return; }
+   UnifiedRefreshSpreads();
+   if(!UnifiedTryAcquireProducer() || !UnifiedProcessBatch()) { UnifiedReleaseProducerState(); return; }
+   if(!UnifiedTryAcquireProducer() || !UnifiedExportFeed()) { if(!UnifiedTryAcquireProducer()) UnifiedReleaseProducerState(); return; }
+   UnifiedWriteHeartbeat();
+   if(!UnifiedTryAcquireProducer()) { UnifiedReleaseProducerState(); return; }
+   UnifiedLaunchWindow();
+}
 void UnifiedMarketWatchTimer()
 {
    if(!EnableUnifiedMarketWatch) return;
    if(!UnifiedTryAcquireProducer()) { UnifiedReleaseProducerState(); return; }
-   if(g_unifiedSignature=="") UnifiedRebuildUniverse();
+   if(g_unifiedSignature=="") { if(!UnifiedTryAcquireProducer()) { UnifiedReleaseProducerState(); return; } UnifiedRebuildUniverse(); }
    ulong now=GetTickCount64();
-   if(now-g_unifiedLastSpreadProcessMs>=UNIFIED_FAST_INTERVAL_MS) { UnifiedRefreshSpreads(); g_unifiedLastSpreadProcessMs=now; }
+   if(now-g_unifiedLastSpreadProcessMs>=UNIFIED_FAST_INTERVAL_MS) { if(!UnifiedTryAcquireProducer()) { UnifiedReleaseProducerState(); return; } UnifiedRefreshSpreads(); g_unifiedLastSpreadProcessMs=now; }
    UnifiedWriteHeartbeat();
-   if(now-g_unifiedLastAtrProcessMs>=1000) { if(UnifiedSignature()!=g_unifiedSignature) UnifiedRebuildUniverse(); if(!UnifiedTryAcquireProducer()) { UnifiedReleaseProducerState(); return; } UnifiedProcessBatch(); g_unifiedLastAtrProcessMs=now; if(!UnifiedTryAcquireProducer()) { UnifiedReleaseProducerState(); return; } }
-   UnifiedExportFeed();
+   if(now-g_unifiedLastAtrProcessMs>=1000) { if(UnifiedSignature()!=g_unifiedSignature) { if(!UnifiedTryAcquireProducer()) { UnifiedReleaseProducerState(); return; } UnifiedRebuildUniverse(); } if(!UnifiedTryAcquireProducer() || !UnifiedProcessBatch()) { UnifiedReleaseProducerState(); return; } g_unifiedLastAtrProcessMs=now; if(!UnifiedTryAcquireProducer()) { UnifiedReleaseProducerState(); return; } }
+   if(!UnifiedExportFeed() && !UnifiedTryAcquireProducer()) { UnifiedReleaseProducerState(); return; }
 }
 
-void UnifiedMarketWatchTick() { if(!EnableUnifiedMarketWatch || !g_unifiedIsProducer) return; ulong now=GetTickCount64(); if(now-g_unifiedLastSpreadProcessMs<UNIFIED_FAST_INTERVAL_MS) return; if(!UnifiedTryAcquireProducer()) { UnifiedReleaseProducerState(); return; } UnifiedRefreshSpreads(); g_unifiedLastSpreadProcessMs=now; UnifiedExportFeed(); }
+void UnifiedMarketWatchTick() { if(!EnableUnifiedMarketWatch || !g_unifiedIsProducer) return; ulong now=GetTickCount64(); if(now-g_unifiedLastSpreadProcessMs<UNIFIED_FAST_INTERVAL_MS) return; if(!UnifiedTryAcquireProducer()) { UnifiedReleaseProducerState(); return; } UnifiedRefreshSpreads(); g_unifiedLastSpreadProcessMs=now; if(!UnifiedExportFeed() && !UnifiedTryAcquireProducer()) { UnifiedReleaseProducerState(); return; } }
 
 void Dbg(const string msg){ if(Debug) Print(EA_COMMENT, ": ", msg); }
 bool PlaceOrReplacePendingLimitAtEntry(const bool isBuyLimit,

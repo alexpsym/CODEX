@@ -1,13 +1,19 @@
 CODEX COMPLETION SUMMARY
-Brief: Correct remaining Unified Trader ownership, safe publication, reacquisition, and heartbeat defects.
+Brief: Correct remaining Unified Trader shared-feed publication, producer overlap, and missing-heartbeat defects.
 Recorded: 2026-08-26 (Australia/Brisbane)
 
-- Producer ownership is a single terminal-global versioned expiry state. Every acquire/renew/takeover performs one compare-and-swap against the observed state and increments the local generation before publishing a new state.
-- Unified feed JSON is built completely in memory. The producer renews/validates before creating a temporary common-file output and again before atomically moving it over the live feed, so ownership loss cannot truncate the live file.
-- Ownership loss releases ATR handles and clears the producer universe/signature/timestamps. Reacquisition sees the empty signature, rebuilds the universe, and resumes bounded spread/ATR work.
-- Missing heartbeat files return None in the window; unchanged cached tables remain rendered and receive an explicit Stale/unavailable status without numeric conversion exceptions.
-- Focused regression nodes exercised ownership ordering, safe export ordering, timer ATR gating/rebuild, and the executable no-GUI missing-heartbeat path. Trader.mq5 compiled with zero errors and warnings.
+- Unified feed publication verifies the complete temporary write and replaces the live common-folder feed with FileMove(temporary,FILE_COMMON,UnifiedMarketWatchFileName,FILE_COMMON|FILE_REWRITE). Failures delete only the temporary file and leave the feed dirty for retry.
+- Race-safe ownership-state creation uses GlobalVariableTemp without overwriting an existing owner. The existing single-state versioned CAS design now uses a named 15-second lease.
+- UnifiedProcessBatch returns ownership failure and renews/validates before each Forex symbol. Initialization, timer, and tick paths stop at failed checkpoints and release producer state where ownership was lost.
+- Both changed-feed and unchanged-feed Python paths classify a missing heartbeat as Stale, show heartbeat age unavailable, retain last-good data, and preserve unchanged-feed render skipping.
 
-This required summary was written immediately before the repository push workflow; it does not claim a push result.
+VERIFICATION
 
-- Corrective delivery note: the push helper staged the existing runtime journal despite its exclusion report. The current runtime bytes were backed up, the tracked file was restored to its fcee1f3 baseline for this corrective commit, and those bytes will be restored locally after the push.
+- Exact pytest nodes: test_unified_feed_publish_targets_common_folder; test_unified_producer_guards_initialization_and_each_batch_unit; test_atr_window_missing_heartbeat_is_safe_in_changed_and_unchanged_paths. Result: 3 passed, with only pytest cache permission warnings.
+- MetaEditor compiled only mt5-clone/MQL5/Experts/Trader.mq5: 0 errors, 0 warnings, 5046 ms elapsed.
+- git diff --check completed without errors; only expected CRLF conversion warnings were reported.
+
+DELIVERY
+
+- The local journal runtime bytes were backed up before restoring the tracked baseline for the commit and will be restored after push verification.
+- This summary was written immediately before PATCH_DESKTOP_PUSH.bat and does not claim a push result.

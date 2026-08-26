@@ -224,33 +224,32 @@ def test_mql5_trader_standard_market_is_live_quote_anchored_and_terminal_token_g
     assert "self.sort_column" in unified_window and "self.sort_desc" in unified_window
 
 
-def test_unified_producer_ownership_is_atomic_and_versioned():
-    trader = (ROOT / "mt5-clone" / "MQL5" / "Experts" / "Trader.mq5").read_text(encoding="utf-8")
-    ownership = trader.split("bool UnifiedTryAcquireProducer", 1)[1].split("void UnifiedReleaseProducerState", 1)[0]
-    assert "g_unifiedLeaseName" not in ownership
-    assert ownership.index("GlobalVariableGet(g_unifiedOwnerName)") < ownership.index("GlobalVariableSetOnCondition(g_unifiedOwnerName,renewed,observed)")
-    assert ownership.index("g_unifiedOwnerGeneration++") < ownership.index("GlobalVariableSetOnCondition(g_unifiedOwnerName,renewed,observed)")
-    assert "observed==g_unifiedOwnerState" in ownership
-
-
-def test_unified_feed_export_cannot_truncate_before_final_ownership_check():
+def test_unified_feed_publish_targets_common_folder():
     trader = (ROOT / "mt5-clone" / "MQL5" / "Experts" / "Trader.mq5").read_text(encoding="utf-8")
     export = trader.split("bool UnifiedExportFeed", 1)[1].split("string UnifiedQuote", 1)[0]
-    assert export.index("json+=\"\\r\\n  ]") < export.index("if(!UnifiedTryAcquireProducer()) return false;") < export.index("FileOpen(temporary,FILE_WRITE")
-    assert export.index("FileClose(handle);") < export.rindex("if(!UnifiedTryAcquireProducer())") < export.index("FileMove(temporary,FILE_COMMON,UnifiedMarketWatchFileName,FILE_REWRITE)")
+    move = "FileMove(temporary,FILE_COMMON,UnifiedMarketWatchFileName,FILE_COMMON|FILE_REWRITE)"
+    assert move in export
+    assert "FileMove(temporary,FILE_COMMON,UnifiedMarketWatchFileName,FILE_REWRITE)" not in export
+    assert export.index("written!=(uint)StringLen(json)") < export.index("if(!UnifiedTryAcquireProducer()) { FileDelete(temporary,FILE_COMMON); return false; }") < export.index(move)
+    assert "g_unifiedFeedDirty=false" in export and export.index("g_unifiedFeedDirty=false") > export.index(move)
 
 
-def test_unified_timer_gates_atr_batch_and_rebuilds_after_reacquisition():
+def test_unified_producer_guards_initialization_and_each_batch_unit():
     trader = (ROOT / "mt5-clone" / "MQL5" / "Experts" / "Trader.mq5").read_text(encoding="utf-8")
+    ownership = trader.split("bool UnifiedTryAcquireProducer", 1)[1].split("void UnifiedReleaseProducerState", 1)[0]
+    batch = trader.split("bool UnifiedProcessBatch", 1)[1].split("void UnifiedRefreshSpreads", 1)[0]
+    init = trader.split("void UnifiedMarketWatchInit", 1)[1].split("void UnifiedMarketWatchTimer", 1)[0]
     timer = trader.split("void UnifiedMarketWatchTimer", 1)[1].split("void UnifiedMarketWatchTick", 1)[0]
-    assert timer.index("if(!UnifiedTryAcquireProducer()) { UnifiedReleaseProducerState(); return; }") < timer.index("if(g_unifiedSignature==\"\") UnifiedRebuildUniverse();") < timer.index("UnifiedProcessBatch();")
-    atr_block = timer[timer.index("if(now-g_unifiedLastAtrProcessMs"):timer.index("UnifiedExportFeed();")]
-    assert atr_block.index("if(!UnifiedTryAcquireProducer()) { UnifiedReleaseProducerState(); return; }") < atr_block.index("UnifiedProcessBatch();")
-    released = trader.split("void UnifiedReleaseProducerState", 1)[1].split("void UnifiedWriteHeartbeat", 1)[0]
-    assert "UnifiedReleaseHandles();" in released and "g_unifiedSignature=\"\"" in released
+    assert "GlobalVariableSet(g_unifiedOwnerName,0.0)" not in ownership
+    assert ownership.index("GlobalVariableTemp(g_unifiedOwnerName)") < ownership.index("GlobalVariableGet(g_unifiedOwnerName)") < ownership.index("GlobalVariableSetOnCondition(g_unifiedOwnerName,renewed,observed)")
+    loop = batch[batch.index("for(int n=0;n<batch;n++)"):]
+    assert loop.index("if(!UnifiedTryAcquireProducer()) return false;") < loop.index("UnifiedRefreshFrame(index,f)")
+    assert "if(!UnifiedTryAcquireProducer() || !UnifiedProcessBatch()) { UnifiedReleaseProducerState(); return; }" in init
+    assert init.index("UnifiedTryAcquireProducer()") < init.index("UnifiedRefreshSpreads()") < init.index("UnifiedProcessBatch()") < init.index("UnifiedExportFeed()") < init.rindex("UnifiedTryAcquireProducer()") < init.index("UnifiedLaunchWindow()")
+    assert "!UnifiedProcessBatch()) { UnifiedReleaseProducerState(); return; }" in timer
 
 
-def test_atr_window_missing_heartbeat_is_safe(tmp_path):
+def test_atr_window_missing_heartbeat_is_safe_in_changed_and_unchanged_paths(tmp_path):
     spec = importlib.util.spec_from_file_location("unified_window_test", ROOT / "mt5-clone" / "atr_percent_window.py")
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
@@ -264,8 +263,8 @@ def test_atr_window_missing_heartbeat_is_safe(tmp_path):
     window = module.ATRPercentWindow.__new__(module.ATRPercentWindow)
     window.feed_path = feed_path
     window.heartbeat_path = tmp_path / "missing.heartbeat"
-    window.last_feed_signature = window._file_signature()
-    window.last_good_feed = {"symbols": []}
+    window.last_feed_signature = None
+    window.last_good_feed = None
     window.rows = []
     window.refresh_ms = 500
     rendered = []
@@ -277,8 +276,12 @@ def test_atr_window_missing_heartbeat_is_safe(tmp_path):
     window._render_rows = lambda: rendered.append(True)
     window._schedule_refresh = lambda *args: scheduled.append(True)
     window._refresh()
-    assert "Stale" in window.status_var.value and "unavailable" in window.status_var.value
-    assert not rendered and scheduled and window.last_good_feed == {"symbols": []}
+    assert "Stale" in window.status_var.value and "heartbeat age unavailable" in window.status_var.value
+    assert rendered and window.last_good_feed == {"symbols": []}
+    rendered.clear()
+    window._refresh()
+    assert "Stale" in window.status_var.value and "heartbeat age unavailable" in window.status_var.value
+    assert not rendered and window.last_good_feed == {"symbols": []} and len(scheduled) == 2
 
 
 def test_unified_market_watch_uses_one_table_trader_guidance_and_successful_atr_timestamp():
