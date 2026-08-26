@@ -160,8 +160,8 @@ datetime g_unifiedLastSuccessfulAtr = 0;
 bool g_unifiedFeedDirty = false;
 bool g_unifiedIsProducer = false;
 string g_unifiedOwnerName = "";
-string g_unifiedLeaseName = "";
-double g_unifiedOwnerToken = 0.0;
+double g_unifiedOwnerState = 0.0;
+uint g_unifiedOwnerGeneration = 0;
 ulong g_unifiedLastAtrProcessMs = 0;
 ulong g_unifiedLastMaintenanceMs = 0;
 ulong g_unifiedLastSpreadProcessMs = 0;
@@ -297,9 +297,6 @@ void UnifiedRefreshSpreads()
 bool UnifiedExportFeed()
 {
    if(!g_unifiedFeedDirty) return true;
-   if(!UnifiedTryAcquireProducer()) return false;
-   int handle=FileOpen(UnifiedMarketWatchFileName,FILE_WRITE|FILE_TXT|FILE_ANSI|FILE_COMMON);
-   if(handle==INVALID_HANDLE) { Print(EA_COMMENT, ": unified feed open failed error=",IntegerToString(GetLastError())); return false; }
    string lastSuccessful=(g_unifiedLastSuccessfulAtr>0?"\""+IsoTimeUTC(g_unifiedLastSuccessfulAtr)+"\"":"null");
    string json="{\r\n  \"name\":\"MarketWatchUnifiedFeed\",\r\n  \"generated_at\":\""+IsoTimeUTC(TimeGMT())+"\",\r\n  \"last_successful_refresh\":"+lastSuccessful+",\r\n  \"atr_length\":"+IntegerToString(UnifiedATRLength)+",\r\n  \"symbols\":[\r\n";
    for(int i=0;i<ArraySize(g_unifiedSymbols);i++)
@@ -315,8 +312,15 @@ bool UnifiedExportFeed()
       }
       json+="}";
    }
-   if(!UnifiedTryAcquireProducer()) { FileClose(handle); return false; }
-   json+="\r\n  ]\r\n}\r\n"; FileWriteString(handle,json); FileClose(handle); g_unifiedFeedDirty=false; return true;
+   json+="\r\n  ]\r\n}\r\n";
+   if(!UnifiedTryAcquireProducer()) return false;
+   string temporary=UnifiedMarketWatchFileName+"."+IntegerToString((long)ChartID())+".tmp";
+   int handle=FileOpen(temporary,FILE_WRITE|FILE_TXT|FILE_ANSI|FILE_COMMON);
+   if(handle==INVALID_HANDLE) { Print(EA_COMMENT, ": unified feed open failed error=",IntegerToString(GetLastError())); return false; }
+   FileWriteString(handle,json); FileClose(handle);
+   if(!UnifiedTryAcquireProducer()) { FileDelete(temporary,FILE_COMMON); return false; }
+   if(!FileMove(temporary,FILE_COMMON,UnifiedMarketWatchFileName,FILE_REWRITE)) { FileDelete(temporary,FILE_COMMON); return false; }
+   g_unifiedFeedDirty=false; return true;
 }
 
 string UnifiedQuote(const string value) { string escaped=value; StringReplace(escaped,"\"","\\\""); return "\""+escaped+"\""; }
@@ -335,22 +339,27 @@ void UnifiedConfigureOwnership()
    uint hash=2166136261;
    for(int i=0;i<StringLen(UnifiedMarketWatchFileName);i++) hash=(hash ^ (uint)StringGetCharacter(UnifiedMarketWatchFileName,i))*16777619;
    string suffix=IntegerToString((long)AccountInfoInteger(ACCOUNT_LOGIN))+"_"+IntegerToString((long)TerminalInfoInteger(TERMINAL_BUILD))+"_"+IntegerToString((long)hash);
-   g_unifiedOwnerName="TraderUnifiedOwner_"+suffix; g_unifiedLeaseName="TraderUnifiedLease_"+suffix; g_unifiedOwnerToken=(double)ChartID();
+   g_unifiedOwnerName="TraderUnifiedOwner_"+suffix;
 }
 
 bool UnifiedTryAcquireProducer()
 {
    if(g_unifiedOwnerName=="") UnifiedConfigureOwnership();
    if(!GlobalVariableCheck(g_unifiedOwnerName)) GlobalVariableSet(g_unifiedOwnerName,0.0);
-   double owner=GlobalVariableGet(g_unifiedOwnerName), lease=GlobalVariableCheck(g_unifiedLeaseName)?GlobalVariableGet(g_unifiedLeaseName):0.0, now=(double)TimeLocal();
-   if(owner==g_unifiedOwnerToken || (lease<now && GlobalVariableSetOnCondition(g_unifiedOwnerName,g_unifiedOwnerToken,owner)))
-   { GlobalVariableSet(g_unifiedLeaseName,now+3.0); g_unifiedIsProducer=true; return true; }
+   double observed=GlobalVariableGet(g_unifiedOwnerName), now=(double)TimeLocal();
+   bool current=(g_unifiedIsProducer && observed==g_unifiedOwnerState);
+   bool stale=(MathFloor(observed)<now);
+   if(!current && !stale) { g_unifiedIsProducer=false; return false; }
+   g_unifiedOwnerGeneration++;
+   double renewed=now+3.0+((double)(g_unifiedOwnerGeneration%100000)/100000.0);
+   if(GlobalVariableSetOnCondition(g_unifiedOwnerName,renewed,observed))
+   { g_unifiedOwnerState=renewed; g_unifiedIsProducer=true; return true; }
    g_unifiedIsProducer=false; return false;
 }
 
 void UnifiedReleaseProducerState()
 {
-   UnifiedReleaseHandles(); ArrayResize(g_unifiedSymbols,0); ArrayResize(g_unifiedForexWorklist,0); g_unifiedFeedDirty=false;
+   UnifiedReleaseHandles(); ArrayResize(g_unifiedSymbols,0); ArrayResize(g_unifiedForex,0); ArrayResize(g_unifiedForexWorklist,0); g_unifiedCursor=0; g_unifiedSignature=""; g_unifiedFeedDirty=false; g_unifiedLastAtrProcessMs=0; g_unifiedLastSpreadProcessMs=0; g_unifiedLastHeartbeatMs=0;
 }
 
 void UnifiedWriteHeartbeat()
@@ -363,8 +372,8 @@ void UnifiedWriteHeartbeat()
 
 void UnifiedReleaseOwnership()
 {
-   if(g_unifiedIsProducer && GlobalVariableCheck(g_unifiedOwnerName) && GlobalVariableGet(g_unifiedOwnerName)==g_unifiedOwnerToken)
-   { GlobalVariableSet(g_unifiedOwnerName,0.0); GlobalVariableSet(g_unifiedLeaseName,0.0); }
+   if(g_unifiedIsProducer && GlobalVariableCheck(g_unifiedOwnerName) && GlobalVariableGet(g_unifiedOwnerName)==g_unifiedOwnerState)
+      GlobalVariableSetOnCondition(g_unifiedOwnerName,0.0,g_unifiedOwnerState);
    g_unifiedIsProducer=false;
 }
 
@@ -373,10 +382,11 @@ void UnifiedMarketWatchTimer()
 {
    if(!EnableUnifiedMarketWatch) return;
    if(!UnifiedTryAcquireProducer()) { UnifiedReleaseProducerState(); return; }
+   if(g_unifiedSignature=="") UnifiedRebuildUniverse();
    ulong now=GetTickCount64();
    if(now-g_unifiedLastSpreadProcessMs>=UNIFIED_FAST_INTERVAL_MS) { UnifiedRefreshSpreads(); g_unifiedLastSpreadProcessMs=now; }
    UnifiedWriteHeartbeat();
-   if(now-g_unifiedLastAtrProcessMs>=1000) { if(UnifiedSignature()!=g_unifiedSignature) UnifiedRebuildUniverse(); UnifiedTryAcquireProducer(); UnifiedProcessBatch(); g_unifiedLastAtrProcessMs=now; if(!UnifiedTryAcquireProducer()) { UnifiedReleaseProducerState(); return; } }
+   if(now-g_unifiedLastAtrProcessMs>=1000) { if(UnifiedSignature()!=g_unifiedSignature) UnifiedRebuildUniverse(); if(!UnifiedTryAcquireProducer()) { UnifiedReleaseProducerState(); return; } UnifiedProcessBatch(); g_unifiedLastAtrProcessMs=now; if(!UnifiedTryAcquireProducer()) { UnifiedReleaseProducerState(); return; } }
    UnifiedExportFeed();
 }
 

@@ -351,18 +351,19 @@ class ATRPercentWindow:
             return None
         return stat.st_mtime_ns, stat.st_size
 
-    def _heartbeat_age_seconds(self) -> float:
+    def _heartbeat_age_seconds(self) -> float | None:
         try:
             return max(0.0, time.time() - self.heartbeat_path.stat().st_mtime)
         except OSError:
-            return float("inf")
+            return None
 
     def _refresh(self) -> None:
         signature = self._file_signature()
         if signature is not None and signature == self.last_feed_signature and self.last_good_feed is not None:
             age_seconds = self._heartbeat_age_seconds()
-            state = classify_window_state(self.rows, feed_age_seconds=age_seconds, heartbeat_tolerance_seconds=max(5, self.refresh_ms * 6 // 1000))
-            self.status_var.set(f"{state} | {sum(1 for row in self.rows if row.is_forex)}/{len(self.rows)} selected symbols are forex | feed unchanged | heartbeat age {int(age_seconds)}s")
+            state = "Stale" if age_seconds is None else classify_window_state(self.rows, feed_age_seconds=age_seconds, heartbeat_tolerance_seconds=max(5, self.refresh_ms * 6 // 1000))
+            heartbeat_text = "unavailable" if age_seconds is None else f"{int(age_seconds)}s"
+            self.status_var.set(f"{state} | {sum(1 for row in self.rows if row.is_forex)}/{len(self.rows)} selected symbols are forex | feed unchanged | heartbeat age {heartbeat_text}")
             self._schedule_refresh()
             return
         try:
@@ -391,9 +392,10 @@ class ATRPercentWindow:
         last_success = feed.get("last_successful_refresh")
         atr_length = feed.get("atr_length", "unknown")
         try:
-            age_seconds = int(self._heartbeat_age_seconds())
+            heartbeat_age = self._heartbeat_age_seconds()
+            age_seconds = int(heartbeat_age) if heartbeat_age is not None else 999999
         except OSError:
-            age_seconds = 0
+            age_seconds = 999999
         forex_count = sum(1 for row in self.rows if row.is_forex)
         state = classify_window_state(
             self.rows,

@@ -1,20 +1,11 @@
 CODEX COMPLETION SUMMARY
-Brief: Correct Unified Trader follow-up performance, ownership, heartbeat, and committed-artifact defects.
+Brief: Correct remaining Unified Trader ownership, safe publication, reacquisition, and heartbeat defects.
 Recorded: 2026-08-26 (Australia/Brisbane)
 
-- Unified spread refresh now shares a 150 ms monotonic throttle between tick and timer paths. Tick processing does not acquire ownership; ATR remains on the one-second bounded timer cadence.
-- Producer ownership uses a full feed-name hash plus account and terminal context, validates/renews before work and feed publication, and releases local ATR handles/state if ownership is lost. Only the producer launches the window.
-- The active producer writes a small companion heartbeat each second without rewriting unchanged feed data. The window uses heartbeat age for liveness, caches nanosecond mtime/size, and skips parsing/rendering unchanged data.
-- ATR batches are capped at the Forex worklist count, and relevant indicator-copy errors release the unusable handle while retaining cached values and retry backoff.
-- Corrected the four-frame Trader assertion and added five exact focused regression contracts. The separate legacy ATR feed remains unchanged.
-- .gitignore now excludes the local Trader EX5 and compile log. The corrective commit restores the tracked journal runtime file to fcee1f3; the latest local runtime bytes are backed up and will be restored after push.
+- Producer ownership is a single terminal-global versioned expiry state. Every acquire/renew/takeover performs one compare-and-swap against the observed state and increments the local generation before publishing a new state.
+- Unified feed JSON is built completely in memory. The producer renews/validates before creating a temporary common-file output and again before atomically moving it over the live feed, so ownership loss cannot truncate the live file.
+- Ownership loss releases ATR handles and clears the producer universe/signature/timestamps. Reacquisition sees the empty signature, rebuilds the universe, and resumes bounded spread/ATR work.
+- Missing heartbeat files return None in the window; unchanged cached tables remain rendered and receive an explicit Stale/unavailable status without numeric conversion exceptions.
+- Focused regression nodes exercised ownership ordering, safe export ordering, timer ATR gating/rebuild, and the executable no-GUI missing-heartbeat path. Trader.mq5 compiled with zero errors and warnings.
 
-VERIFICATION
-
-- pytest exact nodes: test_mql5_trader_standard_market_is_live_quote_anchored_and_terminal_token_gated; test_unified_market_watch_shares_fast_spread_throttle; test_unified_market_watch_revalidates_owner_and_releases_handles_on_loss; test_unified_market_watch_batch_does_not_repeat_forex_symbols; test_unified_window_skips_unchanged_feed_render_and_uses_heartbeat. Result: 5 passed (two pytest cache permission warnings only).
-- MetaEditor compile command: & 'C:\Program Files\Pepperstone MetaTrader 5\MetaEditor64.exe' /compile:'C:\GPT\CODEX-master\mt5-clone\MQL5\Experts\Trader.mq5' /log:'C:\GPT\CODEX-master\mt5-clone\Trader.compile.log'
-- Result: 0 errors, 0 warnings, 3736 ms elapsed.
-
-DELIVERY
-
-- This summary was written immediately before the required PATCH_DESKTOP_PUSH.bat run. It does not claim a push result.
+This required summary was written immediately before the repository push workflow; it does not claim a push result.
