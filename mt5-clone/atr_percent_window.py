@@ -23,8 +23,6 @@ TIMEFRAMES: tuple[tuple[str, str], ...] = (
     ("5m", "m5"),
     ("1h", "h1"),
     ("1D", "d1"),
-    ("1W", "w1"),
-    ("1Mo", "mn1"),
 )
 TIMEFRAME_LABELS = tuple(label for label, _key in TIMEFRAMES)
 TIMEFRAME_KEYS = {label: key for label, key in TIMEFRAMES}

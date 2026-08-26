@@ -138,20 +138,32 @@ int hTrend = INVALID_HANDLE;
 string EA_COMMENT = "Trader";
 string EA_VERSION = "2.20";
 
-const int UNIFIED_FRAME_COUNT = 6;
-ENUM_TIMEFRAMES g_unifiedPeriods[6] = {PERIOD_M1, PERIOD_M5, PERIOD_H1, PERIOD_D1, PERIOD_W1, PERIOD_MN1};
-string g_unifiedKeys[6] = {"m1", "m5", "h1", "d1", "w1", "mn1"};
+const int UNIFIED_FRAME_COUNT = 4;
+ENUM_TIMEFRAMES g_unifiedPeriods[4] = {PERIOD_M1, PERIOD_M5, PERIOD_H1, PERIOD_D1};
+string g_unifiedKeys[4] = {"m1", "m5", "h1", "d1"};
 string g_unifiedSymbols[];
 bool g_unifiedForex[];
+int g_unifiedForexWorklist[];
 int g_unifiedHandles[];
 double g_unifiedAtrPercent[];
 string g_unifiedFrameState[];
 int g_unifiedFrameError[];
 int g_unifiedRetryCount[];
 datetime g_unifiedRetryAt[];
+datetime g_unifiedClosedBar[];
+bool g_unifiedSpreadValid[];
+double g_unifiedSpreadPercent[];
+double g_unifiedSpreadPoints[];
 int g_unifiedCursor = 0;
 string g_unifiedSignature = "";
 datetime g_unifiedLastSuccessfulAtr = 0;
+bool g_unifiedFeedDirty = false;
+bool g_unifiedIsProducer = false;
+string g_unifiedOwnerName = "";
+string g_unifiedLeaseName = "";
+double g_unifiedOwnerToken = 0.0;
+ulong g_unifiedLastAtrProcessMs = 0;
+ulong g_unifiedLastMaintenanceMs = 0;
 
 bool UnifiedIsCurrency(const string value)
 {
@@ -160,10 +172,8 @@ bool UnifiedIsCurrency(const string value)
 
 bool UnifiedIsForex(const string symbol)
 {
-   if(StringLen(symbol) < 6) return false;
-   string base=StringSubstr(symbol,0,3), quote=StringSubstr(symbol,3,3);
-   StringToUpper(base); StringToUpper(quote);
-   return UnifiedIsCurrency(base) && UnifiedIsCurrency(quote) && base != quote;
+   long calcMode=-1;
+   return SymbolInfoInteger(symbol,SYMBOL_TRADE_CALC_MODE,calcMode) && (calcMode==SYMBOL_CALC_MODE_FOREX || calcMode==SYMBOL_CALC_MODE_FOREX_NO_LEVERAGE);
 }
 
 int UnifiedIndex(const int symbolIndex,const int frameIndex) { return symbolIndex*UNIFIED_FRAME_COUNT+frameIndex; }
@@ -186,28 +196,33 @@ void UnifiedRebuildUniverse()
    UnifiedReleaseHandles();
    int count=SymbolsTotal(true);
    ArrayResize(g_unifiedSymbols,count); ArrayResize(g_unifiedForex,count);
+   ArrayResize(g_unifiedSpreadValid,count); ArrayResize(g_unifiedSpreadPercent,count); ArrayResize(g_unifiedSpreadPoints,count); ArrayResize(g_unifiedForexWorklist,0);
    int slots=count*UNIFIED_FRAME_COUNT;
    ArrayResize(g_unifiedHandles,slots); ArrayResize(g_unifiedAtrPercent,slots); ArrayResize(g_unifiedFrameState,slots);
-   ArrayResize(g_unifiedFrameError,slots); ArrayResize(g_unifiedRetryCount,slots); ArrayResize(g_unifiedRetryAt,slots);
+   ArrayResize(g_unifiedFrameError,slots); ArrayResize(g_unifiedRetryCount,slots); ArrayResize(g_unifiedRetryAt,slots); ArrayResize(g_unifiedClosedBar,slots);
    for(int i=0;i<count;i++)
    {
       g_unifiedSymbols[i]=SymbolName(i,true); g_unifiedForex[i]=UnifiedIsForex(g_unifiedSymbols[i]);
+      g_unifiedSpreadValid[i]=false; g_unifiedSpreadPercent[i]=0.0; g_unifiedSpreadPoints[i]=0.0;
+      if(g_unifiedForex[i]) { int work=ArraySize(g_unifiedForexWorklist); ArrayResize(g_unifiedForexWorklist,work+1); g_unifiedForexWorklist[work]=i; }
       for(int f=0;f<UNIFIED_FRAME_COUNT;f++)
       {
          int slot=UnifiedIndex(i,f); g_unifiedHandles[slot]=INVALID_HANDLE; g_unifiedAtrPercent[slot]=0.0;
          g_unifiedFrameState[slot]=g_unifiedForex[i]?"Loading":"N/A"; g_unifiedFrameError[slot]=0;
-         g_unifiedRetryCount[slot]=0; g_unifiedRetryAt[slot]=0;
+         g_unifiedRetryCount[slot]=0; g_unifiedRetryAt[slot]=0; g_unifiedClosedBar[slot]=0;
       }
    }
-   g_unifiedCursor=0; g_unifiedSignature=UnifiedSignature();
+   g_unifiedCursor=0; g_unifiedSignature=UnifiedSignature(); g_unifiedFeedDirty=true;
 }
 
 void UnifiedScheduleRetry(const int slot,const string symbol,const int frameIndex,const int errorCode,const string reason)
 {
+   string previous=g_unifiedFrameState[slot]; int previousError=g_unifiedFrameError[slot];
    g_unifiedFrameError[slot]=errorCode; g_unifiedRetryCount[slot]++;
    int waitSeconds=(int)MathMin(60,MathPow(2,MathMin(g_unifiedRetryCount[slot],5)));
    g_unifiedRetryAt[slot]=TimeCurrent()+waitSeconds;
    g_unifiedFrameState[slot]=(g_unifiedAtrPercent[slot]>0.0?"Stale":(errorCode==0?"Loading":"Error "+IntegerToString(errorCode)));
+   if(previous!=g_unifiedFrameState[slot] || previousError!=errorCode) g_unifiedFeedDirty=true;
    if(g_unifiedRetryCount[slot] <= 3)
       Print(EA_COMMENT, ": ATR ", symbol, " ", g_unifiedKeys[frameIndex], " failed error=", IntegerToString(errorCode), " reason=", reason, " retry_seconds=", IntegerToString(waitSeconds));
 }
@@ -222,6 +237,9 @@ void UnifiedRefreshFrame(const int symbolIndex,const int frameIndex)
    {
       UnifiedScheduleRetry(slot,symbol,frameIndex,0,"series not synchronized or insufficient bars"); return;
    }
+   datetime closedBar=iTime(symbol,g_unifiedPeriods[frameIndex],1);
+   if(closedBar<=0) { UnifiedScheduleRetry(slot,symbol,frameIndex,0,"closed candle unavailable"); return; }
+   if(g_unifiedAtrPercent[slot]>0.0 && g_unifiedClosedBar[slot]==closedBar && g_unifiedFrameState[slot]=="Ready") return;
    if(g_unifiedHandles[slot] == INVALID_HANDLE)
    {
       ResetLastError(); g_unifiedHandles[slot]=iATR(symbol,g_unifiedPeriods[frameIndex],MathMax(2,MathMin(100,UnifiedATRLength)));
@@ -232,44 +250,57 @@ void UnifiedRefreshFrame(const int symbolIndex,const int frameIndex)
    }
    double buffer[1]; ResetLastError();
    int copied=CopyBuffer(g_unifiedHandles[slot],0,1,1,buffer); double close=iClose(symbol,g_unifiedPeriods[frameIndex],1);
-   if(copied != 1 || buffer[0] <= 0.0 || close <= 0.0)
+   if(copied != 1 || buffer[0] == EMPTY_VALUE || !MathIsValidNumber(buffer[0]) || buffer[0] <= 0.0 || close == EMPTY_VALUE || !MathIsValidNumber(close) || close <= 0.0)
    {
       int errorCode=GetLastError();
-      if(errorCode != 0) { IndicatorRelease(g_unifiedHandles[slot]); g_unifiedHandles[slot]=INVALID_HANDLE; }
       UnifiedScheduleRetry(slot,symbol,frameIndex,errorCode,"closed-candle ATR/close unavailable"); return;
    }
-   g_unifiedAtrPercent[slot]=(buffer[0]/close)*100.0; g_unifiedFrameState[slot]="Ready";
+   double percent=(buffer[0]/close)*100.0;
+   if(!MathIsValidNumber(percent) || percent<=0.0) { UnifiedScheduleRetry(slot,symbol,frameIndex,0,"invalid ATR percentage"); return; }
+   bool changed=(g_unifiedAtrPercent[slot]!=percent || g_unifiedClosedBar[slot]!=closedBar || g_unifiedFrameState[slot]!="Ready" || g_unifiedFrameError[slot]!=0);
+   g_unifiedAtrPercent[slot]=percent; g_unifiedClosedBar[slot]=closedBar; g_unifiedFrameState[slot]="Ready";
    g_unifiedLastSuccessfulAtr=TimeGMT();
    g_unifiedFrameError[slot]=0; g_unifiedRetryCount[slot]=0; g_unifiedRetryAt[slot]=0;
+   if(changed) g_unifiedFeedDirty=true;
 }
 
 void UnifiedProcessBatch()
 {
-   int count=ArraySize(g_unifiedSymbols); if(count<=0) return;
+   int count=ArraySize(g_unifiedForexWorklist); if(count<=0) return;
    int batch=MathMax(1,MathMin(50,UnifiedSymbolsPerTimer));
    for(int n=0;n<batch;n++)
    {
-      int index=g_unifiedCursor%count;
+      int index=g_unifiedForexWorklist[g_unifiedCursor%count];
       for(int f=0;f<UNIFIED_FRAME_COUNT;f++) UnifiedRefreshFrame(index,f);
       g_unifiedCursor=(g_unifiedCursor+1)%count;
    }
 }
 
+void UnifiedRefreshSpreads()
+{
+   for(int i=0;i<ArraySize(g_unifiedSymbols);i++)
+   {
+      MqlTick tick; double point=SymbolInfoDouble(g_unifiedSymbols[i],SYMBOL_POINT);
+      bool valid=SymbolInfoTick(g_unifiedSymbols[i],tick) && tick.bid>0.0 && tick.ask>=tick.bid && point>0.0;
+      double percent=0.0, points=0.0;
+      if(valid) { double midpoint=(tick.ask+tick.bid)/2.0; valid=(midpoint>0.0); if(valid) { percent=((tick.ask-tick.bid)/midpoint)*100.0; points=(tick.ask-tick.bid)/point; } }
+      if(valid!=g_unifiedSpreadValid[i] || (valid && (percent!=g_unifiedSpreadPercent[i] || points!=g_unifiedSpreadPoints[i])))
+      { g_unifiedSpreadValid[i]=valid; g_unifiedSpreadPercent[i]=percent; g_unifiedSpreadPoints[i]=points; g_unifiedFeedDirty=true; }
+   }
+}
+
 bool UnifiedExportFeed()
 {
+   if(!g_unifiedFeedDirty) return true;
    int handle=FileOpen(UnifiedMarketWatchFileName,FILE_WRITE|FILE_TXT|FILE_ANSI|FILE_COMMON);
    if(handle==INVALID_HANDLE) { Print(EA_COMMENT, ": unified feed open failed error=",IntegerToString(GetLastError())); return false; }
    string lastSuccessful=(g_unifiedLastSuccessfulAtr>0?"\""+IsoTimeUTC(g_unifiedLastSuccessfulAtr)+"\"":"null");
    string json="{\r\n  \"name\":\"MarketWatchUnifiedFeed\",\r\n  \"generated_at\":\""+IsoTimeUTC(TimeGMT())+"\",\r\n  \"last_successful_refresh\":"+lastSuccessful+",\r\n  \"atr_length\":"+IntegerToString(UnifiedATRLength)+",\r\n  \"symbols\":[\r\n";
    for(int i=0;i<ArraySize(g_unifiedSymbols);i++)
    {
-      string symbol=g_unifiedSymbols[i]; MqlTick tick; double point=SymbolInfoDouble(symbol,SYMBOL_POINT);
-      bool spreadOk=SymbolInfoTick(symbol,tick) && tick.bid>0.0 && tick.ask>=tick.bid && point>0.0;
-      double midpoint=spreadOk?(tick.ask+tick.bid)/2.0:0.0;
-      double spreadPct=(spreadOk && midpoint>0.0)?((tick.ask-tick.bid)/midpoint)*100.0:0.0;
-      double spreadPoints=spreadOk?(tick.ask-tick.bid)/point:0.0;
+      string symbol=g_unifiedSymbols[i]; bool spreadOk=g_unifiedSpreadValid[i];
       if(i>0) json+=",\r\n";
-      json+="    {\"symbol\":\""+JsonEscape(symbol)+"\",\"is_forex\":"+(g_unifiedForex[i]?"true":"false")+",\"status\":\""+(g_unifiedForex[i]?"Ready":"N/A")+"\",\"reason\":\""+(g_unifiedForex[i]?"":"ATR not applicable")+"\",\"spread_percent\":"+(spreadOk?DoubleToString(spreadPct,10):"null")+",\"spread_points\":"+(spreadOk?DoubleToString(spreadPoints,2):"null");
+      json+="    {\"symbol\":\""+JsonEscape(symbol)+"\",\"is_forex\":"+(g_unifiedForex[i]?"true":"false")+",\"status\":\""+(g_unifiedForex[i]?"Ready":"N/A")+"\",\"reason\":\""+(g_unifiedForex[i]?"":"ATR not applicable")+"\",\"spread_percent\":"+(spreadOk?DoubleToString(g_unifiedSpreadPercent[i],10):"null")+",\"spread_points\":"+(spreadOk?DoubleToString(g_unifiedSpreadPoints[i],2):"null");
       for(int f=0;f<UNIFIED_FRAME_COUNT;f++)
       {
          int slot=UnifiedIndex(i,f);
@@ -278,7 +309,7 @@ bool UnifiedExportFeed()
       }
       json+="}";
    }
-   json+="\r\n  ]\r\n}\r\n"; FileWriteString(handle,json); FileClose(handle); return true;
+   json+="\r\n  ]\r\n}\r\n"; FileWriteString(handle,json); FileClose(handle); g_unifiedFeedDirty=false; return true;
 }
 
 string UnifiedQuote(const string value) { string escaped=value; StringReplace(escaped,"\"","\\\""); return "\""+escaped+"\""; }
@@ -292,13 +323,41 @@ void UnifiedLaunchWindow()
    if(result<=32) Print(EA_COMMENT, ": unified desktop window launch failed code=",IntegerToString((int)result));
 }
 
-void UnifiedMarketWatchInit() { if(!EnableUnifiedMarketWatch) return; UnifiedRebuildUniverse(); UnifiedProcessBatch(); UnifiedExportFeed(); UnifiedLaunchWindow(); }
+void UnifiedConfigureOwnership()
+{
+   string suffix=IntegerToString((long)AccountInfoInteger(ACCOUNT_LOGIN))+"_"+IntegerToString(StringLen(UnifiedMarketWatchFileName));
+   g_unifiedOwnerName="TraderUnifiedOwner_"+suffix; g_unifiedLeaseName="TraderUnifiedLease_"+suffix; g_unifiedOwnerToken=(double)ChartID();
+}
+
+bool UnifiedTryAcquireProducer()
+{
+   if(g_unifiedOwnerName=="") UnifiedConfigureOwnership();
+   if(!GlobalVariableCheck(g_unifiedOwnerName)) GlobalVariableSet(g_unifiedOwnerName,0.0);
+   double owner=GlobalVariableGet(g_unifiedOwnerName), lease=GlobalVariableCheck(g_unifiedLeaseName)?GlobalVariableGet(g_unifiedLeaseName):0.0, now=(double)TimeLocal();
+   if(owner==g_unifiedOwnerToken || (lease<now && GlobalVariableSetOnCondition(g_unifiedOwnerName,g_unifiedOwnerToken,owner)))
+   { GlobalVariableSet(g_unifiedLeaseName,now+3.0); g_unifiedIsProducer=true; return true; }
+   g_unifiedIsProducer=false; return false;
+}
+
+void UnifiedReleaseOwnership()
+{
+   if(g_unifiedIsProducer && GlobalVariableCheck(g_unifiedOwnerName) && GlobalVariableGet(g_unifiedOwnerName)==g_unifiedOwnerToken)
+   { GlobalVariableSet(g_unifiedOwnerName,0.0); GlobalVariableSet(g_unifiedLeaseName,0.0); }
+   g_unifiedIsProducer=false;
+}
+
+void UnifiedMarketWatchInit() { if(!EnableUnifiedMarketWatch) return; UnifiedConfigureOwnership(); if(UnifiedTryAcquireProducer()) { UnifiedRebuildUniverse(); UnifiedRefreshSpreads(); UnifiedProcessBatch(); UnifiedExportFeed(); } UnifiedLaunchWindow(); }
 void UnifiedMarketWatchTimer()
 {
    if(!EnableUnifiedMarketWatch) return;
-   if(UnifiedSignature()!=g_unifiedSignature) UnifiedRebuildUniverse();
-   UnifiedProcessBatch(); UnifiedExportFeed();
+   if(!UnifiedTryAcquireProducer()) return;
+   UnifiedRefreshSpreads();
+   ulong now=GetTickCount64();
+   if(now-g_unifiedLastAtrProcessMs>=1000) { if(UnifiedSignature()!=g_unifiedSignature) UnifiedRebuildUniverse(); UnifiedProcessBatch(); g_unifiedLastAtrProcessMs=now; }
+   UnifiedExportFeed();
 }
+
+void UnifiedMarketWatchTick() { if(EnableUnifiedMarketWatch && UnifiedTryAcquireProducer()) { UnifiedRefreshSpreads(); UnifiedExportFeed(); } }
 
 void Dbg(const string msg){ if(Debug) Print(EA_COMMENT, ": ", msg); }
 bool PlaceOrReplacePendingLimitAtEntry(const bool isBuyLimit,
@@ -1848,7 +1907,7 @@ int OnInit()
    g_lastBarTime = iTime(_Symbol, _Period, 0);
 
    // Always run a timer so cancels happen even when market is quiet/no ticks.
-   EventSetTimer(1);
+   if(EnableUnifiedMarketWatch) EventSetMillisecondTimer(100); else EventSetTimer(1);
    Print(EA_COMMENT, ": EA version ", EA_VERSION);
    Print(EA_COMMENT, ": EnablePepperstoneSpreadExport=", (EnablePepperstoneSpreadExport ? "true" : "false"));
    Print(EA_COMMENT, ": PepperstoneSpreadExportIntervalSeconds=", IntegerToString(PepperstoneSpreadExportIntervalSeconds));
@@ -1925,6 +1984,7 @@ void OnDeinit(const int reason)
    if(hSlow  != INVALID_HANDLE) IndicatorRelease(hSlow);
    if(hTrend != INVALID_HANDLE) IndicatorRelease(hTrend);
    UnifiedReleaseHandles();
+   UnifiedReleaseOwnership();
    ObjectDelete(0, STANDARD_MARKET_EXECUTE_BUTTON);
 }
 
@@ -1936,6 +1996,7 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
 
 void OnTick()
 {
+   UnifiedMarketWatchTick();
    // If orders are disabled at any time, make sure trendline pendings are gone.
    if(!OrdersEnabled)
    {
@@ -2011,8 +2072,12 @@ void OnTick()
 
 void OnTimer()
 {
-   MaybeExportPepperstoneSpreads();
+   ulong timerNow=GetTickCount64();
+   bool secondElapsed=(timerNow-g_unifiedLastMaintenanceMs>=1000);
+   if(secondElapsed) { MaybeExportPepperstoneSpreads(); g_unifiedLastMaintenanceMs=timerNow; }
    UnifiedMarketWatchTimer();
+
+   if(!secondElapsed) return;
 
    // Mirrors OnTick gating so cancel happens even with no ticks
    if(Strategy == STRAT_STANDARD_LIMIT)

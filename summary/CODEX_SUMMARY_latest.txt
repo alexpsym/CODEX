@@ -1,38 +1,27 @@
 CODEX COMPLETION SUMMARY
-Brief: Preserve the current authored STATS1 design and correct restored stop-recommendation discrepancies.
-Recorded: 2026-08-25 (Australia/Brisbane)
+Brief: Reduce Unified Trader Market Watch CPU work and restore responsive ATR/spread updates.
+Recorded: 2026-08-26 (Australia/Brisbane)
 
-AUTHORITATIVE BASELINE
+ROOT CAUSE CONFIRMED
 
-- Used the current local journal/Trading Journal.xlsx as the authoritative workbook. Its STATS1 sheet was A1:D136 with Overall/FX/Crypto headers in B1:D1, the user-authored section positions, 65-wide metric columns, 14.5-point rows, 115% zoom, freeze/view state, and all existing fonts, fills, borders, number formats, and styled blank cells.
-- Captured a complete pre-resync STATS1 presentation fingerprint covering every visible/styled coordinate, font/fill/border/alignment/number-format/protection/comment, static labels/headers, dimensions, views, panes, filters, conditional formatting, merges, and workbook order.
+- Trader.mq5 recalculated every configured ATR timeframe for each selected-symbol batch every second, including W1/MN1, and general Market Watch symbols consumed the four-symbol quota.
+- It detected Forex with symbol-name parsing, shared its spread refresh with the heavy ATR timer, and rewrote the full JSON feed on every timer pass.
+- It had no terminal-wide producer coordination, so every enabled instance repeated the scan and created duplicate ATR handles.
 
-FIXES
+IMPLEMENTED
 
-- Preservation mode now fingerprints and asserts the complete STATS1 presentation, including styled blank cells and static labels/headers. Only regenerated data/recommendation values and recommendation hyperlink targets can change.
-- Preservation-mode code no longer applies STATS1 semantic fills, default fonts, number formats, duration normalisation, row-height normalisation, hyperlink blue/underline styling, recommendation styles, or autosizing.
-- Recommendation cells are populated from _distance_recommendation_summary over the normalized current trade rows, exactly as the HTML recommendation artifacts are generated.
-- Excel-open polish no longer recalculates STATS1 stops from rendered winner/loser averages. That post-save repair was the root cause of the restored discrepancy and also restyled cells without an authoritative snapshot.
-
-RESULTS
-
-- Stop recommendations changed from Overall 0.83%, FX 0.14%, Crypto 3.30% to Overall 0.67%, FX 0.16%, Crypto 2.78%.
-- The corrected stop values match overall-stop.html, fx-stop.html, and crypto-stop.html. Target recommendations remain 2.03R, 2.04R, and 2.0R respectively, match their linked pages, and satisfy the 2R floor.
-- The before/after STATS1 presentation and static-layout fingerprints matched exactly. No labels, section positions, formatting, dimensions, panes, views, or authored cell presentation changed.
-
-REGRESSION TEST AND RUNTIME-FILE DELIVERY FIX
-
-- The focused fixture now reuses its already-built equivalent layout solely for the update routine's internal non-STATS1 template source. It still calls update_master_journal_workbook_data_only in preservation mode and retains the full STATS1 presentation/static-layout assertions.
-- The test verifies exact visible recommendation text, data-recommended-value, and parsed numeric recommendation for all six linked artifacts (overall/fx/crypto stop and target); each target is asserted to be at least 2R.
-- Exact pytest node: tests/test_master_journal_workbook.py::test_preservation_update_keeps_full_stats1_presentation_and_authoritative_recommendations. It completed successfully in approximately 104 seconds. No other pytest node was run.
-- journal/5-digit-demo-calculation-context.json is restored in Git's index from e0b7712b5ad4f246f2eabc33c8af2611f0c8ad70. Its current runtime bytes remain in the working tree as an unstaged local change and are excluded from this delivery.
+- The unified table/feed now contains only M1, M5, H1, and D1. The desktop table uses the same four columns.
+- ATR values cache the last fully closed bar timestamp per symbol/timeframe. Existing indicator handles are reused; CopyBuffer/iClose run again only after that closed bar changes, or a bounded retry is due.
+- Forex eligibility now uses SYMBOL_TRADE_CALC_MODE and a dedicated Forex worklist, so non-Forex symbols do not consume the batch quota.
+- A lightweight 100 ms tick/timer spread path publishes only changed values. ATR batches remain limited to one per second, and unchanged feeds are not rewritten.
+- A short terminal-global owner lease ensures one enabled Unified Trader instance produces the shared feed; a stale owner can be replaced and normal deinitialisation releases ownership and handles.
 
 VERIFICATION
 
-- Performed exactly one controlled real journal resync using the current local workbook and current journal data, with GitHub publication deferred until this completion workflow.
-- Post-resync fingerprint comparison confirmed presentation_same=true and static_same=true. Direct workbook/artifact checks confirmed the corrected stop values and preserved target values.
-- No MT5 compilation, launcher, watcher, dashboard, Trade Log, or unrelated test was run.
+- Exact command: & 'C:\Program Files\Pepperstone MetaTrader 5\MetaEditor64.exe' /compile:'C:\GPT\CODEX-master\mt5-clone\MQL5\Experts\Trader.mq5' /log:'C:\GPT\CODEX-master\mt5-clone\Trader.compile.log'
+- Result: 0 errors, 0 warnings, 8135 ms elapsed, cpu='X64 Regular'.
 
 DELIVERY
 
-- PATCH_DESKTOP_PUSH.bat is run exactly once after this summary update. Its result and local HEAD/origin/master equality are checked before completion is reported.
+- No test suite, backtest, or additional compile was run.
+- Commit/push intentionally not run because the user explicitly prohibited them.
