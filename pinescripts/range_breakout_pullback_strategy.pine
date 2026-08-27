@@ -1,5 +1,5 @@
 //@version=6
-strategy("Range Breakout-Pullback Strategy", overlay=true, pyramiding=0, process_orders_on_close=true, max_labels_count=500)
+strategy("Range Breakout-Pullback Strategy", overlay=true, pyramiding=0, process_orders_on_close=true, max_lines_count=500)
 
 // This strategy converts the conceptual pullback turning point into a confirmed,
 // non-lookahead market entry. With process_orders_on_close=true, TradingView's
@@ -60,8 +60,8 @@ enableWeekendBlackout = input.bool(true, "Enable FX Weekend rules", group=weeken
 shadeWeekendBlackout = input.bool(true, "Shade blocked periods", group=weekendGroup, tooltip="Adds subtle background shading while new entries are blocked and positions must be flat.")
 
 visualGroup = "8. Visual audit"
-showStateBackground = input.bool(true, "Highlight extension/pullback states", group=visualGroup)
-showEntryDepthLabel = input.bool(true, "Show pullback depth at entry", group=visualGroup, tooltip="Labels each confirmed entry with the extension-relative pullback depth known on that entry bar.")
+showSetupDiagnostics = input.bool(false, "Show setup diagnostics", group=visualGroup, tooltip="Shows structural zones and Data Window values. Bullish gate: 1 disabled, 2 FX blocked, 3 position/order busy, 4 bearish setup active, 5 no range, 6 breakout absent, 7 extension pending, 8 pullback absent, 9 correction insufficient, 10 resumption absent, 11 ATR unready, 12 entry requested, 13 long filled. Reset: 1 invalidated, 2 extension expired, 3 pullback expired, 4 depth exceeded.")
+showStopLoss = input.bool(false, "Show active stop-loss", group=visualGroup, tooltip="Shows the frozen stop only while its trade is open. Historical take-profit lines remain visible by default.")
 
 // -----------------------------------------------------------------------------
 // VOLATILITY AND TIME HELPERS
@@ -146,19 +146,19 @@ var int entryOrderBar = na
 var float tradeEntry = na
 var float tradeStop = na
 var float tradeTarget = na
+var line activeTargetLine = na
+var int observedClosedTrades = 0
 
-bool breakoutLongMarker = false
-bool breakoutShortMarker = false
-bool extensionLongMarker = false
-bool extensionShortMarker = false
-bool pullbackLongMarker = false
-bool pullbackShortMarker = false
 bool longEntrySignal = false
 bool shortEntrySignal = false
 bool resetSetup = false
+int setupResetReason = 0
 float confirmedEntryDepth = na
 
-canBuildRange = barstate.isconfirmed and setupStage == 0 and strategy.position_size == 0 and not orderAwaitingFill and not fxBlocked
+// Confirmed pivots remain observable during an active setup or trade. Breakout
+// arming below still requires stage 0 and a flat strategy, so this only preserves
+// information that was genuinely confirmed before a later opposite breakout.
+canBuildRange = barstate.isconfirmed and not fxBlocked
 
 if canBuildRange
     if not na(resistanceLastBar) and bar_index - resistanceLastBar > maximumRangeBars
@@ -209,7 +209,7 @@ rangeIsConfirmed = setupStage == 0 and resistanceReactions >= minimumReactions a
 // -----------------------------------------------------------------------------
 // RANGE -> BREAKOUT -> EXTENSION -> PULLBACK -> RESUMPTION
 // -----------------------------------------------------------------------------
-if barstate.isconfirmed and rangeIsConfirmed and strategy.position_size == 0 and not orderAwaitingFill and not fxBlocked
+if barstate.isconfirmed and rangeIsConfirmed and strategy.position_size == 0 and not orderAwaitingFill and na(pendingRiskTicks) and not fxBlocked
     longBodyPasses = minimumBreakoutBodyAtr == 0.0 or close - open >= atrValue * minimumBreakoutBodyAtr
     shortBodyPasses = minimumBreakoutBodyAtr == 0.0 or open - close >= atrValue * minimumBreakoutBodyAtr
     longBreakout = enableLongs and longBodyPasses and close > resistanceCentre + atrValue * breakoutBufferAtr
@@ -229,8 +229,6 @@ if barstate.isconfirmed and rangeIsConfirmed and strategy.position_size == 0 and
         pullbackConfirmedBar := na
         opposingCloseCount := 0
         pullbackMinorSwing := na
-        breakoutLongMarker := setupDirection == 1
-        breakoutShortMarker := setupDirection == -1
         resistanceCentre := na
         resistanceReactions := 0
         resistanceFirstBar := na
@@ -245,20 +243,19 @@ if barstate.isconfirmed and setupStage == 1 and bar_index > breakoutBar
     extensionExpired = bar_index - breakoutBar > maximumExtensionBars
     if materiallyInvalid or extensionExpired
         resetSetup := true
+        setupResetReason := materiallyInvalid ? 1 : 2
     else if setupDirection == 1
         setupExtreme := math.max(setupExtreme, high)
         if setupExtreme >= frozenResistance + setupAtr * minimumExtensionAtr
             setupStage := 2
             extensionBar := bar_index
             pullbackExtreme := na
-            extensionLongMarker := true
     else
         setupExtreme := math.min(setupExtreme, low)
         if setupExtreme <= frozenSupport - setupAtr * minimumExtensionAtr
             setupStage := 2
             extensionBar := bar_index
             pullbackExtreme := na
-            extensionShortMarker := true
 
 if barstate.isconfirmed and setupStage == 2 and bar_index > extensionBar
     if setupDirection == 1
@@ -286,10 +283,10 @@ if barstate.isconfirmed and setupStage == 2 and bar_index > extensionBar
         depthMaximumExceeded = depthHasMaximum and pullbackDepth > selectedDepthMaximum
         if materiallyInvalid or expired or depthMaximumExceeded
             resetSetup := true
+            setupResetReason := materiallyInvalid ? 1 : expired ? 3 : 4
         else if correctiveMovementPasses and depthMinimumPasses
             setupStage := 3
             pullbackConfirmedBar := bar_index
-            pullbackLongMarker := true
     else
         if not pullbackStarted
             madeNewExtreme = low < setupExtreme
@@ -315,10 +312,10 @@ if barstate.isconfirmed and setupStage == 2 and bar_index > extensionBar
         depthMaximumExceeded = depthHasMaximum and pullbackDepth > selectedDepthMaximum
         if materiallyInvalid or expired or depthMaximumExceeded
             resetSetup := true
+            setupResetReason := materiallyInvalid ? 1 : expired ? 3 : 4
         else if correctiveMovementPasses and depthMinimumPasses
             setupStage := 3
             pullbackConfirmedBar := bar_index
-            pullbackShortMarker := true
 
 if barstate.isconfirmed and setupStage == 3
     pullbackExtreme := setupDirection == 1 ? math.min(pullbackExtreme, low) : math.max(pullbackExtreme, high)
@@ -340,6 +337,7 @@ if barstate.isconfirmed and setupStage == 3
 
     if materiallyInvalid or expired or depthMaximumExceeded
         resetSetup := true
+        setupResetReason := materiallyInvalid ? 1 : expired ? 3 : 4
     else if resumptionConfirmed and riskDataReady and strategy.position_size == 0 and not orderAwaitingFill and not fxBlocked
         entryAtrSnapshot = atrValue
         entryMultiplierSnapshot = selectedAtrMultiplier
@@ -352,14 +350,11 @@ if barstate.isconfirmed and setupStage == 3
         longEntrySignal := setupDirection == 1
         shortEntrySignal := setupDirection == -1
         if longEntrySignal
-            strategy.entry("Long", strategy.long, comment="Confirmed bullish resumption")
-            strategy.exit("Long stop/target", from_entry="Long", loss=pendingRiskTicks, profit=pendingTargetTicks)
+            strategy.entry("L", strategy.long, comment="LONG")
+            strategy.exit("LX", from_entry="L", loss=pendingRiskTicks, profit=pendingTargetTicks, comment="EXIT")
         else
-            strategy.entry("Short", strategy.short, comment="Confirmed bearish resumption")
-            strategy.exit("Short stop/target", from_entry="Short", loss=pendingRiskTicks, profit=pendingTargetTicks)
-        if showEntryDepthLabel
-            depthText = "Depth " + str.tostring(confirmedEntryDepth, "#.0") + "%"
-            label.new(bar_index, setupDirection == 1 ? low : high, depthText, yloc=yloc.price, style=setupDirection == 1 ? label.style_label_up : label.style_label_down, color=color.new(color.lime, 5), textcolor=color.black, size=size.tiny)
+            strategy.entry("S", strategy.short, comment="SHORT")
+            strategy.exit("SX", from_entry="S", loss=pendingRiskTicks, profit=pendingTargetTicks, comment="EXIT")
         setupStage := 0
         setupDirection := 0
 
@@ -386,7 +381,7 @@ if fxBlocked
     strategy.cancel_all()
     orderAwaitingFill := false
     if strategy.position_size != 0
-        strategy.close_all(comment="FX Weekend flat window", immediately=true)
+        strategy.close_all(comment="FX FLAT", immediately=true)
     setupStage := 0
     setupDirection := 0
     frozenResistance := na
@@ -427,6 +422,29 @@ if strategy.position_size != 0 and na(tradeStop)
     else
         tradeStop := roundUpToTick(tradeEntry + riskDistance)
         tradeTarget := roundDownToTick(tradeEntry - targetDistance)
+    actualEntryBar = strategy.opentrades.entry_bar_index(0)
+    activeTargetLine := line.new(actualEntryBar, tradeTarget, bar_index, tradeTarget, xloc=xloc.bar_index, extend=extend.none, color=color.teal, width=2)
+
+if strategy.position_size != 0 and not na(activeTargetLine)
+    line.set_x2(activeTargetLine, bar_index)
+
+// Finish each target at the broker emulator's actual exit bar. If a trade opens
+// and closes before this script observes an open position, closed-trade data still
+// supplies its actual entry and exit bars without requiring calc_on_order_fills.
+if strategy.closedtrades > observedClosedTrades
+    lastClosedTrade = strategy.closedtrades - 1
+    actualExitBar = strategy.closedtrades.exit_bar_index(lastClosedTrade)
+    if not na(activeTargetLine)
+        line.set_x2(activeTargetLine, actualExitBar)
+    else if not na(pendingTargetTicks)
+        actualEntryBar = strategy.closedtrades.entry_bar_index(lastClosedTrade)
+        actualEntryPrice = strategy.closedtrades.entry_price(lastClosedTrade)
+        wasLongTrade = strategy.closedtrades.size(lastClosedTrade) > 0
+        targetDistance = pendingTargetTicks * syminfo.mintick
+        closedTarget = wasLongTrade ? roundUpToTick(actualEntryPrice + targetDistance) : roundDownToTick(actualEntryPrice - targetDistance)
+        line.new(actualEntryBar, closedTarget, actualExitBar, closedTarget, xloc=xloc.bar_index, extend=extend.none, color=color.teal, width=2)
+    activeTargetLine := na
+    observedClosedTrades := strategy.closedtrades
 
 if strategy.position_size == 0 and not orderAwaitingFill and not na(pendingRiskTicks)
     tradeEntry := na
@@ -456,27 +474,35 @@ displayResistance = showFrozenRange ? frozenResistance : rangeIsConfirmed ? resi
 displaySupport = showFrozenRange ? frozenSupport : rangeIsConfirmed ? supportCentre : na
 displayZoneHalfWidth = showFrozenRange ? setupAtr * clusterToleranceAtr : atrValue * clusterToleranceAtr
 
-resistanceUpperPlot = plot(not na(displayResistance) ? displayResistance + displayZoneHalfWidth : na, "Resistance zone upper", color=color.new(color.blue, 55), linewidth=1)
-resistanceLowerPlot = plot(not na(displayResistance) ? displayResistance - displayZoneHalfWidth : na, "Resistance zone lower", color=color.new(color.blue, 55), linewidth=1)
-supportUpperPlot = plot(not na(displaySupport) ? displaySupport + displayZoneHalfWidth : na, "Support zone upper", color=color.new(color.blue, 55), linewidth=1)
-supportLowerPlot = plot(not na(displaySupport) ? displaySupport - displayZoneHalfWidth : na, "Support zone lower", color=color.new(color.blue, 55), linewidth=1)
+resistanceUpperPlot = plot(showSetupDiagnostics and not na(displayResistance) ? displayResistance + displayZoneHalfWidth : na, "Resistance zone upper", color=color.new(color.blue, 55), linewidth=1)
+resistanceLowerPlot = plot(showSetupDiagnostics and not na(displayResistance) ? displayResistance - displayZoneHalfWidth : na, "Resistance zone lower", color=color.new(color.blue, 55), linewidth=1)
+supportUpperPlot = plot(showSetupDiagnostics and not na(displaySupport) ? displaySupport + displayZoneHalfWidth : na, "Support zone upper", color=color.new(color.blue, 55), linewidth=1)
+supportLowerPlot = plot(showSetupDiagnostics and not na(displaySupport) ? displaySupport - displayZoneHalfWidth : na, "Support zone lower", color=color.new(color.blue, 55), linewidth=1)
 fill(resistanceUpperPlot, resistanceLowerPlot, color=color.new(color.blue, 88), title="Resistance zone")
 fill(supportUpperPlot, supportLowerPlot, color=color.new(color.blue, 88), title="Support zone")
 
-plotshape(breakoutLongMarker, title="Bullish breakout", style=shape.triangleup, location=location.belowbar, color=color.blue, size=size.tiny, text="BO")
-plotshape(breakoutShortMarker, title="Bearish breakout", style=shape.triangledown, location=location.abovebar, color=color.blue, size=size.tiny, text="BO")
-plotshape(extensionLongMarker, title="Bullish extension confirmed", style=shape.circle, location=location.belowbar, color=color.new(color.blue, 25), size=size.tiny)
-plotshape(extensionShortMarker, title="Bearish extension confirmed", style=shape.circle, location=location.abovebar, color=color.new(color.blue, 25), size=size.tiny)
-plotshape(pullbackLongMarker, title="Bullish pullback qualified", style=shape.diamond, location=location.belowbar, color=color.orange, size=size.tiny)
-plotshape(pullbackShortMarker, title="Bearish pullback qualified", style=shape.diamond, location=location.abovebar, color=color.orange, size=size.tiny)
-plotshape(longEntrySignal, title="Confirmed long entry", style=shape.labelup, location=location.belowbar, color=color.lime, textcolor=color.black, size=size.small, text="LONG")
-plotshape(shortEntrySignal, title="Confirmed short entry", style=shape.labeldown, location=location.abovebar, color=color.lime, textcolor=color.black, size=size.small, text="SHORT")
+diagnosticCanResumeLong = setupStage == 3 and setupDirection == 1 and bar_index > pullbackConfirmedBar
+diagnosticAggressiveLong = close > close[1]
+diagnosticBalancedLong = close > open and close > high[1]
+diagnosticConservativeLong = not na(pullbackMinorSwing) and close > pullbackMinorSwing
+diagnosticLongResumption = diagnosticCanResumeLong and (confirmationMode == "Aggressive" ? diagnosticAggressiveLong : confirmationMode == "Balanced" ? diagnosticBalancedLong : diagnosticConservativeLong)
+diagnosticLongGate = longEntrySignal ? 12 : strategy.position_size > 0 ? 13 : not enableLongs ? 1 : fxBlocked ? 2 : strategy.position_size != 0 or orderAwaitingFill or not na(pendingRiskTicks) ? 3 : setupStage != 0 and setupDirection == -1 ? 4 : setupStage == 0 and not rangeIsConfirmed ? 5 : setupStage == 0 ? 6 : setupStage == 1 ? 7 : setupStage == 2 and not pullbackStarted ? 8 : setupStage == 2 ? 9 : not diagnosticLongResumption ? 10 : not riskDataReady ? 11 : 12
+diagnosticExtensionDistance = setupDirection == 1 ? frozenExtensionExtreme - frozenResistance : frozenSupport - frozenExtensionExtreme
+diagnosticDepth = longEntrySignal or shortEntrySignal ? confirmedEntryDepth : setupStage >= 2 and pullbackStarted and diagnosticExtensionDistance > 0.0 ? (setupDirection == 1 ? frozenExtensionExtreme - pullbackExtreme : pullbackExtreme - frozenExtensionExtreme) / diagnosticExtensionDistance * 100.0 : na
 
-plot(strategy.position_size != 0 ? tradeStop : na, "Frozen stop-loss", color=color.red, linewidth=2, style=plot.style_linebr)
-plot(strategy.position_size != 0 ? tradeTarget : na, "Frozen profit target", color=color.teal, linewidth=2, style=plot.style_linebr)
+// Diagnostics stay in the Data Window instead of adding candle annotations.
+plot(showSetupDiagnostics ? setupStage : na, "Diagnostic: setup stage", display=display.data_window)
+plot(showSetupDiagnostics ? setupDirection : na, "Diagnostic: setup direction", display=display.data_window)
+plot(showSetupDiagnostics ? diagnosticLongGate : na, "Diagnostic: bullish gate", display=display.data_window)
+plot(showSetupDiagnostics ? setupResetReason : na, "Diagnostic: reset reason", display=display.data_window)
+plot(showSetupDiagnostics ? (rangeIsConfirmed ? 1 : 0) : na, "Diagnostic: range ready", display=display.data_window)
+plot(showSetupDiagnostics ? (riskDataReady ? 1 : 0) : na, "Diagnostic: ATR ready", display=display.data_window)
+plot(showSetupDiagnostics ? (fxBlocked ? 1 : 0) : na, "Diagnostic: FX blocked", display=display.data_window)
+plot(showSetupDiagnostics ? (longEntrySignal ? 1 : shortEntrySignal ? -1 : 0) : na, "Diagnostic: entry requested", display=display.data_window)
+plot(showSetupDiagnostics ? diagnosticDepth : na, "Diagnostic: pullback depth (%)", display=display.data_window)
 
-stateShade = showStateBackground ? setupStage == 2 ? color.new(color.orange, 94) : setupStage == 3 ? color.new(color.green, 94) : na : na
-bgcolor(stateShade, title="Setup state")
+plot(showStopLoss and strategy.position_size != 0 ? tradeStop : na, "Frozen stop-loss", color=color.red, linewidth=2, style=plot.style_linebr)
+
 bgcolor(shadeWeekendBlackout and fxBlocked ? color.new(color.gray, 86) : na, title="FX Weekend blackout")
 
 // Broker-emulator note: if a stop and target are both reachable inside one

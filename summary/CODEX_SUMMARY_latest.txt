@@ -1,22 +1,23 @@
 CODEX COMPLETION SUMMARY
-Brief: Correct the TradingView range breakout-pullback strategy's fill handling and ATR readiness, remove the obsolete proximity setting, and make the journal runtime-file exclusion durable.
+Brief: Simplify the TradingView range breakout-pullback chart and restore fresh opposite-direction range detection after an active setup or trade.
 Recorded: 2026-08-27 (Australia/Brisbane)
 
 CHANGES
 
-- Updated pinescripts/range_breakout_pullback_strategy.pine to remove calc_on_order_fills. Each confirmed long or short entry now immediately submits its stop/target bracket with tick-relative loss/profit distances, so protection does not depend on a recalculation after the market order fills.
-- The bracket risk is rounded up to at least one minimum tick; the selected-R target is derived from that frozen tick risk. The default remains exactly 2.0R. The eventual average fill is used only to reconstruct the frozen stop/target prices for chart plots.
-- Adaptive ATR mode now requires the complete configurable ATR%-percentile lookback before an entry is eligible. Fixed ATR mode continues to require a valid ATR without unnecessarily waiting for the adaptive baseline.
-- Removed the unused pullback-proximity input. Pullback eligibility continues to use the existing extension-relative Any/Shallow/Deep/Custom depth modes and structural invalidation rules.
-- Added journal/5-digit-demo-calculation-context.json to PATCH_DESKTOP_PUSH.bat's durable exclusion list. No runtime data was read, staged, or modified.
-- Deleted the mistakenly created untracked pinescripts/breakout_pullback_retest_strategy.pine.
+- Updated only the canonical pinescripts/range_breakout_pullback_strategy.pine implementation. No duplicate or replacement strategy was created.
+- Blue support/resistance zones now default hidden. Breakout, extension, pullback, depth, state-background and custom entry annotations were removed from the normal chart.
+- TradingView's native execution markers are now the sole entry/exit source, with compact LONG, SHORT and EXIT comments. The default custom display consists of frozen teal take-profit lines, each bounded by its actual entry and exit bars. The active stop remains available through a separate setting that defaults off, and FX Weekend shading is preserved.
+- Added one opt-in Show setup diagnostics control. It restores structural zones and exposes compact stage, gate, reset, range, ATR, session, entry-request and pullback-depth values in TradingView's Data Window without adding candle-label clutter.
+- The first code gate blocking the later opposite-direction setup was range observation: confirmed pivots were accepted only while setupStage was 0, the strategy was flat and no order awaited a fill. Pivots confirmed during the preceding bearish setup/trade were permanently missed, so a fresh pre-breakout range and resistance could be absent when the bullish impulse arrived.
+- Range candidates now collect on every completed, non-blackout bar, including during an active setup or position. Breakout arming remains restricted to a confirmed range, stage 0, a flat strategy and no live/pending trade risk. This correction is direction-neutral, uses only already-confirmed pivots and never backdates a breakout.
+- Preserved all pullback-depth modes, Balanced and other resumption modes, full adaptive-ATR warmup, fixed/adaptive ATR stops, immediate symmetric tick-relative brackets, frozen default 2R targets, one-position behavior, FX Weekend rules, process_orders_on_close=true and the absence of calc_on_order_fills.
 
 VERIFICATION
 
-- No focused Pine compiler, syntax checker, or linter exists in the repository, so none was installed or substituted. Final compilation must be confirmed in TradingView Pine Editor.
-- One targeted static review covered immediate symmetric tick-relative brackets, full adaptive warmup, the absence of calc_on_order_fills and the obsolete proximity input, preservation of the default 2R target, and the exact journal exclusion.
-- The final diff inspection was limited to pinescripts/range_breakout_pullback_strategy.pine, PATCH_DESKTOP_PUSH.bat, and summary/CODEX_SUMMARY_latest.txt.
+- No focused Pine compiler, syntax checker or linter exists in the repository, so none was installed or substituted. Final compilation and visual validation must be completed in TradingView Pine Editor.
+- One targeted static review covered default visual visibility, actual frozen target-line construction, ordered bullish gate diagnostics, opposite-direction reset/range behavior, long/short symmetry and absence of lookahead.
+- The final diff inspection was limited to pinescripts/range_breakout_pullback_strategy.pine and summary/CODEX_SUMMARY_latest.txt.
 
 DELIVERY
 
-- Per explicit approval, delivery uses a manual path-scoped commit and normal push containing only the three files above. PATCH_DESKTOP_PUSH.bat is not executed.
+- Per explicit approval, delivery uses a manual path-scoped commit and normal push containing only the two files above. PATCH_DESKTOP_PUSH.bat is not executed or modified.
