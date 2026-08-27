@@ -1,19 +1,20 @@
 CODEX COMPLETION SUMMARY
-Brief: Correct remaining Unified Trader shared-feed publication, producer overlap, and missing-heartbeat defects.
-Recorded: 2026-08-26 (Australia/Brisbane)
+Brief: Create a TradingView bullish range breakout-pullback backtesting strategy and its exact bearish inverse.
+Recorded: 2026-08-27 (Australia/Brisbane)
 
-- Unified feed publication verifies the complete temporary write and replaces the live common-folder feed with FileMove(temporary,FILE_COMMON,UnifiedMarketWatchFileName,FILE_COMMON|FILE_REWRITE). Failures delete only the temporary file and leave the feed dirty for retry.
-- Race-safe ownership-state creation uses GlobalVariableTemp without overwriting an existing owner. The existing single-state versioned CAS design now uses a named 15-second lease.
-- UnifiedProcessBatch returns ownership failure and renews/validates before each Forex symbol. Initialization, timer, and tick paths stop at failed checkpoints and release producer state where ownership was lost.
-- Both changed-feed and unchanged-feed Python paths classify a missing heartbeat as Stale, show heartbeat age unavailable, retain last-good data, and preserve unchanged-feed render skipping.
+- Added pinescripts/range_breakout_pullback_strategy.pine as a Pine Script v6 overlay strategy with independent long/short controls, pyramiding disabled, confirmation-close market entries, and Strategy Tester output.
+- The transparent range detector clusters confirmed pivot highs and lows around running ATR-tolerant centres, requires at least two reactions on both boundaries by default, enforces minimum ATR height and configurable duration/staleness, and freezes both boundaries at breakout.
+- Each trade follows confirmed range, buffered directional breakout, later-bar extension, corrective pullback, and a later completed-bar resumption. Pullbacks need opposing closes, ATR retracement, and boundary proximity but need not touch the boundary. Material closes back inside, extension delays, and stale pullbacks invalidate or expire the setup.
+- Resumption modes are Aggressive, Balanced (default), and Conservative confirmed minor-swing breaks. Entries are never backdated to the pullback extreme.
+- Adaptive ATR stops default to ATR(14) with current/prior-only ATR%-percentile regimes and 1.0/1.5/2.0 multipliers; fixed-multiple mode is also available. ATR and multiplier are snapshotted at entry, and tick-rounded stop and default 2R target prices are frozen for the trade.
+- Transferred the recurring FX Weekend schedule from fxweekend-clone/liquidate.py and fxweekend-clone/settings.json: flat/no-entry from Friday 15:00 through Sunday 16:59 America/New_York, reopening Sunday 17:00. This exactly represents Saturday 05:00 Brisbane while New York is on DST and Saturday 06:00 Brisbane during New York standard time. The strategy cancels unfilled strategy orders, closes open positions, and optionally shades the blocked window.
 
 VERIFICATION
 
-- Exact pytest nodes: test_unified_feed_publish_targets_common_folder; test_unified_producer_guards_initialization_and_each_batch_unit; test_atr_window_missing_heartbeat_is_safe_in_changed_and_unchanged_paths. Result: 3 passed, with only pytest cache permission warnings.
-- MetaEditor compiled only mt5-clone/MQL5/Experts/Trader.mq5: 0 errors, 0 warnings, 5046 ms elapsed.
-- git diff --check completed without errors; only expected CRLF conversion warnings were reported.
+- No focused Pine compiler or syntax checker exists in the repository, so none was installed or substituted. Final compilation and visual validation remain to be performed in TradingView Pine Editor.
+- One targeted static review was performed and repeated only after fixing its same-bar extension/pullback sequencing finding. The final review confirmed the required state order, breakout-side pullback allowance, non-backdated entries, long/short symmetry, current/prior-only adaptive ATR selection, frozen trade risk levels, exact default 2R target, and exact recurring FX Weekend transfer.
+- The final diff inspection is limited to pinescripts/range_breakout_pullback_strategy.pine and summary/CODEX_SUMMARY_latest.txt.
 
 DELIVERY
 
-- The local journal runtime bytes were backed up before restoring the tracked baseline for the commit and will be restored after push verification.
 - This summary was written immediately before PATCH_DESKTOP_PUSH.bat and does not claim a push result.

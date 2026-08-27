@@ -1,0 +1,410 @@
+//@version=6
+strategy("Range Breakout-Pullback Strategy", overlay=true, pyramiding=0, process_orders_on_close=true, calc_on_order_fills=true)
+
+// This strategy converts the conceptual pullback turning point into a confirmed,
+// non-lookahead market entry. With process_orders_on_close=true, TradingView's
+// broker emulator fills the order on the confirmation bar's close.
+
+// -----------------------------------------------------------------------------
+// INPUTS
+// -----------------------------------------------------------------------------
+directionGroup = "1. Trade directions"
+enableLongs = input.bool(true, "Enable long trades", group=directionGroup, tooltip="Allows bullish range breakout-pullback trades.")
+enableShorts = input.bool(true, "Enable short trades", group=directionGroup, tooltip="Allows the exact inverse bearish setup.")
+
+rangeGroup = "2. Horizontal range detection"
+pivotStrength = input.int(3, "Confirmed pivot strength", minval=1, maxval=20, group=rangeGroup, tooltip="A pivot needs this many bars on both sides. It becomes available only after the right-side bars have closed.")
+minimumReactions = input.int(2, "Minimum reactions per side", minval=2, maxval=10, group=rangeGroup, tooltip="Required clustered pivot highs at resistance and clustered pivot lows at support.")
+clusterToleranceAtr = input.float(0.35, "Clustering tolerance (ATR)", minval=0.05, step=0.05, group=rangeGroup, tooltip="A new confirmed pivot joins the current boundary cluster when it is within this many ATR of the running cluster centre.")
+minimumRangeHeightAtr = input.float(2.0, "Minimum range height (ATR)", minval=0.1, step=0.1, group=rangeGroup, tooltip="Support must remain below resistance by at least this many current ATR.")
+minimumRangeBars = input.int(10, "Minimum range duration (bars)", minval=1, group=rangeGroup, tooltip="Minimum span from the earliest qualifying reaction to the latest qualifying reaction.")
+maximumRangeBars = input.int(250, "Maximum range duration/staleness (bars)", minval=10, group=rangeGroup, tooltip="A boundary cluster is discarded when its most recent reaction is older than this many bars; a combined range cannot span longer than this.")
+
+breakoutGroup = "3. Breakout and extension"
+breakoutBufferAtr = input.float(0.10, "Breakout close buffer (ATR)", minval=0.0, step=0.05, group=breakoutGroup, tooltip="A completed close must clear the frozen boundary by this ATR fraction.")
+minimumBreakoutBodyAtr = input.float(0.25, "Minimum breakout body (ATR)", minval=0.0, step=0.05, group=breakoutGroup, tooltip="Rejects negligible breaches. Set to 0 to disable the candle-body filter.")
+minimumExtensionAtr = input.float(0.75, "Minimum post-breakout extension (ATR)", minval=0.0, step=0.05, group=breakoutGroup, tooltip="After the breakout bar, price must extend this far beyond the broken boundary before a pullback can qualify.")
+maximumExtensionBars = input.int(20, "Maximum extension wait (bars)", minval=1, group=breakoutGroup, tooltip="Expires a breakout if the required post-breakout extension is not confirmed within this many bars.")
+
+pullbackGroup = "4. Corrective pullback"
+minimumOpposingCloses = input.int(2, "Minimum opposing closes", minval=1, maxval=20, group=pullbackGroup, tooltip="Longs count lower closes; shorts count higher closes. The count starts after extension is confirmed.")
+minimumRetracementAtr = input.float(0.50, "Minimum retracement (ATR)", minval=0.0, step=0.05, group=pullbackGroup, tooltip="Minimum correction from the post-breakout extreme.")
+pullbackProximityAtr = input.float(0.75, "Boundary proximity (ATR)", minval=0.0, step=0.05, group=pullbackGroup, tooltip="A long pullback low may remain this far above old resistance; a short pullback high may remain this far below old support. An exact touch is not required.")
+invalidationToleranceAtr = input.float(0.25, "Close-back-inside tolerance (ATR)", minval=0.0, step=0.05, group=pullbackGroup, tooltip="Invalidates a long after a close this far below old resistance, or a short after the inverse close above old support.")
+maximumPullbackBars = input.int(30, "Maximum pullback bars", minval=1, group=pullbackGroup, tooltip="Expires the setup this many bars after extension confirmation.")
+
+entryGroup = "5. Price-action resumption"
+confirmationMode = input.string("Balanced", "Confirmation mode", options=["Aggressive", "Balanced", "Conservative"], group=entryGroup, tooltip="Aggressive: first close resuming in the trade direction. Balanced: directional candle closes beyond the previous bar. Conservative: close beyond the latest confirmed minor pullback swing.")
+minorSwingStrength = input.int(2, "Conservative minor-swing strength", minval=1, maxval=10, group=entryGroup, tooltip="Bars on each side needed to confirm the minor swing used only by Conservative mode.")
+
+riskGroup = "6. ATR stop and profit target"
+stopMode = input.string("Adaptive ATR", "Stop mode", options=["Adaptive ATR", "Fixed ATR multiple"], group=riskGroup, tooltip="Adaptive ATR selects a transparent multiplier from the current ATR%-percentile regime. Fixed mode always uses one multiplier.")
+atrLength = input.int(14, "ATR length", minval=1, group=riskGroup, tooltip="ATR uses TradingView's RMA-based ta.atr calculation.")
+fixedAtrMultiplier = input.float(1.5, "Fixed ATR multiplier", minval=0.1, step=0.1, group=riskGroup, tooltip="Used only in Fixed ATR multiple mode; values such as 0.5, 1.0, 1.5 and 2.0 are accepted.")
+regimeLookback = input.int(200, "ATR% percentile lookback", minval=20, group=riskGroup, tooltip="Ranks current ATR as a percentage of price against current and earlier observations only.")
+lowRegimePercentile = input.float(33.0, "Low-volatility percentile", minval=0.0, maxval=100.0, step=1.0, group=riskGroup)
+highRegimePercentile = input.float(67.0, "High-volatility percentile", minval=0.0, maxval=100.0, step=1.0, group=riskGroup)
+lowVolatilityMultiplier = input.float(1.0, "Low-volatility ATR multiplier", minval=0.1, step=0.1, group=riskGroup)
+normalVolatilityMultiplier = input.float(1.5, "Normal-volatility ATR multiplier", minval=0.1, step=0.1, group=riskGroup)
+highVolatilityMultiplier = input.float(2.0, "High-volatility ATR multiplier", minval=0.1, step=0.1, group=riskGroup)
+riskRewardMultiple = input.float(2.0, "Profit target (R)", minval=0.1, step=0.1, group=riskGroup, tooltip="Every target is frozen at entry at this multiple of the actual entry-to-stop distance. Default is exactly 2R.")
+
+weekendGroup = "7. FX Weekend blackout"
+enableWeekendBlackout = input.bool(true, "Enable FX Weekend rules", group=weekendGroup, tooltip="Uses the repository FX Weekend schedule: flat and no entries from Friday 15:00 until Sunday 17:00 America/New_York, with IANA daylight-saving handling.")
+shadeWeekendBlackout = input.bool(true, "Shade blocked periods", group=weekendGroup, tooltip="Adds subtle background shading while new entries are blocked and positions must be flat.")
+
+visualGroup = "8. Visual audit"
+showStateBackground = input.bool(true, "Highlight extension/pullback states", group=visualGroup)
+
+// -----------------------------------------------------------------------------
+// VOLATILITY AND TIME HELPERS
+// -----------------------------------------------------------------------------
+atrValue = ta.atr(atrLength)
+atrPercent = na(close) or close == 0.0 ? na : atrValue / close * 100.0
+
+percentRank(float value, int lookback) =>
+    float atOrBelow = 0.0
+    float observations = 0.0
+    for offset = 0 to lookback - 1
+        historicalValue = atrPercent[offset]
+        if not na(historicalValue) and not na(value)
+            observations += 1.0
+            atOrBelow += historicalValue <= value ? 1.0 : 0.0
+    observations > 0.0 ? atOrBelow / observations * 100.0 : na
+
+roundDownToTick(float value) =>
+    math.floor(value / syminfo.mintick) * syminfo.mintick
+
+roundUpToTick(float value) =>
+    math.ceil(value / syminfo.mintick) * syminfo.mintick
+
+atrPercentile = percentRank(atrPercent, regimeLookback)
+effectiveLowPercentile = math.min(lowRegimePercentile, highRegimePercentile)
+effectiveHighPercentile = math.max(lowRegimePercentile, highRegimePercentile)
+adaptiveMultiplier = atrPercentile <= effectiveLowPercentile ? lowVolatilityMultiplier : atrPercentile >= effectiveHighPercentile ? highVolatilityMultiplier : normalVolatilityMultiplier
+selectedAtrMultiplier = stopMode == "Adaptive ATR" ? adaptiveMultiplier : fixedAtrMultiplier
+
+// FX Weekend's Brisbane DST/standard cutoffs are both Friday 15:00 in New York.
+// IANA timezone conversion applies the historical New York DST rules automatically.
+fxTimezone = "America/New_York"
+fxDay = dayofweek(time_close, fxTimezone)
+fxMinutes = hour(time_close, fxTimezone) * 60 + minute(time_close, fxTimezone)
+fxBlockedRaw = (fxDay == dayofweek.friday and fxMinutes >= 15 * 60) or fxDay == dayofweek.saturday or (fxDay == dayofweek.sunday and fxMinutes < 17 * 60)
+fxBlocked = enableWeekendBlackout and fxBlockedRaw
+
+// -----------------------------------------------------------------------------
+// CONFIRMED PIVOT CLUSTERS AND RANGE
+// -----------------------------------------------------------------------------
+confirmedPivotHigh = ta.pivothigh(high, pivotStrength, pivotStrength)
+confirmedPivotLow = ta.pivotlow(low, pivotStrength, pivotStrength)
+confirmedMinorHigh = ta.pivothigh(high, minorSwingStrength, minorSwingStrength)
+confirmedMinorLow = ta.pivotlow(low, minorSwingStrength, minorSwingStrength)
+
+var float resistanceCentre = na
+var int resistanceReactions = 0
+var int resistanceFirstBar = na
+var int resistanceLastBar = na
+var float supportCentre = na
+var int supportReactions = 0
+var int supportFirstBar = na
+var int supportLastBar = na
+
+// setupStage: 0 range search, 1 breakout, 2 extension, 3 qualified pullback.
+var int setupStage = 0
+var int setupDirection = 0
+var float frozenResistance = na
+var float frozenSupport = na
+var float setupAtr = na
+var float setupExtreme = na
+var float pullbackExtreme = na
+var int breakoutBar = na
+var int extensionBar = na
+var int pullbackConfirmedBar = na
+var int opposingCloseCount = 0
+var float pullbackMinorSwing = na
+var bool orderAwaitingFill = false
+
+var float pendingEntryAtr = na
+var float pendingEntryMultiplier = na
+var float tradeEntry = na
+var float tradeStop = na
+var float tradeTarget = na
+
+bool breakoutLongMarker = false
+bool breakoutShortMarker = false
+bool extensionLongMarker = false
+bool extensionShortMarker = false
+bool pullbackLongMarker = false
+bool pullbackShortMarker = false
+bool longEntrySignal = false
+bool shortEntrySignal = false
+bool resetSetup = false
+
+canBuildRange = barstate.isconfirmed and setupStage == 0 and strategy.position_size == 0 and not orderAwaitingFill and not fxBlocked
+
+if canBuildRange
+    if not na(resistanceLastBar) and bar_index - resistanceLastBar > maximumRangeBars
+        resistanceCentre := na
+        resistanceReactions := 0
+        resistanceFirstBar := na
+        resistanceLastBar := na
+    if not na(supportLastBar) and bar_index - supportLastBar > maximumRangeBars
+        supportCentre := na
+        supportReactions := 0
+        supportFirstBar := na
+        supportLastBar := na
+
+    if not na(confirmedPivotHigh)
+        pivotBar = bar_index - pivotStrength
+        clusterTolerance = atrValue * clusterToleranceAtr
+        joinsCluster = not na(resistanceCentre) and math.abs(confirmedPivotHigh - resistanceCentre) <= clusterTolerance and pivotBar - resistanceFirstBar <= maximumRangeBars
+        if joinsCluster
+            resistanceCentre := (resistanceCentre * resistanceReactions + confirmedPivotHigh) / (resistanceReactions + 1)
+            resistanceReactions += 1
+            resistanceLastBar := pivotBar
+        else
+            resistanceCentre := confirmedPivotHigh
+            resistanceReactions := 1
+            resistanceFirstBar := pivotBar
+            resistanceLastBar := pivotBar
+
+    if not na(confirmedPivotLow)
+        pivotBar = bar_index - pivotStrength
+        clusterTolerance = atrValue * clusterToleranceAtr
+        joinsCluster = not na(supportCentre) and math.abs(confirmedPivotLow - supportCentre) <= clusterTolerance and pivotBar - supportFirstBar <= maximumRangeBars
+        if joinsCluster
+            supportCentre := (supportCentre * supportReactions + confirmedPivotLow) / (supportReactions + 1)
+            supportReactions += 1
+            supportLastBar := pivotBar
+        else
+            supportCentre := confirmedPivotLow
+            supportReactions := 1
+            supportFirstBar := pivotBar
+            supportLastBar := pivotBar
+
+rangeFirstReaction = math.min(nz(resistanceFirstBar, bar_index), nz(supportFirstBar, bar_index))
+rangeLastReaction = math.max(nz(resistanceLastBar, bar_index), nz(supportLastBar, bar_index))
+rangeDuration = rangeLastReaction - rangeFirstReaction
+rangeHeight = resistanceCentre - supportCentre
+rangeIsConfirmed = setupStage == 0 and resistanceReactions >= minimumReactions and supportReactions >= minimumReactions and not na(rangeHeight) and rangeHeight >= atrValue * minimumRangeHeightAtr and rangeDuration >= minimumRangeBars and rangeDuration <= maximumRangeBars
+
+// -----------------------------------------------------------------------------
+// RANGE -> BREAKOUT -> EXTENSION -> PULLBACK -> RESUMPTION
+// -----------------------------------------------------------------------------
+if barstate.isconfirmed and rangeIsConfirmed and strategy.position_size == 0 and not orderAwaitingFill and not fxBlocked
+    longBodyPasses = minimumBreakoutBodyAtr == 0.0 or close - open >= atrValue * minimumBreakoutBodyAtr
+    shortBodyPasses = minimumBreakoutBodyAtr == 0.0 or open - close >= atrValue * minimumBreakoutBodyAtr
+    longBreakout = enableLongs and longBodyPasses and close > resistanceCentre + atrValue * breakoutBufferAtr
+    shortBreakout = enableShorts and shortBodyPasses and close < supportCentre - atrValue * breakoutBufferAtr
+    if longBreakout or shortBreakout
+        setupDirection := longBreakout ? 1 : -1
+        setupStage := 1
+        frozenResistance := resistanceCentre
+        frozenSupport := supportCentre
+        setupAtr := atrValue
+        setupExtreme := setupDirection == 1 ? high : low
+        pullbackExtreme := na
+        breakoutBar := bar_index
+        extensionBar := na
+        pullbackConfirmedBar := na
+        opposingCloseCount := 0
+        pullbackMinorSwing := na
+        breakoutLongMarker := setupDirection == 1
+        breakoutShortMarker := setupDirection == -1
+        resistanceCentre := na
+        resistanceReactions := 0
+        resistanceFirstBar := na
+        resistanceLastBar := na
+        supportCentre := na
+        supportReactions := 0
+        supportFirstBar := na
+        supportLastBar := na
+
+if barstate.isconfirmed and setupStage == 1 and bar_index > breakoutBar
+    materiallyInvalid = setupDirection == 1 ? close < frozenResistance - setupAtr * invalidationToleranceAtr : close > frozenSupport + setupAtr * invalidationToleranceAtr
+    extensionExpired = bar_index - breakoutBar > maximumExtensionBars
+    if materiallyInvalid or extensionExpired
+        resetSetup := true
+    else if setupDirection == 1
+        setupExtreme := math.max(setupExtreme, high)
+        if setupExtreme >= frozenResistance + setupAtr * minimumExtensionAtr
+            setupStage := 2
+            extensionBar := bar_index
+            pullbackExtreme := low
+            extensionLongMarker := true
+    else
+        setupExtreme := math.min(setupExtreme, low)
+        if setupExtreme <= frozenSupport - setupAtr * minimumExtensionAtr
+            setupStage := 2
+            extensionBar := bar_index
+            pullbackExtreme := high
+            extensionShortMarker := true
+
+if barstate.isconfirmed and setupStage == 2 and bar_index > extensionBar
+    if setupDirection == 1
+        if high > setupExtreme
+            setupExtreme := high
+            pullbackExtreme := low
+            opposingCloseCount := 0
+            extensionBar := bar_index
+        else
+            pullbackExtreme := math.min(pullbackExtreme, low)
+            opposingCloseCount += close < close[1] ? 1 : 0
+        materiallyInvalid = close < frozenResistance - setupAtr * invalidationToleranceAtr
+        expired = bar_index - extensionBar > maximumPullbackBars
+        retracementPasses = setupExtreme - pullbackExtreme >= setupAtr * minimumRetracementAtr
+        proximityPasses = pullbackExtreme <= frozenResistance + setupAtr * pullbackProximityAtr
+        if materiallyInvalid or expired
+            resetSetup := true
+        else if opposingCloseCount >= minimumOpposingCloses and retracementPasses and proximityPasses
+            setupStage := 3
+            pullbackConfirmedBar := bar_index
+            pullbackLongMarker := true
+    else
+        if low < setupExtreme
+            setupExtreme := low
+            pullbackExtreme := high
+            opposingCloseCount := 0
+            extensionBar := bar_index
+        else
+            pullbackExtreme := math.max(pullbackExtreme, high)
+            opposingCloseCount += close > close[1] ? 1 : 0
+        materiallyInvalid = close > frozenSupport + setupAtr * invalidationToleranceAtr
+        expired = bar_index - extensionBar > maximumPullbackBars
+        retracementPasses = pullbackExtreme - setupExtreme >= setupAtr * minimumRetracementAtr
+        proximityPasses = pullbackExtreme >= frozenSupport - setupAtr * pullbackProximityAtr
+        if materiallyInvalid or expired
+            resetSetup := true
+        else if opposingCloseCount >= minimumOpposingCloses and retracementPasses and proximityPasses
+            setupStage := 3
+            pullbackConfirmedBar := bar_index
+            pullbackShortMarker := true
+
+if barstate.isconfirmed and setupStage == 3
+    if setupDirection == 1 and not na(confirmedMinorHigh) and bar_index - minorSwingStrength >= extensionBar
+        pullbackMinorSwing := confirmedMinorHigh
+    if setupDirection == -1 and not na(confirmedMinorLow) and bar_index - minorSwingStrength >= extensionBar
+        pullbackMinorSwing := confirmedMinorLow
+
+    materiallyInvalid = setupDirection == 1 ? close < frozenResistance - setupAtr * invalidationToleranceAtr : close > frozenSupport + setupAtr * invalidationToleranceAtr
+    expired = bar_index - extensionBar > maximumPullbackBars
+    canResume = bar_index > pullbackConfirmedBar
+    aggressiveResume = setupDirection == 1 ? close > close[1] : close < close[1]
+    balancedResume = setupDirection == 1 ? close > open and close > high[1] : close < open and close < low[1]
+    conservativeResume = setupDirection == 1 ? not na(pullbackMinorSwing) and close > pullbackMinorSwing : not na(pullbackMinorSwing) and close < pullbackMinorSwing
+    resumptionConfirmed = canResume and (confirmationMode == "Aggressive" ? aggressiveResume : confirmationMode == "Balanced" ? balancedResume : conservativeResume)
+
+    if materiallyInvalid or expired
+        resetSetup := true
+    else if resumptionConfirmed and strategy.position_size == 0 and not orderAwaitingFill and not fxBlocked
+        pendingEntryAtr := atrValue
+        pendingEntryMultiplier := selectedAtrMultiplier
+        orderAwaitingFill := true
+        longEntrySignal := setupDirection == 1
+        shortEntrySignal := setupDirection == -1
+        if longEntrySignal
+            strategy.entry("Long", strategy.long, comment="Confirmed bullish resumption")
+        else
+            strategy.entry("Short", strategy.short, comment="Confirmed bearish resumption")
+        setupStage := 0
+        setupDirection := 0
+
+if resetSetup
+    setupStage := 0
+    setupDirection := 0
+    frozenResistance := na
+    frozenSupport := na
+    setupAtr := na
+    setupExtreme := na
+    pullbackExtreme := na
+    breakoutBar := na
+    extensionBar := na
+    pullbackConfirmedBar := na
+    opposingCloseCount := 0
+    pullbackMinorSwing := na
+
+// -----------------------------------------------------------------------------
+// FX WEEKEND ENFORCEMENT AND FROZEN TRADE RISK
+// -----------------------------------------------------------------------------
+if fxBlocked
+    strategy.cancel_all()
+    orderAwaitingFill := false
+    if strategy.position_size != 0
+        strategy.close_all(comment="FX Weekend flat window", immediately=true)
+    setupStage := 0
+    setupDirection := 0
+    frozenResistance := na
+    frozenSupport := na
+    resistanceCentre := na
+    resistanceReactions := 0
+    resistanceFirstBar := na
+    resistanceLastBar := na
+    supportCentre := na
+    supportReactions := 0
+    supportFirstBar := na
+    supportLastBar := na
+
+// calc_on_order_fills lets these values use the broker emulator's actual fill.
+if strategy.position_size != 0 and na(tradeStop)
+    orderAwaitingFill := false
+    tradeEntry := strategy.position_avg_price
+    entryAtrSnapshot = nz(pendingEntryAtr, atrValue)
+    entryMultiplierSnapshot = nz(pendingEntryMultiplier, selectedAtrMultiplier)
+    stopDistance = entryAtrSnapshot * entryMultiplierSnapshot
+    if strategy.position_size > 0
+        tradeStop := roundDownToTick(tradeEntry - stopDistance)
+        initialRisk = math.abs(tradeEntry - tradeStop)
+        tradeTarget := roundUpToTick(tradeEntry + riskRewardMultiple * initialRisk)
+    else
+        tradeStop := roundUpToTick(tradeEntry + stopDistance)
+        initialRisk = math.abs(tradeStop - tradeEntry)
+        tradeTarget := roundDownToTick(tradeEntry - riskRewardMultiple * initialRisk)
+
+if strategy.position_size > 0 and not fxBlocked
+    strategy.exit("Long stop/target", from_entry="Long", stop=tradeStop, limit=tradeTarget)
+if strategy.position_size < 0 and not fxBlocked
+    strategy.exit("Short stop/target", from_entry="Short", stop=tradeStop, limit=tradeTarget)
+
+if strategy.position_size == 0 and not orderAwaitingFill and not na(tradeStop)
+    tradeEntry := na
+    tradeStop := na
+    tradeTarget := na
+    pendingEntryAtr := na
+    pendingEntryMultiplier := na
+    frozenResistance := na
+    frozenSupport := na
+
+// -----------------------------------------------------------------------------
+// AUDIT VISUALS
+// -----------------------------------------------------------------------------
+showFrozenRange = setupStage != 0 or strategy.position_size != 0 or orderAwaitingFill
+displayResistance = showFrozenRange ? frozenResistance : rangeIsConfirmed ? resistanceCentre : na
+displaySupport = showFrozenRange ? frozenSupport : rangeIsConfirmed ? supportCentre : na
+displayZoneHalfWidth = showFrozenRange ? setupAtr * clusterToleranceAtr : atrValue * clusterToleranceAtr
+
+resistanceUpperPlot = plot(not na(displayResistance) ? displayResistance + displayZoneHalfWidth : na, "Resistance zone upper", color=color.new(color.blue, 55), linewidth=1)
+resistanceLowerPlot = plot(not na(displayResistance) ? displayResistance - displayZoneHalfWidth : na, "Resistance zone lower", color=color.new(color.blue, 55), linewidth=1)
+supportUpperPlot = plot(not na(displaySupport) ? displaySupport + displayZoneHalfWidth : na, "Support zone upper", color=color.new(color.blue, 55), linewidth=1)
+supportLowerPlot = plot(not na(displaySupport) ? displaySupport - displayZoneHalfWidth : na, "Support zone lower", color=color.new(color.blue, 55), linewidth=1)
+fill(resistanceUpperPlot, resistanceLowerPlot, color=color.new(color.blue, 88), title="Resistance zone")
+fill(supportUpperPlot, supportLowerPlot, color=color.new(color.blue, 88), title="Support zone")
+
+plotshape(breakoutLongMarker, title="Bullish breakout", style=shape.triangleup, location=location.belowbar, color=color.blue, size=size.tiny, text="BO")
+plotshape(breakoutShortMarker, title="Bearish breakout", style=shape.triangledown, location=location.abovebar, color=color.blue, size=size.tiny, text="BO")
+plotshape(extensionLongMarker, title="Bullish extension confirmed", style=shape.circle, location=location.belowbar, color=color.new(color.blue, 25), size=size.tiny)
+plotshape(extensionShortMarker, title="Bearish extension confirmed", style=shape.circle, location=location.abovebar, color=color.new(color.blue, 25), size=size.tiny)
+plotshape(pullbackLongMarker, title="Bullish pullback qualified", style=shape.diamond, location=location.belowbar, color=color.orange, size=size.tiny)
+plotshape(pullbackShortMarker, title="Bearish pullback qualified", style=shape.diamond, location=location.abovebar, color=color.orange, size=size.tiny)
+plotshape(longEntrySignal, title="Confirmed long entry", style=shape.labelup, location=location.belowbar, color=color.lime, textcolor=color.black, size=size.small, text="LONG")
+plotshape(shortEntrySignal, title="Confirmed short entry", style=shape.labeldown, location=location.abovebar, color=color.lime, textcolor=color.black, size=size.small, text="SHORT")
+
+plot(strategy.position_size != 0 ? tradeStop : na, "Frozen stop-loss", color=color.red, linewidth=2, style=plot.style_linebr)
+plot(strategy.position_size != 0 ? tradeTarget : na, "Frozen profit target", color=color.teal, linewidth=2, style=plot.style_linebr)
+
+stateShade = showStateBackground ? setupStage == 2 ? color.new(color.orange, 94) : setupStage == 3 ? color.new(color.green, 94) : na : na
+bgcolor(stateShade, title="Setup state")
+bgcolor(shadeWeekendBlackout and fxBlocked ? color.new(color.gray, 86) : na, title="FX Weekend blackout")
+
+// Broker-emulator note: if a stop and target are both reachable inside one
+// historical candle, the assumed fill depends on TradingView's intrabar model,
+// available lower-timeframe data, Bar Magnifier setting, commission and slippage.
