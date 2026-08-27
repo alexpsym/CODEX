@@ -1,21 +1,22 @@
 CODEX COMPLETION SUMMARY
-Brief: Add configurable extension-relative pullback-depth modes to the TradingView range breakout-pullback strategy.
+Brief: Correct the TradingView range breakout-pullback strategy's fill handling and ATR readiness, remove the obsolete proximity setting, and make the journal runtime-file exclusion durable.
 Recorded: 2026-08-27 (Australia/Brisbane)
 
-- Added pinescripts/range_breakout_pullback_strategy.pine as a Pine Script v6 overlay strategy with independent long/short controls, pyramiding disabled, confirmation-close market entries, and Strategy Tester output.
-- The transparent range detector clusters confirmed pivot highs and lows around running ATR-tolerant centres, requires at least two reactions on both boundaries by default, enforces minimum ATR height and configurable duration/staleness, and freezes both boundaries at breakout.
-- Each trade follows confirmed range, buffered directional breakout, later-bar extension, corrective pullback, and a later completed-bar resumption. Pullbacks still need opposing closes and ATR retracement, but former-boundary proximity no longer gates eligibility.
-- Added Any valid depth, Shallow, Deep and Custom range modes. Bullish depth is (frozen extension high - pullback low) / (frozen extension high - broken resistance); bearish depth is its exact inverse. The extension extreme freezes on the first confirmed opposing close, bounded modes arm at their minimum and disqualify above their maximum, and optional entry labels show the confirmed depth.
-- Resumption modes are Aggressive, Balanced (default), and Conservative confirmed minor-swing breaks. Entries are never backdated to the pullback extreme.
-- Adaptive ATR stops default to ATR(14) with current/prior-only ATR%-percentile regimes and 1.0/1.5/2.0 multipliers; fixed-multiple mode is also available. ATR and multiplier are snapshotted at entry, and tick-rounded stop and default 2R target prices are frozen for the trade.
-- Transferred the recurring FX Weekend schedule from fxweekend-clone/liquidate.py and fxweekend-clone/settings.json: flat/no-entry from Friday 15:00 through Sunday 16:59 America/New_York, reopening Sunday 17:00. This exactly represents Saturday 05:00 Brisbane while New York is on DST and Saturday 06:00 Brisbane during New York standard time. The strategy cancels unfilled strategy orders, closes open positions, and optionally shades the blocked window.
+CHANGES
+
+- Updated pinescripts/range_breakout_pullback_strategy.pine to remove calc_on_order_fills. Each confirmed long or short entry now immediately submits its stop/target bracket with tick-relative loss/profit distances, so protection does not depend on a recalculation after the market order fills.
+- The bracket risk is rounded up to at least one minimum tick; the selected-R target is derived from that frozen tick risk. The default remains exactly 2.0R. The eventual average fill is used only to reconstruct the frozen stop/target prices for chart plots.
+- Adaptive ATR mode now requires the complete configurable ATR%-percentile lookback before an entry is eligible. Fixed ATR mode continues to require a valid ATR without unnecessarily waiting for the adaptive baseline.
+- Removed the unused pullback-proximity input. Pullback eligibility continues to use the existing extension-relative Any/Shallow/Deep/Custom depth modes and structural invalidation rules.
+- Added journal/5-digit-demo-calculation-context.json to PATCH_DESKTOP_PUSH.bat's durable exclusion list. No runtime data was read, staged, or modified.
+- Deleted the mistakenly created untracked pinescripts/breakout_pullback_retest_strategy.pine.
 
 VERIFICATION
 
-- No focused Pine compiler or syntax checker exists in the repository, so none was installed or substituted. Final compilation and visual validation remain to be performed in TradingView Pine Editor.
-- One targeted static review confirmed distinct Any/Shallow/Deep/Custom behavior, maximum-depth disqualification before entry, exact bullish/bearish formula symmetry, positive corrective movement, frozen non-lookahead inputs, and later-bar resumption confirmation.
-- The final diff inspection is limited to pinescripts/range_breakout_pullback_strategy.pine and summary/CODEX_SUMMARY_latest.txt.
+- No focused Pine compiler, syntax checker, or linter exists in the repository, so none was installed or substituted. Final compilation must be confirmed in TradingView Pine Editor.
+- One targeted static review covered immediate symmetric tick-relative brackets, full adaptive warmup, the absence of calc_on_order_fills and the obsolete proximity input, preservation of the default 2R target, and the exact journal exclusion.
+- The final diff inspection was limited to pinescripts/range_breakout_pullback_strategy.pine, PATCH_DESKTOP_PUSH.bat, and summary/CODEX_SUMMARY_latest.txt.
 
 DELIVERY
 
-- This summary was written before the explicitly requested manual path-scoped commit and normal push; PATCH_DESKTOP_PUSH.bat is not used for this follow-up.
+- Per explicit approval, delivery uses a manual path-scoped commit and normal push containing only the three files above. PATCH_DESKTOP_PUSH.bat is not executed.

@@ -1,5 +1,5 @@
 //@version=6
-strategy("Range Breakout-Pullback Strategy", overlay=true, pyramiding=0, process_orders_on_close=true, calc_on_order_fills=true, max_labels_count=500)
+strategy("Range Breakout-Pullback Strategy", overlay=true, pyramiding=0, process_orders_on_close=true, max_labels_count=500)
 
 // This strategy converts the conceptual pullback turning point into a confirmed,
 // non-lookahead market entry. With process_orders_on_close=true, TradingView's
@@ -29,7 +29,6 @@ maximumExtensionBars = input.int(20, "Maximum extension wait (bars)", minval=1, 
 pullbackGroup = "4. Corrective pullback"
 minimumOpposingCloses = input.int(2, "Minimum opposing closes", minval=1, maxval=20, group=pullbackGroup, tooltip="Longs count lower closes; shorts count higher closes. The count starts after extension is confirmed.")
 minimumRetracementAtr = input.float(0.50, "Minimum retracement (ATR)", minval=0.0, step=0.05, group=pullbackGroup, tooltip="Minimum correction from the post-breakout extreme.")
-pullbackProximityAtr = input.float(0.75, "Boundary proximity (ATR)", minval=0.0, step=0.05, group=pullbackGroup, tooltip="Retained for settings compatibility and structural reference only. It no longer gates entries; Pullback Depth Mode controls shallow/deep eligibility.")
 pullbackDepthMode = input.string("Any valid depth", "Pullback Depth Mode", options=["Any valid depth", "Shallow", "Deep", "Custom range"], group=pullbackGroup, tooltip="Any accepts the first otherwise-valid correction. Shallow, Deep and Custom arm only inside their selected extension-relative depth interval and disqualify a setup that exceeds its maximum before entry.")
 shallowMinimumDepth = input.float(0.0, "Shallow minimum depth (%)", minval=0.0, maxval=500.0, step=0.5, group=pullbackGroup)
 shallowMaximumDepth = input.float(50.0, "Shallow maximum depth (%)", minval=0.0, maxval=500.0, step=0.5, group=pullbackGroup)
@@ -78,7 +77,7 @@ percentRank(float value, int lookback) =>
         if not na(historicalValue) and not na(value)
             observations += 1.0
             atOrBelow += historicalValue <= value ? 1.0 : 0.0
-    observations > 0.0 ? atOrBelow / observations * 100.0 : na
+    observations == lookback ? atOrBelow / observations * 100.0 : na
 
 roundDownToTick(float value) =>
     math.floor(value / syminfo.mintick) * syminfo.mintick
@@ -91,6 +90,7 @@ effectiveLowPercentile = math.min(lowRegimePercentile, highRegimePercentile)
 effectiveHighPercentile = math.max(lowRegimePercentile, highRegimePercentile)
 adaptiveMultiplier = atrPercentile <= effectiveLowPercentile ? lowVolatilityMultiplier : atrPercentile >= effectiveHighPercentile ? highVolatilityMultiplier : normalVolatilityMultiplier
 selectedAtrMultiplier = stopMode == "Adaptive ATR" ? adaptiveMultiplier : fixedAtrMultiplier
+riskDataReady = not na(atrValue) and (stopMode == "Fixed ATR multiple" or not na(atrPercentile))
 
 configuredDepthMinimum = pullbackDepthMode == "Shallow" ? shallowMinimumDepth : pullbackDepthMode == "Deep" ? deepMinimumDepth : customMinimumDepth
 configuredDepthMaximum = pullbackDepthMode == "Shallow" ? shallowMaximumDepth : pullbackDepthMode == "Deep" ? deepMaximumDepth : customMaximumDepth
@@ -140,8 +140,9 @@ var int opposingCloseCount = 0
 var float pullbackMinorSwing = na
 var bool orderAwaitingFill = false
 
-var float pendingEntryAtr = na
-var float pendingEntryMultiplier = na
+var int pendingRiskTicks = na
+var int pendingTargetTicks = na
+var int entryOrderBar = na
 var float tradeEntry = na
 var float tradeStop = na
 var float tradeTarget = na
@@ -339,17 +340,23 @@ if barstate.isconfirmed and setupStage == 3
 
     if materiallyInvalid or expired or depthMaximumExceeded
         resetSetup := true
-    else if resumptionConfirmed and strategy.position_size == 0 and not orderAwaitingFill and not fxBlocked
-        pendingEntryAtr := atrValue
-        pendingEntryMultiplier := selectedAtrMultiplier
+    else if resumptionConfirmed and riskDataReady and strategy.position_size == 0 and not orderAwaitingFill and not fxBlocked
+        entryAtrSnapshot = atrValue
+        entryMultiplierSnapshot = selectedAtrMultiplier
+        stopDistance = entryAtrSnapshot * entryMultiplierSnapshot
+        pendingRiskTicks := math.max(1, int(math.ceil(stopDistance / syminfo.mintick)))
+        pendingTargetTicks := math.max(1, int(math.round(pendingRiskTicks * riskRewardMultiple)))
+        entryOrderBar := bar_index
         confirmedEntryDepth := pullbackDepth
         orderAwaitingFill := true
         longEntrySignal := setupDirection == 1
         shortEntrySignal := setupDirection == -1
         if longEntrySignal
             strategy.entry("Long", strategy.long, comment="Confirmed bullish resumption")
+            strategy.exit("Long stop/target", from_entry="Long", loss=pendingRiskTicks, profit=pendingTargetTicks)
         else
             strategy.entry("Short", strategy.short, comment="Confirmed bearish resumption")
+            strategy.exit("Short stop/target", from_entry="Short", loss=pendingRiskTicks, profit=pendingTargetTicks)
         if showEntryDepthLabel
             depthText = "Depth " + str.tostring(confirmedEntryDepth, "#.0") + "%"
             label.new(bar_index, setupDirection == 1 ? low : high, depthText, yloc=yloc.price, style=setupDirection == 1 ? label.style_label_up : label.style_label_down, color=color.new(color.lime, 5), textcolor=color.black, size=size.tiny)
@@ -403,33 +410,31 @@ if fxBlocked
     supportFirstBar := na
     supportLastBar := na
 
-// calc_on_order_fills lets these values use the broker emulator's actual fill.
+// The relative-tick bracket was submitted with the entry signal, so protection
+// does not depend on an extra fill-triggered calculation. The actual average fill
+// is used only to reconstruct the frozen prices for chart display.
+if orderAwaitingFill and not na(entryOrderBar) and bar_index > entryOrderBar
+    orderAwaitingFill := false
+
 if strategy.position_size != 0 and na(tradeStop)
     orderAwaitingFill := false
     tradeEntry := strategy.position_avg_price
-    entryAtrSnapshot = nz(pendingEntryAtr, atrValue)
-    entryMultiplierSnapshot = nz(pendingEntryMultiplier, selectedAtrMultiplier)
-    stopDistance = entryAtrSnapshot * entryMultiplierSnapshot
+    riskDistance = nz(pendingRiskTicks, 1) * syminfo.mintick
+    targetDistance = nz(pendingTargetTicks, 1) * syminfo.mintick
     if strategy.position_size > 0
-        tradeStop := roundDownToTick(tradeEntry - stopDistance)
-        initialRisk = math.abs(tradeEntry - tradeStop)
-        tradeTarget := roundUpToTick(tradeEntry + riskRewardMultiple * initialRisk)
+        tradeStop := roundDownToTick(tradeEntry - riskDistance)
+        tradeTarget := roundUpToTick(tradeEntry + targetDistance)
     else
-        tradeStop := roundUpToTick(tradeEntry + stopDistance)
-        initialRisk = math.abs(tradeStop - tradeEntry)
-        tradeTarget := roundDownToTick(tradeEntry - riskRewardMultiple * initialRisk)
+        tradeStop := roundUpToTick(tradeEntry + riskDistance)
+        tradeTarget := roundDownToTick(tradeEntry - targetDistance)
 
-if strategy.position_size > 0 and not fxBlocked
-    strategy.exit("Long stop/target", from_entry="Long", stop=tradeStop, limit=tradeTarget)
-if strategy.position_size < 0 and not fxBlocked
-    strategy.exit("Short stop/target", from_entry="Short", stop=tradeStop, limit=tradeTarget)
-
-if strategy.position_size == 0 and not orderAwaitingFill and not na(tradeStop)
+if strategy.position_size == 0 and not orderAwaitingFill and not na(pendingRiskTicks)
     tradeEntry := na
     tradeStop := na
     tradeTarget := na
-    pendingEntryAtr := na
-    pendingEntryMultiplier := na
+    pendingRiskTicks := na
+    pendingTargetTicks := na
+    entryOrderBar := na
     frozenResistance := na
     frozenSupport := na
     setupAtr := na

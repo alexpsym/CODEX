@@ -97,6 +97,7 @@ for %%P in (
   ".env"
   "render/data"
   "render/uploads"
+  "journal/5-digit-demo-calculation-context.json"
   "bybit_monitor/custom_alerts.json"
   "bybit_monitor/settings.json"
   "bybit_monitor/runtime_status.json"
