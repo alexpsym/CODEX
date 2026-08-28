@@ -172,7 +172,6 @@ def test_mql5_trader_resolves_pepperstone_dot_suffix_symbols():
 
 def test_mql5_trader_standard_market_is_live_quote_anchored_and_terminal_token_gated():
     trader = (ROOT / "mt5-clone" / "MQL5" / "Experts" / "Trader.mq5").read_text(encoding="utf-8")
-    unified_window = (ROOT / "mt5-clone" / "atr_percent_window.py").read_text(encoding="utf-8")
     market = trader.split("bool ExecuteStandardMarketOnce()", 1)[1].split("void CancelAllPendingByMagic()", 1)[0]
     consume = trader.split("bool ConsumeStandardMarketToken", 1)[1].split("bool ExecuteStandardMarketOnce()", 1)[0]
     on_init = trader.split("int OnInit()", 1)[1].split("void OnDeinit", 1)[0]
@@ -211,101 +210,28 @@ def test_mql5_trader_standard_market_is_live_quote_anchored_and_terminal_token_g
     assert "ExecuteStandardMarketOnce();" in chart_event
     assert "STANDARD_MARKET_EXECUTE_BUTTON" in chart_event
     assert "if(Strategy == STRAT_STANDARD_MARKET) return;" in trader
-    assert "MarketWatchUnifiedFeed.json" in trader
-    assert "SymbolsTotal(true)" in trader and "SymbolName(i,true)" in trader
-    assert "PERIOD_M1, PERIOD_M5, PERIOD_H1, PERIOD_D1" in trader
-    assert "SeriesInfoInteger(symbol,g_unifiedPeriods[frameIndex],SERIES_SYNCHRONIZED" in trader
-    assert "iATR(symbol,g_unifiedPeriods[frameIndex]" in trader
-    assert "IndicatorRelease(g_unifiedHandles[slot])" in trader
-    assert "UnifiedScheduleRetry" in trader and "MathMin(60" in trader
-    assert "UnifiedMarketWatchTimer();" in trader
-    assert '"spread_percent"' in unified_window and '"spread_points"' in unified_window
-    assert "def _toggle_sort" in unified_window and "def _sorted_rows" in unified_window
-    assert "self.sort_column" in unified_window and "self.sort_desc" in unified_window
+    assert "EventSetTimer(1);" in trader
 
 
-def test_unified_feed_publish_targets_common_folder():
-    trader = (ROOT / "mt5-clone" / "MQL5" / "Experts" / "Trader.mq5").read_text(encoding="utf-8")
-    export = trader.split("bool UnifiedExportFeed", 1)[1].split("string UnifiedQuote", 1)[0]
-    move = "FileMove(temporary,FILE_COMMON,UnifiedMarketWatchFileName,FILE_COMMON|FILE_REWRITE)"
-    assert move in export
-    assert "FileMove(temporary,FILE_COMMON,UnifiedMarketWatchFileName,FILE_REWRITE)" not in export
-    assert export.index("written!=(uint)StringLen(json)") < export.index("if(!UnifiedTryAcquireProducer()) { FileDelete(temporary,FILE_COMMON); return false; }") < export.index(move)
-    assert "g_unifiedFeedDirty=false" in export and export.index("g_unifiedFeedDirty=false") > export.index(move)
-
-
-def test_unified_producer_guards_initialization_and_each_batch_unit():
-    trader = (ROOT / "mt5-clone" / "MQL5" / "Experts" / "Trader.mq5").read_text(encoding="utf-8")
-    ownership = trader.split("bool UnifiedTryAcquireProducer", 1)[1].split("void UnifiedReleaseProducerState", 1)[0]
-    batch = trader.split("bool UnifiedProcessBatch", 1)[1].split("void UnifiedRefreshSpreads", 1)[0]
-    init = trader.split("void UnifiedMarketWatchInit", 1)[1].split("void UnifiedMarketWatchTimer", 1)[0]
-    timer = trader.split("void UnifiedMarketWatchTimer", 1)[1].split("void UnifiedMarketWatchTick", 1)[0]
-    assert "GlobalVariableSet(g_unifiedOwnerName,0.0)" not in ownership
-    assert ownership.index("GlobalVariableTemp(g_unifiedOwnerName)") < ownership.index("GlobalVariableGet(g_unifiedOwnerName)") < ownership.index("GlobalVariableSetOnCondition(g_unifiedOwnerName,renewed,observed)")
-    loop = batch[batch.index("for(int n=0;n<batch;n++)"):]
-    assert loop.index("if(!UnifiedTryAcquireProducer()) return false;") < loop.index("UnifiedRefreshFrame(index,f)")
-    assert "if(!UnifiedTryAcquireProducer() || !UnifiedProcessBatch()) { UnifiedReleaseProducerState(); return; }" in init
-    assert init.index("UnifiedTryAcquireProducer()") < init.index("UnifiedRefreshSpreads()") < init.index("UnifiedProcessBatch()") < init.index("UnifiedExportFeed()") < init.rindex("UnifiedTryAcquireProducer()") < init.index("UnifiedLaunchWindow()")
-    assert "!UnifiedProcessBatch()) { UnifiedReleaseProducerState(); return; }" in timer
-
-
-def test_atr_window_missing_heartbeat_is_safe_in_changed_and_unchanged_paths(tmp_path):
-    spec = importlib.util.spec_from_file_location("unified_window_test", ROOT / "mt5-clone" / "atr_percent_window.py")
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    sys.modules[spec.name] = module
-    try:
-        spec.loader.exec_module(module)
-    finally:
-        sys.modules.pop(spec.name, None)
-    feed_path = tmp_path / "feed.json"
-    feed_path.write_text('{"symbols": []}', encoding="utf-8")
-    window = module.ATRPercentWindow.__new__(module.ATRPercentWindow)
-    window.feed_path = feed_path
-    window.heartbeat_path = tmp_path / "missing.heartbeat"
-    window.last_feed_signature = None
-    window.last_good_feed = None
-    window.rows = []
-    window.refresh_ms = 500
-    rendered = []
-    scheduled = []
-    class Status:
-        value = ""
-        def set(self, value): self.value = value
-    window.status_var = Status()
-    window._render_rows = lambda: rendered.append(True)
-    window._schedule_refresh = lambda *args: scheduled.append(True)
-    window._refresh()
-    assert "Stale" in window.status_var.value and "heartbeat age unavailable" in window.status_var.value
-    assert rendered and window.last_good_feed == {"symbols": []}
-    rendered.clear()
-    window._refresh()
-    assert "Stale" in window.status_var.value and "heartbeat age unavailable" in window.status_var.value
-    assert not rendered and window.last_good_feed == {"symbols": []} and len(scheduled) == 2
-
-
-def test_unified_market_watch_uses_one_table_trader_guidance_and_successful_atr_timestamp():
+def test_trader_has_no_embedded_market_watch_spread_or_atr():
     trader = (ROOT / "mt5-clone" / "MQL5" / "Experts" / "Trader.mq5").read_text(encoding="utf-8")
     window = (ROOT / "mt5-clone" / "atr_percent_window.py").read_text(encoding="utf-8")
 
-    assert "ttk.Notebook" not in window
-    assert window.count("ttk.Treeview(") == 1
-    assert "self.ranked_tree" not in window
-    assert "self.diagnostic_tree" not in window
-    assert "Show ATR Top N only" in window
-    assert "rank_rows(self.rows, timeframe, self._safe_top_n())" in window
-    assert "attach Trader.mq5 in MT5 and enable Unified Market Watch" in window
-    assert "enable DLL imports only for automatic window launch" in window
-    assert "attach MarketWatchATRPercentFeed.mq5" not in window
-    assert "Waiting for first successful ATR calculation" in window
-
-    refresh = trader.split("void UnifiedRefreshFrame", 1)[1].split("void UnifiedProcessBatch", 1)[0]
-    export = trader.split("bool UnifiedExportFeed", 1)[1].split("string UnifiedQuote", 1)[0]
-    assert "g_unifiedLastSuccessfulAtr=TimeGMT();" in refresh
-    assert refresh.index("g_unifiedAtrPercent[slot]=") < refresh.index("g_unifiedLastSuccessfulAtr=TimeGMT();")
-    assert 'last_successful_refresh' in export
-    assert 'g_unifiedLastSuccessfulAtr>0' in export
-    assert '"null"' in export
+    for removed in [
+        "MarketWatchUnifiedFeed.json", "UnifiedMarketWatch", "g_unified", "iATR(",
+        ".heartbeat", "ShellExecuteW", "EventSetMillisecondTimer",
+    ]:
+        assert removed not in trader
+    assert "EnablePepperstoneSpreadExport" in trader
+    assert "MaybeExportPepperstoneSpreads();" in trader
+    assert "MarketWatchATRPercentFeed.json" not in trader
+    assert "MarketWatchSpreadPercentFeed.json" not in trader
+    assert "MarketWatchUnifiedFeed.json" not in window
+    assert "spread_percent" not in window and "spread_points" not in window
+    assert "heartbeat" not in window.lower()
+    assert "MarketWatchATRPercentFeed.json" in window
+    assert "attach MarketWatchATRPercentFeed.mq5" in window
+    assert "_feed_age_seconds" in window
 
 
 def test_mql5_trader_standard_limit_retries_transient_failures_without_duplicate_send():

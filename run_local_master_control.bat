@@ -252,17 +252,7 @@ if defined LOCAL_MASTER_EXIT_REQUEST (
       echo [local-master] smoke/test mode: not closing shared console window.
       exit 0
     )
-    echo [local-master] closing Local Master Control command prompt.
-    set "LOCAL_MASTER_SHUTDOWN_PS1=%TEMP%\local_master_shutdown_!RANDOM!_!RANDOM!.ps1"
-    > "!LOCAL_MASTER_SHUTDOWN_PS1!" (
-      echo $title = $env:LOCAL_MASTER_WINDOW_TITLE
-      echo Start-Sleep -Milliseconds 750
-      echo if ^([string]::IsNullOrWhiteSpace^($title^)^) { exit 0 }
-      echo $allow = @^('WindowsTerminal','wt','OpenConsole','conhost','cmd'^)
-      echo Get-Process ^| Where-Object { $_.MainWindowTitle -eq $title -and $allow -contains $_.ProcessName } ^| ForEach-Object { try { Stop-Process -Id $_.Id -Force -ErrorAction Stop } catch {} }
-      echo Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
-    )
-    start "" powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "!LOCAL_MASTER_SHUTDOWN_PS1!"
+    echo [local-master] local exit complete; returning the owned worker console normally.
     exit 0
   )
 )

@@ -30,15 +30,15 @@ const string NORMAL_DESKTOP_SCRIPT_PATH = "C:\\GPT\\CODEX-master\\mt5-clone\\atr
 const int    SW_SHOWNORMAL = 1;
 const uint   INVALID_FILE_ATTRIBUTES = 0xFFFFFFFF;
 const uint   FILE_ATTRIBUTE_DIRECTORY = 0x00000010;
-const int    FRAME_COUNT = 6;
+const int    FRAME_COUNT = 4;
 
-ENUM_TIMEFRAMES FRAME_PERIODS[6] =
+ENUM_TIMEFRAMES FRAME_PERIODS[4] =
 {
-   PERIOD_M1, PERIOD_M5, PERIOD_H1, PERIOD_D1, PERIOD_W1, PERIOD_MN1
+   PERIOD_M1, PERIOD_M5, PERIOD_H1, PERIOD_D1
 };
-string FRAME_KEYS[6] =
+string FRAME_KEYS[4] =
 {
-   "m1", "m5", "h1", "d1", "w1", "mn1"
+   "m1", "m5", "h1", "d1"
 };
 
 string   g_symbols[];
@@ -114,7 +114,7 @@ string SafeRankFrame()
    string value = DesktopWindowRankFrame;
    StringTrimLeft(value);
    StringTrimRight(value);
-   if(value == "1m" || value == "5m" || value == "1h" || value == "1D" || value == "1W" || value == "1Mo")
+   if(value == "1m" || value == "5m" || value == "1h" || value == "1D")
       return value;
    return "1m";
 }

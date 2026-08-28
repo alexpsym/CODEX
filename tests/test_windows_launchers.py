@@ -401,16 +401,15 @@ def test_run_local_master_exit_wiring_and_ordering() -> None:
     restart_idx = script.find('goto restart_master')
     assert exit_branch_idx != -1 and restart_idx != -1 and exit_branch_idx < restart_idx
     assert '\n  exit /b 0\n)' not in script
-    assert 'LOCAL_MASTER_SHUTDOWN_PS1=%TEMP%\\local_master_shutdown_!RANDOM!_!RANDOM!.ps1' in script
     assert 'if /I "!LOCAL_MASTER_SUPPRESS_WINDOW_CLOSE!"=="1" (' in script
     assert 'smoke/test mode: not closing shared console window.' in script
-    assert 'start "" powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "!LOCAL_MASTER_SHUTDOWN_PS1!"' in script
-    assert 'powershell -NoProfile -WindowStyle Hidden -Command' not in script
-    assert "$_.MainWindowTitle -eq $title" in script
-    assert "Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue" in script
-    assert "$allow = @^('WindowsTerminal','wt','OpenConsole','conhost','cmd'^)" in script
-    assert "Stop-Process -Id $_.Id -Force -ErrorAction Stop" in script
-    assert "Stop-Process -Name WindowsTerminal" not in script
+    assert 'local exit complete; returning the owned worker console normally.' in script
+    assert 'LOCAL_MASTER_SHUTDOWN_PS1' not in script
+    assert 'MainWindowTitle' not in script
+    assert 'WindowsTerminal' not in script
+    assert 'OpenConsole' not in script
+    assert 'conhost' not in script
+    assert 'Stop-Process' not in script
     assert "taskkill" not in script.lower()
     assert '\n    exit 0\n  )\n)' in script
 

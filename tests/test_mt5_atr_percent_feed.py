@@ -45,11 +45,14 @@ def test_separate_ea_enumerates_selected_market_watch_forex_only():
     assert ".Buy(" not in source and ".Sell(" not in source
 
 
-def test_ea_uses_six_unambiguous_timeframes_and_closed_candle_atr_percent():
+def test_ea_uses_four_active_timeframes_and_closed_candle_atr_percent():
     source = _source()
-    for period in ["PERIOD_M1", "PERIOD_M5", "PERIOD_H1", "PERIOD_D1", "PERIOD_W1", "PERIOD_MN1"]:
+    for period in ["PERIOD_M1", "PERIOD_M5", "PERIOD_H1", "PERIOD_D1"]:
         assert period in source
-    assert '"m1", "m5", "h1", "d1", "w1", "mn1"' in source
+    assert "PERIOD_W1" not in source and "PERIOD_MN1" not in source
+    assert '"m1", "m5", "h1", "d1"' in source
+    assert "FRAME_COUNT = 4" in source
+    assert 'value == "1W"' not in source and 'value == "1Mo"' not in source
     assert "iATR(g_symbols[index], FRAME_PERIODS[frame], SafeATRLength())" in source
     assert "CopyBuffer(handle, 0, 1, 1, atr_buffer)" in source
     assert "iClose(g_symbols[index], FRAME_PERIODS[frame], 1)" in source
@@ -241,54 +244,54 @@ def test_fresh_ready_feed_ignores_closed_bar_calculation_timestamp(
     assert instance.status_var.value.startswith("Ready |")
 
 
-def test_window_state_uses_file_heartbeat_and_explicit_row_timeframe_states():
+def test_window_state_uses_standalone_feed_freshness_and_explicit_row_timeframe_states():
     window = _load_window_module()
     ready = _ready_row(window)
     assert window.classify_window_state(
-        [ready], feed_age_seconds=5, heartbeat_tolerance_seconds=5
+        [ready], feed_age_seconds=5, freshness_tolerance_seconds=5
     ) == "Ready"
     assert window.classify_window_state(
-        [ready], feed_age_seconds=6, heartbeat_tolerance_seconds=5
+        [ready], feed_age_seconds=6, freshness_tolerance_seconds=5
     ) == "Stale"
     assert window.classify_window_state(
         [_ready_row(window, status="Stale")],
         feed_age_seconds=0,
-        heartbeat_tolerance_seconds=5,
+        freshness_tolerance_seconds=5,
     ) == "Stale"
     assert window.classify_window_state(
         [_ready_row(window, frame_state="Stale")],
         feed_age_seconds=0,
-        heartbeat_tolerance_seconds=5,
+        freshness_tolerance_seconds=5,
     ) == "Stale"
     assert window.classify_window_state(
         [_ready_row(window, status="Error", frame_state="Stale")],
         feed_age_seconds=0,
-        heartbeat_tolerance_seconds=5,
+        freshness_tolerance_seconds=5,
     ) == "Stale"
     assert window.classify_window_state(
         [_ready_row(window, status="Error")],
         feed_age_seconds=0,
-        heartbeat_tolerance_seconds=5,
+        freshness_tolerance_seconds=5,
     ) == "Error"
     assert window.classify_window_state(
         [_ready_row(window, frame_state="Error")],
         feed_age_seconds=0,
-        heartbeat_tolerance_seconds=5,
+        freshness_tolerance_seconds=5,
     ) == "Error"
     assert window.classify_window_state(
         [_ready_row(window, status="Loading")],
         feed_age_seconds=0,
-        heartbeat_tolerance_seconds=5,
+        freshness_tolerance_seconds=5,
     ) == "Loading"
     assert window.classify_window_state(
         [_ready_row(window, frame_state="Loading")],
         feed_age_seconds=0,
-        heartbeat_tolerance_seconds=5,
+        freshness_tolerance_seconds=5,
     ) == "Loading"
     assert window.classify_window_state(
         [_ready_row(window, with_value=False)],
         feed_age_seconds=0,
-        heartbeat_tolerance_seconds=5,
+        freshness_tolerance_seconds=5,
     ) == "Loading"
 
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Desktop unified spread and ATR-percentage table for Trader.mq5."""
+"""Desktop ATR-percentage table for MarketWatchATRPercentFeed.mq5."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ import tkinter as tk
 from tkinter import ttk
 
 
-DEFAULT_FEED_NAME = "MarketWatchUnifiedFeed.json"
+DEFAULT_FEED_NAME = "MarketWatchATRPercentFeed.json"
 TIMEFRAMES: tuple[tuple[str, str], ...] = (
     ("1m", "m1"),
     ("5m", "m5"),
@@ -65,8 +65,6 @@ class ATRRow:
     reason: str
     atr_percent: Mapping[str, float | None]
     frame_states: Mapping[str, str]
-    spread_percent: float | None = None
-    spread_points: float | None = None
 
 
 def optional_positive_float(value: Any) -> float | None:
@@ -104,23 +102,11 @@ def parse_feed_rows(feed: Mapping[str, Any]) -> list[ATRRow]:
                 is_forex=raw.get("is_forex") is True,
                 status=str(raw.get("status") or "Unknown"),
                 reason=str(raw.get("reason") or ""),
-                spread_percent=optional_nonnegative_float(raw.get("spread_percent", raw.get("spread_pct"))),
-                spread_points=optional_nonnegative_float(raw.get("spread_points")),
                 atr_percent=values,
                 frame_states=states,
             )
         )
     return parsed
-
-
-def optional_nonnegative_float(value: Any) -> float | None:
-    if value is None or isinstance(value, bool):
-        return None
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError):
-        return None
-    return parsed if math.isfinite(parsed) and parsed >= 0.0 else None
 
 
 def rank_rows(rows: list[ATRRow], timeframe: str = "1m", top_n: int = 10) -> list[ATRRow]:
@@ -148,11 +134,11 @@ def classify_window_state(
     rows: list[ATRRow],
     *,
     feed_age_seconds: float,
-    heartbeat_tolerance_seconds: float,
+    freshness_tolerance_seconds: float,
 ) -> str:
-    """Classify feed health from local heartbeat age and explicit ATR states."""
+    """Classify feed health from standalone feed freshness and ATR states."""
 
-    if feed_age_seconds > heartbeat_tolerance_seconds:
+    if feed_age_seconds > freshness_tolerance_seconds:
         return "Stale"
     forex_rows = [row for row in rows if row.is_forex]
     if not forex_rows:
@@ -181,7 +167,6 @@ class ATRPercentWindow:
     def __init__(self, root: tk.Tk, args: argparse.Namespace) -> None:
         self.root = root
         self.feed_path = Path(args.file)
-        self.heartbeat_path = self.feed_path.with_name(self.feed_path.name + ".heartbeat")
         self.refresh_ms = clamp(args.refresh_ms, 100, 5000)
         self.decimals = clamp(args.decimals, 0, 8)
         self.font_size = clamp(args.font_size, 8, 22)
@@ -194,8 +179,8 @@ class ATRPercentWindow:
         self.top_n = tk.IntVar(value=clamp(args.top_n, 1, 100))
         self.ranked_only = tk.BooleanVar(value=False)
 
-        self.root.title("Unified MT5 Market Watch — Spread and ATR %")
-        self.root.geometry("1420x700")
+        self.root.title("Market Watch Forex ATR %")
+        self.root.geometry("1100x700")
         self.root.minsize(820, 360)
 
         self._build_styles()
@@ -262,16 +247,12 @@ class ATRPercentWindow:
     def _build_tree(self, parent: ttk.Frame) -> ttk.Treeview:
         parent.columnconfigure(0, weight=1)
         parent.rowconfigure(0, weight=1)
-        columns = ["rank", "symbol", "spread_percent", "spread_points"] + [key for _label, key in TIMEFRAMES] + ["status"]
+        columns = ["rank", "symbol"] + [key for _label, key in TIMEFRAMES] + ["status"]
         tree = ttk.Treeview(parent, columns=columns, show="headings", style="ATR.Treeview")
         tree.heading("rank", text="Rank")
         tree.column("rank", width=54, minwidth=48, anchor="e", stretch=False)
         tree.heading("symbol", text="Instrument", command=lambda: self._toggle_sort("symbol"))
         tree.column("symbol", width=150, minwidth=110, anchor="w", stretch=True)
-        tree.heading("spread_percent", text="Spread %", command=lambda: self._toggle_sort("spread_percent"))
-        tree.column("spread_percent", width=105, minwidth=85, anchor="e", stretch=False)
-        tree.heading("spread_points", text="Spread points", command=lambda: self._toggle_sort("spread_points"))
-        tree.column("spread_points", width=110, minwidth=90, anchor="e", stretch=False)
         for label, key in TIMEFRAMES:
             tree.heading(key, text=f"ATR% {label}", command=lambda selected=label: self._toggle_sort(selected))
             tree.column(key, width=100, minwidth=82, anchor="e", stretch=False)
@@ -298,8 +279,8 @@ class ATRPercentWindow:
         self._render_rows()
 
     def _update_headings(self) -> None:
-        labels = {"symbol": "Instrument", "spread_percent": "Spread %", "spread_points": "Spread points", **{label: f"ATR% {label}" for label in TIMEFRAME_LABELS}}
-        keys = {"symbol": "symbol", "spread_percent": "spread_percent", "spread_points": "spread_points", **{label: TIMEFRAME_KEYS[label] for label in TIMEFRAME_LABELS}}
+        labels = {"symbol": "Instrument", **{label: f"ATR% {label}" for label in TIMEFRAME_LABELS}}
+        keys = {"symbol": "symbol", **{label: TIMEFRAME_KEYS[label] for label in TIMEFRAME_LABELS}}
         suffix = " ↓" if self.sort_desc else " ↑"
         for column, label in labels.items():
             self.tree.heading(keys[column], text=label + (suffix if self.sort_column == column else ""), command=lambda selected=column: self._toggle_sort(selected))
@@ -308,8 +289,6 @@ class ATRPercentWindow:
         if self.sort_column == "symbol":
             return sorted(rows, key=lambda row: (row.symbol.casefold(), row.symbol), reverse=self.sort_desc)
         def value(row: ATRRow) -> float | None:
-            if self.sort_column == "spread_percent": return row.spread_percent
-            if self.sort_column == "spread_points": return row.spread_points
             return row.atr_percent.get(self.sort_column)
         valid = [row for row in rows if value(row) is not None]
         invalid = [row for row in rows if value(row) is None]
@@ -351,19 +330,19 @@ class ATRPercentWindow:
             return None
         return stat.st_mtime_ns, stat.st_size
 
-    def _heartbeat_age_seconds(self) -> float | None:
+    def _feed_age_seconds(self) -> float | None:
         try:
-            return max(0.0, time.time() - self.heartbeat_path.stat().st_mtime)
+            return max(0.0, time.time() - self.feed_path.stat().st_mtime)
         except OSError:
             return None
 
     def _refresh(self) -> None:
         signature = self._file_signature()
         if signature is not None and signature == self.last_feed_signature and self.last_good_feed is not None:
-            age_seconds = self._heartbeat_age_seconds()
-            state = "Stale" if age_seconds is None else classify_window_state(self.rows, feed_age_seconds=age_seconds, heartbeat_tolerance_seconds=max(5, self.refresh_ms * 6 // 1000))
-            heartbeat_text = "unavailable" if age_seconds is None else f"{int(age_seconds)}s"
-            self.status_var.set(f"{state} | {sum(1 for row in self.rows if row.is_forex)}/{len(self.rows)} selected symbols are forex | feed unchanged | heartbeat age {heartbeat_text}")
+            age_seconds = self._feed_age_seconds()
+            state = "Stale" if age_seconds is None else classify_window_state(self.rows, feed_age_seconds=age_seconds, freshness_tolerance_seconds=max(5, self.refresh_ms * 6 // 1000))
+            age_text = "unavailable" if age_seconds is None else f"{int(age_seconds)}s"
+            self.status_var.set(f"{state} | {sum(1 for row in self.rows if row.is_forex)}/{len(self.rows)} selected symbols are forex | feed unchanged | feed age {age_text}")
             self._schedule_refresh()
             return
         try:
@@ -372,7 +351,7 @@ class ATRPercentWindow:
         except FileNotFoundError:
             if self.last_good_feed is None:
                 self.status_var.set(
-                    f"Loading: attach Trader.mq5 in MT5 and enable Unified Market Watch; "
+                    f"Loading: attach MarketWatchATRPercentFeed.mq5 in MT5; "
                     f"enable DLL imports only for automatic window launch; feed missing: {self.feed_path}"
                 )
             else:
@@ -391,14 +370,14 @@ class ATRPercentWindow:
         generated_at = str(feed.get("generated_at") or "unknown")
         last_success = feed.get("last_successful_refresh")
         atr_length = feed.get("atr_length", "unknown")
-        heartbeat_age = self._heartbeat_age_seconds()
-        age_seconds = heartbeat_age if heartbeat_age is not None else 0.0
-        heartbeat_text = "unavailable" if heartbeat_age is None else f"{int(heartbeat_age)}s"
+        feed_age = self._feed_age_seconds()
+        age_seconds = feed_age if feed_age is not None else 0.0
+        age_text = "unavailable" if feed_age is None else f"{int(feed_age)}s"
         forex_count = sum(1 for row in self.rows if row.is_forex)
-        state = "Stale" if heartbeat_age is None else classify_window_state(
+        state = "Stale" if feed_age is None else classify_window_state(
             self.rows,
             feed_age_seconds=age_seconds,
-            heartbeat_tolerance_seconds=max(
+            freshness_tolerance_seconds=max(
                 5, self.refresh_ms * 6 // 1000
             ),
         )
@@ -409,7 +388,7 @@ class ATRPercentWindow:
         )
         self.status_var.set(
             f"{state} | {forex_count}/{len(self.rows)} selected symbols are forex | ATR({atr_length}) | "
-            f"{refresh_text} | feed written {generated_at} | heartbeat age {heartbeat_text}"
+            f"{refresh_text} | feed written {generated_at} | feed age {age_text}"
         )
         self._render_rows()
         self._schedule_refresh()
@@ -427,7 +406,7 @@ class ATRPercentWindow:
         return "N/A" if value is None else f"{value:.{self.decimals}f}%"
 
     def _row_values(self, row: ATRRow, rank: int) -> tuple[str, ...]:
-        values = [str(rank), row.symbol, self._format_percent(row.spread_percent), "N/A" if row.spread_points is None else f"{row.spread_points:.2f}"]
+        values = [str(rank), row.symbol]
         values.extend(self._format_percent(row.atr_percent.get(label)) for label in TIMEFRAME_LABELS)
         state = row.status
         selected_state = row.frame_states.get(self.rank_timeframe.get(), "N/A")
@@ -477,7 +456,7 @@ def main(argv: list[str] | None = None) -> None:
         return
     args = parse_args(argv)
     root = tk.Tk()
-    root._unified_market_watch_singleton = singleton  # keep the process lock for the window lifetime
+    root._atr_percent_window_singleton = singleton  # keep the process lock for the window lifetime
     ATRPercentWindow(root, args)
     root.mainloop()
 
