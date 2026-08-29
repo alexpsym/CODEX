@@ -78,6 +78,7 @@ input int InpTesterServerUTCOffsetHours=0; // Used only with FixedUTCOffset.
 input group "10. Visual and diagnostics"
 input bool InpShowBlackoutStatus=true;
 input bool InpShowDiagnostics=false;
+input bool InpShowBlackoutZones=true;
 
 CTrade trade;
 int atrHandle=INVALID_HANDLE;
@@ -95,6 +96,8 @@ bool haveFrozenExtension=false,havePullback=false,haveMinorSwing=false,pullbackS
 long breakoutBar=-1,extensionBar=-1,pullbackConfirmedBar=-1;
 int opposingCloseCount=0;
 bool activeImpulseSetup=false;
+bool blackoutWasActive=false;
+datetime blackoutStartTime=0;
 
 bool IsNewBar()
 {
@@ -181,11 +184,45 @@ void ResetSetup()
 double ActiveMinimumRetracement() { return activeImpulseSetup ? InpImpulseMinimumRetracementATR : InpMinimumRetracementATR; }
 int ActiveMaximumPullbackBars() { return activeImpulseSetup ? InpImpulseMaximumPullbackBars : InpMaximumPullbackBars; }
 bool DepthExceeded(const double depth,const bool hasRangeMaximum,const double rangeMaximum) { return activeImpulseSetup ? depth>InpImpulseMaximumDepth : hasRangeMaximum && depth>rangeMaximum; }
+string DiagnosticReason(const bool blocked)
+{
+   if(blocked) return "FX weekend blackout";
+   if(PositionOpen()) return "position busy / no pyramiding";
+   if(stage==0) return InpSetupMode==RangeBreakoutPullback ? "range not qualified or breakout body/buffer failed" : "impulse body/range not qualified";
+   if(stage==1) return "extension pending/insufficient";
+   if(stage==2 && !pullbackStarted) return "pullback not started";
+   if(stage==2) return opposingCloseCount<InpMinimumOpposingCloses ? "insufficient opposing closes" : "ATR retracement/depth not qualified";
+   if(stage==3) { bool ready=false; SelectedMultiplier(ready); return ready ? "resumption confirmation not satisfied" : "ATR/risk data not ready"; }
+   return "entry requested";
+}
+void UpdateBlackoutZone(const bool blocked,const datetime t)
+{
+   if(!InpShowBlackoutZones) { blackoutWasActive=blocked; return; }
+   if(blocked && !blackoutWasActive) blackoutStartTime=t;
+   if(!blocked && blackoutWasActive && blackoutStartTime>0)
+   {
+      string name="RBP_FX_BLACKOUT_"+IntegerToString((long)blackoutStartTime);
+      if(ObjectFind(0,name)<0)
+      {
+         double top=0,bottom=0;
+         if(!ChartGetDouble(0,CHART_PRICE_MAX,0,top) || !ChartGetDouble(0,CHART_PRICE_MIN,0,bottom) || top<=bottom) { top=iHigh(_Symbol,_Period,1); bottom=iLow(_Symbol,_Period,1); }
+         if(ObjectCreate(0,name,OBJ_RECTANGLE,0,blackoutStartTime,top,t,bottom))
+         {
+            ObjectSetInteger(0,name,OBJPROP_COLOR,ColorToARGB(clrGray,35));
+            ObjectSetInteger(0,name,OBJPROP_FILL,true);
+            ObjectSetInteger(0,name,OBJPROP_BACK,true);
+            ObjectSetInteger(0,name,OBJPROP_SELECTABLE,false);
+         }
+      }
+      blackoutStartTime=0;
+   }
+   blackoutWasActive=blocked;
+}
 void UpdateVisualStatus(const bool blocked)
 {
    if(!InpShowBlackoutStatus && !InpShowDiagnostics) return;
    string mode=InpSetupMode==RangeBreakoutPullback ? "Range" : "Impulse";
-   string state=blocked ? "FX WEEKEND BLACKOUT" : (stage==0 ? (InpSetupMode==RangeBreakoutPullback ? "waiting for range" : "waiting for impulse") : stage==1 ? "extension pending" : stage==2 ? (pullbackStarted ? "pullback qualifying" : "pullback waiting") : "resumption/risk gate");
+   string state=DiagnosticReason(blocked);
    Comment("Range Breakout-Pullback [",mode,"]\n",state,InpShowDiagnostics ? StringFormat("\nstage=%d direction=%d opposing=%d",stage,direction,opposingCloseCount) : "");
 }
 void ClearClusters()
@@ -293,6 +330,7 @@ void ProcessClosedBar()
    double atr=0; if(!ATR(1,atr)) return;
    datetime closeTime=iTime(_Symbol,_Period,0); // the next bar opens at the prior completed bar's close time.
    bool blocked=IsFXBlocked(closeTime);
+   UpdateBlackoutZone(blocked,closeTime);
    if(blocked)
    {
       CloseStrategyPosition(); ResetSetup(); ClearClusters(); UpdateVisualStatus(true); return;
