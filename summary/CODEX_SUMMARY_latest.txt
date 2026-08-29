@@ -4,3 +4,4 @@ Range Breakout-Pullback MT5 and Forex Tester 6 ports
 - Corrected MT5's Pepperstone-aware weekend conversion: default PepperstoneNYClose mode uses the server's constant seven-hour New York wall-clock lead across DST; FixedUTCOffset remains available for other data.
 - Corrected MT5 historical-spread instructions, documented the deployed Pepperstone EA, and added the FT6 GMT+0/no-DST deterministic project setup.
 - Verification: compile only the corrected MT5 EA and FT6 DLL, then deploy their named artifacts.
+- Corrected stage-3 entry gating in both ports: a resumption signal now preserves the qualified setup until ATR/risk data is ready; the validated multiplier is reused for the requested entry before reset.

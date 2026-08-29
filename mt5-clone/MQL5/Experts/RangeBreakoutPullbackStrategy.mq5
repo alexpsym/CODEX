@@ -239,10 +239,8 @@ bool RangeConfirmed(const double atr)
    long duration=last-first;
    return resistanceCentre-supportCentre>=atr*InpMinimumRangeHeightATR && duration>=InpMinimumRangeBars && duration<=InpMaximumRangeBars;
 }
-void SendEntry(const int dir,const double atr)
+void SendEntry(const int dir,const double atr,const double multiplier)
 {
-   bool ready=false; double multiplier=SelectedMultiplier(ready);
-   if(!ready || multiplier<=0) return;
    double riskTicks=MathMax(1.0,MathCeil(atr*multiplier/TickSize()));
    double riskDistance=riskTicks*TickSize();
    double targetDistance=MathMax(1.0,MathRound(riskTicks*InpRiskRewardMultiple))*TickSize();
@@ -331,7 +329,8 @@ void ProcessClosedBar()
       else if(InpPullbackDepthMode==CustomRange) maxDepth=MathMax(InpCustomMinimumDepth,InpCustomMaximumDepth);
       if(invalid || barNumber-extensionBar>InpMaximumPullbackBars || (hasMax && depth>maxDepth)) { ResetSetup(); return; }
       bool resume=InpConfirmationMode==Aggressive ? (direction==1?close>previousClose:close<previousClose) : InpConfirmationMode==Balanced ? (direction==1?close>open && close>previousHigh:close<open && close<previousLow) : (haveMinorSwing && (direction==1?close>pullbackMinorSwing:close<pullbackMinorSwing));
-      if(barNumber>pullbackConfirmedBar && resume && !PositionOpen()) { int entryDirection=direction; ResetSetup(); SendEntry(entryDirection,atr); }
+      bool riskReady=false; double multiplier=SelectedMultiplier(riskReady);
+      if(barNumber>pullbackConfirmedBar && resume && !PositionOpen() && riskReady && multiplier>0) { int entryDirection=direction; ResetSetup(); SendEntry(entryDirection,atr,multiplier); }
    }
 }
 int OnInit()
