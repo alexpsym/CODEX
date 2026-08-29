@@ -6,8 +6,8 @@ The intended dry-run environment is **MT5 Strategy Tester**. It uses historical 
 
 ### Install and compile the EA
 
-1. In MT5, choose **File → Open Data Folder**. Open `MQL5\Experts` inside that data folder.
-2. Copy `RangeBreakoutPullbackStrategy.mq5` there. The repository source is `mt5-clone/MQL5/Experts/RangeBreakoutPullbackStrategy.mq5`; it is intentionally separate from the other EAs.
+1. This EA has already been deployed to the Pepperstone terminal data folder: `C:\Users\User\AppData\Roaming\MetaQuotes\Terminal\73B7A2420D6397DFF9014A20F1201F97\MQL5\Experts`. The canonical repository source remains `mt5-clone/MQL5/Experts/RangeBreakoutPullbackStrategy.mq5`.
+2. To update it later, compile the repository source and replace only its `.mq5` and `.ex5` files in that Experts folder.
 3. Open MetaEditor from MT5 with **Tools → MetaQuotes Language Editor**, or run `C:\Program Files\Pepperstone MetaTrader 5\MetaEditor64.exe`.
 4. In MetaEditor’s Navigator, open **Experts**, double-click the file, then press **F7** (Compile). Confirm the Toolbox/Errors pane reports zero errors and that an `.ex5` is created beside the source.
 5. Return to MT5. In Navigator, right-click **Expert Advisors** and choose **Refresh**. If it does not appear, restart MT5.
@@ -20,9 +20,9 @@ For chart inspection only, drag the EA from **Navigator → Expert Advisors** on
 2. Select `RangeBreakoutPullbackStrategy` as the Expert, then select the symbol and timeframe that match the TradingView test.
 3. Set the date range with **Use date**, and choose an appropriate historical period. Ensure the broker has downloaded the relevant history first.
 4. For the closest practical fill simulation, choose **Every tick based on real ticks** when available. The strategy itself makes structural decisions only after a completed bar; the tick mode affects market-order, stop and target fills.
-5. In the tester’s account/testing settings, set the deposit, leverage, currency, commission and spread assumptions to ones you want to evaluate. Use the same currency/symbol convention as your comparison where possible.
+5. In the tester’s account/testing settings, set deposit, leverage, deposit currency and any commission/advanced-account settings relevant to the test. For a normal broker symbol, Strategy Tester obtains the historical floating spread; it does not provide a simple arbitrary spread override.
 6. Click **Inputs**. The inputs are arranged in the same numbered groups as TradingView. `InpTradeDirection` replaces the two TradingView long/short checkboxes; choose both, longs only, or shorts only. `InpVolumeLots` is the fixed tester order size. All remaining range, breakout, pullback, confirmation and ATR settings directly mirror their similarly named Pine settings.
-7. Set `InpTesterServerUTCOffsetHours` to the historical tester/broker server’s UTC offset. This is required so the Friday 15:00 through Sunday 17:00 **America/New_York** blackout is converted deterministically; it is not Windows or Brisbane time.
+7. Leave `InpServerTimeMode` at **PepperstoneNYClose** for Pepperstone data. It derives New York wall time directly because Pepperstone server time stays seven hours ahead of New York in both DST regimes. Use **FixedUTCOffset** only for another broker/test environment, then set `InpTesterServerUTCOffsetHours`.
 8. Press **Start**. Enable **Visual mode** before starting if you want replay on a chart; use the speed control to pause around entries and exits.
 
 After a run, use the Strategy Tester tabs:
@@ -50,7 +50,7 @@ The native FT6 strategy is a 32-bit Windows DLL. The canonical source is `forex-
 2. Build the DLL and copy the result to `C:\ForexTester6\Strategies\RangeBreakoutPullbackStrategy.dll`. Restart Forex Tester 6 if it was open while the DLL was copied.
 3. Open the **Strategies** tab and select **List of Strategies**. `Range Breakout-Pullback` should appear. Enable the strategy using its switch, then use its gear/settings control.
 4. Choose a project instrument for `Currency` and a matching `Timeframe`; FT6 requires both. In the strategy settings, the numbered sequence of options follows TradingView: direction, range, breakout, pullback/depth, confirmation, then ATR/risk. `Depth mode` is `0 Any`, `1 Shallow`, `2 Deep`, `3 Custom`; confirmation is `0 Aggressive`, `1 Balanced`, `2 Conservative`; stop mode is `0 Adaptive ATR`, `1 Fixed ATR`.
-5. Set `Server UTC offset hours` to the server-time offset used by the FT6 historical data. This preserves the DST-aware America/New_York Friday 15:00–Sunday 17:00 blackout rather than using Windows local time.
+5. For the simplest deterministic setup, create the FT6 project with **Timezone: GMT+0** and **Daylight Saving Time: No DST**, then set `Server UTC offset hours` to `0`. The strategy converts the UTC project time itself to America/New_York for the Friday/Sunday blackout; no changing offset is needed.
 
 ### Dry run and review
 

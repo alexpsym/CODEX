@@ -23,7 +23,7 @@ double LowRegimePercentile=33,HighRegimePercentile=67,LowVolatilityMultiplier=1,
 bool EnableWeekendBlackout=true; int ServerUTCOffsetHours=0, MagicNumber=26083001;
 
 long nbar=0; TDateTime lastTime=0; double rmaATR=0; int atrCount=0;
-double atrPct[1000]; int atrPctCount=0;
+double *atrPct=NULL; int atrPctCapacity=0,atrPctCount=0,atrPctNext=0;
 double resistance=0,support=0; int rCount=0,sCount=0; long rFirst=-1,rLast=-1,sFirst=-1,sLast=-1;
 int stage=0,dir=0,opposing=0; long breakout=-1,extension=-1,pullbackConfirmed=-1;
 double frozenR=0,frozenS=0,setupATR=0,setupExtreme=0,frozenExtension=0,pullbackExtreme=0,minorSwing=0;
@@ -55,16 +55,37 @@ bool FXBlocked(TDateTime serverTime)
   if(!EnableWeekendBlackout) return false; double utc=serverTime-ServerUTCOffsetHours/24.0; double ny=utc+(IsNYDST(serverTime)?-4.0:-5.0)/24.0; SYSTEMTIME st; VariantTimeToSystemTime(ny,&st); int minutes=st.wHour*60+st.wMinute;
   return (st.wDayOfWeek==5 && minutes>=900)||st.wDayOfWeek==6||(st.wDayOfWeek==0&&minutes<1020);
 }
+bool EnsureATRHistory()
+{
+  int needed=RegimeLookback>0?RegimeLookback:1;
+  if(atrPctCapacity>=needed) return true;
+  double *replacement=(double*)malloc(sizeof(double)*needed); if(!replacement) return false;
+  for(int i=0;i<atrPctCount;i++) replacement[i]=atrPct[(atrPctNext-atrPctCount+i+atrPctCapacity)%atrPctCapacity];
+  free(atrPct); atrPct=replacement; atrPctCapacity=needed; atrPctNext=atrPctCount%atrPctCapacity;
+  return true;
+}
+void AddATRPercent(const double value)
+{
+  if(!EnsureATRHistory()) return;
+  atrPct[atrPctNext]=value; atrPctNext=(atrPctNext+1)%atrPctCapacity;
+  if(atrPctCount<atrPctCapacity) atrPctCount++;
+}
+double RecentATRPercent(const int offset)
+{
+  return atrPct[(atrPctNext-1-offset+atrPctCapacity)%atrPctCapacity];
+}
 void AddATR()
 {
   double tr=Max(High(1)-Low(1),Max(fabs(High(1)-Close(2)),fabs(Low(1)-Close(2))));
   if(atrCount==0) rmaATR=tr; else if(atrCount<ATRLength) rmaATR=(rmaATR*atrCount+tr)/(atrCount+1); else rmaATR=(rmaATR*(ATRLength-1)+tr)/ATRLength;
-  atrCount++; if(Close(1)!=0 && atrPctCount<1000) atrPct[atrPctCount++]=rmaATR/Close(1)*100.0;
+  atrCount++;
+  // Pine ta.atr/RMA is not valid until its ATRLength seed is complete.
+  if(atrCount>=ATRLength && Close(1)!=0) AddATRPercent(rmaATR/Close(1)*100.0);
 }
 bool RiskReady(double &mult)
 {
-  if(atrCount<ATRLength || rmaATR<=0) return false; if(StopModeSetting==1){mult=FixedATRMultiplier;return true;} if(atrPctCount<RegimeLookback) return false;
-  double cur=atrPct[atrPctCount-1];int count=0;for(int i=atrPctCount-RegimeLookback;i<atrPctCount;i++)if(atrPct[i]<=cur)count++;double rank=100.0*count/RegimeLookback;
+  if(atrCount<ATRLength || rmaATR<=0) return false; if(StopModeSetting==1){mult=FixedATRMultiplier;return true;} if(!EnsureATRHistory() || atrPctCount<RegimeLookback) return false;
+  double cur=RecentATRPercent(0);int count=0;for(int i=0;i<RegimeLookback;i++)if(RecentATRPercent(i)<=cur)count++;double rank=100.0*count/RegimeLookback;
   double lo=Min(LowRegimePercentile,HighRegimePercentile),hi=Max(LowRegimePercentile,HighRegimePercentile);mult=rank<=lo?LowVolatilityMultiplier:(rank>=hi?HighVolatilityMultiplier:NormalVolatilityMultiplier);return true;
 }
 void AddClusters()
@@ -99,5 +120,5 @@ EXPORT void __stdcall InitStrategy()
  RegOption((PChar)"Confirmation (0 aggressive,1 balanced,2 conservative)",ot_Integer,&Confirmation);RegOption((PChar)"Minor swing strength",ot_Integer,&MinorSwingStrength);RegOption((PChar)"Stop mode (0 adaptive,1 fixed)",ot_Integer,&StopModeSetting);RegOption((PChar)"ATR length",ot_Integer,&ATRLength);RegOption((PChar)"Fixed ATR multiplier",ot_Double,&FixedATRMultiplier);RegOption((PChar)"ATR percentile lookback",ot_Integer,&RegimeLookback);RegOption((PChar)"Low regime percentile",ot_Double,&LowRegimePercentile);RegOption((PChar)"High regime percentile",ot_Double,&HighRegimePercentile);RegOption((PChar)"Low multiplier",ot_Double,&LowVolatilityMultiplier);RegOption((PChar)"Normal multiplier",ot_Double,&NormalVolatilityMultiplier);RegOption((PChar)"High multiplier",ot_Double,&HighVolatilityMultiplier);RegOption((PChar)"Profit target R",ot_Double,&RiskRewardMultiple);
  RegOption((PChar)"Enable weekend blackout",ot_Boolean,&EnableWeekendBlackout);RegOption((PChar)"Server UTC offset hours",ot_Integer,&ServerUTCOffsetHours);RegOption((PChar)"Magic number",ot_Integer,&MagicNumber);
 }
-EXPORT void __stdcall DoneStrategy(){free(Currency);} EXPORT void __stdcall ResetStrategy(){lastTime=0;nbar=0;rmaATR=0;atrCount=atrPctCount=0;ResetSetup();ClearClusters();}
+EXPORT void __stdcall DoneStrategy(){free(Currency);free(atrPct);atrPct=NULL;atrPctCapacity=atrPctCount=atrPctNext=0;} EXPORT void __stdcall ResetStrategy(){lastTime=0;nbar=0;rmaATR=0;atrCount=atrPctCount=atrPctNext=0;ResetSetup();ClearClusters();}
 EXPORT void __stdcall GetSingleTick(){if(!Currency||strcmp(Currency,Symbol())!=0)return;SetCurrencyAndTimeframe(Currency,Timeframe);if(Bars()<Max(ATRLength,RegimeLookback)+PivotStrength+5)return;TDateTime t=Time(0);if(t!=lastTime){lastTime=t;ProcessBar();}}

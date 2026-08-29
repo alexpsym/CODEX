@@ -8,6 +8,7 @@ enum DirectionMode { LongsAndShorts=0, LongsOnly=1, ShortsOnly=2 };
 enum DepthMode { AnyValidDepth=0, Shallow=1, Deep=2, CustomRange=3 };
 enum ConfirmationMode { Aggressive=0, Balanced=1, Conservative=2 };
 enum StopMode { AdaptiveATR=0, FixedATRMultiple=1 };
+enum ServerTimeMode { PepperstoneNYClose=0, FixedUTCOffset=1 };
 
 input group "1. Trade directions"
 input DirectionMode InpTradeDirection=LongsAndShorts;
@@ -60,7 +61,8 @@ input double InpRiskRewardMultiple=2.0;
 
 input group "7. FX Weekend blackout"
 input bool InpEnableWeekendBlackout=true;
-input int InpTesterServerUTCOffsetHours=0; // Set to the broker/tester server UTC offset for the selected historical data.
+input ServerTimeMode InpServerTimeMode=PepperstoneNYClose;
+input int InpTesterServerUTCOffsetHours=0; // Used only with FixedUTCOffset.
 
 CTrade trade;
 int atrHandle=INVALID_HANDLE;
@@ -120,8 +122,15 @@ bool NewYorkDST(datetime utc)
 bool IsFXBlocked(datetime serverBarClose)
 {
    if(!InpEnableWeekendBlackout) return false;
-   datetime utc=serverBarClose-(datetime)(InpTesterServerUTCOffsetHours*3600);
-   datetime ny=utc+(NewYorkDST(utc)?-4*3600:-5*3600);
+   // Pepperstone follows New York DST: server is always seven wall-clock hours ahead of New York.
+   datetime ny=0;
+   if(InpServerTimeMode==PepperstoneNYClose)
+      ny=serverBarClose-7*3600;
+   else
+   {
+      datetime utc=serverBarClose-(datetime)(InpTesterServerUTCOffsetHours*3600);
+      ny=utc+(NewYorkDST(utc)?-4*3600:-5*3600);
+   }
    MqlDateTime d; TimeToStruct(ny,d);
    int minutes=d.hour*60+d.min;
    return (d.day_of_week==5 && minutes>=900) || d.day_of_week==6 || (d.day_of_week==0 && minutes<1020);
