@@ -12,7 +12,10 @@ directionGroup = "1. Trade directions"
 enableLongs = input.bool(true, "Enable long trades", group=directionGroup, tooltip="Allows bullish range breakout-pullback trades.")
 enableShorts = input.bool(true, "Enable short trades", group=directionGroup, tooltip="Allows the exact inverse bearish setup.")
 
-rangeGroup = "2. Horizontal range detection"
+modeGroup = "2. Setup mode"
+setupMode = input.string("Range Breakout-Pullback", "Setup mode", options=["Range Breakout-Pullback", "Impulse Pullback Continuation"], group=modeGroup, tooltip="Range preserves the original strict horizontal-range logic. Impulse uses a standalone ATR-normalized directional displacement followed by a pullback.")
+
+rangeGroup = "3. Original horizontal range detection"
 pivotStrength = input.int(3, "Confirmed pivot strength", minval=1, maxval=20, group=rangeGroup, tooltip="A pivot needs this many bars on both sides. It becomes available only after the right-side bars have closed.")
 minimumReactions = input.int(2, "Minimum reactions per side", minval=2, maxval=10, group=rangeGroup, tooltip="Required clustered pivot highs at resistance and clustered pivot lows at support.")
 clusterToleranceAtr = input.float(0.35, "Clustering tolerance (ATR)", minval=0.05, step=0.05, group=rangeGroup, tooltip="A new confirmed pivot joins the current boundary cluster when it is within this many ATR of the running cluster centre.")
@@ -20,13 +23,20 @@ minimumRangeHeightAtr = input.float(2.0, "Minimum range height (ATR)", minval=0.
 minimumRangeBars = input.int(10, "Minimum range duration (bars)", minval=1, group=rangeGroup, tooltip="Minimum span from the earliest qualifying reaction to the latest qualifying reaction.")
 maximumRangeBars = input.int(250, "Maximum range duration/staleness (bars)", minval=10, group=rangeGroup, tooltip="A boundary cluster is discarded when its most recent reaction is older than this many bars; a combined range cannot span longer than this.")
 
-breakoutGroup = "3. Breakout and extension"
+breakoutGroup = "4. Original range breakout and extension"
 breakoutBufferAtr = input.float(0.10, "Breakout close buffer (ATR)", minval=0.0, step=0.05, group=breakoutGroup, tooltip="A completed close must clear the frozen boundary by this ATR fraction.")
 minimumBreakoutBodyAtr = input.float(0.25, "Minimum breakout body (ATR)", minval=0.0, step=0.05, group=breakoutGroup, tooltip="Rejects negligible breaches. Set to 0 to disable the candle-body filter.")
 minimumExtensionAtr = input.float(0.75, "Minimum post-breakout extension (ATR)", minval=0.05, step=0.05, group=breakoutGroup, tooltip="After the breakout bar, price must extend this far beyond the broken boundary before a pullback can qualify. The positive minimum also keeps pullback-depth division valid.")
 maximumExtensionBars = input.int(20, "Maximum extension wait (bars)", minval=1, group=breakoutGroup, tooltip="Expires a breakout if the required post-breakout extension is not confirmed within this many bars.")
 
-pullbackGroup = "4. Corrective pullback"
+impulseGroup = "5. Impulse pullback continuation"
+impulseMinimumBodyAtr = input.float(1.0, "Minimum impulse body (ATR)", minval=0.1, step=0.1, group=impulseGroup)
+impulseMinimumRangeAtr = input.float(1.25, "Minimum impulse range (ATR)", minval=0.1, step=0.1, group=impulseGroup)
+impulseMinimumRetracementAtr = input.float(0.50, "Minimum pullback retracement (ATR)", minval=0.0, step=0.05, group=impulseGroup)
+impulseMaximumDepth = input.float(75.0, "Maximum pullback depth (%)", minval=1.0, maxval=500.0, step=0.5, group=impulseGroup)
+impulseMaximumPullbackBars = input.int(30, "Maximum pullback duration (bars)", minval=1, group=impulseGroup)
+
+pullbackGroup = "6. Shared corrective pullback"
 minimumOpposingCloses = input.int(2, "Minimum opposing closes", minval=1, maxval=20, group=pullbackGroup, tooltip="Longs count lower closes; shorts count higher closes. The count starts after extension is confirmed.")
 minimumRetracementAtr = input.float(0.50, "Minimum retracement (ATR)", minval=0.0, step=0.05, group=pullbackGroup, tooltip="Minimum correction from the post-breakout extreme.")
 pullbackDepthMode = input.string("Any valid depth", "Pullback Depth Mode", options=["Any valid depth", "Shallow", "Deep", "Custom range"], group=pullbackGroup, tooltip="Any accepts the first otherwise-valid correction. Shallow, Deep and Custom arm only inside their selected extension-relative depth interval and disqualify a setup that exceeds its maximum before entry.")
@@ -39,11 +49,11 @@ customMaximumDepth = input.float(100.0, "Custom maximum depth (%)", minval=0.0, 
 invalidationToleranceAtr = input.float(0.25, "Close-back-inside tolerance (ATR)", minval=0.0, step=0.05, group=pullbackGroup, tooltip="Invalidates a long after a close this far below old resistance, or a short after the inverse close above old support.")
 maximumPullbackBars = input.int(30, "Maximum pullback bars", minval=1, group=pullbackGroup, tooltip="Expires the setup this many bars after extension confirmation.")
 
-entryGroup = "5. Price-action resumption"
+entryGroup = "7. Shared price-action resumption"
 confirmationMode = input.string("Balanced", "Confirmation mode", options=["Aggressive", "Balanced", "Conservative"], group=entryGroup, tooltip="Aggressive: first close resuming in the trade direction. Balanced: directional candle closes beyond the previous bar. Conservative: close beyond the latest confirmed minor pullback swing.")
 minorSwingStrength = input.int(2, "Conservative minor-swing strength", minval=1, maxval=10, group=entryGroup, tooltip="Bars on each side needed to confirm the minor swing used only by Conservative mode.")
 
-riskGroup = "6. ATR stop and profit target"
+riskGroup = "8. ATR stop and profit target"
 stopMode = input.string("Adaptive ATR", "Stop mode", options=["Adaptive ATR", "Fixed ATR multiple"], group=riskGroup, tooltip="Adaptive ATR selects a transparent multiplier from the current ATR%-percentile regime. Fixed mode always uses one multiplier.")
 atrLength = input.int(14, "ATR length", minval=1, group=riskGroup, tooltip="ATR uses TradingView's RMA-based ta.atr calculation.")
 fixedAtrMultiplier = input.float(1.5, "Fixed ATR multiplier", minval=0.1, step=0.1, group=riskGroup, tooltip="Used only in Fixed ATR multiple mode; values such as 0.5, 1.0, 1.5 and 2.0 are accepted.")
@@ -55,11 +65,11 @@ normalVolatilityMultiplier = input.float(1.5, "Normal-volatility ATR multiplier"
 highVolatilityMultiplier = input.float(2.0, "High-volatility ATR multiplier", minval=0.1, step=0.1, group=riskGroup)
 riskRewardMultiple = input.float(2.0, "Profit target (R)", minval=0.1, step=0.1, group=riskGroup, tooltip="Every target is frozen at entry at this multiple of the actual entry-to-stop distance. Default is exactly 2R.")
 
-weekendGroup = "7. FX Weekend blackout"
+weekendGroup = "9. FX Weekend blackout"
 enableWeekendBlackout = input.bool(true, "Enable FX Weekend rules", group=weekendGroup, tooltip="Uses the repository FX Weekend schedule: flat and no entries from Friday 15:00 until Sunday 17:00 America/New_York, with IANA daylight-saving handling.")
 shadeWeekendBlackout = input.bool(true, "Shade blocked periods", group=weekendGroup, tooltip="Adds subtle background shading while new entries are blocked and positions must be flat.")
 
-visualGroup = "8. Visual audit"
+visualGroup = "10. Visual audit"
 showSetupDiagnostics = input.bool(false, "Show setup diagnostics", group=visualGroup, tooltip="Shows structural zones and Data Window values. Bullish gate: 1 disabled, 2 FX blocked, 3 position/order busy, 4 bearish setup active, 5 no range, 6 breakout absent, 7 extension pending, 8 pullback absent, 9 correction insufficient, 10 resumption absent, 11 ATR unready, 12 entry requested, 13 long filled. Reset: 1 invalidated, 2 extension expired, 3 pullback expired, 4 depth exceeded.")
 showStopLoss = input.bool(false, "Show active stop-loss", group=visualGroup, tooltip="Shows the frozen stop only while its trade is open. Historical take-profit lines remain visible by default.")
 
@@ -139,6 +149,7 @@ var int pullbackConfirmedBar = na
 var int opposingCloseCount = 0
 var float pullbackMinorSwing = na
 var bool orderAwaitingFill = false
+var bool activeImpulseSetup = false
 
 var int pendingRiskTicks = na
 var int pendingTargetTicks = na
@@ -154,6 +165,9 @@ bool shortEntrySignal = false
 bool resetSetup = false
 int setupResetReason = 0
 float confirmedEntryDepth = na
+int diagnosticReason = 0
+activeMinimumRetracementAtr = activeImpulseSetup ? impulseMinimumRetracementAtr : minimumRetracementAtr
+activeMaximumPullbackBars = activeImpulseSetup ? impulseMaximumPullbackBars : maximumPullbackBars
 
 // Confirmed pivots remain observable during an active setup or trade. Breakout
 // arming below still requires stage 0 and a flat strategy, so this only preserves
@@ -209,7 +223,7 @@ rangeIsConfirmed = setupStage == 0 and resistanceReactions >= minimumReactions a
 // -----------------------------------------------------------------------------
 // RANGE -> BREAKOUT -> EXTENSION -> PULLBACK -> RESUMPTION
 // -----------------------------------------------------------------------------
-if barstate.isconfirmed and rangeIsConfirmed and strategy.position_size == 0 and not orderAwaitingFill and na(pendingRiskTicks) and not fxBlocked
+if barstate.isconfirmed and setupMode == "Range Breakout-Pullback" and rangeIsConfirmed and strategy.position_size == 0 and not orderAwaitingFill and na(pendingRiskTicks) and not fxBlocked
     longBodyPasses = minimumBreakoutBodyAtr == 0.0 or close - open >= atrValue * minimumBreakoutBodyAtr
     shortBodyPasses = minimumBreakoutBodyAtr == 0.0 or open - close >= atrValue * minimumBreakoutBodyAtr
     longBreakout = enableLongs and longBodyPasses and close > resistanceCentre + atrValue * breakoutBufferAtr
@@ -229,6 +243,7 @@ if barstate.isconfirmed and rangeIsConfirmed and strategy.position_size == 0 and
         pullbackConfirmedBar := na
         opposingCloseCount := 0
         pullbackMinorSwing := na
+        activeImpulseSetup := false
         resistanceCentre := na
         resistanceReactions := 0
         resistanceFirstBar := na
@@ -237,6 +252,28 @@ if barstate.isconfirmed and rangeIsConfirmed and strategy.position_size == 0 and
         supportReactions := 0
         supportFirstBar := na
         supportLastBar := na
+
+// Impulse mode deliberately bypasses horizontal-range qualification. A large
+// directional closed candle arms the existing pullback/resumption machinery.
+if barstate.isconfirmed and setupMode == "Impulse Pullback Continuation" and setupStage == 0 and strategy.position_size == 0 and not orderAwaitingFill and na(pendingRiskTicks) and not fxBlocked
+    longImpulse = enableLongs and close > open and close - open >= atrValue * impulseMinimumBodyAtr and high - low >= atrValue * impulseMinimumRangeAtr
+    shortImpulse = enableShorts and close < open and open - close >= atrValue * impulseMinimumBodyAtr and high - low >= atrValue * impulseMinimumRangeAtr
+    if longImpulse or shortImpulse
+        setupDirection := longImpulse ? 1 : -1
+        setupStage := 2
+        activeImpulseSetup := true
+        frozenResistance := setupDirection == 1 ? open : na
+        frozenSupport := setupDirection == -1 ? open : na
+        setupAtr := atrValue
+        setupExtreme := setupDirection == 1 ? high : low
+        frozenExtensionExtreme := na
+        pullbackExtreme := na
+        pullbackStarted := false
+        breakoutBar := bar_index
+        extensionBar := bar_index
+        pullbackConfirmedBar := na
+        opposingCloseCount := 0
+        pullbackMinorSwing := na
 
 if barstate.isconfirmed and setupStage == 1 and bar_index > breakoutBar
     materiallyInvalid = setupDirection == 1 ? close < frozenResistance - setupAtr * invalidationToleranceAtr : close > frozenSupport + setupAtr * invalidationToleranceAtr
@@ -274,13 +311,13 @@ if barstate.isconfirmed and setupStage == 2 and bar_index > extensionBar
             pullbackExtreme := math.min(pullbackExtreme, low)
             opposingCloseCount += close < close[1] ? 1 : 0
         materiallyInvalid = close < frozenResistance - setupAtr * invalidationToleranceAtr
-        expired = bar_index - extensionBar > maximumPullbackBars
+        expired = bar_index - extensionBar > activeMaximumPullbackBars
         extensionDistance = frozenExtensionExtreme - frozenResistance
         pullbackDepth = pullbackStarted and extensionDistance > 0.0 ? (frozenExtensionExtreme - pullbackExtreme) / extensionDistance * 100.0 : na
-        retracementPasses = pullbackStarted and frozenExtensionExtreme - pullbackExtreme >= setupAtr * minimumRetracementAtr
+        retracementPasses = pullbackStarted and frozenExtensionExtreme - pullbackExtreme >= setupAtr * activeMinimumRetracementAtr
         correctiveMovementPasses = opposingCloseCount >= minimumOpposingCloses and retracementPasses and pullbackDepth > 0.0
         depthMinimumPasses = pullbackDepthMode == "Any valid depth" or pullbackDepth >= selectedDepthMinimum
-        depthMaximumExceeded = depthHasMaximum and pullbackDepth > selectedDepthMaximum
+        depthMaximumExceeded = activeImpulseSetup ? pullbackDepth > impulseMaximumDepth : depthHasMaximum and pullbackDepth > selectedDepthMaximum
         if materiallyInvalid or expired or depthMaximumExceeded
             resetSetup := true
             setupResetReason := materiallyInvalid ? 1 : expired ? 3 : 4
@@ -303,13 +340,13 @@ if barstate.isconfirmed and setupStage == 2 and bar_index > extensionBar
             pullbackExtreme := math.max(pullbackExtreme, high)
             opposingCloseCount += close > close[1] ? 1 : 0
         materiallyInvalid = close > frozenSupport + setupAtr * invalidationToleranceAtr
-        expired = bar_index - extensionBar > maximumPullbackBars
+        expired = bar_index - extensionBar > activeMaximumPullbackBars
         extensionDistance = frozenSupport - frozenExtensionExtreme
         pullbackDepth = pullbackStarted and extensionDistance > 0.0 ? (pullbackExtreme - frozenExtensionExtreme) / extensionDistance * 100.0 : na
-        retracementPasses = pullbackStarted and pullbackExtreme - frozenExtensionExtreme >= setupAtr * minimumRetracementAtr
+        retracementPasses = pullbackStarted and pullbackExtreme - frozenExtensionExtreme >= setupAtr * activeMinimumRetracementAtr
         correctiveMovementPasses = opposingCloseCount >= minimumOpposingCloses and retracementPasses and pullbackDepth > 0.0
         depthMinimumPasses = pullbackDepthMode == "Any valid depth" or pullbackDepth >= selectedDepthMinimum
-        depthMaximumExceeded = depthHasMaximum and pullbackDepth > selectedDepthMaximum
+        depthMaximumExceeded = activeImpulseSetup ? pullbackDepth > impulseMaximumDepth : depthHasMaximum and pullbackDepth > selectedDepthMaximum
         if materiallyInvalid or expired or depthMaximumExceeded
             resetSetup := true
             setupResetReason := materiallyInvalid ? 1 : expired ? 3 : 4
@@ -325,10 +362,10 @@ if barstate.isconfirmed and setupStage == 3
         pullbackMinorSwing := confirmedMinorLow
 
     materiallyInvalid = setupDirection == 1 ? close < frozenResistance - setupAtr * invalidationToleranceAtr : close > frozenSupport + setupAtr * invalidationToleranceAtr
-    expired = bar_index - extensionBar > maximumPullbackBars
+    expired = bar_index - extensionBar > activeMaximumPullbackBars
     extensionDistance = setupDirection == 1 ? frozenExtensionExtreme - frozenResistance : frozenSupport - frozenExtensionExtreme
     pullbackDepth = setupDirection == 1 ? (frozenExtensionExtreme - pullbackExtreme) / extensionDistance * 100.0 : (pullbackExtreme - frozenExtensionExtreme) / extensionDistance * 100.0
-    depthMaximumExceeded = depthHasMaximum and pullbackDepth > selectedDepthMaximum
+    depthMaximumExceeded = activeImpulseSetup ? pullbackDepth > impulseMaximumDepth : depthHasMaximum and pullbackDepth > selectedDepthMaximum
     canResume = bar_index > pullbackConfirmedBar
     aggressiveResume = setupDirection == 1 ? close > close[1] : close < close[1]
     balancedResume = setupDirection == 1 ? close > open and close > high[1] : close < open and close < low[1]
@@ -373,6 +410,7 @@ if resetSetup
     pullbackConfirmedBar := na
     opposingCloseCount := 0
     pullbackMinorSwing := na
+    activeImpulseSetup := false
 
 // -----------------------------------------------------------------------------
 // FX WEEKEND ENFORCEMENT AND FROZEN TRADE RISK
@@ -396,6 +434,7 @@ if fxBlocked
     pullbackConfirmedBar := na
     opposingCloseCount := 0
     pullbackMinorSwing := na
+    activeImpulseSetup := false
     resistanceCentre := na
     resistanceReactions := 0
     resistanceFirstBar := na
@@ -465,6 +504,7 @@ if strategy.position_size == 0 and not orderAwaitingFill and not na(pendingRiskT
     pullbackConfirmedBar := na
     opposingCloseCount := 0
     pullbackMinorSwing := na
+    activeImpulseSetup := false
 
 // -----------------------------------------------------------------------------
 // AUDIT VISUALS
@@ -487,6 +527,7 @@ diagnosticBalancedLong = close > open and close > high[1]
 diagnosticConservativeLong = not na(pullbackMinorSwing) and close > pullbackMinorSwing
 diagnosticLongResumption = diagnosticCanResumeLong and (confirmationMode == "Aggressive" ? diagnosticAggressiveLong : confirmationMode == "Balanced" ? diagnosticBalancedLong : diagnosticConservativeLong)
 diagnosticLongGate = longEntrySignal ? 12 : strategy.position_size > 0 ? 13 : not enableLongs ? 1 : fxBlocked ? 2 : strategy.position_size != 0 or orderAwaitingFill or not na(pendingRiskTicks) ? 3 : setupStage != 0 and setupDirection == -1 ? 4 : setupStage == 0 and not rangeIsConfirmed ? 5 : setupStage == 0 ? 6 : setupStage == 1 ? 7 : setupStage == 2 and not pullbackStarted ? 8 : setupStage == 2 ? 9 : not diagnosticLongResumption ? 10 : not riskDataReady ? 11 : 12
+diagnosticReason := fxBlocked ? 1 : strategy.position_size != 0 or orderAwaitingFill ? 2 : setupMode == "Range Breakout-Pullback" and setupStage == 0 and not rangeIsConfirmed ? 3 : setupMode == "Impulse Pullback Continuation" and setupStage == 0 ? 4 : setupStage == 1 ? 5 : setupStage == 2 and not pullbackStarted ? 6 : setupStage == 2 ? 7 : setupStage == 3 and not diagnosticLongResumption ? 8 : setupStage == 3 and not riskDataReady ? 9 : 0
 diagnosticExtensionDistance = setupDirection == 1 ? frozenExtensionExtreme - frozenResistance : frozenSupport - frozenExtensionExtreme
 diagnosticDepth = longEntrySignal or shortEntrySignal ? confirmedEntryDepth : setupStage >= 2 and pullbackStarted and diagnosticExtensionDistance > 0.0 ? (setupDirection == 1 ? frozenExtensionExtreme - pullbackExtreme : pullbackExtreme - frozenExtensionExtreme) / diagnosticExtensionDistance * 100.0 : na
 
@@ -500,6 +541,7 @@ plot(showSetupDiagnostics ? (riskDataReady ? 1 : 0) : na, "Diagnostic: ATR ready
 plot(showSetupDiagnostics ? (fxBlocked ? 1 : 0) : na, "Diagnostic: FX blocked", display=display.data_window)
 plot(showSetupDiagnostics ? (longEntrySignal ? 1 : shortEntrySignal ? -1 : 0) : na, "Diagnostic: entry requested", display=display.data_window)
 plot(showSetupDiagnostics ? diagnosticDepth : na, "Diagnostic: pullback depth (%)", display=display.data_window)
+plot(showSetupDiagnostics ? diagnosticReason : na, "Diagnostic: skip reason (1 FX,2 busy,3 range,4 impulse,5 extension,6 pullback,7 correction,8 confirmation,9 ATR)", display=display.data_window)
 
 plot(showStopLoss and strategy.position_size != 0 ? tradeStop : na, "Frozen stop-loss", color=color.red, linewidth=2, style=plot.style_linebr)
 

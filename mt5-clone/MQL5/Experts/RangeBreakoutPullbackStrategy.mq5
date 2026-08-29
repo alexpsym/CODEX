@@ -9,6 +9,7 @@ enum DepthMode { AnyValidDepth=0, Shallow=1, Deep=2, CustomRange=3 };
 enum ConfirmationMode { Aggressive=0, Balanced=1, Conservative=2 };
 enum StopMode { AdaptiveATR=0, FixedATRMultiple=1 };
 enum ServerTimeMode { PepperstoneNYClose=0, FixedUTCOffset=1 };
+enum SetupMode { RangeBreakoutPullback=0, ImpulsePullbackContinuation=1 };
 
 input group "1. Trade directions"
 input DirectionMode InpTradeDirection=LongsAndShorts;
@@ -16,7 +17,10 @@ input double InpVolumeLots=0.01;
 input ulong InpMagicNumber=26083001;
 input int InpDeviationPoints=10;
 
-input group "2. Horizontal range detection"
+input group "2. Setup mode"
+input SetupMode InpSetupMode=RangeBreakoutPullback;
+
+input group "3. Original horizontal range detection"
 input int InpPivotStrength=3;
 input int InpMinimumReactions=2;
 input double InpClusterToleranceATR=0.35;
@@ -24,13 +28,20 @@ input double InpMinimumRangeHeightATR=2.0;
 input int InpMinimumRangeBars=10;
 input int InpMaximumRangeBars=250;
 
-input group "3. Breakout and extension"
+input group "4. Original range breakout and extension"
 input double InpBreakoutBufferATR=0.10;
 input double InpMinimumBreakoutBodyATR=0.25;
 input double InpMinimumExtensionATR=0.75;
 input int InpMaximumExtensionBars=20;
 
-input group "4. Corrective pullback"
+input group "5. Impulse pullback continuation"
+input double InpImpulseMinimumBodyATR=1.0;
+input double InpImpulseMinimumRangeATR=1.25;
+input double InpImpulseMinimumRetracementATR=0.50;
+input double InpImpulseMaximumDepth=75.0;
+input int InpImpulseMaximumPullbackBars=30;
+
+input group "6. Shared corrective pullback"
 input int InpMinimumOpposingCloses=2;
 input double InpMinimumRetracementATR=0.50;
 input DepthMode InpPullbackDepthMode=AnyValidDepth;
@@ -43,11 +54,11 @@ input double InpCustomMaximumDepth=100.0;
 input double InpInvalidationToleranceATR=0.25;
 input int InpMaximumPullbackBars=30;
 
-input group "5. Price-action resumption"
+input group "7. Shared price-action resumption"
 input ConfirmationMode InpConfirmationMode=Balanced;
 input int InpMinorSwingStrength=2;
 
-input group "6. ATR stop and profit target"
+input group "8. ATR stop and profit target"
 input StopMode InpStopMode=AdaptiveATR;
 input int InpATRLength=14;
 input double InpFixedATRMultiplier=1.5;
@@ -59,10 +70,14 @@ input double InpNormalVolatilityMultiplier=1.5;
 input double InpHighVolatilityMultiplier=2.0;
 input double InpRiskRewardMultiple=2.0;
 
-input group "7. FX Weekend blackout"
+input group "9. FX Weekend blackout"
 input bool InpEnableWeekendBlackout=true;
 input ServerTimeMode InpServerTimeMode=PepperstoneNYClose;
 input int InpTesterServerUTCOffsetHours=0; // Used only with FixedUTCOffset.
+
+input group "10. Visual and diagnostics"
+input bool InpShowBlackoutStatus=true;
+input bool InpShowDiagnostics=false;
 
 CTrade trade;
 int atrHandle=INVALID_HANDLE;
@@ -79,6 +94,7 @@ double frozenExtensionExtreme=0.0,pullbackExtreme=0.0,pullbackMinorSwing=0.0;
 bool haveFrozenExtension=false,havePullback=false,haveMinorSwing=false,pullbackStarted=false;
 long breakoutBar=-1,extensionBar=-1,pullbackConfirmedBar=-1;
 int opposingCloseCount=0;
+bool activeImpulseSetup=false;
 
 bool IsNewBar()
 {
@@ -160,6 +176,17 @@ void ResetSetup()
    frozenExtensionExtreme=0; pullbackExtreme=0; pullbackMinorSwing=0; haveFrozenExtension=false;
    havePullback=false; haveMinorSwing=false; pullbackStarted=false; breakoutBar=-1; extensionBar=-1;
    pullbackConfirmedBar=-1; opposingCloseCount=0;
+   activeImpulseSetup=false;
+}
+double ActiveMinimumRetracement() { return activeImpulseSetup ? InpImpulseMinimumRetracementATR : InpMinimumRetracementATR; }
+int ActiveMaximumPullbackBars() { return activeImpulseSetup ? InpImpulseMaximumPullbackBars : InpMaximumPullbackBars; }
+bool DepthExceeded(const double depth,const bool hasRangeMaximum,const double rangeMaximum) { return activeImpulseSetup ? depth>InpImpulseMaximumDepth : hasRangeMaximum && depth>rangeMaximum; }
+void UpdateVisualStatus(const bool blocked)
+{
+   if(!InpShowBlackoutStatus && !InpShowDiagnostics) return;
+   string mode=InpSetupMode==RangeBreakoutPullback ? "Range" : "Impulse";
+   string state=blocked ? "FX WEEKEND BLACKOUT" : (stage==0 ? (InpSetupMode==RangeBreakoutPullback ? "waiting for range" : "waiting for impulse") : stage==1 ? "extension pending" : stage==2 ? (pullbackStarted ? "pullback qualifying" : "pullback waiting") : "resumption/risk gate");
+   Comment("Range Breakout-Pullback [",mode,"]\n",state,InpShowDiagnostics ? StringFormat("\nstage=%d direction=%d opposing=%d",stage,direction,opposingCloseCount) : "");
 }
 void ClearClusters()
 {
@@ -268,11 +295,11 @@ void ProcessClosedBar()
    bool blocked=IsFXBlocked(closeTime);
    if(blocked)
    {
-      CloseStrategyPosition(); ResetSetup(); ClearClusters(); return;
+      CloseStrategyPosition(); ResetSetup(); ClearClusters(); UpdateVisualStatus(true); return;
    }
    AddClusters(atr);
    double open=iOpen(_Symbol,_Period,1), high=iHigh(_Symbol,_Period,1), low=iLow(_Symbol,_Period,1), close=iClose(_Symbol,_Period,1), previousClose=iClose(_Symbol,_Period,2), previousHigh=iHigh(_Symbol,_Period,2), previousLow=iLow(_Symbol,_Period,2);
-   if(stage==0 && !PositionOpen() && RangeConfirmed(atr))
+   if(stage==0 && InpSetupMode==RangeBreakoutPullback && !PositionOpen() && RangeConfirmed(atr))
    {
       bool longOK=InpTradeDirection!=ShortsOnly && (InpMinimumBreakoutBodyATR==0 || close-open>=atr*InpMinimumBreakoutBodyATR) && close>resistanceCentre+atr*InpBreakoutBufferATR;
       bool shortOK=InpTradeDirection!=LongsOnly && (InpMinimumBreakoutBodyATR==0 || open-close>=atr*InpMinimumBreakoutBodyATR) && close<supportCentre-atr*InpBreakoutBufferATR;
@@ -280,6 +307,15 @@ void ProcessClosedBar()
       {
          direction=longOK?1:-1; stage=1; frozenResistance=resistanceCentre; frozenSupport=supportCentre; setupATR=atr;
          setupExtreme=direction==1?high:low; breakoutBar=barNumber; ClearClusters();
+      }
+   }
+   if(stage==0 && InpSetupMode==ImpulsePullbackContinuation && !PositionOpen())
+   {
+      bool longImpulse=InpTradeDirection!=ShortsOnly && close>open && close-open>=atr*InpImpulseMinimumBodyATR && high-low>=atr*InpImpulseMinimumRangeATR;
+      bool shortImpulse=InpTradeDirection!=LongsOnly && close<open && open-close>=atr*InpImpulseMinimumBodyATR && high-low>=atr*InpImpulseMinimumRangeATR;
+      if(longImpulse || shortImpulse)
+      {
+         direction=longImpulse?1:-1; stage=2; activeImpulseSetup=true; frozenResistance=direction==1?open:0; frozenSupport=direction==-1?open:0; setupATR=atr; setupExtreme=direction==1?high:low; breakoutBar=extensionBar=barNumber; pullbackStarted=false; opposingCloseCount=0; haveMinorSwing=false;
       }
    }
    if(stage==1 && barNumber>breakoutBar)
@@ -301,7 +337,7 @@ void ProcessClosedBar()
          else if(newExtreme) extensionBar=barNumber;
       }
       else { pullbackExtreme=direction==1?MathMin(pullbackExtreme,low):MathMax(pullbackExtreme,high); if(direction==1 ? close<previousClose : close>previousClose) opposingCloseCount++; }
-      if(invalid || barNumber-extensionBar>InpMaximumPullbackBars) { ResetSetup(); return; }
+      if(invalid || barNumber-extensionBar>ActiveMaximumPullbackBars()) { ResetSetup(); return; }
       if(pullbackStarted)
       {
          double extension=direction==1 ? frozenExtensionExtreme-frozenResistance : frozenSupport-frozenExtensionExtreme;
@@ -311,8 +347,8 @@ void ProcessClosedBar()
          if(InpPullbackDepthMode==Shallow) { lo=MathMin(InpShallowMinimumDepth,InpShallowMaximumDepth); hi=MathMax(InpShallowMinimumDepth,InpShallowMaximumDepth); }
          else if(InpPullbackDepthMode==Deep) { lo=MathMin(InpDeepMinimumDepth,InpDeepMaximumDepth); hi=MathMax(InpDeepMinimumDepth,InpDeepMaximumDepth); }
          else if(InpPullbackDepthMode==CustomRange) { lo=MathMin(InpCustomMinimumDepth,InpCustomMaximumDepth); hi=MathMax(InpCustomMinimumDepth,InpCustomMaximumDepth); }
-         if((hasMax && depth>hi)) { ResetSetup(); return; }
-         if(opposingCloseCount>=InpMinimumOpposingCloses && retracement>=setupATR*InpMinimumRetracementATR && depth>0 && (!hasMax || depth>=lo)) { stage=3; pullbackConfirmedBar=barNumber; }
+         if(DepthExceeded(depth,hasMax,hi)) { ResetSetup(); return; }
+         if(opposingCloseCount>=InpMinimumOpposingCloses && retracement>=setupATR*ActiveMinimumRetracement() && depth>0 && (activeImpulseSetup || !hasMax || depth>=lo)) { stage=3; pullbackConfirmedBar=barNumber; }
       }
    }
    if(stage==3)
@@ -327,11 +363,12 @@ void ProcessClosedBar()
       if(InpPullbackDepthMode==Shallow) maxDepth=MathMax(InpShallowMinimumDepth,InpShallowMaximumDepth);
       else if(InpPullbackDepthMode==Deep) maxDepth=MathMax(InpDeepMinimumDepth,InpDeepMaximumDepth);
       else if(InpPullbackDepthMode==CustomRange) maxDepth=MathMax(InpCustomMinimumDepth,InpCustomMaximumDepth);
-      if(invalid || barNumber-extensionBar>InpMaximumPullbackBars || (hasMax && depth>maxDepth)) { ResetSetup(); return; }
+      if(invalid || barNumber-extensionBar>ActiveMaximumPullbackBars() || DepthExceeded(depth,hasMax,maxDepth)) { ResetSetup(); return; }
       bool resume=InpConfirmationMode==Aggressive ? (direction==1?close>previousClose:close<previousClose) : InpConfirmationMode==Balanced ? (direction==1?close>open && close>previousHigh:close<open && close<previousLow) : (haveMinorSwing && (direction==1?close>pullbackMinorSwing:close<pullbackMinorSwing));
       bool riskReady=false; double multiplier=SelectedMultiplier(riskReady);
       if(barNumber>pullbackConfirmedBar && resume && !PositionOpen() && riskReady && multiplier>0) { int entryDirection=direction; ResetSetup(); SendEntry(entryDirection,atr,multiplier); }
    }
+   UpdateVisualStatus(false);
 }
 int OnInit()
 {

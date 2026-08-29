@@ -21,9 +21,11 @@ For chart inspection only, drag the EA from **Navigator → Expert Advisors** on
 3. Set the date range with **Use date**, and choose an appropriate historical period. Ensure the broker has downloaded the relevant history first.
 4. For the closest practical fill simulation, choose **Every tick based on real ticks** when available. The strategy itself makes structural decisions only after a completed bar; the tick mode affects market-order, stop and target fills.
 5. In the tester’s account/testing settings, set deposit, leverage, deposit currency and any commission/advanced-account settings relevant to the test. For a normal broker symbol, Strategy Tester obtains the historical floating spread; it does not provide a simple arbitrary spread override.
-6. Click **Inputs**. The inputs are arranged in the same numbered groups as TradingView. `InpTradeDirection` replaces the two TradingView long/short checkboxes; choose both, longs only, or shorts only. `InpVolumeLots` is the fixed tester order size. All remaining range, breakout, pullback, confirmation and ATR settings directly mirror their similarly named Pine settings.
+6. Click **Inputs**. Leave `InpSetupMode` at **RangeBreakoutPullback** to reproduce the original strict horizontal-range strategy. Select **ImpulsePullbackContinuation** to test the new optional strong impulse → pullback → resumption framework. Its inputs control minimum impulse body/range in ATR, minimum pullback ATR retracement, maximum depth and duration. `InpTradeDirection` replaces the two TradingView long/short checkboxes; `InpVolumeLots` is the fixed tester order size.
 7. Leave `InpServerTimeMode` at **PepperstoneNYClose** for Pepperstone data. It derives New York wall time directly because Pepperstone server time stays seven hours ahead of New York in both DST regimes. Use **FixedUTCOffset** only for another broker/test environment, then set `InpTesterServerUTCOffsetHours`.
 8. Press **Start**. Enable **Visual mode** before starting if you want replay on a chart; use the speed control to pause around entries and exits.
+
+`InpShowBlackoutStatus` displays a compact chart status during the weekend block. `InpShowDiagnostics` adds the current mode, setup stage and opposing-close count to that status. This is a status overlay rather than TradingView-style historical background shading, so it does not add persistent chart clutter.
 
 After a run, use the Strategy Tester tabs:
 
@@ -47,9 +49,9 @@ The native FT6 strategy is a 32-bit Windows DLL. The canonical source is `forex-
 ### Build and add the strategy
 
 1. The supplied FT6 C++ example specifies an empty **32-bit DLL** project in Microsoft Visual C++. Add the strategy `.cpp` and `.def` files, add `C:\ForexTester6\Examples\Strategies\C++` to the include path, and use `RangeBreakoutPullbackStrategy.def` as the Linker **Module Definition File**. Link `oleaut32.lib`.
-2. Build the DLL and copy the result to `C:\ForexTester6\Strategies\RangeBreakoutPullbackStrategy.dll`. Restart Forex Tester 6 if it was open while the DLL was copied.
+2. Close Forex Tester 6 before replacing `C:\ForexTester6\Strategies\RangeBreakoutPullbackStrategy.dll`; Windows keeps a loaded strategy DLL locked. Copy the rebuilt DLL, then restart Forex Tester 6.
 3. Open the **Strategies** tab and select **List of Strategies**. `Range Breakout-Pullback` should appear. Enable the strategy using its switch, then use its gear/settings control.
-4. Choose a project instrument for `Currency` and a matching `Timeframe`; FT6 requires both. In the strategy settings, the numbered sequence of options follows TradingView: direction, range, breakout, pullback/depth, confirmation, then ATR/risk. `Depth mode` is `0 Any`, `1 Shallow`, `2 Deep`, `3 Custom`; confirmation is `0 Aggressive`, `1 Balanced`, `2 Conservative`; stop mode is `0 Adaptive ATR`, `1 Fixed ATR`.
+4. Choose a project instrument for `Currency` and a matching `Timeframe`; FT6 requires both. Set **Setup mode** to `0` for the original range logic or `1` for Impulse Pullback Continuation. The impulse settings define its minimum ATR body/range, pullback retracement, maximum depth and maximum duration. `Depth mode` is `0 Any`, `1 Shallow`, `2 Deep`, `3 Custom`; confirmation is `0 Aggressive`, `1 Balanced`, `2 Conservative`; stop mode is `0 Adaptive ATR`, `1 Fixed ATR`.
 5. For the simplest deterministic setup, create the FT6 project with **Timezone: GMT+0** and **Daylight Saving Time: No DST**, then set `Server UTC offset hours` to `0`. The strategy converts the UTC project time itself to America/New_York for the Friday/Sunday blackout; no changing offset is needed.
 
 ### Dry run and review
@@ -60,6 +62,8 @@ The native FT6 strategy is a 32-bit Windows DLL. The canonical source is `forex-
 4. Review individual entries/exits in the account history/orders area, price action on the chart, and the project’s statistics/performance panels. Use the history context menu’s export option where available to save trades/results. Change the gear/settings values or project execution assumptions and run **Quick Test** again to compare a new run.
 
 FT6 calls the DLL on ticks, but the port advances its setup state only after a new bar reveals the prior completed bar. Instant orders therefore fill on the first available tick after the confirmation bar, rather than TradingView's broker-emulator close. The same New York DST rule limitation applies: the current US DST dates are modelled for 2007 onward; verify earlier dates manually.
+
+Enable **Show blackout status** and **Show diagnostics** when investigating a missed setup. FT6 records compact messages in its Journal for blackout, waiting-for-range/impulse and active-setup status. Its supplied strategy API does not offer a clean historical chart-background shading equivalent, so this intentionally avoids creating many chart objects. Across platforms, the main skip categories are: blackout, position busy, range/impulse not qualified, extension/pullback/retracement/depth failure, resumption failure, expired setup, or ATR risk not ready.
 
 ## Which one is easiest?
 

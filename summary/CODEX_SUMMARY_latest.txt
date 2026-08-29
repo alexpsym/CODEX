@@ -5,3 +5,5 @@ Range Breakout-Pullback MT5 and Forex Tester 6 ports
 - Corrected MT5 historical-spread instructions, documented the deployed Pepperstone EA, and added the FT6 GMT+0/no-DST deterministic project setup.
 - Verification: compile only the corrected MT5 EA and FT6 DLL, then deploy their named artifacts.
 - Corrected stage-3 entry gating in both ports: a resumption signal now preserves the qualified setup until ATR/risk data is ready; the validated multiplier is reused for the requested entry before reset.
+- Added an explicit optional Impulse Pullback Continuation mode alongside the preserved default range mode in Pine, MT5 and FT6. The new mode requires ATR-normalized directional body/range, pullback retracement/depth/duration and the existing resumption/risk gates.
+- Extended inspectability: Pine retains shaded weekend periods and Data Window gates; MT5 adds compact chart status/diagnostics; FT6 adds optional Journal status/diagnostics because its supplied API has no clean historical background-shading primitive.
