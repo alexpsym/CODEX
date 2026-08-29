@@ -1,24 +1,6 @@
-CODEX COMPLETION SUMMARY
-Brief: Restore separate MT5 Market Watch EAs and make Local Tools exit local to its owned worker console.
-Recorded: 2026-08-28 (Australia/Brisbane)
+Range Breakout-Pullback MT5 and Forex Tester 6 ports
 
-CHANGES
-
-- Removed the embedded Unified Market Watch producer, JSON feed, window launch, symbol/ATR/spread processing, ownership/heartbeat state and 100 ms timer from `Trader.mq5`. Trader retains its one-second timer, trading behavior, and Pepperstone calculator-spread export.
-- Restored `MarketWatchATRPercentFeed.mq5` as the independent ATR source for exactly 1m, 5m, 1h and 1D, preserving its cached closed-candle updates, timer batching, handle reuse, stale/error behavior and separate JSON filename.
-- Restored `atr_percent_window.py` as the standalone ATR window for `MarketWatchATRPercentFeed.json`, with four ATR columns, standalone feed mtime freshness, deterministic ranking, Top N controls and last-known-good handling. Spread fields and unified heartbeat/Trader wording were removed.
-- Left the independent per-tick Market Watch spread EA/window unchanged and documented the separate ATR architecture.
-- Removed the Local Tools controlled-exit PowerShell host-process termination. After the marker/request-driven server shutdown, the owned worker console now returns naturally without targeting Windows Terminal, Codex, cmd, conhost, browsers, or any unrelated console.
-
-VERIFICATION
-
-- `python -m py_compile mt5-clone\\atr_percent_window.py` passed.
-- Seven exact targeted pytest nodes passed: four-frame ATR/closed-candle contract; separate ATR/spread names; Trader-without-embedded-Market-Watch; standard market token protection; standalone ATR freshness; Local Tools exit wiring; and worker-console syntax smoke.
-- No established MetaEditor compiler executable was available at the documented/known paths, so no MQL5 compilation or deployment was performed.
-- Final review is restricted to the authorized task files; the pre-existing runtime/data modifications remain unstaged and untouched.
-
-DEPLOYMENT
-
-- Compile and attach `Trader.mq5` for trading only.
-- Run one `MarketWatchSpreadPercentFeed.mq5` instance for the separate spread window.
-- Run one `MarketWatchATRPercentFeed.mq5` instance for the separate ATR window.
+- Added mt5-clone/MQL5/Experts/RangeBreakoutPullbackStrategy.mq5: standalone MT5 Strategy Tester EA with confirmed-bar range, breakout, extension, pullback, depth, resumption, ATR risk, no-pyramiding and New York weekend-blackout rules.
+- Added forex-tester-6/RangeBreakoutPullbackStrategy source and module definition for the native FT6 C++ DLL API; compiled the 32-bit DLL against FT6's supplied header and deployed it to C:\ForexTester6\Strategies.
+- Added docs/RangeBreakoutPullback_Backtesting_Guide.md with verified MT5 and FT6 build, loading, dry-run and review workflows.
+- Verification: only the new MT5 EA and FT6 DLL were compiled; no broad or unrelated tests were run.
