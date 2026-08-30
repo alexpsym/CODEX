@@ -62,7 +62,7 @@ The first strategy setting is **Settings preset (0 Custom, 1 Baseline, 2 Trend-f
 
 `1 Baseline` uses Impulse setup, Aggressive confirmation, 1.0 minimum / 1.5 maximum impulse-body ATR, 1.25 minimum impulse-range ATR, 0.50 minimum impulse retracement ATR, Shallow depth 0–50%, Deep 50–100%, Custom 0–100%, maximum impulse pullback bars 30, minimum opposing closes 2, Adaptive ATR stop, 2R target, weekend blackout on, server UTC offset 0, diagnostics on, 0.01 lots, and the existing M15/H4 trend filter off. In the existing FT6 depth mapping, `1` means Shallow (`0` remains Any), so the preset uses the Shallow mapping without changing its established parameter meaning. All other settings use their registered defaults.
 
-`2 Trend-filter test` is exactly Baseline with the existing **Impulse M15/H4 trend filter (0 disabled)** enabled. Its EMA calculation, readiness and rejection behaviour are unchanged.
+`2 Trend-filter test` is exactly Baseline with the existing **Impulse M15/H4 trend filter (0 disabled)** enabled. Its EMA calculation, readiness and rejection behaviour are unchanged. **Trend filter scope** selects `0 = Both directions` (the default), `1 = Buys only`, or `2 = Sells only`. The scope is ignored when the trend filter is disabled; a bypassed direction has no EMA-readiness or alignment requirement.
 
 The remaining properties are grouped in this order: General execution/setup; Confirmation; Range-mode settings; Impulse-detection settings; Pullback and depth settings; Stop, risk and 2R target; Time and weekend settings; Diagnostics. The strategy Journal logs one compact initialization line with the resolved preset and effective core settings.
 
