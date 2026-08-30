@@ -533,21 +533,26 @@ diagnosticConservativeShort = not na(pullbackMinorSwing) and close < pullbackMin
 diagnosticShortResumption = diagnosticCanResumeShort and (confirmationMode == "Aggressive" ? diagnosticAggressiveShort : confirmationMode == "Balanced" ? diagnosticBalancedShort : diagnosticConservativeShort)
 diagnosticResumption = setupDirection == 1 ? diagnosticLongResumption : setupDirection == -1 ? diagnosticShortResumption : false
 diagnosticLongGate = longEntrySignal ? 12 : strategy.position_size > 0 ? 13 : not enableLongs ? 1 : fxBlocked ? 2 : strategy.position_size != 0 or orderAwaitingFill or not na(pendingRiskTicks) ? 3 : setupStage != 0 and setupDirection == -1 ? 4 : setupStage == 0 and not rangeIsConfirmed ? 5 : setupStage == 0 ? 6 : setupStage == 1 ? 7 : setupStage == 2 and not pullbackStarted ? 8 : setupStage == 2 ? 9 : not diagnosticLongResumption ? 10 : not riskDataReady ? 11 : 12
-diagnosticReason := fxBlocked ? 1 : strategy.position_size != 0 or orderAwaitingFill ? 2 : setupMode == "Range Breakout-Pullback" and setupStage == 0 and not rangeIsConfirmed ? 3 : setupMode == "Impulse Pullback Continuation" and setupStage == 0 ? 4 : setupStage == 1 ? 5 : setupStage == 2 and not pullbackStarted ? 6 : setupStage == 2 ? 7 : setupStage == 3 and not diagnosticResumption ? 8 : setupStage == 3 and not riskDataReady ? 9 : longEntrySignal or shortEntrySignal ? 10 : 0
 diagnosticExtensionDistance = setupDirection == 1 ? frozenExtensionExtreme - frozenResistance : frozenSupport - frozenExtensionExtreme
 diagnosticDepth = longEntrySignal or shortEntrySignal ? confirmedEntryDepth : setupStage >= 2 and pullbackStarted and diagnosticExtensionDistance > 0.0 ? (setupDirection == 1 ? frozenExtensionExtreme - pullbackExtreme : pullbackExtreme - frozenExtensionExtreme) / diagnosticExtensionDistance * 100.0 : na
+diagnosticRetracementAtr = setupStage >= 2 and pullbackStarted and not na(setupAtr) and setupAtr > 0.0 ? (setupDirection == 1 ? frozenExtensionExtreme - pullbackExtreme : pullbackExtreme - frozenExtensionExtreme) / setupAtr : na
+diagnosticDepthMinimumPasses = setupStage >= 2 and pullbackStarted ? (activeImpulseSetup or pullbackDepthMode == "Any valid depth" or diagnosticDepth >= selectedDepthMinimum ? 1 : 0) : na
+diagnosticReason := fxBlocked ? 1 : strategy.position_size != 0 or orderAwaitingFill ? 2 : setupMode == "Range Breakout-Pullback" and setupStage == 0 and not rangeIsConfirmed ? 3 : setupMode == "Impulse Pullback Continuation" and setupStage == 0 ? 4 : setupStage == 1 ? 5 : setupStage == 2 and not pullbackStarted ? 6 : setupStage == 2 and opposingCloseCount < minimumOpposingCloses ? 7 : setupStage == 2 and diagnosticRetracementAtr < activeMinimumRetracementAtr ? 8 : setupStage == 2 and diagnosticDepthMinimumPasses == 0 ? 9 : setupStage == 3 and not diagnosticResumption ? 10 : setupStage == 3 and not riskDataReady ? 11 : longEntrySignal or shortEntrySignal ? 12 : 0
 
 // Diagnostics stay in the Data Window instead of adding candle annotations.
 plot(showSetupDiagnostics ? setupStage : na, "Diagnostic: setup stage", display=display.data_window)
 plot(showSetupDiagnostics ? setupDirection : na, "Diagnostic: setup direction", display=display.data_window)
 plot(showSetupDiagnostics ? diagnosticLongGate : na, "Diagnostic: bullish gate", display=display.data_window)
-plot(showSetupDiagnostics ? setupResetReason : na, "Diagnostic: reset reason", display=display.data_window)
+plot(showSetupDiagnostics ? setupResetReason : na, "Diagnostic: reset (1 invalidated, 2 extension expired, 3 pullback expired, 4 maximum depth)", display=display.data_window)
 plot(showSetupDiagnostics ? (rangeIsConfirmed ? 1 : 0) : na, "Diagnostic: range ready", display=display.data_window)
 plot(showSetupDiagnostics ? (riskDataReady ? 1 : 0) : na, "Diagnostic: ATR ready", display=display.data_window)
 plot(showSetupDiagnostics ? (fxBlocked ? 1 : 0) : na, "Diagnostic: FX blocked", display=display.data_window)
 plot(showSetupDiagnostics ? (longEntrySignal ? 1 : shortEntrySignal ? -1 : 0) : na, "Diagnostic: entry requested", display=display.data_window)
 plot(showSetupDiagnostics ? diagnosticDepth : na, "Diagnostic: pullback depth (%)", display=display.data_window)
-plot(showSetupDiagnostics ? diagnosticReason : na, "Diagnostic: gate (1 FX,2 busy,3 range,4 impulse,5 extension,6 pullback,7 correction/depth,8 confirmation,9 ATR,10 entry)", display=display.data_window)
+plot(showSetupDiagnostics ? opposingCloseCount : na, "Diagnostic: opposing close count", display=display.data_window)
+plot(showSetupDiagnostics ? diagnosticRetracementAtr : na, "Diagnostic: pullback retracement (ATR)", display=display.data_window)
+plot(showSetupDiagnostics ? diagnosticDepthMinimumPasses : na, "Diagnostic: minimum depth met", display=display.data_window)
+plot(showSetupDiagnostics ? diagnosticReason : na, "Diagnostic: gate (1 FX,2 busy,3 range,4 impulse,5 extension,6 pullback,7 opposing,8 ATR retrace,9 min depth,10 confirmation,11 ATR risk,12 entry)", display=display.data_window)
 
 plot(showStopLoss and strategy.position_size != 0 ? tradeStop : na, "Frozen stop-loss", color=color.red, linewidth=2, style=plot.style_linebr)
 

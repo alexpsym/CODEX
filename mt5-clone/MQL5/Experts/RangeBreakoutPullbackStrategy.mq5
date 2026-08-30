@@ -98,6 +98,7 @@ int opposingCloseCount=0;
 bool activeImpulseSetup=false;
 bool blackoutWasActive=false;
 datetime blackoutStartTime=0;
+string lastDiagnosticReason="";
 
 bool IsNewBar()
 {
@@ -188,24 +189,44 @@ string DiagnosticReason(const bool blocked)
 {
    if(blocked) return "FX weekend blackout";
    if(PositionOpen()) return "position busy / no pyramiding";
+   if(stage==0 && lastDiagnosticReason!="") return lastDiagnosticReason;
    if(stage==0) return InpSetupMode==RangeBreakoutPullback ? "range not qualified or breakout body/buffer failed" : "impulse body/range not qualified";
    if(stage==1) return "extension pending/insufficient";
    if(stage==2 && !pullbackStarted) return "pullback not started";
-   if(stage==2) return opposingCloseCount<InpMinimumOpposingCloses ? "insufficient opposing closes" : "ATR retracement/depth not qualified";
+   if(stage==2)
+   {
+      if(opposingCloseCount<InpMinimumOpposingCloses) return "insufficient opposing closes";
+      double extension=direction==1 ? frozenExtensionExtreme-frozenResistance : frozenSupport-frozenExtensionExtreme;
+      double retracement=direction==1 ? frozenExtensionExtreme-pullbackExtreme : pullbackExtreme-frozenExtensionExtreme;
+      double depth=extension>0.0 ? retracement/extension*100.0 : 0.0;
+      if(retracement<setupATR*ActiveMinimumRetracement()) return "ATR retracement not reached";
+      if(!activeImpulseSetup && InpPullbackDepthMode!=AnyValidDepth)
+      {
+         double minimum=InpPullbackDepthMode==Shallow ? MathMin(InpShallowMinimumDepth,InpShallowMaximumDepth) : InpPullbackDepthMode==Deep ? MathMin(InpDeepMinimumDepth,InpDeepMaximumDepth) : MathMin(InpCustomMinimumDepth,InpCustomMaximumDepth);
+         if(depth<minimum) return "pullback below configured minimum depth";
+      }
+      return "pullback qualifying";
+   }
    if(stage==3) { bool ready=false; SelectedMultiplier(ready); return ready ? "resumption confirmation not satisfied" : "ATR/risk data not ready"; }
    return "entry requested";
+}
+void BlackoutBounds(double &top,double &bottom)
+{
+   if(!ChartGetDouble(0,CHART_PRICE_MAX,0,top) || !ChartGetDouble(0,CHART_PRICE_MIN,0,bottom) || top<=bottom)
+   {
+      top=iHigh(_Symbol,_Period,1); bottom=iLow(_Symbol,_Period,1);
+   }
 }
 void UpdateBlackoutZone(const bool blocked,const datetime t)
 {
    if(!InpShowBlackoutZones) { blackoutWasActive=blocked; return; }
    if(blocked && !blackoutWasActive) blackoutStartTime=t;
-   if(!blocked && blackoutWasActive && blackoutStartTime>0)
+   if(blackoutStartTime>0)
    {
       string name="RBP_FX_BLACKOUT_"+IntegerToString((long)blackoutStartTime);
+      double top=0,bottom=0; BlackoutBounds(top,bottom);
       if(ObjectFind(0,name)<0)
       {
-         double top=0,bottom=0;
-         if(!ChartGetDouble(0,CHART_PRICE_MAX,0,top) || !ChartGetDouble(0,CHART_PRICE_MIN,0,bottom) || top<=bottom) { top=iHigh(_Symbol,_Period,1); bottom=iLow(_Symbol,_Period,1); }
          if(ObjectCreate(0,name,OBJ_RECTANGLE,0,blackoutStartTime,top,t,bottom))
          {
             ObjectSetInteger(0,name,OBJPROP_COLOR,ColorToARGB(clrGray,35));
@@ -214,7 +235,8 @@ void UpdateBlackoutZone(const bool blocked,const datetime t)
             ObjectSetInteger(0,name,OBJPROP_SELECTABLE,false);
          }
       }
-      blackoutStartTime=0;
+      else ObjectMove(0,name,1,t,bottom);
+      if(!blocked) blackoutStartTime=0;
    }
    blackoutWasActive=blocked;
 }
@@ -343,6 +365,7 @@ void ProcessClosedBar()
       bool shortOK=InpTradeDirection!=LongsOnly && (InpMinimumBreakoutBodyATR==0 || open-close>=atr*InpMinimumBreakoutBodyATR) && close<supportCentre-atr*InpBreakoutBufferATR;
       if(longOK || shortOK)
       {
+         lastDiagnosticReason="";
          direction=longOK?1:-1; stage=1; frozenResistance=resistanceCentre; frozenSupport=supportCentre; setupATR=atr;
          setupExtreme=direction==1?high:low; breakoutBar=barNumber; ClearClusters();
       }
@@ -353,13 +376,14 @@ void ProcessClosedBar()
       bool shortImpulse=InpTradeDirection!=LongsOnly && close<open && open-close>=atr*InpImpulseMinimumBodyATR && high-low>=atr*InpImpulseMinimumRangeATR;
       if(longImpulse || shortImpulse)
       {
+         lastDiagnosticReason="";
          direction=longImpulse?1:-1; stage=2; activeImpulseSetup=true; frozenResistance=direction==1?open:0; frozenSupport=direction==-1?open:0; setupATR=atr; setupExtreme=direction==1?high:low; breakoutBar=extensionBar=barNumber; pullbackStarted=false; opposingCloseCount=0; haveMinorSwing=false;
       }
    }
    if(stage==1 && barNumber>breakoutBar)
    {
       bool invalid=direction==1 ? close<frozenResistance-setupATR*InpInvalidationToleranceATR : close>frozenSupport+setupATR*InpInvalidationToleranceATR;
-      if(invalid || barNumber-breakoutBar>InpMaximumExtensionBars) { ResetSetup(); return; }
+      if(invalid || barNumber-breakoutBar>InpMaximumExtensionBars) { lastDiagnosticReason=invalid ? "setup invalidated" : "extension expired"; ResetSetup(); UpdateVisualStatus(false); return; }
       if(direction==1) { setupExtreme=MathMax(setupExtreme,high); if(setupExtreme>=frozenResistance+setupATR*InpMinimumExtensionATR) { stage=2; extensionBar=barNumber; } }
       else { setupExtreme=MathMin(setupExtreme,low); if(setupExtreme<=frozenSupport-setupATR*InpMinimumExtensionATR) { stage=2; extensionBar=barNumber; } }
    }
@@ -375,7 +399,7 @@ void ProcessClosedBar()
          else if(newExtreme) extensionBar=barNumber;
       }
       else { pullbackExtreme=direction==1?MathMin(pullbackExtreme,low):MathMax(pullbackExtreme,high); if(direction==1 ? close<previousClose : close>previousClose) opposingCloseCount++; }
-      if(invalid || barNumber-extensionBar>ActiveMaximumPullbackBars()) { ResetSetup(); return; }
+      if(invalid || barNumber-extensionBar>ActiveMaximumPullbackBars()) { lastDiagnosticReason=invalid ? "setup invalidated" : "pullback expired"; ResetSetup(); UpdateVisualStatus(false); return; }
       if(pullbackStarted)
       {
          double extension=direction==1 ? frozenExtensionExtreme-frozenResistance : frozenSupport-frozenExtensionExtreme;
@@ -385,7 +409,7 @@ void ProcessClosedBar()
          if(InpPullbackDepthMode==Shallow) { lo=MathMin(InpShallowMinimumDepth,InpShallowMaximumDepth); hi=MathMax(InpShallowMinimumDepth,InpShallowMaximumDepth); }
          else if(InpPullbackDepthMode==Deep) { lo=MathMin(InpDeepMinimumDepth,InpDeepMaximumDepth); hi=MathMax(InpDeepMinimumDepth,InpDeepMaximumDepth); }
          else if(InpPullbackDepthMode==CustomRange) { lo=MathMin(InpCustomMinimumDepth,InpCustomMaximumDepth); hi=MathMax(InpCustomMinimumDepth,InpCustomMaximumDepth); }
-         if(DepthExceeded(depth,hasMax,hi)) { ResetSetup(); return; }
+         if(DepthExceeded(depth,hasMax,hi)) { lastDiagnosticReason="maximum pullback depth exceeded"; ResetSetup(); UpdateVisualStatus(false); return; }
          if(opposingCloseCount>=InpMinimumOpposingCloses && retracement>=setupATR*ActiveMinimumRetracement() && depth>0 && (activeImpulseSetup || !hasMax || depth>=lo)) { stage=3; pullbackConfirmedBar=barNumber; }
       }
    }
@@ -401,10 +425,10 @@ void ProcessClosedBar()
       if(InpPullbackDepthMode==Shallow) maxDepth=MathMax(InpShallowMinimumDepth,InpShallowMaximumDepth);
       else if(InpPullbackDepthMode==Deep) maxDepth=MathMax(InpDeepMinimumDepth,InpDeepMaximumDepth);
       else if(InpPullbackDepthMode==CustomRange) maxDepth=MathMax(InpCustomMinimumDepth,InpCustomMaximumDepth);
-      if(invalid || barNumber-extensionBar>ActiveMaximumPullbackBars() || DepthExceeded(depth,hasMax,maxDepth)) { ResetSetup(); return; }
+      if(invalid || barNumber-extensionBar>ActiveMaximumPullbackBars() || DepthExceeded(depth,hasMax,maxDepth)) { lastDiagnosticReason=invalid ? "setup invalidated" : barNumber-extensionBar>ActiveMaximumPullbackBars() ? "pullback expired" : "maximum pullback depth exceeded"; ResetSetup(); UpdateVisualStatus(false); return; }
       bool resume=InpConfirmationMode==Aggressive ? (direction==1?close>previousClose:close<previousClose) : InpConfirmationMode==Balanced ? (direction==1?close>open && close>previousHigh:close<open && close<previousLow) : (haveMinorSwing && (direction==1?close>pullbackMinorSwing:close<pullbackMinorSwing));
       bool riskReady=false; double multiplier=SelectedMultiplier(riskReady);
-      if(barNumber>pullbackConfirmedBar && resume && !PositionOpen() && riskReady && multiplier>0) { int entryDirection=direction; ResetSetup(); SendEntry(entryDirection,atr,multiplier); }
+      if(barNumber>pullbackConfirmedBar && resume && !PositionOpen() && riskReady && multiplier>0) { int entryDirection=direction; lastDiagnosticReason="entry requested"; ResetSetup(); SendEntry(entryDirection,atr,multiplier); }
    }
    UpdateVisualStatus(false);
 }
