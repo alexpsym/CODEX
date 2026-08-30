@@ -9,7 +9,7 @@
 // decisions below are deliberately made once, after a bar has closed.
 
 PChar Currency=NULL;
-int Timeframe=PERIOD_M15, TradeDirection=0, SetupModeSetting=0, PivotStrength=3, MinimumReactions=2;
+int SettingsPreset=0,Timeframe=PERIOD_M15, TradeDirection=0, SetupModeSetting=0, PivotStrength=3, MinimumReactions=2;
 double VolumeLots=0.01, ClusterToleranceATR=0.35, MinimumRangeHeightATR=2.0;
 int MinimumRangeBars=10, MaximumRangeBars=250;
 double BreakoutBufferATR=0.10, MinimumBreakoutBodyATR=0.25, MinimumExtensionATR=0.75;
@@ -40,6 +40,26 @@ double ActiveMinimumRetracement(){return activeImpulseSetup?ImpulseMinimumRetrac
 int ActiveMaximumPullbackBars(){return activeImpulseSetup?ImpulseMaximumPullbackBars:MaximumPullbackBars;}
 bool DepthExceeded(double depth,bool useRange,double rangeMaximum){return activeImpulseSetup?depth>ImpulseMaximumDepth:(useRange&&depth>rangeMaximum);}
 void EmitStatus(PChar text){if(strcmp(lastDiagnostic,text)!=0){Print(text);strncpy(lastDiagnostic,text,159);lastDiagnostic[159]=0;}}
+void ApplySettingsPreset()
+{
+  if(SettingsPreset!=1&&SettingsPreset!=2) return;
+  // Non-Custom presets start from the registered defaults, then apply their compact experiment values.
+  Timeframe=PERIOD_M15; TradeDirection=0; VolumeLots=0.01; SetupModeSetting=0; PivotStrength=3; MinimumReactions=2;
+  ClusterToleranceATR=0.35; MinimumRangeHeightATR=2.0; MinimumRangeBars=10; MaximumRangeBars=250;
+  BreakoutBufferATR=0.10; MinimumBreakoutBodyATR=0.25; MinimumExtensionATR=0.75; MaximumExtensionBars=20;
+  ImpulseMinimumBodyATR=1.0; ImpulseMaximumBodyATR=0.0; ImpulseMinimumRangeATR=1.25; ImpulseMinimumRetracementATR=0.50; ImpulseMaximumDepth=75.0; ImpulseMaximumPullbackBars=30;
+  MinimumRetracementATR=0.50; PullbackDepthMode=0; ShallowMinimumDepth=0; ShallowMaximumDepth=50; DeepMinimumDepth=50; DeepMaximumDepth=100; CustomMinimumDepth=0; CustomMaximumDepth=100; InvalidationToleranceATR=0.25; MaximumPullbackBars=30;
+  Confirmation=1; MinorSwingStrength=2; StopModeSetting=0; ATRLength=14; FixedATRMultiplier=1.5; RegimeLookback=200; LowRegimePercentile=33; HighRegimePercentile=67; LowVolatilityMultiplier=1; NormalVolatilityMultiplier=1.5; HighVolatilityMultiplier=2; RiskRewardMultiple=2;
+  EnableWeekendBlackout=true; ShowBlackoutStatus=true; ShowDiagnostics=false; ImpulseM15H4TrendFilter=0; ServerUTCOffsetHours=0; MagicNumber=26083001;
+  SetupModeSetting=1; Confirmation=0; ImpulseMaximumBodyATR=1.5; PullbackDepthMode=1; ShowDiagnostics=true;
+  if(SettingsPreset==2) ImpulseM15H4TrendFilter=1;
+}
+void EmitPresetDiagnostic()
+{
+  char text[200]; const char *name=SettingsPreset==1?"Baseline":SettingsPreset==2?"Trend-filter test":"Custom";
+  sprintf(text,"RBP preset=%s setup=%d confirmation=%d body=%.2f-%.2fATR depth=%.0f-%.0f%% stop=%s target=%.1fR trend=%s",name,SetupModeSetting,Confirmation,ImpulseMinimumBodyATR,ImpulseMaximumBodyATR,ShallowMinimumDepth,ShallowMaximumDepth,StopModeSetting==0?"adaptive":"fixed",RiskRewardMultiple,ImpulseM15H4TrendFilter!=0?"on":"off");
+  Print((PChar)text);
+}
 bool StrategyPositionOpen();
 bool RiskReady(double &mult);
 PChar CurrentDiagnostic()
@@ -181,14 +201,24 @@ void ProcessBar()
 EXPORT void __stdcall InitStrategy()
 {
  StrategyShortName((PChar)"Range Breakout-Pullback"); StrategyDescription((PChar)"Closed-bar TradingView range breakout-pullback port");
- RegOption((PChar)"Currency",ot_Currency,&Currency);RegOption((PChar)"Timeframe",ot_TimeFrame,&Timeframe);Timeframe=PERIOD_M15;
- RegOption((PChar)"Trade direction (0 both, 1 long, 2 short)",ot_Integer,&TradeDirection);RegOption((PChar)"Setup mode (0 range, 1 impulse)",ot_Integer,&SetupModeSetting);RegOption((PChar)"Volume lots",ot_Double,&VolumeLots);
- RegOption((PChar)"Pivot strength",ot_Integer,&PivotStrength);RegOption((PChar)"Minimum reactions",ot_Integer,&MinimumReactions);RegOption((PChar)"Cluster tolerance ATR",ot_Double,&ClusterToleranceATR);RegOption((PChar)"Minimum range height ATR",ot_Double,&MinimumRangeHeightATR);RegOption((PChar)"Minimum range bars",ot_Integer,&MinimumRangeBars);RegOption((PChar)"Maximum range bars",ot_Integer,&MaximumRangeBars);
- RegOption((PChar)"Breakout buffer ATR",ot_Double,&BreakoutBufferATR);RegOption((PChar)"Minimum breakout body ATR",ot_Double,&MinimumBreakoutBodyATR);RegOption((PChar)"Minimum extension ATR",ot_Double,&MinimumExtensionATR);RegOption((PChar)"Maximum extension bars",ot_Integer,&MaximumExtensionBars);
- RegOption((PChar)"Impulse minimum body ATR",ot_Double,&ImpulseMinimumBodyATR);RegOption((PChar)"Impulse maximum body ATR (0 disabled)",ot_Double,&ImpulseMaximumBodyATR);RegOption((PChar)"Impulse minimum range ATR",ot_Double,&ImpulseMinimumRangeATR);RegOption((PChar)"Impulse minimum retracement ATR",ot_Double,&ImpulseMinimumRetracementATR);RegOption((PChar)"Impulse maximum depth %",ot_Double,&ImpulseMaximumDepth);RegOption((PChar)"Impulse maximum pullback bars",ot_Integer,&ImpulseMaximumPullbackBars);
+ RegOption((PChar)"Settings preset (0 Custom, 1 Baseline, 2 Trend-filter test)",ot_Integer,&SettingsPreset);
+ AddSeparator((PChar)"General execution/setup");
+ RegOption((PChar)"Currency",ot_Currency,&Currency);RegOption((PChar)"Timeframe",ot_TimeFrame,&Timeframe);RegOption((PChar)"Trade direction (0 both, 1 long, 2 short)",ot_Integer,&TradeDirection);RegOption((PChar)"Setup mode (0 range, 1 impulse)",ot_Integer,&SetupModeSetting);RegOption((PChar)"Volume lots",ot_Double,&VolumeLots);RegOption((PChar)"Magic number",ot_Integer,&MagicNumber);
+ AddSeparator((PChar)"Confirmation");
+ RegOption((PChar)"Confirmation (0 aggressive,1 balanced,2 conservative)",ot_Integer,&Confirmation);RegOption((PChar)"Minor swing strength",ot_Integer,&MinorSwingStrength);
+ AddSeparator((PChar)"Range-mode settings");
+ RegOption((PChar)"Pivot strength",ot_Integer,&PivotStrength);RegOption((PChar)"Minimum reactions",ot_Integer,&MinimumReactions);RegOption((PChar)"Cluster tolerance ATR",ot_Double,&ClusterToleranceATR);RegOption((PChar)"Minimum range height ATR",ot_Double,&MinimumRangeHeightATR);RegOption((PChar)"Minimum range bars",ot_Integer,&MinimumRangeBars);RegOption((PChar)"Maximum range bars",ot_Integer,&MaximumRangeBars);RegOption((PChar)"Breakout buffer ATR",ot_Double,&BreakoutBufferATR);RegOption((PChar)"Minimum breakout body ATR",ot_Double,&MinimumBreakoutBodyATR);RegOption((PChar)"Minimum extension ATR",ot_Double,&MinimumExtensionATR);RegOption((PChar)"Maximum extension bars",ot_Integer,&MaximumExtensionBars);
+ AddSeparator((PChar)"Impulse-detection settings");
+ RegOption((PChar)"Impulse minimum body ATR",ot_Double,&ImpulseMinimumBodyATR);RegOption((PChar)"Impulse maximum body ATR (0 disabled)",ot_Double,&ImpulseMaximumBodyATR);RegOption((PChar)"Impulse minimum range ATR",ot_Double,&ImpulseMinimumRangeATR);RegOption((PChar)"Impulse minimum retracement ATR",ot_Double,&ImpulseMinimumRetracementATR);RegOption((PChar)"Impulse maximum depth %",ot_Double,&ImpulseMaximumDepth);RegOption((PChar)"Impulse maximum pullback bars",ot_Integer,&ImpulseMaximumPullbackBars);RegOption((PChar)"Impulse M15/H4 trend filter (0 disabled)",ot_Integer,&ImpulseM15H4TrendFilter);
+ AddSeparator((PChar)"Pullback and depth settings");
  RegOption((PChar)"Minimum opposing closes",ot_Integer,&MinimumOpposingCloses);RegOption((PChar)"Minimum retracement ATR",ot_Double,&MinimumRetracementATR);RegOption((PChar)"Depth mode (0 any,1 shallow,2 deep,3 custom)",ot_Integer,&PullbackDepthMode);RegOption((PChar)"Shallow minimum depth",ot_Double,&ShallowMinimumDepth);RegOption((PChar)"Shallow maximum depth",ot_Double,&ShallowMaximumDepth);RegOption((PChar)"Deep minimum depth",ot_Double,&DeepMinimumDepth);RegOption((PChar)"Deep maximum depth",ot_Double,&DeepMaximumDepth);RegOption((PChar)"Custom minimum depth",ot_Double,&CustomMinimumDepth);RegOption((PChar)"Custom maximum depth",ot_Double,&CustomMaximumDepth);RegOption((PChar)"Invalidation tolerance ATR",ot_Double,&InvalidationToleranceATR);RegOption((PChar)"Maximum pullback bars",ot_Integer,&MaximumPullbackBars);
- RegOption((PChar)"Confirmation (0 aggressive,1 balanced,2 conservative)",ot_Integer,&Confirmation);RegOption((PChar)"Minor swing strength",ot_Integer,&MinorSwingStrength);RegOption((PChar)"Stop mode (0 adaptive,1 fixed)",ot_Integer,&StopModeSetting);RegOption((PChar)"ATR length",ot_Integer,&ATRLength);RegOption((PChar)"Fixed ATR multiplier",ot_Double,&FixedATRMultiplier);RegOption((PChar)"ATR percentile lookback",ot_Integer,&RegimeLookback);RegOption((PChar)"Low regime percentile",ot_Double,&LowRegimePercentile);RegOption((PChar)"High regime percentile",ot_Double,&HighRegimePercentile);RegOption((PChar)"Low multiplier",ot_Double,&LowVolatilityMultiplier);RegOption((PChar)"Normal multiplier",ot_Double,&NormalVolatilityMultiplier);RegOption((PChar)"High multiplier",ot_Double,&HighVolatilityMultiplier);RegOption((PChar)"Profit target R",ot_Double,&RiskRewardMultiple);
- RegOption((PChar)"Enable weekend blackout",ot_Boolean,&EnableWeekendBlackout);RegOption((PChar)"Show blackout status",ot_Boolean,&ShowBlackoutStatus);RegOption((PChar)"Show diagnostics",ot_Boolean,&ShowDiagnostics);RegOption((PChar)"Impulse M15/H4 trend filter (0 disabled)",ot_Integer,&ImpulseM15H4TrendFilter);RegOption((PChar)"Server UTC offset hours",ot_Integer,&ServerUTCOffsetHours);RegOption((PChar)"Magic number",ot_Integer,&MagicNumber);
+ AddSeparator((PChar)"Stop, risk and 2R target");
+ RegOption((PChar)"Stop mode (0 adaptive,1 fixed)",ot_Integer,&StopModeSetting);RegOption((PChar)"ATR length",ot_Integer,&ATRLength);RegOption((PChar)"Fixed ATR multiplier",ot_Double,&FixedATRMultiplier);RegOption((PChar)"ATR percentile lookback",ot_Integer,&RegimeLookback);RegOption((PChar)"Low regime percentile",ot_Double,&LowRegimePercentile);RegOption((PChar)"High regime percentile",ot_Double,&HighRegimePercentile);RegOption((PChar)"Low multiplier",ot_Double,&LowVolatilityMultiplier);RegOption((PChar)"Normal multiplier",ot_Double,&NormalVolatilityMultiplier);RegOption((PChar)"High multiplier",ot_Double,&HighVolatilityMultiplier);RegOption((PChar)"Profit target R",ot_Double,&RiskRewardMultiple);
+ AddSeparator((PChar)"Time and weekend settings");
+ RegOption((PChar)"Enable weekend blackout",ot_Boolean,&EnableWeekendBlackout);RegOption((PChar)"Server UTC offset hours",ot_Integer,&ServerUTCOffsetHours);
+ AddSeparator((PChar)"Diagnostics");
+ RegOption((PChar)"Show blackout status",ot_Boolean,&ShowBlackoutStatus);RegOption((PChar)"Show diagnostics",ot_Boolean,&ShowDiagnostics);
+ ApplySettingsPreset(); EmitPresetDiagnostic();
 }
 EXPORT void __stdcall DoneStrategy(){free(Currency);free(atrPct);atrPct=NULL;atrPctCapacity=atrPctCount=atrPctNext=0;} EXPORT void __stdcall ResetStrategy(){lastTime=0;nbar=0;rmaATR=0;atrCount=atrPctCount=atrPctNext=0;lastDiagnostic[0]=0;ResetSetup();ClearClusters();}
 EXPORT void __stdcall GetSingleTick(){if(!Currency||strcmp(Currency,Symbol())!=0)return;SetCurrencyAndTimeframe(Currency,Timeframe);if(Bars()<Max(ATRLength,RegimeLookback)+PivotStrength+5)return;TDateTime t=Time(0);if(t!=lastTime){lastTime=t;ProcessBar();}}
