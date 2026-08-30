@@ -31,6 +31,7 @@ maximumExtensionBars = input.int(20, "Maximum extension wait (bars)", minval=1, 
 
 impulseGroup = "5. Impulse pullback continuation"
 impulseMinimumBodyAtr = input.float(1.0, "Minimum impulse body (ATR)", minval=0.1, step=0.1, group=impulseGroup)
+impulseMaximumBodyAtr = input.float(0.0, "Maximum impulse body (ATR, 0 = disabled)", minval=0.0, step=0.1, group=impulseGroup)
 impulseMinimumRangeAtr = input.float(1.25, "Minimum impulse range (ATR)", minval=0.1, step=0.1, group=impulseGroup)
 impulseMinimumRetracementAtr = input.float(0.50, "Minimum pullback retracement (ATR)", minval=0.0, step=0.05, group=impulseGroup)
 impulseMaximumDepth = input.float(75.0, "Maximum pullback depth (%)", minval=1.0, maxval=500.0, step=0.5, group=impulseGroup)
@@ -256,8 +257,8 @@ if barstate.isconfirmed and setupMode == "Range Breakout-Pullback" and rangeIsCo
 // Impulse mode deliberately bypasses horizontal-range qualification. A large
 // directional closed candle arms the existing pullback/resumption machinery.
 if barstate.isconfirmed and setupMode == "Impulse Pullback Continuation" and setupStage == 0 and strategy.position_size == 0 and not orderAwaitingFill and na(pendingRiskTicks) and not fxBlocked
-    longImpulse = enableLongs and close > open and close - open >= atrValue * impulseMinimumBodyAtr and high - low >= atrValue * impulseMinimumRangeAtr
-    shortImpulse = enableShorts and close < open and open - close >= atrValue * impulseMinimumBodyAtr and high - low >= atrValue * impulseMinimumRangeAtr
+    longImpulse = enableLongs and close > open and close - open >= atrValue * impulseMinimumBodyAtr and (impulseMaximumBodyAtr == 0.0 or close - open <= atrValue * impulseMaximumBodyAtr) and high - low >= atrValue * impulseMinimumRangeAtr
+    shortImpulse = enableShorts and close < open and open - close >= atrValue * impulseMinimumBodyAtr and (impulseMaximumBodyAtr == 0.0 or open - close <= atrValue * impulseMaximumBodyAtr) and high - low >= atrValue * impulseMinimumRangeAtr
     if longImpulse or shortImpulse
         setupDirection := longImpulse ? 1 : -1
         setupStage := 2
@@ -537,7 +538,8 @@ diagnosticExtensionDistance = setupDirection == 1 ? frozenExtensionExtreme - fro
 diagnosticDepth = longEntrySignal or shortEntrySignal ? confirmedEntryDepth : setupStage >= 2 and pullbackStarted and diagnosticExtensionDistance > 0.0 ? (setupDirection == 1 ? frozenExtensionExtreme - pullbackExtreme : pullbackExtreme - frozenExtensionExtreme) / diagnosticExtensionDistance * 100.0 : na
 diagnosticRetracementAtr = setupStage >= 2 and pullbackStarted and not na(setupAtr) and setupAtr > 0.0 ? (setupDirection == 1 ? frozenExtensionExtreme - pullbackExtreme : pullbackExtreme - frozenExtensionExtreme) / setupAtr : na
 diagnosticDepthMinimumPasses = setupStage >= 2 and pullbackStarted ? (activeImpulseSetup or pullbackDepthMode == "Any valid depth" or diagnosticDepth >= selectedDepthMinimum ? 1 : 0) : na
-diagnosticReason := fxBlocked ? 1 : strategy.position_size != 0 or orderAwaitingFill ? 2 : setupMode == "Range Breakout-Pullback" and setupStage == 0 and not rangeIsConfirmed ? 3 : setupMode == "Impulse Pullback Continuation" and setupStage == 0 ? 4 : setupStage == 1 ? 5 : setupStage == 2 and not pullbackStarted ? 6 : setupStage == 2 and opposingCloseCount < minimumOpposingCloses ? 7 : setupStage == 2 and diagnosticRetracementAtr < activeMinimumRetracementAtr ? 8 : setupStage == 2 and diagnosticDepthMinimumPasses == 0 ? 9 : setupStage == 3 and not diagnosticResumption ? 10 : setupStage == 3 and not riskDataReady ? 11 : longEntrySignal or shortEntrySignal ? 12 : 0
+diagnosticImpulseBodyExceedsMaximum = setupMode == "Impulse Pullback Continuation" and setupStage == 0 and impulseMaximumBodyAtr > 0.0 and ((enableLongs and close > open and close - open >= atrValue * impulseMinimumBodyAtr and high - low >= atrValue * impulseMinimumRangeAtr and close - open > atrValue * impulseMaximumBodyAtr) or (enableShorts and close < open and open - close >= atrValue * impulseMinimumBodyAtr and high - low >= atrValue * impulseMinimumRangeAtr and open - close > atrValue * impulseMaximumBodyAtr))
+diagnosticReason := fxBlocked ? 1 : strategy.position_size != 0 or orderAwaitingFill ? 2 : setupMode == "Range Breakout-Pullback" and setupStage == 0 and not rangeIsConfirmed ? 3 : diagnosticImpulseBodyExceedsMaximum ? 4 : setupMode == "Impulse Pullback Continuation" and setupStage == 0 ? 5 : setupStage == 1 ? 6 : setupStage == 2 and not pullbackStarted ? 7 : setupStage == 2 and opposingCloseCount < minimumOpposingCloses ? 8 : setupStage == 2 and diagnosticRetracementAtr < activeMinimumRetracementAtr ? 9 : setupStage == 2 and diagnosticDepthMinimumPasses == 0 ? 10 : setupStage == 3 and not diagnosticResumption ? 11 : setupStage == 3 and not riskDataReady ? 12 : longEntrySignal or shortEntrySignal ? 13 : 0
 
 // Diagnostics stay in the Data Window instead of adding candle annotations.
 plot(showSetupDiagnostics ? setupStage : na, "Diagnostic: setup stage", display=display.data_window)
@@ -552,7 +554,8 @@ plot(showSetupDiagnostics ? diagnosticDepth : na, "Diagnostic: pullback depth (%
 plot(showSetupDiagnostics ? opposingCloseCount : na, "Diagnostic: opposing close count", display=display.data_window)
 plot(showSetupDiagnostics ? diagnosticRetracementAtr : na, "Diagnostic: pullback retracement (ATR)", display=display.data_window)
 plot(showSetupDiagnostics ? diagnosticDepthMinimumPasses : na, "Diagnostic: minimum depth met", display=display.data_window)
-plot(showSetupDiagnostics ? diagnosticReason : na, "Diagnostic: gate (1 FX,2 busy,3 range,4 impulse,5 extension,6 pullback,7 opposing,8 ATR retrace,9 min depth,10 confirmation,11 ATR risk,12 entry)", display=display.data_window)
+plot(showSetupDiagnostics ? (diagnosticImpulseBodyExceedsMaximum ? 1 : 0) : na, "Diagnostic: impulse body exceeds maximum ATR", display=display.data_window)
+plot(showSetupDiagnostics ? diagnosticReason : na, "Diagnostic: gate (1 FX,2 busy,3 range,4 impulse body max,5 impulse,6 extension,7 pullback,8 opposing,9 ATR retrace,10 min depth,11 confirmation,12 ATR risk,13 entry)", display=display.data_window)
 
 plot(showStopLoss and strategy.position_size != 0 ? tradeStop : na, "Frozen stop-loss", color=color.red, linewidth=2, style=plot.style_linebr)
 

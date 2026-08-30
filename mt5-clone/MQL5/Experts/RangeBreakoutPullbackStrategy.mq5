@@ -36,6 +36,7 @@ input int InpMaximumExtensionBars=20;
 
 input group "5. Impulse pullback continuation"
 input double InpImpulseMinimumBodyATR=1.0;
+input double InpImpulseMaximumBodyATR=0.0; // 0 disables the cap.
 input double InpImpulseMinimumRangeATR=1.25;
 input double InpImpulseMinimumRetracementATR=0.50;
 input double InpImpulseMaximumDepth=75.0;
@@ -372,8 +373,13 @@ void ProcessClosedBar()
    }
    if(stage==0 && InpSetupMode==ImpulsePullbackContinuation && !PositionOpen())
    {
-      bool longImpulse=InpTradeDirection!=ShortsOnly && close>open && close-open>=atr*InpImpulseMinimumBodyATR && high-low>=atr*InpImpulseMinimumRangeATR;
-      bool shortImpulse=InpTradeDirection!=LongsOnly && close<open && open-close>=atr*InpImpulseMinimumBodyATR && high-low>=atr*InpImpulseMinimumRangeATR;
+      bool longCandidate=InpTradeDirection!=ShortsOnly && close>open && close-open>=atr*InpImpulseMinimumBodyATR && high-low>=atr*InpImpulseMinimumRangeATR;
+      bool shortCandidate=InpTradeDirection!=LongsOnly && close<open && open-close>=atr*InpImpulseMinimumBodyATR && high-low>=atr*InpImpulseMinimumRangeATR;
+      bool longTooLarge=longCandidate && InpImpulseMaximumBodyATR>0.0 && close-open>atr*InpImpulseMaximumBodyATR;
+      bool shortTooLarge=shortCandidate && InpImpulseMaximumBodyATR>0.0 && open-close>atr*InpImpulseMaximumBodyATR;
+      if(longTooLarge || shortTooLarge) lastDiagnosticReason="impulse body exceeds maximum ATR";
+      bool longImpulse=longCandidate && !longTooLarge;
+      bool shortImpulse=shortCandidate && !shortTooLarge;
       if(longImpulse || shortImpulse)
       {
          lastDiagnosticReason="";
