@@ -44,6 +44,7 @@ BASE_DIR = Path(__file__).resolve().parents[1]
 LOCAL_BUILD_FILES = (
     "render/master_service.py",
     "render/atr_scanner.py",
+    "render/oanda_volatility.py",
     "render/static/atr_scanner.js",
     "render/static/calculator.js",
     "render/static/dashboard.js",
@@ -238,7 +239,7 @@ OANDA_RUNTIME_STATUS_PATH = BASE_DIR / "oanda_monitor" / "runtime_status.json"
 SCANNER_HEARTBEAT_GRACE_SECONDS = 30
 SCANNER_LOCAL_UI_MODE = os.getenv("SCANNER_LOCAL_UI_MODE", "0").strip().lower() in {"1", "true", "yes", "on"}
 DEFAULT_RENDER_ALLOWED_APPS = "calculator-webhook,pending-webhooks,fxweekend-clone,bybit_trigger_bounce_trader"
-DEFAULT_LOCAL_ALLOWED_APPS = "bybit_monitor,oanda_monitor,bybithistory-clone,oanda_history-clone,coinspot-clone,open-orders,instrument-lookup,ivindicator-clone,spreads-clone"
+DEFAULT_LOCAL_ALLOWED_APPS = "bybit_monitor,oanda_monitor,bybithistory-clone,oanda_history-clone,coinspot-clone,open-orders,instrument-lookup,ivindicator-clone,spreads-clone,oanda-volatility"
 PINE_SCRIPTS_DIR = BASE_DIR / "pinescripts"
 PINE_ALLOWED_SUFFIXES = {".pine", ".pinescript", ".txt"}
 
@@ -285,6 +286,7 @@ LOCAL_ONLY_APP_NAMES = {
     "instrument-lookup",
     "ivindicator-clone",
     "spreads-clone",
+    "oanda-volatility",
     "pine",
 }
 LOCAL_ONLY_PATH_PREFIXES = (
@@ -307,6 +309,7 @@ LOCAL_ONLY_PATH_PREFIXES = (
     "/api/open-orders",
     "/api/instrument-lookup",
     "/api/atr-scanner",
+    "/oanda-volatility",
 )
 
 
@@ -372,6 +375,7 @@ def _profile_main_buttons() -> List[Dict[str, object]]:
                 {"id": "atr-scanner", "name": "atr-scanner", "label": "Scanner", "open_url": "/merged/atr-scanner", "dashboard_main_view": True},
                 {"id": "ivindicator-clone", "name": "ivindicator-clone", "label": "IV Indicator", "open_url": "/apps/ivindicator-clone", "dashboard_main_view": True},
                 {"id": "spreads-clone", "name": "spreads-clone", "label": "Oanda Spreads", "open_url": "/apps/spreads-clone", "dashboard_main_view": True},
+                {"id": "oanda-volatility", "name": "oanda-volatility", "label": "Oanda Volatility", "open_url": "/oanda-volatility", "dashboard_main_view": True},
             ]
         )
     return buttons
@@ -391,6 +395,7 @@ def _profile_merged_source_names() -> Set[str]:
                 "oanda_monitor",
                 "ivindicator-clone",
                 "spreads-clone",
+                "oanda-volatility",
             }
         )
     return names
@@ -3005,6 +3010,7 @@ WEB_APPS = {
     "ivindicator-clone",
     "fxweekend-clone",
     "spreads-clone",
+    "oanda-volatility",
 }
 STANDALONE_SCRIPTS = {
     "bybit-alert-clone",
@@ -3014,6 +3020,7 @@ STANDALONE_SCRIPTS = {
     "fxweekend-clone",
     "oanda_history-clone",
     "spreads-clone",
+    "oanda-volatility",
 }
 
 ENTRY_OVERRIDES = {
@@ -12583,6 +12590,7 @@ FRIENDLY_SCRIPT_LABELS: Dict[str, str] = {
     "pine": "Pine",
     "pinescripts": "Pine Scripts",
     "spreads-clone": "Oanda Spreads",
+    "oanda-volatility": "Oanda Volatility",
     "trading-journal": "Journal",
 }
 
@@ -12658,6 +12666,16 @@ def discover_scripts() -> List[ManagedScript]:
                     log_file=LOG_FILE_OVERRIDES.get(app_dir.name),
                 )
             )
+
+    oanda_volatility_path = BASE_DIR / "render" / "oanda_volatility.py"
+    if _profile_allows_script("oanda-volatility") and oanda_volatility_path.is_file():
+        scripts.append(
+            ManagedScript(
+                name="oanda-volatility",
+                path=oanda_volatility_path,
+                category="Forex",
+            )
+        )
 
     return scripts
 
@@ -14625,6 +14643,13 @@ async def _autostart_scripts() -> None:
 @app.on_event("shutdown")
 async def _log_local_master_shutdown() -> None:
     _stop_manual_save_github_sync_watcher()
+    try:
+        oanda_volatility = script_manager.get("oanda-volatility")
+    except HTTPException:
+        oanda_volatility = None
+    if oanda_volatility is not None and oanda_volatility.is_running:
+        oanda_volatility.last_exit_reason = "local master shutdown"
+        await oanda_volatility.stop()
     AUTOSTART_LOGGER.error(
         "LOCAL_MASTER_SHUTDOWN profile=%s scripts=%s",
         APP_PROFILE,
@@ -30106,6 +30131,14 @@ async def view_logs(script_name: str) -> str:
     # Ensure the script exists so we don't render a viewer for an unknown path.
     script_manager.get(script_name)
     return _render_log_view(script_name)
+
+
+@app.get("/oanda-volatility")
+async def oanda_volatility_page() -> Response:
+    if APP_PROFILE != "local":
+        return _local_only_disabled_response("/oanda-volatility")
+    script_manager.get("oanda-volatility")
+    return RedirectResponse(url="/apps/oanda-volatility", status_code=307)
 
 
 @app.api_route("/apps/{script_name}", methods=PROXY_METHODS)

@@ -213,24 +213,22 @@ def test_mql5_trader_standard_market_is_live_quote_anchored_and_terminal_token_g
     assert "EventSetTimer(1);" in trader
 
 
-def test_trader_has_no_embedded_market_watch_spread_or_atr():
+def test_trader_has_no_embedded_market_watch_spread_feed():
     trader = (ROOT / "mt5-clone" / "MQL5" / "Experts" / "Trader.mq5").read_text(encoding="utf-8")
-    window = (ROOT / "mt5-clone" / "atr_percent_window.py").read_text(encoding="utf-8")
+    window = (ROOT / "mt5-clone" / "spread_percent_window.py").read_text(encoding="utf-8")
 
     for removed in [
-        "MarketWatchUnifiedFeed.json", "UnifiedMarketWatch", "g_unified", "iATR(",
+        "MarketWatchUnifiedFeed.json", "UnifiedMarketWatch", "g_unified",
         ".heartbeat", "ShellExecuteW", "EventSetMillisecondTimer",
     ]:
         assert removed not in trader
     assert "EnablePepperstoneSpreadExport" in trader
     assert "MaybeExportPepperstoneSpreads();" in trader
-    assert "MarketWatchATRPercentFeed.json" not in trader
     assert "MarketWatchSpreadPercentFeed.json" not in trader
     assert "MarketWatchUnifiedFeed.json" not in window
-    assert "spread_percent" not in window and "spread_points" not in window
     assert "heartbeat" not in window.lower()
-    assert "MarketWatchATRPercentFeed.json" in window
-    assert "attach MarketWatchATRPercentFeed.mq5" in window
+    assert "MarketWatchSpreadPercentFeed.json" in window
+    assert "attach MarketWatchSpreadPercentFeed.mq5" in window
     assert "_feed_age_seconds" in window
 
 

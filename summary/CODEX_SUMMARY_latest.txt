@@ -1,15 +1,9 @@
-FT6 first-fresh-pullback and structural-target correction
+Oanda Volatility tool and Pepperstone/MT5 ATR retirement
 
-- Saved the implementation brief at `CODEX_BRIEF_FIRST_FRESH_PULLBACK_STRUCTURAL_TREND.txt`.
-- Corrected the premature-entry cause in the FT6 impulse mode: the qualifying seed candle no longer jumps directly into the generic pullback stage with its open as the whole impulse origin.
-- Added explicit FT6 impulse states for parent-leg tracking, PB1 tracking, resumption armed and consumed. The parent is anchored at the latest confirmed directional-origin swing. A new directional extreme updates the endpoint and clears an unqualified PB1; a qualified/entered/invalidated/expired PB1 consumes the leg until a post-consumption swing origin and genuinely new structural impulse exist.
-- Preserved the impulse minimum body, optional maximum body and minimum range settings as seed-candle controls. Pullback qualification now applies opposing closes, ATR retracement, selected depth limits, impulse maximum depth, duration and origin-tolerance invalidation before any confirmation mode can enter.
-- Added confirmed M15 pivot structure using `Minor swing strength`: HH plus HL is Uptrend, LH plus LL is Downtrend, and mixed/equal/insufficient pivots are Neutral. Only closed right-side bars confirm pivots, and the exact four pivots used are logged at entry.
-- Added configurable `With-trend / neutral target R (minimum 2.0)` and `Counter-trend target R (minimum 3.0)`. The trend snapshot, risk distance, target multiple and target price are frozen at impulse entry. Range mode continues to use the normal target.
-- Preserved the optional M15/H4 EMA filter as a separate impulse-entry gate. Baseline and Trend-filter presets do not overwrite the new target settings.
-- Added concise state-change diagnostics plus four small supported FT6 text markers (`I-start`, `I-end`, `PB1`, and `WT`/`CT`/`N`) when diagnostics are enabled.
-- Updated the FT6 backtesting guide. TradingView and MT5 sources were not modified.
-- Verification was limited to one final 32-bit FT6 project compile and one deterministic 12-case source/state-machine check covering parent-leg extension/reset, PB1 consumption/re-arm, bullish symmetry, structural classifications, target floors and confirmed-pivot timing. All passed. No broad tests, backtests or optimisations were run.
-- Fresh build: `C:\GPT\CODEX-master\.codex_tmp_ft6_structural_build\RangeBreakoutPullbackStrategy.dll`, 133632 bytes, 2026-08-31T23:12:02.6068052+10:00, SHA-256 `4C058A137B1D08744810CB787FEA15F9D694268F958F4AA0723857C42DA8660C`.
-- Previous deployment: `C:\ForexTester6\Strategies\RangeBreakoutPullbackStrategy.dll`, 134656 bytes, 2026-08-30T22:34:18.1742960+10:00, SHA-256 `648E836EA71CA36C20734E3078C35C0D3B0767DF717981075839228A1792D804`.
-- Final deployment: `C:\ForexTester6\Strategies\RangeBreakoutPullbackStrategy.dll`, 133632 bytes, 2026-08-31T23:12:02.6068052+10:00, SHA-256 `4C058A137B1D08744810CB787FEA15F9D694268F958F4AA0723857C42DA8660C`; built and deployed hashes match exactly.
+- Added `render/oanda_volatility.py`, a separate local managed web tool that discovers active OANDA `CURRENCY` instruments and calculates Wilder ATR(14) percentages from completed mid candles for 1m, 5m, 1h, 1D, 1W and 1Mo.
+- Added bounded concurrent requests, completed-candle-aware caching, background refresh progress, deterministic ATR/name sorting, five-decimal percentage display, and per-timeframe N/A/error/stale diagnostics without mixing OANDA data with Pepperstone/MT5 prices.
+- Added the exact `Oanda Volatility` dashboard button beside `Oanda Spreads`, the canonical `/oanda-volatility` route, a unique `oanda-volatility` managed process, click-only startup, and targeted shutdown handling.
+- Removed the Pepperstone/MT5 ATR window, test, MQL5 source and ATR-only documentation. Removed the exact deployed `MarketWatchATRPercentFeed.mq5` and `.ex5` copies from the configured Pepperstone terminal Experts directory; no matching ATR desktop process was running.
+- Preserved the MT5 Market Spread feed/window, Oanda Spreads, Bybit Scanner and Alerts. Updated one mixed MT5 preservation test so it no longer reads the retired ATR window.
+- Targeted verification only: 4 exact pytest nodes passed; `py_compile` passed for the two changed Python runtime files; `node --check render/static/dashboard.js` passed; `git diff --check` passed; the narrow retired-identifier scan returned no matches.
+- A live OANDA request was not performed because network access is restricted; no broad tests or service smoke checks were run.

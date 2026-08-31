@@ -707,6 +707,8 @@ def test_local_profile_buttons_use_configured_render_routes(monkeypatch) -> None
     assert by_name["history"]["open_url"] == "/merged/history"
     assert by_name["history"]["dashboard_main_view"] is True
     assert by_name["spreads-clone"]["label"] == "Oanda Spreads"
+    assert by_name["oanda-volatility"]["label"] == "Oanda Volatility"
+    assert by_name["oanda-volatility"]["open_url"] == "/oanda-volatility"
     assert [item["name"] for item in buttons] == [
         "calculator",
         "bounce-trader",
@@ -718,6 +720,7 @@ def test_local_profile_buttons_use_configured_render_routes(monkeypatch) -> None
         "atr-scanner",
         "ivindicator-clone",
         "spreads-clone",
+        "oanda-volatility",
     ]
     assert "open-orders" not in by_name
     assert "pine" not in by_name
@@ -725,6 +728,34 @@ def test_local_profile_buttons_use_configured_render_routes(monkeypatch) -> None
     assert '@app.get("/dashboard/trading-journal")' in source
     assert '@app.get("/trading-journal", response_class=HTMLResponse)' in source
     assert '@app.get("/dashboard/pine", response_class=HTMLResponse)' in source
+
+
+def test_oanda_volatility_button_preserves_spread_tools(monkeypatch) -> None:
+    module = _load_master_service_module()
+    monkeypatch.setattr(module, "APP_PROFILE", "local")
+
+    buttons = module._profile_main_buttons()
+    by_name = {str(item.get("name")): item for item in buttons}
+    names = [str(item.get("name")) for item in buttons]
+    assert by_name["oanda-volatility"] == {
+        "id": "oanda-volatility",
+        "name": "oanda-volatility",
+        "label": "Oanda Volatility",
+        "open_url": "/oanda-volatility",
+        "dashboard_main_view": True,
+    }
+    assert names.index("oanda-volatility") == names.index("spreads-clone") + 1
+    assert by_name["spreads-clone"]["label"] == "Oanda Spreads"
+    assert by_name["spreads-clone"]["open_url"] == "/apps/spreads-clone"
+
+    managed = {script.name: script for script in module.discover_scripts()}
+    assert managed["oanda-volatility"].path == ROOT / "render" / "oanda_volatility.py"
+    assert "oanda-volatility" in module.WEB_APPS
+    assert "oanda-volatility" in module.STANDALONE_SCRIPTS
+    assert any(getattr(route, "path", None) == "/oanda-volatility" for route in module.app.routes)
+
+    assert (ROOT / "mt5-clone" / "MQL5" / "Experts" / "MarketWatchSpreadPercentFeed.mq5").is_file()
+    assert (ROOT / "mt5-clone" / "spread_percent_window.py").is_file()
 
 
 def test_remote_tool_buttons_refuse_localhost_and_render_has_no_tool_buttons(monkeypatch) -> None:
