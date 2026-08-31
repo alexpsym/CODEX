@@ -21,7 +21,8 @@ double ShallowMinimumDepth=0,ShallowMaximumDepth=50,DeepMinimumDepth=50,DeepMaxi
 double InvalidationToleranceATR=0.25; int MaximumPullbackBars=30;
 int Confirmation=1, MinorSwingStrength=2, StopModeSetting=0, ATRLength=14;
 double FixedATRMultiplier=1.5; int RegimeLookback=200;
-double LowRegimePercentile=33,HighRegimePercentile=67,LowVolatilityMultiplier=1,NormalVolatilityMultiplier=1.5,HighVolatilityMultiplier=2,RiskRewardMultiple=2;
+double LowRegimePercentile=33,HighRegimePercentile=67,LowVolatilityMultiplier=1,NormalVolatilityMultiplier=1.5,HighVolatilityMultiplier=2;
+double WithTrendNeutralTargetR=2.0,CounterTrendTargetR=3.0;
 bool EnableWeekendBlackout=true,ShowBlackoutStatus=true,ShowDiagnostics=false; int ImpulseM15H4TrendFilter=0,TrendFilterScope=0,ServerUTCOffsetHours=0, MagicNumber=26083001;
 
 long nbar=0; TDateTime lastTime=0; double rmaATR=0; int atrCount=0;
@@ -30,16 +31,42 @@ double resistance=0,support=0; int rCount=0,sCount=0; long rFirst=-1,rLast=-1,sF
 int stage=0,dir=0,opposing=0; long breakout=-1,extension=-1,pullbackConfirmed=-1;
 double frozenR=0,frozenS=0,setupATR=0,setupExtreme=0,frozenExtension=0,pullbackExtreme=0,minorSwing=0;
 bool pullbackStarted=false,hasFrozenExtension=false,hasMinorSwing=false,activeImpulseSetup=false;
-char lastDiagnostic[160]="";
+enum ImpulseStage { IMPULSE_PARENT=4, IMPULSE_PULLBACK=5, IMPULSE_ARMED=6, IMPULSE_CONSUMED=7 };
+double impulseOrigin=0,pullbackStartPrice=0,consumedExtreme=0,frozenRiskDistance=0,frozenTargetR=0,frozenTargetPrice=0;
+long impulseOriginBar=-1,impulseEndpointBar=-1,pullbackStartBar=-1,consumedBar=-1;
+TDateTime impulseOriginTime=0,impulseSeedTime=0,impulseEndpointTime=0,pullbackStartTime=0;
+int consumedDirection=0,frozenStructuralTrend=0;
+double previousSwingHigh=0,latestSwingHigh=0,previousSwingLow=0,latestSwingLow=0;
+long previousSwingHighBar=-1,latestSwingHighBar=-1,previousSwingLowBar=-1,latestSwingLowBar=-1;
+TDateTime previousSwingHighTime=0,latestSwingHighTime=0,previousSwingLowTime=0,latestSwingLowTime=0;
+bool havePreviousSwingHigh=false,haveLatestSwingHigh=false,havePreviousSwingLow=false,haveLatestSwingLow=false;
+char lastDiagnostic[512]="";
 
 double Min(double a,double b){return a<b?a:b;} double Max(double a,double b){return a>b?a:b;}
 double Down(double p){ double q=Point(); return floor(p/q+1e-9)*q; }
 double Up(double p){ double q=Point(); return ceil(p/q-1e-9)*q; }
-void ResetSetup(){stage=0;dir=0;opposing=0;breakout=extension=pullbackConfirmed=-1;pullbackStarted=false;hasFrozenExtension=false;hasMinorSwing=false;activeImpulseSetup=false;}
+void ResetSetup(){stage=0;dir=0;opposing=0;breakout=extension=pullbackConfirmed=-1;pullbackStarted=false;hasFrozenExtension=false;hasMinorSwing=false;activeImpulseSetup=false;pullbackStartBar=-1;}
 double ActiveMinimumRetracement(){return activeImpulseSetup?ImpulseMinimumRetracementATR:MinimumRetracementATR;}
 int ActiveMaximumPullbackBars(){return activeImpulseSetup?ImpulseMaximumPullbackBars:MaximumPullbackBars;}
 bool DepthExceeded(double depth,bool useRange,double rangeMaximum){return activeImpulseSetup?depth>ImpulseMaximumDepth:(useRange&&depth>rangeMaximum);}
-void EmitStatus(PChar text){if(strcmp(lastDiagnostic,text)!=0){Print(text);strncpy(lastDiagnostic,text,159);lastDiagnostic[159]=0;}}
+void EmitStatus(PChar text){if(strcmp(lastDiagnostic,text)!=0){Print(text);strncpy(lastDiagnostic,text,511);lastDiagnostic[511]=0;}}
+void EmitDiagnostic(const char *text){if(ShowDiagnostics)EmitStatus((PChar)text);}
+const char *DirectionName(const int d){return d==1?"long":"short";}
+const char *TrendName(const int trend){return trend==1?"Uptrend":trend==-1?"Downtrend":"Neutral";}
+void FormatTime(const TDateTime value,char *buffer)
+{
+  SYSTEMTIME st;
+  if(value!=0&&VariantTimeToSystemTime(value,&st)) sprintf(buffer,"%04d-%02d-%02d %02d:%02d",st.wYear,st.wMonth,st.wDay,st.wHour,st.wMinute);
+  else strcpy(buffer,"n/a");
+}
+void DiagnosticMarker(const char *kind,const TDateTime time,const double price,const char *label,const TColor color)
+{
+  if(!ShowDiagnostics) return;
+  char name[96];sprintf(name,"RBP_DIAG_%d_%ld_%s",MagicNumber,breakout,kind);
+  if(ObjectExists((PChar)name)) ObjectDelete((PChar)name);
+  if(ObjectCreate((PChar)name,obj_Text,0,time,price)) ObjectSetText((PChar)name,(PChar)label,7,(PChar)"Arial",color);
+}
+void ClampTargetSettings(){WithTrendNeutralTargetR=Max(2.0,WithTrendNeutralTargetR);CounterTrendTargetR=Max(3.0,CounterTrendTargetR);}
 void ApplySettingsPreset()
 {
   if(SettingsPreset!=1&&SettingsPreset!=2) return;
@@ -49,7 +76,7 @@ void ApplySettingsPreset()
   BreakoutBufferATR=0.10; MinimumBreakoutBodyATR=0.25; MinimumExtensionATR=0.75; MaximumExtensionBars=20;
   ImpulseMinimumBodyATR=1.0; ImpulseMaximumBodyATR=0.0; ImpulseMinimumRangeATR=1.25; ImpulseMinimumRetracementATR=0.50; ImpulseMaximumDepth=75.0; ImpulseMaximumPullbackBars=30;
   MinimumRetracementATR=0.50; PullbackDepthMode=0; ShallowMinimumDepth=0; ShallowMaximumDepth=50; DeepMinimumDepth=50; DeepMaximumDepth=100; CustomMinimumDepth=0; CustomMaximumDepth=100; InvalidationToleranceATR=0.25; MaximumPullbackBars=30;
-  Confirmation=1; MinorSwingStrength=2; StopModeSetting=0; ATRLength=14; FixedATRMultiplier=1.5; RegimeLookback=200; LowRegimePercentile=33; HighRegimePercentile=67; LowVolatilityMultiplier=1; NormalVolatilityMultiplier=1.5; HighVolatilityMultiplier=2; RiskRewardMultiple=2;
+  Confirmation=1; MinorSwingStrength=2; StopModeSetting=0; ATRLength=14; FixedATRMultiplier=1.5; RegimeLookback=200; LowRegimePercentile=33; HighRegimePercentile=67; LowVolatilityMultiplier=1; NormalVolatilityMultiplier=1.5; HighVolatilityMultiplier=2;
   EnableWeekendBlackout=true; ShowBlackoutStatus=true; ShowDiagnostics=false; ImpulseM15H4TrendFilter=0; TrendFilterScope=0; ServerUTCOffsetHours=0; MagicNumber=26083001;
   SetupModeSetting=1; Confirmation=0; ImpulseMaximumBodyATR=1.5; PullbackDepthMode=1; ShowDiagnostics=true;
   if(SettingsPreset==2) ImpulseM15H4TrendFilter=1;
@@ -57,7 +84,7 @@ void ApplySettingsPreset()
 void EmitPresetDiagnostic()
 {
   char text[200]; const char *name=SettingsPreset==1?"Baseline":SettingsPreset==2?"Trend-filter test":"Custom";
-  sprintf(text,"RBP preset=%s setup=%d confirmation=%d body=%.2f-%.2fATR depth=%.0f-%.0f%% stop=%s target=%.1fR trend=%s scope=%d",name,SetupModeSetting,Confirmation,ImpulseMinimumBodyATR,ImpulseMaximumBodyATR,ShallowMinimumDepth,ShallowMaximumDepth,StopModeSetting==0?"adaptive":"fixed",RiskRewardMultiple,ImpulseM15H4TrendFilter!=0?"on":"off",TrendFilterScope);
+  sprintf(text,"RBP preset=%s setup=%d confirmation=%d body=%.2f-%.2fATR depth=%.0f-%.0f%% stop=%s targets=%.1f/%.1fR EMAtrend=%s scope=%d",name,SetupModeSetting,Confirmation,ImpulseMinimumBodyATR,ImpulseMaximumBodyATR,ShallowMinimumDepth,ShallowMaximumDepth,StopModeSetting==0?"adaptive":"fixed",WithTrendNeutralTargetR,CounterTrendTargetR,ImpulseM15H4TrendFilter!=0?"on":"off",TrendFilterScope);
   Print((PChar)text);
 }
 bool StrategyPositionOpen();
@@ -74,6 +101,10 @@ PChar CurrentDiagnostic()
     return (PChar)"RBP: impulse body/range not qualified";
   }
   if(stage==1) return (PChar)"RBP: extension pending";
+  if(stage==IMPULSE_PARENT) return (PChar)"RBP: tracking parent impulse";
+  if(stage==IMPULSE_PULLBACK) return (PChar)"RBP: tracking first pullback";
+  if(stage==IMPULSE_ARMED) return (PChar)"RBP: first pullback armed / resumption pending";
+  if(stage==IMPULSE_CONSUMED) return (PChar)"RBP: impulse consumed / new structural leg required";
   if(stage==2)
   {
     if(!pullbackStarted) return (PChar)"RBP: pullback not started";
@@ -96,6 +127,104 @@ bool StrategyPositionOpen(){for(int i=0;i<OrdersTotal();i++) if(OrderSelect(i,SE
 void Flatten(){for(int i=OrdersTotal()-1;i>=0;i--) if(OrderSelect(i,SELECT_BY_POS,MODE_TRADES) && OrderMagicNumber()==MagicNumber && strcmp(OrderSymbol(),Currency)==0) CloseOrder(OrderTicket());}
 bool IsPivotHigh(int strength,double &p){int c=strength+1; p=High(c); for(int i=1;i<=strength;i++) if(p<High(c-i)||p<High(c+i)) return false; return true;}
 bool IsPivotLow(int strength,double &p){int c=strength+1; p=Low(c); for(int i=1;i<=strength;i++) if(p>Low(c-i)||p>Low(c+i)) return false; return true;}
+void UpdateStructuralPivots()
+{
+  int strength=MinorSwingStrength<1?1:MinorSwingStrength,center=strength+1; double p; long pivotBar=nbar-strength;
+  if(IsPivotHigh(strength,p)&&pivotBar!=latestSwingHighBar)
+  {
+    if(haveLatestSwingHigh){previousSwingHigh=latestSwingHigh;previousSwingHighBar=latestSwingHighBar;previousSwingHighTime=latestSwingHighTime;havePreviousSwingHigh=true;}
+    latestSwingHigh=p;latestSwingHighBar=pivotBar;latestSwingHighTime=Time(center);haveLatestSwingHigh=true;
+  }
+  if(IsPivotLow(strength,p)&&pivotBar!=latestSwingLowBar)
+  {
+    if(haveLatestSwingLow){previousSwingLow=latestSwingLow;previousSwingLowBar=latestSwingLowBar;previousSwingLowTime=latestSwingLowTime;havePreviousSwingLow=true;}
+    latestSwingLow=p;latestSwingLowBar=pivotBar;latestSwingLowTime=Time(center);haveLatestSwingLow=true;
+  }
+}
+int StructuralTrend()
+{
+  if(!havePreviousSwingHigh||!haveLatestSwingHigh||!havePreviousSwingLow||!haveLatestSwingLow) return 0;
+  if(latestSwingHigh>previousSwingHigh&&latestSwingLow>previousSwingLow) return 1;
+  if(latestSwingHigh<previousSwingHigh&&latestSwingLow<previousSwingLow) return -1;
+  return 0;
+}
+bool LatestImpulseOrigin(const int d,double &price,long &bar,TDateTime &time)
+{
+  if(d==1&&haveLatestSwingLow){price=latestSwingLow;bar=latestSwingLowBar;time=latestSwingLowTime;return true;}
+  if(d==-1&&haveLatestSwingHigh){price=latestSwingHigh;bar=latestSwingHighBar;time=latestSwingHighTime;return true;}
+  return false;
+}
+void SelectedDepthLimits(double &minimumDepth,double &maximumDepth,bool &hasMaximum)
+{
+  minimumDepth=0;maximumDepth=0;hasMaximum=PullbackDepthMode!=0;
+  if(PullbackDepthMode==1){minimumDepth=Min(ShallowMinimumDepth,ShallowMaximumDepth);maximumDepth=Max(ShallowMinimumDepth,ShallowMaximumDepth);}
+  if(PullbackDepthMode==2){minimumDepth=Min(DeepMinimumDepth,DeepMaximumDepth);maximumDepth=Max(DeepMinimumDepth,DeepMaximumDepth);}
+  if(PullbackDepthMode==3){minimumDepth=Min(CustomMinimumDepth,CustomMaximumDepth);maximumDepth=Max(CustomMinimumDepth,CustomMaximumDepth);}
+}
+bool ImpulseDepthExceeded(const double depth)
+{
+  double minimumDepth=0,maximumDepth=0;bool hasMaximum=false;SelectedDepthLimits(minimumDepth,maximumDepth,hasMaximum);
+  if(depth>ImpulseMaximumDepth) return true;
+  return hasMaximum&&depth>maximumDepth;
+}
+bool ImpulseDepthQualified(const double depth)
+{
+  double minimumDepth=0,maximumDepth=0;bool hasMaximum=false;SelectedDepthLimits(minimumDepth,maximumDepth,hasMaximum);
+  return depth>0&&depth>=minimumDepth&&!ImpulseDepthExceeded(depth);
+}
+double ImpulseDisplacement(){return dir==1?setupExtreme-impulseOrigin:impulseOrigin-setupExtreme;}
+double PullbackRetracement(){return dir==1?setupExtreme-pullbackExtreme:pullbackExtreme-setupExtreme;}
+double PullbackDepth(){double displacement=ImpulseDisplacement();return displacement>0?PullbackRetracement()/displacement*100.0:0;}
+bool ImpulseInvalidated(const double close){return dir==1?close<impulseOrigin-setupATR*InvalidationToleranceATR:close>impulseOrigin+setupATR*InvalidationToleranceATR;}
+bool SeedCandle(const int d,const double o,const double h,const double l,const double c)
+{
+  double body=d==1?c-o:o-c;
+  return body>=rmaATR*ImpulseMinimumBodyATR&&(ImpulseMaximumBodyATR==0||body<=rmaATR*ImpulseMaximumBodyATR)&&h-l>=rmaATR*ImpulseMinimumRangeATR;
+}
+bool CanSeedImpulse(const int seedDirection,const double seedExtreme,double &origin,long &originBar,TDateTime &originTime)
+{
+  if(!LatestImpulseOrigin(seedDirection,origin,originBar,originTime)||originBar>=nbar) return false;
+  if(stage!=IMPULSE_CONSUMED) return true;
+  if(originBar<=consumedBar) return false;
+  if(seedDirection==consumedDirection)
+    return seedDirection==1?seedExtreme>consumedExtreme:seedExtreme<consumedExtreme;
+  return true;
+}
+void StartImpulse(const int seedDirection,const double seedExtreme,const double origin,const long originBar,const TDateTime originTime)
+{
+  dir=seedDirection;stage=IMPULSE_PARENT;activeImpulseSetup=true;setupATR=rmaATR;impulseOrigin=origin;impulseOriginBar=originBar;impulseOriginTime=originTime;
+  setupExtreme=seedExtreme;impulseEndpointBar=nbar;impulseEndpointTime=Time(1);impulseSeedTime=Time(1);breakout=extension=nbar;
+  pullbackStarted=false;pullbackStartBar=-1;opposing=0;hasMinorSwing=false;hasFrozenExtension=false;
+  char originText[32],seedText[32],text[512];FormatTime(impulseOriginTime,originText);FormatTime(impulseSeedTime,seedText);
+  sprintf(text,"RBP impulse seed dir=%s origin=%s@%.5f seed=%s endpoint=%.5f displacement=%.5f/%.2fATR",DirectionName(dir),originText,impulseOrigin,seedText,setupExtreme,ImpulseDisplacement(),setupATR>0?ImpulseDisplacement()/setupATR:0);
+  EmitDiagnostic(text);
+}
+void ClearUnqualifiedPullback()
+{
+  stage=IMPULSE_PARENT;pullbackStarted=false;pullbackStartBar=-1;pullbackStartTime=0;opposing=0;pullbackExtreme=0;pullbackConfirmed=-1;hasMinorSwing=false;
+}
+void ConsumeImpulse(const char *reason)
+{
+  bool hadPullback=pullbackStarted;double retracement=hadPullback?PullbackRetracement():0,depth=hadPullback?PullbackDepth():0;int closeCount=opposing;
+  consumedDirection=dir;consumedExtreme=setupExtreme;consumedBar=nbar;stage=IMPULSE_CONSUMED;pullbackStarted=false;activeImpulseSetup=true;
+  char endpointText[32],startText[32],text[512];FormatTime(impulseEndpointTime,endpointText);FormatTime(pullbackStartTime,startText);
+  sprintf(text,"RBP impulse consumed dir=%s reason=%s endpoint=%s@%.5f displacement=%.5f/%.2fATR PB1=%s opposing=%d retracement=%.2fATR depth=%.1f%%",DirectionName(dir),reason,endpointText,setupExtreme,ImpulseDisplacement(),setupATR>0?ImpulseDisplacement()/setupATR:0,hadPullback?startText:"n/a",closeCount,setupATR>0?retracement/setupATR:0,depth);
+  EmitDiagnostic(text);
+}
+void StartFirstPullback(const double h,const double l)
+{
+  stage=IMPULSE_PULLBACK;pullbackStarted=true;pullbackStartBar=nbar;pullbackStartTime=Time(1);pullbackExtreme=dir==1?l:h;pullbackStartPrice=pullbackExtreme;opposing=1;hasMinorSwing=false;
+  frozenExtension=setupExtreme;hasFrozenExtension=true;extension=nbar;
+  char startText[32],text[512];FormatTime(pullbackStartTime,startText);
+  sprintf(text,"RBP PB1 start dir=%s time=%s@%.5f endpoint=%.5f opposing=%d retracement=%.2fATR depth=%.1f%%",DirectionName(dir),startText,pullbackStartPrice,setupExtreme,opposing,setupATR>0?PullbackRetracement()/setupATR:0,PullbackDepth());
+  EmitDiagnostic(text);
+}
+void LogPullbackReset()
+{
+  char endpointText[32],text[512];FormatTime(impulseEndpointTime,endpointText);
+  sprintf(text,"RBP PB1 reset dir=%s reason=new impulse extreme endpoint=%s@%.5f displacement=%.5f/%.2fATR",DirectionName(dir),endpointText,setupExtreme,ImpulseDisplacement(),setupATR>0?ImpulseDisplacement()/setupATR:0);
+  EmitDiagnostic(text);
+}
 int DaysInMonth(int y,int m){int d[]={31,28,31,30,31,30,31,31,30,31,30,31}; return m==2 && y%4==0 && (y%100!=0||y%400==0)?29:d[m-1];}
 bool IsNYDST(TDateTime serverTime)
 {
@@ -154,9 +283,17 @@ void AddClusters()
   if(IsPivotLow(PivotStrength,p)){if(sCount&&fabs(p-support)<=tolerance&&pb-sFirst<=MaximumRangeBars){support=(support*sCount+p)/(sCount+1);sCount++;sLast=pb;}else{support=p;sCount=1;sFirst=sLast=pb;}}
 }
 bool RangeReady(){if(stage||rCount<MinimumReactions||sCount<MinimumReactions)return false;long duration=Max(rLast,sLast)-Min(rFirst,sFirst);return resistance-support>=rmaATR*MinimumRangeHeightATR&&duration>=MinimumRangeBars&&duration<=MaximumRangeBars;}
-void Enter(int d,double mult)
+void Enter(int d,double mult,const bool impulseTrade,const int structuralTrend)
 {
-  double riskTicks=Max(1,ceil(rmaATR*mult/Point()));double risk=riskTicks*Point(), target=Max(1,floor(riskTicks*RiskRewardMultiple+0.5))*Point();double entry=d==1?Ask():Bid();double sl=d==1?Down(entry-risk):Up(entry+risk);double tp=d==1?Up(entry+target):Down(entry-target);int ticket=-1;
+  ClampTargetSettings(); int relation=structuralTrend==0?0:((d==1&&structuralTrend==1)||(d==-1&&structuralTrend==-1)?1:-1);
+  double targetR=impulseTrade&&relation==-1?CounterTrendTargetR:WithTrendNeutralTargetR;
+  targetR=relation==-1?Max(3.0,targetR):Max(2.0,targetR);
+  double riskTicks=Max(1,ceil(rmaATR*mult/Point()));double risk=riskTicks*Point(), target=Max(1,floor(riskTicks*targetR+0.5))*Point();double entry=d==1?Ask():Bid();double sl=d==1?Down(entry-risk):Up(entry+risk);double tp=d==1?Up(entry+target):Down(entry-target);int ticket=-1;
+  frozenStructuralTrend=structuralTrend;frozenRiskDistance=risk;frozenTargetR=targetR;frozenTargetPrice=tp;
+  if(impulseTrade)
+  {
+    char text[256];sprintf(text,"RBP entry frozen dir=%s structure=%s risk=%.5f target=%.1fR targetPrice=%.5f",DirectionName(d),TrendName(structuralTrend),frozenRiskDistance,frozenTargetR,frozenTargetPrice);EmitDiagnostic(text);
+  }
   SendInstantOrder(Currency,d==1?op_Buy:op_Sell,VolumeLots,sl,tp,(PChar)"RangeBreakoutPullback",MagicNumber,ticket);
 }
 bool ImpulseTrendConsensus(const int entryDirection,bool &ready)
@@ -188,14 +325,78 @@ bool ImpulseTrendConsensus(const int entryDirection,bool &ready)
   ready=true;
   return entryDirection==1 ? ema50>ema200&&ema10>ema30 : ema50<ema200&&ema10<ema30;
 }
+void ProcessImpulseSetup(const double o,const double h,const double l,const double c,const double previousClose)
+{
+  if((stage==0||stage==IMPULSE_CONSUMED)&&!StrategyPositionOpen())
+  {
+    bool longSeed=TradeDirection!=2&&c>o&&SeedCandle(1,o,h,l,c),shortSeed=TradeDirection!=1&&c<o&&SeedCandle(-1,o,h,l,c);
+    int seedDirection=longSeed?1:shortSeed?-1:0; double origin=0;long originBar=-1;TDateTime originTime=0;
+    if(seedDirection!=0&&CanSeedImpulse(seedDirection,seedDirection==1?h:l,origin,originBar,originTime)) StartImpulse(seedDirection,seedDirection==1?h:l,origin,originBar,originTime);
+    return;
+  }
+  if(stage==IMPULSE_PARENT||stage==IMPULSE_PULLBACK)
+  {
+    if(ImpulseInvalidated(c)){ConsumeImpulse("invalidation beyond origin tolerance");return;}
+    bool newExtreme=dir==1?h>setupExtreme:l<setupExtreme;
+    if(newExtreme)
+    {
+      setupExtreme=dir==1?h:l;impulseEndpointBar=nbar;impulseEndpointTime=Time(1);extension=nbar;
+      if(stage==IMPULSE_PULLBACK){LogPullbackReset();ClearUnqualifiedPullback();}
+      return;
+    }
+    bool opposingClose=dir==1?c<previousClose:c>previousClose;
+    if(stage==IMPULSE_PARENT)
+    {
+      if(opposingClose) StartFirstPullback(h,l);
+    }
+    else
+    {
+      pullbackExtreme=dir==1?Min(pullbackExtreme,l):Max(pullbackExtreme,h);
+      if(opposingClose) opposing++;
+    }
+    if(stage!=IMPULSE_PULLBACK) return;
+    double retracement=PullbackRetracement(),depth=PullbackDepth();
+    if(nbar-pullbackStartBar>ActiveMaximumPullbackBars()){ConsumeImpulse("first pullback expired");return;}
+    if(ImpulseDepthExceeded(depth)){ConsumeImpulse("maximum pullback depth exceeded");return;}
+    if(opposing>=MinimumOpposingCloses&&retracement>=setupATR*ActiveMinimumRetracement()&&ImpulseDepthQualified(depth))
+    {
+      stage=IMPULSE_ARMED;pullbackConfirmed=nbar;
+      char originText[32],endpointText[32],startText[32],text[512];FormatTime(impulseOriginTime,originText);FormatTime(impulseEndpointTime,endpointText);FormatTime(pullbackStartTime,startText);
+      sprintf(text,"RBP PB1 qualified dir=%s origin=%s@%.5f endpoint=%s@%.5f displacement=%.5f/%.2fATR start=%s opposing=%d retracement=%.2fATR depth=%.1f%%",DirectionName(dir),originText,impulseOrigin,endpointText,setupExtreme,ImpulseDisplacement(),setupATR>0?ImpulseDisplacement()/setupATR:0,startText,opposing,setupATR>0?retracement/setupATR:0,depth);
+      EmitDiagnostic(text);
+      DiagnosticMarker("START",impulseOriginTime,impulseOrigin,"I-start",clBlue);DiagnosticMarker("END",impulseEndpointTime,setupExtreme,"I-end",clBlue);DiagnosticMarker("PB1",pullbackStartTime,pullbackStartPrice,"PB1",clYellow);
+    }
+    return;
+  }
+  if(stage!=IMPULSE_ARMED) return;
+  pullbackExtreme=dir==1?Min(pullbackExtreme,l):Max(pullbackExtreme,h);
+  if(dir==1&&haveLatestSwingHigh&&latestSwingHighBar>=pullbackStartBar){minorSwing=latestSwingHigh;hasMinorSwing=true;}
+  if(dir==-1&&haveLatestSwingLow&&latestSwingLowBar>=pullbackStartBar){minorSwing=latestSwingLow;hasMinorSwing=true;}
+  double depth=PullbackDepth();
+  if(ImpulseInvalidated(c)){ConsumeImpulse("invalidation beyond origin tolerance");return;}
+  if(nbar-pullbackStartBar>ActiveMaximumPullbackBars()){ConsumeImpulse("first pullback expired");return;}
+  if(ImpulseDepthExceeded(depth)){ConsumeImpulse("maximum pullback depth exceeded");return;}
+  bool resumed=Confirmation==0?(dir==1?c>previousClose:c<previousClose):Confirmation==1?(dir==1?c>o&&c>High(2):c<o&&c<Low(2)):(hasMinorSwing&&(dir==1?c>minorSwing:c<minorSwing));
+  double mult=0;bool riskReady=RiskReady(mult);
+  if(nbar<=pullbackConfirmed||!resumed||StrategyPositionOpen()||!riskReady||mult<=0) return;
+  int entryDirection=dir,structuralTrend=StructuralTrend();bool trendReady=true,trendAligned=true;
+  bool filterThisDirection=ImpulseM15H4TrendFilter!=0&&(TrendFilterScope==0||(TrendFilterScope==1&&entryDirection==1)||(TrendFilterScope==2&&entryDirection==-1));
+  if(filterThisDirection)trendAligned=ImpulseTrendConsensus(entryDirection,trendReady);
+  if(filterThisDirection&&(!trendReady||!trendAligned)){ConsumeImpulse(!trendReady?"EMA trend filter not ready":"EMA trend filter not aligned");return;}
+  ClampTargetSettings();int relation=structuralTrend==0?0:((entryDirection==1&&structuralTrend==1)||(entryDirection==-1&&structuralTrend==-1)?1:-1);double selectedTargetR=relation==-1?CounterTrendTargetR:WithTrendNeutralTargetR;
+  char previousHighText[32],latestHighText[32],previousLowText[32],latestLowText[32],text[512];
+  FormatTime(previousSwingHighTime,previousHighText);FormatTime(latestSwingHighTime,latestHighText);FormatTime(previousSwingLowTime,previousLowText);FormatTime(latestSwingLowTime,latestLowText);
+  sprintf(text,"RBP resumption=%s dir=%s structure=%s class=%s target=%.1fR pivots H1=%s@%.5f H2=%s@%.5f L1=%s@%.5f L2=%s@%.5f",Confirmation==0?"aggressive":Confirmation==1?"balanced":"conservative",DirectionName(entryDirection),TrendName(structuralTrend),relation==1?"with-trend":relation==-1?"counter-trend":"neutral",selectedTargetR,previousHighText,previousSwingHigh,latestHighText,latestSwingHigh,previousLowText,previousSwingLow,latestLowText,latestSwingLow);
+  EmitDiagnostic(text);DiagnosticMarker("ENTRY",Time(1),c,relation==1?"WT":relation==-1?"CT":"N",relation==-1?clRed:relation==1?clGreen:clYellow);Enter(entryDirection,mult,true,structuralTrend);ConsumeImpulse("entered first pullback");
+}
 void ProcessBar()
 {
-  nbar++; AddATR(); if(atrCount<ATRLength)return; if(FXBlocked(Time(0))){Flatten();ResetSetup();ClearClusters();Status(true);return;} AddClusters(); double o=Open(1),h=High(1),l=Low(1),c=Close(1),pc=Close(2);
+  nbar++; AddATR(); if(atrCount<ATRLength)return; UpdateStructuralPivots(); if(FXBlocked(Time(0))){Flatten();ResetSetup();ClearClusters();Status(true);return;} AddClusters(); double o=Open(1),h=High(1),l=Low(1),c=Close(1),pc=Close(2);
   if(stage==0&&SetupModeSetting==0&&!StrategyPositionOpen()&&RangeReady()){bool lng=TradeDirection!=2&&(MinimumBreakoutBodyATR==0||c-o>=rmaATR*MinimumBreakoutBodyATR)&&c>resistance+rmaATR*BreakoutBufferATR;bool sht=TradeDirection!=1&&(MinimumBreakoutBodyATR==0||o-c>=rmaATR*MinimumBreakoutBodyATR)&&c<support-rmaATR*BreakoutBufferATR;if(lng||sht){dir=lng?1:-1;stage=1;frozenR=resistance;frozenS=support;setupATR=rmaATR;setupExtreme=dir==1?h:l;breakout=nbar;ClearClusters();}}
-  if(stage==0&&SetupModeSetting==1&&!StrategyPositionOpen()){bool lng=TradeDirection!=2&&c>o&&c-o>=rmaATR*ImpulseMinimumBodyATR&&(ImpulseMaximumBodyATR==0||c-o<=rmaATR*ImpulseMaximumBodyATR)&&h-l>=rmaATR*ImpulseMinimumRangeATR;bool sht=TradeDirection!=1&&c<o&&o-c>=rmaATR*ImpulseMinimumBodyATR&&(ImpulseMaximumBodyATR==0||o-c<=rmaATR*ImpulseMaximumBodyATR)&&h-l>=rmaATR*ImpulseMinimumRangeATR;if(lng||sht){dir=lng?1:-1;stage=2;activeImpulseSetup=true;frozenR=dir==1?o:0;frozenS=dir==-1?o:0;setupATR=rmaATR;setupExtreme=dir==1?h:l;breakout=extension=nbar;pullbackStarted=false;opposing=0;hasMinorSwing=false;}}
   if(stage==1&&nbar>breakout){bool bad=dir==1?c<frozenR-setupATR*InvalidationToleranceATR:c>frozenS+setupATR*InvalidationToleranceATR;if(bad||nbar-breakout>MaximumExtensionBars){EmitStatus(bad?(PChar)"RBP: setup invalidated":(PChar)"RBP: extension expired");ResetSetup();return;}if(dir==1){setupExtreme=Max(setupExtreme,h);if(setupExtreme>=frozenR+setupATR*MinimumExtensionATR){stage=2;extension=nbar;}}else{setupExtreme=Min(setupExtreme,l);if(setupExtreme<=frozenS-setupATR*MinimumExtensionATR){stage=2;extension=nbar;}}}
   if(stage==2&&nbar>extension){bool bad=dir==1?c<frozenR-setupATR*InvalidationToleranceATR:c>frozenS+setupATR*InvalidationToleranceATR;if(!pullbackStarted){bool newx=dir==1?h>setupExtreme:l<setupExtreme;setupExtreme=dir==1?Max(setupExtreme,h):Min(setupExtreme,l);bool opp=dir==1?c<pc:c>pc;if(opp){pullbackStarted=true;hasFrozenExtension=true;frozenExtension=setupExtreme;pullbackExtreme=dir==1?l:h;opposing=1;extension=nbar;}else if(newx)extension=nbar;}else{pullbackExtreme=dir==1?Min(pullbackExtreme,l):Max(pullbackExtreme,h);if(dir==1?c<pc:c>pc)opposing++;}if(bad||nbar-extension>ActiveMaximumPullbackBars()){EmitStatus(bad?(PChar)"RBP: setup invalidated":(PChar)"RBP: pullback expired");ResetSetup();return;}if(pullbackStarted){double ext=dir==1?frozenExtension-frozenR:frozenS-frozenExtension,ret=dir==1?frozenExtension-pullbackExtreme:pullbackExtreme-frozenExtension,depth=ext>0?ret/ext*100:0,lo=0,hi=0;bool maxDepth=PullbackDepthMode!=0;if(PullbackDepthMode==1){lo=Min(ShallowMinimumDepth,ShallowMaximumDepth);hi=Max(ShallowMinimumDepth,ShallowMaximumDepth);}if(PullbackDepthMode==2){lo=Min(DeepMinimumDepth,DeepMaximumDepth);hi=Max(DeepMinimumDepth,DeepMaximumDepth);}if(PullbackDepthMode==3){lo=Min(CustomMinimumDepth,CustomMaximumDepth);hi=Max(CustomMinimumDepth,CustomMaximumDepth);}if(DepthExceeded(depth,maxDepth,hi)){EmitStatus((PChar)"RBP: maximum pullback depth exceeded");ResetSetup();return;}if(opposing>=MinimumOpposingCloses&&ret>=setupATR*ActiveMinimumRetracement()&&depth>0&&(activeImpulseSetup||!maxDepth||depth>=lo)){stage=3;pullbackConfirmed=nbar;}}}
-  if(stage==3){pullbackExtreme=dir==1?Min(pullbackExtreme,l):Max(pullbackExtreme,h);double p;if(dir==1&&IsPivotHigh(MinorSwingStrength,p)&&nbar-MinorSwingStrength>=extension){minorSwing=p;hasMinorSwing=true;}if(dir==-1&&IsPivotLow(MinorSwingStrength,p)&&nbar-MinorSwingStrength>=extension){minorSwing=p;hasMinorSwing=true;}bool bad=dir==1?c<frozenR-setupATR*InvalidationToleranceATR:c>frozenS+setupATR*InvalidationToleranceATR;double ext=dir==1?frozenExtension-frozenR:frozenS-frozenExtension,depth=ext>0?(dir==1?frozenExtension-pullbackExtreme:pullbackExtreme-frozenExtension)/ext*100:0,hi=0;bool maxDepth=PullbackDepthMode!=0;if(PullbackDepthMode==1)hi=Max(ShallowMinimumDepth,ShallowMaximumDepth);if(PullbackDepthMode==2)hi=Max(DeepMinimumDepth,DeepMaximumDepth);if(PullbackDepthMode==3)hi=Max(CustomMinimumDepth,CustomMaximumDepth);if(bad||nbar-extension>ActiveMaximumPullbackBars()||DepthExceeded(depth,maxDepth,hi)){EmitStatus(bad?(PChar)"RBP: setup invalidated":nbar-extension>ActiveMaximumPullbackBars()?(PChar)"RBP: pullback expired":(PChar)"RBP: maximum pullback depth exceeded");ResetSetup();return;}bool resume=Confirmation==0?(dir==1?c>pc:c<pc):Confirmation==1?(dir==1?c>o&&c>High(2):c<o&&c<Low(2)):(hasMinorSwing&&(dir==1?c>minorSwing:c<minorSwing));double mult=0;bool riskReady=RiskReady(mult);if(nbar>pullbackConfirmed&&resume&&!StrategyPositionOpen()&&riskReady&&mult>0){int d=dir;bool trendReady=true,trendAligned=true,filterThisDirection=activeImpulseSetup&&ImpulseM15H4TrendFilter!=0&&(TrendFilterScope==0||(TrendFilterScope==1&&d==1)||(TrendFilterScope==2&&d==-1));if(filterThisDirection)trendAligned=ImpulseTrendConsensus(d,trendReady);if(filterThisDirection&&(!trendReady||!trendAligned)){EmitStatus(!trendReady?(PChar)"RBP: impulse trend filter not ready":(PChar)"RBP: impulse trend filter not aligned");ResetSetup();return;}EmitStatus((PChar)"RBP: entry requested");ResetSetup();Enter(d,mult);}}
+  if(stage==3){pullbackExtreme=dir==1?Min(pullbackExtreme,l):Max(pullbackExtreme,h);double p;if(dir==1&&IsPivotHigh(MinorSwingStrength,p)&&nbar-MinorSwingStrength>=extension){minorSwing=p;hasMinorSwing=true;}if(dir==-1&&IsPivotLow(MinorSwingStrength,p)&&nbar-MinorSwingStrength>=extension){minorSwing=p;hasMinorSwing=true;}bool bad=dir==1?c<frozenR-setupATR*InvalidationToleranceATR:c>frozenS+setupATR*InvalidationToleranceATR;double ext=dir==1?frozenExtension-frozenR:frozenS-frozenExtension,depth=ext>0?(dir==1?frozenExtension-pullbackExtreme:pullbackExtreme-frozenExtension)/ext*100:0,hi=0;bool maxDepth=PullbackDepthMode!=0;if(PullbackDepthMode==1)hi=Max(ShallowMinimumDepth,ShallowMaximumDepth);if(PullbackDepthMode==2)hi=Max(DeepMinimumDepth,DeepMaximumDepth);if(PullbackDepthMode==3)hi=Max(CustomMinimumDepth,CustomMaximumDepth);if(bad||nbar-extension>ActiveMaximumPullbackBars()||DepthExceeded(depth,maxDepth,hi)){EmitStatus(bad?(PChar)"RBP: setup invalidated":nbar-extension>ActiveMaximumPullbackBars()?(PChar)"RBP: pullback expired":(PChar)"RBP: maximum pullback depth exceeded");ResetSetup();return;}bool resume=Confirmation==0?(dir==1?c>pc:c<pc):Confirmation==1?(dir==1?c>o&&c>High(2):c<o&&c<Low(2)):(hasMinorSwing&&(dir==1?c>minorSwing:c<minorSwing));double mult=0;bool riskReady=RiskReady(mult);if(nbar>pullbackConfirmed&&resume&&!StrategyPositionOpen()&&riskReady&&mult>0){int d=dir;EmitStatus((PChar)"RBP: entry requested");ResetSetup();Enter(d,mult,false,0);}}
+  if(SetupModeSetting==1) ProcessImpulseSetup(o,h,l,c,pc);
   Status(false);
 }
 EXPORT void __stdcall InitStrategy()
@@ -212,13 +413,13 @@ EXPORT void __stdcall InitStrategy()
  RegOption((PChar)"Impulse minimum body ATR",ot_Double,&ImpulseMinimumBodyATR);RegOption((PChar)"Impulse maximum body ATR (0 disabled)",ot_Double,&ImpulseMaximumBodyATR);RegOption((PChar)"Impulse minimum range ATR",ot_Double,&ImpulseMinimumRangeATR);RegOption((PChar)"Impulse minimum retracement ATR",ot_Double,&ImpulseMinimumRetracementATR);RegOption((PChar)"Impulse maximum depth %",ot_Double,&ImpulseMaximumDepth);RegOption((PChar)"Impulse maximum pullback bars",ot_Integer,&ImpulseMaximumPullbackBars);RegOption((PChar)"Impulse M15/H4 trend filter (0 disabled)",ot_Integer,&ImpulseM15H4TrendFilter);RegOption((PChar)"Trend filter scope (0 both,1 buys only,2 sells only)",ot_Integer,&TrendFilterScope);AddOptionValue((PChar)"Trend filter scope (0 both,1 buys only,2 sells only)",(PChar)"0 = Both directions");AddOptionValue((PChar)"Trend filter scope (0 both,1 buys only,2 sells only)",(PChar)"1 = Buys only");AddOptionValue((PChar)"Trend filter scope (0 both,1 buys only,2 sells only)",(PChar)"2 = Sells only");
  AddSeparator((PChar)"Pullback and depth settings");
  RegOption((PChar)"Minimum opposing closes",ot_Integer,&MinimumOpposingCloses);RegOption((PChar)"Minimum retracement ATR",ot_Double,&MinimumRetracementATR);RegOption((PChar)"Depth mode (0 any,1 shallow,2 deep,3 custom)",ot_Integer,&PullbackDepthMode);RegOption((PChar)"Shallow minimum depth",ot_Double,&ShallowMinimumDepth);RegOption((PChar)"Shallow maximum depth",ot_Double,&ShallowMaximumDepth);RegOption((PChar)"Deep minimum depth",ot_Double,&DeepMinimumDepth);RegOption((PChar)"Deep maximum depth",ot_Double,&DeepMaximumDepth);RegOption((PChar)"Custom minimum depth",ot_Double,&CustomMinimumDepth);RegOption((PChar)"Custom maximum depth",ot_Double,&CustomMaximumDepth);RegOption((PChar)"Invalidation tolerance ATR",ot_Double,&InvalidationToleranceATR);RegOption((PChar)"Maximum pullback bars",ot_Integer,&MaximumPullbackBars);
- AddSeparator((PChar)"Stop, risk and 2R target");
- RegOption((PChar)"Stop mode (0 adaptive,1 fixed)",ot_Integer,&StopModeSetting);RegOption((PChar)"ATR length",ot_Integer,&ATRLength);RegOption((PChar)"Fixed ATR multiplier",ot_Double,&FixedATRMultiplier);RegOption((PChar)"ATR percentile lookback",ot_Integer,&RegimeLookback);RegOption((PChar)"Low regime percentile",ot_Double,&LowRegimePercentile);RegOption((PChar)"High regime percentile",ot_Double,&HighRegimePercentile);RegOption((PChar)"Low multiplier",ot_Double,&LowVolatilityMultiplier);RegOption((PChar)"Normal multiplier",ot_Double,&NormalVolatilityMultiplier);RegOption((PChar)"High multiplier",ot_Double,&HighVolatilityMultiplier);RegOption((PChar)"Profit target R",ot_Double,&RiskRewardMultiple);
+ AddSeparator((PChar)"Stop, risk and structural R targets");
+ RegOption((PChar)"Stop mode (0 adaptive,1 fixed)",ot_Integer,&StopModeSetting);RegOption((PChar)"ATR length",ot_Integer,&ATRLength);RegOption((PChar)"Fixed ATR multiplier",ot_Double,&FixedATRMultiplier);RegOption((PChar)"ATR percentile lookback",ot_Integer,&RegimeLookback);RegOption((PChar)"Low regime percentile",ot_Double,&LowRegimePercentile);RegOption((PChar)"High regime percentile",ot_Double,&HighRegimePercentile);RegOption((PChar)"Low multiplier",ot_Double,&LowVolatilityMultiplier);RegOption((PChar)"Normal multiplier",ot_Double,&NormalVolatilityMultiplier);RegOption((PChar)"High multiplier",ot_Double,&HighVolatilityMultiplier);RegOption((PChar)"With-trend / neutral target R (minimum 2.0)",ot_Double,&WithTrendNeutralTargetR);RegOption((PChar)"Counter-trend target R (minimum 3.0)",ot_Double,&CounterTrendTargetR);
  AddSeparator((PChar)"Time and weekend settings");
  RegOption((PChar)"Enable weekend blackout",ot_Boolean,&EnableWeekendBlackout);RegOption((PChar)"Server UTC offset hours",ot_Integer,&ServerUTCOffsetHours);
  AddSeparator((PChar)"Diagnostics");
  RegOption((PChar)"Show blackout status",ot_Boolean,&ShowBlackoutStatus);RegOption((PChar)"Show diagnostics",ot_Boolean,&ShowDiagnostics);
- ApplySettingsPreset(); EmitPresetDiagnostic();
+ ApplySettingsPreset(); ClampTargetSettings(); EmitPresetDiagnostic();
 }
-EXPORT void __stdcall DoneStrategy(){free(Currency);free(atrPct);atrPct=NULL;atrPctCapacity=atrPctCount=atrPctNext=0;} EXPORT void __stdcall ResetStrategy(){lastTime=0;nbar=0;rmaATR=0;atrCount=atrPctCount=atrPctNext=0;lastDiagnostic[0]=0;ResetSetup();ClearClusters();}
-EXPORT void __stdcall GetSingleTick(){if(!Currency||strcmp(Currency,Symbol())!=0)return;SetCurrencyAndTimeframe(Currency,Timeframe);if(Bars()<Max(ATRLength,RegimeLookback)+PivotStrength+5)return;TDateTime t=Time(0);if(t!=lastTime){lastTime=t;ProcessBar();}}
+EXPORT void __stdcall DoneStrategy(){free(Currency);free(atrPct);atrPct=NULL;atrPctCapacity=atrPctCount=atrPctNext=0;} EXPORT void __stdcall ResetStrategy(){lastTime=0;nbar=0;rmaATR=0;atrCount=atrPctCount=atrPctNext=0;lastDiagnostic[0]=0;previousSwingHigh=latestSwingHigh=previousSwingLow=latestSwingLow=0;previousSwingHighBar=latestSwingHighBar=previousSwingLowBar=latestSwingLowBar=-1;previousSwingHighTime=latestSwingHighTime=previousSwingLowTime=latestSwingLowTime=0;havePreviousSwingHigh=haveLatestSwingHigh=havePreviousSwingLow=haveLatestSwingLow=false;consumedDirection=0;consumedExtreme=0;consumedBar=-1;ResetSetup();ClearClusters();}
+EXPORT void __stdcall GetSingleTick(){if(!Currency||strcmp(Currency,Symbol())!=0)return;SetCurrencyAndTimeframe(Currency,Timeframe);if(Bars()<Max(ATRLength,RegimeLookback)+Max(PivotStrength,MinorSwingStrength)+5)return;TDateTime t=Time(0);if(t!=lastTime){lastTime=t;ProcessBar();}}

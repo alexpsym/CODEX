@@ -1,0 +1,377 @@
+IMPLEMENT THIS JOB IN THE REPOSITORY.
+
+Do not merely analyse the request or rewrite it as another brief.
+
+Before editing, save this exact brief in the repository root as:
+
+CODEX_BRIEF_FIRST_FRESH_PULLBACK_STRUCTURAL_TREND.txt
+
+Use one agent only. Do not spawn subagents.
+
+REPOSITORY
+
+Repository:
+C:\GPT\CODEX-master
+
+Canonical FT6 strategy source:
+forex-tester-6/RangeBreakoutPullbackStrategy/RangeBreakoutPullbackStrategy.cpp
+
+Related files:
+forex-tester-6/RangeBreakoutPullbackStrategy/RangeBreakoutPullbackStrategy.def
+docs/RangeBreakoutPullback_Backtesting_Guide.md
+summary/CODEX_SUMMARY_latest.txt
+
+This job is FT6-only. Do not modify the TradingView or MT5 implementations in this job. They can be ported later after the corrected FT6 behaviour is validated.
+
+GOAL
+
+Correct Impulse Pullback Continuation mode so it implements the intended strategy:
+
+A substantial multi-candle impulsive move or breakout
+→ the first fresh corrective pullback after that complete impulse
+→ confirmed price-action resumption
+→ entry.
+
+The current FT6 implementation uses a single-candle impulse detector. It can treat a candle or micro-pause inside a larger continuing impulse as a complete impulse/pullback sequence and enter while the parent impulse is still underway.
+
+That behaviour is incorrect.
+
+Do not attempt to improve the historical statistics directly. Correct the strategy semantics first. Do not hardcode any date, time, price, screenshot, instrument or expected result.
+
+AUTHORITATIVE SCREENSHOT-DERIVED EXAMPLE
+
+The supplied EURUSD M15 example around 30 July 2025 represents this sequence:
+
+1. A substantial bearish multi-candle decline begins around the 09:00 area and continues until approximately 13:30.
+2. The existing strategy places a sell around 12:00, inside that continuing bearish leg.
+3. That sell is premature and must not qualify as a first-pullback entry.
+4. The entire decline marked by the user’s blue rectangle is the parent bearish impulse.
+5. Only after that impulse stops extending and a corrective bullish phase begins should the strategy track the first pullback.
+6. The user’s preferred attempt around the 15:00 area is the type of first-pullback/resumption entry the strategy should consider.
+7. That preferred trade may still have been stopped before the later decline. That would be an acceptable trading loss, not a detection failure.
+8. The later bearish expansion around 18:30 through the next lower low near 21:00 is a new bearish impulse leg. Its subsequent corrective phase may create another first-pullback opportunity.
+9. Individual marubozu candles inside one directional leg must not automatically become unrelated impulses.
+
+The screenshot is semantic guidance, not permission to hardcode that occurrence.
+
+REQUIRED IMPULSE STATE MACHINE
+
+Audit the current implementation first and identify the exact state transition that allowed an entry inside the continuing parent impulse.
+
+Implement a symmetric long/short state machine equivalent to:
+
+Idle
+→ tracking parent impulse
+→ tracking first pullback
+→ armed for resumption
+→ entered, invalidated or expired
+→ consumed until a genuinely new impulse exists.
+
+Required behaviour:
+
+1. A qualifying impulse candle may seed recognition of an impulse, but it must not be treated as the entire impulse by itself.
+
+2. Preserve the exact existing meanings of:
+
+- Impulse minimum body ATR
+- Impulse maximum body ATR (0 disabled)
+- Impulse minimum range ATR
+
+These remain seed-candle quality controls. Do not silently reinterpret the configured 1.0–1.5 body values as maximum limits on the entire multi-bar leg.
+
+3. Anchor the parent impulse at the appropriate latest confirmed swing origin preceding the qualifying expansion.
+
+4. Extend the parent impulse endpoint whenever price makes another extreme in the impulse direction.
+
+5. Internal pauses and micro-retracements must remain part of the parent impulse unless they genuinely satisfy the configured pullback requirements.
+
+6. Before a pullback becomes qualified, a new impulse-direction extreme must:
+
+- extend the same parent impulse;
+- update its endpoint;
+- clear/reset the unqualified pullback attempt;
+- not generate an entry.
+
+7. A pullback becomes qualified only after satisfying the existing applicable controls, including:
+
+- minimum opposing closes;
+- minimum retracement ATR;
+- selected depth limits;
+- maximum pullback bars;
+- invalidation tolerance.
+
+8. After the first pullback qualifies, apply the selected confirmation mode:
+
+Aggressive:
+first higher close for longs / first lower close for shorts.
+
+Balanced:
+bullish close above the previous high for longs / bearish close below the previous low for shorts.
+
+Conservative:
+break of the latest confirmed minor swing in the resumption direction.
+
+Preserve these meanings, but apply them only after a genuine first pullback of the parent impulse has qualified.
+
+9. Permit only the first qualified pullback opportunity belonging to an impulse.
+
+After it enters, expires or is invalidated, do not re-arm from another micro-correction belonging to the same parent leg.
+
+A new opportunity requires a genuinely new impulse leg or newly established structural extension.
+
+10. A horizontal-range breakout is not mandatory in Impulse Pullback Continuation mode.
+
+A valid impulse may:
+
+- break out of a developed range; or
+- originate from a confirmed swing and create directional expansion without a clean horizontal range.
+
+Preserve Setup mode 0, the original Range Breakout-Pullback mode, as selectable and behaviourally unchanged.
+
+STRUCTURAL TREND CLASSIFICATION
+
+The existing optional M15/H4 EMA trend filter is not a substitute for structural trend classification. Preserve that filter as its own optional entry filter.
+
+Add a separate real-time price-structure classification using confirmed M15 swing pivots and the existing Minor swing strength unless the current source already has an equivalent reusable pivot implementation.
+
+Use only information available at the current bar.
+
+Classification:
+
+Uptrend:
+latest confirmed swing high is higher than the preceding confirmed swing high
+AND
+latest confirmed swing low is higher than the preceding confirmed swing low.
+
+Downtrend:
+latest confirmed swing high is lower than the preceding confirmed swing high
+AND
+latest confirmed swing low is lower than the preceding confirmed swing low.
+
+Neutral:
+mixed structure, equal pivots or insufficient confirmed pivots.
+
+Requirements:
+
+- No lookahead.
+- No backdated classification.
+- A pivot affects the trend only when it becomes confirmed.
+- Do not retrospectively change a trade’s classification.
+- Use one symmetric implementation for bullish and bearish structure.
+- Log the exact confirmed pivots used for each classification.
+
+In the screenshot, the lower high eventually formed to the right of the preferred entry is future information at that earlier entry time. It must not justify that entry retrospectively. Once that lower high and the following lower low become confirmed, they may establish the downtrend state used by subsequent setups.
+
+DYNAMIC R TARGETS
+
+Two R remains the hard minimum target.
+
+At entry, classify the trade using the structural trend snapshot:
+
+With-trend:
+
+- long while structural trend is Uptrend; or
+- short while structural trend is Downtrend.
+- Target must be at least 2.0R.
+
+Counter-trend:
+
+- short while structural trend is Uptrend; or
+- long while structural trend is Downtrend.
+- Target must be at least 3.0R.
+
+Neutral:
+
+- use the normal target, with a hard minimum of 2.0R.
+
+Add or adapt clearly grouped FT6 parameters so the user can configure:
+
+- With-trend / neutral target R, default 2.0, clamped to a minimum of 2.0.
+- Counter-trend target R, default 3.0, clamped to a minimum of 3.0.
+
+Do not lower either minimum.
+
+Calculate and freeze the trend classification, risk distance, target multiple and target price at entry. Do not move the target because structural classification later changes.
+
+Preserve existing adaptive/fixed stop behaviour and no-pyramiding behaviour.
+
+DIAGNOSTICS AND VISUAL INSPECTION
+
+Diagnostics must make the corrected behaviour inspectable without creating a cluttered chart.
+
+When Diagnostics is enabled, emit concise state-change records containing:
+
+- impulse direction;
+- impulse origin time/price;
+- qualifying seed candle;
+- current/final impulse endpoint;
+- cumulative impulse displacement;
+- ATR-normalised measurements;
+- pullback start;
+- pullback ordinal;
+- opposing-close count;
+- retracement ATR;
+- depth percentage;
+- qualification, reset, invalidation or expiry reason;
+- resumption confirmation;
+- confirmed structural swing highs/lows;
+- structural trend at entry;
+- with-trend, counter-trend or neutral classification;
+- selected target R.
+
+Do not print repetitive information every bar.
+
+If the FT6 API already supports strategy-created visual diagnostics, use a minimal non-overlapping representation such as small impulse-start, impulse-end, PB1 and entry-classification markers. Do not create stacked verbose labels or visual clutter. Do not invent unsupported FT6 drawing APIs.
+
+Keep the normal FT6 trade entry/exit markers intact.
+
+SETTINGS AND PRESETS
+
+Keep related parameters grouped logically in Strategy Properties.
+
+Do not reorder or rename unrelated settings.
+
+Audit the existing Custom, Baseline and Trend-filter test preset logic so it does not silently overwrite the new target settings or incorrectly revert impulse-state behaviour.
+
+Do not change unrelated preset values.
+
+CODE QUALITY AND SAFETY
+
+- Long and short logic must remain symmetrical.
+- No future-bar access or lookahead.
+- No hardcoded screenshot data.
+- No new dependency.
+- Do not broadly rewrite unrelated strategy components.
+- Preserve range mode, weekend blackout, ATR warm-up, risk-readiness retention, existing optional trend-filter scope, trade-direction settings and no-pyramiding.
+- Do not reduce the 2R minimum.
+- Do not claim the corrected design is profitable. The user will backtest it after deployment.
+
+MINIMAL TARGETED VERIFICATION ONLY
+
+Credit conservation is mandatory and overrides broader repository instructions.
+
+Run only the smallest targeted verification directly relevant to this change.
+
+Do not run:
+
+- complete test files;
+- full test suites;
+- broad integration checks;
+- unrelated tests;
+- repeated passing tests;
+- unnecessary smoke tests;
+- checks of unaffected features;
+- historical backtests;
+- optimisations;
+- multi-year simulations;
+- subagents.
+
+Do not expand testing without explicit user approval.
+
+Use the smallest existing targeted test seam if one exists. Otherwise, perform only a narrowly scoped compile and deterministic source-level/state-machine verification.
+
+Targeted cases must cover only:
+
+1. A multi-bar bearish impulse containing internal pauses does not enter before its first qualifying post-impulse pullback.
+2. A new low before pullback qualification extends the parent impulse and resets the unqualified pullback.
+3. The first qualifying pullback can arm an aggressive resumption entry.
+4. A second correction from the same consumed impulse cannot re-arm.
+5. A genuinely new lower-low impulse can create a new first-pullback opportunity.
+6. Bullish behaviour is symmetric.
+7. Confirmed HH/HL produces Uptrend.
+8. Confirmed LH/LL produces Downtrend.
+9. Mixed or insufficient structure produces Neutral.
+10. With-trend and neutral targets cannot fall below 2R.
+11. Counter-trend targets cannot fall below 3R.
+12. No classification uses an unconfirmed future pivot.
+
+Do not run the same passing verification repeatedly.
+
+REPOSITORY SAFETY
+
+Before editing, run:
+
+git status --short
+
+Treat every pre-existing modified or untracked file as user-owned.
+
+Do not stage, overwrite, restore, delete, stash or commit unrelated user files.
+
+Never use:
+
+git add -A
+git pull
+git rebase
+git stash
+git autostash
+git reset --hard
+git clean -fd
+git push --force
+git push --force-with-lease
+
+Do not use PATCH_DESKTOP_PUSH.bat if it performs broad staging or any prohibited Git operation.
+
+Use manual path-scoped staging only.
+
+Before committing, run:
+
+git diff --cached --name-only
+
+Only files directly authorised by this task may be staged.
+
+Use a normal commit and normal push. If the push is rejected because the remote advanced, stop and report the rejection. Do not pull, rebase, force-push or rewrite history.
+
+BUILD AND FT6 DEPLOYMENT ARE MANDATORY
+
+A source change is not completion.
+
+FT6 uses a native 32-bit C++ strategy DLL built with the supplied API and .def file and linked with oleaut32.lib.
+
+Build only the affected FT6 strategy project from current source.
+
+Before replacing the DLL, verify that:
+
+C:\ForexTester6\ForexTester6.exe
+
+is not running.
+
+If it is running, stop and report that FT6 must be closed. Do not claim deployment succeeded.
+
+After the targeted build:
+
+1. Identify the newly generated DLL.
+2. Record its full path, size, modified timestamp and SHA-256.
+3. Record the existing deployed DLL’s path, size, modified timestamp and SHA-256.
+4. Copy only the fresh DLL to:
+
+C:\ForexTester6\Strategies\RangeBreakoutPullbackStrategy.dll
+
+5. Recalculate SHA-256 for both the fresh built DLL and deployed DLL.
+6. Require exact hash equality.
+7. If the hashes differ, deployment failed.
+8. Do not report success merely because the copy command succeeded.
+9. Verify current source registers any new or changed user-visible FT6 parameter names.
+
+COMMIT AND COMPLETION REPORT
+
+Use a concise commit message such as:
+
+Correct impulse first-pullback and structural targets
+
+Push normally after the path-scoped commit.
+
+The final report must include:
+
+- the concrete cause of the premature mid-impulse entry;
+- the implemented parent-impulse and first-pullback state transitions;
+- the exact structural-trend rules;
+- the exact 2R/3R target rules;
+- files changed;
+- smallest targeted verification run and result;
+- confirmation that no broad tests/backtests/optimisations were run;
+- commit hash and push result;
+- fresh built DLL path, size, timestamp and SHA-256;
+- previous deployed DLL metadata;
+- final deployed DLL metadata;
+- confirmation that built and deployed hashes match;
+- any remaining limitation that genuinely requires user action.
