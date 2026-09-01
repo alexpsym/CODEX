@@ -1,0 +1,336 @@
+IMPLEMENT THIS JOB IN THE REPOSITORY.
+
+Do not merely analyse the request or produce another brief.
+
+Before editing, save this exact brief in the repository root as:
+
+CODEX_BRIEF_FIX_MISSED_PARENT_IMPULSE_LATE_ENTRY.txt
+
+Use one agent only. Do not spawn subagents.
+
+REPOSITORY
+
+Repository:
+
+C:\GPT\CODEX-master
+
+Canonical FT6 source:
+
+forex-tester-6/RangeBreakoutPullbackStrategy/RangeBreakoutPullbackStrategy.cpp
+
+Related files:
+
+docs/RangeBreakoutPullback_Backtesting_Guide.md
+summary/CODEX_SUMMARY_latest.txt
+
+This is FT6-only. Do not modify the TradingView or MT5 implementations.
+
+PROBLEM
+
+The previous parent-impulse correction fixed the premature EURUSD sell on 30 July 2025: the old 12:15 entry disappeared and the corrected strategy entered around 15:30.
+
+However, a subsequent chart example shows that the strategy can still segment price action one impulse generation too late.
+
+Authoritative sequence:
+
+1. Ticket 163 was a EURUSD sell opened on 30 July 2025 at 15:30:
+
+   * Entry: 1.14790
+   * Stop: 1.14995
+   * Closed at the stop around 18:35.
+
+2. A strong bearish impulse then occurred around 18:00–21:00, falling from approximately 1.1490–1.1500 to around 1.1400.
+
+3. The first substantial corrective pullback following that bearish impulse reached approximately 1.1430–1.1440 around 00:30–01:00 on 31 July.
+
+4. The user marked that pullback with a blue arrow. That is the location where the strategy should have considered the bearish first-pullback/resumption setup.
+
+5. Instead, the diagnostics appear to classify the blue-arrow region as the start/origin of a smaller bearish impulse.
+
+6. The strategy then waited for the pullback belonging to that smaller child impulse and entered much later.
+
+7. The actual late trade was ticket 164:
+
+   * Sell opened 31 July 2025 at 04:30
+   * Entry: 1.14232
+   * Stop: 1.14355
+   * Target: 1.13986
+   * Stopped at 04:59:29
+   * Result: −123 points / −1.23.
+
+8. The circled 04:30 entry is not a location the user would trade manually.
+
+The screenshot and timestamps are semantic evidence only. Do not hardcode any date, time, ticket, instrument or price.
+
+REQUIRED AUDIT
+
+Identify the exact reason the earlier 18:00 bearish parent impulse was missed or discarded.
+
+Explicitly inspect these likely failure paths without assuming which one is responsible:
+
+* New impulse seeding currently being suppressed while StrategyPositionOpen() is true.
+* A seed candle occurring while the preceding trade was still open and then being permanently lost.
+* No recovery of an already-started impulse after the preceding position closes.
+* The 1.5 ATR maximum seed-body filter rejecting the strongest expansion candles.
+* The confirmed-origin pivot not becoming available until after the initial expansion candle.
+* CanSeedImpulse post-consumption restrictions preventing the correct parent from being promoted.
+* A smaller contained impulse replacing or superseding the unresolved larger parent impulse.
+* Pullback qualification, depth, duration, confirmation or trend-filter logic being applied to the wrong parent leg.
+
+Document the proven cause before changing the implementation.
+
+REQUIRED BEHAVIOUR
+
+1. Passive detection while a position is open
+
+The strategy must continue observing and tracking valid new impulse candidates while another strategy position is open.
+
+No pyramiding remains mandatory:
+
+* Never open a second position while the existing position remains open.
+* Detection and state tracking must not stop merely because an order is open.
+* If the previous position closes before the new impulse reaches its PB1 resumption, the new candidate may remain eligible.
+* If the new candidate’s entry signal occurs while the previous position is still open, do not queue a stale entry to execute later. Record that the opportunity was unavailable because the position was busy, then consume it appropriately.
+
+2. Do not lose a seed bar
+
+A qualifying expansion candle processed while a position is open must not disappear permanently.
+
+Track it observationally so the parent leg can continue extending after the position closes.
+
+3. Confirmed-origin recovery without lookahead
+
+If a strong expansion starts before its swing origin becomes confirmed:
+
+* retain a provisional candidate using only already-closed bars;
+* when the origin pivot later becomes confirmed, promote the candidate using the closed price history since that pivot;
+* do not backdate an entry or pretend the pivot was known earlier;
+* only current or future entry decisions may use the newly confirmed information.
+
+4. Oversized expansion bars must not create a blind spot
+
+Preserve the existing meaning of:
+
+Impulse maximum body ATR (0 disabled)
+
+A candle exceeding the configured maximum must not independently qualify as a normal seed candle.
+
+However, an oversized expansion candle must still be capable of belonging to a legitimate cumulative multi-bar parent impulse.
+
+Do not solve this merely by telling the user to change 1.5 to zero.
+
+A sequence containing oversized expansion bars must remain recoverable through a valid confirmed origin, another valid seed or cumulative parent-leg recognition. The oversized bar may be included in the parent displacement without silently changing the seed-body parameter’s meaning.
+
+5. Parent impulse must dominate contained child impulses
+
+While a substantial parent impulse and its first pullback remain unresolved:
+
+* a smaller same-direction impulse contained within that sequence must not replace the parent;
+* the first correction after the larger impulse endpoint remains PB1 of the larger impulse;
+* the PB1 high or low must not be relabelled as the origin of a child impulse simply because another directional move follows;
+* same-direction seeds within the active parent should extend or strengthen the current parent unless objective evidence establishes a genuinely independent new leg.
+
+Use symmetric bullish and bearish logic.
+
+6. Independent new impulse requirement
+
+A new same-direction impulse may replace the old parent only after the old parent is entered, invalidated, expired or otherwise consumed and a genuinely new confirmed structural origin and directional expansion exist.
+
+Do not allow repeated micro-impulses to move the strategy progressively farther away from the freshest pullback.
+
+7. Screenshot-derived acceptance behaviour
+
+For the supplied semantic sequence, the corrected diagnostics should show:
+
+* the bearish expansion around 18:00–21:00 as the relevant parent impulse;
+* its endpoint near the low around 21:00;
+* the subsequent rally toward the blue-arrow area around 00:30–01:00 as PB1;
+* resumption after that PB1 as the entry region to evaluate under the configured confirmation rules.
+
+The blue-arrow pullback must not become I-start for a smaller same-direction child impulse while the larger parent’s PB1 is unresolved.
+
+If the configured gates still reject the blue-arrow setup, the final report must identify the exact gate and its measured value. Do not claim the example is fixed without proving the state sequence.
+
+The late ticket-164-type child entry must not qualify when it exists only because the earlier valid parent was missed.
+
+8. Preserve the previous correction
+
+Do not regress the earlier 30 July behaviour:
+
+* the premature sell around 12:15 must remain rejected;
+* the first-pullback attempt around 15:30 must remain the applicable setup for that earlier parent impulse.
+
+9. Preserve unrelated behaviour
+
+Preserve:
+
+* Setup mode 0 range behaviour;
+* aggressive, balanced and conservative confirmation meanings;
+* selected depth ranges;
+* ATR warm-up;
+* adaptive and fixed stops;
+* structural HH/HL and LH/LL classification;
+* 2R with-trend/neutral and 3R counter-trend target floors;
+* frozen entry classification and targets;
+* M15/H4 EMA filter and direction scope;
+* weekend blackout;
+* trade-direction controls;
+* no-pyramiding;
+* existing parameter defaults and presets.
+
+Do not tune settings or historical results to manufacture profitability.
+
+DIAGNOSTICS
+
+When diagnostics are enabled, add concise state-change evidence for:
+
+* candidate observed while a position is open;
+* seed accepted, rejected or retained provisionally;
+* rejection reason and measured body/range ATR;
+* confirmed-origin availability;
+* provisional candidate promotion;
+* parent versus contained-child decision;
+* parent origin, endpoint and cumulative displacement;
+* PB1 start, qualification and rejection reason;
+* position-busy consumption;
+* exact reason an earlier parent was abandoned;
+* exact reason a new independent impulse became eligible.
+
+Do not print repetitive information every bar or add chart clutter.
+
+MINIMAL TARGETED VERIFICATION ONLY
+
+Credit conservation is mandatory and overrides broader repository testing instructions.
+
+Run only:
+
+1. One narrowly scoped deterministic state-machine verification covering:
+
+   * a new impulse beginning while another position is open;
+   * continued tracking without opening a second trade;
+   * eligibility after the earlier position closes before PB1 resumption;
+   * no delayed entry when the signal occurred while the position was still busy;
+   * an oversized expansion bar remaining part of a recoverable parent leg;
+   * origin confirmation after expansion without retrospective entry;
+   * a contained child impulse not replacing its unresolved parent;
+   * a genuinely independent later leg becoming eligible;
+   * the screenshot-derived bearish sequence selecting the earlier PB1 and rejecting the late child entry;
+   * bullish symmetry;
+   * preservation of the earlier 12:15 rejection and approximately 15:30 first-pullback behaviour.
+
+2. One final affected 32-bit FT6 strategy compile.
+
+Do not run:
+
+* complete test files;
+* full test suites;
+* broad integration checks;
+* unrelated tests;
+* repeated passing tests;
+* smoke tests of unaffected features;
+* historical backtests;
+* optimisations;
+* multi-year simulations;
+* subagents.
+
+Do not expand verification without explicit user approval.
+
+REPOSITORY SAFETY
+
+Before editing, run:
+
+git status --short
+
+Treat every pre-existing modified or untracked file as user-owned.
+
+Do not stage, overwrite, restore, delete or commit unrelated files.
+
+Never use:
+
+git add -A
+git pull
+git rebase
+git stash
+git autostash
+git reset --hard
+git clean -fd
+git push --force
+git push --force-with-lease
+
+Do not use PATCH_DESKTOP_PUSH.bat.
+
+Use manual path-scoped staging only.
+
+Before committing, run:
+
+git diff --cached --name-only
+
+Only directly authorised files may be staged:
+
+* CODEX_BRIEF_FIX_MISSED_PARENT_IMPULSE_LATE_ENTRY.txt
+* forex-tester-6/RangeBreakoutPullbackStrategy/RangeBreakoutPullbackStrategy.cpp
+* docs/RangeBreakoutPullback_Backtesting_Guide.md only if genuinely required
+* summary/CODEX_SUMMARY_latest.txt
+
+Do not modify the .def file unless the implementation genuinely requires an export change.
+
+Use a normal commit and normal push. If the push is rejected because the remote advanced, stop and report it. Do not pull, rebase, stash or rewrite history.
+
+BUILD AND FT6 DEPLOYMENT
+
+A source change is not completion.
+
+Build only the affected native 32-bit C++ FT6 strategy using:
+
+* RangeBreakoutPullbackStrategy.cpp
+* RangeBreakoutPullbackStrategy.def
+* C:\ForexTester6\Examples\Strategies\C++ include/API files
+* oleaut32.lib
+
+Before deployment, verify that:
+
+C:\ForexTester6\ForexTester6.exe
+
+is not running.
+
+If FT6 is running, stop and report that it must be closed. Do not overwrite a loaded DLL or claim deployment succeeded.
+
+After building:
+
+1. Identify the newly generated DLL.
+2. Record its full path, size, modified timestamp and SHA-256.
+3. Record the existing deployed DLL’s metadata and SHA-256.
+4. Copy only the fresh DLL to:
+
+C:\ForexTester6\Strategies\RangeBreakoutPullbackStrategy.dll
+
+5. Recalculate both hashes after copying.
+6. Require exact hash equality.
+7. Treat a mismatch as deployment failure.
+8. Verify any changed user-visible parameter registration from current source.
+
+COMMIT
+
+Use a concise commit message such as:
+
+Fix missed parent impulse and late child entry
+
+FINAL REPORT
+
+Include:
+
+* proven cause of the missed 18:00 parent impulse;
+* whether the open-position gate, body cap, pivot confirmation or parent/child logic contributed;
+* implemented state changes;
+* how oversized bars are handled without changing the maximum-body seed meaning;
+* how candidates are tracked while a position is open without pyramiding;
+* how parent dominance prevents one-generation-late entries;
+* files changed;
+* exact targeted verification and result;
+* confirmation that no broad tests or backtests were run;
+* commit hash and push result;
+* fresh built DLL metadata and hash;
+* previous deployed DLL metadata and hash;
+* final deployed DLL metadata and hash;
+* confirmation that built and deployed hashes match;
+* any remaining limitation requiring user action.
