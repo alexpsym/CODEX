@@ -13267,6 +13267,7 @@ def _snapshot_trade_log_data_presentations_by_row_id(
         row_id = str(ws.cell(row, row_id_col).value or "").strip()
         if not row_id:
             continue
+        row_dimension = ws.row_dimensions.get(row)
         values: Dict[str, Any] = {}
         cells: Dict[str, Dict[str, Any]] = {}
         for header, col in header_columns:
@@ -13292,7 +13293,17 @@ def _snapshot_trade_log_data_presentations_by_row_id(
         presentations_by_row_id[row_id].append(
             {
                 "source_row": row,
-                "row_height": ws.row_dimensions[row].height,
+                "row_dimension": (
+                    {
+                        "signature": _dimension_contract(
+                            row_dimension,
+                            column=False,
+                        ),
+                        "style": copy(row_dimension._style),
+                    }
+                    if row_dimension is not None
+                    else None
+                ),
                 "values": values,
                 "cells": cells,
             }
@@ -13458,6 +13469,19 @@ def _restore_trade_log_data_presentations_by_row_id(
     restored_cells = 0
     restored_formula_cells = 0
     restored_formula_row_ids: Set[str] = set()
+    # The generated copy overwrites cell contents in-place, so a moved row's
+    # original RowDimension would otherwise remain attached to its old Excel
+    # coordinate.  Remove those identity-owned dimensions before attaching
+    # their complete saved state to the matching surviving Row ID below.
+    source_dimension_rows = {
+        int(candidate["source_row"])
+        for candidates in presentations_by_row_id.values()
+        for candidate in candidates
+        if candidate.get("row_dimension") is not None
+    }
+    for source_row in source_dimension_rows:
+        if source_row in ws.row_dimensions:
+            del ws.row_dimensions[source_row]
     last_row = _trade_log_last_populated_row(ws)
     for row in range(_trade_log_data_start_row(ws), last_row + 1):
         row_id = str(ws.cell(row, row_id_col).value or "").strip()
@@ -13503,7 +13527,17 @@ def _restore_trade_log_data_presentations_by_row_id(
             if hasattr(cell, "comment"):
                 cell.comment = copy(presentation.get("comment"))
             restored_cells += 1
-        ws.row_dimensions[row].height = candidate.get("row_height")
+        row_dimension = candidate.get("row_dimension")
+        if isinstance(row_dimension, dict):
+            signature = row_dimension.get("signature") or {}
+            target_dimension = ws.row_dimensions[row]
+            target_dimension.height = signature.get("height")
+            target_dimension.hidden = signature.get("hidden")
+            target_dimension.outlineLevel = signature.get("outlineLevel")
+            target_dimension.collapsed = signature.get("collapsed")
+            target_dimension._style = copy(row_dimension.get("style"))
+            target_dimension.thickTop = signature.get("thickTop")
+            target_dimension.thickBot = signature.get("thickBot")
         restored_rows += 1
 
     diagnostics: Dict[str, Any] = {

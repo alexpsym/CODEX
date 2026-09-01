@@ -6461,7 +6461,26 @@ def test_preservation_mode_moves_trade_presentation_with_row_id_after_monthly_de
     ws.cell(styled_row, symbol_col).hyperlink = (
         "https://example.com/row-aware-authored-trade"
     )
-    ws.row_dimensions[styled_row].height = 37.25
+    styled_dimension = ws.row_dimensions[styled_row]
+    styled_dimension.height = 15.0
+    styled_dimension.hidden = False
+    styled_dimension.outlineLevel = 0
+    styled_dimension.collapsed = False
+    styled_dimension.thickTop = False
+    styled_dimension.thickBot = True
+    expected_row_dimension = {
+        "height": 15.0,
+        "hidden": False,
+        "outlineLevel": 0,
+        "collapsed": False,
+        "style_id": 0,
+        "thickTop": False,
+        "thickBot": True,
+    }
+    assert (
+        mjw._dimension_contract(styled_dimension, column=False)
+        == expected_row_dimension
+    )
     for col in range(1, len(TRADE_LOG_HEADERS) + 1):
         ws.cell(styled_row, col).fill = PatternFill()
     wb.save(out)
@@ -6496,7 +6515,14 @@ def test_preservation_mode_moves_trade_presentation_with_row_id_after_monthly_de
             symbol_cell.hyperlink.target
             == "https://example.com/row-aware-authored-trade"
         )
-        assert ws.row_dimensions[moved_row].height == pytest.approx(37.25)
+        assert (
+            mjw._dimension_contract(
+                ws.row_dimensions[moved_row],
+                column=False,
+            )
+            == expected_row_dimension
+        )
+        assert ws.row_dimensions[styled_row].thickBot is False
         assert all(
             _cell_fill_rgb(ws.cell(moved_row, col)) == "C6EFCE"
             for col in range(1, len(TRADE_LOG_HEADERS) + 1)
