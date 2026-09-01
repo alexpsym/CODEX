@@ -522,6 +522,19 @@ bool ImpulseTrendConsensus(const int entryDirection,bool &ready)
   ready=true;
   return entryDirection==1 ? ema50>ema200&&ema10>ema30 : ema50<ema200&&ema10<ema30;
 }
+int RetireCandidateBeforeCurrentSeed(const int direction,const bool originAvailable,const long originBar)
+{
+  ProvisionalImpulseCandidate &candidate=CandidateFor(direction);if(!candidate.active)return 0;
+  if(nbar-candidate.firstBar>ImpulseMaximumPullbackBars)
+  {
+    char text[384];sprintf(text,"RBP candidate retired dir=%s reason=recovery window expired oldFirstBar=%ld currentBar=%ld",DirectionName(direction),candidate.firstBar,nbar);EmitDiagnostic(text);ResetCandidate(candidate);return 1;
+  }
+  if(originAvailable&&originBar>candidate.firstBar)
+  {
+    char text[384];sprintf(text,"RBP candidate retired dir=%s reason=newer confirmed origin structurally incompatible oldFirstBar=%ld newOriginBar=%ld currentBar=%ld",DirectionName(direction),candidate.firstBar,originBar,nbar);EmitDiagnostic(text);ResetCandidate(candidate);return 2;
+  }
+  return 0;
+}
 void ProcessImpulseSetup(const double o,const double h,const double l,const double c,const double previousClose)
 {
   bool busy=StrategyPositionOpen();int candleDirection=c>o?1:c<o?-1:0;double bodyATR=0,rangeATR=0;
@@ -537,22 +550,36 @@ void ProcessImpulseSetup(const double o,const double h,const double l,const doub
     if(directionAllowed&&seedClass!=0)
     {
       double seedExtreme=candleDirection==1?h:l,origin=0;long originBar=-1;TDateTime originTime=0;const char *reason="";
+      double latestOrigin=0;long latestOriginBar=-1;TDateTime latestOriginTime=0;bool originAvailable=LatestImpulseOrigin(candleDirection,latestOrigin,latestOriginBar,latestOriginTime);
+      int retirement=RetireCandidateBeforeCurrentSeed(candleDirection,originAvailable,latestOriginBar);
       bool canSeed=CanSeedImpulse(candleDirection,seedExtreme,origin,originBar,originTime,reason);
       if(seedClass==1&&canSeed&&!CandidateFor(candleDirection).active)
       {
         LogSeedDecision(candleDirection,"accepted",reason,bodyATR,rangeATR,busy);
+        if(retirement!=0){char text[384];sprintf(text,"RBP current normal seed preserved after retirement dir=%s currentBar=%ld decision=fresh parent accepted",DirectionName(candleDirection),nbar);EmitDiagnostic(text);}
         if(busy){char text[256];sprintf(text,"RBP candidate observed while position open dir=%s bar=%ld; parent tracking active, entry remains blocked",DirectionName(candleDirection),nbar);EmitDiagnostic(text);}
         StartImpulse(candleDirection,seedExtreme,origin,originBar,originTime,reason);return;
       }
       ObserveProvisional(candleDirection,seedExtreme,seedClass,bodyATR,rangeATR,busy,canSeed?"normal seed retained for cumulative parent selection":reason);
+      if(retirement!=0&&seedClass==2)
+      {
+        ProvisionalImpulseCandidate &restarted=CandidateFor(candleDirection);char text[512];
+        sprintf(text,"RBP current oversized seed restarted provisionally after retirement dir=%s currentBar=%ld firstBar=%ld normalSeedSeen=%s continuationSeen=%s decision=not a normal seed",DirectionName(candleDirection),nbar,restarted.firstBar,restarted.normalSeedSeen?"yes":"no",restarted.continuationSeen?"yes":"no");EmitDiagnostic(text);
+      }
     }
     else if(directionAllowed&&(bodyATR>=ImpulseMinimumBodyATR||rangeATR>=ImpulseMinimumRangeATR))
     {
       LogSeedDecision(candleDirection,"rejected",bodyATR<ImpulseMinimumBodyATR?"body below minimum ATR":"range below minimum ATR",bodyATR,rangeATR,busy);
     }
     if(directionAllowed&&seedClass==0)ObserveProvisionalContinuation(candleDirection,candleDirection==1?h:l,busy);
-    if(TryPromoteCandidate(candleDirection==-1?provisionalShort:provisionalLong)) return;
-    if(TryPromoteCandidate(candleDirection==-1?provisionalLong:provisionalShort)) return;
+    if(TryPromoteCandidate(candleDirection==-1?provisionalShort:provisionalLong))
+    {
+      if(seedClass!=0&&stage==IMPULSE_CONSUMED)EmitDiagnostic("RBP current seed disposition after compatible replay=not reprocessed reason=no distinct newer confirmed origin; duplicate processing forbidden");return;
+    }
+    if(TryPromoteCandidate(candleDirection==-1?provisionalLong:provisionalShort))
+    {
+      if(seedClass!=0&&stage==IMPULSE_CONSUMED)EmitDiagnostic("RBP current seed disposition after compatible replay=not reprocessed reason=other-direction replay consumed; duplicate processing forbidden");return;
+    }
     return;
   }
   if(stage==IMPULSE_PARENT||stage==IMPULSE_PULLBACK)

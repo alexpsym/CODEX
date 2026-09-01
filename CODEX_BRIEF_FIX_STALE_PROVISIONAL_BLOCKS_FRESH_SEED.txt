@@ -1,0 +1,325 @@
+IMPLEMENT THIS JOB IN THE REPOSITORY.
+
+Do not merely analyse the request or produce another brief.
+
+Before editing, save this exact brief in the repository root as:
+
+CODEX_BRIEF_FIX_STALE_PROVISIONAL_BLOCKS_FRESH_SEED.txt
+
+Use one agent only. Do not spawn subagents.
+
+REPOSITORY
+
+Repository:
+
+C:\GPT\CODEX-master
+
+Expected starting commit:
+
+3fe106e6e6593572966ad7484c94261a79755285
+
+Canonical FT6 source:
+
+forex-tester-6/RangeBreakoutPullbackStrategy/RangeBreakoutPullbackStrategy.cpp
+
+Related files:
+
+summary/CODEX_SUMMARY_latest.txt
+
+This is a narrow FT6-only follow-up. Do not redo the chronological replay, trend-filter, strategy-settings or broader parent-impulse work already completed.
+
+Do not modify the TradingView or MT5 implementations.
+
+PROBLEM
+
+Commit 3fe106e correctly changed provisional recovery to chronological replay, consumed already-passed PB1 resumptions, and required genuine continuation after an oversized seed.
+
+One candidate-to-fresh-seed handoff defect remains.
+
+The relevant current paths are:
+
+* ProcessImpulseSetup() accepts a normal current seed directly only when CandidateFor(candleDirection).active is false.
+* When a same-direction candidate is active, the current normal seed is appended to that candidate instead.
+* TryPromoteCandidate() returns false when originBar > candidate.firstBar because the newly confirmed structural origin is later than the old candidate and therefore cannot be that candidate's origin.
+* TryPromoteCandidate() also abandons an expired candidate only after the current seed has already been appended to it.
+
+This creates two seed-loss cases.
+
+CASE A: INCOMPATIBLE NEWER ORIGIN
+
+1. An old same-direction provisional candidate exists.
+2. A genuinely newer confirmed structural origin forms after candidate.firstBar.
+3. A new normal qualifying same-direction seed occurs after that newer origin.
+4. CanSeedImpulse() says the current seed is eligible.
+5. Direct acceptance is blocked solely because the old candidate is active.
+6. The current seed is appended to the old candidate.
+7. TryPromoteCandidate() rejects the old candidate because originBar > candidate.firstBar.
+8. The valid fresh seed is therefore lost and the stale candidate continues blocking later seeds until expiry.
+
+CASE B: EXPIRY ON THE CURRENT SEED BAR
+
+1. An old provisional candidate reaches its recovery-window expiry.
+2. A valid normal seed occurs on that same current bar.
+3. Direct acceptance is again blocked by candidate.active.
+4. The new seed is appended to the old candidate.
+5. TryPromoteCandidate() then resets the expired candidate.
+6. The current valid seed is deleted with it instead of being evaluated as a fresh seed.
+
+This contradicts the independent-new-leg rule and can create another blind spot: a stale or expired provisional object must not suppress a genuinely valid new structural origin plus directional expansion.
+
+These are code-path findings. Keep this job limited to candidate retirement and fresh-seed preservation.
+
+REQUIRED BEHAVIOUR
+
+1. Validate or retire old candidates before consuming the current seed
+
+Before an active provisional candidate is allowed to absorb a current qualifying seed, determine whether that candidate is still structurally compatible and within its recovery window.
+
+Retire the old candidate before current-seed handling when either is true:
+
+* its recovery window has already expired before the current bar is evaluated; or
+* the applicable confirmed directional origin has originBar > candidate.firstBar, proving that origin belongs to a later leg and cannot validate the old candidate.
+
+Retirement must be symmetric for bullish and bearish candidates and must produce one concise state-change diagnostic.
+
+2. Never lose a valid normal current seed
+
+A current candle that satisfies normal SeedClassification() and CanSeedImpulse() must not disappear solely because an older same-direction candidate was active at the start of the bar.
+
+On that bar, exactly one of these outcomes must occur:
+
+* a still-compatible earlier candidate is promoted and chronologically replayed; or
+* the incompatible/expired candidate is retired and the current normal seed starts the fresh parent; or
+* the current normal seed is rejected for a real existing gate, with the exact reason logged.
+
+Candidate activity alone is not a valid rejection reason.
+
+Do not process the same current seed twice or start two parents.
+
+3. Preserve compatible earlier-parent recovery
+
+Do not fix this by always discarding an active candidate whenever a new normal seed appears.
+
+If the confirmed origin is at or before candidate.firstBar, the candidate is still inside its recovery window, and its recovery requirements are satisfied, preserve the existing behaviour:
+
+* retain the earlier candidate as the parent;
+* promote it;
+* replay chronologically from the first provisional seed;
+* preserve the true PB1 and passed-resumption protections from commit 3fe106e.
+
+The fresh current seed may be evidence for the cumulative earlier parent when structurally compatible.
+
+4. Preserve oversized-seed meaning during rotation
+
+If an incompatible or expired candidate is retired and the current candle is oversized:
+
+* do not accept it as a normal seed;
+* start a new oversized provisional candidate from the current bar only when otherwise directionally eligible;
+* continue requiring a later normal same-direction seed or later same-direction endpoint advancement;
+* do not carry continuationSeen, normalSeedSeen, firstExtreme, firstBar or other evidence from the retired candidate into the new candidate.
+
+The configured 1.5 ATR maximum-body meaning must remain unchanged.
+
+5. Preserve post-consumption independent-leg rules
+
+When stage is IMPULSE_CONSUMED, a fresh same-direction parent must still require:
+
+* a confirmed structural origin newer than consumedBar; and
+* the required directional expansion beyond the consumed parent where applicable.
+
+Retiring a stale provisional candidate must not bypass CanSeedImpulse() or allow reuse of the consumed parent's old origin.
+
+If chronological promotion determines that the old opportunity was already consumed before the current seed, do not let the stale candidate block a genuinely independent current seed. Re-evaluate it only if doing so can be performed once, without retrospective entry or double-processing, and only against the proper newer-origin/post-consumption gates. Otherwise document the conservative disposition precisely; never leave the stale candidate active as the reason the current seed vanishes.
+
+6. Preserve detection/execution separation
+
+Preserve:
+
+* passive detection while a strategy position is open;
+* no pyramiding;
+* position-busy PB1 consumption;
+* no queued or retrospective entry;
+* trade-direction controls.
+
+A valid fresh parent may be detected while busy, but no second order may open.
+
+7. Preserve all completed replay corrections
+
+Do not regress:
+
+* chronological closed-bar replay;
+* actual historical endpoint and PB1 reconstruction;
+* unqualified PB1 reset on a new parent extreme;
+* historical qualification bar/time preservation;
+* passed historical resumption consumption;
+* conservative consumption of a same-promotion-bar resumption;
+* aggressive, balanced and conservative confirmation meanings;
+* time-valid recovered minor swings;
+* oversized opposing/doji/non-advancing rejection;
+* unresolved-parent dominance over contained children;
+* independent later-leg requirements;
+* bullish/bearish symmetry;
+* the earlier approximately 12:15 rejection and 15:30 PB1 behaviour;
+* rejection of the approximately 04:30 ticket-164-type stale entry.
+
+8. Preserve unrelated behaviour
+
+Preserve all user-visible settings, defaults and presets, range mode, selected depth ranges, ATR warm-up, stop logic, structural trend classification, 2R/3R target floors, frozen targets, EMA filter/scope, weekend blackout, and current diagnostics unless directly affected.
+
+Do not add a user setting, tune strategy parameters or alter historical outcomes to manufacture profitability.
+
+DIAGNOSTICS
+
+When diagnostics are enabled, add concise state-change evidence for:
+
+* old candidate retired because its origin is structurally incompatible;
+* old candidate retired because its recovery window expired;
+* old firstBar and new origin/current bar;
+* current normal seed preserved and accepted after retirement;
+* current oversized seed restarted provisionally after retirement;
+* compatible old candidate retained and promoted instead of replaced;
+* any real gate that rejects the current seed.
+
+Do not print repetitive per-bar noise or add chart clutter.
+
+MINIMAL TARGETED VERIFICATION ONLY
+
+Credit conservation is mandatory and overrides broader repository testing instructions.
+
+Do not rerun the complete previous 18-case chronological replay verification. Those passing cases are unaffected and repeating them wastes credits.
+
+Run only:
+
+1. One narrowly scoped deterministic candidate-handoff verification covering:
+
+   * stale same-direction candidate, newer confirmed origin and current normal seed: stale candidate retires and the fresh parent starts on the current bar;
+   * candidate expiring on a current normal-seed bar: the old candidate retires and the current seed is still evaluated/accepted;
+   * compatible active candidate plus current normal seed: the earlier candidate is promoted and replayed rather than discarded;
+   * stale/expired candidate plus current oversized candle: a clean new oversized provisional candidate starts, without inherited evidence and without normal-seed acceptance;
+   * post-consumption old origin remains ineligible while a genuinely newer origin plus valid expansion is eligible;
+   * the same cases operate symmetrically for bullish and bearish directions;
+   * no duplicate parent start, no duplicate seed processing and no order while another strategy position is open.
+
+2. One final affected native 32-bit FT6 strategy compile.
+
+Do not run:
+
+* complete test files;
+* the previous complete 18-case harness;
+* full test suites;
+* broad integration checks;
+* unrelated tests;
+* repeated passing tests;
+* smoke tests of unaffected features;
+* historical backtests;
+* optimisations;
+* multi-year simulations;
+* subagents.
+
+Do not expand verification without explicit user approval.
+
+REPOSITORY SAFETY
+
+Before editing, run:
+
+git status --short
+
+Then verify:
+
+git rev-parse HEAD
+
+If HEAD is not exactly:
+
+3fe106e6e6593572966ad7484c94261a79755285
+
+stop and report the actual commit. Do not pull, rebase, merge, stash or rewrite history.
+
+Treat every pre-existing modified or untracked file as user-owned. Preserve it exactly.
+
+Never use:
+
+git add -A
+git pull
+git rebase
+git stash
+git autostash
+git reset --hard
+git clean -fd
+git push --force
+git push --force-with-lease
+
+Do not use PATCH_DESKTOP_PUSH.bat.
+
+Use manual path-scoped staging only.
+
+Before committing, run:
+
+git diff --cached --name-only
+
+Only these directly authorised files may be staged:
+
+* CODEX_BRIEF_FIX_STALE_PROVISIONAL_BLOCKS_FRESH_SEED.txt
+* forex-tester-6/RangeBreakoutPullbackStrategy/RangeBreakoutPullbackStrategy.cpp
+* summary/CODEX_SUMMARY_latest.txt
+
+Do not modify the guide, .def file, TradingView source, MT5 source, tests or unrelated files for this narrow correction.
+
+Use a normal commit and normal push. If the push is rejected because the remote advanced, stop and report it. Do not pull, rebase, stash or rewrite history.
+
+BUILD AND FT6 DEPLOYMENT
+
+A source change is not completion.
+
+Build only the affected native 32-bit C++ FT6 strategy using:
+
+* RangeBreakoutPullbackStrategy.cpp
+* RangeBreakoutPullbackStrategy.def
+* C:\ForexTester6\Examples\Strategies\C++ include/API files
+* oleaut32.lib
+
+Before deployment, verify that:
+
+C:\ForexTester6\ForexTester6.exe
+
+is not running.
+
+If FT6 is running, stop and report that it must be closed. Do not overwrite a loaded DLL or claim deployment succeeded.
+
+After building:
+
+1. Identify the newly generated DLL.
+2. Record its full path, size, modified timestamp and SHA-256.
+3. Record the existing deployed DLL's full path, size, modified timestamp and SHA-256.
+4. Copy only the fresh DLL to:
+
+   C:\ForexTester6\Strategies\RangeBreakoutPullbackStrategy.dll
+
+5. Recalculate both hashes after copying.
+6. Require exact hash equality.
+7. Treat a mismatch as deployment failure.
+8. Verify from current source that no user-visible setting or export changed.
+
+COMMIT
+
+Use a concise commit message such as:
+
+Preserve fresh seed after candidate retirement
+
+FINAL REPORT
+
+Include:
+
+* confirmation of starting commit and initial worktree status;
+* exact stale-candidate and expiry seed-loss causes;
+* candidate retirement/rotation order implemented;
+* proof that a valid normal current seed is not lost;
+* proof that compatible earlier-parent promotion remains intact;
+* proof that an oversized current seed restarts only as provisional;
+* confirmation that no replay, maximum-body, parent-dominance or no-pyramiding rule regressed;
+* files changed;
+* exact targeted verification cases and results;
+* confirmation that the previous complete harness and all broad tests/backtests were not run;
+* commit hash and push result;
+* fresh build, previous deployment and final deployment metadata and SHA-256;
+* confirmation that built and deployed hashes match exactly;
+* any remaining limitation requiring user action.
