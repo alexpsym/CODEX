@@ -4110,15 +4110,36 @@ _BINANCE_RANGE_INTERVALS = [
 ]
 
 
-async def _binance_futures_get_async(path: str, params: Optional[Dict[str, object]] = None) -> object:
-    timeout = httpx.Timeout(6.0, connect=2.0, read=6.0, write=6.0, pool=2.0)
-    async with httpx.AsyncClient(timeout=timeout) as client:
+def _binance_http_timeout() -> httpx.Timeout:
+    return httpx.Timeout(6.0, connect=2.0, read=6.0, write=6.0, pool=2.0)
+
+
+async def _binance_futures_get_async(
+    path: str,
+    params: Optional[Dict[str, object]] = None,
+    *,
+    client: Optional[httpx.AsyncClient] = None,
+    semaphore: Optional[asyncio.Semaphore] = None,
+) -> object:
+    if client is None:
+        async with httpx.AsyncClient(timeout=_binance_http_timeout()) as request_client:
+            return await _binance_futures_get_async(
+                path, params, client=request_client, semaphore=semaphore
+            )
+    if semaphore is not None:
+        async with semaphore:
+            response = await client.get(f"{BINANCE_FUTURES_BASE}{path}", params=params or {})
+    else:
         response = await client.get(f"{BINANCE_FUTURES_BASE}{path}", params=params or {})
     response.raise_for_status()
     return response.json()
 
 
-async def _binance_exchange_symbols_cached() -> List[Dict[str, object]]:
+async def _binance_exchange_symbols_cached(
+    *,
+    client: Optional[httpx.AsyncClient] = None,
+    semaphore: Optional[asyncio.Semaphore] = None,
+) -> List[Dict[str, object]]:
     now = time.time()
     cached = _BINANCE_EXCHANGE_INFO_CACHE.get("symbols")
     cached_ts = float(_BINANCE_EXCHANGE_INFO_CACHE.get("ts") or 0.0)
@@ -4126,7 +4147,9 @@ async def _binance_exchange_symbols_cached() -> List[Dict[str, object]]:
         return [dict(row) for row in cached if isinstance(row, dict)]
 
     try:
-        payload = await _binance_futures_get_async("/fapi/v1/exchangeInfo")
+        payload = await _binance_futures_get_async(
+            "/fapi/v1/exchangeInfo", client=client, semaphore=semaphore
+        )
         rows = payload.get("symbols") if isinstance(payload, dict) else None
         symbols = [dict(row) for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
         if not symbols:
@@ -4150,22 +4173,29 @@ def _binance_range_cache_key(symbol: str, interval: str) -> str:
     return f"{_binance_base_key(BINANCE_FUTURES_BASE)}:{_normalize_instrument_key(symbol)}:{interval}"
 
 
-async def _binance_fetch_range_specs_async(symbol: str) -> Tuple[Dict[str, float], List[Dict[str, str]]]:
+async def _binance_fetch_range_specs_async(
+    symbol: str,
+    *,
+    client: Optional[httpx.AsyncClient] = None,
+    semaphore: Optional[asyncio.Semaphore] = None,
+) -> Tuple[Dict[str, float], List[Dict[str, str]]]:
     out: Dict[str, float] = {}
     warnings: List[Dict[str, str]] = []
     now = time.time()
-    for field, interval in _BINANCE_RANGE_INTERVALS:
+
+    async def fetch_interval(field: str, interval: str) -> Tuple[str, Optional[float], Optional[Dict[str, str]]]:
         cache_key = _binance_range_cache_key(symbol, interval)
         cached = _BINANCE_RANGE_CACHE.get(cache_key)
         if cached and (now - float(cached.get("ts") or 0.0)) <= _BINANCE_RANGE_CACHE_TTL_SECONDS:
             cached_value = cached.get("value")
             if isinstance(cached_value, (int, float)):
-                out[field] = float(cached_value)
-                continue
+                return field, float(cached_value), None
         try:
             payload = await _binance_futures_get_async(
                 "/fapi/v1/klines",
                 {"symbol": symbol, "interval": interval, "limit": 1},
+                client=client,
+                semaphore=semaphore,
             )
             if not isinstance(payload, list) or not payload or not isinstance(payload[-1], list):
                 raise ValueError("No kline rows returned")
@@ -4178,10 +4208,21 @@ async def _binance_fetch_range_specs_async(symbol: str) -> Tuple[Dict[str, float
             if open_price <= 0:
                 raise ValueError(f"Open price <= 0 ({open_price})")
             value = (high - low) / open_price
-            out[field] = value
             _BINANCE_RANGE_CACHE[cache_key] = {"ts": now, "value": value}
+            return field, value, None
         except Exception as exc:
-            warnings.append({"scope": "range", "symbol": symbol, "field": field, "message": str(exc)})
+            return field, None, {
+                "scope": "range", "symbol": symbol, "field": field, "message": str(exc)
+            }
+
+    results = await asyncio.gather(
+        *(fetch_interval(field, interval) for field, interval in _BINANCE_RANGE_INTERVALS)
+    )
+    for field, value, warning in results:
+        if value is not None:
+            out[field] = value
+        if warning is not None:
+            warnings.append(warning)
     return out, warnings
 
 
@@ -4196,10 +4237,18 @@ def _binance_filter_map(instrument: Dict[str, object]) -> Dict[str, Dict[str, ob
     }
 
 
-async def _binance_avg_7d_turnover_usd_async(symbol: str) -> Optional[float]:
+async def _binance_avg_7d_turnover_usd_async(
+    symbol: str,
+    *,
+    client: Optional[httpx.AsyncClient] = None,
+    semaphore: Optional[asyncio.Semaphore] = None,
+) -> Optional[float]:
     try:
         payload = await _binance_futures_get_async(
-            "/fapi/v1/klines", {"symbol": symbol, "interval": "1d", "limit": 7}
+            "/fapi/v1/klines",
+            {"symbol": symbol, "interval": "1d", "limit": 7},
+            client=client,
+            semaphore=semaphore,
         )
         values = [float(row[7]) for row in payload if isinstance(row, list) and len(row) >= 8]
         return (sum(values) / len(values)) if values else None
@@ -4207,47 +4256,54 @@ async def _binance_avg_7d_turnover_usd_async(symbol: str) -> Optional[float]:
         return None
 
 
-async def _binance_resolve_and_fetch_specs(
-    query: str, *, include_btc_reference: bool = True
-) -> Optional[Dict[str, object]]:
-    want_key = _normalize_instrument_key(query)
-    if not want_key:
-        return None
-    instruments = await _binance_exchange_symbols_cached()
-    resolved_inst = next(
-        (
-            row
-            for row in instruments
-            if _normalize_instrument_key(row.get("symbol")) == want_key
-            and str(row.get("contractType") or "").upper() == "PERPETUAL"
-        ),
-        None,
-    )
-    if not resolved_inst:
-        return None
-
+async def _binance_build_symbol_specs(
+    query: str,
+    resolved_inst: Dict[str, object],
+    *,
+    client: httpx.AsyncClient,
+    semaphore: asyncio.Semaphore,
+) -> Dict[str, object]:
     symbol = str(resolved_inst.get("symbol") or "").upper()
-    warnings: List[Dict[str, str]] = []
-    ticker: Dict[str, object] = {}
-    premium: Dict[str, object] = {}
-    open_interest: Dict[str, object] = {}
-    for field, path in (
+    snapshot_requests = (
         ("ticker", "/fapi/v1/ticker/24hr"),
         ("premiumIndex", "/fapi/v1/premiumIndex"),
         ("openInterest", "/fapi/v1/openInterest"),
-    ):
+    )
+
+    async def fetch_snapshot(field: str, path: str) -> Tuple[str, Dict[str, object], Optional[Dict[str, str]]]:
         try:
-            payload = await _binance_futures_get_async(path, {"symbol": symbol})
+            payload = await _binance_futures_get_async(
+                path, {"symbol": symbol}, client=client, semaphore=semaphore
+            )
             if not isinstance(payload, dict):
                 raise ValueError("Unexpected response shape")
-            if field == "ticker":
-                ticker = payload
-            elif field == "premiumIndex":
-                premium = payload
-            else:
-                open_interest = payload
+            return field, payload, None
         except Exception as exc:
-            warnings.append({"scope": field, "symbol": symbol, "field": field, "message": str(exc)})
+            return field, {}, {
+                "scope": field, "symbol": symbol, "field": field, "message": str(exc)
+            }
+
+    snapshot_task = asyncio.gather(
+        *(fetch_snapshot(field, path) for field, path in snapshot_requests)
+    )
+    avg7d_task = _binance_avg_7d_turnover_usd_async(
+        symbol, client=client, semaphore=semaphore
+    )
+    ranges_task = _binance_fetch_range_specs_async(
+        symbol, client=client, semaphore=semaphore
+    )
+    snapshot_results, avg7d, range_result = await asyncio.gather(
+        snapshot_task, avg7d_task, ranges_task
+    )
+    snapshots: Dict[str, Dict[str, object]] = {}
+    warnings: List[Dict[str, str]] = []
+    for field, payload, warning in snapshot_results:
+        snapshots[field] = payload
+        if warning is not None:
+            warnings.append(warning)
+    ticker = snapshots.get("ticker", {})
+    premium = snapshots.get("premiumIndex", {})
+    open_interest = snapshots.get("openInterest", {})
 
     filters = _binance_filter_map(resolved_inst)
     price_filter = filters.get("PRICE_FILTER", {})
@@ -4285,10 +4341,9 @@ async def _binance_resolve_and_fetch_specs(
         "maxMktOrderQty": market_lot_filter.get("maxQty"),
         "minNotionalValue": notional_filter.get("notional"),
     }
-    avg7d = await _binance_avg_7d_turnover_usd_async(symbol)
     if avg7d is not None:
         specs["avg7dTurnoverUsd"] = avg7d
-    range_specs, range_warnings = await _binance_fetch_range_specs_async(symbol)
+    range_specs, range_warnings = range_result
     specs.update(range_specs)
     warnings.extend(range_warnings)
     units = {
@@ -4305,16 +4360,67 @@ async def _binance_resolve_and_fetch_specs(
         units[field] = "fraction"
     specs["_units"] = units
 
-    if include_btc_reference and str(resolved_inst.get("baseAsset") or "").upper() != "BTC":
-        btc_specs = await _binance_resolve_and_fetch_specs("BTCUSDT", include_btc_reference=False)
-        if btc_specs:
-            specs["_btc_reference"] = {
-                key: value for key, value in btc_specs.items() if not str(key).startswith("_")
-            }
-            warnings.extend(btc_specs.get("_spec_warnings") or [])
     if warnings:
         specs["_spec_warnings"] = warnings
     return {key: value for key, value in specs.items() if value is not None}
+
+
+async def _binance_resolve_and_fetch_specs(
+    query: str, *, include_btc_reference: bool = True
+) -> Optional[Dict[str, object]]:
+    want_key = _normalize_instrument_key(query)
+    if not want_key:
+        return None
+    semaphore = asyncio.Semaphore(4)
+    async with httpx.AsyncClient(timeout=_binance_http_timeout()) as client:
+        instruments = await _binance_exchange_symbols_cached(
+            client=client, semaphore=semaphore
+        )
+        resolved_inst = next(
+            (
+                row
+                for row in instruments
+                if _normalize_instrument_key(row.get("symbol")) == want_key
+                and str(row.get("contractType") or "").upper() == "PERPETUAL"
+            ),
+            None,
+        )
+        if not resolved_inst:
+            return None
+
+        tasks = [_binance_build_symbol_specs(query, resolved_inst, client=client, semaphore=semaphore)]
+        include_reference = (
+            include_btc_reference
+            and str(resolved_inst.get("baseAsset") or "").upper() != "BTC"
+        )
+        if include_reference:
+            btc_inst = next(
+                (
+                    row
+                    for row in instruments
+                    if str(row.get("symbol") or "").upper() == "BTCUSDT"
+                    and str(row.get("contractType") or "").upper() == "PERPETUAL"
+                ),
+                None,
+            )
+            if btc_inst:
+                tasks.append(
+                    _binance_build_symbol_specs(
+                        "BTCUSDT", btc_inst, client=client, semaphore=semaphore
+                    )
+                )
+        results = await asyncio.gather(*tasks)
+
+    specs = results[0]
+    if len(results) > 1:
+        btc_specs = results[1]
+        specs["_btc_reference"] = {
+            key: value for key, value in btc_specs.items() if not str(key).startswith("_")
+        }
+        btc_warnings = btc_specs.get("_spec_warnings") or []
+        if btc_warnings:
+            specs.setdefault("_spec_warnings", []).extend(btc_warnings)
+    return specs
 
 
 async def _fetch_instrument_specs(
@@ -4329,24 +4435,37 @@ async def _fetch_instrument_specs(
 
     pref = str(prefer or "").strip().lower()
     specs: Optional[Dict[str, object]] = None
-    try:
-        if pref in {"bybit", "crypto", "perp", "perpetual"}:
-            specs = await _binance_resolve_and_fetch_specs(q)
-        elif pref in {"oanda", "fx", "forex"}:
-            specs = await _oanda_resolve_and_fetch_specs(q)
-        elif _is_likely_fx_pair(q):
-            specs = await _oanda_resolve_and_fetch_specs(q)
-        elif _is_likely_bybit_symbol(q):
-            specs = await _binance_resolve_and_fetch_specs(q)
-        else:
-            specs = await _oanda_resolve_and_fetch_specs(q)
-            if not specs and not _is_likely_fx_pair(q):
-                specs = await _binance_resolve_and_fetch_specs(q)
-    except httpx.HTTPError as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Binance USDⓈ-M specification request failed for {q}: {exc}",
-        ) from exc
+
+    async def fetch_binance() -> Optional[Dict[str, object]]:
+        try:
+            return await _binance_resolve_and_fetch_specs(q)
+        except httpx.HTTPError as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Binance USDⓈ-M specification request failed for {q}: {exc}",
+            ) from exc
+
+    async def fetch_oanda() -> Optional[Dict[str, object]]:
+        try:
+            return await _oanda_resolve_and_fetch_specs(q)
+        except httpx.HTTPError as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"OANDA specification request failed for {q}: {exc}",
+            ) from exc
+
+    if pref in {"bybit", "crypto", "perp", "perpetual"}:
+        specs = await fetch_binance()
+    elif pref in {"oanda", "fx", "forex"}:
+        specs = await fetch_oanda()
+    elif _is_likely_fx_pair(q):
+        specs = await fetch_oanda()
+    elif _is_likely_bybit_symbol(q):
+        specs = await fetch_binance()
+    else:
+        specs = await fetch_oanda()
+        if not specs and not _is_likely_fx_pair(q):
+            specs = await fetch_binance()
 
     if not specs:
         raise HTTPException(status_code=404, detail=f"Instrument not found for query: {q}")

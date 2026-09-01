@@ -1,11 +1,11 @@
-Instrument Lookup Binance specifications and interval-range correctness
+Instrument Lookup request handling and latency follow-up
 
-- Root cause 1: the canonical Instrument Lookup crypto path resolved and loaded specifications only through Bybit. ZECUSDT is an active Binance USDⓈ-M perpetual but was not resolved by that source, so the independent journal request succeeded while specifications returned not found.
-- Root cause 2: movement ranges were also sourced through Bybit interval aliases instead of the required Binance USDⓈ-M contract. The frontend did not reuse or mis-index values; equal live values can legitimately occur when current candles overlap. The corrected path now associates every response key with its exact Binance interval and a host+symbol+interval cache key.
-- Added Binance USDⓈ-M exchange-info lookup with successful-response caching, stale-cache retry behavior, no negative caching, precise upstream failure reporting, and generic normalization for compact, slash-separated, and space-separated symbols.
-- Parsed exchange filters by filterType, independent of array order, and retained available specifications when optional filters are absent.
-- Preserved the existing (high - low) / open formula, one-candle lookback, response field names, journal independence, frontend rendering/formatting, route, and UI layout.
-- Changed only render/master_service.py, tests/test_master_service_instrument_specs.py, and this summary. render/static/instrument_lookup.js did not require a change.
-- Targeted verification: the two exact new pytest nodes passed together; after the route-level error translation changed, only the affected ZEC node was rerun and passed. No complete test file, suite, broad lint, syntax-only duplicate check, or general smoke test was run.
-- Final requirement comparison: ZECUSDT-shaped reordered/optional-filter metadata is parsed generically; the five requested BTC labels use deliberately distinct interval fixtures and distinct cache keys; journal/UI behavior is unchanged; all task files are authorized.
-- Live evidence: one focused Binance exchange-info read confirmed ZECUSDT is TRADING/PERPETUAL and lacks several optional filters; one focused BTC kline read confirmed exact interval requests and demonstrated that equal current-candle values can be legitimate.
+- Corrected `_fetch_instrument_specs()` so Binance HTTP failures are translated only inside Binance requests and OANDA HTTP failures return an accurate OANDA-specific 502 message. Successful FX routing and lookup behavior are unchanged.
+- Refactored only the Binance specification path to create one request-scoped `httpx.AsyncClient` and share a conservative four-request semaphore across exchange information, requested-symbol data, and BTC-reference data.
+- Requested-symbol and BTC-reference market snapshots, seven-day turnover, and exact-interval range requests now run concurrently under that shared bound instead of serially creating a new client for every request.
+- Preserved successful-response caches, stale exchange-info fallback, non-caching of failures, warning collection, normalization, filterType parsing, response fields, BTC reference behavior, `(high - low) / open`, the one-candle lookback, and all exact Binance intervals.
+- Journal independence, frontend code, UI layout, workbook, dashboard, and calculator were not changed.
+- Added one narrow OANDA regression proving an OANDA `httpx` failure is not labeled as Binance. Updated the existing Binance interval/cache fixture only to accept the request-scoped client arguments.
+- Targeted verification only: the exact OANDA error test and exact Binance interval/cache-key test passed once (`2 passed`). No full test file or suite was run.
+- Focused local route observations: ZECUSDT returned 200 in 1.85s with source `binance_usdm`, nine ranges, and a BTC reference; BTCUSDT returned 200 in 0.81s with source `binance_usdm`, nine ranges, and no self-reference.
+- Changed only `render/master_service.py`, `tests/test_master_service_instrument_specs.py`, and this summary.

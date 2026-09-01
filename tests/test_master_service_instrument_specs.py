@@ -110,7 +110,7 @@ def test_zec_binance_specs_parse_reordered_filters_without_optional_filters(monk
         ],
     }
 
-    async def fake_get(path, params=None):
+    async def fake_get(path, params=None, **_kwargs):
         if path.endswith('exchangeInfo'):
             return {'symbols': [zec]}
         if path.endswith('ticker/24hr'):
@@ -150,7 +150,7 @@ def test_binance_movement_ranges_keep_interval_specific_values_and_cache_keys(mo
     highs = {'15m': 101, '30m': 102, '1h': 103, '4h': 104, '1d': 105}
     requested = []
 
-    async def fake_get(path, params=None):
+    async def fake_get(path, params=None, **_kwargs):
         assert path == '/fapi/v1/klines'
         requested.append((params['symbol'], params['interval']))
         return [[1, '100', str(highs[params['interval']]), '100', '100']]
@@ -175,3 +175,16 @@ def test_binance_movement_ranges_keep_interval_specific_values_and_cache_keys(mo
     }
     assert set(master_service._BINANCE_RANGE_CACHE) == expected_keys
     assert master_service._binance_range_cache_key('BTCUSDT', '15m') != master_service._binance_range_cache_key('ETHUSDT', '15m')
+
+
+def test_oanda_http_failure_is_not_reported_as_binance(monkeypatch):
+    async def fail_oanda(_query):
+        raise master_service.httpx.ConnectError('oanda unavailable')
+
+    monkeypatch.setattr(master_service, '_oanda_resolve_and_fetch_specs', fail_oanda)
+    with pytest.raises(master_service.HTTPException) as caught:
+        asyncio.run(master_service._fetch_instrument_specs('EUR_USD', prefer='oanda'))
+
+    assert caught.value.status_code == 502
+    assert 'OANDA specification request failed for EUR_USD' in caught.value.detail
+    assert 'Binance' not in caught.value.detail
