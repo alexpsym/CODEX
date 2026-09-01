@@ -1832,6 +1832,35 @@ def test_manual_import_bybit_funding_with_completed_trades_and_trailing_open(tmp
     assert matching_ena[0]["id"] == legacy_id
     assert matching_ena[0]["notes"] == "Keep legacy note"
     assert matching_ena[0]["flags"] == ["reviewed"]
+    assert matching_ena[0]["raw_refs"]["source_rows"] == [2, 3]
+
+    repeated_expanded_import = master_service._import_uploaded_trading_journal_file(expanded_path.name, expanded_path.read_bytes(), account_mode="demo")
+    assert repeated_expanded_import["ok"] is True
+    assert len(saved_rows) == 2
+    matching_ena = [row for row in saved_rows if tuple(row.get("raw_refs", {}).get("exec_ids", [])) == ("ENA-E1", "ENA-E2")]
+    assert len(matching_ena) == 1
+    preserved_ena = matching_ena[0]
+    assert preserved_ena["id"] == legacy_id
+    assert preserved_ena["notes"] == "Keep legacy note"
+    assert preserved_ena["pre_trade_comments"] == "Keep pre-trade comment"
+    assert preserved_ena["entry_comments"] == "Keep entry comment"
+    assert preserved_ena["trade_management"] == "Keep management comment"
+    assert preserved_ena["exit_comments"] == "Keep exit comment"
+    assert preserved_ena["flags"] == ["reviewed"]
+    assert preserved_ena["setup"] == "Legacy manual setup"
+    assert preserved_ena["manual_overrides"] == {"setup": "Legacy manual setup"}
+    assert preserved_ena["manual_override_fields"] == ["setup"]
+    assert preserved_ena["user_custom_field"] == "Keep custom value"
+    assert preserved_ena["raw_refs"]["source_rows"] == [2, 3]
+    persisted_legacy_digest = master_service.hashlib.sha256(
+        "|".join(
+            [
+                *preserved_ena["raw_refs"]["exec_ids"],
+                *[str(value) for value in preserved_ena["raw_refs"]["source_rows"]],
+            ]
+        ).encode("utf-8")
+    ).hexdigest()[:16]
+    assert preserved_ena["id"] == f"bybit:demo:trade:ENAUSDT:{persisted_legacy_digest}"
 
 def test_rows_only_bybit_parser_raises_on_unmatched(tmp_path: Path) -> None:
     p = tmp_path / "buy_only.csv"

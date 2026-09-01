@@ -9711,6 +9711,12 @@ def _reconcile_bybit_csv_legacy_trade_ids(
             incoming = dict(imported)
             incoming["id"] = legacy_id
             merged = _merge_trading_journal_row(existing, incoming)
+            existing_refs = existing.get("raw_refs") if isinstance(existing.get("raw_refs"), dict) else {}
+            merged_refs = merged.get("raw_refs") if isinstance(merged.get("raw_refs"), dict) else {}
+            merged["raw_refs"] = {
+                **merged_refs,
+                "source_rows": copy.deepcopy(existing_refs.get("source_rows")),
+            }
             for field in manual_fields:
                 if field in existing:
                     merged[field] = copy.deepcopy(existing.get(field))
