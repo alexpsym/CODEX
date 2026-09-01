@@ -9636,6 +9636,101 @@ def _parse_bybit_trade_history_csv(path: Path, account_mode: str='demo') -> List
     return rows
 
 
+def _reconcile_bybit_csv_legacy_trade_ids(
+    imported_rows: Iterable[Dict[str, object]],
+    existing_rows: Iterable[Dict[str, object]],
+) -> Tuple[List[Dict[str, object]], Dict[str, int]]:
+    def identity(row: Dict[str, object]) -> Optional[Tuple[str, str, str, Tuple[str, ...]]]:
+        if str(row.get("source") or "").strip().lower() != "bybit_execution_history_grouped":
+            return None
+        row_id = str(row.get("id") or "").strip()
+        id_match = re.match(r"^bybit:(demo|live):trade:", row_id, flags=re.IGNORECASE)
+        if not id_match:
+            return None
+        mode = id_match.group(1).lower()
+        symbol = str(row.get("symbol") or "").strip().upper()
+        account = _canonical_journal_account_label(
+            row.get("account_label") or row.get("account"),
+            source="bybit",
+            account_mode=mode,
+        )
+        refs = row.get("raw_refs") if isinstance(row.get("raw_refs"), dict) else {}
+        raw_exec_ids = refs.get("exec_ids")
+        if not symbol or not isinstance(raw_exec_ids, (list, tuple)) or not raw_exec_ids:
+            return None
+        exec_ids = tuple(str(value or "").strip() for value in raw_exec_ids)
+        if any(not value for value in exec_ids):
+            return None
+        return mode, account, symbol, exec_ids
+
+    legacy_by_identity: Dict[Tuple[str, str, str, Tuple[str, ...]], List[Dict[str, object]]] = defaultdict(list)
+    for existing in existing_rows or []:
+        if not isinstance(existing, dict):
+            continue
+        existing_identity = identity(existing)
+        if existing_identity is None:
+            continue
+        refs = existing.get("raw_refs") if isinstance(existing.get("raw_refs"), dict) else {}
+        source_rows = refs.get("source_rows")
+        if not isinstance(source_rows, (list, tuple)) or not source_rows:
+            continue
+        source_row_refs = tuple(str(value or "").strip() for value in source_rows)
+        if any(not value for value in source_row_refs):
+            continue
+        mode, _account, symbol, exec_ids = existing_identity
+        legacy_digest = hashlib.sha256(
+            "|".join([*exec_ids, *source_row_refs]).encode("utf-8")
+        ).hexdigest()[:16]
+        if str(existing.get("id") or "").strip() != f"bybit:{mode}:trade:{symbol}:{legacy_digest}":
+            continue
+        legacy_by_identity[existing_identity].append(dict(existing))
+
+    manual_fields = {
+        *_JOURNAL_WORKBOOK_MANUAL_PRESERVE_FIELDS,
+        "pre_trade_comments",
+        "entry_comments",
+        "trade_management",
+        "exit_comments",
+        "flags",
+    }
+    reconciled: List[Dict[str, object]] = []
+    matched = 0
+    ambiguous = 0
+    for imported in imported_rows or []:
+        if not isinstance(imported, dict):
+            continue
+        imported_identity = identity(imported)
+        candidates = legacy_by_identity.get(imported_identity, []) if imported_identity is not None else []
+        candidates_by_id = {
+            str(candidate.get("id") or "").strip(): candidate
+            for candidate in candidates
+            if str(candidate.get("id") or "").strip()
+        }
+        if len(candidates_by_id) == 1:
+            legacy_id, existing = next(iter(candidates_by_id.items()))
+            incoming = dict(imported)
+            incoming["id"] = legacy_id
+            merged = _merge_trading_journal_row(existing, incoming)
+            for field in manual_fields:
+                if field in existing:
+                    merged[field] = copy.deepcopy(existing.get(field))
+            merged["id"] = legacy_id
+            reconciled.append(
+                _normalize_journal_profit_fields(
+                    _reapply_trading_journal_manual_overrides(merged)
+                )
+            )
+            matched += 1
+        else:
+            if len(candidates_by_id) > 1:
+                ambiguous += 1
+            reconciled.append(dict(imported))
+    return reconciled, {
+        "bybit_legacy_trade_ids_reconciled": matched,
+        "bybit_legacy_trade_id_matches_ambiguous": ambiguous,
+    }
+
+
 def _infer_realized_net_profit_from_balance_continuity(
     imported_rows: List[Dict[str, object]],
     existing_rows: List[Dict[str, object]],
@@ -36676,6 +36771,12 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
         _update_trading_journal_import_status(stage="pnl_inference", message="Inferring P/L")
         APP_LOGGER.info("trading_journal_import_stage_start stage=pnl_inference upload=%s", name)
         existing_rows = _get_trading_journal_rows()
+        if is_bybit_csv:
+            rows, bybit_reconcile_diag = _reconcile_bybit_csv_legacy_trade_ids(
+                rows,
+                existing_rows,
+            )
+            bybit_diag.update(bybit_reconcile_diag)
         rows, inference_warnings, inference_diag = _infer_realized_net_profit_from_balance_continuity(rows, existing_rows)
         timings["pnl_inference"] = round(time.perf_counter() - t1, 6)
         APP_LOGGER.info("trading_journal_import_stage_done stage=pnl_inference elapsed=%.6fs upload=%s", timings["pnl_inference"], name)

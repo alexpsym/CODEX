@@ -1673,19 +1673,19 @@ def test_manual_import_bybit_funding_with_completed_trades_and_trailing_open(tmp
     )
     lines = [
         headers,
-        "ENAUSDT,ENA-ENTRY,Buy,Market,144,0.15667,0.15667,Trade,0.00055,0.01240970,ENA-E1,01/06/2026 01:00,1000",
-        "ENAUSDT,ENA-EXIT,Sell,Market,144,0.1565,0.1565,Trade,0.00055,0.01239337,ENA-E2,01/06/2026 01:10,999.95",
+        "ENAUSDT,ENA-ENTRY,Buy,Market,144,0.15667,0.15667,Trade,0.00055,0.01240827,ENA-E1,01/06/2026 01:00,1000",
+        "ENAUSDT,ENA-EXIT,Sell,Market,144,0.1565,0.1565,Trade,0.00055,0.01239480,ENA-E2,01/06/2026 01:10,999.95",
         "ETHUSDT,ETH-ENTRY,Buy,Market,0.04,2463.51,2463.51,Trade,0.00055,0.05419722,ETH-E1,01/06/2026 02:00,999.90",
     ]
     eth_funding = [0.0028] * 12 + [0.00362970]
     for index, fee in enumerate(eth_funding, start=1):
         lines.append(
-            f"ETHUSDT,ETH-FUND-{index},Buy,Market,0,0,0,Funding,0,{fee:.8f},ETH-F{index},01/06/2026 {index + 2:02d}:00,999.90"
+            f"ETHUSDT,ETH-FUND-{index},Buy,Market,0.04,0,0,Funding,0,{fee:.8f},ETH-F{index},01/06/2026 {index + 2:02d}:00,999.90"
         )
     lines.extend(
         [
             "ETHUSDT,ETH-EXIT,Sell,Market,0.04,2394.51,2394.51,Trade,0.00055,0.05267922,ETH-E2,01/06/2026 16:00,996.99",
-            "ENAUSDT,ENA-OPEN,Buy,Market,242,0.15766,0.15766,Trade,0.00055,0.02098063,ENA-E3,01/06/2026 17:00,996.97",
+            "ENAUSDT,ENA-OPEN,Buy,Market,242,0.15766,0.15766,Trade,0.00055,0.02098455,ENA-E3,01/06/2026 17:00,996.97",
         ]
     )
     ena_open_funding = [-0.001] * 6 + [-0.00146378]
@@ -1693,7 +1693,7 @@ def test_manual_import_bybit_funding_with_completed_trades_and_trailing_open(tmp
         hour = index + 17
         timestamp = f"01/06/2026 {hour:02d}:00" if hour < 24 else "02/06/2026 00:00"
         lines.append(
-            f"ENAUSDT,ENA-OPEN-FUND-{index},Buy,Market,0,0,0,Funding,0,{fee:.8f},ENA-OF{index},{timestamp},996.97"
+            f"ENAUSDT,ENA-OPEN-FUND-{index},Buy,Market,242,0,0,Funding,0,{fee:.8f},ENA-OF{index},{timestamp},996.97"
         )
 
     csv_path = tmp_path / "bybit_history_funding_and_open.csv"
@@ -1736,13 +1736,33 @@ def test_manual_import_bybit_funding_with_completed_trades_and_trailing_open(tmp
 
     expanded_path = tmp_path / "bybit_history_funding_and_open_expanded.csv"
     expanded_path.write_text(
-        "\n".join([headers, "ENAUSDT,ENA-OPEN-FUND-8,Buy,Market,0,0,0,Funding,0,-0.00010000,ENA-OF8,02/06/2026 01:00,996.97", *lines[1:]]),
+        "\n".join([headers, "ENAUSDT,ENA-OPEN-FUND-8,Buy,Market,242,0,0,Funding,0,-0.00010000,ENA-OF8,02/06/2026 01:00,996.97", *lines[1:]]),
         encoding="utf-8",
     )
     expanded_rows, _, _ = master_service._parse_bybit_trade_history_csv_with_diagnostics(expanded_path, account_mode="demo")
     assert {row["id"] for row in expanded_rows} == {row["id"] for row in rows}
 
-    saved_rows = []
+    legacy_digest = master_service.hashlib.sha256(
+        "ENA-E1|ENA-E2|2|3".encode("utf-8")
+    ).hexdigest()[:16]
+    legacy_id = f"bybit:demo:trade:ENAUSDT:{legacy_digest}"
+    legacy_ena = {
+        **ena,
+        "id": legacy_id,
+        "notes": "Keep legacy note",
+        "pre_trade_comments": "Keep pre-trade comment",
+        "entry_comments": "Keep entry comment",
+        "trade_management": "Keep management comment",
+        "exit_comments": "Keep exit comment",
+        "flags": ["reviewed"],
+        "setup": "Legacy manual setup",
+        "manual_overrides": {"setup": "Legacy manual setup"},
+        "manual_override_fields": ["setup"],
+        "manual_updated_at": "2026-06-03T00:00:00+00:00",
+        "user_custom_field": "Keep custom value",
+        "raw_refs": {**ena["raw_refs"], "source_rows": [2, 3]},
+    }
+    saved_rows = [legacy_ena]
 
     def fake_get_rows():
         return [dict(row) for row in saved_rows]
@@ -1753,7 +1773,12 @@ def test_manual_import_bybit_funding_with_completed_trades_and_trailing_open(tmp
     def fake_upsert(incoming, **_kwargs):
         merged = {row["id"]: dict(row) for row in saved_rows}
         for row in incoming:
-            merged[row["id"]] = dict(row)
+            row_id = row["id"]
+            merged[row_id] = (
+                master_service._merge_trading_journal_row(merged[row_id], row)
+                if row_id in merged
+                else dict(row)
+            )
         saved_rows[:] = list(merged.values())
         return len(incoming)
 
@@ -1779,12 +1804,34 @@ def test_manual_import_bybit_funding_with_completed_trades_and_trailing_open(tmp
     assert first_import["bybit_trade_execution_rows_seen"] == 5
     assert first_import["bybit_funding_rows_seen"] == 20
     assert first_import["bybit_trailing_open_execution_rows_deferred"] == 1
+    assert first_import["bybit_legacy_trade_ids_reconciled"] == 1
     assert "unmatched_bybit_executions" not in first_import["errors"]
     assert len(saved_rows) == 2
+    matching_ena = [row for row in saved_rows if tuple(row.get("raw_refs", {}).get("exec_ids", [])) == ("ENA-E1", "ENA-E2")]
+    assert len(matching_ena) == 1
+    assert matching_ena[0]["id"] == legacy_id
+    assert matching_ena[0]["notes"] == "Keep legacy note"
+    assert matching_ena[0]["pre_trade_comments"] == "Keep pre-trade comment"
+    assert matching_ena[0]["entry_comments"] == "Keep entry comment"
+    assert matching_ena[0]["trade_management"] == "Keep management comment"
+    assert matching_ena[0]["exit_comments"] == "Keep exit comment"
+    assert matching_ena[0]["flags"] == ["reviewed"]
+    assert matching_ena[0]["setup"] == "Legacy manual setup"
+    assert matching_ena[0]["user_custom_field"] == "Keep custom value"
 
     second_import = master_service._import_uploaded_trading_journal_file(csv_path.name, csv_path.read_bytes(), account_mode="demo")
     assert second_import["ok"] is True
     assert len(saved_rows) == 2
+    assert len([row for row in saved_rows if tuple(row.get("raw_refs", {}).get("exec_ids", [])) == ("ENA-E1", "ENA-E2")]) == 1
+
+    expanded_import = master_service._import_uploaded_trading_journal_file(expanded_path.name, expanded_path.read_bytes(), account_mode="demo")
+    assert expanded_import["ok"] is True
+    assert len(saved_rows) == 2
+    matching_ena = [row for row in saved_rows if tuple(row.get("raw_refs", {}).get("exec_ids", [])) == ("ENA-E1", "ENA-E2")]
+    assert len(matching_ena) == 1
+    assert matching_ena[0]["id"] == legacy_id
+    assert matching_ena[0]["notes"] == "Keep legacy note"
+    assert matching_ena[0]["flags"] == ["reviewed"]
 
 def test_rows_only_bybit_parser_raises_on_unmatched(tmp_path: Path) -> None:
     p = tmp_path / "buy_only.csv"
