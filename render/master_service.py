@@ -9457,6 +9457,8 @@ def _normalize_bybit_execution_history_row(raw: Dict[str, object], account_mode:
     side=str(raw.get('Direction') or raw.get('side') or '').strip().title()
     order_id=str(raw.get('Order No.') or raw.get('orderId') or '').strip()
     exec_id=str(raw.get('Trasaction ID') or raw.get('Transaction ID') or raw.get('execId') or '').strip()
+    filled_type_raw = raw.get('Filled Type') if 'Filled Type' in raw else raw.get('execType')
+    filled_type = str(filled_type_raw or ('Trade' if 'Filled Type' not in raw and 'execType' not in raw else '')).strip().title()
     qty=_to_float(raw.get('Filled Qty') if raw.get('Filled Qty') not in (None,'') else raw.get('execQty'))
     price=_to_float(raw.get('Filled Price') if raw.get('Filled Price') not in (None,'') else raw.get('execPrice'))
     if not symbol or (not exec_id and not order_id):
@@ -9487,35 +9489,69 @@ def _normalize_bybit_execution_history_row(raw: Dict[str, object], account_mode:
     bal=_to_float(raw.get('Final Balance (USDT)')) if str(raw.get('Final Balance (USDT)') or '').strip() else None
     mode='demo' if str(account_mode).lower().strip()=='demo' else 'live'
     rid = f'bybit:{mode}:execution:{symbol}:{exec_id}' if exec_id else f"bybit:{mode}:execution:{symbol}:{order_id}:{open_time}:{side}:{qty}:{price}"
-    return {'id': rid,'row_type':'trade','asset_class':'crypto','account':_canonical_journal_account_label('Bybit Demo' if mode=='demo' else 'Bybit Live', source='bybit', account_mode=mode),'account_label':_canonical_journal_account_label('Bybit Demo' if mode=='demo' else 'Bybit Live', source='bybit', account_mode=mode),'symbol':symbol,'side':side,'qty':qty,'entry_price':price,'exit_price':price,'open_time':open_time,'close_time':open_time,'commission':fee,'fee_rate':fee_rate,'net_profit':None,'balance_after_trade':bal,'currency':'USDT' if symbol.endswith('USDT') else '', 'source':'bybit_execution_history','notes':'Bybit execution-history row; Net P/L may be inferred from explicit P/L fields or balance continuity when provable.','raw_refs':{'orderId':order_id or None,'execId':exec_id or None,'source_file':source_path,'source_row':source_row}}
+    return {'id': rid,'row_type':'trade','asset_class':'crypto','account':_canonical_journal_account_label('Bybit Demo' if mode=='demo' else 'Bybit Live', source='bybit', account_mode=mode),'account_label':_canonical_journal_account_label('Bybit Demo' if mode=='demo' else 'Bybit Live', source='bybit', account_mode=mode),'symbol':symbol,'side':side,'qty':qty,'entry_price':price,'exit_price':price,'open_time':open_time,'close_time':open_time,'commission':fee,'fee_rate':fee_rate,'filled_type':filled_type,'net_profit':None,'balance_after_trade':bal,'currency':'USDT' if symbol.endswith('USDT') else '', 'source':'bybit_execution_history','notes':'Bybit execution-history row; Net P/L may be inferred from explicit P/L fields or balance continuity when provable.','raw_refs':{'orderId':order_id or None,'execId':exec_id or None,'filledType':filled_type or None,'source_file':source_path,'source_row':source_row}}
 
 def _group_bybit_execution_history_rows_into_completed_trades(records: List[Dict[str, object]], account_mode: str, source_path: str) -> Tuple[List[Dict[str, object]], List[str], Dict[str, object]]:
     mode = "demo" if str(account_mode).lower().strip() == "demo" else "live"
     account_label = _canonical_journal_account_label("Bybit Demo" if mode == "demo" else "Bybit Live", source="bybit", account_mode=mode)
     normalized: List[Dict[str, object]] = []
+    trade_rows_seen = 0
+    funding_rows_seen = 0
+    invalid_rows: List[str] = []
     for rec in records or []:
         if not isinstance(rec, dict):
             continue
-        row = _normalize_bybit_execution_history_row(rec.get("raw") or rec, mode, source_path, rec.get("_source_row"))
+        raw = rec.get("raw") or rec
+        filled_type_raw = raw.get("Filled Type") if "Filled Type" in raw else raw.get("execType")
+        filled_type = str(filled_type_raw or ("Trade" if "Filled Type" not in raw and "execType" not in raw else "")).strip().lower()
+        if filled_type == "trade":
+            trade_rows_seen += 1
+        elif filled_type == "funding":
+            funding_rows_seen += 1
+        else:
+            invalid_rows.append(str(raw.get("Trasaction ID") or raw.get("Transaction ID") or raw.get("execId") or f"source-row:{rec.get('_source_row')}"))
+        row = _normalize_bybit_execution_history_row(raw, mode, source_path, rec.get("_source_row"))
         if row:
             row["_source_row"] = rec.get("_source_row")
             row["_ts"] = _parse_iso_datetime(row.get("open_time"))
             normalized.append(row)
+        elif filled_type != "funding":
+            invalid_id = str(raw.get("Trasaction ID") or raw.get("Transaction ID") or raw.get("execId") or f"source-row:{rec.get('_source_row')}")
+            if invalid_id not in invalid_rows:
+                invalid_rows.append(invalid_id)
     normalized.sort(key=lambda r: ((r.get("_ts").timestamp() if isinstance(r.get("_ts"), datetime) else float("inf")), int(r.get("_source_row") or 10**9)))
     trades: List[Dict[str, object]] = []
     unmatched: List[str] = []
     reversal_rows: List[str] = []
+    reversal_blocking_rows: List[str] = []
+    trailing_open_rows: List[str] = []
+    trailing_open_funding_rows = 0
+    unallocated_funding_rows = 0
     by_symbol: Dict[str, List[Dict[str, object]]] = defaultdict(list)
     for r in normalized:
         by_symbol[str(r.get("symbol") or "").upper()].append(r)
     for symbol, exec_rows in by_symbol.items():
         seg: List[Dict[str, object]] = []
+        funding_seg: List[Dict[str, object]] = []
         pos = 0.0
+        symbol_reversal = False
         for ex in exec_rows:
-            qty = abs(_to_float(ex.get("qty")) or 0.0)
-            if qty <= 0:
+            filled_type = str(ex.get("filled_type") or "").strip().lower()
+            if filled_type == "funding":
+                if seg and abs(pos) >= 1e-12:
+                    funding_seg.append(ex)
+                else:
+                    unallocated_funding_rows += 1
                 continue
+            if filled_type != "trade":
+                continue
+            qty = abs(_to_float(ex.get("qty")) or 0.0)
             side = str(ex.get("side") or "").strip().lower()
+            if qty <= 0 or side not in {"buy", "sell"}:
+                invalid_id = str((ex.get("raw_refs") or {}).get("execId") or ex.get("id") or "")
+                if invalid_id not in invalid_rows:
+                    invalid_rows.append(invalid_id)
+                continue
             signed = qty if side == "buy" else -qty
             if not seg:
                 seg = [ex]; pos = signed
@@ -9523,6 +9559,11 @@ def _group_bybit_execution_history_rows_into_completed_trades(records: List[Dict
                 if (pos > 0 and signed < 0 and abs(signed) > abs(pos)) or (pos < 0 and signed > 0 and abs(signed) > abs(pos)):
                     reversal_rows.append(str((ex.get("raw_refs") or {}).get("execId") or ex.get("id") or ""))
                     seg.append(ex)
+                    reversal_blocking_rows.extend(
+                        str((row.get("raw_refs") or {}).get("execId") or row.get("id") or "")
+                        for row in seg
+                    )
+                    symbol_reversal = True
                     break
                 seg.append(ex); pos += signed
             if abs(pos) < 1e-12:
@@ -9533,28 +9574,47 @@ def _group_bybit_execution_history_rows_into_completed_trades(records: List[Dict
                 entry_notional = sum((abs(_to_float(s.get("qty")) or 0.0) * (_to_float(s.get("entry_price")) or 0.0)) for s in seg if str(s.get("side") or "").strip().lower() == open_side.lower())
                 exit_notional = sum((abs(_to_float(s.get("qty")) or 0.0) * (_to_float(s.get("entry_price")) or 0.0)) for s in seg if str(s.get("side") or "").strip().lower() != open_side.lower())
                 fees = sum(_to_float(s.get("commission")) or 0.0 for s in seg)
+                funding_cost = sum(_to_float(s.get("commission")) or 0.0 for s in funding_seg)
                 exec_ids = [str(((s.get("raw_refs") or {}).get("execId") or "")).strip() for s in seg if str(((s.get("raw_refs") or {}).get("execId") or "")).strip()]
-                src_rows = [int(s.get("_source_row")) for s in seg if s.get("_source_row")]
-                digest = hashlib.sha256("|".join(exec_ids + [str(x) for x in src_rows]).encode("utf-8")).hexdigest()[:16]
+                funding_ids = [str(((s.get("raw_refs") or {}).get("execId") or "")).strip() for s in funding_seg if str(((s.get("raw_refs") or {}).get("execId") or "")).strip()]
+                src_rows = [int(s.get("_source_row")) for s in [*seg, *funding_seg] if s.get("_source_row")]
+                stable_exec_refs = exec_ids or [str(s.get("id") or "") for s in seg]
+                digest = hashlib.sha256("|".join(stable_exec_refs).encode("utf-8")).hexdigest()[:16]
                 gross = (exit_notional - entry_notional) if open_side.lower() == "buy" else (entry_notional - exit_notional)
                 open_ts = seg[0].get("open_time"); close_ts = seg[-1].get("close_time") or seg[-1].get("open_time")
                 open_dt = _parse_iso_datetime(open_ts)
                 close_dt = _parse_iso_datetime(close_ts)
                 dur = _round_trade_duration_seconds((close_dt - open_dt).total_seconds()) if open_dt and close_dt else 1
+                net = gross - fees - funding_cost
                 trades.append({
                     "id": f"bybit:{mode}:trade:{symbol}:{digest}", "row_type": "trade", "asset_class": "crypto", "account": account_label, "account_label": account_label,
                     "symbol": symbol, "side": open_side, "qty": closed, "entry_price": (entry_notional / open_qty) if open_qty else None, "exit_price": (exit_notional / close_qty) if close_qty else None,
-                    "open_time": open_ts, "close_time": close_ts, "commission": fees, "net_profit": gross - fees, "currency": "USDT" if symbol.endswith("USDT") else "",
+                    "open_time": open_ts, "close_time": close_ts, "gross_profit": gross, "commission": fees, "fees": fees, "funding_cost": funding_cost, "swap": (-funding_cost if funding_cost else None), "net_profit": net, "realized_pnl": net, "currency": "USDT" if symbol.endswith("USDT") else "",
                     "trade_duration_seconds": dur, "source": "bybit_execution_history_grouped",
-                    "raw_refs": {"source_file": source_path, "source_rows": src_rows, "order_ids": sorted({str(((s.get("raw_refs") or {}).get("orderId") or "")).strip() for s in seg if str(((s.get("raw_refs") or {}).get("orderId") or "")).strip()}), "exec_ids": exec_ids, "execution_count": len(seg), "parser": "bybit_execution_history_grouped"}
+                    "raw_refs": {"source_file": source_path, "source_rows": src_rows, "order_ids": sorted({str(((s.get("raw_refs") or {}).get("orderId") or "")).strip() for s in seg if str(((s.get("raw_refs") or {}).get("orderId") or "")).strip()}), "exec_ids": exec_ids, "funding_exec_ids": funding_ids, "execution_count": len(seg), "funding_row_count": len(funding_seg), "parser": "bybit_execution_history_grouped"}
                 })
-                seg = []; pos = 0.0
+                seg = []; funding_seg = []; pos = 0.0
         if seg:
-            unmatched.extend([str((s.get("raw_refs") or {}).get("execId") or s.get("id") or "") for s in seg])
+            open_ids = [str((s.get("raw_refs") or {}).get("execId") or s.get("id") or "") for s in seg]
+            unmatched.extend(open_ids)
+            if not symbol_reversal:
+                trailing_open_rows.extend(open_ids)
+                trailing_open_funding_rows += len(funding_seg)
+    blocking_rows = list(dict.fromkeys([*invalid_rows, *reversal_blocking_rows]))
+    unmatched = list(dict.fromkeys([*blocking_rows, *trailing_open_rows]))
     diag = {
-        "bybit_execution_rows_seen": len(normalized),
+        "bybit_execution_rows_seen": trade_rows_seen,
+        "bybit_trade_execution_rows_seen": trade_rows_seen,
+        "bybit_funding_rows_seen": funding_rows_seen,
         "bybit_completed_trades_imported": len(trades),
         "bybit_unmatched_execution_rows": len(unmatched),
+        "bybit_blocking_execution_rows": len(blocking_rows),
+        "bybit_invalid_execution_rows_seen": len(invalid_rows),
+        "bybit_invalid_execution_row_ids": invalid_rows,
+        "bybit_trailing_open_execution_rows_deferred": len(trailing_open_rows),
+        "bybit_trailing_open_execution_row_ids": trailing_open_rows,
+        "bybit_trailing_open_funding_rows_deferred": trailing_open_funding_rows,
+        "bybit_unallocated_funding_rows": unallocated_funding_rows,
         "bybit_reversal_execution_rows_seen": len(reversal_rows),
         "bybit_reversal_import_blocked": bool(reversal_rows),
         "bybit_reversal_row_ids": reversal_rows,
@@ -36587,7 +36647,13 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
                 rows, balance = _parse_local_trading_journal_workbook(tmp_path, original_name=name, account_mode=mode or None)
             except Exception as exc:
                 return {"ok": False, "status_code": 422, "message": f"Failed to parse {name}: {exc}", "uploaded_name": name, "file_type": suffix, "errors": [str(exc)], "warnings": []}
-        if is_bybit_csv and unmatched_exec_ids:
+        bybit_blocking_rows = int(bybit_diag.get("bybit_blocking_execution_rows") or 0)
+        bybit_trailing_rows = int(bybit_diag.get("bybit_trailing_open_execution_rows_deferred") or 0)
+        if is_bybit_csv and unmatched_exec_ids and (
+            bybit_blocking_rows > 0
+            or bybit_trailing_rows != len(unmatched_exec_ids)
+            or not rows
+        ):
             return {
                 "ok": False,
                 "status_code": 422,

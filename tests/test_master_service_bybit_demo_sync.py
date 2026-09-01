@@ -1665,6 +1665,127 @@ def test_bybit_trade_history_csv_parser_full_fixture(tmp_path: Path) -> None:
     assert [round(float(r["qty"]), 3) for r in rows] == [0.019, 0.324, 0.016]
     assert all(str(r["id"]).startswith("bybit:demo:trade:") for r in rows)
 
+
+def test_manual_import_bybit_funding_with_completed_trades_and_trailing_open(tmp_path: Path, monkeypatch) -> None:
+    headers = (
+        "contracts,Order No.,Direction,Order Type,Filled Qty,Filled Price,Order Price,Filled Type,"
+        "Trading Fee Rate,Fees Paid,Trasaction ID,Transaction Time(UTC+10),Final Balance (USDT)"
+    )
+    lines = [
+        headers,
+        "ENAUSDT,ENA-ENTRY,Buy,Market,144,0.15667,0.15667,Trade,0.00055,0.01240970,ENA-E1,01/06/2026 01:00,1000",
+        "ENAUSDT,ENA-EXIT,Sell,Market,144,0.1565,0.1565,Trade,0.00055,0.01239337,ENA-E2,01/06/2026 01:10,999.95",
+        "ETHUSDT,ETH-ENTRY,Buy,Market,0.04,2463.51,2463.51,Trade,0.00055,0.05419722,ETH-E1,01/06/2026 02:00,999.90",
+    ]
+    eth_funding = [0.0028] * 12 + [0.00362970]
+    for index, fee in enumerate(eth_funding, start=1):
+        lines.append(
+            f"ETHUSDT,ETH-FUND-{index},Buy,Market,0,0,0,Funding,0,{fee:.8f},ETH-F{index},01/06/2026 {index + 2:02d}:00,999.90"
+        )
+    lines.extend(
+        [
+            "ETHUSDT,ETH-EXIT,Sell,Market,0.04,2394.51,2394.51,Trade,0.00055,0.05267922,ETH-E2,01/06/2026 16:00,996.99",
+            "ENAUSDT,ENA-OPEN,Buy,Market,242,0.15766,0.15766,Trade,0.00055,0.02098063,ENA-E3,01/06/2026 17:00,996.97",
+        ]
+    )
+    ena_open_funding = [-0.001] * 6 + [-0.00146378]
+    for index, fee in enumerate(ena_open_funding, start=1):
+        hour = index + 17
+        timestamp = f"01/06/2026 {hour:02d}:00" if hour < 24 else "02/06/2026 00:00"
+        lines.append(
+            f"ENAUSDT,ENA-OPEN-FUND-{index},Buy,Market,0,0,0,Funding,0,{fee:.8f},ENA-OF{index},{timestamp},996.97"
+        )
+
+    csv_path = tmp_path / "bybit_history_funding_and_open.csv"
+    csv_path.write_text("\n".join(lines), encoding="utf-8")
+    rows, unmatched, diag = master_service._parse_bybit_trade_history_csv_with_diagnostics(csv_path, account_mode="demo")
+
+    assert diag["bybit_trade_execution_rows_seen"] == 5
+    assert diag["bybit_execution_rows_seen"] == 5
+    assert diag["bybit_funding_rows_seen"] == 20
+    assert diag["bybit_completed_trades_imported"] == 2
+    assert diag["bybit_trailing_open_execution_rows_deferred"] == 1
+    assert diag["bybit_trailing_open_funding_rows_deferred"] == 7
+    assert diag["bybit_blocking_execution_rows"] == 0
+    assert unmatched == ["ENA-E3"]
+    assert len(rows) == 2
+
+    by_symbol = {row["symbol"]: row for row in rows}
+    ena = by_symbol["ENAUSDT"]
+    assert ena["qty"] == pytest.approx(144)
+    assert ena["entry_price"] == pytest.approx(0.15667)
+    assert ena["exit_price"] == pytest.approx(0.1565)
+    assert ena["gross_profit"] == pytest.approx(-0.02448)
+    assert ena["commission"] == pytest.approx(0.02480307)
+    assert ena["funding_cost"] == pytest.approx(0)
+    assert ena["net_profit"] == pytest.approx(-0.04928307)
+
+    eth = by_symbol["ETHUSDT"]
+    assert eth["qty"] == pytest.approx(0.04)
+    assert eth["entry_price"] == pytest.approx(2463.51)
+    assert eth["exit_price"] == pytest.approx(2394.51)
+    assert eth["gross_profit"] == pytest.approx(-2.76)
+    assert eth["commission"] == pytest.approx(0.10687644)
+    assert eth["funding_cost"] == pytest.approx(0.03722970)
+    assert eth["net_profit"] == pytest.approx(-2.90410614)
+    assert all(row["qty"] != pytest.approx(242) for row in rows)
+    assert all(str(row["id"]).startswith("bybit:demo:trade:") for row in rows)
+
+    with pytest.raises(ValueError, match="Unmatched Bybit execution rows remain open"):
+        master_service._parse_bybit_trade_history_csv(csv_path, account_mode="demo")
+
+    expanded_path = tmp_path / "bybit_history_funding_and_open_expanded.csv"
+    expanded_path.write_text(
+        "\n".join([headers, "ENAUSDT,ENA-OPEN-FUND-8,Buy,Market,0,0,0,Funding,0,-0.00010000,ENA-OF8,02/06/2026 01:00,996.97", *lines[1:]]),
+        encoding="utf-8",
+    )
+    expanded_rows, _, _ = master_service._parse_bybit_trade_history_csv_with_diagnostics(expanded_path, account_mode="demo")
+    assert {row["id"] for row in expanded_rows} == {row["id"] for row in rows}
+
+    saved_rows = []
+
+    def fake_get_rows():
+        return [dict(row) for row in saved_rows]
+
+    def fake_set_rows(incoming, **_kwargs):
+        saved_rows[:] = [dict(row) for row in incoming]
+
+    def fake_upsert(incoming, **_kwargs):
+        merged = {row["id"]: dict(row) for row in saved_rows}
+        for row in incoming:
+            merged[row["id"]] = dict(row)
+        saved_rows[:] = list(merged.values())
+        return len(incoming)
+
+    monkeypatch.setattr(master_service, "_master_journal_path", lambda: tmp_path / "Trading Journal.xlsx")
+    monkeypatch.setattr(master_service, "_get_trading_journal_rows", fake_get_rows)
+    monkeypatch.setattr(master_service, "_set_trading_journal_rows", fake_set_rows)
+    monkeypatch.setattr(master_service, "_upsert_trading_journal_rows", fake_upsert)
+    monkeypatch.setattr(master_service, "_reserve_master_journal_workbook_sync", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(master_service, "_release_master_journal_workbook_sync", lambda: None)
+    monkeypatch.setattr(master_service, "_recover_trading_journal_derived_refresh_state_if_needed", lambda: None)
+    monkeypatch.setattr(master_service, "TRADING_JOURNAL_DERIVED_REFRESH_STATE", {})
+    monkeypatch.setattr(master_service, "_update_trading_journal_import_status", lambda **_kwargs: None)
+    monkeypatch.setattr(master_service, "_build_manual_import_authoritative_snapshot", lambda **_kwargs: {"items": fake_get_rows()})
+    monkeypatch.setattr(master_service, "_sync_master_journal_workbook", lambda **_kwargs: {"ok": True})
+    monkeypatch.setattr(master_service, "_verify_trade_log_row_ids_in_workbook", lambda _path, ids: {"ok": True, "found_row_ids_count": len(ids), "missing_row_ids": []})
+    monkeypatch.setattr(master_service, "_persist_trading_journal_sqlite", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(master_service, "_sync_journal_excel_files_to_github", lambda _path: {"github_sync_enabled": False, "github_sync_ok": True})
+    monkeypatch.setattr(master_service, "_schedule_dropbox_upload_state_backup", lambda: None)
+
+    first_import = master_service._import_uploaded_trading_journal_file(csv_path.name, csv_path.read_bytes(), account_mode="demo")
+    assert first_import["ok"] is True
+    assert first_import["rows_parsed"] == 2
+    assert first_import["bybit_trade_execution_rows_seen"] == 5
+    assert first_import["bybit_funding_rows_seen"] == 20
+    assert first_import["bybit_trailing_open_execution_rows_deferred"] == 1
+    assert "unmatched_bybit_executions" not in first_import["errors"]
+    assert len(saved_rows) == 2
+
+    second_import = master_service._import_uploaded_trading_journal_file(csv_path.name, csv_path.read_bytes(), account_mode="demo")
+    assert second_import["ok"] is True
+    assert len(saved_rows) == 2
+
 def test_rows_only_bybit_parser_raises_on_unmatched(tmp_path: Path) -> None:
     p = tmp_path / "buy_only.csv"
     p.write_text(
