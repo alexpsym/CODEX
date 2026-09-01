@@ -1,0 +1,355 @@
+IMPLEMENT THIS JOB IN THE REPOSITORY.
+
+Do not merely analyse the request or produce another brief.
+
+Before editing, save this exact brief in the repository root as:
+
+CODEX_BRIEF_FIX_PROVISIONAL_REPLAY_STALE_ENTRY.txt
+
+Use one agent only. Do not spawn subagents.
+
+REPOSITORY
+
+Repository:
+
+C:\GPT\CODEX-master
+
+Expected starting commit:
+
+7bf418e5127a0658fbb202fc65620c6f28f19077
+
+Canonical FT6 source:
+
+forex-tester-6/RangeBreakoutPullbackStrategy/RangeBreakoutPullbackStrategy.cpp
+
+Related files:
+
+docs/RangeBreakoutPullback_Backtesting_Guide.md
+summary/CODEX_SUMMARY_latest.txt
+
+This is an FT6-only corrective follow-up to the already-completed missed-parent-impulse implementation.
+
+Do not redo the trend-filter work, change the user's settings, redesign the entire strategy, or modify the TradingView or MT5 implementations.
+
+PROBLEM
+
+The commit named "Fix missed parent impulse and late child entry" added passive detection, provisional candidates and closed-history recovery. The high-level direction is correct, but the promotion replay can still recreate a stale one-generation-late entry.
+
+The defect is in the interaction between TryPromoteCandidate() and RecoverPromotedPullback().
+
+Current behaviour:
+
+1. TryPromoteCandidate() chooses the most extreme high or low over the entire interval from originBar through the current bar.
+
+2. It treats that global final extreme as the parent endpoint before reconstructing PB1.
+
+3. RecoverPromotedPullback() then scans only bars after that endpoint.
+
+4. If PB1 qualified earlier and its resumption also occurred before promotion, RecoverPromotedPullback() records qualificationBar but never evaluates that historical resumption.
+
+5. At the end it always does the equivalent of:
+
+   stage = IMPULSE_ARMED;
+   pullbackConfirmed = nbar;
+
+6. The already-passed PB1 is therefore armed at the current bar. A later unrelated same-direction bar can trigger an entry, which is exactly the stale delayed-entry behaviour the preceding fix was meant to prevent.
+
+7. Selecting the global final extreme can also swallow the true first pullback and its resumption into the parent leg. The replay then begins after a later low or high and labels a later correction as PB1.
+
+There is also a narrow oversized-seed defect:
+
+8. An oversized-only candidate is blocked only while nbar <= firstBar.
+
+9. On any later bar, even an opposing candle or doji that adds no same-direction continuation, the original oversized candle's displacement can satisfy the cumulative threshold by itself.
+
+10. That makes the configured maximum-body cap functionally equivalent to a one-bar delay rather than preserving the rule that an oversized candle cannot independently seed an impulse.
+
+These are code-path findings. Do not broaden this job into another general strategy audit.
+
+REQUIRED FIX
+
+1. Chronological promotion replay
+
+When a provisional candidate becomes promotable, reconstruct the state chronologically using only already-closed bars and the same state-transition meanings used by live processing.
+
+Do not select the final global extreme first and then replay only the bars after it.
+
+The chronological reconstruction must distinguish, in order:
+
+* origin available;
+* parent expansion and endpoint extension;
+* first opposing close beginning PB1;
+* a new same-direction extreme resetting an unqualified PB1 and extending the same parent;
+* PB1 opposing-close count, retracement, depth, duration and invalidation;
+* PB1 qualification;
+* the selected aggressive, balanced or conservative resumption after qualification;
+* consumption, expiry or invalidation.
+
+The reconstructed endpoint and PB1 must match what the live state machine would have known after each closed bar. Use symmetric bullish and bearish logic.
+
+2. Never re-arm a resumption that already passed
+
+If the recovered PB1 qualified and its selected resumption occurred on a bar before the current promotion decision bar:
+
+* do not enter retrospectively;
+* do not set pullbackConfirmed to the current bar merely to keep the setup alive;
+* do not queue the old signal for a later bar;
+* mark the opportunity consumed/passed with a concise diagnostic such as "PB1 resumption occurred before origin promotion; retrospective entry forbidden";
+* prevent a later unrelated continuation candle from triggering that old PB1.
+
+If the resumption occurred while another position was open, the opportunity remains unavailable and consumed. No pyramiding and no delayed execution remain mandatory.
+
+If the resumption occurs on the same currently closed bar that makes promotion possible, handle it explicitly:
+
+* it may be evaluated as a current closed-bar signal only if all required information is available at that bar's close and the normal live entry gates are applied at that decision point; or
+* conservatively consume it as unavailable.
+
+Either choice is acceptable, but it must never be converted into an armed setup that waits for a later bar.
+
+If a recovered PB1 has qualified but no resumption has occurred through the current bar, it may be armed for a genuinely future resumption. Preserve the actual historical PB1 qualification bar/time in state and diagnostics; do not claim it qualified on the promotion bar.
+
+3. Do not hide a passed PB1 by moving the endpoint
+
+Once chronological replay has started PB1, a later bar must be interpreted according to the same live rules:
+
+* before PB1 qualification, a genuine new same-direction extreme may reset that unqualified pullback and extend the parent;
+* after PB1 qualification, evaluate invalidation, expiry, depth and the chosen resumption;
+* do not automatically absorb post-qualification resumption price into a newer endpoint just because it creates the interval's final high or low.
+
+This is essential to preventing the original first pullback from being replaced by a later one.
+
+4. Preserve the maximum-body setting
+
+Keep the existing meaning of:
+
+Impulse maximum body ATR (0 disabled)
+
+An over-cap candle must still be unable to become a normal seed by itself.
+
+An oversized-only provisional candidate may be promoted only when later closed bars provide objective same-direction cumulative evidence. At minimum, require one of the following after the oversized candle:
+
+* a later normal qualifying same-direction seed; or
+* later same-direction continuation that advances the impulse endpoint beyond the oversized candle's own extreme as part of a genuine multi-bar leg.
+
+An arbitrary later opposing candle, doji or non-advancing bar must not unlock promotion. The first oversized candle's displacement alone must not satisfy the claimed multi-bar evidence.
+
+Do not add a new user setting or tell the user to change 1.5 to zero.
+
+5. Detection remains separate from execution
+
+Preserve the completed passive-observation work:
+
+* candidates may be observed and parents may be tracked while a strategy position is open;
+* no second order may open while the strategy position remains open;
+* if the earlier position closes before a not-yet-passed PB1 resumption, the setup may remain eligible;
+* a signal that passed while busy or before promotion is never executed later.
+
+6. Preserve parent dominance and independent-leg rules
+
+Do not regress the completed parent/child logic:
+
+* an unresolved parent owns its PB1;
+* a contained same-direction child cannot replace it;
+* a genuinely independent later same-direction impulse requires the old opportunity to be consumed and a newer confirmed structural origin plus directional expansion;
+* bullish and bearish handling must remain symmetric.
+
+7. Preserve the screenshot-derived intent
+
+For the previously supplied EURUSD semantic sequence:
+
+* the strong bearish move around 18:00-21:00 remains the parent;
+* the correction around 00:30-01:00 remains that parent's PB1;
+* its first valid resumption is the only entry opportunity for that PB1;
+* if origin promotion is early enough, the current/future first resumption may be evaluated normally;
+* if origin promotion happens only after that resumption has already passed, the opportunity must be consumed rather than re-armed;
+* the circled approximately 04:30 ticket-164-type entry must not occur merely because an old PB1 was armed late or the parent endpoint was moved past the true PB1.
+
+The screenshot, date, time, ticket and prices are semantic evidence only. Do not hardcode them.
+
+PRESERVE UNRELATED BEHAVIOUR
+
+Preserve:
+
+* Setup mode 0 range behaviour;
+* all user-visible settings, defaults and presets;
+* aggressive, balanced and conservative confirmation meanings;
+* selected depth ranges;
+* ATR warm-up;
+* adaptive and fixed stops;
+* structural HH/HL and LH/LL classification;
+* 2R with-trend/neutral and 3R counter-trend target floors;
+* frozen entry classification and targets;
+* M15/H4 EMA trend filter and direction scope;
+* weekend blackout;
+* trade-direction controls;
+* no-pyramiding;
+* the earlier 30 July 12:15 rejection and approximately 15:30 first-pullback behaviour.
+
+Do not tune strategy settings or historical outcomes.
+
+DIAGNOSTICS
+
+When diagnostics are enabled, provide concise state-change evidence for:
+
+* chronological recovered endpoint changes;
+* recovered PB1 start and any pre-qualification reset;
+* historical PB1 qualification bar/time;
+* whether a historical/current/future resumption was found;
+* consumption because resumption passed before promotion;
+* current-bar promotion signal handling;
+* oversized candidate waiting for genuine continuation;
+* exact multi-bar evidence that made an oversized candidate promotable.
+
+Do not print repetitive per-bar noise or add chart clutter.
+
+MINIMAL TARGETED VERIFICATION ONLY
+
+Credit conservation is mandatory and overrides broader repository testing instructions.
+
+Run only:
+
+1. One narrowly scoped deterministic state-machine verification covering these exact cases:
+
+   * delayed origin confirmation before PB1 begins: parent remains active;
+   * delayed origin confirmation after PB1 qualifies but before resumption: correct historical PB1 is armed for a future signal;
+   * delayed origin confirmation after PB1 resumption: opportunity is consumed and never re-armed;
+   * the next unrelated same-direction bar after a passed resumption cannot enter;
+   * a new same-direction extreme resets an unqualified PB1 chronologically;
+   * a post-qualification resumption extreme is not silently selected as a replacement parent endpoint;
+   * aggressive confirmation replay;
+   * balanced confirmation replay;
+   * conservative confirmation replay using only a minor swing confirmed by the bars available at that replay step;
+   * signal while position busy is consumed and never queued;
+   * previous position closes before a still-future resumption: entry remains eligible without pyramiding;
+   * oversized candle followed only by an opposing candle does not promote;
+   * oversized candle followed only by a doji/non-advancing bar does not promote;
+   * oversized candle followed by genuine same-direction endpoint advancement can form a cumulative parent;
+   * a later normal same-direction seed can validate the cumulative parent;
+   * bullish symmetry;
+   * the screenshot-derived bearish sequence keeps the earlier parent/PB1 and rejects the late ticket-164-type entry;
+   * preservation of the earlier approximately 12:15 rejection and 15:30 PB1 sequence.
+
+2. One final affected native 32-bit FT6 strategy compile.
+
+Do not run:
+
+* complete test files;
+* full test suites;
+* broad integration checks;
+* unrelated tests;
+* repeated passing tests;
+* smoke tests of unaffected features;
+* historical backtests;
+* optimisations;
+* multi-year simulations;
+* subagents.
+
+Do not expand verification without explicit user approval.
+
+REPOSITORY SAFETY
+
+Before editing, run:
+
+git status --short
+
+Then verify the starting commit with:
+
+git rev-parse HEAD
+
+If HEAD is not the expected commit above, stop and report the actual commit. Do not pull, rebase, merge or rewrite history.
+
+Treat every pre-existing modified or untracked file as user-owned.
+
+Do not stage, overwrite, restore, delete or commit unrelated files.
+
+Never use:
+
+git add -A
+git pull
+git rebase
+git stash
+git autostash
+git reset --hard
+git clean -fd
+git push --force
+git push --force-with-lease
+
+Do not use PATCH_DESKTOP_PUSH.bat.
+
+Use manual path-scoped staging only.
+
+Before committing, run:
+
+git diff --cached --name-only
+
+Only directly authorised files may be staged:
+
+* CODEX_BRIEF_FIX_PROVISIONAL_REPLAY_STALE_ENTRY.txt
+* forex-tester-6/RangeBreakoutPullbackStrategy/RangeBreakoutPullbackStrategy.cpp
+* docs/RangeBreakoutPullback_Backtesting_Guide.md only if genuinely required
+* summary/CODEX_SUMMARY_latest.txt
+
+Do not modify the .def file unless an export change is genuinely required. No export change is expected.
+
+Use a normal commit and normal push. If the push is rejected because the remote advanced, stop and report it. Do not pull, rebase, stash or rewrite history.
+
+BUILD AND FT6 DEPLOYMENT
+
+A source change is not completion.
+
+Build only the affected native 32-bit C++ FT6 strategy using:
+
+* RangeBreakoutPullbackStrategy.cpp
+* RangeBreakoutPullbackStrategy.def
+* C:\ForexTester6\Examples\Strategies\C++ include/API files
+* oleaut32.lib
+
+Before deployment, verify that:
+
+C:\ForexTester6\ForexTester6.exe
+
+is not running.
+
+If FT6 is running, stop and report that it must be closed. Do not overwrite a loaded DLL or claim deployment succeeded.
+
+After building:
+
+1. Identify the newly generated DLL.
+2. Record its full path, size, modified timestamp and SHA-256.
+3. Record the existing deployed DLL's full path, size, modified timestamp and SHA-256.
+4. Copy only the fresh DLL to:
+
+   C:\ForexTester6\Strategies\RangeBreakoutPullbackStrategy.dll
+
+5. Recalculate both hashes after copying.
+6. Require exact hash equality.
+7. Treat a mismatch as deployment failure.
+8. Verify current user-visible parameter registration from source; no setting change is expected.
+
+COMMIT
+
+Use a concise commit message such as:
+
+Fix provisional replay stale entry
+
+FINAL REPORT
+
+Include:
+
+* confirmation of the starting commit and initial git status;
+* exact defect found in the global-endpoint and recovery-arming paths;
+* exact defect found in oversized-only promotion;
+* chronological replay state changes implemented;
+* how already-passed resumptions are consumed rather than queued;
+* how a same-current-bar promotion/resumption is handled;
+* how the 1.5 ATR maximum-body meaning remains intact;
+* confirmation that passive tracking/no-pyramiding and parent dominance remain intact;
+* files changed;
+* exact targeted verification cases and result;
+* confirmation that no broad tests or backtests were run;
+* commit hash and push result;
+* fresh built DLL metadata and SHA-256;
+* previous deployed DLL metadata and SHA-256;
+* final deployed DLL metadata and SHA-256;
+* confirmation that built and deployed hashes match exactly;
+* any remaining limitation requiring user action.

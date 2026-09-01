@@ -38,14 +38,14 @@ TDateTime impulseOriginTime=0,impulseSeedTime=0,impulseEndpointTime=0,pullbackSt
 int consumedDirection=0,frozenStructuralTrend=0;
 struct ProvisionalImpulseCandidate
 {
-  bool active,observedWhileBusy,normalSeedSeen,oversizedSeen;
+  bool active,observedWhileBusy,normalSeedSeen,oversizedSeen,continuationSeen,oversizedWaitLogged;
   int direction;
-  double seedATR,extreme;
+  double seedATR,firstExtreme,extreme;
   long firstBar,extremeBar;
   TDateTime firstTime,extremeTime;
 };
-ProvisionalImpulseCandidate provisionalLong={false,false,false,false,1,0,0,-1,-1,0,0};
-ProvisionalImpulseCandidate provisionalShort={false,false,false,false,-1,0,0,-1,-1,0,0};
+ProvisionalImpulseCandidate provisionalLong={false,false,false,false,false,false,1,0,0,0,-1,-1,0,0};
+ProvisionalImpulseCandidate provisionalShort={false,false,false,false,false,false,-1,0,0,0,-1,-1,0,0};
 long lastContainedDecisionBar=-1;
 double previousSwingHigh=0,latestSwingHigh=0,previousSwingLow=0,latestSwingLow=0;
 long previousSwingHighBar=-1,latestSwingHighBar=-1,previousSwingLowBar=-1,latestSwingLowBar=-1;
@@ -234,13 +234,25 @@ void ObserveProvisional(const int seedDirection,const double seedExtreme,const i
   if(!candidate.active)
   {
     candidate.active=true;candidate.direction=seedDirection;candidate.observedWhileBusy=busy;candidate.normalSeedSeen=classification==1;candidate.oversizedSeen=classification==2;
-    candidate.seedATR=rmaATR;candidate.extreme=seedExtreme;candidate.firstBar=candidate.extremeBar=nbar;candidate.firstTime=candidate.extremeTime=Time(1);
+    candidate.seedATR=rmaATR;candidate.firstExtreme=candidate.extreme=seedExtreme;candidate.firstBar=candidate.extremeBar=nbar;candidate.firstTime=candidate.extremeTime=Time(1);
     LogSeedDecision(seedDirection,"retained provisionally",classification==2?"body cap prevents normal seed; cumulative parent recovery retained":reason,bodyATR,rangeATR,busy);
     if(busy){char text[256];sprintf(text,"RBP candidate observed while position open dir=%s bar=%ld; detection continues without entry",DirectionName(seedDirection),nbar);EmitDiagnostic(text);}
     return;
   }
+  bool firstLaterNormal=candidate.oversizedSeen&&!candidate.normalSeedSeen&&classification==1;
   candidate.observedWhileBusy=candidate.observedWhileBusy||busy;candidate.normalSeedSeen=candidate.normalSeedSeen||classification==1;candidate.oversizedSeen=candidate.oversizedSeen||classification==2;
-  if(seedDirection==1?seedExtreme>candidate.extreme:seedExtreme<candidate.extreme){candidate.extreme=seedExtreme;candidate.extremeBar=nbar;candidate.extremeTime=Time(1);}
+  if(firstLaterNormal){char text[384];sprintf(text,"RBP oversized recovery evidence dir=%s type=later normal same-direction seed bar=%ld body=%.2fATR range=%.2fATR",DirectionName(seedDirection),nbar,bodyATR,rangeATR);EmitDiagnostic(text);}
+  if(seedDirection==1?seedExtreme>candidate.extreme:seedExtreme<candidate.extreme){candidate.continuationSeen=candidate.continuationSeen||nbar>candidate.firstBar;candidate.extreme=seedExtreme;candidate.extremeBar=nbar;candidate.extremeTime=Time(1);}
+}
+void ObserveProvisionalContinuation(const int direction,const double extreme,const bool busy)
+{
+  ProvisionalImpulseCandidate &candidate=CandidateFor(direction);if(!candidate.active)return;
+  candidate.observedWhileBusy=candidate.observedWhileBusy||busy;
+  if(nbar>candidate.firstBar&&(direction==1?extreme>candidate.extreme:extreme<candidate.extreme))
+  {
+    candidate.continuationSeen=true;candidate.extreme=extreme;candidate.extremeBar=nbar;candidate.extremeTime=Time(1);
+    if(candidate.oversizedSeen){char text[384];sprintf(text,"RBP oversized recovery evidence dir=%s type=later same-direction endpoint advancement bar=%ld endpoint=%.5f firstExtreme=%.5f",DirectionName(direction),nbar,extreme,candidate.firstExtreme);EmitDiagnostic(text);}
+  }
 }
 int ClosedBarShift(const long bar){return (int)(nbar-bar+1);}
 double ClosedHigh(const long bar){return High(ClosedBarShift(bar));}
@@ -248,38 +260,105 @@ double ClosedLow(const long bar){return Low(ClosedBarShift(bar));}
 double ClosedClose(const long bar){return Close(ClosedBarShift(bar));}
 TDateTime ClosedTime(const long bar){return Time(ClosedBarShift(bar));}
 void ConsumeImpulse(const char *reason);
-void RecoverPromotedPullback(const long endpointBar)
+bool RecoveredMinorPivot(const int direction,const long confirmationBar,double &price)
 {
-  long qualificationBar=-1;
-  for(long bar=endpointBar+1;bar<=nbar;bar++)
+  int strength=MinorSwingStrength<1?1:MinorSwingStrength;long center=confirmationBar-strength;
+  if(center<pullbackStartBar)return false;
+  price=direction==1?ClosedHigh(center):ClosedLow(center);
+  for(int i=1;i<=strength;i++)
+  {
+    if(direction==1&&(price<ClosedHigh(center-i)||price<ClosedHigh(center+i)))return false;
+    if(direction==-1&&(price>ClosedLow(center-i)||price>ClosedLow(center+i)))return false;
+  }
+  return true;
+}
+bool RecoveredResumption(const int direction,const long bar)
+{
+  double c=ClosedClose(bar),o=Open(ClosedBarShift(bar)),previousClose=ClosedClose(bar-1);
+  if(Confirmation==0)return direction==1?c>previousClose:c<previousClose;
+  if(Confirmation==1)return direction==1?c>o&&c>ClosedHigh(bar-1):c<o&&c<ClosedLow(bar-1);
+  return hasMinorSwing&&(direction==1?c>minorSwing:c<minorSwing);
+}
+void LogRecoveredEndpoint(const long bar)
+{
+  char endpointText[32],text[384];FormatTime(impulseEndpointTime,endpointText);
+  sprintf(text,"RBP replay endpoint dir=%s bar=%ld time=%s endpoint=%.5f displacement=%.5f/%.2fATR",DirectionName(dir),bar,endpointText,setupExtreme,ImpulseDisplacement(),setupATR>0?ImpulseDisplacement()/setupATR:0);EmitDiagnostic(text);
+}
+void RecoverProvisionalChronologically(const long replayStartBar)
+{
+  long qualificationBar=-1;TDateTime qualificationTime=0;
+  for(long bar=replayStartBar;bar<=nbar;bar++)
   {
     double h=ClosedHigh(bar),l=ClosedLow(bar),c=ClosedClose(bar),previousClose=ClosedClose(bar-1);
-    if(dir==1?c<impulseOrigin-setupATR*InvalidationToleranceATR:c>impulseOrigin+setupATR*InvalidationToleranceATR)
-    {ConsumeImpulse("recovered parent invalidated before provisional promotion");return;}
-    bool opposingClose=dir==1?c<previousClose:c>previousClose;
-    if(!pullbackStarted&&opposingClose)
+    if(stage==IMPULSE_PARENT||stage==IMPULSE_PULLBACK)
     {
-      stage=IMPULSE_PULLBACK;pullbackStarted=true;pullbackStartBar=bar;pullbackStartTime=ClosedTime(bar);pullbackExtreme=dir==1?l:h;pullbackStartPrice=pullbackExtreme;opposing=1;hasMinorSwing=false;
-      frozenExtension=setupExtreme;hasFrozenExtension=true;extension=bar;
-      char startText[32],text[512];FormatTime(pullbackStartTime,startText);
-      sprintf(text,"RBP PB1 recovered dir=%s start=%s@%.5f endpoint=%.5f reason=closed history replay after origin confirmation",DirectionName(dir),startText,pullbackStartPrice,setupExtreme);EmitDiagnostic(text);
+      if(ImpulseInvalidated(c)){ConsumeImpulse("recovered parent invalidated during chronological replay");return;}
+      bool newExtreme=dir==1?h>setupExtreme:l<setupExtreme;
+      if(newExtreme)
+      {
+        setupExtreme=dir==1?h:l;impulseEndpointBar=bar;impulseEndpointTime=ClosedTime(bar);extension=bar;LogRecoveredEndpoint(bar);
+        if(stage==IMPULSE_PULLBACK)
+        {
+          char text[384];sprintf(text,"RBP recovered PB1 reset dir=%s bar=%ld reason=new same-direction extreme before qualification",DirectionName(dir),bar);EmitDiagnostic(text);
+          stage=IMPULSE_PARENT;pullbackStarted=false;pullbackStartBar=-1;pullbackStartTime=0;opposing=0;pullbackExtreme=0;pullbackConfirmed=-1;hasMinorSwing=false;
+        }
+        continue;
+      }
+      bool opposingClose=dir==1?c<previousClose:c>previousClose;
+      if(stage==IMPULSE_PARENT&&opposingClose)
+      {
+        stage=IMPULSE_PULLBACK;pullbackStarted=true;pullbackStartBar=bar;pullbackStartTime=ClosedTime(bar);pullbackExtreme=dir==1?l:h;pullbackStartPrice=pullbackExtreme;opposing=1;hasMinorSwing=false;
+        frozenExtension=setupExtreme;hasFrozenExtension=true;extension=bar;
+        char startText[32],text[512];FormatTime(pullbackStartTime,startText);
+        sprintf(text,"RBP recovered PB1 start dir=%s bar=%ld time=%s@%.5f endpoint=%.5f",DirectionName(dir),bar,startText,pullbackStartPrice,setupExtreme);EmitDiagnostic(text);
+      }
+      else if(stage==IMPULSE_PULLBACK)
+      {
+        pullbackExtreme=dir==1?Min(pullbackExtreme,l):Max(pullbackExtreme,h);if(opposingClose)opposing++;
+      }
+      if(stage!=IMPULSE_PULLBACK)continue;
+      double recoveredPivot=0;if(RecoveredMinorPivot(dir,bar,recoveredPivot)){minorSwing=recoveredPivot;hasMinorSwing=true;}
+      double retracement=PullbackRetracement(),depth=PullbackDepth();
+      if(bar-pullbackStartBar>ActiveMaximumPullbackBars()){ConsumeImpulse("recovered first pullback expired during chronological replay");return;}
+      if(ImpulseDepthExceeded(depth)){ConsumeImpulse("recovered first pullback exceeded maximum depth during chronological replay");return;}
+      if(opposing>=MinimumOpposingCloses&&retracement>=setupATR*ActiveMinimumRetracement()&&ImpulseDepthQualified(depth))
+      {
+        stage=IMPULSE_ARMED;qualificationBar=pullbackConfirmed=bar;qualificationTime=ClosedTime(bar);
+        char qualificationText[32],text[512];FormatTime(qualificationTime,qualificationText);
+        sprintf(text,"RBP historical PB1 qualified dir=%s bar=%ld time=%s opposing=%d retracement=%.2fATR depth=%.1f%%",DirectionName(dir),qualificationBar,qualificationText,opposing,setupATR>0?retracement/setupATR:0,depth);EmitDiagnostic(text);
+        DiagnosticMarker("START",impulseOriginTime,impulseOrigin,"I-start",clBlue);DiagnosticMarker("END",impulseEndpointTime,setupExtreme,"I-end",clBlue);DiagnosticMarker("PB1",pullbackStartTime,pullbackStartPrice,"PB1",clYellow);
+      }
+      continue;
     }
-    else if(pullbackStarted)
+    if(stage!=IMPULSE_ARMED)return;
+    pullbackExtreme=dir==1?Min(pullbackExtreme,l):Max(pullbackExtreme,h);
+    double recoveredPivot=0;if(RecoveredMinorPivot(dir,bar,recoveredPivot)){minorSwing=recoveredPivot;hasMinorSwing=true;}
+    double depth=PullbackDepth();
+    if(ImpulseInvalidated(c)){ConsumeImpulse("recovered parent invalidated after historical PB1 qualification");return;}
+    if(bar-pullbackStartBar>ActiveMaximumPullbackBars()){ConsumeImpulse("recovered first pullback expired after historical qualification");return;}
+    if(ImpulseDepthExceeded(depth)){ConsumeImpulse("recovered first pullback exceeded maximum depth after historical qualification");return;}
+    if(bar>qualificationBar&&RecoveredResumption(dir,bar))
     {
-      pullbackExtreme=dir==1?Min(pullbackExtreme,l):Max(pullbackExtreme,h);if(opposingClose)opposing++;
+      char signalText[32],text[512];FormatTime(ClosedTime(bar),signalText);
+      if(bar<nbar)
+      {
+        sprintf(text,"RBP historical resumption found dir=%s mode=%s bar=%ld time=%s decision=consumed reason=PB1 resumption occurred before origin promotion; retrospective entry forbidden",DirectionName(dir),Confirmation==0?"aggressive":Confirmation==1?"balanced":"conservative",bar,signalText);EmitDiagnostic(text);
+        ConsumeImpulse("PB1 resumption occurred before origin promotion; retrospective entry forbidden");return;
+      }
+      bool busy=StrategyPositionOpen();
+      sprintf(text,"RBP current-bar promotion resumption dir=%s mode=%s bar=%ld time=%s busy=%s decision=consumed-not-armed",DirectionName(dir),Confirmation==0?"aggressive":Confirmation==1?"balanced":"conservative",bar,signalText,busy?"yes":"no");EmitDiagnostic(text);
+      ConsumeImpulse(busy?"position busy at current-bar promotion resumption; opportunity unavailable and not queued":"PB1 resumption occurred on origin promotion bar; conservative retrospective entry forbidden");return;
     }
-    if(!pullbackStarted) continue;
-    double retracement=PullbackRetracement(),depth=PullbackDepth();
-    if(bar-pullbackStartBar>ActiveMaximumPullbackBars()){ConsumeImpulse("recovered first pullback expired before promotion");return;}
-    if(ImpulseDepthExceeded(depth)){ConsumeImpulse("recovered first pullback exceeded maximum depth before promotion");return;}
-    if(qualificationBar<0&&opposing>=MinimumOpposingCloses&&retracement>=setupATR*ActiveMinimumRetracement()&&ImpulseDepthQualified(depth)) qualificationBar=bar;
   }
-  if(qualificationBar>=0)
+  char text[512];
+  if(stage==IMPULSE_ARMED)
   {
-    stage=IMPULSE_ARMED;pullbackConfirmed=nbar;
-    char qualificationText[32],text[512];FormatTime(ClosedTime(qualificationBar),qualificationText);
-    sprintf(text,"RBP PB1 qualified during promotion dir=%s qualifiedHistory=%s armedNowBar=%ld retracement=%.2fATR depth=%.1f%% retrospectiveEntry=no",DirectionName(dir),qualificationText,nbar,setupATR>0?PullbackRetracement()/setupATR:0,PullbackDepth());EmitDiagnostic(text);
-    DiagnosticMarker("START",impulseOriginTime,impulseOrigin,"I-start",clBlue);DiagnosticMarker("END",impulseEndpointTime,setupExtreme,"I-end",clBlue);DiagnosticMarker("PB1",pullbackStartTime,pullbackStartPrice,"PB1",clYellow);
+    char qualificationText[32];FormatTime(qualificationTime,qualificationText);
+    sprintf(text,"RBP replay complete dir=%s historicalQualification=%s bar=%ld resumption=none-through-promotion decision=armed-for-future-only",DirectionName(dir),qualificationText,qualificationBar);EmitDiagnostic(text);
+  }
+  else
+  {
+    sprintf(text,"RBP replay complete dir=%s stage=%s resumption=not-applicable endpointBar=%ld PB1=%s",DirectionName(dir),stage==IMPULSE_PARENT?"parent":"pullback",impulseEndpointBar,pullbackStarted?"unqualified":"not-started");EmitDiagnostic(text);
   }
 }
 bool TryPromoteCandidate(ProvisionalImpulseCandidate &candidate)
@@ -292,22 +371,29 @@ bool TryPromoteCandidate(ProvisionalImpulseCandidate &candidate)
   double origin=0;long originBar=-1;TDateTime originTime=0;const char *reason="";
   if(!CanSeedImpulse(candidate.direction,candidate.extreme,origin,originBar,originTime,reason)) return false;
   if(originBar>candidate.firstBar) return false;
-  if(candidate.oversizedSeen&&!candidate.normalSeedSeen&&nbar<=candidate.firstBar) return false;
-  double endpoint=candidate.direction==1?ClosedHigh(originBar):ClosedLow(originBar);long endpointBar=originBar;
-  for(long bar=originBar+1;bar<=nbar;bar++)
+  if(candidate.oversizedSeen&&!candidate.normalSeedSeen&&!candidate.continuationSeen)
   {
-    double value=candidate.direction==1?ClosedHigh(bar):ClosedLow(bar);
-    if(candidate.direction==1?value>endpoint:value<endpoint){endpoint=value;endpointBar=bar;}
+    if(!candidate.oversizedWaitLogged)
+    {
+      char text[384];sprintf(text,"RBP oversized candidate waiting dir=%s firstBar=%ld reason=no later normal seed or same-direction endpoint advancement",DirectionName(candidate.direction),candidate.firstBar);EmitDiagnostic(text);candidate.oversizedWaitLogged=true;
+    }
+    return false;
   }
-  double displacement=candidate.direction==1?endpoint-origin:origin-endpoint;
+  double displacement=candidate.direction==1?candidate.extreme-origin:origin-candidate.extreme;
   double requiredATR=Max(ImpulseMinimumBodyATR,ImpulseMinimumRangeATR);
   if(candidate.seedATR<=0||displacement<candidate.seedATR*requiredATR) return false;
-  bool observedBusy=candidate.observedWhileBusy,oversized=candidate.oversizedSeen;TDateTime seedTime=candidate.firstTime;
+  bool observedBusy=candidate.observedWhileBusy,oversized=candidate.oversizedSeen,laterNormal=candidate.normalSeedSeen;TDateTime seedTime=candidate.firstTime;long firstBar=candidate.firstBar;
+  double initialEndpoint=candidate.direction==1?ClosedHigh(originBar):ClosedLow(originBar);long initialEndpointBar=originBar;
+  for(long bar=originBar+1;bar<=firstBar;bar++)
+  {
+    double value=candidate.direction==1?ClosedHigh(bar):ClosedLow(bar);
+    if(candidate.direction==1?value>initialEndpoint:value<initialEndpoint){initialEndpoint=value;initialEndpointBar=bar;}
+  }
   char originText[32],text[512];FormatTime(originTime,originText);
-  sprintf(text,"RBP confirmed origin available dir=%s reason=%s origin=%s@%.5f provisionalFirstBar=%ld cumulative=%.5f/%.2fATR oversizedIncluded=%s",DirectionName(candidate.direction),reason,originText,origin,candidate.firstBar,displacement,displacement/candidate.seedATR,oversized?"yes":"no");EmitDiagnostic(text);
-  StartImpulseAt(candidate.direction,endpoint,endpointBar,ClosedTime(endpointBar),origin,originBar,originTime,candidate.seedATR,seedTime,reason);
-  RecoverPromotedPullback(endpointBar);
-  sprintf(text,"RBP provisional promoted dir=%s observedWhileBusy=%s endpointBar=%ld currentBar=%ld retrospectiveEntry=no",DirectionName(dir),observedBusy?"yes":"no",endpointBar,nbar);EmitDiagnostic(text);
+  sprintf(text,"RBP confirmed origin available dir=%s reason=%s origin=%s@%.5f provisionalFirstBar=%ld cumulative=%.5f/%.2fATR oversizedIncluded=%s evidence=%s",DirectionName(candidate.direction),reason,originText,origin,firstBar,displacement,displacement/candidate.seedATR,oversized?"yes":"no",oversized?(laterNormal?"later normal same-direction seed":"later same-direction endpoint advancement"):"normal provisional seed");EmitDiagnostic(text);
+  StartImpulseAt(candidate.direction,initialEndpoint,initialEndpointBar,ClosedTime(initialEndpointBar),origin,originBar,originTime,candidate.seedATR,seedTime,reason);
+  RecoverProvisionalChronologically(firstBar+1);
+  sprintf(text,"RBP provisional promoted dir=%s observedWhileBusy=%s replayStartBar=%ld currentBar=%ld finalStage=%d retrospectiveEntry=no",DirectionName(dir),observedBusy?"yes":"no",firstBar+1,nbar,stage);EmitDiagnostic(text);
   return true;
 }
 void ClearUnqualifiedPullback()
@@ -452,7 +538,7 @@ void ProcessImpulseSetup(const double o,const double h,const double l,const doub
     {
       double seedExtreme=candleDirection==1?h:l,origin=0;long originBar=-1;TDateTime originTime=0;const char *reason="";
       bool canSeed=CanSeedImpulse(candleDirection,seedExtreme,origin,originBar,originTime,reason);
-      if(seedClass==1&&canSeed)
+      if(seedClass==1&&canSeed&&!CandidateFor(candleDirection).active)
       {
         LogSeedDecision(candleDirection,"accepted",reason,bodyATR,rangeATR,busy);
         if(busy){char text[256];sprintf(text,"RBP candidate observed while position open dir=%s bar=%ld; parent tracking active, entry remains blocked",DirectionName(candleDirection),nbar);EmitDiagnostic(text);}
@@ -464,6 +550,7 @@ void ProcessImpulseSetup(const double o,const double h,const double l,const doub
     {
       LogSeedDecision(candleDirection,"rejected",bodyATR<ImpulseMinimumBodyATR?"body below minimum ATR":"range below minimum ATR",bodyATR,rangeATR,busy);
     }
+    if(directionAllowed&&seedClass==0)ObserveProvisionalContinuation(candleDirection,candleDirection==1?h:l,busy);
     if(TryPromoteCandidate(candleDirection==-1?provisionalShort:provisionalLong)) return;
     if(TryPromoteCandidate(candleDirection==-1?provisionalLong:provisionalShort)) return;
     return;
