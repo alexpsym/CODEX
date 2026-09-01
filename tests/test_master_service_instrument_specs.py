@@ -90,3 +90,88 @@ def test_range_failure_exposes_warning(monkeypatch):
     specs = asyncio.run(master_service._bybit_resolve_and_fetch_specs('BTCUSDT'))
     warns = specs.get('_spec_warnings') or []
     assert any(w.get('field') == 'range.1w' for w in warns)
+
+
+def test_zec_binance_specs_parse_reordered_filters_without_optional_filters(monkeypatch):
+    zec = {
+        'symbol': 'ZECUSDT',
+        'pair': 'ZECUSDT',
+        'contractType': 'PERPETUAL',
+        'status': 'TRADING',
+        'baseAsset': 'ZEC',
+        'quoteAsset': 'USDT',
+        'onboardDate': 1,
+        'filters': [
+            {'filterType': 'MIN_NOTIONAL', 'notional': '5'},
+            {'filterType': 'MARKET_LOT_SIZE', 'maxQty': '1000'},
+            {'filterType': 'PRICE_FILTER', 'maxPrice': '100000', 'tickSize': '0.01', 'minPrice': '0.01'},
+            {'filterType': 'LOT_SIZE', 'maxQty': '5000', 'stepSize': '0.001', 'minQty': '0.001'},
+            {'filterType': 'MAX_NUM_ORDERS', 'limit': 200},
+        ],
+    }
+
+    async def fake_get(path, params=None):
+        if path.endswith('exchangeInfo'):
+            return {'symbols': [zec]}
+        if path.endswith('ticker/24hr'):
+            return {'symbol': 'ZECUSDT', 'lastPrice': '40', 'quoteVolume': '1234'}
+        if path.endswith('premiumIndex'):
+            return {'symbol': 'ZECUSDT', 'markPrice': '40', 'lastFundingRate': '0.0001', 'nextFundingTime': 2}
+        if path.endswith('openInterest'):
+            return {'symbol': 'ZECUSDT', 'openInterest': '10'}
+        if path.endswith('klines'):
+            if params['interval'] == '1d' and params['limit'] == 7:
+                return [[1, '40', '42', '39', '41', '1', 2, '100']]
+            return [[1, '40', '42', '39', '41']]
+        raise AssertionError(path)
+
+    monkeypatch.setattr(master_service, '_binance_futures_get_async', fake_get)
+    monkeypatch.setattr(master_service, '_BINANCE_EXCHANGE_INFO_CACHE', {'ts': 0.0, 'symbols': []})
+    monkeypatch.setattr(master_service, '_BINANCE_RANGE_CACHE', {})
+    for query in ('ZECUSDT', 'ZEC/USDT', 'ZEC USDT'):
+        specs = asyncio.run(master_service._fetch_instrument_specs(query, prefer='crypto'))
+        assert specs['resolved_symbol'] == 'ZECUSDT'
+        assert specs['source'] == 'binance_usdm'
+        assert specs['tickSize'] == '0.01'
+        assert specs['qtyStep'] == '0.001'
+        assert specs['maxMktOrderQty'] == '1000'
+        assert specs['minNotionalValue'] == '5'
+        assert 'maxLeverage' not in specs
+
+
+def test_binance_movement_ranges_keep_interval_specific_values_and_cache_keys(monkeypatch):
+    intervals = [
+        ('range.15m', '15m'),
+        ('range.30m', '30m'),
+        ('range.1h', '1h'),
+        ('range.4h', '4h'),
+        ('range.1d', '1d'),
+    ]
+    highs = {'15m': 101, '30m': 102, '1h': 103, '4h': 104, '1d': 105}
+    requested = []
+
+    async def fake_get(path, params=None):
+        assert path == '/fapi/v1/klines'
+        requested.append((params['symbol'], params['interval']))
+        return [[1, '100', str(highs[params['interval']]), '100', '100']]
+
+    monkeypatch.setattr(master_service, '_BINANCE_RANGE_INTERVALS', intervals)
+    monkeypatch.setattr(master_service, '_BINANCE_RANGE_CACHE', {})
+    monkeypatch.setattr(master_service, '_binance_futures_get_async', fake_get)
+    ranges, warnings = asyncio.run(master_service._binance_fetch_range_specs_async('BTCUSDT'))
+
+    assert warnings == []
+    assert requested == [('BTCUSDT', interval) for _field, interval in intervals]
+    assert ranges == {
+        'range.15m': 0.01,
+        'range.30m': 0.02,
+        'range.1h': 0.03,
+        'range.4h': 0.04,
+        'range.1d': 0.05,
+    }
+    expected_keys = {
+        master_service._binance_range_cache_key('BTCUSDT', interval)
+        for _field, interval in intervals
+    }
+    assert set(master_service._BINANCE_RANGE_CACHE) == expected_keys
+    assert master_service._binance_range_cache_key('BTCUSDT', '15m') != master_service._binance_range_cache_key('ETHUSDT', '15m')

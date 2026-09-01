@@ -3345,6 +3345,13 @@ _BYBIT_SYMBOL_LIST_CACHE_TTL_SECONDS = float(
 _BYBIT_INSTRUMENT_CACHE: Dict[str, Dict[str, object]] = {}
 _BYBIT_INSTRUMENT_CACHE_TTL_SECONDS = float(os.getenv("BYBIT_INSTRUMENT_CACHE_TTL_SECONDS", "600"))
 _BYBIT_INSTRUMENT_NEGATIVE_TTL_SECONDS = float(os.getenv("BYBIT_INSTRUMENT_NEGATIVE_TTL_SECONDS", "30"))
+BINANCE_FUTURES_BASE = "https://fapi.binance.com"
+_BINANCE_EXCHANGE_INFO_CACHE: Dict[str, object] = {"ts": 0.0, "symbols": []}
+_BINANCE_EXCHANGE_INFO_CACHE_TTL_SECONDS = float(
+    os.getenv("BINANCE_EXCHANGE_INFO_CACHE_TTL_SECONDS", "600")
+)
+_BINANCE_RANGE_CACHE: Dict[str, Dict[str, object]] = {}
+_BINANCE_RANGE_CACHE_TTL_SECONDS = float(os.getenv("BINANCE_RANGE_CACHE_TTL_SECONDS", "3"))
 _BYBIT_TICKER_CACHE: Dict[str, Dict[str, object]] = {}
 _BYBIT_TICKER_CACHE_TTL_SECONDS = float(os.getenv("BYBIT_TICKER_CACHE_TTL_SECONDS", "3"))
 _BYBIT_TICKER_INFLIGHT: Dict[str, "asyncio.Task[Dict[str, object]]"] = {}
@@ -4090,6 +4097,226 @@ async def _bybit_resolve_and_fetch_specs(query: str, *, include_btc_reference: b
     return {k: v for k, v in specs.items() if v is not None}
 
 
+_BINANCE_RANGE_INTERVALS = [
+    ("range.1m", "1m"),
+    ("range.5m", "5m"),
+    ("range.15m", "15m"),
+    ("range.30m", "30m"),
+    ("range.1h", "1h"),
+    ("range.4h", "4h"),
+    ("range.1d", "1d"),
+    ("range.1w", "1w"),
+    ("range.1mo", "1M"),
+]
+
+
+async def _binance_futures_get_async(path: str, params: Optional[Dict[str, object]] = None) -> object:
+    timeout = httpx.Timeout(6.0, connect=2.0, read=6.0, write=6.0, pool=2.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        response = await client.get(f"{BINANCE_FUTURES_BASE}{path}", params=params or {})
+    response.raise_for_status()
+    return response.json()
+
+
+async def _binance_exchange_symbols_cached() -> List[Dict[str, object]]:
+    now = time.time()
+    cached = _BINANCE_EXCHANGE_INFO_CACHE.get("symbols")
+    cached_ts = float(_BINANCE_EXCHANGE_INFO_CACHE.get("ts") or 0.0)
+    if isinstance(cached, list) and cached and (now - cached_ts) <= _BINANCE_EXCHANGE_INFO_CACHE_TTL_SECONDS:
+        return [dict(row) for row in cached if isinstance(row, dict)]
+
+    try:
+        payload = await _binance_futures_get_async("/fapi/v1/exchangeInfo")
+        rows = payload.get("symbols") if isinstance(payload, dict) else None
+        symbols = [dict(row) for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+        if not symbols:
+            raise ValueError("Binance USDⓈ-M exchange information returned no symbols")
+    except Exception:
+        if isinstance(cached, list) and cached:
+            return [dict(row) for row in cached if isinstance(row, dict)]
+        raise
+
+    _BINANCE_EXCHANGE_INFO_CACHE["ts"] = now
+    _BINANCE_EXCHANGE_INFO_CACHE["symbols"] = symbols
+    return [dict(row) for row in symbols]
+
+
+def _binance_base_key(base_url: str) -> str:
+    parsed = urlparse(str(base_url or "").strip())
+    return str(parsed.netloc or parsed.path or "").strip().lower()
+
+
+def _binance_range_cache_key(symbol: str, interval: str) -> str:
+    return f"{_binance_base_key(BINANCE_FUTURES_BASE)}:{_normalize_instrument_key(symbol)}:{interval}"
+
+
+async def _binance_fetch_range_specs_async(symbol: str) -> Tuple[Dict[str, float], List[Dict[str, str]]]:
+    out: Dict[str, float] = {}
+    warnings: List[Dict[str, str]] = []
+    now = time.time()
+    for field, interval in _BINANCE_RANGE_INTERVALS:
+        cache_key = _binance_range_cache_key(symbol, interval)
+        cached = _BINANCE_RANGE_CACHE.get(cache_key)
+        if cached and (now - float(cached.get("ts") or 0.0)) <= _BINANCE_RANGE_CACHE_TTL_SECONDS:
+            cached_value = cached.get("value")
+            if isinstance(cached_value, (int, float)):
+                out[field] = float(cached_value)
+                continue
+        try:
+            payload = await _binance_futures_get_async(
+                "/fapi/v1/klines",
+                {"symbol": symbol, "interval": interval, "limit": 1},
+            )
+            if not isinstance(payload, list) or not payload or not isinstance(payload[-1], list):
+                raise ValueError("No kline rows returned")
+            row = payload[-1]
+            if len(row) < 4:
+                raise ValueError("Kline row missing OHLC fields")
+            open_price = float(row[1])
+            high = float(row[2])
+            low = float(row[3])
+            if open_price <= 0:
+                raise ValueError(f"Open price <= 0 ({open_price})")
+            value = (high - low) / open_price
+            out[field] = value
+            _BINANCE_RANGE_CACHE[cache_key] = {"ts": now, "value": value}
+        except Exception as exc:
+            warnings.append({"scope": "range", "symbol": symbol, "field": field, "message": str(exc)})
+    return out, warnings
+
+
+def _binance_filter_map(instrument: Dict[str, object]) -> Dict[str, Dict[str, object]]:
+    filters = instrument.get("filters")
+    if not isinstance(filters, list):
+        return {}
+    return {
+        str(item.get("filterType") or ""): item
+        for item in filters
+        if isinstance(item, dict) and item.get("filterType")
+    }
+
+
+async def _binance_avg_7d_turnover_usd_async(symbol: str) -> Optional[float]:
+    try:
+        payload = await _binance_futures_get_async(
+            "/fapi/v1/klines", {"symbol": symbol, "interval": "1d", "limit": 7}
+        )
+        values = [float(row[7]) for row in payload if isinstance(row, list) and len(row) >= 8]
+        return (sum(values) / len(values)) if values else None
+    except Exception:
+        return None
+
+
+async def _binance_resolve_and_fetch_specs(
+    query: str, *, include_btc_reference: bool = True
+) -> Optional[Dict[str, object]]:
+    want_key = _normalize_instrument_key(query)
+    if not want_key:
+        return None
+    instruments = await _binance_exchange_symbols_cached()
+    resolved_inst = next(
+        (
+            row
+            for row in instruments
+            if _normalize_instrument_key(row.get("symbol")) == want_key
+            and str(row.get("contractType") or "").upper() == "PERPETUAL"
+        ),
+        None,
+    )
+    if not resolved_inst:
+        return None
+
+    symbol = str(resolved_inst.get("symbol") or "").upper()
+    warnings: List[Dict[str, str]] = []
+    ticker: Dict[str, object] = {}
+    premium: Dict[str, object] = {}
+    open_interest: Dict[str, object] = {}
+    for field, path in (
+        ("ticker", "/fapi/v1/ticker/24hr"),
+        ("premiumIndex", "/fapi/v1/premiumIndex"),
+        ("openInterest", "/fapi/v1/openInterest"),
+    ):
+        try:
+            payload = await _binance_futures_get_async(path, {"symbol": symbol})
+            if not isinstance(payload, dict):
+                raise ValueError("Unexpected response shape")
+            if field == "ticker":
+                ticker = payload
+            elif field == "premiumIndex":
+                premium = payload
+            else:
+                open_interest = payload
+        except Exception as exc:
+            warnings.append({"scope": field, "symbol": symbol, "field": field, "message": str(exc)})
+
+    filters = _binance_filter_map(resolved_inst)
+    price_filter = filters.get("PRICE_FILTER", {})
+    lot_filter = filters.get("LOT_SIZE", {})
+    market_lot_filter = filters.get("MARKET_LOT_SIZE", {})
+    notional_filter = filters.get("MIN_NOTIONAL", {})
+    last_price = ticker.get("lastPrice") or premium.get("markPrice")
+    open_interest_value = None
+    try:
+        open_interest_value = float(open_interest.get("openInterest")) * float(last_price)
+    except (TypeError, ValueError):
+        pass
+    specs: Dict[str, object] = {
+        "source": "binance_usdm",
+        "query": query,
+        "resolved_symbol": symbol,
+        "category": "linear",
+        "lastPrice": last_price,
+        "fundingRate": premium.get("lastFundingRate"),
+        "nextFundingTime": premium.get("nextFundingTime"),
+        "launchTime": resolved_inst.get("onboardDate"),
+        "openInterest": open_interest.get("openInterest"),
+        "openInterestValue": open_interest_value,
+        "volume24hUsd": ticker.get("quoteVolume"),
+        "contractType": resolved_inst.get("contractType"),
+        "status": resolved_inst.get("status"),
+        "baseCoin": resolved_inst.get("baseAsset"),
+        "quoteCoin": resolved_inst.get("quoteAsset"),
+        "tickSize": price_filter.get("tickSize"),
+        "minPrice": price_filter.get("minPrice"),
+        "maxPrice": price_filter.get("maxPrice"),
+        "qtyStep": lot_filter.get("stepSize"),
+        "minOrderQty": lot_filter.get("minQty"),
+        "maxOrderQty": lot_filter.get("maxQty"),
+        "maxMktOrderQty": market_lot_filter.get("maxQty"),
+        "minNotionalValue": notional_filter.get("notional"),
+    }
+    avg7d = await _binance_avg_7d_turnover_usd_async(symbol)
+    if avg7d is not None:
+        specs["avg7dTurnoverUsd"] = avg7d
+    range_specs, range_warnings = await _binance_fetch_range_specs_async(symbol)
+    specs.update(range_specs)
+    warnings.extend(range_warnings)
+    units = {
+        "fundingRate": "fraction",
+        "lastPrice": "price",
+        "launchTime": "timestamp_ms",
+        "nextFundingTime": "timestamp_ms",
+        "openInterest": "contracts",
+        "openInterestValue": "usd_value",
+        "volume24hUsd": "usd_value_24h",
+        "avg7dTurnoverUsd": "usd_value_per_day_avg_7d",
+    }
+    for field, _interval in _BINANCE_RANGE_INTERVALS:
+        units[field] = "fraction"
+    specs["_units"] = units
+
+    if include_btc_reference and str(resolved_inst.get("baseAsset") or "").upper() != "BTC":
+        btc_specs = await _binance_resolve_and_fetch_specs("BTCUSDT", include_btc_reference=False)
+        if btc_specs:
+            specs["_btc_reference"] = {
+                key: value for key, value in btc_specs.items() if not str(key).startswith("_")
+            }
+            warnings.extend(btc_specs.get("_spec_warnings") or [])
+    if warnings:
+        specs["_spec_warnings"] = warnings
+    return {key: value for key, value in specs.items() if value is not None}
+
+
 async def _fetch_instrument_specs(
     query: str,
     prefer: Optional[str] = None,
@@ -4102,18 +4329,24 @@ async def _fetch_instrument_specs(
 
     pref = str(prefer or "").strip().lower()
     specs: Optional[Dict[str, object]] = None
-    if pref in {"bybit", "crypto", "perp", "perpetual"}:
-        specs = await _bybit_resolve_and_fetch_specs(q)
-    elif pref in {"oanda", "fx", "forex"}:
-        specs = await _oanda_resolve_and_fetch_specs(q)
-    elif _is_likely_fx_pair(q):
-        specs = await _oanda_resolve_and_fetch_specs(q)
-    elif _is_likely_bybit_symbol(q):
-        specs = await _bybit_resolve_and_fetch_specs(q)
-    else:
-        specs = await _oanda_resolve_and_fetch_specs(q)
-        if not specs and not _is_likely_fx_pair(q):
-            specs = await _bybit_resolve_and_fetch_specs(q)
+    try:
+        if pref in {"bybit", "crypto", "perp", "perpetual"}:
+            specs = await _binance_resolve_and_fetch_specs(q)
+        elif pref in {"oanda", "fx", "forex"}:
+            specs = await _oanda_resolve_and_fetch_specs(q)
+        elif _is_likely_fx_pair(q):
+            specs = await _oanda_resolve_and_fetch_specs(q)
+        elif _is_likely_bybit_symbol(q):
+            specs = await _binance_resolve_and_fetch_specs(q)
+        else:
+            specs = await _oanda_resolve_and_fetch_specs(q)
+            if not specs and not _is_likely_fx_pair(q):
+                specs = await _binance_resolve_and_fetch_specs(q)
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Binance USDⓈ-M specification request failed for {q}: {exc}",
+        ) from exc
 
     if not specs:
         raise HTTPException(status_code=404, detail=f"Instrument not found for query: {q}")

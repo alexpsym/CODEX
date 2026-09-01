@@ -1,9 +1,11 @@
-Oanda Volatility tool and Pepperstone/MT5 ATR retirement
+Instrument Lookup Binance specifications and interval-range correctness
 
-- Added `render/oanda_volatility.py`, a separate local managed web tool that discovers active OANDA `CURRENCY` instruments and calculates Wilder ATR(14) percentages from completed mid candles for 1m, 5m, 1h, 1D, 1W and 1Mo.
-- Added bounded concurrent requests, completed-candle-aware caching, background refresh progress, deterministic ATR/name sorting, five-decimal percentage display, and per-timeframe N/A/error/stale diagnostics without mixing OANDA data with Pepperstone/MT5 prices.
-- Added the exact `Oanda Volatility` dashboard button beside `Oanda Spreads`, the canonical `/oanda-volatility` route, a unique `oanda-volatility` managed process, click-only startup, and targeted shutdown handling.
-- Removed the Pepperstone/MT5 ATR window, test, MQL5 source and ATR-only documentation. Removed the exact deployed `MarketWatchATRPercentFeed.mq5` and `.ex5` copies from the configured Pepperstone terminal Experts directory; no matching ATR desktop process was running.
-- Preserved the MT5 Market Spread feed/window, Oanda Spreads, Bybit Scanner and Alerts. Updated one mixed MT5 preservation test so it no longer reads the retired ATR window.
-- Targeted verification only: 4 exact pytest nodes passed; `py_compile` passed for the two changed Python runtime files; `node --check render/static/dashboard.js` passed; `git diff --check` passed; the narrow retired-identifier scan returned no matches.
-- A live OANDA request was not performed because network access is restricted; no broad tests or service smoke checks were run.
+- Root cause 1: the canonical Instrument Lookup crypto path resolved and loaded specifications only through Bybit. ZECUSDT is an active Binance USDⓈ-M perpetual but was not resolved by that source, so the independent journal request succeeded while specifications returned not found.
+- Root cause 2: movement ranges were also sourced through Bybit interval aliases instead of the required Binance USDⓈ-M contract. The frontend did not reuse or mis-index values; equal live values can legitimately occur when current candles overlap. The corrected path now associates every response key with its exact Binance interval and a host+symbol+interval cache key.
+- Added Binance USDⓈ-M exchange-info lookup with successful-response caching, stale-cache retry behavior, no negative caching, precise upstream failure reporting, and generic normalization for compact, slash-separated, and space-separated symbols.
+- Parsed exchange filters by filterType, independent of array order, and retained available specifications when optional filters are absent.
+- Preserved the existing (high - low) / open formula, one-candle lookback, response field names, journal independence, frontend rendering/formatting, route, and UI layout.
+- Changed only render/master_service.py, tests/test_master_service_instrument_specs.py, and this summary. render/static/instrument_lookup.js did not require a change.
+- Targeted verification: the two exact new pytest nodes passed together; after the route-level error translation changed, only the affected ZEC node was rerun and passed. No complete test file, suite, broad lint, syntax-only duplicate check, or general smoke test was run.
+- Final requirement comparison: ZECUSDT-shaped reordered/optional-filter metadata is parsed generically; the five requested BTC labels use deliberately distinct interval fixtures and distinct cache keys; journal/UI behavior is unchanged; all task files are authorized.
+- Live evidence: one focused Binance exchange-info read confirmed ZECUSDT is TRADING/PERPETUAL and lacks several optional filters; one focused BTC kline read confirmed exact interval requests and demonstrated that equal current-candle values can be legitimate.
