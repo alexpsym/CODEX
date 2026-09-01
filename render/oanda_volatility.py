@@ -49,6 +49,17 @@ TIMEFRAME_SECONDS: dict[str, Optional[int]] = {
     "1Mo": None,
 }
 TIMEFRAMES = tuple(TIMEFRAME_GRANULARITIES)
+MAJOR_FOREX_PAIRS = frozenset(
+    {
+        "AUD_USD",
+        "EUR_USD",
+        "GBP_USD",
+        "NZD_USD",
+        "USD_CAD",
+        "USD_CHF",
+        "USD_JPY",
+    }
+)
 
 
 def _mode_from_env() -> str:
@@ -177,6 +188,19 @@ def sort_rows(rows: Iterable[Mapping[str, object]], timeframe: str = "1m") -> li
         return (1, 0.0, instrument) if value is None else (0, -value, instrument)
 
     return [copy.deepcopy(dict(row)) for row in sorted(rows, key=key)]
+
+
+def split_currency_rows(
+    rows: Iterable[Mapping[str, object]], timeframe: str = "1m"
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    """Split returned currency rows into independently ranked major and other pairs."""
+
+    major_rows: list[Mapping[str, object]] = []
+    other_rows: list[Mapping[str, object]] = []
+    for row in rows:
+        instrument = str(row.get("instrument") or row.get("symbol") or "").upper()
+        (major_rows if instrument in MAJOR_FOREX_PAIRS else other_rows).append(row)
+    return sort_rows(major_rows, timeframe), sort_rows(other_rows, timeframe)
 
 
 def _parse_time(value: object) -> Optional[datetime]:
@@ -501,7 +525,7 @@ PAGE_TEMPLATE = r"""
     select,button{border:1px solid #3b82f6;border-radius:6px;background:#1e293b;color:#eff6ff;padding:7px 11px;font-weight:700}button{background:#2563eb;cursor:pointer}button:disabled{opacity:.6;cursor:wait}
     main{padding:18px 22px}.status{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:12px;color:#cbd5e1;font-size:13px;flex-wrap:wrap}.error{color:#fca5a5}.stale{color:#fde68a}
     .progress{height:7px;background:#1e293b;border-radius:999px;overflow:hidden;margin-bottom:12px}.progress>div{height:100%;width:0;background:#3b82f6;transition:width .2s}
-    .table-wrap{max-height:calc(100vh - 190px);overflow:auto;border:1px solid #243044;border-radius:8px;background:#0f172a}table{width:100%;min-width:820px;border-collapse:collapse}th,td{padding:10px 9px;border-right:1px solid #243044;border-bottom:1px solid #243044;text-align:right;font-size:12px}th{position:sticky;top:0;z-index:1;background:#111827;color:#cbd5e1}th:first-child,td:first-child{text-align:left;position:sticky;left:0;background:#111827;font-weight:900}td.na{color:#94a3b8}tr:hover td{background:#172033}tr:hover td:first-child{background:#172033}
+    .pair-section+.pair-section{margin-top:18px}.pair-section h2{font-size:14px;margin:0 0 7px;color:#cbd5e1}.table-wrap{max-height:calc(100vh - 190px);overflow:auto;border:1px solid #243044;border-radius:8px;background:#0f172a}table{width:100%;min-width:820px;border-collapse:collapse}th,td{padding:10px 9px;border-right:1px solid #243044;border-bottom:1px solid #243044;text-align:right;font-size:12px}th{position:sticky;top:0;z-index:1;background:#111827;color:#cbd5e1}th:first-child,td:first-child{text-align:left;position:sticky;left:0;background:#111827;font-weight:900}td.na{color:#94a3b8}tr:hover td{background:#172033}tr:hover td:first-child{background:#172033}
   </style>
 </head>
 <body>
@@ -509,14 +533,16 @@ PAGE_TEMPLATE = r"""
     <div class="actions"><label>Rank by <select id="rank">{% for tf in timeframes %}<option value="{{ tf }}">{{ tf }}</option>{% endfor %}</select></label><button id="refresh">Refresh</button></div>
   </header>
   <main><div class="status"><span id="status">Loading OANDA currency instruments.</span><span id="updated">Not updated</span></div><div class="progress"><div id="bar"></div></div>
-    <div class="table-wrap"><table><thead><tr><th>Instrument</th>{% for tf in timeframes %}<th>ATR % {{ tf }}</th>{% endfor %}<th>Data state</th></tr></thead><tbody id="body"><tr><td colspan="8">Loading…</td></tr></tbody></table></div>
+    <div id="sections"><div class="pair-section"><h2>Major Forex Pairs</h2><div class="table-wrap"><table><thead><tr><th>Instrument</th>{% for tf in timeframes %}<th>ATR % {{ tf }}</th>{% endfor %}<th>Data state</th></tr></thead><tbody><tr><td colspan="8">Loading…</td></tr></tbody></table></div></div><div class="pair-section"><h2>Other Forex Pairs</h2><div class="table-wrap"><table><thead><tr><th>Instrument</th>{% for tf in timeframes %}<th>ATR % {{ tf }}</th>{% endfor %}<th>Data state</th></tr></thead><tbody><tr><td colspan="8">Loading…</td></tr></tbody></table></div></div></div>
   </main>
   <script>
-  (()=>{const base={{ base_path|tojson }};const tfs={{ timeframes|tojson }};const body=document.getElementById('body');const status=document.getElementById('status');const updated=document.getElementById('updated');const bar=document.getElementById('bar');const rank=document.getElementById('rank');const refresh=document.getElementById('refresh');let snapshot=null,timer=null;
+  (()=>{const base={{ base_path|tojson }};const tfs={{ timeframes|tojson }};const majorPairs=new Set({{ major_pairs|tojson }});const sections=document.getElementById('sections');const status=document.getElementById('status');const updated=document.getElementById('updated');const bar=document.getElementById('bar');const rank=document.getElementById('rank');const refresh=document.getElementById('refresh');let snapshot=null,timer=null;
   const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const finite=v=>{if(v===null||v===undefined||v==='')return null;const n=Number(v);return Number.isFinite(n)?n:null};const fmt=v=>{const n=finite(v);return n===null?'N/A':`${n.toFixed(5)}%`};
   const sorted=rows=>[...(Array.isArray(rows)?rows:[])].sort((a,b)=>{const av=finite(a?.atr_pct?.[rank.value]),bv=finite(b?.atr_pct?.[rank.value]);if(av===null&&bv!==null)return 1;if(av!==null&&bv===null)return -1;if(av!==null&&bv!==null&&av!==bv)return bv-av;return String(a.instrument).localeCompare(String(b.instrument));});
-  const render=payload=>{snapshot=payload||{};const p=snapshot.progress||{};const total=Number(p.total||0),done=Number(p.completed||0);bar.style.width=`${total?Math.min(100,done/total*100):(p.in_progress?8:0)}%`;refresh.disabled=Boolean(p.in_progress);status.className=snapshot.state==='error'?'error':(snapshot.state==='partial'||snapshot.state==='stale'?'stale':'');status.textContent=snapshot.refresh_error?.message||`${p.detail||snapshot.state||'Idle'}${total?` (${done}/${total})`:''}`;updated.textContent=snapshot.updated_at?`Updated ${new Date(snapshot.updated_at).toLocaleString()} · ${snapshot.instrument_count||0} FX pairs`:'Not updated';const rows=sorted(snapshot.rows);body.innerHTML=rows.map(row=>{const cells=tfs.map(tf=>{const value=finite(row?.atr_pct?.[tf]);const diagnostic=String(row?.diagnostics?.[tf]||'');return `<td class="${value===null?'na':''}" title="${esc(diagnostic)}">${esc(fmt(value))}</td>`}).join('');const states=Object.values(row.atr_status||{});const state=states.includes('error')?'Partial / error':(states.includes('stale')?'Partial / stale':(states.includes('loading')?'Loading':'Fresh'));return `<tr><td>${esc(row.instrument)}</td>${cells}<td>${esc(state)}</td></tr>`}).join('')||'<tr><td colspan="8">No OANDA currency instruments available.</td></tr>';if(p.in_progress){clearTimeout(timer);timer=setTimeout(poll,1000)}else{clearTimeout(timer);timer=setTimeout(poll,30000)}};
+  const rowsHtml=rows=>rows.map(row=>{const cells=tfs.map(tf=>{const value=finite(row?.atr_pct?.[tf]);const diagnostic=String(row?.diagnostics?.[tf]||'');return `<td class="${value===null?'na':''}" title="${esc(diagnostic)}">${esc(fmt(value))}</td>`}).join('');const states=Object.values(row.atr_status||{});const state=states.includes('error')?'Partial / error':(states.includes('stale')?'Partial / stale':(states.includes('loading')?'Loading':'Fresh'));return `<tr><td>${esc(row.instrument)}</td>${cells}<td>${esc(state)}</td></tr>`}).join('')||'<tr><td colspan="8">No OANDA currency instruments available.</td></tr>';
+  const sectionHtml=(title,rows)=>`<section class="pair-section"><h2>${title}</h2><div class="table-wrap"><table><thead><tr><th>Instrument</th>${tfs.map(tf=>`<th>ATR % ${esc(tf)}</th>`).join('')}<th>Data state</th></tr></thead><tbody>${rowsHtml(rows)}</tbody></table></div></section>`;
+  const render=payload=>{snapshot=payload||{};const p=snapshot.progress||{};const total=Number(p.total||0),done=Number(p.completed||0);bar.style.width=`${total?Math.min(100,done/total*100):(p.in_progress?8:0)}%`;refresh.disabled=Boolean(p.in_progress);status.className=snapshot.state==='error'?'error':(snapshot.state==='partial'||snapshot.state==='stale'?'stale':'');status.textContent=snapshot.refresh_error?.message||`${p.detail||snapshot.state||'Idle'}${total?` (${done}/${total})`:''}`;updated.textContent=snapshot.updated_at?`Updated ${new Date(snapshot.updated_at).toLocaleString()} · ${snapshot.instrument_count||0} FX pairs`:'Not updated';const rows=sorted(snapshot.rows);const majors=rows.filter(row=>majorPairs.has(String(row?.instrument||'').toUpperCase()));const others=rows.filter(row=>!majorPairs.has(String(row?.instrument||'').toUpperCase()));sections.innerHTML=sectionHtml('Major Forex Pairs',majors)+sectionHtml('Other Forex Pairs',others);if(p.in_progress){clearTimeout(timer);timer=setTimeout(poll,1000)}else{clearTimeout(timer);timer=setTimeout(poll,30000)}};
   const poll=async()=>{try{const r=await fetch(`${base}/api/status`,{cache:'no-store'});render(await r.json())}catch(e){status.className='error';status.textContent=e.message||'Status request failed.'}};
   refresh.onclick=async()=>{refresh.disabled=true;await fetch(`${base}/api/refresh`,{method:'POST'});poll()};rank.onchange=()=>{if(snapshot)render(snapshot)};poll();setInterval(()=>fetch(`${base}/api/refresh`,{method:'POST'}).catch(()=>{}),{{ auto_refresh_ms }});
   })();
@@ -532,6 +558,7 @@ def index() -> str:
         PAGE_TEMPLATE,
         base_path=APP_BASE_PATH,
         timeframes=list(TIMEFRAMES),
+        major_pairs=sorted(MAJOR_FOREX_PAIRS),
         auto_refresh_ms=AUTO_REFRESH_SECONDS * 1000,
     )
 

@@ -15011,6 +15011,7 @@ async def _supervise_autostart_scripts(names: List[str]) -> None:
 
 @app.on_event("startup")
 async def _autostart_scripts() -> None:
+    _start_local_terminal_exit_watcher()
     AUTOSTART_LOGGER.info(format_env_bootstrap_log(_MASTER_ENV_INFO))
     AUTOSTART_LOGGER.info(
         "Local state mode: LOCAL_STATE_ONLY=%s effective_mode=%s env_loaded_file=%s",
@@ -39720,6 +39721,83 @@ def _is_local_exit_allowed() -> bool:
     return _resolve_app_profile() == "local"
 
 
+_LOCAL_TERMINAL_EXIT_WATCHER_LOCK = threading.Lock()
+_LOCAL_TERMINAL_EXIT_WATCHER: Optional[threading.Thread] = None
+
+
+def _request_local_exit(reason: str, action: str = "local_exit") -> Tuple[Path, Optional[Path]]:
+    """Write local-exit markers, log, and schedule the owned master shutdown."""
+
+    sentinel_path, normal_path = _write_local_exit_markers(reason, action)
+    APP_LOGGER.info(
+        "LOCAL_EXIT_REQUESTED reason=%s action=%s sentinel=%s normal_marker=%s",
+        reason,
+        action,
+        sentinel_path,
+        normal_path,
+    )
+    _schedule_local_master_process_exit()
+    return sentinel_path, normal_path
+
+
+def _handle_local_terminal_key(key: str) -> bool:
+    """Request the canonical local exit only for terminal Ctrl+Q."""
+
+    if key != "\x11" or not _is_local_exit_allowed():
+        return False
+    try:
+        _request_local_exit("ctrl_q")
+    except Exception:
+        APP_LOGGER.exception("LOCAL_EXIT_REQUEST_FAILED reason=ctrl_q")
+        return False
+    return True
+
+
+def _watch_local_terminal_exit(stop_event: threading.Event) -> None:
+    try:
+        import msvcrt
+    except ImportError:
+        return
+    while not stop_event.wait(0.1):
+        try:
+            if not msvcrt.kbhit():
+                continue
+            key = msvcrt.getwch()
+        except Exception:
+            return
+        if _handle_local_terminal_key(key):
+            stop_event.set()
+            return
+
+
+def _start_local_terminal_exit_watcher() -> bool:
+    """Start one low-idle console watcher when this is an interactive local master."""
+
+    if not sys.platform.startswith("win") or not _is_local_exit_allowed():
+        return False
+    try:
+        if not sys.stdin.isatty():
+            return False
+        import msvcrt  # noqa: F401
+    except (AttributeError, ImportError, OSError):
+        return False
+    global _LOCAL_TERMINAL_EXIT_WATCHER
+    with _LOCAL_TERMINAL_EXIT_WATCHER_LOCK:
+        if _LOCAL_TERMINAL_EXIT_WATCHER is not None and _LOCAL_TERMINAL_EXIT_WATCHER.is_alive():
+            return False
+        stop_event = threading.Event()
+        watcher = threading.Thread(
+            target=_watch_local_terminal_exit,
+            args=(stop_event,),
+            name="local-master-terminal-exit",
+            daemon=True,
+        )
+        _LOCAL_TERMINAL_EXIT_WATCHER = watcher
+        watcher.start()
+    print("Press Ctrl+Q to shut down Local Trading Tools.", flush=True)
+    return True
+
+
 def _close_local_master_edge_target(current_url: Optional[str]) -> Dict[str, object]:
     debug_port_raw = str(os.getenv("LOCAL_MASTER_EDGE_DEBUG_PORT") or "").strip()
     if not debug_port_raw.isdigit():
@@ -39830,7 +39908,7 @@ async def local_exit(payload: Dict[str, object] = Body(default_factory=dict)) ->
     if not _is_local_exit_allowed():
         raise HTTPException(status_code=404, detail="Local exit is only available in local profile.")
     try:
-        sentinel_path, normal_path = _write_local_exit_markers("exit_button", "local_exit")
+        sentinel_path, normal_path = _request_local_exit("exit_button")
     except HTTPException:
         raise
     except Exception as exc:
@@ -39843,10 +39921,4 @@ async def local_exit(payload: Dict[str, object] = Body(default_factory=dict)) ->
         "action": "local_exit",
     }
     response = JSONResponse(response_payload)
-    APP_LOGGER.info(
-        "LOCAL_EXIT_REQUESTED reason=exit_button action=local_exit sentinel=%s normal_marker=%s",
-        sentinel_path,
-        normal_path,
-    )
-    _schedule_local_master_process_exit()
     return response

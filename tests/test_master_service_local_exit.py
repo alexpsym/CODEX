@@ -148,6 +148,23 @@ def test_local_exit_success(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> 
     assert calls == ["markers", "log", "schedule"]
 
 
+def test_terminal_ctrl_q_uses_canonical_local_exit_but_plain_q_does_not(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(master_service, "_resolve_app_profile", lambda: "local")
+    monkeypatch.setattr(
+        master_service,
+        "_request_local_exit",
+        lambda reason, action="local_exit": calls.append((reason, action)),
+    )
+
+    assert master_service._handle_local_terminal_key("q") is False
+    assert calls == []
+    assert master_service._handle_local_terminal_key("\x11") is True
+    assert calls == [("ctrl_q", "local_exit")]
+
+
 def test_local_shutdown_success_without_edge_close(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     client = TestClient(master_service.app)
     calls: list[str] = []

@@ -3,8 +3,10 @@ from __future__ import annotations
 import pytest
 
 from render.oanda_volatility import (
+    MAJOR_FOREX_PAIRS,
     TIMEFRAME_GRANULARITIES,
     filter_currency_instruments,
+    split_currency_rows,
     sort_rows,
     wilder_atr_percent,
 )
@@ -73,3 +75,42 @@ def test_currency_filter_and_deterministic_sort() -> None:
     assert rows[-1]["atr_pct"]["1m"] is None
     assert rows[-1]["atr_status"]["1m"] == "error"
     assert rows[-1]["diagnostics"]["1m"] == "bounded request failed"
+
+
+def test_currency_rows_split_majors_first_without_duplicates() -> None:
+    returned = filter_currency_instruments(
+        {
+            "instruments": [
+                {"name": "CAD_JPY", "type": "CURRENCY"},
+                {"name": "EUR_USD", "type": "CURRENCY"},
+                {"name": "USD_JPY", "type": "CURRENCY"},
+                {"name": "EUR_GBP", "type": "CURRENCY"},
+                {"name": "GBP_USD", "type": "CURRENCY"},
+                {"name": "XAU_USD", "type": "METAL"},
+            ]
+        }
+    )
+    rows = [
+        {"instrument": instrument, "atr_pct": {"1m": value}}
+        for instrument, value in {
+            "CAD_JPY": 0.9,
+            "EUR_USD": 0.1,
+            "USD_JPY": 0.3,
+            "EUR_GBP": 0.2,
+            "GBP_USD": 0.4,
+        }.items()
+    ]
+
+    major_rows, other_rows = split_currency_rows(rows, "1m")
+
+    assert [row["instrument"] for row in major_rows] == ["GBP_USD", "USD_JPY", "EUR_USD"]
+    assert [row["instrument"] for row in other_rows] == ["CAD_JPY", "EUR_GBP"]
+    assert {row["instrument"] for row in major_rows}.issubset(MAJOR_FOREX_PAIRS)
+    assert [row["instrument"] for row in [*major_rows, *other_rows]] == [
+        "GBP_USD",
+        "USD_JPY",
+        "EUR_USD",
+        "CAD_JPY",
+        "EUR_GBP",
+    ]
+    assert {row["instrument"] for row in [*major_rows, *other_rows]} == set(returned)
