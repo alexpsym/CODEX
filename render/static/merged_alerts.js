@@ -33,6 +33,15 @@
         { value: '1w', label: '1 week' },
         { value: '1mo', label: '1 month' },
     ];
+    const ACTIVE_PERIODS = [
+        { value: 'anytime', label: 'Anytime' },
+        { value: 'weekend_brisbane', label: 'Weekend only — Saturday 7:00 am to Monday 7:00 am, Brisbane time' },
+    ];
+    const activePeriodLabel = (value) => (
+        value === 'weekend_brisbane'
+            ? 'Weekend only — Saturday 7:00 am to Monday 7:00 am, Brisbane time'
+            : 'Anytime'
+    );
     const expiryForPreset = (preset, now = new Date()) => {
         const durationMinutes = { '1h': 60, '4h': 240, '1d': 24 * 60, '1w': 7 * 24 * 60 };
         if (Object.prototype.hasOwnProperty.call(durationMinutes, preset)) {
@@ -137,8 +146,10 @@
         const messageInput = document.createElement('input'); messageInput.type='text'; messageInput.placeholder='Optional custom message';
         const enabledInput = document.createElement('input'); enabledInput.type='checkbox'; enabledInput.checked=true;
         const expiryPresetSelect = document.createElement('select');
+        const activePeriodSelect = document.createElement('select');
+        ACTIVE_PERIODS.forEach((item) => { const option=document.createElement('option'); option.value=item.value; option.textContent=item.label; activePeriodSelect.appendChild(option); });
 
-        formGrid.append(makeLabel('Symbol', symbolInput), makeLabel('Type', kindSelect), makeLabel('Price direction', priceDirectionSelect), makeLabel('Move direction', moveDirectionSelect), makeLabel('Target price', targetPriceInput), makeLabel('Move threshold', thresholdInput), makeLabel('Unit', unitSelect), makeLabel('Window', windowSelect), makeLabel('Cooldown (seconds)', cooldownInput), makeLabel('Custom message', messageInput), makeLabel('Expiry', expiryPresetSelect), makeLabel('Enabled', enabledInput));
+        formGrid.append(makeLabel('Symbol', symbolInput), makeLabel('Type', kindSelect), makeLabel('Price direction', priceDirectionSelect), makeLabel('Move direction', moveDirectionSelect), makeLabel('Target price', targetPriceInput), makeLabel('Move threshold', thresholdInput), makeLabel('Unit', unitSelect), makeLabel('Window', windowSelect), makeLabel('Cooldown (seconds)', cooldownInput), makeLabel('Custom message', messageInput), makeLabel('Expiry', expiryPresetSelect), makeLabel('Active period', activePeriodSelect), makeLabel('Enabled', enabledInput));
         section.appendChild(formGrid);
 
         const actions=document.createElement('div'); actions.className='row';
@@ -180,7 +191,7 @@
             moveDirectionSelect.disabled = isPrice; thresholdInput.disabled = isPrice; unitSelect.disabled = isPrice; windowSelect.disabled = isPrice;
         };
 
-        const resetForm = () => { editingId=null; editingExpiresAt=null; symbolInput.value=''; kindSelect.value='price'; priceDirectionSelect.value='above'; moveDirectionSelect.value='up'; targetPriceInput.value=''; thresholdInput.value=''; unitSelect.selectedIndex=0; windowSelect.value='900'; cooldownInput.value='0'; messageInput.value=''; setExpiryPresetOptions(); enabledInput.checked=true; saveBtn.textContent='Save alert'; toggleFields(); };
+        const resetForm = () => { editingId=null; editingExpiresAt=null; symbolInput.value=''; kindSelect.value='price'; priceDirectionSelect.value='above'; moveDirectionSelect.value='up'; targetPriceInput.value=''; thresholdInput.value=''; unitSelect.selectedIndex=0; windowSelect.value='900'; cooldownInput.value='0'; messageInput.value=''; setExpiryPresetOptions(); activePeriodSelect.value='anytime'; enabledInput.checked=true; saveBtn.textContent='Save alert'; toggleFields(); };
         const parseRequiredNumber = (input, name) => { const value = Number(input.value); if (!Number.isFinite(value)) throw new Error(`${name} must be numeric`); return value; };
         const rowText = (customAlert) => customAlert.kind === 'price' ? `${customAlert.symbol} ${customAlert.direction} ${customAlert.target_price}` : `${customAlert.symbol} ${customAlert.direction} ${customAlert.threshold} ${customAlert.unit} in ${customAlert.window_seconds}s`;
 
@@ -209,12 +220,12 @@
                     const tr = document.createElement('tr'); tr.style.borderTop = '1px solid #334155';
                     const expired = isExpired(alertItem);
                     const expiryText = alertItem.expires_at ? new Date(alertItem.expires_at).toLocaleString() : 'No expiry';
-                    const tdMain = document.createElement('td'); tdMain.style.padding='8px'; tdMain.textContent=`${rowText(alertItem)} | Expiry: ${expiryText}${expired ? ' | Expired' : ''}`;
+                    const tdMain = document.createElement('td'); tdMain.style.padding='8px'; tdMain.textContent=`${rowText(alertItem)} | Active: ${activePeriodLabel(alertItem.active_period)} | Expiry: ${expiryText}${expired ? ' | Expired' : ''}`;
                     const tdActions = document.createElement('td'); tdActions.style.padding='8px'; tdActions.style.whiteSpace='nowrap';
                     const enabledBtn = document.createElement('button'); enabledBtn.type='button'; enabledBtn.textContent=expired ? 'Expired' : (alertItem.enabled ? 'Disable' : 'Enable'); enabledBtn.disabled=expired;
                     enabledBtn.addEventListener('click', async () => { enabledBtn.disabled=true; try { await fetchJson(`/api/${monitor}-alerts/custom-alerts/${encodeURIComponent(alertItem.id)}/enabled`, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ enabled: !alertItem.enabled }) }); await loadAlerts(); } catch (err) { console.error(err); setSettingsBadge(statusBadge, 'Toggle failed', true); window.alert(err.message || 'Unable to update alert'); } finally { enabledBtn.disabled=false; } });
                     const editBtn = document.createElement('button'); editBtn.type='button'; editBtn.textContent='Edit';
-                    editBtn.addEventListener('click', () => { editingId=alertItem.id; editingExpiresAt=alertItem.expires_at||null; symbolInput.value=alertItem.symbol||''; kindSelect.value=alertItem.kind||'price'; priceDirectionSelect.value=alertItem.direction||'above'; moveDirectionSelect.value=alertItem.direction||'up'; targetPriceInput.value=alertItem.target_price??''; thresholdInput.value=alertItem.threshold??''; unitSelect.value=alertItem.unit||unitSelect.options[0].value; windowSelect.value=String(alertItem.window_seconds||900); cooldownInput.value=String(alertItem.cooldown_seconds||0); messageInput.value=alertItem.message||''; setExpiryPresetOptions(editingExpiresAt); enabledInput.checked=Boolean(alertItem.enabled); saveBtn.textContent='Update alert'; toggleFields(); });
+                    editBtn.addEventListener('click', () => { editingId=alertItem.id; editingExpiresAt=alertItem.expires_at||null; symbolInput.value=alertItem.symbol||''; kindSelect.value=alertItem.kind||'price'; priceDirectionSelect.value=alertItem.direction||'above'; moveDirectionSelect.value=alertItem.direction||'up'; targetPriceInput.value=alertItem.target_price??''; thresholdInput.value=alertItem.threshold??''; unitSelect.value=alertItem.unit||unitSelect.options[0].value; windowSelect.value=String(alertItem.window_seconds||900); cooldownInput.value=String(alertItem.cooldown_seconds||0); messageInput.value=alertItem.message||''; setExpiryPresetOptions(editingExpiresAt); activePeriodSelect.value=alertItem.active_period||'anytime'; enabledInput.checked=Boolean(alertItem.enabled); saveBtn.textContent='Update alert'; toggleFields(); });
                     const deleteBtn = document.createElement('button'); deleteBtn.type='button'; deleteBtn.textContent='Delete';
                     deleteBtn.addEventListener('click', async () => { if (!window.confirm('Delete this custom alert?')) return; deleteBtn.disabled=true; try { await fetchJson(`/api/${monitor}-alerts/custom-alerts/${encodeURIComponent(alertItem.id)}`, { method:'DELETE' }); if (editingId===alertItem.id) resetForm(); await loadAlerts(); } catch (err) { console.error(err); setSettingsBadge(statusBadge, 'Delete failed', true); window.alert(err.message || 'Unable to delete alert'); } finally { deleteBtn.disabled=false; } });
                     tdActions.append(enabledBtn, editBtn, deleteBtn); tr.append(tdMain, tdActions); tbody.appendChild(tr);
@@ -233,7 +244,7 @@
             try {
                 let symbol = symbolInput.value.trim().toUpperCase(); if (!symbol) throw new Error('Symbol is required');
                 symbol = await resolveBybitSymbol(symbol); symbolInput.value = symbol;
-                const kind = kindSelect.value; const payload = { id: editingId || undefined, symbol, kind, enabled: enabledInput.checked, cooldown_seconds: cooldownInput.value ? parseRequiredNumber(cooldownInput, 'Cooldown seconds') : 0 };
+                const kind = kindSelect.value; const payload = { id: editingId || undefined, symbol, kind, enabled: enabledInput.checked, cooldown_seconds: cooldownInput.value ? parseRequiredNumber(cooldownInput, 'Cooldown seconds') : 0, active_period: activePeriodSelect.value };
                 if (expiryPresetSelect.value === 'keep-current' && editingExpiresAt) payload.expires_at = editingExpiresAt;
                 else if (expiryPresetSelect.value !== 'lifetime') {
                     const expiry = expiryForPreset(expiryPresetSelect.value);

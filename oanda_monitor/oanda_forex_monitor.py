@@ -102,6 +102,10 @@ _ALLOWED_ALERT_KINDS = {"price", "move"}
 _ALLOWED_PRICE_DIRECTIONS = {"above", "below"}
 _ALLOWED_MOVE_DIRECTIONS = {"up", "down", "either"}
 _ALLOWED_MOVE_UNITS = {"pips", "pct"}
+_ACTIVE_PERIOD_ANYTIME = "anytime"
+_ACTIVE_PERIOD_WEEKEND_BRISBANE = "weekend_brisbane"
+_ALLOWED_ACTIVE_PERIODS = {_ACTIVE_PERIOD_ANYTIME, _ACTIVE_PERIOD_WEEKEND_BRISBANE}
+_BRISBANE_TIMEZONE = ZoneInfo("Australia/Brisbane")
 _runtime_started_at = _dt.datetime.now(_dt.timezone.utc).isoformat()
 
 
@@ -225,6 +229,42 @@ def alert_is_expired(alert: dict, *, now: _dt.datetime | None = None) -> bool:
         return True
 
 
+def _normalized_active_period(payload: dict) -> str:
+    period = str(payload.get("active_period") or _ACTIVE_PERIOD_ANYTIME).strip().lower()
+    if period not in _ALLOWED_ACTIVE_PERIODS:
+        raise ValueError("active_period must be one of: anytime, weekend_brisbane")
+    return period
+
+
+def custom_alert_is_active(alert: dict, *, now: _dt.datetime | None = None) -> bool:
+    period = str(alert.get("active_period") or _ACTIVE_PERIOD_ANYTIME).strip().lower()
+    if period == _ACTIVE_PERIOD_ANYTIME:
+        return True
+    if period != _ACTIVE_PERIOD_WEEKEND_BRISBANE:
+        return False
+    reference = now or _dt.datetime.now(_dt.timezone.utc)
+    if reference.tzinfo is None:
+        reference = reference.replace(tzinfo=_dt.timezone.utc)
+    brisbane = reference.astimezone(_BRISBANE_TIMEZONE)
+    if brisbane.weekday() == 5:
+        return brisbane.time() >= _dt.time(7, 0)
+    if brisbane.weekday() == 6:
+        return True
+    return brisbane.weekday() == 0 and brisbane.time() < _dt.time(7, 0)
+
+
+def _active_window_start_timestamp(alert: dict, now: _dt.datetime) -> float | None:
+    if str(alert.get("active_period") or _ACTIVE_PERIOD_ANYTIME) != _ACTIVE_PERIOD_WEEKEND_BRISBANE:
+        return None
+    brisbane = now.astimezone(_BRISBANE_TIMEZONE)
+    if not custom_alert_is_active(alert, now=now):
+        return None
+    days_since_saturday = (brisbane.weekday() - 5) % 7
+    saturday = (brisbane - _dt.timedelta(days=days_since_saturday)).date()
+    start = _dt.datetime.combine(saturday, _dt.time(7, 0), tzinfo=_BRISBANE_TIMEZONE)
+    return start.timestamp()
+
+
 def _coerce_alert(payload: dict, *, allow_expired: bool = False) -> dict:
     if not isinstance(payload, dict):
         raise ValueError("Alert payload must be an object.")
@@ -249,6 +289,7 @@ def _coerce_alert(payload: dict, *, allow_expired: bool = False) -> dict:
         "kind": kind,
         "enabled": enabled,
         "cooldown_seconds": cooldown_seconds,
+        "active_period": _normalized_active_period(payload),
     }
     expires_at = _normalized_expiry(payload, allow_expired=allow_expired)
     if expires_at:
@@ -421,6 +462,7 @@ def evaluate_custom_alerts(
     pip_sizes: Dict[str, float],
 ) -> bool:
     now = time.time()
+    now_datetime = _dt.datetime.fromtimestamp(now, tz=_dt.timezone.utc)
     grace_seconds = 2
     alert_state = state.get("custom_alerts")
     if not isinstance(alert_state, dict):
@@ -429,7 +471,9 @@ def evaluate_custom_alerts(
 
     enabled_alerts = [
         alert for alert in alerts
-        if alert.get("enabled", True) and not alert_is_expired(alert)
+        if alert.get("enabled", True)
+        and not alert_is_expired(alert, now=now_datetime)
+        and custom_alert_is_active(alert, now=now_datetime)
     ]
     max_window = 0
     for alert in enabled_alerts:
@@ -454,6 +498,13 @@ def evaluate_custom_alerts(
         if not isinstance(st, dict):
             st = {}
             alert_state[alert_id] = st
+            changed = True
+
+        active_window_start = _active_window_start_timestamp(alert, now_datetime)
+        if active_window_start is not None and st.get("active_window_start") != active_window_start:
+            st["active_window_start"] = active_window_start
+            st["armed"] = True
+            st["last_trigger_at"] = 0
             changed = True
 
         armed = bool(st.get("armed", True))
@@ -496,6 +547,8 @@ def evaluate_custom_alerts(
         if not dq:
             continue
         cutoff = now - window_s - grace_seconds
+        if active_window_start is not None:
+            cutoff = max(cutoff, active_window_start)
         window_prices = [price for (ts, price) in dq if ts >= cutoff]
         if len(window_prices) < 2:
             continue

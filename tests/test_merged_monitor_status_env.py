@@ -7,8 +7,9 @@ import shutil
 import subprocess
 import sys
 from collections import deque
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 pytest.importorskip("httpx")
@@ -58,6 +59,77 @@ def test_expired_custom_alerts_are_never_evaluated_rearmed_or_sent(
     with pytest.raises(ValueError, match="future"):
         monitor._normalized_expiry({"expires_at": "2020-01-01T00:00:00Z"})
     assert monitor._normalized_expiry({"expires_at": "2099-01-01T10:00:00+10:00"}) == "2099-01-01T00:00:00Z"
+
+
+@pytest.mark.parametrize("monitor_name", ["bybit", "oanda"])
+def test_weekend_custom_alert_schedule_coercion_boundaries_and_state_isolation(
+    monitor_name: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from bybit_monitor import bybit_altcoin_monitor
+    from oanda_monitor import oanda_forex_monitor
+
+    monitor = bybit_altcoin_monitor if monitor_name == "bybit" else oanda_forex_monitor
+    symbol = "BTCUSDT" if monitor_name == "bybit" else "EUR_USD"
+    if monitor_name == "bybit":
+        monkeypatch.setattr(monitor, "_get_linear_perpetual_symbols", lambda: {symbol})
+
+    base_payload = {
+        "id": "coerce",
+        "symbol": symbol,
+        "kind": "price",
+        "direction": "above",
+        "target_price": 1.0,
+        "enabled": True,
+    }
+    assert monitor._coerce_alert(base_payload)["active_period"] == "anytime"
+    weekend_alert = monitor._coerce_alert({**base_payload, "active_period": "weekend_brisbane"})
+    assert weekend_alert["active_period"] == "weekend_brisbane"
+    with pytest.raises(ValueError, match="active_period"):
+        monitor._coerce_alert({**base_payload, "active_period": "unknown"})
+
+    brisbane = ZoneInfo("Australia/Brisbane")
+    saturday_start = datetime(2024, 2, 3, 7, 0, tzinfo=brisbane)
+    assert monitor.custom_alert_is_active(weekend_alert, now=saturday_start)
+    assert monitor.custom_alert_is_active(weekend_alert, now=saturday_start - timedelta(seconds=1)) is False
+    assert monitor.custom_alert_is_active(weekend_alert, now=datetime(2024, 2, 5, 6, 59, 59, tzinfo=brisbane))
+    assert monitor.custom_alert_is_active(weekend_alert, now=datetime(2024, 2, 5, 7, 0, tzinfo=brisbane)) is False
+
+    sent: list[str] = []
+    monkeypatch.setattr(monitor, "send_notification", lambda title, *_args, **_kwargs: sent.append(title))
+    friday = datetime(2024, 2, 2, 12, 0, tzinfo=brisbane).timestamp()
+    monkeypatch.setattr(monitor.time, "time", lambda: friday)
+    outside_state = {"custom_alerts": {"price": {"armed": False, "last_trigger_at": 55}}}
+    price_alert = {**weekend_alert, "id": "price"}
+    history: dict[str, deque] = {symbol: deque([(friday - 30, 1.0)])}
+    if monitor_name == "bybit":
+        assert monitor.evaluate_custom_alerts([price_alert], {symbol: 2.0}, outside_state, history) is False
+    else:
+        assert monitor.evaluate_custom_alerts([price_alert], {symbol: 2.0}, outside_state, history, {symbol: 0.0001}) is False
+    assert outside_state["custom_alerts"]["price"] == {"armed": False, "last_trigger_at": 55}
+    assert sent == []
+
+    active_now = saturday_start + timedelta(minutes=1)
+    monkeypatch.setattr(monitor.time, "time", lambda: active_now.timestamp())
+    move_alert = {
+        "id": "move",
+        "symbol": symbol,
+        "kind": "move",
+        "direction": "up",
+        "unit": "pct",
+        "threshold": 1.0,
+        "window_seconds": 3600,
+        "enabled": True,
+        "active_period": "weekend_brisbane",
+    }
+    state = {"custom_alerts": {"price": {"armed": False, "last_trigger_at": 55, "active_window_start": 0}}}
+    history = {symbol: deque([(saturday_start.timestamp() - 1, 1.0), (active_now.timestamp() - 30, 2.0)])}
+    alerts = [price_alert, move_alert]
+    if monitor_name == "bybit":
+        assert monitor.evaluate_custom_alerts(alerts, {symbol: 2.0}, state, history)
+    else:
+        assert monitor.evaluate_custom_alerts(alerts, {symbol: 2.0}, state, history, {symbol: 0.0001})
+    assert any("Custom Price" in title for title in sent)
+    assert not any("Custom Move" in title for title in sent)
 
 
 @pytest.mark.parametrize("monitor_name", ["bybit", "oanda"])

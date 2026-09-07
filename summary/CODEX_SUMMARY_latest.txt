@@ -1,3 +1,26 @@
+Per-alert Brisbane weekend active window
+
+Behaviour implemented
+
+- Added active_period to Bybit and OANDA custom alerts with strict values anytime (default) and weekend_brisbane. Missing legacy values behave as Anytime; upserts and backup/restore coercion preserve the setting, while unknown values are rejected.
+- Weekend only is evaluated strictly in Australia/Brisbane: Saturday 07:00 inclusive through Monday 07:00 exclusive. Inactive, disabled, and expired alerts are excluded before history, state, cooldown, firing, auto-removal, Telegram, or email handling.
+- Each new active weekend resets the scheduled alert’s armed/cooldown state for that window. Weekend movement calculations filter out pre-07:00/pre-weekend samples, preventing a Friday or pre-window comparison from triggering after the window opens.
+- Added the shared Active period form dropdown, Save/Update payload field, edit/reset/monitor-switch handling, and row display. Existing movement windows and all expiry/notification behavior remain intact.
+
+Focused verification
+
+- PASS python -m pytest -q tests/test_merged_alerts_runtime.py::test_merged_alerts_runtime_expiry_default_round_trip_and_notification_channels tests/test_merged_monitor_status_env.py::test_weekend_custom_alert_schedule_coercion_boundaries_and_state_isolation — 3 passed in 6.44s (one JavaScript runtime node plus two parametrised backend cases).
+- No live monitor, broker, exchange, notification, browser, or production-data operation ran.
+
+Exact files changed
+
+- bybit_monitor/bybit_altcoin_monitor.py
+- oanda_monitor/oanda_forex_monitor.py
+- render/static/merged_alerts.js
+- tests/test_merged_alerts_runtime.py
+- tests/test_merged_monitor_status_env.py
+- summary/CODEX_SUMMARY_latest.txt
+
 Alert expiry preset dropdown
 
 Behaviour implemented
