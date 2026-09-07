@@ -29,14 +29,14 @@ elements['monitor-target'].value='bybit';
 const document={createElement(tag){return new Element('',tag);},getElementById(id){return get(id);}};
 const NativeDate=Date; const fixedNow=new NativeDate(2024,0,31,10,30,0,0).getTime();
 class FixedDate extends NativeDate { constructor(...args){ super(...(args.length?args:[fixedNow])); } static now(){ return fixedNow; } }
-const fetchCalls=[]; const futureExpiry='2030-05-06T03:04:00Z'; const pastExpiry='2020-01-01T00:00:00Z'; const savedPayloads=[];
+const fetchCalls=[]; const futureExpiry='2030-05-06T03:04:00Z'; const pastExpiry='2020-01-01T00:00:00Z'; const savedPayloads=[]; const savedRequests=[];
 const fetch=async(url,options={})=>{
   const method=options.method||'GET'; fetchCalls.push([url,method]);
   if(url.includes('/status')) return {ok:true,json:async()=>({ui_status:'running',phase:'waiting',heartbeat_fresh:true,pid_alive:true}),text:async()=>''};
   if(url.includes('/settings')) return {ok:true,json:async()=>({wait_seconds:5,percent_threshold:1.2,telegram_ready:false,email_ready:true}),text:async()=>''};
-  if(url.includes('/api/resolve-symbol')) return {ok:true,json:async()=>({resolved_symbol:'BTCUSDT'}),text:async()=>''};
-  if(url.includes('/custom-alerts')&&method==='GET') return {ok:true,json:async()=>({alerts:[{id:'future',symbol:'BTCUSDT',kind:'price',direction:'above',target_price:2,enabled:true,expires_at:futureExpiry,active_period:'weekend_brisbane'},{id:'past',symbol:'ETHUSDT',kind:'move',direction:'up',threshold:1,unit:'pct',window_seconds:60,enabled:true,expires_at:pastExpiry,expired:true}]}),text:async()=>''};
-  if(url.includes('/custom-alerts')&&method==='POST'){savedPayloads.push(JSON.parse(options.body));return {ok:true,json:async()=>({ok:true}),text:async()=>'{"ok":true}'};}
+  if(url.includes('/api/resolve-symbol')) { const input=decodeURIComponent((url.match(/[?&]symbol=([^&]+)/)||[])[1]||''); if(!url.includes('prefer=auto')) throw new Error('alerts resolver did not request automatic routing'); if(input==='USDJPY') return {ok:true,json:async()=>({resolved_symbol:'USD_JPY',source:'oanda'}),text:async()=>''}; return {ok:true,json:async()=>({resolved_symbol:'BTCUSDT',source:'bybit'}),text:async()=>''}; }
+  if(url.includes('/custom-alerts')&&method==='GET') { if(url.includes('/api/oanda-alerts/')) return {ok:true,json:async()=>({alerts:savedRequests.filter((request)=>request.url==='/api/oanda-alerts/custom-alerts').map((request,index)=>({id:'oanda-'+index,...request.payload}))}),text:async()=>''}; return {ok:true,json:async()=>({alerts:[{id:'future',symbol:'BTCUSDT',kind:'price',direction:'above',target_price:2,enabled:true,expires_at:futureExpiry,active_period:'weekend_brisbane'},{id:'past',symbol:'ETHUSDT',kind:'move',direction:'up',threshold:1,unit:'pct',window_seconds:60,enabled:true,expires_at:pastExpiry,expired:true}]}),text:async()=>''}; }
+  if(url.includes('/custom-alerts')&&method==='POST'){const payload=JSON.parse(options.body);savedPayloads.push(payload);savedRequests.push({url,payload});return {ok:true,json:async()=>({ok:true}),text:async()=>'{"ok":true}'};}
   if(url.includes('/notification-test')) return {ok:true,status:200,text:async()=>JSON.stringify({channels:{telegram:{configured:false,sent:false},email:{configured:true,sent:true}}})};
   return {ok:true,json:async()=>({}),text:async()=>''};
 };
@@ -81,6 +81,17 @@ const allNodes=(root)=>[root,...(root.children||[]).filter((child)=>typeof child
   allNodes(section).find((node)=>node.textContent==='Reset').dispatch('click'); if(expiry.options.length!==6||activePeriod.value!=='anytime') throw new Error('reset retained temporary expiry option or active period');
   elements['monitor-target'].value='oanda'; elements['monitor-target'].dispatch('change'); await settle(); if(expiry.options.length!==6||activePeriod.value!=='anytime') throw new Error('monitor switch retained temporary expiry option or active period');
   elements['monitor-target'].value='bybit'; elements['monitor-target'].dispatch('change'); await settle();
+  allNodes(section).find((node)=>node.textContent==='Reset').dispatch('click');
+  symbol.value='USDJPY'; target.value='155'; expiry.value='1w'; activePeriod.value='weekend_brisbane'; save().dispatch('click'); await settle();
+  const usdJpyRequests=savedRequests.filter((request)=>request.payload.symbol==='USD_JPY');
+  if(usdJpyRequests.length!==1||usdJpyRequests[0].url!=='/api/oanda-alerts/custom-alerts') throw new Error('USDJPY did not make exactly one OANDA alert save');
+  if(savedRequests.some((request)=>request.url==='/api/bybit-alerts/custom-alerts'&&request.payload.symbol==='USD_JPY')) throw new Error('USDJPY attempted a Bybit alert save');
+  if(fetchCalls.filter(([url])=>url.includes('/api/resolve-symbol')&&url.includes('symbol=USDJPY')).length!==1) throw new Error('USDJPY did not resolve exactly once');
+  if(usdJpyRequests[0].payload.expires_at!==expected(10080)||usdJpyRequests[0].payload.active_period!=='weekend_brisbane'||usdJpyRequests[0].payload.enabled!==true) throw new Error('USDJPY routed save lost alert settings');
+  if(elements['monitor-target'].value!=='oanda'||!fetchCalls.some(([url,method])=>url.includes('/api/oanda-alerts/custom-alerts')&&method==='GET')||!fetchCalls.some(([url])=>url.includes('/api/oanda-alerts/status'))||!fetchCalls.some(([url])=>url.includes('/api/oanda-alerts/settings'))||!allNodes(section).some((node)=>String(node.textContent||'').includes('USD_JPY'))) throw new Error('USDJPY routing did not switch to the OANDA view');
+  elements['monitor-target'].value='bybit'; elements['monitor-target'].dispatch('change'); await settle();
+  symbol.value='BTC'; target.value='2'; save().dispatch('click'); await settle();
+  const btcRequest=savedRequests.at(-1); if(btcRequest.url!=='/api/bybit-alerts/custom-alerts'||btcRequest.payload.symbol!=='BTCUSDT') throw new Error('ordinary Bybit BTC routing changed');
   if(!allNodes(section).some((node)=>String(node.textContent||'').includes('Expired'))) throw new Error('expired status not displayed');
   if(!allNodes(section).some((node)=>String(node.textContent||'').includes('Active: Weekend only — Saturday 7:00 am to Monday 7:00 am, Brisbane time'))||!allNodes(section).some((node)=>String(node.textContent||'').includes('Active: Anytime'))) throw new Error('active period row labels missing');
   const testBtn=elements['monitor-test-alert']; testBtn.dispatch('click'); await sleep(0);

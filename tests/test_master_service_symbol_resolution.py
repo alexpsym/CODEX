@@ -69,6 +69,32 @@ def test_is_likely_fx_pair_avoids_six_letter_crypto_false_positive() -> None:
     assert master_service._is_likely_fx_pair("XAUUSD") is True
 
 
+def test_auto_symbol_resolution_routes_unambiguous_fx_to_oanda(monkeypatch: pytest.MonkeyPatch) -> None:
+    bybit_categories: list[str] = []
+
+    async def fake_symbols(_base_url: str, category: str):
+        bybit_categories.append(category)
+        return ["BRUSDT", "OPUSDT"]
+
+    monkeypatch.setattr(master_service, "_bybit_get_symbols_by_category_cached", fake_symbols)
+
+    for spelling in ("USDJPY", "USD_JPY", "USD/JPY", "usdjpy"):
+        result = asyncio.run(master_service._resolve_symbol_payload(spelling, "auto", "linear"))
+        assert result == {
+            "input": spelling,
+            "normalized": "USDJPY",
+            "resolved_symbol": "USD_JPY",
+            "source": "oanda",
+        }
+
+    for symbol in ("BRUSDT", "OPUSDT"):
+        result = asyncio.run(master_service._resolve_symbol_payload(symbol, "auto", "linear"))
+        assert result is not None
+        assert result["source"] == "bybit"
+        assert result["resolved_symbol"] == symbol
+    assert bybit_categories == ["linear", "linear"]
+
+
 def test_watchlist_mixed_crypto_fx_persists_canonical_values(monkeypatch: pytest.MonkeyPatch) -> None:
     saved = {"items": None}
 

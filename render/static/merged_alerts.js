@@ -65,7 +65,7 @@
         return null;
     };
 
-    const setupCustomAlerts = ({ container, getMonitor }) => {
+    const setupCustomAlerts = ({ container, getMonitor, selectMonitor }) => {
         if (!container) return { loadAlerts: async () => {}, resetForMonitor: () => {} };
 
         const section = document.createElement('div');
@@ -195,15 +195,17 @@
         const parseRequiredNumber = (input, name) => { const value = Number(input.value); if (!Number.isFinite(value)) throw new Error(`${name} must be numeric`); return value; };
         const rowText = (customAlert) => customAlert.kind === 'price' ? `${customAlert.symbol} ${customAlert.direction} ${customAlert.target_price}` : `${customAlert.symbol} ${customAlert.direction} ${customAlert.threshold} ${customAlert.unit} in ${customAlert.window_seconds}s`;
 
-        const resolveBybitSymbol = async (raw) => {
+        const resolveAlertSymbol = async (raw) => {
             const symbol = String(raw || '').trim().toUpperCase();
-            if (!symbol || getMonitor() !== 'bybit') return symbol;
-            const resp = await fetch(`/api/resolve-symbol?symbol=${encodeURIComponent(symbol)}&prefer=bybit&scope=linear`, { cache: 'no-store' });
-            if (!resp.ok) throw new Error(`Unable to resolve symbol: ${symbol}`);
+            const selectedMonitor = getMonitor();
+            if (!symbol || selectedMonitor !== 'bybit') return { symbol, monitor: selectedMonitor };
+            const resp = await fetch(`/api/resolve-symbol?symbol=${encodeURIComponent(symbol)}&prefer=auto&scope=linear`, { cache: 'no-store' });
+            if (!resp.ok) throw new Error(`Unable to resolve ${selectedMonitor === 'bybit' ? 'Bybit or OANDA' : selectedMonitor} symbol: ${symbol}`);
             const data = await resp.json().catch(() => null);
             const resolved = String(data?.resolved_symbol || '').trim().toUpperCase();
-            if (!resolved) throw new Error(`Unable to resolve symbol: ${symbol}`);
-            return resolved;
+            const monitor = normalizeMonitor(data?.source);
+            if (!resolved || !VALID_MONITORS.has(data?.source)) throw new Error(`Unable to resolve Bybit or OANDA symbol: ${symbol}`);
+            return { symbol: resolved, monitor };
         };
 
         const loadAlerts = async () => {
@@ -243,7 +245,8 @@
             saveBtn.disabled = true; clearBtn.disabled = true;
             try {
                 let symbol = symbolInput.value.trim().toUpperCase(); if (!symbol) throw new Error('Symbol is required');
-                symbol = await resolveBybitSymbol(symbol); symbolInput.value = symbol;
+                const resolvedAlert = await resolveAlertSymbol(symbol);
+                symbol = resolvedAlert.symbol; symbolInput.value = symbol;
                 const kind = kindSelect.value; const payload = { id: editingId || undefined, symbol, kind, enabled: enabledInput.checked, cooldown_seconds: cooldownInput.value ? parseRequiredNumber(cooldownInput, 'Cooldown seconds') : 0, active_period: activePeriodSelect.value };
                 if (expiryPresetSelect.value === 'keep-current' && editingExpiresAt) payload.expires_at = editingExpiresAt;
                 else if (expiryPresetSelect.value !== 'lifetime') {
@@ -253,10 +256,14 @@
                 }
                 if (kind === 'price') { const target = parseRequiredNumber(targetPriceInput, 'Target price'); if (target <= 0) throw new Error('Target price must be greater than zero'); payload.direction = priceDirectionSelect.value; payload.target_price = target; const customMessage = messageInput.value.trim(); if (customMessage) payload.message = customMessage; }
                 else { const threshold = parseRequiredNumber(thresholdInput, 'Move threshold'); if (threshold <= 0) throw new Error('Move threshold must be greater than zero'); const windowSeconds = Number(windowSelect.value); if (!Number.isFinite(windowSeconds) || windowSeconds <= 0) throw new Error('Window must be selected'); payload.direction = moveDirectionSelect.value; payload.threshold = threshold; payload.unit = unitSelect.value; payload.window_seconds = windowSeconds; }
-                const monitor = getMonitor();
+                const monitor = resolvedAlert.monitor;
                 setSettingsBadge(statusBadge, 'Saving...');
                 await fetchJson(`/api/${monitor}-alerts/custom-alerts`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-                resetForm(); await loadAlerts(); setSettingsBadge(statusBadge, 'Saved');
+                if (monitor !== getMonitor()) {
+                    selectMonitor(monitor);
+                } else {
+                    resetForm(); await loadAlerts(); setSettingsBadge(statusBadge, 'Saved');
+                }
             } catch (err) { console.error(err); setSettingsBadge(statusBadge, 'Save failed', true); window.alert(err.message || 'Unable to save alert'); }
             finally { saveBtn.disabled = false; clearBtn.disabled = false; }
         });
@@ -285,7 +292,14 @@
 
         let customAlerts = { loadAlerts: async () => {}, resetForMonitor: () => {} };
         try {
-            customAlerts = setupCustomAlerts({ container: customAlertsContainer, getMonitor });
+            customAlerts = setupCustomAlerts({
+                container: customAlertsContainer,
+                getMonitor,
+                selectMonitor: (monitor) => {
+                    if (monitorTargetEl) monitorTargetEl.value = normalizeMonitor(monitor);
+                    onMonitorChange();
+                },
+            });
         } catch (err) {
             console.error('Custom alerts UI init failed', err);
             if (customAlertsContainer) customAlertsContainer.textContent = `Alerts load failed: ${err?.message || String(err)}`;

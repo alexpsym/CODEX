@@ -1,3 +1,26 @@
+USDJPY merged-alert symbol routing
+
+Root cause and behaviour implemented
+
+- The default Bybit target sent an unambiguous forex entry such as USDJPY exclusively through the Bybit resolver, which produced the reported unresolved-symbol error before any alert save.
+- Added the explicit resolver preference auto. It uses the existing shared OANDA-pair recognizer first, returning OANDA's canonical USD_JPY without a broker request; all other inputs continue through the existing Bybit path. Explicit bybit and oanda preferences are unchanged.
+- The merged-alert form now resolves once before constructing its single save request. An auto-routed forex alert is posted only to OANDA, then switches the target and refreshes OANDA status, settings, and alert list through the existing monitor-change lifecycle, which invalidates stale Bybit responses. Form values remain intact while resolution/save is pending and errors identify the relevant market path.
+- Existing expiry, Brisbane active-period, enabled, movement-window, and notification behavior is carried unchanged in the routed payload. BTC still resolves and saves to Bybit as BTCUSDT; BRUSDT and OPUSDT remain Bybit candidates rather than forex.
+
+Focused verification
+
+- PASS `python -m pytest -q tests/test_merged_alerts_runtime.py::test_merged_alerts_runtime_expiry_default_round_trip_and_notification_channels tests/test_master_service_symbol_resolution.py::test_auto_symbol_resolution_routes_unambiguous_fx_to_oanda` (2 passed in 9.69s).
+- The Node/VM runtime coverage verifies a single USDJPY resolution, one canonical USD_JPY OANDA POST with preserved expiry/schedule/enabled data, no canonical forex Bybit POST, the OANDA view/list/status/settings refresh, and unchanged BTC Bybit routing. The server test covers USDJPY spellings plus BRUSDT/OPUSDT protection with mocked Bybit resolution.
+- No live monitor, broker, exchange, notification, Render, TradingView, or production-data request ran. Phase 7 remains pending.
+
+Exact files changed
+
+- render/master_service.py
+- render/static/merged_alerts.js
+- tests/test_master_service_symbol_resolution.py
+- tests/test_merged_alerts_runtime.py
+- summary/CODEX_SUMMARY_latest.txt
+
 Per-alert Brisbane weekend active window
 
 Behaviour implemented

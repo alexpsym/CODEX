@@ -4567,6 +4567,17 @@ async def _resolve_symbol_payload(
             "source": "oanda",
         }
 
+    if pref == "auto":
+        if is_likely_oanda_pair(raw):
+            resolved = normalize_oanda_symbol_query(raw)
+            return {
+                "input": raw,
+                "normalized": normalized,
+                "resolved_symbol": resolved,
+                "source": "oanda",
+            }
+        pref = "bybit"
+
     if pref != "bybit":
         return None
 
