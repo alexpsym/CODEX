@@ -296,13 +296,44 @@ async def _trendline_fresh_calculation(plan: Mapping[str, object], _quote: Optio
     response = await calculator_quote(_trendline_calculator_payload(plan))
     if response.status_code >= 400:
         raise ValueError("Fresh trendline calculation was rejected.")
-    return json.loads(response.body.decode("utf-8"))
+    calculated = json.loads(response.body.decode("utf-8"))
+    # A final independent snapshot is retained with the result and is used for
+    # trigger revalidation before claiming. No creation-time quote is reused.
+    calculated["trigger_quote"] = await _trendline_executor_quote(plan)
+    return calculated
 
 
 async def _trendline_executor_quote(plan: Mapping[str, object]) -> Mapping[str, object]:
-    calculated = await _trendline_fresh_calculation(plan)
-    entry = calculated.get("entry_price")
-    return {"instrument": plan["instrument"], "timestamp_ms": int(calculated.get("quote_created_at_ms") or time.time() * 1000), "bid": entry, "ask": entry, "tick_size": calculated.get("tick_size")}
+    broker = str(plan["broker"])
+    symbol = str(plan["instrument"]).upper()
+    if broker == "bybit":
+        _mode, _key, _secret, base_url, _source = resolve_bybit_credentials_for(str(plan["account"]))
+        ticker = await _fetch_bybit_ticker_cached(base_url, "linear", symbol, max_age_s=0, allow_stale_s=0, timeout_s=1.5)
+        payload = ticker.get("payload") if isinstance(ticker, Mapping) else {}
+        row = _extract_valid_bybit_ticker_row(payload if isinstance(payload, dict) else {}, symbol)
+        instrument = await _bybit_get_instrument_info_cached(base_url, "linear", symbol)
+        timestamp = (payload or {}).get("time") if isinstance(payload, Mapping) else None
+        if not row or not instrument or not isinstance(timestamp, int):
+            raise ValueError("Fresh Bybit quote is missing required timestamp or precision.")
+        bid, ask = Decimal(str(row.get("bid1Price"))), Decimal(str(row.get("ask1Price")))
+        tick = (instrument.get("priceFilter") or {}).get("tickSize")
+    elif broker == "oanda":
+        cfg = _get_oanda_config(str(plan["account"]))
+        meta = await _fetch_oanda_instrument_meta(base_url=cfg["base_url"], account_id=cfg["account_id"], api_key=cfg["token"], symbol=symbol, mode=str(plan["account"]))
+        prices = await _fetch_oanda_json(base_url=cfg["base_url"], account_id=cfg["account_id"], api_key=cfg["token"], endpoint=f"/accounts/{{account_id}}/pricing?instruments={symbol}&includeHomeConversions=false", mode=str(plan["account"]))
+        rows = prices.get("prices") or []; row = rows[0] if rows else {}
+        stamp = str(row.get("time") or "").replace("Z", "+00:00")
+        try:
+            timestamp = int(datetime.fromisoformat(stamp).timestamp() * 1000)
+            bid = Decimal(str(((row.get("bids") or [{}])[0]).get("price"))); ask = Decimal(str(((row.get("asks") or [{}])[0]).get("price")))
+        except Exception as exc:
+            raise ValueError("Fresh OANDA quote is malformed or missing a broker timestamp.") from exc
+        tick = str(Decimal("1").scaleb(-int(meta["displayPrecision"])))
+    else:
+        raise ValueError("Unsupported trendline broker.")
+    if bid <= 0 or ask <= 0 or bid >= ask or not tick:
+        raise ValueError("Fresh trendline quote is crossed or invalid.")
+    return {"instrument": symbol, "timestamp_ms": timestamp, "bid": str(bid), "ask": str(ask), "tick_size": str(tick)}
 
 
 async def _trendline_executor_submit(plan: Mapping[str, object], calculation: Mapping[str, object], execution_key: str) -> Mapping[str, object]:
@@ -317,7 +348,11 @@ TRENDLINE_EXECUTOR = TrendlinePlanExecutor(
     _trendline_executor_quote,
     _trendline_fresh_calculation,
     _trendline_executor_submit,
-    lambda plan: str(plan.get("account") or "").lower() == "demo",
+    lambda plan: str(plan.get("account") or "").lower() == "demo" or (
+        isinstance(plan.get("live_authorization"), Mapping)
+        and plan["live_authorization"].get("execution_key") == plan.get("execution_key")
+        and plan["live_authorization"].get("plan_revision") == plan.get("revision")
+    ),
 )
 JOURNAL_DISPLAY_TZ = ZoneInfo("Australia/Brisbane")
 RENDER_ALLOWED_APPS = _parse_allowed_apps(os.getenv("RENDER_ALLOWED_APPS", DEFAULT_RENDER_ALLOWED_APPS))
@@ -26472,6 +26507,10 @@ def _trendline_plan_client_view(plan: Mapping[str, object]) -> Dict[str, object]
     return dict(plan)
 
 
+def _trendline_response_state() -> Dict[str, object]:
+    return {"monitoring_active": bool(TRENDLINE_EXECUTOR.status()["running"]), "execution_enabled": APP_PROFILE == "local"}
+
+
 @app.get("/api/trendline-plans")
 async def trendline_plan_list() -> JSONResponse:
     _trendline_plans_require_local()
@@ -26479,7 +26518,7 @@ async def trendline_plan_list() -> JSONResponse:
         registry = TRENDLINE_PLAN_STORE.load()
         plans = [_trendline_plan_client_view(plan) for plan in registry["plans"].values()]
         plans.sort(key=lambda item: (int(item["updated_at_ms"]), str(item["plan_id"])), reverse=True)
-        return JSONResponse({"ok": True, "plans": plans, "monitoring_active": False, "execution_enabled": False})
+        return JSONResponse({"ok": True, "plans": plans, **_trendline_response_state()})
     except Exception as exc:
         _trendline_plan_http_error(exc)
 
@@ -26489,7 +26528,7 @@ async def trendline_plan_create(payload: Dict[str, object] = Body(default={})) -
     _trendline_plans_require_local()
     try:
         plan = TRENDLINE_PLAN_STORE.create(_trendline_plan_payload(payload))
-        return JSONResponse({"ok": True, "plan": _trendline_plan_client_view(plan), "monitoring_active": False, "execution_enabled": False})
+        return JSONResponse({"ok": True, "plan": _trendline_plan_client_view(plan), **_trendline_response_state()})
     except Exception as exc:
         _trendline_plan_http_error(exc)
 
@@ -26512,17 +26551,23 @@ async def trendline_plan_update(plan_id: str, payload: Dict[str, object] = Body(
         }
         client_base.update(payload)
         plan = TRENDLINE_PLAN_STORE.update(plan_id, _trendline_plan_payload(client_base))
-        return JSONResponse({"ok": True, "plan": _trendline_plan_client_view(plan), "monitoring_active": False, "execution_enabled": False})
+        return JSONResponse({"ok": True, "plan": _trendline_plan_client_view(plan), **_trendline_response_state()})
     except Exception as exc:
         _trendline_plan_http_error(exc, transition=True)
 
 
 @app.post("/api/trendline-plans/{plan_id}/arm")
-async def trendline_plan_arm(plan_id: str) -> JSONResponse:
+async def trendline_plan_arm(plan_id: str, payload: Dict[str, object] = Body(default={})) -> JSONResponse:
     _trendline_plans_require_local()
     try:
-        plan = TRENDLINE_PLAN_STORE.arm(plan_id)
-        return JSONResponse({"ok": True, "plan": _trendline_plan_client_view(plan), "monitoring_active": False, "execution_enabled": False})
+        existing = TRENDLINE_PLAN_STORE.get(plan_id)
+        if existing["account"] == "live" and not existing["test_trade"]:
+            if (payload or {}).get("confirm_live_execution") is not True:
+                raise TrendlinePlanError("Live non-test plans require explicit local execution confirmation.")
+            plan = TRENDLINE_PLAN_STORE.authorize_live_and_arm(plan_id)
+        else:
+            plan = TRENDLINE_PLAN_STORE.arm(plan_id)
+        return JSONResponse({"ok": True, "plan": _trendline_plan_client_view(plan), **_trendline_response_state()})
     except Exception as exc:
         _trendline_plan_http_error(exc, transition=True)
 
@@ -26532,7 +26577,7 @@ async def trendline_plan_cancel(plan_id: str) -> JSONResponse:
     _trendline_plans_require_local()
     try:
         plan = TRENDLINE_PLAN_STORE.cancel(plan_id)
-        return JSONResponse({"ok": True, "plan": _trendline_plan_client_view(plan), "monitoring_active": False, "execution_enabled": False})
+        return JSONResponse({"ok": True, "plan": _trendline_plan_client_view(plan), **_trendline_response_state()})
     except Exception as exc:
         _trendline_plan_http_error(exc, transition=True)
 
@@ -26540,21 +26585,21 @@ async def trendline_plan_cancel(plan_id: str) -> JSONResponse:
 @app.get("/api/trendline-plans/monitor/status")
 async def trendline_monitor_status() -> JSONResponse:
     _trendline_plans_require_local()
-    return JSONResponse({"ok": True, **TRENDLINE_EXECUTOR.status(), "execution_enabled": True})
+    return JSONResponse({"ok": True, **TRENDLINE_EXECUTOR.status(), **_trendline_response_state()})
 
 
 @app.post("/api/trendline-plans/monitor/start")
 async def trendline_monitor_start() -> JSONResponse:
     _trendline_plans_require_local()
     started = await TRENDLINE_EXECUTOR.start()
-    return JSONResponse({"ok": True, "started": started, **TRENDLINE_EXECUTOR.status(), "execution_enabled": True})
+    return JSONResponse({"ok": True, "started": started, **TRENDLINE_EXECUTOR.status(), **_trendline_response_state()})
 
 
 @app.post("/api/trendline-plans/monitor/stop")
 async def trendline_monitor_stop() -> JSONResponse:
     _trendline_plans_require_local()
     stopped = await TRENDLINE_EXECUTOR.stop()
-    return JSONResponse({"ok": True, "stopped": stopped, **TRENDLINE_EXECUTOR.status(), "execution_enabled": True})
+    return JSONResponse({"ok": True, "stopped": stopped, **TRENDLINE_EXECUTOR.status(), **_trendline_response_state()})
 
 
 @app.get("/api/calculator/instrument")

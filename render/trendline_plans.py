@@ -40,7 +40,7 @@ _STATUSES = {
 _CLAIMED_STATUSES = {"claimed", "submitting", "submitted", "failed", "uncertain"}
 _IMMUTABLE_FIELDS = {
     "schema_version", "plan_id", "execution_key", "revision", "created_at_ms",
-    "updated_at_ms", "status", "lifecycle", "trigger_claim", "execution_result",
+    "updated_at_ms", "status", "lifecycle", "trigger_claim", "execution_result", "live_authorization",
 }
 _ORDER_METADATA_FIELDS = (
     "setup", "pattern", "ema", "vwap", "aths_atls", "round_number",
@@ -174,6 +174,18 @@ def _normalise_execution_result(value: object) -> Optional[Dict[str, object]]:
     return result
 
 
+def _normalise_live_authorization(value: object, execution_key: str, revision: int) -> Optional[Dict[str, object]]:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise TrendlinePlanError("live_authorization must be an object or null.")
+    if _text(value.get("execution_key"), "live_authorization.execution_key") != execution_key:
+        raise TrendlinePlanError("live_authorization execution key must match the plan.")
+    if _positive_int(value.get("plan_revision"), "live_authorization.plan_revision") != revision:
+        raise TrendlinePlanError("live_authorization revision must match the plan.")
+    return {"execution_key": execution_key, "plan_revision": revision, "authorized_at_ms": _int_ms(value.get("authorized_at_ms"), "live_authorization.authorized_at_ms")}
+
+
 def validate_plan(record: Mapping[str, object]) -> Dict[str, object]:
     """Return a canonical, JSON-safe plan record or raise without mutation."""
     if not isinstance(record, Mapping):
@@ -203,6 +215,7 @@ def validate_plan(record: Mapping[str, object]) -> Dict[str, object]:
     plan_id = _text(record.get("plan_id"), "plan_id")
     execution_key = _text(record.get("execution_key"), "execution_key")
     revision = _positive_int(record.get("revision"), "revision")
+    live_authorization = _normalise_live_authorization(record.get("live_authorization"), execution_key, revision)
     if not isinstance(record.get("right_extension"), bool):
         raise TrendlinePlanError("right_extension must be boolean.")
     if not isinstance(record.get("test_trade"), bool):
@@ -251,6 +264,7 @@ def validate_plan(record: Mapping[str, object]) -> Dict[str, object]:
         "execution_key": execution_key,
         "trigger_claim": claim,
         "execution_result": execution_result,
+        "live_authorization": live_authorization,
     }
 
 
@@ -492,6 +506,7 @@ class TrendlinePlanStore:
             "lifecycle": {"last_transition": "created", "last_transition_at_ms": now},
             "trigger_claim": None,
             "execution_result": None,
+            "live_authorization": None,
         })
         plan = validate_plan(record)
         with _LOCK:
@@ -527,6 +542,7 @@ class TrendlinePlanStore:
             updated["revision"] = int(plan["revision"]) + 1
             updated["updated_at_ms"] = now
             updated["lifecycle"] = {"last_transition": "updated", "last_transition_at_ms": now}
+            updated["live_authorization"] = None
             canonical = validate_plan(updated)
             registry["plans"][canonical["plan_id"]] = canonical
             self._write(registry)
@@ -567,6 +583,17 @@ class TrendlinePlanStore:
         now = utc_epoch_ms() if now_ms is None else _int_ms(now_ms, "now_ms")
         with _LOCK:
             return self._transition(plan_id, target="armed", event="armed", now_ms=now)
+
+    def authorize_live_and_arm(self, plan_id: str, *, now_ms: Optional[int] = None) -> Dict[str, object]:
+        now = utc_epoch_ms() if now_ms is None else _int_ms(now_ms, "now_ms")
+        with _LOCK:
+            registry = self._read(); plan = registry["plans"].get(_text(plan_id, "plan_id"))
+            if plan is None: raise TrendlinePlanError("Unknown trendline plan.")
+            if plan["status"] != "draft" or plan["trigger_claim"] is not None: raise TrendlinePlanError("Only an unclaimed draft plan may be armed.")
+            updated = copy.deepcopy(plan); updated["status"] = "armed"; updated["revision"] = int(plan["revision"]) + 1
+            updated["updated_at_ms"] = now; updated["lifecycle"] = {"last_transition": "live_authorized_armed", "last_transition_at_ms": now}
+            updated["live_authorization"] = {"execution_key": plan["execution_key"], "plan_revision": updated["revision"], "authorized_at_ms": now}
+            canonical = validate_plan(updated); registry["plans"][canonical["plan_id"]] = canonical; self._write(registry); return copy.deepcopy(canonical)
 
     def cancel(self, plan_id: str, *, now_ms: Optional[int] = None) -> Dict[str, object]:
         now = utc_epoch_ms() if now_ms is None else _int_ms(now_ms, "now_ms")

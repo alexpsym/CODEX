@@ -39,6 +39,7 @@
     trendlineListLoading: false,
     trendlineListRequestSeq: 0,
     trendlineMonitorPending: false,
+    trendlineMonitorStatus: {running:false},
   };
 
   const $ = (id) => document.getElementById(id);
@@ -690,14 +691,14 @@
   function trendlineStatus(text) { const el = $('trendline-plan-status'); if (el) el.textContent = text || ''; }
   function renderTrendlineMonitor(status) {
     const running=!!status?.running; const text=$('trendline-monitor-status'); const start=$('trendline-monitor-start'); const stop=$('trendline-monitor-stop');
-    if(text) text.textContent=running ? `Monitoring running. Last cycle: ${status?.last_cycle?.at_ms || 'waiting'}.` : `Monitoring stopped.${status?.last_error ? ` ${status.last_error}` : ''}`;
+    state.trendlineMonitorStatus=status||{running:false}; if(text) text.textContent=running ? `Monitoring running. Last cycle: ${status?.last_cycle?.at_ms || 'waiting'}.` : `Monitoring stopped.${status?.last_error ? ` ${status.last_error}` : ''}`;
     if(start) start.disabled=running||state.trendlineMonitorPending; if(stop) stop.disabled=!running||state.trendlineMonitorPending;
   }
   async function trendlineMonitor(action) {
     if(!state.trendlinePlansAvailable||state.trendlineMonitorPending) return;
     state.trendlineMonitorPending=true; renderTrendlineMonitor(action==='start'?{running:false}:{running:true});
-    try { const response=await post(`/api/trendline-plans/monitor/${action}`,{}); renderTrendlineMonitor(response); }
-    catch(err) { trendlineStatus(String(err.message||err)); } finally { state.trendlineMonitorPending=false; }
+    try { const response=await post(`/api/trendline-plans/monitor/${action}`,{}); state.trendlineMonitorPending=false; renderTrendlineMonitor(response); }
+    catch(err) { trendlineStatus(String(err.message||err)); state.trendlineMonitorPending=false; renderTrendlineMonitor(state.trendlineMonitorStatus); } finally { state.trendlineMonitorPending=false; }
   }
   function localDateTime(ms) {
     const d = new Date(Number(ms)); const p = (v) => String(v).padStart(2, '0');
@@ -792,9 +793,10 @@
   async function trendlineAction(action, planId) {
     if (state.trendlineMutationPending) return; const plan=state.trendlinePlans.find((p)=>p.plan_id===planId);
     if(action==='edit') return editTrendlinePlan(plan);
-    if(action==='arm' && plan?.account==='live' && !plan?.test_trade && typeof confirm==='function' && !confirm('Arm this live non-test plan? Monitoring and execution remain disabled in this phase.')) return;
+    const liveArm=action==='arm' && plan?.account==='live' && !plan?.test_trade;
+    if(liveArm && typeof confirm==='function' && !confirm('Authorize and arm this live plan for local monitoring and execution?')) return;
     ++state.trendlineListRequestSeq; state.trendlineMutationPending=true;
-    try { const response=await post(`/api/trendline-plans/${encodeURIComponent(planId)}/${action}`,{}); state.trendlinePlans=state.trendlinePlans.map((p)=>p.plan_id===planId?response.plan:p); renderTrendlinePlans(); state.trendlineMutationPending=false; await refreshTrendlinePlans(); } catch(err) { trendlineStatus(String(err.message||err)); } finally { state.trendlineMutationPending=false; }
+    try { const response=await post(`/api/trendline-plans/${encodeURIComponent(planId)}/${action}`,liveArm?{confirm_live_execution:true}:{}); state.trendlinePlans=state.trendlinePlans.map((p)=>p.plan_id===planId?response.plan:p); renderTrendlinePlans(); state.trendlineMutationPending=false; await refreshTrendlinePlans(); } catch(err) { trendlineStatus(String(err.message||err)); } finally { state.trendlineMutationPending=false; }
   }
   function initializeTrendlinePlans() {
     const panel=trendlinePanel(); if(!panel) return;

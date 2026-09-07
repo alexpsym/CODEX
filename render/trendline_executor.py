@@ -71,10 +71,13 @@ class TrendlinePlanExecutor:
                 if plan["expiry_at_ms"] is not None and now >= int(plan["expiry_at_ms"]):
                     self.store.expire(str(plan["plan_id"]), now_ms=now)
                     continue
-                await self._evaluate_one(plan, now)
+                try:
+                    await self._evaluate_one(plan, now)
+                except Exception as exc:
+                    self.last_error = _safe_error(exc)
                 processed += 1
             self.last_cycle = {"at_ms": now, "processed": processed}
-            self.last_error = None
+            self.last_error = self.last_error if self.last_error else None
         except Exception as exc:  # Cycle remains safe; no unclaimed plan was submitted.
             self.last_error = str(exc)[:500]
             self.last_cycle = {"at_ms": now, "processed": processed}
@@ -96,27 +99,42 @@ class TrendlinePlanExecutor:
         self._previous[plan_id] = observation
         if not evaluation.get("triggered"):
             return
-        # Re-read immediately before the atomic claim; cancellation/edit wins safely.
-        fresh = self.store.get(plan_id)
-        if fresh["status"] != "armed" or fresh["trigger_claim"] is not None:
+        # The calculator obtains the exact final quote used for sizing.  Re-test
+        # that quote before a claim so a moved-away candidate cannot execute.
+        calculated = await _await(self.calculate(plan, quote))
+        final_quote = calculated.get("trigger_quote") if isinstance(calculated, Mapping) else None
+        if not isinstance(final_quote, Mapping):
             return
-        claim = self.store.claim_trigger(plan_id, {"trigger_timestamp_ms": observation["timestamp_ms"], "trigger_price": evaluation["trigger_price"], "trigger_kind": evaluation["trigger_kind"]}, now_ms=now)
+        final_observation = {"timestamp_ms": final_quote.get("timestamp_ms"), "bid": final_quote.get("bid"), "ask": final_quote.get("ask")}
+        final_eval = evaluate_trigger(plan, final_observation, previous_observation=self._previous.get(plan_id), now_ms=now, tick_size=final_quote.get("tick_size"))
+        if not final_eval.get("triggered"):
+            return
+        # Re-read after the final calculation: cancellation, expiry, revision or
+        # replacement invalidate the candidate before the atomic claim.
+        fresh = self.store.get(plan_id)
+        if fresh["status"] != "armed" or fresh["trigger_claim"] is not None or fresh["revision"] != plan["revision"] or fresh["execution_key"] != plan["execution_key"]:
+            return
+        if not fresh["test_trade"] and not self.live_confirmed(fresh):
+            return
+        claim = self.store.claim_trigger(plan_id, {"trigger_timestamp_ms": final_observation["timestamp_ms"], "trigger_price": final_eval["trigger_price"], "trigger_kind": final_eval["trigger_kind"]}, now_ms=now)
         if not claim["claimed"]:
             return
         claimed = claim["plan"]
         if claimed["test_trade"]:
             self.store.resolve_claim(plan_id, status="submitted", outcome={"outcome": "simulated", "message": "Test plan triggered; no broker order was sent."}, now_ms=now)
             return
-        if not self.live_confirmed(claimed):
-            self.store.resolve_claim(plan_id, status="failed", outcome={"outcome": "failed", "message": "Live execution confirmation was not available."}, now_ms=now)
-            return
         try:
-            calculation = await _await(self.calculate(claimed, quote))
-            result = await _await(self.submit(claimed, calculation, str(claim["execution_key"])))
+            result = await _await(self.submit(claimed, calculated, str(claim["execution_key"])))
         except ValueError as exc:
-            self.store.resolve_claim(plan_id, status="failed", outcome={"outcome": "failed", "message": str(exc)}, now_ms=now)
+            self.store.resolve_claim(plan_id, status="failed", outcome={"outcome": "failed", "message": _safe_error(exc)}, now_ms=now)
         except Exception as exc:
-            self.store.resolve_claim(plan_id, status="uncertain", outcome={"outcome": "uncertain", "message": str(exc)}, now_ms=now)
+            self.store.resolve_claim(plan_id, status="uncertain", outcome={"outcome": "uncertain", "message": _safe_error(exc)}, now_ms=now)
         else:
-            order_id = str((result or {}).get("order_id") or (result or {}).get("orderId") or "") or None
+            body = (result or {}).get("order") if isinstance(result, Mapping) else {}
+            order_id = str((result or {}).get("order_id") or (result or {}).get("orderId") or (body or {}).get("orderId") or (body or {}).get("id") or "") or None
             self.store.resolve_claim(plan_id, status="submitted", outcome={"outcome": "executed", "message": "Broker accepted order.", "order_id": order_id}, now_ms=now)
+
+
+def _safe_error(exc: Exception) -> str:
+    text = str(exc or exc.__class__.__name__).replace("\n", " ")[:500]
+    return "Trendline execution validation failed." if any(token in text.lower() for token in ("token", "secret", "authorization", "http://", "https://")) else text

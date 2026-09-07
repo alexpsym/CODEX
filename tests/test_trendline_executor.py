@@ -26,7 +26,7 @@ def test_trendline_executor_fresh_claim_recalculation_and_one_submission(tmp_pat
     calls = {"calculate": 0, "submit": 0}
 
     async def quote(_plan): return {"instrument": plan["instrument"], "timestamp_ms": 2500, "bid": "99.9", "ask": "100", "tick_size": "0.1"}
-    async def calculate(_plan, fresh_quote): calls["calculate"] += 1; assert fresh_quote["timestamp_ms"] == 2500; return {"entry_price": "100", "stop_loss_price": "99", "take_profit_price": "102", "quantity": "1"}
+    async def calculate(_plan, fresh_quote): calls["calculate"] += 1; assert fresh_quote["timestamp_ms"] == 2500; return {"entry_price": "100", "stop_loss_price": "99", "take_profit_price": "102", "quantity": "1", "trigger_quote": fresh_quote}
     async def submit(_plan, calc, key): calls["submit"] += 1; assert calc["take_profit_price"] == "102" and key; return {"order_id": "one"}
     executor = TrendlinePlanExecutor(store, quote, calculate, submit, lambda _p: True, now_ms=lambda: 2500)
     asyncio.run(executor.cycle())
@@ -43,7 +43,7 @@ def test_trendline_executor_rejects_stale_and_simulates_test_without_submission(
     test = store.arm(store.create(_payload("oanda", test_trade=True), now_ms=1000)["plan_id"], now_ms=1500)
     submitted = []
     async def quote(plan): return {"instrument": plan["instrument"], "timestamp_ms": 1 if plan["plan_id"] == stale["plan_id"] else 2500, "bid": "99.9", "ask": "100", "tick_size": "0.1"}
-    async def calculate(*_args): return {"quantity": "1"}
+    async def calculate(_plan, quote): return {"quantity": "1", "trigger_quote": quote}
     async def submit(*_args): submitted.append(True); return {}
     executor = TrendlinePlanExecutor(store, quote, calculate, submit, lambda _p: False, now_ms=lambda: 2500)
     asyncio.run(executor.cycle())
