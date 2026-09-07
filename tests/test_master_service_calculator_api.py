@@ -2325,3 +2325,58 @@ def test_trade_context_normalizes_and_backfills_quality_criteria(monkeypatch: py
     assert merged["vwap"] == "No"
     assert merged["aths_atls"] == "All-Time Low"
     assert merged["round_number"] == "No"
+
+
+def test_oanda_rr_floor_survives_costs_conversion_sizing_and_submit_revalidation(monkeypatch: pytest.MonkeyPatch) -> None:
+    dec = master_service.Decimal
+    fixed = master_service._oanda_rr_floor_levels(
+        entry=dec("1.0002"), side="buy", units=dec("8333"), tick_size=dec("0.0001"),
+        spread_quote=dec("0.0002"), loss_per_unit_home=dec("0.0012"), gain_factor=dec("0.8"),
+        nominated_risk_home=dec("10"), requested_rr=dec("2"),
+    )
+    assert fixed["estimated_reward"] >= dec("20")
+    assert fixed["estimated_total_loss"] <= dec("12")
+    assert fixed["effective_rr_net"] >= dec("2")
+    percent = master_service._oanda_rr_floor_levels(
+        entry=dec("1.0002"), side="sell", units=dec("8333"), tick_size=dec("0.0001"),
+        spread_quote=dec("0.0002"), loss_per_unit_home=dec("0.0012"), gain_factor=dec("0.8"),
+        nominated_risk_home=dec("10"), requested_rr=dec("2"),
+    )
+    assert percent["estimated_reward"] >= dec("20")
+    with pytest.raises(ValueError, match="120%"):
+        master_service._oanda_rr_floor_levels(
+            entry=dec("1"), side="buy", units=dec("11"), tick_size=dec("0.0001"),
+            spread_quote=dec("0"), loss_per_unit_home=dec("1.1"), gain_factor=dec("1"),
+            nominated_risk_home=dec("10"), requested_rr=dec("2"),
+        )
+
+    posts = []
+    monkeypatch.setattr(master_service, "_get_oanda_config", lambda _account: {"base_url": "https://oanda.test", "account_id": "acct", "token": "token"})
+    monkeypatch.setattr(master_service, "_fetch_oanda_instrument_meta", lambda **_kwargs: asyncio.sleep(0, result={"displayPrecision": 4, "tradeUnitsPrecision": 0, "minimumTradeSize": "1", "maximumOrderUnits": "999999"}))
+    monkeypatch.setattr(master_service, "_fetch_oanda_account_summary", lambda _account: asyncio.sleep(0, result={"currency": "AUD", "nav": "1000"}))
+    monkeypatch.setattr(master_service, "_get_oanda_quote_home_factors", lambda **_kwargs: (dec("0.8"), dec("1"), dec("1")))
+    monkeypatch.setattr(master_service, "_convert_aud_to_home_currency", lambda amount, *_args: asyncio.sleep(0, result=amount))
+    monkeypatch.setattr(master_service, "_fetch_oanda_json", lambda **_kwargs: asyncio.sleep(0, result={"prices": [{"bids": [{"price": "1.0000"}], "asks": [{"price": "1.0002"}]}]}))
+    monkeypatch.setattr(master_service, "_upsert_calculator_trade_context", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(master_service, "_schedule_dropbox_upload_state_backup", lambda: None)
+    monkeypatch.setattr(master_service, "_delete_pending_webhook", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(master_service, "_log_webhook_event", lambda *_args, **_kwargs: None)
+
+    class FakeResponse:
+        status_code = 201
+        text = "{}"
+        def json(self): return {"orderCreateTransaction": {"id": "1"}}
+    class FakeClient:
+        def __init__(self, **_kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *_args): return False
+        async def post(self, url, **kwargs): posts.append((url, kwargs)); return FakeResponse()
+    monkeypatch.setattr(master_service.httpx, "AsyncClient", FakeClient)
+    payload = {"symbol": "EUR_USD", "action": "buy", "quantity": "1", "account": "demo", "order_type": "market", "target_mode": "rr", "risk_reward": "2", "risk_mode": "percent", "risk_value": "1", "stop_loss_ticks": "10"}
+    result = asyncio.run(master_service._place_oanda_order(payload, request_id="rr-floor", invalidate_cache=False))
+    assert len(posts) == 1
+    order = posts[0][1]["json"]["order"]
+    assert order["units"] == "8333"
+    assert dec(order["takeProfitOnFill"]["price"]) >= dec("1.0035")
+    assert payload["_submit_level_adjustments"]["fresh_revalidation"] is True
+    assert result["orderCreateTransaction"]["id"] == "1"

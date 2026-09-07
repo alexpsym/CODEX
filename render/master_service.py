@@ -22070,6 +22070,94 @@ async def _place_oanda_order(
             f"quantity={qty_val} is not valid."
         )
 
+    # Calculator RR orders are revalidated once against a fresh executable
+    # quote before the only broker submission. Older/manual payloads keep their
+    # established direct-submit behavior because they lack this metadata.
+    rr_requested_raw = payload.get("risk_reward")
+    if (
+        str(payload.get("target_mode") or "").strip().lower() == "rr"
+        and rr_requested_raw is not None
+        and payload.get("risk_mode") is not None
+        and payload.get("risk_value") is not None
+        and payload.get("stop_loss_ticks") is not None
+    ):
+        rr_requested = _dec(rr_requested_raw, "risk_reward")
+        risk_value = _dec(payload.get("risk_value"), "risk_value")
+        stop_ticks = _dec(payload.get("stop_loss_ticks"), "stop_loss_ticks")
+        if rr_requested <= 0 or risk_value <= 0 or stop_ticks <= 0:
+            raise ValueError("Calculator RR revalidation requires positive risk, stop, and R values.")
+        prices = await _fetch_oanda_json(
+            base_url=cfg["base_url"],
+            account_id=cfg["account_id"],
+            api_key=cfg["token"],
+            endpoint=f"/accounts/{{account_id}}/pricing?instruments={symbol}&includeHomeConversions=true",
+            mode=account,
+        )
+        rows = prices.get("prices") or []
+        if not rows:
+            raise ValueError("Fresh OANDA pricing is unavailable for Net-R revalidation.")
+        row = rows[0]
+        bid = Decimal(str(((row.get("bids") or [{}])[0]).get("price") or "0"))
+        ask = Decimal(str(((row.get("asks") or [{}])[0]).get("price") or "0"))
+        if bid <= 0 or ask <= 0:
+            raise ValueError("Fresh OANDA bid/ask is unavailable for Net-R revalidation.")
+        summary = await _fetch_oanda_account_summary(account)
+        home_ccy = str(summary.get("currency") or "").strip().upper()
+        quote_ccy = symbol.split("_", 1)[1]
+        gain_factor, loss_factor, _position_value_factor = _get_oanda_quote_home_factors(
+            prices_payload=prices,
+            row=row,
+            quote_ccy=quote_ccy,
+            account_home_ccy=home_ccy,
+        )
+        fresh_entry = Decimal(str(entry_price)) if order_type == "limit" else (ask if action == "buy" else bid)
+        tick_size = Decimal("1").scaleb(-display_precision)
+        fresh_sl = fresh_entry - stop_ticks * tick_size if action == "buy" else fresh_entry + stop_ticks * tick_size
+        spread_quote = max(Decimal("0"), ask - bid)
+        loss_per_unit_home = (abs(fresh_entry - fresh_sl) + spread_quote) * loss_factor
+        if loss_per_unit_home <= 0:
+            raise ValueError("Fresh OANDA quote produced zero all-in loss per unit.")
+        risk_mode = str(payload.get("risk_mode") or "").strip().lower()
+        if risk_mode == "percent":
+            nav = Decimal(str(summary.get("nav") or "0"))
+            nominated_risk_home = nav * risk_value / Decimal("100")
+        elif risk_mode == "fixed_aud":
+            nominated_risk_home = await _convert_aud_to_home_currency(risk_value, home_ccy, cfg)
+        else:
+            raise ValueError("Calculator RR revalidation requires risk_mode fixed_aud or percent.")
+        fresh_units = _floor_to_precision(nominated_risk_home / loss_per_unit_home, units_precision)
+        if fresh_units < Decimal(str(meta.get("minimumTradeSize") or "0")):
+            raise ValueError("Fresh OANDA quote produces units below minimum trade size.")
+        if Decimal(str(meta.get("maximumOrderUnits") or "0")) > 0 and fresh_units > Decimal(str(meta.get("maximumOrderUnits") or "0")):
+            raise ValueError("Fresh OANDA quote produces units above maximumOrderUnits.")
+        try:
+            rr_floor = _oanda_rr_floor_levels(
+                entry=fresh_entry,
+                side=action,
+                units=fresh_units,
+                tick_size=tick_size,
+                spread_quote=spread_quote,
+                loss_per_unit_home=loss_per_unit_home,
+                gain_factor=gain_factor,
+                nominated_risk_home=nominated_risk_home,
+                requested_rr=rr_requested,
+            )
+        except ValueError as exc:
+            raise ValueError(f"Fresh OANDA Net-R validation failed: {exc}") from exc
+        qty_val = float(fresh_units)
+        entry_price = float(fresh_entry) if order_type == "limit" else None
+        sl_price = float(fresh_sl)
+        tp_price = float(rr_floor["target_price"])
+        payload["_submit_level_adjustments"] = {
+            "fresh_revalidation": True,
+            "entry_price": _fmt_dec(fresh_entry),
+            "stop_loss_price": _fmt_dec(fresh_sl),
+            "take_profit_price": _fmt_dec(rr_floor["target_price"]),
+            "quantity": _fmt_dec(fresh_units),
+            "minimum_net_reward": _fmt_dec(rr_floor["minimum_net_reward"]),
+            "effective_rr_net": _fmt_dec(rr_floor["effective_rr_net"]),
+        }
+
     signed_units = qty_val if action == "buy" else -qty_val
     order_payload: Dict[str, object] = {
         "type": "MARKET" if order_type == "market" else "LIMIT",
@@ -25400,6 +25488,49 @@ def _floor_to_precision(value: Decimal, precision: int) -> Decimal:
     return value.quantize(quant, rounding=ROUND_DOWN)
 
 
+def _oanda_rr_floor_levels(
+    *,
+    entry: Decimal,
+    side: str,
+    units: Decimal,
+    tick_size: Decimal,
+    spread_quote: Decimal,
+    loss_per_unit_home: Decimal,
+    gain_factor: Decimal,
+    nominated_risk_home: Decimal,
+    requested_rr: Decimal,
+) -> Dict[str, Decimal]:
+    """Return an outward-rounded OANDA TP that meets the calculator Net-R floor."""
+    if units <= 0 or tick_size <= 0 or loss_per_unit_home <= 0 or gain_factor <= 0:
+        raise ValueError("Cannot establish the OANDA Net-R floor from the current quote.")
+    final_loss = loss_per_unit_home * units
+    risk_max = nominated_risk_home * Decimal("1.20")
+    if final_loss > risk_max:
+        raise ValueError(
+            f"Final all-in risk {final_loss} exceeds the 120% risk ceiling {risk_max}."
+        )
+    r_basis = max(nominated_risk_home, final_loss)
+    minimum_net_reward = requested_rr * r_basis
+    distance = spread_quote + (minimum_net_reward / (gain_factor * units))
+    raw_tp = entry + distance if side == "buy" else entry - distance
+    rounding = ROUND_UP if side == "buy" else ROUND_DOWN
+    tp = (raw_tp / tick_size).to_integral_value(rounding=rounding) * tick_size
+    for _ in range(10_000):
+        reward = max(Decimal("0"), (abs(tp - entry) - spread_quote) * gain_factor * units)
+        if reward >= minimum_net_reward:
+            return {
+                "target_price": tp,
+                "target_distance": abs(tp - entry),
+                "estimated_reward": reward,
+                "estimated_total_loss": final_loss,
+                "r_basis": r_basis,
+                "minimum_net_reward": minimum_net_reward,
+                "effective_rr_net": reward / r_basis,
+            }
+        tp += tick_size if side == "buy" else -tick_size
+    raise ValueError("Final rounded OANDA target cannot satisfy the minimum Net-R floor.")
+
+
 def _fmt_dec(value: Decimal) -> str:
     text = format(value, "f")
     return text.rstrip("0").rstrip(".") if "." in text else text
@@ -27099,17 +27230,6 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
             requested_rr_net = None
             effective_rr_net = None
             fee_buffer_r = None
-            if target_mode == "rr" and rr_requested is not None:
-                desired_net_reward_home = loss_per_unit_home * rr_requested
-                target_distance = (desired_net_reward_home / loss_factor) + spread_quote
-                tp = (entry + target_distance) if side == "buy" else (entry - target_distance)
-                reward_per_unit_home = max(Decimal("0"), (target_distance - spread_quote) * gain_factor)
-                requested_rr_net = rr_requested
-                effective_rr_net = reward_per_unit_home / loss_per_unit_home if loss_per_unit_home > 0 else Decimal("0")
-                fee_buffer_r = ((spread_quote * loss_factor) / loss_per_unit_home) if loss_per_unit_home > 0 else Decimal("0")
-            else:
-                target_distance = (tp_ticks or Decimal("0")) * tick_size
-                tp = (entry + target_distance) if side == "buy" else (entry - target_distance)
 
             units_raw = risk_amount_home / loss_per_unit_home
             units = _floor_to_precision(units_raw, units_precision)
@@ -27119,6 +27239,31 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
                 raise HTTPException(status_code=400, detail="Calculated units exceed OANDA maximumOrderUnits.")
             if max_position_size > 0 and units > max_position_size:
                 raise HTTPException(status_code=400, detail="Calculated units exceed OANDA maximumPositionSize.")
+            if target_mode == "rr" and rr_requested is not None:
+                try:
+                    rr_floor = _oanda_rr_floor_levels(
+                        entry=entry,
+                        side=side,
+                        units=units,
+                        tick_size=tick_size,
+                        spread_quote=spread_quote,
+                        loss_per_unit_home=loss_per_unit_home,
+                        gain_factor=gain_factor,
+                        nominated_risk_home=risk_amount_home,
+                        requested_rr=rr_requested,
+                    )
+                except ValueError as exc:
+                    raise HTTPException(status_code=400, detail=str(exc)) from exc
+                tp = rr_floor["target_price"]
+                target_distance = rr_floor["target_distance"]
+                reward_home = rr_floor["estimated_reward"]
+                requested_rr_net = rr_requested
+                effective_rr_net = rr_floor["effective_rr_net"]
+                fee_buffer_r = ((spread_quote * loss_factor) / loss_per_unit_home) if loss_per_unit_home > 0 else Decimal("0")
+            else:
+                target_distance = (tp_ticks or Decimal("0")) * tick_size
+                tp = (entry + target_distance) if side == "buy" else (entry - target_distance)
+                reward_home = max(Decimal("0"), (abs(tp - entry) - spread_quote) * gain_factor * units)
             margin_available = Decimal(str(summary.get("marginAvailable") or "0"))
             effective_margin_rate = margin_rate if margin_rate > 0 else Decimal(str(summary.get("marginRate") or "0"))
             estimated_position_value_home = units * entry * _position_value_factor
@@ -27156,7 +27301,6 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
                         },
                     )
             spread_home = spread_quote * loss_factor * units
-            reward_home = max(Decimal("0"), (abs(tp - entry) - spread_quote) * gain_factor * units)
             response_payload = {
                     "broker": broker,
                     "venue": "Pepperstone" if broker == "pepperstone" else "OANDA",

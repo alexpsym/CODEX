@@ -180,7 +180,7 @@ double CalcRiskForVolume(double lossPerLotSL, double commissionRoundTurnPerLot, 
 
 // Computes TP so that NET profit (after commissions) is >= NetRR_Target * 1R, where:
 // 1R is interpreted as (SL loss + commissions) if IncludeCommissionInRisk=true, else (SL loss + commissions) is still used for the "R" base.
-bool ComputeAutoTP_NetRR(ENUM_ORDER_TYPE type, double entry, double vol, double riskRoundedAUD, double &tpOut, string &why)
+bool ComputeAutoTP_NetRR(ENUM_ORDER_TYPE type, double entry, double vol, double riskRoundedAUD, double riskBufferedAUD, double &tpOut, string &why)
 {
    if(vol <= 0)
    {
@@ -196,10 +196,11 @@ bool ComputeAutoTP_NetRR(ENUM_ORDER_TYPE type, double entry, double vol, double 
    // Estimate round-trip commission in account currency (AUD)
    double commissionRT = CommissionPerLotPerSide * 2.0 * vol;
 
-   // Define 1R base as (SL loss + commissions), regardless of IncludeCommissionInRisk
-   double rBase = riskRoundedAUD;
+   // Use the nominated budget as a floor and the final all-in risk when larger.
+   double finalAllInRisk = MathMax(riskRoundedAUD, riskBufferedAUD);
    if(!IncludeCommissionInRisk)
-      rBase += commissionRT;
+      finalAllInRisk += commissionRT;
+   double rBase = MathMax(RiskAUD_Target, finalAllInRisk);
 
    double requiredNetProfit = NetRR_Target * rBase;
    double requiredGrossProfit = requiredNetProfit + commissionRT; // gross must cover commissions to achieve required net
@@ -241,6 +242,29 @@ bool ComputeAutoTP_NetRR(ENUM_ORDER_TYPE type, double entry, double vol, double 
          tp = (type == ORDER_TYPE_BUY) ? (entry + (double)pts * _Point) : (entry - (double)pts * _Point);
          tp = NormalizeDouble(tp, (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS));
       }
+   }
+
+   double grossAtTP = 0.0;
+   double netAtTP = 0.0;
+   int adjustmentAttempts = 0;
+   const int maxAdjustmentAttempts = 10000;
+   while(true)
+   {
+      if(!OrderCalcProfit(type, _Symbol, vol, entry, tp, grossAtTP))
+      {
+         why = "OrderCalcProfit failed while validating final TP.";
+         return false;
+      }
+      netAtTP = grossAtTP - commissionRT;
+      if(netAtTP + 0.0000001 >= requiredNetProfit) break;
+      if(adjustmentAttempts++ >= maxAdjustmentAttempts)
+      {
+         why = "Final normalized TP cannot satisfy the minimum Net R target.";
+         return false;
+      }
+      pts++;
+      tp = (type == ORDER_TYPE_BUY) ? (entry + (double)pts * _Point) : (entry - (double)pts * _Point);
+      tp = NormalizeDouble(tp, (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS));
    }
 
    tpOut = tp;
@@ -367,6 +391,7 @@ bool BuildOrderParams(ENUM_ORDER_TYPE type, double &price, double &sl, double &t
       return false;
    }
 
+   double riskBufferedFinal = riskNominal;
    // Optional slippage buffer: attempt to reduce volume so worst-case <= max,
    // but NEVER reduce volume below the minimum-risk requirement.
    if(RiskSlippageBufferPoints > 0)
@@ -393,8 +418,12 @@ bool BuildOrderParams(ENUM_ORDER_TYPE type, double &price, double &sl, double &t
                riskBuffered += commissionRoundTurnPerLot * v;
          }
 
-         if(Debug && riskBuffered > riskMax)
-            Dbg(StringFormat("WARN: buffered risk %.2f > max %.2f, but minimum-risk requirement enforced; proceeding", riskBuffered, riskMax));
+         if(riskBuffered > riskMax)
+         {
+            Dbg(StringFormat("FAIL: buffered risk %.2f exceeds RiskAUD_Max %.2f", riskBuffered, riskMax));
+            return false;
+         }
+         riskBufferedFinal = riskBuffered;
       }
    }
 
@@ -409,7 +438,7 @@ bool BuildOrderParams(ENUM_ORDER_TYPE type, double &price, double &sl, double &t
    if(AutoTP_NetRR_Enabled)
    {
       string why = "";
-      if(!ComputeAutoTP_NetRR(type, price, vol, riskRoundedAUD, tp, why))
+      if(!ComputeAutoTP_NetRR(type, price, vol, riskRoundedAUD, riskBufferedFinal, tp, why))
       {
          Dbg("FAIL: auto TP " + why);
          return false;

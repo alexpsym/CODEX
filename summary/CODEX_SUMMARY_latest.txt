@@ -1,3 +1,28 @@
+Phase 7: enforce nominated minimum Net-R targets after costs and final sizing
+
+Defect and invariant implemented
+
+- Pepperstone automatic Net-R targets previously used only nominal rounded risk, allowing a legal undersized lot or retained slippage-buffer risk to produce less than the nominated target. The shared live and Backtest calculations now retain buffered worst-case all-in risk after volume adjustment and use `max(RiskAUD_Target, final rounded all-in risk, final buffered all-in risk)` as the Net-R basis. Thus AUD 10 at 2R requires at least AUD 20 net when final risk is lower, and at least AUD 22 when retained buffered risk is AUD 11.
+- Both MQL5 AutoTP helpers validate profit after final TP normalisation with OrderCalcProfit, subtract configured round-trip commission once, move an undershooting target outward by bounded legal point increments, and fail if the floor cannot be established. Buffered risk above RiskAUD_Max is a hard failure before any order is sent. The corrected shared helper is used by standard market, standard limit/trendline, EMA, and Backtest paths; manual TP remains unchanged.
+- OANDA calculator RR quoting now determines legal units before calculating the target floor, uses loss-side conversion for all-in loss and gain-side conversion for reward, rounds TP outward, checks the 120% cap, and returns internally consistent estimated loss/reward and Net-R fields. Calculator-metadata OANDA submissions perform one fresh quote/factor/unit/bracket validation before their sole broker request; legacy/manual payloads are unchanged.
+
+Focused verification and deployment
+
+- PASS `python -m pytest -q tests/test_master_service_calculator_api.py::test_oanda_rr_floor_survives_costs_conversion_sizing_and_submit_revalidation` (1 passed in 6.92s after the initial combined run identified and corrected only a test return-key assertion). The prior OANDA test verifies fixed/percentage AUD-10-equivalent floor handling, lower gain-side conversion, whole-unit sizing, outward target precision, 120% failure, one revalidated mocked submit, and one mocked OANDA request.
+- PASS `python -m pytest -q tests/test_python_mt5_conversion_files.py::test_mql5_trader_standard_market_is_live_quote_anchored_and_terminal_token_gated` (1 passed in 0.28s). It verifies retained buffered-risk handoff to both live/backtest Net-R helpers, hard risk caps, final TP validation/outward adjustment, and existing live-quote/token protections.
+- MetaEditor compilation cycle: Trader.mq5 `0 errors, 0 warnings` (3357 ms); Backtest.mq5 `0 errors, 0 warnings` (1140 ms). MetaEditor returned process code 1 despite both authoritative logs reporting zero errors/warnings.
+- Deployed only Trader.mq5 and Trader.ex5 to the exact Pepperstone terminal Experts directory. SHA-256 source: `328100561F5BB198E0323E9D5F5BDB27103FE9C3A3E13F6CF29AF806F97A075D`; compiled/deployed EX5: `7D3377AE49E021DF9E07CFA6347D50C685FB03A769EB008523BEED26DCA9CE25`. Existing deployed files were preserved at `C:\Users\User\AppData\Local\Temp\codex-phase7-trader-backup-20260907-225155`.
+- No live/demo trade, broker, exchange, notification, Render, TradingView, or production-data request ran. Phase 7 is complete; modeled costs/quotes do not mathematically guarantee eventual realised P/L against future gaps, slippage, conversion changes, swaps, or unconfigured broker charges.
+
+Exact files changed
+
+- render/master_service.py
+- mt5-clone/MQL5/Experts/Trader.mq5
+- mt5-clone/MQL5/Experts/Backtest.mq5
+- tests/test_master_service_calculator_api.py
+- tests/test_python_mt5_conversion_files.py
+- summary/CODEX_SUMMARY_latest.txt
+
 USDJPY merged-alert symbol routing
 
 Root cause and behaviour implemented

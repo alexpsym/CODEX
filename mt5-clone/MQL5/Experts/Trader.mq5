@@ -225,7 +225,7 @@ bool BuildTPManualFromDistance(double entry, bool isBuy, double &tpOut, string &
    return true;
 }
 
-bool ComputeAutoTP_NetRR(double entry, bool isBuy, double vol, double riskRoundedAUD,
+bool ComputeAutoTP_NetRR(double entry, bool isBuy, double vol, double riskRoundedAUD, double riskBufferedAUD,
                          double &tpOut, int &tpPointsOut, double &effNetRR, string &why)
 {
    if(vol <= 0){ why="Invalid volume for AutoTP."; return false; }
@@ -233,8 +233,9 @@ bool ComputeAutoTP_NetRR(double entry, bool isBuy, double vol, double riskRounde
 
    double commissionRT = CommissionPerLotPerSide * 2.0 * vol;
 
-   double rBase = riskRoundedAUD;
-   if(!IncludeCommissionInRisk) rBase += commissionRT;
+   double finalAllInRisk = MathMax(riskRoundedAUD, riskBufferedAUD);
+   if(!IncludeCommissionInRisk) finalAllInRisk += commissionRT;
+   double rBase = MathMax(RiskAUD_Target, finalAllInRisk);
 
    double requiredNetProfit   = NetRR_Target * rBase;
    double requiredGrossProfit = requiredNetProfit + commissionRT;
@@ -265,10 +266,21 @@ bool ComputeAutoTP_NetRR(double entry, bool isBuy, double vol, double riskRounde
    }
 
    double grossAtTP = 0.0;
-   if(!OrderCalcProfit(ot, _Symbol, vol, entry, tp, grossAtTP))
-   { why="OrderCalcProfit failed while validating final TP."; return false; }
-
-   double netAtTP = grossAtTP - commissionRT;
+   double netAtTP = 0.0;
+   int adjustmentAttempts = 0;
+   const int maxAdjustmentAttempts = 10000;
+   while(true)
+   {
+      if(!OrderCalcProfit(ot, _Symbol, vol, entry, tp, grossAtTP))
+      { why="OrderCalcProfit failed while validating final TP."; return false; }
+      netAtTP = grossAtTP - commissionRT;
+      if(netAtTP + 0.0000001 >= requiredNetProfit) break;
+      if(adjustmentAttempts++ >= maxAdjustmentAttempts)
+      { why="Final normalized TP cannot satisfy the minimum Net R target."; return false; }
+      pts++;
+      tp = isBuy ? (entry + (double)pts * _Point) : (entry - (double)pts * _Point);
+      tp = NormalizePrice(tp);
+   }
    effNetRR = (rBase > 0) ? (netAtTP / rBase) : 0.0;
 
    tpOut = tp;
@@ -311,12 +323,13 @@ bool IsLimitPriceValid(double entry, bool isBuyLimit, string &why)
    return true;
 }
 
-bool ComputeVolumeFromRisk(double entry, double sl, double &outVol, double &outRiskRoundedAUD, string &why)
+bool ComputeVolumeFromRisk(double entry, double sl, double &outVol, double &outRiskRoundedAUD, double &outRiskBufferedAUD, string &why)
 {
    double riskMin = RiskAUD_Min;
    double riskMax = MathMax(RiskAUD_Max, riskMin);
    double riskTarget = MathMax(RiskAUD_Target, riskMin);
    why = "";
+   outRiskBufferedAUD = 0.0;
 
    double stopPoints = MathAbs(entry - sl) / _Point;
    if(stopPoints <= 0){ why="Stop distance is zero/invalid."; return false; }
@@ -369,6 +382,7 @@ bool ComputeVolumeFromRisk(double entry, double sl, double &outVol, double &outR
 
    outVol = vol;
    outRiskRoundedAUD = riskTotal;
+   outRiskBufferedAUD = riskTotal;
 
    if(riskTotal < riskMin){ why="Rounded risk is below RiskAUD_Min filter."; return false; }
    if(riskTotal > riskMax){ why="Rounded risk exceeds RiskAUD_Max filter."; return false; }
@@ -403,7 +417,12 @@ bool ComputeVolumeFromRisk(double entry, double sl, double &outVol, double &outR
 
       outVol = vol;
       outRiskRoundedAUD = riskTotal;
-      if(riskWorst > riskMax) why = "WARN: worst-case buffered risk exceeds RiskAUD_Max.";
+      outRiskBufferedAUD = riskWorst;
+      if(riskWorst > riskMax)
+      {
+         why = "Worst-case buffered risk exceeds RiskAUD_Max.";
+         return false;
+      }
    }
 
    return true;
@@ -689,12 +708,13 @@ bool ExecuteStandardMarketOnce()
    double tp = 0.0;
    double volume = 0.0;
    double riskRounded = 0.0;
+   double riskBuffered = 0.0;
    if(!BuildSLFromDistance(entry, isBuy, sl, why))
    {
       LogStandardMarketOutcome("invalid_stops", isBuy, entry, sl, tp, volume, riskRounded, tokenFingerprint, 0, "not_sent", 0, 0, why);
       return false;
    }
-   if(!ComputeVolumeFromRisk(entry, sl, volume, riskRounded, why))
+   if(!ComputeVolumeFromRisk(entry, sl, volume, riskRounded, riskBuffered, why))
    {
       LogStandardMarketOutcome("invalid_risk", isBuy, entry, sl, tp, volume, riskRounded, tokenFingerprint, 0, "not_sent", 0, 0, why);
       return false;
@@ -709,7 +729,7 @@ bool ExecuteStandardMarketOnce()
    double effectiveNetRR = 0.0;
    if(AutoTP_NetRR_Enabled)
    {
-      if(!ComputeAutoTP_NetRR(entry, isBuy, volume, riskRounded, tp, autoTpPts, effectiveNetRR, why))
+      if(!ComputeAutoTP_NetRR(entry, isBuy, volume, riskRounded, riskBuffered, tp, autoTpPts, effectiveNetRR, why))
       {
          LogStandardMarketOutcome("invalid_stops", isBuy, entry, sl, tp, volume, riskRounded, tokenFingerprint, 0, "not_sent", 0, 0, why);
          return false;
@@ -876,15 +896,15 @@ bool PlaceMarketEmaBounce()
 
    if(!BuildSLFromDistance(entry, isBuy, sl, why)) return false;
 
-   double vol=0, riskRounded=0;
-   if(!ComputeVolumeFromRisk(entry, sl, vol, riskRounded, why)) return false;
+   double vol=0, riskRounded=0, riskBuffered=0;
+   if(!ComputeVolumeFromRisk(entry, sl, vol, riskRounded, riskBuffered, why)) return false;
 
    int autoTpPts=0;
    double effNetRR=0.0;
 
    if(AutoTP_NetRR_Enabled)
    {
-      if(!ComputeAutoTP_NetRR(entry, isBuy, vol, riskRounded, tp, autoTpPts, effNetRR, why)) return false;
+      if(!ComputeAutoTP_NetRR(entry, isBuy, vol, riskRounded, riskBuffered, tp, autoTpPts, effNetRR, why)) return false;
    }
    else
    {
@@ -1014,7 +1034,7 @@ bool PlaceOrReplacePendingLimitAtEntry(const bool isBuyLimit,
       g_ticket = 0;
    }
 
-   double sl=0.0, tp=0.0, vol=0.0, riskRounded=0.0;
+   double sl=0.0, tp=0.0, vol=0.0, riskRounded=0.0, riskBuffered=0.0;
 
    if(!ValidateTradingReadiness(isBuyLimit, why))
    {
@@ -1037,7 +1057,7 @@ bool PlaceOrReplacePendingLimitAtEntry(const bool isBuyLimit,
       return false;
    }
 
-   if(!ComputeVolumeFromRisk(entry, sl, vol, riskRounded, why))
+   if(!ComputeVolumeFromRisk(entry, sl, vol, riskRounded, riskBuffered, why))
    {
       g_lastPendingFailureStructural = true;
       Print(EA_COMMENT, ": Risk sizing failure. ", why);
@@ -1054,7 +1074,7 @@ bool PlaceOrReplacePendingLimitAtEntry(const bool isBuyLimit,
    double effNetRR=0.0;
    if(AutoTP_NetRR_Enabled)
    {
-      if(!ComputeAutoTP_NetRR(entry, isBuyLimit, vol, riskRounded, tp, autoTpPts, effNetRR, why))
+      if(!ComputeAutoTP_NetRR(entry, isBuyLimit, vol, riskRounded, riskBuffered, tp, autoTpPts, effNetRR, why))
       {
          g_lastPendingFailureStructural = true;
          Print(EA_COMMENT, ": Failed to build AutoTP. ", why);

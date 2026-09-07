@@ -172,6 +172,7 @@ def test_mql5_trader_resolves_pepperstone_dot_suffix_symbols():
 
 def test_mql5_trader_standard_market_is_live_quote_anchored_and_terminal_token_gated():
     trader = (ROOT / "mt5-clone" / "MQL5" / "Experts" / "Trader.mq5").read_text(encoding="utf-8")
+    backtest = (ROOT / "mt5-clone" / "MQL5" / "Experts" / "Backtest.mq5").read_text(encoding="utf-8")
     market = trader.split("bool ExecuteStandardMarketOnce()", 1)[1].split("void CancelAllPendingByMagic()", 1)[0]
     consume = trader.split("bool ConsumeStandardMarketToken", 1)[1].split("bool ExecuteStandardMarketOnce()", 1)[0]
     on_init = trader.split("int OnInit()", 1)[1].split("void OnDeinit", 1)[0]
@@ -211,6 +212,21 @@ def test_mql5_trader_standard_market_is_live_quote_anchored_and_terminal_token_g
     assert "STANDARD_MARKET_EXECUTE_BUTTON" in chart_event
     assert "if(Strategy == STRAT_STANDARD_MARKET) return;" in trader
     assert "EventSetTimer(1);" in trader
+    for source in (trader, backtest):
+        assert "double rBase = MathMax(RiskAUD_Target, finalAllInRisk);" in source
+        assert "MathMax(riskRoundedAUD, riskBufferedAUD)" in source
+        assert "OrderCalcProfit" in source
+        assert "Final normalized TP cannot satisfy the minimum Net R target." in source
+        assert "adjustmentAttempts" in source
+        assert "riskWorst > riskMax" in source or "riskBuffered > riskMax" in source
+        assert "RiskAUD_Max" in source
+    assert "Worst-case buffered risk exceeds RiskAUD_Max." in trader
+    assert "FAIL: buffered risk" in backtest
+    assert "double &outRiskBufferedAUD" in trader
+    assert "outRiskBufferedAUD = riskWorst;" in trader
+    assert "riskBufferedFinal" in backtest
+    assert "riskRounded, riskBuffered" in trader
+    assert "riskRoundedAUD, riskBufferedFinal" in backtest
 
 
 def test_trader_has_no_embedded_market_watch_spread_feed():
