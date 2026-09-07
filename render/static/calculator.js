@@ -741,6 +741,7 @@
     const payload = {
       asset: state.asset, broker: state.asset === 'crypto' ? 'bybit' : state.broker, account: state.account,
       instrument: state.resolvedSymbol, side: state.side, order_type: state.order_type, test_trade: state.test_mode === 'yes',
+      limit_entry_price: state.order_type === 'limit' ? $('calc-limit').value : null,
       anchors: [{ timestamp_ms: Math.trunc(a1), price: p1 }, { timestamp_ms: Math.trunc(a2), price: p2 }],
       right_extension: !!$('trendline-right-extension').checked,
       trigger_mode: $('trendline-trigger-mode').value, cross_direction: $('trendline-cross-direction').value,
@@ -787,6 +788,7 @@
     state.trendlineEditId=plan.plan_id; const a=plan.anchors||[];
     $('trendline-anchor-1-time').value=localDateTime(a[0].timestamp_ms); $('trendline-anchor-2-time').value=localDateTime(a[1].timestamp_ms); $('trendline-anchor-1-price').value=a[0].price; $('trendline-anchor-2-price').value=a[1].price;
     $('trendline-right-extension').checked=!!plan.right_extension; $('trendline-trigger-mode').value=plan.trigger_mode; $('trendline-cross-direction').value=plan.cross_direction; $('trendline-price-basis').value=plan.trigger_price_basis; $('trendline-tolerance-ticks').value=plan.tolerance_ticks;
+    if(plan.order_intent==='limit' && plan.limit_entry_price) $('calc-limit').value=plan.limit_entry_price;
     const expiry=$('trendline-expiry'); if(plan.expiry_at_ms){ expiry.innerHTML=`<option value="keep">Keep current expiry — ${escapeHtml(new Date(Number(plan.expiry_at_ms)).toLocaleString())}</option>`+expiry.innerHTML; expiry.value='keep'; }
     $('trendline-save').textContent='Update draft'; anchorEpoch('trendline-anchor-1-time','trendline-anchor-1-utc'); anchorEpoch('trendline-anchor-2-time','trendline-anchor-2-utc'); syncTrendlineTriggerControls(); trendlineStatus(`Editing draft ${String(plan.plan_id).slice(0,8)}.`);
   }

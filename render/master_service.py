@@ -286,8 +286,9 @@ def _trendline_calculator_payload(plan: Mapping[str, object]) -> Dict[str, objec
         "asset": "crypto" if plan["broker"] == "bybit" else "fx", "broker": plan["broker"],
         "account": plan["account"], "symbol": plan["instrument"], "side": plan["action"],
         "order_type": plan["order_intent"], "risk_mode": plan["risk_mode"], "risk_value": plan["risk_value"],
+        "entry_price": plan.get("limit_entry_price") if plan["order_intent"] == "limit" else None,
         "stop_loss_ticks": plan["stop_loss_ticks"], "risk_reward": plan["rr_target"], "target_mode": "rr",
-        "timeframe": plan["timeframe"], "test_trade": False, "webhook": "no", **dict(plan["order_metadata"]),
+        "timeframe": plan["timeframe"], "test_trade": False, "webhook": "no", "_trendline_internal": True, **dict(plan["order_metadata"]),
     }
 
 
@@ -297,9 +298,11 @@ async def _trendline_fresh_calculation(plan: Mapping[str, object], _quote: Optio
     if response.status_code >= 400:
         raise ValueError("Fresh trendline calculation was rejected.")
     calculated = json.loads(response.body.decode("utf-8"))
-    # A final independent snapshot is retained with the result and is used for
-    # trigger revalidation before claiming. No creation-time quote is reused.
-    calculated["trigger_quote"] = await _trendline_executor_quote(plan)
+    # The private in-process calculator returns the exact snapshot used for
+    # its sizing; no third quote acquisition is permitted here.
+    calculated["trigger_quote"] = calculated.pop("_trusted_trendline_quote", None)
+    if not isinstance(calculated["trigger_quote"], Mapping):
+        raise ValueError("Final calculator quote snapshot was unavailable.")
     return calculated
 
 
@@ -313,7 +316,7 @@ async def _trendline_executor_quote(plan: Mapping[str, object]) -> Mapping[str, 
         row = _extract_valid_bybit_ticker_row(payload if isinstance(payload, dict) else {}, symbol)
         instrument = await _bybit_get_instrument_info_cached(base_url, "linear", symbol)
         timestamp = (payload or {}).get("time") if isinstance(payload, Mapping) else None
-        if not row or not instrument or not isinstance(timestamp, int):
+        if not row or str(row.get("symbol") or "").upper() != symbol or not instrument or not isinstance(timestamp, int):
             raise ValueError("Fresh Bybit quote is missing required timestamp or precision.")
         bid, ask = Decimal(str(row.get("bid1Price"))), Decimal(str(row.get("ask1Price")))
         tick = (instrument.get("priceFilter") or {}).get("tickSize")
@@ -322,6 +325,8 @@ async def _trendline_executor_quote(plan: Mapping[str, object]) -> Mapping[str, 
         meta = await _fetch_oanda_instrument_meta(base_url=cfg["base_url"], account_id=cfg["account_id"], api_key=cfg["token"], symbol=symbol, mode=str(plan["account"]))
         prices = await _fetch_oanda_json(base_url=cfg["base_url"], account_id=cfg["account_id"], api_key=cfg["token"], endpoint=f"/accounts/{{account_id}}/pricing?instruments={symbol}&includeHomeConversions=false", mode=str(plan["account"]))
         rows = prices.get("prices") or []; row = rows[0] if rows else {}
+        if str(row.get("instrument") or "").upper() != symbol:
+            raise ValueError("Fresh OANDA quote instrument does not match the plan.")
         stamp = str(row.get("time") or "").replace("Z", "+00:00")
         try:
             timestamp = int(datetime.fromisoformat(stamp).timestamp() * 1000)
@@ -333,10 +338,13 @@ async def _trendline_executor_quote(plan: Mapping[str, object]) -> Mapping[str, 
         raise ValueError("Unsupported trendline broker.")
     if bid <= 0 or ask <= 0 or bid >= ask or not tick:
         raise ValueError("Fresh trendline quote is crossed or invalid.")
-    return {"instrument": symbol, "timestamp_ms": timestamp, "bid": str(bid), "ask": str(ask), "tick_size": str(tick)}
+    returned_instrument = str(row.get("symbol") if broker == "bybit" else row.get("instrument")).upper()
+    return {"instrument": returned_instrument, "timestamp_ms": timestamp, "bid": str(bid), "ask": str(ask), "tick_size": str(tick)}
 
 
 async def _trendline_executor_submit(plan: Mapping[str, object], calculation: Mapping[str, object], execution_key: str) -> Mapping[str, object]:
+    if plan["order_intent"] == "limit" and not plan.get("limit_entry_price"):
+        raise ValueError("Trendline limit plan is missing its limit entry price.")
     payload = {**_trendline_calculator_payload(plan), "action": plan["action"], "quantity": calculation.get("quantity"), "entry_price": calculation.get("entry_price"), "stop_loss_price": calculation.get("stop_price"), "take_profit_price": calculation.get("target_price"), "calculation_context_id": calculation.get("calculation_context_id"), "quote_created_at_ms": calculation.get("quote_created_at_ms")}
     if plan["broker"] == "bybit":
         return await _place_bybit_order(payload, request_id=execution_key, invalidate_cache=True)
@@ -351,7 +359,7 @@ TRENDLINE_EXECUTOR = TrendlinePlanExecutor(
     lambda plan: str(plan.get("account") or "").lower() == "demo" or (
         isinstance(plan.get("live_authorization"), Mapping)
         and plan["live_authorization"].get("execution_key") == plan.get("execution_key")
-        and plan["live_authorization"].get("plan_revision") == plan.get("revision")
+        and int(plan["live_authorization"].get("plan_revision") or 0) <= int(plan.get("revision") or 0)
     ),
 )
 JOURNAL_DISPLAY_TZ = ZoneInfo("Australia/Brisbane")
@@ -26435,7 +26443,7 @@ def _trendline_plan_http_error(exc: Exception, *, transition: bool = False) -> N
 
 
 def _trendline_plan_payload(payload: Mapping[str, object]) -> Dict[str, object]:
-    forbidden = {"schema_version", "plan_id", "execution_key", "revision", "created_at_ms", "updated_at_ms", "status", "lifecycle", "trigger_claim"}
+    forbidden = {"schema_version", "plan_id", "execution_key", "revision", "created_at_ms", "updated_at_ms", "status", "lifecycle", "trigger_claim", "live_authorization", "execution_result"}
     attempted = sorted(forbidden.intersection(payload))
     if attempted:
         raise TrendlinePlanError(f"Client may not supply immutable trendline fields: {', '.join(attempted)}.")
@@ -26474,12 +26482,17 @@ def _trendline_plan_payload(payload: Mapping[str, object]) -> Dict[str, object]:
         test_trade = False
     else:
         raise TrendlinePlanError("test_trade must be boolean.")
+    order_intent = str(payload.get("order_intent") or payload.get("order_type") or "").strip().lower()
+    limit_entry = payload.get("limit_entry_price") or payload.get("entry_price") or payload.get("limit_price")
+    if order_intent == "limit" and limit_entry in (None, ""):
+        raise TrendlinePlanError("Limit trendline plans require a positive limit entry price.")
     return {
         "broker": broker,
         "account": account,
         "instrument": canonical_symbol,
         "action": payload.get("action") or payload.get("side"),
         "order_intent": payload.get("order_intent") or payload.get("order_type"),
+        "limit_entry_price": limit_entry,
         "test_trade": test_trade,
         "anchors": payload.get("anchors"),
         "right_extension": payload.get("right_extension", True),
@@ -26542,6 +26555,7 @@ async def trendline_plan_update(plan_id: str, payload: Dict[str, object] = Body(
             "asset": "crypto" if existing["broker"] == "bybit" else "fx",
             "broker": existing["broker"], "account": existing["account"], "instrument": existing["instrument"],
             "side": existing["action"], "order_type": existing["order_intent"], "test_trade": existing["test_trade"],
+            "limit_entry_price": existing.get("limit_entry_price"),
             "anchors": existing["anchors"], "right_extension": existing["right_extension"],
             "trigger_mode": existing["trigger_mode"], "cross_direction": existing["cross_direction"],
             "trigger_price_basis": existing["trigger_price_basis"], "tolerance_ticks": existing["tolerance_ticks"],
@@ -27305,6 +27319,11 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
                 "requested_target_price_before_adjustment": _fmt_dec(requested_target_before_adjustment),
                 "fee_buffer_r": _fmt_dec_by_precision(fee_buffer_r, Decimal("0.01")) if fee_buffer_r is not None else None,
             }
+            if payload.get("_trendline_internal") is True:
+                broker_ts = tickers.get("time") if isinstance(tickers, Mapping) else None
+                if not isinstance(broker_ts, int):
+                    raise HTTPException(status_code=502, detail="Bybit calculator quote is missing a broker timestamp.")
+                response_payload["_trusted_trendline_quote"] = {"instrument": str(row.get("symbol") or ""), "bid": _fmt_dec(bid), "ask": _fmt_dec(ask), "timestamp_ms": broker_ts, "tick_size": _fmt_dec(tick_size)}
             if warnings:
                 response_payload["warnings"] = warnings
             calculation_context_id = (
@@ -27697,6 +27716,13 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
             )
             response_payload["calculation_context_id"] = calculation_context_id
             response_payload["quote_created_at_ms"] = int(time.time() * 1000)
+            if payload.get("_trendline_internal") is True:
+                stamp = str(row.get("time") or "").replace("Z", "+00:00")
+                try:
+                    broker_ts = int(datetime.fromisoformat(stamp).timestamp() * 1000)
+                except Exception as exc:
+                    raise HTTPException(status_code=502, detail="OANDA calculator quote is missing a broker timestamp.") from exc
+                response_payload["_trusted_trendline_quote"] = {"instrument": str(row.get("instrument") or ""), "bid": _fmt_dec(bid), "ask": _fmt_dec(ask), "timestamp_ms": broker_ts, "tick_size": _fmt_dec(tick_size)}
             try:
                 _upsert_calculator_trade_context(
                     {

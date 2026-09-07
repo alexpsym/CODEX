@@ -2493,3 +2493,23 @@ def test_local_trendline_executor_start_stop_status_is_profile_gated(monkeypatch
     assert json.loads(asyncio.run(master_service.trendline_monitor_start()).body)["started"] is False
     assert fake.starts == 1
     assert json.loads(asyncio.run(master_service.trendline_monitor_stop()).body)["running"] is False
+
+
+def test_trendline_final_calculator_snapshot_and_literal_live_arm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    store = master_service.TrendlinePlanStore(tmp_path / "plans.json")
+    monkeypatch.setattr(master_service, "TRENDLINE_PLAN_STORE", store)
+    monkeypatch.setattr(master_service, "APP_PROFILE", "local")
+    calls = []
+    async def fake_quote(payload):
+        calls.append(dict(payload))
+        return master_service.JSONResponse({"entry_price": "100", "_trusted_trendline_quote": {"instrument": "USD_JPY", "bid": "99.9", "ask": "100", "timestamp_ms": 2000, "tick_size": "0.01"}})
+    monkeypatch.setattr(master_service, "calculator_quote", fake_quote)
+    plan = {"broker":"oanda","account":"live","instrument":"USD_JPY","action":"buy","order_intent":"market","limit_entry_price":None,"risk_mode":"percent","risk_value":"1","stop_loss_ticks":10,"rr_target":"2","timeframe":"1h","order_metadata":{}}
+    result = asyncio.run(master_service._trendline_fresh_calculation(plan))
+    assert len(calls) == 1 and result["trigger_quote"] == {"instrument":"USD_JPY","bid":"99.9","ask":"100","timestamp_ms":2000,"tick_size":"0.01"}
+    payload = {"asset":"fx","broker":"oanda","account":"live","instrument":"USD_JPY","side":"buy","order_type":"market","test_trade":False,"anchors":[{"timestamp_ms":1000,"price":"100"},{"timestamp_ms":2000,"price":"101"}],"right_extension":True,"trigger_mode":"touch","cross_direction":"either","trigger_price_basis":"executable","tolerance_ticks":0,"risk_mode":"percent","risk_value":"1","stop_loss_ticks":10,"rr_target":"2","timeframe":"1h"}
+    created = json.loads(asyncio.run(master_service.trendline_plan_create(payload)).body)["plan"]
+    for invalid in ({}, {"confirm_live_execution": False}, {"confirm_live_execution": "true"}):
+        with pytest.raises(master_service.HTTPException): asyncio.run(master_service.trendline_plan_arm(created["plan_id"], invalid))
+    armed = json.loads(asyncio.run(master_service.trendline_plan_arm(created["plan_id"], {"confirm_live_execution": True})).body)["plan"]
+    assert armed["live_authorization"]["execution_key"] == armed["execution_key"] and armed["live_authorization"]["plan_revision"] == armed["revision"]

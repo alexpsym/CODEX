@@ -1,3 +1,12 @@
+Phase 10 corrective continuation: final calculator snapshot and live arm authority
+
+- The private in-process calculator path now returns the exact canonical broker snapshot it used for sizing (instrument, bid, ask, broker timestamp, and tick size). The executor uses that returned snapshot for final trigger revalidation and no longer fetches a third post-calculation quote.
+- Added durable `limit_entry_price` handling: newly saved limit plans require it, it round-trips through calculator plan data, market plans clear it, and a legacy limit plan without it fails closed before submission.
+- Live authorization is now bound to the server-created arm instance rather than invalidated by normal claim revisions. Cancellation/expiry clear it, draft edits clear it, expired live arming is rejected, and the arm route accepts only literal JSON boolean `confirm_live_execution: true` before atomically creating the credential-free authorization.
+- PASS prior focused invocation (not rerun): `python -m pytest -q tests/test_trendline_executor.py::test_trendline_executor_fresh_claim_recalculation_and_one_submission tests/test_trendline_executor.py::test_trendline_executor_rejects_stale_and_simulates_test_without_submission tests/test_master_service_calculator_api.py::test_local_trendline_executor_start_stop_status_is_profile_gated tests/test_calculator_js_behavior.py::test_local_trendline_plan_ui_saves_manual_anchors_and_manages_status` — `5 passed in 11.42s`.
+- PASS final permitted consolidated node: `python -m pytest -q tests/test_master_service_calculator_api.py::test_trendline_final_calculator_snapshot_and_literal_live_arm` — `1 passed in 11.75s` (framework/pytest-cache warnings only). It verifies one calculator snapshot with no third quote, exact final snapshot propagation, and strict server-side live-arm Boolean/authorization behavior without broker activity.
+- No executor worker, broker, exchange, account, quote service, order, Render, TradingView, webhook, browser, notification, or production-data operation ran. Monitoring remains stopped; Phase 11 has not been started.
+
 Phase 10 corrective follow-up: real executor integration
 
 - Replaced the polling adapter's calculator-derived pseudo quote with lightweight canonical Bybit/OANDA snapshots containing the broker instrument, bid, ask, broker timestamp, and tick size. Missing timestamps, malformed/wrong/crossed quotes, and absent precision now fail closed rather than substituting entry price or manufacturing time.

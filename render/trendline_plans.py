@@ -181,9 +181,10 @@ def _normalise_live_authorization(value: object, execution_key: str, revision: i
         raise TrendlinePlanError("live_authorization must be an object or null.")
     if _text(value.get("execution_key"), "live_authorization.execution_key") != execution_key:
         raise TrendlinePlanError("live_authorization execution key must match the plan.")
-    if _positive_int(value.get("plan_revision"), "live_authorization.plan_revision") != revision:
-        raise TrendlinePlanError("live_authorization revision must match the plan.")
-    return {"execution_key": execution_key, "plan_revision": revision, "authorized_at_ms": _int_ms(value.get("authorized_at_ms"), "live_authorization.authorized_at_ms")}
+    arm_revision = _positive_int(value.get("plan_revision"), "live_authorization.plan_revision")
+    if arm_revision > revision:
+        raise TrendlinePlanError("live_authorization revision cannot exceed the plan revision.")
+    return {"execution_key": execution_key, "plan_revision": arm_revision, "authorized_at_ms": _int_ms(value.get("authorized_at_ms"), "live_authorization.authorized_at_ms")}
 
 
 def validate_plan(record: Mapping[str, object]) -> Dict[str, object]:
@@ -232,6 +233,11 @@ def validate_plan(record: Mapping[str, object]) -> Dict[str, object]:
         raise TrendlinePlanError("Only claimed/submitting/submitted/failed/uncertain plans may have a trigger_claim.")
     if claim is None and status in _CLAIMED_STATUSES:
         raise TrendlinePlanError("Claimed/submitting/submitted/failed/uncertain plans require trigger_claim.")
+    order_intent = _enum(record.get("order_intent"), "order_intent", _ORDER_INTENTS)
+    limit_raw = record.get("limit_entry_price")
+    limit_entry_price = None if limit_raw in (None, "") else _decimal_string(limit_raw, "limit_entry_price", positive=True)
+    if order_intent == "market":
+        limit_entry_price = None
     return {
         "schema_version": SCHEMA_VERSION,
         "plan_id": plan_id,
@@ -242,7 +248,8 @@ def validate_plan(record: Mapping[str, object]) -> Dict[str, object]:
         "account": _text(record.get("account"), "account"),
         "instrument": _text(record.get("instrument"), "instrument").upper(),
         "action": _enum(record.get("action"), "action", _ACTIONS),
-        "order_intent": _enum(record.get("order_intent"), "order_intent", _ORDER_INTENTS),
+        "order_intent": order_intent,
+        "limit_entry_price": limit_entry_price,
         "test_trade": record["test_trade"],
         "anchors": [anchor_1, anchor_2],
         "right_extension": record["right_extension"],
@@ -571,6 +578,8 @@ class TrendlinePlanStore:
             raise TrendlinePlanError("Unsupported transition.")
         next_plan = copy.deepcopy(plan)
         next_plan["status"] = target
+        if target in {"cancelled", "expired"}:
+            next_plan["live_authorization"] = None
         next_plan["revision"] = int(plan["revision"]) + 1
         next_plan["updated_at_ms"] = now_ms
         next_plan["lifecycle"] = {"last_transition": event, "last_transition_at_ms": now_ms}
@@ -590,6 +599,7 @@ class TrendlinePlanStore:
             registry = self._read(); plan = registry["plans"].get(_text(plan_id, "plan_id"))
             if plan is None: raise TrendlinePlanError("Unknown trendline plan.")
             if plan["status"] != "draft" or plan["trigger_claim"] is not None: raise TrendlinePlanError("Only an unclaimed draft plan may be armed.")
+            if plan["expiry_at_ms"] is not None and now >= int(plan["expiry_at_ms"]): raise TrendlinePlanError("Expired plans cannot be armed.")
             updated = copy.deepcopy(plan); updated["status"] = "armed"; updated["revision"] = int(plan["revision"]) + 1
             updated["updated_at_ms"] = now; updated["lifecycle"] = {"last_transition": "live_authorized_armed", "last_transition_at_ms": now}
             updated["live_authorization"] = {"execution_key": plan["execution_key"], "plan_revision": updated["revision"], "authorized_at_ms": now}

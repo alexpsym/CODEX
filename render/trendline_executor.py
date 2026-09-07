@@ -63,6 +63,7 @@ class TrendlinePlanExecutor:
     async def cycle(self) -> Dict[str, object]:
         now = self.now_ms()
         processed = 0
+        cycle_error = None
         try:
             registry = self.store.load()
             for plan in registry["plans"].values():
@@ -72,18 +73,18 @@ class TrendlinePlanExecutor:
                     self.store.expire(str(plan["plan_id"]), now_ms=now)
                     continue
                 try:
-                    await self._evaluate_one(plan, now)
+                    await self._evaluate_one(plan)
                 except Exception as exc:
-                    self.last_error = _safe_error(exc)
+                    cycle_error = _safe_error(exc)
                 processed += 1
             self.last_cycle = {"at_ms": now, "processed": processed}
-            self.last_error = self.last_error if self.last_error else None
+            self.last_error = cycle_error
         except Exception as exc:  # Cycle remains safe; no unclaimed plan was submitted.
             self.last_error = str(exc)[:500]
             self.last_cycle = {"at_ms": now, "processed": processed}
         return self.last_cycle
 
-    async def _evaluate_one(self, plan: Mapping[str, object], now: int) -> None:
+    async def _evaluate_one(self, plan: Mapping[str, object]) -> None:
         plan_id = str(plan["plan_id"])
         quote = await _await(self.quote(plan))
         if not isinstance(quote, Mapping) or str(quote.get("instrument") or "").upper() != str(plan["instrument"]).upper():
@@ -91,13 +92,14 @@ class TrendlinePlanExecutor:
             return
         tick_size = quote.get("tick_size")
         observation = {"timestamp_ms": quote.get("timestamp_ms"), "bid": quote.get("bid"), "ask": quote.get("ask")}
+        previous = self._previous.get(plan_id)
         try:
-            evaluation = evaluate_trigger(plan, observation, previous_observation=self._previous.get(plan_id), now_ms=now, tick_size=tick_size)
+            evaluation = evaluate_trigger(plan, observation, previous_observation=previous, now_ms=self.now_ms(), tick_size=tick_size)
         except TrendlinePlanError:
             self._previous.pop(plan_id, None)
             return
-        self._previous[plan_id] = observation
         if not evaluation.get("triggered"):
+            self._previous[plan_id] = observation
             return
         # The calculator obtains the exact final quote used for sizing.  Re-test
         # that quote before a claim so a moved-away candidate cannot execute.
@@ -106,8 +108,10 @@ class TrendlinePlanExecutor:
         if not isinstance(final_quote, Mapping):
             return
         final_observation = {"timestamp_ms": final_quote.get("timestamp_ms"), "bid": final_quote.get("bid"), "ask": final_quote.get("ask")}
-        final_eval = evaluate_trigger(plan, final_observation, previous_observation=self._previous.get(plan_id), now_ms=now, tick_size=final_quote.get("tick_size"))
+        final_now = self.now_ms()
+        final_eval = evaluate_trigger(plan, final_observation, previous_observation=previous, now_ms=final_now, tick_size=final_quote.get("tick_size"))
         if not final_eval.get("triggered"):
+            self._previous[plan_id] = final_observation
             return
         # Re-read after the final calculation: cancellation, expiry, revision or
         # replacement invalidate the candidate before the atomic claim.
@@ -116,23 +120,29 @@ class TrendlinePlanExecutor:
             return
         if not fresh["test_trade"] and not self.live_confirmed(fresh):
             return
-        claim = self.store.claim_trigger(plan_id, {"trigger_timestamp_ms": final_observation["timestamp_ms"], "trigger_price": final_eval["trigger_price"], "trigger_kind": final_eval["trigger_kind"]}, now_ms=now)
+        claim_now = self.now_ms()
+        if fresh["expiry_at_ms"] is not None and claim_now >= int(fresh["expiry_at_ms"]):
+            return
+        claim = self.store.claim_trigger(plan_id, {"trigger_timestamp_ms": final_observation["timestamp_ms"], "trigger_price": final_eval["trigger_price"], "trigger_kind": final_eval["trigger_kind"]}, now_ms=claim_now)
         if not claim["claimed"]:
             return
         claimed = claim["plan"]
         if claimed["test_trade"]:
-            self.store.resolve_claim(plan_id, status="submitted", outcome={"outcome": "simulated", "message": "Test plan triggered; no broker order was sent."}, now_ms=now)
+            self.store.resolve_claim(plan_id, status="submitted", outcome={"outcome": "simulated", "message": "Test plan triggered; no broker order was sent."}, now_ms=claim_now)
             return
         try:
             result = await _await(self.submit(claimed, calculated, str(claim["execution_key"])))
         except ValueError as exc:
-            self.store.resolve_claim(plan_id, status="failed", outcome={"outcome": "failed", "message": _safe_error(exc)}, now_ms=now)
+            self.store.resolve_claim(plan_id, status="failed", outcome={"outcome": "failed", "message": _safe_error(exc)}, now_ms=claim_now)
         except Exception as exc:
-            self.store.resolve_claim(plan_id, status="uncertain", outcome={"outcome": "uncertain", "message": _safe_error(exc)}, now_ms=now)
+            self.store.resolve_claim(plan_id, status="uncertain", outcome={"outcome": "uncertain", "message": _safe_error(exc)}, now_ms=claim_now)
         else:
             body = (result or {}).get("order") if isinstance(result, Mapping) else {}
             order_id = str((result or {}).get("order_id") or (result or {}).get("orderId") or (body or {}).get("orderId") or (body or {}).get("id") or "") or None
-            self.store.resolve_claim(plan_id, status="submitted", outcome={"outcome": "executed", "message": "Broker accepted order.", "order_id": order_id}, now_ms=now)
+            if not order_id:
+                self.store.resolve_claim(plan_id, status="uncertain", outcome={"outcome": "uncertain", "message": "Broker acceptance reference was missing."}, now_ms=claim_now)
+                return
+            self.store.resolve_claim(plan_id, status="submitted", outcome={"outcome": "executed", "message": "Broker accepted order.", "order_id": order_id}, now_ms=claim_now)
 
 
 def _safe_error(exc: Exception) -> str:
