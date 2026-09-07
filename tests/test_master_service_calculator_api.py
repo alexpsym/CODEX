@@ -2351,9 +2351,16 @@ def test_oanda_rr_floor_survives_costs_conversion_sizing_and_submit_revalidation
         )
 
     posts = []
+    limits = {"maximum_position_size": "0"}
+    summary_values = {
+        "currency": "AUD",
+        "nav": "1000",
+        "marginAvailable": "10000",
+        "marginRate": "0.10",
+    }
     monkeypatch.setattr(master_service, "_get_oanda_config", lambda _account: {"base_url": "https://oanda.test", "account_id": "acct", "token": "token"})
-    monkeypatch.setattr(master_service, "_fetch_oanda_instrument_meta", lambda **_kwargs: asyncio.sleep(0, result={"displayPrecision": 4, "tradeUnitsPrecision": 0, "minimumTradeSize": "1", "maximumOrderUnits": "999999"}))
-    monkeypatch.setattr(master_service, "_fetch_oanda_account_summary", lambda _account: asyncio.sleep(0, result={"currency": "AUD", "nav": "1000"}))
+    monkeypatch.setattr(master_service, "_fetch_oanda_instrument_meta", lambda **_kwargs: asyncio.sleep(0, result={"displayPrecision": 4, "tradeUnitsPrecision": 0, "minimumTradeSize": "1", "maximumOrderUnits": "999999", "maximumPositionSize": limits["maximum_position_size"], "marginRate": "0"}))
+    monkeypatch.setattr(master_service, "_fetch_oanda_account_summary", lambda _account: asyncio.sleep(0, result=dict(summary_values)))
     monkeypatch.setattr(master_service, "_get_oanda_quote_home_factors", lambda **_kwargs: (dec("0.8"), dec("1"), dec("1")))
     monkeypatch.setattr(master_service, "_convert_aud_to_home_currency", lambda amount, *_args: asyncio.sleep(0, result=amount))
     monkeypatch.setattr(master_service, "_fetch_oanda_json", lambda **_kwargs: asyncio.sleep(0, result={"prices": [{"bids": [{"price": "1.0000"}], "asks": [{"price": "1.0002"}]}]}))
@@ -2372,11 +2379,35 @@ def test_oanda_rr_floor_survives_costs_conversion_sizing_and_submit_revalidation
         async def __aexit__(self, *_args): return False
         async def post(self, url, **kwargs): posts.append((url, kwargs)); return FakeResponse()
     monkeypatch.setattr(master_service.httpx, "AsyncClient", FakeClient)
-    payload = {"symbol": "EUR_USD", "action": "buy", "quantity": "1", "account": "demo", "order_type": "market", "target_mode": "rr", "risk_reward": "2", "risk_mode": "percent", "risk_value": "1", "stop_loss_ticks": "10"}
-    result = asyncio.run(master_service._place_oanda_order(payload, request_id="rr-floor", invalidate_cache=False))
+    payload = {"asset": "fx", "broker": "oanda", "symbol": "EUR_USD", "action": "buy", "quantity": "1000", "account": "demo", "order_type": "market", "stop_loss_price": "0.9990", "take_profit_price": "1.0020", "target_mode": "rr", "risk_reward": "2", "risk_mode": "percent", "risk_value": "1", "stop_loss_ticks": "10"}
+    response = asyncio.run(master_service.calculator_submit(payload))
+    response_body = json.loads(response.body.decode("utf-8"))
     assert len(posts) == 1
     order = posts[0][1]["json"]["order"]
     assert order["units"] == "8333"
+    assert order["stopLossOnFill"]["price"] == "0.9992"
     assert dec(order["takeProfitOnFill"]["price"]) >= dec("1.0035")
-    assert payload["_submit_level_adjustments"]["fresh_revalidation"] is True
-    assert result["orderCreateTransaction"]["id"] == "1"
+    adjustments = response_body["submit_level_adjustments"]
+    assert adjustments["fresh_revalidation"] is True
+    assert adjustments["original_quantity"] == "1000"
+    assert adjustments["adjusted_quantity"] == "8333"
+    assert adjustments["original_take_profit_price"] == "1.002"
+    assert adjustments["adjusted_take_profit_price"] == order["takeProfitOnFill"]["price"]
+    assert adjustments["submit_take_profit_auto_adjusted"] is True
+    assert dec(adjustments["minimum_net_reward"]) == dec("20")
+    final_reward = (dec(order["takeProfitOnFill"]["price"]) - dec("1.0002") - dec("0.0002")) * dec("0.8") * dec(order["units"])
+    assert final_reward >= dec(adjustments["minimum_net_reward"])
+    assert response_body["result"]["orderCreateTransaction"]["id"] == "1"
+
+    # Both refreshed capacity limits fail closed before another broker POST.
+    posts.clear()
+    limits["maximum_position_size"] = "8000"
+    with pytest.raises(ValueError, match="maximumPositionSize"):
+        asyncio.run(master_service._place_oanda_order(payload, request_id="rr-position-cap", invalidate_cache=False))
+    assert posts == []
+
+    limits["maximum_position_size"] = "0"
+    summary_values["marginAvailable"] = "1"
+    with pytest.raises(ValueError, match="marginAvailable"):
+        asyncio.run(master_service._place_oanda_order(payload, request_id="rr-margin-cap", invalidate_cache=False))
+    assert posts == []

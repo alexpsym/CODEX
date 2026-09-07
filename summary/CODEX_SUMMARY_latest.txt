@@ -1,3 +1,10 @@
+Phase 7 corrective follow-up: complete OANDA fresh-submit capacity and adjustment reporting
+
+- The calculator-metadata RR revalidation now applies the quote path's zero/unlimited conventions for `maximumPositionSize`, instrument/account margin-rate selection, position-value conversion, estimated initial margin, and `marginAvailable`. Both capacity checks fail before the single OANDA broker POST.
+- Revalidation retains Decimal-normalized quoted quantity/entry/stop/TP values and returns the original and final bracket/quantity, minimum reward, effective Net-R, and a Decimal-based TP-adjustment flag as top-level `submit_level_adjustments` from `/api/calculator/submit`. Legacy/manual OANDA payloads remain unchanged.
+- PASS (after one bounded endpoint-field correction) `python -m pytest -q tests/test_master_service_calculator_api.py::test_oanda_rr_floor_survives_costs_conversion_sizing_and_submit_revalidation` — `1 passed in 8.90s`. The mocked node verifies exactly one successful POST with fresh units/stop/TP, returned adjustments and Net-R floor, and no POST for maximum-position or refreshed-margin failures.
+- Changed only `render/master_service.py`, `tests/test_master_service_calculator_api.py`, and this summary. No live/demo broker, exchange, Render, notification, or production-data request ran.
+
 Phase 7: enforce nominated minimum Net-R targets after costs and final sizing
 
 Defect and invariant implemented

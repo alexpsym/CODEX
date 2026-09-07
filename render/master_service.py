@@ -22061,6 +22061,28 @@ async def _place_oanda_order(
     )
     display_precision = int(meta["displayPrecision"])
     units_precision = int(meta.get("tradeUnitsPrecision", 0))
+    price_tick = Decimal("1").scaleb(-display_precision)
+    units_tick = Decimal("1").scaleb(-units_precision)
+
+    # Retain the quoted calculator values before fresh RR validation replaces
+    # them. Compare these Decimal display values (never binary floats) with
+    # the final OANDA-normalized bracket returned to the caller.
+    original_quantity = Decimal(str(qty)).quantize(units_tick, rounding=ROUND_HALF_UP)
+    original_entry = (
+        Decimal(str(entry_price)).quantize(price_tick, rounding=ROUND_HALF_UP)
+        if entry_price is not None
+        else None
+    )
+    original_stop = (
+        Decimal(str(sl_price)).quantize(price_tick, rounding=ROUND_HALF_UP)
+        if sl_price is not None
+        else None
+    )
+    original_take_profit = (
+        Decimal(str(tp_price)).quantize(price_tick, rounding=ROUND_HALF_UP)
+        if tp_price is not None
+        else None
+    )
 
     if units_precision <= 0 and not math.isclose(
         qty_val, float(int(qty_val)), rel_tol=0.0, abs_tol=1e-9
@@ -22111,7 +22133,7 @@ async def _place_oanda_order(
             account_home_ccy=home_ccy,
         )
         fresh_entry = Decimal(str(entry_price)) if order_type == "limit" else (ask if action == "buy" else bid)
-        tick_size = Decimal("1").scaleb(-display_precision)
+        tick_size = price_tick
         fresh_sl = fresh_entry - stop_ticks * tick_size if action == "buy" else fresh_entry + stop_ticks * tick_size
         spread_quote = max(Decimal("0"), ask - bid)
         loss_per_unit_home = (abs(fresh_entry - fresh_sl) + spread_quote) * loss_factor
@@ -22130,6 +22152,31 @@ async def _place_oanda_order(
             raise ValueError("Fresh OANDA quote produces units below minimum trade size.")
         if Decimal(str(meta.get("maximumOrderUnits") or "0")) > 0 and fresh_units > Decimal(str(meta.get("maximumOrderUnits") or "0")):
             raise ValueError("Fresh OANDA quote produces units above maximumOrderUnits.")
+        maximum_position_size = Decimal(str(meta.get("maximumPositionSize") or "0"))
+        if maximum_position_size > 0 and fresh_units > maximum_position_size:
+            raise ValueError("Fresh OANDA quote produces units above maximumPositionSize.")
+        margin_available = Decimal(str(summary.get("marginAvailable") or "0"))
+        instrument_margin_rate = Decimal(str(meta.get("marginRate") or "0"))
+        effective_margin_rate = (
+            instrument_margin_rate
+            if instrument_margin_rate > 0
+            else Decimal(str(summary.get("marginRate") or "0"))
+        )
+        estimated_position_value_home = fresh_units * fresh_entry * _position_value_factor
+        estimated_initial_margin_home = estimated_position_value_home * max(
+            Decimal("0"), effective_margin_rate
+        )
+        # Keep the quote path's convention: an absent/zero margin rate or
+        # marginAvailable does not make a capacity claim, otherwise fail
+        # closed before the single OANDA broker POST.
+        if (
+            effective_margin_rate > 0
+            and margin_available > 0
+            and estimated_initial_margin_home > margin_available
+        ):
+            raise ValueError(
+                "Fresh OANDA quote has insufficient marginAvailable for estimated initial margin."
+            )
         try:
             rr_floor = _oanda_rr_floor_levels(
                 entry=fresh_entry,
@@ -22144,16 +22191,37 @@ async def _place_oanda_order(
             )
         except ValueError as exc:
             raise ValueError(f"Fresh OANDA Net-R validation failed: {exc}") from exc
-        qty_val = float(fresh_units)
+        adjusted_quantity = fresh_units.quantize(units_tick, rounding=ROUND_HALF_UP)
+        adjusted_entry = fresh_entry.quantize(price_tick, rounding=ROUND_HALF_UP)
+        adjusted_stop = fresh_sl.quantize(price_tick, rounding=ROUND_HALF_UP)
+        adjusted_take_profit = rr_floor["target_price"].quantize(
+            price_tick, rounding=ROUND_HALF_UP
+        )
+        qty_val = float(adjusted_quantity)
         entry_price = float(fresh_entry) if order_type == "limit" else None
-        sl_price = float(fresh_sl)
-        tp_price = float(rr_floor["target_price"])
+        sl_price = float(adjusted_stop)
+        tp_price = float(adjusted_take_profit)
         payload["_submit_level_adjustments"] = {
             "fresh_revalidation": True,
-            "entry_price": _fmt_dec(fresh_entry),
-            "stop_loss_price": _fmt_dec(fresh_sl),
-            "take_profit_price": _fmt_dec(rr_floor["target_price"]),
-            "quantity": _fmt_dec(fresh_units),
+            "submit_take_profit_auto_adjusted": (
+                original_take_profit != adjusted_take_profit
+            ),
+            "original_quantity": _fmt_dec(original_quantity),
+            "adjusted_quantity": _fmt_dec(adjusted_quantity),
+            "original_entry_price": _fmt_dec(original_entry) if original_entry is not None else None,
+            "adjusted_entry_price": _fmt_dec(adjusted_entry),
+            "original_stop_price": _fmt_dec(original_stop) if original_stop is not None else None,
+            "adjusted_stop_price": _fmt_dec(adjusted_stop),
+            "original_take_profit_price": (
+                _fmt_dec(original_take_profit) if original_take_profit is not None else None
+            ),
+            "adjusted_take_profit_price": _fmt_dec(adjusted_take_profit),
+            # Retain the older field names for consumers that already display
+            # the fresh values.
+            "entry_price": _fmt_dec(adjusted_entry),
+            "stop_loss_price": _fmt_dec(adjusted_stop),
+            "take_profit_price": _fmt_dec(adjusted_take_profit),
+            "quantity": _fmt_dec(adjusted_quantity),
             "minimum_net_reward": _fmt_dec(rr_floor["minimum_net_reward"]),
             "effective_rr_net": _fmt_dec(rr_floor["effective_rr_net"]),
         }
@@ -28124,6 +28192,7 @@ async def calculator_submit(payload: Dict[str, object] = Body(default={})) -> JS
                 "venue": "OANDA",
                 "resolved_venue": "OANDA",
                 "result": result,
+                "submit_level_adjustments": canonical.get("_submit_level_adjustments"),
                 "journal_context_saved": result.get("journal_context_saved", True),
                 "warnings": result.get("warnings"),
                 "context_save_error": result.get("context_save_error"),
