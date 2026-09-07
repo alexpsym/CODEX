@@ -32,6 +32,12 @@
     quotePrewarmPromise: null,
     quotePrewarmContext: null,
     pepperstoneSetPayload: null,
+    trendlinePlansAvailable: false,
+    trendlinePlans: [],
+    trendlineEditId: '',
+    trendlineMutationPending: false,
+    trendlineListLoading: false,
+    trendlineListRequestSeq: 0,
   };
 
   const $ = (id) => document.getElementById(id);
@@ -679,6 +685,118 @@
     return request(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), ...opts });
   }
 
+  function trendlinePanel() { return $('trendline-plans-panel'); }
+  function trendlineStatus(text) { const el = $('trendline-plan-status'); if (el) el.textContent = text || ''; }
+  function localDateTime(ms) {
+    const d = new Date(Number(ms)); const p = (v) => String(v).padStart(2, '0');
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+  }
+  function anchorEpoch(id, previewId) {
+    const input = $(id); const preview = $(previewId); const ms = input && input.value ? new Date(input.value).getTime() : NaN;
+    if (preview) preview.textContent = Number.isFinite(ms) ? `Stored UTC: ${new Date(ms).toISOString()}` : 'Enter a local date/time to preview UTC.';
+    return ms;
+  }
+  function syncTrendlineTriggerControls() {
+    const mode = $('trendline-trigger-mode'); const direction = $('trendline-cross-direction');
+    if (!mode || !direction) return;
+    if (mode.value === 'touch') { direction.value = 'either'; direction.disabled = true; }
+    else direction.disabled = false;
+  }
+  function trendlineExpiryAtMs() {
+    const select = $('trendline-expiry'); const preset = select ? select.value : 'lifetime';
+    if (preset === 'lifetime' || preset === 'keep') return preset === 'keep' ? undefined : null;
+    const now = new Date();
+    if (preset === '1h') return now.getTime() + 60 * 60 * 1000;
+    if (preset === '4h') return now.getTime() + 4 * 60 * 60 * 1000;
+    if (preset === '1d') return now.getTime() + 24 * 60 * 60 * 1000;
+    if (preset === '1w') return now.getTime() + 7 * 24 * 60 * 60 * 1000;
+    if (preset === '1mo') {
+      const d = new Date(now.getTime()); const day = d.getDate(); d.setDate(1); d.setMonth(d.getMonth() + 1);
+      const last = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate(); d.setDate(Math.min(day, last)); return d.getTime();
+    }
+    throw new Error('Choose a valid trendline expiry preset.');
+  }
+  function trendlinePayload() {
+    const a1 = anchorEpoch('trendline-anchor-1-time', 'trendline-anchor-1-utc');
+    const a2 = anchorEpoch('trendline-anchor-2-time', 'trendline-anchor-2-utc');
+    const p1 = $('trendline-anchor-1-price')?.value; const p2 = $('trendline-anchor-2-price')?.value;
+    if (!state.resolvedSymbol) throw new Error('Resolve a canonical calculator instrument before saving a trendline plan.');
+    if (!Number.isFinite(a1) || !Number.isFinite(a2) || !p1 || !p2) throw new Error('Both manual anchor times and positive prices are required.');
+    if (!state.timeframe || !$('calc-risk').value || !$('calc-sl-ticks').value || !$('calc-rr').value) throw new Error('Complete the calculator risk, stop, R and timeframe fields first.');
+    syncTrendlineTriggerControls();
+    const expiry = trendlineExpiryAtMs();
+    const payload = {
+      asset: state.asset, broker: state.asset === 'crypto' ? 'bybit' : state.broker, account: state.account,
+      instrument: state.resolvedSymbol, side: state.side, order_type: state.order_type, test_trade: state.test_mode === 'yes',
+      anchors: [{ timestamp_ms: Math.trunc(a1), price: p1 }, { timestamp_ms: Math.trunc(a2), price: p2 }],
+      right_extension: !!$('trendline-right-extension').checked,
+      trigger_mode: $('trendline-trigger-mode').value, cross_direction: $('trendline-cross-direction').value,
+      trigger_price_basis: $('trendline-price-basis').value, tolerance_ticks: Number($('trendline-tolerance-ticks').value),
+      risk_mode: state.risk_mode, risk_value: $('calc-risk').value, stop_loss_ticks: $('calc-sl-ticks').value,
+      rr_target: $('calc-rr').value, timeframe: state.timeframe,
+      setup: state.setup, pattern: state.pattern, ema: state.ema, vwap: state.vwap, aths_atls: state.aths_atls, round_number: state.round_number,
+    };
+    if (expiry !== undefined) payload.expiry_at_ms = expiry;
+    return payload;
+  }
+  function resetTrendlineForm() {
+    state.trendlineEditId = '';
+    ['trendline-anchor-1-time','trendline-anchor-2-time','trendline-anchor-1-price','trendline-anchor-2-price'].forEach((id) => { const el=$(id); if(el) el.value=''; });
+    const extension=$('trendline-right-extension'); if(extension) extension.checked=true;
+    const mode=$('trendline-trigger-mode'); if(mode) mode.value='touch'; const direction=$('trendline-cross-direction'); if(direction) direction.value='either';
+    const basis=$('trendline-price-basis'); if(basis) basis.value='executable'; const tolerance=$('trendline-tolerance-ticks'); if(tolerance) tolerance.value='0';
+    const expiry=$('trendline-expiry'); if(expiry) { expiry.innerHTML='<option value="lifetime">Lifetime</option><option value="1h">1 hour</option><option value="4h">4 hours</option><option value="1d">1 day</option><option value="1w">1 week</option><option value="1mo">1 month</option>'; expiry.value='lifetime'; }
+    anchorEpoch('trendline-anchor-1-time','trendline-anchor-1-utc'); anchorEpoch('trendline-anchor-2-time','trendline-anchor-2-utc'); syncTrendlineTriggerControls();
+    const save=$('trendline-save'); if(save) save.textContent='Save draft';
+  }
+  function renderTrendlinePlans() {
+    const list=$('trendline-plan-list'); if(!list) return;
+    if (!state.trendlinePlans.length) { list.innerHTML='<div class="muted">No local trendline plans saved.</div>'; return; }
+    list.innerHTML=state.trendlinePlans.map((plan) => {
+      const a=plan.anchors||[]; const expiry=plan.expiry_at_ms ? new Date(Number(plan.expiry_at_ms)).toISOString() : 'Lifetime';
+      const actions=plan.status==='draft' ? `<button type="button" data-tl-action="edit" data-tl-id="${escapeHtml(plan.plan_id)}">Edit</button><button type="button" data-tl-action="arm" data-tl-id="${escapeHtml(plan.plan_id)}">Arm</button><button type="button" data-tl-action="cancel" data-tl-id="${escapeHtml(plan.plan_id)}">Cancel</button>` : plan.status==='armed' ? `<button type="button" data-tl-action="cancel" data-tl-id="${escapeHtml(plan.plan_id)}">Cancel</button>` : '';
+      return `<div class="card"><strong>${escapeHtml(plan.status)} · ${escapeHtml(plan.broker)}/${escapeHtml(plan.account)} · ${escapeHtml(plan.instrument)}</strong><div class="muted">${escapeHtml(plan.action)} ${escapeHtml(plan.order_intent)} · ${escapeHtml(plan.trigger_mode)}/${escapeHtml(plan.cross_direction)} · extension ${plan.right_extension ? 'on' : 'off'}</div><div class="muted">A1 ${escapeHtml(a[0]?.timestamp_ms)} @ ${escapeHtml(a[0]?.price)} · A2 ${escapeHtml(a[1]?.timestamp_ms)} @ ${escapeHtml(a[1]?.price)} · ${escapeHtml(expiry)} · ${escapeHtml(String(plan.plan_id).slice(0,8))}</div><div class="group">${actions}</div></div>`;
+    }).join('');
+    list.querySelectorAll('[data-tl-action]').forEach((btn) => btn.addEventListener('click', () => trendlineAction(btn.dataset.tlAction, btn.dataset.tlId)));
+  }
+  async function refreshTrendlinePlans() {
+    if (!state.trendlinePlansAvailable) return;
+    const seq=++state.trendlineListRequestSeq;
+    state.trendlineListLoading=true; try { const response=await request('/api/trendline-plans',{cache:'no-store'}); if(seq!==state.trendlineListRequestSeq) return; state.trendlinePlans=response.plans||[]; renderTrendlinePlans(); trendlineStatus('Stored only: monitoring and execution are disabled.'); } catch(err) { if(seq===state.trendlineListRequestSeq) trendlineStatus(String(err.message||err)); } finally { if(seq===state.trendlineListRequestSeq) state.trendlineListLoading=false; }
+  }
+  async function saveTrendlinePlan() {
+    if (!state.trendlinePlansAvailable || state.trendlineMutationPending) return;
+    ++state.trendlineListRequestSeq; state.trendlineMutationPending=true; const save=$('trendline-save'); if(save) save.disabled=true;
+    try { const payload=trendlinePayload(); const response=state.trendlineEditId ? await request(`/api/trendline-plans/${encodeURIComponent(state.trendlineEditId)}`,{method:'PATCH',headers:{'content-type':'application/json'},body:JSON.stringify(payload)}) : await post('/api/trendline-plans',payload); trendlineStatus(state.trendlineEditId ? 'Draft updated.' : 'Draft saved.'); resetTrendlineForm(); state.trendlinePlans=response.plan ? [response.plan,...state.trendlinePlans.filter((p)=>p.plan_id!==response.plan.plan_id)] : state.trendlinePlans; state.trendlineMutationPending=false; await refreshTrendlinePlans(); } catch(err) { trendlineStatus(String(err.message||err)); } finally { state.trendlineMutationPending=false; if(save) save.disabled=false; }
+  }
+  function editTrendlinePlan(plan) {
+    if (!plan || plan.status!=='draft') return;
+    state.trendlineEditId=plan.plan_id; const a=plan.anchors||[];
+    $('trendline-anchor-1-time').value=localDateTime(a[0].timestamp_ms); $('trendline-anchor-2-time').value=localDateTime(a[1].timestamp_ms); $('trendline-anchor-1-price').value=a[0].price; $('trendline-anchor-2-price').value=a[1].price;
+    $('trendline-right-extension').checked=!!plan.right_extension; $('trendline-trigger-mode').value=plan.trigger_mode; $('trendline-cross-direction').value=plan.cross_direction; $('trendline-price-basis').value=plan.trigger_price_basis; $('trendline-tolerance-ticks').value=plan.tolerance_ticks;
+    const expiry=$('trendline-expiry'); if(plan.expiry_at_ms){ expiry.innerHTML=`<option value="keep">Keep current expiry — ${escapeHtml(new Date(Number(plan.expiry_at_ms)).toLocaleString())}</option>`+expiry.innerHTML; expiry.value='keep'; }
+    $('trendline-save').textContent='Update draft'; anchorEpoch('trendline-anchor-1-time','trendline-anchor-1-utc'); anchorEpoch('trendline-anchor-2-time','trendline-anchor-2-utc'); syncTrendlineTriggerControls(); trendlineStatus(`Editing draft ${String(plan.plan_id).slice(0,8)}.`);
+  }
+  async function trendlineAction(action, planId) {
+    if (state.trendlineMutationPending) return; const plan=state.trendlinePlans.find((p)=>p.plan_id===planId);
+    if(action==='edit') return editTrendlinePlan(plan);
+    if(action==='arm' && plan?.account==='live' && !plan?.test_trade && typeof confirm==='function' && !confirm('Arm this live non-test plan? Monitoring and execution remain disabled in this phase.')) return;
+    ++state.trendlineListRequestSeq; state.trendlineMutationPending=true;
+    try { const response=await post(`/api/trendline-plans/${encodeURIComponent(planId)}/${action}`,{}); state.trendlinePlans=state.trendlinePlans.map((p)=>p.plan_id===planId?response.plan:p); renderTrendlinePlans(); state.trendlineMutationPending=false; await refreshTrendlinePlans(); } catch(err) { trendlineStatus(String(err.message||err)); } finally { state.trendlineMutationPending=false; }
+  }
+  function initializeTrendlinePlans() {
+    const panel=trendlinePanel(); if(!panel) return;
+    panel.style.display='none'; resetTrendlineForm();
+    ['trendline-anchor-1-time','trendline-anchor-2-time'].forEach((id)=>$(id)?.addEventListener('input',()=>anchorEpoch(id,id==='trendline-anchor-1-time'?'trendline-anchor-1-utc':'trendline-anchor-2-utc')));
+    $('trendline-trigger-mode')?.addEventListener('change',syncTrendlineTriggerControls); $('trendline-save')?.addEventListener('click',saveTrendlinePlan); $('trendline-reset')?.addEventListener('click',resetTrendlineForm); $('trendline-refresh')?.addEventListener('click',refreshTrendlinePlans);
+  }
+  function configureTrendlinePlans(bootstrap) {
+    const panel=trendlinePanel(); if(!panel) return;
+    state.trendlinePlansAvailable=bootstrap?.app_profile==='local' && bootstrap?.trendline_plans_available===true;
+    panel.style.display=state.trendlinePlansAvailable?'':'none';
+    if(state.trendlinePlansAvailable) refreshTrendlinePlans();
+  }
+
   function notifyOpenOrdersStateChanged(details = {}) {
     const message = {
       type: 'state-changed',
@@ -815,6 +933,7 @@
   async function loadBootstrapCapability() {
     try {
       const bootstrap = await request('/api/calculator/bootstrap', { cache: 'no-store' });
+      configureTrendlinePlans(bootstrap);
       state.webhookCapability = bootstrap?.webhook || null;
       const yesBtn = $('webhook-toggle').querySelectorAll('button')[1];
       if (state.webhookCapability && state.webhookCapability.available === false) {
@@ -837,6 +956,7 @@
         if (webhookStatusEl) webhookStatusEl.textContent = '';
       }
     } catch (_err) {
+      configureTrendlinePlans(null);
       state.webhookCapability = null;
       if (webhookStatusEl) webhookStatusEl.textContent = 'Webhook availability could not be verified; server will validate on calculate.';
     }
@@ -1286,6 +1406,7 @@
   setVwapButtons();
   setAthsAtlsButtons();
   setRoundNumberButtons();
+  initializeTrendlinePlans();
   updateRiskUiForAsset();
   updateBrokerUiForAsset();
   syncAllToggleStates();

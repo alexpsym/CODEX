@@ -130,6 +130,11 @@ from render.atr_scanner import (
     DEFAULT_SETTINGS as ATR_SCANNER_DEFAULT_SETTINGS,
     ScannerValidationError,
 )
+from render.trendline_plans import (
+    TrendlinePlanError,
+    TrendlinePlanPersistenceError,
+    TrendlinePlanStore,
+)
 from shared.bybit_option_resolver import resolve_option_by_target_risk
 from shared.symbol_resolution import (
     is_likely_oanda_pair,
@@ -272,6 +277,7 @@ def _resolve_app_profile() -> str:
 
 
 APP_PROFILE = _resolve_app_profile()
+TRENDLINE_PLAN_STORE = TrendlinePlanStore()
 JOURNAL_DISPLAY_TZ = ZoneInfo("Australia/Brisbane")
 RENDER_ALLOWED_APPS = _parse_allowed_apps(os.getenv("RENDER_ALLOWED_APPS", DEFAULT_RENDER_ALLOWED_APPS))
 LOCAL_ALLOWED_APPS = _parse_allowed_apps(os.getenv("LOCAL_ALLOWED_APPS", DEFAULT_LOCAL_ALLOWED_APPS))
@@ -301,6 +307,7 @@ LOCAL_ONLY_PATH_PREFIXES = (
     "/dashboard/pine",
     "/merged/open-orders",
     "/instrument-lookup",
+    "/api/trendline-plans",
     "/api/bybit-history",
     "/api/oanda-history",
     "/api/coinspot-history",
@@ -25515,6 +25522,20 @@ CALCULATOR_TEMPLATE = """<!doctype html>
               </tbody>
             </table>
           </div>
+          <section id="trendline-plans-panel" class="status-area" style="display:none" aria-labelledby="trendline-plans-title">
+            <table class="calc-table">
+              <caption id="trendline-plans-title">Local trendline plans</caption>
+              <tbody>
+                <tr><td colspan="2"><div class="card"><strong>Stored-plan foundation only</strong><div class="muted">Plans can be stored and armed, but are not yet monitored or executed. TradingView drawings are not read automatically: copy both anchor times and prices manually. Times are entered in your browser timezone and stored as UTC.</div></div></td></tr>
+                <tr><th><label for="trendline-anchor-1-time">Anchor 1</label></th><td><div class="grid"><input id="trendline-anchor-1-time" type="datetime-local"/><input id="trendline-anchor-1-price" type="number" step="any" min="0" placeholder="Price"/></div><div id="trendline-anchor-1-utc" class="muted"></div></td></tr>
+                <tr><th><label for="trendline-anchor-2-time">Anchor 2</label></th><td><div class="grid"><input id="trendline-anchor-2-time" type="datetime-local"/><input id="trendline-anchor-2-price" type="number" step="any" min="0" placeholder="Price"/></div><div id="trendline-anchor-2-utc" class="muted"></div></td></tr>
+                <tr><th>Trigger</th><td><div class="grid"><label>Mode <select id="trendline-trigger-mode"><option value="touch">Touch</option><option value="confirmed_cross">Confirmed cross</option></select></label><label>Direction <select id="trendline-cross-direction"><option value="either">Either</option><option value="upward">Upward</option><option value="downward">Downward</option></select></label><label>Price basis <select id="trendline-price-basis"><option value="executable">Executable price</option><option value="bid">Bid</option><option value="ask">Ask</option><option value="midpoint">Midpoint</option></select></label><label>Tolerance ticks <input id="trendline-tolerance-ticks" type="number" min="0" step="1" value="0"/></label></div></td></tr>
+                <tr><th>Extension / expiry</th><td><div class="group"><label><input id="trendline-right-extension" type="checkbox" checked/> Right extension</label><label for="trendline-expiry">Expiry <select id="trendline-expiry"><option value="lifetime">Lifetime</option><option value="1h">1 hour</option><option value="4h">4 hours</option><option value="1d">1 day</option><option value="1w">1 week</option><option value="1mo">1 month</option></select></label></div></td></tr>
+                <tr><th>Actions</th><td><div class="group"><button id="trendline-save" type="button">Save draft</button><button id="trendline-reset" type="button">Reset</button><button id="trendline-refresh" type="button">Refresh plans</button></div><div id="trendline-plan-status" class="muted"></div></td></tr>
+                <tr><th>Saved plans</th><td><div id="trendline-plan-list" class="grid" aria-live="polite"></div></td></tr>
+              </tbody>
+            </table>
+          </section>
         </div>
       </div>
     </div>
@@ -26307,6 +26328,7 @@ async def calculator_bootstrap(request: Request) -> JSONResponse:
             "order_types": ["market", "limit"],
             "risk_modes": ["fixed_aud", "percent"],
             "app_profile": APP_PROFILE,
+            "trendline_plans_available": APP_PROFILE == "local",
             "app_version": str(app.version),
             "app_build_stamp": str(os.getenv("APP_BUILD_STAMP") or ""),
             "render_git_commit": str(os.getenv("RENDER_GIT_COMMIT") or ""),
@@ -26319,6 +26341,158 @@ async def calculator_bootstrap(request: Request) -> JSONResponse:
         },
         headers={"cache-control": "no-store, max-age=0"},
     )
+
+
+def _trendline_plans_require_local() -> None:
+    if APP_PROFILE != "local":
+        raise HTTPException(status_code=410, detail="Trendline plans are available only in the local profile.")
+
+
+def _trendline_plan_http_error(exc: Exception, *, transition: bool = False) -> None:
+    if isinstance(exc, TrendlinePlanPersistenceError):
+        raise HTTPException(status_code=500, detail="Local trendline plan state could not be read or saved safely.") from exc
+    message = str(exc)
+    if "Unknown trendline plan" in message:
+        raise HTTPException(status_code=404, detail="Trendline plan was not found.") from exc
+    raise HTTPException(status_code=409 if transition else 422, detail=message) from exc
+
+
+def _trendline_plan_payload(payload: Mapping[str, object]) -> Dict[str, object]:
+    forbidden = {"schema_version", "plan_id", "execution_key", "revision", "created_at_ms", "updated_at_ms", "status", "lifecycle", "trigger_claim"}
+    attempted = sorted(forbidden.intersection(payload))
+    if attempted:
+        raise TrendlinePlanError(f"Client may not supply immutable trendline fields: {', '.join(attempted)}.")
+    asset = str(payload.get("asset") or "").strip().lower()
+    broker = str(payload.get("broker") or "").strip().lower()
+    if broker == "pepperstone":
+        raise TrendlinePlanError("Pepperstone trendlines continue to use the existing MT5-drawn trendline EA.")
+    account = str(payload.get("account") or "").strip().lower()
+    if account not in {"live", "demo"}:
+        raise TrendlinePlanError("account must be live or demo.")
+    if asset not in {"crypto", "fx"}:
+        raise TrendlinePlanError("asset must be crypto or fx.")
+    if asset == "crypto":
+        if broker != "bybit":
+            raise TrendlinePlanError("Crypto trendline plans must use Bybit.")
+        raw_symbol = str(payload.get("instrument") or payload.get("symbol") or "").strip().upper()
+        canonical_symbol = norm_symbol(raw_symbol)
+        if not raw_symbol or raw_symbol != canonical_symbol or not re.fullmatch(r"[A-Z0-9]{3,}", canonical_symbol):
+            raise TrendlinePlanError("Crypto plans require an already-resolved canonical Bybit symbol.")
+    else:
+        if broker != "oanda":
+            raise TrendlinePlanError("Forex trendline plans must use OANDA.")
+        raw_symbol = str(payload.get("instrument") or payload.get("symbol") or "").strip()
+        try:
+            canonical_symbol = normalize_oanda_symbol_query(raw_symbol)
+        except ValueError as exc:
+            raise TrendlinePlanError("Forex plans require an already-resolved canonical OANDA instrument.") from exc
+        if "_" not in canonical_symbol:
+            raise TrendlinePlanError("Forex plans require an already-resolved canonical OANDA instrument.")
+    test_value = payload.get("test_trade", payload.get("test"))
+    if isinstance(test_value, bool):
+        test_trade = test_value
+    elif str(test_value or "").strip().lower() in {"yes", "true", "1"}:
+        test_trade = True
+    elif str(test_value or "").strip().lower() in {"no", "false", "0"}:
+        test_trade = False
+    else:
+        raise TrendlinePlanError("test_trade must be boolean.")
+    return {
+        "broker": broker,
+        "account": account,
+        "instrument": canonical_symbol,
+        "action": payload.get("action") or payload.get("side"),
+        "order_intent": payload.get("order_intent") or payload.get("order_type"),
+        "test_trade": test_trade,
+        "anchors": payload.get("anchors"),
+        "right_extension": payload.get("right_extension", True),
+        "trigger_mode": payload.get("trigger_mode"),
+        "cross_direction": payload.get("cross_direction"),
+        "trigger_price_basis": payload.get("trigger_price_basis"),
+        "tolerance_ticks": payload.get("tolerance_ticks", 0),
+        "max_quote_age_ms": 60_000,
+        "max_observation_gap_ms": 300_000,
+        "expiry_at_ms": payload.get("expiry_at_ms"),
+        "risk_mode": payload.get("risk_mode"),
+        "risk_value": payload.get("risk_value"),
+        "stop_loss_ticks": payload.get("stop_loss_ticks"),
+        "rr_target": payload.get("rr_target") or payload.get("risk_reward"),
+        "timeframe": payload.get("timeframe"),
+        "order_metadata": {
+            "setup": payload.get("setup"), "pattern": payload.get("pattern"),
+            "ema": payload.get("ema"), "vwap": payload.get("vwap"),
+            "aths_atls": payload.get("aths_atls"), "round_number": payload.get("round_number"),
+        },
+    }
+
+
+def _trendline_plan_client_view(plan: Mapping[str, object]) -> Dict[str, object]:
+    return dict(plan)
+
+
+@app.get("/api/trendline-plans")
+async def trendline_plan_list() -> JSONResponse:
+    _trendline_plans_require_local()
+    try:
+        registry = TRENDLINE_PLAN_STORE.load()
+        plans = [_trendline_plan_client_view(plan) for plan in registry["plans"].values()]
+        plans.sort(key=lambda item: (int(item["updated_at_ms"]), str(item["plan_id"])), reverse=True)
+        return JSONResponse({"ok": True, "plans": plans, "monitoring_active": False, "execution_enabled": False})
+    except Exception as exc:
+        _trendline_plan_http_error(exc)
+
+
+@app.post("/api/trendline-plans")
+async def trendline_plan_create(payload: Dict[str, object] = Body(default={})) -> JSONResponse:
+    _trendline_plans_require_local()
+    try:
+        plan = TRENDLINE_PLAN_STORE.create(_trendline_plan_payload(payload))
+        return JSONResponse({"ok": True, "plan": _trendline_plan_client_view(plan), "monitoring_active": False, "execution_enabled": False})
+    except Exception as exc:
+        _trendline_plan_http_error(exc)
+
+
+@app.patch("/api/trendline-plans/{plan_id}")
+async def trendline_plan_update(plan_id: str, payload: Dict[str, object] = Body(default={})) -> JSONResponse:
+    _trendline_plans_require_local()
+    try:
+        existing = TRENDLINE_PLAN_STORE.get(plan_id)
+        client_base: Dict[str, object] = {
+            "asset": "crypto" if existing["broker"] == "bybit" else "fx",
+            "broker": existing["broker"], "account": existing["account"], "instrument": existing["instrument"],
+            "side": existing["action"], "order_type": existing["order_intent"], "test_trade": existing["test_trade"],
+            "anchors": existing["anchors"], "right_extension": existing["right_extension"],
+            "trigger_mode": existing["trigger_mode"], "cross_direction": existing["cross_direction"],
+            "trigger_price_basis": existing["trigger_price_basis"], "tolerance_ticks": existing["tolerance_ticks"],
+            "expiry_at_ms": existing["expiry_at_ms"], "risk_mode": existing["risk_mode"],
+            "risk_value": existing["risk_value"], "stop_loss_ticks": existing["stop_loss_ticks"],
+            "rr_target": existing["rr_target"], "timeframe": existing["timeframe"], **existing["order_metadata"],
+        }
+        client_base.update(payload)
+        plan = TRENDLINE_PLAN_STORE.update(plan_id, _trendline_plan_payload(client_base))
+        return JSONResponse({"ok": True, "plan": _trendline_plan_client_view(plan), "monitoring_active": False, "execution_enabled": False})
+    except Exception as exc:
+        _trendline_plan_http_error(exc, transition=True)
+
+
+@app.post("/api/trendline-plans/{plan_id}/arm")
+async def trendline_plan_arm(plan_id: str) -> JSONResponse:
+    _trendline_plans_require_local()
+    try:
+        plan = TRENDLINE_PLAN_STORE.arm(plan_id)
+        return JSONResponse({"ok": True, "plan": _trendline_plan_client_view(plan), "monitoring_active": False, "execution_enabled": False})
+    except Exception as exc:
+        _trendline_plan_http_error(exc, transition=True)
+
+
+@app.post("/api/trendline-plans/{plan_id}/cancel")
+async def trendline_plan_cancel(plan_id: str) -> JSONResponse:
+    _trendline_plans_require_local()
+    try:
+        plan = TRENDLINE_PLAN_STORE.cancel(plan_id)
+        return JSONResponse({"ok": True, "plan": _trendline_plan_client_view(plan), "monitoring_active": False, "execution_enabled": False})
+    except Exception as exc:
+        _trendline_plan_http_error(exc, transition=True)
 
 
 @app.get("/api/calculator/instrument")

@@ -2411,3 +2411,62 @@ def test_oanda_rr_floor_survives_costs_conversion_sizing_and_submit_revalidation
     with pytest.raises(ValueError, match="marginAvailable"):
         asyncio.run(master_service._place_oanda_order(payload, request_id="rr-margin-cap", invalidate_cache=False))
     assert posts == []
+
+
+def test_local_trendline_plan_crud_is_profile_gated_and_preserves_calculator_fields(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    store = master_service.TrendlinePlanStore(tmp_path / "trendline_plans.json")
+    monkeypatch.setattr(master_service, "TRENDLINE_PLAN_STORE", store)
+
+    async def forbidden_external(*_args, **_kwargs):
+        raise AssertionError("Trendline CRUD must not call external services")
+
+    monkeypatch.setattr(master_service, "_fetch_oanda_json", forbidden_external)
+    payload = {
+        "asset": "fx", "broker": "oanda", "account": "demo", "instrument": "usdjpy",
+        "side": "buy", "order_type": "market", "test_trade": True,
+        "anchors": [{"timestamp_ms": 1_000, "price": "155.10"}, {"timestamp_ms": 2_000, "price": "155.20"}],
+        "right_extension": True, "trigger_mode": "touch", "cross_direction": "either",
+        "trigger_price_basis": "executable", "tolerance_ticks": 2, "expiry_at_ms": None,
+        "risk_mode": "percent", "risk_value": "1", "stop_loss_ticks": 10, "rr_target": "2",
+        "timeframe": "15m", "setup": "Pullback", "pattern": "channel", "ema": "20",
+        "vwap": "No", "aths_atls": "No", "round_number": "Yes",
+    }
+    for profile in ("render", "journal"):
+        monkeypatch.setattr(master_service, "APP_PROFILE", profile)
+        with pytest.raises(master_service.HTTPException) as exc:
+            asyncio.run(master_service.trendline_plan_list())
+        assert exc.value.status_code == 410
+        assert not store.path.exists()
+
+    monkeypatch.setattr(master_service, "APP_PROFILE", "local")
+    created_response = asyncio.run(master_service.trendline_plan_create(payload))
+    created = json.loads(created_response.body.decode("utf-8"))["plan"]
+    assert created["instrument"] == "USD_JPY"
+    assert created["action"] == "buy" and created["order_intent"] == "market"
+    assert created["test_trade"] is True and created["risk_mode"] == "percent"
+    assert created["order_metadata"]["setup"] == "Pullback"
+    assert created["max_quote_age_ms"] == 60_000 and created["max_observation_gap_ms"] == 300_000
+    assert created["status"] == "draft"
+    assert json.loads(asyncio.run(master_service.trendline_plan_list()).body.decode("utf-8"))["monitoring_active"] is False
+
+    updated = json.loads(asyncio.run(master_service.trendline_plan_update(created["plan_id"], {"tolerance_ticks": 3, "risk_value": "1.5"})).body.decode("utf-8"))["plan"]
+    assert updated["tolerance_ticks"] == 3 and updated["risk_value"] == "1.5" and updated["instrument"] == "USD_JPY"
+    armed = json.loads(asyncio.run(master_service.trendline_plan_arm(created["plan_id"])).body.decode("utf-8"))["plan"]
+    assert armed["status"] == "armed"
+    with pytest.raises(master_service.HTTPException) as exc:
+        asyncio.run(master_service.trendline_plan_update(created["plan_id"], {"tolerance_ticks": 4}))
+    assert exc.value.status_code == 409
+    cancelled = json.loads(asyncio.run(master_service.trendline_plan_cancel(created["plan_id"])).body.decode("utf-8"))["plan"]
+    assert cancelled["status"] == "cancelled"
+    with pytest.raises(master_service.HTTPException) as exc:
+        asyncio.run(master_service.trendline_plan_arm(created["plan_id"]))
+    assert exc.value.status_code == 409
+
+    bad_pair = dict(payload, asset="crypto", broker="oanda", instrument="BTCUSDT")
+    with pytest.raises(master_service.HTTPException) as exc:
+        asyncio.run(master_service.trendline_plan_create(bad_pair))
+    assert exc.value.status_code == 422
+    pepperstone = dict(payload, broker="pepperstone")
+    with pytest.raises(master_service.HTTPException) as exc:
+        asyncio.run(master_service.trendline_plan_create(pepperstone))
+    assert exc.value.status_code == 422
