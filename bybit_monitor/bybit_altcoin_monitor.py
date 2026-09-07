@@ -28,6 +28,7 @@ from urllib3.util.retry import Retry
 
 from bybit_credentials import resolve_bybit_credentials
 from shared.atomic_json import write_json_file
+from shared.alert_email import email_readiness, send_alert_email
 from shared.env_bootstrap import format_env_bootstrap_log, load_master_env
 from shared.symbol_resolution import norm_symbol, resolve_bybit_symbol_from_choices
 
@@ -141,6 +142,37 @@ def _utc_now_iso() -> str:
     return _dt.datetime.now(_dt.timezone.utc).isoformat()
 
 
+def _normalized_expiry(payload: dict, *, allow_expired: bool = False) -> str | None:
+    raw = payload.get("expires_at")
+    if raw in (None, ""):
+        return None
+    text = str(raw).strip()
+    try:
+        parsed = _dt.datetime.fromisoformat(text[:-1] + "+00:00" if text.endswith("Z") else text)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("expires_at must be a valid ISO-8601 date/time with a UTC offset") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("expires_at must include an explicit UTC offset")
+    expires_utc = parsed.astimezone(_dt.timezone.utc)
+    if not allow_expired and expires_utc <= _dt.datetime.now(_dt.timezone.utc):
+        raise ValueError("expires_at must be in the future")
+    return expires_utc.isoformat().replace("+00:00", "Z")
+
+
+def alert_is_expired(alert: dict, *, now: _dt.datetime | None = None) -> bool:
+    raw = alert.get("expires_at") if isinstance(alert, dict) else None
+    if raw in (None, ""):
+        return False
+    try:
+        parsed = _dt.datetime.fromisoformat(str(raw).strip().replace("Z", "+00:00"))
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            return True
+        reference = now or _dt.datetime.now(_dt.timezone.utc)
+        return parsed.astimezone(_dt.timezone.utc) <= reference.astimezone(_dt.timezone.utc)
+    except (TypeError, ValueError):
+        return True
+
+
 def _write_runtime_status(**extra: object) -> None:
     payload = {
         "running": False,
@@ -204,7 +236,7 @@ def get_custom_alerts(force: bool = False) -> list[dict]:
     return list(_alerts_cache or [])
 
 
-def _coerce_alert(payload: dict) -> dict:
+def _coerce_alert(payload: dict, *, allow_expired: bool = False) -> dict:
     if not isinstance(payload, dict):
         raise ValueError("Alert payload must be an object.")
     alert_id = str(payload.get("id") or "").strip() or uuid.uuid4().hex
@@ -243,6 +275,12 @@ def _coerce_alert(payload: dict) -> dict:
         "enabled": enabled,
         "cooldown_seconds": cooldown_seconds,
     }
+    expires_at = _normalized_expiry(payload, allow_expired=allow_expired)
+    if expires_at:
+        alert["expires_at"] = expires_at
+    for metadata_key in ("created_at", "updated_at", "source"):
+        if payload.get(metadata_key) not in (None, ""):
+            alert[metadata_key] = payload.get(metadata_key)
 
     if kind == "price":
         direction = str(payload.get("direction") or "").strip().lower()
@@ -287,7 +325,13 @@ def _coerce_alert(payload: dict) -> dict:
 
 def upsert_custom_alert(payload: dict) -> dict:
     alerts = get_custom_alerts(force=True)
-    alert = _coerce_alert(payload)
+    existing = next((item for item in alerts if str(item.get("id")) == str(payload.get("id") or "")), None)
+    same_expired_value = bool(
+        existing
+        and alert_is_expired(existing)
+        and str(existing.get("expires_at") or "") == str(payload.get("expires_at") or "")
+    )
+    alert = _coerce_alert(payload, allow_expired=same_expired_value)
     for idx, existing in enumerate(alerts):
         if str(existing.get("id")) == alert["id"]:
             alerts[idx] = alert
@@ -317,6 +361,8 @@ def set_custom_alert_enabled(alert_id: str, enabled: bool) -> dict:
     alerts = get_custom_alerts(force=True)
     for alert in alerts:
         if str(alert.get("id")) == alert_id:
+            if enabled and alert_is_expired(alert):
+                raise ValueError("Expired alerts cannot be enabled until expiry is cleared or moved to the future")
             alert["enabled"] = bool(enabled)
             _save_custom_alerts(alerts)
             get_custom_alerts(force=True)
@@ -334,7 +380,7 @@ def replace_custom_alerts(alerts_payload: object, *, strict: bool = True) -> lis
         if not isinstance(item, dict):
             continue
         try:
-            replaced.append(_coerce_alert(item))
+            replaced.append(_coerce_alert(item, allow_expired=True))
         except ValueError:
             if strict:
                 raise
@@ -384,7 +430,10 @@ def evaluate_custom_alerts(
         alert_state = {}
         state["custom_alerts"] = alert_state
 
-    enabled_alerts = [alert for alert in alerts if alert.get("enabled", True)]
+    enabled_alerts = [
+        alert for alert in alerts
+        if alert.get("enabled", True) and not alert_is_expired(alert)
+    ]
     max_window = 0
     for alert in enabled_alerts:
         if alert.get("kind") == "move":
@@ -433,7 +482,18 @@ def evaluate_custom_alerts(
                 custom_msg = str(alert.get("message") or "").strip()
                 notify_msg = f"{msg}\nNote: {custom_msg}" if custom_msg else msg
                 log(msg if not custom_msg else f"{msg} | note={custom_msg}")
-                send_notification("BYBIT Custom Price Alert", notify_msg)
+                send_notification(
+                    "BYBIT Custom Price Alert",
+                    notify_msg,
+                    event={
+                        "source": "Bybit",
+                        "symbol": symbol,
+                        "alert_type": "Custom price",
+                        "condition": f"price {direction} {target}",
+                        "current_value": current,
+                        "custom_message": custom_msg,
+                    },
+                )
             elif not condition_met and not armed:
                 st["armed"] = True
                 changed = True
@@ -467,7 +527,17 @@ def evaluate_custom_alerts(
                 f"| ref {ref:.8f} -> now {current:.8f}"
             )
             log(msg)
-            send_notification("BYBIT Custom Move Alert", msg)
+            send_notification(
+                "BYBIT Custom Move Alert",
+                msg,
+                event={
+                    "source": "Bybit",
+                    "symbol": symbol,
+                    "alert_type": "Custom move",
+                    "condition": f"{resolved_dir} {threshold}{'%' if unit == 'pct' else ''} in {window_s}s",
+                    "current_value": current,
+                },
+            )
         elif not triggered and not armed:
             st["armed"] = True
             changed = True
@@ -635,23 +705,68 @@ def send_push_notification(title: str, message: str) -> bool:
         return False
 
 
-def send_push_test() -> Dict[str, object]:
-    """Trigger a Telegram alert test and report the outcome."""
+def notification_readiness() -> Dict[str, object]:
+    email = email_readiness()
+    return {
+        "telegram_ready": _push_configured(),
+        "email_ready": bool(email.get("ready")),
+        "email_detail": str(email.get("detail") or ""),
+    }
 
-    configured = _push_configured()
-    success = False
 
-    if configured:
-        success = send_push_notification(
-            "Bybit monitor Telegram test",
-            "If you received this, Telegram alerts are working for bybit_monitor.",
+def send_notification_test() -> Dict[str, object]:
+    title = "Bybit monitor notification test"
+    message = "If you received this, Bybit alert notifications are working."
+    telegram_configured = _push_configured()
+    try:
+        telegram_sent = send_push_notification(title, message) if telegram_configured else False
+    except Exception as exc:  # defensive channel isolation
+        telegram_sent = False
+        log(f"Telegram notification test failed ({type(exc).__name__}).")
+    try:
+        email_result = send_alert_email(
+            title,
+            message,
+            event={
+                "source": "Bybit",
+                "symbol": "TEST",
+                "alert_type": "Notification test",
+                "condition": "Manual test",
+                "current_value": "n/a",
+                "trigger_time": _utc_now_iso(),
+            },
         )
-    detail = (
-        "Telegram alerts are not configured (set TELEGRAM_BOT_TOKEN/TELEGRAM_TOKEN and TELEGRAM_CHAT_ID)."
-        if not configured
-        else "Test Telegram alert sent successfully." if success else "Telegram alert send attempt failed."
-    )
-    return {"sent": success, "detail": detail, "configured": configured}
+    except Exception as exc:  # defensive channel isolation
+        email_result = {
+            "configured": True,
+            "sent": False,
+            "detail": f"Email notification test failed ({type(exc).__name__}).",
+        }
+    channels = {
+        "telegram": {
+            "configured": telegram_configured,
+            "sent": telegram_sent,
+            "detail": (
+                "Telegram test sent successfully."
+                if telegram_sent
+                else "Telegram is not configured."
+                if not telegram_configured
+                else "Telegram test delivery failed."
+            ),
+        },
+        "email": email_result,
+    }
+    return {
+        "configured": any(bool(item.get("configured")) for item in channels.values()),
+        "sent": any(bool(item.get("sent")) for item in channels.values()),
+        "detail": "Notification test completed; see per-channel results.",
+        "channels": channels,
+    }
+
+
+def send_push_test() -> Dict[str, object]:
+    """Backward-compatible alias for the combined notification test."""
+    return send_notification_test()
 
 
 class BybitBlockedError(RuntimeError):
@@ -1067,15 +1182,38 @@ def fetch_altcoin_prices() -> Dict[str, float]:
     raise RuntimeError(detail)
 
 
-def send_notification(title: str, message: str) -> None:
-    """Send Telegram notifications, falling back to console logging only."""
+def send_notification(
+    title: str,
+    message: str,
+    *,
+    event: dict[str, object] | None = None,
+) -> Dict[str, bool]:
+    """Attempt Telegram and email independently for one alert event."""
 
-    if not send_push_notification(title, message):
+    try:
+        telegram_sent = send_push_notification(title, message)
+    except Exception as exc:  # defensive channel isolation
+        telegram_sent = False
+        log(f"Telegram alert delivery failed ({type(exc).__name__}).")
+    if not telegram_sent:
         if _push_configured():
             log("Telegram alert delivery failed; using console logging fallback only.")
         else:
             log("Telegram alert not sent because Telegram is not configured.")
-        log("ALERT: " + message)
+    try:
+        email_result = send_alert_email(
+            title,
+            message,
+            event={**dict(event or {}), "trigger_time": str((event or {}).get("trigger_time") or _utc_now_iso())},
+        )
+    except Exception as exc:  # defensive channel isolation
+        email_result = {"configured": True, "sent": False, "detail": f"Email delivery failed ({type(exc).__name__})."}
+    if email_result.get("configured") and not email_result.get("sent"):
+        log(str(email_result.get("detail") or "Email alert delivery failed."))
+    elif not email_result.get("configured"):
+        log(str(email_result.get("detail") or "Email alert not configured."))
+    log("ALERT: " + message)
+    return {"telegram": telegram_sent, "email": bool(email_result.get("sent"))}
 
 
 def wait_with_log(total_seconds: int, label: str) -> None:
@@ -1400,7 +1538,17 @@ def run_monitor() -> None:
                             f"(from {previous_price:.6f} to {current_price:.6f})."
                         )
                         log(message)
-                        send_notification("Bybit Altcoin Alert", message)
+                        send_notification(
+                            "Bybit Altcoin Alert",
+                            message,
+                            event={
+                                "source": "Bybit",
+                                "symbol": symbol,
+                                "alert_type": "Percentage move",
+                                "condition": f"absolute move >= {settings['percent_threshold']:.4g}%",
+                                "current_value": current_price,
+                            },
+                        )
                         triggered_any = True
 
                 if not triggered_any:

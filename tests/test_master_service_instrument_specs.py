@@ -92,13 +92,13 @@ def test_range_failure_exposes_warning(monkeypatch):
     assert any(w.get('field') == 'range.1w' for w in warns)
 
 
-def test_zec_binance_specs_parse_reordered_filters_without_optional_filters(monkeypatch):
-    zec = {
-        'symbol': 'ZECUSDT',
-        'pair': 'ZECUSDT',
+def test_zorausdt_specs_parse_reordered_filters_preserve_partial_results_and_report_safe_failures(monkeypatch):
+    zora = {
+        'symbol': 'ZORAUSDT',
+        'pair': 'ZORAUSDT',
         'contractType': 'PERPETUAL',
         'status': 'TRADING',
-        'baseAsset': 'ZEC',
+        'baseAsset': 'ZORA',
         'quoteAsset': 'USDT',
         'onboardDate': 1,
         'filters': [
@@ -112,31 +112,56 @@ def test_zec_binance_specs_parse_reordered_filters_without_optional_filters(monk
 
     async def fake_get(path, params=None, **_kwargs):
         if path.endswith('exchangeInfo'):
-            return {'symbols': [zec]}
+            return {'timezone': 'UTC', 'symbols': [zora]}
         if path.endswith('ticker/24hr'):
-            return {'symbol': 'ZECUSDT', 'lastPrice': '40', 'quoteVolume': '1234'}
+            return {'symbol': 'ZORAUSDT', 'lastPrice': '0.085', 'quoteVolume': '1234'}
         if path.endswith('premiumIndex'):
-            return {'symbol': 'ZECUSDT', 'markPrice': '40', 'lastFundingRate': '0.0001', 'nextFundingTime': 2}
+            raise master_service.BinancePublicAPIError(endpoint=path, exception_class='ReadTimeout')
         if path.endswith('openInterest'):
-            return {'symbol': 'ZECUSDT', 'openInterest': '10'}
+            return {'symbol': 'ZORAUSDT', 'openInterest': '10'}
         if path.endswith('klines'):
             if params['interval'] == '1d' and params['limit'] == 7:
-                return [[1, '40', '42', '39', '41', '1', 2, '100']]
-            return [[1, '40', '42', '39', '41']]
+                return [[1, '0.085', '0.09', '0.08', '0.086', '1', 2, '100']]
+            if params['interval'] == '1w':
+                raise master_service.BinancePublicAPIError(endpoint=path, exception_class='ReadTimeout')
+            return [[1, '0.085', '0.09', '0.08', '0.086']]
         raise AssertionError(path)
 
     monkeypatch.setattr(master_service, '_binance_futures_get_async', fake_get)
     monkeypatch.setattr(master_service, '_BINANCE_EXCHANGE_INFO_CACHE', {'ts': 0.0, 'symbols': []})
     monkeypatch.setattr(master_service, '_BINANCE_RANGE_CACHE', {})
-    for query in ('ZECUSDT', 'ZEC/USDT', 'ZEC USDT'):
+    for query in ('ZORAUSDT', 'ZORA/USDT', 'ZORA USDT'):
         specs = asyncio.run(master_service._fetch_instrument_specs(query, prefer='crypto'))
-        assert specs['resolved_symbol'] == 'ZECUSDT'
+        assert specs['resolved_symbol'] == 'ZORAUSDT'
         assert specs['source'] == 'binance_usdm'
         assert specs['tickSize'] == '0.01'
         assert specs['qtyStep'] == '0.001'
         assert specs['maxMktOrderQty'] == '1000'
         assert specs['minNotionalValue'] == '5'
         assert 'maxLeverage' not in specs
+        assert specs['lastPrice'] == '0.085'
+        assert 'fundingRate' not in specs
+        assert any(item['field'] == 'premiumIndex' for item in specs['_spec_warnings'])
+        assert any(item['field'] == 'range.1w' for item in specs['_spec_warnings'])
+
+    async def blocked(_query):
+        raise master_service.BinancePublicAPIError(
+            endpoint='/fapi/v1/exchangeInfo',
+            exception_class='HTTPStatusError',
+            http_status=451,
+            response_code=-1000,
+            response_message='Service unavailable from a restricted location',
+        )
+
+    monkeypatch.setattr(master_service, '_binance_resolve_and_fetch_specs', blocked)
+    with pytest.raises(master_service.HTTPException) as caught:
+        asyncio.run(master_service._fetch_instrument_specs('ZORAUSDT', prefer='crypto'))
+    assert caught.value.status_code == 502
+    assert 'endpoint=/fapi/v1/exchangeInfo' in caught.value.detail
+    assert 'exception=HTTPStatusError' in caught.value.detail
+    assert 'HTTP 451' in caught.value.detail
+    assert 'code=-1000' in caught.value.detail
+    assert 'restricted location' in caught.value.detail
 
 
 def test_binance_movement_ranges_keep_interval_specific_values_and_cache_keys(monkeypatch):

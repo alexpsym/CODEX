@@ -34,7 +34,7 @@ from datetime import datetime, timedelta, timezone
 from datetime import date as _date
 from dateutil.relativedelta import relativedelta
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Callable
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple, Callable
 from urllib.parse import quote, unquote, urlparse
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -147,7 +147,7 @@ from shared.oanda_api import (
 )
 from render.dropbox_sync import download_bytes, list_excel_files, upload_bytes
 from render import dropbox_state_store
-from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, read_master_journal_source, update_master_journal_workbook_data_only, update_master_journal_workbook_incremental, IncrementalWorkbookUpdateNotEligible, refresh_master_journal_derived_sheets, stable_row_id, SHEET_ORDER, REPORT_YEARLY_SHEET, expected_report_sheet_names, _get_all_trades_sheet, _get_trade_log_sheet, _trade_log_header_map, _trade_log_data_start_row, _trade_log_last_populated_row, _find_instrument_leaders_table, LEADER_LABEL_TO_KEY, _repair_or_flag_zero_trade_qty, _canonicalize_and_dedupe_balances, _trade_execution_fingerprint, _trade_row_source_rank, _dedupe_trade_rows_by_execution, _normalize_master_journal_rows, _instrument_averages_header_map, INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, INSTRUMENT_AVERAGES_DATA_START_ROW, _result_percentage_totals_by_market, _risk_of_ruin_by_account, _stats1_sheet, _stats2_sheet, _symbols_sheet, STATS1_SHEET, STATS2_SHEET, SYMBOLS_SHEET, _parse_duration_text, _duration_ddhhmmss_cell_to_seconds, _is_ddhhmmss_number_format, STOP_RECOMMENDATION_HEADER, TARGET_RECOMMENDATION_HEADER, _distance_recommendation_summary, _stop_recommendation_payload, _apply_recommendation_cell_style, _ensure_dashboard_requested_metric_rows, _stats1_market_columns, _stats1_section_bounds, balance_drawdown_metrics
+from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, read_master_journal_source, update_master_journal_workbook_data_only, update_master_journal_workbook_incremental, assign_trade_numbers_and_create_folders, IncrementalWorkbookUpdateNotEligible, refresh_master_journal_derived_sheets, stable_row_id, SHEET_ORDER, REPORT_YEARLY_SHEET, expected_report_sheet_names, _get_all_trades_sheet, _get_trade_log_sheet, _trade_log_header_map, _trade_log_data_start_row, _trade_log_last_populated_row, _find_instrument_leaders_table, LEADER_LABEL_TO_KEY, _repair_or_flag_zero_trade_qty, _canonicalize_and_dedupe_balances, _trade_execution_fingerprint, _trade_row_source_rank, _dedupe_trade_rows_by_execution, _normalize_master_journal_rows, _instrument_averages_header_map, INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, INSTRUMENT_AVERAGES_DATA_START_ROW, _result_percentage_totals_by_market, _risk_of_ruin_by_account, _stats1_sheet, _stats2_sheet, _symbols_sheet, STATS1_SHEET, STATS2_SHEET, SYMBOLS_SHEET, _parse_duration_text, _duration_ddhhmmss_cell_to_seconds, _is_ddhhmmss_number_format, STOP_RECOMMENDATION_HEADER, TARGET_RECOMMENDATION_HEADER, _distance_recommendation_summary, _stop_recommendation_payload, _apply_recommendation_cell_style, _ensure_dashboard_requested_metric_rows, _stats1_market_columns, _stats1_section_bounds, balance_drawdown_metrics
 from bybit_monitor import bybit_altcoin_monitor as bybit_monitor
 from oanda_monitor import oanda_forex_monitor as oanda_monitor
 from bybit_demo_tpsl_cache import (
@@ -3212,6 +3212,8 @@ _OPEN_ORDERS_CACHE: Dict[str, object] = {
     "version": 0,
 }
 _OPEN_ORDERS_LAST_GOOD_ITEMS: Dict[str, List[Dict[str, object]]] = {}
+_BYBIT_OPEN_FUNDING_CACHE: Dict[str, Dict[str, object]] = {}
+_BYBIT_OPEN_FUNDING_CACHE_TTL_SECONDS = 45.0
 
 
 class BybitOrderRejected(RuntimeError):
@@ -3346,6 +3348,12 @@ _BYBIT_INSTRUMENT_CACHE: Dict[str, Dict[str, object]] = {}
 _BYBIT_INSTRUMENT_CACHE_TTL_SECONDS = float(os.getenv("BYBIT_INSTRUMENT_CACHE_TTL_SECONDS", "600"))
 _BYBIT_INSTRUMENT_NEGATIVE_TTL_SECONDS = float(os.getenv("BYBIT_INSTRUMENT_NEGATIVE_TTL_SECONDS", "30"))
 BINANCE_FUTURES_BASE = "https://fapi.binance.com"
+BINANCE_FUTURES_FAILOVER_BASES = (
+    "https://fapi1.binance.com",
+    "https://fapi2.binance.com",
+    "https://fapi3.binance.com",
+    "https://fapi4.binance.com",
+)
 _BINANCE_EXCHANGE_INFO_CACHE: Dict[str, object] = {"ts": 0.0, "symbols": []}
 _BINANCE_EXCHANGE_INFO_CACHE_TTL_SECONDS = float(
     os.getenv("BINANCE_EXCHANGE_INFO_CACHE_TTL_SECONDS", "600")
@@ -4114,6 +4122,53 @@ def _binance_http_timeout() -> httpx.Timeout:
     return httpx.Timeout(6.0, connect=2.0, read=6.0, write=6.0, pool=2.0)
 
 
+class BinancePublicAPIError(RuntimeError):
+    def __init__(
+        self,
+        *,
+        endpoint: str,
+        exception_class: str,
+        http_status: Optional[int] = None,
+        response_code: object = None,
+        response_message: str = "",
+    ) -> None:
+        self.endpoint = endpoint
+        self.exception_class = exception_class
+        self.http_status = http_status
+        self.response_code = response_code
+        self.response_message = str(response_message or "")[:240]
+        parts = [f"endpoint={endpoint}", f"exception={exception_class}"]
+        if http_status is not None:
+            parts.append(f"HTTP {http_status}")
+        if response_code not in (None, ""):
+            parts.append(f"code={response_code}")
+        if self.response_message:
+            parts.append(f"message={self.response_message}")
+        super().__init__("; ".join(parts))
+
+
+def _binance_public_error(exc: Exception, path: str) -> BinancePublicAPIError:
+    response = getattr(exc, "response", None)
+    status = getattr(response, "status_code", None)
+    code: object = None
+    message = ""
+    if response is not None:
+        try:
+            payload = response.json()
+            if isinstance(payload, dict):
+                code = payload.get("code")
+                message = str(payload.get("msg") or payload.get("message") or "")
+        except Exception:
+            pass
+    return BinancePublicAPIError(
+        endpoint=path,
+        exception_class=type(exc).__name__,
+        http_status=int(status) if isinstance(status, int) else None,
+        response_code=code,
+        response_message=message,
+    )
+
+
 async def _binance_futures_get_async(
     path: str,
     params: Optional[Dict[str, object]] = None,
@@ -4126,13 +4181,25 @@ async def _binance_futures_get_async(
             return await _binance_futures_get_async(
                 path, params, client=request_client, semaphore=semaphore
             )
-    if semaphore is not None:
-        async with semaphore:
-            response = await client.get(f"{BINANCE_FUTURES_BASE}{path}", params=params or {})
-    else:
-        response = await client.get(f"{BINANCE_FUTURES_BASE}{path}", params=params or {})
-    response.raise_for_status()
-    return response.json()
+    bases = (BINANCE_FUTURES_BASE, *BINANCE_FUTURES_FAILOVER_BASES)
+    last_error: Optional[BinancePublicAPIError] = None
+    for index, base in enumerate(bases):
+        try:
+            if semaphore is not None:
+                async with semaphore:
+                    response = await client.get(f"{base}{path}", params=params or {})
+            else:
+                response = await client.get(f"{base}{path}", params=params or {})
+            response.raise_for_status()
+            return response.json()
+        except Exception as exc:
+            safe_error = _binance_public_error(exc, path)
+            last_error = safe_error
+            status = safe_error.http_status
+            transient = status is None or status == 429 or status >= 500
+            if not transient or index == len(bases) - 1:
+                raise safe_error from exc
+    raise last_error or BinancePublicAPIError(endpoint=path, exception_class="UnknownError")
 
 
 async def _binance_exchange_symbols_cached(
@@ -4439,10 +4506,11 @@ async def _fetch_instrument_specs(
     async def fetch_binance() -> Optional[Dict[str, object]]:
         try:
             return await _binance_resolve_and_fetch_specs(q)
-        except httpx.HTTPError as exc:
+        except Exception as exc:
+            safe = exc if isinstance(exc, BinancePublicAPIError) else _binance_public_error(exc, "/fapi/v1/exchangeInfo")
             raise HTTPException(
                 status_code=502,
-                detail=f"Binance USDⓈ-M specification request failed for {q}: {exc}",
+                detail=f"Binance USDⓈ-M specification request failed for {q}: {safe}",
             ) from exc
 
     async def fetch_oanda() -> Optional[Dict[str, object]]:
@@ -9927,6 +9995,10 @@ def _group_bybit_execution_history_rows_into_completed_trades(records: List[Dict
                 exit_notional = sum((abs(_to_float(s.get("qty")) or 0.0) * (_to_float(s.get("entry_price")) or 0.0)) for s in seg if str(s.get("side") or "").strip().lower() != open_side.lower())
                 fees = sum(_to_float(s.get("commission")) or 0.0 for s in seg)
                 funding_cost = sum(_to_float(s.get("commission")) or 0.0 for s in funding_seg)
+                funding_paid = sum(max(_to_float(s.get("commission")) or 0.0, 0.0) for s in funding_seg)
+                funding_received = sum(max(-(_to_float(s.get("commission")) or 0.0), 0.0) for s in funding_seg)
+                net_funding = funding_received - funding_paid
+                combined_commission = fees + funding_cost
                 exec_ids = [str(((s.get("raw_refs") or {}).get("execId") or "")).strip() for s in seg if str(((s.get("raw_refs") or {}).get("execId") or "")).strip()]
                 funding_ids = [str(((s.get("raw_refs") or {}).get("execId") or "")).strip() for s in funding_seg if str(((s.get("raw_refs") or {}).get("execId") or "")).strip()]
                 src_rows = [int(s.get("_source_row")) for s in [*seg, *funding_seg] if s.get("_source_row")]
@@ -9941,7 +10013,7 @@ def _group_bybit_execution_history_rows_into_completed_trades(records: List[Dict
                 trades.append({
                     "id": f"bybit:{mode}:trade:{symbol}:{digest}", "row_type": "trade", "asset_class": "crypto", "account": account_label, "account_label": account_label,
                     "symbol": symbol, "side": open_side, "qty": closed, "entry_price": (entry_notional / open_qty) if open_qty else None, "exit_price": (exit_notional / close_qty) if close_qty else None,
-                    "open_time": open_ts, "close_time": close_ts, "gross_profit": gross, "commission": fees, "fees": fees, "funding_cost": funding_cost, "swap": (-funding_cost if funding_cost else None), "net_profit": net, "realized_pnl": net, "currency": "USDT" if symbol.endswith("USDT") else "",
+                    "open_time": open_ts, "close_time": close_ts, "gross_profit": gross, "commission": combined_commission, "fees": fees, "trading_fee_total": fees, "funding_cost": funding_cost, "funding_paid": funding_paid, "funding_received": funding_received, "net_funding": net_funding, "commission_includes_funding": True, "swap": (net_funding if funding_cost else None), "net_profit": net, "realized_pnl": net, "currency": "USDT" if symbol.endswith("USDT") else "",
                     "trade_duration_seconds": dur, "source": "bybit_execution_history_grouped",
                     "raw_refs": {"source_file": source_path, "source_rows": src_rows, "order_ids": sorted({str(((s.get("raw_refs") or {}).get("orderId") or "")).strip() for s in seg if str(((s.get("raw_refs") or {}).get("orderId") or "")).strip()}), "exec_ids": exec_ids, "funding_exec_ids": funding_ids, "execution_count": len(seg), "funding_row_count": len(funding_seg), "parser": "bybit_execution_history_grouped"}
                 })
@@ -9970,6 +10042,8 @@ def _group_bybit_execution_history_rows_into_completed_trades(records: List[Dict
         "bybit_reversal_execution_rows_seen": len(reversal_rows),
         "bybit_reversal_import_blocked": bool(reversal_rows),
         "bybit_reversal_row_ids": reversal_rows,
+        "bybit_commission_includes_funding": True,
+        "bybit_commission_funding_sign_convention": "CSV Fees Paid: positive cost, negative credit",
     }
     return trades, unmatched, diag
 
@@ -18671,6 +18745,234 @@ async def _fetch_bybit_orders_for_category(
     return [row for row in rows if isinstance(row, dict)], []
 
 
+def _bybit_position_lifecycle_start_ms(
+    position: Dict[str, object], executions: Sequence[Dict[str, object]]
+) -> Optional[int]:
+    symbol = str(position.get("instrument") or position.get("symbol") or "").strip().upper()
+    position_idx = int(_to_float(position.get("position_idx", position.get("positionIdx"))) or 0)
+    current_side = str(position.get("side") or "").strip().lower()
+    current_size = abs(_to_float(position.get("size")) or 0.0)
+    relevant: List[Dict[str, object]] = []
+    for execution in executions:
+        if not isinstance(execution, dict) or str(execution.get("symbol") or "").strip().upper() != symbol:
+            continue
+        execution_idx_raw = execution.get("positionIdx")
+        if execution_idx_raw not in (None, ""):
+            execution_idx = int(_to_float(execution_idx_raw) or 0)
+            if execution_idx != position_idx:
+                continue
+        elif position_idx != 0:
+            continue
+        relevant.append(execution)
+    relevant.sort(key=lambda row: int(_to_float(row.get("execTime")) or 0))
+    net = 0.0
+    lifecycle_start: Optional[int] = None
+    for execution in relevant:
+        qty = abs(_to_float(execution.get("execQty")) or 0.0)
+        side = str(execution.get("side") or "").strip().lower()
+        timestamp = int(_to_float(execution.get("execTime")) or 0)
+        if qty <= 0 or timestamp <= 0 or side not in {"buy", "sell"}:
+            continue
+        signed = qty if side == "buy" else -qty
+        before = net
+        after = before + signed
+        if abs(before) <= 1e-12 or before * after < 0:
+            lifecycle_start = timestamp
+        net = 0.0 if abs(after) <= 1e-12 else after
+    expected_sign = 1 if current_side == "buy" else -1 if current_side == "sell" else 0
+    if lifecycle_start is not None and expected_sign and net * expected_sign > 0:
+        tolerance = max(1e-9, current_size * 1e-6)
+        if current_size <= 0 or abs(abs(net) - current_size) <= tolerance:
+            return lifecycle_start
+    created = int(_to_float(position.get("opened_at", position.get("createdTime"))) or 0)
+    return created if created > 0 else None
+
+
+def _bybit_transaction_dedupe_key(row: Mapping[str, object]) -> str:
+    for key in ("transactionId", "id", "execId"):
+        value = str(row.get(key) or "").strip()
+        if value:
+            return f"{key}:{value}"
+    return "|".join(
+        str(row.get(key) or "").strip()
+        for key in ("transactionTime", "symbol", "currency", "type", "funding", "positionIdx")
+    )
+
+
+async def _fetch_bybit_open_funding_transactions_cached(
+    *,
+    base_url: str,
+    api_key: str,
+    api_secret: str,
+    account_context: str,
+    start_time: int,
+    end_time: int,
+) -> List[Dict[str, object]]:
+    cache_key = f"{account_context}:{urlparse(base_url).netloc}:{hashlib.sha256(api_key.encode('utf-8')).hexdigest()[:12]}"
+    cached = _BYBIT_OPEN_FUNDING_CACHE.get(cache_key) or {}
+    if (
+        time.time() - float(cached.get("fetched_at") or 0.0) <= _BYBIT_OPEN_FUNDING_CACHE_TTL_SECONDS
+        and int(cached.get("start_time") or 0) <= start_time
+        and end_time - int(cached.get("end_time") or 0) <= int(_BYBIT_OPEN_FUNDING_CACHE_TTL_SECONDS * 1000)
+        and isinstance(cached.get("rows"), list)
+    ):
+        return [dict(row) for row in cached["rows"] if isinstance(row, dict)]
+
+    deduped: Dict[str, Dict[str, object]] = {}
+    for chunk_start, chunk_end in _iter_bybit_time_chunks(start_time, end_time):
+        cursor: Optional[str] = None
+        while True:
+            payload = await _fetch_bybit_transaction_log(
+                base_url=base_url,
+                api_key=api_key,
+                api_secret=api_secret,
+                start_time=chunk_start,
+                end_time=chunk_end,
+                cursor=cursor,
+            )
+            result = payload.get("result") if isinstance(payload, dict) else None
+            rows = result.get("list") if isinstance(result, dict) else None
+            if not isinstance(rows, list):
+                raise ValueError("Bybit transaction-log response did not contain result.list")
+            for row in rows:
+                if isinstance(row, dict):
+                    deduped[_bybit_transaction_dedupe_key(row)] = dict(row)
+            cursor = str((result or {}).get("nextPageCursor") or "").strip() or None
+            if not cursor:
+                break
+    rows = sorted(
+        deduped.values(),
+        key=lambda row: (int(_to_float(row.get("transactionTime")) or 0), _bybit_transaction_dedupe_key(row)),
+    )
+    _BYBIT_OPEN_FUNDING_CACHE[cache_key] = {
+        "fetched_at": time.time(),
+        "start_time": start_time,
+        "end_time": end_time,
+        "rows": rows,
+    }
+    return [dict(row) for row in rows]
+
+
+async def _enrich_bybit_open_position_funding(
+    positions: Sequence[Dict[str, object]],
+    *,
+    base_url: str,
+    api_key: str,
+    api_secret: str,
+    account_context: str,
+) -> List[Dict[str, object]]:
+    warnings: List[Dict[str, object]] = []
+    current_positions = [
+        position for position in positions
+        if isinstance(position, dict) and str(position.get("type") or "").lower() == "position"
+    ]
+    if not current_positions:
+        return warnings
+    now_ms = int(time.time() * 1000)
+    lifecycle_starts: Dict[int, int] = {}
+    try:
+        for category in sorted({str(position.get("category") or "") for position in current_positions}):
+            scoped = [position for position in current_positions if str(position.get("category") or "") == category]
+            created_values = [
+                int(_to_float(position.get("opened_at")) or 0)
+                for position in scoped
+                if int(_to_float(position.get("opened_at")) or 0) > 0
+            ]
+            if not created_values:
+                continue
+            executions = await _fetch_bybit_executions_chunked(
+                base_url=base_url,
+                api_key=api_key,
+                api_secret=api_secret,
+                category=category,
+                start_time=min(created_values),
+                end_time=now_ms,
+            )
+            for position in scoped:
+                lifecycle = _bybit_position_lifecycle_start_ms(position, executions)
+                if lifecycle:
+                    lifecycle_starts[id(position)] = lifecycle
+        if len(lifecycle_starts) != len(current_positions):
+            raise ValueError("Current position lifecycle start could not be established")
+        transactions = await _fetch_bybit_open_funding_transactions_cached(
+            base_url=base_url,
+            api_key=api_key,
+            api_secret=api_secret,
+            account_context=account_context,
+            start_time=min(lifecycle_starts.values()),
+            end_time=now_ms,
+        )
+    except Exception as exc:
+        for position in current_positions:
+            position.update({"funding_paid": None, "funding_received": None, "net_funding": None})
+        warnings.append(
+            _bybit_open_source_error(
+                exc,
+                account=account_context,
+                category="account",
+                source_type="settled funding",
+                endpoint="/v5/account/transaction-log",
+                settlement_coin="multiple",
+                api_key=api_key,
+                api_secret=api_secret,
+            )
+        )
+        return warnings
+
+    symbol_counts = Counter(str(position.get("instrument") or "").upper() for position in current_positions)
+    for position in current_positions:
+        symbol = str(position.get("instrument") or "").strip().upper()
+        position_idx = int(_to_float(position.get("position_idx")) or 0)
+        settlement_currency = str(position.get("settlement_currency") or "").strip().upper()
+        lifecycle = lifecycle_starts[id(position)]
+        matching: List[float] = []
+        ambiguous = False
+        for transaction in transactions:
+            funding_raw = transaction.get("funding")
+            if funding_raw in (None, ""):
+                continue
+            if str(transaction.get("symbol") or "").strip().upper() != symbol:
+                continue
+            tx_time = int(_to_float(transaction.get("transactionTime")) or 0)
+            if tx_time < lifecycle or tx_time > now_ms:
+                continue
+            tx_currency = str(transaction.get("currency") or "").strip().upper()
+            if settlement_currency and tx_currency and tx_currency != settlement_currency:
+                continue
+            tx_idx_raw = transaction.get("positionIdx")
+            if tx_idx_raw not in (None, ""):
+                if int(_to_float(tx_idx_raw) or 0) != position_idx:
+                    continue
+            elif position_idx != 0 and symbol_counts[symbol] > 1:
+                ambiguous = True
+                continue
+            value = _to_float(funding_raw)
+            if value is not None:
+                matching.append(value)
+        if ambiguous:
+            position.update({"funding_paid": None, "funding_received": None, "net_funding": None})
+            warnings.append({
+                "broker": "Bybit",
+                "account": account_context,
+                "category": str(position.get("category") or ""),
+                "source_type": "settled funding",
+                "endpoint": "/v5/account/transaction-log",
+                "settlement_coin": settlement_currency or "unknown",
+                "message": f"Funding records for {symbol} did not identify positionIdx in hedge mode.",
+            })
+            continue
+        received = sum(value for value in matching if value > 0)
+        paid = sum(-value for value in matching if value < 0)
+        position.update({
+            "funding_paid": paid,
+            "funding_received": received,
+            "net_funding": received - paid,
+            "funding_currency": settlement_currency or None,
+            "funding_lifecycle_started_at": lifecycle,
+        })
+    return warnings
+
+
 async def _collect_bybit_open_items(
     *,
     base_url: str,
@@ -18681,6 +18983,7 @@ async def _collect_bybit_open_items(
 ) -> Dict[str, object]:
     items: List[Dict[str, object]] = []
     errors: List[Dict[str, object]] = []
+    warnings: List[Dict[str, object]] = []
     try:
         auth_diagnostic = await _bybit_read_only_auth_preflight(
             base_url=base_url,
@@ -18807,11 +19110,24 @@ async def _collect_bybit_open_items(
                     "opened_at": position.get("createdTime"),
                     "id": position.get("positionId") or position.get("positionIdx"),
                     "position_idx": position.get("positionIdx"),
+                    "settlement_currency": position.get("settleCoin") or (
+                        "USDT" if symbol.endswith("USDT") else "USDC" if symbol.endswith("USDC") else None
+                    ),
                     "order_id": position.get("orderId"),
                     "order_link_id": position.get("orderLinkId"),
                     "status": "OPEN",
                 }
             )
+
+    warnings.extend(
+        await _enrich_bybit_open_position_funding(
+            items,
+            base_url=base_url,
+            api_key=api_key,
+            api_secret=api_secret,
+            account_context=account_context,
+        )
+    )
 
     for category in order_categories:
         orders, order_errors = await _fetch_bybit_orders_for_category(
@@ -18894,6 +19210,7 @@ async def _collect_bybit_open_items(
     return {
         "items": items,
         "errors": errors,
+        "warnings": warnings,
         "auth_failed": False,
         "auth_diagnostic": auth_diagnostic,
     }
@@ -27829,7 +28146,7 @@ MERGED_MONITOR_TEMPLATE = """<!doctype html>
         <div class="row">
           <button id="monitor-save-settings" type="button">Save</button>
           <button id="monitor-reload-settings" type="button">Reset / Reload</button>
-          <button id="monitor-test-alert" type="button">Telegram test</button>
+          <button id="monitor-test-alert" type="button">Test notifications</button>
           <span id="monitor-settings-status" class="badge">&nbsp;</span>
         </div>
         <div id="monitor-custom-alerts"></div>
@@ -28049,6 +28366,9 @@ OPEN_ORDERS_TEMPLATE = """<!doctype html>
               <th>Stop Loss</th>
               <th>Take Profit</th>
               <th>Leverage / Margin</th>
+              <th>Funding paid</th>
+              <th>Funding received</th>
+              <th>Net funding</th>
               <th>Opened</th>
               <th>Status</th>
               <th>Action</th>
@@ -30578,7 +30898,9 @@ def _compute_journal_stats_with_period_reports(
 def _read_bybit_settings() -> Dict[str, float]:
     try:
         settings = bybit_monitor.get_runtime_settings(force=True)
+        readiness = bybit_monitor.notification_readiness()
         settings["push_ready"] = bybit_monitor.push_notifications_ready()
+        settings.update(readiness)
         return settings
     except Exception as exc:  # pragma: no cover - defensive
         raise HTTPException(status_code=500, detail=f"Failed to load settings: {exc}") from exc
@@ -30603,7 +30925,9 @@ def _update_bybit_settings(payload: Dict[str, object]) -> Dict[str, float]:
 def _read_oanda_settings() -> Dict[str, float]:
     try:
         settings = oanda_monitor.get_runtime_settings(force=True)
+        readiness = oanda_monitor.notification_readiness()
         settings["push_ready"] = oanda_monitor.push_notifications_ready()
+        settings.update(readiness)
         return settings
     except Exception as exc:  # pragma: no cover - defensive
         raise HTTPException(status_code=500, detail=f"Failed to load settings: {exc}") from exc
@@ -30906,7 +31230,12 @@ async def oanda_monitor_runtime_status() -> JSONResponse:
 async def bybit_monitor_custom_alerts() -> JSONResponse:
     await _wait_for_state_restore_or_error()
     try:
-        return JSONResponse({"alerts": bybit_monitor.get_custom_alerts(force=True), "state_sync": _state_sync_status_snapshot()})
+        alerts = [
+            {**dict(item), "expired": bybit_monitor.alert_is_expired(item)}
+            for item in bybit_monitor.get_custom_alerts(force=True)
+            if isinstance(item, dict)
+        ]
+        return JSONResponse({"alerts": alerts, "state_sync": _state_sync_status_snapshot()})
     except Exception as exc:
         err_code = "repo_local_state_unavailable" if _state_source_label() == "repo_local" else ("dropbox_state_unavailable" if _state_source_label() == "dropbox" else "local_state_unavailable")
         raise HTTPException(status_code=503, detail={"error": err_code, "message": str(exc), "state_sync": _state_sync_status_snapshot()}) from exc
@@ -30921,7 +31250,18 @@ async def upsert_bybit_monitor_custom_alert(request: Request) -> JSONResponse:
     existing = bybit_monitor.get_custom_alerts(force=True)
     incoming = dict(payload or {})
     match = next((a for a in existing if str(a.get("id")) == str(incoming.get("id") or "")), None)
-    normalized = bybit_monitor._coerce_alert({**incoming, "id": (match or {}).get("id") or incoming.get("id")})
+    same_expired_value = bool(
+        match
+        and bybit_monitor.alert_is_expired(match)
+        and str(match.get("expires_at") or "") == str(incoming.get("expires_at") or "")
+    )
+    try:
+        normalized = bybit_monitor._coerce_alert(
+            {**incoming, "id": (match or {}).get("id") or incoming.get("id")},
+            allow_expired=same_expired_value,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     normalized["created_at"] = str((match or {}).get("created_at") or now)
     normalized["updated_at"] = now
     normalized["source"] = _state_source_label()
@@ -30961,6 +31301,11 @@ async def set_bybit_monitor_custom_alert_enabled(
     for item in (existing if isinstance(existing, list) else []):
         cloned = dict(item)
         if str(cloned.get("id")) == alert_id:
+            if enabled and bybit_monitor.alert_is_expired(cloned):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Expired alerts cannot be enabled until expiry is cleared or moved to the future",
+                )
             cloned["enabled"] = enabled
             cloned["updated_at"] = now
             found = cloned
@@ -30979,7 +31324,12 @@ async def set_bybit_monitor_custom_alert_enabled(
 async def oanda_monitor_custom_alerts() -> JSONResponse:
     await _wait_for_state_restore_or_error()
     try:
-        return JSONResponse({"alerts": oanda_monitor.get_custom_alerts(force=True), "state_sync": _state_sync_status_snapshot()})
+        alerts = [
+            {**dict(item), "expired": oanda_monitor.alert_is_expired(item)}
+            for item in oanda_monitor.get_custom_alerts(force=True)
+            if isinstance(item, dict)
+        ]
+        return JSONResponse({"alerts": alerts, "state_sync": _state_sync_status_snapshot()})
     except Exception as exc:
         err_code = "repo_local_state_unavailable" if _state_source_label() == "repo_local" else ("dropbox_state_unavailable" if _state_source_label() == "dropbox" else "local_state_unavailable")
         raise HTTPException(status_code=503, detail={"error": err_code, "message": str(exc), "state_sync": _state_sync_status_snapshot()}) from exc
@@ -30994,7 +31344,18 @@ async def upsert_oanda_monitor_custom_alert(request: Request) -> JSONResponse:
     existing = oanda_monitor.get_custom_alerts(force=True)
     incoming = dict(payload or {})
     match = next((a for a in (existing if isinstance(existing, list) else []) if str(a.get("id")) == str(incoming.get("id") or "")), None)
-    normalized = oanda_monitor._coerce_alert({**incoming, "id": (match or {}).get("id") or incoming.get("id")})
+    same_expired_value = bool(
+        match
+        and oanda_monitor.alert_is_expired(match)
+        and str(match.get("expires_at") or "") == str(incoming.get("expires_at") or "")
+    )
+    try:
+        normalized = oanda_monitor._coerce_alert(
+            {**incoming, "id": (match or {}).get("id") or incoming.get("id")},
+            allow_expired=same_expired_value,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     normalized["created_at"] = str((match or {}).get("created_at") or now)
     normalized["updated_at"] = now
     normalized["source"] = _state_source_label()
@@ -31034,6 +31395,11 @@ async def set_oanda_monitor_custom_alert_enabled(
     for item in (existing if isinstance(existing, list) else []):
         cloned = dict(item)
         if str(cloned.get("id")) == alert_id:
+            if enabled and oanda_monitor.alert_is_expired(cloned):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Expired alerts cannot be enabled until expiry is cleared or moved to the future",
+                )
             cloned["enabled"] = enabled
             cloned["updated_at"] = now
             found = cloned
@@ -31471,31 +31837,40 @@ async def restore_all_alerts(file: UploadFile = File(...)) -> JSONResponse:
 
 
 
+def _notification_test_status_code(result: Dict[str, object]) -> int:
+    channels = result.get("channels") if isinstance(result, dict) else None
+    configured = [
+        item for item in (channels or {}).values()
+        if isinstance(item, dict) and item.get("configured")
+    ] if isinstance(channels, dict) else []
+    return 400 if any(not item.get("sent") for item in configured) else 200
+
+
+@app.post("/api/bybit-alerts/notification-test")
+@app.post("/api/bybit-monitor/notification-test")
 @app.post("/api/bybit-alerts/push-test")
 @app.post("/api/bybit-monitor/push-test")
 async def bybit_monitor_push_test() -> JSONResponse:
     try:
-        result = bybit_monitor.send_push_test()
-        configured = bool(result.get("configured"))
-        status_code = 200 if (result.get("sent") or not configured) else 400
-        return JSONResponse(result, status_code=status_code)
+        result = bybit_monitor.send_notification_test()
+        return JSONResponse(result, status_code=_notification_test_status_code(result))
     except Exception as exc:  # pragma: no cover - defensive
         raise HTTPException(
-            status_code=500, detail=f"Failed to send Telegram alert test: {exc}"
+            status_code=500, detail=f"Failed to run notification test: {type(exc).__name__}"
         ) from exc
 
 
+@app.post("/api/oanda-alerts/notification-test")
+@app.post("/api/oanda-monitor/notification-test")
 @app.post("/api/oanda-alerts/push-test")
 @app.post("/api/oanda-monitor/push-test")
 async def oanda_monitor_push_test() -> JSONResponse:
     try:
-        result = oanda_monitor.send_push_test()
-        configured = bool(result.get("configured"))
-        status_code = 200 if (result.get("sent") or not configured) else 400
-        return JSONResponse(result, status_code=status_code)
+        result = oanda_monitor.send_notification_test()
+        return JSONResponse(result, status_code=_notification_test_status_code(result))
     except Exception as exc:  # pragma: no cover - defensive
         raise HTTPException(
-            status_code=500, detail=f"Failed to send Telegram alert test: {exc}"
+            status_code=500, detail=f"Failed to run notification test: {type(exc).__name__}"
         ) from exc
 
 
@@ -32540,6 +32915,11 @@ async def list_open_orders(force: bool = Query(False)) -> JSONResponse:
                     for row in (result.get("errors", []) or [])
                     if isinstance(row, dict)
                 ]
+                result_warnings = [
+                    dict(row)
+                    for row in (result.get("warnings", []) or [])
+                    if isinstance(row, dict)
+                ]
                 source_key = f"bybit:{account}"
                 if bool(result.get("auth_failed")):
                     stale_items = [
@@ -32560,11 +32940,13 @@ async def list_open_orders(force: bool = Query(False)) -> JSONResponse:
                             dict(row) for row in result_items
                         ]
                 errors.extend(result_errors)
+                warnings.extend(result_warnings)
                 BYBIT_LOGGER.info(
-                    "OPEN_ORDERS bybit account=%s items=%s errors=%s auth_failed=%s",
+                    "OPEN_ORDERS bybit account=%s items=%s errors=%s warnings=%s auth_failed=%s",
                     account,
                     len(result_items),
                     len(result_errors),
+                    len(result_warnings),
                     bool(result.get("auth_failed")),
                 )
             except Exception as exc:
@@ -35691,13 +36073,24 @@ def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, e
             recommendation_row_normalization["stats_recomputed"] = False
         source_items = normalized_rows
         source_trade_rows = [r for r in source_items if _row_type(r) == "trade"]
-
         snapshot_shrink_guard = _non_authoritative_snapshot_shrink_guard(
             path,
             snapshot,
         )
         if snapshot_shrink_guard.get("blocked"):
             raise _NonAuthoritativeSnapshotShrinkError(snapshot_shrink_guard)
+
+        trade_numbering = assign_trade_numbers_and_create_folders(
+            normalized_rows,
+            workbook_path=path if path.exists() else None,
+        )
+        if trade_numbering.get("assigned_count"):
+            snapshot["items"] = normalized_rows
+            source_items = normalized_rows
+            source_trade_rows = [r for r in source_items if _row_type(r) == "trade"]
+            if not _master_journal_single_file_mode():
+                _set_trading_journal_rows(normalized_rows)
+        recommendation_row_normalization["trade_numbering"] = trade_numbering
 
         if path.exists():
             if expected_survivor_row_ids is None:
@@ -38153,6 +38546,23 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
                                 "Incremental workbook update failed: "
                                 f"{_master_journal_sync_error(sync_result)}"
                             )
+                        numbering_diag = dict(
+                            ((sync_result or {}).get("diagnostics") or {}).get("trade_numbering") or {}
+                        )
+                        assigned_numbers = {
+                            str(item.get("row_id") or "").strip(): str(item.get("trade_number") or "").strip()
+                            for item in (numbering_diag.get("assignments") or [])
+                            if isinstance(item, dict)
+                            and str(item.get("row_id") or "").strip()
+                            and str(item.get("trade_number") or "").strip()
+                        }
+                        if assigned_numbers:
+                            for collection in (repaired_rows, _PENDING_MANUAL_SYNC_ROWS):
+                                for stored_row in collection:
+                                    row_id = str((stored_row or {}).get("id") or "").strip()
+                                    if row_id in assigned_numbers:
+                                        stored_row["trade_number"] = assigned_numbers[row_id]
+                            _set_trading_journal_rows(repaired_rows)
                         helper_affected_ids = sorted(
                             str(row_id or "").strip()
                             for row_id in ((sync_result or {}).get("affected_row_ids") or [])

@@ -6477,6 +6477,8 @@ def test_preservation_mode_moves_trade_presentation_with_row_id_after_monthly_de
         "thickTop": False,
         "thickBot": True,
     }
+
+
     assert (
         mjw._dimension_contract(styled_dimension, column=False)
         == expected_row_dimension
@@ -9988,3 +9990,130 @@ def test_preservation_resync_repairs_semantic_statistics_and_is_idempotent(
     )
     Path(second["candidate_path"]).replace(path)
     assert _workbook_semantic_idempotence_fingerprint(path) == first_fingerprint
+
+
+def test_incremental_cell_signature_accepts_only_presence_only_default_blanks() -> None:
+    before = Workbook()
+    after = Workbook()
+    after.active["A1"]
+
+    before_signature = mjw._incremental_workbook_cell_signature(before)
+    after_signature = mjw._incremental_workbook_cell_signature(after)
+    assert mjw._incremental_workbook_cell_signature_differences(
+        before_signature, after_signature
+    ) == []
+
+    def value_change(cell) -> None:
+        cell.value = "meaningful"
+
+    def formula_change(cell) -> None:
+        cell.value = "=1+1"
+
+    def style_change(cell) -> None:
+        cell.font = Font(bold=True)
+
+    def hyperlink_change(cell) -> None:
+        cell.hyperlink = "https://example.invalid/chart"
+
+    def comment_change(cell) -> None:
+        cell.comment = Comment("meaningful", "Codex")
+
+    for mutate in (
+        value_change,
+        formula_change,
+        style_change,
+        hyperlink_change,
+        comment_change,
+    ):
+        changed = Workbook()
+        mutate(changed.active["A1"])
+        differences = mjw._incremental_workbook_cell_signature_differences(
+            before_signature,
+            mjw._incremental_workbook_cell_signature(changed),
+        )
+        assert differences == [{
+            "sheet": "Sheet",
+            "cell": "A1",
+            "changed_fields": ["presence"],
+        }]
+
+    merged = Workbook()
+    merged.active.merge_cells("A1:B1")
+    assert mjw._incremental_workbook_cell_signature_differences(
+        before_signature,
+        mjw._incremental_workbook_cell_signature(merged),
+    )
+
+
+def test_trade_number_allocation_folder_creation_test_exclusion_and_incremental_idempotency(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    forex_root = tmp_path / "charts" / "FOREX"
+    crypto_root = tmp_path / "charts" / "CRYPTO"
+    (forex_root / "2025" / "F010 EURUSD").mkdir(parents=True)
+    (crypto_root / "2025" / "C030 BTC").mkdir(parents=True)
+    monkeypatch.setenv("TRADING_JOURNAL_FOREX_ROOT", str(forex_root))
+    monkeypatch.setenv("TRADING_JOURNAL_CRYPTO_ROOT", str(crypto_root))
+    mjw._TRADE_FOLDER_INDEX_CACHE.clear()
+
+    snapshot = sample_snapshot()
+    snapshot["items"][0]["trade_number"] = "F10"
+    snapshot["items"][1]["trade_number"] = "C030"
+    new_fx = {
+        "id": "number-new-fx", "row_type": "trade", "account": "OANDA DEMO",
+        "asset_class": "fx", "symbol": "GBP_USD", "side": "BUY",
+        "open_time": "2026-02-02T01:00:00+10:00", "close_time": "2026-02-02T02:00:00+10:00",
+        "qty": 1, "entry_price": 1.2, "exit_price": 1.21, "net_profit": 1,
+    }
+    new_crypto = {
+        "id": "number-new-crypto", "row_type": "trade", "account": "Bybit Demo",
+        "asset_class": "crypto", "symbol": "ETHUSDT", "side": "SELL",
+        "open_time": "2026-01-01T01:00:00+10:00", "close_time": "2026-01-01T02:00:00+10:00",
+        "qty": 1, "entry_price": 100, "exit_price": 99, "net_profit": 1,
+    }
+    test_trade = {
+        "id": "number-test", "row_type": "trade", "account": "Bybit Demo",
+        "asset_class": "crypto", "symbol": "SOLUSDT", "side": "BUY",
+        "open_time": "2026-01-03T01:00:00+10:00", "close_time": "2026-01-03T02:00:00+10:00",
+        "qty": 1, "entry_price": 10, "exit_price": 11, "net_profit": 1,
+        "is_test_trade": True,
+    }
+    snapshot["items"].extend([new_fx, new_crypto, test_trade])
+    workbook = tmp_path / "Trading Journal.xlsx"
+    build_master_journal_workbook(snapshot, workbook)
+
+    before = load_workbook(workbook)
+    before_sheetnames = list(before.sheetnames)
+    before_stats_value = before[STATS1_SHEET]["A1"].value
+    before_merges = {name: tuple(map(str, before[name].merged_cells.ranges)) for name in before.sheetnames}
+    before.close()
+
+    first = mjw.reconcile_missing_trade_numbers_in_workbook(workbook, dry_run=False)
+    assert first["ok"] is True
+    assert first["candidate_verified_before_replace"] is True
+    assignments = {item["row_id"]: item for item in first["assignments"]}
+    assert assignments["number-new-fx"]["trade_number"] == "F11"
+    assert assignments["number-new-crypto"]["trade_number"] == "C31"
+    assert "number-test" not in assignments
+    assert (forex_root / "2026" / "F11 GBPUSD").is_dir()
+    assert (crypto_root / "2026" / "C31 ETH").is_dir()
+
+    wb = load_workbook(workbook)
+    ws = wb[mjw.TRADE_LOG_SHEET]
+    headers = _trade_log_header_map(ws)
+    by_id = {str(ws.cell(row, headers["Row ID"]).value or ""): row for row in range(TRADE_LOG_DATA_START_ROW, ws.max_row + 1)}
+    assert ws.cell(by_id["number-new-fx"], headers[TRADE_NUMBER_HEADER]).value == "F11"
+    crypto_cell = ws.cell(by_id["number-new-crypto"], headers[TRADE_NUMBER_HEADER])
+    assert crypto_cell.value == "C31"
+    assert crypto_cell.number_format == "@"
+    assert crypto_cell.hyperlink and "C31%20ETH" in crypto_cell.hyperlink.target
+    assert ws.cell(by_id["number-test"], headers[TRADE_NUMBER_HEADER]).value in (None, "")
+    assert list(wb.sheetnames) == before_sheetnames
+    assert wb[STATS1_SHEET]["A1"].value == before_stats_value
+    assert {name: tuple(map(str, wb[name].merged_cells.ranges)) for name in wb.sheetnames} == before_merges
+    wb.close()
+
+    second = mjw.reconcile_missing_trade_numbers_in_workbook(workbook, dry_run=True)
+    assert second["assigned_count"] == 0
+    assert len(list((forex_root / "2026").glob("F11*"))) == 1
+    assert len(list((crypto_root / "2026").glob("C31*"))) == 1

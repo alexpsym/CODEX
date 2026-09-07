@@ -112,6 +112,9 @@ def test_open_orders_headers_and_rendered_cells_have_exact_alignment() -> None:
         "Stop Loss",
         "Take Profit",
         "Leverage / Margin",
+        "Funding paid",
+        "Funding received",
+        "Net funding",
         "Opened",
         "Status",
         "Action",
@@ -157,12 +160,86 @@ def test_open_orders_headers_and_rendered_cells_have_exact_alignment() -> None:
         "item.stop_loss",
         "item.take_profit",
         "item.leverage",
+        "item.type==='Position'?item.funding_paid:null",
+        "item.type==='Position'?item.funding_received:null",
+        "item.type==='Position'?item.net_funding:null",
         "formatTimestamp(item.opened_at)",
         "item.status",
     ]
     assert "renderActionCell(item,actionTd,{allowAction:true}); row.appendChild(actionTd); tbody.appendChild(row);" in js
-    assert len(headers) == len(rendered_values.group(1).split(",")) + 1 == 36
+    assert len(headers) == len(rendered_values.group(1).split(",")) + 1 == 39
     assert headers[-1] == "Action"
+
+
+def test_bybit_open_position_funding_uses_current_lifecycle_and_reports_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    html = asyncio.run(master_service.merged_open_orders_page()).body.decode("utf-8")
+    js = (ROOT / "render" / "static" / "open_orders.js").read_text(encoding="utf-8")
+    for heading in ("Funding paid", "Funding received", "Net funding"):
+        assert f"<th>{heading}</th>" in html
+    assert "item.type==='Position'?item.funding_paid:null" in js
+    assert "item.type==='Position'?item.funding_received:null" in js
+    assert "item.type==='Position'?item.net_funding:null" in js
+
+    monkeypatch.setattr(master_service.time, "time", lambda: 10.0)
+    master_service._BYBIT_OPEN_FUNDING_CACHE.clear()
+    executions = [
+        {"symbol": "BTCUSDT", "positionIdx": 0, "side": "Buy", "execQty": "1", "execTime": "1100", "execId": "e1"},
+        {"symbol": "BTCUSDT", "positionIdx": 0, "side": "Sell", "execQty": "1", "execTime": "1200", "execId": "e2"},
+        {"symbol": "BTCUSDT", "positionIdx": 0, "side": "Buy", "execQty": "1", "execTime": "2000", "execId": "e3"},
+        {"symbol": "BTCUSDT", "positionIdx": 0, "side": "Buy", "execQty": "1", "execTime": "2100", "execId": "e4"},
+        {"symbol": "BTCUSDT", "positionIdx": 0, "side": "Sell", "execQty": ".5", "execTime": "2200", "execId": "e5"},
+        {"symbol": "BTCUSDT", "positionIdx": 0, "side": "Buy", "execQty": ".5", "execTime": "2300", "execId": "e6"},
+    ]
+
+    async def fake_executions(**_kwargs):
+        return executions
+
+    transactions = [
+        {"transactionId": "old", "transactionTime": "1900", "symbol": "BTCUSDT", "currency": "USDT", "funding": "9"},
+        {"transactionId": "received", "transactionTime": "3000", "symbol": "BTCUSDT", "currency": "USDT", "funding": ".30"},
+        {"transactionId": "paid", "transactionTime": "4000", "symbol": "BTCUSDT", "currency": "USDT", "funding": "-.10"},
+        {"transactionId": "currency", "transactionTime": "5000", "symbol": "BTCUSDT", "currency": "USDC", "funding": "1"},
+    ]
+
+    async def fake_transactions(**_kwargs):
+        return {"result": {"list": transactions, "nextPageCursor": ""}}
+
+    monkeypatch.setattr(master_service, "_fetch_bybit_executions_chunked", fake_executions)
+    monkeypatch.setattr(master_service, "_fetch_bybit_transaction_log", fake_transactions)
+    position = {
+        "type": "Position", "account": "demo", "category": "linear", "instrument": "BTCUSDT",
+        "position_idx": 0, "side": "Buy", "size": 2, "opened_at": 1000, "settlement_currency": "USDT",
+    }
+    warnings = asyncio.run(
+        master_service._enrich_bybit_open_position_funding(
+            [position], base_url="https://api-testnet.bybit.com", api_key="KEY", api_secret="SECRET", account_context="demo"
+        )
+    )
+    assert warnings == []
+    assert position["funding_lifecycle_started_at"] == 2000
+    assert position["funding_paid"] == pytest.approx(0.10)
+    assert position["funding_received"] == pytest.approx(0.30)
+    assert position["net_funding"] == pytest.approx(0.20)
+
+    master_service._BYBIT_OPEN_FUNDING_CACHE.clear()
+
+    async def failed_transactions(**_kwargs):
+        raise RuntimeError("api_key=KEY api_secret=SECRET upstream unavailable")
+
+    monkeypatch.setattr(master_service, "_fetch_bybit_transaction_log", failed_transactions)
+    unknown = dict(position)
+    unknown.update({"funding_paid": 0, "funding_received": 0, "net_funding": 0})
+    warning_rows = asyncio.run(
+        master_service._enrich_bybit_open_position_funding(
+            [unknown], base_url="https://api-testnet.bybit.com", api_key="KEY", api_secret="SECRET", account_context="demo"
+        )
+    )
+    assert unknown["funding_paid"] is None
+    assert unknown["funding_received"] is None
+    assert unknown["net_funding"] is None
+    assert warning_rows and "KEY" not in str(warning_rows) and "SECRET" not in str(warning_rows)
 
 
 def test_oanda_open_item_values_align_with_open_orders_columns(monkeypatch: pytest.MonkeyPatch) -> None:

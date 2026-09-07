@@ -4885,6 +4885,11 @@ def _trade_number_aliases(trade_number: Any) -> List[str]:
     return list(dict.fromkeys([text, canonical, raw, zero_padded]))
 
 
+def _trade_number_ordinal(value: Any, prefix: str) -> int | None:
+    match = re.fullmatch(rf"{re.escape(prefix.upper())}0*(\d+)", str(value or "").strip().upper())
+    return int(match.group(1)) if match else None
+
+
 def _trade_folder_index(root: Path, prefix: str, *, include_files: bool = False) -> Dict[str, List[Path]]:
     cache_key = (str(root).lower(), prefix.upper(), "files" if include_files else "dirs")
     cached = _TRADE_FOLDER_INDEX_CACHE.get(cache_key)
@@ -4957,6 +4962,243 @@ def _trade_folder_roots(prefix: str, explicit_root: Path | None = None) -> List[
         seen.add(key)
         unique.append(candidate.expanduser())
     return unique
+
+
+def _select_trade_chart_root(prefix: str, explicit_root: Path | None = None) -> Tuple[Path | None, Dict[str, Any]]:
+    market = "FOREX" if prefix == "F" else "CRYPTO"
+    env_name = f"TRADING_JOURNAL_{market}_ROOT"
+    configured = Path(explicit_root).expanduser() if explicit_root is not None else None
+    if configured is None:
+        env_value = str(os.getenv(env_name) or "").strip()
+        configured = Path(env_value).expanduser() if env_value else None
+    if configured is not None:
+        return configured, {
+            "selection": "explicit" if explicit_root is not None else env_name,
+            "root": str(configured),
+        }
+
+    scored: List[Tuple[int, int, str, Path]] = []
+    for root in _trade_folder_roots(prefix):
+        if not root.is_dir():
+            continue
+        index = _trade_folder_index(root, prefix)
+        ordinals = {
+            ordinal
+            for alias in index
+            for ordinal in [_trade_number_ordinal(alias, prefix)]
+            if ordinal is not None
+        }
+        scored.append((max(ordinals or {0}), len(ordinals), str(root).casefold(), root))
+    if not scored:
+        return None, {"selection": "none", "reason": f"No existing {market} chart root was found"}
+    scored.sort(reverse=True)
+    best = scored[0]
+    tied = [entry for entry in scored if entry[:2] == best[:2]]
+    if len(tied) > 1 and best[0] > 0:
+        return None, {
+            "selection": "ambiguous",
+            "reason": "Multiple chart roots have the same high-water trade number",
+            "roots": [str(entry[3]) for entry in tied],
+        }
+    return best[3], {
+        "selection": "highest_existing_sequence",
+        "root": str(best[3]),
+        "max_number": best[0],
+        "number_count": best[1],
+    }
+
+
+def _trade_folder_layout(root: Path, prefix: str) -> Dict[str, Any]:
+    paths = {
+        str(path).casefold(): path
+        for candidates in _trade_folder_index(root, prefix).values()
+        for path in candidates
+        if path.is_dir()
+    }.values()
+    year_direct = 0
+    year_month = 0
+    names_with_symbol = 0
+    total = 0
+    for path in paths:
+        if _trade_number_ordinal(path.name.split()[0] if path.name.split() else "", prefix) is None:
+            continue
+        total += 1
+        if re.fullmatch(r"20\d{2}", path.parent.name):
+            year_direct += 1
+        elif re.fullmatch(r"20\d{2}", path.parent.parent.name):
+            year_month += 1
+        match = re.match(rf"^{re.escape(prefix)}0*\d+\s+\S+", path.name, re.IGNORECASE)
+        if match:
+            names_with_symbol += 1
+    return {
+        "month_level": year_month > year_direct,
+        "include_symbol": names_with_symbol > 0 and names_with_symbol >= max(1, total // 2),
+        "observed_numbered_folders": total,
+    }
+
+
+def _trade_prefix_for_row(row: Mapping[str, Any]) -> str | None:
+    asset = str(row.get("asset_class") or row.get("market") or "").strip().lower()
+    account = str(row.get("account") or row.get("account_label") or "").upper()
+    symbol = re.sub(r"[^A-Z0-9]+", "", str(row.get("symbol") or "").upper())
+    if asset in {"crypto", "cryptocurrency"} or any(token in account for token in ("BYBIT", "BINANCE", "COINSPOT")) or symbol.endswith(("USDT", "USDC", "PERP")):
+        return "C"
+    if asset in {"fx", "forex"} or _is_likely_fx_pair(symbol) or any(token in account for token in ("OANDA", "PEPPERSTONE")):
+        return "F"
+    return None
+
+
+def _trade_folder_symbol(row: Mapping[str, Any], prefix: str) -> str:
+    symbol = re.sub(r"[^A-Z0-9]+", "", str(row.get("symbol") or "").upper())
+    if prefix == "C":
+        for quote in ("USDT", "USDC", "USD"):
+            if symbol.endswith(quote) and len(symbol) > len(quote):
+                return symbol[:-len(quote)]
+    return symbol
+
+
+def _existing_workbook_trade_numbers(path: Path) -> Tuple[set[str], Dict[str, str]]:
+    values: set[str] = set()
+    by_row_id: Dict[str, str] = {}
+    if not Path(path).exists():
+        return values, by_row_id
+    wb = load_workbook(path, read_only=True, data_only=False, keep_links=False)
+    try:
+        ws = _get_trade_log_sheet(wb)
+        headers = _trade_log_header_map(ws)
+        number_col = headers.get(TRADE_NUMBER_HEADER)
+        row_id_col = headers.get("Row ID")
+        if not number_col:
+            return values, by_row_id
+        for row_number in range(_trade_log_data_start_row(ws), ws.max_row + 1):
+            number = str(ws.cell(row_number, number_col).value or "").strip().upper()
+            if not number:
+                continue
+            values.add(number)
+            if row_id_col:
+                row_id = str(ws.cell(row_number, row_id_col).value or "").strip()
+                if row_id:
+                    by_row_id[row_id] = number
+    finally:
+        wb.close()
+    return values, by_row_id
+
+
+def assign_trade_numbers_and_create_folders(
+    rows: Sequence[Dict[str, Any]],
+    *,
+    workbook_path: Path | None = None,
+    forex_root: Path | None = None,
+    crypto_root: Path | None = None,
+    dry_run: bool = False,
+) -> Dict[str, Any]:
+    """Assign missing canonical trade numbers only after their chart folder is available."""
+    workbook_numbers, workbook_by_row_id = _existing_workbook_trade_numbers(Path(workbook_path)) if workbook_path else (set(), {})
+    used: Dict[str, set[int]] = {"F": set(), "C": set()}
+    for value in [*workbook_numbers, *(row.get("trade_number") for row in rows)]:
+        for prefix in ("F", "C"):
+            ordinal = _trade_number_ordinal(value, prefix)
+            if ordinal is not None:
+                used[prefix].add(ordinal)
+    root_details: Dict[str, Dict[str, Any]] = {}
+    roots: Dict[str, Path | None] = {}
+    layouts: Dict[str, Dict[str, Any]] = {}
+    for prefix, explicit in (("F", forex_root), ("C", crypto_root)):
+        root, selection = _select_trade_chart_root(prefix, explicit)
+        roots[prefix] = root
+        root_details[prefix] = selection
+        layouts[prefix] = _trade_folder_layout(root, prefix) if root and root.is_dir() else {
+            "month_level": False,
+            "include_symbol": True,
+            "observed_numbered_folders": 0,
+        }
+        if root:
+            for alias in _trade_folder_index(root, prefix):
+                ordinal = _trade_number_ordinal(alias, prefix)
+                if ordinal is not None:
+                    used[prefix].add(ordinal)
+
+    preserved = 0
+    skipped_test = 0
+    skipped_missing_time: List[str] = []
+    skipped_root: List[str] = []
+    assignments: List[Dict[str, Any]] = []
+    candidates: List[Tuple[datetime, str, Dict[str, Any], str]] = []
+    for row in rows:
+        if str(row.get("row_type") or "trade").strip().lower() != "trade":
+            continue
+        if _is_test_trade_value(row.get("is_test_trade", row.get("test"))):
+            skipped_test += 1
+            continue
+        row_id = str(row.get("id") or "").strip()
+        existing = str(row.get("trade_number") or workbook_by_row_id.get(row_id) or "").strip().upper()
+        if existing:
+            row["trade_number"] = existing
+            preserved += 1
+            continue
+        prefix = _trade_prefix_for_row(row)
+        if not prefix:
+            skipped_root.append(row_id or "<missing-row-id>")
+            continue
+        opened = _as_datetime(row.get("open_time"))
+        trade_time = opened or _as_datetime(row.get("close_time"))
+        if trade_time is None:
+            skipped_missing_time.append(row_id or "<missing-row-id>")
+            continue
+        candidates.append((trade_time, row_id, row, prefix))
+
+    candidates.sort(key=lambda item: (item[0], item[1]))
+    next_values = {prefix: max(used[prefix] or {0}) + 1 for prefix in ("F", "C")}
+    for trade_time, row_id, row, prefix in candidates:
+        root = roots[prefix]
+        if root is None:
+            skipped_root.append(row_id or "<missing-row-id>")
+            continue
+        ordinal = next_values[prefix]
+        while ordinal in used[prefix]:
+            ordinal += 1
+        number = f"{prefix}{ordinal}"
+        layout = layouts[prefix]
+        parent = root / str(trade_time.year)
+        if layout.get("month_level"):
+            parent = parent / calendar.month_name[trade_time.month].upper()
+        symbol = _trade_folder_symbol(row, prefix)
+        folder_name = f"{number} {symbol}" if layout.get("include_symbol") and symbol else number
+        folder = parent / folder_name
+        if not dry_run:
+            try:
+                folder.mkdir(parents=True, exist_ok=False)
+            except FileExistsError:
+                existing_matches = _trade_folder_index(root, prefix).get(number, [])
+                if len(existing_matches) != 1 or existing_matches[0].resolve() != folder.resolve():
+                    skipped_root.append(row_id or "<missing-row-id>")
+                    continue
+            except OSError:
+                skipped_root.append(row_id or "<missing-row-id>")
+                continue
+            _TRADE_FOLDER_INDEX_CACHE.clear()
+            row["trade_number"] = number
+        assignments.append({
+            "row_id": row_id,
+            "trade_number": number,
+            "folder": str(folder),
+            "symbol": str(row.get("symbol") or ""),
+            "open_time": str(row.get("open_time") or ""),
+        })
+        used[prefix].add(ordinal)
+        next_values[prefix] = ordinal + 1
+    return {
+        "dry_run": dry_run,
+        "assignments": assignments,
+        "assigned_count": len(assignments),
+        "preserved_existing": preserved,
+        "skipped_test": skipped_test,
+        "skipped_missing_time": skipped_missing_time,
+        "skipped_unresolved_root_or_market": skipped_root,
+        "roots": root_details,
+        "layouts": layouts,
+        "next_numbers": {prefix: next_values[prefix] for prefix in ("F", "C")},
+    }
 
 
 def _trade_file_fallback_root_keys(prefix: str, explicit_root: Path | None = None) -> set[str]:
@@ -18665,6 +18907,11 @@ def update_master_journal_workbook_incremental(
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(f"Master Journal workbook not found: {path}")
+    mutable_changed_rows = [dict(row) for row in changed_rows if isinstance(row, Mapping)]
+    trade_numbering = assign_trade_numbers_and_create_folders(
+        mutable_changed_rows,
+        workbook_path=path,
+    )
     source_calculation_signature = _workbook_calculation_signature(path)
     source_chart_snapshot = _snapshot_chart_ooxml(path)
     external_references = _external_workbook_formula_references(path)
@@ -18674,7 +18921,7 @@ def update_master_journal_workbook_incremental(
             unsafe_full_rebuild=True,
         )
     changed_order, rows_by_id = _incremental_changed_rows_by_id(
-        changed_rows,
+        mutable_changed_rows,
         allow_empty=isinstance(account_balance, Mapping),
     )
     candidate = path.with_name(
@@ -18788,6 +19035,8 @@ def update_master_journal_workbook_incremental(
             )
             affected_rows.append(row_number)
         if changed_order:
+            incremental_link_diagnostics: Dict[str, Any] = {}
+            _apply_trade_number_hyperlinks(ws, incremental_link_diagnostics)
             _apply_trade_log_win_loss_direct_row_fills_for_rows(ws, affected_rows)
             _apply_trade_log_win_loss_row_formatting(ws)
             last_populated = _trade_log_last_populated_row(ws)
@@ -18914,6 +19163,8 @@ def update_master_journal_workbook_incremental(
                 "generated_data_validations_extended": validation_extended,
                 "candidate_verified_before_replace": True,
                 "verified_account_balance": verified_account_balance,
+                "trade_numbering": trade_numbering,
+                "trade_number_hyperlinks": incremental_link_diagnostics if changed_order else {},
                 **formula_dependency_diagnostics,
                 **formula_cache_diagnostics,
             },
@@ -18923,6 +19174,411 @@ def update_master_journal_workbook_incremental(
             wb.close()
         if not replaced and candidate.exists():
             candidate.unlink(missing_ok=True)
+
+
+_OOXML_HYPERLINK_RELATIONSHIP = (
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink"
+)
+
+_INCREMENTAL_CELL_SIGNATURE_FIELDS = (
+    "value",
+    "formula",
+    "data_type",
+    "style",
+    "has_style",
+    "number_format",
+    "hyperlink",
+    "comment",
+    "merge",
+)
+
+
+def _incremental_workbook_cell_signature(
+    book: Any,
+    ignored: Collection[Tuple[str, str]] = (),
+) -> Tuple[Any, ...]:
+    signature: List[Any] = []
+    for sheet in book.worksheets:
+        for cell in sorted(
+            sheet._cells.values(), key=lambda value: (value.row, value.column)
+        ):
+            key = (sheet.title, cell.coordinate)
+            if key in ignored:
+                continue
+            hyperlink = getattr(cell, "hyperlink", None)
+            comment = getattr(cell, "comment", None)
+            value = getattr(cell, "value", None)
+            signature.append((
+                sheet.title,
+                cell.coordinate,
+                repr(value),
+                bool(getattr(cell, "data_type", None) == "f"),
+                str(getattr(cell, "data_type", "") or ""),
+                int(getattr(cell, "style_id", 0) or 0),
+                bool(getattr(cell, "has_style", False)),
+                str(getattr(cell, "number_format", "") or ""),
+                (
+                    str(getattr(hyperlink, "target", "") or ""),
+                    str(getattr(hyperlink, "location", "") or ""),
+                    str(getattr(hyperlink, "display", "") or ""),
+                    str(getattr(hyperlink, "tooltip", "") or ""),
+                ) if hyperlink is not None else None,
+                (
+                    str(getattr(comment, "text", "") or ""),
+                    str(getattr(comment, "author", "") or ""),
+                    float(getattr(comment, "width", 0) or 0),
+                    float(getattr(comment, "height", 0) or 0),
+                ) if comment is not None else None,
+                bool(cell.coordinate in sheet.merged_cells),
+            ))
+    return tuple(signature)
+
+
+def _incremental_cell_state_is_blank_default(state: Tuple[Any, ...]) -> bool:
+    return (
+        state[0] == "None"
+        and state[1] is False
+        and state[2] == "n"
+        and state[3] == 0
+        and state[4] is False
+        and state[5] == "General"
+        and state[6] is None
+        and state[7] is None
+        and state[8] is False
+    )
+
+
+def _incremental_workbook_cell_signature_differences(
+    before: Tuple[Any, ...],
+    after: Tuple[Any, ...],
+    *,
+    limit: int = 10,
+) -> List[Dict[str, Any]]:
+    before_by_cell = {(item[0], item[1]): item[2:] for item in before}
+    after_by_cell = {(item[0], item[1]): item[2:] for item in after}
+    differences: List[Dict[str, Any]] = []
+    for key in sorted(set(before_by_cell) | set(after_by_cell)):
+        left = before_by_cell.get(key)
+        right = after_by_cell.get(key)
+        if left == right:
+            continue
+        if left is None or right is None:
+            present = right if left is None else left
+            if present is not None and _incremental_cell_state_is_blank_default(present):
+                continue
+            changed_fields = ["presence"]
+        else:
+            changed_fields = [
+                name
+                for name, before_value, after_value in zip(
+                    _INCREMENTAL_CELL_SIGNATURE_FIELDS, left, right
+                )
+                if before_value != after_value
+            ]
+        differences.append({
+            "sheet": key[0],
+            "cell": key[1],
+            "changed_fields": changed_fields,
+        })
+        if len(differences) >= limit:
+            break
+    return differences
+
+
+def _worksheet_relationship_part_name(worksheet_part: str) -> str:
+    return posixpath.join(
+        posixpath.dirname(worksheet_part),
+        "_rels",
+        posixpath.basename(worksheet_part) + ".rels",
+    )
+
+
+def _patch_trade_numbers_in_workbook_package(
+    source_path: Path,
+    candidate_path: Path,
+    updates: Mapping[str, Mapping[str, Any]],
+) -> Dict[str, Any]:
+    """Copy the workbook package while changing only target cell/link XML."""
+    with zipfile.ZipFile(source_path, "r") as source_package:
+        worksheet_part = _worksheet_ooxml_part_name(source_package, TRADE_LOG_SHEET)
+        relationships_part = _worksheet_relationship_part_name(worksheet_part)
+        if relationships_part not in source_package.namelist():
+            raise RuntimeError("Trade Log relationships are unavailable for safe hyperlink insertion.")
+        worksheet_payload = source_package.read(worksheet_part).decode("utf-8")
+        relationships_payload = source_package.read(relationships_part).decode("utf-8")
+
+        relationship_ids = {
+            match.group(1)
+            for match in re.finditer(r'\bId="([^"]+)"', relationships_payload)
+        }
+        next_relationship_number = 1
+        added_relationship_ids: List[str] = []
+        hyperlink_fragments: List[str] = []
+        for coordinate, update in updates.items():
+            coordinate_text = str(coordinate).strip().upper()
+            number = str(update.get("trade_number") or "").strip().upper()
+            folder = Path(str(update.get("folder") or ""))
+            style_id = int(update.get("style_id") or 0)
+            if not coordinate_text or not number or not folder:
+                raise RuntimeError("Trade-number OOXML update is incomplete.")
+            self_closing_pattern = re.compile(
+                rf'<c\b(?P<attrs>[^>]*\br="{re.escape(coordinate_text)}"[^>]*)\s*/>'
+            )
+            full_cell_pattern = re.compile(
+                rf'<c\b(?P<attrs>[^>]*\br="{re.escape(coordinate_text)}"[^>]*)>'
+                r'(?P<body>.*?)</c>',
+                re.DOTALL,
+            )
+            match = self_closing_pattern.search(worksheet_payload)
+            if match is None:
+                match = full_cell_pattern.search(worksheet_payload)
+            if match is None:
+                raise RuntimeError(
+                    f"Trade Number cell {coordinate_text} is missing from worksheet XML."
+                )
+            attrs = str(match.group("attrs") or "")
+            attrs = re.sub(r'\s+t="[^"]*"', "", attrs)
+            attrs = re.sub(r'\s+s="[^"]*"', "", attrs)
+            if style_id:
+                attrs += f' s="{style_id}"'
+            replacement = (
+                f'<c{attrs} t="inlineStr"><is><t>{_xml_escape(number)}</t></is></c>'
+            )
+            worksheet_payload = (
+                worksheet_payload[:match.start()]
+                + replacement
+                + worksheet_payload[match.end():]
+            )
+
+            while f"rId{next_relationship_number}" in relationship_ids:
+                next_relationship_number += 1
+            relationship_id = f"rId{next_relationship_number}"
+            relationship_ids.add(relationship_id)
+            added_relationship_ids.append(relationship_id)
+            next_relationship_number += 1
+            target = _xml_escape(folder.resolve().as_uri(), {'"': "&quot;"})
+            relationship_fragment = (
+                f'<Relationship Id="{relationship_id}" '
+                f'Type="{_OOXML_HYPERLINK_RELATIONSHIP}" '
+                f'Target="{target}" TargetMode="External"/>'
+            )
+            relationships_payload = relationships_payload.replace(
+                "</Relationships>", relationship_fragment + "</Relationships>", 1
+            )
+            hyperlink_fragments.append(
+                f'<hyperlink ref="{coordinate_text}" '
+                f'xmlns:r="{_OFFICE_DOCUMENT_RELATIONSHIP_NAMESPACE}" '
+                f'r:id="{relationship_id}"/>'
+            )
+
+        hyperlink_payload = "".join(hyperlink_fragments)
+        if "</hyperlinks>" in worksheet_payload:
+            worksheet_payload = worksheet_payload.replace(
+                "</hyperlinks>", hyperlink_payload + "</hyperlinks>", 1
+            )
+        elif "<hyperlinks/>" in worksheet_payload:
+            worksheet_payload = worksheet_payload.replace(
+                "<hyperlinks/>", f"<hyperlinks>{hyperlink_payload}</hyperlinks>", 1
+            )
+        else:
+            if "xmlns:r=" not in worksheet_payload.partition(">")[0]:
+                worksheet_payload = worksheet_payload.replace(
+                    "<worksheet ",
+                    f'<worksheet xmlns:r="{_OFFICE_DOCUMENT_RELATIONSHIP_NAMESPACE}" ',
+                    1,
+                )
+            insertion_markers = (
+                "<printOptions", "<pageMargins", "<pageSetup", "<headerFooter",
+                "<rowBreaks", "<colBreaks", "<customProperties", "<cellWatches",
+                "<ignoredErrors", "<smartTags", "<drawing", "<legacyDrawing",
+                "<legacyDrawingHF", "<picture", "<oleObjects", "<controls",
+                "<webPublishItems", "<tableParts", "<extLst", "</worksheet>",
+            )
+            positions = [worksheet_payload.find(marker) for marker in insertion_markers]
+            positions = [position for position in positions if position >= 0]
+            if not positions:
+                raise RuntimeError("Trade Log worksheet has no safe hyperlink insertion point.")
+            position = min(positions)
+            worksheet_payload = (
+                worksheet_payload[:position]
+                + f"<hyperlinks>{hyperlink_payload}</hyperlinks>"
+                + worksheet_payload[position:]
+            )
+
+        replacements = {
+            worksheet_part: worksheet_payload.encode("utf-8"),
+            relationships_part: relationships_payload.encode("utf-8"),
+        }
+        with zipfile.ZipFile(candidate_path, "w") as candidate_package:
+            candidate_package.comment = source_package.comment
+            for info in source_package.infolist():
+                candidate_package.writestr(
+                    info,
+                    replacements.get(info.filename, source_package.read(info.filename)),
+                )
+
+    with zipfile.ZipFile(source_path, "r") as source_package, zipfile.ZipFile(
+        candidate_path, "r"
+    ) as candidate_package:
+        if source_package.namelist() != candidate_package.namelist():
+            raise RuntimeError("Workbook package part set changed during trade-number patch.")
+        allowed_parts = {worksheet_part, relationships_part}
+        for part_name in source_package.namelist():
+            if part_name in allowed_parts:
+                continue
+            if source_package.read(part_name) != candidate_package.read(part_name):
+                raise RuntimeError(
+                    f"Workbook package part {part_name!r} changed outside the Trade Log patch."
+                )
+    return {
+        "preservation_mode": "targeted_trade_log_ooxml_patch",
+        "worksheet_part": worksheet_part,
+        "relationships_part": relationships_part,
+        "added_hyperlink_relationships": len(added_relationship_ids),
+        "unchanged_package_parts_verified": True,
+    }
+
+
+def reconcile_missing_trade_numbers_in_workbook(
+    path: Path,
+    *,
+    forex_root: Path | None = None,
+    crypto_root: Path | None = None,
+    dry_run: bool = True,
+) -> Dict[str, Any]:
+    """Inventory or atomically write only missing Trade Number cells and links."""
+    path = Path(path)
+    source = read_master_journal_source(path)
+    rows = [dict(row) for row in (source.get("items") or []) if isinstance(row, dict)]
+    plan = assign_trade_numbers_and_create_folders(
+        rows,
+        workbook_path=path,
+        forex_root=forex_root,
+        crypto_root=crypto_root,
+        dry_run=True,
+    )
+    if dry_run or not plan.get("assignments"):
+        return plan
+
+    external_references = _external_workbook_formula_references(path)
+    if external_references:
+        raise RuntimeError("Trade-number reconciliation cannot preserve external workbook references.")
+    wb = load_workbook(path, data_only=False, keep_links=False)
+    candidate = path.with_name(f".{path.stem}.trade-numbers-{uuid4().hex}.tmp{path.suffix}")
+    replaced = False
+    created = assign_trade_numbers_and_create_folders(
+        rows,
+        workbook_path=path,
+        forex_root=forex_root,
+        crypto_root=crypto_root,
+        dry_run=False,
+    )
+    assignments = {
+        str(item.get("row_id") or ""): dict(item)
+        for item in (created.get("assignments") or [])
+        if isinstance(item, dict) and str(item.get("row_id") or "")
+    }
+    try:
+        ws = _incremental_require_canonical_trade_log(wb)
+        headers = _trade_log_header_map(ws)
+        row_id_col = headers.get("Row ID")
+        number_col = headers.get(TRADE_NUMBER_HEADER)
+        if not row_id_col or not number_col:
+            raise RuntimeError("Canonical Trade Log identifiers are unavailable.")
+        target_rows: Dict[str, int] = {}
+        for row_number in range(_trade_log_data_start_row(ws), ws.max_row + 1):
+            row_id = str(ws.cell(row_number, row_id_col).value or "").strip()
+            if row_id in assignments:
+                target_rows[row_id] = row_number
+        missing_ids = sorted(set(assignments) - set(target_rows))
+        if missing_ids:
+            raise RuntimeError("Trade-number rows disappeared before reconciliation: " + ", ".join(missing_ids[:20]))
+
+        ignored = {(TRADE_LOG_SHEET, ws.cell(row_number, number_col).coordinate) for row_number in target_rows.values()}
+
+        before_cells = _incremental_workbook_cell_signature(wb, ignored)
+        before_formula_signature = _incremental_formula_signature(wb)
+        before_defined_names = _incremental_defined_name_signature(wb)
+        before_structure = _incremental_structural_signature(wb)
+        before_charts = _incremental_chart_formula_signature(path)
+        source_calculation_signature = _workbook_calculation_signature(path)
+        text_style_ids = [
+            ws.cell(row_number, number_col).style_id
+            for row_number in range(_trade_log_data_start_row(ws), ws.max_row + 1)
+            if ws.cell(row_number, number_col).number_format == "@"
+        ]
+        fallback_text_style_id = text_style_ids[0] if text_style_ids else None
+        package_updates: Dict[str, Dict[str, Any]] = {}
+        for row_id, row_number in target_rows.items():
+            cell = ws.cell(row_number, number_col)
+            if cell.value not in (None, ""):
+                raise RuntimeError(f"Trade Number became nonblank for {row_id!r}; refusing to overwrite it.")
+            item = assignments[row_id]
+            style_id = cell.style_id if cell.number_format == "@" else fallback_text_style_id
+            if style_id is None:
+                raise RuntimeError("No existing Trade Number text style is available.")
+            package_updates[cell.coordinate] = {
+                "trade_number": item["trade_number"],
+                "folder": item["folder"],
+                "style_id": style_id,
+            }
+
+        package_diagnostics = _patch_trade_numbers_in_workbook_package(
+            path, candidate, package_updates
+        )
+        wb.close()
+        wb = None
+
+        verified = load_workbook(candidate, data_only=False, keep_links=False)
+        try:
+            verified_ws = _incremental_require_canonical_trade_log(verified)
+            verified_headers = _trade_log_header_map(verified_ws)
+            verified_index, _last_row = _incremental_trade_log_row_index(verified_ws)
+            for row_id, item in assignments.items():
+                cell = verified_ws.cell(verified_index[row_id], verified_headers[TRADE_NUMBER_HEADER])
+                if str(cell.value or "") != str(item["trade_number"]) or cell.number_format != "@" or not cell.hyperlink:
+                    raise RuntimeError(f"Trade-number verification failed for {row_id!r}.")
+            after_cells = _incremental_workbook_cell_signature(verified, ignored)
+            differences = _incremental_workbook_cell_signature_differences(
+                before_cells, after_cells
+            )
+            if differences:
+                raise RuntimeError(
+                    "A non-target workbook cell changed during trade-number reconciliation: "
+                    + json.dumps(differences, sort_keys=True)
+                )
+            if _incremental_formula_signature(verified) != before_formula_signature:
+                raise RuntimeError("Workbook formulas changed during trade-number reconciliation.")
+            if _incremental_defined_name_signature(verified) != before_defined_names:
+                raise RuntimeError("Workbook defined names changed during trade-number reconciliation.")
+            if _incremental_structural_signature(verified) != before_structure:
+                raise RuntimeError("Workbook layout changed during trade-number reconciliation.")
+        finally:
+            verified.close()
+        if _incremental_chart_formula_signature(candidate) != before_charts:
+            raise RuntimeError("Workbook charts changed during trade-number reconciliation.")
+        if _workbook_calculation_signature(candidate) != source_calculation_signature:
+            raise RuntimeError("Workbook calculation settings changed during trade-number reconciliation.")
+        with candidate.open("r+b") as handle:
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(candidate, path)
+        replaced = True
+        return {
+            **created,
+            "ok": True,
+            "applied": True,
+            "candidate_verified_before_replace": True,
+            "package_preservation_diagnostics": package_diagnostics,
+        }
+    finally:
+        if wb is not None:
+            wb.close()
+        if not replaced and candidate.exists():
+            try:
+                candidate.unlink(missing_ok=True)
+            except PermissionError:
+                pass
 
 
 def refresh_master_journal_derived_sheets(path: Path, snapshot: Dict[str, Any]) -> Dict[str, Any]:

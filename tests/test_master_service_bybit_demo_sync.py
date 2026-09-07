@@ -1677,7 +1677,7 @@ def test_manual_import_bybit_funding_with_completed_trades_and_trailing_open(tmp
         "ENAUSDT,ENA-EXIT,Sell,Market,144,0.1565,0.1565,Trade,0.00055,0.01239480,ENA-E2,01/06/2026 01:10,999.95",
         "ETHUSDT,ETH-ENTRY,Buy,Market,0.04,2463.51,2463.51,Trade,0.00055,0.05419722,ETH-E1,01/06/2026 02:00,999.90",
     ]
-    eth_funding = [0.0028] * 12 + [0.00362970]
+    eth_funding = [0.0028] * 11 + [-0.001] + [0.00362970]
     for index, fee in enumerate(eth_funding, start=1):
         lines.append(
             f"ETHUSDT,ETH-FUND-{index},Buy,Market,0.04,0,0,Funding,0,{fee:.8f},ETH-F{index},01/06/2026 {index + 2:02d}:00,999.90"
@@ -1707,6 +1707,7 @@ def test_manual_import_bybit_funding_with_completed_trades_and_trailing_open(tmp
     assert diag["bybit_trailing_open_execution_rows_deferred"] == 1
     assert diag["bybit_trailing_open_funding_rows_deferred"] == 7
     assert diag["bybit_blocking_execution_rows"] == 0
+    assert diag["bybit_commission_includes_funding"] is True
     assert unmatched == ["ENA-E3"]
     assert len(rows) == 2
 
@@ -1717,6 +1718,7 @@ def test_manual_import_bybit_funding_with_completed_trades_and_trailing_open(tmp
     assert ena["exit_price"] == pytest.approx(0.1565)
     assert ena["gross_profit"] == pytest.approx(-0.02448)
     assert ena["commission"] == pytest.approx(0.02480307)
+    assert ena["trading_fee_total"] == pytest.approx(0.02480307)
     assert ena["funding_cost"] == pytest.approx(0)
     assert ena["net_profit"] == pytest.approx(-0.04928307)
 
@@ -1725,9 +1727,14 @@ def test_manual_import_bybit_funding_with_completed_trades_and_trailing_open(tmp
     assert eth["entry_price"] == pytest.approx(2463.51)
     assert eth["exit_price"] == pytest.approx(2394.51)
     assert eth["gross_profit"] == pytest.approx(-2.76)
-    assert eth["commission"] == pytest.approx(0.10687644)
-    assert eth["funding_cost"] == pytest.approx(0.03722970)
-    assert eth["net_profit"] == pytest.approx(-2.90410614)
+    assert eth["trading_fee_total"] == pytest.approx(0.10687644)
+    assert eth["funding_cost"] == pytest.approx(0.03342970)
+    assert eth["funding_paid"] == pytest.approx(0.03442970)
+    assert eth["funding_received"] == pytest.approx(0.001)
+    assert eth["net_funding"] == pytest.approx(-0.03342970)
+    assert eth["commission"] == pytest.approx(0.14030614)
+    assert eth["net_profit"] == pytest.approx(-2.90030614)
+    assert eth["net_profit"] == pytest.approx(eth["gross_profit"] - eth["commission"])
     assert all(row["qty"] != pytest.approx(242) for row in rows)
     assert all(str(row["id"]).startswith("bybit:demo:trade:") for row in rows)
 

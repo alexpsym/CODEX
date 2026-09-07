@@ -6,6 +6,8 @@ import os
 import shutil
 import subprocess
 import sys
+from collections import deque
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -18,6 +20,83 @@ master_service = importlib.util.module_from_spec(SPEC)
 assert SPEC and SPEC.loader
 sys.modules[SPEC.name] = master_service
 SPEC.loader.exec_module(master_service)
+
+
+@pytest.mark.parametrize("monitor_name", ["bybit", "oanda"])
+def test_expired_custom_alerts_are_never_evaluated_rearmed_or_sent(
+    monitor_name: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from bybit_monitor import bybit_altcoin_monitor
+    from oanda_monitor import oanda_forex_monitor
+
+    monitor = bybit_altcoin_monitor if monitor_name == "bybit" else oanda_forex_monitor
+    sent: list[str] = []
+    monkeypatch.setattr(monitor, "send_notification", lambda _title, message, **_kwargs: sent.append(message))
+    alert = {
+        "id": "expired-1",
+        "symbol": "BTCUSDT" if monitor_name == "bybit" else "EUR_USD",
+        "kind": "price",
+        "direction": "above",
+        "target_price": 1.0,
+        "enabled": True,
+        "cooldown_seconds": 0,
+        "expires_at": "2020-01-01T00:00:00Z",
+    }
+    state = {"custom_alerts": {"expired-1": {"armed": False, "last_trigger_at": 1}}}
+    history: dict[str, deque] = {}
+    if monitor_name == "bybit":
+        changed = monitor.evaluate_custom_alerts([alert], {"BTCUSDT": 100.0}, state, history)
+    else:
+        changed = monitor.evaluate_custom_alerts([alert], {"EUR_USD": 2.0}, state, history, {"EUR_USD": 0.0001})
+    assert changed is False
+    assert state["custom_alerts"]["expired-1"] == {"armed": False, "last_trigger_at": 1}
+    assert sent == []
+    assert monitor.alert_is_expired(alert, now=datetime(2026, 1, 1, tzinfo=timezone.utc))
+    assert monitor._normalized_expiry({}) is None
+    with pytest.raises(ValueError, match="valid ISO-8601"):
+        monitor._normalized_expiry({"expires_at": "not-a-date"})
+    with pytest.raises(ValueError, match="future"):
+        monitor._normalized_expiry({"expires_at": "2020-01-01T00:00:00Z"})
+    assert monitor._normalized_expiry({"expires_at": "2099-01-01T10:00:00+10:00"}) == "2099-01-01T00:00:00Z"
+
+
+@pytest.mark.parametrize("monitor_name", ["bybit", "oanda"])
+def test_telegram_and_email_delivery_are_independent(
+    monitor_name: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from bybit_monitor import bybit_altcoin_monitor
+    from oanda_monitor import oanda_forex_monitor
+
+    monitor = bybit_altcoin_monitor if monitor_name == "bybit" else oanda_forex_monitor
+    monkeypatch.setattr(monitor, "log", lambda _message: None)
+    email_events: list[dict[str, object]] = []
+
+    def email_success(_title, _message, *, event=None):
+        email_events.append(dict(event or {}))
+        return {"configured": True, "sent": True, "detail": "sent"}
+
+    monkeypatch.setattr(monitor, "send_push_notification", lambda *_args: (_ for _ in ()).throw(RuntimeError("telegram down")))
+    monkeypatch.setattr(monitor, "send_alert_email", email_success)
+    first = monitor.send_notification(
+        "test",
+        "details",
+        event={"source": monitor_name, "symbol": "TEST", "alert_type": "move", "condition": "> 1", "current_value": 2},
+    )
+    assert first == {"telegram": False, "email": True}
+    assert email_events[0]["symbol"] == "TEST"
+    assert email_events[0]["trigger_time"].endswith("+00:00") or email_events[0]["trigger_time"].endswith("Z")
+    monkeypatch.setattr(monitor, "_push_configured", lambda: True)
+    first_test = monitor.send_notification_test()
+    assert first_test["channels"]["telegram"]["sent"] is False
+    assert first_test["channels"]["email"]["sent"] is True
+
+    monkeypatch.setattr(monitor, "send_push_notification", lambda *_args: True)
+    monkeypatch.setattr(monitor, "send_alert_email", lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("smtp down")))
+    second = monitor.send_notification("test", "details", event={"source": monitor_name})
+    assert second == {"telegram": True, "email": False}
+    second_test = monitor.send_notification_test()
+    assert second_test["channels"]["telegram"]["sent"] is True
+    assert second_test["channels"]["email"]["sent"] is False
 
 
 def test_local_launcher_includes_trading_journal_github_sync_env_defaults() -> None:
@@ -766,7 +845,7 @@ def test_bybit_run_monitor_resets_baseline_after_long_gap(monkeypatch: pytest.Mo
     monkeypatch.setattr(bybit_altcoin_monitor, "_save_state", lambda *_args, **_kwargs: None)
 
     alerts: list[str] = []
-    monkeypatch.setattr(bybit_altcoin_monitor, "send_notification", lambda _title, msg: alerts.append(msg))
+    monkeypatch.setattr(bybit_altcoin_monitor, "send_notification", lambda _title, msg, **_kwargs: alerts.append(msg))
 
     prices_sequence = iter(
         [

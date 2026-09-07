@@ -36,6 +36,7 @@ Place these in your Render dashboard or in your local external env file (`C:\GPT
 - `BYBIT_API_KEY`, `BYBIT_API_SECRET`, and any other Bybit settings used by the Bybit automation scripts.
 - `OANDA_API_KEY`, `OANDA_ACCOUNT_ID`, and `OANDA_BASE_URL` for OANDA strategies.
 - Any Telegram/Discord/API tokens needed by alerting code.
+- Alert email delivery uses Python SMTP and is disabled unless `ALERT_EMAIL_ENABLED=true`. Configure `ALERT_EMAIL_TO`, `ALERT_EMAIL_FROM`, `ALERT_SMTP_HOST`, `ALERT_SMTP_PORT`, `ALERT_SMTP_USERNAME`, and `ALERT_SMTP_PASSWORD`; set `ALERT_SMTP_USE_TLS=true` for STARTTLS (the default). Keep recipients and credentials in the Render dashboard or external local env file, never in the repository.
 - `PORT` (Render sets this automatically; only override for local testing).
 - `MASTER_ENV_FILE` overrides the exact local env file path used by `shared.env_bootstrap`.
 - `MASTER_ENV_DIR` overrides the directory searched for `env.env`, `.env`, `scanner.env`, and `master.env` when `MASTER_ENV_FILE` is not explicitly set.
