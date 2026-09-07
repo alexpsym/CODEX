@@ -753,31 +753,64 @@ def test_settings_saved_during_refresh_does_not_queue_or_change_active_snapshot(
     asyncio.run(scenario())
 
 
-def test_cancelling_gated_worker_preserves_last_good_result_and_allows_restart(tmp_path: Path):
+def test_cancellation_finalisation_blocks_competing_start_then_allows_latest_restart(tmp_path: Path):
     async def scenario():
         now_ref = [DEFAULT_NOW_MS]
-        fake = FakeBybit(now_ref)
-        service = _make_service(tmp_path, fake, now_ref)
-        last_good = await service.refresh(manual=True)
-        gate = asyncio.Event()
-        fake.slow_gate = gate
+        fallback = FakeBybit(now_ref)
+        fetch_entered = asyncio.Event()
+        cancellation_seen = asyncio.Event()
+        cleanup_gate = asyncio.Event()
+        first_request = True
+
+        async def fetch(path, params):
+            nonlocal first_request
+            if first_request and path == "/v5/market/instruments-info":
+                fetch_entered.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    first_request = False
+                    cancellation_seen.set()
+                    await cleanup_gate.wait()
+                    raise
+            return await fallback(path, params)
+
+        service = ATRScannerService(
+            fetch_json=fetch,
+            settings_path=tmp_path / "scanner-settings.json",
+            now_ms=lambda: now_ref[0],
+            request_spacing_seconds=0,
+            request_retries=0,
+        )
         started = await service.start_refresh(manual=True)
         assert started["started"] is True
-        await asyncio.sleep(0)
+        await fetch_entered.wait()
 
-        cancelled = await asyncio.wait_for(service.cancel_refresh(), timeout=1)
+        cancellation = asyncio.create_task(service.cancel_refresh())
+        await cancellation_seen.wait()
+        service.save_settings({"min_turnover_usdt": 60_000_000})
+        competing = await service.start_refresh(manual=True)
+        assert competing["started"] is False
+        assert competing["cancellation_in_progress"] is True
+        original_task = service._refresh_task
+        assert original_task is not None and not original_task.done()
+
+        cleanup_gate.set()
+        cancelled = await cancellation
         assert cancelled["cancelled"] is True
-        assert not gate.is_set()
-        assert service._refresh_task is not None and service._refresh_task.done()
+        assert original_task.done() and original_task.cancelled()
         status = service.status_payload()
         assert status["progress"]["in_progress"] is False
         assert status["progress"]["phase"] == "cancelled"
-        assert status["ranked_rows"] == last_good["ranked_rows"]
+        assert service._active_settings is None
+        assert service._cancelling_task is None
 
-        fake.slow_gate = None
         restarted = await service.start_refresh(manual=True)
         assert restarted["started"] is True
+        assert service._active_settings is not None
+        assert service._active_settings["min_turnover_usdt"] == 60_000_000
         await service.wait_for_idle()
+        assert Counter(path for path, _params in fallback.calls)["/v5/market/instruments-info"] == 1
 
     asyncio.run(scenario())
 

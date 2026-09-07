@@ -595,6 +595,7 @@ class ATRScannerService:
         self._last_request_started = 0.0
         self._refresh_guard = asyncio.Lock()
         self._refresh_task: Optional[asyncio.Task[dict[str, object]]] = None
+        self._cancelling_task: Optional[asyncio.Task[dict[str, object]]] = None
         self._active_settings: Optional[dict[str, object]] = None
         self._settings_lock = threading.RLock()
         self._last_good: Optional[dict[str, object]] = None
@@ -662,6 +663,14 @@ class ATRScannerService:
 
     async def start_refresh(self, *, manual: bool = False) -> dict[str, object]:
         async with self._refresh_guard:
+            if self._cancelling_task is not None:
+                return {
+                    "started": False,
+                    "shared_in_flight": False,
+                    "cancellation_in_progress": True,
+                    "manual": bool(manual),
+                    "progress": copy.deepcopy(self._progress),
+                }
             settings = self.load_settings()
             if not manual and not settings["auto_refresh_enabled"]:
                 return {
@@ -709,47 +718,80 @@ class ATRScannerService:
             return await self._run_refresh(settings=settings, manual=manual)
         finally:
             async with self._refresh_guard:
-                self._active_settings = None
+                if self._refresh_task is asyncio.current_task():
+                    self._active_settings = None
 
     async def cancel_refresh(self) -> dict[str, object]:
         """Cancel the shared worker and await termination of its child work."""
 
         async with self._refresh_guard:
             task = self._refresh_task
+            if self._cancelling_task is not None:
+                return {
+                    "cancelled": False,
+                    "already_idle": False,
+                    "cancellation_in_progress": True,
+                    "progress": copy.deepcopy(self._progress),
+                }
             if task is None or task.done():
                 return {
                     "cancelled": False,
                     "already_idle": True,
                     "progress": copy.deepcopy(self._progress),
                 }
-            task.cancel()
+            self._cancelling_task = task
+            cancellation_requested = task.cancel()
 
         # The worker takes this lock while cleaning up, so never await it under the lock.
         try:
             await task
         except asyncio.CancelledError:
             pass
+        except BaseException:
+            async with self._refresh_guard:
+                if self._cancelling_task is task:
+                    self._cancelling_task = None
+            raise
 
         async with self._refresh_guard:
-            self._active_settings = None
-            self._set_progress(
-                "cancelled", completed=0, total=0, detail="Scan stopped by user."
-            )
-            if self._last_good is not None:
-                self._last_result = copy.deepcopy(self._last_good)
-            else:
-                self._last_result = {
-                    "ok": False,
-                    "state": "cancelled",
-                    "stale": False,
-                    "partial": False,
-                    "ranked_rows": [],
-                    "qualified_rows": [],
-                    "excluded_rows": [],
+            if self._cancelling_task is not task:
+                return {
+                    "cancelled": False,
+                    "already_idle": True,
+                    "progress": copy.deepcopy(self._progress),
+                }
+            self._cancelling_task = None
+            if not cancellation_requested or not task.cancelled():
+                return {
+                    "cancelled": False,
+                    "already_idle": True,
+                    "progress": copy.deepcopy(self._progress),
+                }
+            if self._refresh_task is task:
+                self._active_settings = None
+                self._set_progress(
+                    "cancelled", completed=0, total=0, detail="Scan stopped by user."
+                )
+                if self._last_good is not None:
+                    self._last_result = copy.deepcopy(self._last_good)
+                else:
+                    self._last_result = {
+                        "ok": False,
+                        "state": "cancelled",
+                        "stale": False,
+                        "partial": False,
+                        "ranked_rows": [],
+                        "qualified_rows": [],
+                        "excluded_rows": [],
+                    }
+                return {
+                    "cancelled": True,
+                    "already_idle": False,
+                    "progress": copy.deepcopy(self._progress),
                 }
             return {
-                "cancelled": True,
-                "already_idle": False,
+                "cancelled": False,
+                "already_idle": True,
                 "progress": copy.deepcopy(self._progress),
             }
 

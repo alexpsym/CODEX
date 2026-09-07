@@ -1,3 +1,26 @@
+ATR scanner Phase 1 corrective follow-up: cancellation lifecycle race and executable UI coverage
+
+Correction
+
+- Cancellation now records the exact task under _refresh_guard before cancelling it. start_refresh returns an explicit cancellation_in_progress non-started response until the cancelled task has terminated and that same task has been finalised. Finalisation verifies task identity before changing active settings, progress, or last result; the marker is cleared for cancellation, natural completion, and unexpected worker exceptions. Duplicate Stop requests are safe and do not finalise competing task state.
+- Browser Stop now clears the auto-refresh timer before requesting cancellation, blocks Run and timer callbacks while Stop is pending, deduplicates Stop actions, restarts the configured full auto-refresh countdown after confirmed cancellation, and polls authoritative status plus restores scheduling after cancellation failure. Settings/Save/Reset remain available.
+- The static JavaScript token test was replaced with a deterministic Node/VM fake-DOM, fake-fetch, and fake-timer behaviour test. It executes disabled-auto initialization/callback suppression, manual Run payload, active control state, Save-only behaviour, pending Stop deduplication/blocking, stopped status, and enabled auto-refresh timer replacement plus manual:false callback payload.
+
+Focused verification
+
+- PASS python -m pytest -q tests/test_atr_scanner_ui.py::test_atr_scanner_javascript_controls_manual_cancel_and_auto_refresh_behaviour (1 passed in 0.58s).
+- The earlier deterministic service race test, tests/test_atr_scanner.py::test_cancellation_finalisation_blocks_competing_start_then_allows_latest_restart, had already passed and was intentionally not rerun in this continuation.
+- The earlier UI attempts exposed only an assertion that counted the unrelated 2-second progress-status timer after the mock cancellation status sequence. The expectation was narrowly corrected to assert the required Stop state while the test continues to assert auto-timer suspension and replacement explicitly.
+- No live scanner, service, browser, Bybit, account, or production-data request was run. No remaining blocker identified.
+
+Exact files changed
+
+- render/atr_scanner.py
+- render/static/atr_scanner.js
+- tests/test_atr_scanner.py
+- tests/test_atr_scanner_ui.py
+- summary/CODEX_SUMMARY_latest.txt
+
 ATR scanner Phase 1: cancellation, manual runs, and auto-refresh control
 
 Root cause

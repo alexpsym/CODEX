@@ -45,6 +45,7 @@
   let statusRequestInFlight = null;
   let progressTimer = null;
   let autoTimer = null;
+  let stopRequestInFlight = null;
 
   const esc = (value) => String(value ?? '')
     .replaceAll('&', '&amp;')
@@ -313,6 +314,7 @@
   };
 
   const requestRefresh = async (manual = true) => {
+    if (stopRequestInFlight) return null;
     if (!manual && settings?.auto_refresh_enabled === false) return null;
     if (refreshRequestInFlight) return refreshRequestInFlight;
     refreshRequestInFlight = (async () => {
@@ -372,24 +374,41 @@
   };
 
   const scheduleAutomaticRefresh = () => {
-    if (autoTimer) clearInterval(autoTimer);
-    autoTimer = null;
+    suspendAutomaticRefresh();
     if (settings?.auto_refresh_enabled === false) return;
     const seconds = Math.max(30, Number(settings?.auto_refresh_seconds) || 60);
     autoTimer = setInterval(() => requestRefresh(false), seconds * 1000);
   };
 
+  const suspendAutomaticRefresh = () => {
+    if (autoTimer) clearInterval(autoTimer);
+    autoTimer = null;
+  };
+
   const stopScan = async () => {
-    setActionStatus('Stopping scan.');
-    try {
-      const response = await fetchJson('/api/atr-scanner/cancel', { method: 'POST' });
-      renderProgress(response.progress || { in_progress: false, phase: 'cancelled', detail: 'Scan stopped' });
-      setActionStatus(response.already_idle ? 'No scan is running.' : 'Scan stopped');
-      scheduleAutomaticRefresh();
-      await pollStatus();
-    } catch (error) {
-      setActionStatus(error?.message || 'Unable to stop scan.', 'error');
-    }
+    if (stopRequestInFlight) return stopRequestInFlight;
+    suspendAutomaticRefresh();
+    setRunState(true);
+    if (stopButton) stopButton.disabled = true;
+    stopRequestInFlight = (async () => {
+      setActionStatus('Stopping scan.');
+      try {
+        const response = await fetchJson('/api/atr-scanner/cancel', { method: 'POST' });
+        renderProgress(response.progress || { in_progress: false, phase: 'cancelled', detail: 'Scan stopped' });
+        setActionStatus(response.already_idle ? 'No scan is running.' : 'Scan stopped');
+        scheduleAutomaticRefresh();
+        await pollStatus();
+        return response;
+      } catch (error) {
+        setActionStatus(error?.message || 'Unable to stop scan.', 'error');
+        await pollStatus();
+        if (settings?.auto_refresh_enabled !== false) scheduleAutomaticRefresh();
+        return null;
+      } finally {
+        stopRequestInFlight = null;
+      }
+    })();
+    return stopRequestInFlight;
   };
 
   saveButton?.addEventListener('click', saveSettings);

@@ -272,36 +272,95 @@ def test_scanner_public_market_origin_is_canonical_and_never_uses_credentials(mo
     assert captured["path"] == "/v5/market/tickers"
 
 
-def test_atr_scanner_javascript_controls_manual_cancel_and_auto_refresh_contract():
+def test_atr_scanner_javascript_controls_manual_cancel_and_auto_refresh_behaviour():
     node = shutil.which("node")
     assert node, "node is required for scanner JavaScript verification"
-    syntax = subprocess.run(
-        [node, "--check", str(SCANNER_JS)], capture_output=True, text=True
+    harness = r"""
+const fs = require('fs'); const vm = require('vm');
+const source = fs.readFileSync(process.argv[1], 'utf8');
+const elementIds = ['scanner-rank-timeframe','scanner-top-n','scanner-atr-length','scanner-min-turnover','scanner-max-spread','scanner-depth-band','scanner-min-bid-depth','scanner-min-ask-depth','scanner-auto-refresh-enabled','scanner-auto-refresh-seconds','scanner-exclusions','scanner-save','scanner-reset','scanner-run','scanner-stop','scanner-action-status','scanner-auto-status','scanner-progress-bar','scanner-progress-text','scanner-basis','scanner-qualified-body','scanner-excluded-body','scanner-qualified-empty','scanner-excluded-empty','scanner-qualified-tab','scanner-excluded-tab','scanner-qualified-panel','scanner-excluded-panel'];
+function el(){ return { value:'', checked:false, textContent:'', innerHTML:'', hidden:false, disabled:false, style:{}, listeners:{}, addEventListener(type, fn){ this.listeners[type]=fn; }, setAttribute(){}, click(){ return this.listeners.click && this.listeners.click(); } }; }
+const elements = Object.fromEntries(elementIds.map(id => [id, el()]));
+const document = { getElementById(id){ return elements[id] || (elements[id]=el()); } };
+let nextTimer = 0; const timers = new Map();
+const setInterval = (fn, ms) => { const id=++nextTimer; timers.set(id,{fn,ms}); return id; };
+const clearInterval = id => timers.delete(id);
+const requests=[];
+let settings={rank_timeframe:'1m',top_n:10,atr_length:14,min_turnover_usdt:20000000,max_spread_pct:0.1,depth_band_pct:0.1,min_bid_depth_usdt:25000,min_ask_depth_usdt:25000,manual_exclusions:[],auto_refresh_enabled:false,auto_refresh_seconds:60};
+let status={ok:false,state:'not_started',progress:{in_progress:false,phase:'idle',detail:'Idle'},qualified_rows:[],excluded_rows:[]};
+let resolveCancel=null;
+const response = payload => ({ok:true,status:200,statusText:'OK',text:async()=>JSON.stringify(payload)});
+const fetch = async (url, options={}) => {
+  requests.push({url,method:options.method||'GET',body:options.body||null});
+  if (url === '/api/atr-scanner/settings' && (!options.method || options.method === 'GET')) return response({settings});
+  if (url === '/api/atr-scanner/settings') { settings=JSON.parse(options.body); return response({settings}); }
+  if (url === '/api/atr-scanner/settings/reset') return response({settings});
+  if (url === '/api/atr-scanner/status') return response(status);
+  if (url === '/api/atr-scanner/refresh') return response({started:true,progress:status.progress});
+  if (url === '/api/atr-scanner/cancel') return new Promise(resolve => { resolveCancel=()=>resolve(response({cancelled:true,progress:{in_progress:false,phase:'cancelled',detail:'Scan stopped'}})); });
+  throw new Error(url);
+};
+const context={console,document,fetch,setInterval,clearInterval,Number,String,Math,Date,JSON,Promise,Intl};
+context.window=context; context.window.addEventListener=()=>{}; context.globalThis=context;
+vm.createContext(context); vm.runInContext(source,context);
+const drain = async () => { for(let i=0;i<12;i++) await Promise.resolve(); };
+(async()=>{
+  await drain();
+  const initial={timers:timers.size, automatic:requests.filter(x=>x.url==='/api/atr-scanner/refresh').length};
+  await context.__atrScannerTestHooks.requestRefresh(false); await drain();
+  const disabledCallbackRefreshes=requests.filter(x=>x.url==='/api/atr-scanner/refresh').length;
+
+  status={ok:false,state:'loading',progress:{in_progress:true,phase:'instruments',detail:'Scanning'},qualified_rows:[],excluded_rows:[]};
+  elements['scanner-run'].click(); await drain();
+  const refreshesAfterRun=requests.filter(x=>x.url==='/api/atr-scanner/refresh');
+  const controlsDuringActive={run:elements['scanner-run'].disabled,stop:elements['scanner-stop'].disabled,save:elements['scanner-save'].disabled,reset:elements['scanner-reset'].disabled,field:elements['scanner-top-n'].disabled};
+
+  const refreshCountBeforeSave=refreshesAfterRun.length; const cancelCountBeforeSave=requests.filter(x=>x.url==='/api/atr-scanner/cancel').length;
+  elements['scanner-save'].click(); await drain();
+  const saveOnly={settingsPosts:requests.filter(x=>x.url==='/api/atr-scanner/settings'&&x.method==='POST').length,refreshes:requests.filter(x=>x.url==='/api/atr-scanner/refresh').length-refreshCountBeforeSave,cancels:requests.filter(x=>x.url==='/api/atr-scanner/cancel').length-cancelCountBeforeSave};
+
+  elements['scanner-stop'].click(); elements['scanner-stop'].click(); await drain();
+  const duringStop={cancels:requests.filter(x=>x.url==='/api/atr-scanner/cancel').length,run:elements['scanner-run'].disabled,autoTimers:[...timers.values()].filter(timer=>timer.ms!==2000).length};
+  await context.__atrScannerTestHooks.requestRefresh(false); await drain();
+  const refreshesDuringStop=requests.filter(x=>x.url==='/api/atr-scanner/refresh').length-refreshCountBeforeSave;
+  status={ok:false,state:'cancelled',progress:{in_progress:false,phase:'cancelled',detail:'Scan stopped'},qualified_rows:[],excluded_rows:[]}; resolveCancel(); await drain();
+  const afterStop={run:elements['scanner-run'].disabled,stop:elements['scanner-stop'].disabled,status:elements['scanner-action-status'].textContent};
+
+  elements['scanner-auto-refresh-enabled'].checked=true; elements['scanner-auto-refresh-seconds'].value='123';
+  elements['scanner-save'].click(); await drain();
+  const firstTimer=[...timers.entries()][0];
+  elements['scanner-save'].click(); await drain();
+  const secondTimer=[...timers.entries()][0];
+  const timersAfterResave={count:timers.size,firstStillPresent:timers.has(firstTimer[0]),milliseconds:secondTimer[1].ms};
+  const refreshesBeforeTimer=requests.filter(x=>x.url==='/api/atr-scanner/refresh').length;
+  secondTimer[1].fn(); await drain();
+  const automaticPayload=JSON.parse(requests.filter(x=>x.url==='/api/atr-scanner/refresh').at(-1).body);
+  process.stdout.write(JSON.stringify({initial,disabledCallbackRefreshes,manualPayload:JSON.parse(refreshesAfterRun[0].body),controlsDuringActive,saveOnly,duringStop,refreshesDuringStop,afterStop,timersAfterResave,automaticRefreshes:requests.filter(x=>x.url==='/api/atr-scanner/refresh').length-refreshesBeforeTimer,automaticPayload}));
+})().catch(error=>{ console.error(error); process.exit(1); });
+"""
+    completed = subprocess.run(
+        [node, "-e", harness, str(SCANNER_JS)],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
     )
-    assert syntax.returncode == 0, syntax.stderr
-    source = SCANNER_JS.read_text(encoding="utf-8")
-    for token in (
-        "/api/atr-scanner/settings",
-        "/api/atr-scanner/settings/reset",
-        "/api/atr-scanner/refresh",
-        "/api/atr-scanner/cancel",
-        "/api/atr-scanner/status",
-        "shared",
-        "Stale last-known-good result",
-        "scanner-excluded-body",
-        "manual_exclusions",
-        "auto_refresh_seconds",
-        "auto_refresh_enabled",
-        "scanner-run",
-        "scanner-stop",
-        "setInterval(pollStatus, 2000)",
-        "settings?.auto_refresh_enabled === false",
-        "Saved settings will apply to the next scan.",
-        "Scan stopped",
-    ):
-        assert token in source
-    assert "setControlsDisabled" not in source
-    assert "if (settings?.auto_refresh_enabled === false) return;" in source
+    payload = json.loads(completed.stdout)
+    assert payload["initial"] == {"timers": 0, "automatic": 0}
+    assert payload["disabledCallbackRefreshes"] == 0
+    assert payload["manualPayload"] == {"manual": True}
+    assert payload["controlsDuringActive"] == {
+        "run": True, "stop": False, "save": False, "reset": False, "field": False,
+    }
+    assert payload["saveOnly"] == {"settingsPosts": 1, "refreshes": 0, "cancels": 0}
+    assert payload["duringStop"] == {"cancels": 1, "run": True, "autoTimers": 0}
+    assert payload["refreshesDuringStop"] == 0
+    assert payload["afterStop"] == {"run": False, "stop": True, "status": "Scan stopped"}
+    assert payload["timersAfterResave"] == {
+        "count": 1, "firstStillPresent": False, "milliseconds": 123000,
+    }
+    assert payload["automaticRefreshes"] == 1
+    assert payload["automaticPayload"] == {"manual": False}
 
 
 def test_atr_scanner_javascript_sorts_raw_each_timeframe_top_n_ties_and_na():
