@@ -25,11 +25,35 @@
         const expiry = new Date(alertItem.expires_at);
         return Number.isNaN(expiry.getTime()) || expiry.getTime() <= Date.now();
     };
-    const toLocalDateTimeValue = (isoValue) => {
-        if (!isoValue) return '';
-        const value = new Date(isoValue);
-        if (Number.isNaN(value.getTime())) return '';
-        return new Date(value.getTime() - value.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+    const EXPIRY_PRESETS = [
+        { value: 'lifetime', label: 'Lifetime' },
+        { value: '1h', label: '1 hour' },
+        { value: '4h', label: '4 hours' },
+        { value: '1d', label: '1 day' },
+        { value: '1w', label: '1 week' },
+        { value: '1mo', label: '1 month' },
+    ];
+    const expiryForPreset = (preset, now = new Date()) => {
+        const durationMinutes = { '1h': 60, '4h': 240, '1d': 24 * 60, '1w': 7 * 24 * 60 };
+        if (Object.prototype.hasOwnProperty.call(durationMinutes, preset)) {
+            return new Date(now.getTime() + durationMinutes[preset] * 60_000).toISOString();
+        }
+        if (preset === '1mo') {
+            const targetMonth = now.getMonth() + 1;
+            const targetYear = now.getFullYear() + Math.floor(targetMonth / 12);
+            const normalizedMonth = targetMonth % 12;
+            const finalDay = new Date(targetYear, normalizedMonth + 1, 0).getDate();
+            return new Date(
+                targetYear,
+                normalizedMonth,
+                Math.min(now.getDate(), finalDay),
+                now.getHours(),
+                now.getMinutes(),
+                now.getSeconds(),
+                now.getMilliseconds(),
+            ).toISOString();
+        }
+        return null;
     };
 
     const setupCustomAlerts = ({ container, getMonitor }) => {
@@ -112,11 +136,9 @@
         const cooldownInput = document.createElement('input'); cooldownInput.type='number'; cooldownInput.min='0'; cooldownInput.step='1'; cooldownInput.value='0';
         const messageInput = document.createElement('input'); messageInput.type='text'; messageInput.placeholder='Optional custom message';
         const enabledInput = document.createElement('input'); enabledInput.type='checkbox'; enabledInput.checked=true;
-        const expiryModeSelect = document.createElement('select');
-        [{ value: 'none', label: 'No expiry' }, { value: 'datetime', label: 'Date / time' }].forEach((item) => { const option=document.createElement('option'); option.value=item.value; option.textContent=item.label; expiryModeSelect.appendChild(option); });
-        const expiryDateTimeInput = document.createElement('input'); expiryDateTimeInput.type='datetime-local'; expiryDateTimeInput.disabled=true;
+        const expiryPresetSelect = document.createElement('select');
 
-        formGrid.append(makeLabel('Symbol', symbolInput), makeLabel('Type', kindSelect), makeLabel('Price direction', priceDirectionSelect), makeLabel('Move direction', moveDirectionSelect), makeLabel('Target price', targetPriceInput), makeLabel('Move threshold', thresholdInput), makeLabel('Unit', unitSelect), makeLabel('Window', windowSelect), makeLabel('Cooldown (seconds)', cooldownInput), makeLabel('Custom message', messageInput), makeLabel('Expiry', expiryModeSelect), makeLabel('Expiry date / time', expiryDateTimeInput), makeLabel('Enabled', enabledInput));
+        formGrid.append(makeLabel('Symbol', symbolInput), makeLabel('Type', kindSelect), makeLabel('Price direction', priceDirectionSelect), makeLabel('Move direction', moveDirectionSelect), makeLabel('Target price', targetPriceInput), makeLabel('Move threshold', thresholdInput), makeLabel('Unit', unitSelect), makeLabel('Window', windowSelect), makeLabel('Cooldown (seconds)', cooldownInput), makeLabel('Custom message', messageInput), makeLabel('Expiry', expiryPresetSelect), makeLabel('Enabled', enabledInput));
         section.appendChild(formGrid);
 
         const actions=document.createElement('div'); actions.className='row';
@@ -129,6 +151,17 @@
         let editingId = null;
         let editingExpiresAt = null;
         let alertLoadSeq = 0;
+
+        const setExpiryPresetOptions = (currentExpiry = null) => {
+            expiryPresetSelect.innerHTML = '';
+            EXPIRY_PRESETS.forEach((item) => { const option=document.createElement('option'); option.value=item.value; option.textContent=item.label; expiryPresetSelect.appendChild(option); });
+            if (currentExpiry) {
+                const option = document.createElement('option'); option.value='keep-current';
+                option.textContent=`Keep current expiry — ${new Date(currentExpiry).toLocaleString()}`;
+                expiryPresetSelect.appendChild(option);
+            }
+            expiryPresetSelect.value = currentExpiry ? 'keep-current' : 'lifetime';
+        };
 
         const updateUnitOptions = () => {
             const monitor = getMonitor();
@@ -147,7 +180,7 @@
             moveDirectionSelect.disabled = isPrice; thresholdInput.disabled = isPrice; unitSelect.disabled = isPrice; windowSelect.disabled = isPrice;
         };
 
-        const resetForm = () => { editingId=null; editingExpiresAt=null; symbolInput.value=''; kindSelect.value='price'; priceDirectionSelect.value='above'; moveDirectionSelect.value='up'; targetPriceInput.value=''; thresholdInput.value=''; unitSelect.selectedIndex=0; windowSelect.value='900'; cooldownInput.value='0'; messageInput.value=''; expiryModeSelect.value='none'; expiryDateTimeInput.value=''; expiryDateTimeInput.disabled=true; enabledInput.checked=true; saveBtn.textContent='Save alert'; toggleFields(); };
+        const resetForm = () => { editingId=null; editingExpiresAt=null; symbolInput.value=''; kindSelect.value='price'; priceDirectionSelect.value='above'; moveDirectionSelect.value='up'; targetPriceInput.value=''; thresholdInput.value=''; unitSelect.selectedIndex=0; windowSelect.value='900'; cooldownInput.value='0'; messageInput.value=''; setExpiryPresetOptions(); enabledInput.checked=true; saveBtn.textContent='Save alert'; toggleFields(); };
         const parseRequiredNumber = (input, name) => { const value = Number(input.value); if (!Number.isFinite(value)) throw new Error(`${name} must be numeric`); return value; };
         const rowText = (customAlert) => customAlert.kind === 'price' ? `${customAlert.symbol} ${customAlert.direction} ${customAlert.target_price}` : `${customAlert.symbol} ${customAlert.direction} ${customAlert.threshold} ${customAlert.unit} in ${customAlert.window_seconds}s`;
 
@@ -181,7 +214,7 @@
                     const enabledBtn = document.createElement('button'); enabledBtn.type='button'; enabledBtn.textContent=expired ? 'Expired' : (alertItem.enabled ? 'Disable' : 'Enable'); enabledBtn.disabled=expired;
                     enabledBtn.addEventListener('click', async () => { enabledBtn.disabled=true; try { await fetchJson(`/api/${monitor}-alerts/custom-alerts/${encodeURIComponent(alertItem.id)}/enabled`, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ enabled: !alertItem.enabled }) }); await loadAlerts(); } catch (err) { console.error(err); setSettingsBadge(statusBadge, 'Toggle failed', true); window.alert(err.message || 'Unable to update alert'); } finally { enabledBtn.disabled=false; } });
                     const editBtn = document.createElement('button'); editBtn.type='button'; editBtn.textContent='Edit';
-                    editBtn.addEventListener('click', () => { editingId=alertItem.id; editingExpiresAt=alertItem.expires_at||null; symbolInput.value=alertItem.symbol||''; kindSelect.value=alertItem.kind||'price'; priceDirectionSelect.value=alertItem.direction||'above'; moveDirectionSelect.value=alertItem.direction||'up'; targetPriceInput.value=alertItem.target_price??''; thresholdInput.value=alertItem.threshold??''; unitSelect.value=alertItem.unit||unitSelect.options[0].value; windowSelect.value=String(alertItem.window_seconds||900); cooldownInput.value=String(alertItem.cooldown_seconds||0); messageInput.value=alertItem.message||''; expiryModeSelect.value=alertItem.expires_at?'datetime':'none'; expiryDateTimeInput.value=toLocalDateTimeValue(alertItem.expires_at); expiryDateTimeInput.disabled=expiryModeSelect.value==='none'; enabledInput.checked=Boolean(alertItem.enabled); saveBtn.textContent='Update alert'; toggleFields(); });
+                    editBtn.addEventListener('click', () => { editingId=alertItem.id; editingExpiresAt=alertItem.expires_at||null; symbolInput.value=alertItem.symbol||''; kindSelect.value=alertItem.kind||'price'; priceDirectionSelect.value=alertItem.direction||'above'; moveDirectionSelect.value=alertItem.direction||'up'; targetPriceInput.value=alertItem.target_price??''; thresholdInput.value=alertItem.threshold??''; unitSelect.value=alertItem.unit||unitSelect.options[0].value; windowSelect.value=String(alertItem.window_seconds||900); cooldownInput.value=String(alertItem.cooldown_seconds||0); messageInput.value=alertItem.message||''; setExpiryPresetOptions(editingExpiresAt); enabledInput.checked=Boolean(alertItem.enabled); saveBtn.textContent='Update alert'; toggleFields(); });
                     const deleteBtn = document.createElement('button'); deleteBtn.type='button'; deleteBtn.textContent='Delete';
                     deleteBtn.addEventListener('click', async () => { if (!window.confirm('Delete this custom alert?')) return; deleteBtn.disabled=true; try { await fetchJson(`/api/${monitor}-alerts/custom-alerts/${encodeURIComponent(alertItem.id)}`, { method:'DELETE' }); if (editingId===alertItem.id) resetForm(); await loadAlerts(); } catch (err) { console.error(err); setSettingsBadge(statusBadge, 'Delete failed', true); window.alert(err.message || 'Unable to delete alert'); } finally { deleteBtn.disabled=false; } });
                     tdActions.append(enabledBtn, editBtn, deleteBtn); tr.append(tdMain, tdActions); tbody.appendChild(tr);
@@ -194,7 +227,6 @@
         };
 
         kindSelect.addEventListener('change', toggleFields);
-        expiryModeSelect.addEventListener('change', () => { expiryDateTimeInput.disabled=expiryModeSelect.value==='none'; if (expiryModeSelect.value==='none') expiryDateTimeInput.value=''; });
         clearBtn.addEventListener('click', resetForm);
         saveBtn.addEventListener('click', async () => {
             saveBtn.disabled = true; clearBtn.disabled = true;
@@ -202,7 +234,12 @@
                 let symbol = symbolInput.value.trim().toUpperCase(); if (!symbol) throw new Error('Symbol is required');
                 symbol = await resolveBybitSymbol(symbol); symbolInput.value = symbol;
                 const kind = kindSelect.value; const payload = { id: editingId || undefined, symbol, kind, enabled: enabledInput.checked, cooldown_seconds: cooldownInput.value ? parseRequiredNumber(cooldownInput, 'Cooldown seconds') : 0 };
-                if (expiryModeSelect.value === 'datetime') { if (!expiryDateTimeInput.value) throw new Error('Expiry date / time is required'); const expiry = new Date(expiryDateTimeInput.value); if (Number.isNaN(expiry.getTime())) throw new Error('Expiry date / time is invalid'); const unchangedExpired=Boolean(editingId&&editingExpiresAt&&toLocalDateTimeValue(editingExpiresAt)===expiryDateTimeInput.value); if (expiry.getTime() <= Date.now() && !unchangedExpired) throw new Error('Expiry must be in the future'); payload.expires_at = unchangedExpired?editingExpiresAt:expiry.toISOString(); }
+                if (expiryPresetSelect.value === 'keep-current' && editingExpiresAt) payload.expires_at = editingExpiresAt;
+                else if (expiryPresetSelect.value !== 'lifetime') {
+                    const expiry = expiryForPreset(expiryPresetSelect.value);
+                    if (!expiry) throw new Error('Expiry preset must be selected');
+                    payload.expires_at = expiry;
+                }
                 if (kind === 'price') { const target = parseRequiredNumber(targetPriceInput, 'Target price'); if (target <= 0) throw new Error('Target price must be greater than zero'); payload.direction = priceDirectionSelect.value; payload.target_price = target; const customMessage = messageInput.value.trim(); if (customMessage) payload.message = customMessage; }
                 else { const threshold = parseRequiredNumber(thresholdInput, 'Move threshold'); if (threshold <= 0) throw new Error('Move threshold must be greater than zero'); const windowSeconds = Number(windowSelect.value); if (!Number.isFinite(windowSeconds) || windowSeconds <= 0) throw new Error('Window must be selected'); payload.direction = moveDirectionSelect.value; payload.threshold = threshold; payload.unit = unitSelect.value; payload.window_seconds = windowSeconds; }
                 const monitor = getMonitor();

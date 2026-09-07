@@ -27,18 +27,20 @@ const elements={}; const get=(id)=>elements[id]||(elements[id]=new Element(id));
 ['monitor-target','monitor-status','monitor-health','monitor-wait-seconds','monitor-threshold','monitor-save-settings','monitor-reload-settings','monitor-test-alert','monitor-settings-status','monitor-custom-alerts'].forEach(get);
 elements['monitor-target'].value='bybit';
 const document={createElement(tag){return new Element('',tag);},getElementById(id){return get(id);}};
-const fetchCalls=[]; const futureExpiry='2099-05-06T03:04:00Z'; let savedPayload=null;
+const NativeDate=Date; const fixedNow=new NativeDate(2024,0,31,10,30,0,0).getTime();
+class FixedDate extends NativeDate { constructor(...args){ super(...(args.length?args:[fixedNow])); } static now(){ return fixedNow; } }
+const fetchCalls=[]; const futureExpiry='2030-05-06T03:04:00Z'; const pastExpiry='2020-01-01T00:00:00Z'; const savedPayloads=[];
 const fetch=async(url,options={})=>{
   const method=options.method||'GET'; fetchCalls.push([url,method]);
   if(url.includes('/status')) return {ok:true,json:async()=>({ui_status:'running',phase:'waiting',heartbeat_fresh:true,pid_alive:true}),text:async()=>''};
   if(url.includes('/settings')) return {ok:true,json:async()=>({wait_seconds:5,percent_threshold:1.2,telegram_ready:false,email_ready:true}),text:async()=>''};
   if(url.includes('/api/resolve-symbol')) return {ok:true,json:async()=>({resolved_symbol:'BTCUSDT'}),text:async()=>''};
-  if(url.includes('/custom-alerts')&&method==='GET') return {ok:true,json:async()=>({alerts:[{id:'future',symbol:'BTCUSDT',kind:'price',direction:'above',target_price:2,enabled:true,expires_at:futureExpiry},{id:'past',symbol:'ETHUSDT',kind:'move',direction:'up',threshold:1,unit:'pct',window_seconds:60,enabled:true,expires_at:'2020-01-01T00:00:00Z',expired:true}]}),text:async()=>''};
-  if(url.includes('/custom-alerts')&&method==='POST'){savedPayload=JSON.parse(options.body);return {ok:true,json:async()=>({ok:true}),text:async()=>'{"ok":true}'};}
+  if(url.includes('/custom-alerts')&&method==='GET') return {ok:true,json:async()=>({alerts:[{id:'future',symbol:'BTCUSDT',kind:'price',direction:'above',target_price:2,enabled:true,expires_at:futureExpiry},{id:'past',symbol:'ETHUSDT',kind:'move',direction:'up',threshold:1,unit:'pct',window_seconds:60,enabled:true,expires_at:pastExpiry,expired:true}]}),text:async()=>''};
+  if(url.includes('/custom-alerts')&&method==='POST'){savedPayloads.push(JSON.parse(options.body));return {ok:true,json:async()=>({ok:true}),text:async()=>'{"ok":true}'};}
   if(url.includes('/notification-test')) return {ok:true,status:200,text:async()=>JSON.stringify({channels:{telegram:{configured:false,sent:false},email:{configured:true,sent:true}}})};
   return {ok:true,json:async()=>({}),text:async()=>''};
 };
-const ctx={document,fetch,window:{alert(){},confirm(){return true;}},console,setInterval(){return 0;},Date};
+const ctx={document,fetch,window:{alert(){},confirm(){return true;}},console,setInterval(){return 0;},Date:FixedDate};
 vm.createContext(ctx); vm.runInContext(fs.readFileSync('render/static/merged_alerts.js','utf8'),ctx);
 const sleep=(ms)=>new Promise((resolve)=>setTimeout(resolve,ms));
 const allNodes=(root)=>[root,...(root.children||[]).filter((child)=>typeof child==='object').flatMap(allNodes)];
@@ -46,15 +48,34 @@ const allNodes=(root)=>[root,...(root.children||[]).filter((child)=>typeof child
   await sleep(0);
   const section=elements['monitor-custom-alerts'].children[0]; if(!section) throw new Error('custom alerts controls not rendered');
   const formGrid=section.children[1];
-  const expiryLabel=formGrid.children.find((label)=>label.children?.[0]==='Expiry');
-  const expiryDateLabel=formGrid.children.find((label)=>label.children?.[0]==='Expiry date / time');
-  if(!expiryLabel||!expiryDateLabel) throw new Error('expiry controls missing');
-  const expiryMode=expiryLabel.children[1]; const expiryDate=expiryDateLabel.children[1];
-  if(expiryMode.value!=='none'||!expiryDate.disabled) throw new Error('No expiry is not the default');
-  const edit=allNodes(section).find((node)=>node.textContent==='Edit'); if(!edit) throw new Error('edit control missing'); edit.dispatch('click');
-  if(expiryMode.value!=='datetime'||!expiryDate.value) throw new Error('edit did not load expiry');
-  const save=allNodes(section).find((node)=>node.textContent==='Update alert'); if(!save) throw new Error('update control missing'); save.dispatch('click'); await sleep(0); await sleep(0);
-  if(!savedPayload?.expires_at||new Date(savedPayload.expires_at).getTime()!==new Date(futureExpiry).getTime()) throw new Error('expiry UTC round trip failed');
+  const control=(name)=>{const label=formGrid.children.find((item)=>item.children?.[0]===name);if(!label)throw new Error('missing '+name);return label.children[1];};
+  const expiry=control('Expiry'); const symbol=control('Symbol'); const target=control('Target price'); const save=()=>allNodes(section).find((node)=>node.textContent==='Save alert'||node.textContent==='Update alert');
+  const editButtons=()=>allNodes(section).filter((node)=>node.textContent==='Edit');
+  const optionLabels=()=>expiry.options.map((option)=>option.textContent);
+  const settle=async()=>{await sleep(0);await sleep(0);await sleep(0);};
+  const expected=(minutes)=>new NativeDate(fixedNow+minutes*60000).toISOString();
+  const expectedMonth=new NativeDate(2024,1,29,10,30,0,0).toISOString();
+  if(JSON.stringify(optionLabels())!==JSON.stringify(['Lifetime','1 hour','4 hours','1 day','1 week','1 month'])) throw new Error('expiry preset choices missing');
+  if(expiry.value!=='lifetime') throw new Error('Lifetime is not the default');
+  if(allNodes(section).some((node)=>node.type==='datetime-local')) throw new Error('manual datetime input remains');
+  const saveNew=async(preset)=>{symbol.value='BTC';target.value='2';expiry.value=preset;save().dispatch('click');await settle();return savedPayloads.at(-1);};
+  if(Object.hasOwn(await saveNew('lifetime'),'expires_at')) throw new Error('Lifetime did not omit expiry');
+  const durationCases=[['1h',60],['4h',240],['1d',1440],['1w',10080]];
+  for(const [preset,minutes] of durationCases){const payload=await saveNew(preset);if(payload.expires_at!==expected(minutes))throw new Error(preset+' expiry mismatch');}
+  const monthPayload=await saveNew('1mo'); if(monthPayload.expires_at!==expectedMonth) throw new Error('calendar month clamping mismatch');
+
+  editButtons()[0].dispatch('click');
+  if(expiry.value!=='keep-current'||!expiry.options.at(-1).textContent.startsWith('Keep current expiry — ')) throw new Error('future current-expiry option missing');
+  save().dispatch('click'); await settle(); if(savedPayloads.at(-1).expires_at!==futureExpiry) throw new Error('future expiry was not preserved');
+  editButtons()[1].dispatch('click'); if(expiry.value!=='keep-current') throw new Error('expired current-expiry option missing');
+  save().dispatch('click'); await settle(); if(savedPayloads.at(-1).expires_at!==pastExpiry) throw new Error('expired expiry was not preserved');
+  editButtons()[1].dispatch('click'); expiry.value='1h'; save().dispatch('click'); await settle(); if(savedPayloads.at(-1).expires_at!==expected(60)) throw new Error('replacement preset did not restart expiry');
+  editButtons()[0].dispatch('click'); expiry.value='lifetime'; save().dispatch('click'); await settle(); if(Object.hasOwn(savedPayloads.at(-1),'expires_at')) throw new Error('Lifetime did not clear current expiry');
+  editButtons()[0].dispatch('click'); if(expiry.options.length!==7) throw new Error('temporary option missing before reset');
+  allNodes(section).find((node)=>node.textContent==='Reset').dispatch('click'); if(expiry.options.length!==6) throw new Error('reset retained temporary expiry option');
+  elements['monitor-target'].value='oanda'; elements['monitor-target'].dispatch('change'); await settle(); if(expiry.options.length!==6) throw new Error('monitor switch retained temporary expiry option');
+  elements['monitor-target'].value='bybit'; elements['monitor-target'].dispatch('change'); await settle();
+  if(!allNodes(section).some((node)=>String(node.textContent||'').includes('Expired'))) throw new Error('expired status not displayed');
   if(!allNodes(section).some((node)=>String(node.textContent||'').includes('Expired'))) throw new Error('expired status not displayed');
   const testBtn=elements['monitor-test-alert']; testBtn.dispatch('click'); await sleep(0);
   const status=elements['monitor-settings-status'].textContent;

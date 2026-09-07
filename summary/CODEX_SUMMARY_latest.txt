@@ -1,3 +1,24 @@
+Alert expiry preset dropdown
+
+Behaviour implemented
+
+- Replaced the shared alerts UI manual expiry mode and datetime-local control with one Expiry preset dropdown: Lifetime, 1 hour, 4 hours, 1 day, 1 week, and 1 month. Lifetime is the default and omits expires_at.
+- Expiries are calculated only when Save or Update is clicked, then supplied as absolute UTC ISO-8601 values to the existing Bybit/OANDA shared backend. Hour/day/week selections use exact minute durations; one month keeps the local clock time and clamps end-of-month dates to the final valid target-month day.
+- Editing an expiring alert adds a temporary locally displayed Keep current expiry option that preserves the exact stored ISO value, including expired alerts. Selecting a new preset restarts from Update; Lifetime clears expiry. Reset and monitor changes rebuild the base choices, preventing temporary-option accumulation.
+- Existing expiry display, Expired state, backend enforcement, notification-channel behavior, symbols, alert kinds, movement settings, and all non-expiry alert fields are unchanged.
+
+Focused verification
+
+- PASS python -m pytest -q tests/test_merged_alerts_runtime.py::test_merged_alerts_runtime_expiry_default_round_trip_and_notification_channels (1 passed in 0.56s).
+- The fixed-clock Node/VM test verifies all six choices, default/lack of manual control, Lifetime omission, four exact duration presets, end-of-month month clamping, future/expired exact preservation, replacement and clearing behavior, temporary-option cleanup on reset/monitor switch, and existing Telegram/email notification reporting.
+- No live monitor, broker, browser, scanner, or production-data request was run.
+
+Exact files changed
+
+- render/static/merged_alerts.js
+- tests/test_merged_alerts_runtime.py
+- summary/CODEX_SUMMARY_latest.txt
+
 ATR scanner Phase 1 corrective follow-up: cancellation lifecycle race and executable UI coverage
 
 Correction
