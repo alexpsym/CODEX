@@ -103,10 +103,13 @@ def test_scanner_page_has_required_controls_columns_help_and_accessibility(monke
         "scanner-depth-band",
         "scanner-min-bid-depth",
         "scanner-min-ask-depth",
+        "scanner-auto-refresh-enabled",
+        "scanner-auto-refresh-seconds",
         "scanner-exclusions",
         "scanner-save",
         "scanner-reset",
-        "scanner-refresh",
+        "scanner-run",
+        "scanner-stop",
         "scanner-qualified-tab",
         "scanner-excluded-tab",
     ):
@@ -128,12 +131,16 @@ def test_scanner_page_has_required_controls_columns_help_and_accessibility(monke
         assert label in html
     assert html.count('scope="col"') >= 14
     assert 'role="status" aria-live="polite"' in html
+    assert 'role="switch" aria-label="Auto refresh"' in html
+    assert "Run scan" in html
+    assert "Stop scan" in html
+    assert "Auto-refresh interval (seconds)" in html
     assert "/static/atr_scanner.js?v=" in html
 
 
 class _StubService:
     def __init__(self):
-        self.settings = {"rank_timeframe": "1m", "top_n": 10}
+        self.settings = {"rank_timeframe": "1m", "top_n": 10, "auto_refresh_enabled": True}
         self.status = {
             "ok": False,
             "state": "error",
@@ -144,6 +151,7 @@ class _StubService:
         }
         self.saved = None
         self.started = []
+        self.cancelled = 0
 
     def load_settings(self):
         return dict(self.settings)
@@ -154,18 +162,22 @@ class _StubService:
         return dict(self.settings)
 
     def reset_settings(self):
-        self.settings = {"rank_timeframe": "1m", "top_n": 10}
+        self.settings = {"rank_timeframe": "1m", "top_n": 10, "auto_refresh_enabled": True}
         return dict(self.settings)
 
     async def start_refresh(self, *, manual=False):
         self.started.append(manual)
         return {"started": True, "shared_in_flight": False, "manual": manual}
 
+    async def cancel_refresh(self):
+        self.cancelled += 1
+        return {"cancelled": False, "already_idle": True, "progress": {"in_progress": False, "phase": "idle"}}
+
     def status_payload(self):
         return dict(self.status)
 
 
-def test_scanner_api_settings_refresh_status_and_failure_codes(monkeypatch):
+def test_scanner_api_settings_refresh_cancel_and_failure_codes(monkeypatch):
     module = _load_master_service("render_master_service_atr_api")
     _force_local(monkeypatch, module)
     stub = _StubService()
@@ -180,11 +192,19 @@ def test_scanner_api_settings_refresh_status_and_failure_codes(monkeypatch):
     )
     assert save_response.status_code == 200
     assert stub.saved == {"rank_timeframe": "1D", "top_n": 20}
-    assert stub.started == [True]
+    assert stub.started == []
+
+    reset_response = asyncio.run(module.reset_atr_scanner_settings())
+    assert reset_response.status_code == 200
+    assert stub.started == []
 
     refresh_response = asyncio.run(module.refresh_atr_scanner({"manual": False}))
     assert refresh_response.status_code == 202
     assert stub.started[-1] is False
+
+    cancel_response = asyncio.run(module.cancel_atr_scanner())
+    assert cancel_response.status_code == 200
+    assert stub.cancelled == 1
 
     failure_response = asyncio.run(module.atr_scanner_status())
     assert failure_response.status_code == 502
@@ -201,6 +221,9 @@ def test_scanner_api_settings_refresh_status_and_failure_codes(monkeypatch):
     stale_response = asyncio.run(module.atr_scanner_status())
     assert stale_response.status_code == 200
     assert json.loads(stale_response.body)["ranked_rows"] == [{"symbol": "BTCUSDT"}]
+
+    stub.status.update({"ok": False, "state": "cancelled", "progress": {"in_progress": False}})
+    assert asyncio.run(module.atr_scanner_status()).status_code == 200
 
 
 def test_scanner_api_and_card_are_blocked_in_render_profile(monkeypatch):
@@ -249,7 +272,7 @@ def test_scanner_public_market_origin_is_canonical_and_never_uses_credentials(mo
     assert captured["path"] == "/v5/market/tickers"
 
 
-def test_atr_scanner_javascript_parses_and_contains_progress_stale_settings_contract():
+def test_atr_scanner_javascript_controls_manual_cancel_and_auto_refresh_contract():
     node = shutil.which("node")
     assert node, "node is required for scanner JavaScript verification"
     syntax = subprocess.run(
@@ -261,16 +284,24 @@ def test_atr_scanner_javascript_parses_and_contains_progress_stale_settings_cont
         "/api/atr-scanner/settings",
         "/api/atr-scanner/settings/reset",
         "/api/atr-scanner/refresh",
+        "/api/atr-scanner/cancel",
         "/api/atr-scanner/status",
         "shared",
         "Stale last-known-good result",
         "scanner-excluded-body",
         "manual_exclusions",
         "auto_refresh_seconds",
+        "auto_refresh_enabled",
+        "scanner-run",
+        "scanner-stop",
         "setInterval(pollStatus, 2000)",
-        "requestRefresh(false)",
+        "settings?.auto_refresh_enabled === false",
+        "Saved settings will apply to the next scan.",
+        "Scan stopped",
     ):
         assert token in source
+    assert "setControlsDisabled" not in source
+    assert "if (settings?.auto_refresh_enabled === false) return;" in source
 
 
 def test_atr_scanner_javascript_sorts_raw_each_timeframe_top_n_ties_and_na():

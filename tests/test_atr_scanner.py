@@ -734,7 +734,7 @@ def test_shared_inflight_refresh_and_manual_overlap_do_not_multiply_calls(tmp_pa
     asyncio.run(scenario())
 
 
-def test_settings_saved_during_refresh_queue_one_nonoverlapping_rebuild(tmp_path: Path):
+def test_settings_saved_during_refresh_does_not_queue_or_change_active_snapshot(tmp_path: Path):
     async def scenario():
         now_ref = [DEFAULT_NOW_MS]
         gate = asyncio.Event()
@@ -744,14 +744,40 @@ def test_settings_saved_during_refresh_queue_one_nonoverlapping_rebuild(tmp_path
         assert first["started"] is True
         await asyncio.sleep(0)
         service.save_settings({"min_turnover_usdt": 60_000_000})
-        queued = await service.start_refresh(manual=True)
-        assert queued["shared_in_flight"] is True
-        assert queued["follow_up_queued"] is True
         gate.set()
         result = await service.wait_for_idle()
-        assert result["settings"]["min_turnover_usdt"] == 60_000_000
-        assert result["ranked_rows"] == []
-        assert Counter(path for path, _params in fake.calls)["/v5/market/instruments-info"] == 2
+        assert result["settings"]["min_turnover_usdt"] == DEFAULT_SETTINGS["min_turnover_usdt"]
+        assert service.load_settings()["min_turnover_usdt"] == 60_000_000
+        assert Counter(path for path, _params in fake.calls)["/v5/market/instruments-info"] == 1
+
+    asyncio.run(scenario())
+
+
+def test_cancelling_gated_worker_preserves_last_good_result_and_allows_restart(tmp_path: Path):
+    async def scenario():
+        now_ref = [DEFAULT_NOW_MS]
+        fake = FakeBybit(now_ref)
+        service = _make_service(tmp_path, fake, now_ref)
+        last_good = await service.refresh(manual=True)
+        gate = asyncio.Event()
+        fake.slow_gate = gate
+        started = await service.start_refresh(manual=True)
+        assert started["started"] is True
+        await asyncio.sleep(0)
+
+        cancelled = await asyncio.wait_for(service.cancel_refresh(), timeout=1)
+        assert cancelled["cancelled"] is True
+        assert not gate.is_set()
+        assert service._refresh_task is not None and service._refresh_task.done()
+        status = service.status_payload()
+        assert status["progress"]["in_progress"] is False
+        assert status["progress"]["phase"] == "cancelled"
+        assert status["ranked_rows"] == last_good["ranked_rows"]
+
+        fake.slow_gate = None
+        restarted = await service.start_refresh(manual=True)
+        assert restarted["started"] is True
+        await service.wait_for_idle()
 
     asyncio.run(scenario())
 

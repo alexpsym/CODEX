@@ -46,6 +46,7 @@ DEFAULT_SETTINGS: dict[str, object] = {
     "min_ask_depth_usdt": 25_000.0,
     "max_book_age_seconds": 30.0,
     "manual_exclusions": [],
+    "auto_refresh_enabled": True,
     "auto_refresh_seconds": 60,
 }
 
@@ -228,6 +229,8 @@ def validate_settings(
         maximum=3600,
         integer=True,
     )
+    if not isinstance(merged.get("auto_refresh_enabled"), bool):
+        raise ScannerValidationError("auto_refresh_enabled must be true or false.")
     merged["manual_exclusions"] = normalize_manual_exclusions(
         merged.get("manual_exclusions")
     )
@@ -593,7 +596,6 @@ class ATRScannerService:
         self._refresh_guard = asyncio.Lock()
         self._refresh_task: Optional[asyncio.Task[dict[str, object]]] = None
         self._active_settings: Optional[dict[str, object]] = None
-        self._queued_settings_refresh = False
         self._settings_lock = threading.RLock()
         self._last_good: Optional[dict[str, object]] = None
         self._last_result: Optional[dict[str, object]] = None
@@ -661,14 +663,18 @@ class ATRScannerService:
     async def start_refresh(self, *, manual: bool = False) -> dict[str, object]:
         async with self._refresh_guard:
             settings = self.load_settings()
+            if not manual and not settings["auto_refresh_enabled"]:
+                return {
+                    "started": False,
+                    "shared_in_flight": False,
+                    "auto_refresh_disabled": True,
+                    "manual": False,
+                    "progress": copy.deepcopy(self._progress),
+                }
             if self._refresh_task is not None and not self._refresh_task.done():
-                settings_changed = settings != self._active_settings
-                if settings_changed:
-                    self._queued_settings_refresh = True
                 return {
                     "started": False,
                     "shared_in_flight": True,
-                    "follow_up_queued": settings_changed,
                     "manual": bool(manual),
                     "progress": copy.deepcopy(self._progress),
                 }
@@ -686,9 +692,8 @@ class ATRScannerService:
                     "progress": copy.deepcopy(self._progress),
                 }
             self._active_settings = copy.deepcopy(settings)
-            self._queued_settings_refresh = False
             self._refresh_task = asyncio.create_task(
-                self._refresh_worker(settings=settings, manual=manual)
+                self._refresh_worker(settings=copy.deepcopy(settings), manual=manual)
             )
             return {
                 "started": True,
@@ -700,29 +705,53 @@ class ATRScannerService:
     async def _refresh_worker(
         self, *, settings: dict[str, object], manual: bool
     ) -> dict[str, object]:
-        current_settings = copy.deepcopy(settings)
-        current_manual = bool(manual)
         try:
-            while True:
-                result = await self._run_refresh(
-                    settings=current_settings, manual=current_manual
-                )
-                async with self._refresh_guard:
-                    if not self._queued_settings_refresh:
-                        return result
-                    self._queued_settings_refresh = False
-                    current_settings = self.load_settings()
-                    self._active_settings = copy.deepcopy(current_settings)
-                    current_manual = True
-                    self._set_progress(
-                        "queued_settings",
-                        completed=0,
-                        total=0,
-                        detail="Applying settings saved during the previous refresh.",
-                    )
+            return await self._run_refresh(settings=settings, manual=manual)
         finally:
             async with self._refresh_guard:
                 self._active_settings = None
+
+    async def cancel_refresh(self) -> dict[str, object]:
+        """Cancel the shared worker and await termination of its child work."""
+
+        async with self._refresh_guard:
+            task = self._refresh_task
+            if task is None or task.done():
+                return {
+                    "cancelled": False,
+                    "already_idle": True,
+                    "progress": copy.deepcopy(self._progress),
+                }
+            task.cancel()
+
+        # The worker takes this lock while cleaning up, so never await it under the lock.
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        async with self._refresh_guard:
+            self._active_settings = None
+            self._set_progress(
+                "cancelled", completed=0, total=0, detail="Scan stopped by user."
+            )
+            if self._last_good is not None:
+                self._last_result = copy.deepcopy(self._last_good)
+            else:
+                self._last_result = {
+                    "ok": False,
+                    "state": "cancelled",
+                    "stale": False,
+                    "partial": False,
+                    "ranked_rows": [],
+                    "qualified_rows": [],
+                    "excluded_rows": [],
+                }
+            return {
+                "cancelled": True,
+                "already_idle": False,
+                "progress": copy.deepcopy(self._progress),
+            }
 
     async def refresh(self, *, manual: bool = False) -> dict[str, object]:
         await self.start_refresh(manual=manual)
@@ -741,7 +770,7 @@ class ATRScannerService:
         self, phase: str, *, completed: int, total: int, detail: str
     ) -> None:
         self._progress = {
-            "in_progress": phase not in {"complete", "failed", "idle"},
+            "in_progress": phase not in {"complete", "failed", "cancelled", "idle"},
             "phase": phase,
             "completed": max(0, int(completed)),
             "total": max(0, int(total)),
@@ -991,6 +1020,8 @@ class ATRScannerService:
             result = await self._build_snapshot(
                 settings=settings, manual=manual, started_local_ms=started_local_ms
             )
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
             scope = exc.scope if isinstance(exc, ScannerUpstreamError) else "scanner"
             error = {"scope": scope, "message": str(exc)}

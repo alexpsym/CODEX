@@ -11,11 +11,14 @@
     depthBand: get('scanner-depth-band'),
     minBidDepth: get('scanner-min-bid-depth'),
     minAskDepth: get('scanner-min-ask-depth'),
+    autoRefreshEnabled: get('scanner-auto-refresh-enabled'),
+    autoRefreshSeconds: get('scanner-auto-refresh-seconds'),
     exclusions: get('scanner-exclusions'),
   };
   const saveButton = get('scanner-save');
   const resetButton = get('scanner-reset');
-  const refreshButton = get('scanner-refresh');
+  const runButton = get('scanner-run');
+  const stopButton = get('scanner-stop');
   const actionStatus = get('scanner-action-status');
   const autoStatus = get('scanner-auto-status');
   const progressBar = get('scanner-progress-bar');
@@ -96,10 +99,9 @@
     actionStatus.className = `status${state ? ` ${state}` : ''}`;
   };
 
-  const setControlsDisabled = (disabled) => {
-    [saveButton, resetButton, refreshButton].forEach((button) => {
-      if (button) button.disabled = Boolean(disabled);
-    });
+  const setRunState = (inProgress) => {
+    if (runButton) runButton.disabled = Boolean(inProgress);
+    if (stopButton) stopButton.disabled = !inProgress;
   };
 
   const applySettings = (value) => {
@@ -112,11 +114,15 @@
     if (controls.depthBand) controls.depthBand.value = String(settings.depth_band_pct ?? 0.1);
     if (controls.minBidDepth) controls.minBidDepth.value = String(settings.min_bid_depth_usdt ?? 25000);
     if (controls.minAskDepth) controls.minAskDepth.value = String(settings.min_ask_depth_usdt ?? 25000);
+    if (controls.autoRefreshEnabled) controls.autoRefreshEnabled.checked = settings.auto_refresh_enabled !== false;
+    if (controls.autoRefreshSeconds) controls.autoRefreshSeconds.value = String(settings.auto_refresh_seconds ?? 60);
     if (controls.exclusions) {
       const values = Array.isArray(settings.manual_exclusions) ? settings.manual_exclusions : [];
       controls.exclusions.value = values.join('\n');
     }
-    if (autoStatus) autoStatus.textContent = `Automatic refresh: every ${settings.auto_refresh_seconds ?? 60} seconds`;
+    if (autoStatus) autoStatus.textContent = settings.auto_refresh_enabled === false
+      ? 'Automatic refresh: off'
+      : `Automatic refresh: every ${settings.auto_refresh_seconds ?? 60} seconds`;
     scheduleAutomaticRefresh();
   };
 
@@ -129,6 +135,8 @@
     depth_band_pct: Number(controls.depthBand?.value),
     min_bid_depth_usdt: Number(controls.minBidDepth?.value),
     min_ask_depth_usdt: Number(controls.minAskDepth?.value),
+    auto_refresh_enabled: Boolean(controls.autoRefreshEnabled?.checked),
+    auto_refresh_seconds: Number(controls.autoRefreshSeconds?.value),
     manual_exclusions: String(controls.exclusions?.value || ''),
   });
 
@@ -183,7 +191,7 @@
 
   const renderQualified = (snapshot) => {
     if (!qualifiedBody) return;
-    const activeSettings = settings || snapshot?.settings || {};
+    const activeSettings = snapshot?.settings || settings || {};
     const rows = rankRows(
       snapshot?.qualified_rows,
       String(activeSettings.rank_timeframe || '1m'),
@@ -204,7 +212,7 @@
 
   const renderExcluded = (snapshot) => {
     if (!excludedBody) return;
-    const activeSettings = settings || snapshot?.settings || {};
+    const activeSettings = snapshot?.settings || settings || {};
     const rows = excludedRowsFor(snapshot, String(activeSettings.rank_timeframe || '1m'));
     excludedBody.innerHTML = rows.map((row) => {
       const reasons = Array.isArray(row.reason_labels) ? row.reason_labels.join('; ') : 'Unknown';
@@ -217,7 +225,9 @@
 
   const renderBasis = (snapshot) => {
     if (!basis) return;
-    const activeSettings = settings || snapshot?.settings || {};
+    const activeSettings = snapshot?.settings || settings || {};
+    const savedSettingsDiffer = Boolean(snapshot?.settings && settings
+      && JSON.stringify(snapshot.settings) !== JSON.stringify(settings));
     const selectedTimeframe = String(activeSettings.rank_timeframe || '1m');
     const excludedRows = excludedRowsFor(snapshot, selectedTimeframe);
     const counts = {};
@@ -232,7 +242,8 @@
       <div><strong>Thresholds</strong><br>Turnover ≥ ${esc(formatMoney(activeSettings.min_turnover_usdt))}; spread ≤ ${esc(formatPct(activeSettings.max_spread_pct))}; depth band ±${esc(formatPct(activeSettings.depth_band_pct))}</div>
       <div><strong>Depth</strong><br>Bid ≥ ${esc(formatMoney(activeSettings.min_bid_depth_usdt))}; ask ≥ ${esc(formatMoney(activeSettings.min_ask_depth_usdt))} USDT</div>
       <div><strong>Last successful update</strong><br>${esc(formatTime(snapshot?.updated_at))}</div>
-      <div><strong>Excluded (${esc(excludedRows.length)})</strong><br>${esc(reasonSummary)}</div>`;
+      <div><strong>Excluded (${esc(excludedRows.length)})</strong><br>${esc(reasonSummary)}</div>
+      ${savedSettingsDiffer ? '<div><strong>Saved settings</strong><br>Saved settings will apply to the next scan.</div>' : ''}`;
   };
 
   const renderProgress = (progress) => {
@@ -244,7 +255,7 @@
       const counter = total > 0 ? ` (${completed}/${total})` : '';
       progressText.textContent = `${progress?.detail || 'Idle'}${counter}`;
     }
-    setControlsDisabled(Boolean(progress?.in_progress));
+    setRunState(Boolean(progress?.in_progress));
   };
 
   const renderSnapshot = (snapshot) => {
@@ -256,7 +267,9 @@
     renderExcluded(snapshot);
     renderBasis(snapshot);
 
-    if (snapshot.stale) {
+    if (snapshot?.progress?.phase === 'cancelled' || snapshot.state === 'cancelled') {
+      setActionStatus('Scan stopped');
+    } else if (snapshot.stale) {
       const age = finite(snapshot.stale_age_seconds);
       setActionStatus(`Stale last-known-good result${age === null ? '' : ` (${Math.round(age)}s old)`}: ${snapshot?.refresh_error?.message || 'refresh failed'}`, 'stale');
     } else if (snapshot.state === 'partial') {
@@ -300,6 +313,7 @@
   };
 
   const requestRefresh = async (manual = true) => {
+    if (!manual && settings?.auto_refresh_enabled === false) return null;
     if (refreshRequestInFlight) return refreshRequestInFlight;
     refreshRequestInFlight = (async () => {
       setActionStatus(manual ? 'Manual refresh requested.' : 'Automatic refresh requested.');
@@ -327,34 +341,26 @@
   };
 
   const saveSettings = async () => {
-    setControlsDisabled(true);
-    setActionStatus('Saving settings and rebuilding the scanner view.');
+    setActionStatus('Saving settings. They apply to the next scan.');
     try {
       const payload = await fetchJson('/api/atr-scanner/settings', {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(collectSettings()),
       });
       applySettings(payload.settings || {});
-      startProgressPolling();
       await pollStatus();
     } catch (error) {
       setActionStatus(error?.message || 'Settings were rejected.', 'error');
-    } finally {
-      if (!lastSnapshot?.progress?.in_progress) setControlsDisabled(false);
     }
   };
 
   const resetSettings = async () => {
-    setControlsDisabled(true);
     setActionStatus('Resetting scanner settings to defaults.');
     try {
       const payload = await fetchJson('/api/atr-scanner/settings/reset', { method: 'POST' });
       applySettings(payload.settings || {});
-      startProgressPolling();
       await pollStatus();
     } catch (error) {
       setActionStatus(error?.message || 'Settings reset failed.', 'error');
-    } finally {
-      if (!lastSnapshot?.progress?.in_progress) setControlsDisabled(false);
     }
   };
 
@@ -367,33 +373,40 @@
 
   const scheduleAutomaticRefresh = () => {
     if (autoTimer) clearInterval(autoTimer);
+    autoTimer = null;
+    if (settings?.auto_refresh_enabled === false) return;
     const seconds = Math.max(30, Number(settings?.auto_refresh_seconds) || 60);
     autoTimer = setInterval(() => requestRefresh(false), seconds * 1000);
   };
 
+  const stopScan = async () => {
+    setActionStatus('Stopping scan.');
+    try {
+      const response = await fetchJson('/api/atr-scanner/cancel', { method: 'POST' });
+      renderProgress(response.progress || { in_progress: false, phase: 'cancelled', detail: 'Scan stopped' });
+      setActionStatus(response.already_idle ? 'No scan is running.' : 'Scan stopped');
+      scheduleAutomaticRefresh();
+      await pollStatus();
+    } catch (error) {
+      setActionStatus(error?.message || 'Unable to stop scan.', 'error');
+    }
+  };
+
   saveButton?.addEventListener('click', saveSettings);
   resetButton?.addEventListener('click', resetSettings);
-  refreshButton?.addEventListener('click', () => requestRefresh(true));
+  runButton?.addEventListener('click', () => requestRefresh(true));
+  stopButton?.addEventListener('click', stopScan);
   qualifiedTab?.addEventListener('click', () => switchTab(false));
   excludedTab?.addEventListener('click', () => switchTab(true));
   controls.rankTimeframe?.addEventListener('change', () => {
-    if (settings) settings.rank_timeframe = controls.rankTimeframe.value;
-    if (lastSnapshot) {
-      renderQualified(lastSnapshot);
-      renderExcluded(lastSnapshot);
-      renderBasis(lastSnapshot);
-    }
+    // The displayed snapshot remains pinned to the settings used to build it.
   });
   controls.topN?.addEventListener('change', () => {
-    if (settings) settings.top_n = Number(controls.topN.value);
-    if (lastSnapshot) {
-      renderQualified(lastSnapshot);
-      renderBasis(lastSnapshot);
-    }
+    // The displayed snapshot remains pinned to the settings used to build it.
   });
 
   if (typeof window !== 'undefined') {
-    window.__atrScannerTestHooks = { rankRows, formatAtr, finite, rowDataState, excludedRowsFor };
+    window.__atrScannerTestHooks = { rankRows, formatAtr, finite, rowDataState, excludedRowsFor, scheduleAutomaticRefresh, requestRefresh };
   }
 
   (async () => {
@@ -401,7 +414,7 @@
       const payload = await fetchJson('/api/atr-scanner/settings');
       applySettings(payload.settings || payload.defaults || {});
       const snapshot = await pollStatus();
-      if (!snapshot || snapshot.state === 'not_started') await requestRefresh(false);
+      if ((!snapshot || snapshot.state === 'not_started') && settings?.auto_refresh_enabled !== false) await requestRefresh(false);
     } catch (error) {
       setActionStatus(error?.message || 'Scanner initialization failed.', 'error');
     }

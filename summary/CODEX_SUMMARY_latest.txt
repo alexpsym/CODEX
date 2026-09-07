@@ -1,3 +1,40 @@
+ATR scanner Phase 1: cancellation, manual runs, and auto-refresh control
+
+Root cause
+
+- Scanner settings saves and resets directly started manual refreshes, and the shared worker queued a second refresh whenever settings changed mid-scan. The page also disabled all action controls, had no cancellation operation, always scheduled browser auto refresh, and rendered old snapshots using newly saved settings.
+
+Behaviour implemented
+
+- Added persisted, strictly validated auto_refresh_enabled (default true for legacy settings) alongside the existing validated 30–3600 second interval. The runtime settings JSON was not read, modified, staged, or committed by this work.
+- Settings save/reset now only persist and return settings. Active workers retain their immutable start snapshot; queued-settings refresh state was removed.
+- Added Run scan, Stop scan, accessible auto-refresh switch, and editable interval controls. Settings and save/reset stay usable while scanning; Run/Stop swap availability based on worker state.
+- Added local-only POST /api/atr-scanner/cancel. It cancels and awaits the active asyncio task without holding its cleanup lock, preserves the last good result, publishes a stopped progress outcome, is idle-safe, and permits a new run immediately after cancellation.
+- Automatic browser requests are scheduled only when enabled; disabled automatic requests are also rejected by the service. Initial automatic scanning remains only when enabled. Saved/stop states restart the enabled countdown from the full configured interval.
+- Results and basis now render from the snapshot settings that produced them, with an explicit next-scan notice when saved settings differ.
+
+Exact files changed
+
+- render/atr_scanner.py
+- render/master_service.py
+- render/static/atr_scanner.js
+- tests/test_atr_scanner.py
+- tests/test_atr_scanner_ui.py
+- summary/CODEX_SUMMARY_latest.txt
+
+Focused verification
+
+- PASS tests/test_atr_scanner.py::test_settings_saved_during_refresh_does_not_queue_or_change_active_snapshot
+- PASS tests/test_atr_scanner.py::test_cancelling_gated_worker_preserves_last_good_result_and_allows_restart
+- PASS tests/test_atr_scanner_ui.py::test_scanner_page_has_required_controls_columns_help_and_accessibility
+- PASS tests/test_atr_scanner_ui.py::test_scanner_api_settings_refresh_cancel_and_failure_codes
+- PASS tests/test_atr_scanner_ui.py::test_atr_scanner_javascript_controls_manual_cancel_and_auto_refresh_contract
+- One targeted pytest invocation only: 5 passed in 15.91s. No live scanner, browser, service, Bybit, or production-data request was run.
+
+Delivery note
+
+- Starting and final origin/master baseline: 3bdc2c32b40051b3ed54be88af964e0ea208f652 (unchanged). No genuine limitation identified.
+
 Alert expiry/email, trade numbering/chart folders, funding totals/commission, and ZORAUSDT repair
 
 Root causes and implementation

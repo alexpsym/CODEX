@@ -28226,6 +28226,10 @@ ATR_SCANNER_TEMPLATE = """<!doctype html>
         <label for="scanner-depth-band">Depth band from midpoint (%)<input id="scanner-depth-band" type="number" min="0.000001" max="10" step="0.01"/></label>
         <label for="scanner-min-bid-depth">Minimum bid depth (USDT)<input id="scanner-min-bid-depth" type="number" min="0" step="1000"/></label>
         <label for="scanner-min-ask-depth">Minimum ask depth (USDT)<input id="scanner-min-ask-depth" type="number" min="0" step="1000"/></label>
+        <label for="scanner-auto-refresh-enabled">Auto refresh
+          <input id="scanner-auto-refresh-enabled" type="checkbox" role="switch" aria-label="Auto refresh"/>
+        </label>
+        <label for="scanner-auto-refresh-seconds">Auto-refresh interval (seconds)<input id="scanner-auto-refresh-seconds" type="number" min="30" max="3600" step="1"/></label>
         <label class="wide" for="scanner-exclusions">Manual symbol exclusions (comma or newline separated)
           <textarea id="scanner-exclusions" spellcheck="false" placeholder="Example: BTCUSDT, ETHUSDT"></textarea>
         </label>
@@ -28233,7 +28237,8 @@ ATR_SCANNER_TEMPLATE = """<!doctype html>
       <div class="actions">
         <button id="scanner-save" type="button">Save settings</button>
         <button id="scanner-reset" type="button">Reset to defaults</button>
-        <button id="scanner-refresh" type="button">Refresh now</button>
+        <button id="scanner-run" type="button">Run scan</button>
+        <button id="scanner-stop" type="button" disabled>Stop scan</button>
         <span id="scanner-auto-status" class="muted">Automatic refresh: every 60 seconds</span>
       </div>
       <div id="scanner-action-status" class="status" role="status" aria-live="polite"></div>
@@ -28450,8 +28455,7 @@ async def update_atr_scanner_settings(
         return _local_only_disabled_response("/api/atr-scanner/settings", as_json=True)
     try:
         settings = ATR_SCANNER_SERVICE.save_settings(payload)
-        refresh = await ATR_SCANNER_SERVICE.start_refresh(manual=True)
-        return JSONResponse({"settings": settings, "refresh": refresh})
+        return JSONResponse({"settings": settings})
     except ScannerValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -28463,8 +28467,7 @@ async def reset_atr_scanner_settings() -> Response:
             "/api/atr-scanner/settings/reset", as_json=True
         )
     settings = ATR_SCANNER_SERVICE.reset_settings()
-    refresh = await ATR_SCANNER_SERVICE.start_refresh(manual=True)
-    return JSONResponse({"settings": settings, "refresh": refresh})
+    return JSONResponse({"settings": settings})
 
 
 @app.post("/api/atr-scanner/refresh")
@@ -28483,6 +28486,13 @@ async def refresh_atr_scanner(
     return JSONResponse(started, status_code=202 if started.get("started") else 200)
 
 
+@app.post("/api/atr-scanner/cancel")
+async def cancel_atr_scanner() -> Response:
+    if _runtime_is_render():
+        return _local_only_disabled_response("/api/atr-scanner/cancel", as_json=True)
+    return JSONResponse(await ATR_SCANNER_SERVICE.cancel_refresh())
+
+
 @app.get("/api/atr-scanner/status")
 @app.get("/api/atr-scanner/snapshot")
 async def atr_scanner_status() -> Response:
@@ -28495,6 +28505,8 @@ async def atr_scanner_status() -> Response:
         status_code = 202
     elif payload.get("state") == "not_started":
         status_code = 202
+    elif payload.get("state") == "cancelled":
+        status_code = 200
     else:
         status_code = 502
     return JSONResponse(payload, status_code=status_code)
