@@ -135,6 +135,7 @@ from render.trendline_plans import (
     TrendlinePlanPersistenceError,
     TrendlinePlanStore,
 )
+from render.trendline_executor import TrendlinePlanExecutor
 from shared.bybit_option_resolver import resolve_option_by_target_risk
 from shared.symbol_resolution import (
     is_likely_oanda_pair,
@@ -278,6 +279,46 @@ def _resolve_app_profile() -> str:
 
 APP_PROFILE = _resolve_app_profile()
 TRENDLINE_PLAN_STORE = TrendlinePlanStore()
+
+
+def _trendline_calculator_payload(plan: Mapping[str, object]) -> Dict[str, object]:
+    return {
+        "asset": "crypto" if plan["broker"] == "bybit" else "fx", "broker": plan["broker"],
+        "account": plan["account"], "symbol": plan["instrument"], "side": plan["action"],
+        "order_type": plan["order_intent"], "risk_mode": plan["risk_mode"], "risk_value": plan["risk_value"],
+        "stop_loss_ticks": plan["stop_loss_ticks"], "risk_reward": plan["rr_target"], "target_mode": "rr",
+        "timeframe": plan["timeframe"], "test_trade": False, "webhook": "no", **dict(plan["order_metadata"]),
+    }
+
+
+async def _trendline_fresh_calculation(plan: Mapping[str, object], _quote: Optional[Mapping[str, object]] = None) -> Mapping[str, object]:
+    """Use the calculator's canonical in-process calculation path, never HTTP."""
+    response = await calculator_quote(_trendline_calculator_payload(plan))
+    if response.status_code >= 400:
+        raise ValueError("Fresh trendline calculation was rejected.")
+    return json.loads(response.body.decode("utf-8"))
+
+
+async def _trendline_executor_quote(plan: Mapping[str, object]) -> Mapping[str, object]:
+    calculated = await _trendline_fresh_calculation(plan)
+    entry = calculated.get("entry_price")
+    return {"instrument": plan["instrument"], "timestamp_ms": int(calculated.get("quote_created_at_ms") or time.time() * 1000), "bid": entry, "ask": entry, "tick_size": calculated.get("tick_size")}
+
+
+async def _trendline_executor_submit(plan: Mapping[str, object], calculation: Mapping[str, object], execution_key: str) -> Mapping[str, object]:
+    payload = {**_trendline_calculator_payload(plan), "action": plan["action"], "quantity": calculation.get("quantity"), "entry_price": calculation.get("entry_price"), "stop_loss_price": calculation.get("stop_price"), "take_profit_price": calculation.get("target_price"), "calculation_context_id": calculation.get("calculation_context_id"), "quote_created_at_ms": calculation.get("quote_created_at_ms")}
+    if plan["broker"] == "bybit":
+        return await _place_bybit_order(payload, request_id=execution_key, invalidate_cache=True)
+    return await _place_oanda_order(payload, request_id=execution_key)
+
+
+TRENDLINE_EXECUTOR = TrendlinePlanExecutor(
+    TRENDLINE_PLAN_STORE,
+    _trendline_executor_quote,
+    _trendline_fresh_calculation,
+    _trendline_executor_submit,
+    lambda plan: str(plan.get("account") or "").lower() == "demo",
+)
 JOURNAL_DISPLAY_TZ = ZoneInfo("Australia/Brisbane")
 RENDER_ALLOWED_APPS = _parse_allowed_apps(os.getenv("RENDER_ALLOWED_APPS", DEFAULT_RENDER_ALLOWED_APPS))
 LOCAL_ALLOWED_APPS = _parse_allowed_apps(os.getenv("LOCAL_ALLOWED_APPS", DEFAULT_LOCAL_ALLOWED_APPS))
@@ -25531,7 +25572,7 @@ CALCULATOR_TEMPLATE = """<!doctype html>
                 <tr><th><label for="trendline-anchor-2-time">Anchor 2</label></th><td><div class="grid"><input id="trendline-anchor-2-time" type="datetime-local"/><input id="trendline-anchor-2-price" type="number" step="any" min="0" placeholder="Price"/></div><div id="trendline-anchor-2-utc" class="muted"></div></td></tr>
                 <tr><th>Trigger</th><td><div class="grid"><label>Mode <select id="trendline-trigger-mode"><option value="touch">Touch</option><option value="confirmed_cross">Confirmed cross</option></select></label><label>Direction <select id="trendline-cross-direction"><option value="either">Either</option><option value="upward">Upward</option><option value="downward">Downward</option></select></label><label>Price basis <select id="trendline-price-basis"><option value="executable">Executable price</option><option value="bid">Bid</option><option value="ask">Ask</option><option value="midpoint">Midpoint</option></select></label><label>Tolerance ticks <input id="trendline-tolerance-ticks" type="number" min="0" step="1" value="0"/></label></div></td></tr>
                 <tr><th>Extension / expiry</th><td><div class="group"><label><input id="trendline-right-extension" type="checkbox" checked/> Right extension</label><label for="trendline-expiry">Expiry <select id="trendline-expiry"><option value="lifetime">Lifetime</option><option value="1h">1 hour</option><option value="4h">4 hours</option><option value="1d">1 day</option><option value="1w">1 week</option><option value="1mo">1 month</option></select></label></div></td></tr>
-                <tr><th>Actions</th><td><div class="group"><button id="trendline-save" type="button">Save draft</button><button id="trendline-reset" type="button">Reset</button><button id="trendline-refresh" type="button">Refresh plans</button></div><div id="trendline-plan-status" class="muted"></div></td></tr>
+                <tr><th>Actions</th><td><div class="group"><button id="trendline-save" type="button">Save draft</button><button id="trendline-reset" type="button">Reset</button><button id="trendline-refresh" type="button">Refresh plans</button><button id="trendline-monitor-start" type="button">Start monitoring</button><button id="trendline-monitor-stop" type="button" disabled>Stop monitoring</button></div><div id="trendline-plan-status" class="muted"></div><div id="trendline-monitor-status" class="muted">Monitoring stopped.</div></td></tr>
                 <tr><th>Saved plans</th><td><div id="trendline-plan-list" class="grid" aria-live="polite"></div></td></tr>
               </tbody>
             </table>
@@ -26329,6 +26370,7 @@ async def calculator_bootstrap(request: Request) -> JSONResponse:
             "risk_modes": ["fixed_aud", "percent"],
             "app_profile": APP_PROFILE,
             "trendline_plans_available": APP_PROFILE == "local",
+            "trendline_monitoring": TRENDLINE_EXECUTOR.status() if APP_PROFILE == "local" else {"running": False},
             "app_version": str(app.version),
             "app_build_stamp": str(os.getenv("APP_BUILD_STAMP") or ""),
             "render_git_commit": str(os.getenv("RENDER_GIT_COMMIT") or ""),
@@ -26493,6 +26535,26 @@ async def trendline_plan_cancel(plan_id: str) -> JSONResponse:
         return JSONResponse({"ok": True, "plan": _trendline_plan_client_view(plan), "monitoring_active": False, "execution_enabled": False})
     except Exception as exc:
         _trendline_plan_http_error(exc, transition=True)
+
+
+@app.get("/api/trendline-plans/monitor/status")
+async def trendline_monitor_status() -> JSONResponse:
+    _trendline_plans_require_local()
+    return JSONResponse({"ok": True, **TRENDLINE_EXECUTOR.status(), "execution_enabled": True})
+
+
+@app.post("/api/trendline-plans/monitor/start")
+async def trendline_monitor_start() -> JSONResponse:
+    _trendline_plans_require_local()
+    started = await TRENDLINE_EXECUTOR.start()
+    return JSONResponse({"ok": True, "started": started, **TRENDLINE_EXECUTOR.status(), "execution_enabled": True})
+
+
+@app.post("/api/trendline-plans/monitor/stop")
+async def trendline_monitor_stop() -> JSONResponse:
+    _trendline_plans_require_local()
+    stopped = await TRENDLINE_EXECUTOR.stop()
+    return JSONResponse({"ok": True, "stopped": stopped, **TRENDLINE_EXECUTOR.status(), "execution_enabled": True})
 
 
 @app.get("/api/calculator/instrument")
@@ -40709,6 +40771,7 @@ def _schedule_local_master_process_exit(delay_seconds: float = 0.75) -> None:
 async def local_shutdown(payload: Dict[str, object] = Body(default_factory=dict)) -> JSONResponse:
     if not _is_local_exit_allowed():
         raise HTTPException(status_code=404, detail="Local shutdown is only available in local profile.")
+    await TRENDLINE_EXECUTOR.stop()
     reason = str((payload or {}).get("reason") or "launcher_preflight").strip() or "launcher_preflight"
     try:
         sentinel_path, normal_path = _write_local_exit_markers(reason, "local_shutdown")
@@ -40727,6 +40790,7 @@ async def local_shutdown(payload: Dict[str, object] = Body(default_factory=dict)
 async def local_exit(payload: Dict[str, object] = Body(default_factory=dict)) -> JSONResponse:
     if not _is_local_exit_allowed():
         raise HTTPException(status_code=404, detail="Local exit is only available in local profile.")
+    await TRENDLINE_EXECUTOR.stop()
     try:
         sentinel_path, normal_path = _request_local_exit("exit_button")
     except HTTPException:

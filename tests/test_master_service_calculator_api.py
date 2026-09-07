@@ -2470,3 +2470,26 @@ def test_local_trendline_plan_crud_is_profile_gated_and_preserves_calculator_fie
     with pytest.raises(master_service.HTTPException) as exc:
         asyncio.run(master_service.trendline_plan_create(pepperstone))
     assert exc.value.status_code == 422
+
+
+def test_local_trendline_executor_start_stop_status_is_profile_gated(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeExecutor:
+        def __init__(self): self.running = False; self.starts = 0
+        def status(self): return {"running": self.running, "last_cycle": None, "last_error": None}
+        async def start(self):
+            if self.running: return False
+            self.running = True; self.starts += 1; return True
+        async def stop(self):
+            if not self.running: return False
+            self.running = False; return True
+    fake = FakeExecutor()
+    monkeypatch.setattr(master_service, "TRENDLINE_EXECUTOR", fake)
+    monkeypatch.setattr(master_service, "APP_PROFILE", "render")
+    with pytest.raises(master_service.HTTPException) as exc:
+        asyncio.run(master_service.trendline_monitor_status())
+    assert exc.value.status_code == 410
+    monkeypatch.setattr(master_service, "APP_PROFILE", "local")
+    assert json.loads(asyncio.run(master_service.trendline_monitor_start()).body)["running"] is True
+    assert json.loads(asyncio.run(master_service.trendline_monitor_start()).body)["started"] is False
+    assert fake.starts == 1
+    assert json.loads(asyncio.run(master_service.trendline_monitor_stop()).body)["running"] is False

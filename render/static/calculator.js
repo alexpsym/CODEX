@@ -38,6 +38,7 @@
     trendlineMutationPending: false,
     trendlineListLoading: false,
     trendlineListRequestSeq: 0,
+    trendlineMonitorPending: false,
   };
 
   const $ = (id) => document.getElementById(id);
@@ -687,6 +688,17 @@
 
   function trendlinePanel() { return $('trendline-plans-panel'); }
   function trendlineStatus(text) { const el = $('trendline-plan-status'); if (el) el.textContent = text || ''; }
+  function renderTrendlineMonitor(status) {
+    const running=!!status?.running; const text=$('trendline-monitor-status'); const start=$('trendline-monitor-start'); const stop=$('trendline-monitor-stop');
+    if(text) text.textContent=running ? `Monitoring running. Last cycle: ${status?.last_cycle?.at_ms || 'waiting'}.` : `Monitoring stopped.${status?.last_error ? ` ${status.last_error}` : ''}`;
+    if(start) start.disabled=running||state.trendlineMonitorPending; if(stop) stop.disabled=!running||state.trendlineMonitorPending;
+  }
+  async function trendlineMonitor(action) {
+    if(!state.trendlinePlansAvailable||state.trendlineMonitorPending) return;
+    state.trendlineMonitorPending=true; renderTrendlineMonitor(action==='start'?{running:false}:{running:true});
+    try { const response=await post(`/api/trendline-plans/monitor/${action}`,{}); renderTrendlineMonitor(response); }
+    catch(err) { trendlineStatus(String(err.message||err)); } finally { state.trendlineMonitorPending=false; }
+  }
   function localDateTime(ms) {
     const d = new Date(Number(ms)); const p = (v) => String(v).padStart(2, '0');
     return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
@@ -762,7 +774,7 @@
   async function refreshTrendlinePlans() {
     if (!state.trendlinePlansAvailable) return;
     const seq=++state.trendlineListRequestSeq;
-    state.trendlineListLoading=true; try { const response=await request('/api/trendline-plans',{cache:'no-store'}); if(seq!==state.trendlineListRequestSeq) return; state.trendlinePlans=response.plans||[]; renderTrendlinePlans(); trendlineStatus('Stored only: monitoring and execution are disabled.'); } catch(err) { if(seq===state.trendlineListRequestSeq) trendlineStatus(String(err.message||err)); } finally { if(seq===state.trendlineListRequestSeq) state.trendlineListLoading=false; }
+    state.trendlineListLoading=true; try { const response=await request('/api/trendline-plans',{cache:'no-store'}); if(seq!==state.trendlineListRequestSeq) return; state.trendlinePlans=response.plans||[]; renderTrendlinePlans(); } catch(err) { if(seq===state.trendlineListRequestSeq) trendlineStatus(String(err.message||err)); } finally { if(seq===state.trendlineListRequestSeq) state.trendlineListLoading=false; }
   }
   async function saveTrendlinePlan() {
     if (!state.trendlinePlansAvailable || state.trendlineMutationPending) return;
@@ -788,13 +800,13 @@
     const panel=trendlinePanel(); if(!panel) return;
     panel.style.display='none'; resetTrendlineForm();
     ['trendline-anchor-1-time','trendline-anchor-2-time'].forEach((id)=>$(id)?.addEventListener('input',()=>anchorEpoch(id,id==='trendline-anchor-1-time'?'trendline-anchor-1-utc':'trendline-anchor-2-utc')));
-    $('trendline-trigger-mode')?.addEventListener('change',syncTrendlineTriggerControls); $('trendline-save')?.addEventListener('click',saveTrendlinePlan); $('trendline-reset')?.addEventListener('click',resetTrendlineForm); $('trendline-refresh')?.addEventListener('click',refreshTrendlinePlans);
+    $('trendline-trigger-mode')?.addEventListener('change',syncTrendlineTriggerControls); $('trendline-save')?.addEventListener('click',saveTrendlinePlan); $('trendline-reset')?.addEventListener('click',resetTrendlineForm); $('trendline-refresh')?.addEventListener('click',refreshTrendlinePlans); $('trendline-monitor-start')?.addEventListener('click',()=>trendlineMonitor('start')); $('trendline-monitor-stop')?.addEventListener('click',()=>trendlineMonitor('stop'));
   }
   function configureTrendlinePlans(bootstrap) {
     const panel=trendlinePanel(); if(!panel) return;
     state.trendlinePlansAvailable=bootstrap?.app_profile==='local' && bootstrap?.trendline_plans_available===true;
     panel.style.display=state.trendlinePlansAvailable?'':'none';
-    if(state.trendlinePlansAvailable) refreshTrendlinePlans();
+    if(state.trendlinePlansAvailable) { renderTrendlineMonitor(bootstrap?.trendline_monitoring||{running:false}); refreshTrendlinePlans(); }
   }
 
   function notifyOpenOrdersStateChanged(details = {}) {

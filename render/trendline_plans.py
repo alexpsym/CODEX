@@ -40,7 +40,7 @@ _STATUSES = {
 _CLAIMED_STATUSES = {"claimed", "submitting", "submitted", "failed", "uncertain"}
 _IMMUTABLE_FIELDS = {
     "schema_version", "plan_id", "execution_key", "revision", "created_at_ms",
-    "updated_at_ms", "status", "lifecycle", "trigger_claim",
+    "updated_at_ms", "status", "lifecycle", "trigger_claim", "execution_result",
 }
 _ORDER_METADATA_FIELDS = (
     "setup", "pattern", "ema", "vwap", "aths_atls", "round_number",
@@ -159,6 +159,21 @@ def _normalise_claim(value: object, execution_key: str) -> Optional[Dict[str, ob
     return claim
 
 
+def _normalise_execution_result(value: object) -> Optional[Dict[str, object]]:
+    """Keep only a small, credential-free durable terminal outcome."""
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise TrendlinePlanError("execution_result must be an object or null.")
+    outcome = _enum(value.get("outcome"), "execution_result.outcome", {"executed", "simulated", "failed", "uncertain"})
+    result = {"outcome": outcome, "recorded_at_ms": _int_ms(value.get("recorded_at_ms"), "execution_result.recorded_at_ms")}
+    for field in ("message", "order_id"):
+        raw = value.get(field)
+        if raw is not None:
+            result[field] = _text(raw, f"execution_result.{field}")[:500]
+    return result
+
+
 def validate_plan(record: Mapping[str, object]) -> Dict[str, object]:
     """Return a canonical, JSON-safe plan record or raise without mutation."""
     if not isinstance(record, Mapping):
@@ -199,6 +214,7 @@ def validate_plan(record: Mapping[str, object]) -> Dict[str, object]:
         "last_transition_at_ms": _int_ms(record["lifecycle"].get("last_transition_at_ms"), "lifecycle.last_transition_at_ms"),
     }
     claim = _normalise_claim(record.get("trigger_claim"), execution_key)
+    execution_result = _normalise_execution_result(record.get("execution_result"))
     if claim is not None and status not in _CLAIMED_STATUSES:
         raise TrendlinePlanError("Only claimed/submitting/submitted/failed/uncertain plans may have a trigger_claim.")
     if claim is None and status in _CLAIMED_STATUSES:
@@ -234,6 +250,7 @@ def validate_plan(record: Mapping[str, object]) -> Dict[str, object]:
         "lifecycle": lifecycle,
         "execution_key": execution_key,
         "trigger_claim": claim,
+        "execution_result": execution_result,
     }
 
 
@@ -474,6 +491,7 @@ class TrendlinePlanStore:
             "status": "draft",
             "lifecycle": {"last_transition": "created", "last_transition_at_ms": now},
             "trigger_claim": None,
+            "execution_result": None,
         })
         plan = validate_plan(record)
         with _LOCK:
@@ -594,3 +612,26 @@ class TrendlinePlanStore:
             registry["plans"][canonical["plan_id"]] = canonical
             self._write(registry)
             return {"claimed": True, "duplicate": False, "execution_key": canonical["execution_key"], "plan": copy.deepcopy(canonical)}
+
+    def resolve_claim(self, plan_id: str, *, status: str, outcome: Mapping[str, object], now_ms: Optional[int] = None) -> Dict[str, object]:
+        """Persist a final claimed outcome; callers must never retry it automatically."""
+        now = utc_epoch_ms() if now_ms is None else _int_ms(now_ms, "now_ms")
+        if status not in {"submitted", "failed", "uncertain"}:
+            raise TrendlinePlanError("Claim resolution status must be submitted, failed, or uncertain.")
+        with _LOCK:
+            registry = self._read()
+            plan = registry["plans"].get(_text(plan_id, "plan_id"))
+            if plan is None:
+                raise TrendlinePlanError("Unknown trendline plan.")
+            if plan["status"] != "claimed" or plan["trigger_claim"] is None:
+                raise TrendlinePlanError("Only a claimed plan may be resolved.")
+            updated = copy.deepcopy(plan)
+            updated["status"] = status
+            updated["execution_result"] = _normalise_execution_result({**dict(outcome), "recorded_at_ms": now})
+            updated["revision"] = int(plan["revision"]) + 1
+            updated["updated_at_ms"] = now
+            updated["lifecycle"] = {"last_transition": f"claim_{status}", "last_transition_at_ms": now}
+            canonical = validate_plan(updated)
+            registry["plans"][canonical["plan_id"]] = canonical
+            self._write(registry)
+            return copy.deepcopy(canonical)
