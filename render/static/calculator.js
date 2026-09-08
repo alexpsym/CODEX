@@ -696,9 +696,12 @@
   }
   async function trendlineMonitor(action) {
     if(!state.trendlinePlansAvailable||state.trendlineMonitorPending) return;
-    state.trendlineMonitorPending=true; renderTrendlineMonitor(action==='start'?{running:false}:{running:true});
+    state.trendlineMonitorPending=true; renderTrendlineMonitor(state.trendlineMonitorStatus);
     try { const response=await post(`/api/trendline-plans/monitor/${action}`,{}); state.trendlineMonitorPending=false; renderTrendlineMonitor(response); }
-    catch(err) { trendlineStatus(String(err.message||err)); state.trendlineMonitorPending=false; renderTrendlineMonitor(state.trendlineMonitorStatus); } finally { state.trendlineMonitorPending=false; }
+    catch(err) {
+      try { state.trendlineMonitorStatus=await request('/api/trendline-plans/monitor/status',{cache:'no-store'}); } catch(_statusError) { /* Retain last confirmed state. */ }
+      trendlineStatus('Monitoring request failed. Refresh status before trying again.');
+    } finally { state.trendlineMonitorPending=false; renderTrendlineMonitor(state.trendlineMonitorStatus); }
   }
   function localDateTime(ms) {
     const d = new Date(Number(ms)); const p = (v) => String(v).padStart(2, '0');
@@ -788,7 +791,10 @@
     state.trendlineEditId=plan.plan_id; const a=plan.anchors||[];
     $('trendline-anchor-1-time').value=localDateTime(a[0].timestamp_ms); $('trendline-anchor-2-time').value=localDateTime(a[1].timestamp_ms); $('trendline-anchor-1-price').value=a[0].price; $('trendline-anchor-2-price').value=a[1].price;
     $('trendline-right-extension').checked=!!plan.right_extension; $('trendline-trigger-mode').value=plan.trigger_mode; $('trendline-cross-direction').value=plan.cross_direction; $('trendline-price-basis').value=plan.trigger_price_basis; $('trendline-tolerance-ticks').value=plan.tolerance_ticks;
-    if(plan.order_intent==='limit' && plan.limit_entry_price) $('calc-limit').value=plan.limit_entry_price;
+    state.order_type=plan.order_intent;
+    $('calc-limit').value=plan.order_intent==='limit' ? (plan.limit_entry_price||'') : '';
+    $('limit-wrap').style.display=plan.order_intent==='limit'?'':'none';
+    syncToggleState('order-toggle','order_type');
     const expiry=$('trendline-expiry'); if(plan.expiry_at_ms){ expiry.innerHTML=`<option value="keep">Keep current expiry — ${escapeHtml(new Date(Number(plan.expiry_at_ms)).toLocaleString())}</option>`+expiry.innerHTML; expiry.value='keep'; }
     $('trendline-save').textContent='Update draft'; anchorEpoch('trendline-anchor-1-time','trendline-anchor-1-utc'); anchorEpoch('trendline-anchor-2-time','trendline-anchor-2-utc'); syncTrendlineTriggerControls(); trendlineStatus(`Editing draft ${String(plan.plan_id).slice(0,8)}.`);
   }
@@ -796,7 +802,7 @@
     if (state.trendlineMutationPending) return; const plan=state.trendlinePlans.find((p)=>p.plan_id===planId);
     if(action==='edit') return editTrendlinePlan(plan);
     const liveArm=action==='arm' && plan?.account==='live' && !plan?.test_trade;
-    if(liveArm && typeof confirm==='function' && !confirm('Authorize and arm this live plan for local monitoring and execution?')) return;
+    if(liveArm && (typeof confirm!=='function' || !confirm('Authorize and arm this live plan for local monitoring and execution?'))) return;
     ++state.trendlineListRequestSeq; state.trendlineMutationPending=true;
     try { const response=await post(`/api/trendline-plans/${encodeURIComponent(planId)}/${action}`,liveArm?{confirm_live_execution:true}:{}); state.trendlinePlans=state.trendlinePlans.map((p)=>p.plan_id===planId?response.plan:p); renderTrendlinePlans(); state.trendlineMutationPending=false; await refreshTrendlinePlans(); } catch(err) { trendlineStatus(String(err.message||err)); } finally { state.trendlineMutationPending=false; }
   }

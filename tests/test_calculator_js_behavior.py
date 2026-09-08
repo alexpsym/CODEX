@@ -802,3 +802,89 @@ eval(source);
     assert data["postPayload"]["cross_direction"] == "either"
     assert data["patch"] and data["armCalls"] == 1 and data["cancelCalls"] == 1
     assert data["confirms"] == 2 and data["status"] == "cancelled" and data["noUnexpected"]
+
+
+def test_trendline_monitor_ui_failures_live_arm_and_limit_round_trip() -> None:
+    node = shutil.which("node")
+    assert node
+    harness = r'''
+const fs=require('fs'), vm=require('vm'), assert=require('assert');
+const source=fs.readFileSync(process.argv[1],'utf8');
+class Button {
+  constructor(v, action) { this.dataset=action?{tlAction:action,tlId:v}:{v}; this.listeners={}; this.disabled=false; this.attrs={}; this.classList={toggle(){},add(){},remove(){}}; }
+  addEventListener(e,f){this.listeners[e]=f;}
+  click(){if(!this.disabled && this.listeners.click)return this.listeners.click({target:this,currentTarget:this});}
+  setAttribute(k,v){this.attrs[k]=String(v);} getAttribute(k){return this.attrs[k];} removeAttribute(k){delete this.attrs[k];}
+}
+class Element extends Button {
+  constructor(id){super('');this.id=id;this.value='';this.style={};this.textContent='';this.checked=false;this.buttons=[];this.actions=[];}
+  set innerHTML(v){this.html=String(v);this.buttons=[...this.html.matchAll(/data-v="([^"]*)"/g)].map(m=>new Button(m[1]));this.actions=[...this.html.matchAll(/data-tl-action="([^"]*)" data-tl-id="([^"]*)"/g)].map(m=>new Button(m[2],m[1]));}
+  get innerHTML(){return this.html||'';}
+  querySelectorAll(s){return s==='button'?this.buttons:s==='[data-tl-action]'?this.actions:[];}
+}
+const ids=['calc-error','calc-error-debug','calc-success','calc-results','calc-request-summary','calc-canonical-symbol','calc-journal-summary','calc-instrument-specs','risk-toggle-wrap','calc-webhook-panel','calc-webhook-url','calc-webhook-json','calc-webhook-copy','calc-webhook-copy-url','risk-toggle','calc-risk-label','limit-wrap','account-toggle','asset-toggle','side-toggle','order-toggle','webhook-toggle','test-toggle','timeframe-toggle','setup-toggle','pattern-toggle','ema-toggle','vwap-toggle','aths-atls-toggle','round-number-toggle','calc-symbol','calc-limit','calc-sl-ticks','calc-rr','calc-risk','calc-quote','calc-submit','calc-quote-status','calc-webhook-status','calc-pepperstone-set','broker-toggle-wrap','broker-toggle','trendline-plans-panel','trendline-anchor-1-time','trendline-anchor-1-price','trendline-anchor-1-utc','trendline-anchor-2-time','trendline-anchor-2-price','trendline-anchor-2-utc','trendline-trigger-mode','trendline-cross-direction','trendline-price-basis','trendline-tolerance-ticks','trendline-right-extension','trendline-expiry','trendline-save','trendline-reset','trendline-refresh','trendline-plan-status','trendline-plan-list','trendline-monitor-start','trendline-monitor-stop','trendline-monitor-status'];
+const flush=()=>new Promise(resolve=>setImmediate(resolve));
+async function run(profile){
+ const el=Object.fromEntries(ids.map(id=>[id,new Element(id)])), calls=[];
+ const groups={'risk-toggle':['fixed_aud','percent'],'asset-toggle':['crypto','fx'],'broker-toggle':['oanda','pepperstone'],'account-toggle':['live','demo'],'side-toggle':['buy','sell'],'order-toggle':['market','limit'],'webhook-toggle':['no','yes'],'test-toggle':['no','yes']};
+ for(const [id,values] of Object.entries(groups))el[id].buttons=values.map(v=>new Button(v));
+ Object.assign(el['calc-symbol'],{value:'BTCUSDT'});el['calc-risk'].value='1';el['calc-sl-ticks'].value='10';el['calc-rr'].value='2';
+ let plans=[],confirmed=false,running=false,fail=false,changeOnFailure=false;
+ const response=(data,status=200)=>({ok:status<400,status,statusText:'mock',headers:{get:()=> 'application/json'},text:async()=>JSON.stringify(data)});
+ const fetch=async(url,opts={})=>{
+  const method=opts.method||'GET';calls.push({url,method,body:opts.body?JSON.parse(opts.body):null});
+  if(url==='/api/calculator/bootstrap')return response({app_profile:profile,trendline_plans_available:profile==='local',trendline_monitoring:{running:false},webhook:{available:true}});
+  if(url.startsWith('/api/calculator/instrument?'))return response({symbol:'BTCUSDT'});
+  if(url==='/api/trendline-plans/monitor/status')return response({ok:true,running});
+  if(url.startsWith('/api/trendline-plans/monitor/')){
+   if(fail){if(changeOnFailure)running=!running;return response({detail:'mock failure'},503);}
+   running=url.endsWith('/start');return response({ok:true,running});
+  }
+  if(url==='/api/trendline-plans' && method==='GET')return response({ok:true,plans});
+  if(url==='/api/trendline-plans' && method==='POST'){
+   const p=JSON.parse(opts.body);plans=[{...p,plan_id:'plan-1',status:'draft',order_intent:p.order_type,action:p.side}];return response({ok:true,plan:plans[0]});
+  }
+  if(url==='/api/trendline-plans/plan-1' && method==='PATCH'){
+   plans[0]={...plans[0],...JSON.parse(opts.body)};return response({ok:true,plan:plans[0]});
+  }
+  if(url==='/api/trendline-plans/plan-1/arm'){plans[0].status='armed';return response({ok:true,plan:plans[0]});}
+  throw new Error('Unexpected request '+url);
+ };
+ // A VM does not inherit browser/Node web globals. Symbol resolution uses
+ // AbortController before its first awaited fetch, just as in the browser.
+ vm.runInNewContext(source,{document:{getElementById:id=>el[id]},fetch,confirm:()=>confirmed,navigator:{clipboard:{writeText:async()=>{}}},setTimeout:fn=>{fn();return 1;},clearTimeout(){},setInterval:()=>1,clearInterval(){},console,Date,URL,URLSearchParams,AbortController});
+ await flush();
+ if(profile!=='local'){assert.equal(el['trendline-plans-panel'].style.display,'none');assert(!calls.some(c=>c.url.startsWith('/api/trendline-plans')));return;}
+ assert.equal(el['trendline-plans-panel'].style.display,'');
+ el['calc-symbol'].listeners.input();await flush();
+ assert(el['calc-canonical-symbol'].textContent.includes('BTCUSDT'),'Canonical resolution must complete before saving');
+ el['order-toggle'].buttons.find(b=>b.dataset.v==='limit').click();
+ el['calc-limit'].value='99.25';el['trendline-anchor-1-time'].value='2025-01-01T01:00';el['trendline-anchor-2-time'].value='2025-01-01T02:00';el['trendline-anchor-1-price'].value='100';el['trendline-anchor-2-price'].value='101';
+ el['trendline-price-basis'].value='executable';
+ const save=el['trendline-save'].click();el['trendline-save'].click();await save;
+ assert.equal(calls.filter(c=>c.method==='POST' && c.url==='/api/trendline-plans').length,1);
+ assert.equal(plans[0].limit_entry_price,'99.25');assert.equal(plans[0].order_intent,'limit');
+ const action=name=>{const b=el['trendline-plan-list'].actions.find(b=>b.dataset.tlAction===name);assert(b,'Missing action '+name);return b;};
+ el['order-toggle'].buttons.find(b=>b.dataset.v==='market').click();el['calc-limit'].value='123';
+ await action('edit').click();assert.equal(el['calc-limit'].value,'99.25');await el['trendline-save'].click();
+ const patch=calls.find(c=>c.method==='PATCH');assert.equal(patch.body.limit_entry_price,'99.25');assert.equal(patch.body.order_type,'limit');
+ await action('arm').click();assert(!calls.some(c=>c.url.endsWith('/arm')));
+ confirmed=true;await action('arm').click();assert.deepEqual(calls.find(c=>c.url.endsWith('/arm')).body,{confirm_live_execution:true});
+ assert(!calls.some(c=>c.url.includes('/monitor/') && c.method==='POST'));
+ const controls=(startDisabled,stopDisabled)=>{assert.equal(el['trendline-monitor-start'].disabled,startDisabled);assert.equal(el['trendline-monitor-stop'].disabled,stopDisabled);};
+ controls(false,true);
+ const start=el['trendline-monitor-start'].click();el['trendline-monitor-start'].click();await start;controls(true,false);
+ assert.equal(calls.filter(c=>c.url.endsWith('/monitor/start')).length,1);
+ await el['trendline-monitor-stop'].click();controls(false,true);
+ fail=true;await el['trendline-monitor-start'].click();controls(false,true);assert(el['trendline-plan-status'].textContent.includes('failed'));
+ fail=false;await el['trendline-monitor-start'].click();controls(true,false);
+ fail=true;await el['trendline-monitor-stop'].click();controls(true,false);
+ changeOnFailure=true;await el['trendline-monitor-stop'].click();controls(false,true);
+ assert(calls.filter(c=>c.url.endsWith('/monitor/status')).length===3);
+ assert(!calls.some(c=>c.url.includes('/quote')||c.url.includes('/submit')||c.url.includes('webhook')));
+}
+(async()=>{await run('render');await run('local');console.log('ok');})().catch(e=>{console.error(e);process.exitCode=1;});
+'''
+    result = subprocess.run([node, "-e", harness, str(JS_PATH)], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "ok"

@@ -282,6 +282,15 @@ def _bounded_ms(value: object, field: str, maximum: int) -> int:
     return parsed
 
 
+def live_execution_authorized(plan: Mapping[str, object]) -> bool:
+    if plan.get("account") == "demo" or plan.get("test_trade") is True:
+        return True
+    auth = plan.get("live_authorization")
+    return (plan.get("account") == "live" and plan.get("status") == "armed"
+            and isinstance(auth, Mapping) and auth.get("execution_key") == plan.get("execution_key")
+            and auth.get("plan_revision") == plan.get("revision"))
+
+
 def projected_price(plan: Mapping[str, object], timestamp_ms: int) -> Decimal:
     """Calculate the unrounded line price. Tick rounding is evaluation-only."""
     canonical = validate_plan(plan)
@@ -615,7 +624,7 @@ class TrendlinePlanStore:
         with _LOCK:
             return self._transition(plan_id, target="expired", event="expired", now_ms=now)
 
-    def claim_trigger(self, plan_id: str, trigger: Mapping[str, object], *, now_ms: Optional[int] = None) -> Dict[str, object]:
+    def claim_trigger(self, plan_id: str, trigger: Mapping[str, object], *, now_ms: Optional[int] = None, expected_revision: Optional[int] = None, expected_execution_key: Optional[str] = None) -> Dict[str, object]:
         """Persist an idempotent claim before returning it; never submit an order."""
         now = utc_epoch_ms() if now_ms is None else _int_ms(now_ms, "now_ms")
         if not isinstance(trigger, Mapping):
@@ -629,6 +638,10 @@ class TrendlinePlanStore:
                 return {"claimed": False, "duplicate": True, "execution_key": plan["execution_key"], "plan": copy.deepcopy(plan)}
             if plan["status"] != "armed":
                 raise TrendlinePlanError("Only armed, unclaimed plans may be trigger-claimed.")
+            if expected_revision is not None and (plan["revision"] != expected_revision or plan["execution_key"] != expected_execution_key):
+                raise TrendlinePlanError("Plan changed before claim.")
+            if not live_execution_authorized(plan):
+                raise TrendlinePlanError("Current live arm authorization required.")
             expiry = plan["expiry_at_ms"]
             if expiry is not None and now >= int(expiry):
                 raise TrendlinePlanError("Expired plans cannot be trigger-claimed.")

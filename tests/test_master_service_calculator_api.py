@@ -2513,3 +2513,132 @@ def test_trendline_final_calculator_snapshot_and_literal_live_arm(tmp_path: Path
         with pytest.raises(master_service.HTTPException): asyncio.run(master_service.trendline_plan_arm(created["plan_id"], invalid))
     armed = json.loads(asyncio.run(master_service.trendline_plan_arm(created["plan_id"], {"confirm_live_execution": True})).body)["plan"]
     assert armed["live_authorization"]["execution_key"] == armed["execution_key"] and armed["live_authorization"]["plan_revision"] == armed["revision"]
+
+
+def test_trendline_real_calculator_snapshots_and_broker_outcomes(monkeypatch: pytest.MonkeyPatch) -> None:
+    import copy
+    from render.trendline_executor import DefiniteSubmissionFailure, InvalidQuote
+    service = master_service
+    dec = service.Decimal
+    now = 1_750_000_000_000
+    monkeypatch.setattr(service.time, "time_ns", lambda: now * 1_000_000)
+    monkeypatch.setattr(service, "resolve_bybit_credentials_for", lambda _a: ("demo", "mock-key", "mock-secret", "https://bybit.invalid", "mock"))
+    monkeypatch.setattr(service, "_get_oanda_config", lambda _a: {"base_url":"https://oanda.invalid", "account_id":"mock", "token":"mock"})
+    for name in ("_upsert_calculator_trade_context", "_upsert_bybit_demo_calc_context", "_schedule_dropbox_upload_state_backup", "_log_webhook_event", "cache_bybit_demo_tpsl_request", "_invalidate_open_orders_cache"):
+        monkeypatch.setattr(service, name, lambda *a, **kw: {})
+    monkeypatch.setattr(service, "_delete_pending_webhook", lambda *a, **kw: False)
+    quotes = {"bybit":0, "oanda":0}
+    posts = []
+    fault = {"mode":None, "row":None, "transaction":"orderCreateTransaction"}
+    meta = {"symbol":"BTCUSDT", "status":"Trading", "priceFilter":{"tickSize":"0.1"},
+            "lotSizeFilter":{"qtyStep":"0.001", "minOrderQty":"0.001", "maxOrderQty":"100000", "maxMktOrderQty":"100000", "minNotionalValue":"1"},
+            "leverageFilter":{"maxLeverage":"100"}}
+    async def bybit_get(base, path, params, **kwargs):
+        if path == "/v5/market/instruments-info": return {"retCode":0, "result":{"list":[meta]}}
+        assert path == "/v5/market/tickers", path
+        quotes["bybit"] += 1
+        bid = "100.0" if quotes["bybit"] == 1 else "100.2"
+        ask = "100.2" if quotes["bybit"] == 1 else "100.4"
+        return {"retCode":0, "time":now-50, "result":{"list":[{"symbol":"BTCUSDT", "bid1Price":bid, "ask1Price":ask, "lastPrice":"100.3"}]}}
+    async def wallet(*a, **kw): return {"available_usdt":dec("1000"), "total_equity":dec("1000")}
+    async def signed_get(**kw):
+        assert kw["path"] == "/v5/position/list", kw
+        body = posts[-1]
+        return {"retCode":0, "result":{"list":[{"size":"1", "avgPrice":"100.4", "positionIdx":0, "takeProfit":body.get("takeProfit"), "stopLoss":body.get("stopLoss")}]}}
+    async def signed_post(**kw):
+        assert kw["path"] == "/v5/order/create", kw
+        posts.append(copy.deepcopy(kw["body"]))
+        if fault["mode"] == "timeout": raise service.httpx.ReadTimeout("secret-url")
+        if fault["mode"] == "value": raise ValueError("retCode=123 retMsg=secret")
+        if fault["mode"] == "negative": return {"retCode":10001, "retMsg":"private", "result":{}}
+        return {"retCode":0, "result":{"orderId":"bybit-101", "orderLinkId":kw["body"]["orderLinkId"]}}
+    async def oanda_get(**kw):
+        assert "/pricing?" in kw["endpoint"], kw
+        quotes["oanda"] += 1
+        row = {"instrument":"USD_JPY", "status":"tradeable", "time":"2025-06-15T15:06:39.950Z",
+               "bids":[{"price":"155.000" if quotes["oanda"] == 1 else "155.010"}],
+               "asks":[{"price":"155.002" if quotes["oanda"] == 1 else "155.012"}]}
+        if fault["row"]: row.update(fault["row"])
+        return {"prices":[row]}
+    async def oanda_meta(**kw): return {"displayPrecision":3, "tradeUnitsPrecision":0, "minimumTradeSize":"1", "maximumOrderUnits":"1000000", "maximumPositionSize":"1000000", "marginRate":"0.01"}
+    async def summary(*a): return {"currency":"JPY", "nav":"10000", "marginAvailable":"100000", "marginRate":"0.01"}
+    class FakeClient:
+        def __init__(self, **kw): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): return False
+        async def post(self, url, **kwargs):
+            posts.append(copy.deepcopy(kwargs["json"]["order"]))
+            mode = fault["mode"]
+            if mode == "timeout": raise service.httpx.ReadTimeout("private")
+            status = 503 if mode == "5xx" else 400 if mode == "negative" else 201
+            data = [] if mode == "malformed" else {fault["transaction"]:{"id":"701"}}
+            return service.httpx.Response(status, json=data, request=service.httpx.Request("POST", url))
+    monkeypatch.setattr(service, "_bybit_get_async", bybit_get)
+    monkeypatch.setattr(service, "_bybit_signed_get", signed_get)
+    monkeypatch.setattr(service, "_bybit_signed_post", signed_post)
+    monkeypatch.setattr(service, "_fetch_bybit_balance_usdt", wallet)
+    monkeypatch.setattr(service, "_fetch_oanda_json", oanda_get)
+    monkeypatch.setattr(service, "_fetch_oanda_instrument_meta", oanda_meta)
+    monkeypatch.setattr(service, "_fetch_oanda_account_summary", summary)
+    monkeypatch.setattr(service.httpx, "AsyncClient", FakeClient)
+    plans = {}
+    calculations = {}
+    async def run():
+        for broker in ("bybit", "oanda"):
+            for intent in ("market", "limit"):
+                quotes[broker] = 0
+                plan = {"broker":broker, "account":"demo", "instrument":"BTCUSDT" if broker=="bybit" else "USD_JPY",
+                        "action":"buy", "order_intent":intent, "limit_entry_price":"99.9" if broker=="bybit" else "155.000",
+                        "risk_mode":"percent", "risk_value":"1", "stop_loss_ticks":100, "rr_target":"2", "timeframe":"1h", "order_metadata":{}, "max_quote_age_ms":60000}
+                candidate = await service._trendline_executor_quote(plan)
+                assert quotes[broker] == 1
+                calc = await service._trendline_fresh_calculation(plan, candidate)
+                final = calc["trigger_quote"]
+                assert quotes[broker] == 2, "Only candidate and calculator final pricing acquisitions"
+                assert final["instrument"] == plan["instrument"] and final["timestamp_ms"] == now-50
+                assert final["bid"] == ("100.2" if broker=="bybit" else "155.010")
+                assert final["ask"] == ("100.4" if broker=="bybit" else "155.012")
+                assert final["tick_size"] == ("0.1" if broker=="bybit" else "0.001")
+                entry = dec(final["ask"]) if intent=="market" else dec(plan["limit_entry_price"])
+                assert dec(calc["entry_price"]) == entry
+                stop_distance = dec(100) * dec(final["tick_size"])
+                assert dec(calc["stop_price"]) == entry-stop_distance
+                units = dec(calc["quantity"])
+                spread = dec(final["ask"])-dec(final["bid"])
+                if broker=="oanda":
+                    assert dec(calc["estimated_total_loss"]) == units*(stop_distance+spread)
+                else:
+                    fee = dec(service.os.getenv("CALCULATOR_BYBIT_TAKER_FEE_FALLBACK", "0.0006"))
+                    assert dec(calc["estimated_total_loss"]) == units*(stop_distance+(spread if intent=="market" else 0)+entry*fee+(entry-stop_distance)*fee)
+                before = len(posts)
+                outcome = await service._trendline_executor_submit(plan, calc, "stable-execution-id")
+                assert len(posts) == before+1 and outcome == {"accepted":True, "order_id":"bybit-101" if broker=="bybit" else "701"}
+                order = posts[-1]
+                assert (order.get("orderLinkId") or order.get("clientExtensions", {}).get("id")) == "stable-execution-id"
+                if intent == "limit": assert dec(order["price"]) == entry
+                else: assert "price" not in order
+                plans[broker], calculations[broker] = plan, calc
+            # A public caller's body cannot enable private snapshot behavior.
+            public = service._trendline_calculator_payload(plan)
+            public.update({"_trendline_internal":True, "_include_trendline_snapshot":True, "bid":"9999"})
+            body = json.loads((await service.calculator_quote(public)).body)
+            assert "_trusted_trendline_quote" not in body and "trigger_quote" not in body
+        for row in ({"instrument":"EUR_USD"}, {"status":"non-tradeable"}, {"time":None}):
+            fault["row"] = row
+            with pytest.raises((InvalidQuote, service.HTTPException)):
+                await service._trendline_executor_quote(plans["oanda"])
+            with pytest.raises(service.HTTPException):
+                await service._trendline_fresh_calculation(plans["oanda"])
+        fault["row"] = None
+        for tx in ("orderCreateTransaction", "orderFillTransaction"):
+            fault["transaction"] = tx
+            assert (await service._trendline_executor_submit(plans["oanda"], calculations["oanda"], "stable"))["order_id"] == "701"
+        for broker, mode, error in (("bybit","negative",DefiniteSubmissionFailure), ("bybit","timeout",RuntimeError), ("bybit","value",RuntimeError), ("oanda","negative",DefiniteSubmissionFailure), ("oanda","5xx",RuntimeError), ("oanda","malformed",RuntimeError), ("oanda","timeout",RuntimeError)):
+            fault["mode"] = mode
+            with pytest.raises(error): await service._trendline_executor_submit(plans[broker], calculations[broker], "stable")
+        fault["mode"] = None
+        before = len(posts)
+        with pytest.raises(DefiniteSubmissionFailure):
+            await service._trendline_executor_submit(plans["oanda"], {**calculations["oanda"], "quantity":None}, "stable")
+        assert len(posts) == before
+    asyncio.run(run())

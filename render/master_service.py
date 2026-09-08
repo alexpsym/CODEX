@@ -134,8 +134,9 @@ from render.trendline_plans import (
     TrendlinePlanError,
     TrendlinePlanPersistenceError,
     TrendlinePlanStore,
+    live_execution_authorized,
 )
-from render.trendline_executor import TrendlinePlanExecutor
+from render.trendline_executor import TrendlinePlanExecutor, DefiniteSubmissionFailure, InvalidQuote, validate_quote, valid_order_reference
 from shared.bybit_option_resolver import resolve_option_by_target_risk
 from shared.symbol_resolution import (
     is_likely_oanda_pair,
@@ -288,13 +289,13 @@ def _trendline_calculator_payload(plan: Mapping[str, object]) -> Dict[str, objec
         "order_type": plan["order_intent"], "risk_mode": plan["risk_mode"], "risk_value": plan["risk_value"],
         "entry_price": plan.get("limit_entry_price") if plan["order_intent"] == "limit" else None,
         "stop_loss_ticks": plan["stop_loss_ticks"], "risk_reward": plan["rr_target"], "target_mode": "rr",
-        "timeframe": plan["timeframe"], "test_trade": False, "webhook": "no", "_trendline_internal": True, **dict(plan["order_metadata"]),
+        "timeframe": plan["timeframe"], "test_trade": False, "webhook": "no", **dict(plan["order_metadata"]),
     }
 
 
 async def _trendline_fresh_calculation(plan: Mapping[str, object], _quote: Optional[Mapping[str, object]] = None) -> Mapping[str, object]:
     """Use the calculator's canonical in-process calculation path, never HTTP."""
-    response = await calculator_quote(_trendline_calculator_payload(plan))
+    response = await _calculator_quote_impl(_trendline_calculator_payload(plan), _include_trendline_snapshot=True, _max_quote_age_ms=int(plan["max_quote_age_ms"]))
     if response.status_code >= 400:
         raise ValueError("Fresh trendline calculation was rejected.")
     calculated = json.loads(response.body.decode("utf-8"))
@@ -303,7 +304,27 @@ async def _trendline_fresh_calculation(plan: Mapping[str, object], _quote: Optio
     calculated["trigger_quote"] = calculated.pop("_trusted_trendline_quote", None)
     if not isinstance(calculated["trigger_quote"], Mapping):
         raise ValueError("Final calculator quote snapshot was unavailable.")
+    validate_quote(calculated["trigger_quote"], str(plan["instrument"]), time.time_ns() // 1_000_000, int(plan["max_quote_age_ms"]))
     return calculated
+
+
+def _trendline_broker_snapshot(broker: str, symbol: str, row: Mapping[str, object], tick: object, *, timestamp: object = None, max_age_ms: int = 60_000) -> Dict[str, object]:
+    if broker == "oanda":
+        if row.get("status") != "tradeable":
+            raise InvalidQuote()
+        try:
+            stamp = datetime.fromisoformat(str(row.get("time") or "").replace("Z", "+00:00"))
+            if stamp.tzinfo is None:
+                raise InvalidQuote()
+            delta = stamp - datetime(1970, 1, 1, tzinfo=timezone.utc)
+            timestamp = (delta.days * 86400 + delta.seconds) * 1000 + delta.microseconds // 1000
+            bid, ask = row["bids"][0]["price"], row["asks"][0]["price"]
+        except (KeyError, ValueError, IndexError, TypeError) as exc:
+            raise InvalidQuote() from exc
+        instrument = row.get("instrument")
+    else:
+        instrument, bid, ask = row.get("symbol"), row.get("bid1Price"), row.get("ask1Price")
+    return validate_quote({"instrument": instrument, "bid": bid, "ask": ask, "timestamp_ms": timestamp, "tick_size": tick}, symbol, time.time_ns() // 1_000_000, max_age_ms)
 
 
 async def _trendline_executor_quote(plan: Mapping[str, object]) -> Mapping[str, object]:
@@ -316,39 +337,46 @@ async def _trendline_executor_quote(plan: Mapping[str, object]) -> Mapping[str, 
         row = _extract_valid_bybit_ticker_row(payload if isinstance(payload, dict) else {}, symbol)
         instrument = await _bybit_get_instrument_info_cached(base_url, "linear", symbol)
         timestamp = (payload or {}).get("time") if isinstance(payload, Mapping) else None
-        if not row or str(row.get("symbol") or "").upper() != symbol or not instrument or not isinstance(timestamp, int):
+        if not row or not instrument or instrument.get("status") != "Trading":
             raise ValueError("Fresh Bybit quote is missing required timestamp or precision.")
-        bid, ask = Decimal(str(row.get("bid1Price"))), Decimal(str(row.get("ask1Price")))
         tick = (instrument.get("priceFilter") or {}).get("tickSize")
     elif broker == "oanda":
         cfg = _get_oanda_config(str(plan["account"]))
         meta = await _fetch_oanda_instrument_meta(base_url=cfg["base_url"], account_id=cfg["account_id"], api_key=cfg["token"], symbol=symbol, mode=str(plan["account"]))
         prices = await _fetch_oanda_json(base_url=cfg["base_url"], account_id=cfg["account_id"], api_key=cfg["token"], endpoint=f"/accounts/{{account_id}}/pricing?instruments={symbol}&includeHomeConversions=false", mode=str(plan["account"]))
         rows = prices.get("prices") or []; row = rows[0] if rows else {}
-        if str(row.get("instrument") or "").upper() != symbol:
-            raise ValueError("Fresh OANDA quote instrument does not match the plan.")
-        stamp = str(row.get("time") or "").replace("Z", "+00:00")
-        try:
-            timestamp = int(datetime.fromisoformat(stamp).timestamp() * 1000)
-            bid = Decimal(str(((row.get("bids") or [{}])[0]).get("price"))); ask = Decimal(str(((row.get("asks") or [{}])[0]).get("price")))
-        except Exception as exc:
-            raise ValueError("Fresh OANDA quote is malformed or missing a broker timestamp.") from exc
+        timestamp = None
         tick = str(Decimal("1").scaleb(-int(meta["displayPrecision"])))
     else:
         raise ValueError("Unsupported trendline broker.")
-    if bid <= 0 or ask <= 0 or bid >= ask or not tick:
-        raise ValueError("Fresh trendline quote is crossed or invalid.")
-    returned_instrument = str(row.get("symbol") if broker == "bybit" else row.get("instrument")).upper()
-    return {"instrument": returned_instrument, "timestamp_ms": timestamp, "bid": str(bid), "ask": str(ask), "tick_size": str(tick)}
+    return _trendline_broker_snapshot(broker, symbol, row, tick, timestamp=timestamp, max_age_ms=int(plan["max_quote_age_ms"]))
 
 
 async def _trendline_executor_submit(plan: Mapping[str, object], calculation: Mapping[str, object], execution_key: str) -> Mapping[str, object]:
     if plan["order_intent"] == "limit" and not plan.get("limit_entry_price"):
-        raise ValueError("Trendline limit plan is missing its limit entry price.")
+        raise DefiniteSubmissionFailure()
     payload = {**_trendline_calculator_payload(plan), "action": plan["action"], "quantity": calculation.get("quantity"), "entry_price": calculation.get("entry_price"), "stop_loss_price": calculation.get("stop_price"), "take_profit_price": calculation.get("target_price"), "calculation_context_id": calculation.get("calculation_context_id"), "quote_created_at_ms": calculation.get("quote_created_at_ms")}
-    if plan["broker"] == "bybit":
-        return await _place_bybit_order(payload, request_id=execution_key, invalidate_cache=True)
-    return await _place_oanda_order(payload, request_id=execution_key)
+    request_state: Dict[str, object] = {"posted": False, "client_order_id": execution_key}
+    try:
+        if plan["broker"] == "bybit":
+            result = await _place_bybit_order(payload, request_id=execution_key, invalidate_cache=True, _request_state=request_state)
+            order_id = (result.get("order") or {}).get("orderId")
+        else:
+            result = await _place_oanda_order(payload, request_id=execution_key, _request_state=request_state)
+            if result.get("orderRejectTransaction") or result.get("orderCancelTransaction"):
+                raise DefiniteSubmissionFailure()
+            order_id = _extract_oanda_order_id(result)
+    except DefiniteSubmissionFailure:
+        raise
+    except Exception as exc:
+        if not request_state["posted"] or (isinstance(exc, BybitOrderRejected) and exc.http_status is not None and exc.http_status < 500 and exc.ret_code not in (None, 0, "0")):
+            raise DefiniteSubmissionFailure() from exc
+        # Once POST begins, arbitrary ValueError/transport/protection errors are
+        # ambiguous. Never infer rejection from their text.
+        raise RuntimeError("ORDER_OUTCOME_UNCERTAIN") from exc
+    if not valid_order_reference(order_id):
+        raise RuntimeError("ORDER_REFERENCE_MISSING")
+    return {"accepted": True, "order_id": order_id}
 
 
 TRENDLINE_EXECUTOR = TrendlinePlanExecutor(
@@ -356,11 +384,7 @@ TRENDLINE_EXECUTOR = TrendlinePlanExecutor(
     _trendline_executor_quote,
     _trendline_fresh_calculation,
     _trendline_executor_submit,
-    lambda plan: str(plan.get("account") or "").lower() == "demo" or (
-        isinstance(plan.get("live_authorization"), Mapping)
-        and plan["live_authorization"].get("execution_key") == plan.get("execution_key")
-        and int(plan["live_authorization"].get("plan_revision") or 0) <= int(plan.get("revision") or 0)
-    ),
+    live_execution_authorized,
 )
 JOURNAL_DISPLAY_TZ = ZoneInfo("Australia/Brisbane")
 RENDER_ALLOWED_APPS = _parse_allowed_apps(os.getenv("RENDER_ALLOWED_APPS", DEFAULT_RENDER_ALLOWED_APPS))
@@ -21261,7 +21285,7 @@ def _entry_price_for_bybit_submit_validation(
 
 
 async def _place_bybit_order(
-    payload: Dict[str, object], *, request_id: str, invalidate_cache: bool = True
+    payload: Dict[str, object], *, request_id: str, invalidate_cache: bool = True, _request_state: Optional[Dict[str, object]] = None
 ) -> Dict[str, object]:
     request_open_time_iso = _utc_now_iso()
     symbol = str(payload.get("symbol", "")).upper()
@@ -21564,6 +21588,9 @@ async def _place_bybit_order(
 
     data: Dict[str, object] = {}
     try:
+        if _request_state is not None:
+            body["orderLinkId"] = _request_state["client_order_id"]
+            _request_state["posted"] = True
         data = await _bybit_signed_post(
             base_url=base_url,
             api_key=api_key,
@@ -21603,6 +21630,8 @@ async def _place_bybit_order(
     except Exception as exc:
         message = str(exc)
         ret_code_match = re.search(r"retCode=([^\\s]+)", message)
+        if _request_state is not None:
+            raise RuntimeError("ORDER_OUTCOME_UNCERTAIN") from exc
         ret_msg_match = re.search(r"retMsg=(.+)$", message)
         raise BybitOrderRejected(
             ret_code=ret_code_match.group(1) if ret_code_match else None,
@@ -22080,7 +22109,7 @@ async def _place_bybit_order(
 
 
 async def _place_oanda_order(
-    payload: Dict[str, object], *, request_id: str, invalidate_cache: bool = True
+    payload: Dict[str, object], *, request_id: str, invalidate_cache: bool = True, _request_state: Optional[Dict[str, object]] = None
 ) -> Dict[str, object]:
     symbol = str(payload.get("symbol", "")).upper()
     action = str(payload.get("action", "")).lower()
@@ -22369,8 +22398,15 @@ async def _place_oanda_order(
         {"url": url, "order": order_payload},
     )
     async with httpx.AsyncClient(timeout=10) as client:
+        if _request_state is not None:
+            order_payload["clientExtensions"] = {"id": _request_state["client_order_id"]}
+            _request_state["posted"] = True
         response = await client.post(url, headers=headers, json={"order": order_payload})
     if response.status_code >= 400:
+        if _request_state is not None:
+            if response.status_code in {400, 401, 403, 404, 405, 409, 422}:
+                raise DefiniteSubmissionFailure()
+            raise RuntimeError("ORDER_OUTCOME_UNCERTAIN")
         safe_body = _safe_bybit_diagnostic_text(
             _summarize_upstream_body(response.text),
             api_key=str(cfg.get("token") or ""),
@@ -22388,6 +22424,11 @@ async def _place_oanda_order(
     result = response.json()
     if not isinstance(result, dict):
         result = {"raw": result}
+    if _request_state is not None:
+        if result.get("orderRejectTransaction") or result.get("orderCancelTransaction"):
+            raise DefiniteSubmissionFailure()
+        if not _extract_oanda_order_id(result):
+            raise RuntimeError("ORDER_REFERENCE_MISSING")
     _log_webhook_event(
         request_id,
         "oanda_order_response",
@@ -26897,6 +26938,10 @@ async def calculator_pepperstone_set(payload: Dict[str, object] = Body(default={
 
 @app.post("/api/calculator/quote")
 async def calculator_quote(request: Request, payload: Dict[str, object] = Body(default={})) -> JSONResponse:
+    return await _calculator_quote_impl(request, payload)
+
+
+async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, object]] = None, *, _include_trendline_snapshot: bool = False, _max_quote_age_ms: int = 60_000) -> JSONResponse:
     if isinstance(request, dict) and (not isinstance(payload, dict) or not payload):
         payload = request
         request = Request(
@@ -27079,8 +27124,8 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
             inst_task = None
             if not resolved_inst_row:
                 inst_task = asyncio.create_task(_calculator_timed_dependency("bybit_instruments_info", _bybit_get_instrument_info_cached(base_url, "linear", resolved_symbol), timings_ms, 3.0, "/v5/market/instruments-info", pending_dependencies=pending_dependencies, last_dependency_started=last_dependency_started))
-            ticker_task = asyncio.create_task(_calculator_timed_dependency("bybit_ticker", _fetch_bybit_ticker_cached(base_url, "linear", resolved_symbol, timeout_s=1.5, allow_stale_s=45.0, public_fallback_base_url=((os.getenv("BYBIT_PUBLIC_MARKET_BASE_URL") or "https://api.bybit.com") if account == "demo" else None)), timings_ms, 2.0, "/v5/market/tickers", pending_dependencies=pending_dependencies, last_dependency_started=last_dependency_started, deadline=quote_deadline))
-            balance_task = asyncio.create_task(_calculator_timed_dependency("bybit_wallet_balance", _fetch_bybit_balance_usdt_cached(account, timeout_s=2.5, connect_s=1.0, read_s=2.5), timings_ms, 3.0, "/v5/account/wallet-balance", pending_dependencies=pending_dependencies, last_dependency_started=last_dependency_started, deadline=quote_deadline))
+            ticker_task = asyncio.create_task(_calculator_timed_dependency("bybit_ticker", _fetch_bybit_ticker_cached(base_url, "linear", resolved_symbol, timeout_s=1.5, max_age_s=0 if _include_trendline_snapshot else _BYBIT_TICKER_CACHE_TTL_SECONDS, allow_stale_s=0 if _include_trendline_snapshot else 45.0, public_fallback_base_url=None if _include_trendline_snapshot else ((os.getenv("BYBIT_PUBLIC_MARKET_BASE_URL") or "https://api.bybit.com") if account == "demo" else None)), timings_ms, 2.0, "/v5/market/tickers", pending_dependencies=pending_dependencies, last_dependency_started=last_dependency_started, deadline=quote_deadline))
+            balance_task = asyncio.create_task(_calculator_timed_dependency("bybit_wallet_balance", _fetch_bybit_balance_usdt_cached(account, timeout_s=2.5, connect_s=1.0, read_s=2.5, max_age_s=0 if _include_trendline_snapshot else _BYBIT_WALLET_BALANCE_CACHE_TTL_SECONDS, allow_stale_s=0 if _include_trendline_snapshot else 120.0), timings_ms, 3.0, "/v5/account/wallet-balance", pending_dependencies=pending_dependencies, last_dependency_started=last_dependency_started, deadline=quote_deadline))
             async def _fetch_aud_usd_cached() -> Dict[str, float]:
                 now = time.time()
                 cached_val = _OANDA_AUD_USD_CACHE.get("value")
@@ -27141,6 +27186,10 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
             bid = Decimal(str(row.get("bid1Price") or "0"))
             ask = Decimal(str(row.get("ask1Price") or "0"))
             last = Decimal(str(row.get("lastPrice") or "0"))
+            if _include_trendline_snapshot:
+                if inst.get("status") != "Trading":
+                    raise InvalidQuote()
+                sizing_snapshot = _trendline_broker_snapshot("bybit", symbol_in, row, tick_size, timestamp=tickers.get("time"), max_age_ms=_max_quote_age_ms)
             entry = _dec(limit_entry, "entry_price") if order_type == "limit" else (ask if side == "buy" else bid)
             if entry <= 0:
                 raise HTTPException(status_code=400, detail="entry_price must be greater than zero.")
@@ -27319,11 +27368,8 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
                 "requested_target_price_before_adjustment": _fmt_dec(requested_target_before_adjustment),
                 "fee_buffer_r": _fmt_dec_by_precision(fee_buffer_r, Decimal("0.01")) if fee_buffer_r is not None else None,
             }
-            if payload.get("_trendline_internal") is True:
-                broker_ts = tickers.get("time") if isinstance(tickers, Mapping) else None
-                if not isinstance(broker_ts, int):
-                    raise HTTPException(status_code=502, detail="Bybit calculator quote is missing a broker timestamp.")
-                response_payload["_trusted_trendline_quote"] = {"instrument": str(row.get("symbol") or ""), "bid": _fmt_dec(bid), "ask": _fmt_dec(ask), "timestamp_ms": broker_ts, "tick_size": _fmt_dec(tick_size)}
+            if _include_trendline_snapshot:
+                response_payload["_trusted_trendline_quote"] = sizing_snapshot
             if warnings:
                 response_payload["warnings"] = warnings
             calculation_context_id = (
@@ -27542,6 +27588,8 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
             if not rows:
                 raise HTTPException(status_code=502, detail="OANDA pricing/meta fetch failure.")
             row = rows[0]
+            if _include_trendline_snapshot:
+                sizing_snapshot = _trendline_broker_snapshot("oanda", symbol, row, tick_size, max_age_ms=_max_quote_age_ms)
             bid = Decimal(str(((row.get("bids") or [{}])[0]).get("price") or "0"))
             ask = Decimal(str(((row.get("asks") or [{}])[0]).get("price") or "0"))
             if bid <= 0 or ask <= 0:
@@ -27716,13 +27764,8 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
             )
             response_payload["calculation_context_id"] = calculation_context_id
             response_payload["quote_created_at_ms"] = int(time.time() * 1000)
-            if payload.get("_trendline_internal") is True:
-                stamp = str(row.get("time") or "").replace("Z", "+00:00")
-                try:
-                    broker_ts = int(datetime.fromisoformat(stamp).timestamp() * 1000)
-                except Exception as exc:
-                    raise HTTPException(status_code=502, detail="OANDA calculator quote is missing a broker timestamp.") from exc
-                response_payload["_trusted_trendline_quote"] = {"instrument": str(row.get("instrument") or ""), "bid": _fmt_dec(bid), "ask": _fmt_dec(ask), "timestamp_ms": broker_ts, "tick_size": _fmt_dec(tick_size)}
+            if _include_trendline_snapshot:
+                response_payload["_trusted_trendline_quote"] = sizing_snapshot
             try:
                 _upsert_calculator_trade_context(
                     {
