@@ -65,11 +65,19 @@ class TrendlinePlanExecutor:
     last_cycle: Optional[Dict[str, object]] = field(default=None, init=False)
     last_error: Optional[str] = field(default=None, init=False)
 
+    def _reconciliation_status(self) -> Dict[str, object]:
+        try:
+            registry = self.store.load()
+            count = sum(p["status"] in {"claimed", "submitting", "uncertain"} for p in registry["plans"].values())
+        except Exception:
+            return {"reconciliation_required": None,
+                    "reconciliation_message": "Reconciliation status unknown: registry unavailable. Automatic retry remains disabled."}
+        return {"reconciliation_required": count,
+                "reconciliation_message": "Unresolved claims require manual broker reconciliation; automatic retry is disabled." if count else None}
+
     def status(self) -> Dict[str, object]:
-        unresolved = (self.last_cycle or {}).get("reconciliation_required", 0)
         return {"running": self._task is not None and not self._task.done(), "last_cycle": self.last_cycle, "last_error": self.last_error,
-                "reconciliation_required": unresolved,
-                "reconciliation_message": "Unresolved claims require manual broker reconciliation; automatic retry is disabled." if unresolved else None}
+                **self._reconciliation_status()}
 
     async def start(self) -> bool:
         if self.status()["running"]:
@@ -110,10 +118,8 @@ class TrendlinePlanExecutor:
         now = self.now_ms()
         processed = 0
         cycle_error = None
-        unresolved = 0
         try:
             registry = self.store.load()
-            unresolved = sum(p["status"] in {"claimed", "submitting"} for p in registry["plans"].values())
             for plan in registry["plans"].values():
                 if plan["status"] != "armed" or plan["trigger_claim"] is not None:
                     continue
@@ -127,15 +133,14 @@ class TrendlinePlanExecutor:
                     self._previous.pop(str(plan["plan_id"]), None)
                     cycle_error = _safe_error(exc)
                 processed += 1
-            self.last_cycle = {"at_ms": now, "processed": processed, "reconciliation_required": unresolved}
             self.last_error = cycle_error
         except Exception as exc:  # Cycle remains safe; no unclaimed plan was submitted.
             self._previous.clear()
             self.last_error = _safe_error(exc)
-            self.last_cycle = {"at_ms": now, "processed": processed, "reconciliation_required": unresolved}
         except asyncio.CancelledError:
             self._previous.clear()
             raise
+        self.last_cycle = {"at_ms": now, "processed": processed, **self._reconciliation_status()}
         return self.last_cycle
 
     async def _evaluate_one(self, plan: Mapping[str, object]) -> None:
@@ -190,7 +195,7 @@ class TrendlinePlanExecutor:
             return
         claimed = claim["plan"]
         if claimed["test_trade"]:
-            self.store.resolve_claim(plan_id, status="submitted", outcome={"outcome": "simulated", "message": "Test plan triggered; no broker order was sent."}, now_ms=claim_now)
+            self.store.resolve_claim(plan_id, status="submitted", outcome={"outcome": "simulated", "message": "Test plan triggered; no broker order was sent."}, now_ms=self.now_ms())
             return
         # A failed durable transition leaves the claim unresolved and MUST NOT
         # call the adapter. Reconstruction only processes armed plans.
@@ -206,15 +211,15 @@ class TrendlinePlanExecutor:
                 pass
             raise
         except DefiniteSubmissionFailure as exc:
-            self.store.resolve_claim(plan_id, status="failed", outcome={"outcome": "failed", "message": _safe_error(exc)}, now_ms=claim_now)
+            self.store.resolve_claim(plan_id, status="failed", outcome={"outcome": "failed", "message": _safe_error(exc)}, now_ms=self.now_ms())
         except Exception as exc:
-            self.store.resolve_claim(plan_id, status="uncertain", outcome={"outcome": "uncertain", "message": _safe_error(exc)}, now_ms=claim_now)
+            self.store.resolve_claim(plan_id, status="uncertain", outcome={"outcome": "uncertain", "message": _safe_error(exc)}, now_ms=self.now_ms())
         else:
             order_id = result.get("order_id") if isinstance(result, Mapping) else None
             if not isinstance(result, Mapping) or result.get("accepted") is not True or not valid_order_reference(order_id):
-                self.store.resolve_claim(plan_id, status="uncertain", outcome={"outcome": "uncertain", "message": "Broker acceptance reference was missing."}, now_ms=claim_now)
+                self.store.resolve_claim(plan_id, status="uncertain", outcome={"outcome": "uncertain", "message": "Broker acceptance reference was missing."}, now_ms=self.now_ms())
                 return
-            self.store.resolve_claim(plan_id, status="submitted", outcome={"outcome": "executed", "message": "Broker accepted order.", "order_id": order_id}, now_ms=claim_now)
+            self.store.resolve_claim(plan_id, status="submitted", outcome={"outcome": "executed", "message": "Broker accepted order.", "order_id": order_id}, now_ms=self.now_ms())
 
 
 def _safe_error(exc: Exception) -> str:

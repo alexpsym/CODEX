@@ -63,6 +63,15 @@ def utc_epoch_ms() -> int:
     return time.time_ns() // 1_000_000
 
 
+def _transition_time(plan: Mapping[str, object], supplied_ms: int) -> int:
+    """Normalize backwards clocks against all previously durable time markers."""
+    return max(supplied_ms, int(plan["created_at_ms"]), int(plan["updated_at_ms"]),
+               int(plan["lifecycle"]["last_transition_at_ms"]),
+               int((plan.get("trigger_claim") or {}).get("claimed_at_ms", 0)),
+               int((plan.get("execution_result") or {}).get("recorded_at_ms", 0)),
+               int((plan.get("live_authorization") or {}).get("authorized_at_ms", 0)))
+
+
 def _int_ms(value: object, field: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise TrendlinePlanError(f"{field} must be a non-negative integer UTC epoch milliseconds value.")
@@ -610,6 +619,7 @@ class TrendlinePlanStore:
                 raise TrendlinePlanError("Unknown trendline plan.")
             if plan["status"] != "draft":
                 raise TrendlinePlanError("Only draft plans may be updated.")
+            now = _transition_time(plan, now)
             updated = copy.deepcopy(plan)
             updated.update(copy.deepcopy(dict(changes)))
             updated["revision"] = int(plan["revision"]) + 1
@@ -626,6 +636,7 @@ class TrendlinePlanStore:
         plan = registry["plans"].get(_text(plan_id, "plan_id"))
         if plan is None:
             raise TrendlinePlanError("Unknown trendline plan.")
+        now_ms = _transition_time(plan, now_ms)
         if target == "armed":
             if plan["status"] != "draft" or plan["trigger_claim"] is not None:
                 raise TrendlinePlanError("Only an unclaimed draft plan may be armed.")
@@ -664,6 +675,7 @@ class TrendlinePlanStore:
         with self._locked():
             registry = self._read(); plan = registry["plans"].get(_text(plan_id, "plan_id"))
             if plan is None: raise TrendlinePlanError("Unknown trendline plan.")
+            now = _transition_time(plan, now)
             if plan["status"] != "draft" or plan["trigger_claim"] is not None: raise TrendlinePlanError("Only an unclaimed draft plan may be armed.")
             if plan["expiry_at_ms"] is not None and now >= int(plan["expiry_at_ms"]): raise TrendlinePlanError("Expired plans cannot be armed.")
             updated = copy.deepcopy(plan); updated["status"] = "armed"; updated["revision"] = int(plan["revision"]) + 1
@@ -699,6 +711,7 @@ class TrendlinePlanStore:
                 raise TrendlinePlanError("Plan changed before claim.")
             if not live_execution_authorized(plan):
                 raise TrendlinePlanError("Current live arm authorization required.")
+            now = _transition_time(plan, now)
             expiry = plan["expiry_at_ms"]
             if expiry is not None and now >= int(expiry):
                 raise TrendlinePlanError("Expired plans cannot be trigger-claimed.")
@@ -730,6 +743,7 @@ class TrendlinePlanStore:
                 raise TrendlinePlanError("Unknown trendline plan.")
             if plan["status"] != "claimed" or plan["trigger_claim"] is None or plan["execution_key"] != execution_key or plan["test_trade"]:
                 raise TrendlinePlanError("Only the matching non-test claim may begin submission.")
+            now = _transition_time(plan, now)
             updated = copy.deepcopy(plan)
             updated["status"] = "submitting"
             updated["revision"] += 1
@@ -753,6 +767,7 @@ class TrendlinePlanStore:
             simulation = plan["test_trade"] and plan["status"] == "claimed" and status == "submitted" and outcome.get("outcome") == "simulated"
             if plan["trigger_claim"] is None or not (simulation or plan["status"] == "submitting"):
                 raise TrendlinePlanError("Only submitting plans or claimed test simulations may be resolved.")
+            now = _transition_time(plan, now)
             updated = copy.deepcopy(plan)
             updated["status"] = status
             updated["execution_result"] = _normalise_execution_result({**dict(outcome), "recorded_at_ms": now})

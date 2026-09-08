@@ -692,6 +692,11 @@
   function renderTrendlineMonitor(status) {
     const running=!!status?.running; const text=$('trendline-monitor-status'); const start=$('trendline-monitor-start'); const stop=$('trendline-monitor-stop');
     state.trendlineMonitorStatus=status||{running:false}; if(text) text.textContent=running ? `Monitoring running. Last cycle: ${status?.last_cycle?.at_ms || 'waiting'}.` : `Monitoring stopped.${status?.last_error ? ` ${status.last_error}` : ''}`;
+    if(text) {
+      const count=status?.reconciliation_required;
+      if(!Number.isInteger(count) || count<0) text.textContent+=` ${status?.reconciliation_message || 'Reconciliation status unknown. Automatic retry remains disabled.'}`;
+      else if(count>0) text.textContent+=` ${count} ${count===1?'plan requires':'plans require'} manual broker reconciliation. ${status?.reconciliation_message || 'Automatic retry is disabled.'}`;
+    }
     if(start) start.disabled=running||state.trendlineMonitorPending; if(stop) stop.disabled=!running||state.trendlineMonitorPending;
   }
   async function trendlineMonitor(action) {

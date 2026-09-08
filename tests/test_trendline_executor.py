@@ -328,3 +328,123 @@ def test_executor_restart_reconnect_submission_cancellation_and_duplicates(tmp_p
             assert f.store.get(pid)["status"] == status
             if status in {"claimed", "submitting"}: assert "manual broker reconciliation" in reconstructed.status()["reconciliation_message"]
     asyncio.run(run())
+
+
+def test_phase11_terminal_timestamps_and_durable_reconciliation_status(tmp_path, monkeypatch):
+    import json
+    from render.trendline_executor import DefiniteSubmissionFailure
+    from render.trendline_plans import TrendlinePlanPersistenceError, live_execution_authorized
+
+    def assert_time(plan, expected, terminal=False):
+        assert plan["updated_at_ms"] == plan["lifecycle"]["last_transition_at_ms"] == expected
+        if terminal: assert plan["execution_result"]["recorded_at_ms"] == expected
+
+    async def scenario(mode):
+        store = TrendlinePlanStore(tmp_path / mode / "plans.json")
+        now, calls = [3000], []
+        draft = store.create(_payload("oanda", test_trade=mode=="simulation"), now_ms=1000)
+        plan = store.arm(draft["plan_id"], now_ms=2000)
+        pid, key = plan["plan_id"], plan["execution_key"]
+        original_claim = store.claim_trigger
+        def claim(*args, **kwargs):
+            result = original_claim(*args, **kwargs)
+            assert_time(result["plan"], 3100)
+            now[0] = 3200
+            return result
+        monkeypatch.setattr(store, "claim_trigger", claim)
+        async def quote(_p):
+            return {"instrument":"USD_JPY", "timestamp_ms":now[0], "bid":"99.9", "ask":"100", "tick_size":"0.1"}
+        async def calculate(_p, _q):
+            now[0] = 3100
+            return {"trigger_quote":await quote(_p)}
+        entered, release = asyncio.Event(), asyncio.Event()
+        async def submit(p, _calc, execution_key):
+            assert p["status"] == "submitting" and execution_key == key
+            assert_time(store.get(pid), 3200)
+            calls.append(execution_key)
+            entered.set()
+            await release.wait()
+            if mode == "rejected": raise DefiniteSubmissionFailure("private")
+            if mode == "uncertain": raise TimeoutError("private")
+            if mode == "missing": return {"accepted":True}
+            return {"accepted":True, "order_id":"mock-order"}
+        if mode == "persistence":
+            original_write = store._write
+            def fail_submitting(registry):
+                if registry["plans"][pid]["status"] == "submitting": raise TrendlinePlanPersistenceError("private disk failure")
+                original_write(registry)
+            monkeypatch.setattr(store, "_write", fail_submitting)
+        executor = TrendlinePlanExecutor(store, quote, calculate, submit, live_execution_authorized, now_ms=lambda:now[0])
+        if mode in {"simulation", "persistence"}:
+            await executor.cycle()
+            assert not calls
+        else:
+            task = asyncio.create_task(executor.cycle())
+            await asyncio.wait_for(entered.wait(), 2)
+            now[0] = 100 if mode == "backwards" else 3500
+            if mode == "cancelled":
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError): await task
+            else:
+                release.set()
+                await task
+            assert calls == [key]
+        final = store.get(pid)
+        expected_status = "claimed" if mode=="persistence" else "failed" if mode=="rejected" else "uncertain" if mode in {"uncertain","missing","cancelled"} else "submitted"
+        assert final["status"] == expected_status and final["execution_key"] == key
+        if mode != "persistence": assert_time(final, 3200 if mode in {"backwards","simulation"} else 3500, terminal=True)
+        count = int(expected_status in {"claimed","submitting","uncertain"})
+        assert executor.status()["reconciliation_required"] == count
+        if mode != "cancelled": assert executor.last_cycle["reconciliation_required"] == count
+        before = list(calls)
+        await executor.cycle()
+        assert calls == before
+
+    async def run():
+        for mode in ("success","rejected","uncertain","missing","cancelled","backwards","simulation","persistence"):
+            await scenario(mode)
+        store = TrendlinePlanStore(tmp_path / "reconstructed.json")
+        trigger = {"trigger_timestamp_ms":3000,"trigger_price":"100","trigger_kind":"touch"}
+        for state in ("claimed","submitting","uncertain","submitted","failed"):
+            draft = store.create(_payload("oanda"), now_ms=1000)
+            pid, key = draft["plan_id"], draft["execution_key"]
+            # All durable mutations independently normalize a stale caller clock.
+            assert_time(store.update(pid, {"rr_target":"3"}, now_ms=0), 1000)
+            store.arm(pid, now_ms=2000)
+            assert_time(store.claim_trigger(pid, trigger, now_ms=0)["plan"], 2000)
+            if state != "claimed": assert_time(store.begin_submission(pid, execution_key=key, now_ms=4000), 4000)
+            if state in {"uncertain","submitted","failed"}:
+                final = store.resolve_claim(pid, status=state, outcome={"outcome":"executed" if state=="submitted" else state}, now_ms=0)
+                assert_time(final, 4000, terminal=True)
+        async def forbidden(*a): raise AssertionError("No adapter may be invoked")
+        executor = TrendlinePlanExecutor(TrendlinePlanStore(store.path), forbidden, forbidden, forbidden, live_execution_authorized)
+        assert executor.last_cycle is None
+        status = executor.status()
+        assert not status["running"] and status["reconciliation_required"] == 3
+        assert "manual broker reconciliation" in status["reconciliation_message"].lower()
+        await executor.cycle()
+        assert executor.last_cycle["reconciliation_required"] == 3
+        # Read/lock failures are explicitly unknown, including before any cycle.
+        for failure in (OSError("secret URL account"), TrendlinePlanPersistenceError("secret lock")):
+            with monkeypatch.context() as patch:
+                patch.setattr(executor.store, "load", lambda: (_ for _ in ()).throw(failure))
+                status = executor.status()
+                assert status["reconciliation_required"] is None and "unknown" in status["reconciliation_message"]
+                assert "Automatic retry remains disabled" in status["reconciliation_message"]
+                assert "secret" not in json.dumps(status)
+                await executor.cycle()
+                assert executor.last_cycle["reconciliation_required"] is None
+                assert "secret" not in json.dumps(executor.status())
+        assert executor.status()["reconciliation_required"] == 3
+        for transition in ("cancel", "expire", "authorize"):
+            p = store.create({**_payload("oanda"), "account":"live", "expiry_at_ms":2000 if transition=="expire" else None}, now_ms=1000)
+            pid = p["plan_id"]
+            if transition=="authorize":
+                p = store.authorize_live_and_arm(pid, now_ms=0)
+                assert_time(p, 1000)
+                assert p["live_authorization"]["authorized_at_ms"] == 1000
+                assert_time(store.cancel(pid, now_ms=0), 1000)
+            else:
+                store.update(pid, {"rr_target":"3"}, now_ms=3000)
+                assert_time(getattr(store, transition)(pid, now_ms=0), 3000)
+    asyncio.run(run())

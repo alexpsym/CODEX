@@ -888,3 +888,40 @@ async function run(profile){
     result = subprocess.run([node, "-e", harness, str(JS_PATH)], capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "ok"
+
+
+def test_trendline_reconciliation_warning_is_visible() -> None:
+    node = shutil.which("node")
+    assert node
+    harness = r'''
+const fs=require('fs'),vm=require('vm'),assert=require('assert');
+const source=fs.readFileSync(process.argv[1],'utf8');
+// Execute the production renderer unchanged, isolated from application startup.
+const start=source.indexOf('  function renderTrendlineMonitor(status) {');
+const end=source.indexOf('  async function trendlineMonitor(action)',start);
+assert(start>=0 && end>start,'Production monitor renderer must exist');
+const elements=Object.fromEntries(['trendline-monitor-status','trendline-monitor-start','trendline-monitor-stop'].map(id=>[id,{textContent:'',disabled:false}]));
+let requests=0;
+const context=vm.createContext({$:id=>elements[id],state:{trendlineMonitorPending:false},fetch:()=>{requests++;throw new Error('No request allowed');}});
+vm.runInContext(source.slice(start,end),context);
+for(const running of [false,true]) {
+  for(const count of [0,1,3,null]) {
+    const message=count===null?'Reconciliation status unknown: registry unavailable. Automatic retry remains disabled.':count?'Manual broker reconciliation required; automatic retry is disabled.':null;
+    context.renderTrendlineMonitor({running,reconciliation_required:count,reconciliation_message:message});
+    const text=elements['trendline-monitor-status'].textContent;
+    assert(text.includes(running?'Monitoring running':'Monitoring stopped'));
+    if(count===null){assert(text.includes(message));assert(!text.includes('0 plans'));}
+    else if(count>0){assert(text.includes(`${count} ${count===1?'plan requires':'plans require'} manual broker reconciliation`));assert(text.includes(message));}
+    else assert(!text.includes('reconciliation'));
+    assert.equal(elements['trendline-monitor-start'].disabled,running);
+    assert.equal(elements['trendline-monitor-stop'].disabled,!running);
+  }
+}
+context.renderTrendlineMonitor({running:false,reconciliation_required:null});
+assert(elements['trendline-monitor-status'].textContent.includes('Reconciliation status unknown. Automatic retry remains disabled.'));
+assert.equal(requests,0);
+console.log('ok');
+'''
+    result = subprocess.run([node, "-e", harness, str(JS_PATH)], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "ok"
