@@ -1,6 +1,6 @@
 #property strict
 #property description "Trader EA: trendline/standard limits, EMA bounce, and token-gated one-shot standard market execution. SL/TP are set by DISTANCE in MT5 POINTS, with optional AutoTP NetRR."
-#property version   "2.31"
+#property version   "2.32"
 
 #include <Trade/Trade.mqh>
 CTrade trade;
@@ -43,7 +43,8 @@ input int    TP_DistancePoints         = 400;
 input group "Trendline strategy (Trendline Limit)"
 enum TL_Direction { TL_BUY_LIMIT=0, TL_SELL_LIMIT=1 };
 input TL_Direction Direction           = TL_BUY_LIMIT;
-input string       TrendlineObjectName = "";     // Auto-arm key: valid name => ON, empty/invalid => OFF
+input string       TrendlineObjectName = "";     // Named trendline to trade; the object remains unchanged after a cycle.
+input long         TrendlineArmGeneration = 0;    // Set a new positive integer to arm/re-arm this unchanged named trendline once.
 input int          PendingCancelAfterMinutes  = 60;
 
 // -------------------- Inputs (Standard limit strategy only) --------------------
@@ -98,6 +99,10 @@ string   g_standardLimitLastReason = "";
 bool     g_lastPendingFailureStructural = false;
 bool     g_lastPendingAcceptanceMismatch = false;
 const string STANDARD_MARKET_EXECUTE_BUTTON = "TraderExecuteStandardMarket";
+string   g_trendlineLifecycleStatus = "";
+// MT5 terminal globals are doubles; keep generations below 2^52 so the .5
+// working marker remains exactly representable.
+const long TRENDLINE_ARM_GENERATION_MAX = 4503599627370495;
 
 void RefreshStandardMarketExecuteButton()
 {
@@ -930,7 +935,7 @@ bool PlaceOrReplacePendingTrendline()
    }
 
    string why="";
-   return PlaceOrReplacePendingLimitAtEntry(isBuyLimit, entry, true, why);
+   return PlaceOrReplacePendingLimitAtEntry(isBuyLimit, entry, false, why);
 }
 
 bool IsTradePlacementAccepted(const uint retcode)
@@ -988,6 +993,257 @@ bool FindAnyPendingLimitForEA(ulong &ticketOut)
       }
    }
    return false;
+}
+
+// A trendline intent is durable across EA/chart reloads.  The value is an exact
+// positive generation when consumed, or generation + 0.5 while an accepted
+// order/position is working.  Generation zero is reserved for a safely adopted
+// pre-upgrade order whose prior arm cannot be reconstructed.
+string TrendlineLifecycleGlobalKey()
+{
+   long login = (long)AccountInfoInteger(ACCOUNT_LOGIN);
+   string identity = AccountInfoString(ACCOUNT_SERVER) + "|" + (string)login + "|" +
+                     _Symbol + "|" + IntegerToString(MagicNumber) + "|trendline|" +
+                     TrendlineObjectName;
+   return "TraderTL." + ShortStableFingerprint(identity);
+}
+
+bool AcquireTrendlineLifecycleLock(int &lockHandle, string &why)
+{
+   lockHandle = INVALID_HANDLE;
+   const string lockName = "TraderTrendlineLifecycleGate.lck";
+   for(int attempt = 0; attempt < 20; attempt++)
+   {
+      ResetLastError();
+      lockHandle = FileOpen(lockName, FILE_READ | FILE_WRITE | FILE_BIN | FILE_COMMON);
+      if(lockHandle != INVALID_HANDLE)
+      {
+         why = "";
+         return true;
+      }
+      Sleep(25);
+   }
+   why = "Could not acquire the exclusive terminal-common trendline lifecycle gate lock. error=" + IntegerToString(GetLastError());
+   return false;
+}
+
+bool TrendlineArmGenerationIsValid()
+{
+   return (TrendlineArmGeneration > 0 && TrendlineArmGeneration <= TRENDLINE_ARM_GENERATION_MAX);
+}
+
+bool LoadTrendlineLifecycleState(double &stateOut, bool &existsOut, string &why)
+{
+   stateOut = 0.0;
+   existsOut = false;
+   string key = TrendlineLifecycleGlobalKey();
+   if(StringLen(key) > 63)
+   {
+      why = "Internal trendline lifecycle key exceeds the MT5 63-character limit.";
+      return false;
+   }
+   if(!GlobalVariableCheck(key))
+   {
+      why = "";
+      return true;
+   }
+   stateOut = GlobalVariableGet(key);
+   existsOut = true;
+   if(stateOut < 0.0 || stateOut > (double)TRENDLINE_ARM_GENERATION_MAX + 0.5)
+   {
+      why = "Persisted trendline lifecycle state is invalid; the line is left disarmed for safety.";
+      return false;
+   }
+   why = "";
+   return true;
+}
+
+long TrendlineGenerationFromState(const double state)
+{
+   return (long)MathFloor(state);
+}
+
+bool TrendlineStateIsWorking(const double state)
+{
+   return (MathAbs(state - ((double)TrendlineGenerationFromState(state) + 0.5)) < 0.000001);
+}
+
+void LogTrendlineLifecycle(const string state, const string source, const string detail)
+{
+   if(g_trendlineLifecycleStatus == state) return;
+   g_trendlineLifecycleStatus = state;
+   Print(EA_COMMENT, ": mode=trendline state=", state,
+         " source=", source,
+         " line=", TrendlineObjectName,
+         " generation=", (string)TrendlineArmGeneration,
+         " ", detail);
+}
+
+bool StoreTrendlineLifecycleState(const double expected,
+                                  const bool expectedExists,
+                                  const double replacement,
+                                  string &why)
+{
+   string key = TrendlineLifecycleGlobalKey();
+   int lockHandle = INVALID_HANDLE;
+   if(!AcquireTrendlineLifecycleLock(lockHandle, why)) return false;
+
+   bool currentExists = GlobalVariableCheck(key);
+   double current = currentExists ? GlobalVariableGet(key) : 0.0;
+   bool matches = (currentExists == expectedExists) &&
+                  (!currentExists || MathAbs(current - expected) < 0.000001);
+   bool stored = false;
+   if(matches)
+   {
+      ResetLastError();
+      stored = currentExists
+         ? GlobalVariableSetOnCondition(key, replacement, current)
+         : (GlobalVariableSet(key, replacement) != 0);
+      if(stored) GlobalVariablesFlush();
+   }
+   FileClose(lockHandle);
+   if(!stored)
+   {
+      why = matches
+         ? "Could not persist the trendline lifecycle transition. error=" + IntegerToString(GetLastError())
+         : "The trendline lifecycle changed concurrently; no order will be sent.";
+      return false;
+   }
+   why = "";
+   return true;
+}
+
+bool FindOwnedTrendlinePosition(ulong &ticketOut)
+{
+   ticketOut = 0;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      string symbol = PositionGetSymbol(i);
+      if(symbol != _Symbol) continue;
+      if((int)PositionGetInteger(POSITION_MAGIC) != MagicNumber) continue;
+      ticketOut = (ulong)PositionGetInteger(POSITION_TICKET);
+      return (ticketOut > 0);
+   }
+   return false;
+}
+
+bool FindActiveTrendlineLifecycle(ulong &ticketOut, string &kindOut)
+{
+   ticketOut = 0;
+   kindOut = "";
+   if(FindAnyPendingLimitForEA(ticketOut))
+   {
+      kindOut = "pending";
+      return true;
+   }
+   if(FindOwnedTrendlinePosition(ticketOut))
+   {
+      kindOut = "position";
+      return true;
+   }
+   return false;
+}
+
+void ResetTrendlinePlacementMetadata()
+{
+   g_ticket = 0;
+   g_armStartTime = 0;
+   g_expireAt = 0;
+}
+
+void MaintainTrendlineLifecycle(const string source)
+{
+   if(!TrendlineShouldBeActive()) return;
+
+   double storedState = 0.0;
+   bool storedExists = false;
+   string why = "";
+   if(!LoadTrendlineLifecycleState(storedState, storedExists, why))
+   {
+      LogTrendlineLifecycle("disarmed", source, "reason=" + why);
+      return;
+   }
+
+   ulong activeTicket = 0;
+   string activeKind = "";
+   if(FindActiveTrendlineLifecycle(activeTicket, activeKind))
+   {
+      if(!storedExists)
+      {
+         // A pre-upgrade active order/position is adopted as generation zero.
+         // Its original arm is unknowable, so it can never auto-arm this line.
+         if(!StoreTrendlineLifecycleState(0.0, false, 0.5, why))
+         {
+            LogTrendlineLifecycle("disarmed", source, "reason=" + why);
+            return;
+         }
+         storedState = 0.5;
+         storedExists = true;
+      }
+      LogTrendlineLifecycle("working", source,
+                            "kind=" + activeKind + " ticket=" + (string)activeTicket);
+      return;
+   }
+
+   if(storedExists && TrendlineStateIsWorking(storedState))
+   {
+      long completedGeneration = TrendlineGenerationFromState(storedState);
+      if(!StoreTrendlineLifecycleState(storedState, true, (double)completedGeneration, why))
+      {
+         LogTrendlineLifecycle("disarmed", source, "reason=" + why);
+         return;
+      }
+      storedState = (double)completedGeneration;
+      LogTrendlineLifecycle("consumed", source,
+                            "reason=The pending intent or resulting position is no longer active.");
+   }
+
+   if(!TrendlineArmGenerationIsValid())
+   {
+      LogTrendlineLifecycle("disarmed", source,
+                            "reason=Set TrendlineArmGeneration to a new positive integer to arm this line.");
+      return;
+   }
+
+   long completedGeneration = storedExists ? TrendlineGenerationFromState(storedState) : -1;
+   if(storedExists && completedGeneration >= TrendlineArmGeneration)
+   {
+      LogTrendlineLifecycle("consumed", source,
+                            "reason=This arm generation was already used; increase TrendlineArmGeneration to re-arm.");
+      return;
+   }
+
+   bool manualRearm = storedExists && completedGeneration >= 0;
+   LogTrendlineLifecycle("armed", source,
+                         manualRearm
+                         ? "event=manually_rearmed; this new generation permits one trade cycle."
+                         : "event=armed; this generation permits one trade cycle.");
+
+   // Reserve before calling the broker.  A restart, ambiguous broker response,
+   // or persistence uncertainty therefore fails closed rather than duplicating.
+   if(!StoreTrendlineLifecycleState(storedState, storedExists,
+                                    (double)TrendlineArmGeneration + 0.5, why))
+   {
+      LogTrendlineLifecycle("disarmed", source, "reason=" + why);
+      return;
+   }
+
+   ResetTrendlinePlacementMetadata();
+   if(PlaceOrReplacePendingTrendline())
+   {
+      LogTrendlineLifecycle("working", source,
+                            "reason=The one-shot pending-order intent was accepted.");
+      return;
+   }
+
+   if(!StoreTrendlineLifecycleState((double)TrendlineArmGeneration + 0.5, true,
+                                    (double)TrendlineArmGeneration, why))
+   {
+      LogTrendlineLifecycle("disarmed", source, "reason=" + why);
+      return;
+   }
+   LogTrendlineLifecycle("consumed", source,
+                         "reason=The one-shot pending-order intent was rejected or could not be confirmed.");
 }
 
 bool IsTransientPendingRetcode(const uint retcode)
@@ -1719,19 +1975,17 @@ int OnInit()
       }
    }
 
-   // Immediate behavior on applying settings:
-   // - If trendline is invalid/off -> cancel EA pending orders now
-   // - If trendline is valid/on  -> place immediately now
-   if(Strategy == STRAT_TRENDLINE_LIMIT)
-   {
+    // A valid named trendline is deliberately not enough to submit an order.
+    // The durable generation gate makes an explicit arm/re-arm one-shot.
+    if(Strategy == STRAT_TRENDLINE_LIMIT)
+    {
       if(!TrendlineShouldBeActive())
       {
          CancelAllPendingByMagic();
       }
       else
       {
-         // place immediately upon valid name submission
-         PlaceOrReplacePendingTrendline();
+          MaintainTrendlineLifecycle("OnInit");
       }
    }
    else if(Strategy == STRAT_STANDARD_LIMIT)
@@ -1794,35 +2048,8 @@ void OnTick()
          return;
       }
 
-      bool nowInPos = InPosition();
-
-      if(nowInPos)
-      {
-         // once filled, stop managing pendings
-         g_wasInPosition = true;
-         CancelAllPendingByMagic();
-         return;
-      }
-
-      // position just closed -> immediately re-arm next pending
-      if(g_wasInPosition)
-      {
-         g_wasInPosition = false;
-         PlaceOrReplacePendingTrendline();
-         return;
-      }
-
-      if(PendingAgeExpired())
-      {
-         CancelAllPendingByMagic();
-         return;
-      }
-
-      if(IsNewBar())
-      {
-         PlaceOrReplacePendingTrendline();
-      }
-      return;
+       MaintainTrendlineLifecycle("OnTick");
+       return;
    }
 
    if(Strategy == STRAT_STANDARD_LIMIT)
@@ -1879,25 +2106,5 @@ void OnTimer()
       return;
    }
 
-   bool nowInPos = InPosition();
-
-   if(nowInPos)
-   {
-      g_wasInPosition = true;
-      CancelAllPendingByMagic();
-      return;
-   }
-
-   if(g_wasInPosition)
-   {
-      g_wasInPosition = false;
-      PlaceOrReplacePendingTrendline();
-      return;
-   }
-
-   if(PendingAgeExpired())
-   {
-      CancelAllPendingByMagic();
-      return;
-   }
+    MaintainTrendlineLifecycle("OnTimer");
 }

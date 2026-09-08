@@ -289,3 +289,15 @@ Delivery
 - The one authorized fetch found origin/master equal to HEAD at 317a0814df36573288ef28299f16351903da915a; there were no intervening commits or filenames to integrate.
 - Only authorized task paths are intended for the final commit. Runtime JSON, deleted brief files, and uncertain bybit_monitor/settings.json remain user-owned and unstaged.
 - The exact final commit hash and successful normal push confirmation are reported in the delivery response because a commit cannot contain its own hash.
+
+Trader EA Phase 1: one-shot named-trendline lifecycle and manual re-arm
+
+- `Trader.mq5` now requires a positive `TrendlineArmGeneration` to arm a named trendline. The same unchanged name is manually re-armed only by increasing that generation.
+- A terminal-global lifecycle key is stable across account server/login, symbol, magic number, strategy, and trendline name. It atomically reserves an arm before submission, preserves working/consumed state through EA/chart/terminal reloads, and fails closed on uncertain state.
+- Accepted pending orders and their resulting positions are adopted on upgrade, then become consumed when absent; TP, SL, manual/broker closure, cancellation, deletion, expiry, rejection, and ambiguous acceptance cannot recreate an order. An active lifecycle blocks a re-arm from placing a concurrent second order.
+- Lifecycle logging is transition-based (`armed`, `working`, `consumed`) and marks explicit subsequent arms as `event=manually_rearmed`; no tick-driven replacement of a working pending order occurs.
+
+Focused verification
+
+- PASS `python -m pytest -q tests/test_trader_trendline_one_shot.py::test_trendline_lifecycle_reserves_a_durable_account_symbol_magic_name_generation tests/test_trader_trendline_one_shot.py::test_trendline_completion_and_cancellation_paths_consume_before_any_new_submission tests/test_trader_trendline_one_shot.py::test_same_named_line_requires_an_explicit_new_generation_to_rearm tests/test_trader_trendline_one_shot.py::test_reinitialization_adopts_existing_work_and_fails_closed_without_a_new_arm` — 4 passed in 0.29s (only test invocation).
+- No focused MetaEditor compiler command exists in this repository. No terminal, Pepperstone account, production data, or real order was accessed; compile/deployment remains a manual MT5 step.
