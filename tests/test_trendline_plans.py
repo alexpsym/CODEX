@@ -49,6 +49,87 @@ def _arm(store, payload=None):
     return store.arm(created["plan_id"], now_ms=6_000)
 
 
+def _phase11_process_lock(path, ready, release):
+    with plans.TrendlinePlanStore(path)._locked():
+        ready.set()
+        if not release.wait(10):
+            raise AssertionError("Lock-holder release timed out")
+
+
+def _phase11_process_claim(path, plan_id, ready, go, results):
+    ready.set()
+    if not go.wait(10):
+        raise AssertionError("Claim gate timed out")
+    store = plans.TrendlinePlanStore(path)
+    result = store.claim_trigger(plan_id, {"trigger_timestamp_ms":20000, "trigger_price":"1.2", "trigger_kind":"entered_band"}, now_ms=20000)
+    results.put((result["claimed"], result["execution_key"]))
+
+
+def test_submission_transitions_restart_and_cross_process_claim_lock(tmp_path, monkeypatch):
+    import multiprocessing
+    import time
+    store = plans.TrendlinePlanStore(tmp_path / "plans.json")
+    trigger = {"trigger_timestamp_ms":20000, "trigger_price":"1.2", "trigger_kind":"entered_band"}
+    for terminal in ("submitted", "failed", "uncertain"):
+        armed = _arm(store, _payload(test_trade=False))
+        key, pid = armed["execution_key"], armed["plan_id"]
+        claimed = store.claim_trigger(pid, trigger, now_ms=20000)["plan"]
+        assert plans.TrendlinePlanStore(store.path).get(pid) == claimed
+        with pytest.raises(plans.TrendlinePlanError):
+            store.resolve_claim(pid, status=terminal, outcome={"outcome":"executed"}, now_ms=20001)
+        before = store.path.read_bytes()
+        with monkeypatch.context() as patch:
+            patch.setattr(store, "_write", lambda _r: (_ for _ in ()).throw(plans.TrendlinePlanPersistenceError("mock disk unavailable")))
+            with pytest.raises(plans.TrendlinePlanPersistenceError): store.begin_submission(pid, execution_key=key, now_ms=20001)
+        assert store.path.read_bytes() == before
+        submitting = store.begin_submission(pid, execution_key=key, now_ms=20001)
+        assert submitting["status"] == "submitting" and submitting["execution_key"] == key
+        assert plans.TrendlinePlanStore(store.path).get(pid) == submitting
+        with pytest.raises(plans.TrendlinePlanError): store.begin_submission(pid, execution_key=key, now_ms=20002)
+        outcome = "executed" if terminal == "submitted" else terminal
+        final = store.resolve_claim(pid, status=terminal, outcome={"outcome":outcome}, now_ms=20002)
+        assert final["execution_key"] == key and final["status"] == terminal
+        assert plans.TrendlinePlanStore(store.path).get(pid) == final
+        assert not store.claim_trigger(pid, trigger, now_ms=20003)["claimed"]
+        with pytest.raises(plans.TrendlinePlanError): store.arm(pid, now_ms=20003)
+    simulated = _arm(store)
+    store.claim_trigger(simulated["plan_id"], trigger, now_ms=20000)
+    with pytest.raises(plans.TrendlinePlanError): store.begin_submission(simulated["plan_id"], execution_key=simulated["execution_key"], now_ms=20001)
+    assert store.resolve_claim(simulated["plan_id"], status="submitted", outcome={"outcome":"simulated"}, now_ms=20001)["execution_result"]["outcome"] == "simulated"
+
+    ctx = multiprocessing.get_context("spawn")
+    ready, release = ctx.Event(), ctx.Event()
+    holder = ctx.Process(target=_phase11_process_lock, args=(store.path, ready, release))
+    holder.start()
+    try:
+        assert ready.wait(10)
+        before = store.path.read_bytes()
+        start = time.monotonic()
+        with pytest.raises(plans.TrendlinePlanPersistenceError, match="lock unavailable"):
+            plans.TrendlinePlanStore(store.path, lock_timeout_seconds=0.05).create(_payload(), now_ms=5000)
+        assert time.monotonic()-start < 2 and store.path.read_bytes() == before
+    finally:
+        release.set()
+        holder.join(10)
+    assert holder.exitcode == 0
+    armed = _arm(store, _payload(test_trade=False))
+    go, results = ctx.Event(), ctx.Queue()
+    readiness = [ctx.Event(), ctx.Event()]
+    workers = [ctx.Process(target=_phase11_process_claim, args=(store.path, armed["plan_id"], event, go, results)) for event in readiness]
+    for worker in workers: worker.start()
+    try:
+        assert all(event.wait(10) for event in readiness)
+    finally:
+        go.set()
+        for worker in workers: worker.join(10)
+    assert all(worker.exitcode == 0 for worker in workers)
+    claims = [results.get(timeout=2), results.get(timeout=2)]
+    assert sorted(c[0] for c in claims) == [False, True]
+    assert {c[1] for c in claims} == {armed["execution_key"]}
+    results.close()
+    assert plans.TrendlinePlanStore(store.path).get(armed["plan_id"])["status"] == "claimed"
+
+
 def test_trendline_plan_schema_projection_evaluation_and_atomic_claims(tmp_path):
     store = plans.TrendlinePlanStore(tmp_path / "trendline_plans.json")
     created = store.create(_payload(), now_ms=5_000)

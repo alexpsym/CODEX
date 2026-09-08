@@ -61,15 +61,20 @@ class TrendlinePlanExecutor:
     _task: Optional[asyncio.Task] = field(default=None, init=False)
     _stop: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     _previous: Dict[str, Dict[str, object]] = field(default_factory=dict, init=False)
+    _cycle_guard: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     last_cycle: Optional[Dict[str, object]] = field(default=None, init=False)
     last_error: Optional[str] = field(default=None, init=False)
 
     def status(self) -> Dict[str, object]:
-        return {"running": self._task is not None and not self._task.done(), "last_cycle": self.last_cycle, "last_error": self.last_error}
+        unresolved = (self.last_cycle or {}).get("reconciliation_required", 0)
+        return {"running": self._task is not None and not self._task.done(), "last_cycle": self.last_cycle, "last_error": self.last_error,
+                "reconciliation_required": unresolved,
+                "reconciliation_message": "Unresolved claims require manual broker reconciliation; automatic retry is disabled." if unresolved else None}
 
     async def start(self) -> bool:
         if self.status()["running"]:
             return False
+        self._previous.clear()
         self._stop = asyncio.Event()
         self._task = asyncio.create_task(self._run(), name="local-trendline-plan-executor")
         return True
@@ -77,25 +82,38 @@ class TrendlinePlanExecutor:
     async def stop(self) -> bool:
         task = self._task
         if task is None or task.done():
+            self._previous.clear()
             return False
         self._stop.set()
-        await task
+        try:
+            await task
+        finally:
+            self._previous.clear()
         return True
 
     async def _run(self) -> None:
-        while not self._stop.is_set():
-            await self.cycle()
-            try:
-                await asyncio.wait_for(self._stop.wait(), timeout=self.interval_seconds)
-            except asyncio.TimeoutError:
-                pass
+        try:
+            while not self._stop.is_set():
+                await self.cycle()
+                try:
+                    await asyncio.wait_for(self._stop.wait(), timeout=self.interval_seconds)
+                except asyncio.TimeoutError:
+                    pass
+        finally:
+            self._previous.clear()
 
     async def cycle(self) -> Dict[str, object]:
+        async with self._cycle_guard:
+            return await self._cycle()
+
+    async def _cycle(self) -> Dict[str, object]:
         now = self.now_ms()
         processed = 0
         cycle_error = None
+        unresolved = 0
         try:
             registry = self.store.load()
+            unresolved = sum(p["status"] in {"claimed", "submitting"} for p in registry["plans"].values())
             for plan in registry["plans"].values():
                 if plan["status"] != "armed" or plan["trigger_claim"] is not None:
                     continue
@@ -106,13 +124,18 @@ class TrendlinePlanExecutor:
                         continue
                     await self._evaluate_one(plan)
                 except Exception as exc:
+                    self._previous.pop(str(plan["plan_id"]), None)
                     cycle_error = _safe_error(exc)
                 processed += 1
-            self.last_cycle = {"at_ms": now, "processed": processed}
+            self.last_cycle = {"at_ms": now, "processed": processed, "reconciliation_required": unresolved}
             self.last_error = cycle_error
         except Exception as exc:  # Cycle remains safe; no unclaimed plan was submitted.
+            self._previous.clear()
             self.last_error = _safe_error(exc)
-            self.last_cycle = {"at_ms": now, "processed": processed}
+            self.last_cycle = {"at_ms": now, "processed": processed, "reconciliation_required": unresolved}
+        except asyncio.CancelledError:
+            self._previous.clear()
+            raise
         return self.last_cycle
 
     async def _evaluate_one(self, plan: Mapping[str, object]) -> None:
@@ -126,6 +149,8 @@ class TrendlinePlanExecutor:
         tick_size = quote.get("tick_size")
         observation = {"timestamp_ms": quote.get("timestamp_ms"), "bid": quote.get("bid"), "ask": quote.get("ask")}
         previous = self._previous.get(plan_id)
+        if previous is not None and int(observation["timestamp_ms"]) <= int(previous["timestamp_ms"]):
+            raise InvalidQuote()
         self._previous[plan_id] = observation
         try:
             evaluation = evaluate_trigger(plan, observation, previous_observation=previous, now_ms=self.now_ms(), tick_size=tick_size)
@@ -167,8 +192,19 @@ class TrendlinePlanExecutor:
         if claimed["test_trade"]:
             self.store.resolve_claim(plan_id, status="submitted", outcome={"outcome": "simulated", "message": "Test plan triggered; no broker order was sent."}, now_ms=claim_now)
             return
+        # A failed durable transition leaves the claim unresolved and MUST NOT
+        # call the adapter. Reconstruction only processes armed plans.
+        submitting = self.store.begin_submission(plan_id, execution_key=str(claim["execution_key"]), now_ms=self.now_ms())
         try:
-            result = await _await(self.submit(claimed, calculated, str(claim["execution_key"])))
+            result = await _await(self.submit(submitting, calculated, str(claim["execution_key"])))
+        except asyncio.CancelledError:
+            try:
+                self.store.resolve_claim(plan_id, status="uncertain", outcome={"outcome": "uncertain", "message": "Submission interrupted; manual broker reconciliation required."}, now_ms=self.now_ms())
+            except Exception:
+                # If disk/lock is unavailable, durable submitting still blocks
+                # retries. Never replace cancellation with a persistence error.
+                pass
+            raise
         except DefiniteSubmissionFailure as exc:
             self.store.resolve_claim(plan_id, status="failed", outcome={"outcome": "failed", "message": _safe_error(exc)}, now_ms=claim_now)
         except Exception as exc:

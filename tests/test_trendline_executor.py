@@ -81,7 +81,7 @@ def test_executor_final_snapshot_outcomes_and_authorization(tmp_path: Path, monk
             if mutation == "error": raise ValueError("secret account https://private token")
             return {"quantity": "4", "trigger_quote": snapshot(final, 3100, **(final_changes or {}))}
         async def submit(_plan, calc, key):
-            assert store.get(plan["plan_id"])["status"] == "claimed"
+            assert store.get(plan["plan_id"])["status"] == "submitting"
             assert key == plan["execution_key"] and calc["quantity"] == "4"
             counters["submit"] += 1
             if error: raise error
@@ -162,4 +162,169 @@ def test_executor_final_snapshot_outcomes_and_authorization(tmp_path: Path, monk
         assert not live_execution_authorized(legacy)
         with pytest.raises(TrendlinePlanError): auth_store.claim_trigger(legacy["plan_id"], {}, now_ms=2500)
         assert auth_store.get(legacy["plan_id"])["trigger_claim"] is None
+    asyncio.run(run())
+
+
+def test_executor_restart_reconnect_submission_cancellation_and_duplicates(tmp_path, monkeypatch):
+    from decimal import Decimal
+    from render.trendline_plans import TrendlinePlanPersistenceError, live_execution_authorized
+
+    class Fixture:
+        def __init__(self, name, mode="confirmed_cross", **overrides):
+            self.store = TrendlinePlanStore(tmp_path / name / "plans.json")
+            payload = {**_payload("oanda"), "trigger_mode":mode, "max_quote_age_ms":2000, "max_observation_gap_ms":1000, **overrides}
+            self.plan = self.store.arm(self.store.create(payload, now_ms=1000)["plan_id"], now_ms=1500)
+            self.now, self.price, self.fault = 3000, "99", None
+            self.calls = {"quote":0, "calculate":0, "submit":0}
+            self.executor = self.build()
+        def build(self):
+            return TrendlinePlanExecutor(self.store, self.quote, self.calculate, self.submit, live_execution_authorized, now_ms=lambda:self.now)
+        def snapshot(self):
+            return {"instrument":"USD_JPY", "bid":str(Decimal(self.price)-Decimal("0.1")), "ask":self.price, "tick_size":"0.1", "timestamp_ms":self.now}
+        async def quote(self, plan):
+            self.calls["quote"] += 1
+            if self.fault == "disconnect": raise ConnectionError("private")
+            q = self.snapshot()
+            changes = {"stale":{"timestamp_ms":0}, "future":{"timestamp_ms":self.now+1}, "wrong":{"instrument":"EUR_USD"}, "malformed":{"bid":"NaN"}}
+            q.update(changes.get(self.fault, {}))
+            return q
+        async def calculate(self, plan, q):
+            self.calls["calculate"] += 1
+            if self.fault == "calculation": raise ValueError("private")
+            if self.fault == "expiry": self.now = self.plan["expiry_at_ms"]
+            final = dict(q)
+            if self.fault == "final": final["instrument"] = "EUR_USD"
+            return {"trigger_quote":final, "quantity":"4"}
+        async def submit(self, plan, calculation, key):
+            assert self.store.get(plan["plan_id"])["status"] == "submitting"
+            assert key == self.plan["execution_key"]
+            self.calls["submit"] += 1
+            return {"accepted":True, "order_id":"mock-order"}
+        async def step(self, now, price, fault=None):
+            self.now, self.price, self.fault = now, price, fault
+            await self.executor.cycle()
+
+    async def run():
+        for mode in ("confirmed_cross", "touch"):
+            for fault in ("disconnect", "stale", "future", "wrong", "malformed", "calculation", "final", "reversed"):
+                f = Fixture(mode+fault, mode)
+                await f.step(3000, "99")
+                await f.step(2900 if fault=="reversed" else 3100, "101", fault)
+                assert f.calls["submit"] == 0 and not f.executor._previous
+                await f.step(3200, "101")  # Reconnect seeds; must not use pre-fault 99.
+                assert f.calls["submit"] == 0
+                await f.step(3300, "99")
+                assert f.calls["submit"] == 1
+                assert f.store.get(f.plan["plan_id"])["trigger_claim"]["trigger_price"] == "99"
+                await f.step(3400, "101")
+                assert f.calls["submit"] == 1
+            for elapsed in (1100, 10000):
+                f = Fixture(mode+str(elapsed), mode)
+                await f.step(3000, "99")
+                await f.step(3000+elapsed, "101")
+                assert f.calls["submit"] == 0
+                await f.step(3100+elapsed, "99")
+                assert f.calls["submit"] == 1
+            f = Fixture(mode+"restart", mode)
+            await f.step(3000, "99")
+            f.executor = f.build()
+            await f.step(3100, "101")
+            assert f.calls["submit"] == 0
+            # Exercise real lifecycle methods with a stub loop, not monitoring.
+            async def stub_loop(): await f.executor._stop.wait()
+            monkeypatch.setattr(f.executor, "_run", stub_loop)
+            assert await f.executor.start()
+            assert not f.executor._previous and not await f.executor.start()
+            f.executor._previous["stub"] = {}
+            assert await f.executor.stop() and not f.executor._previous
+            assert not await f.executor.stop()
+            await f.step(3200, "99")
+            assert f.calls["submit"] == 0
+            await f.step(3300, "101")
+            assert f.calls["submit"] == 1
+            assert f.store.get(f.plan["plan_id"])["trigger_claim"]["trigger_price"] == "101"
+
+        touch = Fixture("direct-touch", "touch")
+        await touch.step(3000, "100")
+        assert touch.calls["submit"] == 1
+        # Expiry before acquisition, during final calculation, immediately at claim.
+        for boundary in ("before", "calculation", "claim"):
+            f = Fixture("expiry-"+boundary, "touch", expiry_at_ms=4000)
+            if boundary == "claim":
+                original_get = f.store.get
+                def advancing_get(pid):
+                    record = original_get(pid)
+                    f.now = 4000
+                    return record
+                monkeypatch.setattr(f.store, "get", advancing_get)
+            await f.step(4000 if boundary=="before" else 3000, "100", "expiry" if boundary=="calculation" else None)
+            assert f.calls["submit"] == 0
+            assert f.store.load()["plans"][f.plan["plan_id"]]["trigger_claim"] is None
+            if boundary == "before": assert f.calls["quote"] == 0
+
+        for failure in ("disk", "lock"):
+            f = Fixture("begin-"+failure, "touch")
+            def fail_begin(*a, **kw): raise TrendlinePlanPersistenceError("Registry unavailable")
+            monkeypatch.setattr(f.store, "begin_submission", fail_begin)
+            await f.step(3000, "100")
+            assert f.calls["submit"] == 0 and f.store.get(f.plan["plan_id"])["status"] == "claimed"
+            restarted = f.build()
+            await restarted.cycle()
+            assert f.calls["submit"] == 0 and restarted.status()["reconciliation_required"] == 1
+
+        # Cancellation after durable submitting preserves cancellation and uncertainty.
+        for disk_failure in (False, True):
+            f = Fixture("cancel-"+str(disk_failure), "touch")
+            entered = asyncio.Event()
+            async def gated_submit(plan, calc, key):
+                assert f.store.get(plan["plan_id"])["status"] == "submitting"
+                f.calls["submit"] += 1
+                entered.set()
+                await asyncio.Event().wait()
+            f.executor.submit = gated_submit
+            if disk_failure:
+                monkeypatch.setattr(f.store, "resolve_claim", lambda *a, **kw: (_ for _ in ()).throw(TrendlinePlanPersistenceError("disk")))
+            f.price = "100"
+            task = asyncio.create_task(f.executor.cycle())
+            await asyncio.wait_for(entered.wait(), 2)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError): await task
+            assert not f.executor._previous
+            assert f.store.get(f.plan["plan_id"])["status"] == ("submitting" if disk_failure else "uncertain")
+            await f.build().cycle()
+            assert f.calls["submit"] == 1
+
+        # Both instances see armed and finish calculation before contending to claim.
+        f = Fixture("competing", "touch")
+        f.price = "100"
+        second = f.build()
+        ready, go = asyncio.Event(), asyncio.Event()
+        arrivals = 0
+        async def gated_calculation(plan, q):
+            nonlocal arrivals
+            arrivals += 1
+            if arrivals == 2: ready.set()
+            await go.wait()
+            return {"trigger_quote":q}
+        f.executor.calculate = second.calculate = gated_calculation
+        tasks = [asyncio.create_task(e.cycle()) for e in (f.executor, second)]
+        await asyncio.wait_for(ready.wait(), 2)
+        go.set()
+        await asyncio.gather(*tasks)
+        assert f.calls["submit"] == 1
+        await asyncio.gather(f.executor.cycle(), f.executor.cycle(), second.cycle(), f.build().cycle())
+        assert f.calls["submit"] == 1
+        # Every persisted unresolved/terminal status is inert after reconstruction.
+        for status in ("claimed", "submitting", "submitted", "failed", "uncertain"):
+            f = Fixture("inert-"+status, "touch")
+            pid, key = f.plan["plan_id"], f.plan["execution_key"]
+            f.store.claim_trigger(pid, {"trigger_timestamp_ms":3000, "trigger_price":"100", "trigger_kind":"touch"}, now_ms=3000)
+            if status != "claimed": f.store.begin_submission(pid, execution_key=key, now_ms=3000)
+            if status not in {"claimed", "submitting"}:
+                f.store.resolve_claim(pid, status=status, outcome={"outcome":"executed" if status=="submitted" else status}, now_ms=3000)
+            reconstructed = f.build()
+            await reconstructed.cycle()
+            assert f.calls == {"quote":0, "calculate":0, "submit":0}
+            assert f.store.get(pid)["status"] == status
+            if status in {"claimed", "submitting"}: assert "manual broker reconciliation" in reconstructed.status()["reconciliation_message"]
     asyncio.run(run())

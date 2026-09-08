@@ -12,6 +12,8 @@ import json
 import os
 import tempfile
 import threading
+import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -448,12 +450,67 @@ def evaluate_trigger(
 
 @dataclass
 class TrendlinePlanStore:
-    """A same-process locked, atomically persisted plan registry."""
+    """A bounded process/thread-locked, atomically persisted plan registry."""
 
     path: Path = DEFAULT_PATH
+    lock_timeout_seconds: float = 2.0
 
     def __post_init__(self) -> None:
         self.path = Path(self.path)
+        if not 0 <= self.lock_timeout_seconds <= 5:
+            raise TrendlinePlanPersistenceError("Registry lock timeout must be between zero and five seconds.")
+
+    @contextmanager
+    def _locked(self):
+        # Never unlink this file: every process must lock the same inode even
+        # while the JSON registry itself is atomically replaced. OS locks are
+        # released on process exit; a leftover lock file is not a stale lock.
+        deadline = time.monotonic() + self.lock_timeout_seconds
+        if not _LOCK.acquire(timeout=self.lock_timeout_seconds):
+            raise TrendlinePlanPersistenceError("Registry lock unavailable.")
+        handle = None
+        acquired = False
+        try:
+            try:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                handle = self.path.with_name(self.path.name + ".lock").open("a+b")
+                if os.name == "nt":
+                    import msvcrt
+                    def lock():
+                        handle.seek(0)
+                        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                    def unlock():
+                        handle.seek(0)
+                        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+                    def lock():
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    def unlock():
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                while True:
+                    try:
+                        lock()
+                        acquired = True
+                        break
+                    except OSError:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise TrendlinePlanPersistenceError("Registry lock unavailable.") from None
+                        time.sleep(min(0.01, remaining))
+            except OSError:
+                raise TrendlinePlanPersistenceError("Registry lock unavailable.") from None
+            yield
+        finally:
+            try:
+                if handle is not None:
+                    try:
+                        if acquired:
+                            unlock()
+                    finally:
+                        handle.close()
+            finally:
+                _LOCK.release()
 
     def _empty_registry(self) -> Dict[str, object]:
         return {"schema_version": REGISTRY_SCHEMA_VERSION, "plans": {}}
@@ -483,7 +540,7 @@ class TrendlinePlanStore:
         return {"schema_version": REGISTRY_SCHEMA_VERSION, "plans": canonical}
 
     def load(self) -> Dict[str, object]:
-        with _LOCK:
+        with self._locked():
             return copy.deepcopy(self._read())
 
     def _write(self, registry: Mapping[str, object]) -> None:
@@ -525,14 +582,14 @@ class TrendlinePlanStore:
             "live_authorization": None,
         })
         plan = validate_plan(record)
-        with _LOCK:
+        with self._locked():
             registry = self._read()
             registry["plans"][plan["plan_id"]] = plan
             self._write(registry)
         return copy.deepcopy(plan)
 
     def get(self, plan_id: str) -> Dict[str, object]:
-        with _LOCK:
+        with self._locked():
             registry = self._read()
             try:
                 return copy.deepcopy(registry["plans"][_text(plan_id, "plan_id")])
@@ -546,7 +603,7 @@ class TrendlinePlanStore:
         blocked = set(changes) & _IMMUTABLE_FIELDS
         if blocked:
             raise TrendlinePlanError(f"Plan update cannot change immutable fields: {', '.join(sorted(blocked))}.")
-        with _LOCK:
+        with self._locked():
             registry = self._read()
             plan = registry["plans"].get(_text(plan_id, "plan_id"))
             if plan is None:
@@ -599,12 +656,12 @@ class TrendlinePlanStore:
 
     def arm(self, plan_id: str, *, now_ms: Optional[int] = None) -> Dict[str, object]:
         now = utc_epoch_ms() if now_ms is None else _int_ms(now_ms, "now_ms")
-        with _LOCK:
+        with self._locked():
             return self._transition(plan_id, target="armed", event="armed", now_ms=now)
 
     def authorize_live_and_arm(self, plan_id: str, *, now_ms: Optional[int] = None) -> Dict[str, object]:
         now = utc_epoch_ms() if now_ms is None else _int_ms(now_ms, "now_ms")
-        with _LOCK:
+        with self._locked():
             registry = self._read(); plan = registry["plans"].get(_text(plan_id, "plan_id"))
             if plan is None: raise TrendlinePlanError("Unknown trendline plan.")
             if plan["status"] != "draft" or plan["trigger_claim"] is not None: raise TrendlinePlanError("Only an unclaimed draft plan may be armed.")
@@ -616,12 +673,12 @@ class TrendlinePlanStore:
 
     def cancel(self, plan_id: str, *, now_ms: Optional[int] = None) -> Dict[str, object]:
         now = utc_epoch_ms() if now_ms is None else _int_ms(now_ms, "now_ms")
-        with _LOCK:
+        with self._locked():
             return self._transition(plan_id, target="cancelled", event="cancelled", now_ms=now)
 
     def expire(self, plan_id: str, *, now_ms: Optional[int] = None) -> Dict[str, object]:
         now = utc_epoch_ms() if now_ms is None else _int_ms(now_ms, "now_ms")
-        with _LOCK:
+        with self._locked():
             return self._transition(plan_id, target="expired", event="expired", now_ms=now)
 
     def claim_trigger(self, plan_id: str, trigger: Mapping[str, object], *, now_ms: Optional[int] = None, expected_revision: Optional[int] = None, expected_execution_key: Optional[str] = None) -> Dict[str, object]:
@@ -629,7 +686,7 @@ class TrendlinePlanStore:
         now = utc_epoch_ms() if now_ms is None else _int_ms(now_ms, "now_ms")
         if not isinstance(trigger, Mapping):
             raise TrendlinePlanError("trigger must be an object.")
-        with _LOCK:
+        with self._locked():
             registry = self._read()
             plan = registry["plans"].get(_text(plan_id, "plan_id"))
             if plan is None:
@@ -663,18 +720,39 @@ class TrendlinePlanStore:
             self._write(registry)
             return {"claimed": True, "duplicate": False, "execution_key": canonical["execution_key"], "plan": copy.deepcopy(canonical)}
 
+    def begin_submission(self, plan_id: str, *, execution_key: str, now_ms: Optional[int] = None) -> Dict[str, object]:
+        """Persist the non-retryable boundary before any possible broker request."""
+        now = utc_epoch_ms() if now_ms is None else _int_ms(now_ms, "now_ms")
+        with self._locked():
+            registry = self._read()
+            plan = registry["plans"].get(_text(plan_id, "plan_id"))
+            if plan is None:
+                raise TrendlinePlanError("Unknown trendline plan.")
+            if plan["status"] != "claimed" or plan["trigger_claim"] is None or plan["execution_key"] != execution_key or plan["test_trade"]:
+                raise TrendlinePlanError("Only the matching non-test claim may begin submission.")
+            updated = copy.deepcopy(plan)
+            updated["status"] = "submitting"
+            updated["revision"] += 1
+            updated["updated_at_ms"] = now
+            updated["lifecycle"] = {"last_transition": "submission_started", "last_transition_at_ms": now}
+            canonical = validate_plan(updated)
+            registry["plans"][plan_id] = canonical
+            self._write(registry)
+            return copy.deepcopy(canonical)
+
     def resolve_claim(self, plan_id: str, *, status: str, outcome: Mapping[str, object], now_ms: Optional[int] = None) -> Dict[str, object]:
         """Persist a final claimed outcome; callers must never retry it automatically."""
         now = utc_epoch_ms() if now_ms is None else _int_ms(now_ms, "now_ms")
         if status not in {"submitted", "failed", "uncertain"}:
             raise TrendlinePlanError("Claim resolution status must be submitted, failed, or uncertain.")
-        with _LOCK:
+        with self._locked():
             registry = self._read()
             plan = registry["plans"].get(_text(plan_id, "plan_id"))
             if plan is None:
                 raise TrendlinePlanError("Unknown trendline plan.")
-            if plan["status"] != "claimed" or plan["trigger_claim"] is None:
-                raise TrendlinePlanError("Only a claimed plan may be resolved.")
+            simulation = plan["test_trade"] and plan["status"] == "claimed" and status == "submitted" and outcome.get("outcome") == "simulated"
+            if plan["trigger_claim"] is None or not (simulation or plan["status"] == "submitting"):
+                raise TrendlinePlanError("Only submitting plans or claimed test simulations may be resolved.")
             updated = copy.deepcopy(plan)
             updated["status"] = status
             updated["execution_result"] = _normalise_execution_result({**dict(outcome), "recorded_at_ms": now})
