@@ -1,3 +1,12 @@
+Final trendline-panel guidance correction
+
+- Required/verified starting HEAD: 1ef3808b8ee8b58f04fa25903ec847c090da669c. Preserved all pre-existing modified, deleted and untracked user-owned paths. The real trendline registry and lock file were not accessed.
+- Replaced obsolete stored-plan-only guidance in the actual calculator panel. It now accurately states that armed Bybit/OANDA plans are monitored only after Start monitoring, Local Trading Tools must remain running with the computer awake, test plans simulate, fresh validated eligible non-test plans can submit once, live plans need explicit confirmation, TradingView anchors are manual, and Pepperstone remains on its MT5 trendline EA. IDs, controls, layout, styles, monitor Start/Stop behavior and execution/API logic were unchanged.
+- Exact focused invocation: python -m pytest -q --tb=short tests/test_master_service_calculator_api.py::test_local_trendline_panel_describes_current_execution_behavior
+  Result: passed. The test renders the actual calculator response, asserts each accurate guidance statement, both obsolete phrases absent, and existing Start/Stop controls retained. No other tests were run or rerun.
+- Changed only: render/master_service.py; tests/test_master_service_calculator_api.py; summary/CODEX_SUMMARY_latest.txt. Scoped git diff --check passed.
+- No real/live/demo service, monitor, executor, broker, quote/account/order, exchange, Render, TradingView, browser, webhook, notification or production-data operation ran. No implementation blocker remains.
+
 Phase 11 corrective follow-up: monotonic terminal timestamps and durable reconciliation visibility
 
 - Required/verified starting HEAD: 1b62ac77a92de29a67657a80b80dd4daa19d0aba. All pre-existing unrelated modified/deleted/untracked paths were preserved. The real trendline registry and sibling lock file were never accessed.

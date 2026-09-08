@@ -271,6 +271,26 @@ def test_merged_calculator_page_returns_200() -> None:
     assert 'id="calc-webhook-copy-url"' in html
 
 
+def test_local_trendline_panel_describes_current_execution_behavior() -> None:
+    response = asyncio.run(master_service.merged_calculator_page())
+    assert response.status_code == 200
+    html = response.body.decode("utf-8")
+    panel_start = html.index('id="trendline-plans-panel"')
+    panel = html[panel_start:html.index("</section>", panel_start)]
+    for guidance in (
+        "Armed Bybit and OANDA plans are monitored locally only after you start monitoring.",
+        "Keep Local Trading Tools running and the computer awake.",
+        "Test plans simulate without sending broker orders; eligible non-test plans can submit once after fresh validation, and live plans require explicit live confirmation.",
+        "TradingView drawings are not imported automatically: copy both anchor times and prices manually.",
+        "Pepperstone trendline execution remains handled by the existing MT5 trendline EA.",
+    ):
+        assert guidance in panel
+    assert "Stored-plan foundation only" not in panel
+    assert "Plans can be stored and armed, but are not yet monitored or executed." not in panel
+    assert 'id="trendline-monitor-start"' in panel
+    assert 'id="trendline-monitor-stop"' in panel
+
+
 def test_merged_calculator_page_has_unique_expected_element_ids() -> None:
     response = asyncio.run(master_service.merged_calculator_page())
     assert response.status_code == 200
