@@ -326,3 +326,16 @@ Focused verification
 - One pytest invocation: PASS `tests/test_trader_trendline_one_shot.py::test_strict_v3_parse_and_replacement_outcomes_fail_closed_without_retry` — 1 passed in 0.22s. Pytest emitted two cache-write warnings because `.pytest_cache` is not writable; they do not affect the result.
 - The single availability check, `Get-Command MetaEditor64.exe -ErrorAction SilentlyContinue`, found no command, so compilation remains unavailable and unverified; no MetaEditor compile invocation was run.
 - No MT5 terminal, broker, account, market data, production data, demo order, live order, or other live/production operation occurred. Remaining manual action is to compile `Trader.mq5` in MetaEditor, deploy through the normal non-live process, and review the runtime journal. Phase 2 was not started.
+
+Trader EA Phase 2: explicit EMA bounce selection
+
+- Baseline: `7ee8903989d1b6d167a416e233554d84822e716c`. Authorized changed paths are `mt5-clone/MQL5/Experts/Trader.mq5`, `tests/test_trader_ema_selection.py`, and this summary only.
+- EMA Bounce now exposes `BounceReferenceEMA` with MT5-facing `Fast EMA` and `Slow EMA` choices and defaults to Slow EMA. In dual mode both configured EMA handles still determine trend from fast-versus-slow ordering, while one centralized selector applies the chosen EMA to the closed candle's above/below bounce-reference condition. In single mode the selector always returns the `TrendEMAPeriod` EMA and ignores the fast/slow choice.
+- Required EMA periods are validated before handle creation and invalid parameters fail initialization clearly. Closed-candle/new-bar timing, countertrend candle direction, market execution, risk/SL/TP/Net-R, one-trade protection, trendline lifecycle, standard strategies, and spread export paths remain unchanged. Source property and runtime `EA_VERSION` are synchronized at `2.37`.
+
+Focused verification and deployment
+
+- One pytest invocation: PASS `tests/test_trader_ema_selection.py::test_dual_ema_bounce_reference_is_explicit_selectable_and_defaults_slow` and PASS `tests/test_trader_ema_selection.py::test_single_ema_mode_period_validation_version_and_execution_paths_are_preserved` — 2 passed in 0.24s. Two `.pytest_cache` access warnings did not affect results.
+- The exact `C:\Program Files\Pepperstone MetaTrader 5\MetaEditor64.exe` compile returned process exit code 1, while its explicit log reported `0 errors, 0 warnings` and successful code generation. The source hash remained unchanged and the fresh 131778-byte EX5 was generated at `2026-09-09T09:40:52.2065964Z`.
+- One targeted deployment copied only `Trader.mq5` and `Trader.ex5` to the specified Pepperstone Experts directory. Repository/deployed SHA-256 matches are MQ5 `0D53255CBEC0AD9BB9696BB95949F3323A138691F1D8E09D473F950B8E7E5806` and EX5 `CA19DB74AE61FE97C50CA2B2DE40FB2711078E0D94B8A842FB9D08CFBC0B38DA`.
+- The verified prior deployment backup is `C:\Users\User\AppData\Local\Temp\codex-trader-v237-backup-20260909-194155672`. No MT5 terminal was launched and no live/demo account, broker, market data, or order operation was accessed. Phase 3 was not started.

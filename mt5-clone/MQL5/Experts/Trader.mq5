@@ -1,6 +1,6 @@
 #property strict
 #property description "Trader EA: trendline/standard limits, EMA bounce, and token-gated one-shot standard market execution. SL/TP are set by DISTANCE in MT5 POINTS, with optional AutoTP NetRR."
-#property version   "2.36"
+#property version   "2.37"
 
 #include <Trade/Trade.mqh>
 CTrade trade;
@@ -65,6 +65,12 @@ input bool   UseDualEMA       = true;
 input int    FastEMAPeriod    = 9;
 input int    SlowEMAPeriod    = 20;
 input int    TrendEMAPeriod   = 20;
+enum EmaBounceReference
+{
+   EMA_BOUNCE_FAST = 0, // Fast EMA
+   EMA_BOUNCE_SLOW = 1  // Slow EMA
+};
+input EmaBounceReference BounceReferenceEMA = EMA_BOUNCE_SLOW; // Dual-EMA mode only; single-EMA mode always uses TrendEMAPeriod.
 input bool   Debug            = false;
 
 // -------------------- Orders housekeeping --------------------
@@ -127,7 +133,7 @@ int hSlow  = INVALID_HANDLE;
 int hTrend = INVALID_HANDLE;
 
 string EA_COMMENT = "Trader";
-string EA_VERSION = "2.36";
+string EA_VERSION = "2.37";
 
 void Dbg(const string msg){ if(Debug) Print(EA_COMMENT, ": ", msg); }
 bool PlaceOrReplacePendingLimitAtEntry(const bool isBuyLimit,
@@ -853,6 +859,33 @@ bool GetBufferValue(const int handle, const int bufferIndex, const int shift, do
    return true;
 }
 
+double SelectEmaBounceReference(const double fastValue,
+                                const double slowValue,
+                                const double trendValue)
+{
+   if(!UseDualEMA) return trendValue;
+   return (BounceReferenceEMA == EMA_BOUNCE_FAST ? fastValue : slowValue);
+}
+
+bool ValidateEmaBouncePeriods()
+{
+   if(UseDualEMA)
+   {
+      if(FastEMAPeriod <= 0 || SlowEMAPeriod <= 0)
+      {
+         Print(EA_COMMENT, ": EMA Bounce initialization failed: FastEMAPeriod and SlowEMAPeriod must both be positive in dual-EMA mode.");
+         return false;
+      }
+      return true;
+   }
+   if(TrendEMAPeriod <= 0)
+   {
+      Print(EA_COMMENT, ": EMA Bounce initialization failed: TrendEMAPeriod must be positive in single-EMA mode.");
+      return false;
+   }
+   return true;
+}
+
 bool GetEmaBounceSignal(ENUM_ORDER_TYPE &outType)
 {
    double c1 = iClose(_Symbol, _Period, 1);
@@ -869,16 +902,18 @@ bool GetEmaBounceSignal(ENUM_ORDER_TYPE &outType)
       double fast1=0, slow1=0;
       if(!GetBufferValue(hFast, 0, 1, fast1)) return false;
       if(!GetBufferValue(hSlow, 0, 1, slow1)) return false;
+      double reference1 = SelectEmaBounceReference(fast1, slow1, 0.0);
 
-      up   = (c1 > slow1 && fast1 > slow1);
-      down = (c1 < slow1 && fast1 < slow1);
+      up   = (c1 > reference1 && fast1 > slow1);
+      down = (c1 < reference1 && fast1 < slow1);
    }
    else
    {
       double ema1=0;
       if(!GetBufferValue(hTrend, 0, 1, ema1)) return false;
-      up   = (c1 > ema1);
-      down = (c1 < ema1);
+      double reference1 = SelectEmaBounceReference(0.0, 0.0, ema1);
+      up   = (c1 > reference1);
+      down = (c1 < reference1);
    }
 
    if(up && candleBear){ outType = ORDER_TYPE_BUY;  return true; }
@@ -2453,6 +2488,7 @@ int OnInit()
    // EMA handles only if strategy needs them
    if(Strategy == STRAT_EMA_BOUNCE)
    {
+      if(!ValidateEmaBouncePeriods()) return INIT_PARAMETERS_INCORRECT;
       if(UseDualEMA)
       {
          hFast = iMA(_Symbol, _Period, FastEMAPeriod, 0, MODE_EMA, PRICE_CLOSE);
