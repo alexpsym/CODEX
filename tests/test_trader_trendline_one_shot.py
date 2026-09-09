@@ -131,14 +131,26 @@ def test_strict_v3_parse_and_replacement_outcomes_fail_closed_without_retry() ->
     assert "record.orderType != ORDER_TYPE_SELL_LIMIT" in relationships
     assert "record.replacing && (!record.working || record.ticket == 0)" in relationships
 
-    definite = submit.split("if(!sendOk && IsDefinitePendingRejectionRetcode(retcode)", 1)[1].split(
+    accepted = submit.split("ulong observed = 0;", 1)[0]
+    assert "if(sendOk && IsTradePlacementAccepted(retcode) && resultTicket > 0)" in accepted
+    assert "TrendlinePendingMatchesPreparedTerms(resultTicket, record, entry, sl, tp, volume)" in accepted
+
+    definite = submit.split("if(IsDefinitePendingRejectionRetcode(retcode)", 1)[1].split(
         'why = "Replacement outcome is ambiguous', 1
     )[0]
+    assert "sendOk" not in definite
     assert "resultTicket == 0 && visibleMatches == 0" in definite
     assert "return EXACT_REPLACEMENT_CONSUMED" in definite
-    assert "return EXACT_REPLACEMENT_UNRESOLVED" in submit.split(
+    unresolved = submit.split(
         'why = "Replacement outcome is ambiguous', 1
     )[1]
+    assert "return EXACT_REPLACEMENT_UNRESOLVED" in unresolved
+    assert submit.count("EXACT_REPLACEMENT_CONSUMED") == 1
+    assert "IsTransientPendingRetcode" not in definite
+    assert "uint retcode = trade.ResultRetcode()" in submit
+    assert "ulong resultTicket = (ulong)trade.ResultOrder()" in submit
+    assert "int visibleMatches = CountTrendlinePendingIdentity(record, observed)" in submit
+    assert '#property version   "2.36"' in trader and 'EA_VERSION = "2.36"' in trader
 
     assert replace.count("SubmitExactTrendlineReplacement(") == 1
     assert replace.index("transition.replacing = true") < replace.index(

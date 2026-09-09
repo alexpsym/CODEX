@@ -1,6 +1,6 @@
 #property strict
 #property description "Trader EA: trendline/standard limits, EMA bounce, and token-gated one-shot standard market execution. SL/TP are set by DISTANCE in MT5 POINTS, with optional AutoTP NetRR."
-#property version   "2.35"
+#property version   "2.36"
 
 #include <Trade/Trade.mqh>
 CTrade trade;
@@ -127,7 +127,7 @@ int hSlow  = INVALID_HANDLE;
 int hTrend = INVALID_HANDLE;
 
 string EA_COMMENT = "Trader";
-string EA_VERSION = "2.35";
+string EA_VERSION = "2.36";
 
 void Dbg(const string msg){ if(Debug) Print(EA_COMMENT, ": ", msg); }
 bool PlaceOrReplacePendingLimitAtEntry(const bool isBuyLimit,
@@ -1410,7 +1410,7 @@ ExactReplacementResult SubmitExactTrendlineReplacement(const TrendlineLifecycleR
    }
    ulong observed = 0;
    int visibleMatches = CountTrendlinePendingIdentity(record, observed);
-   if(!sendOk && IsDefinitePendingRejectionRetcode(retcode) &&
+   if(IsDefinitePendingRejectionRetcode(retcode) &&
       resultTicket == 0 && visibleMatches == 0)
    {
       why = "Replacement was definitely rejected and no exact lifecycle order exists.";
