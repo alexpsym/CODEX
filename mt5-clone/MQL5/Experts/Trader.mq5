@@ -1,6 +1,6 @@
 #property strict
 #property description "Trader EA: trendline/standard limits, EMA bounce, and token-gated one-shot standard market execution. SL/TP are set by DISTANCE in MT5 POINTS, with optional AutoTP NetRR."
-#property version   "2.32"
+#property version   "2.33"
 
 #include <Trade/Trade.mqh>
 CTrade trade;
@@ -100,9 +100,9 @@ bool     g_lastPendingFailureStructural = false;
 bool     g_lastPendingAcceptanceMismatch = false;
 const string STANDARD_MARKET_EXECUTE_BUTTON = "TraderExecuteStandardMarket";
 string   g_trendlineLifecycleStatus = "";
-// MT5 terminal globals are doubles; keep generations below 2^52 so the .5
-// working marker remains exactly representable.
-const long TRENDLINE_ARM_GENERATION_MAX = 4503599627370495;
+bool     g_trendlineTrackingFailed = false;
+// Keeps the lifecycle comment within common MT5 broker comment limits.
+const long TRENDLINE_ARM_GENERATION_MAX = 999999999;
 
 void RefreshStandardMarketExecuteButton()
 {
@@ -127,15 +127,17 @@ int hSlow  = INVALID_HANDLE;
 int hTrend = INVALID_HANDLE;
 
 string EA_COMMENT = "Trader";
-string EA_VERSION = "2.20";
+string EA_VERSION = "2.33";
 
 void Dbg(const string msg){ if(Debug) Print(EA_COMMENT, ": ", msg); }
 bool PlaceOrReplacePendingLimitAtEntry(const bool isBuyLimit,
                                        const double rawEntry,
                                        const bool allowReplace,
+                                       const string orderComment,
                                        string &why);
 bool IsTradePlacementAccepted(const uint retcode);
 bool StandardLimitShouldBeActive();
+string TrendlineOrderComment(const long generation);
 
 bool IsNewBar()
 {
@@ -935,7 +937,8 @@ bool PlaceOrReplacePendingTrendline()
    }
 
    string why="";
-   return PlaceOrReplacePendingLimitAtEntry(isBuyLimit, entry, false, why);
+   return PlaceOrReplacePendingLimitAtEntry(isBuyLimit, entry, false,
+                                            TrendlineOrderComment(TrendlineArmGeneration), why);
 }
 
 bool IsTradePlacementAccepted(const uint retcode)
@@ -946,28 +949,31 @@ bool IsTradePlacementAccepted(const uint retcode)
 }
 
 bool IsPendingLimitTicketMatching(const ulong ticket,
-                                  const bool isBuyLimit,
-                                  const double entry)
+                                   const bool isBuyLimit,
+                                   const double entry,
+                                   const string requiredComment)
 {
    if(ticket == 0 || !OrderSelect(ticket)) return false;
    if(OrderGetString(ORDER_SYMBOL) != _Symbol) return false;
    if((int)OrderGetInteger(ORDER_MAGIC) != MagicNumber) return false;
    long requiredType = isBuyLimit ? ORDER_TYPE_BUY_LIMIT : ORDER_TYPE_SELL_LIMIT;
    if(OrderGetInteger(ORDER_TYPE) != requiredType) return false;
+   if(OrderGetString(ORDER_COMMENT) != requiredComment) return false;
    double orderPrice = OrderGetDouble(ORDER_PRICE_OPEN);
    double tolerance = MathMax(_Point * 0.5, 1e-10);
    return (MathAbs(orderPrice - entry) <= tolerance);
 }
 
 bool FindMatchingPendingLimit(const bool isBuyLimit,
-                              const double entry,
-                              ulong &ticketOut)
+                               const double entry,
+                               const string requiredComment,
+                               ulong &ticketOut)
 {
    ticketOut = 0;
    for(int i = OrdersTotal() - 1; i >= 0; i--)
    {
       ulong ticket = OrderGetTicket(i);
-      if(IsPendingLimitTicketMatching(ticket, isBuyLimit, entry))
+      if(IsPendingLimitTicketMatching(ticket, isBuyLimit, entry, requiredComment))
       {
          ticketOut = ticket;
          return true;
@@ -995,17 +1001,35 @@ bool FindAnyPendingLimitForEA(ulong &ticketOut)
    return false;
 }
 
-// A trendline intent is durable across EA/chart reloads.  The value is an exact
-// positive generation when consumed, or generation + 0.5 while an accepted
-// order/position is working.  Generation zero is reserved for a safely adopted
-// pre-upgrade order whose prior arm cannot be reconstructed.
-string TrendlineLifecycleGlobalKey()
+struct TrendlineLifecycleRecord
+{
+   bool     exists;
+   long     generation;
+   long     blockedGeneration;
+   bool     working;
+   ulong    ticket;
+   datetime expiration;
+   string   orderComment;
+};
+
+// The fingerprint scopes both the terminal-global cache and the indefinite
+// FILE_COMMON record to this exact account/server, symbol, magic, strategy and line.
+string TrendlineLifecycleFingerprint()
 {
    long login = (long)AccountInfoInteger(ACCOUNT_LOGIN);
    string identity = AccountInfoString(ACCOUNT_SERVER) + "|" + (string)login + "|" +
                      _Symbol + "|" + IntegerToString(MagicNumber) + "|trendline|" +
                      TrendlineObjectName;
-   return "TraderTL." + ShortStableFingerprint(identity);
+   return ShortStableFingerprint(identity);
+}
+
+string TrendlineLifecycleGlobalKey(){ return "TraderTL." + TrendlineLifecycleFingerprint(); }
+string TrendlineLifecycleStateFile(){ return "TraderTL." + TrendlineLifecycleFingerprint() + ".state"; }
+
+string TrendlineOrderComment(const long generation)
+{
+   // 28 characters at the supported generation maximum: safe for common MT5 comment limits.
+   return "TL" + TrendlineLifecycleFingerprint() + ":" + (string)generation;
 }
 
 bool AcquireTrendlineLifecycleLock(int &lockHandle, string &why)
@@ -1032,40 +1056,81 @@ bool TrendlineArmGenerationIsValid()
    return (TrendlineArmGeneration > 0 && TrendlineArmGeneration <= TRENDLINE_ARM_GENERATION_MAX);
 }
 
-bool LoadTrendlineLifecycleState(double &stateOut, bool &existsOut, string &why)
+void ClearTrendlineLifecycleRecord(TrendlineLifecycleRecord &record)
 {
-   stateOut = 0.0;
-   existsOut = false;
-   string key = TrendlineLifecycleGlobalKey();
-   if(StringLen(key) > 63)
-   {
-      why = "Internal trendline lifecycle key exceeds the MT5 63-character limit.";
-      return false;
-   }
-   if(!GlobalVariableCheck(key))
-   {
-      why = "";
-      return true;
-   }
-   stateOut = GlobalVariableGet(key);
-   existsOut = true;
-   if(stateOut < 0.0 || stateOut > (double)TRENDLINE_ARM_GENERATION_MAX + 0.5)
-   {
-      why = "Persisted trendline lifecycle state is invalid; the line is left disarmed for safety.";
-      return false;
-   }
-   why = "";
-   return true;
+   record.exists = false;
+   record.generation = 0;
+   record.blockedGeneration = 0;
+   record.working = false;
+   record.ticket = 0;
+   record.expiration = 0;
+   record.orderComment = "";
 }
 
-long TrendlineGenerationFromState(const double state)
+long TrendlineHighestHandled(const TrendlineLifecycleRecord &record)
 {
-   return (long)MathFloor(state);
+   return MathMax(record.generation, record.blockedGeneration);
 }
 
 bool TrendlineStateIsWorking(const double state)
 {
-   return (MathAbs(state - ((double)TrendlineGenerationFromState(state) + 0.5)) < 0.000001);
+   return (MathAbs(state - ((double)MathFloor(state) + 0.5)) < 0.000001);
+}
+
+bool SameTrendlineLifecycleRecord(const TrendlineLifecycleRecord &left,
+                                  const TrendlineLifecycleRecord &right)
+{
+   return (left.exists == right.exists && left.generation == right.generation &&
+           left.blockedGeneration == right.blockedGeneration && left.working == right.working &&
+           left.ticket == right.ticket && left.expiration == right.expiration &&
+           left.orderComment == right.orderComment);
+}
+
+bool ReadTrendlineLifecycleRecord(TrendlineLifecycleRecord &record, string &why)
+{
+   ClearTrendlineLifecycleRecord(record);
+   string fileName = TrendlineLifecycleStateFile();
+   if(!FileIsExist(fileName, FILE_COMMON)){ why = ""; return true; }
+   int handle = FileOpen(fileName, FILE_READ | FILE_TXT | FILE_COMMON);
+   if(handle == INVALID_HANDLE)
+   { why = "Could not open durable trendline lifecycle state. error=" + IntegerToString(GetLastError()); return false; }
+   string line = FileReadString(handle);
+   FileClose(handle);
+   string fields[];
+   if(StringSplit(line, '|', fields) != 8 || fields[0] != "TraderTLV2" ||
+      fields[1] != TrendlineLifecycleFingerprint())
+   { why = "Durable trendline lifecycle state is corrupt or belongs to another lifecycle."; return false; }
+   record.exists = true;
+   record.generation = StringToInteger(fields[2]);
+   record.blockedGeneration = StringToInteger(fields[3]);
+   record.working = (fields[4] == "1");
+   record.ticket = (ulong)StringToInteger(fields[5]);
+   record.expiration = (datetime)StringToInteger(fields[6]);
+   record.orderComment = fields[7];
+   if(record.generation < 0 || record.blockedGeneration < record.generation ||
+      record.blockedGeneration > TRENDLINE_ARM_GENERATION_MAX ||
+      (record.generation > 0 && record.orderComment != TrendlineOrderComment(record.generation)) ||
+      (record.working && (record.generation <= 0 || record.orderComment == "")))
+   { why = "Durable trendline lifecycle state is contradictory; the line is left disarmed for safety."; return false; }
+   why = "";
+   return true;
+}
+
+bool WriteTrendlineLifecycleRecord(const TrendlineLifecycleRecord &record, string &why)
+{
+   string fileName = TrendlineLifecycleStateFile();
+   int handle = FileOpen(fileName, FILE_WRITE | FILE_TXT | FILE_COMMON);
+   if(handle == INVALID_HANDLE)
+   { why = "Could not write durable trendline lifecycle state. error=" + IntegerToString(GetLastError()); return false; }
+   string line = "TraderTLV2|" + TrendlineLifecycleFingerprint() + "|" +
+                 (string)record.generation + "|" + (string)record.blockedGeneration + "|" +
+                 (record.working ? "1" : "0") + "|" + (string)record.ticket + "|" +
+                 (string)record.expiration + "|" + record.orderComment;
+   FileWriteString(handle, line);
+   FileFlush(handle);
+   FileClose(handle);
+   why = "";
+   return true;
 }
 
 void LogTrendlineLifecycle(const string state, const string source, const string detail)
@@ -1079,67 +1144,92 @@ void LogTrendlineLifecycle(const string state, const string source, const string
          " ", detail);
 }
 
-bool StoreTrendlineLifecycleState(const double expected,
-                                  const bool expectedExists,
-                                  const double replacement,
-                                  string &why)
+bool PersistTrendlineLifecycleRecord(const TrendlineLifecycleRecord &expected,
+                                     const TrendlineLifecycleRecord &replacement,
+                                     string &why)
 {
-   string key = TrendlineLifecycleGlobalKey();
    int lockHandle = INVALID_HANDLE;
    if(!AcquireTrendlineLifecycleLock(lockHandle, why)) return false;
-
-   bool currentExists = GlobalVariableCheck(key);
-   double current = currentExists ? GlobalVariableGet(key) : 0.0;
-   bool matches = (currentExists == expectedExists) &&
-                  (!currentExists || MathAbs(current - expected) < 0.000001);
-   bool stored = false;
-   if(matches)
+   TrendlineLifecycleRecord current;
+   string readWhy = "";
+   bool readable = ReadTrendlineLifecycleRecord(current, readWhy);
+   bool stored = readable && SameTrendlineLifecycleRecord(current, expected) &&
+                 WriteTrendlineLifecycleRecord(replacement, why);
+   if(stored)
    {
-      ResetLastError();
-      stored = currentExists
-         ? GlobalVariableSetOnCondition(key, replacement, current)
-         : (GlobalVariableSet(key, replacement) != 0);
-      if(stored) GlobalVariablesFlush();
+      GlobalVariableSet(TrendlineLifecycleGlobalKey(),
+                        replacement.working ? (double)replacement.generation + 0.5
+                                            : (double)TrendlineHighestHandled(replacement));
+      GlobalVariablesFlush();
    }
    FileClose(lockHandle);
    if(!stored)
    {
-      why = matches
-         ? "Could not persist the trendline lifecycle transition. error=" + IntegerToString(GetLastError())
-         : "The trendline lifecycle changed concurrently; no order will be sent.";
+      if(!readable) why = readWhy;
+      else if(why == "") why = "The durable trendline lifecycle changed concurrently; no order will be sent.";
       return false;
    }
    why = "";
    return true;
 }
 
-bool FindOwnedTrendlinePosition(ulong &ticketOut)
+bool LoadTrendlineLifecycleRecord(TrendlineLifecycleRecord &record, string &why)
+{
+   if(!ReadTrendlineLifecycleRecord(record, why)) return false;
+   if(record.exists) return true; // Durable state always takes precedence over the expiring cache.
+   string key = TrendlineLifecycleGlobalKey();
+   if(!GlobalVariableCheck(key)){ why = ""; return true; }
+   double legacyState = GlobalVariableGet(key);
+   if(legacyState < 0.0 || legacyState > (double)TRENDLINE_ARM_GENERATION_MAX + 0.5)
+   { why = "Expired-cache migration found invalid trendline state; the line is left disarmed for safety."; return false; }
+   TrendlineLifecycleRecord empty;
+   ClearTrendlineLifecycleRecord(empty);
+   ClearTrendlineLifecycleRecord(record);
+   record.exists = true;
+   record.generation = (long)MathFloor(legacyState);
+   record.blockedGeneration = record.generation;
+   // Old working records had no exact order identity.  Preserve the consumed
+   // generation, never adopt a same-magic order, and require a later new arm.
+   if(TrendlineStateIsWorking(legacyState) && TrendlineArmGenerationIsValid())
+      record.blockedGeneration = MathMax(record.blockedGeneration, TrendlineArmGeneration);
+   if(!PersistTrendlineLifecycleRecord(empty, record, why)) return false;
+   return true;
+}
+
+bool IsExactTrendlinePending(const ulong ticket, const TrendlineLifecycleRecord &record)
+{
+   if(ticket == 0 || record.orderComment == "" || !OrderSelect(ticket)) return false;
+   if(OrderGetString(ORDER_SYMBOL) != _Symbol || (int)OrderGetInteger(ORDER_MAGIC) != MagicNumber) return false;
+   long type = OrderGetInteger(ORDER_TYPE);
+   if(type != (Direction == TL_BUY_LIMIT ? ORDER_TYPE_BUY_LIMIT : ORDER_TYPE_SELL_LIMIT)) return false;
+   if(OrderGetString(ORDER_COMMENT) != record.orderComment) return false;
+   return (record.ticket == 0 || record.ticket == ticket);
+}
+
+bool FindExactTrendlinePending(const TrendlineLifecycleRecord &record, ulong &ticketOut)
 {
    ticketOut = 0;
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
    {
-      string symbol = PositionGetSymbol(i);
-      if(symbol != _Symbol) continue;
-      if((int)PositionGetInteger(POSITION_MAGIC) != MagicNumber) continue;
-      ticketOut = (ulong)PositionGetInteger(POSITION_TICKET);
-      return (ticketOut > 0);
+      ulong ticket = OrderGetTicket(i);
+      if(IsExactTrendlinePending(ticket, record)){ ticketOut = ticket; return true; }
    }
    return false;
 }
 
-bool FindActiveTrendlineLifecycle(ulong &ticketOut, string &kindOut)
+bool FindExactTrendlinePosition(const TrendlineLifecycleRecord &record, ulong &ticketOut)
 {
    ticketOut = 0;
-   kindOut = "";
-   if(FindAnyPendingLimitForEA(ticketOut))
+   if(record.ticket == 0 || !HistoryOrderSelect(record.ticket)) return false;
+   long positionId = HistoryOrderGetInteger(record.ticket, ORDER_POSITION_ID);
+   if(positionId <= 0) return false;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
    {
-      kindOut = "pending";
-      return true;
-   }
-   if(FindOwnedTrendlinePosition(ticketOut))
-   {
-      kindOut = "position";
-      return true;
+      if(PositionGetSymbol(i) != _Symbol) continue;
+      if((int)PositionGetInteger(POSITION_MAGIC) != MagicNumber) continue;
+      if(PositionGetInteger(POSITION_IDENTIFIER) != positionId) continue;
+      ticketOut = (ulong)PositionGetInteger(POSITION_TICKET);
+      return ticketOut > 0;
    }
    return false;
 }
@@ -1151,51 +1241,88 @@ void ResetTrendlinePlacementMetadata()
    g_expireAt = 0;
 }
 
+bool ModifyWorkingTrendlinePending(const ulong ticket, const TrendlineLifecycleRecord &record, string &why)
+{
+   bool isBuyLimit = (Direction == TL_BUY_LIMIT);
+   double entry = NormalizePrice(GetTrendlinePriceAtTime(g_trendName, iTime(_Symbol, _Period, 0)));
+   if(entry <= 0.0 || !ValidateTradingReadiness(isBuyLimit, why) || !IsLimitPriceValid(entry, isBuyLimit, why)) return false;
+   double sl=0.0, tp=0.0, vol=0.0, riskRounded=0.0, riskBuffered=0.0;
+   if(!BuildSLFromDistance(entry, isBuyLimit, sl, why) ||
+      !ComputeVolumeFromRisk(entry, sl, vol, riskRounded, riskBuffered, why) ||
+      !ValidateVolumeForBroker(vol, why)) return false;
+   int autoTpPts=0; double effNetRR=0.0;
+   if(AutoTP_NetRR_Enabled)
+   {
+      if(!ComputeAutoTP_NetRR(entry, isBuyLimit, vol, riskRounded, riskBuffered, tp, autoTpPts, effNetRR, why)) return false;
+   }
+   else if(!BuildTPManualFromDistance(entry, isBuyLimit, tp, why)) return false;
+   ENUM_ORDER_TYPE_TIME typeTime = record.expiration > 0 ? ORDER_TIME_SPECIFIED : ORDER_TIME_GTC;
+   bool modified = trade.OrderModify(ticket, entry, sl, tp, typeTime, record.expiration);
+   if(!modified || trade.ResultRetcode() != TRADE_RETCODE_DONE)
+   { why = "Broker rejected in-place trendline maintenance. retcode=" + (string)trade.ResultRetcode(); return false; }
+   if(!IsExactTrendlinePending(ticket, record))
+   { why = "Modified trendline order is not exactly observable; no replacement will be sent."; return false; }
+   why = "";
+   return true;
+}
+
 void MaintainTrendlineLifecycle(const string source)
 {
    if(!TrendlineShouldBeActive()) return;
 
-   double storedState = 0.0;
-   bool storedExists = false;
+   TrendlineLifecycleRecord record;
    string why = "";
-   if(!LoadTrendlineLifecycleState(storedState, storedExists, why))
+   if(!LoadTrendlineLifecycleRecord(record, why))
    {
       LogTrendlineLifecycle("disarmed", source, "reason=" + why);
       return;
    }
 
-   ulong activeTicket = 0;
-   string activeKind = "";
-   if(FindActiveTrendlineLifecycle(activeTicket, activeKind))
+   if(record.exists && record.working)
    {
-      if(!storedExists)
+      if(TrendlineArmGenerationIsValid() && TrendlineArmGeneration > record.blockedGeneration)
       {
-         // A pre-upgrade active order/position is adopted as generation zero.
-         // Its original arm is unknowable, so it can never auto-arm this line.
-         if(!StoreTrendlineLifecycleState(0.0, false, 0.5, why))
+         TrendlineLifecycleRecord rejected = record;
+         rejected.blockedGeneration = TrendlineArmGeneration;
+         if(!PersistTrendlineLifecycleRecord(record, rejected, why))
          {
             LogTrendlineLifecycle("disarmed", source, "reason=" + why);
             return;
          }
-         storedState = 0.5;
-         storedExists = true;
+         record = rejected;
+         LogTrendlineLifecycle("active_rearm_rejected", source,
+                               "reason=A higher generation entered during active work is consumed and will not queue.");
       }
-      LogTrendlineLifecycle("working", source,
-                            "kind=" + activeKind + " ticket=" + (string)activeTicket);
-      return;
-   }
-
-   if(storedExists && TrendlineStateIsWorking(storedState))
-   {
-      long completedGeneration = TrendlineGenerationFromState(storedState);
-      if(!StoreTrendlineLifecycleState(storedState, true, (double)completedGeneration, why))
+      ulong pendingTicket = 0;
+      if(FindExactTrendlinePending(record, pendingTicket))
       {
-         LogTrendlineLifecycle("disarmed", source, "reason=" + why);
+         if(record.ticket == 0)
+         {
+            TrendlineLifecycleRecord observed = record;
+            observed.ticket = pendingTicket;
+            observed.expiration = (datetime)OrderGetInteger(ORDER_TIME_EXPIRATION);
+            if(!PersistTrendlineLifecycleRecord(record, observed, why))
+            { LogTrendlineLifecycle("disarmed", source, "reason=" + why); return; }
+            record = observed;
+         }
+         if(IsNewBar() && !g_trendlineTrackingFailed && !ModifyWorkingTrendlinePending(pendingTicket, record, why))
+         {
+            g_trendlineTrackingFailed = true;
+            LogTrendlineLifecycle("tracking_failed", source, "reason=" + why + "; keeping the last confirmed pending order.");
+            return;
+         }
+         LogTrendlineLifecycle("working", source, "kind=pending ticket=" + (string)pendingTicket);
          return;
       }
-      storedState = (double)completedGeneration;
-      LogTrendlineLifecycle("consumed", source,
-                            "reason=The pending intent or resulting position is no longer active.");
+      ulong positionTicket = 0;
+      if(FindExactTrendlinePosition(record, positionTicket))
+      { LogTrendlineLifecycle("working", source, "kind=position ticket=" + (string)positionTicket); return; }
+      TrendlineLifecycleRecord completed = record;
+      completed.working = false;
+      if(!PersistTrendlineLifecycleRecord(record, completed, why))
+      { LogTrendlineLifecycle("disarmed", source, "reason=" + why); return; }
+      record = completed;
+      LogTrendlineLifecycle("consumed", source, "reason=The exact pending intent or resulting position is no longer active.");
    }
 
    if(!TrendlineArmGenerationIsValid())
@@ -1205,15 +1332,21 @@ void MaintainTrendlineLifecycle(const string source)
       return;
    }
 
-   long completedGeneration = storedExists ? TrendlineGenerationFromState(storedState) : -1;
-   if(storedExists && completedGeneration >= TrendlineArmGeneration)
+   if(record.exists && TrendlineHighestHandled(record) >= TrendlineArmGeneration)
    {
       LogTrendlineLifecycle("consumed", source,
                             "reason=This arm generation was already used; increase TrendlineArmGeneration to re-arm.");
       return;
    }
 
-   bool manualRearm = storedExists && completedGeneration >= 0;
+   ulong unrelatedPending = 0;
+   if(FindAnyPendingLimitForEA(unrelatedPending))
+   {
+      LogTrendlineLifecycle("blocked_unrelated", source,
+                            "reason=Another same-symbol/same-magic pending order exists and is not this lifecycle.");
+      return;
+   }
+   bool manualRearm = record.exists;
    LogTrendlineLifecycle("armed", source,
                          manualRearm
                          ? "event=manually_rearmed; this new generation permits one trade cycle."
@@ -1221,8 +1354,15 @@ void MaintainTrendlineLifecycle(const string source)
 
    // Reserve before calling the broker.  A restart, ambiguous broker response,
    // or persistence uncertainty therefore fails closed rather than duplicating.
-   if(!StoreTrendlineLifecycleState(storedState, storedExists,
-                                    (double)TrendlineArmGeneration + 0.5, why))
+   TrendlineLifecycleRecord armed = record;
+   armed.exists = true;
+   armed.generation = TrendlineArmGeneration;
+   armed.blockedGeneration = TrendlineArmGeneration;
+   armed.working = true;
+   armed.ticket = 0;
+   armed.expiration = 0;
+   armed.orderComment = TrendlineOrderComment(TrendlineArmGeneration);
+   if(!PersistTrendlineLifecycleRecord(record, armed, why))
    {
       LogTrendlineLifecycle("disarmed", source, "reason=" + why);
       return;
@@ -1231,13 +1371,22 @@ void MaintainTrendlineLifecycle(const string source)
    ResetTrendlinePlacementMetadata();
    if(PlaceOrReplacePendingTrendline())
    {
+      TrendlineLifecycleRecord reserved = armed;
+      armed.ticket = g_ticket;
+      if(OrderSelect(armed.ticket)) armed.expiration = (datetime)OrderGetInteger(ORDER_TIME_EXPIRATION);
+      if(!PersistTrendlineLifecycleRecord(reserved, armed, why))
+      {
+         LogTrendlineLifecycle("disarmed", source, "reason=Accepted order retained, but durable ticket persistence failed: " + why);
+         return;
+      }
       LogTrendlineLifecycle("working", source,
                             "reason=The one-shot pending-order intent was accepted.");
       return;
    }
 
-   if(!StoreTrendlineLifecycleState((double)TrendlineArmGeneration + 0.5, true,
-                                    (double)TrendlineArmGeneration, why))
+   TrendlineLifecycleRecord consumed = armed;
+   consumed.working = false;
+   if(!PersistTrendlineLifecycleRecord(armed, consumed, why))
    {
       LogTrendlineLifecycle("disarmed", source, "reason=" + why);
       return;
@@ -1263,6 +1412,7 @@ bool IsTransientPendingRetcode(const uint retcode)
 bool PlaceOrReplacePendingLimitAtEntry(const bool isBuyLimit,
                                        const double rawEntry,
                                        const bool allowReplace,
+                                       const string orderComment,
                                        string &why)
 {
    g_lastPendingFailureStructural = false;
@@ -1286,7 +1436,7 @@ bool PlaceOrReplacePendingLimitAtEntry(const bool isBuyLimit,
 
    if(!allowReplace && g_ticket > 0)
    {
-      if(IsPendingLimitTicketMatching(g_ticket, isBuyLimit, entry)) return true;
+      if(IsPendingLimitTicketMatching(g_ticket, isBuyLimit, entry, orderComment)) return true;
       g_ticket = 0;
    }
 
@@ -1374,8 +1524,8 @@ bool PlaceOrReplacePendingLimitAtEntry(const bool isBuyLimit,
          " expiration=", TimeToString(exp, TIME_DATE | TIME_SECONDS));
 
    bool sendOk=false;
-   if(isBuyLimit) sendOk = trade.BuyLimit(vol, entry, _Symbol, sl, tp, tt, exp, EA_COMMENT);
-   else           sendOk = trade.SellLimit(vol, entry, _Symbol, sl, tp, tt, exp, EA_COMMENT);
+   if(isBuyLimit) sendOk = trade.BuyLimit(vol, entry, _Symbol, sl, tp, tt, exp, orderComment);
+   else           sendOk = trade.SellLimit(vol, entry, _Symbol, sl, tp, tt, exp, orderComment);
 
    uint retcode = trade.ResultRetcode();
    ulong orderTicket = (ulong)trade.ResultOrder();
@@ -1398,10 +1548,10 @@ bool PlaceOrReplacePendingLimitAtEntry(const bool isBuyLimit,
    }
 
    ulong observedTicket = 0;
-   if(IsPendingLimitTicketMatching(orderTicket, isBuyLimit, entry))
+   if(IsPendingLimitTicketMatching(orderTicket, isBuyLimit, entry, orderComment))
       observedTicket = orderTicket;
    else
-      FindMatchingPendingLimit(isBuyLimit, entry, observedTicket);
+      FindMatchingPendingLimit(isBuyLimit, entry, orderComment, observedTicket);
    if(observedTicket == 0)
    {
       g_lastPendingAcceptanceMismatch = true;
@@ -1422,7 +1572,7 @@ bool PlacePendingStandardLimit()
 {
    bool isBuyLimit = (StandardLimitSide == STD_BUY_LIMIT);
    string why="";
-   bool placed = PlaceOrReplacePendingLimitAtEntry(isBuyLimit, StandardLimitEntryPrice, false, why);
+   bool placed = PlaceOrReplacePendingLimitAtEntry(isBuyLimit, StandardLimitEntryPrice, false, EA_COMMENT, why);
    g_standardLimitLastReason = why;
    return placed;
 }
@@ -1492,7 +1642,7 @@ void MaintainStandardLimit(const string source)
    bool isBuyLimit = (StandardLimitSide == STD_BUY_LIMIT);
    double entry = NormalizePrice(StandardLimitEntryPrice);
    ulong matchingTicket = 0;
-   if(FindMatchingPendingLimit(isBuyLimit, entry, matchingTicket))
+   if(FindMatchingPendingLimit(isBuyLimit, entry, EA_COMMENT, matchingTicket))
    {
       if(!g_standardLimitPlacementConfirmed || g_ticket != matchingTicket)
          AdoptObservedStandardLimit(matchingTicket, source);
