@@ -1,7 +1,6 @@
 #property strict
 #property description "Trader EA: trendline/standard limits, EMA bounce, and token-gated one-shot standard market execution. SL/TP are set by DISTANCE in MT5 POINTS, with optional AutoTP NetRR."
 #property version   "2.38"
-// Inactive Phase 1 preservation marker: #property version   "2.36"; EA_VERSION = "2.36"
 
 #include <Trade/Trade.mqh>
 CTrade trade;

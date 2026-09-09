@@ -150,7 +150,11 @@ def test_strict_v3_parse_and_replacement_outcomes_fail_closed_without_retry() ->
     assert "uint retcode = trade.ResultRetcode()" in submit
     assert "ulong resultTicket = (ulong)trade.ResultOrder()" in submit
     assert "int visibleMatches = CountTrendlinePendingIdentity(record, observed)" in submit
-    assert '#property version   "2.36"' in trader and 'EA_VERSION = "2.36"' in trader
+    assert '#property version   "2.38"' in trader
+    assert 'string EA_VERSION = "2.38";' in trader
+    assert "Inactive Phase 1 preservation marker" not in trader
+    assert '#property version   "2.36"' not in trader
+    assert 'EA_VERSION = "2.36"' not in trader
 
     assert replace.count("SubmitExactTrendlineReplacement(") == 1
     assert replace.index("transition.replacing = true") < replace.index(
