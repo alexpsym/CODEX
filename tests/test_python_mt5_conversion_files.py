@@ -175,6 +175,8 @@ def test_mql5_trader_standard_market_is_live_quote_anchored_and_terminal_token_g
     backtest = (ROOT / "mt5-clone" / "MQL5" / "Experts" / "Backtest.mq5").read_text(encoding="utf-8")
     market = trader.split("bool ExecuteStandardMarketOnce()", 1)[1].split("void CancelAllPendingByMagic()", 1)[0]
     consume = trader.split("bool ConsumeStandardMarketToken", 1)[1].split("bool ExecuteStandardMarketOnce()", 1)[0]
+    desktop_market = trader.split("void ExecuteDesktopMarket", 1)[1].split("void ExecuteDesktopPendingAtEntry", 1)[0]
+    desktop_dispatch = trader.split("void HandleDesktopTraderCommand", 1)[1].split("string IsoTimeUTC", 1)[0]
     on_init = trader.split("int OnInit()", 1)[1].split("void OnDeinit", 1)[0]
     chart_event = trader.split("void OnChartEvent", 1)[1].split("void OnTick", 1)[0]
 
@@ -210,6 +212,18 @@ def test_mql5_trader_standard_market_is_live_quote_anchored_and_terminal_token_g
     assert "ExecuteStandardMarketOnce();" not in on_init
     assert "ExecuteStandardMarketOnce();" in chart_event
     assert "STANDARD_MARKET_EXECUTE_BUTTON" in chart_event
+    assert "!UseDesktopTraderControls" in chart_event
+    assert "StandardMarketSide == STD_MARKET_BUY" in desktop_market
+    assert "SymbolInfoTick(_Symbol, liveTick)" in desktop_market
+    assert "isBuy ? liveTick.ask : liveTick.bid" in desktop_market
+    assert "BuildSLFromDistance(entry, isBuy" in desktop_market
+    assert "ComputeVolumeFromRisk(entry, sl" in desktop_market
+    assert "ComputeAutoTP_NetRR(entry, isBuy" in desktop_market
+    assert "ValidateMarketStopsAtLiveQuote" in desktop_market
+    assert desktop_dispatch.index("ConsumeDesktopTraderCommand(command") < desktop_dispatch.index(
+        "ExecuteDesktopMarket(command.commandId, result)"
+    )
+    assert "StandardMarketExecutionToken" not in desktop_market
     assert "if(Strategy == STRAT_STANDARD_MARKET) return;" in trader
     assert "EventSetTimer(1);" in trader
     for source in (trader, backtest):

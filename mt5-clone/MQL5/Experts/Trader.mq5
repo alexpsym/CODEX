@@ -1,9 +1,18 @@
 #property strict
 #property description "Trader EA: trendline/standard limits, EMA bounce, and token-gated one-shot standard market execution. SL/TP are set by DISTANCE in MT5 POINTS, with optional AutoTP NetRR."
-#property version   "2.37"
+#property version   "2.38"
+// Inactive Phase 1 preservation marker: #property version   "2.36"; EA_VERSION = "2.36"
 
 #include <Trade/Trade.mqh>
 CTrade trade;
+
+#import "shell32.dll"
+long ShellExecuteW(long hwnd, string operation, string file, string parameters, string directory, int show_cmd);
+#import
+
+#import "kernel32.dll"
+uint GetFileAttributesW(string file_name);
+#import
 
 // -------------------- Strategy selection --------------------
 enum StrategyMode
@@ -17,6 +26,13 @@ enum StrategyMode
 input group "Strategy"
 input StrategyMode Strategy = STRAT_TRENDLINE_LIMIT;
 input bool         OrdersEnabled = true; // master on/off switch (in Inputs)
+
+input group "Desktop Trader Controls"
+input bool   UseDesktopTraderControls       = true;
+input bool   LaunchDesktopTraderWindow      = true;
+input string PythonExecutable               = "C:\\Users\\User\\miniconda3\\python.exe";
+input string TraderControlWindowScriptPath  = "C:\\GPT\\CODEX-master\\mt5-clone\\trader_control_window.py";
+input int    TraderControlWindowRefreshMs   = 250;
 
 // -------------------- Inputs (risk model) --------------------
 input group "Risk (account currency)"
@@ -104,15 +120,26 @@ datetime g_standardLimitNextAttemptAt = 0;
 string   g_standardLimitLastReason = "";
 bool     g_lastPendingFailureStructural = false;
 bool     g_lastPendingAcceptanceMismatch = false;
+bool     g_lastPendingBrokerAttempted = false;
 const string STANDARD_MARKET_EXECUTE_BUTTON = "TraderExecuteStandardMarket";
 string   g_trendlineLifecycleStatus = "";
 bool     g_trendlineTrackingFailed = false;
+string   g_traderControlInstanceId = "";
+bool     g_traderControlReady = false;
+string   g_traderControlReason = "Desktop controls are initializing.";
 // Keeps the lifecycle comment within common MT5 broker comment limits.
 const long TRENDLINE_ARM_GENERATION_MAX = 999999999;
+const int  TRADER_CONTROL_PROTOCOL_VERSION = 1;
+const int  TRADER_CONTROL_COMMAND_MAX_AGE_SECONDS = 15;
+const int  TRADER_CONTROL_STATUS_FRESH_SECONDS = 5;
+const int  TRADER_CONTROL_SW_SHOWNORMAL = 1;
+const uint TRADER_CONTROL_INVALID_FILE_ATTRIBUTES = 0xFFFFFFFF;
+const uint TRADER_CONTROL_FILE_ATTRIBUTE_DIRECTORY = 0x00000010;
 
 void RefreshStandardMarketExecuteButton()
 {
    ObjectDelete(0, STANDARD_MARKET_EXECUTE_BUTTON);
+   if(UseDesktopTraderControls) return;
    if(Strategy != STRAT_STANDARD_MARKET) return;
    ObjectCreate(0, STANDARD_MARKET_EXECUTE_BUTTON, OBJ_BUTTON, 0, 0, 0);
    ObjectSetInteger(0, STANDARD_MARKET_EXECUTE_BUTTON, OBJPROP_CORNER, CORNER_LEFT_UPPER);
@@ -133,7 +160,7 @@ int hSlow  = INVALID_HANDLE;
 int hTrend = INVALID_HANDLE;
 
 string EA_COMMENT = "Trader";
-string EA_VERSION = "2.37";
+string EA_VERSION = "2.38";
 
 void Dbg(const string msg){ if(Debug) Print(EA_COMMENT, ": ", msg); }
 bool PlaceOrReplacePendingLimitAtEntry(const bool isBuyLimit,
@@ -962,7 +989,7 @@ bool PlaceMarketEmaBounce()
    return ok;
 }
 
-bool PlaceOrReplacePendingTrendline()
+bool PlacePendingTrendlineGeneration(const long generation)
 {
    bool isBuyLimit = (Direction == TL_BUY_LIMIT);
    datetime barTime = iTime(_Symbol, _Period, 0);
@@ -975,7 +1002,12 @@ bool PlaceOrReplacePendingTrendline()
 
    string why="";
    return PlaceOrReplacePendingLimitAtEntry(isBuyLimit, entry, false,
-                                            TrendlineOrderComment(TrendlineArmGeneration), why);
+                                            TrendlineOrderComment(generation), why);
+}
+
+bool PlaceOrReplacePendingTrendline()
+{
+   return PlacePendingTrendlineGeneration(TrendlineArmGeneration);
 }
 
 bool IsTradePlacementAccepted(const uint retcode)
@@ -1058,7 +1090,7 @@ string TrendlineLifecycleFingerprint()
    long login = (long)AccountInfoInteger(ACCOUNT_LOGIN);
    string identity = AccountInfoString(ACCOUNT_SERVER) + "|" + (string)login + "|" +
                      _Symbol + "|" + IntegerToString(MagicNumber) + "|trendline|" +
-                     TrendlineObjectName;
+                     g_trendName;
    return ShortStableFingerprint(identity);
 }
 
@@ -1231,7 +1263,7 @@ void LogTrendlineLifecycle(const string state, const string source, const string
    g_trendlineLifecycleStatus = state;
    Print(EA_COMMENT, ": mode=trendline state=", state,
          " source=", source,
-         " line=", TrendlineObjectName,
+         " line=", g_trendName,
          " generation=", (string)TrendlineArmGeneration,
          " ", detail);
 }
@@ -1577,9 +1609,9 @@ void CancelExactTrendlineLifecyclePending(const string source)
       LogTrendlineLifecycle("consumed", source, "reason=Exact lifecycle pending order was cancelled.");
 }
 
-void MaintainTrendlineLifecycle(const string source)
+void MaintainTrendlineLifecycle(const string source, const bool allowNewArm=true)
 {
-   if(!TrendlineShouldBeActive()) return;
+   if(g_trendName == "" || !TrendlineExists(g_trendName)) return;
 
    TrendlineLifecycleRecord record;
    string why = "";
@@ -1597,7 +1629,8 @@ void MaintainTrendlineLifecycle(const string source)
                                "reason=An earlier exact delete-confirm-replace transition is unresolved; no automatic retry is allowed.");
          return;
       }
-      if(TrendlineArmGenerationIsValid() && TrendlineArmGeneration > record.blockedGeneration)
+      if(allowNewArm && TrendlineArmGenerationIsValid() &&
+         TrendlineArmGeneration > record.blockedGeneration)
       {
          TrendlineLifecycleRecord rejected = record;
          rejected.blockedGeneration = TrendlineArmGeneration;
@@ -1680,6 +1713,10 @@ void MaintainTrendlineLifecycle(const string source)
       record = completed;
       LogTrendlineLifecycle("consumed", source, "reason=The exact pending intent or resulting position is no longer active.");
    }
+
+   // Desktop-control maintenance may track/complete existing work, but only an
+   // explicitly consumed desktop command may enter the new-arm path below.
+   if(!allowNewArm) return;
 
    if(!TrendlineArmGenerationIsValid())
    {
@@ -1793,6 +1830,7 @@ bool PlaceOrReplacePendingLimitAtEntry(const bool isBuyLimit,
 {
    g_lastPendingFailureStructural = false;
    g_lastPendingAcceptanceMismatch = false;
+   g_lastPendingBrokerAttempted = false;
    if(rawEntry <= 0.0)
    {
       g_lastPendingFailureStructural = true;
@@ -1900,6 +1938,7 @@ bool PlaceOrReplacePendingLimitAtEntry(const bool isBuyLimit,
          " expiration=", TimeToString(exp, TIME_DATE | TIME_SECONDS));
 
    bool sendOk=false;
+   g_lastPendingBrokerAttempted = true;
    if(isBuyLimit) sendOk = trade.BuyLimit(vol, entry, _Symbol, sl, tp, tt, exp, orderComment);
    else           sendOk = trade.SellLimit(vol, entry, _Symbol, sl, tp, tt, exp, orderComment);
 
@@ -2244,6 +2283,637 @@ string JsonEscape(const string value)
    return result;
 }
 
+// ---------- Separate desktop Trader control ----------
+struct DesktopTraderCommand
+{
+   int      protocolVersion;
+   string   instanceId;
+   string   commandId;
+   string   action;
+   datetime createdAt;
+};
+
+struct DesktopTraderResult
+{
+   string commandId;
+   string action;
+   string outcome;
+   string reason;
+   uint   retcode;
+   ulong  ticket;
+};
+
+int SafeTraderControlRefreshMs()
+{
+   if(TraderControlWindowRefreshMs < 100) return 100;
+   if(TraderControlWindowRefreshMs > 5000) return 5000;
+   return TraderControlWindowRefreshMs;
+}
+
+string TraderControlNamespace()
+{
+   return "TraderControl.v1." + g_traderControlInstanceId;
+}
+
+string TraderControlStatusFile(){ return TraderControlNamespace() + ".status.json"; }
+string TraderControlCommandFile(){ return TraderControlNamespace() + ".command.json"; }
+string TraderControlResultFile(){ return TraderControlNamespace() + ".result.json"; }
+string TraderControlGateFile(){ return TraderControlNamespace() + ".command-gate.lck"; }
+string TraderControlActiveTrendlineFile(){ return TraderControlNamespace() + ".active-trendline.txt"; }
+string TraderControlConsumedFile(const string commandId)
+{
+   return TraderControlNamespace() + ".consumed." + commandId + ".json";
+}
+
+string TraderControlInstanceId()
+{
+   string identity = AccountInfoString(ACCOUNT_SERVER) + "|" +
+                     (string)AccountInfoInteger(ACCOUNT_LOGIN) + "|" +
+                     (string)ChartID() + "|" + _Symbol + "|" +
+                     IntegerToString(MagicNumber);
+   return ShortStableFingerprint(identity);
+}
+
+string TraderControlCommonFilesPath()
+{
+   string common = TerminalInfoString(TERMINAL_COMMONDATA_PATH);
+   if(common == "") return "";
+   return common + "\\Files";
+}
+
+string TraderControlQuoteArg(const string value)
+{
+   string escaped = value;
+   StringReplace(escaped, "\"", "\\\"");
+   return "\"" + escaped + "\"";
+}
+
+string TraderControlDirectoryName(const string path)
+{
+   string normalized = path;
+   StringReplace(normalized, "/", "\\");
+   for(int i = StringLen(normalized) - 1; i >= 0; i--)
+      if(StringGetCharacter(normalized, i) == 92)
+         return StringSubstr(normalized, 0, i);
+   return "";
+}
+
+bool TraderControlConfiguredFileExists(const string path)
+{
+   ResetLastError();
+   uint attributes = GetFileAttributesW(path);
+   return (attributes != TRADER_CONTROL_INVALID_FILE_ATTRIBUTES &&
+           (attributes & TRADER_CONTROL_FILE_ATTRIBUTE_DIRECTORY) == 0);
+}
+
+bool WriteVerifiedCommonText(const string fileName, const string contents, string &why)
+{
+   ResetLastError();
+   int handle = FileOpen(fileName, FILE_WRITE | FILE_TXT | FILE_ANSI | FILE_COMMON | FILE_SHARE_READ);
+   if(handle == INVALID_HANDLE)
+   { why = "Could not open FILE_COMMON record " + fileName + ". error=" + IntegerToString(GetLastError()); return false; }
+   ResetLastError();
+   uint written = FileWriteString(handle, contents);
+   int writeError = GetLastError();
+   FileFlush(handle);
+   int flushError = GetLastError();
+   FileClose(handle);
+   if(written != (uint)StringLen(contents) || writeError != 0 || flushError != 0)
+   { why = "FILE_COMMON write/flush failed for " + fileName + "."; return false; }
+
+   handle = FileOpen(fileName, FILE_READ | FILE_TXT | FILE_ANSI | FILE_COMMON | FILE_SHARE_READ);
+   if(handle == INVALID_HANDLE)
+   { why = "Could not reopen FILE_COMMON record " + fileName + " for verification."; return false; }
+   int size = (int)FileSize(handle);
+   string verified = (size > 0 ? FileReadString(handle, size) : "");
+   FileClose(handle);
+   if(verified != contents)
+   { why = "FILE_COMMON verification mismatch for " + fileName + "."; return false; }
+   why = "";
+   return true;
+}
+
+bool WriteDesktopTraderStatus()
+{
+   if(!UseDesktopTraderControls || g_traderControlInstanceId == "") return true;
+   datetime now = TimeGMT();
+   string payload = "{";
+   payload += "\"account_login\":" + (string)AccountInfoInteger(ACCOUNT_LOGIN) + ",";
+   payload += "\"account_server\":\"" + JsonEscape(AccountInfoString(ACCOUNT_SERVER)) + "\",";
+   payload += "\"chart_id\":" + (string)ChartID() + ",";
+   payload += "\"connected\":" + (TerminalInfoInteger(TERMINAL_CONNECTED) ? "true" : "false") + ",";
+   payload += "\"control_ready\":" + (g_traderControlReady ? "true" : "false") + ",";
+   payload += "\"ea_version\":\"" + EA_VERSION + "\",";
+   payload += "\"fresh_for_seconds\":" + IntegerToString(TRADER_CONTROL_STATUS_FRESH_SECONDS) + ",";
+   payload += "\"instance_id\":\"" + g_traderControlInstanceId + "\",";
+   payload += "\"magic_number\":" + IntegerToString(MagicNumber) + ",";
+   payload += "\"orders_enabled\":" + (OrdersEnabled ? "true" : "false") + ",";
+   payload += "\"protocol_version\":" + IntegerToString(TRADER_CONTROL_PROTOCOL_VERSION) + ",";
+   payload += "\"reason\":\"" + JsonEscape(g_traderControlReason) + "\",";
+   payload += "\"symbol\":\"" + JsonEscape(_Symbol) + "\",";
+   payload += "\"updated_at\":" + (string)now + "}";
+   string why = "";
+   if(WriteVerifiedCommonText(TraderControlStatusFile(), payload, why)) return true;
+   Print(EA_COMMENT, ": desktop control status write failed: ", why);
+   return false;
+}
+
+bool LaunchDesktopTraderControls(string &why)
+{
+   if(!LaunchDesktopTraderWindow)
+   { why = "Automatic launch disabled; waiting for a manually started matching Trader Controls window."; return true; }
+   if(!MQLInfoInteger(MQL_DLLS_ALLOWED))
+   { why = "Desktop Trader Controls require Allow DLL imports for automatic launch; commands are disabled."; return false; }
+
+   string python = TrimText(PythonExecutable);
+   string script = TrimText(TraderControlWindowScriptPath);
+   string common = TraderControlCommonFilesPath();
+   if(python == "" || !TraderControlConfiguredFileExists(python))
+   { why = "Configured PythonExecutable is missing or invalid: " + python; return false; }
+   if(script == "" || !TraderControlConfiguredFileExists(script))
+   { why = "Configured TraderControlWindowScriptPath is missing or invalid: " + script; return false; }
+   if(common == "")
+   { why = "TERMINAL_COMMONDATA_PATH is unavailable; desktop commands are disabled."; return false; }
+
+   string params = TraderControlQuoteArg(script) +
+                   " --common-dir " + TraderControlQuoteArg(common) +
+                   " --instance-id " + TraderControlQuoteArg(g_traderControlInstanceId) +
+                   " --account-login " + (string)AccountInfoInteger(ACCOUNT_LOGIN) +
+                   " --account-server " + TraderControlQuoteArg(AccountInfoString(ACCOUNT_SERVER)) +
+                   " --chart-id " + (string)ChartID() +
+                   " --symbol " + TraderControlQuoteArg(_Symbol) +
+                   " --magic " + IntegerToString(MagicNumber) +
+                   " --ea-version " + TraderControlQuoteArg(EA_VERSION) +
+                   " --refresh-ms " + IntegerToString(SafeTraderControlRefreshMs());
+   ResetLastError();
+   long result = ShellExecuteW(0, "open", python, params,
+                               TraderControlDirectoryName(script), TRADER_CONTROL_SW_SHOWNORMAL);
+   if(result <= 32)
+   {
+      why = "ShellExecuteW rejected the Trader Controls launch. result=" + (string)result +
+            " error=" + IntegerToString(GetLastError());
+      return false;
+   }
+   why = "Trader Controls launch accepted; waiting for fresh instance-scoped commands.";
+   return true;
+}
+
+bool ReadDesktopJsonString(const string payload, const string key, string &value)
+{
+   string token = "\"" + key + "\":\"";
+   int at = StringFind(payload, token);
+   if(at < 0 || StringFind(payload, token, at + StringLen(token)) >= 0) return false;
+   int start = at + StringLen(token);
+   int stop = StringFind(payload, "\"", start);
+   if(stop < start) return false;
+   value = StringSubstr(payload, start, stop - start);
+   return StringFind(value, "\\") < 0;
+}
+
+bool ReadDesktopJsonLong(const string payload, const string key, long &value)
+{
+   string token = "\"" + key + "\":";
+   int at = StringFind(payload, token);
+   if(at < 0 || StringFind(payload, token, at + StringLen(token)) >= 0) return false;
+   int start = at + StringLen(token);
+   int stop = start;
+   while(stop < StringLen(payload))
+   {
+      ushort ch = StringGetCharacter(payload, stop);
+      if(ch < 48 || ch > 57) break;
+      stop++;
+   }
+   string number = StringSubstr(payload, start, stop - start);
+   return ParseNonnegativeLongStrict(number, value);
+}
+
+bool IsDesktopCommandIdValid(const string commandId)
+{
+   if(StringLen(commandId) != 36) return false;
+   for(int i = 0; i < 36; i++)
+   {
+      ushort ch = StringGetCharacter(commandId, i);
+      if(i == 8 || i == 13 || i == 18 || i == 23)
+      { if(ch != 45) return false; continue; }
+      if(!((ch >= 48 && ch <= 57) || (ch >= 97 && ch <= 102))) return false;
+   }
+   ushort variant = StringGetCharacter(commandId, 19);
+   return (StringGetCharacter(commandId, 14) == 52 &&
+           (variant == 56 || variant == 57 || variant == 97 || variant == 98));
+}
+
+bool IsDesktopActionAllowed(const string action)
+{
+   return (action == "market" || action == "limit" ||
+           action == "trendline" || action == "ema_bounce");
+}
+
+bool ReadDesktopTraderCommand(DesktopTraderCommand &command, string &why)
+{
+   int handle = FileOpen(TraderControlCommandFile(),
+                         FILE_READ | FILE_TXT | FILE_ANSI | FILE_COMMON | FILE_SHARE_READ);
+   if(handle == INVALID_HANDLE){ why = ""; return false; }
+   int size = (int)FileSize(handle);
+   string payload = (size > 0 ? FileReadString(handle, size) : "");
+   FileClose(handle);
+
+   long protocol=0, created=0;
+   if(!ReadDesktopJsonString(payload, "action", command.action) ||
+      !ReadDesktopJsonString(payload, "command_id", command.commandId) ||
+      !ReadDesktopJsonLong(payload, "created_at", created) ||
+      !ReadDesktopJsonString(payload, "instance_id", command.instanceId) ||
+      !ReadDesktopJsonLong(payload, "protocol_version", protocol))
+   { why = "Malformed desktop command JSON."; return false; }
+   string canonical = "{\"action\":\"" + command.action + "\",\"command_id\":\"" +
+                      command.commandId + "\",\"created_at\":" + (string)created +
+                      ",\"instance_id\":\"" + command.instanceId +
+                      "\",\"protocol_version\":" + (string)protocol + "}";
+   if(payload != canonical)
+   { why = "Desktop command is non-canonical or contains unsupported fields."; return false; }
+   command.protocolVersion = (int)protocol;
+   command.createdAt = (datetime)created;
+   if(command.protocolVersion != TRADER_CONTROL_PROTOCOL_VERSION)
+   { why = "Desktop command protocol version mismatch."; return false; }
+   if(command.instanceId != g_traderControlInstanceId)
+   { why = "Desktop command instance identity mismatch."; return false; }
+   if(!IsDesktopCommandIdValid(command.commandId))
+   { why = "Desktop command ID is not a valid UUIDv4."; return false; }
+   if(!IsDesktopActionAllowed(command.action))
+   { why = "Desktop command action is unknown."; return false; }
+   datetime now = TimeGMT();
+   if(command.createdAt > now + 5 || command.createdAt < now - TRADER_CONTROL_COMMAND_MAX_AGE_SECONDS)
+   { why = "Desktop command is stale or has an invalid future timestamp."; return false; }
+   why = "";
+   return true;
+}
+
+bool AcquireDesktopCommandGate(int &handle, string &why)
+{
+   handle = INVALID_HANDLE;
+   for(int attempt = 0; attempt < 20; attempt++)
+   {
+      ResetLastError();
+      handle = FileOpen(TraderControlGateFile(), FILE_READ | FILE_WRITE | FILE_BIN | FILE_COMMON);
+      if(handle != INVALID_HANDLE){ why = ""; return true; }
+      Sleep(25);
+   }
+   why = "Could not acquire the instance-scoped desktop command gate.";
+   return false;
+}
+
+bool ConsumeDesktopTraderCommand(const DesktopTraderCommand &command,
+                                 bool &alreadyConsumed, string &why)
+{
+   alreadyConsumed = false;
+   int gate = INVALID_HANDLE;
+   if(!AcquireDesktopCommandGate(gate, why)) return false;
+   string marker = TraderControlConsumedFile(command.commandId);
+   if(FileIsExist(marker, FILE_COMMON))
+   {
+      alreadyConsumed = true;
+      why = "Command ID was already consumed; replay rejected.";
+      FileClose(gate);
+      return false;
+   }
+   string payload = "{\"command_id\":\"" + command.commandId +
+                    "\",\"consumed_at\":" + (string)TimeGMT() +
+                    ",\"instance_id\":\"" + g_traderControlInstanceId +
+                    "\",\"protocol_version\":" + IntegerToString(TRADER_CONTROL_PROTOCOL_VERSION) + "}";
+   bool stored = WriteVerifiedCommonText(marker, payload, why);
+   FileClose(gate);
+   return stored;
+}
+
+bool WriteDesktopTraderResult(const DesktopTraderResult &result)
+{
+   string payload = "{";
+   payload += "\"action\":\"" + result.action + "\",";
+   payload += "\"command_id\":\"" + result.commandId + "\",";
+   payload += "\"instance_id\":\"" + g_traderControlInstanceId + "\",";
+   payload += "\"outcome\":\"" + result.outcome + "\",";
+   payload += "\"protocol_version\":" + IntegerToString(TRADER_CONTROL_PROTOCOL_VERSION) + ",";
+   payload += "\"reason\":\"" + JsonEscape(result.reason) + "\",";
+   payload += "\"retcode\":" + (string)result.retcode + ",";
+   payload += "\"ticket\":" + (string)result.ticket + ",";
+   payload += "\"updated_at\":" + (string)TimeGMT() + "}";
+   string why = "";
+   if(WriteVerifiedCommonText(TraderControlResultFile(), payload, why)) return true;
+   Print(EA_COMMENT, ": desktop result write failed: ", why);
+   return false;
+}
+
+void SetDesktopResult(DesktopTraderResult &result, const string outcome,
+                      const string reason, const uint retcode=0, const ulong ticket=0)
+{
+   result.outcome = outcome;
+   result.reason = reason;
+   result.retcode = retcode;
+   result.ticket = ticket;
+}
+
+bool DesktopOneTradeBlock(string &why, ulong &ticket)
+{
+   ticket = 0;
+   if(!EnforceOneTradeAtATime) return false;
+   if(PositionSelect(_Symbol))
+   { ticket = (ulong)PositionGetInteger(POSITION_TICKET); why = "An open position already exists for this symbol."; return true; }
+   if(HasBlockingPendingOrderForMarket(ticket))
+   { why = "A same-symbol/same-magic pending order already exists."; return true; }
+   return false;
+}
+
+void ExecuteDesktopMarket(const string commandId, DesktopTraderResult &result)
+{
+   bool isBuy = (StandardMarketSide == STD_MARKET_BUY);
+   string why = "";
+   ulong blocking = 0;
+   if(DesktopOneTradeBlock(why, blocking))
+   { SetDesktopResult(result, "blocked", why, 0, blocking); return; }
+   if(!ValidateTradingReadiness(isBuy, why))
+   { SetDesktopResult(result, "blocked", why); return; }
+   MqlTick liveTick;
+   if(!SymbolInfoTick(_Symbol, liveTick) || liveTick.bid <= 0.0 || liveTick.ask <= 0.0)
+   { SetDesktopResult(result, "blocked", "Fresh live Bid/Ask is unavailable."); return; }
+   double entry = NormalizePrice(isBuy ? liveTick.ask : liveTick.bid);
+   double sl=0.0, tp=0.0, volume=0.0, riskRounded=0.0, riskBuffered=0.0;
+   if(!BuildSLFromDistance(entry, isBuy, sl, why) ||
+      !ComputeVolumeFromRisk(entry, sl, volume, riskRounded, riskBuffered, why) ||
+      !ValidateVolumeForBroker(volume, why))
+   { SetDesktopResult(result, "blocked", why); return; }
+   int autoTpPts=0; double effectiveNetRR=0.0;
+   if(AutoTP_NetRR_Enabled)
+   {
+      if(!ComputeAutoTP_NetRR(entry, isBuy, volume, riskRounded, riskBuffered,
+                             tp, autoTpPts, effectiveNetRR, why))
+      { SetDesktopResult(result, "blocked", why); return; }
+   }
+   else if(!BuildTPManualFromDistance(entry, isBuy, tp, why))
+   { SetDesktopResult(result, "blocked", why); return; }
+   if(!ValidateMarketStopsAtLiveQuote(isBuy, liveTick.bid, liveTick.ask, sl, tp, why))
+   { SetDesktopResult(result, "blocked", why); return; }
+
+   string comment = "TDM:" + ShortStableFingerprint(commandId);
+   bool sendOk = isBuy
+      ? trade.Buy(volume, _Symbol, 0.0, sl, tp, comment)
+      : trade.Sell(volume, _Symbol, 0.0, sl, tp, comment);
+   uint retcode = trade.ResultRetcode();
+   ulong order = (ulong)trade.ResultOrder();
+   ulong deal = (ulong)trade.ResultDeal();
+   ulong ticket = order > 0 ? order : deal;
+   if(sendOk && IsTradePlacementAccepted(retcode) && ticket > 0)
+   { SetDesktopResult(result, "accepted", "Broker accepted the one-shot desktop market request.", retcode, ticket); return; }
+   if(IsDefinitePendingRejectionRetcode(retcode) && ticket == 0)
+      SetDesktopResult(result, "rejected", trade.ResultRetcodeDescription(), retcode, 0);
+   else
+      SetDesktopResult(result, "uncertain", "Market request outcome is not conclusively accepted or rejected; no retry will occur. " + trade.ResultRetcodeDescription(), retcode, ticket);
+}
+
+void ExecuteDesktopPendingAtEntry(const bool isBuyLimit, const double entry,
+                                  const string comment, DesktopTraderResult &result)
+{
+   string why = "";
+   ulong blocking = 0;
+   if(DesktopOneTradeBlock(why, blocking))
+   { SetDesktopResult(result, "blocked", why, 0, blocking); return; }
+   ResetTrendlinePlacementMetadata();
+   bool placed = PlaceOrReplacePendingLimitAtEntry(isBuyLimit, entry, false, comment, why);
+   uint retcode = g_lastPendingBrokerAttempted ? trade.ResultRetcode() : 0;
+   ulong ticket = g_lastPendingBrokerAttempted ? (ulong)trade.ResultOrder() : 0;
+   if(placed && g_ticket > 0)
+   { SetDesktopResult(result, "accepted", "Broker accepted and exposed the one-shot pending order.", retcode, g_ticket); return; }
+   if(!g_lastPendingBrokerAttempted)
+   { SetDesktopResult(result, "blocked", why); return; }
+   if(g_lastPendingAcceptanceMismatch || ticket > 0 || !IsDefinitePendingRejectionRetcode(retcode))
+   { SetDesktopResult(result, "uncertain", why + " No retry will occur.", retcode, ticket); return; }
+   SetDesktopResult(result, "rejected", why, retcode, 0);
+}
+
+void ExecuteDesktopLimit(DesktopTraderResult &result)
+{
+   bool isBuyLimit = (StandardLimitSide == STD_BUY_LIMIT);
+   ExecuteDesktopPendingAtEntry(isBuyLimit, StandardLimitEntryPrice,
+                                "TDL:" + ShortStableFingerprint(result.commandId), result);
+}
+
+void ExecuteDesktopEmaBounce(DesktopTraderResult &result)
+{
+   double fast0=0.0, slow0=0.0, trend0=0.0;
+   double reference=0.0;
+   bool isBuyLimit=false;
+   if(UseDualEMA)
+   {
+      if(!GetBufferValue(hFast, 0, 0, fast0) || !GetBufferValue(hSlow, 0, 0, slow0))
+      { SetDesktopResult(result, "blocked", "Current Fast/Slow EMA values are unavailable."); return; }
+      if(!PricesMateriallyDiffer(fast0, slow0))
+      { SetDesktopResult(result, "blocked", "Fast and Slow EMA values are equal; direction is ambiguous."); return; }
+      isBuyLimit = (fast0 > slow0);
+      reference = SelectEmaBounceReference(fast0, slow0, 0.0);
+   }
+   else
+   {
+      double trend1=0.0;
+      double close1=iClose(_Symbol, _Period, 1);
+      if(close1 <= 0.0 || !GetBufferValue(hTrend, 0, 0, trend0) ||
+         !GetBufferValue(hTrend, 0, 1, trend1))
+      { SetDesktopResult(result, "blocked", "Trend EMA or latest completed candle is unavailable."); return; }
+      if(!PricesMateriallyDiffer(close1, trend1))
+      { SetDesktopResult(result, "blocked", "Latest completed close equals the Trend EMA; direction is ambiguous."); return; }
+      isBuyLimit = (close1 > trend1);
+      reference = SelectEmaBounceReference(0.0, 0.0, trend0);
+   }
+   ExecuteDesktopPendingAtEntry(isBuyLimit, NormalizePrice(reference),
+                                "TDE:" + ShortStableFingerprint(result.commandId), result);
+}
+
+bool IsValidDesktopTrendline(const string name)
+{
+   if(!TrendlineExists(name)) return false;
+   datetime barTime = iTime(_Symbol, _Period, 0);
+   return (barTime > 0 && GetTrendlinePriceAtTime(name, barTime) > 0.0);
+}
+
+bool ResolveDesktopTrendline(string &name, string &why)
+{
+   int total = ObjectsTotal(0, -1, OBJ_TREND);
+   int selectedCount = 0;
+   string selected = "";
+   for(int i = 0; i < total; i++)
+   {
+      string candidate = ObjectName(0, i, -1, OBJ_TREND);
+      if(!IsValidDesktopTrendline(candidate)) continue;
+      if((bool)ObjectGetInteger(0, candidate, OBJPROP_SELECTED))
+      { selected = candidate; selectedCount++; }
+   }
+   if(selectedCount == 1){ name = selected; why = ""; return true; }
+   if(selectedCount > 1)
+   { why = "Multiple valid trendlines are selected; select exactly one."; return false; }
+   if(IsValidDesktopTrendline(TrendlineObjectName))
+   { name = TrendlineObjectName; why = ""; return true; }
+
+   int validCount = 0;
+   string only = "";
+   for(int i = 0; i < total; i++)
+   {
+      string candidate = ObjectName(0, i, -1, OBJ_TREND);
+      if(!IsValidDesktopTrendline(candidate)) continue;
+      only = candidate;
+      validCount++;
+   }
+   if(validCount == 1){ name = only; why = ""; return true; }
+   why = validCount == 0 ? "No valid trendline exists on this chart."
+                         : "Multiple valid trendlines exist; select exactly one.";
+   return false;
+}
+
+bool SaveDesktopActiveTrendline(const string name, string &why)
+{
+   if(name == "" || StringFind(name, "\r") >= 0 || StringFind(name, "\n") >= 0)
+   { why = "Resolved trendline name cannot be persisted safely."; return false; }
+   return WriteVerifiedCommonText(TraderControlActiveTrendlineFile(), name, why);
+}
+
+void LoadDesktopActiveTrendline()
+{
+   g_trendName = "";
+   int handle = FileOpen(TraderControlActiveTrendlineFile(),
+                         FILE_READ | FILE_TXT | FILE_ANSI | FILE_COMMON | FILE_SHARE_READ);
+   if(handle != INVALID_HANDLE)
+   {
+      int size = (int)FileSize(handle);
+      g_trendName = size > 0 ? FileReadString(handle, size) : "";
+      FileClose(handle);
+   }
+   if(g_trendName == "" && TrendlineObjectName != "")
+      g_trendName = TrendlineObjectName;
+}
+
+void MaintainDesktopTrendlineLifecycle(const string source)
+{
+   if(g_trendName == "") return;
+   if(!OrdersEnabled || !TrendlineExists(g_trendName))
+   { CancelExactTrendlineLifecyclePending(source + " inactive"); return; }
+   MaintainTrendlineLifecycle(source, false);
+}
+
+void ExecuteDesktopTrendline(DesktopTraderResult &result)
+{
+   string line = "";
+   string why = "";
+   if(!ResolveDesktopTrendline(line, why))
+   { SetDesktopResult(result, "blocked", why); return; }
+   if(!SaveDesktopActiveTrendline(line, why))
+   { SetDesktopResult(result, "blocked", why); return; }
+   g_trendName = line;
+
+   TrendlineLifecycleRecord record;
+   if(!LoadTrendlineLifecycleRecord(record, why))
+   { SetDesktopResult(result, "blocked", why); return; }
+   if(record.exists && record.working)
+   {
+      MaintainTrendlineLifecycle("desktop command preflight", false);
+      if(!LoadTrendlineLifecycleRecord(record, why))
+      { SetDesktopResult(result, "blocked", why); return; }
+      if(record.working)
+      { SetDesktopResult(result, "blocked", "This exact trendline already has an active or unresolved lifecycle.", 0, record.ticket); return; }
+   }
+
+   ulong unrelated = 0;
+   if(FindAnyPendingLimitForEA(unrelated))
+   { SetDesktopResult(result, "blocked", "Another same-symbol/same-magic pending order exists.", 0, unrelated); return; }
+   if(EnforceOneTradeAtATime && PositionSelect(_Symbol))
+   { SetDesktopResult(result, "blocked", "An open position already exists for this symbol.", 0, (ulong)PositionGetInteger(POSITION_TICKET)); return; }
+
+   long generation = record.exists ? TrendlineHighestHandled(record) + 1 : 1;
+   if(generation <= 0 || generation > TRENDLINE_ARM_GENERATION_MAX)
+   { SetDesktopResult(result, "blocked", "No higher safe trendline lifecycle generation is available."); return; }
+   TrendlineLifecycleRecord armed = record;
+   armed.exists = true;
+   armed.generation = generation;
+   armed.blockedGeneration = generation;
+   armed.working = true;
+   armed.replacing = false;
+   armed.ticket = 0;
+   armed.expiration = 0;
+   armed.orderType = (Direction == TL_BUY_LIMIT ? ORDER_TYPE_BUY_LIMIT : ORDER_TYPE_SELL_LIMIT);
+   armed.orderComment = TrendlineOrderComment(generation);
+   if(!PersistTrendlineLifecycleRecord(record, armed, why))
+   { SetDesktopResult(result, "blocked", why); return; }
+
+   ResetTrendlinePlacementMetadata();
+   bool placed = PlacePendingTrendlineGeneration(generation);
+   uint retcode = g_lastPendingBrokerAttempted ? trade.ResultRetcode() : 0;
+   ulong resultTicket = g_lastPendingBrokerAttempted ? (ulong)trade.ResultOrder() : 0;
+   if(placed && g_ticket > 0)
+   {
+      TrendlineLifecycleRecord working = armed;
+      working.ticket = g_ticket;
+      if(OrderSelect(g_ticket)) working.expiration = (datetime)OrderGetInteger(ORDER_TIME_EXPIRATION);
+      if(!PersistTrendlineLifecycleRecord(armed, working, why))
+      { SetDesktopResult(result, "uncertain", "Order is observable but durable ticket persistence failed: " + why, retcode, g_ticket); return; }
+      SetDesktopResult(result, "accepted", "The trendline generation was accepted once.", retcode, g_ticket);
+      return;
+   }
+   if(g_lastPendingAcceptanceMismatch || resultTicket > 0)
+   { SetDesktopResult(result, "uncertain", "Trendline request outcome is ambiguous; lifecycle remains reserved and no retry will occur.", retcode, resultTicket); return; }
+
+   TrendlineLifecycleRecord consumed = armed;
+   consumed.working = false;
+   if(!PersistTrendlineLifecycleRecord(armed, consumed, why))
+   { SetDesktopResult(result, "uncertain", "Placement failed and consumed-state persistence also failed: " + why, retcode, 0); return; }
+   if(!g_lastPendingBrokerAttempted)
+      SetDesktopResult(result, "blocked", "Trendline placement preflight failed; this generation is consumed.");
+   else if(IsDefinitePendingRejectionRetcode(retcode))
+      SetDesktopResult(result, "rejected", trade.ResultRetcodeDescription(), retcode, 0);
+   else
+      SetDesktopResult(result, "uncertain", "Trendline request was not accepted; generation is consumed and no retry will occur.", retcode, 0);
+}
+
+void HandleDesktopTraderCommand()
+{
+   if(!UseDesktopTraderControls || !g_traderControlReady) return;
+   DesktopTraderCommand command;
+   string why = "";
+   if(!ReadDesktopTraderCommand(command, why))
+   {
+      if(why == "") return;
+      static string lastRejected = "";
+      string rejectionKey = command.commandId + "|" + why;
+      if(rejectionKey == lastRejected) return;
+      lastRejected = rejectionKey;
+      DesktopTraderResult rejected;
+      rejected.commandId = IsDesktopCommandIdValid(command.commandId) ? command.commandId : "invalid";
+      rejected.action = IsDesktopActionAllowed(command.action) ? command.action : "unknown";
+      SetDesktopResult(rejected, "blocked", why);
+      WriteDesktopTraderResult(rejected);
+      Print(EA_COMMENT, ": desktop command rejected before consumption: ", why);
+      return;
+   }
+   static string lastObserved = "";
+   if(command.commandId == lastObserved) return;
+   lastObserved = command.commandId;
+
+   DesktopTraderResult result;
+   result.commandId = command.commandId;
+   result.action = command.action;
+   SetDesktopResult(result, "blocked", "Command was not dispatched.");
+   bool alreadyConsumed = false;
+   if(!ConsumeDesktopTraderCommand(command, alreadyConsumed, why))
+   {
+      SetDesktopResult(result, "blocked", alreadyConsumed ? "Command replay rejected." : why);
+      WriteDesktopTraderResult(result);
+      return;
+   }
+   // The durable per-command marker above is verified before any broker request.
+   if(!OrdersEnabled)
+      SetDesktopResult(result, "blocked", "OrdersEnabled is false; command consumed without submission.");
+   else if(command.action == "market") ExecuteDesktopMarket(command.commandId, result);
+   else if(command.action == "limit") ExecuteDesktopLimit(result);
+   else if(command.action == "trendline") ExecuteDesktopTrendline(result);
+   else if(command.action == "ema_bounce") ExecuteDesktopEmaBounce(result);
+   else SetDesktopResult(result, "blocked", "Unknown desktop action.");
+   WriteDesktopTraderResult(result);
+}
+
 string IsoTimeUTC(datetime value)
 {
    MqlDateTime dt;
@@ -2470,6 +3140,7 @@ int OnInit()
 {
    trade.SetDeviationInPoints(SlippagePoints);
    trade.SetExpertMagicNumber(MagicNumber);
+   g_traderControlInstanceId = TraderControlInstanceId();
 
    g_lastBarTime = iTime(_Symbol, _Period, 0);
 
@@ -2485,8 +3156,8 @@ int OnInit()
    MaybeExportPepperstoneSpreads(true);
    RefreshTrendlineNameFromInputs();
 
-   // EMA handles only if strategy needs them
-   if(Strategy == STRAT_EMA_BOUNCE)
+   // Desktop mode exposes EMA Bounce regardless of the legacy Strategy selector.
+   if(UseDesktopTraderControls || Strategy == STRAT_EMA_BOUNCE)
    {
       if(!ValidateEmaBouncePeriods()) return INIT_PARAMETERS_INCORRECT;
       if(UseDualEMA)
@@ -2500,6 +3171,23 @@ int OnInit()
          hTrend = iMA(_Symbol, _Period, TrendEMAPeriod, 0, MODE_EMA, PRICE_CLOSE);
          if(hTrend == INVALID_HANDLE) return INIT_FAILED;
       }
+   }
+
+   if(UseDesktopTraderControls)
+   {
+      ObjectDelete(0, STANDARD_MARKET_EXECUTE_BUTTON);
+      g_traderControlReady = false;
+      g_traderControlReason = "Desktop controls are initializing; execution is disabled.";
+      WriteDesktopTraderStatus();
+      string launchReason = "";
+      g_traderControlReady = LaunchDesktopTraderControls(launchReason);
+      g_traderControlReason = launchReason;
+      LoadDesktopActiveTrendline();
+      MaintainDesktopTrendlineLifecycle("OnInit desktop maintenance");
+      WriteDesktopTraderStatus();
+      Print(EA_COMMENT, ": desktop_control ready=", (g_traderControlReady ? "true" : "false"),
+            " instance=", g_traderControlInstanceId, " reason=", g_traderControlReason);
+      return INIT_SUCCEEDED;
    }
 
     // A valid named trendline is deliberately not enough to submit an order.
@@ -2543,6 +3231,12 @@ int OnInit()
 
 void OnDeinit(const int reason)
 {
+   if(UseDesktopTraderControls)
+   {
+      g_traderControlReady = false;
+      g_traderControlReason = "EA instance disconnected.";
+      WriteDesktopTraderStatus();
+   }
    EventKillTimer();
    if(hFast  != INVALID_HANDLE) IndicatorRelease(hFast);
    if(hSlow  != INVALID_HANDLE) IndicatorRelease(hSlow);
@@ -2552,12 +3246,19 @@ void OnDeinit(const int reason)
 
 void OnChartEvent(const int id, const long &lparam, const double &dparam, const string &sparam)
 {
-   if(id == CHARTEVENT_OBJECT_CLICK && sparam == STANDARD_MARKET_EXECUTE_BUTTON && Strategy == STRAT_STANDARD_MARKET)
+   if(!UseDesktopTraderControls && id == CHARTEVENT_OBJECT_CLICK &&
+      sparam == STANDARD_MARKET_EXECUTE_BUTTON && Strategy == STRAT_STANDARD_MARKET)
       ExecuteStandardMarketOnce();
 }
 
 void OnTick()
 {
+   if(UseDesktopTraderControls)
+   {
+      MaintainDesktopTrendlineLifecycle("OnTick desktop maintenance");
+      return;
+   }
+
    // If orders are disabled at any time, make sure trendline pendings are gone.
    if(!OrdersEnabled)
    {
@@ -2612,6 +3313,15 @@ void OnTick()
 void OnTimer()
 {
    MaybeExportPepperstoneSpreads();
+
+   if(UseDesktopTraderControls)
+   {
+      MaintainDesktopTrendlineLifecycle("OnTimer desktop maintenance");
+      WriteDesktopTraderStatus();
+      HandleDesktopTraderCommand();
+      WriteDesktopTraderStatus();
+      return;
+   }
 
    // Mirrors OnTick gating so cancel happens even with no ticks
    if(Strategy == STRAT_STANDARD_LIMIT)
