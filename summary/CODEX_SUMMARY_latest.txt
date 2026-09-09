@@ -314,3 +314,17 @@ Focused verification
 
 - PASS `python -m pytest -q tests/test_trader_trendline_one_shot.py::test_working_pending_tracks_new_bar_by_exact_ticket_without_a_second_order tests/test_trader_trendline_one_shot.py::test_only_exact_lifecycle_comment_ticket_and_position_identifier_are_owned tests/test_trader_trendline_one_shot.py::test_durable_common_file_restores_consumed_state_before_expiring_terminal_global_cache tests/test_trader_trendline_one_shot.py::test_active_rearm_is_consumed_not_queued_and_completion_cannot_resubmit` — 4 passed in 0.25s (one test invocation).
 - `Get-Command MetaEditor64.exe` found no focused compiler command. No MT5 terminal, account, production data, or live order was accessed. Compile `Trader.mq5` and perform the normal non-live deployment/runtime journal review manually before use.
+
+Trader EA Phase 1 correction 2: compile-safe exact lifecycle maintenance
+
+- Baseline: `9c3c2ad023dcce77d6d07ee8a66ef821ac8271b1`; final correction commit is reported in the delivery after the one focused commit is finalized.
+- `OrderModify` now uses the complete seven-argument CTrade signature with stoplimit `0.0`. It compares normalized entry, SL, TP, expiry and volume first; no material price/expiry change is a successful no-op, and only `DONE`/`NO_CHANGES` results are accepted before exact revalidation.
+- Trendline lifecycle cancellation is exact-ticket/comment/type only. Trendline OnInit/OnTick/OnTimer inactive and disabled paths no longer call broad same-magic cancellation; standard-limit behavior remains unchanged.
+- Durable `FILE_COMMON` records are V3 and persist immutable limit order type, replacement state, ticket, expiry, comment and generations. Writes reset/check errors, validate the written length, flush/close, reopen/parse and compare every field before returning success. V2/cache-only records fail closed because their order direction is unverifiable.
+- Working maintenance uses the persisted immutable order type, not the current Direction input. Material volume changes use a persisted exact delete-confirm-replace transition under the same generation; it verifies absence before one replacement and never automatically retries uncertainty.
+
+Focused verification
+
+- PASS `python -m pytest -q tests/test_trader_trendline_one_shot.py::test_order_modify_uses_complete_signature_safe_no_change_and_later_new_bar_tracking tests/test_trader_trendline_one_shot.py::test_exact_lifecycle_only_cancellation_and_immutable_recorded_order_type_ownership tests/test_trader_trendline_one_shot.py::test_verified_durable_write_failure_blocks_placement_or_lifecycle_advancement tests/test_trader_trendline_one_shot.py::test_volume_change_uses_exact_delete_confirm_replace_without_overlap_and_completion_stays_consumed` — 4 passed in 0.30s.
+- `Get-Command MetaEditor64.exe` returned no available command, so no MetaEditor compile was run. No terminal, broker, account, market data, production execution, or live order was accessed.
+- Manual remaining action: compile `Trader.mq5` in MetaEditor and perform the normal non-live deployment/runtime journal review. Phase 2 was not started.

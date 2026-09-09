@@ -1,6 +1,6 @@
 #property strict
 #property description "Trader EA: trendline/standard limits, EMA bounce, and token-gated one-shot standard market execution. SL/TP are set by DISTANCE in MT5 POINTS, with optional AutoTP NetRR."
-#property version   "2.33"
+#property version   "2.34"
 
 #include <Trade/Trade.mqh>
 CTrade trade;
@@ -127,7 +127,7 @@ int hSlow  = INVALID_HANDLE;
 int hTrend = INVALID_HANDLE;
 
 string EA_COMMENT = "Trader";
-string EA_VERSION = "2.33";
+string EA_VERSION = "2.34";
 
 void Dbg(const string msg){ if(Debug) Print(EA_COMMENT, ": ", msg); }
 bool PlaceOrReplacePendingLimitAtEntry(const bool isBuyLimit,
@@ -1007,8 +1007,10 @@ struct TrendlineLifecycleRecord
    long     generation;
    long     blockedGeneration;
    bool     working;
+   bool     replacing;
    ulong    ticket;
    datetime expiration;
+   long     orderType;
    string   orderComment;
 };
 
@@ -1062,8 +1064,10 @@ void ClearTrendlineLifecycleRecord(TrendlineLifecycleRecord &record)
    record.generation = 0;
    record.blockedGeneration = 0;
    record.working = false;
+   record.replacing = false;
    record.ticket = 0;
    record.expiration = 0;
+   record.orderType = -1;
    record.orderComment = "";
 }
 
@@ -1082,7 +1086,8 @@ bool SameTrendlineLifecycleRecord(const TrendlineLifecycleRecord &left,
 {
    return (left.exists == right.exists && left.generation == right.generation &&
            left.blockedGeneration == right.blockedGeneration && left.working == right.working &&
-           left.ticket == right.ticket && left.expiration == right.expiration &&
+           left.replacing == right.replacing && left.ticket == right.ticket &&
+           left.expiration == right.expiration && left.orderType == right.orderType &&
            left.orderComment == right.orderComment);
 }
 
@@ -1091,25 +1096,28 @@ bool ReadTrendlineLifecycleRecord(TrendlineLifecycleRecord &record, string &why)
    ClearTrendlineLifecycleRecord(record);
    string fileName = TrendlineLifecycleStateFile();
    if(!FileIsExist(fileName, FILE_COMMON)){ why = ""; return true; }
-   int handle = FileOpen(fileName, FILE_READ | FILE_TXT | FILE_COMMON);
+   int handle = FileOpen(fileName, FILE_READ | FILE_TXT | FILE_COMMON | FILE_ANSI);
    if(handle == INVALID_HANDLE)
    { why = "Could not open durable trendline lifecycle state. error=" + IntegerToString(GetLastError()); return false; }
    string line = FileReadString(handle);
    FileClose(handle);
    string fields[];
-   if(StringSplit(line, '|', fields) != 8 || fields[0] != "TraderTLV2" ||
+   if(StringSplit(line, '|', fields) != 10 || fields[0] != "TraderTLV3" ||
       fields[1] != TrendlineLifecycleFingerprint())
    { why = "Durable trendline lifecycle state is corrupt or belongs to another lifecycle."; return false; }
    record.exists = true;
    record.generation = StringToInteger(fields[2]);
    record.blockedGeneration = StringToInteger(fields[3]);
    record.working = (fields[4] == "1");
-   record.ticket = (ulong)StringToInteger(fields[5]);
-   record.expiration = (datetime)StringToInteger(fields[6]);
-   record.orderComment = fields[7];
+   record.replacing = (fields[5] == "1");
+   record.ticket = (ulong)StringToInteger(fields[6]);
+   record.expiration = (datetime)StringToInteger(fields[7]);
+   record.orderType = StringToInteger(fields[8]);
+   record.orderComment = fields[9];
    if(record.generation < 0 || record.blockedGeneration < record.generation ||
       record.blockedGeneration > TRENDLINE_ARM_GENERATION_MAX ||
       (record.generation > 0 && record.orderComment != TrendlineOrderComment(record.generation)) ||
+      (record.orderType != ORDER_TYPE_BUY_LIMIT && record.orderType != ORDER_TYPE_SELL_LIMIT) ||
       (record.working && (record.generation <= 0 || record.orderComment == "")))
    { why = "Durable trendline lifecycle state is contradictory; the line is left disarmed for safety."; return false; }
    why = "";
@@ -1119,16 +1127,27 @@ bool ReadTrendlineLifecycleRecord(TrendlineLifecycleRecord &record, string &why)
 bool WriteTrendlineLifecycleRecord(const TrendlineLifecycleRecord &record, string &why)
 {
    string fileName = TrendlineLifecycleStateFile();
-   int handle = FileOpen(fileName, FILE_WRITE | FILE_TXT | FILE_COMMON);
+   ResetLastError();
+   int handle = FileOpen(fileName, FILE_WRITE | FILE_TXT | FILE_COMMON | FILE_ANSI);
    if(handle == INVALID_HANDLE)
    { why = "Could not write durable trendline lifecycle state. error=" + IntegerToString(GetLastError()); return false; }
-   string line = "TraderTLV2|" + TrendlineLifecycleFingerprint() + "|" +
+   string line = "TraderTLV3|" + TrendlineLifecycleFingerprint() + "|" +
                  (string)record.generation + "|" + (string)record.blockedGeneration + "|" +
-                 (record.working ? "1" : "0") + "|" + (string)record.ticket + "|" +
-                 (string)record.expiration + "|" + record.orderComment;
-   FileWriteString(handle, line);
+                 (record.working ? "1" : "0") + "|" + (record.replacing ? "1" : "0") + "|" +
+                 (string)record.ticket + "|" + (string)record.expiration + "|" +
+                 (string)record.orderType + "|" + record.orderComment;
+   ResetLastError();
+   uint written = FileWriteString(handle, line);
+   int writeError = GetLastError();
+   ResetLastError();
    FileFlush(handle);
+   int flushError = GetLastError();
    FileClose(handle);
+   if(written != (uint)StringLen(line) || writeError != 0 || flushError != 0)
+   { why = "Durable trendline lifecycle write was short or failed."; return false; }
+   TrendlineLifecycleRecord verified;
+   if(!ReadTrendlineLifecycleRecord(verified, why) || !SameTrendlineLifecycleRecord(verified, record))
+   { if(why == "") why = "Durable trendline lifecycle verification mismatch."; return false; }
    why = "";
    return true;
 }
@@ -1185,15 +1204,9 @@ bool LoadTrendlineLifecycleRecord(TrendlineLifecycleRecord &record, string &why)
    TrendlineLifecycleRecord empty;
    ClearTrendlineLifecycleRecord(empty);
    ClearTrendlineLifecycleRecord(record);
-   record.exists = true;
-   record.generation = (long)MathFloor(legacyState);
-   record.blockedGeneration = record.generation;
-   // Old working records had no exact order identity.  Preserve the consumed
-   // generation, never adopt a same-magic order, and require a later new arm.
-   if(TrendlineStateIsWorking(legacyState) && TrendlineArmGenerationIsValid())
-      record.blockedGeneration = MathMax(record.blockedGeneration, TrendlineArmGeneration);
-   if(!PersistTrendlineLifecycleRecord(empty, record, why)) return false;
-   return true;
+   // V2/cache-only records lack immutable order type and are not safe to migrate.
+   why = "Legacy trendline lifecycle state has no immutable order type; it is left disarmed for safety.";
+   return false;
 }
 
 bool IsExactTrendlinePending(const ulong ticket, const TrendlineLifecycleRecord &record)
@@ -1201,7 +1214,7 @@ bool IsExactTrendlinePending(const ulong ticket, const TrendlineLifecycleRecord 
    if(ticket == 0 || record.orderComment == "" || !OrderSelect(ticket)) return false;
    if(OrderGetString(ORDER_SYMBOL) != _Symbol || (int)OrderGetInteger(ORDER_MAGIC) != MagicNumber) return false;
    long type = OrderGetInteger(ORDER_TYPE);
-   if(type != (Direction == TL_BUY_LIMIT ? ORDER_TYPE_BUY_LIMIT : ORDER_TYPE_SELL_LIMIT)) return false;
+   if(type != record.orderType) return false;
    if(OrderGetString(ORDER_COMMENT) != record.orderComment) return false;
    return (record.ticket == 0 || record.ticket == ticket);
 }
@@ -1241,12 +1254,14 @@ void ResetTrendlinePlacementMetadata()
    g_expireAt = 0;
 }
 
-bool ModifyWorkingTrendlinePending(const ulong ticket, const TrendlineLifecycleRecord &record, string &why)
+bool PrepareWorkingTrendlineTerms(const TrendlineLifecycleRecord &record,
+                                  double &entry, double &sl, double &tp, double &vol, string &why)
 {
-   bool isBuyLimit = (Direction == TL_BUY_LIMIT);
-   double entry = NormalizePrice(GetTrendlinePriceAtTime(g_trendName, iTime(_Symbol, _Period, 0)));
+   bool isBuyLimit = (record.orderType == ORDER_TYPE_BUY_LIMIT);
+   entry = NormalizePrice(GetTrendlinePriceAtTime(g_trendName, iTime(_Symbol, _Period, 0)));
    if(entry <= 0.0 || !ValidateTradingReadiness(isBuyLimit, why) || !IsLimitPriceValid(entry, isBuyLimit, why)) return false;
-   double sl=0.0, tp=0.0, vol=0.0, riskRounded=0.0, riskBuffered=0.0;
+   sl=0.0; tp=0.0; vol=0.0;
+   double riskRounded=0.0, riskBuffered=0.0;
    if(!BuildSLFromDistance(entry, isBuyLimit, sl, why) ||
       !ComputeVolumeFromRisk(entry, sl, vol, riskRounded, riskBuffered, why) ||
       !ValidateVolumeForBroker(vol, why)) return false;
@@ -1256,14 +1271,88 @@ bool ModifyWorkingTrendlinePending(const ulong ticket, const TrendlineLifecycleR
       if(!ComputeAutoTP_NetRR(entry, isBuyLimit, vol, riskRounded, riskBuffered, tp, autoTpPts, effNetRR, why)) return false;
    }
    else if(!BuildTPManualFromDistance(entry, isBuyLimit, tp, why)) return false;
-   ENUM_ORDER_TYPE_TIME typeTime = record.expiration > 0 ? ORDER_TIME_SPECIFIED : ORDER_TIME_GTC;
-   bool modified = trade.OrderModify(ticket, entry, sl, tp, typeTime, record.expiration);
-   if(!modified || trade.ResultRetcode() != TRADE_RETCODE_DONE)
-   { why = "Broker rejected in-place trendline maintenance. retcode=" + (string)trade.ResultRetcode(); return false; }
+   why = "";
+   return true;
+}
+
+bool PricesMateriallyDiffer(const double left, const double right)
+{
+   return MathAbs(left - right) > MathMax(_Point * 0.5, 1e-10);
+}
+
+bool ModifyWorkingTrendlinePending(const ulong ticket, const TrendlineLifecycleRecord &record,
+                                   bool &volumeChanged, string &why)
+{
+   volumeChanged = false;
+   double entry=0.0, sl=0.0, tp=0.0, vol=0.0;
+   if(!PrepareWorkingTrendlineTerms(record, entry, sl, tp, vol, why)) return false;
    if(!IsExactTrendlinePending(ticket, record))
+   { why = "Exact lifecycle ticket is not observable before maintenance."; return false; }
+   double currentVolume = OrderGetDouble(ORDER_VOLUME_INITIAL);
+   double volumeTolerance = MathMax(SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP) * 0.5, 1e-10);
+   volumeChanged = (MathAbs(currentVolume - vol) > volumeTolerance);
+   ENUM_ORDER_TYPE_TIME typeTime = record.expiration > 0 ? ORDER_TIME_SPECIFIED : ORDER_TIME_GTC;
+   bool valuesChanged = PricesMateriallyDiffer(OrderGetDouble(ORDER_PRICE_OPEN), entry) ||
+                        PricesMateriallyDiffer(OrderGetDouble(ORDER_SL), sl) ||
+                        PricesMateriallyDiffer(OrderGetDouble(ORDER_TP), tp) ||
+                        ((datetime)OrderGetInteger(ORDER_TIME_EXPIRATION) != record.expiration);
+   if(volumeChanged || !valuesChanged) { why = ""; return true; }
+   bool modified = trade.OrderModify(ticket, entry, sl, tp, typeTime, record.expiration, 0.0);
+   uint retcode = trade.ResultRetcode();
+   if(!modified || (retcode != TRADE_RETCODE_DONE && retcode != TRADE_RETCODE_NO_CHANGES))
+   { why = "Broker rejected in-place trendline maintenance. retcode=" + (string)trade.ResultRetcode(); return false; }
+   if(!IsExactTrendlinePending(ticket, record) || !OrderSelect(ticket))
    { why = "Modified trendline order is not exactly observable; no replacement will be sent."; return false; }
    why = "";
    return true;
+}
+
+bool DeleteExactTrendlinePending(const TrendlineLifecycleRecord &record, string &why)
+{
+   if(record.ticket == 0 || !IsExactTrendlinePending(record.ticket, record))
+   { why = "Exact lifecycle pending ticket is not observable for deletion."; return false; }
+   bool deleted = trade.OrderDelete(record.ticket);
+   if(!deleted || trade.ResultRetcode() != TRADE_RETCODE_DONE)
+   { why = "Broker rejected exact lifecycle cancellation. retcode=" + (string)trade.ResultRetcode(); return false; }
+   if(OrderSelect(record.ticket))
+   { why = "Exact lifecycle deletion was not confirmed absent."; return false; }
+   why = "";
+   return true;
+}
+
+bool ReplaceExactTrendlinePendingForVolume(const TrendlineLifecycleRecord &record, string &why)
+{
+   TrendlineLifecycleRecord transition = record;
+   transition.replacing = true;
+   if(!PersistTrendlineLifecycleRecord(record, transition, why)) return false;
+   if(!DeleteExactTrendlinePending(transition, why)) return false;
+   ResetTrendlinePlacementMetadata();
+   g_expireAt = transition.expiration;
+   if(!PlaceOrReplacePendingTrendline()) return false;
+   TrendlineLifecycleRecord replaced = transition;
+   replaced.replacing = false;
+   replaced.ticket = g_ticket;
+   if(OrderSelect(replaced.ticket)) replaced.expiration = (datetime)OrderGetInteger(ORDER_TIME_EXPIRATION);
+   if(!PersistTrendlineLifecycleRecord(transition, replaced, why)) return false;
+   why = "";
+   return true;
+}
+
+void CancelExactTrendlineLifecyclePending(const string source)
+{
+   TrendlineLifecycleRecord record;
+   string why = "";
+   if(!LoadTrendlineLifecycleRecord(record, why) || !record.exists || !record.working) return;
+   if(!FindExactTrendlinePending(record, record.ticket)) return;
+   if(!DeleteExactTrendlinePending(record, why))
+   { LogTrendlineLifecycle("cancel_failed", source, "reason=" + why); return; }
+   TrendlineLifecycleRecord consumed = record;
+   consumed.working = false;
+   consumed.replacing = false;
+   if(!PersistTrendlineLifecycleRecord(record, consumed, why))
+      LogTrendlineLifecycle("disarmed", source, "reason=" + why);
+   else
+      LogTrendlineLifecycle("consumed", source, "reason=Exact lifecycle pending order was cancelled.");
 }
 
 void MaintainTrendlineLifecycle(const string source)
@@ -1280,6 +1369,12 @@ void MaintainTrendlineLifecycle(const string source)
 
    if(record.exists && record.working)
    {
+      if(record.replacing)
+      {
+         LogTrendlineLifecycle("tracking_failed", source,
+                               "reason=An earlier exact delete-confirm-replace transition is unresolved; no automatic retry is allowed.");
+         return;
+      }
       if(TrendlineArmGenerationIsValid() && TrendlineArmGeneration > record.blockedGeneration)
       {
          TrendlineLifecycleRecord rejected = record;
@@ -1305,10 +1400,20 @@ void MaintainTrendlineLifecycle(const string source)
             { LogTrendlineLifecycle("disarmed", source, "reason=" + why); return; }
             record = observed;
          }
-         if(IsNewBar() && !g_trendlineTrackingFailed && !ModifyWorkingTrendlinePending(pendingTicket, record, why))
+         bool volumeChanged = false;
+         bool newBar = IsNewBar();
+         if(newBar && !g_trendlineTrackingFailed &&
+            !ModifyWorkingTrendlinePending(pendingTicket, record, volumeChanged, why))
          {
             g_trendlineTrackingFailed = true;
             LogTrendlineLifecycle("tracking_failed", source, "reason=" + why + "; keeping the last confirmed pending order.");
+            return;
+         }
+         if(newBar && !g_trendlineTrackingFailed && volumeChanged &&
+            !ReplaceExactTrendlinePendingForVolume(record, why))
+         {
+            g_trendlineTrackingFailed = true;
+            LogTrendlineLifecycle("tracking_failed", source, "reason=" + why + "; no replacement retry is allowed.");
             return;
          }
          LogTrendlineLifecycle("working", source, "kind=pending ticket=" + (string)pendingTicket);
@@ -1359,8 +1464,10 @@ void MaintainTrendlineLifecycle(const string source)
    armed.generation = TrendlineArmGeneration;
    armed.blockedGeneration = TrendlineArmGeneration;
    armed.working = true;
+   armed.replacing = false;
    armed.ticket = 0;
    armed.expiration = 0;
+   armed.orderType = (Direction == TL_BUY_LIMIT ? ORDER_TYPE_BUY_LIMIT : ORDER_TYPE_SELL_LIMIT);
    armed.orderComment = TrendlineOrderComment(TrendlineArmGeneration);
    if(!PersistTrendlineLifecycleRecord(record, armed, why))
    {
@@ -2131,7 +2238,7 @@ int OnInit()
     {
       if(!TrendlineShouldBeActive())
       {
-         CancelAllPendingByMagic();
+         CancelExactTrendlineLifecyclePending("OnInit inactive");
       }
       else
       {
@@ -2184,7 +2291,12 @@ void OnTick()
    // If orders are disabled at any time, make sure trendline pendings are gone.
    if(!OrdersEnabled)
    {
-      if(Strategy == STRAT_TRENDLINE_LIMIT || Strategy == STRAT_STANDARD_LIMIT) CancelAllPendingByMagic();
+      if(Strategy == STRAT_TRENDLINE_LIMIT)
+      {
+         RefreshTrendlineNameFromInputs();
+         CancelExactTrendlineLifecyclePending("OnTick orders_disabled");
+      }
+      else if(Strategy == STRAT_STANDARD_LIMIT) CancelAllPendingByMagic();
       return;
    }
 
@@ -2194,7 +2306,7 @@ void OnTick()
       RefreshTrendlineNameFromInputs();
       if(!TrendlineShouldBeActive())
       {
-         CancelAllPendingByMagic();
+         CancelExactTrendlineLifecyclePending("OnTick inactive");
          return;
       }
 
@@ -2252,7 +2364,7 @@ void OnTimer()
 
    if(!TrendlineShouldBeActive())
    {
-      CancelAllPendingByMagic();
+      CancelExactTrendlineLifecyclePending("OnTimer inactive");
       return;
    }
 
