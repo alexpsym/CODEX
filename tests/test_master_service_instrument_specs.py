@@ -32,20 +32,20 @@ def _fake_instrument(symbol, base='BTC'):
 
 
 def _fake_get_factory(fail_interval=None):
-    async def fake_get(_base, path, params):
+    async def fake_get(_base, path, params, **_kwargs):
         if path.endswith('instruments-info'):
             sym = params['symbol']
             base = 'BTC' if sym.startswith('BTC') else 'ETH'
             item = _fake_instrument(sym, base)
             item['_category'] = params['category']
-            return {'result': {'list': [item]}}
+            return {'retCode': 0, 'result': {'list': [item]}}
         if path.endswith('tickers'):
             sym = params['symbol']
-            return {'result': {'list': [{'symbol': sym, 'lastPrice': '100', 'fundingRate': '0.01', 'nextFundingTime': '2', 'openInterestValue': '500', 'turnover24h': '1234'}]}}
+            return {'retCode': 0, 'result': {'list': [{'symbol': sym, 'lastPrice': '100', 'fundingRate': '0.01', 'nextFundingTime': '2', 'openInterestValue': '500', 'turnover24h': '1234'}]}}
         if path.endswith('kline'):
             if fail_interval and params.get('interval') == fail_interval:
                 raise RuntimeError('kline fail')
-            return {'result': {'list': [['10', '100', '110', '90', '101', '1', '1']]}}
+            return {'retCode': 0, 'result': {'list': [['10', '100', '110', '90', '101', '1', '1']]}}
         raise AssertionError(path)
     return fake_get
 
@@ -92,76 +92,174 @@ def test_range_failure_exposes_warning(monkeypatch):
     assert any(w.get('field') == 'range.1w' for w in warns)
 
 
-def test_zorausdt_specs_parse_reordered_filters_preserve_partial_results_and_report_safe_failures(monkeypatch):
-    zora = {
-        'symbol': 'ZORAUSDT',
-        'pair': 'ZORAUSDT',
-        'contractType': 'PERPETUAL',
-        'status': 'TRADING',
-        'baseAsset': 'ZORA',
-        'quoteAsset': 'USDT',
-        'onboardDate': 1,
-        'filters': [
-            {'filterType': 'MIN_NOTIONAL', 'notional': '5'},
-            {'filterType': 'MARKET_LOT_SIZE', 'maxQty': '1000'},
-            {'filterType': 'PRICE_FILTER', 'maxPrice': '100000', 'tickSize': '0.01', 'minPrice': '0.01'},
-            {'filterType': 'LOT_SIZE', 'maxQty': '5000', 'stepSize': '0.001', 'minQty': '0.001'},
-            {'filterType': 'MAX_NUM_ORDERS', 'limit': 200},
-        ],
+def test_crypto_specs_use_bybit_first_for_generic_symbol_variants(monkeypatch):
+    monkeypatch.setenv('BYBIT_PUBLIC_MARKET_BASE_URL', 'https://api.bytick.com')
+    monkeypatch.setattr(master_service, '_BYBIT_INSTRUMENT_CACHE', {})
+    monkeypatch.setattr(master_service, '_BYBIT_SYMBOL_LIST_CACHE', {})
+    monkeypatch.setattr(master_service, '_BYBIT_NAME_ALIAS_CACHE', {'expires_at': 0.0, 'aliases': {}})
+    requests = []
+    enrichments = []
+
+    def credentials_forbidden(_account):
+        raise AssertionError('public Instrument Lookup must not resolve credentials')
+
+    async def binance_forbidden(_query, **_kwargs):
+        raise AssertionError('Binance must not be called when Bybit lists the pair')
+
+    async def fake_get(base_url, path, params, **_kwargs):
+        requests.append((base_url, path, dict(params)))
+        assert base_url == 'https://api.bytick.com'
+        category = params.get('category')
+        if path == '/v5/market/instruments-info':
+            selector = str(params.get('symbol') or '')
+            base = str(params.get('baseCoin') or '')
+            rows = []
+            symbol = selector or (f'{base}USDT' if base else '')
+            expected_category = 'linear' if symbol.startswith(('ZORA', 'BTC')) else 'spot'
+            if symbol in {'ZORAUSDT', 'UAIUSDT', 'BTCUSDT'} and category == expected_category:
+                rows = [_fake_instrument(symbol, symbol.removesuffix('USDT'))]
+                if base:
+                    usdc = _fake_instrument(f'{base}USDC', base)
+                    usdc['quoteCoin'] = 'USDC'
+                    rows.insert(0, usdc)
+            return {'retCode': 0, 'retMsg': 'OK', 'result': {'list': rows}}
+        if path == '/v5/market/tickers':
+            symbol = str(params['symbol'])
+            return {
+                'retCode': 0,
+                'retMsg': 'OK',
+                'result': {'list': [{
+                    'symbol': symbol,
+                    'lastPrice': '1.25',
+                    'bid1Price': '1.24',
+                    'ask1Price': '1.26',
+                    'turnover24h': '2500',
+                }]},
+            }
+        raise AssertionError((path, params))
+
+    async def fake_avg(base_url, symbol, category):
+        enrichments.append(('turnover', base_url, symbol, category))
+        return 1000.0
+
+    async def fake_ranges(base_url, category, symbol):
+        enrichments.append(('ranges', base_url, symbol, category))
+        return {'range.1d': 0.1}, []
+
+    monkeypatch.setattr(master_service, 'resolve_bybit_credentials_for', credentials_forbidden)
+    monkeypatch.setattr(master_service, '_binance_resolve_and_fetch_specs', binance_forbidden)
+    monkeypatch.setattr(master_service, '_bybit_get_async', fake_get)
+    monkeypatch.setattr(master_service, '_bybit_avg_7d_turnover_usd_async', fake_avg)
+    monkeypatch.setattr(master_service, '_bybit_fetch_range_specs_async', fake_ranges)
+
+    variants = {
+        'ZORAUSDT': ('ZORAUSDT', 'linear'),
+        'ZORA/USDT': ('ZORAUSDT', 'linear'),
+        'ZORA USDT': ('ZORAUSDT', 'linear'),
+        'ZORA': ('ZORAUSDT', 'linear'),
+        'UAIUSDT': ('UAIUSDT', 'spot'),
+        'UAI/USDT': ('UAIUSDT', 'spot'),
+        'UAI USDT': ('UAIUSDT', 'spot'),
+        'UAI': ('UAIUSDT', 'spot'),
     }
+    for query, (symbol, category) in variants.items():
+        specs = asyncio.run(master_service._fetch_instrument_specs(query, prefer='bybit'))
+        assert specs['source'] == 'bybit'
+        assert specs['resolved_symbol'] == symbol
+        assert specs['category'] == category
 
-    async def fake_get(path, params=None, **_kwargs):
-        if path.endswith('exchangeInfo'):
-            return {'timezone': 'UTC', 'symbols': [zora]}
-        if path.endswith('ticker/24hr'):
-            return {'symbol': 'ZORAUSDT', 'lastPrice': '0.085', 'quoteVolume': '1234'}
-        if path.endswith('premiumIndex'):
-            raise master_service.BinancePublicAPIError(endpoint=path, exception_class='ReadTimeout')
-        if path.endswith('openInterest'):
-            return {'symbol': 'ZORAUSDT', 'openInterest': '10'}
-        if path.endswith('klines'):
-            if params['interval'] == '1d' and params['limit'] == 7:
-                return [[1, '0.085', '0.09', '0.08', '0.086', '1', 2, '100']]
-            if params['interval'] == '1w':
-                raise master_service.BinancePublicAPIError(endpoint=path, exception_class='ReadTimeout')
-            return [[1, '0.085', '0.09', '0.08', '0.086']]
-        raise AssertionError(path)
+    assert requests
+    assert {request[0] for request in requests} == {'https://api.bytick.com'}
+    assert ('turnover', 'https://api.bytick.com', 'ZORAUSDT', 'linear') in enrichments
+    assert ('ranges', 'https://api.bytick.com', 'UAIUSDT', 'spot') in enrichments
 
-    monkeypatch.setattr(master_service, '_binance_futures_get_async', fake_get)
-    monkeypatch.setattr(master_service, '_BINANCE_EXCHANGE_INFO_CACHE', {'ts': 0.0, 'symbols': []})
-    monkeypatch.setattr(master_service, '_BINANCE_RANGE_CACHE', {})
-    for query in ('ZORAUSDT', 'ZORA/USDT', 'ZORA USDT'):
-        specs = asyncio.run(master_service._fetch_instrument_specs(query, prefer='crypto'))
-        assert specs['resolved_symbol'] == 'ZORAUSDT'
-        assert specs['source'] == 'binance_usdm'
-        assert specs['tickSize'] == '0.01'
-        assert specs['qtyStep'] == '0.001'
-        assert specs['maxMktOrderQty'] == '1000'
-        assert specs['minNotionalValue'] == '5'
-        assert 'maxLeverage' not in specs
-        assert specs['lastPrice'] == '0.085'
-        assert 'fundingRate' not in specs
-        assert any(item['field'] == 'premiumIndex' for item in specs['_spec_warnings'])
-        assert any(item['field'] == 'range.1w' for item in specs['_spec_warnings'])
 
-    async def blocked(_query):
-        raise master_service.BinancePublicAPIError(
-            endpoint='/fapi/v1/exchangeInfo',
-            exception_class='HTTPStatusError',
-            http_status=451,
-            response_code=-1000,
-            response_message='Service unavailable from a restricted location',
-        )
+def test_crypto_specs_fall_back_to_labeled_binance_only_after_confirmed_bybit_absence(monkeypatch):
+    monkeypatch.setattr(master_service, '_BYBIT_INSTRUMENT_CACHE', {})
+    events = []
 
-    monkeypatch.setattr(master_service, '_binance_resolve_and_fetch_specs', blocked)
-    with pytest.raises(master_service.HTTPException) as caught:
-        asyncio.run(master_service._fetch_instrument_specs('ZORAUSDT', prefer='crypto'))
-    assert caught.value.status_code == 502
-    assert 'endpoint=/fapi/v1/exchangeInfo' in caught.value.detail
-    assert 'exception=HTTPStatusError' in caught.value.detail
-    assert 'HTTP 451' in caught.value.detail
-    assert 'code=-1000' in caught.value.detail
-    assert 'restricted location' in caught.value.detail
+    async def confirmed_absence(_base_url, path, params, **_kwargs):
+        assert path == '/v5/market/instruments-info'
+        events.append(('bybit', params['category']))
+        return {'retCode': 0, 'retMsg': 'OK', 'result': {'list': []}}
+
+    async def fake_binance(query, **_kwargs):
+        events.append(('binance', query))
+        return {'source': 'binance_usdm', 'resolved_symbol': 'MISSINGUSDT'}
+
+    monkeypatch.setattr(master_service, '_bybit_get_async', confirmed_absence)
+    monkeypatch.setattr(master_service, '_binance_resolve_and_fetch_specs', fake_binance)
+    specs = asyncio.run(master_service._fetch_instrument_specs('MISSINGUSDT', prefer='crypto'))
+
+    assert events == [
+        ('bybit', 'linear'),
+        ('bybit', 'spot'),
+        ('bybit', 'inverse'),
+        ('binance', 'MISSINGUSDT'),
+    ]
+    assert specs['source'] == 'binance_usdm'
+    assert specs['_source_notice'] == 'Bybit did not list this instrument; Binance USD-M was used as fallback.'
+
+
+def test_bybit_lookup_failure_never_silently_falls_back_to_binance(monkeypatch):
+    binance_calls = []
+
+    async def fake_binance(query, **_kwargs):
+        binance_calls.append(query)
+        return {'source': 'binance_usdm', 'resolved_symbol': query}
+
+    monkeypatch.setattr(master_service, '_binance_resolve_and_fetch_specs', fake_binance)
+    monkeypatch.setattr(master_service, '_BYBIT_INSTRUMENT_CACHE', {})
+
+    async def transport_failure(_base_url, _path, _params, **_kwargs):
+        raise master_service.httpx.ConnectError('public endpoint unavailable')
+
+    monkeypatch.setattr(master_service, '_bybit_get_async', transport_failure)
+    with pytest.raises(master_service.HTTPException) as transport_error:
+        asyncio.run(master_service._fetch_instrument_specs('FAILUSDT', prefer='bybit'))
+    assert transport_error.value.status_code == 502
+    assert 'Bybit public market specification request failed' in transport_error.value.detail
+    assert binance_calls == []
+
+    async def api_failure(_base_url, _path, _params, **_kwargs):
+        return {'retCode': 10001, 'retMsg': 'invalid request', 'result': {'list': []}}
+
+    monkeypatch.setattr(master_service, '_BYBIT_INSTRUMENT_CACHE', {})
+    monkeypatch.setattr(master_service, '_bybit_get_async', api_failure)
+    with pytest.raises(master_service.HTTPException) as api_error:
+        asyncio.run(master_service._fetch_instrument_specs('FAILUSDT', prefer='perp'))
+    assert api_error.value.status_code == 502
+    assert 'retCode=10001' in api_error.value.detail
+    assert binance_calls == []
+
+    instrument = _fake_instrument('PARTIALUSDT', 'PARTIAL')
+
+    async def resolved(_base_url, _query):
+        return dict(instrument)
+
+    async def optional_failure(_base_url, path, _params, **_kwargs):
+        raise master_service.httpx.ReadTimeout(f'optional {path} unavailable')
+
+    async def avg_failure(_base_url, _symbol, _category):
+        raise RuntimeError('optional turnover unavailable')
+
+    async def range_partial(_base_url, category, symbol):
+        assert category == 'linear'
+        return {}, [{'scope': 'range', 'symbol': symbol, 'field': 'range.1d', 'message': 'optional range unavailable'}]
+
+    monkeypatch.setattr(master_service, '_BYBIT_INSTRUMENT_CACHE', {})
+    monkeypatch.setattr(master_service, '_bybit_lookup_symbol', resolved)
+    monkeypatch.setattr(master_service, '_bybit_get_async', optional_failure)
+    monkeypatch.setattr(master_service, '_bybit_avg_7d_turnover_usd_async', avg_failure)
+    monkeypatch.setattr(master_service, '_bybit_fetch_range_specs_async', range_partial)
+    specs = asyncio.run(master_service._fetch_instrument_specs('PARTIALUSDT', prefer='perpetual'))
+
+    assert specs['source'] == 'bybit'
+    assert specs['resolved_symbol'] == 'PARTIALUSDT'
+    assert specs['tickSize'] == '0.10'
+    fields = {warning['field'] for warning in specs['_spec_warnings']}
+    assert {'tickers', 'avg7dTurnoverUsd', 'range.1d', 'instrument'} <= fields
+    assert binance_calls == []
 
 
 def test_binance_movement_ranges_keep_interval_specific_values_and_cache_keys(monkeypatch):

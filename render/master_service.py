@@ -3611,34 +3611,19 @@ def _oanda_account_id_for_specs() -> str:
 
 
 BYBIT_BASE = "https://api.bybit.com"
+_BYBIT_INSTRUMENT_CATEGORIES = ("linear", "spot", "inverse")
+_BYBIT_PREFERRED_QUOTES = ("USDT", "USDC", "USD")
 
 
-def _is_likely_bybit_symbol(value: str) -> bool:
-    s = str(value or "").strip().upper()
-    if not s:
-        return False
-    return (
-        s.endswith("USDT")
-        or s.endswith("USDC")
-        or s.endswith("USD")
-        or s.endswith("PERP")
-        or s.endswith("USDT.P")
-    )
+class BybitPublicMarketError(RuntimeError):
+    def __init__(self, endpoint: str, reason: str) -> None:
+        self.endpoint = endpoint
+        self.reason = reason
+        super().__init__(f"Bybit public market request failed endpoint={endpoint}: {reason}")
 
 
-async def _bybit_get_async(base_url: str, path: str, params: Dict[str, object], *, timeout_s: float = 6.0, connect_s: float = 2.0, read_s: Optional[float] = None) -> Dict[str, object]:
-    timeout = httpx.Timeout(timeout_s, connect=connect_s, read=(read_s if read_s is not None else timeout_s), write=timeout_s, pool=2.0)
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        res = await client.get(f"{base_url}{path}", params=params)
-    res.raise_for_status()
-    return res.json()
-
-
-ATR_SCANNER_SETTINGS_PATH = BASE_DIR / "render" / "data" / "atr_scanner_settings.json"
-
-
-def _atr_scanner_public_base_url() -> str:
-    """Resolve only a public live Bybit market-data origin for the scanner."""
+def _bybit_public_market_base_url() -> str:
+    """Return a credentials-free, production Bybit public market origin."""
 
     raw = str(os.getenv("BYBIT_PUBLIC_MARKET_BASE_URL") or BYBIT_BASE).strip().rstrip("/")
     parsed = urlparse(raw)
@@ -3660,6 +3645,77 @@ def _atr_scanner_public_base_url() -> str:
     ):
         return f"https://{host}"
     return BYBIT_BASE
+
+
+async def _bybit_market_get_async(
+    base_url: str,
+    path: str,
+    params: Dict[str, object],
+    *,
+    timeout_s: float = 6.0,
+    connect_s: float = 2.0,
+    read_s: Optional[float] = None,
+) -> Dict[str, object]:
+    payload = await _bybit_get_async(
+        base_url,
+        path,
+        params,
+        timeout_s=timeout_s,
+        connect_s=connect_s,
+        read_s=read_s,
+    )
+    if not isinstance(payload, dict):
+        raise BybitPublicMarketError(path, "invalid JSON response shape")
+    ret_code = payload.get("retCode")
+    if isinstance(ret_code, bool) or not isinstance(ret_code, int):
+        raise BybitPublicMarketError(path, "missing or invalid retCode")
+    if ret_code != 0:
+        ret_msg = str(payload.get("retMsg") or "unknown API error").strip()
+        raise BybitPublicMarketError(path, f"retCode={ret_code} retMsg={ret_msg}")
+    result = payload.get("result")
+    if not isinstance(result, dict) or not isinstance(result.get("list"), list):
+        raise BybitPublicMarketError(path, "missing result.list array")
+    return payload
+
+
+def _normalize_bybit_lookup_key(value: object) -> str:
+    key = _normalize_instrument_key(value)
+    if key.endswith("PERP"):
+        key = key[:-4]
+    if key.endswith("P") and key[:-1].endswith(_BYBIT_PREFERRED_QUOTES):
+        key = key[:-1]
+    return key
+
+
+def _bybit_split_explicit_quote(value: str) -> Tuple[str, str]:
+    for quote in _BYBIT_PREFERRED_QUOTES:
+        if value.endswith(quote) and len(value) > len(quote):
+            return value[: -len(quote)], quote
+    return value, ""
+
+
+def _is_likely_bybit_symbol(value: str) -> bool:
+    s = _normalize_bybit_lookup_key(value)
+    if not s:
+        return False
+    return s.endswith(_BYBIT_PREFERRED_QUOTES)
+
+
+async def _bybit_get_async(base_url: str, path: str, params: Dict[str, object], *, timeout_s: float = 6.0, connect_s: float = 2.0, read_s: Optional[float] = None) -> Dict[str, object]:
+    timeout = httpx.Timeout(timeout_s, connect=connect_s, read=(read_s if read_s is not None else timeout_s), write=timeout_s, pool=2.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        res = await client.get(f"{base_url}{path}", params=params)
+    res.raise_for_status()
+    return res.json()
+
+
+ATR_SCANNER_SETTINGS_PATH = BASE_DIR / "render" / "data" / "atr_scanner_settings.json"
+
+
+def _atr_scanner_public_base_url() -> str:
+    """Resolve only a public live Bybit market-data origin for the scanner."""
+
+    return _bybit_public_market_base_url()
 
 
 async def _atr_scanner_fetch_public_json(
@@ -3685,30 +3741,29 @@ ATR_SCANNER_SERVICE = ATRScannerService(
 async def _bybit_avg_7d_turnover_usd_async(
     base_url: str, symbol: str, category: str = "linear"
 ) -> Optional[float]:
-    try:
-        end_ms = int(time.time() * 1000)
-        data = await _bybit_get_async(
-            base_url,
-            "/v5/market/kline",
-            {
-                "category": category,
-                "symbol": symbol,
-                "interval": "D",
-                "end": end_ms,
-                "limit": 10,
-            },
-        )
-        rows = (data.get("result") or {}).get("list") or []
-        turnovers: List[float] = []
-        for row in rows[:7]:
-            if isinstance(row, list) and len(row) >= 7:
-                try:
-                    turnovers.append(float(row[6]))
-                except Exception:
-                    pass
-        return (sum(turnovers) / len(turnovers)) if turnovers else None
-    except Exception:
-        return None
+    end_ms = int(time.time() * 1000)
+    data = await _bybit_market_get_async(
+        base_url,
+        "/v5/market/kline",
+        {
+            "category": category,
+            "symbol": symbol,
+            "interval": "D",
+            "end": end_ms,
+            "limit": 10,
+        },
+    )
+    rows = (data.get("result") or {}).get("list") or []
+    turnovers: List[float] = []
+    for row in rows[:7]:
+        if isinstance(row, list) and len(row) >= 7:
+            try:
+                turnovers.append(float(row[6]))
+            except (TypeError, ValueError):
+                continue
+    if not turnovers:
+        raise ValueError(f"Bybit seven-day turnover rows were unavailable for {symbol}")
+    return sum(turnovers) / len(turnovers)
 
 
 
@@ -3735,35 +3790,48 @@ async def _bybit_fetch_symbols_by_category(base_url: str, category: str) -> List
         params: Dict[str, object] = {"category": category, "limit": 1000}
         if cursor:
             params["cursor"] = cursor
-        payload = await _bybit_get_async(base_url, "/v5/market/instruments-info", params)
+        payload = await _bybit_market_get_async(base_url, "/v5/market/instruments-info", params)
         rows = (payload.get("result") or {}).get("list") or []
         if isinstance(rows, list):
             for row in rows:
                 if not isinstance(row, dict):
-                    continue
+                    raise BybitPublicMarketError(
+                        "/v5/market/instruments-info",
+                        f"invalid {category} instrument row",
+                    )
                 symbol = str(row.get("symbol") or "").upper()
-                if symbol:
-                    symbols.append(symbol)
+                if not symbol:
+                    raise BybitPublicMarketError(
+                        "/v5/market/instruments-info",
+                        f"missing symbol in {category} instrument row",
+                    )
+                symbols.append(symbol)
         cursor = (payload.get("result") or {}).get("nextPageCursor")
         if not cursor:
             break
     return sorted(set(symbols))
 
 
-async def _bybit_get_symbols_by_category_cached(base_url: str, category: str) -> List[str]:
+async def _bybit_get_symbols_by_category_cached(
+    base_url: str,
+    category: str,
+    *,
+    force_refresh: bool = False,
+    allow_stale_on_error: bool = True,
+) -> List[str]:
     category_key = category if category in {"linear", "spot", "inverse"} else "linear"
     cache_key = _bybit_symbol_list_cache_key(base_url, category_key)
     entry = _BYBIT_SYMBOL_LIST_CACHE.get(cache_key) or {"ts": 0.0, "symbols": []}
     now = time.time()
     cached = entry.get("symbols")
     ts = float(entry.get("ts") or 0.0)
-    if isinstance(cached, list) and cached and (now - ts) <= _BYBIT_SYMBOL_LIST_CACHE_TTL_SECONDS:
+    if not force_refresh and isinstance(cached, list) and cached and (now - ts) <= _BYBIT_SYMBOL_LIST_CACHE_TTL_SECONDS:
         return list(cached)
 
     try:
         symbols = await _bybit_fetch_symbols_by_category(base_url, category_key)
     except Exception:
-        if isinstance(cached, list) and cached:
+        if allow_stale_on_error and not force_refresh and isinstance(cached, list) and cached:
             return list(cached)
         raise
 
@@ -3771,7 +3839,16 @@ async def _bybit_get_symbols_by_category_cached(base_url: str, category: str) ->
     return list(symbols)
 
 
-async def _bybit_get_instrument_info_cached(base_url: str, category: str, symbol: str, *, timeout_s: float = 6.0, connect_s: float = 2.0, read_s: Optional[float] = None) -> Optional[Dict[str, object]]:
+async def _bybit_get_instrument_info_cached(
+    base_url: str,
+    category: str,
+    symbol: str,
+    *,
+    timeout_s: float = 6.0,
+    connect_s: float = 2.0,
+    read_s: Optional[float] = None,
+    refresh_negative: bool = False,
+) -> Optional[Dict[str, object]]:
     category_key = category if category in {"linear", "spot", "inverse"} else "linear"
     symbol_key = str(symbol or "").strip().upper()
     if not symbol_key:
@@ -3781,10 +3858,24 @@ async def _bybit_get_instrument_info_cached(base_url: str, category: str, symbol
     cached = _BYBIT_INSTRUMENT_CACHE.get(cache_key)
     if cached and (now - float(cached.get("ts") or 0.0)) <= float(cached.get("ttl") or _BYBIT_INSTRUMENT_CACHE_TTL_SECONDS):
         row = cached.get("row")
-        return dict(row) if isinstance(row, dict) else None
-    payload = await _bybit_get_async(base_url, "/v5/market/instruments-info", {"category": category_key, "symbol": symbol_key}, timeout_s=timeout_s, connect_s=connect_s, read_s=read_s)
+        if isinstance(row, dict) or not refresh_negative:
+            return dict(row) if isinstance(row, dict) else None
+    payload = await _bybit_market_get_async(base_url, "/v5/market/instruments-info", {"category": category_key, "symbol": symbol_key}, timeout_s=timeout_s, connect_s=connect_s, read_s=read_s)
     items = (payload.get("result") or {}).get("list") or []
-    row = dict(items[0]) if isinstance(items, list) and items and isinstance(items[0], dict) else None
+    row = next(
+        (
+            dict(item)
+            for item in items
+            if isinstance(item, dict)
+            and _normalize_instrument_key(item.get("symbol")) == symbol_key
+        ),
+        None,
+    )
+    if items and row is None:
+        raise BybitPublicMarketError(
+            "/v5/market/instruments-info",
+            f"response did not match requested symbol {symbol_key}",
+        )
     if row:
         _BYBIT_INSTRUMENT_CACHE[cache_key] = {"ts": now, "ttl": _BYBIT_INSTRUMENT_CACHE_TTL_SECONDS, "row": row}
     else:
@@ -3792,7 +3883,17 @@ async def _bybit_get_instrument_info_cached(base_url: str, category: str, symbol
     return row
 
 
-async def _bybit_get_instrument_rows_by_base_cached(base_url: str, category: str, base_coin: str, *, timeout_s: float = 6.0, connect_s: float = 2.0, read_s: Optional[float] = None) -> List[Dict[str, object]]:
+async def _bybit_get_instrument_rows_by_base_cached(
+    base_url: str,
+    category: str,
+    base_coin: str,
+    *,
+    timeout_s: float = 6.0,
+    connect_s: float = 2.0,
+    read_s: Optional[float] = None,
+    refresh_negative: bool = False,
+    force_refresh: bool = False,
+) -> List[Dict[str, object]]:
     category_key = category if category in {"linear", "spot", "inverse"} else "linear"
     base_key = str(base_coin or '').strip().upper()
     if not base_key:
@@ -3800,11 +3901,23 @@ async def _bybit_get_instrument_rows_by_base_cached(base_url: str, category: str
     cache_key = _bybit_instrument_cache_key(base_url, category_key, "base", base_key)
     now = time.time()
     cached = _BYBIT_INSTRUMENT_CACHE.get(cache_key)
-    if cached and (now - float(cached.get("ts") or 0.0)) <= float(cached.get("ttl") or _BYBIT_INSTRUMENT_CACHE_TTL_SECONDS):
+    if not force_refresh and cached and (now - float(cached.get("ts") or 0.0)) <= float(cached.get("ttl") or _BYBIT_INSTRUMENT_CACHE_TTL_SECONDS):
         rows = cached.get("rows")
-        return [dict(r) for r in rows] if isinstance(rows, list) else []
-    payload = await _bybit_get_async(base_url, "/v5/market/instruments-info", {"category": category_key, "baseCoin": base_key}, timeout_s=timeout_s, connect_s=connect_s, read_s=read_s)
-    rows = [dict(r) for r in ((payload.get("result") or {}).get("list") or []) if isinstance(r, dict)]
+        if isinstance(rows, list) and (rows or not refresh_negative):
+            return [dict(r) for r in rows]
+    payload = await _bybit_market_get_async(base_url, "/v5/market/instruments-info", {"category": category_key, "baseCoin": base_key}, timeout_s=timeout_s, connect_s=connect_s, read_s=read_s)
+    raw_rows = (payload.get("result") or {}).get("list") or []
+    rows = [
+        dict(row)
+        for row in raw_rows
+        if isinstance(row, dict)
+        and _normalize_instrument_key(row.get("baseCoin")) == base_key
+    ]
+    if raw_rows and len(rows) != len(raw_rows):
+        raise BybitPublicMarketError(
+            "/v5/market/instruments-info",
+            f"response contained invalid rows for baseCoin {base_key}",
+        )
     ttl = _BYBIT_INSTRUMENT_CACHE_TTL_SECONDS if rows else _BYBIT_INSTRUMENT_NEGATIVE_TTL_SECONDS
     _BYBIT_INSTRUMENT_CACHE[cache_key] = {"ts": now, "ttl": ttl, "rows": rows}
     return rows
@@ -3961,50 +4074,126 @@ async def _calculator_timed_dependency(
             pending_dependencies.discard(name)
 
 
+def _bybit_instrument_with_category(
+    row: Dict[str, object], category: str
+) -> Dict[str, object]:
+    instrument = dict(row)
+    instrument["_category"] = category
+    return instrument
+
+
+def _bybit_preferred_base_instrument(
+    rows: List[Dict[str, object]], base_coin: str
+) -> Optional[Dict[str, object]]:
+    quote_rank = {quote: index for index, quote in enumerate(_BYBIT_PREFERRED_QUOTES)}
+    candidates = [
+        row
+        for row in rows
+        if _normalize_instrument_key(row.get("baseCoin")) == base_coin
+        and str(row.get("quoteCoin") or "").upper() in quote_rank
+    ]
+    if not candidates:
+        return None
+    return min(
+        candidates,
+        key=lambda row: (
+            quote_rank[str(row.get("quoteCoin") or "").upper()],
+            len(str(row.get("symbol") or "")),
+            str(row.get("symbol") or "").upper(),
+        ),
+    )
+
+
+def _bybit_symbol_cache_is_fresh(base_url: str, category: str) -> bool:
+    entry = _BYBIT_SYMBOL_LIST_CACHE.get(
+        _bybit_symbol_list_cache_key(base_url, category)
+    )
+    return bool(
+        isinstance(entry, dict)
+        and isinstance(entry.get("symbols"), list)
+        and entry.get("symbols")
+        and (time.time() - float(entry.get("ts") or 0.0))
+        <= _BYBIT_SYMBOL_LIST_CACHE_TTL_SECONDS
+    )
+
+
 async def _bybit_lookup_symbol(base_url: str, symbol: str) -> Optional[Dict[str, object]]:
-    normalized_symbol = _norm_symbol(symbol)
+    normalized_symbol = _normalize_bybit_lookup_key(symbol)
     if not normalized_symbol:
         return None
+    base_coin, explicit_quote = _bybit_split_explicit_quote(normalized_symbol)
 
-    for category in ("linear", "spot", "inverse"):
-        try:
-            choices = await _bybit_get_symbols_by_category_cached(base_url, category)
-        except Exception:
-            choices = []
-        resolved = resolve_bybit_symbol_from_choices(
-            normalized_symbol,
-            choices,
-            preferred_quotes=("USDT", "USDC", "USD"),
-            exact_first=True,
-        )
-        if not resolved or not resolved.get("resolved_symbol"):
-            name_aliases = await _bybit_name_aliases_for_choices(base_url, set(choices))
-            if name_aliases:
-                resolved = resolve_bybit_symbol_from_choices(
-                    normalized_symbol,
-                    choices,
-                    preferred_quotes=("USDT", "USDC", "USD"),
-                    exact_first=True,
-                    extra_aliases=name_aliases,
-                )
-        resolved_symbol = str((resolved or {}).get("resolved_symbol") or "").upper()
-        if not resolved_symbol:
-            continue
-        try:
-            payload = await _bybit_get_async(
-                base_url,
-                "/v5/market/instruments-info",
-                {"category": category, "symbol": resolved_symbol},
+    # Exact-looking pairs bypass the cached universe so newly listed symbols are
+    # queried directly. A validated retCode=0 empty list is the only miss.
+    if explicit_quote:
+        for category in _BYBIT_INSTRUMENT_CATEGORIES:
+            row = await _bybit_get_instrument_info_cached(
+                base_url, category, normalized_symbol, refresh_negative=True
             )
-        except Exception:
-            continue
+            if row:
+                return _bybit_instrument_with_category(row, category)
+        return None
 
-        items = (payload.get("result") or {}).get("list") or []
-        if isinstance(items, list) and items and isinstance(items[0], dict):
-            inst = dict(items[0])
-            inst["_category"] = category
-            return inst
-    return None
+    # Bare bases use Bybit's baseCoin selector and the established quote order.
+    for category in _BYBIT_INSTRUMENT_CATEGORIES:
+        rows = await _bybit_get_instrument_rows_by_base_cached(
+            base_url,
+            category,
+            base_coin,
+            refresh_negative=True,
+            force_refresh=True,
+        )
+        row = _bybit_preferred_base_instrument(rows, base_coin)
+        if row:
+            return _bybit_instrument_with_category(row, category)
+
+    async def resolve_from_universe(*, force_refresh: bool) -> Optional[Dict[str, object]]:
+        for category in _BYBIT_INSTRUMENT_CATEGORIES:
+            choices = await _bybit_get_symbols_by_category_cached(
+                base_url,
+                category,
+                force_refresh=force_refresh,
+                allow_stale_on_error=False,
+            )
+            resolved = resolve_bybit_symbol_from_choices(
+                normalized_symbol,
+                choices,
+                preferred_quotes=_BYBIT_PREFERRED_QUOTES,
+                exact_first=True,
+            )
+            if not resolved or not resolved.get("resolved_symbol"):
+                name_aliases = await _bybit_name_aliases_for_choices(
+                    base_url, set(choices)
+                )
+                if name_aliases:
+                    resolved = resolve_bybit_symbol_from_choices(
+                        normalized_symbol,
+                        choices,
+                        preferred_quotes=_BYBIT_PREFERRED_QUOTES,
+                        exact_first=True,
+                        extra_aliases=name_aliases,
+                    )
+            resolved_symbol = str(
+                (resolved or {}).get("resolved_symbol") or ""
+            ).upper()
+            if not resolved_symbol:
+                continue
+            row = await _bybit_get_instrument_info_cached(
+                base_url, category, resolved_symbol, refresh_negative=True
+            )
+            if row:
+                return _bybit_instrument_with_category(row, category)
+        return None
+
+    used_cached_universe = any(
+        _bybit_symbol_cache_is_fresh(base_url, category)
+        for category in _BYBIT_INSTRUMENT_CATEGORIES
+    )
+    resolved = await resolve_from_universe(force_refresh=False)
+    if resolved or not used_cached_universe:
+        return resolved
+    # At most one forced universe refresh pass follows a cache-only miss.
+    return await resolve_from_universe(force_refresh=True)
 
 
 async def _bybit_lookup_linear_symbol_with_fallback(base_url: str, symbol: str) -> Optional[Dict[str, object]]:
@@ -4012,7 +4201,7 @@ async def _bybit_lookup_linear_symbol_with_fallback(base_url: str, symbol: str) 
     tick = ((inst or {}).get("priceFilter") or {}).get("tickSize") if isinstance(inst, dict) else None
     if tick not in (None, "", "0", 0):
         return inst
-    payload = await _bybit_get_async(base_url, "/v5/market/instruments-info", {"category": "linear", "symbol": symbol})
+    payload = await _bybit_market_get_async(base_url, "/v5/market/instruments-info", {"category": "linear", "symbol": symbol})
     rows = ((payload.get("result") or {}).get("list") or []) if isinstance(payload, dict) else []
     for row in rows:
         if isinstance(row, dict) and str(row.get("symbol") or "").upper() == str(symbol).upper():
@@ -4088,7 +4277,7 @@ async def _bybit_fetch_range_specs_async(base_url: str, category: str, symbol: s
     warnings: List[Dict[str, str]] = []
     for field, interval in _BYBIT_RANGE_INTERVALS:
         try:
-            payload = await _bybit_get_async(
+            payload = await _bybit_market_get_async(
                 base_url,
                 "/v5/market/kline",
                 {"category": category, "symbol": symbol, "interval": interval, "limit": 1},
@@ -4125,11 +4314,10 @@ def _btc_reference_symbol_for_category(category: str, quote_coin: Optional[str] 
 
 
 async def _bybit_resolve_and_fetch_specs(query: str, *, include_btc_reference: bool = True) -> Optional[Dict[str, object]]:
-    want_key = _normalize_instrument_key(query)
+    want_key = _normalize_bybit_lookup_key(query)
     if not want_key:
         return None
-    creds = resolve_bybit_credentials_for("default")
-    base_url = (creds.get("base_url") if isinstance(creds, dict) else None) or BYBIT_BASE
+    base_url = _bybit_public_market_base_url()
     resolved_inst = await _bybit_lookup_symbol(base_url, want_key)
     if not resolved_inst:
         return None
@@ -4138,7 +4326,7 @@ async def _bybit_resolve_and_fetch_specs(query: str, *, include_btc_reference: b
     warnings: List[Dict[str, str]] = []
     ticker = None
     try:
-        payload = await _bybit_get_async(base_url, "/v5/market/tickers", {"category": category, "symbol": symbol})
+        payload = await _bybit_market_get_async(base_url, "/v5/market/tickers", {"category": category, "symbol": symbol})
         ticker_row = _extract_valid_bybit_ticker_row(payload, symbol)
         if ticker_row:
             _cache_bybit_ticker_payload(base_url, category, symbol, payload, "instrument_specs")
@@ -4177,8 +4365,21 @@ async def _bybit_resolve_and_fetch_specs(query: str, *, include_btc_reference: b
             "leverageStep": leverage_filter.get("leverageStep"),
         }
     )
-    avg7d = await _bybit_avg_7d_turnover_usd_async(base_url, str((ticker or {}).get("symbol") or symbol), category)
-    if avg7d is not None: specs["avg7dTurnoverUsd"] = avg7d
+    try:
+        avg7d = await _bybit_avg_7d_turnover_usd_async(
+            base_url, str((ticker or {}).get("symbol") or symbol), category
+        )
+        if avg7d is not None:
+            specs["avg7dTurnoverUsd"] = avg7d
+    except Exception as exc:
+        warnings.append(
+            {
+                "scope": "turnover",
+                "symbol": symbol,
+                "field": "avg7dTurnoverUsd",
+                "message": _safe_exception_message(exc),
+            }
+        )
     range_specs, range_warnings = await _bybit_fetch_range_specs_async(base_url, category, symbol)
     specs.update(range_specs); warnings.extend(range_warnings)
     units = {"fundingRate":"fraction","lastPrice":"price","launchTime":"timestamp_ms","nextFundingTime":"timestamp_ms","openInterest":"contracts","openInterestValue":"usd_value","volume24hUsd":"usd_value_24h","avg7dTurnoverUsd":"usd_value_per_day_avg_7d"}
@@ -4186,20 +4387,39 @@ async def _bybit_resolve_and_fetch_specs(query: str, *, include_btc_reference: b
     specs["_units"] = units
     if include_btc_reference and not _is_bitcoin_bybit_symbol(symbol, resolved_inst):
         btc_symbol = _btc_reference_symbol_for_category(category, resolved_inst.get("quoteCoin"))
-        btc_exact = await _bybit_get_async(base_url, "/v5/market/instruments-info", {"category": category, "symbol": btc_symbol})
-        btc_rows = ((btc_exact.get("result") or {}).get("list") or []) if isinstance(btc_exact, dict) else []
-        btc_inst = next((r for r in btc_rows if isinstance(r, dict) and str(r.get("symbol") or "").upper() == btc_symbol), None)
-        btc_specs = None
-        if btc_inst:
+        try:
+            btc_inst = await _bybit_get_instrument_info_cached(
+                base_url, category, btc_symbol, refresh_negative=True
+            )
+            if not btc_inst:
+                raise ValueError(f"Bybit did not return optional reference instrument {btc_symbol}")
             btc_ticker = None
             try:
-                p = await _bybit_get_async(base_url, "/v5/market/tickers", {"category": category, "symbol": btc_symbol})
-                lst = (p.get("result") or {}).get("list") or []
-                if isinstance(lst, list) and lst and isinstance(lst[0], dict):
-                    btc_ticker = lst[0]
-            except Exception:
-                btc_ticker = None
-            btc_specs = {
+                payload = await _bybit_market_get_async(
+                    base_url,
+                    "/v5/market/tickers",
+                    {"category": category, "symbol": btc_symbol},
+                )
+                rows = (payload.get("result") or {}).get("list") or []
+                btc_ticker = next(
+                    (
+                        row
+                        for row in rows
+                        if isinstance(row, dict)
+                        and str(row.get("symbol") or "").upper() == btc_symbol
+                    ),
+                    None,
+                )
+            except Exception as exc:
+                warnings.append(
+                    {
+                        "scope": "btc_reference",
+                        "symbol": btc_symbol,
+                        "field": "tickers",
+                        "message": _safe_exception_message(exc),
+                    }
+                )
+            btc_specs: Dict[str, object] = {
                 "source": "bybit",
                 "query": btc_symbol,
                 "resolved_symbol": btc_symbol,
@@ -4207,14 +4427,40 @@ async def _bybit_resolve_and_fetch_specs(query: str, *, include_btc_reference: b
                 "lastPrice": (btc_ticker or {}).get("lastPrice"),
                 "volume24hUsd": (btc_ticker or {}).get("turnover24h"),
             }
-            btc_avg7d = await _bybit_avg_7d_turnover_usd_async(base_url, btc_symbol, category)
-            if btc_avg7d is not None:
-                btc_specs["avg7dTurnoverUsd"] = btc_avg7d
-            btc_ranges, _btc_warnings = await _bybit_fetch_range_specs_async(base_url, category, btc_symbol)
+            try:
+                btc_avg7d = await _bybit_avg_7d_turnover_usd_async(
+                    base_url, btc_symbol, category
+                )
+                if btc_avg7d is not None:
+                    btc_specs["avg7dTurnoverUsd"] = btc_avg7d
+            except Exception as exc:
+                warnings.append(
+                    {
+                        "scope": "btc_reference",
+                        "symbol": btc_symbol,
+                        "field": "avg7dTurnoverUsd",
+                        "message": _safe_exception_message(exc),
+                    }
+                )
+            btc_ranges, btc_warnings = await _bybit_fetch_range_specs_async(
+                base_url, category, btc_symbol
+            )
             btc_specs.update(btc_ranges)
-        if btc_specs:
-            specs["_btc_reference"] = {k: v for k, v in btc_specs.items() if not str(k).startswith("_")}
-            warnings.extend(btc_specs.get("_spec_warnings") or [])
+            warnings.extend(btc_warnings)
+            specs["_btc_reference"] = {
+                key: value
+                for key, value in btc_specs.items()
+                if not str(key).startswith("_") and value is not None
+            }
+        except Exception as exc:
+            warnings.append(
+                {
+                    "scope": "btc_reference",
+                    "symbol": btc_symbol,
+                    "field": "instrument",
+                    "message": _safe_exception_message(exc),
+                }
+            )
     if warnings:
         specs["_spec_warnings"] = warnings
     return {k: v for k, v in specs.items() if v is not None}
@@ -4618,6 +4864,18 @@ async def _fetch_instrument_specs(
     pref = str(prefer or "").strip().lower()
     specs: Optional[Dict[str, object]] = None
 
+    async def fetch_bybit() -> Optional[Dict[str, object]]:
+        try:
+            return await _bybit_resolve_and_fetch_specs(q)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    f"Bybit public market specification request failed for {q}: "
+                    f"{_safe_exception_message(exc)}"
+                ),
+            ) from exc
+
     async def fetch_binance() -> Optional[Dict[str, object]]:
         try:
             return await _binance_resolve_and_fetch_specs(q)
@@ -4627,6 +4885,17 @@ async def _fetch_instrument_specs(
                 status_code=502,
                 detail=f"Binance USDⓈ-M specification request failed for {q}: {safe}",
             ) from exc
+
+    async def fetch_crypto_bybit_first() -> Optional[Dict[str, object]]:
+        bybit_specs = await fetch_bybit()
+        if bybit_specs:
+            return bybit_specs
+        fallback_specs = await fetch_binance()
+        if fallback_specs:
+            fallback_specs["_source_notice"] = (
+                "Bybit did not list this instrument; Binance USD-M was used as fallback."
+            )
+        return fallback_specs
 
     async def fetch_oanda() -> Optional[Dict[str, object]]:
         try:
@@ -4638,17 +4907,15 @@ async def _fetch_instrument_specs(
             ) from exc
 
     if pref in {"bybit", "crypto", "perp", "perpetual"}:
+        specs = await fetch_crypto_bybit_first()
+    elif pref == "binance":
         specs = await fetch_binance()
     elif pref in {"oanda", "fx", "forex"}:
         specs = await fetch_oanda()
     elif _is_likely_fx_pair(q):
         specs = await fetch_oanda()
-    elif _is_likely_bybit_symbol(q):
-        specs = await fetch_binance()
     else:
-        specs = await fetch_oanda()
-        if not specs and not _is_likely_fx_pair(q):
-            specs = await fetch_binance()
+        specs = await fetch_crypto_bybit_first()
 
     if not specs:
         raise HTTPException(status_code=404, detail=f"Instrument not found for query: {q}")
@@ -26116,12 +26383,15 @@ async def _bybit_name_aliases_for_choices(base_url: str, symbols: List[str] | Se
     if isinstance(cached_aliases, dict) and now < float(_BYBIT_NAME_ALIAS_CACHE.get("expires_at") or 0):
         alias_map = cached_aliases
     else:
-        payload = await _bybit_get_async(base_url, "/v5/market/instruments-info", {"category": "linear", "limit": 1000})
+        payload = await _bybit_market_get_async(base_url, "/v5/market/instruments-info", {"category": "linear", "limit": 1000})
         rows = (payload.get("result") or {}).get("list") or []
         alias_map: Dict[str, str] = {}
         for row in rows if isinstance(rows, list) else []:
             if not isinstance(row, dict):
-                continue
+                raise BybitPublicMarketError(
+                    "/v5/market/instruments-info",
+                    "invalid linear instrument row while resolving aliases",
+                )
             symbol = str(row.get("symbol") or "").upper()
             base_coin = str(row.get("baseCoin") or "").upper()
             display_name = norm_symbol(row.get("displayName"))

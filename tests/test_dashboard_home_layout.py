@@ -112,6 +112,22 @@ def test_dashboard_home_removes_instrument_specs_recent_trades_open_orders() -> 
     assert 'id="scripts-grid"' in rail_html
 
 
+def test_instrument_lookup_requests_bybit_and_labels_market_data_source() -> None:
+    source = (ROOT / 'render' / 'static' / 'instrument_lookup.js').read_text(encoding='utf-8')
+    backend = MASTER_SERVICE_PATH.read_text(encoding='utf-8')
+
+    assert "detectedAsset === 'fx' ? '&prefer=oanda' : '&prefer=bybit'" in source
+    assert '/api/resolve-symbol?' not in source
+    assert "label = 'Data source: Bybit'" in source
+    assert 'Data source: Binance USD-M fallback' in source
+    assert 'Bybit did not list this instrument; Binance USD-M was used as fallback.' in backend
+    assert "label = 'Data source: OANDA'" in source
+    assert "indicator.id = 'instrument-data-source'" in source
+    assert 'renderMarketDataSource(source)' in source
+    assert "'_source_notice'" in source.split('const HIDE_SPEC_FIELDS', 1)[1].split(']);', 1)[0]
+    assert 'renderSpecRow(key, source._source_notice' not in source
+
+
 def test_dashboard_equity_toolbar_is_responsive_and_non_overlapping() -> None:
     source = MASTER_SERVICE_PATH.read_text(encoding='utf-8')
     html = _extract_html_template(source)

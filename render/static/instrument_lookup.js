@@ -23,7 +23,7 @@
     'category', 'status', 'baseCoin', 'quoteCoin',
     'fundingHistory.fundingRate', 'fundingHistory.fundingRateTimestamp',
     'indexPrice', 'leverageFilter', 'lotSizeFilter', 'markPrice', 'priceFilter',
-    'openInterest', 'query', 'source', 'scannerVolume24h', '_units', '_btc_reference', '_spec_warnings',
+    'openInterest', 'query', 'source', 'scannerVolume24h', '_units', '_btc_reference', '_spec_warnings', '_source_notice',
     'tickSize', 'minPrice', 'maxPrice', 'qtyStep', 'minOrderQty', 'maxOrderQty', 'maxMktOrderQty',
     'minNotionalValue', 'minLeverage', 'maxLeverage', 'leverageStep', 'pipLocation', 'displayPrecision',
     'tradeUnitsPrecision', 'minimumTradeSize', 'maximumOrderUnits', 'maximumPositionSize', 'marginRate',
@@ -501,9 +501,35 @@
     return state.asset === 'fx' ? 'AUD' : 'USDT';
   }
 
+  function renderMarketDataSource(specs) {
+    if (!rows?.parentNode) return;
+    let indicator = document.getElementById('instrument-data-source');
+    if (!indicator) {
+      indicator = document.createElement('div');
+      indicator.id = 'instrument-data-source';
+      indicator.className = 'panel-note';
+      indicator.setAttribute('role', 'status');
+      indicator.style.marginBottom = '0.65rem';
+      rows.parentNode.insertBefore(indicator, rows);
+    }
+    let label = '';
+    if (specs?.source === 'bybit') {
+      label = 'Data source: Bybit';
+    } else if (specs?.source === 'binance_usdm') {
+      label = specs?._source_notice
+        ? `Data source: Binance USD-M fallback — ${String(specs._source_notice)}`
+        : 'Data source: Binance USD-M';
+    } else if (specs?.source === 'oanda') {
+      label = 'Data source: OANDA';
+    }
+    indicator.textContent = label;
+    indicator.hidden = !label;
+  }
+
   function renderSpecs(specs) {
     if (!rows) return;
     const source = specs && typeof specs === 'object' ? specs : {};
+    renderMarketDataSource(source);
     const btcRef = source._btc_reference && typeof source._btc_reference === 'object' ? source._btc_reference : null;
     const usableKeys = Object.keys(source).filter((key) => {
       if (HIDE_SPEC_FIELDS.has(key) || !hasValue(source[key])) return false;
@@ -749,16 +775,6 @@
     return payload || {};
   }
 
-  async function resolveBybitSymbol(value) {
-    if (!value || isLikelyFxPair(value)) return value;
-    try {
-      const payload = await fetchJson(`/api/resolve-symbol?symbol=${encodeURIComponent(value)}&prefer=bybit&scope=all`);
-      return String(payload?.resolved_symbol || value).trim() || value;
-    } catch (_err) {
-      return value;
-    }
-  }
-
   async function load() {
     const raw = String(qInput?.value || '').trim();
     if (!raw) return;
@@ -767,24 +783,27 @@
     renderJournal({ status: 'loading', trades: [] });
     const detectedAsset = isLikelyFxPair(raw) ? 'fx' : 'crypto';
     setAsset(detectedAsset);
-    const resolved = detectedAsset === 'crypto' ? await resolveBybitSymbol(raw) : raw;
-    if (qInput && resolved && resolved !== raw) qInput.value = resolved;
-    const prefer = detectedAsset === 'fx' ? '&prefer=oanda' : '';
-    const [specsResult, journalResult] = await Promise.allSettled([
-      fetchJson(`/api/instrument-specs?query=${encodeURIComponent(resolved)}${prefer}`),
-      fetchJson(`/api/calculator/journal-summary?asset=${encodeURIComponent(detectedAsset)}&symbol=${encodeURIComponent(resolved)}`),
+    const prefer = detectedAsset === 'fx' ? '&prefer=oanda' : '&prefer=bybit';
+    const [specsResult] = await Promise.allSettled([
+      fetchJson(`/api/instrument-specs?query=${encodeURIComponent(raw)}${prefer}`),
     ]);
 
     const errors = [];
     let specs = null;
+    let resolved = raw;
     if (specsResult.status === 'fulfilled') {
       specs = specsResult.value || {};
+      resolved = String(specs.resolved_symbol || raw).trim() || raw;
+      if (qInput && resolved !== raw) qInput.value = resolved;
       renderSpecs(specs);
     } else {
       renderSpecs({});
       errors.push(`Instrument specs failed: ${specsResult.reason?.message || String(specsResult.reason)}`);
     }
 
+    const [journalResult] = await Promise.allSettled([
+      fetchJson(`/api/calculator/journal-summary?asset=${encodeURIComponent(detectedAsset)}&symbol=${encodeURIComponent(resolved)}`),
+    ]);
     if (journalResult.status === 'fulfilled') {
       renderJournal(journalResult.value || { status: 'error', trades: [] });
     } else {
