@@ -14,6 +14,7 @@ import ctypes
 import hashlib
 import hmac
 import html
+from html.parser import HTMLParser
 import io
 import json
 import logging
@@ -8935,12 +8936,36 @@ def _parse_excel_account_workbook(
 ) -> Tuple[List[Dict[str, object]], Optional[Dict[str, object]]]:
     def _parse_oanda_export_datetime(value: object) -> Tuple[float, Optional[str]]:
         return _parse_oanda_datetime_to_epoch_and_journal_iso(value)
+    if _looks_like_html_table_report(payload):
+        parsed_html = _parse_pepperstone_mt5_rows(
+            [_mt5_html_rows(payload)], source_kind="html"
+        )
+        if parsed_html is None:
+            raise ValueError(
+                "The HTML/XML file is not a recognized native Pepperstone MT5 statement."
+            )
+        return parsed_html
     bio = io.BytesIO(payload)
     try:
         xls = pd.ExcelFile(bio, engine="openpyxl")
     except Exception:
         bio.seek(0)
         xls = pd.ExcelFile(bio, engine="xlrd")
+
+    raw_sheets: List[List[List[object]]] = []
+    for raw_sheet in xls.sheet_names:
+        try:
+            raw_frame = pd.read_excel(xls, sheet_name=raw_sheet, header=None)
+        except Exception:
+            continue
+        if raw_frame is None or raw_frame.empty:
+            continue
+        raw_sheets.append(
+            [list(row) for row in raw_frame.itertuples(index=False, name=None)]
+        )
+    parsed_mt5 = _parse_pepperstone_mt5_rows(raw_sheets, source_kind="excel")
+    if parsed_mt5 is not None:
+        return parsed_mt5
 
     all_rows: List[Dict[str, object]] = []
     account_balance: Optional[Dict[str, object]] = None
@@ -9686,7 +9711,7 @@ def _build_journal_balance_timelines(
 
     def _is_authoritative_account_balance_seed(seed: Dict[str, object]) -> bool:
         source = str(seed.get("balance_source") or seed.get("source") or "").strip().lower()
-        if source in {"oanda_transaction_export_balance", "oanda_account_summary", "broker_account_summary", "account_summary"}:
+        if source in {"oanda_transaction_export_balance", "pepperstone_mt5_statement_balance", "oanda_account_summary", "broker_account_summary", "account_summary"}:
             return True
         if source in {"excel", "local_excel"}:
             raw_refs = seed.get("raw_refs") if isinstance(seed.get("raw_refs"), dict) else {}
@@ -9698,7 +9723,7 @@ def _build_journal_balance_timelines(
         if not str(seed_as_of or "").strip():
             return False
         return str(seed_source or "").strip().lower() in {
-            "oanda_transaction_export_balance", "oanda_account_summary", "broker_account_summary", "account_summary"
+            "oanda_transaction_export_balance", "pepperstone_mt5_statement_balance", "oanda_account_summary", "broker_account_summary", "account_summary"
         }
     ts_cache: Dict[str, float] = {}
     def _to_ts(value: object) -> float:
@@ -10873,6 +10898,10 @@ def _parse_local_trading_journal_workbook(path: Path, *, original_name: Optional
             return parsed.get("rows") or [], parsed.get("account_balance")
         return [], None
     payload = path.read_bytes()
+    if path.suffix.lower() in {".html", ".htm"} and not _looks_like_html_table_report(payload):
+        raise ValueError(
+            "The HTML file is not a recognized native Pepperstone MT5 table report."
+        )
     rows, balance = _parse_excel_account_workbook(str(original_name or path.name), str(path), payload)
     for row in rows:
         if isinstance(row, dict):
@@ -19765,6 +19794,622 @@ async def _collect_bybit_open_items(
         "auth_failed": False,
         "auth_diagnostic": auth_diagnostic,
     }
+
+
+class _MT5ReportHTMLParser(HTMLParser):
+    """Extract inert table text from an MT5 report without loading resources."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.rows: List[List[str]] = []
+        self._row: Optional[List[str]] = None
+        self._cell: Optional[List[str]] = None
+        self._ignored_depth = 0
+        self._loose_text: List[str] = []
+
+    def handle_starttag(self, tag: str, attrs: List[Tuple[str, Optional[str]]]) -> None:
+        name = str(tag or "").casefold()
+        if name in {"script", "style", "iframe", "object"}:
+            self._ignored_depth += 1
+            return
+        if self._ignored_depth:
+            return
+        if name in {"tr", "row"}:
+            self._row = []
+        elif name in {"td", "th", "cell"} and self._row is not None:
+            self._cell = []
+
+    def handle_endtag(self, tag: str) -> None:
+        name = str(tag or "").casefold()
+        if name in {"script", "style", "iframe", "object"}:
+            self._ignored_depth = max(0, self._ignored_depth - 1)
+            return
+        if self._ignored_depth:
+            return
+        if name in {"td", "th", "cell"} and self._row is not None and self._cell is not None:
+            self._row.append(" ".join(part for part in self._cell if part).strip())
+            self._cell = None
+        elif name in {"tr", "row"} and self._row is not None:
+            if any(str(cell or "").strip() for cell in self._row):
+                self.rows.append(self._row)
+            self._row = None
+            self._cell = None
+
+    def handle_data(self, data: str) -> None:
+        if self._ignored_depth:
+            return
+        text = re.sub(r"\s+", " ", str(data or "")).strip()
+        if not text:
+            return
+        if self._cell is not None:
+            self._cell.append(text)
+        elif self._row is None:
+            self._loose_text.append(text)
+
+    def extracted_rows(self) -> List[List[object]]:
+        return [*[list(row) for row in self.rows], *[[text] for text in self._loose_text]]
+
+
+def _decode_mt5_report_text(payload: bytes) -> str:
+    if payload.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return payload.decode("utf-16")
+    if payload.startswith(b"\xef\xbb\xbf"):
+        return payload.decode("utf-8-sig")
+    sample = payload[:512]
+    encodings = ["utf-16-le", "utf-16-be", "utf-8-sig", "utf-8"] if sample.count(b"\x00") > max(2, len(sample) // 8) else ["utf-8-sig", "utf-8", "utf-16-le", "utf-16-be"]
+    for encoding in encodings:
+        try:
+            return payload.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    raise ValueError("The statement text encoding is not supported; export the MT5 report as UTF-8 or UTF-16.")
+
+
+def _looks_like_html_table_report(payload: bytes) -> bool:
+    try:
+        sample = _decode_mt5_report_text(payload[:65536]).casefold()
+    except Exception:
+        return False
+    return ("<html" in sample or "<?xml" in sample or "<table" in sample) and ("<table" in sample or "<row" in sample)
+
+
+def _mt5_html_rows(payload: bytes) -> List[List[object]]:
+    parser = _MT5ReportHTMLParser()
+    try:
+        parser.feed(_decode_mt5_report_text(payload))
+        parser.close()
+    except Exception as exc:
+        raise ValueError(f"Could not parse the MT5 HTML tables: {exc}") from exc
+    return parser.extracted_rows()
+
+
+def _mt5_cell_text(value: object) -> str:
+    if _is_empty_cell(value):
+        return ""
+    if isinstance(value, datetime):
+        return value.isoformat(sep=" ")
+    return re.sub(r"\s+", " ", str(value)).strip()
+
+
+def _mt5_header(value: object) -> str:
+    text = html.unescape(_mt5_cell_text(value)).casefold()
+    text = text.replace("s / l", "sl").replace("t / p", "tp")
+    return re.sub(r"[^a-z0-9]+", " ", text).strip()
+
+
+def _mt5_ticket(value: object) -> str:
+    text = _mt5_cell_text(value)
+    if re.fullmatch(r"\d+\.0+", text):
+        text = text.split(".", 1)[0]
+    return text if re.fullmatch(r"[A-Za-z0-9._-]+", text) else ""
+
+
+def _mt5_broker_local_iso(value: object) -> Optional[str]:
+    if _is_empty_cell(value):
+        return None
+    if isinstance(value, pd.Timestamp):
+        value = value.to_pydatetime()
+    if isinstance(value, datetime):
+        return value.isoformat()
+    text = _mt5_cell_text(value)
+    normalized = text.replace(".", "-") if re.match(r"^\d{4}\.\d{2}\.\d{2}", text) else text
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    try:
+        return datetime.fromisoformat(normalized).isoformat()
+    except ValueError:
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y/%m/%d %H:%M:%S"):
+            try:
+                return datetime.strptime(normalized, fmt).isoformat()
+            except ValueError:
+                continue
+    return text or None
+
+
+def _mt5_metadata_value(rows: List[List[object]], labels: Set[str]) -> str:
+    normalized_labels = {_mt5_header(label) for label in labels}
+    for row in rows:
+        cells = [_mt5_cell_text(cell) for cell in row]
+        for index, cell in enumerate(cells):
+            norm = _mt5_header(cell)
+            if norm in normalized_labels:
+                for candidate in cells[index + 1 :]:
+                    if candidate:
+                        return candidate
+            raw_match = re.match(r"^\s*([^:#-]+?)\s*[:#-]\s*(.+)$", cell)
+            if raw_match and _mt5_header(raw_match.group(1)) in normalized_labels:
+                return raw_match.group(2).strip()
+    return ""
+
+
+def _mt5_row_value(row: List[object], index: Optional[int]) -> object:
+    if index is None or index < 0 or index >= len(row):
+        return None
+    return row[index]
+
+
+def _mt5_header_index(headers: List[str], names: Set[str], *, last: bool = False) -> Optional[int]:
+    indexes = [index for index, value in enumerate(headers) if value in names]
+    if not indexes:
+        return None
+    return indexes[-1] if last else indexes[0]
+
+
+def _mt5_component(value: object) -> float:
+    parsed = _cell_to_float(value)
+    return float(parsed) if parsed is not None else 0.0
+
+
+def _mt5_account_fingerprint(server: str, login: str) -> str:
+    identity = f"pepperstone\n{server.strip().casefold()}\n{login.strip()}"
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()[:20]
+
+
+def _mt5_statement_metadata(rows: List[List[object]]) -> Optional[Dict[str, str]]:
+    flattened = "\n".join(_mt5_cell_text(cell) for row in rows for cell in row if _mt5_cell_text(cell))
+    lower = flattened.casefold()
+    if "pepperstone" not in lower:
+        return None
+    structural = any(
+        {"deal", "symbol", "volume", "price"}.issubset(set(_mt5_header(cell) for cell in row))
+        or {"position", "symbol", "volume", "price"}.issubset(set(_mt5_header(cell) for cell in row))
+        for row in rows
+    )
+    if not structural:
+        raise ValueError("Pepperstone report metadata was found, but no native MT5 Positions or Deals table was recognized.")
+    server = _mt5_metadata_value(rows, {"server", "trade server"})
+    company = _mt5_metadata_value(rows, {"company", "broker"})
+    if "pepperstone" not in f"{server} {company}".casefold():
+        raise ValueError("The MT5 report does not identify a Pepperstone server.")
+    account_value = _mt5_metadata_value(rows, {"account", "login", "account number"})
+    login_match = re.search(r"\b\d{3,}\b", account_value)
+    login = login_match.group(0) if login_match else ""
+    if not login:
+        raise ValueError("The Pepperstone MT5 report account login could not be read.")
+    account_name = _mt5_metadata_value(rows, {"name", "account name", "client"})
+    mode_text = f"{server} {account_value} {account_name}".casefold()
+    if any(token in mode_text for token in ("demo", "practice")):
+        mode = "demo"
+    elif any(token in mode_text for token in ("live", "real", "edge")):
+        mode = "live"
+    else:
+        raise ValueError("Pepperstone MT5 account type is ambiguous; the report must identify a Demo or Live server.")
+    currency = _mt5_metadata_value(rows, {"currency", "deposit currency"}).upper()
+    if not re.fullmatch(r"[A-Z]{3,5}", currency):
+        raise ValueError("The Pepperstone MT5 report deposit currency could not be read.")
+    return {
+        "server": server,
+        "login": login,
+        "account_name": account_name,
+        "account_label": "PEPPERSTONE DEMO" if mode == "demo" else "PEPPERSTONE LIVE",
+        "currency": currency,
+        "period": _mt5_metadata_value(rows, {"period", "report period"}),
+        "fingerprint": _mt5_account_fingerprint(server, login),
+    }
+
+
+def _mt5_table_ranges(rows: List[List[object]], kind: str) -> List[Tuple[List[str], List[List[object]]]]:
+    found: List[Tuple[List[str], List[List[object]]]] = []
+    for start, row in enumerate(rows):
+        headers = [_mt5_header(cell) for cell in row]
+        values = set(headers)
+        if kind == "positions":
+            is_header = {"position", "symbol", "type", "volume"}.issubset(values) and headers.count("price") >= 1
+        else:
+            is_header = {"deal", "symbol", "type", "volume", "price"}.issubset(values) and bool({"direction", "entry"} & values)
+        if not is_header:
+            continue
+        body: List[List[object]] = []
+        for candidate in rows[start + 1 :]:
+            candidate_headers = [_mt5_header(cell) for cell in candidate]
+            candidate_values = set(candidate_headers)
+            if ({"position", "symbol", "type", "volume"}.issubset(candidate_values) or {"deal", "symbol", "type", "volume", "price"}.issubset(candidate_values)):
+                break
+            if len([cell for cell in candidate if _mt5_cell_text(cell)]) == 1 and _mt5_header(next(cell for cell in candidate if _mt5_cell_text(cell))) in {"orders", "deals", "positions", "summary"}:
+                break
+            body.append(candidate)
+        found.append((headers, body))
+    return found
+
+
+def _mt5_trade_row(
+    *, metadata: Dict[str, str], position_ticket: str, close_tickets: List[str],
+    symbol: str, side: str, qty: float, entry_price: float, exit_price: float,
+    open_time: str, close_time: str, commission: float, fee: float, swap: float,
+    profit: float, stop_loss: Optional[float] = None, take_profit: Optional[float] = None,
+    identity_suffix: str = "",
+) -> Dict[str, object]:
+    account_fp = metadata["fingerprint"]
+    ticket_set = sorted(set(ticket for ticket in close_tickets if ticket))
+    if position_ticket and not identity_suffix:
+        identity = f"position:{position_ticket}"
+    else:
+        digest = hashlib.sha256("\n".join(ticket_set).encode("utf-8")).hexdigest()[:16]
+        identity = identity_suffix or f"closing-deals:{digest}"
+    net = profit + commission + fee + swap
+    return _normalize_journal_profit_fields({
+        "id": f"pepperstone_mt5:{account_fp}:{identity}",
+        "row_type": "trade",
+        "source": "pepperstone_mt5_statement",
+        "account": metadata["account_label"],
+        "account_label": metadata["account_label"],
+        "asset_class": "fx",
+        "currency": metadata["currency"],
+        "symbol": _canonical_symbol(symbol),
+        "symbol_raw": symbol,
+        "side": side.upper(),
+        "status": "closed",
+        "open_time": open_time,
+        "close_time": close_time,
+        "qty": qty,
+        "qty_raw": qty,
+        "qty_unit": "lots",
+        "entry_price": entry_price,
+        "exit_price": exit_price,
+        "stop_loss": stop_loss,
+        "take_profit": take_profit,
+        "commission": commission or None,
+        "fees": fee or None,
+        "swap": swap or None,
+        "net_profit": net,
+        "realized_pnl": net,
+        "realized_pnl_currency": metadata["currency"],
+        "commission_currency": metadata["currency"],
+        "fee_currency": metadata["currency"],
+        "metrics": {
+            "mt5_profit": profit,
+            "mt5_commission": commission,
+            "mt5_fee": fee,
+            "mt5_swap": swap,
+            "mt5_net_components_once": True,
+        },
+        "raw_refs": {
+            "account_fingerprint": account_fp,
+            "position_ticket": position_ticket or None,
+            "closing_deal_tickets": ticket_set,
+            "broker_server": metadata["server"],
+            "report_period": metadata.get("period") or None,
+        },
+        "updated_at": _utc_now_iso(),
+    })
+
+
+def _mt5_positions_rows(rows: List[List[object]], metadata: Dict[str, str]) -> Tuple[List[Dict[str, object]], int]:
+    parsed: List[Dict[str, object]] = []
+    open_count = 0
+    for headers, body in _mt5_table_ranges(rows, "positions"):
+        position_idx = _mt5_header_index(headers, {"position", "position id", "ticket"})
+        symbol_idx = _mt5_header_index(headers, {"symbol"})
+        type_idx = _mt5_header_index(headers, {"type"})
+        volume_idx = _mt5_header_index(headers, {"volume", "lots"})
+        time_indexes = [i for i, value in enumerate(headers) if value in {"time", "open time", "close time"}]
+        price_indexes = [i for i, value in enumerate(headers) if value in {"price", "open price", "close price"}]
+        commission_idx = _mt5_header_index(headers, {"commission"})
+        fee_idx = _mt5_header_index(headers, {"fee"})
+        swap_idx = _mt5_header_index(headers, {"swap"})
+        profit_idx = _mt5_header_index(headers, {"profit"})
+        sl_idx = _mt5_header_index(headers, {"sl", "s l", "stop loss"})
+        tp_idx = _mt5_header_index(headers, {"tp", "t p", "take profit"})
+        for row in body:
+            ticket = _mt5_ticket(_mt5_row_value(row, position_idx))
+            symbol = _mt5_cell_text(_mt5_row_value(row, symbol_idx))
+            side = _mt5_header(_mt5_row_value(row, type_idx))
+            qty = _cell_to_float(_mt5_row_value(row, volume_idx))
+            if not ticket or not symbol or side not in {"buy", "sell"} or qty is None or qty <= 0:
+                continue
+            if len(time_indexes) < 2 or len(price_indexes) < 2:
+                open_count += 1
+                continue
+            open_time = _mt5_broker_local_iso(_mt5_row_value(row, time_indexes[0]))
+            close_time = _mt5_broker_local_iso(_mt5_row_value(row, time_indexes[-1]))
+            entry = _cell_to_float(_mt5_row_value(row, price_indexes[0]))
+            exit_price = _cell_to_float(_mt5_row_value(row, price_indexes[-1]))
+            if not open_time or not close_time or entry is None or exit_price is None:
+                open_count += 1
+                continue
+            parsed.append(_mt5_trade_row(
+                metadata=metadata, position_ticket=ticket, close_tickets=[], symbol=symbol,
+                side=side, qty=float(qty), entry_price=entry, exit_price=exit_price,
+                open_time=open_time, close_time=close_time,
+                commission=_mt5_component(_mt5_row_value(row, commission_idx)),
+                fee=_mt5_component(_mt5_row_value(row, fee_idx)),
+                swap=_mt5_component(_mt5_row_value(row, swap_idx)),
+                profit=_mt5_component(_mt5_row_value(row, profit_idx)),
+                stop_loss=_cell_to_float(_mt5_row_value(row, sl_idx)),
+                take_profit=_cell_to_float(_mt5_row_value(row, tp_idx)),
+            ))
+    return parsed, open_count
+
+
+def _mt5_deal_events(rows: List[List[object]]) -> List[Dict[str, object]]:
+    events: List[Dict[str, object]] = []
+    sequence = 0
+    for headers, body in _mt5_table_ranges(rows, "deals"):
+        indexes = {
+            "time": _mt5_header_index(headers, {"time"}),
+            "deal": _mt5_header_index(headers, {"deal", "deal id", "ticket"}),
+            "symbol": _mt5_header_index(headers, {"symbol"}),
+            "type": _mt5_header_index(headers, {"type"}),
+            "direction": _mt5_header_index(headers, {"direction", "entry"}),
+            "volume": _mt5_header_index(headers, {"volume", "lots"}),
+            "price": _mt5_header_index(headers, {"price"}),
+            "position": _mt5_header_index(headers, {"position", "position id"}),
+            "commission": _mt5_header_index(headers, {"commission"}),
+            "fee": _mt5_header_index(headers, {"fee"}),
+            "swap": _mt5_header_index(headers, {"swap"}),
+            "profit": _mt5_header_index(headers, {"profit"}),
+        }
+        for row in body:
+            sequence += 1
+            deal = _mt5_ticket(_mt5_row_value(row, indexes["deal"]))
+            symbol = _mt5_cell_text(_mt5_row_value(row, indexes["symbol"]))
+            side = _mt5_header(_mt5_row_value(row, indexes["type"]))
+            volume = _cell_to_float(_mt5_row_value(row, indexes["volume"]))
+            price = _cell_to_float(_mt5_row_value(row, indexes["price"]))
+            if not deal or not symbol or side not in {"buy", "sell"} or volume is None or volume <= 0 or price is None:
+                continue
+            events.append({
+                "sequence": sequence,
+                "time": _mt5_broker_local_iso(_mt5_row_value(row, indexes["time"])),
+                "deal": deal,
+                "symbol": symbol,
+                "side": side,
+                "direction": _mt5_header(_mt5_row_value(row, indexes["direction"])).replace(" ", ""),
+                "volume": float(volume),
+                "price": float(price),
+                "position": _mt5_ticket(_mt5_row_value(row, indexes["position"])),
+                "commission": _mt5_component(_mt5_row_value(row, indexes["commission"])),
+                "fee": _mt5_component(_mt5_row_value(row, indexes["fee"])),
+                "swap": _mt5_component(_mt5_row_value(row, indexes["swap"])),
+                "profit": _mt5_component(_mt5_row_value(row, indexes["profit"])),
+            })
+    return events
+
+
+def _mt5_rows_from_deal_group(events: List[Dict[str, object]], metadata: Dict[str, str], position_ticket: str) -> Tuple[List[Dict[str, object]], List[str], int]:
+    cycles: List[Dict[str, object]] = []
+    warnings: List[str] = []
+    current: Optional[Dict[str, object]] = None
+
+    def start_cycle(event: Dict[str, object], volume: float, ratio: float = 1.0) -> Dict[str, object]:
+        return {"side": event["side"], "remaining": volume, "opened": volume, "open_parts": [{**event, "volume": volume, "ratio": ratio}], "close_parts": []}
+
+    for event in sorted(events, key=lambda item: int(item.get("sequence") or 0)):
+        direction = str(event.get("direction") or "").strip("/")
+        volume = float(event.get("volume") or 0.0)
+        if direction in {"in", "inout"} and current is None:
+            current = start_cycle(event, volume)
+            continue
+        if not direction:
+            if current is None:
+                current = start_cycle(event, volume)
+                continue
+            direction = "out" if event.get("side") != current.get("side") else "in"
+        if direction == "in":
+            if current is None:
+                current = start_cycle(event, volume)
+            elif event.get("side") == current.get("side"):
+                current["remaining"] = float(current["remaining"]) + volume
+                current["opened"] = float(current["opened"]) + volume
+                current["open_parts"].append({**event, "ratio": 1.0})
+            else:
+                warnings.append(f"ambiguous_opposite_entry:{event.get('deal')}")
+            continue
+        if direction not in {"out", "outby", "inout"} or current is None or event.get("side") == current.get("side"):
+            warnings.append(f"unmatched_or_ambiguous_deal:{event.get('deal')}")
+            continue
+        remaining = float(current.get("remaining") or 0.0)
+        consumed = min(volume, remaining)
+        if consumed > 0:
+            current["close_parts"].append({**event, "volume": consumed, "ratio": consumed / volume})
+            current["remaining"] = max(0.0, remaining - consumed)
+        if float(current.get("remaining") or 0.0) <= 1e-12:
+            cycles.append(current)
+            current = None
+        excess = max(0.0, volume - consumed)
+        if excess > 1e-12:
+            if direction == "inout":
+                current = start_cycle(event, excess, excess / volume)
+            else:
+                warnings.append(f"unmatched_close_volume:{event.get('deal')}")
+
+    open_count = 0
+    if current is not None:
+        if current.get("close_parts"):
+            cycles.append(current)
+        if float(current.get("remaining") or 0.0) > 1e-12:
+            open_count += 1
+
+    parsed: List[Dict[str, object]] = []
+    for cycle_index, cycle in enumerate(cycles):
+        closes = list(cycle.get("close_parts") or [])
+        if not closes:
+            continue
+        realized = sum(float(part.get("volume") or 0.0) for part in closes)
+        if realized <= 0:
+            continue
+        needed = realized
+        entry_total = 0.0
+        opening_components = {"commission": 0.0, "fee": 0.0, "swap": 0.0, "profit": 0.0}
+        opening_times: List[str] = []
+        for part in list(cycle.get("open_parts") or []):
+            part_volume = float(part.get("volume") or 0.0)
+            used = min(needed, part_volume)
+            if used <= 0:
+                continue
+            ratio = used / part_volume
+            entry_total += float(part.get("price") or 0.0) * used
+            if part.get("time"):
+                opening_times.append(str(part["time"]))
+            base_ratio = float(part.get("ratio") or 1.0)
+            for field in opening_components:
+                opening_components[field] += float(part.get(field) or 0.0) * base_ratio * ratio
+            needed -= used
+            if needed <= 1e-12:
+                break
+        exit_total = sum(float(part.get("price") or 0.0) * float(part.get("volume") or 0.0) for part in closes)
+        close_components = {
+            field: sum(float(part.get(field) or 0.0) * float(part.get("ratio") or 1.0) for part in closes)
+            for field in ("commission", "fee", "swap", "profit")
+        }
+        close_tickets = [str(part.get("deal") or "") for part in closes]
+        identity_suffix = ""
+        if len(cycles) > 1:
+            digest = hashlib.sha256("\n".join(sorted(close_tickets)).encode("utf-8")).hexdigest()[:16]
+            identity_suffix = f"position:{position_ticket}:close:{digest}" if position_ticket else f"closing-deals:{digest}"
+        parsed.append(_mt5_trade_row(
+            metadata=metadata,
+            position_ticket=position_ticket,
+            close_tickets=close_tickets,
+            symbol=str((cycle.get("open_parts") or [{}])[0].get("symbol") or ""),
+            side=str(cycle.get("side") or ""),
+            qty=realized,
+            entry_price=entry_total / realized,
+            exit_price=exit_total / realized,
+            open_time=min(opening_times) if opening_times else "",
+            close_time=max(str(part.get("time") or "") for part in closes),
+            commission=opening_components["commission"] + close_components["commission"],
+            fee=opening_components["fee"] + close_components["fee"],
+            swap=opening_components["swap"] + close_components["swap"],
+            profit=opening_components["profit"] + close_components["profit"],
+            identity_suffix=identity_suffix,
+        ))
+    return parsed, warnings, open_count
+
+
+def _mt5_deals_rows(rows: List[List[object]], metadata: Dict[str, str]) -> Tuple[List[Dict[str, object]], List[str], int]:
+    events = _mt5_deal_events(rows)
+    warnings: List[str] = []
+    explicit: Dict[str, List[Dict[str, object]]] = defaultdict(list)
+    implicit_groups: List[List[Dict[str, object]]] = []
+    active_implicit: List[Dict[str, object]] = []
+    for event in events:
+        position = str(event.get("position") or "")
+        if position:
+            explicit[position].append(event)
+            continue
+        direction = str(event.get("direction") or "").strip("/")
+        if direction in {"in", "inout"}:
+            group = [event]
+            implicit_groups.append(group)
+            active_implicit.append({"events": group, "symbol": event["symbol"], "side": event["side"], "remaining": float(event["volume"])})
+            continue
+        candidates = [item for item in active_implicit if item["symbol"] == event["symbol"] and item["side"] != event["side"] and float(item["remaining"]) > 1e-12]
+        if len(candidates) != 1:
+            warnings.append(f"ambiguous_unpositioned_deal:{event.get('deal')}")
+            continue
+        target = candidates[0]
+        target["events"].append(event)
+        target["remaining"] = max(0.0, float(target["remaining"]) - float(event["volume"]))
+
+    parsed: List[Dict[str, object]] = []
+    open_count = 0
+    for position, group in explicit.items():
+        group_rows, group_warnings, group_open = _mt5_rows_from_deal_group(group, metadata, position)
+        parsed.extend(group_rows)
+        warnings.extend(group_warnings)
+        open_count += group_open
+    for group in implicit_groups:
+        group_rows, group_warnings, group_open = _mt5_rows_from_deal_group(group, metadata, "")
+        parsed.extend(group_rows)
+        warnings.extend(group_warnings)
+        open_count += group_open
+    return parsed, warnings, open_count
+
+
+def _mt5_final_balance(rows: List[List[object]]) -> Optional[float]:
+    balance: Optional[float] = None
+    for row in rows:
+        populated = [(index, _mt5_cell_text(cell)) for index, cell in enumerate(row) if _mt5_cell_text(cell)]
+        if not populated:
+            continue
+        first_index, first_text = populated[0]
+        first_norm = _mt5_header(first_text)
+        if first_norm not in {"balance", "final balance"}:
+            match = re.match(r"^(?:final )?balance\s*[:=-]\s*(.+)$", first_text, re.IGNORECASE)
+            if match:
+                candidate = _cell_to_float(match.group(1))
+                if candidate is not None:
+                    balance = candidate
+            continue
+        for index, _text in populated:
+            if index == first_index:
+                continue
+            candidate = _cell_to_float(_mt5_row_value(row, index))
+            if candidate is not None:
+                balance = candidate
+                break
+    return balance
+
+
+def _mt5_period_as_of(period: str) -> Optional[str]:
+    matches = re.findall(r"\d{4}[./-]\d{2}[./-]\d{2}(?:\s+\d{2}:\d{2}(?::\d{2})?)?(?:\s*[+-]\d{2}:?\d{2})?", str(period or ""))
+    return _mt5_broker_local_iso(matches[-1]) if matches else None
+
+
+def _parse_pepperstone_mt5_rows(raw_sheets: List[List[List[object]]], *, source_kind: str) -> Optional[Tuple[List[Dict[str, object]], Optional[Dict[str, object]]]]:
+    rows = [list(row) for sheet in raw_sheets for row in sheet if isinstance(row, list)]
+    metadata = _mt5_statement_metadata(rows)
+    if metadata is None:
+        return None
+    position_rows, skipped_open_positions = _mt5_positions_rows(rows, metadata)
+    warnings: List[str] = []
+    if position_rows:
+        parsed = position_rows
+    else:
+        parsed, warnings, deal_open_count = _mt5_deals_rows(rows, metadata)
+        skipped_open_positions += deal_open_count
+    if skipped_open_positions:
+        warnings.append(f"skipped_open_positions:{skipped_open_positions}")
+    for row in parsed:
+        if isinstance(row, dict):
+            row["_import_warnings"] = list(warnings)
+    balance_value = _mt5_final_balance(rows)
+    balance = None
+    if balance_value is not None:
+        balance = {
+            "source": "pepperstone_mt5_statement_balance",
+            "balance_source": "pepperstone_mt5_statement_balance",
+            "account": metadata["account_label"],
+            "label": metadata["account_label"],
+            "balance": balance_value,
+            "currency": metadata["currency"],
+            "as_of": _mt5_period_as_of(metadata.get("period") or ""),
+            "raw_refs": {
+                "account_fingerprint": metadata["fingerprint"],
+                "broker_server": metadata["server"],
+                "report_period": metadata.get("period") or None,
+                "source_format": source_kind,
+            },
+            "_import_warnings": warnings,
+            "_mt5_diagnostics": {
+                "closed_positions_imported": len(parsed),
+                "open_positions_skipped": skipped_open_positions,
+                "warnings": warnings,
+            },
+        }
+    if not parsed and balance is None:
+        raise ValueError("The Pepperstone MT5 report contains no completed positions or final account balance.")
+    return parsed, balance
 
 
 def _load_bounce_traders() -> List[Dict[str, object]]:
@@ -38682,10 +39327,10 @@ body{margin:0;background:#0b1220;color:#e2e8f0;font-family:Inter,system-ui,sans-
 <body><main class="workspace">
 <section class="controls" aria-label="Journal controls">
   <button id="open-journal-btn">Open workbook</button><button id="import-journal-btn">Import</button><button id="journal-resync-btn">Resync</button>
-  <div id="journal-import-drop-zone" class="drop-zone">Drop .xlsx/.xlsm/.xls/.csv import files here<br/><span style="font-size:12px">or click Import to choose a file</span></div>
+  <div id="journal-import-drop-zone" class="drop-zone">Drop .xlsx/.xlsm/.xls/.csv or MT5 .html/.htm import files here<br/><span style="font-size:12px">or click Import to choose a file</span></div>
   <label style="font-size:12px;color:#94a3b8">Bybit CSV account <select id="journal-account-mode"><option value="" selected disabled>Select Demo or Live</option><option value="demo">Demo</option><option value="live">Live</option></select></label>
   <button id="crypto-monthly-pnl-btn">Crypto Monthly P&amp;L</button><button id="bybit-demo-balance-adjustment-btn">Bybit Demo Balance Adjustment</button>
-  <input id="journal-file-input" type="file" accept=".xlsx,.xlsm,.xls,.csv" hidden/><div id="journal-actions-status" class="status"></div>
+  <input id="journal-file-input" type="file" accept=".xlsx,.xlsm,.xls,.csv,.html,.htm" hidden/><div id="journal-actions-status" class="status"></div>
 </section>
 </main><script src="/static/trading_journal_actions.js?v={{TRADING_JOURNAL_ACTIONS_JS_VERSION}}"></script></body></html>"""
 
@@ -38698,12 +39343,45 @@ async def trading_journal_actions_workspace() -> HTMLResponse:
         .replace("{{TRADING_JOURNAL_ACTIONS_JS_VERSION}}", actions_js_version)
     )
 
+
+def _is_authoritative_manual_statement_balance(balance: object) -> bool:
+    if not isinstance(balance, dict):
+        return False
+    sources = {
+        str(balance.get(field) or "").strip().lower()
+        for field in ("source", "balance_source")
+    }
+    return bool(
+        sources
+        & {
+            "oanda_transaction_export_balance",
+            "pepperstone_mt5_statement_balance",
+        }
+    )
+
+
+def _is_authoritative_manual_statement_trade(row: object) -> bool:
+    if not isinstance(row, dict) or _row_type(row) != "trade":
+        return False
+    if _canonical_oanda_account_label(row) in _OANDA_CANONICAL_ACCOUNT_LABELS:
+        return True
+    return str(row.get("source") or "").strip().lower() == "pepperstone_mt5_statement"
+
+
+def _is_pepperstone_mt5_trade(row: object) -> bool:
+    return bool(
+        isinstance(row, dict)
+        and _row_type(row) == "trade"
+        and str(row.get("source") or "").strip().lower()
+        == "pepperstone_mt5_statement"
+    )
+
 def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, account_mode: Optional[str] = None) -> Dict[str, object]:
     global _PENDING_MANUAL_SYNC_ROWS, _PENDING_MANUAL_SYNC_BALANCES
     global _TRADING_JOURNAL_CACHE, _TRADING_JOURNAL_CACHE_KEY
     name = str(upload_name or "upload").strip() or "upload"
     suffix = Path(name).suffix.lower()
-    allowed = {".xlsx", ".xlsm", ".xls", ".csv"}
+    allowed = {".xlsx", ".xlsm", ".xls", ".csv", ".html", ".htm"}
     mode = str(account_mode or "").strip().lower()
     if suffix not in allowed:
         return {"ok": False, "status_code": 415, "message": f"Unsupported file type: {suffix or 'unknown'}", "uploaded_name": name, "file_type": suffix or "unknown", "errors": ["unsupported_file_type"], "warnings": []}
@@ -38711,6 +39389,20 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
         return {"ok": False, "status_code": 400, "message": "Uploaded file is empty.", "uploaded_name": name, "file_type": suffix, "errors": ["empty_upload"], "warnings": []}
     if mode and mode not in {"demo", "live"}:
         return {"ok": False, "status_code": 422, "message": "account_mode must be demo or live.", "uploaded_name": name, "file_type": suffix, "errors": ["invalid_account_mode"], "warnings": []}
+    preparsed_statement: Optional[Tuple[List[Dict[str, object]], Optional[Dict[str, object]]]] = None
+    if suffix in {".html", ".htm"} or _looks_like_html_table_report(payload):
+        try:
+            preparsed_statement = _parse_excel_account_workbook(name, "manual_upload", payload)
+        except Exception as exc:
+            return {
+                "ok": False,
+                "status_code": 422,
+                "message": f"The uploaded report is not a valid native Pepperstone MT5 statement: {exc}",
+                "uploaded_name": name,
+                "file_type": suffix,
+                "errors": [str(exc)],
+                "warnings": [],
+            }
     stem = Path(name).stem.lower()
     tokens = [t for t in re.split(r"[^a-z0-9]+", stem) if t]
     inferred_mode = "demo" if "demo" in tokens else ("live" if "live" in tokens else "")
@@ -38754,6 +39446,8 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
             except Exception as exc:
                 return {"ok": False, "status_code": 422, "message": f"Failed to parse {name}: {exc}", "uploaded_name": name, "file_type": suffix, "errors": [str(exc)], "warnings": []}
             balance = None
+        elif preparsed_statement is not None:
+            rows, balance = preparsed_statement
         else:
             try:
                 rows, balance = _parse_local_trading_journal_workbook(tmp_path, original_name=name, account_mode=mode or None)
@@ -38779,9 +39473,16 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
             }
         timings["parse"] = round(time.perf_counter() - t0, 6)
         APP_LOGGER.info("trading_journal_import_stage_done stage=parse elapsed=%.6fs upload=%s", timings["parse"], name)
+        parser_warnings = list((balance or {}).get("_import_warnings") or []) if isinstance(balance, dict) else []
+        for parsed_row in rows:
+            if not isinstance(parsed_row, dict):
+                continue
+            parser_warnings.extend(str(item) for item in (parsed_row.pop("_import_warnings", []) or []))
+        parser_warnings = list(dict.fromkeys(parser_warnings))
+        mt5_diagnostics = dict((balance or {}).get("_mt5_diagnostics") or {}) if isinstance(balance, dict) else {}
         oanda_transaction_export_balance = (
             dict(balance)
-            if _is_oanda_transaction_export_balance(balance)
+            if _is_authoritative_manual_statement_balance(balance)
             else None
         )
         t1 = time.perf_counter()
@@ -38795,6 +39496,9 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
             )
             bybit_diag.update(bybit_reconcile_diag)
         rows, inference_warnings, inference_diag = _infer_realized_net_profit_from_balance_continuity(rows, existing_rows)
+        inference_warnings = [*parser_warnings, *inference_warnings]
+        if mt5_diagnostics:
+            inference_diag["pepperstone_mt5"] = mt5_diagnostics
         timings["pnl_inference"] = round(time.perf_counter() - t1, 6)
         APP_LOGGER.info("trading_journal_import_stage_done stage=pnl_inference elapsed=%.6fs upload=%s", timings["pnl_inference"], name)
         rows = [r for r in (rows or []) if isinstance(r, dict)]
@@ -39195,8 +39899,8 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
                     workbook_row = workbook_by_id.get(row_id)
                     if (
                         isinstance(workbook_row, dict)
-                        and _canonical_oanda_account_label(candidate)
-                        in _OANDA_CANONICAL_ACCOUNT_LABELS
+                        and _is_authoritative_manual_statement_trade(candidate)
+                        and not _is_pepperstone_mt5_trade(candidate)
                     ):
                         candidate = _preserve_workbook_manual_fields(
                             candidate,
@@ -39272,6 +39976,27 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
                 and not preflight_state_delta_row_ids
             )
             if fast_path_noop:
+                # A workbook may contain user-entered MT5 fields that are not
+                # part of the imported trade projection. Reflect those fields
+                # in the in-memory cache only; the verified workbook remains
+                # authoritative and no JSON/workbook/GitHub write is needed.
+                global _TRADING_JOURNAL_CACHE, _TRADING_JOURNAL_CACHE_KEY
+                cached_rows = _get_trading_journal_rows()
+                cached_by_id = {
+                    str(item.get("id") or "").strip(): dict(item)
+                    for item in cached_rows
+                    if isinstance(item, dict) and str(item.get("id") or "").strip()
+                }
+                for row_id, workbook_row in workbook_map.items():
+                    current_row = cached_by_id.get(row_id)
+                    if current_row is None or not _is_pepperstone_mt5_trade(workbook_row):
+                        continue
+                    cached_by_id[row_id] = _preserve_workbook_manual_fields(
+                        current_row, workbook_row
+                    )
+                with _TRADING_JOURNAL_ROWS_LOCK:
+                    _TRADING_JOURNAL_CACHE = list(cached_by_id.values())
+                    _TRADING_JOURNAL_CACHE_KEY = _trading_journal_file_cache_key()
                 duplicate_rows_merged = sum(
                     1 for rid in preflight_parsed_map if rid in workbook_map
                 )
@@ -39460,8 +40185,7 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
                 if (
                     isinstance(row, dict)
                     and str(row.get("id") or "").strip() in workbook_map
-                    and _canonical_oanda_account_label(row)
-                    in _OANDA_CANONICAL_ACCOUNT_LABELS
+                    and _is_authoritative_manual_statement_trade(row)
                 )
                 else row
                 for row in rows
@@ -39721,8 +40445,7 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
                 )
                 if (
                     str((row or {}).get("id") or "").strip() in workbook_map
-                    and _canonical_oanda_account_label(row)
-                    in _OANDA_CANONICAL_ACCOUNT_LABELS
+                    and _is_authoritative_manual_statement_trade(row)
                 )
                 else post_upsert_rows_by_id.get(
                     str((row or {}).get("id") or "").strip(), dict(row)

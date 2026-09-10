@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import importlib.util
 import io
 import json
@@ -12,6 +13,7 @@ from pathlib import Path
 
 import pytest
 from fastapi import HTTPException
+from openpyxl import Workbook
 if "multipart" not in sys.modules:
     multipart_mod = types.ModuleType("multipart")
     multipart_mod.__spec__ = importlib.machinery.ModuleSpec("multipart", loader=None)
@@ -207,6 +209,178 @@ def _json(res):
 def test_autouse_fixture_starts_with_empty_pending_manual_import_state():
     assert master_service._PENDING_MANUAL_SYNC_ROWS == []
     assert master_service._PENDING_MANUAL_SYNC_BALANCES == []
+
+
+def _pepperstone_mt5_native_rows() -> list[list[object]]:
+    return [
+        ["Account History Report"],
+        ["Name", "Synthetic Tester"],
+        ["Account", "123456"],
+        ["Company", "Pepperstone Group Limited"],
+        ["Server", "Pepperstone-Demo"],
+        ["Currency", "AUD"],
+        ["Period", "2026.09.01 00:00:00 - 2026.09.02 23:59:59"],
+        ["Deals"],
+        ["Time", "Deal", "Symbol", "Type", "Direction", "Volume", "Price", "Order", "Position ID", "Commission", "Fee", "Swap", "Profit", "Balance", "Comment"],
+        ["2026.09.01 09:00:00", "1001", "EURUSD", "buy", "in", 0.60, 1.1000, "5001", "7001", -0.60, -0.06, 0.0, 0.0, 1000.0, "first fill"],
+        ["2026.09.01 09:01:00", "1002", "EURUSD", "buy", "in", 0.40, 1.2000, "5001", "7001", -0.40, -0.04, 0.0, 0.0, 1000.0, "second fill"],
+        ["2026.09.01 10:00:00", "1003", "EURUSD", "sell", "out", 0.50, 1.3000, "5002", "7001", -0.50, -0.05, -0.10, 10.0, 1009.35, "partial exit"],
+        ["2026.09.01 11:00:00", "1004", "EURUSD", "sell", "out", 0.25, 1.4000, "5003", "7001", -0.25, -0.025, -0.05, 6.0, 1014.20, "partial exit"],
+        ["2026.09.01 12:00:00", "1005", "GBPUSD", "buy", "in", 0.20, 1.2500, "5004", "8001", -0.20, -0.02, 0.0, 0.0, 1014.20, "still open"],
+        ["2026.09.01 12:30:00", "1006", "", "balance", "in", 100.0, 0.0, "", "", 0.0, 0.0, 0.0, 0.0, 1114.20, "deposit"],
+        ["Balance", 1114.20],
+    ]
+
+
+def _pepperstone_mt5_html_bytes() -> bytes:
+    rows = _pepperstone_mt5_native_rows()
+    rendered = []
+    for row in rows:
+        rendered.append("<tr>" + "".join(f"<td>{value}</td>" for value in row) + "</tr>")
+    return ("<html><body><table>" + "".join(rendered) + "</table><script>throw new Error('must not run')</script></body></html>").encode("utf-16")
+
+
+def _pepperstone_mt5_xlsx_bytes() -> bytes:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Report"
+    for row in _pepperstone_mt5_native_rows():
+        sheet.append(row)
+    output = io.BytesIO()
+    workbook.save(output)
+    workbook.close()
+    return output.getvalue()
+
+
+def test_pepperstone_mt5_native_html_and_xlsx_import_same_closed_positions(tmp_path: Path):
+    html_path = tmp_path / "statement.html"
+    xlsx_path = tmp_path / "different-name.xlsx"
+    html_path.write_bytes(_pepperstone_mt5_html_bytes())
+    xlsx_path.write_bytes(_pepperstone_mt5_xlsx_bytes())
+
+    html_rows, html_balance = master_service._parse_local_trading_journal_workbook(
+        html_path, original_name="statement.html", account_mode="live"
+    )
+    xlsx_rows, xlsx_balance = master_service._parse_local_trading_journal_workbook(
+        xlsx_path, original_name="unrelated.xlsx"
+    )
+
+    assert len(html_rows) == len(xlsx_rows) == 1
+    html_trade = html_rows[0]
+    xlsx_trade = xlsx_rows[0]
+    assert html_trade["id"] == xlsx_trade["id"]
+    assert html_trade["id"].startswith("pepperstone_mt5:")
+    assert html_trade["id"].endswith(":position:7001")
+    for field in ("account", "symbol", "side", "qty", "entry_price", "exit_price", "commission", "fees", "swap", "net_profit"):
+        assert html_trade[field] == pytest.approx(xlsx_trade[field]) if isinstance(html_trade[field], float) else html_trade[field] == xlsx_trade[field]
+    assert html_trade["account"] == "PEPPERSTONE DEMO"
+    assert html_trade["side"] == "BUY"
+    assert html_trade["qty"] == pytest.approx(0.75)
+    assert html_trade["entry_price"] == pytest.approx(1.12)
+    assert html_trade["exit_price"] == pytest.approx(4.0 / 3.0)
+    assert html_trade["commission"] == pytest.approx(-1.5)
+    assert html_trade["fees"] == pytest.approx(-0.15)
+    assert html_trade["swap"] == pytest.approx(-0.15)
+    assert html_trade["net_profit"] == pytest.approx(14.2)
+    assert html_trade["open_time"] == "2026-09-01T09:00:00"
+    assert html_trade["close_time"] == "2026-09-01T11:00:00"
+    assert not html_trade["open_time"].endswith("Z")
+    assert html_trade["metrics"]["mt5_net_components_once"] is True
+    assert html_trade["raw_refs"]["closing_deal_tickets"] == ["1003", "1004"]
+    assert "123456" not in json.dumps(html_trade)
+    assert html_balance["balance"] == pytest.approx(1114.20)
+    assert xlsx_balance["balance"] == pytest.approx(1114.20)
+    assert html_balance["balance_source"] == "pepperstone_mt5_statement_balance"
+    assert html_balance["account"] == "PEPPERSTONE DEMO"
+    assert html_balance["currency"] == "AUD"
+    assert "skipped_open_positions:2" in html_balance["_import_warnings"]
+
+
+def test_pepperstone_mt5_import_is_idempotent_preserves_manual_fields_and_applies_balance(
+    temp_state_paths: Path, monkeypatch: pytest.MonkeyPatch
+):
+    workbook_path = temp_state_paths / "Trading Journal.xlsx"
+    workbook_path.write_bytes(b"existing-workbook")
+    workbook_state = {"items": [], "balances": []}
+    master_service._set_trading_journal_rows([])
+    monkeypatch.setattr(master_service, "read_master_journal_source", lambda _path: copy.deepcopy(workbook_state))
+
+    def fake_snapshot(**_kwargs):
+        return {
+            "items": copy.deepcopy(master_service._PENDING_MANUAL_SYNC_ROWS),
+            "balances": copy.deepcopy(master_service._PENDING_MANUAL_SYNC_BALANCES),
+            "stats": {},
+            "diagnostics": {},
+        }
+
+    def fake_sync(**kwargs):
+        snapshot = copy.deepcopy(kwargs["prebuilt_snapshot"])
+        workbook_state.clear()
+        workbook_state.update(snapshot)
+        workbook_path.write_bytes(b"verified-workbook")
+        return {"ok": True, "master_journal_ok": True, "github_sync_ok": None, "missing_row_ids": []}
+
+    monkeypatch.setattr(master_service, "_build_manual_import_authoritative_snapshot", fake_snapshot)
+    monkeypatch.setattr(master_service, "_sync_master_journal_workbook", fake_sync)
+    monkeypatch.setattr(master_service, "_verify_trade_log_row_ids_in_workbook", lambda _path, ids: {"ok": set(ids).issubset({row["id"] for row in workbook_state["items"]}), "missing_row_ids": []})
+    monkeypatch.setattr(master_service, "_persist_trading_journal_sqlite", lambda *_args, **_kwargs: None)
+
+    payload = _pepperstone_mt5_html_bytes()
+    first = master_service._import_uploaded_trading_journal_file(
+        "broker-report.htm", payload, account_mode="live"
+    )
+    assert first["ok"] is True
+    assert first["rows_parsed"] == 1
+    assert first["balance_applied"] is True
+    assert first["balance_verification"]["expected_balance"] == pytest.approx(1114.20)
+    assert workbook_state["balances"][0]["balance_source"] == "pepperstone_mt5_statement_balance"
+    row_id = workbook_state["items"][0]["id"]
+    workbook_state["items"][0]["notes"] = "Keep this journal note"
+    workbook_state["items"][0]["setup"] = "Manual setup"
+
+    second = master_service._import_uploaded_trading_journal_file(
+        "renamed-report.html", payload
+    )
+    assert second["ok"] is True
+    assert second["duplicate_noop_fast_path_used"] is True
+    assert second["rows_upserted"] == 0
+    stored = {row["id"]: row for row in master_service._get_trading_journal_rows()}
+    assert list(stored) == [row_id]
+    assert stored[row_id]["notes"] == "Keep this journal note"
+    assert stored[row_id]["setup"] == "Manual setup"
+    assert stored[row_id]["account"] == "PEPPERSTONE DEMO"
+
+
+def test_pepperstone_mt5_rejects_unrecognized_html_without_mutation(
+    temp_state_paths: Path, monkeypatch: pytest.MonkeyPatch
+):
+    existing = {"id": "existing:trade", "row_type": "trade", "source": "manual", "notes": "untouched"}
+    master_service._set_trading_journal_rows([existing])
+    workbook_path = temp_state_paths / "Trading Journal.xlsx"
+    workbook_path.write_bytes(b"unchanged workbook")
+    cache_path = master_service.TRADING_JOURNAL_IMPORT_CACHE_PATH
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_bytes(b"unchanged cache")
+    master_service._PENDING_MANUAL_SYNC_ROWS = [{"id": "pending:existing"}]
+    master_service._PENDING_MANUAL_SYNC_BALANCES = [{"account": "EXISTING", "balance": 1.0}]
+    monkeypatch.setattr(master_service, "_sync_master_journal_workbook", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("sync must not run")))
+    monkeypatch.setattr(master_service, "_sync_journal_excel_files_to_github", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("GitHub sync must not run")))
+
+    before_rows = copy.deepcopy(master_service._get_trading_journal_rows())
+    before_pending_rows = copy.deepcopy(master_service._PENDING_MANUAL_SYNC_ROWS)
+    before_pending_balances = copy.deepcopy(master_service._PENDING_MANUAL_SYNC_BALANCES)
+    result = master_service._import_uploaded_trading_journal_file(
+        "not-a-statement.html", b"<html><body><h1>Unrelated report</h1></body></html>"
+    )
+
+    assert result["ok"] is False
+    assert result["status_code"] == 422
+    assert "not a valid native Pepperstone MT5 statement" in result["message"]
+    assert master_service._get_trading_journal_rows() == before_rows
+    assert master_service._PENDING_MANUAL_SYNC_ROWS == before_pending_rows
+    assert master_service._PENDING_MANUAL_SYNC_BALANCES == before_pending_balances
+    assert workbook_path.read_bytes() == b"unchanged workbook"
+    assert cache_path.read_bytes() == b"unchanged cache"
 
 
 def _strict_oanda_row(

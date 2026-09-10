@@ -155,7 +155,7 @@
         return;
       }
       const form = new FormData(); form.append('file', file);
-      if (isExplicitAccountMode(explicitMode)) form.append('account_mode', explicitMode);
+      if (bybitLikely && isExplicitAccountMode(explicitMode)) form.append('account_mode', explicitMode);
       const res = await fetch('/api/trading-journal/import-file', { method: 'POST', body: form });
       const payload = await res.json().catch(() => ({}));
       if (payload?.requires_account_mode || (Array.isArray(payload?.errors) && payload.errors.includes('ambiguous_bybit_account'))) {
@@ -257,7 +257,7 @@
   };
   resyncBtn?.addEventListener('click', runResync);
 
-  const isAcceptedImportFile = (file) => /\.(xlsx|xlsm|xls|csv)$/i.test(String(file?.name || ''));
+  const isAcceptedImportFile = (file) => /\.(xlsx|xlsm|xls|csv|html|htm)$/i.test(String(file?.name || ''));
   dropZone?.addEventListener('click', () => fileInput?.click());
   dropZone?.addEventListener('dragover', (event) => {
     event.preventDefault();
@@ -269,7 +269,7 @@
     dropZone.classList.remove('drag-over');
     const file = event.dataTransfer?.files && event.dataTransfer.files[0];
     if (!file) return;
-    if (!isAcceptedImportFile(file)) { setStatus('Unsupported file type. Drop .xlsx, .xlsm, .xls, or .csv.', true); return; }
+    if (!isAcceptedImportFile(file)) { setStatus('Unsupported file type. Drop .xlsx, .xlsm, .xls, .csv, .html, or .htm.', true); return; }
     const capturedMode = String(accountModeSelect?.value || '').trim().toLowerCase();
     await runImport(file, capturedMode);
   });

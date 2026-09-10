@@ -635,3 +635,57 @@ vm.runInContext(source, context, { filename: 'trading_journal_actions.js' });
 })();
 """
     subprocess.run([node, "-e", harness, str(ACTIONS_JS_PATH)], check=True)
+
+
+def test_trading_journal_actions_accepts_mt5_html_without_bybit_mode() -> None:
+    service = SERVICE_PATH.read_text(encoding="utf-8")
+    actions = ACTIONS_JS_PATH.read_text(encoding="utf-8")
+    assert 'accept=".xlsx,.xlsm,.xls,.csv,.html,.htm"' in service
+    assert "xlsx|xlsm|xls|csv|html|htm" in actions
+    node = shutil.which("node")
+    assert node, "node is required for the focused journal-actions harness"
+    harness = r"""
+const fs = require('fs');
+const vm = require('vm');
+const source = fs.readFileSync(process.argv[1], 'utf8');
+const listeners = {};
+function element(id) { return { id, style: {}, classList: { add: () => {}, remove: () => {} }, textContent: '', value: '', disabled: false, files: [], focus: () => { throw new Error('Bybit mode must not be requested'); }, click: () => {}, after: () => {}, addEventListener: (type, fn) => { listeners[id + ':' + type] = fn; } }; }
+const elements = {
+  'open-journal-btn': element('open-journal-btn'),
+  'import-journal-btn': element('import-journal-btn'),
+  'journal-resync-btn': element('journal-resync-btn'),
+  'journal-file-input': element('journal-file-input'),
+  'journal-import-drop-zone': element('journal-import-drop-zone'),
+  'crypto-monthly-pnl-btn': element('crypto-monthly-pnl-btn'),
+  'bybit-demo-balance-adjustment-btn': element('bybit-demo-balance-adjustment-btn'),
+  'journal-account-mode': element('journal-account-mode'),
+  'journal-actions-status': element('journal-actions-status'),
+};
+elements['journal-account-mode'].value = 'live';
+const file = { name: 'statement.html', slice: () => ({ text: async () => { throw new Error('HTML must not be inspected as Bybit CSV'); } }) };
+class FormData { constructor() { this.values = {}; } append(key, value) { this.values[key] = value; } }
+let importCalls = 0;
+let posted = null;
+const context = {
+  console, FormData,
+  document: { getElementById: (id) => elements[id] || element(id), createElement: (tag) => element(tag) },
+  Date: { now: () => 1000 },
+  setInterval: () => 1, clearInterval: () => {}, setTimeout: () => 2, clearTimeout: () => {},
+  fetch: async (url, options = {}) => {
+    if (url !== '/api/trading-journal/import-file') throw new Error('unexpected URL ' + url);
+    importCalls += 1; posted = options.body.values;
+    return { ok: true, json: async () => ({ ok: true, message: 'Import complete.', rows_parsed: 1, rows_upserted: 1, warnings: [], missing_row_ids: [], master_journal_path: 'Trading Journal.xlsx' }) };
+  },
+};
+context.window = context; context.globalThis = context;
+vm.createContext(context);
+vm.runInContext(source, context, { filename: 'trading_journal_actions.js' });
+(async () => {
+  await listeners['journal-import-drop-zone:drop']({ preventDefault: () => {}, dataTransfer: { files: [file] } });
+  if (importCalls !== 1) throw new Error('expected one import request, got ' + importCalls);
+  if (posted.file !== file) throw new Error('HTML file missing from request');
+  if (Object.prototype.hasOwnProperty.call(posted, 'account_mode')) throw new Error('Bybit account mode leaked into MT5 import');
+  if (!elements['journal-actions-status'].textContent.includes('Import complete.')) throw new Error('successful MT5 import status missing');
+})();
+"""
+    subprocess.run([node, "-e", harness, str(ACTIONS_JS_PATH)], check=True)
