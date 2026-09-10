@@ -13253,6 +13253,7 @@ class ManagedScript:
     is_starting: bool = False
     startup_started_at: Optional[float] = None
     startup_completed_at: Optional[float] = None
+    upstream_ready_at: Optional[float] = None
     pid: Optional[int] = None
     executor_instance_id: Optional[str] = None
     heartbeat_confirmed_pid: Optional[int] = None
@@ -13294,6 +13295,8 @@ class ManagedScript:
             "last_spawn_cwd": self.last_spawn_cwd,
             "startup_started_at": self.startup_started_at,
             "startup_completed_at": self.startup_completed_at,
+            "ready": bool(self.is_running and self.upstream_ready_at is not None),
+            "upstream_ready_at": self.upstream_ready_at,
             "heartbeat_confirmed_pid": self.heartbeat_confirmed_pid,
             "operational_started_pid": self.operational_started_pid,
             "standalone": self.name in STANDALONE_SCRIPTS,
@@ -13367,6 +13370,7 @@ class ManagedScript:
         self.is_starting = True
         self.startup_started_at = self.last_start_attempt_at
         self.startup_completed_at = None
+        self.upstream_ready_at = None
         self.pid = None
         self.executor_instance_id = (
             uuid4().hex if self.name == "fxweekend-clone" else None
@@ -13395,7 +13399,7 @@ class ManagedScript:
             env["HOST"] = "127.0.0.1"
             env["APP_BASE_PATH"] = f"/apps/{quote(self.name)}"
 
-        command = [os.getenv("PYTHON", "python"), "-u", str(self.path)]
+        command = [sys.executable, "-u", str(self.path)]
         self.last_spawn_command = command
         self.last_spawn_cwd = str(self.path.parent)
         self.add_log(f"Command: {' '.join(command)}")
@@ -13474,7 +13478,9 @@ class ManagedScript:
                 )
             elif self.last_exit_reason is None:
                 self.last_exit_reason = (
-                    "Process exited unexpectedly." if process.returncode else None
+                    "Process exited before the web app became ready."
+                    if self.upstream_ready_at is None
+                    else "Process exited unexpectedly."
                 )
             if self.name == "fxweekend-clone":
                 AUTOSTART_LOGGER.warning(
@@ -13489,6 +13495,7 @@ class ManagedScript:
             self.executor_instance_id = None
             self.heartbeat_confirmed_pid = None
             self.operational_started_pid = None
+            self.upstream_ready_at = None
             self.port = None
 
     async def stop(self) -> None:
@@ -13527,6 +13534,7 @@ class ManagedScript:
         self.executor_instance_id = None
         self.heartbeat_confirmed_pid = None
         self.operational_started_pid = None
+        self.upstream_ready_at = None
 
 
 @dataclass
@@ -16948,66 +16956,136 @@ LAUNCHER_TEMPLATE = """<!DOCTYPE html>
         .card { background: #111827; border: 1px solid #1f2937; border-radius: 14px; padding: 2rem; max-width: 520px; text-align: center; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35); }
         .meta { color: #94a3b8; margin-top: 0.5rem; }
         .spinner { width: 36px; height: 36px; border: 3px solid #1f2937; border-top-color: #38bdf8; border-radius: 50%; margin: 1rem auto 0; animation: spin 1s linear infinite; }
+        .actions { display: none; gap: 0.75rem; justify-content: center; margin-top: 1rem; }
+        .actions.visible { display: flex; }
+        button, .action-link { border: 0; border-radius: 9px; padding: 0.65rem 1rem; font: inherit; font-weight: 700; cursor: pointer; text-decoration: none; }
+        button { background: #2563eb; color: #eff6ff; }
+        .action-link { background: #1f2937; color: #38bdf8; }
         @keyframes spin { to { transform: rotate(360deg); } }
-        a { color: #38bdf8; }
     </style>
 </head>
 <body data-script-name=\"{script_name}\" data-target-url=\"{target_url}\" data-has-ui=\"{has_ui}\">
     <div class=\"card\">
         <h1>Launching {script_name}</h1>
         <p class=\"meta\" id=\"status\">Starting the script...</p>
-        <div class=\"spinner\"></div>
-        <p class=\"meta\">If you are not redirected, <a id=\"open-link\" href=\"{target_url}\">open the script</a>.</p>
+        <div class=\"spinner\" id=\"spinner\"></div>
+        <div class=\"actions\" id=\"failure-actions\">
+            <button type=\"button\" id=\"retry-button\">Retry</button>
+            <a class=\"action-link\" id=\"logs-link\" href=\"/logs/view/{script_name_url}\" target=\"_blank\" rel=\"noopener\">Open logs</a>
+        </div>
     </div>
     <script>
         const scriptName = document.body.dataset.scriptName;
         const targetUrl = document.body.dataset.targetUrl;
         const hasUi = document.body.dataset.hasUi === 'true';
+        const statusUrl = `/api/scripts/${encodeURIComponent(scriptName)}`;
+        const startUrl = `/scripts/${encodeURIComponent(scriptName)}/start`;
+        const upstreamHeader = 'X-Managed-App-Upstream';
+        const maxAttempts = 30;
+        let launchCycle = 0;
+        let retryPending = false;
+        let redirected = false;
 
         const fetchJson = async (url, options = {}) => {
             const response = await fetch(url, options);
             if (!response.ok) {
-                const body = await response.text();
-                const detail = body || response.statusText;
-                throw new Error(`${options.method || 'GET'} ${url} failed with ${response.status}: ${detail}`);
+                throw new Error(`${options.method || 'GET'} ${url} failed with ${response.status}`);
             }
             return response.json();
         };
 
         const statusEl = document.getElementById('status');
+        const spinnerEl = document.getElementById('spinner');
+        const actionsEl = document.getElementById('failure-actions');
+        const retryButton = document.getElementById('retry-button');
 
-        const waitForApp = async () => {
-            let attempts = 0;
-            while (attempts < 30) {
-                attempts += 1;
+        const safeReason = (value, fallback) => {
+            const cleaned = String(value || '').replace(/[\\u0000-\\u001f\\u007f]+/g, ' ').trim();
+            return (cleaned || fallback).slice(0, 240);
+        };
+
+        const showFailure = (message) => {
+            launchCycle += 1;
+            retryPending = false;
+            statusEl.textContent = safeReason(message, 'The app did not become ready.');
+            spinnerEl.style.display = 'none';
+            actionsEl.classList.add('visible');
+            retryButton.disabled = false;
+        };
+
+        const failureFromStatus = (summary) => {
+            if (!summary || summary.running || summary.starting) return '';
+            if (summary.last_start_error) return `Unable to start: ${summary.last_start_error}`;
+            if (summary.last_exit_reason) {
+                const code = summary.last_exit_code ?? summary.return_code;
+                return `${summary.last_exit_reason}${code === null || code === undefined ? '' : ` (exit code ${code})`}`;
+            }
+            const code = summary.last_exit_code ?? summary.return_code;
+            return code === null || code === undefined ? '' : `The child process exited with code ${code}.`;
+        };
+
+        const waitForApp = async (cycle) => {
+            for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+                if (cycle !== launchCycle || redirected) return;
                 try {
                     const response = await fetch(targetUrl, { cache: 'no-store' });
-                    if (response.ok) {
-                        const nextUrl = hasUi ? `${targetUrl}?ts=${Date.now()}` : targetUrl;
+                    const isRealUpstream = response.headers && response.headers.get(upstreamHeader) === '1';
+                    if (response.ok && isRealUpstream) {
+                        redirected = true;
+                        const separator = targetUrl.includes('?') ? '&' : '?';
+                        const nextUrl = hasUi ? `${targetUrl}${separator}_launcher_ready=${Date.now()}` : targetUrl;
                         window.location.replace(nextUrl);
                         return;
                     }
                 } catch (err) {
-                    // keep trying
+                    // The socket can legitimately refuse connections during cold start.
                 }
+                try {
+                    const summary = await fetchJson(statusUrl, { cache: 'no-store' });
+                    const failure = failureFromStatus(summary);
+                    if (failure) {
+                        showFailure(failure);
+                        return;
+                    }
+                } catch (err) {
+                    // A transient status failure is bounded by the same readiness cycle.
+                }
+                if (attempt === maxAttempts) break;
                 await new Promise((resolve) => setTimeout(resolve, 500));
             }
-            statusEl.textContent = 'Still warming up. Please use the link below to open the script.';
+            if (cycle === launchCycle && !redirected) {
+                showFailure('Timed out waiting for the app to become ready. Retry or open the logs for details.');
+            }
         };
 
         const launch = async () => {
-            try {
-                await fetchJson(`/scripts/${encodeURIComponent(scriptName)}/start`, { method: 'POST' });
-                statusEl.textContent = 'Waiting for the script to respond...';
-            } catch (err) {
-                statusEl.textContent = 'Unable to start the script automatically.';
-            }
+            const cycle = ++launchCycle;
+            statusEl.textContent = 'Waiting for the script to respond...';
             if (hasUi) {
-                await waitForApp();
+                await waitForApp(cycle);
             } else {
                 window.location.replace(targetUrl);
             }
         };
+
+        retryButton.addEventListener('click', async () => {
+            if (retryPending) return;
+            retryPending = true;
+            retryButton.disabled = true;
+            spinnerEl.style.display = '';
+            actionsEl.classList.remove('visible');
+            statusEl.textContent = 'Restarting the script...';
+            const cycle = ++launchCycle;
+            try {
+                await fetchJson(startUrl, { method: 'POST' });
+            } catch (err) {
+                showFailure('Unable to restart the app. Open the logs for details.');
+                return;
+            }
+            retryPending = false;
+            statusEl.textContent = 'Waiting for the script to respond...';
+            await waitForApp(cycle);
+        });
 
         launch();
     </script>
@@ -31956,6 +32034,38 @@ async def oanda_volatility_page() -> Response:
     return RedirectResponse(url="/apps/oanda-volatility", status_code=307)
 
 
+def _managed_app_launcher_response(script: ManagedScript, request: Request) -> HTMLResponse:
+    target_url = f"/apps/{_encoded_script_name(script.name)}/"
+    if request.url.query:
+        target_url = f"{target_url}?{request.url.query}"
+    content = (
+        LAUNCHER_TEMPLATE.replace("{script_name}", html.escape(script.name))
+        .replace("{script_name_url}", _encoded_script_name(script.name))
+        .replace("{target_url}", html.escape(target_url, quote=True))
+        .replace("{has_ui}", "true")
+    )
+    return HTMLResponse(
+        content,
+        status_code=200,
+        headers={"X-Managed-App-Launcher": "1"},
+    )
+
+
+def _managed_script_safe_failure(script: ManagedScript) -> str:
+    reason = str(
+        getattr(script, "last_start_error", None)
+        or getattr(script, "last_exit_reason", None)
+        or ""
+    ).strip()
+    reason = re.sub(r"[\x00-\x1f\x7f]+", " ", reason)
+    if reason:
+        return reason[:240]
+    exit_code = getattr(script, "last_exit_code", None)
+    if exit_code is not None:
+        return f"Child process exited with code {exit_code}."
+    return ""
+
+
 @app.api_route("/apps/{script_name}", methods=PROXY_METHODS)
 @app.api_route("/apps/{script_name}/{path:path}", methods=PROXY_METHODS)
 async def proxy_app(script_name: str, request: Request, path: str = "") -> Response:
@@ -32005,28 +32115,36 @@ async def proxy_app(script_name: str, request: Request, path: str = "") -> Respo
         and request.method.upper() == "GET"
     )
     if not script.is_running:
+        startup_pending = bool(
+            script.startup_task is not None and not script.startup_task.done()
+        )
         if script.name in WEB_APPS:
-            if script.port is None:
-                script.port = _allocate_port()
-            if not script.last_start_attempt_at or script.last_start_error:
-                if script.startup_task is None or script.startup_task.done():
-                    starter = (
-                        _background_start_after_state_restore(script)
-                        if script.name == "fxweekend-clone"
-                        else _background_start(script)
-                    )
-                    script.startup_task = asyncio.create_task(starter)
-            if wants_html:
-                target_url = f"/apps/{_encoded_script_name(script.name)}"
-                return HTMLResponse(
-                    LAUNCHER_TEMPLATE.replace(
-                        "{script_name}", html.escape(script.name)
-                    )
-                    .replace("{target_url}", target_url)
-                    .replace("{has_ui}", "true"),
-                    status_code=200,
+            failure = _managed_script_safe_failure(script)
+            if not script.last_start_attempt_at and not startup_pending:
+                if script.port is None:
+                    script.port = _allocate_port()
+                starter = (
+                    _background_start_after_state_restore(script)
+                    if script.name == "fxweekend-clone"
+                    else _background_start(script)
                 )
-            raise HTTPException(status_code=503, detail=f"{script_name} is starting.")
+                script.startup_task = asyncio.create_task(starter)
+                startup_pending = True
+            if wants_html:
+                return _managed_app_launcher_response(script, request)
+            if failure and not startup_pending:
+                raise HTTPException(
+                    status_code=500,
+                    detail={
+                        "error": failure,
+                        "exit_code": getattr(script, "last_exit_code", None),
+                        "logs_url": script_logs_url(script.name),
+                    },
+                )
+            raise HTTPException(
+                status_code=503,
+                detail={"error": "starting", "message": f"{script_name} is starting."},
+            )
         if script.last_start_attempt_at:
             if script.last_start_error or script.last_exit_reason:
                 detail = {
@@ -32037,16 +32155,6 @@ async def proxy_app(script_name: str, request: Request, path: str = "") -> Respo
                     "stdout_tail": script.logs(),
                 }
                 raise HTTPException(status_code=500, detail=detail)
-            if script.name in WEB_APPS and wants_html:
-                target_url = f"/apps/{_encoded_script_name(script.name)}"
-                return HTMLResponse(
-                    LAUNCHER_TEMPLATE.replace(
-                        "{script_name}", html.escape(script.name)
-                    )
-                    .replace("{target_url}", target_url)
-                    .replace("{has_ui}", "true"),
-                    status_code=200,
-                )
             raise HTTPException(
                 status_code=503, detail=f"{script_name} is starting."
             )
@@ -32136,6 +32244,11 @@ async def proxy_app(script_name: str, request: Request, path: str = "") -> Respo
                 ) from exc
 
     assert resp is not None
+    if getattr(script, "upstream_ready_at", None) is None:
+        script.upstream_ready_at = time.time()
+        script.is_starting = False
+        script.startup_completed_at = script.upstream_ready_at
+        script.add_log(f"Web app readiness confirmed on port {script.port}.")
     PROXY_LOGGER.info(
         "Proxy response script=%s subpath=%s port=%s status=%s",
         script.name,
@@ -32148,6 +32261,7 @@ async def proxy_app(script_name: str, request: Request, path: str = "") -> Respo
         for k, v in resp.headers.items()
         if k.lower() not in PROXY_HOP_HEADERS | PROXY_STRIP_HEADERS
     }
+    filtered_headers["X-Managed-App-Upstream"] = "1"
     if fx_previous_settings is not None and resp.status_code < 400:
         durability = await _persist_fxweekend_config_with_rollback(
             fx_previous_settings,
@@ -33027,6 +33141,11 @@ async def _background_start(script: ManagedScript) -> None:
         await script.start()
     except Exception as exc:  # pragma: no cover - runtime protection
         # Capture failures in the per-script log instead of surfacing them to the caller.
+        script.last_start_attempt_at = script.last_start_attempt_at or time.time()
+        script.last_start_error = script.last_start_error or str(exc)
+        script.last_exit_reason = script.last_exit_reason or "Child process failed to start."
+        script.is_starting = False
+        script.startup_completed_at = time.time()
         script.add_log(f"Failed to start: {exc}")
     finally:
         if script.startup_task is asyncio.current_task():
