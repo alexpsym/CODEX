@@ -23,6 +23,49 @@ sys.modules[SPEC.name] = master_service
 SPEC.loader.exec_module(master_service)
 
 
+def test_canonical_bybit_alert_symbol_matches_monitor_prices_and_fires(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from bybit_monitor import bybit_altcoin_monitor
+
+    monkeypatch.setattr(
+        bybit_altcoin_monitor,
+        "_get_linear_perpetual_symbols",
+        lambda force=False: {"AKEUSDT"},
+    )
+    sent: list[tuple[str, dict[str, object]]] = []
+    monkeypatch.setattr(
+        bybit_altcoin_monitor,
+        "send_notification",
+        lambda title, _message, *, event=None: sent.append((title, dict(event or {}))),
+    )
+    alert = bybit_altcoin_monitor._coerce_alert(
+        {
+            "id": "ake-alert",
+            "symbol": "AKE",
+            "kind": "price",
+            "direction": "above",
+            "target_price": 1.0,
+            "cooldown_seconds": 0,
+            "active_period": "anytime",
+            "enabled": True,
+        }
+    )
+    assert alert["symbol"] == "AKEUSDT"
+
+    state: dict[str, object] = {}
+    alerts = [alert]
+    changed = bybit_altcoin_monitor.evaluate_custom_alerts(
+        alerts, {"AKEUSDT": 2.0}, state, {}
+    )
+    assert changed is True
+    assert alerts == []
+    assert "ake-alert" not in state["custom_alerts"]
+    assert len(sent) == 1
+    assert sent[0][0] == "BYBIT Custom Price Alert"
+    assert sent[0][1]["symbol"] == "AKEUSDT"
+
+
 @pytest.mark.parametrize("monitor_name", ["bybit", "oanda"])
 def test_expired_custom_alerts_are_never_evaluated_rearmed_or_sent(
     monitor_name: str, monkeypatch: pytest.MonkeyPatch

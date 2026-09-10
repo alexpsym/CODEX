@@ -30,7 +30,7 @@ from bybit_credentials import resolve_bybit_credentials
 from shared.atomic_json import write_json_file
 from shared.alert_email import email_readiness, send_alert_email
 from shared.env_bootstrap import format_env_bootstrap_log, load_master_env
-from shared.symbol_resolution import norm_symbol, resolve_bybit_symbol_from_choices
+from shared.symbol_resolution import norm_symbol
 
 # Credential + endpoint resolution -------------------------------------------------
 _ENV_BOOTSTRAP_INFO = load_master_env()
@@ -287,16 +287,29 @@ def _coerce_alert(payload: dict, *, allow_expired: bool = False) -> dict:
     if any(symbol.endswith(suffix) for suffix in _NON_USDT_STABLECOIN_SUFFIXES):
         raise ValueError("Bybit monitor supports USDT perpetual symbols only.")
 
-    allowed = _get_linear_perpetual_symbols()
-    resolved = resolve_bybit_symbol_from_choices(
-        symbol,
-        allowed,
-        preferred_quotes=("USDT", "USDC", "USD"),
-        exact_first=True,
-    )
-    resolved_symbol = str((resolved or {}).get("resolved_symbol") or "").upper()
-    if not resolved_symbol or resolved_symbol not in allowed:
-        raise ValueError(f"Unable to resolve '{raw_symbol}' to a Bybit linear perpetual symbol.")
+    verified_symbol = norm_symbol(payload.get("_verified_canonical_symbol") or "")
+    if verified_symbol:
+        if symbol != verified_symbol or not verified_symbol.endswith("USDT"):
+            raise ValueError("Verified Bybit alert symbol does not match the submitted symbol.")
+        resolved_symbol = verified_symbol
+    else:
+        # Monitor-side validation is intentionally exact-only. The master
+        # service supplies a public-Bybit-verified canonical symbol for new
+        # writes; this local path exists for restore/tests and never performs
+        # starts-with or contains matching.
+        allowed = _get_linear_perpetual_symbols()
+        if symbol in allowed:
+            resolved_symbol = symbol
+        elif not symbol.endswith(STABLECOIN_SUFFIXES) and f"{symbol}USDT" in allowed:
+            resolved_symbol = f"{symbol}USDT"
+        else:
+            resolved_symbol = ""
+        if not resolved_symbol:
+            raise ValueError(
+                f"Unable to resolve '{raw_symbol}' to a Bybit linear perpetual symbol."
+            )
+
+    allow_expired = allow_expired or bool(payload.get("_allow_existing_expired"))
 
     kind = str(payload.get("kind") or "").strip().lower()
     if kind not in _ALLOWED_ALERT_KINDS:
@@ -416,23 +429,21 @@ def replace_custom_alerts(alerts_payload: object, *, strict: bool = True) -> lis
     if not isinstance(alerts_payload, list):
         raise ValueError("alerts must be a list")
     replaced: list[dict] = []
-    skipped: list[dict] = []
     for item in alerts_payload:
         if not isinstance(item, dict):
+            continue
+        if not strict:
+            # The server has already verified newly written symbols. Preserve
+            # all other rows byte-for-field so a restore/upsert cannot perform
+            # an unverified legacy migration or discard unrelated state.
+            replaced.append(dict(item))
             continue
         try:
             replaced.append(_coerce_alert(item, allow_expired=True))
         except ValueError:
-            if strict:
-                raise
-            skipped.append(item)
+            raise
     _save_custom_alerts(replaced)
     get_custom_alerts(force=True)
-    if skipped:
-        log(
-            "Skipped invalid restored Bybit alerts: "
-            f"removed={len(skipped)} kept={len(replaced)}"
-        )
     return list(replaced)
 
 
@@ -1421,13 +1432,11 @@ def backfill_baselines(
 def prune_non_perpetual_custom_alerts() -> None:
     allowed = _get_linear_perpetual_symbols(force=True)
     alerts = get_custom_alerts(force=True)
-    kept = [a for a in alerts if str(a.get("symbol") or "").upper() in allowed]
-    if len(kept) != len(alerts):
-        _save_custom_alerts(kept)
-        get_custom_alerts(force=True)
+    unresolved = [a for a in alerts if str(a.get("symbol") or "").upper() not in allowed]
+    if unresolved:
         log(
-            "Pruned unsupported custom alerts (non-USDT/non-perpetual): "
-            f"removed={len(alerts) - len(kept)} kept={len(kept)}"
+            "Preserved unresolved custom alerts pending exact public Bybit verification: "
+            f"unresolved={len(unresolved)} kept={len(alerts)}"
         )
 
 

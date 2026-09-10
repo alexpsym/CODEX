@@ -200,31 +200,48 @@
             const selectedMonitor = getMonitor();
             if (!symbol || selectedMonitor !== 'bybit') return { symbol, monitor: selectedMonitor };
             const resp = await fetch(`/api/resolve-symbol?symbol=${encodeURIComponent(symbol)}&prefer=auto&scope=linear`, { cache: 'no-store' });
-            if (!resp.ok) throw new Error(`Unable to resolve ${selectedMonitor === 'bybit' ? 'Bybit or OANDA' : selectedMonitor} symbol: ${symbol}`);
-            const data = await resp.json().catch(() => null);
+            const responseText = await resp.text();
+            let data = null;
+            if (responseText) {
+                try { data = JSON.parse(responseText); } catch (_err) { data = null; }
+            } else if (resp.ok && typeof resp.json === 'function') {
+                data = await resp.json().catch(() => null);
+            }
+            if (!resp.ok) {
+                const serverDetail = typeof data?.detail === 'string' ? data.detail : (data?.detail?.message || responseText);
+                throw new Error(serverDetail || `Unable to resolve Bybit or OANDA symbol: ${symbol}`);
+            }
             const resolved = String(data?.resolved_symbol || '').trim().toUpperCase();
             const monitor = normalizeMonitor(data?.source);
             if (!resolved || !VALID_MONITORS.has(data?.source)) throw new Error(`Unable to resolve Bybit or OANDA symbol: ${symbol}`);
-            return { symbol: resolved, monitor };
+            return { symbol: resolved, monitor, input: symbol };
         };
 
-        const loadAlerts = async () => {
+        const loadAlerts = async (authoritativeAlert = null) => {
             const monitor = getMonitor();
             const req = ++alertLoadSeq;
             try {
                 setSettingsBadge(statusBadge, 'Loading...');
                 const payload = await fetchJson(`/api/${monitor}-alerts/custom-alerts`);
                 if (req !== alertLoadSeq || monitor !== getMonitor()) return;
-                const alerts = Array.isArray(payload?.alerts) ? payload.alerts : [];
+                let alerts = Array.isArray(payload?.alerts) ? payload.alerts : [];
+                if (authoritativeAlert?.id) {
+                    const foundIndex = alerts.findIndex((item) => String(item?.id || '') === String(authoritativeAlert.id));
+                    alerts = alerts.slice();
+                    if (foundIndex >= 0) alerts[foundIndex] = authoritativeAlert;
+                    else alerts.push(authoritativeAlert);
+                }
                 table.innerHTML = '';
                 const tbody = document.createElement('tbody');
                 alerts.forEach((alertItem) => {
                     const tr = document.createElement('tr'); tr.style.borderTop = '1px solid #334155';
                     const expired = isExpired(alertItem);
+                    const unresolved = alertItem?.symbol_resolution === 'unresolved';
                     const expiryText = alertItem.expires_at ? new Date(alertItem.expires_at).toLocaleString() : 'No expiry';
-                    const tdMain = document.createElement('td'); tdMain.style.padding='8px'; tdMain.textContent=`${rowText(alertItem)} | Active: ${activePeriodLabel(alertItem.active_period)} | Expiry: ${expiryText}${expired ? ' | Expired' : ''}`;
+                    const resolutionText = unresolved ? ` | Symbol unresolved: ${alertItem.symbol_resolution_reason || 'verification required'}` : '';
+                    const tdMain = document.createElement('td'); tdMain.style.padding='8px'; tdMain.textContent=`${rowText(alertItem)} | Active: ${activePeriodLabel(alertItem.active_period)} | Expiry: ${expiryText}${expired ? ' | Expired' : ''}${resolutionText}`;
                     const tdActions = document.createElement('td'); tdActions.style.padding='8px'; tdActions.style.whiteSpace='nowrap';
-                    const enabledBtn = document.createElement('button'); enabledBtn.type='button'; enabledBtn.textContent=expired ? 'Expired' : (alertItem.enabled ? 'Disable' : 'Enable'); enabledBtn.disabled=expired;
+                    const enabledBtn = document.createElement('button'); enabledBtn.type='button'; enabledBtn.textContent=unresolved ? 'Unresolved' : (expired ? 'Expired' : (alertItem.enabled ? 'Disable' : 'Enable')); enabledBtn.disabled=expired || unresolved;
                     enabledBtn.addEventListener('click', async () => { enabledBtn.disabled=true; try { await fetchJson(`/api/${monitor}-alerts/custom-alerts/${encodeURIComponent(alertItem.id)}/enabled`, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ enabled: !alertItem.enabled }) }); await loadAlerts(); } catch (err) { console.error(err); setSettingsBadge(statusBadge, 'Toggle failed', true); window.alert(err.message || 'Unable to update alert'); } finally { enabledBtn.disabled=false; } });
                     const editBtn = document.createElement('button'); editBtn.type='button'; editBtn.textContent='Edit';
                     editBtn.addEventListener('click', () => { editingId=alertItem.id; editingExpiresAt=alertItem.expires_at||null; symbolInput.value=alertItem.symbol||''; kindSelect.value=alertItem.kind||'price'; priceDirectionSelect.value=alertItem.direction||'above'; moveDirectionSelect.value=alertItem.direction||'up'; targetPriceInput.value=alertItem.target_price??''; thresholdInput.value=alertItem.threshold??''; unitSelect.value=alertItem.unit||unitSelect.options[0].value; windowSelect.value=String(alertItem.window_seconds||900); cooldownInput.value=String(alertItem.cooldown_seconds||0); messageInput.value=alertItem.message||''; setExpiryPresetOptions(editingExpiresAt); activePeriodSelect.value=alertItem.active_period||'anytime'; enabledInput.checked=Boolean(alertItem.enabled); saveBtn.textContent='Update alert'; toggleFields(); });
@@ -244,25 +261,31 @@
         saveBtn.addEventListener('click', async () => {
             saveBtn.disabled = true; clearBtn.disabled = true;
             try {
-                let symbol = symbolInput.value.trim().toUpperCase(); if (!symbol) throw new Error('Symbol is required');
+                const rawSymbol = symbolInput.value.trim().toUpperCase(); if (!rawSymbol) throw new Error('Symbol is required');
+                let symbol = rawSymbol;
                 const resolvedAlert = await resolveAlertSymbol(symbol);
                 symbol = resolvedAlert.symbol; symbolInput.value = symbol;
-                const kind = kindSelect.value; const payload = { id: editingId || undefined, symbol, kind, enabled: enabledInput.checked, cooldown_seconds: cooldownInput.value ? parseRequiredNumber(cooldownInput, 'Cooldown seconds') : 0, active_period: activePeriodSelect.value };
+                const kind = kindSelect.value; const payload = { id: editingId || undefined, symbol, kind, enabled: enabledInput.checked, cooldown_seconds: cooldownInput.value ? parseRequiredNumber(cooldownInput, 'Cooldown seconds') : 0, active_period: activePeriodSelect.value, expires_at: null };
                 if (expiryPresetSelect.value === 'keep-current' && editingExpiresAt) payload.expires_at = editingExpiresAt;
                 else if (expiryPresetSelect.value !== 'lifetime') {
                     const expiry = expiryForPreset(expiryPresetSelect.value);
                     if (!expiry) throw new Error('Expiry preset must be selected');
                     payload.expires_at = expiry;
                 }
-                if (kind === 'price') { const target = parseRequiredNumber(targetPriceInput, 'Target price'); if (target <= 0) throw new Error('Target price must be greater than zero'); payload.direction = priceDirectionSelect.value; payload.target_price = target; const customMessage = messageInput.value.trim(); if (customMessage) payload.message = customMessage; }
+                if (kind === 'price') { const target = parseRequiredNumber(targetPriceInput, 'Target price'); if (target <= 0) throw new Error('Target price must be greater than zero'); payload.direction = priceDirectionSelect.value; payload.target_price = target; payload.message = messageInput.value.trim(); }
                 else { const threshold = parseRequiredNumber(thresholdInput, 'Move threshold'); if (threshold <= 0) throw new Error('Move threshold must be greater than zero'); const windowSeconds = Number(windowSelect.value); if (!Number.isFinite(windowSeconds) || windowSeconds <= 0) throw new Error('Window must be selected'); payload.direction = moveDirectionSelect.value; payload.threshold = threshold; payload.unit = unitSelect.value; payload.window_seconds = windowSeconds; }
                 const monitor = resolvedAlert.monitor;
                 setSettingsBadge(statusBadge, 'Saving...');
-                await fetchJson(`/api/${monitor}-alerts/custom-alerts`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+                const saveResponse = await fetchJson(`/api/${monitor}-alerts/custom-alerts`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+                const savedAlert = saveResponse?.alert;
+                if (!savedAlert?.symbol) throw new Error('Server did not return the canonical saved alert');
+                symbolInput.value = String(savedAlert.symbol).toUpperCase();
+                const resolvedNotice = rawSymbol !== String(savedAlert.symbol).toUpperCase() ? `Resolved ${rawSymbol} to ${String(savedAlert.symbol).toUpperCase()}` : 'Saved';
                 if (monitor !== getMonitor()) {
                     selectMonitor(monitor);
+                    await loadAlerts(savedAlert); setSettingsBadge(statusBadge, resolvedNotice);
                 } else {
-                    resetForm(); await loadAlerts(); setSettingsBadge(statusBadge, 'Saved');
+                    resetForm(); await loadAlerts(savedAlert); setSettingsBadge(statusBadge, resolvedNotice);
                 }
             } catch (err) { console.error(err); setSettingsBadge(statusBadge, 'Save failed', true); window.alert(err.message || 'Unable to save alert'); }
             finally { saveBtn.disabled = false; clearBtn.disabled = false; }

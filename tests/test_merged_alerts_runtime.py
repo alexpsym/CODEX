@@ -7,6 +7,39 @@ ROOT = Path(__file__).resolve().parents[1]
 MERGED_ALERTS = ROOT / "render" / "static" / "merged_alerts.js"
 
 
+def test_merged_alerts_normalizes_ake_to_bybit_canonical_symbol_before_display() -> None:
+    node = shutil.which("node")
+    if not node:
+        return
+    harness = r"""
+const fs=require('fs');const vm=require('vm');
+class Element{constructor(id='',tag=''){this.id=id;this.tag=tag.toUpperCase();this.children=[];this.style={};this.listeners={};this.disabled=false;this.value='';this.textContent='';this._innerHTML='';this.checked=false;this.options=[];this.selectedIndex=0;this.type='';}set innerHTML(v){this._innerHTML=v;if(v===''){this.children=[];this.options=[];}}get innerHTML(){return this._innerHTML;}append(...nodes){nodes.forEach((n)=>this.appendChild(n));}appendChild(n){this.children.push(n);if(this.tag==='SELECT'&&typeof n==='object'){this.options.push(n);if(!this.value)this.value=n.value;}return n;}addEventListener(t,cb){this.listeners[t]=cb;}dispatch(t){if(this.listeners[t])this.listeners[t]({preventDefault(){}});}}
+const elements={};const get=(id)=>elements[id]||(elements[id]=new Element(id));
+['monitor-target','monitor-status','monitor-health','monitor-wait-seconds','monitor-threshold','monitor-save-settings','monitor-reload-settings','monitor-test-alert','monitor-settings-status','monitor-custom-alerts'].forEach(get);elements['monitor-target'].value='bybit';
+const document={createElement:(tag)=>new Element('',tag),getElementById:get};
+const requests=[];const alertMessages=[];let alerts=[];let failResolution=false;
+const response=(data,ok=true,status=200)=>({ok,status,statusText:ok?'OK':'Bad Gateway',text:async()=>JSON.stringify(data),json:async()=>data});
+const fetch=async(url,options={})=>{const method=options.method||'GET';requests.push({url,method,body:options.body});
+ if(url.includes('/status'))return response({ui_status:'running',phase:'waiting',heartbeat_fresh:true,pid_alive:true});
+ if(url.includes('/settings'))return response({wait_seconds:5,percent_threshold:1,telegram_ready:false,email_ready:false});
+ if(url.includes('/api/resolve-symbol')){const input=decodeURIComponent((url.match(/[?&]symbol=([^&]+)/)||[])[1]||'');if(!url.includes('prefer=auto')||!url.includes('scope=linear'))throw new Error('strict automatic linear resolution missing');if(failResolution)return response({detail:'Bybit public symbol verification failed'},false,502);if(input==='USDJPY')return response({resolved_symbol:'USD_JPY',source:'oanda'});return response({resolved_symbol:'AKEUSDT',source:'bybit'});}
+ if(url.includes('/custom-alerts')&&method==='GET')return response({alerts});
+ if(url.includes('/custom-alerts')&&method==='POST'){const payload=JSON.parse(options.body);const canonical={id:url.includes('oanda')?'fx-1':'ake-1',created_at:'now',...payload};alerts=[canonical];return response({ok:true,alert:canonical});}
+ return response({});};
+const ctx={document,fetch,window:{alert:(m)=>alertMessages.push(String(m)),confirm:()=>true},console,setInterval:()=>0,Date};vm.createContext(ctx);vm.runInContext(fs.readFileSync('render/static/merged_alerts.js','utf8'),ctx);
+const sleep=()=>new Promise((r)=>setTimeout(r,0));const settle=async()=>{for(let i=0;i<6;i++)await sleep();};const all=(root)=>[root,...(root.children||[]).filter((x)=>typeof x==='object').flatMap(all)];
+(async()=>{await settle();const section=elements['monitor-custom-alerts'].children[0];if(!section)throw new Error('alerts UI absent');const grid=section.children[1];const control=(name)=>{const label=grid.children.find((x)=>x.children?.[0]===name);if(!label)throw new Error('missing '+name);return label.children[1];};const symbol=control('Symbol'),target=control('Target price');const save=()=>all(section).find((x)=>x.textContent==='Save alert'||x.textContent==='Update alert');
+ symbol.value='AKE';target.value='2';save().dispatch('click');await settle();const post=requests.find((r)=>r.method==='POST'&&r.url==='/api/bybit-alerts/custom-alerts');if(!post)throw new Error('Bybit POST absent');const submitted=JSON.parse(post.body);if(submitted.symbol!=='AKEUSDT')throw new Error('raw shorthand was submitted');if(!all(section).some((x)=>String(x.textContent||'').includes('AKEUSDT')))throw new Error('returned canonical alert was not displayed');if(!all(section).some((x)=>String(x.textContent||'').includes('Resolved AKE to AKEUSDT')))throw new Error('resolution notice absent');
+ failResolution=true;symbol.value='BAD';target.value='7';const beforePosts=requests.filter((r)=>r.method==='POST').length;save().dispatch('click');await settle();if(requests.filter((r)=>r.method==='POST').length!==beforePosts)throw new Error('failed resolution still saved');if(symbol.value!=='BAD'||target.value!=='7')throw new Error('failed save cleared form values');if(!alertMessages.at(-1)?.includes('Bybit public symbol verification failed'))throw new Error('server error not shown');
+ failResolution=false;symbol.value='USDJPY';target.value='155';save().dispatch('click');await settle();const fxPost=requests.find((r)=>r.method==='POST'&&r.url==='/api/oanda-alerts/custom-alerts');if(!fxPost||JSON.parse(fxPost.body).symbol!=='USD_JPY')throw new Error('FX routing changed');
+})().catch((e)=>{console.error(e);process.exit(1);});
+"""
+    result = subprocess.run(
+        [node, "-e", harness], cwd=ROOT, capture_output=True, text=True
+    )
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
 def test_merged_alerts_runtime_expiry_default_round_trip_and_notification_channels() -> None:
     node = shutil.which("node")
     if not node:

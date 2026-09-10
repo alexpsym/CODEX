@@ -874,6 +874,153 @@ def test_wait_for_state_restore_local_messages(monkeypatch: pytest.MonkeyPatch) 
     assert "Repo-local state restore is still pending." in detail["message"]
 
 
+def test_bybit_alert_upsert_persists_only_server_verified_canonical_symbol_atomically(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    alerts_path = tmp_path / "custom_alerts.json"
+    manifest_path = tmp_path / "state_manifest.json"
+    monkeypatch.setattr(master_service, "LOCAL_STATE_ONLY", True)
+    monkeypatch.setattr(master_service, "DROPBOX_SYNC_ENABLED", False)
+    monkeypatch.setattr(master_service, "BYBIT_CUSTOM_ALERTS_PATH", alerts_path)
+    monkeypatch.setattr(master_service.bybit_monitor, "CUSTOM_ALERTS_PATH", alerts_path)
+    monkeypatch.setattr(master_service, "STATE_MANIFEST_PATH", manifest_path)
+    monkeypatch.setattr(
+        master_service,
+        "LEGACY_STATE_MANIFEST_CAMEL_PATH",
+        tmp_path / "stateManifest.json",
+    )
+    monkeypatch.setattr(master_service.bybit_monitor, "_alerts_cache", None)
+    monkeypatch.setattr(master_service.bybit_monitor, "_alerts_mtime", None)
+    monkeypatch.setattr(
+        master_service, "_schedule_dropbox_upload_state_backup", lambda: None
+    )
+    master_service._STARTUP_STATE_RESTORE_DONE.set()
+    master_service._update_state_sync_status(
+        enabled=True, restore_status="done", restore_complete=True
+    )
+
+    initial = [
+        {
+            "id": "unrelated",
+            "symbol": "BTCUSDT",
+            "kind": "move",
+            "direction": "up",
+            "unit": "pct",
+            "threshold": 2.5,
+            "window_seconds": 900,
+            "cooldown_seconds": 30,
+            "active_period": "anytime",
+            "enabled": True,
+            "created_at": "2025-01-01T00:00:00Z",
+        },
+        {
+            "id": "edit-me",
+            "symbol": "ETHUSDT",
+            "kind": "price",
+            "direction": "above",
+            "target_price": 100.0,
+            "message": "keep me",
+            "cooldown_seconds": 45,
+            "active_period": "weekend_brisbane",
+            "enabled": False,
+            "expires_at": "2099-01-01T00:00:00Z",
+            "created_at": "2025-02-02T00:00:00Z",
+        },
+    ]
+    master_service.write_json_file(alerts_path, initial)
+
+    resolve_inputs: list[str] = []
+
+    async def fake_resolve(symbol: str, prefer: str, scope: str):
+        resolve_inputs.append(symbol)
+        assert (prefer, scope) == ("bybit", "linear")
+        if master_service._normalize_bybit_lookup_key(symbol) in {"AKE", "AKEUSDT"}:
+            return {"resolved_symbol": "AKEUSDT", "source": "bybit"}
+        return None
+
+    monkeypatch.setattr(master_service, "_resolve_symbol_payload", fake_resolve)
+    response = asyncio.run(
+        master_service.upsert_bybit_monitor_custom_alert(
+            DummyRequest({"id": "edit-me", "symbol": "AKE", "target_price": 123.0})
+        )
+    )
+    body = json.loads(response.body.decode("utf-8"))
+    saved = body["alert"]
+    assert saved["symbol"] == "AKEUSDT"
+    assert saved["id"] == "edit-me"
+    assert saved["created_at"] == "2025-02-02T00:00:00Z"
+    assert saved["target_price"] == 123.0
+    assert saved["message"] == "keep me"
+    assert saved["expires_at"] == "2099-01-01T00:00:00Z"
+    assert saved["active_period"] == "weekend_brisbane"
+    assert saved["enabled"] is False
+    persisted = json.loads(alerts_path.read_text(encoding="utf-8"))
+    assert persisted[0] == initial[0]
+    assert persisted[1] == saved
+    assert resolve_inputs == ["AKE"]
+
+    before_failure = alerts_path.read_bytes()
+
+    def fail_after_partial_write(key: str, payload: object):
+        master_service.write_json_file(master_service.state_file_path_for_key(key), payload)
+        raise OSError("simulated durable verification failure")
+
+    with monkeypatch.context() as failure_patch:
+        failure_patch.setattr(
+            master_service, "write_repo_state_json_and_verify", fail_after_partial_write
+        )
+        with pytest.raises(master_service.HTTPException) as exc:
+            asyncio.run(
+                master_service.upsert_bybit_monitor_custom_alert(
+                    DummyRequest(
+                        {
+                            "symbol": "AKEUSDT",
+                            "kind": "price",
+                            "direction": "above",
+                            "target_price": 10.0,
+                        }
+                    )
+                )
+            )
+        assert exc.value.status_code == 503
+    assert alerts_path.read_bytes() == before_failure
+
+    with monkeypatch.context() as resolution_patch:
+        resolution_patch.setattr(
+            master_service,
+            "_resolve_symbol_payload",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                master_service.BybitPublicMarketError(
+                    "/v5/market/instruments-info", "transport unavailable"
+                )
+            ),
+        )
+        resolution_patch.setattr(
+            master_service,
+            "write_repo_state_json_and_verify",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("resolution failure attempted persistence")
+            ),
+        )
+        with pytest.raises(master_service.HTTPException) as exc:
+            asyncio.run(
+                master_service.upsert_bybit_monitor_custom_alert(
+                    DummyRequest({"symbol": "AKE", "kind": "price"})
+                )
+            )
+        assert exc.value.status_code == 502
+    assert alerts_path.read_bytes() == before_failure
+
+    legacy = [{**initial[0], "id": "legacy", "symbol": "AKE"}]
+    master_service.write_json_file(alerts_path, legacy)
+    master_service.bybit_monitor.get_custom_alerts(force=True)
+    migrated_response = asyncio.run(master_service.bybit_monitor_custom_alerts())
+    migrated_body = json.loads(migrated_response.body.decode("utf-8"))
+    assert migrated_body["alerts"][0]["symbol"] == "AKEUSDT"
+    migrated_disk = json.loads(alerts_path.read_text(encoding="utf-8"))
+    assert migrated_disk[0] == {**legacy[0], "symbol": "AKEUSDT"}
+
+
 def test_upsert_bybit_custom_alert_source_repo_local(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(master_service, "LOCAL_STATE_ONLY", True)
     monkeypatch.setattr(master_service, "DROPBOX_SYNC_ENABLED", False)

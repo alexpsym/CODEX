@@ -14,6 +14,72 @@ sys.modules[SPEC.name] = master_service
 SPEC.loader.exec_module(master_service)
 
 
+def test_alert_resolution_maps_exact_bybit_linear_base_to_canonical_symbol(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    instrument = {
+        "symbol": "AKEUSDT",
+        "baseCoin": "AKE",
+        "quoteCoin": "USDT",
+        "settleCoin": "USDT",
+        "contractType": "LinearPerpetual",
+        "status": "Trading",
+        "deliveryTime": "0",
+    }
+    calls: list[tuple[str, str, str]] = []
+    monkeypatch.setenv("BYBIT_PUBLIC_MARKET_BASE_URL", "https://api.bytick.com")
+    monkeypatch.setattr(
+        master_service,
+        "resolve_bybit_credentials_for",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("public alert resolution requested credentials")
+        ),
+    )
+
+    async def fake_exact(base_url: str, category: str, symbol: str, **_kwargs):
+        calls.append((base_url, category, f"symbol:{symbol}"))
+        return dict(instrument) if symbol == "AKEUSDT" else None
+
+    async def fake_base(base_url: str, category: str, base_coin: str, **_kwargs):
+        calls.append((base_url, category, f"base:{base_coin}"))
+        # Returning an unrelated row proves the resolver itself enforces an
+        # exact base/symbol relationship rather than fuzzy matching it.
+        return [dict(instrument)] if base_coin in {"AKE", "AK"} else []
+
+    monkeypatch.setattr(master_service, "_bybit_get_instrument_info_cached", fake_exact)
+    monkeypatch.setattr(
+        master_service, "_bybit_get_instrument_rows_by_base_cached", fake_base
+    )
+
+    spellings = ("AKE", "ake", "AKEUSDT", "AKE/USDT", "AKE USDT", "AKE-USDT")
+    for spelling in spellings:
+        result = asyncio.run(
+            master_service._resolve_symbol_payload(spelling, "auto", "linear")
+        )
+        assert result is not None
+        assert result["resolved_symbol"] == "AKEUSDT"
+        assert result["source"] == "bybit"
+        assert result["category"] == "linear"
+        assert result["contract_type"] == "LinearPerpetual"
+        assert result["quote_coin"] == result["settle_coin"] == "USDT"
+
+    assert asyncio.run(
+        master_service._resolve_symbol_payload("AK", "bybit", "linear")
+    ) is None
+    fx = asyncio.run(
+        master_service._resolve_symbol_payload("USDJPY", "auto", "linear")
+    )
+    assert fx == {
+        "input": "USDJPY",
+        "normalized": "USDJPY",
+        "resolved_symbol": "USD_JPY",
+        "source": "oanda",
+    }
+    assert calls
+    assert all(base == "https://api.bytick.com" for base, _, _ in calls)
+    assert all(category == "linear" for _, category, _ in calls)
+
+
 def test_bybit_lookup_symbol_resolves_shorthand(monkeypatch: pytest.MonkeyPatch) -> None:
     async def fake_symbols(_base_url: str, category: str):
         if category == "linear":

@@ -3168,6 +3168,7 @@ WEBHOOK_ATTEMPTS_MAX_ITEMS = int(os.getenv("WEBHOOK_ATTEMPTS_MAX_ITEMS", "300") 
 
 _WATCHLIST_CACHE: Optional[List[str]] = None
 _WATCHLIST_MUTATION_LOCK = asyncio.Lock()
+_BYBIT_ALERT_MUTATION_LOCK = asyncio.Lock()
 _TRADING_JOURNAL_CACHE: Optional[List[Dict[str, object]]] = None
 _TRADING_JOURNAL_CACHE_KEY: Optional[Tuple[object, ...]] = None
 _TRADING_JOURNAL_ROWS_LOCK = threading.RLock()
@@ -4963,33 +4964,112 @@ async def _resolve_symbol_payload(
     if pref != "bybit":
         return None
 
-    creds = resolve_bybit_credentials_for("default")
-    base_url = (creds.get("base_url") if isinstance(creds, dict) else None) or BYBIT_BASE
-    categories = ("linear",) if selected_scope == "linear" else ("linear", "spot", "inverse")
-    for category in categories:
-        try:
-            symbols = await _bybit_get_symbols_by_category_cached(base_url, category)
-        except Exception:
-            symbols = []
-        resolved = resolve_bybit_symbol_from_choices(
-            raw,
-            symbols,
-            preferred_quotes=("USDT", "USDC", "USD"),
-            exact_first=True,
+    # A linear-scoped request is used by saved alerts and watchlists. It must
+    # resolve from public Bybit instrument metadata, never an account endpoint
+    # or a fuzzy cached-universe match.
+    if selected_scope == "linear":
+        return await _resolve_bybit_linear_usdt_alert_symbol(raw)
+
+    instrument = await _bybit_lookup_symbol(_bybit_public_market_base_url(), raw)
+    if not instrument:
+        return None
+    resolved_symbol = str(instrument.get("symbol") or "").strip().upper()
+    if not resolved_symbol:
+        return None
+    return {
+        "input": raw,
+        "normalized": normalized,
+        "resolved_symbol": resolved_symbol,
+        "source": "bybit",
+        "category": str(instrument.get("_category") or ""),
+    }
+
+
+def _is_active_bybit_linear_usdt_perpetual(
+    row: object, *, expected_base: str = "", expected_symbol: str = ""
+) -> bool:
+    if not isinstance(row, dict):
+        return False
+    symbol = _normalize_instrument_key(row.get("symbol"))
+    base_coin = _normalize_instrument_key(row.get("baseCoin"))
+    if expected_symbol and symbol != expected_symbol:
+        return False
+    if expected_base and base_coin != expected_base:
+        return False
+    return bool(
+        symbol
+        and symbol.endswith("USDT")
+        and str(row.get("category") or "linear").strip().lower() == "linear"
+        and str(row.get("contractType") or "").strip() == "LinearPerpetual"
+        and str(row.get("status") or "").strip() == "Trading"
+        and str(row.get("quoteCoin") or "").strip().upper() == "USDT"
+        and str(row.get("settleCoin") or "").strip().upper() == "USDT"
+        and str(row.get("deliveryTime") or "").strip() in {"", "0"}
+    )
+
+
+async def _resolve_bybit_linear_usdt_alert_symbol(
+    raw_symbol: str,
+) -> Optional[Dict[str, object]]:
+    raw = str(raw_symbol or "")
+    normalized = _normalize_bybit_lookup_key(raw)
+    if not normalized:
+        return None
+
+    base_url = _bybit_public_market_base_url()
+    base_coin, explicit_quote = _bybit_split_explicit_quote(normalized)
+    row: Optional[Dict[str, object]] = None
+
+    if explicit_quote:
+        # Alert persistence supports only USDT-settled linear perpetuals. A
+        # non-USDT spelling is unsupported rather than a candidate for fuzzy
+        # conversion to some other contract.
+        if explicit_quote != "USDT":
+            return None
+        row = await _bybit_get_instrument_info_cached(
+            base_url,
+            "linear",
+            normalized,
+            refresh_negative=True,
         )
-        if not resolved or not resolved.get("resolved_symbol"):
-            name_aliases = await _bybit_name_aliases_for_choices(base_url, set(symbols))
-            if name_aliases:
-                resolved = resolve_bybit_symbol_from_choices(
-                    raw,
-                    symbols,
-                    preferred_quotes=("USDT", "USDC", "USD"),
-                    exact_first=True,
-                    extra_aliases=name_aliases,
-                )
-        if resolved and resolved.get("resolved_symbol"):
-            return resolved
-    return None
+        if not _is_active_bybit_linear_usdt_perpetual(
+            row, expected_base=base_coin, expected_symbol=normalized
+        ):
+            return None
+    else:
+        rows = await _bybit_get_instrument_rows_by_base_cached(
+            base_url,
+            "linear",
+            normalized,
+            refresh_negative=True,
+            force_refresh=True,
+        )
+        expected_symbol = f"{normalized}USDT"
+        matches = [
+            candidate
+            for candidate in rows
+            if _is_active_bybit_linear_usdt_perpetual(
+                candidate,
+                expected_base=normalized,
+                expected_symbol=expected_symbol,
+            )
+        ]
+        if len(matches) != 1:
+            return None
+        row = matches[0]
+
+    resolved_symbol = _normalize_instrument_key((row or {}).get("symbol"))
+    return {
+        "input": raw,
+        "normalized": normalized,
+        "resolved_symbol": resolved_symbol,
+        "source": "bybit",
+        "category": "linear",
+        "contract_type": "LinearPerpetual",
+        "quote_coin": "USDT",
+        "settle_coin": "USDT",
+        "status": "Trading",
+    }
 
 
 def _truthy_query_param(value: Optional[str]) -> bool:
@@ -25752,7 +25832,20 @@ async def api_resolve_symbol(
     prefer: Optional[str] = "bybit",
     scope: Optional[str] = "all",
 ) -> JSONResponse:
-    resolved = await _resolve_symbol_payload(symbol, prefer or "bybit", scope or "all")
+    try:
+        resolved = await _resolve_symbol_payload(
+            symbol, prefer or "bybit", scope or "all"
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "Bybit public symbol verification failed; no symbol was saved: "
+                f"{_safe_exception_message(exc)}"
+            ),
+        ) from exc
     if not resolved or not resolved.get("resolved_symbol"):
         raise HTTPException(status_code=404, detail=f"No match for '{symbol}'")
     return JSONResponse(resolved)
@@ -32081,15 +32174,125 @@ async def oanda_monitor_runtime_status() -> JSONResponse:
     return JSONResponse(_scanner_status_payload(OANDA_RUNTIME_STATUS_PATH))
 
 
+def _optional_file_snapshot(path: Path) -> Optional[bytes]:
+    return path.read_bytes() if path.exists() else None
+
+
+def _restore_optional_file_snapshot(path: Path, snapshot: Optional[bytes]) -> None:
+    if snapshot is None:
+        path.unlink(missing_ok=True)
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_write_bytes(path, snapshot)
+
+
+def _persist_bybit_alert_collection_atomically(
+    previous: List[Dict[str, object]], updated: List[Dict[str, object]]
+) -> None:
+    """Write one exact alert collection or restore all prior durable state."""
+
+    alerts_path = state_file_path_for_key("bybit_alerts")
+    alerts_snapshot = _optional_file_snapshot(alerts_path)
+    manifest_snapshot = _optional_file_snapshot(STATE_MANIFEST_PATH)
+    try:
+        write_repo_state_json_and_verify("bybit_alerts", updated)
+        bybit_monitor.replace_custom_alerts(updated, strict=False)
+        roundtrip = read_repo_state_json("bybit_alerts")
+        if roundtrip != updated:
+            raise RuntimeError("Bybit alert collection round-trip mismatch")
+    except Exception as exc:
+        rollback_error: Optional[Exception] = None
+        try:
+            _restore_optional_file_snapshot(alerts_path, alerts_snapshot)
+            _restore_optional_file_snapshot(STATE_MANIFEST_PATH, manifest_snapshot)
+            bybit_monitor.get_custom_alerts(force=True)
+            if alerts_snapshot is not None:
+                restored = read_repo_state_json("bybit_alerts")
+                if restored != previous:
+                    raise RuntimeError("prior Bybit alert collection did not round-trip")
+            elif alerts_path.exists():
+                raise RuntimeError("new Bybit alert file remained after rollback")
+        except Exception as rollback_exc:  # pragma: no cover - exceptional disk failure
+            rollback_error = rollback_exc
+        if rollback_error is not None:
+            raise RuntimeError(
+                "Bybit alert persistence failed and rollback could not be verified: "
+                f"write={exc}; rollback={rollback_error}"
+            ) from exc
+        raise
+
+
+def _is_canonical_saved_bybit_symbol(raw_symbol: object) -> bool:
+    raw = str(raw_symbol or "").strip()
+    normalized = _normalize_bybit_lookup_key(raw)
+    return bool(raw and raw.upper() == normalized and normalized.endswith("USDT"))
+
+
+async def _migrate_legacy_bybit_alert_symbols(
+    existing: List[Dict[str, object]],
+) -> Tuple[List[Dict[str, object]], bool]:
+    """Resolve legacy shorthand without deleting or rewriting uncertain rows."""
+
+    persisted = [dict(item) for item in existing]
+    display = [dict(item) for item in existing]
+    changed_indexes: List[int] = []
+    for index, item in enumerate(existing):
+        raw_symbol = str(item.get("symbol") or "").strip()
+        if _is_canonical_saved_bybit_symbol(raw_symbol):
+            continue
+        try:
+            resolved = await _resolve_symbol_payload(raw_symbol, "bybit", "linear")
+        except Exception as exc:
+            display[index]["symbol_resolution"] = "unresolved"
+            display[index]["symbol_resolution_reason"] = (
+                "Bybit verification unavailable: " + _safe_exception_message(exc)
+            )
+            continue
+        canonical = str((resolved or {}).get("resolved_symbol") or "").upper()
+        if not canonical:
+            display[index]["symbol_resolution"] = "unresolved"
+            display[index]["symbol_resolution_reason"] = (
+                "Not an active Bybit linear USDT perpetual."
+            )
+            continue
+        persisted[index]["symbol"] = canonical
+        display[index]["symbol"] = canonical
+        display[index]["symbol_resolution"] = "resolved"
+        changed_indexes.append(index)
+
+    if not changed_indexes:
+        return display, False
+    try:
+        _persist_bybit_alert_collection_atomically(existing, persisted)
+    except Exception as exc:
+        failed_display = [dict(item) for item in existing]
+        reason = "Canonical symbol migration was not persisted: " + _safe_exception_message(exc)
+        for index in changed_indexes:
+            failed_display[index]["symbol_resolution"] = "unresolved"
+            failed_display[index]["symbol_resolution_reason"] = reason
+        return failed_display, False
+    return display, True
+
+
 @app.get("/api/bybit-alerts/custom-alerts")
 @app.get("/api/bybit-monitor/custom-alerts")
 async def bybit_monitor_custom_alerts() -> JSONResponse:
     await _wait_for_state_restore_or_error()
     try:
+        async with _BYBIT_ALERT_MUTATION_LOCK:
+            existing = [
+                dict(item)
+                for item in bybit_monitor.get_custom_alerts(force=True)
+                if isinstance(item, dict)
+            ]
+            alerts, migrated = await _migrate_legacy_bybit_alert_symbols(existing)
+            if migrated and (
+                DROPBOX_SYNC_ENABLED or _state_backup_uses_local_repo_file()
+            ):
+                _schedule_dropbox_upload_state_backup()
         alerts = [
             {**dict(item), "expired": bybit_monitor.alert_is_expired(item)}
-            for item in bybit_monitor.get_custom_alerts(force=True)
-            if isinstance(item, dict)
+            for item in alerts
         ]
         return JSONResponse({"alerts": alerts, "state_sync": _state_sync_status_snapshot()})
     except Exception as exc:
@@ -32103,27 +32306,86 @@ async def upsert_bybit_monitor_custom_alert(request: Request) -> JSONResponse:
     await _wait_for_state_restore_or_error()
     payload = await request.json()
     now = _utc_now_iso()
-    existing = bybit_monitor.get_custom_alerts(force=True)
     incoming = dict(payload or {})
-    match = next((a for a in existing if str(a.get("id")) == str(incoming.get("id") or "")), None)
-    same_expired_value = bool(
-        match
-        and bybit_monitor.alert_is_expired(match)
-        and str(match.get("expires_at") or "") == str(incoming.get("expires_at") or "")
-    )
     try:
-        normalized = bybit_monitor._coerce_alert(
-            {**incoming, "id": (match or {}).get("id") or incoming.get("id")},
-            allow_expired=same_expired_value,
+        resolved = await _resolve_symbol_payload(
+            str(incoming.get("symbol") or ""), "bybit", "linear"
         )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    normalized["created_at"] = str((match or {}).get("created_at") or now)
-    normalized["updated_at"] = now
-    normalized["source"] = _state_source_label()
-    updated = [a for a in existing if str(a.get("id")) != str(normalized.get("id"))] + [normalized]
-    bybit_monitor.replace_custom_alerts(updated, strict=False)
-    write_repo_state_json_and_verify("bybit_alerts", updated)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "Bybit public symbol verification failed; the alert collection "
+                f"was not changed: {_safe_exception_message(exc)}"
+            ),
+        ) from exc
+    canonical_symbol = str((resolved or {}).get("resolved_symbol") or "").upper()
+    if not canonical_symbol:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Symbol is not an active Bybit linear USDT perpetual; "
+                "the alert collection was not changed."
+            ),
+        )
+
+    async with _BYBIT_ALERT_MUTATION_LOCK:
+        existing = [
+            dict(item)
+            for item in bybit_monitor.get_custom_alerts(force=True)
+            if isinstance(item, dict)
+        ]
+        match = next(
+            (
+                item
+                for item in existing
+                if str(item.get("id")) == str(incoming.get("id") or "")
+            ),
+            None,
+        )
+        same_expired_value = bool(
+            match
+            and bybit_monitor.alert_is_expired(match)
+            and str(match.get("expires_at") or "")
+            == str(incoming.get("expires_at") or "")
+        )
+        candidate = {
+            **(dict(match) if match else {}),
+            **incoming,
+            "id": (match or {}).get("id") or incoming.get("id"),
+            "symbol": canonical_symbol,
+            "_verified_canonical_symbol": canonical_symbol,
+            "_allow_existing_expired": same_expired_value,
+        }
+        try:
+            normalized = bybit_monitor._coerce_alert(candidate)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        normalized["created_at"] = str((match or {}).get("created_at") or now)
+        normalized["updated_at"] = now
+        normalized["source"] = _state_source_label()
+        updated: List[Dict[str, object]] = []
+        replaced = False
+        for item in existing:
+            if str(item.get("id")) == str(normalized.get("id")):
+                updated.append(normalized)
+                replaced = True
+            else:
+                updated.append(dict(item))
+        if not replaced:
+            updated.append(normalized)
+        try:
+            _persist_bybit_alert_collection_atomically(existing, updated)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Alert persistence failed and the prior alert collection was "
+                    f"restored: {_safe_exception_message(exc)}"
+                ),
+            ) from exc
+
     if DROPBOX_SYNC_ENABLED or _state_backup_uses_local_repo_file():
         _schedule_dropbox_upload_state_backup()
     return JSONResponse({"ok": True, "alert": normalized, "state_sync": _state_sync_status_snapshot()})
