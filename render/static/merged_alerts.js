@@ -265,13 +265,13 @@
                 let symbol = rawSymbol;
                 const resolvedAlert = await resolveAlertSymbol(symbol);
                 symbol = resolvedAlert.symbol; symbolInput.value = symbol;
-                const kind = kindSelect.value; const payload = { id: editingId || undefined, symbol, kind, enabled: enabledInput.checked, cooldown_seconds: cooldownInput.value ? parseRequiredNumber(cooldownInput, 'Cooldown seconds') : 0, active_period: activePeriodSelect.value, expires_at: null };
+                const kind = kindSelect.value; const payload = { id: editingId || undefined, symbol, kind, enabled: enabledInput.checked, cooldown_seconds: cooldownInput.value ? parseRequiredNumber(cooldownInput, 'Cooldown seconds') : 0, active_period: activePeriodSelect.value };
                 if (expiryPresetSelect.value === 'keep-current' && editingExpiresAt) payload.expires_at = editingExpiresAt;
                 else if (expiryPresetSelect.value !== 'lifetime') {
                     const expiry = expiryForPreset(expiryPresetSelect.value);
                     if (!expiry) throw new Error('Expiry preset must be selected');
                     payload.expires_at = expiry;
-                }
+                } else if (editingId && editingExpiresAt) payload.expires_at = null;
                 if (kind === 'price') { const target = parseRequiredNumber(targetPriceInput, 'Target price'); if (target <= 0) throw new Error('Target price must be greater than zero'); payload.direction = priceDirectionSelect.value; payload.target_price = target; payload.message = messageInput.value.trim(); }
                 else { const threshold = parseRequiredNumber(thresholdInput, 'Move threshold'); if (threshold <= 0) throw new Error('Move threshold must be greater than zero'); const windowSeconds = Number(windowSelect.value); if (!Number.isFinite(windowSeconds) || windowSeconds <= 0) throw new Error('Window must be selected'); payload.direction = moveDirectionSelect.value; payload.threshold = threshold; payload.unit = unitSelect.value; payload.window_seconds = windowSeconds; }
                 const monitor = resolvedAlert.monitor;
