@@ -845,7 +845,6 @@ def test_existing_master_journal_trade_log_filter_range_can_update_without_invar
 @pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
 def test_startup_recovery_skips_broker_refresh_in_master_journal_mode(monkeypatch):
     monkeypatch.setattr(master_service, 'TRADING_JOURNAL_SOURCE', 'master_journal')
-    monkeypatch.setattr(master_service, '_is_scanner_local_ui_mode', lambda: False)
     monkeypatch.setattr(master_service, '_import_trading_journal_from_sources', lambda: (_ for _ in ()).throw(AssertionError("startup must not import journal sources in master_journal mode")))
     monkeypatch.setattr(master_service, '_sync_master_journal_workbook', lambda **_kwargs: (_ for _ in ()).throw(AssertionError("startup must not sync workbook in master_journal mode")))
     monkeypatch.setattr(master_service, '_recover_oanda_recent_fills', lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("should not call")))
@@ -1827,7 +1826,6 @@ def test_sync_master_journal_uses_configured_local_dir(tmp_path, monkeypatch):
     assert expected.exists()
 @pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
 def test_startup_recovery_import_includes_master_journal_sync_success(monkeypatch, tmp_path):
-    monkeypatch.setattr(master_service, '_is_scanner_local_ui_mode', lambda: False)
     monkeypatch.setattr(master_service, '_trading_journal_excel_only_mode', lambda: True)
     monkeypatch.setattr(master_service, '_import_trading_journal_from_sources', lambda: {'ok': True, 'rows_imported': 1})
     monkeypatch.setattr(
@@ -1847,7 +1845,6 @@ def test_startup_recovery_import_includes_master_journal_sync_success(monkeypatc
     assert 'Trading Journal.xlsx created' in str(master_service.TRADING_JOURNAL_SYNC_STATE.get('message') or '')
 @pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
 def test_startup_recovery_import_master_journal_failure_is_not_success(monkeypatch):
-    monkeypatch.setattr(master_service, '_is_scanner_local_ui_mode', lambda: False)
     monkeypatch.setattr(master_service, '_trading_journal_excel_only_mode', lambda: True)
     monkeypatch.setattr(master_service, '_import_trading_journal_from_sources', lambda: {'ok': True, 'rows_imported': 1})
     monkeypatch.setattr(

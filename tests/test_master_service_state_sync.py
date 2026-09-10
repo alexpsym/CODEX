@@ -804,19 +804,7 @@ def test_render_restart_durably_migrates_legacy_live_only_fxweekend_settings(
     assert master_service._STARTUP_STATE_RESTORE_DONE.is_set()
 
 
-def test_scanner_local_ui_mode_still_runs_restore(monkeypatch: pytest.MonkeyPatch) -> None:
-    called = {"restore": 0}
-    monkeypatch.setattr(master_service, "_is_scanner_local_ui_mode", lambda: True)
-    monkeypatch.setattr(master_service, "DROPBOX_SYNC_ENABLED", True)
-    monkeypatch.setattr(master_service, "_dropbox_restore_state_backup_on_startup", lambda: called.__setitem__("restore", called["restore"] + 1) or asyncio.sleep(0))
-    monkeypatch.setattr(master_service, "_log_outbound_traffic_summary", lambda: asyncio.sleep(0))
-    monkeypatch.setattr(master_service, "_poll_pending_webhook_invalidations", lambda: asyncio.sleep(0))
-    asyncio.run(master_service._autostart_scripts())
-    assert called["restore"] == 1
-
-
 def test_autostart_normal_path_uses_repo_local_backup_path(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(master_service, "_is_scanner_local_ui_mode", lambda: False)
     monkeypatch.setattr(master_service, "DROPBOX_SYNC_ENABLED", False)
     monkeypatch.setattr(master_service, "LOCAL_STATE_ONLY", True)
     monkeypatch.setattr(master_service, "_restore_bybit_closed_pnl_last_seen_from_state", lambda: None)

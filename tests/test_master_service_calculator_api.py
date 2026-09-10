@@ -124,7 +124,7 @@ def test_scripts_page_contains_calculator_row() -> None:
 def test_scripts_page_marks_merged_dashboard_views_non_standalone() -> None:
     response = asyncio.run(master_service.list_scripts())
     payload = json.loads(response.body.decode("utf-8"))
-    merged_names = {"calculator", "monitor", "atr-scanner"}
+    merged_names = {"calculator", "monitor"}
     merged_rows = [row for row in payload if row.get("name") in merged_names]
     assert len(merged_rows) == len(merged_names)
     for row in merged_rows:
@@ -156,14 +156,11 @@ def test_scanner_merged_routes_return_gone_on_render(monkeypatch: pytest.MonkeyP
     monkeypatch.setenv("RENDER", "1")
     monitor = asyncio.run(master_service.merged_monitor_page())
     legacy_scanner = asyncio.run(master_service.merged_scanner_redirect())
-    atr_scanner = asyncio.run(master_service.atr_scanner_page())
     assert monitor.status_code == 410
     assert legacy_scanner.status_code == 410
-    assert atr_scanner.status_code == 410
     message = "Alerts are local-only. Run run_local_master_control.bat on your PC."
     assert monitor.body.decode("utf-8") == message
     assert legacy_scanner.body.decode("utf-8") == message
-    assert "local-only" in atr_scanner.body.decode("utf-8")
 
 
 def test_scanner_merged_routes_work_locally(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -174,13 +171,10 @@ def test_scanner_merged_routes_work_locally(monkeypatch: pytest.MonkeyPatch) -> 
     monitor = asyncio.run(master_service.merged_monitor_page())
     alerts_alias = asyncio.run(master_service.merged_monitor_page())
     legacy_scanner = asyncio.run(master_service.merged_scanner_redirect())
-    atr_scanner = asyncio.run(master_service.atr_scanner_page())
     assert monitor.status_code == 200
     assert alerts_alias.status_code == 200
     assert legacy_scanner.status_code == 307
     assert legacy_scanner.headers.get("location") == "/merged/monitor"
-    assert atr_scanner.status_code == 200
-    assert "Ranks currently Trading Bybit linear USDT perpetuals" in atr_scanner.body.decode("utf-8")
     html = monitor.body.decode("utf-8")
     assert "Monitor controls" in html
     assert 'id="monitor-target"' in html
@@ -190,6 +184,54 @@ def test_scanner_merged_routes_work_locally(monkeypatch: pytest.MonkeyPatch) -> 
     assert 'id="oanda-start-btn"' not in html
     assert 'id="bybit-log-box"' not in html
     assert 'id="oanda-log-box"' not in html
+
+
+def test_atr_scanner_is_removed_without_affecting_alert_monitor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(master_service, "APP_PROFILE", "local")
+    dashboard_names = {
+        str(item.get("name")) for item in master_service._profile_main_buttons()
+    }
+    assert "atr-scanner" not in dashboard_names
+    assert "monitor" in dashboard_names
+
+    route_paths = {str(route.path) for route in master_service.app.routes}
+    assert "/merged/atr-scanner" not in route_paths
+    assert not any(path.startswith("/api/atr-scanner") for path in route_paths)
+    assert "/merged/monitor" in route_paths
+    assert "/merged/alerts" in route_paths
+    assert "/merged/scanner" in route_paths
+
+    removed_paths = (
+        "render/atr_scanner.py",
+        "render/static/atr_scanner.js",
+        "run_scanner_local.bat",
+        "tests/test_atr_scanner.py",
+        "tests/test_atr_scanner_ui.py",
+    )
+    assert all(not (ROOT / path).exists() for path in removed_paths)
+    assert all(path not in master_service.LOCAL_BUILD_FILES for path in removed_paths)
+    watcher = (ROOT / "tools" / "windows_launchers" / "ensure_local_master_server.ps1").read_text(
+        encoding="utf-8"
+    )
+    assert all(path not in watcher for path in removed_paths)
+
+    service_source = (ROOT / "render" / "master_service.py").read_text(encoding="utf-8")
+    for removed_symbol in (
+        "render.atr_scanner",
+        "ATRScannerService",
+        "ATR_SCANNER_SERVICE",
+        "ATR_SCANNER_SETTINGS_PATH",
+        "SCANNER_LOCAL_UI_MODE",
+        "_is_scanner_local_ui_mode",
+    ):
+        assert removed_symbol not in service_source
+
+    monkeypatch.setattr(master_service, "_runtime_is_render", lambda: False)
+    legacy = asyncio.run(master_service.merged_scanner_redirect())
+    assert legacy.status_code == 307
+    assert legacy.headers.get("location") == "/merged/monitor"
 
 
 def test_scripts_page_local_scanner_merged_and_deduped(monkeypatch: pytest.MonkeyPatch) -> None:

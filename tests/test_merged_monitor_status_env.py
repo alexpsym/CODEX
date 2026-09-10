@@ -527,14 +527,6 @@ def test_env_bootstrap_protected_keys_preserve_existing_values(tmp_path: Path, m
     assert os.environ.get("DROPBOX_SYNC_ENABLED") == "0"
 
 
-def test_run_scanner_local_bat_sets_explicit_env_file() -> None:
-    content = (ROOT / "run_scanner_local.bat").read_text(encoding="utf-8")
-    assert 'set "MASTER_ENV_FILE=C:\\GPT\\env.env"' in content
-    assert r"Copy your env file from C:\Users\User\Documents\GPT\env.env to C:\GPT\env.env" in content
-    assert 'if not exist "%MASTER_ENV_FILE%" (' in content
-    assert "exit /b 1" in content
-
-
 def test_journal_launchers_protect_bybit_demo_anchor_flag() -> None:
     journal_bat = (ROOT / "run_trading_journal_local.bat").read_text(encoding="utf-8")
     master_bat = (ROOT / "run_local_master_control.bat").read_text(encoding="utf-8")
@@ -554,7 +546,6 @@ def test_no_legacy_env_default_paths_remain_active() -> None:
 
 
 def test_compute_autostart_semantics(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(master_service, "SCANNER_LOCAL_UI_MODE", False)
     monkeypatch.setattr(master_service, "APP_PROFILE", "local")
     monkeypatch.setattr(master_service, "_resolve_app_profile", lambda: "local")
     monkeypatch.delenv("AUTOSTART_SCRIPTS", raising=False)
@@ -576,16 +567,10 @@ def test_compute_autostart_semantics(monkeypatch: pytest.MonkeyPatch) -> None:
     assert isinstance(names_render, list)
     assert "fxweekend-clone" in master_service.DEFAULT_RENDER_AUTOSTART_SCRIPTS
 
-    monkeypatch.setattr(master_service, "SCANNER_LOCAL_UI_MODE", True)
-    monkeypatch.delenv("AUTOSTART_SCRIPTS", raising=False)
-    assert master_service._compute_autostart_scripts() == []
-    assert "fxweekend-clone" in master_service._LAST_AUTOSTART_UNAVAILABLE
-
 
 def test_local_fxweekend_autostart_target_is_ignored_without_ui_row(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(master_service, "SCANNER_LOCAL_UI_MODE", False)
     monkeypatch.setattr(master_service, "APP_PROFILE", "local")
     monkeypatch.setattr(master_service, "_resolve_app_profile", lambda: "local")
     monkeypatch.setenv("AUTOSTART_SCRIPTS", "bybit_monitor,fxweekend-clone")
@@ -914,12 +899,8 @@ def test_run_trading_journal_local_bat_profile_and_port() -> None:
 
 def test_all_local_bat_launchers_use_consistent_default_master_env_file() -> None:
     expected = 'set "MASTER_ENV_FILE=C:\\GPT\\env.env"'
-    for name in (
-        "run_local_master_control.bat",
-        "run_scanner_local.bat",
-    ):
-        content = (ROOT / name).read_text(encoding="utf-8")
-        assert expected in content, f"{name} should default MASTER_ENV_FILE to C:/GPT env.env"
+    content = (ROOT / "run_local_master_control.bat").read_text(encoding="utf-8")
+    assert expected in content, "run_local_master_control.bat should default MASTER_ENV_FILE to C:/GPT env.env"
     journal = (ROOT / "run_trading_journal_local.bat").read_text(encoding="utf-8")
     assert "Trading Journal.xlsx" in journal
     assert "MASTER_ENV_FILE" not in journal

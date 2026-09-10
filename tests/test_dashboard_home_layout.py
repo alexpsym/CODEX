@@ -715,9 +715,6 @@ def test_local_profile_buttons_use_configured_render_routes(monkeypatch) -> None
     assert by_name["trading-journal"]["open_url"] == "/dashboard/trading-journal"
     assert by_name["monitor"]["label"] == "Alerts"
     assert by_name["monitor"]["open_url"] == "/merged/monitor"
-    assert by_name["atr-scanner"]["label"] == "Scanner"
-    assert by_name["atr-scanner"]["open_url"] == "/merged/atr-scanner"
-    assert by_name["monitor"]["id"] != by_name["atr-scanner"]["id"]
     assert by_name["instrument-lookup"]["open_url"] == "/instrument-lookup"
     assert by_name["instrument-lookup"]["dashboard_main_view"] is True
     assert by_name["history"]["open_url"] == "/merged/history"
@@ -733,7 +730,6 @@ def test_local_profile_buttons_use_configured_render_routes(monkeypatch) -> None
         "instrument-lookup",
         "history",
         "monitor",
-        "atr-scanner",
         "ivindicator-clone",
         "spreads-clone",
         "oanda-volatility",

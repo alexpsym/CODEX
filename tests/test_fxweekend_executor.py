@@ -1247,7 +1247,6 @@ def test_render_environment_overrides_cannot_remove_fxweekend_authority(
             self.name = name
 
     monkeypatch.setattr(master_service, "APP_PROFILE", "render")
-    monkeypatch.setattr(master_service, "SCANNER_LOCAL_UI_MODE", False)
     monkeypatch.setattr(master_service, "RENDER_ALLOWED_APPS", set())
     monkeypatch.setenv(
         "AUTOSTART_SCRIPTS",

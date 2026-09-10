@@ -160,7 +160,6 @@ def test_local_profile_includes_remote_tools_and_local_calculator(monkeypatch) -
         "instrument-lookup",
         "history",
         "monitor",
-        "atr-scanner",
         "ivindicator-clone",
         "spreads-clone",
     ]

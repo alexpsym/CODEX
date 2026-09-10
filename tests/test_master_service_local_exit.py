@@ -27,8 +27,6 @@ def _launcher_build_files() -> tuple[str, ...]:
 def test_local_build_file_lists_match_launcher_preflight() -> None:
     expected = (
         "render/master_service.py",
-        "render/atr_scanner.py",
-        "render/static/atr_scanner.js",
         "render/static/calculator.js",
         "render/static/dashboard.js",
         "render/static/history_page.js",
@@ -59,13 +57,11 @@ def test_local_html_pages_receive_exit_control_only_in_local_profile(monkeypatch
     assert 'id="local-exit-control"' not in public.text
 
 
-def test_local_source_stamp_tracks_dashboard_history_and_atr_scanner(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_local_source_stamp_tracks_dashboard_and_history(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     build_files = (
         "render/master_service.py",
         "render/static/dashboard.js",
         "render/static/history_page.js",
-        "render/atr_scanner.py",
-        "render/static/atr_scanner.js",
     )
     for rel in build_files:
         path = tmp_path / rel
@@ -85,14 +81,6 @@ def test_local_source_stamp_tracks_dashboard_history_and_atr_scanner(monkeypatch
     history_path = tmp_path / "render" / "static" / "history_page.js"
     history_path.write_text("history changed\n", encoding="utf-8")
     assert master_service._local_source_stamp() != history_baseline
-
-    history_path.write_text("initial render/static/history_page.js\n", encoding="utf-8")
-    for rel in ("render/atr_scanner.py", "render/static/atr_scanner.js"):
-        scanner_baseline = master_service._local_source_stamp()
-        scanner_path = tmp_path / rel
-        scanner_path.write_text(f"changed {rel}\n", encoding="utf-8")
-        assert master_service._local_source_stamp() != scanner_baseline
-        scanner_path.write_text(f"initial {rel}\n", encoding="utf-8")
 
 
 def test_local_build_info_exposes_source_stamp(monkeypatch: pytest.MonkeyPatch) -> None:
