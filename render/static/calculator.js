@@ -887,6 +887,32 @@
     syncToggleState('webhook-toggle', 'webhook_mode');
   }
 
+  function currentSymbolInput() {
+    return String($('calc-symbol').value || '').trim();
+  }
+
+  function adoptEffectiveRoute(payload, expectedInput) {
+    if (!payload || (expectedInput !== undefined && currentSymbolInput() !== expectedInput)) return false;
+    const effectiveAsset = String(payload.asset || '').trim().toLowerCase();
+    const effectiveBroker = String(payload.broker || '').trim().toLowerCase();
+    const canonicalSymbol = String(payload.symbol || '').trim().toUpperCase();
+    if (!['crypto', 'fx'].includes(effectiveAsset) || !canonicalSymbol) return false;
+    state.asset = effectiveAsset;
+    if (effectiveAsset === 'fx') {
+      state.broker = ['oanda', 'pepperstone'].includes(effectiveBroker) ? effectiveBroker : 'oanda';
+      state.fx_broker = state.broker;
+    } else {
+      state.broker = 'bybit';
+    }
+    state.resolvedSymbol = canonicalSymbol;
+    updateRiskUiForAsset();
+    updateBrokerUiForAsset();
+    syncAllToggleStates();
+    refreshPrewarmSchedule();
+    canonicalEl.textContent = `Canonical symbol: ${canonicalSymbol}`;
+    return true;
+  }
+
   function toggleWebhookPanel(show) {
     webhookPanel.style.display = show ? '' : 'none';
     if (!show) {
@@ -1038,7 +1064,7 @@
   }
 
   async function resolveSymbolAndLoad() {
-    const symbol = $('calc-symbol').value.trim();
+    const symbol = currentSymbolInput();
     invalidateQuote();
     canonicalEl.textContent = '';
     if (!symbol) {
@@ -1047,25 +1073,30 @@
       return;
     }
     if (resolveController) resolveController.abort();
-    resolveController = new AbortController();
+    const controller = new AbortController();
+    resolveController = controller;
     try {
-      resolveInFlight = request(`/api/calculator/instrument?asset=${encodeURIComponent(state.asset)}&account=${encodeURIComponent(state.account)}&symbol=${encodeURIComponent(symbol)}`, { signal: resolveController.signal });
+      const requestedBroker = state.asset === 'fx' ? state.broker : 'bybit';
+      resolveInFlight = request(`/api/calculator/instrument?asset=${encodeURIComponent(state.asset)}&broker=${encodeURIComponent(requestedBroker)}&account=${encodeURIComponent(state.account)}&symbol=${encodeURIComponent(symbol)}`, { signal: controller.signal });
       const instrument = await resolveInFlight;
-      state.resolvedSymbol = instrument.symbol;
-      canonicalEl.textContent = `Canonical symbol: ${instrument.symbol}`;
-      loadJournalSummary(instrument.symbol);
-      loadInstrumentSpecs(instrument.symbol);
-      prewarmQuoteDependencies(instrument.symbol);
+      if (resolveController !== controller || !adoptEffectiveRoute(instrument, symbol)) return;
+      loadJournalSummary(state.resolvedSymbol);
+      loadInstrumentSpecs(state.resolvedSymbol);
+      prewarmQuoteDependencies(state.resolvedSymbol);
     } catch (e) {
       if (e.name === 'AbortError') {
         return;
       }
+      if (resolveController !== controller || currentSymbolInput() !== symbol) return;
       state.resolvedSymbol = '';
       canonicalEl.textContent = '';
       loadJournalSummary('');
       loadInstrumentSpecs('');
     } finally {
-      resolveInFlight = null;
+      if (resolveController === controller) {
+        resolveController = null;
+        resolveInFlight = null;
+      }
     }
   }
 
@@ -1077,7 +1108,7 @@
       symbol: String(symbol || '').toUpperCase(),
     };
     try {
-      if (!symbol) return;
+      if (!symbol || state.asset !== 'crypto') return;
       state.quotePrewarmPromise = post('/api/calculator/prewarm', { asset: state.asset, account: state.account, symbol: expectedContext.symbol });
       const status = await state.quotePrewarmPromise;
       const currentContext = {
@@ -1145,6 +1176,8 @@
 
   $('calc-symbol').addEventListener('input', () => {
     invalidateQuote({ clearResults: false, status: state.hasCalculatedOnce ? 'stale' : 'idle', reason: 'Quote changed. Recalculate before submitting.' });
+    state.resolvedSymbol = '';
+    canonicalEl.textContent = '';
     debounceSymbolResolve();
   });
 
@@ -1204,10 +1237,11 @@
         try { await Promise.race([resolveInFlight, new Promise((r) => setTimeout(r, 800))]); } catch (_e) {}
       }
       if (state.asset === 'crypto' && state.quotePrewarmPromise) setQuoteStatus('Preparing quote data…');
+      const submittedSymbol = currentSymbolInput();
       const payload = {
         ...state,
-        submitted_symbol: $('calc-symbol').value,
-        symbol: state.resolvedSymbol || $('calc-symbol').value,
+        submitted_symbol: submittedSymbol,
+        symbol: state.resolvedSymbol || submittedSymbol,
         broker: state.asset === 'crypto' ? 'bybit' : state.broker,
         entry_price: $('calc-limit').value,
         stop_loss_ticks: $('calc-sl-ticks').value,
@@ -1228,10 +1262,22 @@
       delete payload.quotePrewarmPromise;
       renderRequestSummary(payload);
       const quote = await post('/api/calculator/quote', payload, { signal: state.quoteController.signal });
-      if (seq !== state.quoteRequestSeq) return;
+      if (seq !== state.quoteRequestSeq || currentSymbolInput() !== submittedSymbol) return;
+      if (resolveController) {
+        resolveController.abort();
+        resolveController = null;
+        resolveInFlight = null;
+      }
+      if (!adoptEffectiveRoute(quote, submittedSymbol)) {
+        throw new Error('Quote response did not contain a valid effective calculator identity.');
+      }
+      payload.asset = state.asset;
+      payload.broker = state.broker;
+      payload.symbol = state.resolvedSymbol;
       state.quote = quote;
-      if (state.asset === 'crypto') state.broker = 'bybit';
       state.resolvedVenue = quote?.resolved_venue || quote?.venue || (state.asset === 'crypto' ? 'Bybit' : state.broker);
+      loadJournalSummary(state.resolvedSymbol);
+      loadInstrumentSpecs(state.resolvedSymbol);
       renderRequestSummary(payload, quote);
       renderQuote(quote);
       state.quoteStatus = 'ready';

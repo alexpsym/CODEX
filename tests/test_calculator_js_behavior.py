@@ -7,6 +7,99 @@ ROOT = Path(__file__).resolve().parents[1]
 JS_PATH = ROOT / "render" / "static" / "calculator.js"
 
 
+def _run_usdjpy_auto_route_harness(mode: str) -> dict:
+    node = shutil.which("node")
+    assert node, "node is required for JS behavior test"
+    harness = r'''
+const fs=require('fs'),vm=require('vm'),assert=require('assert');
+const source=fs.readFileSync(process.argv[1],'utf8'),mode=process.argv[2];
+class Button {
+  constructor(v){this.dataset={v};this.listeners={};this.disabled=false;this.attrs={};this.active=false;this.classList={toggle:(name,on)=>{if(name==='active')this.active=!!on;},add:()=>{},remove:()=>{}};}
+  addEventListener(e,f){this.listeners[e]=f;} click(){if(!this.disabled&&this.listeners.click)return this.listeners.click({target:this,currentTarget:this});}
+  setAttribute(k,v){this.attrs[k]=String(v);} getAttribute(k){return this.attrs[k];} removeAttribute(k){delete this.attrs[k];}
+}
+class Element extends Button {
+  constructor(id){super('');this.id=id;this.value='';this.style={};this.textContent='';this._html='';this.buttons=[];this.checked=false;}
+  set innerHTML(v){this._html=String(v||'');this.buttons=[...this._html.matchAll(/data-v="([^"]*)"/g)].map(m=>new Button(m[1]));}
+  get innerHTML(){return this._html;} querySelectorAll(s){return s==='button'?this.buttons:[];}
+}
+const ids=['calc-error','calc-error-debug','calc-success','calc-results','calc-request-summary','calc-canonical-symbol','calc-journal-summary','calc-instrument-specs','risk-toggle-wrap','calc-webhook-panel','calc-webhook-url','calc-webhook-json','calc-webhook-copy','calc-webhook-copy-url','risk-toggle','calc-risk-label','limit-wrap','account-toggle','asset-toggle','side-toggle','order-toggle','webhook-toggle','test-toggle','timeframe-toggle','setup-toggle','pattern-toggle','ema-toggle','vwap-toggle','aths-atls-toggle','round-number-toggle','calc-symbol','calc-limit','calc-sl-ticks','calc-rr','calc-risk','calc-quote','calc-submit','calc-quote-status','calc-webhook-status','calc-pepperstone-set','broker-toggle-wrap','broker-toggle','trendline-plans-panel','trendline-anchor-1-time','trendline-anchor-1-price','trendline-anchor-1-utc','trendline-anchor-2-time','trendline-anchor-2-price','trendline-anchor-2-utc','trendline-trigger-mode','trendline-cross-direction','trendline-price-basis','trendline-tolerance-ticks','trendline-right-extension','trendline-expiry','trendline-save','trendline-reset','trendline-refresh','trendline-plan-status','trendline-plan-list','trendline-monitor-start','trendline-monitor-stop','trendline-monitor-status'];
+const el=Object.fromEntries(ids.map(id=>[id,new Element(id)]));
+const groups={'risk-toggle':['fixed_aud','percent'],'asset-toggle':['crypto','fx'],'broker-toggle':['oanda','pepperstone'],'account-toggle':['live','demo'],'side-toggle':['buy','sell'],'order-toggle':['market','limit'],'webhook-toggle':['no','yes'],'test-toggle':['no','yes']};
+for(const [id,values] of Object.entries(groups))el[id].buttons=values.map(v=>new Button(v));
+el['calc-sl-ticks'].value='10';el['calc-rr'].value='2';el['calc-risk'].value='1';
+const calls=[];let quotePayload=null,submitPayload=null,intervalClears=0;
+const response=data=>({ok:true,status:200,statusText:'OK',headers:{get:()=> 'application/json'},text:async()=>JSON.stringify(data)});
+const quote={asset:'fx',broker:'oanda',venue:'OANDA',resolved_venue:'OANDA',symbol:'USD_JPY',tick_size:'0.001',entry_price:'150.000',stop_price:'149.990',target_price:'150.020',target_distance:'0.020',quantity:'1000',estimated_fees_or_spread:'1',estimated_total_loss:'10',estimated_reward:'20',calculation_context_id:'ctx-usdjpy',quote_created_at_ms:123,quote_valid_for_submit:true};
+const fetch=async(url,opts={})=>{
+  const body=opts.body?JSON.parse(opts.body):null;calls.push({url,method:opts.method||'GET',body});
+  if(url==='/api/calculator/bootstrap')return response({app_profile:'render',trendline_plans_available:false,webhook:{available:true}});
+  if(url.startsWith('/api/calculator/prewarm-account'))return response({ready_for_quote:true,asset:'crypto'});
+  if(url.startsWith('/api/calculator/instrument?'))return response({asset:'fx',broker:'oanda',symbol:'USD_JPY'});
+  if(url==='/api/calculator/quote'){quotePayload=body;return response(quote);}
+  if(url==='/api/calculator/submit'){submitPayload=body;return response({ok:true,broker:'oanda',result:{order:{orderId:'test-order'}}});}
+  if(url.startsWith('/api/calculator/journal-summary'))return response({status:'no_data'});
+  if(url.startsWith('/api/instrument-specs'))return response({source:'oanda',resolved_symbol:'USD_JPY'});
+  if(url.startsWith('/api/calculator/prewarm'))throw new Error('FX resolution must not prewarm Bybit quote data');
+  return response({status:'no_data'});
+};
+let timerId=0;const timers=new Map();
+const setTimeout=(fn,ms)=>{const id=++timerId;if(ms===250)fn();else timers.set(id,fn);return id;};
+const clearTimeout=id=>timers.delete(id);const setInterval=()=>99;const clearInterval=()=>{intervalClears++;};
+const context={document:{getElementById:id=>el[id]},fetch,navigator:{clipboard:{writeText:async()=>{}}},setTimeout,clearTimeout,setInterval,clearInterval,console,Date,URL,URLSearchParams,AbortController};
+vm.runInNewContext(source,context);
+const flush=()=>new Promise(resolve=>setImmediate(resolve));
+(async()=>{
+  await flush();await flush();
+  el['calc-symbol'].value='USDJPY';
+  if(mode==='resolved') { el['calc-symbol'].listeners.input(); await flush(); await flush(); await flush(); }
+  await el['calc-quote'].listeners.click();await flush();await flush();
+  if(mode==='race') { await el['calc-submit'].listeners.click();await flush(); }
+  const active=(id,v)=>!!el[id].buttons.find(b=>b.dataset.v===v)?.active;
+  console.log(JSON.stringify({calls,quotePayload,submitPayload,canonical:el['calc-canonical-symbol'].textContent,assetFx:active('asset-toggle','fx'),brokerOanda:active('broker-toggle','oanda'),riskVisible:el['risk-toggle-wrap'].style.display!=='none',brokerVisible:el['broker-toggle-wrap'].style.display!=='none',intervalClears,submitEnabled:!el['calc-submit'].disabled}));
+})().catch(e=>{console.error(e);process.exitCode=1;});
+'''
+    result = subprocess.run(
+        [node, "-e", harness, str(JS_PATH), mode],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout.strip().splitlines()[-1])
+
+
+def test_usdjpy_default_crypto_input_auto_selects_fx_and_posts_oanda_quote() -> None:
+    data = _run_usdjpy_auto_route_harness("resolved")
+    assert data["assetFx"] and data["brokerOanda"]
+    assert data["riskVisible"] and data["brokerVisible"]
+    assert data["canonical"].endswith("USD_JPY")
+    assert data["quotePayload"]["asset"] == "fx"
+    assert data["quotePayload"]["broker"] == "oanda"
+    assert data["quotePayload"]["symbol"] == "USD_JPY"
+    urls = [call["url"] for call in data["calls"]]
+    assert any("/api/calculator/instrument?asset=crypto&broker=bybit" in url for url in urls)
+    assert any("/api/calculator/journal-summary?asset=fx&symbol=USD_JPY" in url for url in urls)
+    assert any("/api/instrument-specs?query=USD_JPY&prefer=oanda" in url for url in urls)
+    assert not any(call["url"] == "/api/calculator/prewarm" for call in data["calls"])
+    assert data["intervalClears"] >= 1
+
+
+def test_usdjpy_quote_response_reconciles_fx_identity_after_resolution_race() -> None:
+    data = _run_usdjpy_auto_route_harness("race")
+    assert data["quotePayload"]["asset"] == "crypto"
+    assert data["quotePayload"]["broker"] == "bybit"
+    assert data["quotePayload"]["symbol"] == "USDJPY"
+    assert data["assetFx"] and data["brokerOanda"]
+    assert data["canonical"].endswith("USD_JPY")
+    assert data["submitPayload"]["asset"] == "fx"
+    assert data["submitPayload"]["broker"] == "oanda"
+    assert data["submitPayload"]["symbol"] == "USD_JPY"
+    urls = [call["url"] for call in data["calls"]]
+    assert any("/api/calculator/journal-summary?asset=fx&symbol=USD_JPY" in url for url in urls)
+    assert any("/api/instrument-specs?query=USD_JPY&prefer=oanda" in url for url in urls)
+
+
 def test_risk_toggle_posts_fixed_aud_payload_and_preserves_fx_selection() -> None:
     node = shutil.which("node")
     assert node, "node is required for JS behavior test"

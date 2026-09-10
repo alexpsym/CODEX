@@ -1809,6 +1809,107 @@ def test_calculator_quote_pepperstone_market_is_supported_and_resolves_venue(mon
     assert body["resolved_venue"] == "Pepperstone"
 
 
+def test_usdjpy_default_crypto_calculator_paths_auto_route_to_oanda_without_bybit(monkeypatch: pytest.MonkeyPatch) -> None:
+    bybit_names = (
+        "resolve_bybit_credentials_for",
+        "_bybit_get_symbols_by_category_cached",
+        "_resolve_bybit_calculator_symbol_fast",
+        "_bybit_get_instrument_info_cached",
+        "_fetch_bybit_ticker_cached",
+        "_fetch_bybit_balance_usdt_cached",
+        "_bybit_signed_get",
+    )
+
+    def unexpected_bybit(*_args, **_kwargs):
+        raise AssertionError("USDJPY routing must not touch a Bybit dependency")
+
+    for name in bybit_names:
+        monkeypatch.setattr(master_service, name, unexpected_bybit)
+
+    oanda_calls = []
+    saved_context = {}
+    monkeypatch.setattr(
+        master_service,
+        "_get_oanda_config",
+        lambda mode: {"base_url": "https://oanda.test", "account_id": f"acct-{mode}", "token": "test-token"},
+    )
+
+    async def fake_meta(**kwargs):
+        oanda_calls.append(("meta", kwargs["symbol"]))
+        return {
+            "displayPrecision": 3,
+            "tradeUnitsPrecision": 0,
+            "pipLocation": -2,
+            "minimumTradeSize": "1",
+            "maximumOrderUnits": "0",
+            "maximumPositionSize": "0",
+            "marginRate": "0.05",
+        }
+
+    async def fake_oanda_json(**kwargs):
+        oanda_calls.append(("pricing", kwargs["endpoint"]))
+        return {
+            "prices": [{"bids": [{"price": "149.998"}], "asks": [{"price": "150.000"}]}],
+            "homeConversions": [
+                {"currency": "JPY", "accountGain": "0.0067", "accountLoss": "0.0068", "positionValue": "0.0067"}
+            ],
+        }
+
+    monkeypatch.setattr(master_service, "_fetch_oanda_instrument_meta", fake_meta)
+    monkeypatch.setattr(master_service, "_fetch_oanda_json", fake_oanda_json)
+    monkeypatch.setattr(
+        master_service,
+        "_fetch_oanda_account_summary",
+        lambda _mode: asyncio.sleep(0, result={"currency": "USD", "nav": "100000", "marginAvailable": "1000000", "marginRate": "0.05"}),
+    )
+    monkeypatch.setattr(
+        master_service,
+        "_upsert_calculator_trade_context",
+        lambda payload, **_kwargs: saved_context.update(payload) or payload,
+    )
+    monkeypatch.setattr(master_service, "_invalidate_open_orders_cache", lambda: None)
+
+    for spelling in ("USDJPY", "usdjpy", "USD/JPY", "USD_JPY"):
+        instrument = json.loads(
+            asyncio.run(master_service.calculator_instrument("crypto", "demo", spelling, "bybit")).body.decode("utf-8")
+        )
+        assert instrument["asset"] == "fx"
+        assert instrument["broker"] == "oanda"
+        assert instrument["symbol"] == "USD_JPY"
+    assert master_service._calculator_effective_route("fx", "pepperstone", "usd/jpy") == (
+        "fx",
+        "pepperstone",
+        "USD_JPY",
+    )
+
+    quote = json.loads(
+        asyncio.run(
+            master_service.calculator_quote(
+                {
+                    "asset": "crypto",
+                    "broker": "bybit",
+                    "account": "demo",
+                    "symbol": "USDJPY",
+                    "side": "buy",
+                    "order_type": "market",
+                    "risk_mode": "percent",
+                    "risk_value": "1",
+                    "stop_loss_ticks": "10",
+                    "take_profit_ticks": "20",
+                }
+            )
+        ).body.decode("utf-8")
+    )
+    assert quote["asset"] == "fx"
+    assert quote["broker"] == "oanda"
+    assert quote["symbol"] == "USD_JPY"
+    assert saved_context["asset"] == "fx"
+    assert saved_context["broker"] == "oanda"
+    assert saved_context["symbol"] == "USD_JPY"
+    assert saved_context["instrument"] == "USD_JPY"
+    assert any(kind == "pricing" and "USD_JPY" in value for kind, value in oanda_calls)
+
+
 def _parse_set_file(text: str) -> dict:
     result = {}
     for line in text.splitlines():

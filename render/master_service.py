@@ -27020,10 +27020,28 @@ async def trendline_monitor_stop() -> JSONResponse:
     return JSONResponse({"ok": True, "stopped": stopped, **TRENDLINE_EXECUTOR.status(), **_trendline_response_state()})
 
 
-@app.get("/api/calculator/instrument")
-async def calculator_instrument(asset: str, account: str, symbol: str) -> JSONResponse:
+def _calculator_effective_route(asset: object, broker: object, symbol: object) -> Tuple[str, str, str]:
+    """Return the server-authoritative calculator route before broker dependencies."""
     asset_norm = str(asset or "").strip().lower()
+    broker_norm = str(broker or "").strip().lower()
+    symbol_text = str(symbol or "").strip()
+    if asset_norm == "crypto" and is_likely_oanda_pair(symbol_text):
+        return "fx", "oanda", normalize_oanda_symbol_query(symbol_text)
+    if asset_norm == "fx":
+        effective_broker = "oanda" if broker_norm in {"", "bybit"} else broker_norm
+        return "fx", effective_broker, normalize_oanda_symbol_query(symbol_text)
+    if asset_norm == "crypto":
+        return "crypto", "bybit", symbol_text
+    return asset_norm, broker_norm, symbol_text
+
+
+@app.get("/api/calculator/instrument")
+async def calculator_instrument(asset: str, account: str, symbol: str, broker: str = "") -> JSONResponse:
     account_norm = str(account or "live").strip().lower()
+    try:
+        asset_norm, broker_norm, routed_symbol = _calculator_effective_route(asset, broker, symbol)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if asset_norm == "crypto":
         _mode, _key, _secret, base_url, _src = resolve_bybit_credentials_for(account_norm)
         choices = await _bybit_get_symbols_by_category_cached(base_url, "linear")
@@ -27055,6 +27073,7 @@ async def calculator_instrument(asset: str, account: str, symbol: str) -> JSONRe
             raise HTTPException(status_code=502, detail=f"Bybit instrument meta unavailable for {resolved_symbol}.")
         return JSONResponse(
             {
+                "asset": "crypto",
                 "broker": "bybit",
                 "account": account_norm,
                 "symbol": resolved_symbol,
@@ -27071,7 +27090,7 @@ async def calculator_instrument(asset: str, account: str, symbol: str) -> JSONRe
     if asset_norm == "fx":
         try:
             cfg = _get_oanda_config(account_norm)
-            resolved_symbol = normalize_oanda_symbol_query(symbol)
+            resolved_symbol = routed_symbol
             meta = await _fetch_oanda_instrument_meta(
                 base_url=cfg["base_url"],
                 account_id=cfg["account_id"],
@@ -27083,7 +27102,8 @@ async def calculator_instrument(asset: str, account: str, symbol: str) -> JSONRe
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return JSONResponse(
             {
-                "broker": "oanda",
+                "asset": "fx",
+                "broker": broker_norm,
                 "account": account_norm,
                 "symbol": resolved_symbol,
                 "displayPrecision": meta.get("displayPrecision"),
@@ -27342,6 +27362,12 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
         previous_pending_id = str(payload.get("previous_pending_webhook_id") or "").strip()
         if not symbol_in:
             raise HTTPException(status_code=400, detail="symbol is required.")
+        try:
+            asset, broker, symbol_in = _calculator_effective_route(asset, broker, symbol_in)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        payload = dict(payload or {})
+        payload.update({"asset": asset, "broker": broker, "symbol": symbol_in})
         if side not in {"buy", "sell"}:
             raise HTTPException(status_code=400, detail="side must be buy or sell.")
         if order_type not in {"market", "limit"}:
@@ -27694,6 +27720,7 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
             except BybitPreSubmitValidationError as exc:
                 raise HTTPException(status_code=400, detail={"code": exc.code, "message": exc.message, "debug": exc.debug}) from exc
             response_payload: Dict[str, object] = {
+                "asset": "crypto",
                 "broker": "bybit",
                 "venue": "Bybit",
                 "resolved_venue": "Bybit",
@@ -28081,6 +28108,7 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
                     )
             spread_home = spread_quote * loss_factor * units
             response_payload = {
+                    "asset": "fx",
                     "broker": broker,
                     "venue": "Pepperstone" if broker == "pepperstone" else "OANDA",
                     "resolved_venue": "Pepperstone" if broker == "pepperstone" else "OANDA",
