@@ -172,7 +172,8 @@ def test_scripts_endpoint_places_spread_monitor_after_iv_indicator_in_local_prof
     assert names.index("ivindicator-clone") == names.index("monitor") + 1
     assert names.index("spreads-clone") == names.index("ivindicator-clone") + 1
     by_name = {str(item.get("name")): item for item in payload}
-    assert by_name["bounce-trader"]["remote_owned"] is True
+    assert by_name["bounce-trader"]["open_url"] == "/merged/bounce-trader"
+    assert "remote_owned" not in by_name["bounce-trader"]
     assert by_name["fxweekend"]["remote_owned"] is True
     assert "fxweekend-clone" not in by_name
     assert by_name["spreads-clone"]["label"] == "Oanda Spreads"

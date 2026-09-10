@@ -1,4 +1,5 @@
 import importlib.util
+import os
 import sys
 from pathlib import Path
 
@@ -15,6 +16,67 @@ app = importlib.util.module_from_spec(SPEC)
 assert SPEC and SPEC.loader
 sys.modules[SPEC.name] = app
 SPEC.loader.exec_module(app)
+
+
+def test_local_worker_launch_uses_current_python_and_repo_paths_without_spawning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bogus_python = str(ROOT / "definitely-not-python.exe")
+    original_pythonpath = os.pathsep.join(("existing-one", "existing-two"))
+    monkeypatch.setenv("PYTHON", bogus_python)
+    monkeypatch.setenv("PYTHONPATH", original_pythonpath)
+    monkeypatch.setattr(
+        app.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("worker process must not be spawned")
+        ),
+    )
+    monkeypatch.setattr(
+        app.requests,
+        "get",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("network must not be accessed")
+        ),
+    )
+
+    launches: list[dict[str, object]] = []
+
+    def capture_spawn(config, symbol, session_id, env, cmd, *, broker):
+        launches.append(
+            {
+                "config": config,
+                "symbol": symbol,
+                "session_id": session_id,
+                "env": dict(env),
+                "cmd": list(cmd),
+                "broker": broker,
+            }
+        )
+        return session_id
+
+    monkeypatch.setattr(app, "_spawn_session", capture_spawn)
+    config = dict(app.DEFAULT_CONFIG)
+    bybit_id = app._start_bybit_session(config, "BTCUSDT")
+    oanda_id = app._start_oanda_session(config, "USD_JPY")
+
+    assert bybit_id.startswith("bb-")
+    assert oanda_id.startswith("oa-")
+    assert [launch["broker"] for launch in launches] == ["bybit", "oanda"]
+    expected_workers = [app.BYBIT_WORKER_PATH, app.OANDA_WORKER_PATH]
+    for launch, expected_worker in zip(launches, expected_workers):
+        command = launch["cmd"]
+        assert command[0] == sys.executable
+        assert command[0] != bogus_python
+        assert command[1] == "-u"
+        worker_path = Path(command[2])
+        assert worker_path.is_absolute()
+        assert worker_path == expected_worker
+        assert worker_path.parent == ROOT / "bybit_trigger_bounce_trader"
+        pythonpath_entries = launch["env"]["PYTHONPATH"].split(os.pathsep)
+        assert str(ROOT) in pythonpath_entries
+        assert "existing-one" in pythonpath_entries
+        assert "existing-two" in pythonpath_entries
 
 
 def test_shorthand_symbol_resolves_before_spawn(monkeypatch: pytest.MonkeyPatch):

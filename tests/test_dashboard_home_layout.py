@@ -708,8 +708,8 @@ def test_local_profile_buttons_use_configured_render_routes(monkeypatch) -> None
     buttons = module._profile_main_buttons()
     by_name = {str(item.get("name")): item for item in buttons}
     assert by_name["calculator"]["open_url"] == "/merged/calculator"
-    assert by_name["bounce-trader"]["open_url"] == "https://tools.example/merged/bounce-trader"
-    assert by_name["bounce-trader"]["remote_owned"] is True
+    assert by_name["bounce-trader"]["open_url"] == "/merged/bounce-trader"
+    assert "remote_owned" not in by_name["bounce-trader"]
     assert by_name["fxweekend"]["open_url"] == "https://tools.example/apps/fxweekend-clone"
     assert by_name["fxweekend"]["remote_owned"] is True
     assert by_name["trading-journal"]["open_url"] == "/dashboard/trading-journal"
@@ -776,12 +776,12 @@ def test_remote_tool_buttons_refuse_localhost_and_render_has_no_tool_buttons(mon
     monkeypatch.setenv("RENDER_CALCULATOR_BASE_URL", "http://127.0.0.1:9000")
     monkeypatch.setenv("RENDER_EXTERNAL_URL", "https://render-fallback.example")
     fallback_by_name = {str(item.get("name")): item for item in module._profile_main_buttons()}
-    assert fallback_by_name["bounce-trader"]["open_url"] == "https://render-fallback.example/merged/bounce-trader"
+    assert fallback_by_name["bounce-trader"]["open_url"] == "/merged/bounce-trader"
     assert fallback_by_name["fxweekend"]["open_url"] == "https://render-fallback.example/apps/fxweekend-clone"
 
     monkeypatch.delenv("RENDER_EXTERNAL_URL", raising=False)
     by_name = {str(item.get("name")): item for item in module._profile_main_buttons()}
-    assert by_name["bounce-trader"]["open_url"] == "/render-tools-configuration-error"
+    assert by_name["bounce-trader"]["open_url"] == "/merged/bounce-trader"
     assert by_name["fxweekend"]["open_url"] == "/render-tools-configuration-error"
 
     error_page = asyncio.run(module.render_tools_configuration_error())

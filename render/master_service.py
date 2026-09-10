@@ -238,8 +238,8 @@ LOCAL_ONLY_SCRIPTS = {"bybit_monitor", "oanda_monitor"}
 BYBIT_RUNTIME_STATUS_PATH = BASE_DIR / "bybit_monitor" / "runtime_status.json"
 OANDA_RUNTIME_STATUS_PATH = BASE_DIR / "oanda_monitor" / "runtime_status.json"
 SCANNER_HEARTBEAT_GRACE_SECONDS = 30
-DEFAULT_RENDER_ALLOWED_APPS = "calculator-webhook,pending-webhooks,fxweekend-clone,bybit_trigger_bounce_trader"
-DEFAULT_LOCAL_ALLOWED_APPS = "bybit_monitor,oanda_monitor,bybithistory-clone,oanda_history-clone,coinspot-clone,open-orders,instrument-lookup,ivindicator-clone,spreads-clone,oanda-volatility"
+DEFAULT_RENDER_ALLOWED_APPS = "calculator-webhook,pending-webhooks,fxweekend-clone"
+DEFAULT_LOCAL_ALLOWED_APPS = "bybit_monitor,oanda_monitor,bybit_trigger_bounce_trader,bybithistory-clone,oanda_history-clone,coinspot-clone,open-orders,instrument-lookup,ivindicator-clone,spreads-clone,oanda-volatility"
 PINE_SCRIPTS_DIR = BASE_DIR / "pinescripts"
 PINE_ALLOWED_SUFFIXES = {".pine", ".pinescript", ".txt"}
 
@@ -382,6 +382,7 @@ LOCAL_ONLY_DISABLED_MESSAGE = "This app is local-only to reduce Render bandwidth
 LOCAL_ONLY_APP_NAMES = {
     "bybit_monitor",
     "oanda_monitor",
+    "bybit_trigger_bounce_trader",
     "bybithistory-clone",
     "oanda_history-clone",
     "coinspot-clone",
@@ -395,6 +396,7 @@ LOCAL_ONLY_APP_NAMES = {
 LOCAL_ONLY_PATH_PREFIXES = (
     "/merged/history",
     "/merged/alerts",
+    "/merged/bounce-trader",
     "/bybit-history",
     "/oanda-history",
     "/coinspot-history",
@@ -419,6 +421,8 @@ def _profile_allows_script(script_name: str) -> bool:
     name = str(script_name or "").strip()
     if not name:
         return False
+    if name == "bybit_trigger_bounce_trader":
+        return APP_PROFILE == "local"
     if name == "fxweekend-clone":
         return APP_PROFILE == "render"
     if APP_PROFILE == "render":
@@ -468,7 +472,7 @@ def _profile_main_buttons() -> List[Dict[str, object]]:
     if APP_PROFILE == "local":
         buttons.extend(
             [
-                {"id": "bounce-trader", "name": "bounce-trader", "label": "Bounce Trader", "open_url": _render_tools_page_url("/merged/bounce-trader"), "dashboard_main_view": True, "remote_owned": True},
+                {"id": "bounce-trader", "name": "bounce-trader", "label": "Bounce Trader", "open_url": "/merged/bounce-trader", "dashboard_main_view": True},
                 {"id": "fxweekend", "name": "fxweekend", "label": "FX Weekend", "open_url": _render_tools_page_url("/apps/fxweekend-clone"), "dashboard_main_view": True, "remote_owned": True},
                 {"id": "trading-journal", "name": "trading-journal", "label": "Journal", "open_url": "/dashboard/trading-journal", "dashboard_main_view": True},
                 {"id": "instrument-lookup", "name": "instrument-lookup", "label": "Instrument Lookup", "open_url": "/instrument-lookup", "dashboard_main_view": True},
@@ -483,12 +487,13 @@ def _profile_main_buttons() -> List[Dict[str, object]]:
 
 
 def _profile_merged_source_names() -> Set[str]:
-    names = {"bybit_trigger_bounce_trader"}
+    names: Set[str] = set()
     if APP_PROFILE == "render":
         names.add("fxweekend-clone")
     if APP_PROFILE == "local":
         names.update(
             {
+                "bybit_trigger_bounce_trader",
                 "bybithistory-clone",
                 "oanda_history-clone",
                 "coinspot-clone",
@@ -29909,6 +29914,8 @@ async def merged_monitor_page() -> Response:
 
 @app.get("/merged/bounce-trader")
 async def merged_bounce_page() -> Response:
+    if APP_PROFILE != "local":
+        return _local_only_disabled_response("/merged/bounce-trader")
     return RedirectResponse(url="/apps/bybit_trigger_bounce_trader", status_code=307)
 
 

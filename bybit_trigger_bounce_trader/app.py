@@ -28,9 +28,12 @@ load_master_env(base_dir=ROOT_DIR)
 
 APP = Flask(__name__)
 BASE_DIR = Path(__file__).resolve().parent
-CONFIG_PATH = BASE_DIR / "bounce_config.json"
-BOUNCE_TRADERS_PATH = BASE_DIR.parent / "render" / "data" / "bounce_traders.json"
-SESSION_LOG_DIR = BASE_DIR / "session_logs"
+RUNTIME_DATA_DIR = ROOT_DIR / "render" / "data"
+CONFIG_PATH = RUNTIME_DATA_DIR / "bounce_trader_config.json"
+BOUNCE_TRADERS_PATH = RUNTIME_DATA_DIR / "bounce_traders.json"
+SESSION_LOG_DIR = RUNTIME_DATA_DIR / "bounce_trader_session_logs"
+BYBIT_WORKER_PATH = (BASE_DIR / "bybit_trigger_bounce_trader.py").resolve()
+OANDA_WORKER_PATH = (BASE_DIR / "oanda_trigger_bounce_trader.py").resolve()
 APP_BASE_PATH = os.getenv("APP_BASE_PATH", "")
 
 DEFAULT_CONFIG: Dict[str, str] = {
@@ -259,11 +262,26 @@ def _load_config() -> Dict[str, str]:
 
 
 def _save_config(config: Dict[str, str]) -> None:
+    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     CONFIG_PATH.write_text(json.dumps(config, indent=2, sort_keys=True), encoding="utf-8")
 
 
-def _build_bybit_env(config: Dict[str, str], *, symbol: str, session_id: str) -> Dict[str, str]:
+def _worker_environment() -> Dict[str, str]:
     env = os.environ.copy()
+    existing_entries = [entry for entry in env.get("PYTHONPATH", "").split(os.pathsep) if entry]
+    root_text = str(ROOT_DIR)
+    normalized_root = os.path.normcase(os.path.abspath(root_text))
+    if not any(
+        os.path.normcase(os.path.abspath(entry)) == normalized_root
+        for entry in existing_entries
+    ):
+        existing_entries.insert(0, root_text)
+    env["PYTHONPATH"] = os.pathsep.join(existing_entries)
+    return env
+
+
+def _build_bybit_env(config: Dict[str, str], *, symbol: str, session_id: str) -> Dict[str, str]:
+    env = _worker_environment()
     env["BYBIT_ENV"] = "demo" if config["account_mode"] == "demo" else "live"
     env["BYBIT_CATEGORY"] = config["category"]
     env["BYBIT_TRIGGER_BY"] = config["trigger_by"]
@@ -290,7 +308,7 @@ def _build_bybit_env(config: Dict[str, str], *, symbol: str, session_id: str) ->
 
 
 def _build_oanda_env(config: Dict[str, str], *, instrument: str, session_id: str) -> Dict[str, str]:
-    env = os.environ.copy()
+    env = _worker_environment()
     env["OANDA_MODE"] = "demo" if config["account_mode"] == "demo" else "live"
     env["BOUNCE_POLL_SECONDS"] = config["poll_seconds"]
     env["BOUNCE_SYMBOLS"] = instrument
@@ -339,14 +357,14 @@ def _running_sessions() -> List[Dict[str, object]]:
 def _start_bybit_session(config: Dict[str, str], symbol: str) -> str:
     session_id = f"bb-{uuid4().hex[:12]}"
     env = _build_bybit_env(config, symbol=symbol, session_id=session_id)
-    cmd = [os.getenv("PYTHON", "python3"), "-u", "bybit_trigger_bounce_trader.py"]
+    cmd = [sys.executable, "-u", str(BYBIT_WORKER_PATH)]
     return _spawn_session(config, symbol, session_id, env, cmd, broker="bybit")
 
 
 def _start_oanda_session(config: Dict[str, str], instrument: str) -> str:
     session_id = f"oa-{uuid4().hex[:12]}"
     env = _build_oanda_env(config, instrument=instrument, session_id=session_id)
-    cmd = [os.getenv("PYTHON", "python3"), "-u", "oanda_trigger_bounce_trader.py"]
+    cmd = [sys.executable, "-u", str(OANDA_WORKER_PATH)]
     return _spawn_session(config, instrument, session_id, env, cmd, broker="oanda")
 
 

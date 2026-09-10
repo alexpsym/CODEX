@@ -4,6 +4,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -104,34 +105,53 @@ def test_render_profile_blocks_local_only_routes() -> None:
     assert "run_local_master_control.bat" in disabled.body.decode("utf-8")
 
 
-def test_render_profile_scripts_hide_local_only_main_views() -> None:
-    master_service = _load_master_service("render_master_service_profile_render_scripts", "render")
-    payload = json.loads(asyncio.run(master_service.list_scripts()).body.decode("utf-8"))
-    names = {str(item.get("name")) for item in payload}
-
-    assert "history" not in names
-    assert "monitor" not in names
-    assert "trading-journal" not in names
-    assert "open-orders" not in names
-    assert "mt5" not in names
-    assert "pine" not in names
-    assert "bybit_monitor" not in names
-    assert "oanda_monitor" not in names
-    assert "calculator" not in names
-    assert "fxweekend" not in names
-    assert "bounce-trader" not in names
-    assert "fxweekend-clone" not in names
-    assert master_service._profile_allows_script("fxweekend-clone") is True
-    assert master_service._profile_allows_script("bybit_trigger_bounce_trader") is True
-    assert master_service.script_manager.get("fxweekend-clone").name == "fxweekend-clone"
-    assert (
-        master_service.script_manager.get("bybit_trigger_bounce_trader").name
-        == "bybit_trigger_bounce_trader"
+def test_bounce_trader_is_exclusively_local_and_does_not_need_render_url(monkeypatch) -> None:
+    monkeypatch.delenv("RENDER_CALCULATOR_BASE_URL", raising=False)
+    monkeypatch.delenv("RENDER_EXTERNAL_URL", raising=False)
+    monkeypatch.setenv(
+        "RENDER_ALLOWED_APPS",
+        "calculator-webhook,pending-webhooks,fxweekend-clone,bybit_trigger_bounce_trader",
     )
 
-    bounce = asyncio.run(master_service.merged_bounce_page())
-    assert bounce.status_code == 307
-    assert bounce.headers.get("location") == "/apps/bybit_trigger_bounce_trader"
+    local_service = _load_master_service(
+        "render_master_service_profile_local_bounce_owner", "local"
+    )
+    assert local_service._profile_allows_script("bybit_trigger_bounce_trader") is True
+    assert "bybit_trigger_bounce_trader" in local_service.script_manager.names
+    assert "bybit_trigger_bounce_trader" in local_service._profile_merged_source_names()
+    local_source = local_service.script_manager.get("bybit_trigger_bounce_trader")
+    local_source.is_starting = True
+    local_rows = json.loads(asyncio.run(local_service.list_scripts()).body.decode("utf-8"))
+    local_by_name = {str(item.get("name")): item for item in local_rows}
+    assert local_by_name["bounce-trader"]["open_url"] == "/merged/bounce-trader"
+    assert "remote_owned" not in local_by_name["bounce-trader"]
+    assert local_by_name["bounce-trader"]["starting"] is True
+    assert local_by_name["fxweekend"]["remote_owned"] is True
+    local_route = asyncio.run(local_service.merged_bounce_page())
+    assert local_route.status_code == 307
+    assert local_route.headers.get("location") == "/apps/bybit_trigger_bounce_trader"
+
+    render_service = _load_master_service(
+        "render_master_service_profile_render_bounce_blocked", "render"
+    )
+    assert render_service._profile_allows_script("bybit_trigger_bounce_trader") is False
+    assert "bybit_trigger_bounce_trader" not in render_service.script_manager.names
+    assert "bybit_trigger_bounce_trader" not in render_service._profile_merged_source_names()
+    assert render_service._profile_allows_script("fxweekend-clone") is True
+    assert "fxweekend-clone" in render_service.script_manager.names
+    assert render_service._render_blocks_path("/merged/bounce-trader") is True
+    assert render_service._render_blocks_path("/apps/bybit_trigger_bounce_trader") is True
+    blocked_route = asyncio.run(render_service.merged_bounce_page())
+    assert blocked_route.status_code == 410
+    proxy_request = SimpleNamespace(
+        url=SimpleNamespace(path="/apps/bybit_trigger_bounce_trader/", query=""),
+        headers={"accept": "text/html"},
+        method="GET",
+    )
+    blocked_proxy = asyncio.run(
+        render_service.proxy_app("bybit_trigger_bounce_trader", proxy_request)
+    )
+    assert blocked_proxy.status_code == 410
 
 
 def test_local_profile_includes_remote_tools_and_local_calculator(monkeypatch) -> None:
@@ -165,9 +185,9 @@ def test_local_profile_includes_remote_tools_and_local_calculator(monkeypatch) -
     ]
 
     assert by_name["calculator"]["open_url"] == "/merged/calculator"
-    assert by_name["bounce-trader"]["open_url"] == "https://tools.example.test/merged/bounce-trader"
+    assert by_name["bounce-trader"]["open_url"] == "/merged/bounce-trader"
     assert by_name["fxweekend"]["open_url"] == "https://tools.example.test/apps/fxweekend-clone"
-    assert by_name["bounce-trader"]["remote_owned"] is True
+    assert "remote_owned" not in by_name["bounce-trader"]
     assert by_name["fxweekend"]["remote_owned"] is True
 
     trading_journal = by_name["trading-journal"]
