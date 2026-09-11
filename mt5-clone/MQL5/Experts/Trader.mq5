@@ -1,6 +1,6 @@
 #property strict
 #property description "Trader EA: trendline/standard limits, EMA bounce, and token-gated one-shot standard market execution. SL/TP are set by DISTANCE in MT5 POINTS, with optional AutoTP NetRR."
-#property version   "2.40"
+#property version   "2.41"
 
 #include <Trade/Trade.mqh>
 CTrade trade;
@@ -159,7 +159,7 @@ int hSlow  = INVALID_HANDLE;
 int hTrend = INVALID_HANDLE;
 
 string EA_COMMENT = "Trader";
-string EA_VERSION = "2.40";
+string EA_VERSION = "2.41";
 
 void Dbg(const string msg){ if(Debug) Print(EA_COMMENT, ": ", msg); }
 bool PlaceOrReplacePendingLimitAtEntry(const bool isBuyLimit,
@@ -2452,7 +2452,7 @@ bool WriteDesktopTraderStatus()
    payload += "\"protocol_version\":" + IntegerToString(TRADER_CONTROL_PROTOCOL_VERSION) + ",";
    payload += "\"reason\":\"" + JsonEscape(g_traderControlReason) + "\",";
    payload += "\"symbol\":\"" + JsonEscape(_Symbol) + "\",";
-   payload += "\"updated_at\":" + (string)now + "}";
+   payload += "\"updated_at\":" + IntegerToString((long)now) + "}";
    string why = "";
    bool published = PublishVerifiedCommonSnapshot(TraderControlStatusFile(), payload, why);
    ReportDesktopStatusPublication(published, why);
@@ -2617,7 +2617,7 @@ bool ConsumeDesktopTraderCommand(const DesktopTraderCommand &command,
       return false;
    }
    string payload = "{\"command_id\":\"" + command.commandId +
-                    "\",\"consumed_at\":" + (string)TimeGMT() +
+                    "\",\"consumed_at\":" + IntegerToString((long)TimeGMT()) +
                     ",\"instance_id\":\"" + g_traderControlInstanceId +
                     "\",\"protocol_version\":" + IntegerToString(TRADER_CONTROL_PROTOCOL_VERSION) + "}";
    bool stored = WriteVerifiedCommonText(marker, payload, why);
@@ -2636,7 +2636,7 @@ bool WriteDesktopTraderResult(const DesktopTraderResult &result)
    payload += "\"reason\":\"" + JsonEscape(result.reason) + "\",";
    payload += "\"retcode\":" + (string)result.retcode + ",";
    payload += "\"ticket\":" + (string)result.ticket + ",";
-   payload += "\"updated_at\":" + (string)TimeGMT() + "}";
+   payload += "\"updated_at\":" + IntegerToString((long)TimeGMT()) + "}";
    string why = "";
    if(WriteVerifiedCommonText(TraderControlResultFile(), payload, why)) return true;
    Print(EA_COMMENT, ": desktop result write failed: ", why);

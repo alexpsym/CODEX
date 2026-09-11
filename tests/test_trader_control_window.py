@@ -147,6 +147,8 @@ def test_status_diagnostics_are_precise_fail_closed_and_snapshot_scoped(
 
     trader = _source()
     publish = _function(trader, "bool PublishVerifiedCommonSnapshot")
+    status_writer = _function(trader, "bool WriteDesktopTraderStatus")
+    result_writer = _function(trader, "bool WriteDesktopTraderResult")
     assert "TraderControlCommonFilesPath()" in trader
     assert "PublishVerifiedCommonSnapshot(TraderControlStatusFile(), payload, why)" in trader
     assert "MoveFileExW" not in trader
@@ -156,6 +158,11 @@ def test_status_diagnostics_are_precise_fail_closed_and_snapshot_scoped(
     assert "FileDelete(temporary, FILE_COMMON)" in publish
     assert "WriteVerifiedCommonText(fileName, contents, why)" not in publish
     assert "MQL_DLLS_ALLOWED" not in publish
+    assert 'IntegerToString((long)now)' in status_writer
+    assert '(string)now' not in status_writer
+    assert 'IntegerToString((long)TimeGMT())' in result_writer
+    assert '(string)TimeGMT()' not in result_writer
+    assert isinstance(json.loads(json.dumps(status))["updated_at"], int)
 
 
 def test_ea_validates_scope_freshness_consumes_before_dispatch_and_reports_structured_result() -> None:
@@ -279,4 +286,4 @@ def test_four_actions_reuse_current_inputs_and_one_attempt_trading_protections()
     assert tick.index("if(UseDesktopTraderControls)") < tick.index("if(!OrdersEnabled)")
     assert timer.index("if(UseDesktopTraderControls)") < timer.index("if(Strategy == STRAT_STANDARD_LIMIT)")
     assert "HandleDesktopTraderCommand()" in timer
-    assert '#property version   "2.40"' in trader and 'EA_VERSION = "2.40"' in trader
+    assert '#property version   "2.41"' in trader and 'EA_VERSION = "2.41"' in trader

@@ -1,3 +1,11 @@
+Trader v2.41 delivery: JSON timestamp serialization repair
+
+- Replacement snapshot parser result: `JSON_ERROR message="Expecting ',' delimiter" line=1 column=348 position=347 property=updated_at`; `UPDATED_AT_TOKEN='2026.09.11 10:13:52'`. This proved the malformed status JSON was caused by Trader emitting an unquoted formatted MQL datetime where the protocol requires a numeric JSON epoch.
+- Trader is v2.41 in both active declarations. Desktop status `updated_at`, structured-result `updated_at`, and consumed-marker `consumed_at` now use `IntegerToString((long)... )`, preserving unquoted JSON integer epochs. The v2.40 FILE_COMMON FileMove transport and all existing fail-closed protocol/trading gates were unchanged.
+- Changed: `mt5-clone/MQL5/Experts/Trader.mq5`, `tests/test_trader_control_window.py`, `tests/test_trader_trendline_one_shot.py`, and this summary. The previously completed focused invocation passed: `tests/test_trader_control_window.py::test_status_diagnostics_are_precise_fail_closed_and_snapshot_scoped` and `tests/test_trader_trendline_one_shot.py::test_strict_v3_parse_and_replacement_outcomes_fail_closed_without_retry` — 2 passed (with two existing unwritable pytest-cache warnings).
+- The previously completed MetaEditor compilation reported `0 errors, 0 warnings`; log: `C:\Users\User\AppData\Local\Temp\codex-v241-20260911102018398\Trader.compile.log`. Repository and deployed v2.41 hashes match: Trader.mq5 SHA-256 `0C3BD1C7FFE89AB1945637277AF14926BE83B89F8B92A2CDFEC5DC0CAF9A3E24`; Trader.ex5 SHA-256 `C063A407EB2207E219A0D826CF7FE09D7ED49CB654EC2FA9850BC7542632661A`. Deployment made one backup pair named `Trader.20260911102734759.mq5.bak` and `.ex5.bak` in the established Experts directory, then deployed only the source and EX5.
+- No MT5 control, runtime capture, panel click, order, test trade, or broker operation occurred. Live recovery remains unverified: manually reload/re-attach Trader v2.41 and wait for `Connected | Orders enabled | Fresh` in the existing panel.
+
 Corrective follow-up: Repair persistent malformed Trader status publication
 
 - Required baseline was verified before editing: HEAD and origin/master both equalled 797d31c101e395645773fc6f9a99825bb595b3e0. All pre-existing dirty paths were user-owned and preserved.
