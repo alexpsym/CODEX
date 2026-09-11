@@ -1,6 +1,6 @@
 #property strict
 #property description "Trader EA: trendline/standard limits, EMA bounce, and token-gated one-shot standard market execution. SL/TP are set by DISTANCE in MT5 POINTS, with optional AutoTP NetRR."
-#property version   "2.39"
+#property version   "2.40"
 
 #include <Trade/Trade.mqh>
 CTrade trade;
@@ -11,7 +11,6 @@ long ShellExecuteW(long hwnd, string operation, string file, string parameters, 
 
 #import "kernel32.dll"
 uint GetFileAttributesW(string file_name);
-bool MoveFileExW(string existing_file_name, string new_file_name, uint flags);
 #import
 
 // -------------------- Strategy selection --------------------
@@ -135,8 +134,6 @@ const int  TRADER_CONTROL_STATUS_FRESH_SECONDS = 5;
 const int  TRADER_CONTROL_SW_SHOWNORMAL = 1;
 const uint TRADER_CONTROL_INVALID_FILE_ATTRIBUTES = 0xFFFFFFFF;
 const uint TRADER_CONTROL_FILE_ATTRIBUTE_DIRECTORY = 0x00000010;
-const uint TRADER_CONTROL_MOVEFILE_REPLACE_EXISTING = 0x00000001;
-const uint TRADER_CONTROL_MOVEFILE_WRITE_THROUGH = 0x00000008;
 
 void RefreshStandardMarketExecuteButton()
 {
@@ -162,7 +159,7 @@ int hSlow  = INVALID_HANDLE;
 int hTrend = INVALID_HANDLE;
 
 string EA_COMMENT = "Trader";
-string EA_VERSION = "2.39";
+string EA_VERSION = "2.40";
 
 void Dbg(const string msg){ if(Debug) Print(EA_COMMENT, ": ", msg); }
 bool PlaceOrReplacePendingLimitAtEntry(const bool isBuyLimit,
@@ -2368,6 +2365,21 @@ bool TraderControlConfiguredFileExists(const string path)
            (attributes & TRADER_CONTROL_FILE_ATTRIBUTE_DIRECTORY) == 0);
 }
 
+bool VerifyCommonText(const string fileName, const string contents, string &why)
+{
+   ResetLastError();
+   int handle = FileOpen(fileName, FILE_READ | FILE_TXT | FILE_ANSI | FILE_COMMON | FILE_SHARE_READ);
+   if(handle == INVALID_HANDLE)
+   { why = "Could not reopen FILE_COMMON record " + fileName + " for verification."; return false; }
+   int size = (int)FileSize(handle);
+   string verified = (size > 0 ? FileReadString(handle, size) : "");
+   FileClose(handle);
+   if(verified != contents)
+   { why = "FILE_COMMON verification mismatch for " + fileName + "."; return false; }
+   why = "";
+   return true;
+}
+
 bool WriteVerifiedCommonText(const string fileName, const string contents, string &why)
 {
    ResetLastError();
@@ -2382,17 +2394,7 @@ bool WriteVerifiedCommonText(const string fileName, const string contents, strin
    FileClose(handle);
    if(written != (uint)StringLen(contents) || writeError != 0 || flushError != 0)
    { why = "FILE_COMMON write/flush failed for " + fileName + "."; return false; }
-
-   handle = FileOpen(fileName, FILE_READ | FILE_TXT | FILE_ANSI | FILE_COMMON | FILE_SHARE_READ);
-   if(handle == INVALID_HANDLE)
-   { why = "Could not reopen FILE_COMMON record " + fileName + " for verification."; return false; }
-   int size = (int)FileSize(handle);
-   string verified = (size > 0 ? FileReadString(handle, size) : "");
-   FileClose(handle);
-   if(verified != contents)
-   { why = "FILE_COMMON verification mismatch for " + fileName + "."; return false; }
-   why = "";
-   return true;
+   return VerifyCommonText(fileName, contents, why);
 }
 
 string TraderControlTemporarySnapshotFile(const string fileName)
@@ -2402,30 +2404,15 @@ string TraderControlTemporarySnapshotFile(const string fileName)
 
 bool PublishVerifiedCommonSnapshot(const string fileName, const string contents, string &why)
 {
-   if(!MQLInfoInteger(MQL_DLLS_ALLOWED))
-   {
-      why = "Allow DLL imports is required to publish the desktop control status snapshot.";
-      return false;
-   }
-   string common = TraderControlCommonFilesPath();
-   if(common == "")
-   {
-      why = "TERMINAL_COMMONDATA_PATH is unavailable for desktop control status publication.";
-      return false;
-   }
    string temporary = TraderControlTemporarySnapshotFile(fileName);
    if(!WriteVerifiedCommonText(temporary, contents, why)) return false;
 
    ResetLastError();
-   if(MoveFileExW(common + "\\" + temporary, common + "\\" + fileName,
-                  TRADER_CONTROL_MOVEFILE_REPLACE_EXISTING | TRADER_CONTROL_MOVEFILE_WRITE_THROUGH))
-   {
-      why = "";
-      return true;
-   }
+   if(FileMove(temporary, FILE_COMMON, fileName, FILE_COMMON | FILE_REWRITE))
+      return VerifyCommonText(fileName, contents, why);
    int moveError = GetLastError();
    FileDelete(temporary, FILE_COMMON);
-   why = "Could not atomically publish FILE_COMMON status snapshot. error=" + IntegerToString(moveError);
+   why = "Could not atomically replace FILE_COMMON status snapshot. error=" + IntegerToString(moveError);
    return false;
 }
 

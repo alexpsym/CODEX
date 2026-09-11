@@ -42,7 +42,7 @@ def _window_module():
 
 def test_window_writes_one_atomic_scoped_command_and_blocks_duplicate_pending_clicks(tmp_path: Path) -> None:
     window = _window_module()
-    identity = window.InstanceIdentity("A1B2C3D4", 123456, "Pepperstone-Demo", 9988, "EURUSD.a", 91001, "2.39")
+    identity = window.InstanceIdentity("A1B2C3D4", 123456, "Pepperstone-Demo", 9988, "EURUSD.a", 91001, "2.40")
     protocol = window.TraderControlProtocol(tmp_path, identity)
     now = int(time.time())
     status = {
@@ -83,7 +83,7 @@ def test_status_diagnostics_are_precise_fail_closed_and_snapshot_scoped(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     window = _window_module()
-    identity = window.InstanceIdentity("A1B2C3D4", 123456, "Pepperstone-Demo", 9988, "EURUSD.a", 91001, "2.39")
+    identity = window.InstanceIdentity("A1B2C3D4", 123456, "Pepperstone-Demo", 9988, "EURUSD.a", 91001, "2.40")
     protocol = window.TraderControlProtocol(tmp_path, identity)
     now = 1_700_000_000
     protocol.started_at = now
@@ -146,9 +146,16 @@ def test_status_diagnostics_are_precise_fail_closed_and_snapshot_scoped(
     assert ready.buttons_enabled and ready.reason == "Ready for one explicit command."
 
     trader = _source()
+    publish = _function(trader, "bool PublishVerifiedCommonSnapshot")
     assert "TraderControlCommonFilesPath()" in trader
     assert "PublishVerifiedCommonSnapshot(TraderControlStatusFile(), payload, why)" in trader
-    assert "MoveFileExW" in trader and "TRADER_CONTROL_MOVEFILE_REPLACE_EXISTING" in trader
+    assert "MoveFileExW" not in trader
+    assert "WriteVerifiedCommonText(temporary, contents, why)" in publish
+    assert "FileMove(temporary, FILE_COMMON, fileName, FILE_COMMON | FILE_REWRITE)" in publish
+    assert "VerifyCommonText(fileName, contents, why)" in publish
+    assert "FileDelete(temporary, FILE_COMMON)" in publish
+    assert "WriteVerifiedCommonText(fileName, contents, why)" not in publish
+    assert "MQL_DLLS_ALLOWED" not in publish
 
 
 def test_ea_validates_scope_freshness_consumes_before_dispatch_and_reports_structured_result() -> None:
@@ -272,4 +279,4 @@ def test_four_actions_reuse_current_inputs_and_one_attempt_trading_protections()
     assert tick.index("if(UseDesktopTraderControls)") < tick.index("if(!OrdersEnabled)")
     assert timer.index("if(UseDesktopTraderControls)") < timer.index("if(Strategy == STRAT_STANDARD_LIMIT)")
     assert "HandleDesktopTraderCommand()" in timer
-    assert '#property version   "2.39"' in trader and 'EA_VERSION = "2.39"' in trader
+    assert '#property version   "2.40"' in trader and 'EA_VERSION = "2.40"' in trader
