@@ -42,7 +42,7 @@ def _window_module():
 
 def test_window_writes_one_atomic_scoped_command_and_blocks_duplicate_pending_clicks(tmp_path: Path) -> None:
     window = _window_module()
-    identity = window.InstanceIdentity("A1B2C3D4", 123456, "Pepperstone-Demo", 9988, "EURUSD.a", 91001, "2.38")
+    identity = window.InstanceIdentity("A1B2C3D4", 123456, "Pepperstone-Demo", 9988, "EURUSD.a", 91001, "2.39")
     protocol = window.TraderControlProtocol(tmp_path, identity)
     now = int(time.time())
     status = {
@@ -77,6 +77,78 @@ def test_window_writes_one_atomic_scoped_command_and_blocks_duplicate_pending_cl
 
     with pytest.raises(window.ProtocolError, match="pending"):
         protocol.issue_command("trendline", now=now + 1)
+
+
+def test_status_diagnostics_are_precise_fail_closed_and_snapshot_scoped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    window = _window_module()
+    identity = window.InstanceIdentity("A1B2C3D4", 123456, "Pepperstone-Demo", 9988, "EURUSD.a", 91001, "2.39")
+    protocol = window.TraderControlProtocol(tmp_path, identity)
+    now = 1_700_000_000
+    protocol.started_at = now
+
+    connecting = protocol.state(now=now)
+    assert not connecting.buttons_enabled
+    assert "Connecting" in connecting.reason and str(protocol.status_path) in connecting.reason
+
+    missing = protocol.state(now=now + window.STARTUP_GRACE_SECONDS + 1)
+    assert not missing.buttons_enabled
+    assert "missing" in missing.reason and str(protocol.status_path) in missing.reason
+
+    protocol.status_path.write_text("{", encoding="ascii")
+    malformed = protocol.state(now=now + 10)
+    assert not malformed.buttons_enabled and "malformed JSON" in malformed.reason
+
+    protocol.status_path.write_bytes(b"\xff")
+    encoding = protocol.state(now=now + 10)
+    assert not encoding.buttons_enabled and "unsupported encoding" in encoding.reason
+
+    protocol.status_path.write_text("[]", encoding="ascii")
+    non_object = protocol.state(now=now + 10)
+    assert not non_object.buttons_enabled and "not a JSON object" in non_object.reason
+
+    original_read_bytes = window.Path.read_bytes
+
+    def unreadable_status(path: Path) -> bytes:
+        if path == protocol.status_path:
+            raise PermissionError("test-only access denial")
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(window.Path, "read_bytes", unreadable_status)
+    unreadable = protocol.state(now=now + 10)
+    assert not unreadable.buttons_enabled and "unreadable" in unreadable.reason
+    monkeypatch.setattr(window.Path, "read_bytes", original_read_bytes)
+
+    status = {
+        "protocol_version": 1,
+        "instance_id": identity.instance_id,
+        "account_login": identity.account_login,
+        "account_server": identity.account_server,
+        "chart_id": identity.chart_id,
+        "symbol": identity.symbol,
+        "magic_number": identity.magic_number,
+        "ea_version": identity.ea_version,
+        "updated_at": now,
+        "fresh_for_seconds": 5,
+        "connected": True,
+        "control_ready": True,
+        "orders_enabled": True,
+        "reason": "ready",
+    }
+    protocol.status_path.write_text(json.dumps(status), encoding="ascii")
+    stale = protocol.state(now=now + 6)
+    assert not stale.buttons_enabled and "stale" in stale.reason
+
+    status["updated_at"] = now + 6
+    protocol.status_path.write_text(json.dumps(status), encoding="ascii")
+    ready = protocol.state(now=now + 6)
+    assert ready.buttons_enabled and ready.reason == "Ready for one explicit command."
+
+    trader = _source()
+    assert "TraderControlCommonFilesPath()" in trader
+    assert "PublishVerifiedCommonSnapshot(TraderControlStatusFile(), payload, why)" in trader
+    assert "MoveFileExW" in trader and "TRADER_CONTROL_MOVEFILE_REPLACE_EXISTING" in trader
 
 
 def test_ea_validates_scope_freshness_consumes_before_dispatch_and_reports_structured_result() -> None:
@@ -200,4 +272,4 @@ def test_four_actions_reuse_current_inputs_and_one_attempt_trading_protections()
     assert tick.index("if(UseDesktopTraderControls)") < tick.index("if(!OrdersEnabled)")
     assert timer.index("if(UseDesktopTraderControls)") < timer.index("if(Strategy == STRAT_STANDARD_LIMIT)")
     assert "HandleDesktopTraderCommand()" in timer
-    assert '#property version   "2.38"' in trader and 'EA_VERSION = "2.38"' in trader
+    assert '#property version   "2.39"' in trader and 'EA_VERSION = "2.39"' in trader

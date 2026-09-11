@@ -27,6 +27,7 @@ MIN_REFRESH_MS = 100
 MAX_REFRESH_MS = 5000
 MAX_STATUS_FRESH_SECONDS = 30
 COMMAND_PENDING_SECONDS = 20
+STARTUP_GRACE_SECONDS = 8
 
 
 class ProtocolError(RuntimeError):
@@ -52,6 +53,12 @@ class ControlState:
     pending_command_id: str | None
     status: dict[str, Any] | None
     result: dict[str, Any] | None
+
+
+@dataclass(frozen=True)
+class JsonRead:
+    payload: dict[str, Any] | None
+    failure: str | None = None
 
 
 def clamp(value: int, low: int, high: int) -> int:
@@ -84,14 +91,27 @@ class TraderControlProtocol:
         self.status_path = self.common_dir / f"{namespace}.status.json"
         self.command_path = self.common_dir / f"{namespace}.command.json"
         self.result_path = self.common_dir / f"{namespace}.result.json"
+        self.started_at = time.time()
 
     @staticmethod
-    def _read_json(path: Path) -> dict[str, Any] | None:
+    def _read_json(path: Path) -> JsonRead:
         try:
-            payload = json.loads(path.read_text(encoding="ascii"))
-        except (FileNotFoundError, OSError, UnicodeError, json.JSONDecodeError):
-            return None
-        return payload if isinstance(payload, dict) else None
+            encoded = path.read_bytes()
+        except FileNotFoundError:
+            return JsonRead(None, "missing")
+        except OSError:
+            return JsonRead(None, "unreadable")
+        try:
+            text = encoded.decode("ascii")
+        except UnicodeError:
+            return JsonRead(None, "encoding")
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            return JsonRead(None, "malformed")
+        if not isinstance(payload, dict):
+            return JsonRead(None, "non_object")
+        return JsonRead(payload)
 
     def _identity_matches(self, payload: dict[str, Any]) -> bool:
         return (
@@ -106,7 +126,7 @@ class TraderControlProtocol:
         )
 
     def _pending_command_id(self, now: float) -> str | None:
-        command = self._read_json(self.command_path)
+        command = self._read_json(self.command_path).payload
         if not command:
             return None
         command_id = command.get("command_id")
@@ -120,18 +140,40 @@ class TraderControlProtocol:
             or now - created_at > COMMAND_PENDING_SECONDS
         ):
             return None
-        result = self._read_json(self.result_path)
+        result = self._read_json(self.result_path).payload
         if result and result.get("instance_id") == self.identity.instance_id and result.get("command_id") == command_id:
             return None
         return command_id
 
+    def _status_failure_reason(self, failure: str, now: float) -> str:
+        path = str(self.status_path)
+        if failure == "missing":
+            if now - self.started_at < STARTUP_GRACE_SECONDS:
+                return f"Connecting: waiting for EA status at {path}."
+            return f"EA status file is missing at {path}. Keep Trader attached and confirm EA/MT5 permissions."
+        if failure == "unreadable":
+            return f"EA status file is unreadable at {path}. Check FILE_COMMON access; controls remain disabled."
+        if failure == "encoding":
+            return f"EA status file has an unsupported encoding at {path}. Reload the attached Trader EA."
+        if failure == "non_object":
+            return f"EA status file is not a JSON object at {path}. Reload the attached Trader EA."
+        return f"EA status file contains malformed JSON at {path}. Reload the attached Trader EA."
+
     def state(self, now: float | None = None) -> ControlState:
         current = time.time() if now is None else now
-        status = self._read_json(self.status_path)
-        result = self._read_json(self.result_path)
+        status_read = self._read_json(self.status_path)
+        status = status_read.payload
+        result = self._read_json(self.result_path).payload
         pending = self._pending_command_id(current)
         if not status:
-            return ControlState(False, False, "EA state is missing.", pending, None, result)
+            return ControlState(
+                False,
+                False,
+                self._status_failure_reason(status_read.failure or "malformed", current),
+                pending,
+                None,
+                result,
+            )
         if not self._identity_matches(status):
             return ControlState(False, False, "EA instance identity does not match this window.", pending, status, result)
         updated_at = status.get("updated_at")
@@ -223,8 +265,8 @@ class TraderControlWindow:
         self.buttons: list[ttk.Button] = []
 
         root.title("Trader Controls")
-        root.geometry("420x500")
-        root.minsize(360, 460)
+        root.geometry("420x650")
+        root.minsize(360, 580)
         root.protocol("WM_DELETE_WINDOW", self._close)
         self._build()
         root.after(0, self._refresh)
@@ -255,13 +297,24 @@ class TraderControlWindow:
             self.buttons.append(button)
             frame.rowconfigure(row, weight=1)
 
+        guidance = (
+            "Use: load the calculated .set into Trader and leave the EA attached; enable the required "
+            "EA/MT5 permissions; wait for Connected | Orders enabled | Fresh. Choose only the matching "
+            "action, click once, then wait for its structured result. Loading or reloading a .set never submits an order.\n"
+            "Market uses the configured side and a fresh Bid/Ask. Limit uses the configured standard-limit "
+            "side and entry. Trendline uses the selected, configured, or sole valid chart trendline. EMA Bounce "
+            "uses the configured current EMA reference as one fixed limit price."
+        )
+        ttk.Label(frame, text=guidance, wraplength=380, justify="left").grid(
+            row=5, column=0, sticky="ew", pady=(12, 4)
+        )
         self.connection_var = tk.StringVar(value="Connecting...")
         self.result_var = tk.StringVar(value="Last command: none")
         ttk.Label(frame, textvariable=self.connection_var, wraplength=380, justify="left").grid(
-            row=5, column=0, sticky="ew", pady=(14, 4)
+            row=6, column=0, sticky="ew", pady=(8, 4)
         )
         ttk.Label(frame, textvariable=self.result_var, wraplength=380, justify="left").grid(
-            row=6, column=0, sticky="ew", pady=(4, 0)
+            row=7, column=0, sticky="ew", pady=(4, 0)
         )
 
     def _click(self, action: str) -> None:

@@ -1,6 +1,6 @@
 #property strict
 #property description "Trader EA: trendline/standard limits, EMA bounce, and token-gated one-shot standard market execution. SL/TP are set by DISTANCE in MT5 POINTS, with optional AutoTP NetRR."
-#property version   "2.38"
+#property version   "2.39"
 
 #include <Trade/Trade.mqh>
 CTrade trade;
@@ -11,6 +11,7 @@ long ShellExecuteW(long hwnd, string operation, string file, string parameters, 
 
 #import "kernel32.dll"
 uint GetFileAttributesW(string file_name);
+bool MoveFileExW(string existing_file_name, string new_file_name, uint flags);
 #import
 
 // -------------------- Strategy selection --------------------
@@ -134,6 +135,8 @@ const int  TRADER_CONTROL_STATUS_FRESH_SECONDS = 5;
 const int  TRADER_CONTROL_SW_SHOWNORMAL = 1;
 const uint TRADER_CONTROL_INVALID_FILE_ATTRIBUTES = 0xFFFFFFFF;
 const uint TRADER_CONTROL_FILE_ATTRIBUTE_DIRECTORY = 0x00000010;
+const uint TRADER_CONTROL_MOVEFILE_REPLACE_EXISTING = 0x00000001;
+const uint TRADER_CONTROL_MOVEFILE_WRITE_THROUGH = 0x00000008;
 
 void RefreshStandardMarketExecuteButton()
 {
@@ -159,7 +162,7 @@ int hSlow  = INVALID_HANDLE;
 int hTrend = INVALID_HANDLE;
 
 string EA_COMMENT = "Trader";
-string EA_VERSION = "2.38";
+string EA_VERSION = "2.39";
 
 void Dbg(const string msg){ if(Debug) Print(EA_COMMENT, ": ", msg); }
 bool PlaceOrReplacePendingLimitAtEntry(const bool isBuyLimit,
@@ -2392,6 +2395,58 @@ bool WriteVerifiedCommonText(const string fileName, const string contents, strin
    return true;
 }
 
+string TraderControlTemporarySnapshotFile(const string fileName)
+{
+   return fileName + ".publish." + (string)GetTickCount64() + ".tmp";
+}
+
+bool PublishVerifiedCommonSnapshot(const string fileName, const string contents, string &why)
+{
+   if(!MQLInfoInteger(MQL_DLLS_ALLOWED))
+   {
+      why = "Allow DLL imports is required to publish the desktop control status snapshot.";
+      return false;
+   }
+   string common = TraderControlCommonFilesPath();
+   if(common == "")
+   {
+      why = "TERMINAL_COMMONDATA_PATH is unavailable for desktop control status publication.";
+      return false;
+   }
+   string temporary = TraderControlTemporarySnapshotFile(fileName);
+   if(!WriteVerifiedCommonText(temporary, contents, why)) return false;
+
+   ResetLastError();
+   if(MoveFileExW(common + "\\" + temporary, common + "\\" + fileName,
+                  TRADER_CONTROL_MOVEFILE_REPLACE_EXISTING | TRADER_CONTROL_MOVEFILE_WRITE_THROUGH))
+   {
+      why = "";
+      return true;
+   }
+   int moveError = GetLastError();
+   FileDelete(temporary, FILE_COMMON);
+   why = "Could not atomically publish FILE_COMMON status snapshot. error=" + IntegerToString(moveError);
+   return false;
+}
+
+void ReportDesktopStatusPublication(const bool succeeded, const string why)
+{
+   static bool lastFailed = false;
+   static string lastFailure = "";
+   if(succeeded)
+   {
+      if(lastFailed)
+         Print(EA_COMMENT, ": desktop control status publication recovered.");
+      lastFailed = false;
+      lastFailure = "";
+      return;
+   }
+   if(!lastFailed || why != lastFailure)
+      Print(EA_COMMENT, ": desktop control status publication failed: ", why);
+   lastFailed = true;
+   lastFailure = why;
+}
+
 bool WriteDesktopTraderStatus()
 {
    if(!UseDesktopTraderControls || g_traderControlInstanceId == "") return true;
@@ -2412,9 +2467,9 @@ bool WriteDesktopTraderStatus()
    payload += "\"symbol\":\"" + JsonEscape(_Symbol) + "\",";
    payload += "\"updated_at\":" + (string)now + "}";
    string why = "";
-   if(WriteVerifiedCommonText(TraderControlStatusFile(), payload, why)) return true;
-   Print(EA_COMMENT, ": desktop control status write failed: ", why);
-   return false;
+   bool published = PublishVerifiedCommonSnapshot(TraderControlStatusFile(), payload, why);
+   ReportDesktopStatusPublication(published, why);
+   return published;
 }
 
 bool LaunchDesktopTraderControls(string &why)
