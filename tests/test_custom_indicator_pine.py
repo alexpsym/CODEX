@@ -163,6 +163,39 @@ def test_custom_indicator_preserves_base_and_dashed_offset_visuals() -> None:
     assert "color.new(color.purple" not in offset_calls
 
 
+def test_custom_indicator_vwap_offset_continues_across_realtime_updates() -> None:
+    source = _source()
+    helper = source.split(
+        "drawDashedOffset(array<line> offsetLines, bool enabled, float value, color lineColor) =>",
+        1,
+    )[1].split(
+        "drawDashedOffset(ema9OffsetLines, showEma9Offset, ema9Offset, color.black)",
+        1,
+    )[0]
+
+    assert "barstate.isnew" not in helper
+    assert "if enabled and not na(value) and not na(value[1])" in helper
+    assert "latestOffsetLine := array.get(offsetLines, array.size(offsetLines) - 1)" in helper
+    assert "line.get_x2(latestOffsetLine) == bar_index" in helper
+    assert "if not hasCurrentBarSegment" in helper
+    assert helper.count("line.new(") == 1
+    assert "line.set_xy1(latestOffsetLine, bar_index - 1, value[1])" in helper
+    assert "line.set_xy2(latestOffsetLine, bar_index, value)" in helper
+    assert helper.index("if not hasCurrentBarSegment") < helper.index("line.set_xy1(")
+    assert "array.size(offsetLines) > offsetSegmentLimit" in helper
+    assert "line.delete(array.shift(offsetLines))" in helper
+    assert "color=lineColor, style=line.style_dashed, width=1" in helper
+    assert "xloc=xloc.bar_index, extend=extend.none" in helper
+    assert "force_overlay=true" in helper
+    assert "else\n        if array.size(offsetLines) > 0" in helper
+    assert "line.delete(array.get(offsetLines, i))" in helper
+    assert "array.clear(offsetLines)" in helper
+    assert (
+        "drawDashedOffset(vwapOffsetLines, showVwapOffsetOnChart, vwapOffset, color.black)"
+        in source
+    )
+
+
 def test_offset_cross_model_ignores_base_crossings_until_each_offset_is_reached() -> None:
     scenarios = {
         "9 EMA Offset": (99.0, 100.25, 101.0),
