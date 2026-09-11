@@ -35,7 +35,7 @@ def test_atr_percentage_uses_the_normal_rma_atr_14_and_exact_percent_formula() -
 def test_atr_percentage_threshold_and_alerts_are_confirmed_and_context_rich() -> None:
     source = _source()
     assert 'thresholdPercent = input.float(' in source
-    assert 'plot(thresholdPercent, "Alert threshold %"' in source
+    assert 'plot(showThresholdLine ? thresholdPercent : na, "Alert threshold %"' in source
     assert "ta.crossover(atrPercent, thresholdPercent)" in source
     assert "ta.crossunder(atrPercent, thresholdPercent)" in source
     assert "barstate.isconfirmed and crossedAboveThresholdRaw" in source
@@ -44,6 +44,31 @@ def test_atr_percentage_threshold_and_alerts_are_confirmed_and_context_rich() ->
     assert len(conditions) == 2
     for placeholder in ('{{exchange}}', '{{ticker}}', '{{interval}}', '{{time}}', '{{plot("ATR %")}}'):
         assert source.count(placeholder) == 2
+
+
+def test_atr_percentage_threshold_line_is_hidden_by_default_to_preserve_auto_scale() -> None:
+    source = _source()
+
+    assert 'showThresholdLine = input.bool(false, "Show alert threshold line"' in source
+    assert "tooltip=" in source
+    assert "expand the pane's automatic scale" in source
+    assert 'plot(showThresholdLine ? thresholdPercent : na, "Alert threshold %"' in source
+    assert 'plot(atrPercent, "ATR %", color=plotColor, linewidth=plotWidth, format=format.percent)' in source
+
+    assert "thresholdPercent = input.float(1.0" in source
+    assert source.count("ta.crossover(atrPercent, thresholdPercent)") == 1
+    assert source.count("ta.crossunder(atrPercent, thresholdPercent)") == 1
+    assert "atrPercent = na(close) or close == 0.0 ? na : atrValue / close * 100.0" in source
+
+    forbidden_scale_controls = (
+        "timeframe.",
+        "math.clamp",
+        "math.max(atrPercent",
+        "math.min(atrPercent",
+        "minval=atrPercent",
+        "maxval=atrPercent",
+    )
+    assert not any(control in source for control in forbidden_scale_controls)
 
 
 def test_custom_indicator_remains_atr_free() -> None:
