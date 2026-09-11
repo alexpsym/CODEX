@@ -198,6 +198,28 @@ def test_ea_validates_scope_freshness_consumes_before_dispatch_and_reports_struc
         assert f'\\"{field}\\"' in status
 
 
+def test_auto_fit_risk_buffer_preserves_risk_and_submission_gates() -> None:
+    trader = _source()
+    risk = _function(trader, "bool ComputeVolumeFromRisk")
+    market = _function(trader, "void ExecuteDesktopMarket")
+    fixed_market = _function(trader, "bool ExecuteStandardMarketOnce")
+
+    assert 'input bool   AutoFitRiskSlippageBuffer = false;' in trader
+    assert "int &outBufferPoints" in risk
+    assert "if(AutoFitRiskSlippageBuffer && riskWorst > riskMax)" in risk
+    assert "int low = minimumBuffer" in risk and "int high = preferredBuffer" in risk
+    assert "while(low <= high)" in risk
+    assert "chosenBuffer = mid" in risk
+    assert "No automatic risk buffer at or above SlippagePoints fits RiskAUD_Max." in risk
+    assert "if(riskTotal < riskMin)" in risk and "if(riskTotal > riskMax)" in risk
+    assert "if(riskWorst > riskMax)" in risk
+    assert "CalcRiskFor1Lot(stopPoints + MathMax(0, bufferPoints)" in trader
+    assert "chosenRiskBuffer" in market and "Automatic risk buffer selected" in market
+    assert market.index("ComputeVolumeFromRisk") < market.index("trade.Buy(")
+    assert fixed_market.index("ComputeVolumeFromRisk") < fixed_market.index("ConsumeStandardMarketToken") < fixed_market.index("trade.Buy(")
+    assert '#property version   "2.42"' in trader and 'EA_VERSION = "2.42"' in trader
+
+
 def test_four_actions_reuse_current_inputs_and_one_attempt_trading_protections() -> None:
     trader = _source()
     inputs = trader.split('input group "Desktop Trader Controls"', 1)[1].split('input group "Risk', 1)[0]
@@ -286,4 +308,4 @@ def test_four_actions_reuse_current_inputs_and_one_attempt_trading_protections()
     assert tick.index("if(UseDesktopTraderControls)") < tick.index("if(!OrdersEnabled)")
     assert timer.index("if(UseDesktopTraderControls)") < timer.index("if(Strategy == STRAT_STANDARD_LIMIT)")
     assert "HandleDesktopTraderCommand()" in timer
-    assert '#property version   "2.41"' in trader and 'EA_VERSION = "2.41"' in trader
+    assert '#property version   "2.42"' in trader and 'EA_VERSION = "2.42"' in trader

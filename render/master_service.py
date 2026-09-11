@@ -30,7 +30,7 @@ import time
 import traceback
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
-from decimal import Decimal, ROUND_DOWN, ROUND_FLOOR, ROUND_HALF_UP, ROUND_UP
+from decimal import Decimal, ROUND_CEILING, ROUND_DOWN, ROUND_FLOOR, ROUND_HALF_UP, ROUND_UP
 from datetime import datetime, timedelta, timezone
 from datetime import date as _date
 from dateutil.relativedelta import relativedelta
@@ -26615,7 +26615,6 @@ CALCULATOR_TEMPLATE = """<!doctype html>
               <tr id="rr-wrap"><th><label for="calc-rr">Risk/reward</label></th><td><input id="calc-rr" type="number" min="0.1" step="0.1" value="2"/></td></tr>
               <tr id="risk-toggle-wrap"><th>Risk mode</th><td><div class="group toggle" id="risk-toggle"><button type="button" data-v="fixed_aud">Fixed AUD</button><button type="button" data-v="percent" class="active">%</button></div></td></tr>
               <tr><th><label id="calc-risk-label" for="calc-risk">Risk value (%)</label></th><td><input id="calc-risk" type="number" min="0.0001" step="any" value="1"/></td></tr>
-              <tr id="pepperstone-risk-buffer-wrap" style="display:none"><th><label for="calc-pepperstone-risk-buffer">Risk slippage buffer</label></th><td><input id="calc-pepperstone-risk-buffer" type="number" min="0" step="1" value="50"/><div class="muted">MT5 points. Additional worst-case price-distance cushion used by Trader’s risk gate; distinct from its fixed SlippagePoints order-deviation setting. On 3-digit JPY and 5-digit FX symbols, 10 MT5 points normally equals one pip. Zero removes this extra cushion only; Trader’s other safety checks remain.</div></td></tr>
             </tbody>
           </table>
         </div>
@@ -26779,6 +26778,7 @@ PEPPERSTONE_TRADER_SET_INPUT_NAMES = (
     "CommissionPerLotPerSide",
     "RiskSlippageBufferPoints",
     "SlippagePoints",
+    "AutoFitRiskSlippageBuffer",
     "SL_DistancePoints",
     "AutoTP_NetRR_Enabled",
     "NetRR_Target",
@@ -26846,44 +26846,45 @@ def _pepperstone_default_risk_slippage_buffer_points() -> int:
         return 50
 
 
-def _pepperstone_risk_slippage_buffer_points(payload: Dict[str, object]) -> int:
-    if "risk_slippage_buffer_points" not in payload:
-        return _pepperstone_default_risk_slippage_buffer_points()
-    return _pepperstone_set_nonnegative_int(payload.get("risk_slippage_buffer_points"), "risk_slippage_buffer_points")
+def _pepperstone_default_slippage_points() -> int:
+    raw = os.getenv("PEPPERSTONE_TRADER_SLIPPAGE_POINTS", "10")
+    try:
+        return _pepperstone_set_nonnegative_int(raw, "PEPPERSTONE_TRADER_SLIPPAGE_POINTS")
+    except HTTPException:
+        return 10
 
 
 def _pepperstone_risk_buffer_preflight(
-    *, stop_points: int, risk_target: Decimal, buffer_points: int
+    *, stop_points: int, risk_target: Decimal
 ) -> Dict[str, object]:
-    """Conservative distance-only guard; Trader remains the live risk authority."""
+    """Derive an automatic distance-only cap; Trader remains the live authority."""
     if stop_points <= 0 or risk_target <= 0:
         raise ValueError("Pepperstone risk preflight requires positive stop points and risk target.")
     risk_min = risk_target * Decimal("0.90")
     risk_max = risk_target * Decimal("1.20")
-    effective_stop_points = stop_points + buffer_points
-    distance_multiplier = Decimal(effective_stop_points) / Decimal(stop_points)
-    buffered_at_min = risk_min * distance_multiplier
-    buffered_at_target = risk_target * distance_multiplier
-    maximum_buffer = int(
+    preferred_maximum = _pepperstone_default_risk_slippage_buffer_points()
+    minimum_automatic_buffer = min(preferred_maximum, _pepperstone_default_slippage_points())
+    conservative_maximum = int(
         (Decimal(stop_points) * ((risk_max / risk_min) - Decimal("1"))).to_integral_value(rounding=ROUND_FLOOR)
     )
-    compatible = buffer_points <= maximum_buffer
+    planned_buffer = min(preferred_maximum, conservative_maximum)
+    ratio = (risk_max / risk_min) - Decimal("1")
+    minimum_compatible_stop = int(
+        (Decimal(minimum_automatic_buffer) / ratio).to_integral_value(rounding=ROUND_CEILING)
+    ) if minimum_automatic_buffer > 0 else 1
+    compatible = planned_buffer >= minimum_automatic_buffer
     explanation = (
-        "Conservative distance-only preflight passed. Trader still performs the final broker-specific calculation for live tick value, commission, minimum/step volume, price rounding, and current Bid/Ask."
+        "Automatic risk buffer ready. Trader will choose the exact live value within the planned range."
         if compatible
-        else "Selected risk slippage buffer is incompatible with this stop and generated AUD risk band. Reduce the buffer or widen the stop, then Calculate again."
+        else "Stop is too tight for the configured minimum automatic protection. Widen the stop and Calculate again."
     )
     return {
         "stop_points": stop_points,
-        "selected_buffer_points": buffer_points,
-        "effective_stop_points": effective_stop_points,
-        "distance_multiplier": _fmt_dec(distance_multiplier),
-        "risk_min_aud": _fmt_dec(risk_min),
-        "risk_target_aud": _fmt_dec(risk_target),
-        "risk_max_aud": _fmt_dec(risk_max),
-        "conservative_buffered_risk_at_min_aud": _fmt_dec(buffered_at_min),
-        "conservative_buffered_risk_at_target_aud": _fmt_dec(buffered_at_target),
-        "conservative_max_buffer_points": maximum_buffer,
+        "preferred_maximum_buffer_points": preferred_maximum,
+        "minimum_automatic_buffer_points": minimum_automatic_buffer,
+        "conservative_max_buffer_points": conservative_maximum,
+        "planned_buffer_points": planned_buffer,
+        "minimum_compatible_stop_points": minimum_compatible_stop,
         "compatible": compatible,
         "explanation": explanation,
     }
@@ -26939,10 +26940,7 @@ def _build_pepperstone_trader_set(payload: Dict[str, object]) -> Tuple[str, str]
         raise HTTPException(status_code=400, detail="RiskAUD_Target must be greater than zero.")
     risk_min = risk_target * Decimal("0.90")
     risk_max = risk_target * Decimal("1.20")
-    buffer_points = _pepperstone_risk_slippage_buffer_points(payload)
-    preflight = _pepperstone_risk_buffer_preflight(
-        stop_points=stop_ticks, risk_target=risk_target, buffer_points=buffer_points
-    )
+    preflight = _pepperstone_risk_buffer_preflight(stop_points=stop_ticks, risk_target=risk_target)
     if not preflight["compatible"]:
         raise HTTPException(
             status_code=422,
@@ -26962,8 +26960,9 @@ def _build_pepperstone_trader_set(payload: Dict[str, object]) -> Tuple[str, str]
         "RiskAUD_Max": _pepperstone_set_decimal(risk_max, places="0.01"),
         "IncludeCommissionInRisk": _pepperstone_trader_set_bool(True),
         "CommissionPerLotPerSide": _pepperstone_set_decimal(Decimal(str(os.getenv("PEPPERSTONE_TRADER_COMMISSION_PER_LOT_PER_SIDE", "3.50") or "3.50")), places="0.01"),
-        "RiskSlippageBufferPoints": str(buffer_points),
-        "SlippagePoints": str(int(os.getenv("PEPPERSTONE_TRADER_SLIPPAGE_POINTS", "10") or "10")),
+        "RiskSlippageBufferPoints": str(preflight["planned_buffer_points"]),
+        "SlippagePoints": str(_pepperstone_default_slippage_points()),
+        "AutoFitRiskSlippageBuffer": _pepperstone_trader_set_bool(True),
         "SL_DistancePoints": str(stop_ticks),
         "AutoTP_NetRR_Enabled": _pepperstone_trader_set_bool(True),
         "NetRR_Target": _pepperstone_set_decimal(rr, places="0.01"),
@@ -27564,7 +27563,6 @@ async def calculator_bootstrap(request: Request) -> JSONResponse:
             "sides": ["buy", "sell"],
             "order_types": ["market", "limit"],
             "risk_modes": ["fixed_aud", "percent"],
-            "pepperstone_risk_slippage_buffer_points": _pepperstone_default_risk_slippage_buffer_points(),
             "app_profile": APP_PROFILE,
             "trendline_plans_available": APP_PROFILE == "local",
             "trendline_monitoring": TRENDLINE_EXECUTOR.status() if APP_PROFILE == "local" else {"running": False},
@@ -28900,7 +28898,6 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
                     "fee_buffer_r": _fmt_dec_by_precision(fee_buffer_r, Decimal("0.01")) if fee_buffer_r is not None else None,
                 }
             if broker == "pepperstone":
-                buffer_points = _pepperstone_risk_slippage_buffer_points(payload)
                 preflight_risk_target = (
                     risk_val
                     if risk_mode == "fixed_aud"
@@ -28909,7 +28906,6 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
                 response_payload["pepperstone_risk_buffer_preflight"] = _pepperstone_risk_buffer_preflight(
                     stop_points=int(stop_ticks),
                     risk_target=preflight_risk_target,
-                    buffer_points=buffer_points,
                 )
             calculation_context_id = (
                 str(payload.get("calculation_context_id") or "").strip()

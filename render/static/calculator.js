@@ -59,8 +59,6 @@
   const specsEl = $('calc-instrument-specs');
   const riskToggleWrap = $('risk-toggle-wrap');
   const brokerToggleWrap = $('broker-toggle-wrap');
-  const pepperstoneRiskBufferWrap = $('pepperstone-risk-buffer-wrap');
-  const pepperstoneRiskBufferEl = $('calc-pepperstone-risk-buffer');
   const pepperstoneRiskPreflightEl = $('calc-pepperstone-risk-preflight');
   const webhookPanel = $('calc-webhook-panel');
   const webhookUrlEl = $('calc-webhook-url');
@@ -240,8 +238,8 @@
     const compatible = preflight.compatible === true;
     pepperstoneRiskPreflightEl.style.display = '';
     pepperstoneRiskPreflightEl.textContent = compatible
-      ? `Risk-buffer preflight passed: stop ${preflight.stop_points} points + buffer ${preflight.selected_buffer_points} = ${preflight.effective_stop_points} points. Conservative buffered risk at target: AUD ${preflight.conservative_buffered_risk_at_target_aud}; generated cap: AUD ${preflight.risk_max_aud}; maximum compatible buffer: ${preflight.conservative_max_buffer_points} points. Trader still performs the final broker-specific calculation.`
-      : `Risk-buffer preflight incompatible: stop ${preflight.stop_points} points + selected buffer ${preflight.selected_buffer_points} = ${preflight.effective_stop_points} points; conservative buffered risk at AUD ${preflight.risk_min_aud} minimum is AUD ${preflight.conservative_buffered_risk_at_min_aud}, above the AUD ${preflight.risk_max_aud} cap. Maximum compatible buffer: ${preflight.conservative_max_buffer_points} points. Reduce the buffer or widen the stop and Calculate again.`;
+      ? `Automatic risk buffer ready: calculator cap ${preflight.planned_buffer_points} MT5 points; Trader will choose the exact live value between ${preflight.minimum_automatic_buffer_points} and ${preflight.planned_buffer_points}. No buffer input is required.`
+      : `Stop is too tight for the configured minimum protection of ${preflight.minimum_automatic_buffer_points} MT5 points. Minimum compatible stop: ${preflight.minimum_compatible_stop_points} points. Widen the stop and Calculate again.`;
     return compatible;
   }
 
@@ -655,7 +653,6 @@
       risk_value: $('calc-risk').value,
       estimated_total_loss_aud: quote?.estimated_total_loss_aud || quote?.estimated_total_loss || '',
       estimated_total_loss: quote?.estimated_total_loss || '',
-      risk_slippage_buffer_points: pepperstoneRiskBufferEl ? pepperstoneRiskBufferEl.value : '',
     };
     if (state.order_type === 'limit') payload.entry_price = quote?.entry_price || $('calc-limit').value;
     return payload;
@@ -927,7 +924,6 @@
     } else {
       state.broker = 'bybit';
     }
-    if (pepperstoneRiskBufferWrap) pepperstoneRiskBufferWrap.style.display = isPepperstoneFx() ? '' : 'none';
     state.resolvedSymbol = canonicalSymbol;
     updateRiskUiForAsset();
     updateBrokerUiForAsset();
@@ -1011,9 +1007,6 @@
     try {
       const bootstrap = await request('/api/calculator/bootstrap', { cache: 'no-store' });
       configureTrendlinePlans(bootstrap);
-      if (pepperstoneRiskBufferEl && Number.isInteger(bootstrap?.pepperstone_risk_slippage_buffer_points) && bootstrap.pepperstone_risk_slippage_buffer_points >= 0) {
-        pepperstoneRiskBufferEl.value = String(bootstrap.pepperstone_risk_slippage_buffer_points);
-      }
       state.webhookCapability = bootstrap?.webhook || null;
       const yesBtn = $('webhook-toggle').querySelectorAll('button')[1];
       if (state.webhookCapability && state.webhookCapability.available === false) {
@@ -1208,7 +1201,7 @@
     debounceSymbolResolve();
   });
 
-  ['calc-limit', 'calc-sl-ticks', 'calc-rr', 'calc-risk', 'calc-pepperstone-risk-buffer'].forEach((id) => {
+  ['calc-limit', 'calc-sl-ticks', 'calc-rr', 'calc-risk'].forEach((id) => {
     const el = $(id);
     if (!el) return;
     ['input', 'change'].forEach((evt) => el.addEventListener(evt, () => invalidateQuote({ clearResults: false })));
@@ -1275,7 +1268,6 @@
         stop_loss_ticks: $('calc-sl-ticks').value,
         risk_reward: $('calc-rr').value,
         risk_value: $('calc-risk').value,
-        risk_slippage_buffer_points: pepperstoneRiskBufferEl ? pepperstoneRiskBufferEl.value : undefined,
         webhook: state.webhook_mode,
         test: state.test_mode,
         setup: state.setup,
@@ -1319,7 +1311,7 @@
           enabled: preflightPassed,
           reason: preflightPassed
             ? 'Download the user-mediated Pepperstone MT5 Expert Set file.'
-            : 'Reduce the risk slippage buffer or widen the stop, then Calculate again before downloading a .set.',
+            : 'Widen the stop and Calculate again before downloading a .set.',
         });
         setSubmitState({ visible: false, enabled: false, reason: 'Pepperstone uses MT5 .set export.', stateName: 'ready' });
         setQuoteStatus(state.order_type === 'market'

@@ -1,6 +1,6 @@
 #property strict
 #property description "Trader EA: trendline/standard limits, EMA bounce, and token-gated one-shot standard market execution. SL/TP are set by DISTANCE in MT5 POINTS, with optional AutoTP NetRR."
-#property version   "2.41"
+#property version   "2.42"
 
 #include <Trade/Trade.mqh>
 CTrade trade;
@@ -42,6 +42,7 @@ input bool   IncludeCommissionInRisk  = true;
 input double CommissionPerLotPerSide  = 3.50;
 input int    RiskSlippageBufferPoints = 50;
 input int    SlippagePoints           = 10;
+input bool   AutoFitRiskSlippageBuffer = false;
 
 // -------------------- Inputs (shared: DISTANCES, in MT5 POINTS) --------------------
 input group "Stops & Targets (points)"
@@ -159,7 +160,7 @@ int hSlow  = INVALID_HANDLE;
 int hTrend = INVALID_HANDLE;
 
 string EA_COMMENT = "Trader";
-string EA_VERSION = "2.41";
+string EA_VERSION = "2.42";
 
 void Dbg(const string msg){ if(Debug) Print(EA_COMMENT, ": ", msg); }
 bool PlaceOrReplacePendingLimitAtEntry(const bool isBuyLimit,
@@ -364,13 +365,26 @@ bool IsLimitPriceValid(double entry, bool isBuyLimit, string &why)
    return true;
 }
 
-bool ComputeVolumeFromRisk(double entry, double sl, double &outVol, double &outRiskRoundedAUD, double &outRiskBufferedAUD, string &why)
+bool CalcBufferedRiskForVolume(const double stopPoints, const int bufferPoints,
+                               const double volume, const double commissionRTPerLot,
+                               double &outRisk)
+{
+   double lossPerLot = 0.0;
+   if(!CalcRiskFor1Lot(stopPoints + MathMax(0, bufferPoints), lossPerLot)) return false;
+   outRisk = lossPerLot * volume;
+   if(IncludeCommissionInRisk) outRisk += commissionRTPerLot * volume;
+   return true;
+}
+
+bool ComputeVolumeFromRisk(double entry, double sl, double &outVol, double &outRiskRoundedAUD,
+                           double &outRiskBufferedAUD, int &outBufferPoints, string &why)
 {
    double riskMin = RiskAUD_Min;
    double riskMax = MathMax(RiskAUD_Max, riskMin);
    double riskTarget = MathMax(RiskAUD_Target, riskMin);
    why = "";
    outRiskBufferedAUD = 0.0;
+   outBufferPoints = MathMax(0, RiskSlippageBufferPoints);
 
    double stopPoints = MathAbs(entry - sl) / _Point;
    if(stopPoints <= 0){ why="Stop distance is zero/invalid."; return false; }
@@ -428,16 +442,18 @@ bool ComputeVolumeFromRisk(double entry, double sl, double &outVol, double &outR
    if(riskTotal < riskMin){ why="Rounded risk is below RiskAUD_Min filter."; return false; }
    if(riskTotal > riskMax){ why="Rounded risk exceeds RiskAUD_Max filter."; return false; }
 
-   // worst-case sizing buffer (optional)
-   double effectiveStopPoints = stopPoints + MathMax(0, RiskSlippageBufferPoints);
-   if(effectiveStopPoints > stopPoints)
+   // Fixed mode preserves the prior configured-buffer behavior. Automatic mode
+   // may lower the generated preferred maximum, never below SlippagePoints.
+   int preferredBuffer = MathMax(0, RiskSlippageBufferPoints);
+   int minimumBuffer = AutoFitRiskSlippageBuffer
+      ? (int)MathMin(preferredBuffer, MathMax(0, SlippagePoints))
+      : preferredBuffer;
+   int chosenBuffer = preferredBuffer;
+   if(preferredBuffer > 0)
    {
-      double lossPerLotWorst = 0.0;
-      if(!CalcRiskFor1Lot(effectiveStopPoints, lossPerLotWorst))
+      double riskWorst = 0.0;
+      if(!CalcBufferedRiskForVolume(stopPoints, preferredBuffer, vol, commissionRTPerLot, riskWorst))
       { why="Failed to compute worst-case risk for 1 lot."; return false; }
-
-      double riskWorst = lossPerLotWorst * vol;
-      if(IncludeCommissionInRisk) riskWorst += commissionRTPerLot * vol;
 
       while(riskWorst > riskMax && vol - step >= vmin)
       {
@@ -452,8 +468,39 @@ bool ComputeVolumeFromRisk(double entry, double sl, double &outVol, double &outR
          riskCommission = commissionRTPerLot * vol;
          riskTotal = IncludeCommissionInRisk ? (riskSL + riskCommission) : riskSL;
 
-         riskWorst = lossPerLotWorst * vol;
-         if(IncludeCommissionInRisk) riskWorst += commissionRTPerLot * vol;
+         if(!CalcBufferedRiskForVolume(stopPoints, preferredBuffer, vol, commissionRTPerLot, riskWorst))
+         { why="Failed to compute worst-case risk for 1 lot."; return false; }
+      }
+
+      if(AutoFitRiskSlippageBuffer && riskWorst > riskMax)
+      {
+         double minimumRisk = 0.0;
+         if(!CalcBufferedRiskForVolume(stopPoints, minimumBuffer, vol, commissionRTPerLot, minimumRisk))
+         { why="Failed to compute automatic buffered risk for 1 lot."; return false; }
+         if(minimumRisk > riskMax)
+         {
+            why = "No automatic risk buffer at or above SlippagePoints fits RiskAUD_Max.";
+            return false;
+         }
+         int low = minimumBuffer;
+         int high = preferredBuffer;
+         chosenBuffer = minimumBuffer;
+         // Bounded monotonic search across whole MT5 points; no point-by-point retry.
+         while(low <= high)
+         {
+            int mid = low + (high - low) / 2;
+            double candidateRisk = 0.0;
+            if(!CalcBufferedRiskForVolume(stopPoints, mid, vol, commissionRTPerLot, candidateRisk))
+            { why="Failed to compute automatic buffered risk for 1 lot."; return false; }
+            if(candidateRisk <= riskMax)
+            {
+               chosenBuffer = mid;
+               low = mid + 1;
+            }
+            else high = mid - 1;
+         }
+         if(!CalcBufferedRiskForVolume(stopPoints, chosenBuffer, vol, commissionRTPerLot, riskWorst))
+         { why="Failed to compute automatic buffered risk for 1 lot."; return false; }
       }
 
       outVol = vol;
@@ -465,6 +512,8 @@ bool ComputeVolumeFromRisk(double entry, double sl, double &outVol, double &outR
          return false;
       }
    }
+
+   outBufferPoints = chosenBuffer;
 
    return true;
 }
@@ -750,12 +799,13 @@ bool ExecuteStandardMarketOnce()
    double volume = 0.0;
    double riskRounded = 0.0;
    double riskBuffered = 0.0;
+   int chosenRiskBuffer = 0;
    if(!BuildSLFromDistance(entry, isBuy, sl, why))
    {
       LogStandardMarketOutcome("invalid_stops", isBuy, entry, sl, tp, volume, riskRounded, tokenFingerprint, 0, "not_sent", 0, 0, why);
       return false;
    }
-   if(!ComputeVolumeFromRisk(entry, sl, volume, riskRounded, riskBuffered, why))
+   if(!ComputeVolumeFromRisk(entry, sl, volume, riskRounded, riskBuffered, chosenRiskBuffer, why))
    {
       LogStandardMarketOutcome("invalid_risk", isBuy, entry, sl, tp, volume, riskRounded, tokenFingerprint, 0, "not_sent", 0, 0, why);
       return false;
@@ -797,6 +847,7 @@ bool ExecuteStandardMarketOnce()
          " tp=", DoubleToString(tp, (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS)),
          " volume=", DoubleToString(volume, 8),
          " risk=", DoubleToString(riskRounded, 2),
+         " risk_buffer_points=", IntegerToString(chosenRiskBuffer),
          " token_fp=", tokenFingerprint);
 
    bool alreadyConsumed = false;
@@ -967,7 +1018,8 @@ bool PlaceMarketEmaBounce()
    if(!BuildSLFromDistance(entry, isBuy, sl, why)) return false;
 
    double vol=0, riskRounded=0, riskBuffered=0;
-   if(!ComputeVolumeFromRisk(entry, sl, vol, riskRounded, riskBuffered, why)) return false;
+   int chosenRiskBuffer=0;
+   if(!ComputeVolumeFromRisk(entry, sl, vol, riskRounded, riskBuffered, chosenRiskBuffer, why)) return false;
 
    int autoTpPts=0;
    double effNetRR=0.0;
@@ -1372,8 +1424,9 @@ bool PrepareWorkingTrendlineTerms(const TrendlineLifecycleRecord &record,
    if(entry <= 0.0 || !ValidateTradingReadiness(isBuyLimit, why) || !IsLimitPriceValid(entry, isBuyLimit, why)) return false;
    sl=0.0; tp=0.0; vol=0.0;
    double riskRounded=0.0, riskBuffered=0.0;
+   int chosenRiskBuffer=0;
    if(!BuildSLFromDistance(entry, isBuyLimit, sl, why) ||
-      !ComputeVolumeFromRisk(entry, sl, vol, riskRounded, riskBuffered, why) ||
+      !ComputeVolumeFromRisk(entry, sl, vol, riskRounded, riskBuffered, chosenRiskBuffer, why) ||
       !ValidateVolumeForBroker(vol, why)) return false;
    int autoTpPts=0; double effNetRR=0.0;
    if(AutoTP_NetRR_Enabled)
@@ -1854,6 +1907,7 @@ bool PlaceOrReplacePendingLimitAtEntry(const bool isBuyLimit,
    }
 
    double sl=0.0, tp=0.0, vol=0.0, riskRounded=0.0, riskBuffered=0.0;
+   int chosenRiskBuffer=0;
 
    if(!ValidateTradingReadiness(isBuyLimit, why))
    {
@@ -1876,7 +1930,7 @@ bool PlaceOrReplacePendingLimitAtEntry(const bool isBuyLimit,
       return false;
    }
 
-   if(!ComputeVolumeFromRisk(entry, sl, vol, riskRounded, riskBuffered, why))
+   if(!ComputeVolumeFromRisk(entry, sl, vol, riskRounded, riskBuffered, chosenRiskBuffer, why))
    {
       g_lastPendingFailureStructural = true;
       Print(EA_COMMENT, ": Risk sizing failure. ", why);
@@ -2677,8 +2731,9 @@ void ExecuteDesktopMarket(const string commandId, DesktopTraderResult &result)
    { SetDesktopResult(result, "blocked", "Fresh live Bid/Ask is unavailable."); return; }
    double entry = NormalizePrice(isBuy ? liveTick.ask : liveTick.bid);
    double sl=0.0, tp=0.0, volume=0.0, riskRounded=0.0, riskBuffered=0.0;
+   int chosenRiskBuffer=0;
    if(!BuildSLFromDistance(entry, isBuy, sl, why) ||
-      !ComputeVolumeFromRisk(entry, sl, volume, riskRounded, riskBuffered, why) ||
+      !ComputeVolumeFromRisk(entry, sl, volume, riskRounded, riskBuffered, chosenRiskBuffer, why) ||
       !ValidateVolumeForBroker(volume, why))
    { SetDesktopResult(result, "blocked", why); return; }
    int autoTpPts=0; double effectiveNetRR=0.0;
@@ -2693,6 +2748,9 @@ void ExecuteDesktopMarket(const string commandId, DesktopTraderResult &result)
    if(!ValidateMarketStopsAtLiveQuote(isBuy, liveTick.bid, liveTick.ask, sl, tp, why))
    { SetDesktopResult(result, "blocked", why); return; }
 
+   string automaticBufferNote = AutoFitRiskSlippageBuffer
+      ? "Automatic risk buffer selected " + IntegerToString(chosenRiskBuffer) + " MT5 points. "
+      : "";
    string comment = "TDM:" + ShortStableFingerprint(commandId);
    bool sendOk = isBuy
       ? trade.Buy(volume, _Symbol, 0.0, sl, tp, comment)
@@ -2702,11 +2760,11 @@ void ExecuteDesktopMarket(const string commandId, DesktopTraderResult &result)
    ulong deal = (ulong)trade.ResultDeal();
    ulong ticket = order > 0 ? order : deal;
    if(sendOk && IsTradePlacementAccepted(retcode) && ticket > 0)
-   { SetDesktopResult(result, "accepted", "Broker accepted the one-shot desktop market request.", retcode, ticket); return; }
+   { SetDesktopResult(result, "accepted", automaticBufferNote + "Broker accepted the one-shot desktop market request.", retcode, ticket); return; }
    if(IsDefinitePendingRejectionRetcode(retcode) && ticket == 0)
-      SetDesktopResult(result, "rejected", trade.ResultRetcodeDescription(), retcode, 0);
+      SetDesktopResult(result, "rejected", automaticBufferNote + trade.ResultRetcodeDescription(), retcode, 0);
    else
-      SetDesktopResult(result, "uncertain", "Market request outcome is not conclusively accepted or rejected; no retry will occur. " + trade.ResultRetcodeDescription(), retcode, ticket);
+      SetDesktopResult(result, "uncertain", automaticBufferNote + "Market request outcome is not conclusively accepted or rejected; no retry will occur. " + trade.ResultRetcodeDescription(), retcode, ticket);
 }
 
 void ExecuteDesktopPendingAtEntry(const bool isBuyLimit, const double entry,

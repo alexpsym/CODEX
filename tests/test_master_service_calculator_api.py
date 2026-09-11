@@ -1972,7 +1972,7 @@ def _trader_input_names() -> set[str]:
     return names
 
 
-def test_pepperstone_set_export_uses_visible_compatible_risk_buffer(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_pepperstone_set_automatically_derives_risk_buffer(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("PEPPERSTONE_TRADER_RISK_SLIPPAGE_BUFFER_POINTS", raising=False)
     base_payload = {
         "asset": "fx",
@@ -1984,9 +1984,8 @@ def test_pepperstone_set_export_uses_visible_compatible_risk_buffer(monkeypatch:
         "entry_price": "1.10020",
         "risk_mode": "fixed_aud",
         "risk_value": "10",
-        "stop_loss_ticks": "35",
+        "stop_loss_ticks": "43",
         "risk_reward": "2",
-        "risk_slippage_buffer_points": "10",
     }
     response = asyncio.run(master_service.calculator_pepperstone_set(base_payload))
     assert response.media_type.startswith("text/plain")
@@ -2000,9 +1999,10 @@ def test_pepperstone_set_export_uses_visible_compatible_risk_buffer(monkeypatch:
     assert values["RiskAUD_Max"] == "12"
     assert values["IncludeCommissionInRisk"] == "true"
     assert values["CommissionPerLotPerSide"] == "3.5"
-    assert values["RiskSlippageBufferPoints"] == "10"
+    assert values["RiskSlippageBufferPoints"] == "14"
     assert values["SlippagePoints"] == "10"
-    assert values["SL_DistancePoints"] == "35"
+    assert values["AutoFitRiskSlippageBuffer"] == "true"
+    assert values["SL_DistancePoints"] == "43"
     assert values["AutoTP_NetRR_Enabled"] == "true"
     assert values["NetRR_Target"] == "2"
     assert values["StandardLimitSide"] == "0"
@@ -2018,7 +2018,6 @@ def test_pepperstone_set_export_uses_visible_compatible_risk_buffer(monkeypatch:
     assert sell_values["StandardLimitSide"] == "1"
 
     default_payload = dict(base_payload, stop_loss_ticks="200")
-    default_payload.pop("risk_slippage_buffer_points")
     default_response = asyncio.run(master_service.calculator_pepperstone_set(default_payload))
     default_values = _parse_set_file(default_response.body.decode("utf-8"))
     assert default_values["RiskSlippageBufferPoints"] == "50"
@@ -2035,7 +2034,6 @@ def test_pepperstone_set_export_maps_market_side_and_generates_unique_one_shot_t
         "risk_value": "10",
         "stop_loss_ticks": "35",
         "risk_reward": "2",
-        "risk_slippage_buffer_points": "10",
     }
     first = asyncio.run(master_service.calculator_pepperstone_set(base_payload))
     second = asyncio.run(master_service.calculator_pepperstone_set(base_payload))
@@ -2073,7 +2071,7 @@ def test_pepperstone_set_export_maps_market_side_and_generates_unique_one_shot_t
     assert sell_values["StandardMarketSide"] == "1"
 
 
-def test_pepperstone_set_export_rejects_incompatible_buffer_before_token_generation() -> None:
+def test_pepperstone_set_export_rejects_tight_stop_before_token_generation() -> None:
     payload = {
         "asset": "fx",
         "broker": "pepperstone",
@@ -2082,21 +2080,19 @@ def test_pepperstone_set_export_rejects_incompatible_buffer_before_token_generat
         "order_type": "market",
         "risk_mode": "fixed_aud",
         "risk_value": "10",
-        "stop_loss_ticks": "43",
+        "stop_loss_ticks": "20",
         "risk_reward": "2",
-        "risk_slippage_buffer_points": "50",
     }
     with pytest.raises(master_service.HTTPException) as exc:
         master_service._build_pepperstone_trader_set(payload)
     assert exc.value.status_code == 422
     assert exc.value.detail["code"] == "PEPPERSTONE_SET_RISK_BUFFER_INCOMPATIBLE"
     preflight = exc.value.detail["preflight"]
-    assert preflight["stop_points"] == 43
-    assert preflight["selected_buffer_points"] == 50
-    assert preflight["effective_stop_points"] == 93
-    assert preflight["conservative_max_buffer_points"] == 14
-    assert preflight["conservative_buffered_risk_at_min_aud"] == "19.46511627906976744186046512"
-    assert preflight["risk_max_aud"] == "12"
+    assert preflight["stop_points"] == 20
+    assert preflight["minimum_automatic_buffer_points"] == 10
+    assert preflight["conservative_max_buffer_points"] == 6
+    assert preflight["planned_buffer_points"] == 6
+    assert preflight["minimum_compatible_stop_points"] == 30
     assert preflight["compatible"] is False
 
 
