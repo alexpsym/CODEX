@@ -514,9 +514,9 @@ def index() -> str:
                         if Decimal(config["risk_aud"]) <= 0:
                             error = "Fixed Risk (AUD) must be greater than zero."
                         elif Decimal(config["sl_ticks"]) <= 0:
-                            error = "SL Ticks / Pips must be greater than zero for Fixed Risk (AUD)."
+                            error = "Stop Loss (ticks) must be greater than zero for Fixed Risk (AUD)."
                     except (InvalidOperation, ValueError):
-                        error = "Fixed Risk (AUD) and SL Ticks / Pips must be numeric."
+                        error = "Fixed Risk (AUD) and Stop Loss (ticks) must be numeric."
             try:
                 symbols = [] if error else _normalize_symbols(config.get("symbols", ""), market=config["market"], category=config.get("category", "linear"))
             except ValueError as exc:
@@ -717,7 +717,7 @@ FORM_HTML = """
             <input name="rr_ratio" value="{{ config.rr_ratio }}" />
           </label>
           <label>
-            SL Ticks / Pips
+            Stop Loss (ticks)
             <input name="sl_ticks" value="{{ config.sl_ticks }}" />
           </label>
         </div>

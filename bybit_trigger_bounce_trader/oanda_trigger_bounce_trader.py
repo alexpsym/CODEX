@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import os
 import time
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
@@ -54,9 +54,56 @@ def _request(method: str, endpoint: str, *, params: Optional[Dict[str, object]] 
 
 
 def _tick_size(instrument: str) -> float:
-    details = oanda_api.get_instrument_details(instrument, mode=MODE)
-    pip_location = int(details.get("pipLocation", -4) or -4)
-    return float(10 ** pip_location)
+    meta = _validated_meta(oanda_api.get_instrument_details(instrument, mode=MODE))
+    return float(_price_tick(meta["display_precision"]))
+
+
+def _decimal(value: object, name: str) -> Decimal:
+    try:
+        result = Decimal(str(value))
+    except (InvalidOperation, ValueError) as exc:
+        raise RuntimeError(f"OANDA {name} is invalid.") from exc
+    if not result.is_finite():
+        raise RuntimeError(f"OANDA {name} is invalid.")
+    return result
+
+
+def _precision(value: object, name: str) -> int:
+    result = _decimal(value, name)
+    if result < 0 or result != result.to_integral_value():
+        raise RuntimeError(f"OANDA {name} is invalid.")
+    return int(result)
+
+
+def _validated_meta(meta: Dict[str, object]) -> Dict[str, Decimal | int]:
+    required = ("displayPrecision", "tradeUnitsPrecision", "minimumTradeSize", "maximumOrderUnits", "maximumPositionSize")
+    if not isinstance(meta, dict) or any(key not in meta or meta[key] is None or str(meta[key]).strip() == "" for key in required):
+        raise RuntimeError("OANDA instrument metadata is incomplete for order sizing.")
+    display_precision = _precision(meta["displayPrecision"], "displayPrecision")
+    units_precision = _precision(meta["tradeUnitsPrecision"], "tradeUnitsPrecision")
+    minimum = _decimal(meta["minimumTradeSize"], "minimumTradeSize")
+    maximum_order = _decimal(meta["maximumOrderUnits"], "maximumOrderUnits")
+    maximum_position = _decimal(meta["maximumPositionSize"], "maximumPositionSize")
+    if minimum <= 0 or maximum_order < 0 or maximum_position < 0:
+        raise RuntimeError("OANDA instrument sizing limits are invalid.")
+    return {
+        "display_precision": display_precision,
+        "units_precision": units_precision,
+        "minimum_trade_size": minimum,
+        "maximum_order_units": maximum_order,
+        "maximum_position_size": maximum_position,
+    }
+
+
+def _price_tick(display_precision: int) -> Decimal:
+    return Decimal("1").scaleb(-display_precision)
+
+
+def _normalize_price(value: object, display_precision: int, name: str) -> Decimal:
+    result = _decimal(value, name).quantize(_price_tick(display_precision), rounding=ROUND_HALF_UP)
+    if result <= 0:
+        raise RuntimeError(f"OANDA {name} is invalid.")
+    return result
 
 
 def _instrument_meta(instrument: str) -> Dict[str, object]:
@@ -89,14 +136,17 @@ def _format_price(value: Decimal, display_precision: int) -> str:
 
 def _fixed_aud_order_values(instrument: str, trigger_price: float) -> tuple[Decimal, Decimal, Decimal, int]:
     if RISK_AUD <= 0 or SL_TICKS <= 0:
-        raise RuntimeError("Fixed Risk (AUD) requires positive risk and SL Ticks / Pips.")
+        raise RuntimeError("Fixed Risk (AUD) requires positive risk and stop-loss ticks.")
     account_id = _oanda_account_id()
-    meta = _instrument_meta(instrument)
-    display_precision = int(meta.get("displayPrecision") or 0)
-    units_precision = int(meta.get("tradeUnitsPrecision") or 0)
-    tick = Decimal("1").scaleb(-display_precision)
-    entry = Decimal(str(trigger_price))
-    stop = entry - Decimal(str(SL_TICKS)) * tick if SIDE.lower() == "buy" else entry + Decimal(str(SL_TICKS)) * tick
+    meta = _validated_meta(_instrument_meta(instrument))
+    display_precision = int(meta["display_precision"])
+    tick = _price_tick(display_precision)
+    entry = _normalize_price(trigger_price, display_precision, "entry price")
+    stop = _normalize_price(
+        entry - Decimal(str(SL_TICKS)) * tick if SIDE.lower() == "buy" else entry + Decimal(str(SL_TICKS)) * tick,
+        display_precision,
+        "stop-loss price",
+    )
     summary = _request("GET", f"/accounts/{account_id}/summary")
     home = str((summary.get("account") or summary).get("currency") or "").upper()
     quote = instrument.split("_", 1)[-1]
@@ -109,8 +159,8 @@ def _fixed_aud_order_values(instrument: str, trigger_price: float) -> tuple[Deci
     if row is None:
         raise RuntimeError("OANDA bid/ask unavailable for fixed-AUD sizing.")
     bids, asks = row.get("bids") or [], row.get("asks") or []
-    bid = Decimal(str((bids[0] if bids else {}).get("price") or "0"))
-    ask = Decimal(str((asks[0] if asks else {}).get("price") or "0"))
+    bid = _decimal((bids[0] if bids else {}).get("price") or "0", "bid")
+    ask = _decimal((asks[0] if asks else {}).get("price") or "0", "ask")
     if bid <= 0 or ask <= 0:
         raise RuntimeError("OANDA bid/ask unavailable for fixed-AUD sizing.")
     try:
@@ -118,9 +168,9 @@ def _fixed_aud_order_values(instrument: str, trigger_price: float) -> tuple[Deci
         _gain, loss, _value = oanda_risk.quote_home_factors(prices, row, quote, home)
         sized = oanda_risk.size_fixed_risk_units(
             risk_home=risk_home, entry=entry, stop=stop, bid=bid, ask=ask, loss_factor=loss,
-            units_precision=units_precision, minimum_trade_size=Decimal(str(meta.get("minimumTradeSize") or "0")),
-            maximum_order_units=Decimal(str(meta.get("maximumOrderUnits") or "0")),
-            maximum_position_size=Decimal(str(meta.get("maximumPositionSize") or "0")),
+            units_precision=int(meta["units_precision"]), minimum_trade_size=Decimal(meta["minimum_trade_size"]),
+            maximum_order_units=Decimal(meta["maximum_order_units"]),
+            maximum_position_size=Decimal(meta["maximum_position_size"]),
         )
     except ValueError as exc:
         raise RuntimeError(f"Fixed Risk (AUD) sizing unavailable: {exc}") from exc
@@ -233,37 +283,48 @@ def _terminal_log(order_id: str, state: str) -> None:
 
 def _place_pending_order(instrument: str, trigger_price: float) -> str:
     account_id = _oanda_account_id()
-    current = float(oanda_api.get_price(instrument, mode=MODE))
+    current = _decimal(oanda_api.get_price(instrument, mode=MODE), "current price")
     side = SIDE.lower()
     if RISK_MODE == "fixed_aud":
         units, sl_price, entry, display_precision = _fixed_aud_order_values(instrument, trigger_price)
-        trigger_price = float(entry)
-        tick = float(Decimal("1").scaleb(-display_precision))
+        tick = _price_tick(display_precision)
     else:
-        tick = _tick_size(instrument)
-        units = Decimal(str(DEFAULT_QTY if side == "buy" else -DEFAULT_QTY))
+        meta = _validated_meta(oanda_api.get_instrument_details(instrument, mode=MODE))
+        display_precision = int(meta["display_precision"])
+        tick = _price_tick(display_precision)
+        entry = _normalize_price(trigger_price, display_precision, "entry price")
+        configured_units = _decimal(DEFAULT_QTY, "configured units")
+        units = Decimal(int(round(float(configured_units))))
+        units = units if side == "buy" else -units
+        if abs(units) < Decimal(meta["minimum_trade_size"]):
+            raise RuntimeError("Configured units are below OANDA minimumTradeSize.")
+        if Decimal(meta["maximum_order_units"]) > 0 and abs(units) > Decimal(meta["maximum_order_units"]):
+            raise RuntimeError("Configured units exceed OANDA maximumOrderUnits.")
+        if Decimal(meta["maximum_position_size"]) > 0 and abs(units) > Decimal(meta["maximum_position_size"]):
+            raise RuntimeError("Configured units exceed OANDA maximumPositionSize.")
         sl_price = None
-        display_precision = int(oanda_api.get_instrument_details(instrument, mode=MODE).get("displayPrecision", 5) or 5)
+    if units == 0:
+        raise RuntimeError("OANDA order quantity must be positive.")
 
     order_type = "LIMIT"
-    if side == "buy" and trigger_price >= current:
+    if side == "buy" and entry >= current:
         order_type = "STOP"
-    if side == "sell" and trigger_price <= current:
+    if side == "sell" and entry <= current:
         order_type = "STOP"
 
     tp_price = None
     if SL_TICKS > 0 and RISK_MODE != "fixed_aud":
         if side == "buy":
-            sl_price = trigger_price - (SL_TICKS * tick)
+            sl_price = _normalize_price(entry - Decimal(str(SL_TICKS)) * tick, display_precision, "stop-loss price")
             if RR_RATIO > 0:
-                tp_price = trigger_price + (SL_TICKS * RR_RATIO * tick)
+                tp_price = _normalize_price(entry + Decimal(str(SL_TICKS * RR_RATIO)) * tick, display_precision, "take-profit price")
         else:
-            sl_price = trigger_price + (SL_TICKS * tick)
+            sl_price = _normalize_price(entry + Decimal(str(SL_TICKS)) * tick, display_precision, "stop-loss price")
             if RR_RATIO > 0:
-                tp_price = trigger_price - (SL_TICKS * RR_RATIO * tick)
+                tp_price = _normalize_price(entry - Decimal(str(SL_TICKS * RR_RATIO)) * tick, display_precision, "take-profit price")
     elif RISK_MODE == "fixed_aud" and RR_RATIO > 0 and sl_price is not None:
-        distance = abs(trigger_price - float(sl_price)) * RR_RATIO
-        tp_price = trigger_price + distance if side == "buy" else trigger_price - distance
+        distance = abs(entry - sl_price) * Decimal(str(RR_RATIO))
+        tp_price = _normalize_price(entry + distance if side == "buy" else entry - distance, display_precision, "take-profit price")
 
     order: Dict[str, object] = {
         "type": order_type,
@@ -271,7 +332,7 @@ def _place_pending_order(instrument: str, trigger_price: float) -> str:
         "units": str(units),
         "timeInForce": "GTC",
         "positionFill": "DEFAULT",
-        "price": _format_price(Decimal(str(trigger_price)), display_precision),
+        "price": _format_price(entry, display_precision),
         "clientExtensions": {"id": _client_order_id(instrument), "comment": "bounce-trader"},
     }
     if sl_price is not None:
