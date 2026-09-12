@@ -39,11 +39,13 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, 
 from urllib.parse import quote, unquote, urlparse
 from uuid import uuid4
 from zoneinfo import ZoneInfo
+from shared import oanda_risk
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 
 LOCAL_BUILD_FILES = (
     "render/master_service.py",
+    "shared/oanda_risk.py",
     "render/oanda_volatility.py",
     "render/static/calculator.js",
     "render/static/dashboard.js",
@@ -23758,26 +23760,10 @@ async def _fetch_oanda_mid_prices_batch(
 
 async def _convert_aud_to_home_currency(amount_aud: Decimal, account_home_ccy: str, cfg: Dict[str, str]) -> Decimal:
     home_ccy = str(account_home_ccy or "").strip().upper()
-    if amount_aud <= 0:
-        return amount_aud
-    if not home_ccy:
-        raise ValueError("OANDA account home currency unavailable for AUD conversion.")
-    if home_ccy == "AUD":
-        return amount_aud
-
-    direct_symbol = f"AUD_{home_ccy}"
-    inverse_symbol = f"{home_ccy}_AUD"
-    prices = await _fetch_oanda_mid_prices_batch(cfg=cfg, instruments=[direct_symbol, inverse_symbol])
-
-    direct = Decimal(str(prices.get(direct_symbol) or "0"))
-    if direct > 0:
-        return amount_aud * direct
-
-    inverse = Decimal(str(prices.get(inverse_symbol) or "0"))
-    if inverse > 0:
-        return amount_aud / inverse
-
-    raise ValueError(f"Unable to resolve AUD->{home_ccy} conversion from OANDA pricing.")
+    if amount_aud <= 0 or home_ccy == "AUD":
+        return oanda_risk.aud_to_home_currency(amount_aud, home_ccy, {})
+    prices = await _fetch_oanda_mid_prices_batch(cfg=cfg, instruments=[f"AUD_{home_ccy}", f"{home_ccy}_AUD"])
+    return oanda_risk.aud_to_home_currency(amount_aud, home_ccy, prices)
 
 
 async def _poll_pending_webhook_invalidations() -> None:
@@ -26640,8 +26626,7 @@ def _floor_to_step(value: Decimal, step: Decimal) -> Decimal:
 
 
 def _floor_to_precision(value: Decimal, precision: int) -> Decimal:
-    quant = Decimal("1").scaleb(-max(0, int(precision)))
-    return value.quantize(quant, rounding=ROUND_DOWN)
+    return oanda_risk.floor_to_precision(value, precision)
 
 
 def _oanda_rr_floor_levels(
@@ -28724,12 +28709,18 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
             units_raw = risk_amount_home / loss_per_unit_home
             units = units_raw if is_pepperstone else _floor_to_precision(units_raw, units_precision)
             if not is_pepperstone:
-                if units < min_trade_size:
-                    raise HTTPException(status_code=400, detail="Calculated units are below minimum trade size.")
-                if max_order_units > 0 and units > max_order_units:
-                    raise HTTPException(status_code=400, detail="Calculated units exceed OANDA maximumOrderUnits.")
-                if max_position_size > 0 and units > max_position_size:
-                    raise HTTPException(status_code=400, detail="Calculated units exceed OANDA maximumPositionSize.")
+                try:
+                    sized = oanda_risk.size_fixed_risk_units(
+                        risk_home=risk_amount_home, entry=entry, stop=sl, bid=bid, ask=ask,
+                        loss_factor=loss_factor, units_precision=units_precision,
+                        minimum_trade_size=min_trade_size, maximum_order_units=max_order_units,
+                        maximum_position_size=max_position_size,
+                    )
+                    units_raw = sized["units_raw"]
+                    units = sized["units"]
+                    loss_per_unit_home = sized["loss_per_unit_home"]
+                except ValueError as exc:
+                    raise HTTPException(status_code=400, detail=str(exc)) from exc
             if target_mode == "rr" and rr_requested is not None and not is_pepperstone:
                 try:
                     rr_floor = _oanda_rr_floor_levels(
@@ -29036,43 +29027,7 @@ def _get_oanda_quote_home_factors(
     quote_ccy: str,
     account_home_ccy: str,
 ) -> Tuple[Decimal, Decimal, Decimal]:
-    quote_code = str(quote_ccy or "").strip().upper()
-    home_code = str(account_home_ccy or "").strip().upper()
-    if quote_code and home_code and quote_code == home_code:
-        one = Decimal("1")
-        return one, one, one
-
-    def _pick_from_home_conversions(conversions: object) -> Optional[Tuple[Decimal, Decimal, Decimal]]:
-        if not isinstance(conversions, list):
-            return None
-        for item in conversions:
-            if not isinstance(item, dict):
-                continue
-            if str(item.get("currency") or "").strip().upper() != quote_code:
-                continue
-            gain = Decimal(str(item.get("accountGain") or "0"))
-            loss = Decimal(str(item.get("accountLoss") or "0"))
-            position_value = Decimal(str(item.get("positionValue") or "0"))
-            if gain > 0 and loss > 0 and position_value > 0:
-                return gain, loss, position_value
-        return None
-
-    top_level = _pick_from_home_conversions(prices_payload.get("homeConversions"))
-    if top_level is not None:
-        return top_level
-
-    row_level = _pick_from_home_conversions(row.get("homeConversions"))
-    if row_level is not None:
-        return row_level
-
-    deprecated = row.get("quoteHomeConversionFactors")
-    if isinstance(deprecated, dict):
-        gain = Decimal(str(deprecated.get("positiveUnits") or "0"))
-        loss = Decimal(str(deprecated.get("negativeUnits") or "0"))
-        if gain > 0 and loss > 0:
-            return gain, loss, gain
-
-    raise ValueError(f"missing usable conversion factors for {quote_code or quote_ccy}")
+    return oanda_risk.quote_home_factors(prices_payload, row, quote_ccy, account_home_ccy)
 
 
 

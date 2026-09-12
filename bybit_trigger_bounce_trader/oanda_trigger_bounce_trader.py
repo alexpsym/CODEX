@@ -4,12 +4,13 @@ from __future__ import annotations
 import json
 import os
 import time
+from decimal import Decimal
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 import requests
 
-from shared import oanda_api
+from shared import oanda_api, oanda_risk
 
 MODE = (os.getenv("OANDA_MODE") or "demo").strip().lower()
 INSTRUMENT = (os.getenv("BOUNCE_OANDA_INSTRUMENT") or os.getenv("BOUNCE_SYMBOLS") or "EUR_USD").strip().upper().replace("/", "_")
@@ -19,6 +20,8 @@ SIDE = (os.getenv("BOUNCE_SIDE") or "Buy").strip().title()
 EMA_LEN = int(float(os.getenv("EMA_LEN", "9")))
 VWAP_ANCHOR = (os.getenv("BOUNCE_VWAP_ANCHOR") or "session").strip().lower()
 DEFAULT_QTY = float(os.getenv("BOUNCE_DEFAULT_QTY", "1000") or 1000)
+RISK_MODE = (os.getenv("BOUNCE_RISK_MODE") or "fixed_qty").strip().lower()
+RISK_AUD = Decimal(os.getenv("BOUNCE_RISK_AUD", "0") or "0")
 RR_RATIO = float(os.getenv("BOUNCE_RR_RATIO", "0") or 0)
 SL_TICKS = float(os.getenv("BOUNCE_SL_TICKS", "0") or 0)
 MIN_AMEND_TICKS = float(os.getenv("BOUNCE_MIN_AMEND_TICKS", "1") or 1)
@@ -54,6 +57,75 @@ def _tick_size(instrument: str) -> float:
     details = oanda_api.get_instrument_details(instrument, mode=MODE)
     pip_location = int(details.get("pipLocation", -4) or -4)
     return float(10 ** pip_location)
+
+
+def _instrument_meta(instrument: str) -> Dict[str, object]:
+    account_id = _oanda_account_id()
+    data = _request("GET", f"/accounts/{account_id}/instruments", params={"instruments": instrument})
+    rows = data.get("instruments") or []
+    if not rows or not isinstance(rows[0], dict):
+        raise RuntimeError("OANDA instrument metadata unavailable for fixed-AUD sizing.")
+    return rows[0]
+
+
+def _price_midpoints(rows: List[Dict[str, object]]) -> Dict[str, Decimal]:
+    result: Dict[str, Decimal] = {}
+    for row in rows:
+        symbol = str(row.get("instrument") or "").upper()
+        bids, asks = row.get("bids") or [], row.get("asks") or []
+        try:
+            bid = Decimal(str((bids[0] if bids else {}).get("price") or row.get("closeoutBid") or "0"))
+            ask = Decimal(str((asks[0] if asks else {}).get("price") or row.get("closeoutAsk") or "0"))
+        except Exception:
+            continue
+        if symbol and bid > 0 and ask > 0:
+            result[symbol] = (bid + ask) / Decimal("2")
+    return result
+
+
+def _format_price(value: Decimal, display_precision: int) -> str:
+    return f"{value:.{max(0, int(display_precision))}f}"
+
+
+def _fixed_aud_order_values(instrument: str, trigger_price: float) -> tuple[Decimal, Decimal, Decimal, int]:
+    if RISK_AUD <= 0 or SL_TICKS <= 0:
+        raise RuntimeError("Fixed Risk (AUD) requires positive risk and SL Ticks / Pips.")
+    account_id = _oanda_account_id()
+    meta = _instrument_meta(instrument)
+    display_precision = int(meta.get("displayPrecision") or 0)
+    units_precision = int(meta.get("tradeUnitsPrecision") or 0)
+    tick = Decimal("1").scaleb(-display_precision)
+    entry = Decimal(str(trigger_price))
+    stop = entry - Decimal(str(SL_TICKS)) * tick if SIDE.lower() == "buy" else entry + Decimal(str(SL_TICKS)) * tick
+    summary = _request("GET", f"/accounts/{account_id}/summary")
+    home = str((summary.get("account") or summary).get("currency") or "").upper()
+    quote = instrument.split("_", 1)[-1]
+    symbols = [instrument]
+    if home and home != "AUD":
+        symbols.extend([f"AUD_{home}", f"{home}_AUD"])
+    prices = _request("GET", f"/accounts/{account_id}/pricing", params={"instruments": ",".join(symbols), "includeHomeConversions": "true"})
+    rows = [row for row in (prices.get("prices") or []) if isinstance(row, dict)]
+    row = next((item for item in rows if str(item.get("instrument") or "").upper() == instrument), None)
+    if row is None:
+        raise RuntimeError("OANDA bid/ask unavailable for fixed-AUD sizing.")
+    bids, asks = row.get("bids") or [], row.get("asks") or []
+    bid = Decimal(str((bids[0] if bids else {}).get("price") or "0"))
+    ask = Decimal(str((asks[0] if asks else {}).get("price") or "0"))
+    if bid <= 0 or ask <= 0:
+        raise RuntimeError("OANDA bid/ask unavailable for fixed-AUD sizing.")
+    try:
+        risk_home = oanda_risk.aud_to_home_currency(RISK_AUD, home, _price_midpoints(rows))
+        _gain, loss, _value = oanda_risk.quote_home_factors(prices, row, quote, home)
+        sized = oanda_risk.size_fixed_risk_units(
+            risk_home=risk_home, entry=entry, stop=stop, bid=bid, ask=ask, loss_factor=loss,
+            units_precision=units_precision, minimum_trade_size=Decimal(str(meta.get("minimumTradeSize") or "0")),
+            maximum_order_units=Decimal(str(meta.get("maximumOrderUnits") or "0")),
+            maximum_position_size=Decimal(str(meta.get("maximumPositionSize") or "0")),
+        )
+    except ValueError as exc:
+        raise RuntimeError(f"Fixed Risk (AUD) sizing unavailable: {exc}") from exc
+    units = sized["units"] if SIDE.lower() == "buy" else -sized["units"]
+    return units, stop, entry, display_precision
 
 
 def _candles(instrument: str, granularity: str = "M1", count: int = 200) -> List[Dict[str, float]]:
@@ -162,9 +234,16 @@ def _terminal_log(order_id: str, state: str) -> None:
 def _place_pending_order(instrument: str, trigger_price: float) -> str:
     account_id = _oanda_account_id()
     current = float(oanda_api.get_price(instrument, mode=MODE))
-    tick = _tick_size(instrument)
     side = SIDE.lower()
-    units = int(round(DEFAULT_QTY if side == "buy" else -DEFAULT_QTY))
+    if RISK_MODE == "fixed_aud":
+        units, sl_price, entry, display_precision = _fixed_aud_order_values(instrument, trigger_price)
+        trigger_price = float(entry)
+        tick = float(Decimal("1").scaleb(-display_precision))
+    else:
+        tick = _tick_size(instrument)
+        units = Decimal(str(DEFAULT_QTY if side == "buy" else -DEFAULT_QTY))
+        sl_price = None
+        display_precision = int(oanda_api.get_instrument_details(instrument, mode=MODE).get("displayPrecision", 5) or 5)
 
     order_type = "LIMIT"
     if side == "buy" and trigger_price >= current:
@@ -172,9 +251,8 @@ def _place_pending_order(instrument: str, trigger_price: float) -> str:
     if side == "sell" and trigger_price <= current:
         order_type = "STOP"
 
-    sl_price = None
     tp_price = None
-    if SL_TICKS > 0:
+    if SL_TICKS > 0 and RISK_MODE != "fixed_aud":
         if side == "buy":
             sl_price = trigger_price - (SL_TICKS * tick)
             if RR_RATIO > 0:
@@ -183,6 +261,9 @@ def _place_pending_order(instrument: str, trigger_price: float) -> str:
             sl_price = trigger_price + (SL_TICKS * tick)
             if RR_RATIO > 0:
                 tp_price = trigger_price - (SL_TICKS * RR_RATIO * tick)
+    elif RISK_MODE == "fixed_aud" and RR_RATIO > 0 and sl_price is not None:
+        distance = abs(trigger_price - float(sl_price)) * RR_RATIO
+        tp_price = trigger_price + distance if side == "buy" else trigger_price - distance
 
     order: Dict[str, object] = {
         "type": order_type,
@@ -190,13 +271,13 @@ def _place_pending_order(instrument: str, trigger_price: float) -> str:
         "units": str(units),
         "timeInForce": "GTC",
         "positionFill": "DEFAULT",
-        "price": f"{trigger_price:.5f}",
+        "price": _format_price(Decimal(str(trigger_price)), display_precision),
         "clientExtensions": {"id": _client_order_id(instrument), "comment": "bounce-trader"},
     }
     if sl_price is not None:
-        order["stopLossOnFill"] = {"price": f"{sl_price:.5f}"}
+        order["stopLossOnFill"] = {"price": _format_price(Decimal(str(sl_price)), display_precision)}
     if tp_price is not None:
-        order["takeProfitOnFill"] = {"price": f"{tp_price:.5f}"}
+        order["takeProfitOnFill"] = {"price": _format_price(Decimal(str(tp_price)), display_precision)}
 
     payload = {"order": order}
     data = _request("POST", f"/accounts/{account_id}/orders", json_body=payload)

@@ -1732,7 +1732,7 @@ def test_oanda_fixed_aud_is_converted_to_home_currency_before_sizing(monkeypatch
     )
     monkeypatch.setattr(master_service, "_fetch_oanda_mid_prices_batch", lambda **_kwargs: asyncio.sleep(0, result={"AUD_USD": 0.5}))
     body = json.loads(asyncio.run(master_service.calculator_quote({
-        "asset": "fx", "account": "demo", "symbol": "eurusd", "side": "buy", "order_type": "market",
+        "asset": "fx", "broker": "oanda", "account": "demo", "symbol": "eurusd", "side": "buy", "order_type": "market",
         "risk_mode": "fixed_aud", "risk_value": 10, "stop_loss_ticks": 10, "take_profit_ticks": 20,
     })).body.decode("utf-8"))
     assert body["account_currency"] == "USD"

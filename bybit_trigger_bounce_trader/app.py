@@ -8,6 +8,7 @@ import subprocess
 import sys
 import threading
 import time
+from decimal import Decimal, InvalidOperation
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -50,8 +51,9 @@ DEFAULT_CONFIG: Dict[str, str] = {
     "poll_seconds": "2",
     "ema_len": "9",
     "vwap_anchor": "session",  # session|week (UTC)
-    "risk_mode": "fixed_qty",  # fixed_qty|percent
+    "risk_mode": "fixed_qty",  # fixed_qty|percent|fixed_aud (FX only)
     "risk_pct": "1",
+    "risk_aud": "10",
     "rr_ratio": "2",
     "default_qty": "0.001",
     "qty_map": "{}",
@@ -319,6 +321,7 @@ def _build_oanda_env(config: Dict[str, str], *, instrument: str, session_id: str
     env["BOUNCE_VWAP_ANCHOR"] = config.get("vwap_anchor", "session")
     env["BOUNCE_RISK_MODE"] = config.get("risk_mode", "fixed_qty")
     env["BOUNCE_RISK_PCT"] = config.get("risk_pct", "0")
+    env["BOUNCE_RISK_AUD"] = config.get("risk_aud", "10")
     env["BOUNCE_DEFAULT_QTY"] = config["default_qty"]
     env["BOUNCE_QTY_MAP"] = config["qty_map"]
     env["BOUNCE_RR_RATIO"] = config.get("rr_ratio", "0")
@@ -487,6 +490,7 @@ def index() -> str:
             "vwap_anchor": request.form.get("vwap_anchor", DEFAULT_CONFIG["vwap_anchor"]).strip(),
             "risk_mode": request.form.get("risk_mode", DEFAULT_CONFIG["risk_mode"]).strip(),
             "risk_pct": request.form.get("risk_pct", DEFAULT_CONFIG["risk_pct"]).strip(),
+            "risk_aud": request.form.get("risk_aud", DEFAULT_CONFIG["risk_aud"]).strip(),
             "rr_ratio": request.form.get("rr_ratio", DEFAULT_CONFIG["rr_ratio"]).strip(),
             "default_qty": request.form.get("default_qty", DEFAULT_CONFIG["default_qty"]).strip(),
             "qty_map": request.form.get("qty_map", DEFAULT_CONFIG["qty_map"]).strip(),
@@ -495,17 +499,26 @@ def index() -> str:
             "min_gap_ticks": request.form.get("min_gap_ticks", DEFAULT_CONFIG["min_gap_ticks"]).strip(),
         }
         config["market"] = "fx" if config["market"] == "fx" else "crypto"
+        if config.get("risk_mode") not in {"fixed_qty", "percent", "fixed_aud"}:
+            config["risk_mode"] = "fixed_qty"
         side = (config.get("side") or "Buy").strip().title()
         config["side"] = side if side in {"Buy", "Sell"} else "Buy"
         _save_config(config)
 
         if action == "arm":
+            if config["risk_mode"] == "fixed_aud":
+                if config["market"] != "fx":
+                    error = "Fixed Risk (AUD) is available for FX Bounce Trader sessions only."
+                else:
+                    try:
+                        if Decimal(config["risk_aud"]) <= 0:
+                            error = "Fixed Risk (AUD) must be greater than zero."
+                        elif Decimal(config["sl_ticks"]) <= 0:
+                            error = "SL Ticks / Pips must be greater than zero for Fixed Risk (AUD)."
+                    except (InvalidOperation, ValueError):
+                        error = "Fixed Risk (AUD) and SL Ticks / Pips must be numeric."
             try:
-                symbols = _normalize_symbols(
-                    config.get("symbols", ""),
-                    market=config["market"],
-                    category=config.get("category", "linear"),
-                )
+                symbols = [] if error else _normalize_symbols(config.get("symbols", ""), market=config["market"], category=config.get("category", "linear"))
             except ValueError as exc:
                 error = str(exc)
                 symbols = []
@@ -684,11 +697,16 @@ FORM_HTML = """
             <select name="risk_mode" id="risk_mode">
               <option value="fixed_qty" {% if config.risk_mode == "fixed_qty" %}selected{% endif %}>Fixed Qty</option>
               <option value="percent" {% if config.risk_mode == "percent" %}selected{% endif %}>Risk %</option>
+              <option value="fixed_aud" id="fixed_aud_option" {% if config.risk_mode == "fixed_aud" %}selected{% endif %}>Fixed Risk (AUD)</option>
             </select>
           </label>
           <label id="risk_pct_label">
             Risk %
             <input name="risk_pct" id="risk_pct" value="{{ config.risk_pct }}" />
+          </label>
+          <label id="risk_aud_label">
+            Fixed Risk (AUD)
+            <input name="risk_aud" id="risk_aud" value="{{ config.risk_aud }}" />
           </label>
           <label id="default_qty_wrap">
             Default Qty / Units
@@ -795,7 +813,13 @@ FORM_HTML = """
         function syncVisibility() {
           const strat = (document.getElementById('strategy') || {}).value || 'EMA';
           const market = (document.getElementById('market') || {}).value || 'crypto';
-          const riskMode = (document.getElementById('risk_mode') || {}).value || 'fixed_qty';
+          let riskMode = (document.getElementById('risk_mode') || {}).value || 'fixed_qty';
+          const fixedAudOption = document.getElementById('fixed_aud_option');
+          if (fixedAudOption) fixedAudOption.hidden = market !== 'fx';
+          if (market !== 'fx' && riskMode === 'fixed_aud') {
+            document.getElementById('risk_mode').value = 'fixed_qty';
+            riskMode = 'fixed_qty';
+          }
 
           document.querySelectorAll('.crypto-only').forEach((el) => el.style.display = market === 'crypto' ? '' : 'none');
           document.querySelectorAll('.fx-only').forEach((el) => el.style.display = market === 'fx' ? '' : 'none');
@@ -806,10 +830,13 @@ FORM_HTML = """
           if (vwapAnchorWrap) vwapAnchorWrap.style.display = (strat === 'VWAP') ? '' : 'none';
 
           const showRisk = riskMode === 'percent';
+          const showFixedAud = market === 'fx' && riskMode === 'fixed_aud';
           const riskPctLabel = document.getElementById('risk_pct_label');
+          const riskAudLabel = document.getElementById('risk_aud_label');
           const defaultQtyWrap = document.getElementById('default_qty_wrap');
           if (riskPctLabel) riskPctLabel.style.display = showRisk ? '' : 'none';
-          if (defaultQtyWrap) defaultQtyWrap.style.display = showRisk ? 'none' : '';
+          if (riskAudLabel) riskAudLabel.style.display = showFixedAud ? '' : 'none';
+          if (defaultQtyWrap) defaultQtyWrap.style.display = riskMode === 'fixed_qty' ? '' : 'none';
         }
         document.getElementById('strategy')?.addEventListener('change', syncVisibility);
         document.getElementById('market')?.addEventListener('change', syncVisibility);
