@@ -126,9 +126,37 @@ def _pending_orders(instrument: str) -> List[Dict[str, object]]:
     return out
 
 
-def _cancel_order(order_id: str) -> None:
+def _cancel_order(order_id: str) -> Dict[str, object]:
     account_id = _oanda_account_id()
-    _request("PUT", f"/accounts/{account_id}/orders/{order_id}/cancel")
+    return _request("PUT", f"/accounts/{account_id}/orders/{order_id}/cancel")
+
+
+def _client_order_id(instrument: str) -> str:
+    return f"{SESSION_ID}-{instrument}"[:64]
+
+
+def _tracked_order_state(order_id: str) -> tuple[str, Optional[Dict[str, object]]]:
+    """Read only the session-owned order; never infer state from pendingOrders."""
+    account_id = _oanda_account_id()
+    data = _request("GET", f"/accounts/{account_id}/orders/{order_id}")
+    order = data.get("order") if isinstance(data, dict) else None
+    if not isinstance(order, dict):
+        return "uncertain", None
+    state = str(order.get("state") or "").upper()
+    if state in {"FILLED", "TRIGGERED"} or order.get("orderFillTransaction") or order.get("fillingTransactionID") or order.get("tradeID"):
+        return "triggered", order
+    if state in {"CANCELLED", "REJECTED", "DEACTIVATED"}:
+        return "cancelled", order
+    if state == "PENDING":
+        return "armed", order
+    return "uncertain", order
+
+
+def _terminal_log(order_id: str, state: str) -> None:
+    print(
+        f"[{_iso_now()}] [ONE_SHOT_TERMINAL] broker=oanda instrument={INSTRUMENT} "
+        f"session={SESSION_ID or 'n/a'} order={order_id or _client_order_id(INSTRUMENT)} state={state}"
+    )
 
 
 def _place_pending_order(instrument: str, trigger_price: float) -> str:
@@ -163,7 +191,7 @@ def _place_pending_order(instrument: str, trigger_price: float) -> str:
         "timeInForce": "GTC",
         "positionFill": "DEFAULT",
         "price": f"{trigger_price:.5f}",
-        "clientExtensions": {"id": f"{SESSION_ID}-{instrument}"[:64], "comment": "bounce-trader"},
+        "clientExtensions": {"id": _client_order_id(instrument), "comment": "bounce-trader"},
     }
     if sl_price is not None:
         order["stopLossOnFill"] = {"price": f"{sl_price:.5f}"}
@@ -173,7 +201,10 @@ def _place_pending_order(instrument: str, trigger_price: float) -> str:
     payload = {"order": order}
     data = _request("POST", f"/accounts/{account_id}/orders", json_body=payload)
     created = data.get("orderCreateTransaction") or {}
-    return str(created.get("id") or "")
+    order_id = str(created.get("id") or "")
+    if not order_id:
+        raise RuntimeError("ambiguous OANDA create response: missing order id")
+    return order_id
 
 
 def _same(a: float, b: float, tick: float) -> bool:
@@ -182,23 +213,38 @@ def _same(a: float, b: float, tick: float) -> bool:
 
 def main() -> None:
     print(f"[{_iso_now()}] OANDA bounce trader started mode={MODE} instrument={INSTRUMENT} side={SIDE}")
+    tracked_order_id = ""
     while True:
         try:
+            if tracked_order_id:
+                state, existing = _tracked_order_state(tracked_order_id)
+                if state != "armed":
+                    _terminal_log(tracked_order_id, state)
+                    return
+            else:
+                existing = None
+
             trigger = _trigger_price(INSTRUMENT)
             tick = _tick_size(INSTRUMENT)
-            pending = _pending_orders(INSTRUMENT)
-            existing = pending[0] if pending else None
             if existing:
                 ex_price = float(existing.get("price") or existing.get("triggerCondition") or 0)
                 if not _same(ex_price, trigger, tick):
-                    _cancel_order(str(existing.get("id")))
-                    oid = _place_pending_order(INSTRUMENT, trigger)
-                    print(f"[{_iso_now()}] amended pending order -> {oid} trigger={trigger:.5f}")
+                    _cancel_order(tracked_order_id)
+                    state, _resolved = _tracked_order_state(tracked_order_id)
+                    if state == "triggered":
+                        _terminal_log(tracked_order_id, "triggered")
+                        return
+                    if state != "cancelled":
+                        _terminal_log(tracked_order_id, "uncertain")
+                        return
+                    tracked_order_id = _place_pending_order(INSTRUMENT, trigger)
+                    print(f"[{_iso_now()}] amended pending order -> {tracked_order_id} trigger={trigger:.5f}")
             else:
-                oid = _place_pending_order(INSTRUMENT, trigger)
-                print(f"[{_iso_now()}] placed pending order -> {oid} trigger={trigger:.5f}")
+                tracked_order_id = _place_pending_order(INSTRUMENT, trigger)
+                print(f"[{_iso_now()}] placed pending order -> {tracked_order_id} trigger={trigger:.5f}")
         except Exception as exc:
-            print(f"[{_iso_now()}] loop error: {exc}")
+            _terminal_log(tracked_order_id, f"uncertain-{type(exc).__name__}")
+            return
         time.sleep(max(1.0, POLL_SECONDS))
 
 

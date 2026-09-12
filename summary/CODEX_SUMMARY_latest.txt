@@ -533,6 +533,14 @@ Phase 1 of 7: relocate running bounce traders and remove dashboard Watchlist
 - Targeted verification: first invocation of the four requested nodes produced 3 passed and 1 stale task-created assertion failure; the permitted failed-node-only second invocation passed. Final result: all four requested nodes pass; path-scoped `git diff --check` passes.
 - No live trading, broker, account, production-data, local-server, or browser operation occurred. Phases 2–7 were not started.
 
+Phase 2 of 7: one-shot Bounce Trader workers
+
+- Bybit now tracks only its session-owned `orderLinkId`/order ID, treats Triggered/Filled/PartiallyFilled/positive execution as terminal, applies any available fill-based TP/SL completion once, latches terminal state, and returns from `main()`. Amend uncertainty cannot fall through to create, and non-executed terminal/unknown states stop without rearming.
+- OANDA now tracks its own order ID/client ID, resolves PENDING/FILLED/TRIGGERED/fill-transaction/trade evidence directly rather than using pending-order disappearance, and returns terminally after execution or non-executed terminal/uncertain outcomes. Cancel/replacement first resolves the old order so a cancel/fill race cannot create a second entry.
+- Verification history: the OANDA node passed in the original invocation. The first Bybit attempt failed because the dynamic module was absent from `sys.modules`; after fixing that loader, two loop-based attempts were interrupted because the fixture's `0.001` quantity remained below its mocked `1.0` minimum, so it repeatedly constructed `InstrumentFilters` at worker line 992 without creating a tracked order. The final correction introduced finite `_advance_tracked_entry()` lifecycle testing shared with production `main()`; the final Bybit node passed (`1 passed` in 0.85s).
+- Exact tests: `tests/test_bounce_trader_one_shot.py::test_oanda_worker_stops_after_tracked_entry_triggers_without_replacement` passed earlier; `tests/test_bounce_trader_one_shot.py::test_bybit_worker_stops_after_own_entry_triggers_without_another_entry` passed in the final bounded invocation. Path-scoped `git diff --check` passed with line-ending notices only.
+- Changed exactly: `bybit_trigger_bounce_trader/bybit_trigger_bounce_trader.py`, `bybit_trigger_bounce_trader/oanda_trigger_bounce_trader.py`, `tests/test_bounce_trader_one_shot.py`, and this summary. No real broker, account, credential, network, workbook, database, cloud, or production-data operation occurred. Phases 3–7 were not started.
+
 Phase 1A correction: Running Bounce Traders dashboard refresh and Stop behavior
 
 - Root cause corrected: `refreshBounceTraders()` was not integrated into the existing `/scripts` refresh lifecycle, and Stop incorrectly used JSON parsing against the Bounce Trader endpoint’s successful HTML redirect.

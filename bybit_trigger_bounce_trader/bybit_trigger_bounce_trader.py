@@ -465,10 +465,11 @@ def _place_or_amend_conditional_market(
     tp: Optional[float],
     sl: Optional[float],
     order_link_id: str,
-) -> None:
+    tracked_order_id: Optional[str] = None,
+) -> str:
     """
-    Tries amend first (cheap, keeps same orderLinkId).
-    If amend fails (order missing), create it.
+    Amend an already tracked order, or create the first session-owned order.
+    An amend failure is ambiguous and must never be treated as permission to create.
     """
     filters = _get_instrument_filters(symbol)
     tick = filters.tick_size
@@ -480,9 +481,9 @@ def _place_or_amend_conditional_market(
     last = _get_last_price(symbol)
 
     if trigger_direction == 1 and trigger_price <= last:
-        return
+        return tracked_order_id or ""
     if trigger_direction == 2 and trigger_price >= last:
-        return
+        return tracked_order_id or ""
 
     body_amend = {
         "category": CATEGORY,
@@ -491,7 +492,8 @@ def _place_or_amend_conditional_market(
         "triggerPrice": f"{trigger_price:.12f}".rstrip("0").rstrip("."),
     }
 
-    try:
+    if tracked_order_id:
+        body_amend["orderId"] = tracked_order_id
         amend_resp = _signed_post("/v5/order/amend", body_amend, timeout=10)
         amend_result = amend_resp.get("result") if isinstance(amend_resp, dict) else {}
         cache_bybit_demo_tpsl_request(
@@ -504,11 +506,11 @@ def _place_or_amend_conditional_market(
             stop_loss=sl,
             source="bounce_conditional_amend",
         )
+        amended_order_id = str((amend_result or {}).get("orderId") or tracked_order_id)
+        if not amended_order_id:
+            raise RuntimeError("ambiguous Bybit amend response: missing orderId")
         print(f"[AMEND] {symbol} {order_link_id} trigger={trigger_price}")
-        return
-    except Exception:
-        # Create new if amend failed (likely unknown orderLinkId)
-        pass
+        return amended_order_id
 
     body_create = {
         "category": CATEGORY,
@@ -530,8 +532,11 @@ def _place_or_amend_conditional_market(
 
     create_resp = _signed_post("/v5/order/create", body_create, timeout=10)
     create_result = create_resp.get("result") if isinstance(create_resp, dict) else {}
+    created_order_id = str((create_result or {}).get("orderId") or "")
+    if not created_order_id:
+        raise RuntimeError("ambiguous Bybit create response: missing orderId")
     cache_bybit_demo_tpsl_request(
-        order_id=str((create_result or {}).get("orderId") or ""),
+        order_id=created_order_id,
         order_link_id=order_link_id,
         parent_order_link_id=None,
         symbol=symbol,
@@ -542,6 +547,7 @@ def _place_or_amend_conditional_market(
     )
     _last_order_link_by_symbol[symbol] = order_link_id
     print(f"[CREATE] {symbol} {order_link_id} side={side} trigger={trigger_price} qty={qty}")
+    return created_order_id
 
 
 def _compute_tp_sl(entry: float, tick: float, side: str) -> Tuple[Optional[float], Optional[float]]:
@@ -611,6 +617,58 @@ def _signed_get(path: str, params: dict, timeout: float = 10.0) -> dict:
 _balance_cache: Tuple[float, float] = (0.0, 0.0)
 _last_order_link_by_symbol: Dict[str, str] = {}
 _constraint_failure: Optional[str] = None
+
+
+def _tracked_order_state(symbol: str, order_link_id: str, order_id: str) -> Tuple[str, Optional[dict]]:
+    """Return terminal lifecycle state for this session's order only."""
+    params = {"category": CATEGORY, "symbol": symbol, "orderLinkId": order_link_id}
+    payload = _signed_get("/v5/order/realtime", params, timeout=10)
+    rows = ((payload.get("result") or {}).get("list") or []) if isinstance(payload, dict) else []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("orderLinkId") or "") != order_link_id and str(row.get("orderId") or "") != order_id:
+            continue
+        status = str(row.get("orderStatus") or row.get("status") or "").strip().lower()
+        try:
+            executed = float(row.get("cumExecQty") or 0) > 0
+        except (TypeError, ValueError):
+            executed = False
+        if executed or status in {"triggered", "partiallyfilled", "filled", "new"}:
+            return "triggered", row
+        if status in {"cancelled", "rejected", "deactivated"}:
+            return "cancelled", row
+        if status in {"untriggered", "pending"}:
+            return "armed", row
+        return "uncertain", row
+    return "uncertain", None
+
+
+def _terminal_log(symbol: str, order_link_id: str, order_id: str, state: str) -> None:
+    print(
+        f"[ONE_SHOT_TERMINAL] broker=bybit instrument={symbol} session={SESSION_ID or 'n/a'} "
+        f"order={order_id or order_link_id} state={state}"
+    )
+
+
+def _advance_tracked_entry(symbol: str, tracked: Dict[str, str]) -> str:
+    """Reconcile one tracked entry once and latch any terminal result."""
+    terminal = tracked.get("terminal", "")
+    if terminal:
+        return terminal
+    state, _row = _tracked_order_state(symbol, tracked["link"], tracked["id"])
+    if state == "triggered":
+        tracked["terminal"] = state
+        pos = _get_open_position(symbol)
+        if pos is not None:
+            filters = _get_instrument_filters(symbol)
+            _apply_trading_stop_from_fill(symbol=symbol, tick=filters.tick_size)
+        _terminal_log(symbol, tracked["link"], tracked["id"], state)
+        return state
+    if state != "armed":
+        tracked["terminal"] = state
+        _terminal_log(symbol, tracked["link"], tracked["id"], state)
+    return state
 
 
 def _get_account_balance() -> float:
@@ -919,39 +977,29 @@ def _desired_trigger_for_strategy(symbol: str, strategy: str) -> Optional[Tuple[
     return None
 
 
-SYMBOLS = _normalize_runtime_symbols(SYMBOLS)
-
-
 def main() -> None:
+    symbols = _normalize_runtime_symbols(SYMBOLS)
     print(f"MODE={MODE} BASE={BASE_URL} CATEGORY={CATEGORY} INTERVAL={INTERVAL} TRIGGER_BY={TRIGGER_BY}")
-    print(f"SYMBOLS={SYMBOLS}")
+    print(f"SYMBOLS={symbols}")
     print(f"STRATEGIES={STRATEGIES}")
     print(f"POLL_SECONDS={POLL_SECONDS} EMA_LEN={EMA_LEN} VWAP_ANCHOR={VWAP_ANCHOR} SIDE={BOUNCE_SIDE} SESSION_ID={SESSION_ID or 'n/a'}")
     print(f"RR_RATIO={RR_RATIO} SL_TICKS={SL_TICKS} RISK_MODE={RISK_MODE} RISK_PCT={RISK_PCT} BALANCE={ACCOUNT_BALANCE_RAW}")
 
     # warm cache
-    for sym in SYMBOLS:
+    for sym in symbols:
         _get_instrument_filters(sym)
 
-    active_symbols = list(SYMBOLS)
+    active_symbols = list(symbols)
+    tracked_orders: Dict[str, Dict[str, str]] = {}
 
     while True:
         try:
             for sym in list(active_symbols):
-                pos = _get_open_position(sym)
-                if pos is not None:
-                    filters = _get_instrument_filters(sym)
-                    tick = filters.tick_size
-                    applied = _apply_trading_stop_from_fill(symbol=sym, tick=tick)
-                    if not applied and _constraint_failure:
-                        print(f"[SESSION_STOP] {_constraint_failure}")
+                tracked = tracked_orders.get(sym)
+                if tracked:
+                    state = _advance_tracked_entry(sym, tracked)
+                    if state != "armed":
                         return
-                    print(f"[AUTO-STOP] {sym} position detected; stopping bounce trader for this instrument.")
-                    try:
-                        active_symbols.remove(sym)
-                    except ValueError:
-                        pass
-                    continue
 
                 filters = _get_instrument_filters(sym)
                 tick = filters.tick_size
@@ -959,6 +1007,8 @@ def main() -> None:
                 last = _get_last_price(sym)
 
                 for strat in STRATEGIES:
+                    if tracked and strat != tracked["strategy"]:
+                        continue
                     key = f"{sym}:{strat}"
                     desired = _desired_trigger_for_strategy(sym, strat)
                     if not desired:
@@ -1030,10 +1080,10 @@ def main() -> None:
                             )
                             continue
 
-                    order_link_id = _make_order_link_id(sym, strat)
+                    order_link_id = tracked["link"] if tracked else _make_order_link_id(sym, strat)
                     _last_order_link_by_symbol[sym] = order_link_id
 
-                    _place_or_amend_conditional_market(
+                    order_id = _place_or_amend_conditional_market(
                         symbol=sym,
                         side=side,
                         qty=qty,
@@ -1042,9 +1092,18 @@ def main() -> None:
                         tp=tp,
                         sl=sl,
                         order_link_id=order_link_id,
+                        tracked_order_id=tracked["id"] if tracked else None,
                     )
 
+                    if not order_id:
+                        _terminal_log(sym, order_link_id, tracked["id"] if tracked else "", "uncertain")
+                        return
+                    if not tracked:
+                        tracked_orders[sym] = {"id": order_id, "link": order_link_id, "strategy": strat}
+                        tracked = tracked_orders[sym]
+
                     _last_armed_trigger[key] = trigger
+                    break
 
             if not active_symbols:
                 print("No active instruments remaining (all triggered). Exiting.")
@@ -1056,8 +1115,8 @@ def main() -> None:
             print("Stopped.")
             return
         except Exception as exc:
-            print(f"[ERROR] {type(exc).__name__}: {exc}")
-            time.sleep(max(2.0, POLL_SECONDS))
+            print(f"[ONE_SHOT_TERMINAL] broker=bybit instrument={','.join(active_symbols)} session={SESSION_ID or 'n/a'} order=unknown state=uncertain error={type(exc).__name__}")
+            return
 
 
 if __name__ == "__main__":
