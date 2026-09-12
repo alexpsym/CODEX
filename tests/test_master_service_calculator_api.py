@@ -1842,13 +1842,22 @@ def test_calculator_quote_pepperstone_market_is_supported_and_resolves_venue(mon
     monkeypatch.setattr(master_service, "_get_oanda_config", lambda _a: {"base_url": "https://oanda.test", "account_id": "acct", "token": "tok"})
     monkeypatch.setattr(master_service, "_fetch_oanda_instrument_meta", lambda **_kwargs: asyncio.sleep(0, result={"displayPrecision": 5, "tradeUnitsPrecision": 0, "minimumTradeSize": "1", "marginRate": "0.05"}))
     monkeypatch.setattr(master_service, "_fetch_oanda_json", lambda **_kwargs: asyncio.sleep(0, result={"prices": [{"bids": [{"price": "1.10000"}], "asks": [{"price": "1.10020"}]}], "homeConversions": [{"currency": "USD", "accountGain": "1", "accountLoss": "1", "positionValue": "1"}]}))
-    monkeypatch.setattr(master_service, "_fetch_oanda_account_summary", lambda _a: asyncio.sleep(0, result={"currency": "USD", "nav": 1000000, "marginAvailable": 1000000, "marginRate": 0.05}))
-    monkeypatch.setattr(master_service, "_fetch_oanda_mid_prices_batch", lambda **_kwargs: asyncio.sleep(0, result={"AUD_USD": 1}))
+    async def forbidden_oanda_account_summary(*_args, **_kwargs):
+        raise AssertionError("Pepperstone calculations must not read OANDA account data")
+
+    monkeypatch.setattr(master_service, "_fetch_oanda_account_summary", forbidden_oanda_account_summary)
+    monkeypatch.setattr(master_service, "_upsert_calculator_trade_context", lambda payload, **_kwargs: payload)
+    monkeypatch.setattr(master_service, "_invalidate_open_orders_cache", lambda: None)
     response = asyncio.run(master_service.calculator_quote({"asset": "fx", "broker": "pepperstone", "account": "demo", "symbol": "eurusd", "side": "buy", "order_type": "market", "risk_mode": "fixed_aud", "risk_value": 10, "stop_loss_ticks": 35, "take_profit_ticks": 70}))
     body = json.loads(response.body.decode("utf-8"))
     assert body["broker"] == "pepperstone"
     assert body["venue"] == "Pepperstone"
     assert body["resolved_venue"] == "Pepperstone"
+    assert body["market_data_source"] == "OANDA FX pricing/conversion only; no Pepperstone account or margin data."
+    assert "margin_available_home" not in body
+    assert master_service._calculator_effective_route("fx", "oanda", "eurusd") == ("fx", "oanda", "EUR_USD")
+    with pytest.raises(ValueError, match="broker=oanda or broker=pepperstone"):
+        master_service._calculator_effective_route("fx", "", "eurusd")
 
 
 def test_usdjpy_default_crypto_calculator_paths_auto_route_to_oanda_without_bybit(monkeypatch: pytest.MonkeyPatch) -> None:

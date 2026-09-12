@@ -919,8 +919,9 @@
     if (!['crypto', 'fx'].includes(effectiveAsset) || !canonicalSymbol) return false;
     state.asset = effectiveAsset;
     if (effectiveAsset === 'fx') {
-      state.broker = ['oanda', 'pepperstone'].includes(effectiveBroker) ? effectiveBroker : 'oanda';
-      state.fx_broker = state.broker;
+      if (!['oanda', 'pepperstone'].includes(effectiveBroker)) return false;
+      state.broker = effectiveBroker;
+      state.fx_broker = effectiveBroker;
     } else {
       state.broker = 'bybit';
     }

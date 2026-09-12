@@ -290,7 +290,7 @@ class B {
   getAttribute(k){ return this._attrs[k]; }
   removeAttribute(k){ delete this._attrs[k]; }
 }
-const ids=['calc-error','calc-error-debug','calc-success','calc-results','calc-request-summary','calc-canonical-symbol','calc-journal-summary','calc-instrument-specs','risk-toggle-wrap','broker-toggle-wrap','calc-webhook-panel','calc-webhook-url','calc-webhook-json','calc-webhook-copy','calc-webhook-copy-url','risk-toggle','calc-risk-label','broker-toggle','limit-wrap','account-toggle','asset-toggle','side-toggle','order-toggle','webhook-toggle','test-toggle','timeframe-toggle','calc-symbol','calc-limit','calc-sl-ticks','calc-rr','calc-risk','calc-quote','calc-submit','calc-pepperstone-set','calc-quote-status','calc-webhook-status'];
+const ids=['calc-error','calc-error-debug','calc-success','calc-results','calc-request-summary','calc-canonical-symbol','calc-journal-summary','calc-instrument-specs','risk-toggle-wrap','broker-toggle-wrap','calc-pepperstone-risk-preflight','calc-webhook-panel','calc-webhook-url','calc-webhook-json','calc-webhook-copy','calc-webhook-copy-url','risk-toggle','calc-risk-label','broker-toggle','limit-wrap','account-toggle','asset-toggle','side-toggle','order-toggle','webhook-toggle','test-toggle','timeframe-toggle','calc-symbol','calc-limit','calc-sl-ticks','calc-rr','calc-risk','calc-quote','calc-submit','calc-pepperstone-set','calc-quote-status','calc-webhook-status'];
 const el=Object.fromEntries(ids.map((id)=>[id,new E(id)]));
 const mk=(vals)=>vals.map((v)=>new B(v));
 el['risk-toggle'].buttons=mk(['fixed_aud','percent']);
@@ -311,7 +311,7 @@ let quotePayload=null;
 let setPayload=null;
 global.fetch=async (url,opts={})=>{
   if(url.includes('/api/calculator/bootstrap')) return {ok:true,status:200,statusText:'OK',headers:{get:()=> 'application/json'},text:async()=>JSON.stringify({app_profile:'local',calculator_js_sha256_12:'abc123def456',render_calculator_base_url_configured:true,webhook:{available:true}})};
-  if(url.includes('/api/calculator/quote')){ quotePayload=JSON.parse(opts.body||'{}'); return {ok:true,status:200,statusText:'OK',headers:{get:()=> 'application/json'},text:async()=>JSON.stringify({broker:'pepperstone',venue:'Pepperstone',resolved_venue:'Pepperstone',symbol:'EUR_USD',tick_size:'0.00001',entry_price:'1.1002',stop_price:'1.09985',target_price:'1.10125',target_distance:'0.00105',quantity:'1000',estimated_fees_or_spread:'1',estimated_total_loss:'10',estimated_total_loss_aud:'10',estimated_reward:'20'})}; }
+  if(url.includes('/api/calculator/quote')){ quotePayload=JSON.parse(opts.body||'{}'); return {ok:true,status:200,statusText:'OK',headers:{get:()=> 'application/json'},text:async()=>JSON.stringify({asset:'fx',broker:'pepperstone',venue:'Pepperstone',resolved_venue:'Pepperstone',symbol:'EUR_USD',tick_size:'0.00001',entry_price:'1.1002',stop_price:'1.09985',target_price:'1.10125',target_distance:'0.00105',quantity:'1000',estimated_fees_or_spread:'1',estimated_total_loss:'10',estimated_total_loss_aud:'10',estimated_reward:'20',pepperstone_risk_buffer_preflight:{stop_points:35,preferred_maximum_buffer_points:50,minimum_automatic_buffer_points:10,conservative_max_buffer_points:11,planned_buffer_points:11,minimum_compatible_stop_points:30,compatible:true,explanation:'Automatic risk buffer ready. Trader will choose the exact live value within the planned range.'}})}; }
   if(url.includes('/api/calculator/pepperstone-set')){ setPayload=JSON.parse(opts.body||'{}'); return {ok:true,status:200,statusText:'OK',headers:{get:(k)=>k==='content-disposition'?'attachment; filename="Pepperstone_Trader_EUR_USD_BUY_MARKET_x.set"':'text/plain'},text:async()=> 'Strategy=3\nStandardMarketSide=0\nStandardMarketExecutionToken=mkt_test\n'}; }
   return {ok:true,status:200,statusText:'OK',headers:{get:()=> 'application/json'},text:async()=>JSON.stringify({status:'no_data'})};
 };
@@ -329,8 +329,10 @@ eval(source);
   const visibleOnFx = el['broker-toggle-wrap'].style.display === '';
   el['broker-toggle'].buttons.find((b)=>b.dataset.v==='pepperstone').click();
   await el['calc-quote'].listeners.click();
+  const setReady = el['calc-pepperstone-set'].style.display === '' && el['calc-pepperstone-set'].disabled === false;
+  if (!setReady) throw new Error('Pepperstone .set button was not ready after a compatible quote.');
   await el['calc-pepperstone-set'].listeners.click();
-  console.log(JSON.stringify({hiddenOnCrypto,visibleOnFx,broker:quotePayload?.broker,setPayload,setButton:el['calc-pepperstone-set'].style.display,submit:el['calc-submit'].style.display,summary:el['calc-request-summary'].textContent}));
+  console.log(JSON.stringify({hiddenOnCrypto,visibleOnFx,broker:quotePayload?.broker,setReady,setPayload,setButton:el['calc-pepperstone-set'].style.display,submit:el['calc-submit'].style.display,summary:el['calc-request-summary'].textContent}));
 })();
 '''
     out = subprocess.check_output([node, "-e", harness, str(JS_PATH)], text=True)
@@ -338,6 +340,8 @@ eval(source);
     assert data["hiddenOnCrypto"] is True
     assert data["visibleOnFx"] is True
     assert data["broker"] == "pepperstone"
+    assert data["setReady"] is True
+    assert "broker=pepperstone" in data["summary"]
     assert data["setPayload"]["order_type"] == "market"
     assert "entry_price" not in data["setPayload"]
     assert data["setButton"] == ""

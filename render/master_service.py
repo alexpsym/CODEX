@@ -3910,7 +3910,7 @@ def _calculator_remaining_timeout_s(deadline: Optional[float], fallback_s: float
 
 def _calculator_safe_submitted_payload(payload: Dict[str, object]) -> Dict[str, object]:
     safe: Dict[str, object] = {}
-    for key in ("asset", "account", "submitted_symbol", "webhook", "test", "timeframe", "risk_mode", "risk_value", "stop_loss_ticks", "order_type", "side"):
+    for key in ("asset", "broker", "account", "submitted_symbol", "webhook", "test", "timeframe", "risk_mode", "risk_value", "stop_loss_ticks", "order_type", "side"):
         if key in payload:
             safe[key] = payload.get(key)
     return safe
@@ -27776,8 +27776,9 @@ def _calculator_effective_route(asset: object, broker: object, symbol: object) -
     if asset_norm == "crypto" and is_likely_oanda_pair(symbol_text):
         return "fx", "oanda", normalize_oanda_symbol_query(symbol_text)
     if asset_norm == "fx":
-        effective_broker = "oanda" if broker_norm in {"", "bybit"} else broker_norm
-        return "fx", effective_broker, normalize_oanda_symbol_query(symbol_text)
+        if broker_norm not in {"oanda", "pepperstone"}:
+            raise ValueError("FX calculations require broker=oanda or broker=pepperstone.")
+        return "fx", broker_norm, normalize_oanda_symbol_query(symbol_text)
     if asset_norm == "crypto":
         return "crypto", "bybit", symbol_text
     return asset_norm, broker_norm, symbol_text
@@ -28129,7 +28130,6 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
         if webhook_mode not in {"yes", "no", "true", "false", "1", "0"}:
             raise HTTPException(status_code=400, detail="webhook must be yes or no.")
         if asset == "fx":
-            broker = broker or "oanda"
             if broker not in {"oanda", "pepperstone"}:
                 raise HTTPException(status_code=400, detail="broker must be oanda or pepperstone for FX.")
         elif asset == "crypto":
@@ -28691,6 +28691,15 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
             return JSONResponse(response_payload)
 
         if asset == "fx":
+            is_pepperstone = broker == "pepperstone"
+            if is_pepperstone and risk_mode == "percent":
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "code": "PEPPERSTONE_PERCENT_RISK_REQUIRES_EQUITY",
+                        "message": "Pepperstone percentage risk requires an explicit Pepperstone account-equity source. Select Fixed AUD; no OANDA account data is used.",
+                    },
+                )
             try:
                 cfg = _get_oanda_config(account)
             except ValueError as exc:
@@ -28699,8 +28708,11 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
             oanda_parallel_started = time.perf_counter()
             meta_task = asyncio.create_task(_fetch_oanda_instrument_meta(base_url=cfg["base_url"], account_id=cfg["account_id"], api_key=cfg["token"], symbol=symbol, mode=account))
             pricing_task = asyncio.create_task(_fetch_oanda_json(base_url=cfg["base_url"], account_id=cfg["account_id"], api_key=cfg["token"], endpoint=f"/accounts/{{account_id}}/pricing?instruments={symbol}&includeHomeConversions=true", mode=account))
-            summary_task = asyncio.create_task(_fetch_oanda_account_summary(account))
-            tasks=[meta_task,pricing_task,summary_task]
+            summary_task = None
+            tasks = [meta_task, pricing_task]
+            if not is_pepperstone:
+                summary_task = asyncio.create_task(_fetch_oanda_account_summary(account))
+                tasks.append(summary_task)
             try:
                 await asyncio.gather(*tasks)
             except Exception:
@@ -28737,8 +28749,8 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
                 raise HTTPException(status_code=400, detail="Bad limit price.")
             sl = (entry - stop_ticks * tick_size) if side == "buy" else (entry + stop_ticks * tick_size)
 
-            summary = summary_task.result()
-            account_home_ccy = str(summary.get("currency") or "").strip().upper()
+            summary = summary_task.result() if summary_task is not None else None
+            account_home_ccy = "AUD" if is_pepperstone else str(summary.get("currency") or "").strip().upper()
             quote_ccy = symbol.split("_", 1)[1]
             try:
                 gain_factor, loss_factor, _position_value_factor = _get_oanda_quote_home_factors(
@@ -28786,14 +28798,15 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
             fee_buffer_r = None
 
             units_raw = risk_amount_home / loss_per_unit_home
-            units = _floor_to_precision(units_raw, units_precision)
-            if units < min_trade_size:
-                raise HTTPException(status_code=400, detail="Calculated units are below minimum trade size.")
-            if max_order_units > 0 and units > max_order_units:
-                raise HTTPException(status_code=400, detail="Calculated units exceed OANDA maximumOrderUnits.")
-            if max_position_size > 0 and units > max_position_size:
-                raise HTTPException(status_code=400, detail="Calculated units exceed OANDA maximumPositionSize.")
-            if target_mode == "rr" and rr_requested is not None:
+            units = units_raw if is_pepperstone else _floor_to_precision(units_raw, units_precision)
+            if not is_pepperstone:
+                if units < min_trade_size:
+                    raise HTTPException(status_code=400, detail="Calculated units are below minimum trade size.")
+                if max_order_units > 0 and units > max_order_units:
+                    raise HTTPException(status_code=400, detail="Calculated units exceed OANDA maximumOrderUnits.")
+                if max_position_size > 0 and units > max_position_size:
+                    raise HTTPException(status_code=400, detail="Calculated units exceed OANDA maximumPositionSize.")
+            if target_mode == "rr" and rr_requested is not None and not is_pepperstone:
                 try:
                     rr_floor = _oanda_rr_floor_levels(
                         entry=entry,
@@ -28816,10 +28829,13 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
                 fee_buffer_r = ((spread_quote * loss_factor) / loss_per_unit_home) if loss_per_unit_home > 0 else Decimal("0")
             else:
                 target_distance = (tp_ticks or Decimal("0")) * tick_size
+                if target_mode == "rr" and rr_requested is not None:
+                    target_distance = abs(entry - sl) * rr_requested
+                    requested_rr_net = rr_requested
                 tp = (entry + target_distance) if side == "buy" else (entry - target_distance)
                 reward_home = max(Decimal("0"), (abs(tp - entry) - spread_quote) * gain_factor * units)
-            margin_available = Decimal(str(summary.get("marginAvailable") or "0"))
-            effective_margin_rate = margin_rate if margin_rate > 0 else Decimal(str(summary.get("marginRate") or "0"))
+            margin_available = Decimal(str(summary.get("marginAvailable") or "0")) if summary is not None else Decimal("0")
+            effective_margin_rate = margin_rate if margin_rate > 0 else Decimal(str(summary.get("marginRate") or "0")) if summary is not None else Decimal("0")
             estimated_position_value_home = units * entry * _position_value_factor
             estimated_initial_margin_home = estimated_position_value_home * max(Decimal("0"), effective_margin_rate)
             submitted_debug_payload = {
@@ -28835,7 +28851,7 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
                 "estimated_position_value_home": _fmt_dec(estimated_position_value_home),
                 "estimated_initial_margin_home": _fmt_dec(estimated_initial_margin_home),
             }
-            if effective_margin_rate > 0 and margin_available > 0:
+            if not is_pepperstone and effective_margin_rate > 0 and margin_available > 0:
                 if estimated_initial_margin_home > margin_available:
                     raise HTTPException(
                         status_code=400,
@@ -28878,11 +28894,6 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
                     "account_currency": account_home_ccy,
                     "risk_input_aud": _fmt_dec(risk_input_aud),
                     "risk_amount_home": _fmt_dec(risk_amount_home),
-                    "margin_rate": _fmt_dec(effective_margin_rate),
-                    "position_value_factor": _fmt_dec(_position_value_factor),
-                    "estimated_position_value_home": _fmt_dec(estimated_position_value_home),
-                    "estimated_initial_margin_home": _fmt_dec(estimated_initial_margin_home),
-                    "margin_available_home": _fmt_dec(margin_available),
                     "submitted_risk_mode": risk_mode,
                     "submitted_risk_value": _fmt_dec(risk_val),
                     "submitted_stop_loss_ticks": _fmt_dec(stop_ticks),
@@ -28897,6 +28908,19 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
                     "effective_rr_net": _fmt_dec_by_precision(effective_rr_net, Decimal("0.01")) if effective_rr_net is not None else None,
                     "fee_buffer_r": _fmt_dec_by_precision(fee_buffer_r, Decimal("0.01")) if fee_buffer_r is not None else None,
                 }
+            if is_pepperstone:
+                response_payload["market_data_source"] = "OANDA FX pricing/conversion only; no Pepperstone account or margin data."
+                response_payload["execution_margin_validation"] = "Trader validates live Pepperstone margin at execution."
+            else:
+                response_payload.update(
+                    {
+                        "margin_rate": _fmt_dec(effective_margin_rate),
+                        "position_value_factor": _fmt_dec(_position_value_factor),
+                        "estimated_position_value_home": _fmt_dec(estimated_position_value_home),
+                        "estimated_initial_margin_home": _fmt_dec(estimated_initial_margin_home),
+                        "margin_available_home": _fmt_dec(margin_available),
+                    }
+                )
             if broker == "pepperstone":
                 preflight_risk_target = (
                     risk_val
