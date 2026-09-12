@@ -532,3 +532,11 @@ Phase 1 of 7: relocate running bounce traders and remove dashboard Watchlist
 - Changed exactly: `render/master_service.py`, `render/static/dashboard.js`, `bybit_trigger_bounce_trader/app.py`, `tests/test_dashboard_home_layout.py`, `tests/test_dashboard_js_syntax.py`, and this summary. The dashboard Watchlist markup, CSS, DOM wiring, polling, handlers, and `/api/watchlist` requests were removed; underlying Watchlist APIs/state mappings were preserved. Bounce Trader execution, risk-sizing, trigger, order, and auto-stop logic were not changed.
 - Targeted verification: first invocation of the four requested nodes produced 3 passed and 1 stale task-created assertion failure; the permitted failed-node-only second invocation passed. Final result: all four requested nodes pass; path-scoped `git diff --check` passes.
 - No live trading, broker, account, production-data, local-server, or browser operation occurred. Phases 2–7 were not started.
+
+Phase 1A correction: Running Bounce Traders dashboard refresh and Stop behavior
+
+- Root cause corrected: `refreshBounceTraders()` was not integrated into the existing `/scripts` refresh lifecycle, and Stop incorrectly used JSON parsing against the Bounce Trader endpoint’s successful HTML redirect.
+- The dashboard now refreshes sessions after initial/Refresh-button/periodic `/scripts` loads, retains the local-only guard and existing polling timer, POSTs the encoded Stop route exactly once without parsing HTML, clears the row immediately, and makes a fresh status request after Stop completes.
+- Changed exactly: `render/static/dashboard.js`, `tests/test_dashboard_js_syntax.py`, and this summary. `bybit_trigger_bounce_trader/app.py`, `render/master_service.py`, the relocated panel, Watchlist removal, and all unrelated functionality were untouched.
+- Targeted command: `pytest -q tests/test_dashboard_js_syntax.py::test_dashboard_js_parses_with_node tests/test_dashboard_js_syntax.py::test_dashboard_running_bounce_traders_uses_existing_status_and_stop_routes_without_watchlist` — `2 passed` in 0.68s. Path-scoped `git diff --check` passed with only line-ending notices.
+- No live trading, broker, account, production-data, local-server, or browser operation occurred. Phases 2–7 were not started.

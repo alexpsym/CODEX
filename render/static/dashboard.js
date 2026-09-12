@@ -462,6 +462,7 @@
         const scripts = await fetchJson('/scripts');
         scriptsState = Array.isArray(scripts) ? scripts : [];
         renderScripts();
+        await refreshBounceTraders();
         setStatus(`Updated ${new Date().toLocaleTimeString()}`);
       } catch (err) {
         console.error(err);
@@ -600,7 +601,7 @@
     if (bounceTradersEmpty) bounceTradersEmpty.hidden = rows.length > 0;
   };
 
-  const refreshBounceTraders = async () => {
+  const refreshBounceTraders = async (force = false) => {
     if (!BOUNCE_TRADER_LOCAL_ENABLED || !bounceTradersPanel || !bounceTradersBody) return;
     const script = scriptsState.find((item) => item?.name === 'bybit_trigger_bounce_trader');
     if (script?.running !== true) {
@@ -608,7 +609,10 @@
       setBounceTradersStatus('Bounce Trader is not running.');
       return;
     }
-    if (bounceTradersInFlight) return bounceTradersInFlight;
+    if (bounceTradersInFlight) {
+      if (!force) return bounceTradersInFlight;
+      await bounceTradersInFlight;
+    }
     bounceTradersInFlight = (async () => {
       setBounceTradersStatus('Loading running bounce traders...');
       try {
@@ -632,8 +636,13 @@
     button.disabled = true;
     setBounceTradersStatus('Stopping bounce trader...');
     try {
-      await fetchJson(BOUNCE_TRADER_BASE + '/sessions/' + encodeURIComponent(id) + '/stop', { method: 'POST' });
-      await refreshBounceTraders();
+      const response = await fetch(BOUNCE_TRADER_BASE + '/sessions/' + encodeURIComponent(id) + '/stop', {
+        cache: 'no-store',
+        method: 'POST',
+      });
+      if (!response.ok) throw new Error(`Request failed (${response.status})`);
+      renderBounceTraders([]);
+      await refreshBounceTraders(true);
     } catch (err) {
       console.error(err);
       button.disabled = false;

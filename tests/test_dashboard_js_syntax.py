@@ -83,6 +83,63 @@ def test_dashboard_running_bounce_traders_uses_existing_status_and_stop_routes_w
     assert "if (oandaHeadline) {" in js
     assert "if (workspaceFrame) {" in js
 
+    node = shutil.which("node")
+    assert node, "node is required for bounce dashboard behavior check"
+    harness = r"""
+const fs = require('fs');
+const vm = require('vm');
+const source = fs.readFileSync(process.argv[1], 'utf8');
+class Element {
+  constructor(id = '') { this.id = id; this.children = []; this.handlers = {}; this.dataset = {}; this.style = {}; this.textContent = ''; this.hidden = false; this.disabled = false; this.classList = { add: () => {}, remove: () => {} }; }
+  set innerHTML(value) { this._innerHTML = String(value); if (value === '') this.children = []; }
+  get innerHTML() { return this._innerHTML || ''; }
+  appendChild(child) { this.children.push(child); return child; }
+  addEventListener(event, callback) { this.handlers[event] = callback; }
+  setAttribute(name, value) { this[name] = String(value); }
+}
+const elements = {
+  'scripts-grid': new Element('scripts-grid'),
+  'exit-button-slot': new Element('exit-button-slot'),
+  'running-bounce-traders-panel': new Element('running-bounce-traders-panel'),
+  'running-bounce-traders-status': new Element('running-bounce-traders-status'),
+  'running-bounce-traders-body': new Element('running-bounce-traders-body'),
+  'running-bounce-traders-empty': new Element('running-bounce-traders-empty'),
+  'running-bounce-traders-table': new Element('running-bounce-traders-table'),
+};
+const document = { body: { dataset: { dashboardProfile: 'local' } }, visibilityState: 'visible', getElementById: (id) => elements[id] || null, createElement: (tag) => new Element(tag), addEventListener: () => {} };
+const session = { id: 'sid<&', broker: 'bybit', instrument: '<BTC>', side: 'Buy', strategy: 'ema', account: 'demo', started_at: '2026-09-12T00:00:00Z' };
+const calls = [];
+let stopped = false;
+const response = (ok, payload, html = false) => ({ ok, status: ok ? 200 : 500, statusText: ok ? 'OK' : 'Error', text: async () => html ? payload : JSON.stringify(payload) });
+const fetch = async (url, options = {}) => {
+  calls.push({ url: String(url), method: options.method || 'GET' });
+  if (String(url) === '/scripts') return response(true, [{ name: 'bybit_trigger_bounce_trader', running: true }]);
+  if (String(url).endsWith('/status')) return response(true, { sessions: stopped ? [] : [session] });
+  if (String(url).includes('/sessions/') && String(url).endsWith('/stop')) { stopped = true; return response(true, '<html>redirected</html>', true); }
+  return response(true, {});
+};
+const context = { console, document, fetch, setInterval: () => 1, clearInterval: () => {}, setTimeout: () => 1, clearTimeout: () => {}, Date, Map, Promise, URL, encodeURIComponent, navigator: {}, location: { href: 'http://localhost/' } };
+context.window = { ...context, addEventListener: () => {}, open: () => null };
+context.globalThis = context;
+(async () => {
+  vm.createContext(context); vm.runInContext(source, context);
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  if (elements['running-bounce-traders-body'].children.length !== 1) throw new Error('initial running session did not render');
+  const stop = elements['running-bounce-traders-body'].children[0].children[7].children[0];
+  await stop.handlers.click();
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  const stopCalls = calls.filter((call) => call.method === 'POST');
+  const statusCalls = calls.filter((call) => call.url.endsWith('/status'));
+  if (stopCalls.length !== 1 || !stopCalls[0].url.endsWith('/sessions/sid%3C%26/stop')) throw new Error('stop route was not posted exactly once with encoded ID');
+  if (statusCalls.length < 2) throw new Error('post-stop status was not freshly requested');
+  if (elements['running-bounce-traders-body'].children.length !== 0) throw new Error('stopped session remained visible');
+  if (elements['running-bounce-traders-status'].textContent.includes('Failed')) throw new Error('HTML redirect was treated as stop failure');
+})().catch((error) => { console.error(error); process.exitCode = 1; });
+"""
+    subprocess.run([node, "-e", harness, str(JS_PATH)], check=True)
+
 
 def test_render_dashboard_js_does_not_request_or_poll_local_only_sections() -> None:
     node = shutil.which("node")
