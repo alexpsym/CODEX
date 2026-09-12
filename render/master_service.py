@@ -16404,65 +16404,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         .action-btn:hover { background:#334155; }
         .action-btn:disabled { opacity:0.6; cursor:not-allowed; }
 
-        .watchlist-sub {
-            color: #94a3b8;
-            margin-top: 0.25rem;
-            font-size: 0.95rem;
-            line-height: 1.4;
-        }
-        #watchlist-widget .watchlist-input {
-            display: flex;
-            flex-direction: column;
-            gap: 8px;
-            margin: 0.75rem 0 0.5rem;
-            width: 100%;
-            box-sizing: border-box;
-        }
-        #watchlist-widget .watchlist-input input {
-            flex: 1;
-            width: 100%;
-            box-sizing: border-box;
-            border-radius: 10px;
-            border: 1px solid #334155;
-            background: #0b1220;
-            color: #e2e8f0;
-            padding: 6px 8px;
-            font-size: 0.9rem;
-        }
-        #watchlist-widget .watchlist-input button {
-            width: 100%;
-            box-sizing: border-box;
-            border-radius: 10px;
-            border: 1px solid #334155;
-            background: #1f2937;
-            color: #e2e8f0;
-            font-weight: 900;
-            padding: 6px 10px;
-            cursor: pointer;
-        }
-        #watchlist-widget .watchlist-input button:hover { background: #334155; }
-
-        #watchlist-table { width: 100%; border-collapse: collapse; }
-        #watchlist-table th, #watchlist-table td {
-            text-align:left;
-            padding:0.55rem 0.65rem;
-            border-bottom:1px solid #1f2937;
-            font-size:0.9rem;
-        }
-        #watchlist-table th {
-            background:#0f172a;
-            color:#cbd5e1;
-            position:sticky;
-            top:0;
-            z-index:1;
-        }
-        #watchlist-table tr:hover { background:#111827; }
-
-        .watchlist-status {
-            color: #94a3b8;
-            font-size: 0.85rem;
-            min-height: 1em;
-        }
         #oanda-inactivity-widget .meta-grid {
             display: grid;
             grid-template-columns: max-content 1fr;
@@ -16515,7 +16456,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         }
     </style>
 </head>
-<body>
+<body data-dashboard-profile="{{DASHBOARD_PROFILE}}">
     <div class=\"home\">
         <div class="layout{{DASHBOARD_LAYOUT_CLASS}}">
             <div class="dashboard-rail">
@@ -16525,40 +16466,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 </section>
 
                 <!-- LOCAL_DASHBOARD_RAIL_START -->
-                <section class="panel" id="watchlist-widget">
-                    <div class="panel-header">
-                        <div>
-                            <h2>Watchlist</h2>
-                            <div class="watchlist-sub" id="watchlist-sync-mode">Loading sync status…</div>
-                        </div>
-                        <div class="oo-toolbar">
-                            <span class="status-pill" id="watchlist-count">0</span>
-                            <button type="button" id="watchlist-clear-btn">Clear</button>
-                        </div>
-                    </div>
-
-                    <div class="watchlist-input">
-                        <input id="watchlist-input" type="text" placeholder="BTC, ETH, EURUSD" />
-                        <button type="button" id="watchlist-add-btn">Add</button>
-                    </div>
-
-                    <div class="watchlist-status" id="watchlist-status"></div>
-
-                    <div class="table-wrap">
-                        <table id="watchlist-table">
-                            <thead>
-                                <tr>
-                                    <th>Instrument</th>
-                                    <th>Action</th>
-                                </tr>
-                            </thead>
-                            <tbody id="watchlist-items"></tbody>
-                        </table>
-                    </div>
-
-                    <p class="meta" id="watchlist-empty" style="display:none;">No items yet.</p>
-                </section>
-
 
                 <section class="panel" id="oanda-inactivity-widget">
                     <div class="panel-header">
@@ -16603,6 +16510,22 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                         title="Open orders and positions dashboard"
                         src="/merged/open-orders?_dashboard=1"
                     ></iframe>
+                </section>
+
+                <section class="panel" id="running-bounce-traders-panel" aria-label="Running Bounce Traders">
+                    <div class="panel-header">
+                        <div>
+                            <h2>Running Bounce Traders</h2>
+                            <p id="running-bounce-traders-status">Loading running bounce traders...</p>
+                        </div>
+                    </div>
+                    <div class="table-wrap">
+                        <table id="running-bounce-traders-table">
+                            <thead><tr><th>Session</th><th>Broker</th><th>Instrument</th><th>Side</th><th>Strategy</th><th>Account</th><th>Started</th><th>Action</th></tr></thead>
+                            <tbody id="running-bounce-traders-body"></tbody>
+                        </table>
+                    </div>
+                    <p class="meta" id="running-bounce-traders-empty" hidden>No active bounce trader sessions.</p>
                 </section>
 
                 <section class="panel" id="journal-equity-panel" aria-label="Account equity curve">
@@ -26431,6 +26354,7 @@ def _render_dashboard_template_for_profile() -> str:
         )
         .replace("{{DASHBOARD_JS_URL}}", f"/static/dashboard.js?v={dashboard_js_version}")
         .replace("{{TRADING_JOURNAL_EQUITY_SCRIPT_TAG}}", equity_curve_script)
+        .replace("{{DASHBOARD_PROFILE}}", APP_PROFILE)
     )
 
 

@@ -728,23 +728,6 @@ FORM_HTML = """
         </div>
       </form>
 
-      <h2 style="margin-top:1.6rem;">Running bounce traders</h2>
-      {% if running_sessions %}
-      <table>
-        <thead><tr><th>Session</th><th>Broker</th><th>Instrument</th><th>Side</th><th>Strategy</th><th>Account</th><th>Started</th><th>Action</th></tr></thead>
-        <tbody>
-          {% for s in running_sessions %}
-          <tr>
-            <td>{{ s.id }}</td><td>{{ s.broker or s.market }}</td><td>{{ s.instrument }}</td><td>{{ s.side }}</td><td>{{ s.strategy }}</td><td>{{ s.account }}</td><td>{{ s.started_at }}</td>
-            <td><form method="post" action="{{ app_root }}/sessions/{{ s.id }}/stop"><button class="danger" type="submit">Stop</button></form></td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-      {% else %}
-      <p style="color:#94a3b8;">No active bounce trader sessions.</p>
-      {% endif %}
-
       <script>
         const APP_ROOT = ({{ app_root|tojson }} || '').replace(/\\/$/, '');
         const previewCanonicalEl = document.getElementById('preview-canonical-symbol');

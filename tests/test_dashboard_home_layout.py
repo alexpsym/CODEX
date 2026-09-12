@@ -42,7 +42,7 @@ def test_dashboard_home_removes_instrument_specs_recent_trades_open_orders() -> 
 
     assert 'script-toolbar-title' not in html
     assert '>Scripts<' not in html
-    assert 'Watchlist' in html
+    assert 'Watchlist' not in html
     assert 'OANDA Inactivity' in html
     assert 'Orders / Positions' in html
     assert 'id="dashboard-workspace"' in html
@@ -50,6 +50,9 @@ def test_dashboard_home_removes_instrument_specs_recent_trades_open_orders() -> 
     assert 'id="dashboard-workspace-status"' in html
     assert 'id="dashboard-workspace-empty"' in html
     assert 'id="dashboard-workspace-frame"' in html
+    assert 'id="running-bounce-traders-panel"' in html
+    assert 'id="running-bounce-traders-body"' in html
+    assert 'id="running-bounce-traders-empty"' in html
     assert 'src="/merged/open-orders?_dashboard=1"' in html
     assert 'class="dashboard-main-content"' in html
     assert 'id="pine-scripts-panel"' in html
@@ -86,24 +89,27 @@ def test_dashboard_home_removes_instrument_specs_recent_trades_open_orders() -> 
     assert 'id="sync-journal-btn"' not in html
     assert 'id="sync-journal-status"' not in html
 
-    watchlist_idx = html.find('Watchlist')
     oanda_idx = html.find('OANDA Inactivity')
-    assert watchlist_idx != -1 and oanda_idx != -1
-    assert watchlist_idx < oanda_idx
+    assert oanda_idx != -1
 
     scripts_grid_idx = html.find('id="scripts-grid"')
     exit_slot_idx = html.find('id="exit-button-slot"')
-    watchlist_widget_idx = html.find('id="watchlist-widget"')
     oanda_widget_idx = html.find('id="oanda-inactivity-widget"')
     workspace_idx = html.find('id="dashboard-workspace"')
+    bounce_idx = html.find('id="running-bounce-traders-panel"')
     equity_idx = html.find('id="journal-equity-panel"')
     pine_idx = html.find('id="pine-scripts-panel"')
     assert scripts_grid_idx != -1 and exit_slot_idx != -1
-    assert watchlist_widget_idx != -1 and oanda_widget_idx != -1 and workspace_idx != -1 and equity_idx != -1 and pine_idx != -1
-    assert scripts_grid_idx < watchlist_widget_idx
+    assert oanda_widget_idx != -1 and workspace_idx != -1 and bounce_idx != -1 and equity_idx != -1 and pine_idx != -1
     assert scripts_grid_idx < workspace_idx
-    assert watchlist_widget_idx < oanda_widget_idx
-    assert workspace_idx < equity_idx < pine_idx
+    assert workspace_idx < bounce_idx < equity_idx < pine_idx
+    assert '<section class="panel" id="running-bounce-traders-panel"' in html
+    assert html.count('id="running-bounce-traders-panel"') == 1
+
+    bounce_page = (ROOT / 'bybit_trigger_bounce_trader' / 'app.py').read_text(encoding='utf-8')
+    assert 'Running bounce traders' not in bounce_page
+    assert '/sessions/<session_id>/stop' in bounce_page
+    assert 'def status()' in bounce_page
 
     rail_start = html.find('<div class="dashboard-rail">')
     workspace_start = html.find('<section class="panel" id="dashboard-workspace">')
@@ -142,7 +148,7 @@ def test_dashboard_equity_toolbar_is_responsive_and_non_overlapping() -> None:
     assert 'min-width:0;' in html
 
 
-def test_dashboard_script_css_keeps_scripts_vertical_above_watchlist() -> None:
+def test_dashboard_script_css_keeps_scripts_vertical_above_local_tools() -> None:
     source = MASTER_SERVICE_PATH.read_text(encoding='utf-8')
     html = _extract_html_template(source)
 
@@ -204,7 +210,7 @@ def test_dashboard_profile_layout_removes_local_columns_server_side() -> None:
     local_body = asyncio.run(module.home_page()).body.decode("utf-8")
     assert 'class="layout"' in local_body
     assert 'class="dashboard-main-content"' in local_body
-    assert 'id="watchlist-widget"' in local_body
+    assert 'id="watchlist-widget"' not in local_body
 
     module.APP_PROFILE = "render"
     render_body = asyncio.run(module.home_page()).body.decode("utf-8")

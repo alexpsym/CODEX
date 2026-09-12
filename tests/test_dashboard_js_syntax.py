@@ -12,13 +12,20 @@ def test_dashboard_js_parses_with_node() -> None:
     subprocess.run([node, '--check', str(JS_PATH)], check=True)
 
 
-def test_dashboard_js_no_removed_widget_endpoints_and_keeps_needed_calls() -> None:
+def test_dashboard_running_bounce_traders_uses_existing_status_and_stop_routes_without_watchlist() -> None:
     js = JS_PATH.read_text(encoding='utf-8')
     assert '/api/open-orders' not in js
     assert '/api/recent-trades' not in js
-    assert '/api/watchlist' in js
-    assert '/api/state-sync/status' in js
-    assert '/api/state-sync/remote-backup-summary' in js
+    assert '/api/watchlist' not in js
+    assert '/api/state-sync/status' not in js
+    assert '/api/state-sync/remote-backup-summary' not in js
+    assert "BOUNCE_TRADER_BASE + '/status'" in js
+    assert "encodeURIComponent(id) + '/stop'" in js
+    assert 'td.textContent = String(session?.[key]' in js
+    assert 'No active bounce trader sessions.' in js
+    assert 'Failed to load running bounce traders.' in js
+    assert 'refreshBounceTraders' in js
+    assert 'stopBounceTrader' in js
     assert '/api/oanda-inactivity-status' in js
     assert '/api/local-exit' in js
     assert "const MAIN_WORKSPACE_URL = '/merged/open-orders';" in js
@@ -66,20 +73,13 @@ def test_dashboard_js_no_removed_widget_endpoints_and_keeps_needed_calls() -> No
     assert "exitButtonSlot.appendChild(makeExitButton());" in js
     assert "scriptsGrid.appendChild(makeExitButton());" in js
     assert "cache: 'no-store'" in js
-    assert "Loading state…" in js
-    assert "Saved locally only (repo deletion can lose local state)" in js
-    assert "State synced" in js
-    assert "State sync error" in js
-    assert "Durable watchlist verification failed." in js
-    assert "Watchlist edits blocked until state restore/sync is healthy." in js
     assert "dotTitle = 'Inactive view';" not in js
     assert "dotTitle = 'Active view loaded';" not in js
     assert "Inactive view" not in js
     assert "activeMainLoadState" not in js
     assert "syncWorkspaceSelectionFromScripts" not in js
     assert "if (!oandaHeadline) return null;" in js
-    assert "if (!watchlistItems) return;" in js
-    assert "if (watchlistItems) {" in js
+    assert "if (!bounceTradersPanel || !bounceTradersBody) return;" not in js
     assert "if (oandaHeadline) {" in js
     assert "if (workspaceFrame) {" in js
 
@@ -270,8 +270,7 @@ const response = (payload) => ({
 });
 const fetch = async (url) => {
   if (String(url) === '/scripts') return response(rows);
-  if (String(url).includes('/api/pine/files')) return response({ files: [] });
-  if (String(url).includes('/api/watchlist')) return response({ items: [] });
+    if (String(url).includes('/api/pine/files')) return response({ files: [] });
   return response({});
 };
 const openedTabs = [];
@@ -343,18 +342,6 @@ const states = () => scriptsGrid.children.map((button) => ({
         assert [item['dot'] for item in snapshot] == expected_dots
     assert payload['initial'][1]['title'] == 'healthy missed cutoff'
     assert payload['initial'][3]['label'] == 'FX Disabled (Disabled)'
-
-
-def test_dashboard_js_accepts_verified_empty_watchlist_without_remote_fallback() -> None:
-    js = JS_PATH.read_text(encoding='utf-8')
-    assert "payload?.durable_verified === true" in js
-    assert "const verifiedItems = Array.isArray(payload?.verified_items) ? payload.verified_items : [];" in js
-    assert "verifiedItems.length" not in js
-    assert "const authoritative = await fetchJson('/api/watchlist');" in js
-    assert "error.payload = bodyJson;" in js
-    assert "failurePayload?.state_sync" in js
-    assert "stateSyncState?.watchlist_mutation_blocked === true" in js
-    assert "stateSyncState?.watchlist_indeterminate === true" in js
 
 
 def test_dashboard_js_removed_sync_journal_wiring():

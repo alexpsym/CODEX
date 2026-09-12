@@ -9,14 +9,12 @@
   const workspaceEmpty = document.getElementById('dashboard-workspace-empty');
   const workspaceFrame = document.getElementById('dashboard-workspace-frame');
 
-  const watchlistCount = document.getElementById('watchlist-count');
-  const watchlistInput = document.getElementById('watchlist-input');
-  const watchlistAddBtn = document.getElementById('watchlist-add-btn');
-  const watchlistClearBtn = document.getElementById('watchlist-clear-btn');
-  const watchlistStatus = document.getElementById('watchlist-status');
-  const watchlistSyncMode = document.getElementById('watchlist-sync-mode');
-  const watchlistItems = document.getElementById('watchlist-items');
-  const watchlistEmpty = document.getElementById('watchlist-empty');
+  const bounceTradersPanel = document.getElementById('running-bounce-traders-panel');
+  const bounceTradersStatus = document.getElementById('running-bounce-traders-status');
+  const bounceTradersBody = document.getElementById('running-bounce-traders-body');
+  const bounceTradersEmpty = document.getElementById('running-bounce-traders-empty');
+  const BOUNCE_TRADER_LOCAL_ENABLED = document.body?.dataset?.dashboardProfile === 'local';
+  const BOUNCE_TRADER_BASE = '/apps/bybit_trigger_bounce_trader';
   const pineStatus = document.getElementById('pine-status');
   const pineFiles = document.getElementById('pine-files');
   const pineFallback = document.getElementById('pine-fallback');
@@ -39,9 +37,7 @@
 
   let scriptsInFlight = null;
   let oandaInFlight = null;
-  let watchlistInFlight = null;
-  let stateSyncInFlight = null;
-  let stateSyncPollTimer = null;
+  let bounceTradersInFlight = null;
 
   let scriptsTimer = null;
   let oandaTimer = null;
@@ -58,9 +54,6 @@
 
   let oandaState = null;
   let oandaExpanded = false;
-  let watchlistState = [];
-  let stateSyncState = null;
-  let watchlistLoaded = false;
   let scriptsState = [];
 
   const fmtTime = (v) => {
@@ -577,260 +570,75 @@
     return oandaInFlight;
   };
 
-  const setWatchlistStatus = (msg, isErr = false) => {
-    if (!watchlistStatus) return;
-    watchlistStatus.textContent = msg || '';
-    watchlistStatus.style.color = isErr ? '#fca5a5' : '#94a3b8';
+  const setBounceTradersStatus = (message, isError = false) => {
+    if (!bounceTradersStatus) return;
+    bounceTradersStatus.textContent = message || '';
+    bounceTradersStatus.style.color = isError ? '#fca5a5' : '#94a3b8';
   };
 
-  const applyStateSyncModeLabel = (payload) => {
-    if (!watchlistSyncMode) return;
-    const enabled = payload?.enabled === true;
-    const restoreStatus = String(payload?.restore_status || '').toLowerCase();
-    const hasError = Boolean(payload?.restore_error) || Boolean(payload?.last_upload_error) || restoreStatus === 'failed';
-    if (!enabled) {
-      watchlistSyncMode.textContent = (String(payload?.effective_state_source || '').toLowerCase() === 'repo_local' || String(payload?.effective_state_source || '').toLowerCase() === 'local') ? 'Saved to repo-local state files' : 'Saved locally only (repo deletion can lose local state)';
-      return;
-    }
-    if (restoreStatus === 'pending') {
-      watchlistSyncMode.textContent = 'Loading state…';
-      return;
-    }
-    if (hasError) {
-      watchlistSyncMode.textContent = 'State sync error';
-      return;
-    }
-    watchlistSyncMode.textContent = 'State synced';
-  };
-
-  const watchlistEditingBlocked = () => {
-    const restoreStatus = String(stateSyncState?.restore_status || '').toLowerCase();
-    if (restoreStatus === 'pending' || restoreStatus === 'failed') return true;
-    if (stateSyncState?.watchlist_mutation_blocked === true || stateSyncState?.watchlist_indeterminate === true) return true;
-    if (stateSyncState?.enabled === false && String(stateSyncState?.effective_local_state_mode || '') !== 'local-only') return true;
-    return false;
-  };
-
-  const renderWatchlist = (items) => {
-    if (!watchlistItems) return;
-    watchlistItems.innerHTML = '';
-    const list = Array.isArray(items) ? items : [];
-    list.forEach((symbol) => {
+  const renderBounceTraders = (sessions) => {
+    if (!bounceTradersBody) return;
+    bounceTradersBody.innerHTML = '';
+    const rows = Array.isArray(sessions) ? sessions : [];
+    rows.forEach((session) => {
       const tr = document.createElement('tr');
-      const symTd = document.createElement('td');
-      symTd.textContent = symbol;
-      tr.appendChild(symTd);
-
+      ['id', 'broker', 'instrument', 'side', 'strategy', 'account', 'started_at'].forEach((key) => {
+        const td = document.createElement('td');
+        td.textContent = String(session?.[key] ?? (key === 'broker' ? session?.market : '') ?? '');
+        tr.appendChild(td);
+      });
       const actionTd = document.createElement('td');
-      const removeBtn = document.createElement('button');
-      removeBtn.type = 'button';
-      removeBtn.className = 'action-btn';
-      removeBtn.textContent = 'Remove';
-      removeBtn.addEventListener('click', () => removeWatchlistItem(symbol));
-      actionTd.appendChild(removeBtn);
+      const stopButton = document.createElement('button');
+      stopButton.type = 'button';
+      stopButton.className = 'action-btn danger';
+      stopButton.textContent = 'Stop';
+      stopButton.addEventListener('click', () => stopBounceTrader(session?.id, stopButton));
+      actionTd.appendChild(stopButton);
       tr.appendChild(actionTd);
-      watchlistItems.appendChild(tr);
+      bounceTradersBody.appendChild(tr);
     });
-    if (watchlistCount) watchlistCount.textContent = String(list.length);
-    const restorePending = String(stateSyncState?.restore_status || '').toLowerCase() === 'pending';
-    if (watchlistEmpty) {
-      watchlistEmpty.textContent = restorePending && !watchlistLoaded ? 'Loading state…' : 'No items yet.';
-      watchlistEmpty.style.display = list.length ? 'none' : 'block';
-    }
-    if (watchlistClearBtn) watchlistClearBtn.disabled = !list.length || Boolean(watchlistInFlight);
-    if (watchlistAddBtn) watchlistAddBtn.disabled = Boolean(watchlistInFlight) || watchlistEditingBlocked();
-    if (watchlistClearBtn && watchlistEditingBlocked()) watchlistClearBtn.disabled = true;
+    if (bounceTradersEmpty) bounceTradersEmpty.hidden = rows.length > 0;
   };
 
-  const normalizeWatchlistInput = (text) => {
-    return String(text || '')
-      .split(',')
-      .map((entry) => String(entry || '').trim().toUpperCase())
-      .filter(Boolean);
-  };
-
-  const FX_CODES = new Set(['AUD', 'CAD', 'CHF', 'EUR', 'GBP', 'HKD', 'JPY', 'NZD', 'SGD', 'TRY', 'USD', 'ZAR', 'XAU', 'XAG']);
-  const isLikelyFxPair = (value) => {
-    const token = String(value || '').trim().toUpperCase();
-    if (/^[A-Z]{3}_[A-Z]{3}$/.test(token)) {
-      const [base, quote] = token.split('_');
-      return FX_CODES.has(base) && FX_CODES.has(quote);
+  const refreshBounceTraders = async () => {
+    if (!BOUNCE_TRADER_LOCAL_ENABLED || !bounceTradersPanel || !bounceTradersBody) return;
+    const script = scriptsState.find((item) => item?.name === 'bybit_trigger_bounce_trader');
+    if (script?.running !== true) {
+      renderBounceTraders([]);
+      setBounceTradersStatus('Bounce Trader is not running.');
+      return;
     }
-    if (/^[A-Z]{6}$/.test(token)) {
-      const base = token.slice(0, 3);
-      const quote = token.slice(3);
-      return FX_CODES.has(base) && FX_CODES.has(quote);
-    }
-    return false;
-  };
-
-  const resolveBybitSymbol = async (symbol) => {
-    const token = String(symbol || '').trim().toUpperCase();
-    if (!token || isLikelyFxPair(token)) return token;
-    try {
-      const payload = await fetchJson(`/api/resolve-symbol?symbol=${encodeURIComponent(token)}&prefer=bybit&scope=linear`);
-      return String(payload?.resolved_symbol || token).trim().toUpperCase();
-    } catch {
-      return token;
-    }
-  };
-
-  const saveWatchlist = async (items, successMessage = '') => {
-    if (watchlistInFlight) return watchlistInFlight;
-    const payloadItems = Array.isArray(items) ? items : [];
-    if (watchlistClearBtn) watchlistClearBtn.disabled = true;
-    watchlistInFlight = (async () => {
+    if (bounceTradersInFlight) return bounceTradersInFlight;
+    bounceTradersInFlight = (async () => {
+      setBounceTradersStatus('Loading running bounce traders...');
       try {
-        const payload = await fetchJson('/api/watchlist', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ items: payloadItems }),
-        });
-        const verifiedItems = Array.isArray(payload?.verified_items) ? payload.verified_items : [];
-        const durableVerified = payload?.durable_verified === true;
-        const requestedNormalized = payloadItems.map((item) => String(item || '').trim().toUpperCase()).filter(Boolean);
-        if (!durableVerified || JSON.stringify(verifiedItems) !== JSON.stringify(Array.isArray(payload?.items) ? payload.items : requestedNormalized)) {
-          throw new Error(payload?.error || 'Durable watchlist verification failed.');
-        }
-        watchlistState = Array.isArray(payload?.items) ? payload.items : verifiedItems;
-        watchlistLoaded = true;
-        stateSyncState = payload?.state_sync || stateSyncState;
-        applyStateSyncModeLabel(stateSyncState);
-        renderWatchlist(watchlistState);
-        if (successMessage) {
-          const source = String(payload?.effective_state_source || '').toLowerCase();
-          const label = source === 'repo_local' || source === 'local' ? 'Repo-local' : 'Dropbox';
-          setWatchlistStatus(`${successMessage} ${label} verified: ${verifiedItems.join(', ') || '(empty)'}`, false);
-        }
+        const payload = await fetchJson(BOUNCE_TRADER_BASE + '/status');
+        renderBounceTraders(payload?.sessions);
+        setBounceTradersStatus(Array.isArray(payload?.sessions) && payload.sessions.length ? '' : 'No active bounce trader sessions.');
       } catch (err) {
         console.error(err);
-        const failurePayload = err?.payload && typeof err.payload === 'object' ? err.payload : null;
-        if (Array.isArray(failurePayload?.items)) {
-          watchlistState = failurePayload.items;
-          watchlistLoaded = true;
-        }
-        if (failurePayload?.state_sync) {
-          stateSyncState = failurePayload.state_sync;
-          applyStateSyncModeLabel(stateSyncState);
-        }
-        try {
-          const authoritative = await fetchJson('/api/watchlist');
-          watchlistState = Array.isArray(authoritative?.items) ? authoritative.items : [];
-          stateSyncState = authoritative?.state_sync || stateSyncState;
-          watchlistLoaded = true;
-        } catch (reloadErr) {
-          console.error(reloadErr);
-        }
-        renderWatchlist(watchlistState);
-        setWatchlistStatus(err?.message || 'Watchlist update failed.', true);
+        renderBounceTraders([]);
+        setBounceTradersStatus(err?.message || 'Failed to load running bounce traders.', true);
       } finally {
-        watchlistInFlight = null;
-        if (watchlistClearBtn) watchlistClearBtn.disabled = !watchlistState.length;
+        bounceTradersInFlight = null;
       }
     })();
-    return watchlistInFlight;
+    return bounceTradersInFlight;
   };
 
-  const refreshWatchlist = async () => {
-    if (!watchlistItems) return;
+  const stopBounceTrader = async (sessionId, button) => {
+    const id = String(sessionId || '');
+    if (!id || !button || button.disabled) return;
+    button.disabled = true;
+    setBounceTradersStatus('Stopping bounce trader...');
     try {
-      const payload = await fetchJson('/api/watchlist');
-      watchlistState = Array.isArray(payload?.items) ? payload.items : [];
-      watchlistLoaded = true;
-      stateSyncState = payload?.state_sync || stateSyncState;
-      applyStateSyncModeLabel(stateSyncState);
-      renderWatchlist(watchlistState);
-      setWatchlistStatus('', false);
+      await fetchJson(BOUNCE_TRADER_BASE + '/sessions/' + encodeURIComponent(id) + '/stop', { method: 'POST' });
+      await refreshBounceTraders();
     } catch (err) {
       console.error(err);
-      setWatchlistStatus(err?.message || 'Failed to load watchlist.', true);
+      button.disabled = false;
+      setBounceTradersStatus(err?.message || 'Failed to stop bounce trader.', true);
     }
-  };
-
-  const refreshStateSyncStatus = async () => {
-    if (!watchlistItems) return null;
-    if (stateSyncInFlight) return stateSyncInFlight;
-    stateSyncInFlight = (async () => {
-      try {
-        const payload = await fetchJson('/api/state-sync/status');
-        stateSyncState = payload && typeof payload === 'object' ? payload : null;
-        applyStateSyncModeLabel(stateSyncState);
-        const restoreStatus = String(stateSyncState?.restore_status || '').toLowerCase();
-        if (restoreStatus === 'pending') {
-          watchlistLoaded = false;
-          renderWatchlist(watchlistState);
-          setWatchlistStatus('Loading state…', false);
-        } else if (restoreStatus === 'failed') {
-          setWatchlistStatus((String(stateSyncState?.effective_state_source || '').toLowerCase() === 'repo_local' || String(stateSyncState?.effective_state_source || '').toLowerCase() === 'local') ? `Repo-local restore failed: ${stateSyncState?.restore_error || 'unknown error'}` : `Dropbox restore failed: ${stateSyncState?.restore_error || 'unknown error'}`, true);
-        } else if (stateSyncState?.enabled === false) {
-          setWatchlistStatus((String(stateSyncState?.effective_state_source || '').toLowerCase() === 'repo_local' || String(stateSyncState?.effective_state_source || '').toLowerCase() === 'local') ? 'Saved to repo-local state files.' : 'Saved locally only; repo deletion can lose unsynced state.', false);
-        }
-      } catch (err) {
-        console.error(err);
-      } finally {
-        stateSyncInFlight = null;
-      }
-    })();
-    return stateSyncInFlight;
-  };
-
-  const fetchRemoteBackupSummary = async () => {
-    if (!watchlistItems) return null;
-    try {
-      const payload = await fetchJson('/api/state-sync/remote-backup-summary');
-      return payload && typeof payload === 'object' ? payload : null;
-    } catch (err) {
-      console.error(err);
-      return null;
-    }
-  };
-
-  const scheduleStateSyncPolling = () => {
-    if (!watchlistItems) return;
-    if (stateSyncPollTimer) clearInterval(stateSyncPollTimer);
-    stateSyncPollTimer = setInterval(async () => {
-      await refreshStateSyncStatus();
-      const restoreStatus = String(stateSyncState?.restore_status || '').toLowerCase();
-      if (restoreStatus !== 'pending') {
-        if (stateSyncPollTimer) clearInterval(stateSyncPollTimer);
-        stateSyncPollTimer = null;
-      }
-    }, 1500);
-  };
-
-  const addWatchlistItems = async () => {
-    if (watchlistEditingBlocked()) {
-      setWatchlistStatus('Watchlist edits blocked until state restore/sync is healthy.', true);
-      return;
-    }
-    const rawAdditions = normalizeWatchlistInput(watchlistInput?.value);
-    const additions = [];
-    for (const symbol of rawAdditions) {
-      additions.push(await resolveBybitSymbol(symbol));
-    }
-    if (!additions.length) {
-      setWatchlistStatus('Enter at least one symbol.', true);
-      return;
-    }
-    const next = Array.from(new Set([...watchlistState, ...additions]));
-    await saveWatchlist(next, `Saved ${next.length} item${next.length === 1 ? '' : 's'}.`);
-    if (watchlistInput) watchlistInput.value = '';
-  };
-
-  const removeWatchlistItem = async (symbol) => {
-    const target = String(symbol || '').trim().toUpperCase();
-    if (!target) return;
-    const next = watchlistState.filter((item) => String(item || '').toUpperCase() !== target);
-    await saveWatchlist(next, `Removed ${target}.`);
-  };
-
-  const clearWatchlist = async () => {
-    if (watchlistEditingBlocked()) {
-      setWatchlistStatus('Watchlist edits blocked until state restore/sync is healthy.', true);
-      return;
-    }
-    if (!watchlistState.length || watchlistInFlight) return;
-    await saveWatchlist([], 'Watchlist cleared.');
   };
 
   const setPineStatus = (message, isErr = false) => {
@@ -913,14 +721,6 @@
     refreshScripts();
     if (oandaHeadline) refreshOandaInactivity();
   });
-  watchlistAddBtn?.addEventListener('click', () => addWatchlistItems());
-  watchlistInput?.addEventListener('keydown', (event) => {
-    if (event.key === 'Enter') {
-      event.preventDefault();
-      addWatchlistItems();
-    }
-  });
-  watchlistClearBtn?.addEventListener('click', () => clearWatchlist());
   oandaToggleBtn?.addEventListener('click', () => {
     oandaExpanded = !oandaExpanded;
     syncOandaDetailsVisibility();
@@ -934,15 +734,6 @@
   }
   refreshScripts();
   refreshPineScripts();
-  if (watchlistItems) {
-    refreshStateSyncStatus().then(() => {
-      const restoreStatus = String(stateSyncState?.restore_status || '').toLowerCase();
-      if (restoreStatus === 'pending') {
-        scheduleStateSyncPolling();
-      }
-      refreshWatchlist();
-    });
-  }
   if (oandaHeadline) {
     refreshOandaInactivity();
     syncOandaDetailsVisibility();
@@ -950,7 +741,7 @@
   restartPolling();
   document.addEventListener('visibilitychange', restartPolling);
   window.addEventListener('beforeunload', () => {
-    [scriptsTimer, oandaTimer, oandaSecondTimer, stateSyncPollTimer].forEach((id) => {
+    [scriptsTimer, oandaTimer, oandaSecondTimer].forEach((id) => {
       if (id) clearInterval(id);
     });
     cleanupWorkspaceHeightObservers();
