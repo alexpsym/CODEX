@@ -262,6 +262,7 @@ class TraderControlWindow:
         self.refresh_ms = clamp(refresh_ms, MIN_REFRESH_MS, MAX_REFRESH_MS)
         self.on_close = on_close
         self.last_seen_result_id: str | None = None
+        self.session_command_ids: set[str] = set()
         self.buttons: list[ttk.Button] = []
 
         root.title("Trader Controls")
@@ -327,6 +328,7 @@ class TraderControlWindow:
         except OSError as exc:
             self.result_var.set(f"{ACTION_LABELS[action]} | blocked | Command write failed: {exc}")
         else:
+            self.session_command_ids.add(command["command_id"])
             self.result_var.set(f"{ACTION_LABELS[action]} | pending | {command['command_id']}")
         self._refresh()
 
@@ -344,7 +346,11 @@ class TraderControlWindow:
         result = state.result
         if result and result.get("instance_id") == self.protocol.identity.instance_id:
             command_id = result.get("command_id")
-            if isinstance(command_id, str) and command_id != self.last_seen_result_id:
+            if (
+                isinstance(command_id, str)
+                and command_id in self.session_command_ids
+                and command_id != self.last_seen_result_id
+            ):
                 self.last_seen_result_id = command_id
                 action = ACTION_LABELS.get(str(result.get("action")), str(result.get("action") or "UNKNOWN"))
                 outcome = str(result.get("outcome") or "unknown")

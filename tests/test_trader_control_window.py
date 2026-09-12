@@ -79,6 +79,84 @@ def test_window_writes_one_atomic_scoped_command_and_blocks_duplicate_pending_cl
         protocol.issue_command("trendline", now=now + 1)
 
 
+def test_window_only_displays_results_issued_in_its_current_session() -> None:
+    window = _window_module()
+    identity = window.InstanceIdentity("A1B2C3D4", 123456, "Pepperstone-Demo", 9988, "EURUSD.a", 91001, "2.42")
+    now = int(time.time())
+
+    class Value:
+        def __init__(self, value: str) -> None:
+            self.value = value
+
+        def set(self, value: str) -> None:
+            self.value = value
+
+    class Root:
+        def after(self, _delay: int, _callback: object) -> None:
+            pass
+
+    class Button:
+        def state(self, _state: list[str]) -> None:
+            pass
+
+    old_result = {
+        "instance_id": identity.instance_id,
+        "command_id": "prior-window-command",
+        "action": "market",
+        "outcome": "blocked",
+        "reason": "Desktop command is stale or has an invalid future timestamp.",
+    }
+    current_command = {
+        "command_id": "current-window-command",
+        "action": "market",
+    }
+    status = {"orders_enabled": True, "updated_at": now}
+    control_state = window.ControlState(True, True, "Ready for one explicit command.", None, status, old_result)
+
+    class Protocol:
+        def __init__(self) -> None:
+            self.identity = identity
+
+        def state(self) -> object:
+            return control_state
+
+        def issue_command(self, action: str) -> dict[str, str]:
+            assert action == "market"
+            return current_command
+
+    control = object.__new__(window.TraderControlWindow)
+    control.root = Root()
+    control.protocol = Protocol()
+    control.refresh_ms = 250
+    control.last_seen_result_id = None
+    control.session_command_ids = set()
+    control.buttons = [Button()]
+    control.connection_var = Value("")
+    control.result_var = Value("Last command: none")
+
+    control._refresh()
+    assert control.result_var.value == "Last command: none"
+
+    control._click("market")
+    assert control.result_var.value == "MARKET ORDER | pending | current-window-command"
+    assert control.session_command_ids == {"current-window-command"}
+
+    control_state = window.ControlState(
+        True,
+        True,
+        "Ready for one explicit command.",
+        None,
+        status,
+        {**old_result, **current_command, "outcome": "accepted", "reason": "Submitted."},
+    )
+    control._refresh()
+    assert control.result_var.value == "MARKET ORDER | accepted | Submitted."
+
+    control_state = window.ControlState(True, True, "Ready for one explicit command.", None, status, old_result)
+    control._refresh()
+    assert control.result_var.value == "MARKET ORDER | accepted | Submitted."
+
+
 def test_status_diagnostics_are_precise_fail_closed_and_snapshot_scoped(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
