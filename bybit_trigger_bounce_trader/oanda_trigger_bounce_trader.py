@@ -106,6 +106,13 @@ def _normalize_price(value: object, display_precision: int, name: str) -> Decima
     return result
 
 
+def _validate_protective_prices(entry: Decimal, stop: Optional[Decimal], target: Optional[Decimal], side: str) -> None:
+    if stop is not None and ((side == "buy" and stop >= entry) or (side == "sell" and stop <= entry)):
+        raise RuntimeError(f"OANDA rounded stop-loss price is invalid for {side} entry.")
+    if target is not None and ((side == "buy" and target <= entry) or (side == "sell" and target >= entry)):
+        raise RuntimeError(f"OANDA rounded take-profit price is invalid for {side} entry.")
+
+
 def _instrument_meta(instrument: str) -> Dict[str, object]:
     account_id = _oanda_account_id()
     data = _request("GET", f"/accounts/{account_id}/instruments", params={"instruments": instrument})
@@ -147,6 +154,7 @@ def _fixed_aud_order_values(instrument: str, trigger_price: float) -> tuple[Deci
         display_precision,
         "stop-loss price",
     )
+    _validate_protective_prices(entry, stop, None, SIDE.lower())
     summary = _request("GET", f"/accounts/{account_id}/summary")
     home = str((summary.get("account") or summary).get("currency") or "").upper()
     quote = instrument.split("_", 1)[-1]
@@ -325,6 +333,8 @@ def _place_pending_order(instrument: str, trigger_price: float) -> str:
     elif RISK_MODE == "fixed_aud" and RR_RATIO > 0 and sl_price is not None:
         distance = abs(entry - sl_price) * Decimal(str(RR_RATIO))
         tp_price = _normalize_price(entry + distance if side == "buy" else entry - distance, display_precision, "take-profit price")
+
+    _validate_protective_prices(entry, sl_price, tp_price, side)
 
     order: Dict[str, object] = {
         "type": order_type,

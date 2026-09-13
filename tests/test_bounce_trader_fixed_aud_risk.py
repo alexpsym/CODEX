@@ -179,3 +179,49 @@ def test_fixed_aud_missing_metadata_blocks_order(monkeypatch) -> None:
     with pytest.raises(RuntimeError, match="metadata is incomplete"):
         worker._place_pending_order("EUR_USD", 1.1)
     assert posts == []
+
+
+def test_oanda_rejects_stop_rounded_to_entry_before_post(monkeypatch) -> None:
+    worker = _load("rounded_stop_worker", ROOT / "bybit_trigger_bounce_trader" / "oanda_trigger_bounce_trader.py")
+    worker.RISK_MODE, worker.RISK_AUD, worker.SL_TICKS, worker.SIDE = "fixed_aud", Decimal("10"), 0.1, "Buy"
+    monkeypatch.setattr(worker, "_oanda_account_id", lambda: "acct")
+    monkeypatch.setattr(worker.oanda_api, "get_price", lambda *args, **kwargs: "1.00000")
+    posts = []
+    monkeypatch.setattr(worker, "_request", lambda method, endpoint, **kwargs: posts.append(kwargs) if method == "POST" else {"instruments": [{"displayPrecision": 5, "tradeUnitsPrecision": 0, "minimumTradeSize": "1", "maximumOrderUnits": "100000", "maximumPositionSize": "100000"}]} if endpoint.endswith("/instruments") else {"account": {"currency": "AUD"}})
+    with pytest.raises(RuntimeError, match="rounded stop-loss price"):
+        worker._place_pending_order("EUR_USD", 1.1)
+    assert posts == []
+
+
+def test_oanda_rejects_target_rounded_to_entry_before_post(monkeypatch) -> None:
+    worker = _load("rounded_target_worker", ROOT / "bybit_trigger_bounce_trader" / "oanda_trigger_bounce_trader.py")
+    worker.RISK_MODE, worker.DEFAULT_QTY, worker.SL_TICKS, worker.RR_RATIO, worker.SIDE = "fixed_qty", 1000.0, 10.0, 0.01, "Sell"
+    monkeypatch.setattr(worker, "_oanda_account_id", lambda: "acct")
+    monkeypatch.setattr(worker.oanda_api, "get_price", lambda *args, **kwargs: "1.20000")
+    monkeypatch.setattr(worker.oanda_api, "get_instrument_details", lambda *args, **kwargs: {"displayPrecision": 5, "tradeUnitsPrecision": 0, "minimumTradeSize": "1", "maximumOrderUnits": "100000", "maximumPositionSize": "100000"})
+    posts = []
+    monkeypatch.setattr(worker, "_request", lambda method, endpoint, **kwargs: posts.append(kwargs) if method == "POST" else {})
+    with pytest.raises(RuntimeError, match="rounded take-profit price"):
+        worker._place_pending_order("EUR_USD", 1.1)
+    assert posts == []
+
+
+def test_oanda_accepts_one_tick_stop_and_target_after_validation(monkeypatch) -> None:
+    worker = _load("one_tick_worker", ROOT / "bybit_trigger_bounce_trader" / "oanda_trigger_bounce_trader.py")
+    worker.RISK_MODE, worker.RISK_AUD, worker.SL_TICKS, worker.RR_RATIO, worker.SIDE = "fixed_aud", Decimal("10"), 1.0, 1.0, "Buy"
+    monkeypatch.setattr(worker, "_oanda_account_id", lambda: "acct")
+    monkeypatch.setattr(worker.oanda_api, "get_price", lambda *args, **kwargs: "1.00000")
+    posts = []
+    def request(method, endpoint, *, params=None, json_body=None):
+        if method == "POST":
+            posts.append(json_body["order"])
+            return {"orderCreateTransaction": {"id": "one-tick"}}
+        if endpoint.endswith("/instruments"):
+            return {"instruments": [{"displayPrecision": 5, "tradeUnitsPrecision": 0, "minimumTradeSize": "1", "maximumOrderUnits": "1000000", "maximumPositionSize": "1000000"}]}
+        if endpoint.endswith("/summary"):
+            return {"account": {"currency": "AUD"}}
+        return {"prices": [{"instrument": "EUR_USD", "bids": [{"price": "1.09999"}], "asks": [{"price": "1.10001"}]}], "homeConversions": [{"currency": "USD", "accountGain": "1", "accountLoss": "1", "positionValue": "1"}]}
+    monkeypatch.setattr(worker, "_request", request)
+    assert worker._place_pending_order("EUR_USD", 1.1) == "one-tick"
+    assert len(posts) == 1
+    assert Decimal(posts[0]["stopLossOnFill"]["price"]) < Decimal(posts[0]["price"]) < Decimal(posts[0]["takeProfitOnFill"]["price"])
