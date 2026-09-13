@@ -2765,6 +2765,130 @@ def test_merge_missing_timeline_balances_with_broker_zero_overrides_stale_timeli
     bal = next(b for b in merged if str(b.get('label')) == 'BINANCE')
     assert bal['balance'] == 0
     assert bal['balance_source'] == 'broker_account_summary'
+
+
+@pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
+@pytest.mark.parametrize(
+    ('account', 'statement_balance', 'summary_balance'),
+    [
+        ('OANDA DEMO', 125.0, 140.0),
+        ('OANDA LIVE', 55.0, 0.0),
+    ],
+    ids=['demo', 'live'],
+)
+def test_oanda_newer_summary_replaces_older_statement_balance(account, statement_balance, summary_balance):
+    timeline = [{
+        'account': account,
+        'label': account,
+        'balance': statement_balance,
+        'currency': 'AUD',
+        'balance_source': 'oanda_transaction_export_balance',
+        'as_of': '2026-06-01T00:00:00Z',
+    }]
+    merged = master_service._merge_missing_timeline_balances_with_broker(timeline, [{
+        'account': account,
+        'label': account,
+        'balance': summary_balance,
+        'nav': 999.0,
+        'currency': 'AUD',
+        'balance_source': 'oanda_account_summary',
+        'source': 'oanda_account_summary',
+        'as_of': '2026-06-02T00:00:00Z',
+    }])
+    result = next(item for item in merged if item['label'] == account)
+    assert result['balance'] == summary_balance
+    assert result['balance_source'] == 'oanda_account_summary'
+
+
+@pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
+def test_oanda_older_summary_preserves_newer_authoritative_balance():
+    timeline = [{
+        'account': 'OANDA DEMO', 'label': 'OANDA DEMO', 'balance': 210.0,
+        'currency': 'AUD', 'balance_source': 'oanda_transaction_export_balance',
+        'as_of': '2026-06-03T00:00:00Z',
+    }]
+    merged = master_service._merge_missing_timeline_balances_with_broker(timeline, [{
+        'account': 'OANDA DEMO', 'label': 'OANDA DEMO', 'balance': 150.0,
+        'currency': 'AUD', 'balance_source': 'oanda_account_summary',
+        'as_of': '2026-06-02T00:00:00Z',
+    }])
+    assert merged[0]['balance'] == 210.0
+    assert merged[0]['balance_source'] == 'oanda_transaction_export_balance'
+
+
+@pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
+def test_oanda_missing_balance_does_not_use_nav():
+    timeline = [{
+        'account': 'OANDA DEMO', 'label': 'OANDA DEMO', 'balance': 210.0,
+        'currency': 'AUD', 'balance_source': 'oanda_transaction_export_balance',
+        'as_of': '2026-06-01T00:00:00Z',
+    }]
+    merged = master_service._merge_missing_timeline_balances_with_broker(timeline, [{
+        'account': 'OANDA DEMO', 'label': 'OANDA DEMO', 'balance': None,
+        'nav': 999.0, 'currency': 'AUD', 'balance_source': 'oanda_account_summary',
+        'as_of': '2026-06-02T00:00:00Z',
+    }])
+    assert merged[0]['balance'] == 210.0
+    assert merged[0]['balance_source'] == 'oanda_transaction_export_balance'
+
+
+@pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
+def test_oanda_balance_merge_keeps_account_and_currency_isolated():
+    timeline = [
+        {'account': 'OANDA DEMO', 'label': 'OANDA DEMO', 'balance': 10.0, 'currency': 'AUD', 'balance_source': 'oanda_transaction_export_balance', 'as_of': '2026-06-01T00:00:00Z'},
+        {'account': 'OANDA LIVE', 'label': 'OANDA LIVE', 'balance': 20.0, 'currency': 'USD', 'balance_source': 'oanda_transaction_export_balance', 'as_of': '2026-06-01T00:00:00Z'},
+    ]
+    merged = master_service._merge_missing_timeline_balances_with_broker(timeline, [
+        {'account': 'OANDA DEMO', 'label': 'OANDA DEMO', 'balance': 30.0, 'currency': 'USD', 'balance_source': 'oanda_account_summary', 'as_of': '2026-06-02T00:00:00Z'},
+        {'account': 'OANDA LIVE', 'label': 'OANDA LIVE', 'balance': 40.0, 'currency': 'AUD', 'balance_source': 'oanda_account_summary', 'as_of': '2026-06-02T00:00:00Z'},
+    ])
+    values = {item['label']: (item['balance'], item['currency']) for item in merged}
+    assert values == {'OANDA DEMO': (10.0, 'AUD'), 'OANDA LIVE': (20.0, 'USD')}
+
+
+@pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
+def test_oanda_snapshot_statistics_use_final_balances(monkeypatch, tmp_path):
+    ms = _load_master_service_for_import_test()
+    timeline_balance = {
+        'account': 'OANDA DEMO', 'label': 'OANDA DEMO', 'balance': 100.0,
+        'currency': 'AUD', 'balance_source': 'oanda_transaction_export_balance',
+        'as_of': '2026-06-01T00:00:00Z',
+    }
+    summary_balance = {
+        'account': 'OANDA DEMO', 'label': 'OANDA DEMO', 'balance': 125.0,
+        'currency': 'AUD', 'balance_source': 'oanda_account_summary',
+        'as_of': '2026-06-02T00:00:00Z',
+    }
+    captured = {}
+    monkeypatch.setenv('TRADING_JOURNAL_SOURCE', 'local')
+    monkeypatch.setattr(ms, '_load_trading_journal_view_snapshot', lambda: None)
+    monkeypatch.setattr(ms, '_journal_source_fingerprint', lambda: {})
+    monkeypatch.setattr(ms, '_master_journal_authoritative_enabled', lambda: False)
+    monkeypatch.setattr(ms, '_master_journal_single_file_mode', lambda: False)
+    monkeypatch.setattr(ms, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
+    monkeypatch.setattr(ms, '_get_trading_journal_rows', lambda: [])
+    monkeypatch.setattr(ms, '_trading_journal_local_excel_authoritative', lambda: False)
+    monkeypatch.setattr(ms, '_get_excel_account_balances', lambda: [])
+    monkeypatch.setattr(ms, '_load_json_file', lambda *_args, **_kwargs: {'broker_account_balances': [summary_balance]})
+    monkeypatch.setattr(ms, '_load_cashflows_for_active_journal_source', lambda _state: {})
+    monkeypatch.setattr(ms, '_reconcile_oanda_export_balance_labels', lambda balances, _ledger: (balances, []))
+    monkeypatch.setattr(ms, '_build_journal_balance_timelines', lambda *_args: {'rows': [], 'balances': [timeline_balance], 'diagnostics': {}})
+    monkeypatch.setattr(ms, '_monthly_aud_revaluation_rows_for_journal_view', lambda: [])
+    monkeypatch.setattr(ms, '_build_trading_journal_diagnostics_snapshot', lambda: {})
+    monkeypatch.setattr(ms, '_list_local_oanda_history_exports', lambda: [])
+    monkeypatch.setattr(ms, '_save_trading_journal_view_snapshot', lambda _payload: None)
+    monkeypatch.setattr(ms, '_persist_trading_journal_sqlite', lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(ms, '_attach_trading_journal_equity_metadata', lambda payload: payload)
+    def _capture_stats(_items, balances):
+        captured['balances'] = [dict(item) for item in balances]
+        return {'totals': {}}
+
+    monkeypatch.setattr(ms, '_compute_journal_stats_with_period_reports', _capture_stats)
+
+    snapshot = ms._build_trading_journal_view_snapshot(force=True, persist_sqlite=False)
+
+    assert captured['balances'][0]['balance'] == 125.0
+    assert snapshot['balances'][0]['balance'] == 125.0
 @pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
 def test_sync_master_journal_uses_zero_cashflow_anchor_when_cashflow_new_balance_blank(tmp_path, monkeypatch):
     from tools.master_journal_workbook import build_master_journal_workbook

@@ -2842,11 +2842,11 @@ def _build_trading_journal_view_snapshot(
     monthly_note_rows = _monthly_aud_revaluation_rows_for_journal_view()
     combined_items = sorted([*trade_items, *cashflow_rows, *other_non_trade_rows, *monthly_note_rows], key=_row_sort_dt, reverse=True)
     balances = timeline.get("balances") if isinstance(timeline.get("balances"), list) else []
-    stats = _compute_journal_stats_with_period_reports(stats_items, balances)
     broker_balances = (state or {}).get("broker_account_balances") if isinstance(state, dict) else []
     if not isinstance(broker_balances, list):
         broker_balances = []
     balances = _merge_missing_timeline_balances_with_broker(balances, broker_balances)
+    stats = _compute_journal_stats_with_period_reports(stats_items, balances)
     for bal in balances:
         if not isinstance(bal, dict):
             continue
@@ -10074,7 +10074,13 @@ def _merge_missing_timeline_balances_with_broker(
         if _is_bybit_demo_account_label(label) and not ENABLE_BYBIT_DEMO_JOURNAL:
             continue
         key = _norm_account_key(label)
+        broker_source = str(broker.get("balance_source") or broker.get("source") or "").strip().lower()
+        is_oanda_summary = key.startswith("OANDA ") and broker_source == "oanda_account_summary"
         broker_balance = _to_float(broker.get("balance"))
+        if is_oanda_summary and (broker_balance is None or not math.isfinite(broker_balance)):
+            # NAV is a distinct OANDA value. A missing account balance is not
+            # evidence for substituting NAV, equity, or a synthetic zero.
+            continue
         if broker_balance is None:
             broker_balance = _to_float(broker.get("nav"))
         existing_idx = by_key.get(key)
@@ -10091,11 +10097,24 @@ def _merge_missing_timeline_balances_with_broker(
         existing_balance = _to_float(existing.get("balance"))
         if broker_balance is None:
             continue
-        existing_as_of_ts = _to_float(pd.to_datetime(existing.get("as_of"), utc=True).timestamp()) if existing.get("as_of") else None
-        broker_as_of_ts = _to_float(pd.to_datetime(broker.get("as_of"), utc=True).timestamp()) if broker.get("as_of") else None
+        existing_as_of_ts = _timestamp_epoch_seconds(existing.get("as_of"))
+        broker_as_of_ts = _timestamp_epoch_seconds(broker.get("as_of"))
+        existing_as_of_known = math.isfinite(existing_as_of_ts)
+        broker_as_of_known = math.isfinite(broker_as_of_ts)
+        existing_currency = str(existing.get("currency") or "").strip().upper()
+        broker_currency = str(broker.get("currency") or "").strip().upper()
+        if is_oanda_summary:
+            # An OANDA summary is only comparable with the same named account
+            # and currency. Its timestamp must prove that it is newer.
+            if not broker_currency:
+                continue
+            if existing_balance is not None and not bool(existing.get("missing_balance")):
+                if not existing_currency or existing_currency != broker_currency:
+                    continue
+                if not (existing_as_of_known and broker_as_of_known and broker_as_of_ts > existing_as_of_ts):
+                    continue
         if existing_balance is not None and not bool(existing.get("missing_balance")):
             existing_source = str(existing.get("balance_source") or existing.get("source") or "").lower()
-            broker_source = str(broker.get("balance_source") or broker.get("source") or "").lower()
             trusted_broker_sources = {"oanda_account_summary", "broker_account_summary", "bybit_wallet_balance", "bybit_demo_wallet_balance_anchor"}
             can_override = "cashflow" in existing_source or existing_source in {"timeline_missing", "excel_account_balance", "trade_timeline"}
             if existing_source == "authoritative_trade_balance":
@@ -10107,9 +10126,9 @@ def _merge_missing_timeline_balances_with_broker(
                 existing['skipped_broker_balance_reason'] = 'existing_bybit_balance_preserved'
                 merged[existing_idx] = existing
                 continue
-            if not can_override:
+            if not can_override and not is_oanda_summary:
                 continue
-            if existing_as_of_ts is not None and broker_as_of_ts is not None and existing_as_of_ts > broker_as_of_ts:
+            if (not is_oanda_summary) and existing_as_of_known and broker_as_of_known and existing_as_of_ts > broker_as_of_ts:
                 continue
         resolved = dict(existing)
         resolved["previous_balance"] = existing_balance
@@ -10117,7 +10136,7 @@ def _merge_missing_timeline_balances_with_broker(
         resolved["label"] = label
         resolved["account"] = label
         resolved["account_label"] = label
-        resolved["currency"] = str(broker.get("currency") or existing.get("currency") or _infer_account_currency(label))
+        resolved["currency"] = broker_currency or existing_currency or _infer_account_currency(label)
         source = str(broker.get("source") or broker.get("balance_source") or "bybit_wallet_balance")
         resolved["source"] = source
         resolved["balance_source"] = str(broker.get("balance_source") or broker.get("source") or source)
@@ -36951,7 +36970,7 @@ async def _run_trading_journal_sync_job() -> None:
                             "label": label,
                             "balance": _to_float(summary.get("balance")),
                             "nav": _to_float(summary.get("nav")),
-                            "currency": str(summary.get("currency") or "AUD"),
+                            "currency": str(summary.get("currency") or "").strip().upper(),
                             "source": "oanda_account_summary",
                             "balance_source": "oanda_account_summary",
                             "account_mode": account_mode,
