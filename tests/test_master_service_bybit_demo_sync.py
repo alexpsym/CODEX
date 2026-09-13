@@ -1112,31 +1112,21 @@ def test_local_authoritative_sync_bybit_demo_writes_real_workbook(tmp_path, monk
     assert any(str(v) == "oid-real-1" for v in df["order_id"].tolist())
 
 
-def test_run_sync_job_pre_sanitizes_local_demo_workbook_with_wallet_snapshot(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(master_service, "TRADING_JOURNAL_LOCAL_DIR", tmp_path)
-    monkeypatch.setattr(master_service, "ENABLE_BYBIT_DEMO_JOURNAL", True)
-    monkeypatch.setattr(master_service, "_trading_journal_source_mode", lambda: "local")
-    monkeypatch.setattr(master_service, "_trading_journal_local_excel_authoritative", lambda: True)
-    monkeypatch.setattr(master_service, "_trading_journal_broker_refresh_enabled", lambda: False)
-    monkeypatch.setattr(master_service, "_trading_journal_bybit_demo_balance_anchor_enabled", lambda: True)
-    monkeypatch.setattr(master_service, "_set_trading_journal_sync_state", lambda **_: None)
-    monkeypatch.setattr(master_service, "_run_bybit_closed_pnl_sync", lambda **_: asyncio.sleep(0, result={"ok": True}))
-    monkeypatch.setattr(master_service, "_recover_oanda_recent_fills", lambda *_: asyncio.sleep(0, result={"ok": True}))
-    monkeypatch.setattr(master_service, "_import_trading_journal_from_sources", lambda **_: {"ok": True, "rows_imported": 0, "diagnostics": {}, "warnings": []})
-    monkeypatch.setattr(master_service, "_read_excel_sheet_or_empty", lambda *_: master_service.pd.DataFrame([{"net_profit": 1.0, "balance_after_trade": None}]))
-    monkeypatch.setattr(master_service, "_coerce_bybit_demo_workbook_frame", lambda frame: frame)
-    monkeypatch.setattr(master_service, "_bybit_demo_workbook_has_rows_needing_balance", lambda _f: True)
-    monkeypatch.setattr(master_service, "_fetch_bybit_balance_usdt", lambda _acct: asyncio.sleep(0, result={"available_usdt": 10}))
-    monkeypatch.setattr(master_service, "_fetch_bybit_demo_current_balance_snapshot", lambda: asyncio.sleep(0, result={"current_balance": 224.87769878}))
-    calls = {"sanitize": 0}
-    monkeypatch.setattr(master_service, "_sanitize_bybit_demo_local_workbook", lambda *_a, **_k: calls.__setitem__("sanitize", calls["sanitize"] + 1) or {"changed": 1})
-    saved = {"broker_account_balances": [{"account": "Bybit Live", "label": "Bybit Live", "balance": 11.0}]}
-    monkeypatch.setattr(master_service, "_load_trading_journal_state", lambda: dict(saved))
-    monkeypatch.setattr(master_service, "_save_trading_journal_state", lambda s: saved.update(s))
-    asyncio.run(master_service._run_trading_journal_sync_job())
-    assert calls["sanitize"] >= 1
-    assert any(str((b or {}).get("label")) == "Bybit Demo" for b in saved.get("broker_account_balances", []))
-    assert any(str((b or {}).get("label")) == "Bybit Live" for b in saved.get("broker_account_balances", []))
+def test_run_sync_job_skips_local_demo_wallet_anchor(tmp_path, monkeypatch) -> None:
+    assert master_service._trading_journal_bybit_demo_balance_anchor_enabled() is False
+    merged = master_service._merge_missing_timeline_balances_with_broker(
+        [{'account': 'Bybit Demo', 'label': 'Bybit Demo', 'balance': 900.0, 'currency': 'USDT', 'balance_source': 'journal_recorded_balance_timeline'}],
+        [{'account': 'Bybit Demo', 'label': 'Bybit Demo', 'balance': 999.0, 'currency': 'USDT', 'balance_source': 'bybit_wallet_balance'}],
+    )
+    assert merged[0]['balance'] == 900.0
+    snapshot = {'balances': [], 'diagnostics': {'errors': ['Missing balance anchor for accounts: BYBIT DEMO']}}
+    monkeypatch.setattr(master_service, '_load_trading_journal_view_snapshot', lambda: snapshot)
+    monkeypatch.setattr(master_service, '_queue_trading_journal_sync_if_idle', lambda *_: (_ for _ in ()).throw(AssertionError('wallet repair must not be queued')))
+    response = asyncio.run(master_service.trading_journal_balances())
+    payload = json.loads(response.body.decode('utf-8'))
+    assert response.status_code == 503
+    assert payload['items'] == []
+    assert any('Missing balance anchor for accounts: BYBIT DEMO' in str(error) for error in payload['errors'])
 
 
 def test_run_sync_job_demo_anchor_failure_keeps_missing_warning(tmp_path, monkeypatch) -> None:

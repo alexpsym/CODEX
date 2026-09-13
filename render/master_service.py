@@ -1288,11 +1288,9 @@ def _allow_manual_bybit_demo_broker_rows_in_single_file(*, account_mode: str, re
 
 
 def _trading_journal_bybit_demo_balance_anchor_enabled() -> bool:
-    if not ENABLE_BYBIT_DEMO_JOURNAL:
-        return False
-    if _trading_journal_source_mode() != "local":
-        return False
-    return bool(TRADING_JOURNAL_BYBIT_DEMO_BALANCE_ANCHOR_ENABLED)
+    # A wallet snapshot is not a journal event. Bybit Demo balances are derived
+    # exclusively from recorded journal activity and manual adjustments.
+    return False
 
 
 def _is_test_trade_value(value: object) -> bool:
@@ -9666,7 +9664,7 @@ def _build_journal_balance_timelines(
         if source in {"oanda", "oanda_transaction_export", "excel", "local_excel", "master_journal"}:
             return bal
         bal_source = str(row.get("balance_after_trade_source") or "").strip().lower()
-        if bal_source == "master_journal":
+        if bal_source in {"master_journal", "bybit_transaction_log_cash_balance"}:
             return bal
         raw_refs = row.get("raw_refs") if isinstance(row.get("raw_refs"), dict) else {}
         raw_excel = row.get("raw_excel") if isinstance(row.get("raw_excel"), dict) else {}
@@ -9761,6 +9759,11 @@ def _build_journal_balance_timelines(
         ignored_cashflow_anchor_count = len(raw_events) - len(events)
         event_ts = [_to_ts(e.get("date")) for e in events]
         has_cashflow = len(events) > 0
+        account_label_hint = str(
+            bucket.get("excel_label")
+            or (bucket.get("labels")[-1][0] if bucket.get("labels") else account_key)
+        )
+        is_bybit_demo_account = _is_bybit_demo_account_label(account_label_hint)
         segment_running: Dict[int, float] = {}
         last_known_balance: Optional[float] = None
         last_known_ts = float("-inf")
@@ -9833,6 +9836,48 @@ def _build_journal_balance_timelines(
                 last_known_balance = after
                 last_known_ts = trade_ts
 
+        bybit_demo_journal_balance: Optional[float] = None
+        bybit_demo_journal_as_of: Optional[object] = None
+        if is_bybit_demo_account:
+            # Treat each recorded cashflow/new-balance and confirmed post-trade
+            # balance as a chronological journal checkpoint. A later P&L then
+            # advances that checkpoint exactly once; no wallet value is used.
+            chronological_events: List[Tuple[float, int, str, object]] = []
+            chronological_events.extend((event_ts[i], 0, "cashflow", event) for i, event in enumerate(events))
+            chronological_events.extend(
+                (_to_ts(out_rows[row_idx].get("close_time") or out_rows[row_idx].get("open_time")), 1, "trade", row_idx)
+                for row_idx in trade_indices
+            )
+            for event_time, _kind_rank, event_kind, event_value in sorted(chronological_events, key=lambda item: (item[0], item[1])):
+                if event_kind == "cashflow":
+                    event = event_value if isinstance(event_value, dict) else {}
+                    checkpoint = _to_float(event.get("new_balance"))
+                    if checkpoint is None:
+                        continue
+                    bybit_demo_journal_balance = checkpoint
+                    bybit_demo_journal_as_of = event.get("date")
+                    continue
+                row_idx = int(event_value)
+                row = out_rows[row_idx]
+                pnl = _row_pnl(row)
+                confirmed_after = _authoritative_balance_after_trade(row)
+                if confirmed_after is not None:
+                    bybit_demo_journal_balance = confirmed_after
+                    bybit_demo_journal_as_of = row.get("close_time") or row.get("open_time")
+                    row["analysis_balance_before_trade"] = confirmed_after - pnl if _apply_pnl_to_balance(row, pnl) else confirmed_after
+                    row["analysis_balance_after_trade"] = confirmed_after
+                    row["analysis_balance_before_trade_source"] = "recorded_post_trade_balance"
+                    continue
+                if bybit_demo_journal_balance is None:
+                    continue
+                before = bybit_demo_journal_balance
+                after = before + pnl if _apply_pnl_to_balance(row, pnl) else before
+                bybit_demo_journal_balance = after
+                bybit_demo_journal_as_of = row.get("close_time") or row.get("open_time")
+                row["analysis_balance_before_trade"] = before
+                row["analysis_balance_after_trade"] = after
+                row["analysis_balance_before_trade_source"] = "recorded_balance_plus_trade_result"
+
         latest_trade_authoritative_balance: Optional[float] = None
         latest_trade_authoritative_ts = float("-inf")
         latest_trade_authoritative_as_of: Optional[object] = None
@@ -9878,7 +9923,12 @@ def _build_journal_balance_timelines(
                 selected_authoritative_as_of = bucket.get("excel_balance_as_of")
         latest_authoritative_at = selected_authoritative_as_of
 
-        if has_cashflow:
+        if is_bybit_demo_account:
+            if bybit_demo_journal_balance is not None:
+                display_balance = bybit_demo_journal_balance
+                balance_source = "journal_recorded_balance_timeline"
+                as_of = bybit_demo_journal_as_of
+        elif has_cashflow:
             latest_event_idx = len(events) - 1
             base = _to_float(events[latest_event_idx].get("new_balance"))
             latest_cashflow_ts = _to_ts(events[latest_event_idx].get("date"))
@@ -10075,6 +10125,10 @@ def _merge_missing_timeline_balances_with_broker(
             continue
         key = _norm_account_key(label)
         broker_source = str(broker.get("balance_source") or broker.get("source") or "").strip().lower()
+        if _is_bybit_demo_account_label(label) and broker_source in {"bybit_wallet_balance", "bybit_demo_wallet_balance_anchor"}:
+            # Cached/current wallet values are not journal transactions and must
+            # not seed or override the journal-only Bybit Demo timeline.
+            continue
         is_oanda_summary = key.startswith("OANDA ") and broker_source == "oanda_account_summary"
         broker_balance = _to_float(broker.get("balance"))
         if is_oanda_summary and (broker_balance is None or not math.isfinite(broker_balance)):
@@ -24547,6 +24601,7 @@ def _normalize_bybit_closed_pnl_row(
         "net_profit": _to_float(entry.get("closedPnl")),
         "realized_pnl_currency": "USDT",
         "balance_after_trade": balance_after_trade,
+        "balance_after_trade_source": "bybit_transaction_log_cash_balance" if balance_after_trade is not None else "",
         "notes": notes if status == "closed" else (notes + " | missing open time from Bybit context" if status == "closed_missing_open_time" else "Bybit row quarantined: close_time must be after open_time"),
         "timeframe": timeframe,
         "is_test_trade": is_test_trade,
@@ -25520,13 +25575,6 @@ async def _sync_bybit_closed_pnl_window(
                     has_demo_rows = has_demo_rows or _bybit_demo_workbook_has_rows_needing_balance(wb_frame)
                 except Exception:
                     pass
-            if has_demo_rows:
-                try:
-                    snapshot = await _fetch_bybit_demo_current_balance_snapshot()
-                    sanitized_rows, backfill_stats = _backfill_bybit_demo_balances_from_current_balance(sanitized_rows, snapshot)
-                except Exception:
-                    balance_backfill_error = "Bybit Demo balance reconstruction failed: wallet balance unavailable; Balance After values were not populated."
-                    _record_bybit_demo_sync_status(bybit_demo_balance_backfill_error=balance_backfill_error)
             if int(sanitize_stats.get("changed", 0)) or bool(backfill_stats.get("changed")):
                 _set_trading_journal_rows(sanitized_rows)
             if has_demo_rows:
@@ -25565,13 +25613,6 @@ async def _sync_bybit_closed_pnl_window(
         backfill_stats: Dict[str, object] = {"balance_rows_seen": 0, "balance_rows_backfilled": 0, "changed": False}
         snapshot = {}
         has_demo_rows = any(_is_bybit_demo_trade_row(r) for r in sanitized_rows) or bool(final_rows)
-        if has_demo_rows:
-            try:
-                snapshot = await _fetch_bybit_demo_current_balance_snapshot()
-                sanitized_rows, backfill_stats = _backfill_bybit_demo_balances_from_current_balance(sanitized_rows, snapshot)
-            except Exception:
-                balance_backfill_error = "Bybit Demo balance reconstruction failed: wallet balance unavailable; Balance After values were not populated."
-                _record_bybit_demo_sync_status(bybit_demo_balance_backfill_error=balance_backfill_error)
         if int(sanitize_stats.get("changed", 0)) or bool(backfill_stats.get("changed")):
             _set_trading_journal_rows(sanitized_rows)
         if local_authoritative:
@@ -36941,7 +36982,7 @@ async def _run_trading_journal_sync_job() -> None:
         if broker_refresh_enabled:
             _set_trading_journal_sync_state(stage="fetching_broker_balances", message="Fetching broker balances…")
             for account_mode in ("demo", "live"):
-                if account_mode == "demo" and not ENABLE_BYBIT_DEMO_JOURNAL:
+                if account_mode == "demo":
                     continue
                 label = "Bybit Demo" if account_mode == "demo" else "Bybit Live"
                 try:
@@ -36980,53 +37021,6 @@ async def _run_trading_journal_sync_job() -> None:
                 except Exception as exc:
                     broker_balance_warnings.append(f"OANDA {account_mode} account summary unavailable: {exc}")
         source_mode = _trading_journal_source_mode()
-        if (
-            source_mode == "local"
-            and _trading_journal_bybit_demo_balance_anchor_enabled()
-            and _trading_journal_local_excel_authoritative()
-        ):
-            _set_trading_journal_sync_state(stage="sanitizing_bybit_demo_workbook", message="Sanitizing Bybit Demo workbook…")
-            try:
-                workbook_path = _resolve_local_journal_file(BYBIT_DEMO_WORKBOOK_NAME, TRADING_JOURNAL_LOCAL_DIR)
-                wb_frame = _coerce_bybit_demo_workbook_frame(
-                    _read_excel_sheet_or_empty(workbook_path, BYBIT_DEMO_WORKBOOK_SHEET, BYBIT_DEMO_WORKBOOK_COLUMNS)
-                )
-                if _bybit_demo_workbook_has_rows_needing_balance(wb_frame):
-                    try:
-                        demo_snapshot = await _fetch_bybit_demo_current_balance_snapshot()
-                        demo_balance = _to_float((demo_snapshot or {}).get("current_balance"))
-                        if demo_balance is None:
-                            broker_balance_warnings.append(
-                                "Bybit demo wallet snapshot returned no numeric current_balance for workbook anchor reconstruction."
-                            )
-                            _record_bybit_demo_sync_status(
-                                bybit_demo_balance_backfill_error=(
-                                    "Bybit Demo workbook anchor reconstruction failed: wallet snapshot returned no numeric current_balance."
-                                )
-                            )
-                        else:
-                            broker_account_balances.append(
-                                {
-                                    "account": "Bybit Demo",
-                                    "label": "Bybit Demo",
-                                    "balance": demo_balance,
-                                    "currency": "USDT",
-                                    "source": "bybit_demo_wallet_balance_anchor",
-                                    "balance_source": "bybit_demo_wallet_balance_anchor",
-                                    "account_mode": "demo",
-                                    "as_of": (demo_snapshot or {}).get("snapshot_at") or _utc_now_iso(),
-                                }
-                            )
-                            await asyncio.to_thread(_sanitize_bybit_demo_local_workbook, TRADING_JOURNAL_LOCAL_DIR, demo_snapshot)
-                    except Exception as exc:
-                        broker_balance_warnings.append(
-                            f"Bybit demo wallet snapshot unavailable for workbook anchor reconstruction: {exc}"
-                        )
-                        _record_bybit_demo_sync_status(
-                            bybit_demo_balance_backfill_error=f"Bybit Demo workbook anchor reconstruction failed: {exc}"
-                        )
-            except Exception as exc:
-                broker_balance_warnings.append(f"Bybit demo workbook pre-sanitize failed: {exc}")
         if broker_account_balances or broker_balance_warnings:
             _save_broker_balance_diagnostics_state(broker_account_balances, broker_balance_warnings)
         if source_mode == "local":

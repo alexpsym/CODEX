@@ -3987,6 +3987,68 @@ def test_persisted_cashflow_after_latest_trade_uses_cashflow_anchor_plus_trades_
     assert str(bal.get('balance_source')) == 'cashflow_anchor_plus_trades'
 
 
+def _bybit_demo_timeline_balance(rows, ledger):
+    timeline = master_service._build_journal_balance_timelines(
+        rows, master_service._normalize_cashflow_ledger_keys(ledger), []
+    )
+    return next(
+        balance for balance in timeline['balances']
+        if str(balance.get('label') or balance.get('account')).upper() == 'BYBIT DEMO'
+    )
+
+
+def test_bybit_demo_journal_opening_balance_applies_recorded_activity(temp_state_paths):
+    balance = _bybit_demo_timeline_balance(
+        [{'id': 't1', 'row_type': 'trade', 'source': 'bybit', 'account': 'Bybit Demo', 'close_time': '2026-06-02T00:00:00Z', 'net_profit': -30.0, 'currency': 'USDT'}],
+        {'Bybit Demo': [{'account': 'Bybit Demo', 'date': '2026-06-01T00:00:00Z', 'new_balance': 1000.0, 'currency': 'USDT'}]},
+    )
+    assert balance['balance'] == 970.0
+    assert balance['balance_source'] == 'journal_recorded_balance_timeline'
+
+
+def test_bybit_demo_confirmed_post_trade_balance_advances_with_later_pnl(temp_state_paths):
+    balance = _bybit_demo_timeline_balance(
+        [
+            {'id': 't1', 'row_type': 'trade', 'source': 'master_journal', 'account': 'Bybit Demo', 'close_time': '2026-06-02T00:00:00Z', 'net_profit': -50.0, 'balance_after_trade': 950.0, 'currency': 'USDT'},
+            {'id': 't2', 'row_type': 'trade', 'source': 'bybit', 'account': 'Bybit Demo', 'close_time': '2026-06-03T00:00:00Z', 'net_profit': 20.0, 'currency': 'USDT'},
+        ],
+        {'Bybit Demo': [{'account': 'Bybit Demo', 'date': '2026-06-01T00:00:00Z', 'new_balance': 1000.0, 'currency': 'USDT'}]},
+    )
+    assert balance['balance'] == 970.0
+    assert balance['as_of'] == '2026-06-03T00:00:00Z'
+
+
+def test_bybit_demo_manual_adjustment_survives_synthetic_rebuild_and_later_activity(temp_state_paths):
+    rows = [{'id': 't1', 'row_type': 'trade', 'source': 'bybit', 'account': 'Bybit Demo', 'close_time': '2026-06-03T00:00:00Z', 'net_profit': 25.0, 'currency': 'USDT'}]
+    ledger = {'Bybit Demo': [
+        {'account': 'Bybit Demo', 'date': '2026-06-01T00:00:00Z', 'new_balance': 1000.0, 'currency': 'USDT'},
+        {'account': 'Bybit Demo', 'date': '2026-06-02T00:00:00Z', 'new_balance': 900.0, 'amount': -100.0, 'currency': 'USDT', 'source': 'manual_bybit_demo_balance_adjustment'},
+    ]}
+    first = _bybit_demo_timeline_balance(rows, ledger)
+    rebuilt = _bybit_demo_timeline_balance(rows, ledger)
+    assert first['balance'] == rebuilt['balance'] == 925.0
+    assert rebuilt['as_of'] == '2026-06-03T00:00:00Z'
+
+
+def test_bybit_demo_journal_preserves_recorded_zero_balance(temp_state_paths):
+    balance = _bybit_demo_timeline_balance(
+        [],
+        {'Bybit Demo': [{'account': 'Bybit Demo', 'date': '2026-06-01T00:00:00Z', 'new_balance': 0.0, 'currency': 'USDT'}]},
+    )
+    assert balance['balance'] == 0.0
+    assert balance['missing_balance'] is False
+
+
+def test_bybit_demo_journal_missing_basis_remains_missing(temp_state_paths):
+    balance = _bybit_demo_timeline_balance(
+        [{'id': 't1', 'row_type': 'trade', 'source': 'bybit', 'account': 'Bybit Demo', 'close_time': '2026-06-01T00:00:00Z', 'net_profit': 20.0, 'currency': 'USDT'}],
+        {},
+    )
+    assert balance['balance'] is None
+    assert balance['missing_balance'] is True
+    assert balance['balance_source'] == 'timeline_missing'
+
+
 def test_poll_pending_webhook_invalidations_cancel_path_sets_cancelled_at_without_nameerror(monkeypatch: pytest.MonkeyPatch):
     calls = {"update": 0, "context": 0}
     monkeypatch.setattr(master_service, "LIMIT_CANCEL_POLL_SECONDS", 0)
