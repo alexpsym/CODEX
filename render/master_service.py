@@ -8896,13 +8896,16 @@ def _journal_rows_from_oanda_transaction_history_frame(
 
 
 def _parse_excel_account_workbook(
-    file_name: str, dbx_path: str, payload: bytes
+    file_name: str, dbx_path: str, payload: bytes,
+    *, statement_currency: Optional[str] = None,
 ) -> Tuple[List[Dict[str, object]], Optional[Dict[str, object]]]:
     def _parse_oanda_export_datetime(value: object) -> Tuple[float, Optional[str]]:
         return _parse_oanda_datetime_to_epoch_and_journal_iso(value)
     if _looks_like_html_table_report(payload):
         parsed_html = _parse_pepperstone_mt5_rows(
-            [_mt5_html_rows(payload)], source_kind="html"
+            [_mt5_html_rows(payload)],
+            source_kind="html",
+            statement_currency=statement_currency,
         )
         if parsed_html is None:
             raise ValueError(
@@ -19829,7 +19832,28 @@ def _mt5_account_fingerprint(server: str, login: str) -> str:
     return hashlib.sha256(identity.encode("utf-8")).hexdigest()[:20]
 
 
-def _mt5_statement_metadata(rows: List[List[object]]) -> Optional[Dict[str, str]]:
+PEPPERSTONE_STATEMENT_CURRENCIES = frozenset({
+    "AUD", "CAD", "CHF", "EUR", "GBP", "HKD", "JPY", "NZD", "SGD", "USD",
+})
+
+
+class _PepperstoneStatementCurrencyRequired(ValueError):
+    pass
+
+
+def _normalize_pepperstone_statement_currency(value: object) -> str:
+    currency = str(value or "").strip().upper()
+    if currency and currency not in PEPPERSTONE_STATEMENT_CURRENCIES:
+        raise ValueError(
+            "statement_currency must be one of: "
+            + ", ".join(sorted(PEPPERSTONE_STATEMENT_CURRENCIES))
+        )
+    return currency
+
+
+def _mt5_statement_metadata(
+    rows: List[List[object]], *, statement_currency: Optional[str] = None,
+) -> Optional[Dict[str, str]]:
     flattened = "\n".join(_mt5_cell_text(cell) for row in rows for cell in row if _mt5_cell_text(cell))
     lower = flattened.casefold()
     if "pepperstone" not in lower:
@@ -19858,9 +19882,19 @@ def _mt5_statement_metadata(rows: List[List[object]]) -> Optional[Dict[str, str]
         mode = "live"
     else:
         raise ValueError("Pepperstone MT5 account type is ambiguous; the report must identify a Demo or Live server.")
-    currency = _mt5_metadata_value(rows, {"currency", "deposit currency"}).upper()
-    if not re.fullmatch(r"[A-Z]{3,5}", currency):
-        raise ValueError("The Pepperstone MT5 report deposit currency could not be read.")
+    explicit_currency = _normalize_pepperstone_statement_currency(statement_currency)
+    report_currency = _mt5_metadata_value(rows, {"currency", "deposit currency"}).upper()
+    if report_currency and not re.fullmatch(r"[A-Z]{3,5}", report_currency):
+        raise ValueError("The Pepperstone MT5 report deposit currency is invalid.")
+    if report_currency and explicit_currency and report_currency != explicit_currency:
+        raise ValueError(
+            "The selected Pepperstone HTML account currency conflicts with the report currency."
+        )
+    currency = report_currency or explicit_currency
+    if not currency:
+        raise _PepperstoneStatementCurrencyRequired(
+            "The Pepperstone MT5 report does not include an account currency."
+        )
     return {
         "server": server,
         "login": login,
@@ -20231,9 +20265,12 @@ def _mt5_period_as_of(period: str) -> Optional[str]:
     return _mt5_broker_local_iso(matches[-1]) if matches else None
 
 
-def _parse_pepperstone_mt5_rows(raw_sheets: List[List[List[object]]], *, source_kind: str) -> Optional[Tuple[List[Dict[str, object]], Optional[Dict[str, object]]]]:
+def _parse_pepperstone_mt5_rows(
+    raw_sheets: List[List[List[object]]], *, source_kind: str,
+    statement_currency: Optional[str] = None,
+) -> Optional[Tuple[List[Dict[str, object]], Optional[Dict[str, object]]]]:
     rows = [list(row) for sheet in raw_sheets for row in sheet if isinstance(row, list)]
-    metadata = _mt5_statement_metadata(rows)
+    metadata = _mt5_statement_metadata(rows, statement_currency=statement_currency)
     if metadata is None:
         return None
     position_rows, skipped_open_positions = _mt5_positions_rows(rows, metadata)
@@ -39048,6 +39085,7 @@ body{margin:0;background:#0b1220;color:#e2e8f0;font-family:Inter,system-ui,sans-
   <button id="open-journal-btn">Open workbook</button><button id="import-journal-btn">Import</button><button id="journal-resync-btn">Resync</button>
   <div id="journal-import-drop-zone" class="drop-zone">Drop .xlsx/.xlsm/.xls/.csv or MT5 .html/.htm import files here<br/><span style="font-size:12px">or click Import to choose a file</span></div>
   <label style="font-size:12px;color:#94a3b8">Bybit CSV account <select id="journal-account-mode"><option value="" selected disabled>Select Demo or Live</option><option value="demo">Demo</option><option value="live">Live</option></select></label>
+  <label style="font-size:12px;color:#94a3b8">Pepperstone HTML account currency <select id="journal-statement-currency"><option value="" selected>Use report currency</option>{{PEPPERSTONE_STATEMENT_CURRENCY_OPTIONS}}</select></label>
   <button id="crypto-monthly-pnl-btn">Crypto Monthly P&amp;L</button><button id="bybit-demo-balance-adjustment-btn">Bybit Demo Balance Adjustment</button>
   <input id="journal-file-input" type="file" accept=".xlsx,.xlsm,.xls,.csv,.html,.htm" hidden/><div id="journal-actions-status" class="status"></div>
 </section>
@@ -39060,6 +39098,13 @@ async def trading_journal_actions_workspace() -> HTMLResponse:
     return HTMLResponse(
         TRADING_JOURNAL_ACTIONS_TEMPLATE
         .replace("{{TRADING_JOURNAL_ACTIONS_JS_VERSION}}", actions_js_version)
+        .replace(
+            "{{PEPPERSTONE_STATEMENT_CURRENCY_OPTIONS}}",
+            "".join(
+                f'<option value="{currency}">{currency}</option>'
+                for currency in sorted(PEPPERSTONE_STATEMENT_CURRENCIES)
+            ),
+        )
     )
 
 
@@ -39095,7 +39140,12 @@ def _is_pepperstone_mt5_trade(row: object) -> bool:
         == "pepperstone_mt5_statement"
     )
 
-def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, account_mode: Optional[str] = None) -> Dict[str, object]:
+def _import_uploaded_trading_journal_file(
+    upload_name: str,
+    payload: bytes,
+    account_mode: Optional[str] = None,
+    statement_currency: Optional[str] = None,
+) -> Dict[str, object]:
     global _PENDING_MANUAL_SYNC_ROWS, _PENDING_MANUAL_SYNC_BALANCES
     global _TRADING_JOURNAL_CACHE, _TRADING_JOURNAL_CACHE_KEY
     name = str(upload_name or "upload").strip() or "upload"
@@ -39111,7 +39161,38 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
     preparsed_statement: Optional[Tuple[List[Dict[str, object]], Optional[Dict[str, object]]]] = None
     if suffix in {".html", ".htm"} or _looks_like_html_table_report(payload):
         try:
-            preparsed_statement = _parse_excel_account_workbook(name, "manual_upload", payload)
+            normalized_statement_currency = _normalize_pepperstone_statement_currency(
+                statement_currency
+            )
+        except ValueError as exc:
+            return {
+                "ok": False,
+                "status_code": 422,
+                "message": str(exc),
+                "uploaded_name": name,
+                "file_type": suffix,
+                "errors": ["invalid_statement_currency"],
+                "warnings": [],
+            }
+        try:
+            preparsed_statement = _parse_excel_account_workbook(
+                name,
+                "manual_upload",
+                payload,
+                statement_currency=normalized_statement_currency or None,
+            )
+        except _PepperstoneStatementCurrencyRequired as exc:
+            return {
+                "ok": False,
+                "status_code": 422,
+                "message": f"{exc} Select the Pepperstone HTML account currency and import the file again.",
+                "uploaded_name": name,
+                "file_type": suffix,
+                "errors": ["missing_statement_currency"],
+                "requires_statement_currency": True,
+                "statement_currency_options": sorted(PEPPERSTONE_STATEMENT_CURRENCIES),
+                "warnings": [],
+            }
         except Exception as exc:
             return {
                 "ok": False,
@@ -40778,7 +40859,11 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
             TRADING_JOURNAL_IMPORT_LOCK.release()
 
 @app.post("/api/trading-journal/import-file")
-async def trading_journal_import_file(file: UploadFile = File(...), account_mode: Optional[str] = Form(None)) -> JSONResponse:
+async def trading_journal_import_file(
+    file: UploadFile = File(...),
+    account_mode: Optional[str] = Form(None),
+    statement_currency: Optional[str] = Form(None),
+) -> JSONResponse:
     try:
         payload = await file.read()
     except Exception as exc:
@@ -40789,6 +40874,7 @@ async def trading_journal_import_file(file: UploadFile = File(...), account_mode
         file.filename or "upload",
         payload,
         account_mode,
+        statement_currency,
     )
     status_code = int(result.get("status_code") or (200 if result.get("ok") else 422))
     return JSONResponse(result, status_code=status_code)

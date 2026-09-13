@@ -7,6 +7,7 @@
   const cryptoMonthlyBtn = document.getElementById('crypto-monthly-pnl-btn');
   const bybitDemoBalanceAdjustmentBtn = document.getElementById('bybit-demo-balance-adjustment-btn');
   const accountModeSelect = document.getElementById('journal-account-mode');
+  const statementCurrencySelect = document.getElementById('journal-statement-currency');
   const status = document.getElementById('journal-actions-status');
   const BYBIT_AMBIGUITY_MSG = 'Select Demo or Live in Bybit CSV account, then import this file again.';
   const IMPORT_WATCHDOG_MS = 15000;
@@ -75,7 +76,7 @@
     resumeBtn.disabled = true;
     try { await pendingRetry.run(); } finally { retryInFlight = false; resumeBtn.disabled = false; }
   });
-  cancelBtn.addEventListener('click', () => { clearPendingRetry(); setStatus('Retry canceled.'); });
+  cancelBtn.addEventListener('click', () => { clearPendingRetry(); if (statementCurrencySelect) statementCurrencySelect.value = ''; setStatus('Retry canceled.'); });
   const formatImportError = (payload, fallback) => {
     const base = String(payload?.detail || payload?.message || fallback || 'Import failed.').trim();
     const parts = [base];
@@ -92,6 +93,7 @@
     return parts.join('\n');
   };
   const isBybitCsvFileName = (name) => String(name || '').trim().toLowerCase().endsWith('.csv');
+  const isHtmlStatementFileName = (name) => /\.(html|htm)$/i.test(String(name || '').trim());
   const isLikelyBybitHistoryCsv = async (file) => {
     if (!file || !isBybitCsvFileName(file.name)) return false;
     const head = await file.slice(0, 16384).text();
@@ -117,7 +119,7 @@
   });
 
   importBtn?.addEventListener('click', () => fileInput?.click());
-  const runImport = async (file, fixedAccountMode = null) => {
+  const runImport = async (file, fixedAccountMode = null, fixedStatementCurrency = null) => {
     if (!file) return;
     if (openBtn) openBtn.disabled = true; if (importBtn) importBtn.disabled = true; if (resyncBtn) resyncBtn.disabled = true;
     if (importBtn) importBtn.disabled = true;
@@ -144,6 +146,8 @@
         setStatus(`Import is still running longer than expected. Waiting for backend result... elapsed ${formatElapsed(Date.now() - importStartedAt)}`, true);
       }, IMPORT_WATCHDOG_MS);
       const explicitMode = String((fixedAccountMode ?? accountModeSelect?.value) || '').trim().toLowerCase();
+      const explicitStatementCurrency = String((fixedStatementCurrency ?? statementCurrencySelect?.value) || '').trim().toUpperCase();
+      const isHtmlStatement = isHtmlStatementFileName(file.name);
       const bybitLikely = await isLikelyBybitHistoryCsv(file);
       if (bybitLikely && !isExplicitAccountMode(explicitMode)) {
         if (elapsedTimer && typeof window.clearInterval === 'function') { window.clearInterval(elapsedTimer); elapsedTimer = null; }
@@ -156,8 +160,17 @@
       }
       const form = new FormData(); form.append('file', file);
       if (bybitLikely && isExplicitAccountMode(explicitMode)) form.append('account_mode', explicitMode);
+      if (isHtmlStatement && explicitStatementCurrency) form.append('statement_currency', explicitStatementCurrency);
       const res = await fetch('/api/trading-journal/import-file', { method: 'POST', body: form });
       const payload = await res.json().catch(() => ({}));
+      if (payload?.requires_statement_currency) {
+        if (elapsedTimer && typeof window.clearInterval === 'function') { window.clearInterval(elapsedTimer); elapsedTimer = null; }
+        if (statusPoll && typeof window.clearInterval === 'function') { window.clearInterval(statusPoll); statusPoll = null; }
+        if (watchdog) { window.clearTimeout(watchdog); watchdog = null; }
+        setStatus(payload?.message || 'Select the Pepperstone HTML account currency, then import the file again.', true);
+        statementCurrencySelect?.focus?.();
+        return;
+      }
       if (payload?.requires_account_mode || (Array.isArray(payload?.errors) && payload.errors.includes('ambiguous_bybit_account'))) {
         if (elapsedTimer && typeof window.clearInterval === 'function') { window.clearInterval(elapsedTimer); elapsedTimer = null; }
         if (statusPoll && typeof window.clearInterval === 'function') { window.clearInterval(statusPoll); statusPoll = null; }
@@ -171,7 +184,7 @@
         if (statusPoll && typeof window.clearInterval === 'function') { window.clearInterval(statusPoll); statusPoll = null; }
         if (watchdog) { window.clearTimeout(watchdog); watchdog = null; }
         setStatus(`Import failed: ${formatImportError(payload, 'Trading Journal.xlsx appears to be open/locked. Close Excel, then press Resume.')}`, true);
-        setPendingRetry('import', () => runImport(file, explicitMode));
+        setPendingRetry('import', () => runImport(file, explicitMode, explicitStatementCurrency));
         return;
       }
       if (!res.ok || payload.ok !== true) {
@@ -203,6 +216,7 @@
       if (cryptoMonthlyBtn) cryptoMonthlyBtn.disabled = Boolean(pendingRetry.run);
       if (bybitDemoBalanceAdjustmentBtn) bybitDemoBalanceAdjustmentBtn.disabled = Boolean(pendingRetry.run);
       if (!pendingRetry.run && fileInput) fileInput.value = '';
+      if (!pendingRetry.run && statementCurrencySelect) statementCurrencySelect.value = '';
     }
   };
   const formatTimings = (value) => {
@@ -271,12 +285,14 @@
     if (!file) return;
     if (!isAcceptedImportFile(file)) { setStatus('Unsupported file type. Drop .xlsx, .xlsm, .xls, .csv, .html, or .htm.', true); return; }
     const capturedMode = String(accountModeSelect?.value || '').trim().toLowerCase();
-    await runImport(file, capturedMode);
+    const capturedStatementCurrency = String(statementCurrencySelect?.value || '').trim().toUpperCase();
+    await runImport(file, capturedMode, capturedStatementCurrency);
   });
   fileInput?.addEventListener('change', async () => {
     const file = fileInput.files && fileInput.files[0];
     const capturedMode = String(accountModeSelect?.value || '').trim().toLowerCase();
-    await runImport(file, capturedMode);
+    const capturedStatementCurrency = String(statementCurrencySelect?.value || '').trim().toUpperCase();
+    await runImport(file, capturedMode, capturedStatementCurrency);
   });
   accountModeSelect?.addEventListener('change', () => {
     const explicitMode = String(accountModeSelect?.value || '').trim().toLowerCase();

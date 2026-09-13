@@ -240,6 +240,14 @@ def _pepperstone_mt5_html_bytes() -> bytes:
     return ("<html><body><table>" + "".join(rendered) + "</table><script>throw new Error('must not run')</script></body></html>").encode("utf-16")
 
 
+def _pepperstone_mt5_html_without_currency_bytes() -> bytes:
+    rows = [row for row in _pepperstone_mt5_native_rows() if row[0] != "Currency"]
+    rendered = []
+    for row in rows:
+        rendered.append("<tr>" + "".join(f"<td>{value}</td>" for value in row) + "</tr>")
+    return ("<html><body><table>" + "".join(rendered) + "</table></body></html>").encode("utf-16")
+
+
 def _pepperstone_mt5_xlsx_bytes() -> bytes:
     workbook = Workbook()
     sheet = workbook.active
@@ -250,6 +258,82 @@ def _pepperstone_mt5_xlsx_bytes() -> bytes:
     workbook.save(output)
     workbook.close()
     return output.getvalue()
+
+
+@pytest.mark.parametrize(
+    ("case", "payload", "statement_currency", "expected_error"),
+    [
+        ("missing", _pepperstone_mt5_html_without_currency_bytes, None, "missing_statement_currency"),
+        ("invalid", _pepperstone_mt5_html_without_currency_bytes, "XYZ", "invalid_statement_currency"),
+        ("conflict", _pepperstone_mt5_html_bytes, "USD", "The selected Pepperstone HTML account currency conflicts"),
+    ],
+    ids=["missing", "invalid", "conflict"],
+)
+def test_pepperstone_html_currency_validation_blocks_writes(
+    case, payload, statement_currency, expected_error, temp_state_paths: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    existing = {"id": "existing:trade", "row_type": "trade", "source": "manual", "notes": "untouched"}
+    master_service._set_trading_journal_rows([existing])
+    before_rows = copy.deepcopy(master_service._get_trading_journal_rows())
+    before_pending_rows = copy.deepcopy(master_service._PENDING_MANUAL_SYNC_ROWS)
+    before_pending_balances = copy.deepcopy(master_service._PENDING_MANUAL_SYNC_BALANCES)
+    monkeypatch.setattr(master_service, "_sync_master_journal_workbook", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("sync must not run")))
+    monkeypatch.setattr(master_service, "_persist_trading_journal_sqlite", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("persistence must not run")))
+
+    result = master_service._import_uploaded_trading_journal_file(
+        "statement.html", payload(), statement_currency=statement_currency,
+    )
+
+    assert result["ok"] is False
+    assert result["status_code"] == 422
+    if case == "missing":
+        assert result["requires_statement_currency"] is True
+        assert result["errors"] == [expected_error]
+    elif case == "invalid":
+        assert result["errors"] == [expected_error]
+    else:
+        assert expected_error in result["message"]
+    assert master_service._get_trading_journal_rows() == before_rows
+    assert master_service._PENDING_MANUAL_SYNC_ROWS == before_pending_rows
+    assert master_service._PENDING_MANUAL_SYNC_BALANCES == before_pending_balances
+
+
+def test_pepperstone_html_explicit_currency_flows_from_endpoint_to_rows_and_balance(
+    temp_state_paths: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    observed = {}
+
+    def parse_without_persistence(upload_name, payload, account_mode=None, statement_currency=None):
+        rows, balance = master_service._parse_excel_account_workbook(
+            upload_name,
+            "manual_upload",
+            payload,
+            statement_currency=statement_currency,
+        )
+        observed["rows"] = rows
+        observed["balance"] = balance
+        return {
+            "ok": True,
+            "rows_parsed": len(rows),
+            "rows_upserted": 0,
+            "warnings": [],
+            "missing_row_ids": [],
+        }
+
+    monkeypatch.setattr(master_service, "_import_uploaded_trading_journal_file", parse_without_persistence)
+    upload = master_service.UploadFile(
+        filename="statement.html", file=io.BytesIO(_pepperstone_mt5_html_without_currency_bytes())
+    )
+
+    response = asyncio.run(
+        master_service.trading_journal_import_file(upload, statement_currency=" usd ")
+    )
+    result = _json(response)
+
+    assert result["ok"] is True
+    assert result["rows_parsed"] == 1
+    assert {row["currency"] for row in observed["rows"]} == {"USD"}
+    assert observed["balance"]["currency"] == "USD"
 
 
 def test_pepperstone_mt5_native_html_and_xlsx_import_same_closed_positions(tmp_path: Path):
