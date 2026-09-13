@@ -9664,7 +9664,11 @@ def _build_journal_balance_timelines(
         if source in {"oanda", "oanda_transaction_export", "excel", "local_excel", "master_journal"}:
             return bal
         bal_source = str(row.get("balance_after_trade_source") or "").strip().lower()
-        if bal_source in {"master_journal", "bybit_transaction_log_cash_balance"}:
+        if bal_source == "master_journal":
+            return bal
+        if bal_source == "bybit_transaction_log_cash_balance" and _is_bybit_demo_account_label(
+            row.get("account_label") or row.get("account")
+        ):
             return bal
         raw_refs = row.get("raw_refs") if isinstance(row.get("raw_refs"), dict) else {}
         raw_excel = row.get("raw_excel") if isinstance(row.get("raw_excel"), dict) else {}
@@ -24601,7 +24605,11 @@ def _normalize_bybit_closed_pnl_row(
         "net_profit": _to_float(entry.get("closedPnl")),
         "realized_pnl_currency": "USDT",
         "balance_after_trade": balance_after_trade,
-        "balance_after_trade_source": "bybit_transaction_log_cash_balance" if balance_after_trade is not None else "",
+        "balance_after_trade_source": (
+            "bybit_transaction_log_cash_balance"
+            if balance_after_trade is not None and mode == "demo"
+            else ""
+        ),
         "notes": notes if status == "closed" else (notes + " | missing open time from Bybit context" if status == "closed_missing_open_time" else "Bybit row quarantined: close_time must be after open_time"),
         "timeframe": timeframe,
         "is_test_trade": is_test_trade,

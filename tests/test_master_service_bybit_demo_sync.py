@@ -1129,6 +1129,38 @@ def test_run_sync_job_skips_local_demo_wallet_anchor(tmp_path, monkeypatch) -> N
     assert any('Missing balance anchor for accounts: BYBIT DEMO' in str(error) for error in payload['errors'])
 
 
+@pytest.mark.parametrize('account_mode', ['demo', 'live'], ids=['demo', 'live'])
+def test_bybit_transaction_balance_authority_is_demo_only(account_mode, monkeypatch):
+    monkeypatch.setattr(master_service, '_upsert_trade_context', lambda *_args, **_kwargs: None)
+    row = master_service._normalize_bybit_closed_pnl_row(
+        {
+            'symbol': 'BTCUSDT', 'orderId': 'oid-1', 'side': 'Buy',
+            'avgEntryPrice': '100', 'avgExitPrice': '101', 'closedSize': '1',
+            'closedPnl': '-20', 'createdTime': 1000, 'updatedTime': 2000,
+        },
+        account_mode=account_mode,
+        balance_after_trade=950.0,
+        resolved_trade_context={},
+    )
+    assert row is not None
+    assert (
+        row.get('balance_after_trade_source')
+        == ('bybit_transaction_log_cash_balance' if account_mode == 'demo' else '')
+    )
+    timeline = master_service._build_journal_balance_timelines(
+        [row],
+        master_service._normalize_cashflow_ledger_keys({
+            row['account_label']: [{
+                'account': row['account_label'], 'date': '1970-01-01T00:00:00Z',
+                'new_balance': 1000.0, 'currency': 'USDT',
+            }],
+        }),
+        [],
+    )
+    balance = timeline['balances'][0]['balance']
+    assert balance == (950.0 if account_mode == 'demo' else 980.0)
+
+
 def test_run_sync_job_demo_anchor_failure_keeps_missing_warning(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(master_service, "TRADING_JOURNAL_LOCAL_DIR", tmp_path)
     monkeypatch.setattr(master_service, "_trading_journal_source_mode", lambda: "local")
