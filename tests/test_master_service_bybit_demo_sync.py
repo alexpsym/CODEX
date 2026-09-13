@@ -1143,10 +1143,11 @@ def test_bybit_transaction_balance_authority_is_demo_only(account_mode, monkeypa
         resolved_trade_context={},
     )
     assert row is not None
-    assert (
-        row.get('balance_after_trade_source')
-        == ('bybit_transaction_log_cash_balance' if account_mode == 'demo' else '')
-    )
+    if account_mode == 'demo':
+        assert row.get('balance_after_trade_source') == 'bybit_transaction_log_cash_balance'
+    else:
+        assert 'balance_after_trade_source' not in row
+        row = {**row, 'balance_after_trade_source': 'bybit_transaction_log_cash_balance'}
     timeline = master_service._build_journal_balance_timelines(
         [row],
         master_service._normalize_cashflow_ledger_keys({

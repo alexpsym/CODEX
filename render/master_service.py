@@ -24605,10 +24605,10 @@ def _normalize_bybit_closed_pnl_row(
         "net_profit": _to_float(entry.get("closedPnl")),
         "realized_pnl_currency": "USDT",
         "balance_after_trade": balance_after_trade,
-        "balance_after_trade_source": (
-            "bybit_transaction_log_cash_balance"
+        **(
+            {"balance_after_trade_source": "bybit_transaction_log_cash_balance"}
             if balance_after_trade is not None and mode == "demo"
-            else ""
+            else {}
         ),
         "notes": notes if status == "closed" else (notes + " | missing open time from Bybit context" if status == "closed_missing_open_time" else "Bybit row quarantined: close_time must be after open_time"),
         "timeframe": timeframe,
