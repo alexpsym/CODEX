@@ -82,6 +82,52 @@ def test_eth_specs_include_btc_reference(monkeypatch):
     assert 'range.1m' in specs['_btc_reference']
 
 
+@pytest.mark.parametrize('btc_open_interest', ['222', '0'], ids=['positive', 'zero'])
+def test_bybit_btc_reference_uses_own_open_interest_value(monkeypatch, btc_open_interest):
+    monkeypatch.setattr(master_service, '_bybit_lookup_symbol', lambda *_a, **_k: asyncio.sleep(0, result=_fake_instrument('ETHUSDT', 'ETH')))
+    monkeypatch.setattr(master_service, '_bybit_get_instrument_info_cached', lambda *_a, **_k: asyncio.sleep(0, result=_fake_instrument('BTCUSDT', 'BTC')))
+
+    async def get(_base_url, path, params, **_kwargs):
+        if path.endswith('tickers'):
+            symbol = params['symbol']
+            value = btc_open_interest if symbol == 'BTCUSDT' else '111'
+            return {'retCode': 0, 'result': {'list': [{'symbol': symbol, 'lastPrice': '100', 'openInterestValue': value, 'turnover24h': '1234'}]}}
+        raise AssertionError((path, params))
+
+    monkeypatch.setattr(master_service, '_bybit_market_get_async', get)
+    monkeypatch.setattr(master_service, '_bybit_avg_7d_turnover_usd_async', lambda *_a, **_k: asyncio.sleep(0, result=77.0))
+    monkeypatch.setattr(master_service, '_bybit_fetch_range_specs_async', lambda *_a, **_k: asyncio.sleep(0, result=({'range.1m': 0.1}, [])))
+    specs = asyncio.run(master_service._bybit_resolve_and_fetch_specs('ETHUSDT'))
+
+    assert specs['openInterestValue'] == '111'
+    assert specs['_btc_reference']['openInterestValue'] == btc_open_interest
+    assert specs['_btc_reference']['lastPrice'] == '100'
+
+
+def test_bybit_btc_reference_omits_missing_open_interest_value(monkeypatch):
+    monkeypatch.setattr(master_service, '_bybit_lookup_symbol', lambda *_a, **_k: asyncio.sleep(0, result=_fake_instrument('ETHUSDT', 'ETH')))
+    monkeypatch.setattr(master_service, '_bybit_get_instrument_info_cached', lambda *_a, **_k: asyncio.sleep(0, result=_fake_instrument('BTCUSDT', 'BTC')))
+
+    async def get(_base_url, path, params, **_kwargs):
+        if path.endswith('tickers'):
+            symbol = params['symbol']
+            ticker = {'symbol': symbol, 'lastPrice': '100', 'turnover24h': '1234'}
+            if symbol != 'BTCUSDT':
+                ticker['openInterestValue'] = '111'
+            return {'retCode': 0, 'result': {'list': [ticker]}}
+        raise AssertionError((path, params))
+
+    monkeypatch.setattr(master_service, '_bybit_market_get_async', get)
+    monkeypatch.setattr(master_service, '_bybit_avg_7d_turnover_usd_async', lambda *_a, **_k: asyncio.sleep(0, result=77.0))
+    monkeypatch.setattr(master_service, '_bybit_fetch_range_specs_async', lambda *_a, **_k: asyncio.sleep(0, result=({'range.1m': 0.1}, [])))
+    specs = asyncio.run(master_service._bybit_resolve_and_fetch_specs('ETHUSDT'))
+
+    assert specs['openInterestValue'] == '111'
+    assert 'openInterestValue' not in specs['_btc_reference']
+    assert specs['_btc_reference']['lastPrice'] == '100'
+    assert specs['_btc_reference']['volume24hUsd'] == '1234'
+
+
 def test_range_failure_exposes_warning(monkeypatch):
     monkeypatch.setattr(master_service, 'resolve_bybit_credentials_for', lambda _x: {'base_url': 'https://x'})
     monkeypatch.setattr(master_service, '_bybit_lookup_symbol', lambda *_a, **_k: asyncio.sleep(0, result=_fake_instrument('BTCUSDT', 'BTC')))

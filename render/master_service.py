@@ -4390,6 +4390,7 @@ async def _bybit_resolve_and_fetch_specs(query: str, *, include_btc_reference: b
                 "resolved_symbol": btc_symbol,
                 "category": category,
                 "lastPrice": (btc_ticker or {}).get("lastPrice"),
+                "openInterestValue": (btc_ticker or {}).get("openInterestValue"),
                 "volume24hUsd": (btc_ticker or {}).get("turnover24h"),
             }
             try:
