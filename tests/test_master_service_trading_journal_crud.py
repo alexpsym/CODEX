@@ -1373,6 +1373,81 @@ def test_load_view_snapshot_rejects_old_cache_version(temp_state_paths):
     assert master_service._load_trading_journal_view_snapshot() is None
 
 
+@pytest.mark.parametrize(
+    "case, expected_balance, expect_verifier",
+    [
+        pytest.param("manual-import", 1517.94, True, id="manual-import"),
+        pytest.param("external-only", 1517.94, False, id="external-only"),
+        pytest.param("live-refresh-only", 1517.94, False, id="live-refresh-only"),
+        pytest.param("ordinary-refresh", 1000.0, False, id="ordinary-refresh"),
+    ],
+)
+def test_local_snapshot_respects_broker_balance_exclusions(
+    case, expected_balance, expect_verifier, temp_state_paths, monkeypatch: pytest.MonkeyPatch
+):
+    captured_stats = {}
+    export_balance = {
+        "account": "OANDA DEMO", "label": "OANDA DEMO", "balance": 1517.94,
+        "currency": "AUD", "source": "oanda_transaction_export_balance",
+        "balance_source": "oanda_transaction_export_balance",
+        "as_of": "2026-08-01T05:00:01+10:00",
+    }
+    cached_summary = {
+        "account": "OANDA DEMO", "label": "OANDA DEMO", "balance": 1000.0,
+        "currency": "AUD", "source": "oanda_account_summary",
+        "balance_source": "oanda_account_summary",
+        "as_of": "2026-08-23T13:13:36.793494Z",
+    }
+    monkeypatch.setenv("TRADING_JOURNAL_SOURCE", "local")
+    monkeypatch.setattr(master_service, "_load_trading_journal_view_snapshot", lambda: None)
+    monkeypatch.setattr(master_service, "_journal_source_fingerprint", lambda: {"source_mode": "local", "files": []})
+    monkeypatch.setattr(master_service, "_get_trading_journal_rows", lambda: [])
+    monkeypatch.setattr(master_service, "_get_excel_account_balances", lambda: [dict(export_balance)])
+    monkeypatch.setattr(master_service, "_load_cashflows_from_local", lambda _path: {})
+    monkeypatch.setattr(master_service, "_load_cashflows_for_active_journal_source", lambda _state: {})
+    monkeypatch.setattr(master_service, "_monthly_aud_revaluation_rows_for_journal_view", lambda: [])
+    monkeypatch.setattr(master_service, "_build_trading_journal_diagnostics_snapshot", lambda: {"errors": []})
+    monkeypatch.setattr(master_service, "_build_authoritative_trading_journal_diagnostics_snapshot", lambda _items: {"errors": []})
+    monkeypatch.setattr(master_service, "_persist_trading_journal_sqlite", lambda *_a, **_k: None)
+    monkeypatch.setattr(master_service, "_save_trading_journal_view_snapshot", lambda *_a, **_k: None)
+    monkeypatch.setattr(master_service, "_master_journal_single_file_mode", lambda: False)
+    monkeypatch.setattr(master_service, "_trading_journal_local_excel_authoritative", lambda: False)
+    monkeypatch.setattr(master_service, "_attach_trading_journal_equity_metadata", lambda snapshot: snapshot)
+    monkeypatch.setattr(master_service, "_load_json_file", lambda path, default: {
+        "broker_account_balances": [dict(cached_summary)]
+    } if path == master_service.TRADING_JOURNAL_STATE_PATH else default)
+    def _capture_stats(_items, balances):
+        captured_stats["balances"] = copy.deepcopy(balances)
+        return {"groups": {}}
+
+    monkeypatch.setattr(master_service, "_compute_journal_stats_with_period_reports", _capture_stats)
+    master_service._PENDING_MANUAL_SYNC_ROWS = []
+    master_service._PENDING_MANUAL_SYNC_BALANCES = [dict(export_balance)]
+
+    if case == "manual-import":
+        snapshot = master_service._build_manual_import_authoritative_snapshot(persist_sqlite=False)
+        verified = master_service._verify_imported_account_balance_snapshot(snapshot, export_balance)
+        assert expect_verifier and verified["ok"] is True
+    else:
+        flags = {
+            "skip_external_balances": case == "external-only",
+            "skip_live_account_refresh": case == "live-refresh-only",
+        }
+        snapshot = master_service._build_trading_journal_view_snapshot(
+            force=True, persist_sqlite=False, **flags
+        )
+    balance = next(item for item in snapshot["balances"] if str(item.get("label")) == "OANDA DEMO")
+    assert balance["balance"] == pytest.approx(expected_balance)
+    assert balance["balance_source"] == (
+        "oanda_transaction_export_balance" if expected_balance == 1517.94 else "oanda_account_summary"
+    )
+    assert balance["currency"] == "AUD"
+    assert balance["as_of"] == (
+        "2026-08-01T05:00:01+10:00" if expected_balance == 1517.94 else "2026-08-23T13:13:36.793494Z"
+    )
+    assert captured_stats["balances"][0]["balance"] == pytest.approx(expected_balance)
+
+
 def test_trading_journal_items_failed_sync_without_snapshot_returns_503(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
     fingerprint = {"source_mode": "local", "files": []}
     monkeypatch.setattr(master_service, "_TRADING_JOURNAL_VIEW_CACHE", {"key": None, "payload": None})

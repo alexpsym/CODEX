@@ -2840,7 +2840,7 @@ def _build_trading_journal_view_snapshot(
     monthly_note_rows = _monthly_aud_revaluation_rows_for_journal_view()
     combined_items = sorted([*trade_items, *cashflow_rows, *other_non_trade_rows, *monthly_note_rows], key=_row_sort_dt, reverse=True)
     balances = timeline.get("balances") if isinstance(timeline.get("balances"), list) else []
-    broker_balances = (state or {}).get("broker_account_balances") if isinstance(state, dict) else []
+    broker_balances = [] if (skip_external_balances or skip_live_account_refresh) else ((state or {}).get("broker_account_balances") if isinstance(state, dict) else [])
     if not isinstance(broker_balances, list):
         broker_balances = []
     balances = _merge_missing_timeline_balances_with_broker(balances, broker_balances)
