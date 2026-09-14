@@ -731,10 +731,76 @@ def test_backfill_runs_blocking_work_off_event_loop(monkeypatch: pytest.MonkeyPa
     try:
         response = asyncio.run(run_backfill())
         assert json.loads(response.body.decode("utf-8"))["ok"] is True
-        assert worker_threads == [threading.get_ident()] or worker_threads[0] != main_thread
+        assert len(worker_threads) == 1
+        assert worker_threads[0] != main_thread
         assert verification_called == [True]
     finally:
         release.set()
+        master_service.OANDA_HISTORY_JOBS.pop(job.job_id, None)
+
+
+def test_backfill_waits_for_final_worker_verification(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    export_path = tmp_path / "oanda_history_demo_final_verification.csv"
+    export_path.write_text("synthetic", encoding="utf-8")
+    export_path.with_suffix(".json").write_text('{"account_mode":"demo"}', encoding="utf-8")
+    job = master_service.OandaHistoryJob(
+        job_id="threaded-final-verification", status="done", created_at=0, updated_at=0,
+        params={"account": "demo"}, output_path=export_path,
+    )
+    verification_started = threading.Event()
+    verification_release = threading.Event()
+    main_thread = threading.get_ident()
+    worker_threads = []
+    parse_calls = []
+    master_service.OANDA_HISTORY_JOBS[job.job_id] = job
+
+    def fake_parse(*_args, **_kwargs):
+        worker_threads.append(threading.get_ident())
+        parse_calls.append(True)
+        return ([{"id": "trade-1", "source": "oanda_transaction_export"}], {
+            "balance": 1517.94, "as_of": "2026-08-01T05:00:01Z",
+            "source": "oanda_transaction_export_balance",
+        })
+
+    def fake_snapshot(**_kwargs):
+        worker_threads.append(threading.get_ident())
+        verification_started.set()
+        assert verification_release.wait(timeout=3), "final verification gate was not released"
+        return {"balances": [{
+            "label": "OANDA DEMO", "balance": 1517.94, "currency": "AUD",
+            "balance_source": "oanda_transaction_export_balance",
+        }]}
+
+    monkeypatch.setattr(master_service, "_master_journal_single_file_mode", lambda: True)
+    monkeypatch.setattr(master_service, "_parse_local_trading_journal_workbook", fake_parse)
+    monkeypatch.setattr(master_service, "_import_uploaded_trading_journal_file", lambda *_a, **_k: {
+        "ok": True, "rows_persisted": True, "balance_applied": True,
+        "snapshot_visible": True, "rows_upserted": 1, "duplicate_rows_merged": 0,
+    })
+    monkeypatch.setattr(master_service, "_verify_trade_log_row_ids_in_workbook", lambda *_a, **_k: {"ok": True, "missing_row_ids": []})
+    monkeypatch.setattr(master_service, "_invalidate_trading_journal_view_snapshot", lambda: None)
+    monkeypatch.setattr(master_service, "_build_trading_journal_view_snapshot", fake_snapshot)
+
+    async def run_backfill():
+        task = asyncio.create_task(master_service.backfill_oanda_history_export_to_journal(job.job_id))
+        assert await asyncio.to_thread(verification_started.wait, 1)
+        progressed = asyncio.Event()
+        async def pulse_event_loop():
+            await asyncio.sleep(0)
+            progressed.set()
+        await asyncio.create_task(pulse_event_loop())
+        assert progressed.is_set() and not task.done()
+        verification_release.set()
+        return await task
+
+    try:
+        response = asyncio.run(run_backfill())
+        assert json.loads(response.body.decode("utf-8"))["ok"] is True
+        assert parse_calls == [True]
+        assert len(worker_threads) == 2
+        assert all(thread_id != main_thread for thread_id in worker_threads)
+    finally:
+        verification_release.set()
         master_service.OANDA_HISTORY_JOBS.pop(job.job_id, None)
 
 

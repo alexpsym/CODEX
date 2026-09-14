@@ -37676,12 +37676,63 @@ def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, e
     snapshot_shrink_guard: Dict[str, object] = {}
     substage_timings: Dict[str, float] = {}
     _substage_t0 = time.perf_counter()
-    def _finish_substage(stage: str, *, outcome: str = "completed") -> None:
+    def _start_substage(stage: str) -> None:
+        nonlocal _substage_t0
+        _substage_t0 = time.perf_counter()
+        _update_trading_journal_import_status(
+            stage=f"workbook_sync:{stage}",
+            message=f"Workbook sync {stage.replace('_', ' ')}",
+        )
+        APP_LOGGER.info(
+            "master_journal_workbook_sync_substage_start sync_id=%s caller=%s stage=%s",
+            sync_id,
+            sync_caller,
+            stage,
+        )
+
+    def _finish_substage(
+        stage: str,
+        *,
+        outcome: str = "completed",
+        error: Optional[BaseException] = None,
+    ) -> None:
         nonlocal _substage_t0
         elapsed = round(time.perf_counter() - _substage_t0, 6)
         substage_timings[stage] = elapsed
-        APP_LOGGER.info("master_journal_workbook_sync_substage_done sync_id=%s caller=%s stage=%s outcome=%s elapsed=%.6fs", sync_id, sync_caller, stage, outcome, elapsed)
+        if error is None:
+            APP_LOGGER.info(
+                "master_journal_workbook_sync_substage_done sync_id=%s caller=%s stage=%s outcome=%s elapsed=%.6fs",
+                sync_id,
+                sync_caller,
+                stage,
+                outcome,
+                elapsed,
+            )
+        else:
+            APP_LOGGER.warning(
+                "master_journal_workbook_sync_substage_done sync_id=%s caller=%s stage=%s outcome=failed elapsed=%.6fs error=%s",
+                sync_id,
+                sync_caller,
+                stage,
+                elapsed,
+                _safe_exception_message(error),
+            )
         _substage_t0 = time.perf_counter()
+
+    def _run_prewrite_substage(
+        stage: str,
+        operation: Callable[[], object],
+        *,
+        success_outcome: str = "completed",
+    ) -> object:
+        _start_substage(stage)
+        try:
+            result = operation()
+        except Exception as exc:
+            _finish_substage(stage, outcome="failed", error=exc)
+            raise
+        _finish_substage(stage, outcome=success_outcome)
+        return result
     for _stage in ("snapshot_build", "manual_override_read", "row_normalization", "statistics_recomputation", "snapshot_shrink_validation", "trade_number_assignment", "update_master_journal_workbook_data_only", "workbook_validation_load", "validation_trade_log", "validation_instrument_averages", "validation_calendar", "validation_reports", "validation_dashboard_balances", "validation_leaders", "final_replace", "enforce_single_file", "github_sync"):
         substage_timings.setdefault(_stage, 0.0)
     try:
@@ -37712,39 +37763,44 @@ def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, e
             else {}
         )
         _finish_substage("manual_override_read")
-        normalization_input = source_items
-        if (
-            isinstance(manual_overrides, dict)
-            and manual_overrides
-            and not isinstance(prebuilt_snapshot, dict)
-            and not _master_journal_single_file_mode()
-        ):
-            normalization_input = [
-                r for r in _get_trading_journal_rows() if isinstance(r, dict)
-            ]
-        normalized_rows, recommendation_row_normalization = (
-            _normalize_master_journal_rows(
+        def _normalize_rows_for_prewrite() -> Tuple[List[Dict[str, object]], Dict[str, object]]:
+            nonlocal snapshot
+            normalization_input = source_items
+            if (
+                isinstance(manual_overrides, dict)
+                and manual_overrides
+                and not isinstance(prebuilt_snapshot, dict)
+                and not _master_journal_single_file_mode()
+            ):
+                normalization_input = [
+                    r for r in _get_trading_journal_rows() if isinstance(r, dict)
+                ]
+            normalized, normalization = _normalize_master_journal_rows(
                 normalization_input,
                 manual_overrides if isinstance(manual_overrides, dict) else {},
             )
+            if (
+                int(normalization.get("manual_override_rows_applied") or 0) > 0
+                and not isinstance(prebuilt_snapshot, dict)
+                and not _master_journal_single_file_mode()
+            ):
+                _set_trading_journal_rows(normalized)
+                snapshot = _build_manual_import_authoritative_snapshot()
+                normalized, rebuilt_normalization = _normalize_master_journal_rows(
+                    [r for r in (snapshot.get("items") or []) if isinstance(r, dict)],
+                    manual_overrides if isinstance(manual_overrides, dict) else {},
+                )
+                normalization = {
+                    **normalization,
+                    **rebuilt_normalization,
+                }
+            return normalized, normalization
+
+        normalized_rows, recommendation_row_normalization = _run_prewrite_substage(
+            "row_normalization",
+            _normalize_rows_for_prewrite,
         )
-        if (
-            int(recommendation_row_normalization.get("manual_override_rows_applied") or 0) > 0
-            and not isinstance(prebuilt_snapshot, dict)
-            and not _master_journal_single_file_mode()
-        ):
-            _set_trading_journal_rows(normalized_rows)
-            snapshot = _build_manual_import_authoritative_snapshot()
-            normalized_rows, rebuilt_normalization = _normalize_master_journal_rows(
-                [r for r in (snapshot.get("items") or []) if isinstance(r, dict)],
-                manual_overrides if isinstance(manual_overrides, dict) else {},
-            )
-            recommendation_row_normalization = {
-                **recommendation_row_normalization,
-                **rebuilt_normalization,
-            }
         normalization_changed_rows = normalized_rows != source_items
-        _finish_substage("row_normalization")
         snapshot = dict(snapshot)
         snapshot["items"] = normalized_rows
         if normalization_changed_rows:
@@ -37752,38 +37808,46 @@ def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, e
             # change which trades contribute to every dashboard/report metric.
             # Keep the snapshot aggregates tied to the exact normalized rows
             # written to the workbook and used for recommendation artifacts.
-            snapshot["stats"] = _compute_journal_stats_with_period_reports(
-                normalized_rows,
-                [
-                    balance
-                    for balance in (snapshot.get("balances") or [])
-                    if isinstance(balance, dict)
-                ],
+            snapshot["stats"] = _run_prewrite_substage(
+                "statistics_recomputation",
+                lambda: _compute_journal_stats_with_period_reports(
+                    normalized_rows,
+                    [
+                        balance
+                        for balance in (snapshot.get("balances") or [])
+                        if isinstance(balance, dict)
+                    ],
+                ),
+                success_outcome="ran",
             )
             recommendation_row_normalization["stats_recomputed"] = True
-            _finish_substage("statistics_recomputation", outcome="ran")
         else:
             recommendation_row_normalization["stats_recomputed"] = False
+            _start_substage("statistics_recomputation")
             _finish_substage("statistics_recomputation", outcome="skipped")
         source_items = normalized_rows
         source_trade_rows = [r for r in source_items if _row_type(r) == "trade"]
-        try:
-            snapshot_shrink_guard = _non_authoritative_snapshot_shrink_guard(
+        def _validate_snapshot_shrink() -> Dict[str, object]:
+            guard = _non_authoritative_snapshot_shrink_guard(
                 path,
                 snapshot,
             )
-            if snapshot_shrink_guard.get("blocked"):
-                raise _NonAuthoritativeSnapshotShrinkError(snapshot_shrink_guard)
-        finally:
-            _finish_substage("snapshot_shrink_validation")
+            if guard.get("blocked"):
+                raise _NonAuthoritativeSnapshotShrinkError(guard)
+            return guard
 
-        try:
-            trade_numbering = assign_trade_numbers_and_create_folders(
+        snapshot_shrink_guard = _run_prewrite_substage(
+            "snapshot_shrink_validation",
+            _validate_snapshot_shrink,
+        )
+
+        trade_numbering = _run_prewrite_substage(
+            "trade_number_assignment",
+            lambda: assign_trade_numbers_and_create_folders(
                 normalized_rows,
                 workbook_path=path if path.exists() else None,
-            )
-        finally:
-            _finish_substage("trade_number_assignment")
+            ),
+        )
         if trade_numbering.get("assigned_count"):
             snapshot["items"] = normalized_rows
             source_items = normalized_rows
@@ -37792,32 +37856,32 @@ def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, e
                 _set_trading_journal_rows(normalized_rows)
         recommendation_row_normalization["trade_numbering"] = trade_numbering
 
-        if path.exists():
-            if expected_survivor_row_ids is None:
-                update_result = update_master_journal_workbook_data_only(
-                    path,
-                    snapshot,
-                    preserve_existing_layout=True,
-                    publish_recommendation_assets=False,
-                )
-            else:
-                update_result = update_master_journal_workbook_data_only(
-                    path,
-                    snapshot,
-                    expected_survivor_row_ids=expected_survivor_row_ids,
-                    preserve_existing_layout=True,
-                    publish_recommendation_assets=False,
-                )
-            if not bool((update_result or {}).get("ok")):
-                raise RuntimeError(str((update_result or {}).get("error") or "Trading Journal data-only update failed."))
-            candidate_path = str((update_result or {}).get("candidate_path") or "").strip()
-            if not candidate_path:
-                raise RuntimeError("Trading Journal data-only update failed: candidate workbook path missing.")
-            tmp = Path(candidate_path)
-            created_tmp = True
-            validate_path = tmp
-            _finish_substage("update_master_journal_workbook_data_only")
-        else:
+        def _update_workbook_data() -> Path:
+            nonlocal tmp, created_tmp
+            if path.exists():
+                if expected_survivor_row_ids is None:
+                    update_result = update_master_journal_workbook_data_only(
+                        path,
+                        snapshot,
+                        preserve_existing_layout=True,
+                        publish_recommendation_assets=False,
+                    )
+                else:
+                    update_result = update_master_journal_workbook_data_only(
+                        path,
+                        snapshot,
+                        expected_survivor_row_ids=expected_survivor_row_ids,
+                        preserve_existing_layout=True,
+                        publish_recommendation_assets=False,
+                    )
+                if not bool((update_result or {}).get("ok")):
+                    raise RuntimeError(str((update_result or {}).get("error") or "Trading Journal data-only update failed."))
+                candidate_path = str((update_result or {}).get("candidate_path") or "").strip()
+                if not candidate_path:
+                    raise RuntimeError("Trading Journal data-only update failed: candidate workbook path missing.")
+                tmp = Path(candidate_path)
+                created_tmp = True
+                return tmp
             build_master_journal_workbook(
                 snapshot,
                 tmp,
@@ -37828,8 +37892,12 @@ def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, e
             created_tmp = True
             if not tmp.exists() or tmp.stat().st_size <= 0:
                 raise RuntimeError("Trading Journal temporary workbook was not created.")
-            validate_path = tmp
-            _finish_substage("update_master_journal_workbook_data_only")
+            return tmp
+
+        validate_path = _run_prewrite_substage(
+            "update_master_journal_workbook_data_only",
+            _update_workbook_data,
+        )
 
         from openpyxl import load_workbook as _load_wb
         wb = _load_wb(validate_path, data_only=True)

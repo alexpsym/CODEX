@@ -4352,26 +4352,130 @@ def test_master_journal_snapshot_records_substage_timings_and_skips_context_look
     assert snapshot['equity_cache']['point_counts']['BINANCE'] == 3
 
 
-def test_workbook_sync_reports_each_prewrite_stage():
-    source = MODULE_PATH.read_text(encoding='utf-8')
-    tree = ast.parse(source)
-    target = next(
-        node for node in tree.body
-        if isinstance(node, ast.FunctionDef)
-        and node.name == '_sync_master_journal_workbook_unlocked'
+def _configure_prewrite_timing_sync(monkeypatch, tmp_path, *, normalized_rows, trade_numbering):
+    ms = _load_master_service_for_import_test()
+    path = tmp_path / 'Trading Journal.xlsx'
+    path.write_bytes(b'placeholder')
+    events = []
+    status_updates = []
+
+    class _Logger:
+        def info(self, message, *args, **_kwargs):
+            events.append(('info', message % args))
+
+        def warning(self, message, *args, **_kwargs):
+            events.append(('warning', message % args))
+
+    clock_values = iter(range(1, 200))
+    monkeypatch.setattr(ms, 'APP_LOGGER', _Logger())
+    monkeypatch.setattr(ms.time, 'perf_counter', lambda: float(next(clock_values)))
+    monkeypatch.setattr(ms, '_update_trading_journal_import_status', lambda **kwargs: status_updates.append(kwargs))
+    monkeypatch.setattr(ms, '_master_journal_path', lambda: path)
+    monkeypatch.setattr(ms, '_master_journal_single_file_mode', lambda: False)
+    monkeypatch.setattr(ms, 'read_master_journal_manual_overrides', lambda _path: {})
+    monkeypatch.setattr(ms, '_normalize_master_journal_rows', lambda _rows, _overrides: (normalized_rows, {}))
+    monkeypatch.setattr(ms, '_non_authoritative_snapshot_shrink_guard', lambda _path, _snapshot: {'blocked': False})
+    monkeypatch.setattr(ms, 'assign_trade_numbers_and_create_folders', trade_numbering)
+    return ms, path, events, status_updates
+
+
+def _timing_stage_events(events):
+    return [message for _level, message in events if 'master_journal_workbook_sync_substage_' in message]
+
+
+def test_workbook_stage_timings_report_completed_and_skipped_operations(monkeypatch, tmp_path):
+    rows = [{'id': 'row-1', 'row_type': 'cashflow', 'account': 'OANDA DEMO', 'currency': 'AUD'}]
+    ms, _path, events, status_updates = _configure_prewrite_timing_sync(
+        monkeypatch,
+        tmp_path,
+        normalized_rows=list(rows),
+        trade_numbering=lambda *_args, **_kwargs: {'assigned_count': 0},
     )
-    text = ast.get_source_segment(source, target) or ''
-    expected = {
+    candidate = tmp_path / 'candidate.xlsx'
+
+    class _StopAfterPrewrite(Exception):
+        pass
+
+    monkeypatch.setattr(ms, 'update_master_journal_workbook_data_only', lambda *_args, **_kwargs: {
+        'ok': True, 'candidate_path': str(candidate),
+    })
+    import openpyxl
+    monkeypatch.setattr(openpyxl, 'load_workbook', lambda *_args, **_kwargs: (_ for _ in ()).throw(_StopAfterPrewrite()))
+
+    result = ms._sync_master_journal_workbook_unlocked(
+        prebuilt_snapshot={'items': list(rows), 'balances': [], 'stats': {}},
+        sync_id='timing-complete',
+        sync_caller='unit-test',
+    )
+    assert result['master_journal_ok'] is False
+    assert result['master_journal_error_type'] == '_StopAfterPrewrite'
+
+    stage_events = _timing_stage_events(events)
+    expected = [
         'row_normalization',
         'statistics_recomputation',
         'snapshot_shrink_validation',
         'trade_number_assignment',
         'update_master_journal_workbook_data_only',
-    }
-    assert expected.issubset(set(re.findall(r'"([a-z_]+)"', text)))
-    assert 'outcome="ran"' in text
-    assert 'outcome="skipped"' in text
-    assert 'sync_id=%s caller=%s stage=%s outcome=%s elapsed=%.6fs' in text
+    ]
+    for stage in expected:
+        start = f'stage={stage}'
+        assert sum('substage_start' in message and start in message for message in stage_events) == 1
+        terminal = [message for message in stage_events if 'substage_done' in message and start in message]
+        assert len(terminal) == 1
+        assert 'sync_id=timing-complete caller=unit-test' in terminal[0]
+        assert 'elapsed=1.000000s' in terminal[0]
+    assert 'stage=statistics_recomputation outcome=skipped' in next(
+        message for message in stage_events if 'substage_done' in message and 'stage=statistics_recomputation' in message
+    )
+    assert stage_events.index(next(message for message in stage_events if 'substage_start' in message and 'stage=row_normalization' in message)) < stage_events.index(next(message for message in stage_events if 'substage_done' in message and 'stage=row_normalization' in message))
+    assert [update['stage'] for update in status_updates] == [f'workbook_sync:{stage}' for stage in expected]
+
+
+def test_workbook_stage_timings_report_failure_without_completion(monkeypatch, tmp_path):
+    source_rows = [{'id': 'row-1', 'row_type': 'cashflow', 'account': 'OANDA DEMO', 'currency': 'AUD'}]
+    normalized_rows = [*source_rows, {'id': 'row-2', 'row_type': 'cashflow', 'account': 'OANDA DEMO', 'currency': 'AUD'}]
+
+    class _SyntheticNumberingFailure(RuntimeError):
+        pass
+
+    def fail_numbering(*_args, **_kwargs):
+        raise _SyntheticNumberingFailure('synthetic numbering failure')
+
+    ms, _path, events, _status_updates = _configure_prewrite_timing_sync(
+        monkeypatch,
+        tmp_path,
+        normalized_rows=normalized_rows,
+        trade_numbering=fail_numbering,
+    )
+    workbook_write_calls = []
+    monkeypatch.setattr(ms, '_compute_journal_stats_with_period_reports', lambda *_args, **_kwargs: {'recomputed': True})
+    monkeypatch.setattr(ms, 'update_master_journal_workbook_data_only', lambda *_args, **_kwargs: workbook_write_calls.append(True))
+
+    result = ms._sync_master_journal_workbook_unlocked(
+        prebuilt_snapshot={'items': source_rows, 'balances': [], 'stats': {}},
+        sync_id='timing-failure',
+        sync_caller='unit-test',
+    )
+    assert result['master_journal_ok'] is False
+    assert result['master_journal_error_type'] == '_SyntheticNumberingFailure'
+
+    stage_events = _timing_stage_events(events)
+    stats_terminal = next(
+        message for message in stage_events
+        if 'substage_done' in message and 'stage=statistics_recomputation' in message
+    )
+    numbering_terminal = next(
+        message for message in stage_events
+        if 'substage_done' in message and 'stage=trade_number_assignment' in message
+    )
+    assert 'outcome=ran' in stats_terminal
+    assert 'sync_id=timing-failure caller=unit-test' in stats_terminal
+    assert 'outcome=failed' in numbering_terminal
+    assert 'elapsed=1.000000s' in numbering_terminal
+    assert not any('stage=trade_number_assignment outcome=completed' in message for message in stage_events)
+    assert not any('stage=update_master_journal_workbook_data_only' in message for message in stage_events)
+    assert workbook_write_calls == []
 
 
 def test_resync_fast_path_miss_reports_changed_fingerprint_components(tmp_path):
