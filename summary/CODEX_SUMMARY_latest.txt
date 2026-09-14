@@ -622,3 +622,23 @@ Phase 6B output-contract correction: preserve Bybit Live normalized output
 - Bybit Demo continues to emit `balance_after_trade_source` only when a recorded balance is supplied. Live normalized rows now omit that key entirely, preserving the pre-Phase-6B output contract. The existing timeline guard remains Demo-only, including when a previously tagged Live row is supplied to it.
 - The single authorized failed-node-only invocation, `tests/test_master_service_bybit_demo_sync.py::test_bybit_transaction_balance_authority_is_demo_only[live]`, passed: `1 passed in 6.97s`. The Demo case and earlier Phase 6B cases were not rerun.
 - Changed exactly: `render/master_service.py`, `tests/test_master_service_bybit_demo_sync.py`, and this summary. No real journal adjustment, account reconciliation, broker request, import, workbook, database, cloud, or production-data operation occurred. Missing Bybit history remains missing and the user retains responsibility for any manual adjustment. Phases 3–7 were not started.
+
+Phase 4A evidence capture: UAIUSDT movement-range diagnosis
+
+- One newly authorized credential-free Bybit diagnostic completed against `https://api.bybit.com` using 10 GETs: one exact-symbol `instruments-info` request for `linear` followed by one `kline` request for each existing native interval. UAIUSDT was confirmed as a Linear listing. No alternate category, host, fallback, retry, account, or private request was made.
+- Retained evidence: `C:\tmp\codex_phase4a_ff8b9f9\evidence.json`. The worker completed with PID `12868`, return code `0`, and no timeout. The captured rows are latest native candles (not an atomic snapshot):
+
+  | field | interval | candle start (UTC) | open / high / low | raw % | displayed % |
+  |---|---:|---:|---:|---:|---:|
+  | range.1m | 1 | 1789358040000 | 0.5382 / 0.5398 / 0.5382 | 0.297287 | 0.30 |
+  | range.5m | 5 | 1789357800000 | 0.5392 / 0.5418 / 0.5334 | 1.557864 | 1.56 |
+  | range.15m | 15 | 1789357500000 | 0.5391 / 0.5440 / 0.5334 | 1.966240 | 1.97 |
+  | range.30m | 30 | 1789356600000 | 0.5298 / 0.5440 / 0.5276 | 3.095507 | 3.10 |
+  | range.1h | 60 | 1789354800000 | 0.5190 / 0.5440 / 0.5155 | 5.491329 | 5.49 |
+  | range.4h | 240 | 1789344000000 | 0.5050 / 0.5440 / 0.4890 | 10.891089 | 10.89 |
+  | range.1d | D | 1789344000000 | 0.5050 / 0.5440 / 0.4890 | 10.891089 | 10.89 |
+  | range.1w | W | 1789344000000 | 0.5050 / 0.5440 / 0.4890 | 10.891089 | 10.89 |
+  | range.1mo | M | 1788220800000 | 0.3766 / 0.8400 / 0.3056 | 141.901221 | 141.90 |
+
+- The source mapping is unchanged: each `range.*` field requests its corresponding native interval with `limit=1`, selects the latest parsed candle, computes `(high-low)/open`, and the existing frontend multiplies by 100 and rounds to two decimals. Equal 4h/1d/1w values are supported by equal captured OHLC values, not evidence of cross-period reuse; the other captured raw values are different. Neither 2.63% nor 1.23% appeared in this bounded capture, so no routing, field-mapping, calculation, cache, or presentation defect was demonstrated and no runtime code was changed.
+- This is diagnostic evidence only and does not disprove the historical complaint. Reproduction would require the original screenshot’s exact row context and a contemporaneous capture; current candles are not a historical or atomic snapshot. Phase 4A remains unresolved and requires that evidence before any canonical repair. No tests, broker/account, journal, report, workbook, cloud, or production-data operation occurred.
