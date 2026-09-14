@@ -681,6 +681,93 @@ def test_oanda_master_journal_backfill_uses_authoritative_import_and_is_idempote
     assert ids.count("cashflow:existing") == 1
 
 
+def test_backfill_runs_blocking_work_off_event_loop(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    export_path = tmp_path / "oanda_history_demo_thread.csv"
+    export_path.write_text("synthetic", encoding="utf-8")
+    export_path.with_suffix(".json").write_text('{"account_mode":"demo"}', encoding="utf-8")
+    job = master_service.OandaHistoryJob(
+        job_id="threaded-backfill", status="done", created_at=0, updated_at=0,
+        params={"account": "demo"}, output_path=export_path,
+    )
+    started = threading.Event()
+    release = threading.Event()
+    main_thread = threading.get_ident()
+    worker_threads = []
+    verification_called = []
+    master_service.OANDA_HISTORY_JOBS[job.job_id] = job
+
+    def fake_parse(*_args, **_kwargs):
+        worker_threads.append(threading.get_ident())
+        started.set()
+        assert release.wait(timeout=3), "test gate was not released"
+        return ([{"id": "trade-1", "source": "oanda_transaction_export"}], {
+            "balance": 1517.94, "as_of": "2026-08-01T05:00:01Z",
+            "source": "oanda_transaction_export_balance",
+        })
+
+    monkeypatch.setattr(master_service, "_master_journal_single_file_mode", lambda: True)
+    monkeypatch.setattr(master_service, "_parse_local_trading_journal_workbook", fake_parse)
+    monkeypatch.setattr(master_service, "_import_uploaded_trading_journal_file", lambda *_a, **_k: {
+        "ok": True, "rows_persisted": True, "balance_applied": True,
+        "snapshot_visible": True, "rows_upserted": 1, "duplicate_rows_merged": 0,
+    })
+    monkeypatch.setattr(master_service, "_verify_trade_log_row_ids_in_workbook", lambda *_a, **_k: verification_called.append(True) or {"ok": True, "missing_row_ids": []})
+    monkeypatch.setattr(master_service, "_invalidate_trading_journal_view_snapshot", lambda: None)
+    monkeypatch.setattr(master_service, "_build_trading_journal_view_snapshot", lambda **_k: {"balances": [{
+        "label": "OANDA DEMO", "balance": 1517.94, "currency": "AUD",
+        "balance_source": "oanda_transaction_export_balance",
+    }]})
+
+    async def run_backfill():
+        task = asyncio.create_task(master_service.backfill_oanda_history_export_to_journal(job.job_id))
+        assert await asyncio.to_thread(started.wait, 1)
+        pulse = asyncio.Event()
+        await asyncio.sleep(0)
+        pulse.set()
+        assert pulse.is_set() and not task.done()
+        release.set()
+        return await task
+
+    try:
+        response = asyncio.run(run_backfill())
+        assert json.loads(response.body.decode("utf-8"))["ok"] is True
+        assert worker_threads == [threading.get_ident()] or worker_threads[0] != main_thread
+        assert verification_called == [True]
+    finally:
+        release.set()
+        master_service.OANDA_HISTORY_JOBS.pop(job.job_id, None)
+
+
+@pytest.mark.parametrize("failure_kind", ["busy", "import-error"], ids=["busy", "import-error"])
+def test_backfill_worker_preserves_failure_results(
+    failure_kind: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    export_path = tmp_path / f"oanda_history_demo_{failure_kind}.csv"
+    export_path.write_text("synthetic", encoding="utf-8")
+    export_path.with_suffix(".json").write_text('{"account_mode":"demo"}', encoding="utf-8")
+    job = master_service.OandaHistoryJob(
+        job_id=f"failure-{failure_kind}", status="done", created_at=0, updated_at=0,
+        params={"account": "demo"}, output_path=export_path,
+    )
+    calls = []
+    master_service.OANDA_HISTORY_JOBS[job.job_id] = job
+    monkeypatch.setattr(master_service, "_master_journal_single_file_mode", lambda: True)
+    monkeypatch.setattr(master_service, "_parse_local_trading_journal_workbook", lambda *_a, **_k: ([{"id": "trade-1", "source": "oanda_transaction_export"}], {"balance": 1.0}))
+    monkeypatch.setattr(master_service, "_import_uploaded_trading_journal_file", lambda *_a, **_k: calls.append(True) or {
+        "ok": False,
+        "message": "Trading Journal import is already in progress." if failure_kind == "busy" else "Synthetic import failure.",
+        "rows_persisted": False, "balance_applied": False, "snapshot_visible": False,
+    })
+    try:
+        response = asyncio.run(master_service.backfill_oanda_history_export_to_journal(job.job_id))
+        payload = json.loads(response.body.decode("utf-8"))
+        assert payload["ok"] is False
+        expected_error = "already in progress" if failure_kind == "busy" else "synthetic import failure"
+        assert expected_error in str(payload["error"]).lower()
+        assert calls == [True]
+    finally:
+        master_service.OANDA_HISTORY_JOBS.pop(job.job_id, None)
+
 def test_oanda_master_backfill_persists_later_nontrade_balance_through_workbook_reread(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

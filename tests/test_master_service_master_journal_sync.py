@@ -4352,6 +4352,28 @@ def test_master_journal_snapshot_records_substage_timings_and_skips_context_look
     assert snapshot['equity_cache']['point_counts']['BINANCE'] == 3
 
 
+def test_workbook_sync_reports_each_prewrite_stage():
+    source = MODULE_PATH.read_text(encoding='utf-8')
+    tree = ast.parse(source)
+    target = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == '_sync_master_journal_workbook_unlocked'
+    )
+    text = ast.get_source_segment(source, target) or ''
+    expected = {
+        'row_normalization',
+        'statistics_recomputation',
+        'snapshot_shrink_validation',
+        'trade_number_assignment',
+        'update_master_journal_workbook_data_only',
+    }
+    assert expected.issubset(set(re.findall(r'"([a-z_]+)"', text)))
+    assert 'outcome="ran"' in text
+    assert 'outcome="skipped"' in text
+    assert 'sync_id=%s caller=%s stage=%s outcome=%s elapsed=%.6fs' in text
+
+
 def test_resync_fast_path_miss_reports_changed_fingerprint_components(tmp_path):
     ms = _load_master_service_for_import_test()
     path = tmp_path / 'Trading Journal.xlsx'

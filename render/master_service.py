@@ -35817,8 +35817,7 @@ async def download_oanda_history_export(job_id: str) -> FileResponse:
     )
 
 
-@app.post("/api/oanda-history/export/{job_id}/backfill-journal")
-async def backfill_oanda_history_export_to_journal(job_id: str) -> JSONResponse:
+def _backfill_oanda_history_export_to_journal_blocking(job_id: str) -> JSONResponse:
     def _coerce_append_stats(stats: object) -> Dict[str, object]:
         if isinstance(stats, dict):
             return {
@@ -36170,6 +36169,11 @@ async def backfill_oanda_history_export_to_journal(job_id: str) -> JSONResponse:
         ),
         snapshot_visible=isinstance(target_bal, dict),
     )
+
+
+@app.post("/api/oanda-history/export/{job_id}/backfill-journal")
+async def backfill_oanda_history_export_to_journal(job_id: str) -> JSONResponse:
+    return await asyncio.to_thread(_backfill_oanda_history_export_to_journal_blocking, job_id)
 
 
 @app.post("/api/trading-journal/oanda-demo/repair-balance")
@@ -37672,13 +37676,13 @@ def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, e
     snapshot_shrink_guard: Dict[str, object] = {}
     substage_timings: Dict[str, float] = {}
     _substage_t0 = time.perf_counter()
-    def _finish_substage(stage: str) -> None:
+    def _finish_substage(stage: str, *, outcome: str = "completed") -> None:
         nonlocal _substage_t0
         elapsed = round(time.perf_counter() - _substage_t0, 6)
         substage_timings[stage] = elapsed
-        APP_LOGGER.info("master_journal_workbook_sync_substage_done sync_id=%s caller=%s stage=%s elapsed=%.6fs", sync_id, sync_caller, stage, elapsed)
+        APP_LOGGER.info("master_journal_workbook_sync_substage_done sync_id=%s caller=%s stage=%s outcome=%s elapsed=%.6fs", sync_id, sync_caller, stage, outcome, elapsed)
         _substage_t0 = time.perf_counter()
-    for _stage in ("snapshot_build", "manual_override_read", "update_master_journal_workbook_data_only", "workbook_validation_load", "validation_trade_log", "validation_instrument_averages", "validation_calendar", "validation_reports", "validation_dashboard_balances", "validation_leaders", "final_replace", "enforce_single_file", "github_sync"):
+    for _stage in ("snapshot_build", "manual_override_read", "row_normalization", "statistics_recomputation", "snapshot_shrink_validation", "trade_number_assignment", "update_master_journal_workbook_data_only", "workbook_validation_load", "validation_trade_log", "validation_instrument_averages", "validation_calendar", "validation_reports", "validation_dashboard_balances", "validation_leaders", "final_replace", "enforce_single_file", "github_sync"):
         substage_timings.setdefault(_stage, 0.0)
     try:
         if _master_journal_single_file_mode():
@@ -37740,6 +37744,7 @@ def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, e
                 **rebuilt_normalization,
             }
         normalization_changed_rows = normalized_rows != source_items
+        _finish_substage("row_normalization")
         snapshot = dict(snapshot)
         snapshot["items"] = normalized_rows
         if normalization_changed_rows:
@@ -37756,21 +37761,29 @@ def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, e
                 ],
             )
             recommendation_row_normalization["stats_recomputed"] = True
+            _finish_substage("statistics_recomputation", outcome="ran")
         else:
             recommendation_row_normalization["stats_recomputed"] = False
+            _finish_substage("statistics_recomputation", outcome="skipped")
         source_items = normalized_rows
         source_trade_rows = [r for r in source_items if _row_type(r) == "trade"]
-        snapshot_shrink_guard = _non_authoritative_snapshot_shrink_guard(
-            path,
-            snapshot,
-        )
-        if snapshot_shrink_guard.get("blocked"):
-            raise _NonAuthoritativeSnapshotShrinkError(snapshot_shrink_guard)
+        try:
+            snapshot_shrink_guard = _non_authoritative_snapshot_shrink_guard(
+                path,
+                snapshot,
+            )
+            if snapshot_shrink_guard.get("blocked"):
+                raise _NonAuthoritativeSnapshotShrinkError(snapshot_shrink_guard)
+        finally:
+            _finish_substage("snapshot_shrink_validation")
 
-        trade_numbering = assign_trade_numbers_and_create_folders(
-            normalized_rows,
-            workbook_path=path if path.exists() else None,
-        )
+        try:
+            trade_numbering = assign_trade_numbers_and_create_folders(
+                normalized_rows,
+                workbook_path=path if path.exists() else None,
+            )
+        finally:
+            _finish_substage("trade_number_assignment")
         if trade_numbering.get("assigned_count"):
             snapshot["items"] = normalized_rows
             source_items = normalized_rows
