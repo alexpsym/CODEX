@@ -36024,7 +36024,11 @@ def _backfill_oanda_history_export_to_journal_blocking(job_id: str) -> JSONRespo
         _invalidate_trading_journal_view_snapshot()
         visibility_error = None
         try:
-            snapshot_payload = _build_trading_journal_view_snapshot(force=True)
+            snapshot_payload = _build_trading_journal_view_snapshot(
+                force=True,
+                skip_external_balances=True,
+                skip_live_account_refresh=True,
+            )
             balances_now = _snapshot_balance_items(snapshot_payload)
             label = "OANDA DEMO" if account_mode == "demo" else "OANDA LIVE"
             target_bal = next(
