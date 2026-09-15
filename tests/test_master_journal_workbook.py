@@ -8257,6 +8257,203 @@ def test_incremental_workbook_balance_only_preserves_trade_log_and_workbook_stru
     assert _chart_formula_signature(path) == before_chart_formulas
 
 
+def _inject_trade_log_default_blank_cell(path: Path, coordinate: str) -> None:
+    """Create an explicit OOXML default blank that openpyxl may elide on save."""
+    rewritten = path.with_name(f".{path.stem}.sparse{path.suffix}")
+    with zipfile.ZipFile(path, "r") as source_package:
+        trade_log_part = mjw._worksheet_ooxml_part_name(source_package, "Trade Log")
+        payloads = {
+            info.filename: (info, source_package.read(info.filename))
+            for info in source_package.infolist()
+        }
+    root = ET.fromstring(payloads[trade_log_part][1])
+    sheet_data = root.find(f"{{{_SPREADSHEETML_NAMESPACE}}}sheetData")
+    assert sheet_data is not None
+    row_number, _ = coordinate_to_tuple(coordinate)
+    row = ET.SubElement(sheet_data, f"{{{_SPREADSHEETML_NAMESPACE}}}row", {"r": str(row_number)})
+    ET.SubElement(row, f"{{{_SPREADSHEETML_NAMESPACE}}}c", {"r": coordinate})
+    payloads[trade_log_part] = (
+        payloads[trade_log_part][0],
+        ET.tostring(root, encoding="utf-8", xml_declaration=True),
+    )
+    with zipfile.ZipFile(rewritten, "w", zipfile.ZIP_DEFLATED) as target_package:
+        for info, payload in payloads.values():
+            target_package.writestr(info, payload)
+    rewritten.replace(path)
+
+
+@pytest.fixture(scope="module")
+def balance_only_incremental_template(tmp_path_factory) -> Path:
+    path = tmp_path_factory.mktemp("balance-only-template") / "template.xlsx"
+    snapshot = sample_snapshot()
+    snapshot["balances"].append(
+        {
+            "account_label": "OANDA DEMO",
+            "balance": 1000.0,
+            "currency": "AUD",
+            "as_of": "2026-05-01T00:00:00",
+            "balance_source": "trade_timeline",
+        }
+    )
+    build_master_journal_workbook(snapshot, path)
+    return path
+
+
+def _build_balance_only_incremental_fixture(
+    path: Path, template_path: Path
+) -> None:
+    shutil.copy2(template_path, path)
+    workbook = load_workbook(path)
+    try:
+        trade_log = workbook["Trade Log"]
+        row_number = _trade_log_row_by_id(trade_log, "t1")
+        symbol_cell = trade_log.cell(row_number, _header_col(trade_log, "Symbol"))
+        symbol_cell.comment = Comment("must survive balance-only update", "Tester")
+        symbol_cell.fill = PatternFill("solid", fgColor="FFF4CCCC")
+        workbook.save(path)
+    finally:
+        workbook.close()
+
+
+def _oanda_demo_balance_update() -> dict[str, object]:
+    return {
+        "account_label": "OANDA DEMO",
+        "balance": 1517.94,
+        "currency": "AUD",
+        "as_of": "2026-08-02T12:34:56Z",
+        "balance_source": "oanda_transaction_export_balance",
+    }
+
+
+def test_balance_only_incremental_preserves_sparse_trade_log_roundtrip(
+    monkeypatch, tmp_path: Path, balance_only_incremental_template: Path
+):
+    path = tmp_path / "balance-only-sparse.xlsx"
+    sparse_coordinate = f"{get_column_letter(len(TRADE_LOG_HEADERS))}100"
+    _build_balance_only_incremental_fixture(path, balance_only_incremental_template)
+    _inject_trade_log_default_blank_cell(path, sparse_coordinate)
+    monkeypatch.setattr(
+        mjw, "assign_trade_numbers_and_create_folders", lambda *_args, **_kwargs: {}
+    )
+    workbook = load_workbook(path, data_only=False, keep_links=False)
+    try:
+        trade_log = workbook["Trade Log"]
+        before = mjw._incremental_trade_log_preservation_signature(trade_log)
+        row_number = _trade_log_row_by_id(trade_log, "t1")
+        symbol_cell = trade_log.cell(row_number, _header_col(trade_log, "Symbol"))
+        expected_symbol = symbol_cell.value
+        expected_comment = (symbol_cell.comment.text, symbol_cell.comment.author)
+        expected_fill = symbol_cell.fill.fgColor.rgb
+    finally:
+        workbook.close()
+
+    original_preserve = mjw._preserve_candidate_ooxml
+
+    def elide_default_blank(candidate, *args, **kwargs):
+        result = original_preserve(candidate, *args, **kwargs)
+        workbook = load_workbook(candidate, data_only=False, keep_links=False)
+        try:
+            workbook["Trade Log"]._cells.pop(
+                coordinate_to_tuple(sparse_coordinate), None
+            )
+            workbook.save(candidate)
+        finally:
+            workbook.close()
+        return result
+
+    monkeypatch.setattr(mjw, "_preserve_candidate_ooxml", elide_default_blank)
+
+    result = update_master_journal_workbook_incremental(
+        path,
+        [],
+        account_balance=_oanda_demo_balance_update(),
+        expected_survivor_row_ids=["t1", "t2"],
+    )
+
+    assert result["ok"] is True
+    verified_balance = result["diagnostics"]["verified_account_balance"]
+    assert verified_balance["account_label"] == "OANDA DEMO"
+    assert verified_balance["balance"] == pytest.approx(1517.94)
+    assert verified_balance["currency"] == "AUD"
+    assert verified_balance["as_of"] == "2026-08-02T12:34:56Z"
+    assert verified_balance["source"] == "oanda_transaction_export_balance"
+    workbook = load_workbook(path, data_only=False, keep_links=False)
+    try:
+        trade_log = workbook["Trade Log"]
+        assert mjw._incremental_trade_log_preservation_signature(trade_log) == before
+        row_number = _trade_log_row_by_id(trade_log, "t1")
+        symbol_cell = trade_log.cell(row_number, _header_col(trade_log, "Symbol"))
+        assert symbol_cell.value == expected_symbol
+        assert (symbol_cell.comment.text, symbol_cell.comment.author) == expected_comment
+        assert symbol_cell.fill.fgColor.rgb == expected_fill
+        assert mjw._read_account_balance_source_metadata(workbook, "OANDA DEMO") == {
+            "source": "oanda_transaction_export_balance",
+            "timeline_as_of": "2026-08-02T12:34:56",
+        }
+    finally:
+        workbook.close()
+
+
+def _assert_balance_only_incremental_rejects_candidate_trade_log_change(
+    monkeypatch, tmp_path: Path, template_path: Path, *, filename: str, mutator
+) -> None:
+    path = tmp_path / filename
+    _build_balance_only_incremental_fixture(path, template_path)
+    monkeypatch.setattr(
+        mjw, "assign_trade_numbers_and_create_folders", lambda *_args, **_kwargs: {}
+    )
+    before_bytes = path.read_bytes()
+    original_preserve = mjw._preserve_candidate_ooxml
+
+    def mutate_candidate(candidate, *args, **kwargs):
+        result = original_preserve(candidate, *args, **kwargs)
+        workbook = load_workbook(candidate, data_only=False, keep_links=False)
+        try:
+            trade_log = workbook["Trade Log"]
+            row_number = _trade_log_row_by_id(trade_log, "t1")
+            mutator(trade_log.cell(row_number, _header_col(trade_log, "Symbol")))
+            workbook.save(candidate)
+        finally:
+            workbook.close()
+        return result
+
+    monkeypatch.setattr(mjw, "_preserve_candidate_ooxml", mutate_candidate)
+    with pytest.raises(RuntimeError, match="Trade Log preservation verification failed"):
+        update_master_journal_workbook_incremental(
+            path,
+            [],
+            account_balance=_oanda_demo_balance_update(),
+            expected_survivor_row_ids=["t1", "t2"],
+        )
+    assert path.read_bytes() == before_bytes
+
+
+def test_balance_only_incremental_rejects_trade_log_value_change_atomically(
+    monkeypatch, tmp_path: Path, balance_only_incremental_template: Path
+):
+    _assert_balance_only_incremental_rejects_candidate_trade_log_change(
+        monkeypatch,
+        tmp_path,
+        balance_only_incremental_template,
+        filename="balance-only-value.xlsx",
+        mutator=lambda cell: setattr(cell, "value", "tampered symbol"),
+    )
+
+
+def test_balance_only_incremental_rejects_trade_log_style_change_atomically(
+    monkeypatch, tmp_path: Path, balance_only_incremental_template: Path
+):
+    _assert_balance_only_incremental_rejects_candidate_trade_log_change(
+        monkeypatch,
+        tmp_path,
+        balance_only_incremental_template,
+        filename="balance-only-style.xlsx",
+        mutator=lambda cell: setattr(
+            cell, "fill", PatternFill("solid", fgColor="FF0000FF")
+        ),
+    )
+
+
 def test_incremental_workbook_rejects_empty_rows_without_balance(
     tmp_path: Path,
 ):

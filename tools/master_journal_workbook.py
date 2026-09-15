@@ -18633,13 +18633,27 @@ def _incremental_trade_log_preservation_signature(ws) -> Dict[str, Any]:
     for (row, col), cell in sorted(ws._cells.items()):
         hyperlink = cell.hyperlink
         comment = cell.comment
+        style = tuple(cell._style) if cell._style is not None else None
+        if (
+            cell.value is None
+            and cell.data_type == "n"
+            and (style is None or not any(style))
+            and cell.number_format == "General"
+            and hyperlink is None
+            and comment is None
+            and cell.coordinate not in ws.merged_cells
+        ):
+            # openpyxl may materialize or elide an explicit OOXML default blank
+            # on a save/reload round trip. It carries no Trade Log content or
+            # presentation and is equivalent to the cell being absent.
+            continue
         cells.append(
             (
                 row,
                 col,
                 cell.value,
                 cell.data_type,
-                tuple(cell._style) if cell._style is not None else None,
+                style,
                 cell.number_format,
                 None
                 if hyperlink is None
