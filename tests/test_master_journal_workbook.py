@@ -43,6 +43,77 @@ _SPREADSHEETML_NAMESPACE = (
 _DRAWINGML_CHART_NAMESPACE = (
     "http://schemas.openxmlformats.org/drawingml/2006/chart"
 )
+
+
+def test_existing_workbook_trade_numbers_streams_data_once(monkeypatch, tmp_path):
+    path = tmp_path / "existing.xlsx"
+    path.write_bytes(b"synthetic")
+    rows = [
+        ("unused", " F001 ", "unused", "unused", "id-a"),
+        ("unused", "0007", "unused", "unused", "dup"),
+        ("unused", "C002", "unused", "unused", "id-b"),
+        ("unused", "", "unused", "unused", "blank-number"),
+        ("unused", "F010", "unused", "unused", "dup"),
+    ]
+    iterations = []
+
+    class _Worksheet:
+        max_row = 9
+
+        def iter_rows(self, **kwargs):
+            iterations.append(kwargs)
+            return iter(rows)
+
+        def cell(self, *_args, **_kwargs):
+            raise AssertionError("data-row cell access must not be used")
+
+    class _Workbook:
+        sheetnames = ["Trade Log"]
+
+        def __init__(self):
+            self.closed = False
+            self.sheet = _Worksheet()
+
+        def __getitem__(self, name):
+            assert name == "Trade Log"
+            return self.sheet
+
+        def close(self):
+            self.closed = True
+
+    workbook = _Workbook()
+    monkeypatch.setattr(mjw, "load_workbook", lambda *_args, **_kwargs: workbook)
+    monkeypatch.setattr(mjw, "_trade_log_header_map", lambda _ws: {TRADE_NUMBER_HEADER: 2, "Row ID": 5})
+    monkeypatch.setattr(mjw, "_trade_log_data_start_row", lambda _ws: 5)
+
+    numbers, by_row_id = mjw._existing_workbook_trade_numbers(path)
+
+    assert numbers == {"F001", "0007", "C002", "F010"}
+    assert by_row_id == {"id-a": "F001", "dup": "F010", "id-b": "C002"}
+    assert iterations == [{"min_row": 5, "max_row": 9, "min_col": 1, "max_col": 5, "values_only": True}]
+    assert workbook.closed is True
+
+
+def test_existing_workbook_trade_numbers_without_row_id_column(tmp_path):
+    path = tmp_path / "without-row-id.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Trade Log"
+    headers = [TRADE_NUMBER_HEADER, "Symbol", "Qty"]
+    for column, value in enumerate(headers, start=1):
+        sheet.cell(1, column, value)
+    sheet.cell(2, 1, " F003 ")
+    sheet.cell(3, 1, "C004")
+    sheet.cell(4, 1, "")
+    workbook.save(path)
+    workbook.close()
+
+    numbers, by_row_id = mjw._existing_workbook_trade_numbers(path)
+
+    assert numbers == {"F003", "C004"}
+    assert by_row_id == {}
+
+
 def _opc_source_part_for_relationships(relationships_part: str) -> str | None:
     if relationships_part == "_rels/.rels":
         return ""

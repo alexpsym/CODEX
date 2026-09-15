@@ -5070,13 +5070,21 @@ def _existing_workbook_trade_numbers(path: Path) -> Tuple[set[str], Dict[str, st
         row_id_col = headers.get("Row ID")
         if not number_col:
             return values, by_row_id
-        for row_number in range(_trade_log_data_start_row(ws), ws.max_row + 1):
-            number = str(ws.cell(row_number, number_col).value or "").strip().upper()
+        data_start_row = _trade_log_data_start_row(ws)
+        last_column = max(number_col, row_id_col or number_col)
+        for row in ws.iter_rows(
+            min_row=data_start_row,
+            max_row=ws.max_row,
+            min_col=1,
+            max_col=last_column,
+            values_only=True,
+        ):
+            number = str(row[number_col - 1] or "").strip().upper()
             if not number:
                 continue
             values.add(number)
             if row_id_col:
-                row_id = str(ws.cell(row_number, row_id_col).value or "").strip()
+                row_id = str(row[row_id_col - 1] or "").strip()
                 if row_id:
                     by_row_id[row_id] = number
     finally:
