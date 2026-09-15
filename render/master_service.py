@@ -37828,10 +37828,12 @@ def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, e
         source_items = normalized_rows
         source_trade_rows = [r for r in source_items if _row_type(r) == "trade"]
         def _validate_snapshot_shrink() -> Dict[str, object]:
+            nonlocal snapshot_shrink_guard
             guard = _non_authoritative_snapshot_shrink_guard(
                 path,
                 snapshot,
             )
+            snapshot_shrink_guard = guard
             if guard.get("blocked"):
                 raise _NonAuthoritativeSnapshotShrinkError(guard)
             return guard

@@ -4478,6 +4478,62 @@ def test_workbook_stage_timings_report_failure_without_completion(monkeypatch, t
     assert workbook_write_calls == []
 
 
+def test_blocked_snapshot_shrink_preserves_diagnostics_and_failed_timing(monkeypatch, tmp_path):
+    rows = [{'id': 'row-1', 'row_type': 'cashflow', 'account': 'OANDA DEMO', 'currency': 'AUD'}]
+    numbering_calls = []
+    workbook_write_calls = []
+    ms, path, events, _status_updates = _configure_prewrite_timing_sync(
+        monkeypatch,
+        tmp_path,
+        normalized_rows=list(rows),
+        trade_numbering=lambda *_args, **_kwargs: numbering_calls.append(True),
+    )
+    guard = {
+        'enabled': True,
+        'blocked': True,
+        'existing_trade_rows': 12,
+        'incoming_trade_rows': 1,
+        'retained_trade_rows': 1,
+        'effective_retained_ratio': 0.083333,
+        'reason': 'incoming_snapshot_would_shrink_non_authoritative_history',
+    }
+    monkeypatch.setattr(ms, '_non_authoritative_snapshot_shrink_guard', lambda _path, _snapshot: dict(guard))
+    monkeypatch.setattr(ms, 'update_master_journal_workbook_data_only', lambda *_args, **_kwargs: workbook_write_calls.append(True))
+
+    result = ms._sync_master_journal_workbook_unlocked(
+        prebuilt_snapshot={'items': list(rows), 'balances': [], 'stats': {}},
+        sync_id='timing-shrink-blocked',
+        sync_caller='unit-test',
+    )
+
+    assert result['ok'] is False
+    assert result['master_journal_ok'] is False
+    assert result['master_journal_error_type'] == '_NonAuthoritativeSnapshotShrinkError'
+    assert result['code'] == 'NON_AUTHORITATIVE_SNAPSHOT_SHRINK_BLOCKED'
+    assert result['status_code'] == 409
+    assert result['diagnostics']['snapshot_shrink_guard'] == guard
+    assert result['master_journal_diagnostics']['snapshot_shrink_guard'] == guard
+
+    stage_events = _timing_stage_events(events)
+    shrink_start = [
+        message for message in stage_events
+        if 'substage_start' in message and 'stage=snapshot_shrink_validation' in message
+    ]
+    shrink_done = [
+        message for message in stage_events
+        if 'substage_done' in message and 'stage=snapshot_shrink_validation' in message
+    ]
+    assert len(shrink_start) == 1
+    assert len(shrink_done) == 1
+    assert 'sync_id=timing-shrink-blocked caller=unit-test' in shrink_done[0]
+    assert 'outcome=failed' in shrink_done[0]
+    assert 'elapsed=1.000000s' in shrink_done[0]
+    assert 'outcome=completed' not in shrink_done[0]
+    assert numbering_calls == []
+    assert workbook_write_calls == []
+    assert path.exists()
+
+
 def test_resync_fast_path_miss_reports_changed_fingerprint_components(tmp_path):
     ms = _load_master_service_for_import_test()
     path = tmp_path / 'Trading Journal.xlsx'
