@@ -1291,6 +1291,69 @@ def test_oanda_master_backfill_surfaces_authoritative_import_failures(
     assert payload["sync"] == import_result
 
 
+def test_oanda_backfill_surfaces_classified_workbook_access_failure_without_continuing_import(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    export_path = tmp_path / "oanda_history_demo_access.csv"
+    export_path.write_text("synthetic", encoding="utf-8")
+    export_path.with_suffix(".json").write_text('{"account_mode":"demo"}', encoding="utf-8")
+    job = master_service.OandaHistoryJob(
+        job_id="oanda-workbook-access-failure",
+        status="done",
+        created_at=0,
+        updated_at=0,
+        params={"account": "demo"},
+        output_path=export_path,
+    )
+    import_calls = []
+    master_service.OANDA_HISTORY_JOBS[job.job_id] = job
+    monkeypatch.setattr(master_service, "_master_journal_single_file_mode", lambda: True)
+    monkeypatch.setattr(
+        master_service,
+        "_parse_local_trading_journal_workbook",
+        lambda *_args, **_kwargs: (
+            [{"id": "trade-1", "source": "oanda_transaction_export"}],
+            {"balance": 1000.0, "source": "oanda_transaction_export_balance"},
+        ),
+    )
+    monkeypatch.setattr(
+        master_service,
+        "_import_uploaded_trading_journal_file",
+        lambda *_args, **_kwargs: import_calls.append(True)
+        or master_service._excel_workbook_open_payload(
+            extra={
+                "lock_status": {
+                    "locked": True,
+                    "reason": "access_denied",
+                    "winerror": 5,
+                }
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        master_service,
+        "_verify_trade_log_row_ids_in_workbook",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("backfill must stop at the classified import failure")
+        ),
+    )
+    try:
+        payload = json.loads(
+            asyncio.run(
+                master_service.backfill_oanda_history_export_to_journal(job.job_id)
+            ).body.decode("utf-8")
+        )
+    finally:
+        master_service.OANDA_HISTORY_JOBS.pop(job.job_id, None)
+    assert import_calls == [True]
+    assert payload["ok"] is False
+    assert payload["sync"]["code"] == "WORKBOOK_ACCESS_DENIED"
+    assert "access was denied" in payload["error"].lower()
+    assert "excel" not in payload["error"].lower()
+    assert "resume" not in payload["error"].lower()
+
+
 def test_oanda_master_backfill_parse_and_verification_failures_are_structured(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

@@ -2439,22 +2439,51 @@ def _check_master_journal_write_lock(path: Path) -> Dict[str, object]:
         return {"locked": False, "reason": "", "path": str(path)}
     lock_file = path.with_name(f"~${path.name}")
     if os.name == "nt":
+        handle = None
+        probe_result: Dict[str, object]
         try:
             kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-            handle = kernel32.CreateFileW(str(path), 0x40000000, 0, None, 3, 0x80, None)
+            kernel32.CreateFileW.argtypes = [
+                ctypes.c_wchar_p,
+                ctypes.c_uint32,
+                ctypes.c_uint32,
+                ctypes.c_void_p,
+                ctypes.c_uint32,
+                ctypes.c_uint32,
+                ctypes.c_void_p,
+            ]
+            kernel32.CreateFileW.restype = ctypes.c_void_p
+            kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+            kernel32.CloseHandle.restype = ctypes.c_int
+            handle = kernel32.CreateFileW(
+                str(path), 0x40000000, 0, None, 3, 0x80, None
+            )
+            err = ctypes.get_last_error()
             invalid = ctypes.c_void_p(-1).value
             if handle == invalid or handle == -1:
-                err = ctypes.get_last_error() if hasattr(ctypes, "get_last_error") else None
-                return {"locked": True, "code": "EXCEL_WORKBOOK_OPEN", "reason": "workbook_locked", "path": str(path), "lock_file": str(lock_file) if lock_file.exists() else "", "winerror": err}
-            try:
-                kernel32.CloseHandle(handle)
-            except Exception:
-                pass
-            if lock_file.exists():
-                return {"locked": False, "reason": "lockfile_stale", "path": str(path), "lock_file": str(lock_file)}
-            return {"locked": False, "reason": "", "path": str(path)}
+                if err in {32, 33}:
+                    probe_result = {"locked": True, "code": "WORKBOOK_IN_USE", "reason": "sharing_violation", "path": str(path), "lock_file": str(lock_file) if lock_file.exists() else "", "winerror": err, "owner": "unknown"}
+                elif err == 5:
+                    probe_result = {"locked": True, "code": "WORKBOOK_ACCESS_DENIED", "reason": "access_denied", "path": str(path), "lock_file": str(lock_file) if lock_file.exists() else "", "winerror": err}
+                else:
+                    probe_result = {"locked": True, "code": "WORKBOOK_ACCESS_PROBE_FAILED", "reason": "probe_failure", "path": str(path), "lock_file": str(lock_file) if lock_file.exists() else "", "winerror": err}
+            elif lock_file.exists():
+                probe_result = {"locked": False, "reason": "lockfile_stale", "path": str(path), "lock_file": str(lock_file)}
+            else:
+                probe_result = {"locked": False, "reason": "", "path": str(path)}
         except Exception as exc:
-            return {"locked": True, "reason": "workbook_locked", "path": str(path), "error": str(exc), "error_type": type(exc).__name__}
+            probe_result = {"locked": True, "code": "WORKBOOK_ACCESS_PROBE_FAILED", "reason": "probe_failure", "path": str(path), "error": str(exc), "error_type": type(exc).__name__}
+        finally:
+            if handle not in (None, ctypes.c_void_p(-1).value, -1):
+                try:
+                    closed = bool(kernel32.CloseHandle(handle))
+                    close_error = ctypes.get_last_error()
+                except Exception as exc:
+                    probe_result = {"locked": True, "code": "WORKBOOK_ACCESS_PROBE_FAILED", "reason": "probe_failure", "path": str(path), "error": str(exc), "error_type": type(exc).__name__, "probe_stage": "close_handle"}
+                else:
+                    if not closed:
+                        probe_result = {"locked": True, "code": "WORKBOOK_ACCESS_PROBE_FAILED", "reason": "probe_failure", "path": str(path), "winerror": close_error, "probe_stage": "close_handle"}
+        return probe_result
     if lock_file.exists():
         return {"locked": True, "reason": "excel_open", "path": str(path), "lock_file": str(lock_file)}
     try:
@@ -2470,23 +2499,44 @@ def _master_journal_lock_status(path: Path) -> Dict[str, object]:
 
 
 def _is_workbook_lock_exception(exc: BaseException) -> bool:
-    if isinstance(exc, PermissionError):
-        return True
     winerror = getattr(exc, "winerror", None)
-    if winerror in {5, 32, 33}:
+    if winerror in {32, 33}:
         return True
     text = str(exc).lower()
-    return "access is denied" in text or "permission denied" in text or "being used by another process" in text
+    return "sharing violation" in text or "being used by another process" in text
 
 
-def _excel_workbook_open_payload(*, message_prefix: str = "Trading Journal.xlsx appears to be open in Excel", status_code: int = 423, extra: Optional[Dict[str, object]] = None) -> Dict[str, object]:
+def _workbook_access_failure_status(exc: BaseException, path: Path) -> Optional[Dict[str, object]]:
+    winerror = getattr(exc, "winerror", None)
+    if winerror in {32, 33} or _is_workbook_lock_exception(exc):
+        return {"locked": True, "code": "WORKBOOK_IN_USE", "reason": "sharing_violation", "path": str(path), "winerror": winerror, "owner": "unknown"}
+    if winerror == 5 or isinstance(exc, PermissionError):
+        return {"locked": True, "code": "WORKBOOK_ACCESS_DENIED", "reason": "access_denied", "path": str(path), "winerror": winerror, "error": str(exc), "error_type": type(exc).__name__}
+    return None
+
+
+def _excel_workbook_open_payload(*, message_prefix: str = "", status_code: int = 423, extra: Optional[Dict[str, object]] = None) -> Dict[str, object]:
+    lock_status = dict((extra or {}).get("lock_status") or {})
+    reason = str(lock_status.get("reason") or "workbook_in_use")
+    if reason == "access_denied":
+        code = "WORKBOOK_ACCESS_DENIED"
+        error = "workbook_access_denied"
+        message = "Trading Journal.xlsx could not be opened for update because access was denied. Check file permissions and try again."
+    elif reason == "probe_failure":
+        code = "WORKBOOK_ACCESS_PROBE_FAILED"
+        error = "workbook_access_probe_failed"
+        message = "Trading Journal.xlsx access could not be checked. Review the workbook access error and try again."
+    else:
+        code = "WORKBOOK_IN_USE"
+        error = "workbook_in_use"
+        message = "Trading Journal.xlsx is in use by another process. Close the program using it and try the update again."
     payload: Dict[str, object] = {
         "ok": False,
         "status_code": status_code,
-        "code": "EXCEL_WORKBOOK_OPEN",
+        "code": code,
         "retryable": True,
-        "errors": ["workbook_locked"],
-        "message": f"{message_prefix}. Close Excel, then press Resume.",
+        "errors": [error],
+        "message": message,
     }
     if extra:
         payload.update(extra)
@@ -39352,6 +39402,15 @@ def _import_uploaded_trading_journal_file(
         if workbook_path_for_preflight.exists():
             lock_status = _master_journal_lock_status(workbook_path_for_preflight)
             if lock_status.get("locked"):
+                APP_LOGGER.error(
+                    "trading_journal_import_workbook_access_blocked stage=preflight path=%s reason=%s code=%s winerror=%s error_type=%s error=%s",
+                    workbook_path_for_preflight,
+                    lock_status.get("reason"),
+                    lock_status.get("code"),
+                    lock_status.get("winerror"),
+                    lock_status.get("error_type"),
+                    lock_status.get("error"),
+                )
                 return _excel_workbook_open_payload(extra={"uploaded_name": name, "file_type": suffix, "rows_parsed": 0, "rows_upserted": 0, "warnings": [], "lock_status": lock_status, "import_timings": timings})
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tf:
             tf.write(payload)
@@ -39474,6 +39533,15 @@ def _import_uploaded_trading_journal_file(
             else {"locked": False}
         )
         if locked_after_reservation.get("locked"):
+            APP_LOGGER.error(
+                "trading_journal_import_workbook_access_blocked stage=post_reservation path=%s reason=%s code=%s winerror=%s error_type=%s error=%s",
+                workbook_path,
+                locked_after_reservation.get("reason"),
+                locked_after_reservation.get("code"),
+                locked_after_reservation.get("winerror"),
+                locked_after_reservation.get("error_type"),
+                locked_after_reservation.get("error"),
+            )
             return _excel_workbook_open_payload(
                 extra={
                     "uploaded_name": name,
@@ -40941,7 +41009,22 @@ def _import_uploaded_trading_journal_file(
             rollback_restored = bool(
                 rollback_local_state_restored and github_state_restored
             )
-            if _is_workbook_lock_exception(exc) or (isinstance(sync_result, dict) and sync_result.get("code") == "EXCEL_WORKBOOK_OPEN"):
+            exception_access_status = _workbook_access_failure_status(
+                exc, _master_journal_path()
+            )
+            sync_access_status = (
+                dict((sync_result or {}).get("lock_status") or {})
+                if isinstance(sync_result, dict)
+                else {}
+            )
+            if (
+                exception_access_status is not None
+                or (isinstance(sync_result, dict) and sync_result.get("code") in {"EXCEL_WORKBOOK_OPEN", "WORKBOOK_IN_USE", "WORKBOOK_ACCESS_DENIED", "WORKBOOK_ACCESS_PROBE_FAILED"})
+            ):
+                access_status = exception_access_status or sync_access_status or {
+                    "locked": True,
+                    "reason": "workbook_in_use",
+                }
                 payload = _excel_workbook_open_payload(extra={
                     "uploaded_name": name,
                     "file_type": suffix,
@@ -40951,6 +41034,7 @@ def _import_uploaded_trading_journal_file(
                     "warnings": [],
                     "import_timings": timings,
                     "master_journal_error": _master_journal_sync_error(sync_result) or msg,
+                    "lock_status": access_status,
                     "diagnostics": (sync_result or {}).get("diagnostics") if isinstance(sync_result, dict) else None,
                     "rows_persisted": rollback_rows_persisted,
                     "balance_applied": bool(rollback_balance_verification.get("balance_applied")),
