@@ -839,14 +839,15 @@ def _master_backfill_final_snapshot_fixture(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     *,
-    snapshot_balance: float,
-    snapshot_source: str,
+    persisted_source: str = "oanda_transaction_export_balance",
+    trade_balance: float = 1517.94,
+    trade_as_of: str = "2026-08-02T05:00:01Z",
 ):
     export_path = tmp_path / "oanda_history_demo_final_snapshot.csv"
     export_path.write_text("synthetic", encoding="utf-8")
     export_path.with_suffix(".json").write_text('{"account_mode":"demo"}', encoding="utf-8")
     job = master_service.OandaHistoryJob(
-        job_id="final-snapshot-verification",
+        job_id=f"final-snapshot-verification-{persisted_source or 'missing'}-{trade_balance}",
         status="done",
         created_at=0,
         updated_at=0,
@@ -868,6 +869,10 @@ def _master_backfill_final_snapshot_fixture(
                 "balance": 1517.94,
                 "as_of": "2026-08-01T05:00:01Z",
                 "source": "oanda_transaction_export_balance",
+                "balance_source": "oanda_transaction_export_balance",
+                "account": "OANDA DEMO",
+                "label": "OANDA DEMO",
+                "currency": "AUD",
             },
         ),
     )
@@ -891,27 +896,62 @@ def _master_backfill_final_snapshot_fixture(
     )
     monkeypatch.setattr(master_service, "_invalidate_trading_journal_view_snapshot", lambda: None)
 
+    persisted_balance = {
+        "balance": 1517.94,
+        "as_of": "2026-08-01T05:00:01Z",
+        "timeline_as_of": "2026-08-01T05:00:01Z",
+        "source": persisted_source,
+        "balance_source": persisted_source,
+        "account": "OANDA DEMO",
+        "label": "OANDA DEMO",
+        "currency": "AUD",
+    }
+    source_reads = []
+    timeline_balances = []
+    monkeypatch.setattr(
+        master_service,
+        "read_master_journal_source",
+        lambda path: source_reads.append(path) or {"balances": [dict(persisted_balance)]},
+    )
+
     def fake_snapshot(**kwargs):
         snapshot_calls.append(dict(kwargs))
-        balance = snapshot_balance if kwargs.get("skip_external_balances") and kwargs.get("skip_live_account_refresh") else 1000.0
-        source = snapshot_source if kwargs.get("skip_external_balances") and kwargs.get("skip_live_account_refresh") else "oanda_account_summary"
-        return {"balances": [{
-            "label": "OANDA DEMO",
-            "balance": balance,
-            "currency": "AUD",
-            "balance_source": source,
-        }]}
+        assert kwargs.get("skip_external_balances") is True
+        assert kwargs.get("skip_live_account_refresh") is True
+        timeline = master_service._build_journal_balance_timelines(
+            [{
+                "id": "oanda-demo-trade",
+                "row_type": "trade",
+                "account": "OANDA DEMO",
+                "account_label": "OANDA DEMO",
+                "source": "master_journal",
+                "open_time": trade_as_of,
+                "close_time": trade_as_of,
+                "balance_after_trade": trade_balance,
+                "balance_after_trade_currency": "AUD",
+                "currency": "AUD",
+                "net_profit": 0.0,
+            }],
+            {
+                master_service._norm_account_key("OANDA DEMO"): [{
+                    "account": "OANDA DEMO",
+                    "currency": "AUD",
+                    "date": "2026-08-01T04:00:01Z",
+                    "new_balance": 1500.0,
+                }]
+            },
+            [dict(persisted_balance)],
+        )
+        timeline_balances.extend(timeline["balances"])
+        return {"balances": timeline["balances"]}
 
     monkeypatch.setattr(master_service, "_build_trading_journal_view_snapshot", fake_snapshot)
-    return job, snapshot_calls, row_id_verification_calls, import_calls
+    return job, snapshot_calls, row_id_verification_calls, import_calls, source_reads, timeline_balances
 
 
-def test_oanda_master_backfill_final_verification_excludes_external_balances(monkeypatch, tmp_path):
-    job, snapshot_calls, row_id_calls, import_calls = _master_backfill_final_snapshot_fixture(
-        monkeypatch,
-        tmp_path,
-        snapshot_balance=1517.94,
-        snapshot_source="oanda_transaction_export_balance",
+def test_oanda_master_backfill_final_verification_uses_persisted_export_provenance(monkeypatch, tmp_path):
+    job, snapshot_calls, row_id_calls, import_calls, source_reads, timeline_balances = _master_backfill_final_snapshot_fixture(
+        monkeypatch, tmp_path
     )
     try:
         response = master_service._backfill_oanda_history_export_to_journal_blocking(job.job_id)
@@ -925,40 +965,66 @@ def test_oanda_master_backfill_final_verification_excludes_external_balances(mon
             "skip_external_balances": True,
             "skip_live_account_refresh": True,
         }]
+        assert source_reads == [tmp_path / "Trading Journal.xlsx"]
+        assert timeline_balances == [{
+            "account": "OANDA DEMO",
+            "label": "OANDA DEMO",
+            "balance": 1517.94,
+            "currency": "AUD",
+            "source": "authoritative_trade_balance",
+            "balance_source": "authoritative_trade_balance",
+            "as_of": "2026-08-02T05:00:01Z",
+            "missing_balance": False,
+            "last_trade_at": "2026-08-02T05:00:01Z",
+            "stale_cashflow_overridden": True,
+        }]
         assert row_id_calls == [True]
         assert import_calls == [True]
     finally:
         master_service.OANDA_HISTORY_JOBS.pop(job.job_id, None)
 
 
-@pytest.mark.parametrize("mismatch_kind", ["amount", "provenance"], ids=["amount", "provenance"])
-def test_oanda_master_backfill_final_verification_rejects_mismatch(mismatch_kind, monkeypatch, tmp_path):
-    snapshot_balance = 1500.0 if mismatch_kind == "amount" else 1517.94
-    snapshot_source = "oanda_account_summary" if mismatch_kind == "provenance" else "oanda_transaction_export_balance"
-    job, snapshot_calls, row_id_calls, import_calls = _master_backfill_final_snapshot_fixture(
+def test_oanda_master_backfill_rejects_absent_or_incorrect_persisted_export_provenance(monkeypatch, tmp_path):
+    for source in ("", "oanda_account_summary"):
+        job, snapshot_calls, row_id_calls, import_calls, source_reads, _timeline_balances = _master_backfill_final_snapshot_fixture(
+            monkeypatch, tmp_path, persisted_source=source
+        )
+        try:
+            response = master_service._backfill_oanda_history_export_to_journal_blocking(job.job_id)
+            payload = json.loads(response.body.decode("utf-8"))
+            assert response.status_code == 200
+            assert payload["ok"] is False
+            assert payload["oanda_export_balance_applied"] is False
+            assert payload["snapshot_visible"] is True
+            assert "OANDA_BACKFILL_PERSISTED_BALANCE_PROVENANCE_MISMATCH" in payload["error"]
+            assert snapshot_calls == [{
+                "force": True,
+                "skip_external_balances": True,
+                "skip_live_account_refresh": True,
+            }]
+            assert source_reads == [tmp_path / "Trading Journal.xlsx"]
+            assert row_id_calls == [True]
+            assert import_calls == [True]
+        finally:
+            master_service.OANDA_HISTORY_JOBS.pop(job.job_id, None)
+
+
+def test_oanda_master_backfill_final_snapshot_retains_newer_authoritative_trade_balance(monkeypatch, tmp_path):
+    job, _snapshot_calls, _row_id_calls, _import_calls, _source_reads, timeline_balances = _master_backfill_final_snapshot_fixture(
         monkeypatch,
         tmp_path,
-        snapshot_balance=snapshot_balance,
-        snapshot_source=snapshot_source,
+        trade_balance=1600.0,
+        trade_as_of="2026-08-03T05:00:01Z",
     )
     try:
-        response = master_service._backfill_oanda_history_export_to_journal_blocking(job.job_id)
-        payload = json.loads(response.body.decode("utf-8"))
-        assert response.status_code == 200
-        assert payload["ok"] is False
-        assert payload["oanda_export_balance_applied"] is False
-        assert payload["snapshot_visible"] is True
-        if mismatch_kind == "amount":
-            assert "OANDA_BACKFILL_BALANCE_MISMATCH" in payload["error"]
-        else:
-            assert "OANDA_BACKFILL_BALANCE_PROVENANCE_MISMATCH" in payload["error"]
-        assert snapshot_calls == [{
-            "force": True,
-            "skip_external_balances": True,
-            "skip_live_account_refresh": True,
-        }]
-        assert row_id_calls == [True]
-        assert import_calls == [True]
+        payload = json.loads(
+            master_service._backfill_oanda_history_export_to_journal_blocking(job.job_id).body.decode("utf-8")
+        )
+        assert payload["ok"] is True
+        assert payload["oanda_export_balance_applied"] is True
+        assert timeline_balances[0]["balance"] == 1600.0
+        assert timeline_balances[0]["balance_source"] == "authoritative_trade_balance"
+        assert timeline_balances[0]["as_of"] == "2026-08-03T05:00:01Z"
     finally:
         master_service.OANDA_HISTORY_JOBS.pop(job.job_id, None)
 

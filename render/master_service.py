@@ -36024,6 +36024,62 @@ def _backfill_oanda_history_export_to_journal_blocking(job_id: str) -> JSONRespo
         _invalidate_trading_journal_view_snapshot()
         visibility_error = None
         try:
+            # The import writes its source metadata to the persisted Account
+            # Balances row.  Verify that independently before interpreting the
+            # displayed timeline: a later recorded trade may correctly be the
+            # current display anchor, with ``authoritative_trade_balance`` as
+            # its (different) provenance.
+            persisted_balance_verification = {
+                "ok": True,
+                "balance_applied": False,
+                "snapshot_visible": False,
+            }
+            if _is_oanda_transaction_export_balance(balance):
+                persisted_expected_balance = dict(balance or {})
+                persisted_expected_balance.setdefault(
+                    "label", "OANDA DEMO" if account_mode == "demo" else "OANDA LIVE"
+                )
+                persisted_expected_balance.setdefault(
+                    "account", persisted_expected_balance["label"]
+                )
+                workbook_source_after_import = read_master_journal_source(
+                    _master_journal_path()
+                )
+                persisted_balance_verification = (
+                    _verify_imported_account_balance_snapshot(
+                        {
+                            "balances": (
+                                workbook_source_after_import.get("balances")
+                                if isinstance(workbook_source_after_import, dict)
+                                else []
+                            )
+                        },
+                        persisted_expected_balance,
+                    )
+                )
+                if not bool(persisted_balance_verification.get("ok")):
+                    expected_source = str(
+                        persisted_balance_verification.get("expected_source") or ""
+                    ).strip()
+                    actual_source = str(
+                        persisted_balance_verification.get("actual_source") or ""
+                    ).strip()
+                    if expected_source and not bool(
+                        persisted_balance_verification.get("source_matches")
+                    ):
+                        visibility_error = (
+                            "OANDA_BACKFILL_PERSISTED_BALANCE_PROVENANCE_MISMATCH: "
+                            f"export={expected_source} persisted={actual_source}"
+                        )
+                    else:
+                        visibility_error = (
+                            "OANDA_BACKFILL_PERSISTED_BALANCE_MISMATCH: "
+                            f"expected={persisted_balance_verification.get('expected_balance')} "
+                            f"actual={persisted_balance_verification.get('actual_balance')} "
+                            f"expected_currency={persisted_balance_verification.get('expected_currency')} "
+                            f"actual_currency={persisted_balance_verification.get('actual_currency')}"
+                        )
+                    balance_applied = False
             snapshot_payload = _build_trading_journal_view_snapshot(
                 force=True,
                 skip_external_balances=True,
@@ -36044,40 +36100,8 @@ def _backfill_oanda_history_export_to_journal_blocking(job_id: str) -> JSONRespo
             if not isinstance(target_bal, dict) or str(target_bal.get("balance_source") or "") == "cashflow_anchor_plus_trades":
                 visibility_error = "OANDA_BACKFILL_NOT_VISIBLE_IN_JOURNAL_SNAPSHOT"
                 balance_applied = False
-            else:
-                expected_balance = _to_float(latest_balance)
-                snapshot_balance = _to_float(target_bal.get("balance"))
-                expected_balance_source = str(
-                    (balance or {}).get("balance_source")
-                    or (balance or {}).get("source")
-                    or ""
-                ).strip()
-                snapshot_balance_source = str(
-                    target_bal.get("balance_source")
-                    or target_bal.get("source")
-                    or ""
-                ).strip()
-                if (
-                    expected_balance_source
-                    and snapshot_balance_source != expected_balance_source
-                ):
-                    visibility_error = (
-                        "OANDA_BACKFILL_BALANCE_PROVENANCE_MISMATCH: "
-                        f"export={expected_balance_source} "
-                        f"snapshot={snapshot_balance_source}"
-                    )
-                    balance_applied = False
-                elif expected_balance is not None and (
-                    snapshot_balance is None
-                    or abs(snapshot_balance - expected_balance) > 1e-6
-                ):
-                    visibility_error = (
-                        "OANDA_BACKFILL_BALANCE_MISMATCH: "
-                        f"export={expected_balance} snapshot={snapshot_balance}"
-                    )
-                    balance_applied = False
-                elif expected_balance is not None:
-                    balance_applied = True
+            elif visibility_error is None and _to_float(latest_balance) is not None:
+                balance_applied = True
         except Exception as exc:
             visibility_error = f"OANDA_BACKFILL_SNAPSHOT_VERIFICATION_FAILED: {exc}"
         if visibility_error:
