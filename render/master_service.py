@@ -36105,6 +36105,7 @@ def _backfill_oanda_history_export_to_journal_blocking(job_id: str) -> JSONRespo
                             )
                         },
                         persisted_expected_balance,
+                        persisted_oanda_export_balance=True,
                     )
                 )
                 if not bool(persisted_balance_verification.get("ok")):
@@ -36121,13 +36122,34 @@ def _backfill_oanda_history_export_to_journal_blocking(job_id: str) -> JSONRespo
                             "OANDA_BACKFILL_PERSISTED_BALANCE_PROVENANCE_MISMATCH: "
                             f"export={expected_source} persisted={actual_source}"
                         )
+                    elif not bool(persisted_balance_verification.get("freshness_matches")):
+                        visibility_error = (
+                            "OANDA_BACKFILL_PERSISTED_BALANCE_TIMESTAMP_MISMATCH: "
+                            f"reason={persisted_balance_verification.get('timestamp_failure') or 'older'} "
+                            f"expected={persisted_balance_verification.get('expected_as_of')} "
+                            f"actual={persisted_balance_verification.get('actual_as_of')} "
+                            f"actual_field={persisted_balance_verification.get('actual_as_of_field')} "
+                            f"expected_utc={persisted_balance_verification.get('expected_as_of_utc')} "
+                            f"actual_utc={persisted_balance_verification.get('actual_as_of_utc')}"
+                        )
+                    elif not bool(persisted_balance_verification.get("value_matches")):
+                        visibility_error = (
+                            "OANDA_BACKFILL_PERSISTED_BALANCE_AMOUNT_MISMATCH: "
+                            f"expected={persisted_balance_verification.get('expected_balance')} "
+                            f"actual={persisted_balance_verification.get('actual_balance')}"
+                        )
+                    elif not bool(persisted_balance_verification.get("currency_matches")):
+                        visibility_error = (
+                            "OANDA_BACKFILL_PERSISTED_BALANCE_CURRENCY_MISMATCH: "
+                            f"expected={persisted_balance_verification.get('expected_currency')} "
+                            f"actual={persisted_balance_verification.get('actual_currency')}"
+                        )
                     else:
                         visibility_error = (
                             "OANDA_BACKFILL_PERSISTED_BALANCE_MISMATCH: "
-                            f"expected={persisted_balance_verification.get('expected_balance')} "
-                            f"actual={persisted_balance_verification.get('actual_balance')} "
-                            f"expected_currency={persisted_balance_verification.get('expected_currency')} "
-                            f"actual_currency={persisted_balance_verification.get('actual_currency')}"
+                            + _imported_account_balance_verification_failure_detail(
+                                persisted_balance_verification
+                            )
                         )
                     balance_applied = False
             snapshot_payload = _build_trading_journal_view_snapshot(
@@ -39035,11 +39057,72 @@ def _is_oanda_transaction_export_balance(balance: object) -> bool:
     )
 
 
+def _parse_persisted_oanda_export_balance_timestamp(value: object) -> datetime | None:
+    """Parse OANDA balance metadata, whose native timeline value is Brisbane wall time."""
+    if value in (None, ""):
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+    else:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=JOURNAL_DISPLAY_TZ)
+    return parsed.astimezone(timezone.utc)
+
+
+def _imported_account_balance_verification_failure_detail(
+    verification: Dict[str, object],
+) -> str:
+    failures: List[str] = []
+    if not bool(verification.get("snapshot_visible")):
+        failures.append("account balance is not visible")
+    if not bool(verification.get("value_matches")):
+        failures.append(
+            "amount "
+            f"expected={verification.get('expected_balance')} "
+            f"actual={verification.get('actual_balance')}"
+        )
+    if not bool(verification.get("currency_matches")):
+        failures.append(
+            "currency "
+            f"expected={verification.get('expected_currency')} "
+            f"actual={verification.get('actual_currency')}"
+        )
+    if not bool(verification.get("source_matches")):
+        failures.append(
+            "provenance "
+            f"expected={verification.get('expected_source')} "
+            f"actual={verification.get('actual_source')}"
+        )
+    if not bool(verification.get("freshness_matches")):
+        failures.append(
+            "timestamp "
+            f"reason={verification.get('timestamp_failure') or 'older'} "
+            f"expected={verification.get('expected_as_of')} "
+            f"actual={verification.get('actual_as_of')} "
+            f"actual_field={verification.get('actual_as_of_field')} "
+            f"expected_utc={verification.get('expected_as_of_utc')} "
+            f"actual_utc={verification.get('actual_as_of_utc')}"
+        )
+    return "; ".join(failures) or "verification did not satisfy the persisted balance contract"
+
+
 def _verify_imported_account_balance_snapshot(
     snapshot: Dict[str, object],
     expected_balance: Optional[Dict[str, object]],
     *,
     allow_equivalent_authoritative_balance: bool = False,
+    persisted_oanda_export_balance: bool = False,
 ) -> Dict[str, object]:
     if not isinstance(expected_balance, dict):
         return {
@@ -39098,16 +39181,37 @@ def _verify_imported_account_balance_snapshot(
     expected_source_key = re.sub(r"[^a-z0-9]+", "_", expected_source.lower()).strip("_")
     actual_source_key = re.sub(r"[^a-z0-9]+", "_", actual_source.lower()).strip("_")
     source_matches = not expected_source or actual_source_key == expected_source_key
-    actual_as_of = (target or {}).get("as_of")
+    actual_visible_as_of = (target or {}).get("as_of")
+    actual_timeline_as_of = (target or {}).get("timeline_as_of")
+    if persisted_oanda_export_balance and actual_timeline_as_of not in (None, ""):
+        actual_as_of = actual_timeline_as_of
+        actual_as_of_field = "timeline_as_of"
+    else:
+        actual_as_of = actual_visible_as_of
+        actual_as_of_field = "as_of"
     as_of_not_older = True
+    expected_as_of_dt = None
+    actual_as_of_dt = None
+    timestamp_failure = None
     if expected_as_of not in (None, ""):
         expected_as_of_dt = _parse_iso_datetime(expected_as_of)
-        actual_as_of_dt = _parse_iso_datetime(actual_as_of)
-        as_of_not_older = bool(
-            expected_as_of_dt is not None
-            and actual_as_of_dt is not None
-            and actual_as_of_dt.timestamp() >= expected_as_of_dt.timestamp()
+        actual_as_of_dt = (
+            _parse_persisted_oanda_export_balance_timestamp(actual_as_of)
+            if persisted_oanda_export_balance and actual_as_of_field == "timeline_as_of"
+            else _parse_iso_datetime(actual_as_of)
         )
+        if expected_as_of_dt is None:
+            as_of_not_older = False
+            timestamp_failure = "expected_invalid"
+        elif actual_as_of in (None, ""):
+            as_of_not_older = False
+            timestamp_failure = "missing"
+        elif actual_as_of_dt is None:
+            as_of_not_older = False
+            timestamp_failure = "invalid"
+        elif actual_as_of_dt.timestamp() < expected_as_of_dt.timestamp():
+            as_of_not_older = False
+            timestamp_failure = "older"
     if (
         allow_equivalent_authoritative_balance
         and not source_matches
@@ -39154,6 +39258,13 @@ def _verify_imported_account_balance_snapshot(
         "actual_source": actual_source,
         "expected_as_of": expected_as_of,
         "actual_as_of": actual_as_of,
+        "actual_as_of_field": actual_as_of_field,
+        "actual_visible_as_of": actual_visible_as_of,
+        "actual_timeline_as_of": actual_timeline_as_of,
+        "expected_as_of_utc": expected_as_of_dt.isoformat() if expected_as_of_dt else None,
+        "actual_as_of_utc": actual_as_of_dt.isoformat() if actual_as_of_dt else None,
+        "timestamp_failure": timestamp_failure,
+        "persisted_oanda_export_balance": persisted_oanda_export_balance,
         "allow_equivalent_authoritative_balance": allow_equivalent_authoritative_balance,
         "balance_tolerance": balance_tolerance,
         "value_matches": value_matches,
@@ -40833,14 +40944,14 @@ def _import_uploaded_trading_journal_file(
                         )
                     },
                     oanda_transaction_export_balance,
+                    persisted_oanda_export_balance=True,
                 )
                 if not bool(workbook_balance_verification.get("ok")):
                     raise RuntimeError(
                         "Workbook Account Balances reread failed after import: "
-                        f"expected={workbook_balance_verification.get('expected_balance')} "
-                        f"actual={workbook_balance_verification.get('actual_balance')} "
-                        f"expected_source={workbook_balance_verification.get('expected_source')} "
-                        f"actual_source={workbook_balance_verification.get('actual_source')}"
+                        + _imported_account_balance_verification_failure_detail(
+                            workbook_balance_verification
+                        )
                     )
                 balance_verification = _verify_imported_account_balance_snapshot(
                     snapshot,
@@ -40849,10 +40960,10 @@ def _import_uploaded_trading_journal_file(
                 if not bool(balance_verification.get("ok")):
                     raise RuntimeError(
                         "Workbook account balance verification failed after import: "
-                        f"expected={balance_verification.get('expected_balance')} "
-                        f"actual={balance_verification.get('actual_balance')} "
-                        f"expected_source={balance_verification.get('expected_source')} "
-                        f"actual_source={balance_verification.get('actual_source')} "
+                        + _imported_account_balance_verification_failure_detail(
+                            balance_verification
+                        )
+                        + " "
                         f"workbook_as_of={workbook_balance_verification.get('actual_as_of')} "
                         f"snapshot_as_of={balance_verification.get('actual_as_of')}"
                     )
