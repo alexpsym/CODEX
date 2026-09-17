@@ -3268,6 +3268,44 @@ def test_check_master_journal_write_lock_does_not_treat_stale_lock_file_as_locke
     assert "lockfile" in str(out.get("reason") or "")
     assert closed_handles == [ctypes.c_void_p(123).value]
     assert kernel32.CreateFileW.restype is ctypes.c_void_p
+
+
+def test_workbook_access_payload_preserves_legacy_retry_marker_only_for_in_use():
+    cases = [
+        (
+            {'locked': True, 'reason': 'sharing_violation', 'winerror': 32, 'owner': 'unknown'},
+            'WORKBOOK_IN_USE',
+            {'workbook_in_use', 'workbook_locked'},
+            'in use by another process',
+        ),
+        (
+            {'locked': True, 'reason': 'access_denied', 'winerror': 5},
+            'WORKBOOK_ACCESS_DENIED',
+            {'workbook_access_denied'},
+            'access was denied',
+        ),
+        (
+            {'locked': True, 'reason': 'probe_failure', 'error_type': 'OSError'},
+            'WORKBOOK_ACCESS_PROBE_FAILED',
+            {'workbook_access_probe_failed'},
+            'access could not be checked',
+        ),
+    ]
+    for lock_status, code, expected_errors, message_fragment in cases:
+        payload = master_service._excel_workbook_open_payload(
+            extra={'lock_status': lock_status}
+        )
+        assert payload['ok'] is False
+        assert payload['status_code'] == 423
+        assert payload['code'] == code
+        assert set(payload['errors']) == expected_errors
+        assert payload['lock_status'] == lock_status
+        assert message_fragment in payload['message']
+        if code != 'WORKBOOK_IN_USE':
+            assert 'workbook_locked' not in payload['errors']
+            assert 'excel_open' not in payload['errors']
+
+
 def test_manual_import_prebuilt_snapshot_preserves_workbook_zero_cashflow_anchors(tmp_path, monkeypatch):
     ms = _load_master_service_for_import_test()
     from tools.master_journal_workbook import build_master_journal_workbook

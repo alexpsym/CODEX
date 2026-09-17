@@ -2535,7 +2535,7 @@ def _excel_workbook_open_payload(*, message_prefix: str = "", status_code: int =
         "status_code": status_code,
         "code": code,
         "retryable": True,
-        "errors": [error],
+        "errors": [error, "workbook_locked"] if reason == "workbook_in_use" or reason == "sharing_violation" else [error],
         "message": message,
     }
     if extra:
@@ -41044,7 +41044,10 @@ def _import_uploaded_trading_journal_file(
                     "rollback_local_state_restored": rollback_local_state_restored,
                     "rollback_github_state_restored": github_state_restored,
                 })
-                payload["errors"] = ["workbook_locked", *rollback_errors]
+                payload["errors"] = [
+                    *(list(payload.get("errors") or [])),
+                    *rollback_errors,
+                ]
                 return payload
             return {"ok": False, "status_code": code, "message": msg, "uploaded_name": name, "file_type": suffix, "rows_parsed": len(rows), "rows_upserted": 0, "rows_persisted": rollback_rows_persisted, "balance_applied": bool(rollback_balance_verification.get("balance_applied")), "snapshot_visible": bool(rollback_balance_verification.get("snapshot_visible")), "balance_verification": rollback_balance_verification, "rollback_restored": rollback_restored, "rollback_local_state_restored": rollback_local_state_restored, "rollback_github_state_restored": github_state_restored, "missing_row_ids": missing, "errors": [msg, *rollback_errors], "warnings": [], "import_timings": timings, "master_journal_error": _master_journal_sync_error(sync_result), "diagnostics": (sync_result or {}).get("diagnostics")}
         APP_LOGGER.info("trading_journal_import_success timings=%s upload=%s", timings, name)

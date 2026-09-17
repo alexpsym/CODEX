@@ -737,6 +737,12 @@ OANDA Demo backfill provenance verification correction
 
 OANDA Demo automatic-update workbook-access classification correction
 
+OANDA workbook-in-use retry-marker compatibility correction
+
+- Restored the legacy `workbook_locked` error marker alongside `workbook_in_use` only for `WORKBOOK_IN_USE`/sharing-violation payloads, preserving the newer code, neutral ownership wording, lock details, retryability, and classification-specific messages. Access-denied and probe-failure payloads retain only their distinct error markers; the import failure path does not reintroduce `workbook_locked` for those classifications.
+- Focused synthetic contract verification: `tests/test_master_service_master_journal_sync.py::test_workbook_access_payload_preserves_legacy_retry_marker_only_for_in_use` — `1 passed in 10.54s` (exit 0). No real workbook, access probe, export, import, backfill, broker/account, or production-data operation occurred.
+- Real OANDA Demo acceptance remains unverified and is the next separately authorized step.
+
 - Confirmed code defect: the Windows write probe used untyped `CreateFileW`/`CloseHandle` calls and mapped every invalid handle or probe exception to `EXCEL_WORKBOOK_OPEN`, even for access-denied or probe/API failures. The import path consequently told History Export users to close Excel and press a nonexistent Resume control.
 - `_check_master_journal_write_lock` now binds `CreateFileW` and `CloseHandle` with pointer-sized HANDLE-compatible ctypes types, captures the original Windows error immediately, closes valid handles in `finally`, and classifies sharing/lock violations (`WORKBOOK_IN_USE`), access denial (`WORKBOOK_ACCESS_DENIED`), and probe faults (`WORKBOOK_ACCESS_PROBE_FAILED`) separately. Stale `~$` files remain non-blocking after a successful Windows probe. Import preflight and post-reservation failures log stage/reason/code/error details and carry `lock_status` through the import and backfill response; messages no longer assert Excel ownership or mention Resume.
 - One authorized diagnostic worker (PID `18552`) retained `C:\tmp\codex_oanda_lock_probe_d5a9cb0_20260916\probe.json`. It found the exact workbook exists, has `Archive` attributes (not read-only), no `~$` owner file, and no `EXCEL.exe` process. Its PowerShell command then raised a parameter-binding exception before `CreateFileW`, so no live lock/access conclusion or owner was established; it was not retried.
