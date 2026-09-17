@@ -9747,6 +9747,39 @@ def _build_journal_balance_timelines(
     ts_cache: Dict[str, float] = {}
     def _to_ts(value: object) -> float:
         return _timestamp_epoch_seconds(value, cache=ts_cache)
+
+    def _oanda_seed_identity(seed: Dict[str, object]) -> str:
+        for field in ("account_id", "broker_account_id", "oanda_account_id", "account_identity"):
+            value = str(seed.get(field) or "").strip()
+            if value:
+                return value
+        return ""
+
+    def _oanda_seed_timestamp(seed: Dict[str, object], source: str, as_of: object) -> float:
+        if source == "oanda_transaction_export_balance":
+            parsed = _parse_persisted_oanda_export_balance_timestamp(as_of)
+            return float(parsed.timestamp()) if isinstance(parsed, datetime) else float("-inf")
+        return _to_ts(as_of)
+
+    def _install_balance_seed(
+        bucket: Dict[str, object],
+        seed: Dict[str, object],
+        *,
+        as_of: object,
+        timestamp: float,
+    ) -> None:
+        bucket["excel_balance"] = _to_float(seed.get("balance"))
+        bucket["excel_label"] = str(seed.get("label") or seed.get("account") or "").strip()
+        bucket["excel_currency"] = str(seed.get("currency") or "").strip()
+        bucket["excel_balance_source"] = str(seed.get("balance_source") or seed.get("source") or "excel_account_balance")
+        bucket["excel_balance_as_of"] = as_of
+        bucket["excel_balance_timeline_as_of"] = as_of
+        bucket["excel_balance_ts"] = timestamp
+        bucket["excel_balance_authoritative"] = _is_authoritative_account_balance_seed(seed)
+        identity = _oanda_seed_identity(seed)
+        if identity:
+            bucket["excel_balance_identity"] = identity
+
     def _apply_pnl_to_balance(row: Dict[str, object], pnl: Optional[float]) -> bool:
         if pnl is None:
             return False
@@ -9785,19 +9818,63 @@ def _build_journal_balance_timelines(
         key = _norm_account_key(label)
         if not key:
             continue
-        by_account[key]["excel_balance"] = _to_float(bal.get("balance"))
-        by_account[key]["excel_label"] = label
-        by_account[key]["excel_currency"] = str(bal.get("currency") or "").strip()
-        by_account[key]["excel_balance_source"] = str(bal.get("balance_source") or bal.get("source") or "excel_account_balance")
-        excel_as_of = bal.get("as_of")
+        source = str(bal.get("balance_source") or bal.get("source") or "excel_account_balance").strip().lower()
+        visible_as_of = bal.get("as_of")
         raw_refs = bal.get("raw_refs") if isinstance(bal.get("raw_refs"), dict) else {}
-        if not excel_as_of:
-            excel_as_of = raw_refs.get("transaction_date")
-        by_account[key]["excel_balance_as_of"] = excel_as_of
-        excel_timeline_as_of = bal.get("timeline_as_of") or excel_as_of
-        by_account[key]["excel_balance_timeline_as_of"] = excel_timeline_as_of
-        by_account[key]["excel_balance_ts"] = _to_ts(excel_timeline_as_of)
-        by_account[key]["excel_balance_authoritative"] = _is_authoritative_account_balance_seed(bal)
+        if not visible_as_of:
+            visible_as_of = raw_refs.get("transaction_date")
+        excel_as_of = bal.get("timeline_as_of") or visible_as_of
+        bucket = by_account[key]
+        if not key.startswith("OANDA "):
+            bucket["excel_balance"] = _to_float(bal.get("balance"))
+            bucket["excel_label"] = label
+            bucket["excel_currency"] = str(bal.get("currency") or "").strip()
+            bucket["excel_balance_source"] = str(bal.get("balance_source") or bal.get("source") or "excel_account_balance")
+            bucket["excel_balance_as_of"] = visible_as_of
+            bucket["excel_balance_timeline_as_of"] = excel_as_of
+            bucket["excel_balance_ts"] = _to_ts(excel_as_of)
+            bucket["excel_balance_authoritative"] = _is_authoritative_account_balance_seed(bal)
+            continue
+
+        issues = bucket.setdefault("oanda_balance_seed_issues", [])
+        if not isinstance(issues, list):
+            issues = []
+            bucket["oanda_balance_seed_issues"] = issues
+        mode = "demo" if key.endswith(" DEMO") else "live" if key.endswith(" LIVE") else ""
+        candidate_mode = str(bal.get("account_mode") or "").strip().lower()
+        candidate_balance = _to_float(bal.get("balance"))
+        candidate_currency = str(bal.get("currency") or "").strip().upper()
+        candidate_ts = _oanda_seed_timestamp(bal, source, excel_as_of)
+        if candidate_mode in {"demo", "live"} and mode and candidate_mode != mode:
+            issues.append("rejected conflicting OANDA account mode")
+            continue
+        if candidate_balance is None or not _is_authoritative_account_balance_seed(bal):
+            issues.append("rejected OANDA balance seed without authoritative numeric balance")
+            continue
+        if not candidate_currency:
+            issues.append("rejected OANDA balance seed without currency")
+            continue
+        existing_balance = _to_float(bucket.get("excel_balance"))
+        existing_currency = str(bucket.get("excel_currency") or "").strip().upper()
+        existing_identity = str(bucket.get("excel_balance_identity") or "").strip()
+        candidate_identity = _oanda_seed_identity(bal)
+        if existing_balance is not None:
+            if existing_currency and existing_currency != candidate_currency:
+                issues.append("rejected conflicting OANDA currency")
+                continue
+            if existing_identity and candidate_identity and existing_identity != candidate_identity:
+                issues.append("rejected conflicting OANDA account identity")
+                continue
+            existing_ts = float(bucket.get("excel_balance_ts") or float("-inf"))
+            if not math.isfinite(candidate_ts):
+                issues.append("rejected OANDA balance seed with missing or invalid timestamp")
+                continue
+            if math.isfinite(existing_ts) and candidate_ts <= existing_ts:
+                issues.append("retained newer or equal OANDA balance seed")
+                continue
+        elif not math.isfinite(candidate_ts):
+            issues.append("retained OANDA balance seed with unresolved timestamp")
+        _install_balance_seed(bucket, bal, as_of=excel_as_of, timestamp=candidate_ts)
 
     diagnostics: Dict[str, Dict[str, object]] = {}
     balances: List[Dict[str, object]] = []
@@ -9974,7 +10051,10 @@ def _build_journal_balance_timelines(
                 selected_authoritative_balance = authoritative_seed_balance
                 selected_authoritative_source = authoritative_seed_source
                 selected_authoritative_ts = authoritative_seed_ts
-                selected_authoritative_as_of = bucket.get("excel_balance_as_of")
+                selected_authoritative_as_of = (
+                    bucket.get("excel_balance_timeline_as_of")
+                    or bucket.get("excel_balance_as_of")
+                )
         latest_authoritative_at = selected_authoritative_as_of
 
         if is_bybit_demo_account:
@@ -10038,8 +10118,7 @@ def _build_journal_balance_timelines(
         missing_balance = display_balance is None
         if (not ENABLE_BYBIT_DEMO_JOURNAL) and _is_bybit_demo_account_label(label):
             continue
-        balances.append(
-            {
+        balance_payload = {
                 "account": label,
                 "label": label,
                 "balance": display_balance,
@@ -10051,7 +10130,16 @@ def _build_journal_balance_timelines(
                 "last_trade_at": (out_rows[trade_indices[-1]].get("close_time") or out_rows[trade_indices[-1]].get("open_time")) if trade_indices else None,
                 "stale_cashflow_overridden": bool(events and display_balance is not None and balance_source != "cashflow_anchor_plus_trades" and _to_ts(events[-1].get("date")) <= selected_authoritative_ts),
             }
-        )
+        if (
+            account_key.startswith("OANDA ")
+            and balance_source == selected_authoritative_source
+            and selected_authoritative_as_of not in (None, "")
+        ):
+            balance_payload["timeline_as_of"] = selected_authoritative_as_of
+        selected_identity = str(bucket.get("excel_balance_identity") or "").strip()
+        if selected_identity and balance_source == selected_authoritative_source:
+            balance_payload["account_identity"] = selected_identity
+        balances.append(balance_payload)
         diagnostics[account_key] = {
             "account_key": account_key,
             "cashflow_events": len(events),
@@ -10065,6 +10153,8 @@ def _build_journal_balance_timelines(
             "previous_cashflow_balance": _to_float(events[-1].get("new_balance")) if events else None,
             "authoritative_balance_used": authoritative_balance_used if authoritative_balance_used is not None else (selected_authoritative_balance if balance_source != "cashflow_anchor_plus_trades" else None),
             "authoritative_balance_source": authoritative_balance_source if authoritative_balance_used is not None else (selected_authoritative_source if balance_source != "cashflow_anchor_plus_trades" else None),
+            "selected_balance_observation_at": selected_authoritative_as_of,
+            "oanda_balance_seed_issues": list(bucket.get("oanda_balance_seed_issues") or []),
             "warning": "No cashflow or authoritative trade balance anchor found." if missing_balance else "",
         }
     balances = sorted(balances, key=lambda x: str(x.get("label") or x.get("account") or ""))
@@ -10146,6 +10236,21 @@ def _merge_missing_timeline_balances_with_broker(
     balances: List[Dict[str, object]],
     broker_balances: List[Dict[str, object]],
 ) -> List[Dict[str, object]]:
+    def _oanda_identity(item: Dict[str, object]) -> str:
+        for field in ("account_id", "broker_account_id", "oanda_account_id", "account_identity"):
+            value = str(item.get(field) or "").strip()
+            if value:
+                return value
+        return ""
+
+    def _observation_timestamp(item: Dict[str, object], *, is_oanda: bool) -> float:
+        observed_at = item.get("timeline_as_of") or item.get("as_of")
+        source = str(item.get("balance_source") or item.get("source") or "").strip().lower()
+        if is_oanda and source == "oanda_transaction_export_balance":
+            parsed = _parse_persisted_oanda_export_balance_timestamp(observed_at)
+            return float(parsed.timestamp()) if isinstance(parsed, datetime) else float("-inf")
+        return _timestamp_epoch_seconds(observed_at)
+
     merged: List[Dict[str, object]] = []
     by_key: Dict[str, int] = {}
     for item in (balances or []):
@@ -10205,8 +10310,9 @@ def _merge_missing_timeline_balances_with_broker(
         existing_balance = _to_float(existing.get("balance"))
         if broker_balance is None:
             continue
-        existing_as_of_ts = _timestamp_epoch_seconds(existing.get("as_of"))
-        broker_as_of_ts = _timestamp_epoch_seconds(broker.get("as_of"))
+        is_oanda_account = key.startswith("OANDA ")
+        existing_as_of_ts = _observation_timestamp(existing, is_oanda=is_oanda_account)
+        broker_as_of_ts = _observation_timestamp(broker, is_oanda=is_oanda_account)
         existing_as_of_known = math.isfinite(existing_as_of_ts)
         broker_as_of_known = math.isfinite(broker_as_of_ts)
         existing_currency = str(existing.get("currency") or "").strip().upper()
@@ -10218,6 +10324,10 @@ def _merge_missing_timeline_balances_with_broker(
                 continue
             if existing_balance is not None and not bool(existing.get("missing_balance")):
                 if not existing_currency or existing_currency != broker_currency:
+                    continue
+                existing_identity = _oanda_identity(existing)
+                broker_identity = _oanda_identity(broker)
+                if existing_identity and broker_identity and existing_identity != broker_identity:
                     continue
                 if not (existing_as_of_known and broker_as_of_known and broker_as_of_ts > existing_as_of_ts):
                     continue
@@ -10255,6 +10365,10 @@ def _merge_missing_timeline_balances_with_broker(
         resolved["broker_balance_as_of"] = broker.get("as_of")
         if broker.get("as_of"):
             resolved["as_of"] = broker.get("as_of")
+            resolved["timeline_as_of"] = broker.get("as_of")
+        broker_identity = _oanda_identity(broker) if is_oanda_account else ""
+        if broker_identity:
+            resolved["account_identity"] = broker_identity
         merged[existing_idx] = resolved
     return sorted(merged, key=lambda x: str(x.get("label") or x.get("account") or ""))
 

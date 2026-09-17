@@ -2846,6 +2846,167 @@ def test_oanda_balance_merge_keeps_account_and_currency_isolated():
     assert values == {'OANDA DEMO': (10.0, 'AUD'), 'OANDA LIVE': (20.0, 'USD')}
 
 
+def _roundtrip_tiny_stats2_oanda_balance(tmp_path, *, account, balance, source, as_of):
+    from tools import master_journal_workbook as mjw
+
+    path = tmp_path / f"{account.lower().replace(' ', '_')}.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "STATS2"
+    ws["A1"] = "Account Balances"
+    ws["A2"] = "Account"
+    ws["B2"] = "Balance"
+    ws["C2"] = "Currency"
+    ws["A3"] = account
+    ws["B3"] = 0.0
+    ws["C3"] = "AUD"
+    mjw._incremental_update_account_balance(
+        wb,
+        {
+            "account": account,
+            "label": account,
+            "balance": balance,
+            "currency": "AUD",
+            "balance_source": source,
+            "as_of": as_of,
+        },
+    )
+    wb.save(path)
+    wb.close()
+    reopened = load_workbook(path)
+    try:
+        balances = mjw._read_stats2_account_balances(reopened)
+    finally:
+        reopened.close()
+    assert len(balances) == 1
+    return balances[0]
+
+
+def _ordinary_oanda_snapshot(monkeypatch, ms, *, persisted_balance, stale_seed=None, broker_seed=None):
+    captured = {}
+    monkeypatch.setenv("TRADING_JOURNAL_SOURCE", "master_journal")
+    monkeypatch.setattr(ms, "_load_trading_journal_view_snapshot", lambda: None)
+    monkeypatch.setattr(ms, "_journal_source_fingerprint", lambda: {"source_mode": "master_journal"})
+    monkeypatch.setattr(ms, "_master_journal_single_file_mode", lambda: True)
+    monkeypatch.setattr(ms, "_master_journal_authoritative_enabled", lambda: True)
+    monkeypatch.setattr(ms, "_master_journal_path", lambda: Path("synthetic.xlsx"))
+    monkeypatch.setattr(
+        ms,
+        "read_master_journal_source",
+        lambda _path: {"items": [], "cashflow_ledger": {}, "balances": [dict(persisted_balance)]},
+    )
+    monkeypatch.setattr(ms, "_get_excel_account_balances", lambda: [dict(stale_seed)] if stale_seed else [])
+    monkeypatch.setattr(ms, "_load_json_file", lambda *_args, **_kwargs: {"broker_account_balances": [dict(broker_seed)] if broker_seed else []})
+    monkeypatch.setattr(ms, "_monthly_aud_revaluation_rows_for_journal_view", lambda: [])
+    monkeypatch.setattr(ms, "_build_authoritative_trading_journal_diagnostics_snapshot", lambda _items: {})
+    monkeypatch.setattr(ms, "_save_trading_journal_view_snapshot", lambda _payload: None)
+    monkeypatch.setattr(ms, "_persist_trading_journal_sqlite", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(ms, "_attach_trading_journal_equity_metadata", lambda payload: payload)
+    monkeypatch.setattr(ms, "_PENDING_MANUAL_SYNC_ROWS", [])
+    monkeypatch.setattr(ms, "_PENDING_MANUAL_SYNC_BALANCES", [])
+
+    def _capture_stats(_items, balances):
+        captured["balances"] = [dict(item) for item in balances]
+        return {"totals": {}, "groups": {}}
+
+    monkeypatch.setattr(ms, "_compute_journal_stats_with_period_reports", _capture_stats)
+    return ms._build_trading_journal_view_snapshot(force=True, persist_sqlite=False), captured
+
+
+@pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
+@pytest.mark.parametrize(
+    ("account", "source", "as_of", "expected_metadata_as_of", "amount"),
+    [
+        pytest.param("OANDA DEMO", "oanda_transaction_export_balance", "2026-08-01T15:00:01+10:00", "2026-08-01T15:00:01", 321.45, id="demo-native-brisbane"),
+        pytest.param("OANDA LIVE", "oanda_account_summary", "2026-08-01T05:00:01Z", "2026-08-01T05:00:01", 654.32, id="live-summary-utc"),
+    ],
+)
+def test_oanda_roundtripped_balance_metadata_beats_stale_cached_seed(
+    tmp_path, monkeypatch, account, source, as_of, expected_metadata_as_of, amount
+):
+    persisted = _roundtrip_tiny_stats2_oanda_balance(
+        tmp_path, account=account, balance=amount, source=source, as_of=as_of
+    )
+    assert persisted["timeline_as_of"] == expected_metadata_as_of
+    stale = {
+        "account": account,
+        "label": account,
+        "balance": 1000.0,
+        "currency": "AUD",
+        "balance_source": "oanda_account_summary",
+        "as_of": "2026-08-01T04:00:01Z",
+    }
+    snapshot, captured = _ordinary_oanda_snapshot(
+        monkeypatch, master_service, persisted_balance=persisted, stale_seed=stale
+    )
+    balance = next(item for item in snapshot["balances"] if item["label"] == account)
+    assert balance["balance"] == pytest.approx(amount)
+    assert balance["balance_source"] == source
+    assert balance["as_of"] == expected_metadata_as_of
+    assert balance["timeline_as_of"] == expected_metadata_as_of
+    assert captured["balances"][0]["balance"] == pytest.approx(amount)
+
+
+@pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
+@pytest.mark.parametrize(
+    ("account", "persisted_source", "persisted_as_of", "summary_balance"),
+    [
+        pytest.param("OANDA DEMO", "oanda_transaction_export_balance", "2026-08-01T15:00:01+10:00", 12.5, id="newer-lower-summary"),
+        pytest.param("OANDA LIVE", "oanda_account_summary", "2026-08-01T05:00:01Z", 0.0, id="newer-zero-summary"),
+    ],
+)
+def test_oanda_newer_summary_updates_roundtripped_balance(
+    tmp_path, monkeypatch, account, persisted_source, persisted_as_of, summary_balance
+):
+    persisted = _roundtrip_tiny_stats2_oanda_balance(
+        tmp_path, account=account, balance=333.0, source=persisted_source, as_of=persisted_as_of
+    )
+    summary = {
+        "account": account,
+        "label": account,
+        "balance": summary_balance,
+        "currency": "AUD",
+        "source": "oanda_account_summary",
+        "balance_source": "oanda_account_summary",
+        "as_of": "2026-08-01T06:00:01Z",
+    }
+    snapshot, captured = _ordinary_oanda_snapshot(
+        monkeypatch, master_service, persisted_balance=persisted, broker_seed=summary
+    )
+    balance = next(item for item in snapshot["balances"] if item["label"] == account)
+    assert balance["balance"] == pytest.approx(summary_balance)
+    assert balance["balance_source"] == "oanda_account_summary"
+    assert balance["as_of"] == "2026-08-01T06:00:01Z"
+    assert balance["timeline_as_of"] == "2026-08-01T06:00:01Z"
+    assert captured["balances"][0]["balance"] == pytest.approx(summary_balance)
+
+
+@pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
+def test_oanda_balance_seed_rejects_untrustworthy_or_conflicting_overrides():
+    valid = {
+        "account": "OANDA DEMO", "label": "OANDA DEMO", "account_id": "demo-a",
+        "balance": 77.0, "currency": "AUD", "balance_source": "oanda_transaction_export_balance",
+        "timeline_as_of": "2026-08-01T15:00:01",
+    }
+    rejected = [
+        {"account": "OANDA DEMO", "label": "OANDA DEMO", "balance": 1000.0, "currency": "AUD", "balance_source": "oanda_account_summary"},
+        {"account": "OANDA DEMO", "label": "OANDA DEMO", "balance": 1000.0, "currency": "AUD", "balance_source": "oanda_account_summary", "as_of": "not-a-timestamp"},
+        {"account": "OANDA DEMO", "label": "OANDA DEMO", "balance": 1000.0, "currency": "USD", "balance_source": "oanda_account_summary", "as_of": "2026-08-02T00:00:00Z"},
+        {"account": "OANDA DEMO", "label": "OANDA DEMO", "account_id": "demo-b", "balance": 1000.0, "currency": "AUD", "balance_source": "oanda_account_summary", "as_of": "2026-08-02T00:00:00Z"},
+        {"account": "OANDA DEMO", "label": "OANDA DEMO", "account_mode": "live", "balance": 1000.0, "currency": "AUD", "balance_source": "oanda_account_summary", "as_of": "2026-08-02T00:00:00Z"},
+    ]
+    timeline = master_service._build_journal_balance_timelines([], {}, [valid, *rejected])
+    balance = next(item for item in timeline["balances"] if item["label"] == "OANDA DEMO")
+    assert balance["balance"] == pytest.approx(77.0)
+    assert balance["balance_source"] == "oanda_transaction_export_balance"
+    assert balance["timeline_as_of"] == "2026-08-01T15:00:01"
+    issues = timeline["diagnostics"]["OANDA DEMO"]["oanda_balance_seed_issues"]
+    assert any("timestamp" in issue for issue in issues)
+    assert any("currency" in issue for issue in issues)
+    assert any("identity" in issue for issue in issues)
+    assert any("mode" in issue for issue in issues)
+
+
 @pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
 def test_oanda_snapshot_statistics_use_final_balances(monkeypatch, tmp_path):
     ms = _load_master_service_for_import_test()
