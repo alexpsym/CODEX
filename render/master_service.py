@@ -10024,9 +10024,13 @@ def _build_journal_balance_timelines(
                 latest_trade_authoritative_as_of = row.get("close_time") or row.get("open_time")
 
         authoritative_seed_balance = _to_float(bucket.get("excel_balance")) if bool(bucket.get("excel_balance_authoritative")) else None
-        authoritative_seed_ts = _to_ts(
-            bucket.get("excel_balance_timeline_as_of")
-            or bucket.get("excel_balance_as_of")
+        authoritative_seed_ts = (
+            float(bucket.get("excel_balance_ts") or float("-inf"))
+            if account_key.startswith("OANDA ")
+            else _to_ts(
+                bucket.get("excel_balance_timeline_as_of")
+                or bucket.get("excel_balance_as_of")
+            )
         ) if authoritative_seed_balance is not None else float("-inf")
         authoritative_seed_source = str(bucket.get("excel_balance_source") or "excel_account_balance")
 
@@ -10052,8 +10056,12 @@ def _build_journal_balance_timelines(
                 selected_authoritative_source = authoritative_seed_source
                 selected_authoritative_ts = authoritative_seed_ts
                 selected_authoritative_as_of = (
-                    bucket.get("excel_balance_timeline_as_of")
-                    or bucket.get("excel_balance_as_of")
+                    (
+                        bucket.get("excel_balance_timeline_as_of")
+                        or bucket.get("excel_balance_as_of")
+                    )
+                    if account_key.startswith("OANDA ")
+                    else bucket.get("excel_balance_as_of")
                 )
         latest_authoritative_at = selected_authoritative_as_of
 
@@ -10244,7 +10252,11 @@ def _merge_missing_timeline_balances_with_broker(
         return ""
 
     def _observation_timestamp(item: Dict[str, object], *, is_oanda: bool) -> float:
-        observed_at = item.get("timeline_as_of") or item.get("as_of")
+        observed_at = (
+            item.get("timeline_as_of") or item.get("as_of")
+            if is_oanda
+            else item.get("as_of")
+        )
         source = str(item.get("balance_source") or item.get("source") or "").strip().lower()
         if is_oanda and source == "oanda_transaction_export_balance":
             parsed = _parse_persisted_oanda_export_balance_timestamp(observed_at)
@@ -10365,7 +10377,8 @@ def _merge_missing_timeline_balances_with_broker(
         resolved["broker_balance_as_of"] = broker.get("as_of")
         if broker.get("as_of"):
             resolved["as_of"] = broker.get("as_of")
-            resolved["timeline_as_of"] = broker.get("as_of")
+            if is_oanda_account:
+                resolved["timeline_as_of"] = broker.get("as_of")
         broker_identity = _oanda_identity(broker) if is_oanda_account else ""
         if broker_identity:
             resolved["account_identity"] = broker_identity
