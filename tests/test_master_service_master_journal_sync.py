@@ -2882,8 +2882,38 @@ def _roundtrip_tiny_stats2_oanda_balance(tmp_path, *, account, balance, source, 
     return balances[0]
 
 
-def _ordinary_oanda_snapshot(monkeypatch, ms, *, persisted_balance, stale_seed=None, broker_seed=None):
+def _ordinary_oanda_snapshot(
+    monkeypatch,
+    ms,
+    *,
+    persisted_balance=None,
+    persisted_balances=None,
+    stale_seed=None,
+    broker_seed=None,
+    broker_seeds=None,
+    legacy_broker_cache=False,
+    trade_rows=None,
+):
     captured = {}
+    source_balances = (
+        [dict(item) for item in persisted_balances if isinstance(item, dict)]
+        if persisted_balances is not None
+        else [dict(persisted_balance)]
+    )
+    cached_brokers = (
+        [dict(item) for item in broker_seeds if isinstance(item, dict)]
+        if broker_seeds is not None
+        else ([dict(broker_seed)] if broker_seed else [])
+    )
+    if not legacy_broker_cache:
+        for cached_broker in cached_brokers:
+            if (
+                str(
+                    cached_broker.get("balance_source") or cached_broker.get("source") or ""
+                ).strip().lower()
+                == "oanda_account_summary"
+            ):
+                cached_broker.setdefault("broker_balance_cached_at", ms._utc_now_iso())
     monkeypatch.setenv("TRADING_JOURNAL_SOURCE", "master_journal")
     monkeypatch.setattr(ms, "_load_trading_journal_view_snapshot", lambda: None)
     monkeypatch.setattr(ms, "_journal_source_fingerprint", lambda: {"source_mode": "master_journal"})
@@ -2893,10 +2923,14 @@ def _ordinary_oanda_snapshot(monkeypatch, ms, *, persisted_balance, stale_seed=N
     monkeypatch.setattr(
         ms,
         "read_master_journal_source",
-        lambda _path: {"items": [], "cashflow_ledger": {}, "balances": [dict(persisted_balance)]},
+        lambda _path: {
+            "items": [dict(item) for item in (trade_rows or []) if isinstance(item, dict)],
+            "cashflow_ledger": {},
+            "balances": source_balances,
+        },
     )
     monkeypatch.setattr(ms, "_get_excel_account_balances", lambda: [dict(stale_seed)] if stale_seed else [])
-    monkeypatch.setattr(ms, "_load_json_file", lambda *_args, **_kwargs: {"broker_account_balances": [dict(broker_seed)] if broker_seed else []})
+    monkeypatch.setattr(ms, "_load_json_file", lambda *_args, **_kwargs: {"broker_account_balances": cached_brokers})
     monkeypatch.setattr(ms, "_monthly_aud_revaluation_rows_for_journal_view", lambda: [])
     monkeypatch.setattr(ms, "_build_authoritative_trading_journal_diagnostics_snapshot", lambda _items: {})
     monkeypatch.setattr(ms, "_save_trading_journal_view_snapshot", lambda _payload: None)
@@ -2911,6 +2945,208 @@ def _ordinary_oanda_snapshot(monkeypatch, ms, *, persisted_balance, stale_seed=N
 
     monkeypatch.setattr(ms, "_compute_journal_stats_with_period_reports", _capture_stats)
     return ms._build_trading_journal_view_snapshot(force=True, persist_sqlite=False), captured
+
+
+@pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
+def test_derived_refresh_does_not_replace_oanda_balances_with_legacy_cached_summaries(
+    tmp_path, monkeypatch
+):
+    persisted = [
+        _roundtrip_tiny_stats2_oanda_balance(
+            tmp_path,
+            account="OANDA DEMO",
+            balance=1517.94,
+            source="oanda_transaction_export_balance",
+            as_of="2026-08-01T05:00:01+10:00",
+        ),
+    ]
+    live_trade = {
+        "id": "recovered-live-trade",
+        "row_type": "trade",
+        "source": "master_journal",
+        "account": "OANDA LIVE",
+        "account_label": "OANDA LIVE",
+        "balance_after_trade": 1479.31,
+        "balance_after_trade_currency": "AUD",
+        "currency": "AUD",
+        "close_time": "2025-11-06T11:28:13+00:00",
+    }
+    legacy_cached_summaries = [
+        {
+            "account": "OANDA DEMO",
+            "label": "OANDA DEMO",
+            "balance": 1000.0,
+            "currency": "AUD",
+            "source": "oanda_account_summary",
+            "balance_source": "oanda_account_summary",
+            "account_mode": "demo",
+            "as_of": "2026-08-23T13:13:36.793494+00:00",
+        },
+        {
+            "account": "OANDA LIVE",
+            "label": "OANDA LIVE",
+            "balance": 1000.0,
+            "currency": "AUD",
+            "source": "oanda_account_summary",
+            "balance_source": "oanda_account_summary",
+            "account_mode": "live",
+            "as_of": "2026-08-23T13:13:36.793528+00:00",
+        },
+    ]
+    snapshot, captured = _ordinary_oanda_snapshot(
+        monkeypatch,
+        master_service,
+        persisted_balances=persisted,
+        broker_seeds=legacy_cached_summaries,
+        legacy_broker_cache=True,
+        trade_rows=[live_trade],
+    )
+    balances = {item["label"]: item for item in snapshot["balances"]}
+    assert balances["OANDA DEMO"]["balance"] == pytest.approx(1517.94)
+    assert balances["OANDA DEMO"]["balance_source"] == "oanda_transaction_export_balance"
+    assert balances["OANDA DEMO"]["timeline_as_of"] == "2026-08-01T05:00:01"
+    assert balances["OANDA LIVE"]["balance"] == pytest.approx(1479.31)
+    assert balances["OANDA LIVE"]["balance_source"] == "trade_timeline"
+    assert balances["OANDA LIVE"]["as_of"] == "2025-11-06T11:28:13+00:00"
+    assert {item["label"]: item["balance"] for item in captured["balances"]} == {
+        "OANDA DEMO": pytest.approx(1517.94),
+        "OANDA LIVE": pytest.approx(1479.31),
+    }
+
+
+@pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
+def test_derived_refresh_roundtrip_preserves_oanda_balances_after_pending_clear(
+    tmp_path, monkeypatch
+):
+    persisted = [
+        _roundtrip_tiny_stats2_oanda_balance(
+            tmp_path,
+            account="OANDA DEMO",
+            balance=1517.94,
+            source="oanda_transaction_export_balance",
+            as_of="2026-08-01T05:00:01+10:00",
+        ),
+    ]
+    live_trade = {
+        "id": "recovered-live-trade",
+        "row_type": "trade",
+        "source": "master_journal",
+        "account": "OANDA LIVE",
+        "account_label": "OANDA LIVE",
+        "balance_after_trade": 1479.31,
+        "balance_after_trade_currency": "AUD",
+        "currency": "AUD",
+        "close_time": "2025-11-06T11:28:13+00:00",
+    }
+    legacy_cached_summaries = [
+        {
+            "account": account,
+            "label": account,
+            "balance": 1000.0,
+            "currency": "AUD",
+            "source": "oanda_account_summary",
+            "balance_source": "oanda_account_summary",
+            "account_mode": mode,
+            "as_of": timestamp,
+        }
+        for account, mode, timestamp in (
+            ("OANDA DEMO", "demo", "2026-08-23T13:13:36.793494+00:00"),
+            ("OANDA LIVE", "live", "2026-08-23T13:13:36.793528+00:00"),
+        )
+    ]
+    first_snapshot, _ = _ordinary_oanda_snapshot(
+        monkeypatch,
+        master_service,
+        persisted_balances=persisted,
+        broker_seeds=legacy_cached_summaries,
+        legacy_broker_cache=True,
+        trade_rows=[live_trade],
+    )
+    selected = {item["label"]: item for item in first_snapshot["balances"]}
+    reread = [
+        _roundtrip_tiny_stats2_oanda_balance(
+            tmp_path,
+            account=account,
+            balance=selected[account]["balance"],
+            source=selected[account]["balance_source"],
+            as_of=selected[account].get("timeline_as_of") or selected[account]["as_of"],
+        )
+        for account in ("OANDA DEMO", "OANDA LIVE")
+    ]
+    second_snapshot, captured = _ordinary_oanda_snapshot(
+        monkeypatch,
+        master_service,
+        persisted_balances=reread,
+        broker_seeds=legacy_cached_summaries,
+        legacy_broker_cache=True,
+        trade_rows=[live_trade],
+    )
+    balances = {item["label"]: item for item in second_snapshot["balances"]}
+    assert balances["OANDA DEMO"]["balance"] == pytest.approx(1517.94)
+    assert balances["OANDA DEMO"]["balance_source"] == "oanda_transaction_export_balance"
+    assert balances["OANDA DEMO"]["timeline_as_of"] == "2026-08-01T05:00:01"
+    assert balances["OANDA LIVE"]["balance"] == pytest.approx(1479.31)
+    assert balances["OANDA LIVE"]["balance_source"] == "trade_timeline"
+    assert balances["OANDA LIVE"]["as_of"] == "2025-11-06T11:28:13+00:00"
+    assert {item["label"]: item["balance"] for item in captured["balances"]} == {
+        "OANDA DEMO": pytest.approx(1517.94),
+        "OANDA LIVE": pytest.approx(1479.31),
+    }
+
+
+@pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
+def test_fresh_cached_oanda_summaries_can_apply_lower_and_zero_balances(tmp_path, monkeypatch):
+    persisted = [
+        _roundtrip_tiny_stats2_oanda_balance(
+            tmp_path,
+            account="OANDA DEMO",
+            balance=1517.94,
+            source="oanda_transaction_export_balance",
+            as_of="2026-08-01T05:00:01+10:00",
+        ),
+    ]
+    live_trade = {
+        "id": "recovered-live-trade",
+        "row_type": "trade",
+        "source": "master_journal",
+        "account": "OANDA LIVE",
+        "account_label": "OANDA LIVE",
+        "balance_after_trade": 1479.31,
+        "balance_after_trade_currency": "AUD",
+        "currency": "AUD",
+        "close_time": "2025-11-06T11:28:13+00:00",
+    }
+    fresh_summaries = [
+        {
+            "account": account,
+            "label": account,
+            "balance": balance,
+            "currency": "AUD",
+            "source": "oanda_account_summary",
+            "balance_source": "oanda_account_summary",
+            "account_mode": mode,
+            "as_of": "2026-09-22T04:00:00+00:00",
+        }
+        for account, mode, balance in (
+            ("OANDA DEMO", "demo", 1000.0),
+            ("OANDA LIVE", "live", 0.0),
+        )
+    ]
+    snapshot, captured = _ordinary_oanda_snapshot(
+        monkeypatch,
+        master_service,
+        persisted_balances=persisted,
+        broker_seeds=fresh_summaries,
+        trade_rows=[live_trade],
+    )
+    balances = {item["label"]: item for item in snapshot["balances"]}
+    assert balances["OANDA DEMO"]["balance"] == pytest.approx(1000.0)
+    assert balances["OANDA LIVE"]["balance"] == pytest.approx(0.0)
+    assert all(item["balance_source"] == "oanda_account_summary" for item in balances.values())
+    assert {item["label"]: item["balance"] for item in captured["balances"]} == {
+        "OANDA DEMO": pytest.approx(1000.0),
+        "OANDA LIVE": pytest.approx(0.0),
+    }
 
 
 @pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')

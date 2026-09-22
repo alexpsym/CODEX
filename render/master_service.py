@@ -774,6 +774,7 @@ TRADING_JOURNAL_DERIVED_REFRESH_DEBOUNCE_SECONDS = max(
     0.0,
     float(os.getenv("TRADING_JOURNAL_DERIVED_REFRESH_DEBOUNCE_SECONDS", "30") or "30"),
 )
+TRADING_JOURNAL_OANDA_SUMMARY_CACHE_MAX_AGE_SECONDS = 60 * 60
 TRADING_JOURNAL_DERIVED_REFRESH_MAX_ATTEMPTS = max(
     1,
     int(os.getenv("TRADING_JOURNAL_DERIVED_REFRESH_MAX_ATTEMPTS", "3") or "3"),
@@ -1308,20 +1309,30 @@ def _save_broker_balance_diagnostics_state(
     state = _load_trading_journal_state()
     existing = state.get("broker_account_balances")
     merged = list(existing) if isinstance(existing, list) else []
+    cache_recorded_at = _utc_now_iso()
     for candidate in broker_account_balances or []:
         if not isinstance(candidate, dict):
             continue
-        key = _norm_account_key(candidate.get("label") or candidate.get("account"))
+        stored_candidate = dict(candidate)
+        source = str(
+            stored_candidate.get("balance_source") or stored_candidate.get("source") or ""
+        ).strip().lower()
+        if source == "oanda_account_summary":
+            # State entries are retained diagnostics, not a fresh broker read.
+            # Keep their cache age distinct from the account observation time so
+            # an old retained summary cannot later replace a journal balance.
+            stored_candidate["broker_balance_cached_at"] = cache_recorded_at
+        key = _norm_account_key(stored_candidate.get("label") or stored_candidate.get("account"))
         if not key:
             continue
         replaced = False
         for idx, prev in enumerate(merged):
             if isinstance(prev, dict) and _norm_account_key(prev.get("label") or prev.get("account")) == key:
-                merged[idx] = dict(candidate)
+                merged[idx] = stored_candidate
                 replaced = True
                 break
         if not replaced:
-            merged.append(dict(candidate))
+            merged.append(stored_candidate)
     state["broker_account_balances"] = merged
     diagnostics = state.get("broker_balance_diagnostics")
     diag = diagnostics if isinstance(diagnostics, dict) else {}
@@ -2792,9 +2803,10 @@ def _build_trading_journal_view_snapshot(
         balances = timeline.get("balances") or []
         state = _load_json_file(TRADING_JOURNAL_STATE_PATH, {})
         _finish_snapshot_substage("local_state_read")
-        broker_balances = [] if (skip_external_balances or skip_live_account_refresh) else ((state or {}).get("broker_account_balances") if isinstance(state, dict) else [])
-        if not isinstance(broker_balances, list):
-            broker_balances = []
+        broker_balances = _state_cached_broker_balance_entries(
+            state,
+            enabled=not (skip_external_balances or skip_live_account_refresh),
+        )
         balances = _merge_missing_timeline_balances_with_broker(balances, broker_balances)
         _finish_snapshot_substage("broker_balance_merge")
         stats = _compute_journal_stats_with_period_reports(items, balances)
@@ -2890,9 +2902,10 @@ def _build_trading_journal_view_snapshot(
     monthly_note_rows = _monthly_aud_revaluation_rows_for_journal_view()
     combined_items = sorted([*trade_items, *cashflow_rows, *other_non_trade_rows, *monthly_note_rows], key=_row_sort_dt, reverse=True)
     balances = timeline.get("balances") if isinstance(timeline.get("balances"), list) else []
-    broker_balances = [] if (skip_external_balances or skip_live_account_refresh) else ((state or {}).get("broker_account_balances") if isinstance(state, dict) else [])
-    if not isinstance(broker_balances, list):
-        broker_balances = []
+    broker_balances = _state_cached_broker_balance_entries(
+        state,
+        enabled=not (skip_external_balances or skip_live_account_refresh),
+    )
     balances = _merge_missing_timeline_balances_with_broker(balances, broker_balances)
     stats = _compute_journal_stats_with_period_reports(stats_items, balances)
     for bal in balances:
@@ -10240,6 +10253,23 @@ def _merge_display_balances(*groups: List[Dict[str, object]]) -> List[Dict[str, 
     return sorted(merged.values(), key=lambda x: str(x.get("label") or x.get("account") or ""))
 
 
+def _state_cached_broker_balance_entries(
+    state: object,
+    *,
+    enabled: bool,
+) -> List[Dict[str, object]]:
+    if not enabled or not isinstance(state, dict):
+        return []
+    raw_entries = state.get("broker_account_balances")
+    if not isinstance(raw_entries, list):
+        return []
+    return [
+        {**entry, "_from_broker_balance_cache": True}
+        for entry in raw_entries
+        if isinstance(entry, dict)
+    ]
+
+
 def _merge_missing_timeline_balances_with_broker(
     balances: List[Dict[str, object]],
     broker_balances: List[Dict[str, object]],
@@ -10342,6 +10372,13 @@ def _merge_missing_timeline_balances_with_broker(
                 if existing_identity and broker_identity and existing_identity != broker_identity:
                     continue
                 if not (existing_as_of_known and broker_as_of_known and broker_as_of_ts > existing_as_of_ts):
+                    continue
+            if bool(broker.get("_from_broker_balance_cache")):
+                cached_at_ts = _timestamp_epoch_seconds(broker.get("broker_balance_cached_at"))
+                cache_age_seconds = time.time() - cached_at_ts if math.isfinite(cached_at_ts) else float("inf")
+                if cache_age_seconds < 0 or cache_age_seconds > TRADING_JOURNAL_OANDA_SUMMARY_CACHE_MAX_AGE_SECONDS:
+                    existing["skipped_broker_balance_reason"] = "stale_oanda_account_summary_cache"
+                    merged[existing_idx] = existing
                     continue
         if existing_balance is not None and not bool(existing.get("missing_balance")):
             existing_source = str(existing.get("balance_source") or existing.get("source") or "").lower()
