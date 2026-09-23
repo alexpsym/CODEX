@@ -550,6 +550,137 @@ def test_pepperstone_newer_lower_and_zero_balances_remain_valid():
         assert selected["timeline_as_of"] == newer["as_of"]
 
 
+def test_pepperstone_current_statement_ignores_other_account_cashflow():
+    _rows, balance_b = master_service._parse_pepperstone_mt5_rows(
+        [_pepperstone_mt5_balance_rows(
+            login="700002",
+            period="2026.09.07 00:00:00 - 2026.09.07 17:33:00",
+            final_balance=5000.0,
+            profit=0.0,
+        )],
+        source_kind="html",
+    )
+    assert balance_b is not None
+    identity_a = master_service._mt5_account_fingerprint("Pepperstone-Demo", "700001")
+    withdrawal_a = {
+        "id": f"pepperstone_mt5:{identity_a}:cashflow:withdrawal",
+        "row_type": "cashflow",
+        "account": "PEPPERSTONE DEMO",
+        "close_time": "2026-09-08T18:00:00",
+        "cashflow_new_balance": 0.0,
+        "currency": "AUD",
+        "raw_refs": {"account_fingerprint": identity_a},
+    }
+    ledger = master_service._merge_pending_cashflow_rows_into_ledger({}, [withdrawal_a])
+    event_a = ledger["PEPPERSTONE DEMO"][0]
+    assert event_a["account_identity"] == identity_a
+    assert event_a["new_balance"] == pytest.approx(0.0)
+
+    result = master_service._build_journal_balance_timelines([], ledger, [balance_b])
+    selected = result["balances"][0]
+    assert selected["balance"] == pytest.approx(5000.0)
+    assert selected["balance_source"] == "pepperstone_mt5_statement_balance"
+    assert selected["account_identity"] == balance_b["account_identity"]
+    assert result["diagnostics"]["PEPPERSTONE DEMO"]["ignored_pepperstone_identity_cashflow_events"] == 1
+
+
+def test_pepperstone_current_account_filters_other_account_trade_and_keeps_own_trade():
+    _rows, balance_b = master_service._parse_pepperstone_mt5_rows(
+        [_pepperstone_mt5_balance_rows(
+            login="710002",
+            period="2026.09.07 00:00:00 - 2026.09.07 17:33:00",
+            final_balance=5000.0,
+            profit=0.0,
+        )],
+        source_kind="html",
+    )
+    assert balance_b is not None
+    identity_a = master_service._mt5_account_fingerprint("Pepperstone-Demo", "710001")
+    identity_b = balance_b["account_identity"]
+    rows = [
+        {
+            "id": f"pepperstone_mt5:{identity_a}:position:9001",
+            "row_type": "trade",
+            "source": "local_excel",
+            "account": "PEPPERSTONE DEMO",
+            "currency": "AUD",
+            "close_time": "2026-09-08T18:00:00",
+            "balance_after_trade": 0.0,
+            "balance_after_trade_currency": "AUD",
+        },
+        {
+            "id": f"pepperstone_mt5:{identity_b}:position:9002",
+            "row_type": "trade",
+            "source": "local_excel",
+            "account": "PEPPERSTONE DEMO",
+            "currency": "AUD",
+            "close_time": "2026-09-09T18:00:00",
+            "balance_after_trade": 4990.0,
+            "balance_after_trade_currency": "AUD",
+        },
+    ]
+    result = master_service._build_journal_balance_timelines(rows, {}, [balance_b])
+    selected = result["balances"][0]
+    assert selected["balance"] == pytest.approx(4990.0)
+    assert selected["balance_source"] == "trade_timeline"
+    assert selected["as_of"] == "2026-09-09T18:00:00"
+    assert selected["account_identity"] == identity_b
+    diagnostics = result["diagnostics"]["PEPPERSTONE DEMO"]
+    assert diagnostics["authoritative_balance_source"] == "authoritative_trade_balance"
+    assert diagnostics["ignored_pepperstone_identity_trade_rows"] == 1
+
+
+def test_pepperstone_legacy_zero_stays_historical_and_compatible_cashflow_can_update_current_account(tmp_path: Path):
+    legacy_zero = {
+        "id": "legacy:pepperstone-demo-withdrawal",
+        "row_type": "cashflow",
+        "account": "PEPPERSTONE DEMO",
+        "close_time": "2022-12-16T00:05:04+10:00",
+        "cashflow_new_balance": 0.0,
+        "currency": "AUD",
+    }
+    legacy_ledger = master_service._merge_pending_cashflow_rows_into_ledger({}, [legacy_zero])
+    legacy = master_service._build_journal_balance_timelines([], legacy_ledger, {})["balances"][0]
+    assert legacy["balance"] == pytest.approx(0.0)
+    assert legacy["balance_source"] == "cashflow_anchor_plus_trades"
+    assert "account_identity" not in legacy
+
+    _rows, balance_b = master_service._parse_pepperstone_mt5_rows(
+        [_pepperstone_mt5_balance_rows(
+            login="720002",
+            period="2026.09.07 00:00:00 - 2026.09.07 17:33:00",
+            final_balance=5000.0,
+            profit=0.0,
+        )],
+        source_kind="html",
+    )
+    assert balance_b is not None
+    persisted_b = _tiny_stats2_pepperstone_roundtrip(tmp_path, balance_b)
+    protected = master_service._build_journal_balance_timelines(
+        [], legacy_ledger, [persisted_b]
+    )["balances"][0]
+    assert protected["balance"] == pytest.approx(5000.0)
+    assert protected["account_identity"] == balance_b["account_identity"]
+
+    cashflow_b = {
+        "id": f"pepperstone_mt5:{balance_b['account_identity']}:cashflow:reset",
+        "row_type": "cashflow",
+        "account": "PEPPERSTONE DEMO",
+        "close_time": "2026-09-08T18:00:00",
+        "cashflow_new_balance": 0.0,
+        "currency": "AUD",
+    }
+    current_ledger = master_service._merge_pending_cashflow_rows_into_ledger(
+        legacy_ledger, [cashflow_b]
+    )
+    updated = master_service._build_journal_balance_timelines(
+        [], current_ledger, [persisted_b]
+    )["balances"][0]
+    assert updated["balance"] == pytest.approx(0.0)
+    assert updated["balance_source"] == "cashflow_anchor_plus_trades"
+    assert updated["account_identity"] == balance_b["account_identity"]
+
+
 def test_pepperstone_mt5_import_is_idempotent_preserves_manual_fields_and_applies_balance(
     temp_state_paths: Path, monkeypatch: pytest.MonkeyPatch
 ):

@@ -2571,6 +2571,24 @@ def _trading_journal_import_status_snapshot() -> Dict[str, object]:
     return status
 
 
+def _pepperstone_account_identity(record: object) -> str:
+    item = record if isinstance(record, dict) else {}
+    raw_refs = item.get("raw_refs") if isinstance(item.get("raw_refs"), dict) else {}
+    for value in (
+        item.get("account_identity"),
+        item.get("account_fingerprint"),
+        raw_refs.get("account_fingerprint"),
+    ):
+        identity = str(value or "").strip()
+        if identity:
+            return identity
+    row_id = str(item.get("id") or "").strip()
+    parts = row_id.split(":", 2)
+    if len(parts) >= 3 and parts[0].strip().casefold() == "pepperstone_mt5":
+        return parts[1].strip()
+    return ""
+
+
 def _cashflow_row_to_ledger_event(row: Dict[str, object]) -> Dict[str, object]:
     row_data = row if isinstance(row, dict) else {}
     row_id = str(row_data.get("id") or "").strip()
@@ -2591,7 +2609,7 @@ def _cashflow_row_to_ledger_event(row: Dict[str, object]) -> Dict[str, object]:
     reason = str(row_data.get("notes") or row_data.get("cashflow_reason") or "").strip()
     if not account or not date or new_balance is None:
         return {}
-    return {
+    event = {
         "id": row_id,
         "account": account,
         "date": date,
@@ -2601,6 +2619,14 @@ def _cashflow_row_to_ledger_event(row: Dict[str, object]) -> Dict[str, object]:
         "reason": reason,
         "side": str(row_data.get("side") or row_data.get("cashflow_type") or "").strip(),
     }
+    if _norm_account_key(account).startswith("PEPPERSTONE "):
+        account_identity = _pepperstone_account_identity(row_data)
+        if account_identity:
+            event["account_identity"] = account_identity
+        raw_refs = row_data.get("raw_refs") if isinstance(row_data.get("raw_refs"), dict) else {}
+        if raw_refs:
+            event["raw_refs"] = dict(raw_refs)
+    return event
 
 
 def _normalize_cashflow_ledger_keys(ledger: Dict[str, object]) -> Dict[str, List[Dict[str, object]]]:
@@ -2623,6 +2649,7 @@ def _merge_pending_cashflow_rows_into_ledger(ledger: Dict[str, object], pending_
     def event_identity(event: Dict[str, object]) -> Tuple[object, ...]:
         return (
             _norm_account_key(event.get("account")),
+            _pepperstone_account_identity(event),
             round(_timestamp_epoch_seconds(event.get("date")), 6),
             _to_float(event.get("amount")),
             _to_float(event.get("new_balance")),
@@ -9769,16 +9796,7 @@ def _build_journal_balance_timelines(
         return ""
 
     def _pepperstone_seed_identity(seed: Dict[str, object]) -> str:
-        raw_refs = seed.get("raw_refs") if isinstance(seed.get("raw_refs"), dict) else {}
-        for value in (
-            seed.get("account_identity"),
-            seed.get("account_fingerprint"),
-            raw_refs.get("account_fingerprint"),
-        ):
-            text = str(value or "").strip()
-            if text:
-                return text
-        return ""
+        return _pepperstone_account_identity(seed)
 
     def _oanda_seed_timestamp(seed: Dict[str, object], source: str, as_of: object) -> float:
         if source == "oanda_transaction_export_balance":
@@ -9947,13 +9965,34 @@ def _build_journal_balance_timelines(
 
     for account_key in sorted(set([*by_account.keys(), *((cashflow_ledger or {}).keys())])):
         bucket = by_account.get(account_key) or {"trade_indices": [], "labels": [], "currencies": []}
-        trade_indices = sorted(
+        is_pepperstone_account = account_key.startswith("PEPPERSTONE ")
+        selected_pepperstone_identity = (
+            str(bucket.get("excel_balance_identity") or "").strip()
+            if is_pepperstone_account
+            else ""
+        )
+        raw_trade_indices = sorted(
             bucket.get("trade_indices") or [],
             key=lambda i: _to_ts(out_rows[i].get("close_time") or out_rows[i].get("open_time")),
         )
         raw_events = sorted((cashflow_ledger or {}).get(account_key) or [], key=lambda e: _to_ts(e.get("date")))
-        events = [e for e in raw_events if _to_float(e.get("new_balance")) is not None]
-        ignored_cashflow_anchor_count = len(raw_events) - len(events)
+        if selected_pepperstone_identity:
+            trade_indices = [
+                row_idx
+                for row_idx in raw_trade_indices
+                if _pepperstone_account_identity(out_rows[row_idx])
+                == selected_pepperstone_identity
+            ]
+            compatible_raw_events = [
+                event
+                for event in raw_events
+                if _pepperstone_account_identity(event) == selected_pepperstone_identity
+            ]
+        else:
+            trade_indices = raw_trade_indices
+            compatible_raw_events = raw_events
+        events = [e for e in compatible_raw_events if _to_float(e.get("new_balance")) is not None]
+        ignored_cashflow_anchor_count = len(compatible_raw_events) - len(events)
         event_ts = [_to_ts(e.get("date")) for e in events]
         has_cashflow = len(events) > 0
         account_label_hint = str(
@@ -10219,6 +10258,9 @@ def _build_journal_balance_timelines(
         selected_identity = str(bucket.get("excel_balance_identity") or "").strip()
         if selected_identity and balance_source == selected_authoritative_source:
             balance_payload["account_identity"] = selected_identity
+        elif is_pepperstone_account and selected_pepperstone_identity:
+            # The selected checkpoint was derived only from this fingerprint.
+            balance_payload["account_identity"] = selected_pepperstone_identity
         balances.append(balance_payload)
         diagnostics[account_key] = {
             "account_key": account_key,
@@ -10238,6 +10280,19 @@ def _build_journal_balance_timelines(
             "pepperstone_balance_seed_issues": list(bucket.get("pepperstone_balance_seed_issues") or []),
             "warning": "No cashflow or authoritative trade balance anchor found." if missing_balance else "",
         }
+        if is_pepperstone_account:
+            diagnostics[account_key].update({
+                "ignored_pepperstone_identity_trade_rows": (
+                    len(raw_trade_indices) - len(trade_indices)
+                    if selected_pepperstone_identity
+                    else 0
+                ),
+                "ignored_pepperstone_identity_cashflow_events": (
+                    len(raw_events) - len(compatible_raw_events)
+                    if selected_pepperstone_identity
+                    else 0
+                ),
+            })
     balances = sorted(balances, key=lambda x: str(x.get("label") or x.get("account") or ""))
     return {"rows": out_rows, "balances": balances, "diagnostics": diagnostics}
 
