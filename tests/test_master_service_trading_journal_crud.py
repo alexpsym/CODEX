@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 from fastapi import HTTPException
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 if "multipart" not in sys.modules:
     multipart_mod = types.ModuleType("multipart")
     multipart_mod.__spec__ = importlib.machinery.ModuleSpec("multipart", loader=None)
@@ -260,17 +260,48 @@ def _pepperstone_mt5_xlsx_bytes() -> bytes:
     return output.getvalue()
 
 
-@pytest.mark.parametrize(
-    ("case", "payload", "statement_currency", "expected_error"),
-    [
-        ("missing", _pepperstone_mt5_html_without_currency_bytes, None, "missing_statement_currency"),
-        ("invalid", _pepperstone_mt5_html_without_currency_bytes, "XYZ", "invalid_statement_currency"),
-        ("conflict", _pepperstone_mt5_html_bytes, "USD", "The selected Pepperstone HTML account currency conflicts"),
-    ],
-    ids=["missing", "invalid", "conflict"],
-)
-def test_pepperstone_html_currency_validation_blocks_writes(
-    case, payload, statement_currency, expected_error, temp_state_paths: Path, monkeypatch: pytest.MonkeyPatch,
+def _pepperstone_mt5_balance_rows(
+    *, login: str, period: str, final_balance: float, profit: float,
+) -> list[list[object]]:
+    statement_date = period.split(" - ", 1)[0].split(" ", 1)[0]
+    return [
+        ["Account History Report"],
+        ["Account", login],
+        ["Company", "Pepperstone Group Limited"],
+        ["Server", "Pepperstone-Demo"],
+        ["Period", period],
+        ["Deals"],
+        ["Time", "Deal", "Symbol", "Type", "Direction", "Volume", "Price", "Order", "Position ID", "Commission", "Fee", "Swap", "Profit", "Balance", "Comment"],
+        [f"{statement_date} 07:13:57", "901", "USDJPY.a", "sell", "in", 0.22, 156.154, "501", "701", 0.0, 0.0, 0.0, 0.0, 50000.0, "opening capital"],
+        [f"{statement_date} 08:16:37", "902", "USDJPY.a", "buy", "out", 0.22, 156.054, "502", "701", 0.0, 0.0, 0.0, profit, final_balance, "closed"],
+        ["Balance", final_balance],
+    ]
+
+
+def _tiny_stats2_pepperstone_roundtrip(tmp_path: Path, balance: dict) -> dict:
+    from tools import master_journal_workbook as mjw
+
+    path = tmp_path / "pepperstone-balance.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "STATS2"
+    ws.append(["Account Balances"])
+    ws.append(["Account", "Balance", "Currency"])
+    ws.append(["PEPPERSTONE DEMO", 0.0, "AUD"])
+    mjw._incremental_update_account_balance(wb, balance)
+    wb.save(path)
+    wb.close()
+    reopened = load_workbook(path)
+    try:
+        balances = mjw._read_stats2_account_balances(reopened)
+    finally:
+        reopened.close()
+    assert len(balances) == 1
+    return balances[0]
+
+
+def test_pepperstone_html_defaults_aud_and_rejects_non_aud_before_writes(
+    temp_state_paths: Path, monkeypatch: pytest.MonkeyPatch,
 ):
     existing = {"id": "existing:trade", "row_type": "trade", "source": "manual", "notes": "untouched"}
     master_service._set_trading_journal_rows([existing])
@@ -280,25 +311,48 @@ def test_pepperstone_html_currency_validation_blocks_writes(
     monkeypatch.setattr(master_service, "_sync_master_journal_workbook", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("sync must not run")))
     monkeypatch.setattr(master_service, "_persist_trading_journal_sqlite", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("persistence must not run")))
 
-    result = master_service._import_uploaded_trading_journal_file(
-        "statement.html", payload(), statement_currency=statement_currency,
+    parsed_rows, parsed_balance = master_service._parse_excel_account_workbook(
+        "statement.html", "manual_upload", _pepperstone_mt5_html_without_currency_bytes()
     )
+    assert {row["currency"] for row in parsed_rows} == {"AUD"}
+    assert parsed_balance["currency"] == "AUD"
 
+    for payload, statement_currency in (
+        (_pepperstone_mt5_html_without_currency_bytes(), "USD"),
+        (_pepperstone_mt5_html_bytes(), "USD"),
+    ):
+        result = master_service._import_uploaded_trading_journal_file(
+            "statement.html", payload, statement_currency=statement_currency,
+        )
+        assert result["ok"] is False
+        assert result["status_code"] == 422
+        assert result["errors"] == ["invalid_statement_currency"]
+    non_aud_rows = [list(row) for row in _pepperstone_mt5_native_rows()]
+    for row in non_aud_rows:
+        if row and row[0] == "Currency":
+            row[1] = "USD"
+    non_aud_payload = (
+        "<html><body><table>"
+        + "".join(
+            "<tr>" + "".join(f"<td>{value}</td>" for value in row) + "</tr>"
+            for row in non_aud_rows
+        )
+        + "</table></body></html>"
+    ).encode("utf-16")
+    result = master_service._import_uploaded_trading_journal_file(
+        "statement.html", non_aud_payload,
+    )
     assert result["ok"] is False
     assert result["status_code"] == 422
-    if case == "missing":
-        assert result["requires_statement_currency"] is True
-        assert result["errors"] == [expected_error]
-    elif case == "invalid":
-        assert result["errors"] == [expected_error]
-    else:
-        assert expected_error in result["message"]
+    assert result["errors"] == [
+        "The Pepperstone MT5 report currency conflicts with the required AUD account currency."
+    ]
     assert master_service._get_trading_journal_rows() == before_rows
     assert master_service._PENDING_MANUAL_SYNC_ROWS == before_pending_rows
     assert master_service._PENDING_MANUAL_SYNC_BALANCES == before_pending_balances
 
 
-def test_pepperstone_html_explicit_currency_flows_from_endpoint_to_rows_and_balance(
+def test_pepperstone_html_upload_defaults_aud_without_currency_selector(
     temp_state_paths: Path, monkeypatch: pytest.MonkeyPatch,
 ):
     observed = {}
@@ -326,14 +380,16 @@ def test_pepperstone_html_explicit_currency_flows_from_endpoint_to_rows_and_bala
     )
 
     response = asyncio.run(
-        master_service.trading_journal_import_file(upload, statement_currency=" usd ")
+        master_service.trading_journal_import_file(
+            upload, account_mode=None, statement_currency=None
+        )
     )
     result = _json(response)
 
     assert result["ok"] is True
     assert result["rows_parsed"] == 1
-    assert {row["currency"] for row in observed["rows"]} == {"USD"}
-    assert observed["balance"]["currency"] == "USD"
+    assert {row["currency"] for row in observed["rows"]} == {"AUD"}
+    assert observed["balance"]["currency"] == "AUD"
 
 
 def test_pepperstone_mt5_native_html_and_xlsx_import_same_closed_positions(tmp_path: Path):
@@ -378,6 +434,120 @@ def test_pepperstone_mt5_native_html_and_xlsx_import_same_closed_positions(tmp_p
     assert html_balance["account"] == "PEPPERSTONE DEMO"
     assert html_balance["currency"] == "AUD"
     assert "skipped_open_positions:2" in html_balance["_import_warnings"]
+
+
+def test_pepperstone_statement_balance_survives_metadata_roundtrip_and_refresh(tmp_path: Path):
+    rows, statement_balance = master_service._parse_pepperstone_mt5_rows(
+        [_pepperstone_mt5_balance_rows(
+            login="600001",
+            period="2026.09.07 00:00:00 - 2026.09.07 17:33:00",
+            final_balance=50036.06,
+            profit=36.06,
+        )],
+        source_kind="html",
+    )
+    assert statement_balance is not None
+    assert statement_balance["balance"] == pytest.approx(50036.06)
+    assert sum(float(row["net_profit"]) for row in rows) == pytest.approx(36.06)
+    historical_cashflows = {
+        "PEPPERSTONE DEMO": [{
+            "date": "2022-12-16T00:05:04+10:00",
+            "new_balance": 0.0,
+            "currency": "AUD",
+        }]
+    }
+    first = master_service._build_journal_balance_timelines(
+        rows, historical_cashflows, [statement_balance]
+    )
+    selected = first["balances"][0]
+    assert selected["balance"] == pytest.approx(50036.06)
+    assert selected["balance_source"] == "pepperstone_mt5_statement_balance"
+    assert selected["account_identity"] == statement_balance["account_identity"]
+    assert selected["timeline_as_of"] == statement_balance["as_of"]
+
+    persisted = _tiny_stats2_pepperstone_roundtrip(tmp_path, selected)
+    assert persisted["balance"] == pytest.approx(50036.06)
+    assert persisted["balance_source"] == "pepperstone_mt5_statement_balance"
+    assert persisted["account_identity"] == statement_balance["account_identity"]
+    assert persisted["timeline_as_of"] == statement_balance["as_of"]
+    verification = master_service._verify_imported_account_balance_snapshot(
+        {"balances": [persisted]},
+        statement_balance,
+        persisted_pepperstone_statement_balance=True,
+    )
+    assert verification["ok"] is True
+    refreshed = master_service._build_journal_balance_timelines(
+        rows,
+        historical_cashflows,
+        [
+            persisted,
+            {
+                **statement_balance,
+                "balance": 1000.0,
+                "as_of": "2026-09-01T00:00:00",
+            },
+        ],
+    )
+    second = refreshed["balances"][0]
+    assert second["balance"] == pytest.approx(50036.06)
+    assert second["balance_source"] == "pepperstone_mt5_statement_balance"
+    assert second["timeline_as_of"] == statement_balance["as_of"]
+
+
+def test_pepperstone_demo_replacement_keeps_current_identity_and_old_history_separate():
+    old_rows, old_balance = master_service._parse_pepperstone_mt5_rows(
+        [_pepperstone_mt5_balance_rows(
+            login="600001",
+            period="2026.08.01 00:00:00 - 2026.08.01 17:33:00",
+            final_balance=0.0,
+            profit=0.0,
+        )],
+        source_kind="html",
+    )
+    new_rows, new_balance = master_service._parse_pepperstone_mt5_rows(
+        [_pepperstone_mt5_balance_rows(
+            login="600002",
+            period="2026.09.07 00:00:00 - 2026.09.07 17:33:00",
+            final_balance=50036.06,
+            profit=36.06,
+        )],
+        source_kind="html",
+    )
+    assert old_balance is not None and new_balance is not None
+    assert old_balance["account_identity"] != new_balance["account_identity"]
+    assert {row["id"] for row in old_rows}.isdisjoint({row["id"] for row in new_rows})
+    selected = master_service._build_journal_balance_timelines(
+        old_rows + new_rows,
+        {},
+        [new_balance, old_balance, old_balance],
+    )["balances"][0]
+    assert selected["balance"] == pytest.approx(50036.06)
+    assert selected["account_identity"] == new_balance["account_identity"]
+    assert selected["timeline_as_of"] == new_balance["as_of"]
+
+
+def test_pepperstone_newer_lower_and_zero_balances_remain_valid():
+    _rows, statement_balance = master_service._parse_pepperstone_mt5_rows(
+        [_pepperstone_mt5_balance_rows(
+            login="600003",
+            period="2026.09.07 00:00:00 - 2026.09.07 17:33:00",
+            final_balance=50036.06,
+            profit=36.06,
+        )],
+        source_kind="html",
+    )
+    assert statement_balance is not None
+    for expected_balance in (1000.0, 0.0):
+        newer = {
+            **statement_balance,
+            "balance": expected_balance,
+            "as_of": "2026-09-08T17:33:00",
+        }
+        selected = master_service._build_journal_balance_timelines(
+            [], {}, [newer, statement_balance]
+        )["balances"][0]
+        assert selected["balance"] == pytest.approx(expected_balance)
+        assert selected["timeline_as_of"] == newer["as_of"]
 
 
 def test_pepperstone_mt5_import_is_idempotent_preserves_manual_fields_and_applies_balance(

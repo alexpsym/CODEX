@@ -691,11 +691,12 @@ vm.runInContext(source, context, { filename: 'trading_journal_actions.js' });
     subprocess.run([node, "-e", harness, str(ACTIONS_JS_PATH)], check=True)
 
 
-def test_pepperstone_html_currency_prompt_and_explicit_submission() -> None:
+def test_pepperstone_html_upload_has_no_currency_selector_or_prompt() -> None:
     service = SERVICE_PATH.read_text(encoding="utf-8")
     actions = ACTIONS_JS_PATH.read_text(encoding="utf-8")
-    assert 'id="journal-statement-currency"' in service
-    assert 'statement_currency' in actions
+    assert 'id="journal-statement-currency"' not in service
+    assert 'statement_currency' not in actions
+    assert 'requires_statement_currency' not in actions
     node = shutil.which("node")
     assert node, "node is required for the focused journal-actions harness"
     harness = r"""
@@ -708,19 +709,18 @@ const elements = {
   'open-journal-btn': element('open-journal-btn'), 'import-journal-btn': element('import-journal-btn'),
   'journal-resync-btn': element('journal-resync-btn'), 'journal-file-input': element('journal-file-input'),
   'journal-import-drop-zone': element('journal-import-drop-zone'), 'crypto-monthly-pnl-btn': element('crypto-monthly-pnl-btn'),
-  'bybit-demo-balance-adjustment-btn': element('bybit-demo-balance-adjustment-btn'), 'journal-account-mode': element('journal-account-mode'),
-  'journal-statement-currency': element('journal-statement-currency'), 'journal-actions-status': element('journal-actions-status'),
+   'bybit-demo-balance-adjustment-btn': element('bybit-demo-balance-adjustment-btn'), 'journal-account-mode': element('journal-account-mode'),
+   'journal-actions-status': element('journal-actions-status'),
 };
 const file = { name: 'statement.html', slice: () => ({ text: async () => { throw new Error('HTML must not be read as CSV'); } }) };
 class FormData { constructor() { this.values = {}; } append(key, value) { this.values[key] = value; } }
-let calls = 0; const posted = [];
+let calls = 0; let posted = null;
 const context = {
   console, FormData, document: { getElementById: (id) => elements[id] || element(id), createElement: (tag) => element(tag) },
   Date: { now: () => 1000 }, setInterval: () => 1, clearInterval: () => {}, setTimeout: () => 2, clearTimeout: () => {},
   fetch: async (url, options = {}) => {
     if (url !== '/api/trading-journal/import-file') throw new Error('unexpected URL ' + url);
-    calls += 1; posted.push(options.body.values);
-    if (calls === 1) return { ok: false, json: async () => ({ ok: false, requires_statement_currency: true, message: 'Select the Pepperstone HTML account currency and import the file again.' }) };
+    calls += 1; posted = options.body.values;
     return { ok: true, json: async () => ({ ok: true, message: 'Import complete.', rows_parsed: 1, rows_upserted: 1, warnings: [], missing_row_ids: [] }) };
   },
 };
@@ -728,14 +728,9 @@ context.window = context; context.globalThis = context;
 vm.createContext(context); vm.runInContext(source, context, { filename: 'trading_journal_actions.js' });
 (async () => {
   await listeners['journal-import-drop-zone:drop']({ preventDefault: () => {}, dataTransfer: { files: [file] } });
-  if (calls !== 1) throw new Error('missing-currency response must not auto-resubmit');
-  if (Object.prototype.hasOwnProperty.call(posted[0], 'statement_currency')) throw new Error('blank currency must not be sent');
-  if (elements['journal-statement-currency'].focusCount !== 1) throw new Error('currency selector was not focused');
-  elements['journal-statement-currency'].value = 'USD';
-  await listeners['journal-import-drop-zone:drop']({ preventDefault: () => {}, dataTransfer: { files: [file] } });
-  if (calls !== 2) throw new Error('each user import must make one request');
-  if (posted[1].statement_currency !== 'USD') throw new Error('explicit currency missing from HTML request');
-  if (elements['journal-statement-currency'].value !== '') throw new Error('currency selection must clear after completion');
+   if (calls !== 1) throw new Error('HTML upload must make exactly one request');
+   if (Object.prototype.hasOwnProperty.call(posted, 'statement_currency')) throw new Error('currency override must not be sent');
+   if (!elements['journal-actions-status'].textContent.includes('Import complete.')) throw new Error('successful HTML import status missing');
 })();
 """
     subprocess.run([node, "-e", harness, str(ACTIONS_JS_PATH)], check=True)

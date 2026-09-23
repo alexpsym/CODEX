@@ -5806,11 +5806,12 @@ def _read_account_balance_source_metadata(
         return {
             "source": str(parsed.get("source") or "").strip(),
             "timeline_as_of": str(parsed.get("timeline_as_of") or "").strip(),
+            "account_identity": str(parsed.get("account_identity") or "").strip(),
         }
-    return {"source": raw, "timeline_as_of": ""}
+    return {"source": raw, "timeline_as_of": "", "account_identity": ""}
 
 
-def _account_balance_timeline_as_of(value: Any) -> str:
+def _account_balance_timeline_as_of(value: Any, *, preserve_offset: bool = False) -> str:
     if value in (None, ""):
         return ""
     if isinstance(value, datetime):
@@ -5823,6 +5824,8 @@ def _account_balance_timeline_as_of(value: Any) -> str:
         parsed = datetime.fromisoformat(normalized)
     except Exception:
         return text
+    if preserve_offset and parsed.tzinfo is not None:
+        return parsed.isoformat()
     return parsed.replace(tzinfo=None).isoformat()
 
 
@@ -5831,17 +5834,25 @@ def _write_account_balance_source_metadata(
     account_label: Any,
     source: Any,
     as_of: Any = None,
+    account_identity: Any = None,
 ) -> None:
     name = _account_balance_source_defined_name(account_label)
     wb.defined_names.pop(name, None)
     clean_source = str(source or "").strip()
     if not clean_source:
         return
+    preserve_offset = clean_source.strip().lower() == "pepperstone_mt5_statement_balance"
+    metadata_payload = {
+        "source": clean_source,
+        "timeline_as_of": _account_balance_timeline_as_of(
+            as_of, preserve_offset=preserve_offset
+        ),
+    }
+    clean_identity = str(account_identity or "").strip()
+    if clean_identity:
+        metadata_payload["account_identity"] = clean_identity
     metadata = json.dumps(
-        {
-            "source": clean_source,
-            "timeline_as_of": _account_balance_timeline_as_of(as_of),
-        },
+        metadata_payload,
         separators=(",", ":"),
         ensure_ascii=True,
     )
@@ -10616,6 +10627,7 @@ def build_master_journal_workbook(
             account_label,
             rec.get("balance_source") or rec.get("source"),
             rec.get("as_of"),
+            rec.get("account_identity") or rec.get("account_fingerprint"),
         )
         detail.cell(target_row, 2).number_format = "#,##0.0000000000" if _is_crypto_currency(currency) else "#,##0.00"
         detail.cell(target_row, 3, currency)
@@ -15284,6 +15296,8 @@ def _read_stats2_account_balances(wb) -> List[Dict[str, Any]]:
             "source": balance_source,
             "balance_source": balance_source,
         }
+        if balance_metadata.get("account_identity"):
+            payload["account_identity"] = balance_metadata["account_identity"]
         if "as_of" in col_map:
             payload["as_of"] = _excel_datetime_to_iso(ws.cell(row, col_map["as_of"]).value)
         if balance_metadata.get("timeline_as_of"):
@@ -17638,6 +17652,7 @@ def update_master_journal_workbook_data_only(
                 label,
                 b.get("balance_source") or b.get("source"),
                 b.get("as_of"),
+                b.get("account_identity") or b.get("account_fingerprint"),
             )
             curr = str(b.get("currency") or "").strip()
             existing_fmt = str(detail_dash.cell(row, col_map["balance"]).number_format or "")
@@ -18805,7 +18820,15 @@ def _incremental_update_account_balance(
     if as_of not in (None, "") and "as_of" in col_map:
         ws.cell(row, col_map["as_of"]).value = str(as_of)
     source = account_balance.get("balance_source") or account_balance.get("source")
-    _write_account_balance_source_metadata(wb, label, source, as_of)
+    _write_account_balance_source_metadata(
+        wb,
+        label,
+        source,
+        as_of,
+        account_balance.get("account_identity")
+        or account_balance.get("broker_account_id")
+        or account_balance.get("account_fingerprint"),
+    )
     return {
         "label": label,
         "row": row,

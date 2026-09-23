@@ -9768,6 +9768,18 @@ def _build_journal_balance_timelines(
                 return value
         return ""
 
+    def _pepperstone_seed_identity(seed: Dict[str, object]) -> str:
+        raw_refs = seed.get("raw_refs") if isinstance(seed.get("raw_refs"), dict) else {}
+        for value in (
+            seed.get("account_identity"),
+            seed.get("account_fingerprint"),
+            raw_refs.get("account_fingerprint"),
+        ):
+            text = str(value or "").strip()
+            if text:
+                return text
+        return ""
+
     def _oanda_seed_timestamp(seed: Dict[str, object], source: str, as_of: object) -> float:
         if source == "oanda_transaction_export_balance":
             parsed = _parse_persisted_oanda_export_balance_timestamp(as_of)
@@ -9789,7 +9801,7 @@ def _build_journal_balance_timelines(
         bucket["excel_balance_timeline_as_of"] = as_of
         bucket["excel_balance_ts"] = timestamp
         bucket["excel_balance_authoritative"] = _is_authoritative_account_balance_seed(seed)
-        identity = _oanda_seed_identity(seed)
+        identity = _oanda_seed_identity(seed) or _pepperstone_seed_identity(seed)
         if identity:
             bucket["excel_balance_identity"] = identity
 
@@ -9838,6 +9850,47 @@ def _build_journal_balance_timelines(
             visible_as_of = raw_refs.get("transaction_date")
         excel_as_of = bal.get("timeline_as_of") or visible_as_of
         bucket = by_account[key]
+        if key.startswith("PEPPERSTONE "):
+            issues = bucket.setdefault("pepperstone_balance_seed_issues", [])
+            if not isinstance(issues, list):
+                issues = []
+                bucket["pepperstone_balance_seed_issues"] = issues
+            candidate_balance = _to_float(bal.get("balance"))
+            candidate_currency = str(bal.get("currency") or "").strip().upper()
+            candidate_identity = _pepperstone_seed_identity(bal)
+            candidate_ts = _to_ts(excel_as_of)
+            if candidate_balance is None or not _is_authoritative_account_balance_seed(bal):
+                issues.append("rejected Pepperstone balance seed without authoritative numeric balance")
+                continue
+            if candidate_currency != "AUD":
+                issues.append("rejected conflicting Pepperstone currency")
+                continue
+            existing_balance = _to_float(bucket.get("excel_balance"))
+            existing_currency = str(bucket.get("excel_currency") or "").strip().upper()
+            existing_identity = str(bucket.get("excel_balance_identity") or "").strip()
+            existing_ts = float(bucket.get("excel_balance_ts") or float("-inf"))
+            if existing_balance is not None:
+                if existing_currency and existing_currency != candidate_currency:
+                    issues.append("rejected conflicting Pepperstone currency")
+                    continue
+                if not math.isfinite(candidate_ts):
+                    issues.append("rejected Pepperstone balance seed with missing or invalid timestamp")
+                    continue
+                if existing_identity and candidate_identity and existing_identity != candidate_identity:
+                    if not math.isfinite(existing_ts) or candidate_ts <= existing_ts:
+                        issues.append("retained newer Pepperstone account identity")
+                        continue
+                elif existing_identity and not candidate_identity:
+                    issues.append("rejected Pepperstone balance seed without account identity")
+                    continue
+                elif math.isfinite(existing_ts) and candidate_ts <= existing_ts:
+                    issues.append("retained newer or equal Pepperstone balance seed")
+                    continue
+            elif not math.isfinite(candidate_ts):
+                issues.append("retained Pepperstone balance seed with unresolved timestamp")
+            _install_balance_seed(bucket, bal, as_of=excel_as_of, timestamp=candidate_ts)
+            continue
+
         if not key.startswith("OANDA "):
             bucket["excel_balance"] = _to_float(bal.get("balance"))
             bucket["excel_label"] = label
@@ -10073,7 +10126,7 @@ def _build_journal_balance_timelines(
                         bucket.get("excel_balance_timeline_as_of")
                         or bucket.get("excel_balance_as_of")
                     )
-                    if account_key.startswith("OANDA ")
+                    if account_key.startswith(("OANDA ", "PEPPERSTONE "))
                     else bucket.get("excel_balance_as_of")
                 )
         latest_authoritative_at = selected_authoritative_as_of
@@ -10152,7 +10205,13 @@ def _build_journal_balance_timelines(
                 "stale_cashflow_overridden": bool(events and display_balance is not None and balance_source != "cashflow_anchor_plus_trades" and _to_ts(events[-1].get("date")) <= selected_authoritative_ts),
             }
         if (
-            account_key.startswith("OANDA ")
+            (
+                account_key.startswith("OANDA ")
+                or (
+                    account_key.startswith("PEPPERSTONE ")
+                    and balance_source == "pepperstone_mt5_statement_balance"
+                )
+            )
             and balance_source == selected_authoritative_source
             and selected_authoritative_as_of not in (None, "")
         ):
@@ -10176,6 +10235,7 @@ def _build_journal_balance_timelines(
             "authoritative_balance_source": authoritative_balance_source if authoritative_balance_used is not None else (selected_authoritative_source if balance_source != "cashflow_anchor_plus_trades" else None),
             "selected_balance_observation_at": selected_authoritative_as_of,
             "oanda_balance_seed_issues": list(bucket.get("oanda_balance_seed_issues") or []),
+            "pepperstone_balance_seed_issues": list(bucket.get("pepperstone_balance_seed_issues") or []),
             "warning": "No cashflow or authoritative trade balance anchor found." if missing_balance else "",
         }
     balances = sorted(balances, key=lambda x: str(x.get("label") or x.get("account") or ""))
@@ -20123,21 +20183,11 @@ def _mt5_account_fingerprint(server: str, login: str) -> str:
     return hashlib.sha256(identity.encode("utf-8")).hexdigest()[:20]
 
 
-PEPPERSTONE_STATEMENT_CURRENCIES = frozenset({
-    "AUD", "CAD", "CHF", "EUR", "GBP", "HKD", "JPY", "NZD", "SGD", "USD",
-})
-
-
-class _PepperstoneStatementCurrencyRequired(ValueError):
-    pass
-
-
 def _normalize_pepperstone_statement_currency(value: object) -> str:
     currency = str(value or "").strip().upper()
-    if currency and currency not in PEPPERSTONE_STATEMENT_CURRENCIES:
+    if currency and currency != "AUD":
         raise ValueError(
-            "statement_currency must be one of: "
-            + ", ".join(sorted(PEPPERSTONE_STATEMENT_CURRENCIES))
+            "Pepperstone MT5 statement currency must be AUD; non-AUD overrides are not supported."
         )
     return currency
 
@@ -20177,15 +20227,13 @@ def _mt5_statement_metadata(
     report_currency = _mt5_metadata_value(rows, {"currency", "deposit currency"}).upper()
     if report_currency and not re.fullmatch(r"[A-Z]{3,5}", report_currency):
         raise ValueError("The Pepperstone MT5 report deposit currency is invalid.")
-    if report_currency and explicit_currency and report_currency != explicit_currency:
+    if report_currency and report_currency != "AUD":
         raise ValueError(
-            "The selected Pepperstone HTML account currency conflicts with the report currency."
+            "The Pepperstone MT5 report currency conflicts with the required AUD account currency."
         )
-    currency = report_currency or explicit_currency
-    if not currency:
-        raise _PepperstoneStatementCurrencyRequired(
-            "The Pepperstone MT5 report does not include an account currency."
-        )
+    # Pepperstone accounts in this journal are AUD. Native MT5 reports may
+    # omit the Currency row, so absence is not an ambiguous import condition.
+    currency = "AUD"
     return {
         "server": server,
         "login": login,
@@ -20587,6 +20635,7 @@ def _parse_pepperstone_mt5_rows(
             "balance": balance_value,
             "currency": metadata["currency"],
             "as_of": _mt5_period_as_of(metadata.get("period") or ""),
+            "account_identity": metadata["fingerprint"],
             "raw_refs": {
                 "account_fingerprint": metadata["fingerprint"],
                 "broker_server": metadata["server"],
@@ -39221,6 +39270,16 @@ def _is_oanda_transaction_export_balance(balance: object) -> bool:
     )
 
 
+def _is_pepperstone_mt5_statement_balance(balance: object) -> bool:
+    if not isinstance(balance, dict):
+        return False
+    return any(
+        str(balance.get(field) or "").strip().lower()
+        == "pepperstone_mt5_statement_balance"
+        for field in ("source", "balance_source")
+    )
+
+
 def _parse_persisted_oanda_export_balance_timestamp(value: object) -> datetime | None:
     """Parse OANDA balance metadata, whose native timeline value is Brisbane wall time."""
     if value in (None, ""):
@@ -39268,6 +39327,12 @@ def _imported_account_balance_verification_failure_detail(
             f"expected={verification.get('expected_source')} "
             f"actual={verification.get('actual_source')}"
         )
+    if not bool(verification.get("identity_matches")):
+        failures.append(
+            "account identity "
+            f"expected={verification.get('expected_account_identity')} "
+            f"actual={verification.get('actual_account_identity')}"
+        )
     if not bool(verification.get("freshness_matches")):
         failures.append(
             "timestamp "
@@ -39287,6 +39352,7 @@ def _verify_imported_account_balance_snapshot(
     *,
     allow_equivalent_authoritative_balance: bool = False,
     persisted_oanda_export_balance: bool = False,
+    persisted_pepperstone_statement_balance: bool = False,
 ) -> Dict[str, object]:
     if not isinstance(expected_balance, dict):
         return {
@@ -39328,6 +39394,29 @@ def _verify_imported_account_balance_snapshot(
         or (target or {}).get("source")
         or ""
     ).strip()
+    expected_raw_refs = (
+        expected_balance.get("raw_refs")
+        if isinstance(expected_balance.get("raw_refs"), dict)
+        else {}
+    )
+    expected_identity = str(
+        expected_balance.get("account_identity")
+        or expected_balance.get("account_fingerprint")
+        or expected_raw_refs.get("account_fingerprint")
+        or ""
+    ).strip()
+    actual_raw_refs = (
+        (target or {}).get("raw_refs")
+        if isinstance((target or {}).get("raw_refs"), dict)
+        else {}
+    )
+    actual_identity = str(
+        (target or {}).get("account_identity")
+        or (target or {}).get("account_fingerprint")
+        or actual_raw_refs.get("account_fingerprint")
+        or ""
+    ).strip()
+    identity_matches = not expected_identity or actual_identity == expected_identity
     expected_currency = str(expected_balance.get("currency") or "").strip().upper()
     actual_currency = str((target or {}).get("currency") or "").strip().upper()
     currency_matches = not expected_currency or actual_currency == expected_currency
@@ -39347,7 +39436,10 @@ def _verify_imported_account_balance_snapshot(
     source_matches = not expected_source or actual_source_key == expected_source_key
     actual_visible_as_of = (target or {}).get("as_of")
     actual_timeline_as_of = (target or {}).get("timeline_as_of")
-    if persisted_oanda_export_balance and actual_timeline_as_of not in (None, ""):
+    if (
+        (persisted_oanda_export_balance or persisted_pepperstone_statement_balance)
+        and actual_timeline_as_of not in (None, "")
+    ):
         actual_as_of = actual_timeline_as_of
         actual_as_of_field = "timeline_as_of"
     else:
@@ -39408,6 +39500,7 @@ def _verify_imported_account_balance_snapshot(
         and value_matches
         and source_matches
         and currency_matches
+        and identity_matches
         and freshness_matches
     )
     return {
@@ -39420,6 +39513,8 @@ def _verify_imported_account_balance_snapshot(
         "actual_balance": actual_value,
         "expected_source": expected_source,
         "actual_source": actual_source,
+        "expected_account_identity": expected_identity,
+        "actual_account_identity": actual_identity,
         "expected_as_of": expected_as_of,
         "actual_as_of": actual_as_of,
         "actual_as_of_field": actual_as_of_field,
@@ -39429,11 +39524,13 @@ def _verify_imported_account_balance_snapshot(
         "actual_as_of_utc": actual_as_of_dt.isoformat() if actual_as_of_dt else None,
         "timestamp_failure": timestamp_failure,
         "persisted_oanda_export_balance": persisted_oanda_export_balance,
+        "persisted_pepperstone_statement_balance": persisted_pepperstone_statement_balance,
         "allow_equivalent_authoritative_balance": allow_equivalent_authoritative_balance,
         "balance_tolerance": balance_tolerance,
         "value_matches": value_matches,
         "source_matches": source_matches,
         "currency_matches": currency_matches,
+        "identity_matches": identity_matches,
         "expected_currency": expected_currency,
         "actual_currency": actual_currency,
         "as_of_not_older": as_of_not_older,
@@ -39542,7 +39639,6 @@ body{margin:0;background:#0b1220;color:#e2e8f0;font-family:Inter,system-ui,sans-
   <button id="open-journal-btn">Open workbook</button><button id="import-journal-btn">Import</button><button id="journal-resync-btn">Resync</button>
   <div id="journal-import-drop-zone" class="drop-zone">Drop .xlsx/.xlsm/.xls/.csv or MT5 .html/.htm import files here<br/><span style="font-size:12px">or click Import to choose a file</span></div>
   <label style="font-size:12px;color:#94a3b8">Bybit CSV account <select id="journal-account-mode"><option value="" selected disabled>Select Demo or Live</option><option value="demo">Demo</option><option value="live">Live</option></select></label>
-  <label style="font-size:12px;color:#94a3b8">Pepperstone HTML account currency <select id="journal-statement-currency"><option value="" selected>Use report currency</option>{{PEPPERSTONE_STATEMENT_CURRENCY_OPTIONS}}</select></label>
   <button id="crypto-monthly-pnl-btn">Crypto Monthly P&amp;L</button><button id="bybit-demo-balance-adjustment-btn">Bybit Demo Balance Adjustment</button>
   <input id="journal-file-input" type="file" accept=".xlsx,.xlsm,.xls,.csv,.html,.htm" hidden/><div id="journal-actions-status" class="status"></div>
 </section>
@@ -39555,13 +39651,6 @@ async def trading_journal_actions_workspace() -> HTMLResponse:
     return HTMLResponse(
         TRADING_JOURNAL_ACTIONS_TEMPLATE
         .replace("{{TRADING_JOURNAL_ACTIONS_JS_VERSION}}", actions_js_version)
-        .replace(
-            "{{PEPPERSTONE_STATEMENT_CURRENCY_OPTIONS}}",
-            "".join(
-                f'<option value="{currency}">{currency}</option>'
-                for currency in sorted(PEPPERSTONE_STATEMENT_CURRENCIES)
-            ),
-        )
     )
 
 
@@ -39638,18 +39727,6 @@ def _import_uploaded_trading_journal_file(
                 payload,
                 statement_currency=normalized_statement_currency or None,
             )
-        except _PepperstoneStatementCurrencyRequired as exc:
-            return {
-                "ok": False,
-                "status_code": 422,
-                "message": f"{exc} Select the Pepperstone HTML account currency and import the file again.",
-                "uploaded_name": name,
-                "file_type": suffix,
-                "errors": ["missing_statement_currency"],
-                "requires_statement_currency": True,
-                "statement_currency_options": sorted(PEPPERSTONE_STATEMENT_CURRENCIES),
-                "warnings": [],
-            }
         except Exception as exc:
             return {
                 "ok": False,
@@ -41108,7 +41185,14 @@ def _import_uploaded_trading_journal_file(
                         )
                     },
                     oanda_transaction_export_balance,
-                    persisted_oanda_export_balance=True,
+                    persisted_oanda_export_balance=_is_oanda_transaction_export_balance(
+                        oanda_transaction_export_balance
+                    ),
+                    persisted_pepperstone_statement_balance=(
+                        _is_pepperstone_mt5_statement_balance(
+                            oanda_transaction_export_balance
+                        )
+                    ),
                 )
                 if not bool(workbook_balance_verification.get("ok")):
                     raise RuntimeError(
