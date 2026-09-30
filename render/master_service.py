@@ -9779,6 +9779,16 @@ def _build_journal_balance_timelines(
         source = str(seed.get("balance_source") or seed.get("source") or "").strip().lower()
         if source in {"oanda_transaction_export_balance", "pepperstone_mt5_statement_balance", "oanda_account_summary", "broker_account_summary", "account_summary"}:
             return True
+        if (
+            source == "trade_timeline"
+            and str(seed.get("balance_evidence_source") or "").strip().lower()
+            == "pepperstone_mt5_deal_balance"
+            and str(seed.get("account_label") or seed.get("account") or "").strip().upper().startswith("PEPPERSTONE ")
+        ):
+            # A native MT5 Deals checkpoint can be the selected timeline
+            # balance. Its separately retained provenance prevents generic
+            # calculated timelines from gaining statement authority.
+            return True
         if source in {"excel", "local_excel"}:
             raw_refs = seed.get("raw_refs") if isinstance(seed.get("raw_refs"), dict) else {}
             refs_text = " ".join(str(raw_refs.get(k) or "") for k in ("transaction_type", "details", "sheet", "workbook"))
@@ -9826,6 +9836,9 @@ def _build_journal_balance_timelines(
         bucket["excel_balance_timeline_as_of"] = as_of
         bucket["excel_balance_ts"] = timestamp
         bucket["excel_balance_authoritative"] = _is_authoritative_account_balance_seed(seed)
+        bucket["excel_balance_evidence_source"] = str(
+            seed.get("balance_evidence_source") or ""
+        ).strip()
         identity = _oanda_seed_identity(seed) or _pepperstone_seed_identity(seed)
         if identity:
             bucket["excel_balance_identity"] = identity
@@ -10010,6 +10023,8 @@ def _build_journal_balance_timelines(
         segment_running: Dict[int, float] = {}
         last_known_balance: Optional[float] = None
         last_known_ts = float("-inf")
+        last_known_evidence_source: Optional[str] = None
+        last_known_identity: Optional[str] = None
 
         for row_idx in trade_indices:
             row = out_rows[row_idx]
@@ -10033,6 +10048,10 @@ def _build_journal_balance_timelines(
                     )
                     last_known_balance = authoritative_after
                     last_known_ts = trade_ts
+                    last_known_evidence_source = str(
+                        row.get("balance_after_trade_source") or ""
+                    ).strip()
+                    last_known_identity = _pepperstone_account_identity(row)
                     continue
                 if anchor_idx >= 0:
                     if anchor_idx not in segment_running:
@@ -10064,6 +10083,10 @@ def _build_journal_balance_timelines(
                 )
                 last_known_balance = authoritative_after
                 last_known_ts = trade_ts
+                last_known_evidence_source = str(
+                    row.get("balance_after_trade_source") or ""
+                ).strip()
+                last_known_identity = _pepperstone_account_identity(row)
                 continue
 
             if last_known_balance is not None:
@@ -10154,6 +10177,7 @@ def _build_journal_balance_timelines(
         latest_authoritative_at: Optional[object] = None
         selected_authoritative_balance: Optional[float] = latest_trade_authoritative_balance
         selected_authoritative_source: Optional[str] = "authoritative_trade_balance" if latest_trade_authoritative_balance is not None else None
+        selected_authoritative_evidence_source: Optional[str] = None
         selected_authoritative_ts = latest_trade_authoritative_ts if latest_trade_authoritative_balance is not None else float("-inf")
         selected_authoritative_as_of: Optional[object] = latest_trade_authoritative_as_of
         if authoritative_seed_balance is not None:
@@ -10166,6 +10190,9 @@ def _build_journal_balance_timelines(
             ):
                 selected_authoritative_balance = authoritative_seed_balance
                 selected_authoritative_source = authoritative_seed_source
+                selected_authoritative_evidence_source = str(
+                    bucket.get("excel_balance_evidence_source") or ""
+                ).strip() or None
                 selected_authoritative_ts = authoritative_seed_ts
                 selected_authoritative_as_of = (
                     (
@@ -10268,6 +10295,16 @@ def _build_journal_balance_timelines(
         elif is_pepperstone_account and selected_pepperstone_identity:
             # The selected checkpoint was derived only from this fingerprint.
             balance_payload["account_identity"] = selected_pepperstone_identity
+        elif is_pepperstone_account and last_known_identity:
+            balance_payload["account_identity"] = last_known_identity
+        if is_pepperstone_account:
+            evidence_source = (
+                last_known_evidence_source
+                if balance_source == "trade_timeline"
+                else selected_authoritative_evidence_source
+            )
+            if evidence_source:
+                balance_payload["balance_evidence_source"] = evidence_source
         balances.append(balance_payload)
         diagnostics[account_key] = {
             "account_key": account_key,
@@ -39677,6 +39714,12 @@ def _verify_imported_account_balance_snapshot(
     expected_source_key = re.sub(r"[^a-z0-9]+", "_", expected_source.lower()).strip("_")
     actual_source_key = re.sub(r"[^a-z0-9]+", "_", actual_source.lower()).strip("_")
     source_matches = not expected_source or actual_source_key == expected_source_key
+    actual_evidence_source = str(
+        (target or {}).get("balance_evidence_source") or ""
+    ).strip()
+    actual_evidence_source_key = re.sub(
+        r"[^a-z0-9]+", "_", actual_evidence_source.lower()
+    ).strip("_")
     actual_visible_as_of = (target or {}).get("as_of")
     actual_timeline_as_of = (target or {}).get("timeline_as_of")
     if (
@@ -39735,6 +39778,18 @@ def _verify_imported_account_balance_snapshot(
                 "oanda_transaction_export_balance",
             }
         )
+    if (
+        not source_matches
+        and expected_source_key == "pepperstone_mt5_statement_balance"
+        and _norm_account_key(expected_label).startswith("PEPPERSTONE ")
+    ):
+        # A selected timeline is equivalent only when it retained the native
+        # MT5 Deals account checkpoint. Generic calculated trade timelines
+        # remain insufficient, even when their amount happens to match.
+        source_matches = bool(
+            actual_source_key == "trade_timeline"
+            and actual_evidence_source_key == "pepperstone_mt5_deal_balance"
+        )
     freshness_matches = bool(
         expected_as_of in (None, "") or as_of_not_older
     )
@@ -39756,6 +39811,7 @@ def _verify_imported_account_balance_snapshot(
         "actual_balance": actual_value,
         "expected_source": expected_source,
         "actual_source": actual_source,
+        "actual_balance_evidence_source": actual_evidence_source,
         "expected_account_identity": expected_identity,
         "actual_account_identity": actual_identity,
         "expected_as_of": expected_as_of,
@@ -41369,10 +41425,9 @@ def _import_uploaded_trading_journal_file(
             if bool(oanda_transaction_export_balance) and not bool(pending_balance_verification.get("ok")):
                 raise RuntimeError(
                     "Authoritative import snapshot did not apply parsed account balance: "
-                    f"expected={pending_balance_verification.get('expected_balance')} "
-                    f"actual={pending_balance_verification.get('actual_balance')} "
-                    f"expected_source={pending_balance_verification.get('expected_source')} "
-                    f"actual_source={pending_balance_verification.get('actual_source')}"
+                    + _imported_account_balance_verification_failure_detail(
+                        pending_balance_verification
+                    )
                 )
             timings["snapshot_build"] = round(time.perf_counter() - t_snap, 6)
             APP_LOGGER.info("trading_journal_import_stage_done stage=snapshot_build elapsed=%.6fs upload=%s mode=authoritative_workbook", timings["snapshot_build"], name)

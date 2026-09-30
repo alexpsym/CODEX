@@ -594,6 +594,106 @@ def test_pepperstone_statement_balance_survives_metadata_roundtrip_and_refresh(t
     assert second["timeline_as_of"] == statement_balance["as_of"]
 
 
+def test_pepperstone_native_deal_checkpoint_verifies_statement_balance_through_metadata(
+    tmp_path: Path,
+):
+    # A date-only report end is less precise than the final native Deals
+    # checkpoint. The real selector must therefore expose trade_timeline, not
+    # a fabricated statement source, while retaining its native evidence.
+    report_rows = copy.deepcopy(_pepperstone_mt5_deals_with_orders_rows())
+    for row in report_rows:
+        if row and row[0] == "Period":
+            row[1] = "2026.09.30"
+    rows, statement_balance = master_service._parse_pepperstone_mt5_rows(
+        [report_rows], source_kind="html"
+    )
+    assert statement_balance is not None
+    first = master_service._build_journal_balance_timelines(
+        rows, {}, [statement_balance]
+    )
+    selected = first["balances"][0]
+    assert selected["balance"] == pytest.approx(50036.06)
+    assert selected["balance_source"] == "trade_timeline"
+    assert selected["balance_evidence_source"] == "pepperstone_mt5_deal_balance"
+    assert selected["account_identity"] == statement_balance["account_identity"]
+    assert selected["as_of"] == rows[-1]["close_time"]
+    prewrite = master_service._verify_imported_account_balance_snapshot(
+        {"balances": [selected]}, statement_balance
+    )
+    assert prewrite["ok"] is True
+    assert prewrite["actual_source"] == "trade_timeline"
+    assert prewrite["actual_balance_evidence_source"] == "pepperstone_mt5_deal_balance"
+
+    persisted = _tiny_stats2_pepperstone_roundtrip(tmp_path, selected)
+    assert persisted["balance"] == pytest.approx(50036.06)
+    assert persisted["balance_source"] == "trade_timeline"
+    assert persisted["balance_evidence_source"] == "pepperstone_mt5_deal_balance"
+    assert persisted["account_identity"] == statement_balance["account_identity"]
+    assert persisted["timeline_as_of"] == rows[-1]["close_time"]
+    reread = master_service._verify_imported_account_balance_snapshot(
+        {"balances": [persisted]},
+        statement_balance,
+        persisted_pepperstone_statement_balance=True,
+    )
+    assert reread["ok"] is True
+
+    refreshed = master_service._build_journal_balance_timelines(rows, {}, [persisted])
+    second = refreshed["balances"][0]
+    assert second["balance"] == pytest.approx(50036.06)
+    assert second["balance_source"] == "trade_timeline"
+    assert second["balance_evidence_source"] == "pepperstone_mt5_deal_balance"
+    assert second["account_identity"] == statement_balance["account_identity"]
+    assert second["as_of"] == rows[-1]["close_time"]
+    assert master_service._verify_imported_account_balance_snapshot(
+        {"balances": [second]}, statement_balance
+    )["ok"] is True
+
+
+@pytest.mark.parametrize(
+    ("case", "mutate", "failed_dimension"),
+    [
+        (
+            "generic_timeline",
+            lambda actual: actual.pop("balance_evidence_source", None),
+            "provenance",
+        ),
+        (
+            "conflicting_fingerprint",
+            lambda actual: actual.update({"account_identity": "pepperstone_mt5:other"}),
+            "account identity",
+        ),
+        (
+            "older_timestamp",
+            lambda actual: actual.update({"as_of": "2026-09-29T23:59:59"}),
+            "timestamp reason=older",
+        ),
+    ],
+)
+def test_pepperstone_statement_verification_rejects_unproved_timeline_evidence(
+    case: str, mutate, failed_dimension: str,
+):
+    report_rows = copy.deepcopy(_pepperstone_mt5_deals_with_orders_rows())
+    for row in report_rows:
+        if row and row[0] == "Period":
+            row[1] = "2026.09.30"
+    rows, statement_balance = master_service._parse_pepperstone_mt5_rows(
+        [report_rows], source_kind="html"
+    )
+    assert statement_balance is not None
+    actual = master_service._build_journal_balance_timelines(
+        rows, {}, [statement_balance]
+    )["balances"][0]
+    assert actual["balance"] == pytest.approx(50036.06), case
+    mutate(actual)
+    verification = master_service._verify_imported_account_balance_snapshot(
+        {"balances": [actual]}, statement_balance
+    )
+    assert verification["ok"] is False
+    assert failed_dimension in master_service._imported_account_balance_verification_failure_detail(
+        verification
+    )
+
+
 def test_pepperstone_demo_replacement_keeps_current_identity_and_old_history_separate():
     old_rows, old_balance = master_service._parse_pepperstone_mt5_rows(
         [_pepperstone_mt5_balance_rows(

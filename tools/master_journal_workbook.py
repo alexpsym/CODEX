@@ -5824,8 +5824,16 @@ def _read_account_balance_source_metadata(
             "source": str(parsed.get("source") or "").strip(),
             "timeline_as_of": str(parsed.get("timeline_as_of") or "").strip(),
             "account_identity": str(parsed.get("account_identity") or "").strip(),
+            "balance_evidence_source": str(
+                parsed.get("balance_evidence_source") or ""
+            ).strip(),
         }
-    return {"source": raw, "timeline_as_of": "", "account_identity": ""}
+    return {
+        "source": raw,
+        "timeline_as_of": "",
+        "account_identity": "",
+        "balance_evidence_source": "",
+    }
 
 
 def _account_balance_timeline_as_of(value: Any, *, preserve_offset: bool = False) -> str:
@@ -5852,13 +5860,18 @@ def _write_account_balance_source_metadata(
     source: Any,
     as_of: Any = None,
     account_identity: Any = None,
+    balance_evidence_source: Any = None,
 ) -> None:
     name = _account_balance_source_defined_name(account_label)
     wb.defined_names.pop(name, None)
     clean_source = str(source or "").strip()
     if not clean_source:
         return
-    preserve_offset = clean_source.strip().lower() == "pepperstone_mt5_statement_balance"
+    clean_evidence_source = str(balance_evidence_source or "").strip()
+    preserve_offset = (
+        clean_source.strip().lower() == "pepperstone_mt5_statement_balance"
+        or clean_evidence_source.lower() == "pepperstone_mt5_deal_balance"
+    )
     metadata_payload = {
         "source": clean_source,
         "timeline_as_of": _account_balance_timeline_as_of(
@@ -5868,6 +5881,8 @@ def _write_account_balance_source_metadata(
     clean_identity = str(account_identity or "").strip()
     if clean_identity:
         metadata_payload["account_identity"] = clean_identity
+    if clean_evidence_source:
+        metadata_payload["balance_evidence_source"] = clean_evidence_source
     metadata = json.dumps(
         metadata_payload,
         separators=(",", ":"),
@@ -10645,6 +10660,7 @@ def build_master_journal_workbook(
             rec.get("balance_source") or rec.get("source"),
             rec.get("as_of"),
             rec.get("account_identity") or rec.get("account_fingerprint"),
+            rec.get("balance_evidence_source"),
         )
         detail.cell(target_row, 2).number_format = "#,##0.0000000000" if _is_crypto_currency(currency) else "#,##0.00"
         detail.cell(target_row, 3, currency)
@@ -15315,6 +15331,10 @@ def _read_stats2_account_balances(wb) -> List[Dict[str, Any]]:
         }
         if balance_metadata.get("account_identity"):
             payload["account_identity"] = balance_metadata["account_identity"]
+        if balance_metadata.get("balance_evidence_source"):
+            payload["balance_evidence_source"] = balance_metadata[
+                "balance_evidence_source"
+            ]
         if "as_of" in col_map:
             payload["as_of"] = _excel_datetime_to_iso(ws.cell(row, col_map["as_of"]).value)
         if balance_metadata.get("timeline_as_of"):
@@ -17670,6 +17690,7 @@ def update_master_journal_workbook_data_only(
                 b.get("balance_source") or b.get("source"),
                 b.get("as_of"),
                 b.get("account_identity") or b.get("account_fingerprint"),
+                b.get("balance_evidence_source"),
             )
             curr = str(b.get("currency") or "").strip()
             existing_fmt = str(detail_dash.cell(row, col_map["balance"]).number_format or "")
@@ -18845,6 +18866,7 @@ def _incremental_update_account_balance(
         account_balance.get("account_identity")
         or account_balance.get("broker_account_id")
         or account_balance.get("account_fingerprint"),
+        account_balance.get("balance_evidence_source"),
     )
     return {
         "label": label,
@@ -18878,6 +18900,15 @@ def _incremental_validate_account_balance(
         raise RuntimeError("Incremental workbook account balance timestamp verification failed.")
     if str(metadata.get("source") or "") != str(expected.get("source") or ""):
         raise RuntimeError("Incremental workbook account balance source verification failed.")
+    expected_evidence_source = str(expected.get("balance_evidence_source") or "")
+    if (
+        expected_evidence_source
+        and str(metadata.get("balance_evidence_source") or "")
+        != expected_evidence_source
+    ):
+        raise RuntimeError(
+            "Incremental workbook account balance source-evidence verification failed."
+        )
     return {
         "account_label": str(actual.get("account_label") or actual.get("account") or ""),
         "row": int(expected.get("row") or 0),
@@ -18885,6 +18916,9 @@ def _incremental_validate_account_balance(
         "currency": str(actual.get("currency") or ""),
         "as_of": expected_as_of,
         "source": str(metadata.get("source") or ""),
+        "balance_evidence_source": str(
+            metadata.get("balance_evidence_source") or ""
+        ),
         "provenance_defined_name": (
             _account_balance_source_defined_name(expected.get("label"))
             if metadata
