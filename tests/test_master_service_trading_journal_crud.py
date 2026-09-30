@@ -278,6 +278,26 @@ def _pepperstone_mt5_balance_rows(
     ]
 
 
+def _pepperstone_mt5_deals_with_orders_rows() -> list[list[object]]:
+    """Tiny native report shape for the two completed USDJPY statement cycles."""
+    return [
+        ["Account History Report"], ["Account", "61583268"],
+        ["Company", "Pepperstone Group Limited"], ["Server", "Pepperstone-Demo"],
+        ["Currency", "AUD"], ["Period", "2026.09.30 00:00:00 - 2026.09.30 09:00:00"],
+        ["Deals"],
+        ["Time", "Deal", "Symbol", "Type", "Direction", "Volume", "Price", "Order", "Position ID", "Commission", "Fee", "Swap", "Profit", "Balance"],
+        ["2026.09.30 07:00:00", "1001", "USDJPY", "sell", "in", 0.22, 156.154, "5001", "7001", -0.77, 0.0, 0.0, 0.0, 50000.0],
+        ["2026.09.30 07:05:00", "1002", "USDJPY", "buy", "out", 0.22, 156.054, "5002", "7001", -0.77, 0.0, 0.0, 19.57, 50018.03],
+        ["2026.09.30 08:00:00", "1003", "USDJPY", "sell", "in", 0.22, 156.096, "5003", "7002", -0.77, 0.0, 0.0, 0.0, 50018.03],
+        ["2026.09.30 08:05:00", "1004", "USDJPY", "buy", "out", 0.22, 155.996, "5004", "7002", -0.77, 0.0, 0.0, 19.57, 50036.06],
+        ["Orders"],
+        ["Time", "Order", "Symbol", "Type", "Volume", "Price", "S/L", "T/P", "Position ID"],
+        ["2026.09.30 06:59:59", "5001", "USDJPY", "sell limit", 0.22, 156.154, 156.254, 155.954, "7001"],
+        ["2026.09.30 07:59:59", "5003", "USDJPY", "sell limit", 0.22, 156.096, 156.196, 155.896, "7002"],
+        ["Balance", 50036.06],
+    ]
+
+
 def _tiny_stats2_pepperstone_roundtrip(tmp_path: Path, balance: dict) -> dict:
     from tools import master_journal_workbook as mjw
 
@@ -434,6 +454,86 @@ def test_pepperstone_mt5_native_html_and_xlsx_import_same_closed_positions(tmp_p
     assert html_balance["account"] == "PEPPERSTONE DEMO"
     assert html_balance["currency"] == "AUD"
     assert "skipped_open_positions:2" in html_balance["_import_warnings"]
+
+
+def test_pepperstone_mt5_deals_orders_keep_opening_plan_and_funded_checkpoints():
+    rows, statement_balance = master_service._parse_pepperstone_mt5_rows(
+        [_pepperstone_mt5_deals_with_orders_rows()], source_kind="html"
+    )
+    assert statement_balance is not None
+    assert [row["id"].rsplit(":", 1)[-1] for row in rows] == ["7001", "7002"]
+    assert [row["balance_after_trade"] for row in rows] == pytest.approx([50018.03, 50036.06])
+    assert [row["net_profit"] for row in rows] == pytest.approx([18.03, 18.03])
+    assert [row["stop_loss"] for row in rows] == pytest.approx([156.254, 156.196])
+    assert [row["take_profit"] for row in rows] == pytest.approx([155.954, 155.896])
+    assert [row["order_type"] for row in rows] == ["limit", "limit"]
+    assert [row["raw_refs"]["opening_order_id"] for row in rows] == ["5001", "5003"]
+
+    timeline = master_service._build_journal_balance_timelines(rows, {}, [statement_balance])
+    enriched = master_service._enrich_trade_row_metrics(timeline["rows"])
+    assert [row["analysis_balance_before_trade"] for row in enriched] == pytest.approx([50000.0, 50018.03])
+    assert [row["analysis_balance_after_trade"] for row in enriched] == pytest.approx([50018.03, 50036.06])
+    assert [row["result_pct"] for row in enriched] == pytest.approx([18.03 / 50000.0 * 100, 18.03 / 50018.03 * 100])
+    assert [row["r_multiple"] for row in enriched] == pytest.approx([1.0, 1.0])
+    # Both ordinary refresh and manual Resync rebuild from persisted rows with
+    # no pending import input.  The stable rows keep their checkpoints/plan.
+    refreshed = master_service._enrich_trade_row_metrics(
+        master_service._build_journal_balance_timelines(enriched, {}, [statement_balance])["rows"]
+    )
+    assert [row["id"] for row in refreshed] == [row["id"] for row in rows]
+    assert [row["analysis_balance_after_trade"] for row in refreshed] == pytest.approx([50018.03, 50036.06])
+    assert [row["stop_loss"] for row in refreshed] == pytest.approx([156.254, 156.196])
+    assert [row["r_multiple"] for row in refreshed] == pytest.approx([1.0, 1.0])
+
+
+def test_pepperstone_context_backfill_requires_unique_compatible_evidence(monkeypatch: pytest.MonkeyPatch):
+    rows, _balance = master_service._parse_pepperstone_mt5_rows(
+        [_pepperstone_mt5_deals_with_orders_rows()], source_kind="html"
+    )
+    row = rows[0]
+    exact = {
+        "calculation_context_id": "ctx-exact", "broker": "pepperstone", "account": "demo",
+        "instrument": "USDJPY", "side": "sell", "order_id": "5001",
+        "open_time": row["open_time"], "entry_price": row["entry_price"], "qty": row["qty"],
+        "pattern": "Range", "ema": "20", "vwap": "Touch", "aths_atls": "All-Time Low",
+        "round_number": "Yes", "setup": "Breakout", "timeframe": "5MIN",
+    }
+    wrong_account = {**exact, "calculation_context_id": "ctx-wrong", "account": "live", "order_id": "5001", "pattern": "Wrong"}
+    monkeypatch.setattr(master_service, "_load_trade_contexts", lambda: [exact, wrong_account])
+    patched = master_service._backfill_trade_row_context_fields(row)
+    assert patched["stop_loss"] == pytest.approx(row["stop_loss"])
+    assert patched["take_profit"] == pytest.approx(row["take_profit"])
+    assert patched["pattern"] == "range"
+    assert patched["timeframe"] == "5MIN"
+    assert patched["raw_refs"]["calculation_context_id"] == "ctx-exact"
+
+    unlinked = dict(row)
+    unlinked["raw_refs"] = {**row["raw_refs"], "opening_order_id": None, "opening_order_ids": []}
+    ambiguous = [{**exact, "calculation_context_id": "ctx-a", "order_id": ""}, {**exact, "calculation_context_id": "ctx-b", "order_id": ""}]
+    monkeypatch.setattr(master_service, "_load_trade_contexts", lambda: ambiguous)
+    assert master_service._backfill_trade_row_context_fields(unlinked).get("pattern") in (None, "")
+
+
+def test_pepperstone_reimport_repairs_supported_fields_without_losing_manual_values():
+    rows, _balance = master_service._parse_pepperstone_mt5_rows(
+        [_pepperstone_mt5_deals_with_orders_rows()], source_kind="html"
+    )
+    incoming = rows[0]
+    existing = {
+        **incoming,
+        "balance_after_trade": 18.03,
+        "stop_loss": None,
+        "take_profit": None,
+        "notes": "intentional manual note",
+        "pattern": "intentional manual pattern",
+    }
+    merged = master_service._merge_trading_journal_row(existing, incoming)
+    assert merged["id"] == incoming["id"]
+    assert merged["balance_after_trade"] == pytest.approx(50018.03)
+    assert merged["stop_loss"] == pytest.approx(156.254)
+    assert merged["take_profit"] == pytest.approx(155.954)
+    assert merged["notes"] == "intentional manual note"
+    assert merged["pattern"] == "intentional manual pattern"
 
 
 def test_pepperstone_statement_balance_survives_metadata_roundtrip_and_refresh(tmp_path: Path):

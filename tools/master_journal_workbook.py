@@ -5545,13 +5545,30 @@ def _resolved_all_trade_balances(rows: List[Dict[str, Any]]) -> Dict[str, float]
     indexed = list(enumerate(rows))
     running: Dict[str, float] = {}
     out: Dict[str, float] = {}
+
+    def _running_account_key(row: Dict[str, Any]) -> str:
+        account = str(row.get("account_label") or row.get("account") or "")
+        if not account.strip().upper().startswith("PEPPERSTONE "):
+            return account
+        refs = row.get("raw_refs") if isinstance(row.get("raw_refs"), dict) else {}
+        identity = str(
+            row.get("account_identity")
+            or refs.get("account_fingerprint")
+            or refs.get("account_identity")
+            or ""
+        ).strip()
+        # Identity-less legacy history stays usable on its own, but may not
+        # seed a replacement MT5 account merely because the display label is
+        # the same.
+        return f"{account}\x1f{identity}" if identity else account
+
     def _sort_key(item):
         i, row = item
-        acct = str(row.get("account_label") or row.get("account") or "")
+        acct = _running_account_key(row)
         ts = str(row.get("close_time") or row.get("open_time") or "")
         return (acct, ts, i)
     for i, row in sorted(indexed, key=_sort_key):
-        acct = str(row.get("account_label") or row.get("account") or "")
+        acct = _running_account_key(row)
         resolved = _resolve_balance_after(row)
         if resolved is not None:
             running[acct] = resolved

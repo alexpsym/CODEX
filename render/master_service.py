@@ -9751,7 +9751,10 @@ def _build_journal_balance_timelines(
         if bal is None:
             return None
         source = str(row.get("source") or "").strip().lower()
-        if source in {"oanda", "oanda_transaction_export", "excel", "local_excel", "master_journal"}:
+        if source in {
+            "oanda", "oanda_transaction_export", "excel", "local_excel", "master_journal",
+            "pepperstone_mt5_statement",
+        }:
             return bal
         bal_source = str(row.get("balance_after_trade_source") or "").strip().lower()
         if bal_source == "master_journal":
@@ -9759,6 +9762,10 @@ def _build_journal_balance_timelines(
         if bal_source == "bybit_transaction_log_cash_balance" and _is_bybit_demo_account_label(
             row.get("account_label") or row.get("account")
         ):
+            return bal
+        if bal_source == "pepperstone_mt5_deal_balance" and str(
+            row.get("account_label") or row.get("account") or ""
+        ).strip().upper().startswith("PEPPERSTONE "):
             return bal
         raw_refs = row.get("raw_refs") if isinstance(row.get("raw_refs"), dict) else {}
         raw_excel = row.get("raw_excel") if isinstance(row.get("raw_excel"), dict) else {}
@@ -20307,6 +20314,14 @@ def _mt5_table_ranges(rows: List[List[object]], kind: str) -> List[Tuple[List[st
         values = set(headers)
         if kind == "positions":
             is_header = {"position", "symbol", "type", "volume"}.issubset(values) and headers.count("price") >= 1
+        elif kind == "orders":
+            # A Deals table also has an Order column.  Require an evidenced
+            # protection column so we only treat the native Orders table as a
+            # source of the opening plan.
+            is_header = (
+                {"order", "symbol", "type", "volume", "price"}.issubset(values)
+                and bool({"sl", "s l", "stop loss", "tp", "t p", "take profit"} & values)
+            )
         else:
             is_header = {"deal", "symbol", "type", "volume", "price"}.issubset(values) and bool({"direction", "entry"} & values)
         if not is_header:
@@ -20315,13 +20330,62 @@ def _mt5_table_ranges(rows: List[List[object]], kind: str) -> List[Tuple[List[st
         for candidate in rows[start + 1 :]:
             candidate_headers = [_mt5_header(cell) for cell in candidate]
             candidate_values = set(candidate_headers)
-            if ({"position", "symbol", "type", "volume"}.issubset(candidate_values) or {"deal", "symbol", "type", "volume", "price"}.issubset(candidate_values)):
+            if (
+                {"position", "symbol", "type", "volume"}.issubset(candidate_values)
+                or {"deal", "symbol", "type", "volume", "price"}.issubset(candidate_values)
+                or (
+                    {"order", "symbol", "type", "volume", "price"}.issubset(candidate_values)
+                    and bool({"sl", "s l", "stop loss", "tp", "t p", "take profit"} & candidate_values)
+                )
+            ):
                 break
             if len([cell for cell in candidate if _mt5_cell_text(cell)]) == 1 and _mt5_header(next(cell for cell in candidate if _mt5_cell_text(cell))) in {"orders", "deals", "positions", "summary"}:
                 break
             body.append(candidate)
         found.append((headers, body))
     return found
+
+
+def _mt5_order_plans(rows: List[List[object]]) -> Dict[str, List[Dict[str, object]]]:
+    """Return native MT5 opening plans keyed by order ticket.
+
+    Deals report executions, including closing orders.  Only the native Orders
+    table records the opening plan's SL/TP, so no level is inferred when that
+    table is absent, unset, or conflicts with the position linkage.
+    """
+    plans: Dict[str, List[Dict[str, object]]] = defaultdict(list)
+    for headers, body in _mt5_table_ranges(rows, "orders"):
+        order_idx = _mt5_header_index(headers, {"order", "order id", "ticket"})
+        symbol_idx = _mt5_header_index(headers, {"symbol"})
+        type_idx = _mt5_header_index(headers, {"type"})
+        position_idx = _mt5_header_index(headers, {"position", "position id"})
+        time_idx = _mt5_header_index(headers, {"time", "open time"})
+        sl_idx = _mt5_header_index(headers, {"sl", "s l", "stop loss"})
+        tp_idx = _mt5_header_index(headers, {"tp", "t p", "take profit"})
+        for row in body:
+            order = _mt5_ticket(_mt5_row_value(row, order_idx))
+            symbol = _mt5_cell_text(_mt5_row_value(row, symbol_idx))
+            type_text = _mt5_header(_mt5_row_value(row, type_idx))
+            side = "buy" if type_text.startswith("buy") else "sell" if type_text.startswith("sell") else ""
+            if not order or not symbol or not side:
+                continue
+            stop_loss = _cell_to_float(_mt5_row_value(row, sl_idx))
+            take_profit = _cell_to_float(_mt5_row_value(row, tp_idx))
+            plans[order].append({
+                "order": order,
+                "symbol": symbol,
+                "side": side,
+                "position": _mt5_ticket(_mt5_row_value(row, position_idx)),
+                "time": _mt5_broker_local_iso(_mt5_row_value(row, time_idx)),
+                "stop_loss": stop_loss if stop_loss is not None and stop_loss > 0 else None,
+                "take_profit": take_profit if take_profit is not None and take_profit > 0 else None,
+                "order_type": (
+                    "limit" if "limit" in type_text else "market"
+                    if type_text in {"buy", "sell", "buy market", "sell market"} or "market" in type_text
+                    else None
+                ),
+            })
+    return plans
 
 
 def _mt5_trade_row(
@@ -20445,11 +20509,13 @@ def _mt5_deal_events(rows: List[List[object]]) -> List[Dict[str, object]]:
             "direction": _mt5_header_index(headers, {"direction", "entry"}),
             "volume": _mt5_header_index(headers, {"volume", "lots"}),
             "price": _mt5_header_index(headers, {"price"}),
+            "order": _mt5_header_index(headers, {"order", "order id"}),
             "position": _mt5_header_index(headers, {"position", "position id"}),
             "commission": _mt5_header_index(headers, {"commission"}),
             "fee": _mt5_header_index(headers, {"fee"}),
             "swap": _mt5_header_index(headers, {"swap"}),
             "profit": _mt5_header_index(headers, {"profit"}),
+            "balance": _mt5_header_index(headers, {"balance"}),
         }
         for row in body:
             sequence += 1
@@ -20469,16 +20535,21 @@ def _mt5_deal_events(rows: List[List[object]]) -> List[Dict[str, object]]:
                 "direction": _mt5_header(_mt5_row_value(row, indexes["direction"])).replace(" ", ""),
                 "volume": float(volume),
                 "price": float(price),
+                "order": _mt5_ticket(_mt5_row_value(row, indexes["order"])),
                 "position": _mt5_ticket(_mt5_row_value(row, indexes["position"])),
                 "commission": _mt5_component(_mt5_row_value(row, indexes["commission"])),
                 "fee": _mt5_component(_mt5_row_value(row, indexes["fee"])),
                 "swap": _mt5_component(_mt5_row_value(row, indexes["swap"])),
                 "profit": _mt5_component(_mt5_row_value(row, indexes["profit"])),
+                "balance": _cell_to_float(_mt5_row_value(row, indexes["balance"])),
             })
     return events
 
 
-def _mt5_rows_from_deal_group(events: List[Dict[str, object]], metadata: Dict[str, str], position_ticket: str) -> Tuple[List[Dict[str, object]], List[str], int]:
+def _mt5_rows_from_deal_group(
+    events: List[Dict[str, object]], metadata: Dict[str, str], position_ticket: str,
+    order_plans: Dict[str, List[Dict[str, object]]],
+) -> Tuple[List[Dict[str, object]], List[str], int]:
     cycles: List[Dict[str, object]] = []
     warnings: List[str] = []
     current: Optional[Dict[str, object]] = None
@@ -20569,7 +20640,24 @@ def _mt5_rows_from_deal_group(events: List[Dict[str, object]], metadata: Dict[st
         if len(cycles) > 1:
             digest = hashlib.sha256("\n".join(sorted(close_tickets)).encode("utf-8")).hexdigest()[:16]
             identity_suffix = f"position:{position_ticket}:close:{digest}" if position_ticket else f"closing-deals:{digest}"
-        parsed.append(_mt5_trade_row(
+        opening_order_ids = [
+            str(part.get("order") or "").strip()
+            for part in (cycle.get("open_parts") or [])
+            if str(part.get("order") or "").strip()
+        ]
+        opening_plan: Optional[Dict[str, object]] = None
+        for opening_order_id in opening_order_ids:
+            candidates = order_plans.get(opening_order_id) or []
+            compatible = [
+                plan for plan in candidates
+                if (not plan.get("position") or not position_ticket or str(plan.get("position")) == position_ticket)
+                and _canonical_symbol(str(plan.get("symbol") or "")) == _canonical_symbol(str((cycle.get("open_parts") or [{}])[0].get("symbol") or ""))
+                and str(plan.get("side") or "") == str(cycle.get("side") or "")
+            ]
+            if len(compatible) == 1:
+                opening_plan = compatible[0]
+                break
+        row = _mt5_trade_row(
             metadata=metadata,
             position_ticket=position_ticket,
             close_tickets=close_tickets,
@@ -20584,13 +20672,32 @@ def _mt5_rows_from_deal_group(events: List[Dict[str, object]], metadata: Dict[st
             fee=opening_components["fee"] + close_components["fee"],
             swap=opening_components["swap"] + close_components["swap"],
             profit=opening_components["profit"] + close_components["profit"],
+            stop_loss=_to_float(opening_plan.get("stop_loss")) if opening_plan else None,
+            take_profit=_to_float(opening_plan.get("take_profit")) if opening_plan else None,
             identity_suffix=identity_suffix,
-        ))
+        )
+        last_close = max(closes, key=lambda part: int(part.get("sequence") or 0))
+        checkpoint = _to_float(last_close.get("balance"))
+        if checkpoint is not None:
+            row["balance_after_trade"] = checkpoint
+            row["balance_after_trade_currency"] = metadata["currency"]
+            row["balance_after_trade_source"] = "pepperstone_mt5_deal_balance"
+        if opening_plan and opening_plan.get("order_type"):
+            row["order_type"] = opening_plan["order_type"]
+        refs = row.get("raw_refs") if isinstance(row.get("raw_refs"), dict) else {}
+        refs["opening_order_ids"] = sorted(set(opening_order_ids))
+        refs["opening_order_id"] = opening_order_ids[0] if len(set(opening_order_ids)) == 1 else None
+        refs["opening_plan_source"] = "pepperstone_mt5_orders" if opening_plan else None
+        if opening_plan:
+            refs["opening_plan_order_id"] = opening_plan.get("order")
+        row["raw_refs"] = refs
+        parsed.append(row)
     return parsed, warnings, open_count
 
 
 def _mt5_deals_rows(rows: List[List[object]], metadata: Dict[str, str]) -> Tuple[List[Dict[str, object]], List[str], int]:
     events = _mt5_deal_events(rows)
+    order_plans = _mt5_order_plans(rows)
     warnings: List[str] = []
     explicit: Dict[str, List[Dict[str, object]]] = defaultdict(list)
     implicit_groups: List[List[Dict[str, object]]] = []
@@ -20617,12 +20724,12 @@ def _mt5_deals_rows(rows: List[List[object]], metadata: Dict[str, str]) -> Tuple
     parsed: List[Dict[str, object]] = []
     open_count = 0
     for position, group in explicit.items():
-        group_rows, group_warnings, group_open = _mt5_rows_from_deal_group(group, metadata, position)
+        group_rows, group_warnings, group_open = _mt5_rows_from_deal_group(group, metadata, position, order_plans)
         parsed.extend(group_rows)
         warnings.extend(group_warnings)
         open_count += group_open
     for group in implicit_groups:
-        group_rows, group_warnings, group_open = _mt5_rows_from_deal_group(group, metadata, "")
+        group_rows, group_warnings, group_open = _mt5_rows_from_deal_group(group, metadata, "", order_plans)
         parsed.extend(group_rows)
         warnings.extend(group_warnings)
         open_count += group_open
@@ -21933,6 +22040,74 @@ def _lookup_trade_context_by_market_window(
         return None
     candidates.sort(key=lambda item: item[0])
     return candidates[0][1]
+
+
+def _lookup_pepperstone_trade_context(row: Dict[str, object]) -> Optional[Dict[str, object]]:
+    """Match a Pepperstone statement row only when the evidence identifies one quote.
+
+    MT5 statement rows use a journal label while calculator contexts use the
+    broker/mode pair.  Do not use the generic 90-minute fallback here: two FX
+    quotations can otherwise be plausible for the same symbol and side.
+    """
+    refs = row.get("raw_refs") if isinstance(row.get("raw_refs"), dict) else {}
+    account_label = str(row.get("account_label") or row.get("account") or "").strip().upper()
+    mode = "demo" if account_label.endswith(" DEMO") else "live" if account_label.endswith(" LIVE") else ""
+    symbol = _canonical_symbol(str(row.get("symbol") or row.get("instrument") or ""))
+    side = _normalize_side_for_comparison(row.get("side"))
+    row_identity = _pepperstone_account_identity(row)
+    opening_order_ids = {
+        str(value or "").strip()
+        for value in [
+            refs.get("opening_order_id"), refs.get("opening_plan_order_id"),
+            *(refs.get("opening_order_ids") if isinstance(refs.get("opening_order_ids"), list) else []),
+        ]
+        if str(value or "").strip()
+    }
+    position_ticket = str(refs.get("position_ticket") or "").strip()
+    entry = _to_float(row.get("entry_price"))
+    qty = _to_float(row.get("qty"))
+    row_open = _canonical_trade_epoch_second(row.get("open_time"))
+    if not mode or not symbol or not side:
+        return None
+
+    def compatible(ctx: Dict[str, object]) -> bool:
+        if str(ctx.get("broker") or "").strip().lower() != "pepperstone":
+            return False
+        if str(ctx.get("account") or "").strip().lower() != mode:
+            return False
+        ctx_identity = str(ctx.get("account_identity") or ctx.get("account_fingerprint") or "").strip()
+        if row_identity and ctx_identity and row_identity != ctx_identity:
+            return False
+        if _canonical_symbol(str(ctx.get("instrument") or ctx.get("symbol") or "")) != symbol:
+            return False
+        return _normalize_side_for_comparison(ctx.get("side")) == side
+
+    contexts = [ctx for ctx in _load_trade_contexts() if isinstance(ctx, dict) and compatible(ctx)]
+    linked = [
+        ctx for ctx in contexts
+        if (opening_order_ids and str(ctx.get("order_id") or "").strip() in opening_order_ids)
+        or (position_ticket and str(ctx.get("position_id") or "").strip() == position_ticket)
+    ]
+    if len(linked) == 1:
+        return linked[0]
+    if linked:
+        return None
+    if entry is None or qty is None or row_open is None:
+        return None
+    candidates: List[Dict[str, object]] = []
+    for ctx in contexts:
+        ctx_entry = _to_float(ctx.get("entry_price") or ctx.get("planned_entry_price"))
+        ctx_qty = _to_float(ctx.get("qty") or ctx.get("quantity"))
+        ctx_open = _canonical_trade_epoch_second(ctx.get("open_time") or ctx.get("created_at"))
+        if ctx_entry is None or ctx_qty is None or ctx_open is None:
+            continue
+        if not math.isclose(ctx_entry, entry, rel_tol=0.0, abs_tol=1e-9):
+            continue
+        if not math.isclose(ctx_qty, qty, rel_tol=0.0, abs_tol=1e-9):
+            continue
+        if abs(ctx_open - row_open) <= 60:
+            candidates.append(ctx)
+    return candidates[0] if len(candidates) == 1 else None
 
 
 def _resolve_bybit_closed_pnl_trade_context(
@@ -24977,9 +25152,13 @@ def _backfill_trade_row_context_fields(row: Dict[str, object]) -> Dict[str, obje
     source_text = str(row.get("source") or "").strip().lower()
     if source_text == "master_journal":
         return row
-    broker_for_lookup = "bybit" if source_text.startswith("bybit_execution_history") else row.get("source")
-    ctx = _lookup_trade_context_for_journal_row(row)
-    if not isinstance(ctx, dict):
+    is_pepperstone_statement = source_text == "pepperstone_mt5_statement"
+    broker_for_lookup = (
+        "pepperstone" if is_pepperstone_statement
+        else "bybit" if source_text.startswith("bybit_execution_history") else row.get("source")
+    )
+    ctx = _lookup_pepperstone_trade_context(row) if is_pepperstone_statement else _lookup_trade_context_for_journal_row(row)
+    if not isinstance(ctx, dict) and not is_pepperstone_statement:
         ctx = _lookup_trade_context_by_market_window(
             {
                 "broker": broker_for_lookup,
@@ -24995,6 +25174,13 @@ def _backfill_trade_row_context_fields(row: Dict[str, object]) -> Dict[str, obje
         return row
 
     patched = dict(row)
+    if is_pepperstone_statement:
+        refs = dict(patched.get("raw_refs") or {}) if isinstance(patched.get("raw_refs"), dict) else {}
+        context_id = str(ctx.get("calculation_context_id") or ctx.get("context_id") or "").strip()
+        if context_id:
+            refs["calculation_context_id"] = context_id
+            refs["context_linked_by"] = "pepperstone_exact_statement_match"
+            patched["raw_refs"] = refs
     if not current_timeframe:
         timeframe = _normalize_timeframe(ctx.get("timeframe"))
         if timeframe:
@@ -25028,6 +25214,8 @@ def _backfill_trade_row_context_fields(row: Dict[str, object]) -> Dict[str, obje
     for field in ("ema", "vwap", "aths_atls", "round_number"):
         if not str(patched.get(field) or "").strip() and str(ctx.get(field) or "").strip():
             patched[field] = ctx.get(field)
+    if not str(patched.get("order_type") or "").strip() and str(ctx.get("order_type") or "").strip():
+        patched["order_type"] = ctx.get("order_type")
     if patched.get("r_multiple") in (None, ""):
         entry = _to_float(patched.get("entry_price"))
         stop = _to_float(patched.get("stop_loss"))

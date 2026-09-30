@@ -1940,6 +1940,31 @@ def test_balance_after_resolution_and_duration_display(tmp_path: Path):
         assert _parse_duration_text(inst.cell(INSTRUMENT_AVERAGES_DATA_START_ROW, inst_headers[header]).value) is not None
         assert inst.cell(INSTRUMENT_AVERAGES_DATA_START_ROW, inst_headers[header]).number_format == "General"
 
+
+def test_pepperstone_balance_fallback_does_not_cross_replacement_account_identity():
+    legacy_zero = {
+        "id": "legacy-pepperstone-zero", "row_type": "cashflow", "account": "PEPPERSTONE DEMO",
+        "close_time": "2022-12-16T00:05:04", "cashflow_new_balance": 0.0,
+        "currency": "AUD",
+    }
+    current_first = {
+        "id": "pepperstone_mt5:current:position:7001", "row_type": "trade",
+        "account": "PEPPERSTONE DEMO", "close_time": "2026-09-30T07:05:00",
+        "analysis_balance_after_trade": 50018.03, "net_profit": 18.03, "currency": "AUD",
+        "raw_refs": {"account_fingerprint": "current"},
+    }
+    current_second = {
+        "id": "pepperstone_mt5:current:position:7002", "row_type": "trade",
+        "account": "PEPPERSTONE DEMO", "close_time": "2026-09-30T08:05:00",
+        "net_profit": 18.03, "currency": "AUD",
+        "raw_refs": {"account_fingerprint": "current"},
+    }
+    resolved = mjw._resolved_all_trade_balances([legacy_zero, current_first, current_second])
+    assert resolved["1"] == pytest.approx(50018.03)
+    assert resolved["2"] == pytest.approx(50036.06)
+    projected = mjw._trade_log_row_values(current_second, resolved_balance=resolved["2"])
+    assert projected["Balance After"] == pytest.approx(50036.06)
+
 def test_sheet_order_and_hidden_meta(tmp_path: Path):
     out=tmp_path/'x.xlsx'; build_master_journal_workbook(sample_snapshot(), out); wb=load_workbook(out)
     assert 'Diagnostics' not in SHEET_ORDER
