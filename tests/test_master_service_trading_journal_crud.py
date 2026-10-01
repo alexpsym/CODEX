@@ -694,6 +694,119 @@ def test_pepperstone_statement_verification_rejects_unproved_timeline_evidence(
     )
 
 
+def _pepperstone_date_only_native_checkpoint() -> tuple[list[dict], dict]:
+    report_rows = copy.deepcopy(_pepperstone_mt5_deals_with_orders_rows())
+    for row in report_rows:
+        if row and row[0] == "Period":
+            row[1] = "2026.09.30"
+    rows, statement_balance = master_service._parse_pepperstone_mt5_rows(
+        [report_rows], source_kind="html"
+    )
+    assert statement_balance is not None
+    return rows, statement_balance
+
+
+def test_pepperstone_saved_native_checkpoint_keeps_proof_without_trade_rows(
+    tmp_path: Path,
+):
+    rows, statement_balance = _pepperstone_date_only_native_checkpoint()
+    selected = master_service._build_journal_balance_timelines(
+        rows, {}, [statement_balance]
+    )["balances"][0]
+    persisted = _tiny_stats2_pepperstone_roundtrip(tmp_path, selected)
+
+    rebuilt = master_service._build_journal_balance_timelines([], {}, [persisted])
+    actual = rebuilt["balances"][0]
+    assert actual["balance"] == pytest.approx(50036.06)
+    assert actual["currency"] == "AUD"
+    assert actual["account_identity"] == statement_balance["account_identity"]
+    assert actual["as_of"] == persisted["timeline_as_of"]
+    assert actual["balance_evidence_source"] == "pepperstone_mt5_deal_balance"
+    assert master_service._verify_imported_account_balance_snapshot(
+        {"balances": [actual]}, statement_balance
+    )["ok"] is True
+
+
+def test_pepperstone_newer_saved_native_checkpoint_beats_older_trade_marker(
+    tmp_path: Path,
+):
+    rows, statement_balance = _pepperstone_date_only_native_checkpoint()
+    selected = master_service._build_journal_balance_timelines(
+        rows, {}, [statement_balance]
+    )["balances"][0]
+    persisted = _tiny_stats2_pepperstone_roundtrip(tmp_path, selected)
+    older_workbook_trade = {
+        "id": f"pepperstone_mt5:{statement_balance['account_identity']}:position:older",
+        "row_type": "trade",
+        "source": "master_journal",
+        "account": "PEPPERSTONE DEMO",
+        "account_label": "PEPPERSTONE DEMO",
+        "currency": "AUD",
+        "close_time": "2026-09-30T07:00:00",
+        "net_profit": 0.0,
+        "balance_after_trade": 49999.0,
+        "balance_after_trade_source": "master_journal",
+        "raw_refs": {"account_fingerprint": statement_balance["account_identity"]},
+    }
+    actual = master_service._build_journal_balance_timelines(
+        [older_workbook_trade], {}, [persisted]
+    )["balances"][0]
+    assert actual["balance"] == pytest.approx(50036.06)
+    assert actual["balance_source"] == "trade_timeline"
+    assert actual["balance_evidence_source"] == "pepperstone_mt5_deal_balance"
+    assert actual["account_identity"] == statement_balance["account_identity"]
+    assert actual["as_of"] == persisted["timeline_as_of"]
+    assert master_service._verify_imported_account_balance_snapshot(
+        {"balances": [actual]}, statement_balance
+    )["ok"] is True
+
+
+def test_pepperstone_calculated_balance_clears_native_proof_until_new_checkpoint():
+    rows, statement_balance = _pepperstone_date_only_native_checkpoint()
+    ordinary_later_trade = {
+        "id": f"pepperstone_mt5:{statement_balance['account_identity']}:position:calculated",
+        "row_type": "trade",
+        "source": "master_journal",
+        "account": "PEPPERSTONE DEMO",
+        "account_label": "PEPPERSTONE DEMO",
+        "currency": "AUD",
+        "close_time": "2026-09-30T09:00:00",
+        "net_profit": 0.0,
+        "raw_refs": {"account_fingerprint": statement_balance["account_identity"]},
+    }
+    calculated = master_service._build_journal_balance_timelines(
+        [*rows, ordinary_later_trade], {}, [statement_balance]
+    )["balances"][0]
+    assert calculated["balance"] == pytest.approx(50036.06)
+    assert calculated["balance_source"] == "trade_timeline"
+    assert "balance_evidence_source" not in calculated
+    assert calculated["account_identity"] == statement_balance["account_identity"]
+    assert calculated["as_of"] == ordinary_later_trade["close_time"]
+    verification = master_service._verify_imported_account_balance_snapshot(
+        {"balances": [calculated]}, statement_balance
+    )
+    assert verification["ok"] is False
+    assert "provenance" in master_service._imported_account_balance_verification_failure_detail(
+        verification
+    )
+
+    later_native_checkpoint = copy.deepcopy(rows[-1])
+    later_native_checkpoint["id"] = (
+        f"pepperstone_mt5:{statement_balance['account_identity']}:position:restored"
+    )
+    later_native_checkpoint["close_time"] = "2026-09-30T10:00:00"
+    restored = master_service._build_journal_balance_timelines(
+        [*rows, ordinary_later_trade, later_native_checkpoint], {}, [statement_balance]
+    )["balances"][0]
+    assert restored["balance"] == pytest.approx(50036.06)
+    assert restored["balance_evidence_source"] == "pepperstone_mt5_deal_balance"
+    assert restored["account_identity"] == statement_balance["account_identity"]
+    assert restored["as_of"] == later_native_checkpoint["close_time"]
+    assert master_service._verify_imported_account_balance_snapshot(
+        {"balances": [restored]}, statement_balance
+    )["ok"] is True
+
+
 def test_pepperstone_demo_replacement_keeps_current_identity_and_old_history_separate():
     old_rows, old_balance = master_service._parse_pepperstone_mt5_rows(
         [_pepperstone_mt5_balance_rows(

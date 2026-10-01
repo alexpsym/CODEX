@@ -10071,6 +10071,11 @@ def _build_journal_balance_timelines(
                     )
                     last_known_balance = after
                     last_known_ts = trade_ts
+                    # This is a calculated balance following a cashflow
+                    # anchor, not the native checkpoint that may have
+                    # preceded it.
+                    last_known_evidence_source = None
+                    last_known_identity = _pepperstone_account_identity(row)
                     continue
                 continue
 
@@ -10101,6 +10106,10 @@ def _build_journal_balance_timelines(
                 )
                 last_known_balance = after
                 last_known_ts = trade_ts
+                # The arithmetic result is a new observation. Do not carry a
+                # prior native Deals marker forward as proof of this amount.
+                last_known_evidence_source = None
+                last_known_identity = _pepperstone_account_identity(row)
 
         bybit_demo_journal_balance: Optional[float] = None
         bybit_demo_journal_as_of: Optional[object] = None
@@ -10298,10 +10307,15 @@ def _build_journal_balance_timelines(
         elif is_pepperstone_account and last_known_identity:
             balance_payload["account_identity"] = last_known_identity
         if is_pepperstone_account:
+            # Public ``trade_timeline`` is shared by native checkpoints and
+            # calculated running balances. Keep evidence from the observation
+            # that actually won, rather than choosing from that public label.
             evidence_source = (
-                last_known_evidence_source
+                selected_authoritative_evidence_source
+                if balance_source == selected_authoritative_source
+                else last_known_evidence_source
                 if balance_source == "trade_timeline"
-                else selected_authoritative_evidence_source
+                else None
             )
             if evidence_source:
                 balance_payload["balance_evidence_source"] = evidence_source
