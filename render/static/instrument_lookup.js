@@ -16,6 +16,7 @@
   let tradeScrollResizeObserver = null;
   let tradeScrollResizeFallbackBound = false;
   let tradeScrollSyncing = false;
+  let loadGeneration = 0;
 
   const state = { asset: 'crypto' };
   const FX_CODES = new Set(['AUD', 'CAD', 'CHF', 'EUR', 'GBP', 'HKD', 'JPY', 'NZD', 'SGD', 'TRY', 'USD', 'ZAR', 'XAU', 'XAG']);
@@ -91,7 +92,7 @@
     },
     {
       title: 'Movement Range',
-      note: 'High-low by period',
+      note: 'Latest candle: (high-low)/open; may be forming. Equal rounded values can be normal.',
       keys: ['range.1m', 'range.5m', 'range.15m', 'range.30m', 'range.1h', 'range.4h', 'range.1d', 'range.1w', 'range.1mo'],
     },
     {
@@ -372,10 +373,11 @@
     return number.toLocaleString(undefined, { maximumFractionDigits: decimals });
   }
 
-  function formatPercentFromFraction(value, decimals = 2) {
+  function formatPercentFromFraction(value, decimals = 2, trimTrailingZeros = true) {
     const number = numeric(value);
     if (number === null) return String(value ?? '-');
-    return `${(number * 100).toFixed(decimals).replace(/0+$/, '').replace(/\.$/, '')}%`;
+    const formatted = (number * 100).toFixed(decimals);
+    return `${trimTrailingZeros ? formatted.replace(/0+$/, '').replace(/\.$/, '') : formatted}%`;
   }
 
   function formatPercentPoints(value, decimals = 2) {
@@ -435,7 +437,7 @@
     if (key === 'fundingRate' || key === 'marginRate' || key.endsWith('.longRate') || key.endsWith('.shortRate')) {
       return formatPercentFromFraction(value, 4);
     }
-    if (key.startsWith('range.')) return formatPercentFromFraction(value, 2);
+    if (key.startsWith('range.')) return formatPercentFromFraction(value, 2, false);
     if (/^(volume24hUsd|turnover24h|openInterestValue|avg7dTurnoverUsd)$/i.test(key)) return `$${compactNumber(value)}`;
     if (/^(minLeverage|maxLeverage)$/.test(key)) {
       const number = numeric(value);
@@ -778,6 +780,7 @@
   async function load() {
     const raw = String(qInput?.value || '').trim();
     if (!raw) return;
+    const generation = ++loadGeneration;
     setErr('Loading...');
     renderSpecs({});
     renderJournal({ status: 'loading', trades: [] });
@@ -787,6 +790,7 @@
     const [specsResult] = await Promise.allSettled([
       fetchJson(`/api/instrument-specs?query=${encodeURIComponent(raw)}${prefer}`),
     ]);
+    if (generation !== loadGeneration) return;
 
     const errors = [];
     let specs = null;
@@ -804,6 +808,7 @@
     const [journalResult] = await Promise.allSettled([
       fetchJson(`/api/calculator/journal-summary?asset=${encodeURIComponent(detectedAsset)}&symbol=${encodeURIComponent(resolved)}`),
     ]);
+    if (generation !== loadGeneration) return;
     if (journalResult.status === 'fulfilled') {
       renderJournal(journalResult.value || { status: 'error', trades: [] });
     } else {

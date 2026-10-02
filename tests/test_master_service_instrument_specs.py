@@ -346,6 +346,70 @@ def test_binance_movement_ranges_keep_interval_specific_values_and_cache_keys(mo
     assert master_service._binance_range_cache_key('BTCUSDT', '15m') != master_service._binance_range_cache_key('ETHUSDT', '15m')
 
 
+def test_bybit_movement_ranges_keep_symbol_interval_and_btc_reference_isolated(monkeypatch):
+    intervals = list(master_service._BYBIT_RANGE_INTERVALS)
+    selected_fractions = {
+        field: (index + 1) / 1000.0
+        for index, (field, _interval) in enumerate(intervals)
+    }
+    btc_fractions = {
+        field: (index + 11) / 1000.0
+        for index, (field, _interval) in enumerate(intervals)
+    }
+    requested = []
+
+    def kline(symbol, interval):
+        field = next(field for field, candidate in intervals if candidate == interval)
+        fraction = (
+            selected_fractions[field]
+            if symbol == 'UAIUSDT'
+            else btc_fractions[field]
+        )
+        # Independent fixture construction: the expected fraction is known
+        # before the helper receives its open/high/low fields.
+        return ['1000', '10000', str(10000 + fraction * 10000), '10000', '0', '0', '0']
+
+    async def market_get(_base_url, path, params, **_kwargs):
+        if path.endswith('/kline'):
+            requested.append((params['category'], params['symbol'], params['interval']))
+            if params['symbol'] == 'BTCUSDT' and params['interval'] == 'M':
+                return {'result': {'list': []}}
+            return {'result': {'list': [kline(params['symbol'], params['interval'])]}}
+        if path.endswith('/tickers'):
+            symbol = params['symbol']
+            return {'result': {'list': [{'symbol': symbol, 'lastPrice': '1'}]}}
+        raise AssertionError((path, params))
+
+    monkeypatch.setattr(master_service, '_bybit_lookup_symbol', lambda *_a, **_k: asyncio.sleep(0, result=_fake_instrument('UAIUSDT', 'UAI')))
+    monkeypatch.setattr(master_service, '_bybit_get_instrument_info_cached', lambda *_a, **_k: asyncio.sleep(0, result=_fake_instrument('BTCUSDT', 'BTC')))
+    monkeypatch.setattr(master_service, '_bybit_market_get_async', market_get)
+    monkeypatch.setattr(master_service, '_bybit_avg_7d_turnover_usd_async', lambda *_a, **_k: asyncio.sleep(0, result=None))
+
+    specs = asyncio.run(master_service._bybit_resolve_and_fetch_specs('UAIUSDT'))
+
+    assert {
+        (category, symbol, interval)
+        for category, symbol, interval in requested
+    } == {
+        ('linear', symbol, interval)
+        for symbol in ('UAIUSDT', 'BTCUSDT')
+        for _field, interval in intervals
+    }
+    for field, expected in selected_fractions.items():
+        assert specs[field] == pytest.approx(expected)
+    btc_reference = specs['_btc_reference']
+    for field, expected in btc_fractions.items():
+        if field == 'range.1mo':
+            assert field not in btc_reference
+        else:
+            assert btc_reference[field] == pytest.approx(expected)
+            assert btc_reference[field] != specs[field]
+    assert any(
+        warning['symbol'] == 'BTCUSDT' and warning['field'] == 'range.1mo'
+        for warning in specs['_spec_warnings']
+    )
+
+
 def test_oanda_http_failure_is_not_reported_as_binance(monkeypatch):
     async def fail_oanda(_query):
         raise master_service.httpx.ConnectError('oanda unavailable')
