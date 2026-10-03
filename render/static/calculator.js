@@ -23,6 +23,8 @@
     resolvedSymbol: '',
     pendingWebhookId: '',
     pendingWebhookDeleteUrl: '',
+    chartTickOverrides: Object.create(null),
+    activeChartTickSymbol: '',
     quoteStatus: 'idle',
     hasCalculatedOnce: false,
     quoteRequestSeq: 0,
@@ -212,6 +214,31 @@
     return state.asset === 'fx' && state.broker === 'pepperstone';
   }
 
+  function chartSymbolKey(value) {
+    return String(value || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+  }
+
+  function syncChartTickOverrideForSymbol() {
+    const field = $('calc-chart-tick-size');
+    const nextKey = chartSymbolKey($('calc-symbol')?.value);
+    const previousKey = state.activeChartTickSymbol;
+    if (field && previousKey && previousKey !== nextKey && String(field.value || '').trim()) {
+      state.chartTickOverrides[previousKey] = String(field.value).trim();
+    }
+    state.activeChartTickSymbol = nextKey;
+    if (field && previousKey !== nextKey) field.value = state.chartTickOverrides[nextKey] || '';
+  }
+
+  function syncTargetUi() {
+    const mode = $('calc-target-mode')?.value || 'rr';
+    const rrWrap = $('rr-wrap');
+    const tpTicksWrap = $('tp-ticks-wrap');
+    const chartTickWrap = $('chart-tick-size-wrap');
+    if (rrWrap) rrWrap.style.display = mode === 'rr' ? '' : 'none';
+    if (tpTicksWrap) tpTicksWrap.style.display = mode === 'ticks' ? '' : 'none';
+    if (chartTickWrap) chartTickWrap.style.display = isPepperstoneFx() ? '' : 'none';
+  }
+
   function setPepperstoneSetButton({ visible, enabled = true, reason = '' } = {}) {
     if (!pepperstoneSetBtn) return;
     pepperstoneSetBtn.style.display = visible ? '' : 'none';
@@ -238,8 +265,8 @@
     const compatible = preflight.compatible === true;
     pepperstoneRiskPreflightEl.style.display = '';
     pepperstoneRiskPreflightEl.textContent = compatible
-      ? `Automatic risk buffer ready: calculator cap ${preflight.planned_buffer_points} MT5 points; Trader will choose the exact live value between ${preflight.minimum_automatic_buffer_points} and ${preflight.planned_buffer_points}. No buffer input is required.`
-      : `Stop is too tight for the configured minimum protection of ${preflight.minimum_automatic_buffer_points} MT5 points. Minimum compatible stop: ${preflight.minimum_compatible_stop_points} points. Widen the stop and Calculate again.`;
+      ? `Automatic risk buffer ready: calculator cap ${preflight.planned_buffer_points} MT5 points for the converted ${preflight.stop_points ?? '-'} MT5 point stop; Trader will choose the exact live value between ${preflight.minimum_automatic_buffer_points} and ${preflight.planned_buffer_points}. No buffer input is required.`
+      : `Stop is too tight for the configured minimum protection of ${preflight.minimum_automatic_buffer_points} MT5 points. Minimum compatible stop: ${preflight.minimum_compatible_stop_points} MT5 points (about ${preflight.minimum_compatible_stop_ticks ?? '-'} TradingView ticks). Widen the stop and Calculate again.`;
     return compatible;
   }
 
@@ -262,6 +289,15 @@
   }
 
   function invalidateQuote({ clearResults = true, status = 'stale', reason = '' } = {}) {
+    if (state.quoteStatus === 'calculating' && status !== 'calculating' && status !== 'error') {
+      state.quoteRequestSeq += 1;
+      if (state.quoteController) state.quoteController.abort();
+      const quoteButton = $('calc-quote');
+      if (quoteButton) {
+        quoteButton.disabled = false;
+        quoteButton.textContent = quoteButton.dataset.defaultLabel || 'Calculate';
+      }
+    }
     clearSubmitClicked();
     clearPepperstoneSetDownload();
     state.quote = null;
@@ -502,11 +538,13 @@
     const fee = Number(q.estimated_fees_or_spread);
     const loss = Number(q.estimated_total_loss);
     const reward = Number(q.estimated_reward);
-    const tickSize = q.tick_size;
+    const tickSize = q.price_display_tick_size || q.tick_size;
+    const pepperstone = String(q.broker || '').toLowerCase() === 'pepperstone';
     const rows = [
       ['Resolved broker', q.broker], ['Resolved venue', q.resolved_venue || q.venue], ['Resolved symbol', q.symbol],
       ['Entry price', fmtPriceLike(q.entry_price, tickSize)], ['Stop price', fmtPriceLike(q.stop_price, tickSize)], ['Target price', fmtPriceLike(q.target_price, tickSize)],
-      ['TP distance', fmtPriceLike(q.target_distance, tickSize)], ['Qty / units', q.quantity],
+      ['TP distance', fmtPriceLike(q.target_distance, tickSize)],
+      [pepperstone ? 'Estimated position size (OANDA pricing/conversion units)' : 'Qty / units', q.quantity],
       ['Estimated fees / spread', `${Number.isFinite(fee) ? fee.toFixed(2) : '-'} ${currency}`],
       ['Estimated total loss', `${Number.isFinite(loss) ? loss.toFixed(2) : '-'} ${currency}`],
       ['Estimated reward', `${Number.isFinite(reward) ? reward.toFixed(2) : '-'} ${currency}`],
@@ -529,6 +567,17 @@
       ['Requested net R', fmtR(q.requested_rr_net)], ['Effective net R', fmtR(q.effective_rr_net)],
       ['Fee buffer (R)', fmtR(q.fee_buffer_r)],
     ];
+    if (pepperstone) {
+      const conversion = q.pepperstone_distance_conversion || {};
+      const chartStep = conversion.chart_tick_size || q.chart_tick_size || '-';
+      rows.push(['TradingView chart tick size', `${chartStep} (${conversion.chart_tick_size_source || q.chart_tick_size_source || 'source unavailable'})`]);
+      rows.push(['Measured stop distance', `${conversion.stop_loss_ticks ?? q.submitted_stop_loss_ticks ?? '-'} ticks × ${chartStep} = ${conversion.stop_loss_price_distance || q.stop_loss_price_distance || '-'} price; ${conversion.stop_loss_mt5_points ?? '-'} MT5 points`]);
+      rows.push(['Target distance mode', conversion.target_mode === 'ticks'
+        ? `${conversion.take_profit_ticks ?? '-'} ticks × ${chartStep} = ${conversion.take_profit_price_distance || '-'} price; ${conversion.take_profit_mt5_points ?? '-'} MT5 points`
+        : 'Net R (Trader calculates the live cost-aware target)']);
+      rows.push(['MT5 symbol point', `${conversion.mt5_symbol || '-'} / ${conversion.mt5_point_size || '-'} (${conversion.mt5_point_source || 'source unavailable'})`]);
+      rows.push(['Position-size estimate limit', q.position_size_estimate_note || 'OANDA price/conversion estimate; Trader validates executable MT5 lots, margin, commission, and volume.']);
+    }
     if (q.take_profit_adjusted && q.take_profit_adjustment) {
       const adj = q.take_profit_adjustment;
       rows.push(['TP auto-adjusted', 'Yes']);
@@ -648,12 +697,17 @@
       side: state.side,
       order_type: state.order_type,
       stop_loss_ticks: $('calc-sl-ticks').value,
-      risk_reward: $('calc-rr').value,
+      target_mode: $('calc-target-mode')?.value || 'rr',
+      chart_tick_size_override: $('calc-chart-tick-size')?.value || '',
+      quoted_chart_tick_size: quote?.chart_tick_size || '',
+      calculation_context_id: quote?.calculation_context_id || '',
       risk_mode: state.risk_mode,
       risk_value: $('calc-risk').value,
       estimated_total_loss_aud: quote?.estimated_total_loss_aud || quote?.estimated_total_loss || '',
       estimated_total_loss: quote?.estimated_total_loss || '',
     };
+    if (payload.target_mode === 'ticks') payload.take_profit_ticks = $('calc-tp-ticks')?.value || '';
+    else payload.risk_reward = $('calc-rr').value;
     if (state.order_type === 'limit') payload.entry_price = quote?.entry_price || $('calc-limit').value;
     return payload;
   }
@@ -885,6 +939,7 @@
     if (!isFx) {
       $('risk-toggle').querySelectorAll('button').forEach((b) => b.classList.toggle('active', b.dataset.v === 'percent'));
     }
+    syncTargetUi();
   }
 
   function updateBrokerUiForAsset() {
@@ -905,6 +960,7 @@
     }
     syncToggleState('broker-toggle', 'broker');
     syncToggleState('webhook-toggle', 'webhook_mode');
+    syncTargetUi();
   }
 
   function currentSymbolInput() {
@@ -1105,6 +1161,7 @@
       loadInstrumentSpecs(state.resolvedSymbol);
       prewarmQuoteDependencies(state.resolvedSymbol);
     } catch (e) {
+      if (seq !== state.quoteRequestSeq) return;
       if (e.name === 'AbortError') {
         return;
       }
@@ -1196,16 +1253,27 @@
   });
 
   $('calc-symbol').addEventListener('input', () => {
+    syncChartTickOverrideForSymbol();
     invalidateQuote({ clearResults: false, status: state.hasCalculatedOnce ? 'stale' : 'idle', reason: 'Quote changed. Recalculate before submitting.' });
     state.resolvedSymbol = '';
     canonicalEl.textContent = '';
     debounceSymbolResolve();
   });
 
-  ['calc-limit', 'calc-sl-ticks', 'calc-rr', 'calc-risk'].forEach((id) => {
+  ['calc-limit', 'calc-sl-ticks', 'calc-rr', 'calc-tp-ticks', 'calc-chart-tick-size', 'calc-risk'].forEach((id) => {
     const el = $(id);
     if (!el) return;
-    ['input', 'change'].forEach((evt) => el.addEventListener(evt, () => invalidateQuote({ clearResults: false })));
+    ['input', 'change'].forEach((evt) => el.addEventListener(evt, () => {
+      if (id === 'calc-chart-tick-size') {
+        const key = chartSymbolKey($('calc-symbol')?.value);
+        if (key) state.chartTickOverrides[key] = String(el.value || '').trim();
+      }
+      invalidateQuote({ clearResults: false });
+    }));
+  });
+  $('calc-target-mode')?.addEventListener('change', () => {
+    syncTargetUi();
+    invalidateQuote({ clearResults: false });
   });
 
   $('calc-quote').addEventListener('click', async () => {
@@ -1267,7 +1335,7 @@
         broker: state.asset === 'crypto' ? 'bybit' : state.broker,
         entry_price: $('calc-limit').value,
         stop_loss_ticks: $('calc-sl-ticks').value,
-        risk_reward: $('calc-rr').value,
+        target_mode: $('calc-target-mode')?.value || 'rr',
         risk_value: $('calc-risk').value,
         webhook: state.webhook_mode,
         test: state.test_mode,
@@ -1280,6 +1348,12 @@
         pending_webhook_id: state.webhook_mode === 'yes' ? (state.pendingWebhookId || undefined) : undefined,
         previous_pending_webhook_id: state.webhook_mode === 'yes' ? undefined : (state.pendingWebhookId || undefined),
       };
+      delete payload.chartTickOverrides;
+      delete payload.activeChartTickSymbol;
+      if (payload.target_mode === 'ticks') payload.take_profit_ticks = $('calc-tp-ticks')?.value || '';
+      else payload.risk_reward = $('calc-rr').value;
+      const chartTickOverride = $('calc-chart-tick-size')?.value;
+      if (isPepperstoneFx() && String(chartTickOverride || '').trim()) payload.chart_tick_size = String(chartTickOverride).trim();
       delete payload.quotePrewarmStatus;
       delete payload.quotePrewarmPromise;
       renderRequestSummary(payload);
@@ -1441,9 +1515,9 @@
         risk_value: $('calc-risk').value,
         stop_loss_ticks: $('calc-sl-ticks').value,
         target_mode: state.quote?.target_mode || 'rr',
-        risk_reward: $('calc-rr').value,
       };
-      if (state.take_profit_ticks !== undefined && state.take_profit_ticks !== null && state.take_profit_ticks !== '') payload.take_profit_ticks = state.take_profit_ticks;
+      if (payload.target_mode === 'ticks') payload.take_profit_ticks = $('calc-tp-ticks')?.value || '';
+      else payload.risk_reward = $('calc-rr').value;
       renderRequestSummary(payload);
       const submitResp = await post('/api/calculator/submit', payload);
       if (!submitResp || submitResp.ok !== true) {
@@ -1509,6 +1583,9 @@
   setAthsAtlsButtons();
   setRoundNumberButtons();
   initializeTrendlinePlans();
+  state.activeChartTickSymbol = chartSymbolKey(currentSymbolInput());
+  syncChartTickOverrideForSymbol();
+  syncTargetUi();
   updateRiskUiForAsset();
   updateBrokerUiForAsset();
   syncAllToggleStates();

@@ -42,6 +42,7 @@ from zoneinfo import ZoneInfo
 from shared import oanda_risk
 
 BASE_DIR = Path(__file__).resolve().parents[1]
+DEFAULT_PEPPERSTONE_SPREAD_EXPORT_PATH = BASE_DIR / "mt5-clone" / "pepperstone_spreads_latest.json"
 
 LOCAL_BUILD_FILES = (
     "render/master_service.py",
@@ -27185,7 +27186,10 @@ CALCULATOR_TEMPLATE = """<!doctype html>
             <caption>Risk</caption>
             <tbody>
               <tr><th><label for="calc-sl-ticks">Stop-loss ticks</label></th><td><input id="calc-sl-ticks" type="number" min="1" step="1" value="10"/></td></tr>
+              <tr><th><label for="calc-target-mode">Target mode</label></th><td><select id="calc-target-mode"><option value="rr" selected>Net R</option><option value="ticks">Manual TradingView target ticks</option></select></td></tr>
               <tr id="rr-wrap"><th><label for="calc-rr">Risk/reward</label></th><td><input id="calc-rr" type="number" min="0.1" step="0.1" value="2"/></td></tr>
+              <tr id="tp-ticks-wrap" style="display:none"><th><label for="calc-tp-ticks">Target ticks</label></th><td><input id="calc-tp-ticks" type="number" min="1" step="1" value="20"/></td></tr>
+              <tr id="chart-tick-size-wrap" style="display:none"><th><label for="calc-chart-tick-size">TradingView tick size</label></th><td><input id="calc-chart-tick-size" type="number" min="0" step="any" placeholder="Blank uses OANDA chart-feed default"/><div class="muted">Optional override for this symbol. Enter the selected TradingView chart's minimum price increment; the stop and target fields stay in chart ticks.</div></td></tr>
               <tr id="risk-toggle-wrap"><th>Risk mode</th><td><div class="group toggle" id="risk-toggle"><button type="button" data-v="fixed_aud">Fixed AUD</button><button type="button" data-v="percent" class="active">%</button></div></td></tr>
               <tr><th><label id="calc-risk-label" for="calc-risk">Risk value (%)</label></th><td><input id="calc-risk" type="number" min="0.0001" step="any" value="1"/></td></tr>
             </tbody>
@@ -27410,6 +27414,184 @@ def _pepperstone_set_nonnegative_int(value: object, field: str) -> int:
     return parsed
 
 
+def _pepperstone_spread_export_path() -> Path:
+    """Return the one configured export path; never search terminal folders."""
+    configured = str(os.getenv("PEPPERSTONE_SPREAD_EXPORT_PATH") or "").strip()
+    if not configured:
+        return DEFAULT_PEPPERSTONE_SPREAD_EXPORT_PATH
+    path = Path(configured).expanduser()
+    return path if path.is_absolute() else BASE_DIR / path
+
+
+def _pepperstone_symbol_key(value: object) -> str:
+    return "".join(ch for ch in str(value or "").upper() if ch.isalnum())
+
+
+def _pepperstone_parse_snapshot_time(value: object, field: str) -> str:
+    raw = str(value or "").strip()
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Pepperstone MT5 point export has an invalid {field} timestamp; re-export the Trader symbol snapshot.",
+        ) from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Pepperstone MT5 point export {field} timestamp must include a timezone; re-export the Trader symbol snapshot.",
+        )
+    return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _load_pepperstone_symbol_point(symbol: str) -> Dict[str, object]:
+    """Read one unambiguous MT5 SYMBOL_POINT from the configured EA export."""
+    path = _pepperstone_spread_export_path()
+    try:
+        raw = path.read_text(encoding="utf-8-sig")
+    except OSError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Pepperstone MT5 point metadata is unavailable. Enable the Trader EA spread export and make its "
+                f"PepperstoneSpreadExportPath match PEPPERSTONE_SPREAD_EXPORT_PATH or the project default: {path}"
+            ),
+        ) from exc
+    try:
+        payload = json.loads(raw, parse_float=Decimal)
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Pepperstone MT5 point export is malformed at {path}; re-export the Trader symbol snapshot.",
+        ) from exc
+    if not isinstance(payload, dict) or str(payload.get("version")) != "1":
+        raise HTTPException(status_code=400, detail="Pepperstone MT5 point export has an unsupported schema; re-export the Trader symbol snapshot.")
+    if str(payload.get("broker") or "").strip().lower() != "pepperstone":
+        raise HTTPException(status_code=400, detail="Pepperstone MT5 point export identifies a different broker; select the Pepperstone Trader export.")
+    generated_at = _pepperstone_parse_snapshot_time(payload.get("generated_at"), "generated_at")
+    raw_items = payload.get("symbols", payload.get("spreads", payload.get("items")))
+    if not isinstance(raw_items, list):
+        raise HTTPException(status_code=400, detail="Pepperstone MT5 point export is missing its symbols list; re-export the Trader symbol snapshot.")
+
+    requested_key = _pepperstone_symbol_key(symbol)
+    matches: List[Dict[str, object]] = []
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
+        canonical = item.get("symbol") or item.get("name") or item.get("instrument") or item.get("mt5_symbol")
+        if _pepperstone_symbol_key(canonical) == requested_key:
+            matches.append(item)
+    if len(matches) != 1:
+        reason = "missing" if not matches else "ambiguous"
+        raise HTTPException(
+            status_code=400,
+            detail=f"Pepperstone MT5 point mapping for {symbol} is {reason} in {path}; export exactly one matching Market Watch symbol.",
+        )
+
+    item = matches[0]
+    if item.get("available") is False or str(item.get("available") or "true").strip().lower() in {"0", "false", "n", "no"}:
+        raise HTTPException(status_code=400, detail=f"Pepperstone MT5 point mapping for {symbol} is unavailable; check the Trader export and Market Watch quote.")
+    mt5_symbol = str(item.get("mt5_symbol") or "").strip()
+    if not mt5_symbol:
+        raise HTTPException(status_code=400, detail=f"Pepperstone MT5 point mapping for {symbol} has no mt5_symbol; re-export the Trader symbol snapshot.")
+    try:
+        point = Decimal(str(item.get("point")))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Pepperstone MT5 point mapping for {symbol} has no valid SYMBOL_POINT.") from exc
+    if not point.is_finite() or point <= 0:
+        raise HTTPException(status_code=400, detail=f"Pepperstone MT5 point mapping for {symbol} has an invalid SYMBOL_POINT; re-export the Trader symbol snapshot.")
+    item_timestamp = _pepperstone_parse_snapshot_time(item.get("timestamp") or item.get("time") or item.get("generated_at") or generated_at, "symbol")
+    return {
+        "symbol": symbol,
+        "mt5_symbol": mt5_symbol,
+        "point": point,
+        "generated_at": generated_at,
+        "timestamp": item_timestamp,
+        "source_path": str(path.resolve()),
+        "source": "Pepperstone Trader spread export",
+    }
+
+
+def _pepperstone_positive_tick_count(value: object, field: str) -> int:
+    try:
+        count = Decimal(str(value))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"{field} must be a finite positive whole number of TradingView ticks.") from exc
+    if not count.is_finite() or count <= 0 or count != count.to_integral_value():
+        raise HTTPException(status_code=400, detail=f"{field} must be a finite positive whole number of TradingView ticks.")
+    return int(count)
+
+
+def _pepperstone_convert_ticks_to_points(
+    tick_count: object, chart_tick_size: object, mt5_point: object, field: str
+) -> Dict[str, object]:
+    ticks = _pepperstone_positive_tick_count(tick_count, field)
+    try:
+        chart_step = Decimal(str(chart_tick_size))
+        point = Decimal(str(mt5_point))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="TradingView tick size and MT5 SYMBOL_POINT must be valid positive numbers.") from exc
+    if not chart_step.is_finite() or chart_step <= 0:
+        raise HTTPException(status_code=400, detail="TradingView chart tick size must be a finite positive number.")
+    if not point.is_finite() or point <= 0:
+        raise HTTPException(status_code=400, detail="Pepperstone MT5 SYMBOL_POINT must be a finite positive number.")
+    distance = Decimal(ticks) * chart_step
+    raw_points = distance / point
+    if not raw_points.is_finite() or raw_points != raw_points.to_integral_value():
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{field} distance { _fmt_dec(distance) } is not representable as a whole MT5 point count "
+                f"(TradingView tick { _fmt_dec(chart_step) }, MT5 point { _fmt_dec(point) }); change the chart tick size or distance."
+            ),
+        )
+    points = int(raw_points)
+    if points <= 0 or points > _MQL_INT_MAX:
+        raise HTTPException(status_code=400, detail=f"Converted {field} MT5 points must be between 1 and {_MQL_INT_MAX}.")
+    return {"ticks": ticks, "price_distance": distance, "points": points}
+
+
+def _pepperstone_resolve_chart_tick_size(raw_override: object, default_step: Decimal) -> Tuple[Decimal, str, str]:
+    raw = str(raw_override or "").strip()
+    if not raw:
+        if not default_step.is_finite() or default_step <= 0:
+            raise HTTPException(status_code=400, detail="OANDA chart-feed default tick size is invalid; enter a positive TradingView tick-size override.")
+        return default_step, "OANDA display precision (OANDA chart-feed default)", ""
+    try:
+        step = Decimal(raw)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="TradingView tick-size override must be a finite positive number.") from exc
+    if not step.is_finite() or step <= 0:
+        raise HTTPException(status_code=400, detail="TradingView tick-size override must be a finite positive number.")
+    return step, "TradingView user override", _fmt_dec(step)
+
+
+_PEPPERSTONE_QUOTE_SNAPSHOT_TTL_SECONDS = 20 * 60
+_PEPPERSTONE_QUOTE_SNAPSHOTS: Dict[str, Dict[str, object]] = {}
+_PEPPERSTONE_QUOTE_SNAPSHOTS_LOCK = threading.RLock()
+
+
+def _store_pepperstone_quote_snapshot(context_id: str, snapshot: Dict[str, object]) -> None:
+    now = time.time()
+    with _PEPPERSTONE_QUOTE_SNAPSHOTS_LOCK:
+        for key in [key for key, value in _PEPPERSTONE_QUOTE_SNAPSHOTS.items() if now - float(value.get("stored_at") or 0) > _PEPPERSTONE_QUOTE_SNAPSHOT_TTL_SECONDS]:
+            _PEPPERSTONE_QUOTE_SNAPSHOTS.pop(key, None)
+        _PEPPERSTONE_QUOTE_SNAPSHOTS[context_id] = {**snapshot, "stored_at": now}
+        while len(_PEPPERSTONE_QUOTE_SNAPSHOTS) > 256:
+            _PEPPERSTONE_QUOTE_SNAPSHOTS.pop(next(iter(_PEPPERSTONE_QUOTE_SNAPSHOTS)))
+
+
+def _get_pepperstone_quote_snapshot(context_id: str) -> Dict[str, object]:
+    with _PEPPERSTONE_QUOTE_SNAPSHOTS_LOCK:
+        snapshot = _PEPPERSTONE_QUOTE_SNAPSHOTS.get(context_id)
+        if snapshot is None:
+            raise HTTPException(status_code=409, detail="Pepperstone quote conversion is unavailable or expired. Calculate again before downloading the .set file.")
+        if time.time() - float(snapshot.get("stored_at") or 0) > _PEPPERSTONE_QUOTE_SNAPSHOT_TTL_SECONDS:
+            _PEPPERSTONE_QUOTE_SNAPSHOTS.pop(context_id, None)
+            raise HTTPException(status_code=409, detail="Pepperstone quote conversion expired. Calculate again before downloading the .set file.")
+        return dict(snapshot)
+
+
 def _pepperstone_default_risk_slippage_buffer_points() -> int:
     raw = os.getenv("PEPPERSTONE_TRADER_RISK_SLIPPAGE_BUFFER_POINTS", "50")
     try:
@@ -27485,6 +27667,11 @@ def _build_pepperstone_trader_set(payload: Dict[str, object]) -> Tuple[str, str]
     if asset != "fx" or broker != "pepperstone":
         raise HTTPException(status_code=400, detail="Pepperstone .set export is only available for FX + Pepperstone.")
 
+    context_id = str(payload.get("calculation_context_id") or "").strip()
+    if not context_id:
+        raise HTTPException(status_code=409, detail="Calculate a Pepperstone quote before downloading the .set file.")
+    quote_snapshot = _get_pepperstone_quote_snapshot(context_id)
+
     order_type = str(payload.get("order_type") or "").strip().lower()
     if order_type not in {"limit", "market"}:
         raise HTTPException(status_code=400, detail="order_type must be limit or market.")
@@ -27492,6 +27679,50 @@ def _build_pepperstone_trader_set(payload: Dict[str, object]) -> Tuple[str, str]
     side = str(payload.get("side") or payload.get("action") or "").strip().lower()
     if side not in {"buy", "sell"}:
         raise HTTPException(status_code=400, detail="side must be buy or sell.")
+
+    account = str(payload.get("account") or "").strip().lower()
+    symbol = str(payload.get("symbol") or "").strip()
+    if account != str(quote_snapshot.get("account") or "").lower() or side != quote_snapshot.get("side") or order_type != quote_snapshot.get("order_type"):
+        raise HTTPException(status_code=409, detail="Pepperstone .set inputs no longer match the calculated quote. Recalculate before downloading.")
+    try:
+        _asset, _broker, resolved_symbol = _calculator_effective_route("fx", "pepperstone", symbol)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if resolved_symbol != quote_snapshot.get("symbol"):
+        raise HTTPException(status_code=409, detail="Pepperstone .set symbol no longer matches the calculated quote. Recalculate before downloading.")
+
+    target_mode = str(payload.get("target_mode") or "").strip().lower()
+    if target_mode not in {"rr", "ticks"} or target_mode != quote_snapshot.get("target_mode"):
+        raise HTTPException(status_code=409, detail="Pepperstone target mode no longer matches the calculated quote. Recalculate before downloading.")
+    stop_ticks = _pepperstone_positive_tick_count(payload.get("stop_loss_ticks"), "stop_loss_ticks")
+    if stop_ticks != quote_snapshot.get("stop_ticks"):
+        raise HTTPException(status_code=409, detail="Pepperstone stop ticks no longer match the calculated quote. Recalculate before downloading.")
+    override_text = str(payload.get("chart_tick_size_override") or "").strip()
+    if override_text:
+        try:
+            override_text = _fmt_dec(Decimal(override_text))
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="TradingView tick-size override must be a finite positive number.") from exc
+    if override_text != str(quote_snapshot.get("chart_tick_size_override") or ""):
+        raise HTTPException(status_code=409, detail="TradingView tick-size override changed since the quote. Recalculate before downloading.")
+    chart_tick_size = Decimal(str(quote_snapshot["chart_tick_size"]))
+    quoted_chart_tick_size = payload.get("quoted_chart_tick_size")
+    if quoted_chart_tick_size not in (None, ""):
+        try:
+            if Decimal(str(quoted_chart_tick_size)) != chart_tick_size:
+                raise HTTPException(status_code=409, detail="Quoted TradingView tick size does not match the server quote. Recalculate before downloading.")
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="Quoted TradingView tick size is invalid.") from exc
+
+    current_point = _load_pepperstone_symbol_point(resolved_symbol)
+    if (
+        str(current_point.get("source_path")) != str(quote_snapshot.get("point_source_path"))
+        or str(current_point.get("mt5_symbol")) != str(quote_snapshot.get("mt5_symbol"))
+        or Decimal(str(current_point.get("point"))) != Decimal(str(quote_snapshot.get("mt5_point")))
+    ):
+        raise HTTPException(status_code=409, detail="Pepperstone MT5 symbol mapping or SYMBOL_POINT changed since the quote. Calculate again before downloading the .set file.")
 
     entry: Optional[Decimal] = None
     if order_type == "limit":
@@ -27501,18 +27732,43 @@ def _build_pepperstone_trader_set(payload: Dict[str, object]) -> Tuple[str, str]
         entry = _dec(entry_raw, "entry_price")
         if entry <= 0:
             raise HTTPException(status_code=400, detail="entry_price must be greater than zero.")
+    quoted_entry = quote_snapshot.get("entry_price")
+    if order_type == "limit" and (quoted_entry is None or entry != Decimal(str(quoted_entry))):
+        raise HTTPException(status_code=409, detail="Pepperstone limit entry no longer matches the calculated quote. Recalculate before downloading.")
 
-    stop_ticks = _pepperstone_set_positive_int(_dec(payload.get("stop_loss_ticks") or payload.get("submitted_stop_loss_ticks"), "stop_loss_ticks"), "stop_loss_ticks")
-    rr = _dec(payload.get("risk_reward") or payload.get("requested_rr_net") or payload.get("rr"), "risk_reward")
-    if rr <= 0:
-        raise HTTPException(status_code=400, detail="risk_reward must be greater than zero.")
+    stop_conversion = _pepperstone_convert_ticks_to_points(
+        stop_ticks, chart_tick_size, current_point["point"], "stop_loss_ticks"
+    )
+    rr: Optional[Decimal] = None
+    target_conversion: Optional[Dict[str, object]] = None
+    if target_mode == "rr":
+        try:
+            rr = Decimal(str(payload.get("risk_reward")))
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="risk_reward must be greater than zero when target_mode=rr.") from exc
+        if not rr.is_finite() or rr <= 0:
+            raise HTTPException(status_code=400, detail="risk_reward must be greater than zero when target_mode=rr.")
+        if rr != Decimal(str(quote_snapshot.get("risk_reward"))):
+            raise HTTPException(status_code=409, detail="Net R value no longer matches the calculated quote. Recalculate before downloading.")
+    else:
+        tp_ticks = _pepperstone_positive_tick_count(payload.get("take_profit_ticks"), "take_profit_ticks")
+        if tp_ticks != quote_snapshot.get("take_profit_ticks"):
+            raise HTTPException(status_code=409, detail="Manual target ticks no longer match the calculated quote. Recalculate before downloading.")
+        target_conversion = _pepperstone_convert_ticks_to_points(
+            tp_ticks, chart_tick_size, current_point["point"], "take_profit_ticks"
+        )
+
+    risk_mode = str(payload.get("risk_mode") or "").strip().lower()
+    risk_value = _dec(payload.get("risk_value"), "risk_value")
+    if risk_mode != quote_snapshot.get("risk_mode") or risk_value != Decimal(str(quote_snapshot.get("risk_value"))):
+        raise HTTPException(status_code=409, detail="Pepperstone risk input no longer matches the calculated quote. Recalculate before downloading.")
 
     risk_target = _pepperstone_set_risk_target(payload)
     if risk_target <= 0:
         raise HTTPException(status_code=400, detail="RiskAUD_Target must be greater than zero.")
     risk_min = risk_target * Decimal("0.90")
     risk_max = risk_target * Decimal("1.20")
-    preflight = _pepperstone_risk_buffer_preflight(stop_points=stop_ticks, risk_target=risk_target)
+    preflight = _pepperstone_risk_buffer_preflight(stop_points=int(stop_conversion["points"]), risk_target=risk_target)
     if not preflight["compatible"]:
         raise HTTPException(
             status_code=422,
@@ -27522,7 +27778,11 @@ def _build_pepperstone_trader_set(payload: Dict[str, object]) -> Tuple[str, str]
                 "preflight": preflight,
             },
         )
-    tp_points = max(1, int((Decimal(stop_ticks) * rr).to_integral_value(rounding=ROUND_HALF_UP)))
+    tp_points = (
+        int(target_conversion["points"])
+        if target_conversion is not None
+        else max(1, int((Decimal(int(stop_conversion["points"])) * (rr or Decimal("0"))).to_integral_value(rounding=ROUND_HALF_UP)))
+    )
 
     values = {
         "Strategy": "2" if order_type == "limit" else "3",
@@ -27535,13 +27795,14 @@ def _build_pepperstone_trader_set(payload: Dict[str, object]) -> Tuple[str, str]
         "RiskSlippageBufferPoints": str(preflight["planned_buffer_points"]),
         "SlippagePoints": str(_pepperstone_default_slippage_points()),
         "AutoFitRiskSlippageBuffer": _pepperstone_trader_set_bool(True),
-        "SL_DistancePoints": str(stop_ticks),
-        "AutoTP_NetRR_Enabled": _pepperstone_trader_set_bool(True),
-        "NetRR_Target": _pepperstone_set_decimal(rr, places="0.01"),
+        "SL_DistancePoints": str(stop_conversion["points"]),
+        "AutoTP_NetRR_Enabled": _pepperstone_trader_set_bool(target_mode == "rr"),
         "TP_DistancePoints": str(tp_points),
         "MagicNumber": str(int(os.getenv("PEPPERSTONE_TRADER_MAGIC_NUMBER", "91001") or "91001")),
         "EnforceOneTradeAtATime": _pepperstone_trader_set_bool(True),
     }
+    if target_mode == "rr":
+        values["NetRR_Target"] = _pepperstone_set_decimal(rr or Decimal("0"), places="0.01")
     if order_type == "limit":
         values.update(
             {
@@ -28421,21 +28682,37 @@ async def calculator_instrument(asset: str, account: str, symbol: str, broker: s
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return JSONResponse(
-            {
-                "asset": "fx",
-                "broker": broker_norm,
-                "account": account_norm,
-                "symbol": resolved_symbol,
-                "displayPrecision": meta.get("displayPrecision"),
-                "tradeUnitsPrecision": meta.get("tradeUnitsPrecision"),
-                "pipLocation": meta.get("pipLocation"),
-                "minimumTradeSize": meta.get("minimumTradeSize"),
-                "maximumOrderUnits": meta.get("maximumOrderUnits"),
-                "maximumPositionSize": meta.get("maximumPositionSize"),
-                "marginRate": meta.get("marginRate"),
-            }
-        )
+        instrument_payload: Dict[str, object] = {
+            "asset": "fx",
+            "broker": broker_norm,
+            "account": account_norm,
+            "symbol": resolved_symbol,
+            "displayPrecision": meta.get("displayPrecision"),
+            "tradeUnitsPrecision": meta.get("tradeUnitsPrecision"),
+            "pipLocation": meta.get("pipLocation"),
+            "minimumTradeSize": meta.get("minimumTradeSize"),
+            "maximumOrderUnits": meta.get("maximumOrderUnits"),
+            "maximumPositionSize": meta.get("maximumPositionSize"),
+            "marginRate": meta.get("marginRate"),
+        }
+        if broker_norm == "pepperstone":
+            try:
+                precision = int(meta.get("displayPrecision"))
+                default_chart_step = Decimal("1").scaleb(-precision)
+            except Exception as exc:
+                raise HTTPException(status_code=502, detail="OANDA chart-feed default tick size is unavailable; enter a positive TradingView tick-size override.") from exc
+            point_snapshot = _load_pepperstone_symbol_point(resolved_symbol)
+            instrument_payload.update(
+                {
+                    "chart_tick_size_default": _fmt_dec(default_chart_step),
+                    "chart_tick_size_source": "OANDA display precision (OANDA chart-feed default; override for another TradingView feed)",
+                    "mt5_symbol": point_snapshot["mt5_symbol"],
+                    "mt5_point_size": _fmt_dec(point_snapshot["point"]),
+                    "mt5_point_source": point_snapshot["source"],
+                    "mt5_point_timestamp": point_snapshot["timestamp"],
+                }
+            )
+        return JSONResponse(instrument_payload)
     raise HTTPException(status_code=400, detail="asset must be crypto or fx.")
 
 
@@ -28668,6 +28945,12 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
     pending_dependencies: Set[str] = set()
     resolved_symbol_for_debug = ""
     submitted_debug: Dict[str, object] = {}
+    pepperstone_point_snapshot: Optional[Dict[str, object]] = None
+    pepperstone_chart_tick_size: Optional[Decimal] = None
+    pepperstone_chart_tick_source = ""
+    pepperstone_chart_tick_override = ""
+    pepperstone_stop_conversion: Optional[Dict[str, object]] = None
+    pepperstone_target_conversion: Optional[Dict[str, object]] = None
     try:
         asset = str(payload.get("asset") or "").strip().lower()
         account = str(payload.get("account") or "live").strip().lower()
@@ -28708,11 +28991,13 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
             broker = "bybit"
 
         stop_ticks = _dec(payload.get("stop_loss_ticks"), "stop_loss_ticks")
+        if asset == "fx" and broker == "pepperstone":
+            stop_ticks = Decimal(_pepperstone_positive_tick_count(payload.get("stop_loss_ticks"), "stop_loss_ticks"))
         if stop_ticks <= 0:
             raise HTTPException(status_code=400, detail="stop_loss_ticks must be greater than zero.")
 
         risk_val = _dec(payload.get("risk_value"), "risk_value")
-        if risk_val <= 0:
+        if not risk_val.is_finite() or risk_val <= 0:
             raise HTTPException(status_code=400, detail="risk_value must be greater than zero.")
         limit_entry = payload.get("entry_price")
         if order_type == "limit" and (limit_entry is None or str(limit_entry).strip() == ""):
@@ -28722,10 +29007,12 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
         tp_ticks: Optional[Decimal] = None
         if target_mode == "rr":
             rr_requested = _dec(payload.get("risk_reward"), "risk_reward")
-            if rr_requested <= 0:
+            if not rr_requested.is_finite() or rr_requested <= 0:
                 raise HTTPException(status_code=400, detail="risk_reward must be greater than zero when target_mode=rr.")
         else:
             tp_ticks = _dec(payload.get("take_profit_ticks"), "take_profit_ticks")
+            if asset == "fx" and broker == "pepperstone":
+                tp_ticks = Decimal(_pepperstone_positive_tick_count(payload.get("take_profit_ticks"), "take_profit_ticks"))
             if tp_ticks <= 0:
                 raise HTTPException(status_code=400, detail="take_profit_ticks must be greater than zero when target_mode=ticks.")
 
@@ -29272,11 +29559,13 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
                         "message": "Pepperstone percentage risk requires an explicit Pepperstone account-equity source. Select Fixed AUD; no OANDA account data is used.",
                     },
                 )
+            symbol = normalize_oanda_symbol_query(symbol_in)
+            if is_pepperstone:
+                pepperstone_point_snapshot = _load_pepperstone_symbol_point(symbol)
             try:
                 cfg = _get_oanda_config(account)
             except ValueError as exc:
                 raise HTTPException(status_code=500, detail=str(exc)) from exc
-            symbol = normalize_oanda_symbol_query(symbol_in)
             oanda_parallel_started = time.perf_counter()
             meta_task = asyncio.create_task(_fetch_oanda_instrument_meta(base_url=cfg["base_url"], account_id=cfg["account_id"], api_key=cfg["token"], symbol=symbol, mode=account))
             pricing_task = asyncio.create_task(_fetch_oanda_json(base_url=cfg["base_url"], account_id=cfg["account_id"], api_key=cfg["token"], endpoint=f"/accounts/{{account_id}}/pricing?instruments={symbol}&includeHomeConversions=true", mode=account))
@@ -29302,6 +29591,19 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
             max_position_size = Decimal(str(meta.get("maximumPositionSize") or "0"))
             margin_rate = Decimal(str(meta.get("marginRate") or "0"))
             tick_size = Decimal("1").scaleb(-display_precision)
+            distance_tick_size = tick_size
+            if is_pepperstone:
+                pepperstone_chart_tick_size, pepperstone_chart_tick_source, pepperstone_chart_tick_override = _pepperstone_resolve_chart_tick_size(
+                    payload.get("chart_tick_size"), tick_size
+                )
+                distance_tick_size = pepperstone_chart_tick_size
+                pepperstone_stop_conversion = _pepperstone_convert_ticks_to_points(
+                    stop_ticks, distance_tick_size, pepperstone_point_snapshot["point"], "stop_loss_ticks"
+                )
+                if target_mode == "ticks" and tp_ticks is not None:
+                    pepperstone_target_conversion = _pepperstone_convert_ticks_to_points(
+                        tp_ticks, distance_tick_size, pepperstone_point_snapshot["point"], "take_profit_ticks"
+                    )
             try:
                 prices = pricing_task.result()
             except Exception as exc:
@@ -29319,7 +29621,7 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
             entry = _dec(limit_entry, "entry_price") if order_type == "limit" else (ask if side == "buy" else bid)
             if entry <= 0:
                 raise HTTPException(status_code=400, detail="Bad limit price.")
-            sl = (entry - stop_ticks * tick_size) if side == "buy" else (entry + stop_ticks * tick_size)
+            sl = (entry - stop_ticks * distance_tick_size) if side == "buy" else (entry + stop_ticks * distance_tick_size)
 
             summary = summary_task.result() if summary_task is not None else None
             account_home_ccy = "AUD" if is_pepperstone else str(summary.get("currency") or "").strip().upper()
@@ -29406,7 +29708,7 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
                 effective_rr_net = rr_floor["effective_rr_net"]
                 fee_buffer_r = ((spread_quote * loss_factor) / loss_per_unit_home) if loss_per_unit_home > 0 else Decimal("0")
             else:
-                target_distance = (tp_ticks or Decimal("0")) * tick_size
+                target_distance = (tp_ticks or Decimal("0")) * distance_tick_size
                 if target_mode == "rr" and rr_requested is not None:
                     target_distance = abs(entry - sl) * rr_requested
                     requested_rr_net = rr_requested
@@ -29421,6 +29723,7 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
                 "submitted_risk_value": _fmt_dec(risk_val),
                 "submitted_stop_loss_ticks": _fmt_dec(stop_ticks),
                 "tick_size": _fmt_dec(tick_size),
+                "chart_tick_size": _fmt_dec(distance_tick_size),
                 "entry_price_used": _fmt_dec_by_precision(entry, tick_size),
                 "spread_quote": _fmt_dec(spread_quote),
                 "loss_per_unit_home": _fmt_dec(loss_per_unit_home),
@@ -29456,10 +29759,14 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
                     "resolved_venue": "Pepperstone" if broker == "pepperstone" else "OANDA",
                     "symbol": symbol,
                     "tick_size": _fmt_dec(tick_size),
+                    "chart_tick_size": _fmt_dec(distance_tick_size),
+                    "chart_tick_size_source": pepperstone_chart_tick_source or "OANDA display precision",
+                    "price_display_tick_size": _fmt_dec(min(tick_size, distance_tick_size)),
                     "entry_price": _fmt_dec_by_precision(entry, tick_size),
-                    "stop_price": _fmt_dec_by_precision(sl, tick_size),
-                    "target_price": _fmt_dec_by_precision(tp, tick_size),
-                    "target_distance": _fmt_dec_by_precision(target_distance, tick_size),
+                    "stop_price": _fmt_dec(sl) if is_pepperstone else _fmt_dec_by_precision(sl, tick_size),
+                    "target_price": _fmt_dec(tp) if is_pepperstone else _fmt_dec_by_precision(tp, tick_size),
+                    "target_distance": _fmt_dec(target_distance) if is_pepperstone else _fmt_dec_by_precision(target_distance, tick_size),
+                    "stop_loss_price_distance": _fmt_dec(abs(entry - sl)),
                     "quantity": _fmt_dec(units),
                     "notional": _fmt_dec(units * entry),
                     "estimated_fees_or_spread_aud": _fmt_dec(max(Decimal("0"), spread_home)),
@@ -29475,6 +29782,7 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
                     "submitted_risk_mode": risk_mode,
                     "submitted_risk_value": _fmt_dec(risk_val),
                     "submitted_stop_loss_ticks": _fmt_dec(stop_ticks),
+                    "submitted_take_profit_ticks": _fmt_dec(tp_ticks) if tp_ticks is not None else None,
                     "entry_price_used": _fmt_dec_by_precision(entry, tick_size),
                     "spread_quote": _fmt_dec(spread_quote),
                     "loss_per_unit_home": _fmt_dec(loss_per_unit_home),
@@ -29489,6 +29797,7 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
             if is_pepperstone:
                 response_payload["market_data_source"] = "OANDA FX pricing/conversion only; no Pepperstone account or margin data."
                 response_payload["execution_margin_validation"] = "Trader validates live Pepperstone margin at execution."
+                response_payload["position_size_estimate_note"] = "Position-size estimate from OANDA price/conversion data; Trader validates executable MT5 lots, margin, commission, and volume."
             else:
                 response_payload.update(
                     {
@@ -29505,16 +29814,67 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
                     if risk_mode == "fixed_aud"
                     else Decimal(str(response_payload["estimated_total_loss_aud"]))
                 )
-                response_payload["pepperstone_risk_buffer_preflight"] = _pepperstone_risk_buffer_preflight(
-                    stop_points=int(stop_ticks),
+                preflight = _pepperstone_risk_buffer_preflight(
+                    stop_points=int(pepperstone_stop_conversion["points"]),
                     risk_target=preflight_risk_target,
                 )
+                minimum_ticks = (
+                    Decimal(int(preflight["minimum_compatible_stop_points"]))
+                    * Decimal(str(pepperstone_point_snapshot["point"]))
+                    / Decimal(str(pepperstone_chart_tick_size))
+                ).to_integral_value(rounding=ROUND_CEILING)
+                preflight["minimum_compatible_stop_ticks"] = int(minimum_ticks)
+                preflight["submitted_stop_ticks"] = int(stop_ticks)
+                response_payload["pepperstone_risk_buffer_preflight"] = preflight
+                response_payload["pepperstone_distance_conversion"] = {
+                    "symbol": symbol,
+                    "chart_tick_size": _fmt_dec(pepperstone_chart_tick_size),
+                    "chart_tick_size_source": pepperstone_chart_tick_source,
+                    "mt5_symbol": pepperstone_point_snapshot["mt5_symbol"],
+                    "mt5_point_size": _fmt_dec(pepperstone_point_snapshot["point"]),
+                    "mt5_point_source": pepperstone_point_snapshot["source"],
+                    "mt5_point_timestamp": pepperstone_point_snapshot["timestamp"],
+                    "stop_loss_ticks": int(stop_ticks),
+                    "stop_loss_price_distance": _fmt_dec(pepperstone_stop_conversion["price_distance"]),
+                    "stop_loss_mt5_points": int(pepperstone_stop_conversion["points"]),
+                    "target_mode": target_mode,
+                    "take_profit_ticks": int(tp_ticks) if tp_ticks is not None else None,
+                    "take_profit_price_distance": _fmt_dec(pepperstone_target_conversion["price_distance"]) if pepperstone_target_conversion else None,
+                    "take_profit_mt5_points": int(pepperstone_target_conversion["points"]) if pepperstone_target_conversion else None,
+                }
             calculation_context_id = (
                 str(payload.get("calculation_context_id") or "").strip()
                 or f"calcctx_{broker}_{account}_{uuid4().hex}"
             )
             response_payload["calculation_context_id"] = calculation_context_id
             response_payload["quote_created_at_ms"] = int(time.time() * 1000)
+            if is_pepperstone:
+                _store_pepperstone_quote_snapshot(
+                    calculation_context_id,
+                    {
+                        "account": account,
+                        "symbol": symbol,
+                        "side": side,
+                        "order_type": order_type,
+                        "entry_price": response_payload.get("entry_price") if order_type == "limit" else None,
+                        "target_mode": target_mode,
+                        "stop_ticks": int(stop_ticks),
+                        "take_profit_ticks": int(tp_ticks) if tp_ticks is not None else None,
+                        "risk_reward": _fmt_dec(rr_requested) if rr_requested is not None else "",
+                        "risk_mode": risk_mode,
+                        "risk_value": _fmt_dec(risk_val),
+                        "chart_tick_size": _fmt_dec(pepperstone_chart_tick_size),
+                        "chart_tick_size_override": pepperstone_chart_tick_override,
+                        "chart_tick_size_source": pepperstone_chart_tick_source,
+                        "mt5_symbol": pepperstone_point_snapshot["mt5_symbol"],
+                        "mt5_point": _fmt_dec(pepperstone_point_snapshot["point"]),
+                        "point_source_path": pepperstone_point_snapshot["source_path"],
+                        "point_generated_at": pepperstone_point_snapshot["generated_at"],
+                        "point_timestamp": pepperstone_point_snapshot["timestamp"],
+                        "stop_points": int(pepperstone_stop_conversion["points"]),
+                        "take_profit_points": int(pepperstone_target_conversion["points"]) if pepperstone_target_conversion else None,
+                    },
+                )
             if _include_trendline_snapshot:
                 response_payload["_trusted_trendline_quote"] = sizing_snapshot
             try:

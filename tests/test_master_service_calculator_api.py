@@ -6,6 +6,7 @@ import sys
 import types
 import importlib.machinery
 from datetime import datetime
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -47,6 +48,111 @@ except Exception:
     sys.modules["urllib3"] = urllib3
     sys.modules["urllib3.util"] = util
     sys.modules["urllib3.util.retry"] = retry
+
+
+def _write_pepperstone_point_export(tmp_path: Path, entries: list[dict]) -> Path:
+    path = tmp_path / "pepperstone_spreads_fixture.json"
+    path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "broker": "pepperstone",
+                "generated_at": "2026-10-03T00:00:00Z",
+                "symbol_count": len(entries),
+                "symbols": entries,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def _pepperstone_point_entry(symbol: str, mt5_symbol: str, point: str) -> dict:
+    return {
+        "symbol": symbol,
+        "mt5_symbol": mt5_symbol,
+        "available": True,
+        "point": point,
+        "digits": 5,
+        "timestamp": "2026-10-03T00:00:00Z",
+    }
+
+
+def _mock_pepperstone_quote_dependencies(monkeypatch: pytest.MonkeyPatch) -> dict:
+    calls = {"account_summary": 0, "pricing": 0}
+    monkeypatch.setattr(master_service, "_get_oanda_config", lambda _account: {"base_url": "https://oanda.test", "account_id": "acct", "token": "test-token"})
+
+    async def fake_meta(**kwargs):
+        precision = 3 if str(kwargs.get("symbol") or "").endswith("_JPY") else 5
+        return {"displayPrecision": precision, "tradeUnitsPrecision": 0, "minimumTradeSize": "1", "marginRate": "0.05"}
+
+    monkeypatch.setattr(master_service, "_fetch_oanda_instrument_meta", fake_meta)
+
+    async def fake_pricing(**_kwargs):
+        calls["pricing"] += 1
+        return {
+            "prices": [{"bids": [{"price": "1.30000"}], "asks": [{"price": "1.30020"}]}],
+            "homeConversions": [
+                {"currency": "USD", "accountGain": "1.5", "accountLoss": "1.5", "positionValue": "1.5"},
+                {"currency": "JPY", "accountGain": "0.01", "accountLoss": "0.01", "positionValue": "0.01"},
+            ],
+        }
+
+    async def forbidden_account_summary(*_args, **_kwargs):
+        calls["account_summary"] += 1
+        raise AssertionError("Pepperstone quotes must not read OANDA balance, NAV, or margin data")
+
+    monkeypatch.setattr(master_service, "_fetch_oanda_json", fake_pricing)
+    monkeypatch.setattr(master_service, "_fetch_oanda_account_summary", forbidden_account_summary)
+    monkeypatch.setattr(master_service, "_upsert_calculator_trade_context", lambda payload, **_kwargs: payload)
+    monkeypatch.setattr(master_service, "_invalidate_open_orders_cache", lambda: None)
+    return calls
+
+
+def _pepperstone_quote_payload(**overrides: object) -> dict:
+    payload: dict = {
+        "asset": "fx",
+        "broker": "pepperstone",
+        "account": "demo",
+        "symbol": "GBPUSD",
+        "side": "buy",
+        "order_type": "market",
+        "risk_mode": "fixed_aud",
+        "risk_value": "10",
+        "stop_loss_ticks": "43",
+        "target_mode": "rr",
+        "risk_reward": "2",
+        "webhook": "no",
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _pepperstone_set_payload_from_quote(request_payload: dict, quote_body: dict) -> dict:
+    payload = {
+        "asset": "fx",
+        "broker": "pepperstone",
+        "account": request_payload.get("account", "demo"),
+        "symbol": quote_body["symbol"],
+        "side": request_payload["side"],
+        "order_type": request_payload["order_type"],
+        "stop_loss_ticks": request_payload["stop_loss_ticks"],
+        "target_mode": quote_body["target_mode"],
+        "chart_tick_size_override": request_payload.get("chart_tick_size", ""),
+        "quoted_chart_tick_size": quote_body["chart_tick_size"],
+        "calculation_context_id": quote_body["calculation_context_id"],
+        "risk_mode": request_payload["risk_mode"],
+        "risk_value": request_payload["risk_value"],
+        "estimated_total_loss_aud": quote_body["estimated_total_loss_aud"],
+        "estimated_total_loss": quote_body["estimated_total_loss"],
+    }
+    if quote_body["target_mode"] == "rr":
+        payload["risk_reward"] = request_payload["risk_reward"]
+    else:
+        payload["take_profit_ticks"] = request_payload["take_profit_ticks"]
+    if request_payload["order_type"] == "limit":
+        payload["entry_price"] = quote_body["entry_price"]
+    return payload
 HTTPX_AVAILABLE = importlib.util.find_spec("httpx") is not None
 if not HTTPX_AVAILABLE:
     class _HttpxResponse:
@@ -1838,16 +1944,10 @@ def test_calculator_quote_oanda_success_has_no_logger_nameerror(monkeypatch: pyt
     assert invalidations["count"] == 1
 
 
-def test_calculator_quote_pepperstone_market_is_supported_and_resolves_venue(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(master_service, "_get_oanda_config", lambda _a: {"base_url": "https://oanda.test", "account_id": "acct", "token": "tok"})
-    monkeypatch.setattr(master_service, "_fetch_oanda_instrument_meta", lambda **_kwargs: asyncio.sleep(0, result={"displayPrecision": 5, "tradeUnitsPrecision": 0, "minimumTradeSize": "1", "marginRate": "0.05"}))
-    monkeypatch.setattr(master_service, "_fetch_oanda_json", lambda **_kwargs: asyncio.sleep(0, result={"prices": [{"bids": [{"price": "1.10000"}], "asks": [{"price": "1.10020"}]}], "homeConversions": [{"currency": "USD", "accountGain": "1", "accountLoss": "1", "positionValue": "1"}]}))
-    async def forbidden_oanda_account_summary(*_args, **_kwargs):
-        raise AssertionError("Pepperstone calculations must not read OANDA account data")
-
-    monkeypatch.setattr(master_service, "_fetch_oanda_account_summary", forbidden_oanda_account_summary)
-    monkeypatch.setattr(master_service, "_upsert_calculator_trade_context", lambda payload, **_kwargs: payload)
-    monkeypatch.setattr(master_service, "_invalidate_open_orders_cache", lambda: None)
+def test_calculator_quote_pepperstone_market_is_supported_and_resolves_venue(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    export_path = _write_pepperstone_point_export(tmp_path, [_pepperstone_point_entry("EURUSD", "EURUSD", "0.00001")])
+    monkeypatch.setenv("PEPPERSTONE_SPREAD_EXPORT_PATH", str(export_path))
+    _mock_pepperstone_quote_dependencies(monkeypatch)
     response = asyncio.run(master_service.calculator_quote({"asset": "fx", "broker": "pepperstone", "account": "demo", "symbol": "eurusd", "side": "buy", "order_type": "market", "risk_mode": "fixed_aud", "risk_value": 10, "stop_loss_ticks": 35, "take_profit_ticks": 70}))
     body = json.loads(response.body.decode("utf-8"))
     assert body["broker"] == "pepperstone"
@@ -1981,8 +2081,11 @@ def _trader_input_names() -> set[str]:
     return names
 
 
-def test_pepperstone_set_automatically_derives_risk_buffer(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_pepperstone_set_automatically_derives_risk_buffer(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.delenv("PEPPERSTONE_TRADER_RISK_SLIPPAGE_BUFFER_POINTS", raising=False)
+    export_path = _write_pepperstone_point_export(tmp_path, [_pepperstone_point_entry("EURUSD", "EURUSD", "0.00001")])
+    monkeypatch.setenv("PEPPERSTONE_SPREAD_EXPORT_PATH", str(export_path))
+    _mock_pepperstone_quote_dependencies(monkeypatch)
     base_payload = {
         "asset": "fx",
         "broker": "pepperstone",
@@ -1996,7 +2099,9 @@ def test_pepperstone_set_automatically_derives_risk_buffer(monkeypatch: pytest.M
         "stop_loss_ticks": "43",
         "risk_reward": "2",
     }
-    response = asyncio.run(master_service.calculator_pepperstone_set(base_payload))
+    quote = json.loads(asyncio.run(master_service.calculator_quote(base_payload)).body.decode("utf-8"))
+    set_payload = _pepperstone_set_payload_from_quote(base_payload, quote)
+    response = asyncio.run(master_service.calculator_pepperstone_set(set_payload))
     assert response.media_type.startswith("text/plain")
     assert "Pepperstone_Trader_EUR_USD_BUY_LIMIT_" in response.headers["content-disposition"]
     values = _parse_set_file(response.body.decode("utf-8"))
@@ -2021,18 +2126,25 @@ def test_pepperstone_set_automatically_derives_risk_buffer(monkeypatch: pytest.M
     assert values["MagicNumber"] == "91001"
     assert values["EnforceOneTradeAtATime"] == "true"
 
-    sell_payload = dict(base_payload, side="sell")
+    sell_request = dict(base_payload, side="sell")
+    sell_quote = json.loads(asyncio.run(master_service.calculator_quote(sell_request)).body.decode("utf-8"))
+    sell_payload = _pepperstone_set_payload_from_quote(sell_request, sell_quote)
     sell_response = asyncio.run(master_service.calculator_pepperstone_set(sell_payload))
     sell_values = _parse_set_file(sell_response.body.decode("utf-8"))
     assert sell_values["StandardLimitSide"] == "1"
 
-    default_payload = dict(base_payload, stop_loss_ticks="200")
+    default_request = dict(base_payload, stop_loss_ticks="200")
+    default_quote = json.loads(asyncio.run(master_service.calculator_quote(default_request)).body.decode("utf-8"))
+    default_payload = _pepperstone_set_payload_from_quote(default_request, default_quote)
     default_response = asyncio.run(master_service.calculator_pepperstone_set(default_payload))
     default_values = _parse_set_file(default_response.body.decode("utf-8"))
     assert default_values["RiskSlippageBufferPoints"] == "50"
 
 
-def test_pepperstone_set_export_maps_market_side_and_generates_unique_one_shot_token() -> None:
+def test_pepperstone_set_export_maps_market_side_and_generates_unique_one_shot_token(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    export_path = _write_pepperstone_point_export(tmp_path, [_pepperstone_point_entry("EURUSD", "EURUSD", "0.00001")])
+    monkeypatch.setenv("PEPPERSTONE_SPREAD_EXPORT_PATH", str(export_path))
+    _mock_pepperstone_quote_dependencies(monkeypatch)
     base_payload = {
         "asset": "fx",
         "broker": "pepperstone",
@@ -2044,8 +2156,10 @@ def test_pepperstone_set_export_maps_market_side_and_generates_unique_one_shot_t
         "stop_loss_ticks": "35",
         "risk_reward": "2",
     }
-    first = asyncio.run(master_service.calculator_pepperstone_set(base_payload))
-    second = asyncio.run(master_service.calculator_pepperstone_set(base_payload))
+    quote = json.loads(asyncio.run(master_service.calculator_quote(base_payload)).body.decode("utf-8"))
+    set_payload = _pepperstone_set_payload_from_quote(base_payload, quote)
+    first = asyncio.run(master_service.calculator_pepperstone_set(set_payload))
+    second = asyncio.run(master_service.calculator_pepperstone_set(set_payload))
     first_values = _parse_set_file(first.body.decode("utf-8"))
     second_values = _parse_set_file(second.body.decode("utf-8"))
 
@@ -2075,13 +2189,19 @@ def test_pepperstone_set_export_maps_market_side_and_generates_unique_one_shot_t
     ):
         assert key in first_values
 
-    sell = asyncio.run(master_service.calculator_pepperstone_set(dict(base_payload, side="sell")))
+    sell_request = dict(base_payload, side="sell")
+    sell_quote = json.loads(asyncio.run(master_service.calculator_quote(sell_request)).body.decode("utf-8"))
+    sell = asyncio.run(master_service.calculator_pepperstone_set(_pepperstone_set_payload_from_quote(sell_request, sell_quote)))
     sell_values = _parse_set_file(sell.body.decode("utf-8"))
     assert sell_values["StandardMarketSide"] == "1"
 
 
-def test_pepperstone_set_export_rejects_tight_stop_before_token_generation() -> None:
+def test_pepperstone_set_export_rejects_tight_stop_before_token_generation(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    export_path = _write_pepperstone_point_export(tmp_path, [_pepperstone_point_entry("USDJPY", "USDJPY", "0.001")])
+    monkeypatch.setenv("PEPPERSTONE_SPREAD_EXPORT_PATH", str(export_path))
+    _mock_pepperstone_quote_dependencies(monkeypatch)
     payload = {
+        "account": "demo",
         "asset": "fx",
         "broker": "pepperstone",
         "symbol": "USD_JPY",
@@ -2092,8 +2212,12 @@ def test_pepperstone_set_export_rejects_tight_stop_before_token_generation() -> 
         "stop_loss_ticks": "20",
         "risk_reward": "2",
     }
+    quote = json.loads(asyncio.run(master_service.calculator_quote(payload)).body.decode("utf-8"))
+    set_payload = _pepperstone_set_payload_from_quote(payload, quote)
+    token_calls = []
+    monkeypatch.setattr(master_service, "uuid4", lambda: token_calls.append(True) or "should-not-be-created")
     with pytest.raises(master_service.HTTPException) as exc:
-        master_service._build_pepperstone_trader_set(payload)
+        master_service._build_pepperstone_trader_set(set_payload)
     assert exc.value.status_code == 422
     assert exc.value.detail["code"] == "PEPPERSTONE_SET_RISK_BUFFER_INCOMPATIBLE"
     preflight = exc.value.detail["preflight"]
@@ -2103,6 +2227,152 @@ def test_pepperstone_set_export_rejects_tight_stop_before_token_generation() -> 
     assert preflight["planned_buffer_points"] == 6
     assert preflight["minimum_compatible_stop_points"] == 30
     assert preflight["compatible"] is False
+    assert token_calls == []
+
+
+def test_pepperstone_tick_distances_convert_exactly_for_fx_and_jpy_steps(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    export_path = _write_pepperstone_point_export(
+        tmp_path,
+        [
+            _pepperstone_point_entry("GBPUSD", "GBPUSD.a", "0.00001"),
+            _pepperstone_point_entry("USDJPY", "USDJPY", "0.001"),
+        ],
+    )
+    monkeypatch.setenv("PEPPERSTONE_SPREAD_EXPORT_PATH", str(export_path))
+    gbp = master_service._load_pepperstone_symbol_point("GBP_USD")
+    jpy = master_service._load_pepperstone_symbol_point("USD_JPY")
+    assert gbp["mt5_symbol"] == "GBPUSD.a"
+    assert gbp["point"] == Decimal("0.00001")
+
+    cases = (
+        ("43", "0.00001", gbp["point"], 43, "0.00043"),
+        ("43", "0.0001", gbp["point"], 430, "0.0043"),
+        ("35", "0.001", jpy["point"], 35, "0.035"),
+        ("35", "0.01", jpy["point"], 350, "0.35"),
+    )
+    for count, chart_step, point, expected_points, expected_distance in cases:
+        converted = master_service._pepperstone_convert_ticks_to_points(count, chart_step, point, "stop_loss_ticks")
+        assert converted["points"] == expected_points
+        assert str(converted["price_distance"]) == expected_distance
+    target = master_service._pepperstone_convert_ticks_to_points("25", "0.0001", gbp["point"], "take_profit_ticks")
+    assert target == {"ticks": 25, "price_distance": Decimal("0.0025"), "points": 250}
+
+    with pytest.raises(master_service.HTTPException) as inexact:
+        master_service._pepperstone_convert_ticks_to_points("1", "0.00001", "0.00003", "stop_loss_ticks")
+    assert inexact.value.status_code == 422
+    assert "not representable as a whole MT5 point count" in str(inexact.value.detail)
+    for invalid_count in ("1.5", "NaN", "Infinity", "0"):
+        with pytest.raises(master_service.HTTPException, match="finite positive whole number"):
+            master_service._pepperstone_positive_tick_count(invalid_count, "stop_loss_ticks")
+
+    ambiguous_path = _write_pepperstone_point_export(
+        tmp_path,
+        [
+            _pepperstone_point_entry("GBPUSD", "GBPUSD.a", "0.00001"),
+            _pepperstone_point_entry("GBPUSD", "GBPUSD.b", "0.00001"),
+        ],
+    )
+    monkeypatch.setenv("PEPPERSTONE_SPREAD_EXPORT_PATH", str(ambiguous_path))
+    with pytest.raises(master_service.HTTPException, match="ambiguous"):
+        master_service._load_pepperstone_symbol_point("GBP_USD")
+
+
+def test_pepperstone_manual_ticks_quote_size_and_set_remain_independent_of_inactive_r(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    export_path = _write_pepperstone_point_export(tmp_path, [_pepperstone_point_entry("GBPUSD", "GBPUSD", "0.00001")])
+    monkeypatch.setenv("PEPPERSTONE_SPREAD_EXPORT_PATH", str(export_path))
+    calls = _mock_pepperstone_quote_dependencies(monkeypatch)
+
+    manual_request = _pepperstone_quote_payload(
+        side="sell",
+        target_mode="ticks",
+        take_profit_ticks="25",
+        risk_reward="99",
+        chart_tick_size="0.0001",
+    )
+    manual_quote = json.loads(asyncio.run(master_service.calculator_quote(manual_request)).body.decode("utf-8"))
+    conversion = manual_quote["pepperstone_distance_conversion"]
+    assert manual_quote["target_mode"] == "ticks"
+    assert manual_quote["requested_rr_net"] is None
+    assert manual_quote["chart_tick_size"] == "0.0001"
+    assert conversion["chart_tick_size_source"] == "TradingView user override"
+    assert conversion["mt5_point_size"] == "0.00001"
+    assert conversion["stop_loss_price_distance"] == "0.0043"
+    assert conversion["stop_loss_mt5_points"] == 430
+    assert conversion["take_profit_price_distance"] == "0.0025"
+    assert conversion["take_profit_mt5_points"] == 250
+    assert manual_quote["pepperstone_risk_buffer_preflight"]["stop_points"] == 430
+    assert manual_quote["pepperstone_risk_buffer_preflight"]["minimum_compatible_stop_ticks"] == 4
+    assert Decimal(manual_quote["quantity"]) > 0
+    assert "estimate from OANDA price/conversion data" in manual_quote["position_size_estimate_note"]
+    assert manual_quote["market_data_source"] == "OANDA FX pricing/conversion only; no Pepperstone account or margin data."
+    assert "margin_available_home" not in manual_quote
+    assert calls["account_summary"] == 0
+
+    manual_set = asyncio.run(master_service.calculator_pepperstone_set(_pepperstone_set_payload_from_quote(manual_request, manual_quote)))
+    manual_values = _parse_set_file(manual_set.body.decode("utf-8"))
+    assert manual_values["SL_DistancePoints"] == "430"
+    assert manual_values["TP_DistancePoints"] == "250"
+    assert manual_values["AutoTP_NetRR_Enabled"] == "false"
+    assert "NetRR_Target" not in manual_values
+    assert manual_values["StandardMarketSide"] == "1"
+
+    net_request = _pepperstone_quote_payload(
+        order_type="limit",
+        side="buy",
+        entry_price="1.30000",
+        target_mode="rr",
+        risk_reward="2",
+        chart_tick_size="0.0001",
+    )
+    net_quote = json.loads(asyncio.run(master_service.calculator_quote(net_request)).body.decode("utf-8"))
+    net_set = asyncio.run(master_service.calculator_pepperstone_set(_pepperstone_set_payload_from_quote(net_request, net_quote)))
+    net_values = _parse_set_file(net_set.body.decode("utf-8"))
+    assert net_values["SL_DistancePoints"] == "430"
+    assert net_values["TP_DistancePoints"] == "860"
+    assert net_values["AutoTP_NetRR_Enabled"] == "true"
+    assert net_values["NetRR_Target"] == "2"
+    assert net_values["StandardLimitSide"] == "0"
+    assert net_values["StandardLimitEntryPrice"] == "1.3"
+    assert calls["account_summary"] == 0
+
+
+def test_pepperstone_missing_or_changed_point_source_fails_before_market_token(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    missing_path = tmp_path / "not-created.json"
+    monkeypatch.setenv("PEPPERSTONE_SPREAD_EXPORT_PATH", str(missing_path))
+    oanda_calls = []
+    token_calls = []
+    real_uuid4 = master_service.uuid4
+    monkeypatch.setattr(master_service, "_get_oanda_config", lambda _account: oanda_calls.append("config"))
+    monkeypatch.setattr(master_service, "uuid4", lambda: token_calls.append(True) or "unexpected-token")
+    with pytest.raises(master_service.HTTPException) as unavailable:
+        asyncio.run(master_service.calculator_quote(_pepperstone_quote_payload()))
+    assert unavailable.value.status_code == 400
+    assert "Enable the Trader EA spread export" in str(unavailable.value.detail)
+    assert oanda_calls == []
+    assert token_calls == []
+
+    export_path = _write_pepperstone_point_export(tmp_path, [_pepperstone_point_entry("GBPUSD", "GBPUSD", "0.00001")])
+    monkeypatch.setenv("PEPPERSTONE_SPREAD_EXPORT_PATH", str(export_path))
+    monkeypatch.setattr(master_service, "uuid4", real_uuid4)
+    _mock_pepperstone_quote_dependencies(monkeypatch)
+    quote = json.loads(asyncio.run(master_service.calculator_quote(_pepperstone_quote_payload())).body.decode("utf-8"))
+    set_payload = _pepperstone_set_payload_from_quote(_pepperstone_quote_payload(), quote)
+    export_path.write_text(
+        json.dumps({
+            "version": 1,
+            "broker": "pepperstone",
+            "generated_at": "2026-10-03T00:05:00Z",
+            "symbols": [_pepperstone_point_entry("GBPUSD", "GBPUSD", "0.00002")],
+        }),
+        encoding="utf-8",
+    )
+    token_calls.clear()
+    monkeypatch.setattr(master_service, "uuid4", lambda: token_calls.append(True) or types.SimpleNamespace(hex="unexpected-token"))
+    with pytest.raises(master_service.HTTPException) as changed:
+        master_service._build_pepperstone_trader_set(set_payload)
+    assert changed.value.status_code == 409
+    assert "SYMBOL_POINT changed since the quote" in str(changed.value.detail)
+    assert token_calls == []
 
 
 def test_calculator_webhook_direct_dict_call_uses_payload(monkeypatch: pytest.MonkeyPatch) -> None:
