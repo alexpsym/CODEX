@@ -27449,7 +27449,7 @@ def _load_pepperstone_symbol_point(symbol: str) -> Dict[str, object]:
     path = _pepperstone_spread_export_path()
     try:
         raw = path.read_text(encoding="utf-8-sig")
-    except OSError as exc:
+    except (OSError, UnicodeError) as exc:
         raise HTTPException(
             status_code=400,
             detail=(
@@ -27501,13 +27501,20 @@ def _load_pepperstone_symbol_point(symbol: str) -> Dict[str, object]:
     if not point.is_finite() or point <= 0:
         raise HTTPException(status_code=400, detail=f"Pepperstone MT5 point mapping for {symbol} has an invalid SYMBOL_POINT; re-export the Trader symbol snapshot.")
     item_timestamp = _pepperstone_parse_snapshot_time(item.get("timestamp") or item.get("time") or item.get("generated_at") or generated_at, "symbol")
+    try:
+        source_path = str(path.resolve())
+    except OSError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Pepperstone MT5 point export source path is inaccessible at {path}; check the configured export path.",
+        ) from exc
     return {
         "symbol": symbol,
         "mt5_symbol": mt5_symbol,
         "point": point,
         "generated_at": generated_at,
         "timestamp": item_timestamp,
-        "source_path": str(path.resolve()),
+        "source_path": source_path,
         "source": "Pepperstone Trader spread export",
     }
 
@@ -27671,6 +27678,16 @@ def _build_pepperstone_trader_set(payload: Dict[str, object]) -> Tuple[str, str]
     if not context_id:
         raise HTTPException(status_code=409, detail="Calculate a Pepperstone quote before downloading the .set file.")
     quote_snapshot = _get_pepperstone_quote_snapshot(context_id)
+    export_status = quote_snapshot.get("pepperstone_mt5_export_status")
+    if (
+        (not isinstance(export_status, dict) or export_status.get("ready") is not True)
+        and (not isinstance(export_status, dict) or export_status.get("code") != "PEPPERSTONE_SET_RISK_BUFFER_INCOMPATIBLE")
+    ):
+        reason = str((export_status or {}).get("reason") or "this quote has no verified MT5 point conversion") if isinstance(export_status, dict) else "this quote has no verified MT5 point conversion"
+        raise HTTPException(
+            status_code=409,
+            detail=f"Pepperstone .set export is unavailable for this quote: {reason} Calculate again after MT5 point metadata is available.",
+        )
 
     order_type = str(payload.get("order_type") or "").strip().lower()
     if order_type not in {"limit", "market"}:
@@ -27716,7 +27733,13 @@ def _build_pepperstone_trader_set(payload: Dict[str, object]) -> Tuple[str, str]
         except Exception as exc:
             raise HTTPException(status_code=400, detail="Quoted TradingView tick size is invalid.") from exc
 
-    current_point = _load_pepperstone_symbol_point(resolved_symbol)
+    try:
+        current_point = _load_pepperstone_symbol_point(resolved_symbol)
+    except HTTPException as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Pepperstone MT5 point metadata is unavailable at export: {exc.detail} Recalculate after restoring the export.",
+        ) from exc
     if (
         str(current_point.get("source_path")) != str(quote_snapshot.get("point_source_path"))
         or str(current_point.get("mt5_symbol")) != str(quote_snapshot.get("mt5_symbol"))
@@ -28701,17 +28724,29 @@ async def calculator_instrument(asset: str, account: str, symbol: str, broker: s
                 default_chart_step = Decimal("1").scaleb(-precision)
             except Exception as exc:
                 raise HTTPException(status_code=502, detail="OANDA chart-feed default tick size is unavailable; enter a positive TradingView tick-size override.") from exc
-            point_snapshot = _load_pepperstone_symbol_point(resolved_symbol)
             instrument_payload.update(
                 {
                     "chart_tick_size_default": _fmt_dec(default_chart_step),
                     "chart_tick_size_source": "OANDA display precision (OANDA chart-feed default; override for another TradingView feed)",
-                    "mt5_symbol": point_snapshot["mt5_symbol"],
-                    "mt5_point_size": _fmt_dec(point_snapshot["point"]),
-                    "mt5_point_source": point_snapshot["source"],
-                    "mt5_point_timestamp": point_snapshot["timestamp"],
                 }
             )
+            try:
+                point_snapshot = _load_pepperstone_symbol_point(resolved_symbol)
+            except HTTPException as exc:
+                instrument_payload["pepperstone_mt5_point_status"] = {
+                    "available": False,
+                    "reason": str(exc.detail),
+                }
+            else:
+                instrument_payload.update(
+                    {
+                        "mt5_symbol": point_snapshot["mt5_symbol"],
+                        "mt5_point_size": _fmt_dec(point_snapshot["point"]),
+                        "mt5_point_source": point_snapshot["source"],
+                        "mt5_point_timestamp": point_snapshot["timestamp"],
+                        "pepperstone_mt5_point_status": {"available": True, "reason": ""},
+                    }
+                )
         return JSONResponse(instrument_payload)
     raise HTTPException(status_code=400, detail="asset must be crypto or fx.")
 
@@ -28951,6 +28986,8 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
     pepperstone_chart_tick_override = ""
     pepperstone_stop_conversion: Optional[Dict[str, object]] = None
     pepperstone_target_conversion: Optional[Dict[str, object]] = None
+    pepperstone_export_status: Optional[Dict[str, object]] = None
+    pepperstone_preflight: Optional[Dict[str, object]] = None
     try:
         asset = str(payload.get("asset") or "").strip().lower()
         account = str(payload.get("account") or "live").strip().lower()
@@ -29560,8 +29597,6 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
                     },
                 )
             symbol = normalize_oanda_symbol_query(symbol_in)
-            if is_pepperstone:
-                pepperstone_point_snapshot = _load_pepperstone_symbol_point(symbol)
             try:
                 cfg = _get_oanda_config(account)
             except ValueError as exc:
@@ -29597,13 +29632,37 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
                     payload.get("chart_tick_size"), tick_size
                 )
                 distance_tick_size = pepperstone_chart_tick_size
-                pepperstone_stop_conversion = _pepperstone_convert_ticks_to_points(
-                    stop_ticks, distance_tick_size, pepperstone_point_snapshot["point"], "stop_loss_ticks"
-                )
-                if target_mode == "ticks" and tp_ticks is not None:
-                    pepperstone_target_conversion = _pepperstone_convert_ticks_to_points(
-                        tp_ticks, distance_tick_size, pepperstone_point_snapshot["point"], "take_profit_ticks"
-                    )
+                try:
+                    pepperstone_point_snapshot = _load_pepperstone_symbol_point(symbol)
+                except HTTPException as exc:
+                    pepperstone_export_status = {
+                        "ready": False,
+                        "code": "PEPPERSTONE_MT5_POINT_METADATA_UNAVAILABLE",
+                        "reason": str(exc.detail),
+                    }
+                else:
+                    pepperstone_export_status = {"ready": True, "code": None, "reason": ""}
+                    try:
+                        pepperstone_stop_conversion = _pepperstone_convert_ticks_to_points(
+                            stop_ticks, distance_tick_size, pepperstone_point_snapshot["point"], "stop_loss_ticks"
+                        )
+                    except HTTPException as exc:
+                        pepperstone_export_status = {
+                            "ready": False,
+                            "code": "PEPPERSTONE_MT5_DISTANCE_CONVERSION_FAILED",
+                            "reason": str(exc.detail),
+                        }
+                    if pepperstone_stop_conversion and target_mode == "ticks" and tp_ticks is not None:
+                        try:
+                            pepperstone_target_conversion = _pepperstone_convert_ticks_to_points(
+                                tp_ticks, distance_tick_size, pepperstone_point_snapshot["point"], "take_profit_ticks"
+                            )
+                        except HTTPException as exc:
+                            pepperstone_export_status = {
+                                "ready": False,
+                                "code": "PEPPERSTONE_MT5_DISTANCE_CONVERSION_FAILED",
+                                "reason": str(exc.detail),
+                            }
             try:
                 prices = pricing_task.result()
             except Exception as exc:
@@ -29809,38 +29868,53 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
                     }
                 )
             if broker == "pepperstone":
-                preflight_risk_target = (
-                    risk_val
-                    if risk_mode == "fixed_aud"
-                    else Decimal(str(response_payload["estimated_total_loss_aud"]))
-                )
-                preflight = _pepperstone_risk_buffer_preflight(
-                    stop_points=int(pepperstone_stop_conversion["points"]),
-                    risk_target=preflight_risk_target,
-                )
-                minimum_ticks = (
-                    Decimal(int(preflight["minimum_compatible_stop_points"]))
-                    * Decimal(str(pepperstone_point_snapshot["point"]))
-                    / Decimal(str(pepperstone_chart_tick_size))
-                ).to_integral_value(rounding=ROUND_CEILING)
-                preflight["minimum_compatible_stop_ticks"] = int(minimum_ticks)
-                preflight["submitted_stop_ticks"] = int(stop_ticks)
-                response_payload["pepperstone_risk_buffer_preflight"] = preflight
-                response_payload["pepperstone_distance_conversion"] = {
+                distance_conversion: Dict[str, object] = {
                     "symbol": symbol,
                     "chart_tick_size": _fmt_dec(pepperstone_chart_tick_size),
                     "chart_tick_size_source": pepperstone_chart_tick_source,
-                    "mt5_symbol": pepperstone_point_snapshot["mt5_symbol"],
-                    "mt5_point_size": _fmt_dec(pepperstone_point_snapshot["point"]),
-                    "mt5_point_source": pepperstone_point_snapshot["source"],
-                    "mt5_point_timestamp": pepperstone_point_snapshot["timestamp"],
                     "stop_loss_ticks": int(stop_ticks),
-                    "stop_loss_price_distance": _fmt_dec(pepperstone_stop_conversion["price_distance"]),
-                    "stop_loss_mt5_points": int(pepperstone_stop_conversion["points"]),
+                    "stop_loss_price_distance": _fmt_dec(abs(entry - sl)),
                     "target_mode": target_mode,
                     "take_profit_ticks": int(tp_ticks) if tp_ticks is not None else None,
-                    "take_profit_price_distance": _fmt_dec(pepperstone_target_conversion["price_distance"]) if pepperstone_target_conversion else None,
-                    "take_profit_mt5_points": int(pepperstone_target_conversion["points"]) if pepperstone_target_conversion else None,
+                    "take_profit_price_distance": _fmt_dec(abs(tp - entry)) if target_mode == "ticks" else None,
+                }
+                if pepperstone_point_snapshot is not None:
+                    distance_conversion.update(
+                        {
+                            "mt5_symbol": pepperstone_point_snapshot["mt5_symbol"],
+                            "mt5_point_size": _fmt_dec(pepperstone_point_snapshot["point"]),
+                            "mt5_point_source": pepperstone_point_snapshot["source"],
+                            "mt5_point_timestamp": pepperstone_point_snapshot["timestamp"],
+                        }
+                    )
+                if pepperstone_stop_conversion is not None:
+                    distance_conversion["stop_loss_mt5_points"] = int(pepperstone_stop_conversion["points"])
+                    preflight_risk_target = risk_val
+                    pepperstone_preflight = _pepperstone_risk_buffer_preflight(
+                        stop_points=int(pepperstone_stop_conversion["points"]),
+                        risk_target=preflight_risk_target,
+                    )
+                    minimum_ticks = (
+                        Decimal(int(pepperstone_preflight["minimum_compatible_stop_points"]))
+                        * Decimal(str(pepperstone_point_snapshot["point"]))
+                        / Decimal(str(pepperstone_chart_tick_size))
+                    ).to_integral_value(rounding=ROUND_CEILING)
+                    pepperstone_preflight["minimum_compatible_stop_ticks"] = int(minimum_ticks)
+                    pepperstone_preflight["submitted_stop_ticks"] = int(stop_ticks)
+                    response_payload["pepperstone_risk_buffer_preflight"] = pepperstone_preflight
+                    if not pepperstone_preflight["compatible"] and pepperstone_export_status and pepperstone_export_status.get("ready") is True:
+                        pepperstone_export_status = {
+                            "ready": False,
+                            "code": "PEPPERSTONE_SET_RISK_BUFFER_INCOMPATIBLE",
+                            "reason": str(pepperstone_preflight["explanation"]),
+                        }
+                if pepperstone_target_conversion is not None:
+                    distance_conversion["take_profit_mt5_points"] = int(pepperstone_target_conversion["points"])
+                response_payload["pepperstone_distance_conversion"] = distance_conversion
+                response_payload["pepperstone_mt5_export_status"] = pepperstone_export_status or {
+                    "ready": False,
+                    "code": "PEPPERSTONE_MT5_POINT_METADATA_UNAVAILABLE",
+                    "reason": "Pepperstone MT5 point metadata is unavailable.",
                 }
             calculation_context_id = (
                 str(payload.get("calculation_context_id") or "").strip()
@@ -29849,9 +29923,7 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
             response_payload["calculation_context_id"] = calculation_context_id
             response_payload["quote_created_at_ms"] = int(time.time() * 1000)
             if is_pepperstone:
-                _store_pepperstone_quote_snapshot(
-                    calculation_context_id,
-                    {
+                quote_snapshot = {
                         "account": account,
                         "symbol": symbol,
                         "side": side,
@@ -29866,15 +29938,23 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
                         "chart_tick_size": _fmt_dec(pepperstone_chart_tick_size),
                         "chart_tick_size_override": pepperstone_chart_tick_override,
                         "chart_tick_size_source": pepperstone_chart_tick_source,
-                        "mt5_symbol": pepperstone_point_snapshot["mt5_symbol"],
-                        "mt5_point": _fmt_dec(pepperstone_point_snapshot["point"]),
-                        "point_source_path": pepperstone_point_snapshot["source_path"],
-                        "point_generated_at": pepperstone_point_snapshot["generated_at"],
-                        "point_timestamp": pepperstone_point_snapshot["timestamp"],
-                        "stop_points": int(pepperstone_stop_conversion["points"]),
-                        "take_profit_points": int(pepperstone_target_conversion["points"]) if pepperstone_target_conversion else None,
-                    },
-                )
+                        "pepperstone_mt5_export_status": response_payload["pepperstone_mt5_export_status"],
+                    }
+                if pepperstone_point_snapshot is not None:
+                    quote_snapshot.update(
+                        {
+                            "mt5_symbol": pepperstone_point_snapshot["mt5_symbol"],
+                            "mt5_point": _fmt_dec(pepperstone_point_snapshot["point"]),
+                            "point_source_path": pepperstone_point_snapshot["source_path"],
+                            "point_generated_at": pepperstone_point_snapshot["generated_at"],
+                            "point_timestamp": pepperstone_point_snapshot["timestamp"],
+                        }
+                    )
+                if pepperstone_stop_conversion is not None:
+                    quote_snapshot["stop_points"] = int(pepperstone_stop_conversion["points"])
+                if pepperstone_target_conversion is not None:
+                    quote_snapshot["take_profit_points"] = int(pepperstone_target_conversion["points"])
+                _store_pepperstone_quote_snapshot(calculation_context_id, quote_snapshot)
             if _include_trendline_snapshot:
                 response_payload["_trusted_trendline_quote"] = sizing_snapshot
             try:

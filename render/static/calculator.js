@@ -255,11 +255,21 @@
     }
   }
 
-  function renderPepperstoneRiskPreflight(preflight) {
+  function renderPepperstoneRiskPreflight(preflight, exportStatus) {
     if (!pepperstoneRiskPreflightEl) return false;
+    if (!exportStatus || exportStatus.ready !== true) {
+      pepperstoneRiskPreflightEl.style.display = '';
+      if (exportStatus?.code === 'PEPPERSTONE_SET_RISK_BUFFER_INCOMPATIBLE' && preflight && typeof preflight === 'object') {
+        pepperstoneRiskPreflightEl.textContent = `Stop is too tight for the configured minimum protection of ${preflight.minimum_automatic_buffer_points} MT5 points. Minimum compatible stop: ${preflight.minimum_compatible_stop_points} MT5 points (about ${preflight.minimum_compatible_stop_ticks ?? '-'} TradingView ticks). Widen the stop and Calculate again.`;
+      } else {
+        const reason = String(exportStatus?.reason || 'verified MT5 point conversion is unavailable');
+        pepperstoneRiskPreflightEl.textContent = `Position-size estimate ready. MT5 download unavailable: ${reason}`;
+      }
+      return false;
+    }
     if (!preflight || typeof preflight !== 'object') {
-      pepperstoneRiskPreflightEl.style.display = 'none';
-      pepperstoneRiskPreflightEl.textContent = '';
+      pepperstoneRiskPreflightEl.style.display = '';
+      pepperstoneRiskPreflightEl.textContent = 'Position-size estimate ready. MT5 download unavailable: risk-buffer preflight is unavailable.';
       return false;
     }
     const compatible = preflight.compatible === true;
@@ -569,13 +579,16 @@
     ];
     if (pepperstone) {
       const conversion = q.pepperstone_distance_conversion || {};
+      const exportStatus = q.pepperstone_mt5_export_status || {};
       const chartStep = conversion.chart_tick_size || q.chart_tick_size || '-';
+      const mt5Points = (value) => value === null || value === undefined ? 'MT5 point conversion unavailable' : `${value} MT5 points`;
       rows.push(['TradingView chart tick size', `${chartStep} (${conversion.chart_tick_size_source || q.chart_tick_size_source || 'source unavailable'})`]);
-      rows.push(['Measured stop distance', `${conversion.stop_loss_ticks ?? q.submitted_stop_loss_ticks ?? '-'} ticks × ${chartStep} = ${conversion.stop_loss_price_distance || q.stop_loss_price_distance || '-'} price; ${conversion.stop_loss_mt5_points ?? '-'} MT5 points`]);
+      rows.push(['Measured stop distance', `${conversion.stop_loss_ticks ?? q.submitted_stop_loss_ticks ?? '-'} ticks × ${chartStep} = ${conversion.stop_loss_price_distance || q.stop_loss_price_distance || '-'} price; ${mt5Points(conversion.stop_loss_mt5_points)}`]);
       rows.push(['Target distance mode', conversion.target_mode === 'ticks'
-        ? `${conversion.take_profit_ticks ?? '-'} ticks × ${chartStep} = ${conversion.take_profit_price_distance || '-'} price; ${conversion.take_profit_mt5_points ?? '-'} MT5 points`
+        ? `${conversion.take_profit_ticks ?? '-'} ticks × ${chartStep} = ${conversion.take_profit_price_distance || '-'} price; ${mt5Points(conversion.take_profit_mt5_points)}`
         : 'Net R (Trader calculates the live cost-aware target)']);
-      rows.push(['MT5 symbol point', `${conversion.mt5_symbol || '-'} / ${conversion.mt5_point_size || '-'} (${conversion.mt5_point_source || 'source unavailable'})`]);
+      rows.push(['MT5 symbol point', `${conversion.mt5_point_size ? `${conversion.mt5_symbol || '-'} / ${conversion.mt5_point_size} (${conversion.mt5_point_source || 'source unavailable'})` : 'Unavailable'}`]);
+      rows.push(['MT5 download readiness', exportStatus.ready === true ? 'Ready' : `Unavailable: ${exportStatus.reason || 'verified MT5 point conversion is unavailable'}`]);
       rows.push(['Position-size estimate limit', q.position_size_estimate_note || 'OANDA price/conversion estimate; Trader validates executable MT5 lots, margin, commission, and volume.']);
     }
     if (q.take_profit_adjusted && q.take_profit_adjustment) {
@@ -1379,19 +1392,23 @@
       state.quoteStatus = 'ready';
       setQuoteStatus('Quote ready.');
       if (isPepperstoneFx()) {
-        const preflightPassed = renderPepperstoneRiskPreflight(quote.pepperstone_risk_buffer_preflight);
+        const exportStatus = quote.pepperstone_mt5_export_status;
+        const preflightPassed = renderPepperstoneRiskPreflight(quote.pepperstone_risk_buffer_preflight, exportStatus);
         state.pepperstoneSetPayload = preflightPassed ? buildPepperstoneSetPayload(quote) : null;
+        const exportReason = String(exportStatus?.reason || 'verified MT5 point conversion is unavailable');
         setPepperstoneSetButton({
           visible: true,
           enabled: preflightPassed,
           reason: preflightPassed
             ? 'Download the user-mediated Pepperstone MT5 Expert Set file.'
-            : 'Widen the stop and Calculate again before downloading a .set.',
+            : exportReason,
         });
         setSubmitState({ visible: false, enabled: false, reason: 'Pepperstone uses MT5 .set export.', stateName: 'ready' });
-        setQuoteStatus(state.order_type === 'market'
-          ? 'Quote ready. Download the one-shot market .set and check the local MT5 Experts journal for the execution outcome.'
-          : 'Quote ready. Download the limit .set and check the local MT5 Experts journal for confirmed placement or an exact rejection reason.');
+        setQuoteStatus(preflightPassed
+          ? (state.order_type === 'market'
+            ? 'Quote ready. Download the one-shot market .set and check the local MT5 Experts journal for the execution outcome.'
+            : 'Quote ready. Download the limit .set and check the local MT5 Experts journal for confirmed placement or an exact rejection reason.')
+          : `Quote ready. Position-size estimate ready; MT5 download unavailable: ${exportReason}`);
       } else {
         clearPepperstoneSetDownload();
         setSubmitState({ visible: state.webhook_mode !== 'yes', enabled: true, reason: '', stateName: 'ready' });
