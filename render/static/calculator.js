@@ -220,13 +220,28 @@
 
   function syncChartTickOverrideForSymbol() {
     const field = $('calc-chart-tick-size');
+    const enabled = $('calc-chart-tick-size-override-enabled');
     const nextKey = chartSymbolKey($('calc-symbol')?.value);
     const previousKey = state.activeChartTickSymbol;
-    if (field && previousKey && previousKey !== nextKey && String(field.value || '').trim()) {
+    if (field && enabled?.checked && previousKey && previousKey !== nextKey && String(field.value || '').trim()) {
       state.chartTickOverrides[previousKey] = String(field.value).trim();
     }
     state.activeChartTickSymbol = nextKey;
-    if (field && previousKey !== nextKey) field.value = state.chartTickOverrides[nextKey] || '';
+    if (field && previousKey !== nextKey) {
+      field.value = state.chartTickOverrides[nextKey] || '';
+      if (enabled) enabled.checked = !!state.chartTickOverrides[nextKey];
+      field.disabled = !enabled?.checked;
+      field.style.display = enabled?.checked ? '' : 'none';
+    }
+  }
+
+  function renderChartTickProfile(payload) {
+    const automatic = $('calc-chart-tick-auto');
+    const source = $('calc-chart-tick-source');
+    if (automatic && payload?.chart_tick_size_default) automatic.value = String(payload.chart_tick_size_default);
+    else if (automatic && payload?.chart_tick_size) automatic.value = String(payload.chart_tick_size);
+    if (source) source.textContent = String(payload?.chart_tick_size_source || 'Automatic symbol profile unavailable');
+    if (automatic) automatic.dataset.profileId = String(payload?.chart_tick_profile_id || '');
   }
 
   function syncTargetUi() {
@@ -257,25 +272,25 @@
 
   function renderPepperstoneRiskPreflight(preflight, exportStatus) {
     if (!pepperstoneRiskPreflightEl) return false;
-    if (!exportStatus || exportStatus.ready !== true) {
+    const fileReady = !!exportStatus && (exportStatus.file_ready === true || exportStatus.ready === true);
+    if (!fileReady) {
       pepperstoneRiskPreflightEl.style.display = '';
       if (exportStatus?.code === 'PEPPERSTONE_SET_RISK_BUFFER_INCOMPATIBLE' && preflight && typeof preflight === 'object') {
         pepperstoneRiskPreflightEl.textContent = `Stop is too tight for the configured minimum protection of ${preflight.minimum_automatic_buffer_points} MT5 points. Minimum compatible stop: ${preflight.minimum_compatible_stop_points} MT5 points (about ${preflight.minimum_compatible_stop_ticks ?? '-'} TradingView ticks). Widen the stop and Calculate again.`;
       } else {
-        const reason = String(exportStatus?.reason || 'verified MT5 point conversion is unavailable');
+        const reason = String(exportStatus?.reason || 'the quote is not ready for export');
         pepperstoneRiskPreflightEl.textContent = `Position-size estimate ready. MT5 download unavailable: ${reason}`;
       }
       return false;
     }
-    if (!preflight || typeof preflight !== 'object') {
-      pepperstoneRiskPreflightEl.style.display = '';
-      pepperstoneRiskPreflightEl.textContent = 'Position-size estimate ready. MT5 download unavailable: risk-buffer preflight is unavailable.';
-      return false;
+    pepperstoneRiskPreflightEl.style.display = '';
+    if (!preflight || typeof preflight !== 'object' || preflight.state === 'pending' || exportStatus.broker_check_state === 'pending') {
+      pepperstoneRiskPreflightEl.textContent = 'Position-size estimate ready. .set file prepared; broker point, grid, and risk checks run in Trader.';
+      return true;
     }
     const compatible = preflight.compatible === true;
-    pepperstoneRiskPreflightEl.style.display = '';
     pepperstoneRiskPreflightEl.textContent = compatible
-      ? `Automatic risk buffer ready: calculator cap ${preflight.planned_buffer_points} MT5 points for the converted ${preflight.stop_points ?? '-'} MT5 point stop; Trader will choose the exact live value between ${preflight.minimum_automatic_buffer_points} and ${preflight.planned_buffer_points}. No buffer input is required.`
+      ? `Position-size estimate ready. .set file prepared; final broker checks run in Trader. Offline buffer preview: ${preflight.planned_buffer_points} points maximum.`
       : `Stop is too tight for the configured minimum protection of ${preflight.minimum_automatic_buffer_points} MT5 points. Minimum compatible stop: ${preflight.minimum_compatible_stop_points} MT5 points (about ${preflight.minimum_compatible_stop_ticks ?? '-'} TradingView ticks). Widen the stop and Calculate again.`;
     return compatible;
   }
@@ -581,14 +596,15 @@
       const conversion = q.pepperstone_distance_conversion || {};
       const exportStatus = q.pepperstone_mt5_export_status || {};
       const chartStep = conversion.chart_tick_size || q.chart_tick_size || '-';
-      const mt5Points = (value) => value === null || value === undefined ? 'MT5 point conversion unavailable' : `${value} MT5 points`;
+      const mt5Points = (value) => value === null || value === undefined ? 'broker point count pending in Trader' : `${value} MT5 points (preview)`;
       rows.push(['TradingView chart tick size', `${chartStep} (${conversion.chart_tick_size_source || q.chart_tick_size_source || 'source unavailable'})`]);
+      rows.push(['Chart tick profile', q.chart_tick_profile_id || 'user override / profile unavailable']);
       rows.push(['Measured stop distance', `${conversion.stop_loss_ticks ?? q.submitted_stop_loss_ticks ?? '-'} ticks × ${chartStep} = ${conversion.stop_loss_price_distance || q.stop_loss_price_distance || '-'} price; ${mt5Points(conversion.stop_loss_mt5_points)}`]);
       rows.push(['Target distance mode', conversion.target_mode === 'ticks'
         ? `${conversion.take_profit_ticks ?? '-'} ticks × ${chartStep} = ${conversion.take_profit_price_distance || '-'} price; ${mt5Points(conversion.take_profit_mt5_points)}`
         : 'Net R (Trader calculates the live cost-aware target)']);
       rows.push(['MT5 symbol point', `${conversion.mt5_point_size ? `${conversion.mt5_symbol || '-'} / ${conversion.mt5_point_size} (${conversion.mt5_point_source || 'source unavailable'})` : 'Unavailable'}`]);
-      rows.push(['MT5 download readiness', exportStatus.ready === true ? 'Ready' : `Unavailable: ${exportStatus.reason || 'verified MT5 point conversion is unavailable'}`]);
+      rows.push(['MT5 download readiness', (exportStatus.file_ready === true || exportStatus.ready === true) ? (exportStatus.broker_check_state === 'pending' ? 'File ready; final broker checks pending in Trader' : 'File ready; final broker checks run in Trader') : `Unavailable: ${exportStatus.reason || 'quote is not ready for export'}`]);
       rows.push(['Position-size estimate limit', q.position_size_estimate_note || 'OANDA price/conversion estimate; Trader validates executable MT5 lots, margin, commission, and volume.']);
     }
     if (q.take_profit_adjusted && q.take_profit_adjustment) {
@@ -711,8 +727,9 @@
       order_type: state.order_type,
       stop_loss_ticks: $('calc-sl-ticks').value,
       target_mode: $('calc-target-mode')?.value || 'rr',
-      chart_tick_size_override: $('calc-chart-tick-size')?.value || '',
+      chart_tick_size_override: $('calc-chart-tick-size-override-enabled')?.checked ? ($('calc-chart-tick-size')?.value || '') : '',
       quoted_chart_tick_size: quote?.chart_tick_size || '',
+      quoted_chart_tick_profile_id: quote?.chart_tick_profile_id || '',
       calculation_context_id: quote?.calculation_context_id || '',
       risk_mode: state.risk_mode,
       risk_value: $('calc-risk').value,
@@ -995,6 +1012,7 @@
       state.broker = 'bybit';
     }
     state.resolvedSymbol = canonicalSymbol;
+    if (payload.chart_tick_size_default || payload.chart_tick_size) renderChartTickProfile(payload);
     updateRiskUiForAsset();
     updateBrokerUiForAsset();
     syncAllToggleStates();
@@ -1267,6 +1285,8 @@
 
   $('calc-symbol').addEventListener('input', () => {
     syncChartTickOverrideForSymbol();
+    if ($('calc-chart-tick-auto')) $('calc-chart-tick-auto').value = 'Resolving…';
+    if ($('calc-chart-tick-source')) $('calc-chart-tick-source').textContent = 'Resolving automatic symbol profile';
     invalidateQuote({ clearResults: false, status: state.hasCalculatedOnce ? 'stale' : 'idle', reason: 'Quote changed. Recalculate before submitting.' });
     state.resolvedSymbol = '';
     canonicalEl.textContent = '';
@@ -1279,10 +1299,22 @@
     ['input', 'change'].forEach((evt) => el.addEventListener(evt, () => {
       if (id === 'calc-chart-tick-size') {
         const key = chartSymbolKey($('calc-symbol')?.value);
-        if (key) state.chartTickOverrides[key] = String(el.value || '').trim();
+        if (key && $('calc-chart-tick-size-override-enabled')?.checked) state.chartTickOverrides[key] = String(el.value || '').trim();
       }
       invalidateQuote({ clearResults: false });
     }));
+  });
+  $('calc-chart-tick-size-override-enabled')?.addEventListener('change', () => {
+    const enabled = $('calc-chart-tick-size-override-enabled').checked;
+    const field = $('calc-chart-tick-size');
+    if (field) {
+      field.disabled = !enabled;
+      field.style.display = enabled ? '' : 'none';
+      if (!enabled) field.value = '';
+    }
+    const key = chartSymbolKey($('calc-symbol')?.value);
+    if (key) state.chartTickOverrides[key] = enabled ? String(field?.value || '').trim() : '';
+    invalidateQuote({ clearResults: false });
   });
   $('calc-target-mode')?.addEventListener('change', () => {
     syncTargetUi();
@@ -1366,7 +1398,7 @@
       if (payload.target_mode === 'ticks') payload.take_profit_ticks = $('calc-tp-ticks')?.value || '';
       else payload.risk_reward = $('calc-rr').value;
       const chartTickOverride = $('calc-chart-tick-size')?.value;
-      if (isPepperstoneFx() && String(chartTickOverride || '').trim()) payload.chart_tick_size = String(chartTickOverride).trim();
+      if (isPepperstoneFx() && $('calc-chart-tick-size-override-enabled')?.checked && String(chartTickOverride || '').trim()) payload.chart_tick_size = String(chartTickOverride).trim();
       delete payload.quotePrewarmStatus;
       delete payload.quotePrewarmPromise;
       renderRequestSummary(payload);
@@ -1395,19 +1427,17 @@
         const exportStatus = quote.pepperstone_mt5_export_status;
         const preflightPassed = renderPepperstoneRiskPreflight(quote.pepperstone_risk_buffer_preflight, exportStatus);
         state.pepperstoneSetPayload = preflightPassed ? buildPepperstoneSetPayload(quote) : null;
-        const exportReason = String(exportStatus?.reason || 'verified MT5 point conversion is unavailable');
+        const exportReason = String(exportStatus?.reason || 'quote is not ready for export');
         setPepperstoneSetButton({
           visible: true,
           enabled: preflightPassed,
           reason: preflightPassed
-            ? 'Download the user-mediated Pepperstone MT5 Expert Set file.'
+            ? 'Portable .set prepared; final broker point, grid, and risk checks run in Trader.'
             : exportReason,
         });
         setSubmitState({ visible: false, enabled: false, reason: 'Pepperstone uses MT5 .set export.', stateName: 'ready' });
         setQuoteStatus(preflightPassed
-          ? (state.order_type === 'market'
-            ? 'Quote ready. Download the one-shot market .set and check the local MT5 Experts journal for the execution outcome.'
-            : 'Quote ready. Download the limit .set and check the local MT5 Experts journal for confirmed placement or an exact rejection reason.')
+          ? 'Quote ready. Position-size estimate complete; portable .set prepared. Final broker checks run in Trader.'
           : `Quote ready. Position-size estimate ready; MT5 download unavailable: ${exportReason}`);
       } else {
         clearPepperstoneSetDownload();
@@ -1474,9 +1504,7 @@
       if (!res.ok) throw buildFetchError('/api/calculator/pepperstone-set', 'POST', res.status, res.statusText, bodyText, bodyJson);
       const filename = filenameFromDisposition(res.headers.get('content-disposition'), 'Pepperstone_Trader.set');
       const downloaded = saveTextDownload(bodyText, filename);
-      const journalHint = state.order_type === 'market'
-        ? 'Load it in local MT5 once. Reapplying the same token is blocked; check Experts for accepted, rejected, one-trade-blocked, invalid-stops, or already-consumed.'
-        : 'Load it in local MT5 and check Experts for a confirmed pending ticket or the exact preflight/broker reason.';
+      const journalHint = 'Load only in the updated Trader EA. The preset starts with OrdersEnabled=false and does not arm or place an order; review broker checks, then explicitly enable the intended workflow.';
       okEl.textContent = `${downloaded ? `Pepperstone .set downloaded: ${filename}` : `Pepperstone .set ready: ${filename}`} ${journalHint}`;
     } catch (err) {
       errorEl.textContent = String(err?.message || err);

@@ -285,7 +285,10 @@ def test_auto_fit_risk_buffer_preserves_risk_and_submission_gates() -> None:
     assert 'input bool   AutoFitRiskSlippageBuffer = false;' in trader
     assert "int &outBufferPoints" in risk
     assert "if(AutoFitRiskSlippageBuffer && riskWorst > riskMax)" in risk
-    assert "int low = minimumBuffer" in risk and "int high = preferredBuffer" in risk
+    assert "int low = minimumBuffer" in risk and "int high = maximumBuffer" in risk
+    assert "configuredPreferredBuffer" in risk and "conservativeDistanceCap" in risk
+    assert risk.index("minimumBuffer = AutoFitRiskSlippageBuffer") < risk.index("conservativeDistanceCap")
+    assert "if(maximumBuffer < minimumBuffer)" in risk
     assert "while(low <= high)" in risk
     assert "chosenBuffer = mid" in risk
     assert "No automatic risk buffer at or above SlippagePoints fits RiskAUD_Max." in risk
@@ -295,7 +298,7 @@ def test_auto_fit_risk_buffer_preserves_risk_and_submission_gates() -> None:
     assert "chosenRiskBuffer" in market and "Automatic risk buffer selected" in market
     assert market.index("ComputeVolumeFromRisk") < market.index("trade.Buy(")
     assert fixed_market.index("ComputeVolumeFromRisk") < fixed_market.index("ConsumeStandardMarketToken") < fixed_market.index("trade.Buy(")
-    assert '#property version   "2.42"' in trader and 'EA_VERSION = "2.42"' in trader
+    assert '#property version   "2.43"' in trader and 'EA_VERSION = "2.43"' in trader
 
 
 def test_four_actions_reuse_current_inputs_and_one_attempt_trading_protections() -> None:
@@ -386,4 +389,35 @@ def test_four_actions_reuse_current_inputs_and_one_attempt_trading_protections()
     assert tick.index("if(UseDesktopTraderControls)") < tick.index("if(!OrdersEnabled)")
     assert timer.index("if(UseDesktopTraderControls)") < timer.index("if(Strategy == STRAT_STANDARD_LIMIT)")
     assert "HandleDesktopTraderCommand()" in timer
-    assert '#property version   "2.42"' in trader and 'EA_VERSION = "2.42"' in trader
+    assert '#property version   "2.43"' in trader and 'EA_VERSION = "2.43"' in trader
+
+
+def test_price_distance_mode_reuses_shared_builders_and_fails_before_market_token() -> None:
+    trader = _source()
+    sl_builder = _function(trader, "bool BuildSLFromDistance")
+    tp_builder = _function(trader, "bool BuildTPManualFromDistance")
+    validate = _function(trader, "bool ValidatePriceDistance")
+    symbol_match = _function(trader, "bool DistanceSymbolMatchesChart")
+    market = _function(trader, "bool ExecuteStandardMarketOnce")
+    init = _function(trader, "int OnInit")
+
+    for declaration in (
+        'input bool         UsePriceDistanceInputs = false;',
+        'input string       DistanceSymbol = "";',
+        'input double       SL_PriceDistance = 0.0;',
+        'input double       TP_PriceDistance = 0.0;',
+    ):
+        assert declaration in trader
+    assert "if(UsePriceDistanceInputs)" in sl_builder and "ValidatePriceDistance(SL_PriceDistance" in sl_builder
+    assert "SL_DistancePoints <= 0" in sl_builder
+    assert "if(UsePriceDistanceInputs)" in tp_builder and "ValidatePriceDistance(TP_PriceDistance" in tp_builder
+    assert "TP_DistancePoints <= 0" in tp_builder
+    assert "SYMBOL_POINT" in validate and "SYMBOL_TRADE_TICK_SIZE" in validate
+    assert "2147483647.0" in validate and "DistanceUnitsAreWhole" in validate
+    assert "Broker suffixes are accepted only after an exact canonical pair" in symbol_match
+    assert "StringFind" not in symbol_match
+    assert market.index("BuildSLFromDistance") < market.index("ConsumeStandardMarketToken") < market.index("trade.Buy(")
+    assert init.index("if(UseDesktopTraderControls)") < init.index("if(UsePriceDistanceInputs && !OrdersEnabled)") < init.index("MaintainTrendlineLifecycle(\"OnInit\")")
+    assert "portable price-distance preset loaded inactive" in init
+    assert "UseDesktopTraderControls" in trader and "if(!OrdersEnabled) return false;" in trader
+    assert '#property version   "2.43"' in trader and 'EA_VERSION = "2.43"' in trader

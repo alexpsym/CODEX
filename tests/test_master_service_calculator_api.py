@@ -3,6 +3,7 @@ import importlib.util
 import json
 import re
 import sys
+import time
 import types
 import importlib.machinery
 from datetime import datetime
@@ -140,6 +141,7 @@ def _pepperstone_set_payload_from_quote(request_payload: dict, quote_body: dict)
         "target_mode": quote_body["target_mode"],
         "chart_tick_size_override": request_payload.get("chart_tick_size", ""),
         "quoted_chart_tick_size": quote_body["chart_tick_size"],
+        "quoted_chart_tick_profile_id": quote_body.get("chart_tick_profile_id", ""),
         "calculation_context_id": quote_body["calculation_context_id"],
         "risk_mode": request_payload["risk_mode"],
         "risk_value": request_payload["risk_value"],
@@ -2107,16 +2109,19 @@ def test_pepperstone_set_automatically_derives_risk_buffer(monkeypatch: pytest.M
     values = _parse_set_file(response.body.decode("utf-8"))
     assert set(values).issubset(_trader_input_names())
     assert values["Strategy"] == "2"
-    assert values["OrdersEnabled"] == "true"
+    assert values["OrdersEnabled"] == "false"
     assert values["RiskAUD_Target"] == "10"
     assert values["RiskAUD_Min"] == "9"
     assert values["RiskAUD_Max"] == "12"
     assert values["IncludeCommissionInRisk"] == "true"
     assert values["CommissionPerLotPerSide"] == "3.5"
-    assert values["RiskSlippageBufferPoints"] == "14"
+    assert values["RiskSlippageBufferPoints"] == "50"
     assert values["SlippagePoints"] == "10"
     assert values["AutoFitRiskSlippageBuffer"] == "true"
-    assert values["SL_DistancePoints"] == "43"
+    assert values["UsePriceDistanceInputs"] == "true"
+    assert values["SL_PriceDistance"] == "0.00043"
+    assert values["SL_DistancePoints"] == "0"
+    assert values["TP_DistancePoints"] == "0"
     assert values["AutoTP_NetRR_Enabled"] == "true"
     assert values["NetRR_Target"] == "2"
     assert values["StandardLimitSide"] == "0"
@@ -2310,8 +2315,12 @@ def test_pepperstone_manual_ticks_quote_size_and_set_remain_independent_of_inact
 
     manual_set = asyncio.run(master_service.calculator_pepperstone_set(_pepperstone_set_payload_from_quote(manual_request, manual_quote)))
     manual_values = _parse_set_file(manual_set.body.decode("utf-8"))
-    assert manual_values["SL_DistancePoints"] == "430"
-    assert manual_values["TP_DistancePoints"] == "250"
+    assert manual_values["UsePriceDistanceInputs"] == "true"
+    assert manual_values["DistanceSymbol"] == "GBP_USD"
+    assert manual_values["SL_PriceDistance"] == "0.0043"
+    assert manual_values["TP_PriceDistance"] == "0.0025"
+    assert manual_values["SL_DistancePoints"] == "0"
+    assert manual_values["TP_DistancePoints"] == "0"
     assert manual_values["AutoTP_NetRR_Enabled"] == "false"
     assert "NetRR_Target" not in manual_values
     assert manual_values["StandardMarketSide"] == "1"
@@ -2327,8 +2336,10 @@ def test_pepperstone_manual_ticks_quote_size_and_set_remain_independent_of_inact
     net_quote = json.loads(asyncio.run(master_service.calculator_quote(net_request)).body.decode("utf-8"))
     net_set = asyncio.run(master_service.calculator_pepperstone_set(_pepperstone_set_payload_from_quote(net_request, net_quote)))
     net_values = _parse_set_file(net_set.body.decode("utf-8"))
-    assert net_values["SL_DistancePoints"] == "430"
-    assert net_values["TP_DistancePoints"] == "860"
+    assert net_values["SL_PriceDistance"] == "0.0043"
+    assert net_values["TP_PriceDistance"] == "0"
+    assert net_values["SL_DistancePoints"] == "0"
+    assert net_values["TP_DistancePoints"] == "0"
     assert net_values["AutoTP_NetRR_Enabled"] == "true"
     assert net_values["NetRR_Target"] == "2"
     assert net_values["StandardLimitSide"] == "0"
@@ -2336,125 +2347,95 @@ def test_pepperstone_manual_ticks_quote_size_and_set_remain_independent_of_inact
     assert calls["account_summary"] == 0
 
 
-def test_pepperstone_missing_or_changed_point_source_fails_before_market_token(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    missing_path = tmp_path / "not-created.json"
-    monkeypatch.setenv("PEPPERSTONE_SPREAD_EXPORT_PATH", str(missing_path))
+def test_pepperstone_portable_set_survives_missing_metadata_and_rejects_invalid_quote_before_token(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    export_path = tmp_path / "not-created.json"
+    monkeypatch.setenv("PEPPERSTONE_SPREAD_EXPORT_PATH", str(export_path))
     calls = _mock_pepperstone_quote_dependencies(monkeypatch)
-    real_uuid4 = master_service.uuid4
-
     instrument = json.loads(asyncio.run(master_service.calculator_instrument("fx", "demo", "GBPUSD", "pepperstone")).body.decode("utf-8"))
     assert instrument["symbol"] == "GBP_USD"
     assert instrument["chart_tick_size_default"] == "0.00001"
+    assert instrument["chart_tick_profile_id"] == "pepperstone-gbpusd-tradingview-screenshot-v1"
+    assert "Pepperstone GBPUSD TradingView chart" in instrument["chart_tick_size_source"]
     assert instrument["pepperstone_mt5_point_status"]["available"] is False
-    assert "not-created.json" in instrument["pepperstone_mt5_point_status"]["reason"]
     assert "mt5_point_size" not in instrument
 
-    unverified_quotes = []
-    for request in (
-        _pepperstone_quote_payload(chart_tick_size="0.0001"),
-        _pepperstone_quote_payload(target_mode="ticks", take_profit_ticks="25", risk_reward="99", chart_tick_size="0.0001"),
-    ):
-        quote = json.loads(asyncio.run(master_service.calculator_quote(request)).body.decode("utf-8"))
-        status = quote["pepperstone_mt5_export_status"]
-        conversion = quote["pepperstone_distance_conversion"]
-        assert status["ready"] is False
-        assert status["code"] == "PEPPERSTONE_MT5_POINT_METADATA_UNAVAILABLE"
-        assert "not-created.json" in status["reason"]
-        assert Decimal(quote["quantity"]) > 0
-        assert quote["chart_tick_size"] == "0.0001"
-        assert conversion["stop_loss_price_distance"] == "0.0043"
-        assert "stop_loss_mt5_points" not in conversion
-        assert "pepperstone_risk_buffer_preflight" not in quote
-        assert "margin_available_home" not in quote
-        if request["target_mode"] == "ticks":
-            assert conversion["take_profit_price_distance"] == "0.0025"
-            assert "take_profit_mt5_points" not in conversion
-        else:
-            assert quote["target_distance"] == "0.0086"
-        unverified_quotes.append((request, quote))
+    manual_request = _pepperstone_quote_payload(target_mode="ticks", take_profit_ticks="25", risk_reward="99")
+    manual_quote = json.loads(asyncio.run(master_service.calculator_quote(manual_request)).body.decode("utf-8"))
+    assert Decimal(manual_quote["quantity"]) > 0
+    assert manual_quote["chart_tick_size"] == "0.00001"
+    assert manual_quote["chart_tick_profile_id"] == instrument["chart_tick_profile_id"]
+    conversion = manual_quote["pepperstone_distance_conversion"]
+    assert conversion["stop_loss_ticks"] == 43
+    assert conversion["stop_loss_price_distance"] == "0.00043"
+    assert conversion["take_profit_ticks"] == 25
+    assert conversion["take_profit_price_distance"] == "0.00025"
+    assert "stop_loss_mt5_points" not in conversion
+    assert manual_quote["pepperstone_mt5_export_status"]["file_ready"] is True
+    assert manual_quote["pepperstone_mt5_export_status"]["broker_check_state"] == "pending"
+    assert manual_quote["pepperstone_risk_buffer_preflight"]["state"] == "pending"
+    assert "margin_available_home" not in manual_quote
     assert calls["account_summary"] == 0
 
+    set_payload = _pepperstone_set_payload_from_quote(manual_request, manual_quote)
     token_calls = []
-    def no_market_token():
+    real_uuid4 = master_service.uuid4
+    def tracked_uuid4():
         token_calls.append(True)
-        return types.SimpleNamespace(hex="unexpected-token")
-
-    monkeypatch.setattr(master_service, "uuid4", no_market_token)
-    for request, quote in unverified_quotes:
-        set_payload = _pepperstone_set_payload_from_quote(request, quote)
-        set_payload["pepperstone_mt5_export_status"] = {"ready": True}
-        set_payload["mt5_point_size"] = "0.00001"
-        with pytest.raises(master_service.HTTPException) as unavailable:
-            master_service._build_pepperstone_trader_set(set_payload)
-        assert unavailable.value.status_code == 409
-        assert "MT5 point metadata" in str(unavailable.value.detail)
+        return real_uuid4()
+    monkeypatch.setattr(master_service, "uuid4", tracked_uuid4)
+    forged = dict(set_payload, pepperstone_mt5_export_status={"ready": True}, mt5_point_size="0.00001")
+    with pytest.raises(master_service.HTTPException, match="server-owned"):
+        master_service._build_pepperstone_trader_set(forged)
     assert token_calls == []
-
-    export_path = _write_pepperstone_point_export(tmp_path, [_pepperstone_point_entry("GBPUSD", "GBPUSD", "0.00001")])
-    monkeypatch.setenv("PEPPERSTONE_SPREAD_EXPORT_PATH", str(export_path))
-    # A snapshot created without metadata stays unverified even after the file appears.
-    old_request, old_quote = unverified_quotes[-1]
-    with pytest.raises(master_service.HTTPException, match="MT5 point metadata"):
-        master_service._build_pepperstone_trader_set(_pepperstone_set_payload_from_quote(old_request, old_quote))
+    with pytest.raises(master_service.HTTPException, match="chart profile changed"):
+        master_service._build_pepperstone_trader_set(dict(set_payload, quoted_chart_tick_profile_id="forged-profile"))
+    with pytest.raises(master_service.HTTPException, match="whole number"):
+        master_service._build_pepperstone_trader_set(dict(set_payload, stop_loss_ticks="43.5"))
+    with pytest.raises(master_service.HTTPException, match="Calculate a Pepperstone quote"):
+        master_service._build_pepperstone_trader_set(dict(set_payload, calculation_context_id=""))
     assert token_calls == []
-
-    monkeypatch.setattr(master_service, "uuid4", real_uuid4)
-    verified_request = _pepperstone_quote_payload(
-        target_mode="ticks", take_profit_ticks="25", chart_tick_size="0.0001"
-    )
-    verified_quote = json.loads(asyncio.run(master_service.calculator_quote(verified_request)).body.decode("utf-8"))
-    assert verified_quote["pepperstone_mt5_export_status"]["ready"] is True
-    assert verified_quote["pepperstone_distance_conversion"]["stop_loss_mt5_points"] == 430
-    assert verified_quote["pepperstone_distance_conversion"]["take_profit_mt5_points"] == 250
-    verified_set_payload = _pepperstone_set_payload_from_quote(verified_request, verified_quote)
-    verified_set = asyncio.run(master_service.calculator_pepperstone_set(verified_set_payload))
-    verified_values = _parse_set_file(verified_set.body.decode("utf-8"))
-    assert verified_values["SL_DistancePoints"] == "430"
-    assert verified_values["TP_DistancePoints"] == "250"
-    assert verified_values["AutoTP_NetRR_Enabled"] == "false"
-
-    export_path.write_text(
-        json.dumps({
-            "version": 1,
-            "broker": "pepperstone",
-            "generated_at": "2026-10-03T00:05:00Z",
-            "symbols": [_pepperstone_point_entry("GBPUSD", "GBPUSD", "0.00002")],
-        }),
-        encoding="utf-8",
-    )
-    token_calls.clear()
-    monkeypatch.setattr(master_service, "uuid4", no_market_token)
-    with pytest.raises(master_service.HTTPException) as changed:
-        master_service._build_pepperstone_trader_set(verified_set_payload)
-    assert changed.value.status_code == 409
-    assert "SYMBOL_POINT changed since the quote" in str(changed.value.detail)
+    edited = dict(set_payload, stop_loss_ticks="44")
+    with pytest.raises(master_service.HTTPException, match="no longer match"):
+        master_service._build_pepperstone_trader_set(edited)
     assert token_calls == []
-
-    export_path.write_text(
-        json.dumps({
-            "version": 1,
-            "broker": "pepperstone",
-            "generated_at": "2026-10-03T00:10:00Z",
-            "symbols": [_pepperstone_point_entry("GBPUSD", "GBPUSD", "0.00003")],
-        }),
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(master_service, "uuid4", real_uuid4)
-    inexact_request = _pepperstone_quote_payload(chart_tick_size="0.00001")
-    inexact_quote = json.loads(asyncio.run(master_service.calculator_quote(inexact_request)).body.decode("utf-8"))
-    assert Decimal(inexact_quote["quantity"]) > 0
-    assert inexact_quote["pepperstone_mt5_export_status"]["ready"] is False
-    assert inexact_quote["pepperstone_mt5_export_status"]["code"] == "PEPPERSTONE_MT5_DISTANCE_CONVERSION_FAILED"
-    assert "stop_loss_mt5_points" not in inexact_quote["pepperstone_distance_conversion"]
-    assert "pepperstone_risk_buffer_preflight" not in inexact_quote
-    inexact_set_payload = _pepperstone_set_payload_from_quote(inexact_request, inexact_quote)
-    token_calls.clear()
-    monkeypatch.setattr(master_service, "uuid4", no_market_token)
-    with pytest.raises(master_service.HTTPException) as inexact_export:
-        master_service._build_pepperstone_trader_set(inexact_set_payload)
-    assert inexact_export.value.status_code == 409
-    assert "not representable as a whole MT5 point count" in str(inexact_export.value.detail)
+    saved_snapshot = master_service._get_pepperstone_quote_snapshot(manual_quote["calculation_context_id"])
+    with master_service._PEPPERSTONE_QUOTE_SNAPSHOTS_LOCK:
+        master_service._PEPPERSTONE_QUOTE_SNAPSHOTS[manual_quote["calculation_context_id"]]["stored_at"] = time.time() - master_service._PEPPERSTONE_QUOTE_SNAPSHOT_TTL_SECONDS - 1
+    with pytest.raises(master_service.HTTPException, match="expired"):
+        master_service._build_pepperstone_trader_set(set_payload)
     assert token_calls == []
+    master_service._store_pepperstone_quote_snapshot(manual_quote["calculation_context_id"], saved_snapshot)
+
+    manual_response = asyncio.run(master_service.calculator_pepperstone_set(set_payload))
+    manual_values = _parse_set_file(manual_response.body.decode("utf-8"))
+    assert manual_values["UsePriceDistanceInputs"] == "true"
+    assert manual_values["DistanceSymbol"] == "GBP_USD"
+    assert manual_values["SL_PriceDistance"] == "0.00043"
+    assert manual_values["TP_PriceDistance"] == "0.00025"
+    assert manual_values["SL_DistancePoints"] == "0"
+    assert manual_values["TP_DistancePoints"] == "0"
+    assert manual_values["AutoTP_NetRR_Enabled"] == "false"
+    assert manual_values["OrdersEnabled"] == "false"
+    assert manual_values["UseDesktopTraderControls"] == "false"
+    assert manual_values["TrendlineArmGeneration"] == "0"
+    assert len(token_calls) == 1
+
+    # Optional metadata appearing or changing after calculation does not invalidate a portable quote.
+    changed_fixture = _write_pepperstone_point_export(tmp_path, [_pepperstone_point_entry("GBPUSD", "GBPUSD.a", "0.00002")])
+    export_path.write_text(changed_fixture.read_text(encoding="utf-8"), encoding="utf-8")
+    again = asyncio.run(master_service.calculator_pepperstone_set(set_payload))
+    assert b"SL_PriceDistance=0.00043" in again.body
+    assert len(token_calls) == 2
+
+    net_request = _pepperstone_quote_payload(target_mode="rr", risk_reward="2")
+    net_quote = json.loads(asyncio.run(master_service.calculator_quote(net_request)).body.decode("utf-8"))
+    net_response = asyncio.run(master_service.calculator_pepperstone_set(_pepperstone_set_payload_from_quote(net_request, net_quote)))
+    net_values = _parse_set_file(net_response.body.decode("utf-8"))
+    assert net_values["SL_PriceDistance"] == "0.00043"
+    assert net_values["TP_PriceDistance"] == "0"
+    assert net_values["AutoTP_NetRR_Enabled"] == "true"
+    assert net_values["NetRR_Target"] == "2"
+    assert calls["account_summary"] == 0
 
 
 def test_calculator_webhook_direct_dict_call_uses_payload(monkeypatch: pytest.MonkeyPatch) -> None:

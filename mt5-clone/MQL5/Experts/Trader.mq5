@@ -1,6 +1,6 @@
 #property strict
-#property description "Trader EA: trendline/standard limits, EMA bounce, and token-gated one-shot standard market execution. SL/TP are set by DISTANCE in MT5 POINTS, with optional AutoTP NetRR."
-#property version   "2.42"
+#property description "Trader EA: trendline/standard limits, EMA bounce, and token-gated one-shot standard market execution. SL/TP accept legacy MT5 points or validated portable price distances, with optional AutoTP NetRR."
+#property version   "2.43"
 
 #include <Trade/Trade.mqh>
 CTrade trade;
@@ -25,6 +25,10 @@ enum StrategyMode
 input group "Strategy"
 input StrategyMode Strategy = STRAT_TRENDLINE_LIMIT;
 input bool         OrdersEnabled = true; // master on/off switch (in Inputs)
+input bool         UsePriceDistanceInputs = false;
+input string       DistanceSymbol = "";
+input double       SL_PriceDistance = 0.0;
+input double       TP_PriceDistance = 0.0;
 
 input group "Desktop Trader Controls"
 input bool   UseDesktopTraderControls       = true;
@@ -52,8 +56,7 @@ input double NetRR_Target              = 2.0;
 input int    AutoTP_SafetyPoints       = 0;
 input int    TP_DistancePoints         = 400;
 
-// NOTE: 1 MT5 point = 1 TradingView tick.
-// NOTE: On 5-digit FX / 3-digit JPY, 1 pip = 10 points (e.g., 5.4 pips = 54 points).
+// Legacy point inputs remain supported. Portable calculator presets use price distances.
 
 // -------------------- Inputs (Trendline strategy only) --------------------
 input group "Trendline strategy (Trendline Limit)"
@@ -160,7 +163,7 @@ int hSlow  = INVALID_HANDLE;
 int hTrend = INVALID_HANDLE;
 
 string EA_COMMENT = "Trader";
-string EA_VERSION = "2.42";
+string EA_VERSION = "2.43";
 
 void Dbg(const string msg){ if(Debug) Print(EA_COMMENT, ": ", msg); }
 bool PlaceOrReplacePendingLimitAtEntry(const bool isBuyLimit,
@@ -237,12 +240,116 @@ double GetTrendlinePriceAtTime(const string name, datetime t)
    return ObjectGetValueByTime(0, name, t, 0);
 }
 
+string CompactDistanceSymbol(string value)
+{
+   StringToUpper(value);
+   StringReplace(value, "_", "");
+   StringReplace(value, "/", "");
+   return value;
+}
+
+bool DistanceSymbolMatchesChart(string &why)
+{
+   string expected = DistanceSymbol;
+   string chart = _Symbol;
+   StringTrimLeft(expected);
+   StringTrimRight(expected);
+   StringTrimLeft(chart);
+   StringTrimRight(chart);
+   StringToUpper(expected);
+   StringToUpper(chart);
+   if(expected == "") { why = "DistanceSymbol is required in price-distance mode."; return false; }
+   if(CompactDistanceSymbol(chart) == CompactDistanceSymbol(expected)) { why = ""; return true; }
+
+   // Broker suffixes are accepted only after an exact canonical pair and an explicit delimiter.
+   string compactExpected = CompactDistanceSymbol(expected);
+   int chartLength = StringLen(chart);
+   int suffixAt = -1;
+   for(int i = 0; i < chartLength; i++)
+   {
+      ushort ch = StringGetCharacter(chart, i);
+      if(ch == '.' || ch == '-' || ch == '#' || ch == '_') { suffixAt = i; break; }
+   }
+   if(suffixAt > 0 && CompactDistanceSymbol(StringSubstr(chart, 0, suffixAt)) == compactExpected)
+   {
+      string suffix = StringSubstr(chart, suffixAt + 1);
+      if(StringLen(suffix) > 0)
+      {
+         bool suffixValid = true;
+         for(int j = 0; j < StringLen(suffix); j++)
+         {
+            ushort ch = StringGetCharacter(suffix, j);
+            if(!((ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9'))) { suffixValid = false; break; }
+         }
+         if(suffixValid) { why = ""; return true; }
+      }
+   }
+   why = "Price-distance preset symbol " + DistanceSymbol + " does not match chart symbol " + _Symbol + ".";
+   return false;
+}
+
+bool DistanceUnitsAreWhole(double value, double step, double &unitsOut)
+{
+   if(!MathIsValidNumber(value) || !MathIsValidNumber(step) || value <= 0.0 || step <= 0.0) return false;
+   double units = value / step;
+   double nearest = MathRound(units);
+   double tolerance = MathMax(1e-8, MathAbs(nearest) * 1e-12);
+   if(MathAbs(units - nearest) > tolerance) return false;
+   unitsOut = nearest;
+   return true;
+}
+
+bool ValidatePriceDistance(double priceDistance, double &pointCount, string &why)
+{
+   if(!DistanceSymbolMatchesChart(why)) return false;
+   if(!MathIsValidNumber(priceDistance) || priceDistance <= 0.0)
+   { why = "Price distance must be finite and greater than zero."; return false; }
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   double tradeTickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   if(point <= 0.0 || tradeTickSize <= 0.0)
+   { why = "Broker SYMBOL_POINT or SYMBOL_TRADE_TICK_SIZE is unavailable."; return false; }
+   double points = 0.0;
+   double tradeTicks = 0.0;
+   if(!DistanceUnitsAreWhole(priceDistance, point, points) || points < 1.0 || points > 2147483647.0)
+   { why = "Price distance is not representable as an in-range whole SYMBOL_POINT count."; return false; }
+   if(!DistanceUnitsAreWhole(priceDistance, tradeTickSize, tradeTicks) || tradeTicks < 1.0)
+   { why = "Price distance is not representable on SYMBOL_TRADE_TICK_SIZE."; return false; }
+   pointCount = points;
+   return true;
+}
+
+bool PriceLevelIsOnTradeGrid(double price, string &why)
+{
+   double tradeTickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   double unusedUnits = 0.0;
+   if(!MathIsValidNumber(price) || price <= 0.0 || !DistanceUnitsAreWhole(price, tradeTickSize, unusedUnits))
+   { why = "Entry or final price level is not representable on SYMBOL_TRADE_TICK_SIZE."; return false; }
+   return true;
+}
+
 bool BuildSLFromDistance(double entry, bool isBuy, double &slOut, string &why)
 {
-   if(SL_DistancePoints <= 0){ why = "SL_DistancePoints must be > 0."; return false; }
-   double slDist = (double)SL_DistancePoints * _Point;
-   slOut = isBuy ? (entry - slDist) : (entry + slDist);
-   slOut = NormalizePrice(slOut);
+   double slDist = 0.0;
+   if(UsePriceDistanceInputs)
+   {
+      double stopPoints = 0.0;
+      if(!ValidatePriceDistance(SL_PriceDistance, stopPoints, why)) return false;
+      if(!PriceLevelIsOnTradeGrid(entry, why)) return false;
+      slDist = SL_PriceDistance;
+   }
+   else
+   {
+      if(SL_DistancePoints <= 0){ why = "SL_DistancePoints must be > 0."; return false; }
+      slDist = (double)SL_DistancePoints * _Point;
+   }
+   double rawSL = isBuy ? (entry - slDist) : (entry + slDist);
+   slOut = NormalizePrice(rawSL);
+   if(UsePriceDistanceInputs)
+   {
+      double gridTolerance = MathMax(SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE) * 1e-7, 1e-12);
+      if(!PriceLevelIsOnTradeGrid(slOut, why) || MathAbs(MathAbs(entry - slOut) - slDist) > gridTolerance)
+      { if(why == "") why = "Normalized stop would change the requested price distance."; return false; }
+   }
 
    int stopsLevel = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
    if(stopsLevel > 0 && MathAbs(entry - slOut) < stopsLevel * _Point)
@@ -254,10 +361,27 @@ bool BuildSLFromDistance(double entry, bool isBuy, double &slOut, string &why)
 
 bool BuildTPManualFromDistance(double entry, bool isBuy, double &tpOut, string &why)
 {
-   if(TP_DistancePoints <= 0){ why = "TP_DistancePoints must be > 0 (or enable AutoTP)."; return false; }
-   double tpDist = (double)TP_DistancePoints * _Point;
-   tpOut = isBuy ? (entry + tpDist) : (entry - tpDist);
-   tpOut = NormalizePrice(tpOut);
+   double tpDist = 0.0;
+   if(UsePriceDistanceInputs)
+   {
+      double targetPoints = 0.0;
+      if(!ValidatePriceDistance(TP_PriceDistance, targetPoints, why)) return false;
+      if(!PriceLevelIsOnTradeGrid(entry, why)) return false;
+      tpDist = TP_PriceDistance;
+   }
+   else
+   {
+      if(TP_DistancePoints <= 0){ why = "TP_DistancePoints must be > 0 (or enable AutoTP)."; return false; }
+      tpDist = (double)TP_DistancePoints * _Point;
+   }
+   double rawTP = isBuy ? (entry + tpDist) : (entry - tpDist);
+   tpOut = NormalizePrice(rawTP);
+   if(UsePriceDistanceInputs)
+   {
+      double gridTolerance = MathMax(SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE) * 1e-7, 1e-12);
+      if(!PriceLevelIsOnTradeGrid(tpOut, why) || MathAbs(MathAbs(entry - tpOut) - tpDist) > gridTolerance)
+      { if(why == "") why = "Normalized target would change the requested price distance."; return false; }
+   }
 
    int stopsLevel = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
    if(stopsLevel > 0 && MathAbs(entry - tpOut) < stopsLevel * _Point)
@@ -385,6 +509,8 @@ bool ComputeVolumeFromRisk(double entry, double sl, double &outVol, double &outR
    why = "";
    outRiskBufferedAUD = 0.0;
    outBufferPoints = MathMax(0, RiskSlippageBufferPoints);
+   if(riskMin <= 0.0 || riskMax < riskMin)
+   { why="RiskAUD_Min and RiskAUD_Max must define a positive risk band."; return false; }
 
    double stopPoints = MathAbs(entry - sl) / _Point;
    if(stopPoints <= 0){ why="Stop distance is zero/invalid."; return false; }
@@ -442,17 +568,36 @@ bool ComputeVolumeFromRisk(double entry, double sl, double &outVol, double &outR
    if(riskTotal < riskMin){ why="Rounded risk is below RiskAUD_Min filter."; return false; }
    if(riskTotal > riskMax){ why="Rounded risk exceeds RiskAUD_Max filter."; return false; }
 
-   // Fixed mode preserves the prior configured-buffer behavior. Automatic mode
-   // may lower the generated preferred maximum, never below SlippagePoints.
-   int preferredBuffer = MathMax(0, RiskSlippageBufferPoints);
+   // Fixed mode preserves the configured buffer. Automatic mode caps that
+   // preference by the stop-distance risk band before fitting, while retaining
+   // the minimum derived from the original preference and SlippagePoints.
+   int configuredPreferredBuffer = MathMax(0, RiskSlippageBufferPoints);
    int minimumBuffer = AutoFitRiskSlippageBuffer
-      ? (int)MathMin(preferredBuffer, MathMax(0, SlippagePoints))
-      : preferredBuffer;
-   int chosenBuffer = preferredBuffer;
-   if(preferredBuffer > 0)
+      ? (int)MathMin(configuredPreferredBuffer, MathMax(0, SlippagePoints))
+      : configuredPreferredBuffer;
+   int maximumBuffer = configuredPreferredBuffer;
+   if(AutoFitRiskSlippageBuffer && configuredPreferredBuffer > 0)
+   {
+      double riskBandRatio = (riskMax / riskMin) - 1.0;
+      if(!MathIsValidNumber(riskBandRatio) || riskBandRatio < 0.0)
+      { why="Risk band cannot derive a conservative stop-distance buffer cap."; return false; }
+      double conservativeDistanceCapRaw = stopPoints * riskBandRatio;
+      if(!MathIsValidNumber(conservativeDistanceCapRaw) || conservativeDistanceCapRaw < 0.0)
+      { why="Risk band cannot derive a finite conservative stop-distance buffer cap."; return false; }
+      maximumBuffer = configuredPreferredBuffer;
+      if(conservativeDistanceCapRaw < (double)configuredPreferredBuffer)
+         maximumBuffer = (int)MathFloor(conservativeDistanceCapRaw + 1e-9);
+      if(maximumBuffer < minimumBuffer)
+      {
+         why = "Conservative stop-distance buffer cap is below the minimum derived from the configured preference and SlippagePoints.";
+         return false;
+      }
+   }
+   int chosenBuffer = maximumBuffer;
+   if(maximumBuffer > 0)
    {
       double riskWorst = 0.0;
-      if(!CalcBufferedRiskForVolume(stopPoints, preferredBuffer, vol, commissionRTPerLot, riskWorst))
+      if(!CalcBufferedRiskForVolume(stopPoints, maximumBuffer, vol, commissionRTPerLot, riskWorst))
       { why="Failed to compute worst-case risk for 1 lot."; return false; }
 
       while(riskWorst > riskMax && vol - step >= vmin)
@@ -468,7 +613,7 @@ bool ComputeVolumeFromRisk(double entry, double sl, double &outVol, double &outR
          riskCommission = commissionRTPerLot * vol;
          riskTotal = IncludeCommissionInRisk ? (riskSL + riskCommission) : riskSL;
 
-         if(!CalcBufferedRiskForVolume(stopPoints, preferredBuffer, vol, commissionRTPerLot, riskWorst))
+         if(!CalcBufferedRiskForVolume(stopPoints, maximumBuffer, vol, commissionRTPerLot, riskWorst))
          { why="Failed to compute worst-case risk for 1 lot."; return false; }
       }
 
@@ -483,7 +628,7 @@ bool ComputeVolumeFromRisk(double entry, double sl, double &outVol, double &outR
             return false;
          }
          int low = minimumBuffer;
-         int high = preferredBuffer;
+         int high = maximumBuffer;
          chosenBuffer = minimumBuffer;
          // Bounded monotonic search across whole MT5 points; no point-by-point retry.
          while(low <= high)
@@ -3286,6 +3431,15 @@ int OnInit()
       WriteDesktopTraderStatus();
       Print(EA_COMMENT, ": desktop_control ready=", (g_traderControlReady ? "true" : "false"),
             " instance=", g_traderControlInstanceId, " reason=", g_traderControlReason);
+      return INIT_SUCCEEDED;
+   }
+
+   // Calculator price-distance presets start inert. Reviewing the file in the
+   // terminal cannot place an order, arm a trendline, or cancel prior work.
+   if(UsePriceDistanceInputs && !OrdersEnabled)
+   {
+      ObjectDelete(0, STANDARD_MARKET_EXECUTE_BUTTON);
+      Print(EA_COMMENT, ": portable price-distance preset loaded inactive; enable OrdersEnabled explicitly after review.");
       return INIT_SUCCEEDED;
    }
 

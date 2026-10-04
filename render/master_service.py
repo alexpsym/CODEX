@@ -27189,7 +27189,7 @@ CALCULATOR_TEMPLATE = """<!doctype html>
               <tr><th><label for="calc-target-mode">Target mode</label></th><td><select id="calc-target-mode"><option value="rr" selected>Net R</option><option value="ticks">Manual TradingView target ticks</option></select></td></tr>
               <tr id="rr-wrap"><th><label for="calc-rr">Risk/reward</label></th><td><input id="calc-rr" type="number" min="0.1" step="0.1" value="2"/></td></tr>
               <tr id="tp-ticks-wrap" style="display:none"><th><label for="calc-tp-ticks">Target ticks</label></th><td><input id="calc-tp-ticks" type="number" min="1" step="1" value="20"/></td></tr>
-              <tr id="chart-tick-size-wrap" style="display:none"><th><label for="calc-chart-tick-size">TradingView tick size</label></th><td><input id="calc-chart-tick-size" type="number" min="0" step="any" placeholder="Blank uses OANDA chart-feed default"/><div class="muted">Optional override for this symbol. Enter the selected TradingView chart's minimum price increment; the stop and target fields stay in chart ticks.</div></td></tr>
+              <tr id="chart-tick-size-wrap" style="display:none"><th>TradingView chart tick size</th><td><input id="calc-chart-tick-auto" type="text" readonly aria-label="Automatically resolved TradingView chart tick size" value="Resolving…"/><div id="calc-chart-tick-source" class="muted">Automatic symbol profile</div><label class="muted"><input id="calc-chart-tick-size-override-enabled" type="checkbox"/> Advanced override for another chart feed</label><input id="calc-chart-tick-size" type="number" min="0" step="any" placeholder="Optional positive chart increment" disabled style="display:none"/><div class="muted">Stop and target inputs remain TradingView ticks. Pepperstone GBPUSD uses the measured 0.00001 chart step automatically.</div></td></tr>
               <tr id="risk-toggle-wrap"><th>Risk mode</th><td><div class="group toggle" id="risk-toggle"><button type="button" data-v="fixed_aud">Fixed AUD</button><button type="button" data-v="percent" class="active">%</button></div></td></tr>
               <tr><th><label id="calc-risk-label" for="calc-risk">Risk value (%)</label></th><td><input id="calc-risk" type="number" min="0.0001" step="any" value="1"/></td></tr>
             </tbody>
@@ -27347,6 +27347,8 @@ def _fmt_dec(value: Decimal) -> str:
 PEPPERSTONE_TRADER_SET_INPUT_NAMES = (
     "Strategy",
     "OrdersEnabled",
+    "UseDesktopTraderControls",
+    "TrendlineArmGeneration",
     "RiskAUD_Target",
     "RiskAUD_Min",
     "RiskAUD_Max",
@@ -27355,6 +27357,10 @@ PEPPERSTONE_TRADER_SET_INPUT_NAMES = (
     "RiskSlippageBufferPoints",
     "SlippagePoints",
     "AutoFitRiskSlippageBuffer",
+    "UsePriceDistanceInputs",
+    "DistanceSymbol",
+    "SL_PriceDistance",
+    "TP_PriceDistance",
     "SL_DistancePoints",
     "AutoTP_NetRR_Enabled",
     "NetRR_Target",
@@ -27558,19 +27564,33 @@ def _pepperstone_convert_ticks_to_points(
     return {"ticks": ticks, "price_distance": distance, "points": points}
 
 
-def _pepperstone_resolve_chart_tick_size(raw_override: object, default_step: Decimal) -> Tuple[Decimal, str, str]:
+def _pepperstone_resolve_chart_tick_size(
+    raw_override: object, default_step: Decimal, symbol: str
+) -> Tuple[Decimal, str, str, str]:
     raw = str(raw_override or "").strip()
     if not raw:
+        if _pepperstone_symbol_key(symbol) == "GBPUSD":
+            return (
+                Decimal("0.00001"),
+                "Pepperstone GBPUSD TradingView chart (user screenshot measurement: 25 ticks = 0.00025)",
+                "",
+                "pepperstone-gbpusd-tradingview-screenshot-v1",
+            )
         if not default_step.is_finite() or default_step <= 0:
             raise HTTPException(status_code=400, detail="OANDA chart-feed default tick size is invalid; enter a positive TradingView tick-size override.")
-        return default_step, "OANDA display precision (OANDA chart-feed default)", ""
+        return (
+            default_step,
+            "OANDA display precision fallback (not verified for another TradingView feed)",
+            "",
+            "oanda-display-precision-fallback-unverified",
+        )
     try:
         step = Decimal(raw)
     except Exception as exc:
         raise HTTPException(status_code=400, detail="TradingView tick-size override must be a finite positive number.") from exc
     if not step.is_finite() or step <= 0:
         raise HTTPException(status_code=400, detail="TradingView tick-size override must be a finite positive number.")
-    return step, "TradingView user override", _fmt_dec(step)
+    return step, "TradingView user override", _fmt_dec(step), "user-override"
 
 
 _PEPPERSTONE_QUOTE_SNAPSHOT_TTL_SECONDS = 20 * 60
@@ -27647,6 +27667,7 @@ def _pepperstone_risk_buffer_preflight(
         "planned_buffer_points": planned_buffer,
         "minimum_compatible_stop_points": minimum_compatible_stop,
         "compatible": compatible,
+        "state": "compatible" if compatible else "incompatible",
         "explanation": explanation,
     }
 
@@ -27679,15 +27700,19 @@ def _build_pepperstone_trader_set(payload: Dict[str, object]) -> Tuple[str, str]
         raise HTTPException(status_code=409, detail="Calculate a Pepperstone quote before downloading the .set file.")
     quote_snapshot = _get_pepperstone_quote_snapshot(context_id)
     export_status = quote_snapshot.get("pepperstone_mt5_export_status")
-    if (
-        (not isinstance(export_status, dict) or export_status.get("ready") is not True)
-        and (not isinstance(export_status, dict) or export_status.get("code") != "PEPPERSTONE_SET_RISK_BUFFER_INCOMPATIBLE")
-    ):
-        reason = str((export_status or {}).get("reason") or "this quote has no verified MT5 point conversion") if isinstance(export_status, dict) else "this quote has no verified MT5 point conversion"
+    if not isinstance(export_status, dict) or export_status.get("file_ready", export_status.get("ready")) is not True:
+        reason = str(export_status.get("reason") or "this quote is not ready") if isinstance(export_status, dict) else "this quote is not ready"
         raise HTTPException(
-            status_code=409,
-            detail=f"Pepperstone .set export is unavailable for this quote: {reason} Calculate again after MT5 point metadata is available.",
+            status_code=422 if isinstance(export_status, dict) and export_status.get("broker_check_state") == "incompatible" else 409,
+            detail=f"Pepperstone .set export is unavailable for this quote: {reason}",
         )
+    for forged_field in (
+        "pepperstone_mt5_export_status", "pepperstone_mt5_point_status", "mt5_point", "mt5_point_size",
+        "mt5_symbol", "point_source_path", "stop_loss_mt5_points", "take_profit_mt5_points",
+        "chart_tick_size", "chart_tick_size_source", "chart_tick_profile_id",
+    ):
+        if forged_field in payload:
+            raise HTTPException(status_code=400, detail=f"{forged_field} is server-owned and cannot be supplied to the .set exporter.")
 
     order_type = str(payload.get("order_type") or "").strip().lower()
     if order_type not in {"limit", "market"}:
@@ -27723,6 +27748,10 @@ def _build_pepperstone_trader_set(payload: Dict[str, object]) -> Tuple[str, str]
     if override_text != str(quote_snapshot.get("chart_tick_size_override") or ""):
         raise HTTPException(status_code=409, detail="TradingView tick-size override changed since the quote. Recalculate before downloading.")
     chart_tick_size = Decimal(str(quote_snapshot["chart_tick_size"]))
+    profile_id = str(quote_snapshot.get("chart_tick_profile_id") or "")
+    quoted_profile_id = str(payload.get("quoted_chart_tick_profile_id") or "")
+    if quoted_profile_id and quoted_profile_id != profile_id:
+        raise HTTPException(status_code=409, detail="TradingView chart profile changed since the quote. Recalculate before downloading.")
     quoted_chart_tick_size = payload.get("quoted_chart_tick_size")
     if quoted_chart_tick_size not in (None, ""):
         try:
@@ -27732,20 +27761,6 @@ def _build_pepperstone_trader_set(payload: Dict[str, object]) -> Tuple[str, str]
             raise
         except Exception as exc:
             raise HTTPException(status_code=400, detail="Quoted TradingView tick size is invalid.") from exc
-
-    try:
-        current_point = _load_pepperstone_symbol_point(resolved_symbol)
-    except HTTPException as exc:
-        raise HTTPException(
-            status_code=409,
-            detail=f"Pepperstone MT5 point metadata is unavailable at export: {exc.detail} Recalculate after restoring the export.",
-        ) from exc
-    if (
-        str(current_point.get("source_path")) != str(quote_snapshot.get("point_source_path"))
-        or str(current_point.get("mt5_symbol")) != str(quote_snapshot.get("mt5_symbol"))
-        or Decimal(str(current_point.get("point"))) != Decimal(str(quote_snapshot.get("mt5_point")))
-    ):
-        raise HTTPException(status_code=409, detail="Pepperstone MT5 symbol mapping or SYMBOL_POINT changed since the quote. Calculate again before downloading the .set file.")
 
     entry: Optional[Decimal] = None
     if order_type == "limit":
@@ -27759,11 +27774,11 @@ def _build_pepperstone_trader_set(payload: Dict[str, object]) -> Tuple[str, str]
     if order_type == "limit" and (quoted_entry is None or entry != Decimal(str(quoted_entry))):
         raise HTTPException(status_code=409, detail="Pepperstone limit entry no longer matches the calculated quote. Recalculate before downloading.")
 
-    stop_conversion = _pepperstone_convert_ticks_to_points(
-        stop_ticks, chart_tick_size, current_point["point"], "stop_loss_ticks"
-    )
+    stop_price_distance = Decimal(stop_ticks) * chart_tick_size
+    if stop_price_distance != Decimal(str(quote_snapshot.get("stop_price_distance"))):
+        raise HTTPException(status_code=409, detail="Pepperstone stop price distance no longer matches the calculated quote. Recalculate before downloading.")
     rr: Optional[Decimal] = None
-    target_conversion: Optional[Dict[str, object]] = None
+    target_price_distance = Decimal("0")
     if target_mode == "rr":
         try:
             rr = Decimal(str(payload.get("risk_reward")))
@@ -27777,9 +27792,9 @@ def _build_pepperstone_trader_set(payload: Dict[str, object]) -> Tuple[str, str]
         tp_ticks = _pepperstone_positive_tick_count(payload.get("take_profit_ticks"), "take_profit_ticks")
         if tp_ticks != quote_snapshot.get("take_profit_ticks"):
             raise HTTPException(status_code=409, detail="Manual target ticks no longer match the calculated quote. Recalculate before downloading.")
-        target_conversion = _pepperstone_convert_ticks_to_points(
-            tp_ticks, chart_tick_size, current_point["point"], "take_profit_ticks"
-        )
+        target_price_distance = Decimal(tp_ticks) * chart_tick_size
+        if target_price_distance != Decimal(str(quote_snapshot.get("target_price_distance"))):
+            raise HTTPException(status_code=409, detail="Pepperstone target price distance no longer matches the calculated quote. Recalculate before downloading.")
 
     risk_mode = str(payload.get("risk_mode") or "").strip().lower()
     risk_value = _dec(payload.get("risk_value"), "risk_value")
@@ -27791,36 +27806,37 @@ def _build_pepperstone_trader_set(payload: Dict[str, object]) -> Tuple[str, str]
         raise HTTPException(status_code=400, detail="RiskAUD_Target must be greater than zero.")
     risk_min = risk_target * Decimal("0.90")
     risk_max = risk_target * Decimal("1.20")
-    preflight = _pepperstone_risk_buffer_preflight(stop_points=int(stop_conversion["points"]), risk_target=risk_target)
-    if not preflight["compatible"]:
+    preflight = quote_snapshot.get("risk_buffer_preflight")
+    if isinstance(preflight, dict) and preflight.get("state") != "pending" and preflight.get("compatible") is False:
         raise HTTPException(
             status_code=422,
             detail={
                 "code": "PEPPERSTONE_SET_RISK_BUFFER_INCOMPATIBLE",
-                "message": preflight["explanation"],
+                "message": str(preflight.get("explanation") or "Verified broker metadata shows the configured risk buffer is incompatible."),
                 "preflight": preflight,
             },
         )
-    tp_points = (
-        int(target_conversion["points"])
-        if target_conversion is not None
-        else max(1, int((Decimal(int(stop_conversion["points"])) * (rr or Decimal("0"))).to_integral_value(rounding=ROUND_HALF_UP)))
-    )
 
     values = {
         "Strategy": "2" if order_type == "limit" else "3",
-        "OrdersEnabled": _pepperstone_trader_set_bool(True),
+        "OrdersEnabled": _pepperstone_trader_set_bool(False),
+        "UseDesktopTraderControls": _pepperstone_trader_set_bool(False),
+        "TrendlineArmGeneration": "0",
         "RiskAUD_Target": _pepperstone_set_decimal(risk_target, places="0.01"),
         "RiskAUD_Min": _pepperstone_set_decimal(risk_min, places="0.01"),
         "RiskAUD_Max": _pepperstone_set_decimal(risk_max, places="0.01"),
         "IncludeCommissionInRisk": _pepperstone_trader_set_bool(True),
         "CommissionPerLotPerSide": _pepperstone_set_decimal(Decimal(str(os.getenv("PEPPERSTONE_TRADER_COMMISSION_PER_LOT_PER_SIDE", "3.50") or "3.50")), places="0.01"),
-        "RiskSlippageBufferPoints": str(preflight["planned_buffer_points"]),
+        "RiskSlippageBufferPoints": str(_pepperstone_default_risk_slippage_buffer_points()),
         "SlippagePoints": str(_pepperstone_default_slippage_points()),
         "AutoFitRiskSlippageBuffer": _pepperstone_trader_set_bool(True),
-        "SL_DistancePoints": str(stop_conversion["points"]),
+        "UsePriceDistanceInputs": _pepperstone_trader_set_bool(True),
+        "DistanceSymbol": resolved_symbol,
+        "SL_PriceDistance": _pepperstone_set_decimal(stop_price_distance),
+        "TP_PriceDistance": _pepperstone_set_decimal(target_price_distance),
+        "SL_DistancePoints": "0",
         "AutoTP_NetRR_Enabled": _pepperstone_trader_set_bool(target_mode == "rr"),
-        "TP_DistancePoints": str(tp_points),
+        "TP_DistancePoints": "0",
         "MagicNumber": str(int(os.getenv("PEPPERSTONE_TRADER_MAGIC_NUMBER", "91001") or "91001")),
         "EnforceOneTradeAtATime": _pepperstone_trader_set_bool(True),
     }
@@ -28724,10 +28740,14 @@ async def calculator_instrument(asset: str, account: str, symbol: str, broker: s
                 default_chart_step = Decimal("1").scaleb(-precision)
             except Exception as exc:
                 raise HTTPException(status_code=502, detail="OANDA chart-feed default tick size is unavailable; enter a positive TradingView tick-size override.") from exc
+            chart_step, chart_source, _override, chart_profile = _pepperstone_resolve_chart_tick_size(
+                "", default_chart_step, resolved_symbol
+            )
             instrument_payload.update(
                 {
-                    "chart_tick_size_default": _fmt_dec(default_chart_step),
-                    "chart_tick_size_source": "OANDA display precision (OANDA chart-feed default; override for another TradingView feed)",
+                    "chart_tick_size_default": _fmt_dec(chart_step),
+                    "chart_tick_size_source": chart_source,
+                    "chart_tick_profile_id": chart_profile,
                 }
             )
             try:
@@ -28984,6 +29004,7 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
     pepperstone_chart_tick_size: Optional[Decimal] = None
     pepperstone_chart_tick_source = ""
     pepperstone_chart_tick_override = ""
+    pepperstone_chart_tick_profile = ""
     pepperstone_stop_conversion: Optional[Dict[str, object]] = None
     pepperstone_target_conversion: Optional[Dict[str, object]] = None
     pepperstone_export_status: Optional[Dict[str, object]] = None
@@ -29628,41 +29649,47 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
             tick_size = Decimal("1").scaleb(-display_precision)
             distance_tick_size = tick_size
             if is_pepperstone:
-                pepperstone_chart_tick_size, pepperstone_chart_tick_source, pepperstone_chart_tick_override = _pepperstone_resolve_chart_tick_size(
-                    payload.get("chart_tick_size"), tick_size
+                (
+                    pepperstone_chart_tick_size,
+                    pepperstone_chart_tick_source,
+                    pepperstone_chart_tick_override,
+                    pepperstone_chart_tick_profile,
+                ) = _pepperstone_resolve_chart_tick_size(
+                    payload.get("chart_tick_size"), tick_size, symbol
                 )
                 distance_tick_size = pepperstone_chart_tick_size
                 try:
                     pepperstone_point_snapshot = _load_pepperstone_symbol_point(symbol)
                 except HTTPException as exc:
                     pepperstone_export_status = {
-                        "ready": False,
+                        "ready": True,
+                        "file_ready": True,
+                        "broker_check_state": "pending",
                         "code": "PEPPERSTONE_MT5_POINT_METADATA_UNAVAILABLE",
-                        "reason": str(exc.detail),
+                        "reason": "Broker point and risk-buffer checks are pending in Trader.",
+                        "metadata_reason": str(exc.detail),
                     }
                 else:
-                    pepperstone_export_status = {"ready": True, "code": None, "reason": ""}
+                    pepperstone_export_status = {
+                        "ready": True,
+                        "file_ready": True,
+                        "broker_check_state": "pending",
+                        "code": None,
+                        "reason": "Final broker point, grid, and risk checks run in Trader.",
+                    }
                     try:
                         pepperstone_stop_conversion = _pepperstone_convert_ticks_to_points(
                             stop_ticks, distance_tick_size, pepperstone_point_snapshot["point"], "stop_loss_ticks"
                         )
                     except HTTPException as exc:
-                        pepperstone_export_status = {
-                            "ready": False,
-                            "code": "PEPPERSTONE_MT5_DISTANCE_CONVERSION_FAILED",
-                            "reason": str(exc.detail),
-                        }
+                        pepperstone_export_status["metadata_reason"] = str(exc.detail)
                     if pepperstone_stop_conversion and target_mode == "ticks" and tp_ticks is not None:
                         try:
                             pepperstone_target_conversion = _pepperstone_convert_ticks_to_points(
                                 tp_ticks, distance_tick_size, pepperstone_point_snapshot["point"], "take_profit_ticks"
                             )
                         except HTTPException as exc:
-                            pepperstone_export_status = {
-                                "ready": False,
-                                "code": "PEPPERSTONE_MT5_DISTANCE_CONVERSION_FAILED",
-                                "reason": str(exc.detail),
-                            }
+                            pepperstone_export_status["metadata_reason"] = str(exc.detail)
             try:
                 prices = pricing_task.result()
             except Exception as exc:
@@ -29902,19 +29929,32 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
                     pepperstone_preflight["minimum_compatible_stop_ticks"] = int(minimum_ticks)
                     pepperstone_preflight["submitted_stop_ticks"] = int(stop_ticks)
                     response_payload["pepperstone_risk_buffer_preflight"] = pepperstone_preflight
-                    if not pepperstone_preflight["compatible"] and pepperstone_export_status and pepperstone_export_status.get("ready") is True:
+                    if pepperstone_preflight["compatible"]:
+                        pepperstone_export_status["broker_check_state"] = "compatible"
+                    else:
                         pepperstone_export_status = {
                             "ready": False,
+                            "file_ready": False,
+                            "broker_check_state": "incompatible",
                             "code": "PEPPERSTONE_SET_RISK_BUFFER_INCOMPATIBLE",
                             "reason": str(pepperstone_preflight["explanation"]),
                         }
+                elif pepperstone_export_status and pepperstone_export_status.get("broker_check_state") == "pending":
+                    response_payload["pepperstone_risk_buffer_preflight"] = {
+                        "state": "pending",
+                        "compatible": None,
+                        "explanation": "Broker point and risk-buffer checks are pending in Trader.",
+                    }
                 if pepperstone_target_conversion is not None:
                     distance_conversion["take_profit_mt5_points"] = int(pepperstone_target_conversion["points"])
                 response_payload["pepperstone_distance_conversion"] = distance_conversion
+                response_payload["chart_tick_profile_id"] = pepperstone_chart_tick_profile
                 response_payload["pepperstone_mt5_export_status"] = pepperstone_export_status or {
-                    "ready": False,
+                    "ready": True,
+                    "file_ready": True,
+                    "broker_check_state": "pending",
                     "code": "PEPPERSTONE_MT5_POINT_METADATA_UNAVAILABLE",
-                    "reason": "Pepperstone MT5 point metadata is unavailable.",
+                    "reason": "Broker point and risk-buffer checks are pending in Trader.",
                 }
             calculation_context_id = (
                 str(payload.get("calculation_context_id") or "").strip()
@@ -29938,6 +29978,10 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
                         "chart_tick_size": _fmt_dec(pepperstone_chart_tick_size),
                         "chart_tick_size_override": pepperstone_chart_tick_override,
                         "chart_tick_size_source": pepperstone_chart_tick_source,
+                        "chart_tick_profile_id": pepperstone_chart_tick_profile,
+                        "stop_price_distance": _fmt_dec(abs(entry - sl)),
+                        "target_price_distance": _fmt_dec(abs(tp - entry)) if target_mode == "ticks" else None,
+                        "risk_buffer_preflight": response_payload.get("pepperstone_risk_buffer_preflight"),
                         "pepperstone_mt5_export_status": response_payload["pepperstone_mt5_export_status"],
                     }
                 if pepperstone_point_snapshot is not None:
