@@ -1,6 +1,6 @@
 #property strict
 #property description "Trader EA: trendline/standard limits, EMA bounce, and token-gated one-shot standard market execution. SL/TP accept legacy MT5 points or validated portable price distances, with optional AutoTP NetRR."
-#property version   "2.43"
+#property version   "2.44"
 
 #include <Trade/Trade.mqh>
 CTrade trade;
@@ -130,6 +130,8 @@ bool     g_trendlineTrackingFailed = false;
 string   g_traderControlInstanceId = "";
 bool     g_traderControlReady = false;
 string   g_traderControlReason = "Desktop controls are initializing.";
+datetime g_portablePresetInitializedAt = 0;
+bool     g_portablePresetActionActivated = false;
 // Keeps the lifecycle comment within common MT5 broker comment limits.
 const long TRENDLINE_ARM_GENERATION_MAX = 999999999;
 const int  TRADER_CONTROL_PROTOCOL_VERSION = 1;
@@ -163,7 +165,7 @@ int hSlow  = INVALID_HANDLE;
 int hTrend = INVALID_HANDLE;
 
 string EA_COMMENT = "Trader";
-string EA_VERSION = "2.43";
+string EA_VERSION = "2.44";
 
 void Dbg(const string msg){ if(Debug) Print(EA_COMMENT, ": ", msg); }
 bool PlaceOrReplacePendingLimitAtEntry(const bool isBuyLimit,
@@ -2227,6 +2229,7 @@ void AdoptObservedStandardLimit(const ulong ticket, const string source)
 
 void MaintainStandardLimit(const string source)
 {
+   if(UsePriceDistanceInputs) return;
    if(!StandardLimitShouldBeActive()) return;
    if(g_standardLimitStructuralBlock ||
       g_standardLimitAcceptanceMismatch ||
@@ -2783,6 +2786,9 @@ bool ReadDesktopTraderCommand(DesktopTraderCommand &command, string &why)
    datetime now = TimeGMT();
    if(command.createdAt > now + 5 || command.createdAt < now - TRADER_CONTROL_COMMAND_MAX_AGE_SECONDS)
    { why = "Desktop command is stale or has an invalid future timestamp."; return false; }
+   if(UsePriceDistanceInputs &&
+      (command.createdAt <= g_portablePresetInitializedAt || command.createdAt > now))
+   { why = "Portable preset command was not created during the current EA initialization."; return false; }
    why = "";
    return true;
 }
@@ -3019,6 +3025,7 @@ bool SaveDesktopActiveTrendline(const string name, string &why)
 void LoadDesktopActiveTrendline()
 {
    g_trendName = "";
+   if(UsePriceDistanceInputs) return;
    int handle = FileOpen(TraderControlActiveTrendlineFile(),
                          FILE_READ | FILE_TXT | FILE_ANSI | FILE_COMMON | FILE_SHARE_READ);
    if(handle != INVALID_HANDLE)
@@ -3033,6 +3040,7 @@ void LoadDesktopActiveTrendline()
 
 void MaintainDesktopTrendlineLifecycle(const string source)
 {
+   if(UsePriceDistanceInputs && !g_portablePresetActionActivated) return;
    if(g_trendName == "") return;
    if(!OrdersEnabled || !TrendlineExists(g_trendName))
    { CancelExactTrendlineLifecyclePending(source + " inactive"); return; }
@@ -3115,6 +3123,7 @@ void ExecuteDesktopTrendline(DesktopTraderResult &result)
 void HandleDesktopTraderCommand()
 {
    if(!UseDesktopTraderControls || !g_traderControlReady) return;
+   if(UsePriceDistanceInputs && !OrdersEnabled) return;
    DesktopTraderCommand command;
    string why = "";
    if(!ReadDesktopTraderCommand(command, why))
@@ -3155,6 +3164,9 @@ void HandleDesktopTraderCommand()
    else if(command.action == "trendline") ExecuteDesktopTrendline(result);
    else if(command.action == "ema_bounce") ExecuteDesktopEmaBounce(result);
    else SetDesktopResult(result, "blocked", "Unknown desktop action.");
+   if(UsePriceDistanceInputs &&
+      (result.outcome == "accepted" || result.outcome == "uncertain"))
+      g_portablePresetActionActivated = true;
    WriteDesktopTraderResult(result);
 }
 
@@ -3385,6 +3397,8 @@ int OnInit()
    trade.SetDeviationInPoints(SlippagePoints);
    trade.SetExpertMagicNumber(MagicNumber);
    g_traderControlInstanceId = TraderControlInstanceId();
+   g_portablePresetInitializedAt = TimeGMT();
+   g_portablePresetActionActivated = false;
 
    g_lastBarTime = iTime(_Symbol, _Period, 0);
 
@@ -3398,7 +3412,8 @@ int OnInit()
    Print(EA_COMMENT, ": TERMINAL_DATA_PATH=", TerminalInfoString(TERMINAL_DATA_PATH));
    Print(EA_COMMENT, ": Expected fallback MQL5\\Files path=", TerminalInfoString(TERMINAL_DATA_PATH), "\\MQL5\\Files\\", FileNameOnly(PepperstoneSpreadExportPath));
    MaybeExportPepperstoneSpreads(true);
-   RefreshTrendlineNameFromInputs();
+   if(UsePriceDistanceInputs) g_trendName = "";
+   else RefreshTrendlineNameFromInputs();
 
    // Desktop mode exposes EMA Bounce regardless of the legacy Strategy selector.
    if(UseDesktopTraderControls || Strategy == STRAT_EMA_BOUNCE)
@@ -3426,6 +3441,12 @@ int OnInit()
       string launchReason = "";
       g_traderControlReady = LaunchDesktopTraderControls(launchReason);
       g_traderControlReason = launchReason;
+      if(UsePriceDistanceInputs)
+      {
+         WriteDesktopTraderStatus();
+         Print(EA_COMMENT, ": portable price-distance preset loaded inactive; review, enable OrdersEnabled, then use a fresh Trader Controls command.");
+         return INIT_SUCCEEDED;
+      }
       LoadDesktopActiveTrendline();
       MaintainDesktopTrendlineLifecycle("OnInit desktop maintenance");
       WriteDesktopTraderStatus();
@@ -3434,12 +3455,12 @@ int OnInit()
       return INIT_SUCCEEDED;
    }
 
-   // Calculator price-distance presets start inert. Reviewing the file in the
-   // terminal cannot place an order, arm a trendline, or cancel prior work.
-   if(UsePriceDistanceInputs && !OrdersEnabled)
+   // Portable price-distance presets require the desktop command workflow even
+   // if a user changes OrdersEnabled in Inputs; loading never starts legacy work.
+   if(UsePriceDistanceInputs)
    {
       ObjectDelete(0, STANDARD_MARKET_EXECUTE_BUTTON);
-      Print(EA_COMMENT, ": portable price-distance preset loaded inactive; enable OrdersEnabled explicitly after review.");
+      Print(EA_COMMENT, ": portable price-distance preset requires an explicit desktop command; no legacy plan was activated.");
       return INIT_SUCCEEDED;
    }
 
@@ -3506,6 +3527,9 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
 
 void OnTick()
 {
+   if(UsePriceDistanceInputs &&
+      (!UseDesktopTraderControls || !g_portablePresetActionActivated)) return;
+
    if(UseDesktopTraderControls)
    {
       MaintainDesktopTrendlineLifecycle("OnTick desktop maintenance");
@@ -3566,15 +3590,22 @@ void OnTick()
 void OnTimer()
 {
    MaybeExportPepperstoneSpreads();
+   if(UsePriceDistanceInputs && !UseDesktopTraderControls) return;
 
    if(UseDesktopTraderControls)
    {
-      MaintainDesktopTrendlineLifecycle("OnTimer desktop maintenance");
+      if(!UsePriceDistanceInputs || g_portablePresetActionActivated)
+         MaintainDesktopTrendlineLifecycle("OnTimer desktop maintenance");
       WriteDesktopTraderStatus();
-      HandleDesktopTraderCommand();
+      if(!UsePriceDistanceInputs || OrdersEnabled)
+         HandleDesktopTraderCommand();
+      if(UsePriceDistanceInputs && OrdersEnabled && g_portablePresetActionActivated)
+         MaintainDesktopTrendlineLifecycle("OnTimer portable command maintenance");
       WriteDesktopTraderStatus();
       return;
    }
+
+   if(UsePriceDistanceInputs) return;
 
    // Mirrors OnTick gating so cancel happens even with no ticks
    if(Strategy == STRAT_STANDARD_LIMIT)

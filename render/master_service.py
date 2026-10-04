@@ -27348,6 +27348,7 @@ PEPPERSTONE_TRADER_SET_INPUT_NAMES = (
     "Strategy",
     "OrdersEnabled",
     "UseDesktopTraderControls",
+    "TrendlineObjectName",
     "TrendlineArmGeneration",
     "RiskAUD_Target",
     "RiskAUD_Min",
@@ -27820,7 +27821,8 @@ def _build_pepperstone_trader_set(payload: Dict[str, object]) -> Tuple[str, str]
     values = {
         "Strategy": "2" if order_type == "limit" else "3",
         "OrdersEnabled": _pepperstone_trader_set_bool(False),
-        "UseDesktopTraderControls": _pepperstone_trader_set_bool(False),
+        "UseDesktopTraderControls": _pepperstone_trader_set_bool(True),
+        "TrendlineObjectName": "",
         "TrendlineArmGeneration": "0",
         "RiskAUD_Target": _pepperstone_set_decimal(risk_target, places="0.01"),
         "RiskAUD_Min": _pepperstone_set_decimal(risk_min, places="0.01"),

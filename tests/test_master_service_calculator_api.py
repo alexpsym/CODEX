@@ -2416,7 +2416,8 @@ def test_pepperstone_portable_set_survives_missing_metadata_and_rejects_invalid_
     assert manual_values["TP_DistancePoints"] == "0"
     assert manual_values["AutoTP_NetRR_Enabled"] == "false"
     assert manual_values["OrdersEnabled"] == "false"
-    assert manual_values["UseDesktopTraderControls"] == "false"
+    assert manual_values["UseDesktopTraderControls"] == "true"
+    assert manual_values["TrendlineObjectName"] == ""
     assert manual_values["TrendlineArmGeneration"] == "0"
     assert len(token_calls) == 1
 

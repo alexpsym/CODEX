@@ -346,15 +346,18 @@ el['calc-limit'].value='1.1002';
 el['calc-sl-ticks'].value='35';
 el['calc-rr'].value='2';
 el['calc-risk'].value='10';
-let quotePayload=null;
-let setPayload=null;
-global.fetch=async (url,opts={})=>{
+  let quotePayload=null;
+  let setPayload=null;
+  const requests=[];
+  const downloads=[];
+  global.fetch=async (url,opts={})=>{
+    requests.push(url);
   if(url.includes('/api/calculator/bootstrap')) return {ok:true,status:200,statusText:'OK',headers:{get:()=> 'application/json'},text:async()=>JSON.stringify({app_profile:'local',calculator_js_sha256_12:'abc123def456',render_calculator_base_url_configured:true,webhook:{available:true}})};
-  if(url.includes('/api/calculator/quote')){ quotePayload=JSON.parse(opts.body||'{}'); return {ok:true,status:200,statusText:'OK',headers:{get:()=> 'application/json'},text:async()=>JSON.stringify({asset:'fx',broker:'pepperstone',venue:'Pepperstone',resolved_venue:'Pepperstone',symbol:'EUR_USD',tick_size:'0.00001',entry_price:'1.1002',stop_price:'1.09985',target_price:'1.10125',target_distance:'0.00105',quantity:'1000',estimated_fees_or_spread:'1',estimated_total_loss:'10',estimated_total_loss_aud:'10',estimated_reward:'20',pepperstone_risk_buffer_preflight:{stop_points:35,preferred_maximum_buffer_points:50,minimum_automatic_buffer_points:10,conservative_max_buffer_points:11,planned_buffer_points:11,minimum_compatible_stop_points:30,compatible:true,explanation:'Automatic risk buffer ready. Trader will choose the exact live value within the planned range.'}})}; }
+  if(url.includes('/api/calculator/quote')){ quotePayload=JSON.parse(opts.body||'{}'); return {ok:true,status:200,statusText:'OK',headers:{get:()=> 'application/json'},text:async()=>JSON.stringify({asset:'fx',broker:'pepperstone',venue:'Pepperstone',resolved_venue:'Pepperstone',symbol:'EUR_USD',tick_size:'0.00001',entry_price:'1.1002',stop_price:'1.09985',target_price:'1.10125',target_distance:'0.00105',quantity:'1000',estimated_fees_or_spread:'1',estimated_total_loss:'10',estimated_total_loss_aud:'10',estimated_reward:'20',pepperstone_mt5_export_status:{file_ready:true,broker_check_state:'pending',reason:'Broker point, grid, and risk checks run in Trader.'},pepperstone_risk_buffer_preflight:{state:'pending',stop_points:35,preferred_maximum_buffer_points:50,minimum_automatic_buffer_points:10,conservative_max_buffer_points:11,planned_buffer_points:11,minimum_compatible_stop_points:30,compatible:null,explanation:'Broker checks are pending in Trader.'}})}; }
   if(url.includes('/api/calculator/pepperstone-set')){ setPayload=JSON.parse(opts.body||'{}'); return {ok:true,status:200,statusText:'OK',headers:{get:(k)=>k==='content-disposition'?'attachment; filename="Pepperstone_Trader_EUR_USD_BUY_MARKET_x.set"':'text/plain'},text:async()=> 'Strategy=3\nStandardMarketSide=0\nStandardMarketExecutionToken=mkt_test\n'}; }
   return {ok:true,status:200,statusText:'OK',headers:{get:()=> 'application/json'},text:async()=>JSON.stringify({status:'no_data'})};
 };
-global.document={getElementById:(id)=>el[id]};
+global.document={getElementById:(id)=>el[id],createElement:(tag)=>({tag,style:{},click(){downloads.push({tag,filename:this.download});}})};
 global.navigator={clipboard:{writeText:async()=>{}}};
 global.setTimeout=(fn)=>{ fn(); return 1; };
 global.clearTimeout=()=>{};
@@ -370,8 +373,18 @@ eval(source);
   await el['calc-quote'].listeners.click();
   const setReady = el['calc-pepperstone-set'].style.display === '' && el['calc-pepperstone-set'].disabled === false;
   if (!setReady) throw new Error('Pepperstone .set button was not ready after a compatible quote.');
+  const submitAfterQuote = el['calc-submit'].style.display;
+  const preflightAfterQuote = el['calc-pepperstone-risk-preflight'].textContent;
+  const automaticSetRequests = requests.filter((url)=>url.includes('/api/calculator/pepperstone-set')).length;
+  const automaticOrderRequests = requests.filter((url)=>url.includes('/submit')).length;
+  const automaticDownloads = downloads.length;
   await el['calc-pepperstone-set'].listeners.click();
-  console.log(JSON.stringify({hiddenOnCrypto,visibleOnFx,broker:quotePayload?.broker,setReady,setPayload,setButton:el['calc-pepperstone-set'].style.display,submit:el['calc-submit'].style.display,summary:el['calc-request-summary'].textContent}));
+  const explicitSetRequests = requests.filter((url)=>url.includes('/api/calculator/pepperstone-set')).length;
+  const downloadsAfterExplicitClick = downloads.length;
+  el['calc-risk'].value='11';
+  el['calc-risk'].listeners.input();
+  const invalidatedAfterEdit = el['calc-pepperstone-set'].style.display === 'none' && el['calc-pepperstone-set'].disabled === true;
+  console.log(JSON.stringify({hiddenOnCrypto,visibleOnFx,broker:quotePayload?.broker,setReady,setPayload,automaticSetRequests,automaticOrderRequests,automaticDownloads,explicitSetRequests,downloadsAfterExplicitClick,invalidatedAfterEdit,setButton:el['calc-pepperstone-set'].style.display,submitAfterQuote,submitDisabledAfterEdit:el['calc-submit'].disabled,preflightAfterQuote,summary:el['calc-request-summary'].textContent}));
 })();
 '''
     out = subprocess.check_output([node, "-e", harness, str(JS_PATH)], text=True)
@@ -380,11 +393,19 @@ eval(source);
     assert data["visibleOnFx"] is True
     assert data["broker"] == "pepperstone"
     assert data["setReady"] is True
+    assert data["automaticSetRequests"] == 0
+    assert data["automaticOrderRequests"] == 0
+    assert data["automaticDownloads"] == 0
+    assert data["explicitSetRequests"] == 1
+    assert data["downloadsAfterExplicitClick"] == 1
+    assert data["invalidatedAfterEdit"] is True
     assert "broker=pepperstone" in data["summary"]
     assert data["setPayload"]["order_type"] == "market"
     assert "entry_price" not in data["setPayload"]
-    assert data["setButton"] == ""
-    assert data["submit"] == "none"
+    assert data["setButton"] == "none"
+    assert data["submitAfterQuote"] == "none"
+    assert data["submitDisabledAfterEdit"] is True
+    assert "broker point, grid, and risk checks run in Trader" in data["preflightAfterQuote"]
     assert "broker=pepperstone" in data["summary"]
     assert "venue=Pepperstone" in data["summary"]
 

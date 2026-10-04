@@ -298,7 +298,7 @@ def test_auto_fit_risk_buffer_preserves_risk_and_submission_gates() -> None:
     assert "chosenRiskBuffer" in market and "Automatic risk buffer selected" in market
     assert market.index("ComputeVolumeFromRisk") < market.index("trade.Buy(")
     assert fixed_market.index("ComputeVolumeFromRisk") < fixed_market.index("ConsumeStandardMarketToken") < fixed_market.index("trade.Buy(")
-    assert '#property version   "2.43"' in trader and 'EA_VERSION = "2.43"' in trader
+    assert '#property version   "2.44"' in trader and 'EA_VERSION = "2.44"' in trader
 
 
 def test_four_actions_reuse_current_inputs_and_one_attempt_trading_protections() -> None:
@@ -389,7 +389,7 @@ def test_four_actions_reuse_current_inputs_and_one_attempt_trading_protections()
     assert tick.index("if(UseDesktopTraderControls)") < tick.index("if(!OrdersEnabled)")
     assert timer.index("if(UseDesktopTraderControls)") < timer.index("if(Strategy == STRAT_STANDARD_LIMIT)")
     assert "HandleDesktopTraderCommand()" in timer
-    assert '#property version   "2.43"' in trader and 'EA_VERSION = "2.43"' in trader
+    assert '#property version   "2.44"' in trader and 'EA_VERSION = "2.44"' in trader
 
 
 def test_price_distance_mode_reuses_shared_builders_and_fails_before_market_token() -> None:
@@ -400,6 +400,16 @@ def test_price_distance_mode_reuses_shared_builders_and_fails_before_market_toke
     symbol_match = _function(trader, "bool DistanceSymbolMatchesChart")
     market = _function(trader, "bool ExecuteStandardMarketOnce")
     init = _function(trader, "int OnInit")
+    tick = _function(trader, "void OnTick")
+    timer = _function(trader, "void OnTimer")
+    read_command = _function(trader, "bool ReadDesktopTraderCommand")
+    consume_command = _function(trader, "bool ConsumeDesktopTraderCommand")
+    command_handler = _function(trader, "void HandleDesktopTraderCommand")
+    control_identity = _function(trader, "string TraderControlInstanceId")
+    desktop_maintenance = _function(trader, "void MaintainDesktopTrendlineLifecycle")
+    load_desktop_trendline = _function(trader, "void LoadDesktopActiveTrendline")
+    standard_limit_maintenance = _function(trader, "void MaintainStandardLimit")
+    status = _function(trader, "bool WriteDesktopTraderStatus")
 
     for declaration in (
         'input bool         UsePriceDistanceInputs = false;',
@@ -417,7 +427,55 @@ def test_price_distance_mode_reuses_shared_builders_and_fails_before_market_toke
     assert "Broker suffixes are accepted only after an exact canonical pair" in symbol_match
     assert "StringFind" not in symbol_match
     assert market.index("BuildSLFromDistance") < market.index("ConsumeStandardMarketToken") < market.index("trade.Buy(")
-    assert init.index("if(UseDesktopTraderControls)") < init.index("if(UsePriceDistanceInputs && !OrdersEnabled)") < init.index("MaintainTrendlineLifecycle(\"OnInit\")")
-    assert "portable price-distance preset loaded inactive" in init
+    assert "g_portablePresetActionActivated = false;" in init
+    assert "g_portablePresetInitializedAt = TimeGMT();" in init
+    launch = init.index("g_traderControlReady = LaunchDesktopTraderControls(launchReason)")
+    portable_panel_guard = init.index("if(UsePriceDistanceInputs)", launch)
+    panel_return = init.index("return INIT_SUCCEEDED;", portable_panel_guard)
+    assert launch < portable_panel_guard < panel_return < init.index("LoadDesktopActiveTrendline();")
+    assert "WriteDesktopTraderStatus();" in init[portable_panel_guard:panel_return]
+    assert "LoadDesktopActiveTrendline" not in init[portable_panel_guard:panel_return]
+    assert "MaintainDesktopTrendlineLifecycle" not in init[portable_panel_guard:panel_return]
+    assert init.index("if(UsePriceDistanceInputs)", panel_return) < init.index("if(Strategy == STRAT_TRENDLINE_LIMIT)")
+    assert 'g_trendName = "";' in init
+
+    assert tick.index("if(UsePriceDistanceInputs &&") < tick.index("if(UseDesktopTraderControls)")
+    assert "!UseDesktopTraderControls || !g_portablePresetActionActivated" in tick
+    assert tick.index("if(UsePriceDistanceInputs &&") < tick.index("MaintainDesktopTrendlineLifecycle")
+    assert tick.index("if(UsePriceDistanceInputs &&") < tick.index("if(!OrdersEnabled)")
+
+    assert "if(UsePriceDistanceInputs && !UseDesktopTraderControls) return;" in timer
+    assert timer.index("if(UsePriceDistanceInputs && !UseDesktopTraderControls) return;") < timer.index("if(UseDesktopTraderControls)")
+    assert timer.index("if(!UsePriceDistanceInputs || g_portablePresetActionActivated)") < timer.index("MaintainDesktopTrendlineLifecycle")
+    assert timer.index("if(!UsePriceDistanceInputs || OrdersEnabled)") < timer.index("HandleDesktopTraderCommand()")
+    assert timer.index("if(UsePriceDistanceInputs) return;") < timer.index("if(Strategy == STRAT_STANDARD_LIMIT)")
+    assert timer.index("if(UsePriceDistanceInputs && OrdersEnabled && g_portablePresetActionActivated)") < timer.index("if(Strategy == STRAT_STANDARD_LIMIT)")
+
+    assert "if(UsePriceDistanceInputs) return;" in load_desktop_trendline
+    assert desktop_maintenance.index("if(UsePriceDistanceInputs && !g_portablePresetActionActivated) return;") < desktop_maintenance.index("CancelExactTrendlineLifecyclePending")
+    read_checks = [
+        read_command.index("command.protocolVersion != TRADER_CONTROL_PROTOCOL_VERSION"),
+        read_command.index("command.instanceId != g_traderControlInstanceId"),
+        read_command.index("IsDesktopCommandIdValid(command.commandId)"),
+        read_command.index("IsDesktopActionAllowed(command.action)"),
+        read_command.index("command.createdAt > now + 5"),
+        read_command.index("if(UsePriceDistanceInputs &&"),
+    ]
+    assert read_checks == sorted(read_checks)
+    freshness_check = read_checks[-1]
+    success_start = read_command.index('   why = "";', freshness_check)
+    success_return = read_command.index("return true;", success_start)
+    assert freshness_check < success_start < success_return
+    for identity_part in ("ACCOUNT_SERVER", "ACCOUNT_LOGIN", "ChartID()", "_Symbol", "MagicNumber"):
+        assert identity_part in control_identity
+    assert command_handler.index("if(UsePriceDistanceInputs && !OrdersEnabled) return;") < command_handler.index("ReadDesktopTraderCommand(command, why)")
+    assert command_handler.index("ReadDesktopTraderCommand(command, why)") < command_handler.index("ConsumeDesktopTraderCommand") < command_handler.index('else if(command.action == "market")')
+    assert command_handler.index('if(command.commandId == lastObserved) return;') < command_handler.index("ConsumeDesktopTraderCommand")
+    assert command_handler.index('else if(command.action == "ema_bounce")') < command_handler.index("g_portablePresetActionActivated = true;")
+    assert consume_command.index("FileIsExist(marker, FILE_COMMON)") < consume_command.index("WriteVerifiedCommonText(marker, payload, why)")
+    assert consume_command.index("FileIsExist(marker, FILE_COMMON)") < consume_command.index("alreadyConsumed = true;") < consume_command.index("return stored;")
+    assert 'result.outcome == "accepted"' in command_handler and 'result.outcome == "uncertain"' in command_handler
+    assert standard_limit_maintenance.index("if(UsePriceDistanceInputs) return;") < standard_limit_maintenance.index("StandardLimitShouldBeActive")
+    assert r'\"orders_enabled\":' in status
     assert "UseDesktopTraderControls" in trader and "if(!OrdersEnabled) return false;" in trader
-    assert '#property version   "2.43"' in trader and 'EA_VERSION = "2.43"' in trader
+    assert '#property version   "2.44"' in trader and 'EA_VERSION = "2.44"' in trader
