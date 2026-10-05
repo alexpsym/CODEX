@@ -2415,7 +2415,7 @@ def test_pepperstone_portable_set_survives_missing_metadata_and_rejects_invalid_
     assert manual_values["SL_DistancePoints"] == "0"
     assert manual_values["TP_DistancePoints"] == "0"
     assert manual_values["AutoTP_NetRR_Enabled"] == "false"
-    assert manual_values["OrdersEnabled"] == "false"
+    assert manual_values["OrdersEnabled"] == "true"
     assert manual_values["UseDesktopTraderControls"] == "true"
     assert manual_values["TrendlineObjectName"] == ""
     assert manual_values["TrendlineArmGeneration"] == "0"
@@ -2436,6 +2436,7 @@ def test_pepperstone_portable_set_survives_missing_metadata_and_rejects_invalid_
     assert net_values["TP_PriceDistance"] == "0"
     assert net_values["AutoTP_NetRR_Enabled"] == "true"
     assert net_values["NetRR_Target"] == "2"
+    assert net_values["OrdersEnabled"] == "true"
     assert calls["account_summary"] == 0
 
 

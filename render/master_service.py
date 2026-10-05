@@ -27820,7 +27820,7 @@ def _build_pepperstone_trader_set(payload: Dict[str, object]) -> Tuple[str, str]
 
     values = {
         "Strategy": "2" if order_type == "limit" else "3",
-        "OrdersEnabled": _pepperstone_trader_set_bool(False),
+        "OrdersEnabled": _pepperstone_trader_set_bool(True),
         "UseDesktopTraderControls": _pepperstone_trader_set_bool(True),
         "TrendlineObjectName": "",
         "TrendlineArmGeneration": "0",
