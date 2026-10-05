@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "Local Trading Tools Exit",
+  "version": "1.0.0",
+  "description": "Closes Local Trading Tools tabs after the local worker accepts an exit request.",
+  "host_permissions": [
+    "http://localhost/*",
+    "http://127.0.0.1/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "http://localhost/*",
+        "http://127.0.0.1/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ]
+}

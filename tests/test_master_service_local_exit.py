@@ -52,6 +52,9 @@ def test_local_html_pages_receive_exit_control_only_in_local_profile(monkeypatch
     local = client.get("/instrument-lookup")
     assert local.status_code == 200
     assert 'id="local-exit-control"' in local.text
+    assert 'id="local-exit-control-status"' in local.text
+    assert 'disabled>Exit local tools</button>' in local.text
+    assert "Install the Local Tools Exit browser extension" in local.text
     monkeypatch.setattr(master_service, "_resolve_app_profile", lambda: "render")
     public = client.get("/instrument-lookup")
     assert 'id="local-exit-control"' not in public.text
