@@ -5992,6 +5992,13 @@ INLINE_SOURCE_METRIC_KEYS = {
     "min_r_multiple_losers", "max_r_multiple_losers",
 }
 
+LOSS_OUTCOME_EXTREMA_KEYS = frozenset({
+    "min_result_pct_losers",
+    "max_result_pct_losers",
+    "min_r_multiple_losers",
+    "max_r_multiple_losers",
+})
+
 
 def _inline_metric_source(bucket: Mapping[str, Any], key: str | None) -> Any:
     if not key or key not in INLINE_SOURCE_METRIC_KEYS:
@@ -9856,12 +9863,21 @@ def _dashboard_extended_metrics(
         picked_value, picked_row = picked
         return _trade_metric_ref(picked_row, source_key, picked_value)
 
-    def _metric_extreme_ref(items: List[Dict[str, Any]], key: str, mode: str, source_key: str) -> Dict[str, Any] | None:
+    def _metric_extreme_ref(
+        items: List[Dict[str, Any]],
+        key: str,
+        mode: str,
+        source_key: str,
+        *,
+        negative_only: bool = False,
+    ) -> Dict[str, Any] | None:
         samples = [
             (value, item)
             for item in items
             for value in [_as_float(item.get(key))]
-            if value is not None and math.isfinite(value)
+            if value is not None
+            and math.isfinite(value)
+            and (not negative_only or value < 0)
         ]
         picked = _pick_deterministic_extreme(samples, mode)
         if not picked:
@@ -9974,7 +9990,7 @@ def _dashboard_extended_metrics(
         ]
         loser_results = [
             value for value in (_as_float(item.get("result_pct")) for item in losers)
-            if value is not None
+            if value is not None and math.isfinite(value) and value < 0
         ]
         result_values = [
             value for value in (_as_float(item.get("result_pct")) for item in items)
@@ -9986,7 +10002,7 @@ def _dashboard_extended_metrics(
         ]
         loser_r = [
             value for value in (_as_float(item.get("r_multiple")) for item in losers)
-            if value is not None and value < 0
+            if value is not None and math.isfinite(value) and value < 0
         ]
         r_values = [
             value for value in (_as_float(item.get("r_multiple")) for item in items)
@@ -10081,10 +10097,10 @@ def _dashboard_extended_metrics(
                 "max_result_pct_winners": _metric_extreme_ref(winners, "result_pct", "max", "max_result_pct_winners"),
                 "min_r_multiple_winners": _metric_extreme_ref(winners, "r_multiple", "min", "min_r_multiple_winners"),
                 "max_r_multiple_winners": _metric_extreme_ref(winners, "r_multiple", "max", "max_r_multiple_winners"),
-                "min_result_pct_losers": _metric_extreme_ref(losers, "result_pct", "min", "min_result_pct_losers"),
-                "max_result_pct_losers": _metric_extreme_ref(losers, "result_pct", "max", "max_result_pct_losers"),
-                "min_r_multiple_losers": _metric_extreme_ref(losers, "r_multiple", "min", "min_r_multiple_losers"),
-                "max_r_multiple_losers": _metric_extreme_ref(losers, "r_multiple", "max", "max_r_multiple_losers"),
+                "min_result_pct_losers": _metric_extreme_ref(losers, "result_pct", "min", "min_result_pct_losers", negative_only=True),
+                "max_result_pct_losers": _metric_extreme_ref(losers, "result_pct", "max", "max_result_pct_losers", negative_only=True),
+                "min_r_multiple_losers": _metric_extreme_ref(losers, "r_multiple", "min", "min_r_multiple_losers", negative_only=True),
+                "max_r_multiple_losers": _metric_extreme_ref(losers, "r_multiple", "max", "max_r_multiple_losers", negative_only=True),
                 "min_duration_seconds": _metric_extreme_ref(items, "trade_duration_seconds", "min", "min_duration_seconds"),
                 "max_duration_seconds": _metric_extreme_ref(items, "trade_duration_seconds", "max", "max_duration_seconds"),
                 "shortest_duration_seconds": _metric_extreme_ref(items, "trade_duration_seconds", "min", "shortest_duration_seconds"),
@@ -11248,8 +11264,8 @@ _REPORT_SPECS = [
     ("Move to Break Even (DD:HH:MM:SS)", "move_to_break_even_duration_seconds", "duration", None),
     ("Move to Profit (DD:HH:MM:SS)", "move_to_profit_duration_seconds", "duration", None),
     ("Max win %", "max_result_pct", "pct", "profit"),
-    ("Max loss %", "min_result_pct", "pct", "loss"),
-    ("Max R loss", "min_r_multiple", "r", "loss"),
+    ("Max loss %", "min_result_pct_losers", "pct", "loss"),
+    ("Max R loss", "min_r_multiple_losers", "r", "loss"),
     ("Max R win", "max_r_multiple", "r", "profit"),
     ("Shortest (DD:HH:MM:SS)", "shortest_duration_seconds", "duration", None),
     ("Longest (DD:HH:MM:SS)", "longest_duration_seconds", "duration", None),
@@ -11303,10 +11319,10 @@ _REPORT_SPECS = [
     ("Losers max stop %", "max_stop_pct_losers", "pct", None),
     ("Losers min target %", "min_target_pct_losers", "pct", None),
     ("Losers max target %", "max_target_pct_losers", "pct", None),
-    ("Losers min result %", "min_result_pct_losers", "pct", "loss"),
-    ("Losers max result %", "max_result_pct_losers", "pct", "loss"),
-    ("Losers min R", "min_r_multiple_losers", "r", "loss"),
-    ("Losers max R", "max_r_multiple_losers", "r", "loss"),
+    ("Losers min result %", "max_result_pct_losers", "pct", "loss"),
+    ("Losers max result %", "min_result_pct_losers", "pct", "loss"),
+    ("Losers min R", "max_r_multiple_losers", "r", "loss"),
+    ("Losers max R", "min_r_multiple_losers", "r", "loss"),
     ("Patterns", None, "section", None),
     ("Most Traded", "most_traded_pattern", "text", None),
     ("Least Traded", "least_traded_pattern", "text", None),
@@ -11978,6 +11994,10 @@ def _update_report_sheet_preserving_layout(
             inline_source = _inline_metric_source(bucket, key) if key else None
             bucket_trades = _as_float(bucket.get("trades"))
             bucket_test_trades = _as_float(bucket.get("test_trades"))
+            authoritative_loss_rows = (
+                key in LOSS_OUTCOME_EXTREMA_KEYS
+                and bucket.get("_loss_extrema_rows_authoritative") is True
+            )
             test_only_bucket = (
                 (bucket_trades is None or bucket_trades == 0)
                 and bucket_test_trades is not None
@@ -11988,6 +12008,7 @@ def _update_report_sheet_preserving_layout(
                 and kind in {"pct", "r", "duration"}
                 and cell.value not in (None, "")
                 and not test_only_bucket
+                and not authoritative_loss_rows
                 and not _inline_metric_source_has_symbol_and_date(
                     inline_source
                 )
@@ -12061,6 +12082,31 @@ def _report_rows_for_period(
     if month is None:
         return list((cache.get("year") or {}).get(year, []))
     return list((cache.get("month") or {}).get((year, month), []))
+
+
+def _snapshot_trade_rows_are_complete(snapshot: Dict[str, Any]) -> bool:
+    """Return true only when supplied trade rows reconcile to the snapshot total.
+
+    An empty row subset by itself is not evidence that prior outcomes vanished.
+    The explicit trade total must match either the raw trade rows or the
+    non-test rows counted by the dashboard.
+    """
+    items = snapshot.get("items") if isinstance(snapshot, dict) else None
+    stats = snapshot.get("stats") if isinstance(snapshot, dict) else None
+    totals = stats.get("totals") if isinstance(stats, dict) else None
+    reported = _as_float(totals.get("trades")) if isinstance(totals, dict) else None
+    if not isinstance(items, list) or reported is None or not math.isfinite(reported) or not reported.is_integer():
+        return False
+    trade_rows = [
+        row for row in items
+        if isinstance(row, dict)
+        and str(row.get("row_type") or "trade").strip().casefold() == "trade"
+    ]
+    non_test_count = sum(
+        not _is_test_trade_value(row.get("is_test_trade"))
+        for row in trade_rows
+    )
+    return int(reported) in {len(trade_rows), non_test_count}
 
 
 def _report_outcome(row: Dict[str, Any]) -> int:
@@ -12312,7 +12358,8 @@ def _report_bucket_for_period(
 ) -> Dict[str, Any]:
     bucket = _report_bucket_from_stats(_period_report_lookup(snapshot, year=year, month=month))
     rows = _report_rows_for_period(snapshot, year=year, month=month)
-    if rows:
+    rows_authoritative = _snapshot_trade_rows_are_complete(snapshot)
+    if rows or rows_authoritative:
         active_rows = [
             row for row in rows
             if str(row.get("row_type") or "trade").strip().lower() == "trade"
@@ -12328,6 +12375,21 @@ def _report_bucket_for_period(
             {key: value for key, value in extended.items() if value is not None},
             {key: value for key, value in move_durations.items() if value is not None},
         )
+        if rows_authoritative:
+            source_map = dict(bucket.get("metric_sources") or {})
+            extended_sources = extended.get("metric_sources") or {}
+            for key in LOSS_OUTCOME_EXTREMA_KEYS:
+                bucket[key] = extended.get(key)
+                source = extended_sources.get(key)
+                if source:
+                    source_map[key] = source
+                else:
+                    source_map.pop(key, None)
+            if source_map:
+                bucket["metric_sources"] = source_map
+            else:
+                bucket.pop("metric_sources", None)
+            bucket["_loss_extrema_rows_authoritative"] = True
         commission_by_currency: Dict[str, List[float]] = defaultdict(list)
         for row in active_rows:
             commission = _as_float(row.get("commission"))
@@ -16876,6 +16938,8 @@ def update_master_journal_workbook_data_only(
         diagnostics.update(row_normalization_diagnostics)
         snapshot = dict(snapshot)
         snapshot["items"] = rows
+        loss_extrema_rows_authoritative = _snapshot_trade_rows_are_complete(snapshot)
+        snapshot["_loss_extrema_rows_authoritative"] = loss_extrema_rows_authoritative
         incoming_symbol_win_rate_fingerprint = (
             _symbol_win_rate_snapshot_fingerprint(rows)
         )
@@ -17044,6 +17108,8 @@ def update_master_journal_workbook_data_only(
             metric_type: str = "raw",
             semantic: str | None = None,
             sources_by_market: Dict[str, Any] | None = None,
+            *,
+            clear_loss_extreme_if_missing: bool = False,
         ):
             labels = label if isinstance(label, list) else [label]
             pos = None
@@ -17064,6 +17130,13 @@ def update_master_journal_workbook_data_only(
                     else _format_metric_value(raw_value, metric_type)
                 )
                 if out is None:
+                    if (
+                        clear_loss_extreme_if_missing
+                        and loss_extrema_rows_authoritative
+                    ):
+                        _write_dashboard_metric_cell(
+                            dash, pos[0], col, "", metric_type, semantic
+                        )
                     if section == "Drawdown" and market in {"fx", "crypto"}:
                         missing_markets.append(market)
                     continue
@@ -17160,9 +17233,9 @@ def update_master_journal_workbook_data_only(
                     "Average Move to Profit (DD:HH:MM:SS)",
                 ], "move_to_profit_duration_seconds", "duration", None),
                 (["Max Move to Profit", "Max Move to Profit (DD:HH:MM:SS)"], "max_move_to_profit_duration_seconds", "duration", None),
-                (["Max loss %"], "min_result_pct", "pct", "loss"),
+                (["Max loss %"], "min_result_pct_losers", "pct", "loss"),
                 (["Max win %"], "max_result_pct", "pct", None),
-                (["Max R loss"], "min_r_multiple", "r", "loss"),
+                (["Max R loss"], "min_r_multiple_losers", "r", "loss"),
                 (["Max R win"], "max_r_multiple", "r", None),
             ]
             percentage_totals = _result_percentage_totals_by_market(rows, snapshot.get("balances") or stats.get("balances") or [])
@@ -17179,6 +17252,22 @@ def update_master_journal_workbook_data_only(
                     "crypto": by_market.get("crypto") or {},
                 }.items()
             }
+            if loss_extrema_rows_authoritative:
+                for market, bucket in buckets.items():
+                    bucket["_loss_extrema_rows_authoritative"] = True
+                    sources = dict(bucket.get("metric_sources") or {})
+                    extended_sources = (extended_metrics.get(market) or {}).get("metric_sources") or {}
+                    for key in LOSS_OUTCOME_EXTREMA_KEYS:
+                        bucket[key] = (extended_metrics.get(market) or {}).get(key)
+                        source = extended_sources.get(key)
+                        if source:
+                            sources[key] = source
+                        else:
+                            sources.pop(key, None)
+                    if sources:
+                        bucket["metric_sources"] = sources
+                    else:
+                        bucket.pop("metric_sources", None)
             for labels, key, metric_type, semantic in metric_specs:
                 rows_for_metric: List[int] = []
                 for label in labels:
@@ -17197,6 +17286,14 @@ def update_master_journal_workbook_data_only(
                             else _format_metric_value(raw_value, metric_type)
                         )
                         if value is None:
+                            if (
+                                key in LOSS_OUTCOME_EXTREMA_KEYS
+                                and bucket.get("_loss_extrema_rows_authoritative") is True
+                            ):
+                                _write_dashboard_metric_cell(
+                                    dash, row_num, col, "", metric_type, semantic
+                                )
+                                continue
                             diagnostics.setdefault("missing_dashboard_metric_values", []).append(f"{market} {labels[0]}")
                             continue
                         wrote = _write_dashboard_metric_cell(
@@ -17379,10 +17476,10 @@ def update_master_journal_workbook_data_only(
                 ("Winners", "Max result %"): ["Max result %", "Max win %"],
                 ("Winners", "Min R"): ["Min R", "Min R win"],
                 ("Winners", "Max R"): ["Max R", "Max R win"],
-                ("Losers", "Min result %"): ["Min result %", "Max loss %"],
-                ("Losers", "Max result %"): ["Max result %", "Min loss %"],
-                ("Losers", "Min R"): ["Min R", "Max R loss"],
-                ("Losers", "Max R"): ["Max R", "Min R loss"],
+                ("Losers", "Min result %"): ["Min result %", "Min loss %"],
+                ("Losers", "Max result %"): ["Max result %", "Max loss %"],
+                ("Losers", "Min R"): ["Min R", "Min R loss"],
+                ("Losers", "Max R"): ["Max R", "Max R loss"],
             }
             for label, key, metric_type in (
                 ("Min stop %", f"min_stop_pct_{suffix}", "pct"),
@@ -17394,6 +17491,13 @@ def update_master_journal_workbook_data_only(
                 ("Min R", f"min_r_multiple_{suffix}", "r"),
                 ("Max R", f"max_r_multiple_{suffix}", "r"),
             ):
+                if section == "Losers":
+                    key = {
+                        "Min result %": "max_result_pct_losers",
+                        "Max result %": "min_result_pct_losers",
+                        "Min R": "max_r_multiple_losers",
+                        "Max R": "min_r_multiple_losers",
+                    }.get(label, key)
                 write_market_metric(
                     section,
                     label_aliases.get((section, label), label),
@@ -17401,6 +17505,7 @@ def update_master_journal_workbook_data_only(
                     metric_type,
                     semantic if "result" in key or "r_multiple" in key else None,
                     _extended_market_sources(key),
+                    clear_loss_extreme_if_missing=key in LOSS_OUTCOME_EXTREMA_KEYS,
                 )
 
         if "Side" in anchors:

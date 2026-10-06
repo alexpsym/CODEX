@@ -8914,7 +8914,7 @@ def test_report_inline_extrema_use_numeric_fallback_and_preserve_existing_source
     ws = wb.active
     ws.title = "2018"
     bucket = {
-        "min_r_multiple": -1.25,
+        "min_r_multiple_losers": -1.25,
         "max_r_multiple": 2.5,
     }
     mjw._write_report_sheet(ws, ["January"], [bucket])
@@ -10410,3 +10410,234 @@ def test_trade_number_allocation_folder_creation_test_exclusion_and_incremental_
     assert second["assigned_count"] == 0
     assert len(list((forex_root / "2026").glob("F11*"))) == 1
     assert len(list((crypto_root / "2026").glob("C31*"))) == 1
+
+def _job3_snapshot(rows):
+    trade_rows = [row for row in rows if row.get("row_type", "trade") == "trade"]
+    active_count = sum(not bool(row.get("is_test_trade")) for row in trade_rows)
+    return {
+        "updated_at": "2026-10-06T00:00:00Z",
+        "items": rows,
+        "stats": {
+            "totals": {"trades": active_count},
+            "groups": {},
+        },
+        "balances": [],
+    }
+
+
+def _job3_trade(trade_id, symbol, asset_class, date, result_pct, r_multiple, stop_pct, duration,
+                *, is_test_trade=False, row_type="trade"):
+    return {
+        "id": trade_id,
+        "row_type": row_type,
+        "symbol": symbol,
+        "asset_class": asset_class,
+        "side": "BUY",
+        "open_time": f"{date}T00:00:00Z",
+        "close_time": f"{date}T01:00:00Z",
+        "entry_price": 100.0,
+        "exit_price": 100.0 * (1.0 + result_pct / 100.0),
+        "stop_loss": 100.0 * (1.0 - stop_pct / 100.0),
+        "take_profit": 102.0,
+        "net_profit": result_pct,
+        "result_pct": result_pct,
+        "r_multiple": r_multiple,
+        "trade_duration_seconds": duration,
+        "is_test_trade": is_test_trade,
+    }
+
+
+def _job3_label_row(ws, label):
+    return next(
+        row for row in range(1, ws.max_row + 1)
+        if str(ws.cell(row, 1).value or "").strip() == label
+    )
+
+
+def _job3_inline_number(value):
+    text = str(value).split(" - ", 1)[0]
+    return float(text.removesuffix("%").removesuffix("R"))
+
+
+def test_loser_extrema_show_max_most_lost_min_least_lost_on_generated_sheets(tmp_path: Path):
+    rows = [
+        _job3_trade("fx-deep", "EURUSD", "fx", "2026-01-01", -2.17, -2.0, 1.25, 600),
+        _job3_trade("fx-small", "EURUSD", "fx", "2026-01-02", -0.01, -0.25, 0.50, 300),
+        _job3_trade("fx-win", "EURUSD", "fx", "2026-01-03", 0.01, 0.5, 0.25, 900),
+        _job3_trade("crypto-deep", "BTCUSDT", "crypto", "2026-01-04", -1.5, -1.5, 3.0, 800),
+        _job3_trade("crypto-small", "BTCUSDT", "crypto", "2026-01-05", -0.4, -0.2, 4.0, 400),
+    ]
+    output = tmp_path / "job3-generated.xlsx"
+    build_master_journal_workbook(
+        _job3_snapshot(rows), output, publish_recommendation_assets=False
+    )
+    wb = load_workbook(output)
+    try:
+        stats = wb[STATS1_SHEET]
+        columns = mjw._stats1_market_columns(stats)
+        for market, expected_max, expected_max_source, expected_min, expected_min_source, max_r, max_r_src, min_r, min_r_src in (
+            ("overall", -2.17, "EURUSD 2026-01-01", -0.01, "EURUSD 2026-01-02", -2.0, "EURUSD 2026-01-01", -0.2, "BTCUSDT 2026-01-05"),
+            ("fx", -2.17, "EURUSD 2026-01-01", -0.01, "EURUSD 2026-01-02", -2.0, "EURUSD 2026-01-01", -0.25, "EURUSD 2026-01-02"),
+            ("crypto", -1.5, "BTCUSDT 2026-01-04", -0.4, "BTCUSDT 2026-01-05", -1.5, "BTCUSDT 2026-01-04", -0.2, "BTCUSDT 2026-01-05"),
+        ):
+            col = columns[market]
+            assert _job3_inline_number(stats.cell(_job3_label_row(stats, "Max loss %"), col).value) == pytest.approx(expected_max)
+            assert expected_max_source in stats.cell(_job3_label_row(stats, "Max loss %"), col).value
+            assert _job3_inline_number(stats.cell(_job3_label_row(stats, "Min loss %"), col).value) == pytest.approx(expected_min)
+            assert expected_min_source in stats.cell(_job3_label_row(stats, "Min loss %"), col).value
+            assert _job3_inline_number(stats.cell(_job3_label_row(stats, "Max R loss"), col).value) == pytest.approx(max_r)
+            assert max_r_src in stats.cell(_job3_label_row(stats, "Max R loss"), col).value
+            assert _job3_inline_number(stats.cell(_job3_label_row(stats, "Min R loss"), col).value) == pytest.approx(min_r)
+            assert min_r_src in stats.cell(_job3_label_row(stats, "Min R loss"), col).value
+        assert _job3_inline_number(stats.cell(_job3_label_row(stats, "Max win %"), columns["fx"]).value) == pytest.approx(0.01)
+        assert _job3_inline_number(stats.cell(_job3_label_row(stats, "Min stop %"), columns["fx"]).value) == pytest.approx(0.25)
+        assert stats.cell(_job3_label_row(stats, "Min duration"), columns["fx"]).value.startswith("5M")
+
+        for sheet_name, header, col in ((REPORT_YEARLY_SHEET, 2026, 2), ("2026", "January", 2)):
+            ws = wb[sheet_name]
+            period_col = next(c for c in range(2, ws.max_column + 1) if ws.cell(1, c).value == header)
+            for label, expected in (("Max loss %", -2.17), ("Max R loss", -2.0), ("Losers max result %", -2.17), ("Losers min result %", -0.01), ("Losers max R", -2.0), ("Losers min R", -0.2)):
+                cell = ws.cell(_job3_label_row(ws, label), period_col)
+                numeric = _job3_inline_number(cell.value)
+                assert numeric == pytest.approx(expected)
+            assert "EURUSD 2026-01-01" in ws.cell(_job3_label_row(ws, "Max loss %"), period_col).value
+            assert "EURUSD 2026-01-02" in ws.cell(_job3_label_row(ws, "Losers min result %"), period_col).value
+    finally:
+        wb.close()
+
+
+def test_loser_extrema_refresh_repairs_existing_cells_preserves_layout_and_is_idempotent(tmp_path: Path):
+    rows = [
+        _job3_trade("fx-deep", "EURUSD", "fx", "2026-01-01", -2.17, -2.0, 1.25, 600),
+        _job3_trade("fx-small", "EURUSD", "fx", "2026-01-02", -0.01, -0.25, 0.50, 300),
+        _job3_trade("fx-win", "EURUSD", "fx", "2026-01-03", 0.01, 0.5, 0.25, 900),
+    ]
+    snapshot = _job3_snapshot(rows)
+    path = tmp_path / "job3-refresh.xlsx"
+    build_master_journal_workbook(snapshot, path, publish_recommendation_assets=False)
+    wb = load_workbook(path)
+    stats = wb[STATS1_SHEET]
+    yearly = wb[REPORT_YEARLY_SHEET]
+    for ws in (stats, yearly, wb["2026"]):
+        col = 2
+        if ws.title == STATS1_SHEET:
+            ws.cell(_job3_label_row(ws, "Max loss %"), col).value = "-0.01% - EURUSD 2026-01-02"
+            ws.cell(_job3_label_row(ws, "Min loss %"), col).value = "-2.17% - EURUSD 2026-01-01"
+            ws.cell(_job3_label_row(ws, "Max R loss"), col).value = "-0.250R - EURUSD 2026-01-02"
+            ws.cell(_job3_label_row(ws, "Min R loss"), col).value = "-2.000R - EURUSD 2026-01-01"
+        else:
+            for label, value in (("Losers max result %", "-0.01% - EURUSD 2026-01-02"), ("Losers min result %", "-2.17% - EURUSD 2026-01-01"), ("Losers max R", "-0.250R - EURUSD 2026-01-02"), ("Losers min R", "-2.000R - EURUSD 2026-01-01")):
+                ws.cell(_job3_label_row(ws, label), col).value = value
+    stats["Z99"] = "=1+1"
+    stats["Z98"] = "presentation sentinel"
+    stats["Z98"]._style = copy(stats["B2"]._style)
+    stats["Z98"].number_format = "0.0000%"
+    stats.row_dimensions[99].height = 27
+    stats.column_dimensions["Z"].width = 33
+    wb.save(path)
+    wb.close()
+
+    def refresh():
+        result = update_master_journal_workbook_data_only(
+            path, snapshot, preserve_existing_layout=True,
+            publish_recommendation_assets=False,
+        )
+        assert result["ok"] is True
+        Path(result["candidate_path"]).replace(path)
+
+    refresh()
+    wb = load_workbook(path)
+    try:
+        stats = wb[STATS1_SHEET]
+        assert "EURUSD 2026-01-01" in stats.cell(_job3_label_row(stats, "Max loss %"), 2).value
+        assert "EURUSD 2026-01-02" in stats.cell(_job3_label_row(stats, "Min loss %"), 2).value
+        assert "EURUSD 2026-01-01" in stats.cell(_job3_label_row(stats, "Max R loss"), 2).value
+        assert "EURUSD 2026-01-02" in stats.cell(_job3_label_row(stats, "Min R loss"), 2).value
+        assert stats["Z99"].value == "=1+1"
+        assert stats["Z98"].number_format == "0.0000%"
+        assert stats.row_dimensions[99].height == 27
+        assert stats.column_dimensions["Z"].width == 33
+        assert wb[STATS1_SHEET].freeze_panes == "B2"
+        assert wb.sheetnames.index(REPORT_YEARLY_SHEET) < wb.sheetnames.index("2026")
+        first_values = tuple(
+            (sheet, label, wb[sheet].cell(_job3_label_row(wb[sheet], label), 2).value)
+            for sheet in (STATS1_SHEET, REPORT_YEARLY_SHEET, "2026")
+            for label in (("Max loss %", "Min loss %", "Max R loss", "Min R loss") if sheet == STATS1_SHEET else ("Max loss %", "Max R loss", "Losers max result %", "Losers min result %", "Losers max R", "Losers min R"))
+        )
+    finally:
+        wb.close()
+    refresh()
+    wb = load_workbook(path)
+    try:
+        second_values = tuple(
+            (sheet, label, wb[sheet].cell(_job3_label_row(wb[sheet], label), 2).value)
+            for sheet in (STATS1_SHEET, REPORT_YEARLY_SHEET, "2026")
+            for label in (("Max loss %", "Min loss %", "Max R loss", "Min R loss") if sheet == STATS1_SHEET else ("Max loss %", "Max R loss", "Losers max result %", "Losers min result %", "Losers max R", "Losers min R"))
+        )
+        assert second_values == first_values
+        assert wb[STATS1_SHEET]["Z99"].value == "=1+1"
+    finally:
+        wb.close()
+
+
+def test_loser_extrema_exclude_non_losses_clear_stale_values_and_keep_sources_consistent(tmp_path: Path):
+    rows = [
+        _job3_trade("tie-b", "BBBUSD", "fx", "2026-02-02", -0.5, 0.75, 1, 60),
+        _job3_trade("tie-a", "AAAUSD", "fx", "2026-02-01", -0.5, None, 2, 120),
+        _job3_trade("deep", "CCCUSD", "fx", "2026-02-03", -1.0, float("nan"), 3, 180),
+        _job3_trade("winner", "DDDUSD", "fx", "2026-02-04", 0.01, 0.5, 4, 240),
+        _job3_trade("flat", "EEEUSD", "fx", "2026-02-05", 0.0, 0.0, 5, 300),
+        _job3_trade("test-loss", "FFFUSD", "fx", "2026-02-06", -9.0, -9.0, 6, 360, is_test_trade=True),
+        _job3_trade("cash-loss", "GGGUSD", "fx", "2026-02-07", -8.0, -8.0, 7, 420, row_type="cashflow"),
+    ]
+    metrics = mjw._dashboard_extended_metrics(rows, {})["overall"]
+    assert metrics["min_result_pct_losers"] == -1.0
+    assert metrics["max_result_pct_losers"] == -0.5
+    sources = metrics["metric_sources"]
+    assert sources["min_result_pct_losers"]["symbol"] == "CCCUSD"
+    assert sources["max_result_pct_losers"]["symbol"] == "AAAUSD"
+    assert metrics["min_r_multiple_losers"] is None
+    assert metrics["max_r_multiple_losers"] is None
+    rows[1]["r_multiple"] = -0.25
+    metrics = mjw._dashboard_extended_metrics(rows, {})["overall"]
+    assert metrics["min_r_multiple_losers"] == -0.25
+    assert metrics["max_r_multiple_losers"] == -0.25
+    assert metrics["metric_sources"]["min_r_multiple_losers"]["symbol"] == "AAAUSD"
+    assert metrics["metric_sources"]["max_r_multiple_losers"]["symbol"] == "AAAUSD"
+    winners_only = [_job3_trade("only-win", "EURUSD", "fx", "2026-03-01", 0.01, 0.2, 1, 60)]
+    no_loss_metrics = mjw._dashboard_extended_metrics(winners_only, {})["overall"]
+    assert no_loss_metrics["min_result_pct_losers"] is None
+    assert no_loss_metrics["max_result_pct_losers"] is None
+    assert all(no_loss_metrics["metric_sources"][key] is None for key in mjw.LOSS_OUTCOME_EXTREMA_KEYS)
+
+    # An authoritative refresh with no actual losers clears old generated values.
+    stale_snapshot = _job3_snapshot(rows[:3])
+    path = tmp_path / "job3-clear-stale.xlsx"
+    build_master_journal_workbook(stale_snapshot, path, publish_recommendation_assets=False)
+    wb = load_workbook(path)
+    for sheet_name in (STATS1_SHEET, REPORT_YEARLY_SHEET, "2026"):
+        ws = wb[sheet_name]
+        for label in (("Max loss %", "Min loss %", "Max R loss", "Min R loss") if sheet_name == STATS1_SHEET else ("Max loss %", "Max R loss", "Losers max result %", "Losers min result %", "Losers max R", "Losers min R")):
+            ws.cell(_job3_label_row(ws, label), 2).value = "-4.00% - OLDUSD 2026-01-01"
+    wb.save(path)
+    wb.close()
+    authoritative_no_losses = _job3_snapshot([
+        _job3_trade("win", "EURUSD", "fx", "2026-03-01", 0.01, 0.2, 1, 60),
+        _job3_trade("flat", "AUDUSD", "fx", "2026-03-02", 0.0, 0.0, 1, 60),
+        _job3_trade("test", "BTCUSDT", "crypto", "2026-03-03", -5.0, -5.0, 1, 60, is_test_trade=True),
+        _job3_trade("cash", "BTCUSDT", "crypto", "2026-03-04", -6.0, -6.0, 1, 60, row_type="cashflow"),
+    ])
+    result = update_master_journal_workbook_data_only(
+        path, authoritative_no_losses, preserve_existing_layout=True,
+        publish_recommendation_assets=False,
+    )
+    assert result["ok"] is True
+    Path(result["candidate_path"]).replace(path)
+    wb = load_workbook(path)
+    try:
+        for sheet_name in (STATS1_SHEET, REPORT_YEARLY_SHEET, "2026"):
+            ws = wb[sheet_name]
+            for label in (("Max loss %", "Min loss %", "Max R loss", "Min R loss") if sheet_name == STATS1_SHEET else ("Max loss %", "Max R loss", "Losers max result %", "Losers min result %", "Losers max R", "Losers min R")):
+                assert ws.cell(_job3_label_row(ws, label), 2).value in (None, "")
+    finally:
+        wb.close()
