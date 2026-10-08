@@ -50,7 +50,6 @@ sessionLabelGapRangeFraction = input.float(0.05, "Label clearance (recent-range 
 
 hundredMarkerGroup = "100-Candle Marker"
 showHundredCandleMarker = input.bool(true, "Show 100-candle marker", group=hundredMarkerGroup)
-hundredMarkerGapRangeFraction = input.float(0.12, "Candle clearance (recent-range fraction)", minval=0.065, step=0.005, group=hundredMarkerGroup)
 
 showAnySession = showSydneySession or showTokyoSession or showLondonSession or showNewYorkSession
 showAnySessionVisibility = showSessionOpens or showSessionCloses
@@ -334,59 +333,44 @@ drawSessionMarker(simple string sessionTimezone, simple int eventHour, simple in
 // MOVING 100-CANDLE MARKER
 // -----------------------------------------------------------------------------
 hundredMarkerColor = color.rgb(18, 52, 120)
-hundredMarkerHalfLengthMultiplier = 0.36
-hundredMarkerRecentHigh = ta.highest(high, 100)
-hundredMarkerRecentLow = ta.lowest(low, 100)
 hundredMarkerHasHistory = bar_index >= 99
 hundredTargetBarIndex = bar_index - 99
 hundredTargetHigh = high[99]
 hundredTargetLow = low[99]
-hundredTargetSessionRecentHigh = sessionMarkerRecentHigh[99]
-hundredTargetSessionRecentLow = sessionMarkerRecentLow[99]
-var line hundredMarkerLowerLine = na
-var line hundredMarkerUpperLine = na
+hundredMarkerHasValidTick = not na(syminfo.mintick) and syminfo.mintick > 0
+hundredMarkerFlatCandle = not na(hundredTargetHigh) and not na(hundredTargetLow) and hundredTargetHigh == hundredTargetLow
+hundredMarkerCanDraw = not na(hundredTargetHigh) and not na(hundredTargetLow) and (not hundredMarkerFlatCandle or hundredMarkerHasValidTick)
+hundredMarkerLineHigh = hundredMarkerFlatCandle and hundredMarkerHasValidTick ? hundredTargetHigh + syminfo.mintick : hundredTargetHigh
+var line hundredMarkerLine = na
 var label hundredMarkerLabel = na
 
 if barstate.islast
-    if not na(hundredMarkerLowerLine)
-        line.delete(hundredMarkerLowerLine)
-        hundredMarkerLowerLine := na
-    if not na(hundredMarkerUpperLine)
-        line.delete(hundredMarkerUpperLine)
-        hundredMarkerUpperLine := na
-    if not na(hundredMarkerLabel)
-        label.delete(hundredMarkerLabel)
-        hundredMarkerLabel := na
+    if showHundredCandleMarker and hundredMarkerHasHistory and hundredMarkerCanDraw
+        if na(hundredMarkerLine)
+            hundredMarkerLine := line.new(x1=hundredTargetBarIndex, y1=hundredTargetLow, x2=hundredTargetBarIndex, y2=hundredMarkerLineHigh,
+                                           xloc=xloc.bar_index, extend=extend.both,
+                                           color=hundredMarkerColor, style=line.style_dashed, width=2,
+                                           force_overlay=true)
+        else
+            line.set_xy1(hundredMarkerLine, hundredTargetBarIndex, hundredTargetLow)
+            line.set_xy2(hundredMarkerLine, hundredTargetBarIndex, hundredMarkerLineHigh)
+            line.set_extend(hundredMarkerLine, extend.both)
 
-    if showHundredCandleMarker and hundredMarkerHasHistory
-        hundredRecentRange = hundredMarkerRecentHigh - hundredMarkerRecentLow
-        hundredMarkerRange = math.max(na(hundredRecentRange) ? hundredTargetHigh - hundredTargetLow : hundredRecentRange, syminfo.mintick * 200)
-        hundredMarkerHalfLength = hundredMarkerRange * hundredMarkerHalfLengthMultiplier
-        hundredEffectiveGapFraction = math.max(hundredMarkerGapRangeFraction, sessionCandleGapRangeFraction + 0.02)
-        hundredTargetSessionRangeRaw = hundredTargetSessionRecentHigh - hundredTargetSessionRecentLow
-        hundredTargetSessionRange = math.max(na(hundredTargetSessionRangeRaw) ? hundredTargetHigh - hundredTargetLow : hundredTargetSessionRangeRaw, syminfo.mintick * 200)
-        hundredHistoricalSessionGap = math.max(hundredTargetSessionRange * sessionCandleGapRangeFraction, syminfo.mintick * 40)
-        hundredGapClearance = math.max(hundredMarkerRange * 0.01, syminfo.mintick * 10)
-        hundredCandleGap = math.max(math.max(hundredMarkerRange * hundredEffectiveGapFraction, syminfo.mintick * 80), hundredHistoricalSessionGap + hundredGapClearance)
-        hundredLabelGap = math.max(hundredMarkerRange * sessionLabelGapRangeFraction, syminfo.mintick * 60)
-        hundredLowerEndY = hundredTargetLow - hundredCandleGap
-        hundredLowerStartY = hundredLowerEndY - hundredMarkerHalfLength
-        hundredUpperStartY = hundredTargetHigh + hundredCandleGap
-        hundredUpperEndY = hundredUpperStartY + hundredMarkerHalfLength
-        hundredLabelY = hundredUpperEndY + hundredLabelGap
-        hundredMarkerLowerLine := line.new(x1=hundredTargetBarIndex, y1=hundredLowerStartY, x2=hundredTargetBarIndex, y2=hundredLowerEndY,
-                                           xloc=xloc.bar_index, extend=extend.none,
-                                           color=hundredMarkerColor, style=line.style_dotted, width=2,
-                                           force_overlay=true)
-        hundredMarkerUpperLine := line.new(x1=hundredTargetBarIndex, y1=hundredUpperStartY, x2=hundredTargetBarIndex, y2=hundredUpperEndY,
-                                           xloc=xloc.bar_index, extend=extend.none,
-                                           color=hundredMarkerColor, style=line.style_dotted, width=2,
-                                           force_overlay=true)
-        hundredMarkerLabel := label.new(x=hundredTargetBarIndex, y=hundredLabelY, text="100",
-                                        xloc=xloc.bar_index, yloc=yloc.price,
-                                        color=color.new(color.white, 100), textcolor=hundredMarkerColor,
-                                        style=label.style_none, size=size.normal, textalign=text.align_center,
-                                        force_overlay=true)
+        if na(hundredMarkerLabel)
+            hundredMarkerLabel := label.new(x=hundredTargetBarIndex, y=hundredTargetHigh, text="100",
+                                            xloc=xloc.bar_index, yloc=yloc.abovebar,
+                                            color=color.new(color.white, 100), textcolor=hundredMarkerColor,
+                                            style=label.style_none, size=size.normal, textalign=text.align_center,
+                                            force_overlay=true)
+        else
+            label.set_xy(hundredMarkerLabel, hundredTargetBarIndex, hundredTargetHigh)
+    else
+        if not na(hundredMarkerLine)
+            line.delete(hundredMarkerLine)
+            hundredMarkerLine := na
+        if not na(hundredMarkerLabel)
+            label.delete(hundredMarkerLabel)
+            hundredMarkerLabel := na
 
 // -----------------------------------------------------------------------------
 // HISTORICAL FOREX START-DATE MARKER (UTC)
