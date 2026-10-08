@@ -13,7 +13,8 @@
   const bounceTradersStatus = document.getElementById('running-bounce-traders-status');
   const bounceTradersBody = document.getElementById('running-bounce-traders-body');
   const bounceTradersEmpty = document.getElementById('running-bounce-traders-empty');
-  const BOUNCE_TRADER_LOCAL_ENABLED = document.body?.dataset?.dashboardProfile === 'local';
+  const LOCAL_DASHBOARD_PROFILE = document.body?.dataset?.dashboardProfile === 'local';
+  const BOUNCE_TRADER_LOCAL_ENABLED = LOCAL_DASHBOARD_PROFILE;
   const BOUNCE_TRADER_BASE = '/apps/bybit_trigger_bounce_trader';
   const pineStatus = document.getElementById('pine-status');
   const pineFiles = document.getElementById('pine-files');
@@ -256,10 +257,12 @@
       exitButtonSlot.innerHTML = '';
     }
     scriptsState.forEach((item) => scriptsGrid.appendChild(makeScriptButton(item)));
-    if (exitButtonSlot) {
-      exitButtonSlot.appendChild(makeExitButton());
-    } else {
-      scriptsGrid.appendChild(makeExitButton());
+    if (!LOCAL_DASHBOARD_PROFILE) {
+      if (exitButtonSlot) {
+        exitButtonSlot.appendChild(makeExitButton());
+      } else {
+        scriptsGrid.appendChild(makeExitButton());
+      }
     }
   };
 

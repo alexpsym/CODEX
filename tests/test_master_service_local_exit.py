@@ -60,6 +60,31 @@ def test_local_html_pages_receive_exit_control_only_in_local_profile(monkeypatch
     assert 'id="local-exit-control"' not in public.text
 
 
+def test_dashboard_exit_control_is_single_and_not_embedded(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = TestClient(master_service.app)
+    monkeypatch.setattr(master_service, "APP_PROFILE", "local")
+    monkeypatch.setattr(master_service, "_resolve_app_profile", lambda: "local")
+
+    dashboard = client.get("/")
+    assert dashboard.status_code == 200
+    assert dashboard.text.count('id="local-exit-control"') == 1
+
+    embedded_orders = client.get("/merged/open-orders?_dashboard=1&_dash_ts=123")
+    assert embedded_orders.status_code == 200
+    assert 'id="local-exit-control"' not in embedded_orders.text
+
+    standalone_orders = client.get("/merged/open-orders")
+    assert standalone_orders.status_code == 200
+    assert standalone_orders.text.count('id="local-exit-control"') == 1
+
+    monkeypatch.setattr(master_service, "APP_PROFILE", "render")
+    monkeypatch.setattr(master_service, "_resolve_app_profile", lambda: "render")
+    public_dashboard = client.get("/")
+    public_orders = client.get("/merged/open-orders?_dashboard=1")
+    assert 'id="local-exit-control"' not in public_dashboard.text
+    assert 'id="local-exit-control"' not in public_orders.text
+
+
 def test_local_source_stamp_tracks_dashboard_and_history(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     build_files = (
         "render/master_service.py",

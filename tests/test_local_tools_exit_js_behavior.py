@@ -6,12 +6,14 @@ EXTENSION = ROOT / "tools" / "browser_extensions" / "local_tools_exit"
 NODE = r'''
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
+const path = require("node:path");
 const vm = require("node:vm");
 
 const extensionDir = process.argv[1];
 const scenario = process.argv[2];
 const backgroundSource = fs.readFileSync(`${extensionDir}/background.js`, "utf8");
 const contentSource = fs.readFileSync(`${extensionDir}/content.js`, "utf8");
+const dashboardSource = fs.readFileSync(path.resolve(extensionDir, "../../../render/static/dashboard.js"), "utf8");
 
 function tab(id, url, windowId, pendingUrl) {
   const value = { id, url, windowId };
@@ -35,6 +37,7 @@ async function createPage(mode) {
   const sender = () => ({ tab: requester(), frameId: 0, url: requester().url });
   const button = { disabled: true, textContent: "Exit local tools", title: "" };
   const status = { textContent: "Install the Local Tools Exit browser extension to close all tool tabs." };
+  let buildInfoRequests = 0;
   let clickHandler;
   const document = {
     querySelector(selector) {
@@ -80,7 +83,11 @@ async function createPage(mode) {
   };
   const fetch = async (url, options = {}) => {
     if (String(url).endsWith("/api/local-build-info")) {
+      buildInfoRequests += 1;
       events.push("api:build-info");
+      if (mode === "transient_probe_timeout" && buildInfoRequests === 1) {
+        throw new Error("The operation timed out.");
+      }
       return { ok: true, status: 200, async json() { return { app_profile: mode === "wrong_profile" ? "render" : "local", pid: 4321 }; } };
     }
     if (String(url).endsWith("/api/local-exit")) {
@@ -98,8 +105,12 @@ async function createPage(mode) {
   const window = {};
   window.top = window;
   window.self = window;
+  window.setTimeout = setTimeout;
+  window.clearTimeout = clearTimeout;
+  const windowEvents = {};
+  window.addEventListener = (type, handler) => { windowEvents[type] = handler; };
   const contentContext = {
-    chrome, document, window, location: pageUrl, URL, Set, Promise, Error, console
+    chrome, document, window, location: pageUrl, URL, Set, Promise, Error, console, setTimeout, clearTimeout
   };
   vm.runInNewContext(contentSource, contentContext, { filename: "content.js" });
   await new Promise((resolve) => setImmediate(resolve));
@@ -116,7 +127,7 @@ async function createPage(mode) {
     clickHandler(event);
     return event;
   }
-  return { tabs, events, button, status, click, sender, onMessage };
+  return { tabs, events, button, status, click, sender, onMessage, windowEvents };
 }
 
 async function success() {
@@ -159,8 +170,9 @@ async function failures() {
   assert.equal(invalid.events.filter((e) => e.startsWith("tabs:remove:")).length, 0);
 
   const foreignApp = await createPage("wrong_profile");
+  await new Promise((resolve) => setTimeout(resolve, 20));
   assert.equal(foreignApp.button.disabled, true);
-  assert.match(foreignApp.status.textContent, /did not identify|unavailable/i);
+  assert.match(foreignApp.status.textContent, /could not verify|did not identify/i);
   assert.equal(foreignApp.events.filter((e) => e === "api:exit-started").length, 0);
 
   const navigatedCandidate = await createPage("navigate_candidate");
@@ -170,12 +182,76 @@ async function failures() {
   assert.equal(navigatedCandidate.tabs.get(3).url, "https://example.com/navigated");
 
   const unavailable = await createPage("extension_unavailable");
+  await new Promise((resolve) => setTimeout(resolve, 20));
   assert.equal(unavailable.button.disabled, true);
   assert.match(unavailable.status.textContent, /unavailable/i);
   assert.equal(unavailable.events.filter((e) => e === "api:exit-started").length, 0);
 }
 
-(scenario === "success" ? success() : failures()).catch((error) => {
+async function dashboardProbeRecovery() {
+  const page = await createPage("transient_probe_timeout");
+  const elements = new Map();
+  const makeElement = (id) => ({
+    id,
+    children: [],
+    style: {},
+    dataset: {},
+    addEventListener(type, handler) { this[`on${type}`] = handler; },
+    appendChild(child) { this.children.push(child); return child; },
+    set innerHTML(_value) { this.children = []; },
+    get innerHTML() { return ""; },
+    setAttribute() {},
+  });
+  ["refresh-btn", "status", "scripts-grid", "exit-button-slot"].forEach((id) => elements.set(id, makeElement(id)));
+  const document = {
+    body: { dataset: { dashboardProfile: "local" } },
+    visibilityState: "visible",
+    getElementById(id) { return elements.get(id) || null; },
+    createElement(tag) { const node = makeElement(tag); node.tagName = tag; return node; },
+    addEventListener() {},
+  };
+  const dashboardWindow = { addEventListener() {}, open() { throw new Error("dashboard must not open tabs during refresh"); } };
+  const dashboardFetch = async (url) => ({
+    ok: true,
+    status: 200,
+    statusText: "OK",
+    async text() { return url === "/api/pine/files" ? JSON.stringify({ files: [] }) : "[]"; },
+  });
+  vm.runInNewContext(dashboardSource, {
+    document, window: dashboardWindow, fetch: dashboardFetch, URL, Date, Map, Set, String,
+    Number, Math, JSON, Error, Promise, Array, Object, console,
+    setInterval() { return 1; }, clearInterval() {}, setTimeout, clearTimeout,
+  }, { filename: "dashboard.js" });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  await elements.get("refresh-btn").onclick();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  const dashboardButtons = [
+    ...elements.get("scripts-grid").children,
+    ...elements.get("exit-button-slot").children,
+  ].filter((node) => String(node.className || "").includes("local-exit-btn"));
+  assert.equal(dashboardButtons.length, 0, "local dashboard refreshes must not recreate the legacy direct-POST Exit button");
+  assert.equal(page.events.filter((event) => event === "api:exit-started").length, 0, "readiness retries never request shutdown");
+
+  const startedAt = Date.now();
+  while (page.button.disabled && Date.now() - startedAt < 2500) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  assert.equal(page.events.filter((event) => event === "api:build-info").length, 2, "one transient timeout is followed by one bounded successful probe");
+  assert.equal(page.button.disabled, false, "the shared extension path becomes usable after verification");
+  assert.equal(page.events.filter((event) => event === "api:exit-started").length, 0, "a successful probe still does not initiate exit");
+
+  page.click(true);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(page.events.filter((event) => event === "api:exit-started").length, 1, "one trusted click sends exactly one exit request");
+  assert.ok(page.events.indexOf("api:exit-accepted") < page.events.indexOf("tabs:remove:2"));
+}
+
+({
+  success,
+  failures,
+  dashboard_probe_recovery: dashboardProbeRecovery,
+}[scenario] || (() => Promise.reject(new Error("unknown scenario: " + scenario))))().catch((error) => {
   console.error(error && error.stack ? error.stack : error);
   process.exitCode = 1;
 });
@@ -200,3 +276,7 @@ def test_exit_closes_all_local_tabs_across_windows_and_preserves_unrelated_tabs(
 
 def test_exit_failure_and_invalid_sender_do_not_close_tabs_or_claim_success() -> None:
     _run_node("failures")
+
+
+def test_dashboard_probe_recovers_after_timeout_without_duplicate_exit() -> None:
+    _run_node("dashboard_probe_recovery")

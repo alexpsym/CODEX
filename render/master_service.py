@@ -14286,6 +14286,11 @@ async def inject_local_exit_control(request: Request, call_next):
     response = await call_next(request)
     if not _is_local_exit_allowed() or request.url.path.startswith("/api/"):
         return response
+    # The dashboard owns the top-level exit control. Keep the embedded orders
+    # workspace free of a duplicate; the same route opened as a normal tab
+    # still receives the shared control.
+    if request.url.path == "/merged/open-orders" and request.query_params.get("_dashboard") == "1":
+        return response
     if "text/html" not in response.headers.get("content-type", "").lower():
         return response
     body = b"".join([chunk async for chunk in response.body_iterator])
