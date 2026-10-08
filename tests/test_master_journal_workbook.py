@@ -3829,6 +3829,102 @@ def test_recommendations_are_removed_from_trade_log_and_kept_in_symbols_and_stat
     wb.close()
 
 
+def test_distance_recommendations_ignore_capital_returns(tmp_path: Path):
+    """Stop and target recommendations follow original price/R inputs, not P/L size."""
+    rows = []
+    symbols = (("EURUSD", "fx", 1.0), ("GBPUSD", "fx", 1.0),
+               ("BTCUSDT", "crypto", 100.0), ("ETHUSDT", "crypto", 100.0))
+    for symbol, market, entry in symbols:
+        winner_stop = entry * (1 - 0.0067)
+        loser_stop = entry * (1 - 0.0111)
+        target = entry * 1.02
+        for index, realized_r in enumerate((2.0, 2.1, 2.2, 2.3), start=1):
+            rows.append({
+                "id": f"{symbol}-win-{index}", "row_type": "trade",
+                "asset_class": market, "account": "SYNTHETIC", "symbol": symbol,
+                "side": "BUY", "open_time": f"2026-02-{index:02d}T00:00:00Z",
+                "close_time": f"2026-02-{index:02d}T01:00:00Z",
+                "entry_price": entry, "stop_loss": winner_stop, "take_profit": target,
+                "planned_entry_price": entry, "planned_stop_price": winner_stop,
+                "planned_target_price": target, "net_profit": 20.0 + index,
+                "result_pct": 0.5 + index / 10, "r_multiple": realized_r,
+            })
+        for index in range(1, 3):
+            rows.append({
+                "id": f"{symbol}-loss-{index}", "row_type": "trade",
+                "asset_class": market, "account": "SYNTHETIC", "symbol": symbol,
+                "side": "BUY", "open_time": f"2026-03-{index:02d}T00:00:00Z",
+                "close_time": f"2026-03-{index:02d}T01:00:00Z",
+                "entry_price": entry, "stop_loss": loser_stop, "take_profit": target,
+                "planned_entry_price": entry, "planned_stop_price": loser_stop,
+                "planned_target_price": target, "net_profit": -75.0 * index,
+                "result_pct": -0.75, "r_multiple": -1.0,
+            })
+
+    changed_returns = deepcopy(rows)
+    for row in changed_returns:
+        if row["net_profit"] > 0:
+            row["net_profit"] *= 37.0
+            row["result_pct"] *= 19.0
+        else:
+            row["net_profit"] *= 11.0
+            row["result_pct"] *= 23.0
+
+    scopes = (
+        ("overall", rows, "overall"),
+        ("fx", [row for row in rows if row["asset_class"] == "fx"], "standard"),
+        ("crypto", [row for row in rows if row["asset_class"] == "crypto"], "standard"),
+        ("EURUSD", [row for row in rows if row["symbol"] == "EURUSD"], "standard"),
+        ("BTCUSDT", [row for row in rows if row["symbol"] == "BTCUSDT"], "standard"),
+    )
+    for label, scoped_rows, algorithm_scope in scopes:
+        before = mjw._distance_recommendation_summary(scoped_rows, scope=algorithm_scope)
+        scoped_ids = {row["id"] for row in scoped_rows}
+        changed_rows = [row for row in changed_returns if row["id"] in scoped_ids]
+        after = mjw._distance_recommendation_summary(changed_rows, scope=algorithm_scope)
+        assert before[STOP_RECOMMENDATION_HEADER] == after[STOP_RECOMMENDATION_HEADER], label
+        assert before[TARGET_RECOMMENDATION_HEADER] == after[TARGET_RECOMMENDATION_HEADER], label
+        assert before["stop_loss_winner_mean_pct"] == pytest.approx(0.67)
+        assert before["stop_loss_loser_mean_pct"] == pytest.approx(1.11)
+        assert before["stop_loss_recommended_pct"] == pytest.approx(0.67)
+        assert "0.44 pp below loss average" in before[STOP_RECOMMENDATION_HEADER]
+        assert before["target_r_recommended"] == after["target_r_recommended"]
+
+    before_charts = mjw._prepare_recommendation_chart_bundle(rows, tmp_path / "Trading Journal.xlsx")
+    after_charts = mjw._prepare_recommendation_chart_bundle(changed_returns, tmp_path / "Trading Journal.xlsx")
+    assert before_charts["files"] == after_charts["files"]
+    assert before_charts["links"] == after_charts["links"]
+    for chart_name in ("overall-stop.html", "fx-stop.html", "crypto-stop.html"):
+        chart = before_charts["files"][chart_name]
+        assert 'data-recommended-value="0.67"' in chart
+        assert "0.67%" in chart and "1.11%" in chart
+        assert "Value (%)" in chart
+    for chart_name in ("overall-target.html", "fx-target.html", "crypto-target.html"):
+        assert "Value (R)" in before_charts["files"][chart_name]
+
+    snapshot = sample_snapshot()
+    snapshot["items"] = rows
+    snapshot["stats"]["by_instrument"] = []
+    workbook_path = tmp_path / "recommendation-units.xlsx"
+    build_master_journal_workbook(snapshot, workbook_path, publish_recommendation_assets=False)
+    wb = load_workbook(workbook_path, data_only=True)
+    try:
+        trade_log = wb["Trade Log"]
+        headers = _trade_log_header_map(trade_log)
+        loss_row = next(
+            row for row in range(TRADE_LOG_DATA_START_ROW, trade_log.max_row + 1)
+            if trade_log.cell(row, headers["Row ID"]).value == "EURUSD-loss-1"
+        )
+        # 1.11 percentage points is stored as a 0.0111 Excel fraction; the
+        # separate -0.75% capital return is stored as -0.0075.
+        assert trade_log.cell(loss_row, headers["Stop Loss Distance"]).value == pytest.approx(0.0111)
+        assert trade_log.cell(loss_row, headers["Profit %"]).value == pytest.approx(-0.0075)
+        assert trade_log.cell(loss_row, headers["Stop Loss Distance"]).number_format.endswith("%")
+        assert trade_log.cell(loss_row, headers["Profit %"]).number_format.endswith("%")
+    finally:
+        wb.close()
+
+
 def test_real_trading_journal_source_data_produces_numeric_target_recommendations():
     source = Path("journal") / "Trading Journal.xlsx"
     if not source.exists():
