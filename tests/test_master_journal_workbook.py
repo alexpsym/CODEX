@@ -9692,9 +9692,9 @@ def test_recommendation_svg_high_density_preserves_every_marker_without_x_compre
         range(observation_count)
     )
     assert [next(iter(circle)).text for circle in circles[:3]] == [
-        "EURUSD 2026-01-01 dense-0000: 0% — winner",
-        "EURUSD 2026-01-01 dense-0001: 0.1% — loser",
-        "EURUSD 2026-01-01 dense-0002: 0.2% — winner",
+        "EURUSD 2026-01-01 dense-0000: 0.00% — winner",
+        "EURUSD 2026-01-01 dense-0001: 0.10% — loser",
+        "EURUSD 2026-01-01 dense-0002: 0.20% — winner",
     ]
 
     width = float(root.attrib["width"])
@@ -10737,3 +10737,324 @@ def test_loser_extrema_exclude_non_losses_clear_stale_values_and_keep_sources_co
                 assert ws.cell(_job3_label_row(ws, label), 2).value in (None, "")
     finally:
         wb.close()
+
+
+def test_journal_decimal_text_rounds_up_with_units_and_preserves_sources():
+    from decimal import Decimal
+
+    values = [
+        ("0.00038475834753", "0.00039%"),
+        ("4.689345", "4.69%"),
+        ("4.680001", "4.69%"),
+        ("0.000000344535", "0.00000035%"),
+        ("-4.689345", "-4.69%"),
+        ("-0.00038475834753", "-0.00039%"),
+        ("4.68", "4.68%"),
+        ("0", "0.00%"),
+        ("0.9999", "1.00%"),
+        ("0.09999", "0.100%"),
+        ("0.000000000000000000000000384", "0.00000000000000000000000039%"),
+    ]
+    for raw, expected in values:
+        assert mjw._format_decimal_presentation(Decimal(raw), suffix="%") == expected
+
+    assert mjw._format_decimal_presentation(
+        Decimal("0.000038475834753"), suffix="%", excel_fraction_to_points=True
+    ) == "0.0039%"
+    assert mjw._format_decimal_presentation(Decimal("-0.25"), suffix="R") == "-0.25R"
+    assert mjw._format_stop_pct_value(Decimal("-0.00038475834753")) == "-0.00039%"
+    assert mjw._format_stop_gap_value(Decimal("0.00038475834753")) == "0.00039 pp"
+    assert mjw._format_pnl_calendar_month_cell(0.00038475834753, 2) == "0.00039%, 2 trades"
+    assert mjw._format_pnl_calendar_month_cell(float("nan"), 1) == ""
+    assert mjw._format_inline_metric_value(None, "pct") == ""
+    assert mjw._format_inline_metric_value(float("inf"), "r") == ""
+    assert mjw._format_inline_metric_value(
+        "0.00038475834753", "pct", {"symbol": "BTCUSDT", "date": "2026-05-02"}
+    ) == "0.00039% - BTCUSDT 2026-05-02"
+    assert mjw._format_inline_metric_value(
+        "-0.00038475834753", "r", {"symbol": "EURUSD", "date": "2026-05-01"}
+    ) == "-0.00039R - EURUSD 2026-05-01"
+    assert mjw._format_target_r_text("2") == "2.00R"
+    assert mjw._target_r_bucket_label(2.0, 0.25) == "2.0R-2.25R"
+    assert mjw._report_cell_value(
+        {"fees": {"AUD": Decimal("1234.567"), "USDT": Decimal("0.000000344535")} },
+        "fees",
+        "commission",
+    ) == "AUD 1,234.57 / USDT 0.00000035"
+
+    stop_observations = [
+        {
+            "label": "EURUSD 2026-05-01 tiny-stop",
+            "symbol": "EURUSD",
+            "date": "2026-05-01",
+            "id": "tiny-stop",
+            "outcome": "winner",
+            "value": Decimal("0.00038475834753"),
+            "context": "original stop distance",
+        },
+        {
+            "label": "BTCUSDT 2026-05-02 small-stop",
+            "symbol": "BTCUSDT",
+            "date": "2026-05-02",
+            "id": "small-stop",
+            "outcome": "loser",
+            "value": Decimal("0.000000344535"),
+            "context": "original stop distance",
+        },
+    ]
+    raw_observations = deepcopy(stop_observations)
+    stop_payload = {
+        STOP_RECOMMENDATION_HEADER: "Decrease stop — Recommended: 4.680001%",
+        "stop_recommendation": "Decrease stop — Recommended: 4.680001%",
+        "stop_loss_recommended_pct": Decimal("4.680001"),
+        "eligible_stop_loss_wins": 1,
+        "eligible_stop_loss_losses": 1,
+        "stop_loss_excluded_reasons": {},
+    }
+    raw_payload = deepcopy(stop_payload)
+    stop_html = mjw._recommendation_chart_html(
+        scope_label="Overall",
+        metric="stop",
+        payload=stop_payload,
+        observations=stop_observations,
+        excluded=[],
+    )
+    assert "data-recommended-value=\"4.680001\"" in stop_html
+    assert "Recommended 4.69%" in stop_html
+    assert "0.00039%" in stop_html and "0.00000035%" in stop_html
+    assert "EURUSD 2026-05-01 tiny-stop: 0.00039% — winner" in stop_html
+    assert "<td>0.00000035%</td>" in stop_html
+    assert stop_observations == raw_observations
+    assert stop_payload == raw_payload
+
+    target_observations = [
+        {
+            "label": "ETHUSDT 2026-05-03 target",
+            "symbol": "ETHUSDT",
+            "date": "2026-05-03",
+            "id": "target-1",
+            "outcome": "winner",
+            "value": Decimal("0.09999"),
+            "context": "realized R",
+        }
+    ]
+    target_payload = {
+        TARGET_RECOMMENDATION_HEADER: "Increase target — Recommended: 0.09999R",
+        "target_recommendation": "Increase target — Recommended: 0.09999R",
+        "target_r_recommended": Decimal("0.09999"),
+        "target_r_distribution": {"0.0R-0.25R": 1},
+    }
+    target_html = mjw._recommendation_chart_html(
+        scope_label="Crypto",
+        metric="target",
+        payload=target_payload,
+        observations=target_observations,
+        excluded=[],
+    )
+    assert "Recommended 0.100R" in target_html
+    assert "ETHUSDT 2026-05-03 target: 0.100R — winner" in target_html
+    assert "0.00R-0.25R" in target_html
+    assert list(target_payload["target_r_distribution"]) == ["0.0R-0.25R"]
+
+
+def test_journal_decimal_text_refresh_preserves_numbers_formulas_balances_and_layout(
+    tmp_path: Path,
+    monkeypatch,
+):
+    import time
+
+    monkeypatch.setattr(mjw, "REPORT_START_YEAR", 2026)
+    monkeypatch.setattr(mjw, "REPORT_MIN_END_YEAR", 2026)
+    snapshot = sample_snapshot()
+    snapshot["items"][0]["result_pct"] = 0.00038475834753
+    snapshot["items"][0]["commission"] = 2.5
+    snapshot["items"] = [snapshot["items"][0]]
+    snapshot["stats"] = {
+        "totals": {},
+        "groups": {
+            "by_market": {"overall": {}, "fx": {}, "crypto": {}},
+            "risk_expectancy": {},
+            "duration": {},
+            "leaders": {},
+        },
+        "by_instrument": [],
+    }
+    path = tmp_path / "decimal-text-preservation.xlsx"
+    started = time.perf_counter()
+    build_master_journal_workbook(
+        snapshot,
+        path,
+        publish_recommendation_assets=False,
+    )
+    print(f"fixture build: {time.perf_counter() - started:.2f}s")
+
+    wb = load_workbook(path, data_only=False)
+    stats1 = wb[STATS1_SHEET]
+    authored_cell = stats1["B26"]
+    authored_cell.font = Font(name="Calibri", size=11, bold=True, italic=True, color="123456")
+    authored_cell.fill = PatternFill("solid", fgColor="ABCDEF")
+    authored_cell.number_format = '0.0000" authored"'
+    wb.calculation.calcMode = "auto"
+    wb.calculation.fullCalcOnLoad = True
+
+    # Replace only generated display strings with their former precision;
+    # source identity remains intact and the refresh must regenerate the text.
+    source_suffix = " - EURUSD 2026-05-01"
+    source_text_cells = [
+        (ws.title, cell.coordinate, cell.value)
+        for ws in wb.worksheets
+        for cell in ws._cells.values()
+        if isinstance(cell.value, str)
+        and cell.value.startswith("0.00039%")
+        and cell.value.endswith(source_suffix)
+    ]
+    assert source_text_cells
+    source_sheet, source_coordinate, source_text = source_text_cells[0]
+    wb[source_sheet][source_coordinate] = "0.00%" + source_text[len("0.00039%"):]
+    wb["P&L Calendar"]["B6"] = "0.00%, 1 trade"
+    wb.save(path)
+    wb.close()
+    formula = "=ROUND(2.499,1)"
+    formula_coordinate = _install_trade_log_formula_cache(
+        path,
+        "t1",
+        "Commission",
+        formula,
+        2.5,
+    )
+
+    def capture(path_value: Path):
+        formula_wb = load_workbook(path_value, data_only=False)
+        value_wb = load_workbook(path_value, data_only=True)
+        try:
+            numeric_values = {
+                (ws.title, cell.coordinate): (type(cell.value).__name__, cell.value, cell.number_format)
+                for ws in formula_wb.worksheets
+                for cell in ws._cells.values()
+                if isinstance(cell.value, (int, float)) and not isinstance(cell.value, bool)
+            }
+            formulas = {
+                (ws.title, cell.coordinate): cell.value
+                for ws in formula_wb.worksheets
+                for cell in ws._cells.values()
+                if cell.data_type == "f"
+            }
+            trade_log = formula_wb["Trade Log"]
+            trade_headers = _trade_log_header_map(trade_log)
+            balance_columns = [
+                col for header, col in trade_headers.items()
+                if "balance" in header.casefold()
+            ]
+            balances = {
+                ("Trade Log", trade_log.cell(row, col).coordinate): (
+                    trade_log.cell(row, col).value,
+                    trade_log.cell(row, col).number_format,
+                )
+                for row in range(TRADE_LOG_DATA_START_ROW, trade_log.max_row + 1)
+                for col in balance_columns
+                if isinstance(trade_log.cell(row, col).value, (int, float))
+            }
+            stats2 = formula_wb[STATS2_SHEET]
+            stats2_headers = {
+                str(stats2.cell(2, col).value or ""): col
+                for col in range(1, stats2.max_column + 1)
+            }
+            balance_col = stats2_headers.get("Balance")
+            if balance_col:
+                balances.update({
+                    (STATS2_SHEET, stats2.cell(row, balance_col).coordinate): (
+                        stats2.cell(row, balance_col).value,
+                        stats2.cell(row, balance_col).number_format,
+                    )
+                    for row in range(3, stats2.max_row + 1)
+                    if isinstance(stats2.cell(row, balance_col).value, (int, float))
+                })
+            style = (
+                mjw._contract_xml(formula_wb[STATS1_SHEET]["B26"].font),
+                mjw._contract_xml(formula_wb[STATS1_SHEET]["B26"].fill),
+                formula_wb[STATS1_SHEET]["B26"].number_format,
+            )
+            contract = mjw._workbook_preservation_contract(formula_wb)
+            trade_log_row = _trade_log_row_by_id(formula_wb["Trade Log"], "t1")
+            trade_log_formula_cell = formula_wb["Trade Log"].cell(
+                trade_log_row, _header_col(formula_wb["Trade Log"], "Commission")
+            )
+            assert trade_log_formula_cell.coordinate == formula_coordinate
+            formula_cache = (
+                trade_log_formula_cell.value,
+                value_wb["Trade Log"][formula_coordinate].value,
+            )
+            generated_source_text = formula_wb[source_sheet][source_coordinate].value
+            calendar_text = formula_wb["P&L Calendar"]["B6"].value
+            calculation = mjw._workbook_calculation_signature(path_value)
+            chart_parts = _chart_ooxml_parts(path_value)
+            chart_relationships = _chart_relationship_signature(path_value)
+            return (
+                numeric_values, formulas, balances, style, contract,
+                formula_cache, calendar_text, calculation, chart_parts,
+                chart_relationships, generated_source_text,
+            )
+        finally:
+            formula_wb.close()
+            value_wb.close()
+
+    initial = capture(path)
+    assert initial[5] == (formula, 2.5)
+    assert initial[6] == "0.00%, 1 trade"
+    assert initial[10] == "0.00% - EURUSD 2026-05-01"
+
+    def refresh_once():
+        refresh_started = time.perf_counter()
+        result = update_master_journal_workbook_data_only(
+            path,
+            snapshot,
+            preserve_existing_layout=True,
+            publish_recommendation_assets=False,
+        )
+        assert result["ok"] is True, result
+        diagnostics = result["diagnostics"]
+        assert diagnostics["trade_log_formula_caches_transplanted"] == 1
+        assert diagnostics["trade_log_formula_cache_candidate_verified"] is True
+        assert not any(
+            item.get("row_id") == "t1" and item.get("header") == "Commission"
+            for item in diagnostics["trade_log_formula_cache_skipped"]
+        )
+        candidate = Path(result["candidate_path"])
+        captured = capture(candidate)
+        assert captured[5] == (formula, 2.5)
+        assert captured[10] == "0.00039% - EURUSD 2026-05-01"
+        candidate.replace(path)
+        print(f"preservation refresh: {time.perf_counter() - refresh_started:.2f}s")
+        return captured
+
+    first = refresh_once()
+    second = refresh_once()
+    assert first == second
+    # Preservation refresh may recalculate generated statistics from the
+    # authoritative rows; its second identical refresh must not change them.
+    assert first[1] == initial[1]
+    assert first[2] == initial[2]
+    initial_trade_log_numbers = {
+        key: value for key, value in initial[0].items() if key[0] == "Trade Log"
+    }
+    first_trade_log_numbers = {
+        key: value for key, value in first[0].items() if key[0] == "Trade Log"
+    }
+    assert first_trade_log_numbers == initial_trade_log_numbers
+    assert first[3] == initial[3]
+    assert first[4]["sheet_order"] == initial[4]["sheet_order"]
+    assert first[4]["sheets"] == initial[4]["sheets"]
+    assert first[4]["formulas"] == initial[4]["formulas"]
+    assert first[5] == (formula, 2.5)
+    assert first[10] == second[10] == "0.00039% - EURUSD 2026-05-01"
+    assert first[6] == "0.00039%, 1 trade"
+    refreshed_wb = load_workbook(path, data_only=False)
+    try:
+        assert refreshed_wb[source_sheet][source_coordinate].value == (
+            "0.00039% - EURUSD 2026-05-01"
+        )
+    finally:
+        refreshed_wb.close()
+    assert first[7] == initial[7]
+    assert first[8] == initial[8]
+    assert first[9] == initial[9]

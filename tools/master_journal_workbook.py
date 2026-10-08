@@ -1,7 +1,7 @@
 from __future__ import annotations
 from collections import Counter, defaultdict, OrderedDict
 from datetime import datetime, date, timedelta
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP, localcontext
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP, ROUND_UP, localcontext
 from pathlib import Path
 from typing import Any, Collection, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 from openpyxl import Workbook, load_workbook
@@ -1655,18 +1655,56 @@ def _average_float(values: List[float]) -> float | None:
     return (sum(clean) / len(clean)) if clean else None
 
 
-def _format_stop_pct_value(value: Any) -> str:
-    number = _as_float(value)
-    if number is None or not math.isfinite(number):
+def _format_decimal_presentation(
+    value: Any,
+    *,
+    suffix: str = "",
+    excel_fraction_to_points: bool = False,
+) -> str:
+    """Format an existing text display away from zero without changing its input."""
+    decimal_value = _decimal_from_value(value)
+    if decimal_value is None:
         return ""
-    return f"{number:.2f}%"
+    with localcontext() as context:
+        input_digits = len(decimal_value.as_tuple().digits)
+        context.prec = max(28, input_digits + max(0, decimal_value.adjusted() + 1) + 16)
+        if excel_fraction_to_points:
+            decimal_value *= Decimal("100")
+        if decimal_value.is_zero():
+            return f"0.00{suffix}"
+        magnitude = abs(decimal_value)
+        places = max(2, 1 - magnitude.adjusted())
+        quantum = Decimal(1).scaleb(-places)
+        digits = len(magnitude.as_tuple().digits)
+        integer_places = max(0, magnitude.adjusted() + 1)
+        context.prec = max(context.prec, digits + places + integer_places + 8)
+        rounded = magnitude.quantize(quantum, rounding=ROUND_UP)
+    rendered = f"{rounded:.{places}f}"
+    if decimal_value.is_signed():
+        rendered = f"-{rendered}"
+    return f"{rendered}{suffix}"
+
+
+def _format_currency_text_amount(value: Any) -> str:
+    rendered = _format_decimal_presentation(value)
+    if not rendered:
+        return ""
+    sign = "-" if rendered.startswith("-") else ""
+    magnitude = rendered[1:] if sign else rendered
+    integer, separator, fraction = magnitude.partition(".")
+    grouped = re.sub(r"(?<=\d)(?=(\d{3})+$)", ",", integer)
+    return f"{sign}{grouped}{separator}{fraction}"
+
+
+def _format_stop_pct_value(value: Any) -> str:
+    return _format_decimal_presentation(value, suffix="%")
 
 
 def _format_stop_gap_value(value: Any) -> str:
-    number = _as_float(value)
-    if number is None or not math.isfinite(number):
+    decimal_value = _decimal_from_value(value)
+    if decimal_value is None:
         return ""
-    return f"{abs(number):.2f} pp"
+    return _format_decimal_presentation(decimal_value.copy_abs(), suffix=" pp")
 
 
 def _size_recommendation(kind: str, winner_avg: Any, loser_avg: Any) -> str:
@@ -3366,6 +3404,18 @@ def _format_target_r_value(value: Any) -> str:
     return f"{num:.2f}".rstrip("0").rstrip(".")
 
 
+def _format_target_r_text(value: Any) -> str:
+    """Presentation-only target-R text; distribution bucket keys stay unchanged."""
+    return _format_decimal_presentation(value, suffix="R")
+
+
+def _format_target_r_bucket_text(label: Any) -> str:
+    match = re.fullmatch(r"\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+))R-([+-]?(?:\d+(?:\.\d*)?|\.\d+))R\s*", str(label or ""))
+    if not match:
+        return str(label or "")
+    return f"{_format_target_r_text(match.group(1))}-{_format_target_r_text(match.group(2))}"
+
+
 def _target_r_display_decimal(value: Any) -> Decimal | None:
     decimal_value = _decimal_from_value(value)
     if decimal_value is None:
@@ -3590,11 +3640,11 @@ def _legacy_target_r_recommendation_unused(rows: List[Dict[str, Any]], *, scope:
     else:
         direction = "Increase target"
     if coverage_label and coverage_note:
-        recommendation = f"{coverage_label} — Recommended: {_format_target_r_value(recommended_r)}R — {coverage_note}"
+        recommendation = f"{coverage_label} — Recommended: {_format_target_r_text(recommended_r)} — {coverage_note}"
     else:
-        recommendation = f"{direction} — Recommended: {_format_target_r_value(recommended_r)}R"
+        recommendation = f"{direction} — Recommended: {_format_target_r_text(recommended_r)}"
     if current_median is not None and not coverage_label:
-        recommendation += f" (current median: {_format_target_r_value(current_median)}R)"
+        recommendation += f" (current median: {_format_target_r_text(current_median)})"
 
     return {
         TARGET_RECOMMENDATION_HEADER: recommendation,
@@ -3974,9 +4024,9 @@ def _target_r_recommendation(rows: List[Dict[str, Any]], *, scope: str = "standa
         direction,
     )
     recommended_r = float(recommended_r_decimal)
-    recommendation = f"{direction} \u2014 Recommended: {_format_target_r_value(recommended_r)}R"
+    recommendation = f"{direction} \u2014 Recommended: {_format_target_r_text(recommended_r)}"
     if current_median is not None:
-        recommendation += f" (current median: {_format_target_r_value(current_median)}R)"
+        recommendation += f" (current median: {_format_target_r_text(current_median)})"
 
     return {
         TARGET_RECOMMENDATION_HEADER: recommendation,
@@ -4393,7 +4443,8 @@ def _recommendation_svg(
         value = y_min + (y_max - y_min) * tick / 5.0
         y = y_pos(value)
         svg.append(f'<line x1="{left}" y1="{y:.2f}" x2="{width-right}" y2="{y:.2f}" stroke="#e2e8f0"/>')
-        svg.append(f'<text data-role="tick-label" x="{left-14}" y="{y+4:.2f}" text-anchor="end" class="axis-label">{value:.3f}{_recommendation_html_escape(unit)}</text>')
+        tick_text = _format_decimal_presentation(value, suffix=unit)
+        svg.append(f'<text data-role="tick-label" x="{left-14}" y="{y+4:.2f}" text-anchor="end" class="axis-label">{_recommendation_html_escape(tick_text)}</text>')
     rec_y = y_pos(float(recommended))
     svg.append(f'<line x1="{left}" y1="{rec_y:.2f}" x2="{width-right}" y2="{rec_y:.2f}" stroke="#7c3aed" stroke-width="3" stroke-dasharray="10 6"/>')
     recommendation_label_y = (
@@ -4403,11 +4454,13 @@ def _recommendation_svg(
         height - bottom - 10.0,
         max(top + 16.0, recommendation_label_y),
     )
-    svg.append(f'<text data-role="recommendation-label" x="{width-right-8}" y="{recommendation_label_y:.2f}" text-anchor="end" class="recommendation-label">Recommended {recommended:.8g}{_recommendation_html_escape(unit)}</text>')
+    recommendation_text = _format_decimal_presentation(recommended, suffix=unit)
+    svg.append(f'<text data-role="recommendation-label" x="{width-right-8}" y="{recommendation_label_y:.2f}" text-anchor="end" class="recommendation-label">Recommended {_recommendation_html_escape(recommendation_text)}</text>')
     for index, item in enumerate(points):
         value = float(item["value"])
         colour = "#15803d" if item.get("outcome") == "winner" else "#b91c1c"
-        title = _recommendation_html_escape(f"{item['label']}: {value:.8g}{unit} — {item.get('outcome')}")
+        value_text = _format_decimal_presentation(value, suffix=unit)
+        title = _recommendation_html_escape(f"{item['label']}: {value_text} — {item.get('outcome')}")
         svg.append(
             f'<circle data-role="observation" data-observation-index="{index}" cx="{x_pos(index):.2f}" cy="{y_pos(value):.2f}" r="{marker_radius}" fill="{colour}" stroke="#ffffff" stroke-width="{marker_stroke_width}"><title>{title}</title></circle>'
         )
@@ -4449,7 +4502,7 @@ def _recommendation_chart_html(
     gate_observations = [item for item in observations if item.get("value") is None]
     observation_rows: List[str] = []
     for item in observations:
-        display_value = "" if item.get("value") is None else f"{float(item['value']):.8g}{unit}"
+        display_value = "" if item.get("value") is None else _format_decimal_presentation(item["value"], suffix=unit)
         observation_rows.append(
             "<tr>"
             f"<td>{_recommendation_html_escape(item.get('symbol'))}</td>"
@@ -4475,7 +4528,7 @@ def _recommendation_chart_html(
     if isinstance(distribution, Mapping) and distribution:
         largest = max(int(value) for value in distribution.values()) or 1
         bars = "".join(
-            f'<div class="bar-row"><span>{_recommendation_html_escape(label)}</span><div class="bar"><i style="width:{int(count)/largest*100:.2f}%"></i></div><b>{int(count)}</b></div>'
+            f'<div class="bar-row"><span>{_recommendation_html_escape(_format_target_r_bucket_text(label))}</span><div class="bar"><i style="width:{int(count)/largest*100:.2f}%"></i></div><b>{int(count)}</b></div>'
             for label, count in distribution.items()
         )
         distribution_html = f"<h2>Algorithm distribution</h2><div class=\"bars\">{bars}</div>"
@@ -6036,11 +6089,31 @@ def _format_inline_metric_value(value: Any, kind: str, source: Any = None) -> An
     if value in (None, ""):
         return ""
     if kind == "pct":
-        number = _as_float(value)
-        rendered = str(value) if number is None else f"{number:.8f}".rstrip("0").rstrip(".") + "%"
+        decimal_value = _decimal_from_value(value)
+        if decimal_value is None:
+            try:
+                parsed = Decimal(str(value).strip())
+            except (InvalidOperation, ValueError):
+                rendered = str(value)
+            else:
+                if not parsed.is_finite():
+                    return ""
+                rendered = str(value)
+        else:
+            rendered = _format_decimal_presentation(decimal_value, suffix="%")
     elif kind == "r":
-        number = _as_float(value)
-        rendered = str(value) if number is None else f'{number:.3f}R'
+        decimal_value = _decimal_from_value(value)
+        if decimal_value is None:
+            try:
+                parsed = Decimal(str(value).strip())
+            except (InvalidOperation, ValueError):
+                rendered = str(value)
+            else:
+                if not parsed.is_finite():
+                    return ""
+                rendered = str(value)
+        else:
+            rendered = _format_decimal_presentation(decimal_value, suffix="R")
     elif kind == "duration":
         rendered = _format_duration_display(value)
     else:
@@ -11734,7 +11807,12 @@ def _report_cell_value(bucket: Dict[str, Any], key: str | None, kind: str) -> An
             return ""
         if len(value) == 1:
             return next(iter(value.values()))
-        return " / ".join(f"{currency} {amount:,.8f}".rstrip("0").rstrip(".") for currency, amount in sorted(value.items()))
+        rendered_amounts = [
+            f"{currency} {amount_text}"
+            for currency, amount in sorted(value.items())
+            if (amount_text := _format_currency_text_amount(amount))
+        ]
+        return " / ".join(rendered_amounts)
     return "" if value is None else value
 
 
@@ -15031,7 +15109,8 @@ def _pnl_calendar_monthly_values(snapshot_or_rows: Any) -> Dict[Tuple[int, int],
 
 def _format_pnl_calendar_month_cell(pct_points: float, count: int) -> str:
     label = "trade" if int(count) == 1 else "trades"
-    return f"{pct_points:.2f}%, {int(count)} {label}"
+    percentage = _format_decimal_presentation(pct_points, suffix="%")
+    return f"{percentage}, {int(count)} {label}" if percentage else ""
 
 
 def _pnl_calendar_text_pct_fraction(value: Any) -> float | None:
