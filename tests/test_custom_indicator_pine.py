@@ -367,9 +367,9 @@ def test_custom_indicator_moving_100_marker_counts_current_forming_bar_exactly()
     assert "hundredTargetBarIndex = bar_index - 99" in marker_block
     assert "bar_index - 100" not in marker_block
     assert "hundredTargetHigh = high[99]" in marker_block
-    assert "hundredTargetLow = low[99]" in marker_block
     assert "timeframe." not in marker_block
-    assert "if showHundredCandleMarker and hundredMarkerHasHistory" in marker_block
+    assert "hundredMarkerCanDraw = not na(hundredTargetHigh)" in marker_block
+    assert "if showHundredCandleMarker and hundredMarkerHasHistory and hundredMarkerCanDraw" in marker_block
 
 
 def test_session_markers_wait_until_event_time_on_5_15_and_30_minute_bars() -> None:
@@ -418,40 +418,44 @@ def test_final_friday_new_york_close_uses_confirmed_final_bar_without_a_next_bar
     assert marker_creation_times == [event_ts]
 
 
-def test_custom_indicator_moving_100_marker_has_one_bounded_vertical_lifecycle() -> None:
+def test_custom_indicator_moving_100_marker_has_one_bounded_label_lifecycle() -> None:
     source = _source()
     marker_block = source.split("// MOVING 100-CANDLE MARKER", 1)[1].split(
         "// HISTORICAL FOREX START-DATE MARKER", 1
     )[0]
-    assert marker_block.count("var line hundredMarker") == 1
+    assert "var line hundredMarker" not in marker_block
     assert marker_block.count("var label hundredMarkerLabel") == 1
-    assert marker_block.count("line.delete(hundredMarkerLine)") == 1
+    assert "line.delete(" not in marker_block
+    assert "line.new(" not in marker_block
+    assert "line.set_" not in marker_block
     assert marker_block.count("label.delete(hundredMarkerLabel)") == 1
-    assert marker_block.count("line.new(") == 1
     assert marker_block.count("label.new(") == 1
-    assert marker_block.count("xloc=xloc.bar_index") == 2
-    assert "extend=extend.both" in marker_block
-    assert "line.set_extend(hundredMarkerLine, extend.both)" in marker_block
-    assert "style=line.style_dashed" in marker_block
-    assert "line.set_xy1(hundredMarkerLine, hundredTargetBarIndex, hundredTargetLow)" in marker_block
-    assert "line.set_xy2(hundredMarkerLine, hundredTargetBarIndex, hundredMarkerLineHigh)" in marker_block
+    assert marker_block.count("xloc=xloc.bar_index") == 1
     assert "barstate.islast" in marker_block
-    assert "else\n        if not na(hundredMarkerLine)" in marker_block
+    assert "if showHundredCandleMarker and hundredMarkerHasHistory and hundredMarkerCanDraw" in marker_block
+    assert "else\n        if not na(hundredMarkerLabel)" in marker_block
     assert 'text="100"' in marker_block
     assert "yloc=yloc.abovebar" in marker_block
     assert "label.set_xy(hundredMarkerLabel, hundredTargetBarIndex, hundredTargetHigh)" in marker_block
     assert "hundredMarkerColor = color.rgb(18, 52, 120)" in marker_block
+    assert "color=color.new(color.white, 100)" in marker_block
+    assert "size=size.normal" in marker_block
+    assert "force_overlay=true" in marker_block
 
 
-def test_custom_indicator_100_marker_uses_finite_candle_price_anchors() -> None:
+def test_custom_indicator_100_marker_uses_only_guarded_candle_label() -> None:
     source = _source()
     marker_block = source.split("// MOVING 100-CANDLE MARKER", 1)[1].split(
         "// HISTORICAL FOREX START-DATE MARKER", 1
     )[0]
     assert "hundredTargetHigh = high[99]" in marker_block
-    assert "hundredTargetLow = low[99]" in marker_block
-    assert "hundredMarkerLineHigh = hundredMarkerFlatCandle and hundredMarkerHasValidTick ? hundredTargetHigh + syminfo.mintick : hundredTargetHigh" in marker_block
-    assert "hundredMarkerCanDraw = not na(hundredTargetHigh) and not na(hundredTargetLow) and (not hundredMarkerFlatCandle or hundredMarkerHasValidTick)" in marker_block
+    assert "hundredMarkerCanDraw = not na(hundredTargetHigh)" in marker_block
+    assert "hundredTargetLow" not in marker_block
+    assert "hundredMarkerHasValidTick" not in marker_block
+    assert "hundredMarkerFlatCandle" not in marker_block
+    assert "syminfo.mintick" not in marker_block
+    assert "hundredMarkerLine" not in marker_block
+    assert "line." not in marker_block
     assert "hundredMarkerGapRangeFraction" not in source
     assert "hundredMarkerRecentHigh" not in marker_block
     assert "hundredMarkerRecentLow" not in marker_block
@@ -459,8 +463,7 @@ def test_custom_indicator_100_marker_uses_finite_candle_price_anchors() -> None:
     assert "hundredTargetSessionRecentLow" not in marker_block
     assert "hundredCandleGap" not in marker_block
     assert "hundredLabelGap" not in marker_block
-    assert "hundredTargetLow -" not in marker_block
-    assert "hundredTargetHigh +" not in marker_block or "hundredTargetHigh + syminfo.mintick" in marker_block
+    assert "text=\"100\"" in marker_block
 
 
 def test_custom_indicator_funding_and_option_expiry_code_remains_unchanged() -> None:

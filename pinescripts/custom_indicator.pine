@@ -336,26 +336,11 @@ hundredMarkerColor = color.rgb(18, 52, 120)
 hundredMarkerHasHistory = bar_index >= 99
 hundredTargetBarIndex = bar_index - 99
 hundredTargetHigh = high[99]
-hundredTargetLow = low[99]
-hundredMarkerHasValidTick = not na(syminfo.mintick) and syminfo.mintick > 0
-hundredMarkerFlatCandle = not na(hundredTargetHigh) and not na(hundredTargetLow) and hundredTargetHigh == hundredTargetLow
-hundredMarkerCanDraw = not na(hundredTargetHigh) and not na(hundredTargetLow) and (not hundredMarkerFlatCandle or hundredMarkerHasValidTick)
-hundredMarkerLineHigh = hundredMarkerFlatCandle and hundredMarkerHasValidTick ? hundredTargetHigh + syminfo.mintick : hundredTargetHigh
-var line hundredMarkerLine = na
+hundredMarkerCanDraw = not na(hundredTargetHigh)
 var label hundredMarkerLabel = na
 
 if barstate.islast
     if showHundredCandleMarker and hundredMarkerHasHistory and hundredMarkerCanDraw
-        if na(hundredMarkerLine)
-            hundredMarkerLine := line.new(x1=hundredTargetBarIndex, y1=hundredTargetLow, x2=hundredTargetBarIndex, y2=hundredMarkerLineHigh,
-                                           xloc=xloc.bar_index, extend=extend.both,
-                                           color=hundredMarkerColor, style=line.style_dashed, width=2,
-                                           force_overlay=true)
-        else
-            line.set_xy1(hundredMarkerLine, hundredTargetBarIndex, hundredTargetLow)
-            line.set_xy2(hundredMarkerLine, hundredTargetBarIndex, hundredMarkerLineHigh)
-            line.set_extend(hundredMarkerLine, extend.both)
-
         if na(hundredMarkerLabel)
             hundredMarkerLabel := label.new(x=hundredTargetBarIndex, y=hundredTargetHigh, text="100",
                                             xloc=xloc.bar_index, yloc=yloc.abovebar,
@@ -365,9 +350,6 @@ if barstate.islast
         else
             label.set_xy(hundredMarkerLabel, hundredTargetBarIndex, hundredTargetHigh)
     else
-        if not na(hundredMarkerLine)
-            line.delete(hundredMarkerLine)
-            hundredMarkerLine := na
         if not na(hundredMarkerLabel)
             label.delete(hundredMarkerLabel)
             hundredMarkerLabel := na
