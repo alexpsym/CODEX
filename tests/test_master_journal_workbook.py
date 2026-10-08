@@ -10888,12 +10888,41 @@ def test_journal_decimal_text_refresh_preserves_numbers_formulas_balances_and_la
     )
     print(f"fixture build: {time.perf_counter() - started:.2f}s")
 
+    preparation_started = time.perf_counter()
+    preparation = update_master_journal_workbook_data_only(
+        path,
+        snapshot,
+        preserve_existing_layout=True,
+        publish_recommendation_assets=False,
+    )
+    assert preparation["ok"] is True, preparation
+    preparation_candidate = Path(preparation["candidate_path"])
+    assert preparation_candidate.is_file()
+    preparation_wb = load_workbook(preparation_candidate, data_only=False)
+    try:
+        assert STATS1_SHEET in preparation_wb.sheetnames
+        assert "Trade Log" in preparation_wb.sheetnames
+        assert any(
+            cell.value == "0.00039% - EURUSD 2026-05-01"
+            for ws in preparation_wb.worksheets
+            for cell in ws._cells.values()
+        )
+        prepared_sheet_order = list(preparation_wb.sheetnames)
+    finally:
+        preparation_wb.close()
+    preparation_candidate.replace(path)
+    print(f"baseline preparation refresh: {time.perf_counter() - preparation_started:.2f}s")
+
     wb = load_workbook(path, data_only=False)
     stats1 = wb[STATS1_SHEET]
     authored_cell = stats1["B26"]
     authored_cell.font = Font(name="Calibri", size=11, bold=True, italic=True, color="123456")
     authored_cell.fill = PatternFill("solid", fgColor="ABCDEF")
     authored_cell.number_format = '0.0000" authored"'
+    label_link = stats1["A26"]
+    assert label_link.value not in (None, "")
+    label_link_target = "https://example.invalid/job7b-manual-label"
+    label_link.hyperlink = label_link_target
     wb.calculation.calcMode = "auto"
     wb.calculation.fullCalcOnLoad = True
 
@@ -11002,6 +11031,8 @@ def test_journal_decimal_text_refresh_preserves_numbers_formulas_balances_and_la
     assert initial[5] == (formula, 2.5)
     assert initial[6] == "0.00%, 1 trade"
     assert initial[10] == "0.00% - EURUSD 2026-05-01"
+    assert initial[4]["sheet_order"] == prepared_sheet_order
+    assert initial[4]["hyperlinks"][STATS1_SHEET]["A26"]["target"] == label_link_target
 
     def refresh_once():
         refresh_started = time.perf_counter()
@@ -11030,24 +11061,18 @@ def test_journal_decimal_text_refresh_preserves_numbers_formulas_balances_and_la
     first = refresh_once()
     second = refresh_once()
     assert first == second
-    # Preservation refresh may recalculate generated statistics from the
-    # authoritative rows; its second identical refresh must not change them.
-    assert first[1] == initial[1]
-    assert first[2] == initial[2]
-    initial_trade_log_numbers = {
-        key: value for key, value in initial[0].items() if key[0] == "Trade Log"
-    }
-    first_trade_log_numbers = {
-        key: value for key, value in first[0].items() if key[0] == "Trade Log"
-    }
-    assert first_trade_log_numbers == initial_trade_log_numbers
-    assert first[3] == initial[3]
-    assert first[4]["sheet_order"] == initial[4]["sheet_order"]
-    assert first[4]["sheets"] == initial[4]["sheets"]
-    assert first[4]["formulas"] == initial[4]["formulas"]
-    assert first[5] == (formula, 2.5)
-    assert first[10] == second[10] == "0.00039% - EURUSD 2026-05-01"
-    assert first[6] == "0.00039%, 1 trade"
+    for refreshed in (first, second):
+        assert refreshed[0] == initial[0]
+        assert refreshed[1] == initial[1]
+        assert refreshed[2] == initial[2]
+        assert refreshed[3] == initial[3]
+        assert refreshed[4] == initial[4]
+        assert refreshed[5] == (formula, 2.5)
+        assert refreshed[6] == "0.00039%, 1 trade"
+        assert refreshed[7] == initial[7]
+        assert refreshed[8] == initial[8]
+        assert refreshed[9] == initial[9]
+        assert refreshed[10] == "0.00039% - EURUSD 2026-05-01"
     refreshed_wb = load_workbook(path, data_only=False)
     try:
         assert refreshed_wb[source_sheet][source_coordinate].value == (
@@ -11055,6 +11080,3 @@ def test_journal_decimal_text_refresh_preserves_numbers_formulas_balances_and_la
         )
     finally:
         refreshed_wb.close()
-    assert first[7] == initial[7]
-    assert first[8] == initial[8]
-    assert first[9] == initial[9]
