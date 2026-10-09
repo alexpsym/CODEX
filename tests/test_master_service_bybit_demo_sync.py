@@ -1823,7 +1823,7 @@ def test_manual_import_bybit_funding_with_completed_trades_and_trailing_open(tmp
     monkeypatch.setattr(master_service, "_update_trading_journal_import_status", lambda **_kwargs: None)
     monkeypatch.setattr(master_service, "_build_manual_import_authoritative_snapshot", lambda **_kwargs: {"items": fake_get_rows()})
     monkeypatch.setattr(master_service, "_sync_master_journal_workbook", lambda **_kwargs: {"ok": True})
-    monkeypatch.setattr(master_service, "_verify_trade_log_row_ids_in_workbook", lambda _path, ids: {"ok": True, "found_row_ids_count": len(ids), "missing_row_ids": []})
+    monkeypatch.setattr(master_service, "_verify_trade_log_row_ids_in_workbook", lambda _path, ids, **_kwargs: {"ok": True, "found_row_ids_count": len(ids), "missing_row_ids": []})
     monkeypatch.setattr(master_service, "_persist_trading_journal_sqlite", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(master_service, "_sync_journal_excel_files_to_github", lambda _path: {"github_sync_enabled": False, "github_sync_ok": True})
     monkeypatch.setattr(master_service, "_schedule_dropbox_upload_state_backup", lambda: None)
@@ -2364,3 +2364,248 @@ def test_backfill_persisted_grouped_row_populates_context_and_is_idempotent(monk
     second_rows, second_changed = master_service._backfill_persisted_bybit_trade_fields(first_rows)
     assert second_changed == 0
     assert second_rows == first_rows
+
+
+_JOB7D_BYBIT_HISTORY = """contracts,Order No.,Direction,Order Type,Filled Qty,Filled Price,Order Price,Filled Type,Trading Fee Rate,Fees Paid,Trasaction ID,Transaction Time(UTC+10),Final Balance (USDT)
+BTCUSDT,59f69008-05ae-479d-bd5a-7c3ca8ede652,BUY,Market,0.004,84763.8,85611.8,Trade,0.00055,0.18648036,fd72de32-10dc-4754-9d81-d2e6cc96da8f,13:07:22 2026-10-04,
+BTCUSDT,28550f11-82d1-4894-9790-98bf4e05894f,BUY,--,0.004,85076,0,Funding,0.000027,0.00946726,ea0f5819-2837-435c-b570-9d27419eaa17,18:00:00 2026-10-04,
+BTCUSDT,dbe15d6b-79a2-4d9c-bd60-0592155f6852,BUY,--,0.004,85207.96,0,Funding,0.000054,0.01870826,2938ead7-2185-46d2-8c3b-9ea4aaa49e8b,02:00:00 2026-10-05,
+BTCUSDT,91bb3bcd-dc3a-4eaf-826b-0c48c809329a,BUY,--,0.004,86488.74,0,Funding,0.000087,0.03020879,0ad0b2ef-c795-42db-98fd-b88f2bbcedd9,10:00:00 2026-10-05,
+BTCUSDT,00b5df56-87dc-4eb7-82b7-b1388093ef53,BUY,--,0.004,86227,0,Funding,0.00003,0.01060248,dc4bd44f-38ed-42fa-9923-f8eb632be882,18:00:00 2026-10-05,
+BTCUSDT,dda209e0-ec15-47bb-b854-af6edb10ec67,BUY,--,0.004,85223.76,0,Funding,0.000032,0.01093592,570897b8-2737-47e6-9862-06376aa8a90b,02:00:00 2026-10-06,
+BTCUSDT,eea2c238-08dc-45b4-ad19-f3014e1fe353,BUY,--,0.004,85725.1,0,Funding,0.000011,0.00403594,982076fb-53a7-4c92-9fd2-de05b4f2b9f8,10:00:00 2026-10-06,
+BTCUSDT,bc2d0709-d180-4420-b9ca-b175a0c241bb,BUY,--,0.004,85514.9,0,Funding,0,0.00030102,6003db98-f629-4bd3-90cf-102fc180a9df,18:00:00 2026-10-06,
+BTCUSDT,1a2c4bac-a17b-43b7-8a64-a3759e05910c,BUY,--,0.004,85673.59,0,Funding,0.000057,0.01973235,310c1660-1798-423e-a7bc-db5ffc7d0dd8,02:00:00 2026-10-07,
+BTCUSDT,50b84472-686b-46fe-b691-33fab645b858,BUY,--,0.004,85514.21,0,Funding,0.000016,0.00566105,b56a5ee0-a0b1-42c5-8fe1-e3d6f457365b,10:00:00 2026-10-07,
+BTCUSDT,4dfd1acf-1eda-4a42-b619-37047365c30f,SELL,Market,0.004,84100.3,83302.3,Trade,0.00055,0.18502066,a703df01-fda5-4ebc-b713-c02f2b147bd2,12:01:07 2026-10-07,
+"""
+
+
+def _job7d_csv_path(tmp_path: Path) -> Path:
+    path = tmp_path / "bybit_history_91b14fd8889e4a32b2b5fad1209cd688.csv"
+    path.write_text(_JOB7D_BYBIT_HISTORY, encoding="utf-8")
+    return path
+
+
+def test_bybit_demo_exporter_history_uses_october_dates_and_execution_profit(tmp_path: Path) -> None:
+    path = _job7d_csv_path(tmp_path)
+    rows, unmatched, diag = master_service._parse_bybit_trade_history_csv_with_diagnostics(path, account_mode="demo")
+    assert unmatched == [] and len(rows) == 1
+    assert diag["bybit_trade_execution_rows_seen"] == 2
+    assert diag["bybit_funding_rows_seen"] == 9
+    assert diag["bybit_completed_trades_imported"] == 1
+    row = rows[0]
+    assert row["id"] == "bybit:demo:trade:BTCUSDT:cd7d7d60e40d420e"
+    assert row["account"] == "Bybit Demo" and row["side"] == "Buy"
+    assert row["open_time"] == "2026-10-04T13:07:22+10:00"
+    assert row["close_time"] == "2026-10-07T12:01:07+10:00"
+    assert row["trade_duration_seconds"] == 255225
+    assert row["qty"] == pytest.approx(0.004)
+    assert row["entry_price"] == pytest.approx(84763.8)
+    assert row["exit_price"] == pytest.approx(84100.3)
+    assert row["gross_profit"] == pytest.approx(-2.654)
+    assert row["trading_fee_total"] == pytest.approx(0.37150102)
+    assert row["funding_cost"] == pytest.approx(0.10965307)
+    assert row["commission"] == pytest.approx(0.48115409)
+    assert row["net_profit"] == pytest.approx(-3.13515409)
+    assert row["realized_pnl"] == pytest.approx(-3.13515409)
+    assert row.get("balance_after_trade") is None
+
+
+def test_bybit_csv_timestamp_formats_keep_local_and_api_dates() -> None:
+    source = {"contracts": "BTCUSDT", "Direction": "BUY", "Order No.": "o1", "Trasaction ID": "e1", "Filled Type": "Trade", "Filled Qty": 0.004, "Filled Price": 84763.8}
+    examples = (
+        ("13:07:22 2026-10-04", "2026-10-04T13:07:22+10:00"),
+        ("13:07:22 2026-10-17", "2026-10-17T13:07:22+10:00"),
+        ("04/10/2026 13:07:22", "2026-10-04T13:07:22+10:00"),
+        ("17/10/2026 13:07", "2026-10-17T13:07:00+10:00"),
+        ("2026-10-04T13:07:22+10:00", "2026-10-04T13:07:22+10:00"),
+    )
+    for value, wanted in examples:
+        row = master_service._normalize_bybit_execution_history_row({**source, "Transaction Time(UTC+10)": value}, "demo")
+        assert row["open_time"] == wanted
+    epoch = master_service._normalize_bybit_execution_history_row({**source, "execTime": 1791083242000}, "demo")
+    assert epoch["open_time"] == "2026-10-04T03:07:22+00:00"
+
+
+def _job7d_isolated_import(tmp_path: Path, monkeypatch, saved_rows: list[dict]) -> tuple[Path, list[str]]:
+    from tools.master_journal_workbook import (
+        build_master_journal_workbook, update_master_journal_workbook_data_only,
+    )
+
+    workbook = tmp_path / "Trading Journal.xlsx"
+    writes: list[str] = []
+    monkeypatch.setattr(master_service, "_master_journal_path", lambda: workbook)
+    monkeypatch.setattr(master_service, "TRADING_JOURNAL_PATH", tmp_path / "trading_journal.json")
+    monkeypatch.setattr(master_service, "TRADING_JOURNAL_STATE_PATH", tmp_path / "trading_journal_state.json")
+    monkeypatch.setattr(master_service, "_get_trading_journal_rows", lambda: [dict(row) for row in saved_rows])
+    monkeypatch.setattr(master_service, "_set_trading_journal_rows", lambda incoming, **_kw: saved_rows.__setitem__(slice(None), [dict(row) for row in incoming]))
+
+    def upsert(incoming, **_kw):
+        by_id = {row["id"]: dict(row) for row in saved_rows}
+        for row in incoming:
+            by_id[row["id"]] = (
+                master_service._merge_trading_journal_row(by_id[row["id"]], row)
+                if row["id"] in by_id else dict(row)
+            )
+        saved_rows[:] = list(by_id.values())
+        return len(incoming)
+
+    monkeypatch.setattr(master_service, "_upsert_trading_journal_rows", upsert)
+    monkeypatch.setattr(master_service, "_reserve_master_journal_workbook_sync", lambda *_args, **_kw: None)
+    monkeypatch.setattr(master_service, "_release_master_journal_workbook_sync", lambda: None)
+    monkeypatch.setattr(master_service, "_recover_trading_journal_derived_refresh_state_if_needed", lambda: None)
+    monkeypatch.setattr(master_service, "_update_trading_journal_import_status", lambda **_kw: None)
+    monkeypatch.setattr(master_service, "_build_manual_import_authoritative_snapshot", lambda **_kw: {"items": [dict(row) for row in saved_rows], "stats": {"totals": {}, "groups": {}}, "balances": []})
+    monkeypatch.setattr(master_service, "_persist_trading_journal_sqlite", lambda *_args, **_kw: None)
+    monkeypatch.setattr(master_service, "_sync_journal_excel_files_to_github", lambda _path: {"github_sync_enabled": False, "github_sync_ok": True})
+    monkeypatch.setattr(master_service, "_schedule_dropbox_upload_state_backup", lambda: None)
+    monkeypatch.setattr(master_service, "_trading_journal_file_cache_key", lambda: ("fixture", 1))
+    monkeypatch.setattr(master_service, "_PENDING_MANUAL_SYNC_ROWS", [])
+    monkeypatch.setattr(master_service, "_PENDING_MANUAL_SYNC_BALANCES", [])
+    monkeypatch.setattr(master_service, "TRADING_JOURNAL_DERIVED_REFRESH_STATE", {})
+
+    def write_workbook(*, prebuilt_snapshot, expected_survivor_row_ids=None, **_kw):
+        if workbook.exists():
+            result = update_master_journal_workbook_data_only(
+                workbook, prebuilt_snapshot,
+                expected_survivor_row_ids=expected_survivor_row_ids,
+                preserve_existing_layout=True,
+                publish_recommendation_assets=False,
+            )
+            assert result["ok"], result
+            candidate = Path(result["candidate_path"])
+            candidate.replace(workbook)
+            writes.append("preserved")
+        else:
+            build_master_journal_workbook(
+                prebuilt_snapshot, workbook, publish_recommendation_assets=False,
+            )
+            writes.append("built")
+        return {"ok": True, "master_journal_ok": True, "master_journal_path": str(workbook)}
+
+    monkeypatch.setattr(master_service, "_sync_master_journal_workbook", write_workbook)
+    return workbook, writes
+
+
+def _job7d_saved_trade(workbook: Path, row_id: str) -> tuple:
+    wb = load_workbook(workbook, read_only=True, data_only=True)
+    try:
+        ws = wb["Trade Log"]
+        headers, first = master_service._stream_trade_log_header_map_and_start_row(ws)
+        found = [row for row in ws.iter_rows(min_row=first, values_only=True)
+                 if row[headers["Row ID"] - 1] == row_id]
+        assert len(found) == 1
+        return tuple(found[0][headers[name] - 1] for name in
+                     ("Account", "Open Time", "Close Time", "Qty", "Entry Price", "Exit Price", "Net P/L"))
+    finally:
+        wb.close()
+
+
+def test_bybit_demo_import_writes_october_trade_and_checks_saved_values(tmp_path: Path, monkeypatch) -> None:
+    from datetime import datetime
+
+    csv_path = _job7d_csv_path(tmp_path)
+    saved_rows: list[dict] = []
+    workbook, writes = _job7d_isolated_import(tmp_path, monkeypatch, saved_rows)
+    result = master_service._import_uploaded_trading_journal_file(csv_path.name, csv_path.read_bytes(), account_mode="demo")
+    assert result["ok"] is True, result
+    assert writes == ["built"]
+    assert len(saved_rows) == 1
+    row_id = "bybit:demo:trade:BTCUSDT:cd7d7d60e40d420e"
+    assert saved_rows[0]["id"] == row_id
+    assert _job7d_saved_trade(workbook, row_id) == (
+        "Bybit Demo", datetime(2026, 10, 4, 13, 7, 22),
+        datetime(2026, 10, 7, 12, 1, 7), 0.004,
+        84763.8, 84100.3, pytest.approx(-3.13515409),
+    )
+    wrong = dict(saved_rows[0])
+    wrong["close_time"] = "2026-07-10T12:01:07+10:00"
+    values = master_service._verify_bybit_imported_trade_log_values(workbook, [wrong])
+    assert values["ok"] is False and any("Close Time" in message for message in values["mismatches"])
+
+
+def test_bybit_demo_reimport_repairs_misdated_trade_preserving_manual_fields(tmp_path: Path, monkeypatch) -> None:
+    from datetime import datetime
+    from tools.master_journal_workbook import build_master_journal_workbook
+
+    csv_path = _job7d_csv_path(tmp_path)
+    parsed, unmatched, _diag = master_service._parse_bybit_trade_history_csv_with_diagnostics(csv_path, account_mode="demo")
+    assert not unmatched and len(parsed) == 1
+    old = {**parsed[0], "open_time": "2026-04-10T13:07:22+10:00",
+           "close_time": "2026-07-10T12:01:07+10:00", "trade_duration_seconds": 7858425,
+           "notes": "Keep manual note", "setup": "Pullback", "timeframe": "1H",
+           "is_test_trade": False, "manual_overrides": {"setup": "Pullback"},
+           "manual_override_fields": ["setup"], "stop_loss": 84102.0,
+           "take_profit": 87539.0}
+    unrelated = {"id": "manual:unrelated", "row_type": "trade", "source": "manual",
+                 "account": "OANDA DEMO", "account_label": "OANDA DEMO",
+                 "symbol": "EURUSD", "side": "Buy", "qty": 1.0,
+                 "entry_price": 1.1, "exit_price": 1.2,
+                 "open_time": "2026-10-01T00:00:00+10:00",
+                 "close_time": "2026-10-01T01:00:00+10:00", "net_profit": 10.0,
+                 "balance_after_trade": 1000.0}
+    saved_rows = [old, unrelated]
+    workbook, writes = _job7d_isolated_import(tmp_path, monkeypatch, saved_rows)
+    build_master_journal_workbook(
+        {"items": saved_rows, "stats": {"totals": {}, "groups": {}}, "balances": []},
+        workbook, publish_recommendation_assets=False,
+    )
+    before = load_workbook(workbook, read_only=True, data_only=True)
+    try:
+        sheets = list(before.sheetnames)
+    finally:
+        before.close()
+    first = master_service._import_uploaded_trading_journal_file(csv_path.name, csv_path.read_bytes(), account_mode="demo")
+    assert first["ok"] is True, first
+    assert writes == ["preserved"]
+    assert len(saved_rows) == 2
+    repaired = next(row for row in saved_rows if row["id"] == old["id"])
+    assert repaired["open_time"] == "2026-10-04T13:07:22+10:00"
+    assert repaired["close_time"] == "2026-10-07T12:01:07+10:00"
+    assert repaired["trade_duration_seconds"] == 255225
+    for field in ("notes", "setup", "timeframe", "is_test_trade", "manual_overrides", "manual_override_fields", "stop_loss", "take_profit"):
+        assert repaired[field] == old[field], field
+    saved_unrelated = next(row for row in saved_rows if row["id"] == unrelated["id"])
+    for field, value in unrelated.items():
+        assert saved_unrelated[field] == value, field
+    assert _job7d_saved_trade(workbook, old["id"]) == (
+        "Bybit Demo", datetime(2026, 10, 4, 13, 7, 22),
+        datetime(2026, 10, 7, 12, 1, 7), 0.004,
+        84763.8, 84100.3, pytest.approx(-3.13515409),
+    )
+    after = load_workbook(workbook, read_only=True, data_only=True)
+    try:
+        assert after.sheetnames == sheets
+    finally:
+        after.close()
+    def saved_trade_ids() -> list[str]:
+        saved = load_workbook(workbook, read_only=True, data_only=True)
+        try:
+            sheet = saved["Trade Log"]
+            headers, first_data_row = master_service._stream_trade_log_header_map_and_start_row(sheet)
+            trade_type_column = headers["Row Type"] - 1
+            row_id_column = headers["Row ID"] - 1
+            return [
+                str(cells[row_id_column] or "").strip()
+                for cells in sheet.iter_rows(min_row=first_data_row, values_only=True)
+                if str(cells[trade_type_column] or "trade").strip().lower() == "trade"
+                and str(cells[row_id_column] or "").strip()
+            ]
+        finally:
+            saved.close()
+
+    before_trade_ids = saved_trade_ids()
+    second = master_service._import_uploaded_trading_journal_file(csv_path.name, csv_path.read_bytes(), account_mode="demo")
+    assert second["ok"] is True, second
+    assert not second.get("errors")
+    after_trade_ids = saved_trade_ids()
+    assert len(after_trade_ids) == len(before_trade_ids)
+    assert after_trade_ids.count(old["id"]) == 1
+    assert _job7d_saved_trade(workbook, old["id"]) == (
+        "Bybit Demo", datetime(2026, 10, 4, 13, 7, 22),
+        datetime(2026, 10, 7, 12, 1, 7), 0.004,
+        84763.8, 84100.3, pytest.approx(-3.13515409),
+    )
+    assert writes and all(action == "preserved" for action in writes)
+    assert len(saved_rows) == 2

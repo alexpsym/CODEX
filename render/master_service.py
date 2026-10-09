@@ -10816,24 +10816,35 @@ def _normalize_bybit_execution_history_row(raw: Dict[str, object], account_mode:
     t = raw.get('Transaction Time(UTC+10)') if raw.get('Transaction Time(UTC+10)') not in (None,'') else raw.get('execTime')
     open_time = _epoch_or_iso_to_iso(t)
     if raw.get('Transaction Time(UTC+10)') not in (None, '') and isinstance(t, str):
-        ts = str(t).strip()
+        ts = t.strip()
         if ts:
-            try:
-                parsed = pd.to_datetime(ts, errors="coerce", dayfirst=True)
-                if pd.notna(parsed):
-                    brisbane = ZoneInfo("Australia/Brisbane")
-                    if getattr(parsed, "tzinfo", None) is None:
-                        parsed = parsed.tz_localize(brisbane)
-                    else:
-                        parsed = parsed.tz_convert(brisbane)
-                    open_time = parsed.isoformat()
-            except Exception:
-                pass
-    if isinstance(t,str) and '+' in t and 'T' not in t:
-        try:
-            open_time=t.replace(' ','T')
-        except Exception:
-            pass
+            brisbane = ZoneInfo("Australia/Brisbane")
+            parsed = None
+            # The bundled exporter writes time first, then an unambiguous
+            # year-first date. dayfirst=True swaps its October day/month.
+            for fmt in (
+                "%H:%M:%S %Y-%m-%d",
+                "%d/%m/%Y %H:%M:%S",
+                "%d/%m/%Y %H:%M",
+                "%d/%m/%Y",
+            ):
+                try:
+                    parsed = datetime.strptime(ts, fmt)
+                    break
+                except ValueError:
+                    pass
+            if parsed is None:
+                try:
+                    parsed = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                except ValueError:
+                    if open_time is None:
+                        raise ValueError(f"Invalid Bybit transaction timestamp: {ts}")
+            if parsed is not None:
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=brisbane)
+                else:
+                    parsed = parsed.astimezone(brisbane)
+                open_time = parsed.isoformat()
     fee=_to_float(raw.get('Fees Paid') if raw.get('Fees Paid') not in (None,'') else raw.get('execFee'))
     fee_rate=_to_float(raw.get('Trading Fee Rate') if raw.get('Trading Fee Rate') not in (None,'') else raw.get('feeRate'))
     bal=_to_float(raw.get('Final Balance (USDT)')) if str(raw.get('Final Balance (USDT)') or '').strip() else None
@@ -41080,6 +41091,17 @@ def _import_uploaded_trading_journal_file(
                         # affected-row set. A missing runtime cache row alone must
                         # not defeat the established workbook no-op path.
                         continue
+                    if is_bybit_csv:
+                        candidate = _preserve_workbook_manual_fields(candidate, existing)
+                        if isinstance(workbook_row, dict):
+                            candidate = _preserve_workbook_manual_fields(
+                                candidate,
+                                {
+                                    key: value for key, value in workbook_row.items()
+                                    if key in _JOURNAL_WORKBOOK_MANUAL_PRESERVE_FIELDS
+                                    and value not in (None, "")
+                                },
+                            )
                     merged = _merge_trading_journal_row(existing, candidate)
                     normalized_merged = _normalized_incremental_state(merged)
                     normalized_existing = _normalized_incremental_state(existing)
@@ -41344,18 +41366,31 @@ def _import_uploaded_trading_journal_file(
                 duplicate_rows_merged,
             )
             rows, replaced_oanda_legacy_ids = _prepare_oanda_canonical_replacements(previous_rows, rows)
-            rows = [
-                _preserve_workbook_manual_fields(
-                    dict(row), workbook_map[str(row.get("id") or "").strip()]
-                )
-                if (
-                    isinstance(row, dict)
-                    and str(row.get("id") or "").strip() in workbook_map
-                    and _is_authoritative_manual_statement_trade(row)
-                )
-                else row
-                for row in rows
-            ]
+            previous_map = {
+                str(item.get("id") or "").strip(): item
+                for item in rollback_rows if isinstance(item, dict)
+            }
+            preserved_rows = []
+            for row in rows:
+                if not isinstance(row, dict):
+                    preserved_rows.append(row)
+                    continue
+                row_id = str(row.get("id") or "").strip()
+                if row_id in workbook_map and _is_authoritative_manual_statement_trade(row):
+                    row = _preserve_workbook_manual_fields(dict(row), workbook_map[row_id])
+                elif is_bybit_csv:
+                    # A re-import corrects source dates while retaining fields
+                    # edited in JSON or on the existing Trade Log row.
+                    row = _preserve_workbook_manual_fields(dict(row), previous_map.get(row_id, {}))
+                    if row_id in workbook_map:
+                        workbook_manual = {
+                            key: value for key, value in workbook_map[row_id].items()
+                            if key in _JOURNAL_WORKBOOK_MANUAL_PRESERVE_FIELDS
+                            and value not in (None, "")
+                        }
+                        row = _preserve_workbook_manual_fields(row, workbook_manual)
+                preserved_rows.append(row)
+            rows = preserved_rows
             expected_survivors = sorted(
                 (set(pre_import_workbook_row_ids) - replaced_oanda_legacy_ids) | set(parsed_ids)
             )
@@ -41968,7 +42003,12 @@ def _import_uploaded_trading_journal_file(
             t4 = time.perf_counter()
             _update_trading_journal_import_status(stage="verification", message="Verifying workbook rows")
             APP_LOGGER.info("trading_journal_import_stage_start stage=verification upload=%s expected_row_ids=%s", name, len(expected_survivors))
-            verify_result = _verify_trade_log_row_ids_in_workbook(_master_journal_path(), expected_survivors)
+            verify_result = _verify_trade_log_row_ids_in_workbook(
+                _master_journal_path(), expected_survivors,
+                expected_bybit_rows=rows if is_bybit_csv else None,
+            ) if is_bybit_csv else _verify_trade_log_row_ids_in_workbook(
+                _master_journal_path(), expected_survivors
+            )
             timings["verification"] = round(time.perf_counter() - t4, 6)
             APP_LOGGER.info(
                 "trading_journal_import_stage_done stage=verification elapsed=%.6fs upload=%s found_row_ids_count=%s missing_row_ids_count=%s",
@@ -41978,7 +42018,11 @@ def _import_uploaded_trading_journal_file(
                 len((verify_result or {}).get("missing_row_ids") or []),
             )
             if not bool((verify_result or {}).get("ok")):
-                raise RuntimeError(f"Workbook verification failed after import. missing_row_ids={(verify_result or {}).get('missing_row_ids') or []}")
+                raise RuntimeError(
+                    "Workbook verification failed after import. "
+                    f"missing_row_ids={(verify_result or {}).get('missing_row_ids') or []} "
+                    f"mismatches={(verify_result or {}).get('mismatches') or []}"
+                )
             rows_persisted = True
             t5 = time.perf_counter()
             APP_LOGGER.info("trading_journal_import_stage_start stage=workbook_snapshot_verification upload=%s", name)
@@ -42300,7 +42344,10 @@ def _stream_trade_log_header_map_and_start_row(ws) -> Tuple[Dict[str, int], int]
     return header_map, data_start_row
 
 
-def _verify_trade_log_row_ids_in_workbook(workbook_path: Path, expected_row_ids: List[str]) -> Dict[str, object]:
+def _verify_trade_log_row_ids_in_workbook(
+    workbook_path: Path, expected_row_ids: List[str],
+    *, expected_bybit_rows: Optional[List[Dict[str, object]]] = None,
+) -> Dict[str, object]:
     expected = [str(x).strip() for x in (expected_row_ids or []) if str(x).strip()]
     if not workbook_path.exists():
         return {"ok": False, "expected_row_ids": expected, "found_row_ids_count": 0, "missing_row_ids": expected, "error": "Workbook does not exist."}
@@ -42326,7 +42373,67 @@ def _verify_trade_log_row_ids_in_workbook(workbook_path: Path, expected_row_ids:
         wb.close()
     found_ids = set(found)
     missing = [rid for rid in expected if rid not in found_ids]
-    return {"ok": len(missing) == 0, "expected_row_ids": expected, "found_row_ids_count": len(found), "missing_row_ids": missing}
+    result = {"ok": len(missing) == 0, "expected_row_ids": expected, "found_row_ids_count": len(found), "missing_row_ids": missing}
+    if result["ok"] and expected_bybit_rows is not None:
+        values = _verify_bybit_imported_trade_log_values(workbook_path, expected_bybit_rows)
+        result["ok"] = values["ok"]
+        result["mismatches"] = values["mismatches"]
+    return result
+
+
+def _verify_bybit_imported_trade_log_values(
+    workbook_path: Path, expected_rows: List[Dict[str, object]]
+) -> Dict[str, object]:
+    """Verify the saved Bybit trade, not only the presence of its row ID."""
+    expected = {
+        str(row.get("id") or "").strip(): row
+        for row in expected_rows
+        if isinstance(row, dict) and str(row.get("id") or "").strip()
+    }
+    mismatches: List[str] = []
+    if not expected:
+        return {"ok": False, "mismatches": ["no expected Bybit trade IDs"]}
+    wb = load_workbook(workbook_path, data_only=True, read_only=True)
+    try:
+        ws = _get_trade_log_sheet(wb, allow_legacy=False)
+        headers, first_row = _stream_trade_log_header_map_and_start_row(ws)
+        names = ("Row ID", "Account", "Symbol", "Open Time", "Close Time", "Qty", "Entry Price", "Exit Price", "Net P/L")
+        missing_headers = [name for name in names if name not in headers]
+        if missing_headers:
+            return {"ok": False, "mismatches": [f"missing columns: {missing_headers}"]}
+        seen: Dict[str, int] = defaultdict(int)
+        for cells in ws.iter_rows(min_row=first_row, values_only=True):
+            row_id = str(cells[headers["Row ID"] - 1] or "").strip()
+            if row_id not in expected:
+                continue
+            seen[row_id] += 1
+            source = expected[row_id]
+            for column, field in (("Account", "account"), ("Symbol", "symbol")):
+                actual = str(cells[headers[column] - 1] or "").strip()
+                wanted = str(source.get(field) or "").strip()
+                if actual.casefold() != wanted.casefold():
+                    mismatches.append(f"{row_id}: {column} {actual!r} != {wanted!r}")
+            for column, field in (("Open Time", "open_time"), ("Close Time", "close_time")):
+                actual = cells[headers[column] - 1]
+                wanted = datetime.fromisoformat(str(source[field])).astimezone(
+                    JOURNAL_DISPLAY_TZ
+                ).replace(tzinfo=None)
+                if actual != wanted:
+                    mismatches.append(f"{row_id}: {column} {actual!r} != {wanted!r}")
+            for column, field in (("Qty", "qty"), ("Entry Price", "entry_price"),
+                                  ("Exit Price", "exit_price"), ("Net P/L", "net_profit")):
+                actual = _to_float(cells[headers[column] - 1])
+                wanted = _to_float(source.get(field))
+                if actual is None or wanted is None or not math.isclose(
+                    actual, wanted, rel_tol=1e-12, abs_tol=1e-9
+                ):
+                    mismatches.append(f"{row_id}: {column} {actual!r} != {wanted!r}")
+        for row_id in expected:
+            if seen[row_id] != 1:
+                mismatches.append(f"{row_id}: expected one Trade Log row, found {seen[row_id]}")
+    finally:
+        wb.close()
+    return {"ok": not mismatches, "mismatches": mismatches}
 
 
 
