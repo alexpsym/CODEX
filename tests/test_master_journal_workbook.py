@@ -10739,48 +10739,48 @@ def test_loser_extrema_exclude_non_losses_clear_stale_values_and_keep_sources_co
         wb.close()
 
 
-def test_journal_decimal_text_rounds_up_with_units_and_preserves_sources():
+def test_journal_decimal_text_rounds_nearest_with_units_and_preserves_sources():
     from decimal import Decimal
 
     values = [
-        ("0.00038475834753", "0.00039%"),
+        ("0.00038475834753", "0.00038%"),
         ("4.689345", "4.69%"),
-        ("4.680001", "4.69%"),
-        ("0.000000344535", "0.00000035%"),
+        ("4.680001", "4.68%"),
+        ("0.000000344535", "0.00000034%"),
         ("-4.689345", "-4.69%"),
-        ("-0.00038475834753", "-0.00039%"),
+        ("-0.00038475834753", "-0.00038%"),
         ("4.68", "4.68%"),
         ("0", "0.00%"),
         ("0.9999", "1.00%"),
         ("0.09999", "0.100%"),
-        ("0.000000000000000000000000384", "0.00000000000000000000000039%"),
+        ("0.000000000000000000000000384", "0.00000000000000000000000038%"),
     ]
     for raw, expected in values:
         assert mjw._format_decimal_presentation(Decimal(raw), suffix="%") == expected
 
     assert mjw._format_decimal_presentation(
         Decimal("0.000038475834753"), suffix="%", excel_fraction_to_points=True
-    ) == "0.0039%"
+    ) == "0.0038%"
     assert mjw._format_decimal_presentation(Decimal("-0.25"), suffix="R") == "-0.25R"
-    assert mjw._format_stop_pct_value(Decimal("-0.00038475834753")) == "-0.00039%"
-    assert mjw._format_stop_gap_value(Decimal("0.00038475834753")) == "0.00039 pp"
-    assert mjw._format_pnl_calendar_month_cell(0.00038475834753, 2) == "0.00039%, 2 trades"
+    assert mjw._format_stop_pct_value(Decimal("-0.00038475834753")) == "-0.00038%"
+    assert mjw._format_stop_gap_value(Decimal("0.00038475834753")) == "0.00038 pp"
+    assert mjw._format_pnl_calendar_month_cell(0.00038475834753, 2) == "0.00038%, 2 trades"
     assert mjw._format_pnl_calendar_month_cell(float("nan"), 1) == ""
     assert mjw._format_inline_metric_value(None, "pct") == ""
     assert mjw._format_inline_metric_value(float("inf"), "r") == ""
     assert mjw._format_inline_metric_value(
         "0.00038475834753", "pct", {"symbol": "BTCUSDT", "date": "2026-05-02"}
-    ) == "0.00039% - BTCUSDT 2026-05-02"
+    ) == "0.00038% - BTCUSDT 2026-05-02"
     assert mjw._format_inline_metric_value(
         "-0.00038475834753", "r", {"symbol": "EURUSD", "date": "2026-05-01"}
-    ) == "-0.00039R - EURUSD 2026-05-01"
+    ) == "-0.00038R - EURUSD 2026-05-01"
     assert mjw._format_target_r_text("2") == "2.00R"
     assert mjw._target_r_bucket_label(2.0, 0.25) == "2.0R-2.25R"
     assert mjw._report_cell_value(
         {"fees": {"AUD": Decimal("1234.567"), "USDT": Decimal("0.000000344535")} },
         "fees",
         "commission",
-    ) == "AUD 1,234.57 / USDT 0.00000035"
+    ) == "AUD 1,234.57 / USDT 0.00000034"
 
     stop_observations = [
         {
@@ -10820,10 +10820,10 @@ def test_journal_decimal_text_rounds_up_with_units_and_preserves_sources():
         excluded=[],
     )
     assert "data-recommended-value=\"4.680001\"" in stop_html
-    assert "Recommended 4.69%" in stop_html
-    assert "0.00039%" in stop_html and "0.00000035%" in stop_html
-    assert "EURUSD 2026-05-01 tiny-stop: 0.00039% — winner" in stop_html
-    assert "<td>0.00000035%</td>" in stop_html
+    assert "Recommended 4.68%" in stop_html
+    assert "0.00038%" in stop_html and "0.00000034%" in stop_html
+    assert "EURUSD 2026-05-01 tiny-stop: 0.00038% — winner" in stop_html
+    assert "<td>0.00000034%</td>" in stop_html
     assert stop_observations == raw_observations
     assert stop_payload == raw_payload
 
@@ -10855,6 +10855,27 @@ def test_journal_decimal_text_rounds_up_with_units_and_preserves_sources():
     assert "ETHUSDT 2026-05-03 target: 0.100R — winner" in target_html
     assert "0.00R-0.25R" in target_html
     assert list(target_payload["target_r_distribution"]) == ["0.0R-0.25R"]
+
+
+def test_journal_numeric_formats_use_display_units_without_changing_values():
+    from decimal import Decimal
+
+    workbook = Workbook()
+    sheet = workbook.active
+    cases = (
+        ("pct", Decimal("0.0000038475834753"), "0.00000%"),
+        ("pct", Decimal("0.00000000344535"), "0.00000000%"),
+        ("pct", Decimal("0.04680001"), "0.00%"),
+        ("r", Decimal("0.00038475834753"), '0.00000"R"'),
+        ("commission", Decimal("0.000000344535"), '#,##0.00000000 "USDT"'),
+    )
+    for index, (kind, original, expected_format) in enumerate(cases, 1):
+        cell = sheet.cell(index, 1, original)
+        mjw._apply_semantic_metric_policy(cell, kind=kind, currency="USDT")
+        assert cell.value == original
+        assert cell.number_format == expected_format
+    assert mjw.adaptive_percent_number_format(Decimal("0.00000000000000000000000000344535")) == "0.0E+00%"
+    assert mjw.adaptive_number_format(Decimal("0.000000000000000000000000344535")) == "0.0E+00"
 
 
 def test_journal_decimal_text_refresh_preserves_numbers_formulas_balances_and_layout(
@@ -10903,7 +10924,7 @@ def test_journal_decimal_text_refresh_preserves_numbers_formulas_balances_and_la
         assert STATS1_SHEET in preparation_wb.sheetnames
         assert "Trade Log" in preparation_wb.sheetnames
         assert any(
-            cell.value == "0.00039% - EURUSD 2026-05-01"
+            cell.value == "0.00038% - EURUSD 2026-05-01"
             for ws in preparation_wb.worksheets
             for cell in ws._cells.values()
         )
@@ -10934,12 +10955,12 @@ def test_journal_decimal_text_refresh_preserves_numbers_formulas_balances_and_la
         for ws in wb.worksheets
         for cell in ws._cells.values()
         if isinstance(cell.value, str)
-        and cell.value.startswith("0.00039%")
+        and cell.value.startswith("0.00038%")
         and cell.value.endswith(source_suffix)
     ]
     assert source_text_cells
     source_sheet, source_coordinate, source_text = source_text_cells[0]
-    wb[source_sheet][source_coordinate] = "0.00%" + source_text[len("0.00039%"):]
+    wb[source_sheet][source_coordinate] = "0.00%" + source_text[len("0.00038%"):]
     wb["P&L Calendar"]["B6"] = "0.00%, 1 trade"
     wb.save(path)
     wb.close()
@@ -11053,7 +11074,7 @@ def test_journal_decimal_text_refresh_preserves_numbers_formulas_balances_and_la
         candidate = Path(result["candidate_path"])
         captured = capture(candidate)
         assert captured[5] == (formula, 2.5)
-        assert captured[10] == "0.00039% - EURUSD 2026-05-01"
+        assert captured[10] == "0.00038% - EURUSD 2026-05-01"
         candidate.replace(path)
         print(f"preservation refresh: {time.perf_counter() - refresh_started:.2f}s")
         return captured
@@ -11068,15 +11089,15 @@ def test_journal_decimal_text_refresh_preserves_numbers_formulas_balances_and_la
         assert refreshed[3] == initial[3]
         assert refreshed[4] == initial[4]
         assert refreshed[5] == (formula, 2.5)
-        assert refreshed[6] == "0.00039%, 1 trade"
+        assert refreshed[6] == "0.00038%, 1 trade"
         assert refreshed[7] == initial[7]
         assert refreshed[8] == initial[8]
         assert refreshed[9] == initial[9]
-        assert refreshed[10] == "0.00039% - EURUSD 2026-05-01"
+        assert refreshed[10] == "0.00038% - EURUSD 2026-05-01"
     refreshed_wb = load_workbook(path, data_only=False)
     try:
         assert refreshed_wb[source_sheet][source_coordinate].value == (
-            "0.00039% - EURUSD 2026-05-01"
+            "0.00038% - EURUSD 2026-05-01"
         )
     finally:
         refreshed_wb.close()

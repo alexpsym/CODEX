@@ -38831,7 +38831,7 @@ def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, e
             raise
         _finish_substage(stage, outcome=success_outcome)
         return result
-    for _stage in ("snapshot_build", "manual_override_read", "row_normalization", "statistics_recomputation", "snapshot_shrink_validation", "trade_number_assignment", "update_master_journal_workbook_data_only", "workbook_validation_load", "validation_trade_log", "validation_instrument_averages", "validation_calendar", "validation_reports", "validation_dashboard_balances", "validation_leaders", "final_replace", "enforce_single_file", "github_sync"):
+    for _stage in ("snapshot_build", "manual_override_read", "row_normalization", "statistics_recomputation", "snapshot_shrink_validation", "trade_number_assignment", "update_master_journal_workbook_data_only", "workbook_validation_load", "validation_trade_log", "validation_instrument_averages", "validation_calendar", "validation_reports", "validation_dashboard_balances", "validation_leaders", "recommendation_preflight", "final_replace", "enforce_single_file", "github_sync"):
         substage_timings.setdefault(_stage, 0.0)
     try:
         if _master_journal_single_file_mode():
@@ -39459,6 +39459,24 @@ def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, e
         finally:
             wb.close()
 
+        from tools.master_journal_workbook import (
+            _prepare_recommendation_chart_bundle,
+            _publish_recommendation_chart_bundle,
+        )
+        _start_substage("recommendation_preflight")
+        recommendation_chart_bundle = _prepare_recommendation_chart_bundle(source_items, path)
+        recommendation_preflight = _fast_verify_trading_journal_workbook(
+            validate_path,
+            expected_snapshot=snapshot,
+            recommendation_bundle=recommendation_chart_bundle,
+        )
+        if not recommendation_preflight.get("ok"):
+            raise RuntimeError(
+                "Trading Journal candidate verification failed before publication: "
+                + str(recommendation_preflight.get("error") or "unknown error")
+                + "; diagnostics=" + str(recommendation_preflight.get("diagnostics") or {})
+            )
+        _finish_substage("recommendation_preflight")
         if created_tmp:
             lock_status = _master_journal_lock_status(path)
             if lock_status.get("locked"):
@@ -39482,14 +39500,6 @@ def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, e
             if not enforce_post.get("ok"):
                 raise RuntimeError("Unknown extra Excel files in journal directory after workbook sync: " + ", ".join(enforce_post.get("unknown_extra_excel_files") or []) + ". Move legacy backups outside journal/. Keep only journal/Trading Journal.xlsx.")
         _finish_substage("enforce_single_file")
-        from tools.master_journal_workbook import (
-            _prepare_recommendation_chart_bundle,
-            _publish_recommendation_chart_bundle,
-        )
-        recommendation_chart_bundle = _prepare_recommendation_chart_bundle(
-            source_items,
-            path,
-        )
         recommendation_chart_asset_directory = (
             _publish_recommendation_chart_bundle(recommendation_chart_bundle)
         )
@@ -42752,7 +42762,7 @@ def _save_resync_success_metadata(path: Path, fingerprint: Dict[str, object], sn
     _save_json_file(TRADING_JOURNAL_RESYNC_CACHE_PATH, meta)
 
 
-def _fast_verify_trading_journal_workbook(path: Path, *, expected_snapshot: Optional[Dict[str, object]] = None) -> Dict[str, object]:
+def _fast_verify_trading_journal_workbook(path: Path, *, expected_snapshot: Optional[Dict[str, object]] = None, recommendation_bundle: Optional[Dict[str, object]] = None) -> Dict[str, object]:
     diagnostics: Dict[str, object] = {
         "checked_accounts": [],
         "formula_error_cells": [],
@@ -42954,23 +42964,30 @@ def _fast_verify_trading_journal_workbook(path: Path, *, expected_snapshot: Opti
         symbol_col = symbol_headers.get("Symbol", 1)
         symbol_format_mismatches: List[Dict[str, object]] = []
         required_symbol_formats = {
-            "Net R Multiple": '0.000"R"',
-            "Net P/L %": "0.00%",
-            "Avg P/L %": "0.00%",
-            "Win Rate %": "0.00%",
-            "Avg stop % (W)": "0.00%",
-            "Avg stop % (L)": "0.00%",
-            "Avg target % (W)": "0.00%",
-            "Avg target % (L)": "0.00%",
+            "Net R Multiple": "r",
+            "Net P/L %": "pct",
+            "Avg P/L %": "pct",
+            "Win Rate %": "pct",
+            "Avg stop % (W)": "pct",
+            "Avg stop % (L)": "pct",
+            "Avg target % (W)": "pct",
+            "Avg target % (L)": "pct",
         }
+        from tools.master_journal_workbook import adaptive_number_format, adaptive_percent_number_format
         for row_number in range(INSTRUMENT_AVERAGES_DATA_START_ROW, inst.max_row + 1):
             if inst.cell(row_number, symbol_col).value in (None, ""):
                 continue
-            for header, expected_format in required_symbol_formats.items():
+            for header, format_kind in required_symbol_formats.items():
                 col_number = symbol_headers.get(header)
                 if not col_number:
                     continue
-                actual_format = str(inst.cell(row_number, col_number).number_format or "")
+                symbol_cell = inst.cell(row_number, col_number)
+                expected_format = (
+                    adaptive_percent_number_format(symbol_cell.value)
+                    if format_kind == "pct"
+                    else adaptive_number_format(symbol_cell.value) + '"R"'
+                )
+                actual_format = str(symbol_cell.number_format or "")
                 if actual_format != expected_format:
                     symbol_format_mismatches.append(
                         {
@@ -43015,10 +43032,22 @@ def _fast_verify_trading_journal_workbook(path: Path, *, expected_snapshot: Opti
                 artifact.relative_to(path.parent.resolve())
             except ValueError:
                 return {"ok": False, "error": "recommendation_hyperlink_outside_workbook_tree", "diagnostics": diagnostics}
-            if not artifact.is_file():
+            bundle_files = recommendation_bundle.get("files") if recommendation_bundle else None
+            bundle_links = recommendation_bundle.get("links") if recommendation_bundle else None
+            bundled_text = None
+            if isinstance(bundle_files, dict) and isinstance(bundle_links, dict):
+                if target in bundle_links.values() and artifact.name in bundle_files:
+                    canonical = Path(recommendation_bundle["workbook_path"])
+                    expected_artifact = (canonical.parent / f"{canonical.stem}.assets" / "recommendations" / artifact.name).resolve()
+                    if artifact == expected_artifact:
+                        bundled_text = str(bundle_files[artifact.name])
+            if bundled_text is None and recommendation_bundle is not None:
                 diagnostics["missing_recommendation_artifact"] = str(artifact)
                 return {"ok": False, "error": "recommendation_artifact_missing", "diagnostics": diagnostics}
-            html_text = artifact.read_text(encoding="utf-8")
+            if bundled_text is None and not artifact.is_file():
+                diagnostics["missing_recommendation_artifact"] = str(artifact)
+                return {"ok": False, "error": "recommendation_artifact_missing", "diagnostics": diagnostics}
+            html_text = bundled_text if bundled_text is not None else artifact.read_text(encoding="utf-8")
             html_lower = html_text.casefold()
             if (
                 "<svg" not in html_lower

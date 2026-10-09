@@ -4633,6 +4633,134 @@ def test_fast_verifier_accepts_full_precision_markers_for_every_recommendation_l
     assert verification["ok"] is True, verification
 
 
+def test_candidate_bundle_accepts_nearest_marker_before_publication(
+    fast_verifier_workbook_fixture, tmp_path,
+):
+    from tools.master_journal_workbook import (
+        _prepare_recommendation_chart_bundle,
+        _publish_recommendation_chart_bundle,
+    )
+
+    fixture = fast_verifier_workbook_fixture
+    ms = fixture["ms"]
+    final_path = tmp_path / "Trading Journal.xlsx"
+    candidate = tmp_path / "Trading Journal.update-candidate.tmp.xlsx"
+    shutil.copy2(fixture["path"], candidate)
+    bundle = _prepare_recommendation_chart_bundle(fixture["snapshot"]["items"], final_path)
+    wb = load_workbook(candidate)
+    cells = [
+        cell for ws in wb.worksheets for row in ws.iter_rows() for cell in row
+        if cell.hyperlink and "-stop.html" in str(cell.hyperlink.target or "")
+        and "Recommended:" in str(cell.value or "")
+    ]
+    assert cells
+    cell = cells[0]
+    original = str(cell.value)
+    cell.value = re.sub(r"(Recommended:\s*)[-+]?\d+(?:\.\d+)?", r"\g<1>0.66", original, count=1)
+    target = str(cell.hyperlink.target)
+    wb.save(candidate)
+    wb.close()
+    filename = Path(unquote(target)).name
+    html_text = bundle["files"][filename]
+    html_text = re.sub(r'data-recommended-value="[^"]+"', 'data-recommended-value="0.6619274857"', html_text, count=1)
+    html_text = re.sub(
+        r"(Workbook recommendation</strong>\s*<p>).*?(</p>)",
+        lambda match: match.group(1) + str(cell.value) + match.group(2),
+        html_text, count=1, flags=re.IGNORECASE | re.DOTALL,
+    )
+    bundle["files"][filename] = html_text
+    accepted = ms._fast_verify_trading_journal_workbook(
+        candidate, expected_snapshot=fixture["snapshot"], recommendation_bundle=bundle,
+    )
+    assert accepted["ok"] is True, accepted
+    assert not final_path.exists()
+    assert not (tmp_path / "Trading Journal.assets").exists()
+
+    candidate.replace(final_path)
+    _publish_recommendation_chart_bundle(bundle)
+    published = ms._fast_verify_trading_journal_workbook(final_path, expected_snapshot=fixture["snapshot"])
+    assert published["ok"] is True, published
+    artifact = tmp_path / Path(unquote(target))
+    artifact.write_text(
+        artifact.read_text(encoding="utf-8").replace('data-recommended-value="0.6619274857"', 'data-recommended-value="0.6651"', 1),
+        encoding="utf-8",
+    )
+    rejected = ms._fast_verify_trading_journal_workbook(final_path, expected_snapshot=fixture["snapshot"])
+    assert rejected["ok"] is False
+    assert rejected["error"] == "recommendation_artifact_content_mismatch"
+
+
+def test_candidate_recommendation_mismatch_rejects_before_replace_or_sync(
+    fast_verifier_workbook_fixture, monkeypatch, tmp_path,
+):
+    fixture = fast_verifier_workbook_fixture
+    ms = fixture["ms"]
+    workbook_path = _copy_fast_verifier_workbook(fixture, tmp_path)
+    original_bytes = workbook_path.read_bytes()
+    original_assets = {
+        path.name: path.read_bytes()
+        for path in (tmp_path / "Trading Journal.assets" / "recommendations").glob("*.html")
+    }
+    assert original_assets
+    monkeypatch.setattr(ms, "_master_journal_path", lambda: workbook_path)
+    monkeypatch.setattr(ms, "_master_journal_single_file_mode", lambda: False)
+    monkeypatch.setattr(ms, "TRADING_JOURNAL_LOCAL_DIR", tmp_path)
+    monkeypatch.setattr(ms, "assign_trade_numbers_and_create_folders", lambda *_a, **_k: {})
+    monkeypatch.setattr(ms, "_master_journal_lock_status", lambda _path: {"locked": False})
+    monkeypatch.setattr(ms, "_sync_journal_excel_files_to_github", lambda *_a: (_ for _ in ()).throw(AssertionError("must not sync")))
+    original_verify = ms._fast_verify_trading_journal_workbook
+
+    def reject_candidate(path, **kwargs):
+        if kwargs.get("recommendation_bundle") is not None:
+            return {"ok": False, "error": "recommendation_artifact_content_mismatch", "diagnostics": {"test": "candidate mismatch"}}
+        return original_verify(path, **kwargs)
+
+    monkeypatch.setattr(ms, "_fast_verify_trading_journal_workbook", reject_candidate)
+    result = ms._sync_master_journal_workbook_unlocked(
+        prebuilt_snapshot=fixture["snapshot"], sync_caller="resync", sync_id="synthetic-candidate-reject",
+    )
+    assert result["ok"] is False, result
+    assert "recommendation_artifact_content_mismatch" in str(result)
+    assert workbook_path.read_bytes() == original_bytes
+    assert {
+        path.name: path.read_bytes()
+        for path in (tmp_path / "Trading Journal.assets" / "recommendations").glob("*.html")
+    } == original_assets
+
+
+def test_resync_publishes_verified_candidate_then_uses_fast_fingerprint(
+    fast_verifier_workbook_fixture, monkeypatch, tmp_path,
+):
+    import tools.master_journal_workbook as journal_module
+
+    fixture = fast_verifier_workbook_fixture
+    ms = fixture["ms"]
+    monkeypatch.setattr(journal_module, "REPORT_START_YEAR", 2026)
+    monkeypatch.setattr(journal_module, "REPORT_MIN_END_YEAR", 2026)
+    workbook_path = tmp_path / "Trading Journal.xlsx"
+    journal_module.build_master_journal_workbook(fixture["snapshot"], workbook_path)
+    monkeypatch.setattr(ms, "_master_journal_path", lambda: workbook_path)
+    monkeypatch.setattr(ms, "_master_journal_single_file_mode", lambda: False)
+    monkeypatch.setattr(ms, "TRADING_JOURNAL_LOCAL_DIR", tmp_path)
+    monkeypatch.setattr(ms, "TRADING_JOURNAL_RESYNC_CACHE_PATH", tmp_path / "resync-cache.json")
+    monkeypatch.setattr(ms, "_master_journal_lock_status", lambda _path: {"locked": False})
+    monkeypatch.setattr(ms, "_journal_source_fingerprint", lambda: {"fixture": "unchanged"})
+    monkeypatch.setattr(ms, "_build_trading_journal_view_snapshot", lambda **_k: fixture["snapshot"])
+    monkeypatch.setattr(ms, "assign_trade_numbers_and_create_folders", lambda *_a, **_k: {})
+    monkeypatch.setattr(ms, "_sync_journal_excel_files_to_github", lambda *_a: (_ for _ in ()).throw(AssertionError("external GitHub sync is excluded")))
+    ms.TRADING_JOURNAL_RESYNC_LAST_SUCCESS.update({"fingerprint": None, "snapshot": None, "workbook_path": "", "verified_at": None})
+
+    first = ms._run_trading_journal_resync()
+    assert first["ok"] is True, first
+    assert first["snapshot_build_ran"] is True
+    assert first["master_journal_diagnostics"]["workbook_sync_substage_timings"]["recommendation_preflight"] >= 0
+    assert first["fast_verification"]["ok"] is True
+    second = ms._run_trading_journal_resync()
+    assert second["ok"] is True, second
+    assert second["snapshot_build_ran"] is False
+    assert second["fast_path_reason"] == "memory_fingerprint_match"
+
+
 def test_fast_verifier_rejects_marker_outside_half_display_unit(
     fast_verifier_workbook_fixture,
     tmp_path,

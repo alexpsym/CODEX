@@ -1,7 +1,7 @@
 from __future__ import annotations
 from collections import Counter, defaultdict, OrderedDict
 from datetime import datetime, date, timedelta
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP, ROUND_UP, localcontext
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP, localcontext
 from pathlib import Path
 from typing import Any, Collection, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 from openpyxl import Workbook, load_workbook
@@ -440,7 +440,11 @@ def _semantic_metric_number_format(
     if isinstance(value, str) and value:
         return "General"
     if kind == "commission":
-        return _currency_number_format(currency) if currency else "General"
+        return _adaptive_currency_number_format(value, currency) if currency else "General"
+    if kind == "pct":
+        return adaptive_percent_number_format(value)
+    if kind == "r":
+        return adaptive_number_format(value) + '"R"'
     return SEMANTIC_FORMAT_POLICY.get(kind, "General") or "General"
 
 
@@ -1661,7 +1665,7 @@ def _format_decimal_presentation(
     suffix: str = "",
     excel_fraction_to_points: bool = False,
 ) -> str:
-    """Format an existing text display away from zero without changing its input."""
+    """Round a generated text display to the selected readable precision."""
     decimal_value = _decimal_from_value(value)
     if decimal_value is None:
         return ""
@@ -1678,7 +1682,7 @@ def _format_decimal_presentation(
         digits = len(magnitude.as_tuple().digits)
         integer_places = max(0, magnitude.adjusted() + 1)
         context.prec = max(context.prec, digits + places + integer_places + 8)
-        rounded = magnitude.quantize(quantum, rounding=ROUND_UP)
+        rounded = magnitude.quantize(quantum, rounding=ROUND_HALF_UP)
     rendered = f"{rounded:.{places}f}"
     if decimal_value.is_signed():
         rendered = f"-{rendered}"
@@ -4907,23 +4911,34 @@ def _merge_metric_buckets(*buckets: Dict[str, Any] | None) -> Dict[str, Any]:
 
 
 def adaptive_percent_number_format(value: Any, *, max_decimals: int = 12) -> str:
-    number = _as_float(value)
-    if number is None or number == 0:
-        return "0.00%"
-    for decimals in range(2, max_decimals + 1):
-        if round(abs(number) * 100.0, decimals) != 0:
-            return "0." + ("0" * decimals) + "%"
-    return "0." + ("0" * max_decimals) + "%"
+    return _adaptive_excel_number_format(value, percent=True, max_decimals=max_decimals)
 
 
 def adaptive_number_format(value: Any, *, max_decimals: int = 12) -> str:
-    number = _as_float(value)
-    if number is None or number == 0:
-        return "0.00"
-    for decimals in range(2, max_decimals + 1):
-        if round(abs(number), decimals) != 0:
-            return "0." + ("0" * decimals)
-    return "0." + ("0" * max_decimals)
+    return _adaptive_excel_number_format(value, percent=False, max_decimals=max_decimals)
+
+
+def _adaptive_excel_number_format(value: Any, *, percent: bool, max_decimals: int = 12) -> str:
+    """Select a bounded Excel format in the displayed unit; leave value untouched."""
+    number = _decimal_from_value(value)
+    suffix = "%" if percent else ""
+    if number is None or number.is_zero():
+        return "0.00" + suffix
+    displayed = abs(number) * (Decimal(100) if percent else Decimal(1))
+    places = max(2, 1 - displayed.adjusted())
+    if places > max_decimals:
+        return "0.0E+00" + suffix
+    return "0." + "0" * places + suffix
+
+
+def _adaptive_currency_number_format(value: Any, currency: str | None) -> str:
+    code = _currency_code(currency)
+    if not code:
+        return "General"
+    basic = adaptive_number_format(value)
+    if "E+" in basic:
+        return f'{basic} "{code}"'
+    return f'#,##{basic} "{code}"'
 
 
 def _trade_number_aliases(trade_number: Any) -> List[str]:
@@ -7307,20 +7322,23 @@ def _repair_trade_log_move_to_durations(ws, diagnostics: Dict[str, Any] | None =
 
 def _apply_trade_log_adaptive_formats(ws) -> None:
     headers = _trade_log_header_map(ws)
-    profit_col = headers.get("Profit %")
-    r_col = headers.get("R-Multiple")
     trade_duration_col = headers.get("Trade Duration (DD:HH:MM:SS)")
     move_duration_cols = [
         headers.get("Move to Break Even Duration"),
         headers.get("Move to Profit Duration"),
     ]
     for row in range(_trade_log_data_start_row(ws), ws.max_row + 1):
-        if profit_col:
-            cell = ws.cell(row, profit_col)
-            cell.number_format = adaptive_percent_number_format(cell.value)
-        if r_col:
-            cell = ws.cell(row, r_col)
+        for header in ("Profit %", "Stop Loss Distance", "Target Distance", "Move to Break Even Distance From Entry %", "Move to Break Even Distance From Exit %", "Move to Profit Distance From Entry %", "Move to Profit Distance From Exit %"):
+            if headers.get(header):
+                cell = ws.cell(row, headers[header])
+                cell.number_format = adaptive_percent_number_format(cell.value)
+        if headers.get("R-Multiple"):
+            cell = ws.cell(row, headers["R-Multiple"])
             cell.number_format = adaptive_number_format(cell.value)
+        for header in ("Qty", "Entry Price", "Exit Price", "Stop Loss Price", "Target Price", "Move to Break Even Trigger Price", "Move to Profit Trigger Price"):
+            if headers.get(header):
+                cell = ws.cell(row, headers[header])
+                cell.number_format = adaptive_number_format(cell.value)
         if trade_duration_col:
             cell = ws.cell(row, trade_duration_col)
             if cell.value not in (None, ""):
@@ -8202,10 +8220,11 @@ def _normalize_symbols_performance_formatting(ws) -> None:
             continue
         if net_r_col:
             cell = ws.cell(row, net_r_col)
-            cell.number_format = '0.000"R"'
+            cell.number_format = adaptive_number_format(cell.value) + '"R"'
             _apply_sign_based_full_cell_fill(cell)
         for col in percentage_cols:
-            ws.cell(row, col).number_format = "0.00%"
+            cell = ws.cell(row, col)
+            cell.number_format = adaptive_percent_number_format(cell.value)
         for col in signed_pct_cols:
             _apply_sign_based_full_cell_fill(ws.cell(row, col))
 
@@ -10357,15 +10376,20 @@ def _apply_trade_log_row_number_formats(
     pnl_currency = _infer_trade_log_currency(dict(row), field="net_pnl")
     balance_currency = _infer_trade_log_currency(dict(row), field="balance_after")
     set_format(TRADE_NUMBER_HEADER, "@")
-    set_format("Qty", "#,##0.##########")
+    for header in ("Qty", "Entry Price", "Exit Price", "Stop Loss Price", "Target Price", "Move to Break Even Trigger Price", "Move to Profit Trigger Price"):
+        col = headers.get(header)
+        if col:
+            set_format(header, adaptive_number_format(ws.cell(row_idx, col).value))
     set_format("Open Time", "yyyy-mm-dd hh:mm:ss")
     set_format("Close Time", "yyyy-mm-dd hh:mm:ss")
-    set_format("Stop Loss Distance", "0.00%")
-    set_format("Target Distance", "0.00%")
-    if commission_currency:
-        set_format("Commission", _currency_number_format(commission_currency))
-    if pnl_currency:
-        set_format("Net P/L", _currency_number_format(pnl_currency))
+    for header in ("Stop Loss Distance", "Target Distance"):
+        col = headers.get(header)
+        if col:
+            set_format(header, adaptive_percent_number_format(ws.cell(row_idx, col).value))
+    if commission_currency and headers.get("Commission"):
+        set_format("Commission", _adaptive_currency_number_format(ws.cell(row_idx, headers["Commission"]).value, commission_currency))
+    if pnl_currency and headers.get("Net P/L"):
+        set_format("Net P/L", _adaptive_currency_number_format(ws.cell(row_idx, headers["Net P/L"]).value, pnl_currency))
     profit_col = headers.get("Profit %")
     if profit_col:
         set_format("Profit %", adaptive_percent_number_format(ws.cell(row_idx, profit_col).value))
@@ -10388,7 +10412,9 @@ def _apply_trade_log_row_number_formats(
         "Move to Profit Distance From Entry %",
         "Move to Profit Distance From Exit %",
     ):
-        set_format(header, "0.00%")
+        col = headers.get(header)
+        if col:
+            set_format(header, adaptive_percent_number_format(ws.cell(row_idx, col).value))
     for header in (STOP_RECOMMENDATION_HEADER, TARGET_RECOMMENDATION_HEADER):
         col = headers.get(header)
         if col:
@@ -10755,7 +10781,7 @@ def build_master_journal_workbook(
         detail.cell(target_row, 3, currency)
         risk_payload = risk_of_ruin.get(account_label) or _empty_risk_of_ruin_payload("no_usable_trade_history")
         detail.cell(target_row, 4, risk_payload.get("risk_of_ruin"))
-        detail.cell(target_row, 4).number_format = "0.00%"
+        detail.cell(target_row, 4).number_format = adaptive_percent_number_format(detail.cell(target_row, 4).value)
         detail.cell(target_row, 4).comment = Comment(_risk_of_ruin_comment_text(risk_payload), "Codex")
         net_pct = account_net_pct.get(account_label)
         if net_pct is not None and _stats2_net_pl_percentage_is_applicable(account_label):
@@ -15398,6 +15424,12 @@ def _repair_stats2_account_balance_formatting(ws, diagnostics: Dict[str, Any] | 
         _apply_stats2_net_pl_percentage_conditional_formatting(
             ws, header_row, section, col_map["net_pl_percentage"]
         )
+    if "risk_of_ruin" in col_map:
+        for row in range(header_row + 1, section["end_row"] + 1):
+            if account_col and not str(ws.cell(row, account_col).value or "").strip():
+                continue
+            cell = ws.cell(row, col_map["risk_of_ruin"])
+            cell.number_format = adaptive_percent_number_format(cell.value)
     if diagnostics is not None:
         diagnostics["repaired_stats2_account_balance_formatting"] = True
 
