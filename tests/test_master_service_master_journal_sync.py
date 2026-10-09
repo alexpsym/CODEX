@@ -9,6 +9,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 from urllib.parse import unquote
 import pytest
 from openpyxl import Workbook
@@ -1943,6 +1944,7 @@ def test_github_sync_stages_only_target_file(monkeypatch, tmp_path):
         lambda *_a, **_k: [master, state_backup],
     )
     commands = []
+    state = {"added": False}
 
     def fake_git(args, _cwd, _timeout):
         commands.append(args)
@@ -1951,12 +1953,19 @@ def test_github_sync_stages_only_target_file(monkeypatch, tmp_path):
         if args[:2] == ["ls-files", "-z"]:
             return 0, "journal/Trading Journal.xlsx\0", ""
         if args and args[0] == "status":
-            return 0, " M journal/Trading Journal.xlsx\n", ""
+            return 0, "" if state["added"] else " M journal/Trading Journal.xlsx\n", ""
         if args[:2] == ["rev-parse", "--abbrev-ref"]:
             return 0, "main\n", ""
         if args[:3] == ["remote", "get-url", "origin"]:
             return 0, "x\n", ""
+        if args == ["rev-parse", "HEAD"]:
+            return 0, "abc123\n", ""
+        if args[:2] == ["ls-remote", "--heads"]:
+            return 0, "abc123\trefs/heads/main\n", ""
         if args[:2] == ["diff", "--cached"]:
+            return 0, "", ""
+        if args and args[0] == "add":
+            state["added"] = True
             return 0, "", ""
         return 0, "", ""
 
@@ -2003,6 +2012,7 @@ def test_github_sync_stages_recommendation_assets_and_tracked_deletions(
         )
     ) + "\0"
     commands = []
+    head = {"sha": "before"}
 
     def fake_git(args, _cwd, _timeout):
         commands.append(args)
@@ -2016,8 +2026,15 @@ def test_github_sync_stages_recommendation_assets_and_tracked_deletions(
             return 0, "main\n", ""
         if args[:3] == ["remote", "get-url", "origin"]:
             return 0, "x\n", ""
+        if args == ["rev-parse", "HEAD"]:
+            return 0, head["sha"] + "\n", ""
+        if args[:2] == ["ls-remote", "--heads"]:
+            return 0, head["sha"] + "\trefs/heads/main\n", ""
         if args[:2] == ["diff", "--cached"]:
             return 1, "", ""
+        if args and args[0] == "commit":
+            head["sha"] = "after"
+            return 0, "", ""
         if args[:2] == ["rev-parse", "--short"]:
             return 0, "abc123\n", ""
         return 0, "", ""
@@ -2199,6 +2216,237 @@ def test_github_sync_real_repo_without_eligible_diff_is_successful_noop(
 
 
 @pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
+def test_manual_save_defers_during_import_verification_and_rollback(tmp_path, monkeypatch):
+    workbook = tmp_path / 'Trading Journal.xlsx'
+    workbook.write_bytes(b'previous verified workbook')
+    master_service._manual_save_set_known_fingerprint(workbook)
+    monkeypatch.setattr(master_service, '_manual_save_watcher_debounce_seconds', lambda: 0.2)
+    published = []
+    monkeypatch.setattr(
+        master_service, '_sync_journal_excel_files_to_github',
+        lambda path: published.append(path.read_bytes()) or {
+            'github_sync_enabled': True, 'github_sync_ok': True,
+            'github_sync_noop': False, 'github_sync_verified': True,
+            'github_sync_error': '', 'github_sync_files': [], 'github_sync_commit': 'fixture',
+        },
+    )
+    owner_ready = threading.Event()
+    start_rollback = threading.Event()
+    rollback_written = threading.Event()
+    release_owner = threading.Event()
+    owner_errors = []
+
+    def import_owner():
+        rejected = master_service._reserve_master_journal_workbook_sync(
+            workbook, 'fixture-import', 'manual_import_transaction',
+        )
+        if rejected is not None:
+            owner_errors.append(rejected)
+            owner_ready.set()
+            return
+        try:
+            workbook.write_bytes(b'unverified import candidate')
+            owner_ready.set()
+            if not start_rollback.wait(5):
+                owner_errors.append('rollback signal missed')
+                return
+            workbook.write_bytes(b'restored pending manual save')
+            rollback_written.set()
+            if not release_owner.wait(5):
+                owner_errors.append('release signal missed')
+        finally:
+            master_service._release_master_journal_workbook_sync()
+
+    owner = threading.Thread(target=import_owner, name='fixture-import-owner')
+    owner.start()
+    try:
+        assert owner_ready.wait(5)
+        assert not owner_errors
+        master_service._manual_save_scan_once(10.0, workbook)
+        master_service._manual_save_scan_once(11.0, workbook)
+        assert published == []
+        assert master_service._manual_save_state_snapshot()['manual_save_pending'] is True
+        start_rollback.set()
+        assert rollback_written.wait(5)
+        master_service._manual_save_scan_once(12.0, workbook)
+        master_service._manual_save_scan_once(13.0, workbook)
+        assert published == []
+        assert master_service._manual_save_state_snapshot()['manual_save_pending'] is True
+    finally:
+        release_owner.set()
+        owner.join(timeout=5)
+    assert not owner.is_alive() and not owner_errors
+    master_service._manual_save_scan_once(14.0, workbook)
+    assert published == [b'restored pending manual save']
+    assert master_service._manual_save_state_snapshot()['manual_save_pending'] is False
+
+    # A service-owned write that was verified by its own Git transaction is known.
+    assert master_service._reserve_master_journal_workbook_sync(workbook, 'fixture-service', 'manual_import_transaction') is None
+    try:
+        workbook.write_bytes(b'verified service workbook')
+        assert master_service._manual_save_set_known_fingerprint(workbook)
+    finally:
+        master_service._release_master_journal_workbook_sync()
+    master_service._manual_save_scan_once(20.0, workbook)
+    assert published == [b'restored pending manual save']
+
+
+@pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
+def test_journal_transaction_os_lock_coordinates_separate_processes(tmp_path):
+    workbook = tmp_path / 'Trading Journal.xlsx'
+    workbook.write_bytes(b'fixture workbook')
+    lock_path = master_service._journal_transaction_lock_path(workbook)
+    child_code = (
+        "import os,sys\n"
+        "p=sys.argv[1]; f=open(p,'a+b'); f.seek(0,2)\n"
+        "if f.tell()==0: f.write(b'\\0'); f.flush()\n"
+        "f.seek(0)\n"
+        "if os.name=='nt':\n"
+        " import msvcrt; msvcrt.locking(f.fileno(),msvcrt.LK_NBLCK,1)\n"
+        "else:\n"
+        " import fcntl; fcntl.flock(f.fileno(),fcntl.LOCK_EX|fcntl.LOCK_NB)\n"
+        "print('LOCKED',flush=True); sys.stdin.readline(); f.close()\n"
+    )
+    child = subprocess.Popen(
+        [sys.executable, '-u', '-c', child_code, str(lock_path)],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    try:
+        assert child.stdout.readline().strip() == 'LOCKED'
+        rejected = master_service._reserve_master_journal_workbook_sync(
+            workbook, 'second-worker', 'manual_save_watcher',
+        )
+        assert rejected is not None and rejected['code'] == 'MASTER_JOURNAL_SYNC_IN_PROGRESS'
+    finally:
+        child.stdin.write('\n')
+        child.stdin.flush()
+        child.communicate(timeout=5)
+    assert child.returncode == 0
+    assert master_service._reserve_master_journal_workbook_sync(workbook, 'after-worker', 'manual_save_watcher') is None
+    master_service._release_master_journal_workbook_sync()
+
+
+@pytest.mark.skipif(not HTTPX_AVAILABLE or shutil.which('git') is None, reason='httpx and git are required')
+def test_journal_git_sync_serializes_two_callers_without_interleaving(tmp_path, monkeypatch):
+    fixture = _build_temp_journal_git_repo(tmp_path, change_master=True)
+    repo, workbook = fixture['repo'], fixture['master']
+    monkeypatch.setenv('TRADING_JOURNAL_GITHUB_SYNC_ENABLED', '1')
+    monkeypatch.setenv('TRADING_JOURNAL_GITHUB_SYNC_BRANCH', 'main')
+    monkeypatch.setenv('TRADING_JOURNAL_GITHUB_SYNC_REMOTE', 'origin')
+    monkeypatch.setattr(master_service, '_trading_journal_github_sync_enabled', lambda: True)
+    monkeypatch.setattr(master_service, 'BASE_DIR', repo)
+    monkeypatch.setattr(master_service, '_repo_state_files_for_github', lambda *_a, **_k: [workbook])
+    real_git = master_service._run_git_command
+    real_reserve = master_service._reserve_master_journal_workbook_sync
+    first_at_add = threading.Event()
+    second_at_gate = threading.Event()
+    allow_first = threading.Event()
+    commands = []
+    results = {}
+
+    def recording_git(args, cwd, timeout):
+        name = threading.current_thread().name
+        commands.append((name, args[0]))
+        if name == 'journal-first' and args[0] == 'add':
+            first_at_add.set()
+            assert allow_first.wait(5)
+        return real_git(args, cwd, timeout)
+
+    def recording_reserve(*args, **kwargs):
+        if threading.current_thread().name == 'journal-second':
+            second_at_gate.set()
+        return real_reserve(*args, **kwargs)
+
+    monkeypatch.setattr(master_service, '_run_git_command', recording_git)
+    monkeypatch.setattr(master_service, '_reserve_master_journal_workbook_sync', recording_reserve)
+    first = threading.Thread(target=lambda: results.setdefault('first', master_service._sync_journal_excel_files_to_github(workbook)), name='journal-first')
+    second = threading.Thread(target=lambda: results.setdefault('second', master_service._sync_journal_excel_files_to_github(workbook)), name='journal-second')
+    first.start()
+    try:
+        assert first_at_add.wait(5)
+        second.start()
+        assert second_at_gate.wait(5)
+        assert all(name != 'journal-second' for name, _ in commands)
+    finally:
+        allow_first.set()
+        first.join(timeout=15)
+        if second.ident is not None:
+            second.join(timeout=15)
+    assert not first.is_alive() and not second.is_alive()
+    assert results['first']['github_sync_ok'] and results['first']['github_sync_verified']
+    assert not results['first']['github_sync_noop']
+    assert results['second']['github_sync_ok'] and results['second']['github_sync_verified']
+    assert results['second']['github_sync_noop']
+    seen_second = False
+    for name, _ in commands:
+        if name == 'journal-second':
+            seen_second = True
+        if seen_second:
+            assert name != 'journal-first'
+    assert _git(repo, 'rev-list', '--count', 'HEAD').strip() == '2'
+    assert _git(repo, 'rev-parse', 'HEAD') == _git(fixture['remote'], 'rev-parse', 'refs/heads/main')
+
+
+@pytest.mark.skipif(not HTTPX_AVAILABLE or shutil.which('git') is None, reason='httpx and git are required')
+def test_journal_git_index_lock_recovers_then_reports_bounded_busy(tmp_path, monkeypatch):
+    fixture = _build_temp_journal_git_repo(tmp_path, change_master=True)
+    repo, workbook = fixture['repo'], fixture['master']
+    monkeypatch.setenv('TRADING_JOURNAL_GITHUB_SYNC_ENABLED', '1')
+    monkeypatch.setenv('TRADING_JOURNAL_GITHUB_SYNC_BRANCH', 'main')
+    monkeypatch.setenv('TRADING_JOURNAL_GITHUB_SYNC_REMOTE', 'origin')
+    monkeypatch.setattr(master_service, '_trading_journal_github_sync_enabled', lambda: True)
+    monkeypatch.setattr(master_service, 'BASE_DIR', repo)
+    monkeypatch.setattr(master_service, '_repo_state_files_for_github', lambda *_a, **_k: [workbook])
+    unrelated_before = _git(repo, 'status', '--porcelain=v1', '--', 'unrelated-staged.txt', 'unrelated-dirty.txt')
+    lock_path = repo / '.git' / 'index.lock'
+    lock_path.write_bytes(b'test-owned external lock')
+    failed_add = threading.Event()
+    real_git = master_service._run_git_command
+
+    def recording_git(args, cwd, timeout):
+        outcome = real_git(args, cwd, timeout)
+        if args[0] == 'add' and outcome[0] != 0 and 'index.lock' in outcome[2].lower():
+            failed_add.set()
+        return outcome
+
+    monkeypatch.setattr(master_service, '_run_git_command', recording_git)
+    def clear_fixture_lock():
+        assert failed_add.wait(5)
+        lock_path.unlink()
+    clearer = threading.Thread(target=clear_fixture_lock)
+    clearer.start()
+    transient = master_service._sync_journal_excel_files_to_github(workbook)
+    clearer.join(timeout=5)
+    assert not clearer.is_alive() and failed_add.is_set()
+    assert transient['github_sync_ok'] and transient['github_sync_verified']
+    assert _git(repo, 'rev-list', '--count', 'HEAD').strip() == '2'
+    assert _git(repo, 'status', '--porcelain=v1', '--', 'unrelated-staged.txt', 'unrelated-dirty.txt') == unrelated_before
+    again = master_service._sync_journal_excel_files_to_github(workbook)
+    assert again['github_sync_ok'] and again['github_sync_noop'] and again['github_sync_verified']
+    assert _git(repo, 'rev-list', '--count', 'HEAD').strip() == '2'
+
+    other = tmp_path / 'persistent'
+    other.mkdir()
+    held = _build_temp_journal_git_repo(other, change_master=True)
+    repo2, workbook2 = held['repo'], held['master']
+    monkeypatch.setattr(master_service, 'BASE_DIR', repo2)
+    monkeypatch.setattr(master_service, '_repo_state_files_for_github', lambda *_a, **_k: [workbook2])
+    monkeypatch.setattr(master_service, 'JOURNAL_GIT_INDEX_LOCK_WAIT_SECONDS', 0.3)
+    held_lock = repo2 / '.git' / 'index.lock'
+    held_lock.write_bytes(b'fixture lock remains')
+    head_before = _git(repo2, 'rev-parse', 'HEAD')
+    staged_before = _git(repo2, 'status', '--porcelain=v1', '--', 'unrelated-staged.txt', 'unrelated-dirty.txt')
+    busy = master_service._sync_journal_excel_files_to_github(workbook2)
+    assert busy['github_sync_ok'] is False and busy['github_sync_error_type'] == 'GitIndexBusy'
+    assert held_lock.read_bytes() == b'fixture lock remains'
+    assert _git(repo2, 'rev-parse', 'HEAD') == head_before
+    assert _git(repo2, 'status', '--porcelain=v1', '--', 'unrelated-staged.txt', 'unrelated-dirty.txt') == staged_before
+    held_lock.unlink()  # Only the fixture-owned lock is removed.
+    recovered = master_service._sync_journal_excel_files_to_github(workbook2)
+    assert recovered['github_sync_ok'] and recovered['github_sync_verified']
+
+
+@pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
 def test_authoritative_snapshot_does_not_scan_legacy_sources(tmp_path, monkeypatch):
     monkeypatch.setattr(master_service, "TRADING_JOURNAL_LOCAL_DIR", tmp_path)
     monkeypatch.setenv("TRADING_JOURNAL_SOURCE", "master_journal")
@@ -2296,7 +2544,7 @@ def test_manual_save_scan_debounce_and_service_write_suppression(tmp_path, monke
     p=tmp_path/'Trading Journal.xlsx'; p.write_bytes(b'one')
     monkeypatch.setattr(master_service, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
     calls=[]
-    monkeypatch.setattr(master_service, '_sync_journal_excel_files_to_github', lambda *_: calls.append(1) or {'github_sync_enabled':True,'github_sync_ok':True,'github_sync_noop':False,'github_sync_error':'','github_sync_files':[],'github_sync_commit':'abc'})
+    monkeypatch.setattr(master_service, '_sync_journal_excel_files_to_github', lambda *_: calls.append(1) or {'github_sync_enabled':True,'github_sync_ok':True,'github_sync_noop':False,'github_sync_verified':True,'github_sync_error':'','github_sync_files':[],'github_sync_commit':'abc'})
     master_service._manual_save_set_known_fingerprint(p)
     # service generated write suppression
     master_service._manual_save_set_known_fingerprint(p)
@@ -3649,6 +3897,7 @@ def test_github_sync_stages_legacy_master_journal_deletion_when_tracked_and_miss
     journal.mkdir()
     (journal / "Trading Journal.xlsx").write_bytes(b"x")
     commands = []
+    head = {"sha": "before"}
     def fake_git(args, _cwd, _timeout):
         commands.append(args)
         if args == ["--version"]:
@@ -3661,10 +3910,17 @@ def test_github_sync_stages_legacy_master_journal_deletion_when_tracked_and_miss
             return 0, "main\n", ""
         if args[:3] == ["remote", "get-url", "origin"]:
             return 0, "x\n", ""
+        if args == ["rev-parse", "HEAD"]:
+            return 0, head["sha"] + "\n", ""
+        if args[:2] == ["ls-remote", "--heads"]:
+            return 0, head["sha"] + "\trefs/heads/main\n", ""
         if args[:2] == ["ls-files", "--error-unmatch"]:
             return 0, "journal/Master Journal.xlsx\n", ""
         if args[:2] == ["diff", "--cached"]:
             return 1, "", ""
+        if args and args[0] == "commit":
+            head["sha"] = "after"
+            return 0, "", ""
         if args and args[0] in {"add", "commit", "push", "rev-parse"}:
             return 0, "", ""
         return 0, "", ""

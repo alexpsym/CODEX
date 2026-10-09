@@ -7,6 +7,7 @@ import calendar
 import asyncio
 import ctypes
 import copy
+import errno
 import importlib.util
 import threading
 import base64
@@ -868,6 +869,8 @@ TRADING_JOURNAL_SYNC_LOCK = threading.Lock()
 TRADING_JOURNAL_RESYNC_LOCK = threading.Lock()
 MASTER_JOURNAL_WORKBOOK_SYNC_LOCK = threading.RLock()
 MASTER_JOURNAL_WORKBOOK_SYNC_ACTIVE: Dict[str, object] = {}
+_MASTER_JOURNAL_WORKBOOK_OS_LOCK_HANDLE = None
+JOURNAL_GIT_INDEX_LOCK_WAIT_SECONDS = 15.0
 TRADING_JOURNAL_RESYNC_CACHE_SCHEMA_VERSION = 1
 TRADING_JOURNAL_RESYNC_CACHE_PATH = BASE_DIR / "render" / "data" / "trading_journal_resync_cache.json"
 TRADING_JOURNAL_RESYNC_LAST_SUCCESS: Dict[str, object] = {
@@ -1090,9 +1093,11 @@ def _manual_save_file_fingerprint(path: Path):
     st=path.stat(); h=hashlib.sha256(path.read_bytes()).hexdigest()
     return (st.st_mtime_ns, st.st_size, h)
 
-def _run_manual_save_github_sync_once(master_path: Path) -> Dict[str, object]:
+def _run_manual_save_github_sync_once(
+    master_path: Path, *, expected_fingerprint=None,
+) -> Dict[str, object]:
     _manual_save_state_update(manual_save_last_attempt_at=_utc_now_iso())
-    res=_sync_journal_excel_files_to_github(master_path)
+    res=dict(_sync_journal_excel_files_to_github(master_path))
     err=str((res or {}).get('github_sync_error') or '')
     enabled=bool((res or {}).get('github_sync_enabled'))
     ok=bool((res or {}).get('github_sync_ok'))
@@ -1100,7 +1105,20 @@ def _run_manual_save_github_sync_once(master_path: Path) -> Dict[str, object]:
     verified=bool((res or {}).get('github_sync_verified'))
     if not enabled:
         err = err or 'GitHub sync is disabled.'
-    successful = enabled and ok and not err and (not noop or verified)
+    elif ok and not verified:
+        err = err or 'GitHub sync did not verify the remote branch.'
+        res.update(github_sync_ok=False, github_sync_error=err,
+                   github_sync_error_type='GitSyncUnverified')
+    if enabled and ok and verified and expected_fingerprint is not None:
+        try:
+            unchanged = _manual_save_file_fingerprint(master_path) == expected_fingerprint
+        except OSError:
+            unchanged = False
+        if not unchanged:
+            err = 'Workbook bytes changed while GitHub sync was running; the save remains pending.'
+            res.update(github_sync_ok=False, github_sync_verified=False,
+                       github_sync_error=err, github_sync_error_type='WorkbookChangedDuringSync')
+    successful = enabled and ok and verified and not err
     success_at = _utc_now_iso() if successful else None
     _manual_save_state_update(
         manual_save_last_error=err,
@@ -1113,12 +1131,26 @@ def _run_manual_save_github_sync_once(master_path: Path) -> Dict[str, object]:
     return res
 
 
-def _manual_save_set_known_fingerprint(path: Path) -> None:
-    global _MANUAL_SAVE_KNOWN_FINGERPRINT
+def _manual_save_set_known_fingerprint(path: Path, *, expected_fingerprint=None) -> bool:
+    global _MANUAL_SAVE_KNOWN_FINGERPRINT, _MANUAL_SAVE_PENDING_FINGERPRINT
+    global _MANUAL_SAVE_PENDING_SINCE, _MANUAL_SAVE_RETRY_COUNT, _MANUAL_SAVE_NEXT_RETRY_AT
     try:
-        _MANUAL_SAVE_KNOWN_FINGERPRINT = _manual_save_file_fingerprint(path)
+        fingerprint = _manual_save_file_fingerprint(path)
     except Exception:
-        _MANUAL_SAVE_KNOWN_FINGERPRINT = None
+        return False
+    if expected_fingerprint is not None and fingerprint != expected_fingerprint:
+        return False
+    _MANUAL_SAVE_KNOWN_FINGERPRINT = fingerprint
+    _MANUAL_SAVE_PENDING_FINGERPRINT = None
+    _MANUAL_SAVE_PENDING_SINCE = None
+    _MANUAL_SAVE_RETRY_COUNT = 0
+    _MANUAL_SAVE_NEXT_RETRY_AT = 0.0
+    _manual_save_state_update(
+        manual_save_pending=False, manual_save_retry_count=0,
+        manual_save_next_retry_at=None, manual_save_last_error="",
+        manual_save_last_error_type="",
+    )
+    return True
 
 def _manual_save_known_fingerprint():
     return _MANUAL_SAVE_KNOWN_FINGERPRINT
@@ -1154,22 +1186,47 @@ def _manual_save_scan_once(now: float, master_path: Path | None = None) -> None:
         return
     if now < _MANUAL_SAVE_NEXT_RETRY_AT:
         return
-    try:
-        result = _run_manual_save_github_sync_once(master_path)
-    except Exception as exc:
-        result = {"github_sync_enabled": True, "github_sync_ok": False, "github_sync_noop": False, "github_sync_error": str(exc), "github_sync_error_type": type(exc).__name__}
-        _manual_save_state_update(manual_save_last_attempt_at=_utc_now_iso(), manual_save_last_error=str(exc), manual_save_last_error_type=type(exc).__name__)
-    success = bool(result.get("github_sync_enabled")) and bool(result.get("github_sync_ok")) and not str(result.get("github_sync_error") or "") and (not bool(result.get("github_sync_noop")) or bool(result.get("github_sync_verified")))
-    if success:
-        _MANUAL_SAVE_KNOWN_FINGERPRINT = fp2
-        _MANUAL_SAVE_PENDING_FINGERPRINT = None; _MANUAL_SAVE_PENDING_SINCE = None
-        _MANUAL_SAVE_RETRY_COUNT = 0; _MANUAL_SAVE_NEXT_RETRY_AT = 0.0
-        _manual_save_state_update(manual_save_pending=False, manual_save_retry_count=0, manual_save_next_retry_at=None)
+    rejected = _reserve_master_journal_workbook_sync(
+        master_path, f"manual-save-{uuid4().hex[:12]}", "manual_save_watcher",
+    )
+    if rejected is not None:
+        # Keep the pending fingerprint while an import/resync verifies or rolls back.
         return
-    _MANUAL_SAVE_RETRY_COUNT += 1
-    retry_delay = min(60.0, max(1.0, 2.0 ** min(_MANUAL_SAVE_RETRY_COUNT - 1, 6)))
-    _MANUAL_SAVE_NEXT_RETRY_AT = now + retry_delay
-    _manual_save_state_update(manual_save_pending=True, manual_save_retry_count=_MANUAL_SAVE_RETRY_COUNT, manual_save_next_retry_at=datetime.fromtimestamp(_MANUAL_SAVE_NEXT_RETRY_AT, timezone.utc).isoformat())
+    try:
+        locked_fp = _manual_save_file_fingerprint(master_path)
+        if locked_fp != fp2:
+            _MANUAL_SAVE_PENDING_FINGERPRINT = locked_fp
+            _MANUAL_SAVE_PENDING_SINCE = now
+            return
+        if locked_fp == _MANUAL_SAVE_KNOWN_FINGERPRINT:
+            _MANUAL_SAVE_PENDING_FINGERPRINT = None
+            _MANUAL_SAVE_PENDING_SINCE = None
+            _manual_save_state_update(manual_save_pending=False)
+            return
+        try:
+            result = _run_manual_save_github_sync_once(
+                master_path, expected_fingerprint=locked_fp,
+            )
+        except Exception as exc:
+            result = {"github_sync_enabled": True, "github_sync_ok": False, "github_sync_noop": False, "github_sync_error": str(exc), "github_sync_error_type": type(exc).__name__}
+            _manual_save_state_update(manual_save_last_attempt_at=_utc_now_iso(), manual_save_last_error=str(exc), manual_save_last_error_type=type(exc).__name__)
+        success = bool(result.get("github_sync_enabled")) and bool(result.get("github_sync_ok")) and bool(result.get("github_sync_verified")) and not str(result.get("github_sync_error") or "")
+        if success:
+            if _manual_save_set_known_fingerprint(
+                master_path, expected_fingerprint=locked_fp,
+            ):
+                return
+            _manual_save_state_update(
+                manual_save_last_success_at=None,
+                manual_save_last_error='Workbook bytes changed after GitHub sync; the save remains pending.',
+                manual_save_last_error_type='WorkbookChangedDuringSync',
+            )
+        _MANUAL_SAVE_RETRY_COUNT += 1
+        retry_delay = min(60.0, max(1.0, 2.0 ** min(_MANUAL_SAVE_RETRY_COUNT - 1, 6)))
+        _MANUAL_SAVE_NEXT_RETRY_AT = now + retry_delay
+        _manual_save_state_update(manual_save_pending=True, manual_save_retry_count=_MANUAL_SAVE_RETRY_COUNT, manual_save_next_retry_at=datetime.fromtimestamp(_MANUAL_SAVE_NEXT_RETRY_AT, timezone.utc).isoformat())
+    finally:
+        _release_master_journal_workbook_sync()
 def _manual_save_github_sync_watcher_loop() -> None:
     global _MANUAL_SAVE_KNOWN_FINGERPRINT, _MANUAL_SAVE_PENDING_FINGERPRINT, _MANUAL_SAVE_PENDING_SINCE
     global _MANUAL_SAVE_RETRY_COUNT, _MANUAL_SAVE_NEXT_RETRY_AT
@@ -38654,42 +38711,115 @@ def _non_authoritative_snapshot_shrink_guard(
     return diagnostics
 
 
-def _reserve_master_journal_workbook_sync(path: Path, sync_id: str, caller: str) -> Optional[Dict[str, object]]:
-    if not MASTER_JOURNAL_WORKBOOK_SYNC_LOCK.acquire(blocking=False):
-        APP_LOGGER.warning(
-            "master_journal_workbook_sync_rejected sync_id=%s caller=%s active_sync_id=%s active_caller=%s",
-            sync_id, caller, MASTER_JOURNAL_WORKBOOK_SYNC_ACTIVE.get("sync_id"), MASTER_JOURNAL_WORKBOOK_SYNC_ACTIVE.get("caller"),
-        )
-        return _master_journal_active_sync_payload(path, sync_id, caller)
-    owner_thread_id = threading.get_ident()
-    if (
-        MASTER_JOURNAL_WORKBOOK_SYNC_ACTIVE
-        and int(MASTER_JOURNAL_WORKBOOK_SYNC_ACTIVE.get("owner_thread_id") or -1)
-        == owner_thread_id
-    ):
-        MASTER_JOURNAL_WORKBOOK_SYNC_ACTIVE["depth"] = int(
-            MASTER_JOURNAL_WORKBOOK_SYNC_ACTIVE.get("depth") or 1
-        ) + 1
-        return None
-    MASTER_JOURNAL_WORKBOOK_SYNC_ACTIVE.clear()
-    MASTER_JOURNAL_WORKBOOK_SYNC_ACTIVE.update({
-        "sync_id": sync_id,
-        "caller": caller,
-        "path": str(path),
-        "started_at": _utc_now_iso(),
-        "started_epoch": time.time(),
-        "owner_thread_id": owner_thread_id,
-        "depth": 1,
-    })
-    return None
+def _journal_transaction_lock_path(path: Path) -> Path:
+    """Use one OS-held lock for every journal writer in a Git checkout."""
+    resolved = path.expanduser().resolve()
+    for parent in resolved.parents:
+        git_dir = parent / ".git"
+        if git_dir.is_dir():
+            return git_dir / "trading-journal-transaction.lock"
+    return resolved.parent / ".trading-journal-transaction.lock"
+
+
+def _try_acquire_journal_os_lock(path: Path):
+    lock_path = _journal_transaction_lock_path(path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = lock_path.open("a+b")
+    try:
+        handle.seek(0, os.SEEK_END)
+        if handle.tell() == 0:
+            handle.write(b"\0")
+            handle.flush()
+        handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        handle.close()
+        if exc.errno in {errno.EACCES, errno.EAGAIN}:
+            return None
+        raise
+    return handle
+
+
+def _release_journal_os_lock(handle) -> None:
+    try:
+        handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    finally:
+        handle.close()
+
+
+def _reserve_master_journal_workbook_sync(
+    path: Path, sync_id: str, caller: str, *, wait_seconds: float = 0.0,
+) -> Optional[Dict[str, object]]:
+    global _MASTER_JOURNAL_WORKBOOK_OS_LOCK_HANDLE
+    deadline = time.monotonic() + max(0.0, wait_seconds)
+    while True:
+        if MASTER_JOURNAL_WORKBOOK_SYNC_LOCK.acquire(blocking=False):
+            owner_thread_id = threading.get_ident()
+            if (
+                MASTER_JOURNAL_WORKBOOK_SYNC_ACTIVE
+                and int(MASTER_JOURNAL_WORKBOOK_SYNC_ACTIVE.get("owner_thread_id") or -1)
+                == owner_thread_id
+            ):
+                MASTER_JOURNAL_WORKBOOK_SYNC_ACTIVE["depth"] = int(
+                    MASTER_JOURNAL_WORKBOOK_SYNC_ACTIVE.get("depth") or 1
+                ) + 1
+                return None
+            try:
+                handle = _try_acquire_journal_os_lock(path)
+            except Exception:
+                MASTER_JOURNAL_WORKBOOK_SYNC_LOCK.release()
+                raise
+            if handle is not None:
+                _MASTER_JOURNAL_WORKBOOK_OS_LOCK_HANDLE = handle
+                MASTER_JOURNAL_WORKBOOK_SYNC_ACTIVE.clear()
+                MASTER_JOURNAL_WORKBOOK_SYNC_ACTIVE.update({
+                    "sync_id": sync_id,
+                    "caller": caller,
+                    "path": str(path),
+                    "started_at": _utc_now_iso(),
+                    "started_epoch": time.time(),
+                    "owner_thread_id": owner_thread_id,
+                    "depth": 1,
+                })
+                return None
+            MASTER_JOURNAL_WORKBOOK_SYNC_LOCK.release()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            if caller != "manual_save_watcher":
+                APP_LOGGER.warning(
+                    "master_journal_workbook_sync_rejected sync_id=%s caller=%s active_sync_id=%s active_caller=%s",
+                    sync_id, caller, MASTER_JOURNAL_WORKBOOK_SYNC_ACTIVE.get("sync_id"), MASTER_JOURNAL_WORKBOOK_SYNC_ACTIVE.get("caller"),
+                )
+            return _master_journal_active_sync_payload(path, sync_id, caller)
+        time.sleep(min(0.05, remaining))
 
 
 def _release_master_journal_workbook_sync() -> None:
+    global _MASTER_JOURNAL_WORKBOOK_OS_LOCK_HANDLE
     depth = int(MASTER_JOURNAL_WORKBOOK_SYNC_ACTIVE.get("depth") or 1)
     if depth > 1:
         MASTER_JOURNAL_WORKBOOK_SYNC_ACTIVE["depth"] = depth - 1
     else:
         MASTER_JOURNAL_WORKBOOK_SYNC_ACTIVE.clear()
+        handle = _MASTER_JOURNAL_WORKBOOK_OS_LOCK_HANDLE
+        _MASTER_JOURNAL_WORKBOOK_OS_LOCK_HANDLE = None
+        try:
+            if handle is not None:
+                _release_journal_os_lock(handle)
+        finally:
+            MASTER_JOURNAL_WORKBOOK_SYNC_LOCK.release()
+        return
     MASTER_JOURNAL_WORKBOOK_SYNC_LOCK.release()
 
 
@@ -39546,7 +39676,13 @@ def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, e
         if defer_github_sync:
             payload.update({"github_sync_enabled": _trading_journal_github_sync_enabled(), "github_sync_ok": None, "github_sync_deferred": True})
         else:
+            synced_fingerprint = _manual_save_file_fingerprint(path)
             payload.update(_sync_journal_excel_files_to_github(path))
+            if (payload.get("github_sync_enabled") and payload.get("github_sync_ok")
+                    and payload.get("github_sync_verified")):
+                _manual_save_set_known_fingerprint(
+                    path, expected_fingerprint=synced_fingerprint,
+                )
         _finish_substage("github_sync")
         payload["ok"] = bool(payload.get("master_journal_ok")) and payload.get("github_sync_ok") is not False
         return payload
@@ -39619,6 +39755,35 @@ def _run_git_command(args: List[str], cwd: Path, timeout_s: int) -> Tuple[int, s
         return int(cp.returncode), str(cp.stdout or ""), str(cp.stderr or "")
     except Exception as exc:
         return 1, "", str(exc)
+
+
+def _run_journal_git_mutation(
+    args: List[str], repo_root: Path, timeout_s: int, expected_head: str,
+) -> Tuple[int, str, str, str]:
+    """Wait briefly for an external index owner; never remove its lock."""
+    deadline = time.monotonic() + min(
+        max(0.1, JOURNAL_GIT_INDEX_LOCK_WAIT_SECONDS),
+        max(1.0, float(timeout_s)),
+    )
+    lock_path = repo_root / ".git" / "index.lock"
+    while True:
+        code, out, err = _run_git_command(args, repo_root, timeout_s)
+        if code == 0 or "index.lock" not in err.lower():
+            return code, out, err, ""
+        if time.monotonic() >= deadline:
+            return code, out, f"{err.strip()} Git index stayed busy through the bounded wait; the lock was left intact.", "GitIndexBusy"
+        while lock_path.exists() and time.monotonic() < deadline:
+            time.sleep(min(0.25, max(0.0, deadline - time.monotonic())))
+        if lock_path.exists():
+            return code, out, f"{err.strip()} Git index stayed busy through the bounded wait; the lock was left intact.", "GitIndexBusy"
+        head_code, current_head, head_err = _run_git_command(["rev-parse", "HEAD"], repo_root, timeout_s)
+        if head_code != 0 or current_head.strip() != expected_head:
+            return 1, "", (
+                "Git HEAD changed while waiting for the index lock; journal sync was not retried. "
+                + head_err.strip()
+            ), "GitConcurrentHeadChanged"
+        # Git reported failure before acquiring index.lock and HEAD is unchanged.
+        # Re-evaluate the failed mutation once the external owner releases it.
 
 
 def _legacy_master_journal_tracked_and_missing(repo_root: Path, timeout_s: int) -> bool:
@@ -39745,6 +39910,27 @@ def _git_add_eligible_repo_state_files(
 
 
 def _sync_journal_excel_files_to_github(master_path: Path) -> Dict[str, object]:
+    if not _trading_journal_github_sync_enabled() or not (_repo_root_for_journal_path(master_path) / ".git").exists():
+        return _sync_journal_excel_files_to_github_locked(master_path)
+    rejected = _reserve_master_journal_workbook_sync(
+        master_path, f"journal-git-{uuid4().hex[:12]}", "journal_git_sync",
+        wait_seconds=30.0,
+    )
+    if rejected is not None:
+        return {
+            "github_sync_enabled": True, "github_sync_ok": False,
+            "github_sync_noop": False, "github_sync_verified": False,
+            "github_sync_error": "Journal Git transaction is busy; retry after the workbook transaction finishes.",
+            "github_sync_error_type": "GitSyncBusy", "github_sync_commit": "",
+            "github_sync_files": [],
+        }
+    try:
+        return _sync_journal_excel_files_to_github_locked(master_path)
+    finally:
+        _release_master_journal_workbook_sync()
+
+
+def _sync_journal_excel_files_to_github_locked(master_path: Path) -> Dict[str, object]:
     enabled = _trading_journal_github_sync_enabled()
     remote = str(os.getenv("TRADING_JOURNAL_GITHUB_SYNC_REMOTE", "origin") or "origin").strip() or "origin"
     requested_branch = str(os.getenv("TRADING_JOURNAL_GITHUB_SYNC_BRANCH", "") or "").strip()
@@ -39811,27 +39997,60 @@ def _sync_journal_excel_files_to_github(master_path: Path) -> Dict[str, object]:
         return {**base, "github_sync_ok": False, "github_sync_noop": False, "github_sync_error": f"Failed to inspect journal changes: {err.strip()}", "github_sync_error_type": "GitStatusFailed"}
     if not out.strip():
         code, local_head, err = _run_git_command(["rev-parse", "HEAD"], repo_root, timeout_s)
-        if code != 0:
+        if code != 0 or not local_head.strip():
             return {**base, "github_sync_ok": False, "github_sync_noop": False, "github_sync_error": f"Failed to inspect local HEAD: {err.strip()}", "github_sync_error_type": "HeadInspectFailed"}
         code, remote_out, err = _run_git_command(["ls-remote", "--heads", remote, f"refs/heads/{branch}"], repo_root, timeout_s)
-        remote_head = remote_out.split()[0] if code == 0 and remote_out.split() else ""
-        if code == 0 and remote_head == local_head.strip():
+        if code != 0:
+            return {**base, "github_sync_ok": False, "github_sync_noop": False, "github_sync_error": f"Failed to inspect remote branch: {err.strip()}", "github_sync_error_type": "GitRemoteInspectFailed"}
+        remote_head = remote_out.split()[0] if remote_out.split() else ""
+        if remote_head == local_head.strip():
             return {**base, "github_sync_verified": True}
         code, _, err = _run_git_command(["push", remote, f"HEAD:{branch}"], repo_root, timeout_s)
         if code != 0:
             return {**base, "github_sync_ok": False, "github_sync_noop": False, "github_sync_error": f"Git push retry failed: {err.strip()}", "github_sync_error_type": "GitPushFailed"}
+        code, verified_out, verify_err = _run_git_command(["ls-remote", "--heads", remote, f"refs/heads/{branch}"], repo_root, timeout_s)
+        if code != 0 or not verified_out.split() or verified_out.split()[0] != local_head.strip():
+            return {**base, "github_sync_ok": False, "github_sync_noop": False, "github_sync_error": f"Push verification failed: {verify_err.strip() or 'origin branch does not match local HEAD'}", "github_sync_error_type": "GitPushVerificationFailed"}
         return {**base, "github_sync_noop": False, "github_sync_verified": True, "github_sync_commit": local_head.strip()[:12]}
-    code, _, err = _run_git_command(["add", "-A", "--", *rel_files], repo_root, timeout_s)
+    head_code, head_before, head_err = _run_git_command(["rev-parse", "HEAD"], repo_root, timeout_s)
+    if head_code != 0 or not head_before.strip():
+        return {**base, "github_sync_ok": False, "github_sync_noop": False, "github_sync_error": f"Failed to inspect local HEAD: {head_err.strip()}", "github_sync_error_type": "HeadInspectFailed"}
+    code, _, err, mutation_error = _run_journal_git_mutation(
+        ["add", "-A", "--", *rel_files], repo_root, timeout_s, head_before.strip(),
+    )
     if code != 0:
-        return {**base, "github_sync_ok": False, "github_sync_noop": False, "github_sync_error": f"Git add failed: {err.strip()}", "github_sync_error_type": "GitAddFailed"}
+        return {**base, "github_sync_ok": False, "github_sync_noop": False, "github_sync_error": f"Git add failed: {err.strip()}", "github_sync_error_type": mutation_error or "GitAddFailed"}
     code, _, err = _run_git_command(["diff", "--cached", "--quiet", "--", *rel_files], repo_root, timeout_s)
     if code == 0:
-        return base
+        status_code, status_out, status_err = _run_git_command(
+            ["status", "--porcelain", "--untracked-files=all", "--", *rel_files], repo_root, timeout_s,
+        )
+        if status_code != 0 or status_out.strip():
+            return {**base, "github_sync_ok": False, "github_sync_noop": False,
+                    "github_sync_error": status_err.strip() or "Eligible journal changes remain after Git add.",
+                    "github_sync_error_type": "GitDiffNoopUnverified"}
+        code, local_head, head_err = _run_git_command(["rev-parse", "HEAD"], repo_root, timeout_s)
+        remote_code, remote_out, remote_err = _run_git_command(
+            ["ls-remote", "--heads", remote, f"refs/heads/{branch}"], repo_root, timeout_s,
+        )
+        if code == 0 and remote_code == 0 and local_head.strip() and remote_out.split() and remote_out.split()[0] == local_head.strip():
+            return {**base, "github_sync_verified": True}
+        return {**base, "github_sync_ok": False, "github_sync_noop": False,
+                "github_sync_error": head_err.strip() or remote_err.strip() or "Eligible journal changes were not staged and remote equality was not verified.",
+                "github_sync_error_type": "GitDiffNoopUnverified"}
     if code != 1:
         return {**base, "github_sync_ok": False, "github_sync_noop": False, "github_sync_error": f"Failed to inspect staged journal changes: {err.strip()}", "github_sync_error_type": "GitDiffFailed"}
-    code, _, err = _run_git_command(["commit", "--only", "-m", "Update trading journal state", "--", *rel_files], repo_root, timeout_s)
+    head_code, current_head, head_err = _run_git_command(["rev-parse", "HEAD"], repo_root, timeout_s)
+    if head_code != 0 or current_head.strip() != head_before.strip():
+        return {**base, "github_sync_ok": False, "github_sync_noop": False,
+                "github_sync_error": "Git HEAD changed before the journal commit; sync was stopped. " + head_err.strip(),
+                "github_sync_error_type": "GitConcurrentHeadChanged"}
+    code, _, err, mutation_error = _run_journal_git_mutation(
+        ["commit", "--only", "-m", "Update trading journal state", "--", *rel_files],
+        repo_root, timeout_s, head_before.strip(),
+    )
     if code != 0:
-        return {**base, "github_sync_ok": False, "github_sync_noop": False, "github_sync_error": f"Git commit failed: {err.strip()}", "github_sync_error_type": "GitCommitFailed"}
+        return {**base, "github_sync_ok": False, "github_sync_noop": False, "github_sync_error": f"Git commit failed: {err.strip()}", "github_sync_error_type": mutation_error or "GitCommitFailed"}
     code, out, err = _run_git_command(["rev-parse", "--short", "HEAD"], repo_root, timeout_s)
     commit = out.strip() if code == 0 else ""
     code, _, err = _run_git_command(["push", remote, f"HEAD:{branch}"], repo_root, timeout_s)
@@ -42081,13 +42300,21 @@ def _import_uploaded_trading_journal_file(
             APP_LOGGER.info("trading_journal_import_stage_done stage=snapshot_persist elapsed=%.6fs upload=%s", timings["snapshot_persist"], name)
             t6 = time.perf_counter()
             APP_LOGGER.info("trading_journal_import_stage_start stage=github_sync upload=%s", name)
+            verified_workbook_fingerprint = _manual_save_file_fingerprint(workbook_path)
             github_sync_started = True
             github_sync_result = _sync_journal_excel_files_to_github(_master_journal_path())
             github_sync_returned = True
             timings["github_sync"] = round(time.perf_counter() - t6, 6)
             APP_LOGGER.info("trading_journal_import_stage_done stage=github_sync elapsed=%.6fs upload=%s", timings["github_sync"], name)
-            if github_sync_result.get("github_sync_enabled") and github_sync_result.get("github_sync_ok") is False:
+            if github_sync_result.get("github_sync_enabled") and (
+                github_sync_result.get("github_sync_ok") is False
+                or not github_sync_result.get("github_sync_verified")
+            ):
                 raise RuntimeError(f"GitHub sync failed after local verification: {github_sync_result.get('github_sync_error') or 'unknown error'}")
+            if github_sync_result.get("github_sync_enabled") and not _manual_save_set_known_fingerprint(
+                workbook_path, expected_fingerprint=verified_workbook_fingerprint,
+            ):
+                raise RuntimeError("Workbook bytes changed during GitHub sync; import cannot confirm the published version.")
             if derived_refresh_state:
                 queued_generation = int(
                     derived_refresh_state.get("generation") or 0
