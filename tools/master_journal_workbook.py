@@ -12755,6 +12755,29 @@ def _apply_workbook_left_alignment(wb) -> None:
             for col in range(merged.min_col, merged.max_col + 1)
             if not (row == merged.min_row and col == merged.min_col)
     }
+    style_cache: Dict[Tuple[int, ...], Any] = {}
+    for (row, col), cell in list(ws._cells.items()):
+            if row < data_start:
+                continue
+            if (row, col) in non_anchor_cells:
+                continue
+            if cell.value in (None, ""):
+                continue
+            source_style = cell._style
+            if source_style is None:
+                cell.alignment = default_left_alignment
+                continue
+            source_alignment_id = source_style.alignmentId
+            target_alignment_id = left_alignment_id(source_alignment_id)
+            if target_alignment_id == source_alignment_id:
+                continue
+            style_key = tuple(source_style)
+            target_style = style_cache.get(style_key)
+            if target_style is None:
+                target_style = copy(source_style)
+                target_style.alignmentId = target_alignment_id
+                style_cache[style_key] = target_style
+            cell._style = target_style
 
 
 _STATS1_TRADE_REFERENCE_SUFFIX_RE = re.compile(
@@ -12984,29 +13007,6 @@ def _apply_stats1_trade_source_hyperlinks(
     else:
         diagnostics.pop("stats1_trade_source_hyperlinks_unresolved", None)
     return {"linked": linked, "unresolved": unresolved}
-    style_cache: Dict[Tuple[int, ...], Any] = {}
-    for (row, col), cell in list(ws._cells.items()):
-            if row < data_start:
-                continue
-            if (row, col) in non_anchor_cells:
-                continue
-            if cell.value in (None, ""):
-                continue
-            source_style = cell._style
-            if source_style is None:
-                cell.alignment = default_left_alignment
-                continue
-            source_alignment_id = source_style.alignmentId
-            target_alignment_id = left_alignment_id(source_alignment_id)
-            if target_alignment_id == source_alignment_id:
-                continue
-            style_key = tuple(source_style)
-            target_style = style_cache.get(style_key)
-            if target_style is None:
-                target_style = copy(source_style)
-                target_style.alignmentId = target_alignment_id
-                style_cache[style_key] = target_style
-            cell._style = target_style
 
 
 def _apply_report_managed_left_alignment(

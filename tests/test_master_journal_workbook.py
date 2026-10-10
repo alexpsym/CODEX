@@ -11542,3 +11542,160 @@ def test_stats1_trade_source_links_survive_preservation_refresh_without_layout_c
     assert results[0] == results[1]
     journal._TRADE_FOLDER_INDEX_CACHE.clear()
     timing_end("final repeat-refresh assertions", final_assertions_started)
+
+
+def test_trade_log_left_alignment_restores_data_and_preserves_stats1_links():
+    wb = Workbook()
+    trade_log = wb.active
+    trade_log.title = "Trade Log"
+    stats1 = wb.create_sheet(STATS1_SHEET)
+    presentation = wb.create_sheet("P&L Calendar")
+
+    header_templates = {
+        mjw.TRADE_LOG_HEADERS[0]: mjw._snapshot_cell(trade_log["A1"])
+    }
+    mjw._write_trade_log_three_row_headers(trade_log, header_templates)
+
+    cells = {
+        "A4": "F001",
+        "B4": "BTCUSDT",
+        "C4": "trade-row-1",
+        "D4": "=1+1",
+        "F4": "manual trade note",
+    }
+    for coordinate, value in cells.items():
+        trade_log[coordinate] = value
+    trade_log["A4"].hyperlink = "file:///existing-trade-folder"
+    trade_log["A4"].number_format = "@"
+    trade_log["B4"].number_format = "@"
+    trade_log["D4"].number_format = "0.00"
+    trade_log["E4"].number_format = "0.000"
+    trade_log.merge_cells("F4:G4")
+
+    thin = Side(style="thin", color="224466")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    for coordinate, horizontal, extras in (
+        ("A4", "center", {"vertical": "center", "wrap_text": True, "indent": 1}),
+        ("B4", "right", {"vertical": "top", "text_rotation": 15}),
+        ("C4", "center", {"vertical": "center", "shrink_to_fit": True}),
+        ("D4", "left", {"vertical": "bottom", "indent": 2}),
+        ("E4", "center", {"vertical": "center", "wrap_text": True}),
+        ("F4", "right", {"vertical": "center", "indent": 1}),
+    ):
+        cell = trade_log[coordinate]
+        cell.alignment = Alignment(horizontal=horizontal, **extras)
+        cell.font = Font(name="Calibri", size=11, bold=coordinate == "A2")
+        cell.fill = PatternFill(fill_type="solid", fgColor="DDEEFF")
+        cell.border = border
+    trade_log["G4"].alignment = Alignment(horizontal="right", vertical="center", indent=2)
+
+    stats1["A5"] = "Max win %"
+    stats1["B5"] = "2.00% - BTCUSDT 2026-10-04"
+    stats1["B5"].hyperlink = "file:///existing-trade-folder/F001"
+    stats1["B5"].alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    stats1["B5"].font = Font(name="Arial", size=12, bold=True, color="000080")
+    stats1["B5"].fill = PatternFill(fill_type="solid", fgColor="FFF2CC")
+    stats1["B5"].border = border
+    stats1["A2"] = "Manual reference"
+    stats1["A2"].hyperlink = "file:///manual-reference"
+    stats1["A2"].alignment = Alignment(horizontal="right", vertical="top", indent=1)
+    stats1["A2"].font = Font(name="Calibri", size=10, italic=True)
+    stats1["A2"].border = border
+    presentation["C7"] = "October"
+    presentation["C7"].alignment = Alignment(horizontal="right", vertical="center", wrap_text=True)
+    presentation["C7"].fill = PatternFill(fill_type="solid", fgColor="E2F0D9")
+
+    assert mjw._trade_log_has_three_row_headers(trade_log) is True
+    assert mjw._trade_log_data_start_row(trade_log) == mjw.TRADE_LOG_DATA_START_ROW
+
+    def hyperlink_signature(cell):
+        link = cell.hyperlink
+        if link is None:
+            return None
+        return (link.target, link.location, link.tooltip, link.display, link.ref)
+
+    def signature(cell):
+        return {
+            "value": cell.value,
+            "data_type": cell.data_type,
+            "number_format": cell.number_format,
+            "font": copy(cell.font),
+            "fill": copy(cell.fill),
+            "border": copy(cell.border),
+            "protection": copy(cell.protection),
+            "alignment": copy(cell.alignment),
+            "hyperlink": hyperlink_signature(cell),
+        }
+
+    untouched_cells = [
+        *(
+            trade_log.cell(row, column)
+            for row in range(1, mjw.TRADE_LOG_HEADER_ROWS + 1)
+            for column in range(1, trade_log.max_column + 1)
+        ),
+        trade_log["E4"], trade_log["G4"],
+        stats1["A2"], stats1["B5"], presentation["C7"],
+    ]
+    untouched_before = {cell.coordinate if cell.parent.title == "Trade Log" else f"{cell.parent.title}!{cell.coordinate}": signature(cell) for cell in untouched_cells}
+    data_cells = [trade_log[coordinate] for coordinate in ("A4", "B4", "C4", "D4", "F4")]
+    data_before = {cell.coordinate: signature(cell) for cell in data_cells}
+    sheetnames_before = list(wb.sheetnames)
+    merged_before = tuple(str(item) for item in trade_log.merged_cells.ranges)
+    dimensions_before = {
+        sheet.title: (
+            sheet.max_row,
+            sheet.max_column,
+            tuple(sorted((key, value.height, value.hidden) for key, value in sheet.row_dimensions.items())),
+            tuple(sorted((key, value.width, value.hidden) for key, value in sheet.column_dimensions.items())),
+        )
+        for sheet in wb.worksheets
+    }
+
+    mjw._apply_workbook_left_alignment(wb)
+
+    for cell in data_cells:
+        before = data_before[cell.coordinate]
+        expected_alignment = copy(before["alignment"])
+        expected_alignment.horizontal = "left"
+        assert cell.alignment == expected_alignment
+        assert cell.value == before["value"]
+        assert cell.data_type == before["data_type"]
+        assert cell.number_format == before["number_format"]
+        assert cell.font == before["font"]
+        assert cell.fill == before["fill"]
+        assert cell.border == before["border"]
+        assert cell.protection == before["protection"]
+        assert hyperlink_signature(cell) == before["hyperlink"]
+
+    for cell in untouched_cells:
+        key = cell.coordinate if cell.parent.title == "Trade Log" else f"{cell.parent.title}!{cell.coordinate}"
+        assert signature(cell) == untouched_before[key]
+    assert list(wb.sheetnames) == sheetnames_before
+    assert tuple(str(item) for item in trade_log.merged_cells.ranges) == merged_before
+    assert {
+        sheet.title: (
+            sheet.max_row,
+            sheet.max_column,
+            tuple(sorted((key, value.height, value.hidden) for key, value in sheet.row_dimensions.items())),
+            tuple(sorted((key, value.width, value.hidden) for key, value in sheet.column_dimensions.items())),
+        )
+        for sheet in wb.worksheets
+    } == dimensions_before
+    assert trade_log["A4"].hyperlink.target == "file:///existing-trade-folder"
+    assert stats1["B5"].value == "2.00% - BTCUSDT 2026-10-04"
+    assert stats1["B5"].hyperlink.target == "file:///existing-trade-folder/F001"
+    assert stats1["A2"].hyperlink.target == "file:///manual-reference"
+
+    after_first = {
+        cell.coordinate if cell.parent.title == "Trade Log" else f"{cell.parent.title}!{cell.coordinate}": signature(cell)
+        for cell in data_cells + untouched_cells
+    }
+    mjw._apply_workbook_left_alignment(wb)
+    after_second = {
+        cell.coordinate if cell.parent.title == "Trade Log" else f"{cell.parent.title}!{cell.coordinate}": signature(cell)
+        for cell in data_cells + untouched_cells
+    }
+    assert after_second == after_first
+    assert list(wb.sheetnames) == sheetnames_before
+    assert tuple(str(item) for item in trade_log.merged_cells.ranges) == merged_before
+    wb.close()
