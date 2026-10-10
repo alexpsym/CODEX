@@ -29,7 +29,7 @@ import re
 import zipfile
 import xml.etree.ElementTree as ET
 from xml.sax.saxutils import escape as _xml_escape
-from urllib.parse import quote, unquote
+from urllib.parse import quote, unquote, urlsplit
 from zoneinfo import ZoneInfo
 from uuid import uuid4
 
@@ -10169,6 +10169,8 @@ def _dashboard_extended_metrics(
             "min_commission_source": _fmt_detail_src(min_commission_source) if min_commission_source else "",
             "max_commission_source": _fmt_detail_src(max_commission_source) if max_commission_source else "",
             "metric_sources": {
+                "min_commission": _trade_metric_ref(min_commission_source, "min_commission", abs(_as_float(min_commission_source.get("commission")) or 0.0)) if min_commission_source else None,
+                "max_commission": _trade_metric_ref(max_commission_source, "max_commission", abs(_as_float(max_commission_source.get("commission")) or 0.0)) if max_commission_source else None,
                 "min_stop_pct": _distance_extreme_ref(items, "stop_loss", "min", "min_stop_pct"),
                 "max_stop_pct": _distance_extreme_ref(items, "stop_loss", "max", "max_stop_pct"),
                 "min_target_pct": _distance_extreme_ref(items, "take_profit", "min", "min_target_pct"),
@@ -10477,6 +10479,7 @@ def build_master_journal_workbook(
             "crypto": by_market.get("crypto") or {},
         }.items()
     }
+    stats1_source_link_requests: Dict[Tuple[int, int], Any] = {}
     buckets["overall"]["most_wins_instrument"] = leaders.get("most_wins_instrument")
     buckets["overall"]["most_losses_instrument"] = leaders.get("most_losses_instrument")
     buckets["fx"]["most_wins_instrument"] = leaders.get("fx_most_wins_instrument")
@@ -10527,6 +10530,7 @@ def build_master_journal_workbook(
             cell = dash.cell(row, col)
             inline_source = _inline_metric_source(bucket, key)
             if inline_source and kind in {"pct", "r", "duration"}:
+                stats1_source_link_requests[(row, col)] = inline_source
                 cell.value = _format_inline_metric_value(value, kind, inline_source)
                 cell.number_format = "General"
             elif kind == "pct":
@@ -10539,6 +10543,8 @@ def build_master_journal_workbook(
             elif kind == "source":
                 source_key = str(key or "").split(":", 1)[1] if ":" in str(key or "") else str(key or "")
                 source = (bucket.get("metric_sources") or {}).get(source_key)
+                if source:
+                    stats1_source_link_requests[(row, col)] = source
                 cell.value = _fmt_detail_src(source) if source else ""
                 cell.number_format = "General"
             elif kind == "count":
@@ -10707,6 +10713,7 @@ def build_master_journal_workbook(
                 cell = dash.cell(row, col)
                 inline_source = _inline_metric_source(buckets[market], key)
                 if inline_source and kind in {"pct", "r", "duration"}:
+                    stats1_source_link_requests[(row, col)] = inline_source
                     cell.value = _format_inline_metric_value(value, kind, inline_source)
                     cell.number_format = "General"
                 elif kind == "pct":
@@ -10719,6 +10726,8 @@ def build_master_journal_workbook(
                 elif kind == "source":
                     source_key = str(key or "").split(":", 1)[1] if ":" in str(key or "") else str(key or "")
                     source = (buckets[market].get("metric_sources") or {}).get(source_key)
+                    if source:
+                        stats1_source_link_requests[(row, col)] = source
                     cell.value = _fmt_detail_src(source) if source else ""
                     cell.number_format = "General"
                 elif kind == "duration":
@@ -10733,6 +10742,10 @@ def build_master_journal_workbook(
                     cell.number_format = "0"
                 elif kind == "number":
                     cell.value = "" if value is None else value
+                    if title == "Commission" and key in {"min_commission", "max_commission"}:
+                        source = (buckets[market].get("metric_sources") or {}).get(key)
+                        if source and cell.value not in (None, ""):
+                            stats1_source_link_requests[(row, col)] = source
                     if title == "Commission" and market in {"fx", "crypto"}:
                         currency = "AUD" if market == "fx" else "USDT"
                         cell.number_format = _currency_number_format(currency)
@@ -10926,6 +10939,14 @@ def build_master_journal_workbook(
         hyperlink_workbook_path,
     )
     _apply_recommendation_chart_hyperlinks(wb, chart_bundle)
+    stats1_link_diagnostics: Dict[str, Any] = {}
+    _apply_stats1_trade_source_hyperlinks(
+        dash,
+        stats1_source_link_requests,
+        rows,
+        ws,
+        stats1_link_diagnostics,
+    )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     wb.save(output_path)
     if publish_recommendation_assets:
@@ -10935,6 +10956,7 @@ def build_master_journal_workbook(
         'path': str(output_path),
         'diagnostics': {
             **row_normalization_diagnostics,
+            **stats1_link_diagnostics,
             'recommendation_chart_assets_deferred': not publish_recommendation_assets,
         },
     }
@@ -12733,6 +12755,235 @@ def _apply_workbook_left_alignment(wb) -> None:
             for col in range(merged.min_col, merged.max_col + 1)
             if not (row == merged.min_row and col == merged.min_col)
     }
+
+
+_STATS1_TRADE_REFERENCE_SUFFIX_RE = re.compile(
+    r"(?:^|\s-\s)(?P<symbol>\S+)\s+(?P<date>\d{4}-\d{2}-\d{2})\s*$"
+)
+
+
+def _stats1_trade_reference_metric_value(
+    row: Mapping[str, Any], metric_key: str
+) -> float | None:
+    key = str(metric_key or "").strip().casefold()
+    if "stop_pct" in key:
+        return _distance_pct_points(dict(row), "stop_loss")
+    if "target_pct" in key:
+        return _distance_pct_points(dict(row), "take_profit")
+    if "move_to_break_even_duration" in key:
+        value = _move_duration_seconds(dict(row), "move_to_break_even")
+        return float(value) if value is not None else None
+    if "move_to_profit_duration" in key:
+        value = _move_duration_seconds(dict(row), "move_to_profit")
+        return float(value) if value is not None else None
+    if "duration" in key or key in {"shortest", "longest"}:
+        return _as_float(row.get("trade_duration_seconds"))
+    if "commission" in key:
+        value = _as_float(row.get("commission"))
+        return abs(value) if value is not None else None
+    if "result_pct" in key:
+        return _as_float(row.get("result_pct"))
+    if "r_multiple" in key:
+        return _as_float(row.get("r_multiple"))
+    return None
+
+
+def _stats1_source_matches_row(source: Mapping[str, Any], row: Mapping[str, Any]) -> Tuple[bool, str]:
+    source_symbol = str(source.get("symbol") or source.get("instrument") or "").strip().upper()
+    row_symbol = str(row.get("symbol") or row.get("symbol_raw") or row.get("instrument") or "").strip().upper()
+    if source_symbol and source_symbol != row_symbol:
+        return False, "source_symbol_conflict"
+
+    source_account = str(source.get("account") or "").strip()
+    row_account = str(row.get("account_label") or row.get("account") or row.get("source") or "").strip()
+    if source_account and _canonical_account_label(source_account) != _canonical_account_label(row_account):
+        return False, "source_account_conflict"
+
+    for field in ("open_time", "close_time"):
+        expected = source.get(field)
+        if expected in (None, ""):
+            continue
+        actual = row.get(field)
+        expected_dt = _as_datetime(expected)
+        actual_dt = _as_datetime(actual)
+        if expected_dt is not None and actual_dt is not None:
+            if expected_dt != actual_dt:
+                return False, f"source_{field}_conflict"
+        elif str(expected).strip() != str(actual or "").strip():
+            return False, f"source_{field}_conflict"
+
+    source_date = source.get("date")
+    if source_date not in (None, "") and not any(
+        _as_date(row.get(field)) == _as_date(source_date)
+        for field in ("open_time", "close_time")
+    ):
+        return False, "source_date_conflict"
+
+    metric_key = str(source.get("metric_key") or "").strip()
+    metric_value = _as_float(source.get("metric_value"))
+    if metric_key and metric_value is not None:
+        row_value = _stats1_trade_reference_metric_value(row, metric_key)
+        if row_value is None or not math.isclose(
+            row_value, metric_value, rel_tol=1e-9, abs_tol=1e-9
+        ):
+            return False, "source_metric_conflict"
+    elif metric_key:
+        return False, "source_metric_unavailable"
+    return True, ""
+
+
+def _stats1_existing_trade_reference_cells(ws) -> set[Tuple[int, int]]:
+    columns = set(_stats1_market_columns(ws).values())
+    coordinates: set[Tuple[int, int]] = set()
+    for (row, col), cell in list(ws._cells.items()):
+        if row < 2 or col not in columns or getattr(cell, "hyperlink", None) is None:
+            continue
+        label_cell = ws._cells.get((row, 1))
+        label = " ".join(str(label_cell.value if label_cell is not None else "").strip().casefold().split())
+        if (
+            isinstance(cell.value, str)
+            and _STATS1_TRADE_REFERENCE_SUFFIX_RE.search(cell.value)
+        ) or label in {"min commission", "max commission"}:
+            coordinates.add((row, col))
+    return coordinates
+
+
+def _apply_stats1_trade_source_hyperlinks(
+    ws,
+    source_requests: Mapping[Tuple[int, int], Any],
+    rows: Sequence[Mapping[str, Any]],
+    trade_log_ws=None,
+    diagnostics: Dict[str, Any] | None = None,
+    *,
+    stale_coordinates: Collection[Tuple[int, int]] = (),
+    forex_root: Path | None = None,
+    crypto_root: Path | None = None,
+) -> Dict[str, Any]:
+    """Link generated STATS1 references to the uniquely identified trade folder."""
+    diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+    row_id_columns = _trade_log_header_map(trade_log_ws) if trade_log_ws is not None else {}
+    trade_number_by_id: Dict[str, str] = {}
+    if trade_log_ws is not None:
+        row_id_col = row_id_columns.get("Row ID")
+        number_col = row_id_columns.get(TRADE_NUMBER_HEADER)
+        if row_id_col and number_col:
+            for row_num in range(_trade_log_data_start_row(trade_log_ws), trade_log_ws.max_row + 1):
+                row_id = str(trade_log_ws.cell(row_num, row_id_col).value or "").strip()
+                number = str(trade_log_ws.cell(row_num, number_col).value or "").strip()
+                if row_id and number:
+                    trade_number_by_id[row_id] = number
+
+    rows_by_id: Dict[str, List[Mapping[str, Any]]] = defaultdict(list)
+    eligible_rows: List[Mapping[str, Any]] = []
+    for row in rows:
+        if str(row.get("row_type") or "trade").strip().casefold() != "trade":
+            continue
+        if _is_test_trade_value(row.get("is_test_trade", row.get("test"))):
+            continue
+        eligible_rows.append(row)
+        row_id = str(row.get("id") or row.get("row_id") or stable_row_id(dict(row)) or "").strip()
+        if row_id:
+            rows_by_id[row_id].append(row)
+
+    for coordinate in stale_coordinates:
+        ws.cell(*coordinate).hyperlink = None
+
+    unresolved: List[Dict[str, Any]] = []
+    linked = 0
+    for coordinate, raw_source in source_requests.items():
+        cell = ws.cell(*coordinate)
+        source = raw_source if isinstance(raw_source, Mapping) else {}
+        source_id = str(source.get("id") or source.get("row_id") or "").strip()
+        reason = ""
+        matched_row: Mapping[str, Any] | None = None
+        if source_id:
+            candidates = rows_by_id.get(source_id, [])
+            if len(candidates) != 1:
+                reason = "missing_source_trade" if not candidates else "ambiguous_source_identity"
+            else:
+                matched, conflict = _stats1_source_matches_row(source, candidates[0])
+                if matched:
+                    matched_row = candidates[0]
+                else:
+                    reason = conflict
+        else:
+            source_symbol = str(source.get("symbol") or source.get("instrument") or "").strip().upper()
+            metric_key = str(source.get("metric_key") or "").strip()
+            metric_value = _as_float(source.get("metric_value"))
+            identity_evidence = bool(
+                source.get("account")
+                or source.get("open_time") and source.get("close_time")
+                or source.get("date") and metric_key and metric_value is not None
+                or metric_key and metric_value is not None and (source.get("open_time") or source.get("close_time"))
+            )
+            if not source_symbol:
+                reason = "missing_source_identity"
+            elif not identity_evidence:
+                reason = "insufficient_legacy_source_identity"
+            else:
+                candidates = []
+                for row in eligible_rows:
+                    matched, _conflict = _stats1_source_matches_row(source, row)
+                    if matched and str(row.get("symbol") or row.get("symbol_raw") or row.get("instrument") or "").strip().upper() == source_symbol:
+                        candidates.append(row)
+                if len(candidates) == 1:
+                    matched_row = candidates[0]
+                else:
+                    reason = "missing_source_trade" if not candidates else "ambiguous_source_identity"
+
+        if matched_row is not None:
+            row_id = str(matched_row.get("id") or matched_row.get("row_id") or stable_row_id(dict(matched_row)) or "").strip()
+            trade_number = str(trade_number_by_id.get(row_id) or matched_row.get("trade_number") or "").strip()
+            if not trade_number:
+                reason = "missing_existing_trade_number"
+            else:
+                folder_diagnostics: Dict[str, Any] = {}
+                target, reason = resolve_trade_folder_link(
+                    trade_number,
+                    open_time=matched_row.get("open_time"),
+                    close_time=matched_row.get("close_time"),
+                    forex_root=forex_root,
+                    crypto_root=crypto_root,
+                    diagnostics=folder_diagnostics,
+                )
+                if target:
+                    parsed = urlsplit(target)
+                    local_path = unquote(parsed.path)
+                    if os.name == "nt" and re.match(r"^/[A-Za-z]:/", local_path):
+                        local_path = local_path[1:]
+                    if parsed.scheme.casefold() != "file" or parsed.netloc not in {"", "localhost"} or not Path(local_path).is_dir():
+                        target = None
+                        reason = "resolved_target_is_not_trade_folder"
+                if target:
+                    cell.hyperlink = target
+                    linked += 1
+                else:
+                    cell.hyperlink = None
+                if not target:
+                    unresolved.append({
+                        "cell": cell.coordinate,
+                        "source_id": source_id or row_id,
+                        "trade_number": trade_number,
+                        "reason": reason or "missing_trade_folder",
+                        "checked_roots": list(folder_diagnostics.get("checked_roots") or []),
+                    })
+                continue
+
+        cell.hyperlink = None
+        unresolved.append({
+            "cell": cell.coordinate,
+            "source_id": source_id,
+            "symbol": str(source.get("symbol") or source.get("instrument") or ""),
+            "metric_key": str(source.get("metric_key") or ""),
+            "reason": reason or "unresolved_source_identity",
+        })
+
+    diagnostics["stats1_trade_source_hyperlinks_added"] = linked
+    if unresolved:
+        diagnostics["stats1_trade_source_hyperlinks_unresolved"] = unresolved
+    else:
+        diagnostics.pop("stats1_trade_source_hyperlinks_unresolved", None)
+    return {"linked": linked, "unresolved": unresolved}
     style_cache: Dict[Tuple[int, ...], Any] = {}
     for (row, col), cell in list(ws._cells.items()):
             if row < data_start:
@@ -17030,6 +17281,8 @@ def update_master_journal_workbook_data_only(
         trade_log_ws = _get_trade_log_sheet(wb, allow_legacy=False)
         _ensure_trade_log_schema(trade_log_ws, diagnostics)
         dash = _stats1_sheet(wb)
+        stats1_stale_trade_reference_cells = _stats1_existing_trade_reference_cells(dash)
+        stats1_source_link_requests: Dict[Tuple[int, int], Any] = {}
         detail_dash = _stats2_sheet(wb) or dash
         if not preserve_existing_layout:
             _repair_dashboard_core_layout(dash, diagnostics)
@@ -17187,13 +17440,15 @@ def update_master_journal_workbook_data_only(
             pos = _find_label_in_section(target_ws, label, section_anchors[section])
             if not pos:
                 return
-            _write_dashboard_metric_cell(
+            wrote = _write_dashboard_metric_cell(
                 target_ws,
                 pos[0],
                 pos[1] + 1,
                 out,
                 "raw" if source else metric_type,
             )
+            if wrote and target_ws is dash and isinstance(source, Mapping):
+                stats1_source_link_requests[(pos[0], pos[1] + 1)] = source
 
         def _main_dashboard_market_columns() -> Dict[str, int]:
             cols: Dict[str, int] = {}
@@ -17261,6 +17516,8 @@ def update_master_journal_workbook_data_only(
                     "raw" if source else metric_type,
                     semantic,
                 )
+                if wrote and isinstance(source, Mapping):
+                    stats1_source_link_requests[(pos[0], col)] = source
                 if wrote and source and semantic and _as_float(raw_value) not in (None, 0):
                     if semantic == "profit_loss":
                         _apply_full_cell_semantic_fill(dash.cell(pos[0], col), "profit" if float(raw_value) > 0 else "loss")
@@ -17301,6 +17558,17 @@ def update_master_journal_workbook_data_only(
                     if not _is_merged_non_anchor(dash, row_num, 1):
                         dash.cell(row_num, 1).value = "Net P/L Percentage"
             label_rows = _dashboard_label_rows_by_col(1)
+            overall_anchor = anchors["Overall"]
+            overall_start = int(overall_anchor["start_row"])
+            overall_end = int(overall_anchor["end_row"])
+            following_section_rows = [
+                int(section_anchor["anchor_row"])
+                for section_name, section_anchor in anchors.items()
+                if section_name != "Overall"
+                and int(section_anchor["anchor_row"]) > overall_start
+            ]
+            if following_section_rows:
+                overall_end = min(overall_end, min(following_section_rows) - 1)
             metric_specs = [
                 (["Trades"], "trades", "count", None),
                 (["Wins"], "wins", "count", None),
@@ -17382,7 +17650,11 @@ def update_master_journal_workbook_data_only(
             for labels, key, metric_type, semantic in metric_specs:
                 rows_for_metric: List[int] = []
                 for label in labels:
-                    rows_for_metric.extend(label_rows.get(label.lower(), []))
+                    rows_for_metric.extend(
+                        row_num
+                        for row_num in label_rows.get(label.lower(), [])
+                        if overall_start <= row_num <= overall_end
+                    )
                 if not rows_for_metric:
                     diagnostics.setdefault("missing_dashboard_metric_labels", []).append(" / ".join(labels))
                     continue
@@ -17416,6 +17688,8 @@ def update_master_journal_workbook_data_only(
                             semantic,
                             allow_grey=False,
                         )
+                        if wrote and inline_source:
+                            stats1_source_link_requests[(row_num, col)] = inline_source
                         if wrote and inline_source and semantic and _as_float(raw_value) not in (None, 0):
                             if semantic == "profit_loss":
                                 _apply_full_cell_semantic_fill(dash.cell(row_num, col), "profit" if float(raw_value) > 0 else "loss")
@@ -17708,7 +17982,16 @@ def update_master_journal_workbook_data_only(
                 ("Max Commission", "max_commission"),
                 ("Total Commission", "total_commission"),
             ):
-                write_market_metric("Commission", label, _extended_market_values(key))
+                commission_values = _extended_market_values(key)
+                commission_values["overall"] = None
+                commission_sources = _extended_market_sources(key)
+                commission_sources["overall"] = None
+                write_market_metric(
+                    "Commission",
+                    label,
+                    commission_values,
+                    sources_by_market=commission_sources if key in {"min_commission", "max_commission"} else None,
+                )
 
         if "Drawdown" in anchors:
             market_cols = _main_dashboard_market_columns()
@@ -18538,6 +18821,14 @@ def update_master_journal_workbook_data_only(
             wb,
             chart_bundle,
             preserve_stats1_presentation=preserve_existing_layout,
+        )
+        _apply_stats1_trade_source_hyperlinks(
+            dash,
+            stats1_source_link_requests,
+            rows,
+            trade_log_ws,
+            diagnostics,
+            stale_coordinates=stats1_stale_trade_reference_cells,
         )
         after = _snapshot_invariants(wb)
         _assert_invariants_unchanged(before, after)

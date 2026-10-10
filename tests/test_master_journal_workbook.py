@@ -11101,3 +11101,444 @@ def test_journal_decimal_text_refresh_preserves_numbers_formulas_balances_and_la
         )
     finally:
         refreshed_wb.close()
+
+
+def _job8_stats1_link_snapshot():
+    snapshot = sample_snapshot()
+    snapshot["items"] = [
+        {
+            "id": "fx-trade-1", "row_type": "trade", "trade_number": "F12",
+            "symbol": "EURUSD", "asset_class": "fx", "side": "BUY",
+            "account": "Pepperstone Demo", "currency": "AUD",
+            "open_time": "2021-05-05T23:00:00Z", "close_time": "2021-05-06T00:00:00Z",
+            "entry_price": 1.2, "exit_price": 1.212, "stop_loss": 1.19,
+            "take_profit": 1.22, "result_pct": 1.0, "r_multiple": 0.8,
+            "net_profit": 1.0, "commission": 0.2, "trade_duration_seconds": 3600,
+        },
+        {
+            "id": "xtz-trade-a", "row_type": "trade", "trade_number": "C31",
+            "symbol": "XTZUSDT", "asset_class": "crypto", "side": "BUY",
+            "account": "Bybit Demo", "currency": "USDT",
+            "open_time": "2021-05-06T01:00:00Z", "close_time": "2021-05-06T02:00:00Z",
+            "entry_price": 10.0, "exit_price": 10.2, "stop_loss": 9.9,
+            "take_profit": 10.3, "result_pct": 2.0, "r_multiple": 1.5,
+            "net_profit": 2.0, "commission": 0.03, "trade_duration_seconds": 60,
+        },
+        {
+            "id": "xtz-trade-b", "row_type": "trade", "trade_number": "C32",
+            "symbol": "XTZUSDT", "asset_class": "crypto", "side": "BUY",
+            "account": "Bybit Demo", "currency": "USDT",
+            "open_time": "2021-05-06T03:00:00Z", "close_time": "2021-05-06T04:00:00Z",
+            "entry_price": 10.0, "exit_price": 10.1, "stop_loss": 9.8,
+            "take_profit": 10.1, "result_pct": 1.0, "r_multiple": 0.8,
+            "net_profit": 1.0, "commission": 0.08, "trade_duration_seconds": 120,
+        },
+    ]
+    snapshot["stats"] = {
+        "totals": {},
+        "groups": {
+            "by_market": {"overall": {}, "fx": {}, "crypto": {}},
+            "risk_expectancy": {}, "duration": {}, "leaders": {},
+        },
+        "by_instrument": [],
+    }
+    return snapshot
+
+
+def _job8_make_trade_folders(snapshot, forex_root: Path, crypto_root: Path):
+    import calendar
+
+    for row in snapshot["items"]:
+        root = forex_root if row["asset_class"] == "fx" else crypto_root
+        opened = datetime.fromisoformat(row["open_time"].replace("Z", "+00:00"))
+        folder = root / str(opened.year) / calendar.month_name[opened.month].upper() / (
+            f"{row['trade_number']} {row['symbol']} Trade Folder"
+        )
+        folder.mkdir(parents=True, exist_ok=True)
+
+
+def test_stats1_trade_source_links_resolve_exact_existing_folders(tmp_path: Path, monkeypatch):
+    from tools import master_journal_workbook as journal
+
+    snapshot = _job8_stats1_link_snapshot()
+    forex_root = tmp_path / "FOREX chart root"
+    crypto_root = tmp_path / "CRYPTO chart root"
+    _job8_make_trade_folders(snapshot, forex_root, crypto_root)
+    monkeypatch.setenv("TRADING_JOURNAL_FOREX_ROOT", str(forex_root))
+    monkeypatch.setenv("TRADING_JOURNAL_CRYPTO_ROOT", str(crypto_root))
+    journal._TRADE_FOLDER_INDEX_CACHE.clear()
+
+    output = tmp_path / "stats1-source-links.xlsx"
+    result = build_master_journal_workbook(
+        snapshot, output, publish_recommendation_assets=False
+    )
+    assert result["ok"] is True
+    assert result["diagnostics"]["stats1_trade_source_hyperlinks_added"] > 0
+
+    wb = load_workbook(output)
+    try:
+        ws = wb[STATS1_SHEET]
+        source_cells = [
+            cell for cell in ws._cells.values()
+            if isinstance(cell.value, str)
+            and journal._STATS1_TRADE_REFERENCE_SUFFIX_RE.search(cell.value)
+        ]
+        assert source_cells
+        assert all(cell.hyperlink is not None for cell in source_cells)
+
+        crypto_a = (crypto_root / "2021" / "MAY" / "C31 XTZUSDT Trade Folder").resolve().as_uri()
+        crypto_b = (crypto_root / "2021" / "MAY" / "C32 XTZUSDT Trade Folder").resolve().as_uri()
+        fx_target = (forex_root / "2021" / "MAY" / "F12 EURUSD Trade Folder").resolve().as_uri()
+        assert "%20" in crypto_a and "%20" in fx_target
+        assert any(
+            cell.value == "2.00% - XTZUSDT 2021-05-06"
+            and cell.hyperlink.target == crypto_a
+            for cell in source_cells
+        )
+        assert any(
+            cell.value == "1.00% - XTZUSDT 2021-05-06"
+            and cell.hyperlink.target == crypto_b
+            for cell in source_cells
+        )
+        assert any(
+            cell.value == "1.00% - EURUSD 2021-05-06"
+            and cell.hyperlink.target == fx_target
+            for cell in source_cells
+        )
+
+        def metric_cell(label, market_col):
+            row = next(
+                row for row in range(1, ws.max_row + 1)
+                if str(ws.cell(row, 1).value or "").strip() == label
+            )
+            return ws.cell(row, market_col)
+
+        assert metric_cell("Min Commission", 4).hyperlink.target == crypto_a
+        assert metric_cell("Max Commission", 4).hyperlink.target == crypto_b
+        for label in ("Min Commission", "Max Commission"):
+            overall_commission = metric_cell(label, 2)
+            assert overall_commission.value in (None, "")
+            assert overall_commission.hyperlink is None
+
+        label_link = "file:///manual-label-reference"
+        recommendation_link = "file:///existing-recommendation-chart.html"
+        ws["A2"].hyperlink = label_link
+        recommendation_row = next(
+            row for row in range(2, ws.max_row + 1)
+            if str(ws.cell(row, 1).value or "").strip().casefold() == "recommendation"
+        )
+        ws.cell(recommendation_row, 2).hyperlink = recommendation_link
+        target_cell = next(
+            cell for cell in source_cells
+            if cell.value == "2.00% - XTZUSDT 2021-05-06"
+        )
+        row_by_id = {row["id"]: row for row in snapshot["items"]}
+        before = (target_cell.value, target_cell.number_format, copy(target_cell._style))
+        journal._apply_stats1_trade_source_hyperlinks(
+            ws,
+            {(target_cell.row, target_cell.column): journal._trade_metric_ref(row_by_id["xtz-trade-a"], "max_result_pct", 2.0)},
+            snapshot["items"],
+            wb["Trade Log"],
+            {},
+            stale_coordinates=journal._stats1_existing_trade_reference_cells(ws),
+            forex_root=forex_root,
+            crypto_root=crypto_root,
+        )
+        assert ws["A2"].hyperlink.target == label_link
+        assert ws.cell(recommendation_row, 2).hyperlink.target == recommendation_link
+        assert (target_cell.value, target_cell.number_format, target_cell._style) == before
+        assert target_cell.hyperlink.target == crypto_a
+    finally:
+        wb.close()
+        journal._TRADE_FOLDER_INDEX_CACHE.clear()
+
+
+def test_stats1_trade_source_links_do_not_guess_or_keep_stale_targets(tmp_path: Path):
+    from openpyxl import Workbook
+    from tools import master_journal_workbook as journal
+
+    crypto_root = tmp_path / "legacy CRYPTO root"
+    legacy_file = crypto_root / "2021" / "MAY" / "screenshots" / "C99 XTZUSDT.png"
+    legacy_file.parent.mkdir(parents=True)
+    legacy_file.write_bytes(b"fixture")
+    old_folder = crypto_root / "2021" / "MAY" / "C40 XTZUSDT Old Folder"
+    new_folder = crypto_root / "2021" / "MAY" / "C42 XTZUSDT New Folder"
+    old_folder.mkdir(parents=True)
+    new_folder.mkdir(parents=True)
+
+    rows = [
+        {"id": "amb-a", "row_type": "trade", "trade_number": "C41", "symbol": "XTZUSDT", "asset_class": "crypto", "account": "Bybit Demo", "open_time": "2021-05-06T01:00:00Z", "close_time": "2021-05-06T02:00:00Z", "result_pct": 0.75, "trade_duration_seconds": 3600},
+        {"id": "amb-b", "row_type": "trade", "trade_number": "C43", "symbol": "XTZUSDT", "asset_class": "crypto", "account": "Bybit Demo", "open_time": "2021-05-06T03:00:00Z", "close_time": "2021-05-06T04:00:00Z", "result_pct": 0.75, "trade_duration_seconds": 3600},
+        {"id": "legacy-file", "row_type": "trade", "trade_number": "C99", "symbol": "XTZUSDT", "asset_class": "crypto", "account": "Bybit Demo", "open_time": "2021-05-06T01:00:00Z", "close_time": "2021-05-06T02:00:00Z", "result_pct": 0.75, "trade_duration_seconds": 3600},
+        {"id": "changed", "row_type": "trade", "trade_number": "C42", "symbol": "XTZUSDT", "asset_class": "crypto", "account": "Bybit Demo", "open_time": "2021-05-06T05:00:00Z", "close_time": "2021-05-06T06:00:00Z", "result_pct": 0.5, "trade_duration_seconds": 3600},
+    ]
+    wb = Workbook()
+    ws = wb.active
+    ws.title = STATS1_SHEET
+    for col, label in enumerate(("Overall", "FX", "Crypto"), start=2):
+        ws.cell(1, col).value = label
+    ws["B2"] = "0.75% - XTZUSDT 2021-05-06"
+    ws["B3"] = "0.75% - XTZUSDT 2021-05-06"
+    ws["B4"] = "0.75% - XTZUSDT 2021-05-06"
+    ws["B5"] = "0.50% - XTZUSDT 2021-05-06"
+    ws["B5"].hyperlink = old_folder.resolve().as_uri()
+    original_text = ws["B5"].value
+    original_style = copy(ws["B5"]._style)
+
+    sources = {
+        (2, 2): {"id": "not-present", "symbol": "XTZUSDT", "metric_key": "max_result_pct", "metric_value": 0.75},
+        (3, 2): {"symbol": "XTZUSDT", "account": "Bybit Demo", "date": "2021-05-06", "metric_key": "max_result_pct", "metric_value": 0.75},
+        (4, 2): journal._trade_metric_ref(rows[2], "max_result_pct", 0.75),
+        (5, 2): journal._trade_metric_ref(rows[3], "max_result_pct", 0.5),
+    }
+    diagnostics = {}
+    journal._TRADE_FOLDER_INDEX_CACHE.clear()
+    try:
+        result = journal._apply_stats1_trade_source_hyperlinks(
+            ws,
+            sources,
+            rows,
+            diagnostics=diagnostics,
+            stale_coordinates=journal._stats1_existing_trade_reference_cells(ws),
+            crypto_root=crypto_root,
+        )
+        assert result["linked"] == 1
+        assert ws["B2"].hyperlink is None
+        assert ws["B3"].hyperlink is None
+        assert ws["B4"].hyperlink is None
+        assert ws["B5"].hyperlink.target == new_folder.resolve().as_uri()
+        assert ws["B5"].value == original_text
+        assert ws["B5"]._style == original_style
+        reasons = {item["cell"]: item["reason"] for item in result["unresolved"]}
+        assert reasons == {
+            "B2": "missing_source_trade",
+            "B3": "ambiguous_source_identity",
+            "B4": "resolved_target_is_not_trade_folder",
+        }
+        assert diagnostics["stats1_trade_source_hyperlinks_unresolved"] == result["unresolved"]
+
+        stale = journal._stats1_existing_trade_reference_cells(ws)
+        journal._apply_stats1_trade_source_hyperlinks(
+            ws, {}, rows, diagnostics={}, stale_coordinates=stale, crypto_root=crypto_root
+        )
+        assert ws["B5"].hyperlink is None
+        assert ws["B5"].value == original_text
+    finally:
+        wb.close()
+        journal._TRADE_FOLDER_INDEX_CACHE.clear()
+
+
+def test_stats1_trade_source_links_survive_preservation_refresh_without_layout_changes(
+    tmp_path: Path, monkeypatch, request
+):
+    import faulthandler
+    import os
+    import time
+
+    from openpyxl.styles import Font
+    from tools import master_journal_workbook as journal
+
+    case_started = time.monotonic()
+
+    def timing_start(stage):
+        started = time.monotonic()
+        print(f"[job8-stage] {stage} START +{started - case_started:.2f}s", flush=True)
+        return started
+
+    def timing_end(stage, started):
+        ended = time.monotonic()
+        print(
+            f"[job8-stage] {stage} END +{ended - case_started:.2f}s "
+            f"duration={ended - started:.2f}s",
+            flush=True,
+        )
+
+    stack_dump_path = Path(
+        os.environ.get("JOB8_STACK_DUMP_PATH", tmp_path / "job8_stackdump.txt")
+    )
+    stack_dump_path.parent.mkdir(parents=True, exist_ok=True)
+    stack_dump_file = stack_dump_path.open("w", encoding="utf-8", buffering=1)
+
+    def cancel_stack_dump():
+        faulthandler.cancel_dump_traceback_later()
+        stack_dump_file.close()
+
+    request.addfinalizer(cancel_stack_dump)
+    faulthandler.dump_traceback_later(300, repeat=False, file=stack_dump_file)
+    fixture_started = timing_start("fixture generation")
+    snapshot = _job8_stats1_link_snapshot()
+    snapshot["items"][0].update(result_pct=-1.0, r_multiple=-0.8, net_profit=-1.0)
+    forex_root = tmp_path / "FOREX chart root"
+    crypto_root = tmp_path / "CRYPTO chart root"
+    _job8_make_trade_folders(snapshot, forex_root, crypto_root)
+    monkeypatch.setenv("TRADING_JOURNAL_FOREX_ROOT", str(forex_root))
+    monkeypatch.setenv("TRADING_JOURNAL_CRYPTO_ROOT", str(crypto_root))
+    journal._TRADE_FOLDER_INDEX_CACHE.clear()
+    path = tmp_path / "preserved-stats1-source-links.xlsx"
+    built = build_master_journal_workbook(
+        snapshot, path, publish_recommendation_assets=False
+    )
+    assert built["ok"] is True
+    timing_end("fixture generation", fixture_started)
+    print("[job8-stage] baseline preparation NOT USED", flush=True)
+
+    def saved_stats1_hyperlinks(workbook_path):
+        ns = {
+            "main": "http://schemas.openxmlformats.org/spreadsheetml/2006/main",
+            "rel": "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+            "pkg": "http://schemas.openxmlformats.org/package/2006/relationships",
+        }
+        with zipfile.ZipFile(workbook_path) as package:
+            sheet = ET.fromstring(package.read("xl/worksheets/sheet1.xml"))
+            relationships = ET.fromstring(
+                package.read("xl/worksheets/_rels/sheet1.xml.rels")
+            )
+        targets = {
+            item.attrib["Id"]: item.attrib.get("Target", "")
+            for item in relationships.findall("pkg:Relationship", ns)
+            if item.attrib.get("Type", "").endswith("/hyperlink")
+        }
+        refs = [
+            (item.attrib.get("ref", ""), targets.get(item.attrib.get(f"{{{ns['rel']}}}id", ""), ""))
+            for item in sheet.findall("main:hyperlinks/main:hyperlink", ns)
+        ]
+        assert len([ref for ref, _target in refs]) == len(set(ref for ref, _target in refs))
+        return tuple(sorted(refs))
+
+    authored_workbook_started = timing_start("authored workbook reload/setup")
+    wb = load_workbook(path)
+    try:
+        stats1 = wb[STATS1_SHEET]
+        stats1["A2"].hyperlink = "file:///manual-label-reference"
+        stats1["A2"].font = Font(name="Calibri", size=11, bold=True, italic=True)
+        stats1["J1"] = "=1+2"
+        recommendation_row = next(
+            row for row in range(2, stats1.max_row + 1)
+            if str(stats1.cell(row, 1).value or "").strip().casefold() == "recommendation"
+            and row > 2
+        )
+        recommendation_cell = stats1.cell(recommendation_row, 2)
+        recommendation_target = recommendation_cell.hyperlink.target if recommendation_cell.hyperlink else None
+        assert recommendation_target
+        wb.save(path)
+    finally:
+        wb.close()
+    initial_hyperlinks = saved_stats1_hyperlinks(path)
+    timing_end("authored workbook reload/setup", authored_workbook_started)
+
+    row_id_to_link = {}
+    baseline_capture_started = timing_start("initial workbook reload/capture")
+    initial = load_workbook(path, data_only=False)
+    try:
+        stats1 = initial[STATS1_SHEET]
+        trade_log = initial["Trade Log"]
+        headers = journal._trade_log_header_map(trade_log)
+        source_id_col = headers["Row ID"]
+        number_col = headers[TRADE_NUMBER_HEADER]
+        row_id_to_link = {
+            str(trade_log.cell(row, source_id_col).value): str(trade_log.cell(row, number_col).value)
+            for row in range(TRADE_LOG_DATA_START_ROW, trade_log.max_row + 1)
+            if trade_log.cell(row, source_id_col).value
+        }
+        assert row_id_to_link["xtz-trade-a"] == "C31"
+        assert stats1["A2"].hyperlink.target == "file:///manual-label-reference"
+        assert stats1["A2"].font.italic is True
+        assert stats1["J1"].value == "=1+2"
+        max_win_row = next(
+            row for row in range(1, stats1.max_row + 1)
+            if str(stats1.cell(row, 1).value or "").strip() == "Max win %"
+        )
+        source_cell = stats1.cell(max_win_row, 2)
+        source_coordinate = source_cell.coordinate
+        expected_target = (crypto_root / "2021" / "MAY" / "C31 XTZUSDT Trade Folder").resolve().as_uri()
+        assert source_cell.hyperlink.target == expected_target
+        source_style = copy(source_cell._style)
+        source_number_format = source_cell.number_format
+        wrong_outcome_source_cells = (
+            "C42", "C44", "C45", "C47", "C48", "C50", "C53", "C56",
+            "D59", "D61", "D62", "D64", "D65", "D67",
+        )
+        assert all(
+            stats1[coordinate].value in (None, "")
+            and stats1[coordinate].hyperlink is None
+            for coordinate in wrong_outcome_source_cells
+        )
+        for label in ("Min Commission", "Max Commission"):
+            row = next(
+                row for row in range(1, stats1.max_row + 1)
+                if str(stats1.cell(row, 1).value or "").strip() == label
+            )
+            assert stats1.cell(row, 2).value in (None, "")
+            assert stats1.cell(row, 2).hyperlink is None
+        balance = initial[STATS2_SHEET]["B3"].value
+        balance_format = initial[STATS2_SHEET]["B3"].number_format
+        sheet_order = list(initial.sheetnames)
+        recommendation_link_before = recommendation_target
+    finally:
+        initial.close()
+    timing_end("initial workbook reload/capture", baseline_capture_started)
+
+    results = []
+    for refresh_index in range(2):
+        refresh_label = f"preservation refresh {refresh_index + 1}"
+        refresh_started = timing_start(refresh_label)
+        refreshed = update_master_journal_workbook_data_only(
+            path,
+            snapshot,
+            preserve_existing_layout=True,
+            publish_recommendation_assets=False,
+        )
+        timing_end(refresh_label, refresh_started)
+        assert refreshed["ok"] is True, refreshed
+        candidate = Path(refreshed["candidate_path"])
+        candidate_capture_label = f"candidate reload/capture {refresh_index + 1}"
+        candidate_capture_started = timing_start(candidate_capture_label)
+        candidate_wb = load_workbook(candidate, data_only=False)
+        try:
+            stats1 = candidate_wb[STATS1_SHEET]
+            trade_log = candidate_wb["Trade Log"]
+            cell = stats1[source_coordinate]
+            assert cell.value == "2.00% - XTZUSDT 2021-05-06"
+            assert cell.hyperlink.target == expected_target
+            assert cell._style == source_style
+            assert cell.number_format == source_number_format
+            assert all(
+                stats1[coordinate].value in (None, "")
+                and stats1[coordinate].hyperlink is None
+                for coordinate in wrong_outcome_source_cells
+            )
+            for label in ("Min Commission", "Max Commission"):
+                row = next(
+                    row for row in range(1, stats1.max_row + 1)
+                    if str(stats1.cell(row, 1).value or "").strip() == label
+                )
+                assert stats1.cell(row, 2).value in (None, "")
+                assert stats1.cell(row, 2).hyperlink is None
+            assert stats1["A2"].hyperlink.target == "file:///manual-label-reference"
+            assert stats1["A2"].font.italic is True
+            assert stats1["J1"].value == "=1+2"
+            assert candidate_wb[STATS2_SHEET]["B3"].value == balance
+            assert candidate_wb[STATS2_SHEET]["B3"].number_format == balance_format
+            assert list(candidate_wb.sheetnames) == sheet_order
+            refreshed_recommendation_row = next(
+                row for row in range(2, stats1.max_row + 1)
+                if str(stats1.cell(row, 1).value or "").strip().casefold() == "recommendation"
+                and row > 2
+            )
+            refreshed_recommendation = stats1.cell(refreshed_recommendation_row, 2).hyperlink
+            assert refreshed_recommendation is not None
+            assert refreshed_recommendation.target == recommendation_link_before
+            assert saved_stats1_hyperlinks(candidate) == initial_hyperlinks
+            refreshed_source_cell = stats1[source_coordinate]
+            assert refreshed_source_cell.value == "2.00% - XTZUSDT 2021-05-06"
+            assert refreshed_source_cell.hyperlink.target == expected_target
+            results.append((refreshed_source_cell.value, refreshed_source_cell.hyperlink.target))
+        finally:
+            candidate_wb.close()
+            timing_end(candidate_capture_label, candidate_capture_started)
+        candidate.replace(path)
+
+    final_assertions_started = timing_start("final repeat-refresh assertions")
+    assert results[0] == results[1]
+    journal._TRADE_FOLDER_INDEX_CACHE.clear()
+    timing_end("final repeat-refresh assertions", final_assertions_started)
