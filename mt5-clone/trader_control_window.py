@@ -28,6 +28,8 @@ MAX_REFRESH_MS = 5000
 MAX_STATUS_FRESH_SECONDS = 30
 COMMAND_PENDING_SECONDS = 20
 STARTUP_GRACE_SECONDS = 8
+HANDOFF_FRESH_SECONDS = 30
+SW_SHOWMINNOACTIVE = 7
 
 
 class ProtocolError(RuntimeError):
@@ -43,6 +45,7 @@ class InstanceIdentity:
     symbol: str
     magic_number: int
     ea_version: str
+    owner_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -123,6 +126,10 @@ class TraderControlProtocol:
             and payload.get("symbol") == self.identity.symbol
             and payload.get("magic_number") == self.identity.magic_number
             and payload.get("ea_version") == self.identity.ea_version
+            and (
+                not self.identity.owner_id
+                or payload.get("owner_id") == self.identity.owner_id
+            )
         )
 
     def _pending_command_id(self, now: float) -> str | None:
@@ -249,6 +256,171 @@ class InstanceWindowGuard:
         self.handle = None
 
 
+def _identity_payload(identity: InstanceIdentity) -> dict[str, Any]:
+    return {
+        "protocol_version": PROTOCOL_VERSION,
+        "owner_id": identity.owner_id,
+        "instance_id": identity.instance_id,
+        "account_login": identity.account_login,
+        "account_server": identity.account_server,
+        "chart_id": identity.chart_id,
+        "symbol": identity.symbol,
+        "magic_number": identity.magic_number,
+        "ea_version": identity.ea_version,
+    }
+
+
+def _identity_from_payload(payload: dict[str, Any], owner_id: str) -> InstanceIdentity | None:
+    if (
+        payload.get("protocol_version") != PROTOCOL_VERSION
+        or not owner_id
+        or payload.get("owner_id") != owner_id
+        or not isinstance(payload.get("instance_id"), str)
+        or not isinstance(payload.get("account_login"), int)
+        or not isinstance(payload.get("account_server"), str)
+        or not isinstance(payload.get("chart_id"), int)
+        or not isinstance(payload.get("symbol"), str)
+        or not isinstance(payload.get("magic_number"), int)
+        or not isinstance(payload.get("ea_version"), str)
+    ):
+        return None
+    return InstanceIdentity(
+        instance_id=payload["instance_id"],
+        account_login=payload["account_login"],
+        account_server=payload["account_server"],
+        chart_id=payload["chart_id"],
+        symbol=payload["symbol"],
+        magic_number=payload["magic_number"],
+        ea_version=payload["ea_version"],
+        owner_id=payload["owner_id"],
+    )
+
+
+class OwnerHandoffMailbox:
+    """One bounded identity handoff channel for a terminal/account/chart owner."""
+
+    def __init__(self, common_dir: Path, owner_id: str) -> None:
+        self.owner_id = owner_id
+        self.path = Path(common_dir) / f"TraderControl.owner.v1.{owner_id}.handoff.json"
+
+    def publish(self, identity: InstanceIdentity, now: float | None = None) -> None:
+        payload = _identity_payload(identity)
+        payload["requested_at"] = int(time.time() if now is None else now)
+        payload["request_id"] = str(uuid.uuid4())
+        atomic_write_json(self.path, payload)
+
+    def read(self, now: float | None = None) -> InstanceIdentity | None:
+        record = TraderControlProtocol._read_json(self.path).payload
+        if not record:
+            return None
+        requested_at = record.get("requested_at")
+        current = time.time() if now is None else now
+        if (
+            not isinstance(requested_at, int)
+            or current < requested_at - 5
+            or current - requested_at > HANDOFF_FRESH_SECONDS
+        ):
+            return None
+        return _identity_from_payload(record, self.owner_id)
+
+    def clear(self) -> None:
+        try:
+            self.path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+class WindowOwnership:
+    """Hold one window per terminal/account/chart and its current instance lock."""
+
+    def __init__(
+        self,
+        common_dir: Path,
+        identity: InstanceIdentity,
+        owner_guard: InstanceWindowGuard,
+        instance_guard: InstanceWindowGuard,
+        mailbox: OwnerHandoffMailbox,
+    ) -> None:
+        self.common_dir = Path(common_dir)
+        self.identity = identity
+        self.owner_guard = owner_guard
+        self.instance_guard = instance_guard
+        self.mailbox = mailbox
+
+    @staticmethod
+    def _guard_path(common_dir: Path, namespace: str) -> Path:
+        return Path(common_dir) / f"{namespace}.window-guard.lock"
+
+    @classmethod
+    def claim_or_handoff(
+        cls,
+        common_dir: Path,
+        identity: InstanceIdentity,
+        guard_factory: Callable[[Path], InstanceWindowGuard] = InstanceWindowGuard,
+    ) -> WindowOwnership | None:
+        if not identity.owner_id:
+            raise ProtocolError("Trader Controls owner identity is missing.")
+        mailbox = OwnerHandoffMailbox(common_dir, identity.owner_id)
+        owner_guard = guard_factory(
+            cls._guard_path(common_dir, f"TraderControl.owner.v1.{identity.owner_id}")
+        )
+        if not owner_guard.acquire():
+            mailbox.publish(identity)
+            return None
+        mailbox.clear()
+        instance_guard = guard_factory(
+            cls._guard_path(common_dir, f"TraderControl.v1.{identity.instance_id}")
+        )
+        if not instance_guard.acquire():
+            owner_guard.release()
+            raise ProtocolError("Trader Controls instance lock is already held by another owner.")
+        return cls(common_dir, identity, owner_guard, instance_guard, mailbox)
+
+    def accept_handoff(self, now: float | None = None) -> InstanceIdentity | None:
+        requested = self.mailbox.read(now)
+        if requested is None:
+            return None
+        if requested == self.identity:
+            self.mailbox.clear()
+            return None
+        if requested.instance_id == self.identity.instance_id:
+            self.identity = requested
+            self.mailbox.clear()
+            return requested
+        next_guard = InstanceWindowGuard(
+            self._guard_path(self.common_dir, f"TraderControl.v1.{requested.instance_id}")
+        )
+        if not next_guard.acquire():
+            return None
+        previous_guard = self.instance_guard
+        self.instance_guard = next_guard
+        self.identity = requested
+        self.mailbox.clear()
+        previous_guard.release()
+        return requested
+
+    def release(self) -> None:
+        self.instance_guard.release()
+        self.owner_guard.release()
+
+
+def show_minimized_no_activate(root: tk.Tk, user32: Any | None = None) -> None:
+    """Map the normal Tk top-level directly into a non-activating minimized state."""
+    root.update_idletasks()
+    if os.name != "nt" and user32 is None:
+        root.iconify()
+        return
+    if user32 is None:
+        import ctypes
+
+        user32 = ctypes.windll.user32
+    hwnd = int(root.winfo_id())
+    parent = int(user32.GetParent(hwnd))
+    if parent:
+        hwnd = parent
+    user32.ShowWindow(hwnd, SW_SHOWMINNOACTIVE)
+
+
 class TraderControlWindow:
     def __init__(
         self,
@@ -256,11 +428,13 @@ class TraderControlWindow:
         protocol: TraderControlProtocol,
         refresh_ms: int,
         on_close: Callable[[], None],
+        ownership: WindowOwnership | None = None,
     ) -> None:
         self.root = root
         self.protocol = protocol
         self.refresh_ms = clamp(refresh_ms, MIN_REFRESH_MS, MAX_REFRESH_MS)
         self.on_close = on_close
+        self.ownership = ownership
         self.last_seen_result_id: str | None = None
         self.session_command_ids: set[str] = set()
         self.buttons: list[ttk.Button] = []
@@ -281,12 +455,7 @@ class TraderControlWindow:
 
         ident = self.protocol.identity
         self.identity_var = tk.StringVar(
-            value=(
-                f"EA v{ident.ea_version} | Account {ident.account_login}\n"
-                f"{ident.account_server}\n"
-                f"{ident.symbol} | Magic {ident.magic_number} | Chart {ident.chart_id}\n"
-                f"Instance {ident.instance_id}"
-            )
+            value=self._identity_text(ident)
         )
         ttk.Label(frame, textvariable=self.identity_var, justify="center", anchor="center").grid(
             row=0, column=0, sticky="ew", pady=(0, 12)
@@ -332,7 +501,33 @@ class TraderControlWindow:
             self.result_var.set(f"{ACTION_LABELS[action]} | pending | {command['command_id']}")
         self._refresh()
 
+    @staticmethod
+    def _identity_text(ident: InstanceIdentity) -> str:
+        return (
+            f"EA v{ident.ea_version} | Account {ident.account_login}\n"
+            f"{ident.account_server}\n"
+            f"{ident.symbol} | Magic {ident.magic_number} | Chart {ident.chart_id}\n"
+            f"Instance {ident.instance_id}"
+        )
+
+    def _accept_handoff(self) -> bool:
+        if self.ownership is None:
+            return False
+        identity = self.ownership.accept_handoff()
+        if identity is None:
+            return False
+        self.protocol = TraderControlProtocol(self.protocol.common_dir, identity)
+        self.session_command_ids.clear()
+        self.last_seen_result_id = None
+        self.identity_var.set(self._identity_text(identity))
+        self.connection_var.set("Disconnected | Orders disabled | Freshness unavailable | Connecting to the current EA identity.")
+        self.result_var.set("Last command: none")
+        for button in self.buttons:
+            button.state(["disabled"])
+        return True
+
     def _refresh(self) -> None:
+        self._accept_handoff()
         state = self.protocol.state()
         status_text = "Connected" if state.connected else "Disconnected"
         orders = "enabled" if state.status and state.status.get("orders_enabled") else "disabled"
@@ -367,6 +562,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Control one attached Trader EA chart instance.")
     parser.add_argument("--common-dir", required=True)
     parser.add_argument("--instance-id", required=True)
+    parser.add_argument("--owner-id", required=True)
     parser.add_argument("--account-login", required=True, type=int)
     parser.add_argument("--account-server", required=True)
     parser.add_argument("--chart-id", required=True, type=int)
@@ -387,18 +583,21 @@ def main() -> None:
         symbol=args.symbol,
         magic_number=args.magic,
         ea_version=args.ea_version,
+        owner_id=args.owner_id,
     )
     common_dir = Path(args.common_dir)
-    guard = InstanceWindowGuard(common_dir / f"TraderControl.v1.{identity.instance_id}.window-guard.lock")
-    if not guard.acquire():
-        raise SystemExit("Trader Controls is already open for this EA chart instance.")
+    ownership = WindowOwnership.claim_or_handoff(common_dir, identity)
+    if ownership is None:
+        return
     root = tk.Tk()
+    root.withdraw()
     protocol = TraderControlProtocol(common_dir, identity)
-    TraderControlWindow(root, protocol, args.refresh_ms, guard.release)
+    TraderControlWindow(root, protocol, args.refresh_ms, ownership.release, ownership)
+    show_minimized_no_activate(root)
     try:
         root.mainloop()
     finally:
-        guard.release()
+        ownership.release()
 
 
 if __name__ == "__main__":

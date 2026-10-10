@@ -40,6 +40,174 @@ def _window_module():
     return module
 
 
+def test_auto_start_preserves_focus_and_reinitialization_keeps_one_current_window(
+    tmp_path: Path,
+) -> None:
+    window = _window_module()
+    owner_id = "OWNER-A"
+    original = window.InstanceIdentity(
+        "INSTANCE-EURUSD", 123456, "Pepperstone-Demo", 9988,
+        "EURUSD.a", 91001, "2.45", owner_id,
+    )
+    changed = window.InstanceIdentity(
+        "INSTANCE-GBPUSD", 123456, "Pepperstone-Demo", 9988,
+        "GBPUSD.a", 92002, "2.45", owner_id,
+    )
+    version_changed = window.InstanceIdentity(
+        "INSTANCE-GBPUSD", 123456, "Pepperstone-Demo", 9988,
+        "GBPUSD.a", 92002, "2.46", owner_id,
+    )
+    other_owner = window.InstanceIdentity(
+        "INSTANCE-OTHER", 123456, "Pepperstone-Demo", 7788,
+        "AUDUSD.a", 93003, "2.45", "OWNER-B",
+    )
+
+    class FakeRoot:
+        def __init__(self) -> None:
+            self.events = []
+            self.state = "normal"
+
+        def withdraw(self) -> None:
+            self.events.append("withdraw")
+            self.state = "withdrawn"
+
+        def update_idletasks(self) -> None:
+            self.events.append("update_idletasks")
+
+        def winfo_id(self) -> int:
+            self.events.append("winfo_id")
+            return 101
+
+        def iconify(self) -> None:
+            self.events.append("iconify")
+            self.state = "iconic"
+
+        def deiconify(self) -> None:
+            self.events.append("deiconify")
+            self.state = "normal"
+
+    class FakeUser32:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def GetParent(self, hwnd: int) -> int:
+            self.calls.append(("GetParent", hwnd))
+            return 202
+
+        def ShowWindow(self, hwnd: int, show_mode: int) -> int:
+            self.calls.append(("ShowWindow", hwnd, show_mode))
+            return 1
+
+    root = FakeRoot()
+    user32 = FakeUser32()
+    root.withdraw()
+    window.show_minimized_no_activate(root, user32=user32)
+    assert root.events == ["withdraw", "update_idletasks", "winfo_id"]
+    assert user32.calls == [("GetParent", 101), ("ShowWindow", 202, window.SW_SHOWMINNOACTIVE)]
+    assert not any(event.startswith("focus") for event in root.events)
+    root.state = "iconic"
+    root.deiconify()
+    assert root.state == "normal"
+
+    ownership = window.WindowOwnership.claim_or_handoff(tmp_path, original)
+    assert ownership is not None
+    other = None
+    try:
+        # The second launch cannot create another same-chart window; it leaves
+        # a complete current-identity request for the existing owner instead.
+        assert window.WindowOwnership.claim_or_handoff(tmp_path, changed) is None
+
+        class Value:
+            def __init__(self, value: str) -> None:
+                self.value = value
+
+            def set(self, value: str) -> None:
+                self.value = value
+
+        class Button:
+            def __init__(self) -> None:
+                self.states = []
+
+            def state(self, value) -> None:
+                self.states.append(tuple(value))
+
+        control = window.TraderControlWindow.__new__(window.TraderControlWindow)
+        control.protocol = window.TraderControlProtocol(tmp_path, original)
+        control.ownership = ownership
+        control.session_command_ids = {"old-window-command"}
+        control.last_seen_result_id = "old-window-command"
+        control.identity_var = Value(window.TraderControlWindow._identity_text(original))
+        control.connection_var = Value("Ready")
+        control.result_var = Value("Old result")
+        control.buttons = [Button()]
+
+        assert window.TraderControlWindow._accept_handoff(control) is True
+        assert control.protocol.identity == changed
+        assert ownership.identity == changed
+        assert control.session_command_ids == set()
+        assert control.last_seen_result_id is None
+        assert "GBPUSD.a" in control.identity_var.value
+        assert "Connecting to the current EA identity" in control.connection_var.value
+        assert control.result_var.value == "Last command: none"
+        assert control.buttons[0].states == [("disabled",)]
+        assert root.state == "normal"  # handoff never changes the user's visibility choice
+
+        # Until a full fresh snapshot for the new identity exists, commands
+        # remain unavailable. A matching snapshot enables only explicit clicks.
+        assert control.protocol.state().buttons_enabled is False
+        now = int(time.time())
+        status = {
+            **window._identity_payload(changed),
+            "updated_at": now,
+            "fresh_for_seconds": 5,
+            "connected": True,
+            "control_ready": True,
+            "orders_enabled": True,
+            "reason": "ready",
+        }
+        control.protocol.status_path.write_text(json.dumps(status), encoding="ascii")
+        assert control.protocol.state(now=now).buttons_enabled is True
+
+        # An EA-version-only reinitialization retains the same instance guard
+        # but still forces a complete protocol/status rebind.
+        assert window.WindowOwnership.claim_or_handoff(tmp_path, version_changed) is None
+        assert window.TraderControlWindow._accept_handoff(control) is True
+        assert control.protocol.identity == version_changed
+        assert control.protocol.state().buttons_enabled is False
+
+        # Repeated launch attempts for the already current identity are no-ops.
+        assert window.WindowOwnership.claim_or_handoff(tmp_path, version_changed) is None
+        assert window.TraderControlWindow._accept_handoff(control) is False
+        assert control.protocol.identity == version_changed
+
+        # A different terminal/account/chart owner has an independent window.
+        other = window.WindowOwnership.claim_or_handoff(tmp_path, other_owner)
+        assert other is not None
+        assert other.identity == other_owner
+        assert not list(tmp_path.glob("*.command.json"))
+
+        trader = _source()
+        launch = _function(trader, "bool LaunchDesktopTraderControls")
+        owner = _function(trader, "string TraderControlOwnerId")
+        executable = _function(trader, "string TraderControlLaunchExecutable")
+        assert '#property version   "2.45"' in trader and 'EA_VERSION = "2.45"' in trader
+        assert 'const int  TRADER_CONTROL_SW_SHOWMINNOACTIVE = 7;' in trader
+        assert '" --owner-id " + TraderControlQuoteArg(g_traderControlOwnerId)' in launch
+        assert "TRADER_CONTROL_SW_SHOWMINNOACTIVE" in launch
+        assert "TraderControlLaunchExecutable(configuredPython)" in launch
+        assert '"pythonw.exe"' in executable and "TraderControlConfiguredFileExists(windowed)" in executable
+        assert "TERMINAL_DATA_PATH" in owner and "ChartID()" in owner
+        assert "_Symbol" not in owner and "MagicNumber" not in owner
+        python_source = WINDOW.read_text(encoding="utf-8")
+        main_source = python_source[python_source.index("def main() -> None:"):]
+        assert main_source.index("root.withdraw()") < main_source.index("TraderControlWindow(")
+        assert main_source.index("TraderControlWindow(") < main_source.index("show_minimized_no_activate(root)")
+    finally:
+        if other is not None:
+            other.release()
+        ownership.release()
+
+
 def test_window_writes_one_atomic_scoped_command_and_blocks_duplicate_pending_clicks(tmp_path: Path) -> None:
     window = _window_module()
     identity = window.InstanceIdentity("A1B2C3D4", 123456, "Pepperstone-Demo", 9988, "EURUSD.a", 91001, "2.40")
@@ -298,7 +466,7 @@ def test_auto_fit_risk_buffer_preserves_risk_and_submission_gates() -> None:
     assert "chosenRiskBuffer" in market and "Automatic risk buffer selected" in market
     assert market.index("ComputeVolumeFromRisk") < market.index("trade.Buy(")
     assert fixed_market.index("ComputeVolumeFromRisk") < fixed_market.index("ConsumeStandardMarketToken") < fixed_market.index("trade.Buy(")
-    assert '#property version   "2.44"' in trader and 'EA_VERSION = "2.44"' in trader
+    assert '#property version   "2.45"' in trader and 'EA_VERSION = "2.45"' in trader
 
 
 def test_four_actions_reuse_current_inputs_and_one_attempt_trading_protections() -> None:
@@ -389,7 +557,7 @@ def test_four_actions_reuse_current_inputs_and_one_attempt_trading_protections()
     assert tick.index("if(UseDesktopTraderControls)") < tick.index("if(!OrdersEnabled)")
     assert timer.index("if(UseDesktopTraderControls)") < timer.index("if(Strategy == STRAT_STANDARD_LIMIT)")
     assert "HandleDesktopTraderCommand()" in timer
-    assert '#property version   "2.44"' in trader and 'EA_VERSION = "2.44"' in trader
+    assert '#property version   "2.45"' in trader and 'EA_VERSION = "2.45"' in trader
 
 
 def test_price_distance_mode_reuses_shared_builders_and_fails_before_market_token() -> None:
@@ -478,4 +646,4 @@ def test_price_distance_mode_reuses_shared_builders_and_fails_before_market_toke
     assert standard_limit_maintenance.index("if(UsePriceDistanceInputs) return;") < standard_limit_maintenance.index("StandardLimitShouldBeActive")
     assert r'\"orders_enabled\":' in status
     assert "UseDesktopTraderControls" in trader and "if(!OrdersEnabled) return false;" in trader
-    assert '#property version   "2.44"' in trader and 'EA_VERSION = "2.44"' in trader
+    assert '#property version   "2.45"' in trader and 'EA_VERSION = "2.45"' in trader

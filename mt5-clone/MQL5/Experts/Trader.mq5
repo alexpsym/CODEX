@@ -1,6 +1,6 @@
 #property strict
 #property description "Trader EA: trendline/standard limits, EMA bounce, and token-gated one-shot standard market execution. SL/TP accept legacy MT5 points or validated portable price distances, with optional AutoTP NetRR."
-#property version   "2.44"
+#property version   "2.45"
 
 #include <Trade/Trade.mqh>
 CTrade trade;
@@ -128,6 +128,7 @@ const string STANDARD_MARKET_EXECUTE_BUTTON = "TraderExecuteStandardMarket";
 string   g_trendlineLifecycleStatus = "";
 bool     g_trendlineTrackingFailed = false;
 string   g_traderControlInstanceId = "";
+string   g_traderControlOwnerId = "";
 bool     g_traderControlReady = false;
 string   g_traderControlReason = "Desktop controls are initializing.";
 datetime g_portablePresetInitializedAt = 0;
@@ -137,7 +138,7 @@ const long TRENDLINE_ARM_GENERATION_MAX = 999999999;
 const int  TRADER_CONTROL_PROTOCOL_VERSION = 1;
 const int  TRADER_CONTROL_COMMAND_MAX_AGE_SECONDS = 15;
 const int  TRADER_CONTROL_STATUS_FRESH_SECONDS = 5;
-const int  TRADER_CONTROL_SW_SHOWNORMAL = 1;
+const int  TRADER_CONTROL_SW_SHOWMINNOACTIVE = 7;
 const uint TRADER_CONTROL_INVALID_FILE_ATTRIBUTES = 0xFFFFFFFF;
 const uint TRADER_CONTROL_FILE_ATTRIBUTE_DIRECTORY = 0x00000010;
 
@@ -165,7 +166,7 @@ int hSlow  = INVALID_HANDLE;
 int hTrend = INVALID_HANDLE;
 
 string EA_COMMENT = "Trader";
-string EA_VERSION = "2.44";
+string EA_VERSION = "2.45";
 
 void Dbg(const string msg){ if(Debug) Print(EA_COMMENT, ": ", msg); }
 bool PlaceOrReplacePendingLimitAtEntry(const bool isBuyLimit,
@@ -2535,6 +2536,15 @@ string TraderControlInstanceId()
    return ShortStableFingerprint(identity);
 }
 
+string TraderControlOwnerId()
+{
+   string identity = TerminalInfoString(TERMINAL_DATA_PATH) + "|" +
+                     AccountInfoString(ACCOUNT_SERVER) + "|" +
+                     (string)AccountInfoInteger(ACCOUNT_LOGIN) + "|" +
+                     (string)ChartID();
+   return ShortStableFingerprint(identity);
+}
+
 string TraderControlCommonFilesPath()
 {
    string common = TerminalInfoString(TERMINAL_COMMONDATA_PATH);
@@ -2565,6 +2575,22 @@ bool TraderControlConfiguredFileExists(const string path)
    uint attributes = GetFileAttributesW(path);
    return (attributes != TRADER_CONTROL_INVALID_FILE_ATTRIBUTES &&
            (attributes & TRADER_CONTROL_FILE_ATTRIBUTE_DIRECTORY) == 0);
+}
+
+string TraderControlLaunchExecutable(const string configured)
+{
+   string executable = TrimText(configured);
+   string lower = executable;
+   StringToLower(lower);
+   const string consoleName = "python.exe";
+   int length = StringLen(executable);
+   int consoleLength = StringLen(consoleName);
+   if(length >= consoleLength && StringSubstr(lower, length - consoleLength) == consoleName)
+   {
+      string windowed = StringSubstr(executable, 0, length - consoleLength) + "pythonw.exe";
+      if(TraderControlConfiguredFileExists(windowed)) return windowed;
+   }
+   return executable;
 }
 
 bool VerifyCommonText(const string fileName, const string contents, string &why)
@@ -2650,6 +2676,7 @@ bool WriteDesktopTraderStatus()
    payload += "\"fresh_for_seconds\":" + IntegerToString(TRADER_CONTROL_STATUS_FRESH_SECONDS) + ",";
    payload += "\"instance_id\":\"" + g_traderControlInstanceId + "\",";
    payload += "\"magic_number\":" + IntegerToString(MagicNumber) + ",";
+   payload += "\"owner_id\":\"" + g_traderControlOwnerId + "\",";
    payload += "\"orders_enabled\":" + (OrdersEnabled ? "true" : "false") + ",";
    payload += "\"protocol_version\":" + IntegerToString(TRADER_CONTROL_PROTOCOL_VERSION) + ",";
    payload += "\"reason\":\"" + JsonEscape(g_traderControlReason) + "\",";
@@ -2668,11 +2695,14 @@ bool LaunchDesktopTraderControls(string &why)
    if(!MQLInfoInteger(MQL_DLLS_ALLOWED))
    { why = "Desktop Trader Controls require Allow DLL imports for automatic launch; commands are disabled."; return false; }
 
-   string python = TrimText(PythonExecutable);
+   string configuredPython = TrimText(PythonExecutable);
+   string python = TraderControlLaunchExecutable(configuredPython);
    string script = TrimText(TraderControlWindowScriptPath);
    string common = TraderControlCommonFilesPath();
+   if(configuredPython == "" || !TraderControlConfiguredFileExists(configuredPython))
+   { why = "Configured PythonExecutable is missing or invalid: " + configuredPython; return false; }
    if(python == "" || !TraderControlConfiguredFileExists(python))
-   { why = "Configured PythonExecutable is missing or invalid: " + python; return false; }
+   { why = "Trader Controls launch executable is missing or invalid: " + python; return false; }
    if(script == "" || !TraderControlConfiguredFileExists(script))
    { why = "Configured TraderControlWindowScriptPath is missing or invalid: " + script; return false; }
    if(common == "")
@@ -2681,6 +2711,7 @@ bool LaunchDesktopTraderControls(string &why)
    string params = TraderControlQuoteArg(script) +
                    " --common-dir " + TraderControlQuoteArg(common) +
                    " --instance-id " + TraderControlQuoteArg(g_traderControlInstanceId) +
+                   " --owner-id " + TraderControlQuoteArg(g_traderControlOwnerId) +
                    " --account-login " + (string)AccountInfoInteger(ACCOUNT_LOGIN) +
                    " --account-server " + TraderControlQuoteArg(AccountInfoString(ACCOUNT_SERVER)) +
                    " --chart-id " + (string)ChartID() +
@@ -2690,7 +2721,7 @@ bool LaunchDesktopTraderControls(string &why)
                    " --refresh-ms " + IntegerToString(SafeTraderControlRefreshMs());
    ResetLastError();
    long result = ShellExecuteW(0, "open", python, params,
-                               TraderControlDirectoryName(script), TRADER_CONTROL_SW_SHOWNORMAL);
+                               TraderControlDirectoryName(script), TRADER_CONTROL_SW_SHOWMINNOACTIVE);
    if(result <= 32)
    {
       why = "ShellExecuteW rejected the Trader Controls launch. result=" + (string)result +
@@ -3397,6 +3428,7 @@ int OnInit()
    trade.SetDeviationInPoints(SlippagePoints);
    trade.SetExpertMagicNumber(MagicNumber);
    g_traderControlInstanceId = TraderControlInstanceId();
+   g_traderControlOwnerId = TraderControlOwnerId();
    g_portablePresetInitializedAt = TimeGMT();
    g_portablePresetActionActivated = false;
 
