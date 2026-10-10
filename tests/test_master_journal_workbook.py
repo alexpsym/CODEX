@@ -11258,19 +11258,23 @@ def test_stats1_trade_source_links_do_not_guess_or_keep_stale_targets(tmp_path: 
     from tools import master_journal_workbook as journal
 
     crypto_root = tmp_path / "legacy CRYPTO root"
+    forex_root = tmp_path / "legacy FOREX root"
     legacy_file = crypto_root / "2021" / "MAY" / "screenshots" / "C99 XTZUSDT.png"
     legacy_file.parent.mkdir(parents=True)
     legacy_file.write_bytes(b"fixture")
     old_folder = crypto_root / "2021" / "MAY" / "C40 XTZUSDT Old Folder"
     new_folder = crypto_root / "2021" / "MAY" / "C42 XTZUSDT New Folder"
+    fx_folder = forex_root / "2021" / "MAY" / "F12 EURUSD Trade Folder"
     old_folder.mkdir(parents=True)
     new_folder.mkdir(parents=True)
+    fx_folder.mkdir(parents=True)
 
     rows = [
         {"id": "amb-a", "row_type": "trade", "trade_number": "C41", "symbol": "XTZUSDT", "asset_class": "crypto", "account": "Bybit Demo", "open_time": "2021-05-06T01:00:00Z", "close_time": "2021-05-06T02:00:00Z", "result_pct": 0.75, "trade_duration_seconds": 3600},
         {"id": "amb-b", "row_type": "trade", "trade_number": "C43", "symbol": "XTZUSDT", "asset_class": "crypto", "account": "Bybit Demo", "open_time": "2021-05-06T03:00:00Z", "close_time": "2021-05-06T04:00:00Z", "result_pct": 0.75, "trade_duration_seconds": 3600},
         {"id": "legacy-file", "row_type": "trade", "trade_number": "C99", "symbol": "XTZUSDT", "asset_class": "crypto", "account": "Bybit Demo", "open_time": "2021-05-06T01:00:00Z", "close_time": "2021-05-06T02:00:00Z", "result_pct": 0.75, "trade_duration_seconds": 3600},
         {"id": "changed", "row_type": "trade", "trade_number": "C42", "symbol": "XTZUSDT", "asset_class": "crypto", "account": "Bybit Demo", "open_time": "2021-05-06T05:00:00Z", "close_time": "2021-05-06T06:00:00Z", "result_pct": 0.5, "trade_duration_seconds": 3600},
+        {"id": "working-fx", "row_type": "trade", "trade_number": "F12", "symbol": "EURUSD", "asset_class": "fx", "account": "Pepperstone Demo", "open_time": "2021-05-06T01:00:00Z", "close_time": "2021-05-06T02:00:00Z", "result_pct": 0.9, "trade_duration_seconds": 3600},
     ]
     wb = Workbook()
     ws = wb.active
@@ -11282,14 +11286,58 @@ def test_stats1_trade_source_links_do_not_guess_or_keep_stale_targets(tmp_path: 
     ws["B4"] = "0.75% - XTZUSDT 2021-05-06"
     ws["B5"] = "0.50% - XTZUSDT 2021-05-06"
     ws["B5"].hyperlink = old_folder.resolve().as_uri()
+    ws["C6"] = "0.90% - EURUSD 2021-05-06"
+    ws["D6"] = "0.50% - XTZUSDT 2021-05-06"
+    ws["A2"] = "Manual reference"
+    ws["A2"].hyperlink = "file:///manual-reference"
+    ws["A7"] = "Recommendation"
+    ws["B7"] = "SL 0.75%"
+    ws["B7"].hyperlink = "file:///recommendation-chart"
+    ws["B7"].font = Font(name="Calibri", size=11, color="0563C1", underline="single")
+    for coordinate, font in (
+        ("B2", Font(name="Calibri", size=10, color="222222")),
+        ("B3", Font(name="Calibri", size=10, italic=True, color="333333")),
+        ("B4", Font(name="Calibri", size=10, bold=True, color="444444")),
+    ):
+        ws[coordinate].font = font
+    ws["B5"].font = Font(
+        name="Arial", size=13, bold=True, italic=True, underline="double",
+        strike=True, color="222222",
+    )
+    ws["B5"].fill = PatternFill(fill_type="solid", fgColor="E2F0D9")
+    ws["B5"].border = Border(bottom=Side(style="thin", color="224466"))
+    ws["B5"].alignment = Alignment(horizontal="center", vertical="top", wrap_text=True)
+    ws["C6"].font = Font(
+        name="Calibri", size=10, italic=True, underline=None,
+        strike=True, color="333333",
+    )
+    ws["C6"].fill = PatternFill(fill_type="solid", fgColor="DDEEFF")
+    ws["C6"].alignment = Alignment(horizontal="right", vertical="center", indent=1)
+    ws["D6"].font = Font(name="Times New Roman", size=12, bold=True, color="555555")
+    ws["D6"].border = Border(left=Side(style="dashed", color="884422"))
+    ws["D6"].alignment = Alignment(horizontal="center", vertical="bottom", shrink_to_fit=True)
+    ws["A2"].font = Font(name="Arial", size=9, italic=True, color="7030A0")
+    ws["A2"].alignment = Alignment(horizontal="right", vertical="top")
     original_text = ws["B5"].value
-    original_style = copy(ws["B5"]._style)
+    original_fonts = {coordinate: copy(ws[coordinate].font) for coordinate in ("B5", "C6", "D6")}
+    original_styles = {coordinate: copy(ws[coordinate]._style) for coordinate in ("B5", "C6", "D6")}
+    unresolved_presentation = {
+        coordinate: (ws[coordinate].value, copy(ws[coordinate]._style), copy(ws[coordinate].font))
+        for coordinate in ("B2", "B3", "B4")
+    }
+    manual_presentation = {
+        coordinate: (ws[coordinate].value, copy(ws[coordinate]._style), copy(ws[coordinate].font), ws[coordinate].hyperlink.target)
+        for coordinate in ("A2", "B7")
+    }
+    working_texts = {coordinate: ws[coordinate].value for coordinate in ("B5", "C6", "D6")}
 
     sources = {
         (2, 2): {"id": "not-present", "symbol": "XTZUSDT", "metric_key": "max_result_pct", "metric_value": 0.75},
         (3, 2): {"symbol": "XTZUSDT", "account": "Bybit Demo", "date": "2021-05-06", "metric_key": "max_result_pct", "metric_value": 0.75},
         (4, 2): journal._trade_metric_ref(rows[2], "max_result_pct", 0.75),
         (5, 2): journal._trade_metric_ref(rows[3], "max_result_pct", 0.5),
+        (6, 3): journal._trade_metric_ref(rows[4], "max_result_pct", 0.9),
+        (6, 4): journal._trade_metric_ref(rows[3], "max_result_pct", 0.5),
     }
     diagnostics = {}
     journal._TRADE_FOLDER_INDEX_CACHE.clear()
@@ -11301,14 +11349,44 @@ def test_stats1_trade_source_links_do_not_guess_or_keep_stale_targets(tmp_path: 
             diagnostics=diagnostics,
             stale_coordinates=journal._stats1_existing_trade_reference_cells(ws),
             crypto_root=crypto_root,
+            forex_root=forex_root,
         )
-        assert result["linked"] == 1
+        assert result["linked"] == 3
         assert ws["B2"].hyperlink is None
         assert ws["B3"].hyperlink is None
         assert ws["B4"].hyperlink is None
         assert ws["B5"].hyperlink.target == new_folder.resolve().as_uri()
         assert ws["B5"].value == original_text
-        assert ws["B5"]._style == original_style
+        assert ws["C6"].hyperlink.target == fx_folder.resolve().as_uri()
+        assert ws["D6"].hyperlink.target == new_folder.resolve().as_uri()
+
+        def assert_only_font_colour_changed(coordinate):
+            cell = ws[coordinate]
+            expected_font = copy(original_fonts[coordinate])
+            expected_font.color = "0563C1"
+            assert cell.font == expected_font
+            assert cell.font.color.type == "rgb"
+            assert cell.font.color.rgb.upper().endswith("0563C1")
+            expected_style = copy(original_styles[coordinate])
+            expected_style.fontId = cell._style.fontId
+            assert cell._style == expected_style
+            assert cell.value == working_texts[coordinate]
+
+        for coordinate in ("B5", "C6", "D6"):
+            assert_only_font_colour_changed(coordinate)
+            assert ws[coordinate].font.name == original_fonts[coordinate].name
+            assert ws[coordinate].font.sz == original_fonts[coordinate].sz
+            assert ws[coordinate].font.bold == original_fonts[coordinate].bold
+            assert ws[coordinate].font.italic == original_fonts[coordinate].italic
+            assert ws[coordinate].font.underline == original_fonts[coordinate].underline
+            assert ws[coordinate].font.strike == original_fonts[coordinate].strike
+
+        for coordinate, (value, style, font) in unresolved_presentation.items():
+            assert ws[coordinate].hyperlink is None
+            assert (ws[coordinate].value, ws[coordinate]._style, ws[coordinate].font) == (value, style, font)
+        for coordinate, (value, style, font, target) in manual_presentation.items():
+            assert (ws[coordinate].value, ws[coordinate]._style, ws[coordinate].font) == (value, style, font)
+            assert ws[coordinate].hyperlink.target == target
         reasons = {item["cell"]: item["reason"] for item in result["unresolved"]}
         assert reasons == {
             "B2": "missing_source_trade",
@@ -11317,12 +11395,140 @@ def test_stats1_trade_source_links_do_not_guess_or_keep_stale_targets(tmp_path: 
         }
         assert diagnostics["stats1_trade_source_hyperlinks_unresolved"] == result["unresolved"]
 
+        # Simulate preservation restoring its saved original font before the shared link helper runs.
+        for coordinate, font in original_fonts.items():
+            ws[coordinate].font = copy(font)
+            assert ws[coordinate].font.color.rgb.upper().endswith(font.color.rgb[-6:].upper())
+        result_again = journal._apply_stats1_trade_source_hyperlinks(
+            ws,
+            sources,
+            rows,
+            diagnostics={},
+            stale_coordinates=journal._stats1_existing_trade_reference_cells(ws),
+            crypto_root=crypto_root,
+            forex_root=forex_root,
+        )
+        assert result_again["linked"] == 3
+        for coordinate in ("B5", "C6", "D6"):
+            assert_only_font_colour_changed(coordinate)
+        after_reapply = {
+            coordinate: (ws[coordinate].value, copy(ws[coordinate]._style), copy(ws[coordinate].font), ws[coordinate].hyperlink.target)
+            for coordinate in ("B5", "C6", "D6")
+        }
+        journal._apply_stats1_trade_source_hyperlinks(
+            ws,
+            sources,
+            rows,
+            diagnostics={},
+            stale_coordinates=journal._stats1_existing_trade_reference_cells(ws),
+            crypto_root=crypto_root,
+            forex_root=forex_root,
+        )
+        assert {
+            coordinate: (ws[coordinate].value, copy(ws[coordinate]._style), copy(ws[coordinate].font), ws[coordinate].hyperlink.target)
+            for coordinate in ("B5", "C6", "D6")
+        } == after_reapply
+
+        # Keep a formula sentinel and freeze resolved presentation properties
+        # before serialization. StyleArray indices are workbook-local and may
+        # be renumbered by save/reopen even when the actual properties match.
+        ws["E8"] = "=1+1"
+
+        def resolved_presentation(cell):
+            hyperlink = cell.hyperlink
+            hyperlink_properties = None if hyperlink is None else (
+                hyperlink.target,
+                hyperlink.location,
+                hyperlink.tooltip,
+                hyperlink.display,
+                hyperlink.ref,
+            )
+            return {
+                "value": cell.value,
+                "data_type": cell.data_type,
+                "number_format": cell.number_format,
+                "font": copy(cell.font),
+                "alignment": copy(cell.alignment),
+                "fill": copy(cell.fill),
+                "border": copy(cell.border),
+                "protection": copy(cell.protection),
+                "hyperlink": hyperlink_properties,
+            }
+
+        roundtrip_coordinates = (
+            "A2", "B2", "B3", "B4", "B5", "C6", "D6", "B7", "E8",
+        )
+        roundtrip_presentation = {
+            coordinate: resolved_presentation(ws[coordinate])
+            for coordinate in roundtrip_coordinates
+        }
+        sheet_order_before = tuple(wb.sheetnames)
+        layout_before = {
+            sheet.title: {
+                "dimensions": (sheet.max_row, sheet.max_column, sheet.calculate_dimension()),
+                "merged_ranges": tuple(sorted(str(rng) for rng in sheet.merged_cells.ranges)),
+                "row_dimensions": tuple(sorted(
+                    (index, dim.height, dim.hidden, dim.outlineLevel, dim.collapsed)
+                    for index, dim in sheet.row_dimensions.items()
+                )),
+                "column_dimensions": tuple(sorted(
+                    (key, dim.min, dim.max, dim.width, dim.hidden, dim.outlineLevel, dim.collapsed)
+                    for key, dim in sheet.column_dimensions.items()
+                )),
+            }
+            for sheet in wb.worksheets
+        }
+        workbook_path = tmp_path / "stats1-blue-trade-links.xlsx"
+        wb.save(workbook_path)
+        saved = load_workbook(workbook_path, data_only=False)
+        try:
+            saved_ws = saved[STATS1_SHEET]
+            assert tuple(saved.sheetnames) == sheet_order_before
+            layout_after = {
+                sheet.title: {
+                    "dimensions": (sheet.max_row, sheet.max_column, sheet.calculate_dimension()),
+                    "merged_ranges": tuple(sorted(str(rng) for rng in sheet.merged_cells.ranges)),
+                    "row_dimensions": tuple(sorted(
+                        (index, dim.height, dim.hidden, dim.outlineLevel, dim.collapsed)
+                        for index, dim in sheet.row_dimensions.items()
+                    )),
+                    "column_dimensions": tuple(sorted(
+                        (key, dim.min, dim.max, dim.width, dim.hidden, dim.outlineLevel, dim.collapsed)
+                        for key, dim in sheet.column_dimensions.items()
+                    )),
+                }
+                for sheet in saved.worksheets
+            }
+            assert layout_after == layout_before
+            assert saved_ws["E8"].value == "=1+1"
+            assert saved_ws["E8"].data_type == "f"
+            for coordinate, target in (
+                ("B5", new_folder.resolve().as_uri()),
+                ("C6", fx_folder.resolve().as_uri()),
+                ("D6", new_folder.resolve().as_uri()),
+            ):
+                assert saved_ws[coordinate].hyperlink.target == target
+                assert saved_ws[coordinate].value == working_texts[coordinate]
+                expected_font = copy(original_fonts[coordinate])
+                expected_font.color = "0563C1"
+                assert saved_ws[coordinate].font == expected_font
+            for coordinate, expected in roundtrip_presentation.items():
+                assert resolved_presentation(saved_ws[coordinate]) == expected
+            assert saved_ws["B2"].hyperlink is None
+            assert saved_ws["B3"].hyperlink is None
+            assert saved_ws["B4"].hyperlink is None
+        finally:
+            saved.close()
+
         stale = journal._stats1_existing_trade_reference_cells(ws)
         journal._apply_stats1_trade_source_hyperlinks(
-            ws, {}, rows, diagnostics={}, stale_coordinates=stale, crypto_root=crypto_root
+            ws, {}, rows, diagnostics={}, stale_coordinates=stale,
+            crypto_root=crypto_root, forex_root=forex_root,
         )
         assert ws["B5"].hyperlink is None
         assert ws["B5"].value == original_text
+        assert ws["C6"].hyperlink is None
+        assert ws["D6"].hyperlink is None
     finally:
         wb.close()
         journal._TRADE_FOLDER_INDEX_CACHE.clear()

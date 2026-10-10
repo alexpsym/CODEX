@@ -12979,6 +12979,10 @@ def _apply_stats1_trade_source_hyperlinks(
                         reason = "resolved_target_is_not_trade_folder"
                 if target:
                     cell.hyperlink = target
+                    font = copy(cell.font)
+                    font.color = "0563C1"
+                    if cell.font != font:
+                        cell.font = font
                     linked += 1
                 else:
                     cell.hyperlink = None
