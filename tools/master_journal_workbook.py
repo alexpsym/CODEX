@@ -12912,6 +12912,7 @@ def _apply_stats1_trade_source_hyperlinks(
         ws.cell(*coordinate).hyperlink = None
 
     unresolved: List[Dict[str, Any]] = []
+    linked_cells: List[Dict[str, Any]] = []
     linked = 0
     for coordinate, raw_source in source_requests.items():
         cell = ws.cell(*coordinate)
@@ -12983,6 +12984,12 @@ def _apply_stats1_trade_source_hyperlinks(
                     font.color = "0563C1"
                     if cell.font != font:
                         cell.font = font
+                    linked_cells.append({
+                        "cell": cell.coordinate,
+                        "source_id": source_id or row_id,
+                        "trade_number": trade_number,
+                        "target": target,
+                    })
                     linked += 1
                 else:
                     cell.hyperlink = None
@@ -13010,7 +13017,11 @@ def _apply_stats1_trade_source_hyperlinks(
         diagnostics["stats1_trade_source_hyperlinks_unresolved"] = unresolved
     else:
         diagnostics.pop("stats1_trade_source_hyperlinks_unresolved", None)
-    return {"linked": linked, "unresolved": unresolved}
+    return {
+        "linked": linked,
+        "linked_cells": linked_cells,
+        "unresolved": unresolved,
+    }
 
 
 def _apply_report_managed_left_alignment(
@@ -13596,6 +13607,15 @@ def _workbook_preservation_contract(wb) -> Dict[str, Any]:
         contract["stats1_presentation"] = {
             f"{get_column_letter(col)}{row}": {
                 "style": _contract_xml(cell._style),
+                "style_flags": {
+                    "named_style": str(cell.style or ""),
+                    "pivot_button": bool(
+                        getattr(cell._style, "pivotButton", False)
+                    ),
+                    "quote_prefix": bool(
+                        getattr(cell._style, "quotePrefix", False)
+                    ),
+                },
                 "font": _contract_xml(cell.font),
                 "fill": _contract_xml(cell.fill),
                 "border": _contract_xml(cell.border),
@@ -13607,6 +13627,14 @@ def _workbook_preservation_contract(wb) -> Dict[str, Any]:
             }
             for row, col in sorted(stats1_cells)
             for cell in [stats1.cell(row, col)]
+        }
+        contract["stats1_generated_trade_hyperlinks"] = {
+            stats1.cell(row, col).coordinate: _hyperlink_preservation_value(
+                stats1.cell(row, col).hyperlink
+            )
+            for row, col in sorted(
+                _stats1_existing_trade_reference_cells(stats1)
+            )
         }
         # Dashboard labels and market headers are structural content, not
         # regenerated statistics.  All market data rows remain value-mutable.
@@ -13764,9 +13792,83 @@ def _assert_trade_log_row_dimensions_preserved(
         )
 
 
+def _font_change_is_only_approved_trade_link_blue(
+    before_xml: Any,
+    after_xml: Any,
+) -> bool:
+    if not isinstance(before_xml, str) or not isinstance(after_xml, str):
+        return False
+    try:
+        before = ET.fromstring(before_xml)
+        after = ET.fromstring(after_xml)
+    except ET.ParseError:
+        return False
+    after_colors = list(after.findall("color"))
+    if len(after_colors) != 1:
+        return False
+    color = after_colors[0]
+    if set(color.attrib) != {"rgb"} or not str(
+        color.attrib.get("rgb") or ""
+    ).upper().endswith("0563C1"):
+        return False
+    for tree in (before, after):
+        for item in list(tree.findall("color")):
+            tree.remove(item)
+    return ET.tostring(before) == ET.tostring(after)
+
+
+def _assert_stats1_presentation_preserved(
+    before: Mapping[str, Any],
+    after: Mapping[str, Any],
+    allowed_trade_links: Mapping[str, Mapping[str, Any]],
+) -> None:
+    before_cells = before.get("stats1_presentation") or {}
+    after_cells = after.get("stats1_presentation") or {}
+    after_links = after.get("stats1_generated_trade_hyperlinks") or {}
+    changes: List[Tuple[str, List[str]]] = []
+    for coordinate in sorted(set(before_cells) | set(after_cells)):
+        source = before_cells.get(coordinate) or {}
+        candidate = after_cells.get(coordinate) or {}
+        components = [
+            key
+            for key in sorted(set(source) | set(candidate))
+            if key != "style" and source.get(key) != candidate.get(key)
+        ]
+        if not components:
+            # StyleArray IDs are workbook-local registry references.  The
+            # resolved properties and the meaningful remaining style flags
+            # above are the preservation contract.
+            continue
+        authorization = allowed_trade_links.get(coordinate) or {}
+        actual_link = after_links.get(coordinate) or {}
+        expected_target = unquote(
+            str(authorization.get("target") or "")
+        ).replace("\\", "/")
+        if (
+            components == ["font"]
+            and expected_target
+            and actual_link.get("target") == expected_target
+            and _font_change_is_only_approved_trade_link_blue(
+                source.get("font"), candidate.get("font")
+            )
+        ):
+            continue
+        changes.append((coordinate, components))
+    if changes:
+        preview = changes[:20]
+        remainder = len(changes) - len(preview)
+        suffix = f" (+{remainder} more)" if remainder else ""
+        raise RuntimeError(
+            "Workbook preservation contract changed stats1_presentation at "
+            f"{preview!r}{suffix}."
+        )
+
+
 def _assert_workbook_preservation_contract(
     before: Mapping[str, Any],
     after: Mapping[str, Any],
+    *,
+    allowed_stats1_trade_links: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> None:
     before_order = list(before.get("sheet_order") or [])
     after_order = list(after.get("sheet_order") or [])
@@ -13801,10 +13903,14 @@ def _assert_workbook_preservation_contract(
     # the existing migration path, so their row coordinates and border edges
     # cannot be compared before versus after that structural migration.
     if bool(before.get("stats1_schema_canonical")):
+        _assert_stats1_presentation_preserved(
+            before,
+            after,
+            allowed_stats1_trade_links or {},
+        )
         scalar_keys.extend((
             "stats1_row_labels",
             "stats1_borders",
-            "stats1_presentation",
             "stats1_static_values",
         ))
     for key in scalar_keys:
@@ -18826,7 +18932,7 @@ def update_master_journal_workbook_data_only(
             chart_bundle,
             preserve_stats1_presentation=preserve_existing_layout,
         )
-        _apply_stats1_trade_source_hyperlinks(
+        stats1_trade_link_result = _apply_stats1_trade_source_hyperlinks(
             dash,
             stats1_source_link_requests,
             rows,
@@ -18900,6 +19006,13 @@ def update_master_journal_workbook_data_only(
                 _assert_workbook_preservation_contract(
                     source_preservation_contract,
                     candidate_preservation_contract,
+                    allowed_stats1_trade_links={
+                        str(item.get("cell") or ""): item
+                        for item in (
+                            stats1_trade_link_result.get("linked_cells") or []
+                        )
+                        if str(item.get("cell") or "")
+                    },
                 )
                 managed_presentation_contract = (
                     _managed_statistics_presentation_contract(candidate_wb)

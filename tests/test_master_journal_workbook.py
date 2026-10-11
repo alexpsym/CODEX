@@ -11750,6 +11750,251 @@ def test_stats1_trade_source_links_survive_preservation_refresh_without_layout_c
     timing_end("final repeat-refresh assertions", final_assertions_started)
 
 
+def test_resync_preservation_accepts_owned_stats1_link_colour_and_rejects_authored_changes(
+    tmp_path: Path,
+    monkeypatch,
+):
+    from tools import master_journal_workbook as journal
+
+    monkeypatch.setattr(journal, "REPORT_START_YEAR", 2026)
+    monkeypatch.setattr(journal, "REPORT_MIN_END_YEAR", 2026)
+    snapshot = _job8_stats1_link_snapshot()
+    snapshot["items"][0].update(
+        result_pct=-1.0,
+        r_multiple=-0.8,
+        net_profit=-1.0,
+    )
+    for index, row in enumerate(snapshot["items"], 1):
+        row["open_time"] = f"2026-05-0{index}T01:00:00Z"
+        row["close_time"] = f"2026-05-0{index}T02:00:00Z"
+    forex_root = tmp_path / "FOREX exact folders"
+    crypto_root = tmp_path / "CRYPTO exact folders"
+    _job8_make_trade_folders(snapshot, forex_root, crypto_root)
+    monkeypatch.setenv("TRADING_JOURNAL_FOREX_ROOT", str(forex_root))
+    monkeypatch.setenv("TRADING_JOURNAL_CRYPTO_ROOT", str(crypto_root))
+    journal._TRADE_FOLDER_INDEX_CACHE.clear()
+
+    path = tmp_path / "stats1-link-colour-preservation.xlsx"
+    built = build_master_journal_workbook(
+        snapshot,
+        path,
+        publish_recommendation_assets=False,
+    )
+    assert built["ok"] is True
+
+    wb = load_workbook(path, data_only=False)
+    try:
+        stats1 = wb[STATS1_SHEET]
+        source_cells = sorted(
+            (
+                cell
+                for cell in stats1._cells.values()
+                if isinstance(cell.value, str)
+                and journal._STATS1_TRADE_REFERENCE_SUFFIX_RE.search(cell.value)
+                and cell.hyperlink is not None
+            ),
+            key=lambda cell: (cell.row, cell.column),
+        )
+        assert len(source_cells) >= 2
+        existing_link = source_cells[0]
+        newly_eligible = source_cells[1]
+        existing_coordinate = existing_link.coordinate
+        existing_target = existing_link.hyperlink.target
+        assert existing_link.font.color.rgb.upper().endswith("0563C1")
+        existing_presentation = {
+            "value": existing_link.value,
+            "font": copy(existing_link.font),
+            "fill": copy(existing_link.fill),
+            "border": copy(existing_link.border),
+            "alignment": copy(existing_link.alignment),
+            "number_format": existing_link.number_format,
+            "protection": copy(existing_link.protection),
+        }
+
+        newly_coordinate = newly_eligible.coordinate
+        newly_target = newly_eligible.hyperlink.target
+        authored_font = copy(newly_eligible.font)
+        authored_font.bold = True
+        authored_font.italic = True
+        authored_font.color = "123456"
+        newly_eligible.font = authored_font
+        newly_eligible.number_format = '0.0000" authored"'
+        newly_eligible.hyperlink = None
+        expected_link_font = copy(authored_font)
+        expected_link_font.color = "0563C1"
+
+        stats1["A2"].hyperlink = "file:///manual-stats1-link"
+        stats1["A2"].comment = Comment("manual note", "Alex")
+        stats1["J1"] = "=1+2"
+        stats1["J2"].fill = PatternFill("solid", fgColor="ABCDEF")
+        stats1["J2"].border = Border(
+            left=Side(style="thin", color="123456")
+        )
+        stats1["J2"].alignment = Alignment(horizontal="center")
+        stats1.freeze_panes = stats1.freeze_panes
+        recommendation_cells = [
+            stats1.cell(row, col)
+            for row in range(2, stats1.max_row + 1)
+            for col in range(2, min(4, stats1.max_column) + 1)
+            if str(stats1.cell(row, 1).value or "").strip().casefold()
+            == "recommendation"
+            and stats1.cell(row, col).hyperlink is not None
+        ]
+        assert recommendation_cells
+        recommendation_coordinate = recommendation_cells[0].coordinate
+        recommendation_target = recommendation_cells[0].hyperlink.target
+        sheet_order = tuple(wb.sheetnames)
+        stats1_dimensions = (
+            stats1.max_row,
+            stats1.max_column,
+            stats1.calculate_dimension(),
+            tuple(sorted(str(item) for item in stats1.merged_cells.ranges)),
+        )
+        balance_value = wb[STATS2_SHEET]["B3"].value
+        balance_format = wb[STATS2_SHEET]["B3"].number_format
+        wb.save(path)
+    finally:
+        wb.close()
+
+    initial_wb = load_workbook(path, data_only=False)
+    try:
+        initial_contract = journal._workbook_preservation_contract(initial_wb)
+    finally:
+        initial_wb.close()
+
+    candidate_contracts = []
+    for refresh_index in range(2):
+        result = update_master_journal_workbook_data_only(
+            path,
+            snapshot,
+            preserve_existing_layout=True,
+            publish_recommendation_assets=False,
+        )
+        assert result["ok"] is True, result
+        assert result["diagnostics"]["preservation_contract_verified"] is True
+        candidate = Path(result["candidate_path"])
+        assert candidate.is_file()
+        candidate_wb = load_workbook(candidate, data_only=False)
+        try:
+            stats1 = candidate_wb[STATS1_SHEET]
+            existing = stats1[existing_coordinate]
+            newly = stats1[newly_coordinate]
+            assert existing.value == existing_presentation["value"]
+            assert existing.hyperlink.target == existing_target
+            assert existing.font == existing_presentation["font"]
+            assert existing.fill == existing_presentation["fill"]
+            assert existing.border == existing_presentation["border"]
+            assert existing.alignment == existing_presentation["alignment"]
+            assert existing.number_format == existing_presentation["number_format"]
+            assert existing.protection == existing_presentation["protection"]
+            assert newly.hyperlink.target == newly_target
+            assert newly.font == expected_link_font
+            assert newly.number_format == '0.0000" authored"'
+            assert stats1["A2"].hyperlink.target == "file:///manual-stats1-link"
+            assert stats1["A2"].comment.text == "manual note"
+            assert stats1["A2"].comment.author == "Alex"
+            assert stats1["J1"].value == "=1+2"
+            assert stats1["J1"].data_type == "f"
+            assert stats1["J2"].fill.fgColor.rgb.upper().endswith("ABCDEF")
+            assert stats1["J2"].border.left.style == "thin"
+            assert stats1["J2"].alignment.horizontal == "center"
+            assert stats1[recommendation_coordinate].hyperlink.target == (
+                recommendation_target
+            )
+            assert tuple(candidate_wb.sheetnames) == sheet_order
+            assert (
+                stats1.max_row,
+                stats1.max_column,
+                stats1.calculate_dimension(),
+                tuple(sorted(str(item) for item in stats1.merged_cells.ranges)),
+            ) == stats1_dimensions
+            assert candidate_wb[STATS2_SHEET]["B3"].value == balance_value
+            assert (
+                candidate_wb[STATS2_SHEET]["B3"].number_format
+                == balance_format
+            )
+            candidate_contracts.append(
+                journal._workbook_preservation_contract(candidate_wb)
+            )
+        finally:
+            candidate_wb.close()
+        candidate.replace(path)
+
+    assert candidate_contracts[0] == candidate_contracts[1]
+    assert initial_contract["stats1_presentation"][newly_coordinate]["font"] != (
+        candidate_contracts[0]["stats1_presentation"][newly_coordinate]["font"]
+    )
+    assert all(
+        initial_contract["stats1_presentation"][newly_coordinate][key]
+        == candidate_contracts[0]["stats1_presentation"][newly_coordinate][key]
+        for key in (
+            "fill",
+            "border",
+            "alignment",
+            "number_format",
+            "protection",
+            "comment",
+            "style_flags",
+        )
+    )
+
+    final_wb = load_workbook(path, data_only=False)
+    try:
+        stats1 = final_wb[STATS1_SHEET]
+        protected_source = journal._workbook_preservation_contract(final_wb)
+
+        original_label_font = copy(stats1["A2"].font)
+        changed_label_font = copy(original_label_font)
+        changed_label_font.bold = not bool(original_label_font.bold)
+        stats1["A2"].font = changed_label_font
+        protected_font_change = journal._workbook_preservation_contract(final_wb)
+        with pytest.raises(
+            RuntimeError,
+            match=r"stats1_presentation.*A2.*font",
+        ):
+            journal._assert_workbook_preservation_contract(
+                protected_source,
+                protected_font_change,
+            )
+        stats1["A2"].font = original_label_font
+
+        stats1["J2"].alignment = Alignment(horizontal="right")
+        protected_alignment_change = journal._workbook_preservation_contract(
+            final_wb
+        )
+        with pytest.raises(
+            RuntimeError,
+            match=r"stats1_presentation.*J2.*alignment",
+        ):
+            journal._assert_workbook_preservation_contract(
+                protected_source,
+                protected_alignment_change,
+            )
+
+        unresolved = stats1["K2"]
+        unresolved.value = "9.99% - MISSING 2026-05-01"
+        unresolved.font = Font(name="Calibri", size=11, color="654321")
+        unresolved_font = copy(unresolved.font)
+        unresolved_result = journal._apply_stats1_trade_source_hyperlinks(
+            stats1,
+            {(2, 11): {"id": "missing-source", "symbol": "MISSING"}},
+            snapshot["items"],
+            final_wb["Trade Log"],
+            diagnostics={},
+            forex_root=forex_root,
+            crypto_root=crypto_root,
+        )
+        assert unresolved_result["linked"] == 0
+        assert unresolved_result["unresolved"][0]["reason"] == (
+            "missing_source_trade"
+        )
+        assert unresolved.hyperlink is None
+        assert unresolved.font == unresolved_font
+    finally:
+        final_wb.close()
+        journal._TRADE_FOLDER_INDEX_CACHE.clear()
+
+
 def test_trade_log_left_alignment_restores_data_and_preserves_stats1_links():
     wb = Workbook()
     trade_log = wb.active
