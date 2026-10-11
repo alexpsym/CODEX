@@ -1,6 +1,6 @@
 #property strict
 #property description "Trader EA: trendline/standard limits, EMA bounce, and token-gated one-shot standard market execution. SL/TP accept legacy MT5 points or validated portable price distances, with optional AutoTP NetRR."
-#property version   "2.45"
+#property version   "2.46"
 
 #include <Trade/Trade.mqh>
 CTrade trade;
@@ -11,6 +11,13 @@ long ShellExecuteW(long hwnd, string operation, string file, string parameters, 
 
 #import "kernel32.dll"
 uint GetFileAttributesW(string file_name);
+uint GetCurrentProcessId();
+long GetCurrentProcess();
+bool GetProcessTimes(long process_handle,
+                     long &creation_time,
+                     long &exit_time,
+                     long &kernel_time,
+                     long &user_time);
 #import
 
 // -------------------- Strategy selection --------------------
@@ -129,6 +136,8 @@ string   g_trendlineLifecycleStatus = "";
 bool     g_trendlineTrackingFailed = false;
 string   g_traderControlInstanceId = "";
 string   g_traderControlOwnerId = "";
+uint     g_traderControlTerminalPid = 0;
+long     g_traderControlTerminalCreationTime = 0;
 bool     g_traderControlReady = false;
 string   g_traderControlReason = "Desktop controls are initializing.";
 datetime g_portablePresetInitializedAt = 0;
@@ -166,7 +175,7 @@ int hSlow  = INVALID_HANDLE;
 int hTrend = INVALID_HANDLE;
 
 string EA_COMMENT = "Trader";
-string EA_VERSION = "2.45";
+string EA_VERSION = "2.46";
 
 void Dbg(const string msg){ if(Debug) Print(EA_COMMENT, ": ", msg); }
 bool PlaceOrReplacePendingLimitAtEntry(const bool isBuyLimit,
@@ -2545,6 +2554,39 @@ string TraderControlOwnerId()
    return ShortStableFingerprint(identity);
 }
 
+bool TraderControlTerminalProcessIdentity(uint &processId,
+                                          long &creationTime,
+                                          string &why)
+{
+   processId = GetCurrentProcessId();
+   creationTime = 0;
+   long exitTime = 0;
+   long kernelTime = 0;
+   long userTime = 0;
+   long processHandle = GetCurrentProcess();
+   if(processId == 0 || processHandle == 0)
+   {
+      why = "Could not obtain the owning MT5 process identity.";
+      return false;
+   }
+   ResetLastError();
+   if(!GetProcessTimes(processHandle, creationTime, exitTime, kernelTime, userTime))
+   {
+      why = "GetProcessTimes failed for the owning MT5 process. error=" +
+            IntegerToString(GetLastError());
+      creationTime = 0;
+      return false;
+   }
+   if(creationTime <= 0)
+   {
+      why = "The owning MT5 process creation time is invalid.";
+      creationTime = 0;
+      return false;
+   }
+   why = "";
+   return true;
+}
+
 string TraderControlCommonFilesPath()
 {
    string common = TerminalInfoString(TERMINAL_COMMONDATA_PATH);
@@ -2681,6 +2723,9 @@ bool WriteDesktopTraderStatus()
    payload += "\"protocol_version\":" + IntegerToString(TRADER_CONTROL_PROTOCOL_VERSION) + ",";
    payload += "\"reason\":\"" + JsonEscape(g_traderControlReason) + "\",";
    payload += "\"symbol\":\"" + JsonEscape(_Symbol) + "\",";
+   payload += "\"terminal_creation_time\":" +
+              (string)g_traderControlTerminalCreationTime + ",";
+   payload += "\"terminal_pid\":" + (string)g_traderControlTerminalPid + ",";
    payload += "\"updated_at\":" + IntegerToString((long)now) + "}";
    string why = "";
    bool published = PublishVerifiedCommonSnapshot(TraderControlStatusFile(), payload, why);
@@ -2694,6 +2739,8 @@ bool LaunchDesktopTraderControls(string &why)
    { why = "Automatic launch disabled; waiting for a manually started matching Trader Controls window."; return true; }
    if(!MQLInfoInteger(MQL_DLLS_ALLOWED))
    { why = "Desktop Trader Controls require Allow DLL imports for automatic launch; commands are disabled."; return false; }
+   if(g_traderControlTerminalPid == 0 || g_traderControlTerminalCreationTime <= 0)
+   { why = "The owning MT5 process identity is unavailable; desktop controls were not launched."; return false; }
 
    string configuredPython = TrimText(PythonExecutable);
    string python = TraderControlLaunchExecutable(configuredPython);
@@ -2718,6 +2765,8 @@ bool LaunchDesktopTraderControls(string &why)
                    " --symbol " + TraderControlQuoteArg(_Symbol) +
                    " --magic " + IntegerToString(MagicNumber) +
                    " --ea-version " + TraderControlQuoteArg(EA_VERSION) +
+                   " --terminal-pid " + (string)g_traderControlTerminalPid +
+                   " --terminal-created " + (string)g_traderControlTerminalCreationTime +
                    " --refresh-ms " + IntegerToString(SafeTraderControlRefreshMs());
    ResetLastError();
    long result = ShellExecuteW(0, "open", python, params,
@@ -3429,6 +3478,11 @@ int OnInit()
    trade.SetExpertMagicNumber(MagicNumber);
    g_traderControlInstanceId = TraderControlInstanceId();
    g_traderControlOwnerId = TraderControlOwnerId();
+   string terminalProcessWhy = "";
+   if(!TraderControlTerminalProcessIdentity(g_traderControlTerminalPid,
+                                            g_traderControlTerminalCreationTime,
+                                            terminalProcessWhy))
+      Print(EA_COMMENT, ": ", terminalProcessWhy);
    g_portablePresetInitializedAt = TimeGMT();
    g_portablePresetActionActivated = false;
 

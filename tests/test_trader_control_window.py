@@ -47,19 +47,19 @@ def test_auto_start_preserves_focus_and_reinitialization_keeps_one_current_windo
     owner_id = "OWNER-A"
     original = window.InstanceIdentity(
         "INSTANCE-EURUSD", 123456, "Pepperstone-Demo", 9988,
-        "EURUSD.a", 91001, "2.45", owner_id,
+        "EURUSD.a", 91001, "2.46", owner_id,
     )
     changed = window.InstanceIdentity(
         "INSTANCE-GBPUSD", 123456, "Pepperstone-Demo", 9988,
-        "GBPUSD.a", 92002, "2.45", owner_id,
+        "GBPUSD.a", 92002, "2.46", owner_id,
     )
     version_changed = window.InstanceIdentity(
         "INSTANCE-GBPUSD", 123456, "Pepperstone-Demo", 9988,
-        "GBPUSD.a", 92002, "2.46", owner_id,
+        "GBPUSD.a", 92002, "2.47", owner_id,
     )
     other_owner = window.InstanceIdentity(
         "INSTANCE-OTHER", 123456, "Pepperstone-Demo", 7788,
-        "AUDUSD.a", 93003, "2.45", "OWNER-B",
+        "AUDUSD.a", 93003, "2.46", "OWNER-B",
     )
 
     class FakeRoot:
@@ -190,7 +190,7 @@ def test_auto_start_preserves_focus_and_reinitialization_keeps_one_current_windo
         launch = _function(trader, "bool LaunchDesktopTraderControls")
         owner = _function(trader, "string TraderControlOwnerId")
         executable = _function(trader, "string TraderControlLaunchExecutable")
-        assert '#property version   "2.45"' in trader and 'EA_VERSION = "2.45"' in trader
+        assert '#property version   "2.46"' in trader and 'EA_VERSION = "2.46"' in trader
         assert 'const int  TRADER_CONTROL_SW_SHOWMINNOACTIVE = 7;' in trader
         assert '" --owner-id " + TraderControlQuoteArg(g_traderControlOwnerId)' in launch
         assert "TRADER_CONTROL_SW_SHOWMINNOACTIVE" in launch
@@ -206,6 +206,280 @@ def test_auto_start_preserves_focus_and_reinitialization_keeps_one_current_windo
         if other is not None:
             other.release()
         ownership.release()
+
+
+def test_controls_close_only_when_verified_owning_terminal_exits(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _window_module()
+
+    class FakeProcessApi:
+        def __init__(self) -> None:
+            self.creation = {101: 13_400_000_000_000_101, 202: 13_400_000_000_000_202}
+            self.alive = {101: True, 202: True}
+            self.handles = {}
+            self.closed = []
+            self.next_handle = 1
+            self.fail_open = False
+            self.fail_creation = False
+            self.fail_wait = set()
+
+        def open_process(self, pid: int) -> int:
+            if self.fail_open or pid not in self.creation:
+                raise window.ProtocolError("OpenProcess diagnostic")
+            handle = self.next_handle
+            self.next_handle += 1
+            self.handles[handle] = pid
+            return handle
+
+        def creation_time(self, handle: int) -> int:
+            if self.fail_creation:
+                raise window.ProtocolError("GetProcessTimes diagnostic")
+            return self.creation[self.handles[handle]]
+
+        def wait_zero(self, handle: int) -> int:
+            pid = self.handles[handle]
+            if pid in self.fail_wait:
+                raise window.ProtocolError("WaitForSingleObject diagnostic")
+            return window.WAIT_TIMEOUT if self.alive[pid] else window.WAIT_OBJECT_0
+
+        def close_handle(self, handle: int) -> None:
+            assert handle not in self.closed
+            self.closed.append(handle)
+
+    class Root:
+        def __init__(self, state: str) -> None:
+            self.state = state
+            self.callbacks = {}
+            self.cancelled = []
+            self.destroyed = 0
+            self.next_callback = 1
+            self.activation_events = []
+
+        def after(self, delay: int, callback: object) -> str:
+            callback_id = f"after-{self.next_callback}"
+            self.next_callback += 1
+            self.callbacks[callback_id] = (delay, callback)
+            return callback_id
+
+        def after_cancel(self, callback_id: str) -> None:
+            self.cancelled.append(callback_id)
+            self.callbacks.pop(callback_id, None)
+
+        def run(self, callback_id: str) -> None:
+            _delay, callback = self.callbacks.pop(callback_id)
+            callback()
+
+        def destroy(self) -> None:
+            self.destroyed += 1
+
+    class Value:
+        def __init__(self, value: str) -> None:
+            self.value = value
+
+        def set(self, value: str) -> None:
+            self.value = value
+
+    class Button:
+        def __init__(self) -> None:
+            self.states = []
+
+        def state(self, value) -> None:
+            self.states.append(tuple(value))
+
+    def identity(
+        owner: str,
+        instance: str,
+        pid: int,
+        creation: int,
+        symbol: str,
+        magic: int,
+        chart: int,
+    ) -> object:
+        return window.InstanceIdentity(
+            instance,
+            123456,
+            "Pepperstone-Demo",
+            chart,
+            symbol,
+            magic,
+            "2.46",
+            owner,
+            pid,
+            creation,
+        )
+
+    def panel_for(current_identity, state: str):
+        lifetime = window._terminal_lifetime_id(current_identity)
+        ownership = window.WindowOwnership.claim_or_handoff(
+            tmp_path,
+            current_identity,
+            lifetime_id=lifetime,
+        )
+        assert ownership is not None
+        monitor = window.TerminalProcessMonitor.open(
+            current_identity.terminal_pid,
+            current_identity.terminal_creation_time,
+            process_api,
+        )
+        root = Root(state)
+        panel = window.TraderControlWindow.__new__(window.TraderControlWindow)
+        panel.root = root
+        panel.protocol = window.TraderControlProtocol(tmp_path, current_identity)
+        panel.refresh_ms = 5_000
+        panel.on_close = ownership.release
+        panel.ownership = ownership
+        panel.process_monitor = monitor
+        panel.owner_monitor_error = None
+        panel._closed = False
+        panel._refresh_after_id = None
+        panel._owner_after_id = None
+        panel.last_seen_result_id = None
+        panel.session_command_ids = set()
+        panel.buttons = [Button()]
+        panel.identity_var = Value(window.TraderControlWindow._identity_text(current_identity))
+        panel.connection_var = Value("Connecting...")
+        panel.result_var = Value("Last command: none")
+        return panel, root, ownership
+
+    process_api = FakeProcessApi()
+    first = identity(
+        "OWNER-A", "INSTANCE-EURUSD", 101, process_api.creation[101],
+        "EURUSD.a", 91001, 9988,
+    )
+    changed = identity(
+        "OWNER-A", "INSTANCE-GBPUSD", 101, process_api.creation[101],
+        "GBPUSD.a", 92002, 9988,
+    )
+    second = identity(
+        "OWNER-B", "INSTANCE-AUDUSD", 202, process_api.creation[202],
+        "AUDUSD.a", 93003, 7788,
+    )
+
+    first_panel, first_root, first_ownership = panel_for(first, "normal")
+    second_panel, second_root, _second_ownership = panel_for(second, "iconic")
+
+    # A stale/disconnected EA snapshot and a same-process identity handoff do
+    # not mean the terminal exited and never alter the panel's visibility.
+    stale = {
+        **window._identity_payload(first),
+        "updated_at": 1,
+        "fresh_for_seconds": 5,
+        "connected": False,
+        "control_ready": False,
+        "orders_enabled": False,
+        "reason": "EA instance disconnected.",
+    }
+    first_panel.protocol.status_path.write_text(json.dumps(stale), encoding="ascii")
+    first_panel._refresh()
+    assert not first_panel._closed and first_root.state == "normal"
+    assert window.WindowOwnership.claim_or_handoff(
+        tmp_path,
+        changed,
+        lifetime_id=window._terminal_lifetime_id(changed),
+    ) is None
+    assert first_panel._accept_handoff() is True
+    assert first_panel.protocol.identity == changed
+    assert first_root.state == "normal"
+
+    first_panel._check_owner_process()
+    second_panel._check_owner_process()
+    assert first_root.callbacks[first_panel._owner_after_id][0] == window.OWNER_PROCESS_CHECK_MS
+    assert window.OWNER_PROCESS_CHECK_MS <= 1_000
+    assert not first_panel._closed and not second_panel._closed
+
+    # Confirmed exit closes the restored first panel only. The minimized panel
+    # from another verified terminal remains untouched until its own exit.
+    process_api.alive[101] = False
+    first_root.run(first_panel._owner_after_id)
+    assert first_panel._closed and first_root.destroyed == 1
+    assert first_root.state == "normal" and first_root.activation_events == []
+    assert not second_panel._closed and second_root.destroyed == 0
+    process_api.alive[202] = False
+    second_root.run(second_panel._owner_after_id)
+    assert second_panel._closed and second_root.destroyed == 1
+    assert second_root.state == "iconic" and second_root.activation_events == []
+
+    # PID reuse and process-query failures fail closed; they cannot bind to or
+    # masquerade as confirmed termination of an unrelated process.
+    with pytest.raises(window.ProtocolError, match="PID may have been reused"):
+        window.TerminalProcessMonitor.open(101, process_api.creation[101] + 1, process_api)
+    process_api.fail_creation = True
+    with pytest.raises(window.ProtocolError, match="GetProcessTimes diagnostic"):
+        window.TerminalProcessMonitor.open(101, process_api.creation[101], process_api)
+    process_api.fail_creation = False
+    process_api.alive[101] = True
+    error_panel, error_root, _error_ownership = panel_for(first, "normal")
+    process_api.fail_wait.add(101)
+    error_panel._check_owner_process()
+    assert not error_panel._closed and error_root.destroyed == 0
+    assert "WaitForSingleObject diagnostic" in error_panel.connection_var.value
+    assert error_panel.buttons[0].states[-1] == ("disabled",)
+    process_api.fail_wait.clear()
+
+    # User closure uses the same idempotent cleanup without terminating MT5;
+    # the released owner/instance guards are immediately acquirable again.
+    error_panel._close()
+    error_panel._close()
+    assert process_api.alive[101] is True
+    assert error_root.destroyed == 1
+    reacquired = window.WindowOwnership.claim_or_handoff(
+        tmp_path,
+        first,
+        lifetime_id=window._terminal_lifetime_id(first),
+    )
+    assert reacquired is not None
+    reacquired.release()
+
+    # A Tk startup failure runs main's real finally path: the verified process
+    # handle and acquired guards are released, allowing an ordinary next start.
+    startup = identity(
+        "OWNER-C", "INSTANCE-STARTUP", 101, process_api.creation[101],
+        "NZDUSD.a", 94004, 6688,
+    )
+    args = window.argparse.Namespace(
+        common_dir=str(tmp_path),
+        instance_id=startup.instance_id,
+        owner_id=startup.owner_id,
+        account_login=startup.account_login,
+        account_server=startup.account_server,
+        chart_id=startup.chart_id,
+        symbol=startup.symbol,
+        magic=startup.magic_number,
+        ea_version=startup.ea_version,
+        terminal_pid=startup.terminal_pid,
+        terminal_created=startup.terminal_creation_time,
+        refresh_ms=250,
+    )
+    monkeypatch.setattr(window, "parse_args", lambda: args)
+    monkeypatch.setattr(window, "WindowsProcessApi", lambda: process_api)
+    monkeypatch.setattr(window.tk, "Tk", lambda: (_ for _ in ()).throw(RuntimeError("startup failed")))
+    with pytest.raises(RuntimeError, match="startup failed"):
+        window.main()
+    startup_reacquired = window.WindowOwnership.claim_or_handoff(
+        tmp_path,
+        startup,
+        lifetime_id=window._terminal_lifetime_id(startup),
+    )
+    assert startup_reacquired is not None
+    startup_reacquired.release()
+
+    assert not list(tmp_path.glob("*.command.json"))
+    assert len(process_api.closed) == len(set(process_api.closed))
+
+    trader = _source()
+    process_identity = _function(trader, "bool TraderControlTerminalProcessIdentity")
+    launch = _function(trader, "bool LaunchDesktopTraderControls")
+    status = _function(trader, "bool WriteDesktopTraderStatus")
+    assert '#property version   "2.46"' in trader and 'EA_VERSION = "2.46"' in trader
+    assert "GetCurrentProcessId()" in process_identity
+    assert "GetCurrentProcess()" in process_identity
+    assert "GetProcessTimes(processHandle" in process_identity
+    assert '" --terminal-pid " + (string)g_traderControlTerminalPid' in launch
+    assert '" --terminal-created " + (string)g_traderControlTerminalCreationTime' in launch
+    assert '\\"terminal_pid\\":' in status
+    assert '\\"terminal_creation_time\\":' in status
 
 
 def test_window_writes_one_atomic_scoped_command_and_blocks_duplicate_pending_clicks(tmp_path: Path) -> None:
@@ -466,7 +740,7 @@ def test_auto_fit_risk_buffer_preserves_risk_and_submission_gates() -> None:
     assert "chosenRiskBuffer" in market and "Automatic risk buffer selected" in market
     assert market.index("ComputeVolumeFromRisk") < market.index("trade.Buy(")
     assert fixed_market.index("ComputeVolumeFromRisk") < fixed_market.index("ConsumeStandardMarketToken") < fixed_market.index("trade.Buy(")
-    assert '#property version   "2.45"' in trader and 'EA_VERSION = "2.45"' in trader
+    assert '#property version   "2.46"' in trader and 'EA_VERSION = "2.46"' in trader
 
 
 def test_four_actions_reuse_current_inputs_and_one_attempt_trading_protections() -> None:
@@ -557,7 +831,7 @@ def test_four_actions_reuse_current_inputs_and_one_attempt_trading_protections()
     assert tick.index("if(UseDesktopTraderControls)") < tick.index("if(!OrdersEnabled)")
     assert timer.index("if(UseDesktopTraderControls)") < timer.index("if(Strategy == STRAT_STANDARD_LIMIT)")
     assert "HandleDesktopTraderCommand()" in timer
-    assert '#property version   "2.45"' in trader and 'EA_VERSION = "2.45"' in trader
+    assert '#property version   "2.46"' in trader and 'EA_VERSION = "2.46"' in trader
 
 
 def test_price_distance_mode_reuses_shared_builders_and_fails_before_market_token() -> None:
@@ -646,4 +920,4 @@ def test_price_distance_mode_reuses_shared_builders_and_fails_before_market_toke
     assert standard_limit_maintenance.index("if(UsePriceDistanceInputs) return;") < standard_limit_maintenance.index("StandardLimitShouldBeActive")
     assert r'\"orders_enabled\":' in status
     assert "UseDesktopTraderControls" in trader and "if(!OrdersEnabled) return false;" in trader
-    assert '#property version   "2.45"' in trader and 'EA_VERSION = "2.45"' in trader
+    assert '#property version   "2.46"' in trader and 'EA_VERSION = "2.46"' in trader

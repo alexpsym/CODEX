@@ -30,6 +30,12 @@ COMMAND_PENDING_SECONDS = 20
 STARTUP_GRACE_SECONDS = 8
 HANDOFF_FRESH_SECONDS = 30
 SW_SHOWMINNOACTIVE = 7
+OWNER_PROCESS_CHECK_MS = 500
+PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+SYNCHRONIZE = 0x00100000
+WAIT_OBJECT_0 = 0x00000000
+WAIT_TIMEOUT = 0x00000102
+WAIT_FAILED = 0xFFFFFFFF
 
 
 class ProtocolError(RuntimeError):
@@ -46,6 +52,8 @@ class InstanceIdentity:
     magic_number: int
     ea_version: str
     owner_id: str = ""
+    terminal_pid: int = 0
+    terminal_creation_time: int = 0
 
 
 @dataclass(frozen=True)
@@ -129,6 +137,15 @@ class TraderControlProtocol:
             and (
                 not self.identity.owner_id
                 or payload.get("owner_id") == self.identity.owner_id
+            )
+            and (
+                not self.identity.terminal_pid
+                or payload.get("terminal_pid") == self.identity.terminal_pid
+            )
+            and (
+                not self.identity.terminal_creation_time
+                or payload.get("terminal_creation_time")
+                == self.identity.terminal_creation_time
             )
         )
 
@@ -256,6 +273,134 @@ class InstanceWindowGuard:
         self.handle = None
 
 
+class WindowsProcessApi:
+    """Pointer-width-safe kernel32 calls used to bind one panel to one MT5 process."""
+
+    def __init__(self) -> None:
+        import ctypes
+        from ctypes import wintypes
+
+        class FileTime(ctypes.Structure):
+            _fields_ = [
+                ("low", wintypes.DWORD),
+                ("high", wintypes.DWORD),
+            ]
+
+        self._ctypes = ctypes
+        self._FileTime = FileTime
+        self._kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        self._kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        self._kernel32.OpenProcess.restype = wintypes.HANDLE
+        self._kernel32.GetProcessTimes.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(FileTime),
+            ctypes.POINTER(FileTime),
+            ctypes.POINTER(FileTime),
+            ctypes.POINTER(FileTime),
+        ]
+        self._kernel32.GetProcessTimes.restype = wintypes.BOOL
+        self._kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        self._kernel32.WaitForSingleObject.restype = wintypes.DWORD
+        self._kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        self._kernel32.CloseHandle.restype = wintypes.BOOL
+
+    def _error(self, action: str) -> ProtocolError:
+        return ProtocolError(f"{action} failed with Windows error {self._ctypes.get_last_error()}.")
+
+    def open_process(self, pid: int) -> Any:
+        handle = self._kernel32.OpenProcess(
+            SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+            False,
+            pid,
+        )
+        if not handle:
+            raise self._error("OpenProcess for the owning MT5 terminal")
+        return handle
+
+    def creation_time(self, handle: Any) -> int:
+        created = self._FileTime()
+        exited = self._FileTime()
+        kernel = self._FileTime()
+        user = self._FileTime()
+        if not self._kernel32.GetProcessTimes(
+            handle,
+            self._ctypes.byref(created),
+            self._ctypes.byref(exited),
+            self._ctypes.byref(kernel),
+            self._ctypes.byref(user),
+        ):
+            raise self._error("GetProcessTimes for the owning MT5 terminal")
+        return (int(created.high) << 32) | int(created.low)
+
+    def wait_zero(self, handle: Any) -> int:
+        result = int(self._kernel32.WaitForSingleObject(handle, 0))
+        if result == WAIT_FAILED:
+            raise self._error("WaitForSingleObject for the owning MT5 terminal")
+        return result
+
+    def close_handle(self, handle: Any) -> None:
+        if not self._kernel32.CloseHandle(handle):
+            raise self._error("CloseHandle for the owning MT5 terminal")
+
+
+class TerminalProcessMonitor:
+    """Retain and nonblockingly observe one verified Windows process lifetime."""
+
+    def __init__(self, pid: int, creation_time: int, handle: Any, process_api: Any) -> None:
+        self.pid = pid
+        self.creation_time = creation_time
+        self.handle = handle
+        self.process_api = process_api
+
+    @classmethod
+    def open(
+        cls,
+        pid: int,
+        creation_time: int,
+        process_api: Any | None = None,
+    ) -> "TerminalProcessMonitor":
+        if pid <= 0 or creation_time <= 0:
+            raise ProtocolError("Owning MT5 process identity is missing or invalid.")
+        api = WindowsProcessApi() if process_api is None else process_api
+        handle = api.open_process(pid)
+        try:
+            actual_creation = api.creation_time(handle)
+            if actual_creation != creation_time:
+                raise ProtocolError(
+                    "Owning MT5 process creation time does not match; the PID may have been reused."
+                )
+        except Exception:
+            try:
+                api.close_handle(handle)
+            except Exception:
+                pass
+            raise
+        return cls(pid, creation_time, handle, api)
+
+    def exited(self) -> bool:
+        if self.handle is None:
+            raise ProtocolError("Owning MT5 process handle is closed.")
+        result = self.process_api.wait_zero(self.handle)
+        if result == WAIT_OBJECT_0:
+            return True
+        if result == WAIT_TIMEOUT:
+            return False
+        raise ProtocolError(f"Unexpected owning MT5 wait result: {result}.")
+
+    def close(self) -> None:
+        if self.handle is None:
+            return
+        handle = self.handle
+        self.handle = None
+        self.process_api.close_handle(handle)
+
+
+def _terminal_lifetime_id(identity: InstanceIdentity) -> str:
+    if identity.terminal_pid <= 0 or identity.terminal_creation_time <= 0:
+        raise ProtocolError("Owning MT5 process identity is missing or invalid.")
+    return f"{identity.owner_id}.{identity.terminal_pid}.{identity.terminal_creation_time}"
+
+
 def _identity_payload(identity: InstanceIdentity) -> dict[str, Any]:
     return {
         "protocol_version": PROTOCOL_VERSION,
@@ -267,6 +412,8 @@ def _identity_payload(identity: InstanceIdentity) -> dict[str, Any]:
         "symbol": identity.symbol,
         "magic_number": identity.magic_number,
         "ea_version": identity.ea_version,
+        "terminal_pid": identity.terminal_pid,
+        "terminal_creation_time": identity.terminal_creation_time,
     }
 
 
@@ -282,6 +429,8 @@ def _identity_from_payload(payload: dict[str, Any], owner_id: str) -> InstanceId
         or not isinstance(payload.get("symbol"), str)
         or not isinstance(payload.get("magic_number"), int)
         or not isinstance(payload.get("ea_version"), str)
+        or not isinstance(payload.get("terminal_pid"), int)
+        or not isinstance(payload.get("terminal_creation_time"), int)
     ):
         return None
     return InstanceIdentity(
@@ -293,15 +442,18 @@ def _identity_from_payload(payload: dict[str, Any], owner_id: str) -> InstanceId
         magic_number=payload["magic_number"],
         ea_version=payload["ea_version"],
         owner_id=payload["owner_id"],
+        terminal_pid=payload["terminal_pid"],
+        terminal_creation_time=payload["terminal_creation_time"],
     )
 
 
 class OwnerHandoffMailbox:
     """One bounded identity handoff channel for a terminal/account/chart owner."""
 
-    def __init__(self, common_dir: Path, owner_id: str) -> None:
+    def __init__(self, common_dir: Path, owner_id: str, lifetime_id: str = "") -> None:
         self.owner_id = owner_id
-        self.path = Path(common_dir) / f"TraderControl.owner.v1.{owner_id}.handoff.json"
+        self.lifetime_id = lifetime_id or owner_id
+        self.path = Path(common_dir) / f"TraderControl.owner.v1.{self.lifetime_id}.handoff.json"
 
     def publish(self, identity: InstanceIdentity, now: float | None = None) -> None:
         payload = _identity_payload(identity)
@@ -340,12 +492,14 @@ class WindowOwnership:
         owner_guard: InstanceWindowGuard,
         instance_guard: InstanceWindowGuard,
         mailbox: OwnerHandoffMailbox,
+        lifetime_id: str,
     ) -> None:
         self.common_dir = Path(common_dir)
         self.identity = identity
         self.owner_guard = owner_guard
         self.instance_guard = instance_guard
         self.mailbox = mailbox
+        self.lifetime_id = lifetime_id
 
     @staticmethod
     def _guard_path(common_dir: Path, namespace: str) -> Path:
@@ -357,28 +511,47 @@ class WindowOwnership:
         common_dir: Path,
         identity: InstanceIdentity,
         guard_factory: Callable[[Path], InstanceWindowGuard] = InstanceWindowGuard,
+        lifetime_id: str = "",
     ) -> WindowOwnership | None:
         if not identity.owner_id:
             raise ProtocolError("Trader Controls owner identity is missing.")
-        mailbox = OwnerHandoffMailbox(common_dir, identity.owner_id)
+        effective_lifetime = lifetime_id or identity.owner_id
+        mailbox = OwnerHandoffMailbox(common_dir, identity.owner_id, effective_lifetime)
         owner_guard = guard_factory(
-            cls._guard_path(common_dir, f"TraderControl.owner.v1.{identity.owner_id}")
+            cls._guard_path(common_dir, f"TraderControl.owner.v1.{effective_lifetime}")
         )
         if not owner_guard.acquire():
             mailbox.publish(identity)
             return None
         mailbox.clear()
         instance_guard = guard_factory(
-            cls._guard_path(common_dir, f"TraderControl.v1.{identity.instance_id}")
+            cls._guard_path(
+                common_dir,
+                f"TraderControl.v1.{effective_lifetime}.{identity.instance_id}",
+            )
         )
         if not instance_guard.acquire():
             owner_guard.release()
             raise ProtocolError("Trader Controls instance lock is already held by another owner.")
-        return cls(common_dir, identity, owner_guard, instance_guard, mailbox)
+        return cls(
+            common_dir,
+            identity,
+            owner_guard,
+            instance_guard,
+            mailbox,
+            effective_lifetime,
+        )
 
     def accept_handoff(self, now: float | None = None) -> InstanceIdentity | None:
         requested = self.mailbox.read(now)
         if requested is None:
+            return None
+        if (
+            requested.terminal_pid != self.identity.terminal_pid
+            or requested.terminal_creation_time
+            != self.identity.terminal_creation_time
+        ):
+            self.mailbox.clear()
             return None
         if requested == self.identity:
             self.mailbox.clear()
@@ -388,7 +561,10 @@ class WindowOwnership:
             self.mailbox.clear()
             return requested
         next_guard = InstanceWindowGuard(
-            self._guard_path(self.common_dir, f"TraderControl.v1.{requested.instance_id}")
+            self._guard_path(
+                self.common_dir,
+                f"TraderControl.v1.{self.lifetime_id}.{requested.instance_id}",
+            )
         )
         if not next_guard.acquire():
             return None
@@ -429,12 +605,18 @@ class TraderControlWindow:
         refresh_ms: int,
         on_close: Callable[[], None],
         ownership: WindowOwnership | None = None,
+        process_monitor: TerminalProcessMonitor | None = None,
     ) -> None:
         self.root = root
         self.protocol = protocol
         self.refresh_ms = clamp(refresh_ms, MIN_REFRESH_MS, MAX_REFRESH_MS)
         self.on_close = on_close
         self.ownership = ownership
+        self.process_monitor = process_monitor
+        self.owner_monitor_error: str | None = None
+        self._closed = False
+        self._refresh_after_id: Any = None
+        self._owner_after_id: Any = None
         self.last_seen_result_id: str | None = None
         self.session_command_ids: set[str] = set()
         self.buttons: list[ttk.Button] = []
@@ -444,7 +626,9 @@ class TraderControlWindow:
         root.minsize(360, 580)
         root.protocol("WM_DELETE_WINDOW", self._close)
         self._build()
-        root.after(0, self._refresh)
+        self._refresh_after_id = root.after(0, self._refresh)
+        if self.process_monitor is not None:
+            self._owner_after_id = root.after(0, self._check_owner_process)
 
     def _build(self) -> None:
         frame = ttk.Frame(self.root, padding=16)
@@ -499,6 +683,8 @@ class TraderControlWindow:
         else:
             self.session_command_ids.add(command["command_id"])
             self.result_var.set(f"{ACTION_LABELS[action]} | pending | {command['command_id']}")
+        self._cancel_after(getattr(self, "_refresh_after_id", None))
+        self._refresh_after_id = None
         self._refresh()
 
     @staticmethod
@@ -511,7 +697,7 @@ class TraderControlWindow:
         )
 
     def _accept_handoff(self) -> bool:
-        if self.ownership is None:
+        if getattr(self, "ownership", None) is None:
             return False
         identity = self.ownership.accept_handoff()
         if identity is None:
@@ -527,14 +713,24 @@ class TraderControlWindow:
         return True
 
     def _refresh(self) -> None:
+        if getattr(self, "_closed", False):
+            return
+        self._refresh_after_id = None
         self._accept_handoff()
         state = self.protocol.state()
         status_text = "Connected" if state.connected else "Disconnected"
         orders = "enabled" if state.status and state.status.get("orders_enabled") else "disabled"
         updated_at = state.status.get("updated_at") if state.status else None
         freshness = f"Fresh {max(0.0, time.time() - updated_at):.1f}s" if isinstance(updated_at, int) else "Freshness unavailable"
-        self.connection_var.set(f"{status_text} | Orders {orders} | {freshness} | {state.reason}")
-        button_state = ["!disabled"] if state.buttons_enabled else ["disabled"]
+        if getattr(self, "owner_monitor_error", None):
+            self.connection_var.set(
+                "Disconnected | Orders disabled | Owner verification failed | "
+                + self.owner_monitor_error
+            )
+            button_state = ["disabled"]
+        else:
+            self.connection_var.set(f"{status_text} | Orders {orders} | {freshness} | {state.reason}")
+            button_state = ["!disabled"] if state.buttons_enabled else ["disabled"]
         for button in self.buttons:
             button.state(button_state)
 
@@ -551,11 +747,66 @@ class TraderControlWindow:
                 outcome = str(result.get("outcome") or "unknown")
                 reason = str(result.get("reason") or "No reason supplied.")
                 self.result_var.set(f"{action} | {outcome} | {reason}")
-        self.root.after(self.refresh_ms, self._refresh)
+        if not getattr(self, "_closed", False):
+            self._refresh_after_id = self.root.after(self.refresh_ms, self._refresh)
+
+    def _check_owner_process(self) -> None:
+        if self._closed or self.process_monitor is None:
+            return
+        self._owner_after_id = None
+        try:
+            exited = self.process_monitor.exited()
+        except ProtocolError as exc:
+            self.owner_monitor_error = str(exc)
+            for button in self.buttons:
+                button.state(["disabled"])
+            self.connection_var.set(
+                "Disconnected | Orders disabled | Owner verification failed | "
+                + self.owner_monitor_error
+            )
+        else:
+            self.owner_monitor_error = None
+            if exited:
+                self._close()
+                return
+        if not self._closed:
+            self._owner_after_id = self.root.after(
+                OWNER_PROCESS_CHECK_MS,
+                self._check_owner_process,
+            )
+
+    def _cancel_after(self, callback_id: Any) -> None:
+        if callback_id is None:
+            return
+        try:
+            self.root.after_cancel(callback_id)
+        except (AttributeError, tk.TclError):
+            pass
+
+    def close_resources(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._cancel_after(self._refresh_after_id)
+        self._cancel_after(self._owner_after_id)
+        self._refresh_after_id = None
+        self._owner_after_id = None
+        if self.process_monitor is not None:
+            try:
+                self.process_monitor.close()
+            except ProtocolError as exc:
+                self.owner_monitor_error = str(exc)
+            self.process_monitor = None
+        self.on_close()
 
     def _close(self) -> None:
-        self.on_close()
-        self.root.destroy()
+        if self._closed:
+            return
+        self.close_resources()
+        try:
+            self.root.destroy()
+        except tk.TclError:
+            pass
 
 
 def parse_args() -> argparse.Namespace:
@@ -569,6 +820,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--symbol", required=True)
     parser.add_argument("--magic", required=True, type=int)
     parser.add_argument("--ea-version", required=True)
+    parser.add_argument("--terminal-pid", required=True, type=int)
+    parser.add_argument("--terminal-created", required=True, type=int)
     parser.add_argument("--refresh-ms", type=int, default=250)
     return parser.parse_args()
 
@@ -584,20 +837,46 @@ def main() -> None:
         magic_number=args.magic,
         ea_version=args.ea_version,
         owner_id=args.owner_id,
+        terminal_pid=args.terminal_pid,
+        terminal_creation_time=args.terminal_created,
     )
     common_dir = Path(args.common_dir)
-    ownership = WindowOwnership.claim_or_handoff(common_dir, identity)
-    if ownership is None:
-        return
-    root = tk.Tk()
-    root.withdraw()
-    protocol = TraderControlProtocol(common_dir, identity)
-    TraderControlWindow(root, protocol, args.refresh_ms, ownership.release, ownership)
-    show_minimized_no_activate(root)
+    process_monitor = TerminalProcessMonitor.open(
+        identity.terminal_pid,
+        identity.terminal_creation_time,
+    )
+    ownership: WindowOwnership | None = None
+    control: TraderControlWindow | None = None
     try:
+        ownership = WindowOwnership.claim_or_handoff(
+            common_dir,
+            identity,
+            lifetime_id=_terminal_lifetime_id(identity),
+        )
+        if ownership is None:
+            return
+        root = tk.Tk()
+        root.withdraw()
+        protocol = TraderControlProtocol(common_dir, identity)
+        control = TraderControlWindow(
+            root,
+            protocol,
+            args.refresh_ms,
+            ownership.release,
+            ownership,
+            process_monitor,
+        )
+        show_minimized_no_activate(root)
         root.mainloop()
     finally:
-        ownership.release()
+        if control is not None:
+            control.close_resources()
+        else:
+            try:
+                process_monitor.close()
+            finally:
+                if ownership is not None:
+                    ownership.release()
 
 
 if __name__ == "__main__":
