@@ -1,6 +1,6 @@
 #property strict
 #property description "Feed selected Market Watch symbol spread percentages to a FILE_COMMON JSON file and optionally launch the desktop pop-out. Display-only; no trading."
-#property version   "1.11"
+#property version   "1.12"
 
 #import "shell32.dll"
 long ShellExecuteW(long hwnd, string operation, string file, string parameters, string directory, int show_cmd);
@@ -24,7 +24,7 @@ input bool   DesktopWindowShowPoints  = false;
 
 const string DEFAULT_EXPORT_FILE = "MarketWatchSpreadPercentFeed.json";
 const string NORMAL_DESKTOP_SCRIPT_PATH = "C:\\GPT\\CODEX-master\\mt5-clone\\spread_percent_window.py";
-const int    SW_SHOWNORMAL = 1;
+const int    SW_SHOWMINNOACTIVE = 7;
 const uint   INVALID_FILE_ATTRIBUTES = 0xFFFFFFFF;
 const uint   FILE_ATTRIBUTE_DIRECTORY = 0x00000010;
 
@@ -80,6 +80,26 @@ string QuoteArg(const string value)
    return "\"" + escaped + "\"";
 }
 
+string ShortStableFingerprint(const string value)
+{
+   long h1 = 5381;
+   long h2 = 52711;
+   int len = StringLen(value);
+   for(int i = 0; i < len; i++)
+   {
+      long ch = (long)StringGetCharacter(value, i);
+      h1 = (h1 * 33 + ch) % 2147483647;
+      h2 = (h2 * 131 + ch) % 2147483629;
+   }
+   return StringFormat("%08X%08X", (uint)h1, (uint)h2);
+}
+
+string SpreadWindowOwnerId()
+{
+   string identity = TerminalInfoString(TERMINAL_DATA_PATH) + "|" + (string)ChartID();
+   return ShortStableFingerprint(identity);
+}
+
 string DirectoryName(const string path)
 {
    string normalized = path;
@@ -118,6 +138,23 @@ bool ConfiguredLaunchFileExists(const string path)
    return (attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0);
 }
 
+string LaunchExecutable(const string configured)
+{
+   string executable = Trimmed(configured);
+   string lower = executable;
+   StringToLower(lower);
+   const string console_name = "python.exe";
+   int length = StringLen(executable);
+   int console_length = StringLen(console_name);
+   if(length >= console_length && StringSubstr(lower, length - console_length) == console_name)
+   {
+      string windowed = StringSubstr(executable, 0, length - console_length) + "pythonw.exe";
+      if(ConfiguredLaunchFileExists(windowed))
+         return windowed;
+   }
+   return executable;
+}
+
 bool LaunchWindow()
 {
    if(!LaunchDesktopWindow)
@@ -129,9 +166,10 @@ bool LaunchWindow()
       return false;
    }
 
-   string python = Trimmed(PythonExecutable);
+   string configured_python = Trimmed(PythonExecutable);
+   string python = LaunchExecutable(configured_python);
    string script = Trimmed(DesktopWindowScriptPath);
-   if(python == "")
+   if(configured_python == "")
    {
       Print("MarketWatchSpreadPercentFeed: configured PythonExecutable is blank. Set it to an existing python.exe. 'Allow DLL imports' must remain enabled for auto-launch.");
       return false;
@@ -142,10 +180,16 @@ bool LaunchWindow()
             ". Update this EA input after moving the repository. 'Allow DLL imports' must remain enabled for auto-launch.");
       return false;
    }
-   if(!ConfiguredLaunchFileExists(python))
+   if(!ConfiguredLaunchFileExists(configured_python))
    {
       Print("MarketWatchSpreadPercentFeed: configured PythonExecutable does not exist or is not a file: ", python,
             ". Correct the EA input; no desktop launch was attempted. 'Allow DLL imports' must be enabled for auto-launch.");
+      return false;
+   }
+   if(!ConfiguredLaunchFileExists(python))
+   {
+      Print("MarketWatchSpreadPercentFeed: selected desktop launch executable does not exist or is not a file: ", python,
+            ". Correct the EA input; no desktop launch was attempted.");
       return false;
    }
    if(!ConfiguredLaunchFileExists(script))
@@ -159,13 +203,15 @@ bool LaunchWindow()
    string params = QuoteArg(script)
                  + " --file " + QuoteArg(CommonFeedPath())
                  + " --refresh-ms " + IntegerToString(SafeDesktopWindowRefreshMs())
-                 + " --decimals " + IntegerToString(SafeDesktopWindowDecimals());
+                 + " --decimals " + IntegerToString(SafeDesktopWindowDecimals())
+                 + " --owner-id " + QuoteArg(SpreadWindowOwnerId())
+                 + " --auto-start";
 
    if(DesktopWindowShowPoints)
       params += " --show-points";
 
    ResetLastError();
-   long result = ShellExecuteW(0, "open", python, params, DirectoryName(script), SW_SHOWNORMAL);
+   long result = ShellExecuteW(0, "open", python, params, DirectoryName(script), SW_SHOWMINNOACTIVE);
    if(result <= 32)
    {
       Print("MarketWatchSpreadPercentFeed: failed to launch desktop window. ShellExecuteW result=", result,
