@@ -5531,6 +5531,257 @@ def test_resync_persists_post_replace_fingerprint_for_next_fast_path(monkeypatch
     assert reason == 'memory_fingerprint_match'
 
 
+def test_resync_fast_path_survives_journal_only_commits_but_invalidates_code_and_data_changes(
+    monkeypatch,
+    tmp_path,
+):
+    ms = _load_master_service_for_import_test()
+    import tools.master_journal_workbook as journal_module
+
+    monkeypatch.setattr(journal_module, "REPORT_START_YEAR", 2026)
+    monkeypatch.setattr(journal_module, "REPORT_MIN_END_YEAR", 2026)
+    workbook = tmp_path / "Trading Journal.xlsx"
+    snapshot = {
+        "items": [],
+        "stats": {"totals": {}, "groups": {}},
+        "balances": [
+            {
+                "account_label": "BINANCE",
+                "balance": 0,
+                "currency": "USDT",
+                "balance_source": "cashflow_anchor_plus_trades",
+            },
+            {
+                "account_label": "PEPPERSTONE DEMO",
+                "balance": 0,
+                "currency": "AUD",
+                "balance_source": "cashflow_anchor_plus_trades",
+            },
+        ],
+    }
+    built = journal_module.build_master_journal_workbook(
+        snapshot,
+        workbook,
+        publish_recommendation_assets=False,
+    )
+    assert built["ok"] is True
+
+    checkout = tmp_path / "identity-checkout"
+    implementation_payloads = {
+        "render/master_service.py": b"service implementation\n",
+        "tools/master_journal_workbook.py": b"workbook implementation\n",
+        "shared/oanda_risk.py": b"risk implementation\n",
+    }
+    for relative_path, payload in implementation_payloads.items():
+        target = checkout / relative_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(payload)
+    git_ref = checkout / ".git" / "refs" / "heads" / "master"
+    git_ref.parent.mkdir(parents=True, exist_ok=True)
+    (checkout / ".git" / "HEAD").write_text(
+        "ref: refs/heads/master\n",
+        encoding="utf-8",
+    )
+    first_commit = "1" * 40
+    journal_only_commit = "2" * 40
+    git_ref.write_text(first_commit + "\n", encoding="utf-8")
+
+    monthly = tmp_path / "monthly.json"
+    monthly_state = tmp_path / "monthly-state.json"
+    contexts = tmp_path / "trade-contexts.json"
+    monthly.write_text("{}\n", encoding="utf-8")
+    monthly_state.write_text("{}\n", encoding="utf-8")
+    contexts.write_text("{}\n", encoding="utf-8")
+    cache_path = tmp_path / "resync-cache.json"
+
+    monkeypatch.setattr(ms, "BASE_DIR", checkout)
+    monkeypatch.setattr(ms, "TRADING_JOURNAL_LOCAL_DIR", tmp_path)
+    monkeypatch.setattr(ms, "TRADING_JOURNAL_RESYNC_CACHE_PATH", cache_path)
+    monkeypatch.setattr(ms, "MONTHLY_AUD_REVALUATION_PATH", monthly)
+    monkeypatch.setattr(ms, "MONTHLY_AUD_REVALUATION_STATE_PATH", monthly_state)
+    monkeypatch.setattr(ms, "TRADE_CONTEXTS_PATH", contexts)
+    monkeypatch.setattr(ms, "_master_journal_path", lambda: workbook)
+    monkeypatch.setattr(ms, "_master_journal_single_file_mode", lambda: True)
+    monkeypatch.setattr(ms, "_master_journal_lock_status", lambda _path: {"locked": False})
+    monkeypatch.setattr(ms, "_PENDING_MANUAL_SYNC_ROWS", [])
+    monkeypatch.setattr(
+        ms,
+        "TRADING_JOURNAL_RESYNC_LAST_SUCCESS",
+        {
+            "fingerprint": None,
+            "snapshot": None,
+            "workbook_path": "",
+            "verified_at": None,
+        },
+    )
+
+    calls = {"build": 0, "sync": 0}
+
+    def build_snapshot(**_kwargs):
+        calls["build"] += 1
+        if calls["build"] > 1:
+            raise AssertionError("unchanged Resync must not rebuild the snapshot")
+        return snapshot
+
+    def sync_workbook(**_kwargs):
+        calls["sync"] += 1
+        if calls["sync"] > 1:
+            raise AssertionError("unchanged Resync must not rewrite the workbook")
+        return {
+            "master_journal_ok": True,
+            "master_journal_path": str(workbook),
+            "master_journal_diagnostics": {},
+        }
+
+    monkeypatch.setattr(ms, "_build_trading_journal_view_snapshot", build_snapshot)
+    monkeypatch.setattr(ms, "_sync_master_journal_workbook_unlocked", sync_workbook)
+
+    first = ms._run_trading_journal_resync()
+    assert first["ok"] is True, first
+    assert first["snapshot_build_ran"] is True
+    assert first["fast_verification"]["ok"] is True
+    assert calls == {"build": 1, "sync": 1}
+    verified_fingerprint = ms._resync_source_fingerprint(workbook)
+    assert ms.TRADING_JOURNAL_RESYNC_LAST_SUCCESS["fingerprint"] == (
+        verified_fingerprint
+    )
+    initial_identity = verified_fingerprint["implementation_identity"]
+    assert initial_identity["valid"] is True
+    metadata = json.loads(cache_path.read_text(encoding="utf-8"))
+    assert metadata["schema_version"] == (
+        ms.TRADING_JOURNAL_RESYNC_CACHE_SCHEMA_VERSION
+    )
+    assert metadata["source_fingerprint"] == verified_fingerprint
+    assert metadata["implementation_identity"] == initial_identity
+    assert metadata["code_version"] == first_commit[:12]
+
+    git_ref.write_text(journal_only_commit + "\n", encoding="utf-8")
+    assert ms._trading_journal_code_version() == journal_only_commit[:12]
+    after_journal_commit = ms._resync_source_fingerprint(workbook)
+    assert after_journal_commit == verified_fingerprint
+    assert after_journal_commit["implementation_identity"] == initial_identity
+
+    memory_fast = ms._run_trading_journal_resync()
+    assert memory_fast["ok"] is True, memory_fast
+    assert memory_fast["snapshot_build_ran"] is False
+    assert memory_fast["fast_path_reason"] == "memory_fingerprint_match"
+    assert memory_fast["app_version"] == journal_only_commit[:12]
+    assert calls == {"build": 1, "sync": 1}
+
+    ms.TRADING_JOURNAL_RESYNC_LAST_SUCCESS.update({
+        "fingerprint": None,
+        "snapshot": None,
+        "workbook_path": "",
+        "verified_at": None,
+    })
+    persisted_fast = ms._run_trading_journal_resync()
+    assert persisted_fast["ok"] is True, persisted_fast
+    assert persisted_fast["snapshot_build_ran"] is False
+    assert persisted_fast["fast_path_reason"] == "persisted_fingerprint_match"
+    assert persisted_fast["app_version"] == journal_only_commit[:12]
+    assert calls == {"build": 1, "sync": 1}
+
+    service_source = checkout / "render" / "master_service.py"
+    service_source.write_bytes(
+        implementation_payloads["render/master_service.py"]
+        + b"uncommitted relevant change\n"
+    )
+    changed_code_fingerprint = ms._resync_source_fingerprint(workbook)
+    assert changed_code_fingerprint["implementation_identity"] != initial_identity
+    cached, reason, diagnostics = ms._resync_fast_path_snapshot(
+        workbook,
+        changed_code_fingerprint,
+    )
+    assert cached is None
+    assert reason == "fingerprint_changed_or_no_verified_cache"
+    assert any(
+        item.get("component") == "implementation_identity"
+        for item in diagnostics["memory_changed_components"]
+    )
+    assert "metadata_implementation_identity_changed" in diagnostics
+
+    ms.TRADING_JOURNAL_RESYNC_LAST_SUCCESS.update({
+        "fingerprint": None,
+        "snapshot": None,
+        "workbook_path": "",
+        "verified_at": None,
+    })
+    cached, reason, diagnostics = ms._resync_fast_path_snapshot(
+        workbook,
+        changed_code_fingerprint,
+    )
+    assert cached is None
+    assert reason == "fingerprint_changed_or_no_verified_cache"
+    assert "metadata_implementation_identity_changed" in diagnostics
+
+    service_source.write_bytes(
+        implementation_payloads["render/master_service.py"]
+    )
+    monthly.write_text('{"changed":true}\n', encoding="utf-8")
+    changed_data_fingerprint = ms._resync_source_fingerprint(workbook)
+    assert changed_data_fingerprint["implementation_identity"] == initial_identity
+    cached, reason, diagnostics = ms._resync_fast_path_snapshot(
+        workbook,
+        changed_data_fingerprint,
+    )
+    assert cached is None
+    assert reason == "fingerprint_changed_or_no_verified_cache"
+    assert any(
+        item.get("component") == "file"
+        and item.get("path") == str(monthly)
+        for item in diagnostics["changed_components"]
+    )
+
+    monthly.write_text("{}\n", encoding="utf-8")
+    risk_source = checkout / "shared" / "oanda_risk.py"
+    risk_source.unlink()
+    unavailable_fingerprint = ms._resync_source_fingerprint(workbook)
+    assert unavailable_fingerprint["implementation_identity"]["valid"] is False
+    cached, reason, diagnostics = ms._resync_fast_path_snapshot(
+        workbook,
+        unavailable_fingerprint,
+    )
+    assert cached is None
+    assert reason == "implementation_identity_unavailable"
+    assert "implementation_identity_unavailable" in diagnostics
+    cache_before = cache_path.read_bytes()
+    assert ms._save_resync_success_metadata(
+        workbook,
+        unavailable_fingerprint,
+        snapshot,
+    ) is False
+    assert cache_path.read_bytes() == cache_before
+
+    risk_source.write_bytes(implementation_payloads["shared/oanda_risk.py"])
+    restored_fingerprint = ms._resync_source_fingerprint(workbook)
+    assert restored_fingerprint["implementation_identity"] == initial_identity
+    legacy_metadata = dict(metadata)
+    legacy_metadata["schema_version"] = 1
+    legacy_metadata["source_fingerprint"] = restored_fingerprint
+    legacy_metadata.pop("implementation_identity", None)
+    cache_path.write_text(json.dumps(legacy_metadata), encoding="utf-8")
+    ms.TRADING_JOURNAL_RESYNC_LAST_SUCCESS.update({
+        "fingerprint": None,
+        "snapshot": None,
+        "workbook_path": "",
+        "verified_at": None,
+    })
+    assert ms._load_resync_success_metadata(
+        workbook,
+        restored_fingerprint,
+    ) is None
+    cached, reason, diagnostics = ms._resync_fast_path_snapshot(
+        workbook,
+        restored_fingerprint,
+    )
+    assert cached is None
+    assert reason == "fingerprint_changed_or_no_verified_cache"
+    assert diagnostics["metadata_schema_changed"] == {
+        "previous": 1,
+        "current": ms.TRADING_JOURNAL_RESYNC_CACHE_SCHEMA_VERSION,
+    }
+
+
 @pytest.mark.skipif(not HTTPX_AVAILABLE, reason="httpx is not installed")
 def test_sync_preserves_canonical_stats1_layout_and_manual_formatting(tmp_path, monkeypatch):
     from openpyxl.styles import Alignment, Font, PatternFill

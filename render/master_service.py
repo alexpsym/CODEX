@@ -871,7 +871,13 @@ MASTER_JOURNAL_WORKBOOK_SYNC_LOCK = threading.RLock()
 MASTER_JOURNAL_WORKBOOK_SYNC_ACTIVE: Dict[str, object] = {}
 _MASTER_JOURNAL_WORKBOOK_OS_LOCK_HANDLE = None
 JOURNAL_GIT_INDEX_LOCK_WAIT_SECONDS = 15.0
-TRADING_JOURNAL_RESYNC_CACHE_SCHEMA_VERSION = 1
+TRADING_JOURNAL_RESYNC_CACHE_SCHEMA_VERSION = 2
+TRADING_JOURNAL_RESYNC_IMPLEMENTATION_SCHEMA_VERSION = 1
+TRADING_JOURNAL_RESYNC_IMPLEMENTATION_FILES = (
+    "render/master_service.py",
+    "tools/master_journal_workbook.py",
+    "shared/oanda_risk.py",
+)
 TRADING_JOURNAL_RESYNC_CACHE_PATH = BASE_DIR / "render" / "data" / "trading_journal_resync_cache.json"
 TRADING_JOURNAL_RESYNC_LAST_SUCCESS: Dict[str, object] = {
     "fingerprint": None,
@@ -43023,9 +43029,54 @@ def _trading_journal_code_version() -> str:
         return "unknown"
 
 
+def _trading_journal_resync_implementation_identity() -> Dict[str, object]:
+    files: List[Dict[str, object]] = []
+    for relative_path in TRADING_JOURNAL_RESYNC_IMPLEMENTATION_FILES:
+        path = BASE_DIR / relative_path
+        try:
+            payload = path.read_bytes()
+        except Exception as exc:
+            return {
+                "schema_version": TRADING_JOURNAL_RESYNC_IMPLEMENTATION_SCHEMA_VERSION,
+                "valid": False,
+                "error": f"{relative_path}:{type(exc).__name__}",
+            }
+        files.append({
+            "path": relative_path,
+            "size": len(payload),
+            "sha256": hashlib.sha256(payload).hexdigest(),
+        })
+    identity_payload = {
+        "schema_version": TRADING_JOURNAL_RESYNC_IMPLEMENTATION_SCHEMA_VERSION,
+        "files": files,
+    }
+    return {
+        **identity_payload,
+        "valid": True,
+        "sha256": _stable_json_sha256(identity_payload),
+    }
+
+
+def _resync_fingerprint_implementation_identity(
+    fingerprint: object,
+) -> Optional[Dict[str, object]]:
+    if not isinstance(fingerprint, dict):
+        return None
+    identity = fingerprint.get("implementation_identity")
+    if not isinstance(identity, dict) or identity.get("valid") is not True:
+        return None
+    if not str(identity.get("sha256") or ""):
+        return None
+    return identity
+
+
 def _resync_source_fingerprint(path: Path) -> Dict[str, object]:
+    implementation_identity = _trading_journal_resync_implementation_identity()
     if not _master_journal_single_file_mode():
-        return _journal_source_fingerprint()
+        return {
+            **_journal_source_fingerprint(),
+            "implementation_identity": implementation_identity,
+        }
     files = [
         _source_file_fingerprint(path),
         _source_file_fingerprint(MONTHLY_AUD_REVALUATION_PATH),
@@ -43036,7 +43087,7 @@ def _resync_source_fingerprint(path: Path) -> Dict[str, object]:
         "source_mode": "master_journal",
         "local_dir": str(TRADING_JOURNAL_LOCAL_DIR),
         "schema_version": TRADING_JOURNAL_VIEW_CACHE_VERSION,
-        "code_version": _trading_journal_code_version(),
+        "implementation_identity": implementation_identity,
         "files": sorted(files, key=lambda item: str(item.get("path") or "")),
     }
 
@@ -43073,9 +43124,14 @@ def _load_resync_success_metadata(path: Path, fingerprint: Dict[str, object]) ->
         return None
     if str(meta.get("workbook_path") or "") != str(path):
         return None
-    if meta.get("source_fingerprint") != fingerprint:
+    implementation_identity = _resync_fingerprint_implementation_identity(
+        fingerprint
+    )
+    if implementation_identity is None:
         return None
-    if str(meta.get("code_version") or "") != _trading_journal_code_version():
+    if meta.get("implementation_identity") != implementation_identity:
+        return None
+    if meta.get("source_fingerprint") != fingerprint:
         return None
     snapshot = _resync_expected_snapshot_from_metadata(meta)
     if not isinstance(snapshot, dict):
@@ -43083,17 +43139,24 @@ def _load_resync_success_metadata(path: Path, fingerprint: Dict[str, object]) ->
     return {**meta, "snapshot": snapshot}
 
 
-def _save_resync_success_metadata(path: Path, fingerprint: Dict[str, object], snapshot: Dict[str, object]) -> None:
+def _save_resync_success_metadata(path: Path, fingerprint: Dict[str, object], snapshot: Dict[str, object]) -> bool:
+    implementation_identity = _resync_fingerprint_implementation_identity(
+        fingerprint
+    )
+    if implementation_identity is None:
+        return False
     balances = list(_expected_dashboard_balance_map(snapshot).values())
     meta = {
         "schema_version": TRADING_JOURNAL_RESYNC_CACHE_SCHEMA_VERSION,
         "verified_at": _utc_now_iso(),
         "workbook_path": str(path),
         "source_fingerprint": fingerprint,
+        "implementation_identity": implementation_identity,
         "expected_balances": _json_safe(balances),
         "code_version": _trading_journal_code_version(),
     }
     _save_json_file(TRADING_JOURNAL_RESYNC_CACHE_PATH, meta)
+    return True
 
 
 def _fast_verify_trading_journal_workbook(path: Path, *, expected_snapshot: Optional[Dict[str, object]] = None, recommendation_bundle: Optional[Dict[str, object]] = None) -> Dict[str, object]:
@@ -43493,6 +43556,14 @@ def _resync_fast_path_snapshot(path: Path, fingerprint: Dict[str, object]) -> Tu
         return None, "pending_manual_rows", diagnostics
     if not path.exists():
         return None, "workbook_missing", diagnostics
+    implementation_identity = _resync_fingerprint_implementation_identity(
+        fingerprint
+    )
+    if implementation_identity is None:
+        diagnostics["implementation_identity_unavailable"] = fingerprint.get(
+            "implementation_identity"
+        )
+        return None, "implementation_identity_unavailable", diagnostics
     last = TRADING_JOURNAL_RESYNC_LAST_SUCCESS
     if (
         str(last.get("workbook_path") or "") == str(path)
@@ -43509,8 +43580,11 @@ def _resync_fast_path_snapshot(path: Path, fingerprint: Dict[str, object]) -> Tu
             diagnostics["metadata_schema_changed"] = {"previous": meta.get("schema_version"), "current": TRADING_JOURNAL_RESYNC_CACHE_SCHEMA_VERSION}
         elif str(meta.get("workbook_path") or "") != str(path):
             diagnostics["metadata_workbook_path_changed"] = {"previous": meta.get("workbook_path"), "current": str(path)}
-        elif str(meta.get("code_version") or "") != _trading_journal_code_version():
-            diagnostics["metadata_code_version_changed"] = {"previous": meta.get("code_version"), "current": _trading_journal_code_version()}
+        elif meta.get("implementation_identity") != implementation_identity:
+            diagnostics["metadata_implementation_identity_changed"] = {
+                "previous": meta.get("implementation_identity"),
+                "current": implementation_identity,
+            }
         elif meta.get("source_fingerprint") != fingerprint:
             diagnostics["changed_components"] = _fingerprint_changed_components(meta.get("source_fingerprint"), fingerprint)
         else:
@@ -43622,13 +43696,35 @@ def _run_trading_journal_resync() -> Dict[str, object]:
                 sync = {**(sync if isinstance(sync, dict) else {}), "master_journal_ok": False, "master_journal_error": verification.get("error"), "master_journal_diagnostics": {"fast_verification": verification}}
         if ok and isinstance(snapshot, dict):
             verified_fingerprint = _resync_source_fingerprint(path)
-            TRADING_JOURNAL_RESYNC_LAST_SUCCESS.update({
-                "fingerprint": verified_fingerprint,
-                "snapshot": copy.deepcopy(snapshot),
-                "verified_at": _utc_now_iso(),
-                "workbook_path": str(path),
-            })
-            _save_resync_success_metadata(path, verified_fingerprint, snapshot)
+            initial_implementation_identity = (
+                _resync_fingerprint_implementation_identity(fingerprint)
+            )
+            verified_implementation_identity = (
+                _resync_fingerprint_implementation_identity(verified_fingerprint)
+            )
+            if (
+                initial_implementation_identity is not None
+                and verified_implementation_identity == initial_implementation_identity
+            ):
+                TRADING_JOURNAL_RESYNC_LAST_SUCCESS.update({
+                    "fingerprint": verified_fingerprint,
+                    "snapshot": copy.deepcopy(snapshot),
+                    "verified_at": _utc_now_iso(),
+                    "workbook_path": str(path),
+                })
+                _save_resync_success_metadata(
+                    path,
+                    verified_fingerprint,
+                    snapshot,
+                )
+            elif isinstance(sync, dict):
+                sync.setdefault("master_journal_diagnostics", {})[
+                    "resync_cache_not_recorded"
+                ] = {
+                    "reason": "implementation_identity_changed_or_unavailable",
+                    "initial": initial_implementation_identity,
+                    "verified": verified_implementation_identity,
+                }
         timings["total"] = round(time.perf_counter() - started, 6)
         APP_LOGGER.info("master_journal_workbook_sync_done sync_id=%s caller=resync ok=%s snapshot_build_ran=True", request_id, ok)
         payload = {"ok": ok, "button": "resync", "message": "Trading Journal resync complete." if ok else _master_journal_sync_error(sync), "request_id": request_id, "app_version": _trading_journal_code_version(), "resync_timings": timings, "skipped_snapshot_build": False, "snapshot_build_ran": True, "fast_path_reason": fast_path_reason, "fast_path_diagnostics": fast_path_diagnostics, **(sync if isinstance(sync, dict) else {})}
