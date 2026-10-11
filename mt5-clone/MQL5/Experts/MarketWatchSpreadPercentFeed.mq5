@@ -1,6 +1,6 @@
 #property strict
 #property description "Feed selected Market Watch symbol spread percentages to a FILE_COMMON JSON file and optionally launch the desktop pop-out. Display-only; no trading."
-#property version   "1.12"
+#property version   "1.13"
 
 #import "shell32.dll"
 long ShellExecuteW(long hwnd, string operation, string file, string parameters, string directory, int show_cmd);
@@ -8,6 +8,13 @@ long ShellExecuteW(long hwnd, string operation, string file, string parameters, 
 
 #import "kernel32.dll"
 uint GetFileAttributesW(string file_name);
+uint GetCurrentProcessId();
+long GetCurrentProcess();
+bool GetProcessTimes(long process_handle,
+                     long &creation_time,
+                     long &exit_time,
+                     long &kernel_time,
+                     long &user_time);
 #import
 
 input group "Feed"
@@ -131,6 +138,48 @@ string CommonFeedPath()
    return common + "\\Files\\" + file_name;
 }
 
+string CommonFilesPath()
+{
+   string common = TerminalInfoString(TERMINAL_COMMONDATA_PATH);
+   if(common == "")
+      return "";
+   return common + "\\Files";
+}
+
+bool TerminalProcessIdentity(uint &process_id,
+                             long &creation_time,
+                             string &why)
+{
+   process_id = GetCurrentProcessId();
+   creation_time = 0;
+   long exit_time = 0;
+   long kernel_time = 0;
+   long user_time = 0;
+   long process_handle = GetCurrentProcess();
+   if(process_id == 0 || process_handle == 0)
+   {
+      why = "Could not obtain the owning MT5 process identity.";
+      return false;
+   }
+   ResetLastError();
+   if(!GetProcessTimes(process_handle, creation_time, exit_time,
+                       kernel_time, user_time))
+   {
+      why = "GetProcessTimes failed for the owning MT5 process. error=" +
+            IntegerToString(GetLastError());
+      creation_time = 0;
+      return false;
+   }
+   if(creation_time <= 0)
+   {
+      why = "The owning MT5 process creation time is invalid.";
+      creation_time = 0;
+      return false;
+   }
+   why = "";
+   return true;
+}
+
 bool ConfiguredLaunchFileExists(const string path)
 {
    ResetLastError();
@@ -166,9 +215,21 @@ bool LaunchWindow()
       return false;
    }
 
+   uint terminal_pid = 0;
+   long terminal_creation_time = 0;
+   string process_why = "";
+   if(!TerminalProcessIdentity(terminal_pid, terminal_creation_time,
+                               process_why))
+   {
+      Print("MarketWatchSpreadPercentFeed: desktop window was not launched: ",
+            process_why, " The display-only feed remains active.");
+      return false;
+   }
+
    string configured_python = Trimmed(PythonExecutable);
    string python = LaunchExecutable(configured_python);
    string script = Trimmed(DesktopWindowScriptPath);
+   string runtime_dir = CommonFilesPath();
    if(configured_python == "")
    {
       Print("MarketWatchSpreadPercentFeed: configured PythonExecutable is blank. Set it to an existing python.exe. 'Allow DLL imports' must remain enabled for auto-launch.");
@@ -178,6 +239,11 @@ bool LaunchWindow()
    {
       Print("MarketWatchSpreadPercentFeed: configured DesktopWindowScriptPath is blank. Normal installation path is ", NORMAL_DESKTOP_SCRIPT_PATH,
             ". Update this EA input after moving the repository. 'Allow DLL imports' must remain enabled for auto-launch.");
+      return false;
+   }
+   if(runtime_dir == "")
+   {
+      Print("MarketWatchSpreadPercentFeed: TERMINAL_COMMONDATA_PATH is unavailable; desktop window was not launched. The display-only feed remains active.");
       return false;
    }
    if(!ConfiguredLaunchFileExists(configured_python))
@@ -205,6 +271,9 @@ bool LaunchWindow()
                  + " --refresh-ms " + IntegerToString(SafeDesktopWindowRefreshMs())
                  + " --decimals " + IntegerToString(SafeDesktopWindowDecimals())
                  + " --owner-id " + QuoteArg(SpreadWindowOwnerId())
+                 + " --runtime-dir " + QuoteArg(runtime_dir)
+                 + " --terminal-pid " + (string)terminal_pid
+                 + " --terminal-created " + (string)terminal_creation_time
                  + " --auto-start";
 
    if(DesktopWindowShowPoints)

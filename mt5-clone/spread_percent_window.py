@@ -19,6 +19,16 @@ from tkinter import ttk
 DEFAULT_FEED_NAME = "MarketWatchSpreadPercentFeed.json"
 HANDOFF_FRESH_SECONDS = 30
 SW_SHOWMINNOACTIVE = 7
+OWNER_PROCESS_CHECK_MS = 500
+PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+SYNCHRONIZE = 0x00100000
+WAIT_OBJECT_0 = 0x00000000
+WAIT_TIMEOUT = 0x00000102
+WAIT_FAILED = 0xFFFFFFFF
+
+
+class SpreadLifecycleError(RuntimeError):
+    pass
 
 
 def default_feed_path() -> Path:
@@ -41,6 +51,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--show-points", action="store_true", help="Also show Spread Points.")
     parser.add_argument("--owner-id", default="", help=argparse.SUPPRESS)
     parser.add_argument("--auto-start", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--runtime-dir", default="", help=argparse.SUPPRESS)
+    parser.add_argument("--terminal-pid", type=int, default=0, help=argparse.SUPPRESS)
+    parser.add_argument("--terminal-created", type=int, default=0, help=argparse.SUPPRESS)
     return parser.parse_args(argv)
 
 
@@ -87,6 +100,37 @@ class SpreadWindowConfig:
             decimals=clamp(payload["decimals"], 0, 8),
             font_size=clamp(payload["font_size"], 8, 22),
             show_points=payload["show_points"],
+        )
+
+
+@dataclass(frozen=True)
+class SpreadOwnerIdentity:
+    owner_id: str
+    terminal_pid: int
+    terminal_creation_time: int
+
+    @classmethod
+    def from_args(cls, args: argparse.Namespace) -> "SpreadOwnerIdentity":
+        identity = cls(
+            owner_id=str(args.owner_id),
+            terminal_pid=int(args.terminal_pid),
+            terminal_creation_time=int(args.terminal_created),
+        )
+        if (
+            not identity.owner_id
+            or identity.terminal_pid <= 0
+            or identity.terminal_creation_time <= 0
+        ):
+            raise SpreadLifecycleError(
+                "Automatic Spread startup requires a valid owning MT5 PID and creation time."
+            )
+        return identity
+
+    @property
+    def lifetime_id(self) -> str:
+        return (
+            f"{self.owner_id}.{self.terminal_pid}."
+            f"{self.terminal_creation_time}"
         )
 
 
@@ -148,15 +192,19 @@ class InstanceWindowGuard:
 class SpreadHandoffMailbox:
     """Atomic settings handoff for one terminal/chart-owned Spread window."""
 
-    def __init__(self, runtime_dir: Path, owner_id: str) -> None:
-        self.owner_id = owner_id
-        self.path = Path(runtime_dir) / f"SpreadPercentWindow.owner.v1.{owner_id}.handoff.json"
+    def __init__(self, runtime_dir: Path, identity: SpreadOwnerIdentity) -> None:
+        self.identity = identity
+        self.path = Path(runtime_dir) / (
+            f"SpreadPercentWindow.owner.v1.{identity.lifetime_id}.handoff.json"
+        )
 
     def publish(self, config: SpreadWindowConfig, now: float | None = None) -> None:
         payload = config.payload()
         payload.update(
             {
-                "owner_id": self.owner_id,
+                "owner_id": self.identity.owner_id,
+                "terminal_pid": self.identity.terminal_pid,
+                "terminal_creation_time": self.identity.terminal_creation_time,
                 "requested_at": int(time.time() if now is None else now),
                 "request_id": str(uuid.uuid4()),
             }
@@ -172,7 +220,10 @@ class SpreadHandoffMailbox:
         requested_at = payload.get("requested_at") if isinstance(payload, dict) else None
         if (
             not isinstance(payload, dict)
-            or payload.get("owner_id") != self.owner_id
+            or payload.get("owner_id") != self.identity.owner_id
+            or payload.get("terminal_pid") != self.identity.terminal_pid
+            or payload.get("terminal_creation_time")
+            != self.identity.terminal_creation_time
             or not isinstance(requested_at, int)
             or current < requested_at - 5
             or current - requested_at > HANDOFF_FRESH_SECONDS
@@ -192,11 +243,11 @@ class SpreadWindowOwnership:
 
     def __init__(
         self,
-        owner_id: str,
+        identity: SpreadOwnerIdentity,
         guard: InstanceWindowGuard,
         mailbox: SpreadHandoffMailbox,
     ) -> None:
-        self.owner_id = owner_id
+        self.identity = identity
         self.guard = guard
         self.mailbox = mailbox
 
@@ -204,20 +255,20 @@ class SpreadWindowOwnership:
     def claim_or_handoff(
         cls,
         runtime_dir: Path,
-        owner_id: str,
+        identity: SpreadOwnerIdentity,
         config: SpreadWindowConfig,
         guard_factory: Callable[[Path], InstanceWindowGuard] = InstanceWindowGuard,
     ) -> "SpreadWindowOwnership | None":
-        if not owner_id:
-            raise ValueError("Automatic Spread startup requires an owner identity.")
-        mailbox = SpreadHandoffMailbox(runtime_dir, owner_id)
-        guard_path = Path(runtime_dir) / f"SpreadPercentWindow.owner.v1.{owner_id}.window-guard.lock"
+        mailbox = SpreadHandoffMailbox(runtime_dir, identity)
+        guard_path = Path(runtime_dir) / (
+            f"SpreadPercentWindow.owner.v1.{identity.lifetime_id}.window-guard.lock"
+        )
         guard = guard_factory(guard_path)
         if not guard.acquire():
             mailbox.publish(config)
             return None
         mailbox.clear()
-        return cls(owner_id, guard, mailbox)
+        return cls(identity, guard, mailbox)
 
     def accept_handoff(self, now: float | None = None) -> SpreadWindowConfig | None:
         config = self.mailbox.read(now)
@@ -229,6 +280,160 @@ class SpreadWindowOwnership:
         self.guard.release()
 
 
+class WindowsProcessApi:
+    """Limited-rights, pointer-width-safe process lifetime calls."""
+
+    def __init__(self) -> None:
+        import ctypes
+        from ctypes import wintypes
+
+        class FileTime(ctypes.Structure):
+            _fields_ = [("low", wintypes.DWORD), ("high", wintypes.DWORD)]
+
+        self._ctypes = ctypes
+        self._FileTime = FileTime
+        self._kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        self._kernel32.OpenProcess.argtypes = [
+            wintypes.DWORD,
+            wintypes.BOOL,
+            wintypes.DWORD,
+        ]
+        self._kernel32.OpenProcess.restype = wintypes.HANDLE
+        self._kernel32.GetProcessTimes.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(FileTime),
+            ctypes.POINTER(FileTime),
+            ctypes.POINTER(FileTime),
+            ctypes.POINTER(FileTime),
+        ]
+        self._kernel32.GetProcessTimes.restype = wintypes.BOOL
+        self._kernel32.WaitForSingleObject.argtypes = [
+            wintypes.HANDLE,
+            wintypes.DWORD,
+        ]
+        self._kernel32.WaitForSingleObject.restype = wintypes.DWORD
+        self._kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        self._kernel32.CloseHandle.restype = wintypes.BOOL
+
+    def _error(self, action: str) -> SpreadLifecycleError:
+        return SpreadLifecycleError(
+            f"{action} failed with Windows error {self._ctypes.get_last_error()}."
+        )
+
+    def open_process(self, pid: int) -> Any:
+        handle = self._kernel32.OpenProcess(
+            SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+            False,
+            pid,
+        )
+        if not handle:
+            raise self._error("OpenProcess for the owning MT5 terminal")
+        return handle
+
+    def creation_time(self, handle: Any) -> int:
+        created = self._FileTime()
+        exited = self._FileTime()
+        kernel = self._FileTime()
+        user = self._FileTime()
+        if not self._kernel32.GetProcessTimes(
+            handle,
+            self._ctypes.byref(created),
+            self._ctypes.byref(exited),
+            self._ctypes.byref(kernel),
+            self._ctypes.byref(user),
+        ):
+            raise self._error("GetProcessTimes for the owning MT5 terminal")
+        return (int(created.high) << 32) | int(created.low)
+
+    def wait_zero(self, handle: Any) -> int:
+        result = int(self._kernel32.WaitForSingleObject(handle, 0))
+        if result == WAIT_FAILED:
+            raise self._error("WaitForSingleObject for the owning MT5 terminal")
+        return result
+
+    def close_handle(self, handle: Any) -> None:
+        if not self._kernel32.CloseHandle(handle):
+            raise self._error("CloseHandle for the owning MT5 terminal")
+
+
+class TerminalProcessMonitor:
+    """Retain and nonblockingly observe one verified MT5 process lifetime."""
+
+    def __init__(
+        self,
+        identity: SpreadOwnerIdentity,
+        handle: Any,
+        process_api: Any,
+    ) -> None:
+        self.identity = identity
+        self.handle = handle
+        self.process_api = process_api
+
+    @classmethod
+    def open(
+        cls,
+        identity: SpreadOwnerIdentity,
+        process_api: Any | None = None,
+    ) -> "TerminalProcessMonitor":
+        api = WindowsProcessApi() if process_api is None else process_api
+        handle = api.open_process(identity.terminal_pid)
+        try:
+            actual_creation = api.creation_time(handle)
+            if actual_creation != identity.terminal_creation_time:
+                raise SpreadLifecycleError(
+                    "Owning MT5 process creation time does not match; "
+                    "the PID may have been reused."
+                )
+        except Exception:
+            try:
+                api.close_handle(handle)
+            except Exception:
+                pass
+            raise
+        return cls(identity, handle, api)
+
+    def exited(self) -> bool:
+        if self.handle is None:
+            raise SpreadLifecycleError("Owning MT5 process handle is closed.")
+        result = self.process_api.wait_zero(self.handle)
+        if result == WAIT_OBJECT_0:
+            return True
+        if result == WAIT_TIMEOUT:
+            return False
+        raise SpreadLifecycleError(f"Unexpected owning MT5 wait result: {result}.")
+
+    def close(self) -> None:
+        if self.handle is None:
+            return
+        handle = self.handle
+        self.handle = None
+        self.process_api.close_handle(handle)
+
+
+class WindowsUser32Api:
+    """Pointer-width-safe GetParent and ShowWindow binding."""
+
+    def __init__(self, library: Any | None = None) -> None:
+        import ctypes
+        from ctypes import wintypes
+
+        self._user32 = (
+            ctypes.WinDLL("user32", use_last_error=True)
+            if library is None
+            else library
+        )
+        self._user32.GetParent.argtypes = [wintypes.HWND]
+        self._user32.GetParent.restype = wintypes.HWND
+        self._user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+        self._user32.ShowWindow.restype = wintypes.BOOL
+
+    def get_parent(self, hwnd: int) -> int:
+        return int(self._user32.GetParent(hwnd) or 0)
+
+    def show_window(self, hwnd: int, mode: int) -> None:
+        self._user32.ShowWindow(hwnd, mode)
+
+
 def show_minimized_no_activate(root: tk.Tk, user32: Any | None = None) -> None:
     """Map the normal Tk top-level directly as minimized without activation."""
     root.update_idletasks()
@@ -236,14 +441,18 @@ def show_minimized_no_activate(root: tk.Tk, user32: Any | None = None) -> None:
         root.iconify()
         return
     if user32 is None:
-        import ctypes
-
-        user32 = ctypes.windll.user32
+        user32 = WindowsUser32Api()
     hwnd = int(root.winfo_id())
-    parent = int(user32.GetParent(hwnd))
+    if hasattr(user32, "get_parent"):
+        parent = int(user32.get_parent(hwnd) or 0)
+    else:
+        parent = int(user32.GetParent(hwnd) or 0)
     if parent:
         hwnd = parent
-    user32.ShowWindow(hwnd, SW_SHOWMINNOACTIVE)
+    if hasattr(user32, "show_window"):
+        user32.show_window(hwnd, SW_SHOWMINNOACTIVE)
+    else:
+        user32.ShowWindow(hwnd, SW_SHOWMINNOACTIVE)
 
 
 @dataclass(frozen=True)
@@ -260,6 +469,7 @@ class SpreadPercentWindow:
         args: argparse.Namespace,
         on_close: Callable[[], None] = lambda: None,
         ownership: SpreadWindowOwnership | None = None,
+        process_monitor: TerminalProcessMonitor | None = None,
     ) -> None:
         self.root = root
         config = SpreadWindowConfig.from_args(args)
@@ -270,8 +480,12 @@ class SpreadPercentWindow:
         self.show_points = config.show_points
         self.on_close = on_close
         self.ownership = ownership
+        self.process_monitor = process_monitor
+        self.owner_monitor_error: str | None = None
+        self._feed_status_text = ""
         self._closed = False
         self._refresh_after_id: Any = None
+        self._owner_after_id: Any = None
         self.rows: list[SpreadRow] = []
         self.sort_column: str | None = None
         self.sort_desc = False
@@ -284,6 +498,8 @@ class SpreadPercentWindow:
         self._build_styles()
         self._build_widgets()
         self._schedule_refresh(0)
+        if self.process_monitor is not None:
+            self._owner_after_id = self.root.after(0, self._check_owner_process)
 
     def _build_styles(self) -> None:
         style = ttk.Style(self.root)
@@ -354,14 +570,32 @@ class SpreadPercentWindow:
         self.tree.heading("spread_percent", text=f"Spread %{spread_suffix}", command=self._toggle_spread_sort)
 
     def _configure_tree_columns(self) -> None:
+        existing_widths: dict[str, int] = {}
+        for name in ("symbol", "spread_percent"):
+            try:
+                existing_widths[name] = int(self.tree.column(name, "width"))
+            except (KeyError, TypeError, ValueError, tk.TclError):
+                pass
         columns = ["symbol", "spread_percent"]
         if self.show_points:
             columns.append("spread_points")
         self.tree.configure(columns=columns)
         self.tree.heading("symbol", text="Symbol", command=self._toggle_symbol_sort)
         self.tree.heading("spread_percent", text="Spread %", command=self._toggle_spread_sort)
-        self.tree.column("symbol", width=220, minwidth=140, anchor="w", stretch=True)
-        self.tree.column("spread_percent", width=180, minwidth=140, anchor="e", stretch=True)
+        self.tree.column(
+            "symbol",
+            width=existing_widths.get("symbol", 220),
+            minwidth=140,
+            anchor="w",
+            stretch=True,
+        )
+        self.tree.column(
+            "spread_percent",
+            width=existing_widths.get("spread_percent", 180),
+            minwidth=140,
+            anchor="e",
+            stretch=True,
+        )
         if self.show_points:
             self.tree.heading("spread_points", text="Spread Points")
             self.tree.column("spread_points", width=140, minwidth=120, anchor="e", stretch=True)
@@ -395,6 +629,15 @@ class SpreadPercentWindow:
             self._refresh,
         )
 
+    def _set_feed_status(self, text: str) -> None:
+        self._feed_status_text = text
+        if self.owner_monitor_error:
+            self.status_var.set(
+                f"Owner verification failed: {self.owner_monitor_error} | {text}"
+            )
+        else:
+            self.status_var.set(text)
+
     def _refresh(self) -> None:
         if self._closed:
             return
@@ -405,19 +648,46 @@ class SpreadPercentWindow:
         except FileNotFoundError:
             self.rows = []
             self._clear_rows()
-            self.status_var.set(f"Feed file missing. Attach MarketWatchSpreadPercentFeed.mq5 in MT5: {self.feed_path}")
+            self._set_feed_status(
+                "Feed file missing. Attach MarketWatchSpreadPercentFeed.mq5 "
+                f"in MT5: {self.feed_path}"
+            )
             self._schedule_refresh()
             return
         except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-            self.status_var.set("Feed file is being updated; retrying...")
+            self._set_feed_status("Feed file is being updated; retrying...")
             self._schedule_refresh()
             return
 
         self.rows = self._parse_rows(feed)
         generated_at = str(feed.get("generated_at") or "unknown")
-        self.status_var.set(f"{len(self.rows)} symbols | Updated {generated_at} | {self.feed_path}")
+        self._set_feed_status(
+            f"{len(self.rows)} symbols | Updated {generated_at} | {self.feed_path}"
+        )
         self._render_rows()
         self._schedule_refresh()
+
+    def _check_owner_process(self) -> None:
+        if self._closed or self.process_monitor is None:
+            return
+        self._owner_after_id = None
+        try:
+            exited = self.process_monitor.exited()
+        except SpreadLifecycleError as exc:
+            self.owner_monitor_error = str(exc)
+            self._set_feed_status(self._feed_status_text)
+        else:
+            self.owner_monitor_error = None
+            if exited:
+                self._close()
+                return
+            if self._feed_status_text:
+                self._set_feed_status(self._feed_status_text)
+        if not self._closed:
+            self._owner_after_id = self.root.after(
+                OWNER_PROCESS_CHECK_MS,
+                self._check_owner_process,
+            )
 
     def _read_feed(self) -> dict[str, Any]:
         try:
@@ -509,13 +779,23 @@ class SpreadPercentWindow:
         if self._closed:
             return
         self._closed = True
-        if self._refresh_after_id is not None:
+        for callback_id in (self._refresh_after_id, self._owner_after_id):
+            if callback_id is None:
+                continue
             try:
-                self.root.after_cancel(self._refresh_after_id)
+                self.root.after_cancel(callback_id)
             except (AttributeError, tk.TclError):
                 pass
-            self._refresh_after_id = None
-        self.on_close()
+        self._refresh_after_id = None
+        self._owner_after_id = None
+        try:
+            if self.process_monitor is not None:
+                self.process_monitor.close()
+        except SpreadLifecycleError as exc:
+            self.owner_monitor_error = str(exc)
+        finally:
+            self.process_monitor = None
+            self.on_close()
 
     def _close(self) -> None:
         if self._closed:
@@ -533,20 +813,34 @@ def run_window(
     window_factory: Callable[..., SpreadPercentWindow] = SpreadPercentWindow,
     guard_factory: Callable[[Path], InstanceWindowGuard] = InstanceWindowGuard,
     user32: Any | None = None,
+    process_api: Any | None = None,
 ) -> str:
     config = SpreadWindowConfig.from_args(args)
+    identity: SpreadOwnerIdentity | None = None
+    process_monitor: TerminalProcessMonitor | None = None
     ownership: SpreadWindowOwnership | None = None
     window: SpreadPercentWindow | None = None
     if args.owner_id:
-        ownership = SpreadWindowOwnership.claim_or_handoff(
-            config.feed_path.parent,
-            args.owner_id,
-            config,
-            guard_factory=guard_factory,
+        identity = SpreadOwnerIdentity.from_args(args)
+        runtime_dir = Path(args.runtime_dir)
+        if not args.runtime_dir:
+            raise SpreadLifecycleError(
+                "Automatic Spread startup requires the MT5 Common Files runtime directory."
+            )
+        process_monitor = TerminalProcessMonitor.open(
+            identity,
+            process_api=process_api,
         )
-        if ownership is None:
-            return "handoff"
     try:
+        if identity is not None:
+            ownership = SpreadWindowOwnership.claim_or_handoff(
+                runtime_dir,
+                identity,
+                config,
+                guard_factory=guard_factory,
+            )
+            if ownership is None:
+                return "handoff"
         root = root_factory()
         if args.auto_start:
             root.withdraw()
@@ -555,7 +849,9 @@ def run_window(
             args,
             ownership.release if ownership is not None else (lambda: None),
             ownership,
+            process_monitor,
         )
+        process_monitor = None
         if args.auto_start:
             show_minimized_no_activate(root, user32=user32)
         root.mainloop()
@@ -563,12 +859,55 @@ def run_window(
     finally:
         if window is not None:
             window.close_resources()
-        elif ownership is not None:
-            ownership.release()
+        else:
+            try:
+                if process_monitor is not None:
+                    process_monitor.close()
+            finally:
+                if ownership is not None:
+                    ownership.release()
+
+
+def _startup_diagnostic_path(args: argparse.Namespace) -> Path | None:
+    if (
+        not args.owner_id
+        or not args.runtime_dir
+        or args.terminal_pid <= 0
+        or args.terminal_created <= 0
+    ):
+        return None
+    identity = SpreadOwnerIdentity.from_args(args)
+    return Path(args.runtime_dir) / (
+        f"SpreadPercentWindow.owner.v1.{identity.lifetime_id}.startup-error.json"
+    )
+
+
+def _write_startup_diagnostic(args: argparse.Namespace, message: str) -> None:
+    path = _startup_diagnostic_path(args)
+    if path is None:
+        return
+    atomic_write_json(
+        path,
+        {
+            "owner_id": args.owner_id,
+            "terminal_pid": args.terminal_pid,
+            "terminal_creation_time": args.terminal_created,
+            "error": message,
+        },
+    )
 
 
 def main() -> None:
-    run_window(parse_args())
+    args = parse_args()
+    try:
+        run_window(args)
+    except Exception as exc:
+        if not args.auto_start:
+            raise
+        try:
+            _write_startup_diagnostic(args, str(exc))
+        except OSError:
+            pass
 
 
 if __name__ == "__main__":
