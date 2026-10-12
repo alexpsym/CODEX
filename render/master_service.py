@@ -12890,7 +12890,28 @@ def _calendar_missing_expected_pl_cells(
         if isinstance(value, (int, float)):
             return True
         text = str(value or "").strip()
-        return bool(re.match(r"^-?\d+(?:\.\d+)?%,\s+\d+\s+trades?$", text, flags=re.IGNORECASE))
+        percentage = r"-?\d+(?:\.\d+)?%"
+        legacy = rf"{percentage},\s+\d+\s+trades?"
+        if re.fullmatch(legacy, text, flags=re.IGNORECASE):
+            return True
+        generated = re.fullmatch(
+            rf"(?P<pct>{percentage}),\s+"
+            rf"(?P<r>R N/A|[+-]?\d+(?:\.\d+)?R"
+            rf"(?: \(partial (?P<covered>\d+)/(?P<total>\d+)\))?),\s+"
+            rf"(?P<count>\d+)\s+trades?",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if not generated:
+            return False
+        covered = generated.group("covered")
+        total = generated.group("total")
+        if covered is None or total is None:
+            return True
+        covered_count = int(covered)
+        total_count = int(total)
+        trade_count = int(generated.group("count"))
+        return 0 < covered_count < total_count == trade_count
 
     month_to_col_default: Dict[int, int] = {}
     month_to_col_custom: Dict[int, int] = {}

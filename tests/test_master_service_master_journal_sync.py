@@ -1720,6 +1720,9 @@ def test_sync_master_journal_succeeds_with_merged_calendar_cells(tmp_path, monke
 
 
 def test_calendar_missing_expected_pl_cells_reports_exact_sorted_periods():
+    import calendar
+    from tools import master_journal_workbook as mjw
+
     ws = Workbook().active
     ws['A1'] = 'Year'
     ws['B1'] = 'January P/L %'
@@ -1739,6 +1742,209 @@ def test_calendar_missing_expected_pl_cells_reports_exact_sorted_periods():
     assert missing == [(2024, 1), (2026, 2)]
     assert master_service._calendar_has_expected_pl_cells(ws, {(2025, 1), (2026, 1)}) is True
     assert master_service._calendar_has_expected_pl_cells(ws, {(2026, 2)}) is False
+
+    rows = [
+        {"row_type": "trade", "close_time": "2026-01-01", "result_pct": 0.5, "r_multiple": 1.0},
+        {"row_type": "trade", "close_time": "2026-01-02", "result_pct": 0.7, "r_multiple": 1.5},
+        {"row_type": "trade", "close_time": "2026-02-01", "result_pct": -0.8, "r_multiple": -1.0},
+        {"row_type": "trade", "close_time": "2026-03-01", "result_pct": 0.0, "r_multiple": 0.5},
+        {"row_type": "trade", "close_time": "2026-03-02", "result_pct": 0.0, "r_multiple": -0.5},
+        {"row_type": "trade", "close_time": "2026-04-01", "result_pct": 1.2},
+        {"row_type": "trade", "close_time": "2026-04-02", "result_pct": 0.0},
+        {"row_type": "trade", "close_time": "2026-05-01", "result_pct": 0.4, "r_multiple": 1.25},
+        {"row_type": "trade", "close_time": "2026-05-02", "result_pct": 0.4, "r_multiple": 1.25},
+        {"row_type": "trade", "close_time": "2026-05-03", "result_pct": 0.4},
+        {"row_type": "trade", "close_time": "2026-06-01", "result_pct": 0.00000001, "r_multiple": 0.00000001},
+        {"row_type": "trade", "close_time": "2026-07-01", "result_pct": -0.00000001, "r_multiple": -0.00000001},
+    ]
+    generated = Workbook().active
+    mjw._write_pnl_calendar_one_line_layout(generated, {"items": rows})
+
+    def generated_cell(month: int):
+        year_col = next(
+            col for col in range(2, generated.max_column + 1)
+            if generated.cell(1, col).value == 2026
+        )
+        month_row = next(
+            row for row in range(2, generated.max_row + 1)
+            if str(generated.cell(row, 1).value or "").casefold()
+            == calendar.month_name[month].casefold()
+        )
+        return generated.cell(month_row, year_col)
+
+    tiny_positive = mjw._format_decimal_presentation(0.00000001, suffix="%")
+    tiny_positive_r = "+" + mjw._format_decimal_presentation(0.00000001, suffix="R")
+    tiny_negative = mjw._format_decimal_presentation(-0.00000001, suffix="%")
+    tiny_negative_r = mjw._format_decimal_presentation(-0.00000001, suffix="R")
+    assert [generated_cell(month).value for month in range(1, 8)] == [
+        "1.20%, +2.50R, 2 trades",
+        "-0.80%, -1.00R, 1 trade",
+        "0.00%, 0.00R, 2 trades",
+        "1.20%, R N/A, 2 trades",
+        "1.20%, +2.50R (partial 2/3), 3 trades",
+        f"{tiny_positive}, {tiny_positive_r}, 1 trade",
+        f"{tiny_negative}, {tiny_negative_r}, 1 trade",
+    ]
+    assert master_service._calendar_missing_expected_pl_cells(
+        generated,
+        {(2026, month) for month in range(1, 8)},
+    ) == []
+    generated_cell(9).value = "1.20%, R N/A, 2 trades extra"
+    generated_cell(10).value = "1.20%, +2.50R (partial 2/2), 2 trades"
+    assert master_service._calendar_missing_expected_pl_cells(
+        generated,
+        {(2026, 8), (2026, 9), (2026, 10), (2025, 1), (2024, 1)},
+    ) == [(2024, 1), (2025, 1), (2026, 8), (2026, 9), (2026, 10)]
+
+    custom = Workbook().active
+    custom["A1"] = "Year"
+    custom["B1"] = "January"
+    custom["C1"] = "February"
+    custom["D1"] = "March"
+    custom["A2"] = 2026
+    custom["B2"] = 1.25
+    custom["C2"] = "-2.50%, 3 trades"
+    custom["D2"] = "-0.80%, -1.00R, 1 trade"
+    assert master_service._calendar_missing_expected_pl_cells(
+        custom,
+        {(2026, 1), (2026, 2), (2026, 3)},
+    ) == []
+
+    transposed = Workbook().active
+    mjw._write_pnl_calendar_one_line_layout(transposed, {"items": rows})
+    assert master_service._calendar_missing_expected_pl_cells(
+        transposed,
+        {(2026, month) for month in range(1, 8)},
+    ) == []
+
+
+def test_sync_accepts_net_r_calendar_and_rejects_missing_month_before_publish(
+    tmp_path,
+    monkeypatch,
+):
+    import hashlib
+    from tools import master_journal_workbook as mjw
+
+    monkeypatch.setattr(master_service, "TRADING_JOURNAL_LOCAL_DIR", tmp_path)
+    monkeypatch.setattr(master_service, "_master_journal_single_file_mode", lambda: False)
+    monkeypatch.setattr(master_service, "_update_trading_journal_import_status", lambda **_updates: None)
+    monkeypatch.setattr(master_service, "_set_trading_journal_rows", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        master_service,
+        "assign_trade_numbers_and_create_folders",
+        lambda *_args, **_kwargs: {"assigned_count": 0},
+    )
+    monkeypatch.setattr(
+        mjw,
+        "_publish_recommendation_chart_bundle",
+        lambda _bundle: tmp_path / "recommendation-assets",
+    )
+    monkeypatch.setattr(mjw, "REPORT_START_YEAR", 2026)
+    monkeypatch.setattr(mjw, "REPORT_MIN_END_YEAR", 2026)
+
+    snapshot = {
+        "items": [{
+            "id": "calendar-net-r-trade",
+            "row_type": "trade",
+            "account": "TEST ACCOUNT",
+            "symbol": "EURUSD",
+            "side": "BUY",
+            "open_time": "2026-05-01T00:00:00Z",
+            "close_time": "2026-05-01T01:00:00Z",
+            "net_profit": 12.0,
+            "result_pct": 1.2,
+            "r_multiple": 2.5,
+        }],
+        "stats": {
+            "totals": {},
+            "groups": {
+                "by_market": {"overall": {}, "fx": {}, "crypto": {}},
+                "risk_expectancy": {},
+                "leaders": {},
+                "duration": {},
+            },
+        },
+        "balances": [{
+            "account_label": "TEST ACCOUNT",
+            "balance": 1000.0,
+            "currency": "USD",
+            "as_of": "2026-05-01",
+        }],
+        "diagnostics": {},
+    }
+    workbook_path = tmp_path / "Trading Journal.xlsx"
+    mjw.build_master_journal_workbook(
+        snapshot,
+        workbook_path,
+        publish_recommendation_assets=False,
+    )
+
+    valid = master_service._sync_master_journal_workbook(
+        prebuilt_snapshot=snapshot,
+        defer_github_sync=True,
+        sync_caller="test_net_r_calendar_validation",
+    )
+    assert valid["master_journal_ok"] is True, valid
+    reopened = load_workbook(workbook_path, data_only=True)
+    try:
+        calendar_ws = reopened["P&L Calendar"]
+        year_col = next(
+            col for col in range(2, calendar_ws.max_column + 1)
+            if calendar_ws.cell(1, col).value == 2026
+        )
+        month_row = next(
+            row for row in range(2, calendar_ws.max_row + 1)
+            if str(calendar_ws.cell(row, 1).value or "").casefold() == "may"
+        )
+        assert calendar_ws.cell(month_row, year_col).value == "1.20%, +2.50R, 1 trade"
+    finally:
+        reopened.close()
+
+    published_bytes = workbook_path.read_bytes()
+    published_hash = hashlib.sha256(published_bytes).hexdigest()
+    real_update = master_service.update_master_journal_workbook_data_only
+
+    def _update_with_blank_calendar_candidate(*args, **kwargs):
+        result = real_update(*args, **kwargs)
+        candidate = Path(result["candidate_path"])
+        candidate_wb = load_workbook(candidate)
+        try:
+            calendar_ws = candidate_wb["P&L Calendar"]
+            year_col = next(
+                col for col in range(2, calendar_ws.max_column + 1)
+                if calendar_ws.cell(1, col).value == 2026
+            )
+            month_row = next(
+                row for row in range(2, calendar_ws.max_row + 1)
+                if str(calendar_ws.cell(row, 1).value or "").casefold() == "may"
+            )
+            calendar_ws.cell(month_row, year_col).value = None
+            candidate_wb.save(candidate)
+        finally:
+            candidate_wb.close()
+        return result
+
+    monkeypatch.setattr(
+        master_service,
+        "update_master_journal_workbook_data_only",
+        _update_with_blank_calendar_candidate,
+    )
+    rejected = master_service._sync_master_journal_workbook(
+        prebuilt_snapshot=snapshot,
+        defer_github_sync=True,
+        sync_caller="test_net_r_calendar_validation_blank_candidate",
+    )
+    expected_error = (
+        "Trading Journal validation failed: P&L Calendar missing expected dated "
+        "P/L cells: 2026-05."
+    )
+    assert rejected["master_journal_ok"] is False
+    assert rejected["master_journal_error"] == expected_error
+    after_bytes = workbook_path.read_bytes()
+    assert hashlib.sha256(after_bytes).hexdigest() == published_hash
+    assert after_bytes == published_bytes
+
+
 @pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
 def test_sync_master_journal_populates_instrument_leaders_canonical_layout(tmp_path, monkeypatch):
     from tools.master_journal_workbook import build_master_journal_workbook
