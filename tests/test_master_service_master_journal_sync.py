@@ -1781,7 +1781,7 @@ def test_calendar_missing_expected_pl_cells_reports_exact_sorted_periods():
         "-0.80%, -1.00R, 1 trade",
         "0.00%, 0.00R, 2 trades",
         "1.20%, R N/A, 2 trades",
-        "1.20%, +2.50R (partial 2/3), 3 trades",
+        "1.20%, +2.50R, 3 trades",
         f"{tiny_positive}, {tiny_positive_r}, 1 trade",
         f"{tiny_negative}, {tiny_negative_r}, 1 trade",
     ]

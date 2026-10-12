@@ -1213,3 +1213,13 @@ tests/test_master_service_master_journal_sync.py::test_calendar_missing_expected
 tests/test_master_service_master_journal_sync.py::test_sync_accepts_net_r_calendar_and_rejects_missing_month_before_publish
 Review: updated scoped patch reviewed; host git diff --check returned 0. This correction leaves the Phase 1 generator and width implementation unchanged. Verification used synthetic temporary workbooks; no production workbook or live Resync operation was performed for this correction.
 Existing summary history is preserved byte-for-byte before this append. Live Resync acceptance and Excel fit remain unverified. This record precedes the scoped commit/push; the delivery command reports its final SHA and remote verification separately.
+
+
+P&L Calendar partial R suffix removal - 2026-10-12
+Changed files: tools/master_journal_workbook.py; tests/test_master_journal_workbook.py; tests/test_master_service_master_journal_sync.py; summary/CODEX_SUMMARY_latest.txt.
+Removed only the conditional partial-coverage display suffix. The eligible trade population, month attribution, finite recorded R sum, percentages, counts, signs, precision, zero and R N/A handling, width algorithm, styling, and service validator are unchanged. Updated only the three expected strings requested.
+Verification and delivery are pending: the initial PowerShell command process failed to start during environment setup, so no tests, diff review, diff check, Git staging, commit, or push ran. Per instruction, the command runner was not retried. The host PowerShell block supplied with this summary performs the three requested pytest selections in one fresh GUID --basetemp, reviews/checks only the authorized paths, stages only those paths, commits with --only, and performs scoped delivery. No preservation-refresh or sync-publication node, full file, suite, smoke check, workbook, or Resync operation was run.
+
+
+Verification update - 2026-10-12
+The recovered command runner passed Get-Location in C:\GPT\CODEX-master. One pytest process ran exactly the three requested nodes together with a fresh GUID --basetemp and a 300-second subprocess timeout: 3 passed, 4 warnings, 11.44 pytest seconds (14.83 seconds wall time). No retry was needed; no other tests or verification nodes were run. The Python launcher printed two 'Failed to find real location' notices, but pytest completed successfully with exit code 0.

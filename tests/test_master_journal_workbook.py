@@ -12176,7 +12176,7 @@ def test_pnl_calendar_monthly_net_r_preserves_existing_pct_and_count():
         "count": monthly[(2026, 5)]["count"],
         "net_r": monthly[(2026, 5)]["net_r"],
         "r_count": monthly[(2026, 5)]["r_count"],
-    }) == "1.10%, +1.00R (partial 2/3), 3 trades"
+    }) == "1.10%, +1.00R, 3 trades"
     assert monthly[(2026, 6)]["net_r"] == pytest.approx(-0.00038475834753)
     assert mjw._format_pnl_calendar_month_cell(0.0, 2, 0.0, 2) == "0.00%, 0.00R, 2 trades"
     assert mjw._format_pnl_calendar_month_cell(0.0, 2, 0.0, 0) == "0.00%, R N/A, 2 trades"
@@ -12214,7 +12214,7 @@ def test_pnl_calendar_net_r_column_widths_fit_complete_text():
     tiny_r = "+" + mjw._format_decimal_presentation(
         "0.000000000000000000000000384", suffix="R"
     )
-    assert may.value == f"1.60%, {tiny_r} (partial 1/2), 2 trades"
+    assert may.value == f"1.60%, {tiny_r}, 2 trades"
     assert june.value == "-0.80%, R N/A, 1 trade"
     assert jan.value == "0.00%, 0.00R, 1 trade"
     assert _calendar_month_cell(ws, 2026, "April").value is None

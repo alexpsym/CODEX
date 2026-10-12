@@ -15517,8 +15517,6 @@ def _format_pnl_calendar_month_cell(
         rendered_r = _format_decimal_presentation(r_value, suffix="R")
         if r_value > 0:
             rendered_r = f"+{rendered_r}"
-        if int(r_count) < int(count):
-            rendered_r = f"{rendered_r} (partial {int(r_count)}/{int(count)})"
         r_text = rendered_r
     return f"{percentage}, {r_text}, {int(count)} {label}"
 
