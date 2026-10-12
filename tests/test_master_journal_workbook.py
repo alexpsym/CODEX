@@ -1832,8 +1832,8 @@ def test_calendar_month_conditional_formatting_rows(tmp_path: Path):
     may=cal.cell(month_rows["May"], year_col)
     jun=cal.cell(month_rows["June"], year_col)
     mar=cal.cell(month_rows["March"], year_col)
-    assert may.value == "1.20%, 1 trade"
-    assert jun.value == "-0.40%, 1 trade"
+    assert may.value == "1.20%, R N/A, 1 trade"
+    assert jun.value == "-0.40%, R N/A, 1 trade"
     assert _cell_fill_rgb(may) == PROFIT_FILL
     assert _cell_fill_rgb(jun) == LOSS_FILL
     assert _cf_ranges(cal) == []
@@ -2537,7 +2537,7 @@ def test_monthly_aud_row_uses_result_currency_and_excluded_from_metrics(tmp_path
     assert "UNKNOWN" not in fmt
     # metrics remain from trade rows only
     cal = wb["P&L Calendar"]
-    assert _calendar_month_cell(cal, 2026, "April").value == "1.00%, 1 trade"
+    assert _calendar_month_cell(cal, 2026, "April").value == "1.00%, R N/A, 1 trade"
 
 
 def test_read_master_journal_source_monthly_aud_roundtrip_fields(tmp_path: Path):
@@ -3220,7 +3220,7 @@ def test_update_data_only_rewrites_calendar_to_one_line_layout(tmp_path: Path):
     assert out_cal["A1"].value == "Month"
     assert [out_cal.cell(1, col).value for col in range(2, 5)] == [2024, 2025, 2026]
     assert out_cal["A6"].value == "May"
-    assert out_cal["D6"].value == "1.00%, 1 trade"
+    assert out_cal["D6"].value == "1.00%, R N/A, 1 trade"
     assert out_cal["D2"].value in (None, "")
     assert _cell_fill_rgb(out_cal["D2"]) == ""
     assert out_cal.freeze_panes == "B2"
@@ -3291,7 +3291,7 @@ def test_update_data_only_adds_missing_calendar_year_row(tmp_path: Path):
     out = load_workbook(p, data_only=True)["P&L Calendar"]
     assert list(out.merged_cells.ranges) == []
     assert [out.cell(1, col).value for col in range(2, 4)] == [2026, 2027]
-    assert _calendar_month_cell(out, 2027, "January").value == "2.00%, 1 trade"
+    assert _calendar_month_cell(out, 2027, "January").value == "2.00%, R N/A, 1 trade"
     assert not any(str(out.cell(row, 1).value or "").endswith(" Trades") for row in range(2, out.max_row + 1))
 
 def test_instrument_leaders_custom_layout_populates_values(tmp_path: Path):
@@ -6148,7 +6148,7 @@ def test_pnl_calendar_update_removes_duplicate_generated_profit_loss_rules(tmp_p
     assert "FFFF00" not in {fill for _range, _formula, fill in _cf_rule_details(cal)}
     assert "0000FF" not in {fill for _range, _formula, fill in _cf_rule_details(cal)}
     may = _calendar_month_cell(cal, 2026, "May")
-    assert may.value == "1.20%, 2 trades"
+    assert may.value == "1.20%, +0.40R, 2 trades"
     assert _cell_fill_rgb(may) == "C6EFCE"
     assert f"A4:{get_column_letter(len(TRADE_LOG_HEADERS))}5" in " ".join(_cf_ranges(wb["Trade Log"]))
 
@@ -7045,8 +7045,8 @@ def test_generated_calendar_and_instrument_averages_use_direct_semantic_fills(tm
     assert cal["B1"].value == 2026
     assert cal["A6"].value == "May"
     assert cal["A7"].value == "June"
-    assert cal["B6"].value == "2.30%, 1 trade"
-    assert cal["B7"].value == "-1.10%, 1 trade"
+    assert cal["B6"].value == "2.30%, +1.20R, 1 trade"
+    assert cal["B7"].value == "-1.10%, -0.80R, 1 trade"
     assert _cell_fill_rgb(cal["B6"]) == "C6EFCE"
     assert _cell_fill_rgb(cal["B7"]) == "FFC7CE"
     wb.close()
@@ -10764,8 +10764,8 @@ def test_journal_decimal_text_rounds_nearest_with_units_and_preserves_sources():
     assert mjw._format_decimal_presentation(Decimal("-0.25"), suffix="R") == "-0.25R"
     assert mjw._format_stop_pct_value(Decimal("-0.00038475834753")) == "-0.00038%"
     assert mjw._format_stop_gap_value(Decimal("0.00038475834753")) == "0.00038 pp"
-    assert mjw._format_pnl_calendar_month_cell(0.00038475834753, 2) == "0.00038%, 2 trades"
-    assert mjw._format_pnl_calendar_month_cell(float("nan"), 1) == ""
+    assert mjw._format_pnl_calendar_month_cell(0.00038475834753, 2, 0.000038475834753, 2) == "0.00038%, +0.000038R, 2 trades"
+    assert mjw._format_pnl_calendar_month_cell(float("nan"), 1, 0.0, 0) == ""
     assert mjw._format_inline_metric_value(None, "pct") == ""
     assert mjw._format_inline_metric_value(float("inf"), "r") == ""
     assert mjw._format_inline_metric_value(
@@ -11050,7 +11050,7 @@ def test_journal_decimal_text_refresh_preserves_numbers_formulas_balances_and_la
 
     initial = capture(path)
     assert initial[5] == (formula, 2.5)
-    assert initial[6] == "0.00%, 1 trade"
+    assert initial[6] == "0.00%, +1.20R, 1 trade"
     assert initial[10] == "0.00% - EURUSD 2026-05-01"
     assert initial[4]["sheet_order"] == prepared_sheet_order
     assert initial[4]["hyperlinks"][STATS1_SHEET]["A26"]["target"] == label_link_target
@@ -11089,7 +11089,7 @@ def test_journal_decimal_text_refresh_preserves_numbers_formulas_balances_and_la
         assert refreshed[3] == initial[3]
         assert refreshed[4] == initial[4]
         assert refreshed[5] == (formula, 2.5)
-        assert refreshed[6] == "0.00038%, 1 trade"
+        assert refreshed[6] == "0.00038%, +1.20R, 1 trade"
         assert refreshed[7] == initial[7]
         assert refreshed[8] == initial[8]
         assert refreshed[9] == initial[9]
@@ -12150,3 +12150,160 @@ def test_trade_log_left_alignment_restores_data_and_preserves_stats1_links():
     assert list(wb.sheetnames) == sheetnames_before
     assert tuple(str(item) for item in trade_log.merged_cells.ranges) == merged_before
     wb.close()
+
+
+def test_pnl_calendar_monthly_net_r_preserves_existing_pct_and_count():
+    rows = [
+        {"id": "m1", "row_type": "trade", "close_time": "2026-05-01", "result_pct": 1.2, "r_multiple": 1.25},
+        {"id": "m2", "row_type": "trade", "close_time": "2026-05-02", "result_pct": -0.2, "r_multiple": -0.25},
+        {"id": "m3", "row_type": "trade", "close_time": "2026-05-03", "result_pct": 0.1},
+        {"id": "j1", "row_type": "trade", "close_time": "2026-06-01", "result_pct": -0.8, "r_multiple": -0.00038475834753},
+        {"id": "z1", "row_type": "trade", "close_time": "2027-01-01", "result_pct": 0.3, "r_multiple": 0.4},
+        {"id": "z2", "row_type": "trade", "close_time": "2027-01-02", "result_pct": -0.3, "r_multiple": -0.4},
+        {"id": "n1", "row_type": "trade", "close_time": "2027-02-01", "result_pct": 1.0, "r_multiple": float("nan")},
+        {"id": "n2", "row_type": "trade", "close_time": "2027-02-02", "result_pct": -0.5, "r_multiple": float("inf")},
+        {"id": "cash", "row_type": "cashflow", "close_time": "2026-05-04", "result_pct": 99, "r_multiple": 99},
+        {"id": "test", "row_type": "trade", "close_time": "2026-05-05", "result_pct": 99, "r_multiple": 99, "is_test_trade": True},
+        {"id": "bad_pct", "row_type": "trade", "close_time": "2026-05-06", "result_pct": None, "r_multiple": 99},
+    ]
+    before = deepcopy(rows)
+
+    monthly = mjw._pnl_calendar_monthly_values({"items": rows})
+
+    assert monthly[(2026, 5)] == {"pct": pytest.approx(1.1), "count": 3, "net_r": pytest.approx(1.0), "r_count": 2}
+    assert mjw._format_pnl_calendar_month_cell(**{
+        "pct_points": monthly[(2026, 5)]["pct"],
+        "count": monthly[(2026, 5)]["count"],
+        "net_r": monthly[(2026, 5)]["net_r"],
+        "r_count": monthly[(2026, 5)]["r_count"],
+    }) == "1.10%, +1.00R (partial 2/3), 3 trades"
+    assert monthly[(2026, 6)]["net_r"] == pytest.approx(-0.00038475834753)
+    assert mjw._format_pnl_calendar_month_cell(0.0, 2, 0.0, 2) == "0.00%, 0.00R, 2 trades"
+    assert mjw._format_pnl_calendar_month_cell(0.0, 2, 0.0, 0) == "0.00%, R N/A, 2 trades"
+    assert mjw._format_pnl_calendar_month_cell(0.0, 2, 0.4, 2) == "0.00%, +0.40R, 2 trades"
+    assert mjw._format_pnl_calendar_month_cell(0.0, 2, 0.0, 2).find("0.00R") >= 0
+    assert monthly[(2027, 1)]["net_r"] == 0.0
+    assert monthly[(2027, 2)]["r_count"] == 0
+    assert monthly[(2027, 2)]["count"] == 2
+    assert rows == before
+
+
+def test_pnl_calendar_net_r_column_widths_fit_complete_text():
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "P&L Calendar"
+    ws.column_dimensions["A"].width = 60
+    ws.column_dimensions["B"].width = 90
+    ws.column_dimensions["C"].width = 75
+    ws["A2"].font = Font(name="Calibri", size=14, italic=True)
+    ws.row_dimensions[6].height = 24
+    snapshot = {"items": [
+        {"id": "tiny", "row_type": "trade", "close_time": "2026-05-01", "result_pct": 1.2, "r_multiple": "0.000000000000000000000000384"},
+        {"id": "partial", "row_type": "trade", "close_time": "2026-05-02", "result_pct": 0.4},
+        {"id": "unavailable", "row_type": "trade", "close_time": "2026-06-01", "result_pct": -0.8, "r_multiple": float("inf")},
+        {"id": "zero", "row_type": "trade", "close_time": "2027-01-01", "result_pct": 0.0, "r_multiple": 0.0},
+    ]}
+
+    mjw._write_pnl_calendar_one_line_layout(ws, snapshot)
+
+    may = _calendar_month_cell(ws, 2026, "May")
+    june = _calendar_month_cell(ws, 2026, "June")
+    jan = _calendar_month_cell(ws, 2027, "January")
+    tiny_r = "+" + mjw._format_decimal_presentation(
+        "0.000000000000000000000000384", suffix="R"
+    )
+    assert may.value == f"1.60%, {tiny_r} (partial 1/2), 2 trades"
+    assert june.value == "-0.80%, R N/A, 1 trade"
+    assert jan.value == "0.00%, 0.00R, 1 trade"
+    assert _calendar_month_cell(ws, 2026, "April").value is None
+    assert _cell_fill_rgb(may) == PROFIT_FILL
+    assert _cell_fill_rgb(june) == LOSS_FILL
+    assert _cell_fill_rgb(jan) == ""
+    assert ws.column_dimensions["A"].width < 60
+    assert ws.column_dimensions["B"].width < 90
+    assert ws.column_dimensions["C"].width < 75
+    for col in range(1, 4):
+        dim = ws.column_dimensions[get_column_letter(col)]
+        required = max(
+            mjw._pnl_calendar_rendered_text_width(ws.cell(row, col).value, ws.cell(row, col).font)
+            for row in range(1, 14)
+        ) + 2.0
+        assert dim.width >= required
+    assert ws["A2"].font.name == "Calibri"
+    assert ws["A2"].font.sz == 14
+    assert ws["A2"].font.italic is True
+    assert ws.row_dimensions[6].height == 24
+    assert ws.freeze_panes == "B2"
+    assert ws.auto_filter.ref == "A1:C13"
+    wb.close()
+
+
+def test_pnl_calendar_net_r_persists_through_preservation_refresh(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(mjw, "REPORT_START_YEAR", 2026)
+    monkeypatch.setattr(mjw, "REPORT_MIN_END_YEAR", 2026)
+    snapshot = sample_snapshot()
+    snapshot["items"] = [dict(snapshot["items"][0]), dict(snapshot["items"][1])]
+    snapshot["items"][1]["close_time"] = "2026-05-02T02:00:00Z"
+    path = tmp_path / "calendar-net-r-preservation.xlsx"
+    build_master_journal_workbook(snapshot, path, publish_recommendation_assets=False)
+
+    wb = load_workbook(path, data_only=False)
+    assert _calendar_month_cell(wb["P&L Calendar"], 2026, "May").value == "1.20%, +0.40R, 2 trades"
+    dashboard = wb[STATS1_SHEET]
+    dashboard["AZ100"] = "=1+1"
+    dashboard["AZ101"] = "Manual reference"
+    dashboard["AZ101"].hyperlink = "https://example.invalid/calendar-manual"
+    dashboard["AZ101"].font = Font(name="Calibri", size=12, bold=True, color="123456")
+    dashboard.row_dimensions[101].height = 27
+    sheet_order = list(wb.sheetnames)
+    wb.save(path)
+    wb.close()
+
+    previous_width = None
+    for _refresh in range(2):
+        result = update_master_journal_workbook_data_only(
+            path,
+            snapshot,
+            preserve_existing_layout=True,
+            publish_recommendation_assets=False,
+        )
+        assert result["ok"] is True
+        candidate = Path(result["candidate_path"])
+        checked = load_workbook(candidate, data_only=False)
+        try:
+            assert list(checked.sheetnames) == sheet_order
+            cal = checked["P&L Calendar"]
+            may = _calendar_month_cell(cal, 2026, "May")
+            assert may.value == "1.20%, +0.40R, 2 trades"
+            assert cal.freeze_panes == "B2"
+            assert cal.auto_filter.ref == "A1:B13"
+            assert checked[STATS1_SHEET]["AZ100"].value == "=1+1"
+            manual = checked[STATS1_SHEET]["AZ101"]
+            assert manual.value == "Manual reference"
+            assert manual.hyperlink.target == "https://example.invalid/calendar-manual"
+            assert manual.font.bold is True
+            assert manual.font.color.rgb.endswith("123456")
+            assert checked[STATS1_SHEET].row_dimensions[101].height == 27
+            current_width = cal.column_dimensions["B"].width
+            assert previous_width is None or current_width == previous_width
+            previous_width = current_width
+        finally:
+            checked.close()
+        candidate.replace(path)
+        reopened_formula = load_workbook(path, data_only=False)
+        reopened_values = load_workbook(path, data_only=True)
+        try:
+            assert reopened_formula[STATS1_SHEET]["AZ100"].value == "=1+1"
+            assert reopened_values[STATS1_SHEET]["AZ100"].value is None
+            assert _calendar_month_cell(reopened_formula["P&L Calendar"], 2026, "May").value == may.value
+            assert any(
+                cell.value == pytest.approx(10.123456789)
+                for row in reopened_values[STATS2_SHEET].iter_rows()
+                for cell in row
+                if isinstance(cell.value, (int, float))
+            )
+        finally:
+            reopened_formula.close()
+            reopened_values.close()

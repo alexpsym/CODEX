@@ -15476,7 +15476,9 @@ def _existing_pnl_calendar_years(ws) -> Set[int]:
 
 def _pnl_calendar_monthly_values(snapshot_or_rows: Any) -> Dict[Tuple[int, int], Dict[str, Any]]:
     rows = snapshot_or_rows.get("items") if isinstance(snapshot_or_rows, dict) else snapshot_or_rows
-    monthly: Dict[Tuple[int, int], Dict[str, Any]] = defaultdict(lambda: {"pct": 0.0, "count": 0})
+    monthly: Dict[Tuple[int, int], Dict[str, Any]] = defaultdict(
+        lambda: {"pct": 0.0, "count": 0, "net_r": 0.0, "r_count": 0}
+    )
     for row in rows or []:
         if not isinstance(row, dict):
             continue
@@ -15491,13 +15493,76 @@ def _pnl_calendar_monthly_values(snapshot_or_rows: Any) -> Dict[Tuple[int, int],
         key = (timestamp.year, timestamp.month)
         monthly[key]["pct"] += pct
         monthly[key]["count"] += 1
+        recorded_r = _as_float(row.get("r_multiple"))
+        if recorded_r is not None and math.isfinite(recorded_r):
+            monthly[key]["net_r"] += recorded_r
+            monthly[key]["r_count"] += 1
     return monthly
 
 
-def _format_pnl_calendar_month_cell(pct_points: float, count: int) -> str:
+def _format_pnl_calendar_month_cell(
+    pct_points: float,
+    count: int,
+    net_r: float,
+    r_count: int,
+) -> str:
     label = "trade" if int(count) == 1 else "trades"
     percentage = _format_decimal_presentation(pct_points, suffix="%")
-    return f"{percentage}, {int(count)} {label}" if percentage else ""
+    if not percentage:
+        return ""
+    if int(r_count) <= 0:
+        r_text = "R N/A"
+    else:
+        r_value = float(net_r)
+        rendered_r = _format_decimal_presentation(r_value, suffix="R")
+        if r_value > 0:
+            rendered_r = f"+{rendered_r}"
+        if int(r_count) < int(count):
+            rendered_r = f"{rendered_r} (partial {int(r_count)}/{int(count)})"
+        r_text = rendered_r
+    return f"{percentage}, {r_text}, {int(count)} {label}"
+
+
+def _pnl_calendar_rendered_text_width(text: Any, font: Font) -> float:
+    """Estimate Excel width from complete text and the cell's font settings.
+
+    The estimate accounts for common narrow/wide glyphs, font size, weight and
+    style. Excel's exact font metrics are unavailable in this generation path.
+    """
+    value = str(text if text is not None else "")
+    if not value:
+        return 0.0
+    narrow = set(" ilI.,:;!'|`")
+    wide = set("MW@%&")
+    width_units = 0.0
+    for char in value:
+        if char in narrow:
+            width_units += 0.48
+        elif char in wide:
+            width_units += 1.28
+        elif char in "()[]{}+-":
+            width_units += 0.68
+        else:
+            width_units += 0.9
+    size_scale = float(font.sz or 11) / 11.0
+    family_name = str(font.name or "Calibri").casefold()
+    family_scale = 1.0 if family_name in {"calibri", "aptos", "arial"} else 1.04
+    weight_scale = 1.04 if font.bold else 1.0
+    style_scale = 1.02 if font.italic else 1.0
+    return width_units * size_scale * family_scale * weight_scale * style_scale
+
+
+def _fit_pnl_calendar_columns(ws, target_rows: int, target_cols: int) -> None:
+    """Fit the calendar's generated columns to headers and complete cell text."""
+    for col in range(1, target_cols + 1):
+        widest = max(
+            _pnl_calendar_rendered_text_width(
+                ws.cell(row, col).value,
+                ws.cell(row, col).font,
+            )
+            for row in range(1, target_rows + 1)
+        )
+        ws.column_dimensions[get_column_letter(col)].width = max(2.0, widest + 2.0)
 
 
 def _pnl_calendar_text_pct_fraction(value: Any) -> float | None:
@@ -15589,7 +15654,12 @@ def _write_pnl_calendar_one_line_layout(ws, snapshot: Dict[str, Any], diagnostic
                 continue
             pct = float(values["pct"])
             count = int(values["count"])
-            cell.value = _format_pnl_calendar_month_cell(pct, count)
+            cell.value = _format_pnl_calendar_month_cell(
+                pct,
+                count,
+                float(values["net_r"]),
+                int(values["r_count"]),
+            )
             if pct > 0:
                 _apply_full_cell_semantic_fill(cell, "profit")
             elif pct < 0:
@@ -15600,17 +15670,12 @@ def _write_pnl_calendar_one_line_layout(ws, snapshot: Dict[str, Any], diagnostic
     for idx, height in row_heights.items():
         if idx <= target_rows:
             ws.row_dimensions[idx].height = height
-    ws.column_dimensions["A"].width = max(ws.column_dimensions["A"].width or 0, 12)
-    for col in range(2, target_cols + 1):
-        ws.column_dimensions[get_column_letter(col)].width = max(
-            ws.column_dimensions[get_column_letter(col)].width or 0,
-            18,
-        )
     ws.auto_filter.ref = f"A1:{get_column_letter(target_cols)}{target_rows}"
     _style_header_row(ws, 1)
     _table_border(ws, 1, 1, target_rows, target_cols)
     ws.freeze_panes = "B2"
     _apply_pnl_calendar_profit_loss_formatting(ws)
+    _fit_pnl_calendar_columns(ws, target_rows, target_cols)
     diagnostics["pnl_calendar_transposed_years_written"] = len(years)
 
 
