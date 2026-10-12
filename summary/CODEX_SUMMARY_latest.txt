@@ -1223,3 +1223,7 @@ Verification and delivery are pending: the initial PowerShell command process fa
 
 Verification update - 2026-10-12
 The recovered command runner passed Get-Location in C:\GPT\CODEX-master. One pytest process ran exactly the three requested nodes together with a fresh GUID --basetemp and a 300-second subprocess timeout: 3 passed, 4 warnings, 11.44 pytest seconds (14.83 seconds wall time). No retry was needed; no other tests or verification nodes were run. The Python launcher printed two 'Failed to find real location' notices, but pytest completed successfully with exit code 0.
+
+
+Delivery update - 2026-10-12
+The scoped implementation commit 891be0104620de8f49529caf9bde9d3dcfc150fb contained only the four authorized task paths. The protected delivery helper pushed it to origin/master and verified the remote SHA matched. This delivery record is appended as a summary-only follow-up; no additional tests or workbook operations were run.
