@@ -11,6 +11,13 @@
   const pendingManualActions = new Map();
   const pendingVisibilityChecks = new Map();
   const VERIFY_SCHEDULE_MS = [300, 700, 1500, 3000, 3000];
+  const GET_TIMEOUT_MS = window.__OPEN_ORDERS_TESTING__ ? (window.__OPEN_ORDERS_GET_TIMEOUT_MS__ || 32000) : 32000;
+  const VISIBILITY_TIMEOUT_MS = window.__OPEN_ORDERS_TESTING__ ? (window.__OPEN_ORDERS_VISIBILITY_TIMEOUT_MS__ || 60000) : 60000;
+  const monotonicNow = () => performance.now();
+  let versionInFlight = null;
+  let lastRefreshConfirmed = false;
+  let refreshNeedsRecovery = false;
+  const seenSubmitEvents = new Set();
   const VISIBILITY_SCHEDULE_MS = [0, 350, 800, 1600, 3000, 5000];
   const CHANNEL_NAME = 'trading-tools-open-orders';
   const STORAGE_EVENT_KEY = 'trading-tools-open-orders-event';
@@ -55,7 +62,19 @@
     return context?`${context}: ${message}`:message;
   }).filter(Boolean):[];
   const buildFetchError=(url,status,statusText,bodyText,bodyJson)=>{const detailErrors=bodyJson?.detail?.errors||bodyJson?.errors; const flattened=formatSourceErrors(detailErrors); if(flattened.length) return new Error(flattened.join(' | ')); const endpoint=safeEndpoint(url)||'unknown endpoint'; const httpStatus=safeDiagnostic(status,'unknown'); const parsedBody=bodyJson&&typeof bodyJson==='object'?JSON.stringify(bodyJson):bodyText; const body=safeDiagnostic(parsedBody); const reason=body||safeDiagnostic(statusText,'upstream returned no diagnostic details'); return new Error(`GET ${endpoint} failed: HTTP ${httpStatus} ${reason}`.trim());};
-  const fetchJson=async(url)=>{const response=await fetch(url,{cache:'no-store'}); let bodyText=''; let bodyJson=null; try{bodyText=await response.text(); bodyJson=bodyText?JSON.parse(bodyText):null;}catch(_){bodyJson=null;} if(!response.ok) throw buildFetchError(url,response.status,response.statusText,bodyText,bodyJson); if(bodyJson!==null) return bodyJson; return bodyText?JSON.parse(bodyText):{};};
+  const fetchJson=async(url)=>{
+    const controller=new AbortController(); let timer;
+    const deadline=new Promise((_,reject)=>{timer=setTimeout(()=>{controller.abort();reject(new Error('GET '+url+': deadline exceeded ('+GET_TIMEOUT_MS/1000+'s); broker visibility unknown'));},GET_TIMEOUT_MS);});
+    try{
+      return await Promise.race([(async()=>{
+        const response=await fetch(url,{cache:'no-store',signal:controller.signal});
+        const bodyText=await response.text(); let bodyJson=null;
+        try{bodyJson=bodyText?JSON.parse(bodyText):null;}catch(_){}
+        if(!response.ok)throw buildFetchError(url,response.status,response.statusText,bodyText,bodyJson);
+        return bodyJson!==null?bodyJson:(bodyText?JSON.parse(bodyText):{});
+      })(),deadline]);
+    }finally{clearTimeout(timer);}
+  };
   const resolveAccountLabel=(row)=>{const parts=[]; const account=String(row?.account||'').trim(); const accountId=String(row?.account_id||'').trim(); const suffix=String(row?.account_label_suffix||'').trim(); if(account) parts.push(account); if(accountId) parts.push(accountId); if(suffix) parts.push(suffix); return parts.join(' · ')||'—';};
   const isActionableRow=(row)=>{if(!row||typeof row!=='object') return false; if(row.parent_id||row.parent_order_id) return false; const status=String(row.status||'').toLowerCase(); if(status.includes('bounce waiting')) return false; const type=String(row.type||'').toLowerCase(); return type==='order'||type==='position'||type==='trade'||type==='webhook';};
   const actionLabelFor=(row)=>{const type=String(row?.type||'').toLowerCase(); if(type==='order'||type==='webhook') return 'Cancel'; if(type==='position'||type==='trade') return 'Close'; return null;};
@@ -103,20 +122,23 @@
     items.forEach((item)=>{ if (pendingManualActions.has(rowKey(item))) return; const row=document.createElement('tr'); if(item.source_stale){row.className='stale-row';row.title=safeDiagnostic(item.stale_reason||'Last-known-good broker state');} [item.venue||item.broker,resolveAccountLabel(item),item.asset,item.category,item.side,item.order_type,item.instrument,item.stop_loss_ticks,item.target_mode_display,item.take_profit_ticks,item.risk_mode_display,item.risk_value_display,item.risk_reward,item.timeframe,item.is_test_trade,item.setup,item.pattern,item.ema,item.vwap,item.aths_atls,item.round_number,item.webhook_mode,item.webhook_status,item.planned_entry_price,item.planned_stop_price,item.planned_target_price,item.type,item.size,item.entry_price||item.order_price,item.current_price,item.stop_loss,item.take_profit,item.leverage,item.type==='Position'?item.funding_paid:null,item.type==='Position'?item.funding_received:null,item.type==='Position'?item.net_funding:null,formatTimestamp(item.opened_at),item.status].forEach((v)=>{const td=document.createElement('td'); td.textContent=fmt(v); row.appendChild(td);}); const actionTd=document.createElement('td'); renderActionCell(item,actionTd,{allowAction:true}); row.appendChild(actionTd); tbody.appendChild(row); });
   };
   const refresh=async(reason='manual')=>{
-    if(refreshInFlight){refreshQueued=true;return refreshInFlight.then(()=>{if(refreshQueued){refreshQueued=false;return refresh(reason);}});}
+    if(refreshInFlight){if(['broadcast','submit'].includes(reason))refreshQueued=true;return refreshInFlight.then(()=>{if(refreshQueued){refreshQueued=false;return refresh(reason);}});}
     refreshInFlight=(async()=>{
       try{
         setBadge(reason==='broker-visibility'?'Submitted; waiting for broker visibility':'Loading...');
         const payload=await fetchJson('/api/open-orders?force=1');
-        render(payload.items||[],payload.errors||[],payload.warnings||[]);
+        refreshNeedsRecovery=Boolean(payload.refresh_superseded||payload.stale||(payload.errors||[]).length);
+        lastRefreshConfirmed=!payload.refresh_superseded&&!payload.stale&&!(payload.errors||[]).length;
+        if(!payload.refresh_superseded)render(payload.items||[],payload.errors||[],payload.warnings||[]);
         const renderedVersion=Number(payload?.version);
-        if(Number.isFinite(renderedVersion)) knownVersion=renderedVersion;
+        if(Number.isFinite(renderedVersion)&&!payload.refresh_superseded) knownVersion=renderedVersion;
         const errCount=Array.isArray(payload.errors)?payload.errors.length:0;
         const warningCount=Array.isArray(payload.warnings)?payload.warnings.length:0;
         const stale=Boolean(payload.stale)||errCount>0;
         const details=[errCount?`${errCount} ${errCount===1?'error':'errors'}`:'',warningCount?`${warningCount} ${warningCount===1?'warning':'warnings'}`:''].filter(Boolean).join(', ');
         setBadge(`${stale?'Stale':'Updated'}${details?` (${details})`:''}`);
       }catch(err){
+        lastRefreshConfirmed=false;refreshNeedsRecovery=true;
         const reasonText=safeDiagnostic(err?.message||err,'request failed without diagnostic details').replace(/:+\s*$/,'').trim()||'request failed without diagnostic details';
         setBadge(`Stale (refresh failed: ${reasonText})`);
       }finally{refreshInFlight=null;}
@@ -140,31 +162,53 @@
     const openedRaw=item?.opened_at;const openedNumber=Number(openedRaw);const opened=Number.isFinite(openedNumber)&&String(openedRaw??'').trim()!==''?(openedNumber<1_000_000_000_000?openedNumber*1000:openedNumber):Date.parse(String(openedRaw||''));const submitted=Number(event?.submittedAt||0);
     return Number.isFinite(opened)&&submitted>0&&opened>=(submitted-5*60*1000);
   };
+  const expireVisibility=(key)=>{
+    const state=pendingVisibilityChecks.get(key); if(!state)return;
+    clearTimeout(state.expiryTimer); pendingVisibilityChecks.delete(key);
+    setBadge('Submitted, but broker visibility was not confirmed yet. Use Refresh; if it persists, check the source warning.');
+  };
   const runVisibilityCheck=async(key)=>{
     const state=pendingVisibilityChecks.get(key);if(!state||state.running)return;
     state.running=true;
-    while(state.nextAttempt<VISIBILITY_SCHEDULE_MS.length){
-      if(document.hidden){state.running=false;return;}
-      const delay=VISIBILITY_SCHEDULE_MS[state.nextAttempt];state.nextAttempt+=1;
-      if(delay)await new Promise((resolve)=>setTimeout(resolve,delay));
-      if(document.hidden){state.running=false;return;}
-      await refresh('broker-visibility');
-      const visible=(window.__openOrdersItems||[]).some((item)=>itemMatchesSubmission(item,state.event));
-      if(visible){pendingVisibilityChecks.delete(key);setBadge('Submitted; broker state is now visible.');return;}
-      if(state.nextAttempt<VISIBILITY_SCHEDULE_MS.length)setBadge('Submitted; waiting for broker visibility');
-    }
-    pendingVisibilityChecks.delete(key);
-    setBadge('Submitted, but broker visibility was not confirmed yet. Use Refresh; if it persists, check the source warning.');
+    try{
+      while(state.nextAttempt<VISIBILITY_SCHEDULE_MS.length&&pendingVisibilityChecks.get(key)===state){
+        if(monotonicNow()>=state.deadline){expireVisibility(key);return;}
+        if(document.hidden)return;
+        const delay=Math.min(VISIBILITY_SCHEDULE_MS[state.nextAttempt],Math.max(0,state.deadline-monotonicNow()));state.nextAttempt+=1;
+        if(delay)await new Promise((resolve)=>setTimeout(resolve,delay));
+        if(!pendingVisibilityChecks.has(key))return;
+        if(monotonicNow()>=state.deadline){expireVisibility(key);return;}
+        if(document.hidden)return;
+        await refresh(state.nextAttempt===1?'submit':'broker-visibility');
+        if(!pendingVisibilityChecks.has(key))return;
+        const visible=lastRefreshConfirmed&&(window.__openOrdersItems||[]).some((item)=>!item.source_stale&&itemMatchesSubmission(item,state.event));
+        if(visible){clearTimeout(state.expiryTimer);pendingVisibilityChecks.delete(key);setBadge('Submitted; broker state is now visible.');return;}
+        if(state.nextAttempt<VISIBILITY_SCHEDULE_MS.length)setBadge('Submitted; waiting for broker visibility');
+      }
+      if(pendingVisibilityChecks.has(key))expireVisibility(key);
+    }finally{state.running=false;}
   };
   const handleStateChange=(event)=>{
     if(!event||event.type!=='state-changed')return;
     if(String(event.action||'').toLowerCase()!=='submit'){if(document.hidden){refreshQueued=true;return;}refresh('broadcast').catch(()=>{});return;}
     const key=String(event.eventId||`${event.submittedAt||Date.now()}|${event.order_id||''}|${event.symbol||''}`);
-    if(!pendingVisibilityChecks.has(key))pendingVisibilityChecks.set(key,{event:{...event},nextAttempt:0,running:false});
+    if(seenSubmitEvents.has(key))return;
+    seenSubmitEvents.add(key); if(seenSubmitEvents.size>512)seenSubmitEvents.delete(seenSubmitEvents.values().next().value);
+    const state={event:{...event},nextAttempt:0,running:false,deadline:monotonicNow()+VISIBILITY_TIMEOUT_MS};
+    pendingVisibilityChecks.set(key,state);
+    state.expiryTimer=setTimeout(()=>expireVisibility(key),VISIBILITY_TIMEOUT_MS);
     setBadge('Submitted; waiting for broker visibility');
     runVisibilityCheck(key).catch((err)=>setBadge(`Submitted; broker visibility check failed: ${safeDiagnostic(err?.message||err,'refresh required')}`));
   };
-  const pollVersion=async()=>{if(document.hidden)return;try{const payload=await fetchJson('/api/open-orders/version');const nextVersion=Number(payload?.version);if(!Number.isFinite(nextVersion))return;if(knownVersion===null||nextVersion!==knownVersion){await refresh('version');}}catch(_){}};
+  const pollVersion=async()=>{
+    if(document.hidden)return;
+    if(versionInFlight)return versionInFlight;
+    versionInFlight=(async()=>{try{
+      const payload=await fetchJson('/api/open-orders/version');const nextVersion=Number(payload?.version);
+      if(Number.isFinite(nextVersion)&&(refreshNeedsRecovery||knownVersion===null||nextVersion!==knownVersion))await refresh('version');
+    }catch(_){}finally{versionInFlight=null;}})();
+    return versionInFlight;
+  };
   const startVersionPolling=()=>{if(versionPollTimer) return; versionPollTimer=setInterval(pollVersion,POLL_MS);};
   const stopVersionPolling=()=>{if(!versionPollTimer) return; clearInterval(versionPollTimer); versionPollTimer=null;};
   if(typeof window!=='undefined'&&window.__OPEN_ORDERS_TESTING__){window.__openOrdersTestHooks={refresh,pollVersion,handleStateChange,runVisibilityCheck,itemMatchesSubmission,getState:()=>({knownVersion,refreshQueued,refreshInFlight:Boolean(refreshInFlight),pendingVisibilityChecks:pendingVisibilityChecks.size,hasData})};}

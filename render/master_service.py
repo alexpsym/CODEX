@@ -5,6 +5,7 @@ import math
 import atexit
 import calendar
 import asyncio
+import contextvars
 import ctypes
 import copy
 import errno
@@ -3465,6 +3466,70 @@ _OANDA_INACTIVITY_CACHE: Dict[str, object] = {
 _OANDA_INACTIVITY_CACHE_TTL_SECONDS = 45.0
 _OANDA_INACTIVITY_ERROR_CACHE_TTL_SECONDS = 10.0
 _OPEN_ORDERS_CACHE_LOCK = asyncio.Lock()
+# Open Orders-only elapsed budgets include signing/time sync, retries and queues.
+# wait_for cancels and awaits owned work; elapsed diagnostics use monotonic time.
+_OPEN_ORDERS_COLLECTION_SECONDS = 28.0
+_OPEN_ORDERS_ACCOUNT_SECONDS = 26.0
+_OPEN_ORDERS_SOURCE_SECONDS = 4.0
+_OPEN_ORDERS_CATEGORY_SECONDS = 16.0
+_OPEN_ORDERS_CONFIRM_SECONDS = 2.0
+_OPEN_ORDERS_FUNDING_SECONDS = 3.0
+_OPEN_ORDERS_READ_SCOPE = contextvars.ContextVar("open_orders_read_scope", default=False)
+_OPEN_ORDERS_INFLIGHT: Dict[int, Dict[str, object]] = {}
+_OPEN_ORDERS_PROGRESS = contextvars.ContextVar("open_orders_progress", default=None)
+_OPEN_ORDERS_COLLECTION_VERSION = contextvars.ContextVar("open_orders_collection_version", default=None)
+
+
+async def _open_orders_budget(awaitable, seconds: float, context: str):
+    started = time.monotonic()
+    try:
+        return await asyncio.wait_for(awaitable, timeout=seconds)
+    except asyncio.TimeoutError as exc:
+        raise TimeoutError(f"{context}: deadline exceeded ({seconds:g}s); coverage unknown") from exc
+    finally:
+        BYBIT_LOGGER.info("OPEN_ORDERS timing source=%s elapsed=%.3fs budget=%.3fs",
+                          context, time.monotonic() - started, seconds)
+
+
+async def _open_orders_signed_get(**kwargs):
+    if not _OPEN_ORDERS_READ_SCOPE.get():
+        return await _bybit_signed_get(**kwargs)
+    rows = []
+    async def read_pages():
+        params = dict(kwargs.get("params") or {})
+        seen_cursors = set()
+        while True:
+            payload = await _bybit_signed_get(**dict(kwargs, params=params))
+            if kwargs.get("path") not in {"/v5/position/list", "/v5/order/realtime"}:
+                return payload
+            result = payload.get("result") if isinstance(payload, dict) else None
+            page = result.get("list") if isinstance(result, dict) else None
+            if not isinstance(page, list):
+                raise ValueError("Bybit response did not contain result.list; coverage unknown")
+            rows.extend(row for row in page if isinstance(row, dict))
+            cursor = str(result.get("nextPageCursor") or "").strip()
+            if not cursor:
+                return dict(payload, result=dict(result, list=rows))
+            if cursor in seen_cursors:
+                raise ValueError("Bybit pagination cursor did not progress; coverage unknown")
+            seen_cursors.add(cursor)
+            params["cursor"] = cursor
+    try:
+        return await _open_orders_budget(read_pages(), _OPEN_ORDERS_SOURCE_SECONDS,
+                                         "Bybit " + str(kwargs.get("path", "GET")) + "/" +
+                                         str((kwargs.get("params") or {}).get("category", "account")) + "/" +
+                                         str((kwargs.get("params") or {}).get("settleCoin", "n/a")))
+    except Exception as exc:
+        exc.open_orders_partial_rows = list(rows)
+        raise
+
+
+async def _open_orders_scoped_read(awaitable, context: str):
+    if not _OPEN_ORDERS_READ_SCOPE.get():
+        return await awaitable
+    return await _open_orders_budget(awaitable, _OPEN_ORDERS_SOURCE_SECONDS, context)
+
+
 _OPEN_ORDERS_CACHE_TTL_SECONDS = 60.0
 _OPEN_ORDERS_CACHE: Dict[str, object] = {
     "expires_at": 0.0,
@@ -18393,22 +18458,22 @@ async def _oanda_preflight(
 async def _collect_oanda_open_items(
     *, base_url: str, account_id: str, api_key: str, account_context: str
 ) -> Dict[str, object]:
-    trades_task = _fetch_oanda_json(
+    trades_task = _open_orders_scoped_read(_fetch_oanda_json(
         base_url=base_url,
         account_id=account_id,
         api_key=api_key,
         endpoint="/accounts/{account_id}/openTrades",
         mode=account_context,
         timeout_s=5.0,
-    )
-    orders_task = _fetch_oanda_json(
+    ), "OANDA openTrades")
+    orders_task = _open_orders_scoped_read(_fetch_oanda_json(
         base_url=base_url,
         account_id=account_id,
         api_key=api_key,
         endpoint="/accounts/{account_id}/pendingOrders",
         mode=account_context,
         timeout_s=5.0,
-    )
+    ), "OANDA pendingOrders")
 
     trades_result, orders_result = await asyncio.gather(
         trades_task,
@@ -18704,14 +18769,18 @@ async def _get_cached_oanda_accounts(
             fetched_at=float(cached.get("fetched_at") or now),
         )
 
-    refresh_task = _OANDA_ACCOUNTS_INFLIGHT.get(cache_key)
+    # Open Orders owns this read; its deadline must cancel and await discovery.
+    # Other callers retain the existing shared, shielded discovery behavior.
+    owned_refresh = _OPEN_ORDERS_READ_SCOPE.get()
+    refresh_task = None if owned_refresh else _OANDA_ACCOUNTS_INFLIGHT.get(cache_key)
     if refresh_task is None or refresh_task.done():
         refresh_task = asyncio.create_task(
             _list_oanda_accounts(base_url=base_url, api_key=api_key)
         )
-        _OANDA_ACCOUNTS_INFLIGHT[cache_key] = refresh_task
+        if not owned_refresh:
+            _OANDA_ACCOUNTS_INFLIGHT[cache_key] = refresh_task
     try:
-        accounts = await asyncio.shield(refresh_task)
+        accounts = await refresh_task if owned_refresh else await asyncio.shield(refresh_task)
     except Exception as exc:
         stale_cached = _OANDA_ACCOUNTS_CACHE.get(cache_key)
         if (
@@ -18760,8 +18829,8 @@ def _oanda_discovery_warning(
             1,
         )
         error_type = exc.error_type
-    elif isinstance(exc, httpx.TimeoutException):
-        diagnostic = "Additional owned-account discovery timed out"
+    elif isinstance(exc, (TimeoutError, httpx.TimeoutException)):
+        diagnostic = "Additional owned-account discovery timed out: " + _safe_bybit_diagnostic_text(str(exc), fallback=exc.__class__.__name__)
         error_type = exc.__class__.__name__
     elif isinstance(exc, httpx.RequestError):
         diagnostic = "Additional owned-account discovery had a transport failure"
@@ -19162,7 +19231,19 @@ def _bybit_open_source_error(
         "error_type": error_type,
         "message": reason,
     }
-    if failure_kind:
+    if isinstance(exc, (TimeoutError, httpx.TimeoutException)) or failure_kind == "timeout":
+        entry["failure_kind"] = "timeout"
+    elif str(ret_code) in {"10003", "10004", "10005", "10007", "10010", "33004"} or http_status == 401:
+        entry["failure_kind"] = "authentication_or_permission"
+    elif str(ret_code) in {"10028", "100028"}:
+        entry["failure_kind"] = "unsupported_account_access"
+    elif str(ret_code) in {"10006", "10429"} or http_status == 429:
+        entry["failure_kind"] = "rate_limit"
+    elif isinstance(exc, httpx.RequestError):
+        entry["failure_kind"] = "transport"
+    elif isinstance(exc, ValueError) and not failure_kind:
+        entry["failure_kind"] = "malformed_response"
+    if failure_kind and "failure_kind" not in entry:
         entry["failure_kind"] = failure_kind
     if http_status not in (None, ""):
         entry["http_status"] = str(http_status)
@@ -19603,7 +19684,7 @@ async def _fetch_bybit_positions_for_category(
         errors: List[Dict[str, str]] = []
         for settle_coin in ("USDT", "USDC"):
             try:
-                payload = await _bybit_signed_get(
+                payload = await _open_orders_signed_get(
                     base_url=base_url,
                     api_key=api_key,
                     api_secret=api_secret,
@@ -19616,6 +19697,7 @@ async def _fetch_bybit_positions_for_category(
                     raise ValueError("Bybit positions response did not contain result.list")
                 combined.extend(row for row in rows if isinstance(row, dict))
             except Exception as exc:
+                combined.extend(getattr(exc, "open_orders_partial_rows", []))
                 errors.append(
                     _bybit_open_source_error(
                         exc,
@@ -19630,7 +19712,7 @@ async def _fetch_bybit_positions_for_category(
                 )
         return combined, errors
     try:
-        payload = await _bybit_signed_get(
+        payload = await _open_orders_signed_get(
             base_url=base_url,
             api_key=api_key,
             api_secret=api_secret,
@@ -19642,7 +19724,7 @@ async def _fetch_bybit_positions_for_category(
         if not isinstance(rows, list):
             raise ValueError("Bybit positions response did not contain result.list")
     except Exception as exc:
-        return [], [
+        return list(getattr(exc, "open_orders_partial_rows", [])), [
             _bybit_open_source_error(
                 exc,
                 account=account_context,
@@ -19668,14 +19750,17 @@ async def _confirm_bybit_position_still_open(
     symbol_norm = str(symbol or "").strip().upper()
     if not symbol_norm:
         return False
-    payload = await _bybit_signed_get(
+    payload = await _open_orders_signed_get(
         base_url=base_url,
         api_key=api_key,
         api_secret=api_secret,
         path="/v5/position/list",
         params={"category": category, "symbol": symbol_norm},
     )
-    rows = (payload.get("result") or {}).get("list") or []
+    result = payload.get("result") if isinstance(payload, dict) else None
+    rows = result.get("list") if isinstance(result, dict) else None
+    if not isinstance(rows, list):
+        raise ValueError("Bybit confirmation response did not contain result.list; visibility unknown")
     for row in rows:
         if not isinstance(row, dict):
             continue
@@ -19700,7 +19785,7 @@ async def _fetch_bybit_orders_for_category(
         errors: List[Dict[str, str]] = []
         for settle_coin in ("USDT", "USDC"):
             try:
-                payload = await _bybit_signed_get(
+                payload = await _open_orders_signed_get(
                     base_url=base_url,
                     api_key=api_key,
                     api_secret=api_secret,
@@ -19717,6 +19802,7 @@ async def _fetch_bybit_orders_for_category(
                     raise ValueError("Bybit orders response did not contain result.list")
                 combined.extend(row for row in rows if isinstance(row, dict))
             except Exception as exc:
+                combined.extend(getattr(exc, "open_orders_partial_rows", []))
                 errors.append(
                     _bybit_open_source_error(
                         exc,
@@ -19731,7 +19817,7 @@ async def _fetch_bybit_orders_for_category(
                 )
         return combined, errors
     try:
-        payload = await _bybit_signed_get(
+        payload = await _open_orders_signed_get(
             base_url=base_url,
             api_key=api_key,
             api_secret=api_secret,
@@ -19743,7 +19829,7 @@ async def _fetch_bybit_orders_for_category(
         if not isinstance(rows, list):
             raise ValueError("Bybit orders response did not contain result.list")
     except Exception as exc:
-        return [], [
+        return list(getattr(exc, "open_orders_partial_rows", [])), [
             _bybit_open_source_error(
                 exc,
                 account=account_context,
@@ -19834,6 +19920,7 @@ async def _fetch_bybit_open_funding_transactions_cached(
     deduped: Dict[str, Dict[str, object]] = {}
     for chunk_start, chunk_end in _iter_bybit_time_chunks(start_time, end_time):
         cursor: Optional[str] = None
+        seen_cursors: Set[str] = set()
         while True:
             payload = await _fetch_bybit_transaction_log(
                 base_url=base_url,
@@ -19853,20 +19940,42 @@ async def _fetch_bybit_open_funding_transactions_cached(
             cursor = str((result or {}).get("nextPageCursor") or "").strip() or None
             if not cursor:
                 break
+            if cursor in seen_cursors:
+                raise ValueError("Bybit transaction-log pagination cursor did not progress; funding unknown")
+            seen_cursors.add(cursor)
     rows = sorted(
         deduped.values(),
         key=lambda row: (int(_to_float(row.get("transactionTime")) or 0), _bybit_transaction_dedupe_key(row)),
     )
-    _BYBIT_OPEN_FUNDING_CACHE[cache_key] = {
-        "fetched_at": time.time(),
-        "start_time": start_time,
-        "end_time": end_time,
-        "rows": rows,
-    }
+    collection_version = _OPEN_ORDERS_COLLECTION_VERSION.get()
+    if collection_version is None or collection_version == int(_OPEN_ORDERS_CACHE.get("version") or 0):
+        _BYBIT_OPEN_FUNDING_CACHE[cache_key] = {
+            "fetched_at": time.time(),
+            "start_time": start_time,
+            "end_time": end_time,
+            "rows": rows,
+        }
     return [dict(row) for row in rows]
 
 
-async def _enrich_bybit_open_position_funding(
+async def _enrich_bybit_open_position_funding(positions, **kwargs):
+    token = _OPEN_ORDERS_READ_SCOPE.set(True)
+    try:
+        return await _open_orders_budget(
+            _enrich_bybit_open_position_funding_impl(positions, **kwargs),
+            _OPEN_ORDERS_FUNDING_SECONDS, "Bybit settled funding/history")
+    except TimeoutError as exc:
+        for position in positions:
+            if str(position.get("type") or "").lower() == "position":
+                position.update({"funding_paid": None, "funding_received": None, "net_funding": None})
+        return [_bybit_open_source_error(exc, account=kwargs["account_context"], category="account",
+                source_type="settled funding", endpoint="/v5/account/transaction-log",
+                api_key=kwargs["api_key"], api_secret=kwargs["api_secret"])]
+    finally:
+        _OPEN_ORDERS_READ_SCOPE.reset(token)
+
+
+async def _enrich_bybit_open_position_funding_impl(
     positions: Sequence[Dict[str, object]],
     *,
     base_url: str,
@@ -19986,7 +20095,15 @@ async def _enrich_bybit_open_position_funding(
     return warnings
 
 
-async def _collect_bybit_open_items(
+async def _collect_bybit_open_items(**kwargs):
+    token = _OPEN_ORDERS_READ_SCOPE.set(True)
+    try:
+        return await _collect_bybit_open_items_impl(**kwargs)
+    finally:
+        _OPEN_ORDERS_READ_SCOPE.reset(token)
+
+
+async def _collect_bybit_open_items_impl(
     *,
     base_url: str,
     api_key: str,
@@ -19998,18 +20115,22 @@ async def _collect_bybit_open_items(
     errors: List[Dict[str, object]] = []
     warnings: List[Dict[str, object]] = []
     try:
-        auth_diagnostic = await _bybit_read_only_auth_preflight(
+        auth_diagnostic = await _open_orders_budget(_bybit_read_only_auth_preflight(
             base_url=base_url,
             api_key=api_key,
             api_secret=api_secret,
             account_context=account_context,
             key_source=key_source,
-        )
+        ), _OPEN_ORDERS_SOURCE_SECONDS, f"Bybit {account_context} auth preflight")
+    except TimeoutError as exc:
+        return {"items": [], "errors": [_bybit_open_source_error(exc, account=account_context,
+                category="account", source_type="auth preflight", endpoint="/v5/user/query-api",
+                api_key=api_key, api_secret=api_secret)], "auth_failed": False}
     except BybitAuthPreflightError as exc:
         return {
             "items": [],
             "errors": [dict(exc.diagnostic)],
-            "auth_failed": True,
+            "auth_failed": exc.diagnostic.get("failure_kind") == "authentication_or_permission",
             "auth_diagnostic": {
                 key: exc.diagnostic.get(key)
                 for key in (
@@ -20027,14 +20148,28 @@ async def _collect_bybit_open_items(
     position_categories = ["linear", "inverse", "option"]
     order_categories = ["linear", "inverse", "spot", "option"]
 
+    semaphore = asyncio.Semaphore(3)
+
+    async def read_category(source, category):
+        endpoint = "/v5/position/list" if source == "positions" else "/v5/order/realtime"
+        reader = _fetch_bybit_positions_for_category if source == "positions" else _fetch_bybit_orders_for_category
+        async def read():
+            async with semaphore:
+                return await reader(base_url=base_url, api_key=api_key, api_secret=api_secret,
+                                    category=category, account_context=account_context)
+        try:
+            return await _open_orders_budget(read(), _OPEN_ORDERS_CATEGORY_SECONDS,
+                                             f"Bybit {account_context}/{category}/{source}")
+        except Exception as exc:
+            return [], [_bybit_open_source_error(exc, account=account_context, category=category,
+                        source_type=source, endpoint=endpoint, api_key=api_key, api_secret=api_secret)]
+
+    scopes = [("positions", category) for category in position_categories] + [("orders", category) for category in order_categories]
+    results = dict(zip(scopes, await asyncio.gather(*(read_category(*scope) for scope in scopes))))
+    confirmation_deadline = time.monotonic() + _OPEN_ORDERS_CONFIRM_SECONDS
+
     for category in position_categories:
-        positions, position_errors = await _fetch_bybit_positions_for_category(
-            base_url=base_url,
-            api_key=api_key,
-            api_secret=api_secret,
-            category=category,
-            account_context=account_context,
-        )
+        positions, position_errors = results[("positions", category)]
         for source_error in position_errors:
             if isinstance(source_error, dict):
                 entry = dict(source_error)
@@ -20077,13 +20212,13 @@ async def _collect_bybit_open_items(
                 size = size_raw
             if account_context == "demo" and category == "linear" and symbol:
                 try:
-                    still_open = await _confirm_bybit_position_still_open(
+                    still_open = await _open_orders_budget(_confirm_bybit_position_still_open(
                         base_url=base_url,
                         api_key=api_key,
                         api_secret=api_secret,
                         category=category,
                         symbol=symbol,
-                    )
+                    ), max(0.000001, confirmation_deadline - time.monotonic()), "Bybit demo position confirmation")
                 except Exception as exc:
                     confirm_error = _bybit_open_source_error(
                         exc,
@@ -20097,11 +20232,12 @@ async def _collect_bybit_open_items(
                     )
                     confirm_error["instrument"] = symbol
                     errors.append(confirm_error)
-                    still_open = True
-                if not still_open:
+                    still_open = None
+                if still_open is False:
                     stale_demo_linear_symbols.add(symbol)
                     continue
-                confirmed_demo_linear_symbols.add(symbol)
+                if still_open is True:
+                    confirmed_demo_linear_symbols.add(symbol)
             items.append(
                 {
                     "broker": "Bybit",
@@ -20132,24 +20268,9 @@ async def _collect_bybit_open_items(
                 }
             )
 
-    warnings.extend(
-        await _enrich_bybit_open_position_funding(
-            items,
-            base_url=base_url,
-            api_key=api_key,
-            api_secret=api_secret,
-            account_context=account_context,
-        )
-    )
 
     for category in order_categories:
-        orders, order_errors = await _fetch_bybit_orders_for_category(
-            base_url=base_url,
-            api_key=api_key,
-            api_secret=api_secret,
-            category=category,
-            account_context=account_context,
-        )
+        orders, order_errors = results[("orders", category)]
         for source_error in order_errors:
             if isinstance(source_error, dict):
                 entry = dict(source_error)
@@ -20193,7 +20314,7 @@ async def _collect_bybit_open_items(
             ):
                 if symbol in stale_demo_linear_symbols:
                     continue
-                if confirmed_demo_linear_symbols and symbol not in confirmed_demo_linear_symbols:
+                if not errors and confirmed_demo_linear_symbols and symbol not in confirmed_demo_linear_symbols:
                     continue
             items.append(
                 {
@@ -20217,6 +20338,16 @@ async def _collect_bybit_open_items(
                     "status": status or "OPEN",
                 }
             )
+    warnings.extend(
+        await _enrich_bybit_open_position_funding(
+            items,
+            base_url=base_url,
+            api_key=api_key,
+            api_secret=api_secret,
+            account_context=account_context,
+        )
+    )
+
     for item in items:
         ctx = _lookup_trade_context_for_open_item(item)
         _enrich_open_item_with_trade_context(item, ctx)
@@ -24733,6 +24864,7 @@ async def _fetch_bybit_executions(
 ) -> List[Dict[str, object]]:
     rows: List[Dict[str, object]] = []
     next_cursor: Optional[str] = cursor
+    seen_cursors: Set[str] = set()
     while True:
         params = {
             "category": category,
@@ -24742,18 +24874,24 @@ async def _fetch_bybit_executions(
         }
         if next_cursor:
             params["cursor"] = next_cursor
-        payload = await _bybit_signed_get(
+        payload = await _open_orders_scoped_read(_bybit_signed_get(
             base_url=base_url,
             api_key=api_key,
             api_secret=api_secret,
             path="/v5/execution/list",
             params=params,
-        )
+        ), "/v5/execution/list")
         result = (payload.get("result") or {})
+        if _OPEN_ORDERS_READ_SCOPE.get() and (not isinstance(result, dict) or not isinstance(result.get("list"), list)):
+            raise ValueError("Bybit execution response did not contain result.list; lifecycle unknown")
         rows.extend(result.get("list") or [])
         next_cursor = str(result.get("nextPageCursor") or "").strip() or None
         if not next_cursor:
             break
+        if _OPEN_ORDERS_READ_SCOPE.get():
+            if next_cursor in seen_cursors:
+                raise ValueError("Bybit execution pagination cursor did not progress; lifecycle unknown")
+            seen_cursors.add(next_cursor)
     return rows
 
 
@@ -35407,711 +35545,782 @@ async def open_orders_version() -> JSONResponse:
     )
 
 
+async def _run_open_orders_collection(version: int, progress: dict) -> JSONResponse:
+    token = _OPEN_ORDERS_PROGRESS.set(progress)
+    version_token = _OPEN_ORDERS_COLLECTION_VERSION.set(version)
+    try:
+        return await _open_orders_budget(_collect_open_orders(version),
+                                         _OPEN_ORDERS_COLLECTION_SECONDS, "Open Orders collection")
+    except TimeoutError as exc:
+        previous = dict(_OPEN_ORDERS_CACHE.get("payload") or {})
+        current = [dict(row) for row in progress.get("items", [])]
+        identities = {(str(row.get("broker")), str(row.get("account")), str(row.get("category")),
+                       str(row.get("type")), str(row.get("id")), str(row.get("instrument"))) for row in current}
+        for row in previous.get("items", []):
+            identity = (str(row.get("broker")), str(row.get("account")), str(row.get("category")),
+                        str(row.get("type")), str(row.get("id")), str(row.get("instrument")))
+            if identity not in identities:
+                current.append(dict(row, source_stale=True, stale_reason=str(exc)))
+        errors = list(progress.get("errors", [])) + [{"broker": "All", "source_type": "collection", "message": str(exc)}]
+        previous.update({"items": current, "errors": errors, "error_count": len(errors),
+                         "warnings": list(progress.get("warnings", [])), "stale": True,
+                         "updated_at": _utc_now_iso(), "version": version,
+                         "refresh_superseded": version != int(_OPEN_ORDERS_CACHE.get("version") or 0)})
+        return JSONResponse(previous)
+    finally:
+        _OPEN_ORDERS_PROGRESS.reset(token)
+        _OPEN_ORDERS_COLLECTION_VERSION.reset(version_token)
+
+
 @app.get("/api/open-orders")
 async def list_open_orders(force: bool = Query(False)) -> JSONResponse:
     if APP_PROFILE == "render":
-        return _local_only_disabled_response("/api/open-orders", as_json=True)  # type: ignore[return-value]
-    now = time.time()
-    cached_payload = _OPEN_ORDERS_CACHE.get("payload")
-    expires_at = float(_OPEN_ORDERS_CACHE.get("expires_at") or 0.0)
-    if not force and isinstance(cached_payload, dict) and now < expires_at:
-        fresh = dict(cached_payload)
-        fresh["stale"] = bool(fresh.get("errors"))
-        fresh.setdefault("updated_at", _utc_now_iso())
-        fresh.setdefault("last_success_at", _OPEN_ORDERS_CACHE.get("last_success_at"))
-        fresh["error_count"] = len(fresh.get("errors") or [])
-        fresh["warning_count"] = len(fresh.get("warnings") or [])
-        return JSONResponse(fresh)
+        return _local_only_disabled_response("/api/open-orders", as_json=True)
+    cached = _OPEN_ORDERS_CACHE.get("payload")
+    if not force and isinstance(cached, dict) and time.time() < float(_OPEN_ORDERS_CACHE.get("expires_at") or 0):
+        return JSONResponse(dict(cached))
+    version = int(_OPEN_ORDERS_CACHE.get("version") or 0)
+    # Atomic event-loop registration: no await, lock waiting or full-refresh queue.
+    entry = _OPEN_ORDERS_INFLIGHT.get(version)
+    if entry is None:
+        entry = {"task": asyncio.create_task(_run_open_orders_collection(version, {})), "waiters": 0}
+        _OPEN_ORDERS_INFLIGHT[version] = entry
+    entry["waiters"] += 1
+    task = entry["task"]
+    try:
+        return await asyncio.shield(task)
+    finally:
+        entry["waiters"] -= 1
+        if entry["waiters"] == 0:
+            if _OPEN_ORDERS_INFLIGHT.get(version) is entry:
+                del _OPEN_ORDERS_INFLIGHT[version]
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
-    async with _OPEN_ORDERS_CACHE_LOCK:
-        now = time.time()
-        cached_payload = _OPEN_ORDERS_CACHE.get("payload")
-        expires_at = float(_OPEN_ORDERS_CACHE.get("expires_at") or 0.0)
-        if not force and isinstance(cached_payload, dict) and now < expires_at:
-            fresh = dict(cached_payload)
-            fresh["stale"] = bool(fresh.get("errors"))
-            fresh.setdefault("updated_at", _utc_now_iso())
-            fresh.setdefault("last_success_at", _OPEN_ORDERS_CACHE.get("last_success_at"))
-            fresh["error_count"] = len(fresh.get("errors") or [])
-            fresh["warning_count"] = len(fresh.get("warnings") or [])
-            return JSONResponse(fresh)
 
-        # This version describes the state for which this broker read began. If
-        # another durable transition invalidates the cache while reads are in
-        # flight, the returned payload keeps this older version and is not
-        # cached. The browser will observe the newer version and render again.
-        collection_version = int(_OPEN_ORDERS_CACHE.get("version") or 0)
-        items: List[Dict[str, object]] = []
-        errors: List[Dict[str, str]] = []
-        warnings: List[Dict[str, str]] = []
+async def _collect_open_orders(collection_version: int) -> JSONResponse:
+    # This version describes the state for which this broker read began. If
+    # another durable transition invalidates the cache while reads are in
+    # flight, the returned payload keeps this older version and is not
+    # cached. The browser will observe the newer version and render again.
+    items: List[Dict[str, object]] = []
+    errors: List[Dict[str, str]] = []
+    warnings: List[Dict[str, str]] = []
 
-        for account in ("live", "demo"):
+    progress = _OPEN_ORDERS_PROGRESS.get()
+    if progress is not None:
+        progress.update({"items": items, "errors": errors, "warnings": warnings})
+
+    oanda_semaphore = asyncio.Semaphore(4)
+
+    async def read_oanda_account(**kwargs):
+        async def read():
+            async with oanda_semaphore:
+                return await _collect_oanda_open_items(**kwargs)
+        return await _open_orders_budget(read(), 2 * _OPEN_ORDERS_SOURCE_SECONDS,
+                                         f"OANDA {kwargs['account_context']} account openItems")
+
+    async def collect_oanda(account):
+        try:
+            cfg = _get_oanda_config(account)
+            account_ids: List[str] = []
+            configured_account_id = str(cfg.get("account_id") or "").strip()
+            if configured_account_id:
+                account_ids.append(configured_account_id)
+
+            owned_accounts: List[Dict[str, object]] = []
+            account_tags: Dict[str, List[str]] = {}
+            discovery_exc: Optional[Exception] = None
+            stale_discovery_fetched_at: Optional[float] = None
             try:
-                cfg = _get_oanda_config(account)
-                account_ids: List[str] = []
-                configured_account_id = str(cfg.get("account_id") or "").strip()
-                if configured_account_id:
-                    account_ids.append(configured_account_id)
-
-                owned_accounts: List[Dict[str, object]] = []
-                account_tags: Dict[str, List[str]] = {}
-                discovery_exc: Optional[Exception] = None
-                stale_discovery_fetched_at: Optional[float] = None
-                try:
-                    discovery_result = await _get_cached_oanda_accounts(
-                        base_url=cfg["base_url"],
-                        api_key=cfg["token"],
-                    )
-                    if isinstance(discovery_result, OandaAccountDiscoveryResult):
-                        owned_accounts = list(discovery_result.accounts)
-                        discovery_exc = discovery_result.discovery_error
-                        if discovery_result.cache_state == "stale":
-                            stale_discovery_fetched_at = discovery_result.fetched_at
-                    else:
-                        # Preserve compatibility with local test or extension shims that
-                        # returned the pre-metadata list shape.
-                        owned_accounts = list(discovery_result or [])
-                except Exception as exc:
-                    discovery_exc = exc
-
-                for acct in owned_accounts:
-                    acct_id = str(acct.get("id") or "").strip()
-                    if not acct_id:
-                        continue
-                    account_ids.append(acct_id)
-                    account_tags[acct_id] = [str(t).upper() for t in (acct.get("tags") or [])]
-
-                deduped_ids: List[str] = []
-                seen_account_ids: Set[str] = set()
-                for acct_id in account_ids:
-                    if acct_id in seen_account_ids:
-                        continue
-                    deduped_ids.append(acct_id)
-                    seen_account_ids.add(acct_id)
-                account_ids = deduped_ids
-                if not account_ids:
-                    raise ValueError(
-                        f"No configured or discovered OANDA account IDs are available for {account}."
-                    )
-
-                tasks = [
-                    _collect_oanda_open_items(
-                        base_url=cfg["base_url"],
-                        account_id=acct_id,
-                        api_key=cfg["token"],
-                        account_context=account,
-                    )
-                    for acct_id in account_ids
-                ]
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-
-                oanda_items: List[Dict[str, object]] = []
-                oanda_errors: List[Dict[str, str]] = []
-                account_error_counts: Dict[str, int] = {}
-                refreshed_account_ids: Set[str] = set()
-                for acct_id, result in zip(account_ids, results):
-                    if isinstance(result, Exception):
-                        account_error_counts[acct_id] = (
-                            account_error_counts.get(acct_id, 0) + 1
-                        )
-                        oanda_errors.append(
-                            {
-                                "broker": "OANDA",
-                                "account": account,
-                                "category": "forex",
-                                "source_type": "account data",
-                                "endpoint": "/v3/accounts/{accountID}/openItems",
-                                "account_id": acct_id,
-                                "message": _format_source_exception(
-                                    result,
-                                    broker="OANDA",
-                                    account=account,
-                                    endpoint="/v3/accounts/{accountID}/openItems",
-                                    account_id=acct_id,
-                                ),
-                            }
-                        )
-                        continue
-
-                    if not isinstance(result, dict) or not {
-                        "items",
-                        "errors",
-                    }.issubset(result):
-                        account_error_counts[acct_id] = (
-                            account_error_counts.get(acct_id, 0) + 1
-                        )
-                        oanda_errors.append(
-                            {
-                                "broker": "OANDA",
-                                "account": account,
-                                "category": "forex",
-                                "source_type": "account data",
-                                "endpoint": "/v3/accounts/{accountID}/openItems",
-                                "account_id": acct_id,
-                                "message": (
-                                    "OANDA account refresh returned an invalid result "
-                                    f"for {account}/{acct_id}"
-                                ),
-                            }
-                        )
-                        continue
-
-                    refreshed_account_ids.add(acct_id)
-                    result_items = result.get("items", [])
-                    result_errors = result.get("errors", [])
-
-                    for endpoint_error in result_errors:
-                        account_error_counts[acct_id] = (
-                            account_error_counts.get(acct_id, 0) + 1
-                        )
-                        if isinstance(endpoint_error, dict):
-                            endpoint = str(
-                                endpoint_error.get("endpoint")
-                                or "/v3/accounts/{accountID}/openItems"
-                            )
-                            message = str(
-                                endpoint_error.get("message")
-                                or "Unknown OANDA endpoint error"
-                            ).strip()
-                        else:
-                            endpoint = "/v3/accounts/{accountID}/openItems"
-                            message = (
-                                f"{acct_id}: "
-                                f"{str(endpoint_error).strip() or 'Unknown OANDA endpoint error'}"
-                            )
-                        oanda_errors.append(
-                            {
-                                "broker": "OANDA",
-                                "account": account,
-                                "category": "forex",
-                                "source_type": "account data",
-                                "endpoint": endpoint,
-                                "account_id": acct_id,
-                                "message": message,
-                            }
-                        )
-
-                    tags = account_tags.get(acct_id, [])
-                    for row in result_items:
-                        row["account_id"] = acct_id
-                        if "MT4" in tags:
-                            row["account_label_suffix"] = "MT4"
-                    oanda_items.extend(result_items)
-
-                items.extend(oanda_items)
-                errors.extend(oanda_errors)
-                configured_account_refreshed = bool(
-                    configured_account_id
-                    and configured_account_id in refreshed_account_ids
-                    and account_error_counts.get(configured_account_id, 0) == 0
-                )
-                if configured_account_refreshed and _oanda_discovery_is_http_401(discovery_exc):
-                    BYBIT_LOGGER.warning(
-                        "OANDA_DISCOVERY_AUTH_ANOMALY mode=%s configured_account=%s "
-                        "configured_endpoints_ok=true retry_delay=%.2fs",
-                        account,
-                        configured_account_id,
-                        _OANDA_DISCOVERY_AUTH_ANOMALY_RETRY_DELAY_SECONDS,
-                    )
-                    await asyncio.sleep(_OANDA_DISCOVERY_AUTH_ANOMALY_RETRY_DELAY_SECONDS)
-                    retry_owned_accounts: List[Dict[str, object]] = []
-                    try:
-                        retry_discovery = await _get_cached_oanda_accounts(
-                            base_url=cfg["base_url"],
-                            api_key=cfg["token"],
-                            allow_auth_anomaly_stale=True,
-                        )
-                        if isinstance(retry_discovery, OandaAccountDiscoveryResult):
-                            retry_owned_accounts = list(retry_discovery.accounts)
-                            discovery_exc = retry_discovery.discovery_error
-                            stale_discovery_fetched_at = (
-                                retry_discovery.fetched_at
-                                if retry_discovery.cache_state == "stale"
-                                else None
-                            )
-                        else:
-                            retry_owned_accounts = list(retry_discovery or [])
-                            discovery_exc = None
-                            stale_discovery_fetched_at = None
-                    except Exception as retry_exc:
-                        discovery_exc = retry_exc
-                        stale_discovery_fetched_at = None
-
-                    if discovery_exc is None:
-                        BYBIT_LOGGER.info(
-                            "OANDA_DISCOVERY_AUTH_ANOMALY_RECOVERED mode=%s configured_account=%s",
-                            account,
-                            configured_account_id,
-                        )
-
-                    retry_account_ids: List[str] = []
-                    for acct in retry_owned_accounts:
-                        acct_id = str(acct.get("id") or "").strip()
-                        if not acct_id or acct_id in seen_account_ids:
-                            continue
-                        seen_account_ids.add(acct_id)
-                        account_ids.append(acct_id)
-                        retry_account_ids.append(acct_id)
-                        account_tags[acct_id] = [
-                            str(tag).upper() for tag in (acct.get("tags") or [])
-                        ]
-
-                    if retry_account_ids:
-                        retry_tasks = [
-                            _collect_oanda_open_items(
-                                base_url=cfg["base_url"],
-                                account_id=acct_id,
-                                api_key=cfg["token"],
-                                account_context=account,
-                            )
-                            for acct_id in retry_account_ids
-                        ]
-                        retry_results = await asyncio.gather(
-                            *retry_tasks, return_exceptions=True
-                        )
-                        retry_items: List[Dict[str, object]] = []
-                        retry_errors: List[Dict[str, str]] = []
-                        for acct_id, retry_result in zip(retry_account_ids, retry_results):
-                            if isinstance(retry_result, Exception):
-                                retry_errors.append(
-                                    {
-                                        "broker": "OANDA",
-                                        "account": account,
-                                        "category": "forex",
-                                        "source_type": "account data",
-                                        "endpoint": "/v3/accounts/{accountID}/openItems",
-                                        "account_id": acct_id,
-                                        "message": _format_source_exception(
-                                            retry_result,
-                                            broker="OANDA",
-                                            account=account,
-                                            endpoint="/v3/accounts/{accountID}/openItems",
-                                            account_id=acct_id,
-                                        ),
-                                    }
-                                )
-                                continue
-                            if not isinstance(retry_result, dict):
-                                retry_errors.append(
-                                    {
-                                        "broker": "OANDA",
-                                        "account": account,
-                                        "category": "forex",
-                                        "source_type": "account data",
-                                        "endpoint": "/v3/accounts/{accountID}/openItems",
-                                        "account_id": acct_id,
-                                        "message": "OANDA account refresh returned an invalid result after discovery retry.",
-                                    }
-                                )
-                                continue
-                            result_endpoint_errors = retry_result.get("errors") or []
-                            for endpoint_error in result_endpoint_errors:
-                                endpoint_error = endpoint_error if isinstance(endpoint_error, dict) else {"message": endpoint_error}
-                                retry_errors.append(
-                                    {
-                                        "broker": "OANDA",
-                                        "account": account,
-                                        "category": "forex",
-                                        "source_type": "account data",
-                                        "endpoint": str(endpoint_error.get("endpoint") or "/v3/accounts/{accountID}/openItems"),
-                                        "account_id": acct_id,
-                                        "message": str(endpoint_error.get("message") or "Unknown OANDA endpoint error"),
-                                    }
-                                )
-                            tags = account_tags.get(acct_id, [])
-                            for row in retry_result.get("items") or []:
-                                if not isinstance(row, dict):
-                                    continue
-                                row["account_id"] = acct_id
-                                if "MT4" in tags:
-                                    row["account_label_suffix"] = "MT4"
-                                retry_items.append(row)
-                        oanda_items.extend(retry_items)
-                        oanda_errors.extend(retry_errors)
-                        items.extend(retry_items)
-                        errors.extend(retry_errors)
-
-                if discovery_exc is not None:
-                    warnings.append(
-                        _oanda_discovery_warning(
-                            account=account,
-                            exc=discovery_exc,
-                            stale_fetched_at=stale_discovery_fetched_at,
-                            configured_account_refreshed=configured_account_refreshed,
-                        )
-                    )
-                BYBIT_LOGGER.info(
-                    "OPEN_ORDERS oanda account=%s owner_accounts=%s items=%s errors=%s "
-                    "discovery_warning=%s discovery_cache=%s",
-                    account,
-                    len(account_ids),
-                    len(oanda_items),
-                    len(oanda_errors),
-                    discovery_exc is not None,
-                    "stale" if stale_discovery_fetched_at is not None else "current",
-                )
-            except Exception as exc:
-                errors.append(
-                    {
-                        "broker": "OANDA",
-                        "account": account,
-                        "category": "forex",
-                        "message": _format_source_exception(
-                            exc,
-                            broker="OANDA",
-                            account=account,
-                            endpoint="open-orders",
-                            account_id="unknown",
-                        ),
-                    }
-                )
-
-        for account in ("live", "demo"):
-            api_key = ""
-            api_secret = ""
-            try:
-                _mode, api_key, api_secret, base_url, _key_source = resolve_bybit_credentials_for(
-                    account
-                )
-                if not api_key or not api_secret:
-                    raise ValueError("Bybit API credentials are not configured.")
-                result = await _collect_bybit_open_items(
-                    base_url=base_url,
-                    api_key=api_key,
-                    api_secret=api_secret,
-                    account_context=account,
-                    key_source=_key_source,
-                )
-                result_items = [
-                    dict(row)
-                    for row in (result.get("items", []) or [])
-                    if isinstance(row, dict)
-                ]
-                result_errors = [
-                    dict(row)
-                    for row in (result.get("errors", []) or [])
-                    if isinstance(row, dict)
-                ]
-                result_warnings = [
-                    dict(row)
-                    for row in (result.get("warnings", []) or [])
-                    if isinstance(row, dict)
-                ]
-                source_key = f"bybit:{account}"
-                if bool(result.get("auth_failed")):
-                    stale_items = [
-                        dict(row)
-                        for row in _OPEN_ORDERS_LAST_GOOD_ITEMS.get(source_key, [])
-                        if isinstance(row, dict)
-                    ]
-                    for row in stale_items:
-                        row["source_stale"] = True
-                        row["stale_reason"] = (
-                            "Bybit authentication failed; showing last-known-good broker state."
-                        )
-                    items.extend(stale_items)
+                discovery_result = await _open_orders_budget(_get_cached_oanda_accounts(
+                    base_url=cfg["base_url"],
+                    api_key=cfg["token"],
+                ), _OPEN_ORDERS_SOURCE_SECONDS, "OANDA account discovery")
+                if isinstance(discovery_result, OandaAccountDiscoveryResult):
+                    owned_accounts = list(discovery_result.accounts)
+                    discovery_exc = discovery_result.discovery_error
+                    if discovery_result.cache_state == "stale":
+                        stale_discovery_fetched_at = discovery_result.fetched_at
                 else:
-                    items.extend(result_items)
-                    if not result_errors:
-                        _OPEN_ORDERS_LAST_GOOD_ITEMS[source_key] = [
-                            dict(row) for row in result_items
-                        ]
-                errors.extend(result_errors)
-                warnings.extend(result_warnings)
-                BYBIT_LOGGER.info(
-                    "OPEN_ORDERS bybit account=%s items=%s errors=%s warnings=%s auth_failed=%s",
-                    account,
-                    len(result_items),
-                    len(result_errors),
-                    len(result_warnings),
-                    bool(result.get("auth_failed")),
-                )
+                    # Preserve compatibility with local test or extension shims that
+                    # returned the pre-metadata list shape.
+                    owned_accounts = list(discovery_result or [])
             except Exception as exc:
-                source_error = _bybit_open_source_error(
-                    exc,
-                    account=account,
-                    category="account",
-                    source_type=(
-                        "credential readiness"
-                        if isinstance(exc, BybitCredentialConflictError)
-                        else "collection"
-                    ),
-                    endpoint="open-orders collection",
-                    settlement_coin="n/a",
-                    api_key=api_key,
-                    api_secret=api_secret,
+                discovery_exc = exc
+
+            for acct in owned_accounts:
+                acct_id = str(acct.get("id") or "").strip()
+                if not acct_id:
+                    continue
+                account_ids.append(acct_id)
+                account_tags[acct_id] = [str(t).upper() for t in (acct.get("tags") or [])]
+
+            deduped_ids: List[str] = []
+            seen_account_ids: Set[str] = set()
+            for acct_id in account_ids:
+                if acct_id in seen_account_ids:
+                    continue
+                deduped_ids.append(acct_id)
+                seen_account_ids.add(acct_id)
+            account_ids = deduped_ids
+            if not account_ids:
+                raise ValueError(
+                    f"No configured or discovered OANDA account IDs are available for {account}."
                 )
-                if isinstance(exc, BybitCredentialConflictError):
-                    source_error.update(
+
+            tasks = [
+                read_oanda_account(
+                    base_url=cfg["base_url"],
+                    account_id=acct_id,
+                    api_key=cfg["token"],
+                    account_context=account,
+                )
+                for acct_id in account_ids
+            ]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            oanda_items: List[Dict[str, object]] = []
+            oanda_errors: List[Dict[str, str]] = []
+            account_error_counts: Dict[str, int] = {}
+            refreshed_account_ids: Set[str] = set()
+            for acct_id, result in zip(account_ids, results):
+                if isinstance(result, Exception):
+                    account_error_counts[acct_id] = (
+                        account_error_counts.get(acct_id, 0) + 1
+                    )
+                    oanda_errors.append(
                         {
-                            "auth_failure": "true",
-                            "auth_classification": "credential_source_conflict",
-                            "credential_source": "CONFLICT",
-                            "pair_complete": "false",
+                            "broker": "OANDA",
+                            "account": account,
+                            "category": "forex",
+                            "source_type": "account data",
+                            "endpoint": "/v3/accounts/{accountID}/openItems",
+                            "account_id": acct_id,
+                            "message": _format_source_exception(
+                                result,
+                                broker="OANDA",
+                                account=account,
+                                endpoint="/v3/accounts/{accountID}/openItems",
+                                account_id=acct_id,
+                            ),
                         }
                     )
-                errors.append(source_error)
+                    continue
+
+                if not isinstance(result, dict) or not {
+                    "items",
+                    "errors",
+                }.issubset(result):
+                    account_error_counts[acct_id] = (
+                        account_error_counts.get(acct_id, 0) + 1
+                    )
+                    oanda_errors.append(
+                        {
+                            "broker": "OANDA",
+                            "account": account,
+                            "category": "forex",
+                            "source_type": "account data",
+                            "endpoint": "/v3/accounts/{accountID}/openItems",
+                            "account_id": acct_id,
+                            "message": (
+                                "OANDA account refresh returned an invalid result "
+                                f"for {account}/{acct_id}"
+                            ),
+                        }
+                    )
+                    continue
+
+                refreshed_account_ids.add(acct_id)
+                result_items = result.get("items", [])
+                result_errors = result.get("errors", [])
+
+                for endpoint_error in result_errors:
+                    account_error_counts[acct_id] = (
+                        account_error_counts.get(acct_id, 0) + 1
+                    )
+                    if isinstance(endpoint_error, dict):
+                        endpoint = str(
+                            endpoint_error.get("endpoint")
+                            or "/v3/accounts/{accountID}/openItems"
+                        )
+                        message = str(
+                            endpoint_error.get("message")
+                            or "Unknown OANDA endpoint error"
+                        ).strip()
+                    else:
+                        endpoint = "/v3/accounts/{accountID}/openItems"
+                        message = (
+                            f"{acct_id}: "
+                            f"{str(endpoint_error).strip() or 'Unknown OANDA endpoint error'}"
+                        )
+                    oanda_errors.append(
+                        {
+                            "broker": "OANDA",
+                            "account": account,
+                            "category": "forex",
+                            "source_type": "account data",
+                            "endpoint": endpoint,
+                            "account_id": acct_id,
+                            "message": message,
+                        }
+                    )
+
+                tags = account_tags.get(acct_id, [])
+                for row in result_items:
+                    row["account_id"] = acct_id
+                    if "MT4" in tags:
+                        row["account_label_suffix"] = "MT4"
+                oanda_items.extend(result_items)
+
+            items.extend(oanda_items)
+            errors.extend(oanda_errors)
+            configured_account_refreshed = bool(
+                configured_account_id
+                and configured_account_id in refreshed_account_ids
+                and account_error_counts.get(configured_account_id, 0) == 0
+            )
+            if configured_account_refreshed and _oanda_discovery_is_http_401(discovery_exc):
+                BYBIT_LOGGER.warning(
+                    "OANDA_DISCOVERY_AUTH_ANOMALY mode=%s configured_account=%s "
+                    "configured_endpoints_ok=true retry_delay=%.2fs",
+                    account,
+                    configured_account_id,
+                    _OANDA_DISCOVERY_AUTH_ANOMALY_RETRY_DELAY_SECONDS,
+                )
+                await asyncio.sleep(_OANDA_DISCOVERY_AUTH_ANOMALY_RETRY_DELAY_SECONDS)
+                retry_owned_accounts: List[Dict[str, object]] = []
+                try:
+                    retry_discovery = await _open_orders_budget(_get_cached_oanda_accounts(
+                        base_url=cfg["base_url"],
+                        api_key=cfg["token"],
+                        allow_auth_anomaly_stale=True,
+                    ), _OPEN_ORDERS_SOURCE_SECONDS, "OANDA account discovery")
+                    if isinstance(retry_discovery, OandaAccountDiscoveryResult):
+                        retry_owned_accounts = list(retry_discovery.accounts)
+                        discovery_exc = retry_discovery.discovery_error
+                        stale_discovery_fetched_at = (
+                            retry_discovery.fetched_at
+                            if retry_discovery.cache_state == "stale"
+                            else None
+                        )
+                    else:
+                        retry_owned_accounts = list(retry_discovery or [])
+                        discovery_exc = None
+                        stale_discovery_fetched_at = None
+                except Exception as retry_exc:
+                    discovery_exc = retry_exc
+                    stale_discovery_fetched_at = None
+
+                if discovery_exc is None:
+                    BYBIT_LOGGER.info(
+                        "OANDA_DISCOVERY_AUTH_ANOMALY_RECOVERED mode=%s configured_account=%s",
+                        account,
+                        configured_account_id,
+                    )
+
+                retry_account_ids: List[str] = []
+                for acct in retry_owned_accounts:
+                    acct_id = str(acct.get("id") or "").strip()
+                    if not acct_id or acct_id in seen_account_ids:
+                        continue
+                    seen_account_ids.add(acct_id)
+                    account_ids.append(acct_id)
+                    retry_account_ids.append(acct_id)
+                    account_tags[acct_id] = [
+                        str(tag).upper() for tag in (acct.get("tags") or [])
+                    ]
+
+                if retry_account_ids:
+                    retry_tasks = [
+                        read_oanda_account(
+                            base_url=cfg["base_url"],
+                            account_id=acct_id,
+                            api_key=cfg["token"],
+                            account_context=account,
+                        )
+                        for acct_id in retry_account_ids
+                    ]
+                    retry_results = await asyncio.gather(
+                        *retry_tasks, return_exceptions=True
+                    )
+                    retry_items: List[Dict[str, object]] = []
+                    retry_errors: List[Dict[str, str]] = []
+                    for acct_id, retry_result in zip(retry_account_ids, retry_results):
+                        if isinstance(retry_result, Exception):
+                            retry_errors.append(
+                                {
+                                    "broker": "OANDA",
+                                    "account": account,
+                                    "category": "forex",
+                                    "source_type": "account data",
+                                    "endpoint": "/v3/accounts/{accountID}/openItems",
+                                    "account_id": acct_id,
+                                    "message": _format_source_exception(
+                                        retry_result,
+                                        broker="OANDA",
+                                        account=account,
+                                        endpoint="/v3/accounts/{accountID}/openItems",
+                                        account_id=acct_id,
+                                    ),
+                                }
+                            )
+                            continue
+                        if not isinstance(retry_result, dict):
+                            retry_errors.append(
+                                {
+                                    "broker": "OANDA",
+                                    "account": account,
+                                    "category": "forex",
+                                    "source_type": "account data",
+                                    "endpoint": "/v3/accounts/{accountID}/openItems",
+                                    "account_id": acct_id,
+                                    "message": "OANDA account refresh returned an invalid result after discovery retry.",
+                                }
+                            )
+                            continue
+                        result_endpoint_errors = retry_result.get("errors") or []
+                        for endpoint_error in result_endpoint_errors:
+                            endpoint_error = endpoint_error if isinstance(endpoint_error, dict) else {"message": endpoint_error}
+                            retry_errors.append(
+                                {
+                                    "broker": "OANDA",
+                                    "account": account,
+                                    "category": "forex",
+                                    "source_type": "account data",
+                                    "endpoint": str(endpoint_error.get("endpoint") or "/v3/accounts/{accountID}/openItems"),
+                                    "account_id": acct_id,
+                                    "message": str(endpoint_error.get("message") or "Unknown OANDA endpoint error"),
+                                }
+                            )
+                        tags = account_tags.get(acct_id, [])
+                        for row in retry_result.get("items") or []:
+                            if not isinstance(row, dict):
+                                continue
+                            row["account_id"] = acct_id
+                            if "MT4" in tags:
+                                row["account_label_suffix"] = "MT4"
+                            retry_items.append(row)
+                    oanda_items.extend(retry_items)
+                    oanda_errors.extend(retry_errors)
+                    items.extend(retry_items)
+                    errors.extend(retry_errors)
+
+            if discovery_exc is not None:
+                warnings.append(
+                    _oanda_discovery_warning(
+                        account=account,
+                        exc=discovery_exc,
+                        stale_fetched_at=stale_discovery_fetched_at,
+                        configured_account_refreshed=configured_account_refreshed,
+                    )
+                )
+            BYBIT_LOGGER.info(
+                "OPEN_ORDERS oanda account=%s owner_accounts=%s items=%s errors=%s "
+                "discovery_warning=%s discovery_cache=%s",
+                account,
+                len(account_ids),
+                len(oanda_items),
+                len(oanda_errors),
+                discovery_exc is not None,
+                "stale" if stale_discovery_fetched_at is not None else "current",
+            )
+        except Exception as exc:
+            errors.append(
+                {
+                    "broker": "OANDA",
+                    "account": account,
+                    "category": "forex",
+                    "message": _format_source_exception(
+                        exc,
+                        broker="OANDA",
+                        account=account,
+                        endpoint="open-orders",
+                        account_id="unknown",
+                    ),
+                }
+            )
+
+    async def collect_bybit(account):
+        api_key = ""
+        api_secret = ""
+        try:
+            _mode, api_key, api_secret, base_url, _key_source = resolve_bybit_credentials_for(
+                account
+            )
+            if not api_key or not api_secret:
+                raise ValueError("Bybit API credentials are not configured.")
+            result = await _collect_bybit_open_items(
+                base_url=base_url,
+                api_key=api_key,
+                api_secret=api_secret,
+                account_context=account,
+                key_source=_key_source,
+            )
+            result_items = [
+                dict(row)
+                for row in (result.get("items", []) or [])
+                if isinstance(row, dict)
+            ]
+            result_errors = [
+                dict(row)
+                for row in (result.get("errors", []) or [])
+                if isinstance(row, dict)
+            ]
+            result_warnings = [
+                dict(row)
+                for row in (result.get("warnings", []) or [])
+                if isinstance(row, dict)
+            ]
+            source_key = f"bybit:{account}"
+            if bool(result.get("auth_failed")):
                 stale_items = [
                     dict(row)
-                    for row in _OPEN_ORDERS_LAST_GOOD_ITEMS.get(f"bybit:{account}", [])
+                    for row in _OPEN_ORDERS_LAST_GOOD_ITEMS.get(source_key, [])
                     if isinstance(row, dict)
                 ]
                 for row in stale_items:
                     row["source_stale"] = True
                     row["stale_reason"] = (
-                        "Bybit authentication/configuration failed; showing last-known-good broker state."
+                        "Bybit authentication failed; showing last-known-good broker state."
                     )
                 items.extend(stale_items)
-
-        live_broker_items = list(items)
-        pending_diagnostics: Dict[str, int] = {}
-        pending = _load_pending_webhooks()
-        if pending:
-            pending, pending_changed = _clean_pending_webhooks_for_open_items(
-                pending, items, diagnostics=pending_diagnostics
+            else:
+                items.extend(result_items)
+                if not result_errors and int(_OPEN_ORDERS_CACHE.get("version") or 0) == collection_version:
+                    _OPEN_ORDERS_LAST_GOOD_ITEMS[source_key] = [
+                        dict(row) for row in result_items
+                    ]
+            if result_errors and not result.get("auth_failed"):
+                current_ids = {(str(row.get("category")), str(row.get("type")), str(row.get("id")), str(row.get("instrument"))) for row in result_items}
+                for previous in _OPEN_ORDERS_LAST_GOOD_ITEMS.get(source_key, []):
+                    identity = (str(previous.get("category")), str(previous.get("type")), str(previous.get("id")), str(previous.get("instrument")))
+                    failed = any(
+                        str(error.get("category")) in {"account", str(previous.get("category"))}
+                        and str(error.get("source_type")) in {"collection", "auth preflight", "positions" if previous.get("type") == "Position" else "orders"}
+                        and str(error.get("settlement_coin") or "n/a") in {"n/a", "multiple", str(previous.get("settlement_currency") or ""), "USDT" if str(previous.get("instrument") or "").endswith("USDT") else "USDC"}
+                        for error in result_errors)
+                    if failed and identity not in current_ids:
+                        items.append(dict(previous, source_stale=True,
+                                          stale_reason="Bybit source coverage incomplete; showing last-known-good row."))
+                if any(row.get("source_stale") for row in items if row.get("broker") == "Bybit" and row.get("account") == account):
+                    warnings.append({"broker": "Bybit", "account": account, "source_type": "last-known-good",
+                                     "message": "Some rows are stale because source coverage is incomplete."})
+            errors.extend(result_errors)
+            warnings.extend(result_warnings)
+            BYBIT_LOGGER.info(
+                "OPEN_ORDERS bybit account=%s items=%s errors=%s warnings=%s auth_failed=%s",
+                account,
+                len(result_items),
+                len(result_errors),
+                len(result_warnings),
+                bool(result.get("auth_failed")),
             )
-            if pending_changed:
-                _save_pending_webhooks(pending)
-                _invalidate_open_orders_cache()
-                _schedule_dropbox_upload_state_backup()
-        else:
-            pending_diagnostics["input_records"] = 0
-            pending_diagnostics["active_records"] = 0
+        except Exception as exc:
+            source_error = _bybit_open_source_error(
+                exc,
+                account=account,
+                category="account",
+                source_type=(
+                    "credential readiness"
+                    if isinstance(exc, BybitCredentialConflictError)
+                    else "collection"
+                ),
+                endpoint="open-orders collection",
+                settlement_coin="n/a",
+                api_key=api_key,
+                api_secret=api_secret,
+            )
+            if isinstance(exc, BybitCredentialConflictError):
+                source_error.update(
+                    {
+                        "auth_failure": "true",
+                        "auth_classification": "credential_source_conflict",
+                        "credential_source": "CONFLICT",
+                        "pair_complete": "false",
+                    }
+                )
+            errors.append(source_error)
+            stale_items = [
+                dict(row)
+                for row in _OPEN_ORDERS_LAST_GOOD_ITEMS.get(f"bybit:{account}", [])
+                if isinstance(row, dict)
+            ]
+            for row in stale_items:
+                row["source_stale"] = True
+                row["stale_reason"] = (
+                    "Bybit collection failed; showing last-known-good broker state."
+                )
+            items.extend(stale_items)
 
-        live_broker_positions = sum(
-            1
-            for row in live_broker_items
-            if str(row.get("broker") or "").strip().lower() not in {"webhook", "bounce"}
-            and str(row.get("type") or "").strip().lower() in {"position", "trade"}
-        )
-        live_broker_orders = sum(
-            1
-            for row in live_broker_items
-            if str(row.get("broker") or "").strip().lower() not in {"webhook", "bounce"}
-            and str(row.get("type") or "").strip().lower() == "order"
-        )
-        pruned_pending = sum(
-            int(value)
-            for key, value in pending_diagnostics.items()
-            if key.endswith("_pruned")
-        )
-        source_counts = {
-            "live_broker_positions": live_broker_positions,
-            "live_broker_orders": live_broker_orders,
-            "active_pending_webhooks": len(pending),
-            "duplicates_or_stale_pending_pruned": pruned_pending,
-            "pending_reconciliation": dict(pending_diagnostics),
-            "errors": len(errors),
-            "warnings": len(warnings),
-        }
-        BYBIT_LOGGER.info(
-            "OPEN_ORDERS source_counts live_positions=%s live_orders=%s active_pending=%s "
-            "pruned_pending=%s diagnostics=%s errors=%s warnings=%s",
-            live_broker_positions,
-            live_broker_orders,
-            len(pending),
-            pruned_pending,
-            pending_diagnostics,
-            len(errors),
-            len(warnings),
-        )
-
+    async def bounded_mode(broker, account, collector):
+        token = _OPEN_ORDERS_READ_SCOPE.set(True)
         try:
-            bounce_script_running = script_manager.get("bybit_trigger_bounce_trader").is_running
-        except Exception:
-            bounce_script_running = False
+            await _open_orders_budget(collector(account), _OPEN_ORDERS_ACCOUNT_SECONDS,
+                                      f"{broker} {account} collection")
+        except Exception as exc:
+            errors.append({"broker": broker, "account": account, "source_type": "collection",
+                           "endpoint": "open-orders collection", "message": _safe_bybit_diagnostic_text(str(exc))})
+        finally:
+            _OPEN_ORDERS_READ_SCOPE.reset(token)
 
-        if bounce_script_running:
-            sessions = _load_bounce_traders()
-            changed = False
-            now_dt = datetime.now(timezone.utc)
+    await asyncio.gather(*(bounded_mode(broker, account, collector)
+                           for broker, collector in (("OANDA", collect_oanda), ("Bybit", collect_bybit))
+                           for account in ("live", "demo")))
 
-            bybit_orders = [
-                row
-                for row in items
-                if str(row.get("broker", "")).strip().lower() == "bybit"
-                and str(row.get("type", "")).strip().lower() == "order"
-            ]
-            bybit_positions = [
-                row
-                for row in items
-                if str(row.get("broker", "")).strip().lower() == "bybit"
-                and str(row.get("type", "")).strip().lower() == "position"
-            ]
-            oanda_orders = [
-                row
-                for row in items
-                if str(row.get("broker", "")).strip().lower() == "oanda"
-                and str(row.get("type", "")).strip().lower() == "order"
-            ]
-            oanda_positions = [
-                row
-                for row in items
-                if str(row.get("broker", "")).strip().lower() == "oanda"
-                and str(row.get("type", "")).strip().lower() in {"position", "trade"}
-            ]
+    items.sort(key=lambda row: (0 if str(row.get("broker")).lower() == "oanda" else 1,
+                                0 if row.get("account") == "live" else 1))
+    live_broker_items = list(items)
+    pending_diagnostics: Dict[str, int] = {}
+    pending = _load_pending_webhooks()
+    coverage_complete = not errors and not warnings and int(_OPEN_ORDERS_CACHE.get("version") or 0) == collection_version
+    if pending and coverage_complete:
+        pending, pending_changed = _clean_pending_webhooks_for_open_items(
+            pending, items, diagnostics=pending_diagnostics
+        )
+        if pending_changed:
+            _save_pending_webhooks(pending)
+            _invalidate_open_orders_cache()
+            _schedule_dropbox_upload_state_backup()
+    else:
+        pending_diagnostics["input_records"] = 0
+        pending_diagnostics["active_records"] = 0
 
-            for session in sessions:
-                if not bool(session.get("running")):
-                    continue
+    live_broker_positions = sum(
+        1
+        for row in live_broker_items
+        if str(row.get("broker") or "").strip().lower() not in {"webhook", "bounce"}
+        and str(row.get("type") or "").strip().lower() in {"position", "trade"}
+    )
+    live_broker_orders = sum(
+        1
+        for row in live_broker_items
+        if str(row.get("broker") or "").strip().lower() not in {"webhook", "bounce"}
+        and str(row.get("type") or "").strip().lower() == "order"
+    )
+    pruned_pending = sum(
+        int(value)
+        for key, value in pending_diagnostics.items()
+        if key.endswith("_pruned")
+    )
+    source_counts = {
+        "live_broker_positions": live_broker_positions,
+        "live_broker_orders": live_broker_orders,
+        "active_pending_webhooks": len(pending),
+        "duplicates_or_stale_pending_pruned": pruned_pending,
+        "pending_reconciliation": dict(pending_diagnostics),
+        "errors": len(errors),
+        "warnings": len(warnings),
+    }
+    BYBIT_LOGGER.info(
+        "OPEN_ORDERS source_counts live_positions=%s live_orders=%s active_pending=%s "
+        "pruned_pending=%s diagnostics=%s errors=%s warnings=%s",
+        live_broker_positions,
+        live_broker_orders,
+        len(pending),
+        pruned_pending,
+        pending_diagnostics,
+        len(errors),
+        len(warnings),
+    )
 
-                broker = str(session.get("broker") or "").strip().lower()
-                market = str(session.get("market") or "").strip().lower()
-                if broker not in {"bybit", "oanda"}:
-                    broker = "oanda" if market == "fx" else "bybit"
+    try:
+        bounce_script_running = script_manager.get("bybit_trigger_bounce_trader").is_running
+    except Exception:
+        bounce_script_running = False
 
-                instrument = str(session.get("instrument") or "").strip().upper()
-                side = str(session.get("side") or "").strip().title()
-                account = str(session.get("account") or "").strip().lower() or "demo"
-                category = str(session.get("category") or "").strip().lower() or ("forex" if broker == "oanda" else "linear")
-                order_link_id = str(session.get("order_link_id") or "").strip()
+    if bounce_script_running and coverage_complete:
+        sessions = _load_bounce_traders()
+        changed = False
+        now_dt = datetime.now(timezone.utc)
 
-                seen_order = bool(session.get("seen_order"))
-                if broker == "bybit":
-                    if order_link_id:
-                        if any(
-                            str(row.get("order_link_id") or "").strip() == order_link_id
-                            and str(row.get("account") or "").strip().lower() == account
-                            and str(row.get("category") or "").strip().lower() == category
-                            for row in bybit_orders
-                        ) and not seen_order:
-                            session["seen_order"] = True
-                            changed = True
-                            seen_order = True
+        bybit_orders = [
+            row
+            for row in items
+            if str(row.get("broker", "")).strip().lower() == "bybit"
+            and str(row.get("type", "")).strip().lower() == "order"
+        ]
+        bybit_positions = [
+            row
+            for row in items
+            if str(row.get("broker", "")).strip().lower() == "bybit"
+            and str(row.get("type", "")).strip().lower() == "position"
+        ]
+        oanda_orders = [
+            row
+            for row in items
+            if str(row.get("broker", "")).strip().lower() == "oanda"
+            and str(row.get("type", "")).strip().lower() == "order"
+        ]
+        oanda_positions = [
+            row
+            for row in items
+            if str(row.get("broker", "")).strip().lower() == "oanda"
+            and str(row.get("type", "")).strip().lower() in {"position", "trade"}
+        ]
 
-                    has_position = any(
-                        str(row.get("instrument") or "").strip().upper() == instrument
-                        and str(row.get("side") or "").strip().title() == side
+        for session in sessions:
+            if not bool(session.get("running")):
+                continue
+
+            broker = str(session.get("broker") or "").strip().lower()
+            market = str(session.get("market") or "").strip().lower()
+            if broker not in {"bybit", "oanda"}:
+                broker = "oanda" if market == "fx" else "bybit"
+
+            instrument = str(session.get("instrument") or "").strip().upper()
+            side = str(session.get("side") or "").strip().title()
+            account = str(session.get("account") or "").strip().lower() or "demo"
+            category = str(session.get("category") or "").strip().lower() or ("forex" if broker == "oanda" else "linear")
+            order_link_id = str(session.get("order_link_id") or "").strip()
+
+            seen_order = bool(session.get("seen_order"))
+            if broker == "bybit":
+                if order_link_id:
+                    if any(
+                        str(row.get("order_link_id") or "").strip() == order_link_id
                         and str(row.get("account") or "").strip().lower() == account
                         and str(row.get("category") or "").strip().lower() == category
-                        for row in bybit_positions
-                    )
-                else:
-                    if any(
-                        str(row.get("instrument") or "").strip().upper() == instrument
-                        and str(row.get("account") or "").strip().lower() == account
-                        for row in oanda_orders
+                        for row in bybit_orders
                     ) and not seen_order:
                         session["seen_order"] = True
                         changed = True
                         seen_order = True
 
-                    target_side = "Long" if side == "Buy" else "Short"
-                    has_position = any(
-                        str(row.get("instrument") or "").strip().upper() == instrument
-                        and str(row.get("account") or "").strip().lower() == account
-                        and str(row.get("side") or "").strip().title() == target_side
-                        for row in oanda_positions
-                    )
+                has_position = any(
+                    str(row.get("instrument") or "").strip().upper() == instrument
+                    and str(row.get("side") or "").strip().title() == side
+                    and str(row.get("account") or "").strip().lower() == account
+                    and str(row.get("category") or "").strip().lower() == category
+                    for row in bybit_positions
+                )
+            else:
+                if any(
+                    str(row.get("instrument") or "").strip().upper() == instrument
+                    and str(row.get("account") or "").strip().lower() == account
+                    for row in oanda_orders
+                ) and not seen_order:
+                    session["seen_order"] = True
+                    changed = True
+                    seen_order = True
 
-                started_at = _to_dt_utc(session.get("started_at"))
-                age_seconds = (now_dt - started_at).total_seconds() if started_at else 0.0
+                target_side = "Long" if side == "Buy" else "Short"
+                has_position = any(
+                    str(row.get("instrument") or "").strip().upper() == instrument
+                    and str(row.get("account") or "").strip().lower() == account
+                    and str(row.get("side") or "").strip().title() == target_side
+                    for row in oanda_positions
+                )
 
-                if has_position and (seen_order or age_seconds >= 30):
-                    if bool(session.get("show_in_open_orders", True)):
-                        session["show_in_open_orders"] = False
-                        session["status"] = "filled"
-                        session["updated_at"] = now_dt.isoformat()
-                        changed = True
-                    continue
+            started_at = _to_dt_utc(session.get("started_at"))
+            age_seconds = (now_dt - started_at).total_seconds() if started_at else 0.0
 
-                if not bool(session.get("show_in_open_orders", True)):
-                    continue
-
-                # Bounce sessions are reconciled internally; this endpoint only exposes broker rows.
+            if has_position and (seen_order or age_seconds >= 30):
+                if bool(session.get("show_in_open_orders", True)):
+                    session["show_in_open_orders"] = False
+                    session["status"] = "filled"
+                    session["updated_at"] = now_dt.isoformat()
+                    changed = True
                 continue
 
-            if changed:
-                _save_bounce_traders(sessions)
-
-        def _same_price(a: object, b: object, tol: float = 1e-9) -> bool:
-            try:
-                return abs(float(a) - float(b)) <= tol
-            except (TypeError, ValueError):
-                return False
-
-        def _is_child_exit_order(parent: Dict[str, object], child: Dict[str, object]) -> bool:
-            if str(parent.get("broker", "")).strip().lower() != "bybit":
-                return False
-            if str(parent.get("type", "")).strip().lower() != "position":
-                return False
-            if str(child.get("type", "")).strip().lower() != "order":
-                return False
-            if str(child.get("broker", "")).strip().lower() != "bybit":
-                return False
-            if str(parent.get("account", "")).strip().lower() != str(child.get("account", "")).strip().lower():
-                return False
-            if str(parent.get("category", "")).strip().lower() != str(child.get("category", "")).strip().lower():
-                return False
-            if str(parent.get("instrument", "")).strip().upper() != str(child.get("instrument", "")).strip().upper():
-                return False
-
-            child_status = str(child.get("status", "")).strip().upper()
-            if child_status not in {"UNTRIGGERED", "OPEN", "NEW", "CREATED"}:
-                return False
-
-            parent_side = str(parent.get("side", "")).strip().lower()
-            child_side = str(child.get("side", "")).strip().lower()
-            if parent_side in {"buy", "long"} and child_side not in {"sell", "short"}:
-                return False
-            if parent_side in {"sell", "short"} and child_side not in {"buy", "long"}:
-                return False
-
-            child_price = child.get("current_price") or child.get("order_price")
-            return (
-                _same_price(child_price, parent.get("stop_loss"))
-                or _same_price(child_price, parent.get("take_profit"))
-            )
-
-        grouped: List[Dict[str, object]] = []
-        used_child_indices: Set[int] = set()
-
-        for _parent_idx, item in enumerate(items):
-            if str(item.get("type", "")).strip().lower() != "position":
+            if not bool(session.get("show_in_open_orders", True)):
                 continue
-            parent = dict(item)
-            parent["children"] = []
-            for child_idx, child in enumerate(items):
-                if child_idx in used_child_indices:
-                    continue
-                if _is_child_exit_order(parent, child):
-                    parent["children"].append(dict(child))
-                    used_child_indices.add(child_idx)
-            grouped.append(parent)
 
-        for idx, item in enumerate(items):
-            if idx in used_child_indices:
+            # Bounce sessions are reconciled internally; this endpoint only exposes broker rows.
+            continue
+
+        if changed:
+            _save_bounce_traders(sessions)
+
+    def _same_price(a: object, b: object, tol: float = 1e-9) -> bool:
+        try:
+            return abs(float(a) - float(b)) <= tol
+        except (TypeError, ValueError):
+            return False
+
+    def _is_child_exit_order(parent: Dict[str, object], child: Dict[str, object]) -> bool:
+        if str(parent.get("broker", "")).strip().lower() != "bybit":
+            return False
+        if str(parent.get("type", "")).strip().lower() != "position":
+            return False
+        if str(child.get("type", "")).strip().lower() != "order":
+            return False
+        if str(child.get("broker", "")).strip().lower() != "bybit":
+            return False
+        if str(parent.get("account", "")).strip().lower() != str(child.get("account", "")).strip().lower():
+            return False
+        if str(parent.get("category", "")).strip().lower() != str(child.get("category", "")).strip().lower():
+            return False
+        if str(parent.get("instrument", "")).strip().upper() != str(child.get("instrument", "")).strip().upper():
+            return False
+
+        child_status = str(child.get("status", "")).strip().upper()
+        if child_status not in {"UNTRIGGERED", "OPEN", "NEW", "CREATED"}:
+            return False
+
+        parent_side = str(parent.get("side", "")).strip().lower()
+        child_side = str(child.get("side", "")).strip().lower()
+        if parent_side in {"buy", "long"} and child_side not in {"sell", "short"}:
+            return False
+        if parent_side in {"sell", "short"} and child_side not in {"buy", "long"}:
+            return False
+
+        child_price = child.get("current_price") or child.get("order_price")
+        return (
+            _same_price(child_price, parent.get("stop_loss"))
+            or _same_price(child_price, parent.get("take_profit"))
+        )
+
+    grouped: List[Dict[str, object]] = []
+    used_child_indices: Set[int] = set()
+
+    for _parent_idx, item in enumerate(items):
+        if str(item.get("type", "")).strip().lower() != "position":
+            continue
+        parent = dict(item)
+        parent["children"] = []
+        for child_idx, child in enumerate(items):
+            if child_idx in used_child_indices:
                 continue
-            if str(item.get("type", "")).strip().lower() == "position":
-                continue
-            row = dict(item)
-            row["children"] = []
-            grouped.append(row)
+            if _is_child_exit_order(parent, child):
+                parent["children"].append(dict(child))
+                used_child_indices.add(child_idx)
+        grouped.append(parent)
 
-        updated_at = _utc_now_iso()
-        payload: Dict[str, object] = {
-            "items": grouped,
-            "errors": errors,
-            "warnings": warnings,
-            "error_count": len(errors),
-            "warning_count": len(warnings),
-            "source_counts": source_counts,
-            "stale": bool(errors),
-            "updated_at": updated_at,
-            "last_success_at": _OPEN_ORDERS_CACHE.get("last_success_at"),
-            "version": collection_version,
-        }
+    for idx, item in enumerate(items):
+        if idx in used_child_indices:
+            continue
+        if str(item.get("type", "")).strip().lower() == "position":
+            continue
+        row = dict(item)
+        row["children"] = []
+        grouped.append(row)
 
-        version_unchanged = int(_OPEN_ORDERS_CACHE.get("version") or 0) == collection_version
-        payload["refresh_superseded"] = not version_unchanged
-        if version_unchanged:
-            _OPEN_ORDERS_CACHE["payload"] = dict(payload)
-            _OPEN_ORDERS_CACHE["expires_at"] = time.time() + _OPEN_ORDERS_CACHE_TTL_SECONDS
-        if not errors and version_unchanged:
-            _OPEN_ORDERS_CACHE["last_success_at"] = updated_at
-            payload["last_success_at"] = updated_at
+    updated_at = _utc_now_iso()
+    payload: Dict[str, object] = {
+        "items": grouped,
+        "errors": errors,
+        "warnings": warnings,
+        "error_count": len(errors),
+        "warning_count": len(warnings),
+        "source_counts": source_counts,
+        "stale": bool(errors),
+        "updated_at": updated_at,
+        "last_success_at": _OPEN_ORDERS_CACHE.get("last_success_at"),
+        "version": collection_version,
+    }
 
-        return JSONResponse(payload)
+    version_unchanged = int(_OPEN_ORDERS_CACHE.get("version") or 0) == collection_version
+    payload["refresh_superseded"] = not version_unchanged
+    if version_unchanged:
+        _OPEN_ORDERS_CACHE["payload"] = dict(payload)
+        _OPEN_ORDERS_CACHE["expires_at"] = time.time() + _OPEN_ORDERS_CACHE_TTL_SECONDS
+    if not errors and version_unchanged:
+        _OPEN_ORDERS_CACHE["last_success_at"] = updated_at
+        payload["last_success_at"] = updated_at
+
+    return JSONResponse(payload)
 
 
 @app.get("/api/recent-trades")
