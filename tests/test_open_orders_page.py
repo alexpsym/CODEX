@@ -2244,7 +2244,7 @@ def test_open_orders_collection_version_is_not_advanced_without_rendered_state(
         master_service._OPEN_ORDERS_CACHE.update(cache_snapshot)
 
 
-def test_open_orders_browser_handles_refresh_races_visibility_and_bounded_submit_backoff() -> None:
+def test_open_orders_browser_handles_refresh_races_and_pending_submit() -> None:
     node = shutil.which("node")
     assert node, "node is required for Open Orders browser-state regression"
     js_path = ROOT / "render" / "static" / "open_orders.js"
@@ -2284,8 +2284,14 @@ global.localStorage={setItem(){}};
 global.BroadcastChannel=undefined;
 global.setInterval=()=>1; global.clearInterval=()=>{};
 const realSetTimeout=global.setTimeout;
-global.setTimeout=(fn,delay)=>{if(delay>=32000)return realSetTimeout(fn,delay);queueMicrotask(fn);return 1;};
-const makeResponse=(payload)=>({ok:true,status:200,statusText:'OK',text:async()=>JSON.stringify(payload)});
+global.setTimeout=(fn,delay)=>{if(delay>=15000)return realSetTimeout(fn,delay);queueMicrotask(fn);return 1;};
+const makeResponse=(payload)=>{
+  const pending=visibilityMode==='missing';
+  const normalized={core_complete:!pending,pending,empty_confirmed:!pending&&payload.items?.length===0,
+    progress_revision:payload.version,...payload};
+  if(Array.isArray(payload.items))normalized.items=payload.items.map(row=>({...row,source_stale:false,collection_version:payload.version}));
+  return {ok:true,status:200,statusText:'OK',text:async()=>JSON.stringify(normalized)};
+};
 let serverVersion=1;
 let openItems=[{broker:'Bybit',account:'demo',category:'linear',instrument:'BTCUSDT',type:'Order',id:'initial',status:'New'}];
 let openCalls=0; let versionCalls=0; let resolveInitial=null;
@@ -2369,229 +2375,340 @@ const flush=async(count=40)=>{for(let i=0;i<count;i+=1)await new Promise((resolv
     assert state["rapid"]["state"]["pendingVisibilityChecks"] == 0
     assert sorted(state["rapid"]["ids"]) == ["ctx-a", "ctx-b"]
     assert state["rapid"]["visibilityReads"] >= 2
-    assert state["bounded"]["state"]["pendingVisibilityChecks"] == 0
-    assert "visibility was not confirmed" in state["bounded"]["badge"]
+    assert state["bounded"]["state"]["pendingVisibilityChecks"] == 1
+    assert "Loading broker data" in state["bounded"]["badge"]
 
 
 
-def test_open_orders_refresh_deadline_preserves_completed_sources_and_releases_collection(monkeypatch: pytest.MonkeyPatch) -> None:
+def _incremental_open_orders_fixture(monkeypatch, handler):
     service = master_service
-    monkeypatch.setattr(service, "_OPEN_ORDERS_CACHE", {"payload": None, "expires_at": 0, "version": 70})
+    monkeypatch.setattr(service, "APP_PROFILE", "local")
+    monkeypatch.setattr(service, "_OPEN_ORDERS_CACHE", {"payload": None, "version": 100, "expires_at": 0})
     monkeypatch.setattr(service, "_OPEN_ORDERS_LAST_GOOD_ITEMS", {})
-    monkeypatch.setattr(service, "_OPEN_ORDERS_INFLIGHT", {})
-    monkeypatch.setattr(service, "_OPEN_ORDERS_ACCOUNT_SECONDS", .08)
-    monkeypatch.setattr(service, "_OPEN_ORDERS_COLLECTION_SECONDS", .15)
-    monkeypatch.setattr(service, "_OPEN_ORDERS_SOURCE_SECONDS", .02)
-    actual_discovery = service._get_cached_oanda_accounts
-    actual_oanda = service._collect_oanda_open_items
-    _stub_open_orders_sources(monkeypatch)
-    monkeypatch.setattr(service, "_collect_oanda_open_items", actual_oanda)
+    monkeypatch.setattr(service, "_OPEN_ORDERS_SERVICES", {})
+    monkeypatch.setattr(service, "_OANDA_ACCOUNTS_CACHE", {})
+    monkeypatch.setattr(service, "_OANDA_ACCOUNTS_INFLIGHT", {})
+    monkeypatch.setattr(service, "_BYBIT_TIME_OFFSET_CACHE", {})
+    monkeypatch.setattr(service, "_BYBIT_OPEN_FUNDING_CACHE", {})
+    monkeypatch.setattr(service, "_OPEN_ORDERS_SOURCE_REFRESH_SECONDS", 1000.0)
+    clock = [0.0]
+    monkeypatch.setattr(service, "_open_orders_now", lambda: clock[0])
     monkeypatch.setattr(service, "_lookup_trade_context_for_open_item", lambda _row: None)
+    monkeypatch.setattr(service, "_record_outbound_traffic", lambda *args, **kwargs: None)
+    monkeypatch.setattr(service, "_get_oanda_config", lambda account: {
+        "account_id": "CFG-" + account, "token": "TOKEN-" + account, "base_url": "https://oanda.test"})
+    monkeypatch.setattr(service, "resolve_bybit_credentials_for", lambda account:
+        (account, "KEY-" + account, "SECRET-" + account, "https://bybit.test", "fixture"))
     monkeypatch.setattr(service, "_load_pending_webhooks", lambda: [{"id": "pending", "status": "WAITING"}])
     reconciled = []
-    monkeypatch.setattr(service, "_clean_pending_webhooks_for_open_items", lambda *args, **kwargs: reconciled.append(args) or ([], False))
-    cancelled = []
-    reads = []
-    async def oanda_read(*, endpoint, account_id, mode, **kwargs):
-        reads.append((mode, endpoint))
-        if endpoint.endswith("openTrades"):
-            try:
-                await asyncio.Event().wait()
-            finally:
-                cancelled.append(mode)
-        return {"orders": [{"id": "healthy-" + mode, "instrument": "EUR_USD", "units": "1", "type": "LIMIT", "state": "PENDING"}]}
-    monkeypatch.setattr(service, "_fetch_oanda_json", oanda_read)
-    async def scenario():
-        started = service.time.monotonic()
-        responses = await asyncio.gather(*(service.list_open_orders(force=True) for _ in range(5)))
-        assert service.time.monotonic() - started < .3
-        payloads = [json.loads(response.body) for response in responses]
-        assert all(payload == payloads[0] for payload in payloads)
-        payload = payloads[0]
-        assert {"healthy-live", "healthy-demo", "bybit-live-order"} <= {row["id"] for row in payload["items"]}
-        assert payload["stale"] and payload["errors"]
-        assert len(reads) == 4 and sorted(cancelled) == ["demo", "live"]
-        assert not reconciled and not service._OPEN_ORDERS_INFLIGHT
-        assert not service._OPEN_ORDERS_CACHE_LOCK.locked()
+    monkeypatch.setattr(service, "_clean_pending_webhooks_for_open_items",
+                        lambda pending, items, **kwargs: reconciled.append(list(items)) or (pending, False))
+    monkeypatch.setattr(service, "_load_bounce_traders", lambda: [])
+    monkeypatch.setattr(service.script_manager, "get", lambda _name: type("Script", (), {"is_running": False})())
+    real_client = service.httpx.AsyncClient
+    clients, requests = [], []
+    opened = int(service.time.time() * 1000) - 60000
 
-        # Open Orders discovery cancellation cannot leave a shielded task behind.
-        monkeypatch.setattr(service, "_OANDA_ACCOUNTS_CACHE", {})
-        monkeypatch.setattr(service, "_OANDA_ACCOUNTS_INFLIGHT", {})
-        discovery_stopped = asyncio.Event()
-        async def stalled_discovery(**kwargs):
-            try:
-                await asyncio.Event().wait()
-            finally:
-                discovery_stopped.set()
-        monkeypatch.setattr(service, "_list_oanda_accounts", stalled_discovery)
-        token = service._OPEN_ORDERS_READ_SCOPE.set(True)
-        try:
-            with pytest.raises(TimeoutError, match="deadline exceeded"):
-                await service._open_orders_budget(actual_discovery(base_url="https://fixture.oanda.test",
-                                                api_key="fixture-token"), .01, "OANDA discovery")
-        finally:
-            service._OPEN_ORDERS_READ_SCOPE.reset(token)
-        assert discovery_stopped.is_set() and not service._OANDA_ACCOUNTS_INFLIGHT
+    def client_factory(**kwargs):
+        index = len(clients)
+        async def transport(request):
+            account = str(request.headers.get("X-BAPI-API-KEY", request.headers.get("Authorization", ""))).split("-")[-1]
+            record = (index, account, request.url.path, dict(request.url.params))
+            requests.append(record)
+            override = await handler(request, account, opened)
+            if override is not None:
+                return override
+            path, params = request.url.path, request.url.params
+            if path == "/v3/accounts":
+                return service.httpx.Response(200, json={"accounts": [{"id": "CFG-" + account, "tags": ["MT4"]}]})
+            if path.endswith("openTrades"):
+                return service.httpx.Response(200, json={"trades": []})
+            if path.endswith("pendingOrders"):
+                return service.httpx.Response(200, json={"orders": [{"id": "oanda-" + account,
+                    "instrument": "EUR_USD", "units": "1", "type": "LIMIT", "state": "PENDING"}]})
+            if path == "/v5/market/time":
+                return service.httpx.Response(200, json={"retCode": 0, "result": {"timeSecond": str(service.time.time())}})
+            if path == "/v5/user/query-api":
+                return service.httpx.Response(200, json={"retCode": 0, "result": {"permissions": {}}})
+            position = {"symbol": "BTCUSDT", "size": "1", "side": "Buy", "positionIdx": 0,
+                        "createdTime": str(opened), "settleCoin": "USDT"}
+            rows = []
+            if path == "/v5/position/list" and (params.get("symbol") or params.get("settleCoin") == "USDT"):
+                rows = [position]
+            if path == "/v5/order/realtime" and params.get("settleCoin") == "USDT":
+                rows = [{"symbol": "BTCUSDT", "orderId": "bybit-" + account, "orderStatus": "New", "qty": "1"}]
+            if path == "/v5/execution/list":
+                rows = [{"symbol": "BTCUSDT", "positionIdx": 0, "side": "Buy", "execQty": "1",
+                         "execTime": str(opened), "execId": "opening"}]
+            if path == "/v5/account/transaction-log":
+                rows = [{"transactionId": "received", "symbol": "BTCUSDT", "currency": "USDT", "funding": ".30", "transactionTime": str(opened + 1000)},
+                        {"transactionId": "paid", "symbol": "BTCUSDT", "currency": "USDT", "funding": "-.10", "transactionTime": str(opened + 2000)}]
+            return service.httpx.Response(200, json={"retCode": 0, "result": {"list": rows, "nextPageCursor": ""}})
+        client = real_client(transport=service.httpx.MockTransport(transport), trust_env=False, **kwargs)
+        clients.append(client)
+        return client
+    monkeypatch.setattr(service.httpx, "AsyncClient", client_factory)
+    return clock, clients, requests, reconciled
 
-        # An invalidated older collection may return, but cannot overwrite newer cache/last-good.
-        gate = asyncio.Event()
-        began = asyncio.Event()
-        async def bybit_read(*, account_context, **kwargs):
-            version = service._OPEN_ORDERS_CACHE["version"]
-            if version == 71:
-                began.set()
-                await gate.wait()
-            return {"items": [{"broker": "Bybit", "account": account_context, "category": "linear",
-                               "type": "Order", "instrument": "BTCUSDT", "id": str(version)}], "errors": []}
-        monkeypatch.setattr(service, "_collect_bybit_open_items", bybit_read)
-        service._OPEN_ORDERS_CACHE["version"] = 71
-        old = asyncio.create_task(service.list_open_orders(force=True))
-        await asyncio.wait_for(began.wait(), .3)
-        service._invalidate_open_orders_cache()
-        new = json.loads((await service.list_open_orders(force=True)).body)
-        gate.set()
-        previous = json.loads((await old).body)
-        assert new["version"] == 72 and not new["refresh_superseded"]
-        assert previous["version"] == 71 and previous["refresh_superseded"]
-        assert service._OPEN_ORDERS_CACHE["payload"]["version"] == 72
-        assert service._OPEN_ORDERS_LAST_GOOD_ITEMS["bybit:live"][0]["id"] == "72"
-        assert not service._OPEN_ORDERS_INFLIGHT and not reconciled
 
-        # The aggregate deadline also retains already completed broker/account rows.
-        service._OPEN_ORDERS_CACHE["version"] = 73
-        monkeypatch.setattr(service, "_OPEN_ORDERS_COLLECTION_SECONDS", .01)
-        aggregate = json.loads((await service.list_open_orders(force=True)).body)
-        assert aggregate["stale"] and any(row["id"] == "73" for row in aggregate["items"])
-        assert service._OPEN_ORDERS_CACHE["payload"]["version"] == 72
-        assert not service._OPEN_ORDERS_INFLIGHT
-        monkeypatch.setattr(service, "_OPEN_ORDERS_COLLECTION_SECONDS", .15)
-
-        # Last waiter cancellation owns and awaits collection cancellation.
-        stopped = asyncio.Event()
-        async def stalled_collection(_version):
-            try:
-                await asyncio.Event().wait()
-            finally:
-                stopped.set()
-        monkeypatch.setattr(service, "_collect_open_orders", stalled_collection)
-        task = asyncio.create_task(service.list_open_orders(force=True))
+async def _open_orders_eventually(predicate):
+    for _ in range(400):
+        if predicate():
+            return
         await asyncio.sleep(.005)
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-        assert stopped.is_set() and not service._OPEN_ORDERS_INFLIGHT
-
-        # Whole-collection timeout also cancels/awaits work and leaves cache unmodified.
-        stopped.clear()
-        monkeypatch.setattr(service, "_OPEN_ORDERS_COLLECTION_SECONDS", .02)
-        fallback = json.loads((await service.list_open_orders(force=True)).body)
-        assert stopped.is_set() and fallback["stale"]
-        assert all(row["source_stale"] for row in fallback["items"])
-        assert service._OPEN_ORDERS_CACHE["payload"]["version"] == 72
-        assert not service._OPEN_ORDERS_INFLIGHT
-    asyncio.run(asyncio.wait_for(scenario(), 2.0))
+    raise AssertionError("Controlled Open Orders outcome did not publish")
 
 
-def test_bybit_open_items_bounds_confirmation_and_funding_without_hiding_orders(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_open_orders_incremental_collection_accepts_slow_valid_sources_without_restart(monkeypatch: pytest.MonkeyPatch) -> None:
     service = master_service
-    monkeypatch.setattr(service, "_OPEN_ORDERS_SOURCE_SECONDS", .025)
-    monkeypatch.setattr(service, "_OPEN_ORDERS_CATEGORY_SECONDS", .15)
-    monkeypatch.setattr(service, "_OPEN_ORDERS_CONFIRM_SECONDS", .02)
-    monkeypatch.setattr(service, "_OPEN_ORDERS_FUNDING_SECONDS", .02)
-    monkeypatch.setattr(service, "_BYBIT_OPEN_FUNDING_CACHE", {})
-    monkeypatch.setattr(service, "_lookup_trade_context_for_open_item", lambda _row: None)
-    original_chunked = service._fetch_bybit_executions_chunked
-    events = []
-    async def signed_get(*, path, params, **kwargs):
-        events.append((path, dict(params)))
-        if path == "/v5/user/query-api":
-            return {"result": {}}
-        if path == "/v5/position/list":
-            if params.get("category") == "inverse":
-                try:
-                    await asyncio.Event().wait()
-                finally:
-                    events.append(("category-cancelled", {}))
-            if params.get("symbol"):
-                try:
-                    await asyncio.Event().wait()
-                finally:
-                    events.append(("confirmation-cancelled", {}))
-            if params.get("settleCoin") == "USDT":
-                return {"result": {"list": [{"symbol": "BTCUSDT", "size": "1", "side": "Buy",
-                          "positionIdx": 0, "createdTime": "1000", "settleCoin": "USDT"}]}}
-            if params.get("settleCoin") == "USDC":
-                raise RuntimeError("api_key=KEY api_secret=SECRET settlement unavailable")
-        if path == "/v5/order/realtime" and params.get("settleCoin") == "USDT":
-            return {"result": {"list": [{"symbol": "BTCUSDT", "orderId": "healthy-order", "orderStatus": "New", "qty": "1"}]}}
-        return {"result": {"list": []}}
-    monkeypatch.setattr(service, "_bybit_signed_get", signed_get)
-    async def stalled_history(**kwargs):
-        try:
-            await asyncio.Event().wait()
-        finally:
-            events.append(("funding-cancelled", {}))
-    monkeypatch.setattr(service, "_fetch_bybit_executions_chunked", stalled_history)
     async def scenario():
-        started = service.time.monotonic()
-        result = await service._collect_bybit_open_items(base_url="https://api-demo.bybit.test",
-                         api_key="KEY", api_secret="SECRET", account_context="demo")
-        assert service.time.monotonic() - started < .3
-        assert events[0][0] == "/v5/user/query-api"
-        assert {(row["type"], row["instrument"]) for row in result["items"]} == {("Position", "BTCUSDT"), ("Order", "BTCUSDT")}
-        position = next(row for row in result["items"] if row["type"] == "Position")
-        assert all(position[key] is None for key in ("funding_paid", "funding_received", "net_funding"))
-        assert ("confirmation-cancelled", {}) in events and ("funding-cancelled", {}) in events
-        assert ("category-cancelled", {}) in events
-        diagnostics = str(result["errors"] + result["warnings"])
-        assert "KEY" not in diagnostics and "SECRET" not in diagnostics
-        assert "deadline" in diagnostics and "/v5/position/list" in diagnostics and "/v5/account/transaction-log" in diagnostics
-        assert {params.get("category") for path, params in events if path == "/v5/order/realtime"} == {"linear", "inverse", "spot", "option"}
-
-        async def stalled_order_page(*, params, **kwargs):
-            if params.get("cursor"):
-                await asyncio.Event().wait()
-            return {"result": {"list": [{"orderId": "page-one", "symbol": "ETHUSDC"}], "nextPageCursor": "next"}}
-        monkeypatch.setattr(service, "_bybit_signed_get", stalled_order_page)
-        token = service._OPEN_ORDERS_READ_SCOPE.set(True)
+        auth, position, funding, discovery = (asyncio.Event() for _ in range(4))
+        phase = [1]
+        obsolete_funding = asyncio.Event()
+        obsolete_started, obsolete_cancelled = asyncio.Event(), asyncio.Event()
+        async def handler(request, account, opened):
+            path, params = request.url.path, request.url.params
+            if phase[0] == 1:
+                if path == "/v5/user/query-api" and account == "demo":
+                    await auth.wait()
+                if path == "/v5/position/list" and params.get("settleCoin") == "USDC" and account == "live":
+                    await position.wait()
+                if path == "/v5/account/transaction-log" and account == "live":
+                    await funding.wait()
+                if path == "/v3/accounts" and account == "live":
+                    await discovery.wait()
+            elif phase[0] == 2 and path == "/v5/account/transaction-log" and account == "live":
+                obsolete_started.set()
+                try:
+                    await obsolete_funding.wait()
+                finally:
+                    obsolete_cancelled.set()
+            return None
+        clock, clients, requests, reconciled = _incremental_open_orders_fixture(monkeypatch, handler)
+        duplicate_discovery = []
         try:
-            rows, errors = await service._fetch_bybit_orders_for_category(base_url="https://api-demo.bybit.test",
-                           api_key="KEY", api_secret="SECRET", category="option", account_context="demo")
+            initial = json.loads((await service.list_open_orders(force=True)).body)
+            assert initial["pending"] and not initial["empty_confirmed"] and not initial["items"]
+            owner = service._OPEN_ORDERS_SERVICES[asyncio.get_running_loop()]
+            job = owner.job
+            await _open_orders_eventually(lambda: job.payload and any(row.get("id") == "bybit-live" for row in job.payload["items"]))
+            healthy = job.payload
+            assert {"oanda-live", "oanda-demo", "bybit-live"} <= {row.get("id") for row in healthy["items"]}
+            assert not any(account == "demo" and path in {"/v5/position/list", "/v5/order/realtime"}
+                           for _, account, path, _ in requests)
+            assert not reconciled
+            # Duplicate cold discovery waits share the existing owned underlying request.
+            async def same_discovery():
+                token = service._OPEN_ORDERS_JOB_SCOPE.set(job)
+                try:
+                    return await service._get_cached_oanda_accounts(base_url="https://oanda.test", api_key="TOKEN-live")
+                finally:
+                    service._OPEN_ORDERS_JOB_SCOPE.reset(token)
+            duplicate_discovery = [asyncio.create_task(same_discovery()) for _ in range(2)]
+            await asyncio.sleep(.01)
+            assert sum(path == "/v3/accounts" and account == "live" for _, account, path, _ in requests) == 1
+            before = len(requests)
+            # Cross the former 4/26/28/32/60-second thresholds using the injected source clock.
+            clock[0] = 65
+            snapshots = await asyncio.gather(*(service.list_open_orders(force=True) for _ in range(12)))
+            assert all(json.loads(response.body)["pending"] for response in snapshots)
+            assert len(requests) == before and owner.job is job and not job.obsolete
+            assert not job.payload["errors"] and not job.payload["empty_confirmed"]
+            disconnected = asyncio.Event()
+            async def consumer():
+                await service.list_open_orders(force=True)
+                disconnected.set()
+                await asyncio.Event().wait()
+            request = asyncio.create_task(consumer())
+            await disconnected.wait()
+            request.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await request
+            assert owner.job is job and any(not task.done() for task in job.tasks)
+
+            auth.set(); position.set(); discovery.set()
+            await asyncio.gather(*duplicate_discovery)
+            duplicate_discovery.clear()
+            await _open_orders_eventually(lambda: job.payload["core_complete"])
+            assert job.payload["pending"] and not job.payload["empty_confirmed"] and not reconciled
+            live_position = next(row for row in job.payload["items"] if row.get("broker") == "Bybit"
+                                 and row.get("account") == "live" and row.get("type") == "Position")
+            assert all(live_position.get(key) is None for key in ("funding_paid", "funding_received", "net_funding"))
+            clock[0] = 130
+            await service.list_open_orders(force=True)
+            assert job.payload["pending"]
+            funding.set()
+            await _open_orders_eventually(lambda: not job.payload["pending"])
+            loaded = json.loads((await service.list_open_orders()).body)
+            assert loaded["core_complete"] and not loaded["errors"]
+            live_position = next(row for row in loaded["items"] if row.get("broker") == "Bybit"
+                                 and row.get("account") == "live" and row.get("type") == "Position")
+            assert live_position["funding_paid"] == pytest.approx(.10)
+            assert live_position["funding_received"] == pytest.approx(.30)
+            assert live_position["net_funding"] == pytest.approx(.20)
+            assert loaded["version"] == 100 and loaded["progress_revision"] > initial["progress_revision"]
+            assert job.metrics["client_setups"] == len(clients) == 4
+            assert job.metrics["time-sync_setups"] == 1
+            assert job.metrics["discovery_setups"] == 2
+            assert len(requests) > len(clients) * 3
+            assert all(row.get("account_label_suffix") == "MT4" for row in loaded["items"] if row["broker"] == "OANDA")
+            first_clients = list(clients)
+
+            # Invalidation owns cancellation/awaiting and cannot let late funding publish.
+            phase[0] = 2
+            service._BYBIT_OPEN_FUNDING_CACHE.clear()
+            service._invalidate_open_orders_cache()
+            assert not job.authoritative
+            next_generation = json.loads((await service.list_open_orders()).body)
+            assert any(row["source_stale"] for row in next_generation["items"])
+            assert next_generation["warnings"] and not next_generation["core_complete"]
+            await asyncio.wait_for(obsolete_started.wait(), 2)
+            old = owner.job
+            assert old is not job and all(client.is_closed for client in first_clients)
+            assert old.payload["pending"] and not old.payload["empty_confirmed"]
+            phase[0] = 3
+            service._invalidate_open_orders_cache()
+            await service.list_open_orders()
+            current = owner.job
+            await _open_orders_eventually(lambda: current.payload["core_complete"] and not current.payload["pending"])
+            assert obsolete_cancelled.is_set() and not old.tasks and not old.clients and not old.auxiliary
+            obsolete_funding.set()
+            await asyncio.sleep(0)
+            assert service._OPEN_ORDERS_CACHE["payload"]["version"] == 102
+            assert current.payload["version"] == 102 and not current.payload["refresh_superseded"]
+
+            # Shutdown cancels genuinely pending service work and closes all pooled clients.
+            phase[0] = 2
+            obsolete_funding.clear()
+            obsolete_started.clear()
+            service._BYBIT_OPEN_FUNDING_CACHE.clear()
+            service._invalidate_open_orders_cache()
+            await service.list_open_orders()
+            await asyncio.wait_for(obsolete_started.wait(), 2)
+            stopping = owner.job
+            await service._shutdown_open_orders_jobs()
+            assert not stopping.tasks and not stopping.auxiliary and not stopping.clients
+            assert not service._OPEN_ORDERS_SERVICES and all(client.is_closed for client in clients)
         finally:
-            service._OPEN_ORDERS_READ_SCOPE.reset(token)
-        assert [row["orderId"] for row in rows] == ["page-one"]
-        assert errors[0]["failure_kind"] == "timeout" and "coverage unknown" in errors[0]["message"]
-
-        # Cyclic transaction pagination must not cache or report truncated exact funding.
-        async def executions(**kwargs):
-            return [{"symbol": "BTCUSDT", "positionIdx": 0, "side": "Buy", "execQty": "1", "execTime": "1000"}]
-        pages = []
-        async def repeated_page(**kwargs):
-            pages.append(kwargs.get("cursor"))
-            return {"result": {"list": [{"transactionId": "one", "symbol": "BTCUSDT", "funding": "9",
-                                        "currency": "USDT", "transactionTime": "2000"}], "nextPageCursor": "same"}}
-        monkeypatch.setattr(service, "_fetch_bybit_executions_chunked", executions)
-        monkeypatch.setattr(service, "_fetch_bybit_transaction_log", repeated_page)
-        warnings = await service._enrich_bybit_open_position_funding([position], base_url="https://api-demo.bybit.test",
-                    api_key="KEY", api_secret="SECRET", account_context="demo")
-        assert len(pages) == 2 and "did not progress" in str(warnings)
-        assert position["net_funding"] is None and not service._BYBIT_OPEN_FUNDING_CACHE
-
-        # Execution cursor cycles also leave lifecycle/funding unknown.
-        monkeypatch.setattr(service, "_fetch_bybit_executions_chunked", original_chunked)
-        async def cyclic_execution(**kwargs):
-            return {"result": {"list": [], "nextPageCursor": "same"}}
-        monkeypatch.setattr(service, "_bybit_signed_get", cyclic_execution)
-        warnings = await service._enrich_bybit_open_position_funding([position], base_url="https://api-demo.bybit.test",
-                    api_key="KEY", api_secret="SECRET", account_context="demo")
-        assert "did not progress" in str(warnings) and position["net_funding"] is None
-    asyncio.run(asyncio.wait_for(scenario(), 2.0))
+            await service._shutdown_open_orders_jobs()
+            for task in duplicate_discovery:
+                task.cancel()
+            await asyncio.gather(*duplicate_discovery, return_exceptions=True)
+    asyncio.run(asyncio.wait_for(scenario(), 15))
 
 
+def test_open_orders_recovery_is_source_scoped_and_diagnostics_remain_stable(monkeypatch: pytest.MonkeyPatch) -> None:
+    service = master_service
+    async def scenario():
+        discovery, recovery = asyncio.Event(), asyncio.Event()
+        rate_limit = [True]
+        recovering = asyncio.Event()
+        async def handler(request, account, opened):
+            path, params = request.url.path, request.url.params
+            if path == "/v3/accounts":
+                await discovery.wait()
+            if path == "/v5/order/realtime" and account == "live" and params.get("category") == "inverse":
+                if rate_limit[0]:
+                    return service.httpx.Response(200, json={"retCode": 10006, "retMsg": "rate limit api_key=KEY-live api_secret=SECRET-live"})
+                recovering.set()
+                await recovery.wait()
+            if path == "/v5/order/realtime" and account == "demo" and params.get("category") == "option":
+                return service.httpx.Response(200, json={"retCode": 10005, "retMsg": "permission denied"})
+            return None
+        clock, clients, requests, reconciled = _incremental_open_orders_fixture(monkeypatch, handler)
+        failed_key = "Bybit/live/inverse/n/a/orders"
+        definitive_key = "Bybit/demo/option/n/a/orders"
+        def count(key):
+            account, category = ("live", "inverse") if key == failed_key else ("demo", "option")
+            return sum(mode == account and path == "/v5/order/realtime" and params.get("category") == category
+                       for _, mode, path, params in requests)
+        try:
+            await service.list_open_orders()
+            job = service._OPEN_ORDERS_SERVICES[asyncio.get_running_loop()].job
+            await _open_orders_eventually(lambda: job.sources[failed_key]["state"] == "failed" and job.sources[definitive_key]["state"] == "failed")
+            first_errors = json.loads(json.dumps(job.payload["errors"]))
+            assert {error["source_key"] for error in first_errors} == {failed_key, definitive_key}
+            assert "KEY-live" not in str(first_errors) and "SECRET-live" not in str(first_errors)
+            assert not job.payload["empty_confirmed"] and not job.payload["core_complete"] and not reconciled
+            await _open_orders_eventually(lambda: all(entry["state"] not in {"pending", "blocked"}
+                for entry in job.sources.values() if entry["meta"]["source_type"] != "account discovery"))
+            healthy_reads = {(index, mode, path, str(params)): requests.count((index, mode, path, params))
+                             for index, mode, path, params in requests
+                             if not (path == "/v5/order/realtime" and params.get("category") in {"inverse", "option"})}
+            before = len(requests)
+            for _ in range(12):
+                await service.list_open_orders()
+                await service.open_orders_version()
+            assert len(requests) == before and count(failed_key) == count(definitive_key) == 1
+            discovery.set()
+            await _open_orders_eventually(lambda: all(entry["state"] != "pending" for entry in job.sources.values()))
+            assert job.payload["errors"] == first_errors
+            assert any(row.get("id") == "bybit-live" for row in job.payload["items"])
 
-def test_open_orders_browser_aborts_hung_refresh_and_recovers_after_submit() -> None:
+            # Only transient failures get automatic, bounded, exponential recovery.
+            for due, expected in ((5, 2), (15, 3)):
+                clock[0] = due
+                await service.open_orders_version()
+                await _open_orders_eventually(lambda: count(failed_key) == expected and job.sources[failed_key]["state"] == "failed")
+                assert count(definitive_key) == 1
+            clock[0] = 100
+            for _ in range(10):
+                await service.list_open_orders()
+            assert count(failed_key) == 3 and count(definitive_key) == 1
+            assert len(job.payload["errors"]) == 2
+
+            rate_limit[0] = False
+            await service.list_open_orders(force=True)
+            await asyncio.wait_for(recovering.wait(), 2)
+            assert job.sources[failed_key]["state"] == "pending"
+            assert failed_key in {error["source_key"] for error in job.payload["errors"]}
+            assert not reconciled
+            recovery.set()
+            await _open_orders_eventually(lambda: job.sources[failed_key]["state"] == "complete" and job.sources[definitive_key]["state"] == "failed")
+            assert {error["source_key"] for error in job.payload["errors"]} == {definitive_key}
+            assert count(failed_key) == 4 and count(definitive_key) == 2
+            for index, mode, path, params in requests:
+                if (index, mode, path, str(params)) in healthy_reads:
+                    assert requests.count((index, mode, path, params)) == healthy_reads[(index, mode, path, str(params))]
+            assert not reconciled and not job.payload["empty_confirmed"]
+
+            # Pagination/lifecycle safeguards from the former cutoff regression still hold.
+            async def repeated_page(**kwargs):
+                return {"result": {"list": [{"orderId": "page-one", "symbol": "ETHUSDC"}], "nextPageCursor": "same"}}
+            monkeypatch.setattr(service, "_bybit_signed_get", repeated_page)
+            token = service._OPEN_ORDERS_READ_SCOPE.set(True)
+            try:
+                rows, errors = await service._fetch_bybit_orders_for_category(base_url="https://fixture.test",
+                    api_key="KEY", api_secret="SECRET", category="option", account_context="demo")
+            finally:
+                service._OPEN_ORDERS_READ_SCOPE.reset(token)
+            assert [row["orderId"] for row in rows] == ["page-one"] and "did not progress" in str(errors)
+            position = {"type": "Position", "account": "demo", "category": "linear", "instrument": "BTCUSDT",
+                        "position_idx": 0, "side": "Buy", "size": 1,
+                        "opened_at": int(service.time.time() * 1000) - 10000, "settlement_currency": "USDT"}
+            service._BYBIT_OPEN_FUNDING_CACHE.clear()
+            warnings = await service._enrich_bybit_open_position_funding([position], base_url="https://fixture.test",
+                       api_key="KEY", api_secret="SECRET", account_context="demo")
+            assert "did not progress" in str(warnings) and position["net_funding"] is None
+            assert not service._BYBIT_OPEN_FUNDING_CACHE
+            async def executions(**kwargs):
+                return [{"symbol": "BTCUSDT", "positionIdx": 0, "side": "Buy", "execQty": "1",
+                         "execTime": str(position["opened_at"])}]
+            monkeypatch.setattr(service, "_fetch_bybit_executions_chunked", executions)
+            monkeypatch.setattr(service, "_fetch_bybit_transaction_log", repeated_page)
+            warnings = await service._enrich_bybit_open_position_funding([position], base_url="https://fixture.test",
+                       api_key="KEY", api_secret="SECRET", account_context="demo")
+            assert "did not progress" in str(warnings) and position["net_funding"] is None
+            assert not service._BYBIT_OPEN_FUNDING_CACHE
+        finally:
+            await service._shutdown_open_orders_jobs()
+            assert all(client.is_closed for client in clients)
+    asyncio.run(asyncio.wait_for(scenario(), 15))
+
+
+def test_open_orders_browser_preserves_pending_data_and_confirms_matching_submit() -> None:
     node = shutil.which("node")
-    assert node, "node is required for Open Orders browser-state regression"
+    assert node, "node is required for the Open Orders browser regression"
     harness = r"""
 const fs=require('fs');
 class Element{
@@ -2602,71 +2719,89 @@ class Element{
   querySelector(){return null;}
 }
 const badge=new Element(),tbody=new Element(),table=new Element();table.querySelector=()=>tbody;
-const elements={'open-orders-status':badge,'open-orders-table':table,'refresh-btn':new Element(),
-'open-orders-empty':new Element(),'open-orders-errors':new Element(),'open-orders-warnings':new Element()};
-const handlers={};
-global.window={__OPEN_ORDERS_TESTING__:true,__OPEN_ORDERS_GET_TIMEOUT_MS__:25,
-__OPEN_ORDERS_VISIBILITY_TIMEOUT_MS__:90,addEventListener(){}};
-global.document={hidden:false,getElementById:id=>elements[id]||null,
-createElement:()=>new Element(),addEventListener:(key,fn)=>{handlers[key]=fn;}};
+const empty=new Element(),elements={'open-orders-status':badge,'open-orders-table':table,'refresh-btn':new Element(),
+'open-orders-empty':empty,'open-orders-errors':new Element(),'open-orders-warnings':new Element()};
+const handlers={};let virtual=0;
+global.performance={now:()=>virtual};
+global.window={__OPEN_ORDERS_TESTING__:true,__OPEN_ORDERS_GET_TIMEOUT_MS__:25,addEventListener(){}};
+global.document={hidden:false,getElementById:id=>elements[id]||null,createElement:()=>new Element(),
+addEventListener:(key,fn)=>{handlers[key]=fn;}};
 global.BroadcastChannel=undefined;global.localStorage={setItem(){}};
 global.setInterval=()=>1;global.clearInterval=()=>{};
 const timers=new Set(),nativeTimeout=setTimeout,nativeClear=clearTimeout;
 global.setTimeout=(fn,delay)=>{const timer=nativeTimeout(()=>{timers.delete(timer);fn();},delay);timers.add(timer);return timer;};
-global.clearTimeout=(timer)=>{timers.delete(timer);nativeClear(timer);};
-const pause=ms=>new Promise(resolve=>nativeTimeout(resolve,ms));
-const flush=async()=>{for(let i=0;i<12;i++)await new Promise(resolve=>setImmediate(resolve));};
-let mode='healthy',openCalls=0,versionCalls=0,aborts=0,mutations=0,active=0,maxActive=0;
-let rows=[{broker:'Bybit',account:'demo',category:'linear',type:'Order',instrument:'BTCUSDT',id:'existing',status:'New'}];
+global.clearTimeout=timer=>{timers.delete(timer);nativeClear(timer);};
+const flush=async()=>{for(let i=0;i<20;i++)await new Promise(resolve=>setImmediate(resolve));};
 const reply=payload=>({ok:true,status:200,statusText:'OK',text:async()=>JSON.stringify(payload)});
+let revision=1,mode='healthy',aborts=0,mutations=0,active=0,maxActive=0;
+const urls=[];
+const unrelated={broker:'Bybit',account:'live',category:'inverse',source_key:'live-failed',message:'upstream unavailable'};
+const matching={broker:'Bybit',account:'demo',category:'linear',type:'Order',instrument:'BTCUSDT',
+id:'submitted',status:'New',collection_version:1,source_key:'demo-healthy',source_stale:false};
+let snapshot={version:1,progress_revision:revision,items:[],errors:[],warnings:[],pending:true,core_complete:false,
+empty_confirmed:false,sources:[{state:'pending'}]};
 global.fetch=async(url,options={})=>{
-  if(options.method&&options.method!=='GET')mutations++;
-  const version=String(url).includes('/version');
-  if(version)versionCalls++;else openCalls++;
-  if((mode==='fetch'&&!version)||(mode==='body'&&!version)||(mode==='version-body'&&version)){
+  urls.push(String(url));if(options.method&&options.method!=='GET')mutations++;
+  if(String(url).includes('/version'))return reply({version:1,progress_revision:revision,pending:snapshot.pending});
+  if(mode==='body'){
     active++;maxActive=Math.max(maxActive,active);
-    const stalled=new Promise((_,reject)=>options.signal.addEventListener('abort',()=>{
-      aborts++;active--;reject(new Error('aborted'));},{once:true}));
-    if(mode==='fetch')return await stalled;
-    return {ok:true,status:200,statusText:'OK',text:()=>stalled};
+    return {ok:true,status:200,statusText:'OK',text:()=>new Promise((_,reject)=>options.signal.addEventListener('abort',()=>{
+      active--;aborts++;reject(new Error('aborted'));},{once:true}))};
   }
-  return reply(version?{version:1}:{items:rows,errors:[],warnings:[],version:1});
+  return reply(snapshot);
 };
 eval(fs.readFileSync(__JS_PATH__,'utf8'));
 (async()=>{
-  const hooks=window.__openOrdersTestHooks;
-  await flush();
-  if(window.__openOrdersItems[0].id!=='existing')throw Error('initial rows missing');
-  const before=openCalls;mode='body';
-  await Promise.all([hooks.refresh(),hooks.refresh(),hooks.refresh(),hooks.pollVersion(),hooks.pollVersion()]);
-  const body={calls:openCalls-before,aborts,active,state:hooks.getState(),ids:window.__openOrdersItems.map(row=>row.id),badge:badge.textContent};
-  mode='fetch';const fetchBefore=openCalls;await hooks.refresh();
-  const fetchState={calls:openCalls-fetchBefore,aborts,active,state:hooks.getState(),ids:window.__openOrdersItems.map(row=>row.id)};
-  mode='version-body';const versionBefore=versionCalls;await Promise.all([hooks.pollVersion(),hooks.pollVersion(),hooks.pollVersion()]);
-  const versionState={calls:versionCalls-versionBefore,aborts,active};
-  mode='healthy';
-  await hooks.refresh();
-  rows=[{broker:'Bybit',account:'demo',category:'linear',type:'Order',instrument:'ETHUSDT',id:'submitted',status:'New'}];
-  const event={type:'state-changed',action:'submit',eventId:'submit-one',order_id:'submitted',submittedAt:Date.now()};
-  const submitBefore=openCalls;hooks.handleStateChange(event);hooks.handleStateChange(event);await flush();
-  const recovered={calls:openCalls-submitBefore,ids:window.__openOrdersItems.map(row=>row.id),state:hooks.getState(),badge:badge.textContent};
-  document.hidden=true;hooks.handleStateChange({type:'state-changed',action:'submit',eventId:'hidden-expiry',order_id:'missing'});
-  await pause(110);
-  const expired=hooks.getState();
-  process.stdout.write(JSON.stringify({body,fetchState,versionState,recovered,expired,mutations,maxActive,timers:timers.size}));
+  const hooks=window.__openOrdersTestHooks;await flush();
+  const initial={text:empty.textContent,state:hooks.getState(),badge:badge.textContent};
+  const event={type:'state-changed',action:'submit',eventId:'one',broker:'bybit',account:'demo',category:'linear',
+orderId:'submitted',submittedAt:Date.now()};
+  hooks.handleStateChange(event);hooks.handleStateChange(event);await flush();
+  virtual=65000;
+  const reads=urls.filter(url=>!url.includes('/version')).length;
+  for(let i=0;i<10;i++)await hooks.pollVersion();
+  const pending={text:empty.textContent,state:hooks.getState(),reads:urls.filter(url=>!url.includes('/version')).length-reads};
+  revision=2;snapshot={...snapshot,progress_revision:revision,items:[{...matching,source_stale:true},{...matching,account:'live'}],errors:[unrelated]};
+  await hooks.pollVersion();await flush();
+  const stale={state:hooks.getState(),ids:window.__openOrdersItems.map(row=>row.id),errors:window.__openOrdersErrors,badge:badge.textContent};
+  virtual=130000;
+  revision=3;snapshot={...snapshot,progress_revision:revision,items:[matching],errors:[unrelated]};
+  await hooks.pollVersion();await flush();
+  const confirmed={state:hooks.getState(),ids:window.__openOrdersItems.map(row=>row.id),errors:window.__openOrdersErrors,badge:badge.textContent};
+  mode='body';await Promise.all([hooks.refresh('manual'),hooks.refresh('manual')]);
+  const failed={state:hooks.getState(),ids:window.__openOrdersItems.map(row=>row.id),text:empty.textContent,aborts};
+  mode='healthy';await hooks.pollVersion();await flush();
+  const recovered={state:hooks.getState(),ids:window.__openOrdersItems.map(row=>row.id)};
+  document.hidden=true;
+  const beforeHidden=urls.length;
+  hooks.handleStateChange({...event,eventId:'two',orderId:'hidden'});
+  await hooks.pollVersion();await flush();
+  const hiddenCalls=urls.length-beforeHidden;
+  document.hidden=false;
+  revision=4;snapshot={...snapshot,progress_revision:revision,items:[{...matching,id:'hidden'}]};
+  handlers.visibilitychange();await flush();
+  const visible={state:hooks.getState(),badge:badge.textContent};
+  revision=5;snapshot={version:1,progress_revision:revision,items:[],errors:[],warnings:[],pending:false,
+core_complete:true,empty_confirmed:true,sources:[{state:'complete'}]};
+  await hooks.refresh('manual');
+  process.stdout.write(JSON.stringify({initial,pending,stale,confirmed,failed,recovered,hiddenCalls,visible,
+emptyText:empty.textContent,mutations,active,maxActive,timers:timers.size,forced:urls.filter(url=>url.includes('force=1')).length}));
 })().catch(error=>{console.error(error);process.exit(1);});
 """.replace("__JS_PATH__", json.dumps(str(ROOT / "render" / "static" / "open_orders.js")))
     result = subprocess.run([node, "-e", harness], check=True, capture_output=True, text=True, timeout=10)
     state = json.loads(result.stdout)
-    assert state["body"]["calls"] == 1
-    assert state["body"]["aborts"] == 1 and state["body"]["active"] == 0
-    assert state["body"]["ids"] == ["existing"] and "deadline exceeded" in state["body"]["badge"]
-    assert not state["body"]["state"]["refreshInFlight"]
-    assert state["fetchState"]["calls"] == 1 and state["fetchState"]["aborts"] == 2
-    assert state["fetchState"]["ids"] == ["existing"] and not state["fetchState"]["state"]["refreshInFlight"]
-    assert state["versionState"] == {"calls": 1, "aborts": 3, "active": 0}
-    assert state["recovered"]["calls"] == 1 and state["recovered"]["ids"] == ["submitted"]
-    assert state["recovered"]["state"]["pendingVisibilityChecks"] == 0
-    assert "now visible" in state["recovered"]["badge"]
-    assert state["expired"]["pendingVisibilityChecks"] == 0
-    assert state["mutations"] == 0 and state["maxActive"] == 1 and state["timers"] == 0
+    assert state["initial"]["text"] == "Loading broker data"
+    assert "No open" not in state["pending"]["text"]
+    assert state["pending"]["state"]["pendingVisibilityChecks"] == 1 and state["pending"]["reads"] == 0
+    assert state["stale"]["state"]["pendingVisibilityChecks"] == 1
+    assert state["stale"]["errors"][0]["source_key"] == "live-failed"
+    assert state["confirmed"]["state"]["pendingVisibilityChecks"] == 0
+    assert state["confirmed"]["ids"] == ["submitted"] and "now visible" in state["confirmed"]["badge"]
+    assert state["confirmed"]["errors"][0]["source_key"] == "live-failed"
+    assert state["failed"]["aborts"] == 1 and not state["failed"]["state"]["refreshInFlight"]
+    assert state["failed"]["ids"] == ["submitted"] and state["recovered"]["ids"] == ["submitted"]
+    assert state["hiddenCalls"] == 0 and state["visible"]["state"]["pendingVisibilityChecks"] == 0
+    assert "now visible" in state["visible"]["badge"]
+    assert state["emptyText"] == "No open orders or positions."
+    assert state["mutations"] == 0 and state["active"] == 0 and state["maxActive"] == 1
+    assert state["timers"] == 0 and state["forced"] == 2

@@ -6,6 +6,7 @@ import atexit
 import calendar
 import asyncio
 import contextvars
+from contextlib import asynccontextmanager
 import ctypes
 import copy
 import errno
@@ -3465,30 +3466,75 @@ _OANDA_INACTIVITY_CACHE: Dict[str, object] = {
 }
 _OANDA_INACTIVITY_CACHE_TTL_SECONDS = 45.0
 _OANDA_INACTIVITY_ERROR_CACHE_TTL_SECONDS = 10.0
-_OPEN_ORDERS_CACHE_LOCK = asyncio.Lock()
-# Open Orders-only elapsed budgets include signing/time sync, retries and queues.
-# wait_for cancels and awaits owned work; elapsed diagnostics use monotonic time.
-_OPEN_ORDERS_COLLECTION_SECONDS = 28.0
-_OPEN_ORDERS_ACCOUNT_SECONDS = 26.0
-_OPEN_ORDERS_SOURCE_SECONDS = 4.0
-_OPEN_ORDERS_CATEGORY_SECONDS = 16.0
-_OPEN_ORDERS_CONFIRM_SECONDS = 2.0
-_OPEN_ORDERS_FUNDING_SECONDS = 3.0
+# Service-owned jobs publish snapshots; elapsed time alone never fails a source.
 _OPEN_ORDERS_READ_SCOPE = contextvars.ContextVar("open_orders_read_scope", default=False)
-_OPEN_ORDERS_INFLIGHT: Dict[int, Dict[str, object]] = {}
-_OPEN_ORDERS_PROGRESS = contextvars.ContextVar("open_orders_progress", default=None)
 _OPEN_ORDERS_COLLECTION_VERSION = contextvars.ContextVar("open_orders_collection_version", default=None)
+_OPEN_ORDERS_JOB_SCOPE = contextvars.ContextVar("open_orders_job", default=None)
+_OPEN_ORDERS_RUN_SCOPE = contextvars.ContextVar("open_orders_source_run", default=None)
+_OPEN_ORDERS_HTTP_SCOPE = contextvars.ContextVar("open_orders_http_scope", default="")
+_OPEN_ORDERS_SETTLEMENT_SCOPE = contextvars.ContextVar("open_orders_settlement", default=None)
+_OPEN_ORDERS_SERVICES: Dict[object, object] = {}
+_OPEN_ORDERS_SOURCE_REFRESH_SECONDS = 60.0
+_OPEN_ORDERS_RECOVERY_BACKOFF_SECONDS = 5.0
+_OPEN_ORDERS_MAX_RECOVERY_ATTEMPTS = 3
 
 
-async def _open_orders_budget(awaitable, seconds: float, context: str):
+def _open_orders_now():
+    return time.monotonic()
+
+
+async def _open_orders_observe(awaitable, context: str):
     started = time.monotonic()
     try:
-        return await asyncio.wait_for(awaitable, timeout=seconds)
-    except asyncio.TimeoutError as exc:
-        raise TimeoutError(f"{context}: deadline exceeded ({seconds:g}s); coverage unknown") from exc
+        return await awaitable
     finally:
-        BYBIT_LOGGER.info("OPEN_ORDERS timing source=%s elapsed=%.3fs budget=%.3fs",
-                          context, time.monotonic() - started, seconds)
+        BYBIT_LOGGER.info("OPEN_ORDERS timing source=%s elapsed=%.3fs",
+                          context, time.monotonic() - started)
+
+
+def _open_orders_authoritative() -> bool:
+    job = _OPEN_ORDERS_JOB_SCOPE.get()
+    run = _OPEN_ORDERS_RUN_SCOPE.get()
+    return (job is None or job.authoritative) and (run is None or run[0]["run"] == run[1])
+
+
+class _OpenOrdersClientLease:
+    def __init__(self, client, timeout, job):
+        self.client, self.timeout, self.job = client, timeout, job
+
+    async def get(self, url, **kwargs):
+        kwargs.setdefault("timeout", self.timeout)
+        self.job.metrics["network_reads"] += 1
+        started = time.monotonic()
+        try:
+            return await self.client.get(url, **kwargs)
+        finally:
+            self.job.metrics["network_seconds"] += time.monotonic() - started
+
+
+@asynccontextmanager
+async def _open_orders_http_client(broker, base_url, identity="", **options):
+    job = _OPEN_ORDERS_JOB_SCOPE.get()
+    if job is None:
+        async with httpx.AsyncClient(**options) as client:
+            yield client
+        return
+    if job.loop is not asyncio.get_running_loop() or not job.authoritative:
+        raise asyncio.CancelledError()
+    # Headers stay per-request; pools never cross credential/host/account scopes or loops.
+    if broker == "Bybit" and not identity:
+        identity = next((config.get("api_key", "") for name, account, config in job.configurations
+                         if name == broker and account == _OPEN_ORDERS_HTTP_SCOPE.get()), "")
+    key = (broker, base_url.rstrip("/"), hashlib.sha256(identity.encode()).hexdigest(),
+           _OPEN_ORDERS_HTTP_SCOPE.get(), bool(options.get("follow_redirects")))
+    client = job.clients.get(key)
+    if client is None:
+        started = time.monotonic()
+        client = httpx.AsyncClient(**options)
+        job.clients[key] = client
+        job.metrics["client_setups"] += 1
+        job.metrics["setup_seconds"] += time.monotonic() - started
+    yield _OpenOrdersClientLease(client, options.get("timeout"), job)
 
 
 async def _open_orders_signed_get(**kwargs):
@@ -3498,6 +3544,7 @@ async def _open_orders_signed_get(**kwargs):
     async def read_pages():
         params = dict(kwargs.get("params") or {})
         seen_cursors = set()
+        seen_rows = set()
         while True:
             payload = await _bybit_signed_get(**dict(kwargs, params=params))
             if kwargs.get("path") not in {"/v5/position/list", "/v5/order/realtime"}:
@@ -3506,7 +3553,12 @@ async def _open_orders_signed_get(**kwargs):
             page = result.get("list") if isinstance(result, dict) else None
             if not isinstance(page, list):
                 raise ValueError("Bybit response did not contain result.list; coverage unknown")
-            rows.extend(row for row in page if isinstance(row, dict))
+            for row in page:
+                if isinstance(row, dict):
+                    identity = json.dumps(row, sort_keys=True, default=str)
+                    if identity not in seen_rows:
+                        rows.append(row)
+                        seen_rows.add(identity)
             cursor = str(result.get("nextPageCursor") or "").strip()
             if not cursor:
                 return dict(payload, result=dict(result, list=rows))
@@ -3515,19 +3567,14 @@ async def _open_orders_signed_get(**kwargs):
             seen_cursors.add(cursor)
             params["cursor"] = cursor
     try:
-        return await _open_orders_budget(read_pages(), _OPEN_ORDERS_SOURCE_SECONDS,
-                                         "Bybit " + str(kwargs.get("path", "GET")) + "/" +
-                                         str((kwargs.get("params") or {}).get("category", "account")) + "/" +
-                                         str((kwargs.get("params") or {}).get("settleCoin", "n/a")))
+        return await _open_orders_observe(read_pages(), "Bybit " + str(kwargs.get("path", "GET")))
     except Exception as exc:
         exc.open_orders_partial_rows = list(rows)
         raise
 
 
 async def _open_orders_scoped_read(awaitable, context: str):
-    if not _OPEN_ORDERS_READ_SCOPE.get():
-        return await awaitable
-    return await _open_orders_budget(awaitable, _OPEN_ORDERS_SOURCE_SECONDS, context)
+    return await _open_orders_observe(awaitable, context)
 
 
 _OPEN_ORDERS_CACHE_TTL_SECONDS = 60.0
@@ -3662,6 +3709,12 @@ def _invalidate_open_orders_cache() -> None:
     _OPEN_ORDERS_CACHE["payload"] = None
     _OPEN_ORDERS_CACHE["expires_at"] = 0.0
     _OPEN_ORDERS_CACHE["version"] = int(_OPEN_ORDERS_CACHE.get("version") or 0) + 1
+    try:
+        service = _OPEN_ORDERS_SERVICES.get(asyncio.get_running_loop())
+    except RuntimeError:
+        service = None
+    if service is not None:
+        service.invalidate()
 _BYBIT_SYMBOL_LIST_CACHE: Dict[str, Dict[str, object]] = {
     "linear": {"ts": 0.0, "symbols": []},
     "spot": {"ts": 0.0, "symbols": []},
@@ -16315,6 +16368,7 @@ async def _autostart_scripts() -> None:
 
 @app.on_event("shutdown")
 async def _log_local_master_shutdown() -> None:
+    await _shutdown_open_orders_jobs()
     _stop_manual_save_github_sync_watcher()
     try:
         oanda_volatility = script_manager.get("oanda-volatility")
@@ -18230,7 +18284,7 @@ async def _fetch_oanda_json(
     transient_statuses = _OANDA_TRANSIENT_HTTP_STATUS_CODES
     resp: Optional[httpx.Response] = None
 
-    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+    async with _open_orders_http_client("OANDA", base_url, api_key, timeout=timeout, follow_redirects=True) as client:
         for attempt in range(1, max_attempts + 1):
             try:
                 resp = await client.get(url, headers=headers)
@@ -18456,24 +18510,19 @@ async def _oanda_preflight(
 
 
 async def _collect_oanda_open_items(
-    *, base_url: str, account_id: str, api_key: str, account_context: str
+    *, base_url: str, account_id: str, api_key: str, account_context: str, source_type: Optional[str] = None
 ) -> Dict[str, object]:
-    trades_task = _open_orders_scoped_read(_fetch_oanda_json(
-        base_url=base_url,
-        account_id=account_id,
-        api_key=api_key,
-        endpoint="/accounts/{account_id}/openTrades",
-        mode=account_context,
-        timeout_s=5.0,
-    ), "OANDA openTrades")
-    orders_task = _open_orders_scoped_read(_fetch_oanda_json(
-        base_url=base_url,
-        account_id=account_id,
-        api_key=api_key,
-        endpoint="/accounts/{account_id}/pendingOrders",
-        mode=account_context,
-        timeout_s=5.0,
-    ), "OANDA pendingOrders")
+    async def read_endpoint(kind, endpoint, empty):
+        if source_type is not None and source_type != kind:
+            return empty
+        payload = await _fetch_oanda_json(base_url=base_url, account_id=account_id,
+                    api_key=api_key, endpoint=endpoint, mode=account_context, timeout_s=5.0)
+        field = "trades" if kind == "positions" else "orders"
+        if not isinstance(payload, dict) or not isinstance(payload.get(field), list):
+            raise ValueError(f"OANDA {kind} response did not contain {field}; coverage unknown")
+        return payload
+    trades_task = read_endpoint("positions", "/accounts/{account_id}/openTrades", {"trades": []})
+    orders_task = read_endpoint("orders", "/accounts/{account_id}/pendingOrders", {"orders": []})
 
     trades_result, orders_result = await asyncio.gather(
         trades_task,
@@ -18585,6 +18634,16 @@ async def _collect_oanda_open_items(
     for item in items:
         ctx = _lookup_trade_context_for_open_item(item)
         _enrich_open_item_with_trade_context(item, ctx)
+    for error in fetch_errors:
+        failure = trades_result if str(error.get("endpoint")).endswith("openTrades") else orders_result
+        error["failure_kind"] = ("timeout" if isinstance(failure, (TimeoutError, httpx.TimeoutException))
+                                 else "transport" if isinstance(failure, httpx.RequestError)
+                                 else getattr(failure, "failure_kind", ""))
+        error["retry_exhausted"] = bool(getattr(failure, "retry_exhausted", False))
+        error["transient"] = bool(getattr(failure, "transient", False))
+        status = getattr(failure, "status_code", None) or getattr(failure, "upstream_status", None)
+        if status:
+            error["http_status"] = str(status)
     return {"items": items, "errors": fetch_errors}
 
 
@@ -18602,7 +18661,7 @@ async def _list_oanda_accounts(*, base_url: str, api_key: str) -> List[Dict[str,
     account_context = _oanda_account_context(base_url)
     resp: Optional[httpx.Response] = None
 
-    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+    async with _open_orders_http_client("OANDA", base_url, api_key, timeout=timeout, follow_redirects=True) as client:
         for attempt in range(1, max_attempts + 1):
             attempt_started = time.monotonic()
             try:
@@ -18723,6 +18782,9 @@ async def _list_oanda_accounts(*, base_url: str, api_key: str) -> List[Dict[str,
             timeout_s=timeout_s,
             error_type=exc.__class__.__name__,
         ) from exc
+    if _OPEN_ORDERS_JOB_SCOPE.get() is not None and (
+        not isinstance(payload, dict) or not isinstance(payload.get("accounts"), list)):
+        raise ValueError("OANDA discovery response did not contain accounts; coverage unknown")
     accounts = payload.get("accounts", []) if isinstance(payload, dict) else []
     return [dict(account) for account in accounts if isinstance(account, dict)]
 
@@ -18769,18 +18831,17 @@ async def _get_cached_oanda_accounts(
             fetched_at=float(cached.get("fetched_at") or now),
         )
 
-    # Open Orders owns this read; its deadline must cancel and await discovery.
-    # Other callers retain the existing shared, shielded discovery behavior.
-    owned_refresh = _OPEN_ORDERS_READ_SCOPE.get()
-    refresh_task = None if owned_refresh else _OANDA_ACCOUNTS_INFLIGHT.get(cache_key)
-    if refresh_task is None or refresh_task.done():
-        refresh_task = asyncio.create_task(
-            _list_oanda_accounts(base_url=base_url, api_key=api_key)
-        )
-        if not owned_refresh:
+    job = _OPEN_ORDERS_JOB_SCOPE.get()
+    if job is not None:
+        refresh_task = job.shared_task(("discovery", cache_key),
+            lambda: _list_oanda_accounts(base_url=base_url, api_key=api_key))
+    else:
+        refresh_task = _OANDA_ACCOUNTS_INFLIGHT.get(cache_key)
+        if refresh_task is None or refresh_task.done():
+            refresh_task = asyncio.create_task(_list_oanda_accounts(base_url=base_url, api_key=api_key))
             _OANDA_ACCOUNTS_INFLIGHT[cache_key] = refresh_task
     try:
-        accounts = await refresh_task if owned_refresh else await asyncio.shield(refresh_task)
+        accounts = await asyncio.shield(refresh_task)
     except Exception as exc:
         stale_cached = _OANDA_ACCOUNTS_CACHE.get(cache_key)
         if (
@@ -18802,12 +18863,13 @@ async def _get_cached_oanda_accounts(
             _OANDA_ACCOUNTS_INFLIGHT.pop(cache_key, None)
 
     fetched_at = time.time()
-    _OANDA_ACCOUNTS_CACHE[cache_key] = {
-        "fetched_at": fetched_at,
-        "fresh_until": fetched_at + _OANDA_ACCOUNTS_CACHE_TTL_SECONDS,
-        "stale_until": fetched_at + _OANDA_ACCOUNTS_STALE_TTL_SECONDS,
-        "accounts": list(accounts),
-    }
+    if _open_orders_authoritative():
+        _OANDA_ACCOUNTS_CACHE[cache_key] = {
+            "fetched_at": fetched_at,
+            "fresh_until": fetched_at + _OANDA_ACCOUNTS_CACHE_TTL_SECONDS,
+            "stale_until": fetched_at + _OANDA_ACCOUNTS_STALE_TTL_SECONDS,
+            "accounts": list(accounts),
+        }
     return OandaAccountDiscoveryResult(
         accounts=list(accounts),
         cache_state="refreshed",
@@ -18934,7 +18996,7 @@ def _build_bybit_error_diagnostic(*, base_url: str, path: str, error_text: str) 
 async def _fetch_bybit_server_time_ms(base_url: str) -> int:
     normalized_base = _normalize_bybit_base_url(base_url)
     url = f"{normalized_base}/v5/market/time"
-    async with httpx.AsyncClient(timeout=10) as client:
+    async with _open_orders_http_client("Bybit", normalized_base, "", timeout=10) as client:
         req = client.get(url)
         if hasattr(req, "__aenter__"):
             async with req as resp:
@@ -18989,11 +19051,12 @@ async def _refresh_bybit_time_offset_ms(base_url: str) -> int:
     local_midpoint = (local_before + local_after) // 2
     rtt_ms = max(0, local_after - local_before)
     offset_ms = int(server_ms - local_midpoint)
-    _BYBIT_TIME_OFFSET_CACHE[normalized_base] = {
-        "synced_at": local_after,
-        "offset_ms": offset_ms,
-        "rtt_ms": rtt_ms,
-    }
+    if _open_orders_authoritative():
+        _BYBIT_TIME_OFFSET_CACHE[normalized_base] = {
+            "synced_at": local_after,
+            "offset_ms": offset_ms,
+            "rtt_ms": rtt_ms,
+        }
     BYBIT_LOGGER.info(
         "BYBIT_TIME_SYNC base_url=%s offset_ms=%s rtt_ms=%s",
         normalized_base,
@@ -19020,6 +19083,11 @@ async def _get_bybit_time_offset_ms(base_url: str, force_refresh: bool = False) 
     ):
         return int(cached.get("offset_ms", 0) or 0)
     try:
+        job = _OPEN_ORDERS_JOB_SCOPE.get()
+        if job is not None:
+            task = job.shared_task(("time-sync", normalized_base),
+                                   lambda: _refresh_bybit_time_offset_ms(normalized_base))
+            return await asyncio.shield(task)
         return await _refresh_bybit_time_offset_ms(normalized_base)
     except Exception as exc:
         BYBIT_LOGGER.warning("BYBIT_TIME_SYNC refresh failed base_url=%s err=%s", normalized_base, exc)
@@ -19451,7 +19519,7 @@ async def _bybit_signed_get(
             ) from exc
         force_time_sync = False
         try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
+            async with _open_orders_http_client("Bybit", normalized_base, api_key, timeout=timeout) as client:
                 resp = await client.get(url, headers=headers)
         except httpx.TimeoutException as exc:
             should_retry = attempt < BYBIT_SIGNED_REQUEST_MAX_RETRIES
@@ -19464,6 +19532,9 @@ async def _bybit_signed_get(
                 should_retry,
             )
             if should_retry:
+                job = _OPEN_ORDERS_JOB_SCOPE.get()
+                if job is not None:
+                    job.metrics["transport_retries"] += 1
                 await asyncio.sleep(min(0.2 * attempt, 0.5))
                 continue
             raise BybitSignedGETError(
@@ -19492,6 +19563,9 @@ async def _bybit_signed_get(
                 safe_detail,
             )
             if should_retry:
+                job = _OPEN_ORDERS_JOB_SCOPE.get()
+                if job is not None:
+                    job.metrics["transport_retries"] += 1
                 await asyncio.sleep(min(0.2 * attempt, 0.5))
                 continue
             raise BybitSignedGETError(
@@ -19569,6 +19643,9 @@ async def _bybit_signed_get(
                 should_retry,
             )
             if should_retry:
+                job = _OPEN_ORDERS_JOB_SCOPE.get()
+                if job is not None:
+                    job.metrics["transport_retries"] += 1
                 await asyncio.sleep(min(0.2 * attempt, 0.5))
                 continue
             raise BybitSignedGETError(
@@ -19682,7 +19759,7 @@ async def _fetch_bybit_positions_for_category(
     if category == "linear":
         combined: List[Dict[str, object]] = []
         errors: List[Dict[str, str]] = []
-        for settle_coin in ("USDT", "USDC"):
+        for settle_coin in ((_OPEN_ORDERS_SETTLEMENT_SCOPE.get(),) if _OPEN_ORDERS_SETTLEMENT_SCOPE.get() else ("USDT", "USDC")):
             try:
                 payload = await _open_orders_signed_get(
                     base_url=base_url,
@@ -19783,7 +19860,7 @@ async def _fetch_bybit_orders_for_category(
     if category == "linear":
         combined: List[Dict[str, object]] = []
         errors: List[Dict[str, str]] = []
-        for settle_coin in ("USDT", "USDC"):
+        for settle_coin in ((_OPEN_ORDERS_SETTLEMENT_SCOPE.get(),) if _OPEN_ORDERS_SETTLEMENT_SCOPE.get() else ("USDT", "USDC")):
             try:
                 payload = await _open_orders_signed_get(
                     base_url=base_url,
@@ -19948,7 +20025,7 @@ async def _fetch_bybit_open_funding_transactions_cached(
         key=lambda row: (int(_to_float(row.get("transactionTime")) or 0), _bybit_transaction_dedupe_key(row)),
     )
     collection_version = _OPEN_ORDERS_COLLECTION_VERSION.get()
-    if collection_version is None or collection_version == int(_OPEN_ORDERS_CACHE.get("version") or 0):
+    if _open_orders_authoritative() and (collection_version is None or collection_version == int(_OPEN_ORDERS_CACHE.get("version") or 0)):
         _BYBIT_OPEN_FUNDING_CACHE[cache_key] = {
             "fetched_at": time.time(),
             "start_time": start_time,
@@ -19961,16 +20038,8 @@ async def _fetch_bybit_open_funding_transactions_cached(
 async def _enrich_bybit_open_position_funding(positions, **kwargs):
     token = _OPEN_ORDERS_READ_SCOPE.set(True)
     try:
-        return await _open_orders_budget(
-            _enrich_bybit_open_position_funding_impl(positions, **kwargs),
-            _OPEN_ORDERS_FUNDING_SECONDS, "Bybit settled funding/history")
-    except TimeoutError as exc:
-        for position in positions:
-            if str(position.get("type") or "").lower() == "position":
-                position.update({"funding_paid": None, "funding_received": None, "net_funding": None})
-        return [_bybit_open_source_error(exc, account=kwargs["account_context"], category="account",
-                source_type="settled funding", endpoint="/v5/account/transaction-log",
-                api_key=kwargs["api_key"], api_secret=kwargs["api_secret"])]
+        return await _open_orders_observe(
+            _enrich_bybit_open_position_funding_impl(positions, **kwargs), "Bybit funding/history")
     finally:
         _OPEN_ORDERS_READ_SCOPE.reset(token)
 
@@ -20110,18 +20179,22 @@ async def _collect_bybit_open_items_impl(
     api_secret: str,
     account_context: str,
     key_source: str = "unknown",
+    position_categories=None,
+    order_categories=None,
+    skip_auth: bool = False,
+    enrich_funding: bool = True,
 ) -> Dict[str, object]:
     items: List[Dict[str, object]] = []
     errors: List[Dict[str, object]] = []
     warnings: List[Dict[str, object]] = []
     try:
-        auth_diagnostic = await _open_orders_budget(_bybit_read_only_auth_preflight(
+        auth_diagnostic = {} if skip_auth else await _bybit_read_only_auth_preflight(
             base_url=base_url,
             api_key=api_key,
             api_secret=api_secret,
             account_context=account_context,
             key_source=key_source,
-        ), _OPEN_ORDERS_SOURCE_SECONDS, f"Bybit {account_context} auth preflight")
+        )
     except TimeoutError as exc:
         return {"items": [], "errors": [_bybit_open_source_error(exc, account=account_context,
                 category="account", source_type="auth preflight", endpoint="/v5/user/query-api",
@@ -20145,8 +20218,8 @@ async def _collect_bybit_open_items_impl(
         }
     confirmed_demo_linear_symbols: Set[str] = set()
     stale_demo_linear_symbols: Set[str] = set()
-    position_categories = ["linear", "inverse", "option"]
-    order_categories = ["linear", "inverse", "spot", "option"]
+    position_categories = ["linear", "inverse", "option"] if position_categories is None else position_categories
+    order_categories = ["linear", "inverse", "spot", "option"] if order_categories is None else order_categories
 
     semaphore = asyncio.Semaphore(3)
 
@@ -20158,15 +20231,13 @@ async def _collect_bybit_open_items_impl(
                 return await reader(base_url=base_url, api_key=api_key, api_secret=api_secret,
                                     category=category, account_context=account_context)
         try:
-            return await _open_orders_budget(read(), _OPEN_ORDERS_CATEGORY_SECONDS,
-                                             f"Bybit {account_context}/{category}/{source}")
+            return await read()
         except Exception as exc:
             return [], [_bybit_open_source_error(exc, account=account_context, category=category,
                         source_type=source, endpoint=endpoint, api_key=api_key, api_secret=api_secret)]
 
     scopes = [("positions", category) for category in position_categories] + [("orders", category) for category in order_categories]
     results = dict(zip(scopes, await asyncio.gather(*(read_category(*scope) for scope in scopes))))
-    confirmation_deadline = time.monotonic() + _OPEN_ORDERS_CONFIRM_SECONDS
 
     for category in position_categories:
         positions, position_errors = results[("positions", category)]
@@ -20212,13 +20283,13 @@ async def _collect_bybit_open_items_impl(
                 size = size_raw
             if account_context == "demo" and category == "linear" and symbol:
                 try:
-                    still_open = await _open_orders_budget(_confirm_bybit_position_still_open(
+                    still_open = await _confirm_bybit_position_still_open(
                         base_url=base_url,
                         api_key=api_key,
                         api_secret=api_secret,
                         category=category,
                         symbol=symbol,
-                    ), max(0.000001, confirmation_deadline - time.monotonic()), "Bybit demo position confirmation")
+                    )
                 except Exception as exc:
                     confirm_error = _bybit_open_source_error(
                         exc,
@@ -20312,6 +20383,16 @@ async def _collect_bybit_open_items_impl(
                 and symbol
                 and stop_order_type in {"stoploss", "takeprofit", "partialstoploss", "partialtakeprofit"}
             ):
+                if not position_categories:
+                    try:
+                        if not await _confirm_bybit_position_still_open(
+                            base_url=base_url, api_key=api_key, api_secret=api_secret,
+                            category=category, symbol=symbol):
+                            continue
+                    except Exception as exc:
+                        errors.append(_bybit_open_source_error(exc, account=account_context,
+                            category=category, source_type="positions confirmation",
+                            endpoint="/v5/position/list", api_key=api_key, api_secret=api_secret))
                 if symbol in stale_demo_linear_symbols:
                     continue
                 if not errors and confirmed_demo_linear_symbols and symbol not in confirmed_demo_linear_symbols:
@@ -20338,17 +20419,20 @@ async def _collect_bybit_open_items_impl(
                     "status": status or "OPEN",
                 }
             )
-    warnings.extend(
-        await _enrich_bybit_open_position_funding(
-            items,
-            base_url=base_url,
-            api_key=api_key,
-            api_secret=api_secret,
-            account_context=account_context,
+    if enrich_funding:
+        warnings.extend(
+            await _enrich_bybit_open_position_funding(
+                items,
+                base_url=base_url,
+                api_key=api_key,
+                api_secret=api_secret,
+                account_context=account_context,
+            )
         )
-    )
 
     for item in items:
+        if item.get("type") == "Position" and not enrich_funding:
+            item.update({"funding_paid": None, "funding_received": None, "net_funding": None})
         ctx = _lookup_trade_context_for_open_item(item)
         _enrich_open_item_with_trade_context(item, ctx)
     return {
@@ -35537,544 +35621,510 @@ def _filter_pending_webhooks(
 async def open_orders_version() -> JSONResponse:
     if APP_PROFILE == "render":
         return _local_only_disabled_response("/api/open-orders/version", as_json=True)  # type: ignore[return-value]
+    service = _OPEN_ORDERS_SERVICES.get(asyncio.get_running_loop())
+    if service is not None:
+        await service.snapshot()
     return JSONResponse(
         {
             "version": int(_OPEN_ORDERS_CACHE.get("version") or 0),
+            "progress_revision": int((_OPEN_ORDERS_CACHE.get("payload") or {}).get("progress_revision") or 0),
+            "pending": bool((_OPEN_ORDERS_CACHE.get("payload") or {}).get("pending", True)),
             "updated_at": _utc_now_iso(),
         }
     )
 
 
-async def _run_open_orders_collection(version: int, progress: dict) -> JSONResponse:
-    token = _OPEN_ORDERS_PROGRESS.set(progress)
-    version_token = _OPEN_ORDERS_COLLECTION_VERSION.set(version)
-    try:
-        return await _open_orders_budget(_collect_open_orders(version),
-                                         _OPEN_ORDERS_COLLECTION_SECONDS, "Open Orders collection")
-    except TimeoutError as exc:
-        previous = dict(_OPEN_ORDERS_CACHE.get("payload") or {})
-        current = [dict(row) for row in progress.get("items", [])]
-        identities = {(str(row.get("broker")), str(row.get("account")), str(row.get("category")),
-                       str(row.get("type")), str(row.get("id")), str(row.get("instrument"))) for row in current}
-        for row in previous.get("items", []):
-            identity = (str(row.get("broker")), str(row.get("account")), str(row.get("category")),
-                        str(row.get("type")), str(row.get("id")), str(row.get("instrument")))
-            if identity not in identities:
-                current.append(dict(row, source_stale=True, stale_reason=str(exc)))
-        errors = list(progress.get("errors", [])) + [{"broker": "All", "source_type": "collection", "message": str(exc)}]
-        previous.update({"items": current, "errors": errors, "error_count": len(errors),
-                         "warnings": list(progress.get("warnings", [])), "stale": True,
-                         "updated_at": _utc_now_iso(), "version": version,
-                         "refresh_superseded": version != int(_OPEN_ORDERS_CACHE.get("version") or 0)})
-        return JSONResponse(previous)
-    finally:
-        _OPEN_ORDERS_PROGRESS.reset(token)
-        _OPEN_ORDERS_COLLECTION_VERSION.reset(version_token)
+
+def _open_orders_row_identity(row):
+    return tuple(str(row.get(key) or "") for key in (
+        "broker", "account", "account_id", "category", "instrument", "type", "id", "position_idx", "order_link_id"))
+
+
+def _open_orders_configuration():
+    configurations = []
+    for broker in ("OANDA", "Bybit"):
+        for account in ("live", "demo"):
+            try:
+                if broker == "OANDA":
+                    config = dict(_get_oanda_config(account))
+                else:
+                    _, key, secret, base, origin = resolve_bybit_credentials_for(account)
+                    if not key or not secret:
+                        raise ValueError("Bybit API credentials are not configured.")
+                    config = {"api_key": key, "api_secret": secret, "base_url": base, "key_source": origin}
+                configurations.append((broker, account, config))
+            except Exception as exc:
+                configurations.append((broker, account, {"configuration_error": _safe_bybit_diagnostic_text(str(exc))}))
+    fingerprint = hashlib.sha256(json.dumps(configurations, sort_keys=True, default=str).encode()).hexdigest()
+    return configurations, fingerprint
+
+
+def _open_orders_transient(errors):
+    for error in errors:
+        code = str(error.get("retCode") or error.get("ret_code") or "")
+        status = str(error.get("http_status") or error.get("status") or "")
+        if code in {"10003", "10004", "10005", "10007", "10010", "10028", "100028", "33004"} or status in {"401", "403"}:
+            return False
+        if error.get("failure_kind") in {"authentication_or_permission", "unsupported_account_access", "malformed_response"}:
+            return False
+    return any(error.get("failure_kind") in {"timeout", "transport", "rate_limit", "request_error", "dns"}
+               or str(error.get("http_status") or "") in {"408", "425", "429", "500", "502", "503", "504"}
+               or error.get("transient") or error.get("retry_exhausted") for error in errors)
+
+
+class _OpenOrdersJob:
+    def __init__(self, service, configurations, fingerprint, version):
+        self.service, self.loop = service, service.loop
+        self.configurations, self.fingerprint, self.version = configurations, fingerprint, version
+        self.obsolete = False
+        self.sources = {}
+        self.tasks, self.auxiliary = set(), {}
+        self.clients = {}
+        self.semaphore = asyncio.Semaphore(6)
+        self.metrics = Counter()
+        self.payload = None
+        self.reconciled = False
+        self.oanda_tags = {}
+        self.funding = {}
+
+    @property
+    def authoritative(self):
+        return (not self.obsolete and not self.service.closed and self.service.job is self
+                and int(_OPEN_ORDERS_CACHE.get("version") or 0) == self.version)
+
+    def shared_task(self, key, factory):
+        task = self.auxiliary.get(key)
+        if task is None or task.done():
+            self.metrics[str(key[0]) + "_setups"] += 1
+            task = asyncio.create_task(factory())
+            # Consume exceptions even if every waiting source is canceled.
+            task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
+            self.auxiliary[key] = task
+        return task
+
+    def add(self, key, metadata, reader, *, core=True, ready=True, config=None, after=None):
+        if key in self.sources:
+            return self.sources[key]
+        config = config or {}
+        credential_scope = hashlib.sha256(json.dumps(config, sort_keys=True, default=str).encode()).hexdigest()
+        cache_key = "incremental:" + credential_scope + ":" + key
+        entry = {"key": key, "meta": metadata, "reader": reader, "core": core, "after": after,
+                 "state": "pending" if ready else "blocked", "task": None, "run": 0, "attempts": 0,
+                 "items": [], "previous": copy.deepcopy(_OPEN_ORDERS_LAST_GOOD_ITEMS.get(cache_key, [])),
+                 "errors": [], "warnings": [], "next_retry": 0.0, "updated": None,
+                 "config": config, "cache_key": cache_key}
+        self.sources[key] = entry
+        if ready:
+            self.launch(entry)
+        return entry
+
+    def launch(self, entry):
+        if not self.authoritative or entry["task"] is not None:
+            return
+        entry["state"] = "pending"
+        entry["run"] += 1
+        entry["attempts"] += 1
+        if entry["core"]:
+            self.reconciled = False
+        task = asyncio.create_task(self.run_source(entry, entry["run"]))
+        entry["task"] = task
+        self.tasks.add(task)
+        task.add_done_callback(self.tasks.discard)
+
+    def error(self, entry, exc):
+        config, meta = entry["config"], entry["meta"]
+        if isinstance(exc, BybitAuthPreflightError):
+            error = dict(exc.diagnostic)
+        elif meta["broker"] == "Bybit":
+            error = _bybit_open_source_error(exc, account=meta["account"], category=meta.get("category", "account"),
+                        source_type=meta["source_type"], endpoint=meta["endpoint"],
+                        settlement_coin=meta.get("settlement_coin"), api_key=config.get("api_key", ""),
+                        api_secret=config.get("api_secret", ""))
+        else:
+            error = dict(meta, message=str(exc), error_type=type(exc).__name__)
+            status = getattr(exc, "http_status", None) or getattr(exc, "status_code", None) or getattr(exc, "upstream_status", None)
+            if status:
+                error["http_status"] = str(status)
+            kind = getattr(exc, "failure_kind", "")
+            if isinstance(exc, (httpx.TimeoutException, TimeoutError)):
+                kind = "timeout"
+            elif isinstance(exc, httpx.RequestError):
+                kind = "transport"
+            error["failure_kind"] = kind
+            error["transient"] = bool(getattr(exc, "transient", False))
+            error["retry_exhausted"] = bool(getattr(exc, "retry_exhausted", False))
+        return self.diagnostics(entry, [error])[0]
+
+    def diagnostics(self, entry, rows):
+        unique = {}
+        config = entry["config"]
+        for raw in rows or []:
+            error = dict(entry["meta"], **raw) if isinstance(raw, dict) else dict(entry["meta"], message=str(raw))
+            error["source_key"] = entry["key"]
+            for field in ("message", "retMsg", "retCode"):
+                if field in error:
+                    error[field] = _safe_bybit_diagnostic_text(error[field],
+                        api_key=config.get("api_key", config.get("token", "")), api_secret=config.get("api_secret", ""))
+            if error.get("endpoint"):
+                error["endpoint"] = _safe_bybit_endpoint(error["endpoint"])
+            unique[json.dumps(error, sort_keys=True, default=str)] = error
+        return list(unique.values())
+
+    async def run_source(self, entry, run):
+        tokens = [
+            (_OPEN_ORDERS_JOB_SCOPE, _OPEN_ORDERS_JOB_SCOPE.set(self)),
+            (_OPEN_ORDERS_RUN_SCOPE, _OPEN_ORDERS_RUN_SCOPE.set((entry, run))),
+            (_OPEN_ORDERS_READ_SCOPE, _OPEN_ORDERS_READ_SCOPE.set(True)),
+            (_OPEN_ORDERS_HTTP_SCOPE, _OPEN_ORDERS_HTTP_SCOPE.set(entry["meta"]["account"])),
+            (_OPEN_ORDERS_COLLECTION_VERSION, _OPEN_ORDERS_COLLECTION_VERSION.set(self.version)),
+            (_OPEN_ORDERS_SETTLEMENT_SCOPE, _OPEN_ORDERS_SETTLEMENT_SCOPE.set(entry["meta"].get("settlement_coin") if entry["meta"].get("settlement_coin") in {"USDT", "USDC"} else None)),
+        ]
+        queued = _open_orders_now()
+        try:
+            try:
+                async with self.semaphore:
+                    self.metrics["queue_seconds"] += _open_orders_now() - queued
+                    started = _open_orders_now()
+                    result = await entry["reader"]()
+                    self.metrics["source_seconds"] += _open_orders_now() - started
+                if not isinstance(result, dict) or not isinstance(result.get("items", []), list):
+                    raise ValueError("Source returned malformed data; coverage unknown")
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                result = {"items": [], "errors": [self.error(entry, exc)]}
+            if not self.authoritative or entry["run"] != run:
+                return
+            entry["items"] = [dict(row) for row in result.get("items", []) if isinstance(row, dict)]
+            entry["errors"] = self.diagnostics(entry, result.get("errors", []))
+            entry["warnings"] = self.diagnostics(entry, result.get("warnings", []))
+            failures = entry["errors"] or (entry["warnings"] if not entry["core"] else [])
+            entry["state"] = "failed" if failures else "complete"
+            entry["transient"] = _open_orders_transient(failures)
+            entry["updated"] = _open_orders_now()
+            entry["next_retry"] = entry["updated"] + min(60.0, _OPEN_ORDERS_RECOVERY_BACKOFF_SECONDS * 2 ** (entry["attempts"] - 1))
+            if not failures and entry["core"]:
+                entry["previous"] = copy.deepcopy(entry["items"])
+                _OPEN_ORDERS_LAST_GOOD_ITEMS[entry["cache_key"]] = copy.deepcopy(entry["items"])
+            if entry.get("after"):
+                await entry["after"](entry, result)
+            if entry["meta"]["broker"] == "Bybit" and entry["meta"]["source_type"] == "positions":
+                await self.ensure_funding(entry["meta"]["account"])
+            self.publish()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # Unexpected normalization/publication errors remain visible and cannot orphan tasks.
+            if self.authoritative:
+                entry["errors"] = [self.error(entry, exc)]
+                entry["state"], entry["transient"] = "failed", False
+                self.publish()
+        finally:
+            if entry["task"] is asyncio.current_task():
+                entry["task"] = None
+            for variable, token in reversed(tokens):
+                variable.reset(token)
+
+    def start(self):
+        for broker, account, config in self.configurations:
+            if "configuration_error" in config:
+                async def invalid(config=config):
+                    raise ValueError(config["configuration_error"])
+                self.add(broker + "/" + account + "/configuration",
+                         {"broker": broker, "account": account, "category": "account",
+                          "source_type": "credential readiness", "endpoint": "configuration"}, invalid, config=config)
+            elif broker == "OANDA":
+                self.start_oanda(account, config)
+            else:
+                self.start_bybit(account, config)
+        self.publish()
+
+    def start_oanda(self, account, config):
+        def add_account(account_id):
+            for kind, endpoint in (("positions", "/v3/accounts/{accountID}/openTrades"),
+                                   ("orders", "/v3/accounts/{accountID}/pendingOrders")):
+                async def read(kind=kind, account_id=account_id):
+                    result = await _collect_oanda_open_items(base_url=config["base_url"],
+                             account_id=account_id, api_key=config["token"], account_context=account, source_type=kind)
+                    for row in result.get("items", []):
+                        row["account_id"] = account_id
+                    return result
+                self.add(f"OANDA/{account}/{account_id}/{kind}",
+                    {"broker": "OANDA", "account": account, "account_id": account_id, "category": "forex",
+                     "source_type": kind, "endpoint": endpoint}, read, config=config)
+        configured = str(config.get("account_id") or "").strip()
+        if configured:
+            add_account(configured)
+
+        async def discovery():
+            result = await _get_cached_oanda_accounts(base_url=config["base_url"], api_key=config["token"])
+            if isinstance(result, OandaAccountDiscoveryResult):
+                accounts = result.accounts
+                error = result.discovery_error
+            else:
+                accounts, error = result or [], None
+            errors = []
+            if error is not None:
+                errors.append(self.error(self.sources[f"OANDA/{account}/discovery"], error))
+            return {"items": [], "accounts": accounts, "errors": errors}
+
+        async def discovered(entry, result):
+            for owned in result.get("accounts", []):
+                account_id = str(owned.get("id") or "").strip()
+                if account_id:
+                    self.oanda_tags[(account, account_id)] = [str(tag).upper() for tag in owned.get("tags", [])]
+                    add_account(account_id)
+            if not configured and not result.get("accounts") and not entry["errors"]:
+                entry["errors"] = [dict(entry["meta"], message="No configured or discovered OANDA accounts; coverage unknown")]
+                entry["state"] = "failed"
+        self.add(f"OANDA/{account}/discovery",
+                 {"broker": "OANDA", "account": account, "category": "forex",
+                  "source_type": "account discovery", "endpoint": "/v3/accounts"},
+                 discovery, after=discovered, config=config)
+
+    def start_bybit(self, account, config):
+        children = []
+        for kind, categories in (("positions", ("linear", "inverse", "option")),
+                                 ("orders", ("linear", "inverse", "spot", "option"))):
+            for category in categories:
+                for settlement in (("USDT", "USDC") if category == "linear" else ("n/a",)):
+                    async def read(kind=kind, category=category):
+                        return await _collect_bybit_open_items(base_url=config["base_url"],
+                            api_key=config["api_key"], api_secret=config["api_secret"], account_context=account,
+                            key_source=config["key_source"], skip_auth=True, enrich_funding=False,
+                            position_categories=[category] if kind == "positions" else [],
+                            order_categories=[category] if kind == "orders" else [])
+                    children.append(self.add(f"Bybit/{account}/{category}/{settlement}/{kind}",
+                        {"broker": "Bybit", "account": account, "category": category, "settlement_coin": settlement,
+                         "source_type": kind, "endpoint": "/v5/position/list" if kind == "positions" else "/v5/order/realtime"},
+                        read, ready=False, config=config))
+
+        async def auth():
+            await _bybit_read_only_auth_preflight(base_url=config["base_url"],
+                api_key=config["api_key"], api_secret=config["api_secret"], account_context=account,
+                key_source=config["key_source"])
+            return {"items": [], "errors": []}
+
+        async def authenticated(entry, result):
+            if entry["state"] == "complete":
+                for child in children:
+                    if child["state"] == "blocked":
+                        self.launch(child)
+        self.add(f"Bybit/{account}/auth", {"broker": "Bybit", "account": account, "category": "account",
+                 "source_type": "auth preflight", "endpoint": "/v5/user/query-api"}, auth, after=authenticated, config=config)
+
+    async def ensure_funding(self, account):
+        positions = [entry for entry in self.sources.values() if entry["meta"]["broker"] == "Bybit"
+                     and entry["meta"]["account"] == account and entry["meta"]["source_type"] == "positions"]
+        if not positions or any(entry["state"] in {"pending", "blocked"} for entry in positions):
+            return
+        rows = [dict(row) for entry in positions for row in entry["items"]]
+        fingerprint = hashlib.sha256(json.dumps(rows, sort_keys=True, default=str).encode()).hexdigest()
+        if self.funding.get(account) == fingerprint:
+            return
+        self.funding[account] = fingerprint
+        key = f"Bybit/{account}/funding"
+        previous = self.sources.get(key)
+        if previous is not None:
+            previous["run"] += 1
+            task = previous["task"]
+            if task is not None:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            del self.sources[key]
+        if not rows:
+            return
+        config = positions[0]["config"]
+        async def enrich():
+            updated = copy.deepcopy(rows)
+            warnings = await _enrich_bybit_open_position_funding(updated, base_url=config["base_url"],
+                api_key=config["api_key"], api_secret=config["api_secret"], account_context=account)
+            return {"items": updated, "errors": [], "warnings": warnings}
+        self.add(key, {"broker": "Bybit", "account": account, "category": "account", "source_type": "settled funding",
+                      "endpoint": "/v5/account/transaction-log"}, enrich, core=False, config=config)
+
+    def poll(self, deliberate=False):
+        now = _open_orders_now()
+        was_pending = self.pending
+        has_failures = any(entry["state"] == "failed" for entry in self.sources.values())
+        for entry in list(self.sources.values()):
+            if entry["task"] is not None or entry["state"] == "blocked":
+                continue
+            if entry["state"] == "failed":
+                if now < entry["next_retry"]:
+                    continue
+                if deliberate or (entry.get("transient") and entry["attempts"] < _OPEN_ORDERS_MAX_RECOVERY_ATTEMPTS):
+                    if deliberate:
+                        entry["attempts"] = 0
+                    self.launch(entry)
+            elif entry["updated"] is not None and entry["meta"]["source_type"] != "auth preflight":
+                # Snapshot polls never refetch healthy sources every few seconds.
+                age = now - entry["updated"]
+                if age >= _OPEN_ORDERS_SOURCE_REFRESH_SECONDS or (deliberate and age >= 5.0 and not was_pending and not has_failures):
+                    entry["attempts"] = 0
+                    self.launch(entry)
+        self.publish()
+
+    @property
+    def pending(self):
+        return any(entry["state"] == "pending" for entry in self.sources.values())
+
+    def publish(self):
+        if not self.authoritative:
+            return
+        items, errors, warnings, coverage = [], [], [], []
+        funding = {}
+        for entry in self.sources.values():
+            if not entry["core"] and entry["state"] == "complete":
+                for row in entry["items"]:
+                    funding[_open_orders_row_identity(row)] = row
+        for key, entry in self.sources.items():
+            errors.extend(entry["errors"])
+            warnings.extend(entry["warnings"])
+            state = entry["state"]
+            coverage.append(dict(entry["meta"], source_key=key, state=state, core=entry["core"],
+                                 attempts=entry["attempts"], retry_in_seconds=max(0, entry["next_retry"] - _open_orders_now()) if state == "failed" else None))
+            if not entry["core"]:
+                continue
+            current = entry["items"] if state in {"complete", "failed"} else []
+            identities = {_open_orders_row_identity(row) for row in current}
+            rows = [(row, False) for row in current]
+            if state != "complete":
+                retained = {}
+                for row in entry["items"] + entry["previous"]:
+                    retained.setdefault(_open_orders_row_identity(row), row)
+                rows += [(row, True) for identity, row in retained.items() if identity not in identities]
+            stale = False
+            for raw, retained in rows:
+                row = dict(raw, source_key=key, collection_version=self.version, source_stale=retained)
+                if retained:
+                    stale = True
+                    row["stale_reason"] = "Broker source is " + state + "; retained prior row."
+                elif _open_orders_row_identity(row) in funding:
+                    row.update({field: value for field, value in funding[_open_orders_row_identity(row)].items()
+                                if field.startswith("funding_") or field in {"net_funding"}})
+                if "MT4" in self.oanda_tags.get((row.get("account"), row.get("account_id")), []):
+                    row["account_label_suffix"] = "MT4"
+                items.append(row)
+            if stale:
+                warnings.append(dict(entry["meta"], source_key=key, message="Showing explicitly stale prior broker rows while this source is " + state + "."))
+        core_complete = bool(coverage) and all(row["state"] == "complete" for row in coverage if row["core"])
+        complete = core_complete and not self.pending and not errors and not warnings
+        # Reconciliation only sees fully confirmed current coverage, once per read cycle.
+        payload = _open_orders_payload(items, errors, warnings, self.version, complete and not self.reconciled)
+        if complete:
+            self.reconciled = True
+        if not self.authoritative:
+            return
+        payload.update({"sources": coverage, "pending": self.pending, "core_complete": core_complete,
+                        "empty_confirmed": core_complete and not items, "stale": not core_complete or bool(errors),
+                        "collection_version": self.version})
+        # Revisions describe publications, never invalidate the broker generation.
+        comparable = {key: value for key, value in payload.items() if key not in {"updated_at", "last_success_at"}}
+        for source in comparable["sources"]:
+            source.pop("retry_in_seconds", None)
+        if self.payload is not None:
+            prior = {key: value for key, value in self.payload.items()
+                     if key not in {"updated_at", "last_success_at", "progress_revision", "timings"}}
+            if prior == comparable:
+                return
+        self.service.revision += 1
+        self.metrics["publications"] += 1
+        payload["progress_revision"] = self.service.revision
+        payload["timings"] = {key: round(value, 4) for key, value in self.metrics.items()}
+        self.payload = payload
+        _OPEN_ORDERS_CACHE["payload"] = copy.deepcopy(payload)
+        if complete:
+            _OPEN_ORDERS_CACHE["last_success_at"] = payload["updated_at"]
+        BYBIT_LOGGER.info("OPEN_ORDERS publish generation=%s revision=%s rows=%s pending=%s errors=%s counters=%s",
+                         self.version, self.service.revision, len(items), self.pending, len(errors), payload["timings"])
+
+    async def close(self):
+        self.obsolete = True
+        tasks = set(self.tasks) | set(self.auxiliary.values())
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await asyncio.gather(*(client.aclose() for client in self.clients.values()), return_exceptions=True)
+        self.tasks.clear()
+        self.auxiliary.clear()
+        self.clients.clear()
+
+
+class _OpenOrdersService:
+    def __init__(self):
+        self.loop = asyncio.get_running_loop()
+        self.job = None
+        self.revision = 0
+        self.closed = False
+        self.retired = set()
+
+    def invalidate(self):
+        if self.job is None or self.job.obsolete:
+            return
+        self.job.obsolete = True
+        for task in set(self.job.tasks) | set(self.job.auxiliary.values()):
+            task.cancel()
+        cleanup = asyncio.create_task(self.job.close())
+        self.retired.add(cleanup)
+        cleanup.add_done_callback(self.retired.discard)
+
+    async def snapshot(self, deliberate=False):
+        configurations, fingerprint = _open_orders_configuration()
+        version = int(_OPEN_ORDERS_CACHE.get("version") or 0)
+        if self.job is not None and self.job.fingerprint != fingerprint and self.job.version == version:
+            _invalidate_open_orders_cache()
+            version = int(_OPEN_ORDERS_CACHE.get("version") or 0)
+        if self.job is None or self.job.obsolete or self.job.version != version:
+            self.invalidate()
+            if self.retired:
+                await asyncio.shield(asyncio.gather(*self.retired))
+                configurations, fingerprint = _open_orders_configuration()
+                version = int(_OPEN_ORDERS_CACHE.get("version") or 0)
+            # Registration is atomic in the event loop; concurrent clients join this job.
+            if self.job is None or self.job.obsolete or self.job.version != version:
+                self.job = _OpenOrdersJob(self, configurations, fingerprint, version)
+                self.job.start()
+        else:
+            self.job.poll(deliberate)
+        return copy.deepcopy(self.job.payload)
+
+    async def close(self):
+        self.closed = True
+        if self.job is not None:
+            await self.job.close()
+        if self.retired:
+            await asyncio.gather(*self.retired, return_exceptions=True)
+        self.retired.clear()
+
+
+async def _shutdown_open_orders_jobs():
+    service = _OPEN_ORDERS_SERVICES.pop(asyncio.get_running_loop(), None)
+    if service is not None:
+        await service.close()
 
 
 @app.get("/api/open-orders")
 async def list_open_orders(force: bool = Query(False)) -> JSONResponse:
     if APP_PROFILE == "render":
         return _local_only_disabled_response("/api/open-orders", as_json=True)
-    cached = _OPEN_ORDERS_CACHE.get("payload")
-    if not force and isinstance(cached, dict) and time.time() < float(_OPEN_ORDERS_CACHE.get("expires_at") or 0):
-        return JSONResponse(dict(cached))
-    version = int(_OPEN_ORDERS_CACHE.get("version") or 0)
-    # Atomic event-loop registration: no await, lock waiting or full-refresh queue.
-    entry = _OPEN_ORDERS_INFLIGHT.get(version)
-    if entry is None:
-        entry = {"task": asyncio.create_task(_run_open_orders_collection(version, {})), "waiters": 0}
-        _OPEN_ORDERS_INFLIGHT[version] = entry
-    entry["waiters"] += 1
-    task = entry["task"]
-    try:
-        return await asyncio.shield(task)
-    finally:
-        entry["waiters"] -= 1
-        if entry["waiters"] == 0:
-            if _OPEN_ORDERS_INFLIGHT.get(version) is entry:
-                del _OPEN_ORDERS_INFLIGHT[version]
-            if not task.done():
-                task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
+    loop = asyncio.get_running_loop()
+    service = _OPEN_ORDERS_SERVICES.get(loop)
+    if service is None:
+        service = _OpenOrdersService()
+        _OPEN_ORDERS_SERVICES[loop] = service
+    # A GET owns only a snapshot, never the lifetime of broker collection.
+    return JSONResponse(await service.snapshot(deliberate=force is True))
 
 
-async def _collect_open_orders(collection_version: int) -> JSONResponse:
-    # This version describes the state for which this broker read began. If
-    # another durable transition invalidates the cache while reads are in
-    # flight, the returned payload keeps this older version and is not
-    # cached. The browser will observe the newer version and render again.
-    items: List[Dict[str, object]] = []
-    errors: List[Dict[str, str]] = []
-    warnings: List[Dict[str, str]] = []
-
-    progress = _OPEN_ORDERS_PROGRESS.get()
-    if progress is not None:
-        progress.update({"items": items, "errors": errors, "warnings": warnings})
-
-    oanda_semaphore = asyncio.Semaphore(4)
-
-    async def read_oanda_account(**kwargs):
-        async def read():
-            async with oanda_semaphore:
-                return await _collect_oanda_open_items(**kwargs)
-        return await _open_orders_budget(read(), 2 * _OPEN_ORDERS_SOURCE_SECONDS,
-                                         f"OANDA {kwargs['account_context']} account openItems")
-
-    async def collect_oanda(account):
-        try:
-            cfg = _get_oanda_config(account)
-            account_ids: List[str] = []
-            configured_account_id = str(cfg.get("account_id") or "").strip()
-            if configured_account_id:
-                account_ids.append(configured_account_id)
-
-            owned_accounts: List[Dict[str, object]] = []
-            account_tags: Dict[str, List[str]] = {}
-            discovery_exc: Optional[Exception] = None
-            stale_discovery_fetched_at: Optional[float] = None
-            try:
-                discovery_result = await _open_orders_budget(_get_cached_oanda_accounts(
-                    base_url=cfg["base_url"],
-                    api_key=cfg["token"],
-                ), _OPEN_ORDERS_SOURCE_SECONDS, "OANDA account discovery")
-                if isinstance(discovery_result, OandaAccountDiscoveryResult):
-                    owned_accounts = list(discovery_result.accounts)
-                    discovery_exc = discovery_result.discovery_error
-                    if discovery_result.cache_state == "stale":
-                        stale_discovery_fetched_at = discovery_result.fetched_at
-                else:
-                    # Preserve compatibility with local test or extension shims that
-                    # returned the pre-metadata list shape.
-                    owned_accounts = list(discovery_result or [])
-            except Exception as exc:
-                discovery_exc = exc
-
-            for acct in owned_accounts:
-                acct_id = str(acct.get("id") or "").strip()
-                if not acct_id:
-                    continue
-                account_ids.append(acct_id)
-                account_tags[acct_id] = [str(t).upper() for t in (acct.get("tags") or [])]
-
-            deduped_ids: List[str] = []
-            seen_account_ids: Set[str] = set()
-            for acct_id in account_ids:
-                if acct_id in seen_account_ids:
-                    continue
-                deduped_ids.append(acct_id)
-                seen_account_ids.add(acct_id)
-            account_ids = deduped_ids
-            if not account_ids:
-                raise ValueError(
-                    f"No configured or discovered OANDA account IDs are available for {account}."
-                )
-
-            tasks = [
-                read_oanda_account(
-                    base_url=cfg["base_url"],
-                    account_id=acct_id,
-                    api_key=cfg["token"],
-                    account_context=account,
-                )
-                for acct_id in account_ids
-            ]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-
-            oanda_items: List[Dict[str, object]] = []
-            oanda_errors: List[Dict[str, str]] = []
-            account_error_counts: Dict[str, int] = {}
-            refreshed_account_ids: Set[str] = set()
-            for acct_id, result in zip(account_ids, results):
-                if isinstance(result, Exception):
-                    account_error_counts[acct_id] = (
-                        account_error_counts.get(acct_id, 0) + 1
-                    )
-                    oanda_errors.append(
-                        {
-                            "broker": "OANDA",
-                            "account": account,
-                            "category": "forex",
-                            "source_type": "account data",
-                            "endpoint": "/v3/accounts/{accountID}/openItems",
-                            "account_id": acct_id,
-                            "message": _format_source_exception(
-                                result,
-                                broker="OANDA",
-                                account=account,
-                                endpoint="/v3/accounts/{accountID}/openItems",
-                                account_id=acct_id,
-                            ),
-                        }
-                    )
-                    continue
-
-                if not isinstance(result, dict) or not {
-                    "items",
-                    "errors",
-                }.issubset(result):
-                    account_error_counts[acct_id] = (
-                        account_error_counts.get(acct_id, 0) + 1
-                    )
-                    oanda_errors.append(
-                        {
-                            "broker": "OANDA",
-                            "account": account,
-                            "category": "forex",
-                            "source_type": "account data",
-                            "endpoint": "/v3/accounts/{accountID}/openItems",
-                            "account_id": acct_id,
-                            "message": (
-                                "OANDA account refresh returned an invalid result "
-                                f"for {account}/{acct_id}"
-                            ),
-                        }
-                    )
-                    continue
-
-                refreshed_account_ids.add(acct_id)
-                result_items = result.get("items", [])
-                result_errors = result.get("errors", [])
-
-                for endpoint_error in result_errors:
-                    account_error_counts[acct_id] = (
-                        account_error_counts.get(acct_id, 0) + 1
-                    )
-                    if isinstance(endpoint_error, dict):
-                        endpoint = str(
-                            endpoint_error.get("endpoint")
-                            or "/v3/accounts/{accountID}/openItems"
-                        )
-                        message = str(
-                            endpoint_error.get("message")
-                            or "Unknown OANDA endpoint error"
-                        ).strip()
-                    else:
-                        endpoint = "/v3/accounts/{accountID}/openItems"
-                        message = (
-                            f"{acct_id}: "
-                            f"{str(endpoint_error).strip() or 'Unknown OANDA endpoint error'}"
-                        )
-                    oanda_errors.append(
-                        {
-                            "broker": "OANDA",
-                            "account": account,
-                            "category": "forex",
-                            "source_type": "account data",
-                            "endpoint": endpoint,
-                            "account_id": acct_id,
-                            "message": message,
-                        }
-                    )
-
-                tags = account_tags.get(acct_id, [])
-                for row in result_items:
-                    row["account_id"] = acct_id
-                    if "MT4" in tags:
-                        row["account_label_suffix"] = "MT4"
-                oanda_items.extend(result_items)
-
-            items.extend(oanda_items)
-            errors.extend(oanda_errors)
-            configured_account_refreshed = bool(
-                configured_account_id
-                and configured_account_id in refreshed_account_ids
-                and account_error_counts.get(configured_account_id, 0) == 0
-            )
-            if configured_account_refreshed and _oanda_discovery_is_http_401(discovery_exc):
-                BYBIT_LOGGER.warning(
-                    "OANDA_DISCOVERY_AUTH_ANOMALY mode=%s configured_account=%s "
-                    "configured_endpoints_ok=true retry_delay=%.2fs",
-                    account,
-                    configured_account_id,
-                    _OANDA_DISCOVERY_AUTH_ANOMALY_RETRY_DELAY_SECONDS,
-                )
-                await asyncio.sleep(_OANDA_DISCOVERY_AUTH_ANOMALY_RETRY_DELAY_SECONDS)
-                retry_owned_accounts: List[Dict[str, object]] = []
-                try:
-                    retry_discovery = await _open_orders_budget(_get_cached_oanda_accounts(
-                        base_url=cfg["base_url"],
-                        api_key=cfg["token"],
-                        allow_auth_anomaly_stale=True,
-                    ), _OPEN_ORDERS_SOURCE_SECONDS, "OANDA account discovery")
-                    if isinstance(retry_discovery, OandaAccountDiscoveryResult):
-                        retry_owned_accounts = list(retry_discovery.accounts)
-                        discovery_exc = retry_discovery.discovery_error
-                        stale_discovery_fetched_at = (
-                            retry_discovery.fetched_at
-                            if retry_discovery.cache_state == "stale"
-                            else None
-                        )
-                    else:
-                        retry_owned_accounts = list(retry_discovery or [])
-                        discovery_exc = None
-                        stale_discovery_fetched_at = None
-                except Exception as retry_exc:
-                    discovery_exc = retry_exc
-                    stale_discovery_fetched_at = None
-
-                if discovery_exc is None:
-                    BYBIT_LOGGER.info(
-                        "OANDA_DISCOVERY_AUTH_ANOMALY_RECOVERED mode=%s configured_account=%s",
-                        account,
-                        configured_account_id,
-                    )
-
-                retry_account_ids: List[str] = []
-                for acct in retry_owned_accounts:
-                    acct_id = str(acct.get("id") or "").strip()
-                    if not acct_id or acct_id in seen_account_ids:
-                        continue
-                    seen_account_ids.add(acct_id)
-                    account_ids.append(acct_id)
-                    retry_account_ids.append(acct_id)
-                    account_tags[acct_id] = [
-                        str(tag).upper() for tag in (acct.get("tags") or [])
-                    ]
-
-                if retry_account_ids:
-                    retry_tasks = [
-                        read_oanda_account(
-                            base_url=cfg["base_url"],
-                            account_id=acct_id,
-                            api_key=cfg["token"],
-                            account_context=account,
-                        )
-                        for acct_id in retry_account_ids
-                    ]
-                    retry_results = await asyncio.gather(
-                        *retry_tasks, return_exceptions=True
-                    )
-                    retry_items: List[Dict[str, object]] = []
-                    retry_errors: List[Dict[str, str]] = []
-                    for acct_id, retry_result in zip(retry_account_ids, retry_results):
-                        if isinstance(retry_result, Exception):
-                            retry_errors.append(
-                                {
-                                    "broker": "OANDA",
-                                    "account": account,
-                                    "category": "forex",
-                                    "source_type": "account data",
-                                    "endpoint": "/v3/accounts/{accountID}/openItems",
-                                    "account_id": acct_id,
-                                    "message": _format_source_exception(
-                                        retry_result,
-                                        broker="OANDA",
-                                        account=account,
-                                        endpoint="/v3/accounts/{accountID}/openItems",
-                                        account_id=acct_id,
-                                    ),
-                                }
-                            )
-                            continue
-                        if not isinstance(retry_result, dict):
-                            retry_errors.append(
-                                {
-                                    "broker": "OANDA",
-                                    "account": account,
-                                    "category": "forex",
-                                    "source_type": "account data",
-                                    "endpoint": "/v3/accounts/{accountID}/openItems",
-                                    "account_id": acct_id,
-                                    "message": "OANDA account refresh returned an invalid result after discovery retry.",
-                                }
-                            )
-                            continue
-                        result_endpoint_errors = retry_result.get("errors") or []
-                        for endpoint_error in result_endpoint_errors:
-                            endpoint_error = endpoint_error if isinstance(endpoint_error, dict) else {"message": endpoint_error}
-                            retry_errors.append(
-                                {
-                                    "broker": "OANDA",
-                                    "account": account,
-                                    "category": "forex",
-                                    "source_type": "account data",
-                                    "endpoint": str(endpoint_error.get("endpoint") or "/v3/accounts/{accountID}/openItems"),
-                                    "account_id": acct_id,
-                                    "message": str(endpoint_error.get("message") or "Unknown OANDA endpoint error"),
-                                }
-                            )
-                        tags = account_tags.get(acct_id, [])
-                        for row in retry_result.get("items") or []:
-                            if not isinstance(row, dict):
-                                continue
-                            row["account_id"] = acct_id
-                            if "MT4" in tags:
-                                row["account_label_suffix"] = "MT4"
-                            retry_items.append(row)
-                    oanda_items.extend(retry_items)
-                    oanda_errors.extend(retry_errors)
-                    items.extend(retry_items)
-                    errors.extend(retry_errors)
-
-            if discovery_exc is not None:
-                warnings.append(
-                    _oanda_discovery_warning(
-                        account=account,
-                        exc=discovery_exc,
-                        stale_fetched_at=stale_discovery_fetched_at,
-                        configured_account_refreshed=configured_account_refreshed,
-                    )
-                )
-            BYBIT_LOGGER.info(
-                "OPEN_ORDERS oanda account=%s owner_accounts=%s items=%s errors=%s "
-                "discovery_warning=%s discovery_cache=%s",
-                account,
-                len(account_ids),
-                len(oanda_items),
-                len(oanda_errors),
-                discovery_exc is not None,
-                "stale" if stale_discovery_fetched_at is not None else "current",
-            )
-        except Exception as exc:
-            errors.append(
-                {
-                    "broker": "OANDA",
-                    "account": account,
-                    "category": "forex",
-                    "message": _format_source_exception(
-                        exc,
-                        broker="OANDA",
-                        account=account,
-                        endpoint="open-orders",
-                        account_id="unknown",
-                    ),
-                }
-            )
-
-    async def collect_bybit(account):
-        api_key = ""
-        api_secret = ""
-        try:
-            _mode, api_key, api_secret, base_url, _key_source = resolve_bybit_credentials_for(
-                account
-            )
-            if not api_key or not api_secret:
-                raise ValueError("Bybit API credentials are not configured.")
-            result = await _collect_bybit_open_items(
-                base_url=base_url,
-                api_key=api_key,
-                api_secret=api_secret,
-                account_context=account,
-                key_source=_key_source,
-            )
-            result_items = [
-                dict(row)
-                for row in (result.get("items", []) or [])
-                if isinstance(row, dict)
-            ]
-            result_errors = [
-                dict(row)
-                for row in (result.get("errors", []) or [])
-                if isinstance(row, dict)
-            ]
-            result_warnings = [
-                dict(row)
-                for row in (result.get("warnings", []) or [])
-                if isinstance(row, dict)
-            ]
-            source_key = f"bybit:{account}"
-            if bool(result.get("auth_failed")):
-                stale_items = [
-                    dict(row)
-                    for row in _OPEN_ORDERS_LAST_GOOD_ITEMS.get(source_key, [])
-                    if isinstance(row, dict)
-                ]
-                for row in stale_items:
-                    row["source_stale"] = True
-                    row["stale_reason"] = (
-                        "Bybit authentication failed; showing last-known-good broker state."
-                    )
-                items.extend(stale_items)
-            else:
-                items.extend(result_items)
-                if not result_errors and int(_OPEN_ORDERS_CACHE.get("version") or 0) == collection_version:
-                    _OPEN_ORDERS_LAST_GOOD_ITEMS[source_key] = [
-                        dict(row) for row in result_items
-                    ]
-            if result_errors and not result.get("auth_failed"):
-                current_ids = {(str(row.get("category")), str(row.get("type")), str(row.get("id")), str(row.get("instrument"))) for row in result_items}
-                for previous in _OPEN_ORDERS_LAST_GOOD_ITEMS.get(source_key, []):
-                    identity = (str(previous.get("category")), str(previous.get("type")), str(previous.get("id")), str(previous.get("instrument")))
-                    failed = any(
-                        str(error.get("category")) in {"account", str(previous.get("category"))}
-                        and str(error.get("source_type")) in {"collection", "auth preflight", "positions" if previous.get("type") == "Position" else "orders"}
-                        and str(error.get("settlement_coin") or "n/a") in {"n/a", "multiple", str(previous.get("settlement_currency") or ""), "USDT" if str(previous.get("instrument") or "").endswith("USDT") else "USDC"}
-                        for error in result_errors)
-                    if failed and identity not in current_ids:
-                        items.append(dict(previous, source_stale=True,
-                                          stale_reason="Bybit source coverage incomplete; showing last-known-good row."))
-                if any(row.get("source_stale") for row in items if row.get("broker") == "Bybit" and row.get("account") == account):
-                    warnings.append({"broker": "Bybit", "account": account, "source_type": "last-known-good",
-                                     "message": "Some rows are stale because source coverage is incomplete."})
-            errors.extend(result_errors)
-            warnings.extend(result_warnings)
-            BYBIT_LOGGER.info(
-                "OPEN_ORDERS bybit account=%s items=%s errors=%s warnings=%s auth_failed=%s",
-                account,
-                len(result_items),
-                len(result_errors),
-                len(result_warnings),
-                bool(result.get("auth_failed")),
-            )
-        except Exception as exc:
-            source_error = _bybit_open_source_error(
-                exc,
-                account=account,
-                category="account",
-                source_type=(
-                    "credential readiness"
-                    if isinstance(exc, BybitCredentialConflictError)
-                    else "collection"
-                ),
-                endpoint="open-orders collection",
-                settlement_coin="n/a",
-                api_key=api_key,
-                api_secret=api_secret,
-            )
-            if isinstance(exc, BybitCredentialConflictError):
-                source_error.update(
-                    {
-                        "auth_failure": "true",
-                        "auth_classification": "credential_source_conflict",
-                        "credential_source": "CONFLICT",
-                        "pair_complete": "false",
-                    }
-                )
-            errors.append(source_error)
-            stale_items = [
-                dict(row)
-                for row in _OPEN_ORDERS_LAST_GOOD_ITEMS.get(f"bybit:{account}", [])
-                if isinstance(row, dict)
-            ]
-            for row in stale_items:
-                row["source_stale"] = True
-                row["stale_reason"] = (
-                    "Bybit collection failed; showing last-known-good broker state."
-                )
-            items.extend(stale_items)
-
-    async def bounded_mode(broker, account, collector):
-        token = _OPEN_ORDERS_READ_SCOPE.set(True)
-        try:
-            await _open_orders_budget(collector(account), _OPEN_ORDERS_ACCOUNT_SECONDS,
-                                      f"{broker} {account} collection")
-        except Exception as exc:
-            errors.append({"broker": broker, "account": account, "source_type": "collection",
-                           "endpoint": "open-orders collection", "message": _safe_bybit_diagnostic_text(str(exc))})
-        finally:
-            _OPEN_ORDERS_READ_SCOPE.reset(token)
-
-    await asyncio.gather(*(bounded_mode(broker, account, collector)
-                           for broker, collector in (("OANDA", collect_oanda), ("Bybit", collect_bybit))
-                           for account in ("live", "demo")))
-
+def _open_orders_payload(items, errors, warnings, collection_version, coverage_complete=False):
     items.sort(key=lambda row: (0 if str(row.get("broker")).lower() == "oanda" else 1,
                                 0 if row.get("account") == "live" else 1))
     live_broker_items = list(items)
     pending_diagnostics: Dict[str, int] = {}
     pending = _load_pending_webhooks()
-    coverage_complete = not errors and not warnings and int(_OPEN_ORDERS_CACHE.get("version") or 0) == collection_version
+    coverage_complete = coverage_complete and not errors and not warnings and int(_OPEN_ORDERS_CACHE.get("version") or 0) == collection_version
     if pending and coverage_complete:
         pending, pending_changed = _clean_pending_webhooks_for_open_items(
             pending, items, diagnostics=pending_diagnostics
@@ -36084,8 +36134,8 @@ async def _collect_open_orders(collection_version: int) -> JSONResponse:
             _invalidate_open_orders_cache()
             _schedule_dropbox_upload_state_backup()
     else:
-        pending_diagnostics["input_records"] = 0
-        pending_diagnostics["active_records"] = 0
+        pending_diagnostics["input_records"] = len(pending)
+        pending_diagnostics["active_records"] = len(pending)
 
     live_broker_positions = sum(
         1
@@ -36313,14 +36363,7 @@ async def _collect_open_orders(collection_version: int) -> JSONResponse:
 
     version_unchanged = int(_OPEN_ORDERS_CACHE.get("version") or 0) == collection_version
     payload["refresh_superseded"] = not version_unchanged
-    if version_unchanged:
-        _OPEN_ORDERS_CACHE["payload"] = dict(payload)
-        _OPEN_ORDERS_CACHE["expires_at"] = time.time() + _OPEN_ORDERS_CACHE_TTL_SECONDS
-    if not errors and version_unchanged:
-        _OPEN_ORDERS_CACHE["last_success_at"] = updated_at
-        payload["last_success_at"] = updated_at
-
-    return JSONResponse(payload)
+    return payload
 
 
 @app.get("/api/recent-trades")
