@@ -2755,7 +2755,17 @@ eval(fs.readFileSync(__JS_PATH__,'utf8'));
   const hooks=window.__openOrdersTestHooks;await flush();
   const initial={text:empty.textContent,state:hooks.getState(),badge:badge.textContent};
   const event={type:'state-changed',action:'submit',eventId:'one',broker:'bybit',account:'demo',category:'linear',
-orderId:'submitted',submittedAt:Date.now()};
+orderId:'submitted',symbol:'BTCUSDT',submittedAt:Date.now()};
+  const freshDifferent={...matching,id:'different',order_link_id:'different-link',
+calculation_context_id:'different-context',opened_at:event.submittedAt};
+  const identityChecks=['orderId','orderLinkId','calculationContextId'].map(key=>{
+    const supplied={...event,orderId:undefined,[key]:'expected'};
+    const rowKey={orderId:'id',orderLinkId:'order_link_id',calculationContextId:'calculation_context_id'}[key];
+    return {mismatch:hooks.itemMatchesSubmission(freshDifferent,supplied),
+match:hooks.itemMatchesSubmission({...freshDifferent,[rowKey]:'expected'},supplied)};
+  });
+  const fallback=hooks.itemMatchesSubmission(freshDifferent,{...event,orderId:undefined,symbol:'BTCUSDT'});
+  const oneOfSeveral=hooks.itemMatchesSubmission(freshDifferent,{...event,orderLinkId:'different-link'});
   hooks.handleStateChange(event);hooks.handleStateChange(event);await flush();
   virtual=65000;
   const reads=urls.filter(url=>!url.includes('/version')).length;
@@ -2765,7 +2775,10 @@ orderId:'submitted',submittedAt:Date.now()};
   await hooks.pollVersion();await flush();
   const stale={state:hooks.getState(),ids:window.__openOrdersItems.map(row=>row.id),errors:window.__openOrdersErrors,badge:badge.textContent};
   virtual=130000;
-  revision=3;snapshot={...snapshot,progress_revision:revision,items:[matching],errors:[unrelated]};
+  revision=3;snapshot={...snapshot,progress_revision:revision,items:[freshDifferent],errors:[unrelated]};
+  await hooks.pollVersion();await flush();
+  const mismatched={state:hooks.getState(),ids:window.__openOrdersItems.map(row=>row.id),badge:badge.textContent};
+  revision=4;snapshot={...snapshot,progress_revision:revision,items:[matching],errors:[unrelated]};
   await hooks.pollVersion();await flush();
   const confirmed={state:hooks.getState(),ids:window.__openOrdersItems.map(row=>row.id),errors:window.__openOrdersErrors,badge:badge.textContent};
   mode='body';await Promise.all([hooks.refresh('manual'),hooks.refresh('manual')]);
@@ -2778,23 +2791,28 @@ orderId:'submitted',submittedAt:Date.now()};
   await hooks.pollVersion();await flush();
   const hiddenCalls=urls.length-beforeHidden;
   document.hidden=false;
-  revision=4;snapshot={...snapshot,progress_revision:revision,items:[{...matching,id:'hidden'}]};
+  revision=5;snapshot={...snapshot,progress_revision:revision,items:[{...matching,id:'hidden'}]};
   handlers.visibilitychange();await flush();
   const visible={state:hooks.getState(),badge:badge.textContent};
-  revision=5;snapshot={version:1,progress_revision:revision,items:[],errors:[],warnings:[],pending:false,
+  revision=6;snapshot={version:1,progress_revision:revision,items:[],errors:[],warnings:[],pending:false,
 core_complete:true,empty_confirmed:true,sources:[{state:'complete'}]};
   await hooks.refresh('manual');
-  process.stdout.write(JSON.stringify({initial,pending,stale,confirmed,failed,recovered,hiddenCalls,visible,
+  process.stdout.write(JSON.stringify({identityChecks,fallback,oneOfSeveral,initial,pending,stale,mismatched,confirmed,failed,recovered,hiddenCalls,visible,
 emptyText:empty.textContent,mutations,active,maxActive,timers:timers.size,forced:urls.filter(url=>url.includes('force=1')).length}));
 })().catch(error=>{console.error(error);process.exit(1);});
 """.replace("__JS_PATH__", json.dumps(str(ROOT / "render" / "static" / "open_orders.js")))
     result = subprocess.run([node, "-e", harness], check=True, capture_output=True, text=True, timeout=10)
     state = json.loads(result.stdout)
+    assert state["identityChecks"] == [{"mismatch": False, "match": True}] * 3
+    assert state["fallback"] is True and state["oneOfSeveral"] is True
     assert state["initial"]["text"] == "Loading broker data"
     assert "No open" not in state["pending"]["text"]
     assert state["pending"]["state"]["pendingVisibilityChecks"] == 1 and state["pending"]["reads"] == 0
     assert state["stale"]["state"]["pendingVisibilityChecks"] == 1
     assert state["stale"]["errors"][0]["source_key"] == "live-failed"
+    assert state["mismatched"]["state"]["pendingVisibilityChecks"] == 1
+    assert state["mismatched"]["ids"] == ["different"]
+    assert "now visible" not in state["mismatched"]["badge"]
     assert state["confirmed"]["state"]["pendingVisibilityChecks"] == 0
     assert state["confirmed"]["ids"] == ["submitted"] and "now visible" in state["confirmed"]["badge"]
     assert state["confirmed"]["errors"][0]["source_key"] == "live-failed"

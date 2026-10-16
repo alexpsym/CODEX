@@ -170,6 +170,7 @@
     if(orderId&&eventValue(item,'id','order_id')===orderId)return true;
     if(orderLinkId&&eventValue(item,'order_link_id','orderLinkId')===orderLinkId)return true;
     if(contextId&&eventValue(item,'calculation_context_id','context_id')===contextId)return true;
+    if(orderId||orderLinkId||contextId)return false;
     if(!symbol)return false;
     if(eventValue(item,'instrument').toUpperCase()!==symbol)return false;
     const openedRaw=item?.opened_at;const openedNumber=Number(openedRaw);const opened=Number.isFinite(openedNumber)&&String(openedRaw??'').trim()!==''?(openedNumber<1_000_000_000_000?openedNumber*1000:openedNumber):Date.parse(String(openedRaw||''));const submitted=Number(event?.submittedAt||0);
