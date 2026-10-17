@@ -33,7 +33,7 @@ import time
 import traceback
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
-from decimal import Decimal, ROUND_CEILING, ROUND_DOWN, ROUND_FLOOR, ROUND_HALF_UP, ROUND_UP
+from decimal import Decimal, Inexact, localcontext, ROUND_CEILING, ROUND_DOWN, ROUND_FLOOR, ROUND_HALF_UP, ROUND_UP
 from datetime import datetime, timedelta, timezone
 from datetime import date as _date
 from dateutil.relativedelta import relativedelta
@@ -21918,6 +21918,7 @@ _CALCULATOR_INTENT_FIELDS = (
     "take_profit_ticks", "risk_reward", "timeframe", "is_test_trade", "setup", "pattern",
     "ema", "vwap", "aths_atls", "round_number", "planned_entry_price",
     "planned_stop_price", "planned_target_price", "quote_created_at_ms",
+    "calculator_distance_tick_size",
 )
 
 
@@ -21935,9 +21936,86 @@ def _context_scope_compatible(left, right):
     return not (a and b and _normalize_side_for_comparison(a) != _normalize_side_for_comparison(b))
 
 
+def _calculator_context_distance_unit(ctx, *, local_lookup=True):
+    """Resolve only a durable calculator unit, never a broker pip/mark-price guess."""
+    try:
+        identity = str(ctx.get("calculation_context_id") or "").strip()
+        if not identity:
+            return None
+        canonical = ctx.get("calculator_distance_tick_size")
+        if _context_value_known(canonical):
+            unit = Decimal(str(canonical))
+            return unit if unit.is_finite() and unit > 0 else None
+        candidates = [ctx] if isinstance(ctx.get("quote_result"), dict) else []
+        if (not candidates and local_lookup and str(ctx.get("broker")).lower() == "bybit"
+                and str(ctx.get("account")).lower() == "demo" and _calc_context_uses_repo_local()):
+            # Read the existing local exact-quote record only; no Dropbox/network or writes.
+            state = _load_json_file(BYBIT_DEMO_CALC_CONTEXT_LOCAL_PATH, {})
+            candidates = [row for row in state.get("items", []) if isinstance(row, dict)
+                          and str(row.get("calculation_context_id") or "") == identity]
+        units = []
+        for quote in candidates:
+            result = quote.get("quote_result") or {}
+            if (str(result.get("calculation_context_id") or "") != identity
+                    or not _context_scope_compatible(ctx, quote)
+                    or any(str(quote.get(key) or "").lower() != str(ctx.get(key) or "").lower()
+                           for key in ("broker", "account", "category"))
+                    or str(quote.get("instrument") or quote.get("symbol") or "").upper()
+                        != str(ctx.get("instrument") or ctx.get("symbol") or "").upper()
+                    or _normalize_side_for_comparison(quote.get("side")) != _normalize_side_for_comparison(ctx.get("side"))
+                    or str(quote.get("quote_created_at_ms")) != str(ctx.get("quote_created_at_ms"))
+                    or str(result.get("quote_created_at_ms")) != str(ctx.get("quote_created_at_ms"))):
+                return None
+            for planned, final in (("planned_entry_price", "entry_price"), ("planned_target_price", "target_price")):
+                accepted = Decimal(str(ctx.get(planned)))
+                quoted = Decimal(str(result.get(final)))
+                if not accepted.is_finite() or not quoted.is_finite() or accepted != quoted:
+                    return None
+            if str(ctx.get("asset") or "").lower() == "fx":
+                raw = result.get("chart_tick_size")  # Not MT5 point or a pip.
+            else:
+                raw = result.get("quote_tick_size", result.get("tick_size"))
+                if (result.get("tick_size") not in (None, "")
+                        and Decimal(str(result["tick_size"])) != Decimal(str(raw))):
+                    return None
+            unit = Decimal(str(raw))
+            if not unit.is_finite() or unit <= 0:
+                return None
+            units.append(unit)
+        return units[0] if units and all(unit == units[0] for unit in units) else None
+    except (ArithmeticError, TypeError, ValueError, AttributeError):
+        return None
+
+
+def _calculated_take_profit_ticks(ctx):
+    if (_context_value_known(ctx.get("take_profit_ticks"))
+            or str(ctx.get("target_mode") or "").lower() != "rr"):
+        return {}
+    unit = _calculator_context_distance_unit(ctx)
+    if unit is None:
+        return {}
+    try:
+        with localcontext() as precision:
+            precision.prec = 50
+            precision.traps[Inexact] = True  # Unknown rather than silently truncate a count.
+            entry = Decimal(str(ctx.get("planned_entry_price")))
+            target = Decimal(str(ctx.get("planned_target_price")))
+            if not entry.is_finite() or not target.is_finite() or entry <= 0 or target <= 0:
+                return {}
+            side = _normalize_side_for_comparison(ctx.get("side"))
+            if not ((side == "buy" and target > entry) or (side == "sell" and target < entry)):
+                return {}
+            ticks = abs(target - entry) / unit
+            return {"take_profit_ticks": _fmt_dec(ticks), "take_profit_ticks_source": "accepted_quote_prices",
+                    "take_profit_ticks_tick_size": _fmt_dec(unit)}
+    except (ArithmeticError, TypeError, ValueError):
+        return {}
+
+
 def _accepted_calculator_intent(payload, *, broker, account, category, instrument):
     """Use the exact durable quote's intent, never later mutable form/display values."""
     result = dict(payload)
+    result.pop("calculator_distance_tick_size", None)  # Resolve from durable quote, not Submit input.
     context_id = str(payload.get("calculation_context_id") or payload.get("context_id") or "").strip()
     if not context_id:
         return result
@@ -21952,7 +22030,8 @@ def _accepted_calculator_intent(payload, *, broker, account, category, instrumen
     if candidates:
         # Multiple stores may contain the same quote. Compare numeric meaning, not formatting.
         numeric = {"risk_value", "stop_loss_ticks", "take_profit_ticks", "risk_reward",
-                   "planned_entry_price", "planned_stop_price", "planned_target_price", "quote_created_at_ms"}
+                   "planned_entry_price", "planned_stop_price", "planned_target_price", "quote_created_at_ms",
+                   "calculator_distance_tick_size"}
         for field in _CALCULATOR_INTENT_FIELDS:
             values = [row[field] for row in candidates if _context_value_known(row.get(field))]
             if not values:
@@ -21969,6 +22048,12 @@ def _accepted_calculator_intent(payload, *, broker, account, category, instrumen
             if any(comparable(value) != comparable(values[0]) for value in values[1:]):
                 raise ValueError("Conflicting durable calculator snapshots for accepted context")
             result[field] = values[0]
+        units = [_calculator_context_distance_unit(row, local_lookup=False) for row in candidates]
+        known_units = [unit for unit in units if unit is not None]
+        if known_units:
+            if any(unit != known_units[0] for unit in known_units):
+                raise ValueError("Conflicting durable calculator distance units")
+            result["calculator_distance_tick_size"] = _fmt_dec(known_units[0])
     return result
 
 
@@ -22420,6 +22505,10 @@ def _enrich_open_item_with_trade_context(
         item["order_type"] = order_type.title() if order_type else item.get("order_type")
         item["stop_loss_ticks"] = ctx.get("stop_loss_ticks")
         item["take_profit_ticks"] = ctx.get("take_profit_ticks")
+        item["take_profit_ticks_submitted"] = ctx.get("take_profit_ticks")
+        item["take_profit_ticks_source"] = "submitted" if _context_value_known(ctx.get("take_profit_ticks")) else "unknown"
+        item.pop("take_profit_ticks_tick_size", None)
+        item.update(_calculated_take_profit_ticks(ctx))
         item["target_mode"] = ctx.get("target_mode")
         target_mode = str(ctx.get("target_mode") or "").strip().lower()
         item["target_mode_display"] = (
@@ -22493,6 +22582,8 @@ def _enrich_open_item_with_trade_context(
         )
         item["context_linked"] = True
     else:
+        for field in ("take_profit_ticks_submitted", "take_profit_ticks_source", "take_profit_ticks_tick_size"):
+            item.pop(field, None)
         if item.get("context_linked"):
             for field in _CALCULATOR_INTENT_FIELDS:
                 item.pop(field, None)
@@ -23847,6 +23938,7 @@ async def _place_bybit_order(
             "status": "PENDING_ENTRY" if (category == "linear" and order_type == "limit" and has_attached_order_create_tpsl) else "ACTIVE",
             "calculation_context_id": payload.get("calculation_context_id"),
             "quote_created_at_ms": intent.get("quote_created_at_ms"),
+            "calculator_distance_tick_size": intent.get("calculator_distance_tick_size"),
             "risk_mode": intent.get("risk_mode"),
             "risk_value": intent.get("risk_value"),
             "stop_loss_ticks": intent.get("stop_loss_ticks"),
@@ -24106,6 +24198,7 @@ async def _place_bybit_order(
                     "status": "ACTIVE",
                 "calculation_context_id": payload.get("calculation_context_id"),
                 "quote_created_at_ms": intent.get("quote_created_at_ms"),
+                "calculator_distance_tick_size": intent.get("calculator_distance_tick_size"),
                 "risk_mode": intent.get("risk_mode"),
                 "risk_value": intent.get("risk_value"),
                 "stop_loss_ticks": intent.get("stop_loss_ticks"),
@@ -24625,6 +24718,7 @@ async def _place_oanda_order(
                 "status": "ACTIVE",
                 "calculation_context_id": payload.get("calculation_context_id"),
                 "quote_created_at_ms": intent.get("quote_created_at_ms"),
+                "calculator_distance_tick_size": intent.get("calculator_distance_tick_size"),
                 "risk_mode": intent.get("risk_mode"),
                 "risk_value": intent.get("risk_value"),
                 "stop_loss_ticks": intent.get("stop_loss_ticks"),
@@ -30044,6 +30138,7 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
                 "notional": response_payload.get("notional"),
                 "last_price": response_payload.get("quote_last_price"),
                 "tick_size": response_payload.get("quote_tick_size"),
+                "calculator_distance_tick_size": _fmt_dec(tick_size),
                 "quote_created_at_ms": response_payload.get("quote_created_at_ms"),
                 "status": "QUOTED",
                 "quote_payload": payload,
@@ -30612,6 +30707,7 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
                         "take_profit": response_payload.get("target_price"),
                         "planned_target_price": response_payload.get("target_price"),
                         "quantity": response_payload.get("quantity"),
+                        "calculator_distance_tick_size": _fmt_dec(distance_tick_size),
                         "quote_created_at_ms": response_payload.get("quote_created_at_ms"),
                         "status": "QUOTED",
                     },

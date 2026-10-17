@@ -4286,3 +4286,177 @@ eval(fs.readFileSync(__JS_PATH__,'utf8'));
             assert row[column] == value, (column, row[column], value)
         assert row["Take-profit Ticks"] == "\u2014"
         assert row["Funding paid"] == row["Funding received"] == row["Net funding"] == "\u2014"
+
+
+
+def test_open_orders_derives_missing_take_profit_ticks_from_accepted_quote_prices(monkeypatch, tmp_path):
+    service = master_service
+    monkeypatch.setattr(service, "APP_PROFILE", "local")
+    monkeypatch.setattr(service, "TRADE_CONTEXTS_PATH", tmp_path / "accepted.json")
+    monkeypatch.setattr(service, "_TRADE_CONTEXTS_CACHE", {})
+    monkeypatch.setattr(service, "_calc_context_uses_repo_local", lambda: True)
+    monkeypatch.setattr(service, "BYBIT_DEMO_CALC_CONTEXT_LOCAL_PATH", tmp_path / "quotes.json")
+    monkeypatch.setattr(service, "BYBIT_DEMO_CALC_CONTEXT_LEGACY_LOCAL_PATH", tmp_path / "absent-legacy.json")
+    monkeypatch.setattr(service, "_schedule_dropbox_upload_state_backup", lambda: None)
+    monkeypatch.setattr(service, "_load_pending_webhooks", lambda: [])
+    monkeypatch.setattr(service, "_load_bounce_traders", lambda: [])
+    monkeypatch.setattr(service.script_manager, "get", lambda name: type("Script", (), {"is_running": False})())
+    monkeypatch.setattr(service, "_OPEN_ORDERS_CACHE", {"version": 900, "payload": None})
+    monkeypatch.setattr(service, "_OPEN_ORDERS_SERVICES", {})
+    monkeypatch.setattr(service, "_OPEN_ORDERS_LAST_GOOD_ITEMS", {})
+    clock = [0.]
+    monkeypatch.setattr(service, "_open_orders_now", lambda: clock[0])
+    monkeypatch.setattr(service, "_open_orders_configuration", lambda: ([], "derived-ticks"))
+    async def prohibited(*args, **kwargs):
+        raise AssertionError("No network, broker mutation or external effect")
+    monkeypatch.setattr(service.httpx.AsyncClient, "request", prohibited)
+    monkeypatch.setattr(service, "_bybit_signed_post", prohibited)
+    accepted = {
+        "calculation_context_id": "exact-accepted", "quote_created_at_ms": 1792212222060,
+        "broker": "bybit", "account": "demo", "asset": "crypto", "category": "linear",
+        "instrument": "BTCUSDT", "side": "Buy", "order_id": "accepted-order", "position_idx": 0,
+        "settlement_currency": "USDT", "order_type": "market", "stop_loss_ticks": "5000",
+        "target_mode": "rr", "take_profit_ticks": None, "risk_reward": "2", "risk_mode": "percent",
+        "risk_value": "1", "planned_entry_price": "81541.6", "planned_target_price": "82835.6",
+        "planned_stop_price": "81041.6", "setup": "Pullback", "pattern": "range", "timeframe": "5MIN",
+        "is_test_trade": False, "ema": "9", "vwap": "No", "aths_atls": "All-Time High", "round_number": "Yes",
+    }
+    quote = dict(accepted, status="QUOTED", quote_result={
+        "calculation_context_id": "exact-accepted", "quote_created_at_ms": 1792212222060,
+        "entry_price": "81541.6", "target_price": "82835.6", "tick_size": "0.1", "quote_tick_size": "0.1",
+    })
+    service._upsert_bybit_demo_calc_context(quote, invalidate_cache=False)
+    service._upsert_calculator_trade_context(accepted, invalidate_cache=False)
+    # Existing accepted context lacks the unit; exact legacy quote supplies it read-only.
+    assert not service._load_trade_contexts()[0].get("calculator_distance_tick_size")
+    future = service._accepted_calculator_intent(
+        {"calculation_context_id": "exact-accepted", "action": "buy", "calculator_distance_tick_size": "999"},
+        broker="bybit", account="demo", category="linear", instrument="BTCUSDT")
+    assert future["calculator_distance_tick_size"] == "0.1" and future["take_profit_ticks"] is None
+    fx = dict(accepted, broker="oanda", account="live", asset="fx", category="forex", instrument="EUR_USD",
+              side="Sell", order_id=None, position_idx=None, settlement_currency=None,
+              calculation_context_id="fx-short", planned_entry_price="1.100000",
+              planned_target_price="1.098765", planned_stop_price="1.1005")
+    fx["quote_result"] = {
+        "calculation_context_id": "fx-short", "quote_created_at_ms": 1792212222060,
+        "entry_price": "1.100000", "target_price": "1.098765",
+        "chart_tick_size": "0.00001", "tick_size": "0.000001",
+    }
+    service._upsert_calculator_trade_context(fx, invalidate_cache=False)
+    fx_intent = service._accepted_calculator_intent({"calculation_context_id": "fx-short", "action": "sell"},
+        broker="oanda", account="live", category="forex", instrument="EUR_USD")
+    assert fx_intent["calculator_distance_tick_size"] == "0.00001"
+    service._upsert_calculator_trade_context(dict(fx, **fx_intent, order_id="fx-order"), invalidate_cache=False)
+    persisted = service.TRADE_CONTEXTS_PATH.read_bytes()
+    quote_bytes = service.BYBIT_DEMO_CALC_CONTEXT_LOCAL_PATH.read_bytes()
+    service._TRADE_CONTEXTS_CACHE.clear()
+    reads = []
+    def start(job):
+        for broker, account, symbol, order in (("Bybit", "demo", "BTCUSDT", "accepted-order"),
+                                                ("OANDA", "live", "EUR_USD", "fx-order")):
+            async def reader(broker=broker, account=account, symbol=symbol, order=order):
+                reads.append(symbol)
+                row = {"broker": broker, "account": account, "instrument": symbol, "order_id": order,
+                       "id": order, "type": "Order", "side": "Sell" if broker == "OANDA" else "Buy",
+                       "category": "forex" if broker == "OANDA" else "linear", "size": 1, "status": "New",
+                       "current_price": "99999", "stop_loss": "1", "take_profit": "2"}
+                return {"items": [service._enrich_open_item_with_trade_context(row)], "errors": []}
+            job.add(symbol, {"broker": broker, "account": account, "source_type": "orders",
+                             "category": "forex" if broker == "OANDA" else "linear", "endpoint": "/fixture"}, reader)
+        job.publish()
+    monkeypatch.setattr(service._OpenOrdersJob, "start", start)
+    async def scenario():
+        async def snapshot(force=False):
+            return json.loads((await service.list_open_orders(force=force)).body)
+        payloads = []
+        try:
+            await snapshot()
+            job = service._OPEN_ORDERS_SERVICES[asyncio.get_running_loop()].job
+            await _open_orders_eventually(lambda: all(entry["task"] is None for entry in job.sources.values()))
+            for refresh in (False, True):
+                if refresh:
+                    clock[0] += 10
+                    service._TRADE_CONTEXTS_CACHE.clear()
+                    await snapshot(True)
+                    await _open_orders_eventually(lambda: all(entry["task"] is None for entry in job.sources.values()))
+                payload = await snapshot()
+                rows = {row["instrument"]: row for row in payload["items"]}
+                main = rows["BTCUSDT"]
+                assert main["context_linked"] and main["take_profit_ticks"] == "12940"
+                assert main["take_profit_ticks"] != "10000"  # Accepted cost-adjusted/snapped endpoint.
+                assert main["take_profit_ticks_source"] == "accepted_quote_prices"
+                assert main["take_profit_ticks_submitted"] is None and main["take_profit_ticks_tick_size"] == "0.1"
+                assert main["target_mode"] == "rr" and main["risk_reward"] == "2"
+                assert main["planned_entry_price"] == "81541.6" and main["planned_target_price"] == "82835.6"
+                assert main["setup"] == "Pullback" and main["pattern"] == "Range" and main["is_test_trade"] == "No"
+                assert rows["EUR_USD"]["take_profit_ticks"] == "123.5"
+                assert rows["EUR_USD"]["take_profit_ticks_tick_size"] == "0.00001"
+                payloads.append(payload)
+            assert reads.count("BTCUSDT") == reads.count("EUR_USD") == 2
+        finally:
+            await service._shutdown_open_orders_jobs()
+        return payloads
+    payloads = asyncio.run(asyncio.wait_for(scenario(), 10))
+    assert service.TRADE_CONTEXTS_PATH.read_bytes() == persisted
+    assert service.BYBIT_DEMO_CALC_CONTEXT_LOCAL_PATH.read_bytes() == quote_bytes
+    ctx = service._load_trade_contexts()[0]
+    assert ctx.get("take_profit_ticks") is None and ctx["target_mode"] == "rr" and ctx["risk_reward"] == "2"
+    for value in ("77.50", 0):
+        supplied = service._enrich_open_item_with_trade_context({}, dict(accepted, take_profit_ticks=value))
+        assert supplied["take_profit_ticks"] == value and supplied["take_profit_ticks_source"] == "submitted"
+    for unit in (None, "0", "-0.1", "NaN", "Infinity"):
+        unknown = dict(accepted, calculation_context_id="unavailable", calculator_distance_tick_size=unit)
+        row = service._enrich_open_item_with_trade_context({}, unknown)
+        assert row["take_profit_ticks"] is None and row["take_profit_ticks_source"] == "unknown"
+    for entry, target in (("NaN", "2"), ("1", "Infinity"), ("2", "1"), ("0", "2")):
+        invalid = dict(accepted, calculator_distance_tick_size="0.1", planned_entry_price=entry, planned_target_price=target)
+        assert service._enrich_open_item_with_trade_context({}, invalid)["take_profit_ticks"] is None
+    # Another quote/unit or conflicting exact snapshots cannot silently supply the unit.
+    conflict = dict(quote, quote_result=dict(quote["quote_result"], tick_size="0.2", quote_tick_size="0.2"))
+    service.BYBIT_DEMO_CALC_CONTEXT_LOCAL_PATH.write_text(json.dumps({"items": [quote, conflict]}), encoding="utf-8")
+    assert service._enrich_open_item_with_trade_context({}, accepted)["take_profit_ticks"] is None
+    other = dict(quote, calculation_context_id="unrelated")
+    service.BYBIT_DEMO_CALC_CONTEXT_LOCAL_PATH.write_text(json.dumps({"items": [other]}), encoding="utf-8")
+    assert service._enrich_open_item_with_trade_context({}, accepted)["take_profit_ticks"] is None
+
+    node = shutil.which("node")
+    assert node
+    harness = r"""
+const fs=require('fs');
+class Element{
+  constructor(){this.children=[];this.style={};this.textContent='';}
+  set textContent(value){this._text=String(value);}
+  get textContent(){return this._text;}
+  set innerHTML(value){this.children=[];}
+  appendChild(child){this.children.push(child);}
+  addEventListener(){}
+  querySelector(){return null;}
+}
+const tbody=new Element(),table=new Element();table.querySelector=()=>tbody;
+const elements={'open-orders-table':table};
+for(const id of ['open-orders-status','open-orders-empty','refresh-btn','open-orders-errors','open-orders-warnings'])elements[id]=new Element();
+global.window={__OPEN_ORDERS_TESTING__:true,addEventListener(){}};
+global.document={hidden:true,getElementById:id=>elements[id]||null,createElement:()=>new Element(),addEventListener(){}};
+global.BroadcastChannel=undefined;global.setInterval=()=>1;global.clearInterval=()=>{};
+const payloads=__PAYLOADS__;let current=payloads[0];
+global.fetch=async url=>({ok:true,text:async()=>JSON.stringify(String(url).includes('/version')?{version:current.version,progress_revision:current.progress_revision}:current)});
+eval(fs.readFileSync(__JS_PATH__,'utf8'));
+(async()=>{
+  await new Promise(resolve=>setImmediate(resolve));
+  const rendered=[];
+  for(const payload of payloads){
+    current=payload;
+    await window.__openOrdersTestHooks.refresh('progress');
+    rendered.push(tbody.children.map(row=>row.children.map(cell=>cell.textContent)));
+  }
+  process.stdout.write(JSON.stringify(rendered));
+})().catch(error=>{console.error(error);process.exit(1);});
+""".replace("__PAYLOADS__", json.dumps(payloads)).replace("__JS_PATH__", json.dumps(str(ROOT / "render/static/open_orders.js")))
+    result = subprocess.run([node, "-e", harness], capture_output=True, text=True, encoding="utf-8", check=True, timeout=10)
+    headers = re.findall(r"<th>(.*?)</th>", service.OPEN_ORDERS_TEMPLATE)
+    for rendered in json.loads(result.stdout):
+        rows = {row["Instrument"]: row for cells in rendered for row in [dict(zip(headers, cells))]}
+        assert rows["BTCUSDT"]["Take-profit Ticks"] == "12940"
+        assert rows["EUR_USD"]["Take-profit Ticks"] == "123.5"
+        assert rows["BTCUSDT"]["Target Mode"] == "Risk/Reward" and rows["BTCUSDT"]["Risk / Reward"] == "2"
+        assert rows["BTCUSDT"]["Setup"] == "Pullback" and rows["BTCUSDT"]["Pattern"] == "Range"
