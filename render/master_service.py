@@ -20065,8 +20065,9 @@ def _bybit_position_calculator_refs(position, executions, lifecycle):
     symbol = str(position.get("instrument") or "").upper()
     idx = int(_to_float(position.get("position_idx")) or 0)
     side = str(position.get("side") or "").lower()
+    identity_start = max(lifecycle, int(_to_float(position.get("opened_at")) or 0))
     rows = [row for row in executions if str(row.get("symbol") or "").upper() == symbol
-            and int(_to_float(row.get("execTime")) or 0) >= lifecycle
+            and int(_to_float(row.get("execTime")) or 0) >= identity_start
             and (int(_to_float(row.get("positionIdx")) or 0) == idx
                  if row.get("positionIdx") not in (None, "") else idx == 0)]
     net = sum((1 if str(row.get("side")).lower() == "buy" else -1)
@@ -20204,6 +20205,10 @@ async def _enrich_bybit_open_position_funding_impl(
                     metadata_warning = _open_item_context_warning(position)
                     if metadata_warning:
                         warnings.append(metadata_warning)
+            # Execution identity is independently useful; optional funding may remain pending.
+            job = _OPEN_ORDERS_JOB_SCOPE.get()
+            if job is not None:
+                job.publish_enrichment_progress(positions, warnings)
         if len(lifecycle_starts) != len(current_positions):
             raise ValueError("Current position lifecycle start could not be established")
         transactions = await _fetch_bybit_open_funding_transactions_cached(
@@ -36083,6 +36088,21 @@ class _OpenOrdersJob:
         self.add(f"Bybit/{account}/auth", {"broker": "Bybit", "account": account, "category": "account",
                  "source_type": "auth preflight", "endpoint": "/v5/user/query-api"}, auth, after=authenticated, config=config)
 
+    def publish_enrichment_progress(self, rows, warnings):
+        run = _OPEN_ORDERS_RUN_SCOPE.get()
+        if not self.authoritative or run is None:
+            return
+        entry, revision = run
+        if (self.sources.get(entry["key"]) is not entry or entry["run"] != revision
+                or entry["core"] or entry["state"] != "pending"
+                or entry["task"] is not asyncio.current_task()):
+            return
+        # Do not complete the source, reset failures/age, or mutate last-good caches here.
+        entry["items"] = copy.deepcopy(rows)
+        entry["warnings"] = self.diagnostics(entry, entry["warnings"] + list(warnings))
+        self.metrics["enrichment_progress_publications"] += 1
+        self.publish()
+
     async def ensure_funding(self, account):
         positions = [entry for entry in self.sources.values() if entry["meta"]["broker"] == "Bybit"
                      and entry["meta"]["account"] == account and entry["meta"]["source_type"] == "positions"]
@@ -36181,7 +36201,8 @@ class _OpenOrdersJob:
                     if enrichment_state != "pending":
                         row.update({field: value for field, value in enrichment.items()
                                     if field.startswith("funding_") or field in {"net_funding"}})
-                    if enrichment.get("raw_refs"):
+                    if (enrichment.get("raw_refs")
+                            and str(enrichment.get("opened_at")) == str(row.get("opened_at"))):
                         row["raw_refs"] = dict(enrichment["raw_refs"])
                         _enrich_open_item_with_trade_context(row)
                 if "MT4" in self.oanda_tags.get((row.get("account"), row.get("account_id")), []):
