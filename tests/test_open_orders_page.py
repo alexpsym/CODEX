@@ -3317,3 +3317,284 @@ eval(fs.readFileSync(__JS_PATH__,'utf8'));
             assert row[column] == value, (column, row[column], value)
         assert row["Take-profit Ticks"] == "\u2014"
         assert row["Funding paid"] == row["Funding received"] == row["Net funding"] == "\u2014"
+
+
+def test_open_orders_links_realistic_demo_position_to_accepted_calculator_context(monkeypatch, tmp_path):
+    service = master_service
+    monkeypatch.setattr(service, "APP_PROFILE", "local")
+    monkeypatch.setattr(service, "TRADE_CONTEXTS_PATH", tmp_path / "accepted-contexts.json")
+    monkeypatch.setattr(service, "_TRADE_CONTEXTS_CACHE", {})
+    monkeypatch.setattr(service, "_schedule_dropbox_upload_state_backup", lambda: None)
+    monkeypatch.setattr(service, "_OPEN_ORDERS_CACHE", {"version": 700, "payload": None})
+    monkeypatch.setattr(service, "_OPEN_ORDERS_SERVICES", {})
+    monkeypatch.setattr(service, "_OPEN_ORDERS_LAST_GOOD_ITEMS", {})
+    monkeypatch.setattr(service, "_load_pending_webhooks", lambda: [])
+    monkeypatch.setattr(service, "_load_bounce_traders", lambda: [])
+    monkeypatch.setattr(service.script_manager, "get", lambda name: type("Script", (), {"is_running": False})())
+    monkeypatch.setattr(service, "_record_outbound_traffic", lambda *a, **k: None)
+    clock = [0.0]
+    monkeypatch.setattr(service, "_open_orders_now", lambda: clock[0])
+    phase = [1]
+    mark = ["81550"]
+    config = {"base_url": "https://bybit.fixture", "api_key": "fixture", "api_secret": "fixture", "key_source": "fixture"}
+    monkeypatch.setattr(service, "_open_orders_configuration", lambda: ([("Bybit", "demo", config)], "fixture"))
+    opened = int(service.time.time() * 1000) - 60000
+    context = {
+        "broker": "bybit", "asset": "crypto", "account": "demo", "category": "linear",
+        "instrument": "BTCUSDT", "side": "Buy", "position_idx": 0, "settlement_currency": "USDT",
+        "calculation_context_id": "accepted-quote", "order_id": "accepted-order", "order_link_id": "accepted-link",
+        "order_type": "market", "stop_loss_ticks": "5000", "target_mode": "rr", "risk_reward": "2",
+        "risk_mode": "percent", "risk_value": "1", "timeframe": "5MIN", "is_test_trade": True,
+        "setup": "Pullback", "pattern": "range", "ema": "9", "vwap": "Yes",
+        "aths_atls": "All-Time High", "round_number": "Yes",
+        "webhook_mode": "No", "webhook_status": "Not used",
+        "planned_entry_price": "81541.6", "planned_stop_price": "81041.6", "planned_target_price": "82835.6",
+        "quantity": ".005", "status": "ACTIVE",
+    }
+    service._upsert_calculator_trade_context(context, invalidate_cache=False)
+    service._TRADE_CONTEXTS_CACHE.clear()  # The scheduled readers must load durable data.
+    calls = {"executions": 0, "funding": 0}
+    ranges, clients = [], []
+    monkeypatch.setattr(service, "_BYBIT_TIME_OFFSET_CACHE", {})
+    monkeypatch.setattr(service, "_BYBIT_OPEN_FUNDING_CACHE", {})
+    expected = {
+        "broker": "Bybit", "account": "demo", "asset": "crypto", "category": "linear",
+        "instrument": "BTCUSDT", "side": "Buy", "size": 0.005, "entry_price": "81541.6",
+        "stop_loss": "81041.6", "take_profit": "82835.6",
+        "order_type": "Market", "stop_loss_ticks": "5000", "target_mode": "rr",
+        "target_mode_display": "Risk/Reward", "risk_reward": "2", "risk_mode": "percent",
+        "risk_mode_display": "Percent", "risk_value": "1", "risk_value_display": "1%", "risk_unit": "%",
+        "timeframe": "5MIN", "is_test_trade": "Yes", "setup": "Pullback", "pattern": "Range", "ema": "9",
+        "vwap": "Yes", "aths_atls": "All-Time High", "round_number": "Yes",
+        "webhook_mode": "No", "webhook_status": "Not used",
+        "planned_entry_price": "81541.6", "planned_stop_price": "81041.6", "planned_target_price": "82835.6",
+    }
+
+    async def scenario():
+        executions_ready, execution_gate = asyncio.Event(), asyncio.Event()
+        funding_ready, funding_gate = asyncio.Event(), asyncio.Event()
+        async def auth(**kwargs): return {}
+        real_client = service.httpx.AsyncClient
+        async def transport(request):
+            assert request.method == "GET", "Broker mutations are prohibited"
+            path, params = request.url.path, request.url.params
+            rows, cursor = [], ""
+            if path == "/v5/market/time":
+                return service.httpx.Response(200, json={"retCode": 0, "result": {"timeSecond": str(service.time.time())}})
+            elif path == "/v5/position/list":
+                if params.get("category") == "linear" and (params.get("symbol") or params.get("settleCoin") == "USDT"):
+                    rows = [{"symbol": "BTCUSDT", "side": "Buy", "positionIdx": 0, "size": ".005",
+                             "createdTime": "1763377208045", "openTime": 0,
+                             "seq": "700" if phase[0] == 1 else "900", "updatedTime": str(opened),
+                             "avgPrice": "81541.6", "markPrice": mark[0], "stopLoss": "81041.6",
+                             "takeProfit": "82835.6", "settleCoin": "USDT"}]
+            elif path == "/v5/execution/list":
+                calls["executions"] += 1
+                ranges.append(dict(params))
+                assert params["symbol"] == "BTCUSDT"
+                assert int(params["endTime"]) - int(params["startTime"]) <= service._BYBIT_MAX_WINDOW_MS
+                executions_ready.set()
+                await execution_gate.wait()
+                # Bybit execution rows need not contain positionIdx. createdTime is
+                # first-ever symbol creation; old unmatched history is not this cycle.
+                if not params.get("cursor"):
+                    rows = [{"symbol": "BTCUSDT", "execType": "Funding", "side": "Sell",
+                             "execQty": ".005", "execTime": str(opened + 1000), "execId": "funding-not-fill"}]
+                    cursor = "page-2"
+                else:
+                    assert params["cursor"] == "page-2"
+                    rows = [
+                        {"symbol": "BTCUSDT", "execType": "Trade", "side": "Buy", "execQty": ".005",
+                         "closedSize": "0", "seq": "700", "execTime": str(opened),
+                         "execId": "actual-fill", "orderId": "accepted-order", "orderLinkId": "accepted-link"},
+                        {"symbol": "BTCUSDT", "execType": "Trade", "side": "Sell", "execQty": ".023",
+                         "closedSize": ".023", "seq": "100", "execTime": str(opened - 100000),
+                         "execId": "prior-cycle-close", "orderId": "unrelated-prior-order"},
+                    ]
+            elif path == "/v5/account/transaction-log":
+                calls["funding"] += 1
+                funding_ready.set()
+                await funding_gate.wait()
+                # A definitive read failure stays unknown, without transport retries.
+                return service.httpx.Response(200, json={"retCode": 10005, "retMsg": "fixture funding unavailable"})
+            else:
+                assert path == "/v5/order/realtime", path
+            return service.httpx.Response(200, json={"retCode": 0, "result": {"list": rows, "nextPageCursor": cursor}})
+        def client_factory(**kwargs):
+            client = real_client(transport=service.httpx.MockTransport(transport), trust_env=False, **kwargs)
+            clients.append(client)
+            return client
+        monkeypatch.setattr(service, "_bybit_read_only_auth_preflight", auth)
+        monkeypatch.setattr(service.httpx, "AsyncClient", client_factory)
+        async def prohibited(*args, **kwargs):
+            raise AssertionError("No network, notifications, or broker submissions are permitted")
+        monkeypatch.setattr(service, "_bybit_signed_post", prohibited)
+
+        async def snapshot(force=False):
+            return json.loads((await service.list_open_orders(force=force)).body)
+        def assert_metadata(payload):
+            row = next(item for item in payload["items"] if item.get("broker") == "Bybit" and item.get("type") == "Position")
+            for field, value in expected.items():
+                assert row.get(field) == value, (field, row.get(field), value)
+            assert row["take_profit_ticks"] is None  # Not supplied/applicable in the RR snapshot.
+            assert all(row.get(field) is None for field in ("funding_paid", "funding_received", "net_funding"))
+            return row
+        rendered_payloads = []
+        try:
+            await snapshot()
+            owner = service._OPEN_ORDERS_SERVICES[asyncio.get_running_loop()]
+            job = owner.job
+            await asyncio.wait_for(executions_ready.wait(), 2)
+            initial = await snapshot()
+            assert len(initial["items"]) == 1
+            assert not initial["items"][0]["context_linked"] and calls == {"executions": 1, "funding": 0}
+            execution_gate.set()
+            await asyncio.wait_for(funding_ready.wait(), 2)
+            pending = await snapshot()
+            row = assert_metadata(pending)
+            assert row["raw_refs"]["order_ids"] == ["accepted-order"]
+            assert row["raw_refs"]["order_ids_complete"] and row["context_linked"]
+            assert row["execution_seq"] == "700"
+            assert pending["pending"] and not pending["empty_confirmed"] and not pending["errors"]
+            assert job.sources["Bybit/demo/funding"]["state"] == "pending"
+            assert job.sources["Bybit/demo/funding"]["task"] is not None
+            assert job.metrics["enrichment_progress_publications"] == 1
+            assert pending["progress_revision"] > initial["progress_revision"] and pending["version"] == initial["version"]
+            rendered_payloads.append(pending)
+            # Ordinary GET and Refresh join owned work; sparse persistence/reload cannot erase selections.
+            service._upsert_calculator_trade_context(dict(context, setup="", pattern="", ema=None, risk_value=""), invalidate_cache=False)
+            service._TRADE_CONTEXTS_CACHE.clear()
+            for deliberate in (False, True, False):
+                assert_metadata(await snapshot(deliberate))
+            assert calls == {"executions": 2, "funding": 1}
+            # Normal price changes do not replace the source or repeat the scan.
+            core = job.sources["Bybit/demo/linear/USDT/positions"]
+            enrichment = job.sources["Bybit/demo/funding"]
+            mark[0] = "81600"
+            gate = asyncio.Event()
+            original_reader = core["reader"]
+            async def delayed_core():
+                await gate.wait()
+                return await original_reader()
+            core["reader"] = delayed_core
+            job.launch(core)
+            retained = await snapshot()
+            retained_row = assert_metadata(retained)
+            assert retained_row["source_pending"] and not retained_row["source_stale"]
+            rendered_payloads.append(retained)
+            gate.set()
+            await _open_orders_eventually(lambda: core["task"] is None)
+            fresh = await snapshot()
+            assert_metadata(fresh)
+            assert fresh["items"][0]["current_price"] == "81600"
+            assert job.sources["Bybit/demo/funding"] is enrichment
+            assert enrichment["state"] == "pending" and enrichment["task"] is not None
+            assert calls == {"executions": 2, "funding": 1}
+
+            funding_gate.set()
+            await _open_orders_eventually(lambda: job.sources["Bybit/demo/funding"]["state"] == "failed")
+            failed = await snapshot()
+            assert_metadata(failed)
+            assert failed["warnings"] and calls == {"executions": 2, "funding": 1}
+            rendered_payloads.append(failed)
+
+            # Scheduled optional retry reuses proven executions within this source.
+            job.launch(enrichment)
+            await _open_orders_eventually(lambda: enrichment["task"] is None)
+            assert_metadata(await snapshot())
+            assert calls == {"executions": 2, "funding": 2}
+            assert [item.get("cursor") for item in ranges] == [None, "page-2"]
+            assert all(int(item["startTime"]) > 1763377208045 for item in ranges)
+
+            # Same symbol/size/index with a new sequence must not inherit the old
+            # cycle, even though Bybit createdTime never changes.
+            phase[0] = 2
+            await service._OPEN_ORDERS_SERVICES[asyncio.get_running_loop()].close()
+            service._OPEN_ORDERS_SERVICES.clear()
+            service._OPEN_ORDERS_CACHE["version"] += 1
+            service._TRADE_CONTEXTS_CACHE.clear()
+            await snapshot()
+            replacement = service._OPEN_ORDERS_SERVICES[asyncio.get_running_loop()].job
+            await _open_orders_eventually(lambda: replacement.sources.get("Bybit/demo/funding", {}).get("state") == "failed")
+            new = await snapshot()
+            new_row = next(item for item in new["items"] if item.get("type") == "Position")
+            assert new_row["opened_at"] == row["opened_at"]
+            assert not new_row["context_linked"] and new_row["setup"] is None and new_row["risk_value"] is None
+            assert not new_row["raw_refs"]["order_ids_complete"]
+            assert new_row["raw_refs"]["execution_provenance_reason"] == "Position/execution sequence not reconciled"
+            assert calls == {"executions": 4, "funding": 2}
+            # Durable reload of the original sequence resolves the same exact context.
+            phase[0] = 1
+            await service._OPEN_ORDERS_SERVICES[asyncio.get_running_loop()].close()
+            service._OPEN_ORDERS_SERVICES.clear()
+            service._OPEN_ORDERS_CACHE["version"] += 1
+            service._TRADE_CONTEXTS_CACHE.clear()
+            await snapshot()
+            reloaded = service._OPEN_ORDERS_SERVICES[asyncio.get_running_loop()].job
+            await _open_orders_eventually(lambda: reloaded.sources.get("Bybit/demo/funding", {}).get("state") == "failed")
+            assert_metadata(await snapshot())
+            assert calls == {"executions": 6, "funding": 3}
+        finally:
+            await service._shutdown_open_orders_jobs()
+        assert clients and all(client.is_closed for client in clients)
+        return rendered_payloads
+
+    payloads = asyncio.run(asyncio.wait_for(scenario(), 15))
+    node = shutil.which("node")
+    assert node
+    # Execute the unchanged production renderer against actual API snapshots from the scheduled pipeline.
+    harness = r"""
+const fs=require('fs');
+class Element{
+  constructor(){this.children=[];this.style={};this.textContent='';}
+  set textContent(value){this._text=String(value);}
+  get textContent(){return this._text;}
+  set innerHTML(value){this.children=[];}
+  appendChild(child){this.children.push(child);}
+  addEventListener(){}
+  querySelector(){return null;}
+}
+const tbody=new Element(),table=new Element();table.querySelector=()=>tbody;
+const elements={'open-orders-table':table};
+for(const id of ['open-orders-status','open-orders-empty','refresh-btn','open-orders-errors','open-orders-warnings'])elements[id]=new Element();
+global.window={__OPEN_ORDERS_TESTING__:true,addEventListener(){}};
+global.document={hidden:true,getElementById:id=>elements[id]||null,createElement:()=>new Element(),addEventListener(){}};
+global.BroadcastChannel=undefined;global.setInterval=()=>1;global.clearInterval=()=>{};
+const payloads=__PAYLOADS__;let current=payloads[0];
+global.fetch=async url=>({ok:true,text:async()=>JSON.stringify(String(url).includes('/version')?{version:current.version,progress_revision:current.progress_revision}:current)});
+eval(fs.readFileSync(__JS_PATH__,'utf8'));
+(async()=>{
+  await new Promise(resolve=>setImmediate(resolve));
+  const rows=[],confirmations=[];
+  for(const payload of payloads){
+    current=payload;
+    if(payload.items[0].source_pending)window.__openOrdersTestHooks.handleStateChange({
+      type:'state-changed',action:'submit',eventId:'retained',broker:'bybit',account:'demo',
+      category:'linear',orderId:'accepted-order',calculationContextId:'accepted-quote',submittedAt:Date.now()});
+    await window.__openOrdersTestHooks.refresh('progress');
+    rows.push(tbody.children[0].children.map(cell=>cell.textContent));
+    confirmations.push(window.__openOrdersTestHooks.getState().pendingVisibilityChecks);
+  }
+  process.stdout.write(JSON.stringify({rows,confirmations}));
+})().catch(error=>{console.error(error);process.exit(1);});
+""".replace("__PAYLOADS__", json.dumps(payloads)).replace("__JS_PATH__", json.dumps(str(ROOT / "render/static/open_orders.js")))
+    result = subprocess.run([node, "-e", harness], capture_output=True, text=True, encoding="utf-8", check=True, timeout=10)
+    headers = re.findall(r"<th>(.*?)</th>", service.OPEN_ORDERS_TEMPLATE)
+    cells = {
+        "Broker / Venue": "Bybit", "Account": "demo", "Asset": "crypto", "Category": "linear",
+        "Instrument": "BTCUSDT", "Side": "Buy", "Size": "0.005", "Entry / Order": "81541.6",
+        "Stop Loss": "81041.6", "Take Profit": "82835.6",
+        "Order Type": "Market", "Stop-loss Ticks": "5000", "Target Mode": "Risk/Reward",
+        "Risk / Reward": "2", "Risk Mode": "Percent", "Risk Value": "1%", "Timeframe": "5MIN",
+        "Test": "Yes", "Setup": "Pullback", "Pattern": "Range", "EMA": "9", "VWAP": "Yes",
+        "ATH / ATL": "All-Time High", "Round Number": "Yes", "Webhook Mode": "No", "Webhook Status": "Not used",
+        "Planned Entry": "81541.6", "Planned Stop": "81041.6", "Planned Target": "82835.6",
+    }
+    rendered_state = json.loads(result.stdout)
+    assert rendered_state["confirmations"][1] == 1  # Retained/pending evidence cannot confirm Submit.
+    for rendered in rendered_state["rows"]:
+        row = dict(zip(headers, rendered))
+        for column, value in cells.items():
+            assert row[column] == value, (column, row[column], value)
+        assert row["Take-profit Ticks"] == "\u2014"
+        assert row["Funding paid"] == row["Funding received"] == row["Net funding"] == "\u2014"

@@ -20018,66 +20018,134 @@ async def _fetch_bybit_orders_for_category(
     return [row for row in rows if isinstance(row, dict)], []
 
 
-def _bybit_position_lifecycle_start_ms(
-    position: Dict[str, object], executions: Sequence[Dict[str, object]]
-) -> Optional[int]:
-    symbol = str(position.get("instrument") or position.get("symbol") or "").strip().upper()
-    position_idx = int(_to_float(position.get("position_idx", position.get("positionIdx"))) or 0)
-    current_side = str(position.get("side") or "").strip().lower()
-    current_size = abs(_to_float(position.get("size")) or 0.0)
-    relevant: List[Dict[str, object]] = []
-    for execution in executions:
-        if not isinstance(execution, dict) or str(execution.get("symbol") or "").strip().upper() != symbol:
-            continue
-        execution_idx_raw = execution.get("positionIdx")
-        if execution_idx_raw not in (None, ""):
-            execution_idx = int(_to_float(execution_idx_raw) or 0)
-            if execution_idx != position_idx:
-                continue
-        elif position_idx != 0:
-            continue
-        relevant.append(execution)
-    relevant.sort(key=lambda row: int(_to_float(row.get("execTime")) or 0))
-    net = 0.0
-    lifecycle_start: Optional[int] = None
-    for execution in relevant:
-        qty = abs(_to_float(execution.get("execQty")) or 0.0)
-        side = str(execution.get("side") or "").strip().lower()
-        timestamp = int(_to_float(execution.get("execTime")) or 0)
-        if qty <= 0 or timestamp <= 0 or side not in {"buy", "sell"}:
-            continue
-        signed = qty if side == "buy" else -qty
-        before = net
-        after = before + signed
-        if abs(before) <= 1e-12 or before * after < 0:
-            lifecycle_start = timestamp
-        net = 0.0 if abs(after) <= 1e-12 else after
-    expected_sign = 1 if current_side == "buy" else -1 if current_side == "sell" else 0
-    if lifecycle_start is not None and expected_sign and net * expected_sign > 0:
-        tolerance = max(1e-9, current_size * 1e-6)
-        if current_size <= 0 or abs(abs(net) - current_size) <= tolerance:
-            return lifecycle_start
-    created = int(_to_float(position.get("opened_at", position.get("createdTime"))) or 0)
-    return created if created > 0 else None
+def _bybit_open_position_provenance_key(position):
+    # Prices, stops and display metadata are not execution/lifecycle identity.
+    fields = ("broker", "account", "account_id", "category", "instrument", "side",
+              "position_idx", "settlement_currency", "size", "opened_at",
+              "position_open_time", "execution_seq", "order_id", "order_link_id")
+    values = tuple(str(position.get(key) if position.get(key) is not None else "") for key in fields)
+    # Older payloads without a sequence/openTime cannot safely cache across updates.
+    if str(position.get("execution_seq")) in {"None", "", "-1"} and not (_to_float(position.get("position_open_time")) or 0):
+        values += (str(position.get("position_updated_at") or ""),)
+    return values
+
+
+def _bybit_position_execution_proof(position, executions):
+    """Reconstruct the current cycle backwards from the broker's current quantity.
+
+    createdTime is the first position ever created on this symbol, not this cycle.
+    A current execution sequence (or openTime) anchors a recent window; without
+    either, require the complete forward quantity ledger as well.
+    """
+    symbol = str(position.get("instrument") or position.get("symbol") or "").upper()
+    idx = int(_to_float(position.get("position_idx", position.get("positionIdx"))) or 0)
+    side = str(position.get("side") or "").lower()
+    size = abs(_to_float(position.get("size")) or 0)
+    expected = size * (1 if side == "buy" else -1)
+    tolerance = max(1e-9, size * 1e-6)
+    lower_bound = int(_to_float(position.get("position_open_time")) or _to_float(position.get("opened_at")) or 0)
+    rows = [row for row in executions if isinstance(row, dict)
+            and int(_to_float(row.get("execTime")) or 0) >= lower_bound
+            and str(row.get("symbol") or "").upper() == symbol
+            and row.get("execType") in (None, "", "Trade")
+            and (int(_to_float(row.get("positionIdx")) or 0) == idx
+                 if row.get("positionIdx") not in (None, "") else idx == 0)]
+    rows.sort(key=lambda row: (int(_to_float(row.get("execTime")) or 0),
+                              int(_to_float(row.get("seq")) or 0), str(row.get("execId") or "")))
+    if not rows or not size or side not in {"buy", "sell"}:
+        return None, [], False, "No scoped trade executions"
+    seq = str(position.get("execution_seq") if position.get("execution_seq") is not None else "")
+    open_time = int(_to_float(position.get("position_open_time")) or 0)
+    anchored = seq not in {"", "-1"}
+    latest_time = int(_to_float(rows[-1].get("execTime")) or 0)
+    if anchored and not any(str(row.get("seq")) == seq for row in rows
+                            if int(_to_float(row.get("execTime")) or 0) == latest_time):
+        return None, [], False, "Position/execution sequence not reconciled"
+    if not anchored and not open_time:
+        net = sum((1 if str(row.get("side")).lower() == "buy" else -1)
+                  * abs(_to_float(row.get("execQty")) or 0) for row in rows)
+        if abs(net - expected) > tolerance:
+            return None, [], False, "Execution provenance incomplete"
+    after = expected
+    current = []
+    for row in reversed(rows):
+        timestamp = int(_to_float(row.get("execTime")) or 0)
+        qty = _to_float(row.get("execQty"))
+        direction = str(row.get("side") or "").lower()
+        if not timestamp or qty is None or qty <= 0 or direction not in {"buy", "sell"}:
+            return None, [], False, "Malformed scoped trade execution"
+        if open_time and timestamp < open_time:
+            return None, [], False, "Current openTime not covered by executions"
+        signed = qty if direction == "buy" else -qty
+        before = after - signed
+        closed = _to_float(row.get("closedSize"))
+        expected_closed = min(abs(before), qty) if before * signed < 0 else 0
+        if closed is not None and abs(closed - expected_closed) > tolerance:
+            return None, [], False, "Execution closed quantity not reconciled"
+        current.append(row)
+        if abs(before) <= tolerance or before * after < 0:
+            opening = [entry for entry in current
+                       if str(entry.get("side") or "").lower() == side
+                       and abs(_to_float(entry.get("execQty")) or 0)
+                           > abs(_to_float(entry.get("closedSize")) or 0)]
+            complete = bool(opening) and all(entry.get("orderId") for entry in opening)
+            return timestamp, opening, complete, "" if complete else "Opening order identity missing"
+        after = before
+    return None, [], False, "Execution provenance incomplete"
+
+
+def _bybit_position_lifecycle_start_ms(position, executions):
+    return _bybit_position_execution_proof(position, executions)[0]
 
 
 def _bybit_position_calculator_refs(position, executions, lifecycle):
-    symbol = str(position.get("instrument") or "").upper()
-    idx = int(_to_float(position.get("position_idx")) or 0)
-    side = str(position.get("side") or "").lower()
-    identity_start = max(lifecycle, int(_to_float(position.get("opened_at")) or 0))
-    rows = [row for row in executions if str(row.get("symbol") or "").upper() == symbol
-            and int(_to_float(row.get("execTime")) or 0) >= identity_start
-            and (int(_to_float(row.get("positionIdx")) or 0) == idx
-                 if row.get("positionIdx") not in (None, "") else idx == 0)]
-    net = sum((1 if str(row.get("side")).lower() == "buy" else -1)
-              * abs(_to_float(row.get("execQty")) or 0) for row in rows)
-    expected = abs(_to_float(position.get("size")) or 0) * (1 if side == "buy" else -1)
-    opening = [row for row in rows if str(row.get("side") or "").lower() == side
-               and abs(_to_float(row.get("execQty")) or 0) > 0]
-    complete = bool(opening) and all(row.get("orderId") for row in opening) and abs(net - expected) <= max(1e-9, abs(expected) * 1e-6)
+    start, opening, complete, reason = _bybit_position_execution_proof(position, executions)
     return {"order_ids": sorted({str(row["orderId"]) for row in opening if row.get("orderId")}),
-            "order_ids_complete": bool(complete)}
+            "order_ids_complete": bool(complete and start == lifecycle),
+            "execution_provenance_reason": reason}
+
+
+async def _fetch_bybit_current_position_executions(position, *, base_url, api_key, api_secret, end_time):
+    # Read newest complete pages first. Expand only if they cannot prove the current
+    # cycle; never treat the age/window as a deadline or a matching heuristic.
+    earliest = int(_to_float(position.get("opened_at")) or 0)
+    open_time = int(_to_float(position.get("position_open_time")) or 0)
+    if open_time:
+        earliest = open_time
+    if earliest <= 0:
+        raise ValueError("Position creation/open timestamp unavailable; lifecycle unknown")
+    end = end_time
+    anchored = str(position.get("execution_seq")) not in {"None", "", "-1"} or open_time > 0
+    deduped = {}
+    while end >= earliest:
+        start = max(earliest, end - _BYBIT_MAX_WINDOW_MS)
+        rows = await _fetch_bybit_executions(
+            base_url=base_url, api_key=api_key, api_secret=api_secret,
+            category=str(position.get("category") or ""), start_time=start, end_time=end,
+            symbol=str(position.get("instrument") or ""))
+        for row in rows:
+            if isinstance(row, dict):
+                deduped[_bybit_execution_dedupe_key(row)] = row
+        if not anchored and start > earliest:
+            end = start - 1
+            continue
+        executions = list(deduped.values())
+        lifecycle, opening, complete, reason = _bybit_position_execution_proof(position, executions)
+        if lifecycle is not None:
+            break
+        # A missing current sequence or inconsistent quantities cannot be repaired
+        # by reading older executions after this latest page already has trades.
+        if reason in {"Position/execution sequence not reconciled", "Execution closed quantity not reconciled",
+                      "Malformed scoped trade execution"}:
+            break
+        end = start - 1
+    lifecycle, opening, complete, reason = _bybit_position_execution_proof(position, list(deduped.values()))
+    BYBIT_LOGGER.info("OPEN_ORDERS identity account=%s symbol=%s idx=%s size=%s created=%s open=%s seq=%s "
+                     "executions=%s lifecycle=%s opening_orders=%s complete=%s reason=%s",
+                     position.get("account"), position.get("instrument"), position.get("position_idx"),
+                     position.get("size"), position.get("opened_at"), open_time, position.get("execution_seq"),
+                     len(deduped), lifecycle, sorted({str(row.get("orderId")) for row in opening})[:8], complete, reason)
+    return list(deduped.values())
 
 
 def _bybit_transaction_dedupe_key(row: Mapping[str, object]) -> str:
@@ -20167,8 +20235,10 @@ async def _enrich_bybit_open_position_funding_impl(
     api_key: str,
     api_secret: str,
     account_context: str,
+    execution_cache=None,
 ) -> List[Dict[str, object]]:
     warnings: List[Dict[str, object]] = []
+    execution_cache = {} if execution_cache is None else execution_cache
     current_positions = [
         position for position in positions
         if isinstance(position, dict) and str(position.get("type") or "").lower() == "position"
@@ -20180,31 +20250,23 @@ async def _enrich_bybit_open_position_funding_impl(
     try:
         for category in sorted({str(position.get("category") or "") for position in current_positions}):
             scoped = [position for position in current_positions if str(position.get("category") or "") == category]
-            created_values = [
-                int(_to_float(position.get("opened_at")) or 0)
-                for position in scoped
-                if int(_to_float(position.get("opened_at")) or 0) > 0
-            ]
-            if not created_values:
-                continue
-            executions = await _fetch_bybit_executions_chunked(
-                base_url=base_url,
-                api_key=api_key,
-                api_secret=api_secret,
-                category=category,
-                start_time=min(created_values),
-                end_time=now_ms,
-            )
             for position in scoped:
+                identity = _bybit_open_position_provenance_key(position)
+                executions = execution_cache.get(identity)
+                if executions is None:
+                    executions = await _fetch_bybit_current_position_executions(position,
+                        base_url=base_url, api_key=api_key, api_secret=api_secret, end_time=now_ms)
                 lifecycle = _bybit_position_lifecycle_start_ms(position, executions)
+                position["raw_refs"] = dict(position.get("raw_refs") or {},
+                    **_bybit_position_calculator_refs(position, executions, lifecycle))
                 if lifecycle:
                     lifecycle_starts[id(position)] = lifecycle
-                    position["raw_refs"] = dict(position.get("raw_refs") or {},
-                        **_bybit_position_calculator_refs(position, executions, lifecycle))
-                    _enrich_open_item_with_trade_context(position)
-                    metadata_warning = _open_item_context_warning(position)
-                    if metadata_warning:
-                        warnings.append(metadata_warning)
+                    if _open_orders_authoritative() and position["raw_refs"]["order_ids_complete"]:
+                        execution_cache[identity] = executions
+                _enrich_open_item_with_trade_context(position)
+                metadata_warning = _open_item_context_warning(position)
+                if metadata_warning:
+                    warnings.append(metadata_warning)
             # Execution identity is independently useful; optional funding may remain pending.
             job = _OPEN_ORDERS_JOB_SCOPE.get()
             if job is not None:
@@ -20451,9 +20513,11 @@ async def _collect_bybit_open_items_impl(
                     "take_profit": position.get("takeProfit"),
                     "leverage": position.get("leverage")
                     or position.get("positionMargin"),
-                    # updatedTime is mutable and cannot establish the original
-                    # position-open window used for calculator-context linkage.
+                    # Bybit createdTime is the first-ever symbol position, not this cycle.
                     "opened_at": position.get("createdTime"),
+                    "position_open_time": position.get("openTime"),
+                    "execution_seq": position.get("seq"),
+                    "position_updated_at": position.get("updatedTime"),
                     "id": position.get("positionId") or position.get("positionIdx"),
                     "position_idx": position.get("positionIdx"),
                     "settlement_currency": position.get("settleCoin") or (
@@ -22286,7 +22350,7 @@ def _lookup_trade_context_for_open_item(item: Dict[str, object]) -> Optional[Dic
     identifiers = {key: str(value).strip() for key, value in identifiers.items() if _context_value_known(value)}
     order_ids = {str(value) for value in refs.get("order_ids", []) if _context_value_known(value)}
     if refs.get("order_ids_complete") is False:
-        item["context_link_reason"] = "Execution provenance incomplete"
+        item["context_link_reason"] = refs.get("execution_provenance_reason") or "Execution provenance incomplete"
         return None
     contexts = [ctx for ctx in _load_trade_contexts()
                 if all(str(ctx.get(field) or "").strip().lower() == str(item.get(field) or "").strip().lower()
@@ -25112,6 +25176,7 @@ async def _fetch_bybit_executions(
     start_time: int,
     end_time: int,
     cursor: Optional[str] = None,
+    symbol: Optional[str] = None,
 ) -> List[Dict[str, object]]:
     rows: List[Dict[str, object]] = []
     next_cursor: Optional[str] = cursor
@@ -25123,6 +25188,8 @@ async def _fetch_bybit_executions(
             "endTime": str(end_time),
             "limit": "100",
         }
+        if symbol:
+            params["symbol"] = symbol
         if next_cursor:
             params["cursor"] = next_cursor
         payload = await _open_orders_scoped_read(_bybit_signed_get(
@@ -25135,6 +25202,10 @@ async def _fetch_bybit_executions(
         result = (payload.get("result") or {})
         if _OPEN_ORDERS_READ_SCOPE.get() and (not isinstance(result, dict) or not isinstance(result.get("list"), list)):
             raise ValueError("Bybit execution response did not contain result.list; lifecycle unknown")
+        if _OPEN_ORDERS_READ_SCOPE.get():
+            BYBIT_LOGGER.info("OPEN_ORDERS executions category=%s symbol=%s start=%s end=%s page=%s rows=%s next=%s",
+                             category, symbol, start_time, end_time, len(seen_cursors) + 1,
+                             len(result.get("list") or []), bool(result.get("nextPageCursor")))
         rows.extend(result.get("list") or [])
         next_cursor = str(result.get("nextPageCursor") or "").strip() or None
         if not next_cursor:
@@ -36109,7 +36180,7 @@ class _OpenOrdersJob:
         if not positions or any(entry["state"] in {"pending", "blocked"} for entry in positions):
             return
         rows = [dict(row) for entry in positions for row in entry["items"]]
-        fingerprint = hashlib.sha256(json.dumps(rows, sort_keys=True, default=str).encode()).hexdigest()
+        fingerprint = tuple(sorted(_bybit_open_position_provenance_key(row) for row in rows))
         if self.funding.get(account) == fingerprint:
             return
         self.funding[account] = fingerprint
@@ -36125,10 +36196,12 @@ class _OpenOrdersJob:
         if not rows:
             return
         config = positions[0]["config"]
+        execution_cache = {}  # Owned by this source; retired on scope/lifecycle invalidation.
         async def enrich():
             updated = copy.deepcopy(rows)
             warnings = await _enrich_bybit_open_position_funding(updated, base_url=config["base_url"],
-                api_key=config["api_key"], api_secret=config["api_secret"], account_context=account)
+                api_key=config["api_key"], api_secret=config["api_secret"], account_context=account,
+                execution_cache=execution_cache)
             return {"items": updated, "errors": [], "warnings": warnings}
         self.add(key, {"broker": "Bybit", "account": account, "category": "account", "source_type": "settled funding",
                       "endpoint": "/v5/account/transaction-log"}, enrich, core=False, config=config)
@@ -36198,11 +36271,12 @@ class _OpenOrdersJob:
                     row["stale_reason"] = "Broker source is " + state + "; retained prior row."
                 elif _open_orders_row_identity(row) in funding:
                     enrichment_state, enrichment = funding[_open_orders_row_identity(row)]
-                    if enrichment_state != "pending":
+                    same_provenance = (_bybit_open_position_provenance_key(enrichment)
+                                       == _bybit_open_position_provenance_key(row))
+                    if same_provenance and enrichment_state != "pending":
                         row.update({field: value for field, value in enrichment.items()
                                     if field.startswith("funding_") or field in {"net_funding"}})
-                    if (enrichment.get("raw_refs")
-                            and str(enrichment.get("opened_at")) == str(row.get("opened_at"))):
+                    if same_provenance and enrichment.get("raw_refs"):
                         row["raw_refs"] = dict(enrichment["raw_refs"])
                         _enrich_open_item_with_trade_context(row)
                 if "MT4" in self.oanda_tags.get((row.get("account"), row.get("account_id")), []):
