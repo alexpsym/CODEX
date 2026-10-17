@@ -20043,7 +20043,12 @@ def _bybit_position_execution_proof(position, executions):
     size = abs(_to_float(position.get("size")) or 0)
     expected = size * (1 if side == "buy" else -1)
     tolerance = max(1e-9, size * 1e-6)
-    lower_bound = int(_to_float(position.get("position_open_time")) or _to_float(position.get("opened_at")) or 0)
+    seq = str(position.get("execution_seq") if position.get("execution_seq") is not None else "")
+    anchored = seq not in {"", "-1"}
+    open_time = int(_to_float(position.get("position_open_time")) or 0)
+    # openTime can be later than the opening fill. A verified symbol+sequence
+    # and quantity ledger establish the cycle; openTime is not a fill cutoff.
+    lower_bound = int((0 if anchored else open_time) or _to_float(position.get("opened_at")) or 0)
     rows = [row for row in executions if isinstance(row, dict)
             and int(_to_float(row.get("execTime")) or 0) >= lower_bound
             and str(row.get("symbol") or "").upper() == symbol
@@ -20051,12 +20056,9 @@ def _bybit_position_execution_proof(position, executions):
             and (int(_to_float(row.get("positionIdx")) or 0) == idx
                  if row.get("positionIdx") not in (None, "") else idx == 0)]
     rows.sort(key=lambda row: (int(_to_float(row.get("execTime")) or 0),
-                              int(_to_float(row.get("seq")) or 0), str(row.get("execId") or "")))
+                              int(str(row.get("seq") or 0)), str(row.get("execId") or "")))
     if not rows or not size or side not in {"buy", "sell"}:
         return None, [], False, "No scoped trade executions"
-    seq = str(position.get("execution_seq") if position.get("execution_seq") is not None else "")
-    open_time = int(_to_float(position.get("position_open_time")) or 0)
-    anchored = seq not in {"", "-1"}
     latest_time = int(_to_float(rows[-1].get("execTime")) or 0)
     if anchored and not any(str(row.get("seq")) == seq for row in rows
                             if int(_to_float(row.get("execTime")) or 0) == latest_time):
@@ -20074,7 +20076,7 @@ def _bybit_position_execution_proof(position, executions):
         direction = str(row.get("side") or "").lower()
         if not timestamp or qty is None or qty <= 0 or direction not in {"buy", "sell"}:
             return None, [], False, "Malformed scoped trade execution"
-        if open_time and timestamp < open_time:
+        if not anchored and open_time and timestamp < open_time:
             return None, [], False, "Current openTime not covered by executions"
         signed = qty if direction == "buy" else -qty
         before = after - signed
@@ -20110,12 +20112,13 @@ async def _fetch_bybit_current_position_executions(position, *, base_url, api_ke
     # cycle; never treat the age/window as a deadline or a matching heuristic.
     earliest = int(_to_float(position.get("opened_at")) or 0)
     open_time = int(_to_float(position.get("position_open_time")) or 0)
-    if open_time:
+    sequence_anchor = str(position.get("execution_seq")) not in {"None", "", "-1"}
+    if open_time and not sequence_anchor:
         earliest = open_time
     if earliest <= 0:
         raise ValueError("Position creation/open timestamp unavailable; lifecycle unknown")
     end = end_time
-    anchored = str(position.get("execution_seq")) not in {"None", "", "-1"} or open_time > 0
+    anchored = sequence_anchor or open_time > 0
     deduped = {}
     while end >= earliest:
         start = max(earliest, end - _BYBIT_MAX_WINDOW_MS)
