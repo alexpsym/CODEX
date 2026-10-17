@@ -1,5 +1,5 @@
 (function () {
-  const TIMEFRAMES = [['1m','1MIN'], ['5m','5MIN'], ['15m','15MIN'], ['30m','30MIN'], ['1h','1H'], ['4h','4H'], ['1d','DAILY'], ['1w','WEEKLY'], ['1mo','MONTHLY']];
+  const TIMEFRAMES = [['','None'], ['1m','1MIN'], ['5m','5MIN'], ['15m','15MIN'], ['30m','30MIN'], ['1h','1H'], ['4h','4H'], ['1d','DAILY'], ['1w','WEEKLY'], ['1mo','MONTHLY']];
   const state = {
     account: 'live',
     asset: 'crypto',
@@ -10,7 +10,7 @@
     order_type: 'market',
     risk_mode: 'percent',
     fx_risk_mode: 'percent',
-    timeframe: '15m',
+    timeframe: '',
     webhook_mode: 'no',
     test_mode: 'no',
     setup: '',
@@ -1522,7 +1522,6 @@
       if (submitBtn.disabled) throw new Error('Calculate a fresh quote before submitting.');
       if (state.webhook_mode === 'yes') throw new Error('Webhook mode is enabled. Use the generated TradingView JSON instead of Submit Order.');
       if (state.quoteStatus !== 'ready' || !state.quote) throw new Error('Calculate first.');
-      if (!state.timeframe) throw new Error('Timeframe is required.');
       submitInFlight = true;
       startedSubmit = true;
       markSubmitClicked();

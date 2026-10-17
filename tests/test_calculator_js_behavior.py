@@ -91,7 +91,7 @@ const el=Object.fromEntries(ids.map(id=>[id,new Element(id)]));
 const groups={'risk-toggle':['fixed_aud','percent'],'asset-toggle':['crypto','fx'],'broker-toggle':['oanda','pepperstone'],'account-toggle':['live','demo'],'side-toggle':['buy','sell'],'order-toggle':['market','limit'],'webhook-toggle':['no','yes'],'test-toggle':['no','yes']};
 for(const [id,values] of Object.entries(groups))el[id].buttons=values.map(v=>new Button(v));
 el['calc-sl-ticks'].value='10';el['calc-rr'].value='2';el['calc-risk'].value='1';
-const calls=[];let quotePayload=null,submitPayload=null,intervalClears=0;
+const calls=[];let quotePayload=null,submitPayload=null,intervalClears=0,invalidQuote=false;const checks={};
 const response=data=>({ok:true,status:200,statusText:'OK',headers:{get:()=> 'application/json'},text:async()=>JSON.stringify(data)});
 const quote={asset:'fx',broker:'oanda',venue:'OANDA',resolved_venue:'OANDA',symbol:'USD_JPY',tick_size:'0.001',entry_price:'150.000',stop_price:'149.990',target_price:'150.020',target_distance:'0.020',quantity:'1000',estimated_fees_or_spread:'1',estimated_total_loss:'10',estimated_reward:'20',calculation_context_id:'ctx-usdjpy',quote_created_at_ms:123,quote_valid_for_submit:true};
 const fetch=async(url,opts={})=>{
@@ -99,7 +99,7 @@ const fetch=async(url,opts={})=>{
   if(url==='/api/calculator/bootstrap')return response({app_profile:'render',trendline_plans_available:false,webhook:{available:true}});
   if(url.startsWith('/api/calculator/prewarm-account'))return response({ready_for_quote:true,asset:'crypto'});
   if(url.startsWith('/api/calculator/instrument?'))return response({asset:'fx',broker:'oanda',symbol:'USD_JPY'});
-  if(url==='/api/calculator/quote'){quotePayload=body;return response(quote);}
+  if(url==='/api/calculator/quote'){quotePayload=body;if(Number(body.risk_value)<=0)return {...response({detail:'Risk must be positive'}),ok:false,status:400};return response({...quote,quote_valid_for_submit:!invalidQuote});}
   if(url==='/api/calculator/submit'){submitPayload=body;return response({ok:true,broker:'oanda',result:{order:{orderId:'test-order'}}});}
   if(url.startsWith('/api/calculator/journal-summary'))return response({status:'no_data'});
   if(url.startsWith('/api/instrument-specs'))return response({source:'oanda',resolved_symbol:'USD_JPY'});
@@ -117,9 +117,18 @@ const flush=()=>new Promise(resolve=>setImmediate(resolve));
   el['calc-symbol'].value='USDJPY';
   if(mode==='resolved') { el['calc-symbol'].listeners.input(); await flush(); await flush(); await flush(); }
   await el['calc-quote'].listeners.click();await flush();await flush();
+  if(mode==='classification') {
+    checks.quotePayload={...quotePayload};checks.unsetChoice=el['timeframe-toggle'].buttons.some(b=>b.dataset.v==='');
+    await el['calc-submit'].listeners.click();await flush();checks.submitPayload={...submitPayload};
+    el['calc-risk'].value='0';el['calc-risk'].listeners.input();await el['calc-quote'].listeners.click();await flush();
+    checks.invalidRiskDisabled=el['calc-submit'].disabled;checks.invalidRiskError=el['calc-error'].textContent;await el['calc-submit'].listeners.click();
+    el['calc-risk'].value='1';el['calc-risk'].listeners.input();invalidQuote=true;await el['calc-quote'].listeners.click();await flush();checks.invalidQuoteDisabled=el['calc-submit'].disabled;await el['calc-submit'].listeners.click();
+    invalidQuote=false;await el['webhook-toggle'].buttons.find(b=>b.dataset.v==='yes').click();await el['calc-quote'].listeners.click();await flush();checks.webhookDisabled=el['calc-submit'].disabled;await el['calc-submit'].listeners.click();
+    checks.submits=calls.filter(c=>c.url==='/api/calculator/submit').length;
+  }
   if(mode==='race') { await el['calc-submit'].listeners.click();await flush(); }
   const active=(id,v)=>!!el[id].buttons.find(b=>b.dataset.v===v)?.active;
-  console.log(JSON.stringify({calls,quotePayload,submitPayload,canonical:el['calc-canonical-symbol'].textContent,assetFx:active('asset-toggle','fx'),brokerOanda:active('broker-toggle','oanda'),riskVisible:el['risk-toggle-wrap'].style.display!=='none',brokerVisible:el['broker-toggle-wrap'].style.display!=='none',intervalClears,submitEnabled:!el['calc-submit'].disabled}));
+  console.log(JSON.stringify({checks,calls,quotePayload,submitPayload,canonical:el['calc-canonical-symbol'].textContent,assetFx:active('asset-toggle','fx'),brokerOanda:active('broker-toggle','oanda'),riskVisible:el['risk-toggle-wrap'].style.display!=='none',brokerVisible:el['broker-toggle-wrap'].style.display!=='none',intervalClears,submitEnabled:!el['calc-submit'].disabled}));
 })().catch(e=>{console.error(e);process.exitCode=1;});
 '''
     result = subprocess.run(
@@ -1106,3 +1115,20 @@ console.log('ok');
     result = subprocess.run([node, "-e", harness, str(JS_PATH)], capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "ok"
+
+
+def test_calculator_submits_without_pre_entry_classification():
+    data = _run_usdjpy_auto_route_harness("classification")["checks"]
+    assert data["unsetChoice"]
+    for payload in (data["quotePayload"], data["submitPayload"]):
+        for field in ("timeframe", "setup", "pattern", "ema", "vwap", "aths_atls", "round_number"):
+            assert payload[field] == ""
+        assert payload["risk_value"] == "1" and payload["risk_mode"] == "percent"
+    submitted = data["submitPayload"]
+    assert submitted["broker"] == "oanda" and submitted["symbol"] == "USD_JPY"
+    assert submitted["quantity"] == "1000" and submitted["stop_loss_price"] == "149.990"
+    assert submitted["take_profit_price"] == "150.020" and submitted["order_type"] == "market"
+    assert submitted["calculation_context_id"] == "ctx-usdjpy"
+    assert data["submits"] == 1
+    assert data["invalidRiskDisabled"] and "Risk must be positive" in data["invalidRiskError"]
+    assert data["invalidQuoteDisabled"] and data["webhookDisabled"]

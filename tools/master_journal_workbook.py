@@ -5278,6 +5278,9 @@ def early_trade_folder_rows(contexts: Sequence[Mapping[str, Any]]) -> List[Dict[
         if not isinstance(request, dict) or not request.get("order_id"):
             continue
         row = dict(request)
+        overlay = context.get("classification_overrides") or {}
+        if "is_test_trade" in overlay:
+            row["is_test_trade"] = overlay["is_test_trade"]
         row.update(id=f"accepted:{request['broker']}:{request['account']}:{request['order_id']}",
                    row_type="trade", symbol=request.get("instrument"),
                    asset_class=request.get("asset"),
@@ -5353,6 +5356,17 @@ def assign_trade_numbers_and_create_folders(
             contexts = json.loads(outbox.read_text(encoding="utf-8"))
             contexts = contexts.get("items", []) if isinstance(contexts, dict) else contexts
             pending = early_trade_folder_rows(contexts)
+            # Recheck the latest explicit Test under the allocation lock, including
+            # rows collected by a worker before this metadata save completed.
+            for row in rows:
+                scope, identities = _trade_folder_identity(row)
+                matching = [context for context in contexts
+                            if _trade_folder_identity(context)[0] == scope
+                            and identities.intersection(_trade_folder_identity(context)[1])]
+                if len(matching) == 1:
+                    overlay = matching[0].get("classification_overrides") or {}
+                    if "is_test_trade" in overlay and "is_test_trade" not in (row.get("manual_overrides") or {}):
+                        row["is_test_trade"] = overlay["is_test_trade"]
             if pending:
                 _assign_trade_numbers_locked(pending, workbook_path=workbook_path,
                     forex_root=forex_root, crypto_root=crypto_root, dry_run=dry_run, state=state)

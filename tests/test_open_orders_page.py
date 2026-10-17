@@ -4460,3 +4460,80 @@ eval(fs.readFileSync(__JS_PATH__,'utf8'));
         assert rows["EUR_USD"]["Take-profit Ticks"] == "123.5"
         assert rows["BTCUSDT"]["Target Mode"] == "Risk/Reward" and rows["BTCUSDT"]["Risk / Reward"] == "2"
         assert rows["BTCUSDT"]["Setup"] == "Pullback" and rows["BTCUSDT"]["Pattern"] == "Range"
+def test_open_orders_classification_editor_saves_without_losing_drafts_or_trading():
+    import shutil
+    import subprocess
+    node = shutil.which("node")
+    assert node
+    harness = r'''
+const fs=require('fs'),vm=require('vm'),assert=require('assert');
+class Element {
+  constructor(tag=''){this.tag=tag;this.children=[];this.parentNode=null;this.style={};this.textContent='';this.handlers={};this.dataset={};this.disabled=false;this.value='';}
+  set innerHTML(value){for(const child of this.children)child.parentNode=null;this.children=[];}
+  appendChild(child){this.insertBefore(child,null);return child;}
+  insertBefore(child,before){if(child===before)return;if(child.parentNode)child.remove();const i=before?this.children.indexOf(before):this.children.length;this.children.splice(i,0,child);child.parentNode=this;}
+  remove(){if(this.parentNode){const p=this.parentNode;p.children.splice(p.children.indexOf(this),1);this.parentNode=null;}}
+  addEventListener(event,fn){this.handlers[event]=fn;}
+  setAttribute(k,v){this[k]=v;}
+  querySelector(){return null;}
+  click(){return this.disabled?undefined:this.handlers.click?.();}
+}
+const tbody=new Element('tbody'),table=new Element('table');table.querySelector=()=>tbody;
+const elements={'open-orders-table':table};for(const id of ['open-orders-status','open-orders-empty','refresh-btn','open-orders-errors','open-orders-warnings'])elements[id]=new Element();
+const walk=node=>[node,...node.children.flatMap(walk)];const find=(root,text)=>walk(root).find(e=>e.tag==='button'&&e.textContent===text);
+const select=(root,field)=>walk(root).find(e=>e.tag==='select'&&e.dataset.field===field);
+const change=(el,value)=>{el.value=value;el.handlers.change();};
+global.window={__OPEN_ORDERS_TESTING__:true,addEventListener(){}};
+global.document={hidden:true,getElementById:id=>elements[id]||null,createElement:tag=>new Element(tag),addEventListener(){}};
+global.BroadcastChannel=undefined;global.setInterval=()=>1;global.clearInterval=()=>{};
+const calls=[];let mode='success',release;
+let row={broker:'Bybit',account:'demo',category:'linear',instrument:'BTCUSDT',side:'Buy',type:'Order',id:'accepted',classification_target:'exact-accepted-target',classification_version:0,
+  classification_values:{timeframe:'5m',setup:'Pullback',pattern:'range',ema:'9',vwap:'No',aths_atls:'All-Time Low',round_number:'No',is_test_trade:false,webhook_classification:'Yes'},webhook_mode:'No',webhook_status:'Not used'};
+let snapshot={version:1,progress_revision:1,items:[row],errors:[],warnings:[],core_complete:true,empty_confirmed:false};
+const reply=(data,status=200)=>({ok:status===200,status,statusText:'fixture',text:async()=>JSON.stringify(data),json:async()=>data});
+global.fetch=async(url,opts={})=>{
+  if(opts.method==='POST'){
+    assert.strictEqual(url,'/api/open-orders/classification');const body=JSON.parse(opts.body);calls.push({url,body});
+    if(mode==='hold')await new Promise(resolve=>release=resolve);
+    if(mode==='fail')return reply({detail:'Save failed; retry explicitly'},500);
+    if(mode==='conflict')return reply({detail:'Classification changed. Reload classification; draft retained.'},409);
+    const values={...row.classification_values,...body.changes};row={...row,classification_values:values,classification_version:row.classification_version+1};snapshot.items=[row];snapshot.progress_revision++;
+    return reply({ok:true,values,version:row.classification_version,item:row});
+  }
+  return reply(url.includes('/version')?{version:1,progress_revision:snapshot.progress_revision}:snapshot);
+};
+vm.runInThisContext(fs.readFileSync(process.argv[1],'utf8'));
+const flush=async()=>{for(let i=0;i<5;i++)await new Promise(resolve=>setImmediate(resolve));};
+(async()=>{
+  await flush();const hooks=window.__openOrdersTestHooks;const main=tbody.children[0];
+  assert(find(main,'Close')===undefined);assert(find(main,'Cancel'));
+  find(main,'Edit classification').click();const setup=select(main,'setup');assert.strictEqual(setup.value,'Pullback');
+  for(const field of Object.keys(row.classification_values))assert(select(main,field));
+  assert(select(main,'timeframe').children.some(e=>e.value===''));assert(select(main,'ema').children.some(e=>e.value==='20'));
+  change(setup,'Breakout');document.activeElement=setup;
+  snapshot={...snapshot,progress_revision:2,items:[{...row,current_price:'200'}]};await hooks.refresh('progress');
+  assert.strictEqual(tbody.children[0],main);assert.strictEqual(select(main,'setup'),setup);assert.strictEqual(document.activeElement,setup);assert.strictEqual(setup.value,'Breakout');assert.strictEqual(calls.length,0);
+  // Cancel the editor (the second Cancel is metadata-only), then reopen saved values.
+  walk(main).filter(e=>e.tag==='button'&&e.textContent==='Cancel')[1].click();assert.strictEqual(calls.length,0);
+  find(main,'Edit classification').click();assert.strictEqual(select(main,'setup').value,'Pullback');
+  change(select(main,'setup'),'Breakout');change(select(main,'vwap'),'');change(select(main,'is_test_trade'),'No');
+  mode='fail';await find(main,'Save').click();assert.strictEqual(select(main,'setup').value,'Breakout');assert(walk(main).some(e=>e.textContent.includes('Save failed')));
+  snapshot.progress_revision++;await hooks.refresh('progress');assert.strictEqual(calls.length,1);
+  mode='conflict';await find(main,'Save').click();assert.strictEqual(select(main,'setup').value,'Breakout');assert(walk(main).some(e=>e.textContent.includes('Reload classification; draft retained')));
+  mode='hold';const saving=find(main,'Save').click();await flush();assert(find(main,'Save').disabled);find(main,'Save').click();assert.strictEqual(calls.length,3);
+  release();await saving;assert(!select(main,'setup'));assert(walk(main).some(e=>e.textContent==='Saved'));
+  assert.deepStrictEqual(calls[2].body,{target:'exact-accepted-target',version:0,changes:{setup:'Breakout',vwap:''}});
+  find(main,'Edit classification').click();assert.strictEqual(select(main,'setup').value,'Breakout');
+  change(select(main,'setup'),'News Scalp');
+  const oldSave=find(main,'Save');snapshot={...snapshot,progress_revision:9,items:[{...row,type:'Position',id:'new-position',classification_target:'new-target'}]};await hooks.refresh('progress');
+  assert(oldSave.disabled);assert.strictEqual(select(main,'setup').value,'News Scalp');await oldSave.click();assert.strictEqual(calls.length,3);
+  const replacement=tbody.children.find(e=>e!==main);find(replacement,'Edit classification').click();assert.strictEqual(select(replacement,'setup').value,'Breakout');
+  // No proven linkage withholds the action, with an explanation.
+  snapshot={...snapshot,items:[{...row,id:'unlinked',classification_target:null,classification_unavailable:'No exact calculator linkage'}]};await hooks.refresh('progress');
+  const unlinked=tbody.children.find(e=>find(e,'Edit classification')?.title==='No exact calculator linkage');assert(find(unlinked,'Edit classification').disabled);
+  assert(calls.every(call=>call.url==='/api/open-orders/classification'));console.log('classification editor assertions passed');
+})().catch(error=>{console.error(error);process.exitCode=1;});
+'''
+    result = subprocess.run([node, "-e", harness, str(ROOT / "render/static/open_orders.js")], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    assert "classification editor assertions passed" in result.stdout

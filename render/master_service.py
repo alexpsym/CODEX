@@ -15,6 +15,7 @@ import threading
 import base64
 import ctypes
 import hashlib
+from functools import wraps
 import hmac
 import html
 from html.parser import HTMLParser
@@ -12335,7 +12336,7 @@ def _oanda_abs_charge(value: object) -> float:
 
 
 def _normalize_journal_profit_fields(row: Dict[str, object]) -> Dict[str, object]:
-    normalized = dict(row)
+    normalized = _apply_journal_classification(dict(row))
     net_profit = _to_float(normalized.get("net_profit"))
     realized_pnl = _to_float(normalized.get("realized_pnl"))
     if net_profit is None and realized_pnl is not None:
@@ -21856,6 +21857,15 @@ def _normalize_optional_price(value: object) -> Optional[str]:
 
 
 _TRADE_CONTEXTS_CACHE: Dict[str, object] = {"fingerprint": None, "items": None}
+_TRADE_CONTEXTS_LOCK = threading.RLock()
+
+
+def _context_transaction(function):
+    @wraps(function)
+    def locked(*args, **kwargs):
+        with _TRADE_CONTEXTS_LOCK:
+            return function(*args, **kwargs)
+    return locked
 
 def _trade_context_source_fingerprint() -> List[Dict[str, object]]:
     fingerprints = [_source_file_fingerprint(TRADE_CONTEXTS_PATH)]
@@ -21872,6 +21882,7 @@ def _trade_context_backup_fallback_enabled() -> bool:
     except Exception:
         return False
 
+@_context_transaction
 def _load_trade_contexts() -> List[Dict[str, object]]:
     fingerprint = _trade_context_source_fingerprint()
     cached_fp = _TRADE_CONTEXTS_CACHE.get("fingerprint")
@@ -21905,6 +21916,7 @@ def _load_trade_contexts() -> List[Dict[str, object]]:
     return [dict(entry) for entry in items]
 
 
+@_context_transaction
 def _save_trade_contexts(items: List[Dict[str, object]]) -> None:
     _save_json_file(TRADE_CONTEXTS_PATH, {"items": items, "updated_at": _utc_now_iso()})
     _TRADE_CONTEXTS_CACHE.clear()
@@ -21917,6 +21929,7 @@ def _calculator_context_path() -> Path:
 def _load_calculator_trade_contexts() -> List[Dict[str, object]]:
     return _load_trade_contexts()
 
+@_context_transaction
 def _save_calculator_trade_contexts(items: List[Dict[str, object]]) -> None:
     _save_trade_contexts(items)
 
@@ -22152,7 +22165,7 @@ def _upsert_calculator_trade_context(
     accepted_entry: bool = False,
 ) -> Dict[str, object]:
     try:
-        if accepted_entry and payload.get("order_id") and _normalize_test_trade_flag(payload.get("is_test_trade")) is not True:
+        if accepted_entry and payload.get("order_id"):
             payload = dict(payload)
             # Immutable accepted intent is the durable outbox. It is never pruned,
             # including cancelled pending entries whose screenshot numbers stay reserved.
@@ -22302,7 +22315,7 @@ def _prune_trade_contexts(items: List[Dict[str, object]]) -> List[Dict[str, obje
     for entry in items:
         status = str(entry.get("status") or "").strip().upper()
         updated_at = _parse_iso_datetime(entry.get("updated_at") or entry.get("closed_at"))
-        if status in {"CLOSED", "CANCELLED"} and updated_at and updated_at < cutoff and not entry.get("early_trade_folder_request"):
+        if status in {"CLOSED", "CANCELLED"} and updated_at and updated_at < cutoff and not entry.get("early_trade_folder_request") and not entry.get("classification_overrides"):
             continue
         kept.append(entry)
     return kept
@@ -22379,6 +22392,7 @@ def _merge_bybit_demo_calc_context_into_row(row: Dict[str, object], ctx: Dict[st
     return out
 
 
+@_context_transaction
 def _upsert_trade_context(payload: Dict[str, object]) -> Dict[str, object]:
     items = _load_trade_contexts()
     now_iso = _utc_now_iso()
@@ -22480,6 +22494,8 @@ def _upsert_trade_context(payload: Dict[str, object]) -> Dict[str, object]:
                     merged[k] = v
 
         for k, v in merged_payload.items():
+            if k in {"classification_overrides", "classification_version"}:
+                continue  # Only the version-checked metadata route owns this overlay.
             if k == "early_trade_folder_request" and merged.get(k):
                 continue
             if k == "created_at":
@@ -22512,6 +22528,7 @@ def _upsert_trade_context(payload: Dict[str, object]) -> Dict[str, object]:
     return merged_payload
 
 
+@_context_transaction
 def _mark_trade_context_closed_or_cancelled(*, pending_webhook_id: Optional[str] = None, order_id: Optional[str] = None, trade_id: Optional[str] = None, status: str = "CLOSED") -> None:
     items = _load_trade_contexts()
     now_iso = _utc_now_iso()
@@ -22533,6 +22550,143 @@ def _mark_trade_context_closed_or_cancelled(*, pending_webhook_id: Optional[str]
             changed = True
     if changed:
         _save_trade_contexts(_prune_trade_contexts(items))
+
+
+_CLASSIFICATION_FIELDS = {
+    "timeframe": _normalize_timeframe, "setup": _normalize_setup,
+    "pattern": _normalize_pattern, "ema": lambda value: _normalize_ema(str(value) if value is False or value == 0 else value), "vwap": _normalize_vwap,
+    "aths_atls": _normalize_aths_atls, "round_number": _normalize_round_number,
+    "is_test_trade": _normalize_test_trade_flag,
+    "webhook_classification": lambda value: _normalize_yes_no_criterion(value, "webhook classification"),
+}
+
+
+def _classification_writable_context(row, context):
+    # The display matcher may enrich incomplete scopes; write authority is stricter.
+    if str(row.get("broker") or "").lower() not in {"bybit", "oanda"}:
+        return False
+    if str(row.get("type") or "").lower() not in {"order", "position", "trade"}:
+        return False
+    if not context.get("order_id") and not context.get("trade_id"):
+        return False
+    if str(row.get("account_id") or "") != str(context.get("account_id") or ""):
+        return False
+    if any(str(row.get(key) if row.get(key) is not None else "").strip().lower()
+           != str(context.get(key) if context.get(key) is not None else "").strip().lower()
+           for key in ("broker", "account", "account_id", "category", "instrument")):
+        return False
+    refs = row.get("raw_refs") or {}
+    return bool((str(row.get("type")).lower() == "order" and str(row.get("id")) == str(context.get("order_id")))
+                or (row.get("trade_id") and str(row["trade_id"]) == str(context.get("trade_id")))
+                or (str(row.get("broker")).lower() == "oanda" and str(row.get("id")) == str(context.get("trade_id")))
+                or (refs.get("order_ids_complete") is True and context.get("order_id") in refs.get("order_ids", [])))
+
+
+def _classification_target(row, context):
+    # Stable across prices/publications, deliberately changes on order -> position.
+    identity = {key: row.get(key) for key in ("broker", "account", "account_id", "category", "instrument", "side", "type", "id", "position_idx")}
+    identity["accepted"] = {key: context.get(key) for key in ("order_id", "trade_id", "calculation_context_id", "context_id")}
+    return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+
+
+def _classification_for_journal(row):
+    from tools.master_journal_workbook import _trade_folder_identity
+    scope, identities = _trade_folder_identity(row)
+    if not identities:
+        return None
+    matches = []
+    refs = row.get("raw_refs") or {}
+    for context in _load_trade_contexts():
+        candidate_scope, candidate_ids = _trade_folder_identity(context)
+        if scope != candidate_scope or not identities.intersection(candidate_ids):
+            continue
+        if not _context_scope_compatible(dict(row, broker=scope[0], account=scope[1]), context):
+            continue
+        # A direct ID cannot contradict the matching alias. Grouped CSV order_ids
+        # include both opening and closing orders and are checked as a set instead.
+        if any(value and context.get(field) and str(value) != str(context[field])
+               for field, value in (("trade_id", row.get("trade_id") or refs.get("tradeId") or refs.get("tradeID")),
+                                    ("order_id", row.get("opening_order_id") or refs.get("opening_order_id")))):
+            continue
+        matches.append(context)
+    return matches[0] if len(matches) == 1 else None
+
+
+def _apply_journal_classification(row):
+    context = _classification_for_journal(row)
+    overlay = context.get("classification_overrides") if context else None
+    if not isinstance(overlay, dict) or not overlay:
+        return row
+    updated = dict(row)
+    updated.update(overlay)
+    metrics = dict(row.get("metrics") or {})
+    metrics.update({key: value for key, value in overlay.items() if key in {"timeframe", "is_test_trade"}})
+    updated["metrics"] = metrics
+    updated["classification_version"] = context["classification_version"]
+    # Existing journal/workbook manual edits retain their established precedence.
+    return _reapply_trading_journal_manual_overrides(updated)
+
+
+@app.post("/api/open-orders/classification")
+async def save_open_order_classification(payload: Dict[str, object]) -> Dict[str, object]:
+    if APP_PROFILE == "render":
+        raise HTTPException(status_code=403, detail="Classification editing is local only")
+    if set(payload) != {"target", "version", "changes"}:
+        raise HTTPException(status_code=400, detail="Expected target, version and classification changes only")
+    changes = payload.get("changes")
+    if not isinstance(changes, dict) or not changes or set(changes) - _CLASSIFICATION_FIELDS.keys():
+        raise HTTPException(status_code=400, detail="Only classification fields may be changed")
+    if type(payload.get("version")) is not int:
+        raise HTTPException(status_code=400, detail="Classification version is required")
+    try:
+        normalized = {key: normalize(changes[key]) for key, normalize in _CLASSIFICATION_FIELDS.items() if key in changes}
+        if "is_test_trade" in changes and changes["is_test_trade"] not in (None, "") and normalized["is_test_trade"] is None:
+            raise ValueError("Invalid Test classification")
+        if any(isinstance(value, (list, dict)) for value in changes.values()):
+            raise ValueError("Classification values must be scalar")
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    service = _OPEN_ORDERS_SERVICES.get(asyncio.get_running_loop())
+    job = service.job if service else None
+    snapshot = job.payload if job and job.authoritative else _OPEN_ORDERS_CACHE.get("payload")
+    from tools.master_journal_workbook import _trade_allocation_lock
+    with _trade_allocation_lock(), _TRADE_CONTEXTS_LOCK:
+        candidates = []
+        for row in (snapshot or {}).get("items", []):
+            context = _lookup_trade_context_for_open_item(dict(row))
+            if context and _classification_writable_context(row, context) and _classification_target(row, context) == payload["target"]:
+                candidates.append((row, context))
+        if len(candidates) != 1:
+            raise HTTPException(status_code=409, detail="Entry linkage changed or is unavailable. Reload this row; your draft has not been saved.")
+        row, context = candidates[0]
+        version = int(context.get("classification_version") or 0)
+        if payload["version"] != version:
+            raise HTTPException(status_code=409, detail="Classification changed in another editor. Reload classification before saving; your draft is retained.")
+        items = _load_trade_contexts()
+        index = next((i for i, item in enumerate(items) if item == context), None)
+        if index is None:
+            raise HTTPException(status_code=409, detail="Entry context changed; reload classification")
+        saved = dict(context)
+        saved["classification_overrides"] = {**context.get("classification_overrides", {}), **normalized}
+        saved["classification_version"] = version + 1
+        saved["classification_updated_at"] = _utc_now_iso()
+        # Test=Yes accepted entries retain their original outbox/provenance too.
+        # Older entries can acquire an outbox only with exact accepted references.
+        if normalized.get("is_test_trade") is False and not saved.get("early_trade_folder_request"):
+            saved["early_trade_folder_request"] = {key: context.get(key) for key in
+                ("broker", "account", "account_id", "category", "instrument", "asset", "side", "order_id", "order_link_id", "trade_id", "open_time", "created_at", "is_test_trade", "raw_refs")}
+        items[index] = saved
+        _save_trade_contexts(items)  # Acknowledgement only after the atomic durable write.
+    if "is_test_trade" in normalized:
+        _schedule_early_trade_folders()
+    if job and job.authoritative:
+        job.publish()  # Metadata-only publication; no broker generation invalidation.
+    elif snapshot:
+        for item in snapshot.get("items", []):
+            _enrich_open_item_with_trade_context(item)
+        snapshot["progress_revision"] = int(snapshot.get("progress_revision") or 0) + 1
+    effective = _enrich_open_item_with_trade_context(dict(row), saved)
+    return {"ok": True, "version": version + 1, "values": effective["classification_values"], "item": effective}
 
 
 def _lookup_trade_context_for_open_item(item: Dict[str, object]) -> Optional[Dict[str, object]]:
@@ -22593,7 +22747,8 @@ def _enrich_open_item_with_trade_context(
 ) -> Dict[str, object]:
     """Attach calculator intent without inventing it for broker-originated rows."""
 
-    ctx = context if isinstance(context, dict) else _lookup_trade_context_for_open_item(item)
+    accepted = context if isinstance(context, dict) else _lookup_trade_context_for_open_item(item)
+    ctx = dict(accepted, **accepted.get("classification_overrides", {})) if isinstance(accepted, dict) else None
     broker = str(item.get("broker") or "").strip()
     broker_norm = broker.lower()
     item["venue"] = broker or None
@@ -22633,7 +22788,7 @@ def _enrich_open_item_with_trade_context(
             item["risk_value_display"] = None
         item["risk_reward"] = ctx.get("risk_reward")
         item["timeframe"] = _normalize_journal_timeframe(
-            ctx.get("timeframe") or item.get("timeframe")
+            ctx.get("timeframe")
         )
         item["is_test_trade"] = _display_test_trade(ctx)
         item["setup"] = ctx.get("setup") or None
@@ -22719,6 +22874,15 @@ def _enrich_open_item_with_trade_context(
         ):
             item.setdefault(field, None)
         item["context_linked"] = False
+    item.pop("classification_target", None)
+    item["classification_values"] = {field: ctx.get(field) for field in _CLASSIFICATION_FIELDS} if ctx else {}
+    item["classification_version"] = int((accepted or {}).get("classification_version") or 0)
+    item["webhook_classification"] = ctx.get("webhook_classification") if ctx else None
+    if accepted and _classification_writable_context(item, accepted):
+        item["classification_target"] = _classification_target(item, accepted)
+        item.pop("classification_unavailable", None)
+    else:
+        item["classification_unavailable"] = item.get("context_link_reason") or "Exact accepted entry linkage unavailable"
     return item
 
 
@@ -25948,6 +26112,7 @@ def _normalize_bybit_closed_pnl_row(
 def _backfill_trade_row_context_fields(row: Dict[str, object]) -> Dict[str, object]:
     if not isinstance(row, dict):
         return row
+    row = _apply_journal_classification(row)
     current_timeframe = _normalize_timeframe(
         row.get("timeframe")
         or ((row.get("metrics") or {}).get("timeframe") if isinstance(row.get("metrics"), dict) else "")
@@ -26052,7 +26217,7 @@ def _backfill_trade_row_context_fields(row: Dict[str, object]) -> Dict[str, obje
             risk_dist = abs(entry - stop)
             if risk_dist > 0:
                 patched["r_multiple"] = move / risk_dist
-    return patched
+    return _apply_journal_classification(patched)
 
 
 def _normalize_side_for_comparison(value: object) -> str:
@@ -31735,6 +31900,9 @@ OPEN_ORDERS_TEMPLATE = """<!doctype html>
     .muted { color: #94a3b8; font-size: 13px; }
     .action-btn { border: 1px solid #334155; border-radius: 8px; background: #1f2937; color: #e5e7eb; padding: 5px 10px; cursor: pointer; }
     .action-btn[disabled] { opacity: .6; cursor: default; }
+    .classification-editor { min-width: 350px; max-width: 460px; white-space: normal; display: flex; flex-wrap: wrap; gap: 7px; padding: 8px 0; }
+    .classification-editor > div { width: 100%; }
+    .classification-editor select { background: #0f172a; color: #e5e7eb; border: 1px solid #475569; border-radius: 4px; }
     .error-box { display: none; margin-bottom: 10px; border: 1px solid #7f1d1d; background: #3f0d12; color: #fecaca; border-radius: 10px; padding: 10px 12px; }
     .error-box ul { margin: 8px 0 0; padding-left: 20px; }
     .warning-box { display: none; margin-bottom: 10px; border: 1px solid #92400e; background: #2b1d0e; color: #fde68a; border-radius: 8px; padding: 7px 10px; font-size: 12px; }
@@ -36499,6 +36667,7 @@ class _OpenOrdersJob:
                         _enrich_open_item_with_trade_context(row)
                 if "MT4" in self.oanda_tags.get((row.get("account"), row.get("account_id")), []):
                     row["account_label_suffix"] = "MT4"
+                _enrich_open_item_with_trade_context(row)
                 items.append(row)
             if stale:
                 warnings.append(dict(entry["meta"], source_key=key, message="Showing stale prior broker rows; awaiting a successful source read."))

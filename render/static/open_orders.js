@@ -143,8 +143,89 @@
     }
   };
   const renderActionCell=(row,cell,{allowAction=true}={})=>{const label=actionLabelFor(row); if(!allowAction||!label||!isActionableRow(row)){cell.textContent='—';return;} const required=['broker','account','category','instrument','id','type']; const missing=required.some((k)=>!String(row[k]??'').trim()); if(missing){cell.textContent='—';return;} const key=rowKey(row); const state=pendingManualActions.get(key); if(state&&['submitting','accepted_verifying'].includes(state.verifyStatus)){cell.textContent='Verifying...'; return;} const btn=document.createElement('button'); btn.type='button'; btn.className='action-btn'; btn.textContent=label; btn.addEventListener('click',()=>postClose(row,btn)); cell.appendChild(btn);};
-  const render=(items,errors=[],warnings=[],coverage=window.__openOrdersCoverage||{})=>{window.__openOrdersItems=Array.isArray(items)?items:[]; window.__openOrdersErrors=Array.isArray(errors)?errors:[]; window.__openOrdersWarnings=Array.isArray(warnings)?warnings:[]; if(!tbody) return; tbody.innerHTML=''; hasData=Boolean(items.length); renderDiagnostics(errorsBox,errorsList,errors,'Source errors'); renderDiagnostics(warningsBox,warningsList,warnings,'Source warnings'); if(!items.length){if(emptyState){emptyState.style.display='block';emptyState.textContent=coverage.empty_confirmed===true?'No open orders or positions.':coverage.pending?'Loading broker data':'Broker data incomplete';} return;} if(emptyState) emptyState.style.display='none';
-    items.forEach((item)=>{ if (pendingManualActions.has(rowKey(item))) return; const row=document.createElement('tr'); if(item.source_last_success_at)row.title='Last successful source read: '+formatTimestamp(item.source_last_success_at)+(item.source_pending?' (updating)':''); if(item.source_stale){row.className='stale-row';row.title=safeDiagnostic(item.stale_reason||'Last-known-good broker state')+(row.title?' '+row.title:'');} [item.venue||item.broker,resolveAccountLabel(item),item.asset,item.category,item.side,item.order_type,item.instrument,item.stop_loss_ticks,item.target_mode_display,item.take_profit_ticks,item.risk_mode_display,item.risk_value_display,item.risk_reward,item.timeframe,item.is_test_trade,item.setup,item.pattern,item.ema,item.vwap,item.aths_atls,item.round_number,item.webhook_mode,item.webhook_status,item.planned_entry_price,item.planned_stop_price,item.planned_target_price,item.type,item.size,item.entry_price||item.order_price,item.current_price,item.stop_loss,item.take_profit,item.leverage,item.type==='Position'?item.funding_paid:null,item.type==='Position'?item.funding_received:null,item.type==='Position'?item.net_funding:null,formatTimestamp(item.opened_at),item.status].forEach((v)=>{const td=document.createElement('td'); td.textContent=fmt(v); row.appendChild(td);}); const actionTd=document.createElement('td'); renderActionCell(item,actionTd,{allowAction:true}); row.appendChild(actionTd); tbody.appendChild(row); });
+  const classificationOptions = {
+    timeframe: ['','1m','5m','15m','30m','1h','4h','1d','1w','1mo'],
+    setup: ['','Pullback','Breakout','News Scalp'], pattern: ['','range','channel'],
+    ema: ['','9','20','Yes','No'], vwap: ['','Yes','No'],
+    aths_atls: ['','All-Time High','All-Time Low'], round_number: ['','Yes','No'],
+    is_test_trade: ['','Yes','No'], webhook_classification: ['','Yes','No']
+  };
+  const classificationLabels = {timeframe:'Timeframe',setup:'Setup',pattern:'Pattern',ema:'EMA',vwap:'VWAP',
+    aths_atls:'ATH / ATL',round_number:'Round number',is_test_trade:'Test',webhook_classification:'Webhook classification'};
+  const classificationRows = new Map();
+  const classificationKey = item => rowKey(item)+'|'+(item.classification_target||'unlinked');
+  const choiceValue = value => value===true?'Yes':value===false?'No':String(value??'');
+  const button = (label, action) => {const el=document.createElement('button');el.type='button';el.className='action-btn';el.textContent=label;el.addEventListener('click',action);return el;};
+  const updateEditorAvailability = entry => {
+    if(!entry.draft)return;
+    entry.save.disabled=entry.saving||!entry.present||!entry.item.classification_target;
+    entry.cancel.disabled=entry.saving;entry.reload.disabled=entry.saving||!entry.present;
+    for(const input of entry.inputs)input.disabled=entry.saving;
+    if(!entry.present)entry.feedback.textContent='Entry is no longer available. Draft retained; Cancel to discard.';
+  };
+  const openClassification = entry => {
+    if(entry.draft||!entry.item.classification_target)return;
+    entry.base={...entry.item.classification_values};entry.draft={};entry.version=entry.item.classification_version;entry.inputs=[];
+    const panel=document.createElement('div');panel.className='classification-editor';
+    const title=document.createElement('div');title.textContent=[entry.item.broker,resolveAccountLabel(entry.item),entry.item.instrument,entry.item.side,entry.item.type,entry.item.id].join(' / ');panel.appendChild(title);
+    for(const [field,options] of Object.entries(classificationOptions)){
+      const label=document.createElement('label');label.textContent=classificationLabels[field]+' ';
+      const select=document.createElement('select');select.dataset.field=field;
+      entry.inputs.push(select);
+      const current=choiceValue(entry.base[field]);
+      for(const value of options.includes(current)?options:[...options,current]){const option=document.createElement('option');option.value=value;option.textContent=value||'None';select.appendChild(option);}
+      select.value=current;
+      select.addEventListener('change',()=>{const value=select.value; if(value===choiceValue(entry.base[field]))delete entry.draft[field];else entry.draft[field]=field==='is_test_trade'?(value===''?null:value==='Yes'):value;});
+      label.appendChild(select);panel.appendChild(label);
+    }
+    entry.save=button('Save',async()=>{
+      if(entry.saving||!entry.present||!entry.item.classification_target)return;
+      if(!Object.keys(entry.draft).length){entry.feedback.textContent='No changes to save.';return;}
+      entry.saving=true;entry.feedback.textContent='Saving...';updateEditorAvailability(entry);
+      try{
+        const response=await fetch('/api/open-orders/classification',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({target:entry.item.classification_target,version:entry.version,changes:{...entry.draft}})});
+        const data=await response.json();if(!response.ok)throw new Error(parseApiError(data,response));
+        entry.item={...entry.item,...data.item,classification_values:data.values,classification_version:data.version};
+        entry.draft=null;panel.remove();entry.edit.disabled=!entry.present;entry.feedback.textContent='Saved';
+        const updated=(window.__openOrdersItems||[]).map(item=>classificationKey(item)===entry.key?entry.item:item);
+        render(updated,window.__openOrdersErrors||[],window.__openOrdersWarnings||[]);
+      }catch(error){entry.feedback.textContent=safeDiagnostic(error.message||error);}
+      finally{entry.saving=false;updateEditorAvailability(entry);}
+    });
+    entry.cancel=button('Cancel',()=>{if(entry.saving)return;entry.draft=null;panel.remove();entry.feedback.textContent='';entry.edit.disabled=!entry.present;render(window.__openOrdersItems||[],window.__openOrdersErrors||[],window.__openOrdersWarnings||[]);});
+    entry.reload=button('Reload classification',()=>{if(entry.saving||!entry.present)return;entry.draft=null;panel.remove();entry.feedback.textContent='';openClassification(entry);});
+    panel.appendChild(entry.save);panel.appendChild(entry.cancel);panel.appendChild(entry.reload);
+    entry.cell.appendChild(panel);entry.edit.disabled=true;updateEditorAvailability(entry);
+  };
+  const render=(items,errors=[],warnings=[],coverage=window.__openOrdersCoverage||{})=>{
+    window.__openOrdersItems=Array.isArray(items)?items:[];window.__openOrdersErrors=Array.isArray(errors)?errors:[];window.__openOrdersWarnings=Array.isArray(warnings)?warnings:[];
+    if(!tbody)return;hasData=Boolean(items.length);renderDiagnostics(errorsBox,errorsList,errors,'Source errors');renderDiagnostics(warningsBox,warningsList,warnings,'Source warnings');
+    for(const entry of classificationRows.values())entry.present=false;
+    const desired=[];
+    for(const item of items){
+      if(pendingManualActions.has(rowKey(item)))continue;
+      const key=classificationKey(item);let entry=classificationRows.get(key);
+      if(!entry){const tr=document.createElement('tr');entry={key,tr,item,present:true};classificationRows.set(key,entry);
+        for(let i=0;i<38;i++)tr.appendChild(document.createElement('td'));
+        const cell=document.createElement('td');entry.cell=cell;entry.action=document.createElement('span');cell.appendChild(entry.action);
+        entry.edit=button('Edit classification',()=>openClassification(entry));cell.appendChild(entry.edit);
+        entry.annotation=document.createElement('div');cell.appendChild(entry.annotation);
+        entry.feedback=document.createElement('span');entry.feedback.className='muted';entry.feedback.setAttribute('role','status');cell.appendChild(entry.feedback);tr.appendChild(cell);
+      }
+      entry.item=item;entry.present=true;entry.edit.disabled=Boolean(entry.draft)||!item.classification_target;
+      entry.action.innerHTML='';renderActionCell(item,entry.action,{allowAction:true});
+      entry.edit.title=item.classification_unavailable||'';
+      entry.annotation.textContent='Webhook classification: '+(item.webhook_classification||'None');
+      const tr=entry.tr;tr.className=item.source_stale?'stale-row':'';
+      tr.title=item.source_stale?safeDiagnostic(item.stale_reason||'Last-known-good broker state'):item.source_last_success_at?'Last successful source read: '+formatTimestamp(item.source_last_success_at):'';
+      const values=[item.venue||item.broker,resolveAccountLabel(item),item.asset,item.category,item.side,item.order_type,item.instrument,item.stop_loss_ticks,item.target_mode_display,item.take_profit_ticks,item.risk_mode_display,item.risk_value_display,item.risk_reward,item.timeframe,item.is_test_trade,item.setup,item.pattern,item.ema,item.vwap,item.aths_atls,item.round_number,item.webhook_mode,item.webhook_status,item.planned_entry_price,item.planned_stop_price,item.planned_target_price,item.type,item.size,item.entry_price||item.order_price,item.current_price,item.stop_loss,item.take_profit,item.leverage,item.type==='Position'?item.funding_paid:null,item.type==='Position'?item.funding_received:null,item.type==='Position'?item.net_funding:null,formatTimestamp(item.opened_at),item.status];
+      values.forEach((v,i)=>{const text=String(fmt(v));if(tr.children[i].textContent!==text)tr.children[i].textContent=text;});
+      updateEditorAvailability(entry);desired.push(tr);
+    }
+    for(const [key,entry] of classificationRows){if(entry.present)continue;if(entry.draft){entry.action.innerHTML='';entry.edit.disabled=true;updateEditorAvailability(entry);desired.push(entry.tr);}else{entry.tr.remove();classificationRows.delete(key);}}
+    // Keep the actual editor/select nodes mounted and focused during publication.
+    desired.forEach((tr,i)=>{if(tbody.children[i]!==tr)tbody.insertBefore(tr,tbody.children[i]||null);});
+    if(emptyState){emptyState.style.display=items.length?'none':'block';emptyState.textContent=coverage.empty_confirmed===true?'No open orders or positions.':coverage.pending?'Loading broker data':'Broker data incomplete';}
   };
   const confirmVisibility=()=>{
     for(const [key,state] of pendingVisibilityChecks){

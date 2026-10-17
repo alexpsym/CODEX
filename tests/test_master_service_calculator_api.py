@@ -3642,3 +3642,173 @@ def test_early_trade_folders_reuse_actual_bybit_csv_account_aliases(tmp_path: Pa
     for key, record in final.items():
         assert {field: record[field] for field in ownership[key]} == ownership[key]
         assert folders._owned_trade_folder(record)
+def test_post_entry_classification_persists_for_exact_trade_and_reaches_journal(tmp_path, monkeypatch):
+    import copy
+    import csv
+    import httpx
+    from tools import master_journal_workbook as folders
+
+    service = master_service
+    data = tmp_path / "render" / "data"
+    data.mkdir(parents=True)
+    monkeypatch.setattr(folders, "REPO_ROOT", tmp_path)
+    for name, file in (("TRADE_CONTEXTS_PATH", "trade_contexts.json"), ("TRADING_JOURNAL_PATH", "journal.json")):
+        monkeypatch.setattr(service, name, data / file)
+    monkeypatch.setattr(service, "MASTER_JOURNAL_PATH", tmp_path / "absent.xlsx")
+    monkeypatch.setattr(service, "APP_PROFILE", "local")
+    monkeypatch.setattr(service, "_TRADE_CONTEXTS_CACHE", {})
+    monkeypatch.setattr(service, "_OPEN_ORDERS_CACHE", {"version": 5, "payload": None})
+    monkeypatch.setattr(service, "_OPEN_ORDERS_SERVICES", {})
+    monkeypatch.setattr(service, "_OPEN_ORDERS_LAST_GOOD_ITEMS", {})
+    monkeypatch.setattr(service, "_OANDA_OPEN_TRADE_LEGS", {})
+    monkeypatch.setattr(service, "_load_pending_webhooks", lambda: [])
+    monkeypatch.setattr(service, "_load_bounce_traders", lambda: [])
+    monkeypatch.setattr(service.script_manager, "get", lambda name: type("Script", (), {"is_running": False})())
+    monkeypatch.setattr(service, "_persist_oanda_fill_state", lambda: None)
+    monkeypatch.setattr(service, "_update_unresolved_registry", lambda **k: (False, {}))
+    monkeypatch.setattr(service, "_schedule_dropbox_upload_state_backup", lambda: None)
+    scheduled = []
+    monkeypatch.setattr(service, "_schedule_early_trade_folders", lambda: scheduled.append(True))
+    original_save = service._save_json_file
+    def isolated_save(path, payload):
+        assert Path(path).is_relative_to(tmp_path), path
+        return original_save(path, payload)
+    monkeypatch.setattr(service, "_save_json_file", isolated_save)
+    def forbidden(*a, **k):
+        raise AssertionError("A classification save must never trade, notify, or change a webhook")
+    for name in ("_place_bybit_order", "_place_oanda_order", "_bybit_signed_post", "_save_pending_webhooks", "_delete_pending_webhook", "_log_webhook_event"):
+        monkeypatch.setattr(service, name, forbidden)
+    monkeypatch.setattr(service.requests.sessions.Session, "request", forbidden)
+    crypto, forex = tmp_path / "Crypto", tmp_path / "Forex"
+    (crypto / "2025" / "OCTOBER" / "C7 BTC").mkdir(parents=True)
+    (forex / "2025" / "OCTOBER" / "F3 EURUSD").mkdir(parents=True)
+    monkeypatch.setenv("TRADING_JOURNAL_CRYPTO_ROOT", str(crypto))
+    monkeypatch.setenv("TRADING_JOURNAL_FOREX_ROOT", str(forex))
+    accepted = dict(broker="bybit", account="demo", category="linear", instrument="BTCUSDT", asset="crypto", side="Buy",
+                    order_id="entry", calculation_context_id="quote", position_idx=0, order_type="limit",
+                    open_time="2026-10-16T12:00:00+10:00", is_test_trade=True, timeframe="15m", setup="Pullback",
+                    risk_value="1", stop_loss_ticks="50", raw_execution={"unknown": 0}, webhook_mode="No")
+    service._upsert_calculator_trade_context(accepted, accepted_entry=True, invalidate_cache=False)
+    # An identical broker ID on live is deliberately a different accepted entry.
+    service._upsert_calculator_trade_context(dict(accepted, account="live", calculation_context_id="live-quote"), accepted_entry=True, invalidate_cache=False)
+    service._drain_early_trade_folders()
+    assert not folders._load_trade_allocations()
+
+    async def scenario():
+        owner = service._OpenOrdersService()
+        job = service._OpenOrdersJob(owner, [], "fixture", 5)
+        owner.job = job
+        service._OPEN_ORDERS_SERVICES[asyncio.get_running_loop()] = owner
+        source = job.add("fixture", {"broker": "Bybit", "account": "demo"}, None, ready=False)
+        source.update(state="complete", last_success=service._open_orders_now(), last_success_at="2026-10-16T02:00:00Z")
+        row = dict(broker="Bybit", account="demo", category="linear", instrument="BTCUSDT", side="Buy", type="Order", id="entry", position_idx=0)
+        source["items"] = [row]
+        job.publish()
+        def current():
+            return job.payload["items"][0]
+        transport = httpx.ASGITransport(app=service.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://fixture") as client:
+            async def save(changes, *, target=None, version=None, expected=200):
+                item = current()
+                response = await client.post("/api/open-orders/classification", json={"target": target or item.get("classification_target"), "version": item["classification_version"] if version is None else version, "changes": changes})
+                assert response.status_code == expected, response.text
+                return response.json()
+            initial_target = current()["classification_target"]
+            complete = dict(timeframe="5m", setup="Breakout", pattern="range", ema="20", vwap=False,
+                            aths_atls="All-Time Low", round_number=0, is_test_trade=False, webhook_classification="Yes")
+            revision = job.payload["progress_revision"]
+            result = await save(complete)
+            assert result["values"] == dict(complete, vwap="No", round_number="No")
+            assert current()["timeframe"] == "5MIN" and current()["is_test_trade"] == "No"
+            assert current()["webhook_mode"] == "No" and current()["webhook_status"] == "Not used"
+            assert job.payload["progress_revision"] > revision and not job.tasks
+            service._TRADE_CONTEXTS_CACHE.clear()
+            saved = next(c for c in service._load_trade_contexts() if c["account"] == "demo")
+            assert saved["is_test_trade"] is True and saved["timeframe"] == "15m"
+            assert saved["raw_execution"] == {"unknown": 0} and saved["risk_value"] == "1"
+            assert saved["classification_version"] == 1
+            service._drain_early_trade_folders()
+            allocations = copy.deepcopy(folders._load_trade_allocations())
+            assert len(allocations) == 1
+            allocation = next(iter(allocations.values()))
+            screenshot = Path(allocation["folder"]) / "chart.png"
+            screenshot.write_bytes(b"keep screenshot")
+            before = service.TRADE_CONTEXTS_PATH.read_bytes()
+            for changes, version, target in (({"setup": "News Scalp"}, 0, None), ({"risk_value": "999"}, None, None), ({"order_id": "other"}, None, None), ({"setup": "Breakout"}, None, "forged")):
+                await save(changes, version=version, target=target, expected=400 if "risk_value" in changes or "order_id" in changes else 409)
+                assert service.TRADE_CONTEXTS_PATH.read_bytes() == before
+            # Price revisions are not classification conflicts. Explicit clears survive.
+            row["current_price"] = "999"
+            job.publish()
+            await save({"timeframe": None, "setup": "", "pattern": "", "ema": "", "aths_atls": "", "is_test_trade": True, "webhook_classification": "No"}, version=1)
+            service._drain_early_trade_folders()
+            assert folders._load_trade_allocations() == allocations and screenshot.read_bytes() == b"keep screenshot"
+            # Repeated accepted/webhook updates do not own the explicit overlay.
+            service._upsert_calculator_trade_context(dict(accepted, timeframe="1h", setup="Pullback", is_test_trade=False), accepted_entry=True, invalidate_cache=False)
+            service._TRADE_CONTEXTS_CACHE.clear()
+            job.publish()
+            assert current()["timeframe"] == "" and current()["setup"] is None
+            assert current()["is_test_trade"] == "Yes"
+            # Exact order -> position conversion; the old draft target cannot move.
+            source["items"] = [dict(row, type="Position", id="position-0", raw_refs={"order_ids": ["entry"], "order_ids_complete": True})]
+            job.publish()
+            await save({"setup": "Breakout"}, target=initial_target, expected=409)
+            assert current()["classification_target"] != initial_target
+            await save({"is_test_trade": False})
+            # Scope, lifecycle and contradictory exact IDs reject without a write.
+            baseline_row = copy.deepcopy(source["items"][0])
+            valid_target = current()["classification_target"]
+            for change in ({"account_id": "wrong"}, {"account": "live"}, {"trade_id": "unrelated", "order_id": "wrong"}, {"raw_refs": {"order_ids": ["entry", "unlinked"], "order_ids_complete": True}}):
+                source["items"] = [dict(baseline_row, **change)]
+                job.publish()
+                before = service.TRADE_CONTEXTS_PATH.read_bytes()
+                await save({"setup": "Breakout"}, target=valid_target, expected=409)
+                assert service.TRADE_CONTEXTS_PATH.read_bytes() == before
+            source["items"] = [baseline_row]
+            job.publish()
+            # Real CSV exporter grouping retains its visible Bybit Demo account label.
+            csv_path = tmp_path / "demo.csv"
+            with csv_path.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=service.BYBIT_TRADE_HISTORY_REQUIRED_HEADERS)
+                writer.writeheader()
+                for order, direction, price, execution, timestamp in (("entry", "Buy", "100", "open-fill", "2026-10-16 12:00:00"), ("exit", "Sell", "110", "close-fill", "2026-10-16 12:05:00")):
+                    writer.writerow({"contracts": "BTCUSDT", "Order No.": order, "Direction": direction, "Order Type": "Limit", "Filled Qty": "0.01", "Filled Price": price, "Order Price": price, "Filled Type": "Trade", "Trading Fee Rate": "0.0006", "Fees Paid": "0.001", "Trasaction ID": execution, "Transaction Time(UTC+10)": timestamp, "Final Balance (USDT)": ""})
+            rows, unmatched, _ = service._parse_bybit_trade_history_csv_with_diagnostics(csv_path, account_mode="demo")
+            assert len(rows) == 1 and not unmatched and rows[0]["account"] == "Bybit Demo"
+            patched = service._backfill_trade_row_context_fields(rows[0])
+            assert patched["timeframe"] == "" and patched["setup"] == "" and patched["pattern"] == ""
+            assert patched["vwap"] == "No" and patched["round_number"] == "No" and patched["is_test_trade"] is False
+            assert patched["webhook_classification"] == "No"
+            service._set_trading_journal_rows([patched], invalidate_view_snapshot=False, schedule_state_backup=False)
+            persisted = json.loads(service.TRADING_JOURNAL_PATH.read_text())["items"][0]
+            assert persisted["trade_number"] == allocation["trade_number"]
+            merged = service._merge_trading_journal_row(persisted, dict(rows[0], setup="Pullback", timeframe="1h"))
+            assert merged["setup"] == "" and merged["timeframe"] == ""
+            manual = service._merge_trading_journal_row(dict(merged, manual_overrides={"setup": "News Scalp", "notes": "user note"}), rows[0])
+            normalized, _ = folders._normalize_master_journal_rows([manual])
+            assert normalized[0]["setup"] == "News Scalp" and normalized[0]["notes"] == "user note"
+            assert not folders._target_r_row_is_test_trade(normalized[0])
+            # Pending OANDA acceptance, exact fill alias, executed-webhook provenance.
+            fx = dict(broker="oanda", account="demo", account_id="acct", category="forex", instrument="EUR_USD", asset="fx", side="Buy", order_id="fx-order", calculation_context_id="fx-quote", is_test_trade=True, open_time="2026-10-16T02:00:00Z", pending_webhook_id="actually-executed", webhook_status="Triggered")
+            service._upsert_calculator_trade_context(fx, accepted_entry=True, invalidate_cache=False)
+            fxrow = dict(broker="OANDA", account="demo", account_id="acct", category="forex", instrument="EUR_USD", side="Buy", type="Order", id="fx-order")
+            source["items"] = [fxrow]
+            job.publish()
+            await save({"is_test_trade": False, "setup": "Pullback", "webhook_classification": "No"})
+            service._upsert_trade_context(dict(fx, trade_id="fx-trade"))
+            source["items"] = [dict(fxrow, type="Position", id="fx-trade", trade_id="fx-trade")]
+            job.publish()
+            assert current()["setup"] == "Pullback" and current()["webhook_mode"] == "Yes"
+            assert current()["webhook_status"] == "Triggered" and current()["webhook_classification"] == "No"
+            opening = dict(account="demo", accountID="acct", id="open-tx", orderID="fx-order", instrument="EUR_USD", units="100", price="1.1", time="2026-10-16T02:00:00Z", tradeOpened={"tradeID": "fx-trade", "units": "100", "price": "1.1"})
+            service._journal_rows_from_oanda_order_fill(opening)
+            closed = service._journal_rows_from_oanda_order_fill(dict(opening, id="close-tx", orderID="fx-close", units="-100", price="1.2", time="2026-10-16T03:00:00Z", tradeOpened=None, tradesClosed=[{"tradeID": "fx-trade", "units": "100", "realizedPL": "10"}]))
+            assert len(closed) == 1 and closed[0]["raw_refs"]["opening_order_id"] == "fx-order"
+            assert closed[0]["setup"] == "Pullback" and closed[0]["is_test_trade"] is False
+            assert closed[0]["webhook_classification"] == "No"
+            service._TRADE_CONTEXTS_CACHE.clear()
+            service._drain_early_trade_folders()
+            assert len(folders._load_trade_allocations()) == 2
+            assert screenshot.read_bytes() == b"keep screenshot"
+        await owner.close()
+    asyncio.run(scenario())
