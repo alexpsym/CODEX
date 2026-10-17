@@ -20049,20 +20049,30 @@ def _bybit_position_execution_proof(position, executions):
     # openTime can be later than the opening fill. A verified symbol+sequence
     # and quantity ledger establish the cycle; openTime is not a fill cutoff.
     lower_bound = int((0 if anchored else open_time) or _to_float(position.get("opened_at")) or 0)
-    rows = [row for row in executions if isinstance(row, dict)
+    events = [row for row in executions if isinstance(row, dict)
             and int(_to_float(row.get("execTime")) or 0) >= lower_bound
             and str(row.get("symbol") or "").upper() == symbol
-            and row.get("execType") in (None, "", "Trade")
+            and row.get("execType") in (None, "", "Trade", "Funding")
             and (int(_to_float(row.get("positionIdx")) or 0) == idx
                  if row.get("positionIdx") not in (None, "") else idx == 0)]
-    rows.sort(key=lambda row: (int(_to_float(row.get("execTime")) or 0),
-                              int(str(row.get("seq") or 0)), str(row.get("execId") or "")))
+    events.sort(key=lambda row: (int(_to_float(row.get("execTime")) or 0),
+                                int(str(row.get("seq") or 0)), str(row.get("execId") or "")))
+    rows = [row for row in events if row.get("execType") != "Funding"]
     if not rows or not size or side not in {"buy", "sell"}:
         return None, [], False, "No scoped trade executions"
-    latest_time = int(_to_float(rows[-1].get("execTime")) or 0)
-    if anchored and not any(str(row.get("seq")) == seq for row in rows
-                            if int(_to_float(row.get("execTime")) or 0) == latest_time):
+    latest_time = int(_to_float(events[-1].get("execTime")) or 0)
+    matching = [row for row in events if str(row.get("seq")) == seq
+                and int(_to_float(row.get("execTime")) or 0) == latest_time]
+    if anchored and not matching:
         return None, [], False, "Position/execution sequence not reconciled"
+    # Funding updates the broker position sequence but does not open/increase it.
+    # Its inventory must reconcile before it can anchor the current trade ledger.
+    if anchored and any(row.get("execType") == "Funding"
+                        and (str(row.get("side") or "").lower() != side
+                             or abs(abs(_to_float(row.get("execQty")) or 0) - size) > tolerance
+                             or abs(_to_float(row.get("closedSize")) or 0) > tolerance)
+                        for row in matching):
+        return None, [], False, "Funding execution does not reconcile current position"
     if not anchored and not open_time:
         net = sum((1 if str(row.get("side")).lower() == "buy" else -1)
                   * abs(_to_float(row.get("execQty")) or 0) for row in rows)

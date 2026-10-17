@@ -1507,3 +1507,57 @@ Within this same node (no separate before-fix pytest process), AST-load only the
 Changed paths only render/master_service.py, tests/test_open_orders_page.py, summary/CODEX_SUMMARY_latest.txt. Exact scoped diffs and git diff --check reviewed, append read back preserving all prior bytes/encoding/line endings. Stage/--only commit these paths and protected-helper push; final SHA and local/origin/fresh remote agreement reported separately. Unrelated work preserved. Accepted calendar/fast Submit/quiet grouped diagnostics and parked OANDA monitor remain closed. No order/cancel/close, notifications, production JSON edit, workbook/import/Resync, Dropbox/config/dependency change.
 
 Live metadata acceptance remains FAILED/PENDING: saved current position and exact accepted fill now establish the defect, but localhost was unavailable for a fresh API/UI observation. After delivery restart LTT once and Ctrl+F5 once to load this correction, then compare the same existing position to ALL supplied values above if still open. No new trade, repeated Refresh or prolonged waiting requested. If closed, leave acceptance pending until a future user-chosen order; isolated fixture success is not live acceptance.
+
+
+2026-10-17 - Current position Funding sequence: captured cause, correction and LIVE API verification
+Starting master/local HEAD/fresh remote 97f1a3cd7cca39650d3c0697a369a643649dd7a3; index empty. Applicable AGENTS.md read; user's narrow corrective-job scoped workflow overrides blanket batch delivery. Preserved unrelated dirty/deleted/untracked records, settings and briefs. Only task paths: render/master_service.py; tests/test_open_orders_page.py; summary/CODEX_SUMMARY_latest.txt.
+
+BEFORE EDITING: ordinary host localhost /api/open-orders revision95 contained the existing Bybit demo linear BTCUSDT Buy Position size0.005, idx0, openTime1792212224051, current seq140712176966582, updatedTime1792224000068, avg81541.6, SL81041.6, TP82835.6, leverage100. context_linked=false, refs incomplete/empty, exact rejection Position/execution sequence not reconciled. Read only narrow matching saved worker lines. User-authorized host broker evidence: existing configured Bybit demo client, one paginated recent-seven-day BTCUSDT execution query (start1791632859754/end1792237659753/limit100, page2 returned empty) and one current-position GET categorylinear/symbolBTCUSDT; all retCode0. No credentials/headers/signatures printed, traffic-state recording disabled for these diagnostic calls, no mutation. Sanitized capture logs/phase3-sequence-current-evidence.json remains uncommitted. Invoking UNMODIFIED _bybit_position_execution_proof against that raw capture BEFORE edits returned [None, [], False, "Position/execution sequence not reconciled"].
+
+The FOUR actual records, newest first:
+1 Funding: order a58cb616-665f-492e-8343-cf078baad0ac, exec a3d80fc5-0c40-47e7-b69a-a4408952a8c2, time1792224000000, seq140712176966582, Buy qty0.005 closedSize0, execPrice81704.3, fee0.02094899. Same exact sequence as the current position; position updated68ms afterward.
+2 Current opening Trade: accepted order b2a6134e-3c6e-4255-83c2-0a755c20a0ff, link938d9ec7a01e4850a619b04538c972a1, exec9b689f43-a493-4253-9935-7e0434b603e2, time1792212224049, seq140712176282093, Buy qty0.005 closedSize0, price81541.6.
+3 Prior closing Trade: order71b132c2-9792-428e-87d7-43824d57c813, exec0ff4144c-a429-42fe-88a1-906c98c9062d, time1792195577346, seq140712175282407, Sell qty0.005 closedSize0.005, price81565.5.
+4 Prior opening Trade: order62df17b7-1153-4c6a-9a96-070d6bd2a43e, link5de8745038284938b6c0fafa3711b67d, exec27101de5-6a57-415c-9e57-38ea573677a2, time1792195259425, seq140712175263993, Buy qty0.005 closedSize0, price81563.1.
+All four are BTCUSDT; none supplies positionIdx, allowed only for this one-way idx0 scope. Captured current createdTime1763377208045 is first-ever symbol creation, not this cycle. Actual account ID unavailable; demo credential/host/account/category/settlement and side/idx scope remain enforced.
+
+CONFIRMED cause: Funding updated the position sequence; it was not a new opening Trade and did not change openTime/side/quantity. The proof first discarded Funding, then incorrectly required the latest remaining Trade to match the current sequence. Official contracts rechecked at https://bybit-exchange.github.io/docs/v5/order/execution and https://bybit-exchange.github.io/docs/v5/position . Funding attribution is demonstrated by the exact captured event/position sequence relationship, not assumed from an arbitrary changed sequence or a generic settings-update hypothesis.
+
+Small correction: scope recognized Trade/Funding events for sequence evidence, validate a matching latest Funding event's side, quantity and closedSize against current inventory, then reconstruct the current cycle using ONLY Trade quantities/closing quantities. Funding order IDs never enter calculator opening refs or increase quantity. Preserve exact integer/string sequence values. Current flat/reversal boundary is actual opening fill1792212224049, not later openTime1792212224051 and not first-ever createdTime. Unknown/mismatched events, missing current fills, wrong Funding inventory and unrelated accounts still reject. No forced link, time allowance, nearest/newest context, warning suppression, new store, deadline or broad exception. Existing stable provenance cache, generation cleanup, source isolation, pooling, partial loading, independent funding and strict Submit confirmation preserved. Renderer unchanged.
+
+Only focused selector:
+tests/test_open_orders_page.py::test_open_orders_funding_sequence_preserves_current_trade_metadata
+ONE actual pytest process, approved host C:\Users\User\miniconda3\python.exe, Python3.13.2, -u -m pytest -vv --tb=short -o faulthandler_timeout=20, 180-second outer bound, streamed progress. Fresh basetemp C:\Users\User\AppData\Local\Temp\phase3_funding_sequence_228ada5775114ed19a68f814a4957a69\pytest with parent created. PASSED first run, 12.37 pytest seconds/13.86 runner seconds, exit0; four existing FastAPI deprecation warnings. No retry, previous passing selector, full file/suite, smoke/syntax/compile or unrelated test.
+Node embeds all four sanitized actual records; executes the rejected proof from commit97f1a3c in the same process, then actual current source scheduling/normalization/signed transport/pagination/proof/context/API/production renderer using temporary durable contexts and mocked HTTP. Asserts every supplied field/cell through funding-pending/failure, price refresh, sparse updates and durable reload. Two execution pages only per job; pending core refresh and funding retry reuse history. Negative cases reject missing current fill/prior closed cycle, wrong Funding quantity, wrong account and unrelated sequence. Funding's synthetic order ID is excluded. Owned clients close and retained rows cannot confirm Submit.
+
+AUTHORIZED LIVE SERVICE LOAD: invoked existing C:\GPT\CODEX-master\Local Trading Tools.exe once through Start-Process -WindowStyle Hidden (launcher PID24304 at21:50:02). Existing launcher performed its controlled replacement; no direct process kill, alternate server, configuration change, trade or notification command. New API /api/local-build-info: PID28776, root/cwd C:\GPT\CODEX-master, started2026-10-17T11:50:13.522396+00:00, source_stamp d135819d2fd5deb5. Recomputed existing LOCAL_BUILD_FILES byte fingerprint and VERIFIED exact agreement, proving changed service code loaded. Its git_commit=97f1a3c reflects startup before this new delivery commit, not old loaded source.
+
+LIVE API VERIFICATION PASSED for the EXISTING position, not mocks alone:
+First ordinary post-restart GET started owned collection revision1; subsequent ordinary snapshot revision33 pending=false showed context_linked=true, complete refs containing ONLY accepted orderb2a6134e-3c6e-4255-83c2-0a755c20a0ff, exact calcctx_bybit_demo_133be437ac934f5d9f6c25adcfaec5f8. All demo sources including funding complete, source_pending=false/source_stale=false, no Bybit warnings. The lifecycle warning cleared by valid proof. Read again and compared every supplied field against exact existing durable context: ZERO mismatches. Saved bounded row/build/comparison evidence uncommitted in logs/phase3-sequence-live-verification.json.
+
+Field -> actual LIVE API value / existing column value:
+order_type -> Market / Order Type Market
+stop_loss_ticks -> "5000" / Stop-loss Ticks 5000
+target_mode -> rr, displayRisk/Reward / Target Mode Risk/Reward
+take_profit_ticks -> None / Take-profit Ticks em dash (genuinely absent/inapplicable RR field)
+risk_reward -> "2" / Risk / Reward 2
+risk_mode -> percent, displayPercent / Risk Mode Percent
+risk_value -> "1", risk_unit%, display1% / Risk Value 1%
+timeframe -> 5MIN / Timeframe 5MIN
+is_test_trade -> Yes / Test Yes
+setup -> Pullback / Setup Pullback
+pattern -> Range / Pattern Range (accepted record is range; no Channel substitution)
+ema -> "9" / EMA 9
+vwap -> Yes / VWAP Yes
+aths_atls -> All-Time High / ATH / ATL All-Time High
+round_number -> Yes / Round Number Yes
+webhook_mode -> No / Webhook Mode No
+webhook_status -> Not used / Webhook Status Not used
+planned_entry_price -> "81541.6" / Planned Entry 81541.6
+planned_stop_price -> "81041.6" / Planned Stop 81041.6
+planned_target_price -> "82835.6" / Planned Target 82835.6
+Broker/account/category/instrument/side/size/hedge remain Bybit/demo/linear/BTCUSDT/Buy/0.005/idx0, openTime1792212224051, current seq140712176966582. Asset remains crypto. Supplied No, idx0 and zero funding received are not missing.
+Live funding paid0.02094899, received0, net-0.02094899 (currency USDT); valid funding remains independent of calculator identity. No earlier/later trade's metadata was chosen.
+The exact unchanged renderer verified these existing column cells within the focused node; LIVE evidence is API values, not a claim that a human separately inspected every browser cell. No further trade or restart is needed to establish this requested live API check.
+
+Scope review: exact three task-path staged/unstaged diffs and scoped git diff --check, summary append preserving prior bytes/encoding/line endings and read-back. Stage/one --only commit only actual task paths, protected-helper push and verify HEAD/origin/master/fresh remote agreement; final SHA reported separately, no summary-only second commit. No production record override or repair. Ordinary launcher/runtime updates remain uncommitted/unrelated. Accepted dashboard/Submit/calendar preserved; OANDA issue remains parked. No order placement/cancel/close, workbook/import/Resync, Dropbox or dependency/configuration change. No remaining metadata API blocker observed on this existing position.
