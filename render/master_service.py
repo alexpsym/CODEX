@@ -22109,9 +22109,7 @@ def _drain_early_trade_folders() -> None:
     state = folders._load_trade_allocations()
     pending = []
     for row in rows:
-        scope, identities = folders._trade_folder_identity(row)
-        if not any(tuple(record["scope"]) == scope and identities <= set(record["identities"])
-                   and record["status"] == "ready" for record in state.values()):
+        if not folders.trade_folder_allocation_ready(row, state):
             pending.append(row)
     if pending:
         result = assign_trade_numbers_and_create_folders(pending, workbook_path=MASTER_JOURNAL_PATH)

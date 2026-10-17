@@ -5224,16 +5224,38 @@ def _save_trade_allocations(state: Mapping[str, Any]) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def _trade_folder_scope(scope: Sequence[str]) -> Tuple[str, ...]:
+    """Comparison only: retain stored scopes/labels and require exact account IDs."""
+    broker, account, account_id, category, instrument = scope
+    broker = str(broker).strip().lower()
+    if broker in {"bybit", "bybit_execution_history", "bybit_execution_history_grouped"}:
+        broker = "bybit"
+    account = str(account).strip().lower()
+    if broker == "bybit":
+        alias = " ".join(account.replace("_", " ").replace("-", " ").split())
+        account = {"demo": "demo", "bybit demo": "demo", "live": "live",
+                   "bybit": "live", "bybit live": "live"}.get(alias, account)
+    return broker, account, str(account_id), str(category).lower(), str(instrument).upper()
+
+
+def trade_folder_allocation_ready(row: Mapping[str, Any], state: Mapping[str, Any]) -> bool:
+    """A ready alias must be unique; conflicting ownership stays pending."""
+    scope, identities = _trade_folder_identity(row)
+    matches = [record for record in state.values()
+               if _trade_folder_scope(record["scope"]) == scope
+               and identities.intersection(record["identities"])]
+    return (len(matches) == 1 and matches[0]["status"] == "ready"
+            and identities <= set(matches[0]["identities"]))
+
+
 def _trade_folder_identity(row: Mapping[str, Any]) -> Tuple[Tuple[str, ...], set[str]]:
     """Only exact broker references, scoped to account and market, establish ownership."""
     refs = row.get("raw_refs") if isinstance(row.get("raw_refs"), dict) else {}
-    broker = str(row.get("broker") or row.get("source") or "").lower()
-    if broker.startswith("bybit_execution_history"):
-        broker = "bybit"
+    broker = str(row.get("broker") or row.get("source") or "").strip().lower()
     category = str(row.get("category") or ("forex" if broker == "oanda" else "linear")).lower()
-    scope = (broker, str(row.get("account") or "").lower(),
+    scope = _trade_folder_scope((broker, str(row.get("account") or ""),
              str(row.get("account_id") or refs.get("account_id") or ""), category,
-             str(row.get("instrument") or row.get("symbol") or "").upper())
+             str(row.get("instrument") or row.get("symbol") or "").upper()))
     identities: set[str] = set()
     for kind, names in (("order", ("order_id", "orderId", "orderID", "opening_order_id")),
                         ("link", ("order_link_id", "orderLinkId", "parentOrderLinkId")),
@@ -5276,7 +5298,7 @@ def apply_early_trade_folder_allocations(rows: Sequence[Dict[str, Any]]) -> None
         if row.get("trade_number"):
             continue
         scope, identities = _trade_folder_identity(row)
-        matches = [record for record in state.values() if tuple(record["scope"]) == scope
+        matches = [record for record in state.values() if _trade_folder_scope(record["scope"]) == scope
                    and identities.intersection(record["identities"])]
         if len(matches) == 1 and matches[0]["status"] == "ready":
             row["trade_number"] = matches[0]["trade_number"]
@@ -5390,7 +5412,7 @@ def _assign_trade_numbers_locked(
         existing = str(row.get("trade_number") or workbook_by_row_id.get(row_id) or "").strip().upper()
         scope, identities = _trade_folder_identity(row)
         matches = [(key, record) for key, record in state.items()
-                   if (identities and tuple(record["scope"]) == scope
+                   if (identities and _trade_folder_scope(record["scope"]) == scope
                        and identities.intersection(record["identities"]))
                    or (not identities and row_id and record.get("row_id") == row_id)]
         if len(matches) > 1:
@@ -5435,7 +5457,7 @@ def _assign_trade_numbers_locked(
     for trade_time, row_id, row, prefix in candidates:
         scope, identities = _trade_folder_identity(row)
         # Another candidate in this batch may already own this exact accepted entry.
-        if any(tuple(record["scope"]) == scope and identities.intersection(record["identities"])
+        if any(_trade_folder_scope(record["scope"]) == scope and identities.intersection(record["identities"])
                for record in state.values()):
             replay = _assign_trade_numbers_locked([row], workbook_path=workbook_path,
                 forex_root=forex_root, crypto_root=crypto_root, dry_run=dry_run, state=state)

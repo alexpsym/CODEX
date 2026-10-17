@@ -3468,3 +3468,177 @@ def test_accepted_orders_schedule_early_trade_folders_without_blocking_submit(tm
     service._drain_early_trade_folders()
     assert len(list(crypto.glob("2026/*/C*"))) == 2
     assert len(list(forex.glob("2026/*/F*"))) == 2
+
+
+def test_early_trade_folders_reuse_actual_bybit_csv_account_aliases(tmp_path: Path, monkeypatch, caplog):
+    import copy
+    import csv
+    import logging
+    from tools import master_journal_workbook as folders
+
+    service = master_service
+    monkeypatch.setattr(folders, "REPO_ROOT", tmp_path)
+    data = tmp_path / "render" / "data"
+    data.mkdir(parents=True)
+    monkeypatch.setattr(service, "TRADE_CONTEXTS_PATH", data / "trade_contexts.json")
+    monkeypatch.setattr(service, "TRADING_JOURNAL_PATH", data / "journal.json")
+    monkeypatch.setattr(service, "MASTER_JOURNAL_PATH", tmp_path / "no-workbook.xlsx")
+    monkeypatch.setattr(service, "_TRADE_CONTEXTS_CACHE", {})
+    monkeypatch.setattr(service, "_OPEN_ORDERS_CACHE", {"payload": None})
+    monkeypatch.setattr(service, "_EARLY_TRADE_FOLDER_ERROR", None)
+    scheduled = []
+    monkeypatch.setattr(service, "_schedule_early_trade_folders", lambda: scheduled.append(True))
+    monkeypatch.setattr(service, "_utc_now_iso", lambda: "2026-10-16T02:00:00+00:00")
+    for name in ("_schedule_dropbox_upload_state_backup", "_invalidate_open_orders_cache", "_invalidate_trading_journal_view_snapshot", "_log_webhook_event", "cache_bybit_demo_tpsl_request"):
+        monkeypatch.setattr(service, name, lambda *a, **k: None)
+    monkeypatch.setattr(service, "_delete_pending_webhook", lambda *a, **k: False)
+    monkeypatch.setattr(service, "resolve_bybit_credentials_for", lambda a: (a, "fixture-key", "fixture-secret", "https://bybit.invalid", "FIXTURE"))
+    def forbidden(*a, **k):
+        raise AssertionError("External I/O is forbidden in this regression")
+    monkeypatch.setattr(service.httpx, "AsyncClient", forbidden)
+    monkeypatch.setattr(service.requests.sessions.Session, "request", forbidden)
+    async def accepted(**kwargs):
+        assert kwargs["path"] == "/v5/order/create"
+        return {"retCode": 0, "result": {"orderId": "shared-opening-order", "orderLinkId": "shared-accepted-link"}}
+    monkeypatch.setattr(service, "_bybit_signed_post", accepted)
+    save_json = service._save_json_file
+    def isolated_save(path, payload):
+        assert Path(path).is_relative_to(tmp_path), f"unexpected production write: {path}"
+        save_json(path, payload)
+    monkeypatch.setattr(service, "_save_json_file", isolated_save)
+    crypto, forex = tmp_path / "Crypto", tmp_path / "Forex"
+    (crypto / "2025" / "OCTOBER" / "C7 BTC").mkdir(parents=True)
+    forex.mkdir()
+    monkeypatch.setenv("TRADING_JOURNAL_CRYPTO_ROOT", str(crypto))
+    monkeypatch.setenv("TRADING_JOURNAL_FOREX_ROOT", str(forex))
+
+    # Real placement -> accepted-context outbox -> explicit production worker drain.
+    for mode in ("demo", "live"):
+        result = asyncio.run(service._place_bybit_order({"symbol": "BTCUSDT", "action": "buy", "quantity": "0.01", "account": mode, "order_type": "limit", "entry_price": "100", "is_test_trade": False}, request_id="alias-" + mode))
+        assert result["order"]["orderId"] == "shared-opening-order"
+        assert result["journal_context_saved"] is True
+    assert len(scheduled) == 2
+    service._drain_early_trade_folders()
+    original = folders._load_trade_allocations()
+    assert len(original) == 2
+    by_mode = {record["scope"][1]: (key, copy.deepcopy(record)) for key, record in original.items()}
+    assert set(by_mode) == {"demo", "live"}
+    assert by_mode["demo"][1]["trade_number"] != by_mode["live"][1]["trade_number"]
+    for _, record in by_mode.values():
+        (Path(record["folder"]) / "chart.png").write_bytes(b"preserved screenshot")
+
+    # Actual valid CSV exporter format and parser/grouping, never a synthetic mode row.
+    parsed = []
+    for mode, label in (("demo", "Bybit Demo"), ("live", "BYBIT")):
+        csv_path = tmp_path / (mode + "-execution-history.csv")
+        with csv_path.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=service.BYBIT_TRADE_HISTORY_REQUIRED_HEADERS)
+            writer.writeheader()
+            for direction, order, execution, price, timestamp in (
+                ("Buy", "shared-opening-order", "opening-exec", "100", "12:00:00 2026-10-16"),
+                ("Sell", "shared-closing-order", "closing-exec", "110", "12:05:00 2026-10-16"),
+            ):
+                writer.writerow({"contracts": "BTCUSDT", "Order No.": order, "Direction": direction, "Order Type": "Limit", "Filled Qty": "0.01", "Filled Price": price, "Order Price": price, "Filled Type": "Trade", "Trading Fee Rate": "0.0006", "Fees Paid": "0.001", "Trasaction ID": execution, "Transaction Time(UTC+10)": timestamp, "Final Balance (USDT)": ""})
+        assert service._is_bybit_trade_history_csv(csv_path)
+        rows, unmatched, diagnostics = service._parse_bybit_trade_history_csv_with_diagnostics(csv_path, account_mode=mode)
+        assert unmatched == [] and len(rows) == 1
+        assert diagnostics["bybit_completed_trades_imported"] == 1
+        assert rows[0]["account"] == rows[0]["account_label"] == label
+        assert rows[0]["source"] == "bybit_execution_history_grouped"
+        assert set(rows[0]["raw_refs"]["order_ids"]) == {"shared-opening-order", "shared-closing-order"}
+        parsed.append(rows[0])
+    service._set_trading_journal_rows(parsed, invalidate_view_snapshot=False, schedule_state_backup=False)
+    saved = json.loads(service.TRADING_JOURNAL_PATH.read_text())["items"]
+    assert [row["account"] for row in saved] == ["Bybit Demo", "BYBIT"]
+    for mode, row in zip(("demo", "live"), saved):
+        record = by_mode[mode][1]
+        assert row["trade_number"] == record["trade_number"]
+        assert row["trade_folder"] == record["folder"]
+        target, reason = folders.resolve_trade_folder_link(row["trade_number"], crypto_root=crypto)
+        assert reason is None and target == Path(record["folder"]).resolve().as_uri()
+    result = folders.assign_trade_numbers_and_create_folders(saved)
+    assert result["assigned_count"] == 0
+    assert len(folders._load_trade_allocations()) == len(list(crypto.glob("2026/*/C*"))) == 2
+
+    # Explicit account IDs remain exact, including missing versus present.
+    service._upsert_calculator_trade_context({"broker": "bybit", "account": "demo", "account_id": "account-A", "category": "linear", "instrument": "BTCUSDT", "asset": "crypto", "order_id": "explicit-id-opening", "open_time": "2026-10-16T12:00:00+10:00", "is_test_trade": False}, accepted_entry=True)
+    service._drain_early_trade_folders()
+    state = folders._load_trade_allocations()
+    assert len(state) == 3
+    explicit = {"source": "bybit_execution_history_grouped", "account": "Bybit Demo", "account_id": "account-A", "symbol": "BTCUSDT", "raw_refs": {"order_ids": ["explicit-id-opening"]}}
+    matched = copy.deepcopy(explicit)
+    folders.apply_early_trade_folder_allocations([matched])
+    assert matched.get("trade_number")
+    for account_id in ("account-B", ""):
+        other = dict(explicit, account_id=account_id)
+        folders.apply_early_trade_folder_allocations([other])
+        assert "trade_number" not in other
+    for changes in ({"account": "my Bybit Demo"}, {"account": "Bybit Demo extra"}, {"account": "unknown"}, {"source": "oanda"}, {"source": "unproven_bybit_source"}, {"category": "inverse"}, {"symbol": "ETHUSDT"}):
+        other = dict(parsed[0], **changes)
+        folders.apply_early_trade_folder_allocations([other])
+        assert "trade_number" not in other
+        assert not folders.trade_folder_allocation_ready(other, state)
+
+    # Reload legacy scope spellings without migrating their persisted representation.
+    for record in state.values():
+        record["scope"][1] = "  bYbIt \t DeMo  " if record["scope"][1] == "demo" else " ByBit-LiVe "
+    with folders._trade_allocation_lock():
+        folders._save_trade_allocations(state)
+    ownership = {key: {field: copy.deepcopy(record[field]) for field in ("scope", "owner", "trade_number", "folder", "root")} for key, record in state.items()}
+    before = folders._trade_allocation_state_path().read_bytes()
+    service._TRADE_CONTEXTS_CACHE.clear()
+    service._drain_early_trade_folders()
+    assert folders._trade_allocation_state_path().read_bytes() == before, "ready legacy scopes must not become recurring pending work"
+    service._set_trading_journal_rows(parsed, invalidate_view_snapshot=False, schedule_state_backup=False)
+    for mode, row in zip(("demo", "live"), json.loads(service.TRADING_JOURNAL_PATH.read_text())["items"]):
+        assert row["account"] == ("Bybit Demo" if mode == "demo" else "BYBIT")
+        assert row["trade_number"] == by_mode[mode][1]["trade_number"]
+    replay = copy.deepcopy(parsed)
+    assert folders.assign_trade_numbers_and_create_folders(replay)["assigned_count"] == 0
+    for key, record in folders._load_trade_allocations().items():
+        assert {field: record[field] for field in ownership[key]} == ownership[key]
+    assert len(list(crypto.glob("2026/*/C*"))) == 3
+    for mode in ("demo", "live"):
+        assert (Path(by_mode[mode][1]["folder"]) / "chart.png").read_bytes() == b"preserved screenshot"
+    for account, mode in ((" BYBIT_DEMO ", "demo"), (" ByBit   LiVe ", "live"), (" bybit ", "live")):
+        row = dict(parsed[0], account=account)
+        folders.apply_early_trade_folder_allocations([row])
+        assert row["account"] == account and row["trade_number"] == by_mode[mode][1]["trade_number"]
+
+    # Two real owned allocations become conflicting under equivalent legacy scopes.
+    conflict_row = dict(parsed[0], id="legacy-conflict", account="retired-account-label")
+    assert folders.assign_trade_numbers_and_create_folders([conflict_row])["assigned_count"] == 1
+    state = folders._load_trade_allocations()
+    conflict_key = next(key for key, record in state.items() if record["scope"][1] == "retired-account-label")
+    state[conflict_key]["scope"][1] = "Bybit Demo"
+    with folders._trade_allocation_lock():
+        folders._save_trade_allocations(state)
+    ownership = {key: {field: record[field] for field in ("scope", "owner", "trade_number", "folder")} for key, record in state.items()}
+    assert not folders.trade_folder_allocation_ready(parsed[0], state)
+    unresolved = copy.deepcopy(parsed[0])
+    folders.apply_early_trade_folder_allocations([unresolved])
+    assert "trade_number" not in unresolved
+    result = folders.assign_trade_numbers_and_create_folders([unresolved])
+    assert result["assigned_count"] == 0 and unresolved["id"] in result["skipped_unresolved_root_or_market"]
+    assert "trade_number" not in unresolved
+    # Run one worker cycle deterministically to exercise the existing quiet diagnostic.
+    class OneCycleStop:
+        checks = 0
+        def is_set(self):
+            self.checks += 1
+            return self.checks > 2
+    monkeypatch.setattr(service, "_EARLY_TRADE_FOLDER_STOP", OneCycleStop())
+    monkeypatch.setattr(service, "_EARLY_TRADE_FOLDER_WAKE", types.SimpleNamespace(wait=lambda timeout: None, clear=lambda: None))
+    with caplog.at_level(logging.INFO, logger=service.APP_LOGGER.name):
+        service.APP_LOGGER.addHandler(caplog.handler)
+        try:
+            service._early_trade_folder_worker()
+        finally:
+            service.APP_LOGGER.removeHandler(caplog.handler)
+    assert "early_trade_folder_pending" in caplog.text
+    assert "remains pending" in service._EARLY_TRADE_FOLDER_ERROR
+    final = folders._load_trade_allocations()
+    assert len(final) == len(list(crypto.glob("2026/*/C*"))) == 4
+    for key, record in final.items():
+        assert {field: record[field] for field in ownership[key]} == ownership[key]
+        assert folders._owned_trade_folder(record)
