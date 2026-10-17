@@ -243,6 +243,7 @@ RETIRED_SCRIPT_NAMES = {
 LOCAL_ONLY_SCRIPTS = {"bybit_monitor", "oanda_monitor"}
 BYBIT_RUNTIME_STATUS_PATH = BASE_DIR / "bybit_monitor" / "runtime_status.json"
 OANDA_RUNTIME_STATUS_PATH = BASE_DIR / "oanda_monitor" / "runtime_status.json"
+OANDA_LAST_FAILED_CHILD_PATH = BASE_DIR / "logs" / "oanda-monitor-last-failed-child.json"
 SCANNER_HEARTBEAT_GRACE_SECONDS = 30
 DEFAULT_RENDER_ALLOWED_APPS = "calculator-webhook,pending-webhooks,fxweekend-clone"
 DEFAULT_LOCAL_ALLOWED_APPS = "bybit_monitor,oanda_monitor,bybit_trigger_bounce_trader,bybithistory-clone,oanda_history-clone,coinspot-clone,open-orders,instrument-lookup,ivindicator-clone,spreads-clone,oanda-volatility"
@@ -13923,6 +13924,11 @@ class ManagedScript:
     last_start_attempt_at: Optional[float] = None
     last_start_error: Optional[str] = None
     last_exit_code: Optional[int] = None
+    last_failed_child: Optional[Dict[str, object]] = None
+    last_exit_capture_error: Optional[str] = None
+    monitor_restart_not_before: float = 0.0
+    monitor_crash_count: int = 0
+    monitor_stop_requested: bool = False
     last_exit_reason: Optional[str] = None
     last_spawn_command: Optional[List[str]] = None
     last_spawn_cwd: Optional[str] = None
@@ -13966,6 +13972,10 @@ class ManagedScript:
             "last_start_attempt_at": self.last_start_attempt_at,
             "last_start_error": self.last_start_error,
             "last_exit_code": self.last_exit_code,
+            **({"last_failed_child": self._oanda_failed_child(),
+                "last_exit_capture_error": self.last_exit_capture_error,
+                "restart_not_before": self.monitor_restart_not_before,
+                "intentional_stop": self.monitor_stop_requested} if self.name == "oanda_monitor" else {}),
             "last_exit_reason": self.last_exit_reason,
             "last_spawn_command": self.last_spawn_command,
             "last_spawn_cwd": self.last_spawn_cwd,
@@ -13977,6 +13987,49 @@ class ManagedScript:
             "operational_started_pid": self.operational_started_pid,
             "standalone": self.name in STANDALONE_SCRIPTS,
         }
+
+    def _oanda_failed_child(self):
+        if self.name == "oanda_monitor" and self.last_failed_child is None:
+            try:
+                path = OANDA_LAST_FAILED_CHILD_PATH
+                if path.exists() and path.stat().st_size <= 300_000:
+                    data = json.loads(path.read_text(encoding="utf-8"))
+                    if isinstance(data, dict) and data.get("script") == self.name:
+                        self.last_failed_child = data
+            except Exception as exc:
+                self.last_exit_capture_error = _safe_bybit_diagnostic_text(exc)
+        return self.last_failed_child
+
+    def _record_oanda_failed_child(self, process, lines, provenance, capture_error):
+        # Keep child output separate from later launches and from failures of this recorder.
+        def safe(value):
+            return _safe_bybit_diagnostic_text(value,
+                api_key=os.environ.get("OANDA_API_KEY", ""),
+                api_secret=os.environ.get("OANDA_ACCESS_TOKEN", ""), limit=1000)
+        record = dict(script=self.name, pid=process.pid, command=[safe(part) for part in provenance.get("command", [])],
+                      cwd=safe(provenance.get("cwd")), started_at=provenance.get("started_at"),
+                      exit_code=process.returncode, exited_at=time.time(),
+                      output_tail=[safe(line)[:240] for line in lines[-120:]], capture_error=capture_error)
+        try:
+            if OANDA_RUNTIME_STATUS_PATH.stat().st_size <= 64_000:
+                runtime = json.loads(OANDA_RUNTIME_STATUS_PATH.read_text(encoding="utf-8"))
+                record["runtime_status_pid"] = runtime.get("pid")
+                if runtime.get("pid") == process.pid:
+                    record["runtime_status"] = {
+                        key: safe(runtime[key]) if isinstance(runtime.get(key), str) else runtime.get(key)
+                        for key in ("pid", "started_at", "last_heartbeat_at", "phase", "running",
+                                    "last_error", "last_exit_reason")}
+        except FileNotFoundError:
+            pass
+        except Exception as exc:
+            record["runtime_capture_error"] = safe(exc)
+        self.last_failed_child = record
+        self.last_exit_capture_error = None
+        try:
+            write_json_file(OANDA_LAST_FAILED_CHILD_PATH, record, retries=0)
+        except Exception as exc:
+            self.last_exit_capture_error = safe(exc)
+            self.add_log("OANDA failed-child capture write failed: " + self.last_exit_capture_error)
 
     def add_log(self, line: str) -> None:
         cleaned = line.rstrip("\n")
@@ -14016,6 +14069,8 @@ class ManagedScript:
             "cursor": safe_cursor + len(new_lines),
             "total": len(lines),
             "last_output_at": self.last_output_at,
+            **({"last_failed_child": self._oanda_failed_child(),
+                "last_exit_capture_error": self.last_exit_capture_error} if self.name == "oanda_monitor" else {}),
         }
 
     async def start(self, *, ignore_starting: bool = False) -> None:
@@ -14041,7 +14096,9 @@ class ManagedScript:
         ).strip()
         self.last_start_attempt_at = time.time()
         self.last_start_error = None
-        self.last_exit_code = None
+        if self.name != "oanda_monitor":
+            self.last_exit_code = None
+        self.monitor_stop_requested = False
         self.last_exit_reason = None
         self.is_starting = True
         self.startup_started_at = self.last_start_attempt_at
@@ -14125,6 +14182,10 @@ class ManagedScript:
             return
 
         saw_output = False
+        child_lines = []
+        capture_error = None
+        provenance = {"command": list(self.last_spawn_command or []), "cwd": self.last_spawn_cwd,
+                      "started_at": self.startup_started_at}
         try:
             while True:
                 line = await process.stdout.readline()
@@ -14134,7 +14195,17 @@ class ManagedScript:
                     saw_output = True
                     self.is_starting = False
                     self.startup_completed_at = time.time()
-                self.add_log(line.decode("utf-8", errors="replace"))
+                decoded = line.decode("utf-8", errors="replace")
+                if self.name == "oanda_monitor":
+                    safe = _safe_bybit_diagnostic_text(decoded,
+                        api_key=os.environ.get("OANDA_API_KEY", ""),
+                        api_secret=os.environ.get("OANDA_ACCESS_TOKEN", ""), limit=1000)
+                    child_lines.append(" " * min(20, len(decoded) - len(decoded.lstrip())) + safe)
+                    child_lines = child_lines[-120:]
+                self.add_log(decoded)
+        except Exception as exc:
+            capture_error = _safe_bybit_diagnostic_text(exc)
+            raise
         finally:
             await process.wait()
             if self.process is not process:
@@ -14146,6 +14217,19 @@ class ManagedScript:
                         process.returncode,
                     )
                 return
+            if self.name == "oanda_monitor":
+                if process.returncode and not self.monitor_stop_requested:
+                    self._record_oanda_failed_child(process, child_lines, provenance, capture_error)
+                    duration = time.time() - (provenance["started_at"] or time.time())
+                    self.monitor_crash_count = self.monitor_crash_count + 1 if duration < 60 else 1
+                    delay = min(300.0, 15.0 * 2 ** min(self.monitor_crash_count - 1, 5))
+                    self.monitor_restart_not_before = time.time() + delay
+                    self.add_log(f"OANDA monitor PID {process.pid} exited with code {process.returncode}; restart delay {delay:g}s.")
+                elif process.returncode == 0:
+                    self.monitor_stop_requested = True
+                if self.last_exit_reason is None:
+                    self.last_exit_reason = ("OANDA monitor intentionally stopped." if self.monitor_stop_requested
+                                             else f"OANDA monitor exited with code {process.returncode}; see failed-child traceback.")
             self.last_exit_code = process.returncode
             if not saw_output and process.returncode is not None:
                 self.last_exit_reason = "Process exited before producing startup output."
@@ -14182,6 +14266,9 @@ class ManagedScript:
             await self._stop_locked()
 
     async def _stop_locked(self) -> None:
+        if self.name == "oanda_monitor":
+            self.monitor_stop_requested = True
+            self.last_exit_reason = "OANDA monitor stop requested."
         if not self.is_running:
             return
         assert self.process is not None
@@ -16079,6 +16166,11 @@ async def _supervise_autostart_scripts_once(
         try:
             script = script_manager.get(name)
         except HTTPException:
+            continue
+        if name == "oanda_monitor" and (
+            getattr(script, "monitor_stop_requested", False)
+            or time.time() < getattr(script, "monitor_restart_not_before", 0.0)
+        ):
             continue
         if name == "fxweekend-clone":
             allowed, gate_error = _fxweekend_start_gate()
