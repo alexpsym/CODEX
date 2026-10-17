@@ -3310,3 +3310,161 @@ def test_calculator_context_binds_accepted_order_identifiers_without_losing_sett
             assert len(posts) == before + 1
         monkeypatch.setattr(service, "_save_trade_contexts", original_save)
     asyncio.run(scenario())
+
+
+def test_accepted_orders_schedule_early_trade_folders_without_blocking_submit(tmp_path: Path, monkeypatch):
+    import threading
+    from tools import master_journal_workbook as folders
+
+    service = master_service
+    monkeypatch.setattr(service, "_OPEN_ORDERS_CACHE", {"payload": None})
+    monkeypatch.setattr(folders, "REPO_ROOT", tmp_path)
+    data = tmp_path / "render" / "data"
+    data.mkdir(parents=True)
+    for name, file in (("TRADE_CONTEXTS_PATH", "trade_contexts.json"),
+                       ("TRADING_JOURNAL_PATH", "journal.json"),
+                       ("WEBHOOK_ATTEMPTS_PATH", "webhook_attempts.json"),
+                       ("PENDING_WEBHOOKS_PATH", "pending_webhooks.json")):
+        monkeypatch.setattr(service, name, data / file)
+    monkeypatch.setattr(service, "MASTER_JOURNAL_PATH", tmp_path / "missing-workbook.xlsx")
+    monkeypatch.setattr(service, "_TRADE_CONTEXTS_CACHE", {})
+    monkeypatch.setattr(service, "_OANDA_OPEN_TRADE_LEGS", {})
+    monkeypatch.setattr(service, "_EARLY_TRADE_FOLDER_WAKE", threading.Event())
+    monkeypatch.setattr(service, "_EARLY_TRADE_FOLDER_STOP", threading.Event())
+    monkeypatch.setattr(service, "_EARLY_TRADE_FOLDER_THREAD", None)
+    monkeypatch.setattr(service, "_EARLY_TRADE_FOLDER_ERROR", None)
+    monkeypatch.setattr(service, "_utc_now_iso", lambda: "2026-01-31T23:00:00+00:00")
+    for name in ("_schedule_dropbox_upload_state_backup", "_invalidate_open_orders_cache", "_invalidate_trading_journal_view_snapshot"):
+        monkeypatch.setattr(service, name, lambda *a, **k: None)
+    monkeypatch.setattr(service, "_log_webhook_event", lambda *a, **k: None)
+    monkeypatch.setattr(service, "cache_bybit_demo_tpsl_request", lambda **k: None)
+    monkeypatch.setattr(service, "_load_bybit_demo_calc_contexts", lambda *a: {"items": []})
+    monkeypatch.setattr(service, "_upsert_bybit_demo_calc_context", lambda *a, **k: None)
+    monkeypatch.setattr(service, "_delete_pending_webhook", lambda *a, **k: False)
+    monkeypatch.setattr(service, "_assert_pending_webhook_executable", lambda *a: None)
+    monkeypatch.setattr(service, "_update_pending_webhook", lambda *a, **k: {})
+    monkeypatch.setattr(service, "_consume_pending_webhook", lambda *a, **k: True)
+    save_json = service._save_json_file
+    def isolated_save(path, payload):
+        assert Path(path).is_relative_to(tmp_path), f"unexpected production write: {path}"
+        return save_json(path, payload)
+    monkeypatch.setattr(service, "_save_json_file", isolated_save)
+    crypto, forex = tmp_path / "Crypto", tmp_path / "Forex"
+    (crypto / "2025" / "DECEMBER" / "C7 BTC").mkdir(parents=True)
+    (forex / "2025" / "DECEMBER" / "F3 EURUSD").mkdir(parents=True)
+    monkeypatch.setenv("TRADING_JOURNAL_CRYPTO_ROOT", str(crypto))
+    monkeypatch.setenv("TRADING_JOURNAL_FOREX_ROOT", str(forex))
+    monkeypatch.setattr(service, "resolve_bybit_credentials_for", lambda a: (a, "key", "secret", "https://bybit.test", "KEY"))
+    monkeypatch.setattr(service, "_get_oanda_config", lambda a: {"base_url": "https://oanda.test", "account_id": "acct", "token": "test"})
+    async def meta(**k):
+        return {"displayPrecision": 5, "tradeUnitsPrecision": 0}
+    monkeypatch.setattr(service, "_fetch_oanda_instrument_meta", meta)
+    broker = {"id": "pending-1", "reject": False, "fx_fill": True}
+    async def bybit_post(**k):
+        assert k["path"] == "/v5/order/create"
+        return {"retCode": 10001 if broker["reject"] else 0, "retMsg": "stub", "result": {"orderId": broker["id"], "orderLinkId": "link-" + broker["id"]}}
+    monkeypatch.setattr(service, "_bybit_signed_post", bybit_post)
+    class Response:
+        status_code = 200
+        def json(self):
+            if broker["reject"]:
+                return {"orderRejectTransaction": {"id": "reject"}}
+            result = {"orderCreateTransaction": {"id": broker["id"]}}
+            if broker["fx_fill"]:
+                result["orderFillTransaction"] = {"id": "fill-" + broker["id"], "orderID": broker["id"], "tradeOpened": {"tradeID": "trade-" + broker["id"]}}
+            return result
+    class Client:
+        def __init__(self, *a, **k): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def post(self, url, **k):
+            assert url.startswith("https://oanda.test/")
+            return Response()
+    monkeypatch.setattr(service.httpx, "AsyncClient", Client)
+    async def open_orders(**k):
+        return service.JSONResponse({"items": [{"broker": "oanda", "account": "demo", "category": "forex", "instrument": "EUR_USD", "id": broker["id"], "type": "order"}]})
+    monkeypatch.setattr(service, "list_open_orders", open_orders)
+
+    entered, release = threading.Event(), threading.Event()
+    materialize = folders._materialize_trade_folder
+    def held_io(record):
+        entered.set()
+        assert release.wait(15), "test failed to release folder I/O"
+        materialize(record)
+    monkeypatch.setattr(folders, "_materialize_trade_folder", held_io)
+    crypto_payload = {"asset": "crypto", "account": "demo", "symbol": "BTCUSDT", "action": "buy", "order_type": "limit", "entry_price": "100", "quantity": "0.01", "is_test_trade": False}
+    async def accept():
+        response = await asyncio.wait_for(service.calculator_submit(dict(crypto_payload)), 3)
+        assert json.loads(response.body)["ok"] is True
+        assert await asyncio.to_thread(entered.wait, 3)
+        assert not release.is_set()
+        assert not list(crypto.glob("2026/*/C*"))
+        # Same accepted order delivered again: exact identity must reuse it.
+        await service._place_bybit_order(dict(crypto_payload), request_id="replay")
+        broker["id"] = "market-2"
+        market = dict(crypto_payload, order_type="market")
+        market.pop("entry_price")
+        await service._place_bybit_order(market, request_id="market")
+        broker["id"] = "fx-limit"
+        broker["fx_fill"] = False
+        response = await service.calculator_submit({"asset": "fx", "account": "demo", "symbol": "EUR_USD", "action": "buy", "order_type": "limit", "entry_price": "1.1", "quantity": "100", "is_test_trade": False})
+        assert json.loads(response.body)["ok"] is True
+        broker["id"] = "webhook-fx"
+        broker["fx_fill"] = True
+        response = await service.calculator_webhook({"asset": "fx", "account": "demo", "symbol": "EUR_USD", "action": "buy", "order_type": "market", "quantity": "100", "pending_webhook_id": "registered-webhook", "is_test_trade": False})
+        assert json.loads(response.body)["ok"] is True
+        # Current-inventory proof binds additions to the original accepted entry.
+        service._OPEN_ORDERS_CACHE["payload"] = {"items": [{"broker": "bybit", "account": "demo", "category": "linear", "instrument": "BTCUSDT", "type": "Position", "side": "Buy", "size": "0.02", "position_idx": 0, "source_pending": False, "source_stale": False, "raw_refs": {"order_ids": ["pending-1"], "order_ids_complete": True}}]}
+        broker["id"] = "addition-3"
+        await service._place_bybit_order(dict(crypto_payload), request_id="addition")
+        broker["id"] = "net-reduction"
+        await service._place_bybit_order(dict(crypto_payload, action="sell"), request_id="reduce")
+        # A saved webhook registration is not broker acceptance.
+        service._upsert_calculator_trade_context({"broker": "bybit", "account": "demo", "category": "linear", "instrument": "BTCUSDT", "pending_webhook_id": "unexecuted", "status": "WAITING"})
+        broker["id"] = "test-entry"
+        await service._place_bybit_order(dict(crypto_payload, is_test_trade="Yes"), request_id="test")
+        broker["reject"] = True
+        rejected = await service.calculator_submit(dict(crypto_payload))
+        assert json.loads(rejected.body)["ok"] is False
+    try:
+        asyncio.run(accept())
+    finally:
+        release.set()
+        service._EARLY_TRADE_FOLDER_STOP.set()
+        service._EARLY_TRADE_FOLDER_WAKE.set()
+        if service._EARLY_TRADE_FOLDER_THREAD:
+            service._EARLY_TRADE_FOLDER_THREAD.join(10)
+            assert not service._EARLY_TRADE_FOLDER_THREAD.is_alive()
+    monkeypatch.setattr(folders, "_materialize_trade_folder", materialize)
+    # Simulated restart loads only persisted requests/state, including retained closures.
+    service._TRADE_CONTEXTS_CACHE.clear()
+    contexts = service._load_trade_contexts()
+    requests = [c for c in contexts if c.get("early_trade_folder_request")]
+    assert {c["order_id"] for c in requests} == {"pending-1", "market-2", "fx-limit", "webhook-fx", "addition-3"}
+    for context in requests:
+        context.update(status="CANCELLED", updated_at="2000-01-01T00:00:00Z")
+    assert all(c in service._prune_trade_contexts(contexts) for c in requests)
+    service._save_trade_contexts(contexts)
+    service._drain_early_trade_folders()
+    state = folders._load_trade_allocations()
+    assert len(state) == 4 and all(r["status"] == "ready" for r in state.values())
+    pending = next(r for r in state.values() if "order:pending-1" in r["identities"])
+    assert pending["trade_number"] == "C8"
+    assert Path(pending["folder"]) == crypto / "2026" / "FEBRUARY" / "C8 BTC"
+    # Pending order-to-trade conversion adds an exact alias through the existing context path.
+    service._upsert_trade_context({"broker": "oanda", "account": "demo", "account_id": "acct", "category": "forex", "instrument": "EUR_USD", "order_id": "fx-limit", "trade_id": "filled-fx-limit"})
+    service._drain_early_trade_folders()
+    # Normal source persistence receives the exact allocation before workbook numbering.
+    row = {"id": "new-journal-row", "source": "bybit", "account": "demo", "asset_class": "crypto", "symbol": "BTCUSDT", "open_time": "2027-02-01", "close_time": "2027-03-02", "is_test_trade": False, "raw_refs": {"order_ids": ["pending-1"]}}
+    fx_row = {"id": "fx-close", "source": "oanda", "account": "demo", "account_id": "acct", "asset_class": "forex", "symbol": "EUR_USD", "open_time": "2027-03-01", "raw_refs": {"tradeId": "filled-fx-limit"}}
+    service._set_trading_journal_rows([row, fx_row], invalidate_view_snapshot=False, schedule_state_backup=False)
+    persisted = json.loads(service.TRADING_JOURNAL_PATH.read_text())["items"]
+    assert persisted[0]["trade_number"] == "C8"
+    assert persisted[0]["trade_folder"] == pending["folder"]
+    assert persisted[1]["trade_number"] == "F4"
+    result = folders.assign_trade_numbers_and_create_folders(persisted)
+    assert result["assigned_count"] == 0
+    assert len(folders._load_trade_allocations()) == 4
+    service._drain_early_trade_folders()
+    assert len(list(crypto.glob("2026/*/C*"))) == 2
+    assert len(list(forex.glob("2026/*/F*"))) == 2

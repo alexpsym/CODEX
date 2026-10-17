@@ -7381,6 +7381,8 @@ def _set_trading_journal_rows(
     global _TRADING_JOURNAL_CACHE, _TRADING_JOURNAL_CACHE_KEY
     with _TRADING_JOURNAL_ROWS_LOCK:
         normalized_rows = [_normalize_journal_profit_fields(dict(item)) for item in rows if isinstance(item, dict)]
+        from tools.master_journal_workbook import apply_early_trade_folder_allocations
+        apply_early_trade_folder_allocations(normalized_rows)
         _save_json_file(TRADING_JOURNAL_PATH, {"items": normalized_rows, "updated_at": _utc_now_iso()})
         _TRADING_JOURNAL_CACHE = copy.deepcopy(normalized_rows)
         _TRADING_JOURNAL_CACHE_KEY = _trading_journal_file_cache_key()
@@ -12836,6 +12838,7 @@ def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[s
             "id": f"oanda:{account}:{symbol}:{row_id_suffix}:close",
             "source": "oanda",
             "account": account,
+            "account_id": str(entry.get("accountID") or ""),
             "account_label": f"OANDA {account.title()}",
             "asset_class": "forex",
             "symbol": symbol,
@@ -12901,6 +12904,7 @@ def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[s
                 "transactionId": tx_id,
                 "orderId": entry.get("orderID"),
                 "tradeId": trade_id,
+                "opening_order_id": (open_leg or {}).get("order_id"),
                 "original_loss_conversion_factor": opening_factor,
                 "original_loss_conversion_factor_source": opening_factor_source,
                 "original_loss_conversion_factor_time": opening_factor_time,
@@ -16337,6 +16341,7 @@ async def _supervise_autostart_scripts(names: List[str]) -> None:
 
 @app.on_event("startup")
 async def _autostart_scripts() -> None:
+    _schedule_early_trade_folders()
     _start_local_terminal_exit_watcher()
     AUTOSTART_LOGGER.info(format_env_bootstrap_log(_MASTER_ENV_INFO))
     AUTOSTART_LOGGER.info(
@@ -16462,6 +16467,8 @@ async def _autostart_scripts() -> None:
 
 @app.on_event("shutdown")
 async def _log_local_master_shutdown() -> None:
+    _EARLY_TRADE_FOLDER_STOP.set()
+    _EARLY_TRADE_FOLDER_WAKE.set()
     await _shutdown_open_orders_jobs()
     _stop_manual_save_github_sync_watcher()
     try:
@@ -22057,13 +22064,107 @@ def _accepted_calculator_intent(payload, *, broker, account, category, instrumen
     return result
 
 
+_EARLY_TRADE_FOLDER_WAKE = threading.Event()
+_EARLY_TRADE_FOLDER_STOP = threading.Event()
+_EARLY_TRADE_FOLDER_GUARD = threading.Lock()
+_EARLY_TRADE_FOLDER_THREAD = None
+_EARLY_TRADE_FOLDER_ERROR: Optional[str] = None
+
+
+def _bybit_early_folder_lifecycle(*, account, category, symbol, side, position_idx, quantity):
+    """Reuse only an independently proven current inventory's exact opening refs.
+
+    This uses the existing healthy position snapshot, never a symbol/time/context
+    guess. A net reduction is not a new entry; a reversal starts a new lifecycle.
+    """
+    snapshot = _OPEN_ORDERS_CACHE.get("payload") or {}
+    for item in snapshot.get("items", []):
+        if (str(item.get("broker")).lower() != "bybit"
+                or str(item.get("type")).lower() != "position"
+                or str(item.get("account")).lower() != account
+                or str(item.get("category")).lower() != category
+                or item.get("instrument") != symbol
+                or str(item.get("position_idx", 0)) != str(position_idx or 0)
+                or item.get("source_pending") is not False
+                or item.get("source_stale") is not False):
+            continue
+        refs = item.get("raw_refs") or {}
+        orders = refs.get("order_ids")
+        if refs.get("order_ids_complete") is not True or not isinstance(orders, list) or not orders:
+            continue
+        if str(item.get("side")).lower() == side.lower():
+            return True, {"folder_entry_order_ids": list(orders)}
+        current = _to_float(item.get("size"))
+        incoming = _to_float(quantity)
+        if current is not None and incoming is not None and 0 < incoming <= abs(current):
+            return False, {}
+    return True, {}
+
+
+def _drain_early_trade_folders() -> None:
+    from tools import master_journal_workbook as folders
+    payload = _load_json_file(TRADE_CONTEXTS_PATH, {})
+    contexts = payload.get("items", []) if isinstance(payload, dict) else payload
+    rows = folders.early_trade_folder_rows(contexts or [])
+    state = folders._load_trade_allocations()
+    pending = []
+    for row in rows:
+        scope, identities = folders._trade_folder_identity(row)
+        if not any(tuple(record["scope"]) == scope and identities <= set(record["identities"])
+                   and record["status"] == "ready" for record in state.values()):
+            pending.append(row)
+    if pending:
+        result = assign_trade_numbers_and_create_folders(pending, workbook_path=MASTER_JOURNAL_PATH)
+        if result.get("skipped_unresolved_root_or_market"):
+            raise OSError("Accepted trade folder allocation remains pending: root or creation unavailable")
+
+
+def _early_trade_folder_worker() -> None:
+    global _EARLY_TRADE_FOLDER_ERROR
+    while not _EARLY_TRADE_FOLDER_STOP.is_set():
+        _EARLY_TRADE_FOLDER_WAKE.wait(30.0)
+        _EARLY_TRADE_FOLDER_WAKE.clear()
+        if _EARLY_TRADE_FOLDER_STOP.is_set():
+            break
+        try:
+            _drain_early_trade_folders()
+            _EARLY_TRADE_FOLDER_ERROR = None
+        except Exception as exc:
+            error = str(exc)
+            if error != _EARLY_TRADE_FOLDER_ERROR:
+                APP_LOGGER.info("early_trade_folder_pending: %s", error)
+            _EARLY_TRADE_FOLDER_ERROR = error
+
+
+def _schedule_early_trade_folders() -> None:
+    global _EARLY_TRADE_FOLDER_THREAD
+    with _EARLY_TRADE_FOLDER_GUARD:
+        if _EARLY_TRADE_FOLDER_THREAD is None or not _EARLY_TRADE_FOLDER_THREAD.is_alive():
+            _EARLY_TRADE_FOLDER_STOP.clear()
+            _EARLY_TRADE_FOLDER_THREAD = threading.Thread(
+                target=_early_trade_folder_worker, name="accepted-trade-folders", daemon=True)
+            _EARLY_TRADE_FOLDER_THREAD.start()
+        _EARLY_TRADE_FOLDER_WAKE.set()
+
+
 def _upsert_calculator_trade_context(
     payload: Dict[str, object],
     require_durable: bool = True,
     invalidate_cache: bool = True,
+    accepted_entry: bool = False,
 ) -> Dict[str, object]:
     try:
+        if accepted_entry and payload.get("order_id") and _normalize_test_trade_flag(payload.get("is_test_trade")) is not True:
+            payload = dict(payload)
+            # Immutable accepted intent is the durable outbox. It is never pruned,
+            # including cancelled pending entries whose screenshot numbers stay reserved.
+            payload["early_trade_folder_request"] = {
+                key: payload.get(key) for key in ("broker", "account", "account_id", "category",
+                    "instrument", "asset", "side", "order_id", "order_link_id", "trade_id",
+                    "open_time", "created_at", "is_test_trade", "raw_refs")}
         saved = _upsert_trade_context(payload)
+        if accepted_entry and saved.get("early_trade_folder_request"):
+            _schedule_early_trade_folders()
         if invalidate_cache:
             _invalidate_open_orders_cache()
         return saved
@@ -22203,7 +22304,7 @@ def _prune_trade_contexts(items: List[Dict[str, object]]) -> List[Dict[str, obje
     for entry in items:
         status = str(entry.get("status") or "").strip().upper()
         updated_at = _parse_iso_datetime(entry.get("updated_at") or entry.get("closed_at"))
-        if status in {"CLOSED", "CANCELLED"} and updated_at and updated_at < cutoff:
+        if status in {"CLOSED", "CANCELLED"} and updated_at and updated_at < cutoff and not entry.get("early_trade_folder_request"):
             continue
         kept.append(entry)
     return kept
@@ -22381,6 +22482,8 @@ def _upsert_trade_context(payload: Dict[str, object]) -> Dict[str, object]:
                     merged[k] = v
 
         for k, v in merged_payload.items():
+            if k == "early_trade_folder_request" and merged.get(k):
+                continue
             if k == "created_at":
                 if _is_blank(merged.get("created_at")):
                     merged["created_at"] = v
@@ -23818,6 +23921,9 @@ async def _place_bybit_order(
     planned_entry_price = _normalize_linear_price(planned_entry_price)
     planned_stop_price = _normalize_linear_price(planned_stop_price)
     planned_target_price = _normalize_linear_price(planned_target_price)
+    folder_is_entry, folder_lifecycle_refs = _bybit_early_folder_lifecycle(
+        account=account, category=category, symbol=symbol, side=side,
+        position_idx=body.get("positionIdx"), quantity=qty_val)
     _log_webhook_event(request_id, "order_request", {"payload": body})
 
     data: Dict[str, object] = {}
@@ -23950,8 +24056,10 @@ async def _place_bybit_order(
             "planned_target_price": planned_target_price,
             "stop_loss": initial_stop_loss,
             "take_profit": initial_take_profit,
+            "raw_refs": folder_lifecycle_refs,
         },
             invalidate_cache=False,
+            accepted_entry=folder_is_entry and bool(order_id) and not bool(body.get("reduceOnly")) and not bool(body.get("closeOnTrigger")),
         )
     except Exception as exc:
         journal_context_saved = False
@@ -24728,8 +24836,11 @@ async def _place_oanda_order(
                 "planned_entry_price": intent.get("planned_entry_price"),
                 "planned_stop_price": intent.get("planned_stop_price"),
                 "planned_target_price": intent.get("planned_target_price"),
+                "open_time": _utc_now_iso(),
             },
             invalidate_cache=False,
+            accepted_entry=bool(order_id) and not result.get("orderRejectTransaction")
+                and not result.get("orderCancelTransaction") and (not isinstance(fill_tx, dict) or bool(trade_id)),
         )
         _schedule_dropbox_upload_state_backup()
         if not pending_id:

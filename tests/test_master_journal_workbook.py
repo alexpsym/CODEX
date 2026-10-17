@@ -12307,3 +12307,134 @@ def test_pnl_calendar_net_r_persists_through_preservation_refresh(tmp_path: Path
         finally:
             reopened_formula.close()
             reopened_values.close()
+
+
+def test_early_trade_folder_identity_survives_replay_concurrency_and_journal_reuse(tmp_path: Path, monkeypatch):
+    import subprocess
+    import sys
+    import json
+
+    monkeypatch.setattr(mjw, "REPO_ROOT", tmp_path)
+    forex, crypto = tmp_path / "Forex", tmp_path / "Crypto"
+    (forex / "2025" / "DECEMBER" / "F0007 EURUSD").mkdir(parents=True)
+    (crypto / "2025" / "DECEMBER" / "C0004 BTC").mkdir(parents=True)
+    monkeypatch.setenv("TRADING_JOURNAL_FOREX_ROOT", str(forex))
+    monkeypatch.setenv("TRADING_JOURNAL_CRYPTO_ROOT", str(crypto))
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Trade Log"
+    ws.append(["Trade Number", "Row ID"])
+    ws.append(["C9", "prior-workbook-row"])
+    workbook = tmp_path / "minimal.xlsx"
+    wb.save(workbook)
+    wb.close()
+
+    def entry(order, *, asset="crypto", **extra):
+        return dict(id=order, broker="bybit" if asset == "crypto" else "oanda",
+                    account="demo", account_id="acct" if asset != "crypto" else "",
+                    category="linear" if asset == "crypto" else "forex", asset_class=asset,
+                    symbol="BTCUSDT" if asset == "crypto" else "EUR_USD", order_id=order,
+                    open_time="2026-01-31T23:00:00Z", is_test_trade=False, **extra)
+
+    # Actual competing processes share the production OS lock and durable state.
+    script = '''
+import json, sys, time
+from pathlib import Path
+from tools import master_journal_workbook as m
+m.REPO_ROOT = Path(sys.argv[1])
+row = json.loads(sys.argv[2])
+ready = m.REPO_ROOT / (row['id'] + '.ready')
+ready.touch()
+while not (m.REPO_ROOT / 'go').exists(): time.sleep(.01)
+m.assign_trade_numbers_and_create_folders([row], workbook_path=Path(sys.argv[3]))
+(m.REPO_ROOT / (row['id'] + '.result')).write_text(json.dumps(row))
+'''
+    children = []
+    try:
+        for row in (entry("early"), entry("journal", source="bybit")):
+            children.append(subprocess.Popen([sys.executable, "-c", script, str(tmp_path), json.dumps(row), str(workbook)], cwd=Path(__file__).resolve().parents[1], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True))
+        import time
+        deadline = time.monotonic() + 20
+        while not all((tmp_path / (name + ".ready")).exists() for name in ("early", "journal")):
+            assert time.monotonic() < deadline, "allocation children failed to start"
+            time.sleep(.02)
+        (tmp_path / "go").touch()
+        for child in children:
+            out, err = child.communicate(timeout=25)
+            assert child.returncode == 0, out + err
+    finally:
+        for child in children:
+            if child.poll() is None:
+                child.kill()
+                child.wait()
+    a, b = [json.loads((tmp_path / (name + ".result")).read_text()) for name in ("early", "journal")]
+    assert {a["trade_number"], b["trade_number"]} == {"C10", "C11"}
+    assert Path(a["trade_folder"]).parent == crypto / "2026" / "JANUARY"
+    screenshot = Path(a["trade_folder"]) / "chart.png"
+    screenshot.write_bytes(b"existing screenshot")
+    later = entry("early")
+    later.update(id="changed-close-row", open_time="2027-02-01", close_time="2027-03-02")
+    mjw._TRADE_FOLDER_INDEX_CACHE.clear()
+    mjw.apply_early_trade_folder_allocations([later])
+    assert later["trade_number"] == a["trade_number"]
+    result = mjw.assign_trade_numbers_and_create_folders([later], workbook_path=workbook)
+    assert result["assigned_count"] == 0 and later["trade_folder"] == a["trade_folder"]
+    link, reason = mjw.resolve_trade_folder_link(a["trade_number"].replace("C", "C000"), open_time="2027-02-01", crypto_root=crypto, forex_root=forex)
+    assert reason is None and Path(a["trade_folder"]).name in __import__('urllib.parse', fromlist=['unquote']).unquote(link)
+    assert screenshot.read_bytes() == b"existing screenshot"
+
+    # Crash after rename but before the ready state is committed: the marker is evidence.
+    save = mjw._save_trade_allocations
+    crashed = {"once": False}
+    def crash_once(state):
+        if not crashed["once"] and any(r["row_id"] == "crash" and r["status"] == "ready" for r in state.values()):
+            crashed["once"] = True
+            raise OSError("simulated post-mkdir crash")
+        save(state)
+    monkeypatch.setattr(mjw, "_save_trade_allocations", crash_once)
+    row = entry("crash")
+    assert mjw.assign_trade_numbers_and_create_folders([row])["assigned_count"] == 0
+    assert "trade_number" not in row
+    reserved = next(r for r in mjw._load_trade_allocations().values() if r["row_id"] == "crash")
+    assert reserved["status"] == "reserved" and Path(reserved["folder"]).is_dir()
+    monkeypatch.setattr(mjw, "_save_trade_allocations", save)
+    mjw.assign_trade_numbers_and_create_folders([row])
+    assert row["trade_number"] == reserved["trade_number"]
+
+    # Unavailable configured root remains pending; no alternate root or false number.
+    absent = tmp_path / "temporarily-offline"
+    monkeypatch.setenv("TRADING_JOURNAL_FOREX_ROOT", str(absent))
+    fx = entry("fx", asset="forex")
+    mjw.assign_trade_numbers_and_create_folders([fx])
+    assert "trade_number" not in fx and not absent.exists()
+    monkeypatch.setenv("TRADING_JOURNAL_FOREX_ROOT", str(forex))
+    mjw.assign_trade_numbers_and_create_folders([fx])
+    assert fx["trade_number"] == "F8"
+
+    materialize = mjw._materialize_trade_folder
+    def fail_creation(record):
+        if record["row_id"] == "blocked":
+            raise PermissionError("temporary sync folder failure")
+        materialize(record)
+    monkeypatch.setattr(mjw, "_materialize_trade_folder", fail_creation)
+    blocked = entry("blocked")
+    mjw.assign_trade_numbers_and_create_folders([blocked])
+    record = next(r for r in mjw._load_trade_allocations().values() if r["row_id"] == "blocked")
+    assert "trade_number" not in blocked
+    unowned = Path(record["folder"])
+    unowned.mkdir(parents=True)
+    (unowned / "keep.png").write_bytes(b"do not steal")
+    monkeypatch.setattr(mjw, "_materialize_trade_folder", materialize)
+    mjw.assign_trade_numbers_and_create_folders([blocked])
+    assert "trade_number" not in blocked and (unowned / "keep.png").read_bytes() == b"do not steal"
+    another = entry("after-cancel")
+    mjw.assign_trade_numbers_and_create_folders([another])
+    assert another["trade_number"] != record["trade_number"]
+    test = entry("test")
+    test["is_test_trade"] = "Yes"
+    assert mjw.assign_trade_numbers_and_create_folders([test])["skipped_test"] == 1
+    assert "trade_number" not in test
+    wrong = entry("early")
+    wrong["account"] = "live"
+    mjw.apply_early_trade_folder_allocations([wrong])
+    assert "trade_number" not in wrong

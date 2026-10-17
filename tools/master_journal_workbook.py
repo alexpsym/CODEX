@@ -24,6 +24,9 @@ from copy import copy, deepcopy
 import json
 import math
 import os
+import threading
+import time
+from contextlib import contextmanager
 import posixpath
 import re
 import zipfile
@@ -5160,18 +5163,195 @@ def _existing_workbook_trade_numbers(path: Path) -> Tuple[set[str], Dict[str, st
     return values, by_row_id
 
 
+_TRADE_ALLOCATION_THREAD_LOCK = threading.RLock()
+
+
+def _trade_allocation_state_path() -> Path:
+    return REPO_ROOT / "render" / "data" / "trade_folder_allocations.json"
+
+
+@contextmanager
+def _trade_allocation_lock():
+    """One repository-wide lock for early, workbook and repair allocation."""
+    path = _trade_allocation_state_path().with_suffix(".lock")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with _TRADE_ALLOCATION_THREAD_LOCK, path.open("a+b") as handle:
+        if handle.seek(0, os.SEEK_END) == 0:
+            handle.write(b"0")
+            handle.flush()
+        handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+            while True:
+                try:
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError:
+                    time.sleep(0.05)
+        else:
+            import fcntl
+            fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            handle.seek(0)
+            if os.name == "nt":
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+def _load_trade_allocations() -> Dict[str, Any]:
+    path = _trade_allocation_state_path()
+    if not path.exists():
+        return {}
+    state = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(state, dict):
+        raise ValueError("Invalid trade folder ownership state; allocation stopped")
+    return state
+
+
+def _save_trade_allocations(state: Mapping[str, Any]) -> None:
+    path = _trade_allocation_state_path()
+    temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+    try:
+        with temporary.open("w", encoding="utf-8") as handle:
+            json.dump(state, handle, indent=2)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _trade_folder_identity(row: Mapping[str, Any]) -> Tuple[Tuple[str, ...], set[str]]:
+    """Only exact broker references, scoped to account and market, establish ownership."""
+    refs = row.get("raw_refs") if isinstance(row.get("raw_refs"), dict) else {}
+    broker = str(row.get("broker") or row.get("source") or "").lower()
+    if broker.startswith("bybit_execution_history"):
+        broker = "bybit"
+    category = str(row.get("category") or ("forex" if broker == "oanda" else "linear")).lower()
+    scope = (broker, str(row.get("account") or "").lower(),
+             str(row.get("account_id") or refs.get("account_id") or ""), category,
+             str(row.get("instrument") or row.get("symbol") or "").upper())
+    identities: set[str] = set()
+    for kind, names in (("order", ("order_id", "orderId", "orderID", "opening_order_id")),
+                        ("link", ("order_link_id", "orderLinkId", "parentOrderLinkId")),
+                        ("trade", ("trade_id", "tradeId", "tradeID"))):
+        for source in (row, refs):
+            for name in names:
+                if source.get(name):
+                    identities.add(f"{kind}:{source[name]}")
+        if kind == "order":
+            for name in ("order_ids", "opening_order_ids", "folder_entry_order_ids"):
+                for value in refs.get(name, []) or []:
+                    identities.add(f"order:{value}")
+    return scope, identities
+
+
+def early_trade_folder_rows(contexts: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    rows = []
+    for context in contexts:
+        request = context.get("early_trade_folder_request")
+        if not isinstance(request, dict) or not request.get("order_id"):
+            continue
+        row = dict(request)
+        row.update(id=f"accepted:{request['broker']}:{request['account']}:{request['order_id']}",
+                   row_type="trade", symbol=request.get("instrument"),
+                   asset_class=request.get("asset"),
+                   open_time=request.get("open_time") or request.get("created_at"))
+        # Later exact order-to-trade conversion enriches aliases without changing intent.
+        if context.get("order_id") == request.get("order_id") and context.get("trade_id"):
+            row["trade_id"] = context["trade_id"]
+        rows.append(row)
+    return rows
+
+
+def apply_early_trade_folder_allocations(rows: Sequence[Dict[str, Any]]) -> None:
+    """Transfer ready allocations into source rows; no directory/workbook I/O."""
+    state = _load_trade_allocations()
+    for row in rows:
+        if _is_test_trade_value(row.get("is_test_trade", row.get("test"))):
+            continue
+        if row.get("trade_number"):
+            continue
+        scope, identities = _trade_folder_identity(row)
+        matches = [record for record in state.values() if tuple(record["scope"]) == scope
+                   and identities.intersection(record["identities"])]
+        if len(matches) == 1 and matches[0]["status"] == "ready":
+            row["trade_number"] = matches[0]["trade_number"]
+            row["trade_folder"] = matches[0]["folder"]
+
+
+def _owned_trade_folder(record: Dict[str, Any]) -> bool:
+    """A marker travels with an atomic directory rename across the crash window."""
+    folder = Path(record["folder"])
+    marker = folder / ".ltt-trade-owner.json"
+    return marker.is_file() and json.loads(marker.read_text(encoding="utf-8")) == record["owner"]
+
+
+def _materialize_trade_folder(record: Dict[str, Any]) -> None:
+    folder = Path(record["folder"])
+    if not Path(record["root"]).is_dir():
+        raise OSError("Original chart root is unavailable")
+    if folder.exists():
+        if not _owned_trade_folder(record):
+            raise OSError("Reserved folder exists without matching ownership evidence")
+        return
+    stage = folder.parent / (".ltt-entry-" + record["owner"])
+    stage.mkdir(parents=True, exist_ok=True)
+    marker = stage / ".ltt-trade-owner.json"
+    if marker.exists():
+        if json.loads(marker.read_text(encoding="utf-8")) != record["owner"]:
+            raise OSError("Conflicting staged folder owner")
+    else:
+        if any(stage.iterdir()):
+            raise OSError("Unowned staging contents")
+        with marker.open("x", encoding="utf-8") as handle:
+            json.dump(record["owner"], handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+    if folder.exists():
+        raise OSError("Destination appeared during folder creation")
+    stage.rename(folder)
+
+
 def assign_trade_numbers_and_create_folders(
+    rows: Sequence[Dict[str, Any]], *, workbook_path: Path | None = None,
+    forex_root: Path | None = None, crypto_root: Path | None = None,
+    dry_run: bool = False,
+) -> Dict[str, Any]:
+    with _trade_allocation_lock():
+        _TRADE_FOLDER_INDEX_CACHE.clear()
+        state = _load_trade_allocations()
+        # A journal/repair process can win the lock before the service worker.
+        # Drain the same durable acceptance outbox first, using its original date.
+        outbox = _trade_allocation_state_path().with_name("trade_contexts.json")
+        if outbox.exists():
+            contexts = json.loads(outbox.read_text(encoding="utf-8"))
+            contexts = contexts.get("items", []) if isinstance(contexts, dict) else contexts
+            pending = early_trade_folder_rows(contexts)
+            if pending:
+                _assign_trade_numbers_locked(pending, workbook_path=workbook_path,
+                    forex_root=forex_root, crypto_root=crypto_root, dry_run=dry_run, state=state)
+        return _assign_trade_numbers_locked(rows, workbook_path=workbook_path,
+            forex_root=forex_root, crypto_root=crypto_root, dry_run=dry_run, state=state)
+
+
+def _assign_trade_numbers_locked(
     rows: Sequence[Dict[str, Any]],
     *,
     workbook_path: Path | None = None,
     forex_root: Path | None = None,
     crypto_root: Path | None = None,
     dry_run: bool = False,
+    state: Dict[str, Any],
 ) -> Dict[str, Any]:
     """Assign missing canonical trade numbers only after their chart folder is available."""
     workbook_numbers, workbook_by_row_id = _existing_workbook_trade_numbers(Path(workbook_path)) if workbook_path else (set(), {})
     used: Dict[str, set[int]] = {"F": set(), "C": set()}
-    for value in [*workbook_numbers, *(row.get("trade_number") for row in rows)]:
+    for value in [*workbook_numbers, *(row.get("trade_number") for row in rows),
+                  *(record["trade_number"] for record in state.values())]:
         for prefix in ("F", "C"):
             ordinal = _trade_number_ordinal(value, prefix)
             if ordinal is not None:
@@ -5208,6 +5388,33 @@ def assign_trade_numbers_and_create_folders(
             continue
         row_id = str(row.get("id") or "").strip()
         existing = str(row.get("trade_number") or workbook_by_row_id.get(row_id) or "").strip().upper()
+        scope, identities = _trade_folder_identity(row)
+        matches = [(key, record) for key, record in state.items()
+                   if (identities and tuple(record["scope"]) == scope
+                       and identities.intersection(record["identities"]))
+                   or (not identities and row_id and record.get("row_id") == row_id)]
+        if len(matches) > 1:
+            # Conflicting provenance must never silently select another entry's folder.
+            skipped_root.append(row_id or "<ambiguous-identity>")
+            continue
+        if matches:
+            key, record = matches[0]
+            if existing and not set(_trade_number_aliases(existing)).intersection(_trade_number_aliases(record["trade_number"])):
+                skipped_root.append(row_id or key)
+                continue
+            if not dry_run:
+                try:
+                    _materialize_trade_folder(record)
+                    record["identities"] = sorted(set(record["identities"]) | identities)
+                    record["status"] = "ready"
+                    _save_trade_allocations(state)
+                except (OSError, ValueError):
+                    skipped_root.append(row_id or key)
+                    continue
+                row["trade_number"] = record["trade_number"]
+                row["trade_folder"] = record["folder"]
+            preserved += 1
+            continue
         if existing:
             row["trade_number"] = existing
             preserved += 1
@@ -5226,8 +5433,17 @@ def assign_trade_numbers_and_create_folders(
     candidates.sort(key=lambda item: (item[0], item[1]))
     next_values = {prefix: max(used[prefix] or {0}) + 1 for prefix in ("F", "C")}
     for trade_time, row_id, row, prefix in candidates:
+        scope, identities = _trade_folder_identity(row)
+        # Another candidate in this batch may already own this exact accepted entry.
+        if any(tuple(record["scope"]) == scope and identities.intersection(record["identities"])
+               for record in state.values()):
+            replay = _assign_trade_numbers_locked([row], workbook_path=workbook_path,
+                forex_root=forex_root, crypto_root=crypto_root, dry_run=dry_run, state=state)
+            preserved += replay["preserved_existing"]
+            skipped_root.extend(replay["skipped_unresolved_root_or_market"])
+            continue
         root = roots[prefix]
-        if root is None:
+        if root is None or not root.is_dir():
             skipped_root.append(row_id or "<missing-row-id>")
             continue
         ordinal = next_values[prefix]
@@ -5242,18 +5458,25 @@ def assign_trade_numbers_and_create_folders(
         folder_name = f"{number} {symbol}" if layout.get("include_symbol") and symbol else number
         folder = parent / folder_name
         if not dry_run:
+            key = hashlib.sha256(json.dumps([scope, sorted(identities), row_id if not identities else ""]).encode()).hexdigest()
+            record = {"scope": scope, "identities": sorted(identities), "row_id": row_id,
+                      "trade_number": number, "folder": str(folder), "root": str(root), "owner": uuid4().hex,
+                      "status": "reserved"}
+            state[key] = record
+            # Durable reservation precedes any filesystem work. Never recycle cancellations.
+            _save_trade_allocations(state)
+            used[prefix].add(ordinal)
+            next_values[prefix] = ordinal + 1
             try:
-                folder.mkdir(parents=True, exist_ok=False)
-            except FileExistsError:
-                existing_matches = _trade_folder_index(root, prefix).get(number, [])
-                if len(existing_matches) != 1 or existing_matches[0].resolve() != folder.resolve():
-                    skipped_root.append(row_id or "<missing-row-id>")
-                    continue
-            except OSError:
+                _materialize_trade_folder(record)
+                record["status"] = "ready"
+                _save_trade_allocations(state)
+            except (OSError, ValueError):
                 skipped_root.append(row_id or "<missing-row-id>")
                 continue
             _TRADE_FOLDER_INDEX_CACHE.clear()
             row["trade_number"] = number
+            row["trade_folder"] = str(folder)
         assignments.append({
             "row_id": row_id,
             "trade_number": number,
