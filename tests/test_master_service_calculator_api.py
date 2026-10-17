@@ -3181,3 +3181,132 @@ def test_trendline_real_calculator_snapshots_and_broker_outcomes(monkeypatch: py
             await service._trendline_executor_submit(plans["oanda"], {**calculations["oanda"], "quantity":None}, "stable")
         assert len(posts) == before
     asyncio.run(run())
+
+
+
+def _phase3_accepted_context_fixture(monkeypatch, tmp_path, service):
+    """Real placement/persistence with every broker/backup/state effect isolated."""
+    monkeypatch.setattr(service, "TRADE_CONTEXTS_PATH", tmp_path / "contexts.json")
+    monkeypatch.setattr(service, "_TRADE_CONTEXTS_CACHE", {"fingerprint": None, "items": None})
+    monkeypatch.setattr(service, "_calc_context_uses_repo_local", lambda: True)
+    monkeypatch.setattr(service, "BYBIT_DEMO_CALC_CONTEXT_LOCAL_PATH", tmp_path / "demo-quotes.json")
+    monkeypatch.setattr(service, "BYBIT_DEMO_CALC_CONTEXT_LEGACY_LOCAL_PATH", tmp_path / "absent.json")
+    for name in ("_schedule_dropbox_upload_state_backup", "_invalidate_open_orders_cache", "_log_webhook_event",
+                 "_record_outbound_traffic", "cache_bybit_demo_tpsl_request"):
+        monkeypatch.setattr(service, name, lambda *args, **kwargs: None)
+    monkeypatch.setattr(service, "_delete_pending_webhook", lambda *args, **kwargs: False)
+    monkeypatch.setattr(service, "_parse_limit_cancel_settings", lambda payload: (None, None))
+    monkeypatch.setattr(service, "_bybit_position_idx_for_order", lambda **kwargs: 0)
+    monkeypatch.setattr(service, "resolve_bybit_credentials_for",
+                        lambda account: (account, "key-" + account, "secret", "https://bybit.test", "fixture"))
+    posts = []
+    async def bybit_get(base, path, params, **kwargs):
+        return {"result": {"list": [{"lastPrice": "101", "priceFilter": {"tickSize": "0.1"}}]}}
+    async def bybit_post(**kwargs):
+        assert kwargs["path"] == "/v5/order/create"
+        account = kwargs["api_key"].split("-")[-1]
+        posts.append(("bybit", account))
+        return {"retCode": 0, "result": {"orderId": "bb-" + account, "orderLinkId": "link-" + account}}
+    async def position(**kwargs):
+        return {"avgPrice": "100", "positionIdx": 0, "size": "0.01", "side": "Buy",
+                "takeProfit": "110", "stopLoss": "95"}
+    monkeypatch.setattr(service, "_bybit_get_async", bybit_get)
+    monkeypatch.setattr(service, "_bybit_signed_post", bybit_post)
+    monkeypatch.setattr(service, "_bybit_lookup_linear_symbol_with_fallback", lambda *a, **k: asyncio.sleep(0, result={"priceFilter": {"tickSize": "0.1"}}))
+    monkeypatch.setattr(service, "_wait_for_position_entry", position)
+    monkeypatch.setattr(service, "_set_bybit_trading_stop", lambda **k: asyncio.sleep(0, result={"retCode": 0}))
+    monkeypatch.setattr(service, "_fetch_bybit_positions", lambda **k: asyncio.sleep(0, result=[{"size": "0.01", "takeProfit": "110", "stopLoss": "95"}]))
+    monkeypatch.setattr(service, "_get_oanda_config", lambda account: {
+        "base_url": "https://oanda.test", "account_id": "account-" + account, "token": "token-" + account})
+    monkeypatch.setattr(service, "_fetch_oanda_instrument_meta", lambda **k: asyncio.sleep(0, result={
+        "displayPrecision": 5, "tradeUnitsPrecision": 0, "minimumTradeSize": "1", "marginRate": "0"}))
+    monkeypatch.setattr(service, "_fetch_oanda_account_summary", lambda account: asyncio.sleep(0, result={
+        "currency": "USD", "nav": "10000", "marginAvailable": "1000000"}))
+    monkeypatch.setattr(service, "_convert_aud_to_home_currency", lambda risk, *a: asyncio.sleep(0, result=risk))
+    monkeypatch.setattr(service, "_fetch_oanda_json", lambda **k: asyncio.sleep(0, result={
+        "prices": [{"bids": [{"price": "1.10000"}], "asks": [{"price": "1.10002"}]}]}))
+    class Client:
+        def __init__(self, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def post(self, url, **kwargs):
+            account = "demo" if "account-demo" in url else "live"
+            posts.append(("oanda", account))
+            result = {"orderFillTransaction": {"id": "fill-" + account, "orderID": "oa-" + account,
+                      "tradeOpened": {"tradeID": "trade-" + account}}, "lastTransactionID": "fill-" + account}
+            if account == "live":
+                result["orderCreateTransaction"] = {"id": "oa-" + account}
+            return service.httpx.Response(201, json=result)
+    monkeypatch.setattr(service.httpx, "AsyncClient", Client)
+    cases = []
+    for broker, account, order_type, target, risk in (
+        ("bybit", "demo", "market", "rr", "fixed_aud"),
+        ("bybit", "live", "limit", "ticks", "percent"),
+        ("oanda", "demo", "market", "ticks", "fixed_aud"),
+        ("oanda", "live", "limit", "rr", "percent"),
+    ):
+        crypto = broker == "bybit"
+        quote = {"broker": broker, "account": account, "category": "linear" if crypto else "forex",
+                 "instrument": "BTCUSDT" if crypto else "EUR_USD", "side": "buy",
+                 "calculation_context_id": "ctx-" + broker + "-" + account, "status": "QUOTED",
+                 "order_type": order_type, "risk_mode": risk, "risk_value": "10",
+                 "stop_loss_ticks": "35", "target_mode": target, "take_profit_ticks": "70" if target == "ticks" else None,
+                 "risk_reward": "2" if target == "rr" else None, "is_test_trade": False,
+                 "timeframe": "15MIN", "pattern": "channel", "ema": "Yes",
+                 "planned_entry_price": "100" if crypto else "1.1",
+                 "planned_stop_price": "95" if crypto else "1.09965",
+                 "planned_target_price": "110" if crypto else "1.1007", "quote_created_at_ms": 12345}
+        if crypto and account == "demo":
+            service._upsert_bybit_demo_calc_context(quote)
+        else:
+            service._upsert_calculator_trade_context(quote, invalidate_cache=False)
+        payload = dict(quote, asset="crypto" if crypto else "fx", symbol=quote["instrument"], action="buy",
+                       quantity="0.01" if crypto else "10", entry_price=quote["planned_entry_price"],
+                       stop_loss_price=quote["planned_stop_price"], take_profit_price=quote["planned_target_price"])
+        if crypto:
+            payload["risk_value"] = "999"  # Later form metadata cannot replace the exact durable quote.
+        cases.append((quote, payload))
+    return cases, posts
+
+
+def test_calculator_context_binds_accepted_order_identifiers_without_losing_settings(monkeypatch, tmp_path):
+    service = master_service
+    cases, posts = _phase3_accepted_context_fixture(monkeypatch, tmp_path, service)
+    async def scenario():
+        for quote, payload in cases:
+            response = json.loads((await service.calculator_submit(payload)).body)
+            assert response["ok"] and response["journal_context_saved"], response
+            saved = next(row for row in service._load_trade_contexts()
+                         if row.get("calculation_context_id") == quote["calculation_context_id"])
+            for field in ("order_type", "risk_mode", "risk_value", "stop_loss_ticks", "target_mode",
+                          "take_profit_ticks", "risk_reward", "is_test_trade", "pattern"):
+                assert saved.get(field) == quote.get(field)
+            if quote["broker"] == "bybit":
+                assert saved["order_id"] == "bb-" + quote["account"]
+                assert saved["order_link_id"] == "link-" + quote["account"]
+                assert saved["position_idx"] == 0 and saved["settlement_currency"] == "USDT"
+            else:
+                assert saved["account_id"] == "account-" + quote["account"]
+                assert saved["order_id"] == "oa-" + quote["account"]
+                assert saved["transaction_id"] == "fill-" + quote["account"]
+                assert saved["trade_id"] == "trade-" + quote["account"]
+            service._upsert_trade_context(dict(broker=quote["broker"], account=quote["account"],
+                category=quote["category"], instrument=quote["instrument"], calculation_context_id=quote["calculation_context_id"],
+                risk_value=None, stop_loss_ticks="", pattern="", is_test_trade=None, take_profit_ticks="-"))
+            reloaded = next(row for row in service._load_trade_contexts()
+                            if row.get("calculation_context_id") == quote["calculation_context_id"])
+            assert reloaded["risk_value"] == "10" and reloaded["stop_loss_ticks"] == "35"
+            assert reloaded["is_test_trade"] is False and reloaded["pattern"] == "channel"
+        assert len(posts) == 4
+        # Acceptance is not undone or retried if durable metadata saving subsequently fails.
+        original_save = service._save_trade_contexts
+        def unavailable(rows): raise OSError("fixture context disk unavailable")
+        monkeypatch.setattr(service, "_save_trade_contexts", unavailable)
+        for quote, payload in (cases[0], cases[2]):
+            before = len(posts)
+            result = json.loads((await service.calculator_submit(payload)).body)
+            assert result["ok"] and result["journal_context_saved"] is False
+            assert result["warnings"] and result["context_save_error"]
+            assert len(posts) == before + 1
+        monkeypatch.setattr(service, "_save_trade_contexts", original_save)
+    asyncio.run(scenario())

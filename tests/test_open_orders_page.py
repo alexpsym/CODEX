@@ -2959,3 +2959,148 @@ emptyText:empty.textContent,mutations,active,maxActive,timers:timers.size,forced
     assert state["emptyText"] == "No open orders or positions."
     assert state["mutations"] == 0 and state["active"] == 0 and state["maxActive"] == 1
     assert state["timers"] == 0 and state["forced"] == 2
+
+
+
+def test_open_orders_metadata_survives_reload_and_rejects_unrelated_contexts(monkeypatch, tmp_path):
+    from test_master_service_calculator_api import _phase3_accepted_context_fixture
+    service = master_service
+    cases, posts = _phase3_accepted_context_fixture(monkeypatch, tmp_path, service)
+    monkeypatch.setattr(service, "_load_pending_webhooks", lambda: [])
+    monkeypatch.setattr(service, "_load_bounce_traders", lambda: [])
+    monkeypatch.setattr(service.script_manager, "get", lambda name: type("Script", (), {"is_running": False})())
+    monkeypatch.setattr(service, "_OPEN_ORDERS_CACHE", {"version": 400, "payload": None})
+    monkeypatch.setattr(service, "_OPEN_ORDERS_LAST_GOOD_ITEMS", {})
+    clock = [0.0]
+    monkeypatch.setattr(service, "_open_orders_now", lambda: clock[0])
+    monkeypatch.setattr(service, "_open_orders_configuration", lambda: ([], "metadata-fixture"))
+
+    async def scenario():
+        for quote, payload in cases:
+            accepted = json.loads((await service.calculator_submit(payload)).body)
+            assert accepted["ok"], accepted
+        assert len(posts) == 4
+        # Force a disk reload, rather than reusing a quote/context object in memory.
+        service._TRADE_CONTEXTS_CACHE.clear()
+        contexts = service._load_trade_contexts()
+        assert len(contexts) == 4 and all(row.get("order_id") for row in contexts)
+        now = int(service.time.time() * 1000)
+        opened = now - 30000
+        async def positions(**kwargs):
+            return ([{"symbol": "BTCUSDT", "size": ".01", "side": "Buy", "avgPrice": "100",
+                      "positionIdx": 0, "createdTime": str(opened), "settleCoin": "USDT"}], [])
+        async def orders(**kwargs):
+            return ([{"symbol": "BTCUSDT", "qty": ".01", "side": "Buy", "orderId": "bb-live",
+                      "orderLinkId": "link-live", "orderStatus": "New", "orderType": "Limit",
+                      "positionIdx": 0, "settleCoin": "USDT", "createdTime": str(opened)}], [])
+        monkeypatch.setattr(service, "_fetch_bybit_positions_for_category", positions)
+        monkeypatch.setattr(service, "_fetch_bybit_orders_for_category", orders)
+        monkeypatch.setattr(service, "_confirm_bybit_position_still_open", lambda **k: asyncio.sleep(0, result=True))
+        async def oanda(**kwargs):
+            if kwargs["endpoint"].endswith("openTrades"):
+                return {"trades": [{"id": "trade-demo", "instrument": "EUR_USD", "currentUnits": "10",
+                                    "price": "1.1", "openTime": service._utc_now_iso()}]}
+            return {"orders": [{"id": "oa-live", "instrument": "EUR_USD", "units": "10",
+                                "price": "1.1", "type": "LIMIT", "state": "PENDING"}]}
+        monkeypatch.setattr(service, "_fetch_oanda_json", oanda)
+        bybit_position = (await service._collect_bybit_open_items(base_url="https://bybit.test",
+            api_key="key-demo", api_secret="secret", account_context="demo", skip_auth=True,
+            position_categories=["linear"], order_categories=[], enrich_funding=False))["items"][0]
+        assert not bybit_position["context_linked"] and bybit_position["stop_loss_ticks"] is None
+        bybit_order = (await service._collect_bybit_open_items(base_url="https://bybit.test",
+            api_key="key-live", api_secret="secret", account_context="live", skip_auth=True,
+            position_categories=[], order_categories=["linear"], enrich_funding=False))["items"][0]
+        oa_position = (await service._collect_oanda_open_items(base_url="https://oanda.test",
+            account_id="account-demo", api_key="token", account_context="demo", source_type="positions"))["items"][0]
+        oa_order = (await service._collect_oanda_open_items(base_url="https://oanda.test",
+            account_id="account-live", api_key="token", account_context="live", source_type="orders"))["items"][0]
+        assert oa_position["trade_id"] == "trade-demo" and oa_position["account_id"] == "account-demo"
+        for row in (bybit_order, oa_position, oa_order):
+            assert row["context_linked"] and row["stop_loss_ticks"] == "35"
+            assert row["risk_value"] == "10" and row["is_test_trade"] == "No"
+            assert row["pattern"] == "Channel" and row["timeframe"] == "15MIN"
+        assert bybit_order["order_type"] == "Limit" and bybit_order["target_mode_display"] == "Ticks"
+        assert bybit_order["take_profit_ticks"] == "70" and bybit_order["risk_reward"] is None
+        assert bybit_order["risk_value_display"] == "10%" and bybit_order["risk_unit"] == "%"
+        assert oa_position["order_type"] == "Market" and oa_position["risk_value_display"] == "AUD 10"
+        assert oa_position["risk_unit"] == "AUD" and oa_order["risk_reward"] == "2"
+        assert oa_order["target_mode_display"] == "Risk/Reward" and oa_order["take_profit_ticks"] is None
+        for changed in (dict(bybit_order, account="demo"), dict(bybit_order, order_link_id="wrong"),
+                        dict(oa_position, account_id="another-account"), dict(bybit_order, side="Sell"),
+                        dict(bybit_order, category="inverse"), dict(bybit_order, settlement_currency="USDC")):
+            changed.pop("calculation_context_id", None)
+            assert not service._enrich_open_item_with_trade_context(changed)["context_linked"]
+        demo_context = next(row for row in contexts if row.get("calculation_context_id") == "ctx-bybit-demo")
+        unrelated = dict(demo_context, calculation_context_id="unrelated-recent", order_id="another-order",
+                         order_link_id="another-link", risk_value="1000")
+        unrelated.pop("context_id", None)
+        service._upsert_trade_context(unrelated)
+        unknown = dict(broker="Bybit", account="demo", category="linear", instrument="BTCUSDT",
+                       side="Buy", type="Order", id="broker-only", order_type="Limit", opened_at=opened)
+        assert not service._enrich_open_item_with_trade_context(unknown)["context_linked"]
+        assert unknown["order_type"] == "Limit" and unknown["risk_value"] is None
+
+        execution_rows = [{"symbol": "BTCUSDT", "orderId": "bb-demo", "execId": "fill-bb",
+                           "positionIdx": 0, "side": "Buy", "execQty": ".01", "execTime": str(opened)}]
+        monkeypatch.setattr(service, "_fetch_bybit_executions_chunked", lambda **k: asyncio.sleep(0, result=list(execution_rows)))
+        # Metadata from successful execution reads is independent of unavailable funding.
+        async def funding_unavailable(**kwargs):
+            raise ValueError("fixture optional funding unavailable")
+        monkeypatch.setattr(service, "_fetch_bybit_open_funding_transactions_cached", funding_unavailable)
+        enriched_position = dict(bybit_position)
+        warnings = await service._enrich_bybit_open_position_funding([enriched_position],
+            base_url="https://bybit.test", api_key="key-demo", api_secret="secret", account_context="demo")
+        assert warnings and enriched_position["funding_paid"] is None
+        assert enriched_position["context_linked"] and enriched_position["order_type"] == "Market"
+        assert enriched_position["risk_value_display"] == "AUD 10" and enriched_position["risk_reward"] == "2"
+        assert enriched_position["take_profit_ticks"] is None
+        hedge = dict(bybit_position, position_idx=1)
+        assert not service._enrich_open_item_with_trade_context(dict(hedge, raw_refs=enriched_position["raw_refs"]))["context_linked"]
+        # A second contributing order with different calculator intent is not a newest-context choice.
+        other = dict(demo_context, calculation_context_id="second-demo", order_id="second-order",
+                     order_link_id="second-link", risk_value="20")
+        other.pop("context_id", None)
+        service._upsert_trade_context(other)
+        execution_rows[0]["execQty"] = ".005"
+        execution_rows.append(dict(execution_rows[0], orderId="second-order", execId="fill-second"))
+        ambiguous = dict(bybit_position)
+        await service._enrich_bybit_open_position_funding([ambiguous], base_url="https://bybit.test",
+            api_key="key-demo", api_secret="secret", account_context="demo")
+        assert not ambiguous["context_linked"] and ambiguous["risk_value"] is None
+        assert ambiguous["context_link_reason"] == "Conflicting calculator contexts"
+
+        # Actual incremental payload publication accepts late exact enrichment but retains pending provenance.
+        owner = service._OpenOrdersService()
+        job = service._OpenOrdersJob(owner, [], "metadata-fixture", 400)
+        owner.job = job
+        gate = asyncio.Event()
+        async def core_read():
+            await gate.wait()
+            return {"items": [bybit_position, bybit_order, oa_position, oa_order]}
+        core = job.add("core", {"broker": "Bybit", "account": "demo", "source_type": "orders"}, core_read, ready=False)
+        core.update(state="complete", items=[bybit_position, bybit_order, oa_position, oa_order],
+                    previous=[bybit_position, bybit_order, oa_position, oa_order], updated=0.0,
+                    last_success=0.0, last_success_at="fixture")
+        late = job.add("late", {"broker": "Bybit", "account": "demo", "source_type": "settled funding"},
+                       core_read, core=False, ready=False)
+        late.update(state="failed", items=[enriched_position], warnings=warnings, updated=0.0)
+        try:
+            job.publish()
+            payload = await owner.snapshot()
+            pos = next(row for row in payload["items"] if row.get("type") == "Position" and row["broker"] == "Bybit")
+            assert pos["context_linked"] and pos["stop_loss_ticks"] == "35" and not pos["source_stale"]
+            assert pos["funding_paid"] is None and not payload["empty_confirmed"]
+            assert (await owner.snapshot(deliberate=True))["items"] == payload["items"]
+            job.launch(core)
+            clock[0] = 1
+            pending = await owner.snapshot(deliberate=True)
+            retained = next(row for row in pending["items"] if row.get("type") == "Position" and row["broker"] == "Bybit")
+            assert retained["source_pending"] and not retained["source_stale"]
+            assert retained["stop_loss_ticks"] == "35" and retained["risk_value_display"] == "AUD 10"
+            assert pending["pending"] and not pending["core_complete"] and not pending["empty_confirmed"]
+            # These flags remain ineligible for the existing strict browser confirmation predicate.
+            assert retained["source_pending"] or retained["source_stale"]
+        finally:
+            await job.close()
+        assert len(posts) == 4  # Snapshot/enrichment/Refresh never resubmits a broker order.
+    asyncio.run(asyncio.wait_for(scenario(), 15))

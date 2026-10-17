@@ -18676,6 +18676,7 @@ async def _collect_oanda_open_items(
             {
                 "broker": "OANDA",
                 "account": account_context,
+                "account_id": account_id,
                 "category": "forex",
                 "instrument": trade.get("instrument"),
                 "type": "Position",
@@ -18709,9 +18710,11 @@ async def _collect_oanda_open_items(
             {
                 "broker": "OANDA",
                 "account": account_context,
+                "account_id": account_id,
                 "category": "forex",
                 "instrument": order.get("instrument"),
                 "type": "Order",
+                "order_type": str(order.get("type") or "").title() or None,
                 "side": side,
                 "size": size,
                 "entry_price": None,
@@ -20058,6 +20061,24 @@ def _bybit_position_lifecycle_start_ms(
     return created if created > 0 else None
 
 
+def _bybit_position_calculator_refs(position, executions, lifecycle):
+    symbol = str(position.get("instrument") or "").upper()
+    idx = int(_to_float(position.get("position_idx")) or 0)
+    side = str(position.get("side") or "").lower()
+    rows = [row for row in executions if str(row.get("symbol") or "").upper() == symbol
+            and int(_to_float(row.get("execTime")) or 0) >= lifecycle
+            and (int(_to_float(row.get("positionIdx")) or 0) == idx
+                 if row.get("positionIdx") not in (None, "") else idx == 0)]
+    net = sum((1 if str(row.get("side")).lower() == "buy" else -1)
+              * abs(_to_float(row.get("execQty")) or 0) for row in rows)
+    expected = abs(_to_float(position.get("size")) or 0) * (1 if side == "buy" else -1)
+    opening = [row for row in rows if str(row.get("side") or "").lower() == side
+               and abs(_to_float(row.get("execQty")) or 0) > 0]
+    complete = bool(opening) and all(row.get("orderId") for row in opening) and abs(net - expected) <= max(1e-9, abs(expected) * 1e-6)
+    return {"order_ids": sorted({str(row["orderId"]) for row in opening if row.get("orderId")}),
+            "order_ids_complete": bool(complete)}
+
+
 def _bybit_transaction_dedupe_key(row: Mapping[str, object]) -> str:
     for key in ("transactionId", "id", "execId"):
         value = str(row.get(key) or "").strip()
@@ -20177,6 +20198,12 @@ async def _enrich_bybit_open_position_funding_impl(
                 lifecycle = _bybit_position_lifecycle_start_ms(position, executions)
                 if lifecycle:
                     lifecycle_starts[id(position)] = lifecycle
+                    position["raw_refs"] = dict(position.get("raw_refs") or {},
+                        **_bybit_position_calculator_refs(position, executions, lifecycle))
+                    _enrich_open_item_with_trade_context(position)
+                    metadata_warning = _open_item_context_warning(position)
+                    if metadata_warning:
+                        warnings.append(metadata_warning)
         if len(lifecycle_starts) != len(current_positions):
             raise ValueError("Current position lifecycle start could not be established")
         transactions = await _fetch_bybit_open_funding_transactions_cached(
@@ -20498,6 +20525,9 @@ async def _collect_bybit_open_items_impl(
                     "category": category,
                     "instrument": symbol or order.get("symbol"),
                     "type": "Order",
+                    "order_type": order.get("orderType"),
+                    "position_idx": order.get("positionIdx"),
+                    "settlement_currency": order.get("settleCoin"),
                     "side": order.get("side"),
                     "size": order.get("qty"),
                     "entry_price": None,
@@ -21801,6 +21831,65 @@ def _load_calculator_trade_contexts() -> List[Dict[str, object]]:
 def _save_calculator_trade_contexts(items: List[Dict[str, object]]) -> None:
     _save_trade_contexts(items)
 
+_CALCULATOR_INTENT_FIELDS = (
+    "order_type", "risk_mode", "risk_value", "stop_loss_ticks", "target_mode",
+    "take_profit_ticks", "risk_reward", "timeframe", "is_test_trade", "setup", "pattern",
+    "ema", "vwap", "aths_atls", "round_number", "planned_entry_price",
+    "planned_stop_price", "planned_target_price", "quote_created_at_ms",
+)
+
+
+def _context_value_known(value):
+    return value is not None and not (isinstance(value, str) and value.strip() in {"", "-", "\u2014"})
+
+
+def _context_scope_compatible(left, right):
+    # IDs are only meaningful inside their broker/account/market scope.
+    for field in ("broker", "account", "account_id", "category", "instrument", "settlement_currency", "position_idx"):
+        a, b = left.get(field), right.get(field)
+        if _context_value_known(a) and _context_value_known(b) and str(a).strip().lower() != str(b).strip().lower():
+            return False
+    a, b = left.get("side"), right.get("side")
+    return not (a and b and _normalize_side_for_comparison(a) != _normalize_side_for_comparison(b))
+
+
+def _accepted_calculator_intent(payload, *, broker, account, category, instrument):
+    """Use the exact durable quote's intent, never later mutable form/display values."""
+    result = dict(payload)
+    context_id = str(payload.get("calculation_context_id") or payload.get("context_id") or "").strip()
+    if not context_id:
+        return result
+    scope = dict(broker=broker, account=account, category=category, instrument=instrument,
+                 side=payload.get("action") or payload.get("side"))
+    contexts = _load_calculator_trade_contexts()
+    if broker == "bybit" and account == "demo":
+        contexts += [row for row in _load_bybit_demo_calc_contexts().get("items", []) if isinstance(row, dict)]
+    candidates = [row for row in contexts
+                  if str(row.get("calculation_context_id") or row.get("context_id") or "") == context_id
+                  and _context_scope_compatible(scope, row)]
+    if candidates:
+        # Multiple stores may contain the same quote. Compare numeric meaning, not formatting.
+        numeric = {"risk_value", "stop_loss_ticks", "take_profit_ticks", "risk_reward",
+                   "planned_entry_price", "planned_stop_price", "planned_target_price", "quote_created_at_ms"}
+        for field in _CALCULATOR_INTENT_FIELDS:
+            values = [row[field] for row in candidates if _context_value_known(row.get(field))]
+            if not values:
+                if any(field in row for row in candidates):
+                    result[field] = None
+                continue
+            def comparable(value):
+                if field in numeric:
+                    try:
+                        return Decimal(str(value))
+                    except Exception:
+                        pass
+                return value
+            if any(comparable(value) != comparable(values[0]) for value in values[1:]):
+                raise ValueError("Conflicting durable calculator snapshots for accepted context")
+            result[field] = values[0]
+    return result
+
+
 def _upsert_calculator_trade_context(
     payload: Dict[str, object],
     require_durable: bool = True,
@@ -22035,7 +22124,7 @@ def _upsert_trade_context(payload: Dict[str, object]) -> Dict[str, object]:
     transaction_id = str(payload.get("transaction_id") or "").strip()
 
     def _is_blank(value: object) -> bool:
-        return value is None or (isinstance(value, str) and value.strip() == "")
+        return not _context_value_known(value)
 
     id_fields = ("calculation_context_id", "context_id", "pending_webhook_id", "order_id", "order_link_id", "parent_order_link_id", "trade_id", "transaction_id")
     incoming_ids = {
@@ -22049,7 +22138,7 @@ def _upsert_trade_context(payload: Dict[str, object]) -> Dict[str, object]:
         "transaction_id": transaction_id,
     }
 
-    merged_payload = dict(payload)
+    merged_payload = {key: value for key, value in payload.items() if _context_value_known(value)}
     if "is_test_trade" in merged_payload or "test_trade" in merged_payload or "test" in merged_payload:
         merged_payload["is_test_trade"] = _normalize_test_trade_flag(
             merged_payload.get("is_test_trade", merged_payload.get("test_trade", merged_payload.get("test")))
@@ -22094,6 +22183,13 @@ def _upsert_trade_context(payload: Dict[str, object]) -> Dict[str, object]:
 
     matched_indices: List[int] = []
     for idx, entry in enumerate(items):
+        if not _context_scope_compatible(merged_payload, entry):
+            continue
+        # A shared weak order reference cannot merge conflicting calculation identities.
+        if any(incoming_ids.get(field) and entry.get(field)
+               and incoming_ids[field] != str(entry[field]).strip()
+               for field in ("calculation_context_id", "context_id", "order_id", "trade_id")):
+            continue
         for id_field in id_fields:
             incoming_id = incoming_ids.get(id_field, "")
             if not incoming_id:
@@ -22103,6 +22199,11 @@ def _upsert_trade_context(payload: Dict[str, object]) -> Dict[str, object]:
                 break
 
     if matched_indices:
+        scopes = {tuple(str(items[idx].get(field) or "").lower()
+                        for field in ("broker", "account", "account_id", "category", "instrument"))
+                  for idx in matched_indices}
+        if len(scopes) > 1:
+            raise ValueError("Ambiguous context update requires broker/account scope")
         base_idx = matched_indices[0]
         merged = dict(items[base_idx])
         for idx in matched_indices[1:]:
@@ -22167,98 +22268,55 @@ def _mark_trade_context_closed_or_cancelled(*, pending_webhook_id: Optional[str]
 
 
 def _lookup_trade_context_for_open_item(item: Dict[str, object]) -> Optional[Dict[str, object]]:
-    contexts = _load_trade_contexts()
     refs = item.get("raw_refs") if isinstance(item.get("raw_refs"), dict) else {}
-    broker = str(item.get("broker") or "").strip().lower()
-    account = str(item.get("account") or "").strip().lower()
-    category = str(item.get("category") or "").strip().lower()
-    instrument = str(item.get("instrument") or "").strip().upper()
-    side = _normalize_side_for_comparison(item.get("side"))
-    calculation_context_id = str(
-        item.get("calculation_context_id")
-        or item.get("context_id")
-        or refs.get("calculation_context_id")
-        or refs.get("context_id")
-        or ""
-    ).strip()
-    item_type = str(item.get("type") or "").strip().lower()
-    order_id = str(
-        item.get("order_id")
-        or (item.get("id") if item_type in {"order", "webhook"} else "")
-        or ""
-    ).strip()
-    order_ids: List[str] = []
-    raw_order_ids = refs.get("order_ids")
-    if isinstance(raw_order_ids, list):
-        order_ids = [str(v or "").strip() for v in raw_order_ids if str(v or "").strip()]
-    order_link_id = str(item.get("order_link_id") or item.get("orderLinkId") or "").strip()
-    parent_order_link_id = str(
-        item.get("parent_order_link_id") or item.get("parentOrderLinkId") or ""
-    ).strip()
-    trade_id = str(item.get("trade_id") or "").strip()
-
-    for ctx in contexts:
-        if calculation_context_id and str(ctx.get("calculation_context_id") or ctx.get("context_id") or "").strip() == calculation_context_id:
-            return ctx
-    for ctx in contexts:
-        if order_id and str(ctx.get("order_id") or "").strip() == order_id:
-            return ctx
-    if order_ids:
-        order_id_matches: List[Dict[str, object]] = []
-        seen_match_ids: Set[str] = set()
-        for oid in order_ids:
-            for ctx in contexts:
-                if oid and str(ctx.get("order_id") or "").strip() == oid:
-                    key = str(ctx.get("order_id") or "").strip() or str(ctx.get("calculation_context_id") or "").strip() or str(id(ctx))
-                    if key not in seen_match_ids:
-                        seen_match_ids.add(key)
-                        order_id_matches.append(ctx)
-        if len(order_id_matches) == 1:
-            return order_id_matches[0]
-        if len(order_id_matches) > 1:
-            return None
-    for ctx in contexts:
-        if order_link_id and str(ctx.get("order_link_id") or "").strip() == order_link_id:
-            return ctx
-    for ctx in contexts:
-        if parent_order_link_id and str(ctx.get("parent_order_link_id") or "").strip() == parent_order_link_id:
-            return ctx
-    for ctx in contexts:
-        if trade_id and str(ctx.get("trade_id") or "").strip() == trade_id:
-            return ctx
-
-    candidates = [
-        ctx
-        for ctx in contexts
-        if str(ctx.get("broker") or "").strip().lower() == broker
-        and str(ctx.get("account") or "").strip().lower() == account
-        and str(ctx.get("category") or "").strip().lower() == category
-        and str(ctx.get("instrument") or "").strip().upper() == instrument
-        and _normalize_side_for_comparison(ctx.get("side")) == side
-        and str(ctx.get("status") or "ACTIVE").strip().upper()
-        in {"ACTIVE", "PENDING_ENTRY", "SUBMITTED"}
-    ]
-    if not candidates or not all((broker, account, category, instrument, side)):
+    item_type = str(item.get("type") or "").lower()
+    identifiers = {
+        "calculation_context_id": item.get("calculation_context_id") or item.get("context_id") or refs.get("calculation_context_id"),
+        "order_id": item.get("order_id") or (item.get("id") if item_type in {"order", "webhook"} else None),
+        "order_link_id": item.get("order_link_id") or item.get("orderLinkId"),
+        "parent_order_link_id": item.get("parent_order_link_id") or item.get("parentOrderLinkId"),
+        "trade_id": item.get("trade_id") or (item.get("id") if str(item.get("broker")).lower() == "oanda" and item_type == "position" else None),
+        "transaction_id": item.get("transaction_id") or refs.get("transaction_id"),
+    }
+    identifiers = {key: str(value).strip() for key, value in identifiers.items() if _context_value_known(value)}
+    order_ids = {str(value) for value in refs.get("order_ids", []) if _context_value_known(value)}
+    if refs.get("order_ids_complete") is False:
+        item["context_link_reason"] = "Execution provenance incomplete"
         return None
-    opened_ts = _canonical_trade_epoch_second(item.get("opened_at") or item.get("created_at"))
-    if opened_ts is None:
-        return None
-    window_candidates: List[Dict[str, object]] = []
-    max_window_seconds = 90 * 60
-    for ctx in candidates:
-        ctx_opened_ts = (
-            _canonical_trade_epoch_second(ctx.get("open_time"))
-            or _canonical_trade_epoch_second(ctx.get("created_at"))
-            or _canonical_trade_epoch_second(ctx.get("opened_at"))
-        )
-        if ctx_opened_ts is None:
+    contexts = [ctx for ctx in _load_trade_contexts()
+                if all(str(ctx.get(field) or "").strip().lower() == str(item.get(field) or "").strip().lower()
+                       for field in ("broker", "account", "category", "instrument"))
+                and _context_scope_compatible(item, ctx)]
+    matched = []
+    covered = set()
+    for ctx in contexts:
+        candidate = dict(ctx, calculation_context_id=ctx.get("calculation_context_id") or ctx.get("context_id"))
+        # Matching one supplied ID does not authorize contradicting another supplied ID.
+        if any(candidate.get(key) and str(candidate[key]).strip() != value for key, value in identifiers.items()):
             continue
-        delta = abs(opened_ts - ctx_opened_ts)
-        if delta <= max_window_seconds:
-            window_candidates.append(ctx)
-    if len(window_candidates) == 1:
-        return window_candidates[0]
+        exact = any(str(candidate.get(key) or "").strip() == value for key, value in identifiers.items())
+        linked_orders = order_ids & {str(candidate.get("order_id") or "")}
+        if exact or linked_orders:
+            matched.append(ctx)
+            covered.update(linked_orders)
+    if order_ids and covered != order_ids:
+        item["context_link_reason"] = "Execution provenance includes unlinked orders"
+        return None
+    if len(matched) == 1:
+        item.pop("context_link_reason", None)
+        return matched[0]
+    item["context_link_reason"] = "Conflicting calculator contexts" if matched else "No exact calculator linkage"
     return None
+
+
+def _open_item_context_warning(item):
+    reason = item.get("context_link_reason")
+    if reason not in {"Conflicting calculator contexts", "Execution provenance includes unlinked orders"}:
+        return None
+    return {"broker": item.get("broker"), "account": item.get("account"),
+            "account_id": item.get("account_id"), "category": item.get("category"),
+            "source_type": "calculator metadata", "instrument": item.get("instrument"),
+            "message": str(reason) + "; calculator intent remains unknown."}
 
 
 def _enrich_open_item_with_trade_context(
@@ -22277,7 +22335,7 @@ def _enrich_open_item_with_trade_context(
             or ("crypto" if broker_norm == "bybit" else "fx" if broker_norm == "oanda" else None)
         )
         order_type = str(ctx.get("order_type") or "").strip().lower()
-        item["order_type"] = order_type.title() if order_type else None
+        item["order_type"] = order_type.title() if order_type else item.get("order_type")
         item["stop_loss_ticks"] = ctx.get("stop_loss_ticks")
         item["take_profit_ticks"] = ctx.get("take_profit_ticks")
         item["target_mode"] = ctx.get("target_mode")
@@ -22353,6 +22411,11 @@ def _enrich_open_item_with_trade_context(
         )
         item["context_linked"] = True
     else:
+        if item.get("context_linked"):
+            for field in _CALCULATOR_INTENT_FIELDS:
+                item.pop(field, None)
+            for field in ("target_mode_display", "risk_mode_display", "risk_value_display", "risk_unit", "calculation_context_id"):
+                item.pop(field, None)
         item["asset"] = "crypto" if broker_norm == "bybit" else "fx" if broker_norm == "oanda" else None
         item["timeframe"] = _normalize_journal_timeframe(item.get("timeframe"))
         item["is_test_trade"] = _display_test_trade(item)
@@ -23670,6 +23733,7 @@ async def _place_bybit_order(
     post_submit_warnings: List[str] = []
     journal_context_saved = True
     try:
+        intent = _accepted_calculator_intent(payload, broker="bybit", account=account, category=category, instrument=symbol)
         _upsert_calculator_trade_context(
             {
             "pending_webhook_id": str(payload.get("pending_webhook_id") or "").strip(),
@@ -23677,18 +23741,20 @@ async def _place_bybit_order(
             "asset": "crypto",
             "account": account,
             "category": category,
+            "position_idx": body.get("positionIdx"),
+            "settlement_currency": "USDT" if symbol.endswith("USDT") else "USDC" if symbol.endswith("USDC") else None,
             "instrument": symbol,
             "side": side,
             "order_type": order_type,
             "entry_price": planned_entry_price if planned_entry_price is not None else price_val,
-            "timeframe": _normalize_journal_timeframe(payload.get("timeframe")),
-            "setup": _normalize_setup(payload.get("setup")),
-            "pattern": _normalize_pattern(payload.get("pattern")),
-            "ema": _normalize_ema(payload.get("ema")),
-            "vwap": _normalize_vwap(payload.get("vwap")),
-            "aths_atls": _normalize_aths_atls(payload.get("aths_atls")),
-            "round_number": _normalize_round_number(payload.get("round_number")),
-            "is_test_trade": payload.get("is_test_trade"),
+            "timeframe": _normalize_journal_timeframe(intent.get("timeframe")),
+            "setup": _normalize_setup(intent.get("setup")),
+            "pattern": _normalize_pattern(intent.get("pattern")),
+            "ema": _normalize_ema(intent.get("ema")),
+            "vwap": _normalize_vwap(intent.get("vwap")),
+            "aths_atls": _normalize_aths_atls(intent.get("aths_atls")),
+            "round_number": _normalize_round_number(intent.get("round_number")),
+            "is_test_trade": intent.get("is_test_trade"),
             "webhook_mode": "Yes" if str(payload.get("pending_webhook_id") or "").strip() else "No",
             "webhook_status": "Triggered" if str(payload.get("pending_webhook_id") or "").strip() else "Not used",
             "created_at": request_open_time_iso,
@@ -23698,13 +23764,13 @@ async def _place_bybit_order(
             "order_link_id": str(order_result.get("orderLinkId") or body.get("orderLinkId") or "").strip(),
             "status": "PENDING_ENTRY" if (category == "linear" and order_type == "limit" and has_attached_order_create_tpsl) else "ACTIVE",
             "calculation_context_id": payload.get("calculation_context_id"),
-            "quote_created_at_ms": payload.get("quote_created_at_ms"),
-            "risk_mode": payload.get("risk_mode"),
-            "risk_value": payload.get("risk_value"),
-            "stop_loss_ticks": payload.get("stop_loss_ticks"),
-            "take_profit_ticks": payload.get("take_profit_ticks"),
-            "target_mode": payload.get("target_mode"),
-            "risk_reward": payload.get("risk_reward"),
+            "quote_created_at_ms": intent.get("quote_created_at_ms"),
+            "risk_mode": intent.get("risk_mode"),
+            "risk_value": intent.get("risk_value"),
+            "stop_loss_ticks": intent.get("stop_loss_ticks"),
+            "take_profit_ticks": intent.get("take_profit_ticks"),
+            "target_mode": intent.get("target_mode"),
+            "risk_reward": intent.get("risk_reward"),
             "planned_entry_price": planned_entry_price,
             "planned_stop_price": planned_stop_price,
             "planned_target_price": planned_target_price,
@@ -23942,31 +24008,31 @@ async def _place_bybit_order(
                     "entry_price": entry_price,
                     "stop_loss": sl_target,
                     "take_profit": tp_target,
-                    "timeframe": payload.get("timeframe"),
-                    "is_test_trade": payload.get("is_test_trade"),
+                    "timeframe": intent.get("timeframe"),
+                    "is_test_trade": intent.get("is_test_trade"),
                     "webhook_mode": "Yes" if str(payload.get("pending_webhook_id") or "").strip() else "No",
                     "webhook_status": "Triggered" if str(payload.get("pending_webhook_id") or "").strip() else "Not used",
-                    "pattern": _safe_normalize_pattern(payload.get("pattern")),
-                    "ema": _normalize_ema(payload.get("ema")),
-                    "vwap": _normalize_vwap(payload.get("vwap")),
-                    "aths_atls": _normalize_aths_atls(payload.get("aths_atls")),
-                    "round_number": _normalize_round_number(payload.get("round_number")),
+                    "pattern": _safe_normalize_pattern(intent.get("pattern")),
+                    "ema": _normalize_ema(intent.get("ema")),
+                    "vwap": _normalize_vwap(intent.get("vwap")),
+                    "aths_atls": _normalize_aths_atls(intent.get("aths_atls")),
+                    "round_number": _normalize_round_number(intent.get("round_number")),
                     "open_time": _epoch_or_iso_to_iso(payload.get("opened_at")) or request_open_time_iso,
                     "opened_at": _epoch_or_iso_to_iso(payload.get("opened_at")) or request_open_time_iso,
                     "order_id": str(order_id or "").strip(),
                     "order_link_id": str(order_result.get("orderLinkId") or body.get("orderLinkId") or "").strip(),
                     "status": "ACTIVE",
                 "calculation_context_id": payload.get("calculation_context_id"),
-                "quote_created_at_ms": payload.get("quote_created_at_ms"),
-                "risk_mode": payload.get("risk_mode"),
-                "risk_value": payload.get("risk_value"),
-                "stop_loss_ticks": payload.get("stop_loss_ticks"),
-                "take_profit_ticks": payload.get("take_profit_ticks"),
-                "target_mode": payload.get("target_mode"),
-                "risk_reward": payload.get("risk_reward"),
-                "planned_entry_price": payload.get("planned_entry_price"),
-                    "planned_stop_price": payload.get("planned_stop_price"),
-                    "planned_target_price": payload.get("planned_target_price"),
+                "quote_created_at_ms": intent.get("quote_created_at_ms"),
+                "risk_mode": intent.get("risk_mode"),
+                "risk_value": intent.get("risk_value"),
+                "stop_loss_ticks": intent.get("stop_loss_ticks"),
+                "take_profit_ticks": intent.get("take_profit_ticks"),
+                "target_mode": intent.get("target_mode"),
+                "risk_reward": intent.get("risk_reward"),
+                "planned_entry_price": intent.get("planned_entry_price"),
+                    "planned_stop_price": intent.get("planned_stop_price"),
+                    "planned_target_price": intent.get("planned_target_price"),
                     },
                     require_durable=True,
                     invalidate_cache=False,
@@ -24446,12 +24512,14 @@ async def _place_oanda_order(
     context_save_error: Optional[str] = None
     context_persist_ok = True
     try:
+        intent = _accepted_calculator_intent(payload, broker="oanda", account=account, category="forex", instrument=symbol)
         _upsert_calculator_trade_context(
             {
                 "pending_webhook_id": pending_id or None,
                 "broker": "oanda",
                 "asset": "fx",
                 "account": account,
+                "account_id": cfg["account_id"],
                 "category": "forex",
                 "instrument": symbol,
                 "side": action,
@@ -24459,31 +24527,31 @@ async def _place_oanda_order(
                 "entry_price": order_payload.get("price") or entry_price,
                 "stop_loss": (order_payload.get("stopLossOnFill") or {}).get("price"),
                 "take_profit": (order_payload.get("takeProfitOnFill") or {}).get("price"),
-                "timeframe": payload.get("timeframe"),
-                "is_test_trade": payload.get("is_test_trade"),
+                "timeframe": intent.get("timeframe"),
+                "is_test_trade": intent.get("is_test_trade"),
                 "webhook_mode": "Yes" if pending_id else "No",
                 "webhook_status": "Triggered" if pending_id else "Not used",
-                "setup": payload.get("setup"),
-                "pattern": _safe_normalize_pattern(payload.get("pattern")),
-                "ema": _normalize_ema(payload.get("ema")),
-                "vwap": _normalize_vwap(payload.get("vwap")),
-                "aths_atls": _normalize_aths_atls(payload.get("aths_atls")),
-                "round_number": _normalize_round_number(payload.get("round_number")),
+                "setup": intent.get("setup"),
+                "pattern": _safe_normalize_pattern(intent.get("pattern")),
+                "ema": _normalize_ema(intent.get("ema")),
+                "vwap": _normalize_vwap(intent.get("vwap")),
+                "aths_atls": _normalize_aths_atls(intent.get("aths_atls")),
+                "round_number": _normalize_round_number(intent.get("round_number")),
                 "order_id": str(order_id or "").strip(),
                 "trade_id": str(trade_id or "").strip(),
                 "transaction_id": fill_tx_id or str(result.get("lastTransactionID") or "").strip(),
                 "status": "ACTIVE",
                 "calculation_context_id": payload.get("calculation_context_id"),
-                "quote_created_at_ms": payload.get("quote_created_at_ms"),
-                "risk_mode": payload.get("risk_mode"),
-                "risk_value": payload.get("risk_value"),
-                "stop_loss_ticks": payload.get("stop_loss_ticks"),
-                "take_profit_ticks": payload.get("take_profit_ticks"),
-                "target_mode": payload.get("target_mode"),
-                "risk_reward": payload.get("risk_reward"),
-                "planned_entry_price": payload.get("planned_entry_price"),
-                "planned_stop_price": payload.get("planned_stop_price"),
-                "planned_target_price": payload.get("planned_target_price"),
+                "quote_created_at_ms": intent.get("quote_created_at_ms"),
+                "risk_mode": intent.get("risk_mode"),
+                "risk_value": intent.get("risk_value"),
+                "stop_loss_ticks": intent.get("stop_loss_ticks"),
+                "take_profit_ticks": intent.get("take_profit_ticks"),
+                "target_mode": intent.get("target_mode"),
+                "risk_reward": intent.get("risk_reward"),
+                "planned_entry_price": intent.get("planned_entry_price"),
+                "planned_stop_price": intent.get("planned_stop_price"),
+                "planned_target_price": intent.get("planned_target_price"),
             },
             invalidate_cache=False,
         )
@@ -24561,7 +24629,7 @@ def _extract_oanda_order_id(result: Dict[str, object]) -> Optional[str]:
     ):
         entry = result.get(key)
         if isinstance(entry, dict):
-            order_id = entry.get("id")
+            order_id = entry.get("id") if key == "orderCreateTransaction" else entry.get("orderID")
             if order_id:
                 return str(order_id)
     order = result.get("order")
@@ -36077,9 +36145,9 @@ class _OpenOrdersJob:
         items, errors, warnings, coverage = [], [], [], []
         funding = {}
         for entry in self.sources.values():
-            if not entry["core"] and entry["state"] == "complete":
+            if not entry["core"] and entry["state"] in {"complete", "failed", "pending"}:
                 for row in entry["items"]:
-                    funding[_open_orders_row_identity(row)] = row
+                    funding[_open_orders_row_identity(row)] = (entry["state"], row)
         for key, entry in self.sources.items():
             errors.extend(entry["errors"])
             warnings.extend(entry["warnings"])
@@ -36109,8 +36177,13 @@ class _OpenOrdersJob:
                     stale = True
                     row["stale_reason"] = "Broker source is " + state + "; retained prior row."
                 elif _open_orders_row_identity(row) in funding:
-                    row.update({field: value for field, value in funding[_open_orders_row_identity(row)].items()
-                                if field.startswith("funding_") or field in {"net_funding"}})
+                    enrichment_state, enrichment = funding[_open_orders_row_identity(row)]
+                    if enrichment_state != "pending":
+                        row.update({field: value for field, value in enrichment.items()
+                                    if field.startswith("funding_") or field in {"net_funding"}})
+                    if enrichment.get("raw_refs"):
+                        row["raw_refs"] = dict(enrichment["raw_refs"])
+                        _enrich_open_item_with_trade_context(row)
                 if "MT4" in self.oanda_tags.get((row.get("account"), row.get("account_id")), []):
                     row["account_label_suffix"] = "MT4"
                 items.append(row)
