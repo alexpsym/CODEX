@@ -24,7 +24,7 @@
   const stateChannel = typeof BroadcastChannel === 'function' ? new BroadcastChannel(CHANNEL_NAME) : null;
   stateChannel?.unref?.();
   const fmt = (v) => (v === null || v === undefined || v === '' ? '—' : v);
-  const setBadge = (message) => { if (statusBadge) statusBadge.textContent = message; };
+  const setBadge = (message) => { if (statusBadge&&statusBadge.textContent!==message) statusBadge.textContent = message; };
   const rowKey = (row) => [row?.broker,row?.account,row?.account_id,row?.category,row?.instrument,row?.type,row?.id,row?.position_idx,row?.order_link_id].map((v)=>String(v ?? '').trim().toLowerCase()).join('|');
   const parseApiError = (data, response) => {
     const detail = data?.detail;
@@ -57,9 +57,35 @@
     ].filter(Boolean);
     if(!message) message=errorType?`${errorType} reported without diagnostic text`:'Source request failed without diagnostic details';
     if(diagnostics.length&&!diagnostics.every((part)=>message.includes(part))) message=`${message} (${diagnostics.join(', ')})`;
-    const context=[broker,account,category,sourceType,settlementCoin?`settleCoin=${settlementCoin}`:'',endpoint].filter(Boolean).join(' ');
+    const context=[broker,account,sanitizeSourceText(entry.account_id||''),category,sourceType,settlementCoin?`settleCoin=${settlementCoin}`:'',endpoint].filter(Boolean).join(' ');
     return context?`${context}: ${message}`:message;
   }).filter(Boolean):[];
+  const diagnosticSignatures=new WeakMap();
+  const renderDiagnostics=(box,list,entries,label)=>{
+    if(!box)return;
+    const formatted=formatSourceErrors(entries);
+    const signature=JSON.stringify(formatted);
+    if(diagnosticSignatures.get(box)===signature)return;
+    diagnosticSignatures.set(box,signature);
+    box.style.display=formatted.length?'block':'none';
+    const groups=new Map();
+    entries.forEach(raw=>{
+      const entry=raw&&typeof raw==='object'?raw:{message:raw};
+      const broker=sanitizeSourceText(entry.broker||'Source'),account=sanitizeSourceText(entry.account||'');
+      const message=sanitizeSourceText(entry.message||entry.error||'');
+      // Maintenance is identified by the broker response, never by status 503 alone.
+      const maintenance=broker.toLowerCase()==='oanda'&&/system under maintenance/i.test(message);
+      const cause=maintenance?'reports maintenance':safeDiagnostic(entry.retMsg||message||entry.error_type,'request failed');
+      const key=JSON.stringify([broker,account,entry.http_status||'',cause]);
+      if(!groups.has(key))groups.set(key,{title:[broker,account,cause].filter(Boolean).join(' '),sources:new Set()});
+      groups.get(key).sources.add(entry.source_key||JSON.stringify([entry.account_id,entry.category,entry.source_type,entry.settlement_coin,entry.endpoint]));
+    });
+    const summary=box.querySelector('summary');
+    const text=[...groups.values()].slice(0,2).map(group=>group.title+' \u2014 '+group.sources.size+' affected source'+(group.sources.size===1?'':'s')).join('; ')+(groups.size>2?'; '+(groups.size-2)+' other causes (see details)':'');
+    if(summary&&summary.textContent!==text)summary.textContent=text||label;
+    // The details element itself survives every publication, preserving its open state.
+    if(list){list.innerHTML='';formatted.forEach(text=>{const li=document.createElement('li');li.textContent=text;list.appendChild(li);});}
+  };
   const buildFetchError=(url,status,statusText,bodyText,bodyJson)=>{const detailErrors=bodyJson?.detail?.errors||bodyJson?.errors; const flattened=formatSourceErrors(detailErrors); if(flattened.length) return new Error(flattened.join(' | ')); const endpoint=safeEndpoint(url)||'unknown endpoint'; const httpStatus=safeDiagnostic(status,'unknown'); const parsedBody=bodyJson&&typeof bodyJson==='object'?JSON.stringify(bodyJson):bodyText; const body=safeDiagnostic(parsedBody); const reason=body||safeDiagnostic(statusText,'upstream returned no diagnostic details'); return new Error(`GET ${endpoint} failed: HTTP ${httpStatus} ${reason}`.trim());};
   const fetchJson=async(url)=>{
     const controller=new AbortController(); let timer;
@@ -117,12 +143,12 @@
     }
   };
   const renderActionCell=(row,cell,{allowAction=true}={})=>{const label=actionLabelFor(row); if(!allowAction||!label||!isActionableRow(row)){cell.textContent='—';return;} const required=['broker','account','category','instrument','id','type']; const missing=required.some((k)=>!String(row[k]??'').trim()); if(missing){cell.textContent='—';return;} const key=rowKey(row); const state=pendingManualActions.get(key); if(state&&['submitting','accepted_verifying'].includes(state.verifyStatus)){cell.textContent='Verifying...'; return;} const btn=document.createElement('button'); btn.type='button'; btn.className='action-btn'; btn.textContent=label; btn.addEventListener('click',()=>postClose(row,btn)); cell.appendChild(btn);};
-  const render=(items,errors=[],warnings=[],coverage=window.__openOrdersCoverage||{})=>{window.__openOrdersItems=Array.isArray(items)?items:[]; window.__openOrdersErrors=Array.isArray(errors)?errors:[]; window.__openOrdersWarnings=Array.isArray(warnings)?warnings:[]; if(!tbody) return; tbody.innerHTML=''; hasData=Boolean(items.length); const formattedErrors=formatSourceErrors(errors); const formattedWarnings=formatSourceErrors(warnings); if(errorsBox) errorsBox.style.display=formattedErrors.length?'block':'none'; if(errorsList){errorsList.innerHTML=''; formattedErrors.forEach((text)=>{const li=document.createElement('li'); li.textContent=text; errorsList.appendChild(li);});} if(warningsBox) warningsBox.style.display=formattedWarnings.length?'block':'none'; if(warningsList){warningsList.innerHTML=''; formattedWarnings.forEach((text)=>{const li=document.createElement('li'); li.textContent=text; warningsList.appendChild(li);});} if(!items.length){if(emptyState){emptyState.style.display='block';emptyState.textContent=coverage.empty_confirmed===true?'No open orders or positions.':coverage.pending?'Loading broker data':'Broker data incomplete';} return;} if(emptyState) emptyState.style.display='none';
-    items.forEach((item)=>{ if (pendingManualActions.has(rowKey(item))) return; const row=document.createElement('tr'); if(item.source_stale){row.className='stale-row';row.title=safeDiagnostic(item.stale_reason||'Last-known-good broker state');} [item.venue||item.broker,resolveAccountLabel(item),item.asset,item.category,item.side,item.order_type,item.instrument,item.stop_loss_ticks,item.target_mode_display,item.take_profit_ticks,item.risk_mode_display,item.risk_value_display,item.risk_reward,item.timeframe,item.is_test_trade,item.setup,item.pattern,item.ema,item.vwap,item.aths_atls,item.round_number,item.webhook_mode,item.webhook_status,item.planned_entry_price,item.planned_stop_price,item.planned_target_price,item.type,item.size,item.entry_price||item.order_price,item.current_price,item.stop_loss,item.take_profit,item.leverage,item.type==='Position'?item.funding_paid:null,item.type==='Position'?item.funding_received:null,item.type==='Position'?item.net_funding:null,formatTimestamp(item.opened_at),item.status].forEach((v)=>{const td=document.createElement('td'); td.textContent=fmt(v); row.appendChild(td);}); const actionTd=document.createElement('td'); renderActionCell(item,actionTd,{allowAction:true}); row.appendChild(actionTd); tbody.appendChild(row); });
+  const render=(items,errors=[],warnings=[],coverage=window.__openOrdersCoverage||{})=>{window.__openOrdersItems=Array.isArray(items)?items:[]; window.__openOrdersErrors=Array.isArray(errors)?errors:[]; window.__openOrdersWarnings=Array.isArray(warnings)?warnings:[]; if(!tbody) return; tbody.innerHTML=''; hasData=Boolean(items.length); renderDiagnostics(errorsBox,errorsList,errors,'Source errors'); renderDiagnostics(warningsBox,warningsList,warnings,'Source warnings'); if(!items.length){if(emptyState){emptyState.style.display='block';emptyState.textContent=coverage.empty_confirmed===true?'No open orders or positions.':coverage.pending?'Loading broker data':'Broker data incomplete';} return;} if(emptyState) emptyState.style.display='none';
+    items.forEach((item)=>{ if (pendingManualActions.has(rowKey(item))) return; const row=document.createElement('tr'); if(item.source_last_success_at)row.title='Last successful source read: '+formatTimestamp(item.source_last_success_at)+(item.source_pending?' (updating)':''); if(item.source_stale){row.className='stale-row';row.title=safeDiagnostic(item.stale_reason||'Last-known-good broker state')+(row.title?' '+row.title:'');} [item.venue||item.broker,resolveAccountLabel(item),item.asset,item.category,item.side,item.order_type,item.instrument,item.stop_loss_ticks,item.target_mode_display,item.take_profit_ticks,item.risk_mode_display,item.risk_value_display,item.risk_reward,item.timeframe,item.is_test_trade,item.setup,item.pattern,item.ema,item.vwap,item.aths_atls,item.round_number,item.webhook_mode,item.webhook_status,item.planned_entry_price,item.planned_stop_price,item.planned_target_price,item.type,item.size,item.entry_price||item.order_price,item.current_price,item.stop_loss,item.take_profit,item.leverage,item.type==='Position'?item.funding_paid:null,item.type==='Position'?item.funding_received:null,item.type==='Position'?item.net_funding:null,formatTimestamp(item.opened_at),item.status].forEach((v)=>{const td=document.createElement('td'); td.textContent=fmt(v); row.appendChild(td);}); const actionTd=document.createElement('td'); renderActionCell(item,actionTd,{allowAction:true}); row.appendChild(actionTd); tbody.appendChild(row); });
   };
   const confirmVisibility=()=>{
     for(const [key,state] of pendingVisibilityChecks){
-      const visible=(window.__openOrdersItems||[]).some((item)=>!item.source_stale&&
+      const visible=(window.__openOrdersItems||[]).some((item)=>!item.source_stale&&!item.source_pending&&
         Number(item.collection_version??knownVersion)===knownVersion&&itemMatchesSubmission(item,state.event));
       if(visible){pendingVisibilityChecks.delete(key);setBadge('Submitted; broker state is now visible.');}
     }

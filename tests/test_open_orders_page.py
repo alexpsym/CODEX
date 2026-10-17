@@ -2706,14 +2706,117 @@ def test_open_orders_recovery_is_source_scoped_and_diagnostics_remain_stable(mon
     asyncio.run(asyncio.wait_for(scenario(), 15))
 
 
+def test_open_orders_routine_refresh_keeps_recent_rows_and_source_failures_stable(monkeypatch: pytest.MonkeyPatch) -> None:
+    service = master_service
+
+    async def scenario():
+        clock = [0.0]
+        monkeypatch.setattr(service, "_open_orders_now", lambda: clock[0])
+        monkeypatch.setattr(service, "_OPEN_ORDERS_CACHE", {"version": 300})
+        monkeypatch.setattr(service, "_OPEN_ORDERS_LAST_GOOD_ITEMS", {})
+        # Keep this source-lifecycle regression synthetic, with no reconciliation/state writes.
+        reconciled = []
+        def payload(items, errors, warnings, version, complete):
+            reconciled.append(complete)
+            return {"items": items, "errors": errors, "warnings": warnings,
+                    "version": version, "updated_at": "fixture"}
+        monkeypatch.setattr(service, "_open_orders_payload", payload)
+        owner = service._OpenOrdersService()
+        job = service._OpenOrdersJob(owner, [], "fixture", 300)
+        owner.job = job
+        gate = asyncio.Event()
+        failing = [False]
+        healthy_calls = [0]
+        row = {"broker": "Bybit", "account": "demo", "category": "linear",
+               "instrument": "BTCUSDT", "type": "Order", "id": "accepted"}
+        async def healthy():
+            healthy_calls[0] += 1
+            await gate.wait()
+            return {"items": [row]}
+        failure = {"message": "System under maintenance, please try again later.",
+                   "http_status": "503", "transient": True}
+        retry = asyncio.Event()
+        async def affected():
+            await retry.wait()
+            return {"items": [], "errors": [failure]} if failing[0] else {"items": [dict(row, broker="OANDA", account="live", id="retained-oanda")]}
+        metadata = {"broker": "Bybit", "account": "demo", "category": "linear",
+                    "source_type": "orders", "endpoint": "/v5/order/realtime"}
+        good = job.add("healthy", metadata, healthy)
+        bad = job.add("affected", dict(metadata, broker="OANDA", account="live",
+                      account_id="account-one", endpoint="/v3/accounts/account-one/pendingOrders"), affected)
+        try:
+            job.publish()
+            assert job.payload["pending"] and not job.payload["empty_confirmed"]
+            assert not job.payload["core_complete"] and not job.payload["items"]
+            gate.set()
+            retry.set()
+            await _open_orders_eventually(lambda: not job.pending)
+            assert job.payload["core_complete"] and not job.payload["warnings"]
+            last_success = good["last_success_at"]
+            for now in (60.0, 120.0):
+                gate.clear()
+                clock[0] = now
+                job.poll()
+                retained = job.payload["items"][0]
+                assert retained["source_pending"] and not retained["source_stale"]
+                assert retained["source_last_success_at"] == last_success
+                assert not job.payload["warnings"] and not job.payload["empty_confirmed"]
+                assert not job.payload["core_complete"] and not reconciled[-1]
+                gate.set()
+                await _open_orders_eventually(lambda: good["state"] == "complete")
+                last_success = good["last_success_at"]
+
+            failing[0] = True
+            job.launch(bad)
+            await _open_orders_eventually(lambda: bad["state"] == "failed")
+            errors = job.payload["errors"]
+            bad_success = bad["last_success_at"]
+            failed_row = next(item for item in job.payload["items"] if item["id"] == "retained-oanda")
+            assert failed_row["source_stale"] and failed_row["source_last_success_at"] == bad_success
+            warnings = job.payload["warnings"]
+            retry.clear()
+            clock[0] = bad["next_retry"]
+            job.poll()
+            assert bad["state"] == "pending" and job.payload["errors"] == errors
+            assert bad["last_success_at"] == bad_success
+            assert job.payload["warnings"] == warnings
+            assert next(item for item in job.payload["items"] if item["id"] == "retained-oanda")["source_stale"]
+            # An unrelated successful publication cannot clear this source's failure.
+            job.launch(good)
+            await _open_orders_eventually(lambda: good["state"] == "complete")
+            assert job.payload["errors"] == errors and not job.payload["empty_confirmed"]
+            failing[0] = False
+            retry.set()
+            await _open_orders_eventually(lambda: bad["state"] == "complete")
+            assert not job.payload["errors"]
+
+            # Age changes provenance without canceling a legitimate delayed read.
+            gate.clear()
+            clock[0] = good["last_success"] + service._OPEN_ORDERS_STALE_AFTER_SECONDS + 1
+            job.poll()
+            aged = job.payload["items"][0]
+            assert aged["source_pending"] and aged["source_stale"] and job.payload["warnings"]
+            assert aged["source_last_success_at"] == good["last_success_at"]
+            assert not job.payload["empty_confirmed"] and good["task"] is not None
+            gate.set()
+            await _open_orders_eventually(lambda: good["state"] == "complete")
+            assert not job.payload["warnings"] and not job.payload["items"][0]["source_stale"]
+            assert healthy_calls[0] == 5
+        finally:
+            await job.close()
+        assert not job.tasks and not job.clients
+
+    asyncio.run(asyncio.wait_for(scenario(), 10))
+
+
 def test_open_orders_browser_preserves_pending_data_and_confirms_matching_submit() -> None:
     node = shutil.which("node")
     assert node, "node is required for the Open Orders browser regression"
     harness = r"""
 const fs=require('fs');
 class Element{
-  constructor(){this.children=[];this.style={};this.textContent='';this.handlers={};}
-  set innerHTML(value){this.children=[];}
+  constructor(){this.children=[];this.style={};this.textContent='';this.handlers={};this.open=false;this.writes=0;}
+  set innerHTML(value){this.children=[];this.writes++;}
   appendChild(value){this.children.push(value);}
   addEventListener(event,handler){this.handlers[event]=handler;}
   querySelector(){return null;}
@@ -2721,6 +2824,10 @@ class Element{
 const badge=new Element(),tbody=new Element(),table=new Element();table.querySelector=()=>tbody;
 const empty=new Element(),elements={'open-orders-status':badge,'open-orders-table':table,'refresh-btn':new Element(),
 'open-orders-empty':empty,'open-orders-errors':new Element(),'open-orders-warnings':new Element()};
+for(const id of ['open-orders-errors','open-orders-warnings']){
+  const box=elements[id];box.list=new Element();box.summary=new Element();
+  box.querySelector=selector=>selector==='ul'?box.list:selector==='summary'?box.summary:null;
+}
 const handlers={};let virtual=0;
 global.performance={now:()=>virtual};
 global.window={__OPEN_ORDERS_TESTING__:true,__OPEN_ORDERS_GET_TIMEOUT_MS__:25,addEventListener(){}};
@@ -2774,11 +2881,30 @@ match:hooks.itemMatchesSubmission({...freshDifferent,[rowKey]:'expected'},suppli
   revision=2;snapshot={...snapshot,progress_revision:revision,items:[{...matching,source_stale:true},{...matching,account:'live'}],errors:[unrelated]};
   await hooks.pollVersion();await flush();
   const stale={state:hooks.getState(),ids:window.__openOrdersItems.map(row=>row.id),errors:window.__openOrdersErrors,badge:badge.textContent};
+  const errorsBox=elements['open-orders-errors'],warningsBox=elements['open-orders-warnings'];
+  const maintenance=[1,2].flatMap(account=>['positions','orders'].map(source=>({
+    broker:'OANDA',account:'live',account_id:'account-'+account,source_type:source,
+    source_key:'oanda-'+account+'-'+source,endpoint:'/v3/accounts/account-'+account+'/'+(source==='positions'?'openTrades':'pendingOrders'),
+    http_status:'503',message:'System under maintenance, please try again later.'
+  })));
+  revision=3;snapshot={...snapshot,progress_revision:revision,items:[{...matching,source_pending:true}],errors:maintenance};
+  await hooks.pollVersion();await flush();
+  const initiallyCollapsed=!errorsBox.open;
+  errorsBox.open=true;
+  const detailsWrites=errorsBox.list.writes;
+  const routine={state:hooks.getState(),warnings:warningsBox.style.display,rowClass:tbody.children[0]?.className||'',initiallyCollapsed,
+summary:errorsBox.summary.textContent,details:errorsBox.list.children.map(li=>li.textContent)};
+  revision=4;snapshot={...snapshot,progress_revision:revision};
+  await hooks.pollVersion();await flush();
+  const stableDetails={open:errorsBox.open,writes:errorsBox.list.writes-detailsWrites};
+  revision=5;snapshot={...snapshot,progress_revision:revision,errors:[{...maintenance[0],message:'Service unavailable'}]};
+  await hooks.pollVersion();await flush();
+  const generic503=errorsBox.summary.textContent;
   virtual=130000;
-  revision=3;snapshot={...snapshot,progress_revision:revision,items:[freshDifferent],errors:[unrelated]};
+  revision=6;snapshot={...snapshot,progress_revision:revision,items:[freshDifferent],errors:[unrelated]};
   await hooks.pollVersion();await flush();
   const mismatched={state:hooks.getState(),ids:window.__openOrdersItems.map(row=>row.id),badge:badge.textContent};
-  revision=4;snapshot={...snapshot,progress_revision:revision,items:[matching],errors:[unrelated]};
+  revision=7;snapshot={...snapshot,progress_revision:revision,items:[matching],errors:[unrelated]};
   await hooks.pollVersion();await flush();
   const confirmed={state:hooks.getState(),ids:window.__openOrdersItems.map(row=>row.id),errors:window.__openOrdersErrors,badge:badge.textContent};
   mode='body';await Promise.all([hooks.refresh('manual'),hooks.refresh('manual')]);
@@ -2791,18 +2917,28 @@ match:hooks.itemMatchesSubmission({...freshDifferent,[rowKey]:'expected'},suppli
   await hooks.pollVersion();await flush();
   const hiddenCalls=urls.length-beforeHidden;
   document.hidden=false;
-  revision=5;snapshot={...snapshot,progress_revision:revision,items:[{...matching,id:'hidden'}]};
+  revision=8;snapshot={...snapshot,progress_revision:revision,items:[{...matching,id:'hidden'}]};
   handlers.visibilitychange();await flush();
   const visible={state:hooks.getState(),badge:badge.textContent};
-  revision=6;snapshot={version:1,progress_revision:revision,items:[],errors:[],warnings:[],pending:false,
+  revision=9;snapshot={version:1,progress_revision:revision,items:[],errors:[],warnings:[],pending:false,
 core_complete:true,empty_confirmed:true,sources:[{state:'complete'}]};
   await hooks.refresh('manual');
-  process.stdout.write(JSON.stringify({identityChecks,fallback,oneOfSeveral,initial,pending,stale,mismatched,confirmed,failed,recovered,hiddenCalls,visible,
+  process.stdout.write(JSON.stringify({routine,stableDetails,generic503,identityChecks,fallback,oneOfSeveral,initial,pending,stale,mismatched,confirmed,failed,recovered,hiddenCalls,visible,
 emptyText:empty.textContent,mutations,active,maxActive,timers:timers.size,forced:urls.filter(url=>url.includes('force=1')).length}));
 })().catch(error=>{console.error(error);process.exit(1);});
 """.replace("__JS_PATH__", json.dumps(str(ROOT / "render" / "static" / "open_orders.js")))
-    result = subprocess.run([node, "-e", harness], check=True, capture_output=True, text=True, timeout=10)
+    result = subprocess.run([node, "-e", harness], check=True, capture_output=True, text=True, encoding="utf-8", timeout=10)
     state = json.loads(result.stdout)
+    assert state["routine"]["state"]["pendingVisibilityChecks"] == 1
+    assert state["routine"]["warnings"] == "none" and state["routine"]["rowClass"] == ""
+    assert state["routine"]["initiallyCollapsed"] is True
+    assert state["routine"]["summary"] == "OANDA live reports maintenance \u2014 4 affected sources"
+    assert len(state["routine"]["details"]) == 4
+    assert all("System under maintenance" in detail for detail in state["routine"]["details"])
+    assert any("account-1" in detail and "openTrades" in detail for detail in state["routine"]["details"])
+    assert any("account-2" in detail and "pendingOrders" in detail for detail in state["routine"]["details"])
+    assert state["stableDetails"] == {"open": True, "writes": 0}
+    assert "maintenance" not in state["generic503"]
     assert state["identityChecks"] == [{"mismatch": False, "match": True}] * 3
     assert state["fallback"] is True and state["oneOfSeveral"] is True
     assert state["initial"]["text"] == "Loading broker data"

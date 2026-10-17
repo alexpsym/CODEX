@@ -3475,6 +3475,8 @@ _OPEN_ORDERS_HTTP_SCOPE = contextvars.ContextVar("open_orders_http_scope", defau
 _OPEN_ORDERS_SETTLEMENT_SCOPE = contextvars.ContextVar("open_orders_settlement", default=None)
 _OPEN_ORDERS_SERVICES: Dict[object, object] = {}
 _OPEN_ORDERS_SOURCE_REFRESH_SECONDS = 60.0
+# Data age only: never cancels a slow broker read.
+_OPEN_ORDERS_STALE_AFTER_SECONDS = 180.0
 _OPEN_ORDERS_RECOVERY_BACKOFF_SECONDS = 5.0
 _OPEN_ORDERS_MAX_RECOVERY_ATTEMPTS = 3
 
@@ -31294,14 +31296,14 @@ OPEN_ORDERS_TEMPLATE = """<!doctype html>
         <button id="refresh-btn" class="btn" type="button">Refresh</button>
         <span id="open-orders-status" class="status">Idle</span>
       </div>
-      <div id="open-orders-errors" class="error-box">
-        <div><strong>Source errors</strong></div>
+      <details id="open-orders-errors" class="error-box">
+        <summary>Source errors</summary>
         <ul></ul>
-      </div>
-      <div id="open-orders-warnings" class="warning-box">
-        <div><strong>Source warnings</strong></div>
+      </details>
+      <details id="open-orders-warnings" class="warning-box">
+        <summary>Source warnings</summary>
         <ul></ul>
-      </div>
+      </details>
       <div id="open-orders-empty" class="muted">No open orders or positions.</div>
       <div class="table-wrap">
         <table id="open-orders-table">
@@ -35712,7 +35714,10 @@ class _OpenOrdersJob:
                  "state": "pending" if ready else "blocked", "task": None, "run": 0, "attempts": 0,
                  "items": [], "previous": copy.deepcopy(_OPEN_ORDERS_LAST_GOOD_ITEMS.get(cache_key, [])),
                  "errors": [], "warnings": [], "next_retry": 0.0, "updated": None,
+                 "last_success": None, "last_success_at": None,
                  "config": config, "cache_key": cache_key}
+        if entry["previous"]:
+            entry["last_success_at"] = entry["previous"][0].get("source_last_success_at")
         self.sources[key] = entry
         if ready:
             self.launch(entry)
@@ -35803,9 +35808,14 @@ class _OpenOrdersJob:
             entry["transient"] = _open_orders_transient(failures)
             entry["updated"] = _open_orders_now()
             entry["next_retry"] = entry["updated"] + min(60.0, _OPEN_ORDERS_RECOVERY_BACKOFF_SECONDS * 2 ** (entry["attempts"] - 1))
+            if not failures:
+                entry["last_success"] = entry["updated"]
+                entry["last_success_at"] = datetime.now(timezone.utc).isoformat()
             if not failures and entry["core"]:
                 entry["previous"] = copy.deepcopy(entry["items"])
-                _OPEN_ORDERS_LAST_GOOD_ITEMS[entry["cache_key"]] = copy.deepcopy(entry["items"])
+                _OPEN_ORDERS_LAST_GOOD_ITEMS[entry["cache_key"]] = [
+                    dict(copy.deepcopy(row), source_last_success_at=entry["last_success_at"])
+                    for row in entry["items"]]
             if entry.get("after"):
                 await entry["after"](entry, result)
             if entry["meta"]["broker"] == "Bybit" and entry["meta"]["source_type"] == "positions":
@@ -35982,7 +35992,11 @@ class _OpenOrdersJob:
             errors.extend(entry["errors"])
             warnings.extend(entry["warnings"])
             state = entry["state"]
+            recent = (entry["last_success"] is not None
+                      and _open_orders_now() - entry["last_success"] < _OPEN_ORDERS_STALE_AFTER_SECONDS)
+            routine_update = state == "pending" and recent and not entry["errors"] and not entry["warnings"]
             coverage.append(dict(entry["meta"], source_key=key, state=state, core=entry["core"],
+                                 last_success_at=entry["last_success_at"],
                                  attempts=entry["attempts"], retry_in_seconds=max(0, entry["next_retry"] - _open_orders_now()) if state == "failed" else None))
             if not entry["core"]:
                 continue
@@ -35996,8 +36010,10 @@ class _OpenOrdersJob:
                 rows += [(row, True) for identity, row in retained.items() if identity not in identities]
             stale = False
             for raw, retained in rows:
-                row = dict(raw, source_key=key, collection_version=self.version, source_stale=retained)
-                if retained:
+                row = dict(raw, source_key=key, collection_version=self.version,
+                           source_stale=retained and not routine_update, source_pending=retained and state == "pending",
+                           source_last_success_at=entry["last_success_at"])
+                if retained and not routine_update:
                     stale = True
                     row["stale_reason"] = "Broker source is " + state + "; retained prior row."
                 elif _open_orders_row_identity(row) in funding:
@@ -36007,7 +36023,7 @@ class _OpenOrdersJob:
                     row["account_label_suffix"] = "MT4"
                 items.append(row)
             if stale:
-                warnings.append(dict(entry["meta"], source_key=key, message="Showing explicitly stale prior broker rows while this source is " + state + "."))
+                warnings.append(dict(entry["meta"], source_key=key, message="Showing stale prior broker rows; awaiting a successful source read."))
         core_complete = bool(coverage) and all(row["state"] == "complete" for row in coverage if row["core"])
         complete = core_complete and not self.pending and not errors and not warnings
         # Reconciliation only sees fully confirmed current coverage, once per read cycle.
