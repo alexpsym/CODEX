@@ -2574,24 +2574,143 @@ def _mock_bybit_quote_env(monkeypatch, *, tick='0.00001', bid='0.04921', ask='0.
     monkeypatch.setattr(master_service, '_bybit_signed_get', fake_signed_get)
 
 
-def test_bybit_sell_limit_auto_adjusts_take_profit_below_last(monkeypatch):
+def _mock_pending_limit_replay(monkeypatch, *, symbol, tick, last):
+    # All quote/order dependencies are frozen; no account, market, context or folder IO.
+    service = master_service
+    state = {"last": last, "posts": [], "reject": False, "contexts": []}
+    meta = {"symbol": symbol, "priceFilter": {"tickSize": tick},
+            "lotSizeFilter": {"qtyStep": "1", "minOrderQty": "1", "maxOrderQty": "999999",
+                              "maxMktOrderQty": "999999", "minNotionalValue": "0"},
+            "leverageFilter": {"maxLeverage": "50"}}
+    monkeypatch.setattr(service, "resolve_bybit_credentials_for", lambda a: (a, "mock", "mock", "https://bybit.invalid", "mock"))
+    monkeypatch.setenv("CALCULATOR_BYBIT_MAKER_FEE_FALLBACK", "0.0006")
+    monkeypatch.setenv("CALCULATOR_BYBIT_TAKER_FEE_FALLBACK", "0.0006")
+    async def resolve(*a, **k): return symbol, meta, {"resolution_status": "exact"}
+    async def instrument(*a, **k): return meta
+    async def ticker(*a, **k):
+        # Bid/ask are synthetic, not captured historical QUSDT evidence; limit spread is zero.
+        return {"payload": {"result": {"list": [{"bid1Price": state["last"], "ask1Price": state["last"], "lastPrice": state["last"]}]}}}
+    async def wallet(*a, **k): return {"available_usdt": "298", "total_equity": "298"}, {}
+    async def get(*a, **k):
+        assert a[1] == "/v5/market/tickers"
+        return (await ticker())["payload"]
+    async def post(**k):
+        assert k["path"] == "/v5/order/create"
+        state["posts"].append(dict(k["body"]))
+        return {"retCode": 10001 if state["reject"] else 0, "retMsg": "fixture", "result": {"orderId": "fixture-order"}}
+    def forbidden(*a, **k): raise AssertionError("Unexpected external IO")
+    for name, fn in (("_resolve_bybit_calculator_symbol_fast", resolve),
+                     ("_bybit_lookup_linear_symbol_with_fallback", instrument),
+                     ("_fetch_bybit_ticker_cached", ticker), ("_fetch_bybit_balance_usdt_cached", wallet),
+                     ("_bybit_get_async", get), ("_bybit_signed_post", post)):
+        monkeypatch.setattr(service, name, fn)
+    for name in ("_upsert_calculator_trade_context", "_upsert_bybit_demo_calc_context"):
+        monkeypatch.setattr(service, name, lambda payload, **k: state["contexts"].append(dict(payload)))
+    for name in ("_log_webhook_event", "cache_bybit_demo_tpsl_request", "_invalidate_open_orders_cache", "_schedule_dropbox_upload_state_backup"):
+        monkeypatch.setattr(service, name, lambda *a, **k: None)
+    monkeypatch.setattr(service, "_bybit_early_folder_lifecycle", lambda **k: (False, {}))
+    monkeypatch.setattr(service, "_upsert_pending_webhook", lambda payload, **k: dict(payload))
+    monkeypatch.setattr(service, "_load_pending_webhooks", lambda: [])
+    monkeypatch.setattr(service, "_accepted_calculator_intent", lambda payload, **k: dict(payload))
+    for name in ("_save_json_file", "_bybit_signed_get", "_bybit_market_get_async", "_fetch_oanda_mid_prices_batch"):
+        monkeypatch.setattr(service, name, forbidden)
+    monkeypatch.setattr(service.httpx, "AsyncClient", forbidden)
+    return state
+
+
+def test_bybit_sell_limit_preserves_requested_take_profit_or_requires_requote(monkeypatch):
+    state = _mock_pending_limit_replay(monkeypatch, symbol="PARTIUSDT", tick="0.00001", last="0.04922")
     monkeypatch.setenv("PUBLIC_WEBHOOK_BASE_URL", "https://example-webhook.test")
-    monkeypatch.delenv("RENDER_CALCULATOR_BASE_URL", raising=False)
-    _mock_bybit_quote_env(monkeypatch)
-    body = json.loads(asyncio.run(master_service.calculator_quote({'asset':'crypto','account':'live','symbol':'PARTI','side':'sell','order_type':'limit','entry_price':'0.05313','risk_mode':'percent','risk_value':1,'stop_loss_ticks':37,'take_profit_ticks':94,'webhook':'yes'})).body.decode())
-    assert float(body['target_price']) < float(body['last_price'])
-    assert float(body['target_price']) < float(body['entry_price'])
-    assert body['take_profit_adjusted'] is True
-    wh = json.loads(body['webhook_payload_json'])
-    assert wh['take_profit_price'] == body['target_price']
+    payload = dict(asset="crypto", account="demo", symbol="PARTIUSDT", side="sell", order_type="limit",
+                   entry_price="0.05313", risk_mode="percent", risk_value=1, stop_loss_ticks=37,
+                   take_profit_ticks=94, webhook="yes")
+    body = json.loads(asyncio.run(master_service.calculator_quote(payload)).body)
+    assert body["target_price"] == "0.05219"  # Above LastPrice, below future sell entry.
+    assert body["take_profit_adjusted"] is False
+    wh = json.loads(body["webhook_payload_json"])
+    assert wh["take_profit_price"] == body["target_price"]
+    state["last"] = "0.048"
+    result = asyncio.run(master_service._place_bybit_order(wh, request_id="fixture"))
+    assert result["tpsl"]["status"] == "attached_to_order_create"
+    assert Decimal(state["posts"][-1]["takeProfit"]) == Decimal("0.05219")
+    state["last"] = "0.054"  # Entry now crosses market: existing re-quote validation, no create.
+    with pytest.raises(master_service.BybitPreSubmitValidationError) as exc:
+        asyncio.run(master_service._place_bybit_order(wh, request_id="fixture-stale"))
+    assert exc.value.code == "BYBIT_LIMIT_WOULD_FILL_IMMEDIATELY"
+    assert len(state["posts"]) == 1
 
 
-def test_bybit_buy_limit_auto_adjusts_take_profit_above_last(monkeypatch):
-    _mock_bybit_quote_env(monkeypatch, tick='0.1', bid='99.9', ask='100.1', last='100')
-    body = json.loads(asyncio.run(master_service.calculator_quote({'asset':'crypto','account':'live','symbol':'BTC','side':'buy','order_type':'limit','entry_price':'95','risk_mode':'percent','risk_value':1,'stop_loss_ticks':20,'take_profit_ticks':10})).body.decode())
-    assert float(body['target_price']) > float(body['last_price'])
-    assert float(body['target_price']) > float(body['entry_price'])
-    assert body['take_profit_adjusted'] is True
+def test_bybit_buy_limit_preserves_requested_take_profit_or_requires_requote(monkeypatch):
+    state = _mock_pending_limit_replay(monkeypatch, symbol="BTCUSDT", tick="0.1", last="100")
+    body = json.loads(asyncio.run(master_service.calculator_quote(dict(asset="crypto", account="demo", symbol="BTCUSDT", side="buy", order_type="limit", entry_price="95", risk_mode="percent", risk_value=1, stop_loss_ticks=20, take_profit_ticks=10))).body)
+    assert body["target_price"] == "96"
+    assert body["take_profit_adjusted"] is False
+    state["last"] = "105"
+    args = dict(symbol="BTCUSDT", side="buy", order_type="limit", entry_price=Decimal("95"),
+                stop_loss=Decimal("93"), take_profit=Decimal(body["target_price"]),
+                tick_size=Decimal("0.1"), source_context="fixture")
+    _, sl, tp, diag = master_service._make_bybit_levels_submit_safe(**args, last_price=Decimal("105"))
+    assert (sl, tp) == (Decimal("93"), Decimal("96"))
+    assert not diag.get("submit_take_profit_auto_adjusted")
+    with pytest.raises(master_service.BybitPreSubmitValidationError) as exc:
+        master_service._make_bybit_levels_submit_safe(**args, last_price=Decimal("94"))
+    assert exc.value.code == "BYBIT_LIMIT_WOULD_FILL_IMMEDIATELY"
+    for invalid_tp in ("95", "94"):
+        with pytest.raises(master_service.BybitPreSubmitValidationError):
+            master_service._make_bybit_levels_submit_safe(**dict(args, take_profit=Decimal(invalid_tp)), last_price=Decimal("105"))
+
+
+def test_qusdt_limit_target_replay_preserves_requested_and_submitted_levels(monkeypatch):
+    # Sanitized exact saved quote joined through accepted order/link -> calculation_context_id.
+    # B independently records these submitted prices and quantity, retCode=0.
+    historical = dict(entry="0.10191", stop="0.0944", target="0.13579", quantity="390",
+                      before="0.12111", last="0.13578", tick="0.00001",
+                      total_loss="2.97483654", reward="13.1575782")
+    d = Decimal
+    e, sl, tp, qty, tick = (d(historical[k]) for k in ("entry", "stop", "target", "quantity", "tick"))
+    loss = d(historical["total_loss"]) / qty
+    reward = d(historical["reward"]) / qty
+    # Infer effective rates from two independent saved monetary fields, not today's config.
+    close_fee = ((tp-e-reward) - (loss-(e-sl))) / (tp-sl)
+    open_fee = (loss-(e-sl)-sl*close_fee) / e
+    assert (open_fee, close_fee) == (d("0.0006"), d("0.0006"))
+    assert d(751) * d("2.5") == d("1877.5")
+    raw_tp = (d("2.5")*loss + e*(1+open_fee)) / (1-close_fee)
+    assert abs(raw_tp-d("0.1211132789673804282569541725")) < d("1e-16")
+    assert (d(historical["before"])-e)/tick == 1920
+    assert (tp-d(historical["before"]))/tick == 1468
+    assert (tp-e)/tick == 3388
+    assert abs((tp-e)/(e-sl)-d("4.5113182423")) < d("1e-10")
+    assert abs(reward/loss-d("4.4229583787")) < d("1e-10")
+    state = _mock_pending_limit_replay(monkeypatch, symbol="QUSDT", tick=historical["tick"], last=historical["last"])
+    payload = dict(asset="crypto", account="demo", symbol="QUSDT", side="buy", order_type="limit",
+                   entry_price=historical["entry"], risk_mode="percent", risk_value="1",
+                   stop_loss_ticks="751", target_mode="rr", risk_reward="2.5")
+    body = json.loads(asyncio.run(master_service.calculator_quote(payload)).body)
+    assert body["quantity"] == historical["quantity"]
+    assert body["entry_price"] == historical["entry"] and body["stop_price"] == historical["stop"]
+    assert body["target_price"] == historical["before"]
+    assert body["requested_target_price_before_adjustment"] == body["target_price"]
+    assert body["requested_rr_net"] == "2.5" and body["effective_rr_net"] == "2.5"
+    assert body["take_profit_adjusted"] is False
+    assert d(body["estimated_total_loss"]) == qty*loss  # Fees remain in risk sizing.
+    expected_reward = qty*(d(body["target_price"])-e-e*open_fee-d(body["target_price"])*close_fee)
+    assert d(body["estimated_reward"]) == expected_reward
+    assert abs(expected_reward/(qty*loss)-d("2.4995703865")) < d("1e-10")
+    submit = dict(payload, action="buy", quantity=body["quantity"], stop_loss_price=body["stop_price"],
+                  take_profit_price=body["target_price"], calculation_context_id=body["calculation_context_id"])
+    state["last"] = "0.15"  # Changed market must not relocate the accepted pending TP.
+    response = asyncio.run(master_service.calculator_submit(submit))
+    assert response.status_code == 200
+    posted = state["posts"][-1]
+    assert (posted["price"], posted["stopLoss"], posted["takeProfit"]) == (historical["entry"], historical["stop"], historical["before"])
+    assert (posted["tpslMode"], posted["tpOrderType"], posted["slOrderType"]) == ("Full", "Market", "Market")
+    state["reject"] = True
+    response = asyncio.run(master_service.calculator_submit(submit))
+    assert response.status_code == 400 and json.loads(response.body)["code"] == "BYBIT_REJECTED"
+    assert len(state["posts"]) == 2  # Rejection cannot retry without protection.
+    assert all(p["takeProfit"] == historical["before"] and p["stopLoss"] == historical["stop"] for p in state["posts"])
+
 
 def test_bybit_wallet_retcode_33004_maps_to_api_key_expired_demo(monkeypatch: pytest.MonkeyPatch) -> None:
     async def fake_signed_get(**_kwargs):

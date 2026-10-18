@@ -28862,7 +28862,7 @@ def _validate_bybit_linear_levels_before_submit(
             _raise("BYBIT_LIMIT_WOULD_FILL_IMMEDIATELY", "Buy limit entry is at or above current LastPrice. Use Market, lower the limit below current price, or add explicit conditional stop-entry support.")
         if stop_loss is not None and stop_loss >= last_price:
             _raise("BYBIT_STOP_LOSS_INVALID_FOR_BUY", "Bybit will reject this Buy because stop loss is not below current LastPrice.")
-        if take_profit is not None and take_profit <= last_price:
+        if order_type != "limit" and take_profit is not None and take_profit <= last_price:
             _raise("BYBIT_TAKE_PROFIT_INVALID_FOR_BUY", "Bybit will reject this Buy because take profit is not above current LastPrice.")
         if stop_loss is not None and stop_loss >= entry_price:
             _raise("BYBIT_STOP_LOSS_INVALID_FOR_BUY", "Buy stop loss must be below entry price.")
@@ -28873,7 +28873,7 @@ def _validate_bybit_linear_levels_before_submit(
             _raise("BYBIT_LIMIT_WOULD_FILL_IMMEDIATELY", "Sell limit entry is at or below current LastPrice. Use Market, raise the limit above current price, or add explicit conditional stop-entry support.")
         if stop_loss is not None and stop_loss <= last_price:
             _raise("BYBIT_STOP_LOSS_INVALID_FOR_SELL", "Bybit will reject this Sell because stop loss is not above current LastPrice.")
-        if take_profit is not None and take_profit >= last_price:
+        if order_type != "limit" and take_profit is not None and take_profit >= last_price:
             _raise("BYBIT_TAKE_PROFIT_INVALID_FOR_SELL", "Bybit will reject this Sell because take profit is not below current LastPrice.")
         if stop_loss is not None and stop_loss <= entry_price:
             _raise("BYBIT_STOP_LOSS_INVALID_FOR_SELL", "Sell stop loss must be above entry price.")
@@ -28986,7 +28986,10 @@ def _make_bybit_levels_submit_safe(
     snapped_sl = (_snap_to_increment(stop_loss, tick_size) if stop_loss is not None else None)
     snapped_tp = (_snap_to_increment(take_profit, tick_size) if take_profit is not None else None)
     diag: Dict[str, object] = {"submit_last_price": _fmt_dec(last_price), "tick_size": _fmt_dec(tick_size), "source_context": source_context}
-    if snapped_tp is not None:
+    # Pending linear orders carry preset TP/SL, applied when the entry fills.
+    # Do not apply an active-position LastPrice trigger boundary to that plan.
+    # https://bybit-exchange.github.io/docs/v5/order/create-order
+    if snapped_tp is not None and str(order_type).lower() != "limit":
         adjusted_tp, adj = _adjust_bybit_take_profit_for_last_price(
             symbol=symbol, side=side, entry_price=snapped_entry, take_profit=snapped_tp, last_price=last_price, tick_size=tick_size
         )
@@ -30295,14 +30298,17 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
             requested_target_before_adjustment = _snap_to_increment(tp, tick_size) or tp
             snapped_tp = requested_target_before_adjustment
             take_profit_adjustment = None
-            snapped_tp, take_profit_adjustment = _adjust_bybit_take_profit_for_last_price(
-                symbol=resolved_symbol,
-                side=side,
-                entry_price=snapped_entry,
-                take_profit=snapped_tp,
-                last_price=last,
-                tick_size=tick_size,
-            )
+            # A pending limit's attached TP is relative to its future entry,
+            # not an already-active position's current trigger price.
+            if order_type != "limit":
+                snapped_tp, take_profit_adjustment = _adjust_bybit_take_profit_for_last_price(
+                    symbol=resolved_symbol,
+                    side=side,
+                    entry_price=snapped_entry,
+                    take_profit=snapped_tp,
+                    last_price=last,
+                    tick_size=tick_size,
+                )
             if take_profit_adjustment:
                 warnings.append('Take profit was auto-adjusted to satisfy Bybit LastPrice trigger rules.')
             effective_target_distance = abs(snapped_tp - snapped_entry)
@@ -30357,7 +30363,7 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
                 "quote_last_price": _fmt_dec(last),
                 "quote_tick_size": _fmt_dec(tick_size),
                 "quote_valid_for_submit": True,
-                "submit_validity_boundary": ("take_profit_price < latest LastPrice" if side == "sell" else "take_profit_price > latest LastPrice"),
+                "submit_validity_boundary": (("take_profit_price < limit entry" if side == "sell" else "take_profit_price > limit entry") if order_type == "limit" else ("take_profit_price < latest LastPrice" if side == "sell" else "take_profit_price > latest LastPrice")),
                 "target_mode": target_mode,
                 "requested_rr_net": _fmt_dec_by_precision(requested_rr_net, Decimal("0.01")) if requested_rr_net is not None else None,
                 "effective_rr_net": _fmt_dec_by_precision(effective_rr_net_value if effective_rr_net_value is not None else effective_rr_net, Decimal("0.01")) if (effective_rr_net_value is not None or effective_rr_net is not None) else None,
