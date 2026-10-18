@@ -31900,9 +31900,13 @@ OPEN_ORDERS_TEMPLATE = """<!doctype html>
     .muted { color: #94a3b8; font-size: 13px; }
     .action-btn { border: 1px solid #334155; border-radius: 8px; background: #1f2937; color: #e5e7eb; padding: 5px 10px; cursor: pointer; }
     .action-btn[disabled] { opacity: .6; cursor: default; }
-    .classification-editor { min-width: 350px; max-width: 460px; white-space: normal; display: flex; flex-wrap: wrap; gap: 7px; padding: 8px 0; }
-    .classification-editor > div { width: 100%; }
-    .classification-editor select { background: #0f172a; color: #e5e7eb; border: 1px solid #475569; border-radius: 4px; }
+    .classification-value { font: inherit; color: inherit; background: transparent; border: 0; padding: 0; cursor: pointer; }
+    .classification-value:not(:disabled)::after { content: ' ✎'; color: #64748b; font-size: 11px; }
+    .classification-value:focus-visible { outline: 1px solid #93c5fd; outline-offset: 3px; }
+    .classification-value:disabled { cursor: default; }
+    .classification-cell select { font: inherit; background: #0f172a; color: #e5e7eb; border: 1px solid #475569; border-radius: 4px; max-width: 150px; }
+    .classification-cell .action-btn { font: inherit; padding: 2px 5px; margin-left: 3px; }
+    .classification-feedback { display: block; white-space: normal; max-width: 190px; font-size: 11px; color: #94a3b8; }
     .error-box { display: none; margin-bottom: 10px; border: 1px solid #7f1d1d; background: #3f0d12; color: #fecaca; border-radius: 10px; padding: 10px 12px; }
     .error-box ul { margin: 8px 0 0; padding-left: 20px; }
     .warning-box { display: none; margin-bottom: 10px; border: 1px solid #92400e; background: #2b1d0e; color: #fde68a; border-radius: 8px; padding: 7px 10px; font-size: 12px; }
@@ -31954,6 +31958,7 @@ OPEN_ORDERS_TEMPLATE = """<!doctype html>
               <th>Round Number</th>
               <th>Webhook Mode</th>
               <th>Webhook Status</th>
+              <th>Webhook classification</th>
               <th>Planned Entry</th>
               <th>Planned Stop</th>
               <th>Planned Target</th>

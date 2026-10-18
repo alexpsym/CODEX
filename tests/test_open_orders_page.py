@@ -4460,44 +4460,59 @@ eval(fs.readFileSync(__JS_PATH__,'utf8'));
         assert rows["EUR_USD"]["Take-profit Ticks"] == "123.5"
         assert rows["BTCUSDT"]["Target Mode"] == "Risk/Reward" and rows["BTCUSDT"]["Risk / Reward"] == "2"
         assert rows["BTCUSDT"]["Setup"] == "Pullback" and rows["BTCUSDT"]["Pattern"] == "Range"
-def test_open_orders_classification_editor_saves_without_losing_drafts_or_trading():
-    import shutil
-    import subprocess
+def test_open_orders_classification_cells_edit_and_save_in_place():
     node = shutil.which("node")
     assert node
+    headers = re.findall(r"<th>(.*?)</th>", master_service.OPEN_ORDERS_TEMPLATE)
     harness = r'''
 const fs=require('fs'),vm=require('vm'),assert=require('assert');
 class Element {
-  constructor(tag=''){this.tag=tag;this.children=[];this.parentNode=null;this.style={};this.textContent='';this.handlers={};this.dataset={};this.disabled=false;this.value='';}
-  set innerHTML(value){for(const child of this.children)child.parentNode=null;this.children=[];}
+  constructor(tag=''){this.tag=tag;this.children=[];this.parentNode=null;this.style={};this._text='';this.handlers={};this.dataset={};this.disabled=false;this.value='';this.hidden=false;}
+  set textContent(value){this.innerHTML='';this._text=String(value);}
+  get textContent(){return this._text+this.children.map(child=>child.textContent).join('');}
+  set innerHTML(value){for(const child of this.children)child.parentNode=null;this.children=[];this._text=String(value);}
   appendChild(child){this.insertBefore(child,null);return child;}
-  insertBefore(child,before){if(child===before)return;if(child.parentNode)child.remove();const i=before?this.children.indexOf(before):this.children.length;this.children.splice(i,0,child);child.parentNode=this;}
+  insertBefore(child,before){if(child===before)return;if(child.parentNode)child.remove();const i=before?this.children.indexOf(before):this.children.length;assert(i>=0);this.children.splice(i,0,child);child.parentNode=this;}
   remove(){if(this.parentNode){const p=this.parentNode;p.children.splice(p.children.indexOf(this),1);this.parentNode=null;}}
   addEventListener(event,fn){this.handlers[event]=fn;}
   setAttribute(k,v){this[k]=v;}
   querySelector(){return null;}
   click(){return this.disabled?undefined:this.handlers.click?.();}
+  focus(){document.activeElement=this;}
 }
 const tbody=new Element('tbody'),table=new Element('table');table.querySelector=()=>tbody;
 const elements={'open-orders-table':table};for(const id of ['open-orders-status','open-orders-empty','refresh-btn','open-orders-errors','open-orders-warnings'])elements[id]=new Element();
+const headers=JSON.parse(process.argv[2]);
 const walk=node=>[node,...node.children.flatMap(walk)];const find=(root,text)=>walk(root).find(e=>e.tag==='button'&&e.textContent===text);
-const select=(root,field)=>walk(root).find(e=>e.tag==='select'&&e.dataset.field===field);
-const change=(el,value)=>{el.value=value;el.handlers.change();};
+const select=cell=>walk(cell).find(e=>e.tag==='select');const idle=cell=>walk(cell).find(e=>e.className==='classification-value');
+const cell=(tr,label)=>tr.children[headers.indexOf(label)];
+const change=(el,value)=>{assert(!el.disabled);assert(el.children.some(option=>option.value===value));el.value=value;el.handlers.change();};
+const escape=cell=>cell.handlers.keydown({key:'Escape',preventDefault(){}});
+const inside=(child,parent)=>walk(parent).includes(child);
 global.window={__OPEN_ORDERS_TESTING__:true,addEventListener(){}};
 global.document={hidden:true,getElementById:id=>elements[id]||null,createElement:tag=>new Element(tag),addEventListener(){}};
 global.BroadcastChannel=undefined;global.setInterval=()=>1;global.clearInterval=()=>{};
 const calls=[];let mode='success',release;
+const labels={'1m':'1MIN','5m':'5MIN','15m':'15MIN','30m':'30MIN','1h':'1H','4h':'4H','1d':'1D','1w':'1W','1mo':'1MO'};
 let row={broker:'Bybit',account:'demo',category:'linear',instrument:'BTCUSDT',side:'Buy',type:'Order',id:'accepted',classification_target:'exact-accepted-target',classification_version:0,
-  classification_values:{timeframe:'5m',setup:'Pullback',pattern:'range',ema:'9',vwap:'No',aths_atls:'All-Time Low',round_number:'No',is_test_trade:false,webhook_classification:'Yes'},webhook_mode:'No',webhook_status:'Not used'};
+  classification_values:{timeframe:'1MIN',setup:'Pullback',pattern:'Channel',ema:'9',vwap:'No',aths_atls:'All-Time Low',round_number:'No',is_test_trade:true,webhook_classification:'Yes'},
+  timeframe:'1MIN',setup:'Pullback',pattern:'Channel',is_test_trade:'Yes',webhook_mode:'Yes',webhook_status:'Triggered',planned_entry_price:'100',status:'Pending'};
 let snapshot={version:1,progress_revision:1,items:[row],errors:[],warnings:[],core_complete:true,empty_confirmed:false};
+const publish=changes=>{row={...row,...changes};snapshot={...snapshot,items:[row],progress_revision:snapshot.progress_revision+1};};
 const reply=(data,status=200)=>({ok:status===200,status,statusText:'fixture',text:async()=>JSON.stringify(data),json:async()=>data});
 global.fetch=async(url,opts={})=>{
   if(opts.method==='POST'){
     assert.strictEqual(url,'/api/open-orders/classification');const body=JSON.parse(opts.body);calls.push({url,body});
+    assert.deepStrictEqual(Object.keys(body).sort(),['changes','target','version']);assert.strictEqual(Object.keys(body.changes).length,1);assert.strictEqual(body.target,'exact-accepted-target');
     if(mode==='hold')await new Promise(resolve=>release=resolve);
     if(mode==='fail')return reply({detail:'Save failed; retry explicitly'},500);
-    if(mode==='conflict')return reply({detail:'Classification changed. Reload classification; draft retained.'},409);
-    const values={...row.classification_values,...body.changes};row={...row,classification_values:values,classification_version:row.classification_version+1};snapshot.items=[row];snapshot.progress_revision++;
+    if(mode==='conflict'){
+      publish({classification_values:{...row.classification_values,timeframe:'15m'},timeframe:'15MIN',classification_version:row.classification_version+1});
+      return reply({detail:'Classification changed. Reload this cell; draft retained.'},409);
+    }
+    assert.strictEqual(body.version,row.classification_version,'each serialized save must use the latest acknowledged version');
+    const values={...row.classification_values,...body.changes};
+    publish({classification_values:values,classification_version:row.classification_version+1,timeframe:labels[values.timeframe]||'',pattern:values.pattern?values.pattern[0].toUpperCase()+values.pattern.slice(1):'None',setup:values.setup,is_test_trade:values.is_test_trade===true?'Yes':values.is_test_trade===false?'No':''});
     return reply({ok:true,values,version:row.classification_version,item:row});
   }
   return reply(url.includes('/version')?{version:1,progress_revision:snapshot.progress_revision}:snapshot);
@@ -4506,34 +4521,67 @@ vm.runInThisContext(fs.readFileSync(process.argv[1],'utf8'));
 const flush=async()=>{for(let i=0;i<5;i++)await new Promise(resolve=>setImmediate(resolve));};
 (async()=>{
   await flush();const hooks=window.__openOrdersTestHooks;const main=tbody.children[0];
-  assert(find(main,'Close')===undefined);assert(find(main,'Cancel'));
-  find(main,'Edit classification').click();const setup=select(main,'setup');assert.strictEqual(setup.value,'Pullback');
-  for(const field of Object.keys(row.classification_values))assert(select(main,field));
-  assert(select(main,'timeframe').children.some(e=>e.value===''));assert(select(main,'ema').children.some(e=>e.value==='20'));
-  change(setup,'Breakout');document.activeElement=setup;
-  snapshot={...snapshot,progress_revision:2,items:[{...row,current_price:'200'}]};await hooks.refresh('progress');
-  assert.strictEqual(tbody.children[0],main);assert.strictEqual(select(main,'setup'),setup);assert.strictEqual(document.activeElement,setup);assert.strictEqual(setup.value,'Breakout');assert.strictEqual(calls.length,0);
-  // Cancel the editor (the second Cancel is metadata-only), then reopen saved values.
-  walk(main).filter(e=>e.tag==='button'&&e.textContent==='Cancel')[1].click();assert.strictEqual(calls.length,0);
-  find(main,'Edit classification').click();assert.strictEqual(select(main,'setup').value,'Pullback');
-  change(select(main,'setup'),'Breakout');change(select(main,'vwap'),'');change(select(main,'is_test_trade'),'No');
-  mode='fail';await find(main,'Save').click();assert.strictEqual(select(main,'setup').value,'Breakout');assert(walk(main).some(e=>e.textContent.includes('Save failed')));
-  snapshot.progress_revision++;await hooks.refresh('progress');assert.strictEqual(calls.length,1);
-  mode='conflict';await find(main,'Save').click();assert.strictEqual(select(main,'setup').value,'Breakout');assert(walk(main).some(e=>e.textContent.includes('Reload classification; draft retained')));
-  mode='hold';const saving=find(main,'Save').click();await flush();assert(find(main,'Save').disabled);find(main,'Save').click();assert.strictEqual(calls.length,3);
-  release();await saving;assert(!select(main,'setup'));assert(walk(main).some(e=>e.textContent==='Saved'));
-  assert.deepStrictEqual(calls[2].body,{target:'exact-accepted-target',version:0,changes:{setup:'Breakout',vwap:''}});
-  find(main,'Edit classification').click();assert.strictEqual(select(main,'setup').value,'Breakout');
-  change(select(main,'setup'),'News Scalp');
-  const oldSave=find(main,'Save');snapshot={...snapshot,progress_revision:9,items:[{...row,type:'Position',id:'new-position',classification_target:'new-target'}]};await hooks.refresh('progress');
-  assert(oldSave.disabled);assert.strictEqual(select(main,'setup').value,'News Scalp');await oldSave.click();assert.strictEqual(calls.length,3);
-  const replacement=tbody.children.find(e=>e!==main);find(replacement,'Edit classification').click();assert.strictEqual(select(replacement,'setup').value,'Breakout');
-  // No proven linkage withholds the action, with an explanation.
+  assert.strictEqual(headers.length,40);assert.strictEqual(main.children.length,headers.length);
+  const mapping={Timeframe:'timeframe',Test:'is_test_trade',Setup:'setup',Pattern:'pattern',EMA:'ema',VWAP:'vwap','ATH / ATL':'aths_atls','Round Number':'round_number','Webhook classification':'webhook_classification'};
+  for(const [header,field] of Object.entries(mapping)){assert.strictEqual(cell(main,header).dataset.field,field);assert(idle(cell(main,header)));assert(idle(cell(main,header))['aria-label'].includes(header));}
+  assert.deepStrictEqual(headers.slice(21,25),['Webhook Mode','Webhook Status','Webhook classification','Planned Entry']);
+  assert.strictEqual(cell(main,'Webhook Mode').textContent,'Yes');assert.strictEqual(cell(main,'Webhook Status').textContent,'Triggered');assert.strictEqual(cell(main,'Planned Entry').textContent,'100');
+  const action=cell(main,'Action');assert(find(action,'Cancel'));assert(!select(action));assert(!find(action,'Save'));assert(!find(main,'Edit classification'));
+  const timeframe=cell(main,'Timeframe'),pattern=cell(main,'Pattern'),setup=cell(main,'Setup');
+  assert.strictEqual(idle(timeframe).textContent,'1MIN');assert.strictEqual(idle(pattern).textContent,'Channel');assert.strictEqual(idle(setup).textContent,'Pullback');
+  idle(timeframe).click();idle(pattern).click();const tfSelect=select(timeframe),patternSelect=select(pattern);
+  assert.strictEqual(tfSelect.value,'1m');assert.strictEqual(tfSelect.children.filter(e=>e.textContent==='1MIN').length,1);assert(tfSelect.children.some(e=>e.textContent==='None'));
+  assert.strictEqual(patternSelect.value,'channel');assert(find(timeframe,'Save').disabled);await find(timeframe,'Save').click();assert.strictEqual(calls.length,0);
+  change(tfSelect,'30m');change(patternSelect,'range');patternSelect.focus();
+  for(const td of [timeframe,pattern]){assert(inside(select(td),td));assert(inside(find(td,'Save'),td));assert(inside(find(td,'Cancel'),td));}
+  publish({current_price:'200'});await hooks.refresh('progress');
+  assert.strictEqual(tbody.children[0],main);assert.strictEqual(select(timeframe),tfSelect);assert.strictEqual(select(pattern),patternSelect);assert.strictEqual(document.activeElement,patternSelect);assert.strictEqual(patternSelect.value,'range');assert.strictEqual(calls.length,0);
+  mode='hold';const firstSave=find(timeframe,'Save').click();await flush();
+  assert(tfSelect.disabled);assert(find(timeframe,'Save').disabled);assert(find(pattern,'Save').disabled);find(pattern,'Save').click();assert.strictEqual(calls.length,1);
+  assert(!patternSelect.disabled);assert(!find(pattern,'Cancel').disabled);assert(!find(action,'Cancel').disabled);
+  publish({current_price:'201'});await hooks.refresh('progress');assert.strictEqual(select(pattern),patternSelect);
+  release();await firstSave;mode='success';
+  assert(!select(timeframe));assert.strictEqual(idle(timeframe).textContent,'30MIN');assert(timeframe.textContent.includes('Saved'));
+  assert.strictEqual(select(pattern),patternSelect);assert.strictEqual(patternSelect.value,'range');assert(!find(pattern,'Save').disabled);
+  await find(pattern,'Save').click();assert.strictEqual(idle(pattern).textContent,'Range');
+  idle(setup).click();change(select(setup),'Breakout');await find(setup,'Save').click();assert.strictEqual(idle(setup).textContent,'Breakout');
+  assert.deepStrictEqual(calls.slice(0,3).map(c=>c.body),[
+    {target:'exact-accepted-target',version:0,changes:{timeframe:'30m'}},
+    {target:'exact-accepted-target',version:1,changes:{pattern:'range'}},
+    {target:'exact-accepted-target',version:2,changes:{setup:'Breakout'}}]);
+  // A failed/conflicting cell save preserves its selection and another cell's draft.
+  idle(pattern).click();change(select(pattern),'channel');const otherDraft=select(pattern);
+  idle(timeframe).click();change(select(timeframe),'5m');mode='fail';await find(timeframe,'Save').click();
+  assert.strictEqual(select(timeframe).value,'5m');assert(timeframe.textContent.includes('Save failed'));const failures=calls.length;
+  publish({current_price:'202'});await hooks.refresh('progress');assert.strictEqual(calls.length,failures);
+  mode='conflict';await find(timeframe,'Save').click();assert.strictEqual(select(timeframe).value,'5m');assert(timeframe.textContent.includes('draft retained'));assert(find(timeframe,'Save').disabled);assert(!find(timeframe,'Reload').hidden);
+  mode='success';await find(timeframe,'Reload').click();assert.strictEqual(select(timeframe).value,'15m');assert.strictEqual(select(pattern),otherDraft);assert.strictEqual(otherDraft.value,'channel');
+  escape(timeframe);assert(!select(timeframe));assert.strictEqual(idle(timeframe).textContent,'15MIN');assert.strictEqual(select(pattern),otherDraft);
+  find(pattern,'Cancel').click();assert.strictEqual(idle(pattern).textContent,'Range');
+  // Polling an external edit to the SAME field must not silently rebase it.
+  idle(timeframe).click();change(select(timeframe),'30m');idle(setup).click();change(select(setup),'News Scalp');
+  publish({classification_values:{...row.classification_values,timeframe:'1h'},timeframe:'1H',classification_version:5});await hooks.refresh('progress');
+  assert.strictEqual(select(timeframe).value,'30m');assert(find(timeframe,'Save').disabled);assert(timeframe.textContent.includes('changed'));
+  await find(setup,'Save').click();assert.deepStrictEqual(calls.at(-1).body,{target:'exact-accepted-target',version:5,changes:{setup:'News Scalp'}});assert(select(timeframe));
+  await find(timeframe,'Reload').click();assert.strictEqual(select(timeframe).value,'1h');escape(timeframe);
+  // False and explicit clears are single-field payloads; operational status stays factual.
+  const test=cell(main,'Test');idle(test).click();change(select(test),'No');await find(test,'Save').click();assert.strictEqual(calls.at(-1).body.changes.is_test_trade,false);assert.strictEqual(idle(test).textContent,'No');
+  const webhook=cell(main,'Webhook classification');idle(webhook).click();change(select(webhook),'');await find(webhook,'Save').click();assert.deepStrictEqual(calls.at(-1).body.changes,{webhook_classification:''});
+  assert.strictEqual(idle(webhook).textContent,'\u2014');assert.strictEqual(cell(main,'Webhook Mode').textContent,'Yes');assert.strictEqual(cell(main,'Webhook Status').textContent,'Triggered');
+  for(const header of ['EMA','VWAP','ATH / ATL','Round Number']){const td=cell(main,header);idle(td).click();assert(select(td));assert(inside(find(td,'Save'),td));escape(td);}
+  // Replaced/disappeared targets retain disabled drafts, never attach them to a new row.
+  idle(timeframe).click();change(select(timeframe),'5m');idle(pattern).click();change(select(pattern),'channel');const orphanSelect=select(timeframe),orphanPattern=select(pattern),count=calls.length;
+  snapshot={...snapshot,progress_revision:snapshot.progress_revision+1,items:[{...row,type:'Position',id:'replacement',classification_target:'new-target'}]};await hooks.refresh('progress');
+  assert.strictEqual(select(timeframe),orphanSelect);assert(orphanSelect.disabled);assert(find(timeframe,'Save').disabled);assert(timeframe.textContent.includes('no longer available'));assert(!find(action,'Cancel'));
+  await find(timeframe,'Save').click();assert.strictEqual(calls.length,count);
+  const replacement=tbody.children.find(tr=>tr!==main);assert.strictEqual(replacement.children.length,headers.length);assert(!select(replacement));assert.strictEqual(idle(cell(replacement,'Timeframe')).textContent,'1H');
   snapshot={...snapshot,items:[{...row,id:'unlinked',classification_target:null,classification_unavailable:'No exact calculator linkage'}]};await hooks.refresh('progress');
-  const unlinked=tbody.children.find(e=>find(e,'Edit classification')?.title==='No exact calculator linkage');assert(find(unlinked,'Edit classification').disabled);
-  assert(calls.every(call=>call.url==='/api/open-orders/classification'));console.log('classification editor assertions passed');
+  const unlinked=tbody.children.find(tr=>idle(cell(tr,'Timeframe'))?.title==='No exact calculator linkage');assert(unlinked);
+  for(const header of Object.keys(mapping)){assert(idle(cell(unlinked,header)).disabled);idle(cell(unlinked,header)).click();assert(!select(cell(unlinked,header)));}
+  find(timeframe,'Cancel').click();assert.strictEqual(select(pattern),orphanPattern);find(pattern,'Cancel').click();assert(!tbody.children.includes(main));
+  assert(calls.every(call=>call.url==='/api/open-orders/classification'));console.log('classification cell assertions passed');
 })().catch(error=>{console.error(error);process.exitCode=1;});
 '''
-    result = subprocess.run([node, "-e", harness, str(ROOT / "render/static/open_orders.js")], capture_output=True, text=True, timeout=30)
+    result = subprocess.run([node, "-e", harness, str(ROOT / "render/static/open_orders.js"), json.dumps(headers)], capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stderr
-    assert "classification editor assertions passed" in result.stdout
+    assert "classification cell assertions passed" in result.stdout

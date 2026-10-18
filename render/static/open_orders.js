@@ -151,79 +151,135 @@
     is_test_trade: ['','Yes','No'], webhook_classification: ['','Yes','No']
   };
   const classificationLabels = {timeframe:'Timeframe',setup:'Setup',pattern:'Pattern',ema:'EMA',vwap:'VWAP',
-    aths_atls:'ATH / ATL',round_number:'Round number',is_test_trade:'Test',webhook_classification:'Webhook classification'};
+    aths_atls:'ATH / ATL',round_number:'Round Number',is_test_trade:'Test',webhook_classification:'Webhook classification'};
+  // Explicit zero-based header positions: the new annotation follows Mode/Status.
+  const classificationColumns = {13:'timeframe',14:'is_test_trade',15:'setup',16:'pattern',17:'ema',18:'vwap',19:'aths_atls',20:'round_number',23:'webhook_classification'};
+  const timeframeLabels = {'1m':'1MIN','5m':'5MIN','15m':'15MIN','30m':'30MIN','1h':'1H','4h':'4H','1d':'1D','1w':'1W','1mo':'1MO'};
   const classificationRows = new Map();
   const classificationKey = item => rowKey(item)+'|'+(item.classification_target||'unlinked');
-  const choiceValue = value => value===true?'Yes':value===false?'No':String(value??'');
-  const button = (label, action) => {const el=document.createElement('button');el.type='button';el.className='action-btn';el.textContent=label;el.addEventListener('click',action);return el;};
-  const updateEditorAvailability = entry => {
-    if(!entry.draft)return;
-    entry.save.disabled=entry.saving||!entry.present||!entry.item.classification_target;
-    entry.cancel.disabled=entry.saving;entry.reload.disabled=entry.saving||!entry.present;
-    for(const input of entry.inputs)input.disabled=entry.saving;
-    if(!entry.present)entry.feedback.textContent='Entry is no longer available. Draft retained; Cancel to discard.';
-  };
-  const openClassification = entry => {
-    if(entry.draft||!entry.item.classification_target)return;
-    entry.base={...entry.item.classification_values};entry.draft={};entry.version=entry.item.classification_version;entry.inputs=[];
-    const panel=document.createElement('div');panel.className='classification-editor';
-    const title=document.createElement('div');title.textContent=[entry.item.broker,resolveAccountLabel(entry.item),entry.item.instrument,entry.item.side,entry.item.type,entry.item.id].join(' / ');panel.appendChild(title);
-    for(const [field,options] of Object.entries(classificationOptions)){
-      const label=document.createElement('label');label.textContent=classificationLabels[field]+' ';
-      const select=document.createElement('select');select.dataset.field=field;
-      entry.inputs.push(select);
-      const current=choiceValue(entry.base[field]);
-      for(const value of options.includes(current)?options:[...options,current]){const option=document.createElement('option');option.value=value;option.textContent=value||'None';select.appendChild(option);}
-      select.value=current;
-      select.addEventListener('change',()=>{const value=select.value; if(value===choiceValue(entry.base[field]))delete entry.draft[field];else entry.draft[field]=field==='is_test_trade'?(value===''?null:value==='Yes'):value;});
-      label.appendChild(select);panel.appendChild(label);
+  const choiceValue = (field,value) => {
+    const text=value===true?'Yes':value===false?'No':String(value??'').trim();
+    if(!text||text.toLowerCase()==='none'||text==='\u2014')return '';
+    if(field==='timeframe'){
+      const key=text.toLowerCase();
+      return ({'1min':'1m','5min':'5m','15min':'15m','30min':'30m','daily':'1d','weekly':'1w','monthly':'1mo'})[key]||key;
     }
-    entry.save=button('Save',async()=>{
-      if(entry.saving||!entry.present||!entry.item.classification_target)return;
-      if(!Object.keys(entry.draft).length){entry.feedback.textContent='No changes to save.';return;}
-      entry.saving=true;entry.feedback.textContent='Saving...';updateEditorAvailability(entry);
-      try{
-        const response=await fetch('/api/open-orders/classification',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({target:entry.item.classification_target,version:entry.version,changes:{...entry.draft}})});
-        const data=await response.json();if(!response.ok)throw new Error(parseApiError(data,response));
-        entry.item={...entry.item,...data.item,classification_values:data.values,classification_version:data.version};
-        entry.draft=null;panel.remove();entry.edit.disabled=!entry.present;entry.feedback.textContent='Saved';
-        const updated=(window.__openOrdersItems||[]).map(item=>classificationKey(item)===entry.key?entry.item:item);
-        render(updated,window.__openOrdersErrors||[],window.__openOrdersWarnings||[]);
-      }catch(error){entry.feedback.textContent=safeDiagnostic(error.message||error);}
-      finally{entry.saving=false;updateEditorAvailability(entry);}
-    });
-    entry.cancel=button('Cancel',()=>{if(entry.saving)return;entry.draft=null;panel.remove();entry.feedback.textContent='';entry.edit.disabled=!entry.present;render(window.__openOrdersItems||[],window.__openOrdersErrors||[],window.__openOrdersWarnings||[]);});
-    entry.reload=button('Reload classification',()=>{if(entry.saving||!entry.present)return;entry.draft=null;panel.remove();entry.feedback.textContent='';openClassification(entry);});
-    panel.appendChild(entry.save);panel.appendChild(entry.cancel);panel.appendChild(entry.reload);
-    entry.cell.appendChild(panel);entry.edit.disabled=true;updateEditorAvailability(entry);
+    if(field==='pattern')return text.toLowerCase();
+    if(field==='is_test_trade')return ({'0':'No','1':'Yes','false':'No','true':'Yes','no':'No','yes':'Yes'})[text.toLowerCase()]||text;
+    return text;
   };
+  const fieldValue = (item,field) => choiceValue(field,Object.prototype.hasOwnProperty.call(item.classification_values||{},field)?item.classification_values[field]:item[field]);
+  const displayChoice = (field,value) => !value?'\u2014':field==='timeframe'?(timeframeLabels[value]||value):field==='pattern'?value[0].toUpperCase()+value.slice(1):value;
+  const button = (label, action) => {const el=document.createElement('button');el.type='button';el.className='action-btn';el.textContent=label;el.addEventListener('click',action);return el;};
+  const updateCellAvailability = (entry,state) => {
+    const draft=state.draft;if(!draft)return;
+    const available=entry.present&&Boolean(entry.item.classification_target);
+    if(!available)draft.message='Entry is no longer available. Draft retained; Cancel to discard.';
+    state.select.disabled=!available||entry.saving===state.field;
+    state.save.disabled=Boolean(entry.saving)||!available||draft.conflict||!draft.dirty;
+    state.cancel.disabled=entry.saving===state.field;
+    state.reload.disabled=entry.saving===state.field||!available;
+    state.reload.hidden=!draft.conflict;
+    state.feedback.textContent=draft.message||'';
+  };
+  const synchronizeDrafts = entry => {
+    for(const state of entry.cells.values()){
+      const draft=state.draft;if(!draft)continue;
+      const version=Number(entry.item.classification_version||0);
+      if(!draft.conflict&&version!==draft.version){
+        if(fieldValue(entry.item,state.field)===draft.base)draft.version=version;
+        else{draft.conflict=true;draft.message='This classification changed. Reload this cell before saving; draft retained.';}
+      }
+      updateCellAvailability(entry,state);
+    }
+  };
+  const renderClassificationCell = (entry,state) => {
+    if(state.draft){updateCellAvailability(entry,state);return;}
+    if(!state.valueButton){
+      state.td.innerHTML='';
+      state.valueButton=button('',()=>openClassificationCell(entry,state));state.valueButton.className='classification-value';
+      state.valueButton.setAttribute('aria-label','Edit '+classificationLabels[state.field]);state.td.appendChild(state.valueButton);
+      state.feedback=document.createElement('span');state.feedback.className='classification-feedback';state.feedback.setAttribute('role','status');state.td.appendChild(state.feedback);
+    }
+    state.valueButton.textContent=displayChoice(state.field,fieldValue(entry.item,state.field));
+    state.valueButton.disabled=!entry.present||!entry.item.classification_target;
+    state.valueButton.title=entry.item.classification_unavailable||'Edit '+classificationLabels[state.field];
+    state.feedback.textContent=state.savedUntil>Date.now()?'Saved':'';
+  };
+  const cancelClassificationCell = (entry,state) => {
+    if(entry.saving===state.field)return;
+    state.draft=null;state.valueButton=null;state.savedUntil=0;renderClassificationCell(entry,state);state.valueButton.focus?.();
+    if(!entry.present)render(window.__openOrdersItems||[],window.__openOrdersErrors||[],window.__openOrdersWarnings||[]);
+  };
+  const saveClassificationCell = async(entry,state) => {
+    const draft=state.draft;
+    if(!draft||entry.saving||!entry.present||!entry.item.classification_target||draft.conflict||!draft.dirty)return;
+    const selected=state.select.value;
+    const value=state.field==='is_test_trade'?(selected===''?null:selected==='Yes'):selected;
+    entry.saving=state.field;draft.message='Saving...';synchronizeDrafts(entry);
+    try{
+      const response=await fetch('/api/open-orders/classification',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({target:entry.item.classification_target,version:draft.version,changes:{[state.field]:value}})});
+      const data=await response.json();if(!response.ok){if(response.status===409)draft.conflict=true;throw new Error(parseApiError(data,response));}
+      // A delayed earlier publication/acknowledgment cannot replace newer metadata.
+      if(Number(data.version)>=Number(entry.item.classification_version||0))entry.item={...entry.item,...data.item,classification_values:data.values,classification_version:data.version};
+      state.draft=null;state.valueButton=null;state.savedUntil=Date.now()+2500;
+      const updated=(window.__openOrdersItems||[]).map(item=>classificationKey(item)===entry.key?entry.item:item);
+      render(updated,window.__openOrdersErrors||[],window.__openOrdersWarnings||[]);
+    }catch(error){draft.message=safeDiagnostic(error.message||error);}
+    finally{entry.saving=null;synchronizeDrafts(entry);}
+  };
+  const openClassificationCell = (entry,state) => {
+    if(state.draft||!entry.present||!entry.item.classification_target)return;
+    const base=fieldValue(entry.item,state.field);
+    state.draft={base,version:Number(entry.item.classification_version||0),conflict:false,dirty:false,message:''};state.savedUntil=0;
+    state.td.innerHTML='';state.valueButton=null;
+    const select=document.createElement('select');state.select=select;select.dataset.field=state.field;
+    select.setAttribute('aria-label',classificationLabels[state.field]);
+    for(const value of classificationOptions[state.field]){const option=document.createElement('option');option.value=value;option.textContent=value?displayChoice(state.field,value):'None';select.appendChild(option);}
+    select.value=classificationOptions[state.field].includes(base)?base:'';
+    select.addEventListener('change',()=>{state.draft.dirty=select.value!==state.draft.base;updateCellAvailability(entry,state);});state.td.appendChild(select);
+    state.save=button('Save',()=>saveClassificationCell(entry,state));state.cancel=button('Cancel',()=>cancelClassificationCell(entry,state));
+    state.reload=button('Reload',async()=>{
+      if(entry.saving===state.field||!entry.present)return;
+      await refresh('progress');
+      if(!entry.present)return;
+      if(refreshNeedsRecovery){state.draft.message='Could not reload this cell. Draft retained.';updateCellAvailability(entry,state);return;}
+      state.draft=null;openClassificationCell(entry,state);
+    });
+    state.td.appendChild(state.save);state.td.appendChild(state.cancel);state.td.appendChild(state.reload);
+    state.feedback=document.createElement('span');state.feedback.className='classification-feedback';state.feedback.setAttribute('role','status');state.td.appendChild(state.feedback);
+    updateCellAvailability(entry,state);select.focus?.();
+  };
+  const rowValues = item => [item.venue||item.broker,resolveAccountLabel(item),item.asset,item.category,item.side,item.order_type,item.instrument,item.stop_loss_ticks,item.target_mode_display,item.take_profit_ticks,item.risk_mode_display,item.risk_value_display,item.risk_reward,item.timeframe,item.is_test_trade,item.setup,item.pattern,item.ema,item.vwap,item.aths_atls,item.round_number,item.webhook_mode,item.webhook_status,item.webhook_classification,item.planned_entry_price,item.planned_stop_price,item.planned_target_price,item.type,item.size,item.entry_price||item.order_price,item.current_price,item.stop_loss,item.take_profit,item.leverage,item.type==='Position'?item.funding_paid:null,item.type==='Position'?item.funding_received:null,item.type==='Position'?item.net_funding:null,formatTimestamp(item.opened_at),item.status];
   const render=(items,errors=[],warnings=[],coverage=window.__openOrdersCoverage||{})=>{
     window.__openOrdersItems=Array.isArray(items)?items:[];window.__openOrdersErrors=Array.isArray(errors)?errors:[];window.__openOrdersWarnings=Array.isArray(warnings)?warnings:[];
     if(!tbody)return;hasData=Boolean(items.length);renderDiagnostics(errorsBox,errorsList,errors,'Source errors');renderDiagnostics(warningsBox,warningsList,warnings,'Source warnings');
     for(const entry of classificationRows.values())entry.present=false;
     const desired=[];
-    for(const item of items){
+    for(let item of items){
       if(pendingManualActions.has(rowKey(item)))continue;
       const key=classificationKey(item);let entry=classificationRows.get(key);
-      if(!entry){const tr=document.createElement('tr');entry={key,tr,item,present:true};classificationRows.set(key,entry);
-        for(let i=0;i<38;i++)tr.appendChild(document.createElement('td'));
-        const cell=document.createElement('td');entry.cell=cell;entry.action=document.createElement('span');cell.appendChild(entry.action);
-        entry.edit=button('Edit classification',()=>openClassification(entry));cell.appendChild(entry.edit);
-        entry.annotation=document.createElement('div');cell.appendChild(entry.annotation);
-        entry.feedback=document.createElement('span');entry.feedback.className='muted';entry.feedback.setAttribute('role','status');cell.appendChild(entry.feedback);tr.appendChild(cell);
+      if(!entry){const tr=document.createElement('tr');entry={key,tr,item,present:true,cells:new Map(),saving:null};classificationRows.set(key,entry);
+        rowValues(item).forEach((_,i)=>{const td=document.createElement('td');tr.appendChild(td);const field=classificationColumns[i];if(field){
+          td.className='classification-cell';td.dataset.field=field;const state={field,td,draft:null};entry.cells.set(field,state);
+          td.addEventListener('keydown',event=>{if(event.key==='Escape'&&state.draft&&entry.saving!==field){event.preventDefault();cancelClassificationCell(entry,state);}});
+        }});
+        entry.action=document.createElement('td');tr.appendChild(entry.action);
       }
-      entry.item=item;entry.present=true;entry.edit.disabled=Boolean(entry.draft)||!item.classification_target;
+      if(Number(item.classification_version||0)<Number(entry.item.classification_version||0))item={...item,classification_values:entry.item.classification_values,classification_version:entry.item.classification_version};
+      entry.item=item;entry.present=true;
       entry.action.innerHTML='';renderActionCell(item,entry.action,{allowAction:true});
-      entry.edit.title=item.classification_unavailable||'';
-      entry.annotation.textContent='Webhook classification: '+(item.webhook_classification||'None');
       const tr=entry.tr;tr.className=item.source_stale?'stale-row':'';
       tr.title=item.source_stale?safeDiagnostic(item.stale_reason||'Last-known-good broker state'):item.source_last_success_at?'Last successful source read: '+formatTimestamp(item.source_last_success_at):'';
-      const values=[item.venue||item.broker,resolveAccountLabel(item),item.asset,item.category,item.side,item.order_type,item.instrument,item.stop_loss_ticks,item.target_mode_display,item.take_profit_ticks,item.risk_mode_display,item.risk_value_display,item.risk_reward,item.timeframe,item.is_test_trade,item.setup,item.pattern,item.ema,item.vwap,item.aths_atls,item.round_number,item.webhook_mode,item.webhook_status,item.planned_entry_price,item.planned_stop_price,item.planned_target_price,item.type,item.size,item.entry_price||item.order_price,item.current_price,item.stop_loss,item.take_profit,item.leverage,item.type==='Position'?item.funding_paid:null,item.type==='Position'?item.funding_received:null,item.type==='Position'?item.net_funding:null,formatTimestamp(item.opened_at),item.status];
-      values.forEach((v,i)=>{const text=String(fmt(v));if(tr.children[i].textContent!==text)tr.children[i].textContent=text;});
-      updateEditorAvailability(entry);desired.push(tr);
+      synchronizeDrafts(entry);
+      rowValues(item).forEach((value,i)=>{const field=classificationColumns[i];if(field)renderClassificationCell(entry,entry.cells.get(field));else{const text=String(fmt(value));if(tr.children[i].textContent!==text)tr.children[i].textContent=text;}});
+      desired.push(tr);
     }
-    for(const [key,entry] of classificationRows){if(entry.present)continue;if(entry.draft){entry.action.innerHTML='';entry.edit.disabled=true;updateEditorAvailability(entry);desired.push(entry.tr);}else{entry.tr.remove();classificationRows.delete(key);}}
-    // Keep the actual editor/select nodes mounted and focused during publication.
+    for(const [key,entry] of classificationRows){if(entry.present)continue;if([...entry.cells.values()].some(state=>state.draft)){
+      entry.action.innerHTML='';synchronizeDrafts(entry);for(const state of entry.cells.values())renderClassificationCell(entry,state);desired.push(entry.tr);
+    }else{entry.tr.remove();classificationRows.delete(key);}}
+    // Preserve the mounted dropdowns and focus through ordinary publications.
     desired.forEach((tr,i)=>{if(tbody.children[i]!==tr)tbody.insertBefore(tr,tbody.children[i]||null);});
     if(emptyState){emptyState.style.display=items.length?'none':'block';emptyState.textContent=coverage.empty_confirmed===true?'No open orders or positions.':coverage.pending?'Loading broker data':'Broker data incomplete';}
   };
