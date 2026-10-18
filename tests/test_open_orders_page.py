@@ -4585,3 +4585,352 @@ const flush=async()=>{for(let i=0;i<5;i++)await new Promise(resolve=>setImmediat
     result = subprocess.run([node, "-e", harness, str(ROOT / "render/static/open_orders.js"), json.dumps(headers)], capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stderr
     assert "classification cell assertions passed" in result.stdout
+
+
+
+def _price_edit_fixture(monkeypatch, tmp_path, *, position=False, side="Buy", idx=0, tiny=False):
+    """All amendment IO is synthetic; reservations are confined to this test."""
+    import copy
+    service = master_service
+    monkeypatch.setattr(service, "APP_PROFILE", "local")
+    monkeypatch.setattr(service, "_PRICE_OPERATIONS_PATH", tmp_path / "amendments.json")
+    monkeypatch.setattr(service, "_PRICE_TARGETS", {})
+    monkeypatch.setattr(service, "_PRICE_CONFIRMED", {})
+    monkeypatch.setattr(service, "_PRICE_LOCKS", {})
+    monkeypatch.setattr(service, "_BYBIT_INSTRUMENT_CACHE", {})
+    monkeypatch.setattr(service, "resolve_bybit_credentials_for", lambda account:
+        (account, "mock-key", "mock-secret", "https://bybit.fixture", "fixture"))
+    raw = dict(symbol="QUSDT" if tiny else "BTCUSDT", side=side, positionIdx=idx,
+        orderId="exact-order", orderLinkId="accepted-link", createdTime="1000", seq="800",
+        price="0.10191" if tiny else "80000", avgPrice="80000", size="2", qty="2",
+        takeProfit="0.12111" if tiny else ("81500" if side == "Buy" else "78000"),
+        stopLoss="0.0944" if tiny else ("79000" if side == "Buy" else "81000"),
+        orderStatus="New", orderType="Limit", reduceOnly=False, closeOnTrigger=False,
+        stopOrderType="", triggerPrice="0", tpslMode="Full", tpOrderType="Market", slOrderType="Market",
+        tpTriggerBy="MarkPrice", slTriggerBy="IndexPrice", trailingStop="0")
+    row = dict(broker="Bybit", account="demo", category="linear", instrument=raw["symbol"], side=side,
+        type="Position" if position else "Order", id=idx if position else raw["orderId"], position_idx=idx,
+        _price_broker=copy.deepcopy(raw), _price_read_started=1,
+        _price_distance_unit="0.00001" if tiny else "0.1",
+        order_price=raw["price"], entry_price=raw["avgPrice"] if position else None,
+        stop_loss=raw["stopLoss"], take_profit=raw["takeProfit"],
+        planned_entry_price=raw["price"], planned_stop_price=raw["stopLoss"], planned_target_price=raw["takeProfit"],
+        stop_loss_ticks="751", risk_reward="2.5", calculation_context_id="original-plan")
+    service._enrich_price_edit(row)
+    state = {"raw": raw, "row": row, "writes": [], "reads": [], "markets": [], "mode": "immediate", "exists": True}
+
+    async def get(**kwargs):
+        state["reads"].append(copy.deepcopy(kwargs))
+        assert kwargs["base_url"] == "https://bybit.fixture"
+        params = kwargs["params"]
+        assert params["category"] == state["row"]["category"] and params["symbol"] == raw["symbol"]
+        if params.get("orderFilter") == "StopOrder":
+            orders = []
+            for field, kind, trigger in (("takeProfit", "TakeProfit", "tpTriggerBy"), ("stopLoss", "StopLoss", "slTriggerBy")):
+                if raw[field] != "0":
+                    orders.append(dict(symbol=raw["symbol"], positionIdx=idx, stopOrderType=kind,
+                        orderType=state.get("protection_type", "Market"), qty=raw["size"], triggerPrice=raw[field], triggerBy=raw[trigger]))
+            return {"result": {"list": orders}}
+        if not position:
+            assert params["orderId"] == "exact-order"
+        return {"result": {"list": [copy.deepcopy(raw)] if state["exists"] else []}}
+
+    async def market(base, path, params, **kwargs):
+        state["markets"].append((path, dict(params)))
+        assert params == {"category": state["row"]["category"], "symbol": raw["symbol"]}
+        if path == "/v5/market/instruments-info":
+            return {"result": {"list": [{"symbol": raw["symbol"], "priceFilter": {"tickSize": "0.00001" if tiny else "0.1"}}]}}
+        assert path == "/v5/market/tickers"
+        return {"result": {"list": [dict(symbol=raw["symbol"], lastPrice="0.13578" if tiny else "80500", markPrice="80500", indexPrice="80500")]}}
+
+    async def post(**kwargs):
+        state["writes"].append(copy.deepcopy(kwargs))
+        body = kwargs["body"]
+        assert kwargs["path"] in {"/v5/order/amend", "/v5/position/trading-stop"}
+        if state["mode"] == "reject":
+            raise service.BybitSignedAPIError(path=kwargs["path"], ret_code=10001, ret_msg="synthetic rejection", recv_window="5000", http_status=200, response_body={})
+        if state["mode"] in {"immediate", "lost"}:
+            for field in ("price", "stopLoss", "takeProfit"):
+                if field in body:
+                    raw[field] = body[field]
+        if state["mode"] in {"timeout", "lost"}:
+            raise service.httpx.ReadTimeout("synthetic lost response")
+        return {"retCode": 0}
+
+    monkeypatch.setattr(service, "_bybit_signed_get", get)
+    monkeypatch.setattr(service, "_bybit_signed_post", post)
+    monkeypatch.setattr(service, "_bybit_market_get_async", market)
+    def request(field, value, mode="price", op=None):
+        return dict(operation_id=op or "operation_" + str(len(state["writes"])) + "_" + field + "_test",
+            target=state["row"]["price_edit"]["target"], field=field, mode=mode, value=value,
+            base={**service._price_levels(raw, position), "unit": state["row"]["price_edit"]["unit"]})
+    state["request"] = request
+    return service, state
+
+
+def test_bybit_order_price_edits_amend_only_selected_levels(monkeypatch, tmp_path):
+    import copy
+    async def exercise():
+        service, state = _price_edit_fixture(monkeypatch, tmp_path)
+        original = copy.deepcopy(state["row"])
+        for field, value, key in (("take_profit", "82000", "takeProfit"), ("stop_loss", "79500", "stopLoss"), ("entry", "79900", "price")):
+            before = copy.deepcopy(state["raw"])
+            result = await service.amend_open_order(state["request"](field, value))
+            assert result["status"] == "confirmed"
+            assert state["writes"][-1]["body"] == {"category": "linear", "symbol": "BTCUSDT", "orderId": "exact-order", key: value}
+            assert state["writes"][-1]["path"] == "/v5/order/amend"
+            assert state["raw"] == {**before, key: value}
+            assert result["item"]["price_edit"]["ticks"]["take_profit"] == ("21000" if field == "entry" else "20000")
+            for historical in ("planned_entry_price", "planned_stop_price", "planned_target_price", "stop_loss_ticks", "risk_reward", "calculation_context_id"):
+                assert result["item"][historical] == original[historical]
+        assert all(read["path"] == "/v5/order/realtime" for read in state["reads"])
+        # The literal QUSDT pending target stays below today's LastPrice: URGENT 1.
+        with monkeypatch.context() as patch:
+            small, data = _price_edit_fixture(patch, tmp_path / "tiny", tiny=True)
+            data["request"]  # create its private directory before durable writes
+            small._PRICE_OPERATIONS_PATH.parent.mkdir()
+            result = await small.amend_open_order(data["request"]("take_profit", "1920", "ticks"))
+            assert result["status"] == "confirmed"
+            assert result["item"]["take_profit"] == "0.12111"
+            # Equal value is a read-only no-op, not a broker amendment.
+            assert not data["writes"]
+            result = await small.amend_open_order(data["request"]("take_profit", "1930", "ticks", "tiny_new_target_001"))
+            assert data["writes"][-1]["body"] == {"category": "linear", "symbol": "QUSDT", "orderId": "exact-order", "takeProfit": "0.12121"}
+            assert result["status"] == "confirmed" and data["raw"]["stopLoss"] == "0.0944"
+        with monkeypatch.context() as patch:
+            sell, data = _price_edit_fixture(patch, tmp_path / "sell", side="Sell")
+            sell._PRICE_OPERATIONS_PATH.parent.mkdir()
+            await sell.amend_open_order(data["request"]("take_profit", "15000", "ticks"))
+            assert data["writes"][-1]["body"]["takeProfit"] == "78500"
+            await sell.amend_open_order(data["request"]("stop_loss", "5000", "ticks"))
+            assert data["writes"][-1]["body"]["stopLoss"] == "80500"
+    asyncio.run(exercise())
+
+
+def test_bybit_position_price_edits_preserve_hedge_side_and_protection(monkeypatch, tmp_path):
+    async def exercise():
+        for idx, side in ((0, "Buy"), (1, "Buy"), (2, "Sell")):
+            with monkeypatch.context() as patch:
+                service, state = _price_edit_fixture(patch, tmp_path / str(idx), position=True, side=side, idx=idx)
+                service._PRICE_OPERATIONS_PATH.parent.mkdir()
+                # Long stop in profit is valid below IndexPrice, despite entry 80000.
+                value = "80200" if side == "Buy" else "81200"
+                result = await service.amend_open_order(state["request"]("stop_loss", value))
+                assert result["status"] == "confirmed"
+                if side == "Buy":
+                    assert state["writes"][-1]["body"] == {"category": "linear", "symbol": "BTCUSDT", "positionIdx": idx,
+                        "tpslMode": "Full", "stopLoss": "80200", "slTriggerBy": "IndexPrice"}
+                    assert result["item"]["price_edit"]["ticks"]["stop_loss"] == "-2000"
+                target = "82000" if side == "Buy" else "77500"
+                before = state["raw"]["stopLoss"]
+                await service.amend_open_order(state["request"]("take_profit", target))
+                assert state["raw"]["stopLoss"] == before
+                assert "entry" not in state["row"]["price_edit"]["fields"]
+                with pytest.raises(service.HTTPException, match="") as exc:
+                    await service.amend_open_order(state["request"]("entry", "79000"))
+                assert exc.value.status_code == 400
+                # Unsupported protection is rejected on a fresh conditional read.
+                state["protection_type"] = "Limit"
+                count = len(state["writes"])
+                with pytest.raises(service.HTTPException) as exc:
+                    await service.amend_open_order(state["request"]("stop_loss", "80100" if side == "Buy" else "81100"))
+                assert "read-only" in exc.value.detail and len(state["writes"]) == count
+                for config in ({"tpslMode": "Partial"}, {"trailingStop": "10"}, {"tpOrderType": "Limit"}):
+                    assert service._price_reason(state["row"], {**state["raw"], **config})
+    asyncio.run(exercise())
+
+
+def test_price_edit_validation_reconciles_unknown_results_without_duplicate_writes(monkeypatch, tmp_path):
+    import copy
+    async def exercise():
+        service, state = _price_edit_fixture(monkeypatch, tmp_path)
+        for value in ("", "0", "-1", "NaN", "Infinity", "82000.01"):
+            with pytest.raises(service.HTTPException):
+                await service.amend_open_order(state["request"]("take_profit", value))
+            assert not state["writes"]
+        base = state["request"]("take_profit", "82000")
+        for change in ({"target": "unknown"}, {"base": {**base["base"], "entry": "79900"}}, {"host": "https://evil"}):
+            with pytest.raises(service.HTTPException):
+                await service.amend_open_order({**base, **change})
+        state["row"]["price_edit"]["unit"] = None
+        service._PRICE_TARGETS[base["target"]]["price_edit"]["unit"] = None
+        with pytest.raises(service.HTTPException):
+            await service.amend_open_order(state["request"]("take_profit", "10", "ticks"))
+        state["row"]["price_edit"]["unit"] = "0.1"
+        for key, value in (("orderStatus", "Filled"), ("createdTime", "new-cycle"), ("side", "Sell")):
+            before = state["raw"][key];state["raw"][key] = value
+            with pytest.raises(service.HTTPException):
+                await service.amend_open_order(base)
+            state["raw"][key] = before
+        state["exists"] = False
+        with pytest.raises(service.HTTPException):
+            await service.amend_open_order(base)
+        state["exists"] = True
+        with monkeypatch.context() as patch:
+            patch.setattr(service, "APP_PROFILE", "render")
+            for handler in (service.amend_open_order, service.open_order_amend_status):
+                with pytest.raises(service.HTTPException) as exc:
+                    await handler(base)
+                assert exc.value.status_code == 403
+        with monkeypatch.context() as patch:
+            patch.setattr(service, "resolve_bybit_credentials_for", lambda account: ("live", "key", "secret", "fixture", "fixture"))
+            with pytest.raises(service.HTTPException):
+                await service.amend_open_order(base)
+        assert not state["writes"]
+        state["mode"] = "delay"
+        pending = await service.amend_open_order(base)
+        assert pending["status"] == "pending" and "Saved" not in pending["message"]
+        await service.amend_open_order(base)
+        assert len(state["writes"]) == 1
+        with pytest.raises(service.HTTPException):
+            await service.amend_open_order({**base, "value": "83000"})
+        with pytest.raises(service.HTTPException):
+            await service.amend_open_order({**base, "operation_id": "another_operation_001"})
+        state["raw"]["takeProfit"] = "82000"
+        confirmed = await service.open_order_amend_status({"operation_id": base["operation_id"]})
+        assert confirmed["status"] == "confirmed" and len(state["writes"]) == 1
+        # Old in-flight publications cannot undo confirmed broker evidence.
+        old = copy.deepcopy(state["row"])
+        service._enrich_price_edit(old)
+        assert old["take_profit"] == "82000"
+        later = dict(old, _price_read_started=service.time.monotonic()+1,
+                     _price_broker={**old["_price_broker"], "takeProfit": "82500"})
+        service._enrich_price_edit(later)
+        assert later["price_edit"]["levels"]["take_profit"] == "82500"
+        # Unknown survives an application restart: journal reload, no replay.
+        state["mode"] = "timeout"
+        request = state["request"]("stop_loss", "79500")
+        unknown = await service.amend_open_order(request)
+        assert unknown["status"] == "unknown"
+        service._PRICE_TARGETS.clear();service._PRICE_LOCKS.clear()
+        again = await service.amend_open_order(request)
+        assert again["status"] == "unknown" and len(state["writes"]) == 2
+        state["raw"]["stopLoss"] = "79500"
+        assert (await service.open_order_amend_status({"operation_id": request["operation_id"]}))["status"] == "confirmed"
+        # A lost acknowledgement with already-visible evidence confirms once.
+        state["row"] = service._enrich_price_edit({**state["row"], "_price_broker": copy.deepcopy(state["raw"])})
+        state["mode"] = "lost"
+        lost = await service.amend_open_order(state["request"]("take_profit", "83000", op="lost_acknowledgement_001"))
+        assert lost["status"] == "confirmed" and len(state["writes"]) == 3
+        state["mode"] = "reject"
+        rejected = await service.amend_open_order(state["request"]("stop_loss", "79600", op="explicit_rejection_001"))
+        assert rejected["status"] == "rejected" and "synthetic rejection" in rejected["message"]
+    asyncio.run(exercise())
+
+
+
+def test_open_orders_price_cells_edit_save_and_preserve_drafts():
+    node = shutil.which("node")
+    assert node
+    headers = re.findall(r"<th>(.*?)</th>", master_service.OPEN_ORDERS_TEMPLATE)
+    harness = r"""
+const fs=require('fs'),vm=require('vm'),assert=require('assert');
+class Element {
+  constructor(tag=''){this.tag=tag;this.children=[];this.parentNode=null;this.style={};this._text='';this.handlers={};this.dataset={};this.disabled=false;this.value='';this.hidden=false;}
+  set textContent(value){this.innerHTML='';this._text=String(value);}
+  get textContent(){return this._text+this.children.map(child=>child.textContent).join('');}
+  set innerHTML(value){for(const child of this.children)child.parentNode=null;this.children=[];this._text=String(value);}
+  appendChild(child){this.insertBefore(child,null);return child;}
+  insertBefore(child,before){if(child===before)return;if(child.parentNode)child.remove();const i=before?this.children.indexOf(before):this.children.length;assert(i>=0);this.children.splice(i,0,child);child.parentNode=this;}
+  remove(){if(this.parentNode){const p=this.parentNode;p.children.splice(p.children.indexOf(this),1);this.parentNode=null;}}
+  addEventListener(event,fn){this.handlers[event]=fn;}
+  setAttribute(k,v){this[k]=v;}
+  querySelector(){return null;}
+  click(){return this.disabled?undefined:this.handlers.click?.();}
+  focus(){document.activeElement=this;}
+}
+const tbody=new Element('tbody'),table=new Element('table');table.querySelector=()=>tbody;
+const elements={'open-orders-table':table};for(const id of ['open-orders-status','open-orders-empty','refresh-btn','open-orders-errors','open-orders-warnings'])elements[id]=new Element();
+const headers=JSON.parse(process.argv[2]);
+const walk=node=>[node,...node.children.flatMap(walk)];const find=(root,text)=>walk(root).find(e=>e.tag==='button'&&e.textContent===text);
+const select=cell=>walk(cell).find(e=>e.tag==='select');const idle=cell=>walk(cell).find(e=>e.className==='classification-value');
+const cell=(tr,label)=>tr.children[headers.indexOf(label)];
+const change=(el,value)=>{assert(!el.disabled);assert(el.children.some(option=>option.value===value));el.value=value;el.handlers.change();};
+const escape=cell=>cell.handlers.keydown({key:'Escape',preventDefault(){}});
+const inside=(child,parent)=>walk(parent).includes(child);
+global.window={__OPEN_ORDERS_TESTING__:true,addEventListener(){}};
+global.document={hidden:true,getElementById:id=>elements[id]||null,createElement:tag=>new Element(tag),addEventListener(){}};
+global.BroadcastChannel=undefined;global.setInterval=()=>1;global.clearInterval=()=>{};
+
+const input=td=>walk(td).find(e=>e.tag==='input');
+const edit=td=>walk(td).find(e=>e.className==='price-edit');
+const enter=(td,value)=>{input(td).value=value;input(td).handlers.input();};
+const storage={};window.localStorage={getItem:k=>storage[k]||null,setItem:(k,v)=>{storage[k]=v;}};
+let count=0;window.crypto={randomUUID:()=>('operation_browser_'+String(++count).padStart(4,'0'))};
+let row={broker:'Bybit',account:'demo',category:'linear',instrument:'BTCUSDT',side:'Buy',type:'Order',id:'order',order_type:'Limit',position_idx:0,
+  order_price:'80000',stop_loss:'79000',take_profit:'81500',_price_read_started:1,
+  planned_entry_price:'80000',planned_stop_price:'79000',planned_target_price:'81500',stop_loss_ticks:'10000',
+  classification_target:'class-target',classification_version:0,classification_values:{timeframe:'1m'},
+  price_edit:{target:'price-order-life',fields:['entry','stop_loss','take_profit'],unit:'0.1',ticks:{stop_loss:'10000',take_profit:'15000'},levels:{entry:'80000',stop_loss:'79000',take_profit:'81500'}}};
+let snapshot={version:1,progress_revision:1,items:[row],errors:[],warnings:[],core_complete:true};
+const publish=changes=>{row={...row,...changes};snapshot={...snapshot,items:[row],progress_revision:snapshot.progress_revision+1};};
+const reply=(data,status=200)=>({ok:status===200,status,statusText:'fixture',text:async()=>JSON.stringify(data),json:async()=>data});
+const calls=[];let mode='success',savedOperation;
+const confirmation=body=>{
+  const levels={...row.price_edit.levels,[body.field]:body.value};
+  publish({price_edit:{...row.price_edit,levels},[body.field==='entry'?'order_price':body.field]:body.value,_price_read_started:row._price_read_started+1});
+  return {status:'confirmed',operation_id:body.operation_id,item:JSON.parse(JSON.stringify(row))};
+};
+global.fetch=async(url,opts={})=>{
+  if(opts.method==='POST'){
+    const body=JSON.parse(opts.body);calls.push({url,body});
+    if(url==='/api/open-orders/classification'){
+      assert.deepStrictEqual(body.changes,{timeframe:'5m'});publish({classification_values:{timeframe:'5m'},classification_version:1});
+      return reply({version:1,values:row.classification_values,item:row});
+    }
+    if(url==='/api/open-orders/amend-status'){
+      assert(savedOperation);return reply(mode==='confirmed'?confirmation(savedOperation):{status:'unknown',message:'Outcome unknown; read-only reconciliation pending'});
+    }
+    assert.strictEqual(url,'/api/open-orders/amend');assert.strictEqual(body.target,'price-order-life');
+    assert.strictEqual(typeof body.value,'string');assert.deepStrictEqual(Object.keys(body).sort(),['base','field','mode','operation_id','target','value']);
+    if(mode==='lost'){savedOperation=body;throw new Error('lost acknowledgement');}
+    return reply(confirmation(body));
+  }
+  if(url==='/api/open-orders/version')return reply({version:1,progress_revision:snapshot.progress_revision});
+  return reply(snapshot);
+};
+vm.runInThisContext(fs.readFileSync(process.argv[1],'utf8'));
+(async()=>{
+  const hooks=window.__openOrdersTestHooks;await hooks.refresh('progress');
+  let main=tbody.children[0];assert.strictEqual(main.children.length,headers.length);
+  assert.deepStrictEqual(headers.slice(29,33),['Entry / Order','Current / Trigger','Stop Loss','Take Profit']);
+  const tp=cell(main,'Take Profit'),sl=cell(main,'Stop Loss'),entry=cell(main,'Entry / Order'),action=cell(main,'Action');
+  assert(edit(tp)&&edit(sl)&&edit(entry));assert(!input(action)&&!find(action,'Save'));assert(find(action,'Cancel'));
+  edit(tp).click();assert.strictEqual(input(tp).value,'81500');enter(tp,'82000');
+  const focused=input(tp);focused.focus();focused.selectionStart=2;focused.selectionEnd=4;
+  edit(sl).click();enter(sl,'79500');focused.focus();
+  publish({current_price:'80600',classification_version:1,classification_values:{timeframe:'1m'}});await hooks.refresh('progress');
+  assert.strictEqual(input(tp),focused);assert.strictEqual(document.activeElement,focused);assert.strictEqual(focused.selectionStart,2);assert.strictEqual(focused.selectionEnd,4);
+  assert.strictEqual(input(sl).value,'79500');assert.strictEqual(calls.length,0);
+  await find(tp,'Save').click();assert(tp.textContent.includes('82000')&&tp.textContent.includes('Saved'));
+  assert.strictEqual(input(sl).value,'79500');assert.strictEqual(calls[0].body.field,'take_profit');assert.strictEqual(calls[0].body.value,'82000');
+  await find(sl,'Save').click();assert(sl.textContent.includes('79500'));
+  edit(entry).click();enter(entry,'79900');await find(entry,'Save').click();assert.strictEqual(calls.at(-1).body.field,'entry');
+  edit(tp).click();assert(find(tp,'Save').disabled);await find(tp,'Save').click();assert.strictEqual(calls.length,3);find(tp,'Cancel').click();
+  edit(sl).click();change(select(sl),'ticks');enter(sl,'4500');assert.strictEqual(calls.length,3);escape(sl);assert(!input(sl));
+  // Classification continues using its own handler and stays inside its cell.
+  const tf=cell(main,'Timeframe');idle(tf).click();change(select(tf),'5m');await find(tf,'Save').click();
+  assert.strictEqual(calls.at(-1).url,'/api/open-orders/classification');
+  // A lost response locks the draft. Polls reconcile; they never submit again.
+  edit(tp).click();enter(tp,'83000');mode='lost';await find(tp,'Save').click();
+  assert(find(tp,'Save').disabled&&find(tp,'Cancel').disabled);assert(!tp.textContent.includes('Saved'));assert(tp.textContent.includes('unknown'));
+  const submissions=calls.filter(c=>c.url==='/api/open-orders/amend').length;
+  document.hidden=false;mode='pending';await hooks.pollVersion();
+  assert.strictEqual(calls.filter(c=>c.url==='/api/open-orders/amend').length,submissions);assert(input(tp));
+  mode='confirmed';await hooks.pollVersion();assert(tp.textContent.includes('83000')&&tp.textContent.includes('Saved'));
+  assert.strictEqual(calls.filter(c=>c.url==='/api/open-orders/amend').length,submissions);document.hidden=true;
+  // A stale snapshot cannot overwrite a newer confirmation.
+  const fresh=JSON.parse(JSON.stringify(row));publish({_price_read_started:1,take_profit:'81500',price_edit:{...row.price_edit,levels:{...row.price_edit.levels,take_profit:'81500'}}});
+  await hooks.refresh('progress');assert(tp.textContent.includes('83000'));publish(fresh);await hooks.refresh('progress');
+  edit(sl).click();enter(sl,'79600');publish({_price_read_started:100,price_edit:{...row.price_edit,levels:{...row.price_edit.levels,entry:'79800'}}});await hooks.refresh('progress');
+  assert(input(sl).value==='79600'&&find(sl,'Save').disabled&&find(sl,'Reload'));await find(sl,'Reload').click();assert.strictEqual(input(sl).value,'79500');
+  // Replacement rows retain old drafts but have no authority over the new row.
+  publish({type:'Position',id:0,price_edit:{...row.price_edit,target:'position-new-cycle',fields:['stop_loss','take_profit']}});await hooks.refresh('progress');
+  const replacement=tbody.children.find(tr=>tr!==main);assert(replacement);assert(!edit(cell(replacement,'Entry / Order')));assert(input(sl)&&find(sl,'Save').disabled);
+  assert.strictEqual(cell(replacement,'Planned Target').textContent,'81500');
+  console.log('price cell assertions passed');
+})().catch(err=>{console.error(err);process.exitCode=1;});
+"""
+    result = subprocess.run([node, "-e", harness, str(ROOT / "render/static/open_orders.js"), json.dumps(headers)], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "price cell assertions passed" in result.stdout

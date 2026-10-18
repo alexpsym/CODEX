@@ -20393,6 +20393,7 @@ async def _collect_bybit_open_items_impl(
     skip_auth: bool = False,
     enrich_funding: bool = True,
 ) -> Dict[str, object]:
+    price_read_started = time.monotonic()
     items: List[Dict[str, object]] = []
     errors: List[Dict[str, object]] = []
     warnings: List[Dict[str, object]] = []
@@ -20537,6 +20538,8 @@ async def _collect_bybit_open_items_impl(
                     # Bybit createdTime is the first-ever symbol position, not this cycle.
                     "opened_at": position.get("createdTime"),
                     "position_open_time": position.get("openTime"),
+                    "_price_broker": dict(position),
+                    "_price_read_started": price_read_started,
                     "execution_seq": position.get("seq"),
                     "position_updated_at": position.get("updatedTime"),
                     "id": position.get("positionId") or position.get("positionIdx"),
@@ -20630,6 +20633,8 @@ async def _collect_bybit_open_items_impl(
                     "id": order.get("orderId"),
                     "order_link_id": order.get("orderLinkId"),
                     "stop_order_type": order.get("stopOrderType"),
+                    "_price_broker": dict(order),
+                    "_price_read_started": price_read_started,
                     "status": status or "OPEN",
                 }
             )
@@ -22627,6 +22632,380 @@ def _apply_journal_classification(row):
     return _reapply_trading_journal_manual_overrides(updated)
 
 
+# Separate from calculator intent and classification versions. Journal reservations
+# survive restarts: an uncertain write is never permission to send another one.
+_PRICE_OPERATIONS_PATH = Path(__file__).parent / "data" / "open_order_amendments.json"
+_PRICE_TARGETS = {}
+_PRICE_CONFIRMED = {}
+_PRICE_LOCKS = {}
+_PRICE_FIELDS = {"entry": "price", "stop_loss": "stopLoss", "take_profit": "takeProfit"}
+
+
+def _price_decimal(value, *, positive=False):
+    try:
+        if not isinstance(value, str) or not value.strip() or len(value) > 80:
+            raise ValueError()
+        result = Decimal(value)
+        if not result.is_finite() or abs(result.adjusted()) > 40 or (positive and result <= 0):
+            raise ValueError()
+        return result
+    except (ArithmeticError, ValueError, TypeError):
+        raise HTTPException(400, "Enter a finite" + (" positive" if positive else "") + " decimal value")
+
+
+def _price_scope(row):
+    return json.dumps([row.get(k) for k in ("broker", "account", "category", "instrument", "type", "id", "position_idx")], separators=(",", ":"))
+
+
+def _price_lifecycle(row, raw):
+    # seq changes on a fill/new cycle, unlike createdTime (first ever position).
+    fields = ("createdTime", "seq", "size", "avgPrice") if row.get("type") == "Position" else ("orderId", "createdTime", "side", "positionIdx", "orderLinkId")
+    return [str(raw.get(k, "")) for k in fields]
+
+
+def _price_levels(raw, position=False):
+    return {"entry": str(raw.get("avgPrice" if position else "price", "")),
+            "stop_loss": str(raw.get("stopLoss", "")), "take_profit": str(raw.get("takeProfit", ""))}
+
+
+def _price_reason(row, raw):
+    if APP_PROFILE == "render":
+        return "Price editing is local only"
+    if row.get("broker") != "Bybit":
+        return "Bybit price editing only; OANDA support pending"
+    if row.get("account") not in {"live", "demo"} or row.get("category") not in {"linear", "inverse"}:
+        return "Exact Bybit account and linear/inverse category required"
+    if row.get("side") not in {"Buy", "Sell"} or raw.get("side") != row.get("side") or raw.get("symbol") != row.get("instrument"):
+        return "Exact broker side/instrument state unavailable"
+    if row.get("type") == "Order":
+        if (not row.get("id") or raw.get("orderId") != row.get("id") or not raw.get("createdTime")
+                or raw.get("orderType") != "Limit" or raw.get("orderStatus") not in {"New", "PartiallyFilled"}
+                or raw.get("stopOrderType") not in (None, "", "UNKNOWN")
+                or str(raw.get("triggerPrice", "0")) not in {"", "0"}
+                or raw.get("reduceOnly") is not False or raw.get("closeOnTrigger") is not False):
+            return "Only identified active regular pending limits support price editing"
+    elif row.get("type") == "Position":
+        if (row.get("position_idx") not in (0, 1, 2) or raw.get("positionIdx") != row.get("position_idx")
+                or str(raw.get("seq", "")) in {"", "-1"} or not raw.get("createdTime")):
+            return "Position side/lifecycle sequence unavailable"
+    else:
+        return "This row does not support price editing"
+    if any(raw.get(k) not in (None, "", "Full") for k in ("tpslMode",)):
+        return "Partial TP/SL is read-only"
+    if any(raw.get(k) not in (None, "", "Market") for k in ("tpOrderType", "slOrderType")):
+        return "Limit protection is read-only"
+    if any(str(raw.get(k, "0")) not in {"", "0", "None"} for k in ("trailingStop", "tpLimitPrice", "slLimitPrice")):
+        return "Trailing/limit protection is read-only"
+    if any(raw.get(k) in (None, "") for k in ("takeProfit", "stopLoss")):
+        return "Current protection is unresolved (different from confirmed absent)"
+    return ""
+
+
+def _enrich_price_edit(row):
+    raw = row.get("_price_broker") or {}
+    if row.get("broker") != "Bybit" or not raw:
+        # Unrelated brokers/old cache rows keep their original displayed prices.
+        row["price_edit"] = {"fields": [], "reason": _price_reason(row, raw)}
+        return row
+    scope = _price_scope(row)
+    confirmed = _PRICE_CONFIRMED.get(scope)
+    if confirmed and float(row.get("_price_read_started") or 0) < confirmed[0] and _price_lifecycle(row, raw) == _price_lifecycle(row, confirmed[1]):
+        raw = dict(confirmed[1])
+        row["_price_broker"] = raw
+        row.update(stop_loss=raw.get("stopLoss"), take_profit=raw.get("takeProfit"))
+        row["entry_price" if row.get("type") == "Position" else "order_price"] = raw.get("avgPrice" if row.get("type") == "Position" else "price")
+    reason = _price_reason(row, raw)
+    target = hashlib.sha256((scope + json.dumps(_price_lifecycle(row, raw))).encode()).hexdigest()
+    levels = _price_levels(raw, row.get("type") == "Position")
+    unit = Decimal(row["_price_distance_unit"]) if row.get("_price_distance_unit") else _calculator_context_distance_unit(row, local_lookup=False)
+    # Broker-originated rows can use exact already-resolved instrument metadata.
+    if unit is None and row.get("broker") == "Bybit":
+        known_units = []
+        for cache_key, cached in _BYBIT_INSTRUMENT_CACHE.items():
+            inst = cached.get("row") or {}
+            if inst.get("symbol") == row.get("instrument") and cache_key.endswith(":" + str(row.get("category")) + ":symbol:" + str(row.get("instrument"))):
+                try:
+                    known_units.append(_price_decimal(str((inst.get("priceFilter") or {}).get("tickSize")), positive=True))
+                except HTTPException:
+                    pass
+        unit = known_units[0] if known_units and len(set(known_units)) == 1 else None
+    current_ticks = {}
+    if unit is not None:
+        try:
+            anchor = _price_decimal(levels["entry"], positive=True)
+            sign = Decimal(1 if row.get("side") == "Buy" else -1)
+            for field in ("stop_loss", "take_profit"):
+                level = _price_decimal(levels[field], positive=True)
+                current_ticks[field] = _fmt_dec((level - anchor) * sign * (-1 if field == "stop_loss" else 1) / unit)
+        except HTTPException:
+            pass
+    row["price_edit"] = {"target": target, "levels": levels, "unit": _fmt_dec(unit) if unit else None,
+                         "ticks": current_ticks, "reason": reason,
+                         "fields": [] if reason else (["entry"] if row.get("type") == "Order" else []) + ["stop_loss", "take_profit"]}
+    if not reason:
+        _PRICE_TARGETS[target] = dict(row)
+    return row
+
+
+def _price_operations():
+    # Do not swallow corrupt/unreadable state: fail closed before any mutation.
+    if not _PRICE_OPERATIONS_PATH.exists():
+        return {}
+    data = json.loads(_PRICE_OPERATIONS_PATH.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("Amendment journal is invalid; broker writes blocked")
+    return data
+
+
+def _price_store(operation):
+    operations = _price_operations()
+    operations[operation["operation_id"]] = operation
+    write_json_file(_PRICE_OPERATIONS_PATH, operations, retries=0)
+
+
+def _price_credentials(row):
+    if row.get("account") not in {"demo", "live"}:
+        raise HTTPException(409, "Exact account is unavailable")
+    account, key, secret, base, _ = resolve_bybit_credentials_for(row["account"])
+    if account != row["account"] or not key or not secret:
+        raise HTTPException(409, "Exact account credentials are unavailable")
+    return dict(base_url=base, api_key=key, api_secret=secret)
+
+
+async def _price_read(row, credentials):
+    position = row["type"] == "Position"
+    params = {"category": row["category"], "symbol": row["instrument"]}
+    if not position:
+        params["orderId"] = str(row["id"])
+    payload = await _bybit_signed_get(**credentials, path="/v5/position/list" if position else "/v5/order/realtime", params=params, timeout_s=6)
+    result = payload.get("result") or {}
+    if not isinstance(result.get("list"), list) or result.get("nextPageCursor"):
+        raise HTTPException(409, "Exact broker state is incomplete")
+    matches = [r for r in result["list"] if r.get("symbol") == row["instrument"] and
+               (r.get("positionIdx") == row.get("position_idx") if position else r.get("orderId") == row["id"])]
+    if len(matches) != 1:
+        raise HTTPException(409, "Order filled/disappeared or exact position side is unavailable; draft retained")
+    raw = matches[0]
+    if position and _price_decimal(str(raw.get("size", "0"))) <= 0:
+        raise HTTPException(409, "Position closed; draft retained")
+    if _price_lifecycle(row, raw) != _price_lifecycle(row, row["_price_broker"]):
+        raise HTTPException(409, "Broker lifecycle or entry anchor changed; draft retained")
+    reason = _price_reason(row, raw)
+    if reason:
+        raise HTTPException(409, reason)
+    return raw
+
+
+async def _price_protection(row, raw, credentials):
+    if row["type"] != "Position":
+        if raw.get("tpslMode") != "Full" or any(raw.get(k) not in ("", "Market") for k in ("tpOrderType", "slOrderType")):
+            raise HTTPException(409, "Confirmed Full/Market protection settings required")
+        return {k: raw.get(k) or "LastPrice" for k in ("tpTriggerBy", "slTriggerBy")}
+    # Position/list alone does not prove whether separate partial/limit orders
+    # exist. Inspect this symbol's active conditional orders, including pagination.
+    payload = await _bybit_signed_get(**credentials, path="/v5/order/realtime", params={
+        "category": row["category"], "symbol": row["instrument"], "orderFilter": "StopOrder", "openOnly": "0", "limit": "50"}, timeout_s=6)
+    result = payload.get("result") or {}
+    if not isinstance(result.get("list"), list) or result.get("nextPageCursor"):
+        raise HTTPException(409, "Protection coverage incomplete; no amendment sent")
+    settings = {}
+    for field, kind, trigger in (("takeProfit", "TakeProfit", "tpTriggerBy"), ("stopLoss", "StopLoss", "slTriggerBy")):
+        matching = []
+        for order in result["list"]:
+            if order.get("symbol") != row["instrument"]:
+                raise HTTPException(409, "Protection instrument mismatch")
+            if order.get("positionIdx") is None:
+                raise HTTPException(409, "Protection hedge side unresolved")
+            if order.get("positionIdx") != row["position_idx"]:
+                continue
+            if order.get("stopOrderType") not in {"TakeProfit", "StopLoss"} or order.get("orderType") != "Market":
+                raise HTTPException(409, "Partial/limit/trailing or unresolved protection is read-only")
+            if order.get("stopOrderType") == kind:
+                matching.append(order)
+        level = _price_decimal(str(raw[field]))
+        if level == 0 and not matching:
+            settings[trigger] = "LastPrice"
+        elif len(matching) == 1 and level > 0:
+            order = matching[0]
+            if (_price_decimal(str(order.get("triggerPrice"))) != level
+                    or _price_decimal(str(order.get("qty"))) != _price_decimal(str(raw["size"]))
+                    or order.get("triggerBy") not in {"LastPrice", "MarkPrice", "IndexPrice"}):
+                raise HTTPException(409, "Full protection size/trigger state unresolved")
+            settings[trigger] = order["triggerBy"]
+        else:
+            raise HTTPException(409, "Full/Market protection state unresolved")
+    return settings
+
+
+async def _price_reconcile(operation):
+    if operation["status"] in {"confirmed", "rejected"}:
+        return operation
+    try:
+        row = operation["row"]
+        started = time.monotonic()
+        raw = await _price_read(row, _price_credentials(row))
+        levels = _price_levels(raw, row["type"] == "Position")
+        if _price_decimal(levels[operation["field"]]) == Decimal(operation["price"]):
+            operation["status"] = "confirmed"
+            operation["message"] = "Saved; exact broker level confirmed"
+            _PRICE_CONFIRMED[_price_scope(row)] = (started, dict(raw))
+            updated = dict(row, _price_broker=dict(raw), _price_read_started=started)
+            updated.update(stop_loss=raw["stopLoss"], take_profit=raw["takeProfit"])
+            updated["entry_price" if row["type"] == "Position" else "order_price"] = levels["entry"]
+            operation["item"] = _enrich_price_edit(updated)
+        else:
+            operation["message"] = "Awaiting broker evidence; requested value retained"
+    except Exception as exc:
+        operation["message"] = "Outcome unresolved; read-only reconciliation: " + (str(exc.detail) if isinstance(exc, HTTPException) else "broker read unavailable")
+    return operation
+
+
+def _price_response(operation):
+    return {k: operation[k] for k in ("operation_id", "status", "message", "item") if k in operation}
+
+
+@app.post("/api/open-orders/amend-status")
+async def open_order_amend_status(payload: Dict[str, object]):
+    if APP_PROFILE == "render":
+        raise HTTPException(403, "Price editing is local only")
+    if set(payload) != {"operation_id"}:
+        raise HTTPException(400, "Expected operation_id only")
+    operations = _price_operations()
+    operation = operations.get(str(payload["operation_id"]))
+    if operation is None:
+        return {"operation_id": payload["operation_id"], "status": "unknown", "message": "No durable operation found. Do not replay; reconcile the broker before further editing."}
+    key = (asyncio.get_running_loop(), _price_scope(operation["row"]))
+    async with _PRICE_LOCKS.setdefault(key, asyncio.Lock()):
+        operations = _price_operations()
+        operation = await _price_reconcile(operations[str(payload["operation_id"])])
+        _price_store(operation)
+        return _price_response(operation)
+
+
+@app.post("/api/open-orders/amend")
+async def amend_open_order(payload: Dict[str, object]):
+    # Operation IDs also serialize across different targets (mismatched replay).
+    key = (asyncio.get_running_loop(), "operation", str(payload.get("operation_id")))
+    async with _PRICE_LOCKS.setdefault(key, asyncio.Lock()):
+        with localcontext() as precision:
+            precision.prec = 200
+            return await _amend_open_order(payload)
+
+
+async def _amend_open_order(payload):
+    if APP_PROFILE == "render":
+        raise HTTPException(403, "Price editing is local only")
+    if set(payload) != {"operation_id", "target", "field", "mode", "value", "base"}:
+        raise HTTPException(400, "Expected exact amendment fields only")
+    op_id = payload["operation_id"]
+    if not isinstance(op_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{16,100}", op_id):
+        raise HTTPException(400, "A unique operation ID is required")
+    fingerprint = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    operations = _price_operations()
+    previous = operations.get(op_id)
+    if previous:
+        if previous["request"] != fingerprint:
+            raise HTTPException(409, "Operation ID reused with different input")
+        return await open_order_amend_status({"operation_id": op_id})
+    row = _PRICE_TARGETS.get(str(payload["target"]))
+    if row is None:
+        raise HTTPException(409, "Server-issued row identity unavailable; reload this cell")
+    row = dict(row)
+    field = payload["field"]
+    if field not in row["price_edit"]["fields"]:
+        raise HTTPException(400, "This field is read-only")
+    key = (asyncio.get_running_loop(), _price_scope(row))
+    async with _PRICE_LOCKS.setdefault(key, asyncio.Lock()):
+        operations = _price_operations()
+        if op_id in operations:
+            if operations[op_id]["request"] != fingerprint:
+                raise HTTPException(409, "Operation ID reused with different input")
+            return _price_response(operations[op_id])
+        if any(_price_scope(op["row"]) == _price_scope(row) and op["status"] not in {"confirmed", "rejected"} for op in operations.values()):
+            raise HTTPException(409, "Another amendment for this row has an unresolved outcome; reconcile it first")
+        credentials = _price_credentials(row)
+        raw = await _price_read(row, credentials)
+        levels = _price_levels(raw, row["type"] == "Position")
+        if not isinstance(payload["base"], dict) or set(payload["base"]) != set(levels) | {"unit"} or any(
+                _price_decimal(str(payload["base"][k])) != _price_decimal(levels[k]) for k in (levels if field == "entry" else {"entry", field})):
+            raise HTTPException(409, "Current levels/entry anchor changed; reload this cell. Draft retained")
+        if payload["mode"] == "ticks" and payload["base"]["unit"] != row["price_edit"].get("unit"):
+            raise HTTPException(409, "Distance unit changed; reload this cell")
+        settings = await _price_protection(row, raw, credentials)
+        value = _price_decimal(payload["value"], positive=payload["mode"] == "price")
+        if payload["mode"] == "ticks" and field != "entry":
+            unit = row["price_edit"].get("unit")
+            if not unit:
+                raise HTTPException(400, "Exact instrument distance unit unavailable; use Price")
+            sign = Decimal(1 if row["side"] == "Buy" else -1) * (-1 if field == "stop_loss" else 1)
+            price = _price_decimal(levels["entry"], positive=True) + sign * value * Decimal(unit)
+        elif payload["mode"] == "price":
+            price = value
+        else:
+            raise HTTPException(400, "Use Price or protective Ticks")
+        # Fetch only the exact instrument; no reference coin/calculator re-quote.
+        metadata = await _bybit_market_get_async(credentials["base_url"], "/v5/market/instruments-info", {"category": row["category"], "symbol": row["instrument"]}, timeout_s=6)
+        instruments = (metadata.get("result") or {}).get("list") or []
+        if len(instruments) != 1 or instruments[0].get("symbol") != row["instrument"]:
+            raise HTTPException(409, "Exact executable instrument metadata unavailable")
+        increment = _price_decimal(str((instruments[0].get("priceFilter") or {}).get("tickSize")), positive=True)
+        if price <= 0 or price % increment != 0:
+            raise HTTPException(400, "Price must be positive and on the broker increment " + _fmt_dec(increment))
+        prospective = dict(levels, **{field: _fmt_dec(price)})
+        buy = row["side"] == "Buy"
+        if row["type"] == "Order":
+            anchor = Decimal(prospective["entry"])
+            for level_field in ("stop_loss", "take_profit"):
+                level = Decimal(prospective[level_field])
+                if level and ((level > anchor) != (buy == (level_field == "take_profit")) or level == anchor):
+                    raise HTTPException(400, "Amendment would put pending protection on the wrong side of its entry")
+        if row["type"] == "Position" or field == "entry":
+            ticker = await _bybit_market_get_async(credentials["base_url"], "/v5/market/tickers", {"category": row["category"], "symbol": row["instrument"]}, timeout_s=6)
+            ticks = (ticker.get("result") or {}).get("list") or []
+            if len(ticks) != 1 or ticks[0].get("symbol") != row["instrument"]:
+                raise HTTPException(409, "Current trigger reference unavailable")
+            trigger = "LastPrice" if field == "entry" else settings["tpTriggerBy" if field == "take_profit" else "slTriggerBy"]
+            reference = _price_decimal(str(ticks[0].get({"LastPrice": "lastPrice", "MarkPrice": "markPrice", "IndexPrice": "indexPrice"}[trigger])), positive=True)
+            above = (not buy) if field == "entry" else (buy == (field == "take_profit"))
+            if price == reference or (price > reference) != above:
+                raise HTTPException(400, "Price crosses the current limit/trigger reference")
+        operation = {"operation_id": op_id, "request": fingerprint, "row": row, "field": field,
+                     "price": _fmt_dec(price), "status": "unknown", "message": "Outcome unknown; awaiting exact broker evidence"}
+        if price == Decimal(levels[field]):
+            observed_at = time.monotonic()
+            _PRICE_CONFIRMED[_price_scope(row)] = (observed_at, dict(raw))
+            updated = dict(row, _price_broker=dict(raw), _price_read_started=observed_at,
+                           stop_loss=raw["stopLoss"], take_profit=raw["takeProfit"])
+            updated["entry_price" if row["type"] == "Position" else "order_price"] = levels["entry"]
+            operation.update(status="confirmed", message="Saved; broker level already equal (no write)", item=_enrich_price_edit(updated))
+        else:
+            operations[op_id] = operation
+            _price_store(operation)  # Durable reservation BEFORE the only mutation.
+            body = {"category": row["category"], "symbol": row["instrument"], _PRICE_FIELDS[field]: _fmt_dec(price)}
+            if row["type"] == "Order":
+                body["orderId"] = row["id"]
+                if field != "entry" and Decimal(levels[field]) == 0:
+                    trigger = "tpTriggerBy" if field == "take_profit" else "slTriggerBy"
+                    body[trigger] = settings[trigger]
+                path = "/v5/order/amend"
+            else:
+                body.update(positionIdx=row["position_idx"], tpslMode="Full")
+                trigger = "tpTriggerBy" if field == "take_profit" else "slTriggerBy"
+                body[trigger] = settings[trigger]
+                path = "/v5/position/trading-stop"
+            try:
+                await _bybit_signed_post(**credentials, path=path, body=body)
+                operation["status"] = "pending"
+            except BybitSignedAPIError as exc:
+                operation.update(status="rejected", message=_safe_bybit_diagnostic_text(exc, api_key=credentials["api_key"], api_secret=credentials["api_secret"]))
+            except Exception:
+                pass  # Transport/HTTP uncertainty cannot authorize another write.
+            await _price_reconcile(operation)
+        operations[op_id] = operation
+        _price_store(operation)
+        return _price_response(operation)
+
+
 @app.post("/api/open-orders/classification")
 async def save_open_order_classification(payload: Dict[str, object]) -> Dict[str, object]:
     if APP_PROFILE == "render":
@@ -22749,6 +23128,8 @@ def _enrich_open_item_with_trade_context(
 
     accepted = context if isinstance(context, dict) else _lookup_trade_context_for_open_item(item)
     ctx = dict(accepted, **accepted.get("classification_overrides", {})) if isinstance(accepted, dict) else None
+    unit = _calculator_context_distance_unit(ctx) if ctx else None
+    item["_price_distance_unit"] = _fmt_dec(unit) if unit else None
     broker = str(item.get("broker") or "").strip()
     broker_norm = broker.lower()
     item["venue"] = broker or None
@@ -31912,6 +32293,9 @@ OPEN_ORDERS_TEMPLATE = """<!doctype html>
     .classification-value:disabled { cursor: default; }
     .classification-cell select { font: inherit; background: #0f172a; color: #e5e7eb; border: 1px solid #475569; border-radius: 4px; max-width: 150px; }
     .classification-cell .action-btn { font: inherit; padding: 2px 5px; margin-left: 3px; }
+    .price-cell input { width: 105px; font: inherit; background: #0f172a; color: #e5e7eb; border: 1px solid #475569; }
+    .price-cell select { max-width: 65px; }
+    .price-edit { font: inherit; background: transparent; color: #94a3b8; border: 0; cursor: pointer; }
     .classification-feedback { display: block; white-space: normal; max-width: 190px; font-size: 11px; color: #94a3b8; }
     .error-box { display: none; margin-bottom: 10px; border: 1px solid #7f1d1d; background: #3f0d12; color: #fecaca; border-radius: 10px; padding: 10px 12px; }
     .error-box ul { margin: 8px 0 0; padding-left: 20px; }
@@ -31937,6 +32321,7 @@ OPEN_ORDERS_TEMPLATE = """<!doctype html>
         <ul></ul>
       </details>
       <div id="open-orders-empty" class="muted">No open orders or positions.</div>
+      <div class="muted">Price edits change current broker levels only; planned ticks, risk and Net R remain original intent. Signed ticks: positive target = profit, positive stop = risk; negative stop = profit. One-sided Bybit edits can unbind paired TP/SL orders.</div>
       <div class="table-wrap">
         <table id="open-orders-table">
           <thead>
@@ -36793,6 +37178,8 @@ async def list_open_orders(force: bool = Query(False)) -> JSONResponse:
 
 
 def _open_orders_payload(items, errors, warnings, collection_version, coverage_complete=False):
+    for row in items:
+        _enrich_price_edit(row)
     items.sort(key=lambda row: (0 if str(row.get("broker")).lower() == "oanda" else 1,
                                 0 if row.get("account") == "live" else 1))
     live_broker_items = list(items)
