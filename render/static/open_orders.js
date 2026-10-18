@@ -175,7 +175,7 @@
     const p=entry.item.price_edit;
     if(!d.operation&&!d.conflict&&(!entry.present||p?.target!==d.target||
       ['entry',state.field].some(field=>String(p?.levels?.[field])!==String(d.base[field])))){
-      d.conflict=true;d.message='Current value or entry anchor changed. Draft retained; Reload this cell.';
+      d.conflict=true;d.message='Price or entry changed. Reload this cell.';
     }
     const busy=Boolean(d.operation),available=entry.present&&p?.fields?.includes(state.field);
     state.input.disabled=busy;state.units.disabled=busy;
@@ -192,9 +192,7 @@
     if(p?.fields?.includes(state.field)){
       const edit=button('\u270e',()=>openPriceCell(entry,state));edit.className='price-edit';edit.setAttribute('aria-label','Edit '+priceLabels[state.field]);state.td.appendChild(edit);
     }else state.td.title=p?.reason||(state.field==='entry'?'Filled entry is read-only':'Price editing unavailable');
-    const help=document.createElement('span');help.className='classification-feedback';
-    help.textContent=(p?.ticks?.[state.field]!==undefined?p.ticks[state.field]+' current ticks; ':'')+(state.saved?'Saved':'');
-    help.title='Current broker distance from entry '+(p?.levels?.entry||'?')+'; unit '+(p?.unit||'unresolved')+'. Original plan columns remain historical intent.';state.td.appendChild(help);
+    if(state.saved){const feedback=document.createElement('span');feedback.className='classification-feedback';feedback.setAttribute('role','status');feedback.textContent='Saved';state.td.appendChild(feedback);}
   };
   const finishPriceOperation=(entry,state,data)=>{
     const d=state.draft;if(!d?.operation)return;
@@ -221,7 +219,7 @@
     const d=state.draft;if(!d||state.save.disabled)return;
     const id=window.crypto?.randomUUID?.()||('amend_'+Date.now()+'_'+Math.random().toString(36).slice(2));
     const body={operation_id:id,target:d.target,field:state.field,mode:state.units.value,value:state.input.value,base:d.base};
-    d.operation=id;d.sending=true;d.message='Submitting; awaiting broker evidence';
+    d.operation=id;d.sending=true;d.message='Saving...';
     priceOperations[id]=body;
     try{persistPriceOperations();}catch(_){delete priceOperations[id];d.operation=null;d.sending=false;d.message='Cannot preserve operation reference; no request sent';updatePriceCell(entry,state);return;}
     for(const other of entry.prices.values())updatePriceCell(entry,other);
@@ -242,18 +240,17 @@
     state.saved=false;state.td.innerHTML='';
     const units=document.createElement('select');state.units=units;units.setAttribute('aria-label',priceLabels[state.field]+' units');
     for(const value of ['price','ticks']){if(value==='ticks'&&(state.field==='entry'||!p.unit))continue;const option=document.createElement('option');option.value=value;option.textContent=value==='price'?'Price':'Ticks';units.appendChild(option);}
-    units.value=resume?.mode||'price';state.td.appendChild(units);
-    const input=document.createElement('input');state.input=input;input.type='number';input.step='any';input.setAttribute('aria-label',priceLabels[state.field]+' value');input.value=resume?.value||d.base[state.field];state.td.appendChild(input);
+    units.value=resume?.mode||'price';if(state.field!=='entry'&&p.unit)state.td.appendChild(units);
+    const input=document.createElement('input');state.input=input;input.type='text';input.inputMode='decimal';input.setAttribute('aria-label',priceLabels[state.field]+' value; entry '+d.base.entry+(p.unit?'; tick '+p.unit:''));input.value=resume?.value||d.base[state.field];state.td.appendChild(input);
     const dirty=()=>{d.dirty=units.value!=='price'||input.value!==d.base[state.field];d.message='';updatePriceCell(entry,state);};
     input.addEventListener('input',dirty);units.addEventListener('change',()=>{input.value=units.value==='ticks'?(p.ticks?.[state.field]||''):d.base[state.field];dirty();});
     const cancel=()=>{if(d.operation)return;state.draft=null;renderPriceCell(entry,state);};
     state.save=button('Save',()=>savePriceCell(entry,state));state.cancel=button('Cancel',cancel);
     state.reload=button('Reload',async()=>{if(d.operation)return;await refresh('progress');if(!entry.present||refreshNeedsRecovery)return;state.draft=null;openPriceCell(entry,state);});
     for(const el of [state.save,state.cancel,state.reload])state.td.appendChild(el);
-    const anchor=document.createElement('span');anchor.className='classification-feedback';anchor.textContent='Entry anchor '+d.base.entry+'; tick unit '+(p.unit||'unresolved (Price only)')+'. +stop=risk, -stop=profit; +target=profit.';state.td.appendChild(anchor);
     state.feedback=document.createElement('span');state.feedback.className='classification-feedback';state.feedback.setAttribute('role','status');state.td.appendChild(state.feedback);
     state.td.addEventListener('keydown',event=>{if(event.key==='Escape'){event.preventDefault();cancel();}if(event.key==='Enter'){event.preventDefault();savePriceCell(entry,state);}});
-    updatePriceCell(entry,state);if(!resume)input.focus?.();
+    updatePriceCell(entry,state);if(!resume){input.focus();input.select();}
   };
   const choiceValue = (field,value) => {
     const text=value===true?'Yes':value===false?'No':String(value??'').trim();

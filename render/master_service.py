@@ -22672,7 +22672,7 @@ def _price_reason(row, raw):
     if APP_PROFILE == "render":
         return "Price editing is local only"
     if row.get("broker") != "Bybit":
-        return "Bybit price editing only; OANDA support pending"
+        return "Price editing is unavailable for this broker"
     if row.get("account") not in {"live", "demo"} or row.get("category") not in {"linear", "inverse"}:
         return "Exact Bybit account and linear/inverse category required"
     if row.get("side") not in {"Buy", "Sell"} or raw.get("side") != row.get("side") or raw.get("symbol") != row.get("instrument"):
@@ -22778,27 +22778,67 @@ async def _price_read(row, credentials):
     if not position:
         params["orderId"] = str(row["id"])
     payload = await _bybit_signed_get(**credentials, path="/v5/position/list" if position else "/v5/order/realtime", params=params, timeout_s=6)
-    result = payload.get("result") or {}
-    if not isinstance(result.get("list"), list) or result.get("nextPageCursor"):
-        raise HTTPException(409, "Exact broker state is incomplete")
-    matches = [r for r in result["list"] if r.get("symbol") == row["instrument"] and
-               (r.get("positionIdx") == row.get("position_idx") if position else r.get("orderId") == row["id"])]
+    cursor = False
+
+    def reject(code, message="Broker data incomplete. Refresh this row.", *, field="", matches=None):
+        BYBIT_LOGGER.warning("PRICE_PREFLIGHT_REJECT account=%s category=%s symbol=%s id=%s reason=%s field=%s matches=%s cursor=%s",
+                             row.get("account"), row.get("category"), row.get("instrument"), row.get("id"), code, field, matches, cursor)
+        raise HTTPException(409, message)
+
+    if not isinstance(payload, dict) or payload.get("retCode") not in (0, "0"):
+        reject("invalid_success_envelope")
+    result = payload.get("result")
+    if not isinstance(result, dict):
+        reject("malformed_result")
+    cursor = bool(result.get("nextPageCursor"))
+    if result.get("category") != row["category"]:
+        reject("category_mismatch_or_missing", field="category")
+    rows = result.get("list")
+    if not isinstance(rows, list) or any(not isinstance(item, dict) for item in rows):
+        reject("malformed_list_or_row")
+    if result.get("nextPageCursor") is not None and not isinstance(result["nextPageCursor"], str):
+        reject("malformed_cursor")
+    # An exact orderId lookup is not an inventory query. Bybit can return its
+    # unique requested order with a nonempty cursor; no other page is needed.
+    # Position/inventory coverage retains the conservative completeness guard.
+    if position and cursor:
+        reject("position_coverage_cursor")
+    matches = [item for item in rows if (item.get("positionIdx") == row.get("position_idx") if position else item.get("orderId") == row["id"])]
     if len(matches) != 1:
-        raise HTTPException(409, "Order filled/disappeared or exact position side is unavailable; draft retained")
+        reject("zero_exact_matches" if not matches else "multiple_exact_matches",
+               "Order unavailable or ambiguous. Refresh this row.", matches=len(matches))
     raw = matches[0]
-    if position and _price_decimal(str(raw.get("size", "0"))) <= 0:
-        raise HTTPException(409, "Position closed; draft retained")
+    if raw.get("symbol") != row["instrument"]:
+        reject("symbol_mismatch", field="symbol", matches=1)
+    required = ("size", "avgPrice", "stopLoss", "takeProfit") if position else ("price", "qty", "stopLoss", "takeProfit")
+    for field in required:
+        if not isinstance(raw.get(field), str) or not raw[field].strip():
+            reject("missing_required_field", "Broker " + field + " unavailable. Refresh this row.", field=field)
+        try:
+            number = _price_decimal(raw[field], positive=field in {"price", "avgPrice", "qty"})
+            if number < 0:
+                raise ValueError()
+        except (HTTPException, ValueError):
+            reject("invalid_required_field", "Broker " + field + " invalid. Refresh this row.", field=field)
+    if position and Decimal(raw["size"]) <= 0:
+        reject("closed_position", "Position closed. Refresh this row.")
     if _price_lifecycle(row, raw) != _price_lifecycle(row, row["_price_broker"]):
-        raise HTTPException(409, "Broker lifecycle or entry anchor changed; draft retained")
+        reject("lifecycle_or_anchor_changed", "Order or entry changed. Reload this cell.")
     reason = _price_reason(row, raw)
     if reason:
-        raise HTTPException(409, reason)
+        reject("unsupported_or_inactive_state", reason)
+    if cursor:
+        BYBIT_LOGGER.info("PRICE_PREFLIGHT_EXACT_ORDER cursor_present=true matches=1 account=%s category=%s symbol=%s id=%s",
+                          row["account"], row["category"], row["instrument"], row["id"])
     return raw
 
 
 async def _price_protection(row, raw, credentials):
     if row["type"] != "Position":
-        if raw.get("tpslMode") != "Full" or any(raw.get(k) not in ("", "Market") for k in ("tpOrderType", "slOrderType")):
+        # For linear/inverse Full mode, native protection is Market. Realtime
+        # need not echo the optional order-type keys; explicit Limit is rejected.
+        # Native amend preserves all fields omitted from its request body.
+        if raw.get("tpslMode") != "Full" or any(raw.get(k) not in (None, "", "Market") for k in ("tpOrderType", "slOrderType")):
             raise HTTPException(409, "Confirmed Full/Market protection settings required")
         return {k: raw.get(k) or "LastPrice" for k in ("tpTriggerBy", "slTriggerBy")}
     # Position/list alone does not prove whether separate partial/limit orders
@@ -32321,7 +32361,6 @@ OPEN_ORDERS_TEMPLATE = """<!doctype html>
         <ul></ul>
       </details>
       <div id="open-orders-empty" class="muted">No open orders or positions.</div>
-      <div class="muted">Price edits change current broker levels only; planned ticks, risk and Net R remain original intent. Signed ticks: positive target = profit, positive stop = risk; negative stop = profit. One-sided Bybit edits can unbind paired TP/SL orders.</div>
       <div class="table-wrap">
         <table id="open-orders-table">
           <thead>

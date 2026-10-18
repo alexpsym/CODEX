@@ -4588,7 +4588,7 @@ const flush=async()=>{for(let i=0;i<5;i++)await new Promise(resolve=>setImmediat
 
 
 
-def _price_edit_fixture(monkeypatch, tmp_path, *, position=False, side="Buy", idx=0, tiny=False):
+def _price_edit_fixture(monkeypatch, tmp_path, *, position=False, side="Buy", idx=0, tiny=False, native_order=False):
     """All amendment IO is synthetic; reservations are confined to this test."""
     import copy
     service = master_service
@@ -4600,6 +4600,7 @@ def _price_edit_fixture(monkeypatch, tmp_path, *, position=False, side="Buy", id
     monkeypatch.setattr(service, "_BYBIT_INSTRUMENT_CACHE", {})
     monkeypatch.setattr(service, "resolve_bybit_credentials_for", lambda account:
         (account, "mock-key", "mock-secret", "https://bybit.fixture", "fixture"))
+    tiny = tiny or native_order
     raw = dict(symbol="QUSDT" if tiny else "BTCUSDT", side=side, positionIdx=idx,
         orderId="exact-order", orderLinkId="accepted-link", createdTime="1000", seq="800",
         price="0.10191" if tiny else "80000", avgPrice="80000", size="2", qty="2",
@@ -4608,6 +4609,15 @@ def _price_edit_fixture(monkeypatch, tmp_path, *, position=False, side="Buy", id
         orderStatus="New", orderType="Limit", reduceOnly=False, closeOnTrigger=False,
         stopOrderType="", triggerPrice="0", tpslMode="Full", tpOrderType="Market", slOrderType="Market",
         tpTriggerBy="MarkPrice", slTriggerBy="IndexPrice", trailingStop="0")
+    if native_order:
+        # Supplied brief's accepted order facts; timestamp/ticker/cursor are
+        # synthetic. Optional order-type keys are absent in the documented schema.
+        raw.update(orderId="7cddbc9e-2d62-440e-8acb-284a7d894211",
+                   orderLinkId="89bd01519d6a43659bfc6426d7a5fc39",
+                   price="0.09243", stopLoss="0.08492", takeProfit="0.10778", qty="400",
+                   timeInForce="GTC", tpTriggerBy="LastPrice", slTriggerBy="LastPrice")
+        for key in ("tpOrderType", "slOrderType", "seq", "size", "avgPrice", "trailingStop"):
+            raw.pop(key, None)
     row = dict(broker="Bybit", account="demo", category="linear", instrument=raw["symbol"], side=side,
         type="Position" if position else "Order", id=idx if position else raw["orderId"], position_idx=idx,
         _price_broker=copy.deepcopy(raw), _price_read_started=1,
@@ -4632,8 +4642,12 @@ def _price_edit_fixture(monkeypatch, tmp_path, *, position=False, side="Buy", id
                         orderType=state.get("protection_type", "Market"), qty=raw["size"], triggerPrice=raw[field], triggerBy=raw[trigger]))
             return {"result": {"list": orders}}
         if not position:
-            assert params["orderId"] == "exact-order"
-        return {"result": {"list": [copy.deepcopy(raw)] if state["exists"] else []}}
+            assert params["orderId"] == state["row"]["id"]
+        if "response" in state:
+            return copy.deepcopy(state["response"])
+        return {"retCode": 0, "retMsg": "OK", "result": {"category": state["row"]["category"],
+                "nextPageCursor": "synthetic-nonempty-cursor" if native_order else "",
+                "list": [copy.deepcopy(raw)] if state["exists"] else []}}
 
     async def market(base, path, params, **kwargs):
         state["markets"].append((path, dict(params)))
@@ -4704,6 +4718,55 @@ def test_bybit_order_price_edits_amend_only_selected_levels(monkeypatch, tmp_pat
             assert data["writes"][-1]["body"]["takeProfit"] == "78500"
             await sell.amend_open_order(data["request"]("stop_loss", "5000", "ticks"))
             assert data["writes"][-1]["body"]["stopLoss"] == "80500"
+        with monkeypatch.context() as patch:
+            service, data = _price_edit_fixture(patch, tmp_path / "native", native_order=True)
+            service._PRICE_OPERATIONS_PATH.parent.mkdir()
+            original = copy.deepcopy(data["row"])
+            raw_before = copy.deepcopy(data["raw"])
+            request = data["request"]("entry", "0.09143", op="reported_qusdt_entry_001")
+            normal = {"retCode": 0, "retMsg": "OK", "result": {"category": "linear",
+                      "list": [raw_before], "nextPageCursor": "synthetic-nonempty-cursor"}}
+            invalid = [None, [], {"retCode": 10001}, {"retCode": 0, "result": []}]
+            for value in (None, {}, [None], [], [{**raw_before, "orderId": "different-order"}],
+                          [raw_before, raw_before], [{**raw_before, "symbol": "BTCUSDT"}],
+                          [{**raw_before, "side": "Sell"}], [{**raw_before, "orderStatus": "Filled"}],
+                          [{**raw_before, "createdTime": "new-lifecycle"}],
+                          [{k: v for k, v in raw_before.items() if k != "price"}],
+                          [{**raw_before, "stopLoss": "NaN"}],
+                          [{**raw_before, "tpslMode": "Partial"}],
+                          [{**raw_before, "tpOrderType": "Limit"}],
+                          [{**raw_before, "tpLimitPrice": "0.11"}]):
+                invalid.append({**normal, "result": {**normal["result"], "list": value}})
+            invalid.append({**normal, "result": {**normal["result"], "category": "inverse"}})
+            for response in invalid:
+                data["response"] = response
+                with pytest.raises(service.HTTPException) as exc:
+                    await service.amend_open_order(request)
+                assert exc.value.status_code == 409
+                assert not data["writes"] and not service._PRICE_OPERATIONS_PATH.exists()
+            del data["response"]
+            with pytest.raises(service.HTTPException):
+                await service.amend_open_order({**request, "base": {**request["base"], "entry": "0.09343"}})
+            with patch.context() as account_patch:
+                account_patch.setattr(service, "resolve_bybit_credentials_for", lambda account:
+                    ("live", "key", "secret", "https://bybit.fixture", "fixture"))
+                with pytest.raises(service.HTTPException):
+                    await service.amend_open_order(request)
+            assert not data["writes"]
+            result = await service.amend_open_order(request)
+            assert result["status"] == "confirmed"
+            assert len(data["writes"]) == 1
+            assert data["writes"][0]["path"] == "/v5/order/amend"
+            assert data["writes"][0]["body"] == {"category": "linear", "symbol": "QUSDT",
+                "orderId": "7cddbc9e-2d62-440e-8acb-284a7d894211", "price": "0.09143"}
+            assert data["raw"] == {**raw_before, "price": "0.09143"}
+            assert result["item"]["order_price"] == "0.09143"
+            for field in ("planned_entry_price", "planned_stop_price", "planned_target_price", "stop_loss_ticks", "risk_reward", "calculation_context_id"):
+                assert result["item"][field] == original[field]
+            assert all(read["params"]["orderId"] == raw_before["orderId"] for read in data["reads"])
+            # Same ID reconciles without replay even with a nonempty cursor.
+            assert (await service.amend_open_order(request))["status"] == "confirmed"
+            assert len(data["writes"]) == 1
     asyncio.run(exercise())
 
 
@@ -4838,7 +4901,10 @@ class Element {
   querySelector(){return null;}
   click(){return this.disabled?undefined:this.handlers.click?.();}
   focus(){document.activeElement=this;}
+  setSelectionRange(start,end){if(this.tag!=='input'||this.type!=='text')throw new Error('Selection requires text-backed input');this.selectionStart=start;this.selectionEnd=end;}
+  select(){this.setSelectionRange(0,this.value.length);}
 }
+
 const tbody=new Element('tbody'),table=new Element('table');table.querySelector=()=>tbody;
 const elements={'open-orders-table':table};for(const id of ['open-orders-status','open-orders-empty','refresh-btn','open-orders-errors','open-orders-warnings'])elements[id]=new Element();
 const headers=JSON.parse(process.argv[2]);
@@ -4891,13 +4957,36 @@ global.fetch=async(url,opts={})=>{
 };
 vm.runInThisContext(fs.readFileSync(process.argv[1],'utf8'));
 (async()=>{
+  const template=JSON.parse(process.argv[3]);
+  assert(!template.includes('Price edits change current broker levels only'));
   const hooks=window.__openOrdersTestHooks;await hooks.refresh('progress');
   let main=tbody.children[0];assert.strictEqual(main.children.length,headers.length);
   assert.deepStrictEqual(headers.slice(29,33),['Entry / Order','Current / Trigger','Stop Loss','Take Profit']);
-  const tp=cell(main,'Take Profit'),sl=cell(main,'Stop Loss'),entry=cell(main,'Entry / Order'),action=cell(main,'Action');
+  let tp=cell(main,'Take Profit'),sl=cell(main,'Stop Loss'),entry=cell(main,'Entry / Order'),action=cell(main,'Action');
   assert(edit(tp)&&edit(sl)&&edit(entry));assert(!input(action)&&!find(action,'Save'));assert(find(action,'Cancel'));
-  edit(tp).click();assert.strictEqual(input(tp).value,'81500');enter(tp,'82000');
-  const focused=input(tp);focused.focus();focused.selectionStart=2;focused.selectionEnd=4;
+  for(const td of [tp,sl,entry]){assert.strictEqual(td.children.length,2);assert(!td.textContent.includes('current ticks'));assert(!td.textContent.includes('Entry anchor'));assert(!walk(td).some(e=>e.title?.includes('Original plan')));}
+  // User's QUSDT entry interaction in the same production table/editor.
+  const btc=JSON.parse(JSON.stringify(row));
+  publish({instrument:'QUSDT',order_price:'0.09243',stop_loss:'0.08492',take_profit:'0.10778',
+    price_edit:{...row.price_edit,unit:'0.00001',levels:{entry:'0.09243',stop_loss:'0.08492',take_profit:'0.10778'}}});await hooks.refresh('progress');
+  const qrow=tbody.children[0],qe=cell(qrow,'Entry / Order');edit(qe).click();
+  assert.strictEqual(input(qe).type,'text');assert.strictEqual(input(qe).inputMode,'decimal');
+  assert.strictEqual(input(qe).value,'0.09243');assert.strictEqual(document.activeElement,input(qe));
+  assert.strictEqual(input(qe).selectionStart,0);assert.strictEqual(input(qe).selectionEnd,'0.09243'.length);
+  assert(!select(qe));assert.deepStrictEqual(qe.children.filter(e=>!e.hidden&&e.textContent!=='').map(e=>e.textContent),['Save','Cancel']);
+  assert(find(qe,'Reload').hidden);assert.strictEqual(calls.length,0);
+  const qi=input(qe);qi.setSelectionRange(1,4);enter(qe,'0.09143');publish({current_price:'0.12'});await hooks.refresh('progress');
+  assert.strictEqual(input(qe),qi);assert.strictEqual(document.activeElement,qi);assert.strictEqual(qi.selectionStart,1);assert.strictEqual(qi.selectionEnd,4);
+  find(qe,'Cancel').click();assert.strictEqual(calls.length,0);
+  edit(qe).click();assert.strictEqual(input(qe).selectionStart,0);assert.strictEqual(input(qe).selectionEnd,7);
+  assert(find(qe,'Save').disabled);enter(qe,'0.09143');assert.strictEqual(calls.length,0);await find(qe,'Save').click();
+  assert.strictEqual(calls.length,1);assert.deepStrictEqual([calls[0].body.field,calls[0].body.mode,calls[0].body.value],['entry','price','0.09143']);
+  assert(qe.textContent.includes('0.09143')&&qe.textContent.includes('Saved'));
+  assert.strictEqual(cell(qrow,'Stop Loss').children[0].textContent,'0.08492');assert.strictEqual(cell(qrow,'Take Profit').children[0].textContent,'0.10778');
+  publish(btc);await hooks.refresh('progress');main=tbody.children[0];
+  calls.length=0;tp=cell(main,'Take Profit');sl=cell(main,'Stop Loss');entry=cell(main,'Entry / Order');action=cell(main,'Action');
+  edit(tp).click();assert.strictEqual(input(tp).value,'81500');assert(select(tp));assert(find(tp,'Reload').hidden);assert(!tp.textContent.includes('Entry anchor'));assert(!tp.textContent.includes('+stop'));enter(tp,'82000');
+  const focused=input(tp);focused.focus();focused.setSelectionRange(2,4);
   edit(sl).click();enter(sl,'79500');focused.focus();
   publish({current_price:'80600',classification_version:1,classification_values:{timeframe:'1m'}});await hooks.refresh('progress');
   assert.strictEqual(input(tp),focused);assert.strictEqual(document.activeElement,focused);assert.strictEqual(focused.selectionStart,2);assert.strictEqual(focused.selectionEnd,4);
@@ -4909,8 +4998,9 @@ vm.runInThisContext(fs.readFileSync(process.argv[1],'utf8'));
   edit(tp).click();assert(find(tp,'Save').disabled);await find(tp,'Save').click();assert.strictEqual(calls.length,3);find(tp,'Cancel').click();
   edit(sl).click();change(select(sl),'ticks');enter(sl,'4500');assert.strictEqual(calls.length,3);escape(sl);assert(!input(sl));
   // Classification continues using its own handler and stays inside its cell.
-  const tf=cell(main,'Timeframe');idle(tf).click();change(select(tf),'5m');await find(tf,'Save').click();
-  assert.strictEqual(calls.at(-1).url,'/api/open-orders/classification');
+  edit(entry).click();enter(entry,'79850');const classificationDraft=input(entry);classificationDraft.setSelectionRange(1,3);
+  const tf=cell(main,'Timeframe');idle(tf).click();change(select(tf),'5m');classificationDraft.focus();await find(tf,'Save').click();
+  assert.strictEqual(calls.at(-1).url,'/api/open-orders/classification');assert.strictEqual(input(entry),classificationDraft);assert.strictEqual(document.activeElement,classificationDraft);assert.strictEqual(classificationDraft.selectionStart,1);assert.strictEqual(classificationDraft.selectionEnd,3);find(entry,'Cancel').click();
   // A lost response locks the draft. Polls reconcile; they never submit again.
   edit(tp).click();enter(tp,'83000');mode='lost';await find(tp,'Save').click();
   assert(find(tp,'Save').disabled&&find(tp,'Cancel').disabled);assert(!tp.textContent.includes('Saved'));assert(tp.textContent.includes('unknown'));
@@ -4931,6 +5021,6 @@ vm.runInThisContext(fs.readFileSync(process.argv[1],'utf8'));
   console.log('price cell assertions passed');
 })().catch(err=>{console.error(err);process.exitCode=1;});
 """
-    result = subprocess.run([node, "-e", harness, str(ROOT / "render/static/open_orders.js"), json.dumps(headers)], capture_output=True, text=True, timeout=30)
+    result = subprocess.run([node, "-e", harness, str(ROOT / "render/static/open_orders.js"), json.dumps(headers), json.dumps(master_service.OPEN_ORDERS_TEMPLATE)], capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
     assert "price cell assertions passed" in result.stdout
