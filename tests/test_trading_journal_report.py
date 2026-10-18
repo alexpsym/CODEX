@@ -133,10 +133,13 @@ def test_excel_style_print_plan_preserves_grid_and_continuation_context(tmp_path
 
 
 def test_print_copy_preserves_source_values_styles_and_grayscale_structure(tmp_path):
+    import re
+    from openpyxl.comments import Comment
     wb=Workbook();s=wb.active;s.title='Grid';s.merge_cells('A1:C1');s['A1']='Group heading'
     s['A3']=0;s['B3']=False;s['C3']=-12.345;s['D3']=0.0000000123
     s['C3'].number_format='0.000" AUD"';s['D3'].number_format='0.0000000000'
     s['A4']='=1-1';s['B4']='=2+2';s['C4']='=3+3';s['D4']='Full long note  '*100+'END'
+    s['D4'].comment=Comment('Unrelated synthetic comment remains unchanged','Fixture')
     s['A1'].font=Font(name='Cambria',size=11,bold=True,color='FFFFFF')
     s['A1'].fill=PatternFill('solid',fgColor='112288');s['B3'].fill=PatternFill('solid',fgColor='F0D050')
     s['C3'].border=Border(bottom=Side(style='double',color='006600'))
@@ -151,6 +154,18 @@ def test_print_copy_preserves_source_values_styles_and_grayscale_structure(tmp_p
                 for cell in root.findall('.//s:c',report.NS):
                     if cell.get('r') in ('A4','B4'):cell.find('s:v',report.NS).text='0' if cell.get('r')=='A4' else '4'
                 data=ET.tostring(root)
+            if item.filename in ('xl/workbook.xml','xl/styles.xml','xl/worksheets/sheet1.xml'):
+                # Prefixes are deliberately absent from element/attribute NAMES:
+                # they occur only in Office compatibility string values.
+                declaration=(b' xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"'
+                    b' xmlns:x14ac="http://schemas.microsoft.com/office/spreadsheetml/2009/9/ac"'
+                    b' xmlns:future="urn:journal-print-future" mc:Ignorable="x14ac future"'
+                    b' mc:PreserveElements="future:*" mc:PreserveAttributes="future:*"'
+                    b' mc:ProcessContent="future:wrapper"')
+                data=re.sub(rb'(<[^!?][^\s/>]*)',lambda m:m.group(1)+declaration,data,count=1)
+                close=data.rfind(b'</')
+                data=data[:close]+(b'<mc:AlternateContent><mc:Choice Requires="future"/>'
+                                  b'<mc:Fallback/></mc:AlternateContent>')+data[close:]
             out.writestr(item,data)
     original.write_bytes(buffer.getvalue());before=original.read_bytes();mtime=original.stat().st_mtime_ns
     capture=report.capture_workbook(original,tmp_path)
@@ -170,7 +185,31 @@ def test_print_copy_preserves_source_values_styles_and_grayscale_structure(tmp_p
     for color in colors:assert color[-6:-4]==color[-4:-2]==color[-2:]
     values.close()
     with zipfile.ZipFile(copied) as z:
-        assert b'<f' not in z.read('xl/worksheets/sheet1.xml')
+        assert not ET.fromstring(z.read('xl/worksheets/sheet1.xml')).findall('.//s:f',report.NS)
+        with zipfile.ZipFile(io.BytesIO(before)) as original_zip:
+            expected_changed={'xl/workbook.xml','xl/styles.xml','xl/worksheets/sheet1.xml'}
+            assert set(z.namelist())==set(original_zip.namelist())
+            for name in z.namelist():
+                if name not in expected_changed:
+                    assert z.read(name)==original_zip.read(name),name
+            def compatibility_references(data):
+                scopes=[];pending={};references=[]
+                for event,item in ET.iterparse(io.BytesIO(data),events=('start-ns','start','end')):
+                    if event=='start-ns':pending[item[0]]=item[1]
+                    elif event=='start':
+                        scope=dict(scopes[-1]) if scopes else {}
+                        scope.update(pending);pending={};scopes.append(scope)
+                        for attr,value in item.attrib.items():
+                            if attr.startswith('{http://schemas.openxmlformats.org/markup-compatibility/2006}') or (attr=='Requires' and item.tag.endswith('}Choice')):
+                                for token in value.split():
+                                    prefix=token.split(':',1)[0]
+                                    assert prefix in scope,(attr,token)
+                                    references.append((attr,token,scope[prefix]))
+                    else:scopes.pop()
+                return references
+            for name in expected_changed:
+                expected=compatibility_references(original_zip.read(name))
+                assert expected and compatibility_references(z.read(name))==expected
     panels=[report.PrintPanel('Grid',2,4,3,4,2,1,'landscape',1,1,1)]
     excel=Excel();report.native_preview(copied,tmp_path,panels,'Microsoft Print to PDF on Ne01:',factory=lambda:excel)
     assert excel.events.index('blank-add')<excel.events.index('Calculation')<excel.events.index('virtual-after-blank')<excel.events.index('owned-open')

@@ -303,6 +303,7 @@ def prepare_print_copy(capture: Capture, directory: Path) -> Path:
     ranges, dimensions and all non-colour style properties survive unchanged.
     """
     from openpyxl.styles.colors import COLOR_INDEX
+    from xml.dom import minidom
     directory = directory.resolve()
     target = directory/'print-copy.xlsx'
     if Path(capture.source).resolve() == target:
@@ -325,45 +326,61 @@ def prepare_print_copy(capture: Capture, directory: Path) -> Path:
                     continue
                 data=source.read(info.filename)
                 if info.filename.endswith('.xml') or info.filename.endswith('.rels'):
-                    root=ET.fromstring(data)
+                    # Office compatibility prefixes also occur inside STRING
+                    # values (mc:Ignorable, Choice/@Requires, etc.). ElementTree
+                    # drops declarations not used in expanded element names.
+                    # DOM retains original prefixes/declarations, including
+                    # nested/rebound scopes, while we edit only owned nodes.
+                    document=minidom.parseString(data)
+                    root=document.documentElement
                     changed=False
                     if info.filename.startswith('xl/worksheets/sheet'):
-                        for cell in root.findall('.//s:sheetData/s:row/s:c',NS):
-                            formula=cell.find('s:f',NS)
+                        for cell in root.getElementsByTagNameNS(NS['s'],'c'):
+                            formula=next((n for n in cell.childNodes if n.nodeType==n.ELEMENT_NODE and n.localName=='f' and n.namespaceURI==NS['s']),None)
                             if formula is not None:
-                                cell.remove(formula)
-                                value=cell.find('s:v',NS)
-                                if value is None or value.text is None:
-                                    if value is not None:cell.remove(value)
-                                    cell.set('t','inlineStr')
-                                    inline=ET.SubElement(cell,'{'+NS['s']+'}is')
-                                    ET.SubElement(inline,'{'+NS['s']+'}t').text='[stored result unavailable]'
+                                cell.removeChild(formula)
+                                value=next((n for n in cell.childNodes if n.nodeType==n.ELEMENT_NODE and n.localName=='v' and n.namespaceURI==NS['s']),None)
+                                if value is None or not value.childNodes:
+                                    if value is not None:cell.removeChild(value)
+                                    cell.setAttribute('t','inlineStr')
+                                    prefix=(cell.prefix+':') if cell.prefix else ''
+                                    inline=document.createElementNS(NS['s'],prefix+'is')
+                                    text=document.createElementNS(NS['s'],prefix+'t')
+                                    text.appendChild(document.createTextNode('[stored result unavailable]'))
+                                    inline.appendChild(text);cell.appendChild(inline)
                                 changed=True
-                    for node in root.iter():
-                        kind=node.tag.split('}')[-1]
-                        if kind in ('color','fgColor','bgColor'):
-                            rgb=node.get('rgb')
-                            if rgb is None and node.get('theme') is not None and palette:
-                                rgb=palette[int(node.get('theme'))]
-                            if rgb is None and node.get('indexed') is not None:
-                                index=int(node.get('indexed'))
+                    for node in [root,*root.getElementsByTagName('*')]:
+                        kind=node.localName
+                        # Comments/unsupported extension objects remain byte
+                        # identical; print-cell styles and CF colours are the
+                        # only grayscale targets in this preparation stage.
+                        if (info.filename=='xl/styles.xml' or info.filename.startswith('xl/worksheets/')) and kind in ('color','fgColor','bgColor') and node.namespaceURI==NS['s']:
+                            rgb=node.getAttribute('rgb') or None
+                            if rgb is None and node.hasAttribute('theme') and palette:
+                                rgb=palette[int(node.getAttribute('theme'))]
+                            if rgb is None and node.hasAttribute('indexed'):
+                                index=int(node.getAttribute('indexed'))
                                 if index<len(COLOR_INDEX):rgb=COLOR_INDEX[index]
                             if rgb is not None:
-                                tint=float(node.get('tint','0'))
+                                tint=float(node.getAttribute('tint') or '0')
                                 base=[int(rgb[-6:][i:i+2],16) for i in (0,2,4)]
                                 tinted=[round(v*(1+tint) if tint<0 else v*(1-tint)+255*tint) for v in base]
                                 rgb=''.join(f'{v:02X}' for v in tinted)
-                                node.attrib.clear();node.set('rgb',grayscale_rgb(rgb));changed=True
+                                for attribute in ('rgb','theme','indexed','auto','tint'):
+                                    if node.hasAttribute(attribute):node.removeAttribute(attribute)
+                                node.setAttribute('rgb',grayscale_rgb(rgb));changed=True
                         for flag in ('refreshOnLoad','backgroundRefresh','enableRefresh'):
-                            if flag in node.attrib:node.set(flag,'0');changed=True
+                            if node.hasAttribute(flag):node.setAttribute(flag,'0');changed=True
                         if kind=='calcPr':
-                            node.set('calcMode','manual');node.set('fullCalcOnLoad','0');node.set('forceFullCalc','0');node.set('calcOnSave','0');changed=True
-                        if kind=='workbookPr':node.set('updateLinks','never');changed=True
-                    for parent in root.iter():
-                        for child in list(parent):
-                            if child.get('Type','').endswith('/calcChain') or child.get('PartName')=='/xl/calcChain.xml':
-                                parent.remove(child);changed=True
-                    if changed:data=ET.tostring(root,encoding='utf-8',xml_declaration=True)
+                            for attribute,value in {'calcMode':'manual','fullCalcOnLoad':'0','forceFullCalc':'0','calcOnSave':'0'}.items():node.setAttribute(attribute,value)
+                            changed=True
+                        if kind=='workbookPr':node.setAttribute('updateLinks','never');changed=True
+                    for parent in [root,*root.getElementsByTagName('*')]:
+                        for child in list(parent.childNodes):
+                            if child.nodeType==child.ELEMENT_NODE and (child.getAttribute('Type').endswith('/calcChain') or child.getAttribute('PartName')=='/xl/calcChain.xml'):
+                                parent.removeChild(child);changed=True
+                    if changed:data=document.toxml(encoding='utf-8')
+                    document.unlink()
                 output.writestr(info,data)
     return target
 
