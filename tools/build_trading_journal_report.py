@@ -46,7 +46,6 @@ from decimal import Decimal
 import hashlib
 import io
 import re
-import tempfile
 import zipfile
 import xml.etree.ElementTree as ET
 
@@ -224,278 +223,292 @@ def display_value(cell: PrintCell) -> str:
     return str(value)
 
 
-# Current 50-field schema, including the merged management subheaders. This is
-# schema only, copied from the canonical producer and checked against the capture.
-TRADE_FIELDS = (
-    'Trade Number', 'Open Time', 'Close Time', 'Account', 'Symbol', 'Side', 'Qty',
-    'Entry Price', 'Exit Price', 'Stop Loss Price', 'Stop Loss Distance',
-    'Target Price', 'Target Distance', 'Commission', 'Net P/L', 'Profit %',
-    'R-Multiple', 'Balance After', 'Trade Duration (DD:HH:MM:SS)',
-    *[f'Move to {group} {suffix}' for group in ('Break Even', 'Profit')
-      for suffix in ('Time', 'Duration', 'Trigger Price', 'Distance From Entry %', 'Distance From Exit %')],
-    'Test', 'Pattern', 'EMA', 'VWAP', 'ATHS/ATLS', 'Order', 'Round Number',
-    'Spiked Out', 'Close Stopout', 'Near Perfect Entry', 'Near Win', 'Early Close',
-    'Setup', 'Timeframe', 'Breakeven', 'Notes', 'Cashflow Amount',
-    'Cashflow New Balance', 'Currency', 'Row Type', 'Row ID',
-)
-REPEATED_KEYS = ('Source row', 'Trade Number', 'Account', 'Symbol')
-BANDS = (
-    ('Identity / execution', ('Open Time', 'Close Time', 'Side', 'Qty', 'Trade Duration (DD:HH:MM:SS)')),
-    ('Prices / risk', TRADE_FIELDS[7:13]),
-    ('Results', TRADE_FIELDS[13:18]),
-    ('Move to Break Even', TRADE_FIELDS[19:24]),
-    ('Move to Profit', TRADE_FIELDS[24:29]),
-    ('Classifications / administration / notes', tuple(f for f in TRADE_FIELDS[29:] if f != 'Notes') + ('Notes',)),
-)
-A4 = (210 / 25.4 * 72, 297 / 25.4 * 72)
-MARGIN = 36.0
-BODY_FONT = 10.0
+@dataclass(frozen=True)
+class PrintPanel:
+    sheet: str
+    first_column: int
+    last_column: int
+    first_row: int
+    last_row: int
+    header_rows: int
+    identity_columns: int
+    orientation: str
+    panel: int
+    panels: int
+    block: int
+    zoom: int = 92
+
+    @property
+    def context(self):
+        from openpyxl.utils import get_column_letter as letter
+        return (f'{self.sheet} | rows {self.first_row}-{self.last_row} | '
+                f'panel {self.panel}/{self.panels} | '
+                f'columns {letter(self.first_column)}:{letter(self.last_column)} | block {self.block}')
 
 
-def synthetic_rows():
-    """No production values, identifiers or account labels enter the fixture."""
-    rows = []
-    for i in range(2):
-        row = {f: '[missing]' for f in TRADE_FIELDS}
-        row.update({'Source row': f'Trade Log!{4+i}', 'Trade Number': '[missing]' if i else 'SYN-001',
-                    'Account': 'Demo A', 'Symbol': 'SYNUSD', 'Side': 'Buy' if i == 0 else 'Sell',
-                    'Open Time': '2026-10-01 09:00+10:00', 'Close Time': '2026-10-01 10:00+10:00',
-                    'Qty': '0', 'Entry Price': '0.0000000123', 'Exit Price': '0.0000000120',
-                    'Stop Loss Price': '0.0000000110', 'Stop Loss Distance': '0.0000000013',
-                    'Target Price': '0.0000000150', 'Target Distance': '0.0000000027',
-                    'Commission': '-0.0004 USDT', 'Net P/L': '-12.345 AUD' if i == 0 else '0 AUD',
-                    'Profit %': '-0.125%', 'R-Multiple': '-0.375R', 'Balance After': '1000.000 AUD',
-                    'Trade Duration (DD:HH:MM:SS)': '00:01:00:00', 'Test': 'No', 'Pattern': 'Range',
-                    'EMA': 'No', 'VWAP': 'Yes', 'ATHS/ATLS': 'No', 'Order': 'Limit',
-                    'Round Number': 'No', 'Spiked Out': 'No', 'Close Stopout': 'Yes',
-                    'Near Perfect Entry': 'No', 'Near Win': 'No', 'Early Close': 'No',
-                    'Setup': 'Pullback', 'Timeframe': '30MIN', 'Breakeven': 'No',
-                    'Cashflow Amount': '0 AUD', 'Cashflow New Balance': '[missing]', 'Currency': 'AUD',
-                    'Row Type': 'trade', 'Row ID': f'synthetic-{i+1}',
-                    'Notes': ('Preserve the full observation, including the zero result and the small price. '
-                              'Review entry timing before the next planned session. ' * 10 + 'END OF LONG NOTE')
-                              if i == 0 else 'No early exit. END OF SECOND NOTE'})
-        for group in ('Break Even', 'Profit'):
-            for suffix, value in zip(('Time', 'Duration', 'Trigger Price', 'Distance From Entry %', 'Distance From Exit %'),
-                                     ('2026-10-01 09:30+10:00', '00:00:30:00', '0.0000000123', '0%', '-0.125%')):
-                row[f'Move to {group} {suffix}'] = value
-        rows.append(row)
-    return rows
+def column_points(sheet, column):
+    """Excel character widths to conservative print points; no font scaling here."""
+    from openpyxl.utils import get_column_letter
+    dimension = sheet.column_dimensions.get(get_column_letter(column))
+    width = dimension.width if dimension is not None else (sheet.sheet_format.defaultColWidth or 13)
+    return (width * 7 + 5) * .75
 
 
-@dataclass
-class PlacedText:
-    artist: object
-    row: str | None
-    column: str | None
-    original: str
-    role: str
-    bounds: tuple = ()
-    font_size: float = BODY_FONT
+def plan_panels(workbook, specifications):
+    """Consecutive source columns; finish horizontal panels before next row block.
 
-
-@dataclass
-class PrintPage:
-    figure: object
-    title: str
-    band: int | None = None
-    placements: list[PlacedText] = field(default_factory=list)
-
-
-def build_layout_preview(rows=None):
-    """Return owned A4 page objects with measured, source-addressed placements.
-
-    Large administrative bands use a field/record matrix, retaining both record
-    columns on every continuation. Long cells split at measured line boundaries.
+    specifications: (sheet, last-column, header-count, repeated-columns,
+    orientation, [(first-data-row,last-data-row), ...]). Merged header groups
+    stay whole when they fit; oversized groups explicitly repeat on continuation.
     """
-    import matplotlib
-    matplotlib.use('Agg')
-    from matplotlib.figure import Figure
-    from matplotlib.backends.backend_agg import FigureCanvasAgg
-    from matplotlib.font_manager import FontProperties
-    rows = synthetic_rows() if rows is None else rows
-    if not rows:
-        raise ValueError('Preview requires a small shared row block')
-    pages = []
-
-    def page(title, landscape=False, band=None):
-        w, h = reversed(A4) if landscape else A4
-        fig = Figure(figsize=(w/72, h/72), dpi=72)
-        FigureCanvasAgg(fig)
-        p = PrintPage(fig, title, band)
-        pages.append(p)
-        place(p, title, MARGIN, h-40, 16, role='title')
-        place(p, 'Layout preview — synthetic data', MARGIN, h-61, 10, role='label')
-        return p
-
-    def place(p, text, x, y, size=BODY_FONT, row=None, column=None, original=None, role='data', bold=False):
-        w, h = p.figure.get_size_inches()*72
-        artist = p.figure.text(x/w, y/h, text, va='top', ha='left', fontsize=size,
-                               fontfamily='DejaVu Sans', weight='bold' if bold else 'normal', color='#111111',
-                               linespacing=1.3)
-        p.placements.append(PlacedText(artist, row, column, text if original is None else original, role, font_size=size))
-
-    def wrap(p, text, width, bold=False):
-        renderer = p.figure.canvas.get_renderer()
-        prop = FontProperties(family='DejaVu Sans', size=BODY_FONT, weight='bold' if bold else 'normal')
-        def fits(s):
-            return renderer.get_text_width_height_descent(s, prop, False)[0] <= width
-        lines = []
-        # Preserve every character, including whitespace, across line fragments.
-        for paragraph in str(text).split('\n'):
-            current = ''
-            for token in re.findall(r'\S+\s*|\s+', paragraph):
-                if fits(current+token):
-                    current += token
-                else:
-                    if current:
-                        lines.append(current)
-                    current = token
-                    if not fits(current):
-                        # Do not split numbers: a wider band is required instead.
-                        if re.fullmatch(r'[-+\d.,%]+\s*\w*', current.strip()):
-                            raise ValueError(f'Numeric value needs a wider column: {current}')
-                        chunk = ''
-                        for ch in current:
-                            if chunk and not fits(chunk+ch):
-                                lines.append(chunk)
-                                chunk = ''
-                            chunk += ch
-                        current = chunk
-            lines.append(current)
-        return lines
-
-    def table(p, headers, records, widths, y, band=None, groups=None):
-        """records: [(stable-row-id, [(column-id, display-string), ...])]."""
-        title = p.title
-        def start(target):
-            h = target.figure.get_size_inches()[1]*72
-            top = h-88
-            if groups:
-                for label, start_col, span in groups:
-                    place(target, label, MARGIN+sum(widths[:start_col])+4, top, bold=True, role='group')
-                top -= 21
-            x = MARGIN
-            height = max(len(wrap(target, label, width-8, True)) for label, width in zip(headers, widths))*13+12
-            from matplotlib.patches import Rectangle
-            target.figure.add_artist(Rectangle((MARGIN/(target.figure.get_size_inches()[0]*72), (top-height)/(h)),
-                                     sum(widths)/(target.figure.get_size_inches()[0]*72), height/h,
-                                     transform=target.figure.transFigure, color='#eeeeee', zorder=0))
-            for label, width in zip(headers, widths):
-                place(target, '\n'.join(wrap(target,label,width-8,True)), x+4, top-4, role='header', bold=True)
-                x += width
-            return top-height-7
-        y = start(p)
-        for row_id, values in records:
-            fragments = [wrap(p, value, width-8) for (_, value), width in zip(values, widths)]
-            while any(fragments):
-                available = int((y-MARGIN-12)//13)
-                if available < 1:
-                    p = page(title+' / continued' if not title.endswith('/ continued') else title, True, band)
-                    y = start(p)
-                    if row_id:
-                        place(p, f'Continued row: {row_id}', MARGIN, y, role='continuation')
-                        y -= 22
-                    available = int((y-MARGIN-12)//13)
-                take = min(max(map(len, fragments)), available)
-                x = MARGIN
-                for index, ((column, original), width) in enumerate(zip(values,widths)):
-                    chunk = fragments[index][:take]
-                    if chunk:
-                        place(p, '\n'.join(chunk), x+4, y, row=row_id, column=column, original=original)
-                    fragments[index] = fragments[index][take:]
-                    x += width
-                y -= take*13+4
-        return p
-
-    p = page('Trading journal | Summary')
-    width = A4[0]-2*MARGIN
-    table(p, ['Metric','Synthetic value'], [(None, [('Metric',k),('Value',v)]) for k,v in
-        [('Trades','2'),('Wins','0'),('Losses','1'),('Break-even','1'),('Net P/L','-12.345 AUD'),
-         ('Net R Multiple','-0.375R'),('Test','No'),('Missing value','[missing]')]], [width*.58,width*.42],0)
-    place(p, 'Read at Actual size / 100%. Workbook is unchanged.', MARGIN, 290, role='label')
-    place(p, 'Trade Log records repeat across six consecutive field bands.', MARGIN, 266, role='label')
-    p = page('SYMBOLS | Comparison / statistics', True)
-    width = A4[1]-2*MARGIN
-    table(p,['Symbol','Trades','Wins','Losses','Net R Multiple','Net P/L %'],
-          [(None,[(str(j),v) for j,v in enumerate(r)]) for r in
-           [('SYNUSD','2','0','1','-0.375R','-0.125%'),('SYNJPY','0','0','0','0R','0%')]],
-          [width/6]*6,0, groups=[('Activity',0,4),('Results',4,2)])
-    for number, (name, fields) in enumerate(BANDS,1):
-        p = page(f'Trade Log | Band {number}/6 | {name}', True, number)
-        width = A4[1]-2*MARGIN
-        if number < 6:
-            columns = REPEATED_KEYS+tuple(fields)
-            widths = [86,72,58,65]+[(width-281)/len(fields)]*len(fields)
-            table(p, columns, [(row['Source row'],[(col,row[col]) for col in columns]) for row in rows], widths,0,number)
-        else:
-            # Each record remains its own column; keys appear in every header.
-            headers = ['Field']+[' | '.join(row[k] for k in REPEATED_KEYS) for row in rows]
-            widths = [210]+[(width-210)/len(rows)]*len(rows)
-            records = [(f,[('Field',f)]+[(row['Source row']+'|'+f,row[f]) for row in rows]) for f in fields]
-            table(p,headers,records,widths,0,number)
-    p = page('YEARLY REPORT | Month detail')
-    width = A4[0]-2*MARGIN
-    table(p,['Month','Trades','Net P/L','Net R Multiple'],
-          [(None,[(str(j),v) for j,v in enumerate(r)]) for r in
-           [('October','2','-12.345 AUD','-0.375R'),('November','0','0 AUD','0R')]],
-          [width*.24,width*.15,width*.31,width*.30],0)
-    if len(pages)>10:
-        close_pages(pages)
-        raise ValueError('Synthetic proof exceeded ten pages; reduce fixture rows, never font size')
-    for i,p in enumerate(pages,1):
-        place(p, f'{i} / {len(pages)}', MARGIN, 23, size=9, role='footer')
-        p.figure.canvas.draw()
-        renderer = p.figure.canvas.get_renderer()
-        w,h = p.figure.get_size_inches()*72
-        for item in p.placements:
-            item.bounds = tuple(item.artist.get_window_extent(renderer).extents)
-            x0,y0,x1,y1 = item.bounds
-            minimum_y = 10 if item.role == 'footer' else MARGIN
-            if x0 < MARGIN-0.1 or x1 > w-MARGIN+0.1 or y0 < minimum_y or y1 > h-MARGIN+0.1:
-                close_pages(pages)
-                raise ValueError(f'Text outside printable bounds on {p.title}: {item.artist.get_text()!r} {item.bounds}')
-    return pages
+    from openpyxl.utils.cell import range_boundaries
+    result = []
+    for name, last, headers, identities, orientation, blocks in specifications:
+        sheet = workbook[name]
+        usable = (841.89 if orientation == 'landscape' else 595.276) - 64
+        budget = usable / .92 - sum(column_points(sheet,c) for c in range(1,identities+1))
+        bands = []
+        first = identities+1
+        while first <= last:
+            end, width = first-1, 0
+            while end < last and width+column_points(sheet,end+1) <= budget:
+                end += 1
+                width += column_points(sheet,end)
+            if end < first:
+                raise ValueError(f'{name}: source column {first} exceeds readable A4 width')
+            for merged in sheet.merged_cells.ranges:
+                a,b,c,d = range_boundaries(str(merged))
+                if b <= headers and first < a <= end < c:
+                    end = a-1
+            bands.append((first,end))
+            first = end+1
+        for block,(top,bottom) in enumerate(blocks,1):
+            for panel,(left,right) in enumerate(bands,1):
+                result.append(PrintPanel(name,left,right,top,bottom,headers,identities,
+                                         orientation,panel,len(bands),block))
+    return result
 
 
-def close_pages(pages):
-    for page in pages:
-        page.figure.clear()
+def grayscale_rgb(rgb):
+    value = rgb[-6:]
+    r,g,b = (int(value[i:i+2],16) for i in (0,2,4))
+    gray = round(.299*r+.587*g+.114*b)
+    return f'FF{gray:02X}{gray:02X}{gray:02X}'
 
 
-def write_preview_pdf(pages, output: Path, inspection_directory: Path | None = None):
-    import matplotlib as mpl
-    from matplotlib.backends.backend_pdf import PdfPages
-    output.parent.mkdir(parents=True, exist_ok=True)
-    with mpl.rc_context({'pdf.fonttype':42, 'text.usetex':False}), PdfPages(output, metadata={
-        'Title':'Trading journal - Layout preview - synthetic data', 'Author':'LTT'}) as pdf:
-        for p in pages:
-            pdf.savefig(p.figure)  # No tight bounding box: physical A4 dimensions stay fixed.
-    if inspection_directory is not None:
-        inspection_directory.mkdir(parents=True,exist_ok=True)
-        indices = [0, 2, 3, next(i for i,p in reversed(list(enumerate(pages))) if p.band == 6)]
-        for i in indices:
-            pages[i].figure.savefig(inspection_directory/f'page-{i+1}.png',dpi=100)
-    return len(pages)
+def prepare_print_copy(capture: Capture, directory: Path) -> Path:
+    """Surgical ZIP edits: preserve parts/styles, freeze exact cached results.
+
+    No openpyxl save/rebuild and no native source open. Fonts, borders, merged
+    ranges, dimensions and all non-colour style properties survive unchanged.
+    """
+    from openpyxl.styles.colors import COLOR_INDEX
+    directory = directory.resolve()
+    target = directory/'print-copy.xlsx'
+    if Path(capture.source).resolve() == target:
+        raise ValueError('Print-copy path must differ from source')
+    with zipfile.ZipFile(io.BytesIO(capture.data)) as source:
+        theme = ET.fromstring(source.read('xl/theme/theme1.xml')) if 'xl/theme/theme1.xml' in source.namelist() else None
+        palette = []
+        if theme is not None:
+            ns={'a':'http://schemas.openxmlformats.org/drawingml/2006/main'}
+            scheme=theme.find('.//a:clrScheme',ns)
+            colors={x.tag.split('}')[-1]: next(iter(x)).get('val',next(iter(x)).get('lastClr')) for x in scheme}
+            # System colours use lastClr rather than symbolic window/windowText.
+            for x in scheme:
+                child=next(iter(x))
+                if child.get('lastClr'):colors[x.tag.split('}')[-1]]=child.get('lastClr')
+            palette=[colors[k] for k in ('lt1','dk1','lt2','dk2','accent1','accent2','accent3','accent4','accent5','accent6','hlink','folHlink')]
+        with zipfile.ZipFile(target,'x',compression=zipfile.ZIP_DEFLATED) as output:
+            for info in source.infolist():
+                if info.filename=='xl/calcChain.xml':
+                    continue
+                data=source.read(info.filename)
+                if info.filename.endswith('.xml') or info.filename.endswith('.rels'):
+                    root=ET.fromstring(data)
+                    changed=False
+                    if info.filename.startswith('xl/worksheets/sheet'):
+                        for cell in root.findall('.//s:sheetData/s:row/s:c',NS):
+                            formula=cell.find('s:f',NS)
+                            if formula is not None:
+                                cell.remove(formula)
+                                value=cell.find('s:v',NS)
+                                if value is None or value.text is None:
+                                    if value is not None:cell.remove(value)
+                                    cell.set('t','inlineStr')
+                                    inline=ET.SubElement(cell,'{'+NS['s']+'}is')
+                                    ET.SubElement(inline,'{'+NS['s']+'}t').text='[stored result unavailable]'
+                                changed=True
+                    for node in root.iter():
+                        kind=node.tag.split('}')[-1]
+                        if kind in ('color','fgColor','bgColor'):
+                            rgb=node.get('rgb')
+                            if rgb is None and node.get('theme') is not None and palette:
+                                rgb=palette[int(node.get('theme'))]
+                            if rgb is None and node.get('indexed') is not None:
+                                index=int(node.get('indexed'))
+                                if index<len(COLOR_INDEX):rgb=COLOR_INDEX[index]
+                            if rgb is not None:
+                                tint=float(node.get('tint','0'))
+                                base=[int(rgb[-6:][i:i+2],16) for i in (0,2,4)]
+                                tinted=[round(v*(1+tint) if tint<0 else v*(1-tint)+255*tint) for v in base]
+                                rgb=''.join(f'{v:02X}' for v in tinted)
+                                node.attrib.clear();node.set('rgb',grayscale_rgb(rgb));changed=True
+                        for flag in ('refreshOnLoad','backgroundRefresh','enableRefresh'):
+                            if flag in node.attrib:node.set(flag,'0');changed=True
+                        if kind=='calcPr':
+                            node.set('calcMode','manual');node.set('fullCalcOnLoad','0');node.set('forceFullCalc','0');node.set('calcOnSave','0');changed=True
+                        if kind=='workbookPr':node.set('updateLinks','never');changed=True
+                    for parent in root.iter():
+                        for child in list(parent):
+                            if child.get('Type','').endswith('/calcChain') or child.get('PartName')=='/xl/calcChain.xml':
+                                parent.remove(child);changed=True
+                    if changed:data=ET.tostring(root,encoding='utf-8',xml_declaration=True)
+                output.writestr(info,data)
+    return target
+
+
+def validate_virtual_context(name):
+    # Only exact installed names and cached ports supplied by the host inventory.
+    if not re.fullmatch(r'Microsoft (?:Print to PDF|XPS Document Writer) on (?:Ne\d+|PORTPROMPT):',name):
+        raise ValueError('Only verified installed local Microsoft PDF/XPS contexts are eligible')
+    return name
+
+
+def apply_native_page_setup(excel, sheet, panel, ordinal):
+    from openpyxl.utils import get_column_letter as letter
+    excel.PrintCommunication=False
+    try:
+        setup=sheet.PageSetup
+        setup.PaperSize=9;setup.Orientation=2 if panel.orientation=='landscape' else 1
+        setup.LeftMargin=28.35;setup.RightMargin=28.35
+        setup.TopMargin=36;setup.BottomMargin=36
+        setup.HeaderMargin=14;setup.FooterMargin=14
+        setup.Zoom=panel.zoom;setup.FitToPagesWide=False;setup.FitToPagesTall=False
+        setup.PrintTitleRows=f'$1:${panel.header_rows}'
+        setup.PrintTitleColumns=f'$A:${letter(panel.identity_columns)}'
+        setup.PrintArea=f'${letter(panel.first_column)}${panel.first_row}:${letter(panel.last_column)}${panel.last_row}'
+        setup.Order=2;setup.BlackAndWhite=False;setup.PrintHeadings=True
+        setup.CenterFooter=f'&8 P{ordinal:03d} | '+panel.context.replace('&','&&')+' | page &P'
+    finally:
+        excel.PrintCommunication=True
+    if setup.PaperSize!=9 or setup.Orientation!=(2 if panel.orientation=='landscape' else 1) or setup.Zoom!=panel.zoom:
+        raise RuntimeError('Native A4 settings readback mismatch')
+
+
+def native_preview(copy_path, directory, panels, virtual_context, factory=None):
+    """No-save native adapter. Bootstrap precedes every contextual setter.
+
+    factory is a narrow test seam; production always uses DispatchEx, never an
+    existing Excel instance. Caller runs this adapter in a bounded child.
+    """
+    from openpyxl import load_workbook
+    directory=Path(directory).resolve();copy_path=Path(copy_path).resolve()
+    if copy_path.parent!=directory or copy_path.name!='print-copy.xlsx':
+        raise ValueError('Native open must target the owned print-copy.xlsx')
+    context=validate_virtual_context(virtual_context)
+    if factory is None:
+        import win32com.client
+        factory=lambda:win32com.client.DispatchEx('Excel.Application')
+    excel=None;bootstrap=None;source=None;output=None
+    try:
+        excel=factory()
+        excel.Visible=False;excel.DisplayAlerts=False;excel.EnableEvents=False
+        excel.AutomationSecurity=3;excel.AskToUpdateLinks=False
+        bootstrap=excel.Workbooks.Add(-4167)
+        if excel.Workbooks.Count<1 or excel.ActiveSheet is None:raise RuntimeError('Missing bootstrap context')
+        excel.Calculation=-4135;excel.CalculateBeforeSave=False
+        if excel.Calculation!=-4135 or excel.CalculateBeforeSave:raise RuntimeError('Unsafe calculation state')
+        if excel.ActivePrinter!=context:excel.ActivePrinter=context
+        if excel.ActivePrinter!=context:raise RuntimeError('Virtual context mismatch')
+        source=excel.Workbooks.Open(str(copy_path),UpdateLinks=0,ReadOnly=True,IgnoreReadOnlyRecommended=True,AddToMru=False)
+        if excel.Calculation!=-4135:raise RuntimeError('Print copy changed manual calculation')
+        # Return a native PDF via an output workbook of source-sheet copies. No
+        # source values, formats, or objects are reconstructed from transactions.
+        output=excel.Workbooks.Add(-4167);placeholder=output.Worksheets(1)
+        model=load_workbook(copy_path,data_only=True)
+        try:
+            for ordinal,panel in enumerate(panels,1):
+                original=source.Worksheets(panel.sheet)
+                original.Copy(After=output.Worksheets(output.Worksheets.Count))
+                sheet=output.Worksheets(output.Worksheets.Count)
+                sheet.Name=f'P{ordinal:03d}'
+                # Preserve grouped headers, repeating context if a group spans a
+                # horizontal panel boundary. No trade is transposed.
+                for merged in model[panel.sheet].merged_cells.ranges:
+                    if merged.min_row<=panel.header_rows and merged.min_col<=panel.last_column and merged.max_col>=panel.first_column:
+                        if merged.min_col<panel.first_column or merged.max_col>panel.last_column:
+                            sheet.Range(str(merged)).UnMerge()
+                            left=max(merged.min_col,panel.first_column);right=min(merged.max_col,panel.last_column)
+                            original.Cells(merged.min_row,merged.min_col).Copy(Destination=sheet.Cells(merged.min_row,left))
+                            sheet.Range(sheet.Cells(merged.min_row,left),sheet.Cells(merged.max_row,right)).Merge()
+                # Output-only wrapping and local row expansion retain notes and
+                # long identifiers; no global AutoFit or font replacement.
+                body=sheet.Range(sheet.Cells(panel.first_row,1),sheet.Cells(panel.last_row,panel.last_column))
+                body.WrapText=True;body.Rows.AutoFit()
+                apply_native_page_setup(excel,sheet,panel,ordinal)
+            placeholder.Delete()
+            if len(panels)>24:raise ValueError('Proof plan exceeds 24 pages')
+            native=directory/'native-preview.pdf'
+            output.ExportAsFixedFormat(0,str(native),OpenAfterPublish=False)
+        finally:model.close()
+        return native
+    finally:
+        # No Save/SaveAs/SaveCopyAs path exists; only our books are discarded.
+        try:
+            for book in (output,source,bootstrap):
+                if book is not None:book.Close(SaveChanges=False)
+        finally:
+            if excel is not None:excel.Quit()
+
+
+def finalize_native_pdf(native, directory, panels):
+    """Validate native page geometry/content and arrange panels by explicit IDs."""
+    import fitz
+    target=Path(directory)/'journal_a4_excel_layout_preview.pdf'
+    with fitz.open(native) as pdf:
+        if len(pdf)>24:raise RuntimeError('Native pagination exceeded 24 pages')
+        order=[]
+        for index,page in enumerate(pdf):
+            text=page.get_text()
+            match=re.search(r'P(\d{3})\s*\|',text)
+            if not match:raise RuntimeError('Native page lost explicit panel context')
+            ordinal=int(match.group(1))
+            if not 1<=ordinal<=len(panels):raise RuntimeError('Unknown native panel')
+            expected=(841.89,595.276) if panels[ordinal-1].orientation=='landscape' else (595.276,841.89)
+            if any(abs(a-b)>1 for a,b in zip((page.rect.width,page.rect.height),expected)):
+                raise RuntimeError('Native saved-PDF dimensions are not the planned A4 orientation')
+            if re.search(r'#{4,}',text):raise RuntimeError('Native PDF contains unreadable numeric overflow')
+            order.append((ordinal,index))
+        if {n for n,i in order}!=set(range(1,len(panels)+1)):
+            raise RuntimeError('Native export omitted planned panels')
+        pdf.select([i for _,i in sorted(order)])
+        pdf.save(target)
+        trade=[i for i,p in enumerate(pdf) if 'Trade Log' in p.get_text()]
+        portrait=next(i for i,p in enumerate(pdf) if p.rect.width<p.rect.height)
+        merged=next(i for i,p in enumerate(pdf) if 'SYMBOLS' in p.get_text())
+        for i in [portrait,*trade[:2],merged]:
+            pdf[i].get_pixmap(matrix=fitz.Matrix(1.25,1.25),colorspace=fitz.csGRAY).save(Path(directory)/f'inspect-{i+1}.png')
+        return {'pdf':str(target),'pages':len(pdf),'panel_order':[n for n,_ in sorted(order)],
+                'inspection_pages':[portrait+1,*[i+1 for i in trade[:2]],merged+1]}
 
 
 def main() -> int:
     import argparse
-    parser = argparse.ArgumentParser(description='Legacy HTML report or synthetic A4 layout proof')
-    parser.add_argument('--print-proof', type=Path, help='Write a synthetic PDF; never reads production data')
-    parser.add_argument('--inspection-directory', type=Path, help='At most four PNGs from the same page objects')
-    args = parser.parse_args()
-    if args.print_proof is None:
-        if args.inspection_directory:
-            parser.error('--inspection-directory requires --print-proof')
-        return legacy_main()
-    pages = build_layout_preview()
-    try:
-        print(f'Wrote {write_preview_pdf(pages,args.print_proof,args.inspection_directory)} A4 pages: {args.print_proof}')
-    finally:
-        close_pages(pages)
+    parser=argparse.ArgumentParser(description='Legacy HTML or isolated native Excel print-copy proof')
+    parser.add_argument('--native-preview-directory',type=Path)
+    parser.add_argument('--virtual-context')
+    args=parser.parse_args()
+    if args.native_preview_directory is None:return legacy_main()
+    directory=args.native_preview_directory.resolve()
+    manifest=json.loads((directory/'plan.json').read_text(encoding='utf-8'))
+    panels=[PrintPanel(**p) for p in manifest['panels']]
+    native=native_preview(directory/'print-copy.xlsx',directory,panels,args.virtual_context)
+    result=finalize_native_pdf(native,directory,panels)
+    (directory/'result.json').write_text(json.dumps(result,indent=2),encoding='utf-8')
+    print(json.dumps(result),flush=True)
     return 0
 
 
-if __name__ == '__main__':
+if __name__=='__main__':
     raise SystemExit(main())

@@ -1,3 +1,80 @@
+# Phase 6A correction: Excel appearance, grayscale and native A4
+
+**The previous synthetic layout was REJECTED. Phase 6A remains incomplete and user acceptance is pending.** The rejected tracked PDF has been retired. There is no corrected journal PDF to review yet. Full export and the Journal-menu action remain Phase 6B.
+
+## Current result and exact continuation checkpoint
+
+The bounded complete setup batch established a working native A4 fixture path: approved host execution, dedicated Excel, explicit blank worksheet bootstrap kept open, manual calculation and CalculateBeforeSave=False read back, then an exact installed local virtual context selected before any page setup. Microsoft Print to PDF on Ne01: and Microsoft XPS Document Writer on Ne00: both emitted two-page native PDFs with portrait/landscape A4 geometry. The checker initially marked these failed because it expected the opposite page order; inspection of the saved files showed 841.92 x 595.32 and 595.32 x 841.92 points. No extra export was used to correct that interpretation. Trial C was ineligible: its inherited context was the physical Brother device. No complete path was rerun after saved-PDF evidence was recognized. No cause isolation is claimed beyond the combined working configuration.
+
+Batch evidence: `C:/Users/User/AppData/Local/Temp/ltt_a4_setup_batch_lf_n5umr/batch-results.json`, plus A-fixture.pdf and B-fixture.pdf. The consolidated JSON retains the original checker FAIL statuses; the geometry correction above is the later interpretation, not a rewritten result. Each child reread exact named device cache metadata in its same-user context; this exceeded the intended one metadata-read allowance and must not be represented as a single inventory. No device/network probing, guessed ports, registry writes or Windows default-printer changes occurred.
+
+The single current production capture succeeded. The single private-preview attempt failed at `Workbooks.Open` on the task-owned print-copy.xlsx, with Excel error -2146827284 / COM dispatch error -2147352567. It never reached ExportAsFixedFormat. No real-data PDF or final inspection PNGs were produced. No native retry is authorized. The exact cause of the open failure remains unproven; passing fakes and successful synthetic A4 export do not prove that the rewritten real workbook package opens in Excel.
+
+Checkpoint directory: `C:/Users/User/AppData/Local/Temp/ltt_journal_a4_0wx5wktm`. It contains captured-workbook.xlsx, capture.json, prepared print-copy.xlsx, plan.json, native_worker.py and native-owner.json. These are PRIVATE local temporary artifacts and must never be staged/uploaded. Intended private output was journal_a4_excel_layout_preview.pdf in that directory; it does not exist. Do not open the previous rejected synthetic PDF as a replacement. No user viewer/print dialog was launched.
+
+Next safe work requires a new explicit allowance: diagnose the prepared-package/native-open failure using tiny owned fixtures, without another canonical workbook capture; retain the existing frozen bytes. A new real-data preview attempt requires renewed authorization. Do not install dependencies, repair Office, change defaults, open/save the canonical workbook, or silently fall back to the rejected Matplotlib presentation.
+
+## Source protection and current capture
+
+- Canonical source: `C:/GPT/CODEX-master/journal/Trading Journal.xlsx`. One read-only capture; zero source writes/native opens. Source SHA256 `1508275c67b1ebfda0355ebc241cc3b139377533f2da4baebc7d34cee4d00547`, 823271 bytes; before/after size and mtime_ns `1792202206281703000` matched. All later inspection used the captured bytes. Unsaved changes in a user's Excel session are not included in a saved-file capture.
+- All proposed native opens are restricted to the task-owned print-copy.xlsx in its output directory, with UpdateLinks=0, ReadOnly=True, IgnoreReadOnlyRecommended=True and AddToMru=False. Source paths are rejected before native creation.
+- Surgical OOXML ZIP preparation freezes formula results before native open, retaining stored zero/False/numeric text and marking absent caches explicitly; no formula evaluation. Removes obsolete calculation-chain references, disables refresh-on-open/background refresh/enable-refresh flags where present, and sets manual/no-recalculate workbook flags. No broad openpyxl save/reconstruction.
+- Print-copy grayscale conversion materializes source theme/indexed/RGB colours and tint into grayscale. Fonts/sizes/weights/alignment, number formats, borders, dimensions, merge structure, workbook parts and business values otherwise survive preparation. Native sheet copying retains the Excel grid; no field-list transpose.
+- Native adapter creates its bootstrap before calculation/printer setters and keeps it open until output/source copies close. All owned books close with SaveChanges=False; the path contains no Save/SaveAs/SaveCopyAs, PrintOut, PrintPreview, print dialogs, shell printing, global printer setters or source-save calls. Macro/event/link-update guards are applied before opening the print copy.
+- Actual failed native worker PID 14864 was recorded before work; finally cleanup quit the owned instance. Windows default remained Brother HL-L2395DW series. No owned modal-dialog observation was recorded by the worker monitor; that is limited observation, not proof that all possible driver UI was absent. No print-job API was called; no spooler queue was inspected.
+
+## Planned representative scope (NOT exported)
+
+The current capture confirmed Calibri 11 in representative populated areas, 50 Trade Log fields, 52 Trade Log merges and 28 SYMBOLS merges. The earlier 16-sheet inventory below is retained as structural history, not a claim that every sheet has now been exported.
+
+The source workbook remains the visual reference: trades stay rows; fields remain columns in source order. Original widths are used at 92% print zoom (representative Calibri 11 becomes 10.12pt), never fit-whole-sheet shrinking. Paper is A4, margins left/right 28.35pt, top/bottom 36pt, header/footer 14pt. Source multi-row headings repeat, source identifying column A repeats, and native row/column headings provide exact source row references even where Trade Number is absent. This is a deliberate narrower repeated identity set than the rejected all-key report: account/symbol are retained at their original positions; source row number and source column A identify every panel without reordering fields.
+
+The 16 planned pages follow source sheet order. Horizontal panels finish for a shared row block before the next block. Native footer IDs identify sheet, source row range, panel number, source column span and block; saved-PDF processing validates A4 and reorders by explicit IDs because fixture export order differed. PrintHeadings=True retains the familiar sheet addresses. No PDF export or rasterization of these real-data panels has succeeded.
+
+| Planned page | Source sheet | Data rows | Source columns plus repeated A | Orientation | Panel/block |
+|---|---|---|---|---|---|
+| 1 | STATS1 | 2:43 | B:B | portrait | 1/1, block 1 |
+| 2 | STATS1 | 44:77 | B:B | portrait | 1/1, block 2 |
+| 3 | SYMBOLS | 3:7 | B:K | landscape | 1/3, block 1 |
+| 4 | SYMBOLS | 3:7 | L:S | landscape | 2/3, block 1 |
+| 5 | SYMBOLS | 3:7 | T:V | landscape | 3/3, block 1 |
+| 6 | Trade Log | 4:8 | B:I | landscape | 1/8, block 1 |
+| 7 | Trade Log | 4:8 | J:P | landscape | 2/8, block 1 |
+| 8 | Trade Log | 4:8 | Q:S | landscape | 3/8, block 1 |
+| 9 | Trade Log | 4:8 | T:X | landscape | 4/8, block 1 |
+| 10 | Trade Log | 4:8 | Y:AF | landscape | 5/8, block 1 |
+| 11 | Trade Log | 4:8 | AG:AO | landscape | 6/8, block 1 |
+| 12 | Trade Log | 4:8 | AP:AT | landscape | 7/8, block 1 |
+| 13 | Trade Log | 4:8 | AU:AX | landscape | 8/8, block 1 |
+| 14 | P&L Calendar | 2:13 | B:D | landscape | 1/3, block 1 |
+| 15 | P&L Calendar | 2:13 | E:G | landscape | 2/3, block 1 |
+| 16 | P&L Calendar | 2:13 | H:J | landscape | 3/3, block 1 |
+
+STATS1 uses a representative A:B section with row 1 repeated; its continuation begins at section-label row 44, and stops before the next section at row 78. Trade Log covers A:AX for rows 4:8 with source rows 1:3 repeated, including both five-column management groups. Calendar includes all A:J columns for rows 2:13 with row 1 repeated. SYMBOLS uses representative A:V rows 3:7 with its two-row merged headings repeated. Remaining SYMBOLS fields and the rest of the workbook remain full-export handoff work.
+
+Output-only deviations: source colours become gray, with BlackAndWhite=False so native fills remain visible; selected body cells wrap and only selected rows expand locally; native source address headings and small context footers are added. An oversized merged heading is repeated over its visible panel segment with original context; groups fitting a panel stay intact. No universal font substitution, chart/statistic regeneration, global AutoFit, source edits or transposition. Long-note continuation support is not yet proven natively: local expansion must be verified against selected real text and genuine over-page-height notes need explicit continued rows before a complete export can be claimed. The copy fixture confirms full long-note strings survive preparation, not their native pagination.
+
+## Verification evidence and limitations
+
+Exactly two unique authorized nodes, two pytest processes total. First run: planner/style/settings node PASSED, copy/lifecycle node FAILED due to an incorrect openpyxl colour constant name (COLOR_INDEXED instead of installed COLOR_INDEX). Corrected the import only. Sole failed-selector retry: copy/lifecycle node PASSED. The passing planner selector was not rerun.
+
+- tests/test_trading_journal_report.py::test_excel_style_print_plan_preserves_grid_and_continuation_context - PASS first run; independent coordinates, source field/row order, multi-row merge/font/border/fill/dimension expectations, horizontal-first continuation, A4/scale/settings.
+- tests/test_trading_journal_report.py::test_print_copy_preserves_source_values_styles_and_grayscale_structure - PASS on sole retry; actual ZIP preparation, zero/False/negative/tiny/formula-cache/missing/long-note values and source bytes/hash/mtime; preserved non-colour styles/merges/dimensions, distinct gray fills, fake adapter blank-first/context/no-save/owned cleanup and source-path/physical-context rejection.
+
+The native adapter is mocked in these nodes. It successfully exercises ordering/settings/copy/cleanup but cannot prove actual Excel opening, page appearance, clipping or grayscale fidelity. The real-data open failure is independent native evidence and blocks acceptance. No final page images were inspected; no actual journal PDF was rasterized. No more pytest processes/selectors or production retries remain under these briefs. The old two Matplotlib tests and CLI were replaced, not retained as a competing style.
+
+Reusable interfaces remain in tools/build_trading_journal_report.py: capture_workbook/read_print_snapshot/display_value; plan_panels; prepare_print_copy; apply_native_page_setup; native_preview; finalize_native_pdf. Explicit --native-preview-directory/--virtual-context consumes an already prepared private plan/copy; it is a developer interface, not the user's eventual printing workflow. Legacy no-argument HTML remains preserved and was not executed.
+
+## Phase 6B boundary
+
+After corrected appearance acceptance, complete source-driven coverage of all 16 sheets, exact displayed-format/content checks, notes and objects including two SIM charts/seven STATS2 comments, native no-save safeguards and honest complete-file/error handling. Reuse the canonical module and stable read-only snapshot off the event loop. Add one Journal-menu Printable journal (PDF) action; the user controls any later printing and no physical printer connection is required. No service/UI changes were made in this correction. Phases 1-5 remain live accepted; OANDA Errno 22 and unrelated requests remain outside scope.
+
+---
+
+# Historical Phase 6A inventory and rejected design
+
+Everything below records the prior synthetic implementation and its inventory. Its layout, Matplotlib interfaces/tests/CLI and tracked PDF path are SUPERSEDED/REJECTED and are not current instructions or accepted output. Retained solely for coverage/history; the current status and checkpoint above take precedence.
+
 # A4 trading journal: Phase 6A layout proof and Phase 6B coverage plan
 
 This is a synthetic layout proof and read-only foundation, not the full journal export. Phase 5 was live accepted by the user on 18 October 2026; Phases 1-4 remain accepted. No earlier feature was reopened.

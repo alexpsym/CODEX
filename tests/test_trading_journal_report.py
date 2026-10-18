@@ -1,154 +1,189 @@
-"""Two bounded, production-independent print regressions."""
+"""Two bounded Excel-style print-copy regressions; native adapter is faked here."""
 import hashlib
 import importlib.util
 import io
-from pathlib import Path
-import re
 import sys
 import zipfile
+from pathlib import Path
+from types import SimpleNamespace
 import xml.etree.ElementTree as ET
-from decimal import Decimal
 
-from openpyxl import Workbook
-from openpyxl.styles import PatternFill
+from openpyxl import Workbook, load_workbook
+from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
 
-spec = importlib.util.spec_from_file_location('a4_journal_report', Path(__file__).parents[1]/'tools/build_trading_journal_report.py')
-report = importlib.util.module_from_spec(spec)
-sys.modules[spec.name] = report
-spec.loader.exec_module(report)
+spec=importlib.util.spec_from_file_location('a4_journal_report',Path(__file__).parents[1]/'tools/build_trading_journal_report.py')
+report=importlib.util.module_from_spec(spec);sys.modules[spec.name]=report;spec.loader.exec_module(report)
 
 
-def test_a4_trade_log_bands_cover_fields_and_preserve_readable_page_bounds(tmp_path):
-    # Independent full current schema; omission from renderer constants must fail.
-    expected = ['Trade Number','Open Time','Close Time','Account','Symbol','Side','Qty',
-        'Entry Price','Exit Price','Stop Loss Price','Stop Loss Distance','Target Price','Target Distance',
-        'Commission','Net P/L','Profit %','R-Multiple','Balance After','Trade Duration (DD:HH:MM:SS)',
-        'Move to Break Even Time','Move to Break Even Duration','Move to Break Even Trigger Price',
-        'Move to Break Even Distance From Entry %','Move to Break Even Distance From Exit %',
-        'Move to Profit Time','Move to Profit Duration','Move to Profit Trigger Price',
-        'Move to Profit Distance From Entry %','Move to Profit Distance From Exit %','Test','Pattern','EMA',
-        'VWAP','ATHS/ATLS','Order','Round Number','Spiked Out','Close Stopout','Near Perfect Entry','Near Win',
-        'Early Close','Setup','Timeframe','Breakeven','Notes','Cashflow Amount','Cashflow New Balance','Currency','Row Type','Row ID']
-    assert list(report.TRADE_FIELDS) == expected
-    rows = report.synthetic_rows()
-    assert len(rows) == 2
-    assert rows[0]['Entry Price'] == '0.0000000123'
-    assert rows[0]['Net P/L'] == '-12.345 AUD'
-    assert rows[1]['Net P/L'] == '0 AUD'
-    assert rows[0]['Test'] == 'No'
-    assert rows[0]['Profit %'] == '-0.125%'
-    assert rows[0]['R-Multiple'] == '-0.375R'
-    # Independently replace the long text with a known, whitespace-sensitive value.
-    note = ('Observation 00: keep  two spaces, zero 0 and negative -0.125%. ' * 24)+'FINAL-SENTINEL'
-    rows[0]['Notes'] = note
-    expected_values = {r['Source row']: dict(r) for r in rows}
-    pages = report.build_layout_preview(rows)
-    try:
-        assert 9 <= len(pages) <= 10
-        assert any(p.band == 6 and 'continued' in p.title for p in pages)
-        assert pages[0].figure.get_size_inches()[0] < pages[0].figure.get_size_inches()[1]
-        assert pages[1].figure.get_size_inches()[0] > pages[1].figure.get_size_inches()[1]
-        actual = {r['Source row']: {} for r in rows}
-        for p in pages:
-            w,h = p.figure.get_size_inches()*72
-            assert sorted((w,h)) == sorted(report.A4)
-            for item in p.placements:
-                assert item.artist in p.figure.texts
-                assert item.font_size >= (9 if item.role == 'footer' else 10)
-                x0,y0,x1,y1 = item.bounds
-                assert 36-0.1 <= x0 < x1 <= w-36+0.1
-                assert (10 if item.role == 'footer' else 36)-0.1 <= y0 < y1 <= h-36+0.1
-                if p.band and item.role == 'data':
-                    if p.band < 6:
-                        actual[item.row][item.column] = actual[item.row].get(item.column,'') + item.artist.get_text().replace('\n','')
-                    elif item.column != 'Field':
-                        row,col = item.column.split('|',1)
-                        actual[row][col] = actual[row].get(col,'') + item.artist.get_text().replace('\n','')
-            if p.band:
-                headers = ''.join(i.artist.get_text().replace('\n','') for i in p.placements if i.role == 'header')
-                if p.band < 6:
-                    for key in ('Source row','Trade Number','Account','Symbol'):
-                        assert key in headers
-                    for row in rows:
-                        placed = [i.row for i in p.placements if i.role == 'data' and i.column == 'Source row']
-                        assert placed == [r['Source row'] for r in rows]
-                else:
-                    for row in rows:
-                        for key in ('Source row','Trade Number','Account','Symbol'):
-                            assert row[key] in headers
-            body = [i for i in p.placements if i.role in ('data','header','group','continuation')]
-            for j,a in enumerate(body):
-                for b in body[j+1:]:
-                    ax,ay,ar,at=a.bounds; bx,by,br,bt=b.bounds
-                    assert min(ar,br)-max(ax,bx) <= .1 or min(at,bt)-max(ay,by) <= .1
-        for row, values in expected_values.items():
-            assert set(actual[row]) == set(expected) | {'Source row'}
-            for key in expected:
-                # Repeated identity fields occur once on each horizontal band.
-                factor = 5 if key in ('Trade Number','Account','Symbol') else 1
-                assert actual[row][key] == values[key]*factor, (row,key)
-        assert actual['Trade Log!4']['Notes'] == note
-        target=tmp_path/'fixture.pdf'
-        assert report.write_preview_pdf(pages,target) == len(pages)
-        data=target.read_bytes()
-        assert data.startswith(b'%PDF-')
-        boxes=re.findall(rb'/MediaBox\s*\[\s*0\s+0\s+([\d.]+)\s+([\d.]+)\s*\]',data)
-        assert len(boxes) == len(pages)
-        for w,h in boxes:
-            assert all(abs(a-b)<1e-5 for a,b in zip(sorted((float(w),float(h))),sorted(report.A4)))
-    finally:
-        report.close_pages(pages)
+class Range:
+    def __init__(self, sheet):
+        self.sheet=sheet;self.Rows=self
+    def Merge(self):pass
+    def UnMerge(self):pass
+    def Copy(self,Destination):self.sheet.excel.events.append('copy-group-context')
+    def AutoFit(self):self.sheet.excel.events.append('local-row-expansion')
 
 
-def test_print_snapshot_preserves_cached_values_and_never_writes_source(tmp_path,monkeypatch):
-    workbook=Workbook();ws=workbook.active;ws.title='Business'
-    ws.merge_cells('A1:C1');ws['A1']='Merged business label'
-    ws['A2']=0;ws['B2']=False;ws['C2']=-12.345;ws['C2'].number_format='0.000" AUD"'
-    ws['A3']='=1-1';ws['B3']='=1+1';ws['C3']='=2+2'
-    ws['A4']=0.0000000123;ws['B4']=Decimal('-.00125');ws['B4'].number_format='0.000%'
-    ws['C4']=Decimal('-.375');ws['C4'].number_format='0.000"R"'
-    ws['XFD1000000'].fill=PatternFill('solid',fgColor='FFFFFF')
-    workbook.create_sheet('_Target R Metadata').sheet_state='veryHidden'
-    workbook.create_sheet('Hidden business').sheet_state='hidden'
-    workbook['Hidden business']['A1']='Business information must remain included'
-    source=tmp_path/'source.xlsx';workbook.save(source)
-    original=source.read_bytes()
-    out=io.BytesIO()
-    with zipfile.ZipFile(io.BytesIO(original)) as archive,zipfile.ZipFile(out,'w') as dest:
-        for info in archive.infolist():
-            data=archive.read(info.filename)
-            if info.filename=='xl/worksheets/sheet1.xml':
+class Sheet:
+    def __init__(self,name,book):
+        self.Name=name;self.book=book;self.excel=book.excel;self.PageSetup=SimpleNamespace()
+    def Range(self,*args):return Range(self)
+    def Cells(self,*args):return Range(self)
+    def Copy(self,After):
+        After.book.Worksheets.items.append(Sheet(self.Name,After.book))
+    def Delete(self):self.book.Worksheets.items.remove(self)
+
+
+class Sheets:
+    def __init__(self,book,names):self.items=[Sheet(name,book) for name in names]
+    @property
+    def Count(self):return len(self.items)
+    def __call__(self,key):
+        return self.items[key-1] if isinstance(key,int) else next(s for s in self.items if s.Name==key)
+
+
+class Book:
+    def __init__(self,excel,names=('Blank',)):
+        self.excel=excel;self.Worksheets=Sheets(self,names)
+    def Close(self,SaveChanges):
+        assert SaveChanges is False
+        self.excel.events.append('close-discard');self.excel.Workbooks.items.remove(self)
+    def ExportAsFixedFormat(self,kind,path,OpenAfterPublish):
+        assert kind==0 and OpenAfterPublish is False
+        self.excel.events.append('native-pdf-export')
+        self.excel.export_sheets=list(self.Worksheets.items)
+
+
+class Books:
+    def __init__(self,excel):self.excel=excel;self.items=[]
+    @property
+    def Count(self):return len(self.items)
+    def Add(self,template):
+        assert template==-4167
+        b=Book(self.excel);self.items.append(b);self.excel.events.append('blank-add');return b
+    def Open(self,path,**kwargs):
+        assert self.Count>0
+        assert Path(path).name=='print-copy.xlsx'
+        assert kwargs==dict(UpdateLinks=0,ReadOnly=True,IgnoreReadOnlyRecommended=True,AddToMru=False)
+        self.excel.events.append('owned-open')
+        if self.excel.fail_open:raise RuntimeError('controlled native open failure')
+        b=Book(self.excel,('Grid',));self.items.append(b);return b
+
+
+class Excel:
+    def __init__(self,fail_open=False):
+        self.events=[];self.Workbooks=Books(self);self.fail_open=fail_open
+        self._printer='physical inherited context'
+    @property
+    def ActiveSheet(self):return self.Workbooks.items[0].Worksheets(1) if self.Workbooks.Count else None
+    @property
+    def ActivePrinter(self):
+        assert self.Workbooks.Count>0
+        return self._printer
+    @ActivePrinter.setter
+    def ActivePrinter(self,value):
+        assert self.Workbooks.Count>0
+        assert value=='Microsoft Print to PDF on Ne01:'
+        self.events.append('virtual-after-blank');self._printer=value
+    def __setattr__(self,key,value):
+        if key in ('Calculation','CalculateBeforeSave'):
+            assert self.Workbooks.Count>0
+            self.events.append(key)
+        object.__setattr__(self,key,value)
+    def Quit(self):
+        assert self.Workbooks.Count==0
+        self.events.append('owned-quit')
+
+
+def test_excel_style_print_plan_preserves_grid_and_continuation_context(tmp_path):
+    wb=Workbook();s=wb.active;s.title='Grid'
+    s.column_dimensions['A'].width=12
+    for col in 'BCDEFGHIJ':s.column_dimensions[col].width=32
+    s.merge_cells('D1:F1');s['D1']='Management'
+    for r in range(2,11):
+        s.row_dimensions[r].height=21
+        for c in range(1,11):
+            cell=s.cell(r,c,f'R{r}C{c}')
+            cell.font=Font(name='Cambria',size=11,bold=r==2)
+            cell.fill=PatternFill('solid',fgColor='4472C4' if r==2 else 'FFFFFF')
+            cell.border=Border(bottom=Side(style='thin',color='202020'))
+            cell.alignment=Alignment(horizontal='left')
+    panels=report.plan_panels(wb,[('Grid',10,2,1,'landscape',[(3,6),(7,10)])])
+    assert [(p.first_column,p.last_column) for p in panels]==[(2,3),(4,7),(8,10)]*2
+    assert [(p.first_row,p.last_row) for p in panels]==[(3,6)]*3+[(7,10)]*3
+    expected={(r,c) for r in range(3,11) for c in range(2,11)}
+    actual={(r,c) for p in panels for r in range(p.first_row,p.last_row+1) for c in range(p.first_column,p.last_column+1)}
+    assert actual==expected
+    assert s['B2'].font.name=='Cambria' and s['B2'].font.sz==11 and s['B2'].font.bold
+    assert s['B3'].border.bottom.style=='thin' and s['B2'].fill.fgColor.rgb=='004472C4'
+    assert s.column_dimensions['B'].width==32 and s.row_dimensions[3].height==21
+    excel=Excel();book=excel.Workbooks.Add(-4167)
+    for i,p in enumerate(panels,1):
+        report.apply_native_page_setup(excel,book.Worksheets(1),p,i)
+        settings=book.Worksheets(1).PageSetup
+        assert settings.PaperSize==9 and settings.Orientation==2 and settings.Zoom==92
+        assert settings.PrintTitleRows=='$1:$2' and settings.PrintTitleColumns=='$A:$A'
+        assert settings.LeftMargin==28.35 and settings.TopMargin==36
+        assert settings.Order==2 and settings.BlackAndWhite is False and settings.PrintHeadings
+        assert f'rows {p.first_row}-{p.last_row}' in settings.CenterFooter
+        assert f'panel {p.panel}/3' in settings.CenterFooter
+        assert 11*settings.Zoom/100>=10
+    assert str(s.merged_cells)=='D1:F1'
+    book.Close(SaveChanges=False);excel.Quit()
+
+
+def test_print_copy_preserves_source_values_styles_and_grayscale_structure(tmp_path):
+    wb=Workbook();s=wb.active;s.title='Grid';s.merge_cells('A1:C1');s['A1']='Group heading'
+    s['A3']=0;s['B3']=False;s['C3']=-12.345;s['D3']=0.0000000123
+    s['C3'].number_format='0.000" AUD"';s['D3'].number_format='0.0000000000'
+    s['A4']='=1-1';s['B4']='=2+2';s['C4']='=3+3';s['D4']='Full long note  '*100+'END'
+    s['A1'].font=Font(name='Cambria',size=11,bold=True,color='FFFFFF')
+    s['A1'].fill=PatternFill('solid',fgColor='112288');s['B3'].fill=PatternFill('solid',fgColor='F0D050')
+    s['C3'].border=Border(bottom=Side(style='double',color='006600'))
+    s.column_dimensions['D'].width=40;s.row_dimensions[4].height=34
+    original=tmp_path/'source.xlsx';wb.save(original)
+    source=original.read_bytes();buffer=io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(source)) as z,zipfile.ZipFile(buffer,'w') as out:
+        for item in z.infolist():
+            data=z.read(item.filename)
+            if item.filename=='xl/worksheets/sheet1.xml':
                 root=ET.fromstring(data)
-                for node in root.findall('.//s:c',report.NS):
-                    if node.get('r') in ('A3','B3'):
-                        node.find('s:v',report.NS).text='0' if node.get('r')=='A3' else '2'
+                for cell in root.findall('.//s:c',report.NS):
+                    if cell.get('r') in ('A4','B4'):cell.find('s:v',report.NS).text='0' if cell.get('r')=='A4' else '4'
                 data=ET.tostring(root)
-            dest.writestr(info,data)
-    source.write_bytes(out.getvalue());before=source.read_bytes();stat=source.stat()
-    def forbidden_save(*a,**k):
-        raise AssertionError('Print reader must never save a workbook')
-    monkeypatch.setattr(Workbook,'save',forbidden_save)
-    captured=report.capture_workbook(source,tmp_path)
-    sheets=report.read_print_snapshot(captured)
-    assert source.read_bytes()==before
-    assert source.stat().st_mtime_ns==stat.st_mtime_ns
-    assert captured.sha256==hashlib.sha256(before).hexdigest()
-    assert Path(captured.temporary_path).read_bytes()==before
-    assert [s.name for s in sheets]==['Business','_Target R Metadata','Hidden business']
-    assert sheets[0].bounds=='A1:C4'
-    assert sheets[0].merges==['A1:C1']
-    assert sheets[1].exclusion and sheets[1].visibility=='veryHidden'
-    assert sheets[2].exclusion is None and sheets[2].visibility=='hidden'
-    cells={c.coordinate:c for c in sheets[0].cells}
-    assert report.display_value(cells['A2'])=='0'
-    assert report.display_value(cells['B2'])=='No'
-    assert report.display_value(cells['C2'])=='-12.345 AUD'
-    assert report.display_value(cells['A3'])=='0'
-    assert report.display_value(cells['B3'])=='2'
-    assert cells['C3'].missing_cache
-    assert report.display_value(cells['C3'])=='[stored result unavailable]'
-    assert sum(c.missing_cache for c in cells.values())==1
-    assert report.display_value(cells['A4'])=='0.0000000123'
-    assert report.display_value(cells['B4'])=='-0.12500%'
-    assert report.display_value(cells['C4'])=='-0.375 R'
-    assert '0.000"R"' in sheets[0].format_limitations
+            out.writestr(item,data)
+    original.write_bytes(buffer.getvalue());before=original.read_bytes();mtime=original.stat().st_mtime_ns
+    capture=report.capture_workbook(original,tmp_path)
+    copied=report.prepare_print_copy(capture,tmp_path)
+    assert copied!=original and copied.parent==tmp_path
+    values=load_workbook(copied,data_only=True);v=values['Grid']
+    assert [v.cell(3,c).value for c in range(1,5)]==[0,False,-12.345,.0000000123]
+    assert v['A4'].value==0 and v['B4'].value==4 and v['C4'].value=='[stored result unavailable]'
+    assert v['D4'].value=='Full long note  '*100+'END'
+    assert v['A1'].font.name=='Cambria' and v['A1'].font.sz==11 and v['A1'].font.bold
+    assert v['A1'].font.color.rgb=='FFFFFFFF'
+    assert v['C3'].border.bottom.style=='double'
+    assert v['C3'].number_format=='0.000" AUD"' and v['D3'].number_format=='0.0000000000'
+    assert str(v.merged_cells)=='A1:C1' and v.column_dimensions['D'].width==40 and v.row_dimensions[4].height==34
+    colors=[v['A1'].fill.fgColor.rgb,v['B3'].fill.fgColor.rgb]
+    assert colors[0]!=colors[1]
+    for color in colors:assert color[-6:-4]==color[-4:-2]==color[-2:]
+    values.close()
+    with zipfile.ZipFile(copied) as z:
+        assert b'<f' not in z.read('xl/worksheets/sheet1.xml')
+    panels=[report.PrintPanel('Grid',2,4,3,4,2,1,'landscape',1,1,1)]
+    excel=Excel();report.native_preview(copied,tmp_path,panels,'Microsoft Print to PDF on Ne01:',factory=lambda:excel)
+    assert excel.events.index('blank-add')<excel.events.index('Calculation')<excel.events.index('virtual-after-blank')<excel.events.index('owned-open')
+    assert excel.events.count('native-pdf-export')==1 and excel.events.count('close-discard')==3
+    assert excel.events[-1]=='owned-quit'
+    failed=Excel(True)
+    try:report.native_preview(copied,tmp_path,panels,'Microsoft Print to PDF on Ne01:',factory=lambda:failed)
+    except RuntimeError as error:assert str(error)=='controlled native open failure'
+    else:raise AssertionError('Expected controlled failure')
+    assert failed.events[-2:]==['close-discard','owned-quit']
+    for path,context in [(original,'Microsoft Print to PDF on Ne01:'),(copied,'Brother on Ne03:'),(copied,'network-printer')]:
+        try:report.native_preview(path,tmp_path,panels,context,factory=lambda:(_ for _ in ()).throw(AssertionError('Must reject before native creation')))
+        except ValueError:pass
+        else:raise AssertionError('Unsafe path/context accepted')
+    assert original.read_bytes()==before and original.stat().st_mtime_ns==mtime
+    assert capture.sha256==hashlib.sha256(before).hexdigest()
