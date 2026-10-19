@@ -498,8 +498,28 @@ def native_preview(copy_path, directory, panels, virtual_context, factory=None, 
                 # Visibility changes apply only to explicitly selected output
                 # columns and repeated identity columns, preserving widths.
                 stage(f'P{ordinal:03d} selected output column visibility')
-                sheet.Range(f'$A:${letter(panel.identity_columns)}').Hidden=False
-                sheet.Range(f'${letter(panel.first_column)}:${letter(panel.last_column)}').Hidden=False
+                selected=sorted(set(range(1,panel.identity_columns+1))|set(range(panel.first_column,panel.last_column+1)))
+                for column in selected:
+                    stage(f'P{ordinal:03d} output column {column} visibility')
+                    native_column=sheet.Columns.Item(column)
+                    def visibility_state():
+                        hidden=native_column.Hidden
+                        return {'address':native_column.Address,'rows':native_column.Rows.Count,
+                                'columns':native_column.Columns.Count,'hidden':hidden,
+                                'hidden_type':type(hidden).__name__,'width':native_column.ColumnWidth,
+                                'sheet':native_column.Parent.Name,'workbook':native_column.Parent.Parent.Name}
+                    evidence={'panel':f'P{ordinal:03d}','requested_column':column,'before':visibility_state()}
+                    with (directory/'visibility.jsonl').open('a',encoding='utf-8') as stream:
+                        stream.write(json.dumps(evidence,default=str)+'\n')
+                    if evidence['before']['hidden'] is not False:
+                        if evidence['before']['hidden'] is not True:
+                            raise RuntimeError('Unknown individual column visibility: '+json.dumps(evidence,default=str))
+                        native_column.Hidden=False
+                    evidence['after']=visibility_state()
+                    with (directory/'visibility.jsonl').open('a',encoding='utf-8') as stream:
+                        stream.write(json.dumps(evidence,default=str)+'\n')
+                    if evidence['after']['hidden'] is not False:
+                        raise RuntimeError('Output column remains hidden: '+json.dumps(evidence,default=str))
                 # Preserve grouped headers, repeating context if a group spans a
                 # horizontal panel boundary. No trade is transposed.
                 for merged in model[panel.sheet].merged_cells.ranges:

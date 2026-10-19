@@ -174,12 +174,20 @@ def test_excel_style_print_plan_preserves_grid_and_continuation_context(tmp_path
     class ColumnRange(Range):
         def __init__(self,sheet,columns=None):
             super().__init__(sheet);self.columns=columns
+            if columns is not None:
+                from openpyxl.utils import get_column_letter
+                self.Parent=sheet;self.Address=f'${get_column_letter(columns[0])}:${get_column_letter(columns[-1])}'
+                self.Rows=SimpleNamespace(Count=1048576);self.Columns=SimpleNamespace(Count=len(columns))
+                self.ColumnWidth=sheet.widths.get(columns[0],32)
         @property
-        def Hidden(self):raise AssertionError('No hidden-state read needed')
+        def Hidden(self):
+            assert self.columns is not None and len(self.columns)==1
+            return self.sheet.hidden[self.columns[0]]
         @Hidden.setter
         def Hidden(self,value):
             assert self.columns is not None,'Hidden requires whole columns'
             assert value is False
+            assert all(self.sheet.hidden[c] for c in self.columns),'Already visible columns must skip setter'
             self.sheet.selected.update(self.columns)
             for col in self.columns:self.sheet.hidden[col]=value
             self.sheet.excel.events.append('selected-columns-visible')
@@ -193,6 +201,8 @@ def test_excel_style_print_plan_preserves_grid_and_continuation_context(tmp_path
             super().__init__(*args)
             self.hidden={c:c in (1,10,11) for c in range(1,12)}
             self.widths={10:80};self.selected=set();self.expanded=False
+            self.Parent=self.book;self.book.Name='Fixture book'
+            self.Columns=SimpleNamespace(Item=lambda c:ColumnRange(self,range(c,c+1)))
             sheet=self
             class Setup(SimpleNamespace):
                 def __setattr__(self,key,value):
