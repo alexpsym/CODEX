@@ -1,3 +1,7 @@
+# 19 October 2026: printable-journal job CANCELLED
+
+The user cancelled all Phase 6A/6B work after the 22-page preview and will read the journal on the laptop. No further layout review/repair, full PDF export or Journal/LTT print/PDF menu button is authorized. Prior code, artifacts and the historical plan below are retained; no rollback or cleanup. Earlier pending approval and next-step instructions below are historical and superseded by this cancellation.
+
 # 19 October native visibility resolved: representative PDF ready for user review
 
 **The new representative preview is produced and inspected; USER appearance approval is pending.** Private PDF: C:/Users/User/AppData/Local/Temp/ltt_a4_native_visibility_6cfb95c2fa8c4993b735181a16977367/preview/journal_a4_excel_layout_preview.pdf. It contains22 A4 pages/all16 planned panels, including AX/Row ID on page19/P013. All five complete selected IDs and their repeated trade identities match their correct source-row bands; header included, no prefixes/truncation substituted. It was opened ONCE in the normal viewer, no print UI. Review at Actual size. Phase6B/full journal/menu work has NOT started.
