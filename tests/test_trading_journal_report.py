@@ -46,6 +46,17 @@ class Sheets:
 class Book:
     def __init__(self,excel,names=('Blank',)):
         self.excel=excel;self.Worksheets=Sheets(self,names)
+        book=self
+        class FontScheme:
+            def Save(self,path):
+                assert book.Worksheets(1).Name=='Grid'
+                Path(path).write_text('source font scheme fixture')
+                excel.events.append('source-font-scheme-save')
+            def Load(self,path):
+                assert book.Worksheets(1).Name=='Blank'
+                assert Path(path).read_text()=='source font scheme fixture'
+                excel.events.append('output-font-scheme-load')
+        self.Theme=SimpleNamespace(ThemeFontScheme=FontScheme())
     def Close(self,SaveChanges):
         assert SaveChanges is False
         self.excel.events.append('close-discard');self.excel.Workbooks.items.remove(self)
@@ -160,6 +171,10 @@ def test_excel_style_print_plan_preserves_grid_and_continuation_context(tmp_path
     report.native_preview(tmp_path/'print-copy.xlsx',tmp_path,panels,
                           'Microsoft Print to PDF on Ne01:',factory=lambda:adapter,progress=stages.append)
     assert len(adapter.export_sheets)==len(panels)
+    assert adapter.events.index('owned-open')<adapter.events.index('source-font-scheme-save')
+    assert adapter.events.index('source-font-scheme-save')<adapter.events.index('output-font-scheme-load')
+    assert adapter.events.index('output-font-scheme-load')<adapter.events.index('local-row-expansion')
+    assert stages.index('preserve source theme font scheme in output')<stages.index('P001 source worksheet Copy')
     assert stages.index('read-only print-copy Open')<stages.index('P001 source worksheet Copy')
     assert stages.index('P001 source worksheet Copy')<stages.index('P001 PageSetup configuration and committed readback')
     assert stages[-1]=='ExportAsFixedFormat'

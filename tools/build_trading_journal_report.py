@@ -477,6 +477,10 @@ def native_preview(copy_path, directory, panels, virtual_context, factory=None, 
         # Return a native PDF via an output workbook of source-sheet copies. No
         # source values, formats, or objects are reconstructed from transactions.
         output=excel.Workbooks.Add(-4167);placeholder=output.Worksheets(1)
+        stage('preserve source theme font scheme in output')
+        font_scheme=directory/'source-font-scheme.xml'
+        source.Theme.ThemeFontScheme.Save(str(font_scheme))
+        output.Theme.ThemeFontScheme.Load(str(font_scheme))
         model=load_workbook(copy_path,data_only=True)
         try:
             for ordinal,panel in enumerate(panels,1):
