@@ -1,3 +1,29 @@
+# 19 October resumed readback checkpoint: actual preview still incomplete
+
+No actual journal PDF was emitted. The one newly authorized actual invocation failed at worker initialization, before DispatchEx, with NameError: name 'progress' is not defined. The generated private worker passed progress=progress but its string-based edit failed to insert the callback definition. This is an agent-generated orchestration error, not an Excel/source failure. The attempt is consumed; no retry was made. Phase 6A and appearance acceptance remain pending.
+
+Private checkpoint: C:/Users/User/AppData/Local/Temp/ltt_a4_readback_2cc62a62c1784051a759fdc3716e52fd. preview/ contains the fresh namespace-preserving print-copy.xlsx, unchanged 16-panel plan.json, native_worker.py, supervise.py, failure.json and outer.json. Its measured child invocation was 0.4230435 seconds. Zero actual native opens/exports, PDF pages, inspection images or viewer launches in this continuation. Existing old evidence is untouched. Next authorized continuation must explicitly renew one actual attempt, define the worker progress callback directly before invoking native_preview, and inspect the saved output before declaring success. Do not recapture.
+
+## Native synthetic observations and bounded correction
+
+Two distinct synthetic trials in two supervised worker invocations; owned Excel lifecycles 6.0924526 and 4.0558535 seconds (10.1483061 combined), each bounded at 60 seconds. One cached-metadata invocation queried each of the two exact Microsoft device names once and resolved Microsoft Print to PDF on Ne01:, reused thereafter. No device discovery, installation or default change.
+
+Trial one used the existing named After Copy call and original setter order. Committed PaperSize was 9.0 (float), Orientation 1.0/2.0 (float), Zoom 100 (int), versus intended 9/1-or-2/92 (ints). Original and fresh PageSetup proxies agreed. FitToPagesWide/Tall read False (bool). Placeholder deletion then failed because the output workbook still contained only its placeholder: the named Copy call had not populated the intended output. No PDF was exported in trial one. This trial therefore does not establish the inherited copied-sheet behavior or isolate the original actual-journal cause.
+
+Trial two used positional Copy(None, destination), asserted destination sheet count grew by one, and set both fit properties before numeric Zoom. Copied sheets initially read PaperSize 1.0 (float), Orientation 1.0 (float), Zoom False (bool), both fit properties 1 (int). After commit both proxies read A4 9.0 (float), portrait/landscape 1.0/2.0 (float), Zoom 92 (int). Both fit properties still read 1 (int); numeric Zoom selects the effective percentage mode, so these dormant values are recorded, not coerced or treated as effective fit scaling. The two-page saved synthetic PDF measured 595.32 x 841.92 and 841.92 x 595.32 points, body text 10.08pt from source 11pt. No raster/appearance acceptance is claimed from this extraction. Positional Copy and final numeric Zoom are a proven combined configuration on this tiny fixture; the two changes were not independently isolated. Stale proxy is unsupported.
+
+Canonical changes retain the A4/orientation/numeric zoom guard, typed before/committed original/fresh diagnostics, panel/source identity, private JSONL evidence and explicit adapter progress stages. False cannot pass as a percentage. Diagnostics callback failures do not replace the native result. Copy now uses positional arguments and checks destination count. Inspection selection now requests STATS continuation, SYMBOLS, Trade Log and calendar by panel identity, up to four distinct images; actual rendering remains unexercised.
+
+## Tests, frozen source and scope
+
+Exactly one unique permitted pytest node, two host pytest processes. First PASS 0.89 pytest /1.9491779 outer seconds. Second PASS 0.88 pytest /1.7986064 outer seconds after materially improving the same node: explicit setter-order assertions replace speculative interdependent fake behavior; native adapter fake integration now exercises positional Copy, count, stages and cleanup. Both used fresh GUID host TEMP parents, requested -u/-vv/short traceback/faulthandler flags, hard180-second subprocess bounds. No production/test changes after the final pass. Mocked integration is not native actual-workbook evidence; final PDF inspection selection remains unproven. No other nodes/suites, unchanged namespace regression, smoke/compile checks or installation.
+
+Frozen captured-workbook.xlsx remains 823271 bytes, SHA256 1508275c67b1ebfda0355ebc241cc3b139377533f2da4baebc7d34cee4d00547, verified against capture.json before preparation and unchanged afterward. Zero live workbook reads/captures/writes and zero broker/account/cloud/production operations. All private workbook/value/PDF/worker artifacts remain outside Git. Preserved range coverage remains the existing 16 panels; full 16-sheet export and over-height notes are still unproven, Phase 6B deferred.
+
+User confirms distance-preserving Bybit entry edits at 3eda65adfcf06e5ee762fa3caee6efcf46dc730e PASSED live verification; prior cursor/optional fields/compact editor and QUSDT corrections remain accepted. OANDA URGENT2B is CANCELLED; existing spreads/volatility feeds remain untouched, no Pepperstone/MT5 work. Phases 1-5 remain accepted.
+
+---
+
 # Latest Phase 6A checkpoint: print-copy opening fixed, preview still incomplete
 
 The namespace-preserving correction now lets Excel open the prepared frozen journal normally. **No corrected PDF was produced:** the one newly authorized preview attempt stopped later at the first panel's native A4 settings readback guard, before ExportAsFixedFormat. User layout acceptance remains pending. The older open-failure checkpoint below is history; it is superseded by this result.

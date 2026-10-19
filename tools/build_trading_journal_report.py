@@ -392,16 +392,37 @@ def validate_virtual_context(name):
     return name
 
 
-def apply_native_page_setup(excel, sheet, panel, ordinal):
+def page_setup_values(setup):
+    values={}
+    for key in ('PaperSize','Orientation','Zoom','FitToPagesWide','FitToPagesTall'):
+        try:
+            value=getattr(setup,key)
+            values[key]={'value':value,'type':type(value).__name__}
+        except Exception as error:
+            values[key]={'error':repr(error)}
+    return values
+
+
+def apply_native_page_setup(excel, sheet, panel, ordinal, diagnostic=None):
     from openpyxl.utils import get_column_letter as letter
+    setup=sheet.PageSetup
+    expected={'PaperSize':9,'Orientation':2 if panel.orientation=='landscape' else 1,
+              'Zoom':panel.zoom,'FitToPagesWide':False,'FitToPagesTall':False}
+    evidence={'panel':f'P{ordinal:03d}','sheet':panel.sheet,
+              'expected':{k:{'value':v,'type':type(v).__name__} for k,v in expected.items()},
+              'before':page_setup_values(setup),'stage':'before configuration'}
+    def record():
+        if diagnostic:
+            try:diagnostic(evidence.copy())
+            except Exception:pass  # Diagnostics must not replace a native failure.
+    record()
     excel.PrintCommunication=False
     try:
-        setup=sheet.PageSetup
         setup.PaperSize=9;setup.Orientation=2 if panel.orientation=='landscape' else 1
         setup.LeftMargin=28.35;setup.RightMargin=28.35
         setup.TopMargin=36;setup.BottomMargin=36
         setup.HeaderMargin=14;setup.FooterMargin=14
-        setup.Zoom=panel.zoom;setup.FitToPagesWide=False;setup.FitToPagesTall=False
+        setup.FitToPagesWide=False;setup.FitToPagesTall=False;setup.Zoom=panel.zoom
         setup.PrintTitleRows=f'$1:${panel.header_rows}'
         setup.PrintTitleColumns=f'$A:${letter(panel.identity_columns)}'
         setup.PrintArea=f'${letter(panel.first_column)}${panel.first_row}:${letter(panel.last_column)}${panel.last_row}'
@@ -409,11 +430,17 @@ def apply_native_page_setup(excel, sheet, panel, ordinal):
         setup.CenterFooter=f'&8 P{ordinal:03d} | '+panel.context.replace('&','&&')+' | page &P'
     finally:
         excel.PrintCommunication=True
-    if setup.PaperSize!=9 or setup.Orientation!=(2 if panel.orientation=='landscape' else 1) or setup.Zoom!=panel.zoom:
-        raise RuntimeError('Native A4 settings readback mismatch')
+    evidence.update(stage='after PrintCommunication commit',actual=page_setup_values(setup),
+                    fresh=page_setup_values(sheet.PageSetup))
+    record()
+    actual=evidence['fresh']
+    if any(actual[k].get('value')!=expected[k] or
+           (k=='Zoom' and isinstance(actual[k].get('value'),bool))
+           for k in ('PaperSize','Orientation','Zoom')):
+        raise RuntimeError('Native A4 settings readback mismatch: '+json.dumps(evidence,default=str))
 
 
-def native_preview(copy_path, directory, panels, virtual_context, factory=None):
+def native_preview(copy_path, directory, panels, virtual_context, factory=None, progress=None):
     """No-save native adapter. Bootstrap precedes every contextual setter.
 
     factory is a narrow test seam; production always uses DispatchEx, never an
@@ -428,7 +455,13 @@ def native_preview(copy_path, directory, panels, virtual_context, factory=None):
         import win32com.client
         factory=lambda:win32com.client.DispatchEx('Excel.Application')
     excel=None;bootstrap=None;source=None;output=None
+    def stage(value):
+        if progress:progress(value)
+    def diagnostic(value):
+        with (directory/'page-setup.jsonl').open('a',encoding='utf-8') as stream:
+            stream.write(json.dumps(value,default=str)+'\n')
     try:
+        stage('DispatchEx and owned bootstrap')
         excel=factory()
         excel.Visible=False;excel.DisplayAlerts=False;excel.EnableEvents=False
         excel.AutomationSecurity=3;excel.AskToUpdateLinks=False
@@ -438,6 +471,7 @@ def native_preview(copy_path, directory, panels, virtual_context, factory=None):
         if excel.Calculation!=-4135 or excel.CalculateBeforeSave:raise RuntimeError('Unsafe calculation state')
         if excel.ActivePrinter!=context:excel.ActivePrinter=context
         if excel.ActivePrinter!=context:raise RuntimeError('Virtual context mismatch')
+        stage('read-only print-copy Open')
         source=excel.Workbooks.Open(str(copy_path),UpdateLinks=0,ReadOnly=True,IgnoreReadOnlyRecommended=True,AddToMru=False)
         if excel.Calculation!=-4135:raise RuntimeError('Print copy changed manual calculation')
         # Return a native PDF via an output workbook of source-sheet copies. No
@@ -446,8 +480,14 @@ def native_preview(copy_path, directory, panels, virtual_context, factory=None):
         model=load_workbook(copy_path,data_only=True)
         try:
             for ordinal,panel in enumerate(panels,1):
+                stage(f'P{ordinal:03d} source worksheet Copy')
                 original=source.Worksheets(panel.sheet)
-                original.Copy(After=output.Worksheets(output.Worksheets.Count))
+                count=output.Worksheets.Count
+                # Positional arguments are required by late-bound Excel Copy;
+                # a named After can be silently ignored by this COM dispatch.
+                original.Copy(None,output.Worksheets(count))
+                if output.Worksheets.Count!=count+1:
+                    raise RuntimeError(f'P{ordinal:03d} worksheet Copy missed output workbook')
                 sheet=output.Worksheets(output.Worksheets.Count)
                 sheet.Name=f'P{ordinal:03d}'
                 # Preserve grouped headers, repeating context if a group spans a
@@ -463,10 +503,13 @@ def native_preview(copy_path, directory, panels, virtual_context, factory=None):
                 # long identifiers; no global AutoFit or font replacement.
                 body=sheet.Range(sheet.Cells(panel.first_row,1),sheet.Cells(panel.last_row,panel.last_column))
                 body.WrapText=True;body.Rows.AutoFit()
-                apply_native_page_setup(excel,sheet,panel,ordinal)
+                stage(f'P{ordinal:03d} PageSetup configuration and committed readback')
+                apply_native_page_setup(excel,sheet,panel,ordinal,diagnostic)
+            stage('delete output placeholder')
             placeholder.Delete()
             if len(panels)>24:raise ValueError('Proof plan exceeds 24 pages')
             native=directory/'native-preview.pdf'
+            stage('ExportAsFixedFormat')
             output.ExportAsFixedFormat(0,str(native),OpenAfterPublish=False)
         finally:model.close()
         return native
@@ -501,13 +544,14 @@ def finalize_native_pdf(native, directory, panels):
             raise RuntimeError('Native export omitted planned panels')
         pdf.select([i for _,i in sorted(order)])
         pdf.save(target)
-        trade=[i for i,p in enumerate(pdf) if 'Trade Log' in p.get_text()]
-        portrait=next(i for i,p in enumerate(pdf) if p.rect.width<p.rect.height)
-        merged=next(i for i,p in enumerate(pdf) if 'SYMBOLS' in p.get_text())
-        for i in [portrait,*trade[:2],merged]:
+        inspection=[]
+        for name in ('STATS1','SYMBOLS','Trade Log','P&L Calendar'):
+            candidates=[i for i,(ordinal,_) in enumerate(sorted(order)) if panels[ordinal-1].sheet==name]
+            inspection.append(candidates[-1] if name=='STATS1' else candidates[0])
+        for i in inspection:
             pdf[i].get_pixmap(matrix=fitz.Matrix(1.25,1.25),colorspace=fitz.csGRAY).save(Path(directory)/f'inspect-{i+1}.png')
         return {'pdf':str(target),'pages':len(pdf),'panel_order':[n for n,_ in sorted(order)],
-                'inspection_pages':[portrait+1,*[i+1 for i in trade[:2]],merged+1]}
+                'inspection_pages':[i+1 for i in inspection]}
 
 
 def main() -> int:

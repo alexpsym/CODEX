@@ -29,7 +29,8 @@ class Sheet:
         self.Name=name;self.book=book;self.excel=book.excel;self.PageSetup=SimpleNamespace()
     def Range(self,*args):return Range(self)
     def Cells(self,*args):return Range(self)
-    def Copy(self,After):
+    def Copy(self,Before=None,After=None):
+        assert Before is None and After is not None
         After.book.Worksheets.items.append(Sheet(self.Name,After.book))
     def Delete(self):self.book.Worksheets.items.remove(self)
 
@@ -118,8 +119,17 @@ def test_excel_style_print_plan_preserves_grid_and_continuation_context(tmp_path
     assert s['B3'].border.bottom.style=='thin' and s['B2'].fill.fgColor.rgb=='004472C4'
     assert s.column_dimensions['B'].width==32 and s.row_dimensions[3].height==21
     excel=Excel();book=excel.Workbooks.Add(-4167)
+    writes=[]
+    class Settings(SimpleNamespace):
+        def __setattr__(self,key,value):
+            writes.append(key)
+            super().__setattr__(key,value)
+    book.Worksheets(1).PageSetup=Settings()
     for i,p in enumerate(panels,1):
+        writes.clear()
         report.apply_native_page_setup(excel,book.Worksheets(1),p,i)
+        assert writes.index('FitToPagesWide')<writes.index('Zoom')
+        assert writes.index('FitToPagesTall')<writes.index('Zoom')
         settings=book.Worksheets(1).PageSetup
         assert settings.PaperSize==9 and settings.Orientation==2 and settings.Zoom==92
         assert settings.PrintTitleRows=='$1:$2' and settings.PrintTitleColumns=='$A:$A'
@@ -128,8 +138,31 @@ def test_excel_style_print_plan_preserves_grid_and_continuation_context(tmp_path
         assert f'rows {p.first_row}-{p.last_row}' in settings.CenterFooter
         assert f'panel {p.panel}/3' in settings.CenterFooter
         assert 11*settings.Zoom/100>=10
+    diagnostics=[]
+    settings=book.Worksheets(1).PageSetup
+    class WrongZoom(Settings):
+        def __setattr__(self,key,value):
+            super().__setattr__(key,False if key=='Zoom' else value)
+    book.Worksheets(1).PageSetup=WrongZoom()
+    import pytest,json
+    with pytest.raises(RuntimeError,match='Native A4 settings readback mismatch:') as failure:
+        report.apply_native_page_setup(excel,book.Worksheets(1),panels[0],1,diagnostics.append)
+    detail=json.loads(str(failure.value).split(': ',1)[1])
+    assert detail['panel']=='P001' and detail['sheet']=='Grid'
+    assert detail['fresh']['Zoom']=={'value':False,'type':'bool'}
+    assert detail['expected']['Zoom']=={'value':92,'type':'int'}
+    assert diagnostics[0]['stage']=='before configuration'
+    assert diagnostics[-1]['stage']=='after PrintCommunication commit'
     assert str(s.merged_cells)=='D1:F1'
     book.Close(SaveChanges=False);excel.Quit()
+    wb.save(tmp_path/'print-copy.xlsx');wb.close()
+    adapter=Excel();stages=[]
+    report.native_preview(tmp_path/'print-copy.xlsx',tmp_path,panels,
+                          'Microsoft Print to PDF on Ne01:',factory=lambda:adapter,progress=stages.append)
+    assert len(adapter.export_sheets)==len(panels)
+    assert stages.index('read-only print-copy Open')<stages.index('P001 source worksheet Copy')
+    assert stages.index('P001 source worksheet Copy')<stages.index('P001 PageSetup configuration and committed readback')
+    assert stages[-1]=='ExportAsFixedFormat'
 
 
 def test_print_copy_preserves_source_values_styles_and_grayscale_structure(tmp_path):
