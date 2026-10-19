@@ -494,6 +494,12 @@ def native_preview(copy_path, directory, panels, virtual_context, factory=None, 
                     raise RuntimeError(f'P{ordinal:03d} worksheet Copy missed output workbook')
                 sheet=output.Worksheets(output.Worksheets.Count)
                 sheet.Name=f'P{ordinal:03d}'
+                from openpyxl.utils import get_column_letter as letter
+                # Visibility changes apply only to explicitly selected output
+                # columns and repeated identity columns, preserving widths.
+                stage(f'P{ordinal:03d} selected output column visibility')
+                sheet.Range(f'$A:${letter(panel.identity_columns)}').Hidden=False
+                sheet.Range(f'${letter(panel.first_column)}:${letter(panel.last_column)}').Hidden=False
                 # Preserve grouped headers, repeating context if a group spans a
                 # horizontal panel boundary. No trade is transposed.
                 for merged in model[panel.sheet].merged_cells.ranges:
@@ -551,7 +557,14 @@ def finalize_native_pdf(native, directory, panels):
         inspection=[]
         for name in ('STATS1','SYMBOLS','Trade Log','P&L Calendar'):
             candidates=[i for i,(ordinal,_) in enumerate(sorted(order)) if panels[ordinal-1].sheet==name]
-            inspection.append(candidates[-1] if name=='STATS1' else candidates[0])
+            if name=='Trade Log':
+                # Inspect the last selected field, including a continuation
+                # where Excel places the newly visible long identifiers.
+                last=max(panels[ordinal-1].last_column for ordinal,_ in order if panels[ordinal-1].sheet==name)
+                candidates=[i for i in candidates if panels[sorted(order)[i][0]-1].last_column==last]
+                identifiers=[i for i in candidates if 'Row ID' in pdf[i].get_text()]
+                inspection.append((identifiers or candidates)[-1])
+            else:inspection.append(candidates[-1] if name=='STATS1' else candidates[0])
         for i in inspection:
             pdf[i].get_pixmap(matrix=fitz.Matrix(1.25,1.25),colorspace=fitz.csGRAY).save(Path(directory)/f'inspect-{i+1}.png')
         return {'pdf':str(target),'pages':len(pdf),'panel_order':[n for n,_ in sorted(order)],

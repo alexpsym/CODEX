@@ -107,7 +107,7 @@ class Excel:
         self.events.append('owned-quit')
 
 
-def test_excel_style_print_plan_preserves_grid_and_continuation_context(tmp_path):
+def test_excel_style_print_plan_preserves_grid_and_continuation_context(tmp_path,monkeypatch):
     wb=Workbook();s=wb.active;s.title='Grid'
     s.column_dimensions['A'].width=12
     for col in 'BCDEFGHIJ':s.column_dimensions[col].width=32
@@ -166,11 +166,59 @@ def test_excel_style_print_plan_preserves_grid_and_continuation_context(tmp_path
     assert diagnostics[-1]['stage']=='after PrintCommunication commit'
     assert str(s.merged_cells)=='D1:F1'
     book.Close(SaveChanges=False);excel.Quit()
+    s.column_dimensions['A'].hidden=True
+    s.column_dimensions['J'].hidden=True;s.column_dimensions['J'].width=80
+    s.column_dimensions['K'].hidden=True
+    s['J3']='dummy:long-identifier:'+('abcdef0123456789'*5)
+    source_style=s['J3']._style;source_content=s['J3'].value
+    class ColumnRange(Range):
+        def __init__(self,sheet,columns=None):
+            super().__init__(sheet);self.columns=columns
+        @property
+        def Hidden(self):raise AssertionError('No hidden-state read needed')
+        @Hidden.setter
+        def Hidden(self,value):
+            assert self.columns is not None,'Hidden requires whole columns'
+            assert value is False
+            self.sheet.selected.update(self.columns)
+            for col in self.columns:self.sheet.hidden[col]=value
+            self.sheet.excel.events.append('selected-columns-visible')
+        def AutoFit(self):
+            assert self.sheet.selected and all(not self.sheet.hidden[c] for c in self.sheet.selected)
+            assert self.sheet.hidden[11] is True and self.sheet.widths[10]==80
+            self.sheet.expanded=True
+            super().AutoFit()
+    class VisibilitySheet(Sheet):
+        def __init__(self,*args):
+            super().__init__(*args)
+            self.hidden={c:c in (1,10,11) for c in range(1,12)}
+            self.widths={10:80};self.selected=set();self.expanded=False
+            sheet=self
+            class Setup(SimpleNamespace):
+                def __setattr__(self,key,value):
+                    assert sheet.expanded,'Visibility and row expansion must precede PageSetup'
+                    super().__setattr__(key,value)
+            self.PageSetup=Setup()
+        def Range(self,*args):
+            import re
+            from openpyxl.utils.cell import column_index_from_string
+            match=re.fullmatch(r'\$([A-Z]+):\$([A-Z]+)',args[0]) if isinstance(args[0],str) else None
+            columns=range(column_index_from_string(match[1]),column_index_from_string(match[2])+1) if match else None
+            return ColumnRange(self,columns)
+    monkeypatch.setattr(sys.modules[__name__],'Sheet',VisibilitySheet)
     wb.save(tmp_path/'print-copy.xlsx');wb.close()
     adapter=Excel();stages=[]
     report.native_preview(tmp_path/'print-copy.xlsx',tmp_path,panels,
                           'Microsoft Print to PDF on Ne01:',factory=lambda:adapter,progress=stages.append)
     assert len(adapter.export_sheets)==len(panels)
+    for sheet,panel in zip(adapter.export_sheets,panels):
+        assert all(sheet.hidden[c] is False for c in [1,*range(panel.first_column,panel.last_column+1)])
+        assert sheet.hidden[11] is True and sheet.widths[10]==80
+    saved=load_workbook(tmp_path/'print-copy.xlsx');source=saved['Grid']
+    assert source.column_dimensions['A'].hidden and source.column_dimensions['J'].hidden
+    assert source.column_dimensions['J'].width==80 and source.column_dimensions['K'].hidden
+    assert source['J3'].value==source_content and source['J3']._style==source_style
+    saved.close()
     assert adapter.events.index('owned-open')<adapter.events.index('source-font-scheme-save')
     assert adapter.events.index('source-font-scheme-save')<adapter.events.index('output-font-scheme-load')
     assert adapter.events.index('output-font-scheme-load')<adapter.events.index('local-row-expansion')
