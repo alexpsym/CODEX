@@ -174,7 +174,7 @@
     const d=state.draft;if(!d)return;
     const p=entry.item.price_edit;
     if(!d.operation&&!d.conflict&&(!entry.present||p?.target!==d.target||
-      ['entry',state.field].some(field=>String(p?.levels?.[field])!==String(d.base[field])))){
+      (state.field==='entry'?['entry','stop_loss','take_profit']:['entry',state.field]).some(field=>String(p?.levels?.[field])!==String(d.base[field])))){
       d.conflict=true;d.message='Price or entry changed. Reload this cell.';
     }
     const busy=Boolean(d.operation),available=entry.present&&p?.fields?.includes(state.field);

@@ -22885,7 +22885,12 @@ async def _price_reconcile(operation):
         started = time.monotonic()
         raw = await _price_read(row, _price_credentials(row))
         levels = _price_levels(raw, row["type"] == "Position")
-        if _price_decimal(levels[operation["field"]]) == Decimal(operation["price"]):
+        # Legacy reservations retain their recorded single-field contract.
+        # New entry operations carry every intended level, including known absence.
+        expected = operation.get("expected", {operation["field"]: operation["price"]})
+        if not isinstance(expected, dict) or not expected or set(expected) - _PRICE_FIELDS.keys():
+            raise ValueError("Invalid recorded amendment intent")
+        if all(_price_decimal(levels[field]) == _price_decimal(value) for field, value in expected.items()):
             operation["status"] = "confirmed"
             operation["message"] = "Saved; exact broker level confirmed"
             _PRICE_CONFIRMED[_price_scope(row)] = (started, dict(raw))
@@ -22989,9 +22994,20 @@ async def _amend_open_order(payload):
         if len(instruments) != 1 or instruments[0].get("symbol") != row["instrument"]:
             raise HTTPException(409, "Exact executable instrument metadata unavailable")
         increment = _price_decimal(str((instruments[0].get("priceFilter") or {}).get("tickSize")), positive=True)
-        if price <= 0 or price % increment != 0:
-            raise HTTPException(400, "Price must be positive and on the broker increment " + _fmt_dec(increment))
         prospective = dict(levels, **{field: _fmt_dec(price)})
+        changed_fields = [field]
+        if field == "entry":
+            delta = price - Decimal(levels["entry"])
+            for protection in ("stop_loss", "take_profit"):
+                if Decimal(levels[protection]) > 0:
+                    prospective[protection] = _fmt_dec(Decimal(levels[protection]) + delta)
+                    changed_fields.append(protection)
+        # Validate the entire translation before reserving or sending anything.
+        for changed in changed_fields:
+            amount = _price_decimal(prospective[changed], positive=True)
+            if amount % increment != 0:
+                raise HTTPException(400, "Price must be positive and on the broker increment " + _fmt_dec(increment))
+        expected = dict(prospective) if field == "entry" else {field: prospective[field]}
         buy = row["side"] == "Buy"
         if row["type"] == "Order":
             anchor = Decimal(prospective["entry"])
@@ -23010,7 +23026,8 @@ async def _amend_open_order(payload):
             if price == reference or (price > reference) != above:
                 raise HTTPException(400, "Price crosses the current limit/trigger reference")
         operation = {"operation_id": op_id, "request": fingerprint, "row": row, "field": field,
-                     "price": _fmt_dec(price), "status": "unknown", "message": "Outcome unknown; awaiting exact broker evidence"}
+                     "price": _fmt_dec(price), "expected": expected,
+                     "status": "unknown", "message": "Outcome unknown; awaiting exact broker evidence"}
         if price == Decimal(levels[field]):
             observed_at = time.monotonic()
             _PRICE_CONFIRMED[_price_scope(row)] = (observed_at, dict(raw))
@@ -23024,6 +23041,9 @@ async def _amend_open_order(payload):
             body = {"category": row["category"], "symbol": row["instrument"], _PRICE_FIELDS[field]: _fmt_dec(price)}
             if row["type"] == "Order":
                 body["orderId"] = row["id"]
+                if field == "entry":
+                    for protection in changed_fields[1:]:
+                        body[_PRICE_FIELDS[protection]] = prospective[protection]
                 if field != "entry" and Decimal(levels[field]) == 0:
                     trigger = "tpTriggerBy" if field == "take_profit" else "slTriggerBy"
                     body[trigger] = settings[trigger]

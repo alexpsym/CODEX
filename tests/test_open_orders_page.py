@@ -4653,13 +4653,15 @@ def _price_edit_fixture(monkeypatch, tmp_path, *, position=False, side="Buy", id
         state["markets"].append((path, dict(params)))
         assert params == {"category": state["row"]["category"], "symbol": raw["symbol"]}
         if path == "/v5/market/instruments-info":
-            return {"result": {"list": [{"symbol": raw["symbol"], "priceFilter": {"tickSize": "0.00001" if tiny else "0.1"}}]}}
+            return {"result": {"list": [{"symbol": raw["symbol"], "priceFilter": {"tickSize": state.get("increment", "0.00001" if tiny else "0.1")}}]}}
         assert path == "/v5/market/tickers"
         return {"result": {"list": [dict(symbol=raw["symbol"], lastPrice="0.13578" if tiny else "80500", markPrice="80500", indexPrice="80500")]}}
 
     async def post(**kwargs):
         state["writes"].append(copy.deepcopy(kwargs))
         body = kwargs["body"]
+        reserved = list(service._price_operations().values())[-1]
+        assert reserved["expected"]  # Intended set is durable before mutation.
         assert kwargs["path"] in {"/v5/order/amend", "/v5/position/trading-stop"}
         if state["mode"] == "reject":
             raise service.BybitSignedAPIError(path=kwargs["path"], ret_code=10001, ret_msg="synthetic rejection", recv_window="5000", http_status=200, response_body={})
@@ -4691,10 +4693,11 @@ def test_bybit_order_price_edits_amend_only_selected_levels(monkeypatch, tmp_pat
             before = copy.deepcopy(state["raw"])
             result = await service.amend_open_order(state["request"](field, value))
             assert result["status"] == "confirmed"
-            assert state["writes"][-1]["body"] == {"category": "linear", "symbol": "BTCUSDT", "orderId": "exact-order", key: value}
+            change = {key: value} if field != "entry" else {"price": "79900", "stopLoss": "79400", "takeProfit": "81900"}
+            assert state["writes"][-1]["body"] == {"category": "linear", "symbol": "BTCUSDT", "orderId": "exact-order", **change}
             assert state["writes"][-1]["path"] == "/v5/order/amend"
-            assert state["raw"] == {**before, key: value}
-            assert result["item"]["price_edit"]["ticks"]["take_profit"] == ("21000" if field == "entry" else "20000")
+            assert state["raw"] == {**before, **change}
+            assert result["item"]["price_edit"]["ticks"]["take_profit"] == "20000"
             for historical in ("planned_entry_price", "planned_stop_price", "planned_target_price", "stop_loss_ticks", "risk_reward", "calculation_context_id"):
                 assert result["item"][historical] == original[historical]
         assert all(read["path"] == "/v5/order/realtime" for read in state["reads"])
@@ -4758,8 +4761,9 @@ def test_bybit_order_price_edits_amend_only_selected_levels(monkeypatch, tmp_pat
             assert len(data["writes"]) == 1
             assert data["writes"][0]["path"] == "/v5/order/amend"
             assert data["writes"][0]["body"] == {"category": "linear", "symbol": "QUSDT",
-                "orderId": "7cddbc9e-2d62-440e-8acb-284a7d894211", "price": "0.09143"}
-            assert data["raw"] == {**raw_before, "price": "0.09143"}
+                "orderId": "7cddbc9e-2d62-440e-8acb-284a7d894211", "price": "0.09143",
+                "stopLoss": "0.08392", "takeProfit": "0.10678"}
+            assert data["raw"] == {**raw_before, "price": "0.09143", "stopLoss": "0.08392", "takeProfit": "0.10678"}
             assert result["item"]["order_price"] == "0.09143"
             for field in ("planned_entry_price", "planned_stop_price", "planned_target_price", "stop_loss_ticks", "risk_reward", "calculation_context_id"):
                 assert result["item"][field] == original[field]
@@ -4767,6 +4771,63 @@ def test_bybit_order_price_edits_amend_only_selected_levels(monkeypatch, tmp_pat
             # Same ID reconciles without replay even with a nonempty cursor.
             assert (await service.amend_open_order(request))["status"] == "confirmed"
             assert len(data["writes"]) == 1
+        # Translation uses current manually amended prices on a non-unit grid,
+        # without needing a resolved distance unit. Both sides move by SAME delta.
+        for side in ("Buy", "Sell"):
+            for movement in ("up", "down"):
+                tag = side + movement
+                with monkeypatch.context() as patch:
+                    service, data = _price_edit_fixture(patch, tmp_path / tag, side=side)
+                    service._PRICE_OPERATIONS_PATH.parent.mkdir()
+                    data["increment"] = "0.25"
+                    data["row"]["price_edit"]["unit"] = None
+                    raw = data["raw"]
+                    raw.update(price="80000" if side == "Buy" else "81000",
+                               stopLoss="79325" if side == "Buy" else "82125",
+                               takeProfit="82375" if side == "Buy" else "79250")
+                    before = copy.deepcopy(raw)
+                    delta = service.Decimal("50" if movement == "up" else "-50")
+                    entry = service.Decimal(raw["price"]) + delta
+                    result = await service.amend_open_order(data["request"]("entry", str(entry)))
+                    assert result["status"] == "confirmed" and len(data["writes"]) == 1
+                    body = data["writes"][0]["body"]
+                    assert set(body) == {"category", "symbol", "orderId", "price", "stopLoss", "takeProfit"}
+                    assert body["orderId"] == "exact-order" and body["price"] == str(entry)
+                    assert service.Decimal(body["stopLoss"]) == service.Decimal(before["stopLoss"]) + delta
+                    assert service.Decimal(body["takeProfit"]) == service.Decimal(before["takeProfit"]) + delta
+                    for field in ("stopLoss", "takeProfit"):
+                        assert service.Decimal(raw[field]) - entry == service.Decimal(before[field]) - service.Decimal(before["price"])
+                    assert raw["qty"] == "2" and raw["tpTriggerBy"] == before["tpTriggerBy"] and raw["slTriggerBy"] == before["slTriggerBy"]
+                    assert result["item"]["planned_stop_price"] != raw["stopLoss"]
+                    await service.amend_open_order(data["request"]("entry", str(entry), op="unchanged_entry_after_" + tag))
+                    assert len(data["writes"]) == 1
+        for absent in (("stopLoss",), ("takeProfit",), ("stopLoss", "takeProfit")):
+            with monkeypatch.context() as patch:
+                service, data = _price_edit_fixture(patch, tmp_path / ("absent_" + "_".join(absent)), native_order=True)
+                service._PRICE_OPERATIONS_PATH.parent.mkdir()
+                for field in absent:
+                    data["raw"][field] = "0"
+                request = data["request"]("entry", "0.09143")
+                for field in ("entry", "stop_loss", "take_profit"):
+                    with pytest.raises(service.HTTPException):
+                        await service.amend_open_order({**request, "base": {**request["base"], field: "0.2"}})
+                with pytest.raises(service.HTTPException):
+                    await service.amend_open_order({**request, "value": "0.091431"})
+                if "stopLoss" not in absent:
+                    # Positive entry but translated existing stop would be negative.
+                    with pytest.raises(service.HTTPException):
+                        await service.amend_open_order({**request, "value": "0.001"})
+                    data["raw"]["stopLoss"] = "0.084925"
+                    with pytest.raises(service.HTTPException):
+                        await service.amend_open_order(data["request"]("entry", "0.09143"))
+                    data["raw"]["stopLoss"] = "0.08492"
+                assert not data["writes"] and not service._PRICE_OPERATIONS_PATH.exists()
+                result = await service.amend_open_order(request)
+                assert result["status"] == "confirmed" and len(data["writes"]) == 1
+                body = data["writes"][0]["body"]
+                for field in absent:
+                    assert field not in body and data["raw"][field] == "0"
+                assert body["price"] == "0.09143" and data["raw"]["qty"] == "400"
     asyncio.run(exercise())
 
 
@@ -4878,6 +4939,50 @@ def test_price_edit_validation_reconciles_unknown_results_without_duplicate_writ
         state["mode"] = "reject"
         rejected = await service.amend_open_order(state["request"]("stop_loss", "79600", op="explicit_rejection_001"))
         assert rejected["status"] == "rejected" and "synthetic rejection" in rejected["message"]
+        for outcome in ("delay", "timeout"):
+            with monkeypatch.context() as patch:
+                service, data = _price_edit_fixture(patch, tmp_path / outcome, native_order=True)
+                service._PRICE_OPERATIONS_PATH.parent.mkdir()
+                data["mode"] = outcome
+                request = data["request"]("entry", "0.09143")
+                result = await service.amend_open_order(request)
+                assert result["status"] == ("pending" if outcome == "delay" else "unknown")
+                recorded = service._price_operations()[request["operation_id"]]
+                assert recorded["expected"] == {"entry": "0.09143", "stop_loss": "0.08392", "take_profit": "0.10678"}
+                data["raw"]["price"] = "0.09143"
+                service._PRICE_TARGETS.clear();service._PRICE_LOCKS.clear();service._PRICE_CONFIRMED.clear()
+                result = await service.amend_open_order(request)  # restart: read-only
+                assert result["status"] != "confirmed" and "item" not in result and not service._PRICE_CONFIRMED
+                with pytest.raises(service.HTTPException):
+                    await service.amend_open_order({**request, "value": "0.09043"})
+                # Reissue a valid server identity to prove another ID stays blocked.
+                data["row"] = service._enrich_price_edit({**data["row"], "_price_broker": copy.deepcopy(data["raw"])})
+                with pytest.raises(service.HTTPException):
+                    await service.amend_open_order(data["request"]("entry", "0.09043", op="different_entry_operation_001"))
+                data["raw"]["stopLoss"] = "0.08392"
+                result = await service.open_order_amend_status({"operation_id": request["operation_id"]})
+                assert result["status"] != "confirmed" and "item" not in result and not service._PRICE_CONFIRMED
+                data["raw"]["takeProfit"] = "0.10678"
+                result = await service.open_order_amend_status({"operation_id": request["operation_id"]})
+                assert result["status"] == "confirmed" and len(data["writes"]) == 1
+                assert result["item"]["price_edit"]["levels"] == recorded["expected"]
+                assert service._price_operations()[request["operation_id"]]["expected"] == recorded["expected"]
+                # An older snapshot cannot restore either companion after confirmation.
+                old = copy.deepcopy(recorded["row"])
+                service._enrich_price_edit(old)
+                assert (old["order_price"], old["stop_loss"], old["take_profit"]) == ("0.09143", "0.08392", "0.10678")
+        with monkeypatch.context() as patch:
+            service, data = _price_edit_fixture(patch, tmp_path / "legacy", native_order=True)
+            service._PRICE_OPERATIONS_PATH.parent.mkdir()
+            request = data["request"]("entry", "0.09143", op="legacy_entry_only_operation")
+            legacy = {"operation_id": request["operation_id"], "request": json.dumps(request, sort_keys=True, separators=(",", ":")),
+                      "row": copy.deepcopy(data["row"]), "field": "entry", "price": "0.09143", "status": "unknown", "message": "old operation"}
+            service._price_store(legacy)
+            data["raw"]["price"] = "0.09143"
+            result = await service.amend_open_order(request)
+            assert result["status"] == "confirmed" and not data["writes"]
+            assert result["item"]["stop_loss"] == "0.08492" and result["item"]["take_profit"] == "0.10778"
+            assert "expected" not in service._price_operations()[request["operation_id"]]
     asyncio.run(exercise())
 
 
@@ -4933,8 +5038,13 @@ const publish=changes=>{row={...row,...changes};snapshot={...snapshot,items:[row
 const reply=(data,status=200)=>({ok:status===200,status,statusText:'fixture',text:async()=>JSON.stringify(data),json:async()=>data});
 const calls=[];let mode='success',savedOperation;
 const confirmation=body=>{
-  const levels={...row.price_edit.levels,[body.field]:body.value};
-  publish({price_edit:{...row.price_edit,levels},[body.field==='entry'?'order_price':body.field]:body.value,_price_read_started:row._price_read_started+1});
+  // Independent literal expected sets for the two entry scenarios.
+  let levels={...row.price_edit.levels,[body.field]:body.value};
+  if(body.field==='entry'){
+    if(row.instrument==='QUSDT'){assert.strictEqual(body.value,'0.09143');levels={entry:'0.09143',stop_loss:'0.08392',take_profit:'0.10678'};}
+    else{assert.strictEqual(body.value,'79900');levels={entry:'79900',stop_loss:'79400',take_profit:'81900'};}
+  }
+  publish({price_edit:{...row.price_edit,levels},order_price:levels.entry,stop_loss:levels.stop_loss,take_profit:levels.take_profit,_price_read_started:row._price_read_started+1});
   return {status:'confirmed',operation_id:body.operation_id,item:JSON.parse(JSON.stringify(row))};
 };
 global.fetch=async(url,opts={})=>{
@@ -4945,10 +5055,17 @@ global.fetch=async(url,opts={})=>{
       return reply({version:1,values:row.classification_values,item:row});
     }
     if(url==='/api/open-orders/amend-status'){
-      assert(savedOperation);return reply(mode==='confirmed'?confirmation(savedOperation):{status:'unknown',message:'Outcome unknown; read-only reconciliation pending'});
+      assert(savedOperation);
+      if(mode==='confirmed')return reply(confirmation(savedOperation));
+      if(mode==='entryOne')publish({stop_loss:'0.08392',price_edit:{...row.price_edit,levels:{...row.price_edit.levels,stop_loss:'0.08392'}},_price_read_started:row._price_read_started+1});
+      return reply({status:mode.startsWith('entry')?'pending':'unknown',message:'Outcome unknown; checking broker'});
     }
     assert.strictEqual(url,'/api/open-orders/amend');assert.strictEqual(body.target,'price-order-life');
     assert.strictEqual(typeof body.value,'string');assert.deepStrictEqual(Object.keys(body).sort(),['base','field','mode','operation_id','target','value']);
+    if(mode==='entryPartial'){
+      savedOperation=body;publish({order_price:'0.09143',price_edit:{...row.price_edit,levels:{...row.price_edit.levels,entry:'0.09143'}},_price_read_started:row._price_read_started+1});
+      return reply({status:'pending',message:'Checking broker...',item:JSON.parse(JSON.stringify(row))});
+    }
     if(mode==='lost'){savedOperation=body;throw new Error('lost acknowledgement');}
     return reply(confirmation(body));
   }
@@ -4979,10 +5096,26 @@ vm.runInThisContext(fs.readFileSync(process.argv[1],'utf8'));
   assert.strictEqual(input(qe),qi);assert.strictEqual(document.activeElement,qi);assert.strictEqual(qi.selectionStart,1);assert.strictEqual(qi.selectionEnd,4);
   find(qe,'Cancel').click();assert.strictEqual(calls.length,0);
   edit(qe).click();assert.strictEqual(input(qe).selectionStart,0);assert.strictEqual(input(qe).selectionEnd,7);
-  assert(find(qe,'Save').disabled);enter(qe,'0.09143');assert.strictEqual(calls.length,0);await find(qe,'Save').click();
+  assert(find(qe,'Save').disabled);enter(qe,'0.09143');assert.strictEqual(calls.length,0);mode='entryPartial';await find(qe,'Save').click();
   assert.strictEqual(calls.length,1);assert.deepStrictEqual([calls[0].body.field,calls[0].body.mode,calls[0].body.value],['entry','price','0.09143']);
-  assert(qe.textContent.includes('0.09143')&&qe.textContent.includes('Saved'));
+  assert(input(qe)&&find(qe,'Save').disabled&&!qe.textContent.includes('Saved'));
   assert.strictEqual(cell(qrow,'Stop Loss').children[0].textContent,'0.08492');assert.strictEqual(cell(qrow,'Take Profit').children[0].textContent,'0.10778');
+  await hooks.refresh('progress');assert(input(qe)&&!qe.textContent.includes('Saved'));
+  document.hidden=false;mode='entryOne';await hooks.pollVersion();
+  assert(input(qe)&&!qe.textContent.includes('Saved'));assert.strictEqual(cell(qrow,'Take Profit').children[0].textContent,'0.10778');
+  mode='confirmed';await hooks.pollVersion();document.hidden=true;
+  assert(qe.textContent.includes('0.09143')&&qe.textContent.includes('Saved'));
+  assert.strictEqual(cell(qrow,'Stop Loss').children[0].textContent,'0.08392');assert.strictEqual(cell(qrow,'Take Profit').children[0].textContent,'0.10678');
+  assert.strictEqual(calls.filter(call=>call.url==='/api/open-orders/amend').length,1);
+  // Both companion changes invalidate an unsent entry draft without replacing it.
+  for(const field of ['stop_loss','take_profit']){
+    edit(qe).click();enter(qe,'0.09043');const retained=input(qe);retained.setSelectionRange(2,4);
+    const changed=field==='stop_loss'?'0.08382':'0.10688';
+    publish({[field]:changed,price_edit:{...row.price_edit,levels:{...row.price_edit.levels,[field]:changed}},_price_read_started:row._price_read_started+1});await hooks.refresh('progress');
+    assert.strictEqual(input(qe),retained);assert.strictEqual(retained.value,'0.09043');assert.strictEqual(retained.selectionStart,2);assert.strictEqual(retained.selectionEnd,4);
+    assert(find(qe,'Save').disabled&&!find(qe,'Reload').hidden);await find(qe,'Reload').click();find(qe,'Cancel').click();
+  }
+  assert.strictEqual(calls.filter(call=>call.url==='/api/open-orders/amend').length,1);mode='success';
   publish(btc);await hooks.refresh('progress');main=tbody.children[0];
   calls.length=0;tp=cell(main,'Take Profit');sl=cell(main,'Stop Loss');entry=cell(main,'Entry / Order');action=cell(main,'Action');
   edit(tp).click();assert.strictEqual(input(tp).value,'81500');assert(select(tp));assert(find(tp,'Reload').hidden);assert(!tp.textContent.includes('Entry anchor'));assert(!tp.textContent.includes('+stop'));enter(tp,'82000');
@@ -4993,8 +5126,11 @@ vm.runInThisContext(fs.readFileSync(process.argv[1],'utf8'));
   assert.strictEqual(input(sl).value,'79500');assert.strictEqual(calls.length,0);
   await find(tp,'Save').click();assert(tp.textContent.includes('82000')&&tp.textContent.includes('Saved'));
   assert.strictEqual(input(sl).value,'79500');assert.strictEqual(calls[0].body.field,'take_profit');assert.strictEqual(calls[0].body.value,'82000');
-  await find(sl,'Save').click();assert(sl.textContent.includes('79500'));
+  await find(sl,'Save').click();assert(sl.textContent.includes('79500'));assert(tp.textContent.includes('82000'));assert(entry.textContent.includes('80000'));
+  edit(sl).click();enter(sl,'79600');const protectiveDraft=input(sl);
   edit(entry).click();enter(entry,'79900');await find(entry,'Save').click();assert.strictEqual(calls.at(-1).body.field,'entry');
+  assert(entry.textContent.includes('79900')&&tp.textContent.includes('81900'));assert.strictEqual(input(sl),protectiveDraft);assert.strictEqual(protectiveDraft.value,'79600');
+  assert(find(sl,'Save').disabled&&!find(sl,'Reload').hidden);find(sl,'Cancel').click();assert(sl.textContent.includes('79400'));
   edit(tp).click();assert(find(tp,'Save').disabled);await find(tp,'Save').click();assert.strictEqual(calls.length,3);find(tp,'Cancel').click();
   edit(sl).click();change(select(sl),'ticks');enter(sl,'4500');assert.strictEqual(calls.length,3);escape(sl);assert(!input(sl));
   // Classification continues using its own handler and stays inside its cell.
@@ -5013,7 +5149,7 @@ vm.runInThisContext(fs.readFileSync(process.argv[1],'utf8'));
   const fresh=JSON.parse(JSON.stringify(row));publish({_price_read_started:1,take_profit:'81500',price_edit:{...row.price_edit,levels:{...row.price_edit.levels,take_profit:'81500'}}});
   await hooks.refresh('progress');assert(tp.textContent.includes('83000'));publish(fresh);await hooks.refresh('progress');
   edit(sl).click();enter(sl,'79600');publish({_price_read_started:100,price_edit:{...row.price_edit,levels:{...row.price_edit.levels,entry:'79800'}}});await hooks.refresh('progress');
-  assert(input(sl).value==='79600'&&find(sl,'Save').disabled&&find(sl,'Reload'));await find(sl,'Reload').click();assert.strictEqual(input(sl).value,'79500');
+  assert(input(sl).value==='79600'&&find(sl,'Save').disabled&&find(sl,'Reload'));await find(sl,'Reload').click();assert.strictEqual(input(sl).value,'79400');
   // Replacement rows retain old drafts but have no authority over the new row.
   publish({type:'Position',id:0,price_edit:{...row.price_edit,target:'position-new-cycle',fields:['stop_loss','take_profit']}});await hooks.refresh('progress');
   const replacement=tbody.children.find(tr=>tr!==main);assert(replacement);assert(!edit(cell(replacement,'Entry / Order')));assert(input(sl)&&find(sl,'Save').disabled);
