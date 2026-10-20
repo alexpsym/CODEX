@@ -1,4 +1,4 @@
-"""Manifest-driven five-document Forex pilot; default preparation is private.
+"""Manifest-driven Forex recovery; default five-document pilot stays private.
 
 No discovery, source deletion, journal updates, Office or relationship fetching.
 Detailed content, provenance, captures and ledgers stay in explicit HOST storage.
@@ -100,21 +100,117 @@ def safe_path(root, relative):
     return path
 
 
-def selection_data(path):
+def selection_contract(selection, mode):
+    require(mode in ("pilot", "batch") and selection.get("mode", "pilot") == mode,
+            "Selection mode differs from requested mode")
+    count = len(selection["documents"])
+    if mode == "pilot":
+        require(count == 5, "Pilot requires exactly five documents")
+    else:
+        require(1 <= count <= 20 and selection.get("batch_limit") == 20
+                and selection.get("selected_count") == count,
+                "Batch requires an exact declared selection of 1-20 documents")
+    return count
+
+
+def source_identity(relative):
+    return str(safe_relative(relative.replace("\\", "/"))).casefold()
+
+
+def completion_sources(selection, inventory=None):
+    """Validate immutable receipts only; never reopen completed sources/outputs."""
+    references = selection.get("prior_completions", [])
+    require(1 <= len(references) <= 102, "Batch requires bounded prior-completion evidence")
+    completed = set()
+    if inventory is None:
+        raw_inventory = Path(selection["inventory"]).read_bytes()
+        require(digest(raw_inventory) == selection["inventory_sha256"], "Inventory changed")
+        inventory = [json.loads(x) for x in raw_inventory.decode("utf-8").splitlines()]
+    documents = [d for d in inventory if d.get("kind") == "document"]
+    indexed = {source_identity(d["relative_path"]): d for d in documents}
+    require(len(indexed) == len(documents), "Duplicate/case-variant inventory source")
+    expected_records = {"selection.validated.json", "preparation.json", "publication.json",
+                        "published_verification.json", "preflight.json"}
+    root_key = os.path.normcase(os.path.abspath(selection["root"]))
+    for reference in references:
+        directory = Path(reference["directory"])
+        require(directory.is_absolute() and set(reference["records"]) == expected_records,
+                "Incomplete prior-completion references")
+        records = {}
+        raw_records = {}
+        for name, expected_hash in reference["records"].items():
+            raw = (directory/name).read_bytes()
+            require(digest(raw) == expected_hash, "Prior completion evidence changed")
+            raw_records[name] = raw
+            records[name] = json.loads(raw.decode("utf-8"))
+        chosen = records["selection.validated.json"]
+        prep = records["preparation.json"]
+        receipt = records["publication.json"]
+        verified = records["published_verification.json"]
+        count = selection_contract(chosen, chosen.get("mode", "pilot"))
+        require(os.path.normcase(os.path.abspath(chosen["root"])) == root_key
+                and chosen["inventory_sha256"] == selection["inventory_sha256"],
+                "Prior completion root/inventory differs")
+        require(prep["selection_sha256"] == digest(raw_records["selection.validated.json"])
+                == receipt["selection_sha256"], "Prior selection hash mismatch")
+        require(prep["status"] == receipt["status"] == verified["status"] == "complete"
+                and prep["source_count"] == verified["documents"] == count
+                and len(prep["documents"]) == len(receipt["source_checks"]) == count
+                and prep["tool_sha256"] == reference["tool_sha256"]
+                == records["preflight.json"]["tool_sha256"], "Incomplete prior publication")
+        require([d["source"] for d in prep["documents"]] == chosen["documents"],
+                "Prior selected source identities differ")
+        outputs = {}
+        source_checks = {os.path.normcase(x["source"]): x for x in receipt["source_checks"]}
+        require(len(source_checks) == count, "Duplicate prior source check")
+        for document in prep["documents"]:
+            source = document["source"]
+            key = source_identity(source["relative_path"])
+            require(key in indexed and all(source.get(k) == v for k,v in indexed[key].items()),
+                    "Prior source metadata differs from inventory")
+            require(key not in completed and document["complete"]
+                    and not document["coverage"]["issues"], "Duplicate/incomplete prior source")
+            completed.add(key)
+            source_path = Path(chosen["root"]).joinpath(*safe_relative(source["relative_path"].replace("\\", "/")).parts)
+            check = source_checks.get(os.path.normcase(str(source_path)))
+            require(check is not None and check["sha256"] == document["source_sha256"]
+                    and all(check["before"][k] == check["after"][k] == source[k]
+                            for k in ("size", "mtime_ns")), "Prior source preservation mismatch")
+            for item in document["outputs"]:
+                relative = safe_relative(item["relative_destination"])
+                require(relative.parent == PurePosixPath(source["relative_path"].replace("\\", "/")).parent
+                        and relative.name == item["name"], "Unsafe prior output identity")
+                destination = str(Path(chosen["root"]).joinpath(*relative.parts))
+                require(destination == item["destination"] and destination not in outputs,
+                        "Duplicate/unsafe prior output")
+                outputs[destination] = (item["sha256"], item["kind"])
+        published = {item["path"]: (item["sha256"], item["kind"]) for item in receipt["published"]}
+        require(published == outputs and len(receipt["published"]) == len(outputs)
+                == verified["published_files"], "Prior publication coverage mismatch")
+        counts = {k: sum(kind == k for _, kind in outputs.values())
+                  for k in ("table", "picture", "text")}
+        require(all(verified["counts"].get(k, 0) == v for k, v in counts.items()),
+                "Prior publication type counts mismatch")
+    return completed
+
+
+def selection_data(path, mode="pilot"):
     raw = Path(path).read_bytes()
     selection = json.loads(raw.decode("utf-8"))
     root = Path(selection["root"])
     require(root.is_absolute() and root.name.upper() == "FOREX", "Non-FOREX selection")
     documents = selection["documents"]
-    require(len(documents) == 5, "Pilot requires exactly five documents")
+    selection_contract(selection, mode)
     raw_inventory = Path(selection["inventory"]).read_bytes()
     require(digest(raw_inventory) == selection["inventory_sha256"], "Inventory changed")
     inventory = [json.loads(x) for x in raw_inventory.decode("utf-8").splitlines()]
+    completed = completion_sources(selection, inventory) if mode == "batch" else set()
     seen = set()
     for d in documents:
         relative = d["relative_path"].replace("\\", "/")
         p = safe_relative(relative)
         require(relative.casefold() not in seen, "Duplicate selected source")
+        require(relative.casefold() not in completed, "Previously completed source selected")
         seen.add(relative.casefold())
         require(p.suffix.lower() == ".docx" and not p.name.startswith("~$"), "Not a DOCX source")
         matches = [r for r in inventory if r.get("relative_path", "").replace("\\", "/") == relative]
@@ -194,6 +290,96 @@ def branch_signature(node):
                 images=[x.get(R+"embed") or x.get(R+"link") for x in node.iter(A+"blip")])
 
 
+def normalized_branch_signature(node):
+    """Ignore only text/run splitting and editing IDs, never logical boundaries.
+
+    Both supported textbox representations expose the same Word blocks. Property
+    trees remain exact; adjacent text is coalesced only within identical rPr.
+    """
+    ignored = {W+"bookmarkStart", W+"bookmarkEnd", W+"proofErr", W+"lastRenderedPageBreak"}
+    def attrs(n):
+        return sorted((k,v) for k,v in n.attrib.items()
+                      if not k.split("}")[-1].startswith("rsid")
+                      and k.split("}")[-1] not in ("paraId","textId"))
+    def property_tree(n):
+        return [n.tag,attrs(n),n.text or "",[property_tree(c) for c in n if c.tag not in ignored]]
+    def run(n):
+        properties=n.find(W+"rPr")
+        fmt=property_tree(properties) if properties is not None and (properties.attrib or list(properties)) else None
+        tokens=[]
+        for c in n:
+            if c.tag in ignored or c.tag==W+"rPr":continue
+            if c.tag==W+"t":
+                if tokens and tokens[-1][0]=="text":tokens[-1][1]+=c.text or ""
+                else:tokens.append(["text",c.text or ""])
+            elif c.tag in (W+"br",W+"cr",W+"tab",W+"noBreakHyphen",W+"softHyphen"):
+                tokens.append([c.tag,attrs(c)])
+            elif c.tag==W+"drawing" and list(c.iter(A+"blip")) and not list(c.iter(W+"txbxContent")):
+                tokens.append(["image",property_tree(c)])
+            else:raise RecoveryError("Unsupported alternate-content run feature: "+c.tag)
+        return ["run",fmt,tokens]
+    def paragraph(n):
+        properties=n.find(W+"pPr")
+        fmt=property_tree(properties) if properties is not None and (properties.attrib or list(properties)) else None
+        runs=[]
+        for c in n:
+            if c.tag in ignored or c.tag==W+"pPr":continue
+            require(c.tag==W+"r","Unsupported alternate-content paragraph feature")
+            item=run(c)
+            if runs and runs[-1][1]==item[1]:
+                for token in item[2]:
+                    previous=runs[-1][2]
+                    if token[0]=="text" and previous and previous[-1][0]=="text":previous[-1][1]+=token[1]
+                    else:previous.append(token)
+            else:runs.append(item)
+        return ["paragraph",fmt,runs]
+    def block(n):
+        if n.tag in ignored:return None
+        if n.tag==W+"p":return paragraph(n)
+        if n.tag==W+"tbl":
+            content=[]
+            for c in n:
+                if c.tag in (W+"tblPr",W+"tblGrid"):content.append(property_tree(c))
+                elif c.tag==W+"tr":
+                    row=[]
+                    for cell in c:
+                        if cell.tag==W+"trPr":row.append(property_tree(cell));continue
+                        require(cell.tag==W+"tc","Unsupported alternate-content row feature")
+                        row.append(["cell",attrs(cell),[property_tree(x) if x.tag==W+"tcPr" else block(x)
+                                                      for x in cell if x.tag not in ignored]])
+                    content.append(["row",attrs(c),row])
+                elif c.tag not in ignored:raise RecoveryError("Unsupported alternate-content table feature")
+            return ["table",attrs(n),content]
+        raise RecoveryError("Unsupported alternate-content block: "+n.tag)
+    result=[]
+    def walk(n):
+        if n.tag in ignored:return
+        if n.tag==W+"txbxContent":
+            result.append(["textbox",[block(c) for c in n if c.tag not in ignored]]);return
+        if n.tag in (W+"p",W+"tbl"):
+            result.append(block(n));return
+        if n.tag in (W+"object",W+"fldSimple",W+"instrText",W+"altChunk",W+"sym"):
+            raise RecoveryError("Unsupported alternate-content feature: "+n.tag)
+        if n.tag==A+"prstGeom":require(n.get("prst")=="rect","Unsupported alternate-content geometry")
+        if n.tag==A+"blip":raise RecoveryError("Image outside supported alternate-content paragraph")
+        for c in n:walk(c)
+    walk(node)
+    require(result,"Alternate content has no supported logical blocks")
+    return result
+
+
+def alternate_proof(node):
+    branches=[]
+    for b in node:
+        record=dict(kind=b.tag.split("}")[-1],sha256=digest(ET.tostring(b)),signature=branch_signature(b))
+        try:record["normalized_signature"]=normalized_branch_signature(b)
+        except RecoveryError as error:record["normalization_error"]=str(error)
+        branches.append(record)
+    equal=bool(branches) and all("normalized_signature" in b for b in branches)
+    equal=equal and all(b["normalized_signature"]==branches[0]["normalized_signature"] for b in branches)
+    return dict(branches=branches,equivalent=equal)
+
+
 def collapse_alternatives(root, issues):
     aliases = []
     for parent in list(root.iter()):
@@ -203,7 +389,8 @@ def collapse_alternatives(root, issues):
             if not choices or fallback is None:
                 issues.append("Unsupported alternate-content branch"); continue
             chosen = choices[0]
-            if any(branch_signature(b) != branch_signature(chosen) for b in [*choices[1:], fallback]):
+            proof=alternate_proof(node)
+            if not proof["equivalent"]:
                 issues.append("Divergent alternate-content branches"); continue
             for branch in [*choices[1:], fallback]:
                 aliases.extend(zip(branch.iter(W+"tbl"), chosen.iter(W+"tbl")))
@@ -401,7 +588,8 @@ def parse_package(data):
         parts.sort(key=lambda n:(n != "word/document.xml", n))
         for part in parts:
             root = xml[part]; raw_tables = list(root.iter(W+"tbl"))
-            alternatives.extend(dict(part=part, branches=[dict(kind=b.tag.split("}")[-1], sha256=digest(ET.tostring(b)), signature=branch_signature(b)) for b in n]) for n in root.iter(MC+"AlternateContent"))
+            alternatives.extend(dict(part=part,index=i,**alternate_proof(n))
+                                for i,n in enumerate(root.iter(MC+"AlternateContent"),1))
             aliases = collapse_alternatives(root, issues)
             for n in root.iter():
                 if n.tag in (W+"object", W+"fldSimple", W+"fldChar", W+"instrText", W+"altChunk", W+"del", W+"ins", W+"sym", W+"commentReference", W+"footnoteReference", W+"endnoteReference"):
@@ -562,24 +750,85 @@ def recover_copy(data, document, directory, fonts):
     return dict(source=document,source_sha256=digest(data),outputs=outputs,coverage=parsed,complete=not parsed["issues"])
 
 
-def prepare(selection_path, output, saved_captures=None):
+def branch_correction_record(selection_path, saved_captures, relative, mode="pilot"):
+    """Prove the diagnosed prose-only legacy segmentation failure from bytes.
+
+    This is not an output-mismatch exemption. All table/media coverage is fixed,
+    and only a formerly incomplete source with the exact dependent issue pair
+    and semantically equal old branch representations can be authorized.
+    """
+    selection,selection_hash=selection_data(selection_path,mode)
+    saved_captures=Path(saved_captures)
+    old_bytes=(saved_captures/"preparation.json").read_bytes();previous=json.loads(old_bytes)
+    require(previous["selection_sha256"]==selection_hash
+            and [r["source"] for r in previous["documents"]]==selection["documents"],
+            "Correction selection/completion evidence differs")
+    matches=[r for r in previous["documents"] if source_identity(r["source"]["relative_path"])==source_identity(relative)]
+    require(len(matches)==1,"Correction source is not unique in selection")
+    old=matches[0]
+    expected_issues=["Divergent alternate-content branches","Unsupported non-alternate VML drawing"]
+    require(not old["complete"] and sorted(old["coverage"]["issues"])==expected_issues,
+            "Correction requires the exact previously incomplete branch issue pair")
+    capture=Path(old["capture"])
+    require(capture.resolve().is_relative_to(saved_captures.resolve()),"Correction capture escapes evidence")
+    data=capture.read_bytes()
+    require(digest(data)==old["source_sha256"],"Correction capture changed")
+    parsed=parse_package(data)
+    require(not parsed["issues"],"Correction leaves unsupported content unresolved")
+    # Normalize JSON representation (including the legacy tuple signatures).
+    parsed=json.loads(json.dumps(parsed,ensure_ascii=False,default=lambda x:None))
+    proofs=parsed["alternate_content"]
+    legacy=[dict(part=x["part"],branches=[{k:b[k] for k in ("kind","sha256","signature")} for b in x["branches"]]) for x in proofs]
+    previous_legacy=[dict(part=x["part"],branches=[{k:b[k] for k in ("kind","sha256","signature")} for b in x["branches"]])
+                     for x in old["coverage"]["alternate_content"]]
+    require(legacy==previous_legacy,"Original branch evidence changed")
+    corrected=[]
+    for proof in proofs:
+        branches=proof["branches"]
+        if any(b["signature"]!=branches[0]["signature"] for b in branches):
+            require(proof["equivalent"] and all(not b["signature"]["tables"] and not b["signature"]["images"] for b in branches),
+                    "Correction must be proven prose-only segmentation")
+            corrected.append(proof)
+    require(corrected,"No proven segmentation correction exists")
+    require(parsed["table_coverage"]==old["coverage"]["table_coverage"]
+            and parsed["raw_table_count"]==old["coverage"]["raw_table_count"],"Correction changes table coverage")
+    require(parsed["tables"]==[{k:v for k,v in t.items() if k!="rendering"} for t in old["coverage"]["tables"]],
+            "Correction changes structured tables")
+    require([{k:v for k,v in m.items() if k!="bytes"} for m in parsed["media"]]==old["coverage"]["media"],
+            "Correction changes embedded media")
+    return dict(schema="prose_run_segmentation_v1",old_preparation_sha256=digest(old_bytes),
+                selection_sha256=selection_hash,source_relative_path=old["source"]["relative_path"].replace("\\","/"),
+                source_sha256=old["source_sha256"],old_issues=expected_issues,
+                allowed_changed_kinds=["text"],proven_branches=corrected)
+
+
+def prepare(selection_path, output, saved_captures=None, mode="pilot", correction=None):
     output=Path(output); require(output.is_absolute() and output.is_dir(),"Explicit existing evidence directory required")
     with (output/"prepare.started").open("x") as f: f.write("one attempt\n")
-    selection,selection_hash=selection_data(selection_path); save(output/"selection.validated.json",selection)
+    selection,selection_hash=selection_data(selection_path,mode); save(output/"selection.validated.json",selection)
+    selected_count = len(selection["documents"])
     previous = None
     origin = None
+    correction_record=None
+    require(correction is None or saved_captures is not None,"Correction requires saved captures")
     if saved_captures is not None:
         saved_captures = Path(saved_captures)
         require(saved_captures.is_absolute() and saved_captures.resolve() != output.resolve(),
                 "Saved captures require a distinct absolute evidence directory")
         previous = load(saved_captures/"preparation.json")
         require(previous["selection_sha256"] == selection_hash
-                and previous["source_count"] == 5
+                and previous["source_count"] == selected_count
+                and previous.get("mode", "pilot") == mode
                 and [r["source"] for r in previous["documents"]] == selection["documents"],
                 "Saved capture selection differs")
         origin = dict(evidence=str(saved_captures),
                       preparation_sha256=digest((saved_captures/"preparation.json").read_bytes()),
                       previous_tool_sha256=previous["tool_sha256"])
+        if correction is not None:
+            correction_record=load(correction)
+            expected=branch_correction_record(selection_path,saved_captures,
+                                             correction_record["source_relative_path"],mode)
+            require(correction_record==expected,"Correction authorization/evidence differs")
     fonts=font_set(); results=[]
     save(output/"preparation.json",dict(status="incomplete",selection_sha256=selection_hash,documents=results))
     for i,d in enumerate(selection["documents"],1):
@@ -603,9 +852,20 @@ def prepare(selection_path, output, saved_captures=None):
         with capture.open("xb") as dest: dest.write(data); dest.flush(); os.fsync(dest.fileno())
         result=recover_copy(data,d,directory,fonts); result.update(capture=str(capture),before=before,after=after)
         if previous is not None:
-            require({o["name"]:(o["kind"],o["sha256"]) for o in result["outputs"]} ==
-                    {o["name"]:(o["kind"],o["sha256"]) for o in old["outputs"]},
-                    "Saved-copy outputs differ from previously prepared bytes")
+            new_outputs={o["name"]:(o["kind"],o["sha256"]) for o in result["outputs"]}
+            old_outputs={o["name"]:(o["kind"],o["sha256"]) for o in old["outputs"]}
+            authorized=correction_record is not None and source_identity(d["relative_path"])==source_identity(correction_record["source_relative_path"])
+            if authorized:
+                require(not old["complete"] and result["complete"] and set(new_outputs)==set(old_outputs),
+                        "Correction cannot authorize a complete item or unrelated output set")
+                changed=[name for name in new_outputs if new_outputs[name]!=old_outputs[name]]
+                require(all(new_outputs[n][0]==old_outputs[n][0]=="text" for n in changed),
+                        "Correction cannot change non-text outputs")
+                result["saved_copy_correction"]=dict(authorization_sha256=digest(Path(correction).read_bytes()),
+                                                     changed_outputs=changed,proof=correction_record)
+            else:
+                require(old["complete"] and new_outputs==old_outputs,
+                        "Unaffected/incomplete saved-copy outputs differ without proven correction")
         for item in result["outputs"]:
             relative=str(PurePosixPath(d["relative_path"].replace("\\","/")).parent/item["name"])
             if previous is not None:
@@ -616,13 +876,18 @@ def prepare(selection_path, output, saved_captures=None):
             item.update(relative_destination=relative,destination=str(target))
         save(directory/"provenance.json",result); results.append(result)
         save(output/"preparation.json",dict(status="incomplete",selection_sha256=selection_hash,documents=results))
-    result=dict(status="complete" if all(r["complete"] for r in results) else "incomplete",selection_sha256=selection_hash,documents=results,source_count=len(results),source_bytes=sum(r["before"]["size"] for r in results),deletion_eligible=False,tool_sha256=digest(Path(__file__).read_bytes()),saved_capture_origin=origin,source_captures=0 if previous is not None else len(results))
+    result=dict(status="complete" if all(r["complete"] for r in results) else "incomplete",selection_sha256=selection_hash,documents=results,source_count=len(results),source_bytes=sum(r["before"]["size"] for r in results),deletion_eligible=False,tool_sha256=digest(Path(__file__).read_bytes()),saved_capture_origin=origin,source_captures=0 if previous is not None else len(results),mode=mode,selected_count=selected_count,batch_limit=20 if mode=="batch" else 5,prior_completions=selection.get("prior_completions",[]),correction_authorization_sha256=digest(Path(correction).read_bytes()) if correction is not None else None)
     save(output/"preparation.json",result); return result
 
 
-def validate_prepared(selection_path, output):
-    output=Path(output); selection,selection_hash=selection_data(selection_path); prepared=load(output/"preparation.json")
-    require(prepared["status"]=="complete" and prepared["source_count"]==5,"Incomplete preparation cannot publish")
+def validate_prepared(selection_path, output, mode="pilot"):
+    output=Path(output); selection,selection_hash=selection_data(selection_path,mode); prepared=load(output/"preparation.json")
+    selected_count = len(selection["documents"])
+    require(prepared["status"]=="complete" and prepared["source_count"]==selected_count
+            and prepared.get("mode","pilot")==mode and prepared.get("selected_count",selected_count)==selected_count
+            and prepared.get("batch_limit",5)==(20 if mode=="batch" else 5)
+            and prepared.get("prior_completions",[])==selection.get("prior_completions",[]),
+            "Incomplete/mismatched preparation cannot publish")
     require(prepared["selection_sha256"]==selection_hash and prepared["tool_sha256"]==digest(Path(__file__).read_bytes()),"Selection/tool changed")
     require([r["source"] for r in prepared["documents"]]==selection["documents"],"Prepared selection differs")
     destinations=set()
@@ -657,12 +922,12 @@ def validate_prepared(selection_path, output):
     return selection,prepared
 
 
-def publish(selection_path, output, review_path):
+def publish(selection_path, output, review_path, mode="pilot"):
     output=Path(output)
     with (output/"publish.started").open("x") as f: f.write("one attempt\n")
-    selection,prepared=validate_prepared(selection_path,output); review=load(review_path)
+    selection,prepared=validate_prepared(selection_path,output,mode); review=load(review_path)
     require(review.get("approved") is True and review["preparation_sha256"]==digest((output/"preparation.json").read_bytes()) and review["selection_sha256"]==prepared["selection_sha256"],"Exact preparation requires private/visual approval")
-    ledger=dict(status="incomplete",selection_sha256=prepared["selection_sha256"],source_checks=[],published=[],staged=[],deletion_eligible=False)
+    ledger=dict(status="incomplete",selection_sha256=prepared["selection_sha256"],source_checks=[],published=[],staged=[],deletion_eligible=False,mode=mode,selected_count=len(selection["documents"]))
     save(output/"publication.json",ledger)
     with ExitStack() as stack:
         for result in prepared["documents"]:
@@ -695,15 +960,18 @@ def main(argv=None):
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--stage",choices=("prepare","preflight","publish","verify"),default="prepare")
     parser.add_argument("--selection",type=Path); parser.add_argument("--output",type=Path,required=True)
+    parser.add_argument("--mode",choices=("pilot","batch"),default="pilot")
     parser.add_argument("--saved-captures",type=Path,help="Prepare from exact-selection verified private copies without source access")
+    parser.add_argument("--correction",type=Path,help="Exact proof-bound prose segmentation correction for one incomplete saved item")
     parser.add_argument("--review",type=Path); parser.add_argument("--supervise",action="store_true")
     args=parser.parse_args(argv)
     require(args.output.is_absolute() and args.output.is_dir(),"Absolute existing evidence directory required")
     if args.supervise:
         timeout={"preflight":30,"prepare":180,"publish":60,"verify":60}[args.stage]
-        command=[sys.executable,str(Path(__file__).resolve()),"--stage",args.stage,"--output",str(args.output)]
+        command=[sys.executable,str(Path(__file__).resolve()),"--stage",args.stage,"--output",str(args.output),"--mode",args.mode]
         if args.selection: command += ["--selection",str(args.selection.resolve())]
         if args.saved_captures: command += ["--saved-captures",str(args.saved_captures.resolve())]
+        if args.correction: command += ["--correction",str(args.correction.resolve())]
         if args.review: command += ["--review",str(args.review.resolve())]
         start=time.monotonic()
         try:
@@ -714,18 +982,19 @@ def main(argv=None):
         save(args.output/(args.stage+"_outer.json"),outer); print(json.dumps(outer)); return outer["returncode"]
     try:
         require(args.saved_captures is None or args.stage == "prepare", "Saved captures apply only to preparation")
+        require(args.correction is None or (args.stage=="prepare" and args.saved_captures is not None),"Correction applies only to saved-copy preparation")
         if args.stage=="preflight":
             fonts=font_set()
             with (args.output/"preflight.started").open("x") as f: f.write("one preflight\n")
             save(args.output/"preflight.json",dict(dummy="FOREX_7B1_HOST_STORAGE_V1",output=str(args.output.resolve()),executable=str(Path(sys.executable).resolve()),pid=os.getpid(),tool=str(Path(__file__).resolve()),tool_sha256=digest(Path(__file__).read_bytes()),pillow=PILLOW_VERSION,fonts={k:v.path for k,v in fonts.items()},font_pixels=FONT_SIZE,source_access=False))
         else:
             require(args.selection is not None,"Exact selection required")
-            if args.stage=="prepare": require(prepare(args.selection,args.output,args.saved_captures)["status"]=="complete","Preparation contains unsupported content")
+            if args.stage=="prepare": require(prepare(args.selection,args.output,args.saved_captures,args.mode,args.correction)["status"]=="complete","Preparation contains unsupported content")
             elif args.stage=="verify":
-                _,result=validate_prepared(args.selection,args.output)
+                _,result=validate_prepared(args.selection,args.output,args.mode)
                 save(args.output/"private_checks.json",dict(status="passed",preparation_sha256=digest((args.output/"preparation.json").read_bytes()),selection_sha256=result["selection_sha256"],counts={k:sum(o["kind"]==k for r in result["documents"] for o in r["outputs"]) for k in ("picture","table","text")}))
             else:
-                require(args.review is not None,"Private/visual review required"); publish(args.selection,args.output,args.review)
+                require(args.review is not None,"Private/visual review required"); publish(args.selection,args.output,args.review,args.mode)
         print(json.dumps(dict(stage=args.stage,status="complete",evidence=str(args.output)))); return 0
     except Exception as error:
         save(args.output/(args.stage+"_failure.json"),dict(status="incomplete",error=repr(error),stage=args.stage)); raise

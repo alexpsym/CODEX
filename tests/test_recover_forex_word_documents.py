@@ -253,3 +253,224 @@ def test_forex_pilot_rejects_source_changes_collisions_and_unsafe_paths(tmp_path
                     raw = raw.replace(b'Version="6"',b'Version="6" Unrecognized="yes"')
                 target.writestr(item,raw)
         assert any("Custom XML" in issue for issue in recovery.parse_package(altered.getvalue())["issues"])
+
+
+def test_forex_batch_bounds_and_completed_source_exclusion(tmp_path, monkeypatch):
+    from collections import Counter
+    from copy import deepcopy
+
+    pilot_selection,pilot_evidence,originals,crypto,_ = fixture_selection(tmp_path/"archive")
+    pilot = recovery.load(pilot_selection)
+    root = Path(pilot["root"])
+    inventory = [json.loads(x) for x in Path(pilot["inventory"]).read_text(encoding="utf-8").splitlines()]
+    new_documents = []
+    for index in range(22):
+        source = root/"2018"/("F%03d" % (100+index))/"trade.docx"
+        source.parent.mkdir(parents=True)
+        xml = ('<w:document '+NS+'><w:body><w:tbl><w:tblPr><w:tblStyle w:val="TableGrid"/></w:tblPr>'
+               '<w:tblGrid><w:gridCol w:w="3000"/></w:tblGrid><w:tr>'
+               +cell("%d / 0.00001 / No" % index)+'</w:tr></w:tbl></w:body></w:document>')
+        data = io.BytesIO()
+        with zipfile.ZipFile(data,"w",zipfile.ZIP_DEFLATED) as z: z.writestr("word/document.xml",xml)
+        source.write_bytes(data.getvalue()); originals[source] = data.getvalue()
+        d = dict(relative_path=source.relative_to(root).as_posix(),kind="document",extension=".docx",
+                 availability="metadata_local_candidate",skipped_link=False,
+                 size=source.stat().st_size,mtime_ns=source.stat().st_mtime_ns)
+        inventory.append(d); new_documents.append(d)
+    manifest = Path(pilot["inventory"])
+    manifest.write_text("\n".join(json.dumps(x) for x in inventory),encoding="utf-8")
+    pilot["inventory_sha256"] = recovery.digest(manifest.read_bytes()); recovery.save(pilot_selection,pilot)
+    prepared_pilot = recovery.prepare(pilot_selection,pilot_evidence)
+    pilot_receipt = recovery.publish(pilot_selection,pilot_evidence,review(pilot_evidence))
+    for item in pilot_receipt["published"]:
+        assert recovery.digest(Path(item["path"]).read_bytes()) == item["sha256"]
+    recovery.save(pilot_evidence/"published_verification.json",dict(status="complete",documents=5,
+        published_files=len(pilot_receipt["published"]),counts=dict(Counter(o["kind"] for o in pilot_receipt["published"]))))
+    recovery.save(pilot_evidence/"preflight.json",dict(tool_sha256=prepared_pilot["tool_sha256"]))
+    record_names=("selection.validated.json","preparation.json","publication.json","published_verification.json","preflight.json")
+    reference=dict(directory=str(pilot_evidence),tool_sha256=prepared_pilot["tool_sha256"],
+                   records={n:recovery.digest((pilot_evidence/n).read_bytes()) for n in record_names})
+    batch=dict(root=str(root),inventory=str(manifest),inventory_sha256=pilot["inventory_sha256"],
+               mode="batch",batch_limit=20,selected_count=20,documents=new_documents[:20],prior_completions=[reference])
+    selection=tmp_path/"batch.json"; recovery.save(selection,batch)
+    evidence=tmp_path/"batch_evidence"; evidence.mkdir()
+    with pytest.raises(recovery.RecoveryError): recovery.selection_data(selection)  # pilot default stays strict
+    prepared = recovery.prepare(selection,evidence,mode="batch")
+    assert prepared["status"]=="complete" and prepared["source_count"]==20 and prepared["selected_count"]==20
+    assert prepared["mode"]=="batch" and prepared["prior_completions"]==[reference]
+    recovery.validate_prepared(selection,evidence,mode="batch")
+    receipt = recovery.publish(selection,evidence,review(evidence),mode="batch")
+    assert receipt["status"]=="complete" and len(receipt["source_checks"])==20
+    assert len(receipt["published"])==20
+    assert {x["path"] for x in receipt["published"]}=={o["destination"] for d in prepared["documents"] for o in d["outputs"]}
+    assert all(p.read_bytes()==data for p,data in originals.items())
+
+    for d in new_documents[20:]:
+        folder=(root/d["relative_path"]).parent
+        assert list(folder.iterdir())==[root/d["relative_path"]]
+    assert (crypto/"keep.txt").read_bytes()==b"untouched"
+
+    def no_source(*args, **kwargs):
+        raise AssertionError("Invalid selection/saved-copy validation touched an original")
+    for mode in ("empty","over20","completed","duplicate","case_variant","count","mode","outside","receipt_hash"):
+        bad=deepcopy(batch)
+        if mode=="empty": bad["documents"]=[]; bad["selected_count"]=0
+        elif mode=="over20": bad["documents"]=new_documents[:21]; bad["selected_count"]=21
+        elif mode=="completed": bad["documents"][0]=pilot["documents"][0]
+        elif mode in ("duplicate","case_variant"):
+            bad["documents"][1]=deepcopy(bad["documents"][0])
+            if mode=="case_variant":bad["documents"][1]["relative_path"]=bad["documents"][1]["relative_path"].upper()
+        elif mode=="count": bad["selected_count"]=19
+        elif mode=="mode": bad["mode"]="pilot"
+        elif mode=="outside": bad["documents"][0]["relative_path"]="../Crypto/trade.docx"
+        else:bad["prior_completions"][0]["records"]["publication.json"]="0"*64
+        path=tmp_path/(mode+".json"); recovery.save(path,bad)
+        out=tmp_path/(mode+"_evidence");out.mkdir()
+        with monkeypatch.context() as patch:
+            patch.setattr(recovery,"locked_source",no_source)
+            with pytest.raises(recovery.RecoveryError):recovery.prepare(path,out,mode="batch")
+    for count in (0,4,6):
+        bad=deepcopy(pilot);bad["documents"]=(pilot["documents"]*2)[:count]
+        path=tmp_path/("pilot%d.json"%count);recovery.save(path,bad)
+        with pytest.raises(recovery.RecoveryError):recovery.selection_data(path)
+
+    altered=tmp_path/"altered_receipt";altered.mkdir()
+    for n in record_names:(altered/n).write_bytes((pilot_evidence/n).read_bytes())
+    (altered/"publication.json").write_text('{"status":"incomplete"}',encoding="utf-8")
+    bad=deepcopy(batch);bad["prior_completions"][0]["directory"]=str(altered)
+    path=tmp_path/"changed_receipt.json";recovery.save(path,bad)
+    with pytest.raises(recovery.RecoveryError):recovery.selection_data(path,mode="batch")
+
+    original_preparation=(evidence/"preparation.json").read_bytes()
+    broken=deepcopy(prepared);broken["source_count"]=19;recovery.save(evidence/"preparation.json",broken)
+    with pytest.raises(recovery.RecoveryError):recovery.validate_prepared(selection,evidence,mode="batch")
+    (evidence/"preparation.json").write_bytes(original_preparation)
+    changed=deepcopy(batch);changed["documents"]=changed["documents"][:19];changed["selected_count"]=19
+    path=tmp_path/"changed_list.json";recovery.save(path,changed)
+    with pytest.raises(recovery.RecoveryError):recovery.validate_prepared(path,evidence,mode="batch")
+
+    small=deepcopy(batch);small["documents"]=new_documents[20:];small["selected_count"]=2
+    small_selection=tmp_path/"small.json";recovery.save(small_selection,small)
+    small_evidence=tmp_path/"small_evidence";small_evidence.mkdir()
+    # Actual supervised child must receive --mode batch; default pilot would reject 2.
+    assert recovery.main(["--stage","prepare","--mode","batch","--selection",str(small_selection),
+                          "--output",str(small_evidence),"--supervise"])==0
+    _,small_prepared=recovery.validate_prepared(small_selection,small_evidence,mode="batch")
+    assert small_prepared["source_count"]==2
+    replay=tmp_path/"small_replay";replay.mkdir()
+    with monkeypatch.context() as patch:
+        patch.setattr(recovery,"locked_source",no_source);patch.setattr(recovery,"safe_path",no_source)
+        assert recovery.prepare(small_selection,replay,small_evidence,mode="batch")["source_captures"]==0
+    broken=deepcopy(small_prepared);broken["source_count"]=1;recovery.save(small_evidence/"preparation.json",broken)
+    bad_replay=tmp_path/"bad_replay";bad_replay.mkdir()
+    with pytest.raises(recovery.RecoveryError):recovery.prepare(small_selection,bad_replay,small_evidence,mode="batch")
+    assert all(p.read_bytes()==data for p,data in originals.items())
+
+
+def _segmentation_package(variant=None, tables_in_branch=True):
+    """Synthetic Choice/Fallback with genuine run fragmentation, not trade data."""
+    fmt='<w:rPr><w:b/><w:color w:val="123456"/></w:rPr>'
+    head='<w:p><w:pPr><w:jc w:val="left"/></w:pPr>'
+    choice_p=head+'<w:r>'+fmt+'<w:t xml:space="preserve">Keep Ω </w:t><w:br/><w:t>same</w:t><w:tab/><w:t>0.00001</w:t></w:r></w:p>'
+    fallback_p=head+'<w:r>'+fmt+'<w:t xml:space="preserve">Keep </w:t></w:r><w:r>'+fmt+'<w:t xml:space="preserve">Ω </w:t><w:br/><w:t>sa</w:t><w:t>me</w:t><w:tab/><w:t>0.00001</w:t></w:r></w:p>'
+    image='<w:p><w:r><w:drawing><a:blip r:embed="image1"/></w:drawing></w:r></w:p>' if tables_in_branch else ''
+    left=(table() if tables_in_branch else '')+choice_p+paragraph("Next paragraph")+image
+    right=(table() if tables_in_branch else '')+fallback_p+paragraph("Next paragraph")+image
+    if variant=="text":right=right.replace('<w:t>sa</w:t>','<w:t>changed</w:t>')
+    elif variant=="order":right=paragraph("Next paragraph")+right.replace(paragraph("Next paragraph"),'')
+    elif variant=="paragraph":right=right.replace('<w:t>sa</w:t>','</w:r></w:p>'+head+'<w:r>'+fmt+'<w:t>sa</w:t>')
+    elif variant=="break":right=right.replace('<w:br/>','')
+    elif variant=="tab":right=right.replace('<w:tab/>','<w:t> </w:t>')
+    elif variant=="merge":right=right.replace('<w:gridSpan w:val="2"/>','<w:gridSpan w:val="1"/>',1)
+    elif variant=="cell":right=right.replace(cell("0"),cell("0")+cell(""),1)
+    elif variant=="image":right=right.replace('r:embed="image1"','r:embed="different"')
+    elif variant=="format":right=right.replace('<w:color w:val="123456"/>','<w:color w:val="654321"/>',1)
+    elif variant=="unknown":right=right.replace('<w:t>sa</w:t>','<w:fldSimple w:instr="UNKNOWN"/>')
+    alternate=('<mc:AlternateContent><mc:Choice Requires="wps"><w:drawing><a:prstGeom prst="rect"/><wps:txbx><w:txbxContent>'
+               +left+'</w:txbxContent></wps:txbx></w:drawing></mc:Choice><mc:Fallback><w:pict><w:txbxContent>'
+               +right+'</w:txbxContent></w:pict></mc:Fallback></mc:AlternateContent>')
+    body=table()+(table() if not tables_in_branch else '')+'<w:p><w:r>'+alternate+'</w:r></w:p>'
+    result=io.BytesIO()
+    with zipfile.ZipFile(result,"w",zipfile.ZIP_DEFLATED) as z:
+        z.writestr("word/document.xml",'<w:document '+NS+'><w:body>'+body+'</w:body></w:document>')
+        if tables_in_branch:
+            picture=package()[1];z.writestr("word/media/image1.png",picture)
+            z.writestr("word/_rels/document.xml.rels",'<Relationships xmlns="'+REL+'"><Relationship Id="image1" Type="'+IMAGE_REL+'" Target="media/image1.png"/></Relationships>')
+    return result.getvalue()
+
+
+def test_alternate_content_equivalence_preserves_structure_and_rejects_conflicts():
+    import xml.etree.ElementTree as ET
+    parsed=recovery.parse_package(_segmentation_package())
+    assert not parsed["issues"] and parsed["raw_table_count"]==3 and len(parsed["tables"])==2
+    assert sum(x["alternate_alias"] for x in parsed["table_coverage"])==1
+    proof=parsed["alternate_content"][0]
+    assert proof["equivalent"] and proof["branches"][0]["signature"]!=proof["branches"][1]["signature"]
+    assert proof["branches"][0]["normalized_signature"]==proof["branches"][1]["normalized_signature"]
+    assert [x["text"] for x in parsed["prose"] if "text" in x]==["Keep Ω \nsame\t0.00001","Next paragraph"]
+    assert len(parsed["image_occurrences"])==1
+    for variant in ("text","order","paragraph","break","tab","merge","cell","image","format","unknown"):
+        with zipfile.ZipFile(io.BytesIO(_segmentation_package(variant))) as z:
+            root=ET.fromstring(z.read("word/document.xml"))
+        alt=next(root.iter(recovery.MC+"AlternateContent"))
+        assert not recovery.alternate_proof(alt)["equivalent"],variant
+        issues=[];recovery.collapse_alternatives(root,issues)
+        assert "Divergent alternate-content branches" in issues,variant
+
+
+def test_saved_capture_correction_allows_only_proven_incomplete_branch_changes(tmp_path, monkeypatch):
+    from copy import deepcopy
+    selection,old,originals,_,_=fixture_selection(tmp_path/"archive")
+    chosen=recovery.load(selection);source=next(iter(originals));data=_segmentation_package(tables_in_branch=False)
+    source.write_bytes(data);originals[source]=data
+    records=[json.loads(x) for x in Path(chosen["inventory"]).read_text(encoding="utf-8").splitlines()]
+    records[0].update(size=len(data),mtime_ns=source.stat().st_mtime_ns)
+    chosen["documents"][0].update(records[0],known_sha256=recovery.digest(data))
+    Path(chosen["inventory"]).write_text("\n".join(json.dumps(x) for x in records),encoding="utf-8")
+    chosen["inventory_sha256"]=recovery.digest(Path(chosen["inventory"]).read_bytes());recovery.save(selection,chosen)
+    # Reproduce legacy token comparison only to generate real old failed outputs;
+    # canonical capture/parser/renderer produce the entire snapshot, never a mock result.
+    with monkeypatch.context() as patch:
+        patch.setattr(recovery,"normalized_branch_signature",recovery.branch_signature)
+        prior=recovery.prepare(selection,old)
+    assert prior["status"]=="incomplete" and not prior["documents"][0]["complete"]
+    assert all(r["complete"] for r in prior["documents"][1:])
+    relative=chosen["documents"][0]["relative_path"]
+    authorization=recovery.branch_correction_record(selection,old,relative)
+    correction=tmp_path/"correction.json";recovery.save(correction,authorization)
+    assert authorization["allowed_changed_kinds"]==["text"]
+    def no_source(*args,**kwargs):raise AssertionError("Saved correction accessed archive originals")
+    def attempt(name,path=correction):
+        out=tmp_path/name;out.mkdir()
+        with monkeypatch.context() as patch:
+            patch.setattr(recovery,"locked_source",no_source);patch.setattr(recovery,"safe_path",no_source)
+            return recovery.prepare(selection,out,old,correction=path)
+    for field in ("old_preparation_sha256","selection_sha256","source_sha256"):
+        invalid=deepcopy(authorization);invalid[field]="0"*64;path=tmp_path/(field+".json");recovery.save(path,invalid)
+        with pytest.raises(recovery.RecoveryError):attempt("bad_"+field,path)
+    with pytest.raises(recovery.RecoveryError):recovery.branch_correction_record(selection,old,chosen["documents"][1]["relative_path"])
+    capture=Path(prior["documents"][0]["capture"]);unchanged=capture.read_bytes();capture.write_bytes(unchanged+b"changed")
+    with pytest.raises(recovery.RecoveryError):attempt("changed_capture")
+    capture.write_bytes(unchanged)
+    old_bytes=(old/"preparation.json").read_bytes()
+    wrong=deepcopy(prior);wrong["source_count"]=4;recovery.save(old/"preparation.json",wrong)
+    with pytest.raises(recovery.RecoveryError):attempt("wrong_completion")
+    (old/"preparation.json").write_bytes(old_bytes)
+    selected_bytes=selection.read_bytes();wrong_selection=deepcopy(chosen);wrong_selection["unexpected_change"]=True;recovery.save(selection,wrong_selection)
+    with pytest.raises(recovery.RecoveryError):attempt("wrong_selection")
+    selection.write_bytes(selected_bytes)
+    wrong=deepcopy(prior);wrong["documents"][1]["outputs"][0]["sha256"]="0"*64;recovery.save(old/"preparation.json",wrong)
+    altered_authorization=recovery.branch_correction_record(selection,old,relative)
+    altered=tmp_path/"altered_correction.json";recovery.save(altered,altered_authorization)
+    with pytest.raises(recovery.RecoveryError):attempt("unrelated_output",altered)
+    (old/"preparation.json").write_bytes(old_bytes)
+    current=attempt("corrected")
+    assert current["status"]=="complete" and current["source_captures"]==0
+    assert current["documents"][0]["saved_copy_correction"]["changed_outputs"]
+    for index,(new,previous) in enumerate(zip(current["documents"],prior["documents"])):
+        a={o["name"]:(o["kind"],o["sha256"]) for o in new["outputs"]}
+        b={o["name"]:(o["kind"],o["sha256"]) for o in previous["outputs"]}
+        assert set(a)==set(b)
+        if index:assert a==b
+        else:assert all(a[n][0]==b[n][0]=="text" for n in a if a[n]!=b[n])
+    assert all(path.read_bytes()==raw for path,raw in originals.items())
