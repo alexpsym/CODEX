@@ -22,7 +22,11 @@ void __stdcall IgnoreOptionValue(void*,PChar,PChar) {}
 void __stdcall Capture(void*,PChar text){messages.push_back(text);}
 PChar __stdcall TestSymbol(void*){return (PChar)"EURUSD";}
 bool __stdcall SelectTimeframe(void*,PChar,int timeframe){selectedTimeframe=timeframe;return true;}
-unsigned long __stdcall NoHistory(void*){return 0;}
+unsigned long __stdcall NoHistory(void*)
+{
+  Check(selectedTimeframe==Timeframe,"effective timeframe selected before history reads");
+  return 0;
+}
 void *Option(const char *prefix)
 {
   for(auto &entry:options) if(entry.first.find(prefix)==0) return entry.second.value;
@@ -73,6 +77,7 @@ int main()
     else if(option.type==ot_Boolean) option.custom.boolean=!option.custom.boolean;
     else option.custom.integer+=1;
   }
+  *(int*)Option("Timeframe")=30; // Custom timeframe in minutes
   *(int*)Option("Setup mode")=0;
   *(int*)Option("Confirmation (")=2;
   *(int*)Option("Depth mode")=3;
@@ -83,7 +88,7 @@ int main()
   *(double*)Option("With-trend / neutral target R")=4;
   *(double*)Option("Counter-trend target R")=5;
   auto custom=Values(true);
-  TickOnce("RBP preset=Custom setup=0 confirmation=2 direction=1 body=0.75-2.25ATR",1);
+  TickOnce("RBP preset=Custom timeframe=30 setup=0 confirmation=2 direction=1 body=0.75-2.25ATR",1);
   Check(Values(false)==custom,"Custom must use every detailed value unchanged");
   Check(messages.back().find("depth=20-70% depthMode=3")!=std::string::npos,"Custom diagnostic uses selected depth settings");
   Check(selectedTimeframe==*(int*)Option("Timeframe"),"Custom timeframe used on first tick");
@@ -91,7 +96,7 @@ int main()
   ResetStrategy();
   Check(messages.size()==1,"reset must defer until options are current");
   *(int*)Option("Settings preset")=1;
-  TickOnce("RBP preset=Baseline setup=1 confirmation=0 direction=0 body=1.00-1.50ATR",2);
+  TickOnce("RBP preset=Baseline timeframe=15 setup=1 confirmation=0 direction=0 body=1.00-1.50ATR",2);
   Check(PullbackDepthMode==1&&ShallowMinimumDepth==0&&ShallowMaximumDepth==50,"Baseline shallow depth");
   Check(StopModeSetting==0&&WithTrendNeutralTargetR==2&&CounterTrendTargetR==3,"Baseline adaptive stop and exact targets");
   Check(MinimumOpposingCloses==2&&TradeDirection==0&&ImpulseM15H4TrendFilter==0,"Baseline opposing closes and EMA off");
@@ -102,7 +107,7 @@ int main()
 
   ResetStrategy();
   *(int*)Option("Settings preset")=2;
-  TickOnce("RBP preset=Trend-filter test setup=1 confirmation=0 direction=0 body=1.00-1.50ATR",3);
+  TickOnce("RBP preset=Trend-filter test timeframe=15 setup=1 confirmation=0 direction=0 body=1.00-1.50ATR",3);
   Check(TradeDirection==0&&ImpulseM15H4TrendFilter==1&&messages.back().find("EMAtrend=on")!=std::string::npos,"Trend-filter diagnostic enabled");
   ImpulseM15H4TrendFilter=0;
   Check(Values(false)==baseline,"Trend-filter preset differs ONLY by EMA enable");
@@ -110,29 +115,40 @@ int main()
 
   ResetStrategy();
   *(int*)Option("Settings preset")=3;
-  TickOnce("RBP preset=Baseline buys-only setup=1 confirmation=0 direction=1 body=1.00-1.50ATR depth=0-50% depthMode=1 stop=adaptive targets=2.0/3.0R EMAtrend=off scope=0",4);
+  TickOnce("RBP preset=Baseline buys-only timeframe=15 setup=1 confirmation=0 direction=1 body=1.00-1.50ATR depth=0-50% depthMode=1 stop=adaptive targets=2.0/3.0R EMAtrend=off scope=0",4);
   Check(TradeDirection==1,"buys-only effective direction");
   TradeDirection=0;
   Check(Values(false)==baseline,"buys-only preset differs ONLY by trade direction");
   TradeDirection=1;
   Check(Values(true)==custom,"buys-only preset preserves all Custom values");
 
+  ResetStrategy();ResetStrategy();
+  Check(messages.size()==4,"restart defers preset resolution until first tick");
+  selectedTimeframe=0;
+  *(int*)Option("Settings preset")=4;
+  TickOnce("RBP preset=M5 Baseline timeframe=5 setup=1 confirmation=0 direction=0 body=1.00-1.50ATR depth=0-50% depthMode=1 stop=adaptive targets=2.0/3.0R EMAtrend=off scope=0",5);
+  Check(Timeframe==PERIOD_M5&&selectedTimeframe==PERIOD_M5,"M5 effective series selected");
+  Timeframe=PERIOD_M15;
+  Check(Values(false)==baseline,"M5 preset differs ONLY by timeframe");
+  Timeframe=PERIOD_M5;
+  Check(Values(true)==custom,"M5 preset preserves all Custom values");
+
   ResetStrategy();
   *(int*)Option("Settings preset")=0;
-  TickOnce("RBP preset=Custom setup=0 confirmation=2 direction=1 body=0.75-2.25ATR",5);
+  TickOnce("RBP preset=Custom timeframe=30 setup=0 confirmation=2 direction=1 body=0.75-2.25ATR",6);
   Check(Values(false)==custom,"return to Custom restores every detailed value");
 
   // Changed values during a run take effect on the next run, once.
   *(double*)Option("With-trend / neutral target R")=0.5;
   *(double*)Option("Counter-trend target R")=1;
   GetSingleTick();
-  Check(WithTrendNeutralTargetR==4&&CounterTrendTargetR==5&&messages.size()==5,"no repeated preset resolution on ticks");
+  Check(WithTrendNeutralTargetR==4&&CounterTrendTargetR==5&&messages.size()==6,"no repeated preset resolution on ticks");
   ResetStrategy();
-  TickOnce("RBP preset=Custom",6);
+  TickOnce("RBP preset=Custom timeframe=30",7);
   Check(WithTrendNeutralTargetR==2&&CounterTrendTargetR==3,"existing Custom target floors retained");
   Check(*(double*)Option("With-trend / neutral target R")==0.5&&*(double*)Option("Counter-trend target R")==1,"clamping does not overwrite Custom inputs");
   ResetStrategy();ResetStrategy();
-  TickOnce("RBP preset=Custom",7);
+  TickOnce("RBP preset=Custom timeframe=30",8);
   DoneStrategy();
-  puts("PASS: preset lifecycle, late options, one diagnostic/run, all Custom values, targets, EMA and buys-only isolation");
+  puts("PASS: preset lifecycle, late options, one diagnostic/run, all Custom values, targets, EMA, buys-only and M5 isolation");
 }
