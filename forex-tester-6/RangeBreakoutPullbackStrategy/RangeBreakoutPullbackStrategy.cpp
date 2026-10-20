@@ -117,7 +117,7 @@ void DiagnosticMarker(const char *kind,const TDateTime time,const double price,c
 void ClampTargetSettings(){WithTrendNeutralTargetR=Max(2.0,WithTrendNeutralTargetR);CounterTrendTargetR=Max(3.0,CounterTrendTargetR);}
 void ApplySettingsPreset()
 {
-  if(SettingsPreset!=1&&SettingsPreset!=2) return;
+  if(SettingsPreset!=1&&SettingsPreset!=2&&SettingsPreset!=3) return;
   // Non-Custom presets start from the registered defaults, then apply their compact experiment values.
   Timeframe=PERIOD_M15; TradeDirection=0; VolumeLots=0.01; SetupModeSetting=0; PivotStrength=3; MinimumReactions=2;
   ClusterToleranceATR=0.35; MinimumRangeHeightATR=2.0; MinimumRangeBars=10; MaximumRangeBars=250;
@@ -129,13 +129,14 @@ void ApplySettingsPreset()
   SetupModeSetting=1; Confirmation=0; ImpulseMaximumBodyATR=1.5; PullbackDepthMode=1; ShowDiagnostics=true;
   WithTrendNeutralTargetR=2.0; CounterTrendTargetR=3.0;
   if(SettingsPreset==2) ImpulseM15H4TrendFilter=1;
+  if(SettingsPreset==3) TradeDirection=1;
 }
 void EmitPresetDiagnostic()
 {
-  char text[256]; const char *name=SettingsPreset==1?"Baseline":SettingsPreset==2?"Trend-filter test":"Custom";
+  char text[256]; const char *name=SettingsPreset==1?"Baseline":SettingsPreset==2?"Trend-filter test":SettingsPreset==3?"Baseline buys-only":"Custom";
   double lo=PullbackDepthMode==1?ShallowMinimumDepth:PullbackDepthMode==2?DeepMinimumDepth:PullbackDepthMode==3?CustomMinimumDepth:0;
   double hi=PullbackDepthMode==1?ShallowMaximumDepth:PullbackDepthMode==2?DeepMaximumDepth:PullbackDepthMode==3?CustomMaximumDepth:100;
-  sprintf(text,"RBP preset=%s setup=%d confirmation=%d body=%.2f-%.2fATR depth=%.0f-%.0f%% depthMode=%d stop=%s targets=%.1f/%.1fR EMAtrend=%s scope=%d",name,SetupModeSetting,Confirmation,ImpulseMinimumBodyATR,ImpulseMaximumBodyATR,Min(lo,hi),Max(lo,hi),PullbackDepthMode,StopModeSetting==0?"adaptive":"fixed",WithTrendNeutralTargetR,CounterTrendTargetR,ImpulseM15H4TrendFilter!=0?"on":"off",TrendFilterScope);
+  sprintf(text,"RBP preset=%s setup=%d confirmation=%d direction=%d body=%.2f-%.2fATR depth=%.0f-%.0f%% depthMode=%d stop=%s targets=%.1f/%.1fR EMAtrend=%s scope=%d",name,SetupModeSetting,Confirmation,TradeDirection,ImpulseMinimumBodyATR,ImpulseMaximumBodyATR,Min(lo,hi),Max(lo,hi),PullbackDepthMode,StopModeSetting==0?"adaptive":"fixed",WithTrendNeutralTargetR,CounterTrendTargetR,ImpulseM15H4TrendFilter!=0?"on":"off",TrendFilterScope);
   Print((PChar)text);
 }
 void ResolveRunSettings()
@@ -702,7 +703,7 @@ EXPORT void __stdcall InitStrategy()
 {
  runOptionCount=0; runSettingsResolved=false;
  StrategyShortName((PChar)"Range Breakout-Pullback"); StrategyDescription((PChar)"Closed-bar TradingView range breakout-pullback port");
- RegOption((PChar)"Settings preset (0 Custom, 1 Baseline, 2 Trend-filter test)",ot_Integer,&SettingsPreset);
+ RegOption((PChar)"Settings preset (0 Custom, 1 Baseline, 2 Trend-filter test, 3 Baseline buys-only)",ot_Integer,&SettingsPreset);
  AddSeparator((PChar)"General execution/setup");
  RegOption((PChar)"Currency",ot_Currency,&Currency);RegRunOption((PChar)"Timeframe",ot_TimeFrame,&Timeframe);RegRunOption((PChar)"Trade direction (0 both,1 buys only,2 sells only)",ot_Integer,&TradeDirection);AddOptionValue((PChar)"Trade direction (0 both,1 buys only,2 sells only)",(PChar)"0 = Both directions");AddOptionValue((PChar)"Trade direction (0 both,1 buys only,2 sells only)",(PChar)"1 = Buys only");AddOptionValue((PChar)"Trade direction (0 both,1 buys only,2 sells only)",(PChar)"2 = Sells only");RegRunOption((PChar)"Setup mode (0 range, 1 impulse)",ot_Integer,&SetupModeSetting);RegRunOption((PChar)"Volume lots",ot_Double,&VolumeLots);RegRunOption((PChar)"Magic number",ot_Integer,&MagicNumber);
  AddSeparator((PChar)"Confirmation");
