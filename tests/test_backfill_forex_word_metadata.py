@@ -52,6 +52,23 @@ def rewrite_xml(path, edit):
 
 
 def test_word_metadata_preview_requires_exact_identity_and_preserves_nonblank_cells(tmp_path):
+    origin = r"C:\GPT\CODEX-master\journal\Trading Journal.xlsx"
+    expected = r"C:\Users\User\Dropbox\FOREX\2018\F1"
+    for target, base in [
+        ("../../../Users/User/Dropbox/FOREX/2018/F1", None),
+        ("../../../Users/User/Dropbox/FOREX/2018/./F1", None),
+        (expected, None),
+        ("file:///C:/Users/User/Dropbox/FOREX/2018/F1", None),
+        ("2018/F1", r"C:\Users\User\Dropbox\FOREX"),
+    ]:
+        result = m.normalize_folder_link(target, origin, base)
+        assert result["status"] == "normalized" and result["normalized_target"] == expected
+    unicode_target = "file:///C:/Users/User/Dropbox/FOREX/2018/F1%20%C3%A9"
+    assert m.normalize_folder_link(unicode_target, origin)["normalized_target"].endswith("F1 é")
+    for target in ["C:relative", "/Users/User/Dropbox/FOREX/2018/F1", "//server/share", "https://host/FOREX/F1", "file://server/share", expected+"?x", expected+"#x", expected+"%2520", expected+"%xy", "../../../outside/F1"]:
+        assert m.normalize_folder_link(target, origin)["status"] == "unsupported"
+    assert m.normalize_folder_link("2018/F1", origin, "relative-base")["status"] == "unsupported"
+    assert m.normalize_folder_link("../../../Users/User/Dropbox/FOREX/2018/F1", r"D:\Temp\copy.xlsx")["status"] == "unsupported"
     p = tmp_path / "snapshot.xlsx"
     wb = workbook(p, rows=10)
     ws = wb["Trade Log"]
@@ -94,6 +111,9 @@ def test_word_metadata_preview_requires_exact_identity_and_preserves_nonblank_ce
     observations = m.fields(source())
     conflicting = source(pairs=[("PAIR", "GBPUSD"), ("SETUP", "Pullback")])
     assert m.match_source(conflicting, m.fields(conflicting), snap)["status"] == "unresolved"
+    for label, value in [("ENTRY PRICE", "1.23001"), ("DATE", "11/9/18"), ("SHORT/LONG", "SHORT")]:
+        c = source(pairs=[("PAIR", "EURUSD"), (label, value), ("SETUP", "Pullback")])
+        assert m.match_source(c, m.fields(c), snap)["status"] == "unresolved"
     other = source(99)
     assert m.match_source(other, m.fields(other), snap)["status"] == "unresolved"
     snap.rows.append(copy.deepcopy(snap.rows[0]))
@@ -155,6 +175,7 @@ def receipt_fixture(root):
 
 
 def test_word_metadata_preview_validates_receipts_and_produces_hash_bound_patch(tmp_path):
+    from tools import verify_forex_word_metadata_preview as v
     directory, invdir, h = receipt_fixture(tmp_path)
     handoff = directory / "final_recovery_handoff.json"
     output = tmp_path / "preview"
@@ -171,6 +192,32 @@ def test_word_metadata_preview_validates_receipts_and_produces_hash_bound_patch(
     assert patch["mapping_sha256"] == m.digest((output / "field_mapping_catalog.json").read_bytes())
     assert all(e["target_precondition"]["structurally_blank"] for e in patch["entries"])
     assert all(p.read_bytes() == raw for p, raw in before.items())
+    verified = v.verify(output, output/"independent.json", patch["adapter_sha256"], **args)
+    assert verified["status"] == "complete" and verified["eligible_set_exact"]
+    assert verified["max_reads_per_file"] == verified["max_hashes_per_file"] == verified["max_parses_per_file"] == 1
+    assert all(max(c.values()) <= 1 for c in verified["cache_counters"].values())
+    cache = m.JsonStore([directory])
+    actual = m.digest(before[handoff])
+    cache.load(handoff, actual); cache.load(handoff, actual)
+    with pytest.raises(ValueError, match="hash mismatch"):
+        cache.load(handoff, "f"*64)
+    assert cache.counters[str(handoff)] == dict(reads=1, hashes=1, parses=1)
+    cache.close()
+    original_patch = (output/"proposed_cell_patch.json").read_bytes()
+    for mutate in [
+        lambda p: p.update(entries=[]),
+        lambda p: p["entries"].append(copy.deepcopy(p["entries"][0])),
+        lambda p: p["entries"][0].update(row_id="wrong"),
+        lambda p: p["entries"][0]["target_precondition"].update(style_id=999),
+        lambda p: p["entries"][0]["new_value"].update(value="wrong"),
+    ]:
+        altered = json.loads(original_patch); mutate(altered)
+        (output/"proposed_cell_patch.json").write_bytes(m.encoded(altered))
+        with pytest.raises(ValueError):
+            v.verify(output, tmp_path/"must-not-exist.json", patch["adapter_sha256"], **args)
+    (output/"proposed_cell_patch.json").write_bytes(original_patch)
+    with pytest.raises(ValueError, match="malformed"):
+        v.pointer({}, "/x/~bad")
     # A second independent destination reproduces the proposal without altering
     # inputs; only the private input receipt carries absolute snapshot location.
     other = tmp_path / "other"
@@ -178,6 +225,30 @@ def test_word_metadata_preview_validates_receipts_and_produces_hash_bound_patch(
     (other / "snapshot.xlsx").write_bytes(before[snapshot])
     m.run_preview(handoff, other/"snapshot.xlsx", other, **args)
     assert (other / "proposed_cell_patch.json").read_bytes() == (output / "proposed_cell_patch.json").read_bytes()
+    # Explicit legacy identity: same trusted synthetic sources/snapshot but old
+    # conservative relative-link policy, and fixed historical adapter identity.
+    legacy_dir = tmp_path/"legacy"
+    legacy_dir.mkdir()
+    old_book = legacy_dir/"snapshot.xlsx"
+    old_wb = workbook(old_book)
+    old_wb["Trade Log"]["A2"].hyperlink = "../../../Users/User/Dropbox/FOREX/2018/F1"
+    old_wb.save(old_book)
+    m.run_preview(handoff, old_book, legacy_dir, **args)
+    old_proposal = json.loads((legacy_dir/"proposed_cell_patch.json").read_bytes())
+    old_receipt = json.loads((legacy_dir/"input_receipt.json").read_bytes())
+    old_proposal["adapter_sha256"] = old_receipt["adapter_sha256"] = v.OLD_HASH
+    (legacy_dir/"proposed_cell_patch.json").write_bytes(m.encoded(old_proposal))
+    (legacy_dir/"input_receipt.json").write_bytes(m.encoded(old_receipt))
+    old_report = v.verify(legacy_dir, legacy_dir/"checked.json", v.OLD_HASH, legacy=True, **args)
+    assert old_report["proven_matches"] == old_report["proposed_cells"] == 0
+    assert not old_report["legacy_identity_interpretation_fully_validated"]
+    corrected = tmp_path/"corrected"
+    corrected.mkdir(); (corrected/"snapshot.xlsx").write_bytes(old_book.read_bytes())
+    capture = dict(source=r"C:\GPT\CODEX-master\journal\Trading Journal.xlsx", snapshot=str(old_book), before=dict(size=old_book.stat().st_size,mtime_ns=123), after=dict(size=old_book.stat().st_size,mtime_ns=123), sha256=m.digest(old_book.read_bytes()),successful_copies=1,read_only=True,share_read_only=True)
+    m.save(corrected/"snapshot_receipt.json", capture)
+    m.run_preview(handoff, corrected/"snapshot.xlsx", corrected, **args)
+    new_report = v.verify(corrected, corrected/"checked.json", patch["adapter_sha256"], **args)
+    assert new_report["proven_matches"] == 1 and new_report["proposed_cells"] > 0
     for mutate, message in [
         (lambda x: x["documents"][0].update(source_sha256="b"*64), "source hash"),
         (lambda x: x["documents"][0]["preparation_reference"].update(json_pointer="/documents/1"), "pointer"),

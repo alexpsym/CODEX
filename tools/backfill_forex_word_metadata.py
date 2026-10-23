@@ -15,6 +15,7 @@ import importlib.util
 import io
 import json
 import os
+import ntpath
 from pathlib import Path, PurePosixPath
 import re
 import sys
@@ -99,6 +100,8 @@ class JsonStore:
     def __init__(self, roots):
         self.roots = [Path(x).absolute() for x in roots]
         self.raws, self.parsed, self.hashes = {}, {}, {}
+        self.handles, self.identities = {}, {}
+        self.counters = collections.defaultdict(lambda: dict(reads=0, hashes=0, parses=0))
 
     def checked(self, path, directory=None):
         p = Path(path).absolute()
@@ -117,8 +120,13 @@ class JsonStore:
         p = self.checked(path, directory)
         if p not in self.raws:
             require(p.suffix.lower() in (".json", ".jsonl"), "only saved JSON evidence allowed")
-            b = p.read_bytes()
+            handle = stable_read_handle(p)
+            self.handles[p] = handle
+            self.identities[p] = os.fstat(handle.fileno())
+            b = handle.read()
             self.raws[p], self.hashes[str(p)] = b, digest(b)
+            self.counters[str(p)]["reads"] += 1
+            self.counters[str(p)]["hashes"] += 1
         return self.raws[p]
 
     def load(self, path, expected=None, directory=None):
@@ -127,7 +135,84 @@ class JsonStore:
         require(expected is None or self.hashes[str(p)] == expected, "saved JSON hash mismatch")
         if p not in self.parsed:
             self.parsed[p] = json.loads(raw.decode("utf-8"))
+            self.counters[str(p)]["parses"] += 1
         return self.parsed[p]
+
+    def jsonl(self, path):
+        p = self.checked(path)
+        raw = self.raw(p)
+        if p not in self.parsed:
+            self.parsed[p] = [json.loads(x) for x in raw.decode("utf-8").splitlines()]
+            self.counters[str(p)]["parses"] += 1
+        return self.parsed[p]
+
+    def close(self):
+        for p, handle in self.handles.items():
+            before, after = self.identities[p], os.fstat(handle.fileno())
+            require((before.st_size, before.st_mtime_ns) == (after.st_size, after.st_mtime_ns), "saved input changed while held")
+            handle.close()
+        self.handles.clear()
+
+
+def stable_read_handle(path):
+    """Saved inputs only: hold read access denying concurrent write/delete."""
+    if os.name != "nt":
+        return Path(path).open("rb")
+    import ctypes
+    import msvcrt
+    k = ctypes.WinDLL("kernel32", use_last_error=True)
+    k.CreateFileW.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p]
+    k.CreateFileW.restype = ctypes.c_void_p
+    h = k.CreateFileW(str(path), 0x80000000, 1, None, 3, 0x00100000 | 0x08000000, None)
+    if h == ctypes.c_void_p(-1).value:
+        raise OSError(ctypes.get_last_error(), "saved-input read lock unavailable")
+    return os.fdopen(msvcrt.open_osfhandle(h, os.O_RDONLY | os.O_BINARY), "rb")
+
+
+def normalize_folder_link(raw, original_workbook, hyperlink_base=None, forex_root=r"C:\Users\User\Dropbox\FOREX"):
+    """Pure Windows lexical paths, per Excel's workbook/HyperlinkBase rule.
+
+    No filesystem access. Full addresses override HyperlinkBase. Supported bases
+    are absolute local directory paths/file URIs; other forms stay unresolved.
+    """
+    evidence = dict(raw=raw, original_workbook=original_workbook, hyperlink_base=hyperlink_base, transformations=[])
+
+    def decode(value):
+        require(isinstance(value, str) and value and value == value.strip(), "empty/whitespace link")
+        require(not re.search(r"%(?![0-9a-fA-F]{2})", value), "malformed encoding")
+        decoded = unquote(value, encoding="utf-8", errors="strict")
+        require("%" not in decoded, "multiply encoded/unsupported percent path")
+        require(not any(ord(c) < 32 for c in decoded) and not any(c in decoded for c in '?#*"<>|'), "query/fragment/unsafe link syntax")
+        if decoded.lower().startswith("file:"):
+            uri = urlsplit(decoded)
+            require(uri.scheme.lower() == "file" and not uri.netloc and re.match(r"^/[A-Za-z]:/", uri.path), "unsupported file authority/path")
+            decoded = uri.path[1:]
+        require(not re.match(r"^[A-Za-z][A-Za-z0-9+.-]*:", decoded) or re.match(r"^[A-Za-z]:[/\\]", decoded), "unsupported scheme/drive-relative path")
+        decoded = decoded.replace("/", "\\")
+        require(not decoded.startswith("\\") and not decoded.startswith("\\\\"), "root-relative/UNC path")
+        require(":" not in decoded[2:], "alternate stream/colon")
+        require(all(part in (".", "..") or not part.endswith((" ", ".")) for part in decoded.split("\\") if part), "ambiguous Windows component")
+        return decoded
+
+    try:
+        target = decode(raw)
+        origin = decode(original_workbook)
+        require(re.match(r"^[A-Za-z]:\\", origin), "unproven original workbook location")
+        absolute = bool(re.match(r"^[A-Za-z]:\\", target))
+        if absolute:
+            base = None
+        elif hyperlink_base not in (None, ""):
+            base = decode(hyperlink_base)
+            require(re.match(r"^[A-Za-z]:\\", base), "unsupported relative HyperlinkBase")
+        else:
+            base = ntpath.dirname(origin)
+        result = ntpath.normpath(target if absolute else ntpath.join(base, target))
+        root = ntpath.normcase(ntpath.normpath(forex_root))
+        require(ntpath.normcase(result).startswith(root + "\\"), "outside approved FOREX root")
+        evidence.update(status="normalized", base=base, normalized_target=result, transformations=["one URL decode", "Windows separators", "absolute override" if absolute else "HyperlinkBase" if hyperlink_base else "original workbook directory", "lexical dot-segment normalization", "Windows case-insensitive full-path comparison"])
+    except (ValueError, UnicodeError) as exc:
+        evidence.update(status="unsupported", reason=str(exc), normalized_target=None)
+    return evidence
 
 
 def pointer(value, path):
@@ -138,10 +223,9 @@ def pointer(value, path):
     return value
 
 
-def load_sources(handoff_path, *, approved=None, inventory_directory=None, expected_count=102):
+def _load_sources(handoff_path, *, approved=None, inventory_directory=None, expected_count=102, store):
     approved = [Path(x) for x in (approved or [TEMP / x for x in RECEIPT_NAMES])]
     inventory_directory = Path(inventory_directory or INVENTORY_DIR)
-    store = JsonStore([*approved, inventory_directory])
     final = approved[-1]
     require(Path(handoff_path).absolute() == final / "final_recovery_handoff.json", "unexpected handoff path")
     handoff = store.load(handoff_path, directory=final)
@@ -158,7 +242,7 @@ def load_sources(handoff_path, *, approved=None, inventory_directory=None, expec
     require(inv == inventory_directory / "manifest.jsonl", "unexpected inventory path")
     raw_inv = store.raw(inv)
     require(store.hashes[str(inv)] == context["inventory_sha256"] == handoff["inventory"]["sha256"], "inventory hash mismatch")
-    records = [json.loads(x) for x in raw_inv.decode("utf-8").splitlines()]
+    records = store.jsonl(inv)
     inventory = {identity(x["relative_path"]): x for x in records if x.get("kind") == "document"}
     require(len(inventory) == expected_count, "inventory source count mismatch")
     recovery_path = Path(__file__).with_name("recover_forex_word_documents.py")
@@ -189,7 +273,7 @@ def load_sources(handoff_path, *, approved=None, inventory_directory=None, expec
         for name, sha in ref["records"].items():
             require(Path(name).name == name, "receipt name escape")
             store.load(Path(ref["directory"]) / name, sha, ref["directory"])
-    parse_cache = {store.raws[p].decode("utf-8"): value for p, value in store.parsed.items()}
+    parse_cache = {store.raws[p].decode("utf-8"): value for p, value in store.parsed.items() if p.suffix == ".json"}
 
     def cached_loads(text):
         if text not in parse_cache:
@@ -230,12 +314,29 @@ def load_sources(handoff_path, *, approved=None, inventory_directory=None, expec
     return sources, store, handoff
 
 
+def load_sources(handoff_path, *, approved=None, inventory_directory=None, expected_count=102):
+    roots = [Path(x) for x in (approved or [TEMP / x for x in RECEIPT_NAMES])]
+    inv = Path(inventory_directory or INVENTORY_DIR)
+    store = JsonStore([*roots, inv])
+    try:
+        return _load_sources(handoff_path, approved=roots, inventory_directory=inv, expected_count=expected_count, store=store)
+    except BaseException:
+        store.close()
+        raise
+
+
 class Snapshot:
-    def __init__(self, path):
+    def __init__(self, path, capture=None):
         self.path = Path(path).absolute()
         require(self.path != Path(__file__).resolve().parents[1] / "journal" / "Trading Journal.xlsx", "live workbook prohibited")
-        self.raw = self.path.read_bytes()
+        self.handle = stable_read_handle(self.path)
+        self.raw = self.handle.read()
         self.sha256 = digest(self.raw)
+        self.capture = capture
+        self.original_workbook = capture["source"] if capture else None
+        if capture:
+            require(capture["sha256"] == self.sha256 and capture["before"] == capture["after"], "invalid origin capture receipt")
+            require(capture.get("successful_copies") == 1 and capture.get("read_only") and capture.get("share_read_only"), "unproven snapshot origin")
         self.wb = load_workbook(io.BytesIO(self.raw), data_only=False, keep_links=False)
         self.ws = self.wb["Trade Log"]
         from tools import master_journal_workbook as journal
@@ -246,6 +347,9 @@ class Snapshot:
         with zipfile.ZipFile(io.BytesIO(self.raw)) as z:
             self.part = journal._worksheet_ooxml_part_name(z, self.ws.title)
             self.xml = ET.fromstring(z.read(self.part))
+            properties = ET.fromstring(z.read("docProps/app.xml")) if "docProps/app.xml" in z.namelist() else None
+            base = properties.find("{http://schemas.openxmlformats.org/officeDocument/2006/extended-properties}HyperlinkBase") if properties is not None else None
+            self.hyperlink_base = base.text if base is not None else None
         self.cells = {x.attrib["r"]: x for x in self.xml.iter(NS + "c")}
         self.formula_ranges = []
         for cell in self.cells.values():
@@ -427,13 +531,11 @@ def match_source(source, observations, snapshot):
             cell = snapshot.ws.cell(row, snapshot.headers["Trade Number"])
             target = cell.hyperlink.target if cell.hyperlink else None
         if target:
-            expected = "c:/users/user/dropbox/forex/" + src["parent_relative_path"].replace("\\", "/").casefold()
-            actual = str(target).replace("\\", "/").casefold().rstrip("/")
-            if actual.startswith("file:///"):
-                parsed = urlsplit(actual)
-                actual = unquote(parsed.path).lstrip("/").rstrip("/") if not parsed.netloc else ""
-            folder_agrees = actual == expected
-            evidence.append(dict(kind="folder_hyperlink", raw=target, agrees=folder_agrees))
+            expected = ntpath.normpath(r"C:\Users\User\Dropbox\FOREX" + "\\" + src["parent_relative_path"].replace("/", "\\"))
+            normalized = normalize_folder_link(target, snapshot.original_workbook, snapshot.hyperlink_base)
+            folder_agrees = normalized["status"] == "normalized" and ntpath.normcase(normalized["normalized_target"]) == ntpath.normcase(expected)
+            origin_cell = snapshot.ws.cell(row, snapshot.headers["Trade Number"])
+            evidence.append(dict(kind="folder_hyperlink", raw=target, agrees=folder_agrees, normalization=normalized, expected_parent=expected, cell=origin_cell.coordinate, relationship_id=origin_cell.hyperlink.id if origin_cell.hyperlink else None, origin="literal HYPERLINK" if selected["folder"] else "worksheet relationship"))
             if not folder_agrees:
                 reasons.append("folder_hyperlink_conflict_or_unknown")
         symbol_year = bool(pair_values) and pair_values == {symbol(values.get("Symbol"))} and isinstance(opening, dt.date) and year == str(opening.year)
@@ -559,19 +661,21 @@ def run_preview(handoff, snapshot_path, output, *, approved=None, inventory_dire
     require(output.is_dir() and not output.is_symlink(), "explicit private output directory required")
     require(Path(snapshot_path).absolute().parent == output and Path(snapshot_path).suffix == ".xlsx", "snapshot must be owned by output directory")
     sources, store, _ = load_sources(handoff, approved=approved, inventory_directory=inventory_directory, expected_count=expected_count)
-    snapshot = Snapshot(snapshot_path)
+    capture_path = output / "snapshot_receipt.json"
+    capture_raw = capture_path.read_bytes() if capture_path.is_file() else None
+    capture = json.loads(capture_raw) if capture_raw else None
+    snapshot = Snapshot(snapshot_path, capture)
     audits, catalog, patch, decisions = plan(sources, snapshot)
     adapter_hash = digest(Path(__file__).read_bytes())
     mapping_hash = digest(encoded(catalog))
-    receipt = dict(schema_version=1, mode="preview_only", saved_json_hashes=store.hashes, recovery_tool_sha256=RECOVERY_HASH, adapter_sha256=adapter_hash, snapshot=dict(path=str(snapshot.path), sha256=snapshot.sha256), schema=dict(sheet=snapshot.ws.title, headers=snapshot.headers, data_start=snapshot.start, worksheet_part=snapshot.part), source_count=len(sources))
-    capture_path = output / "snapshot_receipt.json"
-    if capture_path.is_file():
-        capture_raw = capture_path.read_bytes()
-        capture = json.loads(capture_raw)
+    verifier_path = Path(__file__).with_name("verify_forex_word_metadata_preview.py")
+    verifier_hash = digest(verifier_path.read_bytes())
+    receipt = dict(schema_version=1, mode="preview_only", saved_json_hashes=store.hashes, recovery_tool_sha256=RECOVERY_HASH, adapter_sha256=adapter_hash, verifier_sha256=verifier_hash, snapshot=dict(path=str(snapshot.path), sha256=snapshot.sha256, original_workbook=snapshot.original_workbook, hyperlink_base=snapshot.hyperlink_base), schema=dict(sheet=snapshot.ws.title, headers=snapshot.headers, data_start=snapshot.start, worksheet_part=snapshot.part), source_count=len(sources), cache_counters=dict(store.counters))
+    if capture:
         require(capture["sha256"] == snapshot.sha256, "snapshot capture hash mismatch")
         receipt["snapshot"]["capture"] = capture
         receipt["snapshot"]["capture_receipt_sha256"] = digest(capture_raw)
-    proposal = dict(schema_version=1, mode="preview_only", snapshot_sha256=snapshot.sha256, adapter_sha256=adapter_hash, mapping_sha256=mapping_hash, coordinates_valid_only_for_recorded_row_ids=True, entries=patch, decisions=decisions)
+    proposal = dict(schema_version=1, mode="preview_only", snapshot_sha256=snapshot.sha256, adapter_sha256=adapter_hash, verifier_sha256=verifier_hash, mapping_sha256=mapping_hash, coordinates_valid_only_for_recorded_row_ids=True, entries=patch, decisions=decisions)
     save(output / "input_receipt.json", receipt)
     save(output / "document_match_audit.json", dict(documents=audits, count=len(audits)))
     save(output / "field_mapping_catalog.json", catalog)
@@ -582,9 +686,19 @@ def run_preview(handoff, snapshot_path, output, *, approved=None, inventory_dire
     review.extend("SKIP " + json.dumps(x, ensure_ascii=False, default=str) for x in decisions)
     with (output / "review.txt").open("x", encoding="utf-8") as handle:
         handle.write("\n".join(review) + "\n")
-    require(digest(snapshot.path.read_bytes()) == snapshot.sha256, "snapshot modified")
+    require(os.fstat(snapshot.handle.fileno()).st_size == len(snapshot.raw), "snapshot modified")
+    snapshot.handle.close()
+    store.close()
     counts = dict(documents=len(audits), proven_matches=sum(a["status"] == "proven" for a in audits), unresolved_matches=sum(a["status"] != "proven" for a in audits), proposed_cells=len(patch), proposed_rows=len({x["row"] for x in patch}), formula_cells_preserved=snapshot.formula_count, existing_equal=sum(x["status"] == "existing_equal" for x in decisions), existing_conflicting=sum(x["status"] == "existing_conflicting" for x in decisions), mapping_classes=dict(collections.Counter(x["status"] for x in catalog)), decisions=dict(collections.Counter(x["status"] for x in decisions)))
     save(output / "preview_result.json", dict(status="complete", counts=counts, snapshot_sha256=snapshot.sha256, snapshot_unchanged=True, production_writes=0, elapsed_seconds=time.monotonic()-start))
+    diagnostic = []
+    for source, audit in zip(sources, audits):
+        for comparison in audit["comparisons"]:
+            if comparison["kind"] in ("symbol", "ENTRY", "ENTRY PRICE", "DATE", "SHORT/LONG") and not comparison["agrees"]:
+                observed = fields(source)
+                labels = {"symbol": {"PAIR", "SYMBOL"}, "SHORT/LONG": {"SHORT/LONG", "SIDE"}}.get(comparison["kind"], {comparison["kind"]})
+                diagnostic.append(dict(source_identity=source["identity"], row=audit["row"], row_id=audit["row_id"], comparison=comparison, context=[x for x in observed if norm(x["label"]) in labels], blocker="unchanged exact identity comparison; no semantic reinterpretation/tolerance"))
+    save(output / "conflict_context_diagnostic.json", diagnostic)
     return counts
 
 
