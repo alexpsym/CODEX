@@ -691,6 +691,47 @@ vm.runInContext(source, context, { filename: 'trading_journal_actions.js' });
     subprocess.run([node, "-e", harness, str(ACTIONS_JS_PATH)], check=True)
 
 
+def test_trading_journal_actions_displays_mt5_recovery_separately_from_warnings() -> None:
+    node = shutil.which("node")
+    assert node, "node is required for the focused journal-actions harness"
+    harness = r"""
+const fs = require('fs');
+const vm = require('vm');
+const source = fs.readFileSync(process.argv[1], 'utf8');
+const listeners = {};
+function element(id) { return { id, style: {}, classList: { add: () => {}, remove: () => {} }, textContent: '', value: '', disabled: false, files: [], focus: () => {}, click: () => {}, after: () => {}, addEventListener: (type, fn) => { listeners[id + ':' + type] = fn; } }; }
+const elements = {
+  'open-journal-btn': element('open-journal-btn'), 'import-journal-btn': element('import-journal-btn'),
+  'journal-resync-btn': element('journal-resync-btn'), 'journal-file-input': element('journal-file-input'),
+  'journal-import-drop-zone': element('journal-import-drop-zone'), 'crypto-monthly-pnl-btn': element('crypto-monthly-pnl-btn'),
+  'bybit-demo-balance-adjustment-btn': element('bybit-demo-balance-adjustment-btn'), 'journal-account-mode': element('journal-account-mode'),
+  'journal-actions-status': element('journal-actions-status'),
+};
+const file = { name: 'synthetic.html', slice: () => ({ text: async () => '' }) };
+class FormData { append() {} }
+const context = {
+  console, FormData, document: { getElementById: (id) => elements[id] || element(id), createElement: (tag) => element(tag) },
+  Date: { now: () => 1000 }, setInterval: () => 1, clearInterval: () => {}, setTimeout: () => 2, clearTimeout: () => {},
+  fetch: async () => ({ ok: true, json: async () => ({ ok: true, message: 'Import complete.', rows_parsed: 2, rows_upserted: 2,
+    informational_messages: ['Imported 2 closed trades from the report\'s Deals section. Recovered 1 summary row affected by formatting.'],
+    warnings: ['unresolved_position_summary:9001:EURJPY:no_position_or_opening_order_link'], missing_row_ids: [] }) }),
+};
+context.window = context; context.globalThis = context;
+vm.createContext(context); vm.runInContext(source, context, { filename: 'trading_journal_actions.js' });
+(async () => {
+  await listeners['journal-import-drop-zone:drop']({ preventDefault: () => {}, dataTransfer: { files: [file] } });
+  const status = elements['journal-actions-status'].textContent;
+  const info = status.indexOf('Imported 2 closed trades');
+  const warningHeading = status.indexOf('Warnings:');
+  const warning = status.indexOf('unresolved_position_summary:9001:EURJPY:no_position_or_opening_order_link');
+  if (info < 0) throw new Error('recovery information missing');
+  if (warningHeading < 0 || warning < warningHeading) throw new Error('unresolved record was not retained under Warnings');
+  if (info > warningHeading) throw new Error('recovery information was placed inside Warnings');
+})();
+"""
+    subprocess.run([node, "-e", harness, str(ACTIONS_JS_PATH)], check=True)
+
+
 def test_pepperstone_html_upload_has_no_currency_selector_or_prompt() -> None:
     service = SERVICE_PATH.read_text(encoding="utf-8")
     actions = ACTIONS_JS_PATH.read_text(encoding="utf-8")

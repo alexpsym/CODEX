@@ -21037,10 +21037,12 @@ def _mt5_trade_row(
     })
 
 
-def _mt5_positions_rows(rows: List[List[object]], metadata: Dict[str, str]) -> Tuple[List[Dict[str, object]], int, int]:
+def _mt5_positions_rows(
+    rows: List[List[object]], metadata: Dict[str, str],
+) -> Tuple[List[Dict[str, object]], int, List[Dict[str, object]]]:
     parsed: List[Dict[str, object]] = []
     open_count = 0
-    ambiguous_count = 0
+    ambiguous_rows: List[Dict[str, object]] = []
     for headers, body in _mt5_table_ranges(rows, "positions"):
         position_idx = _mt5_header_index(headers, {"position", "position id", "ticket"})
         symbol_idx = _mt5_header_index(headers, {"symbol"})
@@ -21054,59 +21056,161 @@ def _mt5_positions_rows(rows: List[List[object]], metadata: Dict[str, str]) -> T
         profit_idx = _mt5_header_index(headers, {"profit"})
         sl_idx = _mt5_header_index(headers, {"sl", "s l", "stop loss"})
         tp_idx = _mt5_header_index(headers, {"tp", "t p", "take profit"})
+
+        def summary_record(candidate: List[object], ticket: str, symbol: str, side: str) -> Tuple[Optional[Dict[str, object]], str, bool]:
+            if len(candidate) != len(headers):
+                return None, "row_width_mismatch", False
+            if len(time_indexes) < 2 or len(price_indexes) < 2:
+                return None, "closing_columns_missing", False
+            qty_value = _cell_to_float(_mt5_row_value(candidate, volume_idx))
+            raw_open_time = _mt5_row_value(candidate, time_indexes[0])
+            raw_close_time = _mt5_row_value(candidate, time_indexes[-1])
+            entry_value = _cell_to_float(_mt5_row_value(candidate, price_indexes[0]))
+            raw_exit_price = _mt5_row_value(candidate, price_indexes[-1])
+            open_time_value = _mt5_valid_broker_local_iso(raw_open_time)
+            if not ticket or not symbol or side not in {"buy", "sell"}:
+                return None, "position_identity_fields_invalid", False
+            if qty_value is None or qty_value <= 0:
+                return None, "volume_invalid", False
+            if not open_time_value or entry_value is None:
+                return None, "opening_fields_invalid", False
+            if _is_empty_cell(raw_close_time) and _is_empty_cell(raw_exit_price):
+                return None, "", True
+            close_time_value = _mt5_valid_broker_local_iso(raw_close_time)
+            exit_value = _cell_to_float(raw_exit_price)
+            if not close_time_value:
+                return None, "closing_time_invalid", False
+            if exit_value is None:
+                return None, "closing_price_invalid", False
+            return {
+                "position_ticket": ticket,
+                "symbol": symbol,
+                "side": side,
+                "qty": float(qty_value),
+                "open_time": open_time_value,
+                "entry_price": float(entry_value),
+                "close_time": close_time_value,
+                "exit_price": float(exit_value),
+            }, "", False
+
         for row in body:
             ticket = _mt5_ticket(_mt5_row_value(row, position_idx))
             symbol = _mt5_cell_text(_mt5_row_value(row, symbol_idx))
             side = _mt5_header(_mt5_row_value(row, type_idx))
-            qty = _cell_to_float(_mt5_row_value(row, volume_idx))
-            if not ticket or not symbol or side not in {"buy", "sell"} or qty is None or qty <= 0:
+            if not ticket or not symbol or side not in {"buy", "sell"}:
                 continue
-            # MT5 may append a hidden TDM comment cell to an otherwise
-            # position-shaped row. Its colspan is not reflected in the
-            # extracted headers, so every following visible value shifts.
-            # Such a row is ambiguous; it is not evidence of an open trade.
-            if len(row) != len(headers) or any(re.match(r"^TDM:", _mt5_cell_text(cell), re.IGNORECASE) for cell in row):
-                ambiguous_count += 1
+            hidden_comment_indexes = [i for i, cell in enumerate(row) if re.match(r"^TDM:", _mt5_cell_text(cell), re.IGNORECASE)]
+            candidate = list(row)
+            if hidden_comment_indexes:
+                for index in reversed(hidden_comment_indexes):
+                    del candidate[index]
+                summary, reason, confirmed_open = summary_record(candidate, ticket, symbol, side)
+                if confirmed_open:
+                    open_count += 1
+                else:
+                    ambiguous_rows.append({
+                        "position_ticket": ticket,
+                        "symbol": symbol,
+                        "summary": summary,
+                        "reason": reason or "hidden_comment_layout",
+                    })
                 continue
-            if len(time_indexes) < 2 or len(price_indexes) < 2:
-                ambiguous_count += 1
+            if len(candidate) != len(headers):
+                ambiguous_rows.append({"position_ticket": ticket, "symbol": symbol, "summary": None, "reason": "row_width_mismatch"})
                 continue
-            raw_open_time = _mt5_row_value(row, time_indexes[0])
-            raw_close_time = _mt5_row_value(row, time_indexes[-1])
-            entry = _cell_to_float(_mt5_row_value(row, price_indexes[0]))
-            raw_exit_price = _mt5_row_value(row, price_indexes[-1])
-            # Only both explicitly empty closing fields in an intact row
-            # confirm a still-open position. Partial or invalid close data is
-            # recorded as ambiguous instead of being counted as open.
-            if _is_empty_cell(raw_close_time) and _is_empty_cell(raw_exit_price):
+            summary, reason, confirmed_open = summary_record(candidate, ticket, symbol, side)
+            if confirmed_open:
                 open_count += 1
                 continue
-            open_time = _mt5_broker_local_iso(raw_open_time)
-            close_time = _mt5_broker_local_iso(raw_close_time)
-            exit_price = _cell_to_float(raw_exit_price)
-            try:
-                if not open_time or not close_time:
-                    raise ValueError("missing position time")
-                datetime.fromisoformat(open_time.replace(".", "-") if re.match(r"^\d{4}\.\d{2}\.\d{2}", open_time) else open_time)
-                datetime.fromisoformat(close_time.replace(".", "-") if re.match(r"^\d{4}\.\d{2}\.\d{2}", close_time) else close_time)
-            except ValueError:
-                ambiguous_count += 1
-                continue
-            if entry is None or exit_price is None:
-                ambiguous_count += 1
+            if summary is None:
+                ambiguous_rows.append({"position_ticket": ticket, "symbol": symbol, "summary": None, "reason": reason or "summary_fields_invalid"})
                 continue
             parsed.append(_mt5_trade_row(
                 metadata=metadata, position_ticket=ticket, close_tickets=[], symbol=symbol,
-                side=side, qty=float(qty), entry_price=entry, exit_price=exit_price,
-                open_time=open_time, close_time=close_time,
-                commission=_mt5_component(_mt5_row_value(row, commission_idx)),
-                fee=_mt5_component(_mt5_row_value(row, fee_idx)),
-                swap=_mt5_component(_mt5_row_value(row, swap_idx)),
-                profit=_mt5_component(_mt5_row_value(row, profit_idx)),
-                stop_loss=_cell_to_float(_mt5_row_value(row, sl_idx)),
-                take_profit=_cell_to_float(_mt5_row_value(row, tp_idx)),
+                side=side, qty=float(summary["qty"]), entry_price=float(summary["entry_price"]), exit_price=float(summary["exit_price"]),
+                open_time=str(summary["open_time"]), close_time=str(summary["close_time"]),
+                commission=_mt5_component(_mt5_row_value(candidate, commission_idx)),
+                fee=_mt5_component(_mt5_row_value(candidate, fee_idx)),
+                swap=_mt5_component(_mt5_row_value(candidate, swap_idx)),
+                profit=_mt5_component(_mt5_row_value(candidate, profit_idx)),
+                stop_loss=_cell_to_float(_mt5_row_value(candidate, sl_idx)),
+                take_profit=_cell_to_float(_mt5_row_value(candidate, tp_idx)),
             ))
-    return parsed, open_count, ambiguous_count
+    return parsed, open_count, ambiguous_rows
+
+
+def _mt5_valid_broker_local_iso(value: object) -> Optional[str]:
+    normalized = _mt5_broker_local_iso(value)
+    if not normalized:
+        return None
+    candidate = normalized.replace(".", "-") if re.match(r"^\d{4}\.\d{2}\.\d{2}", normalized) else normalized
+    try:
+        datetime.fromisoformat(candidate)
+    except ValueError:
+        return None
+    return normalized
+
+
+def _mt5_position_summary_recovery(
+    summaries: List[Dict[str, object]], deals: List[Dict[str, object]],
+) -> Tuple[int, List[str]]:
+    recovered = 0
+    warnings: List[str] = []
+    used_trade_ids: Set[str] = set()
+    for item in summaries:
+        ticket = str(item.get("position_ticket") or "unknown")
+        symbol = str(item.get("symbol") or "unknown")
+        summary = item.get("summary")
+        reason = str(item.get("reason") or "summary_fields_invalid")
+        if not isinstance(summary, dict):
+            warnings.append(f"unresolved_position_summary:{ticket}:{symbol}:{reason}")
+            continue
+        linked: List[Dict[str, object]] = []
+        for trade in deals:
+            refs = trade.get("raw_refs") if isinstance(trade.get("raw_refs"), dict) else {}
+            position_ticket = str(refs.get("position_ticket") or "")
+            opening_order_values = refs.get("opening_order_ids")
+            opening_ids = {str(value) for value in opening_order_values if str(value)} if isinstance(opening_order_values, (list, tuple, set)) else set()
+            opening_id = str(refs.get("opening_order_id") or "")
+            if ticket == position_ticket or ticket in opening_ids or ticket == opening_id:
+                linked.append(trade)
+        if not linked:
+            warnings.append(f"unresolved_position_summary:{ticket}:{symbol}:no_position_or_opening_order_link")
+            continue
+        matches: List[Dict[str, object]] = []
+        failures: Set[str] = set()
+        for trade in linked:
+            checks = (
+                ("symbol_mismatch", _canonical_symbol(str(trade.get("symbol") or "")) == _canonical_symbol(symbol)),
+                ("side_mismatch", str(trade.get("side") or "").casefold() == str(summary.get("side") or "").casefold()),
+                ("quantity_mismatch", _mt5_values_close(trade.get("qty"), summary.get("qty"), abs_tol=1e-8)),
+                ("opening_time_mismatch", str(trade.get("open_time") or "") == str(summary.get("open_time") or "")),
+                ("closing_time_mismatch", str(trade.get("close_time") or "") == str(summary.get("close_time") or "")),
+                ("entry_price_mismatch", _mt5_values_close(trade.get("entry_price"), summary.get("entry_price"))),
+                ("exit_price_mismatch", _mt5_values_close(trade.get("exit_price"), summary.get("exit_price"))),
+            )
+            failed = [name for name, passed in checks if not passed]
+            if not failed:
+                matches.append(trade)
+            else:
+                failures.update(failed)
+        if len(matches) != 1:
+            conflict = "multiple_consistent_deal_matches" if len(matches) > 1 else (sorted(failures)[0] if failures else "no_consistent_deal_match")
+            warnings.append(f"unresolved_position_summary:{ticket}:{symbol}:{conflict}")
+            continue
+        trade_id = str(matches[0].get("id") or "")
+        if not trade_id or trade_id in used_trade_ids:
+            warnings.append(f"unresolved_position_summary:{ticket}:{symbol}:deal_match_already_used")
+            continue
+        used_trade_ids.add(trade_id)
+        recovered += 1
+    return recovered, warnings
+
+
+def _mt5_values_close(left: object, right: object, *, abs_tol: float = 1e-9) -> bool:
+    left_value = _to_float(left)
+    right_value = _to_float(right)
+    return left_value is not None and right_value is not None and math.isclose(left_value, right_value, rel_tol=1e-9, abs_tol=abs_tol)
 
 
 def _mt5_deal_events(rows: List[List[object]]) -> List[Dict[str, object]]:
@@ -21386,21 +21490,40 @@ def _parse_pepperstone_mt5_rows(
     metadata = _mt5_statement_metadata(rows, statement_currency=statement_currency)
     if metadata is None:
         return None
-    position_rows, skipped_open_positions, ambiguous_positions = _mt5_positions_rows(rows, metadata)
-    warnings: List[str] = [f"ambiguous_positions:{ambiguous_positions}"] if ambiguous_positions else []
+    position_rows, skipped_open_positions, ambiguous_position_rows = _mt5_positions_rows(rows, metadata)
+    warnings: List[str] = []
+    recovered_summary_rows = 0
+    deals_section_used = False
+    deals_trade_count = 0
     if position_rows:
         parsed = position_rows
+        warnings.extend(
+            f"unresolved_position_summary:{item.get('position_ticket') or 'unknown'}:{item.get('symbol') or 'unknown'}:positions_rows_preferred"
+            for item in ambiguous_position_rows
+        )
     else:
         parsed, deal_warnings, deal_open_count = _mt5_deals_rows(rows, metadata)
+        deals_section_used = True
+        deals_trade_count = len(parsed)
         warnings.extend(deal_warnings)
+        recovered_summary_rows, summary_warnings = _mt5_position_summary_recovery(ambiguous_position_rows, parsed)
+        warnings.extend(summary_warnings)
         # Positions and Deals can describe the same open trades. Use the
         # larger confirmed count instead of adding section counts together.
         skipped_open_positions = max(skipped_open_positions, deal_open_count)
     if skipped_open_positions:
         warnings.append(f"skipped_open_positions:{skipped_open_positions}")
+    recovery_message = (
+        f"Imported {deals_trade_count} closed trades from the report's Deals section. "
+        f"Recovered {recovered_summary_rows} summary rows affected by formatting."
+        if deals_section_used and recovered_summary_rows
+        else None
+    )
     for row in parsed:
         if isinstance(row, dict):
             row["_import_warnings"] = list(warnings)
+            if recovery_message:
+                row["_mt5_recovery_message"] = recovery_message
     balance_value = _mt5_final_balance(rows)
     balance = None
     if balance_value is not None:
@@ -21423,8 +21546,13 @@ def _parse_pepperstone_mt5_rows(
             "_mt5_diagnostics": {
                 "closed_positions_imported": len(parsed),
                 "open_positions_skipped": skipped_open_positions,
+                "deals_section_used": deals_section_used,
+                "deals_closed_trades_imported": deals_trade_count,
+                "summary_rows_recovered": recovered_summary_rows,
+                "summary_rows_unresolved": len(summary_warnings) if not position_rows else len(ambiguous_position_rows),
                 "warnings": warnings,
             },
+            "_mt5_recovery_message": recovery_message,
         }
     if not parsed and balance is None:
         raise ValueError("The Pepperstone MT5 report contains no completed positions or final account balance.")
@@ -42289,10 +42417,17 @@ def _import_uploaded_trading_journal_file(
         timings["parse"] = round(time.perf_counter() - t0, 6)
         APP_LOGGER.info("trading_journal_import_stage_done stage=parse elapsed=%.6fs upload=%s", timings["parse"], name)
         parser_warnings = list((balance or {}).get("_import_warnings") or []) if isinstance(balance, dict) else []
+        informational_messages: List[str] = []
+        if isinstance(balance, dict) and balance.get("_mt5_recovery_message"):
+            informational_messages.append(str(balance["_mt5_recovery_message"]))
+            balance.pop("_mt5_recovery_message", None)
         for parsed_row in rows:
             if not isinstance(parsed_row, dict):
                 continue
             parser_warnings.extend(str(item) for item in (parsed_row.pop("_import_warnings", []) or []))
+            recovery_message = parsed_row.pop("_mt5_recovery_message", None)
+            if recovery_message:
+                informational_messages.append(str(recovery_message))
         parser_warnings = list(dict.fromkeys(parser_warnings))
         mt5_diagnostics = dict((balance or {}).get("_mt5_diagnostics") or {}) if isinstance(balance, dict) else {}
         oanda_transaction_export_balance = (
@@ -42314,6 +42449,8 @@ def _import_uploaded_trading_journal_file(
         inference_warnings = [*parser_warnings, *inference_warnings]
         if mt5_diagnostics:
             inference_diag["pepperstone_mt5"] = mt5_diagnostics
+        if informational_messages:
+            inference_diag["informational_messages"] = list(dict.fromkeys(informational_messages))
         timings["pnl_inference"] = round(time.perf_counter() - t1, 6)
         APP_LOGGER.info("trading_journal_import_stage_done stage=pnl_inference elapsed=%.6fs upload=%s", timings["pnl_inference"], name)
         rows = [r for r in (rows or []) if isinstance(r, dict)]

@@ -184,9 +184,10 @@
         if (statusPoll && typeof window.clearInterval === 'function') { window.clearInterval(statusPoll); statusPoll = null; }
       if (watchdog) { window.clearTimeout(watchdog); watchdog = null; }
       const warnings = payload.warnings || [];
+      const informationalMessages = Array.isArray(payload.informational_messages) ? payload.informational_messages : [];
       const inferred = payload.pnl_inferred_count ?? 0;
       const unresolved = payload.pnl_unresolved_count ?? 0;
-      setStatus(`${payload.message || 'Import complete.'}\nRows parsed: ${payload.rows_parsed ?? 0}\nRows upserted: ${payload.rows_upserted ?? 0}\nP/L inferred: ${inferred}\nP/L unresolved: ${unresolved}\nWorkbook: ${payload.master_journal_path || ''}\nMissing Row IDs: ${(payload.missing_row_ids || []).join(', ') || 'none'}${warnings.length ? `\nWarnings:\n- ${warnings.join('\n- ')}` : ''}`);
+      setStatus(`${payload.message || 'Import complete.'}${informationalMessages.length ? `\n${informationalMessages.join('\n')}` : ''}\nRows parsed: ${payload.rows_parsed ?? 0}\nRows upserted: ${payload.rows_upserted ?? 0}\nP/L inferred: ${inferred}\nP/L unresolved: ${unresolved}\nWorkbook: ${payload.master_journal_path || ''}\nMissing Row IDs: ${(payload.missing_row_ids || []).join(', ') || 'none'}${warnings.length ? `\nWarnings:\n- ${warnings.join('\n- ')}` : ''}`);
       notifyEquityDataChanged('import');
       clearPendingRetry();
     } catch (err) {

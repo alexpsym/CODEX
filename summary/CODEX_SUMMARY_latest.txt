@@ -1,3 +1,9 @@
+Pepperstone MT5 summary recovery diagnostics (2026-10-24)
+
+- The newer local report was validated once offline. Its seven Deals-derived closed trades include two formatting-affected Positions summaries; each summary ticket matched the Deals opening-order ID, and symbol, side, quantity, opening/closing times and prices agreed. Deals omit Position ID in this report. The implementation now tracks ambiguous summaries and claims recovery only for a unique provenance-linked, field-consistent Deals row. Unresolved summaries retain ticket/symbol/reason warnings; confirmed open positions remain warnings.
+- Successful imports expose a generated informational message separately from warnings. The import-result renderer and a focused runtime fixture cover mixed recovery/warning output. Fixture data is anonymized and places TDM after Type before Volume.
+- The single allowed four-node pytest invocation emitted two passing-node markers but returned without a final summary. Process-state lookup was denied, so completion and the remaining node results are inconclusive. No retry was made.
+
 Pepperstone MT5 false open-position warning correction (2026-10-24)
 
 - At the Positions parsing boundary, rows with extra TDM hidden comment cells and malformed/partial close fields are reported as ambiguous, not confirmed open. An intact row with both closing fields empty remains a confirmed open position. The Deals fallback remains in place for ambiguous rows; section open counts use the larger count to avoid adding the same position twice.
