@@ -7,7 +7,7 @@ Bar series[128];
 std::vector<std::string> logs;
 std::vector<std::string> markerLabels;double markerPrice=0;
 double bidQuote,askQuote,now,grid=0.0001,orderQuote,orderSL,orderTP;
-int attempts,orderType,selectedFrame;unsigned long historyBars=128;
+int attempts,orderType,selectedFrame,buyAttempts,sellAttempts;unsigned long historyBars=128;
 bool busy,orderResult;int orderTicket;
 void Check(bool ok,const char *why){if(!ok){fprintf(stderr,"FAIL: %s\n",why);for(auto &s:logs)fprintf(stderr,"%s\n",s.c_str());exit(1);}}
 bool Near(double a,double b){return fabs(a-b)<1e-9;}
@@ -37,7 +37,7 @@ bool __stdcall Create(void*,PChar name,int type,int,double,double price,double,d
 bool __stdcall Text(void*,PChar,PChar text,int,PChar,int){markerLabels.push_back(text);return true;}
 bool __stdcall Send(void*,PChar,int type,double lots,double sl,double tp,PChar,int,int &ticket)
 {
-  attempts++;orderType=type;orderQuote=type==op_Buy?askQuote:bidQuote;orderSL=sl;orderTP=tp;
+  attempts++;if(type==op_Buy)buyAttempts++;else sellAttempts++;orderType=type;orderQuote=type==op_Buy?askQuote:bidQuote;orderSL=sl;orderTP=tp;
   Check(Near(lots,0.01),"fixed lots");ticket=orderTicket;return orderResult;
 }
 void Hooks()
@@ -57,7 +57,7 @@ void Fresh()
   now=46000.5;for(int i=0;i<128;i++)series[i]={1.20,1.2002,1.1998,1.20,now-i*5.0/1440};
   lastTime=series[0].t;nbar=10;atrCount=100;rmaATR=0.00206;RegimeLookback=1;AddATRPercent(0.1);
   historyBars=128;bidQuote=1.21;askQuote=1.2102;busy=false;attempts=0;orderResult=true;orderTicket=42;
-  logs.clear();markerLabels.clear();markerPrice=0;tickSequence=1;
+  logs.clear();markerLabels.clear();markerPrice=0;tickSequence=1;buyAttempts=sellAttempts=0;
 }
 void Remember(long bar,double endpoint,int direction,double adverse)
 {
@@ -231,6 +231,121 @@ void Ownership()
   ObserveProvisional(1,1.205,2,body,range,false,"test");haveLatestSwingLow=true;latestSwingLow=1.19;latestSwingLowBar=5;
   Check(!TryPromoteCandidate(provisionalLong)&&provisionalLong.active,"oversized seed cannot promote without later evidence");
 }
+// Chronological market input only: publish one live bar's ticks, then shift it
+// into the closed series. GetSingleTick -> ProcessBar confirms pivots itself.
+// Reflection exercises the exact same price chronology in both directions.
+double MarketPrice(double x,int reflection){return 1.20+reflection*x*0.001;}
+void MarketQuote(double x,int reflection)
+{
+  now=Max(now,series[0].t);double b=MarketPrice(x,reflection);
+  series[0].h=Max(series[0].h,b);series[0].l=Min(series[0].l,b);series[0].c=b;
+  Quote(b,b+0.0002);
+}
+void MarketBar(int reflection,double o,double h,double l,double c,double nextOpen=1e100)
+{
+  double t=series[0].t;
+  // Keep the already observed opening/touch ticks in this bar's OHLC. A gap
+  // opening is specified by the preceding bar, before its first tick arrives.
+  MarketQuote(o,reflection);
+  // In each directional expansion the adverse extreme precedes its endpoint.
+  MarketQuote(c>=o?l:h,reflection);MarketQuote(c>=o?h:l,reflection);MarketQuote(c,reflection);
+  for(int i=127;i>0;i--)series[i]=series[i-1];
+  if(nextOpen==1e100)nextOpen=c;
+  double opening=MarketPrice(nextOpen,reflection);
+  series[0]={opening,opening,opening,opening,t+5.0/1440};
+  MarketQuote(nextOpen,reflection);
+}
+void MarketDecision(int reflection,int direction,int mode,double endpoint)
+{
+  if(mode==1){double b=touchLevel-(direction==1?0.0002:0);MarketQuote((b-1.20)/(reflection*0.001),reflection);return;}
+  // Two closed opposing corrections qualify PB1; a later close resumes it.
+  double e=(endpoint-1.20)/(reflection*0.001),s=direction*reflection;
+  auto bar=[&](double o,double h,double l,double c){
+    if(s==1)MarketBar(reflection,e+o,e+h,e+l,e+c);
+    else MarketBar(reflection,e-o,e-l,e-h,e-c);
+  };
+  bar(-0.2,0,-1.4,-1.2);bar(-1.2,-1.0,-1.7,-1.5);bar(-1.5,-0.9,-1.6,-1.0);
+}
+void DirectionFilteredLifecycle()
+{
+  for(int mode:{1,0})for(int reflection:{1,-1})for(int restricted:{1,0}){
+    Fresh();ImpulseEntryMode=mode;TradeDirection=restricted?(reflection==1?1:2):0;
+    // Custom slow ATR keeps these compact prices within the normal seed band.
+    // No origins, candidates, parents or consumed state are injected.
+    ATRLength=100;
+    MarketBar(reflection,0,0.4,-0.2,0.2);
+    MarketBar(reflection,0.2,0.3,-1,-0.2);long originBar=nbar;
+    MarketBar(reflection,-0.2,0.5,-0.5,0.2);
+    Check(!haveLatestSwingLow||reflection==-1||latestSwingLowBar!=originBar,"origin unavailable before right-side confirmation");
+    MarketBar(reflection,0.2,0.6,0,0.4,7.2);
+    Check((reflection==1?latestSwingLowBar:latestSwingHighBar)==originBar,"origin appears only on confirmation bar");
+    MarketBar(reflection,7.2,10,7.1,9.8);
+    Check(dir==reflection&&stage==IMPULSE_PARENT,"initial allowed parent detected through production bars");
+    double oldEndpoint=setupExtreme;MarketDecision(reflection,reflection,mode,oldEndpoint);
+    Check(stage==IMPULSE_CONSUMED&&attempts==1,"initial allowed parent consumes once");
+    // Old origin and a later corrective origin cannot grant PB2, even with a
+    // fresh normal seed. Its endpoint remains inside the consumed boundary.
+    MarketBar(reflection,9.8,9.9,9.3,9.5);
+    MarketBar(reflection,9.5,9.7,9,9.2,4);
+    MarketBar(reflection,4,4.2,3.6,3.8);
+    Check(stage==IMPULSE_CONSUMED&&attempts==1,"old-origin second correction stays consumed");
+    MarketBar(reflection,3.8,4.3,3.7,4);
+    MarketBar(reflection,4,4.4,3.9,4.2,1.4);
+    Check((reflection==1?latestSwingLowBar:latestSwingHighBar)>consumedBar,"new corrective origin is confirmed after consumption");
+    MarketBar(reflection,1.4,4.5,1.3,4);
+    Check(stage==IMPULSE_CONSUMED&&attempts==1&&CandidateFor(reflection).active,"new confirmed origin alone cannot revive contained second pullback");
+    MarketBar(reflection,4,4.3,3.7,3.9);
+    MarketBar(reflection,3.9,4.2,3.6,3.8);
+    Check(stage==IMPULSE_CONSUMED&&attempts==1,"newer pivot confirmation cannot unlock old boundary");
+    size_t beforeOpposite=logs.size(),markersBefore=markerLabels.size();
+    MarketBar(reflection,3.8,3.9,1,1.2);
+    Check(dir==-reflection&&stage==IMPULSE_PARENT,"opposite structural cycle must be observed despite execution filter (old consumed boundary otherwise remains locked)");
+    double oppositeEndpoint=setupExtreme;MarketDecision(reflection,-reflection,mode,oppositeEndpoint);
+    Check(stage==IMPULSE_CONSUMED&&consumedDirection==-reflection&&!touchActive,"opposite structural cycle consumes at normal decision point");
+    Check(attempts==(restricted?1:2),"opposite execution permission enforced in both entry modes");
+    if(restricted){
+      bool blocked=false;
+      for(size_t i=beforeOpposite;i<logs.size();i++){
+        Check(logs[i].find("entry frozen")==std::string::npos&&logs[i].find("confirmed entry")==std::string::npos&&logs[i].find("reason=entered")==std::string::npos,"structure-only cycle must never report entry");
+        if(logs[i].find("direction blocked")!=std::string::npos)blocked=true;
+      }
+      Check(blocked,"specific direction-blocked transition diagnostic");
+      for(size_t i=markersBefore;i<markerLabels.size();i++)Check(markerLabels[i]!="WT"&&markerLabels[i]!="CT"&&markerLabels[i]!="N","structure-only cycle has no entry marker");
+    }
+    int previousAttempts=attempts;
+    // A distinct corrective origin forms AFTER the opposite opportunity was
+    // consumed, and confirms before the next allowed expansion is submitted.
+    MarketBar(reflection,0,0.2,-1,-0.2);long freshOrigin=nbar;
+    MarketBar(reflection,-0.2,0.5,-0.5,0.2);
+    MarketBar(reflection,0.2,0.6,0,0.4,0);
+    Check(attempts==previousAttempts,"blocked opportunity has no delayed order");
+    MarketBar(reflection,0,2.8,-0.1,2.6);
+    Check(dir==reflection&&stage==IMPULSE_PARENT&&impulseOriginBar==freshOrigin,"fresh allowed cycle recovers using causally confirmed origin");
+    long parentBar=breakout;double parentOrigin=impulseOrigin,frozenATR=setupATR;
+    MarketBar(reflection,2.6,5.3,2.4,5.1);
+    Check(breakout==parentBar&&Near(impulseOrigin,parentOrigin)&&Near(setupATR,frozenATR),"unresolved contained child preserves parent and frozen ATR");
+    Check(reflection==1?setupExtreme<oldEndpoint:setupExtreme>oldEndpoint,"fresh endpoint is inside original consumed boundary");
+    Check(attempts==previousAttempts,"no arming-tick or retrospective entry");
+    MarketDecision(reflection,reflection,mode,setupExtreme);
+    Check(stage==IMPULSE_CONSUMED&&attempts==previousAttempts+1,"fresh allowed cycle enters on future decision");
+    if(restricted)Check(reflection==1?sellAttempts==0:buyAttempts==0,"zero prohibited submissions across complete lifecycle");
+  }
+  // A normal seed observed before its pivot confirms must replay the actual
+  // later touch, consume it, and reject any recovered second touch.
+  for(int reflection:{1,-1}){
+    Fresh();TradeDirection=reflection==1?1:2;ATRLength=100;
+    double opening=MarketPrice(-3,reflection);series[0]={opening,opening,opening,opening,series[0].t};
+    MarketBar(reflection,-3,0,-3.1,-0.4);
+    Check(CandidateFor(reflection).active&&stage==0,"unconfirmed origin retains provisional seed only");
+    MarketBar(reflection,-0.4,-0.2,-1.4,-1.2);
+    MarketBar(reflection,-1.2,-0.4,-1.3,-0.6);
+    Check(stage==IMPULSE_CONSUMED&&attempts==0&&Logged("touch already passed"),"confirmed-origin promotion consumes recovered passed touch");
+    MarketQuote(-1.4,reflection);MarketQuote(-0.5,reflection);MarketQuote(-1.4,reflection);
+    Check(attempts==0,"recovered touch never queues a second touch");
+    ResetStrategy();
+    Check(stage==0&&consumedBar==-1&&!touchActive&&!provisionalLong.active&&!provisionalShort.active&&!haveLatestSwingLow&&!haveLatestSwingHigh,"restart clears evidence without manufacturing eligible structure");
+  }
+}
 int main(int argc,char **argv)
 {
   if(argc!=2){fprintf(stderr,"One named case required\n");return 2;}Hooks();InitStrategy();ReplaceStr(Currency,(PChar)"EURUSD");
@@ -241,6 +356,7 @@ int main(int argc,char **argv)
   else if(name=="endpoint_refresh_ordering")RefreshOrdering();else if(name=="touch_gates")Gates();
   else if(name=="order_failure")OrderFailure();else if(name=="frozen_brackets")Brackets();
   else if(name=="legacy_confirmation_entries")LegacyEntries();else if(name=="parent_ownership")Ownership();
+  else if(name=="direction_filtered_lifecycle")DirectionFilteredLifecycle();
   else{fprintf(stderr,"Unknown case: %s\n",argv[1]);return 2;}
   DoneStrategy();printf("PASS: %s\n",argv[1]);
 }

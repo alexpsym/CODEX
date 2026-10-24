@@ -188,7 +188,7 @@ PChar CurrentDiagnostic()
   {
     if(SetupModeSetting==0) return (PChar)"RBP: range/breakout not qualified";
     double o=Open(1),h=High(1),l=Low(1),c=Close(1),body=fabs(c-o);
-    bool directional=(TradeDirection!=2&&c>o)||(TradeDirection!=1&&c<o);
+    bool directional=c!=o;
     if(ImpulseMaximumBodyATR>0&&directional&&body>=rmaATR*ImpulseMinimumBodyATR&&h-l>=rmaATR*ImpulseMinimumRangeATR&&body>rmaATR*ImpulseMaximumBodyATR) return (PChar)"RBP: impulse body exceeds maximum ATR";
     return (PChar)"RBP: impulse body/range not qualified";
   }
@@ -286,7 +286,7 @@ bool CanSeedImpulse(const int seedDirection,const double seedExtreme,double &ori
 }
 void LogSeedDecision(const int seedDirection,const char *decision,const char *reason,const double bodyATR,const double rangeATR,const bool busy)
 {
-  char text[512];sprintf(text,"RBP seed %s dir=%s reason=%s body=%.2fATR range=%.2fATR busy=%s",decision,DirectionName(seedDirection),reason,bodyATR,rangeATR,busy?"yes":"no");EmitDiagnostic(text);
+  char text[512];sprintf(text,"RBP seed %s dir=%s reason=%s body=%.2fATR range=%.2fATR busy=%s execution=%s",decision,DirectionName(seedDirection),reason,bodyATR,rangeATR,busy?"yes":"no",((seedDirection==1&&TradeDirection==2)||(seedDirection==-1&&TradeDirection==1))?"structure-only":"direction-permitted");EmitDiagnostic(text);
 }
 void StartImpulseAt(const int seedDirection,const double seedExtreme,const long endpointBar,const TDateTime endpointTime,const double origin,const long originBar,const TDateTime originTime,const double atr,const TDateTime seedTime,const char *eligibilityReason)
 {
@@ -295,7 +295,7 @@ void StartImpulseAt(const int seedDirection,const double seedExtreme,const long 
   setupExtreme=seedExtreme;impulseEndpointBar=endpointBar;impulseEndpointTime=endpointTime;impulseSeedTime=seedTime;breakout=extension=endpointBar;
   pullbackStarted=false;pullbackStartBar=-1;opposing=0;hasMinorSwing=false;hasFrozenExtension=false;
   char originText[32],seedText[32],endpointText[32],text[512];FormatTime(impulseOriginTime,originText);FormatTime(impulseSeedTime,seedText);FormatTime(impulseEndpointTime,endpointText);
-  sprintf(text,"RBP parent accepted dir=%s reason=%s origin=%s@%.5f seed=%s endpoint=%s@%.5f displacement=%.5f/%.2fATR",DirectionName(dir),eligibilityReason,originText,impulseOrigin,seedText,endpointText,setupExtreme,ImpulseDisplacement(),setupATR>0?ImpulseDisplacement()/setupATR:0);
+  sprintf(text,"RBP parent accepted dir=%s reason=%s origin=%s@%.5f seed=%s endpoint=%s@%.5f displacement=%.5f/%.2fATR execution=%s",DirectionName(dir),eligibilityReason,originText,impulseOrigin,seedText,endpointText,setupExtreme,ImpulseDisplacement(),setupATR>0?ImpulseDisplacement()/setupATR:0,((dir==1&&TradeDirection==2)||(dir==-1&&TradeDirection==1))?"structure-only":"direction-permitted");
   EmitDiagnostic(text);
   ResetProvisionalCandidates();
 }
@@ -685,7 +685,7 @@ void ProcessFirstTouchTick(const bool historyReady)
   touchActive=false;
   if(FXBlocked(TimeCurrent())){ConsumeImpulse("weekend blackout at first touch; not queued");return;}
   if(!historyReady){ConsumeImpulse("history not ready at first touch; not queued");return;}
-  if((dir==1&&TradeDirection==2)||(dir==-1&&TradeDirection==1)){ConsumeImpulse("direction blocked at first touch; not queued");return;}
+  if((dir==1&&TradeDirection==2)||(dir==-1&&TradeDirection==1)){ConsumeImpulse("direction blocked at first touch; structure-only opportunity consumed, not queued");return;}
   if(StrategyPositionOpen()){ConsumeImpulse("position busy at first touch; not queued");return;}
   if(!ImpulseDepthQualified(PullbackDepth())){ConsumeImpulse("configured depth not qualified at first touch; not queued");return;}
   double mult=0;if(!RiskReady(mult)||mult<=0){ConsumeImpulse("ATR/risk not ready at first touch; not queued");return;}
@@ -762,8 +762,9 @@ void ProcessImpulseSetup(const double o,const double h,const double l,const doub
   }
   if(stage==0||stage==IMPULSE_CONSUMED)
   {
-    bool directionAllowed=candleDirection!=0&&!((TradeDirection==2&&candleDirection==1)||(TradeDirection==1&&candleDirection==-1));
-    if(directionAllowed&&seedClass!=0)
+    // TradeDirection restricts orders, not observation. Opposite structural
+    // cycles must retire normally so a consumed boundary cannot lock one side.
+    if(candleDirection!=0&&seedClass!=0)
     {
       double seedExtreme=candleDirection==1?h:l,origin=0;long originBar=-1;TDateTime originTime=0;const char *reason="";
       double latestOrigin=0;long latestOriginBar=-1;TDateTime latestOriginTime=0;bool originAvailable=LatestImpulseOrigin(candleDirection,latestOrigin,latestOriginBar,latestOriginTime);
@@ -783,11 +784,11 @@ void ProcessImpulseSetup(const double o,const double h,const double l,const doub
         sprintf(text,"RBP current oversized seed restarted provisionally after retirement dir=%s currentBar=%ld firstBar=%ld normalSeedSeen=%s continuationSeen=%s decision=not a normal seed",DirectionName(candleDirection),nbar,restarted.firstBar,restarted.normalSeedSeen?"yes":"no",restarted.continuationSeen?"yes":"no");EmitDiagnostic(text);
       }
     }
-    else if(directionAllowed&&(bodyATR>=ImpulseMinimumBodyATR||rangeATR>=ImpulseMinimumRangeATR))
+    else if(candleDirection!=0&&(bodyATR>=ImpulseMinimumBodyATR||rangeATR>=ImpulseMinimumRangeATR))
     {
       LogSeedDecision(candleDirection,"rejected",bodyATR<ImpulseMinimumBodyATR?"body below minimum ATR":"range below minimum ATR",bodyATR,rangeATR,busy);
     }
-    if(directionAllowed&&seedClass==0)ObserveProvisionalContinuation(candleDirection,candleDirection==1?h:l,busy);
+    if(candleDirection!=0&&seedClass==0)ObserveProvisionalContinuation(candleDirection,candleDirection==1?h:l,busy);
     if(TryPromoteCandidate(candleDirection==-1?provisionalShort:provisionalLong))
     {
       if(seedClass!=0&&stage==IMPULSE_CONSUMED)EmitDiagnostic("RBP current seed disposition after compatible replay=not reprocessed reason=no distinct newer confirmed origin; duplicate processing forbidden");return;
@@ -853,6 +854,7 @@ void ProcessImpulseSetup(const double o,const double h,const double l,const doub
   bool resumed=Confirmation==0?(dir==1?c>previousClose:c<previousClose):Confirmation==1?(dir==1?c>o&&c>High(2):c<o&&c<Low(2)):(hasMinorSwing&&(dir==1?c>minorSwing:c<minorSwing));
   double mult=0;bool riskReady=RiskReady(mult);
   if(nbar<=pullbackConfirmed||!resumed) return;
+  if((dir==1&&TradeDirection==2)||(dir==-1&&TradeDirection==1)){ConsumeImpulse("direction blocked at PB1 resumption; structure-only opportunity consumed, not queued");return;}
   if(busy){ConsumeImpulse("position busy at PB1 resumption; opportunity unavailable and not queued");return;}
   if(!riskReady||mult<=0) return;
   int entryDirection=dir,structuralTrend=StructuralTrend();bool trendReady=true,trendAligned=true;
