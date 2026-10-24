@@ -1,6 +1,6 @@
 #property strict
 #property description "Feed selected Market Watch symbol spread percentages to a FILE_COMMON JSON file and optionally launch the desktop pop-out. Display-only; no trading."
-#property version   "1.13"
+#property version   "1.14"
 
 #import "shell32.dll"
 long ShellExecuteW(long hwnd, string operation, string file, string parameters, string directory, int show_cmd);
@@ -34,6 +34,45 @@ const string NORMAL_DESKTOP_SCRIPT_PATH = "C:\\GPT\\CODEX-master\\mt5-clone\\spr
 const int    SW_SHOWMINNOACTIVE = 7;
 const uint   INVALID_FILE_ATTRIBUTES = 0xFFFFFFFF;
 const uint   FILE_ATTRIBUTE_DIRECTORY = 0x00000010;
+
+string g_attachment_id = "";
+
+string SpreadAttachmentId()
+{
+   string key = "MWSW." + SpreadWindowOwnerId();
+   if(!GlobalVariableCheck(key))
+      GlobalVariableSet(key, 0.0);
+   double next_id = GlobalVariableGet(key) + 1.0;
+   GlobalVariableSet(key, next_id);
+   return DoubleToString(next_id, 0);
+}
+
+string SpreadDetachSignalPath(const uint terminal_pid,
+                              const long terminal_creation_time)
+{
+   return "SpreadPercentWindow.detach."
+          + SpreadWindowOwnerId() + "." + (string)terminal_pid + "."
+          + (string)terminal_creation_time + "." + g_attachment_id + ".signal";
+}
+
+void NotifySpreadWindowRemoved()
+{
+   uint terminal_pid = 0;
+   long terminal_creation_time = 0;
+   string why = "";
+   if(g_attachment_id == "" ||
+      !TerminalProcessIdentity(terminal_pid, terminal_creation_time, why))
+      return;
+   string path = SpreadDetachSignalPath(terminal_pid, terminal_creation_time);
+   int handle = FileOpen(path, FILE_WRITE | FILE_TXT | FILE_ANSI | FILE_COMMON);
+   if(handle == INVALID_HANDLE)
+   {
+      Print("MarketWatchSpreadPercentFeed: could not notify the desktop window of EA removal. error=", GetLastError());
+      return;
+   }
+   FileWriteString(handle, g_attachment_id);
+   FileClose(handle);
+}
 
 int SafeUpdateInterval()
 {
@@ -271,6 +310,7 @@ bool LaunchWindow()
                  + " --refresh-ms " + IntegerToString(SafeDesktopWindowRefreshMs())
                  + " --decimals " + IntegerToString(SafeDesktopWindowDecimals())
                  + " --owner-id " + QuoteArg(SpreadWindowOwnerId())
+                 + " --attachment-id " + QuoteArg(g_attachment_id)
                  + " --runtime-dir " + QuoteArg(runtime_dir)
                  + " --terminal-pid " + (string)terminal_pid
                  + " --terminal-created " + (string)terminal_creation_time
@@ -416,6 +456,7 @@ bool ExportSpreadFeed()
 
 int OnInit()
 {
+   g_attachment_id = SpreadAttachmentId();
    EventSetMillisecondTimer(SafeUpdateInterval());
    ExportSpreadFeed();
    LaunchWindow();
@@ -425,6 +466,8 @@ int OnInit()
 void OnDeinit(const int reason)
 {
    EventKillTimer();
+   if(reason == REASON_REMOVE)
+      NotifySpreadWindowRemoved();
 }
 
 void OnTimer()

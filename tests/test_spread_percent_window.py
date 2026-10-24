@@ -20,6 +20,103 @@ def _load_module():
     return module
 
 
+def _detach_test_window(spread, ownership, visibility="minimized"):
+    class Root:
+        def __init__(self):
+            self.visibility = visibility
+            self.cancelled = []
+            self.destroyed = False
+
+        def after(self, delay, callback):
+            return "owner-check"
+
+        def after_cancel(self, callback_id):
+            self.cancelled.append(callback_id)
+
+        def destroy(self):
+            self.destroyed = True
+
+    class Monitor:
+        def exited(self):
+            return False
+
+        def close(self):
+            pass
+
+    class Status:
+        def set(self, value):
+            self.value = value
+
+    root = Root()
+    window = object.__new__(spread.SpreadPercentWindow)
+    window.root = root
+    window.ownership = ownership
+    window.process_monitor = Monitor()
+    window.owner_monitor_error = None
+    window._feed_status_text = ""
+    window.status_var = Status()
+    window._closed = False
+    window._refresh_after_id = "feed-refresh"
+    window._owner_after_id = None
+    window.on_close = lambda: None
+    return window, root
+
+
+def test_matching_attachment_removal_closes_its_minimized_window(tmp_path: Path) -> None:
+    spread = _load_module()
+    identity = spread.SpreadOwnerIdentity("terminal-chart", 101, 12345)
+    mailbox = spread.SpreadHandoffMailbox(tmp_path, identity)
+    guard = type("Guard", (), {"release": lambda self: None})()
+    owner = spread.SpreadWindowOwnership(identity, guard, mailbox, "attach-8")
+    signal = owner.detach_signal_path()
+    signal.write_text("attach-8", encoding="ascii")
+    window, root = _detach_test_window(spread, owner)
+
+    window._check_owner_process()
+
+    assert window._closed and root.destroyed
+    assert root.cancelled == ["feed-refresh"]
+    assert not signal.exists()
+
+
+def test_stale_attachment_and_other_owner_signals_cannot_close_current_window(tmp_path: Path) -> None:
+    spread = _load_module()
+    identity = spread.SpreadOwnerIdentity("terminal-chart", 101, 12345)
+    other_identity = spread.SpreadOwnerIdentity("other-chart", 101, 12345)
+    mailbox = spread.SpreadHandoffMailbox(tmp_path, identity)
+    other_mailbox = spread.SpreadHandoffMailbox(tmp_path, other_identity)
+    guard = type("Guard", (), {"release": lambda self: None})()
+    owner = spread.SpreadWindowOwnership(identity, guard, mailbox, "attach-new")
+    other_owner = spread.SpreadWindowOwnership(other_identity, guard, other_mailbox, "attach-new")
+    owner.detach_signal_path("attach-old").write_text("attach-old", encoding="ascii")
+    other_owner.detach_signal_path().write_text("attach-new", encoding="ascii")
+    window, root = _detach_test_window(spread, owner, visibility="normal")
+
+    window._check_owner_process()
+
+    assert not window._closed and not root.destroyed
+
+
+def test_transient_handoff_changes_attachment_without_closing_window(tmp_path: Path) -> None:
+    spread = _load_module()
+    identity = spread.SpreadOwnerIdentity("terminal-chart", 101, 12345)
+    config = spread.SpreadWindowConfig(tmp_path / "feed.json", 150, 5, 12, False)
+    mailbox = spread.SpreadHandoffMailbox(tmp_path, identity)
+    guard = type("Guard", (), {"release": lambda self: None})()
+    owner = spread.SpreadWindowOwnership(identity, guard, mailbox, "attach-old")
+    owner.accept_handoff()  # No detach notification means a transient reinitialization.
+    mailbox.publish(config, "attach-new")
+    owner.accept_handoff()
+    owner.detach_signal_path("attach-old").write_text("attach-old", encoding="ascii")
+    window, root = _detach_test_window(spread, owner)
+    window.ownership = owner
+
+    window._check_owner_process()
+
+    assert owner.attachment_id == "attach-new"
+    assert not window._closed and not root.destroyed
+
+
 def test_auto_start_is_minimized_and_reinitialization_keeps_one_owner_window(tmp_path: Path) -> None:
     spread = _load_module()
     held_guards: set[Path] = set()
@@ -297,7 +394,7 @@ def test_auto_start_is_minimized_and_reinitialization_keeps_one_owner_window(tmp
     next_cleanup_guard.release()
 
     mql = MQL_SOURCE.read_text(encoding="utf-8")
-    assert '#property version   "1.13"' in mql
+    assert '#property version   "1.14"' in mql
     assert '\\"version\\": \\"1.10\\"' in mql
     assert "TerminalInfoString(TERMINAL_DATA_PATH)" in mql
     assert "(string)ChartID()" in mql

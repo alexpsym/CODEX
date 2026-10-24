@@ -50,6 +50,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--font-size", type=int, default=12, help="Table font size.")
     parser.add_argument("--show-points", action="store_true", help="Also show Spread Points.")
     parser.add_argument("--owner-id", default="", help=argparse.SUPPRESS)
+    parser.add_argument("--attachment-id", default="", help=argparse.SUPPRESS)
     parser.add_argument("--auto-start", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--runtime-dir", default="", help=argparse.SUPPRESS)
     parser.add_argument("--terminal-pid", type=int, default=0, help=argparse.SUPPRESS)
@@ -197,8 +198,9 @@ class SpreadHandoffMailbox:
         self.path = Path(runtime_dir) / (
             f"SpreadPercentWindow.owner.v1.{identity.lifetime_id}.handoff.json"
         )
+        self.attachment_id = ""
 
-    def publish(self, config: SpreadWindowConfig, now: float | None = None) -> None:
+    def publish(self, config: SpreadWindowConfig, attachment_id: str = "", now: float | None = None) -> None:
         payload = config.payload()
         payload.update(
             {
@@ -207,9 +209,11 @@ class SpreadHandoffMailbox:
                 "terminal_creation_time": self.identity.terminal_creation_time,
                 "requested_at": int(time.time() if now is None else now),
                 "request_id": str(uuid.uuid4()),
+                "attachment_id": attachment_id,
             }
         )
         atomic_write_json(self.path, payload)
+        self.attachment_id = attachment_id
 
     def read(self, now: float | None = None) -> SpreadWindowConfig | None:
         try:
@@ -229,6 +233,7 @@ class SpreadHandoffMailbox:
             or current - requested_at > HANDOFF_FRESH_SECONDS
         ):
             return None
+        self.attachment_id = str(payload.get("attachment_id") or "")
         return SpreadWindowConfig.from_payload(payload)
 
     def clear(self) -> None:
@@ -246,10 +251,12 @@ class SpreadWindowOwnership:
         identity: SpreadOwnerIdentity,
         guard: InstanceWindowGuard,
         mailbox: SpreadHandoffMailbox,
+        attachment_id: str = "",
     ) -> None:
         self.identity = identity
         self.guard = guard
         self.mailbox = mailbox
+        self.attachment_id = attachment_id
 
     @classmethod
     def claim_or_handoff(
@@ -258,6 +265,7 @@ class SpreadWindowOwnership:
         identity: SpreadOwnerIdentity,
         config: SpreadWindowConfig,
         guard_factory: Callable[[Path], InstanceWindowGuard] = InstanceWindowGuard,
+        attachment_id: str = "",
     ) -> "SpreadWindowOwnership | None":
         mailbox = SpreadHandoffMailbox(runtime_dir, identity)
         guard_path = Path(runtime_dir) / (
@@ -265,16 +273,42 @@ class SpreadWindowOwnership:
         )
         guard = guard_factory(guard_path)
         if not guard.acquire():
-            mailbox.publish(config)
+            mailbox.publish(config, attachment_id)
             return None
         mailbox.clear()
-        return cls(identity, guard, mailbox)
+        return cls(identity, guard, mailbox, attachment_id)
 
     def accept_handoff(self, now: float | None = None) -> SpreadWindowConfig | None:
         config = self.mailbox.read(now)
         if config is not None:
             self.mailbox.clear()
+            self.attachment_id = self.mailbox.attachment_id
         return config
+
+    def detach_signal_path(self, attachment_id: str | None = None) -> Path:
+        token = self.attachment_id if attachment_id is None else attachment_id
+        return self.mailbox.path.parent / (
+            f"SpreadPercentWindow.detach.{self.identity.owner_id}."
+            f"{self.identity.terminal_pid}.{self.identity.terminal_creation_time}."
+            f"{token}.signal"
+        )
+
+    def detached(self) -> bool:
+        token = self.attachment_id
+        if not token:
+            return False
+        path = self.detach_signal_path(token)
+        try:
+            signal = path.read_text(encoding="ascii")
+        except (FileNotFoundError, OSError, UnicodeError):
+            return False
+        if signal != token:
+            return False
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        return True
 
     def release(self) -> None:
         self.guard.release()
@@ -620,6 +654,7 @@ class SpreadPercentWindow:
         config = self.ownership.accept_handoff()
         if config is None:
             return False
+        self.attachment_id = self.ownership.attachment_id
         self._apply_config(config)
         return True
 
@@ -684,6 +719,9 @@ class SpreadPercentWindow:
             if self._feed_status_text:
                 self._set_feed_status(self._feed_status_text)
         if not self._closed:
+            if self.ownership is not None and self.ownership.detached():
+                self._close()
+                return
             self._owner_after_id = self.root.after(
                 OWNER_PROCESS_CHECK_MS,
                 self._check_owner_process,
@@ -838,6 +876,7 @@ def run_window(
                 identity,
                 config,
                 guard_factory=guard_factory,
+                attachment_id=getattr(args, "attachment_id", ""),
             )
             if ownership is None:
                 return "handoff"

@@ -2396,3 +2396,10 @@ Manual acceptance remains Alex's after delivery:
 5. Confirm ordinary layout and unrelated percent/R/balance displays remain as before. Do not infer missing digits or change actual prices to force an example.
 
 STOP after protected delivery. No automatic production repair or follow-on work; final live acceptance remains pending Alex.
+
+Market Watch spread window removal lifecycle fix (2026-10-24)
+
+- Updated MarketWatchSpreadPercentFeed to assign a persistent per-chart attachment ID and send a FILE_COMMON detach signal only for documented REASON_REMOVE. Other deinitialization reasons keep transient reinitialization behavior.
+- The existing spread window checks the matching terminal/chart/attachment signal through its existing verified terminal-process callback and idempotent cleanup. Attachment IDs follow handoffs, so delayed signals from prior attachments and unrelated owners cannot close the current window. The existing minimized startup and terminal-exit monitor remain in place.
+- Focused tests: tests/test_spread_percent_window.py::test_matching_attachment_removal_closes_its_minimized_window, ::test_stale_attachment_and_other_owner_signals_cannot_close_current_window, and ::test_transient_handoff_changes_attachment_without_closing_window — all passed (3 passed). Initial default pytest temp setup failed because its system temp directory was unavailable; the same failed nodes passed on rerun with a task-scoped basetemp. No other nodes ran.
+- MetaEditor was not available on PATH; no MQL5 compilation or live MT5 verification was performed. Manual MT5 acceptance remains: install the updated EA, open one chart with the spread window, replace the EA with Trader Controls, and confirm the spread window closes while Trader Controls remains running. Also remove the spread EA directly and confirm its window closes.
