@@ -53,8 +53,9 @@ void TickOnce(const char *prefix,size_t expectedMessages)
   Check(messages.size()==expectedMessages,"subsequent ticks must not resolve/log again");
   Check(nbar==0,"no historical bars processed");
 }
-int main()
+int main(int argc,char **argv)
 {
+  if(argc!=2||strcmp(argv[1],"preset_lifecycle")!=0){fprintf(stderr,"Select preset_lifecycle\n");return 2;}
   IntrfProcsRec.RegOption=Register;
   IntrfProcsRec.StrategyShortName=IgnoreText;
   IntrfProcsRec.StrategyDescription=IgnoreText;
@@ -65,7 +66,7 @@ int main()
   IntrfProcsRec.Bars=NoHistory;
   InitStrategy();
   Check(messages.empty(),"DLL registration must not emit a stale diagnostic");
-  Check(runOptionCount==51&&options.size()==53,"all detailed options registered separately");
+  Check(runOptionCount==52&&options.size()==54,"all detailed options registered separately");
   ReplaceStr(Currency,(PChar)"EURUSD");
 
   // Simulate FT6 supplying current project/dialog values AFTER ResetStrategy.
@@ -87,6 +88,7 @@ int main()
   *(double*)Option("Impulse maximum body ATR")=2.25;
   *(double*)Option("With-trend / neutral target R")=4;
   *(double*)Option("Counter-trend target R")=5;
+  *(int*)Option("Impulse entry mode")=1;
   auto custom=Values(true);
   TickOnce("RBP preset=Custom timeframe=30 setup=0 confirmation=2 direction=1 body=0.75-2.25ATR",1);
   Check(Values(false)==custom,"Custom must use every detailed value unchanged");
@@ -103,6 +105,7 @@ int main()
   Check(ImpulseMinimumRangeATR==1.25&&ImpulseMinimumRetracementATR==0.50&&ImpulseMaximumPullbackBars==30,"Baseline impulse defaults");
   Check(selectedTimeframe==PERIOD_M15,"preset timeframe resolved before API use");
   Check(Values(true)==custom,"Baseline must preserve all registered Custom values");
+  Check(ImpulseEntryMode==0,"legacy preset explicitly uses confirmation");
   auto baseline=Values(false);
 
   ResetStrategy();
@@ -133,22 +136,34 @@ int main()
   Timeframe=PERIOD_M5;
   Check(Values(true)==custom,"M5 preset preserves all Custom values");
 
+  auto m5=Values(false);
+  ResetStrategy();
+  *(int*)Option("Settings preset")=5;
+  TickOnce("RBP preset=M5 first-touch ATR timeframe=5 setup=1 confirmation=0 direction=0",6);
+  Check(ImpulseEntryMode==1&&messages.back().find("entryMode=first-touch-ATR touchATR=0.50")!=std::string::npos,"first-touch diagnostic");
+  ImpulseEntryMode=0;
+  Check(Values(false)==m5,"first-touch preset differs ONLY by entry mode from preset 4");
+  ImpulseEntryMode=1;
+  Check(Values(true)==custom,"first-touch preset preserves Custom values");
+  touchActive=true;touchLevel=1.1;touchActivationTick=12;tickSequence=13;
+  touchPaths[0].complete=true;liveTouchPath.time=1;
   ResetStrategy();
   *(int*)Option("Settings preset")=0;
-  TickOnce("RBP preset=Custom timeframe=30 setup=0 confirmation=2 direction=1 body=0.75-2.25ATR",6);
+  TickOnce("RBP preset=Custom timeframe=30 setup=0 confirmation=2 direction=1 body=0.75-2.25ATR",7);
   Check(Values(false)==custom,"return to Custom restores every detailed value");
+  Check(!touchActive&&touchLevel==0&&touchActivationTick==0&&tickSequence==3&&!touchPaths[0].complete&&liveTouchPath.time==0,"restart clears first-touch state and tick paths");
 
   // Changed values during a run take effect on the next run, once.
   *(double*)Option("With-trend / neutral target R")=0.5;
   *(double*)Option("Counter-trend target R")=1;
   GetSingleTick();
-  Check(WithTrendNeutralTargetR==4&&CounterTrendTargetR==5&&messages.size()==6,"no repeated preset resolution on ticks");
+  Check(WithTrendNeutralTargetR==4&&CounterTrendTargetR==5&&messages.size()==7,"no repeated preset resolution on ticks");
   ResetStrategy();
-  TickOnce("RBP preset=Custom timeframe=30",7);
+  TickOnce("RBP preset=Custom timeframe=30",8);
   Check(WithTrendNeutralTargetR==2&&CounterTrendTargetR==3,"existing Custom target floors retained");
   Check(*(double*)Option("With-trend / neutral target R")==0.5&&*(double*)Option("Counter-trend target R")==1,"clamping does not overwrite Custom inputs");
   ResetStrategy();ResetStrategy();
-  TickOnce("RBP preset=Custom timeframe=30",8);
+  TickOnce("RBP preset=Custom timeframe=30",9);
   DoneStrategy();
   puts("PASS: preset lifecycle, late options, one diagnostic/run, all Custom values, targets, EMA, buys-only and M5 isolation");
 }

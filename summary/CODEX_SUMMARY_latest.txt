@@ -2409,3 +2409,66 @@ Build and installation continuation (2026-10-24)
 - Compiled one fresh task-local copy with C:\Program Files\Pepperstone MetaTrader 5\MetaEditor64.exe. Compiler log: .job1_marketwatch_compile_20261024\MetaEditor_compile.log; it reports Result: 0 errors, 0 warnings. MetaEditor process exit code was 1; success was established from the log and the fresh nonempty EX5. Build artifact: .job1_marketwatch_compile_20261024\MarketWatchSpreadPercentFeed.ex5 (37,214 bytes), SHA-256 12ADDF6FD701AAF12FE10A268E38C09289FC172FE818ACF8BCE19ED435FBAE3E.
 - Verified the destination terminal data origin as C:\Program Files\Pepperstone MetaTrader 5. Installed only MarketWatchSpreadPercentFeed.mq5 and MarketWatchSpreadPercentFeed.ex5 into its MQL5\Experts directory. Installed MQ5 SHA-256 07758316FED16B9EB336983DB37D2F16014096C2CB58468B36B1052126C641A2 matches the canonical source; installed EX5 SHA-256 matches the fresh build. Verified backups of the prior MQ5/EX5 are retained in .job1_marketwatch_compile_20261024\destination-backup.
 - No charts, terminal restart, account, broker, or order operations were performed. Manual EA replacement/removal behavior check remains unperformed.
+
+
+FT6 M5 first-touch ATR experiment - 24 October 2026
+
+Implemented preset ID 5, "M5 first-touch ATR", identical to preset 4 in every existing setting except ImpulseEntryMode=1. Selector default 0=legacy confirmation; presets 1-4 explicitly stay 0. Custom values, target floors, once-per-run first-tick resolution and restart cleanup preserved. Mode 1 affects impulse setups only.
+
+Causal level: known endpoint high - 0.50*frozen setupATR for long; known endpoint low + 0.50*frozen setupATR for short. Existing Point() tick grid, long-down/short-up rounding, no new ATR calculation or fitted price/date. Closed-bar accepted endpoints alone refresh levels prospectively; opening ticks evaluate the OLD level before refresh, after normal risk/structure updates. Ask triggers buys, Bid triggers sells, on incoming intrabar ticks without opposing-close/resumption waits. Arming ticks never enter. Pre-recognition touches, blocked/busy/deep/expired/invalid touches and failed orders retire the parent without a queued/second-touch retry. Existing seed/body/range/origin, provisional/oversized evidence, parent ownership and independent-leg rules remain.
+
+Observed completed-bar tick summaries distinguish adverse quotes after endpoints, preserving earlier touches on equal endpoint revisits. Chronological recovery checks previous levels before endpoint updates. Missing/partial/older tick history uses conservative OHLC ambiguity, never fabricated historical Ask or intrabar ordering. The 64-record cache covers the preset's 30-bar recovery; older Custom windows can lack observations. This can skip a truly fresh setup; no retrospective fill is allowed. Legacy confirmation replay unchanged.
+
+Installed SendInstantOrder API documents bool success and ticket (-1 on failure). New path requires success AND nonnegative ticket and distinguishes attempt/confirmed/failure. Actual available quotes supply orders/brackets, including gaps. Existing adaptive ATR stop, actual-entry bracket rounding, fixed preset 0.01 lots, entry-time structural class, frozen 2R with-trend/neutral and 3R counter-trend targets and management preserved. Planned-price text marker uses existing supported drawing pattern; diagnostics add mode, ATR distance, preset ID, activation tick/time, endpoint, frozen ATR, rounding, actual quote/time and specific consume reasons without per-tick spam. No choppiness filter, impulse detector change, optimisation or profitability claim.
+
+Exact five task-owned paths:
+- forex-tester-6/RangeBreakoutPullbackStrategy/RangeBreakoutPullbackStrategy.cpp
+- tests/ft6_preset_lifecycle.cpp
+- tests/ft6_first_touch.cpp (new one-named-case synthetic API/tick seam)
+- docs/RangeBreakoutPullback_Backtesting_Guide.md
+- summary/CODEX_SUMMARY_latest.txt (append, all prior worktree bytes preserved)
+
+Selected verification: 12 named cases ultimately PASS. Exact repository-root commands:
+.codex_tmp_ft6_touch_20261024\ft6_first_touch.exe touch_intrabar
+.codex_tmp_ft6_touch_20261024\ft6_first_touch.exe executable_quotes_gap_rounding
+.codex_tmp_ft6_touch_20261024\ft6_first_touch.exe activation_and_passed
+.codex_tmp_ft6_touch_20261024\ft6_first_touch.exe observed_tick_activation
+.codex_tmp_ft6_touch_20261024\ft6_first_touch.exe recovered_touch
+.codex_tmp_ft6_touch_20261024\ft6_first_touch.exe endpoint_refresh_ordering
+.codex_tmp_ft6_touch_20261024\ft6_first_touch.exe touch_gates
+.codex_tmp_ft6_touch_20261024\ft6_first_touch.exe order_failure
+.codex_tmp_ft6_touch_20261024\ft6_first_touch.exe frozen_brackets
+.codex_tmp_ft6_touch_20261024\ft6_first_touch.exe legacy_confirmation_entries
+.codex_tmp_ft6_touch_20261024\ft6_first_touch.exe parent_ownership
+.codex_tmp_ft6_touch_20261024\ft6_preset_lifecycle.exe preset_lifecycle
+
+Coverage: long/short intrabar execution, no confirmation wait, executable quotes and real gap-price brackets, outward tick rounding, activation guard, observed seed ordering and chart marker, pre-recognition/recovered/second-touch consumption, normal/oversized confirmed-origin recovery and safe future recovery, endpoint refresh/opening-tick ordering, history/risk/direction/blackout/busy/depth/minimum-depth/expiry/invalidation/EMA-readiness gates, no duplicates, false/-1/mismatched API return failures, adaptive stop/structural 2R/3R freezing, selected legacy aggressive entries/opposing-count wait, range isolation, parent/child/independent-leg/oversize rules, preset isolation/Custom persistence/restart cleanup.
+
+Initial fixture failures: recovered_touch used adverse prices 1.2090/1.1910, short of planned 1.2089/1.1911; corrected only those fixture extremes. touch_gates omitted optional installed-API host context pointers for TimeCurrent and OrderMagicNumber, so wrappers returned time=0/magic=0; corrected fixture pointers. recovered_touch passed its sole retry. touch_gates passed after two failed attempts and those pointer corrections. Only failed named cases were rerun. observed_tick_activation was added/run once for observed tick chronology and supported text drawing. No passing named case was rerun. Strategy source did not change after successful DLL build. No unfiltered harness, broad/full suite, parameter optimisation or historical backtest ran.
+
+Build: cmd /d /c .codex_tmp_ft6_touch_20261024\build.cmd - PASS, exit 0. Exact commands inside it (repository root):
+call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat" x86 >nul
+cl /nologo /O2 /MD /EHsc /D_CRT_SECURE_NO_WARNINGS /I"C:\ForexTester6\Examples\Strategies\C++" /LD forex-tester-6\RangeBreakoutPullbackStrategy\RangeBreakoutPullbackStrategy.cpp /Fo".codex_tmp_ft6_touch_20261024\strategy.obj" /Fe".codex_tmp_ft6_touch_20261024\RangeBreakoutPullbackStrategy.dll" /link /DEF:forex-tester-6\RangeBreakoutPullbackStrategy\RangeBreakoutPullbackStrategy.def /MACHINE:X86 /INCREMENTAL:NO /OPT:REF /OPT:ICF oleaut32.lib
+cl /nologo /O2 /MD /EHsc /D_CRT_SECURE_NO_WARNINGS /I"C:\ForexTester6\Examples\Strategies\C++" tests\ft6_first_touch.cpp /Fo".codex_tmp_ft6_touch_20261024\touch.obj" /Fe".codex_tmp_ft6_touch_20261024\ft6_first_touch.exe" /link /MACHINE:X86 /INCREMENTAL:NO oleaut32.lib
+cl /nologo /O2 /MD /EHsc /D_CRT_SECURE_NO_WARNINGS /I"C:\ForexTester6\Examples\Strategies\C++" tests\ft6_preset_lifecycle.cpp /Fo".codex_tmp_ft6_touch_20261024\lifecycle.obj" /Fe".codex_tmp_ft6_touch_20261024\ft6_preset_lifecycle.exe" /link /MACHINE:X86 /INCREMENTAL:NO oleaut32.lib
+dumpbin /headers /exports .codex_tmp_ft6_touch_20261024\RangeBreakoutPullbackStrategy.dll > .codex_tmp_ft6_touch_20261024\exports.txt
+Harness-only fixture revisions: cmd /d /c .codex_tmp_ft6_touch_20261024\build-touch.cmd (same ft6_first_touch.cpp cl command above), three successful rebuilds; passing cases not repeated.
+
+Minimal binary verification PASS: PE machine 0x14c (x86); dumpbin export names exactly match existing .def: InitStrategy, DoneStrategy, ResetStrategy, GetSingleTick, ReplaceStr, IntrfProcsRec. git diff --check PASS. Build/test artifacts, exports and prior-DLL backup remain ignored in .codex_tmp_ft6_touch_20261024.
+
+Deployment: FT6 was not running (checked installed process paths before copy); no FT6 launch, termination or loaded-DLL replacement. Prior DLL backed up and hash-verified. Initial sandboxed destination copy denied; the brief-authorized single-DLL copy then succeeded with approved host execution. Built/deployed SHA-256 match.
+Installed: C:\ForexTester6\Strategies\RangeBreakoutPullbackStrategy.dll
+Size: 61952 bytes
+Modified: 2026-10-24T18:45:51.6382317+10:00
+Built and deployed SHA-256: FF1DECC5CCD9270698ACCA7CA1C65AE5734A3B0F37E383EF594B62A9A95B7DF2
+Recoverable prior DLL: C:\GPT\CODEX-master\.codex_tmp_ft6_touch_20261024\RangeBreakoutPullbackStrategy.previous.dll
+Prior SHA-256: 05320785959CD08BDA2D4712B0D9777917CE9562203E6112712BFAA4F0E03F19
+
+Expected initialization:
+RBP preset=M5 first-touch ATR timeframe=5 setup=1 confirmation=0 direction=0 body=1.00-1.50ATR depth=0-50% depthMode=1 stop=adaptive targets=2.0/3.0R EMAtrend=off scope=0 entryMode=first-touch-ATR touchATR=0.50 presetId=5
+
+Delivery procedure: initial HEAD/origin/master both d87667d7f38a4b97e8571069845033d55117bc8a; foreign staged set empty. Prior summary bytes preserved, with CRLF/LF normalisation accounted for in comparison. Invoke repository-root PATCH_DESKTOP_PUSH.bat using the established task-local scoped adapter. Only five owned paths may stage/commit; no bulk staging/broad unstaging/rebase/autostash. Its push call invokes ONLY this exact protected PowerShell command:
+& 'C:\Users\User\miniconda3\python.exe' 'C:\Users\User\.codex\tools\alexpsym_git_delivery.py' push
+The BAT then fetches origin/master and verifies local HEAD equality. Its unadapted all-file staging/raw push conflicts with checkout delivery/ownership instructions. Adapter/logs stay ignored. Commit SHA and actual delivery outcome are reported separately after execution; this records procedure, not an advance success claim. No secrets/runtime data/user briefs/unrelated dirty/deleted/untracked work enter the commit.
+
+Residual/manual acceptance: FT6 standard-test/chart execution has not been inspected; no historical test launched or performance improvement claimed. Alex should start FT6, select preset 5, inspect the initialization and short standard-test segment (planned level, executable quote, one opportunity per parent), then compare presets 4/5 over the two existing M5 yearly periods. Missing tick chronology can conservatively skip setups; instant-order gaps/spreads/platform execution can differ from the planned price.
