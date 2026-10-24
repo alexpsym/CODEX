@@ -44,6 +44,11 @@ std::vector<double> Values(bool custom)
   }
   return result;
 }
+size_t EffectiveIndex(void *effective)
+{
+  for(int i=0;i<runOptionCount;i++) if(runOptions[i].effective==effective) return (size_t)i;
+  Check(false,"effective option index missing");return 0;
+}
 void TickOnce(const char *prefix,size_t expectedMessages)
 {
   GetSingleTick();
@@ -145,11 +150,29 @@ int main(int argc,char **argv)
   Check(Values(false)==m5,"first-touch preset differs ONLY by entry mode from preset 4");
   ImpulseEntryMode=1;
   Check(Values(true)==custom,"first-touch preset preserves Custom values");
+  auto preset5=Values(false);
+
+  ResetStrategy();
+  *(int*)Option("Settings preset")=6;
+  TickOnce("RBP preset=M5 first-touch ATR buys-only timeframe=5 setup=1 confirmation=0 direction=1 body=1.00-1.50ATR depth=0-50% depthMode=1 stop=adaptive targets=2.0/3.0R EMAtrend=off scope=0 entryMode=first-touch-ATR touchATR=0.50 presetId=6",7);
+  Check(Timeframe==PERIOD_M5&&selectedTimeframe==PERIOD_M5,"preset 6 selects M5 before history access");
+  Check(TradeDirection==1&&ImpulseEntryMode==1,"preset 6 explicitly selects buys-only first-touch mode");
+  Check(Values(true)==custom,"preset 6 preserves every registered Custom value");
+  auto preset6=Values(false);
+  size_t directionIndex=EffectiveIndex(&TradeDirection);
+  for(size_t i=0;i<preset5.size();i++) Check(preset5[i]==preset6[i]||(i==directionIndex&&preset6[i]==1&&preset5[i]==0),"preset 6 differs from preset 5 only by TradeDirection");
+
+  ResetStrategy();
+  *(int*)Option("Settings preset")=5;
+  TickOnce("RBP preset=M5 first-touch ATR timeframe=5 setup=1 confirmation=0 direction=0",8);
+  Check(TradeDirection==0,"restarting from preset 6 to 5 restores both directions");
+  Check(Values(false)==preset5,"restart to preset 5 restores all its effective settings");
+  Check(Values(true)==custom,"restart to preset 5 preserves Custom values");
   touchActive=true;touchLevel=1.1;touchActivationTick=12;tickSequence=13;
   touchPaths[0].complete=true;liveTouchPath.time=1;
   ResetStrategy();
   *(int*)Option("Settings preset")=0;
-  TickOnce("RBP preset=Custom timeframe=30 setup=0 confirmation=2 direction=1 body=0.75-2.25ATR",7);
+  TickOnce("RBP preset=Custom timeframe=30 setup=0 confirmation=2 direction=1 body=0.75-2.25ATR",9);
   Check(Values(false)==custom,"return to Custom restores every detailed value");
   Check(!touchActive&&touchLevel==0&&touchActivationTick==0&&tickSequence==3&&!touchPaths[0].complete&&liveTouchPath.time==0,"restart clears first-touch state and tick paths");
 
@@ -157,13 +180,13 @@ int main(int argc,char **argv)
   *(double*)Option("With-trend / neutral target R")=0.5;
   *(double*)Option("Counter-trend target R")=1;
   GetSingleTick();
-  Check(WithTrendNeutralTargetR==4&&CounterTrendTargetR==5&&messages.size()==7,"no repeated preset resolution on ticks");
+  Check(WithTrendNeutralTargetR==4&&CounterTrendTargetR==5&&messages.size()==9,"no repeated preset resolution on ticks");
   ResetStrategy();
-  TickOnce("RBP preset=Custom timeframe=30",8);
+  TickOnce("RBP preset=Custom timeframe=30",10);
   Check(WithTrendNeutralTargetR==2&&CounterTrendTargetR==3,"existing Custom target floors retained");
   Check(*(double*)Option("With-trend / neutral target R")==0.5&&*(double*)Option("Counter-trend target R")==1,"clamping does not overwrite Custom inputs");
   ResetStrategy();ResetStrategy();
-  TickOnce("RBP preset=Custom timeframe=30",9);
+  TickOnce("RBP preset=Custom timeframe=30",11);
   DoneStrategy();
   puts("PASS: preset lifecycle, late options, one diagnostic/run, all Custom values, targets, EMA, buys-only and M5 isolation");
 }
