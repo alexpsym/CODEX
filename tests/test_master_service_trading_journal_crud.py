@@ -298,6 +298,25 @@ def _pepperstone_mt5_deals_with_orders_rows() -> list[list[object]]:
     ]
 
 
+def _pepperstone_mt5_hidden_comment_html() -> bytes:
+    """An anonymized native shape with a hidden position comment and closed deal pair."""
+    return b"""<html><body><table>
+    <tr><td>Account</td><td>123456</td></tr>
+    <tr><td>Company</td><td>Pepperstone Group Limited</td></tr>
+    <tr><td>Server</td><td>Pepperstone-Live</td></tr>
+    <tr><td>Currency</td><td>AUD</td></tr>
+    <tr><td>Period</td><td>2026.10.05 00:00:00 - 2026.10.05 23:59:59</td></tr>
+    <tr><td>Positions</td></tr>
+    <tr><th>Position</th><th>Symbol</th><th>Type</th><th>Volume</th><th>Time</th><th>Price</th><th>S/L</th><th>T/P</th><th>Time</th><th>Price</th><th>Commission</th><th>Fee</th><th>Swap</th><th>Profit</th></tr>
+    <tr><td>395458402</td><td>GBPUSD.a</td><td>buy</td><td>0.10</td><td>2026.10.05 03:00:00</td><td>1.32000</td><td></td><td></td><td>2026.10.05 04:38:17</td><td>1.32358</td><td>-0.20</td><td>0</td><td>0</td><td>32.51</td><td class="hidden" colspan="8">TDM:0688788653D6F330</td></tr>
+    <tr><td>Deals</td></tr>
+    <tr><th>Time</th><th>Deal</th><th>Symbol</th><th>Type</th><th>Direction</th><th>Volume</th><th>Price</th><th>Order</th><th>Position ID</th><th>Commission</th><th>Fee</th><th>Swap</th><th>Profit</th><th>Balance</th></tr>
+    <tr><td>2026.10.05 03:00:00</td><td>9001</td><td>GBPUSD.a</td><td>buy</td><td>in</td><td>0.10</td><td>1.32000</td><td>8001</td><td>395458402</td><td>-0.20</td><td>0</td><td>0</td><td>0</td><td>50000.00</td></tr>
+    <tr><td>2026.10.05 04:38:17</td><td>9002</td><td>GBPUSD.a</td><td>sell</td><td>out</td><td>0.10</td><td>1.32358</td><td>8002</td><td>395458402</td><td>-0.20</td><td>0</td><td>0</td><td>32.51</td><td>50032.11</td></tr>
+    <tr><td>Balance</td><td>50032.11</td></tr>
+    </table></body></html>"""
+
+
 def _tiny_stats2_pepperstone_roundtrip(tmp_path: Path, balance: dict) -> dict:
     from tools import master_journal_workbook as mjw
 
@@ -454,6 +473,79 @@ def test_pepperstone_mt5_native_html_and_xlsx_import_same_closed_positions(tmp_p
     assert html_balance["account"] == "PEPPERSTONE DEMO"
     assert html_balance["currency"] == "AUD"
     assert "skipped_open_positions:2" in html_balance["_import_warnings"]
+
+
+def test_pepperstone_mt5_hidden_position_comment_falls_back_to_closed_deals():
+    html_rows = master_service._mt5_html_rows(_pepperstone_mt5_hidden_comment_html())
+    rows, balance = master_service._parse_pepperstone_mt5_rows([html_rows], source_kind="html")
+
+    assert balance is not None
+    assert len(rows) == 1
+    trade = rows[0]
+    assert trade["id"].endswith(":position:395458402")
+    assert trade["raw_refs"]["closing_deal_tickets"] == ["9002"]
+    assert trade["qty"] == pytest.approx(0.10)
+    assert trade["entry_price"] == pytest.approx(1.32000)
+    assert trade["exit_price"] == pytest.approx(1.32358)
+    assert trade["close_time"] == "2026-10-05T04:38:17"
+    assert trade["net_profit"] == pytest.approx(32.11)
+    assert trade["balance_after_trade"] == pytest.approx(50032.11)
+    assert balance["balance"] == pytest.approx(50032.11)
+    assert "skipped_open_positions:1" not in balance["_import_warnings"]
+    assert "ambiguous_positions:1" in balance["_import_warnings"]
+
+
+def test_pepperstone_mt5_malformed_position_close_is_ambiguous_not_open():
+    rows = [
+        ["Account", "123456"], ["Company", "Pepperstone Group Limited"],
+        ["Server", "Pepperstone-Live"], ["Period", "2026.10.05 00:00:00 - 2026.10.05 23:59:59"],
+        ["Positions"],
+        ["Position", "Symbol", "Type", "Volume", "Time", "Price", "Close Time", "Close Price"],
+        ["395458402", "GBPUSD.a", "buy", 0.10, "2026.10.05 03:00:00", 1.32000, "not-a-time", "1.32358"],
+        ["456789012", "EURUSD.a", "sell", 0.20, "2026.10.05 05:00:00", 1.16000, "", ""],
+        ["Deals"],
+        ["Time", "Deal", "Symbol", "Type", "Direction", "Volume", "Price", "Order", "Position ID", "Commission", "Fee", "Swap", "Profit", "Balance"],
+        ["2026.10.05 03:00:00", "9001", "GBPUSD.a", "buy", "in", 0.10, 1.32000, "8001", "395458402", -0.20, 0, 0, 0, 50000.00],
+        ["2026.10.05 04:38:17", "9002", "GBPUSD.a", "sell", "out", 0.10, 1.32358, "8002", "395458402", -0.20, 0, 0, 32.51, 50032.11],
+        ["2026.10.05 05:00:00", "9010", "EURUSD.a", "sell", "in", 0.20, 1.16000, "8010", "456789012", 0, 0, 0, 0, 50032.11],
+        ["Balance", 50032.11],
+    ]
+    trades, balance = master_service._parse_pepperstone_mt5_rows([rows], source_kind="xlsx")
+
+    assert balance is not None
+    assert len(trades) == 1
+    assert balance["_mt5_diagnostics"]["open_positions_skipped"] == 1
+    assert "ambiguous_positions:1" in balance["_import_warnings"]
+    assert "skipped_open_positions:1" in balance["_import_warnings"]
+
+
+def test_pepperstone_mt5_hidden_comment_reimport_preserves_manual_fields_and_identity(
+    temp_state_paths: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(master_service, "_sync_master_journal_workbook", lambda **_kwargs: {"ok": True})
+    monkeypatch.setattr(master_service, "_verify_trade_log_row_ids_in_workbook", lambda *_a, **_k: {"ok": True, "missing_row_ids": []})
+    monkeypatch.setattr(master_service, "_journal_transaction_lock_path", lambda _path: temp_state_paths / "journal-transaction.lock")
+    payload = _pepperstone_mt5_hidden_comment_html()
+    first = master_service._import_uploaded_trading_journal_file("pepperstone_live.html", payload)
+    assert first["ok"] is True, first
+    original = master_service._get_trading_journal_rows()
+    trade = next(row for row in original if row.get("row_type") == "trade")
+    original_id = trade["id"]
+    trade["notes"] = "manual synthetic note"
+    trade["pattern"] = "manual synthetic pattern"
+    master_service._set_trading_journal_rows(original)
+
+    second = master_service._import_uploaded_trading_journal_file("pepperstone_live.html", payload)
+    updated = master_service._get_trading_journal_rows()
+    matching = [row for row in updated if row.get("id") == original_id]
+
+    assert second["ok"] is True
+    assert second["rows_parsed"] == 1
+    assert second["rows_upserted"] == 0
+    assert len(matching) == 1
+    assert matching[0]["notes"] == "manual synthetic note"
+    assert matching[0]["pattern"] == "manual synthetic pattern"
+    assert matching[0]["raw_refs"]["closing_deal_tickets"] == ["9002"]
 
 
 def test_pepperstone_mt5_deals_orders_keep_opening_plan_and_funded_checkpoints():

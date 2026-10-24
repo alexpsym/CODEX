@@ -1,3 +1,9 @@
+Pepperstone MT5 false open-position warning correction (2026-10-24)
+
+- At the Positions parsing boundary, rows with extra TDM hidden comment cells and malformed/partial close fields are reported as ambiguous, not confirmed open. An intact row with both closing fields empty remains a confirmed open position. The Deals fallback remains in place for ambiguous rows; section open counts use the larger count to avoid adding the same position twice.
+- Added four focused pytest nodes: hidden comment/deal balance and identity reproduction, existing native HTML/XLSX compatibility, ambiguous plus genuine open position classification, and isolated duplicate reimport/manual-field preservation. First run: 3 passed, reimport node failed because its transaction lock attempted to write under read-only .git. The test lock was redirected to its task temp directory afterward; rerun was not allowed by the two-invocation limit.
+- Dropbox lookup found the named source but its single configured download attempt failed at DNS resolution before bytes were captured. No retry or real journal import was performed; statement-specific five-trade validation remains unavailable.
+
 Forex Tester 6 Range Breakout-Pullback preset lifecycle fix (2026-10-20)
 
 - Corrected canonical FT6 source only: InitStrategy registers options without applying/logging a preset. ResetStrategy invalidates a run-resolution flag; the first tick resolves the current options once, before symbol/history/trading checks, and emits exactly one effective-settings diagnostic per run.

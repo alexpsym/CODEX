@@ -21037,9 +21037,10 @@ def _mt5_trade_row(
     })
 
 
-def _mt5_positions_rows(rows: List[List[object]], metadata: Dict[str, str]) -> Tuple[List[Dict[str, object]], int]:
+def _mt5_positions_rows(rows: List[List[object]], metadata: Dict[str, str]) -> Tuple[List[Dict[str, object]], int, int]:
     parsed: List[Dict[str, object]] = []
     open_count = 0
+    ambiguous_count = 0
     for headers, body in _mt5_table_ranges(rows, "positions"):
         position_idx = _mt5_header_index(headers, {"position", "position id", "ticket"})
         symbol_idx = _mt5_header_index(headers, {"symbol"})
@@ -21060,15 +21061,39 @@ def _mt5_positions_rows(rows: List[List[object]], metadata: Dict[str, str]) -> T
             qty = _cell_to_float(_mt5_row_value(row, volume_idx))
             if not ticket or not symbol or side not in {"buy", "sell"} or qty is None or qty <= 0:
                 continue
+            # MT5 may append a hidden TDM comment cell to an otherwise
+            # position-shaped row. Its colspan is not reflected in the
+            # extracted headers, so every following visible value shifts.
+            # Such a row is ambiguous; it is not evidence of an open trade.
+            if len(row) != len(headers) or any(re.match(r"^TDM:", _mt5_cell_text(cell), re.IGNORECASE) for cell in row):
+                ambiguous_count += 1
+                continue
             if len(time_indexes) < 2 or len(price_indexes) < 2:
+                ambiguous_count += 1
+                continue
+            raw_open_time = _mt5_row_value(row, time_indexes[0])
+            raw_close_time = _mt5_row_value(row, time_indexes[-1])
+            entry = _cell_to_float(_mt5_row_value(row, price_indexes[0]))
+            raw_exit_price = _mt5_row_value(row, price_indexes[-1])
+            # Only both explicitly empty closing fields in an intact row
+            # confirm a still-open position. Partial or invalid close data is
+            # recorded as ambiguous instead of being counted as open.
+            if _is_empty_cell(raw_close_time) and _is_empty_cell(raw_exit_price):
                 open_count += 1
                 continue
-            open_time = _mt5_broker_local_iso(_mt5_row_value(row, time_indexes[0]))
-            close_time = _mt5_broker_local_iso(_mt5_row_value(row, time_indexes[-1]))
-            entry = _cell_to_float(_mt5_row_value(row, price_indexes[0]))
-            exit_price = _cell_to_float(_mt5_row_value(row, price_indexes[-1]))
-            if not open_time or not close_time or entry is None or exit_price is None:
-                open_count += 1
+            open_time = _mt5_broker_local_iso(raw_open_time)
+            close_time = _mt5_broker_local_iso(raw_close_time)
+            exit_price = _cell_to_float(raw_exit_price)
+            try:
+                if not open_time or not close_time:
+                    raise ValueError("missing position time")
+                datetime.fromisoformat(open_time.replace(".", "-") if re.match(r"^\d{4}\.\d{2}\.\d{2}", open_time) else open_time)
+                datetime.fromisoformat(close_time.replace(".", "-") if re.match(r"^\d{4}\.\d{2}\.\d{2}", close_time) else close_time)
+            except ValueError:
+                ambiguous_count += 1
+                continue
+            if entry is None or exit_price is None:
+                ambiguous_count += 1
                 continue
             parsed.append(_mt5_trade_row(
                 metadata=metadata, position_ticket=ticket, close_tickets=[], symbol=symbol,
@@ -21081,7 +21106,7 @@ def _mt5_positions_rows(rows: List[List[object]], metadata: Dict[str, str]) -> T
                 stop_loss=_cell_to_float(_mt5_row_value(row, sl_idx)),
                 take_profit=_cell_to_float(_mt5_row_value(row, tp_idx)),
             ))
-    return parsed, open_count
+    return parsed, open_count, ambiguous_count
 
 
 def _mt5_deal_events(rows: List[List[object]]) -> List[Dict[str, object]]:
@@ -21361,13 +21386,16 @@ def _parse_pepperstone_mt5_rows(
     metadata = _mt5_statement_metadata(rows, statement_currency=statement_currency)
     if metadata is None:
         return None
-    position_rows, skipped_open_positions = _mt5_positions_rows(rows, metadata)
-    warnings: List[str] = []
+    position_rows, skipped_open_positions, ambiguous_positions = _mt5_positions_rows(rows, metadata)
+    warnings: List[str] = [f"ambiguous_positions:{ambiguous_positions}"] if ambiguous_positions else []
     if position_rows:
         parsed = position_rows
     else:
-        parsed, warnings, deal_open_count = _mt5_deals_rows(rows, metadata)
-        skipped_open_positions += deal_open_count
+        parsed, deal_warnings, deal_open_count = _mt5_deals_rows(rows, metadata)
+        warnings.extend(deal_warnings)
+        # Positions and Deals can describe the same open trades. Use the
+        # larger confirmed count instead of adding section counts together.
+        skipped_open_positions = max(skipped_open_positions, deal_open_count)
     if skipped_open_positions:
         warnings.append(f"skipped_open_positions:{skipped_open_positions}")
     for row in parsed:
