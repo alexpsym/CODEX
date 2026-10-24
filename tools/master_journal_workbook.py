@@ -4934,6 +4934,43 @@ def _adaptive_excel_number_format(value: Any, *, percent: bool, max_decimals: in
     return "0." + "0" * places + suffix
 
 
+TRADE_LOG_PRICE_HEADERS = (
+    "Entry Price", "Exit Price", "Stop Loss Price", "Target Price",
+    "Move to Break Even Trigger Price", "Move to Profit Trigger Price",
+)
+_PRICE_FIXED_DECIMALS = 30
+_PRICE_SCIENTIFIC_FORMAT = "0.################E+00"
+
+
+def _trade_log_price_number_format(cell) -> str:
+    """Display recorded decimal digits, without changing numeric/formula payloads.
+
+    Reuse at most 31 fixed-place patterns and one 17-significant-digit scientific
+    pattern. Excel itself supports only 15 significant numeric digits. Unknown
+    formula results use optional scientific digits rather than assuming a scale.
+    """
+    if cell.data_type == "f":
+        return _PRICE_SCIENTIFIC_FORMAT
+    number = _decimal_from_value(cell.value)
+    if number is None:
+        return adaptive_number_format(cell.value)
+    if number.is_zero():
+        return "0"
+    # Strip trailing zeros from the decimal-string representation without a
+    # context-sensitive Decimal.normalize() or binary-float expansion.
+    digits = number.as_tuple().digits
+    exponent = number.as_tuple().exponent
+    trailing = 0
+    for digit in reversed(digits):
+        if digit != 0:
+            break
+        trailing += 1
+    places = max(0, -(exponent + trailing))
+    if places > _PRICE_FIXED_DECIMALS or number.adjusted() > 30:
+        return _PRICE_SCIENTIFIC_FORMAT
+    return "0" if not places else "0." + "0" * places
+
+
 def _adaptive_currency_number_format(value: Any, currency: str | None) -> str:
     code = _currency_code(currency)
     if not code:
@@ -7594,10 +7631,14 @@ def _apply_trade_log_adaptive_formats(ws) -> None:
         if headers.get("R-Multiple"):
             cell = ws.cell(row, headers["R-Multiple"])
             cell.number_format = adaptive_number_format(cell.value)
-        for header in ("Qty", "Entry Price", "Exit Price", "Stop Loss Price", "Target Price", "Move to Break Even Trigger Price", "Move to Profit Trigger Price"):
+        for header in ("Qty",):
             if headers.get(header):
                 cell = ws.cell(row, headers[header])
                 cell.number_format = adaptive_number_format(cell.value)
+        for header in TRADE_LOG_PRICE_HEADERS:
+            if headers.get(header):
+                cell = ws.cell(row, headers[header])
+                cell.number_format = _trade_log_price_number_format(cell)
         if trade_duration_col:
             cell = ws.cell(row, trade_duration_col)
             if cell.value not in (None, ""):
@@ -10637,10 +10678,14 @@ def _apply_trade_log_row_number_formats(
     pnl_currency = _infer_trade_log_currency(dict(row), field="net_pnl")
     balance_currency = _infer_trade_log_currency(dict(row), field="balance_after")
     set_format(TRADE_NUMBER_HEADER, "@")
-    for header in ("Qty", "Entry Price", "Exit Price", "Stop Loss Price", "Target Price", "Move to Break Even Trigger Price", "Move to Profit Trigger Price"):
+    for header in ("Qty",):
         col = headers.get(header)
         if col:
             set_format(header, adaptive_number_format(ws.cell(row_idx, col).value))
+    for header in TRADE_LOG_PRICE_HEADERS:
+        col = headers.get(header)
+        if col:
+            set_format(header, _trade_log_price_number_format(ws.cell(row_idx, col)))
     set_format("Open Time", "yyyy-mm-dd hh:mm:ss")
     set_format("Close Time", "yyyy-mm-dd hh:mm:ss")
     for header in ("Stop Loss Distance", "Target Distance"):

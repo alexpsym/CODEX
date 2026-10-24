@@ -31,6 +31,232 @@ from tools.master_journal_workbook import IncrementalWorkbookUpdateNotEligible, 
 from openpyxl.utils.cell import coordinate_to_tuple, get_column_letter, range_boundaries
 
 
+_PRECISION_PRICE_FIELDS = {
+    "Entry Price": "entry_price", "Exit Price": "exit_price",
+    "Stop Loss Price": "stop_loss", "Target Price": "take_profit",
+    "Move to Break Even Trigger Price": "move_to_break_even_trigger_price",
+    "Move to Profit Trigger Price": "move_to_profit_trigger_price",
+}
+
+
+def _assert_recorded_price_display(cell):
+    from decimal import Decimal
+
+    fmt = cell.number_format
+    assert "%" not in fmt
+    value = Decimal(str(cell.value))
+    if abs(value) >= Decimal("1e-30") and abs(value) < Decimal("1e31") or not value:
+        assert re.fullmatch(r"0(?:\.0+)?", fmt), (cell.coordinate, value, fmt)
+        places = len(fmt.partition(".")[2])
+        assert value == value.quantize(Decimal(1).scaleb(-places)), (value, fmt)
+        if places:
+            assert format(value, f".{places}f")[-1] != "0"
+    else:
+        assert "E+00" in fmt
+        assert len(fmt.split("E")[0].replace(".", "")) >= 15
+
+
+def test_trade_log_price_formats_preserve_crypto_and_forex_precision(tmp_path: Path):
+    from decimal import Decimal
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Trade Log"
+    for col, header in enumerate(TRADE_LOG_HEADERS, 1):
+        ws.cell(1, col, header)
+    values = (0.16621, 1.1626, 0.018264973, 81541.6, 0, -0.16621, 1.23456789e-40)
+    for offset, value in enumerate(values):
+        row = TRADE_LOG_DATA_START_ROW + offset
+        for header in _PRECISION_PRICE_FIELDS:
+            ws.cell(row, _header_col(ws, header), value)
+        ws.cell(row, _header_col(ws, "Symbol"), ("LUMIAUSDT", "EURUSD")[offset % 2])
+        ws.cell(row, _header_col(ws, "Qty"), 0.018264973)
+        ws.cell(row, _header_col(ws, "Profit %"), 0.04680001)
+        ws.cell(row, _header_col(ws, "R-Multiple"), 1.23456)
+        ws.cell(row, _header_col(ws, "Balance After"), 100.123456789)
+        ws.cell(row, _header_col(ws, "Balance After")).number_format = "#,##0.0000000000"
+    control_row = TRADE_LOG_DATA_START_ROW + len(values)
+    for header, value in zip(_PRECISION_PRICE_FIELDS, (None, "unavailable", "=1/7", Decimal("1.2300"), "", float("nan"))):
+        ws.cell(control_row, _header_col(ws, header), value)
+    formula_cell = ws.cell(control_row, _header_col(ws, "Stop Loss Price"))
+    original = {(c.row, c.column): c.value for c in ws._cells.values()}
+    ws.cell(TRADE_LOG_DATA_START_ROW, _header_col(ws, "Entry Price")).font = Font(bold=True, color="123456")
+    for apply in (lambda: mjw._apply_trade_log_adaptive_formats(ws),
+                  lambda: [mjw._apply_trade_log_row_number_formats(ws, row, {}) for row in range(TRADE_LOG_DATA_START_ROW, ws.max_row + 1)]):
+        apply()
+        for offset, value in enumerate(values):
+            row = TRADE_LOG_DATA_START_ROW + offset
+            for header in _PRECISION_PRICE_FIELDS:
+                cell = ws.cell(row, _header_col(ws, header))
+                assert cell.value == value and cell.data_type == "n"
+                _assert_recorded_price_display(cell)
+            assert ws.cell(row, _header_col(ws, "Qty")).number_format == adaptive_number_format(value=0.018264973)
+            assert ws.cell(row, _header_col(ws, "Profit %")).number_format == "0.00%"
+            assert ws.cell(row, _header_col(ws, "R-Multiple")).number_format == "0.00"
+            assert ws.cell(row, _header_col(ws, "Balance After")).number_format == "#,##0.0000000000"
+        assert formula_cell.value == "=1/7" and "E+00" in formula_cell.number_format
+        count = len(wb._number_formats)
+        formats = [c.number_format for c in ws._cells.values()]
+        apply()
+        assert [c.number_format for c in ws._cells.values()] == formats
+        assert len(wb._number_formats) == count
+    assert all(ws.cell(*key).value is value or ws.cell(*key).value == value for key, value in original.items())
+    path = tmp_path / "price-formats.xlsx"
+    wb.save(path)
+    wb.close()
+    _seed_formula_cached_value(path, "Trade Log", formula_cell.coordinate, 1 / 7)
+    reopened = load_workbook(path)
+    cached = load_workbook(path, data_only=True)
+    try:
+        trade = reopened["Trade Log"]
+        for offset, value in enumerate(values):
+            for header in _PRECISION_PRICE_FIELDS:
+                cell = trade.cell(TRADE_LOG_DATA_START_ROW + offset, _header_col(trade, header))
+                assert cell.value == value and cell.data_type == "n"
+                _assert_recorded_price_display(cell)
+        assert trade[formula_cell.coordinate].value == "=1/7"
+        assert cached["Trade Log"][formula_cell.coordinate].value == pytest.approx(1 / 7)
+        assert trade.cell(TRADE_LOG_DATA_START_ROW, _header_col(trade, "Entry Price")).font.bold
+        assert trade.cell(control_row, _header_col(trade, "Exit Price")).value == "unavailable"
+    finally:
+        reopened.close()
+        cached.close()
+
+
+def test_trade_log_price_precision_survives_incremental_and_preservation_updates(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(mjw, "REPORT_START_YEAR", 2026)
+    monkeypatch.setattr(mjw, "REPORT_MIN_END_YEAR", 2026)
+    monkeypatch.setattr(mjw, "assign_trade_numbers_and_create_folders", lambda *a, **kw: {})
+    snapshot = sample_snapshot()
+    snapshot["stats"] = {"totals": {}, "groups": {"by_market": {"overall": {}, "fx": {}, "crypto": {}}, "risk_expectancy": {}, "duration": {}, "leaders": {}}, "by_instrument": []}
+    rows = snapshot["items"]
+    for row, entry, stop, target in ((rows[0], 1.17, 1.1626, 1.18), (rows[1], 0.17, 0.16621, 0.18)):
+        row.update(entry_price=entry, exit_price=entry, stop_loss=stop, take_profit=target,
+                   side="BUY", stop_loss_pct=abs(entry-stop)/entry*100,
+                   take_profit_pct=abs(target-entry)/entry*100, commission=2.5,
+                   move_to_break_even_trigger_price=0.018264973,
+                   move_to_profit_trigger_price=81541.6)
+    rows[1]["symbol"] = "LUMIAUSDT"
+    path = tmp_path / "price-preservation.xlsx"
+    build_master_journal_workbook(snapshot, path, publish_recommendation_assets=False)
+
+    def trade_rows(candidate):
+        wb = load_workbook(candidate)
+        try:
+            ws = wb["Trade Log"]
+            return {row["id"]: tuple(ws.cell(_trade_log_row_by_id(ws, row["id"]), col).value for col in range(1, len(TRADE_LOG_HEADERS)+1)) for row in rows}
+        finally:
+            wb.close()
+
+    before = trade_rows(path)
+    changed = dict(rows[0], exit_price=1.175123456)
+    original_replace = mjw.os.replace
+    inspected = []
+
+    def inspect_install(source, destination):
+        if Path(destination) == path:
+            actual = trade_rows(Path(source))
+            assert actual["t2"] == before["t2"]
+            expected = list(before["t1"])
+            expected[TRADE_LOG_HEADERS.index("Exit Price")] = changed["exit_price"]
+            assert actual["t1"] == tuple(expected)
+            inspected.append(True)
+        return original_replace(source, destination)
+
+    with monkeypatch.context() as context:
+        context.setattr(mjw.os, "replace", inspect_install)
+        result = update_master_journal_workbook_incremental(path, [changed], expected_survivor_row_ids=["t1", "t2"])
+    assert result["ok"] and result["updated_row_ids"] == ["t1"] and inspected == [True]
+    rows[0] = changed
+    assert trade_rows(path)["t2"] == before["t2"]
+    # Normalize derived sheets after the intended incremental mutation, before
+    # establishing the baseline for two strictly unchanged refreshes.
+    preparation = update_master_journal_workbook_data_only(path, snapshot, preserve_existing_layout=True, publish_recommendation_assets=False)
+    assert preparation["ok"], preparation
+    candidate = Path(preparation["candidate_path"])
+    assert trade_rows(candidate) == trade_rows(path)
+    candidate.replace(path)
+    _add_test_chart_with_blank_axis_text(path)
+    wb = load_workbook(path)
+    ws = wb["Trade Log"]
+    for row in range(TRADE_LOG_DATA_START_ROW, ws.max_row + 1):
+        for header in _PRECISION_PRICE_FIELDS:
+            ws.cell(row, _header_col(ws, header)).number_format = "0.00"
+    ws.cell(TRADE_LOG_DATA_START_ROW, _header_col(ws, "Symbol")).hyperlink = "https://example.invalid/precision"
+    ws.cell(TRADE_LOG_DATA_START_ROW, _header_col(ws, "Entry Price")).border = Border(left=Side(style="double", color="123456"))
+    wb.save(path)
+    wb.close()
+    formula = "=0.018264973"
+    coordinate = _install_trade_log_formula_cache(path, "t2", "Exit Price", formula, 0.018264973)
+
+    def capture(candidate):
+        wb = load_workbook(candidate)
+        cells = {}
+        formats = {}
+        try:
+            ws = wb["Trade Log"]
+            allowed = {(ws.title, ws.cell(row, _header_col(ws, header)).coordinate) for row in range(TRADE_LOG_DATA_START_ROW, ws.max_row + 1) for header in _PRECISION_PRICE_FIELDS}
+            for sheet in wb.worksheets:
+                for cell in sheet._cells.values():
+                    key = (sheet.title, cell.coordinate)
+                    fmt = cell.number_format
+                    if key in allowed:
+                        formats[key] = fmt
+                        cell.number_format = "General"
+                    # Normalize only the authorized number-format component;
+                    # every other style component and every value stays compared.
+                    cells[key] = (type(cell.value).__name__, cell.value, cell.data_type,
+                                  tuple(cell._style) if cell.has_style else None,
+                                  cell.number_format)
+            contract = mjw._workbook_preservation_contract(wb)
+            registry = (len(wb._cell_styles), len(wb._number_formats))
+        finally:
+            wb.close()
+        payloads = {}
+        with zipfile.ZipFile(candidate) as package:
+            for name in package.namelist():
+                if name.startswith("xl/worksheets/") and name.endswith(".xml"):
+                    root = ET.fromstring(package.read(name))
+                    for cell in root.findall(f".//{{{_SPREADSHEETML_NAMESPACE}}}c"):
+                        value = cell.find(f"{{{_SPREADSHEETML_NAMESPACE}}}v")
+                        formula_node = cell.find(f"{{{_SPREADSHEETML_NAMESPACE}}}f")
+                        if value is not None or formula_node is not None:
+                            payloads[(name, cell.get("r"))] = (cell.get("t"), value.text if value is not None else None, ET.tostring(formula_node) if formula_node is not None else None)
+        return (cells, contract, payloads, mjw._workbook_calculation_signature(candidate), _chart_ooxml_parts(candidate), _chart_relationship_signature(candidate)), formats, registry
+
+    baseline, coarse, _ = capture(path)
+    assert baseline[4]
+    previous = None
+    for iteration in range(2):
+        result = update_master_journal_workbook_data_only(path, snapshot, preserve_existing_layout=True, publish_recommendation_assets=False)
+        assert result["ok"], result
+        assert result["diagnostics"]["trade_log_formula_caches_transplanted"] == 1
+        candidate = Path(result["candidate_path"])
+        captured, formats, registry = capture(candidate)
+        assert captured == baseline
+        assert formats != coarse
+        checked = load_workbook(candidate)
+        cached = load_workbook(candidate, data_only=True)
+        try:
+            ws = checked["Trade Log"]
+            assert ws[coordinate].value == formula
+            assert cached["Trade Log"][coordinate].value == 0.018264973
+            for row in range(TRADE_LOG_DATA_START_ROW, ws.max_row+1):
+                for header in _PRECISION_PRICE_FIELDS:
+                    cell = ws.cell(row, _header_col(ws, header))
+                    if cell.data_type != "f" and isinstance(cell.value, (int, float)):
+                        _assert_recorded_price_display(cell)
+            parsed = read_master_journal_source(candidate)
+            assert next(row for row in parsed["items"] if row["id"] == "t2")["stop_loss"] == 0.16621
+        finally:
+            checked.close()
+            cached.close()
+        if previous is not None:
+            assert (formats, registry) == previous
+        previous = formats, registry
+        candidate.replace(path)
+
+
 _OFFICE_RELATIONSHIP_NAMESPACE = (
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 )

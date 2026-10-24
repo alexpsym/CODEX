@@ -2366,3 +2366,33 @@ Manual acceptance for Alex (not run here):
 5. Optionally save/move a downloaded image to the desired existing trade folder through normal file handling.
 
 STOP this phase after scoped delivery. Journal symbol price precision remains a separate later assessment; all94 Word originals retained, Forex cleanup finished, printing6A/6B and OANDA2B cancelled. Accepted Bybit features and existing OANDA market-data policy unchanged.
+
+
+## Phase 9 journal price precision - 24 October 2026
+
+Alex reports Phase8 LIVE VERIFICATION PASSED; acceptance recorded without repeating PNG/browser work. Phase7 cleanup stays finished: eight Word originals and78 shortcuts recycled;94 Word originals and458 recovery outputs retained. Printing6A/6B and OANDA2B remain CANCELLED; accepted LTT/Bybit functions and existing OANDA feeds unchanged.
+
+Exact task paths: tools/master_journal_workbook.py; tests/test_master_journal_workbook.py; docs/journal_decimal_presentation_plan.md; summary/CODEX_SUMMARY_latest.txt. The six entry/exit/SL/target/break-even-trigger/profit-trigger price headers now use one canonical adapter at both existing full-sheet and selected-row formatting entry points, covering generation/schema normalization, incremental writes and final preservation formatting after layout restoration. Qty and all non-price nearest-rounding policies remain unchanged. Existing source fingerprinting suffices; no service/cache invalidation edits.
+
+Policy: reuse Decimal(str(value)) conversion; remove trailing decimal zeros without changing the value. Numeric zero remains zero with format 0. Reusable fixed formats cover 0..30 decimal places and magnitudes below1e31; 0.16621,1.1626,0.018264973 and81541.6 retain their meaningful fractional digits in ordinary notation. Extremes and formulas lacking a result use 0.################E+00, up to17 significant placeholders with optional digits, rather than two significant digits. Missing/text/nonfinite handling remains consistent; unavailable prices never become numeric zero. No price serialization/validation, numeric payload, formula, supported cache, calculation setting, instrument API/tick-size assumption or numeric-to-text change. Excel itself supports15 significant digits: no absent-digit recovery or actual rendering/tick-grid audit is claimed.
+
+Verification: exactly TWO distinct unparameterized nodes, TWO approved HOST Python pytest invocations, each subprocess timeout180s, absolute GUID-child basetemps and evidence under C:/Users/User/AppData/Local/Temp/journal_price_phase9_a47000bad80244ed94d52a3f0d795c00. Attempt1 ran both exact selectors: 1 failed,1 passed in82.16s; outer83.443305s. The formatter fixture put flat headers on row3 although the flat-schema reader uses row1, causing KeyError before formatter assertions. Corrected only that fixture header placement. Attempt2 ran ONLY the failed formatter node:1 passed in4.44s; outer5.503086s. Combined subprocess outer88.946391s. The passing preservation node was not rerun. No other tests/build/syntax/smoke checks, production accesses, installs or subagents.
+
+Exact selectors/results:
+- tests/test_master_journal_workbook.py::test_trade_log_price_formats_preserve_crypto_and_forex_precision - PASS on attempt2 after fixture correction.
+- tests/test_master_journal_workbook.py::test_trade_log_price_precision_survives_incremental_and_preservation_updates - PASS on attempt1.
+
+Budget limitation: the saved-checkpoint/user-resume interval brought the measured monotonic wall time from verification start to attempt2 receipt to3327.736164s. The600-second total wall-clock limit therefore cannot be claimed satisfied across that interval. Neither pytest timeout was exceeded; no third process, deadline extension or repeated passing test was used. Verification stopped after both nodes passed; subsequent work is records/Git delivery only.
+
+Synthetic coverage: all six prices, Forex/crypto examples, nine decimal places, large fraction, signed/zero/extreme values, text/missing/nonfinite/formula controls, local formatter idempotence/registry stability and save/reopen numeric types/values. A2026-only fixture exercises real creation, genuine incremental exit-price update with explicit expected row fields and unchanged unrelated row, candidate inspection before installation, then a permitted baseline preparation. Two consecutive unchanged preservation refreshes correct seeded coarse price formats and remain stable. Whole-fixture cell values/types/style components, raw numeric XML/formula/cache payloads, full existing preservation contract, balances, identities/order/count, calculation settings, hyperlink and chart parts/relationships match the established post-mutation baseline, normalizing ONLY the six price-column number formats. A supported Trade Log price formula/cache is installed after all authoring saves and never reseeded between measured refreshes. Other fonts/fills/borders/alignment/layout/styles remain compared. This is number-format/round-trip fixture evidence, NOT live Excel rendering. No real workbook/database/archive/Recycle Bin/broker account was accessed.
+
+Initial and immediately pre-stage local HEAD/origin/master/fresh remote agreed at e5a1bf3190336cedb2ab5796d96ca90ec06367d9; no intervening commits, foreign staged entries or foreign summary hunks. Prior summary and decimal-plan bytes/history are preserved by binary append. Unrelated dirty/deleted/untracked work and user-owned brief stay untouched. One exact four-path stage, one --only task commit and one protected-helper push follow scoped hunk/whitespace review. Actual task SHA and final local/origin/fresh-remote agreement are reported separately; no SHA-only summary commit.
+
+Manual acceptance remains Alex's after delivery:
+1. Close the journal in Excel. Restart LTT once to load the updated generator.
+2. With Excel closed, run ONE normal Journal Resync and await successful completion; no fixed idle delay, re-import, new trade or cache reset.
+3. Open the existing journal normally. Check entry/exit, SL/target and populated break-even/profit trigger prices on existing Forex/crypto rows against the unchanged formula-bar value.
+4. Where present confirm LUMIAUSDT SL0.16621 and EURUSD SL1.1626, plus an existing high-precision price if available. Do not create/edit production rows to manufacture0.018264973; synthetic coverage exists even if a live example is absent.
+5. Confirm ordinary layout and unrelated percent/R/balance displays remain as before. Do not infer missing digits or change actual prices to force an example.
+
+STOP after protected delivery. No automatic production repair or follow-on work; final live acceptance remains pending Alex.
