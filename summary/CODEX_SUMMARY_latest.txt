@@ -1,3 +1,9 @@
+Job 2D MT5 Python verification (2026-10-25)
+
+- The first targeted invocation ran the two outstanding nodes: hidden-comment Deals recovery passed; isolated reimport failed because its workbook-sync stub reported success without creating a workbook source for the importer post-sync balance check. The test-only stub was corrected to capture the real prebuilt snapshot in temporary workbook state, write a temp marker file and verify requested row IDs against that snapshot. Parsing, upsert and manual-field preservation remain live in the test.
+- Second invocation reran only the failed reimport node; it passed. Final node results: test_pepperstone_mt5_hidden_position_comment_falls_back_to_closed_deals PASSED in invocation 1; test_pepperstone_mt5_hidden_comment_reimport_preserves_manual_fields_and_identity PASSED in invocation 2. The first invocation exited 1 (one pass and one fixture failure); the second exited 0. No passing node was rerun. Logs: .job2d_pytest_output_20261025_01.log and .job2d_pytest_output_20261025_02.log; JUnit files are in the corresponding .job2d_pytest_tmp_20261025_01 and _02 directories.
+- The previously accepted live behavior (seven trades, seven recovered summaries, no unresolved summaries or warnings) was not repeated.
+
 FT6 M5 first-touch ATR buys-only preset 6 (2026-10-25)
 
 - Added numeric preset 6, `M5 first-touch ATR buys-only`. Preset 5 remains unchanged. Preset 6 applies M5 and first-touch ATR mode like preset 5 and changes only effective `TradeDirection` to 1. Registered option count/storage, default preset 0, Custom values, first-tick resolution and all entry/risk/exit logic remain unchanged. Updated the FT6 backtesting guide with preset selection, sole-difference explanation, M5 references, exact expected diagnostic and Custom-value display guidance.

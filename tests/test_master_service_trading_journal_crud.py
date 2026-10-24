@@ -577,8 +577,25 @@ def test_pepperstone_mt5_malformed_position_close_is_ambiguous_not_open():
 def test_pepperstone_mt5_hidden_comment_reimport_preserves_manual_fields_and_identity(
     temp_state_paths: Path, monkeypatch: pytest.MonkeyPatch,
 ):
-    monkeypatch.setattr(master_service, "_sync_master_journal_workbook", lambda **_kwargs: {"ok": True})
-    monkeypatch.setattr(master_service, "_verify_trade_log_row_ids_in_workbook", lambda *_a, **_k: {"ok": True, "missing_row_ids": []})
+    workbook_state = {"items": [], "balances": []}
+    monkeypatch.setattr(
+        master_service, "read_master_journal_source",
+        lambda _path: copy.deepcopy(workbook_state),
+    )
+
+    def isolated_workbook_sync(**kwargs):
+        workbook_state.clear()
+        workbook_state.update(copy.deepcopy(kwargs["prebuilt_snapshot"]))
+        master_service._master_journal_path().write_bytes(b"verified synthetic workbook")
+        return {"ok": True, "master_journal_ok": True, "github_sync_ok": None, "missing_row_ids": []}
+
+    def verify_isolated_workbook_rows(_path, row_ids, **_kwargs):
+        present = {row.get("id") for row in workbook_state.get("items", []) if isinstance(row, dict)}
+        missing = [row_id for row_id in row_ids if row_id not in present]
+        return {"ok": not missing, "missing_row_ids": missing}
+
+    monkeypatch.setattr(master_service, "_sync_master_journal_workbook", isolated_workbook_sync)
+    monkeypatch.setattr(master_service, "_verify_trade_log_row_ids_in_workbook", verify_isolated_workbook_rows)
     monkeypatch.setattr(master_service, "_journal_transaction_lock_path", lambda _path: temp_state_paths / "journal-transaction.lock")
     assert master_service._master_journal_path() != master_service.MASTER_JOURNAL_PATH
     assert master_service._master_journal_path().parent == temp_state_paths
