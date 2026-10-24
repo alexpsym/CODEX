@@ -17461,6 +17461,7 @@ INSTRUMENT_SPECS_TEMPLATE = """<!DOCTYPE html>
             <h2>Instrument Specs</h2>
             <div class="panel-note">Live market context and movement ranges.</div>
           </div>
+          <div class="spec-export-actions"><button id="download-spec-png" type="button" disabled>Download PNG</button><span id="spec-png-status" role="status" aria-live="polite"></span></div>
         </div>
         <div class="panel-body">
           <div id="rows"></div>

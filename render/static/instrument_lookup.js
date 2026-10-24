@@ -17,6 +17,10 @@
   let tradeScrollResizeFallbackBound = false;
   let tradeScrollSyncing = false;
   let loadGeneration = 0;
+  let exportSnapshot = null;
+  let exportJob = null;
+  let pngButton = null;
+  let pngStatus = null;
 
   const state = { asset: 'crypto' };
   const FX_CODES = new Set(['AUD', 'CAD', 'CHF', 'EUR', 'GBP', 'HKD', 'JPY', 'NZD', 'SGD', 'TRY', 'USD', 'ZAR', 'XAU', 'XAG']);
@@ -128,6 +132,9 @@
     style.textContent = `
       .panel { background:#f8fafc !important; border:1px solid #cfd8e3 !important; border-radius:8px !important; color:#0f172a !important; overflow:hidden !important; padding:0 !important; }
       .panel-head { display:flex; gap:0.75rem; align-items:flex-start; justify-content:space-between; padding:0.85rem 1rem; background:#eaf2f8; border-bottom:1px solid #cfd8e3; }
+      .spec-export-actions { display:flex; flex-wrap:wrap; gap:0.4rem; align-items:center; min-width:0; max-width:100%; }
+      #spec-png-status { overflow-wrap:anywhere; color:#64748b; font-size:0.82rem; }
+      #download-spec-png:disabled { opacity:0.55; cursor:default; }
       .panel h2 { margin:0 !important; font-size:1rem !important; color:#0f172a !important; }
       .panel-note { color:#64748b; font-size:0.82rem; margin-top:0.2rem; }
       .panel-body { padding:0.85rem; }
@@ -269,6 +276,7 @@
       ].join('');
       rows = document.getElementById('rows');
     }
+    ensurePngControl(specsPanel);
     const journalPanel = journalMetrics?.closest('section.panel');
     if (journalPanel && !journalPanel.querySelector('.panel-head')) {
       journalPanel.innerHTML = [
@@ -280,6 +288,154 @@
     }
     ensureRecentTradesSection(journalPanel);
     bindTradeScrollSync();
+  }
+
+  function ensurePngControl(panel) {
+    if (!panel) return;
+    pngButton = document.getElementById('download-spec-png');
+    if (!pngButton) {
+      const head = panel.querySelector('.panel-head');
+      if (!head) return;
+      const actions = document.createElement('div');
+      actions.className = 'spec-export-actions';
+      actions.innerHTML = '<button id="download-spec-png" type="button" disabled>Download PNG</button><span id="spec-png-status" role="status" aria-live="polite"></span>';
+      head.appendChild(actions);
+      pngButton = document.getElementById('download-spec-png');
+    }
+    pngStatus = document.getElementById('spec-png-status');
+    pngButton?.addEventListener('click', downloadSpecsPng);
+    updatePngControl();
+  }
+
+  function updatePngControl(message = '') {
+    if (pngButton) pngButton.disabled = !exportSnapshot || !!exportJob;
+    if (pngStatus) pngStatus.textContent = message;
+  }
+
+  function invalidatePng() {
+    exportSnapshot = null;
+    if (exportJob) {
+      exportJob.canvas.width = exportJob.canvas.height = 0;
+      exportJob.canvas.remove();
+      exportJob = null;
+    }
+    updatePngControl();
+  }
+
+  function specWarnings(specs) {
+    const warnings = Array.isArray(specs?._spec_warnings) ? specs._spec_warnings : [];
+    return warnings.length ? `Some instrument specs could not be loaded: ${warnings.map((w) => `${w.field || 'spec'} ${w.symbol || ''}`.trim()).join(', ')}` : '';
+  }
+
+  function snapshotStamp(date) {
+    const parts = Object.fromEntries(new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Australia/Brisbane', year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
+    }).formatToParts(date).map((p) => [p.type, p.value]));
+    return `${parts.year}-${parts.month}-${parts.day}_${parts.hour}${parts.minute}${parts.second}`;
+  }
+
+  // Fixed readable columns; height grows from measured wrapped text, independent of viewport.
+  function drawSpecsTable(canvas, snapshot) {
+    const width = 1100, margin = 28, labelWidth = 350, padding = 14, lineHeight = 28;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('Canvas unavailable');
+    ctx.font = '20px sans-serif';
+    function wrap(text, maxWidth) {
+      const lines = [];
+      for (const paragraph of String(text).split('\n')) {
+        let line = '';
+        for (const word of paragraph.split(/\s+/)) {
+          if (line && ctx.measureText(`${line} ${word}`).width <= maxWidth) {
+            line += ` ${word}`;
+            continue;
+          }
+          if (line) lines.push(line);
+          line = '';
+          for (const char of word) {
+            if (line && ctx.measureText(line + char).width > maxWidth) {
+              lines.push(line);
+              line = '';
+            }
+            line += char;
+          }
+        }
+        lines.push(line);
+      }
+      return lines;
+    }
+    const blocks = [];
+    function block(label, value, heading = false) {
+      const left = wrap(label, (value === null ? width - 2 * margin : labelWidth) - 2 * padding);
+      const right = value === null ? [] : wrap(value, width - 2 * margin - labelWidth - 2 * padding);
+      blocks.push({ left, right, heading, height: Math.max(left.length, right.length) * lineHeight + 2 * padding });
+    }
+    block(`Instrument Specs: ${snapshot.symbol}`, null, true);
+    block(`Lookup snapshot: ${snapshot.stamp.replace('_', ' ')} (Brisbane)`, null);
+    if (snapshot.source) block(snapshot.source, null);
+    if (snapshot.warning) block(snapshot.warning, null);
+    snapshot.sections.forEach((section) => {
+      block(`${section.title}\n${section.note}`, null, true);
+      section.rows.forEach((row) => block(row.label, row.value + (row.reference ? `\nBTC reference: ${row.reference}` : '')));
+    });
+    canvas.width = width;
+    canvas.height = margin * 2 + blocks.reduce((total, b) => total + b.height, 0);
+    ctx.font = '20px sans-serif';
+    ctx.textBaseline = 'top';
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, width, canvas.height);
+    let y = margin;
+    blocks.forEach((b) => {
+      ctx.fillStyle = b.heading ? '#eaf2f8' : '#ffffff';
+      ctx.fillRect(margin, y, width - 2 * margin, b.height);
+      ctx.strokeStyle = '#cfd8e3';
+      ctx.strokeRect(margin, y, width - 2 * margin, b.height);
+      ctx.fillStyle = '#0f172a';
+      b.left.forEach((line, i) => ctx.fillText(line, margin + padding, y + padding + i * lineHeight));
+      b.right.forEach((line, i) => ctx.fillText(line, margin + labelWidth + padding, y + padding + i * lineHeight));
+      if (b.right.length) ctx.strokeRect(margin, y, labelWidth, b.height);
+      y += b.height;
+    });
+  }
+
+  async function downloadSpecsPng() {
+    if (!exportSnapshot || exportJob) return;
+    const snapshot = exportSnapshot;
+    const job = { canvas: document.createElement('canvas') };
+    exportJob = job;
+    updatePngControl('Creating PNG...');
+    let url = null;
+    let anchor = null;
+    try {
+      drawSpecsTable(job.canvas, snapshot);
+      const blob = await new Promise((resolve, reject) => {
+        job.canvas.toBlob((value) => value ? resolve(value) : reject(new Error('PNG encoding failed')), 'image/png');
+      });
+      if (exportSnapshot !== snapshot || exportJob !== job) return;
+      url = URL.createObjectURL(blob);
+      anchor = document.createElement('a');
+      anchor.href = url;
+      const safeSymbol = snapshot.symbol.replace(/[^a-zA-Z0-9_-]/g, '_');
+      anchor.download = `instrument_specs_${safeSymbol}_${snapshot.stamp}.png`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      // Allow the browser to consume the dispatched download before releasing its URL.
+      const dispatchedUrl = url;
+      setTimeout(() => URL.revokeObjectURL(dispatchedUrl), 1000);
+      url = null;
+      updatePngControl('PNG downloaded.');
+    } catch (_error) {
+      if (exportSnapshot === snapshot && exportJob === job) updatePngControl('PNG download failed. Please try again.');
+    } finally {
+      if (url) URL.revokeObjectURL(url);
+      anchor?.remove();
+      job.canvas.width = job.canvas.height = 0;
+      job.canvas.remove();
+      if (exportJob === job) {
+        exportJob = null;
+        if (pngButton) pngButton.disabled = !exportSnapshot;
+      }
+    }
   }
 
   function setErr(message) {
@@ -504,7 +660,7 @@
   }
 
   function renderMarketDataSource(specs) {
-    if (!rows?.parentNode) return;
+    if (!rows?.parentNode) return '';
     let indicator = document.getElementById('instrument-data-source');
     if (!indicator) {
       indicator = document.createElement('div');
@@ -526,12 +682,14 @@
     }
     indicator.textContent = label;
     indicator.hidden = !label;
+    return label;
   }
 
   function renderSpecs(specs) {
     if (!rows) return;
     const source = specs && typeof specs === 'object' ? specs : {};
-    renderMarketDataSource(source);
+    const sourceLabel = renderMarketDataSource(source);
+    const sections = [];
     const btcRef = source._btc_reference && typeof source._btc_reference === 'object' ? source._btc_reference : null;
     const usableKeys = Object.keys(source).filter((key) => {
       if (HIDE_SPEC_FIELDS.has(key) || !hasValue(source[key])) return false;
@@ -541,39 +699,47 @@
     const used = new Set();
 
     const sectionHtml = SPEC_SECTIONS.map((section) => {
+      const exportRows = [];
       const body = section.keys
         .filter((key) => usableKeys.includes(key))
         .map((key) => {
           used.add(key);
-          return renderSpecRow(key, source[key], btcRef);
+          return renderSpecRow(key, source[key], btcRef, exportRows);
         })
         .join('');
       if (!body) return '';
+      sections.push({ title: section.title, note: section.note, rows: exportRows });
       return `<div class="spec-section"><div class="section-title">${escapeHtml(section.title)}<span class="section-subtitle">${escapeHtml(section.note)}</span></div>${body}</div>`;
     }).join('');
 
+    const extraRows = [];
     const extras = usableKeys
       .filter((key) => !used.has(key))
       .sort()
-      .map((key) => renderSpecRow(key, source[key], btcRef))
+      .map((key) => renderSpecRow(key, source[key], btcRef, extraRows))
       .join('');
     const extraHtml = extras
       ? `<div class="spec-section"><div class="section-title">Other Specs<span class="section-subtitle">Additional broker fields</span></div>${extras}</div>`
       : '';
 
+    if (extraRows.length) sections.push({ title: 'Other Specs', note: 'Additional broker fields', rows: extraRows });
     rows.innerHTML = sectionHtml || extraHtml
       ? sectionHtml + extraHtml
       : '<div class="empty-state">No instrument specs loaded yet.</div>';
+    return { sections, source: sourceLabel, warning: specWarnings(source) };
   }
 
-  function renderSpecRow(key, value, btcRef) {
+  function renderSpecRow(key, value, btcRef, exportRows) {
+    const formatted = formatSpecValue(key, value);
+    const reference = btcRef && hasValue(btcRef[key]) ? formatSpecValue(key, btcRef[key]) : '';
+    exportRows.push({ label: SPEC_LABELS[key] || key, value: formatted, reference });
     const btcLine = btcRef && hasValue(btcRef[key])
-      ? `<span class="btc-reference-row">BTC reference: ${escapeHtml(formatSpecValue(key, btcRef[key]))}</span>`
+      ? `<span class="btc-reference-row">BTC reference: ${escapeHtml(reference)}</span>`
       : '';
     return [
       '<div class="spec-row">',
       `<div class="spec-label">${escapeHtml(SPEC_LABELS[key] || key)}</div>`,
-      `<div class="spec-value">${escapeHtml(formatSpecValue(key, value))}${btcLine}</div>`,
+      `<div class="spec-value">${escapeHtml(formatted)}${btcLine}</div>`,
       '</div>',
     ].join('');
   }
@@ -781,6 +947,7 @@
     const raw = String(qInput?.value || '').trim();
     if (!raw) return;
     const generation = ++loadGeneration;
+    invalidatePng();
     setErr('Loading...');
     renderSpecs({});
     renderJournal({ status: 'loading', trades: [] });
@@ -799,7 +966,11 @@
       specs = specsResult.value || {};
       resolved = String(specs.resolved_symbol || raw).trim() || raw;
       if (qInput && resolved !== raw) qInput.value = resolved;
-      renderSpecs(specs);
+      const model = renderSpecs(specs);
+      if (model?.sections.length && specs.resolved_symbol) {
+        exportSnapshot = { ...model, symbol: resolved, stamp: snapshotStamp(new Date()) };
+        updatePngControl();
+      }
     } else {
       renderSpecs({});
       errors.push(`Instrument specs failed: ${specsResult.reason?.message || String(specsResult.reason)}`);
@@ -817,8 +988,7 @@
     }
 
     history.replaceState(null, '', `/instrument-lookup?q=${encodeURIComponent(resolved)}`);
-    const warnings = Array.isArray(specs?._spec_warnings) ? specs._spec_warnings : [];
-    const warningText = warnings.length ? `Some instrument specs could not be loaded: ${warnings.map((w) => `${w.field || 'spec'} ${w.symbol || ''}`.trim()).join(', ')}` : '';
+    const warningText = specWarnings(specs);
     setErr([...errors, warningText].filter(Boolean).join(' | '));
   }
 

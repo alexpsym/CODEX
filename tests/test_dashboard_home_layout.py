@@ -1046,3 +1046,223 @@ def test_trading_journal_workspace_bybit_account_dropdown_has_no_auto_option():
     assert '<option value="" selected disabled>Select Demo or Live</option>' in source
     assert '<option value="demo">Demo</option>' in source
     assert '<option value="live">Live</option>' in source
+
+
+# Offline behavioral/layout harness: Canvas encoding is intercepted, not browser PNG QA.
+def _run_lookup_png_harness(scenario: str) -> None:
+    node = shutil.which("node")
+    assert node, "node is required for instrument lookup PNG behavior tests"
+    harness = r"""
+const assert = require('assert/strict');
+const fs = require('fs');
+const requests = [], downloads = [], canvases = [], encoders = [], revoked = [], urls = new Map(), timers = [];
+let encoderMode = 'pending', drawThrows = false, legacy = false;
+const elements = {};
+class Element {
+  constructor(id = '') {
+    this.id = id; this.value = ''; this.textContent = ''; this.innerHTML = '';
+    this.tagName = 'DIV'; this.listeners = {}; this.dataset = {}; this.style = {};
+    this.classList = {toggle() {}}; this.children = []; this.disabled = false; this.removed = false;
+  }
+  setAttribute(name, value) { this[name] = value; }
+  addEventListener(type, fn) { this.listeners[type] = fn; }
+  querySelectorAll() { return []; }
+  querySelector(selector) { return selector === '.panel-head' ? head : null; }
+  closest() { return this.id === 'rows' ? panel : null; }
+  appendChild(child) {
+    child.parentNode = this; this.children.push(child);
+    if (child.innerHTML.includes('id="download-spec-png"')) {
+      elements['download-spec-png'] = new Element('download-spec-png');
+      elements['spec-png-status'] = new Element('spec-png-status');
+    }
+  }
+  insertBefore(child) { this.appendChild(child); if(child.id) elements[child.id] = child; }
+  remove() { this.removed = true; }
+  click() {
+    if (this.download) {
+      assert(!revoked.includes(this.href), 'URL must survive dispatch');
+      downloads.push({ filename: this.download, frame: urls.get(this.href), anchor: this });
+    } else if (!this.disabled) return this.listeners.click?.();
+  }
+}
+const head = new Element(), panel = new Element(), body = new Element();
+for (const id of ['q','load','rows','err','journal-status','journal-metrics','trade-head','trade-body',
+                  'recent-trades-section','download-spec-png','spec-png-status']) elements[id] = new Element(id);
+elements.rows.parentNode = body;
+const RealDate = Date;
+global.Date = class extends RealDate { constructor(...args) { super(...(args.length ? args : ['2026-10-24T05:15:00Z'])); } };
+global.window = { location: { search: '' } };
+global.history = { replaceState() {} };
+global.setTimeout = (fn) => { timers.push(fn); return timers.length; };
+global.URL.createObjectURL = (blob) => { const url = 'blob:' + urls.size; urls.set(url, blob.frame); return url; };
+global.URL.revokeObjectURL = (url) => revoked.push(url);
+global.document = {
+  head: new Element(), body,
+  getElementById: (id) => elements[id] || null,
+  createElement(tag) {
+    const el = new Element();
+    if (tag === 'canvas') {
+      canvases.push(el); el.frame = { texts: [], rects: [] };
+      const ctx = {
+        measureText: (text) => ({ width: Array.from(text).length * 11 }),
+        fillText(text,x,y) {
+          if(drawThrows) throw Error('drawing failure');
+          el.frame.texts.push({ text,x,y,width:this.measureText(text).width });
+        },
+        fillRect(x,y,w,h) { el.frame.rects.push({x,y,w,h,color:this.fillStyle}); },
+        strokeRect() {},
+      };
+      el.getContext = () => ctx;
+      el.toBlob = (callback, mime) => {
+        assert.equal(mime, 'image/png');
+        if (encoderMode === 'throw') throw Error('encoder failure');
+        el.frame.width = el.width; el.frame.height = el.height;
+        encoders.push({ callback, canvas: el, frame: el.frame });
+      };
+    }
+    return el;
+  },
+};
+global.fetch = (url) => new Promise((resolve, reject) => requests.push({url, resolve, reject}));
+const flush = async () => { for(let i=0;i<16;i++) await Promise.resolve(); };
+const respond = async (index, data, ok=true) => {
+  requests[index].resolve({ ok, statusText:'failure', text:async()=>JSON.stringify(data) }); await flush();
+};
+const start = async (symbol) => { elements.q.value = symbol; const pending = elements.load.click(); await flush(); return {pending}; };
+const encode = async (value=true) => {
+  const item = encoders.shift(); assert(item, 'expected encoder');
+  item.callback(value ? {type:'image/png', frame:item.frame} : null); await flush(); return item;
+};
+const png = () => elements['download-spec-png'];
+const status = () => elements['spec-png-status'].textContent;
+const text = (frame) => frame.texts.map(t=>t.text).join(' ');
+const compact = (s) => s.replace(/\s/g,'');
+const specs = (symbol, price) => ({resolved_symbol:symbol, displayName:'Name '+symbol, source:'bybit', lastPrice:price});
+""" + scenario
+    completed = subprocess.run(
+        [node, "-e", harness, str(ROOT / "render" / "static" / "instrument_lookup.js")],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert completed.stdout.strip() == "PNG_SCENARIO_PASS", "scenario did not finish: " + completed.stdout
+
+
+def test_instrument_lookup_png_export_uses_current_visible_specs() -> None:
+    template = MASTER_SERVICE_PATH.read_text(encoding='utf-8').split('INSTRUMENT_SPECS_TEMPLATE =', 1)[1].split('CATEGORY_TEMPLATE', 1)[0]
+    specs_panel = template.split('<h2>Instrument Specs</h2>', 1)[1].split('<div class="panel-body">', 1)[0]
+    assert '<button id="download-spec-png" type="button" disabled>Download PNG</button>' in specs_panel
+    assert 'role="status" aria-live="polite"' in specs_panel
+    assert template.count('id="download-spec-png"') == 1
+    assert '.panel-head { flex-direction: column; }' in template
+    script = (ROOT / 'render/static/instrument_lookup.js').read_text(encoding='utf-8')
+    assert '.spec-export-actions { display:flex; flex-wrap:wrap;' in script
+    assert 'max-width:100%' in script
+    _run_lookup_png_harness(r"""
+eval(fs.readFileSync(process.argv[1], 'utf8'));
+(async()=> {
+  const data = {
+    resolved_symbol:'ALT/USDT:PERP', displayName:'Alternative & instrument', source:'binance_usdm',
+    _source_notice:'Bybit unavailable; fallback is public market data.',
+    _spec_warnings:[{field:'range.1w',symbol:'ALT/USDT:PERP'}],
+    lastPrice:'12.34567', fundingRate:0, volume24hUsd:0, 'range.1m':0.0123,
+    'financing.longRate':-0.001, missing:null,
+    _btc_reference:{lastPrice:'65000', 'range.1m':0.02},
+    category:'HIDDEN_CATEGORY', status:'HIDDEN_STATUS', baseCoin:'HIDDEN_BASE', quoteCoin:'HIDDEN_QUOTE',
+    openInterest:'HIDDEN_INTEREST', tickSize:'HIDDEN_TICK',
+    ['z'.repeat(95)]:'Q'.repeat(240)+' FINAL',
+  };
+  const before = JSON.stringify(data);
+  await start('alt'); await respond(0,data);
+  assert(!png().disabled, 'journal pending must not block export');
+  const visible = elements.rows.innerHTML, journal = elements['journal-metrics'].innerHTML;
+  elements.q.value = 'UNSUBMITTED';
+  const count = requests.length;
+  const pending = png().click(); await flush(); await encode(); await pending;
+  assert.equal(requests.length,count); assert.equal(JSON.stringify(data),before);
+  assert.equal(elements.rows.innerHTML,visible); assert.equal(elements['journal-metrics'].innerHTML,journal);
+  assert.equal(downloads.length,1);
+  const {filename,frame,anchor} = downloads[0], output = text(frame), dense = compact(output);
+  assert.equal(filename,'instrument_specs_ALT_USDT_PERP_2026-10-24_151500.png');
+  for(const expected of ['ALT/USDT:PERP','Alternative & instrument','Data source: Binance USD-M fallback',
+       'Bybit unavailable; fallback is public market data.','Some instrument specs could not be loaded: range.1w ALT/USDT:PERP',
+       'Lookup snapshot: 2026-10-24 151500 (Brisbane)','12.34567','BTC reference: 65,000',
+       'Funding rate 0%','24h turnover $0','Range 1m 1.23% BTC reference: 2.00%',
+       'z'.repeat(95),'Q'.repeat(240)+' FINAL']) assert(dense.includes(compact(expected)),expected);
+  const titles=['Instrument Identity','Market Snapshot Live context','Movement Range Latest candle:', 'Financing Carry costs','Other Specs Additional broker fields'];
+  let position=-1;
+  for(const title of titles) { const next=output.indexOf(title); assert(next>position,title); position=next; }
+  for(const hidden of ['HIDDEN_','UNSUBMITTED','Journal Stats','Recent Trades','missing']) assert(!output.includes(hidden),hidden);
+  const price=frame.texts.find(t=>t.text==='12.34567'), ref=frame.texts.find(t=>t.text==='BTC reference: 65,000');
+  assert(price && ref && price.x===ref.x && ref.y>price.y);
+  assert(frame.texts.filter(t=>/^Q+$/.test(t.text)).length>1, 'unbroken values wrap');
+  assert(frame.texts.filter(t=>/^z+$/.test(t.text)).length>1, 'unbroken labels wrap');
+  for(const t of frame.texts) {
+    assert(t.x>=28 && t.x+t.width<=frame.width-28,JSON.stringify(t));
+    assert(t.y>=28 && t.y+24<=frame.height-28,JSON.stringify(t));
+  }
+  const final=frame.texts.at(-1); assert(final.text.endsWith('FINAL')); assert(final.y+24<frame.height);
+  assert.equal(frame.rects[0].color,'#ffffff'); assert.equal(frame.rects[0].h,frame.height);
+  assert(anchor.removed); assert(canvases.every(c=>c.removed && c.width===0 && c.height===0));
+  assert.equal(revoked.length,0); timers.splice(0).forEach(fn=>fn()); assert.equal(revoked.length,1);
+  console.log('PNG_SCENARIO_PASS');
+})().catch(e=>{console.error(e);process.exitCode=1;});
+""")
+
+
+def test_instrument_lookup_png_export_preserves_latest_lookup_and_recovers() -> None:
+    _run_lookup_png_harness(r"""
+// Exercise legacy specs replacement and insertion without duplicate controls.
+delete elements['download-spec-png']; delete elements['spec-png-status'];
+elements.rows.tagName='TBODY';
+Object.defineProperty(panel,'innerHTML',{set(value) {
+  this.markup=value; elements.rows=new Element('rows'); elements.rows.parentNode=body;
+}});
+eval(fs.readFileSync(process.argv[1], 'utf8'));
+(async()=> {
+  assert(png().disabled); assert.equal(head.children.length,1);
+  await start('OLD'); assert(png().disabled);
+  await start('NEW'); assert(png().disabled);
+  await respond(1,specs('NEW',222)); assert(!png().disabled);
+  assert.equal(requests.length,3); // NEW journal remains pending.
+  await respond(0,specs('OLD',111)); assert(elements.rows.innerHTML.includes('NEW'));
+  assert(!elements.rows.innerHTML.includes('OLD')); assert.equal(requests.length,3);
+  elements.q.value='EDITED';
+  const first=png().click(); const duplicate=png().listeners.click(); await flush();
+  assert.equal(encoders.length,1); await encode(); await first; await duplicate;
+  assert(downloads[0].filename.includes('_NEW_')); assert(text(downloads[0].frame).includes('222'));
+  assert(!text(downloads[0].frame).includes('EDITED'));
+  await respond(2,{detail:'journal down'},false); assert(!png().disabled);
+  assert(elements['journal-metrics'].innerHTML.includes('unavailable'));
+  const abandoned=png().click(); await flush();
+  const obsolete=encoders[0].canvas;
+  await start('NEXT'); assert(png().disabled); assert(obsolete.removed && obsolete.width===0);
+  await respond(3,specs('NEXT',333)); assert(!png().disabled);
+  await encode(); await abandoned; assert.equal(downloads.length,1); assert(!png().disabled);
+  for(const mode of ['null','throw','draw']) {
+    encoderMode=mode==='throw'?'throw':'pending'; drawThrows=mode==='draw';
+    const pending=png().click(); await flush();
+    if(mode==='null') await encode(false);
+    await pending; assert(status().includes('failed')); assert(!png().disabled);
+    assert(elements.rows.innerHTML.includes('NEXT')); assert.equal(requests.length,5);
+  }
+  encoderMode='pending'; drawThrows=false;
+  const recovery=png().click(); await flush(); await encode(); await recovery;
+  assert.equal(downloads.length,2); assert(downloads[1].filename.includes('_NEXT_'));
+  assert(text(downloads[1].frame).includes('333')); assert(!text(downloads[1].frame).includes('222'));
+  // Stale journal cannot alter the newer successful page/export.
+  await start('FAILED'); assert(png().disabled);
+  await respond(5,{detail:'bad specs'},false); assert(png().disabled);
+  await respond(4,{status:'ok',canonical_symbol:'NEXT',trades:[]}); assert(png().disabled);
+  assert(!elements.rows.innerHTML.includes('NEXT'));
+  await respond(6,{status:'no_data'}); assert(png().disabled);
+  await start('EMPTY'); await respond(7,{source:'bybit'}); assert(png().disabled);
+  await respond(8,{status:'no_data'});
+  await start('FINAL'); await respond(9,specs('FINAL',444)); assert(!png().disabled);
+  const final=png().click(); await flush(); await encode(); await final;
+  assert(downloads[2].filename.includes('_FINAL_')); assert(text(downloads[2].frame).includes('444'));
+  assert(canvases.every(c=>c.removed && c.width===0 && c.height===0));
+  assert(downloads.every(d=>d.anchor.removed));
+  timers.splice(0).forEach(fn=>fn()); assert.equal(revoked.length,3); assert.equal(urls.size,3);
+  console.log('PNG_SCENARIO_PASS');
+})().catch(e=>{console.error(e);process.exitCode=1;});
+""")
