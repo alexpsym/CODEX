@@ -20664,14 +20664,24 @@ async def _collect_bybit_open_items_impl(
     }
 
 
+class _MT5HTMLCell(str):
+    """Cell text that retains native HTML attributes as it passes through row copies."""
+
+    def __new__(cls, value: str, attributes: Optional[Dict[str, str]] = None):
+        cell = super().__new__(cls, value)
+        cell.html_attributes = dict(attributes or {})
+        return cell
+
+
 class _MT5ReportHTMLParser(HTMLParser):
     """Extract inert table text from an MT5 report without loading resources."""
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
-        self.rows: List[List[str]] = []
-        self._row: Optional[List[str]] = None
+        self.rows: List[List[object]] = []
+        self._row: Optional[List[object]] = None
         self._cell: Optional[List[str]] = None
+        self._cell_attributes: Dict[str, str] = {}
         self._ignored_depth = 0
         self._loose_text: List[str] = []
 
@@ -20686,6 +20696,10 @@ class _MT5ReportHTMLParser(HTMLParser):
             self._row = []
         elif name in {"td", "th", "cell"} and self._row is not None:
             self._cell = []
+            self._cell_attributes = {
+                str(key or "").casefold(): str(value or "")
+                for key, value in attrs
+            }
 
     def handle_endtag(self, tag: str) -> None:
         name = str(tag or "").casefold()
@@ -20695,8 +20709,10 @@ class _MT5ReportHTMLParser(HTMLParser):
         if self._ignored_depth:
             return
         if name in {"td", "th", "cell"} and self._row is not None and self._cell is not None:
-            self._row.append(" ".join(part for part in self._cell if part).strip())
+            cell_text = " ".join(part for part in self._cell if part).strip()
+            self._row.append(_MT5HTMLCell(cell_text, self._cell_attributes))
             self._cell = None
+            self._cell_attributes = {}
         elif name in {"tr", "row"} and self._row is not None:
             if any(str(cell or "").strip() for cell in self._row):
                 self.rows.append(self._row)
@@ -21099,11 +21115,10 @@ def _mt5_positions_rows(
             side = _mt5_header(_mt5_row_value(row, type_idx))
             if not ticket or not symbol or side not in {"buy", "sell"}:
                 continue
-            hidden_comment_indexes = [i for i, cell in enumerate(row) if re.match(r"^TDM:", _mt5_cell_text(cell), re.IGNORECASE)]
             candidate = list(row)
-            if hidden_comment_indexes:
-                for index in reversed(hidden_comment_indexes):
-                    del candidate[index]
+            comment_index = _mt5_native_position_comment_index(row, type_idx, volume_idx)
+            if comment_index is not None:
+                del candidate[comment_index]
                 summary, reason, confirmed_open = summary_record(candidate, ticket, symbol, side)
                 if confirmed_open:
                     open_count += 1
@@ -21137,6 +21152,21 @@ def _mt5_positions_rows(
                 take_profit=_cell_to_float(_mt5_row_value(candidate, tp_idx)),
             ))
     return parsed, open_count, ambiguous_rows
+
+
+def _mt5_native_position_comment_index(
+    row: List[object], type_idx: Optional[int], volume_idx: Optional[int],
+) -> Optional[int]:
+    """Recognize only the native hidden colspan comment between Type and Volume."""
+    if type_idx is None or volume_idx != type_idx + 1 or volume_idx < 0 or volume_idx >= len(row):
+        return None
+    attributes = getattr(_mt5_row_value(row, volume_idx), "html_attributes", None)
+    if not isinstance(attributes, dict):
+        return None
+    classes = {value.casefold() for value in str(attributes.get("class") or "").split()}
+    if "hidden" not in classes or str(attributes.get("colspan") or "").strip() != "8":
+        return None
+    return volume_idx
 
 
 def _mt5_valid_broker_local_iso(value: object) -> Optional[str]:

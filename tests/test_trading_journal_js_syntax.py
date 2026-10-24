@@ -729,7 +729,7 @@ vm.createContext(context); vm.runInContext(source, context, { filename: 'trading
   if (info > warningHeading) throw new Error('recovery information was placed inside Warnings');
 })();
 """
-    subprocess.run([node, "-e", harness, str(ACTIONS_JS_PATH)], check=True)
+    subprocess.run([node, "-e", harness, str(ACTIONS_JS_PATH)], check=True, timeout=30)
 
 
 def test_pepperstone_html_upload_has_no_currency_selector_or_prompt() -> None:

@@ -299,23 +299,52 @@ def _pepperstone_mt5_deals_with_orders_rows() -> list[list[object]]:
 
 
 def _pepperstone_mt5_hidden_comment_rows() -> list[list[object]]:
-    """Anonymized native rows: TDM is between Type and Volume; Deals omit Position ID."""
-    return [
+    """Anonymized native MT5 layout, with comment after Type and no Deals Position ID."""
+    records = [
+        ("GBPUSD.a", "buy", 1.32339, 1.32358, 2.43, "TDM:synthetic-a"),
+        ("EURGBP.a", "sell", 0.84590, 0.84550, -9.03, "Trader"),
+        ("USDJPY.a", "buy", 156.10, 156.20, 1.25, "TDM:synthetic-c"),
+        ("AUDUSD.a", "sell", 0.6700, 0.6690, 0.75, "Trader"),
+        ("USDCAD.a", "buy", 1.3600, 1.3610, -1.20, "TDM:synthetic-e"),
+        ("NZDUSD.a", "sell", 0.6100, 0.6090, 0.80, "TDM:synthetic-f"),
+        ("EURUSD.a", "buy", 1.0800, 1.0810, 1.10, "TDM:synthetic-g"),
+    ]
+    rows: list[list[object]] = [
         ["Account History Report"], ["Account", "555001"],
-        ["Company", "Pepperstone Group Limited"], ["Server", "Pepperstone-Live"],
+        ["Company", "Pepperstone Group Limited"], ["Server", "Pepperstone-Demo"],
         ["Currency", "AUD"], ["Period", "2026.10.01 00:00:00 - 2026.10.31 23:59:59"],
         ["Positions"],
-        ["Position", "Symbol", "Type", "Volume", "Time", "Price", "S/L", "T/P", "Time", "Price", "Commission", "Swap", "Profit"],
-        ["7001", "GBPUSD.a", "buy", "TDM:SYNTHETIC-A", 0.11, "2026.10.05 04:20:40", 1.32339, 0, 0, "2026.10.05 04:38:17", 1.32358, -0.20, 0, 2.43],
-        ["7002", "EURGBP.a", "buy", "TDM:SYNTHETIC-B", 0.11, "2026.10.15 13:47:02", 0.84590, 0, 0, "2026.10.15 17:05:20", 0.84550, -0.20, 0, -9.03],
-        ["Deals"],
-        ["Time", "Deal", "Symbol", "Type", "Direction", "Volume", "Price", "Order", "Commission", "Fee", "Swap", "Profit", "Balance"],
-        ["2026.10.05 04:20:40", "9001", "GBPUSD.a", "buy", "in", 0.11, 1.32339, "7001", -0.10, 0, 0, 0, 50000.00],
-        ["2026.10.05 04:38:17", "9002", "GBPUSD.a", "sell", "out", 0.11, 1.32358, "8001", -0.10, 0, 0, 2.43, 50002.23],
-        ["2026.10.15 13:47:02", "9011", "EURGBP.a", "buy", "in", 0.11, 0.84590, "7002", -0.10, 0, 0, 0, 50002.23],
-        ["2026.10.15 17:05:20", "9012", "EURGBP.a", "sell", "out", 0.11, 0.84550, "8002", -0.10, 0, 0, -9.03, 49992.99],
-        ["Balance", 49992.99],
+        ["Time", "Position", "Symbol", "Type", "Volume", "Price", "S/L", "T/P", "Time", "Price", "Commission", "Swap", "Profit"],
     ]
+    deal_rows: list[list[object]] = []
+    balance = 50000.0
+    for index, (symbol, side, entry, exit_price, profit, comment) in enumerate(records, start=1):
+        position = str(7000 + index)
+        opening_deal = str(9000 + index * 2 - 1)
+        closing_deal = str(9000 + index * 2)
+        day = index + 4
+        open_time = f"2026.10.{day:02d} 04:20:40"
+        close_time = f"2026.10.{day:02d} 04:38:17"
+        rows.append([
+            open_time, position, symbol, side,
+            master_service._MT5HTMLCell(comment, {"class": "hidden", "colspan": "8"}),
+            0.11, entry, 0, 0, close_time, exit_price, -0.20, 0, profit,
+        ])
+        direction_out = "sell" if side == "buy" else "buy"
+        balance += profit - 0.20
+        deal_rows.extend([
+            [open_time, opening_deal, symbol, side, "in", 0.11, entry, position,
+             master_service._MT5HTMLCell("0", {"class": "hidden"}), -0.10, 0, 0, 0, balance - profit + 0.20],
+            [close_time, closing_deal, symbol, direction_out, "out", 0.11, exit_price, str(8000 + index),
+             master_service._MT5HTMLCell("0", {"class": "hidden"}), -0.10, 0, 0, profit, balance],
+        ])
+    rows.extend([
+        ["Deals"],
+        ["Time", "Deal", "Symbol", "Type", "Direction", "Volume", "Price", "Order", "Cost", "Commission", "Fee", "Swap", "Profit", "Balance"],
+        *deal_rows,
+        ["Balance", balance],
+    ])
+    return rows
 
 
 def _pepperstone_mt5_hidden_comment_html() -> bytes:
@@ -323,10 +352,13 @@ def _pepperstone_mt5_hidden_comment_html() -> bytes:
     for row in _pepperstone_mt5_hidden_comment_rows():
         cells = []
         for value in row:
-            if isinstance(value, str) and value.startswith("TDM:"):
-                cells.append('<td class="hidden" colspan="8">' + value + "</td>")
+            if isinstance(value, master_service._MT5HTMLCell):
+                attrs = " ".join(f'{key}="{item}"' for key, item in value.html_attributes.items())
+                cells.append(f"<td {attrs}>{value}</td>")
             else:
-                cells.append(f"<td>{value}</td>")
+                colspan = ' colspan="2"' if str(value).casefold() == "profit" else ""
+                hidden_cost = ' class="hidden"' if str(value).casefold() == "cost" else ""
+                cells.append(f"<td{hidden_cost}{colspan}>{value}</td>")
         rendered.append("<tr>" + "".join(cells) + "</tr>")
     return ("<html><body><table>" + "".join(rendered) + "</table></body></html>").encode("utf-16")
 
@@ -491,47 +523,55 @@ def test_pepperstone_mt5_native_html_and_xlsx_import_same_closed_positions(tmp_p
 
 def test_pepperstone_mt5_hidden_position_comment_falls_back_to_closed_deals():
     html_rows = master_service._mt5_html_rows(_pepperstone_mt5_hidden_comment_html())
+    metadata = master_service._mt5_statement_metadata(html_rows)
+    deal_baseline, baseline_warnings, baseline_open = master_service._mt5_deals_rows(html_rows, metadata)
     rows, balance = master_service._parse_pepperstone_mt5_rows([html_rows], source_kind="html")
 
     assert balance is not None
-    assert len(rows) == balance["_mt5_diagnostics"]["deals_closed_trades_imported"] == 2
+    assert len(rows) == balance["_mt5_diagnostics"]["deals_closed_trades_imported"] == len(deal_baseline) == 7
     diagnostics = balance["_mt5_diagnostics"]
     assert diagnostics["deals_section_used"] is True
-    assert diagnostics["summary_rows_recovered"] == 2
+    assert diagnostics["summary_rows_recovered"] == 7
     assert diagnostics["summary_rows_unresolved"] == 0
-    assert balance["_mt5_recovery_message"] == "Imported 2 closed trades from the report's Deals section. Recovered 2 summary rows affected by formatting."
+    assert balance["_mt5_recovery_message"] == f"Imported {len(deal_baseline)} closed trades from the report's Deals section. Recovered 7 summary rows affected by formatting."
     assert balance["_import_warnings"] == []
-    assert [row["id"].rsplit(":", 2)[-2] for row in rows] == ["closing-deals", "closing-deals"]
-    assert [row["raw_refs"]["opening_order_ids"] for row in rows] == [["7001"], ["7002"]]
-    assert [row["raw_refs"]["closing_deal_tickets"] for row in rows] == [["9002"], ["9012"]]
-    assert [row["symbol"] for row in rows] == ["GBPUSD", "EURGBP"]
-    assert [row["qty"] for row in rows] == pytest.approx([0.11, 0.11])
-    assert [row["entry_price"] for row in rows] == pytest.approx([1.32339, 0.84590])
-    assert [row["exit_price"] for row in rows] == pytest.approx([1.32358, 0.84550])
-    assert [row["open_time"] for row in rows] == ["2026-10-05T04:20:40", "2026-10-15T13:47:02"]
-    assert [row["close_time"] for row in rows] == ["2026-10-05T04:38:17", "2026-10-15T17:05:20"]
-    assert [row["net_profit"] for row in rows] == pytest.approx([2.23, -9.23])
-    assert [row["balance_after_trade"] for row in rows] == pytest.approx([50002.23, 49992.99])
-    assert balance["balance"] == pytest.approx(49992.99)
+    assert baseline_warnings == [] and baseline_open == 0
+    assert [row["id"] for row in rows] == [row["id"] for row in deal_baseline]
+    for field in ("symbol", "side", "qty", "entry_price", "exit_price", "open_time", "close_time",
+                  "commission", "fees", "swap", "net_profit", "balance_after_trade"):
+        assert [row[field] for row in rows] == [row[field] for row in deal_baseline]
+    for reference in ("opening_order_ids", "closing_deal_tickets", "position_ticket"):
+        assert [row["raw_refs"].get(reference) for row in rows] == [
+            row["raw_refs"].get(reference) for row in deal_baseline
+        ]
+    assert all(row["id"].rsplit(":", 2)[-2] == "closing-deals" for row in rows)
+    assert all(row["raw_refs"]["closing_deal_tickets"] for row in rows)
+    assert all(row["raw_refs"]["opening_order_ids"] for row in rows)
+    assert balance["balance"] == pytest.approx(50000.0 + sum(row["net_profit"] for row in rows))
 
 
 def test_pepperstone_mt5_malformed_position_close_is_ambiguous_not_open():
-    rows = _pepperstone_mt5_hidden_comment_rows()
+    rows = master_service._mt5_html_rows(_pepperstone_mt5_hidden_comment_html())
     deals_heading = rows.index(["Deals"])
     rows[deals_heading:deals_heading] = [
-        ["7003", "AUDJPY.a", "buy", "TDM:SYNTHETIC-UNMATCHED", 0.12, "2026.10.06 03:00:00", 98.10, 0, 0, "2026.10.06 03:30:00", 98.20, -0.20, 0, 1.00],
-        ["7004", "USDCHF.a", "sell", 0.20, "2026.10.06 04:00:00", 0.90000, 0, 0, "", "", 0, 0, 0],
+        ["2026.10.20 03:00:00", "7991", "AUDJPY.a", "buy", master_service._MT5HTMLCell("arbitrary", {"class": "hidden", "colspan": "8"}), 0.12, 98.10, 0, 0, "2026.10.20 03:30:00", 98.20, -0.20, 0, 1.00],
+        ["2026.10.20 04:00:00", "7992", "USDCHF.a", "sell", master_service._MT5HTMLCell("", {"class": "hidden", "colspan": "8"}), 0.20, 0.90000, 0, 0, "", "", 0, 0, 0],
+        ["2026.10.20 05:00:00", "7993", "GBPJPY.a", "buy", master_service._MT5HTMLCell("TDM:malformed", {"class": "hidden", "colspan": "8"}), 0.10, 190.0, 0, 0, "not-a-time", 190.1, 0, 0, 1.0],
+        # A second summary for a known opening order conflicts on quantity.
+        ["2026.10.05 04:20:40", "7001", "GBPUSD.a", "buy", master_service._MT5HTMLCell("Trader", {"class": "hidden", "colspan": "8"}), 0.99, 1.32339, 0, 0, "2026.10.05 04:38:17", 1.32358, -0.20, 0, 2.43],
     ]
-    trades, balance = master_service._parse_pepperstone_mt5_rows([rows], source_kind="xlsx")
+    trades, balance = master_service._parse_pepperstone_mt5_rows([rows], source_kind="html")
 
     assert balance is not None
-    assert len(trades) == 2
+    assert len(trades) == 7
     assert balance["_mt5_diagnostics"]["open_positions_skipped"] == 1
-    assert balance["_mt5_diagnostics"]["summary_rows_recovered"] == 2
-    assert balance["_mt5_diagnostics"]["summary_rows_unresolved"] == 1
-    assert any("unresolved_position_summary:7003:AUDJPY.a:no_position_or_opening_order_link" in warning for warning in balance["_import_warnings"])
+    assert balance["_mt5_diagnostics"]["summary_rows_recovered"] == 7
+    assert balance["_mt5_diagnostics"]["summary_rows_unresolved"] == 3
+    assert any("unresolved_position_summary:7991:AUDJPY.a:no_position_or_opening_order_link" in warning for warning in balance["_import_warnings"])
+    assert any("unresolved_position_summary:7993:GBPJPY.a:closing_time_invalid" in warning for warning in balance["_import_warnings"])
+    assert any("unresolved_position_summary:7001:GBPUSD.a:quantity_mismatch" in warning for warning in balance["_import_warnings"])
     assert "skipped_open_positions:1" in balance["_import_warnings"]
-    assert "Imported 2 closed trades from the report's Deals section. Recovered 2 summary rows affected by formatting." == balance["_mt5_recovery_message"]
+    assert "Imported 7 closed trades from the report's Deals section. Recovered 7 summary rows affected by formatting." == balance["_mt5_recovery_message"]
 
 
 def test_pepperstone_mt5_hidden_comment_reimport_preserves_manual_fields_and_identity(
@@ -553,7 +593,7 @@ def test_pepperstone_mt5_hidden_comment_reimport_preserves_manual_fields_and_ide
     payload = _pepperstone_mt5_hidden_comment_html()
     first = master_service._import_uploaded_trading_journal_file("pepperstone_live.html", payload)
     assert first["ok"] is True, first
-    assert first["informational_messages"] == ["Imported 2 closed trades from the report's Deals section. Recovered 2 summary rows affected by formatting."]
+    assert first["informational_messages"] == ["Imported 7 closed trades from the report's Deals section. Recovered 7 summary rows affected by formatting."]
     original = master_service._get_trading_journal_rows()
     trade = next(row for row in original if row.get("row_type") == "trade")
     original_id = trade["id"]
@@ -566,13 +606,13 @@ def test_pepperstone_mt5_hidden_comment_reimport_preserves_manual_fields_and_ide
     matching = [row for row in updated if row.get("id") == original_id]
 
     assert second["ok"] is True
-    assert second["rows_parsed"] == 2
+    assert second["rows_parsed"] == 7
     assert second["rows_upserted"] == 0
-    assert second["informational_messages"] == ["Imported 2 closed trades from the report's Deals section. Recovered 2 summary rows affected by formatting."]
+    assert second["informational_messages"] == ["Imported 7 closed trades from the report's Deals section. Recovered 7 summary rows affected by formatting."]
     assert len(matching) == 1
     assert matching[0]["notes"] == "manual synthetic note"
     assert matching[0]["pattern"] == "manual synthetic pattern"
-    assert matching[0]["raw_refs"]["closing_deal_tickets"] == ["9002"]
+    assert matching[0]["raw_refs"]["closing_deal_tickets"]
 
 
 def test_pepperstone_mt5_deals_orders_keep_opening_plan_and_funded_checkpoints():

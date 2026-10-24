@@ -1,3 +1,10 @@
+Pepperstone MT5 hidden-comment layout correction (2026-10-24)
+
+- HTML cells retain their attributes through row extraction. The Positions parser removes only the verified hidden colspan=8 comment immediately after Type and before Volume, regardless of comment text, while leaving hidden Deals Cost cells aligned. Normalized summaries still go through Deals recovery and unique opening-order provenance plus field consistency checks. Confirmed opens and unresolved/conflicting summaries remain distinct diagnostics.
+- One offline parse of the newer local report copy matched its two USDJPY Trader-comment rows and reported seven Deals-derived trades, seven recovered summaries, zero unresolved summaries, zero skipped opens and no warnings. Source: C:\Users\User\Dropbox\GPT-dropbox\ReportHistory-61583268 (2).html; SHA-256 de7e81fbf418cd1a80946355afb1eac63db2aa90fc87a75ab2753766656b8c91.
+- Regression fixture uses anonymized native header/cell order, mixed TDM/Trader comments, Profit colspan and aligned hidden Cost cells. The Deals baseline comparison covers IDs, provenance, timestamps, quantities, prices, commission, fees, swap, net P/L and balances; isolated reimport checks manual-field and ID preservation. The single three-node pytest invocation completed with JS runtime passed and both Python nodes failed because the synthetic Account login was nonnumeric; that fixture was corrected to a numeric anonymized login after the run, and no retry was permitted.
+- LTT must restart to load the updated Python service code.
+
 Pepperstone MT5 summary recovery diagnostics (2026-10-24)
 
 - The newer local report was validated once offline. Its seven Deals-derived closed trades include two formatting-affected Positions summaries; each summary ticket matched the Deals opening-order ID, and symbol, side, quantity, opening/closing times and prices agreed. Deals omit Position ID in this report. The implementation now tracks ambiguous summaries and claims recovery only for a unique provenance-linked, field-consistent Deals row. Unresolved summaries retain ticket/symbol/reason warnings; confirmed open positions remain warnings.
