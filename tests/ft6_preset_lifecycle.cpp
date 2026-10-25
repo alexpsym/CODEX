@@ -27,6 +27,12 @@ unsigned long __stdcall NoHistory(void*)
   Check(selectedTimeframe==Timeframe,"effective timeframe selected before history reads");
   return 0;
 }
+int __stdcall EmptyHistory(void*){return 0;}
+bool __stdcall EmptySelect(void*,int,int,int){return false;}
+int __stdcall EmptyInt(void*){return 0;}
+double __stdcall EmptyDate(void*){return 0;}
+PChar __stdcall EmptySymbol(void*){return (PChar)"EURUSD";}
+void __stdcall EmptyPause(void*,PChar){}
 void *Option(const char *prefix)
 {
   for(auto &entry:options) if(entry.first.find(prefix)==0) return entry.second.value;
@@ -71,7 +77,16 @@ int main(int argc,char **argv)
   IntrfProcsRec.Bars=NoHistory;
   InitStrategy();
   Check(messages.empty(),"DLL registration must not emit a stale diagnostic");
-  Check(runOptionCount==52&&options.size()==54,"all detailed options registered separately");
+  Check(runOptionCount==53&&options.size()==55,"all detailed options registered separately");
+  Check(MaximumCompletedStrategyTrades==100&&*(int*)Option("Maximum completed strategy trades")==100,"trade cap registered with default 100");
+  IntrfProcsRec.HistoryTotal=EmptyHistory;IntrfProcsRec.pHistoryTotal=(void*)1;
+  IntrfProcsRec.OrderSelect=EmptySelect;IntrfProcsRec.pOrderSelect=(void*)1;
+  IntrfProcsRec.OrderType=EmptyInt;IntrfProcsRec.pOrderType=(void*)1;
+  IntrfProcsRec.OrderTicket=EmptyInt;IntrfProcsRec.pOrderTicket=(void*)1;
+  IntrfProcsRec.OrderCloseTime=EmptyDate;IntrfProcsRec.pOrderCloseTime=(void*)1;
+  IntrfProcsRec.OrderSymbol=EmptySymbol;IntrfProcsRec.pOrderSymbol=(void*)1;
+  IntrfProcsRec.OrderMagicNumber=EmptyInt;IntrfProcsRec.pOrderMagicNumber=(void*)1;
+  IntrfProcsRec.Pause=EmptyPause;IntrfProcsRec.pPause=(void*)1;
   ReplaceStr(Currency,(PChar)"EURUSD");
 
   // Simulate FT6 supplying current project/dialog values AFTER ResetStrategy.
@@ -93,10 +108,12 @@ int main(int argc,char **argv)
   *(double*)Option("Impulse maximum body ATR")=2.25;
   *(double*)Option("With-trend / neutral target R")=4;
   *(double*)Option("Counter-trend target R")=5;
+  *(int*)Option("Maximum completed strategy trades")=17;
   *(int*)Option("Impulse entry mode")=1;
   auto custom=Values(true);
   TickOnce("RBP preset=Custom timeframe=30 setup=0 confirmation=2 direction=1 body=0.75-2.25ATR",1);
   Check(Values(false)==custom,"Custom must use every detailed value unchanged");
+  Check(MaximumCompletedStrategyTrades==17,"late-delivered Custom limit is applied");
   Check(messages.back().find("depth=20-70% depthMode=3")!=std::string::npos,"Custom diagnostic uses selected depth settings");
   Check(selectedTimeframe==*(int*)Option("Timeframe"),"Custom timeframe used on first tick");
 
@@ -158,6 +175,7 @@ int main(int argc,char **argv)
   Check(Timeframe==PERIOD_M5&&selectedTimeframe==PERIOD_M5,"preset 6 selects M5 before history access");
   Check(TradeDirection==1&&ImpulseEntryMode==1,"preset 6 explicitly selects buys-only first-touch mode");
   Check(Values(true)==custom,"preset 6 preserves every registered Custom value");
+  Check(MaximumCompletedStrategyTrades==17,"selected limit survives preset 6");
   auto preset6=Values(false);
   size_t directionIndex=EffectiveIndex(&TradeDirection);
   for(size_t i=0;i<preset5.size();i++) Check(preset5[i]==preset6[i]||(i==directionIndex&&preset6[i]==1&&preset5[i]==0),"preset 6 differs from preset 5 only by TradeDirection");
@@ -168,6 +186,7 @@ int main(int argc,char **argv)
   Check(TradeDirection==0,"restarting from preset 6 to 5 restores both directions");
   Check(Values(false)==preset5,"restart to preset 5 restores all its effective settings");
   Check(Values(true)==custom,"restart to preset 5 preserves Custom values");
+  Check(MaximumCompletedStrategyTrades==17,"selected limit survives preset 5");
   touchActive=true;touchLevel=1.1;touchActivationTick=12;tickSequence=13;
   touchPaths[0].complete=true;liveTouchPath.time=1;
   ResetStrategy();
@@ -176,17 +195,21 @@ int main(int argc,char **argv)
   Check(Values(false)==custom,"return to Custom restores every detailed value");
   Check(!touchActive&&touchLevel==0&&touchActivationTick==0&&tickSequence==3&&!touchPaths[0].complete&&liveTouchPath.time==0,"restart clears first-touch state and tick paths");
 
+  *(int*)Option("Maximum completed strategy trades")=0;
+  ResetStrategy();TickOnce("RBP preset=Custom timeframe=30 setup=0",10);
+  Check(MaximumCompletedStrategyTrades==0&&!tradeLimitBlocked,"zero remains unlimited in saved Custom settings");
+
   // Changed values during a run take effect on the next run, once.
   *(double*)Option("With-trend / neutral target R")=0.5;
   *(double*)Option("Counter-trend target R")=1;
   GetSingleTick();
-  Check(WithTrendNeutralTargetR==4&&CounterTrendTargetR==5&&messages.size()==9,"no repeated preset resolution on ticks");
+  Check(WithTrendNeutralTargetR==4&&CounterTrendTargetR==5&&messages.size()==10,"no repeated preset resolution on ticks");
   ResetStrategy();
-  TickOnce("RBP preset=Custom timeframe=30",10);
+  TickOnce("RBP preset=Custom timeframe=30",11);
   Check(WithTrendNeutralTargetR==2&&CounterTrendTargetR==3,"existing Custom target floors retained");
   Check(*(double*)Option("With-trend / neutral target R")==0.5&&*(double*)Option("Counter-trend target R")==1,"clamping does not overwrite Custom inputs");
   ResetStrategy();ResetStrategy();
-  TickOnce("RBP preset=Custom timeframe=30",11);
+  TickOnce("RBP preset=Custom timeframe=30",12);
   DoneStrategy();
   puts("PASS: preset lifecycle, late options, one diagnostic/run, all Custom values, targets, EMA, buys-only and M5 isolation");
 }

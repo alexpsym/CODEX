@@ -9,6 +9,8 @@ std::vector<std::string> markerLabels;double markerPrice=0;
 double bidQuote,askQuote,now,grid=0.0001,orderQuote,orderSL,orderTP;
 int attempts,orderType,selectedFrame,buyAttempts,sellAttempts;unsigned long historyBars=128;
 bool busy,orderResult;int orderTicket;
+struct HistoryRow{int type,ticket,magic;std::string symbol;double closeTime;};
+std::vector<HistoryRow> tradeHistory;int selectedHistory=-1,historyScans=0,pauseCalls=0;bool failHistorySelect=false;
 void Check(bool ok,const char *why){if(!ok){fprintf(stderr,"FAIL: %s\n",why);for(auto &s:logs)fprintf(stderr,"%s\n",s.c_str());exit(1);}}
 bool Near(double a,double b){return fabs(a-b)<1e-9;}
 bool Logged(const char *s){for(auto &v:logs)if(v.find(s)!=std::string::npos)return true;return false;}
@@ -30,7 +32,14 @@ double __stdcall AskQuote(void*){return askQuote;}
 double __stdcall Grid(void*){return grid;}
 int __stdcall Orders(void*){return busy?1:0;}
 bool __stdcall Select(void*,int,int,int){return busy;}
-int __stdcall Magic(void*){return MagicNumber;}
+int __stdcall Magic(void*){return selectedHistory>=0?tradeHistory[selectedHistory].magic:MagicNumber;}
+int __stdcall HistoryTotalMock(void*){return (int)tradeHistory.size();}
+bool __stdcall SelectHistory(void*,int index,int flags,int pool){if(pool==MODE_HISTORY&&flags==SELECT_BY_POS){historyScans++;if(failHistorySelect||index<0||index>=(int)tradeHistory.size())return false;selectedHistory=index;return true;}selectedHistory=-1;return busy;}
+int __stdcall HistoryTicket(void*){return selectedHistory>=0?tradeHistory[selectedHistory].ticket:orderTicket;}
+int __stdcall HistoryType(void*){return selectedHistory>=0?tradeHistory[selectedHistory].type:tp_Buy;}
+double __stdcall HistoryClose(void*){return selectedHistory>=0?tradeHistory[selectedHistory].closeTime:0;}
+PChar __stdcall HistorySymbol(void*){return selectedHistory>=0?(PChar)tradeHistory[selectedHistory].symbol.c_str():(PChar)"EURUSD";}
+void __stdcall PauseMock(void*,PChar){pauseCalls++;}
 unsigned long __stdcall IBars(void*,PChar,int){return 0;}
 bool __stdcall Exists(void*,PChar){return false;}
 bool __stdcall Create(void*,PChar name,int type,int,double,double price,double,double,double,double){Check(type==obj_Text,"supported text marker");if(strstr(name,"TOUCH"))markerPrice=price;return true;}
@@ -47,8 +56,11 @@ void Hooks()
   IntrfProcsRec.Symbol=Sym;IntrfProcsRec.SetCurrencyAndTimeframe=Frame;IntrfProcsRec.Bars=BarsCount;
   IntrfProcsRec.Open=O;IntrfProcsRec.High=H;IntrfProcsRec.Low=L;IntrfProcsRec.Close=C;IntrfProcsRec.Time=T;
   IntrfProcsRec.TimeCurrent=Now;IntrfProcsRec.pTimeCurrent=(void*)1;IntrfProcsRec.Bid=BidQuote;IntrfProcsRec.Ask=AskQuote;IntrfProcsRec.Point=Grid;
-  IntrfProcsRec.OrdersTotal=Orders;IntrfProcsRec.OrderSelect=Select;IntrfProcsRec.OrderMagicNumber=Magic;IntrfProcsRec.pOrderMagicNumber=(void*)1;
-  IntrfProcsRec.OrderSymbol=Sym;IntrfProcsRec.iBars=IBars;IntrfProcsRec.SendInstantOrder2=Send;
+  IntrfProcsRec.OrdersTotal=Orders;IntrfProcsRec.OrderSelect=SelectHistory;IntrfProcsRec.pOrderSelect=(void*)1;IntrfProcsRec.OrderMagicNumber=Magic;IntrfProcsRec.pOrderMagicNumber=(void*)1;
+  IntrfProcsRec.OrderSymbol=HistorySymbol;IntrfProcsRec.pOrderSymbol=(void*)1;IntrfProcsRec.HistoryTotal=HistoryTotalMock;IntrfProcsRec.pHistoryTotal=(void*)1;
+  IntrfProcsRec.OrderTicket=HistoryTicket;IntrfProcsRec.pOrderTicket=(void*)1;IntrfProcsRec.OrderType=HistoryType;IntrfProcsRec.pOrderType=(void*)1;
+  IntrfProcsRec.OrderCloseTime=HistoryClose;IntrfProcsRec.pOrderCloseTime=(void*)1;IntrfProcsRec.Pause=PauseMock;IntrfProcsRec.pPause=(void*)1;
+  IntrfProcsRec.iBars=IBars;IntrfProcsRec.SendInstantOrder2=Send;
   IntrfProcsRec.ObjectExists=Exists;IntrfProcsRec.ObjectCreate=Create;IntrfProcsRec.ObjectSetText=Text;IntrfProcsRec.pObjectCreate=(void*)1;IntrfProcsRec.pObjectSetText=(void*)1;
 }
 void Fresh()
@@ -56,7 +68,7 @@ void Fresh()
   ResetStrategy();SettingsPreset=5;ApplySettingsPreset();runSettingsResolved=true;EnableWeekendBlackout=false;
   now=46000.5;for(int i=0;i<128;i++)series[i]={1.20,1.2002,1.1998,1.20,now-i*5.0/1440};
   lastTime=series[0].t;nbar=10;atrCount=100;rmaATR=0.00206;RegimeLookback=1;AddATRPercent(0.1);
-  historyBars=128;bidQuote=1.21;askQuote=1.2102;busy=false;attempts=0;orderResult=true;orderTicket=42;
+  historyBars=128;tradeHistory.clear();selectedHistory=-1;historyScans=0;pauseCalls=0;failHistorySelect=false;MaximumCompletedStrategyTrades=100;bidQuote=1.21;askQuote=1.2102;busy=false;attempts=0;orderResult=true;orderTicket=42;
   logs.clear();markerLabels.clear();markerPrice=0;tickSequence=1;buyAttempts=sellAttempts=0;
 }
 void Remember(long bar,double endpoint,int direction,double adverse)
@@ -346,6 +358,65 @@ void DirectionFilteredLifecycle()
     Check(stage==0&&consumedBar==-1&&!touchActive&&!provisionalLong.active&&!provisionalShort.active&&!haveLatestSwingLow&&!haveLatestSwingHigh,"restart clears evidence without manufacturing eligible structure");
   }
 }
+void AddClosed(int ticket,int type=tp_Buy,int magic=26083001,const char *symbol="EURUSD",double close=46000.5)
+{tradeHistory.push_back(HistoryRow{type,ticket,magic,symbol,close});}
+void TradeLimitStop()
+{
+  Fresh();SettingsPreset=6;ApplySettingsPreset();runSettingsResolved=true;MaximumCompletedStrategyTrades=100;
+  for(int i=0;i<99;i++)AddClosed(1000+i,i%2?tp_Buy:tp_Sell);
+  // An open hundredth position is absent from MODE_HISTORY and must not stop
+  // the test or be force-closed by the strategy.
+  busy=true;GetSingleTick();Check(pauseCalls==0&&tradeHistory.size()==99&&attempts==0,"99 closed plus one open does not stop or close early");
+  busy=false;AddClosed(1099,tp_Sell);historyBars=128;series[0].t+=5.0/1440;GetSingleTick();
+  Check(pauseCalls==1&&tradeLimitBlocked&&Logged("completed=100 limit=100; test paused"),"trade 100 close pauses before strategy tick processing");
+  Check(attempts==0&&tradeHistory.size()==100,"trade 100 history retained and trade 101 not submitted");
+  size_t messages=logs.size();int scans=historyScans;
+  for(int i=0;i<4;i++){series[0].t+=5.0/1440;GetSingleTick();}
+  Check(pauseCalls==1&&logs.size()==messages&&attempts==0,"manual resume callbacks remain blocked without repeated notification");
+  Check(historyScans==scans,"unchanged stopped history is not rescanned");
+  Fresh(); // eligible-entry control: the fixture can submit below the cap.
+  Check(Enter(1,1,false,0)&&attempts==1,"eligible uncapped entry control submits normally");
+  for(int mode=0;mode<4;mode++)
+  {
+    Fresh();MaximumCompletedStrategyTrades=1;AddClosed(2000+mode);runSettingsResolved=true;
+    if(mode==0)SetupModeSetting=0;else if(mode==1)ImpulseEntryMode=0;else SetupModeSetting=1;
+    series[0].t+=5.0/1440;GetSingleTick();
+    int before=attempts;Check(pauseCalls==1&&attempts==before,"range/confirmation/first-touch dispatch boundaries block after threshold");
+  }
+}
+void TradeLimitHistory()
+{
+  Fresh();MaximumCompletedStrategyTrades=5;
+  AddClosed(1,tp_Buy);AddClosed(2,tp_Sell);AddClosed(3,tp_BuyLimit);AddClosed(4,tp_Credit);AddClosed(5,tp_Balance);
+  AddClosed(6,tp_Buy,999,"EURUSD");AddClosed(7,tp_Sell,MagicNumber,"GBPUSD");AddClosed(8,tp_Buy,MagicNumber,"EURUSD",0);
+  AddClosed(1,tp_Buy); // duplicate ticket is counted once
+  AddClosed(9,tp_Sell);AddClosed(10,tp_Buy); // SL/TP/normal closure all use closed market history
+  GetSingleTick();Check(pauseCalls==0&&cachedCompletedStrategyTrades==4,"filtered unique market closures counted, including sell and closed ticket");
+  orderResult=false;Check(Enter(1,1,false,0)&&attempts==1,"failed entry attempt is submitted below the cap");
+  Check(cachedCompletedStrategyTrades==4&&pauseCalls==0,"failed entry is not counted as a completed trade");
+  AddClosed(11,tp_Sell);GetSingleTick();Check(pauseCalls==1&&cachedCompletedStrategyTrades==5,"newly closed market ticket reaches the configured limit");
+  int scans=historyScans;GetSingleTick();GetSingleTick();Check(historyScans==scans,"no historical rescans on unchanged ticks");
+  Fresh();MaximumCompletedStrategyTrades=3;AddClosed(1);AddClosed(2);AddClosed(3);AddClosed(4);GetSingleTick();
+  Check(pauseCalls==1&&cachedCompletedStrategyTrades==4,"retained history already above limit pauses honestly");
+  Fresh();MaximumCompletedStrategyTrades=1;AddClosed(1);IntrfProcsRec.pPause=NULL;GetSingleTick();
+  Check(tradeLimitBlocked&&pauseCalls==0&&Logged("Pause API unavailable")&&attempts==0,"missing pause context reports failure and blocks entry");
+  IntrfProcsRec.pPause=(void*)1;
+  Fresh();MaximumCompletedStrategyTrades=1;AddClosed(1);failHistorySelect=true;GetSingleTick();
+  Check(tradeLimitBlocked&&pauseCalls==1&&Logged("history order selection failed")&&attempts==0,"history selection failure reports and pauses");
+}
+void TradeLimitControls()
+{
+  Fresh();Check(MaximumCompletedStrategyTrades==100,"default cap is 100");
+  MaximumCompletedStrategyTrades=0;IntrfProcsRec.pHistoryTotal=NULL;GetSingleTick();
+  Check(!tradeLimitBlocked&&pauseCalls==0,"zero bypasses cap/history API and stays unrestricted");
+  IntrfProcsRec.pHistoryTotal=(void*)1;
+  Fresh();MaximumCompletedStrategyTrades=7;AddClosed(10);GetSingleTick();
+  Check(!tradeLimitBlocked&&cachedCompletedStrategyTrades==1,"positive custom limit counts without stopping early");
+  AddClosed(11);ResetStrategy();SettingsPreset=6;ApplySettingsPreset();runSettingsResolved=true;GetSingleTick();
+  Check(cachedCompletedStrategyTrades==2&&MaximumCompletedStrategyTrades==7,"reset reconciles retained history and presets preserve selected limit");
+  Fresh();MaximumCompletedStrategyTrades=7;GetSingleTick();
+  Check(cachedCompletedStrategyTrades==0&&!tradeLimitBlocked,"genuine empty history restart starts at zero");
+}
 int main(int argc,char **argv)
 {
   if(argc!=2){fprintf(stderr,"One named case required\n");return 2;}Hooks();InitStrategy();ReplaceStr(Currency,(PChar)"EURUSD");
@@ -357,6 +428,7 @@ int main(int argc,char **argv)
   else if(name=="order_failure")OrderFailure();else if(name=="frozen_brackets")Brackets();
   else if(name=="legacy_confirmation_entries")LegacyEntries();else if(name=="parent_ownership")Ownership();
   else if(name=="direction_filtered_lifecycle")DirectionFilteredLifecycle();
+  else if(name=="trade_limit_stop")TradeLimitStop();else if(name=="trade_limit_history")TradeLimitHistory();else if(name=="trade_limit_controls")TradeLimitControls();
   else{fprintf(stderr,"Unknown case: %s\n",argv[1]);return 2;}
   DoneStrategy();printf("PASS: %s\n",argv[1]);
 }

@@ -73,7 +73,7 @@ Adaptive ATR stops, actual-entry bracket rounding, fixed preset size **0.01 lots
 Expected initialization for preset 5:
 
 ```text
-RBP preset=M5 first-touch ATR timeframe=5 setup=1 confirmation=0 direction=0 body=1.00-1.50ATR depth=0-50% depthMode=1 stop=adaptive targets=2.0/3.0R EMAtrend=off scope=0 entryMode=first-touch-ATR touchATR=0.50 presetId=5
+RBP preset=M5 first-touch ATR timeframe=5 setup=1 confirmation=0 direction=0 body=1.00-1.50ATR depth=0-50% depthMode=1 stop=adaptive targets=2.0/3.0R EMAtrend=off scope=0 entryMode=first-touch-ATR touchATR=0.50 presetId=5 maxCompletedTrades=100
 ```
 
 The synthetic seam `tests/ft6_first_touch.cpp` accepts exactly one named case; it has no default suite. The existing lifecycle seam requires `preset_lifecycle`. Exact selected commands and build/deployment evidence are recorded in `summary/CODEX_SUMMARY_latest.txt`. These checks establish causal mechanics and preservation, not profitability or live chart acceptance.
@@ -81,8 +81,16 @@ The synthetic seam `tests/ft6_first_touch.cpp` accepts exactly one named case; i
 Expected initialization for preset 6:
 
 ```text
-RBP preset=M5 first-touch ATR buys-only timeframe=5 setup=1 confirmation=0 direction=1 body=1.00-1.50ATR depth=0-50% depthMode=1 stop=adaptive targets=2.0/3.0R EMAtrend=off scope=0 entryMode=first-touch-ATR touchATR=0.50 presetId=6
+RBP preset=M5 first-touch ATR buys-only timeframe=5 setup=1 confirmation=0 direction=1 body=1.00-1.50ATR depth=0-50% depthMode=1 stop=adaptive targets=2.0/3.0R EMAtrend=off scope=0 entryMode=first-touch-ATR touchATR=0.50 presetId=6 maxCompletedTrades=100
 ```
+
+### Automatic stop after completed trades
+
+`Maximum completed strategy trades (0 unlimited)` is an independent run control with a default of `100`. Presets, including preset 6, leave the selected value intact. Set it to `0` for an unrestricted run. Negative values are rejected and block entries.
+
+FT6 pauses automatically when the number of completed market tickets in the current project history reaches or exceeds the limit. The count includes buys and sells matching the effective `Currency` and `Magic number`; each closed ticket counts once. Deposits/credits, pending orders, open positions, failed submissions and other symbols or magic numbers do not count. SL/TP and other normal exits count after the platform records the closed trade. Retained history is recounted after strategy reset, so reinitializing does not grant another 100 trades. Trade 100 closes through its ordinary exit and the paused project retains its chart, account history and statistics.
+
+To export the run, use FT6's normal report/statistics area or Results context menu and select **Save as Report** or **Save as Detailed Report** when available. Leave the test running; FT6 pauses after the matching completed-trade limit.
 
 ### Dry run and review
 

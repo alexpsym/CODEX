@@ -21,6 +21,7 @@ int PullbackDepthMode=0;
 double ShallowMinimumDepth=0,ShallowMaximumDepth=50,DeepMinimumDepth=50,DeepMaximumDepth=100,CustomMinimumDepth=0,CustomMaximumDepth=100;
 double InvalidationToleranceATR=0.25; int MaximumPullbackBars=30;
 int Confirmation=1, MinorSwingStrength=2, StopModeSetting=0, ATRLength=14;
+int MaximumCompletedStrategyTrades=100;
 double FixedATRMultiplier=1.5; int RegimeLookback=200;
 double LowRegimePercentile=33,HighRegimePercentile=67,LowVolatilityMultiplier=1,NormalVolatilityMultiplier=1.5,HighVolatilityMultiplier=2;
 double WithTrendNeutralTargetR=2.0,CounterTrendTargetR=3.0;
@@ -37,6 +38,9 @@ struct RunOption
 };
 RunOption runOptions[64]; int runOptionCount=0;
 bool runSettingsResolved=false;
+bool tradeLimitBlocked=false,tradeLimitNotificationSent=false,tradeHistoryCacheValid=false;
+int cachedCompletedStrategyTrades=0,cachedHistoryTotal=-1;
+void PauseForTradeLimit(const char *reason);
 void RegRunOption(PChar name,TOptionType type,void *effective)
 {
   // The fixed registration list below contains fewer than 64 detailed options.
@@ -166,7 +170,7 @@ void EmitPresetDiagnostic()
   double lo=PullbackDepthMode==1?ShallowMinimumDepth:PullbackDepthMode==2?DeepMinimumDepth:PullbackDepthMode==3?CustomMinimumDepth:0;
   double hi=PullbackDepthMode==1?ShallowMaximumDepth:PullbackDepthMode==2?DeepMaximumDepth:PullbackDepthMode==3?CustomMaximumDepth:100;
   sprintf(text,"RBP preset=%s timeframe=%d setup=%d confirmation=%d direction=%d body=%.2f-%.2fATR depth=%.0f-%.0f%% depthMode=%d stop=%s targets=%.1f/%.1fR EMAtrend=%s scope=%d",name,Timeframe,SetupModeSetting,Confirmation,TradeDirection,ImpulseMinimumBodyATR,ImpulseMaximumBodyATR,Min(lo,hi),Max(lo,hi),PullbackDepthMode,StopModeSetting==0?"adaptive":"fixed",WithTrendNeutralTargetR,CounterTrendTargetR,ImpulseM15H4TrendFilter!=0?"on":"off",TrendFilterScope);
-  sprintf(text+strlen(text)," entryMode=%s touchATR=%.2f presetId=%d",ImpulseEntryMode==1?"first-touch-ATR":"confirmation",ImpulseMinimumRetracementATR,SettingsPreset);
+  sprintf(text+strlen(text)," entryMode=%s touchATR=%.2f presetId=%d maxCompletedTrades=%d",ImpulseEntryMode==1?"first-touch-ATR":"confirmation",ImpulseMinimumRetracementATR,SettingsPreset,MaximumCompletedStrategyTrades);
   Print((PChar)text);
 }
 void ResolveRunSettings()
@@ -174,7 +178,86 @@ void ResolveRunSettings()
   if(runSettingsResolved) return;
   LoadCustomSettings(); ApplySettingsPreset(); ClampTargetSettings();
   runSettingsResolved=true;
+  if(MaximumCompletedStrategyTrades<0)PauseForTradeLimit("Maximum completed strategy trades must be 0 or greater");
   EmitPresetDiagnostic();
+}
+bool StrategyTradeHistoryReady()
+{
+  return IntrfProcsRec.HistoryTotal&&IntrfProcsRec.pHistoryTotal&&
+    IntrfProcsRec.OrderSelect&&IntrfProcsRec.pOrderSelect&&
+    IntrfProcsRec.OrderType&&IntrfProcsRec.pOrderType&&
+    IntrfProcsRec.OrderTicket&&IntrfProcsRec.pOrderTicket&&
+    IntrfProcsRec.OrderCloseTime&&IntrfProcsRec.pOrderCloseTime&&
+    IntrfProcsRec.OrderSymbol&&IntrfProcsRec.pOrderSymbol&&
+    IntrfProcsRec.OrderMagicNumber&&IntrfProcsRec.pOrderMagicNumber;
+}
+void PauseForTradeLimit(const char *reason)
+{
+  tradeLimitBlocked=true;
+  if(tradeLimitNotificationSent)return;
+  char text[256];
+  if(reason)sprintf(text,"RBP auto-stop failure: %s; entries blocked",reason);
+  else sprintf(text,"RBP auto-stop: completed=%d limit=%d; test paused",cachedCompletedStrategyTrades,MaximumCompletedStrategyTrades);
+  if(IntrfProcsRec.Pause&&IntrfProcsRec.pPause)
+  {
+    Pause((PChar)"");
+    EmitStatus((PChar)text);
+  }
+  else
+  {
+    if(reason)sprintf(text,"RBP auto-stop failure: %s; Pause API unavailable, entries blocked",reason);
+    else sprintf(text,"RBP auto-stop failure: completed=%d limit=%d; Pause API unavailable, entries blocked",cachedCompletedStrategyTrades,MaximumCompletedStrategyTrades);
+    EmitStatus((PChar)text);
+  }
+  tradeLimitNotificationSent=true;
+}
+int CompareTradeTickets(const void *left,const void *right)
+{
+  int a=*(const int*)left,b=*(const int*)right;
+  return a<b?-1:a>b?1:0;
+}
+bool ReconcileCompletedStrategyTrades()
+{
+  if(MaximumCompletedStrategyTrades==0)return true;
+  if(MaximumCompletedStrategyTrades<0){PauseForTradeLimit("invalid negative trade limit");return false;}
+  if(!StrategyTradeHistoryReady()){PauseForTradeLimit("required history API/context unavailable");return false;}
+  int total=HistoryTotal();
+  if(total<0){PauseForTradeLimit("HistoryTotal returned an invalid count");return false;}
+  if(tradeHistoryCacheValid&&total==cachedHistoryTotal)return true;
+  if(total>0)
+  {
+    if((unsigned long)total>0x3fffffffUL){PauseForTradeLimit("history count exceeds safe reconciliation size");return false;}
+    int *tickets=(int*)malloc(sizeof(int)*(size_t)total);
+    if(!tickets){PauseForTradeLimit("unable to allocate history reconciliation buffer");return false;}
+    int collected=0;
+    for(int i=0;i<total;i++)
+    {
+      if(!OrderSelect(i,SELECT_BY_POS,MODE_HISTORY)){free(tickets);PauseForTradeLimit("history order selection failed");return false;}
+      int type=(int)OrderType(),ticket=OrderTicket();
+      if((type!=tp_Buy&&type!=tp_Sell)||ticket<0||OrderCloseTime()<=0||!OrderSymbol()||
+        strcmp(OrderSymbol(),Currency)!=0||OrderMagicNumber()!=MagicNumber)continue;
+      tickets[collected++]=ticket;
+    }
+    qsort(tickets,(size_t)collected,sizeof(int),CompareTradeTickets);
+    int count=0;for(int i=0;i<collected;i++)if(i==0||tickets[i]!=tickets[i-1])count++;
+    free(tickets);cachedCompletedStrategyTrades=count;
+  }
+  else cachedCompletedStrategyTrades=0;
+  // History selection and live-order selection share one SDK cursor. Leave it
+  // on the open-order pool before any later position-management call.
+  if(IntrfProcsRec.OrdersTotal&&IntrfProcsRec.pOrdersTotal)
+    for(int i=0;i<OrdersTotal();i++)OrderSelect(i,SELECT_BY_POS,MODE_TRADES);
+  cachedHistoryTotal=total;tradeHistoryCacheValid=true;
+  return true;
+}
+bool CheckTradeLimit()
+{
+  if(tradeLimitBlocked)return false;
+  if(MaximumCompletedStrategyTrades==0)return true;
+  if(!ReconcileCompletedStrategyTrades())return false;
+  if(cachedCompletedStrategyTrades>=MaximumCompletedStrategyTrades)
+  {PauseForTradeLimit(NULL);return false;}
+  return true;
 }
 bool StrategyPositionOpen();
 bool RiskReady(double &mult);
@@ -560,6 +643,7 @@ void AddClusters()
 bool RangeReady(){if(stage||rCount<MinimumReactions||sCount<MinimumReactions)return false;long duration=Max(rLast,sLast)-Min(rFirst,sFirst);return resistance-support>=rmaATR*MinimumRangeHeightATR&&duration>=MinimumRangeBars&&duration<=MaximumRangeBars;}
 bool Enter(int d,double mult,const bool impulseTrade,const int structuralTrend,const bool checkedTouch=false)
 {
+  if(tradeLimitBlocked||!CheckTradeLimit())return false;
   ClampTargetSettings(); int relation=structuralTrend==0?0:((d==1&&structuralTrend==1)||(d==-1&&structuralTrend==-1)?1:-1);
   double targetR=impulseTrade&&relation==-1?CounterTrendTargetR:WithTrendNeutralTargetR;
   targetR=relation==-1?Max(3.0,targetR):Max(2.0,targetR);
@@ -896,7 +980,7 @@ EXPORT void __stdcall InitStrategy()
  StrategyShortName((PChar)"Range Breakout-Pullback"); StrategyDescription((PChar)"Closed-bar TradingView range breakout-pullback port");
  RegOption((PChar)"Settings preset (0 Custom, 1 Baseline, 2 Trend-filter test, 3 Baseline buys-only, 4 M5 Baseline, 5 M5 first-touch ATR, 6 M5 first-touch ATR buys-only)",ot_Integer,&SettingsPreset);
  AddSeparator((PChar)"General execution/setup");
- RegOption((PChar)"Currency",ot_Currency,&Currency);RegRunOption((PChar)"Timeframe",ot_TimeFrame,&Timeframe);RegRunOption((PChar)"Trade direction (0 both,1 buys only,2 sells only)",ot_Integer,&TradeDirection);AddOptionValue((PChar)"Trade direction (0 both,1 buys only,2 sells only)",(PChar)"0 = Both directions");AddOptionValue((PChar)"Trade direction (0 both,1 buys only,2 sells only)",(PChar)"1 = Buys only");AddOptionValue((PChar)"Trade direction (0 both,1 buys only,2 sells only)",(PChar)"2 = Sells only");RegRunOption((PChar)"Setup mode (0 range, 1 impulse)",ot_Integer,&SetupModeSetting);RegRunOption((PChar)"Volume lots",ot_Double,&VolumeLots);RegRunOption((PChar)"Magic number",ot_Integer,&MagicNumber);
+ RegOption((PChar)"Currency",ot_Currency,&Currency);RegRunOption((PChar)"Timeframe",ot_TimeFrame,&Timeframe);RegRunOption((PChar)"Trade direction (0 both,1 buys only,2 sells only)",ot_Integer,&TradeDirection);AddOptionValue((PChar)"Trade direction (0 both,1 buys only,2 sells only)",(PChar)"0 = Both directions");AddOptionValue((PChar)"Trade direction (0 both,1 buys only,2 sells only)",(PChar)"1 = Buys only");AddOptionValue((PChar)"Trade direction (0 both,1 buys only,2 sells only)",(PChar)"2 = Sells only");RegRunOption((PChar)"Maximum completed strategy trades (0 unlimited)",ot_Integer,&MaximumCompletedStrategyTrades);RegRunOption((PChar)"Setup mode (0 range, 1 impulse)",ot_Integer,&SetupModeSetting);RegRunOption((PChar)"Volume lots",ot_Double,&VolumeLots);RegRunOption((PChar)"Magic number",ot_Integer,&MagicNumber);
  AddSeparator((PChar)"Confirmation");
  RegRunOption((PChar)"Confirmation (0 aggressive,1 balanced,2 conservative)",ot_Integer,&Confirmation);RegRunOption((PChar)"Minor swing strength",ot_Integer,&MinorSwingStrength);
  AddSeparator((PChar)"Range-mode settings");
@@ -913,16 +997,18 @@ EXPORT void __stdcall InitStrategy()
  AddSeparator((PChar)"Diagnostics");
  RegRunOption((PChar)"Show blackout status",ot_Boolean,&ShowBlackoutStatus);RegRunOption((PChar)"Show diagnostics",ot_Boolean,&ShowDiagnostics);
 }
-EXPORT void __stdcall DoneStrategy(){free(Currency);free(atrPct);atrPct=NULL;atrPctCapacity=atrPctCount=atrPctNext=0;} EXPORT void __stdcall ResetStrategy(){runSettingsResolved=false;tickSequence=0;touchPathNext=0;memset(touchPaths,0,sizeof(touchPaths));memset(&liveTouchPath,0,sizeof(liveTouchPath));memset(&closedTouchPath,0,sizeof(closedTouchPath));lastTime=0;nbar=0;rmaATR=0;atrCount=atrPctCount=atrPctNext=0;lastDiagnostic[0]=0;previousSwingHigh=latestSwingHigh=previousSwingLow=latestSwingLow=0;previousSwingHighBar=latestSwingHighBar=previousSwingLowBar=latestSwingLowBar=-1;previousSwingHighTime=latestSwingHighTime=previousSwingLowTime=latestSwingLowTime=0;havePreviousSwingHigh=haveLatestSwingHigh=havePreviousSwingLow=haveLatestSwingLow=false;consumedDirection=0;consumedExtreme=0;consumedBar=-1;ResetSetup();ClearClusters();}
+EXPORT void __stdcall DoneStrategy(){free(Currency);free(atrPct);atrPct=NULL;atrPctCapacity=atrPctCount=atrPctNext=0;} EXPORT void __stdcall ResetStrategy(){runSettingsResolved=false;tradeLimitBlocked=false;tradeLimitNotificationSent=false;tradeHistoryCacheValid=false;cachedCompletedStrategyTrades=0;cachedHistoryTotal=-1;tickSequence=0;touchPathNext=0;memset(touchPaths,0,sizeof(touchPaths));memset(&liveTouchPath,0,sizeof(liveTouchPath));memset(&closedTouchPath,0,sizeof(closedTouchPath));lastTime=0;nbar=0;rmaATR=0;atrCount=atrPctCount=atrPctNext=0;lastDiagnostic[0]=0;previousSwingHigh=latestSwingHigh=previousSwingLow=latestSwingLow=0;previousSwingHighBar=latestSwingHighBar=previousSwingLowBar=latestSwingLowBar=-1;previousSwingHighTime=latestSwingHighTime=previousSwingLowTime=latestSwingLowTime=0;havePreviousSwingHigh=haveLatestSwingHigh=havePreviousSwingLow=haveLatestSwingLow=false;consumedDirection=0;consumedExtreme=0;consumedBar=-1;ResetSetup();ClearClusters();}
 EXPORT void __stdcall GetSingleTick()
 {
   ResolveRunSettings();if(!Currency||strcmp(Currency,Symbol())!=0)return;
   SetCurrencyAndTimeframe(Currency,Timeframe);tickSequence++;
+  if(!CheckTradeLimit())return;
   unsigned long bars=Bars();
   if(FirstTouchMode()&&bars>0)ObserveTouchPath();
   bool historyReady=bars>=Max(ATRLength,RegimeLookback)+Max(PivotStrength,MinorSwingStrength)+5;
-  if(!historyReady){ProcessFirstTouchTick(false);return;}
+  if(!historyReady){ProcessFirstTouchTick(false);if(!CheckTradeLimit())return;return;}
   TDateTime t=Time(0);
   if(t!=lastTime){lastTime=t;ProcessBar();}
   else ProcessFirstTouchTick(true);
+  if(!CheckTradeLimit())return;
 }
