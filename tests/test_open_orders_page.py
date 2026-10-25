@@ -232,7 +232,8 @@ const flush=async()=>{for(let i=0;i<5;i++)await new Promise(resolve=>setImmediat
       assert(cell(row,'Stop Loss').textContent.includes('(planned)'));
       assert(cell(row,'Take Profit').textContent.includes('(planned)'));
       const market=cell(row,'Order Type').textContent==='Market';
-      assert.strictEqual(cell(row,'Entry / Order').textContent,market?'Unknown (awaiting MT5 fill)':'1.2 (planned)');
+      assert(cell(row,'Entry / Order').textContent.includes(market?'Unknown (awaiting MT5 fill)':'1.2 (planned)'));
+      assert.strictEqual(walk(cell(row,'Entry / Order')).some(e=>e.tag==='button'&&e.textContent==='Record MT5 fill'),market);
       if(market)assert.strictEqual(cell(row,'Status').textContent,'Awaiting MT5 fill price');
       assert(!walk(row).some(e=>e.tag==='button'&&['Close','Cancel','Amend','\u270e'].includes(e.textContent)));
     }
@@ -476,6 +477,244 @@ const flush=async()=>{for(let i=0;i<5;i++)await new Promise(resolve=>setImmediat
 '''
     result = subprocess.run([node, "-e", harness, str(ROOT / "render/static/open_orders.js")],
         input=json.dumps({"data": data, "headers": headers}), capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.fixture
+def _pepperstone_fill_state(_pepperstone_removal_state):
+    service, base, target, calls, reads = _pepperstone_removal_state
+    market = dict(base, calculation_context_id="market", order_type="market", planned_entry_price="1.10000",
+                  planned_stop_price="1.09900", planned_target_price="1.10200", original_stop_distance="0.00100",
+                  original_target_distance="0.00200", chart_tick_size="0.0001", calculator_distance_tick_size="0.0001",
+                  stop_loss_ticks="10", target_mode="rr", risk_reward="2", quantity="1000", planned_quantity_estimate="1000")
+    service._upsert_calculator_trade_context(market)
+    def request(price="1.10234", revision=0, context_id="market", account="demo"):
+        return {**target(context_id, account), "fill_price": price, "revision": revision}
+    return service, market, target, request, calls, reads
+
+
+def test_pepperstone_local_market_fill_is_scoped_durable_and_preserves_distances(_pepperstone_fill_state):
+    from decimal import Decimal
+    service, market, target, request, calls, reads = _pepperstone_fill_state
+    async def scenario():
+        async def snapshot():
+            return json.loads((await service.list_open_orders()).body)
+        try:
+            await snapshot()
+            job = service._OPEN_ORDERS_SERVICES[asyncio.get_running_loop()].job
+            await _open_orders_eventually(lambda: all(s["task"] is None for s in job.sources.values()))
+            before = await snapshot()
+            contexts = service._load_calculator_trade_contexts()
+            original = next(c for c in contexts if c["calculation_context_id"] == "market")
+            result = json.loads((await service.record_pepperstone_local_fill(request())).body)
+            row = result["item"]
+            assert result["revision"] == row["manual_fill_revision"] == 1
+            assert (row["entry_price"], row["stop_loss"], row["take_profit"]) == ("1.10234", "1.10134", "1.10434")
+            assert row["local_mt5_fill"]["provenance"] == "manual_mt5" and row["local_mt5_fill"]["recorded_at"]
+            assert row["execution_verified"] is False and row["quantity_is_estimate"] is True
+            assert row["current_price"] is None and row["actual_pnl"] is None
+            assert "recorded manually" in row["status"] and "local tracking" in row["status"]
+            saved = next(c for c in service._load_calculator_trade_contexts() if c["calculation_context_id"] == "market")
+            assert {k: v for k, v in saved.items() if k != "local_mt5_fill"} == original
+            assert [c for c in contexts if c["calculation_context_id"] != "market"] == [c for c in service._load_calculator_trade_contexts() if c["calculation_context_id"] != "market"]
+            after = await snapshot()
+            assert job is service._OPEN_ORDERS_SERVICES[asyncio.get_running_loop()].job and reads == ["source"]
+            assert after["version"] == before["version"] and after["progress_revision"] > before["progress_revision"]
+            assert after["errors"] == before["errors"] and after["source_counts"] == before["source_counts"]
+            corrected = json.loads((await service.record_pepperstone_local_fill(request("1.10345", 1))).body)["item"]
+            assert (corrected["stop_loss"], corrected["take_profit"]) == ("1.10245", "1.10545")
+            assert Decimal(corrected["entry_price"]) - Decimal(corrected["stop_loss"]) == Decimal("0.00100")
+            # A stale calculator replay cannot replace the recorded bundle or its original distances.
+            service._upsert_calculator_trade_context(dict(market, original_stop_distance="9", original_target_distance="8",
+                local_mt5_fill={"revision": 0, "price": "99", "stop_price": "98", "target_price": "100"}))
+            replayed = next(c for c in service._load_calculator_trade_contexts() if c["calculation_context_id"] == "market")
+            assert replayed["local_mt5_fill"]["revision"] == 2 and replayed["original_stop_distance"] == "0.00100"
+            assert replayed["original_target_distance"] == "0.00200"
+            # Sell / ticks / JPY: valid fractional prices are not rounded to the chart tick.
+            yen = dict(market, calculation_context_id="yen-sell", instrument="USD_JPY", side="sell", target_mode="ticks",
+                       planned_entry_price="150.123", planned_stop_price="150.173", planned_target_price="150.023",
+                       original_stop_distance="0.050", original_target_distance="0.100", stop_loss_ticks="5", take_profit_ticks="10")
+            service._upsert_calculator_trade_context(yen)
+            yen_row = json.loads((await service.record_pepperstone_local_fill(request("150.127", 0, "yen-sell"))).body)["item"]
+            assert (yen_row["entry_price"], yen_row["stop_loss"], yen_row["take_profit"]) == ("150.127", "150.177", "150.027")
+            live = json.loads((await service.record_pepperstone_local_fill(request("1.10555", 0, "shared", "live"))).body)["item"]
+            assert live["account"] == "live" and live["manual_fill_revision"] == 1
+            assert not next(c for c in service._load_calculator_trade_contexts() if c["calculation_context_id"] == "shared" and c["account"] == "demo").get("local_mt5_fill")
+            await service._shutdown_open_orders_jobs()
+            service._TRADE_CONTEXTS_CACHE.clear()
+            service._PEPPERSTONE_QUOTE_SNAPSHOTS.clear()
+            loaded = await snapshot()
+            row = next(r for r in loaded["items"] if r["id"] == target("market")["id"])
+            assert row["manual_fill_revision"] == 2 and row["entry_price"] == "1.10345" and row["stop_loss"] == "1.10245"
+            await service.remove_pepperstone_local_tracking(target("market"))
+            service._upsert_calculator_trade_context(market)
+            assert not any(r["id"] == target("market")["id"] for r in service._pepperstone_local_tracker_rows())
+            with pytest.raises(service.HTTPException) as error:
+                await service.record_pepperstone_local_fill(request("1.2", 2))
+            assert error.value.status_code == 409
+        finally:
+            await service._shutdown_open_orders_jobs()
+    asyncio.run(asyncio.wait_for(scenario(), 20))
+    assert calls == []
+
+
+def test_pepperstone_local_market_fill_rejects_invalid_stale_and_failed_saves(_pepperstone_fill_state, monkeypatch):
+    service, market, target, request, calls, reads = _pepperstone_fill_state
+    async def scenario():
+        initial = service.TRADE_CONTEXTS_PATH.read_bytes()
+        invalid = [request(value) for value in (None, "", "   ", "abc", True, False, "NaN", "Infinity", "-Infinity", "0", "-1", "1_2", [], {})]
+        invalid += [dict(request(), stop_price="1"), dict(request(), original_stop_distance="1"), dict(request(), revision=True),
+                    dict(request(), revision=-1), dict(request(), revision="0"), dict(request(), account="live"),
+                    dict(request(), id="pepperstone-local:demo:shared"), request(context_id="missing"),
+                    request(context_id="shared"), request(context_id="unrelated"), request(context_id="historical")]
+        for payload in invalid:
+            with pytest.raises(service.HTTPException):
+                await service.record_pepperstone_local_fill(payload)
+            assert service.TRADE_CONTEXTS_PATH.read_bytes() == initial
+        contexts = service._load_calculator_trade_contexts()
+        for changes in ({"original_stop_distance": None}, {"original_target_distance": "0"}, {"original_stop_distance": "0.5"}, {"side": "unknown"}):
+            altered = [dict(c, **changes) if c["calculation_context_id"] == "market" else c for c in contexts]
+            service._save_calculator_trade_contexts(altered)
+            before = service.TRADE_CONTEXTS_PATH.read_bytes()
+            with pytest.raises(service.HTTPException) as error:
+                await service.record_pepperstone_local_fill(request())
+            assert error.value.status_code == 422 and service.TRADE_CONTEXTS_PATH.read_bytes() == before
+        service._save_calculator_trade_contexts(contexts)
+        with pytest.raises(service.HTTPException) as error:
+            await service.record_pepperstone_local_fill(request("0.0001"))
+        assert error.value.status_code == 422  # Nonpositive derived buy stop.
+        duplicate = next(c for c in contexts if c["calculation_context_id"] == "market")
+        service._save_calculator_trade_contexts(contexts + [dict(duplicate, account_id="another")])
+        with pytest.raises(service.HTTPException) as error:
+            await service.record_pepperstone_local_fill(request())
+        assert error.value.status_code == 409
+        service._save_calculator_trade_contexts(contexts)
+        first = json.loads((await service.record_pepperstone_local_fill(request())).body)
+        persisted = service.TRADE_CONTEXTS_PATH.read_bytes()
+        with pytest.raises(service.HTTPException) as error:
+            await service.record_pepperstone_local_fill(request("1.2", 0))
+        assert error.value.status_code == 409 and service.TRADE_CONTEXTS_PATH.read_bytes() == persisted
+        cached = service._pepperstone_local_tracker_rows()
+        version = service._OPEN_ORDERS_CACHE["version"]
+        def fail(*args, **kwargs):
+            raise OSError("fixture disk failure")
+        with monkeypatch.context() as patch:
+            patch.setattr(service, "_save_calculator_trade_contexts", fail)
+            with pytest.raises(service.HTTPException) as error:
+                await service.record_pepperstone_local_fill(request("1.2", first["revision"]))
+            assert error.value.status_code == 500 and "unchanged" in error.value.detail
+        assert service.TRADE_CONTEXTS_PATH.read_bytes() == persisted
+        assert service._pepperstone_local_tracker_rows() == cached and service._OPEN_ORDERS_CACHE["version"] == version
+    asyncio.run(asyncio.wait_for(scenario(), 15))
+    assert calls == [] and reads == []
+
+
+def test_pepperstone_local_market_fill_editor_saves_and_preserves_local_removal(_pepperstone_fill_state):
+    service, market, target, request, calls, reads = _pepperstone_fill_state
+    async def snapshots():
+        async def snapshot():
+            return json.loads((await service.list_open_orders()).body)
+        try:
+            await snapshot()
+            job = service._OPEN_ORDERS_SERVICES[asyncio.get_running_loop()].job
+            await _open_orders_eventually(lambda: all(s["task"] is None for s in job.sources.values()))
+            data = {"before": await snapshot()}
+            for revision, price in enumerate(("1.10234", "1.10345", "1.10456", "1.10567", "1.10678")):
+                data[f"ack{revision+1}"] = json.loads((await service.record_pepperstone_local_fill(request(price, revision))).body)
+                data[f"snapshot{revision+1}"] = await snapshot()
+            data["remove_ack"] = json.loads((await service.remove_pepperstone_local_tracking(target("market"))).body)
+            data["removed"] = await snapshot()
+            return data
+        finally:
+            await service._shutdown_open_orders_jobs()
+    data = asyncio.run(asyncio.wait_for(snapshots(), 20))
+    assert calls == [] and reads == ["source"]
+    node = shutil.which("node")
+    assert node
+    headers = re.findall(r"<th>(.*?)</th>", service.OPEN_ORDERS_TEMPLATE)
+    harness = r'''
+const fs=require('fs'),assert=require('assert');
+class Element {
+  constructor(tag=''){this.tag=tag;this.children=[];this.parentNode=null;this.style={};this._text='';this.dataset={};this.handlers={};this.disabled=false;}
+  set textContent(v){this.innerHTML='';this._text=String(v);} get textContent(){return this._text+this.children.map(c=>c.textContent).join('');}
+  set innerHTML(v){this.children.forEach(c=>c.parentNode=null);this.children=[];this._text=String(v);}
+  appendChild(c){this.insertBefore(c,null);return c;}
+  insertBefore(c,b){if(c===b)return;if(c.parentNode)c.remove();this.children.splice(b?this.children.indexOf(b):this.children.length,0,c);c.parentNode=this;}
+  remove(){if(this.parentNode){const p=this.parentNode;p.children.splice(p.children.indexOf(this),1);this.parentNode=null;}}
+  addEventListener(e,f){this.handlers[e]=f;} setAttribute(k,v){this[k]=v;} querySelector(){return null;}
+  click(){return this.disabled?undefined:this.handlers.click?.();} focus(){document.activeElement=this;}
+}
+const {data,headers}=JSON.parse(fs.readFileSync(0,'utf8'));let current=data.before,mode='fail',queuedAck,release;
+const tbody=new Element('tbody'),table=new Element('table');table.querySelector=()=>tbody;
+const elements={'open-orders-table':table};for(const id of ['open-orders-status','open-orders-empty','refresh-btn','open-orders-errors','open-orders-warnings'])elements[id]=new Element();
+global.window={__OPEN_ORDERS_TESTING__:true,addEventListener(){}};
+global.document={hidden:false,getElementById:id=>elements[id]||null,createElement:t=>new Element(t),addEventListener(){}};
+global.BroadcastChannel=undefined;global.setInterval=()=>1;global.clearInterval=()=>{};
+const requests=[],posts=[];const reply=(body,status=200)=>({ok:status===200,status,text:async()=>JSON.stringify(body)});
+global.fetch=async(url,opts={})=>{
+  requests.push(url);
+  if(opts.method==='POST'){
+    const body=JSON.parse(opts.body);posts.push({url,body});
+    if(url==='/api/open-orders/local-tracking/remove'){current=data.removed;return reply(data.remove_ack);}
+    assert.strictEqual(url,'/api/open-orders/local-tracking/fill');
+    assert.deepStrictEqual(Object.keys(body).sort(),['account','calculation_context_id','fill_price','id','revision']);
+    if(mode==='fail')return reply({detail:'Fixture disk failure; saved tracking values unchanged. Retry.'},500);
+    const ack=queuedAck;await new Promise(resolve=>release=resolve);return reply(ack);
+  }
+  assert(url==='/api/open-orders'||url==='/api/open-orders/version');
+  return reply(url.includes('/version')?{version:current.version,progress_revision:current.progress_revision}:current);
+};
+eval(fs.readFileSync(process.argv[1],'utf8'));
+const walk=e=>[e,...e.children.flatMap(walk)],cell=(row,label)=>row.children[headers.indexOf(label)];
+const find=(root,text)=>walk(root).find(e=>e.tag==='button'&&e.textContent===text);
+const plan=(type,account='demo')=>tbody.children.find(row=>cell(row,'Type').textContent===type&&cell(row,'Account').textContent===account);
+const market=()=>plan('Market plan'),entry=()=>cell(market(),'Entry / Order'),input=()=>walk(entry()).find(e=>e.tag==='input');
+const change=value=>{const el=input();el.value=value;el.handlers.input();};
+const flush=async()=>{for(let i=0;i<5;i++)await new Promise(resolve=>setImmediate(resolve));};
+const checkLocal=price=>{
+  assert(entry().textContent.includes(price+' (manual MT5 fill)'));
+  assert(cell(market(),'Stop Loss').textContent.includes('(local tracking; not sent to MT5)'));
+  assert(cell(market(),'Take Profit').textContent.includes('(local tracking; not sent to MT5)'));
+  assert(cell(market(),'Status').textContent.includes('MT5 fill recorded manually'));
+  assert(find(cell(market(),'Action'),'Remove from LTT'));
+  assert(!walk(cell(market(),'Action')).some(e=>['Close','Cancel','Amend'].includes(e.textContent)));
+};
+(async()=>{
+  await flush();const hooks=window.__openOrdersTestHooks;
+  assert(entry().textContent.includes('Unknown (awaiting MT5 fill)'));
+  assert(!find(cell(plan('Limit plan'),'Entry / Order'),'Record MT5 fill'));
+  find(entry(),'Record MT5 fill').click();const originalInput=input();
+  assert(originalInput['aria-label'].includes('Actual MT5 market fill'));change('1.10234');
+  await hooks.refresh('progress');assert.strictEqual(input(),originalInput);assert.strictEqual(document.activeElement,originalInput);assert.strictEqual(input().value,'1.10234');
+  await find(entry(),'Save MT5 fill').click();
+  assert.strictEqual(input(),originalInput);assert.strictEqual(input().value,'1.10234');assert(!find(entry(),'Save MT5 fill').disabled);
+  assert(entry().textContent.includes('Fixture disk failure'));assert(cell(market(),'Stop Loss').textContent.includes('1.09900 (planned)'));
+  mode='hold';queuedAck=data.ack1;const saving=find(entry(),'Save MT5 fill').click();await flush();
+  assert(input().disabled&&find(entry(),'Save MT5 fill').disabled);find(entry(),'Save MT5 fill').click();assert.strictEqual(posts.length,2);
+  await hooks.refresh('progress');assert.strictEqual(input(),originalInput);assert(input().disabled);
+  current=data.snapshot1;release();await saving;checkLocal('1.10234');
+  assert(cell(market(),'Stop Loss').textContent.includes('1.10134'));assert(cell(market(),'Take Profit').textContent.includes('1.10434'));
+  current=data.before;await hooks.refresh('progress');checkLocal('1.10234'); // Stale snapshot cannot undo saved fill.
+  find(entry(),'Correct MT5 fill').click();change('1.10345');queuedAck=data.ack2;
+  const late=find(entry(),'Save MT5 fill').click();await flush();const heldInput=input();
+  current=data.snapshot3;await hooks.pollVersion();assert.strictEqual(input(),heldInput);assert.strictEqual(input().value,'1.10345');
+  release();await late;checkLocal('1.10456'); // Delayed revision 2 cannot revert revision 3.
+  find(entry(),'Correct MT5 fill').click();change('1.10600');const draft=input();
+  current=data.snapshot4;await hooks.pollVersion();
+  assert.strictEqual(input(),draft);assert.strictEqual(input().value,'1.10600');assert.strictEqual(document.activeElement,draft);
+  assert(find(entry(),'Save MT5 fill').disabled);assert(entry().textContent.includes('changed'));
+  await find(entry(),'Reload saved fill').click();assert.strictEqual(input().value,'1.10567');change('1.10678');
+  queuedAck=data.ack5;const removedDuringSave=find(entry(),'Save MT5 fill').click();await flush();
+  await find(cell(market(),'Action'),'Remove from LTT').click();assert(!market());
+  release();await removedDuringSave;assert(!market()); // A late successful fill response cannot resurrect removal.
+  await hooks.pollVersion();assert(!market());assert(plan('Limit plan'));assert(plan('Market plan','live'));
+  assert.deepStrictEqual(posts.filter(p=>p.url.endsWith('/fill')).map(p=>p.body.revision),[0,0,1,4]);
+  assert(!requests.some(url=>/amend|verify-action|close|calculator|force=1/.test(url)));
+  console.log('Manual fill draft/focus, corrections, durable responses, stale protection, errors and local removal passed');
+})().catch(e=>{console.error(e);process.exit(1);});
+'''
+    result = subprocess.run([node, "-e", harness, str(ROOT / "render/static/open_orders.js")],
+        input=json.dumps({"data": data, "headers": headers}), capture_output=True, text=True, timeout=20)
     assert result.returncode == 0, result.stdout + result.stderr
 
 

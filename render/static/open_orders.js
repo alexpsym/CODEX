@@ -206,6 +206,59 @@
       if(Object.prototype.hasOwnProperty.call(item,key))entry.item[key]=item[key];
     }
   };
+  const localFillFields=['manual_fill_revision','manual_fill_price','local_mt5_fill','entry_price','execution_price','stop_loss','take_profit','status','execution_status'];
+  const preferNewerLocalFill=(item,previous)=>{
+    if(item?.local_tracking&&previous?.local_tracking&&item.id===previous.id&&Number(item.manual_fill_revision||0)<Number(previous.manual_fill_revision||0)){
+      return {...item,...Object.fromEntries(localFillFields.map(key=>[key,previous[key]]))};
+    }
+    return item;
+  };
+  const updateLocalFillCell=(entry,state)=>{
+    const d=state.manualDraft;if(!d)return;
+    if(!d.pending&&Number(entry.item.manual_fill_revision||0)!==d.revision){d.conflict=true;d.message='MT5 fill changed. Reload the saved fill before correcting it; your draft is retained.';}
+    state.fillInput.disabled=d.pending;
+    state.fillSave.disabled=!entry.present||d.pending||d.conflict||!d.dirty;
+    state.fillCancel.disabled=d.pending;state.fillReload.disabled=d.pending||!entry.present;
+    state.fillReload.hidden=!d.conflict;state.fillFeedback.textContent=d.message||'';
+  };
+  const saveLocalFillCell=async(entry,state)=>{
+    const d=state.manualDraft;if(!d||d.pending||state.fillSave.disabled)return;
+    d.pending=true;d.message='Saving local MT5 fill...';updateLocalFillCell(entry,state);
+    const body={id:entry.item.id,account:entry.item.account,calculation_context_id:entry.item.calculation_context_id,
+      fill_price:state.fillInput.value,revision:d.revision};
+    try{
+      const response=await fetch('/api/open-orders/local-tracking/fill',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+      const text=await response.text(),data=text?JSON.parse(text):{};
+      if(!response.ok){if(response.status===409)d.conflict=true;throw new Error(parseApiError(data,response));}
+      if(data.ok!==true||data.item?.id!==body.id||Number(data.item.manual_fill_revision)!==Number(data.revision)||Number(data.revision)<=d.revision)throw new Error('Save was not confirmed. Reload the saved fill before retrying.');
+      state.manualDraft=null;
+      // A removal or a newer publication may have arrived while this request was in flight.
+      if(entry.present){
+        const item=preferNewerLocalFill(data.item,entry.item);
+        render((window.__openOrdersItems||[]).map(row=>rowKey(row)===rowKey(item)?item:row),window.__openOrdersErrors||[],window.__openOrdersWarnings||[]);
+      }
+      setBadge('MT5 fill recorded manually. SL/TP are local tracking only; manage MT5 orders in MT5.');
+      broadcastStateChange({action:'local-fill',broker:entry.item.broker,account:entry.item.account,calculation_context_id:entry.item.calculation_context_id});
+    }catch(err){
+      d.message=safeDiagnostic(err?.message||err,'Could not save. Keep the draft and retry.');
+    }finally{d.pending=false;if(state.manualDraft===d)updateLocalFillCell(entry,state);}
+  };
+  const openLocalFillCell=(entry,state)=>{
+    if(state.manualDraft||!entry.present)return;
+    const d=state.manualDraft={revision:Number(entry.item.manual_fill_revision||0),pending:false,dirty:false,conflict:false,message:''};
+    state.td.innerHTML='';
+    const label=document.createElement('span');label.textContent='Actual MT5 market fill: ';state.td.appendChild(label);
+    const input=state.fillInput=document.createElement('input');input.type='text';input.inputMode='decimal';input.value=entry.item.manual_fill_price||'';
+    input.setAttribute('aria-label','Actual MT5 market fill price (local tracking only)');state.td.appendChild(input);
+    input.addEventListener('input',()=>{d.dirty=input.value!==String(entry.item.manual_fill_price||'');if(!d.conflict)d.message='';updateLocalFillCell(entry,state);});
+    state.fillSave=button('Save MT5 fill',()=>saveLocalFillCell(entry,state));
+    state.fillCancel=button('Discard draft',()=>{if(d.pending)return;state.manualDraft=null;renderPriceCell(entry,state);});
+    state.fillReload=button('Reload saved fill',async()=>{if(d.pending)return;await refresh('progress');if(!entry.present||refreshNeedsRecovery)return;state.manualDraft=null;openLocalFillCell(entry,state);});
+    for(const el of [state.fillSave,state.fillCancel,state.fillReload])state.td.appendChild(el);
+    const note=document.createElement('span');note.textContent='Local tracking only. SL/TP are not sent to MT5.';state.td.appendChild(note);
+    state.fillFeedback=document.createElement('span');state.fillFeedback.setAttribute('role','status');state.td.appendChild(state.fillFeedback);
+    updateLocalFillCell(entry,state);input.focus?.();
+  };
   const updatePriceCell=(entry,state)=>{
     const d=state.draft;if(!d)return;
     const p=entry.item.price_edit;
@@ -220,14 +273,19 @@
     state.feedback.textContent=d.message||'';
   };
   const renderPriceCell=(entry,state)=>{
+    if(entry.item.local_tracking&&state.manualDraft){updateLocalFillCell(entry,state);return;}
     if(state.draft){updatePriceCell(entry,state);return;}
     state.td.innerHTML='';
     if(entry.item.local_tracking){
       const item=entry.item;
       const planned=state.field==='entry'?item.planned_entry_price:state.field==='stop_loss'?item.planned_stop_price:item.planned_target_price;
       const text=document.createElement('span');
-      text.textContent=state.field==='entry'&&String(item.order_type).toLowerCase()==='market'?'Unknown (awaiting MT5 fill)':`${fmt(planned)} (planned)`;
-      state.td.appendChild(text);return;
+      const market=String(item.order_type).toLowerCase()==='market';
+      text.textContent=market&&item.manual_fill_price?(state.field==='entry'?`${item.manual_fill_price} (manual MT5 fill)`:`${fmt(item[state.field])} (local tracking; not sent to MT5)`)
+        :state.field==='entry'&&market?'Unknown (awaiting MT5 fill)':`${fmt(planned)} (planned)`;
+      state.td.appendChild(text);
+      if(state.field==='entry'&&market&&entry.present){const edit=button(item.manual_fill_price?'Correct MT5 fill':'Record MT5 fill',()=>openLocalFillCell(entry,state));edit.setAttribute('aria-label','Record or correct actual MT5 market fill; local tracking only');state.td.appendChild(edit);}
+      return;
     }
     const p=entry.item.price_edit,value=p?.levels?.[state.field]??(state.field==='entry'?(entry.item.entry_price||entry.item.order_price):entry.item[state.field]);
     if(state.saved&&state.savedValue!==value)state.saved=false;
@@ -389,8 +447,9 @@
     state.feedback=document.createElement('span');state.feedback.className='classification-feedback';state.feedback.setAttribute('role','status');state.td.appendChild(state.feedback);
     updateCellAvailability(entry,state);select.focus?.();
   };
-  const rowValues = item => [item.venue||item.broker,resolveAccountLabel(item),item.asset,item.category,item.side,item.order_type,item.instrument,item.stop_loss_ticks,item.target_mode_display,item.take_profit_ticks,item.risk_mode_display,item.risk_value_display,item.risk_reward,item.timeframe,item.is_test_trade,item.setup,item.pattern,item.ema,item.vwap,item.aths_atls,item.round_number,item.webhook_mode,item.webhook_status,item.webhook_classification,item.planned_entry_price,item.planned_stop_price,item.planned_target_price,item.type,item.quantity_is_estimate?`${item.size??''} (est.)`:item.size,item.local_tracking?'':(item.entry_price||item.order_price),item.current_price,item.stop_loss,item.take_profit,item.leverage,item.type==='Position'?item.funding_paid:null,item.type==='Position'?item.funding_received:null,item.type==='Position'?item.net_funding:null,formatTimestamp(item.opened_at),item.status];
+  const rowValues = item => [item.venue||item.broker,resolveAccountLabel(item),item.asset,item.category,item.side,item.order_type,item.instrument,item.stop_loss_ticks,item.target_mode_display,item.take_profit_ticks,item.risk_mode_display,item.risk_value_display,item.risk_reward,item.timeframe,item.is_test_trade,item.setup,item.pattern,item.ema,item.vwap,item.aths_atls,item.round_number,item.webhook_mode,item.webhook_status,item.webhook_classification,item.planned_entry_price,item.planned_stop_price,item.planned_target_price,item.type,item.quantity_is_estimate?`${item.size??''} (est.)`:item.size,item.local_tracking?item.manual_fill_price:(item.entry_price||item.order_price),item.current_price,item.stop_loss,item.take_profit,item.leverage,item.type==='Position'?item.funding_paid:null,item.type==='Position'?item.funding_received:null,item.type==='Position'?item.net_funding:null,formatTimestamp(item.opened_at),item.status];
   const render=(items,errors=[],warnings=[],coverage=window.__openOrdersCoverage||{})=>{
+    items=items.map(item=>preferNewerLocalFill(item,classificationRows.get(classificationKey(item))?.item));
     window.__openOrdersItems=Array.isArray(items)?items:[];window.__openOrdersErrors=Array.isArray(errors)?errors:[];window.__openOrdersWarnings=Array.isArray(warnings)?warnings:[];
     if(!tbody)return;hasData=Boolean(items.length);renderDiagnostics(errorsBox,errorsList,errors,'Source errors');renderDiagnostics(warningsBox,warningsList,warnings,'Source warnings');
     for(const entry of classificationRows.values())entry.present=false;
