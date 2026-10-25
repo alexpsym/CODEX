@@ -9,6 +9,8 @@
   const warningsBox = document.getElementById('open-orders-warnings');
   const warningsList = warningsBox?.querySelector('ul');
   const pendingManualActions = new Map();
+  const localRemovalStates = new Map();
+  const localRemovalDescription = 'Removes local tracking only. Manage MT5 orders in MT5.';
   const pendingVisibilityChecks = new Map();
   const VERIFY_SCHEDULE_MS = [300, 700, 1500, 3000, 3000];
   // This bounds only a snapshot transport request, never acceptance of broker work.
@@ -101,7 +103,7 @@
     }finally{clearTimeout(timer);}
   };
   const resolveAccountLabel=(row)=>{const parts=[]; const account=String(row?.account||'').trim(); const accountId=String(row?.account_id||'').trim(); const suffix=String(row?.account_label_suffix||'').trim(); if(account) parts.push(account); if(accountId) parts.push(accountId); if(suffix) parts.push(suffix); return parts.join(' · ')||'—';};
-  const isActionableRow=(row)=>{if(!row||typeof row!=='object') return false; if(row.parent_id||row.parent_order_id) return false; const status=String(row.status||'').toLowerCase(); if(status.includes('bounce waiting')) return false; const type=String(row.type||'').toLowerCase(); return type==='order'||type==='position'||type==='trade'||type==='webhook';};
+  const isActionableRow=(row)=>{if(!row||typeof row!=='object'||row.local_tracking||String(row.broker||'').toLowerCase()==='pepperstone') return false; if(row.parent_id||row.parent_order_id) return false; const status=String(row.status||'').toLowerCase(); if(status.includes('bounce waiting')) return false; const type=String(row.type||'').toLowerCase(); return type==='order'||type==='position'||type==='trade'||type==='webhook';};
   const actionLabelFor=(row)=>{const type=String(row?.type||'').toLowerCase(); if(type==='order'||type==='webhook') return 'Cancel'; if(type==='position'||type==='trade') return 'Close'; return null;};
   const broadcastStateChange=(event)=>{
     const safeEvent={...event,type:'state-changed',eventId:String(event?.eventId||`${Date.now()}-${Math.random().toString(16).slice(2)}`),submittedAt:Number(event?.submittedAt||Date.now())};
@@ -142,7 +144,41 @@
       pendingManualActions.delete(key); btn.disabled = false; btn.textContent = prev; setBadge(safeDiagnostic(err?.message||err,'Action failed'));
     }
   };
-  const renderActionCell=(row,cell,{allowAction=true}={})=>{const label=actionLabelFor(row); if(!allowAction||!label||!isActionableRow(row)){cell.textContent='—';return;} const required=['broker','account','category','instrument','id','type']; const missing=required.some((k)=>!String(row[k]??'').trim()); if(missing){cell.textContent='—';return;} const key=rowKey(row); const state=pendingManualActions.get(key); if(state&&['submitting','accepted_verifying'].includes(state.verifyStatus)){cell.textContent='Verifying...'; return;} const btn=document.createElement('button'); btn.type='button'; btn.className='action-btn'; btn.textContent=label; btn.addEventListener('click',()=>postClose(row,btn)); cell.appendChild(btn);};
+  const postLocalRemoval=async(row,btn)=>{
+    const key=rowKey(row);if(localRemovalStates.get(key)?.pending)return;
+    localRemovalStates.set(key,{pending:true});btn.disabled=true;btn.textContent='Removing...';
+    try{
+      const response=await fetch('/api/open-orders/local-tracking/remove',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({id:row.id,account:row.account,calculation_context_id:row.calculation_context_id})});
+      const text=await response.text(),data=text?JSON.parse(text):{};
+      if(!response.ok)throw new Error(parseApiError(data,response));
+      if(data.ok!==true||data.removed!==true||data.id!==row.id)throw new Error('Local removal was not confirmed. Reload and retry.');
+      localRemovalStates.delete(key);
+      render((window.__openOrdersItems||[]).filter(item=>rowKey(item)!==key),window.__openOrdersErrors||[],window.__openOrdersWarnings||[]);
+      setBadge('Removed from LTT. '+localRemovalDescription);
+      broadcastStateChange({action:'local-tracking-remove',broker:row.broker,account:row.account,calculation_context_id:row.calculation_context_id});
+    }catch(err){
+      const message='Remove from LTT failed: '+safeDiagnostic(err?.message||err,'Request failed; retry.');
+      localRemovalStates.set(key,{pending:false,error:message});
+      render(window.__openOrdersItems||[],window.__openOrdersErrors||[],window.__openOrdersWarnings||[]);
+      setBadge(message);
+    }
+  };
+  const renderActionCell=(row,cell,{allowAction=true}={})=>{
+    const local=row.local_tracking===true&&String(row.broker||'').toLowerCase()==='pepperstone'
+      &&['demo','live'].includes(row.account)&&row.calculation_context_id
+      &&row.id===`pepperstone-local:${row.account}:${row.calculation_context_id}`
+      &&['limit','market'].includes(String(row.order_type||'').toLowerCase());
+    if(allowAction&&local){
+      const state=localRemovalStates.get(rowKey(row)),btn=document.createElement('button');
+      btn.type='button';btn.className='action-btn';btn.textContent=state?.pending?'Removing...':'Remove from LTT';btn.disabled=Boolean(state?.pending);
+      btn.title=localRemovalDescription;btn.setAttribute('aria-label','Remove from LTT. '+localRemovalDescription);
+      btn.addEventListener('click',()=>postLocalRemoval(row,btn));cell.appendChild(btn);
+      if(state?.error){const error=document.createElement('span');error.setAttribute('role','alert');error.textContent=state.error;cell.appendChild(error);}
+      return;
+    }
+    const label=actionLabelFor(row); if(!allowAction||!label||!isActionableRow(row)){cell.textContent='—';return;} const required=['broker','account','category','instrument','id','type']; const missing=required.some((k)=>!String(row[k]??'').trim()); if(missing){cell.textContent='—';return;} const key=rowKey(row); const state=pendingManualActions.get(key); if(state&&['submitting','accepted_verifying'].includes(state.verifyStatus)){cell.textContent='Verifying...'; return;} const btn=document.createElement('button'); btn.type='button'; btn.className='action-btn'; btn.textContent=label; btn.addEventListener('click',()=>postClose(row,btn)); cell.appendChild(btn);
+  };
   const classificationOptions = {
     timeframe: ['','1m','5m','15m','30m','1h','4h','1d','1w','1mo'],
     setup: ['','Pullback','Breakout','News Scalp'], pattern: ['','range','channel'],

@@ -22507,7 +22507,7 @@ def _prune_trade_contexts(items: List[Dict[str, object]]) -> List[Dict[str, obje
     for entry in items:
         status = str(entry.get("status") or "").strip().upper()
         updated_at = _parse_iso_datetime(entry.get("updated_at") or entry.get("closed_at"))
-        if status in {"CLOSED", "CANCELLED"} and updated_at and updated_at < cutoff and not entry.get("early_trade_folder_request") and not entry.get("classification_overrides"):
+        if status in {"CLOSED", "CANCELLED"} and updated_at and updated_at < cutoff and not entry.get("early_trade_folder_request") and not entry.get("classification_overrides") and not entry.get("local_tracking_removed_at"):
             continue
         kept.append(entry)
     return kept
@@ -22686,6 +22686,8 @@ def _upsert_trade_context(payload: Dict[str, object]) -> Dict[str, object]:
                     merged[k] = v
 
         for k, v in merged_payload.items():
+            if k == "local_tracking_removed_at" and merged.get(k):
+                continue  # Local removal is permanent across calculator replay/update.
             if k in {"classification_overrides", "classification_version"}:
                 continue  # Only the version-checked metadata route owns this overlay.
             if k == "early_trade_folder_request" and merged.get(k):
@@ -36961,6 +36963,7 @@ def _pepperstone_local_tracker_rows():
     for ctx in _load_calculator_trade_contexts():
         if (str(ctx.get("broker") or "").lower() != "pepperstone"
                 or ctx.get("local_tracking") is not True
+                or ctx.get("local_tracking_removed_at")
                 or ctx.get("local_tracking_kind") != "pepperstone_calculator"):
             continue
         cid = str(ctx.get("calculation_context_id") or "").strip()
@@ -37002,6 +37005,54 @@ def _pepperstone_local_tracker_rows():
         row["venue"] = "Pepperstone (local MT5)"
         rows[row["id"]] = row
     return list(rows.values())
+
+
+@_context_transaction
+def _remove_pepperstone_local_tracking(payload):
+    if not isinstance(payload, dict) or set(payload) != {"id", "account", "calculation_context_id"}:
+        raise HTTPException(400, "Exact local row identity and account are required.")
+    account, context_id, row_id = (payload.get(key) for key in ("account", "calculation_context_id", "id"))
+    if (not isinstance(account, str) or account not in {"demo", "live"} or not isinstance(context_id, str)
+            or not context_id or context_id != context_id.strip()
+            or row_id != f"pepperstone-local:{account}:{context_id}"):
+        raise HTTPException(400, "Local row identity does not match its context and account.")
+    items = _load_calculator_trade_contexts()
+    matches = [(index, ctx) for index, ctx in enumerate(items)
+               if str(ctx.get("broker") or "").lower() == "pepperstone"
+               and ctx.get("account") == account
+               and ctx.get("calculation_context_id") == context_id
+               and ctx.get("local_tracking") is True
+               and ctx.get("local_tracking_kind") == "pepperstone_calculator"
+               and str(ctx.get("order_type") or "").lower() in {"limit", "market"}]
+    if not matches:
+        raise HTTPException(404, "Local Pepperstone tracking context not found.")
+    if len(matches) != 1:
+        raise HTTPException(409, "Local tracking identity is ambiguous; no context was changed.")
+    index, context = matches[0]
+    already_removed = bool(context.get("local_tracking_removed_at"))
+    if not already_removed:
+        # Copy the record: a failed atomic save must leave cached contexts unchanged.
+        items[index] = dict(context, local_tracking_removed_at=_utc_now_iso())
+        _save_calculator_trade_contexts(items)
+    return {"ok": True, "removed": True, "already_removed": already_removed, **payload}
+
+
+@app.post("/api/open-orders/local-tracking/remove")
+async def remove_pepperstone_local_tracking(payload: Dict[str, object] = Body(...)) -> JSONResponse:
+    if APP_PROFILE == "render":
+        return _local_only_disabled_response("/api/open-orders/local-tracking/remove", as_json=True)
+    try:
+        result = _remove_pepperstone_local_tracking(payload)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(500, "Could not save local tracking removal. The row has been retained; retry.") from exc
+    service = _OPEN_ORDERS_SERVICES.get(asyncio.get_running_loop())
+    if service and service.job and service.job.authoritative:
+        service.job.publish()  # Metadata-only publication; no broker collection or mutation.
+    else:
+        _invalidate_open_orders_cache()
+    return JSONResponse(result)
 
 
 class _OpenOrdersJob:

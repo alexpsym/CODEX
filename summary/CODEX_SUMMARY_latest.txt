@@ -1,3 +1,28 @@
+JOB 3C - Persistent removal of local Pepperstone tracker plans
+Implementation and focused verification complete; scoped delivery prepared.
+
+- Added Remove from LTT in the existing Action column for both local Pepperstone limit and market plans. Its accessible label/title says: Removes local tracking only. Manage MT5 orders in MT5.
+- The button disables while the request is pending. Only an acknowledged durable server save removes the selected row. Errors retain the row and display a useful per-row alert and status message; retry stays available.
+- Added POST /api/open-orders/local-tracking/remove. It accepts only the exact row ID, account and calculation_context_id, resolves server-held Pepperstone calculator records, rejects unknown/mismatched/unrelated/ambiguous targets and treats repeated valid removal as idempotent.
+- Saves local_tracking_removed_at through the existing context transaction and atomic store. Retains the context, status, references, original distances and classification metadata. Normal context replay cannot clear an existing removal marker; new calculation IDs remain eligible.
+- Removed contexts are omitted from the existing publisher and retained against lifecycle pruning. Active tracker jobs publish a metadata revision without restarting broker readers. Other rows, diagnostics and broker exposure counts are preserved.
+- No broker execution/export/quote calls are added. Broker Cancel, Close and Amend remain unavailable for these plans. Jobs 4 and 5 remain separate.
+
+Targeted verification (one pytest invocation, three selected node executions, no retries):
+- tests/test_open_orders_page.py::test_pepperstone_local_tracking_removal_is_scoped_durable_and_idempotent - PASSED.
+- tests/test_open_orders_page.py::test_pepperstone_local_tracking_removal_rejects_invalid_targets_and_save_failures - PASSED.
+- tests/test_open_orders_page.py::test_pepperstone_local_tracking_remove_button_updates_and_reports_errors - PASSED.
+- Final process exit 0; pytest: 3 passed in 18.59 seconds.
+- Retained verbose log, JUnit and process/exit record: .job3c_verify_20261025_01/pytest.log, results.xml, process.json.
+- All contexts, caches and locks isolated; mocked external sources and backup scheduling. Browser snapshots passed through stdin. Node timeout 15 seconds; pytest timeout 180 seconds.
+- No production-data operations, real row removals, broker operations, application restarts or subagents. Previous Job 3/3A/3B budgets and results remain recorded below and were not rerun.
+- Commit scope: render/master_service.py, render/static/open_orders.js, tests/test_open_orders_page.py and this initially clean summary. Unrelated work and runtime data are excluded.
+
+LTT needs restarting to load the Python service and updated static asset. No restart was performed.
+Pending manual check (not performed by Codex): Select the existing EURUSD test limit row's Remove from LTT button. Confirm only that row disappears, stays absent after reload, and the market row still shows Awaiting MT5 fill price. This removes local tracking only; manage MT5 orders in MT5.
+
+Previous committed summary (preserved):
+
 JOB 3 / JOB 3A / JOB 3B — Pepperstone local tracker persistence
 Status: Targeted verification passed; scoped delivery prepared.
 

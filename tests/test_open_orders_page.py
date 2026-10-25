@@ -248,6 +248,237 @@ const flush=async()=>{for(let i=0;i<5;i++)await new Promise(resolve=>setImmediat
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+@pytest.fixture
+def _pepperstone_removal_state(monkeypatch, tmp_path):
+    import threading
+    service = master_service
+    calls = []
+    for name, value in {
+        "APP_PROFILE": "local", "TRADE_CONTEXTS_PATH": tmp_path / "contexts.json",
+        "_TRADE_CONTEXTS_CACHE": {}, "_TRADE_CONTEXTS_LOCK": threading.RLock(),
+        "_OPEN_ORDERS_CACHE": {"version": 300, "payload": None}, "_OPEN_ORDERS_SERVICES": {},
+        "_OPEN_ORDERS_LAST_GOOD_ITEMS": {}, "_PEPPERSTONE_QUOTE_SNAPSHOTS": {},
+        "_load_pending_webhooks": lambda: [], "_load_bounce_traders": lambda: [],
+        "_schedule_dropbox_upload_state_backup": lambda: None,
+        "_open_orders_configuration": lambda: ([], "local-removal-fixture"),
+    }.items():
+        monkeypatch.setattr(service, name, value)
+    monkeypatch.setattr(service.script_manager, "get", lambda name: type("Stopped", (), {"is_running": False})())
+    def forbidden(*args, **kwargs):
+        calls.append("forbidden")
+        raise AssertionError("Removal must not contact brokers or execute/export")
+    for name in ("_get_oanda_config", "resolve_bybit_credentials_for", "_fetch_oanda_json",
+                 "_bybit_signed_get", "_bybit_signed_post", "_cancel_oanda_order", "_close_oanda_trade",
+                 "_cancel_bybit_order", "calculator_pepperstone_set", "_schedule_early_trade_folders"):
+        monkeypatch.setattr(service, name, forbidden)
+    monkeypatch.setattr(service.httpx.AsyncClient, "request", forbidden)
+    base = {"broker": "pepperstone", "account": "demo", "calculation_context_id": "shared",
+            "category": "forex", "asset": "fx", "instrument": "EUR_USD", "side": "buy", "order_type": "limit",
+            "local_tracking": True, "local_tracking_kind": "pepperstone_calculator", "status": "QUOTED",
+            "planned_entry_price": "1.1", "planned_stop_price": "1.09", "planned_target_price": "1.12",
+            "calculator_distance_tick_size": "0.00001", "original_stop_distance": "0.01", "original_target_distance": "0.02",
+            "risk_mode": "fixed_aud", "risk_value": "10", "target_mode": "rr", "risk_reward": "2",
+            "setup": "Pullback", "timeframe": "5m", "is_test_trade": True, "raw_refs": {"reference": "retain-me"}}
+    contexts = [base, dict(base, calculation_context_id="market", order_type="market"),
+                dict(base, account="live", order_type="market"), dict(base, broker="bybit", calculation_context_id="unrelated"),
+                dict(base, calculation_context_id="historical", local_tracking=False)]
+    for context in contexts:
+        service._upsert_calculator_trade_context(context)
+    reads = []
+    def start(job):
+        async def source():
+            reads.append("source")
+            return {"items": [{"broker": "OANDA", "account": "demo", "category": "forex", "instrument": "GBP_USD",
+                               "side": "Buy", "type": "Order", "id": "broker-order", "size": "100", "status": "Pending"}],
+                    "errors": [{"message": "Fixture incomplete broker coverage", "failure_kind": "authentication_or_permission"}],
+                    "warnings": [{"message": "Fixture source warning"}]}
+        job.add("fixture", {"broker": "OANDA", "account": "demo", "category": "forex", "source_type": "orders"}, source)
+        job.publish()
+    monkeypatch.setattr(service._OpenOrdersJob, "start", start)
+    def target(context_id="shared", account="demo"):
+        return {"id": f"pepperstone-local:{account}:{context_id}", "account": account, "calculation_context_id": context_id}
+    return service, base, target, calls, reads
+
+
+def test_pepperstone_local_tracking_removal_is_scoped_durable_and_idempotent(_pepperstone_removal_state):
+    service, base, target, calls, reads = _pepperstone_removal_state
+    async def scenario():
+        async def snapshot():
+            return json.loads((await service.list_open_orders()).body)
+        try:
+            await snapshot()
+            job = service._OPEN_ORDERS_SERVICES[asyncio.get_running_loop()].job
+            await _open_orders_eventually(lambda: all(source["task"] is None for source in job.sources.values()))
+            before = await snapshot()
+            saved_before = service._load_calculator_trade_contexts()
+            result = json.loads((await service.remove_pepperstone_local_tracking(target())).body)
+            assert result["removed"] is True and result["already_removed"] is False
+            after = await snapshot()
+            assert job is service._OPEN_ORDERS_SERVICES[asyncio.get_running_loop()].job
+            assert reads == ["source"]  # Removal publishes without restarting broker readers.
+            assert after["version"] == before["version"] and after["progress_revision"] > before["progress_revision"]
+            assert {r["id"] for r in after["items"]} == {r["id"] for r in before["items"]} - {target()["id"]}
+            assert after["errors"] == before["errors"] and after["warnings"] == before["warnings"]
+            assert after["source_counts"] == before["source_counts"]
+            saved_after = service._load_calculator_trade_contexts()
+            removed = next(c for c in saved_after if c["account"] == "demo" and c["calculation_context_id"] == "shared")
+            old = next(c for c in saved_before if c["account"] == "demo" and c["calculation_context_id"] == "shared")
+            assert removed["local_tracking_removed_at"]
+            assert {k: v for k, v in removed.items() if k != "local_tracking_removed_at"} == old
+            persisted = service.TRADE_CONTEXTS_PATH.read_bytes()
+            again = json.loads((await service.remove_pepperstone_local_tracking(target())).body)
+            assert again["already_removed"] is True and service.TRADE_CONTEXTS_PATH.read_bytes() == persisted
+            # Ready quote replay cannot reactivate the row, even if stale input tries to clear the marker.
+            service._upsert_calculator_trade_context(dict(base, local_tracking_removed_at=False, risk_value="12"))
+            replayed = next(c for c in service._load_calculator_trade_contexts() if c.get("local_tracking_removed_at"))
+            assert replayed["risk_value"] == "12" and replayed["local_tracking_removed_at"] == removed["local_tracking_removed_at"]
+            await service.remove_pepperstone_local_tracking(target("market"))
+            service._upsert_calculator_trade_context(dict(base, calculation_context_id="new-context"))
+            await service._shutdown_open_orders_jobs()
+            service._TRADE_CONTEXTS_CACHE.clear()
+            service._PEPPERSTONE_QUOTE_SNAPSHOTS.clear()
+            service._OPEN_ORDERS_CACHE["payload"] = None
+            loaded = await snapshot()
+            ids = {r["id"] for r in loaded["items"] if r.get("local_tracking")}
+            assert ids == {target("shared", "live")["id"], target("new-context")["id"]}
+            disk = json.loads(service.TRADE_CONTEXTS_PATH.read_text())["items"]
+            assert len(disk) == len(saved_before) + 1
+            for ctx in disk:
+                if ctx.get("local_tracking_removed_at"):
+                    assert ctx["status"] == "QUOTED" and ctx["raw_refs"] == base["raw_refs"]
+                    assert ctx["original_stop_distance"] == "0.01" and ctx["setup"] == "Pullback"
+        finally:
+            await service._shutdown_open_orders_jobs()
+    asyncio.run(asyncio.wait_for(scenario(), 15))
+    assert calls == []
+
+
+def test_pepperstone_local_tracking_removal_rejects_invalid_targets_and_save_failures(_pepperstone_removal_state, monkeypatch):
+    service, base, target, calls, reads = _pepperstone_removal_state
+    async def scenario():
+        initial = service.TRADE_CONTEXTS_PATH.read_bytes()
+        invalid = [({}, 400), (dict(target(), account="live"), 400),
+                   (dict(target(), calculation_context_id="market"), 400), (target("missing"), 404),
+                   (target("unrelated"), 404), (target("historical"), 404),
+                   (dict(target(), local_tracking=True), 400), (dict(target(), account={}), 400)]
+        for payload, status in invalid:
+            with pytest.raises(service.HTTPException) as error:
+                await service.remove_pepperstone_local_tracking(payload)
+            assert error.value.status_code == status
+            assert service.TRADE_CONTEXTS_PATH.read_bytes() == initial
+        contexts = service._load_calculator_trade_contexts()
+        service._save_calculator_trade_contexts(contexts + [dict(contexts[0], account_id="ambiguous-account")])
+        with pytest.raises(service.HTTPException) as error:
+            await service.remove_pepperstone_local_tracking(target())
+        assert error.value.status_code == 409
+        service._save_calculator_trade_contexts(contexts)
+        initial = service.TRADE_CONTEXTS_PATH.read_bytes()
+        visible_before = service._pepperstone_local_tracker_rows()
+        version = service._OPEN_ORDERS_CACHE["version"]
+        def fail(*args, **kwargs):
+            raise OSError("fixture save denied")
+        with monkeypatch.context() as patch:
+            patch.setattr(service, "_save_calculator_trade_contexts", fail)
+            with pytest.raises(service.HTTPException) as error:
+                await service.remove_pepperstone_local_tracking(target())
+            assert error.value.status_code == 500 and "retained" in error.value.detail
+        assert service.TRADE_CONTEXTS_PATH.read_bytes() == initial
+        assert service._pepperstone_local_tracker_rows() == visible_before
+        assert service._OPEN_ORDERS_CACHE["version"] == version
+        assert not any(c.get("local_tracking_removed_at") for c in service._load_calculator_trade_contexts())
+    asyncio.run(asyncio.wait_for(scenario(), 10))
+    assert calls == [] and reads == []
+
+
+def test_pepperstone_local_tracking_remove_button_updates_and_reports_errors(_pepperstone_removal_state):
+    service, base, target, calls, reads = _pepperstone_removal_state
+    async def snapshots():
+        async def snapshot():
+            return json.loads((await service.list_open_orders()).body)
+        try:
+            await snapshot()
+            job = service._OPEN_ORDERS_SERVICES[asyncio.get_running_loop()].job
+            await _open_orders_eventually(lambda: all(source["task"] is None for source in job.sources.values()))
+            before = await snapshot()
+            ack = json.loads((await service.remove_pepperstone_local_tracking(target())).body)
+            after_limit = await snapshot()
+            await service.remove_pepperstone_local_tracking(target("market"))
+            after_market = await snapshot()
+            return {"before": before, "after_limit": after_limit, "after_market": after_market, "ack": ack}
+        finally:
+            await service._shutdown_open_orders_jobs()
+    data = asyncio.run(asyncio.wait_for(snapshots(), 15))
+    assert calls == []
+    node = shutil.which("node")
+    assert node
+    headers = re.findall(r"<th>(.*?)</th>", service.OPEN_ORDERS_TEMPLATE)
+    harness = r'''
+const fs=require('fs'),assert=require('assert');
+class Element {
+  constructor(tag=''){this.tag=tag;this.children=[];this.parentNode=null;this.style={};this._text='';this.dataset={};this.handlers={};}
+  set textContent(v){this.innerHTML='';this._text=String(v);} get textContent(){return this._text+this.children.map(c=>c.textContent).join('');}
+  set innerHTML(v){this.children.forEach(c=>c.parentNode=null);this.children=[];this._text=String(v);}
+  appendChild(c){this.insertBefore(c,null);return c;}
+  insertBefore(c,b){if(c===b)return;if(c.parentNode)c.remove();this.children.splice(b?this.children.indexOf(b):this.children.length,0,c);c.parentNode=this;}
+  remove(){if(this.parentNode){const p=this.parentNode;p.children.splice(p.children.indexOf(this),1);this.parentNode=null;}}
+  addEventListener(e,f){this.handlers[e]=f;} setAttribute(k,v){this[k]=v;} querySelector(){return null;}
+  click(){return this.disabled?undefined:this.handlers.click?.();}
+}
+const {data,headers}=JSON.parse(fs.readFileSync(0,'utf8'));let current=data.before,mode='hold',release;
+const tbody=new Element('tbody'),table=new Element('table');table.querySelector=()=>tbody;
+const elements={'open-orders-table':table};for(const id of ['open-orders-status','open-orders-empty','refresh-btn','open-orders-errors','open-orders-warnings'])elements[id]=new Element();
+global.window={__OPEN_ORDERS_TESTING__:true,addEventListener(){}};
+global.document={hidden:false,getElementById:id=>elements[id]||null,createElement:t=>new Element(t),addEventListener(){}};
+global.BroadcastChannel=undefined;global.setInterval=()=>1;global.clearInterval=()=>{};
+const requests=[],posts=[];const reply=(body,status=200)=>({ok:status===200,status,text:async()=>JSON.stringify(body)});
+global.fetch=async(url,opts={})=>{
+  requests.push(url);
+  if(opts.method==='POST'){
+    assert.strictEqual(url,'/api/open-orders/local-tracking/remove');const body=JSON.parse(opts.body);posts.push(body);
+    assert.deepStrictEqual(Object.keys(body).sort(),['account','calculation_context_id','id']);
+    if(mode==='hold')await new Promise(resolve=>release=resolve);
+    if(mode==='fail')return reply({detail:'Fixture save failed; retry.'},500);
+    current=data.after_limit;return reply(data.ack);
+  }
+  return reply(url.includes('/version')?{version:current.version,progress_revision:current.progress_revision}:current);
+};
+eval(fs.readFileSync(process.argv[1],'utf8'));
+const walk=e=>[e,...e.children.flatMap(walk)],cell=(row,label)=>row.children[headers.indexOf(label)];
+const button=row=>walk(cell(row,'Action')).find(e=>e.tag==='button');
+const plan=(type,account='demo')=>tbody.children.find(row=>cell(row,'Type').textContent===type&&cell(row,'Account').textContent===account);
+const flush=async()=>{for(let i=0;i<5;i++)await new Promise(resolve=>setImmediate(resolve));};
+(async()=>{
+  await flush();const hooks=window.__openOrdersTestHooks,limit=plan('Limit plan'),market=plan('Market plan');
+  assert(limit&&market);assert.strictEqual(tbody.children.length,data.before.items.length);
+  for(const row of [limit,market,plan('Market plan','live')]){
+    assert.strictEqual(row.children.length,headers.length);const btn=button(row);
+    assert.strictEqual(btn.textContent,'Remove from LTT');assert(!btn.disabled);
+    assert(btn['aria-label'].includes('Removes local tracking only. Manage MT5 orders in MT5.'));
+    assert(!walk(row).some(e=>e.tag==='button'&&['Cancel','Close','Amend','\u270e'].includes(e.textContent)));
+  }
+  const pending=button(limit).click();await flush();assert(button(limit).disabled);assert(plan('Limit plan'));
+  await hooks.refresh('progress');assert(button(plan('Limit plan')).disabled);assert.strictEqual(posts.length,1);
+  release();await pending;assert(!plan('Limit plan'));assert(plan('Market plan'));assert(plan('Market plan','live'));
+  assert.strictEqual(tbody.children.length,data.after_limit.items.length);
+  mode='fail';await button(plan('Market plan')).click();
+  const retained=plan('Market plan');assert(retained);assert(!button(retained).disabled);
+  assert(cell(retained,'Action').textContent.includes('Fixture save failed'));
+  assert(walk(cell(retained,'Action')).some(e=>e.role==='alert'));
+  assert(elements['open-orders-status'].textContent.includes('Remove from LTT failed'));
+  // Another open view learns of the persisted removal through normal revision polling.
+  current=data.after_market;await hooks.pollVersion();await flush();
+  assert(!plan('Market plan'));assert(plan('Market plan','live'));
+  assert.strictEqual(tbody.children.length,data.after_market.items.length);
+  assert(requests.includes('/api/open-orders/version'));assert(!requests.some(url=>/close|amend|verify-action|force=1/.test(url)));
+  assert.strictEqual(posts.length,2);assert.strictEqual(posts[0].id,data.ack.id);
+  console.log('Local removal buttons, persisted success, disabled pending state, failure retention and automatic refresh passed');
+})().catch(e=>{console.error(e);process.exit(1);});
+'''
+    result = subprocess.run([node, "-e", harness, str(ROOT / "render/static/open_orders.js")],
+        input=json.dumps({"data": data, "headers": headers}), capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_render_profile_hides_open_orders_and_blocks_routes() -> None:
     render_service = _load_master_service("render_master_service_open_orders_render", "render")
     payload = json.loads(asyncio.run(render_service.list_scripts()).body.decode("utf-8"))
