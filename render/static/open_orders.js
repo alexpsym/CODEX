@@ -213,6 +213,25 @@
     }
     return item;
   };
+  const preferReferencePrice=(item,previous)=>{
+    if(!item?.local_tracking||!previous?.local_tracking||item.id!==previous.id)return item;
+    const incoming=item.reference_price,prior=previous.reference_price;
+    // Fill acknowledgements contain durable trade data, not transient quote enrichment.
+    if(!incoming&&prior)return {...item,reference_price:prior,current_price:previous.current_price};
+    if(incoming?.scope&&incoming.scope===prior?.scope&&incoming.timestamp&&prior.timestamp&&Number(incoming.timestamp)<Number(prior.timestamp)){
+      return {...item,reference_price:prior,current_price:previous.current_price};
+    }
+    return item;
+  };
+  const renderReferencePriceCell=(cell,item)=>{
+    const q=item.reference_price||{},description='Approximate OANDA midpoint; Pepperstone prices may differ.';
+    let state=q.state;
+    if(q.price&&state==='fresh'&&q.timestamp&&Date.now()/1000-Number(q.timestamp)>30)state='stale';
+    const suffix=state==='nontradeable'?' \u00b7 last price / nontradeable':state==='stale'?' \u00b7 stale / last price':state==='last'?' \u00b7 last price (updating)':'';
+    cell.textContent=q.price?`\u2248 ${q.price} \u00b7 OANDA mid${suffix}`:`OANDA price unavailable${state==='nontradeable'?' \u00b7 nontradeable':state==='pending'?' (pending)':''}`;
+    const detail=`${description} OANDA feed: ${q.environment||'unavailable'}${q.host?' ('+q.host+')':''}. Quote time: ${q.quote_time||'unavailable'}.${q.diagnostic?' '+q.diagnostic:''}`;
+    cell.title=detail;cell.setAttribute('aria-label',cell.textContent+'. '+detail);
+  };
   const updateLocalFillCell=(entry,state)=>{
     const d=state.manualDraft;if(!d)return;
     if(!d.pending&&Number(entry.item.manual_fill_revision||0)!==d.revision){d.conflict=true;d.message='MT5 fill changed. Reload the saved fill before correcting it; your draft is retained.';}
@@ -449,7 +468,7 @@
   };
   const rowValues = item => [item.venue||item.broker,resolveAccountLabel(item),item.asset,item.category,item.side,item.order_type,item.instrument,item.stop_loss_ticks,item.target_mode_display,item.take_profit_ticks,item.risk_mode_display,item.risk_value_display,item.risk_reward,item.timeframe,item.is_test_trade,item.setup,item.pattern,item.ema,item.vwap,item.aths_atls,item.round_number,item.webhook_mode,item.webhook_status,item.webhook_classification,item.planned_entry_price,item.planned_stop_price,item.planned_target_price,item.type,item.quantity_is_estimate?`${item.size??''} (est.)`:item.size,item.local_tracking?item.manual_fill_price:(item.entry_price||item.order_price),item.current_price,item.stop_loss,item.take_profit,item.leverage,item.type==='Position'?item.funding_paid:null,item.type==='Position'?item.funding_received:null,item.type==='Position'?item.net_funding:null,formatTimestamp(item.opened_at),item.status];
   const render=(items,errors=[],warnings=[],coverage=window.__openOrdersCoverage||{})=>{
-    items=items.map(item=>preferNewerLocalFill(item,classificationRows.get(classificationKey(item))?.item));
+    items=items.map(item=>{const previous=classificationRows.get(classificationKey(item))?.item;return preferReferencePrice(preferNewerLocalFill(item,previous),previous);});
     window.__openOrdersItems=Array.isArray(items)?items:[];window.__openOrdersErrors=Array.isArray(errors)?errors:[];window.__openOrdersWarnings=Array.isArray(warnings)?warnings:[];
     if(!tbody)return;hasData=Boolean(items.length);renderDiagnostics(errorsBox,errorsList,errors,'Source errors');renderDiagnostics(warningsBox,warningsList,warnings,'Source warnings');
     for(const entry of classificationRows.values())entry.present=false;
@@ -476,6 +495,7 @@
       rowValues(item).forEach((value,i)=>{const field=classificationColumns[i];if(field)renderClassificationCell(entry,entry.cells.get(field));else if(priceColumns[i]){
         const state=entry.prices.get(priceColumns[i]);const resume=Object.values(priceOperations).find(op=>op.target===item.price_edit?.target&&op.field===state.field);
         if(resume&&!state.draft)openPriceCell(entry,state,resume);renderPriceCell(entry,state);
+      }else if(i===30&&item.local_tracking){renderReferencePriceCell(tr.children[i],item);
       }else{const text=String(fmt(value));if(tr.children[i].textContent!==text)tr.children[i].textContent=text;}});
       desired.push(tr);
     }

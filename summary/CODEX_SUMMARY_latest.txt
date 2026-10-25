@@ -1,3 +1,34 @@
+JOB 5 - Approximate OANDA reference prices for local Pepperstone rows
+Implementation and targeted verification complete; scoped delivery prepared.
+
+- Active local Pepperstone limit/market rows show an approximate midpoint in Current / Trigger, including rows awaiting manual MT5 fill. Visible source label: approximately <price> / OANDA mid. Accessible explanation: Approximate OANDA midpoint; Pepperstone prices may differ. Tooltip/accessible text includes original quote time, actual feed environment and host.
+- Uses Decimal bid/ask midpoint only; validates positive finite prices, bid <= ask, exact instruments, timezone-qualified quote times and tradeability. No one-sided/closeout substitution, reverse-pair search, weekday-based market inference or currency-conversion helper changes.
+- Reuses configured OANDA scopes and existing request/URL/client safeguards. Prefers corresponding demo/live credentials, with fallback only to an already configured alternate. Actual URL/feed environment is labelled without changing Pepperstone account identity. Reference reads are independent of position/account discovery.
+- Existing job-owned tasks batch unique instruments per credential scope, throttle launches to at least five seconds, prevent overlap, and use bounded timeouts/backoff and limited failure recovery. Requests occur through normal tracker polling; no continuous price worker or new persistence file.
+- Transient cache belongs to the existing tracker service and is keyed by hashed actual credentials/base/account/environment and instrument. Old generations/scopes cannot publish into replacements, older evidence cannot overwrite newer quotes, and removed rows stay hidden when reads complete. Reference publications do not write calculator contexts or cloud backups.
+- Quotes older than 30 seconds remain stale by their original timestamp even after repeated HTTP success. Failed/pending reads retain explicitly labelled stale/last prices. Explicit nontradeability is labelled as last-price/nontradeable, including empty-book handling. Missing/malformed/unsupported instruments stay usable with OANDA price unavailable. Diagnostics contain no credentials/account secrets and do not change broker coverage, source counts or existing errors/warnings.
+- Existing version/progress publication updates only reference enrichment; healthy broker readers are not restarted for reference updates. Manual-fill/classification drafts and focus remain mounted. Canonical manual-fill responses preserve already displayed transient quotes. Fill, revisions, original distances, planned/local levels, sizing, execution verification and P/L are unchanged. No broker-write/MT5/export/token path is invoked by reference pricing.
+
+Exact targeted results:
+- tests/test_open_orders_page.py::test_pepperstone_local_tracker_rows_render_and_refresh - PASSED in invocation 1.
+- tests/test_open_orders_page.py::test_pepperstone_oanda_reference_prices_batch_and_refresh - PASSED in invocation 1.
+- tests/test_open_orders_page.py::test_pepperstone_oanda_reference_prices_handle_unavailable_stale_and_scope_changes - invocation 1 failed at a test baseline assertion after that scenario intentionally inserted an unsupported-instrument context. Asserted unchanged persistence before the insertion and recaptured its deliberate new baseline; invocation 2 PASSED, including remaining removal-during-request checks.
+- tests/test_open_orders_page.py::test_pepperstone_oanda_reference_price_rendering_preserves_fill_and_removal - PASSED in invocation 1.
+- Invocation 1: 3 passed, 1 failed, exit 1, 20.08 seconds. Invocation 2: only the failed node, 1 passed, exit 0, 11.32 seconds. No passing node was rerun.
+- Retained verbose logs/JUnit/process results: .job5_verify_20261025_01/ and .job5_verify_20261025_02/ (pytest.log, results.xml, process.json).
+- Budget used: four distinct nodes, two pytest invocations, five node executions. Fresh temporary contexts/caches/locks, mocked pricing and credentials, stdin Node snapshots. Pytest hard timeout 180 seconds; Node child timeout 20 seconds (existing renderer 15 seconds).
+- Automated live API/account requests, real-data operations, production-state writes/imports, app restarts, broker/MT5 operations, MQL builds/deployments and subagents: zero. Prior job budgets remain recorded separately below.
+- Consulted OANDA pricing endpoint/ClientPrice definitions: https://developer.oanda.com/rest-live-v20/pricing-ep/ and https://developer.oanda.com/rest-live-v20/pricing-df/.
+
+LTT needs restarting to load the service/static changes; none was performed by Codex.
+Job 4 is delivered with automated checks passed; its live actual-fill verification remains PENDING and was not a prerequisite for Job 5.
+Pending Job 5 manual acceptance (not performed): after loading this change, open existing Pepperstone limit/market rows and confirm the visible OANDA midpoint source label, explanatory text, quote time, actual feed environment and unchanged Pepperstone account. Weekend checks may establish truthful unavailable/stale/nontradeable labels. Verify manual-fill/removal controls remain available without executing a trade. Price movement remains UNVERIFIED until observed during available quotes.
+
+Phase queue retained: 1 spread cleanup complete; 2 statement warning complete; 3 persistent plans/removal complete; 4 manual fill delivered/live check pending; 5 approximate OANDA reference display (this implementation); 6 research Bybit expiry; 7 supported expiry controls with LTT off; 8 OANDA inactivity warning/countdown; 9 journal hyperlink styling; 10 future MT5 timezone correction; 11 affected historical demo times; 12 future commission-sign normalization preserving net P/L; 13 existing commission-sign normalization preserving net P/L; 14 heading Exit LTT/obsolete-text removal; 15 very light blue test-trade highlighting.
+Only Job 5 was implemented. Commit allowlist: render/master_service.py, render/static/open_orders.js, tests/test_open_orders_page.py, summary/CODEX_SUMMARY_latest.txt. Unrelated work, runtime data and prior summaries are preserved.
+
+Previous committed summary (preserved):
+
 JOB 4 - Manual MT5 market fill and original-distance SL/TP
 Implementation and automated verification complete; scoped delivery prepared.
 

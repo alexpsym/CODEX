@@ -228,7 +228,8 @@ const flush=async()=>{for(let i=0;i<5;i++)await new Promise(resolve=>setImmediat
       assert.strictEqual(cell(row,'Risk Value').textContent,'AUD 10');
       assert.strictEqual(cell(row,'Timeframe').textContent,'5MIN');
       assert.strictEqual(cell(row,'Setup').textContent,'Pullback');
-      assert.strictEqual(cell(row,'Current / Trigger').textContent,'\u2014');
+      assert.strictEqual(cell(row,'Current / Trigger').textContent,'OANDA price unavailable');
+      assert(cell(row,'Current / Trigger')['aria-label'].includes('Approximate OANDA midpoint; Pepperstone prices may differ.'));
       assert(cell(row,'Stop Loss').textContent.includes('(planned)'));
       assert(cell(row,'Take Profit').textContent.includes('(planned)'));
       const market=cell(row,'Order Type').textContent==='Market';
@@ -711,6 +712,341 @@ const checkLocal=price=>{
   assert.deepStrictEqual(posts.filter(p=>p.url.endsWith('/fill')).map(p=>p.body.revision),[0,0,1,4]);
   assert(!requests.some(url=>/amend|verify-action|close|calculator|force=1/.test(url)));
   console.log('Manual fill draft/focus, corrections, durable responses, stale protection, errors and local removal passed');
+})().catch(e=>{console.error(e);process.exit(1);});
+'''
+    result = subprocess.run([node, "-e", harness, str(ROOT / "render/static/open_orders.js")],
+        input=json.dumps({"data": data, "headers": headers}), capture_output=True, text=True, timeout=20)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.fixture
+def _pepperstone_reference_state(_pepperstone_fill_state, monkeypatch):
+    from datetime import datetime, timezone
+    service, market, target, fill_request, forbidden, reads = _pepperstone_fill_state
+    clock = {"mono": 100., "wall": datetime(2026, 10, 25, tzinfo=timezone.utc).timestamp()}
+    demo = {"mode": "demo", "token": "fixture-demo-secret", "account_id": "fixture-demo-account", "base_url": "https://api-fxpractice.oanda.com/v3"}
+    live = {"mode": "live", "token": "fixture-live-secret", "account_id": "fixture-live-account", "base_url": "https://api-fxtrade.oanda.com"}
+    feeds = {"demo": dict(demo), "live": None}
+    requests, http = [], {}
+    monkeypatch.setattr(service, "_open_orders_now", lambda: clock["mono"])
+    monkeypatch.setattr(service, "_pepperstone_reference_wall_time", lambda: clock["wall"])
+    monkeypatch.setattr(service, "_open_orders_configuration", lambda: (
+        [("OANDA", mode, cfg or {"configuration_error": "Fixture credentials missing"}) for mode, cfg in feeds.items()],
+        json.dumps(feeds, sort_keys=True)))
+    service._upsert_calculator_trade_context(dict(market, calculation_context_id="yen", instrument="USD_JPY",
+        planned_entry_price="150.100", planned_stop_price="150.050", planned_target_price="150.200",
+        original_stop_distance="0.050", original_target_distance="0.100"))
+    def quote(instrument="EUR_USD", bid=None, ask=None, offset=0, tradeable=True):
+        return {"instrument": instrument, "time": datetime.fromtimestamp(clock["wall"] + offset, timezone.utc).isoformat().replace("+00:00", "Z"),
+                "tradeable": tradeable, "bids": [{"price": bid or ("150.123" if instrument == "USD_JPY" else "1.10234")}],
+                "asks": [{"price": ask or ("150.124" if instrument == "USD_JPY" else "1.10235")}]}
+    def default(kwargs):
+        instruments = kwargs["endpoint"].split("instruments=")[1].split("&")[0].split(",")
+        return {"prices": [quote(symbol) for symbol in instruments]}
+    http["handler"] = default
+    async def fetch(**kwargs):
+        assert kwargs["endpoint"].startswith("/accounts/{account_id}/pricing?instruments=")
+        assert "/v3/v3" not in service._build_oanda_v3_url(kwargs["base_url"], kwargs["endpoint"], account_id=kwargs["account_id"])
+        requests.append(dict(kwargs))
+        value = http["handler"](kwargs)
+        return await value if hasattr(value, "__await__") else value
+    monkeypatch.setattr(service, "_fetch_oanda_json", fetch)
+    async def snapshot():
+        return json.loads((await service.list_open_orders()).body)
+    async def drain():
+        job = service._OPEN_ORDERS_SERVICES[asyncio.get_running_loop()].job
+        await asyncio.gather(*tuple(job.tasks), *tuple(job.auxiliary.values()))
+        return job
+    return service, market, target, fill_request, forbidden, reads, clock, feeds, demo, live, requests, http, quote, snapshot, drain
+
+
+def test_pepperstone_oanda_reference_prices_batch_and_refresh(_pepperstone_reference_state):
+    service, market, target, fill_request, forbidden, reads, clock, feeds, demo, live, requests, http, quote, snapshot, drain = _pepperstone_reference_state
+    async def scenario():
+        original = service.TRADE_CONTEXTS_PATH.read_bytes()
+        gate = asyncio.Event()
+        async def delayed(kwargs):
+            await gate.wait()
+            return {"prices": [quote("EUR_USD"), quote("USD_JPY")]}
+        http["handler"] = delayed
+        try:
+            first = await snapshot()
+            local = [r for r in first["items"] if r.get("local_tracking")]
+            assert len(local) == 4 and all(r["reference_price"]["state"] == "pending" for r in local)
+            await asyncio.gather(*(snapshot() for _ in range(12)))
+            await asyncio.sleep(0)
+            assert len(requests) == 1
+            assert requests[0]["endpoint"].split("instruments=")[1].split("&")[0] == "EUR_USD,USD_JPY"
+            assert requests[0]["api_key"] == demo["token"] and requests[0]["timeout_s"] == 3.
+            gate.set()
+            job = await drain()
+            ready = await snapshot()
+            rows = [r for r in ready["items"] if r.get("local_tracking")]
+            assert {r["current_price"] for r in rows if r["instrument"] == "EUR_USD"} == {"1.102345"}
+            assert next(r for r in rows if r["instrument"] == "USD_JPY")["current_price"] == "150.1235"
+            assert all(r["reference_price"]["environment"] == "demo" and r["reference_price"]["state"] == "fresh" for r in rows)
+            live_row = next(r for r in rows if r["account"] == "live")
+            assert live_row["broker"] == "Pepperstone" and live_row["account"] == "live"  # Demo reference fallback only.
+            assert all(r["execution_verified"] is False and r["actual_pnl"] is None for r in rows)
+            assert next(r for r in rows if r["id"] == target("market")["id"])["entry_price"] is None
+            assert ready["source_counts"]["live_broker_orders"] == 1 and not ready["core_complete"]
+            assert ready["errors"] and ready["warnings"] and ready["progress_revision"] > first["progress_revision"]
+            clock["mono"] += 4.99; clock["wall"] += 4.99
+            await asyncio.gather(*(snapshot() for _ in range(5)))
+            assert len(requests) == 1
+            clock["mono"] += .02; clock["wall"] += .02
+            await asyncio.gather(*(snapshot() for _ in range(5)))
+            await drain()
+            assert len(requests) == 2 and reads == ["source"]
+            assert job is service._OPEN_ORDERS_SERVICES[asyncio.get_running_loop()].job
+            # Adding an already configured preferred live feed creates a separate actual credential scope.
+            feeds["live"] = dict(live)
+            await snapshot(); await drain()
+            preferred = await snapshot()
+            assert len(requests) == 3 and requests[-1]["api_key"] == live["token"]
+            assert next(r for r in preferred["items"] if r.get("local_tracking") and r["account"] == "live")["reference_price"]["environment"] == "live"
+            assert service.TRADE_CONTEXTS_PATH.read_bytes() == original
+            text = json.dumps(preferred)
+            assert demo["token"] not in text and demo["account_id"] not in text and live["token"] not in text
+        finally:
+            await service._shutdown_open_orders_jobs()
+    asyncio.run(asyncio.wait_for(scenario(), 20))
+    assert forbidden == []
+
+
+def test_pepperstone_oanda_reference_prices_handle_unavailable_stale_and_scope_changes(_pepperstone_reference_state):
+    service, market, target, fill_request, forbidden, reads, clock, feeds, demo, live, requests, http, quote, snapshot, drain = _pepperstone_reference_state
+    async def scenario():
+        original = service.TRADE_CONTEXTS_PATH.read_bytes()
+        try:
+            feeds["demo"] = None
+            missing = await snapshot()
+            assert not requests and all(r["reference_price"]["state"] == "unavailable" for r in missing["items"] if r.get("local_tracking"))
+            feeds["demo"] = dict(demo)
+            old = {"prices": [quote(offset=-45), quote("USD_JPY", tradeable=False)]}
+            http["handler"] = lambda kwargs: old
+            await snapshot(); await drain()
+            stale = await snapshot()
+            eur = next(r for r in stale["items"] if r["id"] == target("market")["id"])
+            assert eur["reference_price"]["state"] == "stale" and eur["current_price"] == "1.102345"
+            original_time = eur["reference_price"]["quote_time"]
+            assert next(r for r in stale["items"] if r.get("instrument") == "USD_JPY")["reference_price"]["state"] == "nontradeable"
+            clock["mono"] += 5; clock["wall"] += 10
+            await snapshot(); await drain()
+            repeated = await snapshot()
+            eur = next(r for r in repeated["items"] if r["id"] == target("market")["id"])
+            assert eur["reference_price"]["state"] == "stale" and eur["reference_price"]["quote_time"] == original_time
+            # Older, reversed-pair and malformed evidence cannot replace a different valid quote.
+            bad_yen = quote("USD_JPY", bid="160", ask="150")
+            http["handler"] = lambda kwargs: {"prices": [quote(bid="9.9", ask="10", offset=-80), quote("USD_EUR"), bad_yen]}
+            clock["mono"] += 5
+            await snapshot(); await drain()
+            kept = await snapshot()
+            assert next(r for r in kept["items"] if r["id"] == target("market")["id"])["current_price"] == "1.102345"
+            # New valid EUR evidence survives partial availability; missing books/closeout alone are not a midpoint.
+            no_books = dict(quote("USD_JPY", tradeable=False), bids=[], asks=[], closeoutBid="999", closeoutAsk="1000")
+            http["handler"] = lambda kwargs: {"prices": [quote(bid="1.2", ask="1.20002"), no_books]}
+            clock["mono"] += 5; clock["wall"] += 5
+            await snapshot(); await drain()
+            partial = await snapshot()
+            assert next(r for r in partial["items"] if r["id"] == target("market")["id"])["current_price"] == "1.20001"
+            yen = next(r for r in partial["items"] if r.get("instrument") == "USD_JPY")
+            assert yen["current_price"] == "150.1235" and yen["reference_price"]["state"] == "nontradeable"
+            assert yen["reference_price"]["quote_time"] == old["prices"][1]["time"]
+            assert service.TRADE_CONTEXTS_PATH.read_bytes() == original
+            service._upsert_calculator_trade_context(dict(market, calculation_context_id="unsupported", instrument="AUD_NZD"))
+            original = service.TRADE_CONTEXTS_PATH.read_bytes()  # New fixture context is intentional; subsequent pricing must not write.
+            clock["mono"] += 5
+            await snapshot(); await drain()
+            assert next(r for r in (await snapshot())["items"] if r.get("instrument") == "AUD_NZD")["reference_price"]["state"] == "unavailable"
+            for malformed in (dict(quote(), bids=[]), dict(quote(), bids=[{"price": "NaN"}]),
+                              dict(quote(), asks=[{"price": True}]), dict(quote(), time="bad-time"), quote(offset=90),
+                              dict(quote(), status="invalid"), dict(quote(), bids=[], closeoutBid="9", closeoutAsk="10")):
+                http["handler"] = lambda kwargs, malformed=malformed: {"prices": [malformed, quote("USD_JPY")]}
+                clock["mono"] += 5
+                await snapshot(); await drain()
+                value = next(r for r in (await snapshot())["items"] if r["id"] == target("market")["id"])
+                assert value["current_price"] == "1.20001" and value["reference_price"]["state"] == "stale"
+            http["handler"] = lambda kwargs: {"prices": []}
+            clock["mono"] += 5
+            await snapshot(); await drain()
+            assert next(r for r in (await snapshot())["items"] if r["id"] == target("market")["id"])["current_price"] == "1.20001"
+            def auth_failure(kwargs):
+                error = RuntimeError(demo["token"] + " " + demo["account_id"])
+                error.status_code = 401
+                raise error
+            http["handler"] = auth_failure; clock["mono"] += 5
+            await snapshot(); await drain()
+            blocked = await snapshot(); count = len(requests)
+            assert "HTTP 401" in json.dumps(blocked) and demo["token"] not in json.dumps(blocked) and demo["account_id"] not in json.dumps(blocked)
+            clock["mono"] += 100
+            await snapshot(); assert len(requests) == count
+            # Rotation cannot reuse the old credentials' quotes; timeout recovery is bounded and backs off.
+            feeds["demo"] = dict(demo, token="timeout-scope")
+            def timed_out(kwargs): raise TimeoutError("fixture timeout")
+            http["handler"] = timed_out
+            await snapshot(); await drain()
+            unavailable = await snapshot()
+            assert all(r["current_price"] is None for r in unavailable["items"] if r.get("local_tracking"))
+            count = len(requests)
+            await snapshot(); assert len(requests) == count
+            clock["mono"] += 5; await snapshot(); await drain()
+            clock["mono"] += 10; await snapshot(); await drain()
+            count = len(requests); clock["mono"] += 100; await snapshot()
+            assert len(requests) == count
+            # A retired scope's delayed/cancelled response cannot enter the next generation.
+            feeds["demo"] = dict(demo, token="retired-scope")
+            started, gate = asyncio.Event(), asyncio.Event()
+            async def retired(kwargs):
+                if kwargs["api_key"] == "retired-scope":
+                    started.set()
+                    try: await gate.wait()
+                    except asyncio.CancelledError: pass
+                    return {"prices": [quote(bid="9", ask="10")]}
+                return {"prices": [quote(bid="1.7", ask="1.70002"), quote("USD_JPY")]}
+            http["handler"] = retired
+            await snapshot(); await started.wait()
+            feeds["demo"] = dict(demo, token="newest-scope")
+            await snapshot(); await drain()
+            newest = await snapshot()
+            assert next(r for r in newest["items"] if r["id"] == target("market")["id"])["current_price"] == "1.70001"
+            assert service.TRADE_CONTEXTS_PATH.read_bytes() == original
+            # Removal remains durable while a reference read is in flight.
+            clock["mono"] += 5
+            started.clear(); gate.clear()
+            async def held(kwargs):
+                started.set(); await gate.wait()
+                return {"prices": [quote(), quote("USD_JPY")]}
+            http["handler"] = held
+            await snapshot(); await started.wait()
+            await service.remove_pepperstone_local_tracking(target("market"))
+            gate.set(); await drain()
+            service._upsert_calculator_trade_context(market)
+            assert not any(r["id"] == target("market")["id"] for r in (await snapshot())["items"])
+        finally:
+            await service._shutdown_open_orders_jobs()
+    asyncio.run(asyncio.wait_for(scenario(), 30))
+    assert forbidden == []
+
+
+def test_pepperstone_oanda_reference_price_rendering_preserves_fill_and_removal(_pepperstone_reference_state):
+    service, market, target, fill_request, forbidden, reads, clock, feeds, demo, live, requests, http, quote, snapshot, drain = _pepperstone_reference_state
+    # Give the existing broker row an exact accepted context so its mounted classification editor is exercised too.
+    service._upsert_calculator_trade_context({"broker": "oanda", "account": "demo", "category": "forex", "instrument": "GBP_USD",
+        "side": "buy", "order_id": "broker-order", "status": "ACTIVE", "timeframe": "5m", "setup": "Pullback"})
+    async def snapshots():
+        data = {"wall": clock["wall"]}
+        try:
+            data["pending"] = await snapshot(); await drain()
+            data["fresh"] = await snapshot()
+            persisted = service.TRADE_CONTEXTS_PATH.read_bytes()
+            http["handler"] = lambda kwargs: {"prices": [quote(bid="1.20234", ask="1.20235"), quote("USD_JPY")]}
+            clock["mono"] += 5; clock["wall"] += 5
+            data["updating"] = await snapshot(); await drain()
+            data["moved"] = await snapshot()
+            assert service.TRADE_CONTEXTS_PATH.read_bytes() == persisted
+            data["fill_ack"] = json.loads((await service.record_pepperstone_local_fill(fill_request())).body)
+            assert "reference_price" not in data["fill_ack"]["item"]
+            data["filled"] = await snapshot()
+            persisted = service.TRADE_CONTEXTS_PATH.read_bytes()
+            clock["wall"] += 31
+            data["stale"] = await snapshot()
+            http["handler"] = lambda kwargs: {"prices": [quote(tradeable=False), quote("USD_JPY", tradeable=False)]}
+            clock["mono"] += 5; clock["wall"] += 5
+            await snapshot(); await drain()
+            data["closed"] = await snapshot()
+            assert service.TRADE_CONTEXTS_PATH.read_bytes() == persisted
+            feeds["demo"] = None
+            data["unavailable"] = await snapshot(); await drain()
+            feeds["live"] = dict(live)
+            await snapshot(); await drain()
+            data["live_fallback"] = await snapshot()
+            data["remove_ack"] = json.loads((await service.remove_pepperstone_local_tracking(target("market"))).body)
+            data["removed"] = await snapshot()
+            return data
+        finally:
+            await service._shutdown_open_orders_jobs()
+    data = asyncio.run(asyncio.wait_for(snapshots(), 20))
+    assert forbidden == []
+    assert next(r for r in data["fresh"]["items"] if r["id"] == "broker-order").get("classification_target")
+    node = shutil.which("node")
+    assert node
+    headers = re.findall(r"<th>(.*?)</th>", service.OPEN_ORDERS_TEMPLATE)
+    harness = r'''
+const fs=require('fs'),assert=require('assert');
+class Element {
+  constructor(tag=''){this.tag=tag;this.children=[];this.parentNode=null;this.style={};this._text='';this.dataset={};this.handlers={};this.disabled=false;}
+  set textContent(v){this.innerHTML='';this._text=String(v);} get textContent(){return this._text+this.children.map(c=>c.textContent).join('');}
+  set innerHTML(v){this.children.forEach(c=>c.parentNode=null);this.children=[];this._text=String(v);}
+  appendChild(c){this.insertBefore(c,null);return c;}
+  insertBefore(c,b){if(c===b)return;if(c.parentNode)c.remove();this.children.splice(b?this.children.indexOf(b):this.children.length,0,c);c.parentNode=this;}
+  remove(){if(this.parentNode){const p=this.parentNode;p.children.splice(p.children.indexOf(this),1);this.parentNode=null;}}
+  addEventListener(e,f){this.handlers[e]=f;} setAttribute(k,v){this[k]=v;} querySelector(){return null;}
+  click(){return this.disabled?undefined:this.handlers.click?.();} focus(){document.activeElement=this;}
+}
+const {data,headers}=JSON.parse(fs.readFileSync(0,'utf8'));let current=data.pending,release;
+Date.now=()=>data.wall*1000;
+const tbody=new Element('tbody'),table=new Element('table');table.querySelector=()=>tbody;
+const elements={'open-orders-table':table};for(const id of ['open-orders-status','open-orders-empty','refresh-btn','open-orders-errors','open-orders-warnings'])elements[id]=new Element();
+global.window={__OPEN_ORDERS_TESTING__:true,addEventListener(){}};
+global.document={hidden:false,getElementById:id=>elements[id]||null,createElement:t=>new Element(t),addEventListener(){}};
+global.BroadcastChannel=undefined;global.setInterval=()=>1;global.clearInterval=()=>{};
+const requests=[],posts=[];const reply=body=>({ok:true,text:async()=>JSON.stringify(body)});
+global.fetch=async(url,opts={})=>{
+  requests.push(url);
+  if(opts.method==='POST'){
+    posts.push(url);
+    if(url==='/api/open-orders/local-tracking/fill'){await new Promise(resolve=>release=resolve);return reply(data.fill_ack);}
+    assert.strictEqual(url,'/api/open-orders/local-tracking/remove');current=data.removed;return reply(data.remove_ack);
+  }
+  assert(url==='/api/open-orders'||url==='/api/open-orders/version');
+  return reply(url.includes('/version')?{version:current.version,progress_revision:current.progress_revision}:current);
+};
+eval(fs.readFileSync(process.argv[1],'utf8'));
+const walk=e=>[e,...e.children.flatMap(walk)],cell=(row,label)=>row.children[headers.indexOf(label)];
+const find=(root,text)=>walk(root).find(e=>e.tag==='button'&&e.textContent===text);
+const market=()=>tbody.children.find(row=>cell(row,'Type').textContent==='Market plan'&&cell(row,'Account').textContent==='demo'&&cell(row,'Instrument').textContent==='EUR_USD');
+const broker=()=>tbody.children.find(row=>cell(row,'Broker / Venue').textContent==='OANDA');
+const entry=()=>cell(market(),'Entry / Order'),ref=()=>cell(market(),'Current / Trigger');
+const flush=async()=>{for(let i=0;i<5;i++)await new Promise(resolve=>setImmediate(resolve));};
+const checkSource=()=>{
+  assert(ref().textContent.includes('OANDA mid'));assert(ref().textContent.startsWith('\u2248 '));
+  assert(ref()['aria-label'].includes('Approximate OANDA midpoint; Pepperstone prices may differ.'));
+  assert(ref().title.includes('Quote time: 2026-10-25T'));
+  assert(cell(market(),'Broker / Venue').textContent.includes('Pepperstone'));assert.strictEqual(cell(market(),'Account').textContent,'demo');
+};
+(async()=>{
+  await flush();assert(ref().textContent.includes('OANDA price unavailable'));
+  current=data.fresh;await window.__openOrdersTestHooks.pollVersion();checkSource();assert(ref().textContent.includes('1.102345'));assert(ref().title.includes('demo (api-fxpractice.oanda.com)'));
+  assert.strictEqual(cell(broker(),'Current / Trigger').textContent,'\u2014');
+  find(entry(),'Record MT5 fill').click();const input=walk(entry()).find(e=>e.tag==='input');input.value='1.10234';input.handlers.input();
+  const classification=walk(cell(broker(),'Timeframe')).find(e=>e.className==='classification-value');classification.click();
+  const select=walk(cell(broker(),'Timeframe')).find(e=>e.tag==='select');select.value='15m';select.handlers.change();select.focus();
+  for(const next of [data.updating,data.moved]){
+    current=next;await window.__openOrdersTestHooks.pollVersion();
+    assert.strictEqual(walk(entry()).find(e=>e.tag==='input'),input);assert.strictEqual(input.value,'1.10234');
+    assert.strictEqual(walk(cell(broker(),'Timeframe')).find(e=>e.tag==='select'),select);assert.strictEqual(select.value,'15m');assert.strictEqual(document.activeElement,select);
+  }
+  assert(ref().textContent.includes('1.202345'));
+  const saving=find(entry(),'Save MT5 fill').click();await flush();assert(input.disabled);
+  release();await saving;
+  assert(entry().textContent.includes('1.10234 (manual MT5 fill)'));assert(ref().textContent.includes('1.202345')); // Canonical fill acknowledgement must retain the transient reference.
+  assert(cell(market(),'Stop Loss').textContent.includes('1.10134'));assert(cell(market(),'Take Profit').textContent.includes('1.10434'));
+  assert(find(entry(),'Correct MT5 fill'));assert(find(cell(market(),'Action'),'Remove from LTT'));
+  for(const next of [data.filled,data.stale,data.closed,data.unavailable,data.live_fallback]){
+    current=next;await window.__openOrdersTestHooks.pollVersion();
+    assert(entry().textContent.includes('1.10234 (manual MT5 fill)'));
+    assert.strictEqual(walk(cell(broker(),'Timeframe')).find(e=>e.tag==='select'),select);assert.strictEqual(select.value,'15m');
+    if(next===data.stale)assert(ref().textContent.includes('stale / last price'));
+    if(next===data.closed)assert(ref().textContent.includes('last price / nontradeable'));
+    if(next===data.unavailable)assert.strictEqual(ref().textContent,'OANDA price unavailable');
+    if(next===data.live_fallback){checkSource();assert(ref().title.includes('live (api-fxtrade.oanda.com)'));}
+  }
+  await find(cell(market(),'Action'),'Remove from LTT').click();assert(!market());
+  await window.__openOrdersTestHooks.pollVersion();assert(!market());
+  assert.deepStrictEqual(posts,['/api/open-orders/local-tracking/fill','/api/open-orders/local-tracking/remove']);
+  assert(!requests.some(url=>/amend|verify-action|close|calculator|force=1/.test(url)));
+  console.log('OANDA source/time/state labels, local fill/classification drafts and removal preserved');
 })().catch(e=>{console.error(e);process.exit(1);});
 '''
     result = subprocess.run([node, "-e", harness, str(ROOT / "render/static/open_orders.js")],

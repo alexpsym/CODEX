@@ -37163,6 +37163,47 @@ async def remove_pepperstone_local_tracking(payload: Dict[str, object] = Body(..
     return JSONResponse(result)
 
 
+def _pepperstone_reference_wall_time():
+    return time.time()
+
+
+def _pepperstone_reference_quote(raw, instrument):
+    """Validate account pricing evidence without closeout/one-sided substitution."""
+    if not isinstance(raw, dict) or raw.get("instrument") != instrument:
+        raise ValueError("OANDA instrument price unavailable")
+    stamp = raw.get("time")
+    match = re.fullmatch(r"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.(\d{1,9}))?(Z|[+-]\d\d:\d\d)", str(stamp or ""))
+    if not match:
+        raise ValueError("Invalid OANDA quote time")
+    instant = datetime.fromisoformat(match[1] + match[3].replace("Z", "+00:00"))
+    delta = instant - datetime(1970, 1, 1, tzinfo=timezone.utc)
+    timestamp = Decimal(delta.days * 86400 + delta.seconds) + Decimal("0." + (match[2] or "0"))
+    if timestamp <= 0 or timestamp > Decimal(str(_pepperstone_reference_wall_time())) + 5:
+        raise ValueError("Invalid OANDA quote time")
+    status = raw.get("status") if isinstance(raw.get("status"), str) else None
+    tradeable = raw.get("tradeable")
+    if type(tradeable) is not bool:
+        tradeable = {"tradeable": True, "non-tradeable": False}.get(status)
+    if status == "non-tradeable":
+        tradeable = False
+    if tradeable is None or status == "invalid":
+        raise ValueError("OANDA tradeability unavailable")
+    result = {"quote_time": stamp, "timestamp": str(timestamp), "tradeable": tradeable, "price": None}
+    try:
+        bid = _pepperstone_fill_decimal(raw["bids"][0]["price"], "OANDA bid")
+        ask = _pepperstone_fill_decimal(raw["asks"][0]["price"], "OANDA ask")
+        if bid > ask:
+            raise ValueError("Crossed OANDA bid/ask")
+        with localcontext() as precision:
+            precision.prec = 500
+            result["price"] = format((bid + ask) / 2, "f")
+    except (KeyError, IndexError, TypeError, ValueError, HTTPException):
+        if tradeable:
+            raise ValueError("Valid OANDA bid/ask unavailable")
+        # Explicit nontradeability remains useful even when both books are empty.
+    return result
+
+
 class _OpenOrdersJob:
     def __init__(self, service, configurations, fingerprint, version):
         self.service, self.loop = service, service.loop
@@ -37177,6 +37218,142 @@ class _OpenOrdersJob:
         self.reconciled = False
         self.oanda_tags = {}
         self.funding = {}
+
+    def reference_groups(self, rows):
+        feeds = {account: cfg for broker, account, cfg in self.configurations
+                 if broker == "OANDA" and not cfg.get("configuration_error")
+                 and all(cfg.get(key) for key in ("base_url", "account_id", "token"))}
+        groups, assignments = {}, {}
+        for row in rows:
+            account = row.get("account")
+            selected = account if account in feeds else next((mode for mode in ("demo", "live") if mode in feeds), None)
+            if selected is None:
+                continue
+            cfg = feeds[selected]
+            host = urlparse(cfg["base_url"]).hostname or "configured host"
+            environment = "demo" if host == "api-fxpractice.oanda.com" else "live" if host == "api-fxtrade.oanda.com" else str(cfg.get("mode") or selected)
+            scope = hashlib.sha256(json.dumps([cfg["base_url"], cfg["account_id"], cfg["token"], environment]).encode()).hexdigest()
+            try:
+                instrument = normalize_oanda_symbol_query(str(row.get("instrument") or ""))
+                if not re.fullmatch(r"[A-Z0-9]+_[A-Z0-9]+", instrument):
+                    continue
+            except (ValueError, TypeError):
+                continue
+            group = groups.setdefault(scope, {"cfg": cfg, "environment": environment, "host": host, "instruments": set()})
+            group["instruments"].add(instrument)
+            assignments[row["id"]] = (scope, instrument)
+        return groups, assignments
+
+    def poll_reference_prices(self, deliberate=False):
+        groups, _ = self.reference_groups(_pepperstone_local_tracker_rows())
+        for scope in list(self.service.reference_cache):
+            if scope not in groups:
+                del self.service.reference_cache[scope]
+        for scope, group in groups.items():
+            cache = self.service.reference_cache.setdefault(scope, {"quotes": {}, "errors": {}, "next": 0., "failures": 0, "blocked": False})
+            task = self.auxiliary.get(("pepperstone-reference", scope))
+            if task is not None and not task.done():
+                continue
+            if _open_orders_now() < cache["next"]:
+                continue
+            if cache["blocked"] or cache["failures"] >= _OPEN_ORDERS_MAX_RECOVERY_ATTEMPTS:
+                if not deliberate:
+                    continue
+                cache.update(blocked=False, failures=0)
+            cache["next"] = _open_orders_now() + 5.
+            self.shared_task(("pepperstone-reference", scope), lambda scope=scope, group=group, cache=cache: self.read_reference_prices(scope, group, cache))
+
+    async def read_reference_prices(self, scope, group, cache):
+        cfg, instruments = group["cfg"], sorted(group["instruments"])
+        tokens = [(_OPEN_ORDERS_JOB_SCOPE, _OPEN_ORDERS_JOB_SCOPE.set(self)),
+                  (_OPEN_ORDERS_HTTP_SCOPE, _OPEN_ORDERS_HTTP_SCOPE.set("pepperstone-reference:" + scope))]
+        try:
+            try:
+                result = await asyncio.wait_for(_fetch_oanda_json(base_url=cfg["base_url"], account_id=cfg["account_id"],
+                    api_key=cfg["token"], mode=cfg.get("mode") or group["environment"], timeout_s=3.,
+                    endpoint="/accounts/{account_id}/pricing?instruments=" + ",".join(instruments) + "&includeHomeConversions=false"), 5.)
+                if not isinstance(result, dict) or not isinstance(result.get("prices"), list) or not result["prices"]:
+                    raise ValueError("Empty or malformed OANDA pricing response")
+                parsed, errors = {}, {}
+                for raw in result["prices"]:
+                    instrument = raw.get("instrument") if isinstance(raw, dict) else None
+                    if instrument not in instruments:
+                        continue
+                    try:
+                        item = _pepperstone_reference_quote(raw, instrument)
+                        if instrument not in parsed or Decimal(item["timestamp"]) > Decimal(parsed[instrument]["timestamp"]):
+                            parsed[instrument] = item
+                    except (ValueError, ArithmeticError):
+                        errors[instrument] = "Invalid OANDA instrument pricing evidence"
+                if not self.authoritative or self.service.reference_cache.get(scope) is not cache:
+                    return
+                cache.update(failures=0, blocked=False)
+                for instrument in instruments:
+                    incoming, old = parsed.get(instrument), cache["quotes"].get(instrument)
+                    if incoming is None:
+                        cache["errors"][instrument] = errors.get(instrument, "OANDA instrument price unavailable")
+                        continue
+                    if old and Decimal(incoming["timestamp"]) < Decimal(old.get("status_timestamp") or old["timestamp"]):
+                        cache["errors"][instrument] = "Older OANDA quote ignored"
+                        continue
+                    if incoming["price"] is None and old and old.get("price"):
+                        incoming = dict(old, tradeable=False, status_timestamp=incoming["timestamp"])
+                    elif old and Decimal(incoming["timestamp"]) == Decimal(old["timestamp"]) and incoming["price"] != old["price"]:
+                        cache["errors"][instrument] = "Conflicting OANDA quote ignored"
+                        continue
+                    cache["quotes"][instrument] = incoming
+                    cache["errors"].pop(instrument, None)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                if not self.authoritative or self.service.reference_cache.get(scope) is not cache:
+                    return
+                status = (getattr(exc, "status_code", None) or getattr(exc, "upstream_status", None)
+                          or getattr(exc, "http_status", None) or getattr(getattr(exc, "response", None), "status_code", None))
+                status = str(status) if str(status).isdigit() and len(str(status)) == 3 else None
+                message = "OANDA reference pricing timed out" if isinstance(exc, (TimeoutError, httpx.TimeoutException)) else "OANDA reference pricing unavailable"
+                if status:
+                    message += " (HTTP " + str(status) + ")"
+                cache["errors"].update({instrument: message for instrument in instruments})
+                cache["failures"] += 1
+                cache["blocked"] = str(status) in {"401", "403"}
+                cache["next"] = _open_orders_now() + min(60., 5. * 2 ** (cache["failures"] - 1))
+        finally:
+            for variable, token in reversed(tokens):
+                variable.reset(token)
+        if self.authoritative:
+            # Mark completion before publication so pending values become fresh immediately.
+            self.auxiliary.pop(("pepperstone-reference", scope), None)
+            self.publish()
+
+    def apply_reference_prices(self, rows):
+        groups, assignments = self.reference_groups(rows)
+        diagnostics = []
+        for row in rows:
+            reference = {"state": "unavailable", "price": None, "quote_time": None, "timestamp": None,
+                         "scope": None, "environment": None, "host": None,
+                         "diagnostic": "No configured OANDA reference feed or supported instrument"}
+            if row["id"] in assignments:
+                scope, instrument = assignments[row["id"]]
+                group = groups[scope]
+                cache = self.service.reference_cache.get(scope, {})
+                item = cache.get("quotes", {}).get(instrument, {})
+                task = self.auxiliary.get(("pepperstone-reference", scope))
+                pending = task is not None and not task.done()
+                error = cache.get("errors", {}).get(instrument)
+                state = "pending" if pending else "unavailable"
+                if item.get("tradeable") is False:
+                    state = "nontradeable"
+                elif item.get("price"):
+                    state = "stale" if error or Decimal(str(_pepperstone_reference_wall_time())) - Decimal(item["timestamp"]) > 30 else "last" if pending else "fresh"
+                reference.update(item, state=state, scope=scope, environment=group["environment"], host=group["host"], diagnostic=error)
+            row["reference_price"] = reference
+            row["current_price"] = reference.get("price")
+        for scope, group in groups.items():
+            cache = self.service.reference_cache.get(scope, {})
+            diagnostics.append({"scope": scope, "environment": group["environment"],
+                                "instruments": sorted(group["instruments"]), "diagnostics": sorted(set(cache.get("errors", {}).values()))})
+        return diagnostics
 
     @property
     def authoritative(self):
@@ -37491,6 +37668,7 @@ class _OpenOrdersJob:
         items, errors, warnings, coverage = [], [], [], []
         funding = {}
         local_rows = _pepperstone_local_tracker_rows()
+        reference_diagnostics = self.apply_reference_prices(local_rows)
         for entry in self.sources.values():
             if not entry["core"] and entry["state"] in {"complete", "failed", "pending"}:
                 for row in entry["items"]:
@@ -37549,6 +37727,7 @@ class _OpenOrdersJob:
         if not self.authoritative:
             return
         payload.update({"sources": coverage, "pending": self.pending, "core_complete": core_complete,
+                        "reference_price_sources": reference_diagnostics,
                         "empty_confirmed": core_complete and not items, "stale": not core_complete or bool(errors),
                         "collection_version": self.version})
         # Revisions describe publications, never invalidate the broker generation.
@@ -37591,6 +37770,7 @@ class _OpenOrdersService:
         self.revision = 0
         self.closed = False
         self.retired = set()
+        self.reference_cache = {}
 
     def invalidate(self):
         if self.job is None or self.job.obsolete:
@@ -37620,6 +37800,8 @@ class _OpenOrdersService:
                 self.job.start()
         else:
             self.job.poll(deliberate)
+        self.job.poll_reference_prices(deliberate)
+        self.job.publish()
         return copy.deepcopy(self.job.payload)
 
     async def close(self):
