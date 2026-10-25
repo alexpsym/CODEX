@@ -10,7 +10,7 @@ FT6 automatic stop after 100 completed strategy trades (2026-10-25)
 - Guide update documents the default, unlimited value, counting scope, automatic pause and export workflow.
 - Limitation: the five checks are synthetic API cases; no live FT6 replay was started. A real stop and export can be confirmed on Alex's next standard test.
 - Handoff: open strategy settings, retain preset 6, confirm Maximum completed strategy trades is 100, click Apply, then restart/start the next standard test from 1 August 2023. FT6 should pause after 100 matching trades close; chart, account history and statistics remain available for export.
-- Git delivery: repository-root `PATCH_DESKTOP_PUSH.bat` will be run through the task-scoped adapter and protected `alexpsym_git_delivery.py push` route. The task remains incomplete until the route verifies local `master` equals `origin/master`.
+- Git delivery: repository-root `PATCH_DESKTOP_PUSH.bat` completed through the task-scoped adapter and protected `alexpsym_git_delivery.py push` route. Commit `9c4cb5f4c20b090f6ad45479a9acc60277ebe1c1` was pushed; the BAT verified local `master` matched `origin/master`. This final delivery record is included in a follow-up scoped run through the same required path.
 JOB 5 - Approximate OANDA reference prices for local Pepperstone rows
 Implementation and targeted verification complete; scoped delivery prepared.
 
