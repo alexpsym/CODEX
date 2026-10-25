@@ -380,8 +380,10 @@ void TradeLimitStop()
   {
     Fresh();MaximumCompletedStrategyTrades=1;AddClosed(2000+mode);runSettingsResolved=true;
     if(mode==0)SetupModeSetting=0;else if(mode==1)ImpulseEntryMode=0;else SetupModeSetting=1;
-    series[0].t+=5.0/1440;GetSingleTick();
-    int before=attempts;Check(pauseCalls==1&&attempts==before,"range/confirmation/first-touch dispatch boundaries block after threshold");
+    touchActive=true;touchLevel=askQuote;touchActivationTick=0;dir=1;setupExtreme=2.0;
+    series[0].t+=5.0/1440;GetSingleTick(); // new-bar dispatch
+    GetSingleTick(); // intrabar dispatch / simulated manual resume
+    Check(pauseCalls==1&&attempts==0&&tradeLimitBlocked,"range/confirmation/first-touch new-bar and intrabar boundaries block after threshold");
   }
 }
 void TradeLimitHistory()
@@ -401,6 +403,9 @@ void TradeLimitHistory()
   Fresh();MaximumCompletedStrategyTrades=1;AddClosed(1);IntrfProcsRec.pPause=NULL;GetSingleTick();
   Check(tradeLimitBlocked&&pauseCalls==0&&Logged("Pause API unavailable")&&attempts==0,"missing pause context reports failure and blocks entry");
   IntrfProcsRec.pPause=(void*)1;
+  Fresh();MaximumCompletedStrategyTrades=1;IntrfProcsRec.pHistoryTotal=NULL;GetSingleTick();
+  Check(tradeLimitBlocked&&pauseCalls==1&&Logged("required history API/context unavailable")&&attempts==0,"missing history context is reported, paused and entry-blocked");
+  IntrfProcsRec.pHistoryTotal=(void*)1;
   Fresh();MaximumCompletedStrategyTrades=1;AddClosed(1);failHistorySelect=true;GetSingleTick();
   Check(tradeLimitBlocked&&pauseCalls==1&&Logged("history order selection failed")&&attempts==0,"history selection failure reports and pauses");
 }
