@@ -181,6 +181,85 @@ sys.modules[SPEC.name] = master_service
 SPEC.loader.exec_module(master_service)
 
 
+def test_pepperstone_ready_quote_persists_local_tracker_intent(monkeypatch, tmp_path):
+    import threading
+    service = master_service
+    path = tmp_path / "contexts.json"
+    real_upsert, real_invalidate = service._upsert_calculator_trade_context, service._invalidate_open_orders_cache
+    _mock_pepperstone_quote_dependencies(monkeypatch)
+    monkeypatch.setattr(service, "_upsert_calculator_trade_context", real_upsert)
+    monkeypatch.setattr(service, "_invalidate_open_orders_cache", real_invalidate)
+    monkeypatch.setattr(service, "TRADE_CONTEXTS_PATH", path)
+    monkeypatch.setattr(service, "_TRADE_CONTEXTS_CACHE", {})
+    monkeypatch.setattr(service, "_TRADE_CONTEXTS_LOCK", threading.RLock())
+    monkeypatch.setattr(service, "_OPEN_ORDERS_CACHE", {"version": 10})
+    monkeypatch.setattr(service, "_OPEN_ORDERS_SERVICES", {})
+    monkeypatch.setattr(service, "_PEPPERSTONE_QUOTE_SNAPSHOTS", {})
+    monkeypatch.setattr(service, "_schedule_dropbox_upload_state_backup", lambda: None)
+    monkeypatch.setenv("PEPPERSTONE_SPREAD_EXPORT_PATH", str(tmp_path / "missing.json"))
+    async def forbidden(*args, **kwargs):
+        raise AssertionError("Tracking must not download or execute")
+    monkeypatch.setattr(service, "calculator_pepperstone_set", forbidden)
+    monkeypatch.setattr(service.httpx.AsyncClient, "request", forbidden)
+
+    async def scenario():
+        async def quote(**changes):
+            request = _pepperstone_quote_payload(target_mode="ticks", take_profit_ticks="25",
+                timeframe="5m", test_trade=True, setup="Pullback", pattern="range", ema="9",
+                vwap="Yes", aths_atls="All-Time High", round_number="Yes")
+            request.update(changes)
+            return json.loads((await service.calculator_quote(request)).body)
+        limit = await quote(calculation_context_id="same-id", order_type="limit", entry_price="1.3")
+        assert limit["pepperstone_mt5_export_status"]["file_ready"] is True
+        assert limit["pepperstone_mt5_export_status"]["broker_check_state"] == "pending"
+        assert limit["calculation_context_saved"] is True
+        disk = json.loads(path.read_text())["items"]
+        assert len(disk) == 1 and disk[0]["local_tracking"] is True  # Before any download.
+        row = disk[0]
+        assert row["planned_entry_price"] == limit["entry_price"]
+        assert row["planned_stop_price"] == limit["stop_price"]
+        assert row["planned_target_price"] == limit["target_price"]
+        for key in ("risk_mode", "risk_value", "target_mode", "stop_loss_ticks", "take_profit_ticks",
+                    "timeframe", "is_test_trade", "setup", "pattern", "ema", "vwap", "aths_atls", "round_number"):
+            assert row.get(key) is not None, key
+        assert row["chart_tick_size"] == row["calculator_distance_tick_size"] == "0.00001"
+        assert Decimal(row["original_stop_distance"]) == abs(Decimal(limit["entry_price"]) - Decimal(limit["stop_price"]))
+        assert Decimal(row["original_target_distance"]) == abs(Decimal(limit["target_price"]) - Decimal(limit["entry_price"]))
+        await quote(calculation_context_id="same-id", order_type="limit", entry_price="1.3")
+        market = await quote(calculation_context_id="same-id", account="live", order_type="market")
+        await quote(calculation_context_id="distinct", order_type="market")
+        disk = json.loads(path.read_text())["items"]
+        assert len(disk) == 3
+        actual = next(item for item in disk if item["account"] == "live")
+        assert actual["execution_verified"] is False
+        assert actual["execution_status"] == "Awaiting MT5 fill price"
+        assert not actual.get("execution_price")
+        assert actual["planned_entry_price"] == market["entry_price"]
+        service._PEPPERSTONE_QUOTE_SNAPSHOTS.clear()
+        service._TRADE_CONTEXTS_CACHE.clear()
+        assert len(service._pepperstone_local_tracker_rows()) == 3
+        assert service._OPEN_ORDERS_CACHE["version"] > 10
+        before = path.read_bytes()
+        with pytest.raises(service.HTTPException):
+            await quote(calculation_context_id="invalid", stop_loss_ticks="0")
+        assert path.read_bytes() == before
+        export = _write_pepperstone_point_export(tmp_path, [_pepperstone_point_entry("GBPUSD", "GBPUSD.a", "0.00001")])
+        monkeypatch.setenv("PEPPERSTONE_SPREAD_EXPORT_PATH", str(export))
+        blocked = await quote(calculation_context_id="ineligible", stop_loss_ticks="1")
+        assert blocked["pepperstone_mt5_export_status"]["file_ready"] is False
+        assert len(service._pepperstone_local_tracker_rows()) == 3
+        # A durable write failure must propagate instead of claiming success.
+        def failed_save(*args, **kwargs):
+            raise OSError("fixture disk failure")
+        monkeypatch.setattr(service, "_save_trade_contexts", failed_save)
+        with pytest.raises(service.HTTPException) as error:
+            await quote(calculation_context_id="save-failed", stop_loss_ticks="100")
+        assert error.value.status_code == 502
+        assert error.value.detail["code"] == "CALC_CONTEXT_SAVE_FAILED"
+        assert not any(item["calculation_context_id"] == "save-failed" for item in json.loads(path.read_text())["items"])
+    asyncio.run(asyncio.wait_for(scenario(), 15))
+
+
 
 def _clear_calculator_caches() -> None:
     for name in [

@@ -186,6 +186,13 @@
   const renderPriceCell=(entry,state)=>{
     if(state.draft){updatePriceCell(entry,state);return;}
     state.td.innerHTML='';
+    if(entry.item.local_tracking){
+      const item=entry.item;
+      const planned=state.field==='entry'?item.planned_entry_price:state.field==='stop_loss'?item.planned_stop_price:item.planned_target_price;
+      const text=document.createElement('span');
+      text.textContent=state.field==='entry'&&String(item.order_type).toLowerCase()==='market'?'Unknown (awaiting MT5 fill)':`${fmt(planned)} (planned)`;
+      state.td.appendChild(text);return;
+    }
     const p=entry.item.price_edit,value=p?.levels?.[state.field]??(state.field==='entry'?(entry.item.entry_price||entry.item.order_price):entry.item[state.field]);
     if(state.saved&&state.savedValue!==value)state.saved=false;
     const text=document.createElement('span');text.textContent=String(fmt(value));state.td.appendChild(text);
@@ -346,7 +353,7 @@
     state.feedback=document.createElement('span');state.feedback.className='classification-feedback';state.feedback.setAttribute('role','status');state.td.appendChild(state.feedback);
     updateCellAvailability(entry,state);select.focus?.();
   };
-  const rowValues = item => [item.venue||item.broker,resolveAccountLabel(item),item.asset,item.category,item.side,item.order_type,item.instrument,item.stop_loss_ticks,item.target_mode_display,item.take_profit_ticks,item.risk_mode_display,item.risk_value_display,item.risk_reward,item.timeframe,item.is_test_trade,item.setup,item.pattern,item.ema,item.vwap,item.aths_atls,item.round_number,item.webhook_mode,item.webhook_status,item.webhook_classification,item.planned_entry_price,item.planned_stop_price,item.planned_target_price,item.type,item.size,item.entry_price||item.order_price,item.current_price,item.stop_loss,item.take_profit,item.leverage,item.type==='Position'?item.funding_paid:null,item.type==='Position'?item.funding_received:null,item.type==='Position'?item.net_funding:null,formatTimestamp(item.opened_at),item.status];
+  const rowValues = item => [item.venue||item.broker,resolveAccountLabel(item),item.asset,item.category,item.side,item.order_type,item.instrument,item.stop_loss_ticks,item.target_mode_display,item.take_profit_ticks,item.risk_mode_display,item.risk_value_display,item.risk_reward,item.timeframe,item.is_test_trade,item.setup,item.pattern,item.ema,item.vwap,item.aths_atls,item.round_number,item.webhook_mode,item.webhook_status,item.webhook_classification,item.planned_entry_price,item.planned_stop_price,item.planned_target_price,item.type,item.quantity_is_estimate?`${item.size??''} (est.)`:item.size,item.local_tracking?'':(item.entry_price||item.order_price),item.current_price,item.stop_loss,item.take_profit,item.leverage,item.type==='Position'?item.funding_paid:null,item.type==='Position'?item.funding_received:null,item.type==='Position'?item.net_funding:null,formatTimestamp(item.opened_at),item.status];
   const render=(items,errors=[],warnings=[],coverage=window.__openOrdersCoverage||{})=>{
     window.__openOrdersItems=Array.isArray(items)?items:[];window.__openOrdersErrors=Array.isArray(errors)?errors:[];window.__openOrdersWarnings=Array.isArray(warnings)?warnings:[];
     if(!tbody)return;hasData=Boolean(items.length);renderDiagnostics(errorsBox,errorsList,errors,'Source errors');renderDiagnostics(warningsBox,warningsList,warnings,'Source warnings');

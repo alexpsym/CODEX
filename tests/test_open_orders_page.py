@@ -42,6 +42,212 @@ def test_scripts_listing_excludes_open_orders_button() -> None:
     assert row is None
 
 
+@pytest.fixture(scope="module")
+def _pepperstone_tracker_payloads(tmp_path_factory):
+    import threading
+    service = master_service
+    path = tmp_path_factory.mktemp("pepperstone") / "contexts.json"
+    with pytest.MonkeyPatch.context() as patch:
+        for name, value in {
+            "APP_PROFILE": "local", "TRADE_CONTEXTS_PATH": path,
+            "_TRADE_CONTEXTS_CACHE": {}, "_TRADE_CONTEXTS_LOCK": threading.RLock(),
+            "_OPEN_ORDERS_CACHE": {"version": 100, "payload": None},
+            "_OPEN_ORDERS_SERVICES": {}, "_OPEN_ORDERS_LAST_GOOD_ITEMS": {},
+            "_PEPPERSTONE_QUOTE_SNAPSHOTS": {}, "_PRICE_TARGETS": {}, "_PRICE_CONFIRMED": {},
+            "_load_pending_webhooks": lambda: [], "_load_bounce_traders": lambda: [],
+            "_schedule_dropbox_upload_state_backup": lambda: None,
+            "_open_orders_configuration": lambda: ([], "pepperstone-fixture"),
+        }.items():
+            patch.setattr(service, name, value)
+        patch.setattr(service.script_manager, "get", lambda name: type("Stopped", (), {"is_running": False})())
+        async def forbidden(*args, **kwargs):
+            raise AssertionError("No external access in tracker fixture")
+        patch.setattr(service.httpx.AsyncClient, "request", forbidden)
+        async def scenario():
+            gate = asyncio.Event()
+            broker = {"broker": "OANDA", "account": "demo", "category": "forex", "instrument": "EUR_USD",
+                      "side": "Buy", "type": "Order", "id": "broker-order", "size": "100",
+                      "order_price": "1.1", "status": "Pending"}
+            def start(job):
+                async def existing():
+                    return {"items": [broker], "errors": []}
+                async def unavailable():
+                    await gate.wait()
+                    return {"items": [], "errors": [{"message": "Fixture broker unavailable", "failure_kind": "authentication_or_permission"}],
+                            "warnings": [{"message": "Fixture coverage warning"}]}
+                job.add("oanda-fixture", {"broker": "OANDA", "account": "demo", "category": "forex", "source_type": "orders"}, existing)
+                job.add("bybit-fixture", {"broker": "Bybit", "account": "demo", "category": "linear", "source_type": "orders"}, unavailable)
+                job.publish()
+            patch.setattr(service._OpenOrdersJob, "start", start)
+            async def snapshot():
+                return json.loads((await service.list_open_orders()).body)
+            try:
+                await snapshot()
+                await asyncio.sleep(0)
+                before = await snapshot()
+                base = {"calculation_context_id": "shared-id", "broker": "pepperstone", "account": "demo", "category": "forex",
+                        "asset": "fx", "instrument": "GBP_USD", "side": "buy", "order_type": "limit", "status": "QUOTED",
+                        "local_tracking": True, "local_tracking_kind": "pepperstone_calculator", "planned_entry_price": "1.2",
+                        "planned_stop_price": "1.1", "planned_target_price": "1.4", "quantity": "1000", "planned_quantity_estimate": "1000",
+                        "stop_loss_ticks": "100", "take_profit_ticks": "200", "target_mode": "ticks", "risk_mode": "fixed_aud", "risk_value": "10",
+                        "calculator_distance_tick_size": "0.001", "chart_tick_size": "0.001", "original_stop_distance": "0.1", "original_target_distance": "0.2",
+                        "timeframe": "5m", "is_test_trade": True, "setup": "Pullback", "pattern": "range", "ema": "9", "vwap": "Yes",
+                        "aths_atls": "All-Time High", "round_number": "Yes"}
+                for ctx in (base, base, dict(base, account="live", order_type="market"),
+                            dict(base, calculation_context_id="distinct", order_type="market"),
+                            dict(base, calculation_context_id="historical", local_tracking=False)):
+                    service._upsert_calculator_trade_context(ctx)
+                # The normal version endpoint publishes the new generation, without a manual force refresh.
+                version = json.loads((await service.open_orders_version()).body)
+                waiting = await snapshot()
+                assert version["version"] > before["version"]
+                assert waiting["pending"] and len([r for r in waiting["items"] if r.get("local_tracking")]) == 3
+                gate.set()
+                job = service._OPEN_ORDERS_SERVICES[asyncio.get_running_loop()].job
+                await _open_orders_eventually(lambda: all(source["task"] is None for source in job.sources.values()))
+                failed = await snapshot()
+                persisted = path.read_bytes()
+                await service._shutdown_open_orders_jobs()
+                service._TRADE_CONTEXTS_CACHE.clear()
+                service._PEPPERSTONE_QUOTE_SNAPSHOTS.clear()
+                service._OPEN_ORDERS_CACHE.update(payload=None)
+                await snapshot()
+                job = service._OPEN_ORDERS_SERVICES[asyncio.get_running_loop()].job
+                await _open_orders_eventually(lambda: all(source["task"] is None for source in job.sources.values()))
+                reloaded = await snapshot()
+                assert path.read_bytes() == persisted
+                return before, waiting, failed, reloaded
+            finally:
+                await service._shutdown_open_orders_jobs()
+        yield asyncio.run(asyncio.wait_for(scenario(), 15))
+
+
+def test_pepperstone_local_tracker_rows_survive_reload_without_broker_data(_pepperstone_tracker_payloads):
+    before, waiting, failed, reloaded = _pepperstone_tracker_payloads
+    identities = None
+    for payload in (waiting, failed, reloaded):
+        rows = [row for row in payload["items"] if row.get("local_tracking")]
+        assert len(rows) == 3
+        current = {row["id"] for row in rows}
+        assert len(current) == 3
+        if identities is not None:
+            assert current == identities
+        identities = current
+        for row in rows:
+            assert row["current_price"] is None and row["actual_pnl"] is None
+            assert row["execution_verified"] is False and row["quantity_is_estimate"] is True
+            assert row["risk_mode_display"] == "Fixed AUD" and row["risk_value_display"] == "AUD 10"
+            assert row["timeframe"] == "5MIN" and row["is_test_trade"] == "Yes"
+            assert row["setup"] == "Pullback" and row["pattern"] == "Range"
+            assert row["original_stop_distance"] == "0.1" and row["chart_tick_size"] == "0.001"
+            if row["order_type"] == "Market":
+                assert row["status"] == "Awaiting MT5 fill price" and row["execution_price"] is None and row["entry_price"] is None
+            else:
+                assert row["entry_price"] == "1.2" and "execution unverified" in row["status"]
+        assert not payload["core_complete"]
+        assert payload["source_counts"]["live_broker_positions"] == 0
+        assert payload["source_counts"]["live_broker_orders"] <= 1
+    assert failed["errors"] and failed["warnings"] and reloaded["errors"]
+    assert reloaded["source_counts"]["live_broker_orders"] == 1
+    assert any(row["id"] == "broker-order" for row in reloaded["items"])
+
+
+def test_pepperstone_local_tracker_rows_never_route_broker_actions(monkeypatch, tmp_path):
+    service = master_service
+    monkeypatch.setattr(service, "APP_PROFILE", "local")
+    monkeypatch.setattr(service, "_PRICE_OPERATIONS_PATH", tmp_path / "operations.json")
+    monkeypatch.setattr(service, "_PRICE_LOCKS", {})
+    calls = []
+    async def forbidden(*args, **kwargs):
+        calls.append("broker")
+        raise AssertionError("broker route reached")
+    for name in ("_cancel_bybit_order", "_close_bybit_position", "_cancel_oanda_order", "_close_oanda_trade", "_fetch_oanda_json", "_bybit_signed_post", "_price_read", "calculator_pepperstone_set"):
+        if hasattr(service, name):
+            monkeypatch.setattr(service, name, forbidden)
+    def forbidden_credentials(*args, **kwargs):
+        calls.append("credentials")
+        raise AssertionError("credentials route reached")
+    monkeypatch.setattr(service, "_get_oanda_config", forbidden_credentials)
+    monkeypatch.setattr(service, "resolve_bybit_credentials_for", forbidden_credentials)
+    async def scenario():
+        for broker in ("pepperstone", "Pepperstone"):
+            for kind in ("order", "position", "trade"):
+                row = {"broker": broker, "account": "demo", "category": "forex", "type": kind, "id": "x"}
+                with pytest.raises(service.HTTPException) as error:
+                    await service.close_open_order(row)
+                assert error.value.status_code == 400 and "do not support broker actions" in error.value.detail
+                with pytest.raises(ValueError, match="do not support broker actions"):
+                    await service._verify_open_order_action(row)
+        # Even a server target with erroneously advertised editable fields must fail closed.
+        monkeypatch.setattr(service, "_PRICE_TARGETS", {"local-target": {"broker": "Pepperstone", "local_tracking": True, "price_edit": {"fields": ["entry"]}}})
+        with pytest.raises(service.HTTPException) as error:
+            await service.amend_open_order({"operation_id": "pepperstone-test-operation", "target": "local-target", "field": "entry", "mode": "price", "value": "1.2", "base": {}})
+        assert error.value.status_code == 400 and "do not support broker actions" in error.value.detail
+    asyncio.run(asyncio.wait_for(scenario(), 5))
+    assert calls == [] and not service._PRICE_OPERATIONS_PATH.exists()
+
+
+def test_pepperstone_local_tracker_rows_render_and_refresh(_pepperstone_tracker_payloads):
+    node = shutil.which("node")
+    assert node
+    headers = re.findall(r"<th>(.*?)</th>", master_service.OPEN_ORDERS_TEMPLATE)
+    harness = r'''
+const fs=require('fs'),assert=require('assert');
+class Element {
+  constructor(tag=''){this.tag=tag;this.children=[];this.parentNode=null;this.style={};this._text='';this.dataset={};this.handlers={};}
+  set textContent(v){this.innerHTML='';this._text=String(v);}
+  get textContent(){return this._text+this.children.map(c=>c.textContent).join('');}
+  set innerHTML(v){this.children.forEach(c=>c.parentNode=null);this.children=[];this._text=String(v);}
+  appendChild(c){this.insertBefore(c,null);return c;}
+  insertBefore(c,b){if(c===b)return;if(c.parentNode)c.remove();const i=b?this.children.indexOf(b):this.children.length;this.children.splice(i,0,c);c.parentNode=this;}
+  remove(){if(this.parentNode){const p=this.parentNode;p.children.splice(p.children.indexOf(this),1);this.parentNode=null;}}
+  addEventListener(e,f){this.handlers[e]=f;} setAttribute(k,v){this[k]=v;} querySelector(){return null;}
+}
+const {payloads,headers}=JSON.parse(fs.readFileSync(0,'utf8'));let current=payloads[0];
+const tbody=new Element('tbody'),table=new Element('table');table.querySelector=()=>tbody;
+const elements={'open-orders-table':table};for(const id of ['open-orders-status','open-orders-empty','refresh-btn','open-orders-errors','open-orders-warnings'])elements[id]=new Element();
+global.window={__OPEN_ORDERS_TESTING__:true,addEventListener(){}};
+global.document={hidden:false,getElementById:id=>elements[id]||null,createElement:t=>new Element(t),addEventListener(){}};
+global.BroadcastChannel=undefined;global.setInterval=()=>1;global.clearInterval=()=>{};
+const requests=[];global.fetch=async(url,opts={})=>{assert(!opts.method||opts.method==='GET');requests.push(url);return {ok:true,text:async()=>JSON.stringify(url.includes('/version')?{version:current.version,progress_revision:current.progress_revision}:current)};};
+eval(fs.readFileSync(process.argv[1],'utf8'));
+const walk=e=>[e,...e.children.flatMap(walk)];
+const cell=(row,label)=>row.children[headers.indexOf(label)];
+const flush=async()=>{for(let i=0;i<5;i++)await new Promise(resolve=>setImmediate(resolve));};
+(async()=>{
+  await flush();assert(tbody.children.length<=1);
+  for(const next of payloads.slice(1)){
+    current=next;await window.__openOrdersTestHooks.pollVersion();await flush();
+    assert.strictEqual(tbody.children.length,current.items.length);
+    for(const row of tbody.children){
+      assert.strictEqual(row.children.length,headers.length);
+      if(!cell(row,'Broker / Venue').textContent.includes('Pepperstone'))continue;
+      assert(cell(row,'Broker / Venue').textContent.includes('local MT5'));
+      assert(cell(row,'Size').textContent.includes('(est.)'));
+      assert.strictEqual(cell(row,'Planned Entry').textContent,'1.2');
+      assert.strictEqual(cell(row,'Risk Value').textContent,'AUD 10');
+      assert.strictEqual(cell(row,'Timeframe').textContent,'5MIN');
+      assert.strictEqual(cell(row,'Setup').textContent,'Pullback');
+      assert.strictEqual(cell(row,'Current / Trigger').textContent,'\u2014');
+      assert(cell(row,'Stop Loss').textContent.includes('(planned)'));
+      assert(cell(row,'Take Profit').textContent.includes('(planned)'));
+      const market=cell(row,'Order Type').textContent==='Market';
+      assert.strictEqual(cell(row,'Entry / Order').textContent,market?'Unknown (awaiting MT5 fill)':'1.2 (planned)');
+      if(market)assert.strictEqual(cell(row,'Status').textContent,'Awaiting MT5 fill price');
+      assert(!walk(row).some(e=>e.tag==='button'&&['Close','Cancel','Amend','\u270e'].includes(e.textContent)));
+    }
+  }
+  assert(requests.includes('/api/open-orders/version'));assert(!requests.some(url=>url.includes('force=1')));
+  assert(tbody.children.some(row=>cell(row,'Broker / Venue').textContent==='OANDA'));
+  console.log('Pepperstone rendering, column alignment and automatic version/progress refresh passed');
+})().catch(e=>{console.error(e);process.exit(1);});
+'''
+    result = subprocess.run([node, "-e", harness, str(ROOT / "render/static/open_orders.js")],
+        input=json.dumps({"payloads": _pepperstone_tracker_payloads, "headers": headers}),
+        capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_render_profile_hides_open_orders_and_blocks_routes() -> None:
     render_service = _load_master_service("render_master_service_open_orders_render", "render")
     payload = json.loads(asyncio.run(render_service.list_scripts()).body.decode("utf-8"))

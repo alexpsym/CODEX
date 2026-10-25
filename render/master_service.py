@@ -23143,6 +23143,8 @@ async def _amend_open_order(payload):
     if row is None:
         raise HTTPException(409, "Server-issued row identity unavailable; reload this cell")
     row = dict(row)
+    if row.get("local_tracking") or str(row.get("broker") or "").lower() == "pepperstone":
+        raise HTTPException(400, "Local Pepperstone calculator rows do not support broker actions.")
     field = payload["field"]
     if field not in row["price_edit"]["fields"]:
         raise HTTPException(400, "This field is read-only")
@@ -31618,6 +31620,21 @@ async def _calculator_quote_impl(request: Request, payload: Optional[Dict[str, o
                         "calculator_distance_tick_size": _fmt_dec(distance_tick_size),
                         "quote_created_at_ms": response_payload.get("quote_created_at_ms"),
                         "status": "QUOTED",
+                        **({"local_tracking": False} if is_pepperstone else {}),
+                        **({
+                            "local_tracking": True,
+                            "local_tracking_kind": "pepperstone_calculator",
+                            "execution_verified": False,
+                            "planned_quantity_estimate": response_payload.get("quantity"),
+                            "original_stop_distance": _fmt_dec(abs(entry - sl)),
+                            "original_target_distance": _fmt_dec(abs(tp - entry)),
+                            "chart_tick_size": _fmt_dec(pepperstone_chart_tick_size),
+                            "venue": "Pepperstone",
+                            "execution_status": "Awaiting MT5 fill price" if order_type == "market" else "Pending limit; execution unverified",
+                        } if is_pepperstone and (
+                            response_payload.get("pepperstone_mt5_export_status", {}).get("file_ready") is True
+                            or response_payload.get("pepperstone_mt5_export_status", {}).get("ready") is True
+                        ) else {}),
                     },
                     require_durable=True,
                     invalidate_cache=False,
@@ -36938,6 +36955,55 @@ def _open_orders_transient(errors):
                or error.get("transient") or error.get("retry_exhausted") for error in errors)
 
 
+def _pepperstone_local_tracker_rows():
+    """Build visible planning rows only from explicitly durable ready contexts."""
+    rows = {}
+    for ctx in _load_calculator_trade_contexts():
+        if (str(ctx.get("broker") or "").lower() != "pepperstone"
+                or ctx.get("local_tracking") is not True
+                or ctx.get("local_tracking_kind") != "pepperstone_calculator"):
+            continue
+        cid = str(ctx.get("calculation_context_id") or "").strip()
+        account = str(ctx.get("account") or "").lower()
+        if not cid or account not in {"demo", "live"}:
+            continue
+        order_type = str(ctx.get("order_type") or "").lower()
+        planned_entry = ctx.get("planned_entry_price")
+        status = "Awaiting MT5 fill price" if order_type == "market" else "Pending limit; execution unverified"
+        row = {
+            "id": f"pepperstone-local:{account}:{cid}", "calculation_context_id": cid,
+            "broker": "Pepperstone", "venue": "Pepperstone", "account": account,
+            "category": "forex", "asset": "fx", "instrument": ctx.get("instrument"),
+            "symbol": ctx.get("instrument"), "side": ctx.get("side"), "order_type": order_type,
+            "type": "Limit plan" if order_type == "limit" else "Market plan", "status": status, "execution_status": status,
+            "local_tracking": True, "execution_verified": False, "execution_price": None,
+            "entry_price": None if order_type == "market" else planned_entry,
+            "order_price": planned_entry, "planned_entry_price": planned_entry,
+            "planned_stop_price": ctx.get("planned_stop_price"), "planned_target_price": ctx.get("planned_target_price"),
+            "stop_loss": ctx.get("planned_stop_price"), "take_profit": ctx.get("planned_target_price"),
+            "current_price": None, "actual_pnl": None,
+            "size": ctx.get("planned_quantity_estimate", ctx.get("quantity")),
+            "quantity_is_estimate": True, "quantity_label": "Estimate",
+            "stop_loss_ticks": ctx.get("stop_loss_ticks"), "take_profit_ticks": ctx.get("take_profit_ticks"),
+            "target_mode": ctx.get("target_mode"), "risk_mode": ctx.get("risk_mode"),
+            "risk_value": ctx.get("risk_value"), "risk_reward": ctx.get("risk_reward"),
+            "chart_tick_size": ctx.get("chart_tick_size"),
+            "calculator_distance_tick_size": ctx.get("calculator_distance_tick_size"),
+            "original_stop_distance": ctx.get("original_stop_distance"),
+            "original_target_distance": ctx.get("original_target_distance"),
+            "timeframe": ctx.get("timeframe"), "is_test_trade": ctx.get("is_test_trade"),
+            "setup": ctx.get("setup"), "pattern": ctx.get("pattern"), "ema": ctx.get("ema"),
+            "vwap": ctx.get("vwap"), "aths_atls": ctx.get("aths_atls"),
+            "round_number": ctx.get("round_number"), "webhook_mode": ctx.get("webhook_mode"),
+            "webhook_status": ctx.get("webhook_status"), "opened_at": ctx.get("quote_created_at_ms"),
+            "source_key": "Pepperstone local calculator",
+        }
+        _enrich_open_item_with_trade_context(row, ctx)
+        row["venue"] = "Pepperstone (local MT5)"
+        rows[row["id"]] = row
+    return list(rows.values())
+
+
 class _OpenOrdersJob:
     def __init__(self, service, configurations, fingerprint, version):
         self.service, self.loop = service, service.loop
@@ -37265,6 +37331,7 @@ class _OpenOrdersJob:
             return
         items, errors, warnings, coverage = [], [], [], []
         funding = {}
+        local_rows = _pepperstone_local_tracker_rows()
         for entry in self.sources.values():
             if not entry["core"] and entry["state"] in {"complete", "failed", "pending"}:
                 for row in entry["items"]:
@@ -37313,6 +37380,7 @@ class _OpenOrdersJob:
                 items.append(row)
             if stale:
                 warnings.append(dict(entry["meta"], source_key=key, message="Showing stale prior broker rows; awaiting a successful source read."))
+        items.extend(local_rows)
         core_complete = bool(coverage) and all(row["state"] == "complete" for row in coverage if row["core"])
         complete = core_complete and not self.pending and not errors and not warnings
         # Reconciliation only sees fully confirmed current coverage, once per read cycle.
@@ -37428,7 +37496,7 @@ def _open_orders_payload(items, errors, warnings, collection_version, coverage_c
         _enrich_price_edit(row)
     items.sort(key=lambda row: (0 if str(row.get("broker")).lower() == "oanda" else 1,
                                 0 if row.get("account") == "live" else 1))
-    live_broker_items = list(items)
+    live_broker_items = [row for row in items if not row.get("local_tracking")]
     pending_diagnostics: Dict[str, int] = {}
     pending = _load_pending_webhooks()
     coverage_complete = coverage_complete and not errors and not warnings and int(_OPEN_ORDERS_CACHE.get("version") or 0) == collection_version
@@ -38064,6 +38132,8 @@ async def oanda_inactivity_status() -> JSONResponse:
 
 async def _verify_open_order_action(item: Dict[str, Any]) -> Dict[str, Any]:
     broker = str(item.get("broker", "")).strip().lower()
+    if broker == "pepperstone" or item.get("local_tracking") is True:
+        raise ValueError("Local Pepperstone calculator rows do not support broker actions.")
     account = str(item.get("account", "live")).strip().lower()
     category = str(item.get("category", "linear")).strip().lower()
     instrument = str(item.get("instrument", "")).strip().upper()
@@ -38133,6 +38203,9 @@ async def close_open_order(item: Dict[str, Any] = Body(...)) -> JSONResponse:
     instrument = str(item.get("instrument", "")).strip().upper()
     item_type = str(item.get("type", "")).strip().lower()
     item_id = str(item.get("id", "")).strip()
+
+    if broker == "pepperstone" or item.get("local_tracking") is True:
+        raise HTTPException(status_code=400, detail="Local Pepperstone calculator rows do not support broker actions.")
 
     if not broker or not item_type or not item_id:
         raise HTTPException(status_code=400, detail="Missing broker/type/id in request.")

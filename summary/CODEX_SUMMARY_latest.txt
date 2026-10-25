@@ -1,3 +1,44 @@
+JOB 3 / JOB 3A / JOB 3B — Pepperstone local tracker persistence
+Status: Targeted verification passed; scoped delivery prepared.
+
+Implemented behavior:
+- A successful Pepperstone calculation marks its existing durable calculator context for local tracking when the same ready/file-ready decision enables the .set download, including portable files with broker checks pending in Trader.
+- No download, broker connection, statement import, order submission or MT5 process is needed to create the row. Export contents, download behavior and one-shot execution tokens are unchanged.
+- Existing Open Orders version invalidation and scheduled publication expose context/account-scoped local rows, including when broker sources are pending or unavailable. Historical unmarked QUOTED contexts stay hidden.
+- Limit rows show planned entry/SL/TP with execution unverified. Market rows await MT5 fill, keep actual execution price unknown and distinguish planned prices from actual fills.
+- Preserve original distances, chart tick size, risk/target settings, timeframe, test flag and classification metadata. Quantities remain estimates; current price and actual P/L remain unknown.
+- Local rows do not count as confirmed broker exposure. Existing source diagnostics, Bybit/OANDA collection and grouping remain in place. Pepperstone Close/Cancel, verification and Amend routes reject broker actions.
+
+Diagnosis and repairs:
+- Original Job 3 invocation 1 exited 4 on an indentation error with zero collected nodes; the indentation was corrected.
+- Original invocation 2 logged setup ERROR on its first two nodes without tracebacks, final status or JUnit. Other nodes had no recorded results. Only its positively identified overdue workers (PIDs 22696/7956, exact Pepperstone command and 2026-10-25 09:08:43 start) were stopped. Unrelated Forex Tester 6 work was untouched.
+- Job 3A diagnostic invocation reproduced the calculator node's tmp_path setup OSError: sandbox pytest could not create its default numbered temporary directory. Exit 1; second selected node unexecuted due -x. The old second traceback was not recoverable.
+- Isolated repository-local temporary roots resolve that setup problem. Production code corrections also normalize local metadata through the existing enricher, prevent planned market quotes appearing as actual entry, and explicitly reject amendment routing.
+- Job 3A's final run passed the three backend nodes; browser startup failed with WinError 206 because serialized snapshots exceeded the Windows command-line limit. The harness now sends snapshots via stdin without weakening assertions.
+
+Exact focused results:
+- tests/test_master_service_calculator_api.py::test_pepperstone_ready_quote_persists_local_tracker_intent — PASSED in Job 3A.
+- tests/test_open_orders_page.py::test_pepperstone_local_tracker_rows_survive_reload_without_broker_data — PASSED in Job 3A.
+- tests/test_open_orders_page.py::test_pepperstone_local_tracker_rows_never_route_broker_actions — PASSED in Job 3A.
+- tests/test_open_orders_page.py::test_pepperstone_local_tracker_rows_render_and_refresh — PASSED in Job 3B, one selected node, exit 0 (7.12 seconds pytest time).
+- Job 3B log, JUnit and explicit process result: .job3b_verify_20261025/pytest.log, results.xml and process.json.
+- Job 3A artifacts remain in .job3a_diagnosis.* and .job3a_verify_final_20261025/. Its final process exit was 1 (3 passed, 1 harness startup failure).
+
+Budgets and isolation:
+- Original Job 3: 2 pytest invocations consumed separately.
+- Job 3A: 2 new invocations, 5 actual node executions, 4 distinct nodes, one AST-only syntax invocation.
+- Job 3B: 1 invocation, 1 selected node execution, no retries; three passing backend checks were not rerun.
+- Test state, locks, caches, source responses and scheduling isolated. Node timeout 15 seconds, pytest process timeout 180 seconds. No LTT startup, live verification, production-data operation, broker operation, application restart or subagent.
+- Only the four authorized implementation/test files and this task-owned summary belong in the task commit. Unrelated modified/untracked files and runtime state are excluded. No PATCH_DESKTOP_PUSH.bat, broad staging, pull, rebase, stash or force-push.
+
+Pending manual acceptance (not performed):
+After loading the delivered service, keep Open Orders open and calculate a Pepperstone limit or market plan without placing a trade. When .set download becomes ready, the correctly scoped Pepperstone local MT5 row must appear automatically before download and remain after page reload. A market row must say Awaiting MT5 fill price and keep actual fill unknown. Planned prices and estimated size must be labelled; no Close/Cancel/Amend controls should appear.
+
+LTT requires a restart/reload of its Python service to load this change; none was performed by Codex.
+Jobs 4 (manual MT5 fill and distance adjustment) and 5 (tracker prices) remain separate phases.
+
+Previous committed summary (preserved):
+
 FT6 direction-filtered impulse lifecycle fix (2026-10-25)
 
 - Root cause: TradeDirection suppressed opposite-direction direct seeds and provisional continuation in ProcessImpulseSetup. After a long was consumed, buys-only could retain its high through later bearish cycles (mirrored for sells-only), so new allowed-direction origins below/above that stale boundary remained blocked. This was a structural lifecycle lock, not evidence that a particular annual trade count is required.
