@@ -1,6 +1,7 @@
 #include <windows.h>
 #include <oleauto.h>
 #include <math.h>
+#include <float.h>
 #include <string.h>
 #include <stdio.h>
 #include "StrategyInterfaceUnit.h"
@@ -14,7 +15,13 @@ double VolumeLots=0.01, ClusterToleranceATR=0.35, MinimumRangeHeightATR=2.0;
 int MinimumRangeBars=10, MaximumRangeBars=250;
 double BreakoutBufferATR=0.10, MinimumBreakoutBodyATR=0.25, MinimumExtensionATR=0.75;
 int MaximumExtensionBars=20, MinimumOpposingCloses=2;
-int ImpulseEntryMode=0; // 0: legacy confirmation; 1: prospective first-touch ATR
+int ImpulseEntryMode=0; // 0 confirmation; 1 first-touch ATR; 2 qualified first pullback
+int QualifiedImpulseRangeLookbackBars=20;
+double QualifiedImpulseMinimumDisplacementATR=3.0,QualifiedImpulseBreakoutBufferATR=0.10,QualifiedPullbackMinimumDepth=25.0;
+bool qualifiedConfigValid=true,qualifiedRangeReady=false,impulseQualified=false;
+double qualifiedRangeHigh=0,qualifiedRangeLow=0;
+long qualifiedFirstSeedBar=-1,qualifyingBar=-1;
+TDateTime qualifyingTime=0;
 double ImpulseMinimumBodyATR=1.0,ImpulseMaximumBodyATR=0.0,ImpulseMinimumRangeATR=1.25,ImpulseMinimumRetracementATR=0.50,ImpulseMaximumDepth=75.0; int ImpulseMaximumPullbackBars=30;
 double MinimumRetracementATR=0.50;
 int PullbackDepthMode=0;
@@ -103,14 +110,16 @@ TouchBarPath liveTouchPath={0},closedTouchPath={0};
 // Covers the preset's 30-bar recovery window. Missing/partial older paths are
 // handled conservatively; no synthetic intrabar order is inferred from OHLC.
 TouchBarPath touchPaths[64]={0};int touchPathNext=0;
-bool FirstTouchMode(){return SetupModeSetting==1&&ImpulseEntryMode==1;}
+bool QualifiedMode(){return SetupModeSetting==1&&ImpulseEntryMode==2;}
+bool FirstTouchMode(){return SetupModeSetting==1&&(ImpulseEntryMode==1||ImpulseEntryMode==2);}
+void ResetQualification(){qualifiedRangeReady=impulseQualified=false;qualifiedRangeHigh=qualifiedRangeLow=0;qualifiedFirstSeedBar=qualifyingBar=-1;qualifyingTime=0;}
 void ResetTouch(){touchActive=false;touchLevel=0;touchActivationTime=0;touchActivationTick=0;}
 
 double Min(double a,double b){return a<b?a:b;} double Max(double a,double b){return a>b?a:b;}
 double Down(double p){ double q=Point(); return floor(p/q+1e-9)*q; }
 double Up(double p){ double q=Point(); return ceil(p/q-1e-9)*q; }
 void ResetProvisionalCandidates();
-void ResetSetup(){ResetTouch();stage=0;dir=0;opposing=0;breakout=extension=pullbackConfirmed=-1;pullbackStarted=false;hasFrozenExtension=false;hasMinorSwing=false;activeImpulseSetup=false;pullbackStartBar=-1;lastContainedDecisionBar=-1;ResetProvisionalCandidates();}
+void ResetSetup(){ResetTouch();ResetQualification();stage=0;dir=0;opposing=0;breakout=extension=pullbackConfirmed=-1;pullbackStarted=false;hasFrozenExtension=false;hasMinorSwing=false;activeImpulseSetup=false;pullbackStartBar=-1;lastContainedDecisionBar=-1;ResetProvisionalCandidates();}
 double ActiveMinimumRetracement(){return activeImpulseSetup?ImpulseMinimumRetracementATR:MinimumRetracementATR;}
 int ActiveMaximumPullbackBars(){return activeImpulseSetup?ImpulseMaximumPullbackBars:MaximumPullbackBars;}
 bool DepthExceeded(double depth,bool useRange,double rangeMaximum){return activeImpulseSetup?depth>ImpulseMaximumDepth:(useRange&&depth>rangeMaximum);}
@@ -146,7 +155,7 @@ void DiagnosticMarker(const char *kind,const TDateTime time,const double price,c
 void ClampTargetSettings(){WithTrendNeutralTargetR=Max(2.0,WithTrendNeutralTargetR);CounterTrendTargetR=Max(3.0,CounterTrendTargetR);}
 void ApplySettingsPreset()
 {
-  if(SettingsPreset<1||SettingsPreset>6) return;
+  if(SettingsPreset<1||SettingsPreset>7) return;
   // Non-Custom presets start from the registered defaults, then apply their compact experiment values.
   Timeframe=PERIOD_M15; TradeDirection=0; VolumeLots=0.01; SetupModeSetting=0; PivotStrength=3; MinimumReactions=2;
   ClusterToleranceATR=0.35; MinimumRangeHeightATR=2.0; MinimumRangeBars=10; MaximumRangeBars=250;
@@ -160,23 +169,27 @@ void ApplySettingsPreset()
   WithTrendNeutralTargetR=2.0; CounterTrendTargetR=3.0;
   if(SettingsPreset==2) ImpulseM15H4TrendFilter=1;
   if(SettingsPreset==3) TradeDirection=1;
-  if(SettingsPreset==4||SettingsPreset==5||SettingsPreset==6) Timeframe=PERIOD_M5;
+  if(SettingsPreset>=4) Timeframe=PERIOD_M5;
   if(SettingsPreset==5||SettingsPreset==6) ImpulseEntryMode=1;
-  if(SettingsPreset==6) TradeDirection=1;
+  if(SettingsPreset==6||SettingsPreset==7) TradeDirection=1;
+  if(SettingsPreset==7){ImpulseEntryMode=2;QualifiedImpulseRangeLookbackBars=20;QualifiedImpulseMinimumDisplacementATR=3.0;QualifiedImpulseBreakoutBufferATR=0.10;QualifiedPullbackMinimumDepth=25.0;}
 }
 void EmitPresetDiagnostic()
 {
-  char text[512]; const char *name=SettingsPreset==1?"Baseline":SettingsPreset==2?"Trend-filter test":SettingsPreset==3?"Baseline buys-only":SettingsPreset==4?"M5 Baseline":SettingsPreset==5?"M5 first-touch ATR":SettingsPreset==6?"M5 first-touch ATR buys-only":"Custom";
+  char text[768]; const char *name=SettingsPreset==1?"Baseline":SettingsPreset==2?"Trend-filter test":SettingsPreset==3?"Baseline buys-only":SettingsPreset==4?"M5 Baseline":SettingsPreset==5?"M5 first-touch ATR":SettingsPreset==6?"M5 first-touch ATR buys-only":SettingsPreset==7?"M5 qualified first pullback buys-only":"Custom";
   double lo=PullbackDepthMode==1?ShallowMinimumDepth:PullbackDepthMode==2?DeepMinimumDepth:PullbackDepthMode==3?CustomMinimumDepth:0;
   double hi=PullbackDepthMode==1?ShallowMaximumDepth:PullbackDepthMode==2?DeepMaximumDepth:PullbackDepthMode==3?CustomMaximumDepth:100;
   sprintf(text,"RBP preset=%s timeframe=%d setup=%d confirmation=%d direction=%d body=%.2f-%.2fATR depth=%.0f-%.0f%% depthMode=%d stop=%s targets=%.1f/%.1fR EMAtrend=%s scope=%d",name,Timeframe,SetupModeSetting,Confirmation,TradeDirection,ImpulseMinimumBodyATR,ImpulseMaximumBodyATR,Min(lo,hi),Max(lo,hi),PullbackDepthMode,StopModeSetting==0?"adaptive":"fixed",WithTrendNeutralTargetR,CounterTrendTargetR,ImpulseM15H4TrendFilter!=0?"on":"off",TrendFilterScope);
-  sprintf(text+strlen(text)," entryMode=%s touchATR=%.2f presetId=%d maxCompletedTrades=%d",ImpulseEntryMode==1?"first-touch-ATR":"confirmation",ImpulseMinimumRetracementATR,SettingsPreset,MaximumCompletedStrategyTrades);
+  sprintf(text+strlen(text)," entryMode=%s touchATR=%.2f presetId=%d maxCompletedTrades=%d",ImpulseEntryMode==2?"qualified-first-pullback":ImpulseEntryMode==1?"first-touch-ATR":"confirmation",ImpulseMinimumRetracementATR,SettingsPreset,MaximumCompletedStrategyTrades);
+  if(QualifiedMode())sprintf(text+strlen(text)," qualifiedLookback=%d qualifiedDisplacementATR=%.2f qualifiedBufferATR=%.2f qualifiedDepthPct=%.2f",QualifiedImpulseRangeLookbackBars,QualifiedImpulseMinimumDisplacementATR,QualifiedImpulseBreakoutBufferATR,QualifiedPullbackMinimumDepth);
   Print((PChar)text);
 }
+bool ValidateQualifiedSettings();
 void ResolveRunSettings()
 {
   if(runSettingsResolved) return;
   LoadCustomSettings(); ApplySettingsPreset(); ClampTargetSettings();
+  qualifiedConfigValid=ValidateQualifiedSettings();
   runSettingsResolved=true;
   if(MaximumCompletedStrategyTrades<0)PauseForTradeLimit("Maximum completed strategy trades must be 0 or greater");
   EmitPresetDiagnostic();
@@ -347,6 +360,17 @@ bool ImpulseDepthQualified(const double depth)
   double minimumDepth=0,maximumDepth=0;bool hasMaximum=false;SelectedDepthLimits(minimumDepth,maximumDepth,hasMaximum);
   return depth>0&&depth>=minimumDepth&&!ImpulseDepthExceeded(depth);
 }
+bool ValidateQualifiedSettings()
+{
+  if(!QualifiedMode())return true;
+  double lo=0,hi=0;bool limited=false;SelectedDepthLimits(lo,hi,limited);
+  double maximum=limited?Min(ImpulseMaximumDepth,hi):ImpulseMaximumDepth;
+  bool valid=QualifiedImpulseRangeLookbackBars>=1&&_finite(QualifiedImpulseMinimumDisplacementATR)&&QualifiedImpulseMinimumDisplacementATR>0&&
+    _finite(QualifiedImpulseBreakoutBufferATR)&&QualifiedImpulseBreakoutBufferATR>=0&&_finite(QualifiedPullbackMinimumDepth)&&
+    _finite(maximum)&&QualifiedPullbackMinimumDepth>0&&QualifiedPullbackMinimumDepth<maximum;
+  if(!valid)Print((PChar)"RBP qualified configuration error: finite lookback >=1, displacement >0, buffer >=0 and 0 < minimum depth < effective maximum required; entries blocked");
+  return valid;
+}
 double ImpulseDisplacement(){return dir==1?setupExtreme-impulseOrigin:impulseOrigin-setupExtreme;}
 double PullbackRetracement(){return dir==1?setupExtreme-pullbackExtreme:pullbackExtreme-setupExtreme;}
 double PullbackDepth(){double displacement=ImpulseDisplacement();return displacement>0?PullbackRetracement()/displacement*100.0:0;}
@@ -371,9 +395,11 @@ void LogSeedDecision(const int seedDirection,const char *decision,const char *re
 {
   char text[512];sprintf(text,"RBP seed %s dir=%s reason=%s body=%.2fATR range=%.2fATR busy=%s execution=%s",decision,DirectionName(seedDirection),reason,bodyATR,rangeATR,busy?"yes":"no",((seedDirection==1&&TradeDirection==2)||(seedDirection==-1&&TradeDirection==1))?"structure-only":"direction-permitted");EmitDiagnostic(text);
 }
+void BeginQualification(const long firstSeed);
+bool TryQualifyImpulse(const long bar);
 void StartImpulseAt(const int seedDirection,const double seedExtreme,const long endpointBar,const TDateTime endpointTime,const double origin,const long originBar,const TDateTime originTime,const double atr,const TDateTime seedTime,const char *eligibilityReason)
 {
-  ResetTouch();
+  ResetTouch();ResetQualification();
   dir=seedDirection;stage=IMPULSE_PARENT;activeImpulseSetup=true;setupATR=atr;impulseOrigin=origin;impulseOriginBar=originBar;impulseOriginTime=originTime;
   setupExtreme=seedExtreme;impulseEndpointBar=endpointBar;impulseEndpointTime=endpointTime;impulseSeedTime=seedTime;breakout=extension=endpointBar;
   pullbackStarted=false;pullbackStartBar=-1;opposing=0;hasMinorSwing=false;hasFrozenExtension=false;
@@ -381,10 +407,12 @@ void StartImpulseAt(const int seedDirection,const double seedExtreme,const long 
   sprintf(text,"RBP parent accepted dir=%s reason=%s origin=%s@%.5f seed=%s endpoint=%s@%.5f displacement=%.5f/%.2fATR execution=%s",DirectionName(dir),eligibilityReason,originText,impulseOrigin,seedText,endpointText,setupExtreme,ImpulseDisplacement(),setupATR>0?ImpulseDisplacement()/setupATR:0,((dir==1&&TradeDirection==2)||(dir==-1&&TradeDirection==1))?"structure-only":"direction-permitted");
   EmitDiagnostic(text);
   ResetProvisionalCandidates();
+  if(QualifiedMode())BeginQualification(endpointBar);
 }
 void StartImpulse(const int seedDirection,const double seedExtreme,const double origin,const long originBar,const TDateTime originTime,const char *eligibilityReason)
 {
   StartImpulseAt(seedDirection,seedExtreme,nbar,Time(1),origin,originBar,originTime,rmaATR,Time(1),eligibilityReason);
+  if(QualifiedMode())TryQualifyImpulse(nbar);
   if(FirstTouchMode()) ArmFirstTouch("armed");
 }
 void ObserveProvisional(const int seedDirection,const double seedExtreme,const int classification,const double bodyATR,const double rangeATR,const bool busy,const char *reason)
@@ -419,6 +447,7 @@ double ClosedLow(const long bar){return Low(ClosedBarShift(bar));}
 double ClosedClose(const long bar){return Close(ClosedBarShift(bar));}
 TDateTime ClosedTime(const long bar){return Time(ClosedBarShift(bar));}
 void ConsumeImpulse(const char *reason);
+void LogQualification(const char *event,const char *reason);
 bool RecoveredMinorPivot(const int direction,const long confirmationBar,double &price)
 {
   int strength=MinorSwingStrength<1?1:MinorSwingStrength;long center=confirmationBar-strength;
@@ -551,6 +580,7 @@ bool TryPromoteCandidate(ProvisionalImpulseCandidate &candidate)
   char originText[32],text[512];FormatTime(originTime,originText);
   sprintf(text,"RBP confirmed origin available dir=%s reason=%s origin=%s@%.5f provisionalFirstBar=%ld cumulative=%.5f/%.2fATR oversizedIncluded=%s evidence=%s",DirectionName(candidate.direction),reason,originText,origin,firstBar,displacement,displacement/candidate.seedATR,oversized?"yes":"no",oversized?(laterNormal?"later normal same-direction seed":"later same-direction endpoint advancement"):"normal provisional seed");EmitDiagnostic(text);
   StartImpulseAt(candidate.direction,initialEndpoint,initialEndpointBar,ClosedTime(initialEndpointBar),origin,originBar,originTime,candidate.seedATR,seedTime,reason);
+  if(QualifiedMode())qualifiedFirstSeedBar=firstBar;
   if(FirstTouchMode()) RecoverFirstTouchChronologically(firstBar);
   else RecoverProvisionalChronologically(firstBar+1);
   sprintf(text,"RBP provisional promoted dir=%s observedWhileBusy=%s replayStartBar=%ld currentBar=%ld finalStage=%d retrospectiveEntry=no",DirectionName(dir),observedBusy?"yes":"no",firstBar+1,nbar,stage);EmitDiagnostic(text);
@@ -563,6 +593,7 @@ void ClearUnqualifiedPullback()
 void ConsumeImpulse(const char *reason)
 {
   touchActive=false;
+  if(QualifiedMode())LogQualification("consume",reason);
   bool hadPullback=pullbackStarted;double retracement=hadPullback?PullbackRetracement():0,depth=hadPullback?PullbackDepth():0;int closeCount=opposing;
   consumedDirection=dir;consumedExtreme=setupExtreme;consumedBar=nbar;stage=IMPULSE_CONSUMED;pullbackStarted=false;activeImpulseSetup=true;
   char endpointText[32],startText[32],text[512];FormatTime(impulseEndpointTime,endpointText);FormatTime(pullbackStartTime,startText);
@@ -695,10 +726,53 @@ bool ImpulseTrendConsensus(const int entryDirection,bool &ready)
   ready=true;
   return entryDirection==1 ? ema50>ema200&&ema10>ema30 : ema50<ema200&&ema10<ema30;
 }
+double RequiredTouchRetracement()
+{
+  double ret=ImpulseMinimumRetracementATR*setupATR;
+  return QualifiedMode()?Max(ret,QualifiedPullbackMinimumDepth/100.0*ImpulseDisplacement()):ret;
+}
+void LogQualification(const char *event,const char *reason)
+{
+  char text[512],when[32];FormatTime(qualifyingTime,when);
+  sprintf(text,"RBP qualified %s dir=%s reason=%s range=%.5f/%.5f originBar=%ld origin=%.5f endpointBar=%ld endpoint=%.5f displacement=%.5f/%.2fATR required=%.5f qualifyingBar=%ld qualifyingTime=%s",event,DirectionName(dir),reason,qualifiedRangeLow,qualifiedRangeHigh,impulseOriginBar,impulseOrigin,impulseEndpointBar,setupExtreme,ImpulseDisplacement(),setupATR>0?ImpulseDisplacement()/setupATR:0,RequiredTouchRetracement(),qualifyingBar,when);EmitDiagnostic(text);
+}
+void BeginQualification(const long firstSeed)
+{
+  qualifiedFirstSeedBar=firstSeed;
+  int originShift=ClosedBarShift(impulseOriginBar);
+  // Full pre-origin window only; origin and every later candle are excluded.
+  if(!qualifiedConfigValid||!_finite(setupATR)||setupATR<=0||originShift<1||
+     QualifiedImpulseRangeLookbackBars<1||(unsigned long)originShift>=Bars()||
+     (unsigned long)QualifiedImpulseRangeLookbackBars>=Bars()-(unsigned long)originShift)
+  {LogQualification("pending","full pre-origin window or valid ATR unavailable");return;}
+  for(int i=1;i<=QualifiedImpulseRangeLookbackBars;i++)
+  {
+    int shift=originShift+i;double h=High(shift),l=Low(shift);
+    if(!_finite(h)||!_finite(l)||h<=0||l<=0||h<l||Time(shift)<=0){LogQualification("pending","invalid pre-origin history");return;}
+    if(i==1){qualifiedRangeHigh=h;qualifiedRangeLow=l;}else{qualifiedRangeHigh=Max(qualifiedRangeHigh,h);qualifiedRangeLow=Min(qualifiedRangeLow,l);}
+  }
+  qualifiedRangeReady=true;LogQualification("pending","frozen full pre-origin range; awaiting completed close and displacement");
+}
+bool TryQualifyImpulse(const long bar)
+{
+  if(impulseQualified)return true;
+  if(!qualifiedConfigValid||!qualifiedRangeReady||bar<qualifiedFirstSeedBar||bar-qualifiedFirstSeedBar>ImpulseMaximumPullbackBars)return false;
+  double c=ClosedClose(bar),buffer=QualifiedImpulseBreakoutBufferATR*setupATR;
+  if(!_finite(c)||!(dir==1?c>qualifiedRangeHigh+buffer:c<qualifiedRangeLow-buffer)||
+     ImpulseDisplacement()<QualifiedImpulseMinimumDisplacementATR*setupATR)return false;
+  impulseQualified=true;qualifyingBar=bar;qualifyingTime=ClosedTime(bar);
+  LogQualification("qualified","completed close breakout and accepted displacement; live eligibility never backdated");return true;
+}
+void AbandonQualification(const char *reason)
+{
+  LogQualification("skip",reason);ResetTouch();ResetQualification();ResetProvisionalCandidates();
+  // Weak, never-qualified candidates do not create a consumed-parent boundary.
+  stage=consumedDirection!=0?IMPULSE_CONSUMED:0;activeImpulseSetup=stage==IMPULSE_CONSUMED;pullbackStarted=false;
+}
 double PlannedFirstTouch()
 {
   // Outward rounding requires at least the configured ATR retracement.
-  double raw=setupExtreme-dir*ImpulseMinimumRetracementATR*setupATR;
+  double raw=setupExtreme-dir*RequiredTouchRetracement();
   return dir==1?Down(raw):Up(raw);
 }
 bool TouchReached(const double quote,const double level){return dir==1?quote<=level:quote>=level;}
@@ -727,6 +801,14 @@ const TouchBarPath *ObservedTouchBar(const TDateTime time)
 }
 bool EndpointTouchPassed()
 {
+  if(QualifiedMode()&&impulseQualified)
+  {
+    for(long bar=impulseEndpointBar+1;bar<=qualifyingBar;bar++)
+    {
+      const TouchBarPath *prior=ObservedTouchBar(ClosedTime(bar));
+      if(TouchReached(dir==1?(prior?prior->minAsk:ClosedLow(bar)):ClosedHigh(bar),PlannedFirstTouch()))return true;
+    }
+  }
   const TouchBarPath *path=ObservedTouchBar(impulseEndpointTime);
   if(path&&fabs((dir==1?path->highBid:path->lowBid)-setupExtreme)<Point()*0.5)
     return TouchReached(dir==1?path->minAskAfterHigh:path->maxBidAfterLow,PlannedFirstTouch());
@@ -736,10 +818,12 @@ bool EndpointTouchPassed()
 }
 void ArmFirstTouch(const char *action)
 {
+  if(QualifiedMode()&&(!qualifiedConfigValid||!impulseQualified))return;
+  if(QualifiedMode())LogQualification(action,"prospective level activation");
   touchLevel=PlannedFirstTouch();touchActivationTime=TimeCurrent();touchActivationTick=tickSequence;
   char when[32],endpoint[32],text[512],label[80];FormatTickTime(touchActivationTime,when);FormatTime(impulseEndpointTime,endpoint);
   sprintf(text,"RBP touch %s dir=%s parentBar=%ld origin=%.5f endpoint=%s@%.5f frozenATR=%.5f planned=%.5f activation=%s tick=%llu rounding=long-down/short-up Point=%.8f",action,DirectionName(dir),breakout,impulseOrigin,endpoint,setupExtreme,setupATR,touchLevel,when,tickSequence,Point());EmitDiagnostic(text);
-  sprintf(label,"Touch %s %.5f",DirectionName(dir),touchLevel);
+  sprintf(label,"Touch %s%s %.5f",QualifiedMode()?"QFP ":"",DirectionName(dir),touchLevel);
   DiagnosticMarker("TOUCH",touchActivationTime,touchLevel,label,clYellow);
   DiagnosticMarker("START",impulseOriginTime,impulseOrigin,"I-start",clBlue);DiagnosticMarker("END",impulseEndpointTime,setupExtreme,"I-end",clBlue);
   double quote=dir==1?Ask():Bid();
@@ -757,7 +841,7 @@ void StartTouchPullback(const double bid,const long bar,const TDateTime when)
 }
 void ProcessFirstTouchTick(const bool historyReady)
 {
-  if(!FirstTouchMode()||!touchActive||tickSequence<=touchActivationTick)return;
+  if(!FirstTouchMode()||!touchActive||tickSequence<=touchActivationTick||(QualifiedMode()&&(!qualifiedConfigValid||!impulseQualified)))return;
   double bid=Bid(),ask=Ask(),quote=dir==1?ask:bid;
   if((dir==1?quote<setupExtreme:quote>setupExtreme))StartTouchPullback(bid,nbar,TimeCurrent());
   if(pullbackStarted)pullbackExtreme=dir==1?Min(pullbackExtreme,bid):Max(pullbackExtreme,bid);
@@ -785,11 +869,19 @@ void RecoverFirstTouchChronologically(const long firstBar)
 {
   // A level never existed live during these bars. Check the PREVIOUS endpoint's
   // level before accepting a newer endpoint, so a recovery cannot erase PB1.
-  if(EndpointTouchPassed()){ConsumeImpulse("touch already passed after recovered seed endpoint; no retrospective entry");return;}
-  long replayStart=impulseEndpointBar+1;
+  if(QualifiedMode())TryQualifyImpulse(firstBar);
+  if((!QualifiedMode()||impulseQualified)&&EndpointTouchPassed()){ConsumeImpulse("touch already passed after recovered seed endpoint; no retrospective entry");return;}
+  long replayStart=QualifiedMode()?firstBar+1:impulseEndpointBar+1;
   for(long bar=replayStart;bar<=nbar;bar++)
   {
     double level=PlannedFirstTouch(),h=ClosedHigh(bar),l=ClosedLow(bar),c=ClosedClose(bar);
+    if(QualifiedMode()&&!impulseQualified)
+    {
+      if(bar-qualifiedFirstSeedBar>ImpulseMaximumPullbackBars||ImpulseInvalidated(c)){AbandonQualification("pending recovery expired or invalidated");return;}
+      if(dir==1?h>setupExtreme:l<setupExtreme){setupExtreme=dir==1?h:l;impulseEndpointBar=bar;impulseEndpointTime=ClosedTime(bar);extension=bar;}
+      if(TryQualifyImpulse(bar)&&EndpointTouchPassed()){ConsumeImpulse("touch already passed at historical qualification; no retrospective entry");return;}
+      continue;
+    }
     if(ImpulseInvalidated(c)){ConsumeImpulse("first-touch recovered parent invalidated");return;}
     const TouchBarPath *path=ObservedTouchBar(ClosedTime(bar));
     double adverse=dir==1?(path?path->minAsk:l):h;
@@ -813,6 +905,13 @@ void RecoverFirstTouchChronologically(const long firstBar)
 }
 void ProcessFirstTouchBar(const double h,const double l,const double c)
 {
+  if(QualifiedMode()&&!impulseQualified)
+  {
+    if(nbar-qualifiedFirstSeedBar>ImpulseMaximumPullbackBars||ImpulseInvalidated(c)){AbandonQualification("pending expired or invalidated");return;}
+    if(dir==1?h>setupExtreme:l<setupExtreme){setupExtreme=dir==1?h:l;impulseEndpointBar=nbar;impulseEndpointTime=Time(1);extension=nbar;}
+    if(TryQualifyImpulse(nbar))ArmFirstTouch("armed");
+    return;
+  }
   if(!touchActive)return;
   if(ImpulseInvalidated(c)){ConsumeImpulse("first-touch closed-bar invalidation");return;}
   if(pullbackStarted&&nbar-pullbackStartBar>ActiveMaximumPullbackBars()){ConsumeImpulse("first-touch pullback expired");return;}
@@ -839,6 +938,13 @@ void ProcessImpulseSetup(const double o,const double h,const double l,const doub
 {
   bool busy=StrategyPositionOpen();int candleDirection=c>o?1:c<o?-1:0;double bodyATR=0,rangeATR=0;
   int seedClass=candleDirection==0?0:SeedClassification(candleDirection,o,h,l,c,bodyATR,rangeATR);
+  if(QualifiedMode()&&activeImpulseSetup&&!impulseQualified&&stage!=IMPULSE_CONSUMED)
+  {
+    double origin=0;long bar=-1;TDateTime time=0;
+    bool newer=candleDirection!=0&&seedClass==1&&LatestImpulseOrigin(candleDirection,origin,bar,time)&&bar>qualifiedFirstSeedBar;
+    if(nbar-qualifiedFirstSeedBar>ImpulseMaximumPullbackBars||ImpulseInvalidated(c)||newer)
+      AbandonQualification(newer?"new confirmed origin replaces incompatible pending parent":"pending expired or invalidated before current seed");
+  }
   if((stage==IMPULSE_PARENT||stage==IMPULSE_PULLBACK||stage==IMPULSE_ARMED)&&seedClass!=0&&lastContainedDecisionBar!=nbar)
   {
     char text[512];bool sameDirection=candleDirection==dir;
@@ -962,7 +1068,7 @@ void ProcessBar()
   if(FXBlocked(Time(0)))
   {
     Flatten();
-    if(FirstTouchMode()&&activeImpulseSetup){if(stage!=IMPULSE_CONSUMED)ConsumeImpulse("weekend blackout; first-touch parent retired");ResetProvisionalCandidates();}
+    if(FirstTouchMode()&&activeImpulseSetup){if(stage!=IMPULSE_CONSUMED){if(QualifiedMode()&&!impulseQualified)AbandonQualification("weekend blackout during pending qualification");else ConsumeImpulse("weekend blackout; first-touch parent retired");}ResetProvisionalCandidates();}
     else ResetSetup();
     ClearClusters();Status(true);return;
   }
@@ -978,7 +1084,7 @@ EXPORT void __stdcall InitStrategy()
 {
  runOptionCount=0; runSettingsResolved=false;
  StrategyShortName((PChar)"Range Breakout-Pullback"); StrategyDescription((PChar)"Closed-bar TradingView range breakout-pullback port");
- RegOption((PChar)"Settings preset (0 Custom, 1 Baseline, 2 Trend-filter test, 3 Baseline buys-only, 4 M5 Baseline, 5 M5 first-touch ATR, 6 M5 first-touch ATR buys-only)",ot_Integer,&SettingsPreset);
+ RegOption((PChar)"Settings preset (0 Custom, 1 Baseline, 2 Trend-filter test, 3 Baseline buys-only, 4 M5 Baseline, 5 M5 first-touch ATR, 6 M5 first-touch ATR buys-only, 7 M5 qualified first pullback buys-only)",ot_Integer,&SettingsPreset);
  AddSeparator((PChar)"General execution/setup");
  RegOption((PChar)"Currency",ot_Currency,&Currency);RegRunOption((PChar)"Timeframe",ot_TimeFrame,&Timeframe);RegRunOption((PChar)"Trade direction (0 both,1 buys only,2 sells only)",ot_Integer,&TradeDirection);AddOptionValue((PChar)"Trade direction (0 both,1 buys only,2 sells only)",(PChar)"0 = Both directions");AddOptionValue((PChar)"Trade direction (0 both,1 buys only,2 sells only)",(PChar)"1 = Buys only");AddOptionValue((PChar)"Trade direction (0 both,1 buys only,2 sells only)",(PChar)"2 = Sells only");RegRunOption((PChar)"Maximum completed strategy trades (0 unlimited)",ot_Integer,&MaximumCompletedStrategyTrades);RegRunOption((PChar)"Setup mode (0 range, 1 impulse)",ot_Integer,&SetupModeSetting);RegRunOption((PChar)"Volume lots",ot_Double,&VolumeLots);RegRunOption((PChar)"Magic number",ot_Integer,&MagicNumber);
  AddSeparator((PChar)"Confirmation");
@@ -986,7 +1092,11 @@ EXPORT void __stdcall InitStrategy()
  AddSeparator((PChar)"Range-mode settings");
  RegRunOption((PChar)"Pivot strength",ot_Integer,&PivotStrength);RegRunOption((PChar)"Minimum reactions",ot_Integer,&MinimumReactions);RegRunOption((PChar)"Cluster tolerance ATR",ot_Double,&ClusterToleranceATR);RegRunOption((PChar)"Minimum range height ATR",ot_Double,&MinimumRangeHeightATR);RegRunOption((PChar)"Minimum range bars",ot_Integer,&MinimumRangeBars);RegRunOption((PChar)"Maximum range bars",ot_Integer,&MaximumRangeBars);RegRunOption((PChar)"Breakout buffer ATR",ot_Double,&BreakoutBufferATR);RegRunOption((PChar)"Minimum breakout body ATR",ot_Double,&MinimumBreakoutBodyATR);RegRunOption((PChar)"Minimum extension ATR",ot_Double,&MinimumExtensionATR);RegRunOption((PChar)"Maximum extension bars",ot_Integer,&MaximumExtensionBars);
  AddSeparator((PChar)"Impulse-detection settings");
- RegRunOption((PChar)"Impulse entry mode (0 confirmation,1 first-touch ATR)",ot_Integer,&ImpulseEntryMode);
+ RegRunOption((PChar)"Impulse entry mode (0 confirmation,1 first-touch ATR,2 qualified-first-pullback)",ot_Integer,&ImpulseEntryMode);
+ RegRunOption((PChar)"Qualified impulse range lookback bars",ot_Integer,&QualifiedImpulseRangeLookbackBars);
+ RegRunOption((PChar)"Qualified impulse minimum displacement ATR",ot_Double,&QualifiedImpulseMinimumDisplacementATR);
+ RegRunOption((PChar)"Qualified impulse breakout buffer ATR",ot_Double,&QualifiedImpulseBreakoutBufferATR);
+ RegRunOption((PChar)"Qualified pullback minimum depth %",ot_Double,&QualifiedPullbackMinimumDepth);
  RegRunOption((PChar)"Impulse minimum body ATR",ot_Double,&ImpulseMinimumBodyATR);RegRunOption((PChar)"Impulse maximum body ATR (0 disabled)",ot_Double,&ImpulseMaximumBodyATR);RegRunOption((PChar)"Impulse minimum range ATR",ot_Double,&ImpulseMinimumRangeATR);RegRunOption((PChar)"Impulse minimum retracement ATR",ot_Double,&ImpulseMinimumRetracementATR);RegRunOption((PChar)"Impulse maximum depth %",ot_Double,&ImpulseMaximumDepth);RegRunOption((PChar)"Impulse maximum pullback bars",ot_Integer,&ImpulseMaximumPullbackBars);RegRunOption((PChar)"Impulse M15/H4 trend filter (0 disabled)",ot_Integer,&ImpulseM15H4TrendFilter);RegRunOption((PChar)"Trend filter scope (0 both,1 buys only,2 sells only)",ot_Integer,&TrendFilterScope);AddOptionValue((PChar)"Trend filter scope (0 both,1 buys only,2 sells only)",(PChar)"0 = Both directions");AddOptionValue((PChar)"Trend filter scope (0 both,1 buys only,2 sells only)",(PChar)"1 = Buys only");AddOptionValue((PChar)"Trend filter scope (0 both,1 buys only,2 sells only)",(PChar)"2 = Sells only");
  AddSeparator((PChar)"Pullback and depth settings");
  RegRunOption((PChar)"Minimum opposing closes",ot_Integer,&MinimumOpposingCloses);RegRunOption((PChar)"Minimum retracement ATR",ot_Double,&MinimumRetracementATR);RegRunOption((PChar)"Depth mode (0 any,1 shallow,2 deep,3 custom)",ot_Integer,&PullbackDepthMode);RegRunOption((PChar)"Shallow minimum depth",ot_Double,&ShallowMinimumDepth);RegRunOption((PChar)"Shallow maximum depth",ot_Double,&ShallowMaximumDepth);RegRunOption((PChar)"Deep minimum depth",ot_Double,&DeepMinimumDepth);RegRunOption((PChar)"Deep maximum depth",ot_Double,&DeepMaximumDepth);RegRunOption((PChar)"Custom minimum depth",ot_Double,&CustomMinimumDepth);RegRunOption((PChar)"Custom maximum depth",ot_Double,&CustomMaximumDepth);RegRunOption((PChar)"Invalidation tolerance ATR",ot_Double,&InvalidationToleranceATR);RegRunOption((PChar)"Maximum pullback bars",ot_Integer,&MaximumPullbackBars);
@@ -997,7 +1107,7 @@ EXPORT void __stdcall InitStrategy()
  AddSeparator((PChar)"Diagnostics");
  RegRunOption((PChar)"Show blackout status",ot_Boolean,&ShowBlackoutStatus);RegRunOption((PChar)"Show diagnostics",ot_Boolean,&ShowDiagnostics);
 }
-EXPORT void __stdcall DoneStrategy(){free(Currency);free(atrPct);atrPct=NULL;atrPctCapacity=atrPctCount=atrPctNext=0;} EXPORT void __stdcall ResetStrategy(){runSettingsResolved=false;tradeLimitBlocked=false;tradeLimitNotificationSent=false;tradeHistoryCacheValid=false;cachedCompletedStrategyTrades=0;cachedHistoryTotal=-1;tickSequence=0;touchPathNext=0;memset(touchPaths,0,sizeof(touchPaths));memset(&liveTouchPath,0,sizeof(liveTouchPath));memset(&closedTouchPath,0,sizeof(closedTouchPath));lastTime=0;nbar=0;rmaATR=0;atrCount=atrPctCount=atrPctNext=0;lastDiagnostic[0]=0;previousSwingHigh=latestSwingHigh=previousSwingLow=latestSwingLow=0;previousSwingHighBar=latestSwingHighBar=previousSwingLowBar=latestSwingLowBar=-1;previousSwingHighTime=latestSwingHighTime=previousSwingLowTime=latestSwingLowTime=0;havePreviousSwingHigh=haveLatestSwingHigh=havePreviousSwingLow=haveLatestSwingLow=false;consumedDirection=0;consumedExtreme=0;consumedBar=-1;ResetSetup();ClearClusters();}
+EXPORT void __stdcall DoneStrategy(){free(Currency);free(atrPct);atrPct=NULL;atrPctCapacity=atrPctCount=atrPctNext=0;} EXPORT void __stdcall ResetStrategy(){qualifiedConfigValid=true;runSettingsResolved=false;tradeLimitBlocked=false;tradeLimitNotificationSent=false;tradeHistoryCacheValid=false;cachedCompletedStrategyTrades=0;cachedHistoryTotal=-1;tickSequence=0;touchPathNext=0;memset(touchPaths,0,sizeof(touchPaths));memset(&liveTouchPath,0,sizeof(liveTouchPath));memset(&closedTouchPath,0,sizeof(closedTouchPath));lastTime=0;nbar=0;rmaATR=0;atrCount=atrPctCount=atrPctNext=0;lastDiagnostic[0]=0;previousSwingHigh=latestSwingHigh=previousSwingLow=latestSwingLow=0;previousSwingHighBar=latestSwingHighBar=previousSwingLowBar=latestSwingLowBar=-1;previousSwingHighTime=latestSwingHighTime=previousSwingLowTime=latestSwingLowTime=0;havePreviousSwingHigh=haveLatestSwingHigh=havePreviousSwingLow=haveLatestSwingLow=false;consumedDirection=0;consumedExtreme=0;consumedBar=-1;ResetSetup();ClearClusters();}
 EXPORT void __stdcall GetSingleTick()
 {
   ResolveRunSettings();if(!Currency||strcmp(Currency,Symbol())!=0)return;

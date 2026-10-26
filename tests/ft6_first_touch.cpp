@@ -422,11 +422,192 @@ void TradeLimitControls()
   Fresh();MaximumCompletedStrategyTrades=7;GetSingleTick();
   Check(cachedCompletedStrategyTrades==0&&!tradeLimitBlocked,"genuine empty history restart starts at zero");
 }
+double QPrice(int d,double p){return d==1?p:2.40-p;}
+void QualifiedFresh(int d=1,bool completeHistory=true)
+{
+  Fresh();SettingsPreset=7;ApplySettingsPreset();EnableWeekendBlackout=false;TradeDirection=d==1?1:0;rmaATR=0.002;RegimeLookback=1;
+  // Confirmed origin exists before the first normal seed, not an armed fixture.
+  if(d==1){haveLatestSwingLow=true;latestSwingLow=1.20;latestSwingLowBar=9;latestSwingLowTime=ClosedTime(9);}
+  else{haveLatestSwingHigh=true;latestSwingHigh=1.20;latestSwingHighBar=9;latestSwingHighTime=ClosedTime(9);}
+  for(int i=3;i<=22;i++){series[i].h=d==1?1.204:1.201;series[i].l=d==1?1.199:1.196;}
+  if(!completeHistory)historyBars=22; // The 20th pre-origin bar is absent.
+  series[1]={QPrice(d,1.2005),QPrice(d,d==1?1.203:1.200),QPrice(d,d==1?1.200:1.203),QPrice(d,1.203),series[1].t};
+  bidQuote=QPrice(d,1.203);askQuote=bidQuote+0.0002;
+  Remember(nbar,QPrice(d,1.203),d,QPrice(d,1.2028));
+  ProcessImpulseSetup(series[1].o,series[1].h,series[1].l,series[1].c,1.20);
+  Check(stage==IMPULSE_PARENT&&!touchActive&&!impulseQualified,"normal seed starts pending, never arms weak rebound");
+}
+void QBar(int d,double o,double h,double l,double c,double adverse=-1)
+{
+  double prior=series[1].c;
+  for(int i=127;i>0;i--)series[i]=series[i-1];
+  series[0].t+=5.0/1440;series[1]={QPrice(d,o),QPrice(d,d==1?h:l),QPrice(d,d==1?l:h),QPrice(d,c),series[0].t-5.0/1440};
+  nbar++;lastTime=series[0].t;now=series[0].t;tickSequence++;
+  bidQuote=QPrice(d,c);askQuote=bidQuote+0.0002;
+  if(adverse>=0)Remember(nbar,QPrice(d,h),d,QPrice(d,adverse));
+  ProcessImpulseSetup(series[1].o,series[1].h,series[1].l,series[1].c,prior);
+}
+void QSurge(int d=1)
+{
+  QBar(d,1.207,1.208,1.2068,1.2072,1.2070);
+  Check(impulseQualified&&touchActive&&qualifyingBar==nbar&&qualifyingTime==Time(1),"closed surge qualifies and records actual bar/time");
+  Check(Near(touchLevel,QPrice(d,1.206))&&attempts==0,"prospective depth level arms without order");
+}
+void QualifiedImpulseGate()
+{
+  for(int d:{1,-1})
+  {
+    QualifiedFresh(d);double high=qualifiedRangeHigh,low=qualifiedRangeLow;
+    Check(qualifiedRangeReady&&Near(high,d==1?1.204:1.201)&&Near(low,d==1?1.199:1.196),"exact full pre-origin window excludes origin and seed");
+    QBar(d,1.2048,1.2055,1.2045,1.2053,1.2052);
+    Check(!touchActive&&!impulseQualified,"breakout close alone cannot qualify insufficient displacement");
+    QBar(d,1.207,1.208,1.204,1.2041,1.2078);
+    Check(!impulseQualified,"large wick and accepted displacement inside range cannot qualify");
+    // Exact strict boundary uses the identical frozen operands.
+    double boundary=d==1?qualifiedRangeHigh+0.1*setupATR:qualifiedRangeLow-0.1*setupATR;
+    QBar(d,1.204,1.208,1.204,QPrice(d,boundary),1.2078);
+    Check(!impulseQualified,"close equal to breakout buffer boundary rejected strictly");
+    series[0].h=2;series[0].l=0.1;series[0].c=QPrice(d,1.30);ProcessFirstTouchTick(true);
+    Check(!impulseQualified&&attempts==0,"unfinished candle cannot qualify");
+    QBar(d,1.208,1.210,1.2078,1.2095,1.2093);
+    Check(impulseQualified&&touchActive&&Near(high,qualifiedRangeHigh)&&Near(low,qualifiedRangeLow),"later bars cannot move frozen comparison range; mirrored Custom short qualifies");
+    QualifiedFresh(d,false); // No shorter-window substitution.
+    QBar(d,1.207,1.208,1.2068,1.2072,1.2070);
+    Check(!qualifiedRangeReady&&!touchActive&&!impulseQualified,"incomplete pre-origin history remains unavailable");
+    QualifiedFresh(d);setupATR=0;qualifiedRangeReady=false;BeginQualification(nbar);
+    Check(!qualifiedRangeReady&&!TryQualifyImpulse(nbar),"invalid frozen ATR cannot qualify");
+  }
+}
+void QualifiedPullbackTouch()
+{
+  for(int d:{1,-1})
+  {
+    QualifiedFresh(d);QSurge(d);double initial=touchLevel,atr=setupATR;
+    Quote(QPrice(d,1.2068),QPrice(d,1.2068)+0.0002);
+    Check(touchActive&&attempts==0,"sub-threshold early dip preserves opportunity");
+    QBar(d,1.211,1.212,1.2108,1.2115,1.2113);
+    Check(touchActive&&Near(touchLevel,QPrice(d,1.209))&&Near(setupATR,atr)&&touchLevel!=initial,"same parent endpoint growth refreshes percentage level prospectively");
+    Check(touchActivationTick==tickSequence&&attempts==0,"no refresh tick order");
+    double level=touchLevel;
+    Quote(d==1?level:level-0.0002,d==1?level+0.0002:level);
+    Check(attempts==0&&touchActive,"non-executable Bid-only/Ask-only touch ignored");
+    Touch(d,0.0003);
+    Check(attempts==1&&stage==IMPULSE_CONSUMED&&Near(orderQuote,level-d*0.0003),"first threshold retracement uses actual executable overshoot quote");
+    Touch(d);Check(attempts==1,"consumed parent cannot retry");
+  }
+  QualifiedFresh();QualifiedPullbackMinimumDepth=10;
+  QBar(1,1.207,1.208,1.2075,1.2078,1.2076);
+  Check(touchActive&&Near(touchLevel,1.207),"Custom mode 2 retains the larger ATR retracement floor");
+  // Opening quote evaluates OLD level before new-bar endpoint replacement.
+  QualifiedFresh();QSurge();double old=touchLevel;
+  series[1].h=1.212;series[0].t+=5.0/1440;now=series[0].t;
+  bidQuote=old-0.0002;askQuote=old;GetSingleTick();
+  Check(attempts==1&&Near(orderQuote,old)&&Near(touchLevel,old),"qualified old-level-before-refresh ordering");
+  for(std::string reason:{"passed","missing","busy","history","risk","direction","failure","ticket","arming"})
+  {
+    QualifiedFresh();
+    if(reason=="passed"||reason=="missing")
+    {
+      QBar(1,1.207,1.208,1.205,1.2072,reason=="passed"?1.2055:-1);
+      Check(attempts==0&&stage==IMPULSE_CONSUMED,"passed or ambiguous qualification endpoint never filled retrospectively");continue;
+    }
+    QSurge();
+    if(reason=="busy")busy=true;
+    if(reason=="history")historyBars=0;
+    if(reason=="risk")atrCount=0;
+    if(reason=="direction")TradeDirection=2;
+    if(reason=="failure")orderResult=false;
+    if(reason=="ticket")orderTicket=-1;
+    if(reason=="arming")
+    {
+      bidQuote=touchLevel-0.0002;askQuote=touchLevel;ProcessFirstTouchTick(true);
+      Check(attempts==0&&touchActive,"explicit arming tick cannot fill");
+    }
+    Touch(1);int count=attempts;Touch(1);
+    Check(stage==IMPULSE_CONSUMED&&attempts==count,"blocked/failed first touch consumed without queue");
+    Check(count==((reason=="failure"||reason=="ticket"||reason=="arming")?1:0),"qualified touch gates and both API success confirmations");
+  }
+  // Promotion walks pending eligibility chronologically, then rejects passed paths.
+  for(int passed:{0,1})
+  {
+    QualifiedFresh();QSurge();ResetTouch();ResetQualification();stage=0;
+    ProvisionalImpulseCandidate &candidate=CandidateFor(1);candidate.active=true;candidate.normalSeedSeen=true;
+    candidate.firstBar=nbar-1;candidate.extremeBar=nbar;candidate.firstTime=ClosedTime(nbar-1);candidate.seedATR=0.002;candidate.firstExtreme=1.203;candidate.extreme=1.208;
+    if(passed)touchPaths[1].minAskAfterHigh=1.205;
+    Check(TryPromoteCandidate(candidate),"actual provisional transition recovers confirmed origin");
+    Check(qualifyingBar==nbar&&attempts==0&&(passed?stage==IMPULSE_CONSUMED:touchActive),"promotion retains qualifying bar and conservative path ordering without backdated entry");
+  }
+  std::vector<std::string> prefix;
+  for(int future:{0,1})
+  {
+    QualifiedFresh();QSurge();Quote(1.2068,1.2070);
+    if(!future)prefix=logs;else Check(prefix==logs,"identical causal decision prefix under different future continuations");
+    QBar(1,1.211,1.212+future*0.002,1.2108,1.2115,1.2113);
+  }
+}
+void QualifiedParentLifecycle()
+{
+  QualifiedFresh();long consumed=consumedBar;
+  nbar+=31;ProcessImpulseSetup(1.20,1.2001,1.1999,1.20,1.20);
+  Check(stage==0&&consumedBar==consumed&&!qualifiedRangeReady,"weak pending expires without consuming real parent boundary");
+  haveLatestSwingLow=true;latestSwingLowBar=nbar-1;latestSwingLowTime=ClosedTime(nbar-1);latestSwingLow=1.20;
+  QBar(1,1.2005,1.203,1.200,1.203,1.2028);QSurge();Touch(1);
+  Check(attempts==1&&stage==IMPULSE_CONSUMED,"later valid leg survives weak candidate expiry");
+  double p;long b;TDateTime t;const char *why="";
+  Check(!CanSeedImpulse(1,1.22,p,b,t,why),"consumed parent requires distinct confirmed origin");
+  Touch(1);Check(attempts==1,"no consumed-parent revival");
+  QualifiedFresh();long first=qualifiedFirstSeedBar;
+  latestSwingLowBar=first+1;latestSwingLowTime=Time(1);nbar+=2;
+  ProcessImpulseSetup(1.2005,1.203,1.20,1.203,1.20);
+  Check(qualifiedFirstSeedBar==nbar&&impulseOriginBar==first+1&&consumedBar==-1,"new confirmed origin cleanly replaces incompatible pending candidate");
+  QualifiedFresh(-1);TradeDirection=1;QSurge(-1);Touch(-1);
+  Check(attempts==0&&stage==IMPULSE_CONSUMED&&Logged("structure-only"),"preset buys-only still observes and consumes prohibited short");
+  haveLatestSwingLow=true;latestSwingLow=1.19;latestSwingLowBar=nbar+1;latestSwingLowTime=Time(1);nbar+=2;
+  Check(CanSeedImpulse(1,1.195,p,b,t,why),"opposite structural cycle permits later allowed leg inside old boundary");
+  QualifiedFresh();AbandonQualification("oversize fixture begins before seed");
+  QBar(1,1.20,1.208,1.20,1.207,1.2072);
+  Check(provisionalLong.active&&provisionalLong.oversizedSeen&&!touchActive,"over-cap candle cannot independently seed qualified mode");
+  Check(!TryPromoteCandidate(provisionalLong),"oversized promotion still requires later objective evidence");
+  QBar(1,1.207,1.209,1.207,1.208,1.2082);
+  Check(!provisionalLong.active&&Logged("later same-direction endpoint advancement"),"later advancing evidence enables existing oversized recovery path");
+  QualifiedFresh();QSurge();ResetStrategy();
+  Check(!impulseQualified&&!qualifiedRangeReady&&qualifiedFirstSeedBar==-1&&qualifyingBar==-1&&qualifyingTime==0&&!touchActive,"reset clears all pending and qualification metadata");
+  for(int bad=0;bad<7;bad++)
+  {
+    QualifiedFresh();
+    if(bad==0)QualifiedImpulseRangeLookbackBars=0;
+    if(bad==1)QualifiedImpulseMinimumDisplacementATR=0;
+    if(bad==2)QualifiedImpulseBreakoutBufferATR=-0.1;
+    if(bad==3)QualifiedPullbackMinimumDepth=0;
+    if(bad==4)QualifiedPullbackMinimumDepth=50;
+    if(bad==5)QualifiedImpulseMinimumDisplacementATR=HUGE_VAL;
+    if(bad==6)QualifiedPullbackMinimumDepth=sqrt(-1.0);
+    qualifiedConfigValid=ValidateQualifiedSettings();
+    Check(!qualifiedConfigValid&&Logged("configuration error"),"invalid mode-2 controls clearly rejected");
+    QBar(1,1.207,1.208,1.2068,1.2072,1.2070);Quote(1.205,1.2052);
+    Check(!touchActive&&attempts==0,"invalid mode-2 configuration blocks entries");
+    ImpulseEntryMode=1;Check(ValidateQualifiedSettings(),"invalid qualified controls do not affect legacy modes");
+  }
+  QualifiedFresh();QualifiedImpulseBreakoutBufferATR=-1;SettingsPreset=0;
+  for(int i=0;i<runOptionCount;i++)
+  {
+    RunOption &option=runOptions[i];
+    if(option.type==ot_Double)option.custom.number=*(double*)option.effective;
+    else if(option.type==ot_Boolean)option.custom.boolean=*(bool*)option.effective;
+    else option.custom.integer=*(int*)option.effective;
+  }
+  ResetStrategy();logs.clear();GetSingleTick();GetSingleTick();GetSingleTick();
+  int errors=0;for(auto &line:logs)if(line.find("configuration error")!=std::string::npos)errors++;
+  Check(errors==1&&!qualifiedConfigValid&&attempts==0,"late invalid Custom inputs resolve once with one error per run");
+}
 int main(int argc,char **argv)
 {
   if(argc!=2){fprintf(stderr,"One named case required\n");return 2;}Hooks();InitStrategy();ReplaceStr(Currency,(PChar)"EURUSD");
   std::string name=argv[1];
-  if(name=="touch_intrabar")Intrabar();else if(name=="executable_quotes_gap_rounding")QuotesGap();
+  if(name=="qualified_impulse_gate")QualifiedImpulseGate();
+  else if(name=="qualified_pullback_touch")QualifiedPullbackTouch();
+  else if(name=="qualified_parent_lifecycle")QualifiedParentLifecycle();
+  else if(name=="touch_intrabar")Intrabar();else if(name=="executable_quotes_gap_rounding")QuotesGap();
   else if(name=="observed_tick_activation")ObservedActivation();
   else if(name=="activation_and_passed")ActivationPassed();else if(name=="recovered_touch")Recover();
   else if(name=="endpoint_refresh_ordering")RefreshOrdering();else if(name=="touch_gates")Gates();

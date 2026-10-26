@@ -2717,3 +2717,75 @@ Delivery procedure: initial HEAD/origin/master both d87667d7f38a4b97e85710698450
 The BAT then fetches origin/master and verifies local HEAD equality. Its unadapted all-file staging/raw push conflicts with checkout delivery/ownership instructions. Adapter/logs stay ignored. Commit SHA and actual delivery outcome are reported separately after execution; this records procedure, not an advance success claim. No secrets/runtime data/user briefs/unrelated dirty/deleted/untracked work enter the commit.
 
 Residual/manual acceptance: FT6 standard-test/chart execution has not been inspected; no historical test launched or performance improvement claimed. Alex should start FT6, select preset 5, inspect the initialization and short standard-test segment (planned level, executable quote, one opportunity per parent), then compare presets 4/5 over the two existing M5 yearly periods. Missing tick chronology can conservatively skip setups; instant-order gaps/spreads/platform execution can differ from the planned price.
+
+
+FT6 QUALIFIED FIRST PULLBACK EXPERIMENT - 26 OCTOBER 2026
+
+Implemented preset **7 ? M5 qualified first pullback buys-only**. It requires a completed close beyond the frozen 20-bar pre-origin range plus 0.10 ATR, with at least 3.0 ATR displacement. Its prospective retracement is max(0.50 frozen ATR, 25% displacement), rounded long-down/short-up. Pending parents continue advancing and expire without spending consumed-parent boundaries; first-touch execution, Custom restoration, presets 0?6 and the independent default 100-trade pause are preserved.
+
+Changed files:
+- forex-tester-6/RangeBreakoutPullbackStrategy/RangeBreakoutPullbackStrategy.cpp
+- tests/ft6_first_touch.cpp
+- tests/ft6_preset_lifecycle.cpp
+- docs/RangeBreakoutPullback_Backtesting_Guide.md
+- summary/CODEX_SUMMARY_latest.txt
+
+All eight authorized selectors PASS:
+- qualified_impulse_gate
+- qualified_pullback_touch
+- qualified_parent_lifecycle
+- endpoint_refresh_ordering
+- direction_filtered_lifecycle
+- legacy_confirmation_entries
+- trade_limit_stop
+- preset_lifecycle
+
+Built native x86 Release using the installed FT6 SDK and oleaut32.lib. Verified all six matching .def exports: InitStrategy, DoneStrategy, ResetStrategy, GetSingleTick, ReplaceStr, IntrfProcsRec.
+
+Deployed C:\ForexTester6\Strategies\RangeBreakoutPullbackStrategy.dll; 70,144 bytes; modified 2026-10-26T17:28:14.7401905+10:00. Built/installed SHA256 matches:
+31BA93347EC670989D6B4D0B99E499BA0A4C1E4CC8EA32ECA69167120B00DBDE
+A verified prior-DLL backup is retained in the excluded .codex_tmp_ft6_qualified_20261026 directory. FT6 was not running; loading this DLL in the app has not been verified.
+
+Expected preset-7 initialization with the default trade limit:
+RBP preset=M5 qualified first pullback buys-only timeframe=5 setup=1 confirmation=0 direction=1 body=1.00-1.50ATR depth=0-50% depthMode=1 stop=adaptive targets=2.0/3.0R EMAtrend=off scope=0 entryMode=qualified-first-pullback touchATR=0.50 presetId=7 maxCompletedTrades=100 qualifiedLookback=20 qualifiedDisplacementATR=3.00 qualifiedBufferATR=0.10 qualifiedDepthPct=25.00
+
+User action: select numeric preset 7, Apply, and restart standard testing for chart acceptance and the next 100-trade review. Use fresh data after freezing the rules for a later profitability check. No historical backtest, replay or optimisation was run. Profitability and screenshot/chart acceptance remain unestablished; missing tick/spread chronology can conservatively skip setups.
+
+Verification and protected-delivery evidence:
+- Only the eight named selectors above ran; no default suite, broad integration, parameter search or historical FT6 test ran. qualified_impulse_gate and all five preservation selectors passed once. qualified_pullback_touch and qualified_parent_lifecycle initially failed because the fixture reapplied preset RegimeLookback=200 after the synthetic Fresh() lookback=1, so available synthetic history correctly blocked entry. The fixture now retains lookback=1; only those two failed selectors were rerun, and both passed. No production change was needed for those failures. No passing selector was rerun.
+- Initial compilation failed for missing _finite declaration; adding <float.h> resolved it. Successful x86 Release compile of strategy and both affected seams; final cmd /d /c .codex_tmp_ft6_qualified_20261026\build.cmd exited 0. After the fixture-only correction, cmd /d /c .codex_tmp_ft6_qualified_20261026\build-touch.cmd exited 0; strategy DLL source did not change. The latter contains only vcvarsall plus the exact ft6_first_touch.cpp command below. Build logs are excluded task artifacts.
+- Full pre-origin history, strict completed-close breakout, displacement, mirrored short rules, unqualified advancement, endpoint/ATR freezing, percentage/ATR retracement, executable quote/spread/overshoot, arming guard, old-level-before-refresh, missing/passed paths, chronological promotion, blocked/failed touch consumption, causal prefixes, pending expiry/replacement, prohibited-side observation, fresh origins, consumed-parent protection, oversized evidence, reset and invalid inputs are covered by the three new selectors. Lifecycle covers 57 detailed registrations (capacity 64), late options, preset 7, 7 -> 6 -> Custom, saved values, effective diagnostics, unchanged old preset comparisons and selected trade-limit persistence.
+
+Exact build script commands (repository root):
+@echo off
+setlocal
+call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat" x86
+if errorlevel 1 exit /b 1
+cl /nologo /O2 /MD /EHsc /D_CRT_SECURE_NO_WARNINGS /I"C:\ForexTester6\Examples\Strategies\C++" /LD forex-tester-6\RangeBreakoutPullbackStrategy\RangeBreakoutPullbackStrategy.cpp /Fo".codex_tmp_ft6_qualified_20261026\strategy.obj" /Fe".codex_tmp_ft6_qualified_20261026\RangeBreakoutPullbackStrategy.dll" /link /DEF:forex-tester-6\RangeBreakoutPullbackStrategy\RangeBreakoutPullbackStrategy.def /MACHINE:X86 /INCREMENTAL:NO /OPT:REF /OPT:ICF oleaut32.lib
+if errorlevel 1 exit /b 1
+cl /nologo /O2 /MD /EHsc /D_CRT_SECURE_NO_WARNINGS /I"C:\ForexTester6\Examples\Strategies\C++" tests\ft6_first_touch.cpp /Fo".codex_tmp_ft6_qualified_20261026\touch.obj" /Fe".codex_tmp_ft6_qualified_20261026\ft6_first_touch.exe" /link /MACHINE:X86 /INCREMENTAL:NO oleaut32.lib
+if errorlevel 1 exit /b 1
+cl /nologo /O2 /MD /EHsc /D_CRT_SECURE_NO_WARNINGS /I"C:\ForexTester6\Examples\Strategies\C++" tests\ft6_preset_lifecycle.cpp /Fo".codex_tmp_ft6_qualified_20261026\lifecycle.obj" /Fe".codex_tmp_ft6_qualified_20261026\ft6_preset_lifecycle.exe" /link /MACHINE:X86 /INCREMENTAL:NO oleaut32.lib
+
+Exact functional commands (repository root), each ultimately PASS:
+.codex_tmp_ft6_qualified_20261026\ft6_first_touch.exe qualified_impulse_gate
+.codex_tmp_ft6_qualified_20261026\ft6_first_touch.exe qualified_pullback_touch
+.codex_tmp_ft6_qualified_20261026\ft6_first_touch.exe qualified_parent_lifecycle
+.codex_tmp_ft6_qualified_20261026\ft6_first_touch.exe endpoint_refresh_ordering
+.codex_tmp_ft6_qualified_20261026\ft6_first_touch.exe direction_filtered_lifecycle
+.codex_tmp_ft6_qualified_20261026\ft6_first_touch.exe legacy_confirmation_entries
+.codex_tmp_ft6_qualified_20261026\ft6_first_touch.exe trade_limit_stop
+.codex_tmp_ft6_qualified_20261026\ft6_preset_lifecycle.exe preset_lifecycle
+The two failed-selector retry commands are identical to their listed commands; retry logs are separate. No other functional selector was invoked.
+
+Export command after vcvarsall x86:
+dumpbin /headers /exports .codex_tmp_ft6_qualified_20261026\RangeBreakoutPullbackStrategy.dll > .codex_tmp_ft6_qualified_20261026\exports.txt
+PE machine 0x14c, 32-bit. Exports exactly match the unchanged canonical .def. git diff --check on owned paths PASS. Installed hash, bytes, time and build hash are recorded in excluded deployment.json. Prior installed/backup SHA256 both 9CD89C3C95B13928C166D0447E54B7536CFC6B4BF42D9864ADB3AB16F503F07D. No process termination, SDK edit, tooling installation, project/data change or test launch was needed.
+
+Protected credential verification succeeded against freshly observed master f63bb01856bbb2820d7fb02ab12ed1d6293a7c25 using precisely:
+& 'C:\Users\User\miniconda3\python.exe' 'C:\Users\User\.codex\tools\alexpsym_git_delivery.py' verify
+A sandboxed ordinary fetch could not open .git/FETCH_HEAD (Permission denied); the subsequent authorized protected verification succeeded under the saved-credential host identity. This was a permission boundary, not a remote failure.
+
+Delivery procedure: run the unchanged repository-root PATCH_DESKTOP_PUSH.bat through task-local run_delivery.py/scoped_git.py/git.bat, adapted from the established auto-stop delivery adapter. It stages only the five owned paths above, refuses foreign staged content, preserves unrelated work, skips blanket reset and raw pull/rebase/autostash, and routes its push exclusively through:
+& 'C:\Users\User\miniconda3\python.exe' 'C:\Users\User\.codex\tools\alexpsym_git_delivery.py' push
+The BAT fetches origin/master and verifies local HEAD equality afterward. Actual delivery commit and verified hashes are reported after execution; this section records the concrete result and procedure before commit, not an advance delivery-success claim. No briefs, binaries, backups, logs, runtime data, unrelated changes or delivery tooling are staged. Prior summary bytes are preserved verbatim before this appended task section.

@@ -77,7 +77,7 @@ int main(int argc,char **argv)
   IntrfProcsRec.Bars=NoHistory;
   InitStrategy();
   Check(messages.empty(),"DLL registration must not emit a stale diagnostic");
-  Check(runOptionCount==53&&options.size()==55,"all detailed options registered separately");
+  Check(runOptionCount==57&&options.size()==59,"all detailed options registered separately");
   Check(MaximumCompletedStrategyTrades==100&&*(int*)Option("Maximum completed strategy trades")==100,"trade cap registered with default 100");
   IntrfProcsRec.HistoryTotal=EmptyHistory;IntrfProcsRec.pHistoryTotal=(void*)1;
   IntrfProcsRec.OrderSelect=EmptySelect;IntrfProcsRec.pOrderSelect=(void*)1;
@@ -210,6 +210,34 @@ int main(int argc,char **argv)
   Check(*(double*)Option("With-trend / neutral target R")==0.5&&*(double*)Option("Counter-trend target R")==1,"clamping does not overwrite Custom inputs");
   ResetStrategy();ResetStrategy();
   TickOnce("RBP preset=Custom timeframe=30",12);
+  // Late saved inputs survive 7 -> 6 -> Custom; limit remains independent.
+  *(int*)Option("Impulse entry mode")=2;
+  *(int*)Option("Setup mode")=1;
+  *(int*)Option("Qualified impulse range lookback bars")=23;
+  *(double*)Option("Qualified impulse minimum displacement ATR")=4.25;
+  *(double*)Option("Qualified impulse breakout buffer ATR")=0.15;
+  *(double*)Option("Qualified pullback minimum depth %")=30;
+  *(int*)Option("Maximum completed strategy trades")=19;
+  custom=Values(true);
+  ResetStrategy();*(int*)Option("Settings preset")=7;
+  TickOnce("RBP preset=M5 qualified first pullback buys-only timeframe=5 setup=1 confirmation=0 direction=1",13);
+  Check(ImpulseEntryMode==2&&QualifiedImpulseRangeLookbackBars==20&&QualifiedImpulseMinimumDisplacementATR==3&&QualifiedImpulseBreakoutBufferATR==0.10&&QualifiedPullbackMinimumDepth==25,"preset 7 applies four explicit hypotheses");
+  Check(MaximumCompletedStrategyTrades==19&&Values(true)==custom,"preset 7 preserves saved Custom and independent limit");
+  Check(messages.back().find("entryMode=qualified-first-pullback touchATR=0.50 presetId=7 maxCompletedTrades=19 qualifiedLookback=20 qualifiedDisplacementATR=3.00 qualifiedBufferATR=0.10 qualifiedDepthPct=25.00")!=std::string::npos,"effective qualified diagnostic values");
+  auto qualified=Values(false);
+  ResetStrategy();*(int*)Option("Settings preset")=6;
+  TickOnce("RBP preset=M5 first-touch ATR buys-only timeframe=5",14);
+  Check(ImpulseEntryMode==1&&QualifiedImpulseRangeLookbackBars==23&&QualifiedPullbackMinimumDepth==30&&MaximumCompletedStrategyTrades==19,"7 to 6 restores Custom-only controls without changing legacy behavior");
+  for(size_t i=0;i<qualified.size();i++)
+  {
+    bool changed=i==EffectiveIndex(&ImpulseEntryMode)||i==EffectiveIndex(&QualifiedImpulseRangeLookbackBars)||i==EffectiveIndex(&QualifiedImpulseMinimumDisplacementATR)||i==EffectiveIndex(&QualifiedImpulseBreakoutBufferATR)||i==EffectiveIndex(&QualifiedPullbackMinimumDepth);
+    Check(changed||qualified[i]==Values(false)[i],"preset 7 inherits every other preset 6 safeguard");
+  }
+  ResetStrategy();*(int*)Option("Settings preset")=0;
+  TickOnce("RBP preset=Custom timeframe=30 setup=1",15);
+  // The previously exercised target floors remain effective while saved inputs stay below floor.
+  auto restored=Values(false);custom[EffectiveIndex(&WithTrendNeutralTargetR)]=2;custom[EffectiveIndex(&CounterTrendTargetR)]=3;
+  Check(restored==custom&&ImpulseEntryMode==2&&qualifiedConfigValid&&MaximumCompletedStrategyTrades==19,"Custom restores every value including qualified mode after 7 -> 6");
   DoneStrategy();
   puts("PASS: preset lifecycle, late options, one diagnostic/run, all Custom values, targets, EMA, buys-only and M5 isolation");
 }
