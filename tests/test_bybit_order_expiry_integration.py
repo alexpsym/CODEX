@@ -310,3 +310,41 @@ function run(){
     completed=subprocess.run([node,"-e",open_harness,str(ROOT/"render/static/open_orders.js")],
         input=json.dumps({"headers":[],"payloads":payloads}),capture_output=True,text=True,timeout=20)
     assert completed.returncode==0,completed.stdout+completed.stderr
+
+
+def test_expiry_repair_status_shows_overdue_error_and_worker_health(service):
+    import ast
+    s=service;f=s.fixture
+    result=json.loads(submit(s,payload()).body);row=result["result"]["order_expiry"]
+    queue=f.Queue(f.path)
+    f.clock[0]+=600000
+    diagnostic={"operation":"realtime","reason":"http_error","exception_type":"BrokerError","http_status":401,"ret_code":10003,
+                "retMsg":"DO-NOT-EXPOSE", "headers":"X-BAPI-secret"}
+    claimed=queue.claim()
+    saved=queue.finish(claimed,"reconciling",diagnostic=diagnostic)
+    status=json.loads(asyncio.run(s.bybit_order_expiry_status()).body)
+    public=status["schedules"][0]
+    assert public["status_label"].startswith("Overdue;") and public["worker_healthy"] is True
+    assert public["diagnostic"]["http_status"]==401 and public["diagnostic"]["ret_code"]==10003
+    assert "credentials" in public["last_error"] and "cancelled" not in public["status_label"].lower()
+    assert "DO-NOT-EXPOSE" not in json.dumps(status) and "X-BAPI" not in json.dumps(status)
+    f.state["healthy"]=False;status=json.loads(asyncio.run(s.bybit_order_expiry_status()).body)
+    assert "worker unavailable" in status["schedules"][0]["status_label"]
+    assert saved["attempts"]==0 and queue.get(row["id"])["deadline_ms"]==row["deadline_ms"]
+    tree=ast.parse((ROOT/"tests/test_bybit_order_expiry_integration.py").read_text(encoding="utf-8"))
+    node=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=="test_expiry_controls_and_durable_status_survive_reload")
+    harness=next(n.value.value for n in ast.walk(node) if isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id=="harness" for t in n.targets))
+    prefix=harness.split("(async()=>{")[0]
+    script=prefix+r"""
+    (async()=>{
+      const ui=run();await ui.h.refreshExpiryStatus();
+      const text=ui.el('bybit-expiry-status').textContent;
+      assert(text.includes('Overdue')&&text.includes('unavailable')&&text.includes('http_status=401')&&text.includes('ret_code=10003'),text);
+      assert(!text.includes('DO-NOT-EXPOSE')&&!text.includes('X-BAPI'));
+      assert(ui.requests.every(r=>!r[0].includes('/submit')&&!r[0].includes('/cancel')));
+      console.log('Truthful overdue/error and worker-health rendering passed');
+    })().catch(e=>{console.error(e);process.exitCode=1;});
+    """
+    node=shutil.which("node");assert node
+    completed=subprocess.run([node,"-e",script,str(ROOT/"render/static/calculator.js")],input=json.dumps({"status":status,"result":{}}),capture_output=True,text=True,timeout=20)
+    assert completed.returncode==0,completed.stdout+completed.stderr

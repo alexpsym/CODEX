@@ -231,7 +231,7 @@
         if (!response.ok) throw new Error(data.error || 'Expiry status unavailable');
         el.textContent = `Local expiry worker: ${data.worker?.healthy ? 'running' : 'unavailable/stopped'}. `
           + (data.error ? data.error + ' ' : '')
-          + (data.schedules || []).map(r=>`${r.mode} ${r.symbol} ${r.order_id || r.order_link_id}: ${r.status_label}; ${brisbaneTime(r.deadline_ms)}`).join(' | ');
+          + (data.schedules || []).map(r=>`${r.mode} ${r.symbol} ${r.order_id || r.order_link_id}: ${r.status_label}; ${brisbaneTime(r.deadline_ms)}${r.last_error ? "; " + r.last_error : ""}`).join(' | ');
       } catch (_) { el.textContent = 'Expiry status unavailable. Check the local worker status before scheduling.'; }
       finally { expiryStatusInFlight = null; }
     })();

@@ -266,3 +266,131 @@ def test_expiry_worker_is_singleton_and_survives_parent_exit(tmp_path):
             current = ExpiryQueue(path).worker_status()
             if current["healthy"] and current["worker"]["instance"] == status["worker"]["instance"]:
                 stop_worker(path, instance=status["worker"]["instance"])
+
+
+def _repair_http(monkeypatch, responder):
+    """Keep the real authenticated transport/parser; replace only HTTP and credentials."""
+    import bybit_credentials
+    import httpx
+    monkeypatch.setattr(bybit_credentials, "resolve_bybit_credentials_for", lambda mode: (mode,"fixture-key","fixture-secret","https://api-demo.bybit.com","DEMO_EXPLICIT"))
+    calls=[]
+    class Client:
+        def __init__(self, **kwargs):
+            assert kwargs=={"timeout":5.,"follow_redirects":False}
+        def request(self, method, url, **kwargs):
+            from urllib.parse import urlsplit, parse_qs
+            parsed=urlsplit(url)
+            assert parsed.netloc=="api-demo.bybit.com"
+            params=parse_qs(parsed.query) if method=="GET" else json.loads(kwargs["content"])
+            calls.append((method,parsed.path,params))
+            return responder(method,parsed.path,params)
+        def close(self): pass
+    monkeypatch.setattr(httpx,"Client",Client)
+    return calls
+
+
+def test_expiry_exact_order_cursor_and_terminal_blank_remainder(tmp_path,monkeypatch):
+    import httpx
+    clock=Clock();path=tmp_path/"expiry.sqlite3";queue=ExpiryQueue(path,clock=clock)
+    row=reserve(queue);manual=reserve(queue)
+    active={row["id"]:True,manual["id"]:False}
+    def response(method,path,params):
+        if method=="POST":
+            assert path=="/v5/order/cancel" and params["orderId"]==row["order_id"]
+            return httpx.Response(200,json={"retCode":0,"result":{"orderId":row["order_id"],"orderLinkId":row["order_link_id"]}})
+        assert path=="/v5/order/realtime"
+        selected=row if params["orderId"]==[row["order_id"]] else manual
+        evidence=order(selected) if active[selected["id"]] else order(selected,orderStatus="Cancelled",leavesQty="")
+        return httpx.Response(200,json={"retCode":0,"result":{"category":"linear","nextPageCursor":"opaque-single-result-cursor","list":[evidence]}})
+    calls=_repair_http(monkeypatch,response)
+    clock.advance(1001)
+    engine=ExpiryEngine(queue)
+    for _ in range(2): engine.run_once()
+    saved=queue.get(row["id"]);assert saved["state"]=="cancel_requested" and saved["attempts"]==1 and saved["cancel_ack"]==1
+    assert queue.get(manual["id"])["state"]=="cancelled" and queue.get(manual["id"])["attempts"]==0
+    active[row["id"]]=False;clock.advance()
+    assert engine.run_once()["state"]=="cancelled"
+    assert len([c for c in calls if c[0]=="POST"])==1
+    assert all(c[2].get("orderId") for c in calls)
+    # Empty active quantities, duplicate/foreign records and empty cursor pages remain unsafe.
+    unsafe=reserve(queue);clock.advance(1001)
+    from shared.bybit_order_expiry import BrokerError, validate_entry
+    for listing,cursor in (([order(unsafe,leavesQty="")],"x"),([order(unsafe),order(unsafe)],"x"),
+                           ([order(unsafe,orderId="foreign")],"x"),([],"x"),([order(unsafe,reduceOnly=True)],"x")):
+        def malformed(method,path,params):
+            assert method=="GET"
+            return httpx.Response(200,json={"retCode":0,"result":{"category":"linear","list":listing,"nextPageCursor":cursor}})
+        bad_calls=_repair_http(monkeypatch,malformed)
+        transport=BybitTransport(scope())
+        try:
+            with pytest.raises((ExpiryError,BrokerError)):
+                observed=transport.orders(unsafe)
+                validate_entry(unsafe,observed[0])
+        finally:
+            transport.close()
+        assert len(bad_calls)==1 and bad_calls[0][0]=="GET"
+    # Existing-schema upgrade preserves the registered deadline and attempt evidence.
+    before=queue.get(row["id"])
+    with queue.connection(write=True) as db: db.execute("ALTER TABLE schedules DROP COLUMN last_error_details")
+    after=ExpiryQueue(path,clock=clock).get(row["id"])
+    assert (after["deadline_ms"],after["attempts"],after["state"])==(before["deadline_ms"],before["attempts"],before["state"])
+
+
+def test_expiry_failures_retain_sanitized_actionable_diagnostics(tmp_path,monkeypatch):
+    import httpx
+    clock=Clock();queue=ExpiryQueue(tmp_path/"expiry.sqlite3",clock=clock);row=reserve(queue)
+    secret="fixture-secret X-BAPI-SIGN api-key=must-not-persist"
+    mode=["auth"]
+    def response(method,path,params):
+        if mode[0]=="timeout": raise httpx.ReadTimeout(secret)
+        if mode[0]=="auth": return httpx.Response(401,json={"retCode":10003,"retMsg":secret,"headers":secret})
+        if mode[0]=="api": return httpx.Response(200,json={"retCode":10002,"retMsg":secret})
+        if mode[0]=="json": return httpx.Response(200,text=secret)
+        if mode[0]=="cancel-timeout" and method=="POST": raise httpx.ReadTimeout(secret)
+        return httpx.Response(200,json={"retCode":0,"result":{"category":"linear","nextPageCursor":"x","list":[order(row)]}})
+    calls=_repair_http(monkeypatch,response);clock.advance(1001);engine=ExpiryEngine(queue)
+    saved=engine.run_once();d=json.loads(saved["last_error_details"])
+    assert d=={"operation":"realtime","reason":"http_error","exception_type":"BrokerError","http_status":401,"ret_code":10003}
+    assert "credentials" in saved["last_error"] and saved["attempts"]==0
+    with queue.connection() as db: count=db.execute("SELECT count(*) FROM evidence").fetchone()[0]
+    clock.advance();engine.run_once()
+    with queue.connection() as db: assert db.execute("SELECT count(*) FROM evidence").fetchone()[0]==count
+    for value,reason in (("api","api_error"),("json","invalid_json"),("timeout","transport_error")):
+        mode[0]=value;clock.advance();saved=engine.run_once()
+        assert json.loads(saved["last_error_details"])["reason"]==reason and saved["attempts"]==0
+        assert saved["next_check_ms"]-clock()<=60000
+    mode[0]="cancel-timeout";clock.advance();saved=engine.run_once()
+    assert saved["attempts"]==1 and saved["state"]=="reconciling"
+    assert json.loads(saved["last_error_details"])["operation"]=="cancel"
+    assert json.loads(saved["last_error_details"])["exception_type"]=="ReadTimeout"
+    with queue.connection() as db:
+        evidence=[dict(r) for r in db.execute("SELECT * FROM evidence")]
+    assert secret not in json.dumps(evidence)+json.dumps(saved)
+    assert "X-BAPI" not in json.dumps(evidence)+json.dumps(saved)
+    assert len([c for c in calls if c[0]=="POST"])==1
+
+
+def test_expiry_repair_worker_retains_independent_lifecycle(tmp_path):
+    from tools.bybit_order_expiry_worker import stop_worker
+    path,log=tmp_path/"empty.sqlite3",tmp_path/"worker.log"
+    script="from tools.bybit_order_expiry_worker import start_worker; import json,sys,pathlib; s=start_worker(sys.argv[1],log_path=sys.argv[2],fixture_seconds=18); pathlib.Path(sys.argv[3]).write_text('local master exiting'); print(json.dumps(s))"
+    status=None
+    try:
+        parent=subprocess.run([sys.executable,"-c",script,str(path),str(log),str(tmp_path/"local-exit-marker")],cwd=ROOT,
+                              env=dict(os.environ,PYTHONPATH=str(ROOT),MASTER_ENV_FILE=str(tmp_path/"absent-env")),capture_output=True,text=True,timeout=20)
+        assert parent.returncode==0,parent.stderr
+        status=json.loads(parent.stdout);queue=ExpiryQueue(path)
+        current=queue.worker_status()
+        assert current["healthy"] and current["worker"]["instance"]==status["worker"]["instance"]
+        assert current["pending"]==0 and (tmp_path/"local-exit-marker").exists()
+        assert log.read_text().count("Expiry worker started")==1
+        stop_worker(path,instance=current["worker"]["instance"])
+        end=time.monotonic()+4
+        while time.monotonic()<end and queue.worker_status()["ownership_locked"]: time.sleep(.1)
+        assert not queue.worker_status()["ownership_locked"]
+        assert "Expiry worker stopped" in log.read_text()
+    finally:
+        if status:
+            current=ExpiryQueue(path).worker_status()
+            if current["healthy"] and current["worker"]["instance"]==status["worker"]["instance"]:
+                stop_worker(path,instance=status["worker"]["instance"])

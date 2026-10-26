@@ -33,8 +33,47 @@ class ScopeMismatch(ExpiryError):
     pass
 
 
+DIAGNOSTIC_REASONS = {"http_error", "api_error", "invalid_json", "response_schema", "transport_error",
+                      "exact_order_ambiguous", "identity_mismatch", "validation_failed", "unexpected_error"}
+DIAGNOSTIC_OPERATIONS = {"credentials", "realtime", "history", "cancel", "validate_entry", "reconcile", "queue"}
+EXCEPTION_TYPES = {"BrokerError", "ScopeMismatch", "ExpiryError", "ReadTimeout", "ConnectTimeout", "WriteTimeout",
+                   "PoolTimeout", "ConnectError", "ReadError", "WriteError", "RemoteProtocolError", "HTTPStatusError",
+                   "JSONDecodeError", "ValueError", "TypeError", "OSError", "OperationalError", "RuntimeError"}
+
+
+def sanitize_diagnostic(value):
+    """Allowlisted structure only; never retain broker messages, URLs, headers or exception text."""
+    if not isinstance(value, dict):
+        return {}
+    result = {}
+    for key, allowed in (("operation", DIAGNOSTIC_OPERATIONS), ("reason", DIAGNOSTIC_REASONS), ("exception_type", EXCEPTION_TYPES)):
+        if isinstance(value.get(key), str) and value[key] in allowed:
+            result[key] = value[key]
+    for key in ("http_status", "ret_code"):
+        raw = value.get(key)
+        if type(raw) is int or (isinstance(raw, str) and re.fullmatch(r"-?\d{1,10}", raw)):
+            number = int(raw)
+            if (key == "http_status" and 100 <= number <= 599) or (key == "ret_code" and abs(number) <= 1_000_000_000):
+                result[key] = number
+    return result
+
+
+def diagnostic_message(value):
+    d = sanitize_diagnostic(value)
+    if not d:
+        return ""
+    details = "; ".join(f"{k}={d[k]}" for k in ("exception_type", "http_status", "ret_code") if k in d)
+    advice = ("Check the selected account credentials/environment and API permissions."
+              if d.get("http_status") in (401, 403) or d.get("ret_code") in (10003, 10004, 10005, 33004)
+              else "Check worker status/connectivity; inspect this exact order before taking action.")
+    return f"{d.get('operation', 'reconcile')}: {d.get('reason', 'unexpected_error')} ({details}). {advice}"
+
+
 class BrokerError(RuntimeError):
-    """Messages deliberately exclude broker bodies, credentials and headers."""
+    def __init__(self, reason, *, operation="reconcile", http_status=None, ret_code=None, exception_type="BrokerError"):
+        self.diagnostic = sanitize_diagnostic(dict(reason=reason, operation=operation, http_status=http_status,
+                                                  ret_code=ret_code, exception_type=exception_type))
+        super().__init__(diagnostic_message(self.diagnostic))
 
 
 def utc_ms():
@@ -156,6 +195,11 @@ class ExpiryQueue:
                     heartbeat_ms INTEGER NOT NULL, stop_instance TEXT, stopped_ms INTEGER,
                     log_path TEXT NOT NULL, last_error TEXT NOT NULL DEFAULT '');
             """)
+
+        # Migrate under the same cross-process write transaction; never reset schedules or attempts.
+        with self.connection(write=True) as db:
+            if "last_error_details" not in {row[1] for row in db.execute("PRAGMA table_info(schedules)")}:
+                db.execute("ALTER TABLE schedules ADD COLUMN last_error_details TEXT NOT NULL DEFAULT '{}'")
 
     @contextmanager
     def connection(self, *, write=False):
@@ -285,21 +329,25 @@ class ExpiryQueue:
                 (evidence["status"], evidence["filled"], evidence["leaves"], self.clock(), row["id"]))
             self._event(db, row["id"], "cancel_submission_started", {"attempt": current["attempts"] + 1, **evidence})
 
-    def finish(self, row, state, *, error="", evidence=None, ack=None):
+    def finish(self, row, state, *, error="", evidence=None, ack=None, diagnostic=None):
         if state not in ACTIVE + TERMINAL:
             raise ExpiryError("Unsupported schedule transition")
+        diagnostic = sanitize_diagnostic(diagnostic)
+        details_json = json.dumps(diagnostic, sort_keys=True)
+        if diagnostic:
+            error = diagnostic_message(diagnostic)
         with self.connection(write=True) as db:
             current = self._claimed(db, row)
             evidence = evidence or {"status": current["broker_status"], "filled": current["filled_qty"], "leaves": current["leaves_qty"]}
             checks = current["reconciliations"] + 1
             wait = min(60_000, 5_000 * 2 ** min(checks - 1, 4)) if error else 5_000
-            db.execute("""UPDATE schedules SET state=?,last_error=?,broker_status=?,filled_qty=?,leaves_qty=?,
+            db.execute("""UPDATE schedules SET state=?,last_error=?,last_error_details=?,broker_status=?,filled_qty=?,leaves_qty=?,
                 cancel_ack=?,reconciliations=?,next_check_ms=?,lease_owner=NULL,lease_until_ms=NULL,
                 updated_ms=?,revision=revision+1 WHERE id=?""",
-                (state, error, evidence["status"], evidence["filled"], evidence["leaves"],
+                (state, error, details_json, evidence["status"], evidence["filled"], evidence["leaves"],
                  current["cancel_ack"] if ack is None else int(ack), checks, self.clock() + wait, self.clock(), row["id"]))
-            if (state, error, evidence["status"], evidence["filled"]) != (current["state"], current["last_error"], current["broker_status"], current["filled_qty"]) or ack is not None:
-                self._event(db, row["id"], state, {"error": error, **evidence})
+            if (state, error, evidence["status"], evidence["filled"]) != (current["state"], current["last_error"], current["broker_status"], current["filled_qty"]) or ack is not None or details_json != current["last_error_details"]:
+                self._event(db, row["id"], state, {"error": error, "diagnostic": diagnostic, **evidence})
         return self.get(row["id"])
 
     def worker_status(self):
@@ -366,22 +414,45 @@ class BybitTransport:
         headers = {"X-BAPI-API-KEY": self.key, "X-BAPI-TIMESTAMP": stamp, "X-BAPI-RECV-WINDOW": window,
                    "X-BAPI-SIGN": signature, "X-BAPI-SIGN-TYPE": "2", "Content-Type": "application/json"}
         url = self.scope.environment + path
-        response = self.client.request(method, url + ("?" + data if method == "GET" else ""),
-                                       headers=headers, **({"content": data} if method == "POST" else {}))
+        operation = {"/v5/order/realtime": "realtime", "/v5/order/history": "history", "/v5/order/cancel": "cancel"}[path]
+        try:
+            response = self.client.request(method, url + ("?" + data if method == "GET" else ""),
+                                           headers=headers, **({"content": data} if method == "POST" else {}))
+        except Exception as exc:
+            raise BrokerError("transport_error", operation=operation, exception_type=type(exc).__name__) from None
+        try:
+            payload = response.json()
+        except Exception:
+            raise BrokerError("http_error" if response.status_code != 200 else "invalid_json",
+                              operation=operation, http_status=response.status_code, exception_type="JSONDecodeError") from None
+        code = payload.get("retCode") if isinstance(payload, dict) else None
         if response.status_code != 200:
-            raise BrokerError("Bybit HTTP request failed")
-        payload = response.json()
-        if not isinstance(payload, dict) or payload.get("retCode") not in (0, "0") or not isinstance(payload.get("result"), dict):
-            raise BrokerError("Bybit did not confirm the request")
+            raise BrokerError("http_error", operation=operation, http_status=response.status_code, ret_code=code)
+        if not isinstance(payload, dict) or code not in (0, "0"):
+            raise BrokerError("api_error", operation=operation, http_status=response.status_code, ret_code=code)
+        if not isinstance(payload.get("result"), dict):
+            raise BrokerError("response_schema", operation=operation, http_status=response.status_code, ret_code=code)
         return payload["result"]
 
     def orders(self, schedule, *, history=False):
         params = {"category": "linear", "symbol": schedule["symbol"]}
         params["orderId" if schedule["order_id"] else "orderLinkId"] = schedule["order_id"] or schedule["order_link_id"]
         result = self._request("GET", "/v5/order/history" if history else "/v5/order/realtime", params)
-        if result.get("category") != "linear" or not isinstance(result.get("list"), list) or result.get("nextPageCursor"):
-            raise BrokerError("Ambiguous or malformed exact-order result")
-        return result["list"]
+        operation = "history" if history else "realtime"
+        rows = result.get("list")
+        if result.get("category") != "linear" or not isinstance(rows, list):
+            raise BrokerError("response_schema", operation=operation)
+        # A cursor is pagination metadata, not evidence of another order. Exact-ID requests
+        # may return it for a single result. Never follow it or adopt/filter unrelated rows.
+        if len(rows) > 1 or (not rows and result.get("nextPageCursor")):
+            raise BrokerError("exact_order_ambiguous", operation=operation)
+        if rows:
+            order = rows[0]
+            if (not isinstance(order, dict) or order.get("symbol") != schedule["symbol"]
+                    or order.get("orderLinkId") != schedule["order_link_id"]
+                    or (schedule["order_id"] and order.get("orderId") != schedule["order_id"])):
+                raise BrokerError("identity_mismatch", operation=operation)
+        return rows
 
     def cancel(self, schedule):
         return self._request("POST", "/v5/order/cancel", {"category": "linear", "symbol": schedule["symbol"], "orderId": schedule["order_id"]})
@@ -403,7 +474,13 @@ def validate_entry(schedule, order):
             raise ExpiryError("Order predates the registered intent")
     except (KeyError, ValueError, TypeError):
         raise ExpiryError("Missing or mismatched order creation evidence") from None
-    qty, filled, leaves = positive(order.get("qty")), positive(order.get("cumExecQty"), zero=True), positive(order.get("leavesQty"), zero=True)
+    status = order.get("orderStatus")
+    # Observed Bybit terminal cancellation evidence has leavesQty="". Only a confirmed
+    # terminal state permits zero remaining open quantity; active orders must supply it.
+    raw_leaves = order.get("leavesQty")
+    if raw_leaves == "" and status in {"Filled", "Cancelled", "PartiallyFilledCanceled", "Rejected"}:
+        raw_leaves = "0"
+    qty, filled, leaves = positive(order.get("qty")), positive(order.get("cumExecQty"), zero=True), positive(raw_leaves, zero=True)
     if qty != positive(schedule["quantity"]) or filled > qty or leaves > qty - filled or filled < positive(schedule["filled_qty"], zero=True):
         raise ExpiryError("Inconsistent or regressing fill evidence")
     status = order.get("orderStatus")
@@ -426,13 +503,16 @@ class ExpiryEngine:
         if row is None:
             return None
         transport = None
+        operation = "credentials"
         try:
             scope = ExecutionScope.from_record(row)
             transport = self.transport_factory(scope)
             if transport.scope != scope:
                 raise ScopeMismatch("Transport scope differs from registered profile")
+            operation = "realtime"
             orders = transport.orders(row)
             if not orders:
+                operation = "history"
                 orders = transport.orders(row, history=True)
             if not orders:
                 return self.queue.finish(row, "needs_attention" if row["attempts"] >= 3 else ("order_missing" if row["order_id"] else "submission_unresolved"),
@@ -440,6 +520,7 @@ class ExpiryEngine:
             if len(orders) != 1:
                 raise ExpiryError("Ambiguous exact-order evidence")
             order = orders[0]
+            operation = "validate_entry"
             evidence = validate_entry(row, order)
             if not row["order_id"]:
                 self.queue.bind(row["id"], scope=scope, order_id=order["orderId"], order_link_id=row["order_link_id"])
@@ -452,6 +533,7 @@ class ExpiryEngine:
             if row["attempts"] >= 3:
                 return self.queue.finish(row, "needs_attention", error="Three cancellation submissions exhausted; broker still reports an active entry", evidence=evidence)
             self.queue.begin_cancel(row, evidence)  # Durable BEFORE the potentially uncertain outbound operation.
+            operation = "cancel"
             result = transport.cancel(row)
             if result.get("orderId") != row["order_id"] or result.get("orderLinkId") != row["order_link_id"]:
                 return self.queue.finish(row, "reconciling", error="Cancellation acknowledgement identity unconfirmed", evidence=evidence)
@@ -459,9 +541,13 @@ class ExpiryEngine:
         except LostClaim:
             return None
         except ExpiryError as exc:
-            return self.queue.finish(row, "needs_attention", error=str(exc))
-        except Exception:
-            return self.queue.finish(row, "reconciling", error="Broker/API/network outcome unavailable; reconcile before any further cancellation")
+            return self.queue.finish(row, "needs_attention", diagnostic={"operation": operation,
+                "reason": "validation_failed", "exception_type": type(exc).__name__})
+        except BrokerError as exc:
+            return self.queue.finish(row, "needs_attention" if row["attempts"] >= 3 else "reconciling", diagnostic=exc.diagnostic)
+        except Exception as exc:
+            return self.queue.finish(row, "needs_attention" if row["attempts"] >= 3 else "reconciling", diagnostic={
+                "operation": operation, "reason": "unexpected_error", "exception_type": type(exc).__name__})
         finally:
             if transport is not None:
                 try:

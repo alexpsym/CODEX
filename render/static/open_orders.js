@@ -498,7 +498,7 @@
         const state=entry.prices.get(priceColumns[i]);const resume=Object.values(priceOperations).find(op=>op.target===item.price_edit?.target&&op.field===state.field);
         if(resume&&!state.draft)openPriceCell(entry,state,resume);renderPriceCell(entry,state);
       }else if(i===30&&item.local_tracking){renderReferencePriceCell(tr.children[i],item);
-      }else{const expiry=item.order_expiry;const suffix=expiry&&i===rowValues(item).length-1?` ? Local expiry ${new Date(expiry.deadline_ms).toLocaleString('en-AU',{timeZone:'Australia/Brisbane',hour12:false})} Australia/Brisbane ? ${expiry.status_label}`:'';const text=String(fmt(value))+suffix;if(tr.children[i].textContent!==text)tr.children[i].textContent=text;}});
+      }else{const expiry=item.order_expiry;const suffix=expiry&&i===rowValues(item).length-1?` ? Local expiry ${new Date(expiry.deadline_ms).toLocaleString('en-AU',{timeZone:'Australia/Brisbane',hour12:false})} Australia/Brisbane | ${expiry.status_label} | worker ${expiry.worker_healthy === true ? "running" : expiry.worker_healthy === false ? "unavailable" : "status pending"}${expiry.last_error ? " | " + expiry.last_error : ""}`:'';const text=String(fmt(value))+suffix;if(tr.children[i].textContent!==text)tr.children[i].textContent=text;}});
       desired.push(tr);
     }
     for(const [key,entry] of classificationRows){if(entry.present)continue;if([...entry.cells.values(),...entry.prices.values()].some(state=>state.draft)){

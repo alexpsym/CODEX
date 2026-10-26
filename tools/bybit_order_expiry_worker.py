@@ -15,7 +15,7 @@ from uuid import uuid4
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-from shared.bybit_order_expiry import DEFAULT_QUEUE, ExpiryEngine, ExpiryError, ExpiryQueue, WorkerLock
+from shared.bybit_order_expiry import DEFAULT_QUEUE, ExpiryEngine, ExpiryError, ExpiryQueue, WorkerLock, diagnostic_message
 
 DEFAULT_LOG = ROOT / "logs/bybit_order_expiry_worker.log"
 
@@ -91,6 +91,7 @@ def run_worker(queue_path, log_path, *, fixture_seconds=None):
         end = time.monotonic() + fixture_seconds if fixture_seconds is not None else float("inf")
         last_error = ""
         next_scan = 0
+        last_schedule_state = {}
         while time.monotonic() < end:
             try:
                 if time.monotonic() >= next_scan:
@@ -101,6 +102,15 @@ def run_worker(queue_path, log_path, *, fixture_seconds=None):
                         scan_until = time.monotonic() + 5
                         for _ in range(20):
                             result = engine.run_once()
+                            if result is not None:
+                                useful = tuple(result.get(key) for key in ("state", "attempts", "broker_status", "filled_qty", "last_error_details"))
+                                if last_schedule_state.get(result["id"]) != useful:
+                                    try:
+                                        detail = diagnostic_message(json.loads(result.get("last_error_details") or "{}"))
+                                    except (ValueError, TypeError):
+                                        detail = ""
+                                    logger.info("Schedule=%s state=%s attempts=%s %s", result["id"], result["state"], result["attempts"], detail)
+                                    last_schedule_state[result["id"]] = useful
                             if queue.heartbeat(instance) or result is None or time.monotonic() >= scan_until:
                                 break
                     else:

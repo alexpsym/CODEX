@@ -24420,7 +24420,7 @@ def _entry_price_for_bybit_submit_validation(
 
 
 # Local scheduled cancellation is separate from the master/terminal shutdown lifecycle.
-from shared.bybit_order_expiry import ExpiryQueue, DEFAULT_QUEUE as BYBIT_EXPIRY_QUEUE_PATH, credential_scope
+from shared.bybit_order_expiry import ExpiryQueue, DEFAULT_QUEUE as BYBIT_EXPIRY_QUEUE_PATH, credential_scope, sanitize_diagnostic, diagnostic_message
 from tools.bybit_order_expiry_worker import start_worker as _start_bybit_expiry_worker
 
 _BYBIT_EXPIRY_START_ERROR = ""
@@ -24478,6 +24478,17 @@ def _expiry_public_record(row, *, healthy=None):
               "order_link_id", "deadline_ms", "state", "attempts", "filled_qty", "broker_status", "revision", "updated_ms")}
     result["deadline_brisbane"] = datetime.fromtimestamp(row["deadline_ms"]/1000, ZoneInfo("Australia/Brisbane")).isoformat()
     result["status_label"] = labels.get(row["state"], "Unresolved")
+    try:
+        result["diagnostic"] = sanitize_diagnostic(json.loads(row.get("last_error_details") or "{}"))
+    except (ValueError, TypeError):
+        result["diagnostic"] = {}
+    result["last_error"] = diagnostic_message(result["diagnostic"])
+    if not result["last_error"] and row.get("last_error"):
+        result["last_error"] = "Previous reconciliation failed; inspect worker status and this exact order."
+    result["worker_healthy"] = healthy
+    unresolved = row["state"] not in {"filled", "cancelled", "partially_filled_cancelled", "rejected"}
+    if unresolved and row["deadline_ms"] <= _bybit_expiry_now_ms():
+        result["status_label"] = "Overdue; " + result["status_label"]
     if (healthy is False and row["deadline_ms"] <= _bybit_expiry_now_ms()
             and row["state"] not in {"filled", "cancelled", "partially_filled_cancelled", "rejected"}):
         result["status_label"] = "Overdue; worker unavailable; needs attention"
