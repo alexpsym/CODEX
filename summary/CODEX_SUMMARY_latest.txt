@@ -1,3 +1,13 @@
+JOB 6 - Bybit limit-entry exchange-hosted expiry research (2026-10-26)
+Verdict: unsupported on the documented LTT linear USDT perpetual order-create path for ordinary retail live and mainnet demo use. Complete create-order schema has no per-order duration/deadline; current TIF enum is GTC/IOC/FOK/PostOnly/RPI, without GTD. Manual-order guide does not establish the remembered timed expiry for this product. DCP is restricted institutional disconnect protection with broad product-order cancellation, not arbitrary expiry of one retail entry.
+Report: docs/bybit_limit_order_expiry_research.md. Includes direct primary evidence, source locations, demo/live routing, attached TP/SL trace, mechanism distinctions, shutdown responsibility and verification limits.
+Job 7 native-expiry implementation is BLOCKED by the capability finding. Retain the original requirement and proceed next to Job 8 (OANDA inactivity-fee countdown and balance-sensitive warnings). No workaround or trading change was implemented.
+Verified six official documentation pages and used two search queries. Tests/builds/deployments/account calls/trial orders/amendments/cancellations/imports/restarts/production-data operations: zero. Only the report and this initially clean summary are task changes; unrelated work and prior summaries preserved.
+Job 4 live actual-fill verification remains pending. Job 5's three user-performed live checks passed; observed price movement remains pending. Remaining queue 9-15 is unchanged. The spontaneous ETHUSDT fee/calculator job remains CANCELLED; no fee settings or investigation were changed.
+Implementation and account state unchanged; documentation delivery prepared.
+
+Previous committed summary (preserved):
+
 FT6 automatic stop after 100 completed strategy trades (2026-10-25)
 
 - Implemented the independent integer setting `Maximum completed strategy trades (0 unlimited)`, default 100. Presets 1-6 do not overwrite it; saved Custom resolution remains once per run. Negative values report an error, request a silent pause when available, and block entries.
