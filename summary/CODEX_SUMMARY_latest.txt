@@ -2721,7 +2721,7 @@ Residual/manual acceptance: FT6 standard-test/chart execution has not been inspe
 
 FT6 QUALIFIED FIRST PULLBACK EXPERIMENT - 26 OCTOBER 2026
 
-Implemented preset **7 ? M5 qualified first pullback buys-only**. It requires a completed close beyond the frozen 20-bar pre-origin range plus 0.10 ATR, with at least 3.0 ATR displacement. Its prospective retracement is max(0.50 frozen ATR, 25% displacement), rounded long-down/short-up. Pending parents continue advancing and expire without spending consumed-parent boundaries; first-touch execution, Custom restoration, presets 0?6 and the independent default 100-trade pause are preserved.
+Implemented preset **7 - M5 qualified first pullback buys-only**. It requires a completed close beyond the frozen 20-bar pre-origin range plus 0.10 ATR, with at least 3.0 ATR displacement. Its prospective retracement is max(0.50 frozen ATR, 25% displacement), rounded long-down/short-up. Pending parents continue advancing and expire without spending consumed-parent boundaries; first-touch execution, Custom restoration, presets 0-6 and the independent default 100-trade pause are preserved.
 
 Changed files:
 - forex-tester-6/RangeBreakoutPullbackStrategy/RangeBreakoutPullbackStrategy.cpp
@@ -2789,3 +2789,5 @@ A sandboxed ordinary fetch could not open .git/FETCH_HEAD (Permission denied); t
 Delivery procedure: run the unchanged repository-root PATCH_DESKTOP_PUSH.bat through task-local run_delivery.py/scoped_git.py/git.bat, adapted from the established auto-stop delivery adapter. It stages only the five owned paths above, refuses foreign staged content, preserves unrelated work, skips blanket reset and raw pull/rebase/autostash, and routes its push exclusively through:
 & 'C:\Users\User\miniconda3\python.exe' 'C:\Users\User\.codex\tools\alexpsym_git_delivery.py' push
 The BAT fetches origin/master and verifies local HEAD equality afterward. Actual delivery commit and verified hashes are reported after execution; this section records the concrete result and procedure before commit, not an advance delivery-success claim. No briefs, binaries, backups, logs, runtime data, unrelated changes or delivery tooling are staged. Prior summary bytes are preserved verbatim before this appended task section.
+
+Text-only delivery correction: replaced Windows pipe-encoding question marks in the new guide/summary range separators with ASCII hyphens. No strategy/test/DLL change, rebuild or repeated functional run. Initial protected BAT delivery succeeded, verified local HEAD == freshly fetched origin/master == 4e1905d1da770b03176cd38693ea1a0f5e954eb2. This text correction is delivered by a second scoped BAT invocation using the same protected helper; final hash is reported afterward.

@@ -86,7 +86,7 @@ RBP preset=M5 first-touch ATR buys-only timeframe=5 setup=1 confirmation=0 direc
 
 ### M5 qualified first pullback experiment (preset 7)
 
-Select numeric **7 M5 qualified first pullback buys-only** for the new EURUSD M5 experiment. It inherits preset 6's seed/provisional and oversized-candle evidence rules, frozen setup ATR, buys-only permission, adaptive stops, 0.01 lots, 2R/3R structural targets, EMA filter off, 50% maximum depth, 30-bar expiry and other safeguards. Presets 0?6 retain their existing behavior; entry modes `0 confirmation` and `1 first-touch ATR` remain available. Mode `2 qualified-first-pullback` is also selectable in Custom, including mirrored shorts. The four new saved Custom inputs default to and are explicitly applied by preset 7 as follows:
+Select numeric **7 M5 qualified first pullback buys-only** for the new EURUSD M5 experiment. It inherits preset 6's seed/provisional and oversized-candle evidence rules, frozen setup ATR, buys-only permission, adaptive stops, 0.01 lots, 2R/3R structural targets, EMA filter off, 50% maximum depth, 30-bar expiry and other safeguards. Presets 0-6 retain their existing behavior; entry modes `0 confirmation` and `1 first-touch ATR` remain available. Mode `2 qualified-first-pullback` is also selectable in Custom, including mirrored shorts. The four new saved Custom inputs default to and are explicitly applied by preset 7 as follows:
 
 - **Qualified impulse range lookback bars** = `20`.
 - **Qualified impulse minimum displacement ATR** = `3.0`.
@@ -120,7 +120,7 @@ RBP preset=M5 qualified first pullback buys-only timeframe=5 setup=1 confirmatio
 
 Event diagnostics retain `RBP` prefixes and report pending/qualified/arm/refresh/skip/consume reasons, frozen range, origin, endpoint, displacement/ATR, required retracement and qualifying time. The existing planned TOUCH text marker identifies mode 2 as `Touch QFP`; no new chart objects or per-tick logging are introduced.
 
-The reviewed August?September 2023 sample and September screenshots are **development data**. The unchanged 100-trade sample was approximately -13.76R; it does not prove this replacement profitable. Screenshot geometry was not reconstructed as OHLC/ticks or replayed, and the approximate yellow-line area is not a required fill or known future bottom. Synthetic checks establish causal mechanics, not screenshot matches, chart acceptance or profitability. Freeze these rules before any later profitability check, and use fresh data for that check. The user performs chart acceptance and the next standard 100-trade test; no historical backtest, replay or optimisation accompanies this implementation.
+The reviewed August-September 2023 sample and September screenshots are **development data**. The unchanged 100-trade sample was approximately -13.76R; it does not prove this replacement profitable. Screenshot geometry was not reconstructed as OHLC/ticks or replayed, and the approximate yellow-line area is not a required fill or known future bottom. Synthetic checks establish causal mechanics, not screenshot matches, chart acceptance or profitability. Freeze these rules before any later profitability check, and use fresh data for that check. The user performs chart acceptance and the next standard 100-trade test; no historical backtest, replay or optimisation accompanies this implementation.
 
 ### Automatic stop after completed trades
 
