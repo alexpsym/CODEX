@@ -6,7 +6,7 @@ Verified **2026-10-26 (Australia/Brisbane)**. Repository inspected at `ff81c40a6
 
 No documented exchange-enforced duration or deadline applies to LTT's ordinary `linear` USDT perpetual limit-entry request, for either mainnet demo or ordinary retail live use. The complete [V5 order-create request table](https://bybit-exchange.github.io/docs/v5/order/create-order#request-parameters) has no per-order expiry field. This is a finding about the checked API/product path, not proof about every Bybit product or private entitlement.
 
-**Job 7's native-expiry implementation is blocked by this capability finding. Proceed to Job 8.** Retain the original offline-cancellation requirement in the queue; do not add controls that imply it is supported.
+**Native expiry remains unsupported.** The original recommendation to skip Job 7 was superseded by the user's approval of an independent local API-cancellation worker (Job 7A), followed by calculator integration (Job 7B). This is a separate running executor, not exchange-hosted expiry. The original computer-off requirement remains deferred to a future explicitly requested hosted executor.
 
 ## Documented capabilities and evidence
 
@@ -46,3 +46,44 @@ Because the applicable expiry mechanism is absent, there are no supported durati
 No material conflict was found among the scoped order schema, enum and manual TIF guide. To reopen Job 7, the smallest useful evidence is written official Bybit confirmation naming the exact supported endpoint/parameter for **retail USDT perpetuals**, demo/live availability, deadline encoding and partial-fill/protection semantics. A remembered UI option would first need its exact product/account and official explanation. Documentation alone would still not prove controlled broker acceptance; no speculative request or trial order is justified by this report.
 
 Verification used **six opened official documentation pages and two search queries**; no changelog expansion was needed. Tests, builds, deployments, account calls, orders, amendments/cancellations, imports, restarts and production-data operations: **zero**. All implementation/configuration files remained read-only. Job 4's live fill check and Job 5 price movement remain pending; Job 5's three user-performed live checks are recorded as passed. The cancelled ETHUSDT fee job remains cancelled.
+
+## Job 7A: approved independent local executor (2026-10-26)
+
+Implemented in `shared/bybit_order_expiry.py` and `tools/bybit_order_expiry_worker.py`. **Calculator controls, submission registration, automatic startup and end-to-end acceptance are not connected; Job 7B is next.** No real worker was activated and no account/order was contacted during development.
+
+The standard-library SQLite queue is `render/data/bybit_order_expiry.sqlite3` (ignored runtime data); logs rotate under `logs/bybit_order_expiry_worker.log`. SQLite transactions cover registration, binding, claims and state/evidence updates. WAL plus synchronous FULL commits provide cross-process coordination; an atomic JSON replacement alone would not. Do not copy/sync the live database through Dropbox. Credentials and authentication headers are never persisted. A SHA-256 credential-profile fingerprint binds each schedule to explicit demo/live mode, actual API base URL, profile, linear category, USDT symbol, side/position scope, quantity, unique preassigned `orderLinkId`, and eventual exact `orderId`.
+
+### Lifecycle commands
+
+Run from `C:\GPT\CODEX-master` using the existing Python environment:
+
+```powershell
+& 'C:\Users\User\miniconda3\python.exe' tools/bybit_order_expiry_worker.py start
+& 'C:\Users\User\miniconda3\python.exe' tools/bybit_order_expiry_worker.py status
+& 'C:\Users\User\miniconda3\python.exe' tools/bybit_order_expiry_worker.py stop
+```
+
+Start uses a detached Windows process, a new process group and breakaway from the parent's job. If detachment/readiness fails, callers must not submit an expiry-enabled entry. An OS ownership mutex scoped to the queue prevents duplicate workers; a fresh heartbeat plus ownership lock establishes readiness, not PID existence. Stop addresses the recorded instance nonce through the queue and is cooperative; no generic process termination is used. A stale/unresponsive owner is reported without launching a competing worker or killing a PID. Status includes instance, heartbeat, pending/overdue/attention counts, last useful error and log location. Stop requests may take until the current bounded broker reconciliation finishes. LTT's shutdown markers and owned master/terminal lifecycle are not used.
+
+**The computer must remain awake and online.** Closing LTT/browser/its owned terminal does not stop this separate worker. Sleep, shutdown, disconnected internet or API outages can delay cancellation. Restarting the executor recovers overdue durable work. There is no automatic boot installation, Windows service/scheduled task, Render deployment or hosted dependency. If stopped/crashed, the worker must be started again (automatic calculator startup belongs to 7B).
+
+### Registration contract for Job 7B
+
+1. Resolve explicit credentials through `resolve_bybit_credentials_for(mode)` and construct `credential_scope(mode, base_url, key, secret, profile)`. Do not infer account privileges from credential presence.
+2. Call `start_worker()` and verify `ExpiryQueue.worker_status()['healthy']`. Before order creation call `ExpiryQueue.reserve(scope=..., symbol=..., side=..., quantity=..., deadline_ms=..., position_idx=...)`. The default readiness check must remain enabled in production. `deadline_ms` is an absolute future UTC epoch millisecond integer; Job 7B must convert relative duration or Brisbane date/time to this value. Reservation returns durable schedule `id` and unique `order_link_id`; pass that exact link to order creation. Failure means **do not submit**. The `require_ready=False` escape is for isolated tests/offline queue tooling, not submission authorization.
+3. After acceptance, call `bind(schedule_id, scope=..., order_id=..., order_link_id=...)`. Binding is idempotent for identical identity, rejects conflicting identity, and does not reset newer reconciliation state. If order creation or response is interrupted, retain the reserved intent: the executor queries that exact link at its deadline and binds only matching entry evidence. It never discovers/adopts arbitrary existing orders. An absent record is unresolved, not proof that nothing was submitted.
+4. Read `get(schedule_id)` and `worker_status()` for status; don't label an asynchronous acknowledgement as expired. Readiness is a point-in-time safety check, not a guarantee that the computer cannot subsequently sleep or the worker fail. Job 7B must show that operating limitation and preserve unresolved submission outcomes.
+
+### Cancellation and reconciliation semantics
+
+The worker follows the official [exact-order cancel contract](https://bybit-exchange.github.io/docs/v5/order/cancel-order): `POST /v5/order/cancel`, `category=linear`, symbol and exact order ID. Bybit documents asynchronous acknowledgement; this remains `cancel_requested` until broker evidence confirms the outcome. [Realtime order queries](https://bybit-exchange.github.io/docs/v5/order/open-order) are followed by [order history](https://bybit-exchange.github.io/docs/v5/order/order-list) when empty; absent history is still not proof of cancellation. Signing follows the [V5 authentication guide](https://bybit-exchange.github.io/docs/v5/guide). No account-discovery or cancel-all endpoint exists in this transport.
+
+Before cancellation the engine validates the exact registered scope/IDs, symbol, side, Limit type, quantity, creation evidence, position index and non-protective/non-reduce-only purpose. It cancels only a still-active entry's unfilled amount. Partial-fill evidence is retained; terminal outcomes distinguish `filled`, `cancelled`, `partially_filled_cancelled` and `rejected`. A racing fill is **filled**, not a successfully expired position. There is no position-close, amendment, protective-order cancellation or resizing operation. Existing filled exposure and its attached protections are not modified by this engine.
+
+Due work is scanned approximately every five seconds. Each HTTP request has a five-second timeout; errors back off from five to at most sixty seconds. Cancellation submissions are durably counted **before** sending, capped at three per schedule across restarts, and every further submission requires fresh exact-order reconciliation. Interrupted requests never become false success. Exhausted submissions with continuing active/unconfirmed evidence require attention; missing records and network outages remain explicit unresolved evidence rather than assumed cancellation. Transactional 30-second claims fence stale owners. Unchanged polling states are not logged each cycle; useful state/attempt evidence is durable.
+
+### Verification and limits
+
+Only the four authorized nodes in `tests/test_bybit_order_expiry_worker.py` ran: **4 passed, exit 0**, one invocation, 6.05 seconds. Tests used temporary SQLite queues, controlled clocks, fake HTTP/broker transports and an empty detached fixture worker that self-exits within 18 seconds. They covered concurrent registration/claims, demo/live isolation, binding recovery, partial fills, fill/cancel races, asynchronous acknowledgement, exhausted attempts, uncertain network outcomes and restart reconciliation. The lifecycle fixture demonstrated singleton ownership and survival after its parent exited, then cooperatively stopped its verified instance. No production database, live credentials/account requests or continuously running real worker was used. Logs/JUnit/exit record: `.job7a_verify_20261026_01/` (not committed).
+
+Documentation and mocked tests do not establish controlled live broker acceptance. Job 7B must connect registration and startup safely and provide its own authorized end-to-end acceptance before advertising the user-facing feature. Render/hosted execution remains deferred. Job 4's actual-fill check and Job 5's price-movement observation remain pending; ETHUSDT fee work remains cancelled.
