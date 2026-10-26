@@ -3,12 +3,13 @@
 #include <vector>
 #include "../forex-tester-6/RangeBreakoutPullbackStrategy/RangeBreakoutPullbackStrategy.cpp"
 struct Bar {double o,h,l,c,t;};
-Bar series[128];
+Bar series[512];
 std::vector<std::string> logs;
 std::vector<std::string> markerLabels;double markerPrice=0;
 double bidQuote,askQuote,now,grid=0.0001,orderQuote,orderSL,orderTP;
-int attempts,orderType,selectedFrame,buyAttempts,sellAttempts;unsigned long historyBars=128;
+int attempts,orderType,selectedFrame,buyAttempts,sellAttempts;unsigned long historyBars=512;
 bool busy,orderResult;int orderTicket;
+bool contextBound=false,frameSuccess=true;int frameCalls=0,symbolReadsBeforeBind=0,contextReadsBeforeBind=0;std::string selectedSymbol;int selectedTimeframe=0,symbolResultMode=0;
 struct HistoryRow{int type,ticket,magic;std::string symbol;double closeTime;};
 std::vector<HistoryRow> tradeHistory;int selectedHistory=-1,historyScans=0,pauseCalls=0;bool failHistorySelect=false;
 void Check(bool ok,const char *why){if(!ok){fprintf(stderr,"FAIL: %s\n",why);for(auto &s:logs)fprintf(stderr,"%s\n",s.c_str());exit(1);}}
@@ -18,23 +19,24 @@ void __stdcall Ignore(void*,PChar){}
 void __stdcall Register(void*,PChar,int,void*){}
 void __stdcall OptionValue(void*,PChar,PChar){}
 void __stdcall Capture(void*,PChar s){logs.push_back(s);}
-PChar __stdcall Sym(void*){return (PChar)"EURUSD";}
-bool __stdcall Frame(void*,PChar,int f){selectedFrame=f;return true;}
-unsigned long __stdcall BarsCount(void*){return historyBars;}
-double __stdcall O(void*,int s){return series[s].o;}
-double __stdcall H(void*,int s){return series[s].h;}
-double __stdcall L(void*,int s){return series[s].l;}
-double __stdcall C(void*,int s){return series[s].c;}
-double __stdcall T(void*,int s){return series[s].t;}
+PChar __stdcall Sym(void*){if(!contextBound){symbolReadsBeforeBind++;return (PChar)"";}if(symbolResultMode==1)return NULL;if(symbolResultMode==2)return (PChar)"";return (PChar)selectedSymbol.c_str();}
+bool __stdcall Frame(void*,PChar symbol,int f){frameCalls++;if(!frameSuccess||!symbol||!*symbol){contextBound=false;selectedSymbol.clear();selectedTimeframe=0;return false;}selectedSymbol=symbol;selectedTimeframe=f;selectedFrame=f;contextBound=true;return true;}
+bool NeedContext(){if(contextBound)return true;contextReadsBeforeBind++;return false;}
+unsigned long __stdcall BarsCount(void*){return NeedContext()?historyBars:0;}
+double __stdcall O(void*,int s){return NeedContext()?series[s].o:0;}
+double __stdcall H(void*,int s){return NeedContext()?series[s].h:0;}
+double __stdcall L(void*,int s){return NeedContext()?series[s].l:0;}
+double __stdcall C(void*,int s){return NeedContext()?series[s].c:0;}
+double __stdcall T(void*,int s){return NeedContext()?series[s].t:0;}
 double __stdcall Now(void*){return now;}
-double __stdcall BidQuote(void*){return bidQuote;}
-double __stdcall AskQuote(void*){return askQuote;}
-double __stdcall Grid(void*){return grid;}
+double __stdcall BidQuote(void*){return NeedContext()?bidQuote:0;}
+double __stdcall AskQuote(void*){return NeedContext()?askQuote:0;}
+double __stdcall Grid(void*){return NeedContext()?grid:0;}
 int __stdcall Orders(void*){return busy?1:0;}
 bool __stdcall Select(void*,int,int,int){return busy;}
 int __stdcall Magic(void*){return selectedHistory>=0?tradeHistory[selectedHistory].magic:MagicNumber;}
-int __stdcall HistoryTotalMock(void*){return (int)tradeHistory.size();}
-bool __stdcall SelectHistory(void*,int index,int flags,int pool){if(pool==MODE_HISTORY&&flags==SELECT_BY_POS){historyScans++;if(failHistorySelect||index<0||index>=(int)tradeHistory.size())return false;selectedHistory=index;return true;}selectedHistory=-1;return busy;}
+int __stdcall HistoryTotalMock(void*){return NeedContext()?(int)tradeHistory.size():-1;}
+bool __stdcall SelectHistory(void*,int index,int flags,int pool){if(!NeedContext())return false;if(pool==MODE_HISTORY&&flags==SELECT_BY_POS){historyScans++;if(failHistorySelect||index<0||index>=(int)tradeHistory.size())return false;selectedHistory=index;return true;}selectedHistory=-1;return busy;}
 int __stdcall HistoryTicket(void*){return selectedHistory>=0?tradeHistory[selectedHistory].ticket:orderTicket;}
 int __stdcall HistoryType(void*){return selectedHistory>=0?tradeHistory[selectedHistory].type:tp_Buy;}
 double __stdcall HistoryClose(void*){return selectedHistory>=0?tradeHistory[selectedHistory].closeTime:0;}
@@ -53,7 +55,7 @@ void Hooks()
 {
   IntrfProcsRec.RegOption=Register;IntrfProcsRec.AddOptionValue=OptionValue;
   IntrfProcsRec.StrategyShortName=Ignore;IntrfProcsRec.StrategyDescription=Ignore;IntrfProcsRec.Print=Capture;
-  IntrfProcsRec.Symbol=Sym;IntrfProcsRec.SetCurrencyAndTimeframe=Frame;IntrfProcsRec.Bars=BarsCount;
+  IntrfProcsRec.Symbol=Sym;IntrfProcsRec.SetCurrencyAndTimeframe=Frame;IntrfProcsRec.pSetCurrencyAndTimeframe=(void*)1;IntrfProcsRec.Bars=BarsCount;
   IntrfProcsRec.Open=O;IntrfProcsRec.High=H;IntrfProcsRec.Low=L;IntrfProcsRec.Close=C;IntrfProcsRec.Time=T;
   IntrfProcsRec.TimeCurrent=Now;IntrfProcsRec.pTimeCurrent=(void*)1;IntrfProcsRec.Bid=BidQuote;IntrfProcsRec.Ask=AskQuote;IntrfProcsRec.Point=Grid;
   IntrfProcsRec.OrdersTotal=Orders;IntrfProcsRec.OrderSelect=SelectHistory;IntrfProcsRec.pOrderSelect=(void*)1;IntrfProcsRec.OrderMagicNumber=Magic;IntrfProcsRec.pOrderMagicNumber=(void*)1;
@@ -66,9 +68,10 @@ void Hooks()
 void Fresh()
 {
   ResetStrategy();SettingsPreset=5;ApplySettingsPreset();runSettingsResolved=true;EnableWeekendBlackout=false;
-  now=46000.5;for(int i=0;i<128;i++)series[i]={1.20,1.2002,1.1998,1.20,now-i*5.0/1440};
+  contextBound=false;frameSuccess=true;symbolResultMode=0;frameCalls=0;symbolReadsBeforeBind=contextReadsBeforeBind=0;selectedSymbol.clear();selectedTimeframe=selectedFrame=0;Check(Frame(NULL,(PChar)"EURUSD",PERIOD_M5),"fixture explicitly selects its context");
+  now=46000.5;for(int i=0;i<512;i++)series[i]={1.20,1.2002,1.1998,1.20,now-i*5.0/1440};
   lastTime=series[0].t;nbar=10;atrCount=100;rmaATR=0.00206;RegimeLookback=1;AddATRPercent(0.1);
-  historyBars=128;tradeHistory.clear();selectedHistory=-1;historyScans=0;pauseCalls=0;failHistorySelect=false;MaximumCompletedStrategyTrades=100;bidQuote=1.21;askQuote=1.2102;busy=false;attempts=0;orderResult=true;orderTicket=42;
+  historyBars=512;tradeHistory.clear();selectedHistory=-1;historyScans=0;pauseCalls=0;failHistorySelect=false;MaximumCompletedStrategyTrades=100;bidQuote=1.21;askQuote=1.2102;busy=false;attempts=0;orderResult=true;orderTicket=42;
   logs.clear();markerLabels.clear();markerPrice=0;tickSequence=1;buyAttempts=sellAttempts=0;
 }
 void Remember(long bar,double endpoint,int direction,double adverse)
@@ -600,11 +603,49 @@ void QualifiedParentLifecycle()
   int errors=0;for(auto &line:logs)if(line.find("configuration error")!=std::string::npos)errors++;
   Check(errors==1&&!qualifiedConfigValid&&attempts==0,"late invalid Custom inputs resolve once with one error per run");
 }
+void ColdStartContext()
+{
+  auto Count=[&](const char *part){int count=0;for(auto &line:logs)if(line.find(part)!=std::string::npos)count++;return count;};
+  auto ColdReset=[&](){ResetStrategy();SettingsPreset=7;runSettingsResolved=false;contextBound=false;frameSuccess=true;symbolResultMode=0;selectedSymbol.clear();selectedTimeframe=0;frameCalls=0;symbolReadsBeforeBind=contextReadsBeforeBind=0;logs.clear();historyBars=512;};
+  ColdReset();PChar savedCurrency=Currency;Currency=NULL;GetSingleTick();GetSingleTick();
+  Check(frameCalls==0&&Count("Currency is missing or empty")==1,"missing Currency blocks safely with one semantic diagnostic");Currency=savedCurrency;
+  ColdReset();frameSuccess=false;GetSingleTick();GetSingleTick();
+  Check(frameCalls==2&&!contextBound&&contextReadsBeforeBind==0&&symbolReadsBeforeBind==0&&Count("SetCurrencyAndTimeframe returned false")==1,"failed binding leaves context unselected and avoids context reads without diagnostic spam");
+  ColdReset();symbolResultMode=1;GetSingleTick();
+  Check(contextBound&&frameCalls==1&&contextReadsBeforeBind==0&&Count("Symbol is null or empty")==1,"null selected Symbol is safe and blocks the callback");GetSingleTick();Check(Count("Symbol is null or empty")==1,"repeated null Symbol failure is not logged on every callback");
+  symbolResultMode=0;GetSingleTick();Check(startupContextValidated&&contextBound&&selectedSymbol=="EURUSD"&&selectedTimeframe==PERIOD_M5&&Count("outcome=success")==1,"later valid callback recovers and binds the requested symbol/timeframe");
+  ColdReset();symbolResultMode=2;GetSingleTick();
+  Check(contextBound&&frameCalls==1&&contextReadsBeforeBind==0&&Count("Symbol is null or empty")==1,"empty selected Symbol is safe and blocks the callback");GetSingleTick();Check(Count("Symbol is null or empty")==1,"repeated empty Symbol failure is not logged on every callback");
+  symbolResultMode=0;GetSingleTick();Check(startupContextValidated&&Count("outcome=success")==1,"empty Symbol failure recovers on the next valid callback");
+
+  // Build all readiness state through unresolved preset-7 production callbacks.
+  // The mock keeps the complete 20-bar range, ATR(14), and 200-bar risk lookback.
+  ColdReset();now=46000.5;for(int i=0;i<512;i++)series[i]={1.2000,1.2002,1.1998,1.2000,now-i*5.0/1440};
+  bidQuote=1.2000;askQuote=1.2002;orderResult=true;orderTicket=42;attempts=0;EnableWeekendBlackout=true;
+  auto CloseSyntheticBar=[&](double o,double h,double l,double c){
+    Bar closed={o,h,l,c,series[0].t};for(int i=511;i>0;i--)series[i]=series[i-1];series[1]=closed;
+    double t=closed.t+5.0/1440;series[0]={c,c+0.0001,c-0.0001,c,t};now=t;bidQuote=c;askQuote=c+0.0002;GetSingleTick();
+  };
+  for(int i=0;i<220;i++)CloseSyntheticBar(1.2000,1.2002,1.1998,1.2000);
+  Check(runSettingsResolved&&SettingsPreset==7&&Timeframe==PERIOD_M5&&TradeDirection==1&&ImpulseEntryMode==2,"cold start resolves preset 7 once from untouched Custom settings");
+  Check(nbar>=200&&atrCount>=ATRLength&&atrPctCount>=RegimeLookback,"normal callback history readiness and ATR/risk warmup use full configured lookbacks");
+  Check(startupContextValidated&&startupHistoryReady&&firstProcessedClosedBar>=0&&Logged("RBP startup first-closed-bar")&&Logged("RBP progress processedBars=1 pending=no qualified=no touch=no"),"bound callbacks report readiness, processed-bar and progress state");
+  CloseSyntheticBar(1.2000,1.2010,1.1999,1.2005);
+  Check(haveLatestSwingLow&&impulseOriginBar<nbar&&activeImpulseSetup,"production callbacks derive a confirmed structural origin and parent seed");
+  Check(qualifiedRangeReady&&!impulseQualified&&!touchActive&&stage==IMPULSE_PARENT,"seed callback freezes the full pre-origin range while displacement remains pending");
+  CloseSyntheticBar(1.2005,1.2016,1.20115,1.2013);
+  Check(impulseQualified&&touchActive&&stage==IMPULSE_PARENT,"completed endpoint close derives qualified breakout and prospective touch arming");
+  Check(Logged("RBP qualified qualified")&&Logged("RBP qualified armed"),"qualification and prospective arming diagnostics are present");
+  Quote(touchLevel-0.0002,touchLevel);Check(attempts==1&&stage==IMPULSE_CONSUMED&&Logged("confirmed entry"),"one executable synthetic quote produces exactly one entry through GetSingleTick");
+  Quote(touchLevel-0.0002,touchLevel);Check(attempts==1,"subsequent callback cannot duplicate the consumed opportunity");
+  ResetStrategy();Check(!startupContextValidated&&!startupHistoryStateKnown&&!startupReadyProgressLogged&&firstProcessedClosedBar==-1&&lastProgressBar==0,"restart clears startup diagnostic and bar-progress state");
+}
 int main(int argc,char **argv)
 {
   if(argc!=2){fprintf(stderr,"One named case required\n");return 2;}Hooks();InitStrategy();ReplaceStr(Currency,(PChar)"EURUSD");
   std::string name=argv[1];
-  if(name=="qualified_impulse_gate")QualifiedImpulseGate();
+  if(name=="cold_start_context")ColdStartContext();
+  else if(name=="qualified_impulse_gate")QualifiedImpulseGate();
   else if(name=="qualified_pullback_touch")QualifiedPullbackTouch();
   else if(name=="qualified_parent_lifecycle")QualifiedParentLifecycle();
   else if(name=="touch_intrabar")Intrabar();else if(name=="executable_quotes_gap_rounding")QuotesGap();

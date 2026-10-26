@@ -58,10 +58,13 @@ size_t EffectiveIndex(void *effective)
 void TickOnce(const char *prefix,size_t expectedMessages)
 {
   GetSingleTick();
-  Check(messages.size()==expectedMessages,"exactly one diagnostic per run");
-  Check(messages.back().find(prefix)==0,"effective preset diagnostic prefix");
+  size_t expected=expectedMessages*3;
+  Check(messages.size()==expected,"one initialization, binding and history event per run");
+  Check(messages[expected-3].find(prefix)==0,"effective preset diagnostic prefix");
+  Check(messages[expected-2].find("RBP startup binding configured=EURUSD selected=EURUSD")==0,"selected SDK context is bound before history reads");
+  Check(messages[expected-1].find("RBP startup history configured=EURUSD selected=EURUSD")==0,"history readiness follows successful context binding");
   GetSingleTick();GetSingleTick();
-  Check(messages.size()==expectedMessages,"subsequent ticks must not resolve/log again");
+  Check(messages.size()==expected,"subsequent ticks must not repeat startup events");
   Check(nbar==0,"no historical bars processed");
 }
 int main(int argc,char **argv)
@@ -74,6 +77,7 @@ int main(int argc,char **argv)
   IntrfProcsRec.Print=Capture;
   IntrfProcsRec.Symbol=TestSymbol;
   IntrfProcsRec.SetCurrencyAndTimeframe=SelectTimeframe;
+  IntrfProcsRec.pSetCurrencyAndTimeframe=(void*)1;
   IntrfProcsRec.Bars=NoHistory;
   InitStrategy();
   Check(messages.empty(),"DLL registration must not emit a stale diagnostic");
@@ -114,11 +118,11 @@ int main(int argc,char **argv)
   TickOnce("RBP preset=Custom timeframe=30 setup=0 confirmation=2 direction=1 body=0.75-2.25ATR",1);
   Check(Values(false)==custom,"Custom must use every detailed value unchanged");
   Check(MaximumCompletedStrategyTrades==17,"late-delivered Custom limit is applied");
-  Check(messages.back().find("depth=20-70% depthMode=3")!=std::string::npos,"Custom diagnostic uses selected depth settings");
+  Check(messages[messages.size()-3].find("depth=20-70% depthMode=3")!=std::string::npos,"Custom diagnostic uses selected depth settings");
   Check(selectedTimeframe==*(int*)Option("Timeframe"),"Custom timeframe used on first tick");
 
   ResetStrategy();
-  Check(messages.size()==1,"reset must defer until options are current");
+  Check(messages.size()==3,"reset must defer until options are current");
   *(int*)Option("Settings preset")=1;
   TickOnce("RBP preset=Baseline timeframe=15 setup=1 confirmation=0 direction=0 body=1.00-1.50ATR",2);
   Check(PullbackDepthMode==1&&ShallowMinimumDepth==0&&ShallowMaximumDepth==50,"Baseline shallow depth");
@@ -133,7 +137,7 @@ int main(int argc,char **argv)
   ResetStrategy();
   *(int*)Option("Settings preset")=2;
   TickOnce("RBP preset=Trend-filter test timeframe=15 setup=1 confirmation=0 direction=0 body=1.00-1.50ATR",3);
-  Check(TradeDirection==0&&ImpulseM15H4TrendFilter==1&&messages.back().find("EMAtrend=on")!=std::string::npos,"Trend-filter diagnostic enabled");
+  Check(TradeDirection==0&&ImpulseM15H4TrendFilter==1&&messages[messages.size()-3].find("EMAtrend=on")!=std::string::npos,"Trend-filter diagnostic enabled");
   ImpulseM15H4TrendFilter=0;
   Check(Values(false)==baseline,"Trend-filter preset differs ONLY by EMA enable");
   Check(Values(true)==custom,"Trend-filter preset preserves Custom values");
@@ -148,7 +152,7 @@ int main(int argc,char **argv)
   Check(Values(true)==custom,"buys-only preset preserves all Custom values");
 
   ResetStrategy();ResetStrategy();
-  Check(messages.size()==4,"restart defers preset resolution until first tick");
+  Check(messages.size()==12,"restart defers preset resolution until first tick");
   selectedTimeframe=0;
   *(int*)Option("Settings preset")=4;
   TickOnce("RBP preset=M5 Baseline timeframe=5 setup=1 confirmation=0 direction=0 body=1.00-1.50ATR depth=0-50% depthMode=1 stop=adaptive targets=2.0/3.0R EMAtrend=off scope=0",5);
@@ -162,7 +166,7 @@ int main(int argc,char **argv)
   ResetStrategy();
   *(int*)Option("Settings preset")=5;
   TickOnce("RBP preset=M5 first-touch ATR timeframe=5 setup=1 confirmation=0 direction=0",6);
-  Check(ImpulseEntryMode==1&&messages.back().find("entryMode=first-touch-ATR touchATR=0.50")!=std::string::npos,"first-touch diagnostic");
+  Check(ImpulseEntryMode==1&&messages[messages.size()-3].find("entryMode=first-touch-ATR touchATR=0.50")!=std::string::npos,"first-touch diagnostic");
   ImpulseEntryMode=0;
   Check(Values(false)==m5,"first-touch preset differs ONLY by entry mode from preset 4");
   ImpulseEntryMode=1;
@@ -203,7 +207,7 @@ int main(int argc,char **argv)
   *(double*)Option("With-trend / neutral target R")=0.5;
   *(double*)Option("Counter-trend target R")=1;
   GetSingleTick();
-  Check(WithTrendNeutralTargetR==4&&CounterTrendTargetR==5&&messages.size()==10,"no repeated preset resolution on ticks");
+  Check(WithTrendNeutralTargetR==4&&CounterTrendTargetR==5&&messages.size()==30,"no repeated preset resolution or startup events on ticks");
   ResetStrategy();
   TickOnce("RBP preset=Custom timeframe=30",11);
   Check(WithTrendNeutralTargetR==2&&CounterTrendTargetR==3,"existing Custom target floors retained");
@@ -223,7 +227,7 @@ int main(int argc,char **argv)
   TickOnce("RBP preset=M5 qualified first pullback buys-only timeframe=5 setup=1 confirmation=0 direction=1",13);
   Check(ImpulseEntryMode==2&&QualifiedImpulseRangeLookbackBars==20&&QualifiedImpulseMinimumDisplacementATR==3&&QualifiedImpulseBreakoutBufferATR==0.10&&QualifiedPullbackMinimumDepth==25,"preset 7 applies four explicit hypotheses");
   Check(MaximumCompletedStrategyTrades==19&&Values(true)==custom,"preset 7 preserves saved Custom and independent limit");
-  Check(messages.back().find("entryMode=qualified-first-pullback touchATR=0.50 presetId=7 maxCompletedTrades=19 qualifiedLookback=20 qualifiedDisplacementATR=3.00 qualifiedBufferATR=0.10 qualifiedDepthPct=25.00")!=std::string::npos,"effective qualified diagnostic values");
+  Check(messages[messages.size()-3].find("entryMode=qualified-first-pullback touchATR=0.50 presetId=7 maxCompletedTrades=19 qualifiedLookback=20 qualifiedDisplacementATR=3.00 qualifiedBufferATR=0.10 qualifiedDepthPct=25.00")!=std::string::npos,"effective qualified diagnostic values");
   auto qualified=Values(false);
   ResetStrategy();*(int*)Option("Settings preset")=6;
   TickOnce("RBP preset=M5 first-touch ATR buys-only timeframe=5",14);

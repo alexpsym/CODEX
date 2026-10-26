@@ -47,6 +47,9 @@ RunOption runOptions[64]; int runOptionCount=0;
 bool runSettingsResolved=false;
 bool tradeLimitBlocked=false,tradeLimitNotificationSent=false,tradeHistoryCacheValid=false;
 int cachedCompletedStrategyTrades=0,cachedHistoryTotal=-1;
+bool startupContextValidated=false,startupHistoryStateKnown=false,startupHistoryReady=false,startupReadyProgressLogged=false;
+int startupTimeframe=-1;char startupCurrency[128]="",lastStartupEvent[512]="";
+long firstProcessedClosedBar=-1,lastProgressBar=0;
 void PauseForTradeLimit(const char *reason);
 void RegRunOption(PChar name,TOptionType type,void *effective)
 {
@@ -125,6 +128,47 @@ int ActiveMaximumPullbackBars(){return activeImpulseSetup?ImpulseMaximumPullback
 bool DepthExceeded(double depth,bool useRange,double rangeMaximum){return activeImpulseSetup?depth>ImpulseMaximumDepth:(useRange&&depth>rangeMaximum);}
 void EmitStatus(PChar text){if(strcmp(lastDiagnostic,text)!=0){Print(text);strncpy(lastDiagnostic,text,511);lastDiagnostic[511]=0;}}
 void EmitDiagnostic(const char *text){if(ShowDiagnostics)EmitStatus((PChar)text);}
+void EmitStartupEvent(const char *text){if(strcmp(lastStartupEvent,text)!=0){Print((PChar)text);strncpy(lastStartupEvent,text,sizeof(lastStartupEvent)-1);lastStartupEvent[sizeof(lastStartupEvent)-1]=0;}}
+void StartupBindingFailure(const char *reason,const char *configured)
+{
+  char text[512];sprintf(text,"RBP startup binding configured=%s selected=unavailable timeframe=%d outcome=failure reason=%s",configured&&*configured?configured:"<missing>",Timeframe,reason);EmitStartupEvent(text);
+  startupContextValidated=false;startupHistoryStateKnown=false;
+}
+bool BindRunContext()
+{
+  if(!Currency||!Currency[0]){StartupBindingFailure("Currency is missing or empty",Currency);return false;}
+  if(!IntrfProcsRec.SetCurrencyAndTimeframe||!IntrfProcsRec.pSetCurrencyAndTimeframe){StartupBindingFailure("SetCurrencyAndTimeframe API unavailable",Currency);return false;}
+  if(!SetCurrencyAndTimeframe(Currency,Timeframe)){StartupBindingFailure("SetCurrencyAndTimeframe returned false",Currency);return false;}
+  PChar selected=Symbol();
+  if(!selected||!selected[0]){StartupBindingFailure("selected Symbol is null or empty after successful binding",Currency);return false;}
+  if(strcmp(Currency,selected)!=0)
+  {
+    char text[512];sprintf(text,"RBP startup binding configured=%s selected=%s timeframe=%d outcome=failure reason=selected context mismatch",Currency,selected,Timeframe);EmitStartupEvent(text);
+    startupContextValidated=false;startupHistoryStateKnown=false;return false;
+  }
+  if(!startupContextValidated||startupTimeframe!=Timeframe||strcmp(startupCurrency,Currency)!=0)
+  {
+    char text[512];sprintf(text,"RBP startup binding configured=%s selected=%s timeframe=%d outcome=success",Currency,selected,Timeframe);EmitStartupEvent(text);
+    strncpy(startupCurrency,Currency,sizeof(startupCurrency)-1);startupCurrency[sizeof(startupCurrency)-1]=0;startupTimeframe=Timeframe;
+  }
+  startupContextValidated=true;return true;
+}
+void StartupHistoryStatus(const unsigned long available,const int required,const bool ready)
+{
+  if(!startupHistoryStateKnown||startupHistoryReady!=ready)
+  {
+    char text[512];sprintf(text,"RBP startup history configured=%s selected=%s timeframe=%d binding=success bars=%lu required=%d readiness=%s",Currency?Currency:"<missing>",Currency?Currency:"<missing>",Timeframe,available,required,ready?"ready":"waiting");EmitStartupEvent(text);
+    startupHistoryStateKnown=true;startupHistoryReady=ready;
+  }
+}
+void StartupProgress()
+{
+  if(!startupReadyProgressLogged||nbar-lastProgressBar>=250)
+  {
+    char text[384];sprintf(text,"RBP progress processedBars=%ld pending=%s qualified=%s touch=%s stage=%d",nbar,(activeImpulseSetup&&stage!=IMPULSE_CONSUMED)?"yes":"no",impulseQualified?"yes":"no",touchActive?"yes":"no",stage);EmitStartupEvent(text);
+    startupReadyProgressLogged=true;lastProgressBar=nbar;
+  }
+}
 const char *DirectionName(const int d){return d==1?"long":"short";}
 const char *TrendName(const int trend){return trend==1?"Uptrend":trend==-1?"Downtrend":"Neutral";}
 ProvisionalImpulseCandidate &CandidateFor(const int d){return d==1?provisionalLong:provisionalShort;}
@@ -1107,18 +1151,18 @@ EXPORT void __stdcall InitStrategy()
  AddSeparator((PChar)"Diagnostics");
  RegRunOption((PChar)"Show blackout status",ot_Boolean,&ShowBlackoutStatus);RegRunOption((PChar)"Show diagnostics",ot_Boolean,&ShowDiagnostics);
 }
-EXPORT void __stdcall DoneStrategy(){free(Currency);free(atrPct);atrPct=NULL;atrPctCapacity=atrPctCount=atrPctNext=0;} EXPORT void __stdcall ResetStrategy(){qualifiedConfigValid=true;runSettingsResolved=false;tradeLimitBlocked=false;tradeLimitNotificationSent=false;tradeHistoryCacheValid=false;cachedCompletedStrategyTrades=0;cachedHistoryTotal=-1;tickSequence=0;touchPathNext=0;memset(touchPaths,0,sizeof(touchPaths));memset(&liveTouchPath,0,sizeof(liveTouchPath));memset(&closedTouchPath,0,sizeof(closedTouchPath));lastTime=0;nbar=0;rmaATR=0;atrCount=atrPctCount=atrPctNext=0;lastDiagnostic[0]=0;previousSwingHigh=latestSwingHigh=previousSwingLow=latestSwingLow=0;previousSwingHighBar=latestSwingHighBar=previousSwingLowBar=latestSwingLowBar=-1;previousSwingHighTime=latestSwingHighTime=previousSwingLowTime=latestSwingLowTime=0;havePreviousSwingHigh=haveLatestSwingHigh=havePreviousSwingLow=haveLatestSwingLow=false;consumedDirection=0;consumedExtreme=0;consumedBar=-1;ResetSetup();ClearClusters();}
+EXPORT void __stdcall DoneStrategy(){free(Currency);free(atrPct);atrPct=NULL;atrPctCapacity=atrPctCount=atrPctNext=0;} EXPORT void __stdcall ResetStrategy(){qualifiedConfigValid=true;runSettingsResolved=false;tradeLimitBlocked=false;tradeLimitNotificationSent=false;tradeHistoryCacheValid=false;cachedCompletedStrategyTrades=0;cachedHistoryTotal=-1;startupContextValidated=false;startupHistoryStateKnown=false;startupHistoryReady=false;startupReadyProgressLogged=false;startupTimeframe=-1;startupCurrency[0]=lastStartupEvent[0]=0;firstProcessedClosedBar=-1;lastProgressBar=0;tickSequence=0;touchPathNext=0;memset(touchPaths,0,sizeof(touchPaths));memset(&liveTouchPath,0,sizeof(liveTouchPath));memset(&closedTouchPath,0,sizeof(closedTouchPath));lastTime=0;nbar=0;rmaATR=0;atrCount=atrPctCount=atrPctNext=0;lastDiagnostic[0]=0;previousSwingHigh=latestSwingHigh=previousSwingLow=latestSwingLow=0;previousSwingHighBar=latestSwingHighBar=previousSwingLowBar=latestSwingLowBar=-1;previousSwingHighTime=latestSwingHighTime=previousSwingLowTime=latestSwingLowTime=0;havePreviousSwingHigh=haveLatestSwingHigh=havePreviousSwingLow=haveLatestSwingLow=false;consumedDirection=0;consumedExtreme=0;consumedBar=-1;ResetSetup();ClearClusters();}
 EXPORT void __stdcall GetSingleTick()
 {
-  ResolveRunSettings();if(!Currency||strcmp(Currency,Symbol())!=0)return;
-  SetCurrencyAndTimeframe(Currency,Timeframe);tickSequence++;
+  ResolveRunSettings();if(!BindRunContext())return;tickSequence++;
   if(!CheckTradeLimit())return;
   unsigned long bars=Bars();
   if(FirstTouchMode()&&bars>0)ObserveTouchPath();
-  bool historyReady=bars>=Max(ATRLength,RegimeLookback)+Max(PivotStrength,MinorSwingStrength)+5;
+  int required=Max(ATRLength,RegimeLookback)+Max(PivotStrength,MinorSwingStrength)+5;
+  bool historyReady=bars>=(unsigned long)required;StartupHistoryStatus(bars,required,historyReady);
   if(!historyReady){ProcessFirstTouchTick(false);if(!CheckTradeLimit())return;return;}
   TDateTime t=Time(0);
-  if(t!=lastTime){lastTime=t;ProcessBar();}
+  if(t!=lastTime){lastTime=t;ProcessBar();if(firstProcessedClosedBar<0){firstProcessedClosedBar=nbar;char when[32],text[384];FormatTime(Time(1),when);sprintf(text,"RBP startup first-closed-bar processedBars=%ld time=%s availableBars=%lu requiredBars=%d",nbar,when,bars,required);EmitStartupEvent(text);}StartupProgress();}
   else ProcessFirstTouchTick(true);
   if(!CheckTradeLimit())return;
 }
