@@ -608,9 +608,11 @@ void ColdStartContext()
   auto Count=[&](const char *part){int count=0;for(auto &line:logs)if(line.find(part)!=std::string::npos)count++;return count;};
   auto ColdReset=[&](){ResetStrategy();SettingsPreset=7;runSettingsResolved=false;contextBound=false;frameSuccess=true;symbolResultMode=0;selectedSymbol.clear();selectedTimeframe=0;frameCalls=0;symbolReadsBeforeBind=contextReadsBeforeBind=0;logs.clear();historyBars=512;};
   ColdReset();PChar savedCurrency=Currency;Currency=NULL;GetSingleTick();GetSingleTick();
-  Check(frameCalls==0&&Count("Currency is missing or empty")==1,"missing Currency blocks safely with one semantic diagnostic");Currency=savedCurrency;
+  Check(frameCalls==0&&Count("Currency is missing or empty")==1,"missing Currency blocks safely with one semantic diagnostic");Currency=savedCurrency;GetSingleTick();
+  Check(startupContextValidated&&contextBound&&Count("outcome=success")==1,"valid Currency recovers safely on a later callback");
   ColdReset();frameSuccess=false;GetSingleTick();GetSingleTick();
   Check(frameCalls==2&&!contextBound&&contextReadsBeforeBind==0&&symbolReadsBeforeBind==0&&Count("SetCurrencyAndTimeframe returned false")==1,"failed binding leaves context unselected and avoids context reads without diagnostic spam");
+  frameSuccess=true;GetSingleTick();Check(startupContextValidated&&contextBound&&selectedSymbol=="EURUSD"&&Count("outcome=success")==1,"successful later binding recovers from an API failure");
   ColdReset();symbolResultMode=1;GetSingleTick();
   Check(contextBound&&frameCalls==1&&contextReadsBeforeBind==0&&Count("Symbol is null or empty")==1,"null selected Symbol is safe and blocks the callback");GetSingleTick();Check(Count("Symbol is null or empty")==1,"repeated null Symbol failure is not logged on every callback");
   symbolResultMode=0;GetSingleTick();Check(startupContextValidated&&contextBound&&selectedSymbol=="EURUSD"&&selectedTimeframe==PERIOD_M5&&Count("outcome=success")==1,"later valid callback recovers and binds the requested symbol/timeframe");
