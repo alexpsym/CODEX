@@ -20633,6 +20633,7 @@ async def _collect_bybit_open_items_impl(
                     "opened_at": order.get("createdTime"),
                     "id": order.get("orderId"),
                     "order_link_id": order.get("orderLinkId"),
+                    "order_expiry": _bybit_expiry_for_order(account_context, base_url, api_key, api_secret, key_source, order),
                     "stop_order_type": order.get("stopOrderType"),
                     "_price_broker": dict(order),
                     "_price_read_started": price_read_started,
@@ -24418,10 +24419,139 @@ def _entry_price_for_bybit_submit_validation(
 
 
 
+# Local scheduled cancellation is separate from the master/terminal shutdown lifecycle.
+from shared.bybit_order_expiry import ExpiryQueue, DEFAULT_QUEUE as BYBIT_EXPIRY_QUEUE_PATH, credential_scope
+from tools.bybit_order_expiry_worker import start_worker as _start_bybit_expiry_worker
+
+_BYBIT_EXPIRY_START_ERROR = ""
+
+
+def _bybit_expiry_now_ms():
+    return time.time_ns() // 1_000_000
+
+
+def _parse_bybit_order_expiry(spec, *, now_ms=None):
+    if spec is None:
+        return None
+    if not isinstance(spec, dict):
+        raise ValueError("Expiry must be a duration or Brisbane date/time")
+    mode = spec.get("mode")
+    now = _bybit_expiry_now_ms() if now_ms is None else now_ms
+    if mode == "none" and set(spec) == {"mode"}:
+        return None
+    if mode == "duration" and set(spec) == {"mode", "value", "unit"}:
+        raw = spec["value"]
+        if isinstance(raw, bool) or spec["unit"] not in {"minutes", "hours"}:
+            raise ValueError("Expiry duration requires positive minutes or hours")
+        try:
+            value = Decimal(str(raw))
+            if not value.is_finite() or value <= 0:
+                raise ValueError()
+            delta = value * (60000 if spec["unit"] == "minutes" else 3600000)
+            if delta != delta.to_integral_value():
+                raise ValueError()
+            deadline = now + int(delta)
+        except Exception:
+            raise ValueError("Expiry duration must be positive finite whole milliseconds") from None
+    elif mode == "at" and set(spec) == {"mode", "brisbane"}:
+        raw = spec["brisbane"]
+        if not isinstance(raw, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?", raw):
+            raise ValueError("Expiry date/time must be Australia/Brisbane local date and time")
+        try:
+            deadline = int(datetime.fromisoformat(raw).replace(tzinfo=ZoneInfo("Australia/Brisbane")).timestamp()*1000)
+        except Exception:
+            raise ValueError("Invalid Australia/Brisbane expiry date/time") from None
+    else:
+        raise ValueError("Unsupported expiry fields or mode")
+    if deadline <= now or deadline > 253402264800000:
+        raise ValueError("Expiry must resolve to a future supported UTC deadline")
+    return deadline
+
+
+def _expiry_public_record(row, *, healthy=None):
+    labels = {"reserved": "Submission unresolved", "scheduled": "Scheduled", "reconciling": "Unresolved; reconciling",
+              "submission_unresolved": "Submission unresolved", "order_missing": "Unresolved; exact order not found",
+              "cancel_requested": "Cancellation requested; awaiting broker confirmation", "cancelled": "Broker-confirmed cancellation",
+              "filled": "Filled (not timed cancellation)", "partially_filled_cancelled": "Partially filled; remainder cancelled",
+              "rejected": "Rejected", "needs_attention": "Needs attention"}
+    result = {key: row.get(key) for key in ("id", "mode", "environment", "category", "symbol", "side", "order_id",
+              "order_link_id", "deadline_ms", "state", "attempts", "filled_qty", "broker_status", "revision", "updated_ms")}
+    result["deadline_brisbane"] = datetime.fromtimestamp(row["deadline_ms"]/1000, ZoneInfo("Australia/Brisbane")).isoformat()
+    result["status_label"] = labels.get(row["state"], "Unresolved")
+    if (healthy is False and row["deadline_ms"] <= _bybit_expiry_now_ms()
+            and row["state"] not in {"filled", "cancelled", "partially_filled_cancelled", "rejected"}):
+        result["status_label"] = "Overdue; worker unavailable; needs attention"
+    return result
+
+
+def _bybit_expiry_status():
+    if not Path(BYBIT_EXPIRY_QUEUE_PATH).exists():
+        return {"worker": {"healthy": False, "pending": 0, "overdue": 0}, "schedules": [], "error": _BYBIT_EXPIRY_START_ERROR}
+    queue = ExpiryQueue(BYBIT_EXPIRY_QUEUE_PATH)
+    status = queue.worker_status()
+    # Explicit allowlists: no credentials, profile fingerprint, headers or raw broker errors.
+    worker = {key: status[key] for key in ("healthy", "pending", "overdue", "needs_attention")}
+    worker["heartbeat_ms"] = status["worker"].get("heartbeat_ms")
+    return {"worker": worker, "schedules": [_expiry_public_record(row, healthy=status["healthy"]) for row in queue.list_records()],
+            "error": _BYBIT_EXPIRY_START_ERROR}
+
+
+@app.get("/api/calculator/order-expiry/status")
+async def bybit_order_expiry_status():
+    if APP_PROFILE != "local":
+        return _local_only_disabled_response("/api/calculator/order-expiry/status", as_json=True)
+    try:
+        return JSONResponse(_bybit_expiry_status())
+    except Exception:
+        return JSONResponse({"worker": {"healthy": False}, "schedules": [], "error": "Expiry storage unavailable; inspect queue permissions and worker status"}, status_code=503)
+
+
+@app.on_event("startup")
+async def _resume_bybit_expiry_on_local_startup():
+    global _BYBIT_EXPIRY_START_ERROR
+    if APP_PROFILE != "local" or not Path(BYBIT_EXPIRY_QUEUE_PATH).exists():
+        return
+    try:
+        status = await asyncio.to_thread(_bybit_expiry_status)
+        if status["worker"]["pending"]:
+            await asyncio.to_thread(_start_bybit_expiry_worker, BYBIT_EXPIRY_QUEUE_PATH)
+        _BYBIT_EXPIRY_START_ERROR = ""
+    except Exception:
+        _BYBIT_EXPIRY_START_ERROR = "Expiry worker could not resume; inspect worker status before scheduling"
+
+
+def _bybit_expiry_for_order(account, base_url, api_key, api_secret, key_source, order):
+    if APP_PROFILE != "local" or not Path(BYBIT_EXPIRY_QUEUE_PATH).exists():
+        return None
+    try:
+        scope = credential_scope(account, base_url, api_key, api_secret, key_source)
+        rows = [row for row in ExpiryQueue(BYBIT_EXPIRY_QUEUE_PATH).list_records()
+                if row["mode"] == scope.mode and row["environment"] == scope.environment and row["fingerprint"] == scope.fingerprint
+                and row["symbol"] == order.get("symbol") and row["order_link_id"] == order.get("orderLinkId")
+                and row["order_id"] in (None, order.get("orderId"))]
+        return _expiry_public_record(rows[0]) if len(rows) == 1 else None
+    except Exception:
+        return None
+
+
+class BybitExpiryOutcomeWarning(RuntimeError):
+    def __init__(self, record, *, accepted=False):
+        self.record, self.accepted = record, accepted
+        super().__init__("Order accepted; expiry binding needs reconciliation. Do not resubmit." if accepted else
+                         "Submission outcome unresolved. Do not resubmit; inspect this exact order in Bybit and expiry status.")
+
+
 async def _place_bybit_order(
-    payload: Dict[str, object], *, request_id: str, invalidate_cache: bool = True, _request_state: Optional[Dict[str, object]] = None
+    payload: Dict[str, object], *, request_id: str, invalidate_cache: bool = True, _request_state: Optional[Dict[str, object]] = None, _expiry_spec=None
 ) -> Dict[str, object]:
     request_open_time_iso = _utc_now_iso()
+    expiry_requested = _parse_bybit_order_expiry(_expiry_spec) is not None
+    if expiry_requested and (APP_PROFILE != "local" or payload.get("pending_webhook_id")
+            or str(payload.get("trade_mode", "linear")).lower() != "linear"
+            or str(payload.get("order_type", "")).lower() != "limit"
+            or not re.fullmatch(r"[A-Z0-9]+USDT", str(payload.get("symbol", "")).upper())):
+        raise ValueError("Local expiry supports direct calculator linear USDT perpetual limit entries only")
+    expiry_queue = expiry_scope = expiry_record = None
     symbol = str(payload.get("symbol", "")).upper()
     action = str(payload.get("action", "")).lower()
     qty = payload.get("quantity")
@@ -24538,6 +24668,7 @@ async def _place_bybit_order(
         if order_type == "limit" and (price_val is None or price_val <= 0):
             raise ValueError("Trendline options resolver returned invalid price.")
 
+    symbol_meta = None
     tick_size_dec: Optional[Decimal] = None
     if category == "linear":
         try:
@@ -24548,6 +24679,10 @@ async def _place_bybit_order(
             tick_size_dec = None
         if tick_size_dec is not None and tick_size_dec <= 0:
             tick_size_dec = None
+
+    if expiry_requested and (not isinstance(symbol_meta, dict) or symbol_meta.get("contractType") != "LinearPerpetual"
+            or symbol_meta.get("quoteCoin") != "USDT" or symbol_meta.get("symbol") != symbol):
+        raise ValueError("Expiry requires verified linear USDT perpetual instrument metadata; no order sent")
 
     def _normalize_linear_price(value: Optional[float]) -> Optional[float]:
         if value is None or category != "linear" or tick_size_dec is None:
@@ -24723,6 +24858,24 @@ async def _place_bybit_order(
         position_idx=body.get("positionIdx"), quantity=qty_val)
     _log_webhook_event(request_id, "order_request", {"payload": body})
 
+    if expiry_requested:
+        try:
+            await asyncio.to_thread(_start_bybit_expiry_worker, BYBIT_EXPIRY_QUEUE_PATH)
+            expiry_queue = ExpiryQueue(BYBIT_EXPIRY_QUEUE_PATH)
+            expiry_scope = credential_scope(_mode, base_url, api_key, api_secret, key_source)
+            if not expiry_queue.worker_status()["healthy"]:
+                raise ValueError("Expiry worker is unhealthy")
+            if (body["category"] != "linear" or body["orderType"] != "Limit" or body.get("reduceOnly")
+                    or body.get("closeOnTrigger") or _request_state is not None):
+                raise ValueError("Unsupported expiry entry route")
+            expiry_record = expiry_queue.reserve(scope=expiry_scope, symbol=body["symbol"], side=body["side"],
+                quantity=body["qty"], position_idx=body["positionIdx"], deadline_ms=_parse_bybit_order_expiry(_expiry_spec))
+            body["orderLinkId"] = expiry_record["order_link_id"]
+            if expiry_record["deadline_ms"] <= _bybit_expiry_now_ms():
+                expiry_queue.reject_submission(expiry_record["id"], scope=expiry_scope, order_link_id=body["orderLinkId"])
+                raise ValueError("Expiry elapsed before submission")
+        except Exception as exc:
+            raise ValueError("Expiry could not be safely scheduled; no order sent. Check local worker/storage and deadline, then retry.") from exc
     data: Dict[str, object] = {}
     try:
         if _request_state is not None:
@@ -24745,6 +24898,14 @@ async def _place_bybit_order(
                 data = response_json
         except Exception:
             data = {}
+        if expiry_record:
+            if data.get("retCode") not in (None, 0, "0") and data.get("retCode") not in (10000, "10000", 10016, "10016"):
+                try:
+                    expiry_queue.reject_submission(expiry_record["id"], scope=expiry_scope, order_link_id=body["orderLinkId"])
+                except Exception:
+                    raise BybitExpiryOutcomeWarning(_expiry_public_record(expiry_record)) from exc
+            else:
+                raise BybitExpiryOutcomeWarning(_expiry_public_record(expiry_record)) from exc
         raise BybitOrderRejected(
             ret_code=data.get("retCode"),
             ret_msg=data.get("retMsg") or str(exc),
@@ -24755,6 +24916,13 @@ async def _place_bybit_order(
             response_body=data,
         ) from exc
     except BybitSignedAPIError as exc:
+        if expiry_record:
+            if exc.ret_code in (None, 0, "0", 10000, "10000", 10016, "10016"):
+                raise BybitExpiryOutcomeWarning(_expiry_public_record(expiry_record)) from exc
+            try:
+                expiry_queue.reject_submission(expiry_record["id"], scope=expiry_scope, order_link_id=body["orderLinkId"])
+            except Exception:
+                raise BybitExpiryOutcomeWarning(_expiry_public_record(expiry_record)) from exc
         raise BybitOrderRejected(
             ret_code=exc.ret_code,
             ret_msg=exc.ret_msg,
@@ -24765,6 +24933,8 @@ async def _place_bybit_order(
             response_body=exc.response_body,
         ) from exc
     except Exception as exc:
+        if expiry_record:
+            raise BybitExpiryOutcomeWarning(_expiry_public_record(expiry_record)) from exc
         message = str(exc)
         ret_code_match = re.search(r"retCode=([^\\s]+)", message)
         if _request_state is not None:
@@ -24789,6 +24959,13 @@ async def _place_bybit_order(
         },
     )
     if data.get("retCode") not in (0, "0"):
+        if expiry_record:
+            if data.get("retCode") in (None, 10000, "10000", 10016, "10016"):
+                raise BybitExpiryOutcomeWarning(_expiry_public_record(expiry_record))
+            try:
+                expiry_queue.reject_submission(expiry_record["id"], scope=expiry_scope, order_link_id=body["orderLinkId"])
+            except Exception:
+                raise BybitExpiryOutcomeWarning(_expiry_public_record(expiry_record))
         raise BybitOrderRejected(
             ret_code=data.get("retCode"),
             ret_msg=data.get("retMsg"),
@@ -24800,13 +24977,23 @@ async def _place_bybit_order(
         )
     order_result = data.get("result", {}) or {}
     order_id = order_result.get("orderId")
+    expiry_binding_warning = None
+    if expiry_record:
+        if not order_id:
+            raise BybitExpiryOutcomeWarning(_expiry_public_record(expiry_record))
+        try:
+            if order_result.get("orderLinkId") != body["orderLinkId"]:
+                raise ValueError("Accepted response link does not match reserved intent")
+            expiry_record = expiry_queue.bind(expiry_record["id"], scope=expiry_scope, order_id=order_id, order_link_id=body["orderLinkId"])
+        except Exception:
+            expiry_binding_warning = "Order accepted, but expiry binding needs exact-link reconciliation. Do not submit another order."
     attached_tp = _normalize_linear_price(_parse_bybit_price_level(body.get("takeProfit")))
     attached_sl = _normalize_linear_price(_parse_bybit_price_level(body.get("stopLoss")))
     initial_stop_loss = attached_sl if attached_sl is not None else planned_stop_price
     initial_take_profit = attached_tp if attached_tp is not None else planned_target_price
     has_attached_order_create_tpsl = attached_tp is not None or attached_sl is not None
     context_save_error: Optional[str] = None
-    post_submit_warnings: List[str] = []
+    post_submit_warnings: List[str] = [expiry_binding_warning] if expiry_binding_warning else []
     journal_context_saved = True
     try:
         intent = _accepted_calculator_intent(payload, broker="bybit", account=account, category=category, instrument=symbol)
@@ -25249,6 +25436,7 @@ async def _place_bybit_order(
         "journal_context_saved": journal_context_saved,
         "warnings": post_submit_warnings,
         "context_save_error": context_save_error,
+        "order_expiry": _expiry_public_record(expiry_record) if expiry_record else None,
     }
 
 
@@ -28766,6 +28954,13 @@ CALCULATOR_TEMPLATE = """<!doctype html>
               <tr id="rr-wrap"><th><label for="calc-rr">Risk/reward</label></th><td><input id="calc-rr" type="number" min="0.1" step="0.1" value="2"/></td></tr>
               <tr id="tp-ticks-wrap" style="display:none"><th><label for="calc-tp-ticks">Target ticks</label></th><td><input id="calc-tp-ticks" type="number" min="1" step="1" value="20"/></td></tr>
               <tr id="chart-tick-size-wrap" style="display:none"><th>TradingView chart tick size</th><td><input id="calc-chart-tick-auto" type="text" readonly aria-label="Automatically resolved TradingView chart tick size" value="Resolving…"/><div id="calc-chart-tick-source" class="muted">Automatic symbol profile</div><label class="muted"><input id="calc-chart-tick-size-override-enabled" type="checkbox"/> Advanced override for another chart feed</label><input id="calc-chart-tick-size" type="number" min="0" step="any" placeholder="Optional positive chart increment" disabled style="display:none"/><div class="muted">Stop and target inputs remain TradingView ticks. Pepperstone GBPUSD uses the measured 0.00001 chart step automatically.</div></td></tr>
+              <tr id="bybit-expiry-wrap" style="display:none"><th>Local entry expiry</th><td>
+                <select id="bybit-expiry-mode" aria-label="Bybit local entry expiry"><option value="none" selected>No expiry</option><option value="duration">Duration</option><option value="at">Specific date/time (Australia/Brisbane)</option></select>
+                <span id="bybit-expiry-duration" hidden><input id="bybit-expiry-value" type="number" min="0" step="any" value="5" aria-label="Expiry duration"/><select id="bybit-expiry-unit" aria-label="Duration units"><option value="minutes">Minutes</option><option value="hours">Hours</option></select></span>
+                <span id="bybit-expiry-at-wrap" hidden><label for="bybit-expiry-at">Australia/Brisbane date and time</label><input id="bybit-expiry-at" type="datetime-local"/></span>
+                <div id="bybit-expiry-preview" class="muted" role="status"></div>
+                <div class="muted">Local expiry requires this computer to remain awake and online. Closing LTT is supported; sleep, shutdown or connection loss can delay cancellation.</div>
+              </td></tr>
               <tr id="risk-toggle-wrap"><th>Risk mode</th><td><div class="group toggle" id="risk-toggle"><button type="button" data-v="fixed_aud">Fixed AUD</button><button type="button" data-v="percent" class="active">%</button></div></td></tr>
               <tr><th><label id="calc-risk-label" for="calc-risk">Risk value (%)</label></th><td><input id="calc-risk" type="number" min="0.0001" step="any" value="1"/></td></tr>
             </tbody>
@@ -28802,6 +28997,7 @@ CALCULATOR_TEMPLATE = """<!doctype html>
             <div class="grid" id="calc-error-debug"></div>
             <div id="calc-success" class="ok"></div>
             <div id="calc-request-summary" class="muted"></div>
+            <div id="bybit-expiry-status" class="muted" role="status" aria-label="Durable Bybit expiry status"></div>
           </div>
           <table class="calc-table">
             <caption>Quote Results</caption>
@@ -32279,6 +32475,16 @@ async def calculator_submit(payload: Dict[str, object] = Body(default={})) -> JS
         normalized_round_number = _normalize_round_number(payload.get("round_number"))
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    expiry_spec = payload.get("order_expiry")
+    try:
+        expiry_enabled = _parse_bybit_order_expiry(expiry_spec) is not None
+        if expiry_enabled and (asset != "crypto" or requested_broker not in {"", "bybit"}
+                or payload.get("pending_webhook_id") or str(payload.get("webhook_mode", "no")).lower() != "no"
+                or str(payload.get("trade_mode", "linear")).lower() != "linear"
+                or str(payload.get("order_type", "")).lower() != "limit"):
+            raise ValueError("Expiry is supported only for direct Bybit linear USDT limit entries")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     canonical = {
         "account": payload.get("account"),
         "symbol": payload.get("symbol"),
@@ -32319,6 +32525,7 @@ async def calculator_submit(payload: Dict[str, object] = Body(default={})) -> JS
             result = await _place_bybit_order(
                 canonical,
                 request_id=request_id,
+                **({"_expiry_spec": expiry_spec} if expiry_enabled else {}),
             )
             return JSONResponse({
                 "ok": True,
@@ -32348,6 +32555,9 @@ async def calculator_submit(payload: Dict[str, object] = Body(default={})) -> JS
                 "context_save_error": result.get("context_save_error"),
             })
         raise HTTPException(status_code=400, detail="asset must be crypto or fx.")
+    except BybitExpiryOutcomeWarning as exc:
+        return JSONResponse({"ok": False, "code": "BYBIT_EXPIRY_SUBMISSION_UNRESOLVED", "message": str(exc),
+                             "do_not_resubmit": True, "order_expiry": exc.record}, status_code=409)
     except HTTPException:
         raise
     except BybitPreSubmitValidationError as exc:

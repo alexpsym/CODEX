@@ -240,6 +240,22 @@ class ExpiryQueue:
                 self._event(db, identity, "bound", {"order_id": order_id})
         return self.get(identity)
 
+    def list_records(self):
+        with self.connection() as db:
+            return [dict(row) for row in db.execute("SELECT * FROM schedules ORDER BY created_ms DESC,id")]
+
+    def reject_submission(self, identity, *, scope, order_link_id):
+        """Only a definitive create rejection may retire an unbound reservation."""
+        with self.connection(write=True) as db:
+            row = db.execute("SELECT * FROM schedules WHERE id=?", (identity,)).fetchone()
+            if (not row or ExecutionScope.from_record(row) != scope or row["order_link_id"] != order_link_id
+                    or row["order_id"] or row["attempts"] or row["lease_owner"] or row["state"] != "reserved"):
+                raise ExpiryError("Submission rejection conflicts with newer reconciliation evidence")
+            db.execute("UPDATE schedules SET state='rejected',broker_status='Rejected',updated_ms=?,revision=revision+1 WHERE id=?",
+                       (self.clock(), identity))
+            self._event(db, identity, "submission_rejected", {"order_link_id": order_link_id})
+        return self.get(identity)
+
     def claim(self):
         now, owner = self.clock(), uuid4().hex
         with self.connection(write=True) as db:

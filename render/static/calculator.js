@@ -1,6 +1,7 @@
 (function () {
   const TIMEFRAMES = [['','None'], ['1m','1MIN'], ['5m','5MIN'], ['15m','15MIN'], ['30m','30MIN'], ['1h','1H'], ['4h','4H'], ['1d','DAILY'], ['1w','WEEKLY'], ['1mo','MONTHLY']];
   const state = {
+    localExpiryAvailable: false,
     account: 'live',
     asset: 'crypto',
     broker: 'bybit',
@@ -73,6 +74,7 @@
   const webhookStatusEl = $('calc-webhook-status');
   const SUBMIT_LABEL = 'Submit Order';
   const SUBMITTING_LABEL = 'Submitting...';
+  let expirySubmissionLocked = false;
   let submitInFlight = false;
   let submitStateResetTimer = null;
 
@@ -186,6 +188,56 @@
     return '';
   }
 
+  function expirySupported() {
+    return state.localExpiryAvailable && state.asset === 'crypto' && state.broker === 'bybit' && state.order_type === 'limit'
+      && state.webhook_mode === 'no' && /^[A-Z0-9]+USDT$/.test(String(state.quote?.symbol || currentSymbolInput()).toUpperCase());
+  }
+  function expiryPayload() {
+    if (!expirySupported()) return null;
+    const mode = $('bybit-expiry-mode')?.value || 'none';
+    if (mode === 'none') return null;
+    if (mode === 'duration') return {mode, value: $('bybit-expiry-value').value, unit: $('bybit-expiry-unit').value};
+    return {mode: 'at', brisbane: $('bybit-expiry-at').value};
+  }
+  function expiryPreviewDeadline(spec, now = Date.now()) {
+    if (!spec) return null;
+    if (spec.mode === 'duration') return now + Number(spec.value) * (spec.unit === 'hours' ? 3600000 : 60000);
+    // Brisbane has UTC+10 throughout the year. Never interpret datetime-local in the browser timezone.
+    return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(spec.brisbane) ? Date.parse(spec.brisbane + ':00+10:00') : NaN;
+  }
+  function brisbaneTime(ms) {
+    return new Date(ms).toLocaleString('en-AU', {timeZone:'Australia/Brisbane', hour12:false}) + ' Australia/Brisbane';
+  }
+  function syncExpiryControls() {
+    const wrap = $('bybit-expiry-wrap'); if (!wrap) return;
+    const supported = expirySupported(); wrap.style.display = supported ? '' : 'none';
+    if (!supported) $('bybit-expiry-mode').value = 'none';
+    const spec = expiryPayload();
+    $('bybit-expiry-duration').hidden = spec?.mode !== 'duration';
+    $('bybit-expiry-at-wrap').hidden = spec?.mode !== 'at';
+    const ms = expiryPreviewDeadline(spec);
+    $('bybit-expiry-preview').textContent = !spec ? 'No scheduled cancellation.' : Number.isFinite(ms) && ms > Date.now()
+      ? `${spec.mode === 'duration' ? 'Estimated at submission: ' : 'Deadline: '}${brisbaneTime(ms)}. Duration starts at the server submission attempt.`
+      : 'Enter a valid future expiry before submitting.';
+  }
+  let expiryStatusInFlight = null;
+  async function refreshExpiryStatus() {
+    if (expiryStatusInFlight) return expiryStatusInFlight;
+    const el = $('bybit-expiry-status'); if (!el) return;
+    expiryStatusInFlight = (async()=>{
+      try {
+        const response = await fetch('/api/calculator/order-expiry/status', {cache:'no-store'});
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || 'Expiry status unavailable');
+        el.textContent = `Local expiry worker: ${data.worker?.healthy ? 'running' : 'unavailable/stopped'}. `
+          + (data.error ? data.error + ' ' : '')
+          + (data.schedules || []).map(r=>`${r.mode} ${r.symbol} ${r.order_id || r.order_link_id}: ${r.status_label}; ${brisbaneTime(r.deadline_ms)}`).join(' | ');
+      } catch (_) { el.textContent = 'Expiry status unavailable. Check the local worker status before scheduling.'; }
+      finally { expiryStatusInFlight = null; }
+    })();
+    return expiryStatusInFlight;
+  }
+
   function refreshPrewarmSchedule() {
     if (walletPrewarmInterval) {
       clearInterval(walletPrewarmInterval);
@@ -194,7 +246,7 @@
     if (state.asset === 'crypto') {
       prewarmAccountDependencies();
       if (typeof setInterval === 'function') {
-        walletPrewarmInterval = setInterval(() => { prewarmAccountDependencies(); }, 20000);
+        walletPrewarmInterval = setInterval(() => { prewarmAccountDependencies(); refreshExpiryStatus(); syncExpiryControls(); }, 20000);
         if (walletPrewarmInterval && typeof walletPrewarmInterval.unref === 'function') walletPrewarmInterval.unref();
       }
     }
@@ -205,7 +257,7 @@
 
   function setSubmitState({ visible, enabled, reason = '', stateName = '' }) {
     submitBtn.style.display = visible ? '' : 'none';
-    submitBtn.disabled = !(enabled && state.quote && state.quoteStatus === 'ready' && state.webhook_mode !== 'yes' && state.quote.quote_valid_for_submit !== false);
+    submitBtn.disabled = expirySubmissionLocked || !(enabled && state.quote && state.quoteStatus === 'ready' && state.webhook_mode !== 'yes' && state.quote.quote_valid_for_submit !== false);
     submitBtn.title = reason || '';
     if (stateName) submitBtn.dataset.state = stateName;
   }
@@ -314,6 +366,7 @@
   }
 
   function invalidateQuote({ clearResults = true, status = 'stale', reason = '' } = {}) {
+    syncExpiryControls();
     if (state.quoteStatus === 'calculating' && status !== 'calculating' && status !== 'error') {
       state.quoteRequestSeq += 1;
       if (state.quoteController) state.quoteController.abort();
@@ -636,7 +689,7 @@
     }
     if (bodyJson && typeof bodyJson === 'object' && (bodyJson.message || bodyJson.code || bodyJson.debug)) {
       const err = new Error(bodyJson.message || bodyJson.code || `${method} ${url} failed: ${status}`);
-      err.detail = { code: bodyJson.code, message: bodyJson.message, debug: bodyJson.debug };
+      err.detail = { code: bodyJson.code, message: bodyJson.message, debug: bodyJson.debug, do_not_resubmit: bodyJson.do_not_resubmit, order_expiry: bodyJson.order_expiry };
       err.debug = bodyJson.debug;
       return err;
     }
@@ -1087,6 +1140,7 @@
         }
         if (typeof onChange === 'function') onChange();
         syncAllToggleStates();
+        syncExpiryControls();
       });
     });
   }
@@ -1094,6 +1148,8 @@
   async function loadBootstrapCapability() {
     try {
       const bootstrap = await request('/api/calculator/bootstrap', { cache: 'no-store' });
+      state.localExpiryAvailable = bootstrap?.app_profile === 'local';
+      syncExpiryControls();
       configureTrendlinePlans(bootstrap);
       state.webhookCapability = bootstrap?.webhook || null;
       const yesBtn = $('webhook-toggle').querySelectorAll('button')[1];
@@ -1322,6 +1378,8 @@
   });
 
   $('calc-quote').addEventListener('click', async () => {
+    expirySubmissionLocked = false;
+    syncExpiryControls();
     clearMessages();
     toggleWebhookPanel(false);
     if (state.quoteController) state.quoteController.abort();
@@ -1482,6 +1540,7 @@
       clearTimeout(softTimeoutId);
       clearTimeout(timeoutId);
       if (seq === state.quoteRequestSeq) {
+        syncExpiryControls();
         quoteBtn.disabled = false;
         quoteBtn.textContent = defaultLabel;
       }
@@ -1562,6 +1621,12 @@
       };
       if (payload.target_mode === 'ticks') payload.take_profit_ticks = $('calc-tp-ticks')?.value || '';
       else payload.risk_reward = $('calc-rr').value;
+      const orderExpiry = expiryPayload();
+      if (orderExpiry) {
+        const deadline = expiryPreviewDeadline(orderExpiry);
+        if (!Number.isFinite(deadline) || deadline <= Date.now()) throw new Error('Enter a valid future local expiry.');
+        payload.order_expiry = orderExpiry;
+      }
       renderRequestSummary(payload);
       const submitResp = await post('/api/calculator/submit', payload);
       if (!submitResp || submitResp.ok !== true) {
@@ -1569,6 +1634,11 @@
       }
       renderRequestSummary(payload, submitResp);
       const brokerResult = submitResp?.result || {};
+      if (brokerResult.order_expiry) {
+        expirySubmissionLocked = true;
+        $('bybit-expiry-status').textContent = `${brokerResult.order_expiry.status_label}; ${brisbaneTime(brokerResult.order_expiry.deadline_ms)}. Do not resubmit this order.`;
+        refreshExpiryStatus();
+      }
       const brokerOrder = brokerResult?.order || {};
       notifyOpenOrdersStateChanged({
         broker: submitResp?.broker || payload.broker,
@@ -1599,6 +1669,7 @@
         }
       }, 1200);
     } catch (e) {
+      if (e.detail?.do_not_resubmit) { expirySubmissionLocked = true; refreshExpiryStatus(); }
       okEl.textContent = '';
       errorEl.textContent = String(e.message || e);
       renderErrorDebug(e.detail || (e.debug ? { debug: e.debug } : null));
@@ -1611,6 +1682,15 @@
     }
   });
 
+  for (const id of ['bybit-expiry-mode','bybit-expiry-value','bybit-expiry-unit','bybit-expiry-at']) {
+    $(id)?.addEventListener('change', syncExpiryControls);
+    $(id)?.addEventListener('input', syncExpiryControls);
+  }
+  syncExpiryControls();
+  refreshExpiryStatus();
+  if (typeof window !== 'undefined' && window.__CALCULATOR_TESTING__) {
+    window.__expiryTestHooks = {state, expiryPayload, expiryPreviewDeadline, syncExpiryControls, refreshExpiryStatus};
+  }
   setToggle('account-toggle', 'account', () => { refreshPrewarmSchedule(); resolveSymbolAndLoad(); });
   setToggle('asset-toggle', 'asset', () => { updateRiskUiForAsset(); updateBrokerUiForAsset(); refreshPrewarmSchedule(); resolveSymbolAndLoad(); });
   setToggle('broker-toggle', 'broker', () => { updateBrokerUiForAsset(); resolveSymbolAndLoad(); });

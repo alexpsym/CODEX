@@ -468,7 +468,9 @@
   };
   const rowValues = item => [item.venue||item.broker,resolveAccountLabel(item),item.asset,item.category,item.side,item.order_type,item.instrument,item.stop_loss_ticks,item.target_mode_display,item.take_profit_ticks,item.risk_mode_display,item.risk_value_display,item.risk_reward,item.timeframe,item.is_test_trade,item.setup,item.pattern,item.ema,item.vwap,item.aths_atls,item.round_number,item.webhook_mode,item.webhook_status,item.webhook_classification,item.planned_entry_price,item.planned_stop_price,item.planned_target_price,item.type,item.quantity_is_estimate?`${item.size??''} (est.)`:item.size,item.local_tracking?item.manual_fill_price:(item.entry_price||item.order_price),item.current_price,item.stop_loss,item.take_profit,item.leverage,item.type==='Position'?item.funding_paid:null,item.type==='Position'?item.funding_received:null,item.type==='Position'?item.net_funding:null,formatTimestamp(item.opened_at),item.status];
   const render=(items,errors=[],warnings=[],coverage=window.__openOrdersCoverage||{})=>{
-    items=items.map(item=>{const previous=classificationRows.get(classificationKey(item))?.item;return preferReferencePrice(preferNewerLocalFill(item,previous),previous);});
+    items=items.map(item=>{const expiry=expiryStatusRecords.get(item.order_expiry?.id);
+      if(expiry&&Number(expiry.revision)>=Number(item.order_expiry.revision||0)&&expiry.mode===item.order_expiry.mode&&expiry.environment===item.order_expiry.environment&&expiry.order_link_id===item.order_expiry.order_link_id)item={...item,order_expiry:expiry};
+      const previous=classificationRows.get(classificationKey(item))?.item;return preferReferencePrice(preferNewerLocalFill(item,previous),previous);});
     window.__openOrdersItems=Array.isArray(items)?items:[];window.__openOrdersErrors=Array.isArray(errors)?errors:[];window.__openOrdersWarnings=Array.isArray(warnings)?warnings:[];
     if(!tbody)return;hasData=Boolean(items.length);renderDiagnostics(errorsBox,errorsList,errors,'Source errors');renderDiagnostics(warningsBox,warningsList,warnings,'Source warnings');
     for(const entry of classificationRows.values())entry.present=false;
@@ -496,7 +498,7 @@
         const state=entry.prices.get(priceColumns[i]);const resume=Object.values(priceOperations).find(op=>op.target===item.price_edit?.target&&op.field===state.field);
         if(resume&&!state.draft)openPriceCell(entry,state,resume);renderPriceCell(entry,state);
       }else if(i===30&&item.local_tracking){renderReferencePriceCell(tr.children[i],item);
-      }else{const text=String(fmt(value));if(tr.children[i].textContent!==text)tr.children[i].textContent=text;}});
+      }else{const expiry=item.order_expiry;const suffix=expiry&&i===rowValues(item).length-1?` ? Local expiry ${new Date(expiry.deadline_ms).toLocaleString('en-AU',{timeZone:'Australia/Brisbane',hour12:false})} Australia/Brisbane ? ${expiry.status_label}`:'';const text=String(fmt(value))+suffix;if(tr.children[i].textContent!==text)tr.children[i].textContent=text;}});
       desired.push(tr);
     }
     for(const [key,entry] of classificationRows){if(entry.present)continue;if([...entry.cells.values(),...entry.prices.values()].some(state=>state.draft)){
@@ -584,11 +586,27 @@
     setBadge('Submitted; waiting for broker visibility');
     runVisibilityCheck(key).catch(()=>{});
   };
+  const expiryStatusRecords=new Map();
+  const refreshExpiryStatuses=async()=>{
+    const data=await fetchJson('/api/calculator/order-expiry/status');
+    const records=expiryStatusRecords;
+    for(const r of data.schedules||[])if(Number(r.revision)>=Number(records.get(r.id)?.revision||0))records.set(r.id,r);
+    let changed=false;
+    const items=(window.__openOrdersItems||[]).map(item=>{
+      const old=item.order_expiry, next=old&&records.get(old.id);
+      if(!next||next.mode!==old.mode||next.environment!==old.environment||next.symbol!==item.instrument
+          ||next.order_link_id!==old.order_link_id||(old.order_id&&next.order_id!==old.order_id))return item;
+      if(JSON.stringify(old)!==JSON.stringify(next)){changed=true;return {...item,order_expiry:next};}
+      return item;
+    });
+    if(changed)render(items,window.__openOrdersErrors||[],window.__openOrdersWarnings||[]);
+  };
   const pollVersion=async()=>{
     if(document.hidden)return;
     if(versionInFlight)return versionInFlight;
     versionInFlight=(async()=>{try{
       await reconcilePriceOperations();
+      try{await refreshExpiryStatuses();}catch(_){}
       const payload=await fetchJson('/api/open-orders/version');const nextVersion=Number(payload?.version);
       const revision=Number(payload.progress_revision||0);
       if(Number.isFinite(nextVersion)&&(refreshNeedsRecovery||knownVersion===null||nextVersion!==knownVersion||revision!==knownRevision))await refresh('progress');
