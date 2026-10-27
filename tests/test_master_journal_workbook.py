@@ -659,6 +659,269 @@ def sample_snapshot():
     }
 
 
+def test_trade_number_link_font_changes_preserve_targets_and_other_styles(tmp_path: Path, monkeypatch):
+    from openpyxl.worksheet.hyperlink import Hyperlink
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Trade Log"
+    for values in mjw._trade_log_three_row_header_values():
+        ws.append(values)
+    for row, value in enumerate(("F1", "F2", "F3", '=HYPERLINK("https://example.invalid/formula","F4")', "unlinked"), 4):
+        ws.cell(row, 1, value)
+        ws.cell(row, 1).font = Font(name="Arial", size=10 + row, bold=row % 2 == 0,
+                                    italic=True, strike=True, color="FF123456")
+        ws.cell(row, 1).fill = PatternFill("solid", fgColor=PROFIT_FILL if row % 2 else LOSS_FILL)
+        ws.cell(row, 1).border = Border(bottom=Side(style="double", color="123456"))
+        ws.cell(row, 1).alignment = Alignment(horizontal="right", wrap_text=True)
+        ws.cell(row, 1).number_format = "0"
+    ws["A4"].font = Font(name="Calibri", size=11, color=mjw.Color(theme=10), underline="single")
+    ws["A4"].hyperlink = "https://example.invalid/reference"
+    ws["A6"].hyperlink = Hyperlink(ref="A6", target="../retained", location="original", display="trade", tooltip="keep", id="rId9")
+    retained = copy(ws["A6"].hyperlink)
+    folder = tmp_path / "F2"
+    folder.mkdir()
+    monkeypatch.setattr(mjw, "resolve_trade_folder_link", lambda number, **kw: (folder.as_uri(), "") if number == "F2" else (None, "unavailable"))
+    before = {cell.coordinate: (copy(cell._style), copy(cell.font), cell.value) for cell in (ws[f"A{r}"] for r in range(4, 9))}
+    diagnostics = {}
+    mjw._apply_trade_number_hyperlinks(ws, diagnostics)
+    assert ws["A5"].hyperlink.target == folder.as_uri()
+    assert ws["A6"].hyperlink == retained
+    assert diagnostics["trade_number_hyperlink_unresolved"][-1]["trade_number"] == "unlinked"
+    for row in range(4, 8):
+        cell = ws.cell(row, 1)
+        old_style, old_font, value = before[cell.coordinate]
+        actual = copy(cell.font)
+        assert actual.color == ws["A4"].font.color and actual.u == "single"
+        actual.color, actual.u = old_font.color, old_font.u
+        assert actual == old_font and cell.value == value
+        style = copy(cell._style)
+        style.fontId = old_style.fontId
+        if row == 5:  # Existing link creation sets text format; font-only helper does not.
+            style.numFmtId = old_style.numFmtId
+        assert style == old_style
+    assert ws["A8"]._style == before["A8"][0] and ws["A8"].hyperlink is None
+    path = tmp_path / "links.xlsx"
+    wb.save(path)
+    wb.close()
+    wb = load_workbook(path)
+    ws = wb["Trade Log"]
+    registry = (len(wb._fonts), len(wb._cell_styles))
+    for _ in range(3):
+        assert mjw._apply_trade_number_link_fonts(ws) == 0
+        for row in range(4, 9):
+            ws.cell(row, 1).style_id
+    assert (len(wb._fonts), len(wb._cell_styles)) == registry
+    assert ws["A6"].hyperlink.target == retained.target
+    assert ws["A7"].value == before["A7"][2]
+    # An unstyled newly generated first row must select the verified default.
+    ws["A4"].font = Font(name="Verdana", size=17, italic=True)
+    mjw._apply_trade_number_link_fonts(ws)
+    assert ws["A4"].font.color == mjw.Color(theme=10) and ws["A4"].font.u == "single"
+    assert ws["A4"].font.name == "Verdana" and ws["A4"].font.italic
+    wb.close()
+
+
+def test_trade_number_link_fonts_survive_trade_updates_and_appends(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(mjw, "REPORT_START_YEAR", 2026)
+    monkeypatch.setattr(mjw, "REPORT_MIN_END_YEAR", 2026)
+    monkeypatch.setattr(mjw, "assign_trade_numbers_and_create_folders", lambda *a, **kw: {})
+    folder = tmp_path / "trade-fixture"
+    folder.mkdir()
+    monkeypatch.setattr(mjw, "resolve_trade_folder_link", lambda *a, **kw: (folder.as_uri(), ""))
+    snapshot = sample_snapshot()
+    for i, row in enumerate(snapshot["items"], 1):
+        row["trade_number"] = f"F{i}"
+    path = tmp_path / "updates.xlsx"
+    build_master_journal_workbook(snapshot, path, publish_recommendation_assets=False)
+    wb = load_workbook(path)
+    ws = wb["Trade Log"]
+    assert ws["A4"].font.color == mjw.Color(theme=10) and ws["A4"].font.u == "single"
+    row_number = _trade_log_row_by_id(ws, "t2")
+    cell = ws.cell(row_number, 1)
+    cell.font = Font(name="Verdana", size=15, bold=True, italic=True, color="112233")
+    cell.border = Border(bottom=Side(style="double"))
+    authored_border = copy(cell.border)
+    retained_target = cell.hyperlink.target
+    wb.save(path)
+    wb.close()
+    changed = dict(snapshot["items"][0], net_profit=119.5)
+    appended = dict(snapshot["items"][1], id="t3", trade_number="F3", open_time="2026-05-03T00:00:00Z", close_time="2026-05-03T01:00:00Z")
+    result = update_master_journal_workbook_incremental(path, [changed, appended], expected_survivor_row_ids=["t1", "t2", "t3"])
+    assert result["ok"] and result["inserted_row_ids"] == ["t3"] and result["updated_row_ids"] == ["t1"]
+    wb = load_workbook(path)
+    ws = wb["Trade Log"]
+    for row in range(4, 7):
+        assert ws.cell(row, 1).font.color == mjw.Color(theme=10) and ws.cell(row, 1).font.u == "single"
+    assert ws.cell(row_number, 1).font.name == "Verdana" and ws.cell(row_number, 1).font.bold
+    assert ws.cell(row_number, 1).border == authored_border and ws.cell(row_number, 1).hyperlink.target == retained_target
+    assert _cell_fill_rgb(ws.cell(6, 1)) == LOSS_FILL
+    # Reintroduce the stale authored font to exercise restoration after regeneration.
+    ws.cell(row_number, 1).font = Font(name="Verdana", size=15, bold=True, italic=True, color="112233")
+    wb.save(path)
+    wb.close()
+    snapshot["items"] = [changed, snapshot["items"][1], appended]
+    result = update_master_journal_workbook_data_only(path, snapshot, preserve_existing_layout=True, publish_recommendation_assets=False)
+    assert result["ok"], result
+    # The caller installs this updater's verified candidate (temporary fixture only).
+    mjw.os.replace(result["candidate_path"], path)
+    wb = load_workbook(path)
+    ws = wb["Trade Log"]
+    cell = ws.cell(_trade_log_row_by_id(ws, "t2"), 1)
+    assert cell.font.color == mjw.Color(theme=10) and cell.font.u == "single"
+    assert cell.font.name == "Verdana" and cell.font.size == 15 and cell.font.bold and cell.font.italic
+    assert cell.border == authored_border and cell.hyperlink.target == retained_target
+    cell.font = Font(name="Verdana", color="112233")
+    wb.save(path)
+    before_balance = mjw._incremental_trade_log_preservation_signature(ws)
+    wb.close()
+    monkeypatch.setattr(mjw, "_apply_trade_number_link_fonts", lambda *a: pytest.fail("balance-only font scan"))
+    result = update_master_journal_workbook_incremental(path, [], account_balance={"account_label": "BYBIT", "balance": 4321.25, "currency": "USDT", "as_of": "2026-05-10T12:00:00Z", "balance_source": "trade_timeline"})
+    assert result["ok"]
+    wb = load_workbook(path)
+    assert mjw._incremental_trade_log_preservation_signature(wb["Trade Log"]) == before_balance
+    wb.close()
+
+
+def test_trade_number_font_package_repair_is_preserving_and_atomic(tmp_path: Path, monkeypatch):
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Trade Log"
+    for values in mjw._trade_log_three_row_header_values():
+        ws.append(values)
+    ws["A4"] = "F1"
+    ws["A4"].hyperlink = "../original"
+    ws["A4"].font = Font(color=mjw.Color(theme=10), underline="single")
+    ws["A5"] = "F2"
+    ws["A5"].hyperlink = "https://example.invalid/keep"
+    ws["A5"].hyperlink.tooltip = "unchanged tooltip"
+    ws["A5"].font = Font(name="Arial", size=16, bold=True, italic=True, color="123456")
+    ws["A5"].fill = PatternFill("solid", fgColor=LOSS_FILL)
+    ws["A6"] = '=HYPERLINK("../formula","F3")'
+    ws["A7"] = "unlinked"
+    ws["B5"]._style = copy(ws["A5"]._style)  # Shared style must stay intact.
+    ws["B6"] = "=1+1"
+    ws.freeze_panes = "A4"
+    volume = 1400
+    volume_changed = 0
+    for index in range(volume):
+        row = index + 8
+        cell = ws.cell(row, 1, f"F{row}")
+        cell._style = copy(ws["A4" if index % 5 == 0 else "A5"]._style)
+        if index % 5:
+            font = copy(cell.font)
+            font.name = ("Arial", "Verdana", "Calibri")[index % 3]
+            font.italic = bool(index % 2)
+            font.size = 10 + index % 4
+            cell.font = font
+            volume_changed += 1
+        cell.border = Border(bottom=Side(style="double"))
+        cell.alignment = Alignment(horizontal="right", wrap_text=True)
+        cell.fill = PatternFill("solid", fgColor=PROFIT_FILL if index % 2 else LOSS_FILL)
+        cell.number_format = "0"
+        cell.hyperlink = f"../volume/{row}"
+        cell.hyperlink.location = "original-location"
+        cell.hyperlink.display = f"display-{row}"
+        cell.hyperlink.tooltip = f"tooltip-{row}"
+        ws.cell(row, 2)._style = copy(cell._style)
+    before_volume = {
+        row: (copy(ws.cell(row, 1).font), copy(ws.cell(row, 1)._style),
+              copy(ws.cell(row, 1).hyperlink), ws.cell(row, 1).value)
+        for row in range(8, volume + 8)
+    }
+    # Count full XML traversals and visited tags, independently of elapsed time.
+    traversal_counts = []
+    cell_tag_pattern = mjw._TRADE_NUMBER_CELL_TAG_RE
+    class CountingCellTags:
+        def sub(self, callback, payload):
+            visited = 0
+            def visit(match):
+                nonlocal visited
+                visited += 1
+                return callback(match)
+            result = cell_tag_pattern.sub(visit, payload)
+            traversal_counts.append(visited)
+            return result
+    monkeypatch.setattr(mjw, "_TRADE_NUMBER_CELL_TAG_RE", CountingCellTags())
+    source_dir = tmp_path / "active"
+    source_dir.mkdir()
+    path = source_dir / "journal.xlsx"
+    wb.save(path)
+    wb.close()
+    # Authored formula caches are copied as raw bytes by the package repair.
+    with zipfile.ZipFile(path) as z:
+        parts = {name: z.read(name) for name in z.namelist()}
+    parts["xl/worksheets/sheet1.xml"] = parts["xl/worksheets/sheet1.xml"].replace(b"<v></v>", b"<v>2</v>")
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+        for name, payload in parts.items():
+            z.writestr(name, payload)
+    original = path.read_bytes()
+    digest = hashlib.sha256(original).hexdigest()
+    monkeypatch.setattr(mjw, "resolve_trade_folder_link", lambda *a, **kw: pytest.fail("repair resolved a folder"))
+    validator = mjw._validate_trade_number_font_package
+    with monkeypatch.context() as patch:
+        patch.setattr(mjw, "_validate_trade_number_font_package", lambda *a: (_ for _ in ()).throw(RuntimeError("validation rejected")))
+        patch.setattr(mjw.os, "replace", lambda *a: pytest.fail("invalid candidate replaced original"))
+        with pytest.raises(RuntimeError, match="validation rejected"):
+            mjw.repair_trade_number_link_fonts_package(path, tmp_path / "rejected.xlsx", expected_sha256=digest)
+    assert path.read_bytes() == original
+    # A concurrent edit detected immediately before replacement must also be retained.
+    with monkeypatch.context() as patch:
+        def concurrent_edit(*args):
+            result = validator(*args)
+            path.write_bytes(original + b"concurrent edit")
+            return result
+        patch.setattr(mjw, "_validate_trade_number_font_package", concurrent_edit)
+        with pytest.raises(RuntimeError, match="changed or was opened"):
+            mjw.repair_trade_number_link_fonts_package(path, tmp_path / "concurrent.xlsx", expected_sha256=digest)
+    assert path.read_bytes() == original + b"concurrent edit"
+    path.write_bytes(original)
+    replace = mjw.os.replace
+    installs = []
+    def checked_replace(candidate, destination):
+        assert Path(destination) == path and path.read_bytes() == original
+        installs.append(candidate)
+        replace(candidate, destination)
+    monkeypatch.setattr(mjw.os, "replace", checked_replace)
+    traversal_counts.clear()
+    manifest = mjw.repair_trade_number_link_fonts_package(path, tmp_path / "candidate.xlsx", expected_sha256=digest)
+    assert len(installs) == 1 and manifest["repaired_cells"] == 2 + volume_changed and manifest["linked_cells"] == 3 + volume
+    assert len(traversal_counts) == 3  # Generation once; validation source/candidate once each.
+    assert len(set(traversal_counts)) == 1 and traversal_counts[0] >= volume
+    assert set(manifest["changed_parts"]) == {"xl/styles.xml", "xl/worksheets/sheet1.xml"}
+    wb = load_workbook(path)
+    ws = wb["Trade Log"]
+    assert ws["A5"].font.name == "Arial" and ws["A5"].font.size == 16
+    assert ws["A5"].font.color == ws["A4"].font.color and ws["A5"].font.u == "single"
+    assert ws["B5"].font.color.rgb == "00123456" and ws["B5"].font.u is None
+    assert ws["A7"].font.u is None
+    for row, (old_font, old_style, old_link, value) in before_volume.items():
+        cell = ws.cell(row, 1)
+        assert cell.value == value
+        assert cell.hyperlink.target == old_link.target
+        assert cell.hyperlink.location == old_link.location
+        assert cell.hyperlink.display == old_link.display and cell.hyperlink.tooltip == old_link.tooltip
+        assert cell.font.color == ws["A4"].font.color and cell.font.u == "single"
+        font = copy(cell.font)
+        font.color, font.u = old_font.color, old_font.u
+        assert font == old_font
+        style = copy(cell._style)
+        style.fontId = old_style.fontId
+        assert style == old_style and ws.cell(row, 2)._style == old_style
+    registry = (len(wb._fonts), len(wb._cell_styles))
+    wb.close()
+    # A second isolated application is a package no-op with no new styles.
+    repaired = path.read_bytes()
+    monkeypatch.setattr(mjw.os, "replace", replace)
+    traversal_counts.clear()
+    manifest = mjw.repair_trade_number_link_fonts_package(path, tmp_path / "repeat.xlsx", expected_sha256=hashlib.sha256(repaired).hexdigest())
+    assert manifest["repaired_cells"] == 0 and manifest["changed_parts"] == []
+    assert len(traversal_counts) == 3 and len(set(traversal_counts)) == 1
+    with zipfile.ZipFile(path) as package:
+        ns = {"s": mjw._SPREADSHEETML_NAMESPACE}
+        root = ET.fromstring(package.read("xl/styles.xml"))
+        assert (len(root.find("s:fonts", ns)), len(root.find("s:cellXfs", ns))) == registry
+
+
 def test_single_builder_definition():
     src = Path('tools/master_journal_workbook.py').read_text(encoding='utf-8')
     assert src.count('def build_master_journal_workbook') == 1

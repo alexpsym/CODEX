@@ -13,6 +13,7 @@ from openpyxl.workbook.defined_name import DefinedName
 from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.worksheet.views import Pane, Selection
 import hashlib
+from io import BytesIO
 from openpyxl.styles import PatternFill, Border, Side, Alignment, Color
 from openpyxl.styles.numbers import BUILTIN_FORMATS_MAX_SIZE
 from openpyxl.formatting.rule import CellIsRule, FormulaRule
@@ -7677,6 +7678,46 @@ def _repair_legacy_duration_number_formats(wb: Workbook, diagnostics: Dict[str, 
     return repaired + registry_repaired
 
 
+def _is_linked_trade_number(cell) -> bool:
+    return bool(cell.value is not None and (
+        cell.hyperlink is not None
+        or (cell.data_type == "f" and isinstance(cell.value, str)
+            and re.match(r"=\s*(?:_xlfn\.)?HYPERLINK\s*\(", cell.value, re.I))
+    ))
+
+
+def _trade_number_link_font(font, reference_font=None):
+    """Copy only colour/underline from a usable A4; never mutate shared fonts."""
+    colour = getattr(reference_font, "color", None)
+    usable = reference_font is not None and reference_font.u == "single" and (
+        colour is not None and colour.tint == 0 and (
+            (colour.type == "theme" and colour.theme == 10)
+            or (colour.type == "rgb" and colour.rgb[-6:].upper() == "0000FF")
+        )
+    )
+    result = copy(font)
+    result.color = copy(colour) if usable else Color(theme=10)
+    result.u = "single"
+    return result
+
+
+def _apply_trade_number_link_fonts(ws) -> int:
+    """Style actual links only, without resolving or rewriting destinations."""
+    col = _trade_log_header_map(ws).get(TRADE_NUMBER_HEADER)
+    if not col:
+        return 0
+    reference = copy(ws.cell(4, col).font)
+    changed = 0
+    for row in range(_trade_log_data_start_row(ws), ws.max_row + 1):
+        cell = ws.cell(row, col)
+        if _is_linked_trade_number(cell):
+            font = _trade_number_link_font(cell.font, reference)
+            if cell.font != font:
+                cell.font = font
+                changed += 1
+    return changed
+
+
 def _apply_trade_number_hyperlinks(
     ws,
     diagnostics: Dict[str, Any] | None = None,
@@ -7696,6 +7737,9 @@ def _apply_trade_number_hyperlinks(
         if not number:
             cell.hyperlink = None
             continue
+        if cell.data_type == "f":
+            # Formula text belongs to the user, including HYPERLINK formulas.
+            continue
         link_diagnostics: Dict[str, Any] = {}
         target, reason = resolve_trade_folder_link(
             number,
@@ -7703,11 +7747,11 @@ def _apply_trade_number_hyperlinks(
             close_time=ws.cell(row, close_time_col).value if close_time_col else None,
             diagnostics=link_diagnostics,
         )
-        if target:
+        if target and cell.hyperlink is None:
             cell.hyperlink = target
             cell.number_format = "@"
             linked += 1
-        else:
+        elif not target:
             unresolved.append({
                 "trade_number": number,
                 "row": row,
@@ -7718,6 +7762,7 @@ def _apply_trade_number_hyperlinks(
     diagnostics["trade_number_hyperlinks_added"] = linked
     if unresolved:
         diagnostics["trade_number_hyperlink_unresolved"] = unresolved
+    _apply_trade_number_link_fonts(ws)
 
 
 def _ensure_trade_log_schema(ws, diagnostics: Dict[str, Any] | None = None) -> None:
@@ -11252,6 +11297,7 @@ def build_master_journal_workbook(
         stats1_link_diagnostics,
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    _apply_trade_number_link_fonts(wb[TRADE_LOG_SHEET])
     wb.save(output_path)
     if publish_recommendation_assets:
         _publish_recommendation_chart_bundle(chart_bundle)
@@ -19280,6 +19326,7 @@ def update_master_journal_workbook_data_only(
                     )
             diagnostics["reapplied_trade_log_generator_number_formats"] = formats_reapplied
             diagnostics["reapplied_generated_trade_log_formatting_after_layout_restore"] = True
+        _apply_trade_number_link_fonts(_get_all_trades_sheet(wb, allow_legacy=False))
         _assert_filter_covers_data(
             _get_all_trades_sheet(wb, allow_legacy=False),
             sheet_name="Trade Log",
@@ -20378,6 +20425,238 @@ def _worksheet_relationship_part_name(worksheet_part: str) -> str:
         "_rels",
         posixpath.basename(worksheet_part) + ".rels",
     )
+
+
+def _trade_number_font_package_inventory(package, payloads=None):
+    """Read links and styles without loading/saving or resolving trade folders."""
+    part = _worksheet_ooxml_part_name(package, TRADE_LOG_SHEET)
+    ns = {"s": _SPREADSHEETML_NAMESPACE}
+    payloads = payloads if payloads is not None else {}
+    for name in (part, "xl/styles.xml"):
+        if name not in payloads:
+            payloads[name] = package.read(name)
+    sheet = ET.fromstring(payloads[part])
+    styles = ET.fromstring(payloads["xl/styles.xml"])
+    fonts = styles.find("s:fonts", ns)
+    xfs = styles.find("s:cellXfs", ns)
+    if fonts is None or xfs is None:
+        raise RuntimeError("Workbook font/style tables are missing.")
+    links = {node.get("ref") for node in sheet.findall("s:hyperlinks/s:hyperlink", ns)}
+    targets = {}
+    reference = None
+    for cell in sheet.findall("s:sheetData/s:row/s:c", ns):
+        coordinate = cell.get("r", "")
+        style_id = int(cell.get("s", "0"))
+        if coordinate == "A4":
+            reference = Font.from_tree(fonts[int(xfs[style_id].get("fontId", "0"))])
+        formula = cell.find("s:f", ns)
+        if re.fullmatch(r"A[1-9][0-9]*", coordinate) and int(coordinate[1:]) >= 4 and (
+            coordinate in links or (formula is not None and re.match(
+                r"\s*(?:_xlfn\.)?HYPERLINK\s*\(", formula.text or "", re.I
+            ))
+        ):
+            targets[coordinate] = style_id
+    return part, fonts, xfs, targets, reference
+
+
+def _font_xml_without_link_appearance(font):
+    result = deepcopy(font)
+    for child in list(result):
+        if child.tag in {f"{{{_SPREADSHEETML_NAMESPACE}}}color", f"{{{_SPREADSHEETML_NAMESPACE}}}u"}:
+            result.remove(child)
+    return ET.tostring(result)
+
+
+_TRADE_NUMBER_CELL_TAG_RE = re.compile(rb'<c\b[^>]*>')
+
+
+def _trade_number_cell_styles_xml(payload, updates):
+    """Visit worksheet cell tags once, changing only indexed target styles."""
+    updates = {coordinate.encode("ascii"): style_id for coordinate, style_id in updates.items()}
+    seen = set()
+    def replace(match):
+        tag = match[0]
+        coordinate_match = re.search(rb'\br="([^"]+)"', tag)
+        coordinate = coordinate_match[1] if coordinate_match else None
+        if coordinate not in updates:
+            return tag
+        if coordinate in seen:
+            raise RuntimeError(f"Duplicate Trade Log target cell {coordinate!r}.")
+        seen.add(coordinate)
+        style_id = updates[coordinate]
+        tag = re.sub(rb'\s+s="[^"]*"', b"", tag)
+        closing = b"/>" if tag.endswith(b"/>") else b">"
+        tag = tag[:-len(closing)]
+        if style_id is not None:
+            tag += b' s="' + str(style_id).encode("ascii") + b'"'
+        return tag + closing
+    result = _TRADE_NUMBER_CELL_TAG_RE.sub(replace, payload)
+    if seen != updates.keys():
+        raise RuntimeError("Missing Trade Log target cells in worksheet XML.")
+    return result
+
+
+def _validate_trade_number_font_package(source_bytes, candidate_path):
+    """Prove that only linked A-cell style references and appended styles differ."""
+    with zipfile.ZipFile(BytesIO(source_bytes)) as source, zipfile.ZipFile(candidate_path) as candidate:
+        if source.namelist() != candidate.namelist() or source.comment != candidate.comment:
+            raise RuntimeError("Font repair changed package membership/comment.")
+        source_payloads = {name: source.read(name) for name in source.namelist()}
+        candidate_payloads = {name: candidate.read(name) for name in candidate.namelist()}
+        part, fonts, xfs, targets, reference = _trade_number_font_package_inventory(source, source_payloads)
+        new_part, new_fonts, new_xfs, new_targets, _ = _trade_number_font_package_inventory(candidate, candidate_payloads)
+        if new_part != part or targets.keys() != new_targets.keys():
+            raise RuntimeError("Font repair changed linked cells.")
+        for name in source.namelist():
+            old_info, new_info = source.getinfo(name), candidate.getinfo(name)
+            metadata = ("date_time", "compress_type", "comment", "extra", "create_system",
+                        "create_version", "extract_version", "reserved", "flag_bits",
+                        "volume", "internal_attr", "external_attr")
+            if any(getattr(old_info, key) != getattr(new_info, key) for key in metadata):
+                raise RuntimeError(f"Font repair changed ZIP metadata for {name}.")
+            if name not in {part, "xl/styles.xml"} and source_payloads[name] != candidate_payloads[name]:
+                raise RuntimeError(f"Font repair changed unrelated package part {name}.")
+        # Existing definitions must remain byte-for-byte intact, apart from table counts.
+        old_styles = source_payloads["xl/styles.xml"]
+        new_styles = candidate_payloads["xl/styles.xml"]
+        for table in (b"fonts", b"cellXfs"):
+            pattern = rb'<' + table + rb'\b[^>]*>.*?</' + table + rb'>'
+            old_table = re.search(pattern, old_styles, re.S)
+            new_table = re.search(pattern, new_styles, re.S)
+            if old_table is None or new_table is None:
+                raise RuntimeError("Unsupported styles table serialization.")
+            old_inner = old_table[0].split(b">", 1)[1].rsplit(b"</", 1)[0]
+            new_inner = new_table[0].split(b">", 1)[1].rsplit(b"</", 1)[0]
+            if not new_inner.startswith(old_inner):
+                raise RuntimeError("Font repair modified an existing style definition.")
+            old_open = old_table[0].split(b">", 1)[0]
+            new_open = new_table[0].split(b">", 1)[0]
+            if re.sub(rb'count="\d+"', b'count="0"', old_open) != re.sub(rb'count="\d+"', b'count="0"', new_open):
+                raise RuntimeError("Font repair changed style table attributes.")
+            old_styles = old_styles.replace(old_table[0], b"<" + table + b"/>", 1)
+            new_styles = new_styles.replace(new_table[0], b"<" + table + b"/>", 1)
+        if old_styles != new_styles:
+            raise RuntimeError("Font repair changed unrelated style definitions.")
+        old_sheet, new_sheet = source_payloads[part], candidate_payloads[part]
+        changed = []
+        validated_styles = set()
+        for coordinate, style_id in targets.items():
+            new_style_id = new_targets[coordinate]
+            if style_id != new_style_id:
+                changed.append(coordinate)
+            pair = (style_id, new_style_id)
+            if pair in validated_styles:
+                continue
+            validated_styles.add(pair)
+            old_xf, new_xf = deepcopy(xfs[style_id]), deepcopy(new_xfs[new_style_id])
+            old_font_id, new_font_id = int(old_xf.get("fontId", "0")), int(new_xf.get("fontId", "0"))
+            old_xf.set("fontId", "0")
+            new_xf.set("fontId", "0")
+            if ET.tostring(old_xf) != ET.tostring(new_xf):
+                raise RuntimeError(f"Font repair changed non-font style at {coordinate}.")
+            old_font, new_font = fonts[old_font_id], new_fonts[new_font_id]
+            if _font_xml_without_link_appearance(old_font) != _font_xml_without_link_appearance(new_font):
+                raise RuntimeError(f"Font repair changed unrelated font properties at {coordinate}.")
+            expected = _trade_number_link_font(Font.from_tree(old_font), reference)
+            actual = Font.from_tree(new_font)
+            if actual.color != expected.color or actual.u != expected.u:
+                raise RuntimeError(f"Font repair appearance mismatch at {coordinate}.")
+        normalize_targets = dict.fromkeys(targets)
+        old_sheet = _trade_number_cell_styles_xml(old_sheet, normalize_targets)
+        new_sheet = _trade_number_cell_styles_xml(new_sheet, normalize_targets)
+        if old_sheet != new_sheet:
+            raise RuntimeError("Font repair changed worksheet content, links or formula caches.")
+        return {"linked_cells": len(targets), "repaired_cells": len(changed), "changed_cells": changed,
+                "changed_parts": [name for name in source.namelist() if source_payloads[name] != candidate_payloads[name]],
+                "preservation": "all other package bytes, original styles, values, formulas, caches and relationships identical"}
+
+
+def repair_trade_number_link_fonts_package(path: Path, candidate_path: Path, *, expected_sha256: str):
+    """One font-only candidate/validate/hash-check/atomic-replace operation.
+
+    Caller owns a byte-for-byte backup. No retry, folder lookup or general update.
+    Candidate must be outside the active workbook directory, on the same volume.
+    """
+    path, candidate_path = Path(path), Path(candidate_path)
+    if candidate_path.parent.resolve() == path.parent.resolve() or candidate_path.exists():
+        raise ValueError("Font candidate must be a fresh path outside the journal directory.")
+    source_bytes = path.read_bytes()
+    if hashlib.sha256(source_bytes).hexdigest() != expected_sha256:
+        raise RuntimeError("Original workbook hash changed before font repair.")
+    # Honour the standard Excel owner file; never bypass an open workbook lock.
+    if path.with_name("~$" + path.name).exists():
+        raise RuntimeError("Excel owner file exists; close the workbook before repair.")
+    with zipfile.ZipFile(BytesIO(source_bytes)) as package:
+        payloads = {}
+        part, fonts, xfs, targets, reference = _trade_number_font_package_inventory(package, payloads)
+        payload = payloads[part]
+        style_payload = payloads["xl/styles.xml"]
+        font_additions, xf_additions, style_map = [], [], {}
+        font_ids = {ET.tostring(item): index for index, item in reversed(list(enumerate(fonts)))}
+        xf_ids = {ET.tostring(item): index for index, item in reversed(list(enumerate(xfs)))}
+        for style_id in set(targets.values()):
+            xf = xfs[style_id]
+            old_font = fonts[int(xf.get("fontId", "0"))]
+            font = Font.from_tree(old_font)
+            desired = _trade_number_link_font(font, reference)
+            if font == desired:
+                style_map[style_id] = style_id
+                continue
+            new_font = deepcopy(old_font)
+            for child in list(new_font):
+                if child.tag.rsplit("}", 1)[-1] in {"color", "u"}:
+                    new_font.remove(child)
+            for child in desired.to_tree():
+                if child.tag.rsplit("}", 1)[-1] in {"color", "u"}:
+                    child = deepcopy(child)
+                    child.tag = f"{{{_SPREADSHEETML_NAMESPACE}}}" + child.tag.rsplit("}", 1)[-1]
+                    new_font.append(child)
+            font_xml = ET.tostring(new_font)
+            if font_xml in font_ids:
+                font_id = font_ids[font_xml]
+            else:
+                font_id = len(fonts) + len(font_additions)
+                font_additions.append(font_xml)
+                font_ids[font_xml] = font_id
+            new_xf = deepcopy(xf)
+            new_xf.set("fontId", str(font_id))
+            xf_xml = ET.tostring(new_xf)
+            if xf_xml in xf_ids:
+                style_map[style_id] = xf_ids[xf_xml]
+            else:
+                style_map[style_id] = len(xfs) + len(xf_additions)
+                xf_additions.append(xf_xml)
+                xf_ids[xf_xml] = style_map[style_id]
+        payload = _trade_number_cell_styles_xml(payload, {
+            coordinate: style_map[style_id] for coordinate, style_id in targets.items()
+            if style_map[style_id] != style_id
+        })
+        for table, additions, original_count in ((b"fonts", font_additions, len(fonts)), (b"cellXfs", xf_additions, len(xfs))):
+            if additions:
+                pattern = rb'(<' + table + rb'\b[^>]*>)(.*?)(</' + table + rb'>)'
+                def append_styles(match):
+                    opening = re.sub(rb'count="\d+"', b'count="' + str(original_count + len(additions)).encode() + b'"', match[1])
+                    return opening + match[2] + b"".join(additions) + match[3]
+                style_payload, count = re.subn(pattern, append_styles, style_payload, flags=re.S)
+                if count != 1:
+                    raise RuntimeError("Unsupported styles table serialization.")
+        with zipfile.ZipFile(candidate_path, "x") as candidate:
+            candidate.comment = package.comment
+            for info in package.infolist():
+                candidate.writestr(info, payload if info.filename == part else
+                                  style_payload if info.filename == "xl/styles.xml" else package.read(info.filename))
+    manifest = _validate_trade_number_font_package(source_bytes, candidate_path)
+    with candidate_path.open("r+b") as handle:
+        handle.flush()
+        os.fsync(handle.fileno())
+    candidate_hash = hashlib.sha256(candidate_path.read_bytes()).hexdigest()
+    if path.with_name("~$" + path.name).exists() or hashlib.sha256(path.read_bytes()).hexdigest() != expected_sha256:
+        raise RuntimeError("Original workbook changed or was opened before replacement.")
+    os.replace(candidate_path, path)
+    if hashlib.sha256(path.read_bytes()).hexdigest() != candidate_hash:
+        raise RuntimeError("Font repair final integrity verification failed; do not retry.")
+    manifest.update(initial_sha256=expected_sha256, final_sha256=candidate_hash)
+    return manifest
 
 
 def _patch_trade_numbers_in_workbook_package(
