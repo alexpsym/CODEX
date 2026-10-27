@@ -17269,17 +17269,20 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                         </div>
                     </div>
                     <dl class="meta-grid">
-                        <dt>Last trade</dt><dd id="oanda-inactivity-last-trade">—</dd>
-                        <dt>Countdown</dt><dd id="oanda-inactivity-countdown">—</dd>
+                        <dt>Last verified live trade (Brisbane)</dt><dd id="oanda-inactivity-last-trade">—</dd>
+                        <dt>Assessment countdown</dt><dd id="oanda-inactivity-countdown">—</dd>
                     </dl>
                     <div class="status-headline" id="oanda-inactivity-headline">Loading...</div>
                     <div class="status-detail" id="oanda-inactivity-detail"></div>
                     <div class="details-wrap" id="oanda-inactivity-details" hidden>
                         <dl class="meta-grid">
                             <dt>Open OANDA trades</dt><dd id="oanda-inactivity-open-trades">—</dd>
-                            <dt>12-month inactivity threshold</dt><dd id="oanda-inactivity-threshold">—</dd>
-                            <dt>Earliest fee date</dt><dd id="oanda-inactivity-fee-date">—</dd>
-                            <dt>Monthly fee</dt><dd id="oanda-inactivity-monthly-fee">Up to AUD 10</dd>
+                            <dt>365-day inactivity threshold (Brisbane)</dt><dd id="oanda-inactivity-threshold">—</dd>
+                            <dt>First eligible assessment (Brisbane)</dt><dd id="oanda-inactivity-fee-date">—</dd>
+                            <dt>Next expected assessment (Brisbane)</dt><dd id="oanda-inactivity-next-assessment">&mdash;</dd>
+                            <dt>Monitored live account</dt><dd id="oanda-inactivity-account">&mdash;</dd>
+                            <dt>Account balance / home currency</dt><dd id="oanda-inactivity-balance">&mdash;</dd>
+                            <dt>Monthly maximum per client</dt><dd id="oanda-inactivity-monthly-fee">Up to AUD 20 per client</dd>
                         </dl>
                         <div class="status-detail" id="oanda-inactivity-error-detail"></div>
                     </div>
@@ -28336,7 +28339,7 @@ def _fee_charge_date_on_or_after(
     while True:
         candidate_local_utc = _third_last_weekday(current.year, current.month, tz_name=tz_name)
         candidate_local = candidate_local_utc.astimezone(zone)
-        if candidate_local >= current:
+        if candidate_local.date() >= current.date():
             return candidate_local.astimezone(timezone.utc)
         if current.month == 12:
             current = current.replace(year=current.year + 1, month=1, day=1)
@@ -28387,7 +28390,9 @@ async def _fetch_oanda_last_live_fill_time(cfg: Dict[str, str]) -> Optional[date
             timeout_s=8.0,
         )
         page_urls = payload.get("pages") if isinstance(payload.get("pages"), list) else []
-        transactions: List[Dict[str, object]] = []
+        transactions: List[Dict[str, object]] = [
+            item for item in payload.get("transactions", []) if isinstance(item, dict)
+        ]
         for page_url in reversed(page_urls):
             page_endpoint = _endpoint_from_page_url(str(page_url), cfg["account_id"])
             if not page_endpoint:
@@ -28406,6 +28411,8 @@ async def _fetch_oanda_last_live_fill_time(cfg: Dict[str, str]) -> Optional[date
         latest_fill: Optional[datetime] = None
         for tx in transactions:
             if str(tx.get("type") or "").strip().upper() != "ORDER_FILL":
+                continue
+            if not any(tx.get(key) for key in ("tradeOpened", "tradeReduced", "tradesClosed")):
                 continue
             tx_time = str(tx.get("time") or "").strip()
             if not tx_time:
@@ -28430,56 +28437,82 @@ async def _build_oanda_inactivity_status() -> Dict[str, object]:
         mode=cfg["mode"],
     )
     account_summary = summary_payload.get("account") if isinstance(summary_payload.get("account"), dict) else {}
-    open_trade_count = int(_to_float(account_summary.get("openTradeCount")) or 0)
-    open_position_count = int(_to_float(account_summary.get("openPositionCount")) or 0)
-    has_open_positions = open_trade_count > 0 or open_position_count > 0
+    if str(account_summary.get("id") or "") != cfg["account_id"]:
+        raise ValueError("OANDA summary account does not match the configured live account.")
 
-    account_created = await _fetch_oanda_account_created_time(
-        base_url=cfg["base_url"],
-        account_id=cfg["account_id"],
-        api_key=cfg["token"],
+    def number(value: object) -> Optional[Decimal]:
+        if isinstance(value, bool) or not isinstance(value, (str, int, float, Decimal)):
+            return None
+        try:
+            parsed = Decimal(str(value))
+            return parsed if parsed.is_finite() else None
+        except ArithmeticError:
+            return None
+
+    def count(value: object) -> Optional[int]:
+        parsed = number(value)
+        return int(parsed) if parsed is not None and parsed >= 0 and parsed == parsed.to_integral_value() else None
+
+    balance = number(account_summary.get("balance"))
+    currency = str(account_summary.get("currency") or "").strip()
+    balance_state = "unknown" if balance is None else "zero" if balance == 0 else "positive" if balance > 0 else "negative"
+    open_trade_count = count(account_summary.get("openTradeCount"))
+    open_position_count = count(account_summary.get("openPositionCount"))
+    has_open_positions = True if (open_trade_count or 0) > 0 or (open_position_count or 0) > 0 else (
+        False if open_trade_count == 0 and open_position_count == 0 else None
     )
-    last_fill_at = await _fetch_oanda_last_live_fill_time(cfg)
-    base_payload: Dict[str, object] = {
-        "ok": True,
+    history_error = None
+    last_fill_at = None
+    try:
+        last_fill_at = await _fetch_oanda_last_live_fill_time(cfg)
+    except Exception as exc:
+        # A separately verified exemption remains useful even if history fails.
+        if balance_state != "zero" and has_open_positions is not True:
+            raise
+        history_error = str(exc)
+
+    zone = ZoneInfo("Australia/Brisbane")
+    threshold_at = last_fill_at + timedelta(days=365) if last_fill_at else None
+    first_assessment = _fee_charge_date_on_or_after(threshold_at) if threshold_at else None
+    next_assessment = _fee_charge_date_on_or_after(max(threshold_at, now)) if threshold_at else None
+    status = "unavailable"
+    if balance_state == "zero":
+        status = "zero_balance"
+    elif has_open_positions is True:
+        status = "paused_open_position"
+    elif balance_state == "positive" and currency and has_open_positions is False and threshold_at:
+        status = "fee_eligible" if now >= threshold_at else "countdown"
+
+    return {
+        "ok": status != "unavailable",
         "mode": "live",
+        "account_id": cfg["account_id"],
+        "account_scope": "Configured live account only; other sub-account balances are not monitored.",
+        "balance": str(balance) if balance is not None else None,
+        "balance_currency": currency or None,
+        "balance_state": balance_state,
+        "balance_verified": balance is not None,
+        "status": status,
         "last_live_fill_at": _format_oanda_timestamp(last_fill_at) if last_fill_at else None,
+        "activity_anchor_source": "verified_order_fill" if last_fill_at else None,
         "open_trade_count": open_trade_count,
         "open_position_count": open_position_count,
         "has_open_positions": has_open_positions,
         "policy_months_without_trade": 12,
-        "monthly_fee_aud": 10,
+        "policy_days_without_trade": 365,
+        "policy_timezone": "Australia/Brisbane",
+        "monthly_fee_aud": 20,
+        "fee_cap_scope": "per_client",
+        "inactivity_threshold_at": _format_oanda_timestamp(threshold_at) if threshold_at else None,
+        # Compatibility alias: historical first eligibility, never the rolling date.
+        "earliest_fee_date": _format_oanda_timestamp(first_assessment) if first_assessment else None,
+        "first_eligible_assessment_date": first_assessment.astimezone(zone).date().isoformat() if first_assessment else None,
+        "next_assessment_date": next_assessment.astimezone(zone).date().isoformat() if next_assessment else None,
+        "days_until_assessment": (next_assessment.astimezone(zone).date() - now.astimezone(zone).date()).days if next_assessment else None,
+        "seconds_until_threshold": max(0, int((threshold_at - now).total_seconds())) if threshold_at else None,
+        "error": history_error or ("Last qualifying trade unavailable; no verified first-deposit evidence available." if not last_fill_at else
+                                   "Balance, currency or open-position data unavailable." if status == "unavailable" else None),
         "updated_at": _utc_now_iso(),
-    }
-
-    if last_fill_at is None:
-        return {
-            **base_payload,
-            "ok": False,
-            "status": "unavailable",
-            "error": "Could not resolve last ORDER_FILL transaction from OANDA history pages.",
-            "inactivity_threshold_at": None,
-            "earliest_fee_date": None,
-            "seconds_until_threshold": None,
-        }
-
-    threshold_anchor = last_fill_at
-    threshold_at = (threshold_anchor + relativedelta(months=12)).astimezone(timezone.utc)
-    earliest_fee_date = _fee_charge_date_on_or_after(threshold_at)
-    seconds_until_threshold = max(0, int((threshold_at - now).total_seconds()))
-    status = "countdown"
-    if has_open_positions:
-        status = "paused_open_position"
-    elif now >= threshold_at:
-        status = "fee_eligible"
-
-    return {
-        **base_payload,
-        "ok": True,
-        "status": status,
-        "inactivity_threshold_at": _format_oanda_timestamp(threshold_at),
-        "earliest_fee_date": _format_oanda_timestamp(earliest_fee_date),
-        "seconds_until_threshold": seconds_until_threshold,
     }
 
 
@@ -38621,10 +38654,20 @@ async def diagnostics_monthly_aud_reval() -> JSONResponse:
 @app.get("/api/oanda-inactivity-status")
 async def oanda_inactivity_status() -> JSONResponse:
     now = time.time()
+    cfg = None
+    scope = None
+    config_error = None
+    try:
+        cfg = _get_oanda_config("live")
+        scope = (cfg["mode"], cfg["base_url"], cfg["account_id"], cfg["token"])
+    except Exception as exc:
+        config_error = exc
     cached = _OANDA_INACTIVITY_CACHE.get("payload")
     cached_status = int(_OANDA_INACTIVITY_CACHE.get("status_code") or 200)
     if (
-        isinstance(cached, dict)
+        scope is not None
+        and _OANDA_INACTIVITY_CACHE.get("scope") == scope
+        and isinstance(cached, dict)
         and float(_OANDA_INACTIVITY_CACHE.get("expires_at") or 0.0) > now
     ):
         return JSONResponse(cached, status_code=cached_status)
@@ -38632,6 +38675,8 @@ async def oanda_inactivity_status() -> JSONResponse:
     status_code = 200
     ttl_seconds = _OANDA_INACTIVITY_CACHE_TTL_SECONDS
     try:
+        if config_error is not None:
+            raise config_error
         payload = await _build_oanda_inactivity_status()
     except OandaUpstreamHTTPError as exc:
         status_code = 503 if exc.transient else 502
@@ -38652,7 +38697,7 @@ async def oanda_inactivity_status() -> JSONResponse:
             "inactivity_threshold_at": None,
             "earliest_fee_date": None,
             "policy_months_without_trade": 12,
-            "monthly_fee_aud": 10,
+            "monthly_fee_aud": 20,
             "seconds_until_threshold": None,
             "updated_at": _utc_now_iso(),
         }
@@ -38680,10 +38725,23 @@ async def oanda_inactivity_status() -> JSONResponse:
             "inactivity_threshold_at": None,
             "earliest_fee_date": None,
             "policy_months_without_trade": 12,
-            "monthly_fee_aud": 10,
+            "monthly_fee_aud": 20,
             "seconds_until_threshold": None,
             "updated_at": _utc_now_iso(),
         }
+    payload.setdefault("account_id", cfg["account_id"] if cfg else None)
+    payload.setdefault("account_scope", "Configured live account only; other sub-account balances are not monitored.")
+    payload.setdefault("balance", None)
+    payload.setdefault("balance_currency", None)
+    payload.setdefault("balance_state", "unknown")
+    payload.setdefault("balance_verified", False)
+    payload.setdefault("policy_days_without_trade", 365)
+    payload.setdefault("policy_timezone", "Australia/Brisbane")
+    payload.setdefault("fee_cap_scope", "per_client")
+    payload.setdefault("first_eligible_assessment_date", None)
+    payload.setdefault("next_assessment_date", None)
+    payload.setdefault("days_until_assessment", None)
+    _OANDA_INACTIVITY_CACHE["scope"] = scope
     _OANDA_INACTIVITY_CACHE["payload"] = payload
     _OANDA_INACTIVITY_CACHE["status_code"] = status_code
     _OANDA_INACTIVITY_CACHE["expires_at"] = now + ttl_seconds

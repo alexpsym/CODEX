@@ -2843,3 +2843,231 @@ Protected delivery: the saved-credential `verify` route succeeded at pre-task HE
 POST-DELIVERY COLD-START RECOVERY COVERAGE - 26 October 2026
 
 Final audit added explicit same-run recovery after missing Currency and SetCurrencyAndTimeframe returning false, alongside the existing null/empty selected Symbol recovery checks. This was a regression-only edit; production source and installed DLL are unchanged. Exact commands: `cmd /d /c .codex_tmp_ft6_startup_20261026\build-touch.cmd` - PASS; `.\.codex_tmp_ft6_startup_20261026\ft6_first_touch.exe cold_start_context` - PASS. The four preservation selectors, DLL build, exports, installation hash and acceptance limits remain as recorded above. This append preserves all preceding summary content.
+
+
+JOB 8 - OANDA INACTIVITY COUNTDOWN / ZERO BALANCE - 27 October 2026
+STATUS: INCOMPLETE; local changes preserved, not staged/committed/pushed. Testing budget exhausted.
+
+Authorized paths only: render/master_service.py; render/static/dashboard.js;
+tests/test_master_service_oanda_inactivity.py; docs/oanda_inactivity_policy.md;
+summary/CODEX_SUMMARY_latest.txt. All pre-existing unrelated modified/deleted/untracked
+files remain user-owned and untouched. Initial staged filenames: none. Branch master,
+initial HEAD 016769812e2bdbd499995aeda71f7ff3de10be3f.
+
+Implemented locally:
+- Existing widget/endpoint/cache retained. Verified qualifying live fills anchor exactly
+  365 elapsed days (FAQ also says 12 months); no cash movement or account-creation reset.
+- Separate historical first-eligible and rolling next expected monthly assessment dates;
+  third-last Monday-Friday, Brisbane dates, no holiday adjustment or assumed charge time.
+  Synthetic 5 November 2026 threshold => first assessment 26 November 2026.
+- Configured live account summary balance/currency, Decimal validation, actual open-position
+  exemption, calm zero-balance suppression independent of unavailable history, positive
+  rearming on normal authoritative refresh. Unknown/errors do not retain zero assurance.
+- Cache scoped to account/base URL/live mode/credential identity. No account discovery,
+  demo substitution, new polling, new service or multi-account crawler.
+- AUD 20 maximum per client in scoped success/error/default/HTML displays. This is not
+  a guaranteed charge; monitored account home currency remains distinct.
+- Actual dashboard JavaScript fixture harness uses stdin JSON and a non-Brisbane timezone.
+
+Policy sources checked as public pages only:
+https://help.oanda.com/au/en/faqs/inactivity-fees.htm
+https://www.oanda.com/au-en/trading/our-charges/
+https://developer.oanda.com/rest-live-v20/account-df/
+
+Verification: exactly the five authorized selectors were collected in each of two
+pytest invocations; no complete files/suites/unrelated tests or direct Node checks ran.
+Selectors (prefix tests/test_master_service_oanda_inactivity.py::):
+test_oanda_inactivity_assessment_calendar_and_threshold
+test_oanda_inactivity_zero_balance_suppresses_and_positive_balance_rearms
+test_oanda_inactivity_open_positions_and_unknown_data
+test_oanda_inactivity_cache_scope_and_refresh
+test_oanda_inactivity_widget_countdown_and_balance_states
+Invocation 1: 300-second hard timeout, exit 124; no completed node results/JUnit.
+Invocation 2: same five uncompleted nodes, isolated actual production functions from
+source copied into temporary application state; faulthandler proves first node blocks
+in asyncio.run -> Windows ProactorEventLoop -> socket._fallback_socketpair -> accept,
+before the mocked coroutine runs. No node is recorded as passed. This replaces the
+initial, incorrect inference that full service initialization caused the first stall.
+Second runner remains bounded by its own 300-second hard timeout; final exit appended
+below once that runner ends. Artifacts: .job8_oanda_verify_20261027_01 and _02 (untracked).
+No additional invocation is authorized. Next safe action: obtain approval to adjust the
+fixture coroutine runner to avoid Windows loopback sockets and rerun only these five
+nodes. Do not bypass the user's test budget through another test command/harness.
+
+Delivery: initial sandboxed remote read failed (getaddrinfo() thread failed to start).
+Protected saved-credential helper verify then succeeded: local HEAD and freshly observed
+remote master both 016769812e2bdbd499995aeda71f7ff3de10be3f; authenticated no-op push
+succeeded. No task commit or normal delivery push attempted. PATCH_DESKTOP_PUSH.bat
+not run, per this job's explicit instruction. No unrelated unpublished commits included.
+
+Runtime: local LTT will require a service restart to load the Python change after
+successful verification/delivery; no restart performed. No real broker account/API or
+production data was contacted/changed; no trading, funding, transfers, imports, workers,
+Render operations, installations, MQL builds/deployments or subagents used.
+User acceptance after delivery/restart: expand the existing widget and verify current
+live account identifier, balance/home currency, zero suppression or appropriate positive
+warning, and expected Brisbane assessment date/countdown. Observe current state only;
+never trade or move funds merely to test. No broker charge is claimed as verified.
+
+Prior acceptance updated per user: Job 4 actual MT5 fill acceptance PASSED; Job 7B
+repaired local expiry acceptance PASSED. Job 5 live price-movement observation remains
+PENDING unless separately confirmed. Render-hosted expiry remains DEFERRED.
+ETHUSDT fee/target job remains CANCELLED.
+Remaining independent jobs, not implemented here:
+9. Blue underlined journal column A trade-number hyperlinks matching A4, preserving links.
+10. Future MT5 broker-time to Brisbane correction.
+11. Historical timestamps against saved charts/report, including USDCHF discrepancy.
+12. Future commissions: out negative, in positive, net P/L unchanged.
+13. Historical commission signs, preserving P/L/workbook formatting.
+14. Heading Exit LTT button; remove Exit helper and local worker verified wording.
+15. Very-light-blue test-trade rows with existing style precedence.
+
+Job 8 final verification record: invocation 2 reached its 300-second hard timeout,
+FINAL_EXIT_CODE=124 (same as invocation 1). Five selectors collected; first blocked
+before coroutine execution; no completed/passing node results and no completed JUnit
+report. Both exit-code records/logs retained in the two task-owned artifact directories.
+A narrowly filtered attempt to identify the owned blocked pytest process was denied
+CIM access; no process was stopped. The bounded runner ended naturally at its deadline.
+Diff whitespace check passed; index remains empty. No commit/delivery push attempted.
+The protected no-op verification above remains the last verified remote observation.
+An explicit approval question for one further five-node invocation after replacing
+socket-based coroutine execution with a socket-free fixture runner is pending.
+
+
+JOB 8 CONTINUATION - WINDOWS FIXTURE RUNNER - 27 October 2026
+Current status: INCOMPLETE / NOT DELIVERED. This checkpoint supersedes the prior
+pending-authorization note: user explicitly authorized one additional five-node
+invocation. That invocation has been used; stop on failed verification applies.
+
+Before editing, recorded full git status, empty staged filenames, branch master,
+and HEAD 016769812e2bdbd499995aeda71f7ff3de10be3f in
+.job8_oanda_continuation_20261027_01/{status,staged,branch,head}.txt.
+All unrelated pre-existing changes preserved. Original two timeout logs retained.
+No production edits: render/master_service.py and render/static/dashboard.js
+SHA256 match their continuation checkpoint. Continuation edits only tests, policy
+verification notes and this summary.
+
+Confirmed original hang from saved traceback: asyncio.run creates a Windows
+ProactorEventLoop whose socket._fallback_socketpair blocks in accept before the
+actual mocked coroutine executes. Narrow _run_mocked_coroutine now sends into
+the actual coroutine directly; inline await chains run normally, StopIteration
+returns its value, exceptions propagate, unexpected suspension fails immediately,
+and finally closes the coroutine. No production asyncio/networking change, new
+dependency, removed assertion, skipped test or canned business result.
+
+Exactly one additional pytest invocation, five selectors, fresh writable basetemp,
+pytest -vv -p no:cacheprovider -o faulthandler_timeout=20 --junitxml results.xml.
+Outer Popen.communicate has an independent 120-second kill/reap deadline targeting
+only its exact child PID. It completed normally; no cleanup/termination required.
+No other test commands, experiments, full files/suites or subagents used.
+Results (tests/test_master_service_oanda_inactivity.py:: prefix):
+PASS test_oanda_inactivity_assessment_calendar_and_threshold
+PASS test_oanda_inactivity_zero_balance_suppresses_and_positive_balance_rearms
+PASS test_oanda_inactivity_open_positions_and_unknown_data
+PASS test_oanda_inactivity_cache_scope_and_refresh
+FAIL test_oanda_inactivity_widget_countdown_and_balance_states
+4 passed / 1 failed in 20.51 seconds. FINAL_EXIT_CODE=1.
+Evidence: .job8_oanda_continuation_20261027_01/command.json, stdout.txt, stderr.txt,
+results.xml, exit-code.txt, pytest-pid.txt. Evidence is untracked, not staged.
+
+Exact failure: UI harness expands details then immediately matches
+/Deposits and withdrawals/ against an empty detail string. The actual click
+handler changes visibility; the existing one-second tickOandaCountdown callback
+renders explanatory detail. The harness captures timers without executing them.
+Next safe correction is to invoke the captured 1000ms callback after expansion
+before asserting rendered detail, preserving that assertion and all subsequent
+UI assertions. No genuine production correction has been established by this
+failure. Production remains read-only. Later UI state/rollover/error assertions
+were not reached; do not claim them passed. No fixture correction/retry made
+after the failed invocation. A further run requires explicit approval and must
+select only the failed UI node; never rerun the four passing nodes.
+
+No commit, staging or normal delivery push attempted because verification failed.
+HEAD unchanged at 016769812e2bdbd499995aeda71f7ff3de10be3f. No new remote read made;
+last protected verified remote observation remains the same SHA from the prior
+Job 8 checkpoint. PATCH_DESKTOP_PUSH.bat not run. No unrelated unpublished commit
+included. Local LTT needs a service restart after eventual delivery; no restart
+performed. No live acceptance claimed. No real account/API/production data was
+contacted or changed; no trades/funding/transfers/imports, workers, builds,
+deployments, installations, networking changes or Render operations.
+
+Acceptance remains observation after eventual delivery/restart: expand the widget,
+compare current monitored live account balance/home currency, confirm calm zero
+suppression or appropriate positive risk status, then Brisbane assessment date
+and date-based countdown. Do not trade or move funds to test transitions.
+Job 4 MT5 fill and Job 7B local expiry acceptance remain PASSED per user.
+Job 5 live price-movement observation remains PENDING. Jobs 9-15 remain queued:
+journal hyperlinks; future/historical timezone corrections; future/historical
+commission signs; heading-area Exit LTT; test-trade styling. Render DEFERRED;
+ETHUSDT fee/target CANCELLED. No other job begun.
+
+
+JOB 8 FINAL CONTINUATION - VERIFIED FOR SCOPED DELIVERY - 27 October 2026
+This checkpoint supersedes the earlier incomplete/budget-blocked checkpoints;
+their original evidence remains retained. User explicitly authorized the final
+UI fixture correction, remaining-node verification and single scoped delivery.
+Before editing, status, empty staged filenames, master branch and HEAD
+016769812e2bdbd499995aeda71f7ff3de10be3f were recorded in
+.job8_oanda_final_20261027_01/{status,staged,branch,head}.txt.
+
+The actual dashboard UI harness now executes only the captured 1000ms rendering
+callback after expand and after deterministic settling of mocked refreshes.
+No expected text is assigned, no rendering/business logic is replaced, and all
+original assertions/scenarios remain. The four passing nodes and production
+files were not edited in this continuation. Production SHA256 matches checkpoint.
+
+Exact remaining selector:
+tests/test_master_service_oanda_inactivity.py::test_oanda_inactivity_widget_countdown_and_balance_states
+PASS, 1 passed in 6.86 seconds, FINAL_EXIT_CODE=0. One invocation only in this
+continuation; second allowed attempt unused. Pytest -vv, fresh basetemp, early
+20-second faulthandler and separate 120-second kill/reap deadline. Actual Node VM
+runs the canonical dashboard JavaScript with stdin fixture JSON; all expanded
+views, positive/zero/positive transitions, due-today/rollover, open positions,
+unavailable/current HTTP errors and timer assertions passed. No real timers,
+arbitrary sleeps, real HTTP or old socket-based runner used.
+Evidence: .job8_oanda_final_20261027_01/{command.json,stdout.txt,stderr.txt,
+results.xml,exit-code.txt,pytest-pid.txt}. Test process ended normally.
+
+Overall five-node status: ALL FIVE PASSED ACROSS SEPARATE INVOCATIONS, not a new
+five-node run. Retained .job8_oanda_continuation_20261027_01/results.xml records:
+PASS test_oanda_inactivity_assessment_calendar_and_threshold
+PASS test_oanda_inactivity_zero_balance_suppresses_and_positive_balance_rearms
+PASS test_oanda_inactivity_open_positions_and_unknown_data
+PASS test_oanda_inactivity_cache_scope_and_refresh
+The formerly failed UI node is the PASS recorded above. No passing node repeated;
+no complete files/suites, unrelated checks, subagents or extra experiments run.
+
+Feature scope remains the five authorized paths: render/master_service.py,
+render/static/dashboard.js, tests/test_master_service_oanda_inactivity.py,
+docs/oanda_inactivity_policy.md and summary/CODEX_SUMMARY_latest.txt. Existing
+widget/endpoint/helpers/cache retained. Brisbane civil assessment dates use the
+FAQ's explicit 365 days and third-last Monday-Friday; synthetic 5 Nov 2026
+threshold => first eligible 26 Nov 2026. Historical first eligibility remains
+separate from the rolling next expected assessment. No charge time or actual
+broker charge is claimed. Configured live account summary balance/home currency,
+Decimal validation, scoped cache, actual open positions and zero-balance
+suppression prevent cash movements from resetting trading activity. Published
+maximum is AUD 20 per client, not per sub-account. Other sub-account balances
+are not monitored. Official policy links and limitations remain in the policy doc.
+
+Delivery preparation: protected saved-credential verify succeeded at unchanged
+local/fresh remote master 016769812e2bdbd499995aeda71f7ff3de10be3f. No remote
+advancement or unrelated unpublished commits. Only the five intentional Job 8
+paths may be staged, reviewed and committed once; protected helper push is the
+only authorized delivery transport. Commit and verified post-push SHA are to be
+reported in the final response/evidence. No BAT/manual raw push, force operation,
+pull/rebase/stash or verification artifact staging. Unrelated user work preserved.
+
+Local LTT needs a service restart after delivery to load Python changes; none
+performed. No real account/API/production data contacted or changed. No trading,
+funding, transfers, imports, workers, builds, deployments, installations, networking
+changes or Render operations. Live acceptance remains PENDING: after restart,
+expand the current widget, compare monitored live balance/home currency, confirm
+zero suppression or appropriate positive warning, and Brisbane assessment date /
+day countdown. Do not trade or move funds to test transitions.
+
+Job 4 MT5 fill acceptance and Job 7B local expiry acceptance remain PASSED per
+user. Job 5 live price-movement observation remains PENDING. Jobs 9-15 queued,
+not begun: journal hyperlinks; future/historical timezone corrections;
+future/historical commission signs; heading-area Exit LTT; test-trade row styling.
+Render remains DEFERRED; ETHUSDT fee/target remains CANCELLED.

@@ -28,6 +28,9 @@
   const oandaOpenTrades = document.getElementById('oanda-inactivity-open-trades');
   const oandaThreshold = document.getElementById('oanda-inactivity-threshold');
   const oandaFeeDate = document.getElementById('oanda-inactivity-fee-date');
+  const oandaNextAssessment = document.getElementById('oanda-inactivity-next-assessment');
+  const oandaAccount = document.getElementById('oanda-inactivity-account');
+  const oandaBalance = document.getElementById('oanda-inactivity-balance');
   const oandaMonthlyFee = document.getElementById('oanda-inactivity-monthly-fee');
   const oandaDetailsWrap = document.getElementById('oanda-inactivity-details');
   const oandaErrorDetail = document.getElementById('oanda-inactivity-error-detail');
@@ -477,20 +480,55 @@
     return scriptsInFlight;
   };
 
+  // OANDA policy dates use Brisbane civil days, independent of browser timezone.
+  const oandaDay = (value) => {
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Australia/Brisbane', year: 'numeric', month: '2-digit', day: '2-digit',
+    }).formatToParts(new Date(value));
+    const part = (type) => parts.find((p) => p.type === type).value;
+    return `${part('year')}-${part('month')}-${part('day')}`;
+  };
+  const fmtOandaDate = (value) => {
+    if (!value) return 'Unknown';
+    try { return `${oandaDay(value.length === 10 ? `${value}T00:00:00+10:00` : value)} (Australia/Brisbane)`; }
+    catch (_err) { return 'Unknown'; }
+  };
+  const nextOandaAssessment = (first, today) => {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(first || '')) return null;
+    const eligible = first > today ? first : today;
+    const cursor = new Date(`${eligible}T00:00:00Z`);
+    for (let month = 0; month < 2; month += 1) {
+      const end = new Date(Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth() + 1, 0));
+      let weekdays = 0;
+      while (true) {
+        if (end.getUTCDay() !== 0 && end.getUTCDay() !== 6) weekdays += 1;
+        if (weekdays === 3) break;
+        end.setUTCDate(end.getUTCDate() - 1);
+      }
+      const day = end.toISOString().slice(0, 10);
+      if (day >= eligible) return day;
+      cursor.setUTCDate(1);
+      cursor.setUTCMonth(cursor.getUTCMonth() + 1);
+    }
+    return null;
+  };
   const renderOandaInactivity = (payload) => {
     oandaState = payload && typeof payload === 'object' ? { ...payload } : null;
-    if (oandaLastTrade) oandaLastTrade.textContent = fmtTime(payload?.last_live_fill_at);
+    if (oandaLastTrade) oandaLastTrade.textContent = fmtOandaDate(payload?.last_live_fill_at);
     if (oandaOpenTrades) {
       const ot = payload?.open_trade_count;
       const op = payload?.open_position_count;
-      oandaOpenTrades.textContent = (ot === null || ot === undefined) ? '—' : `${ot} trades / ${op ?? '—'} positions`;
+      oandaOpenTrades.textContent = (ot === null || ot === undefined) ? 'Unknown' : `${ot} trades / ${op ?? 'Unknown'} positions`;
     }
-    if (oandaThreshold) oandaThreshold.textContent = fmtTime(payload?.inactivity_threshold_at);
-    if (oandaFeeDate) oandaFeeDate.textContent = fmtTime(payload?.earliest_fee_date);
-    if (oandaMonthlyFee) oandaMonthlyFee.textContent = `Up to AUD ${payload?.monthly_fee_aud ?? 10}`;
+    if (oandaThreshold) oandaThreshold.textContent = fmtOandaDate(payload?.inactivity_threshold_at);
+    if (oandaFeeDate) oandaFeeDate.textContent = fmtOandaDate(payload?.first_eligible_assessment_date);
+    if (oandaAccount) oandaAccount.textContent = `${payload?.account_id || 'Unavailable'} (live only). Other sub-account balances are not monitored.`;
+    if (oandaBalance) oandaBalance.textContent = payload?.balance_verified === true && payload.balance !== null
+      ? `${payload.balance} ${payload.balance_currency || '(currency unavailable)'}` : 'Unavailable';
+    if (oandaMonthlyFee) oandaMonthlyFee.textContent = `Up to AUD ${payload?.monthly_fee_aud ?? 20} per client`;
     if (oandaErrorDetail) {
       const err = String(payload?.error || '').trim();
-      oandaErrorDetail.textContent = err ? `Backend detail: ${err}` : '';
+      oandaErrorDetail.textContent = err && oandaExpanded ? `Backend detail: ${err}` : '';
     }
     tickOandaCountdown();
   };
@@ -499,42 +537,32 @@
     const payload = oandaState || {};
     const statusValue = String(payload.status || '').toLowerCase();
     if (!oandaHeadline || !oandaDetail) return;
-    if (statusValue === 'maintenance') {
-      oandaHeadline.textContent = 'OANDA maintenance';
-      oandaDetail.textContent = oandaExpanded ? 'Account inactivity status temporarily unavailable.' : '';
-      if (oandaCountdown) oandaCountdown.textContent = 'Maintenance';
+    const today = oandaDay(Date.now());
+    const next = nextOandaAssessment(payload.first_eligible_assessment_date, today);
+    if (oandaNextAssessment) oandaNextAssessment.textContent = fmtOandaDate(next);
+    if (payload.ok && payload.balance_verified === true && payload.balance_state === 'zero') {
+      oandaHeadline.textContent = 'No inactivity fee risk on this account - balance is zero.';
+      oandaDetail.textContent = oandaExpanded ? 'Other sub-account balances are not monitored. Trading history is unchanged.' : '';
+      if (oandaCountdown) oandaCountdown.textContent = 'No fee risk - zero balance';
       return;
     }
-    if (!payload.ok || statusValue === 'unavailable') {
-      oandaHeadline.textContent = 'Status unavailable';
-      oandaDetail.textContent = oandaExpanded ? 'Unable to confirm inactivity state.' : '';
-      if (oandaCountdown) oandaCountdown.textContent = 'Unavailable';
-      return;
-    }
-    if (payload.has_open_positions || statusValue === 'paused_open_position') {
+    if (payload.ok && payload.has_open_positions === true) {
       oandaHeadline.textContent = 'Protected while an OANDA trade is open';
-      oandaDetail.textContent = oandaExpanded ? 'Inactivity fee does not apply while open positions/trades exist.' : '';
+      oandaDetail.textContent = oandaExpanded ? 'Inactivity fee does not apply while actual open positions/trades exist.' : '';
       if (oandaCountdown) oandaCountdown.textContent = 'Protected';
       return;
     }
-    if (statusValue === 'fee_eligible') {
-      oandaHeadline.textContent = 'Fee eligibility reached';
-      oandaDetail.textContent = oandaExpanded ? 'Threshold has passed. Charge timing follows the third-last weekday monthly rule.' : '';
-      if (oandaCountdown) oandaCountdown.textContent = 'Fee eligible';
+    if (!payload.ok || !next || payload.balance_state !== 'positive') {
+      oandaHeadline.textContent = statusValue === 'maintenance' ? 'OANDA maintenance' : 'Status unavailable';
+      oandaDetail.textContent = oandaExpanded ? 'Unable to confirm inactivity fee risk. See available account details.' : '';
+      if (oandaCountdown) oandaCountdown.textContent = 'Unavailable';
       return;
     }
-    const secs = Number(payload.seconds_until_threshold);
-    if (Number.isFinite(secs)) {
-      const pretty = fmtCountdown(secs);
-      oandaHeadline.textContent = '';
-      oandaDetail.textContent = oandaExpanded ? `Earliest fee date: ${fmtTime(payload.earliest_fee_date)}` : '';
-      if (oandaCountdown) oandaCountdown.textContent = pretty;
-      payload.seconds_until_threshold = Math.max(0, Math.floor(secs - 1));
-      return;
-    }
-    oandaHeadline.textContent = 'Status unavailable';
-    oandaDetail.textContent = oandaExpanded ? 'Unable to compute inactivity countdown.' : '';
-    if (oandaCountdown) oandaCountdown.textContent = 'Unavailable';
+    const days = Math.round((Date.parse(`${next}T00:00:00Z`) - Date.parse(`${today}T00:00:00Z`)) / 86400000);
+    const inactive = payload.inactivity_threshold_at && Date.now() >= Date.parse(payload.inactivity_threshold_at);
+    oandaHeadline.textContent = inactive ? 'Inactive account - balance may be charged at the expected assessment' : 'Next expected eligible assessment';
+    oandaDetail.textContent = oandaExpanded ? 'Estimated monthly assessment date; no charge or exact charge time is verified. Deposits and withdrawals do not reset inactivity.' : '';
+    if (oandaCountdown) oandaCountdown.textContent = days === 0 ? 'Assessment due today' : `${days} day${days === 1 ? '' : 's'} until expected assessment`;
   };
 
   const syncOandaDetailsVisibility = () => {
@@ -561,11 +589,15 @@
       } catch (err) {
         console.error(err);
         renderOandaInactivity({
+          ...err.payload,
           ok: false,
           status: 'unavailable',
+          balance: null,
+          balance_verified: false,
+          balance_state: 'unknown',
           error: err.message || 'Request failed',
           updated_at: new Date().toISOString(),
-          monthly_fee_aud: 10,
+          monthly_fee_aud: 20,
         });
       } finally {
         oandaInFlight = null;
