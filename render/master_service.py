@@ -17198,14 +17198,30 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
         #oanda-inactivity-widget .meta-grid {
             display: grid;
-            grid-template-columns: max-content 1fr;
-            gap: 0.35rem 0.65rem;
+            grid-template-columns: minmax(0, 1fr);
+            gap: 0.15rem;
             font-size: 0.9rem;
             margin-top: 0.35rem;
         }
         #oanda-inactivity-widget {
             height: auto;
             margin-top: 0;
+            min-width: 0;
+            max-width: 100%;
+            box-sizing: border-box;
+            overflow-wrap: anywhere;
+        }
+        #oanda-inactivity-widget .meta-grid > *,
+        #oanda-inactivity-widget .details-wrap,
+        #oanda-inactivity-widget .panel-header > div {
+            min-width: 0;
+            white-space: normal;
+        }
+        #oanda-inactivity-widget .meta-grid dt:not(:first-child) {
+            margin-top: 0.55rem;
+        }
+        #oanda-inactivity-widget .oo-toolbar {
+            flex-shrink: 0;
         }
         #oanda-inactivity-widget .toggle-btn {
             border-radius: 8px;
@@ -17268,21 +17284,22 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                             <button type="button" class="toggle-btn" id="oanda-inactivity-toggle" aria-expanded="false" title="Show details">▾</button>
                         </div>
                     </div>
+                    <p class="status-detail" id="oanda-inactivity-timezone">All dates: Brisbane</p>
                     <dl class="meta-grid">
-                        <dt>Last verified live trade (Brisbane)</dt><dd id="oanda-inactivity-last-trade">—</dd>
+                        <dt>Last live trade</dt><dd id="oanda-inactivity-last-trade">—</dd>
                         <dt>Assessment countdown</dt><dd id="oanda-inactivity-countdown">—</dd>
                     </dl>
                     <div class="status-headline" id="oanda-inactivity-headline">Loading...</div>
                     <div class="status-detail" id="oanda-inactivity-detail"></div>
                     <div class="details-wrap" id="oanda-inactivity-details" hidden>
                         <dl class="meta-grid">
-                            <dt>Open OANDA trades</dt><dd id="oanda-inactivity-open-trades">—</dd>
-                            <dt>365-day inactivity threshold (Brisbane)</dt><dd id="oanda-inactivity-threshold">—</dd>
-                            <dt>First eligible assessment (Brisbane)</dt><dd id="oanda-inactivity-fee-date">—</dd>
-                            <dt>Next expected assessment (Brisbane)</dt><dd id="oanda-inactivity-next-assessment">&mdash;</dd>
-                            <dt>Monitored live account</dt><dd id="oanda-inactivity-account">&mdash;</dd>
-                            <dt>Account balance / home currency</dt><dd id="oanda-inactivity-balance">&mdash;</dd>
-                            <dt>Monthly maximum per client</dt><dd id="oanda-inactivity-monthly-fee">Up to AUD 20 per client</dd>
+                            <dt>Open trades / positions</dt><dd id="oanda-inactivity-open-trades">—</dd>
+                            <dt>Inactivity threshold</dt><dd id="oanda-inactivity-threshold">—</dd>
+                            <dt>First eligible assessment</dt><dd id="oanda-inactivity-fee-date">—</dd>
+                            <dt>Next assessment</dt><dd id="oanda-inactivity-next-assessment">&mdash;</dd>
+                            <dt>Live account</dt><dd id="oanda-inactivity-account">&mdash;</dd>
+                            <dt>Account balance</dt><dd id="oanda-inactivity-balance">&mdash;</dd>
+                            <dt>Monthly maximum</dt><dd id="oanda-inactivity-monthly-fee">Up to AUD 20 per client</dd>
                         </dl>
                         <div class="status-detail" id="oanda-inactivity-error-detail"></div>
                     </div>

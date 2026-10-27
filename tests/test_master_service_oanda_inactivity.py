@@ -402,6 +402,8 @@ def test_oanda_inactivity_cache_scope_and_refresh(monkeypatch):
 def test_oanda_inactivity_widget_countdown_and_balance_states(monkeypatch):
     state = _fixture_account(monkeypatch)
     positive = _build()
+    # UTC day differs: presentation must still convert to the Brisbane date.
+    positive["last_live_fill_at"] = "2025-11-04T15:00:00Z"
     state["summary"]["balance"] = "0"
     zero = _build()
     state["fill"] = None
@@ -434,7 +436,7 @@ const refresh=async(payload,status=200)=>{current=payload;httpStatus=status;elem
 (async()=>{
  vm.createContext(context);vm.runInContext(source,context,{filename:'dashboard.js'});await settle();
  assert.match(el('countdown').textContent,/21 days/);
- assert.match(el('last-trade').textContent,/2025-11-05.*Australia\/Brisbane/);
+ assert.strictEqual(el('last-trade').textContent,'2025-11-05');
  assert.match(el('balance').textContent,/25.50 USD/);
  assert.match(el('monthly-fee').textContent,/AUD 20 per client/);
  assert.match(el('account').textContent,/fixture-live-001.*Other sub-account/);

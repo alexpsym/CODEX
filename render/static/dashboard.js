@@ -490,7 +490,7 @@
   };
   const fmtOandaDate = (value) => {
     if (!value) return 'Unknown';
-    try { return `${oandaDay(value.length === 10 ? `${value}T00:00:00+10:00` : value)} (Australia/Brisbane)`; }
+    try { return oandaDay(value.length === 10 ? `${value}T00:00:00+10:00` : value); }
     catch (_err) { return 'Unknown'; }
   };
   const nextOandaAssessment = (first, today) => {
@@ -562,7 +562,7 @@
     const inactive = payload.inactivity_threshold_at && Date.now() >= Date.parse(payload.inactivity_threshold_at);
     oandaHeadline.textContent = inactive ? 'Inactive account - balance may be charged at the expected assessment' : 'Next expected eligible assessment';
     oandaDetail.textContent = oandaExpanded ? 'Estimated monthly assessment date; no charge or exact charge time is verified. Deposits and withdrawals do not reset inactivity.' : '';
-    if (oandaCountdown) oandaCountdown.textContent = days === 0 ? 'Assessment due today' : `${days} day${days === 1 ? '' : 's'} until expected assessment`;
+    if (oandaCountdown) oandaCountdown.textContent = days === 0 ? 'Assessment due today' : `${days} day${days === 1 ? '' : 's'} to assessment`;
   };
 
   const syncOandaDetailsVisibility = () => {

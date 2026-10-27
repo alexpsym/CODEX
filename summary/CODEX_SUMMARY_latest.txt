@@ -3071,3 +3071,89 @@ user. Job 5 live price-movement observation remains PENDING. Jobs 9-15 queued,
 not begun: journal hyperlinks; future/historical timezone corrections;
 future/historical commission signs; heading-area Exit LTT; test-trade row styling.
 Render remains DEFERRED; ETHUSDT fee/target remains CANCELLED.
+
+
+JOB 8 LAYOUT REPAIR - 27 October 2026
+User layout acceptance FAILED for prior Job 8 commit
+9658bce5362ac849f116b6f3307672d426a0f28e despite its five functional passes.
+This repair addresses OANDA presentation only; live acceptance remains PENDING.
+
+Before editing, recorded git status, empty staged filenames, master branch and
+HEAD 9658bce5362ac849f116b6f3307672d426a0f28e in
+.job8_oanda_layout_20261027_01/{status,staged,branch,head}.txt.
+All unrelated pre-existing modified/deleted/untracked work preserved.
+Authorized delivery paths only: render/master_service.py (OANDA scoped HTML/CSS),
+render/static/dashboard.js (OANDA formatting),
+tests/test_master_service_oanda_inactivity.py (affected UI fixture/assertion),
+summary/CODEX_SUMMARY_latest.txt. Policy doc and unrelated tests remain read-only.
+
+Layout/wording:
+- Replace the widget's max-content label column with a single minmax(0,1fr)
+  column, each label above its value, readable pair spacing, unchanged font sizes.
+- Widget min-width 0, max-width 100%, border-box, scoped overflow-wrap anywhere;
+  metadata/header children can shrink and text wraps normally. No clipping,
+  ellipses, overflow hiding, sidebar enlargement or global dashboard-grid edits.
+- Short labels retain last trade, countdown, open trades/positions, threshold,
+  historical first eligible assessment, next assessment, account, balance and cap.
+- One visible All dates: Brisbane note. Dates display YYYY-MM-DD while still
+  using actual Australia/Brisbane Intl conversion; no slicing UTC timestamps.
+  Countdown compacted to N days to assessment, retaining due-today and all states.
+- No fee/date calculations, thresholds, account/balance choice, API semantics,
+  status transitions, cache/polling or broker integration changes. Other panels,
+  equity curve, Exit local tools and queued Exit-button job untouched.
+
+Focused offline rendering attempt (one visual invocation, at most 50 seconds
+per browser case, initial fixture planned both 300px and 400px parent widths):
+- Extracted actual HTML_TEMPLATE via AST, retained its actual full production CSS,
+  ran actual dashboard.js with synthetic fetch before scripts execute, restrictive
+  CSP blocking external connections/frames, captured polling timers and fixed clock.
+- Installed Chrome used a task-only isolated profile. At 300px it produced
+  .job8_oanda_layout_20261027_01/layout-300.png, which was opened and visually
+  inspected: all labels, compact dates, countdown, long synthetic account ID,
+  balance/USD, AUD 20 per-client maximum and long diagnostic fit inside the widget;
+  no visible clipping or overlap with the adjacent panel. Expanded details visible.
+- Chrome did not terminate/return DOM geometry within its 50-second bound;
+  subprocess timeout killed/reaped the exact launched parent. Visual runner exit 1.
+  Screenshot was retained even though the geometry/toggle report was not returned.
+  400px was not reached. No 400px pass, complete geometry/toggle pass or live pass
+  claimed. Under the user's explicit fallback, no additional browser attempt,
+  installation or environment investigation was made; two-width visual acceptance
+  remains PENDING. Exact-profile Chrome cleanup query found zero remaining
+  matching processes; no unrelated browser/FT6/worker was stopped.
+- Fixture HTML, runner, screenshot and layout-results.json retained locally under
+  .job8_oanda_layout_20261027_01/ and excluded from staging.
+
+Targeted behavioral verification AFTER presentation stabilized:
+Only tests/test_master_service_oanda_inactivity.py::test_oanda_inactivity_widget_countdown_and_balance_states
+PASS, 1 passed in 6.20 seconds, FINAL_EXIT_CODE=0. One pytest invocation; no rerun.
+Fresh basetemp, -vv, JUnit, early faulthandler 20 seconds and independent 120-second
+kill/reap deadline. Socket-free coroutine runner and deterministic captured render
+callbacks retained. Original countdown, zero suppression, positive rearming,
+unavailable/error and expand behavior coverage preserved. A UTC timestamp from
+the preceding day must render 2025-11-05 in Brisbane without a timezone suffix.
+Artifacts: .job8_oanda_layout_20261027_01/{pytest-command.json,pytest-stdout.txt,
+pytest-stderr.txt,results.xml,pytest-exit-code.txt,pytest-pid.txt}.
+No four backend nodes, earlier jobs, full files/suites, unrelated checks,
+additional smoke tests or subagents. Existing calculation evidence remains valid
+for unchanged calculations; behavioral success alone does not establish CSS fit.
+
+Delivery preparation: protected saved-credential verify succeeded, local/fresh
+remote master both 9658bce5362ac849f116b6f3307672d426a0f28e. No remote advancement
+or unrelated unpublished commits. Review/stage only four authorized paths, one
+scoped commit, then only protected helper push. Actual commit/push and verified
+post-push remote SHA are recorded in final response/local evidence. No BAT,
+raw push, force operations, pull/rebase/stash or staging of artifacts/runtime data.
+
+Local LTT needs restarting/reopening to load embedded HTML/CSS. No LTT restart,
+account/API access, production-data operation, trades, money movements, imports,
+workers, builds/deployments, package installs or Render operations performed.
+Acceptance: reopen/restart LTT as required, expand the OANDA widget and confirm
+every value fits and remains readable, including current balance/currency,
+appropriate warning/zero suppression, and Brisbane assessment date/countdown.
+No trading or money movement is required. Job 8 live layout acceptance PENDING.
+
+Jobs 9-15 remain queued and untouched: journal hyperlinks; future/historical
+timezone corrections; future/historical commission signs; heading Exit LTT;
+test-trade row styling. Job 4 actual MT5 fill and Job 7B local expiry acceptance
+remain PASSED per user. Job 5 live price-movement observation PENDING unless
+separately confirmed. Render DEFERRED; ETHUSDT fee/target CANCELLED.
