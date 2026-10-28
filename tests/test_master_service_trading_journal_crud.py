@@ -507,8 +507,13 @@ def test_pepperstone_mt5_native_html_and_xlsx_import_same_closed_positions(tmp_p
     assert html_trade["fees"] == pytest.approx(-0.15)
     assert html_trade["swap"] == pytest.approx(-0.15)
     assert html_trade["net_profit"] == pytest.approx(14.2)
-    assert html_trade["open_time"] == "2026-09-01T09:00:00"
-    assert html_trade["close_time"] == "2026-09-01T11:00:00"
+    assert html_trade["open_time"] == xlsx_trade["open_time"] == "2026-09-01T16:00:00+10:00"
+    assert html_trade["close_time"] == xlsx_trade["close_time"] == "2026-09-01T18:00:00+10:00"
+    assert html_balance["as_of"] == xlsx_balance["as_of"] == "2026-09-03T06:59:59+10:00"
+    conversion = html_trade["raw_refs"]["timestamp_conversion"]
+    assert conversion == xlsx_trade["raw_refs"]["timestamp_conversion"]
+    assert conversion["source_times"]["deals"][0]["time"] == "2026.09.01 09:00:00"
+    assert conversion["journal_zone"] == "Australia/Brisbane"
     assert not html_trade["open_time"].endswith("Z")
     assert html_trade["metrics"]["mt5_net_components_once"] is True
     assert html_trade["raw_refs"]["closing_deal_tickets"] == ["1003", "1004"]
@@ -547,7 +552,73 @@ def test_pepperstone_mt5_hidden_position_comment_falls_back_to_closed_deals():
     assert all(row["id"].rsplit(":", 2)[-2] == "closing-deals" for row in rows)
     assert all(row["raw_refs"]["closing_deal_tickets"] for row in rows)
     assert all(row["raw_refs"]["opening_order_ids"] for row in rows)
+    assert rows[0]["open_time"] == "2026-10-05T11:20:40+10:00"
+    assert rows[0]["close_time"] == "2026-10-05T11:38:17+10:00"
     assert balance["balance"] == pytest.approx(50000.0 + sum(row["net_profit"] for row in rows))
+
+
+def test_pepperstone_mt5_server_time_conversion_uses_trade_date_and_us_dst():
+    convert = master_service._mt5_broker_local_iso
+    cases = [
+        ("2026-01-15 09:00:00", "2026-01-15T17:00:00+10:00"),
+        ("2026-09-01 09:00:00", "2026-09-01T16:00:00+10:00"),
+        ("2026-03-16 09:00:00", "2026-03-16T16:00:00+10:00"),
+        ("2026-10-28 09:00:00", "2026-10-28T16:00:00+10:00"),
+        ("2026-09-01 23:30:00", "2026-09-02T06:30:00+10:00"),
+        ("2026-09-01T09:00:00Z", "2026-09-01T19:00:00+10:00"),
+        ("2026-09-01T09:00:00+02:00", "2026-09-01T17:00:00+10:00"),
+        ("2026-09-01T16:00:00+10:00", "2026-09-01T16:00:00+10:00"),
+        (datetime(2026, 1, 15, 9), "2026-01-15T17:00:00+10:00"),
+        ("2026.09.01 09:00:00.123456", "2026-09-01T16:00:00.123456+10:00"),
+        ("2006-03-16 09:00:00", "2006-03-16T17:00:00+10:00"),
+        ("2027-01-15 09:00:00", "2027-01-15T17:00:00+10:00"),
+        ("2026-11-01T08:30:00+03:00", "2026-11-01T15:30:00+10:00"),
+        ("2026-11-01T08:30:00+02:00", "2026-11-01T16:30:00+10:00"),
+        ("2026-03-08T09:30:00+02:00", "2026-03-08T17:30:00+10:00"),
+    ]
+    for source, expected in cases:
+        assert convert(source) == expected, source
+        assert convert(expected) == expected
+    for source, reason in [
+        ("not-a-time", "Invalid"), ("2026-02-30 09:00:00", "Invalid"),
+        ("2026-09-01", "requires a time"),
+        ("2026-03-08 09:30:00", "nonexistent"),
+        ("2026-11-01 08:30:00", "ambiguous"),
+    ]:
+        with pytest.raises(ValueError, match=reason):
+            convert(source)
+        assert master_service._mt5_valid_broker_local_iso(source) is None
+    assert convert("") is None and convert(None) is None
+    for start, end, seconds in [
+        ("2026-03-08 08:59:59", "2026-03-08 10:00:00", 1),
+        ("2026-11-01 07:59:59", "2026-11-01 09:00:00", 7201),
+        ("2026-09-01 09:00:00", "2026-09-01 11:00:00", 7200),
+    ]:
+        assert (datetime.fromisoformat(convert(end)) - datetime.fromisoformat(convert(start))).total_seconds() == seconds
+    assert master_service._mt5_period_as_of("2026.09.01 - 2026.09.02") == "2026-09-02T00:00:00"
+    assert master_service._mt5_period_as_of("2026-09-01T09:00:00Z") == "2026-09-01T19:00:00+10:00"
+    native = _pepperstone_mt5_deals_with_orders_rows()
+    metadata = master_service._mt5_statement_metadata(native)
+    trades, warnings, opened = master_service._mt5_deals_rows(native, metadata)
+    assert warnings == [] and opened == 0
+    assert trades[0]["raw_refs"]["opening_plan_journal_time"] == "2026-09-30T13:59:59+10:00"
+    assert trades[0]["stop_loss"] == 156.254 and trades[0]["take_profit"] == 155.954
+    # A normal Positions row and Deals use the same representation; blank closes stay open.
+    hidden = _pepperstone_mt5_hidden_comment_rows()
+    positions_end = hidden.index(["Deals"])
+    for row in hidden[8:positions_end]:
+        del row[4]
+    metadata = master_service._mt5_statement_metadata(hidden)
+    position_trades, open_count, unresolved = master_service._mt5_positions_rows(hidden, metadata)
+    assert len(position_trades) == 7 and open_count == 0 and unresolved == []
+    assert position_trades[0]["open_time"] == "2026-10-05T11:20:40+10:00"
+    assert position_trades[0]["raw_refs"]["timestamp_conversion"]["source_times"]["position_open"] == "2026.10.05 04:20:40"
+    hidden[8][8:10] = ["", ""]
+    _, open_count, unresolved = master_service._mt5_positions_rows(hidden, metadata)
+    assert open_count == 1 and unresolved == []
+    native[9][0] = "2026-11-01 08:30:00"
+    with pytest.raises(ValueError, match="ambiguous"):
+        master_service._parse_pepperstone_mt5_rows([native], source_kind="html")
 
 
 def test_pepperstone_mt5_malformed_position_close_is_ambiguous_not_open():
@@ -1173,11 +1244,42 @@ def test_pepperstone_legacy_zero_stays_historical_and_compatible_cashflow_can_up
 def test_pepperstone_mt5_import_is_idempotent_preserves_manual_fields_and_applies_balance(
     temp_state_paths: Path, monkeypatch: pytest.MonkeyPatch
 ):
+    monkeypatch.setattr(master_service, "TRADING_JOURNAL_SOURCE", "master_journal")
+    transaction_lock = temp_state_paths / "journal-transaction.lock"
+    monkeypatch.setattr(master_service, "_journal_transaction_lock_path", lambda _path: transaction_lock)
+    assert master_service._master_journal_path() != master_service.MASTER_JOURNAL_PATH
+    assert master_service._master_journal_path().resolve().parent == temp_state_paths.resolve()
+    assert master_service.TRADING_JOURNAL_LOCAL_DIR == temp_state_paths
+    assert master_service._journal_transaction_lock_path(master_service._master_journal_path()).resolve().parent == temp_state_paths.resolve()
+    for state_path_name in (
+        "TRADING_JOURNAL_PATH", "TRADING_JOURNAL_STATE_PATH", "TRADING_JOURNAL_SYNC_STATE_PATH",
+        "TRADING_JOURNAL_SQLITE_PATH", "TRADING_JOURNAL_IMPORT_CACHE_PATH",
+        "TRADING_JOURNAL_VIEW_CACHE_PATH", "TRADING_JOURNAL_DERIVED_REFRESH_STATE_PATH",
+    ):
+        assert getattr(master_service, state_path_name).resolve().parent == temp_state_paths.resolve()
+    assert master_service._PENDING_MANUAL_SYNC_ROWS == []
+    assert master_service._PENDING_MANUAL_SYNC_BALANCES == []
+    monkeypatch.setattr(master_service, "_master_journal_lock_status", lambda _path: {"locked": False})
     workbook_path = temp_state_paths / "Trading Journal.xlsx"
     workbook_path.write_bytes(b"existing-workbook")
     workbook_state = {"items": [], "balances": []}
     master_service._set_trading_journal_rows([])
-    monkeypatch.setattr(master_service, "read_master_journal_source", lambda _path: copy.deepcopy(workbook_state))
+    def read_isolated_workbook(_path):
+        snapshot = copy.deepcopy(workbook_state)
+        # Real Excel readback contains Brisbane wall time without tzinfo.
+        for row in snapshot["items"]:
+            for field in ("open_time", "close_time"):
+                row[field] = datetime.fromisoformat(row[field]).replace(tzinfo=None).isoformat()
+        return snapshot
+
+    monkeypatch.setattr(master_service, "read_master_journal_source", read_isolated_workbook)
+    monkeypatch.setattr(master_service, "_arm_trading_journal_derived_refresh_timer_locked", lambda: None)
+    monkeypatch.setattr(master_service, "_queue_trading_journal_equity_refresh_if_idle", lambda **_kwargs: None)
+    def forbidden_background_or_network(*_args, **_kwargs):
+        pytest.fail("Isolated timestamp verification must not start background/network work")
+    import socket
+    monkeypatch.setattr(socket.socket, "connect", forbidden_background_or_network)
+    monkeypatch.setattr(threading.Thread, "start", forbidden_background_or_network)
 
     def fake_snapshot(**_kwargs):
         return {
@@ -1203,14 +1305,22 @@ def test_pepperstone_mt5_import_is_idempotent_preserves_manual_fields_and_applie
     first = master_service._import_uploaded_trading_journal_file(
         "broker-report.htm", payload, account_mode="live"
     )
-    assert first["ok"] is True
+    assert first["ok"] is True, first
     assert first["rows_parsed"] == 1
     assert first["balance_applied"] is True
     assert first["balance_verification"]["expected_balance"] == pytest.approx(1114.20)
     assert workbook_state["balances"][0]["balance_source"] == "pepperstone_mt5_statement_balance"
     row_id = workbook_state["items"][0]["id"]
+    financial_fields = ("qty", "entry_price", "exit_price", "commission", "fees", "swap", "net_profit", "balance_after_trade")
+    original_financials = {key: workbook_state["items"][0][key] for key in financial_fields}
     workbook_state["items"][0]["notes"] = "Keep this journal note"
     workbook_state["items"][0]["setup"] = "Manual setup"
+    workbook_state["items"][0]["timeframe"] = "M5"
+    workbook_state["items"][0]["is_test_trade"] = True
+    workbook_state["items"][0]["manual_overrides"] = {"result_pct": 1.25}
+    workbook_state["items"][0]["result_pct"] = 1.25
+    corrected = ("2026-09-01T16:00:00+10:00", "2026-09-01T18:00:00+10:00")
+    assert tuple(workbook_state["items"][0][key] for key in ("open_time", "close_time")) == corrected
 
     second = master_service._import_uploaded_trading_journal_file(
         "renamed-report.html", payload
@@ -1223,6 +1333,27 @@ def test_pepperstone_mt5_import_is_idempotent_preserves_manual_fields_and_applie
     assert stored[row_id]["notes"] == "Keep this journal note"
     assert stored[row_id]["setup"] == "Manual setup"
     assert stored[row_id]["account"] == "PEPPERSTONE DEMO"
+    assert stored[row_id]["timeframe"] == "M5"
+    assert stored[row_id]["is_test_trade"] is True
+    assert stored[row_id]["manual_overrides"] == {"result_pct": 1.25}
+    assert stored[row_id]["result_pct"] == 1.25
+    assert {key: stored[row_id][key] for key in financial_fields} == original_financials
+    assert workbook_state["balances"][0]["balance"] == pytest.approx(1114.20)
+    assert tuple(stored[row_id][key] for key in ("open_time", "close_time")) == corrected
+    from tools.master_journal_workbook import _trade_log_row_values
+    values = _trade_log_row_values(stored[row_id])
+    expected_wall = (datetime(2026, 9, 1, 16), datetime(2026, 9, 1, 18))
+    assert (values["Open Time"], values["Close Time"]) == expected_wall
+    tiny = Workbook()
+    tiny.active.title = "Trade Log"
+    tiny.active.append(["Row ID", "Open Time", "Close Time"])
+    tiny.active.append([row_id, values["Open Time"], values["Close Time"]])
+    tiny_path = temp_state_paths / "isolated-projection.xlsx"
+    tiny.save(tiny_path)
+    tiny.close()
+    reloaded = load_workbook(tiny_path)
+    assert list(reloaded.active.values)[1] == (row_id, *expected_wall)
+    reloaded.close()
 
 
 def test_pepperstone_mt5_rejects_unrecognized_html_without_mutation(

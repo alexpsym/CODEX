@@ -20810,24 +20810,44 @@ def _mt5_ticket(value: object) -> str:
 
 
 def _mt5_broker_local_iso(value: object) -> Optional[str]:
+    """Normalize native Pepperstone wall time, rejecting unresolvable instants.
+
+    Server offset is +3 during US DST and +2 otherwise. Test both candidate
+    instants against New York's rules: the server's transition hour is not
+    New York's local transition hour. Explicit offsets already identify an instant.
+    """
     if _is_empty_cell(value):
         return None
     if isinstance(value, pd.Timestamp):
         value = value.to_pydatetime()
-    if isinstance(value, datetime):
-        return value.isoformat()
     text = _mt5_cell_text(value)
-    normalized = text.replace(".", "-") if re.match(r"^\d{4}\.\d{2}\.\d{2}", text) else text
+    normalized = text[:10].replace(".", "-") + text[10:] if re.match(r"^\d{4}\.\d{2}\.\d{2}", text) else text
     normalized = re.sub(r"\s+", " ", normalized).strip()
     try:
-        return datetime.fromisoformat(normalized).isoformat()
+        parsed = datetime.fromisoformat(normalized.replace("Z", "+00:00"))
     except ValueError:
         for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y/%m/%d %H:%M:%S"):
             try:
-                return datetime.strptime(normalized, fmt).isoformat()
+                parsed = datetime.strptime(normalized, fmt)
+                break
             except ValueError:
                 continue
-    return text or None
+        else:
+            raise ValueError("Invalid Pepperstone MT5 timestamp") from None
+    if not re.search(r"[ T]\d{2}:\d{2}", normalized):
+        raise ValueError("Pepperstone MT5 timestamp requires a time")
+    if parsed.tzinfo is None:
+        candidates = []
+        for hours in (2, 3):
+            candidate = parsed.replace(tzinfo=timezone(timedelta(hours=hours)))
+            us_dst = bool(candidate.astimezone(ZoneInfo("America/New_York")).dst())
+            if hours == (3 if us_dst else 2):
+                candidates.append(candidate)
+        if len(candidates) != 1:
+            reason = "ambiguous" if candidates else "nonexistent"
+            raise ValueError(f"{reason} Pepperstone MT5 server timestamp; explicit offset required")
+        parsed = candidates[0]
+    return parsed.astimezone(ZoneInfo("Australia/Brisbane")).isoformat()
 
 
 def _mt5_metadata_value(rows: List[List[object]], labels: Set[str]) -> str:
@@ -21001,6 +21021,7 @@ def _mt5_order_plans(rows: List[List[object]]) -> Dict[str, List[Dict[str, objec
                 "side": side,
                 "position": _mt5_ticket(_mt5_row_value(row, position_idx)),
                 "time": _mt5_broker_local_iso(_mt5_row_value(row, time_idx)),
+                "source_time": _mt5_cell_text(_mt5_row_value(row, time_idx)),
                 "stop_loss": stop_loss if stop_loss is not None and stop_loss > 0 else None,
                 "take_profit": take_profit if take_profit is not None and take_profit > 0 else None,
                 "order_type": (
@@ -21018,6 +21039,7 @@ def _mt5_trade_row(
     open_time: str, close_time: str, commission: float, fee: float, swap: float,
     profit: float, stop_loss: Optional[float] = None, take_profit: Optional[float] = None,
     identity_suffix: str = "",
+    source_times: Optional[Dict[str, object]] = None,
 ) -> Dict[str, object]:
     account_fp = metadata["fingerprint"]
     ticket_set = sorted(set(ticket for ticket in close_tickets if ticket))
@@ -21069,6 +21091,14 @@ def _mt5_trade_row(
             "closing_deal_tickets": ticket_set,
             "broker_server": metadata["server"],
             "report_period": metadata.get("period") or None,
+            "timestamp_conversion": {
+                "rule": "Pepperstone UTC+3 US DST / UTC+2 US standard; explicit offsets respected",
+                "dst_zone": "America/New_York",
+                "journal_zone": "Australia/Brisbane",
+                "source_times": source_times or {},
+                "open_time": open_time,
+                "close_time": close_time,
+            },
         },
         "updated_at": _utc_now_iso(),
     })
@@ -21165,6 +21195,10 @@ def _mt5_positions_rows(
                 metadata=metadata, position_ticket=ticket, close_tickets=[], symbol=symbol,
                 side=side, qty=float(summary["qty"]), entry_price=float(summary["entry_price"]), exit_price=float(summary["exit_price"]),
                 open_time=str(summary["open_time"]), close_time=str(summary["close_time"]),
+                source_times={
+                    "position_open": _mt5_cell_text(_mt5_row_value(candidate, time_indexes[0])),
+                    "position_close": _mt5_cell_text(_mt5_row_value(candidate, time_indexes[-1])),
+                },
                 commission=_mt5_component(_mt5_row_value(candidate, commission_idx)),
                 fee=_mt5_component(_mt5_row_value(candidate, fee_idx)),
                 swap=_mt5_component(_mt5_row_value(candidate, swap_idx)),
@@ -21191,7 +21225,10 @@ def _mt5_native_position_comment_index(
 
 
 def _mt5_valid_broker_local_iso(value: object) -> Optional[str]:
-    normalized = _mt5_broker_local_iso(value)
+    try:
+        normalized = _mt5_broker_local_iso(value)
+    except ValueError:
+        return None
     if not normalized:
         return None
     candidate = normalized.replace(".", "-") if re.match(r"^\d{4}\.\d{2}\.\d{2}", normalized) else normalized
@@ -21293,9 +21330,12 @@ def _mt5_deal_events(rows: List[List[object]]) -> List[Dict[str, object]]:
             price = _cell_to_float(_mt5_row_value(row, indexes["price"]))
             if not deal or not symbol or side not in {"buy", "sell"} or volume is None or volume <= 0 or price is None:
                 continue
+            if _is_empty_cell(_mt5_row_value(row, indexes["time"])):
+                raise ValueError("Missing Pepperstone MT5 deal timestamp")
             events.append({
                 "sequence": sequence,
                 "time": _mt5_broker_local_iso(_mt5_row_value(row, indexes["time"])),
+                "source_time": _mt5_cell_text(_mt5_row_value(row, indexes["time"])),
                 "deal": deal,
                 "symbol": symbol,
                 "side": side,
@@ -21442,6 +21482,12 @@ def _mt5_rows_from_deal_group(
             stop_loss=_to_float(opening_plan.get("stop_loss")) if opening_plan else None,
             take_profit=_to_float(opening_plan.get("take_profit")) if opening_plan else None,
             identity_suffix=identity_suffix,
+            source_times={
+                "deals": [
+                    {"deal": part.get("deal"), "time": part.get("source_time"), "journal_time": part.get("time")}
+                    for part in list(cycle.get("open_parts") or []) + closes
+                ],
+            },
         )
         last_close = max(closes, key=lambda part: int(part.get("sequence") or 0))
         checkpoint = _to_float(last_close.get("balance"))
@@ -21457,6 +21503,8 @@ def _mt5_rows_from_deal_group(
         refs["opening_plan_source"] = "pepperstone_mt5_orders" if opening_plan else None
         if opening_plan:
             refs["opening_plan_order_id"] = opening_plan.get("order")
+            refs["opening_plan_journal_time"] = opening_plan.get("time")
+            refs["opening_plan_source_time"] = opening_plan.get("source_time")
         row["raw_refs"] = refs
         parsed.append(row)
     return parsed, warnings, open_count
@@ -21529,8 +21577,14 @@ def _mt5_final_balance(rows: List[List[object]]) -> Optional[float]:
 
 
 def _mt5_period_as_of(period: str) -> Optional[str]:
-    matches = re.findall(r"\d{4}[./-]\d{2}[./-]\d{2}(?:\s+\d{2}:\d{2}(?::\d{2})?)?(?:\s*[+-]\d{2}:?\d{2})?", str(period or ""))
-    return _mt5_broker_local_iso(matches[-1]) if matches else None
+    matches = re.findall(r"\d{4}[./-]\d{2}[./-]\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:\s*(?:Z|[+-]\d{2}:?\d{2}))?)?", str(period or ""))
+    if not matches:
+        return None
+    end = matches[-1]
+    if not re.search(r"[ T]\d{2}:\d{2}", end):
+        # Preserve the existing date-only range semantics; no timezone/instant.
+        return datetime.fromisoformat(end.replace(".", "-").replace("/", "-")).isoformat()
+    return _mt5_broker_local_iso(end)
 
 
 def _parse_pepperstone_mt5_rows(
@@ -21592,6 +21646,7 @@ def _parse_pepperstone_mt5_rows(
                 "broker_server": metadata["server"],
                 "report_period": metadata.get("period") or None,
                 "source_format": source_kind,
+                "timestamp_rule": "Pepperstone US DST to Australia/Brisbane; date-only period unchanged",
             },
             "_import_warnings": warnings,
             "_mt5_diagnostics": {
@@ -43412,7 +43467,10 @@ def _import_uploaded_trading_journal_file(
                 value = row.get(field)
                 if value in (None, ""):
                     return ""
-                if _canonical_oanda_account_label(row) in _OANDA_CANONICAL_ACCOUNT_LABELS:
+                if (
+                    _canonical_oanda_account_label(row) in _OANDA_CANONICAL_ACCOUNT_LABELS
+                    or _is_pepperstone_mt5_trade(row)
+                ):
                     try:
                         parsed = pd.to_datetime(value)
                         dt = parsed.to_pydatetime()
