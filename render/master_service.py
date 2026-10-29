@@ -155,7 +155,7 @@ from shared.oanda_api import (
 )
 from render.dropbox_sync import download_bytes, list_excel_files, upload_bytes
 from render import dropbox_state_store
-from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, read_master_journal_source, update_master_journal_workbook_data_only, update_master_journal_workbook_incremental, assign_trade_numbers_and_create_folders, IncrementalWorkbookUpdateNotEligible, refresh_master_journal_derived_sheets, stable_row_id, SHEET_ORDER, REPORT_YEARLY_SHEET, expected_report_sheet_names, _get_all_trades_sheet, _get_trade_log_sheet, _trade_log_header_map, _trade_log_data_start_row, _trade_log_last_populated_row, _find_instrument_leaders_table, LEADER_LABEL_TO_KEY, _repair_or_flag_zero_trade_qty, _canonicalize_and_dedupe_balances, _trade_execution_fingerprint, _trade_row_source_rank, _dedupe_trade_rows_by_execution, _normalize_master_journal_rows, _instrument_averages_header_map, INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, INSTRUMENT_AVERAGES_DATA_START_ROW, _result_percentage_totals_by_market, _risk_of_ruin_by_account, _stats1_sheet, _stats2_sheet, _symbols_sheet, STATS1_SHEET, STATS2_SHEET, SYMBOLS_SHEET, _parse_duration_text, _duration_ddhhmmss_cell_to_seconds, _is_ddhhmmss_number_format, STOP_RECOMMENDATION_HEADER, TARGET_RECOMMENDATION_HEADER, _distance_recommendation_summary, _stop_recommendation_payload, _apply_recommendation_cell_style, _ensure_dashboard_requested_metric_rows, _stats1_market_columns, _stats1_section_bounds, balance_drawdown_metrics
+from tools.master_journal_workbook import project_commission_cashflow, build_master_journal_workbook, read_master_journal_manual_overrides, read_master_journal_source, update_master_journal_workbook_data_only, update_master_journal_workbook_incremental, assign_trade_numbers_and_create_folders, IncrementalWorkbookUpdateNotEligible, refresh_master_journal_derived_sheets, stable_row_id, SHEET_ORDER, REPORT_YEARLY_SHEET, expected_report_sheet_names, _get_all_trades_sheet, _get_trade_log_sheet, _trade_log_header_map, _trade_log_data_start_row, _trade_log_last_populated_row, _find_instrument_leaders_table, LEADER_LABEL_TO_KEY, _repair_or_flag_zero_trade_qty, _canonicalize_and_dedupe_balances, _trade_execution_fingerprint, _trade_row_source_rank, _dedupe_trade_rows_by_execution, _normalize_master_journal_rows, _instrument_averages_header_map, INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, INSTRUMENT_AVERAGES_DATA_START_ROW, _result_percentage_totals_by_market, _risk_of_ruin_by_account, _stats1_sheet, _stats2_sheet, _symbols_sheet, STATS1_SHEET, STATS2_SHEET, SYMBOLS_SHEET, _parse_duration_text, _duration_ddhhmmss_cell_to_seconds, _is_ddhhmmss_number_format, STOP_RECOMMENDATION_HEADER, TARGET_RECOMMENDATION_HEADER, _distance_recommendation_summary, _stop_recommendation_payload, _apply_recommendation_cell_style, _ensure_dashboard_requested_metric_rows, _stats1_market_columns, _stats1_section_bounds, balance_drawdown_metrics
 from bybit_monitor import bybit_altcoin_monitor as bybit_monitor
 from oanda_monitor import oanda_forex_monitor as oanda_monitor
 from bybit_demo_tpsl_cache import (
@@ -7863,87 +7863,15 @@ def _sanitize_oanda_commission_fields(
             else {}
         )
 
-        financing_raw: Optional[float] = None
-        for key in (
-            "oanda_export_financing_allocated",
-            "oanda_export_funding_allocated",
-            "oanda_api_financing",
-            "oanda_api_funding",
-            "oanda_api_swap",
-        ):
-            if key in source_metrics:
-                candidate = _to_float(source_metrics.get(key))
-                if candidate is not None:
-                    financing_raw = candidate
-                    break
-        if financing_raw is None:
-            for key in ("financing", "funding", "swap"):
-                if key in commission_source:
-                    candidate = _to_float(commission_source.get(key))
-                    if candidate is not None:
-                        financing_raw = candidate
-                        break
-        financing_charge = abs(financing_raw) if financing_raw is not None else 0.0
-
-        broker_charge: Optional[float] = None
-        for key in ("oanda_broker_commission_total", "oanda_actual_commission_total"):
-            if key in source_metrics:
-                candidate = _to_float(source_metrics.get(key))
-                if candidate is not None:
-                    broker_charge = abs(candidate)
-                    break
-        if broker_charge is None:
-            raw_charge_keys = (
-                "oanda_raw_commission",
-                "oanda_raw_gsl_fee",
-                "oanda_raw_gsl_premium",
-                "oanda_api_commission_charge",
-                "oanda_api_guaranteed_execution_fee",
-                "oanda_api_guaranteed_execution_premium",
-                "oanda_api_other_trading_charges",
-            )
-            if any(key in source_metrics for key in raw_charge_keys):
-                broker_charge = sum(
-                    abs(_to_float(source_metrics.get(key)) or 0.0)
-                    for key in raw_charge_keys
-                )
-
-        row_id = str(row.get("id") or "").strip().lower()
-        canonical_persisted_row = row_id.startswith(("oanda_export:", "oanda:"))
-        existing_display = _to_float(commission_source.get("commission"))
-        already_includes_financing = bool(
-            source_metrics.get("oanda_commission_includes_financing")
-        )
-        if broker_charge is not None:
-            displayed_commission = broker_charge + financing_charge
-        elif already_includes_financing and existing_display is not None:
-            displayed_commission = abs(existing_display)
-            broker_charge = max(displayed_commission - financing_charge, 0.0)
-        elif source in {"oanda_transaction_export", "oanda"}:
-            broker_charge = abs(existing_display) if existing_display is not None else 0.0
-            displayed_commission = broker_charge + financing_charge
-        elif canonical_persisted_row:
-            # The workbook only persists the combined Commission column, not Swap or
-            # row metrics. Preserve that canonical displayed total on the next read.
-            displayed_commission = abs(existing_display) if existing_display is not None else financing_charge
-            broker_charge = max(displayed_commission - financing_charge, 0.0)
-        else:
-            # Legacy workbook rows sometimes stored spread cost as Commission. Keep
-            # clearing that unsupported value, while retaining proven financing.
-            broker_charge = 0.0
-            displayed_commission = financing_charge
-
-        metrics["oanda_broker_commission_total"] = broker_charge
-        metrics["oanda_financing_commission_total"] = financing_charge
-        metrics["oanda_displayed_commission_total"] = displayed_commission
-        metrics["oanda_commission_includes_financing"] = bool(financing_charge)
+        if not (source_metrics.get("commission_cashflow_version") == 1
+                or source_metrics.get("commission_input_convention")):
+            sanitized.append(dict(raw))
+            continue
+        projected = project_commission_cashflow(commission_source)
+        row["commission"] = projected.get("commission")
+        metrics.update(projected.get("metrics") or {})
         row["metrics"] = metrics
-        row["commission"] = (
-            None
-            if math.isclose(displayed_commission, 0.0, abs_tol=1e-12)
-            else displayed_commission
-        )
-        row["fees"] = row["commission"]
+        # fees remains an accounting component, never a second projected charge.
         sanitized.append(row)
     return sanitized
 
@@ -9100,6 +9028,7 @@ def _journal_rows_from_oanda_transaction_history_frame(
                         "oanda_open_spread_cost": open_spread,
                         "oanda_close_spread_cost": close_spread,
                         "oanda_total_spread_cost": total_spread,
+                        "commission_input_convention": "oanda_broker_cost_signed_financing",
                         "oanda_raw_commission": commission_raw,
                         "oanda_raw_gsl_fee": gsl_fee_raw,
                         "oanda_raw_gsl_premium": gsl_premium_raw,
@@ -11037,7 +10966,7 @@ def _normalize_bybit_execution_history_row(raw: Dict[str, object], account_mode:
     bal=_to_float(raw.get('Final Balance (USDT)')) if str(raw.get('Final Balance (USDT)') or '').strip() else None
     mode='demo' if str(account_mode).lower().strip()=='demo' else 'live'
     rid = f'bybit:{mode}:execution:{symbol}:{exec_id}' if exec_id else f"bybit:{mode}:execution:{symbol}:{order_id}:{open_time}:{side}:{qty}:{price}"
-    return {'id': rid,'row_type':'trade','asset_class':'crypto','account':_canonical_journal_account_label('Bybit Demo' if mode=='demo' else 'Bybit Live', source='bybit', account_mode=mode),'account_label':_canonical_journal_account_label('Bybit Demo' if mode=='demo' else 'Bybit Live', source='bybit', account_mode=mode),'symbol':symbol,'side':side,'qty':qty,'entry_price':price,'exit_price':price,'open_time':open_time,'close_time':open_time,'commission':fee,'fee_rate':fee_rate,'filled_type':filled_type,'net_profit':None,'balance_after_trade':bal,'currency':'USDT' if symbol.endswith('USDT') else '', 'source':'bybit_execution_history','notes':'Bybit execution-history row; Net P/L may be inferred from explicit P/L fields or balance continuity when provable.','raw_refs':{'orderId':order_id or None,'execId':exec_id or None,'filledType':filled_type or None,'source_file':source_path,'source_row':source_row}}
+    return {'id': rid,'row_type':'trade','asset_class':'crypto','account':_canonical_journal_account_label('Bybit Demo' if mode=='demo' else 'Bybit Live', source='bybit', account_mode=mode),'account_label':_canonical_journal_account_label('Bybit Demo' if mode=='demo' else 'Bybit Live', source='bybit', account_mode=mode),'symbol':symbol,'side':side,'qty':qty,'entry_price':price,'exit_price':price,'open_time':open_time,'close_time':open_time,'commission':fee,'fee_rate':fee_rate,'filled_type':filled_type,'net_profit':None,'balance_after_trade':bal,'currency':'USDT' if symbol.endswith('USDT') else '', 'source':'bybit_execution_history','metrics':{'commission_input_convention':'bybit_fee_cost'},'notes':'Bybit execution-history row; Net P/L may be inferred from explicit P/L fields or balance continuity when provable.','raw_refs':{'orderId':order_id or None,'execId':exec_id or None,'filledType':filled_type or None,'source_file':source_path,'source_row':source_row}}
 
 def _group_bybit_execution_history_rows_into_completed_trades(records: List[Dict[str, object]], account_mode: str, source_path: str) -> Tuple[List[Dict[str, object]], List[str], Dict[str, object]]:
     mode = "demo" if str(account_mode).lower().strip() == "demo" else "live"
@@ -11143,6 +11072,15 @@ def _group_bybit_execution_history_rows_into_completed_trades(records: List[Dict
                     "symbol": symbol, "side": open_side, "qty": closed, "entry_price": (entry_notional / open_qty) if open_qty else None, "exit_price": (exit_notional / close_qty) if close_qty else None,
                     "open_time": open_ts, "close_time": close_ts, "gross_profit": gross, "commission": combined_commission, "fees": fees, "trading_fee_total": fees, "funding_cost": funding_cost, "funding_paid": funding_paid, "funding_received": funding_received, "net_funding": net_funding, "commission_includes_funding": True, "swap": (net_funding if funding_cost else None), "net_profit": net, "realized_pnl": net, "currency": "USDT" if symbol.endswith("USDT") else "",
                     "trade_duration_seconds": dur, "source": "bybit_execution_history_grouped",
+                    "metrics": {"commission_input_convention": "bybit_fee_cost",
+                        # Trade-history Fees Paid (including funding) is a cost;
+                        # transaction-log funding has the opposite convention and
+                        # is not consumed by this grouping path.
+                        "commission_raw_components": [
+                            {"amount": s.get("commission"), "field": "Fees Paid / execFee",
+                             "exec_id": (s.get("raw_refs") or {}).get("execId"),
+                             "type": s.get("filled_type"), "currency": s.get("currency")}
+                            for s in [*seg, *funding_seg]]},
                     "raw_refs": {"source_file": source_path, "source_rows": src_rows, "order_ids": sorted({str(((s.get("raw_refs") or {}).get("orderId") or "")).strip() for s in seg if str(((s.get("raw_refs") or {}).get("orderId") or "")).strip()}), "exec_ids": exec_ids, "funding_exec_ids": funding_ids, "execution_count": len(seg), "funding_row_count": len(funding_seg), "parser": "bybit_execution_history_grouped"}
                 })
                 seg = []; funding_seg = []; pos = 0.0
@@ -11173,6 +11111,7 @@ def _group_bybit_execution_history_rows_into_completed_trades(records: List[Dict
         "bybit_commission_includes_funding": True,
         "bybit_commission_funding_sign_convention": "CSV Fees Paid: positive cost, negative credit",
     }
+    trades = [project_commission_cashflow(row) for row in trades]
     return trades, unmatched, diag
 
 def _parse_bybit_trade_history_csv_with_diagnostics(path: Path, account_mode: str='demo') -> Tuple[List[Dict[str, object]], List[str], Dict[str, object]]:
@@ -12343,7 +12282,7 @@ def _normalize_journal_profit_fields(row: Dict[str, object]) -> Dict[str, object
         normalized["net_profit"] = realized_pnl
     if realized_pnl is None and net_profit is not None:
         normalized["realized_pnl"] = net_profit
-    return normalized
+    return project_commission_cashflow(normalized)
 
 
 def _row_pnl(row: Dict[str, object]) -> Optional[float]:
@@ -12494,8 +12433,8 @@ def _journal_rows_from_bybit_execution(entry: Dict[str, object]) -> List[Dict[st
             "vwap": vwap,
             "aths_atls": aths_atls,
             "round_number": round_number,
-            "metrics": {k: v for k, v in {"timeframe": timeframe, "is_test_trade": is_test_trade}.items() if v not in ("", None)},
-            "raw_refs": {"orderId": order_id, "execIds": [exec_id]},
+            "metrics": {k: v for k, v in {"commission_input_convention": "bybit_fee_cost", "timeframe": timeframe, "is_test_trade": is_test_trade}.items() if v not in ("", None)},
+            "raw_refs": {"orderId": order_id, "execIds": [exec_id], "execFee": entry.get("execFee")},
         })
     ]
 
@@ -12879,6 +12818,7 @@ def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[s
                 for k, v in {
                     "timeframe": row_timeframe,
                     "is_test_trade": row_is_test_trade,
+                    "commission_input_convention": "oanda_broker_cost_signed_financing",
                     "oanda_api_realized_pl": gross_realized_pl,
                     "oanda_api_financing": financing,
                     "oanda_half_spread_cost": spread_cost or None,
@@ -21079,6 +21019,7 @@ def _mt5_trade_row(
         "commission_currency": metadata["currency"],
         "fee_currency": metadata["currency"],
         "metrics": {
+            "commission_input_convention": "native_signed",
             "mt5_profit": profit,
             "mt5_commission": commission,
             "mt5_fee": fee,
@@ -27154,6 +27095,7 @@ def _normalize_bybit_closed_pnl_row(
         "fillCount": fill_count,
         "source": "closed_pnl",
         "raw_closed_pnl_side": raw_side or None,
+        "openFee": entry.get("openFee"), "closeFee": entry.get("closeFee"),
     }
     if isinstance(raw_refs_extra, dict):
         raw_refs.update(raw_refs_extra)
@@ -27319,7 +27261,7 @@ def _normalize_bybit_closed_pnl_row(
         "vwap": vwap,
         "aths_atls": aths_atls,
         "round_number": round_number,
-        "metrics": {k: v for k, v in {"timeframe": timeframe, "is_test_trade": is_test_trade}.items() if v not in ("", None)},
+        "metrics": {k: v for k, v in {"commission_input_convention": "bybit_fee_cost", "timeframe": timeframe, "is_test_trade": is_test_trade}.items() if v not in ("", None)},
         "raw_refs": raw_refs,
     })
 
@@ -28268,7 +28210,7 @@ async def _sync_bybit_closed_pnl_window(
         rid = str(row.get("id") or "").strip()
         if not rid:
             continue
-        final_rows_by_id[rid] = row
+        final_rows_by_id[rid] = project_commission_cashflow(row)
     final_rows = list(final_rows_by_id.values())
     latest_execution_time = None
     execution_timestamps = [

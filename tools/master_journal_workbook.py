@@ -10576,6 +10576,47 @@ def _trade_log_datetime_value(value: Any) -> Any:
     return parsed
 
 
+def project_commission_cashflow(row: Mapping[str, Any]) -> Dict[str, Any]:
+    """Project explicitly identified broker components; never guess from a sign/account.
+
+    Adapters opt in only at a completed-record boundary. Raw accounting fields,
+    including fees and funding costs, remain untouched. Unmarked historical and
+    canonical workbook rows pass through without reinterpretation.
+    """
+    result = dict(row)
+    metrics = dict(row.get("metrics") or {})
+    if metrics.get("commission_cashflow_version") == 1:
+        return result
+    convention = metrics.get("commission_input_convention")
+    if not convention:
+        return result
+    raw = _as_float(row.get("commission"))
+    if convention == "bybit_fee_cost":
+        value = -raw if raw is not None else None
+    elif convention == "oanda_broker_cost_signed_financing":
+        cost = _as_float(metrics.get("oanda_broker_commission_total"))
+        financing = _as_float(metrics.get("oanda_api_financing"))
+        if financing is None:
+            financing = _as_float(metrics.get("oanda_export_financing_allocated"))
+        if cost is None or financing is None:
+            metrics["commission_cashflow_diagnostic"] = "commission_direction_unknown"
+            result["metrics"] = metrics
+            return result
+        value = -cost + financing
+        metrics["oanda_displayed_commission_total"] = value
+    elif convention == "native_signed":
+        value = raw
+    else:
+        metrics["commission_cashflow_diagnostic"] = "commission_direction_unknown"
+        result["metrics"] = metrics
+        return result
+    metrics["commission_raw_value"] = raw
+    metrics["commission_cashflow_version"] = 1
+    result["commission"] = value
+    result["metrics"] = metrics
+    return result
+
+
 def _trade_log_row_values(
     row: Mapping[str, Any],
     *,
@@ -10583,7 +10624,7 @@ def _trade_log_row_values(
     recommendations_by_symbol: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Serialize a journal row to the canonical Trade Log logical columns."""
-    row_map = dict(row)
+    row_map = project_commission_cashflow(row)
     pct = _as_float(row_map.get("result_pct"))
     is_monthly = str(row_map.get("row_type") or "") == "monthly_aud_reval"
     symbol = row_map.get("symbol") or ("MONTHLY AUD P/L" if is_monthly else "")

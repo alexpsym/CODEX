@@ -3148,7 +3148,7 @@ def test_oanda_order_fill_allocates_transaction_financing_across_multiple_close_
     )
     assert len(rows) == 2
     assert [row["swap"] for row in rows] == pytest.approx([-1.0, -2.0])
-    assert [row["commission"] for row in rows] == pytest.approx([1.0, 2.0])
+    assert [row["commission"] for row in rows] == pytest.approx([-1.0, -2.0])
     assert [row["net_profit"] for row in rows] == pytest.approx([5.0, 10.0])
     assert sum(float(row["swap"]) for row in rows) == pytest.approx(-3.0)
 
@@ -8599,3 +8599,156 @@ def test_trading_journal_items_reuses_pending_derived_refresh_instead_of_equity_
     assert payload["derived_refresh"]["generation"] == 3
     assert payload["refresh_status"]["status"] == "queued"
     assert payload["status_url"] == "/api/trading-journal/import/status"
+
+
+@pytest.fixture
+def _future_commission_isolation(temp_state_paths, monkeypatch):
+    import socket
+    import tools.master_journal_workbook as mjw
+    def forbidden(*args, **kwargs):
+        pytest.fail("commission fixture reached network/background work")
+    monkeypatch.setattr(socket.socket, "connect", forbidden)
+    monkeypatch.setattr(threading.Thread, "start", forbidden)
+    monkeypatch.setattr(master_service, "_journal_transaction_lock_path", lambda p: temp_state_paths / "transaction.lock")
+    monkeypatch.setattr(master_service, "_lookup_trade_context_for_journal_row", lambda *a, **k: None)
+    monkeypatch.setattr(master_service, "_lookup_trade_context_by_market_window", lambda *a, **k: None)
+    monkeypatch.setattr(master_service, "_load_trade_contexts", lambda: [])
+    monkeypatch.setattr(master_service, "_update_unresolved_registry", lambda **k: (False, {}))
+    monkeypatch.setattr(master_service, "_mark_trade_context_closed_or_cancelled", lambda **k: None)
+    monkeypatch.setattr(master_service, "_OANDA_OPEN_TRADE_LEGS", {})
+    monkeypatch.setattr(master_service, "_OANDA_CONTEXT_WARNED_RUNTIME", set())
+    monkeypatch.setattr(master_service, "_arm_trading_journal_derived_refresh_timer_locked", lambda: None)
+    monkeypatch.setattr(master_service, "_queue_trading_journal_equity_refresh_if_idle", lambda **k: None)
+    monkeypatch.setattr(master_service, "_trading_journal_local_excel_authoritative", lambda: False)
+    monkeypatch.setattr(mjw, "apply_early_trade_folder_allocations", lambda rows: None)
+    monkeypatch.setattr(mjw, "assign_trade_numbers_and_create_folders", lambda *a, **k: {})
+    monkeypatch.setattr(mjw, "resolve_trade_folder_link", lambda *a, **k: (None, "fixture"))
+    handle = master_service._try_acquire_journal_os_lock(master_service._master_journal_path())
+    assert handle is not None and Path(handle.name).parent == temp_state_paths
+    try:
+        yield temp_state_paths
+    finally:
+        master_service._release_journal_os_lock(handle)
+    # Acquisition after release verifies that a real fixture-local lock was freed.
+    handle = master_service._try_acquire_journal_os_lock(master_service._master_journal_path())
+    assert handle is not None
+    master_service._release_journal_os_lock(handle)
+
+
+def test_future_commission_cashflows_preserve_source_direction_and_net_pnl(_future_commission_isolation):
+    from tools.master_journal_workbook import project_commission_cashflow
+    svc = master_service
+    for paid, rebate in [(1, 0), (0, .25), (1, .25), (1, 1), (0, 0), (None, None)]:
+        cost = (paid or 0) - (rebate or 0)
+        net = 10 - cost
+        entry = dict(symbol="BTCUSDT", orderId="o1", openFee=paid, closeFee=-rebate if rebate is not None else None,
+                     createdTime=1710000000000, updatedTime=1710000060000, closedPnl=str(net),
+                     avgEntryPrice="100", avgExitPrice="110", closedSize="1", side="Buy")
+        closed = svc._normalize_bybit_closed_pnl_row(entry, balance_after_trade=100+net)
+        assert closed["commission"] == pytest.approx(-cost)
+        assert closed["fees"] == pytest.approx(cost)
+        assert closed["net_profit"] == closed["realized_pnl"] == net
+        assert project_commission_cashflow(closed) == closed
+        api = svc._journal_rows_from_bybit_execution(dict(entry, execId="e1", execFee=paid,
+            execPnl=net, execPrice=110, execQty=1, execTime=1710000060000, category="linear", account="demo"))[0]
+        assert api["commission"] == pytest.approx(-(paid or 0)) and api["net_profit"] == net
+        records=[]
+        for i, (side, price, fee) in enumerate([("Buy",100,paid),("Sell",110,-rebate if rebate is not None else None)]):
+            raw=dict(symbol="BTCUSDT", side=side, orderId=f"o{i}", execId=f"e{i}", execQty=1,
+                     execPrice=price, execFee=fee, execTime=1710000000000+i*60000, execType="Trade")
+            intermediate=svc._normalize_bybit_execution_history_row(raw,"demo")
+            assert intermediate["commission"] == fee
+            records.append({"raw":raw,"_source_row":i+2})
+        grouped, unmatched, diag=svc._group_bybit_execution_history_rows_into_completed_trades(records,"demo","synthetic.csv")
+        assert not unmatched and len(grouped)==1
+        row=grouped[0]
+        assert row["commission"] == pytest.approx(-cost)
+        assert row["net_profit"] == row["realized_pnl"] == pytest.approx(net)
+        assert row["fees"] == pytest.approx(cost)
+        assert len(row["metrics"]["commission_raw_components"]) == 2
+        assert svc._infer_realized_net_profit_from_balance_continuity([row],[])[0][0]["net_profit"] == net
+    # Included trade-history funding uses positive cost, negative credit once.
+    records.insert(1,{"raw":dict(symbol="BTCUSDT",side="Buy",orderId="f",execId="f",execQty=0,
+        execPrice=100,execFee=-.25,execTime=1710000030000,execType="Funding"),"_source_row":3})
+    funded=svc._group_bybit_execution_history_rows_into_completed_trades(records,"demo","synthetic.csv")[0][0]
+    assert funded["commission"] == .25 and funded["net_profit"] == 10.25
+    assert funded["funding_cost"] == -.25 and funded["net_funding"] == .25
+    metadata=dict(fingerprint="synthetic",account_label="PEPPERSTONE DEMO",currency="AUD",server="demo")
+    for signed in (-1,.25,0):
+        row=svc._mt5_trade_row(metadata=metadata,position_ticket="p",close_tickets=["d"],symbol="EURUSD",
+            side="Buy",qty=1,entry_price=1,exit_price=2,open_time="2026-01-01T00:00:00+10:00",
+            close_time="2026-01-01T01:00:00+10:00",commission=signed,fee=-.1,swap=.2,profit=10)
+        assert (row["commission"] or 0) == signed
+        assert row["net_profit"] == pytest.approx(10+signed-.1+.2)
+        assert row["fees"] == -.1 and row["swap"] == .2
+        assert project_commission_cashflow(row) == row
+    unknown=project_commission_cashflow({"commission":2,"metrics":{"commission_input_convention":"unknown"}})
+    assert unknown["commission"]==2 and unknown["metrics"]["commission_cashflow_diagnostic"] == "commission_direction_unknown"
+
+
+def test_future_oanda_commission_cashflows_include_signed_financing_once(_future_commission_isolation):
+    import pandas as pd
+    from tools.master_journal_workbook import _trade_log_row_values
+    svc=master_service
+    for financing, charge in [(-1,0),(.25,0),(.25,1),(-1,1),(1,1),(0,0)]:
+        entry=dict(account="live",id="100",instrument="EUR_USD",time="2026-04-01T02:00:00Z",
+            orderID="200",units="-1000",commission=str(charge),halfSpreadCost="99",accountCurrency="AUD",price="1.2",
+            tradesClosed=[dict(tradeID="t1",units="-1000",price="1.2",realizedPL="10",financing=str(financing))])
+        row=svc._journal_rows_from_oanda_order_fill(entry)[0]
+        expected=financing-charge
+        assert (row["commission"] or 0) == pytest.approx(expected)
+        assert row["net_profit"] == row["realized_pnl"] == pytest.approx(10+expected)
+        assert row["metrics"]["oanda_broker_commission_total"] == charge
+        assert row["metrics"]["oanda_api_financing"] == financing
+        assert row["fees"] == (charge+abs(financing) or None)
+        assert svc._sanitize_oanda_commission_fields([row])[0] == row
+        projection=_trade_log_row_values(row)
+        canonical=dict(id=row["id"],source="master_journal",account="OANDA LIVE",symbol="EURUSD",
+                       commission=projection["Commission"] or None,net_profit=row["net_profit"])
+        assert svc._sanitize_oanda_commission_fields([canonical])[0] == canonical
+        frame=pd.DataFrame([
+            {"TICKET":"1","TRANSACTION DATE":"2026-04-01T00:00:00Z","TRANSACTION TYPE":"ORDER_FILL",
+             "DETAILS":"MARKET_ORDER","INSTRUMENT":"EUR_USD","DIRECTION":"Buy","UNITS":1000,"PRICE":1.1,"COMMISSION":charge,"SPREAD COST":50},
+            {"TICKET":"2","TRANSACTION DATE":"2026-04-01T01:00:00Z","TRANSACTION TYPE":"DAILY_FINANCING","FINANCING":financing},
+            {"TICKET":"3","TRANSACTION DATE":"2026-04-01T02:00:00Z","TRANSACTION TYPE":"ORDER_FILL",
+             "DETAILS":"MARKET_ORDER_TRADE_CLOSE","INSTRUMENT":"EUR_USD","DIRECTION":"Sell","UNITS":1000,"PRICE":1.2,"PL":10,"BALANCE":110+expected,"COMMISSION":0,"SPREAD COST":49}]).fillna("")
+        exported=svc._journal_rows_from_oanda_transaction_history_frame(frame,account_mode="live",account_label="OANDA LIVE",source_path="synthetic.csv")["rows"][0]
+        assert (exported["commission"] or 0) == pytest.approx(expected)
+        assert exported["net_profit"] == pytest.approx(10+expected)
+        assert exported["metrics"]["oanda_total_spread_cost"] == 99
+        assert svc._sanitize_oanda_commission_fields([exported])[0] == exported
+    # Transaction-level financing is allocated across close legs rather than repeated.
+    entry.pop("halfSpreadCost");entry["financing"]=".75";entry["commission"]="1"
+    entry["tradesClosed"]=[dict(tradeID=f"t{i}",units=str(-1000*n),price="1.2",realizedPL="10") for i,n in enumerate((1,2))]
+    rows=svc._journal_rows_from_oanda_order_fill(entry)
+    assert sum(r["commission"] for r in rows)==pytest.approx(-.25)
+    assert sum(r["net_profit"] for r in rows)==pytest.approx(19.75)
+
+
+def test_future_commission_ingestion_is_idempotent_and_preserves_legacy_rows(_future_commission_isolation, monkeypatch):
+    svc=master_service
+    legacy=dict(id="legacy:oanda",source="master_journal",account="OANDA DEMO",symbol="EURUSD",commission=4.5,
+                net_profit=9,realized_pnl=9,result_pct=1.25,r_multiple=.5,notes="historical",balance_after_trade=109)
+    svc._set_trading_journal_rows([legacy],invalidate_view_snapshot=False,schedule_state_backup=False)
+    raw=dict(symbol="BTCUSDT",orderId="future",openFee=1,closeFee=-.25,closedPnl=9.25,
+             createdTime=1710000000000,updatedTime=1710000060000,avgEntryPrice=100,avgExitPrice=110,closedSize=1,side="Buy")
+    row=svc._normalize_bybit_closed_pnl_row(raw,balance_after_trade=109.25)
+    assert svc._upsert_trading_journal_rows([row],invalidate_view_snapshot=False,schedule_state_backup=False)==1
+    rows=svc._get_trading_journal_rows()
+    future=next(r for r in rows if r["id"]==row["id"])
+    future.update(notes="manual",setup="Pullback",manual_overrides={"result_pct":1.25},result_pct=1.25,r_multiple=.5)
+    svc._set_trading_journal_rows(rows,invalidate_view_snapshot=False,schedule_state_backup=False)
+    svc._TRADING_JOURNAL_CACHE=None;svc._TRADING_JOURNAL_CACHE_KEY=None
+    assert svc._upsert_trading_journal_rows([svc._normalize_journal_profit_fields(future)],invalidate_view_snapshot=False,schedule_state_backup=False)==1
+    stored={r["id"]:r for r in svc._get_trading_journal_rows()}
+    assert stored[legacy["id"]] == legacy
+    actual=stored[row["id"]]
+    for field in ("id","commission","fees","net_profit","realized_pnl","balance_after_trade","raw_refs","metrics"):
+        assert actual[field] == future[field]
+    assert actual["notes"]=="manual" and actual["result_pct"]==1.25 and actual["r_multiple"]==.5
+    assert svc._sanitize_oanda_commission_fields(list(stored.values())) == list(stored.values())
+    svc._persist_trading_journal_sqlite({"items":list(stored.values()),"balances":[]})
+    with sqlite3.connect(svc.TRADING_JOURNAL_SQLITE_PATH) as conn:
+        reloaded={rid:json.loads(payload) for rid,payload in conn.execute("SELECT id,payload_json FROM journal_trades")}
+    assert reloaded==stored
+    assert svc._normalize_journal_profit_fields(reloaded[row["id"]])==actual

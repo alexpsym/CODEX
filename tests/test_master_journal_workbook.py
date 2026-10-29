@@ -12985,3 +12985,80 @@ m.assign_trade_numbers_and_create_folders([row], workbook_path=Path(sys.argv[3])
     wrong["account"] = "live"
     mjw.apply_early_trade_folder_allocations([wrong])
     assert "trade_number" not in wrong
+
+
+def test_future_commission_cashflows_survive_trade_log_write_and_readback(tmp_path, monkeypatch):
+    import socket
+    import threading
+    def forbidden(*a, **k):
+        pytest.fail("synthetic workbook reached network/background work")
+    monkeypatch.setattr(socket.socket,"connect",forbidden)
+    monkeypatch.setattr(threading.Thread,"start",forbidden)
+    monkeypatch.setattr(mjw,"REPORT_START_YEAR",2026)
+    monkeypatch.setattr(mjw,"REPORT_MIN_END_YEAR",2026)
+    monkeypatch.setattr(mjw,"assign_trade_numbers_and_create_folders",lambda *a,**k:{})
+    monkeypatch.setattr(mjw,"resolve_trade_folder_link",lambda *a,**k:(None,"fixture"))
+    snapshot=sample_snapshot()
+    template=deepcopy(snapshot["items"][0])
+    template.pop("analysis_balance_after_trade", None)
+    rows=[]
+    for i,(amount,convention,expected) in enumerate([(1,"bybit_fee_cost",-1),(-.25,"bybit_fee_cost",.25),
+            (.75,"bybit_fee_cost",-.75),(0,"bybit_fee_cost",None),(None,"native_signed",None),
+            (-1,"native_signed",-1),(.25,"native_signed",.25)]):
+        row=dict(template,id=f"cashflow-{i}",trade_number=f"F{i+1}",commission=amount,fees=amount,
+                 net_profit=9.25,realized_pnl=9.25,result_pct=1.25,r_multiple=.5,balance_after_trade=109.25,
+                 metrics={"commission_input_convention":convention})
+        assert mjw._trade_log_row_values(row)["Commission"] == (expected if expected is not None else "")
+        rows.append(row)
+    legacy=dict(template,id="historical",trade_number="F8",commission=4.5,notes="keep historical",metrics={})
+    snapshot["items"]=[*rows,legacy]
+    path=tmp_path/"commission.xlsx"
+    build_master_journal_workbook(snapshot,path,publish_recommendation_assets=False)
+    wb=load_workbook(path);ws=wb["Trade Log"];headers=_trade_log_header_map(ws)
+    legacy_number=_trade_log_row_by_id(ws,"historical")
+    ws.cell(legacy_number,headers["Notes"]).font=Font(name="Verdana",bold=True,color="123456")
+    ws.cell(legacy_number,1).hyperlink="https://example.invalid/retained"
+    extra=wb.create_sheet("Preserved");extra["A1"]="=2+3";extra["B2"]="neighbour"
+    extra["B2"].fill=PatternFill("solid",fgColor="112233")
+    ws.row_dimensions[legacy_number].height=29
+    wb.save(path)
+    before=mjw._incremental_trade_log_preservation_signature(ws)
+    legacy_style=copy(ws.cell(legacy_number,headers["Notes"])._style)
+    wb.close()
+    initial={r["id"]:r for r in read_master_journal_source(path)["items"]}
+    for i,expected in enumerate((-1,.25,-.75,None,None,-1,.25)):
+        actual=initial[f"cashflow-{i}"]
+        assert actual["commission"]==expected
+        assert actual["net_profit"]==9.25 and actual["result_pct"]==1.25 and actual["r_multiple"]==.5
+        assert actual["balance_after_trade"]==109.25
+        assert mjw.project_commission_cashflow(actual)==actual
+    # Update and append use the same projection, with a canonical reload between writes.
+    changed=dict(rows[0],commission=-.25,metrics={"commission_input_convention":"bybit_fee_cost"})
+    appended=dict(rows[1],id="appended",trade_number="F9")
+    result=update_master_journal_workbook_incremental(path,[changed,appended],expected_survivor_row_ids=[r["id"] for r in [*rows,legacy,appended]])
+    assert result["ok"] and result["inserted_row_ids"]==["appended"]
+    reloaded={r["id"]:r for r in read_master_journal_source(path)["items"]}
+    assert reloaded["cashflow-0"]["commission"]==.25 and reloaded["appended"]["commission"]==.25
+    result=update_master_journal_workbook_incremental(path,[reloaded["cashflow-0"]])
+    assert result["ok"]
+    # Ordinary data-only writer also keeps signed canonical inputs stable.
+    snapshot["items"]=list(reloaded.values())
+    result=update_master_journal_workbook_data_only(path,snapshot,preserve_existing_layout=True,publish_recommendation_assets=False)
+    assert result["ok"]
+    mjw.os.replace(result["candidate_path"],path)
+    final={r["id"]:r for r in read_master_journal_source(path)["items"]}
+    for rid,row in reloaded.items():
+        for field in ("commission","net_profit","result_pct","r_multiple","balance_after_trade"):
+            assert final[rid][field]==row[field]
+    wb=load_workbook(path);ws=wb["Trade Log"]
+    assert ws.cell(_trade_log_row_by_id(ws,"historical"),headers["Notes"])._style==legacy_style
+    assert ws.cell(_trade_log_row_by_id(ws,"historical"),1).hyperlink.target=="https://example.invalid/retained"
+    assert wb["Preserved"]["A1"].value=="=2+3" and wb["Preserved"]["B2"].value=="neighbour"
+    assert wb["Preserved"]["B2"].fill.fgColor.rgb=="00112233"
+    assert ws.row_dimensions[_trade_log_row_by_id(ws,"historical")].height==29
+    before_balance=mjw._incremental_trade_log_preservation_signature(ws);wb.close()
+    result=update_master_journal_workbook_incremental(path,[],account_balance={"account_label":"BYBIT","balance":4321.25,"currency":"USDT","as_of":"2026-05-10T12:00:00Z","balance_source":"trade_timeline"})
+    assert result["ok"]
+    wb=load_workbook(path)
+    assert mjw._incremental_trade_log_preservation_signature(wb["Trade Log"])==before_balance
+    wb.close()
