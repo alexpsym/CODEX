@@ -9251,6 +9251,12 @@ def _parse_excel_account_workbook(
                     raw_excel[str(col_name)] = value
 
                 metrics: Dict[str, object] = {}
+                if commission_col:
+                    metrics["commission_origin"] = {"path": dbx_path, "sheet": sheet, "field": commission_col}
+                    convention_col = _first_present(df, ["commission_input_convention"])
+                    explicit = _safe_str_from_row(row, convention_col) if convention_col else ""
+                    if explicit in {"legacy_expense_only", "bybit_fee_cost", "native_signed"}:
+                        metrics["commission_input_convention"] = explicit
                 for key, col_name in extra_cols.items():
                     if not col_name:
                         continue
@@ -10878,6 +10884,15 @@ def _row_source_rank(row: Dict[str, object]) -> int:
 
 def _merge_duplicate_import_rows(primary: Dict[str, object], incoming: Dict[str, object]) -> Dict[str, object]:
     merged = dict(primary)
+    for existing in (primary, incoming):
+        metrics = existing.get("metrics") or {}
+        if (metrics.get("commission_cashflow_version") == 1 and metrics.get("commission_cashflow_repair")
+                and not _commission_protected(primary) and not _commission_protected(incoming)
+                and ((bool(primary.get("id")) and primary.get("id") == incoming.get("id")) or
+                     (_trade_execution_fingerprint(primary) is not None and
+                      _trade_execution_fingerprint(primary) == _trade_execution_fingerprint(incoming)))):
+            merged["commission"] = existing.get("commission")
+            merged["metrics"] = {**(merged.get("metrics") or {}), **copy.deepcopy(metrics)}
     for field in [
         "manual_overrides",
         "manual_override_fields",
@@ -46597,6 +46612,20 @@ def _commission_protected(row):
                for k in ("commission", "Commission"))
 
 
+def _commission_evidence_identity(row: dict):
+    native = _commission_native_identity(row)
+    contract = (row.get("metrics") or {}).get("commission_source_contract")
+    if isinstance(contract, dict):
+        if (contract.get("row_id") == row.get("id") and contract.get("contract_id")
+                and contract.get("field") and contract.get("evidence")
+                and contract.get("authority") in {"user_identified_paid_ledger", "historical_importer_contract", "explicit_source_field"}
+                and (row.get("metrics") or {}).get("commission_input_convention") in
+                {"legacy_expense_only", "bybit_fee_cost", "native_signed"}):
+            return ("source_contract", contract["contract_id"], row["id"])
+        return None
+    return native
+
+
 def _plan_historical_commissions(workbook_rows: list, provenance_rows: list, native_evidence: list) -> dict:
     """Read-only explicit maintenance plan from freshly parsed native evidence.
 
@@ -46604,13 +46633,13 @@ def _plan_historical_commissions(workbook_rows: list, provenance_rows: list, nat
     exports are usable only when identity, components and compatibility agree.
     No balances, accounting inputs or parser records are installed by this path.
     """
-    counts = {k: 0 for k in ("corrected", "already_correct", "proven_zero", "protected", "unmatched", "ambiguous", "unsupported", "unknown")}
+    counts = {k: 0 for k in ("corrected", "already_correct", "proven_zero", "protected", "unmatched", "ambiguous", "unsupported", "unknown", "blank", "nontrade")}
     by_id, native_by_id, native_by_key = defaultdict(list), defaultdict(list), defaultdict(list)
     for row in provenance_rows:
         by_id[str(row.get("id") or "")].append(row)
     for item in native_evidence:
         native_by_id[str(item["row"].get("id") or "")].append(item)
-        key = _commission_native_identity(item["row"])
+        key = _commission_evidence_identity(item["row"])
         if key:
             native_by_key[key].append(item)
     ids = Counter(str(r.get("id") or "") for r in workbook_rows)
@@ -46644,6 +46673,8 @@ def _plan_historical_commissions(workbook_rows: list, provenance_rows: list, nat
         return True
     for old in workbook_rows:
         if old.get("row_type", "trade") != "trade":
+            counts["nontrade"] += 1
+            classifications.append({"id": str(old.get("id") or ""), "account": account(old), "status": "nontrade", "reason": "not a trade"})
             continue
         rid = str(old.get("id") or "")
         retained = by_id.get(rid, [])
@@ -46652,28 +46683,37 @@ def _plan_historical_commissions(workbook_rows: list, provenance_rows: list, nat
             status = "ambiguous"
         elif _commission_protected(old) or any(_commission_protected(r) for r in retained):
             status = "protected"
+        elif old.get("commission") is None:
+            status = "blank"
+        elif old.get("commission") == 0:
+            status = "proven_zero"
+        elif retained and (retained[0].get("metrics") or {}).get("commission_cashflow_version") == 1:
+            status = "already_correct" if _mt5_values_close(old.get("commission"), retained[0].get("commission")) else "ambiguous"
         else:
             candidates = native_by_id.get(rid, [])
+            contracts = [item for item in candidates if item.get("evidence_type") == "source_contract"]
+            if contracts:
+                candidates = contracts
             if not candidates and retained:
-                candidates = native_by_key.get(_commission_native_identity(retained[0]), [])
+                candidates = native_by_key.get(_commission_evidence_identity(retained[0]), [])
             if not candidates:
-                status = "unknown" if not retained or not _commission_native_identity(retained[0]) else "unmatched"
+                status = "unknown" if not retained or not _commission_evidence_identity(retained[0]) else "unmatched"
         if status is None:
             signatures = set()
             for item in candidates:
                 fresh = item["row"]
                 metrics = fresh.get("metrics") or {}
-                signatures.add(json.dumps({"identity": _commission_native_identity(fresh),
+                signatures.add(json.dumps({"identity": _commission_evidence_identity(fresh),
                     "commission": fresh.get("commission"), "metrics": {k:v for k,v in metrics.items() if k.startswith(("commission_", "oanda_", "mt5_"))},
                     "compatibility": {k:fresh.get(k) for k in ("symbol","side","qty","entry_price","exit_price","open_time","close_time","currency")}}, sort_keys=True, default=str))
             if len(signatures) != 1:
                 status = "ambiguous"
             else:
                 item, fresh = candidates[0], candidates[0]["row"]
-                key = _commission_native_identity(fresh)
+                key = _commission_evidence_identity(fresh)
                 metrics = fresh.get("metrics") or {}
                 convention = metrics.get("commission_input_convention")
-                if not key or convention not in {"bybit_fee_cost", "oanda_broker_cost_signed_financing", "native_signed"}:
+                if not key or convention not in {"legacy_expense_only", "bybit_fee_cost", "oanda_broker_cost_signed_financing", "native_signed"}:
                     status = "unsupported"
                 elif not compatible(old, fresh) or any(not compatible(r, fresh) for r in retained):
                     status = "unsupported"
@@ -46703,7 +46743,9 @@ def _plan_historical_commissions(workbook_rows: list, provenance_rows: list, nat
                             status = "corrected"
                             additions = {"commission_input_convention": convention, "commission_cashflow_version": 1,
                                          "commission_raw_value": raw,
-                                         "commission_cashflow_repair": {"native_identity": key, "sources": [x["source"] for x in candidates]}}
+                                         "commission_cashflow_repair": {"native_identity": _commission_native_identity(fresh), "evidence_identity": key, "sources": [x["source"] for x in candidates]}}
+                            if metrics.get("commission_source_contract"):
+                                additions["commission_source_contract"] = copy.deepcopy(metrics["commission_source_contract"])
                             if convention == "bybit_fee_cost":
                                 additions["commission_raw_components"] = copy.deepcopy(metrics.get("commission_raw_components"))
                             if convention == "oanda_broker_cost_signed_financing":
@@ -46711,15 +46753,19 @@ def _plan_historical_commissions(workbook_rows: list, provenance_rows: list, nat
                             entries.append({"id": rid, "account": account(old), "trade_number": old.get("trade_number"),
                                 "before": {"commission": old.get("commission")}, "after": {"commission": after},
                                 "runtime_before": {"commission": retained[0].get("commission")} if retained else None,
-                                "metrics_additions": additions, "native_identity": key,
+                                "metrics_additions": additions, "native_identity": _commission_native_identity(fresh), "evidence_identity": key,
                                 "native_refs": fresh.get("raw_refs"), "source": item["source"],
                                 "components": copy.deepcopy(metrics), "currency": fresh.get("currency") or "AUD",
                                 "identity": {k:old.get(k) for k in ("symbol","side","qty","entry_price","exit_price")}})
         counts[status] += 1
-        classifications.append({"id": rid, "account": account(old), "status": status})
+        reason = {"protected": "explicit Commission override", "blank": "blank is not proof of zero or direction", "proven_zero": "existing numeric zero", "unknown": "no retained direction or applicable source contract", "unmatched": "source identity not found", "ambiguous": "duplicate identity or inconsistent representations", "unsupported": "conflicting amount, convention or compatibility"}.get(status)
+        if reason is None:
+            contract = ((candidates[0]["row"].get("metrics") or {}).get("commission_source_contract") if candidates else None)
+            reason = ("source-contract coverage: " + contract["authority"] + "; " + contract["evidence"]) if contract else "explicit normalized marker or proven native signed components"
+        classifications.append({"id": rid, "account": account(old), "status": status, "reason": reason})
     # One source aggregate must never own two existing rows.
-    owners = Counter(json.dumps(e["native_identity"]) for e in entries)
-    conflicts = {e["id"] for e in entries if owners[json.dumps(e["native_identity"])] > 1}
+    owners = Counter(json.dumps(e["evidence_identity"]) for e in entries)
+    conflicts = {e["id"] for e in entries if owners[json.dumps(e["evidence_identity"])] > 1}
     if conflicts:
         entries = [e for e in entries if e["id"] not in conflicts]
         for c in classifications:
@@ -46745,9 +46791,66 @@ def _historical_commission_record(row: dict, entry: dict) -> dict:
     return result
 
 
+def _historical_commission_recovery_bytes(payload: dict) -> bytes:
+    """The sole Job 13 recovery serializer, also used for exact byte accounting."""
+    return json.dumps(payload, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
+
+
+def _historical_commission_recovery_accounting(recovery: dict, retained_files: dict,
+                                               candidate_sizes: dict, external_bytes: int = 0) -> dict:
+    """Bound real coexisting files, including metadata replacement temporaries.
+
+    Candidates are installed sequentially. During failure metadata replacement,
+    the original recovery file, its replacement temp and one candidate may all
+    coexist. No arbitrary JSON-size allowance or different serializer is used.
+    """
+    if external_bytes < 0:
+        raise ValueError("Negative external recovery size")
+    accounting = {"retained_file_bytes": retained_files, "candidate_bytes": candidate_sizes,
+                  "external_recovery_bytes": external_bytes, "metadata_bytes_by_phase": {},
+                  "metadata_max_bytes": 0, "metadata_atomic_temp_bytes": 0,
+                  "coexisting_candidate_bytes": max(candidate_sizes.values(), default=0),
+                  "projected_peak_bytes": 0}
+    recovery["byte_accounting"] = accounting
+    phases = {"prepared": ("prepared", "uncommitted", False),
+              "committed": ("committed", "committed", True),
+              "recovered_uncommitted": ("recovered", "rolled_back_uncommitted", True),
+              "recovered_committed": ("recovered", "reversed_committed_owned_rows", True),
+              "ownership_lost": ("ownership_lost", "reversed_committed_owned_rows", True)}
+    # Decimal byte counts embedded in metadata are solved to a fixed point.
+    for _ in range(20):
+        prior = copy.deepcopy(accounting)
+        sizes = {}
+        for label, (phase, sql_phase, installed) in phases.items():
+            variant = dict(recovery, phase=phase, sqlite_phase=sql_phase,
+                           installed=list(candidate_sizes) if installed else [],
+                           installed_hashes=recovery["candidate_hashes"] if installed else {})
+            sizes[label] = len(_historical_commission_recovery_bytes(variant))
+        maximum = max(sizes.values())
+        accounting.update(metadata_bytes_by_phase=sizes, metadata_max_bytes=maximum,
+                          metadata_atomic_temp_bytes=maximum,
+                          projected_peak_bytes=sum(retained_files.values()) +
+                          max(candidate_sizes.values(), default=0) + 2 * maximum + external_bytes)
+        if accounting == prior:
+            return accounting
+    raise RuntimeError("Recovery serialization size did not converge")
+
+
+def _write_historical_commission_recovery(path: Path, recovery: dict) -> None:
+    data = _historical_commission_recovery_bytes(recovery)
+    accounting = recovery["byte_accounting"]
+    if len(data) > accounting["metadata_max_bytes"]:
+        raise ValueError("Recovery phase exceeds its serialized byte bound")
+    # This includes the old recovery file plus the new atomic-write temporary.
+    actual = sum(p.stat().st_size for p in path.parent.iterdir() if p.is_file())
+    if actual + len(data) + accounting["external_recovery_bytes"] > recovery["recovery_limit_bytes"]:
+        raise ValueError("Commission recovery exceeds 50 MiB")
+    _atomic_write_bytes(path, data)
+
+
 def _repair_historical_commissions(plan: dict, *, workbook_path: Path, store_paths: dict,
                                              backup_dir: Path, expected_revisions: dict,
-                                             expected_sqlite_rows: dict) -> dict:
+                                             expected_sqlite_rows: dict, external_recovery_bytes: int = 0) -> dict:
     """One locked, backed-up maintenance transaction; no importer or refresh.
 
     Candidates precede installation. SQLite keeps a write transaction open while
@@ -46816,7 +46919,8 @@ def _repair_historical_commissions(plan: dict, *, workbook_path: Path, store_pat
                 rid = value.get("id")
                 if rid in entries and "commission" in value:
                     patched = _historical_commission_record(value, entries[rid])
-                    cache_undo.setdefault(active_cache, []).append({"path": list(location), "before": value,
+                    cache_undo.setdefault(active_cache, []).append({"path": list(location), "id": rid,
+                        "before": {"commission": value.get("commission"), "metrics": copy.deepcopy(value.get("metrics")), "metrics_present": "metrics" in value},
                         "after_sha256": hashlib.sha256(json.dumps(patched, sort_keys=True).encode()).hexdigest()})
                     return patched
                 return {k: patch_snapshot(v, location + (k,)) for k,v in value.items()}
@@ -46864,27 +46968,50 @@ def _repair_historical_commissions(plan: dict, *, workbook_path: Path, store_pat
                 if not references_matched_identity(json.loads(sql_snapshot_original[1])):
                     raise ValueError("Current snapshot has no matched native trade identity")
         # Persist the complete candidate/rollback manifest before touching files.
-        recovery = {"phase": "prepared", "plan": plan, "package": package,
+        contracts, records = {}, []
+        for entry in plan["entries"]:
+            metadata = entry.get("metrics_additions") or {}
+            contract = metadata.get("commission_source_contract")
+            reference = None
+            if contract:
+                reference = contract["contract_id"]
+                shared = {k:v for k,v in contract.items() if k != "row_id"}
+                if reference in contracts and contracts[reference] != shared:
+                    raise ValueError("Conflicting shared commission contract")
+                contracts[reference] = shared
+            records.append({k:entry.get(k) for k in ("id", "identity", "before", "after", "native_identity", "evidence_identity")})
+            records[-1].update(contract_ref=reference, convention=metadata.get("commission_input_convention"))
+        recovery = {"phase": "prepared", "counts": plan["counts"], "sources": plan.get("sources", []),
+                    "contracts": contracts, "records": records, "package": package,
+                    "installed": [], "installed_hashes": {},
                     "original_hashes": {k: hashlib.sha256(v).hexdigest() for k, v in originals.items()},
-                    "sqlite_before": sql_originals, "sqlite_after": sql_candidates,
+                    "sqlite_before": sql_originals, "sqlite_after_sha256": {rid:hashlib.sha256(value.encode()).hexdigest() for rid,value in sql_candidates.items()},
                     "sqlite_invalidated_current_snapshot": sql_snapshot_original,
                     "sqlite_phase": "uncommitted", "full_database_backup": False,
                     "cache_undo": cache_undo, "paths": {k: str(v) for k,v in paths.items()},
                     "candidate_hashes": {k: hashlib.sha256(v).hexdigest() for k,v in candidates.items()},
                     "recovery_limit_bytes": recovery_limit}
-        recovery_bytes = len(json.dumps(recovery, ensure_ascii=False, indent=2).encode())
-        projected_bytes = sum(p.stat().st_size for p in backup_dir.iterdir() if p.is_file()) + sum(map(len, candidates.values())) + 2 * recovery_bytes
-        if projected_bytes > recovery_limit:
+        retained_files = {p.name:p.stat().st_size for p in backup_dir.iterdir() if p.is_file()}
+        accounting = _historical_commission_recovery_accounting(
+            recovery, retained_files, {k:len(v) for k,v in candidates.items()}, external_recovery_bytes)
+        if accounting["projected_peak_bytes"] > recovery_limit:
             raise ValueError("Commission recovery exceeds 50 MiB")
-        recovery["peak_recovery_bytes_bound"] = projected_bytes
-        _save_json_file(backup_dir / "recovery.json", recovery)
+        recovery["peak_recovery_bytes_bound"] = accounting["projected_peak_bytes"]
+        # Adding the compatibility field changes the serialized bytes: measure again.
+        accounting = _historical_commission_recovery_accounting(
+            recovery, retained_files, {k:len(v) for k,v in candidates.items()}, external_recovery_bytes)
+        recovery["peak_recovery_bytes_bound"] = accounting["projected_peak_bytes"]
+        accounting = _historical_commission_recovery_accounting(
+            recovery, retained_files, {k:len(v) for k,v in candidates.items()}, external_recovery_bytes)
+        if accounting["projected_peak_bytes"] > recovery_limit:
+            raise ValueError("Commission recovery exceeds 50 MiB")
+        _write_historical_commission_recovery(backup_dir / "recovery.json", recovery)
         if conn:
             for rid, value in sql_candidates.items():
                 conn.execute("UPDATE journal_trades SET payload_json=? WHERE id=?", (value, rid))
             if sql_snapshot_original:
                 conn.execute("DELETE FROM journal_stats WHERE snapshot_id=? AND payload_json=?", sql_snapshot_original[:2])
         for key, data in candidates.items():
-            _atomic_write_bytes(backup_dir / (key + ".candidate"), data)
             candidate_hashes[key] = hashlib.sha256(data).hexdigest()
         deletions = []
         # Recheck all file revisions and the native report immediately before install.
@@ -46894,6 +47021,8 @@ def _repair_historical_commissions(plan: dict, *, workbook_path: Path, store_pat
         if any(hashlib.sha256(Path(x["path"]).read_bytes()).hexdigest() != x["sha256"] for x in plan.get("sources", [])) or _master_journal_lock_status(workbook_path).get("locked"):
             raise RuntimeError("Commission source changed or workbook opened")
         for key, data in candidates.items():
+            # Only one output candidate coexists with retained undo at a time.
+            _atomic_write_bytes(backup_dir / (key + ".candidate"), data)
             os.replace(backup_dir / (key + ".candidate"), paths[key])
             installed.append(key)
         for key in deletions:
@@ -46913,11 +47042,12 @@ def _repair_historical_commissions(plan: dict, *, workbook_path: Path, store_pat
             conn.commit()
             sql_committed = True
         recovery.update(phase="committed", sqlite_phase="committed", installed=installed, installed_hashes=candidate_hashes)
-        _save_json_file(backup_dir / "recovery.json", recovery)
+        _write_historical_commission_recovery(backup_dir / "recovery.json", recovery)
         return {"ok": True, "noop": False, "counts": plan["counts"], "package": package,
                 "installed": installed, "sqlite_rows": len(sql_candidates), "backup_dir": str(backup_dir),
                 "full_database_backup": False,
-                "recovery_bytes": sum(p.stat().st_size for p in backup_dir.iterdir() if p.is_file())}
+                "recovery_bytes": sum(p.stat().st_size for p in backup_dir.iterdir() if p.is_file()),
+                "byte_accounting": accounting}
     except Exception:
         if conn:
             conn.rollback()
@@ -46939,13 +47069,13 @@ def _repair_historical_commissions(plan: dict, *, workbook_path: Path, store_pat
             current = hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else None
             if current != candidate_hashes[key]:
                 if recovery is not None:
-                    recovery.update(phase="ownership_lost", sqlite_phase="reversed_committed_owned_rows" if sql_committed else "rolled_back_uncommitted")
-                    _save_json_file(backup_dir / "recovery.json", recovery)
+                    recovery.update(installed=list(installed), installed_hashes=candidate_hashes, phase="ownership_lost", sqlite_phase="reversed_committed_owned_rows" if sql_committed else "rolled_back_uncommitted")
+                    _write_historical_commission_recovery(backup_dir / "recovery.json", recovery)
                 raise RuntimeError("Commission rollback ownership lost; recovery evidence retained")
             _restore_optional_file_snapshot(path, originals[key])
         if recovery is not None:
-            recovery.update(phase="recovered", sqlite_phase="reversed_committed_owned_rows" if sql_committed else "rolled_back_uncommitted")
-            _save_json_file(backup_dir / "recovery.json", recovery)
+            recovery.update(installed=list(installed), installed_hashes=candidate_hashes, phase="recovered", sqlite_phase="reversed_committed_owned_rows" if sql_committed else "rolled_back_uncommitted")
+            _write_historical_commission_recovery(backup_dir / "recovery.json", recovery)
         raise
     finally:
         if conn:

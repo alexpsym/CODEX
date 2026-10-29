@@ -10591,7 +10591,11 @@ def project_commission_cashflow(row: Mapping[str, Any]) -> Dict[str, Any]:
     if not convention:
         return result
     raw = _as_float(row.get("commission"))
-    if convention == "bybit_fee_cost":
+    if convention == "legacy_expense_only":
+        # Explicit paid-expense contracts accept either historical spelling.
+        # A signed cost/rebate field must use its separate source convention.
+        value = -raw if raw is not None and raw > 0 else raw
+    elif convention == "bybit_fee_cost":
         value = -raw if raw is not None else None
     elif convention == "oanda_broker_cost_signed_financing":
         cost = _as_float(metrics.get("oanda_broker_commission_total"))

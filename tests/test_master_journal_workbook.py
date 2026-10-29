@@ -13101,3 +13101,50 @@ def test_historical_commission_package_repair_preserves_workbook(tmp_path):
     bad=[{'id':'native-8','before':{'commission':99},'after':{'commission':-99}}]
     with pytest.raises(ValueError,match='revision'):
         mjw.prepare_historical_commission_package(source,tmp_path/'bad.xlsx',bad,expected_sha256=hashlib.sha256(source.read_bytes()).hexdigest())
+
+def test_legacy_commission_conventions_survive_write_readback(tmp_path, monkeypatch):
+    import sys, importlib.util, socket, threading
+    svc=sys.modules.get('render_master_service_journal_crud')
+    if svc is None:
+        spec=importlib.util.spec_from_file_location('render_master_service_journal_crud',Path(__file__).with_name('test_master_service_trading_journal_crud.py'))
+        module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module);svc=module.master_service
+    else:
+        # The service module is registered by the existing CRUD fixture loader.
+        svc=svc
+    def forbidden(*a,**k):pytest.fail('Legacy workbook fixture crossed an application boundary')
+    monkeypatch.setattr(svc,'_journal_transaction_lock_path',lambda _p:tmp_path/'transaction.lock')
+    monkeypatch.setattr(svc,'_master_journal_path',lambda:tmp_path/'legacy.xlsx')
+    for name in ('TRADING_JOURNAL_PATH','TRADING_JOURNAL_SQLITE_PATH','TRADING_JOURNAL_IMPORT_CACHE_PATH','TRADING_JOURNAL_VIEW_CACHE_PATH','TRADING_JOURNAL_RESYNC_CACHE_PATH','TRADING_JOURNAL_DERIVED_REFRESH_STATE_PATH','TRADING_JOURNAL_STATE_PATH','TRADING_JOURNAL_SYNC_STATE_PATH'):
+        monkeypatch.setattr(svc,name,tmp_path/(name+'.fixture'))
+    monkeypatch.setattr(svc,'_schedule_dropbox_upload_state_backup',forbidden)
+    monkeypatch.setattr(socket.socket,'connect',forbidden);monkeypatch.setattr(threading.Thread,'start',forbidden)
+    monkeypatch.setattr(mjw,'REPORT_START_YEAR',2026);monkeypatch.setattr(mjw,'REPORT_MIN_END_YEAR',2026)
+    monkeypatch.setattr(mjw,'assign_trade_numbers_and_create_folders',lambda *a,**k:{})
+    monkeypatch.setattr(mjw,'resolve_trade_folder_link',lambda *a,**k:(None,'fixture'))
+    snapshot=sample_snapshot();template=deepcopy(snapshot['items'][0]);template.pop('analysis_balance_after_trade',None)
+    cases=[(4.,'legacy_expense_only',-4.),(-2.,'legacy_expense_only',-2.),(.25,'native_signed',.25),(-.35,'bybit_fee_cost',.35),(.21623566,'native_signed',.21623566)]
+    rows=[]
+    for i,(amount,convention,expected) in enumerate(cases):
+        rows.append(dict(template,id='legacy-'+str(i),trade_number='F'+str(i+1),open_time='2020-01-01T10:00:00',close_time='2020-01-01T11:00:00',commission=amount,fees=amount,
+            net_profit=9.25,realized_pnl=9.25,result_pct=1.25,r_multiple=.5,balance_after_trade=109.25,metrics={'commission_input_convention':convention}))
+    snapshot['items']=rows;path=tmp_path/'legacy.xlsx'
+    assert svc._reserve_master_journal_workbook_sync(path,'legacy-fixture','test',wait_seconds=0) is None
+    try:
+        build_master_journal_workbook(snapshot,path,publish_recommendation_assets=False)
+        wb=load_workbook(path);ws=wb['Trade Log'];headers=_trade_log_header_map(ws);number=_trade_log_row_by_id(ws,'legacy-0')
+        ws.cell(number,headers['Notes']).font=Font(name='Verdana',bold=True,color='123456');style=copy(ws.cell(number,headers['Notes'])._style)
+        ws.cell(number,1).hyperlink='https://example.invalid/retained';extra=wb.create_sheet('Adjacent');extra['A1']='=2+3';extra['B2']='keep';wb.save(path);wb.close()
+        reloaded={r['id']:r for r in read_master_journal_source(path)['items']}
+        for i,(_,_,expected) in enumerate(cases):
+            row=reloaded['legacy-'+str(i)];assert row['commission']==expected
+            assert [row[k] for k in ('net_profit','result_pct','r_multiple','balance_after_trade')]==[9.25,1.25,.5,109.25]
+        updated=update_master_journal_workbook_incremental(path,list(reloaded.values()))
+        assert updated['ok']
+        snapshot['items']=list(reloaded.values());out=update_master_journal_workbook_data_only(path,snapshot,preserve_existing_layout=True,publish_recommendation_assets=False);assert out['ok'];mjw.os.replace(out['candidate_path'],path)
+        final={r['id']:r for r in read_master_journal_source(path)['items']}
+        for rid,row in reloaded.items():
+            for key in ('commission','net_profit','result_pct','r_multiple','balance_after_trade'):assert final[rid][key]==row[key]
+        wb=load_workbook(path);ws=wb['Trade Log'];number=_trade_log_row_by_id(ws,'legacy-0')
+        assert ws.cell(number,headers['Notes'])._style==style and ws.cell(number,1).hyperlink.target=='https://example.invalid/retained'
+        assert wb['Adjacent']['A1'].value=='=2+3' and wb['Adjacent']['B2'].value=='keep';wb.close()
+    finally:svc._release_master_journal_workbook_sync()

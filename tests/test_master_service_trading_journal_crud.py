@@ -8835,6 +8835,30 @@ def test_historical_commission_plan_requires_source_evidence_and_preserves_finan
         raw_refs={'account_fingerprint':'native','closing_deal_tickets':['1']},metrics={'commission_input_convention':'native_signed'})
     assert master_service._plan_historical_commissions([pepper],[pepper],[{'row':pepper,'source':ev[0]['source']}])['counts']['already_correct']==1
 
+    # A source contract is honest legacy provenance, never a broker identity.
+    for convention, raw, expected in [('legacy_expense_only',4.,-4.),('legacy_expense_only',-4.,-4.),('native_signed',2.,2.),('bybit_fee_cost',-2.,2.)]:
+        legacy=copy.deepcopy(row);legacy.update(id='sig:old-paid',open_time='2020-01-01T10:00:00',close_time='2020-01-01T11:00:00',commission=raw,raw_refs={})
+        proof=copy.deepcopy(legacy);proof['metrics']={'commission_input_convention':convention,'commission_source_contract':{
+            'row_id':legacy['id'],'contract_id':'explicit-old-ledger','authority':'user_identified_paid_ledger' if convention=='legacy_expense_only' else 'historical_importer_contract',
+            'field':'Commission' if convention=='legacy_expense_only' else 'Fees Paid','evidence':'User identifies this exact old paid-fee cohort; retained source contract distinguishes cost from cashflow.'}}
+        evidence=[{'row':proof,'source':ev[0]['source'],'evidence_type':'source_contract'}]
+        plan=master_service._plan_historical_commissions([legacy],[legacy],evidence)
+        if raw!=expected:
+            e=plan['entries'][0];assert e['native_identity'] is None and e['evidence_identity'][0]=='source_contract'
+            patched=master_service._historical_commission_record(legacy,e);assert patched['commission']==expected
+            assert {k:v for k,v in patched.items() if k not in ('commission','metrics')}=={k:v for k,v in legacy.items() if k not in ('commission','metrics')}
+            assert master_service._merge_duplicate_import_rows(legacy,patched)['commission']==expected
+        else:assert plan['counts']['already_correct']==1
+        protected=copy.deepcopy(legacy);protected['manual_overrides']={'commission':raw}
+        assert master_service._plan_historical_commissions([protected],[protected],evidence)['counts']['protected']==1
+        conflict=copy.deepcopy(proof);conflict['qty']=999
+        assert master_service._plan_historical_commissions([legacy],[legacy],evidence+[{'row':conflict,'source':ev[0]['source'],'evidence_type':'source_contract'}])['counts']['ambiguous']==1
+    # An alias without a proved convention is not expense evidence.
+    unproven=copy.deepcopy(row);unproven.update(id='sig:unmarked-old',raw_refs={},metrics={'commission_origin':{'field':'fees'}})
+    assert master_service._plan_historical_commissions([unproven],[unproven],[])['counts']['unknown']==1
+    blank=copy.deepcopy(unproven);blank['commission']=None
+    assert master_service._plan_historical_commissions([blank],[blank],[])['counts']['blank']==1
+
 
 def _job13_forbid_database_copies(monkeypatch):
     real_connect = sqlite3.connect
@@ -8855,11 +8879,28 @@ def _job13_forbid_database_copies(monkeypatch):
 def test_historical_commission_repair_updates_existing_stores_and_is_idempotent(tmp_path, monkeypatch):
     import tools.master_journal_workbook as mjw
     row,native,ev,workbook,stores,plan,revisions,sql=_job13_commission_fixture(tmp_path,monkeypatch)
+    legacy=copy.deepcopy(row);legacy.update(id='sig:legacy-2020',commission=4.,open_time='2020-01-01T10:00:00',close_time='2020-01-01T11:00:00',raw_refs={})
+    proof=copy.deepcopy(legacy);proof['metrics']={'commission_input_convention':'legacy_expense_only','commission_source_contract':{'row_id':legacy['id'],'contract_id':'old-ledger','authority':'user_identified_paid_ledger','field':'Commission','evidence':'Exact old paid cohort'}}
+    # Extend the actual workbook and stores without substituting fresh records.
+    wb=load_workbook(workbook);values=mjw._trade_log_row_values(legacy);values['Row ID']=legacy['id']
+    for col,h in enumerate(mjw.TRADE_LOG_HEADERS,1):wb['Trade Log'].cell(9,col,values.get(h))
+    wb.save(workbook);wb.close()
+    data=json.loads(stores['journal'].read_text());data['items'].append(legacy);stores['journal'].write_text(json.dumps(data))
+    for key in ('import_cache','view_cache'):
+        data=json.loads(stores[key].read_text())
+        (data['files']['matched']['rows'] if key=='import_cache' else data['items']).append(legacy)
+        stores[key].write_text(json.dumps(data))
+    with sqlite3.connect(stores['sqlite']) as c:c.execute('INSERT INTO journal_trades VALUES (?,?)',(legacy['id'],json.dumps(legacy)))
+    ev.append({'row':proof,'source':ev[0]['source'],'evidence_type':'source_contract'})
+    plan=master_service._plan_historical_commissions([row,legacy],[row,legacy],ev);plan['sources']=[ev[0]['source']]
+    import hashlib
+    revisions={"workbook":hashlib.sha256(workbook.read_bytes()).hexdigest(),**{k:hashlib.sha256(p.read_bytes()).hexdigest() for k,p in stores.items() if k!='sqlite'}}
+    with sqlite3.connect(stores['sqlite']) as c:sql=dict(c.execute('SELECT id,payload_json FROM journal_trades'))
     _job13_forbid_database_copies(monkeypatch)
     with sqlite3.connect(stores["sqlite"]) as c:
         c.execute("INSERT INTO journal_trades VALUES (?,?)", ("unrelated", json.dumps({"manual": "keep", "net_profit": 999})))
     result=master_service._repair_historical_commissions(plan,workbook_path=workbook,store_paths=stores,backup_dir=tmp_path/'backup',expected_revisions=revisions,expected_sqlite_rows=sql)
-    assert result['ok'] and result['sqlite_rows']==1
+    assert result['ok'] and result['sqlite_rows']==2
     assert result['full_database_backup'] is False
     recovery=json.loads((tmp_path/'backup/recovery.json').read_text())
     assert recovery['sqlite_before']==sql and recovery['sqlite_phase']=='committed'
@@ -8868,7 +8909,7 @@ def test_historical_commission_repair_updates_existing_stores_and_is_idempotent(
     assert recovery['peak_recovery_bytes_bound'] <= 50*1024*1024
     assert not (tmp_path/'backup/journal.sqlite').exists()
     assert not (tmp_path/'backup/view_cache.original').exists()
-    assert recovery['cache_undo']['view_cache'][0]['before']==row
+    assert recovery['cache_undo']['view_cache'][0]['before']=={'commission':row['commission'],'metrics':row['metrics'],'metrics_present':True}
     assert recovery['cache_undo']['view_cache'][0]['path']==['items',0]
     data=json.loads(stores['journal'].read_text());patched=data['items'][0]
     assert {k:v for k,v in patched.items() if k not in ('commission','metrics')}=={k:v for k,v in row.items() if k not in ('commission','metrics')}
@@ -8883,10 +8924,14 @@ def test_historical_commission_repair_updates_existing_stores_and_is_idempotent(
         assert json.loads(c.execute("SELECT payload_json FROM journal_trades WHERE id='unrelated'").fetchone()[0])=={'manual':'keep','net_profit':999}
         assert c.execute('SELECT * FROM journal_balances').fetchall()==[('keep',123)]
         assert c.execute('SELECT * FROM journal_stats').fetchall()==[('history','{}','keep')]
-    projected=mjw.read_master_journal_source(workbook)['items'][0]
+    all_projected=mjw.read_master_journal_source(workbook)['items']
+    legacy_actual=next(r for r in all_projected if r['id']==legacy['id']);assert legacy_actual['commission']==-4
+    current_items=json.loads(stores['journal'].read_text())['items']
+    legacy_runtime=next(r for r in current_items if r['id']==legacy['id']);assert legacy_runtime['commission']==-4 and legacy_runtime['net_profit']==legacy['net_profit']
+    projected=next(r for r in all_projected if r['id']==row['id'])
     assert projected['commission']==-3 and mjw.project_commission_cashflow(projected)['commission']==-3
-    second=master_service._plan_historical_commissions([projected],[patched],ev)
-    assert second['counts']['already_correct']==1
+    second=master_service._plan_historical_commissions(all_projected,[patched,legacy_runtime],ev)
+    assert second['counts']['already_correct']==2
     before={k:p.read_bytes() for k,p in {'workbook':workbook,**stores}.items()}
     assert master_service._repair_historical_commissions(second,workbook_path=workbook,store_paths=stores,backup_dir=tmp_path/'noop',expected_revisions={},expected_sqlite_rows={})['noop']
     assert not (tmp_path/'noop').exists()
@@ -8917,12 +8962,12 @@ def test_historical_commission_repair_failure_preserves_original_state(tmp_path,
     assert json.loads((tmp_path/'install/recovery.json').read_text())['sqlite_phase']=='rolled_back_uncommitted'
     # Fail after COMMIT: undo only the exact owned SQL payloads and installed files.
     monkeypatch.setattr(master_service.os,'replace',replace)
-    save=master_service._save_json_file
+    save=master_service._write_historical_commission_recovery
     def fail_committed(path,value):
         if Path(path).name=='recovery.json' and value.get('phase')=='committed':
             raise OSError('controlled post-commit failure')
         return save(path,value)
-    monkeypatch.setattr(master_service,'_save_json_file',fail_committed)
+    monkeypatch.setattr(master_service,'_write_historical_commission_recovery',fail_committed)
     with pytest.raises(OSError,match='post-commit'):
         master_service._repair_historical_commissions(plan,workbook_path=workbook,store_paths=stores,backup_dir=tmp_path/'committed',expected_revisions=revisions,expected_sqlite_rows=sql)
     assert {k:v for k,v in before.items() if k!='sqlite'}=={k:p.read_bytes() for k,p in {'workbook':workbook,**stores}.items() if k!='sqlite'}
@@ -8930,7 +8975,7 @@ def test_historical_commission_repair_failure_preserves_original_state(tmp_path,
         assert {table:c.execute('SELECT * FROM '+table).fetchall() for table in before_rows}==before_rows
     recovered=json.loads((tmp_path/'committed/recovery.json').read_text())
     assert recovered['phase']=='recovered' and recovered['sqlite_phase']=='reversed_committed_owned_rows'
-    monkeypatch.setattr(master_service,'_save_json_file',save)
+    monkeypatch.setattr(master_service,'_write_historical_commission_recovery',save)
     # A concurrent file revision is never overwritten during owned recovery.
     def lose_ownership(src,dst):
         if Path(src).name=='workbook.candidate':
@@ -8956,3 +9001,85 @@ def test_historical_commission_repair_failure_preserves_original_state(tmp_path,
         master_service._repair_historical_commissions(plan,workbook_path=workbook,store_paths=stores,backup_dir=tmp_path/'revision',expected_revisions=wrong,expected_sqlite_rows=sql)
     assert master_service._reserve_master_journal_workbook_sync(workbook,'released','test',wait_seconds=0) is None
     master_service._release_master_journal_workbook_sync()
+
+def test_historical_commission_recovery_size_matches_written_artifacts(tmp_path, monkeypatch):
+    import hashlib
+    row,native,ev,workbook,stores,_,_,_=_job13_commission_fixture(tmp_path,monkeypatch)
+    _job13_forbid_database_copies(monkeypatch)
+    import tools.master_journal_workbook as mjw
+    originals=[];evidence=[]
+    for i in range(551):
+        old=copy.deepcopy(row);old.update(id='sig:synthetic-'+str(i),commission=1.+i*0.125,trade_number='F'+str(i+1),raw_refs={},notes='synthetic original note '+str(i),metrics={'retained':'unchanged'})
+        proof=copy.deepcopy(old);proof['metrics']={'commission_input_convention':'legacy_expense_only','commission_source_contract':{
+            'row_id':old['id'],'contract_id':'synthetic-paid-cohort','authority':'user_identified_paid_ledger','field':'Commission',
+            'evidence':'Synthetic source contract shared by this explicitly identified paid cohort. '*6,'historical_commit':'synthetic-not-a-broker-id'}}
+        originals.append(old);evidence.append({'row':proof,'source':ev[0]['source'],'evidence_type':'source_contract'})
+    wb=Workbook();ws=wb.active;ws.title='Trade Log'
+    for col,header in enumerate(mjw.TRADE_LOG_HEADERS,1):ws.cell(1,col,header)
+    for number,old in enumerate(originals,8):
+        values=mjw._trade_log_row_values(old);values['Row ID']=old['id']
+        for col,header in enumerate(mjw.TRADE_LOG_HEADERS,1):ws.cell(number,col,values.get(header))
+    wb.save(workbook);wb.close()
+    stores['journal'].write_text(json.dumps({'items':originals,'balances':[123]}))
+    stores['view_cache'].write_text(json.dumps({'items':originals,'unrelated_derived_payload':'x'*(28*1024*1024),'balances':[123]}))
+    stores['import_cache'].write_text(json.dumps({'files':{'unchanged':{'rows':[{'id':'other','manual':'keep'}]}}}))
+    with sqlite3.connect(stores['sqlite']) as c:
+        c.execute('DELETE FROM journal_trades')
+        c.executemany('INSERT INTO journal_trades VALUES (?,?)',[(r['id'],json.dumps(r)) for r in originals])
+    plan=master_service._plan_historical_commissions(originals,originals,evidence);plan['sources']=[ev[0]['source']]
+    def inputs():
+        revisions={'workbook':hashlib.sha256(workbook.read_bytes()).hexdigest(),**{k:hashlib.sha256(p.read_bytes()).hexdigest() for k,p in stores.items() if k!='sqlite'}}
+        with sqlite3.connect(stores['sqlite']) as c:sql=dict(c.execute('SELECT id,payload_json FROM journal_trades'))
+        return revisions,sql
+    revisions,sql=inputs();writes=[];actual_peak={};real=master_service._atomic_write_bytes
+    def measured_write(path,data):
+        path=Path(path)
+        if path.parent.name in ('bounded-valid','bounded-oversized'):
+            current=sum(p.stat().st_size for p in path.parent.iterdir() if p.is_file())
+            actual_peak[path.parent.name]=max(actual_peak.get(path.parent.name,0),current+len(data)+4096)
+            writes.append((path.name,len(data),bytes(data) if path.name=='recovery.json' else None))
+        result=real(path,data)
+        assert path.stat().st_size==len(data)
+        return result
+    monkeypatch.setattr(master_service,'_atomic_write_bytes',measured_write)
+    result=master_service._repair_historical_commissions(plan,workbook_path=workbook,store_paths=stores,backup_dir=tmp_path/'bounded-valid',expected_revisions=revisions,expected_sqlite_rows=sql,external_recovery_bytes=4096)
+    assert result['ok'] and result['sqlite_rows']==551 and not result['full_database_backup']
+    recovery=json.loads((tmp_path/'bounded-valid/recovery.json').read_text());a=recovery['byte_accounting']
+    assert set(recovery['sqlite_before'])==set(sql) and recovery['sqlite_before']==sql
+    assert len(recovery['sqlite_after_sha256'])==551 and 'sqlite_after' not in recovery and 'plan' not in recovery
+    assert len(recovery['contracts'])==1 and len(recovery['records'])==551
+    assert a['projected_peak_bytes']==sum(a['retained_file_bytes'].values())+max(a['candidate_bytes'].values())+2*a['metadata_max_bytes']+4096
+    assert actual_peak['bounded-valid']<=a['projected_peak_bytes']<=50*1024*1024
+    for name,size,data in writes:
+        if name.endswith('.candidate'):assert size==a['candidate_bytes'][name[:-10]]
+        if data is not None:
+            value=json.loads(data);assert data==master_service._historical_commission_recovery_bytes(value)
+            assert len(data)==a['metadata_bytes_by_phase'][value['phase']]
+    with sqlite3.connect(stores['sqlite']) as c:
+        actual=dict(c.execute('SELECT id,payload_json FROM journal_trades'))
+        for rid,value in actual.items():
+            assert hashlib.sha256(value.encode()).hexdigest()==recovery['sqlite_after_sha256'][rid]
+            before=json.loads(recovery['sqlite_before'][rid]);after=json.loads(value)
+            assert after['commission']==-before['commission']
+            assert {k:v for k,v in before.items() if k not in ('commission','metrics')}=={k:v for k,v in after.items() if k not in ('commission','metrics')}
+        assert c.execute('SELECT * FROM journal_balances').fetchall()==[('keep',123)]
+        assert c.execute('SELECT * FROM journal_stats').fetchall()==[('history','{}','keep')]
+    assert not (tmp_path/'bounded-valid/journal.sqlite').exists() and not (tmp_path/'bounded-valid/view_cache.original').exists()
+    assert len(recovery['cache_undo']['view_cache'])==551
+    # A genuine oversized output candidate is rejected before any installation.
+    stores['journal'].write_text(json.dumps({'items':originals,'balances':[123]}))
+    stores['view_cache'].write_text(json.dumps({'items':originals,'unrelated_derived_payload':'x'*(52*1024*1024),'balances':[123]}))
+    with sqlite3.connect(stores['sqlite']) as c:
+        for rid,value in sql.items():c.execute('UPDATE journal_trades SET payload_json=? WHERE id=?',(value,rid))
+    # Workbook fixture is returned to the exact planned Commission values.
+    wb=load_workbook(workbook);headers=mjw._trade_log_header_map(wb['Trade Log'])
+    for n,old in enumerate(originals,8):wb['Trade Log'].cell(n,headers['Commission'],old['commission'])
+    wb.save(workbook);wb.close();revisions,sql=inputs()
+    before={k:hashlib.sha256(p.read_bytes()).hexdigest() for k,p in {'workbook':workbook,**stores}.items()}
+    with pytest.raises(ValueError,match='exceeds 50 MiB'):
+        master_service._repair_historical_commissions(plan,workbook_path=workbook,store_paths=stores,backup_dir=tmp_path/'bounded-oversized',expected_revisions=revisions,expected_sqlite_rows=sql,external_recovery_bytes=4096)
+    assert before=={k:hashlib.sha256(p.read_bytes()).hexdigest() for k,p in {'workbook':workbook,**stores}.items()}
+    rejected=json.loads((tmp_path/'bounded-oversized/recovery.json').read_text())
+    assert rejected['phase']=='recovered' and rejected['sqlite_phase']=='rolled_back_uncommitted'
+    assert not (tmp_path/'bounded-oversized/view_cache.candidate').exists()
+    assert not (tmp_path/'bounded-oversized/journal.sqlite').exists()
