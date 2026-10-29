@@ -1,3 +1,87 @@
+JOB 13 - SOURCE-PROVED HISTORICAL COMMISSION REPAIR - 29 October 2026
+
+PRODUCTION REPAIR: PASSED, final exit 0; 166.414 seconds (300-second maximum). Worker PID 15772. Exactly one new production attempt in this replacement continuation. Previous failed attempts remain recorded, not treated as unspent. Actual configured canonical workbook: C:\GPT\CODEX-master\journal\Trading Journal.xlsx. Generated current production candidates through the existing narrow OOXML maintenance path; no old temporary candidate was installed.
+
+STORAGE CLEANUP: One reviewed exact-path batch removed 32 task-owned redundant files, apparent bytes 18182180796. Measured free space before 34783232; after 18217025536; recovered 18182242304 bytes. Original production SQLite, its sidecars, canonical workbook, native reports, user files and other jobs were retained. No recursive/wildcard/directory deletion. Full ownership/hash/redundancy evidence: .job13_20261029_01/bounded-cleanup.json. Deleted files (apparent bytes):
+705013 C:\GPT\CODEX-master\.job13_20261029_01\workbook.original
+5790520 C:\GPT\CODEX-master\.job13_20261029_01\journal.original
+5964 C:\GPT\CODEX-master\.job13_20261029_01\import_cache.original
+32198943 C:\GPT\CODEX-master\.job13_20261029_01\view_cache.original
+12109 C:\GPT\CODEX-master\.job13_20261029_01\derived.original
+705031 C:\GPT\CODEX-master\.job13_20261029_01\acceptance-copy-continuation-01\workbook.xlsx
+5815853 C:\GPT\CODEX-master\.job13_20261029_01\acceptance-copy-continuation-01\journal.json
+5165588480 C:\GPT\CODEX-master\.job13_20261029_01\acceptance-copy-continuation-01\sqlite.sqlite
+5964 C:\GPT\CODEX-master\.job13_20261029_01\acceptance-copy-continuation-01\import_cache.json
+31526221 C:\GPT\CODEX-master\.job13_20261029_01\acceptance-copy-continuation-01\view_cache.json
+12109 C:\GPT\CODEX-master\.job13_20261029_01\acceptance-copy-continuation-01\derived.json
+705013 C:\GPT\CODEX-master\.job13_20261029_01\acceptance-copy-continuation-01\backups\workbook.original
+5790520 C:\GPT\CODEX-master\.job13_20261029_01\acceptance-copy-continuation-01\backups\journal.original
+5964 C:\GPT\CODEX-master\.job13_20261029_01\acceptance-copy-continuation-01\backups\import_cache.original
+32198943 C:\GPT\CODEX-master\.job13_20261029_01\acceptance-copy-continuation-01\backups\view_cache.original
+12109 C:\GPT\CODEX-master\.job13_20261029_01\acceptance-copy-continuation-01\backups\derived.original
+5165572096 C:\GPT\CODEX-master\.job13_20261029_01\acceptance-copy-continuation-01\backups\journal.sqlite
+705031 C:\GPT\CODEX-master\.job13_20261029_01\acceptance-copy-continuation-01\backups\commission-candidate.xlsx
+705013 C:\GPT\CODEX-master\.job13_20261029_01\acceptance-copy\workbook.xlsx
+5790520 C:\GPT\CODEX-master\.job13_20261029_01\acceptance-copy\journal.json
+5165572096 C:\GPT\CODEX-master\.job13_20261029_01\acceptance-copy\sqlite.sqlite
+5964 C:\GPT\CODEX-master\.job13_20261029_01\acceptance-copy\import_cache.json
+32198943 C:\GPT\CODEX-master\.job13_20261029_01\acceptance-copy\view_cache.json
+12109 C:\GPT\CODEX-master\.job13_20261029_01\acceptance-copy\derived.json
+705013 C:\GPT\CODEX-job13-backups\job13-production-retry-20261029-38772\workbook.original
+5790520 C:\GPT\CODEX-job13-backups\job13-production-retry-20261029-38772\journal.original
+5964 C:\GPT\CODEX-job13-backups\job13-production-retry-20261029-38772\import_cache.original
+32198943 C:\GPT\CODEX-job13-backups\job13-production-retry-20261029-38772\view_cache.original
+12109 C:\GPT\CODEX-job13-backups\job13-production-retry-20261029-38772\derived.original
+2491121664 C:\GPT\CODEX-job13-backups\job13-production-retry-20261029-38772\journal.sqlite
+1024 C:\GPT\CODEX-job13-backups\job13-production-retry-20261029-38772\journal.sqlite-journal
+705031 C:\GPT\CODEX-job13-backups\job13-production-retry-20261029-38772\commission-candidate.xlsx
+
+BOUNDED RECOVERY: No full SQLite backup, copy, dump, compression, export or equivalent was created. SQLite durability/journal mode/synchronization and locking were not changed. Job 13 alone now retains exact edited SQL before/after payloads and identities, small original workbook/journal bytes, sparse matched cache-record undo paths, source/file hashes, candidate ownership hashes and transaction phase. No recomputable cache was backed up wholesale. Atomic cache output candidates were temporary and stayed within the combined 50 MiB peak cap. General LTT backups and Job 11 maintenance were not changed.
+Unique recovery directory: C:\GPT\CODEX-job13-backups\job13-bounded-20261029-15772
+Actual retained recovery bytes: 7565176; calculated peak bound: 45956003; cap 52,428,800 bytes. Durable recovery manifest: C:\GPT\CODEX-job13-backups\job13-bounded-20261029-15772\recovery.json; phase committed / SQLite phase committed. Exact SQL undo covers 11 existing records. No whole-database recovery is used. Uncommitted rollback and owned committed-record reversal are distinguished; file recovery rejects revisions no longer owned by the attempt.
+Space calculation: recovery cap 52428800 + SQL transaction working bound 16777216 + additional headroom 1073741824 = 1142947840 bytes; measured free before repair 18201894912. No full-backup/8 GiB gate was imposed.
+
+TARGETED VERIFICATION: Exactly the two authorized nodes were run. Invocation 1: success/idempotence PASSED; recovery node FAILED because the added committed-undo assertion compared raw SQLite bytes, whose change counters legitimately advance. All restored data remained correct. The assertion was corrected to compare every SQL record/table and retain exact non-SQL file checks. Invocation 2: only failed recovery node PASSED, exit 0. Total 2 distinct nodes, 2 invocations, 3 executions. Results/verbose logs/JUnit: bounded-pytest-1-result.json/log/xml and bounded-pytest-2-result.json/log/xml. Invocation 1 exit 1 / pytest 74.95 seconds; invocation 2 exit 0 / pytest 45.98 seconds. Fresh checkout-owned basetemps were create/write/read/rename/delete/directory-probed by the same Python child, with logs separate. Real fixture-local journal locks, runtime/application/network isolation retained.
+The tests forbid Connection.backup/iterdump and SQL copy commands; verify no full DB/cache backup artifacts, the 50 MiB cap, sparse cache undo, successful correction/repeated no-op, actual uncommitted rollback, recovery after commit and refusal to overwrite a concurrent file. Unrelated records, balances, manual fields and history remain preserved. The other original tests, 14.07-second population guard, 9.24-second caller check and 179.36-second full-size acceptance were NOT rerun. Prior acceptance remains evidence for unchanged matching/arithmetic/package preservation; authorized recovery-only code delta is recorded in bounded-code-review.json.
+
+ACTUAL RESULTS: Corrected 11 (BYBIT DEMO 10; OANDA DEMO 1). Already correct 9 (PEPPERSTONE DEMO 7; OANDA LIVE 2). Proven zero 34 OANDA LIVE, retaining blank display. Protected 0; unmatched 0; ambiguous 0. Unsupported 19 OANDA LIVE and unknown 1,393 remain unchanged and are NOT proved correctly signed. Existing nontrade rows excluded. Unknown by account: BINANCE 110, BYBIT 264, BYBIT DEMO 10, OANDA DEMO 70, OANDA LIVE 4, PEPPERSTONE DEMO 759, PEPPERSTONE LIVE 176.
+Corrected workbook cells / unchanged Net P/L:
+C385 N4 DOODUSDT: Commission -0.21623566 -> 0.21623566; Net P/L unchanged -2.882464339999994
+C383 N5 WETUSDT: Commission 0.04302901 -> -0.04302901; Net P/L unchanged -3.047669009999995
+C382 N6 TREEUSDT: Commission 0.02533584 -> -0.025335840000000002; Net P/L unchanged 9.113360160000003
+C380 N7 QUSDT: Commission 0.05345593 -> -0.05345593; Net P/L unchanged -3.004155929999998
+C379 N9 QUSDT: Commission 0.05664437999999999 -> -0.056644379999999994; Net P/L unchanged -2.75934438
+(no trade number) N10 BTCUSDT: Commission 0.46276594 -> -0.46276594; Net P/L unchanged 1.174234060000057
+C379 N11 BTCUSDT: Commission 0.44694678 -> -0.44694678; Net P/L unchanged -0.4714467799999322
+(no trade number) N12 BTCUSDT: Commission 0.46918964 -> -0.46918964; Net P/L unchanged -0.9021896399999927
+(no trade number) N13 BTCUSDT: Commission 0.44860366 -> -0.44860365999999996; Net P/L unchanged -0.4366036600000563
+C377 N17 BTCUSDT: Commission 0.48115409 -> -0.48115409000000003; Net P/L unchanged -3.135154089999996
+(no trade number) N26 EURUSD: Commission 0.9608 -> -0.9608; Net P/L unchanged 17.4233
+DOODUSDT C385 combines native trade-history fees 0.09025481 and funding cost -0.30649047, producing received cashflow +0.21623566. OANDA Demo 652:664 uses signed financing -0.9608 and broker charges zero; spread metrics excluded. Source/component amounts, currencies and native grouping are in bounded-production-manifest.json/recovery.json. Native Pepperstone signs were retained; separate fees/swaps were not newly combined. No sign/account/side/P&L inference, blanket negation, -abs, estimates or new conversion occurred.
+
+PRESERVATION: Independently decoded all 11 actual output Commission cells and compared every unapproved worksheet byte, unaffected package payload and ZIP metadata to original production bytes. All other values/formulas/caches, fonts/styles/layout/dimensions/filters/panes/merges/borders/sheets/charts/validation/relationships/hyperlinks are identical, including Job 9 blue underlined links and Job 11 corrected timestamps/dependent labels.
+Independent actual JSON roots/records and complete typed SQL schema/table/record fingerprints matched the current before-state with only approved Commission/provenance changes. Net P/L, net_profit, realized_pnl, Profit %, R, balances/equity, raw accounting inputs, quantities/prices/SL/TP, currencies/precision, IDs/numbers/order/manual fields/overrides and unrelated history remain unchanged. No P/L recalculation or second fee charge. Runtime installed keys journal, view_cache, workbook; SQL rows 11.
+journal: 11 matched rows patched, all unrelated values/order retained.
+import_cache: 0 matched rows patched, all unrelated values/order retained.
+view_cache: 11 matched rows patched, all unrelated values/order retained.
+derived: 0 matched rows patched, all unrelated values/order retained.
+Missing resync store remains absent. No global cache clearing/version bump, startup migration, queued refresh or general resync. Cache changes are exact matched records with sparse undo; unrelated cache entries and audit snapshots remain intact.
+Production cumulative stage times:
+0.01s START pid=15772 result=C:\GPT\CODEX-master\.job13_20261029_01\bounded-production-result.json
+82.77s current sources, exact approved identities, revisions and complete SQL before-state verified
+91.379s production transaction committed; starting independent output readback
+93.55s independent complete OOXML payload and metadata readback passed
+95.212s actual JSON records and all excluded fields verified
+166.411s all SQLite schemas, records, balances and history independently verified
+Evidence: bounded-production-result.json/exit.json/identity.json/stages.log, bounded-production-manifest.json, bounded-space-plan.json, bounded-code-review.json, bounded-cleanup.json under C:\GPT\CODEX-master\.job13_20261029_01. Prior compact acceptance/log/manifests/hashes were preserved after deleting their bulk copies.
+
+DELIVERY: Original Job 13 workbook Git baseline was clean; current original backup equals HEAD workbook bytes, and complete package comparison proves exclusively the 11 approved Commission-cell corrections. It is eligible with the four task source/test paths and this summary for the single scoped commit. Runtime files, reports, recovery, logs, callers and manifests remain unstaged. Unrelated user work is preserved. PATCH_DESKTOP_PUSH.bat was not run. This summary accompanies that scoped commit; the protected-helper push outcome and freshly verified local/origin/remote SHA are reported in the final response and local delivery record. Do not claim delivery until push verification passes.
+
+After successful delivery the user may start LTT normally, inspect existing corrected Commission values beside unchanged Net P/L, and reload the browser/Ctrl+R. No new trade, account operation or journal resync is required. No user acceptance or complete historical coverage is claimed.
+Job 12 was future-write projection only; Job 11 manual acceptance PASSED 29 October 2026 and is preserved. Jobs 14-15 queued. Job 5 live price-movement observation pending. ETH fee/target work CANCELLED; hosted Render DEFERRED.
+
+--- Prior summaries retained ---
+
 JOB 12 - FUTURE COMMISSION CASHFLOWS: IMPLEMENTED / TARGETED VERIFICATION PASSED (2026-10-29)
 
 JOB 11 MANUAL ACCEPTANCE: PASSED, explicitly confirmed by the user on 29 October 2026. Preserve all seven delivered timestamp corrections and all earlier accepted work. No Job 11 production records were inspected or rewritten in Job 12.

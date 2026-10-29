@@ -21128,3 +21128,82 @@ def refresh_master_journal_derived_sheets(path: Path, snapshot: Dict[str, Any]) 
         return {"ok": False, "error": "derived_sheet_candidate_missing", "path": str(path)}
     candidate.replace(path)
     return {"ok": True, "path": str(path), "diagnostics": result.get("diagnostics") or {}}
+
+
+def prepare_historical_commission_package(path: Path, candidate_path: Path, updates: list, *, expected_sha256: str):
+    """Prepare Commission-only OOXML edits; never save a workbook through openpyxl."""
+    path, candidate_path = Path(path), Path(candidate_path)
+    original = path.read_bytes()
+    if hashlib.sha256(original).hexdigest() != expected_sha256:
+        raise RuntimeError("Commission workbook revision changed")
+    if candidate_path.exists() or candidate_path.resolve() == path.resolve():
+        raise ValueError("Commission candidate must be fresh")
+    if path.with_name("~$" + path.name).exists():
+        raise RuntimeError("Excel owner file exists")
+    workbook = load_workbook(BytesIO(original), read_only=True, data_only=False)
+    edits = {}
+    try:
+        ws = _get_trade_log_sheet(workbook)
+        headers = _trade_log_header_map(ws)
+        if not {"Row ID", "Commission"}.issubset(headers):
+            raise ValueError("Commission headers missing")
+        targets = {u["id"]: u for u in updates}
+        if len(targets) != len(updates):
+            raise ValueError("Duplicate Commission Row ID")
+        seen = set()
+        for cells in ws.iter_rows(min_row=_trade_log_data_start_row(ws)):
+            rid = str(cells[headers["Row ID"] - 1].value or "")
+            if rid not in targets:
+                continue
+            if rid in seen:
+                raise ValueError("Ambiguous Commission Row ID")
+            seen.add(rid)
+            cell = cells[headers["Commission"] - 1]
+            update = targets[rid]
+            if cell.data_type == "f" or cell.value != update["before"]["commission"]:
+                raise ValueError("Commission cell revision or formula conflict")
+            desired = update["after"]["commission"]
+            if desired is not None and (not isinstance(desired, (float, int)) or not math.isfinite(desired)):
+                raise ValueError("Invalid Commission value")
+            desired = None if desired == 0 else desired
+            if cell.value != desired:
+                edits[cell.coordinate] = {"before": cell.value, "after": desired, "id": rid}
+        if seen != set(targets):
+            raise ValueError("Commission Row ID missing")
+    finally:
+        workbook.close()
+    if not edits:
+        return {"noop": True, "changed_cells": {}, "initial_sha256": expected_sha256, "final_sha256": expected_sha256}
+    with zipfile.ZipFile(BytesIO(original)) as package:
+        part = _worksheet_ooxml_part_name(package, "Trade Log")
+        seen = set()
+        def patch(match):
+            cell = match.group()
+            address = re.search(rb'\br="([A-Z]+[0-9]+)"', cell).group(1).decode()
+            if address not in edits:
+                return cell
+            if address in seen or re.search(rb'<(?:\w+:)?f\b', cell):
+                raise ValueError("Duplicate or formula Commission cell")
+            seen.add(address)
+            opening = cell[:cell.index(b'>') + 1]
+            opening = re.sub(rb'\s+t="[^"]*"', b'', opening)
+            opening = opening[:-2] + b'>' if opening.endswith(b'/>') else opening
+            body = b'' if cell.endswith(b'/>') else cell[cell.index(b'>')+1:-4]
+            if body and not re.fullmatch(rb'(?:<v>[^<]*</v>|<is>.*</is>)?', body, flags=re.S):
+                raise ValueError("Ambiguous Commission cell payload")
+            value = edits[address]["after"]
+            return opening + (b'' if value is None else b'<v>' + repr(value).encode() + b'</v>') + b'</c>'
+        payload = re.sub(rb'<c\b[^<>]*\br="[A-Z]+[0-9]+"[^<>]*?(?:/>|>(?:(?!</?(?:c|row)\b).)*</c>)', patch, package.read(part), flags=re.S)
+        if seen != set(edits):
+            raise ValueError("Commission target cell missing")
+        with zipfile.ZipFile(candidate_path, 'x') as candidate:
+            candidate.comment = package.comment
+            for info in package.infolist():
+                candidate.writestr(info, payload if info.filename == part else package.read(info.filename))
+    _validate_historical_commission_package(original, candidate_path, part, payload)
+    return {"noop": False, "part": part, "changed_cells": edits, "initial_sha256": expected_sha256,
+            "final_sha256": hashlib.sha256(candidate_path.read_bytes()).hexdigest()}
+
+
+def _validate_historical_commission_package(original, candidate_path, part, payload):
+    _validate_pepperstone_timestamp_package(original, candidate_path, part, payload)

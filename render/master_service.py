@@ -46572,3 +46572,382 @@ async def local_exit(payload: Dict[str, object] = Body(default_factory=dict)) ->
     }
     response = JSONResponse(response_payload)
     return response
+
+
+def _commission_native_identity(row: dict):
+    """Native aggregate identity, never a price/time/sign heuristic."""
+    refs = row.get("raw_refs") or {}
+    rid = str(row.get("id") or "")
+    if rid.startswith("bybit:") and refs.get("parser") == "bybit_execution_history_grouped":
+        ids = refs.get("exec_ids") or []
+        funding = refs.get("funding_exec_ids") or []
+        if ids and len(set(ids + funding)) == len(ids + funding):
+            return ("bybit", rid.split(":")[1], tuple(ids), tuple(funding))
+    if rid.startswith("oanda_export:"):
+        parts = rid.split(":")
+        if len(parts) == 4 and refs.get("open_ticket") == parts[2] and refs.get("close_ticket") == parts[3]:
+            return ("oanda", parts[1], parts[2], parts[3])
+    if refs.get("account_fingerprint") and (refs.get("closing_deal_tickets") or refs.get("position_ticket")):
+        return ("pepperstone", refs["account_fingerprint"], str(refs.get("position_ticket")), tuple(refs.get("closing_deal_tickets") or []))
+    return None
+
+
+def _commission_protected(row):
+    return any(k in (row.get("manual_overrides") or {}) or k in (row.get("manual_override_fields") or [])
+               for k in ("commission", "Commission"))
+
+
+def _plan_historical_commissions(workbook_rows: list, provenance_rows: list, native_evidence: list) -> dict:
+    """Read-only explicit maintenance plan from freshly parsed native evidence.
+
+    Fresh parsing and source/account attribution belong to the caller. Repeated
+    exports are usable only when identity, components and compatibility agree.
+    No balances, accounting inputs or parser records are installed by this path.
+    """
+    counts = {k: 0 for k in ("corrected", "already_correct", "proven_zero", "protected", "unmatched", "ambiguous", "unsupported", "unknown")}
+    by_id, native_by_id, native_by_key = defaultdict(list), defaultdict(list), defaultdict(list)
+    for row in provenance_rows:
+        by_id[str(row.get("id") or "")].append(row)
+    for item in native_evidence:
+        native_by_id[str(item["row"].get("id") or "")].append(item)
+        key = _commission_native_identity(item["row"])
+        if key:
+            native_by_key[key].append(item)
+    ids = Counter(str(r.get("id") or "") for r in workbook_rows)
+    entries, classifications = [], []
+    def account(row):
+        value = str(row.get("account_label") or row.get("account") or "").upper()
+        if value in {"LIVE", "DEMO"} and str(row.get("id", "")).startswith("oanda_export:"):
+            value = "OANDA " + value
+        return value
+    def compatible(old, fresh):
+        if account(old) != account(fresh):
+            return False
+        if str(old.get("symbol") or "").upper() != str(fresh.get("symbol") or "").upper() or str(old.get("side") or "").upper() != str(fresh.get("side") or "").upper():
+            return False
+        if any(not _mt5_values_close(old.get(k), fresh.get(k)) for k in ("qty", "entry_price", "exit_price")):
+            return False
+        # Empty canonical currency is the established workbook representation;
+        # never apply a currency conversion during maintenance.
+        if old.get("currency") and fresh.get("currency") and old["currency"] != fresh["currency"]:
+            return False
+        for k in ("open_time", "close_time"):
+            try:
+                a = datetime.fromisoformat(str(old.get(k)).replace("Z", "+00:00"))
+                b = datetime.fromisoformat(str(fresh.get(k)).replace("Z", "+00:00"))
+            except (ValueError, TypeError):
+                return False
+            def wall(v):
+                return v.astimezone(ZoneInfo("Australia/Brisbane")).replace(tzinfo=None) if v and v.tzinfo else v
+            if a is None or b is None or wall(a) != wall(b):
+                return False
+        return True
+    for old in workbook_rows:
+        if old.get("row_type", "trade") != "trade":
+            continue
+        rid = str(old.get("id") or "")
+        retained = by_id.get(rid, [])
+        status, candidates = None, []
+        if ids[rid] != 1 or len(retained) > 1:
+            status = "ambiguous"
+        elif _commission_protected(old) or any(_commission_protected(r) for r in retained):
+            status = "protected"
+        else:
+            candidates = native_by_id.get(rid, [])
+            if not candidates and retained:
+                candidates = native_by_key.get(_commission_native_identity(retained[0]), [])
+            if not candidates:
+                status = "unknown" if not retained or not _commission_native_identity(retained[0]) else "unmatched"
+        if status is None:
+            signatures = set()
+            for item in candidates:
+                fresh = item["row"]
+                metrics = fresh.get("metrics") or {}
+                signatures.add(json.dumps({"identity": _commission_native_identity(fresh),
+                    "commission": fresh.get("commission"), "metrics": {k:v for k,v in metrics.items() if k.startswith(("commission_", "oanda_", "mt5_"))},
+                    "compatibility": {k:fresh.get(k) for k in ("symbol","side","qty","entry_price","exit_price","open_time","close_time","currency")}}, sort_keys=True, default=str))
+            if len(signatures) != 1:
+                status = "ambiguous"
+            else:
+                item, fresh = candidates[0], candidates[0]["row"]
+                key = _commission_native_identity(fresh)
+                metrics = fresh.get("metrics") or {}
+                convention = metrics.get("commission_input_convention")
+                if not key or convention not in {"bybit_fee_cost", "oanda_broker_cost_signed_financing", "native_signed"}:
+                    status = "unsupported"
+                elif not compatible(old, fresh) or any(not compatible(r, fresh) for r in retained):
+                    status = "unsupported"
+                else:
+                    projected = project_commission_cashflow(fresh)
+                    after = projected.get("commission")
+                    if after is None:
+                        status = "unknown"
+                    else:
+                        raw = metrics.get("commission_raw_value", fresh.get("commission"))
+                        if convention == "oanda_broker_cost_signed_financing":
+                            cost = metrics.get("oanda_broker_commission_total")
+                            financing = metrics.get("oanda_api_financing", metrics.get("oanda_export_financing_allocated"))
+                            raw = cost + abs(financing) if cost is not None and financing is not None else None
+                        values = [old.get("commission"), *[r.get("commission") for r in retained]]
+                        allowed = [after, raw]
+                        if convention == "native_signed":
+                            allowed.append(abs(after))
+                        valid = lambda v: (v is None and after == 0) or any(a is not None and _mt5_values_close(v, a) for a in allowed)
+                        if not all(valid(v) for v in values):
+                            status = "unsupported"
+                        elif after == 0:
+                            status = "proven_zero"
+                        elif all(_mt5_values_close(v, after) for v in values):
+                            status = "already_correct"
+                        else:
+                            status = "corrected"
+                            additions = {"commission_input_convention": convention, "commission_cashflow_version": 1,
+                                         "commission_raw_value": raw,
+                                         "commission_cashflow_repair": {"native_identity": key, "sources": [x["source"] for x in candidates]}}
+                            if convention == "bybit_fee_cost":
+                                additions["commission_raw_components"] = copy.deepcopy(metrics.get("commission_raw_components"))
+                            if convention == "oanda_broker_cost_signed_financing":
+                                additions["oanda_displayed_commission_total"] = after
+                            entries.append({"id": rid, "account": account(old), "trade_number": old.get("trade_number"),
+                                "before": {"commission": old.get("commission")}, "after": {"commission": after},
+                                "runtime_before": {"commission": retained[0].get("commission")} if retained else None,
+                                "metrics_additions": additions, "native_identity": key,
+                                "native_refs": fresh.get("raw_refs"), "source": item["source"],
+                                "components": copy.deepcopy(metrics), "currency": fresh.get("currency") or "AUD",
+                                "identity": {k:old.get(k) for k in ("symbol","side","qty","entry_price","exit_price")}})
+        counts[status] += 1
+        classifications.append({"id": rid, "account": account(old), "status": status})
+    # One source aggregate must never own two existing rows.
+    owners = Counter(json.dumps(e["native_identity"]) for e in entries)
+    conflicts = {e["id"] for e in entries if owners[json.dumps(e["native_identity"])] > 1}
+    if conflicts:
+        entries = [e for e in entries if e["id"] not in conflicts]
+        for c in classifications:
+            if c["id"] in conflicts:
+                counts[c["status"]] -= 1; c["status"] = "ambiguous"; counts["ambiguous"] += 1
+    return {"entries": entries, "counts": counts, "classifications": classifications}
+
+
+def _historical_commission_record(row: dict, entry: dict) -> dict:
+    if _commission_protected(row):
+        raise ValueError("Manual Commission override is protected")
+    for k, v in entry["identity"].items():
+        actual = row.get(k)
+        matches = _mt5_values_close(actual, v) if k in {"qty", "entry_price", "exit_price"} else str(actual or "").upper() == str(v or "").upper()
+        if not matches:
+            raise ValueError("Commission runtime identity conflict: " + k)
+    before = entry.get("runtime_before") or entry["before"]
+    if row.get("commission") not in (before["commission"], entry["before"]["commission"], entry["after"]["commission"]):
+        raise ValueError("Commission runtime revision conflict")
+    result = copy.deepcopy(row)
+    result["commission"] = entry["after"]["commission"]
+    result.setdefault("metrics", {}).update(copy.deepcopy(entry["metrics_additions"]))
+    return result
+
+
+def _repair_historical_commissions(plan: dict, *, workbook_path: Path, store_paths: dict,
+                                             backup_dir: Path, expected_revisions: dict,
+                                             expected_sqlite_rows: dict) -> dict:
+    """One locked, backed-up maintenance transaction; no importer or refresh.
+
+    Candidates precede installation. SQLite keeps a write transaction open while
+    files are installed; failures restore only revisions owned by this attempt.
+    Only edited SQL payloads and small file originals are retained; never a full
+    database backup. Cache undo is restricted to matched record paths.
+    """
+    from tools.master_journal_workbook import prepare_historical_commission_package
+    import sqlite3
+    workbook_path, backup_dir = Path(workbook_path), Path(backup_dir)
+    if not plan["entries"]:
+        return {"ok": True, "noop": True, "counts": plan["counts"]}
+    rejected = _reserve_master_journal_workbook_sync(workbook_path, "historical-commission-repair", "commission_maintenance", wait_seconds=5.0)
+    if rejected:
+        raise RuntimeError("Journal transaction is busy")
+    installed, originals, candidate_hashes = [], {}, {}
+    conn, sql_originals, sql_candidates = None, {}, {}
+    sql_snapshot_original = None
+    recovery, sql_committed = None, False
+    recovery_limit = 50 * 1024 * 1024
+    try:
+        if backup_dir.exists():
+            raise ValueError("Commission backup directory must be unique")
+        if _master_journal_lock_status(workbook_path).get("locked"):
+            raise RuntimeError("Workbook is locked")
+        for source in plan.get("sources", []):
+            if hashlib.sha256(Path(source["path"]).read_bytes()).hexdigest() != source["sha256"]:
+                raise RuntimeError("Native commission source changed")
+        paths = {"workbook": workbook_path, **{k: Path(v) for k, v in store_paths.items() if Path(v).exists()}}
+        for key, path in paths.items():
+            if key == "sqlite":
+                continue
+            content = path.read_bytes()
+            if hashlib.sha256(content).hexdigest() != expected_revisions[key]:
+                raise RuntimeError("Commission source revision changed: " + key)
+            originals[key] = content
+        state = json.loads(originals["derived"]) if "derived" in originals else {}
+        if any(state.get(k) for k in ("queued", "running", "pending", "refresh_required")):
+            raise RuntimeError("Derived journal transaction is pending")
+        backup_dir.mkdir(parents=True)
+        for key, content in originals.items():
+            if key not in {"workbook", "journal"}:
+                continue
+            if sum(p.stat().st_size for p in backup_dir.iterdir() if p.is_file()) + len(content) > recovery_limit:
+                raise ValueError("Commission recovery exceeds 50 MiB")
+            backup = backup_dir / (key + ".original")
+            _atomic_write_bytes(backup, content)
+            if backup.read_bytes() != content:
+                raise RuntimeError("Commission backup verification failed")
+        entries = {item["id"]: item for item in plan["entries"]}
+        candidates = {}
+        if "journal" in originals:
+            data = json.loads(originals["journal"])
+            seen = set()
+            for index, row in enumerate(data["items"]):
+                rid = row.get("id")
+                if rid in entries:
+                    if rid in seen:
+                        raise ValueError("Duplicate runtime Row ID")
+                    seen.add(rid)
+                    data["items"][index] = _historical_commission_record(row, entries[rid])
+            candidates["journal"] = json.dumps(data, ensure_ascii=False, indent=2).encode()
+        cache_undo, active_cache = {}, None
+        def patch_snapshot(value, location=()):
+            if isinstance(value, dict):
+                rid = value.get("id")
+                if rid in entries and "commission" in value:
+                    patched = _historical_commission_record(value, entries[rid])
+                    cache_undo.setdefault(active_cache, []).append({"path": list(location), "before": value,
+                        "after_sha256": hashlib.sha256(json.dumps(patched, sort_keys=True).encode()).hexdigest()})
+                    return patched
+                return {k: patch_snapshot(v, location + (k,)) for k,v in value.items()}
+            if isinstance(value, list):
+                return [patch_snapshot(v, location + (i,)) for i,v in enumerate(value)]
+            return value
+        for key in ("import_cache", "view_cache", "resync_cache"):
+            active_cache = key
+            if key in originals:
+                data = json.loads(originals[key])
+                patched = patch_snapshot(data)
+                if patched != data:
+                    candidates[key] = json.dumps(patched, ensure_ascii=False, indent=2).encode()
+        workbook_candidate = backup_dir / "commission-candidate.xlsx"
+        package = prepare_historical_commission_package(workbook_path, workbook_candidate, list(entries.values()),
+            expected_sha256=expected_revisions["workbook"])
+        if not package["noop"]:
+            candidates["workbook"] = workbook_candidate.read_bytes()
+        if "sqlite" in paths:
+            conn = sqlite3.connect(paths["sqlite"], timeout=5)
+            conn.execute("BEGIN IMMEDIATE")
+            for rid, entry in entries.items():
+                values = conn.execute("SELECT payload_json FROM journal_trades WHERE id=?", (rid,)).fetchall()
+                if not values:
+                    continue
+                if len(values) != 1 or values[0][0] != expected_sqlite_rows.get(rid):
+                    raise RuntimeError("SQLite commission revision changed")
+                sql_originals[rid] = values[0][0]
+                sql_candidates[rid] = json.dumps(_historical_commission_record(json.loads(values[0][0]), entry), ensure_ascii=False)
+            snapshot = plan.get("sqlite_current_stats_invalidation")
+            if snapshot:
+                schema = conn.execute("PRAGMA table_info(journal_stats)").fetchall()
+                if [column[1] for column in schema] != ["snapshot_id", "payload_json", "imported_at"] or schema[0][5] != 1:
+                    raise ValueError("Unsupported SQLite snapshot schema")
+                latest = conn.execute("SELECT snapshot_id FROM journal_stats ORDER BY snapshot_id DESC LIMIT 1").fetchone()
+                if latest != (snapshot["snapshot_id"],):
+                    raise RuntimeError("SQLite current snapshot revision advanced")
+                sql_snapshot_original = conn.execute("SELECT snapshot_id,payload_json,imported_at FROM journal_stats WHERE snapshot_id=?", latest).fetchone()
+                if hashlib.sha256(sql_snapshot_original[1].encode()).hexdigest() != snapshot["sha256"]:
+                    raise RuntimeError("SQLite current snapshot payload changed")
+                def references_matched_identity(value):
+                    if isinstance(value, dict):
+                        return any(value.get(key) in entries for key in ("id", "row_id", "source_id") if isinstance(value.get(key), str)) or any(references_matched_identity(item) for item in value.values())
+                    return isinstance(value, list) and any(references_matched_identity(item) for item in value)
+                if not references_matched_identity(json.loads(sql_snapshot_original[1])):
+                    raise ValueError("Current snapshot has no matched native trade identity")
+        # Persist the complete candidate/rollback manifest before touching files.
+        recovery = {"phase": "prepared", "plan": plan, "package": package,
+                    "original_hashes": {k: hashlib.sha256(v).hexdigest() for k, v in originals.items()},
+                    "sqlite_before": sql_originals, "sqlite_after": sql_candidates,
+                    "sqlite_invalidated_current_snapshot": sql_snapshot_original,
+                    "sqlite_phase": "uncommitted", "full_database_backup": False,
+                    "cache_undo": cache_undo, "paths": {k: str(v) for k,v in paths.items()},
+                    "candidate_hashes": {k: hashlib.sha256(v).hexdigest() for k,v in candidates.items()},
+                    "recovery_limit_bytes": recovery_limit}
+        recovery_bytes = len(json.dumps(recovery, ensure_ascii=False, indent=2).encode())
+        projected_bytes = sum(p.stat().st_size for p in backup_dir.iterdir() if p.is_file()) + sum(map(len, candidates.values())) + 2 * recovery_bytes
+        if projected_bytes > recovery_limit:
+            raise ValueError("Commission recovery exceeds 50 MiB")
+        recovery["peak_recovery_bytes_bound"] = projected_bytes
+        _save_json_file(backup_dir / "recovery.json", recovery)
+        if conn:
+            for rid, value in sql_candidates.items():
+                conn.execute("UPDATE journal_trades SET payload_json=? WHERE id=?", (value, rid))
+            if sql_snapshot_original:
+                conn.execute("DELETE FROM journal_stats WHERE snapshot_id=? AND payload_json=?", sql_snapshot_original[:2])
+        for key, data in candidates.items():
+            _atomic_write_bytes(backup_dir / (key + ".candidate"), data)
+            candidate_hashes[key] = hashlib.sha256(data).hexdigest()
+        deletions = []
+        # Recheck all file revisions and the native report immediately before install.
+        for key, content in originals.items():
+            if paths[key].read_bytes() != content:
+                raise RuntimeError("Concurrent journal/cache change before commission install: " + key)
+        if any(hashlib.sha256(Path(x["path"]).read_bytes()).hexdigest() != x["sha256"] for x in plan.get("sources", [])) or _master_journal_lock_status(workbook_path).get("locked"):
+            raise RuntimeError("Commission source changed or workbook opened")
+        for key, data in candidates.items():
+            os.replace(backup_dir / (key + ".candidate"), paths[key])
+            installed.append(key)
+        for key in deletions:
+            paths[key].unlink()
+            installed.append(key)
+            candidate_hashes[key] = None
+        for key in installed:
+            if candidate_hashes[key] is None:
+                if paths[key].exists():
+                    raise RuntimeError("Commission snapshot invalidation failed")
+            elif hashlib.sha256(paths[key].read_bytes()).hexdigest() != candidate_hashes[key]:
+                raise RuntimeError("Commission installation verification failed")
+        if conn:
+            for rid, value in sql_candidates.items():
+                if conn.execute("SELECT payload_json FROM journal_trades WHERE id=?", (rid,)).fetchone() != (value,):
+                    raise RuntimeError("SQLite commission verification failed")
+            conn.commit()
+            sql_committed = True
+        recovery.update(phase="committed", sqlite_phase="committed", installed=installed, installed_hashes=candidate_hashes)
+        _save_json_file(backup_dir / "recovery.json", recovery)
+        return {"ok": True, "noop": False, "counts": plan["counts"], "package": package,
+                "installed": installed, "sqlite_rows": len(sql_candidates), "backup_dir": str(backup_dir),
+                "full_database_backup": False,
+                "recovery_bytes": sum(p.stat().st_size for p in backup_dir.iterdir() if p.is_file())}
+    except Exception:
+        if conn:
+            conn.rollback()
+            for rid, value in sql_originals.items():
+                current = conn.execute("SELECT payload_json FROM journal_trades WHERE id=?", (rid,)).fetchone()
+                if current == (sql_candidates.get(rid),):
+                    conn.execute("UPDATE journal_trades SET payload_json=? WHERE id=?", (value, rid))
+                elif current != (value,):
+                    raise RuntimeError("SQLite repair ownership lost; recovery evidence retained")
+            if sql_snapshot_original:
+                current = conn.execute("SELECT snapshot_id,payload_json,imported_at FROM journal_stats WHERE snapshot_id=?", (sql_snapshot_original[0],)).fetchone()
+                if current is None:
+                    conn.execute("INSERT INTO journal_stats(snapshot_id,payload_json,imported_at) VALUES (?,?,?)", sql_snapshot_original)
+                elif current != sql_snapshot_original:
+                    raise RuntimeError("SQLite current snapshot recovery ownership lost")
+            conn.commit()
+        for key in reversed(installed):
+            path = paths[key]
+            current = hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else None
+            if current != candidate_hashes[key]:
+                if recovery is not None:
+                    recovery.update(phase="ownership_lost", sqlite_phase="reversed_committed_owned_rows" if sql_committed else "rolled_back_uncommitted")
+                    _save_json_file(backup_dir / "recovery.json", recovery)
+                raise RuntimeError("Commission rollback ownership lost; recovery evidence retained")
+            _restore_optional_file_snapshot(path, originals[key])
+        if recovery is not None:
+            recovery.update(phase="recovered", sqlite_phase="reversed_committed_owned_rows" if sql_committed else "rolled_back_uncommitted")
+            _save_json_file(backup_dir / "recovery.json", recovery)
+        raise
+    finally:
+        if conn:
+            conn.close()
+        _release_master_journal_workbook_sync()

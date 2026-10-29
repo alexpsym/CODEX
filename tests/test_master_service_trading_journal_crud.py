@@ -8752,3 +8752,207 @@ def test_future_commission_ingestion_is_idempotent_and_preserves_legacy_rows(_fu
         reloaded={rid:json.loads(payload) for rid,payload in conn.execute("SELECT id,payload_json FROM journal_trades")}
     assert reloaded==stored
     assert svc._normalize_journal_profit_fields(reloaded[row["id"]])==actual
+
+def _job13_commission_fixture(tmp_path, monkeypatch):
+    import hashlib
+    import socket
+    import tools.master_journal_workbook as mjw
+    monkeypatch.setattr(master_service, "_journal_transaction_lock_path", lambda _p: tmp_path / "transaction.lock")
+    def forbidden(*a, **k):
+        pytest.fail("Commission maintenance crossed an isolated boundary")
+    monkeypatch.setattr(threading.Thread, "start", forbidden)
+    monkeypatch.setattr(socket.socket, "connect", forbidden)
+    monkeypatch.setattr(master_service, "_import_uploaded_trading_journal_file", forbidden)
+    monkeypatch.setattr(master_service, "_schedule_dropbox_upload_state_backup", forbidden)
+    row = dict(id="bybit:demo:trade:ABCUSDT:native",row_type="trade",account="Bybit Demo",symbol="ABCUSDT",side="Buy",
+        qty=2,entry_price=10,exit_price=11,open_time="2026-10-01T10:00:00",close_time="2026-10-01T11:00:00",
+        commission=3.,currency="USDT",net_profit=17,realized_pnl=17,result_pct=2,r_multiple=.7,balance_after_trade=117,
+        fees=3.,funding_cost=0,stop_loss=9,take_profit=12,trade_number="C4",metrics={"keep":7},
+        raw_refs={"parser":"bybit_execution_history_grouped","exec_ids":["entry","exit"],"funding_exec_ids":[]})
+    native=copy.deepcopy(row);native["metrics"]={"commission_input_convention":"bybit_fee_cost",
+        "commission_raw_components":[{"amount":1.,"exec_id":"entry","field":"Fees Paid / execFee","currency":"USDT"},
+                                     {"amount":2.,"exec_id":"exit","field":"Fees Paid / execFee","currency":"USDT"}]}
+    native=mjw.project_commission_cashflow(native)
+    source=tmp_path/'native.json';source.write_text(json.dumps(native))
+    evidence=[{"row":native,"source":{"path":str(source),"sha256":hashlib.sha256(source.read_bytes()).hexdigest()}}]
+    wb=Workbook();ws=wb.active;ws.title="Trade Log"
+    values=mjw._trade_log_row_values(row);values['Row ID']=row['id']
+    for col,h in enumerate(mjw.TRADE_LOG_HEADERS,1):
+        ws.cell(1,col,h);ws.cell(8,col,values.get(h))
+    ws['A8'].hyperlink='https://example.invalid/retained';ws['A8'].style='Hyperlink'
+    workbook=tmp_path/'journal.xlsx';wb.save(workbook);wb.close()
+    stores={k:tmp_path/(k+ext) for k,ext in {'journal':'.json','sqlite':'.sqlite','import_cache':'.json','view_cache':'.json','resync_cache':'.json','derived':'.json'}.items()}
+    stores['journal'].write_text(json.dumps({'items':[row,{'id':'other','balance':99}],'balances':[123]}))
+    stores['import_cache'].write_text(json.dumps({'files':{'matched':{'rows':[row],'balance':999},'other':{'rows':[]}}}))
+    stores['view_cache'].write_text(json.dumps({'items':[row],'balances':[123],'stats':{'net':17}}))
+    stores['resync_cache'].write_text(json.dumps({'unrelated':'keep'}));stores['derived'].write_text('{}')
+    with sqlite3.connect(stores['sqlite']) as c:
+        c.execute('CREATE TABLE journal_trades(id TEXT PRIMARY KEY,payload_json TEXT)')
+        c.execute('INSERT INTO journal_trades VALUES (?,?)',(row['id'],json.dumps(row)))
+        c.execute('CREATE TABLE journal_balances(account TEXT,balance REAL)');c.execute("INSERT INTO journal_balances VALUES ('keep',123)")
+        c.execute('CREATE TABLE journal_stats(snapshot_id TEXT PRIMARY KEY,payload_json TEXT,imported_at TEXT)')
+        c.execute("INSERT INTO journal_stats VALUES ('history','{}','keep')")
+    plan=master_service._plan_historical_commissions([row],[row],evidence);plan['sources']=[evidence[0]['source']]
+    revisions={'workbook':hashlib.sha256(workbook.read_bytes()).hexdigest(),**{k:hashlib.sha256(v.read_bytes()).hexdigest() for k,v in stores.items() if k!='sqlite'}}
+    with sqlite3.connect(stores['sqlite']) as c:sql=dict(c.execute('SELECT id,payload_json FROM journal_trades'))
+    return row,native,evidence,workbook,stores,plan,revisions,sql
+
+
+def test_historical_commission_plan_requires_source_evidence_and_preserves_financials(tmp_path, monkeypatch):
+    row,native,ev,*_= _job13_commission_fixture(tmp_path,monkeypatch)
+    import tools.master_journal_workbook as mjw
+    for amounts in ([1.,2.],[-1.,-2.],[3.,-1.],[1.,-1.]):
+        fresh=copy.deepcopy(native);fresh['commission']=sum(amounts);fresh['metrics']={'commission_input_convention':'bybit_fee_cost',
+            'commission_raw_components':[{'amount':v,'exec_id':str(i)} for i,v in enumerate(amounts)]}
+        fresh=mjw.project_commission_cashflow(fresh)
+        old=copy.deepcopy(row);old['commission']=sum(amounts)
+        plan=master_service._plan_historical_commissions([old],[old],[{'row':fresh,'source':ev[0]['source']}])
+        assert plan['counts']['corrected' if sum(amounts) else 'proven_zero']==1
+        if plan['entries']:
+            patched=master_service._historical_commission_record(old,plan['entries'][0])
+            assert patched['commission']==-sum(amounts)
+            assert {k:v for k,v in patched.items() if k not in ('commission','metrics')}=={k:v for k,v in old.items() if k not in ('commission','metrics')}
+    for cost,financing in [(2.,-3.),(2.,5.),(0.,0.)]:
+        fresh=copy.deepcopy(row);fresh.update(id='oanda_export:demo:1:2',account='OANDA DEMO',currency='AUD',commission=cost+abs(financing),
+            raw_refs={'open_ticket':'1','close_ticket':'2'},metrics={'commission_input_convention':'oanda_broker_cost_signed_financing',
+            'oanda_broker_commission_total':cost,'oanda_export_financing_allocated':financing,'oanda_total_spread_cost':99})
+        old=copy.deepcopy(fresh);fresh=mjw.project_commission_cashflow(fresh)
+        plan=master_service._plan_historical_commissions([old],[old],[{'row':fresh,'source':ev[0]['source']}])
+        if plan['entries']:assert plan['entries'][0]['after']['commission']==-cost+financing
+        else:assert plan['counts']['proven_zero']+plan['counts']['already_correct']==1
+    assert master_service._plan_historical_commissions([row],[row],[])['counts']['unmatched']==1
+    unknown=copy.deepcopy(native);unknown['metrics']={'commission_input_convention':'unknown'}
+    assert master_service._plan_historical_commissions([row],[row],[{'row':unknown,'source':ev[0]['source']}])['counts']['unsupported']==1
+    for modified in ('manual','duplicate','incompatible'):
+        old=copy.deepcopy(row)
+        if modified=='manual':old['manual_overrides']={'commission':3}
+        if modified=='incompatible':old['qty']=99
+        plan=master_service._plan_historical_commissions([old,old] if modified=='duplicate' else [old],[old],ev)
+        assert plan['counts'][{'manual':'protected','duplicate':'ambiguous','incompatible':'unsupported'}[modified]]>=1
+    signed=copy.deepcopy(native)
+    assert master_service._plan_historical_commissions([signed],[signed],ev)['counts']['already_correct']==1
+    pepper=copy.deepcopy(row);pepper.update(id='pepperstone_mt5:native',account='PEPPERSTONE DEMO',commission=-3,
+        raw_refs={'account_fingerprint':'native','closing_deal_tickets':['1']},metrics={'commission_input_convention':'native_signed'})
+    assert master_service._plan_historical_commissions([pepper],[pepper],[{'row':pepper,'source':ev[0]['source']}])['counts']['already_correct']==1
+
+
+def _job13_forbid_database_copies(monkeypatch):
+    real_connect = sqlite3.connect
+    class ScopedConnection(sqlite3.Connection):
+        def backup(self, *args, **kwargs):
+            pytest.fail("Job 13 must not back up the database")
+        def iterdump(self, *args, **kwargs):
+            pytest.fail("Job 13 must not dump the database")
+        def execute(self, sql, *args, **kwargs):
+            assert not str(sql).strip().upper().startswith(("VACUUM", "ATTACH"))
+            return super().execute(sql, *args, **kwargs)
+    def connect(*args, **kwargs):
+        kwargs["factory"] = ScopedConnection
+        return real_connect(*args, **kwargs)
+    monkeypatch.setattr(master_service.sqlite3, "connect", connect)
+
+
+def test_historical_commission_repair_updates_existing_stores_and_is_idempotent(tmp_path, monkeypatch):
+    import tools.master_journal_workbook as mjw
+    row,native,ev,workbook,stores,plan,revisions,sql=_job13_commission_fixture(tmp_path,monkeypatch)
+    _job13_forbid_database_copies(monkeypatch)
+    with sqlite3.connect(stores["sqlite"]) as c:
+        c.execute("INSERT INTO journal_trades VALUES (?,?)", ("unrelated", json.dumps({"manual": "keep", "net_profit": 999})))
+    result=master_service._repair_historical_commissions(plan,workbook_path=workbook,store_paths=stores,backup_dir=tmp_path/'backup',expected_revisions=revisions,expected_sqlite_rows=sql)
+    assert result['ok'] and result['sqlite_rows']==1
+    assert result['full_database_backup'] is False
+    recovery=json.loads((tmp_path/'backup/recovery.json').read_text())
+    assert recovery['sqlite_before']==sql and recovery['sqlite_phase']=='committed'
+    assert recovery['full_database_backup'] is False
+    assert sum(p.stat().st_size for p in (tmp_path/'backup').iterdir() if p.is_file()) <= 50*1024*1024
+    assert recovery['peak_recovery_bytes_bound'] <= 50*1024*1024
+    assert not (tmp_path/'backup/journal.sqlite').exists()
+    assert not (tmp_path/'backup/view_cache.original').exists()
+    assert recovery['cache_undo']['view_cache'][0]['before']==row
+    assert recovery['cache_undo']['view_cache'][0]['path']==['items',0]
+    data=json.loads(stores['journal'].read_text());patched=data['items'][0]
+    assert {k:v for k,v in patched.items() if k not in ('commission','metrics')}=={k:v for k,v in row.items() if k not in ('commission','metrics')}
+    assert patched['metrics']['keep']==7
+    assert patched['commission']==-3 and patched['net_profit']==17 and data['items'][1]=={'id':'other','balance':99}
+    assert data['balances']==[123]
+    cache=json.loads(stores['import_cache'].read_text());assert cache['files']['matched']['rows'][0]==patched
+    assert cache['files']['matched']['balance']==999 and cache['files']['other']=={'rows':[]}
+    assert json.loads(stores['view_cache'].read_text())['items'][0]==patched
+    with sqlite3.connect(stores['sqlite']) as c:
+        assert json.loads(c.execute('SELECT payload_json FROM journal_trades WHERE id=?',(row['id'],)).fetchone()[0])==patched
+        assert json.loads(c.execute("SELECT payload_json FROM journal_trades WHERE id='unrelated'").fetchone()[0])=={'manual':'keep','net_profit':999}
+        assert c.execute('SELECT * FROM journal_balances').fetchall()==[('keep',123)]
+        assert c.execute('SELECT * FROM journal_stats').fetchall()==[('history','{}','keep')]
+    projected=mjw.read_master_journal_source(workbook)['items'][0]
+    assert projected['commission']==-3 and mjw.project_commission_cashflow(projected)['commission']==-3
+    second=master_service._plan_historical_commissions([projected],[patched],ev)
+    assert second['counts']['already_correct']==1
+    before={k:p.read_bytes() for k,p in {'workbook':workbook,**stores}.items()}
+    assert master_service._repair_historical_commissions(second,workbook_path=workbook,store_paths=stores,backup_dir=tmp_path/'noop',expected_revisions={},expected_sqlite_rows={})['noop']
+    assert not (tmp_path/'noop').exists()
+    assert before=={k:p.read_bytes() for k,p in {'workbook':workbook,**stores}.items()}
+
+
+def test_historical_commission_repair_failure_preserves_original_state(tmp_path, monkeypatch):
+    import tools.master_journal_workbook as mjw
+    row,native,ev,workbook,stores,plan,revisions,sql=_job13_commission_fixture(tmp_path,monkeypatch)
+    _job13_forbid_database_copies(monkeypatch)
+    before={k:p.read_bytes() for k,p in {'workbook':workbook,**stores}.items()}
+    with sqlite3.connect(stores["sqlite"]) as c:
+        before_rows={table:c.execute("SELECT * FROM "+table).fetchall() for table in ("journal_trades","journal_balances","journal_stats")}
+    real=mjw._validate_historical_commission_package
+    monkeypatch.setattr(mjw,'_validate_historical_commission_package',lambda *a: (_ for _ in ()).throw(ValueError('candidate rejected')))
+    with pytest.raises(ValueError,match='candidate rejected'):
+        master_service._repair_historical_commissions(plan,workbook_path=workbook,store_paths=stores,backup_dir=tmp_path/'reject',expected_revisions=revisions,expected_sqlite_rows=sql)
+    monkeypatch.setattr(mjw,'_validate_historical_commission_package',real)
+    replace=master_service.os.replace
+    def fail(src,dst):
+        if Path(src).name=='workbook.candidate':raise OSError('controlled installation failure')
+        return replace(src,dst)
+    monkeypatch.setattr(master_service.os,'replace',fail)
+    with pytest.raises(OSError,match='controlled installation'):
+        master_service._repair_historical_commissions(plan,workbook_path=workbook,store_paths=stores,backup_dir=tmp_path/'install',expected_revisions=revisions,expected_sqlite_rows=sql)
+    assert before=={k:p.read_bytes() for k,p in {'workbook':workbook,**stores}.items()}
+    assert json.loads((tmp_path/'install/recovery.json').read_text())['phase']=='recovered'
+    assert json.loads((tmp_path/'install/recovery.json').read_text())['sqlite_phase']=='rolled_back_uncommitted'
+    # Fail after COMMIT: undo only the exact owned SQL payloads and installed files.
+    monkeypatch.setattr(master_service.os,'replace',replace)
+    save=master_service._save_json_file
+    def fail_committed(path,value):
+        if Path(path).name=='recovery.json' and value.get('phase')=='committed':
+            raise OSError('controlled post-commit failure')
+        return save(path,value)
+    monkeypatch.setattr(master_service,'_save_json_file',fail_committed)
+    with pytest.raises(OSError,match='post-commit'):
+        master_service._repair_historical_commissions(plan,workbook_path=workbook,store_paths=stores,backup_dir=tmp_path/'committed',expected_revisions=revisions,expected_sqlite_rows=sql)
+    assert {k:v for k,v in before.items() if k!='sqlite'}=={k:p.read_bytes() for k,p in {'workbook':workbook,**stores}.items() if k!='sqlite'}
+    with sqlite3.connect(stores['sqlite']) as c:
+        assert {table:c.execute('SELECT * FROM '+table).fetchall() for table in before_rows}==before_rows
+    recovered=json.loads((tmp_path/'committed/recovery.json').read_text())
+    assert recovered['phase']=='recovered' and recovered['sqlite_phase']=='reversed_committed_owned_rows'
+    monkeypatch.setattr(master_service,'_save_json_file',save)
+    # A concurrent file revision is never overwritten during owned recovery.
+    def lose_ownership(src,dst):
+        if Path(src).name=='workbook.candidate':
+            stores['journal'].write_bytes(b'concurrent-user-owned-value')
+            raise OSError('controlled ownership conflict')
+        return replace(src,dst)
+    monkeypatch.setattr(master_service.os,'replace',lose_ownership)
+    with pytest.raises(RuntimeError,match='ownership lost'):
+        master_service._repair_historical_commissions(plan,workbook_path=workbook,store_paths=stores,backup_dir=tmp_path/'ownership',expected_revisions=revisions,expected_sqlite_rows=sql)
+    assert stores['journal'].read_bytes()==b'concurrent-user-owned-value'
+    assert json.loads((tmp_path/'ownership/recovery.json').read_text())['phase']=='ownership_lost'
+    with sqlite3.connect(stores['sqlite']) as c:
+        assert dict(c.execute('SELECT id,payload_json FROM journal_trades'))==sql
+        assert c.execute('SELECT * FROM journal_balances').fetchall()==[('keep',123)]
+        assert c.execute('SELECT * FROM journal_stats').fetchall()==[('history','{}','keep')]
+    stores['journal'].write_bytes(before['journal'])  # fixture-owned cleanup only
+    monkeypatch.setattr(master_service.os,'replace',replace)
+    for folder in ('reject','install','committed','ownership'):
+        assert not (tmp_path/folder/'journal.sqlite').exists()
+        assert sum(p.stat().st_size for p in (tmp_path/folder).iterdir() if p.is_file()) <= 50*1024*1024
+    wrong=dict(revisions,workbook='changed')
+    with pytest.raises(RuntimeError,match='revision changed'):
+        master_service._repair_historical_commissions(plan,workbook_path=workbook,store_paths=stores,backup_dir=tmp_path/'revision',expected_revisions=wrong,expected_sqlite_rows=sql)
+    assert master_service._reserve_master_journal_workbook_sync(workbook,'released','test',wait_seconds=0) is None
+    master_service._release_master_journal_workbook_sync()

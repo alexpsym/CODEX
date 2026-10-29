@@ -13062,3 +13062,42 @@ def test_future_commission_cashflows_survive_trade_log_write_and_readback(tmp_pa
     wb=load_workbook(path)
     assert mjw._incremental_trade_log_preservation_signature(wb["Trade Log"])==before_balance
     wb.close()
+
+def test_historical_commission_package_repair_preserves_workbook(tmp_path):
+    import hashlib
+    import zipfile
+    import re
+    import xml.etree.ElementTree as ET
+    import tools.master_journal_workbook as mjw
+    from openpyxl import Workbook, load_workbook
+    wb=Workbook();ws=wb.active;ws.title='Trade Log'
+    for c,h in enumerate(['Row ID','Commission','Other','Formula'],1):ws.cell(1,c,h)
+    updates=[]
+    for n,before,after in [(8,3,-3),(9,-2,2),(10,None,-1),(11,1,0),(12,None,0)]:
+        rid='native-'+str(n);ws.cell(n,1,rid);ws.cell(n,2,before);ws.cell(n,2).number_format='0.0000';ws.cell(n,3,'');ws.cell(n,4,'=1+2')
+        updates.append({'id':rid,'before':{'commission':before},'after':{'commission':after}})
+    ws['A8'].hyperlink='https://example.invalid/keep';ws['A8'].style='Hyperlink';ws.row_dimensions[8].height=29
+    source=tmp_path/'source.xlsx';candidate=tmp_path/'candidate.xlsx';wb.save(source);wb.close()
+    with zipfile.ZipFile(source) as z:infos=z.infolist();parts={i.filename:z.read(i.filename) for i in infos}
+    parts['xl/worksheets/sheet1.xml']=parts['xl/worksheets/sheet1.xml'].replace(b'<f>1+2</f><v />',b'<f>1+2</f><v>3</v>').replace(b'<f>1+2</f><v></v>',b'<f>1+2</f><v>3</v>').replace(b'<c r="B10" s="1" t="n"></c>',b'<c r="B10" s="1" t="n"/>')
+    with zipfile.ZipFile(source,'w') as z:
+        for i in infos:z.writestr(i,parts[i.filename])
+    result=mjw.prepare_historical_commission_package(source,candidate,updates,expected_sha256=hashlib.sha256(source.read_bytes()).hexdigest())
+    ns={'s':'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
+    with zipfile.ZipFile(source) as a,zipfile.ZipFile(candidate) as b:
+        assert a.namelist()==b.namelist()
+        for i in a.infolist():
+            x,y=a.read(i.filename),b.read(i.filename)
+            assert i.date_time==b.getinfo(i.filename).date_time and i.external_attr==b.getinfo(i.filename).external_attr
+            if i.filename==result['part']:
+                old,new=ET.fromstring(x),ET.fromstring(y)
+                for tree in (old,new):
+                    for row in tree.findall('s:sheetData/s:row',ns):
+                        for cell in list(row):
+                            if cell.get('r') in result['changed_cells']:row.remove(cell)
+                assert ET.tostring(old)==ET.tostring(new)
+            else:assert x==y
+    wb=load_workbook(candidate,data_only=True);assert [wb['Trade Log'].cell(n,2).value for n in range(8,13)]==[-3,2,-1,None,None];assert wb['Trade Log']['D8'].value==3;wb.close()
+    bad=[{'id':'native-8','before':{'commission':99},'after':{'commission':-99}}]
+    with pytest.raises(ValueError,match='revision'):
+        mjw.prepare_historical_commission_package(source,tmp_path/'bad.xlsx',bad,expected_sha256=hashlib.sha256(source.read_bytes()).hexdigest())
