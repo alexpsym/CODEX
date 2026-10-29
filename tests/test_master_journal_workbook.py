@@ -31,6 +31,64 @@ from tools.master_journal_workbook import IncrementalWorkbookUpdateNotEligible, 
 from openpyxl.utils.cell import coordinate_to_tuple, get_column_letter, range_boundaries
 
 
+def test_pepperstone_timestamp_package_repair_preserves_workbook_and_is_atomic(tmp_path, monkeypatch):
+    wb = Workbook(); ws = wb.active; ws.title = "Trade Log"
+    headers = {header:index for index,header in enumerate(TRADE_LOG_HEADERS,1)}
+    for header,col in headers.items():
+        ws.cell(1,col,header)
+    values = {"Row ID":"pepperstone:native:1","Open Time":datetime(2026,9,1,9),
+              "Close Time":datetime(2026,9,1,10),"Account":"PEPPERSTONE DEMO",
+              "Symbol":"USDCHF","Side":"SELL","Qty":0.12,"Entry Price":0.82472,
+              "Exit Price":0.82512,"Net P/L":-9.18,"Notes":"keep note"}
+    for header,value in values.items():
+        if header in headers: ws.cell(8,headers[header],value)
+    duration_header=next(h for h in headers if h.startswith('Trade Duration'))
+    ws.cell(8,headers[duration_header],'1H')
+    ws.cell(8,1,'F1169'); ws.cell(8,1).hyperlink='file:///original/destination'
+    ws.cell(8,1).font=Font(name='Calibri',size=11,color='0000FF',underline='single')
+    ws.cell(8,1).comment=Comment('annotation','tester')
+    ws.freeze_panes='G8'; ws.auto_filter.ref='A7:AZ8'; ws.row_dimensions[8].height=25
+    ws.column_dimensions['B'].width=22
+    other=wb.create_sheet('Unrelated');other['A1']='=1+2';other.merge_cells('B2:C3')
+    report=wb.create_sheet('YEARLY REPORT'); report['J82']='0.047% - EURGBP 2026-10-15'
+    path=tmp_path/'journal.xlsx';wb.save(path);wb.close()
+    original=path.read_bytes(); digest=hashlib.sha256(original).hexdigest()
+    updates=[{'id':'pepperstone:native:1','before':{'open_time':'2026-09-01T09:00:00','close_time':'2026-09-01T10:00:00'},
+              'after':{'open_time':'2026-09-01T16:00:00+10:00','close_time':'2026-09-01T18:00:00+10:00'},
+              'duration_changed':True,'duration_seconds':7200}]
+    candidate=tmp_path/'candidate.xlsx'
+    dependency={'sheet':'YEARLY REPORT','coordinate':'J82','before':'0.047% - EURGBP 2026-10-15',
+                'after':'0.047% - EURGBP 2026-10-16','source_row_id':'pepperstone:native:1'}
+    result=mjw.prepare_pepperstone_timestamp_package(path,candidate,updates,expected_sha256=digest,dependent_cells=[dependency])
+    assert path.read_bytes() == original and len(result['changed_cells']) == 3
+    with zipfile.ZipFile(path) as before,zipfile.ZipFile(candidate) as after:
+        assert before.namelist() == after.namelist()
+        for name in before.namelist():
+            if name not in {result['part'],mjw._worksheet_ooxml_part_name(before,'YEARLY REPORT')}:assert before.read(name) == after.read(name)
+        def masked(payload):
+            for coord in result['changed_cells']:
+                payload=re.sub(rb'<c\b[^>]*\br="'+coord.encode()+rb'"[^>]*>.*?</c>',b'<approved/>',payload,flags=re.S)
+            return payload
+        assert masked(before.read(result['part'])) == masked(after.read(result['part']))
+    reloaded=load_workbook(candidate);sheet=reloaded['Trade Log']
+    assert sheet.cell(8,headers['Open Time']).value == datetime(2026,9,1,16)
+    assert sheet.cell(8,headers['Close Time']).value == datetime(2026,9,1,18)
+    assert sheet.cell(8,headers[duration_header]).value == mjw._format_duration_display(7200)
+    assert sheet.cell(8,1).hyperlink.target == 'file:///original/destination'
+    assert sheet.cell(8,1).font.color.rgb == '000000FF' and sheet.cell(8,1).font.underline == 'single'
+    assert reloaded['YEARLY REPORT']['J82'].value == dependency['after']
+    reloaded.close()
+    second=deepcopy(updates);second[0]['before']=second[0]['after']
+    second[0]['duration_changed']=False
+    assert mjw.prepare_pepperstone_timestamp_package(candidate,tmp_path/'noop.xlsx',second,
+        expected_sha256=hashlib.sha256(candidate.read_bytes()).hexdigest())['noop']
+    assert not (tmp_path/'noop.xlsx').exists()
+    monkeypatch.setattr(mjw,'_validate_pepperstone_timestamp_package',lambda *_a: (_ for _ in ()).throw(ValueError('rejected')))
+    with pytest.raises(ValueError,match='rejected'):
+        mjw.prepare_pepperstone_timestamp_package(path,tmp_path/'rejected.xlsx',updates,expected_sha256=digest)
+    assert path.read_bytes() == original
+
+
 _PRECISION_PRICE_FIELDS = {
     "Entry Price": "entry_price", "Exit Price": "exit_price",
     "Stop Loss Price": "stop_loss", "Target Price": "take_profit",

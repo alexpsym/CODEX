@@ -20571,6 +20571,131 @@ def _validate_trade_number_font_package(source_bytes, candidate_path):
                 "preservation": "all other package bytes, original styles, values, formulas, caches and relationships identical"}
 
 
+def prepare_pepperstone_timestamp_package(path: Path, candidate_path: Path, updates: list, *, expected_sha256: str, dependent_cells=None):
+    """Prepare a value-only candidate; caller owns the journal lock and installation.
+
+    Read with openpyxl, but never save through it: only approved cell payloads in
+    the original worksheet XML change. Every other package payload stays exact.
+    """
+    from openpyxl.utils.datetime import to_excel
+    from xml.sax.saxutils import escape
+
+    path, candidate_path = Path(path), Path(candidate_path)
+    original = path.read_bytes()
+    if hashlib.sha256(original).hexdigest() != expected_sha256:
+        raise RuntimeError("Timestamp workbook revision changed")
+    if candidate_path.exists() or path.resolve() == candidate_path.resolve():
+        raise ValueError("Timestamp candidate must be fresh")
+    if path.with_name("~$" + path.name).exists():
+        raise RuntimeError("Excel owner file exists")
+    workbook = load_workbook(BytesIO(original), read_only=True, data_only=False)
+    dependent_edits = {}
+    try:
+        ws = _get_trade_log_sheet(workbook)
+        headers = _trade_log_header_map(ws)
+        required = {"Row ID", "Open Time", "Close Time"}
+        if not required.issubset(headers):
+            raise ValueError("Timestamp repair requires native Trade Log headers")
+        by_id = defaultdict(list)
+        for cells in ws.iter_rows(min_row=_trade_log_data_start_row(ws)):
+            row_id = str(cells[headers["Row ID"] - 1].value or "")
+            if row_id:
+                by_id[row_id].append(cells)
+        edits = {}
+        for update in updates:
+            matches = by_id.get(update["id"], [])
+            if len(matches) != 1:
+                raise ValueError("Timestamp Row ID is missing or ambiguous")
+            cells = matches[0]
+            for field, header in (("open_time", "Open Time"), ("close_time", "Close Time")):
+                cell = cells[headers[header] - 1]
+                current = cell.value
+                expected = datetime.fromisoformat(update["before"][field]).replace(tzinfo=None)
+                desired = datetime.fromisoformat(update["after"][field]).replace(tzinfo=None)
+                if current != expected:
+                    raise ValueError("Timestamp workbook cell no longer matches plan")
+                if current != desired:
+                    edits[cell.coordinate] = {"before": current.isoformat(), "after": desired.isoformat(),
+                                              "value": format(to_excel(desired, workbook.epoch), ".16g"), "kind": "number"}
+            if update.get("duration_changed"):
+                header = next((h for h in headers if h.startswith("Trade Duration")), None)
+                if not header:
+                    raise ValueError("Timestamp duration column is missing")
+                cell = cells[headers[header] - 1]
+                if cell.data_type == "f":
+                    raise ValueError("Timestamp repair cannot replace a duration formula")
+                edits[cell.coordinate] = {"before": str(cell.value), "after": _format_duration_display(update["duration_seconds"]),
+                                          "value": _format_duration_display(update["duration_seconds"]), "kind": "text"}
+        approved_ids = {update["id"] for update in updates}
+        for item in dependent_cells or []:
+            if item["source_row_id"] not in approved_ids or item["sheet"] == "Trade Log":
+                raise ValueError("Dependent timestamp cell lacks approved native identity")
+            cell = workbook[item["sheet"]][item["coordinate"]]
+            if cell.data_type == "f" or cell.value != item["before"]:
+                raise ValueError("Dependent timestamp label no longer matches exact plan")
+            dependent_edits.setdefault(item["sheet"], {})[item["coordinate"]] = {
+                "before": cell.value, "after": item["after"], "value": item["after"],
+                "kind": "text", "source_row_id": item["source_row_id"]}
+    finally:
+        workbook.close()
+    if not edits:
+        return {"changed_cells": {}, "initial_sha256": expected_sha256, "final_sha256": expected_sha256, "noop": True}
+    with zipfile.ZipFile(BytesIO(original)) as package:
+        part = _worksheet_ooxml_part_name(package, "Trade Log")
+        by_part = {part: edits, **{_worksheet_ooxml_part_name(package, sheet): values for sheet, values in dependent_edits.items()}}
+        payloads = {}
+        seen = set()
+        active_edits = edits
+        def patch_cell(match):
+            cell = match.group(0)
+            coordinate = re.search(rb'\br="([A-Z]+[0-9]+)"', cell).group(1).decode()
+            edit = active_edits.get(coordinate)
+            if edit is None:
+                return cell
+            if coordinate in seen or b"<f" in cell:
+                raise ValueError("Duplicate or formula timestamp cell")
+            seen.add(coordinate)
+            if edit["kind"] == "number":
+                result, count = re.subn(rb'<v>[^<]*</v>', b'<v>' + edit["value"].encode() + b'</v>', cell)
+                if count != 1:
+                    raise ValueError("Timestamp cell must contain one numeric value")
+                return result
+            opening = cell[:cell.index(b">") + 1]
+            opening = re.sub(rb'\s+t="[^"]*"', b'', opening)
+            return opening[:-1] + b' t="inlineStr"><is><t>' + escape(edit["value"]).encode() + b'</t></is></c>'
+        for name, active_edits in by_part.items():
+            seen = set()
+            # A paired cell body cannot include another cell or a row boundary.
+            # One pass per changed worksheet, including self-closing neighbours.
+            payloads[name] = re.sub(rb'<c\b[^<>]*\br="[A-Z]+[0-9]+"[^<>]*?(?:/>|>(?:(?!</?(?:c|row)\b).)*</c>)',
+                                    patch_cell, package.read(name), flags=re.S)
+            if seen != set(active_edits):
+                raise ValueError("Approved timestamp cells not found")
+        with zipfile.ZipFile(candidate_path, "x") as candidate:
+            candidate.comment = package.comment
+            for info in package.infolist():
+                candidate.writestr(info, payloads[info.filename] if info.filename in payloads else package.read(info.filename))
+    _validate_pepperstone_timestamp_package(original, candidate_path, part, payloads)
+    return {"part": part, "changed_cells": edits, "initial_sha256": expected_sha256,
+            "dependent_cells": dependent_edits, "final_sha256": hashlib.sha256(candidate_path.read_bytes()).hexdigest(), "noop": False}
+
+
+def _validate_pepperstone_timestamp_package(original, candidate_path, part, expected_payload):
+    with zipfile.ZipFile(BytesIO(original)) as source, zipfile.ZipFile(candidate_path) as candidate:
+        if source.namelist() != candidate.namelist() or source.comment != candidate.comment:
+            raise ValueError("Timestamp package inventory changed")
+        for info in source.infolist():
+            other = candidate.getinfo(info.filename)
+            for attr in ("date_time", "compress_type", "comment", "extra", "internal_attr", "external_attr", "create_system"):
+                if getattr(info, attr) != getattr(other, attr):
+                    raise ValueError("Timestamp ZIP metadata changed")
+            expected = (expected_payload.get(info.filename, source.read(info.filename)) if isinstance(expected_payload, dict)
+                        else expected_payload if info.filename == part else source.read(info.filename))
+            if candidate.read(info.filename) != expected:
+                raise ValueError("Unapproved timestamp package change")
+        ET.fromstring(candidate.read(part))
+
+
 def repair_trade_number_link_fonts_package(path: Path, candidate_path: Path, *, expected_sha256: str):
     """One font-only candidate/validate/hash-check/atomic-replace operation.
 

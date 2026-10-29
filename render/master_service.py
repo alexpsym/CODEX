@@ -21665,6 +21665,312 @@ def _parse_pepperstone_mt5_rows(
     return parsed, balance
 
 
+def _plan_pepperstone_historical_timestamps(payload: bytes, workbook_rows: list, provenance_rows: list) -> dict:
+    """Explicit maintenance plan from fresh native bytes; never an import/resync.
+
+    No balances or new rows are consumed. Legacy IDs need native provenance,
+    just as native IDs do; timestamps never participate in identity matching.
+    """
+    native = _mt5_html_rows(payload)
+    fresh, _balance = _parse_pepperstone_mt5_rows([native], source_kind="html", statement_currency="AUD")
+    digest = hashlib.sha256(payload).hexdigest()
+    provenance = defaultdict(list)
+    for row in provenance_rows:
+        provenance[str(row.get("id") or "")].append(row)
+    counts = {key: 0 for key in ("corrected", "already_correct", "unmatched", "ambiguous", "protected", "unsupported")}
+    entries, classifications = [], []
+    ids = [str(row.get("id") or "") for row in workbook_rows]
+    def protected(row):
+        fields = row.get("manual_override_fields") or []
+        overrides = row.get("manual_overrides") or {}
+        return any(key in fields or key in overrides for key in ("open_time", "close_time"))
+    def wall(value):
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if dt.tzinfo:
+            dt = dt.astimezone(ZoneInfo("Australia/Brisbane"))
+        return dt.replace(tzinfo=None)
+    for old in workbook_rows:
+        if str(old.get("account") or "").upper() != "PEPPERSTONE DEMO" or old.get("row_type", "trade") != "trade":
+            continue
+        rid = str(old.get("id") or "")
+        evidence = provenance.get(rid, [])
+        status = None
+        candidates = []
+        if ids.count(rid) != 1 or len(evidence) > 1:
+            status = "ambiguous"
+        elif not evidence:
+            status = "unsupported"
+        else:
+            refs = evidence[0].get("raw_refs") or {}
+            if str(evidence[0].get("account") or "").upper() != "PEPPERSTONE DEMO":
+                refs = {}
+            for trade in fresh:
+                native_refs = trade["raw_refs"]
+                same_account = refs.get("account_fingerprint") == native_refs.get("account_fingerprint")
+                closing = refs.get("closing_deal_tickets")
+                position = refs.get("position_ticket")
+                linked = ((bool(closing) and sorted(closing) == native_refs.get("closing_deal_tickets"))
+                          or (bool(position) and position == native_refs.get("position_ticket")))
+                if same_account and linked:
+                    candidates.append(trade)
+            if not candidates:
+                status = "unmatched"
+            elif len(candidates) != 1:
+                status = "ambiguous"
+            elif protected(old) or protected(evidence[0]):
+                status = "protected"
+        if status is None:
+            trade = candidates[0]
+            compatible = (str(old.get("symbol")).upper() == str(trade.get("symbol")).upper()
+                          and str(old.get("side")).upper() == str(trade.get("side")).upper()
+                          and all(_mt5_values_close(old.get(k), trade.get(k)) for k in ("qty", "entry_price", "exit_price")))
+            if not compatible:
+                status = "unsupported"
+            else:
+                before = {key: old.get(key) for key in ("open_time", "close_time")}
+                after = {key: trade[key] for key in before}
+                old_duration = (wall(before["close_time"]) - wall(before["open_time"])).total_seconds()
+                duration = (wall(after["close_time"]) - wall(after["open_time"])).total_seconds()
+                # Existing calendar/report cells aggregate by month/year. A change
+                # to those buckets needs a separately supported dependency plan.
+                if wall(before["close_time"]).strftime("%Y-%m") != wall(after["close_time"]).strftime("%Y-%m"):
+                    raise ValueError("Timestamp repair changes a monthly calendar/report bucket")
+                if all(wall(before[k]) == wall(after[k]) for k in before):
+                    status = "already_correct"
+                else:
+                    status = "corrected"
+                    entries.append({"id": rid, "before": before, "after": after,
+                                    "native_refs": trade["raw_refs"], "source_sha256": digest,
+                                    "duration_seconds": duration, "duration_changed": old_duration != duration,
+                                    "date_changed": wall(before["close_time"]).date() != wall(after["close_time"]).date(),
+                                    "identity": {key: old.get(key) for key in ("account", "symbol", "side", "qty", "entry_price", "exit_price")}})
+        counts[status] += 1
+        classifications.append({"id": rid, "status": status})
+    ownership = defaultdict(list)
+    for entry in entries:
+        refs = entry["native_refs"]
+        ownership[(refs["account_fingerprint"], str(refs.get("position_ticket")), tuple(refs.get("closing_deal_tickets") or []))].append(entry["id"])
+    conflicting = {rid for owners in ownership.values() if len(owners) > 1 for rid in owners}
+    if conflicting:
+        entries = [entry for entry in entries if entry["id"] not in conflicting]
+        counts["corrected"] -= len(conflicting)
+        counts["ambiguous"] += len(conflicting)
+        for item in classifications:
+            if item["id"] in conflicting:
+                item["status"] = "ambiguous"
+    return {"source_sha256": digest, "entries": entries, "counts": counts, "classifications": classifications,
+            "dependencies": "monthly/yearly buckets unchanged; durations corrected only when elapsed instants differ"}
+
+
+def _pepperstone_timestamp_record(row: dict, entry: dict) -> dict:
+    """Patch a proven existing record, preserving every other field."""
+    for key, value in entry["identity"].items():
+        actual = row.get(key)
+        if key in {"qty", "entry_price", "exit_price"}:
+            matches = _mt5_values_close(actual, value)
+        else:
+            matches = str(actual or "").upper() == str(value or "").upper()
+        if not matches:
+            raise ValueError("Runtime timestamp identity conflict: " + key)
+    if any(key in (row.get("manual_overrides") or {}) or key in (row.get("manual_override_fields") or []) for key in entry["after"]):
+        raise ValueError("Runtime timestamp manual override is protected")
+    result = copy.deepcopy(row)
+    for key, desired in entry["after"].items():
+        actual = str(row.get(key) or "")
+        dt = _parse_iso_datetime(actual)
+        before = _parse_iso_datetime(entry["before"][key])
+        after = _parse_iso_datetime(desired)
+        # Stored naive workbook/runtime values already denote Brisbane wall time.
+        def local(value):
+            if value is None:
+                return None
+            return value.replace(tzinfo=None) if value.tzinfo is None else value.astimezone(ZoneInfo("Australia/Brisbane")).replace(tzinfo=None)
+        if actual not in {str(entry["before"][key]), desired} and local(dt) not in {local(before), local(after)}:
+            raise ValueError("Runtime timestamp revision conflicts with plan")
+        result[key] = desired
+    if entry["duration_changed"]:
+        result["trade_duration_seconds"] = entry["duration_seconds"]
+    refs = result.setdefault("raw_refs", {})
+    refs["timestamp_conversion"] = copy.deepcopy(entry["native_refs"]["timestamp_conversion"])
+    refs["timestamp_repair"] = {"source_sha256": entry["source_sha256"], "journal_zone": "Australia/Brisbane"}
+    return result
+
+
+def _repair_pepperstone_historical_timestamps(plan: dict, *, workbook_path: Path, store_paths: dict,
+                                             backup_dir: Path, expected_revisions: dict,
+                                             expected_sqlite_rows: dict, source_path: Path) -> dict:
+    """One locked, backed-up maintenance transaction; no importer or refresh.
+
+    Candidates precede installation. SQLite keeps a write transaction open while
+    files are installed; failures restore only revisions owned by this attempt.
+    Durable recovery evidence and a consistent database backup stay with caller.
+    """
+    from tools.master_journal_workbook import prepare_pepperstone_timestamp_package
+    import sqlite3
+    workbook_path, backup_dir = Path(workbook_path), Path(backup_dir)
+    if not plan["entries"]:
+        return {"ok": True, "noop": True, "counts": plan["counts"]}
+    rejected = _reserve_master_journal_workbook_sync(workbook_path, "pepperstone-timestamp-repair", "timestamp_maintenance", wait_seconds=5.0)
+    if rejected:
+        raise RuntimeError("Journal transaction is busy")
+    installed, originals, candidate_hashes = [], {}, {}
+    conn, sql_originals, sql_candidates = None, {}, {}
+    sql_snapshot_original = None
+    try:
+        if backup_dir.exists():
+            raise ValueError("Timestamp backup directory must be unique")
+        if _master_journal_lock_status(workbook_path).get("locked"):
+            raise RuntimeError("Workbook is locked")
+        if hashlib.sha256(source_path.read_bytes()).hexdigest() != plan["source_sha256"]:
+            raise RuntimeError("Native timestamp source changed")
+        paths = {"workbook": workbook_path, **{k: Path(v) for k, v in store_paths.items() if Path(v).exists()}}
+        for key, path in paths.items():
+            if key == "sqlite":
+                continue
+            content = path.read_bytes()
+            if hashlib.sha256(content).hexdigest() != expected_revisions[key]:
+                raise RuntimeError("Timestamp source revision changed: " + key)
+            originals[key] = content
+        state = json.loads(originals["derived"]) if "derived" in originals else {}
+        if any(state.get(k) for k in ("queued", "running", "pending", "refresh_required")):
+            raise RuntimeError("Derived journal transaction is pending")
+        backup_dir.mkdir(parents=True)
+        for key, content in originals.items():
+            backup = backup_dir / (key + ".original")
+            _atomic_write_bytes(backup, content)
+            if backup.read_bytes() != content:
+                raise RuntimeError("Timestamp backup verification failed")
+        entries = {item["id"]: item for item in plan["entries"]}
+        candidates = {}
+        if "journal" in originals:
+            data = json.loads(originals["journal"])
+            seen = set()
+            for index, row in enumerate(data["items"]):
+                rid = row.get("id")
+                if rid in entries:
+                    if rid in seen:
+                        raise ValueError("Duplicate runtime Row ID")
+                    seen.add(rid)
+                    data["items"][index] = _pepperstone_timestamp_record(row, entries[rid])
+            candidates["journal"] = json.dumps(data, ensure_ascii=False, indent=2).encode()
+        if "import_cache" in originals:
+            cache = json.loads(originals["import_cache"])
+            files = cache.get("files", {})
+            stale = [key for key, value in files.items() if any(
+                row.get("id") in entries for row in value.get("rows", []) if isinstance(row, dict))]
+            for key in stale:
+                del files[key]
+            if stale:
+                candidates["import_cache"] = json.dumps(cache, ensure_ascii=False, indent=2).encode()
+        workbook_candidate = backup_dir / "timestamp-candidate.xlsx"
+        package = prepare_pepperstone_timestamp_package(workbook_path, workbook_candidate, list(entries.values()),
+            expected_sha256=expected_revisions["workbook"], dependent_cells=plan.get("dependent_cells", []))
+        if not package["noop"]:
+            candidates["workbook"] = workbook_candidate.read_bytes()
+        if "sqlite" in paths:
+            conn = sqlite3.connect(paths["sqlite"], timeout=5)
+            conn.execute("BEGIN IMMEDIATE")
+            for rid, entry in entries.items():
+                values = conn.execute("SELECT payload_json FROM journal_trades WHERE id=?", (rid,)).fetchall()
+                if not values:
+                    continue
+                if len(values) != 1 or values[0][0] != expected_sqlite_rows.get(rid):
+                    raise RuntimeError("SQLite timestamp revision changed")
+                sql_originals[rid] = values[0][0]
+                sql_candidates[rid] = json.dumps(_pepperstone_timestamp_record(json.loads(values[0][0]), entry), ensure_ascii=False)
+            snapshot = plan.get("sqlite_current_stats_invalidation")
+            if snapshot:
+                schema = conn.execute("PRAGMA table_info(journal_stats)").fetchall()
+                if [column[1] for column in schema] != ["snapshot_id", "payload_json", "imported_at"] or schema[0][5] != 1:
+                    raise ValueError("Unsupported SQLite snapshot schema")
+                latest = conn.execute("SELECT snapshot_id FROM journal_stats ORDER BY snapshot_id DESC LIMIT 1").fetchone()
+                if latest != (snapshot["snapshot_id"],):
+                    raise RuntimeError("SQLite current snapshot revision advanced")
+                sql_snapshot_original = conn.execute("SELECT snapshot_id,payload_json,imported_at FROM journal_stats WHERE snapshot_id=?", latest).fetchone()
+                if hashlib.sha256(sql_snapshot_original[1].encode()).hexdigest() != snapshot["sha256"]:
+                    raise RuntimeError("SQLite current snapshot payload changed")
+                def references_matched_identity(value):
+                    if isinstance(value, dict):
+                        return any(value.get(key) in entries for key in ("id", "row_id", "source_id") if isinstance(value.get(key), str)) or any(references_matched_identity(item) for item in value.values())
+                    return isinstance(value, list) and any(references_matched_identity(item) for item in value)
+                if not references_matched_identity(json.loads(sql_snapshot_original[1])):
+                    raise ValueError("Current snapshot has no matched native trade identity")
+            with sqlite3.connect(paths["sqlite"].resolve().as_uri() + "?mode=ro", uri=True) as reader, sqlite3.connect(backup_dir / "journal.sqlite") as destination:
+                reader.backup(destination)
+                for rid, value in sql_originals.items():
+                    if destination.execute("SELECT payload_json FROM journal_trades WHERE id=?", (rid,)).fetchone() != (value,):
+                        raise RuntimeError("SQLite consistent backup verification failed")
+            for rid, value in sql_candidates.items():
+                conn.execute("UPDATE journal_trades SET payload_json=? WHERE id=?", (value, rid))
+            if sql_snapshot_original:
+                conn.execute("DELETE FROM journal_stats WHERE snapshot_id=? AND payload_json=?", sql_snapshot_original[:2])
+        # Persist the complete candidate/rollback manifest before touching files.
+        recovery = {"phase": "prepared", "plan": plan, "package": package,
+                    "original_hashes": {k: hashlib.sha256(v).hexdigest() for k, v in originals.items()},
+                    "sqlite_before": sql_originals, "sqlite_after": sql_candidates,
+                    "sqlite_invalidated_current_snapshot": sql_snapshot_original}
+        _save_json_file(backup_dir / "recovery.json", recovery)
+        for key, data in candidates.items():
+            _atomic_write_bytes(backup_dir / (key + ".candidate"), data)
+            candidate_hashes[key] = hashlib.sha256(data).hexdigest()
+        deletions = [key for key in ("view_cache", "resync_cache") if key in originals]
+        # Recheck all file revisions and the native report immediately before install.
+        for key, content in originals.items():
+            if paths[key].read_bytes() != content:
+                raise RuntimeError("Concurrent journal/cache change before timestamp install: " + key)
+        if hashlib.sha256(source_path.read_bytes()).hexdigest() != plan["source_sha256"] or _master_journal_lock_status(workbook_path).get("locked"):
+            raise RuntimeError("Timestamp source changed or workbook opened")
+        for key, data in candidates.items():
+            os.replace(backup_dir / (key + ".candidate"), paths[key])
+            installed.append(key)
+        for key in deletions:
+            paths[key].unlink()
+            installed.append(key)
+            candidate_hashes[key] = None
+        for key in installed:
+            if candidate_hashes[key] is None:
+                if paths[key].exists():
+                    raise RuntimeError("Timestamp snapshot invalidation failed")
+            elif hashlib.sha256(paths[key].read_bytes()).hexdigest() != candidate_hashes[key]:
+                raise RuntimeError("Timestamp installation verification failed")
+        if conn:
+            for rid, value in sql_candidates.items():
+                if conn.execute("SELECT payload_json FROM journal_trades WHERE id=?", (rid,)).fetchone() != (value,):
+                    raise RuntimeError("SQLite timestamp verification failed")
+            conn.commit()
+        recovery.update(phase="committed", installed=installed, installed_hashes=candidate_hashes)
+        _save_json_file(backup_dir / "recovery.json", recovery)
+        return {"ok": True, "noop": False, "counts": plan["counts"], "package": package,
+                "installed": installed, "sqlite_rows": len(sql_candidates), "backup_dir": str(backup_dir)}
+    except Exception:
+        if conn:
+            conn.rollback()
+            for rid, value in sql_originals.items():
+                current = conn.execute("SELECT payload_json FROM journal_trades WHERE id=?", (rid,)).fetchone()
+                if current == (sql_candidates.get(rid),):
+                    conn.execute("UPDATE journal_trades SET payload_json=? WHERE id=?", (value, rid))
+                elif current != (value,):
+                    raise RuntimeError("SQLite repair ownership lost; recovery evidence retained")
+            if sql_snapshot_original:
+                current = conn.execute("SELECT snapshot_id,payload_json,imported_at FROM journal_stats WHERE snapshot_id=?", (sql_snapshot_original[0],)).fetchone()
+                if current is None:
+                    conn.execute("INSERT INTO journal_stats(snapshot_id,payload_json,imported_at) VALUES (?,?,?)", sql_snapshot_original)
+                elif current != sql_snapshot_original:
+                    raise RuntimeError("SQLite current snapshot recovery ownership lost")
+            conn.commit()
+        for key in reversed(installed):
+            path = paths[key]
+            current = hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else None
+            if current != candidate_hashes[key]:
+                raise RuntimeError("Timestamp rollback ownership lost; recovery evidence retained")
+            _restore_optional_file_snapshot(path, originals[key])
+        raise
+    finally:
+        if conn:
+            conn.close()
+        _release_master_journal_workbook_sync()
+
+
 def _load_bounce_traders() -> List[Dict[str, object]]:
     if not BOUNCE_TRADERS_PATH.exists():
         return []

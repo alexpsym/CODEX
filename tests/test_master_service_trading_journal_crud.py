@@ -1356,6 +1356,180 @@ def test_pepperstone_mt5_import_is_idempotent_preserves_manual_fields_and_applie
     reloaded.close()
 
 
+def _job11_timestamp_fixture(tmp_path, monkeypatch):
+    import hashlib
+    import tools.master_journal_workbook as mjw
+    payload = _pepperstone_mt5_html_bytes()
+    fresh, _ = master_service._parse_pepperstone_mt5_rows(
+        [master_service._mt5_html_rows(payload)], source_kind="html")
+    row = copy.deepcopy(fresh[0])
+    row["open_time"], row["close_time"] = "2026-09-01T09:00:00", "2026-09-01T11:00:00"
+    row.update(notes="keep", setup="Pullback", timeframe="M5", trade_duration_seconds=7200)
+    workbook = tmp_path / "journal.xlsx"
+    wb = Workbook(); ws = wb.active; ws.title = "Trade Log"
+    values = mjw._trade_log_row_values(row)
+    values["Row ID"] = row["id"]
+    for col, header in enumerate(mjw.TRADE_LOG_HEADERS, 1):
+        ws.cell(1, col, header); ws.cell(8, col, values.get(header))
+    # Regression: the blank A8 immediately precedes the two timestamp cells.
+    # Also retain adjacent blank/populated/formula cells with an explicit cache.
+    extra = len(mjw.TRADE_LOG_HEADERS) + 1
+    ws.cell(8, extra, "")
+    ws.cell(8, extra + 1, "neighbour value")
+    formula_cell = ws.cell(8, extra + 2, "=1+2").coordinate
+    ws.cell(8, extra + 3, "")
+    wb.save(workbook); wb.close()
+    import zipfile
+    import re
+    import xml.etree.ElementTree as ET
+    with zipfile.ZipFile(workbook) as package:
+        infos = package.infolist()
+        payloads = {info.filename: package.read(info.filename) for info in infos}
+    sheet_part = "xl/worksheets/sheet1.xml"
+    pattern = (rb'<c\b[^<>]*\br="' + formula_cell.encode()
+               + rb'"[^<>]*>(?:(?!</?(?:c|row)\b).)*</c>')
+    def set_formula_cache(match):
+        cell = ET.fromstring(match.group())
+        assert cell.find("f").text == "1+2"
+        value = cell.find("v")
+        if value is None:
+            value = ET.SubElement(cell, "v")
+        value.text = "3"
+        result = ET.tostring(cell, encoding="utf-8")
+        parsed = ET.fromstring(result)
+        assert parsed.find("f").text == "1+2" and parsed.find("v").text == "3"
+        return result
+    payloads[sheet_part], count = re.subn(pattern, set_formula_cache, payloads[sheet_part], flags=re.S)
+    assert count == 1
+    with zipfile.ZipFile(workbook, "w") as package:
+        for info in infos:
+            package.writestr(info, payloads[info.filename])
+    (tmp_path / "neighbours-before.xml").write_bytes(payloads[sheet_part])
+    stores = {key: tmp_path / filename for key, filename in {
+        "journal": "journal.json", "sqlite": "journal.sqlite", "view_cache": "view.json",
+        "resync_cache": "resync.json", "import_cache": "import.json"}.items()}
+    stores["journal"].write_text(json.dumps({"items": [row, {"id": "unrelated", "notes": "untouched"}]}))
+    stores["view_cache"].write_text(json.dumps({"items": [row]}))
+    stores["resync_cache"].write_text(json.dumps({"verified_at": "stale"}))
+    stores["import_cache"].write_text(json.dumps({"files": {"pepperstone": {"rows": [row]}, "other": {"rows": [{"id": "other"}]}}}))
+    with sqlite3.connect(stores["sqlite"]) as conn:
+        conn.execute("CREATE TABLE journal_trades(id TEXT PRIMARY KEY,payload_json TEXT)")
+        conn.execute("CREATE TABLE journal_balances(account TEXT,balance REAL)")
+        conn.execute("CREATE TABLE journal_stats(snapshot_id TEXT PRIMARY KEY,payload_json TEXT,imported_at TEXT)")
+        conn.execute("INSERT INTO journal_trades VALUES (?,?)", (row["id"], json.dumps(row)))
+        conn.execute("INSERT INTO journal_balances VALUES ('newer',99999)")
+        stats_payload = json.dumps({'source_id':row['id'],'date':row['close_time']})
+        conn.execute("INSERT INTO journal_stats VALUES ('z-current',?,'keep')", (stats_payload,))
+        conn.execute("INSERT INTO journal_stats VALUES ('a-history','{}','keep')")
+    source = tmp_path / "report.html"; source.write_bytes(payload)
+    plan = master_service._plan_pepperstone_historical_timestamps(payload, [row], [row])
+    plan['sqlite_current_stats_invalidation'] = {'snapshot_id':'z-current','sha256':hashlib.sha256(stats_payload.encode()).hexdigest()}
+    revisions = {"workbook": hashlib.sha256(workbook.read_bytes()).hexdigest(), **{
+        k: hashlib.sha256(v.read_bytes()).hexdigest() for k, v in stores.items() if k != "sqlite"}}
+    with sqlite3.connect(stores["sqlite"]) as conn:
+        sql = dict(conn.execute("SELECT id,payload_json FROM journal_trades"))
+    monkeypatch.setattr(master_service, "_journal_transaction_lock_path", lambda _path: tmp_path / "journal-transaction.lock")
+    assert master_service._journal_transaction_lock_path(workbook).parent == tmp_path
+    def forbidden(*_a, **_k):
+        pytest.fail("Historical timestamp maintenance must not import, upload or start background work")
+    monkeypatch.setattr(master_service, "_import_uploaded_trading_journal_file", forbidden)
+    monkeypatch.setattr(master_service, "_schedule_dropbox_upload_state_backup", forbidden)
+    monkeypatch.setattr(threading.Thread, "start", forbidden)
+    import socket
+    monkeypatch.setattr(socket.socket, "connect", forbidden)
+    return payload, row, workbook, stores, plan, revisions, sql, source
+
+
+def test_pepperstone_historical_timestamp_plan_matches_identity_and_preserves_other_fields(tmp_path, monkeypatch):
+    payload, row, _, _, plan, _, _, _ = _job11_timestamp_fixture(tmp_path, monkeypatch)
+    assert plan["counts"]["corrected"] == 1
+    entry = plan["entries"][0]
+    assert entry["after"] == {"open_time": "2026-09-01T16:00:00+10:00", "close_time": "2026-09-01T18:00:00+10:00"}
+    patched = master_service._pepperstone_timestamp_record(row, entry)
+    assert {k:v for k,v in patched.items() if k not in {"open_time","close_time","raw_refs"}} == {k:v for k,v in row.items() if k not in {"open_time","close_time","raw_refs"}}
+    assert master_service._plan_pepperstone_historical_timestamps(payload, [patched], [patched])["counts"]["already_correct"] == 1
+    for field in ("open_time", "close_time"):
+        manual = copy.deepcopy(row); manual["manual_overrides"] = {field: row[field]}
+        assert master_service._plan_pepperstone_historical_timestamps(payload,[manual],[manual])["counts"]["protected"] == 1
+    wrong = copy.deepcopy(row); wrong["raw_refs"]["account_fingerprint"] = "wrong"
+    assert master_service._plan_pepperstone_historical_timestamps(payload,[row],[wrong])["counts"]["unmatched"] == 1
+    assert master_service._plan_pepperstone_historical_timestamps(payload,[row,row],[row])["counts"]["ambiguous"] == 2
+    wrong = copy.deepcopy(row); wrong["qty"] *= 2
+    assert master_service._plan_pepperstone_historical_timestamps(payload,[wrong],[row])["counts"]["unsupported"] == 1
+    other = copy.deepcopy(row); other["account"] = "PEPPERSTONE LIVE"
+    assert master_service._plan_pepperstone_historical_timestamps(payload,[other],[other])["entries"] == []
+    legacy = copy.deepcopy(row); legacy["id"] = "legacy:unchanged-id"
+    assert master_service._plan_pepperstone_historical_timestamps(payload,[legacy],[legacy])["entries"][0]["id"] == legacy["id"]
+    duration = copy.deepcopy(entry); duration.update(duration_changed=True,duration_seconds=3600)
+    assert master_service._pepperstone_timestamp_record(row,duration)["trade_duration_seconds"] == 3600
+    month = copy.deepcopy(row); month["close_time"] = "2026-08-31T11:00:00"
+    with pytest.raises(ValueError, match="monthly"):
+        master_service._plan_pepperstone_historical_timestamps(payload,[month],[row])
+
+
+def test_pepperstone_historical_timestamp_repair_bypasses_stale_caches_and_is_idempotent(tmp_path, monkeypatch):
+    payload,row,workbook,stores,plan,revisions,sql,source = _job11_timestamp_fixture(tmp_path,monkeypatch)
+    result = master_service._repair_pepperstone_historical_timestamps(plan,workbook_path=workbook,store_paths=stores,
+        backup_dir=tmp_path/'backup',expected_revisions=revisions,expected_sqlite_rows=sql,source_path=source)
+    assert result["ok"] and result["sqlite_rows"] == 1
+    import zipfile
+    import xml.etree.ElementTree as ET
+    before = ET.fromstring((tmp_path / "neighbours-before.xml").read_bytes())
+    with zipfile.ZipFile(workbook) as package:
+        after = ET.fromstring(package.read("xl/worksheets/sheet1.xml"))
+    ns = {"s": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+    for tree in (before, after):
+        for xml_row in tree.findall("s:sheetData/s:row", ns):
+            for cell in list(xml_row):
+                if cell.get("r") in {"B8", "C8"}:
+                    xml_row.remove(cell)
+    assert ET.tostring(before) == ET.tostring(after)
+    assert b"<v>3</v>" in (tmp_path / "neighbours-before.xml").read_bytes()
+    data=json.loads(stores["journal"].read_text()); patched=data["items"][0]
+    assert patched["open_time"] == "2026-09-01T16:00:00+10:00"
+    assert data["items"][1] == {"id":"unrelated","notes":"untouched"}
+    assert not stores["view_cache"].exists() and not stores["resync_cache"].exists()
+    assert list(json.loads(stores["import_cache"].read_text())["files"]) == ["other"]
+    with sqlite3.connect(stores["sqlite"]) as conn:
+        assert json.loads(conn.execute('SELECT payload_json FROM journal_trades').fetchone()[0]) == patched
+        assert conn.execute('SELECT * FROM journal_balances').fetchall() == [('newer',99999)]
+        assert conn.execute('SELECT snapshot_id FROM journal_stats').fetchall() == [('a-history',)]
+    import tools.master_journal_workbook as mjw
+    projected=mjw.read_master_journal_source(workbook)["items"][0]
+    assert projected["open_time"] == "2026-09-01T16:00:00"
+    second=master_service._plan_pepperstone_historical_timestamps(payload,[projected],[patched])
+    assert second["counts"]["already_correct"] == 1
+    original=workbook.read_bytes(),stores["journal"].read_bytes()
+    out=master_service._repair_pepperstone_historical_timestamps(second,workbook_path=workbook,store_paths=stores,
+        backup_dir=tmp_path/'noop',expected_revisions={},expected_sqlite_rows={},source_path=source)
+    assert out["noop"] and original == (workbook.read_bytes(),stores["journal"].read_bytes())
+
+
+def test_pepperstone_historical_timestamp_repair_failure_preserves_original_state(tmp_path, monkeypatch):
+    _,_,workbook,stores,plan,revisions,sql,source = _job11_timestamp_fixture(tmp_path,monkeypatch)
+    originals={k:p.read_bytes() for k,p in {"workbook":workbook,**stores}.items()}
+    import tools.master_journal_workbook as mjw
+    real=mjw._validate_pepperstone_timestamp_package
+    monkeypatch.setattr(mjw,"_validate_pepperstone_timestamp_package",lambda *_a: (_ for _ in ()).throw(ValueError('validation rejected')))
+    with pytest.raises(ValueError,match='validation rejected'):
+        master_service._repair_pepperstone_historical_timestamps(plan,workbook_path=workbook,store_paths=stores,
+            backup_dir=tmp_path/'validation-backup',expected_revisions=revisions,expected_sqlite_rows=sql,source_path=source)
+    monkeypatch.setattr(mjw,"_validate_pepperstone_timestamp_package",real)
+    replace=master_service.os.replace
+    def fail_install(src,dst):
+        if Path(src).name == 'workbook.candidate':
+            raise OSError('installation rejected')
+        return replace(src,dst)
+    monkeypatch.setattr(master_service.os,"replace",fail_install)
+    with pytest.raises(OSError,match='installation rejected'):
+        master_service._repair_pepperstone_historical_timestamps(plan,workbook_path=workbook,store_paths=stores,
+            backup_dir=tmp_path/'rollback-backup',expected_revisions=revisions,expected_sqlite_rows=sql,source_path=source)
+    for key,path in {"workbook":workbook,**stores}.items():
+        assert path.read_bytes() == originals[key]
+    assert master_service._reserve_master_journal_workbook_sync(workbook,'after-failure','test',wait_seconds=0) is None
+    master_service._release_master_journal_workbook_sync()
+
+
 def test_pepperstone_mt5_rejects_unrecognized_html_without_mutation(
     temp_state_paths: Path, monkeypatch: pytest.MonkeyPatch
 ):
