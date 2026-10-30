@@ -1,3 +1,80 @@
+JOB 15 ? Implemented and installed; manual acceptance PENDING.
+Jobs 13 and 14: user acceptance PASSED. Their checks were not repeated.
+Job 5 live price observation remains pending. ETH fee/target work CANCELLED;
+hosted Render work DEFERRED.
+
+Changed tracked files: tools/master_journal_workbook.py,
+tests/test_master_journal_workbook.py, summary/CODEX_SUMMARY_latest.txt,
+journal/Trading Journal.xlsx. Unrelated pre-existing changes remain user-owned.
+Initial and continuation branch/HEAD: master,
+431c6fce6c15fbc67e106c86e4706c78b009ec28. No initially staged filenames.
+Workbook was clean at both checkpoints and byte-identical to that original
+committed workbook immediately before preparing the production candidate.
+
+Implementation: shared direct fill logic uses existing Test semantics and
+_is_test_trade_value, with EAF4FF for marked trade rows regardless of Net P/L.
+Demo account alone does not mark a trade. No flags or financial data changed.
+Clearing Test through supported updates restores normal generated backgrounds.
+Generated win/loss CF excludes Test flags; legacy generated rules remain
+recognized. Authored/specific recommendation/warning rules and their priorities
+are retained. No unrelated rule renumbering. Nontrade rows remain unchanged.
+
+Verification history (retained, not erased by the continuation):
+- Generation/incremental/preservation node PASSED in original combined run;
+  it was NOT rerun. That invocation exited 1 overall, 43.823 seconds
+  (pytest 41.12 seconds), because the package node failed XML attribute-order
+  validation. Canonical XML comparison corrected the validation.
+- Second invocation, package node only, FAILED: mutable ZipInfo/header_offset
+  corrupted subsequent source reads. Exit 1, 14.407 seconds (pytest 12.34).
+  The Job 15 writer now passes copy(info) to writestr. Historical helpers were
+  not changed. Preservation assertions were retained.
+- Explicitly authorized continuation: package node only PASSED, exit 0,
+  4.771 seconds (pytest 3.16 seconds). One additional node execution.
+  Log: .job15-work-20261030\continuation-package.log
+  JUnit: .job15-work-20261030/continuation-package.xml
+  Result: .job15-work-20261030/continuation-package-result.json
+  Fresh fixture path: .job15-tests-20261030-c (no real journal lock).
+
+Production: exactly ONE attempt, successful. Excel closed; standard existing
+journal transaction lock acquired using only its extracted definitions, without
+importing the service or starting workers. Initial ownership and hash recorded;
+source ownership/hash rechecked before one atomic replacement; one installed-file
+readback matched validated candidate SHA256.
+Marked trade rows installed: 41; changed cell styles: 2050.
+Added fill definitions: 1; added cloned cell styles: 47.
+Only generated profit/loss formulas changed, at existing priorities 5 and 6.
+Trade Log part: xl/worksheets/sheet4.xml. Other ZIP member payloads, including relationships,
+charts, other worksheets and comments, were byte-identical. Existing style-table
+definitions were retained; appended clones differ only in fillId. Worksheet
+comparison allowed only targeted style references and exact generated formula
+exclusions, preserving all values, formulas/caches, flags, links, fonts, borders,
+number formats, alignment, protection, layout and unrelated formatting.
+Initial SHA256: 90aec2825dd1b20aa4fdb7f1aeba72fa8559c568adacc9c5142125f7d9ed3868
+Installed SHA256: 06e553b0e3839a54d1f9eafaee14ea1f92da98afe60e46bb82c9281d4d28aceb
+Operation elapsed 24.927 seconds; bounded wrapper 27.331 seconds,
+exit 0; hard operation timeout 180 seconds.
+Log/result: .job15-work-20261030/production.log and production-execution.json.
+Recovery: C:\GPT\CODEX-job15-backups\job15-20261030-171050
+Retained: one original.xlsx plus initial.json and manifest.json; candidate moved
+atomically into the canonical path. Recorded combined recovery peak:
+1412560 bytes, below 25 MiB. No databases or database copies.
+No journal JSON/cache/broker/history operations, general workbook save, rebuild,
+resync, recalculation, prior repair operations or application restarts.
+
+Manual inspection in Trade Log:
+- Row 10: bybit:demo:trade:BTCUSDT:d29f59a9d501fcab (marked).
+- Row 12: bybit:demo:trade:BTCUSDT:ea7c0b6ac5d23328 (marked).
+- Row 4: C385, bybit:demo:trade:DOODUSDT:79d25ab21b6f77a3 (ordinary non-test).
+Open the updated workbook and inspect blue test rows and preserved ordinary
+formatting. No resync, new trade or repeat of Jobs 13/14 checks is required.
+
+Delivery uses only these four exact paths and the protected normal-push helper;
+PATCH_DESKTOP_PUSH.bat is explicitly superseded by the user's authorization.
+Continuation ownership evidence: .job15-work-20261030/continuation-ownership.json.
+Final commit/push identities and fresh remote equality are reported in-session.
+
+--- Historical summaries retained unchanged below ---
+
 JOB 14 CONTINUATION - LEGACY READY SENTENCE PRESENTATION GUARD - 30 October 2026
 Job 13 user acceptance PASSED. Job 14 placement, scrolling and shutdown user checks PASSED. Obsolete-message removal FAILED live acceptance; this continuation corrects presentation. Final text-only user recheck PENDING. Earlier acceptance states below are historical.
 

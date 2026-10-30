@@ -13148,3 +13148,123 @@ def test_legacy_commission_conventions_survive_write_readback(tmp_path, monkeypa
         assert ws.cell(number,headers['Notes'])._style==style and ws.cell(number,1).hyperlink.target=='https://example.invalid/retained'
         assert wb['Adjacent']['A1'].value=='=2+3' and wb['Adjacent']['B2'].value=='keep';wb.close()
     finally:svc._release_master_journal_workbook_sync()
+
+def test_test_trade_row_fill_survives_generation_incremental_and_preservation(tmp_path, monkeypatch):
+    monkeypatch.setattr(mjw, '_trade_allocation_state_path', lambda: tmp_path/'allocations.json')
+    monkeypatch.setattr(mjw, 'REPORT_START_YEAR', 2026)
+    monkeypatch.setattr(mjw, 'REPORT_MIN_END_YEAR', 2026)
+    monkeypatch.setenv('TRADING_JOURNAL_FOREX_ROOT', str(tmp_path/'fx'))
+    monkeypatch.setenv('TRADING_JOURNAL_CRYPTO_ROOT', str(tmp_path/'crypto'))
+    # Accepted representations and all outcomes, plus demo/nontrade controls.
+    wb=Workbook(); ws=wb.active;ws.title='Trade Log'
+    for values in mjw._trade_log_three_row_header_values(): ws.append(values)
+    headers=mjw._trade_log_header_map(ws)
+    flags=[True,1,1.0,'YES',' y ','true','1',False,'no',2]
+    for row, flag in enumerate(flags,4):
+        ws.cell(row,headers['Row Type'],'trade');ws.cell(row,headers['Test'],flag)
+        pnl=[3,-2,0,None][(row-4)%4]
+        ws.cell(row,headers['Net P/L'],pnl)
+        ws.cell(row,headers['Account'],'DEMO')
+    ws.cell(14,headers['Row Type'],'cashflow');ws.cell(14,headers['Test'],'yes')
+    ws.cell(14,1).fill=PatternFill('solid',fgColor=PROFIT_FILL)
+    mjw._apply_trade_log_win_loss_direct_row_fills(ws)
+    for row in range(4,11): assert mjw._cell_fill_rgb(ws.cell(row,1)) == 'EAF4FF'
+    assert mjw._cell_fill_rgb(ws.cell(14,1)) == PROFIT_FILL
+    for row in range(11,14): assert mjw._cell_fill_rgb(ws.cell(row,1)) != 'EAF4FF'
+    for row in range(4,8): ws.cell(row,headers['Test'],False)
+    mjw._apply_trade_log_win_loss_direct_row_fills_for_rows(ws,range(4,8))
+    assert [mjw._cell_fill_rgb(ws.cell(r,1)) for r in range(4,8)] == [PROFIT_FILL,LOSS_FILL,'000000','000000']
+    wb.close()
+    snapshot=sample_snapshot();snapshot['items'][0]['is_test_trade']=True
+    path=tmp_path/'flows.xlsx'
+    build_master_journal_workbook(snapshot,path,publish_recommendation_assets=False)
+    wb=load_workbook(path);ws=wb['Trade Log'];r=_trade_log_row_by_id(ws,'t1')
+    assert mjw._cell_fill_rgb(ws.cell(r,1)) == 'EAF4FF'
+    ws.cell(r,headers['Notes']).comment=Comment('preserve','tester')
+    # An authored warning keeps its exact priority and survives generated refreshes.
+    warning=FormulaRule(formula=['TRUE'],fill=PatternFill('solid',fgColor='FFF2CC'),stopIfTrue=True)
+    warning.priority=77;ws.conditional_formatting.add(f'B{r}',warning)
+    mjw._apply_trade_log_recommendation_conditional_formatting(ws,4,5,headers)
+    before=mjw._conditional_formatting_contract(ws)
+    style=copy(ws.cell(r,1)._style);link=copy(ws.cell(r,1).hyperlink)
+    wb.save(path);wb.close()
+    changed=dict(snapshot['items'][0]);changed['is_test_trade']=False
+    appended=dict(snapshot['items'][1],id='job15-new',is_test_trade=True,net_profit=0)
+    result=update_master_journal_workbook_incremental(path,[changed,appended])
+    assert result['ok']
+    snapshot['items']=[changed,snapshot['items'][1],appended]
+    wb=load_workbook(path);ws=wb['Trade Log']
+    assert mjw._cell_fill_rgb(ws.cell(_trade_log_row_by_id(ws,'t1'),1)) == PROFIT_FILL
+    assert mjw._cell_fill_rgb(ws.cell(_trade_log_row_by_id(ws,'job15-new'),1)) == 'EAF4FF'
+    assert mjw._conditional_formatting_contract(ws) == before
+    now=copy(ws.cell(r,1)._style);now.fillId=style.fillId
+    assert now == style and ws.cell(r,1).hyperlink == link
+    wb.close()
+    result=update_master_journal_workbook_data_only(path,snapshot,preserve_existing_layout=True,publish_recommendation_assets=False)
+    assert result['ok'];candidate=Path(result['candidate_path'])
+    wb=load_workbook(candidate);ws=wb['Trade Log']
+    assert mjw._cell_fill_rgb(ws.cell(_trade_log_row_by_id(ws,'job15-new'),1)) == 'EAF4FF'
+    assert mjw._cell_fill_rgb(ws.cell(_trade_log_row_by_id(ws,'t1'),1)) == PROFIT_FILL
+    assert mjw._conditional_formatting_contract(ws) == before
+    for key,rules in ws.conditional_formatting._cf_rules.items():
+        for rule in rules:
+            if mjw._is_generated_trade_log_win_loss_row_rule(rule,str(key.sqref)):
+                assert ',NOT(OR(' in rule.formula[0]
+    wb.close()
+
+
+def test_test_trade_fill_package_patch_preserves_workbook(tmp_path):
+    wb=Workbook();ws=wb.active;ws.title='Trade Log'
+    for values in mjw._trade_log_three_row_header_values():ws.append(values)
+    headers=mjw._trade_log_header_map(ws)
+    for row,(flag,pnl,kind) in enumerate([('yes',4,'trade'),(True,-2,'trade'),(1,0,'trade'),('y',None,'trade'),('no',4,'trade'),('yes',3,'cashflow')],4):
+        for col in range(1,len(TRADE_LOG_HEADERS)+1):
+            c=ws.cell(row,col);c.fill=PatternFill('solid',fgColor=PROFIT_FILL)
+        for h,v in [('Row ID',f'id-{row}'),('Row Type',kind),('Test',flag),('Net P/L',pnl)]:ws.cell(row,headers[h],v)
+    ws['A4']='F1';ws['A4'].hyperlink='../retained';ws['A4'].font=Font(color='0000FF',underline='single')
+    ws['A4'].comment=Comment('retain','tester');ws['A4'].number_format='@'
+    ws['A4'].border=Border(bottom=Side(style='double'));ws['A4'].alignment=Alignment(horizontal='left')
+    ws.row_dimensions[4].height=29;ws.column_dimensions['B'].width=23;ws.freeze_panes='B4'
+    wb.create_sheet('Other')['A1']='=1+2'
+    # Legacy generated rules and a specific warning; priorities must not change.
+    typ=get_column_letter(headers['Row Type']);net=get_column_letter(headers['Net P/L'])
+    for direction,color,priority in [('>',PROFIT_FILL,2),('<',LOSS_FILL,3)]:
+        rule=FormulaRule(formula=[f'AND(${typ}4="trade",${net}4{direction}0)'],fill=PatternFill('solid',fgColor=color),stopIfTrue=True)
+        rule.priority=priority;ws.conditional_formatting.add(f'A4:{get_column_letter(len(headers))}9',rule)
+    warning=FormulaRule(formula=['TRUE'],fill=PatternFill('solid',fgColor='FFF2CC'));warning.priority=1
+    ws.conditional_formatting.add('B4',warning)
+    path=tmp_path/'original.xlsx';candidate=tmp_path/'candidate.xlsx';wb.save(path);wb.close()
+    original=path.read_bytes();digest=hashlib.sha256(original).hexdigest()
+    with pytest.raises(RuntimeError,match='hash changed'):
+        mjw.prepare_test_trade_fill_package(path,candidate,expected_sha256='stale')
+    assert not candidate.exists() and path.read_bytes() == original
+    result=mjw.prepare_test_trade_fill_package(path,candidate,expected_sha256=digest)
+    assert len(result['marked_rows']) == 4 and len(result['generated_rules']) == 2
+    with zipfile.ZipFile(path) as before,zipfile.ZipFile(candidate) as after:
+        assert before.namelist() == after.namelist()
+        for name in before.namelist():
+            if name not in {result['part'],'xl/styles.xml'}:assert before.read(name) == after.read(name)
+        ns={'s':mjw._SPREADSHEETML_NAMESPACE}
+        a=ET.fromstring(before.read('xl/styles.xml'));b=ET.fromstring(after.read('xl/styles.xml'))
+        for table in ('fills','cellXfs'):
+            old=a.find('s:'+table,ns);new=b.find('s:'+table,ns)
+            assert [ET.tostring(n) for n in old] == [ET.tostring(n) for n in list(new)[:len(old)]]
+    before=load_workbook(path);after=load_workbook(candidate)
+    for row in range(4,10):
+        for col in range(1,len(headers)+1):
+            a=before['Trade Log'].cell(row,col);b=after['Trade Log'].cell(row,col)
+            assert a.value == b.value and a.hyperlink == b.hyperlink and a.comment == b.comment
+            old=copy(a._style);new=copy(b._style);new.fillId=old.fillId;assert old == new
+            assert mjw._cell_fill_rgb(b) == ('EAF4FF' if row<8 else PROFIT_FILL)
+    assert mjw._conditional_formatting_contract(before['Trade Log']) == mjw._conditional_formatting_contract(after['Trade Log'])
+    sheet=after['Trade Log']
+    mjw._apply_trade_log_win_loss_row_formatting(sheet)
+    mjw._apply_trade_log_win_loss_row_formatting(sheet)
+    generated=[rule for key,rules in sheet.conditional_formatting._cf_rules.items() for rule in rules
+               if mjw._is_generated_trade_log_win_loss_row_rule(rule,str(key.sqref))]
+    assert len(generated) == 2
+    assert {('profit' if '>0,' in rule.formula[0] else 'loss'):rule.priority for rule in generated} == {'profit':2,'loss':3}
+    before.close();after.close()
+    noop=mjw.prepare_test_trade_fill_package(candidate,tmp_path/'noop.xlsx',expected_sha256=hashlib.sha256(candidate.read_bytes()).hexdigest())
+    assert noop['noop'] and not (tmp_path/'noop.xlsx').exists()
+    assert path.read_bytes() == original

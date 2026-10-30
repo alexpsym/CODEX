@@ -8050,18 +8050,34 @@ def _conditional_formatting_formula_text(rule) -> str:
     return str(formula or "")
 
 
+TEST_TRADE_FILL = "EAF4FF"
+
+
+def _test_trade_cf_predicate(letter: str, row: int) -> str:
+    # Excel's boolean/numeric text conversion agrees with _is_test_trade_value.
+    value = f'LOWER(TRIM(${letter}{row}&""))'
+    return 'OR(' + ','.join(f'{value}="{flag}"' for flag in ("yes", "y", "true", "1")) + ')'
+
+
 def _is_generated_trade_log_win_loss_row_rule(rule, sqref: str) -> bool:
     """Identify only the row-level win/loss rules emitted by this module."""
     formulas = getattr(rule, "formula", None) or []
     if not isinstance(formulas, (list, tuple)) or len(formulas) != 1:
         return False
     formula_text = re.sub(r"\s+", "", str(formulas[0] or ""))
+    # Accept the original generated formula and only our exact Test exclusion.
+    suffix = re.search(r',NOT\((OR\(.*\))\)\)$', formula_text, re.I)
+    if suffix:
+        ref = re.search(r'\$([A-Z]{1,3})(\d+)', suffix[1])
+        if not ref or suffix[1].lower() != _test_trade_cf_predicate(ref[1], int(ref[2])).lower():
+            return False
+        formula_text = formula_text[:suffix.start()] + ')'
     match = re.fullmatch(
         r'AND\(\$([A-Z]{1,3})(\d+)="trade",\$([A-Z]{1,3})(\d+)([<>])0\)',
         formula_text,
         flags=re.IGNORECASE,
     )
-    if not match or match.group(2) != match.group(4):
+    if not match or match.group(2) != match.group(4) or (suffix and ref[2] != match.group(2)):
         return False
     try:
         sqref_parts = str(sqref or "").split()
@@ -8100,7 +8116,7 @@ def _remove_trade_log_win_loss_row_formatting(ws) -> Dict[str, int]:
                 "",
                 str((getattr(rule, "formula", None) or [""])[0]),
             )
-            direction = "profit" if ">0)" in formula_text else "loss"
+            direction = "profit" if re.search(r'>0(?:,|\))', formula_text) else "loss"
             priority = int(getattr(rule, "priority", 0) or 0)
             if priority > 0:
                 generated_priorities.setdefault(direction, priority)
@@ -8145,9 +8161,19 @@ def _cell_fill_rgb(cell) -> str:
     return rgb[-6:].upper() if rgb else ""
 
 def _cell_has_generated_trade_log_win_loss_fill(cell) -> bool:
-    return getattr(cell.fill, "fill_type", None) == "solid" and _cell_fill_rgb(cell) in {PROFIT_FILL, LOSS_FILL}
+    return getattr(cell.fill, "fill_type", None) == "solid" and _cell_fill_rgb(cell) in {PROFIT_FILL, LOSS_FILL, TEST_TRADE_FILL}
 
 def _apply_trade_log_win_loss_direct_row_fills(ws) -> None:
+    _apply_trade_log_win_loss_direct_row_fills_for_rows(
+        ws, range(_trade_log_data_start_row(ws), ws.max_row + 1)
+    )
+
+
+def _apply_trade_log_win_loss_direct_row_fills_for_rows(
+    ws,
+    row_numbers: Collection[int],
+) -> None:
+    """Apply the shared generated base to generation, updates and preservation."""
     headers = _trade_log_header_map(ws)
     row_type_col = headers.get("Row Type")
     net_pl_col = headers.get("Net P/L")
@@ -8157,11 +8183,17 @@ def _apply_trade_log_win_loss_direct_row_fills(ws) -> None:
     profit_fill = PatternFill("solid", fgColor=PROFIT_FILL)
     loss_fill = PatternFill("solid", fgColor=LOSS_FILL)
     empty_fill = PatternFill()
-    for row in range(_trade_log_data_start_row(ws), ws.max_row + 1):
+    test_col = headers.get("Test")
+    test_fill = PatternFill("solid", fgColor=TEST_TRADE_FILL)
+    for row in sorted({int(value) for value in row_numbers}):
         row_type = str(ws.cell(row, row_type_col).value or "").strip().lower()
+        if row_type != "trade":
+            continue
         net_pl = _as_float(ws.cell(row, net_pl_col).value)
         fill = None
-        if row_type == "trade" and net_pl is not None:
+        if row_type == "trade" and test_col and _is_test_trade_value(ws.cell(row, test_col).value):
+            fill = test_fill
+        elif row_type == "trade" and net_pl is not None:
             if net_pl > 0:
                 fill = profit_fill
             elif net_pl < 0:
@@ -8173,36 +8205,6 @@ def _apply_trade_log_win_loss_direct_row_fills(ws) -> None:
             elif _cell_has_generated_trade_log_win_loss_fill(cell):
                 cell.fill = empty_fill
 
-
-def _apply_trade_log_win_loss_direct_row_fills_for_rows(
-    ws,
-    row_numbers: Collection[int],
-) -> None:
-    """Apply generated row fills only to explicitly changed Trade Log rows."""
-    headers = _trade_log_header_map(ws)
-    row_type_col = headers.get("Row Type")
-    net_pl_col = headers.get("Net P/L")
-    if not row_type_col or not net_pl_col:
-        return
-    last_col = max((col for header, col in headers.items() if header), default=ws.max_column)
-    profit_fill = PatternFill("solid", fgColor=PROFIT_FILL)
-    loss_fill = PatternFill("solid", fgColor=LOSS_FILL)
-    empty_fill = PatternFill()
-    for row in sorted({int(value) for value in row_numbers}):
-        row_type = str(ws.cell(row, row_type_col).value or "").strip().lower()
-        net_pl = _as_float(ws.cell(row, net_pl_col).value)
-        fill = None
-        if row_type == "trade" and net_pl is not None:
-            if net_pl > 0:
-                fill = profit_fill
-            elif net_pl < 0:
-                fill = loss_fill
-        for col in range(1, last_col + 1):
-            cell = ws.cell(row, col)
-            if fill is not None:
-                cell.fill = copy(fill)
-            elif _cell_has_generated_trade_log_win_loss_fill(cell):
-                cell.fill = copy(empty_fill)
 
 def _apply_trade_log_recommendation_conditional_formatting(ws, start_row: int, last_row: int, headers: Dict[str, int]) -> None:
     yellow_fill = PatternFill("solid", fgColor="FFF2CC")
@@ -8267,6 +8269,11 @@ def _apply_trade_log_win_loss_row_formatting(ws) -> None:
         fill=loss_fill,
         stopIfTrue=True,
     )
+    test_col = headers.get("Test")
+    if test_col:
+        predicate = _test_trade_cf_predicate(get_column_letter(test_col), start_row)
+        for rule in (profit_rule, loss_rule):
+            rule.formula = [rule.formula[0][:-1] + f',NOT({predicate}))']
     if generated_priorities.get("profit"):
         profit_rule.priority = generated_priorities["profit"]
     if generated_priorities.get("loss"):
@@ -20539,6 +20546,208 @@ def _trade_number_cell_styles_xml(payload, updates):
     if seen != updates.keys():
         raise RuntimeError("Missing Trade Log target cells in worksheet XML.")
     return result
+
+
+def prepare_test_trade_fill_package(path: Path, candidate_path: Path, *, expected_sha256: str):
+    """Prepare and validate a fill-only OOXML candidate; caller owns lock/install.
+
+    Original style indices and unrelated package bytes remain intact. No journal
+    pipeline, formula evaluation, hyperlink lookup or source mutation occurs here.
+    """
+    source = Path(path).read_bytes()
+    if hashlib.sha256(source).hexdigest() != expected_sha256:
+        raise RuntimeError("Original workbook hash changed before test-fill patch.")
+    candidate_path = Path(candidate_path)
+    if candidate_path.exists() or candidate_path.resolve() == Path(path).resolve():
+        raise ValueError("Test-fill candidate must be a fresh path.")
+    ns = {"s": _SPREADSHEETML_NAMESPACE}
+    with zipfile.ZipFile(BytesIO(source)) as package:
+        part = _worksheet_ooxml_part_name(package, TRADE_LOG_SHEET)
+        sheet_bytes, style_bytes = package.read(part), package.read('xl/styles.xml')
+        sheet, styles = ET.fromstring(sheet_bytes), ET.fromstring(style_bytes)
+        shared = []
+        if 'xl/sharedStrings.xml' in package.namelist():
+            shared = [''.join(n.itertext()) for n in ET.fromstring(package.read('xl/sharedStrings.xml'))]
+        def value(cell):
+            if cell is None:
+                return None
+            kind = cell.get('t')
+            if kind == 'inlineStr':
+                return ''.join(n.text or '' for n in cell.findall('.//s:t', ns))
+            text = cell.findtext('s:v', default='', namespaces=ns)
+            if kind == 's':
+                return shared[int(text)]
+            if kind == 'b':
+                return text == '1'
+            if kind in ('str', 'e') or not text:
+                return text
+            return float(text)
+        rows = sheet.findall('s:sheetData/s:row', ns)
+        # Reuse the header resolver with a tiny header-only worksheet.
+        header_book = Workbook(); header_ws = header_book.active
+        for row in rows:
+            if int(row.get('r')) > TRADE_LOG_HEADER_ROWS:
+                continue
+            for cell in row.findall('s:c', ns):
+                header_ws[cell.get('r')] = value(cell)
+        headers = _trade_log_header_map(header_ws)
+        start = _trade_log_data_start_row(header_ws)
+        header_book.close()
+        if not {'Test', 'Row Type', 'Net P/L', 'Row ID'}.issubset(headers):
+            raise RuntimeError("Cannot resolve required Trade Log headers.")
+        fills, xfs = styles.find('s:fills', ns), styles.find('s:cellXfs', ns)
+        dxfs = styles.find('s:dxfs', ns)
+        if fills is None or xfs is None:
+            raise RuntimeError("Missing workbook fill/style tables.")
+        original_counts = (len(fills), len(xfs))
+        additions = {"fills": [], "cellXfs": []}
+        def intern(table, node):
+            signature = ET.tostring(node)
+            for index, existing in enumerate(table):
+                if ET.tostring(existing) == signature:
+                    return index
+            table.append(node)
+            additions['fills' if table is fills else 'cellXfs'].append(signature)
+            return len(table) - 1
+        blue = ET.fromstring(f'<fill xmlns="{_SPREADSHEETML_NAMESPACE}"><patternFill patternType="solid"><fgColor rgb="00{TEST_TRADE_FILL}"/></patternFill></fill>')
+        updates, marked, comparison = {}, [], []
+        style_map = {}
+        last_col = max(headers.values())
+        missing = {}
+        for row in rows:
+            row_no = int(row.get('r'))
+            if row_no < start:
+                continue
+            cells = {coordinate_to_column(c.get('r')): c for c in row.findall('s:c', ns)}
+            get = lambda name: value(cells.get(headers[name]))
+            if str(get('Row Type') or '').strip().lower() != 'trade':
+                continue
+            info = {'row': row_no, 'id': get('Row ID'), 'trade_number': get(TRADE_NUMBER_HEADER) if TRADE_NUMBER_HEADER in headers else None}
+            if not _is_test_trade_value(get('Test')):
+                if len(comparison) < 1:
+                    comparison.append(info)
+                continue
+            marked.append(info)
+            blue_id = intern(fills, deepcopy(blue))
+            for col in range(1, last_col + 1):
+                cell = cells.get(col)
+                old_id = int(cell.get('s', '0')) if cell is not None else int(row.get('s', '0'))
+                if old_id not in style_map:
+                    xf = deepcopy(xfs[old_id]); xf.set('fillId', str(blue_id))
+                    style_map[old_id] = intern(xfs, xf)
+                new_id = style_map[old_id]
+                coord = f'{get_column_letter(col)}{row_no}'
+                if cell is None:
+                    missing.setdefault(row_no, []).append((col, coord, new_id))
+                elif old_id != new_id:
+                    updates[coord] = new_id
+        changed_rules = []
+        # Replace only recognized generated formula text, retaining all priorities.
+        def patch_cf(match):
+            block = match[0]
+            node = ET.fromstring(b'<root xmlns="' + _SPREADSHEETML_NAMESPACE.encode() + b'">' + block + b'</root>')[0]
+            sqref = node.get('sqref', '')
+            for rule in node.findall('s:cfRule', ns):
+                obj = FormulaRule(formula=[f.text or '' for f in rule.findall('s:formula', ns)])
+                obj.type = rule.get('type')
+                dxf_id = rule.get('dxfId')
+                if dxf_id is None or dxfs is None:
+                    continue
+                from openpyxl.styles.differential import DifferentialStyle
+                obj.dxf = DifferentialStyle.from_tree(dxfs[int(dxf_id)])
+                if not _is_generated_trade_log_win_loss_row_rule(obj, sqref):
+                    continue
+                old = obj.formula[0]
+                if ',NOT(' in old:
+                    continue
+                row_start = range_boundaries(sqref)[1]
+                predicate = _test_trade_cf_predicate(get_column_letter(headers['Test']), row_start)
+                new = old[:-1] + f',NOT({predicate}))'
+                old_xml = ('<formula>' + _xml_escape(old) + '</formula>').encode()
+                new_xml = ('<formula>' + _xml_escape(new) + '</formula>').encode()
+                if block.count(old_xml) != 1:
+                    raise RuntimeError('Unsupported generated formula serialization.')
+                block = block.replace(old_xml, new_xml, 1)
+                changed_rules.append({'priority': rule.get('priority'), 'before': old, 'after': new})
+            return block
+        patched = re.sub(rb'<conditionalFormatting\b[^>]*>.*?</conditionalFormatting>', patch_cf, sheet_bytes, flags=re.S)
+        patched = _trade_number_cell_styles_xml(patched, updates)
+        for row_no, entries in missing.items():
+            pattern = rb'(<row\b[^>]*\br="' + str(row_no).encode() + rb'"[^>]*>)(.*?)(</row>)'
+            def add_cells(match):
+                inner = match[2]
+                for col, coord, style in entries:
+                    new = f'<c r="{coord}" s="{style}" t="n"></c>'.encode()
+                    # Insert before the next larger column, preserving original bytes.
+                    offset = next((m.start() for m in re.finditer(rb'<c\b[^>]*\br="([A-Z]+)\d+"', inner)
+                                   if coordinate_to_column(m[1].decode() + '1') > col), len(inner))
+                    inner = inner[:offset] + new + inner[offset:]
+                return match[1] + inner + match[3]
+            patched, count = re.subn(pattern, add_cells, patched, flags=re.S)
+            if count != 1:
+                raise RuntimeError('Missing target row.')
+        new_styles = style_bytes
+        for table, original_count in zip(('fills', 'cellXfs'), original_counts):
+            extra = additions[table]
+            if not extra:
+                continue
+            pattern = rb'(<' + table.encode() + rb'\b[^>]*>)(.*?)(</' + table.encode() + rb'>)'
+            def append(match):
+                opening = re.sub(rb'count="\d+"', f'count="{original_count + len(extra)}"'.encode(), match[1])
+                return opening + match[2] + b''.join(extra) + match[3]
+            new_styles, count = re.subn(pattern, append, new_styles, flags=re.S)
+            if count != 1:
+                raise RuntimeError('Unsupported style table serialization.')
+        manifest = {'marked_rows': marked, 'comparison_rows': comparison, 'changed_cells': len(updates) + sum(map(len, missing.values())),
+                    'generated_rules': changed_rules, 'added_fills': len(additions['fills']), 'added_styles': len(additions['cellXfs']), 'part': part,
+                    'initial_sha256': expected_sha256, 'noop': patched == sheet_bytes and new_styles == style_bytes}
+        if manifest['noop']:
+            return manifest
+        # Independent semantic guard: strip only authorized style references,
+        # inserted blank cells and exact generated formula substitutions.
+        normalized = ET.fromstring(patched)
+        originals = {c.get('r'): c for c in sheet.findall('s:sheetData/s:row/s:c', ns)}
+        for row in normalized.findall('s:sheetData/s:row', ns):
+            for cell in list(row):
+                coord = cell.get('r')
+                if coord in updates:
+                    old = originals[coord]
+                    if 's' in old.attrib: cell.set('s', old.get('s'))
+                    else: cell.attrib.pop('s', None)
+                elif coord not in originals:
+                    if coord not in {entry[1] for entries in missing.values() for entry in entries}:
+                        raise RuntimeError('Unexpected inserted cell.')
+                    row.remove(cell)
+        for formula in normalized.findall('.//s:cfRule/s:formula', ns):
+            for change in changed_rules:
+                if formula.text == change['after']: formula.text = change['before']
+        if ET.canonicalize(ET.tostring(normalized)) != ET.canonicalize(ET.tostring(sheet)):
+            raise RuntimeError('Test-fill patch changed unrelated worksheet content.')
+        for old_id, new_id in style_map.items():
+            old, new = deepcopy(xfs[old_id]), deepcopy(xfs[new_id])
+            old.attrib.pop('fillId', None); new.attrib.pop('fillId', None)
+            if ET.tostring(old) != ET.tostring(new):
+                raise RuntimeError('Test-fill patch changed a non-fill style.')
+        with zipfile.ZipFile(candidate_path, 'x') as candidate:
+            candidate.comment = package.comment
+            for info in package.infolist():
+                # writestr mutates header_offset; keep source metadata usable for
+                # the subsequent independent member comparison.
+                candidate.writestr(copy(info), patched if info.filename == part else new_styles if info.filename == 'xl/styles.xml' else package.read(info.filename))
+        with zipfile.ZipFile(candidate_path) as checked:
+            if checked.namelist() != package.namelist() or checked.comment != package.comment:
+                raise RuntimeError('Package membership changed.')
+            for info in package.infolist():
+                expected = patched if info.filename == part else new_styles if info.filename == 'xl/styles.xml' else package.read(info.filename)
+                if checked.read(info.filename) != expected:
+                    raise RuntimeError(f'Package preservation failed: {info.filename}')
+        manifest['preservation'] = 'Only marked-row fill style references, appended fills/styles and recognized generated formula exclusions changed; all other member bytes identical.'
+        manifest['candidate_sha256'] = hashlib.sha256(candidate_path.read_bytes()).hexdigest()
+        return manifest
+
+
+def coordinate_to_column(coordinate: str) -> int:
+    return range_boundaries(coordinate)[0]
 
 
 def _validate_trade_number_font_package(source_bytes, candidate_path):
