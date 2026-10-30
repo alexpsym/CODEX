@@ -1,3 +1,5 @@
+import ast
+import re
 import subprocess
 from pathlib import Path
 
@@ -246,6 +248,43 @@ async function dashboardProbeRecovery() {
 
   assert.equal(page.status.textContent, "", "ready state has no verification sentence");
   assert.equal(page.status.hidden, true, "ready state has no empty status box");
+  // Run the shared production presentation script against the existing status
+  // element, simulating a legacy helper that writes text without hidden updates.
+  let notifyMutation;
+  let legacyText = "Exit helper and local worker verified.";
+  Object.defineProperty(page.status, "textContent", {
+    get() { return legacyText; },
+    set(value) { legacyText = value; if (notifyMutation) queueMicrotask(notifyMutation); },
+  });
+  class StatusObserver {
+    constructor(callback) { notifyMutation = callback; }
+    observe(target, options) {
+      assert.equal(target, page.status, "observer is scoped to shared status only");
+      assert.equal(options.childList && options.characterData && options.subtree, true);
+    }
+  }
+  vm.runInNewContext(process.argv[3], {
+    document: { querySelector(selector) {
+      assert.equal(selector, "#local-exit-control-status");
+      return page.status;
+    } }, MutationObserver: StatusObserver,
+  }, { filename: "local-exit-status-presentation.js" });
+  assert.equal(page.status.hidden, true, "already-present legacy ready sentence is hidden");
+  for (const message of ["Checking exit...", "Exit helper unavailable. Recheck exit.",
+                         "Requesting the local worker to exit...", "Exit failed: worker unavailable."]) {
+    page.status.textContent = message;
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(page.status.hidden, false, "later useful legacy messages become visible");
+    assert.equal(page.status.textContent, message);
+    page.status.textContent = "Exit helper and local worker verified.";
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(page.status.hidden, true, "later legacy ready sentence is hidden");
+  }
+  page.status.textContent = "";
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(page.status.hidden, true, "empty status is hidden");
+  assert.equal(page.events.filter((event) => event === "api:exit-started").length, 0,
+               "presentation changes never request shutdown");
   page.click(true);
   page.click(true);
   assert.equal(page.status.hidden, false, "shutdown progress is visible");
@@ -266,8 +305,19 @@ async function dashboardProbeRecovery() {
 
 
 def _run_node(scenario: str) -> None:
+    presentation = ""
+    if scenario == "dashboard_probe_recovery":
+        # Extract the actual shared markup without importing the application or
+        # starting workers; execute its presentation script in the offline DOM.
+        tree = ast.parse((ROOT / "render/master_service.py").read_text(encoding="utf-8"))
+        function = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
+                        and node.name == "_local_exit_control_html")
+        markup = ast.literal_eval(function.body[1].value)
+        match = re.search(r'<script id="local-exit-status-presentation">(.*?)</script>', markup, re.S)
+        assert match is not None
+        presentation = match.group(1)
     result = subprocess.run(
-        ["node", "-e", NODE, str(EXTENSION), scenario],
+        ["node", "-e", NODE, str(EXTENSION), scenario, presentation],
         cwd=ROOT,
         capture_output=True,
         text=True,

@@ -1,3 +1,16 @@
+JOB 14 CONTINUATION - LEGACY READY SENTENCE PRESENTATION GUARD - 30 October 2026
+Job 13 user acceptance PASSED. Job 14 placement, scrolling and shutdown user checks PASSED. Obsolete-message removal FAILED live acceptance; this continuation corrects presentation. Final text-only user recheck PENDING. Earlier acceptance states below are historical.
+
+Added a MutationObserver scoped only to the existing shared local-exit status element in _local_exit_control_html. It immediately handles existing text and subsequent child/text mutations without polling: the exact obsolete ready sentence and empty status are hidden; every other nonempty message becomes visible, including a later legacy-helper error after hidden readiness. Existing status role and accepted layout retained exactly. Extension content.js remains unchanged; the loaded extension copy/path is not established and no reload failure is attributed to the user. No readiness, click, shutdown, tab removal, host/port, duplicate protection, injection restriction or expiry-worker changes.
+
+Authorized changes only: render/master_service.py; tests/test_local_tools_exit_js_behavior.py; summary/CODEX_SUMMARY_latest.txt. Extended existing offline node executes actual production markup script extracted through AST, with mocked DOM mutations and existing mocked shutdown APIs. No application import/workers or real-data/browser/broker operations.
+Verification: test_dashboard_probe_recovers_after_timeout_without_duplicate_exit PASSED once; pytest 11.11 seconds, parent 13.887 seconds, exit 0. No other nodes or repeated passing tests. Evidence excluded from commit: .job14_text_20261030_01/pytest.log and result.json. Final diff reviewed against requirements/scope; diff whitespace check passed. Initial master HEAD/observed remote 10d308dfe54a2b0ad758f635041d21d3f37925df, initial index empty; pre-existing unrelated work preserved. Delivery uses exact-path commit and protected normal push; final SHA and fresh local/origin/remote agreement in delivery response. PATCH_DESKTOP_PUSH.bat explicitly excluded.
+
+Only remaining manual check: restart LTT normally, refresh its page and confirm the obsolete sentence is absent once the red button is ready. Do not repeat accepted placement/scrolling/shutdown checks; no extension reinstall, journal resync or new trade.
+Queue: Job 15 queued; Job 5 live price-movement observation pending. ETH fee/target CANCELLED; hosted Render DEFERRED.
+
+--- Historical summaries below ---
+
 JOB 14 - IMPLEMENTED; MANUAL ACCEPTANCE PENDING - 30 October 2026
 Job 13 user acceptance PASSED. Older pending/failed Job 13 entries below are historical and superseded.
 

@@ -14540,7 +14540,16 @@ app = FastAPI(title="TradingTools", version="1.0")
 
 def _local_exit_control_html() -> str:
     """Shared local-only control for every locally served HTML tool page."""
-    return '''<style id="local-exit-control-style">#local-exit-control{display:flex;flex-direction:column;align-items:flex-end;margin:0 0 12px;gap:4px;color:#fff;font:12px system-ui}#local-exit-control button{background:#7f1d1d;color:#fff;border:1px solid #fecaca;border-radius:6px;padding:7px 12px;font:600 13px system-ui;cursor:pointer}#local-exit-control button:disabled{opacity:.65;cursor:default}#local-exit-control-status{display:block;max-width:300px;line-height:1.35}#local-exit-control-status[hidden]{display:none}</style><div id="local-exit-control"><button type="button" disabled>Exit local tools</button><span id="local-exit-control-status" role="status">Install the Local Tools Exit browser extension to close all tool tabs.</span></div>'''
+    return '''<style id="local-exit-control-style">#local-exit-control{display:flex;flex-direction:column;align-items:flex-end;margin:0 0 12px;gap:4px;color:#fff;font:12px system-ui}#local-exit-control button{background:#7f1d1d;color:#fff;border:1px solid #fecaca;border-radius:6px;padding:7px 12px;font:600 13px system-ui;cursor:pointer}#local-exit-control button:disabled{opacity:.65;cursor:default}#local-exit-control-status{display:block;max-width:300px;line-height:1.35}#local-exit-control-status[hidden]{display:none}</style><div id="local-exit-control"><button type="button" disabled>Exit local tools</button><span id="local-exit-control-status" role="status">Install the Local Tools Exit browser extension to close all tool tabs.</span></div><script id="local-exit-status-presentation">(() => {
+  const status = document.querySelector("#local-exit-control-status");
+  if (!status) return;
+  const presentStatus = () => {
+    const message = status.textContent.trim();
+    status.hidden = !message || message === "Exit helper and local worker verified.";
+  };
+  new MutationObserver(presentStatus).observe(status, {childList: true, characterData: true, subtree: true});
+  presentStatus();
+})();</script>'''
 
 
 @app.middleware("http")
