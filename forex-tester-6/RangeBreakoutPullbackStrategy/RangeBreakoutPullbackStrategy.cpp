@@ -490,9 +490,9 @@ bool CanSeedImpulse(const int seedDirection,const double seedExtreme,double &ori
   if(originBar>=nbar){reason="confirmed origin is not before expansion";return false;}
   if(stage!=IMPULSE_CONSUMED){reason="confirmed origin and directional expansion eligible";return true;}
   if(originBar<=consumedBar){reason="confirmed origin is not newer than consumed parent";return false;}
-  if(seedDirection==consumedDirection&&!(seedDirection==1?seedExtreme>consumedExtreme:seedExtreme<consumedExtreme))
+  if(!StructureMode()&&seedDirection==consumedDirection&&!(seedDirection==1?seedExtreme>consumedExtreme:seedExtreme<consumedExtreme))
   {reason="same-direction expansion did not exceed consumed parent";return false;}
-  reason="new post-consumption structural origin and expansion eligible";return true;
+  reason=StructureMode()?"fresh confirmed origin permits new structure impulse; prior extreme not required":"new post-consumption structural origin and expansion eligible";return true;
 }
 void LogSeedDecision(const int seedDirection,const char *decision,const char *reason,const double bodyATR,const double rangeATR,const bool busy)
 {
@@ -513,8 +513,8 @@ bool StartImpulseAt(const int seedDirection,const double seedExtreme,const long 
   dir=seedDirection;stage=IMPULSE_PARENT;activeImpulseSetup=true;setupATR=atr;impulseOrigin=origin;impulseOriginBar=originBar;impulseOriginTime=originTime;
   setupExtreme=seedExtreme;impulseEndpointBar=endpointBar;impulseEndpointTime=endpointTime;impulseSeedTime=seedTime;breakout=extension=endpointBar;
   pullbackStarted=false;pullbackStartBar=-1;opposing=0;hasMinorSwing=false;hasFrozenExtension=false;
-  char originText[32],seedText[32],endpointText[32],text[512];FormatTime(impulseOriginTime,originText);FormatTime(impulseSeedTime,seedText);FormatTime(impulseEndpointTime,endpointText);
-  sprintf(text,"RBP parent accepted dir=%s reason=%s origin=%s@%.5f seed=%s endpoint=%s@%.5f displacement=%.5f/%.2fATR execution=%s",DirectionName(dir),eligibilityReason,originText,impulseOrigin,seedText,endpointText,setupExtreme,ImpulseDisplacement(),setupATR>0?ImpulseDisplacement()/setupATR:0,((dir==1&&TradeDirection==2)||(dir==-1&&TradeDirection==1))?"structure-only":"direction-permitted");
+  char originText[32],seedText[32],endpointText[32],text[768];FormatTime(impulseOriginTime,originText);FormatTime(impulseSeedTime,seedText);FormatTime(impulseEndpointTime,endpointText);
+  _snprintf_s(text,sizeof(text),_TRUNCATE,"RBP parent accepted dir=%s reason=%s origin=%s@%.5f seed=%s endpoint=%s@%.5f displacement=%.5f/%.2fATR execution=%s originBar=%ld consumedDir=%d consumedBar=%ld consumedExtreme=%.5f",DirectionName(dir),eligibilityReason,originText,impulseOrigin,seedText,endpointText,setupExtreme,ImpulseDisplacement(),setupATR>0?ImpulseDisplacement()/setupATR:0,((dir==1&&TradeDirection==2)||(dir==-1&&TradeDirection==1))?"structure-only":"direction-permitted",impulseOriginBar,consumedDirection,consumedBar,consumedExtreme);
   EmitDiagnostic(text);
   ResetProvisionalCandidates();
   if(QualifiedMode())BeginQualification(endpointBar);
@@ -700,7 +700,7 @@ bool TryPromoteCandidate(ProvisionalImpulseCandidate &candidate)
   sprintf(text,"RBP confirmed origin available dir=%s reason=%s origin=%s@%.5f provisionalFirstBar=%ld cumulative=%.5f/%.2fATR oversizedIncluded=%s evidence=%s",DirectionName(candidate.direction),reason,originText,origin,firstBar,displacement,displacement/candidate.seedATR,oversized?"yes":"no",oversized?(laterNormal?"later normal same-direction seed":"later same-direction endpoint advancement"):"normal provisional seed");EmitDiagnostic(text);
   if(!ValidImpulseGeometry(candidate.direction,origin,initialEndpoint))
   {LogPromotionCurrent(candidate,"rejected","invalid directional geometry at recovered initial endpoint; retain/wait");return false;}
-  LogPromotionCurrent(candidate,"promoted","admission eligible; chronological recovery, future touch only");
+  LogPromotionCurrent(candidate,"promoted",reason);
   if(!StartImpulseAt(candidate.direction,initialEndpoint,initialEndpointBar,ClosedTime(initialEndpointBar),origin,originBar,originTime,candidate.seedATR,seedTime,reason))return false;
   if(QualifiedMode())qualifiedFirstSeedBar=firstBar;
   if(FirstTouchMode()) RecoverFirstTouchChronologically(firstBar);

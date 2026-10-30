@@ -915,11 +915,16 @@ void CandidateGeometryPreservation()
 }
 // A retained oversized seed, sub-minimum continuation, rejected opposite attempt,
 // then newly confirmed valid origin reach the existing mode-3 qualification path.
-void OversizedFuturePath(int d)
+void OversizedFuturePath(int d,bool postConsumption=false,double oldExtreme=1.22)
 {
   Fresh();SettingsPreset=8;ApplySettingsPreset();EnableWeekendBlackout=false;nbar=40;rmaATR=0.002;RegimeLookback=1;
   StructureContextSeries(d,ClosedTime(38),1.2006,1.2008);
   for(int i=3;i<30;i++){series[i].h=1.2002;series[i].l=1.1998;series[i].c=1.20;}
+  if(postConsumption)
+  {
+    nbar=37;StartImpulseAt(d,QPrice(d,oldExtreme),37,ClosedTime(37),1.20,30,ClosedTime(30),rmaATR,ClosedTime(37),"old synthetic parent");
+    ConsumeImpulse("synthetic spent opportunity");
+  }
   nbar=39; // First oversized seed observed before a causal origin is available.
   ObserveProvisional(d,QPrice(d,1.204),2,1.76,2.21,false,"confirmed directional origin unavailable");
   nbar=40;ObserveProvisionalContinuation(d,QPrice(d,1.208),false);
@@ -938,6 +943,76 @@ void OversizedFuturePath(int d)
   double p=0;long b=-1;TDateTime t=0;const char *reason="";
   Check(!CanSeedImpulse(d,QPrice(d,1.22),p,b,t,reason)&&strstr(reason,"not newer than consumed"),"consumed fresh-origin requirement remains effective");
 }
+// A consumed production parent, then independent normal admission through the
+// same frozen context/close-path and executable future-quote helpers as recovery.
+void FreshNormalPath(int d,double oldExtreme,bool custom,bool failContext=false)
+{
+  StructurePath({1.20,1.203,1.2075},d);RegimeLookback=1;
+  if(custom){SettingsPreset=0;Check(StructureMode(),"equivalent Custom mode 3 uses same predicate");}
+  ResetTouch();ResetQualification();ResetProvisionalCandidates();
+  nbar=47;StartImpulseAt(d,QPrice(d,oldExtreme),47,ClosedTime(47),1.20,40,ClosedTime(40),rmaATR,ClosedTime(47),"old synthetic parent");
+  ConsumeImpulse("synthetic spent opportunity");
+  nbar=49;SetOrigin(d,1.20,48);
+  StructureContextSeries(d,ClosedTime(48),failContext?1.22:1.2006,failContext?1.222:1.2008);
+  series[2]={QPrice(d,1.2005),QPrice(d,d==1?1.204:1.20),QPrice(d,d==1?1.20:1.204),QPrice(d,1.203),series[2].t};
+  Remember(49,QPrice(d,1.204),d,QPrice(d,1.2038));
+  bidQuote=QPrice(d,1.2038);askQuote=bidQuote+0.0002;
+  ProcessImpulseSetup(QPrice(d,1.2005),QPrice(d,d==1?1.204:1.20),QPrice(d,d==1?1.20:1.204),QPrice(d,1.203),1.20);
+  Check(stage==IMPULSE_PARENT&&impulseOriginBar==48&&qualifiedFirstSeedBar==49&&!impulseQualified&&!touchActive&&attempts==0,"fresh normal mode-3 parent admitted below old extreme without order");
+  Check(consumedDirection==d&&consumedBar==47&&Near(consumedExtreme,QPrice(d,oldExtreme)),"admission preserves actual consumed references");
+  Check(Logged("fresh confirmed origin permits new structure impulse; prior extreme not required"),"normal admission exposes mode-3 eligibility reason");
+  nbar=50;series[1]={QPrice(d,1.207),QPrice(d,d==1?1.208:1.2068),QPrice(d,d==1?1.2068:1.208),QPrice(d,1.2075),series[1].t};
+  Remember(50,QPrice(d,1.208),d,QPrice(d,1.2078));bidQuote=QPrice(d,1.2075);askQuote=bidQuote+0.0002;
+  ProcessImpulseSetup(QPrice(d,1.207),High(1),Low(1),Close(1),QPrice(d,1.203));
+  if(failContext)
+  {
+    Check(!impulseQualified&&!touchActive&&attempts==0&&Logged("completed close has not broken frozen M15 structure"),"fresh admission still fails unchanged M15 gate");return;
+  }
+  Check(impulseQualified&&touchActive&&structureEfficiency>=0.70&&qualifyingBar==50&&attempts==0,"fresh normal leg independently qualifies with prospective arming");
+  Touch(d);Check(attempts==1&&stage==IMPULSE_CONSUMED&&orderType==(d==1?op_Buy:op_Sell),"fresh normal leg executes future first touch");
+  Touch(d);Touch(d);Check(attempts==1,"spent parent cannot repeat touch/order");
+  ResetStrategy();Check(consumedBar==-1&&consumedDirection==0&&consumedExtreme==0&&!activeImpulseSetup&&!touchActive&&!provisionalLong.active&&!provisionalShort.active,"reset clears consumed and candidate run state normally");
+}
+void StructureFreshOriginAfterConsumption()
+{
+  for(int d:{1,-1})for(double oldExtreme:{1.22,1.208})
+  {
+    FreshNormalPath(d,oldExtreme,false);FreshNormalPath(d,oldExtreme,true);
+    OversizedFuturePath(d,true,oldExtreme);
+    Check(Logged("fresh confirmed origin permits new structure impulse; prior extreme not required"),"oversized recovery exposes mode-3 admission reason");
+  }
+  for(int d:{1,-1})FreshNormalPath(d,1.22,false,true);
+  for(int d:{1,-1})for(int mode:{0,1,2,3})
+  {
+    CandidateState(d);ImpulseEntryMode=mode;
+    nbar=8;StartImpulseAt(d,QPrice(d,1.21),8,ClosedTime(8),1.20,2,ClosedTime(2),rmaATR,ClosedTime(8),"old synthetic parent");ConsumeImpulse("spent");nbar=10;
+    SetOrigin(d,1.20,9);
+    double p=0;long b=-1;TDateTime t=0;const char *reason="";
+    for(double endpoint:{1.205,1.21,1.211})
+    {
+      bool ok=CanSeedImpulse(d,QPrice(d,endpoint),p,b,t,reason);
+      Check(ok==(mode==3||endpoint>1.21),"mode boundary and old-extreme equality are directional");
+      if(!ok)Check(strcmp(reason,"same-direction expansion did not exceed consumed parent")==0,"legacy denial reason retained");
+      Check(consumedDirection==d&&consumedBar==8&&Near(consumedExtreme,QPrice(d,1.21)),"eligibility never mutates consumption");
+    }
+    for(long origin:{7L,8L,10L,11L})
+    {
+      SetOrigin(d,1.20,origin);
+      Check(!CanSeedImpulse(d,QPrice(d,1.23),p,b,t,reason),"farther endpoint cannot unlock stale or current/future origin");
+      Check(strstr(reason,origin<=8?"not newer than consumed":"not before expansion")!=NULL,"actual origin denial retained");
+    }
+    if(d==1)haveLatestSwingLow=false;else haveLatestSwingHigh=false;
+    Check(!CanSeedImpulse(d,QPrice(d,1.23),p,b,t,reason)&&strcmp(reason,"confirmed directional origin unavailable")==0,"missing/unconfirmed origin blocked");
+    if(mode==3)
+    {
+      ObserveProvisional(d,QPrice(d,1.205),2,1.76,2.21,false,"origin unavailable");
+      nbar=12;ObserveProvisionalContinuation(d,QPrice(d,1.208),false);SetOrigin(d,1.20,11);
+      Check(!TryPromoteCandidate(CandidateFor(d))&&CandidateFor(d).active&&Logged("latest confirmed origin after candidate first seed"),"fresh origin after first seed cannot backdate recovery");
+      Check(attempts==0&&stage==IMPULSE_CONSUMED,"blocked recovery never orders");
+    }
+  }
+}
+
 void PromotionGateDiagnostics()
 {
   Fresh();int count=PromotionCount();TryPromoteCandidate(provisionalLong);Check(PromotionCount()==count,"inactive candidates emit nothing");
@@ -975,6 +1050,7 @@ int main(int argc,char **argv)
   if(argc!=2){fprintf(stderr,"One named case required\n");return 2;}Hooks();InitStrategy();ReplaceStr(Currency,(PChar)"EURUSD");
   std::string name=argv[1];
   if(name=="candidate_geometry_preservation")CandidateGeometryPreservation();
+  else if(name=="structure_fresh_origin_after_consumption")StructureFreshOriginAfterConsumption();
   else if(name=="promotion_gate_diagnostics")PromotionGateDiagnostics();
   else if(name=="structure_context_gate")StructureContextGate();
   else if(name=="structure_impulse_quality")StructureImpulseQuality();

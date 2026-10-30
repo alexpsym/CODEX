@@ -1,0 +1,92 @@
+CODEX BRIEF - FT6 FRESH STRUCTURE ORIGIN AFTER CONSUMPTION
+Recommended model: gpt-6.1-sol
+Reasoning effort: medium
+Reason: one bounded admission-policy change with synthetic lifecycle regression checks and the established native build/install workflow.
+Repository: C:\GPT\CODEX-master
+Filename: CODEX_BRIEF_FT6_FRESH_ORIGIN_ADMISSION.txt
+
+Implement, compile, install, document and push this focused correction. Read applicable AGENTS.md and inspect current git status before editing. Do not inspect/read/modify custom instructions/. Do not delegate. Work only on this FT6 task; preserve all unrelated and concurrent work.
+
+CREDIT AND VERIFICATION LIMITS
+Conserve credits. Run ONLY the four named functional selectors below, plus the smallest necessary compilation, export, installed-file and protected-delivery checks. No complete test-file runs, full suites, broad integration checks, unrelated checks, repeated passing checks, smoke tests, optimisation, parameter searches or historical FT6 backtests/replays, including short historical replays. Do not expand testing without explicit user approval. A pre-fix failing run of the new selector is specifically authorized; rerun a failed affected selector only after its relevant code/fixture changes. These limits override broader testing suggestions.
+
+OBSERVED VS EXPECTED
+Reviewed master 579f675f631b5a786af304899c2128dfd8a4cb13; strategy blob 08aebbcbcc7bebeb5ecf80cc0b8ef6124913e2ad. These identify reviewed code, not permission to reset/pin a moving branch.
+The user reran EURUSD M5, preset 8. On 2023-08-23 from 13:10 through 13:35, the retained bullish candidate repeatedly reports:
+RBP promotion pending dir=long reason=same-direction expansion did not exceed consumed parent
+Its later same-direction continuation reaches endpoint 1.08353 at 13:35. At 13:40 the invalid short is now correctly rejected for invalid directional geometry. At 13:45 a newly confirmed short origin permits a different, geometrically valid short parent; this remains unqualified because its completed close has not broken the frozen M5 range. Parent acceptance is not an executed trade.
+
+CanSeedImpulse currently checks a confirmed origin, valid geometry, origin before the current expansion, then originBar > consumedBar. It subsequently requires a same-direction candidate to exceed consumedExtreme. Therefore the reported long passed the earlier origin checks but failed this last comparison. It never reached its own M15/efficiency qualification through that admission path.
+The screenshots cut off the consumed-reference fields. Do not invent the old consumed extreme's exact price, timestamp, trade ticket or reason for consumption. "Consumed" can mean a spent/blocked opportunity, not necessarily a completed trade.
+
+Required behavior: in structure entry mode 3, a fresh causally confirmed origin strictly after the consumed opportunity may start a new impulse even when its long endpoint remains below/equal to the previous consumed long high, or its short endpoint remains above/equal to the previous consumed short low. All current geometry, origin, qualification and execution gates still apply. This is an intentional mode-3 policy change supported by the new diagnostics; the previous task correctly preserved the old policy while diagnosing it.
+
+SCOPE AND EXACT CHANGE
+Primary source:
+forex-tester-6/RangeBreakoutPullbackStrategy/RangeBreakoutPullbackStrategy.cpp
+Tests:
+tests/ft6_first_touch.cpp
+Guide:
+docs/RangeBreakoutPullback_Backtesting_Guide.md
+Required summary:
+summary/CODEX_SUMMARY_latest.txt
+Include this supplied brief in delivery. Inspect the matching .def; no export change is expected.
+
+Inspect CanSeedImpulse, StructureMode, LatestImpulseOrigin, ProcessImpulseSetup, TryPromoteCandidate, StartImpulse/StartImpulseAt, ConsumeImpulse, AbandonQualification and the existing diagnostics before editing. Prefer the existing function boundaries.
+
+1. Keep the existing confirmed-origin availability, finite positive directional geometry, causal origin-before-expansion and originBar > consumedBar checks in their effective order.
+2. Make the consumedExtreme comparison apply only outside StructureMode(). StructureMode() already means impulse setup mode with entry mode 3. Use that predicate, rather than SettingsPreset==8, so Custom settings explicitly selecting entry mode 3 get consistent behavior. Preset 8 remains the same numeric preset using mode 3.
+3. In mode 3, after all preceding checks pass, allow admission based on the fresh post-consumption origin without requiring an excursion beyond the old consumed parent's extreme. Apply this equally to long/short, normal seeding and retained oversized/provisional promotion through the shared admission boundary.
+4. Preserve modes 0, 1 and 2 exactly: their same-direction consumed-extreme requirement and its existing denial reason remain enforced. Range mode is unchanged. No preset, input, parameter, sizing or target changes.
+5. Do not clear, move, rewrite or manufacture consumedDirection/consumedBar/consumedExtreme to obtain admission. Do not reset the strategy or wait for a sacrificial opposite parent to consume merely to unlock a new mode-3 leg.
+6. A current/forming, unavailable/unconfirmed, same or older origin still cannot unlock a consumed opportunity. Repeated quotes, endpoint updates and touches of the old parent must not cause another entry. In this bounded change, a distinct candidate requires the existing confirmed origin strictly after consumption and must independently satisfy every existing structure/impulse gate.
+7. Preserve active-parent ownership, genuine candidate retirement, qualification expiry and chronological recovery. Do not resurrect an old discarded/consumed candidate, queue a blocked touch, or backdate admission/entry.
+8. Retain the previous geometry validation before destructive mutation, correct success/failure propagation and independent-candidate preservation. Do not loosen these to make any fixture pass.
+
+DIAGNOSTICS AND DOCUMENTATION
+Give an admitted post-consumption mode-3 candidate a clear eligibility reason explaining that the fresh confirmed origin permits a new structure impulse without the prior-extreme requirement. Existing seed/origin/promotion records must expose this through their normal paths, with the existing origin and consumed references. Keep actual denial reasons for stale origins, invalid geometry and every later gate. Preserve semantic deduplication, ShowDiagnostics, bounded formatting and stored timestamps; add no logger/file-output subsystem or per-tick noise.
+Update the relevant guide paragraphs so "new extreme beyond consumed parent" is no longer presented as universal. State the mode-3 rule, the unchanged rules for modes 0-2 and the unchanged one-opportunity-per-parent/fresh-origin safeguards. Do not rewrite unrelated guidance.
+
+ONLY FOUR AUTHORIZED FUNCTIONAL SELECTORS
+Add one named case to the existing touch harness:
+structure_fresh_origin_after_consumption
+
+First demonstrate the old-policy failure using a synthetic production transition. Then make this case pass with the correction. Reuse the existing structure-context, quote/path and oversized-recovery helpers; do not construct a historical replay or a parallel strategy implementation.
+Cover:
+- Long and mirrored short: a consumed same-direction parent, a genuinely fresh confirmed origin after its consumption bar, and a qualifying new leg that does not exceed the old consumed extreme. Exercise production normal admission and provisional/oversized promotion, not just the boolean helper. Include the equality boundary against the OLD consumed extreme with otherwise strictly positive new-leg geometry.
+- At least one mirrored end-to-end path reaches unchanged mode-3 qualification and an actual prospective future first-touch order. An oversized-only path must retain later continuation evidence without requiring a later normal-sized seed. No order on admission/arming, no retrospective fill, no repeat touch/order for the consumed parent.
+- Missing/unconfirmed, originBar equal to or before consumedBar, and originBar at/after the current expansion remain blocked. A farther endpoint alone must not unlock an old origin. Respect the existing origin-before-first-seed requirement during provisional recovery.
+- Admission does not guarantee qualification: a controlled failure of an existing structure/quality gate keeps the fresh candidate unqualified with no order. Keep the original gate/threshold; do not bypass it in production.
+- For modes 0, 1 and 2, the same fresh-origin scenarios still reject insufficient/equal old-extreme expansion and allow genuinely exceeding expansion when the other existing gates pass. Verify the original denial reason and unchanged consumption references.
+- A reset clears run state normally, and the rule behaves the same for preset 8 and equivalent Custom mode 3. Do not change preset resolution or UI inputs.
+
+Then run these three existing selectors once after relevant code/fixtures are stable:
+ft6_first_touch.exe structure_first_touch
+ft6_first_touch.exe candidate_geometry_preservation
+ft6_first_touch.exe promotion_gate_diagnostics
+
+These four selectors are the complete authorized functional list. Compile only the affected touch harness and native strategy. Do not run the preset harness, trade-limit cases or other unrelated selectors.
+The existing promotion_gate_diagnostics consumed-extreme assertion starts from CandidateState(), which currently selects legacy mode 1. Preserve that legacy assertion; do not globally remove it or relabel a still-valid legacy failure. Add mode-3 assertions in the new case.
+Repair only genuinely affected synthetic fixtures, retaining their original assertions. Record initial failures and the relevant correction. Do not repeatedly rerun passing checks.
+
+UNCHANGED CONTRACTS
+Keep presets 0-8 and saved Custom/effective settings resolution, explicit Currency binding/readiness and both-direction observation. Preserve all mode-3 controls: body 1.00-1.50ATR, oversized continuation recovery, frozen setup ATR, pre-origin M5 range 20, displacement 3.0ATR, close buffer 0.10ATR, M15 strength 2 / two relevant confirmed pivots / scan 200 frozen at origin open, signed close-path efficiency >=0.70 within 12 bars, prospective retracement max(0.50ATR,25% displacement), maximum depth 50% and existing 30-bar recovery/pullback bounds.
+Keep executable Ask/Bid and actual available fills, old-level quote evaluation before endpoint refresh, no arming/refresh-tick fill, chronological recovery and conservative handling of passed/unknown paths. Failed, busy, direction-blocked or otherwise blocked real touches stay consumed. Order success requires API success AND a valid ticket.
+Keep 0.01 lots, adaptive stops, frozen 2R/3R target classification, weekend behavior, no partials/BE/trailing and all invalid-input rules.
+The independent Maximum completed strategy trades (0 unlimited) stays default 100 and is never preset-overridden. Do not modify its counting, history reconciliation or Pause behavior.
+
+BUILD, INSTALL AND VERIFY - CODEX MUST DO THIS
+Use the installed x86 Windows toolchain and FT6 SDK at C:\ForexTester6\Examples\Strategies\C++. Build the canonical source and matching .def as a native 32-bit Release DLL linked with oleaut32.lib. Verify exactly these six exports: InitStrategy, DoneStrategy, ResetStrategy, GetSingleTick, ReplaceStr and IntrfProcsRec. Do not change SDK, tooling or system configuration.
+
+Use a task-scoped ignored build directory. Back up only the installed strategy DLL there. Close FT6 gracefully if running, preserving project/data; never force-kill it. Install the rebuilt DLL yourself at C:\ForexTester6\Strategies\RangeBreakoutPullbackStrategy.dll. If an actual unsaved prompt/file lock blocks installation, report that specific blocker; do not hand compilation/copying to the user.
+Verify installed SHA256 equals built DLL, and report path, bytes, hash and modification time with timezone. Previous reported DLL: 86,528 bytes, SHA256 C8018165C79ADECEDE71EDEE44CF1DCFD7DAB2078007F4C602048BC3F7BA9937; inspect the actual file rather than assuming it matches. Do not claim FT6 loaded the DLL unless observed. Do not use historical testing as a deployment check.
+
+SUMMARY AND PROTECTED DELIVERY
+Preserve unrelated staged/working changes and concurrent summary sections. A moving remote or another terminal is not itself a stop condition. No destructive cleanup, reset, force push, history rewrite, system edits or unrelated file changes.
+Append the final technical summary verbatim as a clearly identified readable UTF-8 section of summary/CODEX_SUMMARY_latest.txt BEFORE pushing. Preserve existing sections; do not embed UTF-16 bytes/NULs from captured output. Include observed evidence, exact mode boundary, actual commands/results, pre-fix failure, final targeted passes, installed-file evidence and limitations.
+Then run unchanged repository-root PATCH_DESKTOP_PUSH.bat through the established task-scoped protected adapter. Reuse C:\Users\User\.codex\tools\alexpsym_git_delivery.py with C:\Users\User\miniconda3\python.exe; do not modify the BAT or protected tools. Stage only this owned brief, strategy, directly relevant test, FT6 guide and summary. Preserve unrelated staged content; no blanket staging, raw pull --rebase --autostash or raw push. Use the established protected remote-advance procedure.
+Completion requires successful protected BAT delivery and verified local HEAD==origin/master. Keep binaries, backups, logs, adapters and local state out of commits. Report genuine delivery failure precisely and leave completion pending. Report the actual commit/verified heads after successful BAT execution; do not predict delivery success in the pre-push summary or make a second SHA-only summary commit.
+
+FINAL REPORT AND NEXT USER CHECK
+Report the precise mode-3 fresh-origin policy change, unchanged legacy behavior, four selected results, installed DLL evidence and protected delivery status. No profitability or historical-entry guarantee.
+Codex must not run historical tests. After installation, tell the user to restart the same EURUSD/preset-8 standard test from its original project start, keep the 100-trade limit, pause around 2023-08-23 13:50 and capture the chart plus 13:00-13:50 Journal records. Those records should show fresh-origin admission and either qualification/entry or the actual next blocking gate. No full-year run or parameter tuning is requested.
