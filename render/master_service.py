@@ -23316,12 +23316,49 @@ def _price_credentials(row):
     return dict(base_url=base, api_key=key, api_secret=secret)
 
 
+async def _price_read_pages(row, credentials, path, params):
+    """Complete one exact-symbol inventory, bounded independently of collection jobs."""
+    rows, seen = [], set()
+    params = dict(params)
+    try:
+        async with asyncio.timeout(20):
+            for page in range(3):
+                payload = await _bybit_signed_get(**credentials, path=path, params=dict(params), timeout_s=6)
+                if not isinstance(payload, dict) or payload.get("retCode") not in (0, "0"):
+                    raise HTTPException(409, "Selected row broker response is unavailable")
+                result = payload.get("result")
+                if not isinstance(result, dict) or result.get("category") != row["category"]:
+                    raise HTTPException(409, "Selected row broker category is unresolved")
+                items = result.get("list")
+                cursor = result.get("nextPageCursor", "")
+                if (not isinstance(items, list) or any(not isinstance(item, dict) for item in items)
+                        or not isinstance(cursor, str) or (cursor and not cursor.strip())):
+                    raise HTTPException(409, "Selected row broker page is malformed")
+                if any(item.get("symbol") != row["instrument"] or type(item.get("positionIdx")) is not int
+                       or item["positionIdx"] not in (0, 1, 2) for item in items):
+                    raise HTTPException(409, "Selected row instrument or hedge identity is unresolved")
+                rows.extend(items)
+                if not cursor:
+                    return rows
+                if cursor in seen:
+                    raise HTTPException(409, "Selected row broker cursor repeated; coverage unresolved")
+                seen.add(cursor)
+                params["cursor"] = cursor
+            raise HTTPException(409, "Selected row broker coverage exceeds three pages")
+    except TimeoutError:
+        raise HTTPException(409, "Selected row broker read exceeded 20 seconds; draft retained")
+
+
 async def _price_read(row, credentials):
     position = row["type"] == "Position"
     params = {"category": row["category"], "symbol": row["instrument"]}
     if not position:
         params["orderId"] = str(row["id"])
-    payload = await _bybit_signed_get(**credentials, path="/v5/position/list" if position else "/v5/order/realtime", params=params, timeout_s=6)
+    if position:
+        rows = await _price_read_pages(row, credentials, "/v5/position/list", dict(params, limit="200"))
+        payload = {"retCode": 0, "result": {"category": row["category"], "list": rows}}
+    else:
+        payload = await _bybit_signed_get(**credentials, path="/v5/order/realtime", params=params, timeout_s=6)
     cursor = False
 
     def reject(code, message="Broker data incomplete. Refresh this row.", *, field="", matches=None):
@@ -23344,9 +23381,7 @@ async def _price_read(row, credentials):
         reject("malformed_cursor")
     # An exact orderId lookup is not an inventory query. Bybit can return its
     # unique requested order with a nonempty cursor; no other page is needed.
-    # Position/inventory coverage retains the conservative completeness guard.
-    if position and cursor:
-        reject("position_coverage_cursor")
+    # Position inventories above have completed bounded cursor coverage.
     matches = [item for item in rows if (item.get("positionIdx") == row.get("position_idx") if position else item.get("orderId") == row["id"])]
     if len(matches) != 1:
         reject("zero_exact_matches" if not matches else "multiple_exact_matches",
@@ -23387,15 +23422,12 @@ async def _price_protection(row, raw, credentials):
         return {k: raw.get(k) or "LastPrice" for k in ("tpTriggerBy", "slTriggerBy")}
     # Position/list alone does not prove whether separate partial/limit orders
     # exist. Inspect this symbol's active conditional orders, including pagination.
-    payload = await _bybit_signed_get(**credentials, path="/v5/order/realtime", params={
-        "category": row["category"], "symbol": row["instrument"], "orderFilter": "StopOrder", "openOnly": "0", "limit": "50"}, timeout_s=6)
-    result = payload.get("result") or {}
-    if not isinstance(result.get("list"), list) or result.get("nextPageCursor"):
-        raise HTTPException(409, "Protection coverage incomplete; no amendment sent")
+    orders = await _price_read_pages(row, credentials, "/v5/order/realtime", {
+        "category": row["category"], "symbol": row["instrument"], "orderFilter": "StopOrder", "openOnly": "0", "limit": "50"})
     settings = {}
     for field, kind, trigger in (("takeProfit", "TakeProfit", "tpTriggerBy"), ("stopLoss", "StopLoss", "slTriggerBy")):
         matching = []
-        for order in result["list"]:
+        for order in orders:
             if order.get("symbol") != row["instrument"]:
                 raise HTTPException(409, "Protection instrument mismatch")
             if order.get("positionIdx") is None:
@@ -23469,6 +23501,39 @@ async def open_order_amend_status(payload: Dict[str, object]):
         operation = await _price_reconcile(operations[str(payload["operation_id"])])
         _price_store(operation)
         return _price_response(operation)
+
+
+@app.post("/api/open-orders/price-refresh")
+async def refresh_open_order_price(payload: Dict[str, object]):
+    """Read only the server-issued target; unrelated source health is irrelevant."""
+    if APP_PROFILE == "render":
+        raise HTTPException(403, "Price editing is local only")
+    if set(payload) != {"target"} or not isinstance(payload["target"], str):
+        raise HTTPException(400, "Expected server-issued target only")
+    row = _PRICE_TARGETS.get(payload["target"])
+    if row is None:
+        raise HTTPException(409, "Selected row identity unavailable; draft retained")
+    row = dict(row)
+    key = (asyncio.get_running_loop(), _price_scope(row))
+    try:
+        async with asyncio.timeout(20):
+            async with _PRICE_LOCKS.setdefault(key, asyncio.Lock()):
+                if any(_price_scope(op["row"]) == _price_scope(row) and op["status"] not in {"confirmed", "rejected"}
+                       for op in _price_operations().values()):
+                    raise HTTPException(409, "Selected row has an unresolved amendment; reconcile it before editing")
+                started = time.monotonic()
+                credentials = _price_credentials(row)
+                raw = await _price_read(row, credentials)
+                await _price_protection(row, raw, credentials)
+                updated = dict(row, _price_broker=dict(raw), _price_read_started=started,
+                               entry_price=raw.get("avgPrice"), order_price=raw.get("price"),
+                               stop_loss=raw["stopLoss"], take_profit=raw["takeProfit"])
+                item = _enrich_price_edit(updated)
+                if item["price_edit"].get("target") != payload["target"] or not item["price_edit"]["fields"]:
+                    raise HTTPException(409, "Selected row lifecycle changed; review the position")
+                return {"status": "fresh", "target": payload["target"], "item": item}
+    except TimeoutError:
+        raise HTTPException(409, "Selected row read timed out; draft retained")
 
 
 @app.post("/api/open-orders/amend")

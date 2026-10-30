@@ -89,12 +89,12 @@
     if(list){list.innerHTML='';formatted.forEach(text=>{const li=document.createElement('li');li.textContent=text;list.appendChild(li);});}
   };
   const buildFetchError=(url,status,statusText,bodyText,bodyJson)=>{const detailErrors=bodyJson?.detail?.errors||bodyJson?.errors; const flattened=formatSourceErrors(detailErrors); if(flattened.length) return new Error(flattened.join(' | ')); const endpoint=safeEndpoint(url)||'unknown endpoint'; const httpStatus=safeDiagnostic(status,'unknown'); const parsedBody=bodyJson&&typeof bodyJson==='object'?JSON.stringify(bodyJson):bodyText; const body=safeDiagnostic(parsedBody); const reason=body||safeDiagnostic(statusText,'upstream returned no diagnostic details'); return new Error(`GET ${endpoint} failed: HTTP ${httpStatus} ${reason}`.trim());};
-  const fetchJson=async(url,timeoutMs=GET_TIMEOUT_MS)=>{
+  const fetchJson=async(url,timeoutMs=GET_TIMEOUT_MS,request={})=>{
     const controller=new AbortController(); let timer;
     const deadline=new Promise((_,reject)=>{timer=setTimeout(()=>{controller.abort();reject(new Error('GET '+url+': deadline exceeded ('+GET_TIMEOUT_MS/1000+'s); broker visibility unknown'));},timeoutMs);});
     try{
       return await Promise.race([(async()=>{
-        const response=await fetch(url,{cache:'no-store',signal:controller.signal});
+        const response=await fetch(url,{...request,cache:'no-store',signal:controller.signal});
         const bodyText=await response.text(); let bodyJson=null;
         try{bodyJson=bodyText?JSON.parse(bodyText):null;}catch(_){}
         if(!response.ok)throw buildFetchError(url,response.status,response.statusText,bodyText,bodyJson);
@@ -374,20 +374,22 @@
       d.message='Refreshing this row; your draft is retained.';updatePriceCell(entry,state);
       try{
         for(let attempt=0;attempt<3&&Date.now()<deadline;attempt++){
-          const payload=await refresh('price-recovery',Math.max(1,deadline-Date.now()));
-          const matches=(payload?.items||[]).filter(item=>rowKey(item)===key);
+          const payload=await fetchJson('/api/open-orders/price-refresh',Math.max(1,deadline-Date.now()),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({target:d.target})});
+          const matches=payload?.item&&rowKey(payload.item)===key?[payload.item]:[];
           if(!payload){d.message='Row refresh failed; draft retained. Reload when broker data is available.';break;}
           if(matches.length!==1){d.message='Row missing or ambiguous; draft retained. Review the trade before editing.';break;}
           const item=matches[0],p=item.price_edit;
           if(p?.target!==d.target){d.message='Row lifecycle changed; draft retained without permission to amend the replacement.';break;}
-          if(item.source_pending!==false||item.source_stale!==false||Number(item.collection_version)!==Number(payload.version)||Number(item._price_read_started||0)<=started||!p.fields?.includes(state.field)){
+          if(payload.status!=='fresh'||payload.target!==d.target||!entry.present||Number(item._price_read_started||0)<=started||!p.fields?.includes(state.field)){
             d.message='Fresh data for this row is still unavailable; draft retained. Reload later.';continue;
           }
           const changed=['entry','stop_loss','take_profit','unit'].some(k=>String(d.base[k]??'')!==String(k==='unit'?p.unit:p.levels?.[k]));
           if(changed){d.message='Broker baseline changed; draft retained. Review it and reopen the editor before saving.';break;}
+          priceApply(entry,item);
           d.conflict=false;d.message='Fresh row verified; draft retained. Save explicitly when ready.';break;
         }
-      }finally{d.recovering=false;priceRecovery=false;updatePriceCell(entry,state);}
+      }catch(error){d.message='Selected row refresh failed; draft retained: '+safeDiagnostic(error?.message||'broker unavailable');}
+      finally{d.recovering=false;priceRecovery=false;updatePriceCell(entry,state);}
     });
     for(const el of [state.save,state.cancel,state.reload])state.td.appendChild(el);
     state.feedback=document.createElement('span');state.feedback.className='classification-feedback';state.feedback.setAttribute('role','status');state.td.appendChild(state.feedback);

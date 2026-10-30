@@ -6220,6 +6220,10 @@ let snapshot={version:1,progress_revision:1,items:[row],pending:true,core_comple
 const reply=(data,status=200)=>({ok:status===200,status,json:async()=>data,text:async()=>JSON.stringify(data)});
 let reads=0,writes=0,queue=[];
 global.fetch=async(url,opts={})=>{
+ if(url==='/api/open-orders/price-refresh'){
+  reads++;const publication=queue.length?queue.shift()():snapshot;
+  return reply({status:'fresh',target:JSON.parse(opts.body).target,item:publication.items[0]});
+ }
  if(opts.method==='POST'){
   if(url==='/api/open-orders/amend-status')return reply({status:'unknown',message:'Outcome unknown'});
   assert.strictEqual(url,'/api/open-orders/amend');writes++;const body=JSON.parse(opts.body);assert.strictEqual(body.value,'0.04848');assert.strictEqual(body.mode,'price');assert.strictEqual(body.base.take_profit,'0.05379');assert.strictEqual(body.base.entry,'0.04996');return reply({detail:'Broker data incomplete. Refresh this row.'},409);
@@ -6250,4 +6254,210 @@ vm.runInThisContext(fs.readFileSync(process.argv[1],'utf8'));
 
 """
     result = subprocess.run([node, "-e", harness, str(ROOT / "render/static/open_orders.js"), json.dumps(headers)], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def _run_scoped_price_mock_io(coro):
+    # No sockets or cross-thread work exist in these transport-mocked tests.
+    # Keep actual asyncio tasks, deadlines and locks, without Windows socketpair.
+    import selectors
+    import time
+    class MockIOSelector(selectors.SelectSelector):
+        def select(self, timeout=None):
+            assert not self.get_map(), "Unexpected real IO in isolated price test"
+            if timeout:
+                time.sleep(timeout)
+            return []
+    class MockIOLoop(asyncio.SelectorEventLoop):
+        def _make_self_pipe(self):
+            self._ssock = self._csock = None
+        def _close_self_pipe(self):
+            pass
+        def _write_to_self(self):
+            raise AssertionError("Unexpected cross-thread IO")
+    with asyncio.Runner(loop_factory=lambda: MockIOLoop(MockIOSelector())) as runner:
+        return runner.run(coro)
+
+
+def _scoped_position_fixture(monkeypatch, tmp_path):
+    import copy
+    service, state = _price_edit_fixture(monkeypatch, tmp_path, position=True, tiny=True, idx=1)
+    raw, row = state["raw"], state["row"]
+    raw.update(symbol="FIXTUREUSDT", avgPrice="0.04996", size="2058", stopLoss="0.04858", takeProfit="0.05379",
+               tpTriggerBy="LastPrice", slTriggerBy="LastPrice")
+    row.update(instrument=raw["symbol"], entry_price=raw["avgPrice"], stop_loss=raw["stopLoss"], take_profit=raw["takeProfit"],
+               _price_broker=copy.deepcopy(raw), source_pending=True, source_stale=True)
+    service._PRICE_TARGETS.clear()
+    service._enrich_price_edit(row)
+    state["unrelated"] = {"OANDA demo": "maintenance", "pending": True}
+    async def get(**kw):
+        state["reads"].append(copy.deepcopy(kw))
+        assert kw["api_key"] == "mock-key" and kw["base_url"] == "https://bybit.fixture"
+        params = kw["params"]
+        assert params["symbol"] == "FIXTUREUSDT" and params["category"] == "linear"
+        await asyncio.sleep(0.001)  # Real suspension/scheduling, not immediate driving.
+        if "bad" in state:
+            return copy.deepcopy(state["bad"])
+        if params.get("orderFilter") == "StopOrder":
+            items = [dict(symbol=raw["symbol"], positionIdx=1, stopOrderType=kind, orderType="Market",
+                          qty=raw["size"], triggerPrice=raw[field], triggerBy="LastPrice")
+                     for field, kind in (("stopLoss", "StopLoss"), ("takeProfit", "TakeProfit"))]
+            items = items[1:] if params.get("cursor") else items[:1]
+        else:
+            items = [copy.deepcopy(raw)] if params.get("cursor") else []
+        return {"retCode": 0, "result": {"category": "linear", "list": items,
+                "nextPageCursor": "" if params.get("cursor") else "page-two"}}
+    async def market(base, path, params, **kw):
+        assert base == "https://bybit.fixture" and params == {"category": "linear", "symbol": "FIXTUREUSDT"}
+        return {"result": {"list": [{"symbol": "FIXTUREUSDT", **({"priceFilter": {"tickSize": "0.00001"}}
+                if path.endswith("instruments-info") else {"lastPrice": "0.0501"})}]}}
+    monkeypatch.setattr(service, "_bybit_signed_get", get)
+    monkeypatch.setattr(service, "_bybit_market_get_async", market)
+    return service, state
+
+
+def test_position_sl_scoped_refresh_and_amend_confirm_under_partial_coverage(monkeypatch, tmp_path):
+    import copy
+    async def exercise():
+        service, state = _scoped_position_fixture(monkeypatch, tmp_path)
+        row, raw = state["row"], state["raw"]
+        target = row["price_edit"]["target"]
+        fresh = await service.refresh_open_order_price({"target": target})
+        assert fresh["status"] == "fresh" and fresh["target"] == target
+        assert fresh["item"]["_price_read_started"] > 1
+        assert fresh["item"]["price_edit"]["levels"] == {"entry": "0.04996", "stop_loss": "0.04858", "take_profit": "0.05379"}
+        assert len(state["reads"]) == 4 and state["writes"] == []
+        original = copy.deepcopy(raw)
+        # Every invalid scoped read must fail before any mutation.
+        bads = [None, {"retCode": 1}, {"retCode": 0, "result": {"category": "inverse", "list": []}},
+                {"retCode": 0, "result": {"category": "linear", "list": [None]}},
+                {"retCode": 0, "result": {"category": "linear", "list": [], "nextPageCursor": 7}},
+                {"retCode": 0, "result": {"category": "linear", "list": [], "nextPageCursor": "repeat"}}]
+        for changes in ({"symbol": "WRONG"}, {"positionIdx": 2}, {"side": "Sell"}, {"size": "0"},
+                        {"stopLoss": ""}, {"seq": "replacement"}):
+            bads.append({"retCode": 0, "result": {"category": "linear", "list": [dict(raw, **changes)]}})
+        bads.append({"retCode": 0, "result": {"category": "linear", "list": [raw, raw]}})
+        for bad in bads:
+            state["bad"] = bad
+            with pytest.raises(service.HTTPException):
+                await service.refresh_open_order_price({"target": target})
+            assert not state["writes"]
+        del state["bad"]
+        with pytest.raises(service.HTTPException):
+            await service.refresh_open_order_price({"target": "missing-account-target"})
+        # Exact existing amend route, real locks and durable reservation, single SL mutation.
+        result = await service.amend_open_order(state["request"]("stop_loss", "0.04848"))
+        assert result["status"] == "confirmed" and result["item"]["stop_loss"] == "0.04848"
+        assert len(state["writes"]) == 1
+        write = state["writes"][0]
+        assert write["path"] == "/v5/position/trading-stop"
+        assert write["body"] == {"category": "linear", "symbol": "FIXTUREUSDT", "positionIdx": 1,
+                                  "tpslMode": "Full", "stopLoss": "0.04848", "slTriggerBy": "LastPrice"}
+        for key in ("avgPrice", "size", "takeProfit"):
+            assert raw[key] == original[key]
+        # Retained unknown reservation blocks fresh requests; status only reads, never replays.
+        op = next(iter(service._price_operations().values()))
+        op.update(operation_id="unknown_fixture_operation", status="unknown", expected={"stop_loss": "0.04847"})
+        service._price_store(op)
+        with pytest.raises(service.HTTPException):
+            await service.refresh_open_order_price({"target": target})
+        with pytest.raises(service.HTTPException):
+            await service.amend_open_order(state["request"]("stop_loss", "0.04846", op="blocked_fixture_operation"))
+        result = await service.open_order_amend_status({"operation_id": op["operation_id"]})
+        assert result["status"] == "unknown" and len(state["writes"]) == 1
+        assert state["unrelated"]["pending"]
+    _run_scoped_price_mock_io(exercise())
+
+
+def test_price_editor_recovers_and_saves_with_unrelated_broker_failure(monkeypatch, tmp_path):
+    import copy
+    async def serialize():
+        service, state = _scoped_position_fixture(monkeypatch, tmp_path)
+        initial = copy.deepcopy(state["row"])
+        fresh = await service.refresh_open_order_price({"target": initial["price_edit"]["target"]})
+        request = state["request"]("stop_loss", "0.04848", op="operation_browser_0001")
+        confirmed = await service.amend_open_order(request)
+        assert confirmed["status"] == "confirmed" and len(state["writes"]) == 1
+        return dict(initial=initial, fresh=fresh, request=request, confirmed=confirmed)
+    fixture = _run_scoped_price_mock_io(serialize())
+    node = shutil.which("node") or r"C:\Program Files\nodejs\node.exe"
+    headers = re.findall(r"<th>(.*?)</th>", master_service.OPEN_ORDERS_TEMPLATE)
+    harness = r"""
+const fs=require('fs'),vm=require('vm'),assert=require('assert');
+class Element {
+  constructor(tag=''){this.tag=tag;this.children=[];this.parentNode=null;this.style={};this._text='';this.handlers={};this.dataset={};this.disabled=false;this.value='';this.hidden=false;}
+  set textContent(value){this.innerHTML='';this._text=String(value);}
+  get textContent(){return this._text+this.children.map(child=>child.textContent).join('');}
+  set innerHTML(value){for(const child of this.children)child.parentNode=null;this.children=[];this._text=String(value);}
+  appendChild(child){this.insertBefore(child,null);return child;}
+  insertBefore(child,before){if(child===before)return;if(child.parentNode)child.remove();const i=before?this.children.indexOf(before):this.children.length;assert(i>=0);this.children.splice(i,0,child);child.parentNode=this;}
+  remove(){if(this.parentNode){const p=this.parentNode;p.children.splice(p.children.indexOf(this),1);this.parentNode=null;}}
+  addEventListener(event,fn){this.handlers[event]=fn;}
+  setAttribute(k,v){this[k]=v;}
+  querySelector(){return null;}
+  click(){return this.disabled?undefined:this.handlers.click?.();}
+  focus(){document.activeElement=this;}
+  setSelectionRange(start,end){if(this.tag!=='input'||this.type!=='text')throw new Error('Selection requires text-backed input');this.selectionStart=start;this.selectionEnd=end;}
+  select(){this.setSelectionRange(0,this.value.length);}
+}
+
+const tbody=new Element('tbody'),table=new Element('table');table.querySelector=()=>tbody;
+const elements={'open-orders-table':table};for(const id of ['open-orders-status','open-orders-empty','refresh-btn','open-orders-errors','open-orders-warnings'])elements[id]=new Element();
+const headers=JSON.parse(process.argv[2]);
+const walk=node=>[node,...node.children.flatMap(walk)];const find=(root,text)=>walk(root).find(e=>e.tag==='button'&&e.textContent===text);
+const select=cell=>walk(cell).find(e=>e.tag==='select');const idle=cell=>walk(cell).find(e=>e.className==='classification-value');
+const cell=(tr,label)=>tr.children[headers.indexOf(label)];
+const change=(el,value)=>{assert(!el.disabled);assert(el.children.some(option=>option.value===value));el.value=value;el.handlers.change();};
+const escape=cell=>cell.handlers.keydown({key:'Escape',preventDefault(){}});
+const inside=(child,parent)=>walk(parent).includes(child);
+global.window={__OPEN_ORDERS_TESTING__:true,addEventListener(){}};
+global.document={hidden:true,getElementById:id=>elements[id]||null,createElement:tag=>new Element(tag),addEventListener(){}};
+global.BroadcastChannel=undefined;global.setInterval=()=>1;global.clearInterval=()=>{};
+
+const input=td=>walk(td).find(e=>e.tag==='input');
+const edit=td=>walk(td).find(e=>e.className==='price-edit');
+const enter=(td,value)=>{input(td).value=value;input(td).handlers.input();};
+const storage={};window.localStorage={getItem:k=>storage[k]||null,setItem:(k,v)=>{storage[k]=v;}};
+let count=0;window.crypto={randomUUID:()=>('operation_browser_'+String(++count).padStart(4,'0'))};
+
+
+const fixture=JSON.parse(process.argv[3]);let row=fixture.initial;
+const reply=(data,status=200)=>({ok:status===200,status,json:async()=>data,text:async()=>JSON.stringify(data)});
+let snapshot={version:1,progress_revision:1,items:[row],pending:true,core_complete:false,errors:['OANDA demo maintenance'],sources:[{state:'pending'}]};
+let reads=0,writes=0,release,refreshMode='delayed';
+global.fetch=async(url,opts={})=>{
+ if(url==='/api/open-orders/price-refresh'){
+  reads++;assert.deepStrictEqual(JSON.parse(opts.body),{target:row.price_edit.target});
+  if(refreshMode==='delayed')return new Promise(resolve=>{release=()=>resolve(reply(fixture.fresh));});
+  if(refreshMode==='stale')return reply({...fixture.fresh,item:row});
+  if(refreshMode==='replaced')return reply({...fixture.fresh,item:{...fixture.fresh.item,price_edit:{...row.price_edit,target:'replacement'}}});
+  return reply({detail:'Selected row is unavailable'},409);
+ }
+ if(url==='/api/open-orders/amend'){writes++;assert.deepStrictEqual(JSON.parse(opts.body),fixture.request);return reply(fixture.confirmed);}
+ if(url==='/api/open-orders/amend-status')return reply({status:'unknown',message:'Outcome unresolved'});
+ if(url.includes('/version'))return reply({version:1,progress_revision:1});
+ return reply(snapshot);
+};
+vm.runInThisContext(fs.readFileSync(process.argv[1],'utf8'));
+(async()=>{
+ const hooks=window.__openOrdersTestHooks;await hooks.refresh('progress');
+ let tr=tbody.children[0],sl=cell(tr,'Stop Loss');edit(sl).click();enter(sl,'0.04848');const typed=input(sl);typed.focus();typed.setSelectionRange(3,5);
+ // An ordinary pending publication does not prove fresh row readiness.
+ snapshot={...snapshot,items:[{...row,_price_read_started:2,price_edit:{...row.price_edit,levels:{...row.price_edit.levels,stop_loss:'0.04857'}}}]};await hooks.refresh('progress');
+ const recovering=find(sl,'Reload').click();assert(release);assert.strictEqual(typed.value,'0.04848');assert(find(sl,'Save').disabled);assert.strictEqual(writes,0);await hooks.pollVersion();assert.strictEqual(writes,0);
+ release();await recovering;assert.strictEqual(input(sl),typed);assert.strictEqual(typed.selectionStart,3);assert.strictEqual(document.activeElement,typed);assert.strictEqual(select(sl).value,'price');assert(!find(sl,'Save').disabled);assert.strictEqual(reads,1);assert.strictEqual(writes,0);
+ // Use the production browser request and the real server's serialized confirmed response.
+ await find(sl,'Save').click();assert.strictEqual(writes,1);assert(sl.textContent.includes('Saved'));assert(sl.textContent.includes('0.04848'));assert(cell(tr,'Take Profit').textContent.includes('0.05379'));assert(cell(tr,'Entry / Order').textContent.includes('0.04996'));
+ // New unsent draft: failed recovery is bounded and cannot carry authority onto a replacement.
+ edit(sl).click();enter(sl,'0.04847');snapshot={...snapshot,items:[{...row,_price_read_started:fixture.fresh.item._price_read_started+1,price_edit:{...row.price_edit,levels:{...row.price_edit.levels,stop_loss:'0.04846'}}}]};await hooks.refresh('progress');
+ refreshMode='stale';let before=reads;await find(sl,'Reload').click();assert.strictEqual(reads-before,3);assert(find(sl,'Save').disabled);assert.strictEqual(input(sl).value,'0.04847');
+ refreshMode='replaced';await find(sl,'Reload').click();assert(find(sl,'Save').disabled);assert(sl.textContent.includes('lifecycle'));assert.strictEqual(input(sl).value,'0.04847');
+ refreshMode='missing';await find(sl,'Reload').click();assert(find(sl,'Save').disabled);assert(sl.textContent.includes('retained'));
+ storage['ltt-open-order-amendments-v1']=JSON.stringify({pending_fixture:{...fixture.request,operation_id:'pending_fixture'}});
+ tbody.innerHTML='';snapshot={...snapshot,items:[row]};vm.runInThisContext(fs.readFileSync(process.argv[1],'utf8'));await window.__openOrdersTestHooks.refresh('progress');sl=cell(tbody.children[0],'Stop Loss');assert(find(sl,'Save').disabled);assert(find(sl,'Cancel').disabled);document.hidden=false;await window.__openOrdersTestHooks.pollVersion();assert.strictEqual(writes,1);assert(find(sl,'Save').disabled);
+ console.log('scoped recovery and explicit confirmed Save passed');
+})().catch(error=>{console.error(error);process.exitCode=1;});
+
+"""
+    result = subprocess.run([node, "-e", harness, str(ROOT / "render/static/open_orders.js"), json.dumps(headers), json.dumps(fixture)], capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
