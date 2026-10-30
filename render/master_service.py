@@ -30633,6 +30633,8 @@ def _trendline_plan_http_error(exc: Exception, *, transition: bool = False) -> N
     message = str(exc)
     if "Unknown trendline plan" in message:
         raise HTTPException(status_code=404, detail="Trendline plan was not found.") from exc
+    if message == "stop_loss_ticks must be a positive integer.":
+        raise HTTPException(status_code=422, detail=message) from exc
     raise HTTPException(status_code=409 if transition else 422, detail=message) from exc
 
 
@@ -30680,6 +30682,16 @@ def _trendline_plan_payload(payload: Mapping[str, object]) -> Dict[str, object]:
     limit_entry = payload.get("limit_entry_price") or payload.get("entry_price") or payload.get("limit_price")
     if order_intent == "limit" and limit_entry in (None, ""):
         raise TrendlinePlanError("Limit trendline plans require a positive limit entry price.")
+    stop_loss_ticks = payload.get("stop_loss_ticks")
+    if isinstance(stop_loss_ticks, bool):
+        raise TrendlinePlanError("stop_loss_ticks must be a positive integer.")
+    if isinstance(stop_loss_ticks, str):
+        stop_loss_text = stop_loss_ticks.strip()
+        if not re.fullmatch(r"[0-9]+", stop_loss_text):
+            raise TrendlinePlanError("stop_loss_ticks must be a positive integer.")
+        stop_loss_ticks = int(stop_loss_text)
+    if not isinstance(stop_loss_ticks, int) or stop_loss_ticks <= 0:
+        raise TrendlinePlanError("stop_loss_ticks must be a positive integer.")
     return {
         "broker": broker,
         "account": account,
@@ -30699,7 +30711,7 @@ def _trendline_plan_payload(payload: Mapping[str, object]) -> Dict[str, object]:
         "expiry_at_ms": payload.get("expiry_at_ms"),
         "risk_mode": payload.get("risk_mode"),
         "risk_value": payload.get("risk_value"),
-        "stop_loss_ticks": payload.get("stop_loss_ticks"),
+        "stop_loss_ticks": stop_loss_ticks,
         "rr_target": payload.get("rr_target") or payload.get("risk_reward"),
         "timeframe": payload.get("timeframe"),
         "order_metadata": {

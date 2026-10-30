@@ -3209,6 +3209,90 @@ def test_local_trendline_plan_crud_is_profile_gated_and_preserves_calculator_fie
     assert exc.value.status_code == 422
 
 
+def _run_immediate_route(coroutine):
+    try:
+        coroutine.send(None)
+    except StopIteration as completed:
+        return completed.value
+    coroutine.close()
+    raise AssertionError("Trendline CRUD routes should complete without awaiting external work in these isolated tests.")
+
+
+def test_trendline_stop_ticks_accept_browser_values_for_create_and_update(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    store = master_service.TrendlinePlanStore(tmp_path / "trendline_plans.json")
+    monkeypatch.setattr(master_service, "TRENDLINE_PLAN_STORE", store)
+    monkeypatch.setattr(master_service, "APP_PROFILE", "local")
+    monkeypatch.setattr(master_service, "_trendline_response_state", lambda: {"monitoring_active": False, "execution_enabled": True})
+
+    def payload(broker: str, instrument: str, ticks: object) -> dict:
+        return {
+            "asset": "crypto" if broker == "bybit" else "fx", "broker": broker, "account": "demo",
+            "instrument": instrument, "side": "buy", "order_type": "market", "test_trade": True,
+            "anchors": [{"timestamp_ms": 1_000, "price": "100"}, {"timestamp_ms": 2_000, "price": "101"}],
+            "right_extension": True, "trigger_mode": "touch", "cross_direction": "either",
+            "trigger_price_basis": "executable", "tolerance_ticks": 2, "expiry_at_ms": None,
+            "risk_mode": "percent", "risk_value": "1", "stop_loss_ticks": ticks, "rr_target": "2",
+            "timeframe": "15m", "setup": "Pullback", "pattern": "channel", "ema": "20",
+            "vwap": "No", "aths_atls": "No", "round_number": "Yes",
+        }
+
+    for broker, instrument, ticks in (
+        ("bybit", "BTCUSDT", "123"), ("bybit", "ETHUSDT", " 123 "), ("oanda", "USD_JPY", 123),
+    ):
+        request = payload(broker, instrument, ticks)
+        created = json.loads(_run_immediate_route(master_service.trendline_plan_create(request)).body)["plan"]
+        assert created["stop_loss_ticks"] == 123 and type(created["stop_loss_ticks"]) is int
+        assert created["status"] == "draft"
+        expected_metadata = {"setup": "Pullback", "pattern": "channel", "ema": "20", "vwap": "No", "aths_atls": "No", "round_number": "Yes"}
+        for key in ("anchors", "risk_mode", "risk_value", "rr_target", "timeframe", "order_metadata"):
+            expected = expected_metadata if key == "order_metadata" else request[key]
+            assert created[key] == expected
+        updated = json.loads(_run_immediate_route(master_service.trendline_plan_update(created["plan_id"], {"stop_loss_ticks": ticks})).body)["plan"]
+        assert updated["stop_loss_ticks"] == 123 and type(updated["stop_loss_ticks"]) is int
+        assert updated["status"] == "draft"
+        for key in ("anchors", "risk_mode", "risk_value", "rr_target", "timeframe", "order_metadata"):
+            assert updated[key] == created[key]
+        omitted = json.loads(_run_immediate_route(master_service.trendline_plan_update(created["plan_id"], {"tolerance_ticks": 3})).body)["plan"]
+        assert omitted["stop_loss_ticks"] == 123 and type(omitted["stop_loss_ticks"]) is int
+
+
+def test_trendline_stop_ticks_reject_invalid_values_without_changing_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    store = master_service.TrendlinePlanStore(tmp_path / "trendline_plans.json")
+    monkeypatch.setattr(master_service, "TRENDLINE_PLAN_STORE", store)
+    monkeypatch.setattr(master_service, "APP_PROFILE", "local")
+    monkeypatch.setattr(master_service, "_trendline_response_state", lambda: {"monitoring_active": False, "execution_enabled": True})
+    valid = {
+        "asset": "fx", "broker": "oanda", "account": "demo", "instrument": "USD_JPY", "side": "buy",
+        "order_type": "market", "test_trade": True,
+        "anchors": [{"timestamp_ms": 1_000, "price": "100"}, {"timestamp_ms": 2_000, "price": "101"}],
+        "right_extension": True, "trigger_mode": "touch", "cross_direction": "either",
+        "trigger_price_basis": "executable", "tolerance_ticks": 2, "expiry_at_ms": None,
+        "risk_mode": "percent", "risk_value": "1", "stop_loss_ticks": 123, "rr_target": "2", "timeframe": "15m",
+    }
+    created = json.loads(_run_immediate_route(master_service.trendline_plan_create(valid)).body)["plan"]
+
+    invalid_values = ("", "   ", "0", "-123", "123.5", 123.5, "123ticks", "NaN", float("nan"), float("inf"), None, True, [], {}, (123,))
+    for invalid in invalid_values:
+        before = store.path.read_bytes()
+        revision = store.get(created["plan_id"])["revision"]
+        for operation in ("create", "update"):
+            request = dict(valid, stop_loss_ticks=invalid)
+            with pytest.raises(master_service.HTTPException) as exc:
+                if operation == "create":
+                    _run_immediate_route(master_service.trendline_plan_create(request))
+                else:
+                    _run_immediate_route(master_service.trendline_plan_update(created["plan_id"], {"stop_loss_ticks": invalid}))
+            assert exc.value.status_code == 422
+            assert store.path.read_bytes() == before
+            assert store.get(created["plan_id"])["revision"] == revision
+
+    before = store.path.read_bytes()
+    with pytest.raises(master_service.HTTPException) as exc:
+        _run_immediate_route(master_service.trendline_plan_create({key: value for key, value in valid.items() if key != "stop_loss_ticks"}))
+    assert exc.value.status_code == 422
+    assert store.path.read_bytes() == before
+
+
 def test_local_trendline_executor_start_stop_status_is_profile_gated(monkeypatch: pytest.MonkeyPatch) -> None:
     class FakeExecutor:
         def __init__(self): self.running = False; self.starts = 0
