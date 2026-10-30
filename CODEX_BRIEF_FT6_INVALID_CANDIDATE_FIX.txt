@@ -1,0 +1,117 @@
+CODEX BRIEF - FT6 INVALID CANDIDATE ADMISSION AND PROMOTION DIAGNOSTICS
+Recommended model: gpt-6.1-sol
+Reasoning effort: high
+Repository: C:\GPT\CODEX-master
+Filename: CODEX_BRIEF_FT6_INVALID_CANDIDATE_FIX.txt
+
+Implement, compile, install, document and push this focused native Forex Tester 6 correction. Read applicable AGENTS.md and inspect current git status before editing. Do not inspect/read/modify custom instructions/. Do not delegate. Work only in the FT6 strategy, its directly relevant synthetic seam, FT6 guide, this brief and required summary. Leave MT5/Pine, LTT, journal and other concurrent jobs untouched.
+
+CREDIT AND VERIFICATION LIMITS
+Conserve credits. Run ONLY the seven named functional selectors below and the smallest directly necessary compilation/export/deployment/delivery checks. No complete test-file runs, full suites, broad integration checks, unrelated checks, repeated passing checks, optimisation, parameter searches or historical FT6 backtests/replays, including short historical replays. Do not expand testing without explicit user approval. Rerun a failed affected selector only after correcting its relevant code/fixture. These limits override broader testing suggestions.
+
+OBSERVED EVIDENCE
+Reviewed master eda120d3ca7b09bb4e1a8743c059cbb1aa15bedb; strategy blob 8be057d057ef1efc570aad01242987222fa8754a. These identify reviewed code, not permission to reset/pin a moving branch.
+
+Preset 8 is M5 structure-break first pullback both, entry mode 3. The user-approved bullish reversal on EURUSD, 2023-08-23, roughly 13:00-13:40, was absent from the latest export. Supplied Journal screenshots show:
+- 13:10: long seed retained provisionally, reason body cap prevents normal seed; body=1.76ATR, range=2.21ATR, busy=no, execution=direction-permitted.
+- 13:15/13:20/13:25/13:30/13:35: later same-direction endpoint advancement recorded for that oversized long, ending at 1.08353. At 13:25 and 13:35 the individual bodies were below the normal minimum, 0.89ATR and 0.78ATR. These do not by themselves invalidate cumulative oversized recovery.
+- Through those records the state remains "impulse consumed / new structural leg required"; no long parent/promotion is shown.
+- 13:40: a short seed is accepted (body=1.05ATR, range=1.44ATR), with origin=2023-08-23 12:45@1.08106 and endpoint=13:35@1.08253.
+- For that short, origin minus endpoint is NEGATIVE. The endpoint is above its claimed origin; this is invalid bearish impulse geometry.
+- That short later reports directional efficiency below minimum. This message concerns the SHORT, not the intended buy.
+
+Source confirms StartImpulseAt resets both provisional candidates after assigning the new parent. Therefore accepting this invalid short clears the stored long candidate. CanSeedImpulse lacks a general positive directional-displacement check, and TryPromoteCandidate has several silent failure returns.
+
+The exact earlier historical condition preventing the long's promotion is NOT established by the screenshots. Do not assert that the body cap alone, M15 structure, efficiency, deadline, or consumed-parent extreme rule was the cause. No news/calendar filter exists in this FT6 strategy; its blackout is weekend-only. Do not add news handling.
+
+Expected: an invalid opposite seed must not create a parent or erase a valid pending candidate. A retained oversized candidate can use existing later-continuation evidence, subject to every existing eligibility/qualification/execution gate. Any remaining promotion block must have an explicit, useful reason. This job does not guarantee an August 23 entry or profitability.
+
+FILES / BOUNDARIES
+forex-tester-6/RangeBreakoutPullbackStrategy/RangeBreakoutPullbackStrategy.cpp
+forex-tester-6/RangeBreakoutPullbackStrategy/RangeBreakoutPullbackStrategy.def (inspect; change only if actually required)
+tests/ft6_first_touch.cpp
+docs/RangeBreakoutPullback_Backtesting_Guide.md
+summary/CODEX_SUMMARY_latest.txt
+
+Inspect CanSeedImpulse, LatestImpulseOrigin, StartImpulse/StartImpulseAt, ObserveProvisional/ObserveProvisionalContinuation, TryPromoteCandidate, ProcessImpulseSetup, AbandonQualification, ResetProvisionalCandidates, RetireCandidateBeforeCurrentSeed, qualification/recovery and reset paths. Prefer the existing boundaries; do not rebuild the strategy.
+
+REQUIRED FIX - VALIDATE BEFORE DESTRUCTIVE STATE CHANGES
+1. Introduce/reuse one consistent non-mutating directional-geometry check: finite positive origin and extreme prices, valid direction, and strictly positive dir*(extreme-origin). Long extreme must exceed origin; short extreme must be below origin. Equality is invalid. Keep existing causal origin-time/bar checks.
+2. Apply it to impulse admission, including the normal seed path and provisional promotion. Add a defensive check at the parent-creation boundary BEFORE ResetTouch, ResetQualification, parent assignment or ResetProvisionalCandidates.
+3. Propagate rejection correctly to callers. A rejected StartImpulseAt must not be treated as a successfully started/promoted parent, followed by qualification metadata writes or recovery of some other/stale parent. Prefer a clear success result where necessary.
+4. Preflight geometry before the "newer confirmed origin" branch in ProcessImpulseSetup can abandon/replace a pending unqualified parent. An invalid incoming candidate must not trigger this destructive replacement merely because its origin bar is newer.
+5. Rejection of an invalid incoming short must preserve an independently pending long and its first seed, ATR, extremes, continuation evidence and remaining lifecycle. Mirror for pending short/invalid long. Preserve an existing active parent's state too when the attempted replacement is invalid.
+6. Continue evaluating eligible retained candidates after rejecting the incoming seed. Do not return early before the existing other-direction promotion path can run. An invalid attempted seed may remain provisional awaiting a genuinely appropriate causal origin only if consistent with existing bounded recovery rules; it must not displace/clear the other candidate.
+7. Do not solve this by suppressing all opposite candles, indefinitely restoring every candidate after a real retirement, or resurrecting a consumed opportunity. Genuine expiry, incompatibility, invalidation, accepted-parent ownership and strategy reset must still retire state normally.
+8. Apply the shared integrity check to impulse admission across existing modes while preserving valid-trade behavior and all preset definitions. Range mode is unchanged. This only rejects invalid geometry; it does not change a numeric trading threshold.
+
+PROMOTION DIAGNOSTICS - EXPOSE THE REMAINING BLOCK
+Add concise, event-based diagnostics to relevant unsuccessful promotion paths for an ACTIVE candidate. Inactive candidates must produce no noise. Cover:
+- An active parent currently owns the setup.
+- Recovery-window expiry.
+- CanSeedImpulse denial, retaining its actual reason: missing/unconfirmed origin, origin not newer than consumption, same-direction extreme not beyond consumed parent, or invalid directional geometry.
+- Latest confirmed origin occurring after the candidate's first seed.
+- The mode-3 origin-to-first-seed deadline.
+- Oversized candidate lacking the existing allowed continuation/normal-seed evidence.
+- Invalid seed ATR or insufficient cumulative displacement.
+
+Use an identifiable prefix such as "RBP promotion pending/rejected/retired". Report direction, current bar/time, candidate first bar/time and extreme, seed ATR, normal/oversized/continuation flags, origin availability and actual origin bar/time/price, signed displacement and required displacement where applicable, and consumed direction/bar/extreme where relevant. Do not read unavailable history just to format a timestamp. Distinguish retain/wait, actual retirement, admission rejection and successful promotion.
+
+Do not overwrite the primary eligibility failure with the generic "body cap" description. Body classification and promotion eligibility are separate facts. Keep existing useful seed/promotion diagnostics and the real reason from CanSeedImpulse.
+
+Deduplicate by semantic candidate/origin/owner/consumption identity plus reason and disposition. Repeated identical attempts/quotes must not spam. A changed eligibility outcome or reference must become visible. Reset diagnostic state when the candidate is replaced/retired or the strategy resets. Keep ShowDiagnostics behavior; bound formatting safely.
+
+Crucially: DO NOT relax consumed-parent extreme/fresh-origin requirements, the M15 gate or other eligibility policy to force the historical buy. If one of those still blocks the long, preserve it and expose the exact reason. Complete this bounded correction even if the historical cause still needs a user rerun.
+
+UNCHANGED TRADING AND EXECUTION CONTRACTS
+No new preset, entry mode, input, logger/file-output subsystem or strategy redesign. Preset 8 stays numeric 8; presets 0-8 and all saved Custom/effective resolution behavior remain intact.
+Keep seed body thresholds 1.00-1.50ATR, oversized recovery evidence, frozen setup ATR, pre-origin M5 range 20, displacement 3.0ATR, buffer 0.10ATR, M15 strength 2 / two relevant confirmed pivots / scan 200 frozen at origin open, signed efficiency >=0.70, qualification deadline 12, prospective max(0.50ATR,25% displacement) retracement, maximum depth 50%, existing 30-bar recovery/pullback bound and all invalid-input rules.
+Keep both-side observation, correct target/risk freezing, 0.01 lots, adaptive stops, 2R/3R target classification, weekend behavior, explicit Currency and startup binding/readiness/recovery.
+Keep old-level quote evaluation before endpoint refresh; no arming/refresh-tick fill; no retrospective or second-touch entry; executable Ask/Bid and actual available fills; chronological recovery; no queued/second entry after a blocked/failed real touch; API success AND a valid ticket; one opportunity per consumed parent.
+The independent maximum completed strategy trades remains default 100 and is never preset-overridden. Do not modify counting, history reconciliation or Pause behavior.
+
+ONLY SEVEN AUTHORISED FUNCTIONAL SELECTORS
+Add two selected cases to tests/ft6_first_touch.cpp:
+1. candidate_geometry_preservation
+   Demonstrate the invalid-opposite-seed candidate loss on the old code before the fix, using synthetic production transitions, then pass after the fix. Include the analogous short origin 1.08106 / endpoint 1.08253 and mirrored long geometry; treat these as illustrative evidence, not a historical replay.
+   Cover negative, equal and nonfinite geometry; normal admission and defensive parent-creation rejection without partial state mutation; provisional promotion; invalid newer-origin preemption of an existing pending parent; both pending-candidate directions; preservation of valid candidate evidence after rejection. Exercise ProcessImpulseSetup/callers, not just the helper.
+   Include a later genuinely valid origin/leg reaching the existing qualification and prospective future-touch path where all gates pass. Check normal retirement and consumed-parent protection remain effective.
+2. promotion_gate_diagnostics
+   Exercise the active-candidate failure categories above using synthetic state/transitions. Assert the actual reason, relevant reference values, retain/retire disposition, deduplication and reset/change visibility.
+   Include an oversized-only candidate with later same-direction continuation but no later normal-sized seed: it can promote when all existing gates allow it. Separately show a legitimate consumed-extreme or origin block remains blocked and is now diagnosed. Diagnostics must not change qualification or order decisions.
+   Check an invalid opposite attempt cannot erase this evidence and no historical/arming-tick order is fabricated.
+
+Run these five existing selectors once after relevant code/fixtures are stable:
+ft6_first_touch.exe structure_first_touch
+ft6_first_touch.exe structure_impulse_quality
+ft6_first_touch.exe qualified_pullback_touch
+ft6_first_touch.exe direction_filtered_lifecycle
+ft6_first_touch.exe legacy_confirmation_entries
+
+These seven selectors are the full authorised functional list. Compile only the affected touch harness and native strategy. Do not run the preset harness or unrelated trade-limit cases when their code/controls are untouched.
+
+Some direct synthetic fixtures may currently construct impossible directional origins (for example a signed-efficiency test whose seed extreme is already on the wrong side of its origin). If the new integrity check exposes this, repair only the affected named fixture so it reaches its intended gate through valid origin/seed geometry. Retain negative signed-efficiency, expiry and other original assertions. Do not weaken production checks or remove assertions to make an invalid fixture pass. Rerun only failed affected selectors after such corrections.
+
+DOCUMENTATION AND ACCEPTANCE
+Update a short relevant FT6 guide section explaining invalid-geometry rejection, retained-candidate preservation and the new promotion-reason records. Do not rewrite unrelated guidance.
+Acceptance: invalid parents never become active or clear unrelated candidates; valid oversized recovery retains its existing evidence paths; legitimate gate failures remain failures with explicit reasons; repeated failures do not flood the Journal; reset and real retirements work; the seven selected tests pass; the DLL is rebuilt/installed and delivery succeeds.
+A synthetic counterexample proves this specific state fault, not the exact historical reason or screenshot acceptance. No claim that the missing buy is now taken until the user checks it.
+
+BUILD, INSTALL AND VERIFY - CODEX MUST DO THIS
+Use the existing installed x86 Windows toolchain and FT6 SDK at C:\ForexTester6\Examples\Strategies\C++. Build the canonical .cpp with its matching .def as a native 32-bit Release DLL linked with oleaut32.lib. Verify the six expected exports: InitStrategy, DoneStrategy, ResetStrategy, GetSingleTick, ReplaceStr and IntrfProcsRec. No SDK/tooling/system configuration edits.
+
+Back up only the installed strategy DLL in a task-scoped excluded build directory. Close FT6 gracefully if running, preserving the project/data; never force-kill it. Install the built DLL yourself at C:\ForexTester6\Strategies\RangeBreakoutPullbackStrategy.dll. A genuine unsaved prompt/file lock must be reported specifically; do not hand compilation or copying to the user.
+Verify installed SHA256 equals the built DLL. Report path, hash, bytes and modification time; do not claim FT6 loaded it unless observed. Previous reported installed DLL was 81408 bytes, SHA256 D10443C99A7473BCD64378888EF6967217C5B760C5EDAC80DCBC0F0E70A4729F; inspect the actual current file rather than assuming it matches.
+Do not run historical tests as a deployment check.
+
+SUMMARY, DELIVERY AND CONCURRENT WORK
+Preserve unrelated staged/working changes and concurrent summary sections. A moving remote/another terminal is not itself a reason to stop. No destructive cleanup, system edits, reset, force push or history rewrite.
+Write the final task summary verbatim as a clearly identified new section of summary/CODEX_SUMMARY_latest.txt BEFORE pushing. Use readable UTF-8 text; decode captured build output rather than embedding UTF-16 bytes/NUL characters. Preserve existing sections.
+Then run unchanged repository-root PATCH_DESKTOP_PUSH.bat using the established task-scoped protected adapter. Reuse C:\Users\User\.codex\tools\alexpsym_git_delivery.py with C:\Users\User\miniconda3\python.exe as established locally; do not modify the BAT or protected tools. Stage only the owned brief/source/test/FT6-guide/summary changes. Preserve unrelated staged content; do not permit blanket staging, raw pull --rebase --autostash or raw push to capture other jobs. Use the existing protected remote-advance procedure.
+Completion requires successful protected BAT delivery and verified local HEAD==origin/master. Keep binaries, backups, logs, adapters and local state out of commits. Report a genuine failure precisely and leave delivery incomplete.
+
+FINAL REPORT
+Report the proved invalid-admission defect, exact correction and new promotion diagnostics, changed files, seven selected-case outcomes, build/export/installed-DLL evidence, commit and verified local/remote heads. State that preset 8 and all thresholds remain unchanged.
+Distinguish what is now proved from the still-unverified historical long-promotion cause. Give one next user check: rerun the same EURUSD/preset-8 standard test with the existing 100-trade limit, pause just after 2023-08-23 13:45, and capture the 13:00-13:45 Journal block including the new promotion reasons. No full-year run is requested.
+Explicitly state no historical backtest/replay/optimisation was run by Codex and historical screenshot matching/profitability remain unverified.
+

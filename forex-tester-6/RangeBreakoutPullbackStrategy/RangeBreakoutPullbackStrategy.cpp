@@ -100,6 +100,7 @@ struct ProvisionalImpulseCandidate
   double seedATR,firstExtreme,extreme;
   long firstBar,extremeBar;
   TDateTime firstTime,extremeTime;
+  char lastPromotion[1400]; // Semantic event key; cleared with the candidate lifecycle.
 };
 ProvisionalImpulseCandidate provisionalLong={false,false,false,false,false,false,1,0,0,0,-1,-1,0,0};
 ProvisionalImpulseCandidate provisionalShort={false,false,false,false,false,false,-1,0,0,0,-1,-1,0,0};
@@ -401,6 +402,40 @@ bool LatestImpulseOrigin(const int d,double &price,long &bar,TDateTime &time)
   if(d==-1&&haveLatestSwingHigh){price=latestSwingHigh;bar=latestSwingHighBar;time=latestSwingHighTime;return true;}
   return false;
 }
+// Admission integrity is independent of seed size, qualification and execution policy.
+bool ValidImpulseGeometry(const int direction,const double origin,const double extreme)
+{
+  double displacement=direction*(extreme-origin);
+  return (direction==1||direction==-1)&&_finite(origin)&&origin>0&&_finite(extreme)&&extreme>0&&_finite(displacement)&&displacement>0;
+}
+void LogPromotion(ProvisionalImpulseCandidate &candidate,const char *disposition,const char *reason,
+  const bool originAvailable,const double origin,const long originBar,const TDateTime originTime)
+{
+  if(!candidate.active||!ShowDiagnostics)return;
+  double displacement=originAvailable?candidate.direction*(candidate.extreme-origin):0;
+  double required=candidate.seedATR*Max(ImpulseMinimumBodyATR,ImpulseMinimumRangeATR);
+  char key[1400];
+  // Current quote/bar is deliberately absent: identical eligibility on later quotes
+  // is one event. Changed candidate, origin, owner or consumption is a new event.
+  _snprintf_s(key,sizeof(key),_TRUNCATE,"%s|%s|%d|%ld|%.17g|%.17g|%ld|%.17g|%.17g|%.17g|%d%d%d|%d|%.17g|%ld|%.17g|%d|%d|%ld|%.17g|%ld|%.17g|%d|%ld|%.17g|%.17g",
+    disposition,reason,candidate.direction,candidate.firstBar,candidate.firstTime,candidate.firstExtreme,candidate.extremeBar,candidate.extremeTime,candidate.extreme,candidate.seedATR,
+    candidate.normalSeedSeen,candidate.oversizedSeen,candidate.continuationSeen,originAvailable,origin,originBar,originTime,
+    stage,dir,impulseOriginBar,impulseOrigin,qualifiedFirstSeedBar,setupExtreme,consumedDirection,consumedBar,consumedExtreme,required);
+  if(strcmp(key,candidate.lastPromotion)==0)return;
+  strcpy_s(candidate.lastPromotion,key);
+  char currentText[32],firstText[32],originText[32],text[1600];
+  FormatTime(lastTime,currentText);FormatTime(candidate.firstTime,firstText);FormatTime(originTime,originText);
+  _snprintf_s(text,sizeof(text),_TRUNCATE,"RBP promotion %s dir=%s reason=%s currentBar=%ld currentTime=%s firstBar=%ld firstTime=%s firstExtreme=%.5f extremeBar=%ld extreme=%.5f seedATR=%.5f normal=%s oversized=%s continuation=%s originAvailable=%s originBar=%ld originTime=%s origin=%.5f signedDisplacement=%.5f requiredDisplacement=%.5f ownerDir=%d ownerStage=%d ownerOriginBar=%ld ownerOrigin=%.5f ownerFirstBar=%ld ownerExtreme=%.5f consumedDir=%d consumedBar=%ld consumedExtreme=%.5f",
+    disposition,DirectionName(candidate.direction),reason,nbar,currentText,candidate.firstBar,firstText,candidate.firstExtreme,candidate.extremeBar,candidate.extreme,candidate.seedATR,
+    candidate.normalSeedSeen?"yes":"no",candidate.oversizedSeen?"yes":"no",candidate.continuationSeen?"yes":"no",originAvailable?"yes":"no",originBar,originText,origin,displacement,required,
+    dir,stage,impulseOriginBar,impulseOrigin,qualifiedFirstSeedBar,setupExtreme,consumedDirection,consumedBar,consumedExtreme);
+  EmitDiagnostic(text);
+}
+void LogPromotionCurrent(ProvisionalImpulseCandidate &candidate,const char *disposition,const char *reason)
+{
+  double origin=0;long bar=-1;TDateTime time=0;bool available=LatestImpulseOrigin(candidate.direction,origin,bar,time);
+  LogPromotion(candidate,disposition,reason,available,origin,bar,time);
+}
 void SelectedDepthLimits(double &minimumDepth,double &maximumDepth,bool &hasMaximum)
 {
   minimumDepth=0;maximumDepth=0;hasMaximum=PullbackDepthMode!=0;
@@ -451,6 +486,7 @@ int SeedClassification(const int d,const double o,const double h,const double l,
 bool CanSeedImpulse(const int seedDirection,const double seedExtreme,double &origin,long &originBar,TDateTime &originTime,const char *&reason)
 {
   if(!LatestImpulseOrigin(seedDirection,origin,originBar,originTime)){reason="confirmed directional origin unavailable";return false;}
+  if(!ValidImpulseGeometry(seedDirection,origin,seedExtreme)){reason="invalid directional geometry";return false;}
   if(originBar>=nbar){reason="confirmed origin is not before expansion";return false;}
   if(stage!=IMPULSE_CONSUMED){reason="confirmed origin and directional expansion eligible";return true;}
   if(originBar<=consumedBar){reason="confirmed origin is not newer than consumed parent";return false;}
@@ -466,8 +502,13 @@ void BeginQualification(const long firstSeed);
 bool QualificationExpired(const long bar);
 void AbandonQualification(const char *reason);
 bool TryQualifyImpulse(const long bar);
-void StartImpulseAt(const int seedDirection,const double seedExtreme,const long endpointBar,const TDateTime endpointTime,const double origin,const long originBar,const TDateTime originTime,const double atr,const TDateTime seedTime,const char *eligibilityReason)
+bool StartImpulseAt(const int seedDirection,const double seedExtreme,const long endpointBar,const TDateTime endpointTime,const double origin,const long originBar,const TDateTime originTime,const double atr,const TDateTime seedTime,const char *eligibilityReason)
 {
+  // Validate before touching ANY parent, qualification, touch or candidate state.
+  if(!ValidImpulseGeometry(seedDirection,origin,seedExtreme))
+  {
+    char text[384];_snprintf_s(text,sizeof(text),_TRUNCATE,"RBP parent rejected dir=%d reason=invalid directional geometry originBar=%ld origin=%.5f endpointBar=%ld extreme=%.5f signedDisplacement=%.5f",seedDirection,originBar,origin,endpointBar,seedExtreme,seedDirection*(seedExtreme-origin));EmitDiagnostic(text);return false;
+  }
   ResetTouch();ResetQualification();
   dir=seedDirection;stage=IMPULSE_PARENT;activeImpulseSetup=true;setupATR=atr;impulseOrigin=origin;impulseOriginBar=originBar;impulseOriginTime=originTime;
   setupExtreme=seedExtreme;impulseEndpointBar=endpointBar;impulseEndpointTime=endpointTime;impulseSeedTime=seedTime;breakout=extension=endpointBar;
@@ -477,13 +518,15 @@ void StartImpulseAt(const int seedDirection,const double seedExtreme,const long 
   EmitDiagnostic(text);
   ResetProvisionalCandidates();
   if(QualifiedMode())BeginQualification(endpointBar);
+  return true;
 }
-void StartImpulse(const int seedDirection,const double seedExtreme,const double origin,const long originBar,const TDateTime originTime,const char *eligibilityReason)
+bool StartImpulse(const int seedDirection,const double seedExtreme,const double origin,const long originBar,const TDateTime originTime,const char *eligibilityReason)
 {
-  StartImpulseAt(seedDirection,seedExtreme,nbar,Time(1),origin,originBar,originTime,rmaATR,Time(1),eligibilityReason);
-  if(StructureMode()&&QualificationExpired(nbar)){AbandonQualification("origin qualification deadline exceeded at seed");return;}
+  if(!StartImpulseAt(seedDirection,seedExtreme,nbar,Time(1),origin,originBar,originTime,rmaATR,Time(1),eligibilityReason))return false;
+  if(StructureMode()&&QualificationExpired(nbar)){AbandonQualification("origin qualification deadline exceeded at seed");return true;}
   if(QualifiedMode())TryQualifyImpulse(nbar);
   if(FirstTouchMode()) ArmFirstTouch("armed");
+  return true;
 }
 void ObserveProvisional(const int seedDirection,const double seedExtreme,const int classification,const double bodyATR,const double rangeATR,const bool busy,const char *reason)
 {
@@ -492,7 +535,8 @@ void ObserveProvisional(const int seedDirection,const double seedExtreme,const i
   {
     candidate.active=true;candidate.direction=seedDirection;candidate.observedWhileBusy=busy;candidate.normalSeedSeen=classification==1;candidate.oversizedSeen=classification==2;
     candidate.seedATR=rmaATR;candidate.firstExtreme=candidate.extreme=seedExtreme;candidate.firstBar=candidate.extremeBar=nbar;candidate.firstTime=candidate.extremeTime=Time(1);
-    LogSeedDecision(seedDirection,"retained provisionally",classification==2?"body cap prevents normal seed; cumulative parent recovery retained":reason,bodyATR,rangeATR,busy);
+    LogSeedDecision(seedDirection,"retained provisionally",reason,bodyATR,rangeATR,busy);
+    if(classification==2)LogSeedDecision(seedDirection,"body classification","body cap prevents normal seed; cumulative parent recovery retained",bodyATR,rangeATR,busy);
     if(busy){char text[256];sprintf(text,"RBP candidate observed while position open dir=%s bar=%ld; detection continues without entry",DirectionName(seedDirection),nbar);EmitDiagnostic(text);}
     return;
   }
@@ -621,29 +665,30 @@ void RecoverProvisionalChronologically(const long replayStartBar)
 }
 bool TryPromoteCandidate(ProvisionalImpulseCandidate &candidate)
 {
-  if(!candidate.active||stage==IMPULSE_PARENT||stage==IMPULSE_PULLBACK||stage==IMPULSE_ARMED) return false;
+  if(!candidate.active)return false;
+  if(stage==IMPULSE_PARENT||stage==IMPULSE_PULLBACK||stage==IMPULSE_ARMED)
+  {LogPromotionCurrent(candidate,"pending","active parent owns setup; retain/wait");return false;}
   if(nbar-candidate.firstBar>ImpulseMaximumPullbackBars)
   {
-    char text[256];sprintf(text,"RBP provisional abandoned dir=%s reason=origin recovery window expired firstBar=%ld currentBar=%ld",DirectionName(candidate.direction),candidate.firstBar,nbar);EmitDiagnostic(text);ResetCandidate(candidate);return false;
+    LogPromotionCurrent(candidate,"retired","origin recovery window expired");ResetCandidate(candidate);return false;
   }
   double origin=0;long originBar=-1;TDateTime originTime=0;const char *reason="";
-  if(!CanSeedImpulse(candidate.direction,candidate.extreme,origin,originBar,originTime,reason)) return false;
-  if(originBar>candidate.firstBar) return false;
+  if(!CanSeedImpulse(candidate.direction,candidate.extreme,origin,originBar,originTime,reason))
+  {LogPromotionCurrent(candidate,"pending",reason);return false;}
+  if(originBar>candidate.firstBar)
+  {LogPromotionCurrent(candidate,"pending","latest confirmed origin after candidate first seed; retain/wait for current seed retirement");return false;}
   if(StructureMode()&&candidate.firstBar-originBar>StructureImpulseMaximumBars)
   {
-    EmitDiagnostic("RBP structure abandon reason=provisional first seed beyond origin qualification deadline");ResetCandidate(candidate);return false;
+    LogPromotionCurrent(candidate,"retired","provisional first seed beyond origin qualification deadline");ResetCandidate(candidate);return false;
   }
   if(candidate.oversizedSeen&&!candidate.normalSeedSeen&&!candidate.continuationSeen)
-  {
-    if(!candidate.oversizedWaitLogged)
-    {
-      char text[384];sprintf(text,"RBP oversized candidate waiting dir=%s firstBar=%ld reason=no later normal seed or same-direction endpoint advancement",DirectionName(candidate.direction),candidate.firstBar);EmitDiagnostic(text);candidate.oversizedWaitLogged=true;
-    }
-    return false;
-  }
-  double displacement=candidate.direction==1?candidate.extreme-origin:origin-candidate.extreme;
+  {LogPromotionCurrent(candidate,"pending","no later normal seed or same-direction endpoint advancement; retain/wait");return false;}
+  double displacement=candidate.direction*(candidate.extreme-origin);
   double requiredATR=Max(ImpulseMinimumBodyATR,ImpulseMinimumRangeATR);
-  if(candidate.seedATR<=0||displacement<candidate.seedATR*requiredATR) return false;
+  if(!_finite(candidate.seedATR)||candidate.seedATR<=0)
+  {LogPromotionCurrent(candidate,"rejected","invalid seed ATR; retain/wait");return false;}
+  if(displacement<candidate.seedATR*requiredATR)
+  {LogPromotionCurrent(candidate,"pending","insufficient cumulative displacement; retain/wait");return false;}
   bool observedBusy=candidate.observedWhileBusy,oversized=candidate.oversizedSeen,laterNormal=candidate.normalSeedSeen;TDateTime seedTime=candidate.firstTime;long firstBar=candidate.firstBar;
   double initialEndpoint=candidate.direction==1?ClosedHigh(originBar):ClosedLow(originBar);long initialEndpointBar=originBar;
   for(long bar=originBar+1;bar<=firstBar;bar++)
@@ -653,7 +698,10 @@ bool TryPromoteCandidate(ProvisionalImpulseCandidate &candidate)
   }
   char originText[32],text[512];FormatTime(originTime,originText);
   sprintf(text,"RBP confirmed origin available dir=%s reason=%s origin=%s@%.5f provisionalFirstBar=%ld cumulative=%.5f/%.2fATR oversizedIncluded=%s evidence=%s",DirectionName(candidate.direction),reason,originText,origin,firstBar,displacement,displacement/candidate.seedATR,oversized?"yes":"no",oversized?(laterNormal?"later normal same-direction seed":"later same-direction endpoint advancement"):"normal provisional seed");EmitDiagnostic(text);
-  StartImpulseAt(candidate.direction,initialEndpoint,initialEndpointBar,ClosedTime(initialEndpointBar),origin,originBar,originTime,candidate.seedATR,seedTime,reason);
+  if(!ValidImpulseGeometry(candidate.direction,origin,initialEndpoint))
+  {LogPromotionCurrent(candidate,"rejected","invalid directional geometry at recovered initial endpoint; retain/wait");return false;}
+  LogPromotionCurrent(candidate,"promoted","admission eligible; chronological recovery, future touch only");
+  if(!StartImpulseAt(candidate.direction,initialEndpoint,initialEndpointBar,ClosedTime(initialEndpointBar),origin,originBar,originTime,candidate.seedATR,seedTime,reason))return false;
   if(QualifiedMode())qualifiedFirstSeedBar=firstBar;
   if(FirstTouchMode()) RecoverFirstTouchChronologically(firstBar);
   else RecoverProvisionalChronologically(firstBar+1);
@@ -1110,10 +1158,12 @@ int RetireCandidateBeforeCurrentSeed(const int direction,const bool originAvaila
   ProvisionalImpulseCandidate &candidate=CandidateFor(direction);if(!candidate.active)return 0;
   if(nbar-candidate.firstBar>ImpulseMaximumPullbackBars)
   {
+    LogPromotionCurrent(candidate,"retired","origin recovery window expired");
     char text[384];sprintf(text,"RBP candidate retired dir=%s reason=recovery window expired oldFirstBar=%ld currentBar=%ld",DirectionName(direction),candidate.firstBar,nbar);EmitDiagnostic(text);ResetCandidate(candidate);return 1;
   }
   if(originAvailable&&originBar>candidate.firstBar)
   {
+    LogPromotionCurrent(candidate,"retired","newer confirmed origin structurally incompatible");
     char text[384];sprintf(text,"RBP candidate retired dir=%s reason=newer confirmed origin structurally incompatible oldFirstBar=%ld newOriginBar=%ld currentBar=%ld",DirectionName(direction),candidate.firstBar,originBar,nbar);EmitDiagnostic(text);ResetCandidate(candidate);return 2;
   }
   return 0;
@@ -1125,7 +1175,7 @@ void ProcessImpulseSetup(const double o,const double h,const double l,const doub
   if(QualifiedMode()&&activeImpulseSetup&&!impulseQualified&&stage!=IMPULSE_CONSUMED)
   {
     double origin=0;long bar=-1;TDateTime time=0;
-    bool newer=candleDirection!=0&&seedClass==1&&LatestImpulseOrigin(candleDirection,origin,bar,time)&&bar>qualifiedFirstSeedBar;
+    bool newer=candleDirection!=0&&seedClass==1&&LatestImpulseOrigin(candleDirection,origin,bar,time)&&ValidImpulseGeometry(candleDirection,origin,candleDirection==1?h:l)&&bar<nbar&&bar>qualifiedFirstSeedBar;
     if(QualificationExpired(nbar)||ImpulseInvalidated(c)||newer)
       AbandonQualification(newer?"new confirmed origin replaces incompatible pending parent":"pending expired or invalidated before current seed");
   }
@@ -1149,7 +1199,7 @@ void ProcessImpulseSetup(const double o,const double h,const double l,const doub
         LogSeedDecision(candleDirection,"accepted",reason,bodyATR,rangeATR,busy);
         if(retirement!=0){char text[384];sprintf(text,"RBP current normal seed preserved after retirement dir=%s currentBar=%ld decision=fresh parent accepted",DirectionName(candleDirection),nbar);EmitDiagnostic(text);}
         if(busy){char text[256];sprintf(text,"RBP candidate observed while position open dir=%s bar=%ld; parent tracking active, entry remains blocked",DirectionName(candleDirection),nbar);EmitDiagnostic(text);}
-        StartImpulse(candleDirection,seedExtreme,origin,originBar,originTime,reason);return;
+        if(StartImpulse(candleDirection,seedExtreme,origin,originBar,originTime,reason))return;
       }
       ObserveProvisional(candleDirection,seedExtreme,seedClass,bodyATR,rangeATR,busy,canSeed?"normal seed retained for cumulative parent selection":reason);
       if(retirement!=0&&seedClass==2)

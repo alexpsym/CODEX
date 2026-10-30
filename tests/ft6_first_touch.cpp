@@ -749,7 +749,8 @@ void StructureImpulseQuality()
     Check(impulseQualified&&structureEfficiency==measured&&structureDuration==duration,"qualification metrics latch while endpoints advance");
     StructurePath({1.20,1.205,1.201,1.207},d);RecoverFirstTouchChronologically(qualifiedFirstSeedBar);
     Check(!impulseQualified&&!touchActive&&structureEfficiency<0.70&&ImpulseDisplacement()>=0.006,"overlapping close path fails despite sufficient extreme displacement");
-    StructurePath({1.20,1.198,1.197},d);Check(!TryQualifyImpulse(nbar)&&structureEfficiency<0,"signed numerator cannot turn wrong-direction movement into efficiency");
+    // A valid initial directional seed precedes the negative signed close path.
+    StructurePath({1.20,1.2001,1.198,1.197},d);Check(!TryQualifyImpulse(nbar)&&structureEfficiency<0,"signed numerator cannot turn wrong-direction movement into efficiency");
   }
   // Exact binary-representable efficiency boundary: net .125 / path .25 = .5.
   StructurePath({1.25,1.28125,1.21875,1.375},1,0.5);QualifiedImpulseMinimumDisplacementATR=50;RecoverFirstTouchChronologically(qualifiedFirstSeedBar);
@@ -845,11 +846,137 @@ void StructureFirstTouch()
   Check(impulseQualified&&qualifyingBar==nbar&&structureDuration==4,"later efficient endpoint cannot make earlier overlapping replay bar qualify");
 }
 
+// Illustrative prices only: synthetic production admission, no historical replay.
+void InvalidOppositeAttempt(int d)
+{
+  Fresh();rmaATR=0.002;ImpulseMaximumBodyATR=1.5;
+  ObserveProvisional(d,QPrice(d,1.086),2,1.76,2.21,false,"confirmed directional origin unavailable");
+  nbar++;ObserveProvisionalContinuation(d,QPrice(d,1.087),false);nbar++;
+  if(d==1){haveLatestSwingHigh=true;latestSwingHigh=1.08106;latestSwingHighBar=nbar-1;latestSwingHighTime=Time(2);}
+  else{haveLatestSwingLow=true;latestSwingLow=QPrice(d,1.08106);latestSwingLowBar=nbar-1;latestSwingLowTime=Time(2);}
+  ProcessImpulseSetup(QPrice(d,1.0853),QPrice(d,d==1?1.0855:1.08253),QPrice(d,d==1?1.08253:1.0855),QPrice(d,1.0828),QPrice(d,1.0853));
+  auto &candidate=CandidateFor(d);
+  Check(candidate.active&&candidate.firstBar==10&&Near(candidate.seedATR,0.002)&&Near(candidate.firstExtreme,QPrice(d,1.086))&&Near(candidate.extreme,QPrice(d,1.087))&&candidate.oversizedSeen&&candidate.continuationSeen&&!candidate.normalSeedSeen,"invalid opposite seed preserves independent candidate and all evidence");
+  Check(!activeImpulseSetup&&attempts==0,"invalid opposite geometry cannot create a parent/order");
+}
+
+void SetOrigin(int d,double price,long bar)
+{
+  if(d==1){haveLatestSwingLow=true;latestSwingLow=price;latestSwingLowBar=bar;latestSwingLowTime=ClosedTime(bar);}
+  else{haveLatestSwingHigh=true;latestSwingHigh=price;latestSwingHighBar=bar;latestSwingHighTime=ClosedTime(bar);}
+}
+void CandidateState(int d=1)
+{
+  Fresh();rmaATR=0.002;ImpulseMaximumBodyATR=1.5;
+  ObserveProvisional(d,QPrice(d,1.205),2,1.76,2.21,false,"confirmed directional origin unavailable");
+  SetOrigin(d,1.20,nbar-1);
+}
+int PromotionCount(){int count=0;for(auto &line:logs)if(line.find("RBP promotion ")==0)count++;return count;}
+void CandidateGeometryPreservation()
+{
+  for(int d:{1,-1})InvalidOppositeAttempt(d);
+  for(int d:{1,-1})for(int mode:{0,1,2,3})for(double extreme:{QPrice(d,1.199),1.20,HUGE_VAL,-HUGE_VAL,nan("")})
+  {
+    Fresh();ImpulseEntryMode=mode;SetOrigin(d,1.20,nbar-1);
+    double p=0;long b=-1;TDateTime t=0;const char *reason="";
+    Check(!CanSeedImpulse(d,extreme,p,b,t,reason)&&strcmp(reason,"invalid directional geometry")==0,"normal admission rejects negative/equal/nonfinite geometry in every impulse mode");
+    Parent(d); // Existing live touch must survive a defensive boundary rejection.
+    ObserveProvisional(-d,QPrice(-d,1.205),2,1.76,2.21,false,"pending");
+    auto saved=CandidateFor(-d);double atr=setupATR,endpoint=setupExtreme,origin=impulseOrigin,level=touchLevel;long first=qualifiedFirstSeedBar;int oldStage=stage;bool armed=touchActive,qualified=impulseQualified;
+    Check(!StartImpulseAt(d,extreme,nbar,Time(1),1.20,nbar-1,Time(2),rmaATR,Time(1),"invalid replacement"),"defensive boundary propagates failure");
+    Check(!StartImpulse(d,extreme,1.20,nbar-1,Time(2),"invalid caller"),"wrapper propagates failure without arming or qualifying stale parent");
+    Check(stage==oldStage&&setupATR==atr&&setupExtreme==endpoint&&impulseOrigin==origin&&touchActive==armed&&touchLevel==level&&qualifiedFirstSeedBar==first&&impulseQualified==qualified&&memcmp(&saved,&CandidateFor(-d),sizeof(saved))==0,"invalid boundary leaves parent, touch, qualification and independent candidate unchanged");
+    Check(attempts==0,"invalid boundary never orders");
+  }
+  for(int d:{1,-1})for(double origin:{0.0,-1.0,HUGE_VAL,nan("")})
+  {
+    Fresh();Check(!StartImpulseAt(d,QPrice(d,1.205),nbar,Time(1),origin,1,Time(10),rmaATR,Time(1),"bad origin")&&!activeImpulseSetup,"nonpositive/nonfinite origin rejected without parent mutation");
+  }
+  Fresh();Check(!StartImpulseAt(0,1.205,nbar,Time(1),1.20,1,Time(10),rmaATR,Time(1),"bad direction")&&!activeImpulseSetup,"invalid direction rejected");
+  for(int d:{1,-1})
+  {
+    // Exercise ProcessImpulseSetup's newer-origin preemption with an actual pending parent.
+    QualifiedFresh(d);long first=qualifiedFirstSeedBar,originBar=impulseOriginBar;double endpoint=setupExtreme;
+    nbar+=2;SetOrigin(-d,QPrice(d,1.199),nbar-1);
+    ProcessImpulseSetup(QPrice(d,1.2028),QPrice(d,d==1?1.203:1.200),QPrice(d,d==1?1.200:1.203),QPrice(d,1.2003),QPrice(d,1.203));
+    Check(activeImpulseSetup&&dir==d&&qualifiedFirstSeedBar==first&&impulseOriginBar==originBar&&setupExtreme==endpoint&&!impulseQualified&&attempts==0,"invalid newer opposite origin cannot preempt pending parent");
+    CandidateState(d);auto &candidate=CandidateFor(d);candidate.normalSeedSeen=true;candidate.extreme=QPrice(d,1.199);
+    Check(!TryPromoteCandidate(candidate)&&candidate.active&&!activeImpulseSetup&&qualifiedFirstSeedBar==-1,"invalid provisional geometry never writes qualification metadata or recovers stale parent");
+    // A cumulative endpoint may be valid while the initial recovered endpoint is invalid.
+    CandidateState(d);candidate.normalSeedSeen=true;candidate.extreme=QPrice(d,1.21);
+    for(int i=1;i<4;i++){series[i].h=QPrice(d,d==1?1.199:1.198);series[i].l=QPrice(d,d==1?1.198:1.199);}
+    Check(!TryPromoteCandidate(candidate)&&!activeImpulseSetup&&candidate.active&&Logged("invalid directional geometry at recovered initial endpoint"),"reconstructed endpoint admission rejection is propagated without partial promotion");
+    CandidateState(d);nbar+=31;Check(!TryPromoteCandidate(CandidateFor(d))&&!CandidateFor(d).active,"real expiry retires candidate");
+    CandidateState(d);SetOrigin(d,1.20,nbar);nbar++;
+    Check(RetireCandidateBeforeCurrentSeed(d,true,nbar-1)==0,"origin at first seed stays compatible");
+    SetOrigin(d,1.20,nbar);nbar++;
+    Check(RetireCandidateBeforeCurrentSeed(d,true,nbar-1)==2&&!CandidateFor(d).active,"genuinely incompatible newer origin retires candidate");
+  }
+}
+// A retained oversized seed, sub-minimum continuation, rejected opposite attempt,
+// then newly confirmed valid origin reach the existing mode-3 qualification path.
+void OversizedFuturePath(int d)
+{
+  Fresh();SettingsPreset=8;ApplySettingsPreset();EnableWeekendBlackout=false;nbar=40;rmaATR=0.002;RegimeLookback=1;
+  StructureContextSeries(d,ClosedTime(38),1.2006,1.2008);
+  for(int i=3;i<30;i++){series[i].h=1.2002;series[i].l=1.1998;series[i].c=1.20;}
+  nbar=39; // First oversized seed observed before a causal origin is available.
+  ObserveProvisional(d,QPrice(d,1.204),2,1.76,2.21,false,"confirmed directional origin unavailable");
+  nbar=40;ObserveProvisionalContinuation(d,QPrice(d,1.208),false);
+  series[3].c=1.20;series[2]={QPrice(d,1.2005),QPrice(d,d==1?1.204:1.200),QPrice(d,d==1?1.200:1.204),QPrice(d,1.203),series[2].t};
+  series[1]={QPrice(d,1.207),QPrice(d,d==1?1.208:1.2068),QPrice(d,d==1?1.2068:1.208),QPrice(d,1.2075),series[1].t};
+  Remember(39,QPrice(d,1.204),d,QPrice(d,1.2038));Remember(40,QPrice(d,1.208),d,QPrice(d,1.2078));
+  SetOrigin(-d,QPrice(d,1.19),38);
+  ProcessImpulseSetup(QPrice(d,1.206),QPrice(d,d==1?1.2062:1.203),QPrice(d,d==1?1.203:1.2062),QPrice(d,1.2035),QPrice(d,1.206));
+  Check(CandidateFor(d).active&&CandidateFor(d).continuationSeen&&!CandidateFor(d).normalSeedSeen&&attempts==0,"invalid opposite attempt preserves oversized-only continuation evidence");
+  SetOrigin(d,1.20,38);bidQuote=QPrice(d,1.2075);askQuote=bidQuote+0.0002;
+  // Rejecting the incoming short must still evaluate the other candidate now eligible.
+  ProcessImpulseSetup(QPrice(d,1.206),QPrice(d,d==1?1.2062:1.203),QPrice(d,d==1?1.203:1.2062),QPrice(d,1.2035),QPrice(d,1.206));
+  Check(impulseQualified&&touchActive&&dir==d&&qualifiedFirstSeedBar==39&&Near(setupATR,0.002)&&structureEfficiency>=0.70&&attempts==0,"oversized-only continuation promotes and qualifies without normal seed or arming order");
+  Check(!provisionalLong.active&&!provisionalShort.active&&Logged("RBP promotion promoted")&&Logged("later same-direction endpoint advancement"),"accepted parent retires candidates and exposes successful evidence path");
+  Touch(d);Check(attempts==1&&stage==IMPULSE_CONSUMED,"only prospective future first touch executes");Touch(d);Check(attempts==1,"consumed parent never retries");
+  double p=0;long b=-1;TDateTime t=0;const char *reason="";
+  Check(!CanSeedImpulse(d,QPrice(d,1.22),p,b,t,reason)&&strstr(reason,"not newer than consumed"),"consumed fresh-origin requirement remains effective");
+}
+void PromotionGateDiagnostics()
+{
+  Fresh();int count=PromotionCount();TryPromoteCandidate(provisionalLong);Check(PromotionCount()==count,"inactive candidates emit nothing");
+  CandidateState();haveLatestSwingLow=false;Check(!TryPromoteCandidate(provisionalLong)&&Logged("reason=confirmed directional origin unavailable")&&Logged("originAvailable=no"),"missing origin retains actual reason");
+  count=PromotionCount();nbar++;TryPromoteCandidate(provisionalLong);TryPromoteCandidate(provisionalLong);Check(PromotionCount()==count,"identical attempts across bars deduplicate");
+  SetOrigin(1,1.20,nbar);TryPromoteCandidate(provisionalLong);Check(Logged("confirmed origin is not before expansion")&&PromotionCount()==count+1,"changed origin and denial are visible");
+  CandidateState();stage=IMPULSE_CONSUMED;consumedDirection=-1;consumedBar=9;consumedExtreme=1.19;
+  TryPromoteCandidate(provisionalLong);Check(Logged("reason=confirmed origin is not newer than consumed parent")&&Logged("consumedDir=-1 consumedBar=9 consumedExtreme=1.19000"),"consumed origin block remains blocked and references consumption");
+  count=PromotionCount();consumedExtreme=1.18;TryPromoteCandidate(provisionalLong);Check(PromotionCount()==count+1,"changed consumed reference visible with same reason");
+  CandidateState();stage=IMPULSE_CONSUMED;consumedDirection=1;consumedBar=8;consumedExtreme=1.21;
+  TryPromoteCandidate(provisionalLong);Check(Logged("reason=same-direction expansion did not exceed consumed parent")&&provisionalLong.active&&!touchActive,"consumed extreme block retains legitimate failure");
+  CandidateState();SetOrigin(1,1.206,9);TryPromoteCandidate(provisionalLong);Check(Logged("invalid directional geometry")&&Logged("signedDisplacement=-0.00100")&&provisionalLong.active,"invalid geometry reported with signed values");
+  CandidateState();provisionalLong.firstBar=8;TryPromoteCandidate(provisionalLong);Check(Logged("latest confirmed origin after candidate first seed")&&provisionalLong.active,"incompatible origin waits until genuine current-seed retirement");
+  CandidateState();stage=IMPULSE_PARENT;dir=-1;impulseOriginBar=7;impulseOrigin=1.21;qualifiedFirstSeedBar=8;setupExtreme=1.19;
+  TryPromoteCandidate(provisionalLong);Check(Logged("active parent owns setup")&&Logged("ownerDir=-1 ownerStage=4 ownerOriginBar=7")&&provisionalLong.active,"owner retains candidate and identifies reference");
+  count=PromotionCount();TryPromoteCandidate(provisionalLong);Check(PromotionCount()==count,"owner denial deduplicates");setupExtreme=1.18;TryPromoteCandidate(provisionalLong);Check(PromotionCount()==count+1,"changed owner reference visible");
+  CandidateState();nbar+=31;TryPromoteCandidate(provisionalLong);Check(Logged("RBP promotion retired")&&Logged("origin recovery window expired")&&!provisionalLong.active&&provisionalLong.lastPromotion[0]==0,"expiry is actual retirement and clears diagnostic state");
+  CandidateState();SettingsPreset=8;ApplySettingsPreset();nbar=30;provisionalLong.firstBar=20;SetOrigin(1,1.20,7);
+  TryPromoteCandidate(provisionalLong);Check(Logged("RBP promotion retired")&&Logged("first seed beyond origin qualification deadline")&&!provisionalLong.active,"mode-3 deadline is retirement");
+  CandidateState();TryPromoteCandidate(provisionalLong);Check(Logged("no later normal seed or same-direction endpoint advancement")&&Logged("normal=no oversized=yes continuation=no")&&provisionalLong.active,"oversized evidence wait separate from eligibility");
+  count=PromotionCount();TryPromoteCandidate(provisionalLong);Check(PromotionCount()==count,"evidence wait deduplicates");
+  for(double atr:{0.0,-0.002,HUGE_VAL,nan("")}){CandidateState();provisionalLong.normalSeedSeen=true;provisionalLong.seedATR=atr;TryPromoteCandidate(provisionalLong);Check(Logged("RBP promotion rejected")&&Logged("invalid seed ATR")&&provisionalLong.active&&!activeImpulseSetup,"invalid seed ATR rejected with retained candidate");}
+  CandidateState();provisionalLong.normalSeedSeen=true;provisionalLong.extreme=1.201;TryPromoteCandidate(provisionalLong);
+  Check(Logged("insufficient cumulative displacement")&&Logged("signedDisplacement=0.00100 requiredDisplacement=0.00250")&&Logged("firstBar=10 firstTime=")&&Logged("seedATR=0.00200")&&Logged("originBar=9 originTime="),"displacement failure identifies candidate, times, origin and requirement");
+  count=PromotionCount();provisionalLong.extreme=1.2011;TryPromoteCandidate(provisionalLong);Check(PromotionCount()==count+1,"changed endpoint visible despite same failure");
+  ShowDiagnostics=false;auto saved=provisionalLong;Check(!TryPromoteCandidate(provisionalLong)&&memcmp(&saved,&provisionalLong,sizeof(saved))==0&&!activeImpulseSetup&&attempts==0,"disabled diagnostics do not mutate eligibility or decisions");
+  ShowDiagnostics=true;ResetProvisionalCandidates();ObserveProvisional(1,1.2011,1,1.1,1.3,false,"pending");count=PromotionCount();TryPromoteCandidate(provisionalLong);Check(PromotionCount()==count+1,"replacement resets event deduplication");
+  ResetStrategy();Check(provisionalLong.lastPromotion[0]==0&&provisionalShort.lastPromotion[0]==0,"strategy reset clears promotion identities");
+  for(int d:{1,-1})OversizedFuturePath(d);
+}
+
+
 int main(int argc,char **argv)
 {
   if(argc!=2){fprintf(stderr,"One named case required\n");return 2;}Hooks();InitStrategy();ReplaceStr(Currency,(PChar)"EURUSD");
   std::string name=argv[1];
-  if(name=="structure_context_gate")StructureContextGate();
+  if(name=="candidate_geometry_preservation")CandidateGeometryPreservation();
+  else if(name=="promotion_gate_diagnostics")PromotionGateDiagnostics();
+  else if(name=="structure_context_gate")StructureContextGate();
   else if(name=="structure_impulse_quality")StructureImpulseQuality();
   else if(name=="structure_first_touch")StructureFirstTouch();
   else if(name=="cold_start_context")ColdStartContext();
