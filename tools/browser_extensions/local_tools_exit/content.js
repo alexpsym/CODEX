@@ -17,7 +17,10 @@
   let pageClosed = false;
   const MAX_PROBE_ATTEMPTS = 4;
   const RETRY_DELAY_MS = 900;
-  const setStatus = (message) => { status.textContent = message; };
+  const setStatus = (message) => {
+    status.textContent = message;
+    status.hidden = !message;
+  };
 
   const errorMessage = (error) => String(error && error.message ? error.message : error || "Check failed.");
   const updateReady = () => {
@@ -25,7 +28,7 @@
     button.disabled = false;
     button.textContent = "Exit local tools";
     button.title = "Request local worker shutdown and close Local Trading Tools tabs in this browser profile.";
-    setStatus("Exit helper and local worker verified.");
+    setStatus("");
   };
   const runProbe = async () => {
     if (probing || pageClosed || ready) return;

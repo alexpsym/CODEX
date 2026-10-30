@@ -61,13 +61,48 @@ def test_local_html_pages_receive_exit_control_only_in_local_profile(monkeypatch
 
 
 def test_dashboard_exit_control_is_single_and_not_embedded(monkeypatch: pytest.MonkeyPatch) -> None:
-    client = TestClient(master_service.app)
+    # Render only these offline pages and run the real injection middleware;
+    # avoid the Windows TestClient portal and application worker lifecycle.
+    import asyncio
+    from types import SimpleNamespace
+    from urllib.parse import urlsplit
+    from starlette.requests import Request
+    from starlette.responses import StreamingResponse
+
+    class PageClient:
+        def get(self, url):
+            async def render():
+                parts = urlsplit(url)
+                request = Request({"type": "http", "method": "GET", "path": parts.path,
+                                   "query_string": parts.query.encode(), "headers": [],
+                                   "scheme": "http", "server": ("127.0.0.1", 8000)})
+
+                async def call_next(_request):
+                    response = await (master_service.home_page() if parts.path == "/"
+                                      else master_service.merged_open_orders_page())
+                    async def body():
+                        yield response.body
+                    return StreamingResponse(body(), status_code=response.status_code,
+                                             headers=dict(response.headers))
+
+                response = await master_service.inject_local_exit_control(request, call_next)
+                body = (response.body if hasattr(response, "body") else
+                        b"".join([chunk async for chunk in response.body_iterator]))
+                return SimpleNamespace(status_code=response.status_code, text=body.decode())
+            return asyncio.run(render())
+
+    client = PageClient()
     monkeypatch.setattr(master_service, "APP_PROFILE", "local")
     monkeypatch.setattr(master_service, "_resolve_app_profile", lambda: "local")
 
     dashboard = client.get("/")
     assert dashboard.status_code == 200
     assert dashboard.text.count('id="local-exit-control"') == 1
+    assert dashboard.text.index('class="home"') < dashboard.text.index('id="local-exit-control"') < dashboard.text.index('class="layout')
+    assert re.search(r'id="exit-button-slot"[^>]*>\s*</div>', dashboard.text)
+    control_css = re.search(r'#local-exit-control\{([^}]+)', dashboard.text).group(1)
+    assert not any(prop in control_css for prop in ("position:", "z-index:", "top:", "right:"))
+    assert 'role="status"' in dashboard.text
 
     embedded_orders = client.get("/merged/open-orders?_dashboard=1&_dash_ts=123")
     assert embedded_orders.status_code == 200
@@ -76,6 +111,7 @@ def test_dashboard_exit_control_is_single_and_not_embedded(monkeypatch: pytest.M
     standalone_orders = client.get("/merged/open-orders")
     assert standalone_orders.status_code == 200
     assert standalone_orders.text.count('id="local-exit-control"') == 1
+    assert re.search(r'<body[^>]*>\s*<style id="local-exit-control-style">', standalone_orders.text)
 
     monkeypatch.setattr(master_service, "APP_PROFILE", "render")
     monkeypatch.setattr(master_service, "_resolve_app_profile", lambda: "render")

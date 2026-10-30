@@ -1,3 +1,18 @@
+JOB 14 - IMPLEMENTED; MANUAL ACCEPTANCE PENDING - 30 October 2026
+Job 13 user acceptance PASSED. Older pending/failed Job 13 entries below are historical and superseded.
+
+Shared Exit local tools control now occupies a compact normal-flow row within the dashboard home layout above existing panels, outside the refresh-cleared exit-button-slot. Other eligible standalone local HTML pages receive it immediately after the body opening. Removed fixed positioning, offsets and z-index; preserved IDs and accessible status role. Ready state enables the red button and clears/hides status, removing the obsolete verification sentence and empty status box. Checking, retries/recheck, unavailable-helper, progress and failure messages remain visible. Existing local/hosted/embedded restrictions, trusted-click requirement, duplicate protection and shutdown-before-tab-removal behavior unchanged. Independent expiry worker and unrelated tabs/processes unchanged.
+
+Changed: render/master_service.py; tools/browser_extensions/local_tools_exit/content.js; tests/test_master_service_local_exit.py; tests/test_local_tools_exit_js_behavior.py; summary/CODEX_SUMMARY_latest.txt. No other tracked edits for this job.
+Verification: one invocation, all three permitted nodes PASSED; pytest 18.52 seconds, parent elapsed 20.582 seconds, exit 0. Six existing FastAPI lifecycle deprecation warnings. Nodes: test_dashboard_exit_control_is_single_and_not_embedded; test_dashboard_probe_recovers_after_timeout_without_duplicate_exit; test_exit_failure_and_invalid_sender_do_not_close_tabs_or_claim_success. Offline page/middleware fixture avoids Windows TestClient lifecycle; shutdown/tab APIs mocked. Untracked evidence: .job14_20261030_01/pytest.log and result.json. No live browser control, restarts, shutdowns, broker/workbook/database operations or Job 13 retests.
+
+Delivery: initial master HEAD and remote f317202ff7a31e62d48ebac6f6d4be228fbf99dd; empty initial index; unrelated changes preserved. Scoped five-file commit and protected normal push, final SHA/remote agreement in delivery response. PATCH_DESKTOP_PUSH.bat excluded by explicit instruction. Initial sandbox launcher failed before execution on locked F:; subsequent commands used normal per-command approval. Initial summary prepend failed on default encoding before writing; corrected using byte-preserving prepend.
+
+Manual checks: restart LTT normally, reload existing Local Tools Exit extension through its extension card, refresh local page. Confirm red button in heading/top area, obsolete sentence absent and no floating overlap when scrolling. When ready to close LTT, click once and confirm normal shutdown/tab closing while unrelated tabs and terminals remain. No journal resync, new trade or repeat expiry-order test.
+Queue: Jobs 1-4 and 6-13 accepted/completed; Job 5 live observation pending; Job 15 queued. ETH fee/target CANCELLED; hosted Render DEFERRED.
+
+--- Historical summaries; Job 13 acceptance PASSED supersedes older entries ---
+
 JOB 13 - HISTORICAL REPAIR VERIFIED; SCOPED GIT DELIVERY - 30 October 2026
 
 Production repair: 551 additional corrections INSTALLED and independently verified. Wrapper reporting: exit 1 AFTER commit (string/list verification-path defect); subsequent independent read-only verification: exit 0. Neither exit is relabeled. This delivery-only continuation performs NO repair, journal/database mutation, backup, tests, acceptance or no-op rerun.

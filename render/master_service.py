@@ -14540,7 +14540,7 @@ app = FastAPI(title="TradingTools", version="1.0")
 
 def _local_exit_control_html() -> str:
     """Shared local-only control for every locally served HTML tool page."""
-    return '''<style id="local-exit-control-style">#local-exit-control{position:fixed;z-index:2147483647;top:10px;right:12px;background:#111827;color:#fff;border:1px solid #7f1d1d;border-radius:6px;padding:6px 8px;font:12px system-ui;max-width:300px}#local-exit-control button{background:#7f1d1d;color:#fff;border:1px solid #fecaca;border-radius:6px;padding:7px 12px;font:600 13px system-ui;cursor:pointer}#local-exit-control button:disabled{opacity:.65;cursor:default}#local-exit-control-status{display:block;margin-top:4px;line-height:1.35}</style><div id="local-exit-control"><button type="button" disabled>Exit local tools</button><span id="local-exit-control-status" role="status">Install the Local Tools Exit browser extension to close all tool tabs.</span></div>'''
+    return '''<style id="local-exit-control-style">#local-exit-control{display:flex;flex-direction:column;align-items:flex-end;margin:0 0 12px;gap:4px;color:#fff;font:12px system-ui}#local-exit-control button{background:#7f1d1d;color:#fff;border:1px solid #fecaca;border-radius:6px;padding:7px 12px;font:600 13px system-ui;cursor:pointer}#local-exit-control button:disabled{opacity:.65;cursor:default}#local-exit-control-status{display:block;max-width:300px;line-height:1.35}#local-exit-control-status[hidden]{display:none}</style><div id="local-exit-control"><button type="button" disabled>Exit local tools</button><span id="local-exit-control-status" role="status">Install the Local Tools Exit browser extension to close all tool tabs.</span></div>'''
 
 
 @app.middleware("http")
@@ -14559,7 +14559,11 @@ async def inject_local_exit_control(request: Request, call_next):
     page = body.decode("utf-8", errors="replace")
     if "local-exit-control" not in page:
         control = _local_exit_control_html()
-        page = page.replace("</body>", control + "</body>") if "</body>" in page else control + page
+        if "<!-- LOCAL_EXIT_TOP_ROW -->" in page:
+            page = page.replace("<!-- LOCAL_EXIT_TOP_ROW -->", control, 1)
+        else:
+            body_tag = re.search(r"<body\b[^>]*>", page, re.IGNORECASE)
+            page = page[:body_tag.end()] + control + page[body_tag.end():] if body_tag else control + page
     headers = dict(response.headers)
     headers.pop("content-length", None)
     return HTMLResponse(page, status_code=response.status_code, headers=headers)
@@ -17221,6 +17225,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 </head>
 <body data-dashboard-profile="{{DASHBOARD_PROFILE}}">
     <div class=\"home\">
+        <!-- LOCAL_EXIT_TOP_ROW -->
         <div class="layout{{DASHBOARD_LAYOUT_CLASS}}">
             <div class="dashboard-rail">
                 <section class="panel dashboard-script-panel" id="dashboard-scripts-panel">

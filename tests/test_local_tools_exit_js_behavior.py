@@ -153,6 +153,7 @@ async function failures() {
   assert.equal(rejected.events.filter((e) => e.startsWith("tabs:remove:")).length, 0);
   assert.equal(rejected.button.disabled, false, "a rejected shutdown leaves the action recoverable");
   assert.match(rejected.status.textContent, /failed/i);
+  assert.equal(rejected.status.hidden, false, "shutdown failures remain visible");
 
   const navigated = await createPage("accepted");
   navigated.tabs.set(1, tab(1, "https://example.com/left", 10));
@@ -185,11 +186,13 @@ async function failures() {
   await new Promise((resolve) => setTimeout(resolve, 20));
   assert.equal(unavailable.button.disabled, true);
   assert.match(unavailable.status.textContent, /unavailable/i);
+  assert.equal(unavailable.status.hidden, false, "unavailable-helper guidance remains visible");
   assert.equal(unavailable.events.filter((e) => e === "api:exit-started").length, 0);
 }
 
 async function dashboardProbeRecovery() {
   const page = await createPage("transient_probe_timeout");
+  assert.equal(page.status.hidden, false, "checking/retry guidance remains visible");
   const elements = new Map();
   const makeElement = (id) => ({
     id,
@@ -241,7 +244,11 @@ async function dashboardProbeRecovery() {
   assert.equal(page.button.disabled, false, "the shared extension path becomes usable after verification");
   assert.equal(page.events.filter((event) => event === "api:exit-started").length, 0, "a successful probe still does not initiate exit");
 
+  assert.equal(page.status.textContent, "", "ready state has no verification sentence");
+  assert.equal(page.status.hidden, true, "ready state has no empty status box");
   page.click(true);
+  page.click(true);
+  assert.equal(page.status.hidden, false, "shutdown progress is visible");
   await new Promise((resolve) => setTimeout(resolve, 20));
   assert.equal(page.events.filter((event) => event === "api:exit-started").length, 1, "one trusted click sends exactly one exit request");
   assert.ok(page.events.indexOf("api:exit-accepted") < page.events.indexOf("tabs:remove:2"));
