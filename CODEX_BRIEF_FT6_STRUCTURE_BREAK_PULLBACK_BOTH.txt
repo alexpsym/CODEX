@@ -1,0 +1,162 @@
+CODEX BRIEF - FT6 STRUCTURE-BREAK FIRST PULLBACK, BOTH DIRECTIONS
+Recommended model: gpt-6.1-sol
+Reasoning effort: high
+Repository: C:\GPT\CODEX-master
+Filename: CODEX_BRIEF_FT6_STRUCTURE_BREAK_PULLBACK_BOTH.txt
+
+Implement, compile, install, document and push this bounded experimental native Forex Tester 6 revision. Do not change repository code outside the FT6 scope below. Read applicable AGENTS.md. Do not inspect, read or modify custom instructions/. Do not delegate to subagents.
+
+CREDIT AND TEST LIMITS
+Conserve credits. Run only the nine named functional cases below and the smallest required compilation, exports, deployment and task-delivery checks. Do not run complete test files as suites, full suites, broad integration checks, unrelated checks, repeated passing cases, parameter searches, optimisation or historical backtests, including short historical replays. Do not expand testing without the user's explicit approval. Correct a failed affected case and rerun that case only. Do not broaden the job because unrelated tests or tasks exist.
+
+GOAL AND EVIDENCE
+The user wants the first corrective pullback after a decisive impulse that breaks preceding structure. Both a reversal and a continuation can qualify; both buys and sells belong in this experiment. Entry remains on a prospective first-touch level without waiting for a reversal candle.
+
+The user explicitly rejected the revised preset-7 EURUSD buy on 2023-09-19 at 17:41:29, ticket 90. Its local rally remained beneath earlier highs, including roughly 15:05. The user rejected both its wider context and the quality of its upward movement. Its eventual -1R result is not a selection criterion.
+Accepted qualitative examples:
+- 2023-08-23, EURUSD M5: sharp fall around 07:30, several hours of slower corrective downward action, then decisive bullish movement roughly 13:05-13:30 above the post-drop correction's highs, followed by a small pullback. Approximate yellow reference 1.08264. This is a reversal candidate despite the prior downtrend.
+- 2023-08-31, EURUSD M5: existing decline, accelerated bearish movement around 06:50-07:15 through previous lows, then a smaller upward pullback toward approximately 1.09004. This is a short continuation candidate.
+- Earlier accepted example: 2023-09-12, strong bullish departure from preceding congestion around 20:15-20:55, followed by a pullback toward approximate 1.07533.
+
+These are screenshots, not supplied OHLC/tick fixtures. Do not infer exact candle values, claim screenshot replay, hardcode dates/prices, or fit trade outcomes. Yellow lines are approximate examples, not exact future turning-point targets. No screenshot files are required locally; this description is self-contained.
+
+Preset 7's last 100-trade development sample had 32 winners and 68 losers, 0R overall, with negative cash P&L at fixed lots. This does not establish an edge. The following M15 pivot construction, efficiency threshold and duration limit are explicit starting hypotheses chosen for this experiment, not user-specified measurements or proven screenshot classifiers. Matching these historical examples remains a later user acceptance task. Do not promise either exact matching or profitability.
+
+CURRENT CODE AND SCOPE
+Reviewed master: e8fdef097f67de97210a8aa2ecc01be3417980ce.
+Reviewed strategy blob: 5cc01772041580d5963dcae91e91417c8140322f.
+These identify reviewed evidence; do not reset or pin the user's branch to them.
+
+Inspect current git status and these relevant files:
+forex-tester-6/RangeBreakoutPullbackStrategy/RangeBreakoutPullbackStrategy.cpp
+forex-tester-6/RangeBreakoutPullbackStrategy/RangeBreakoutPullbackStrategy.def
+tests/ft6_first_touch.cpp
+tests/ft6_preset_lifecycle.cpp
+docs/RangeBreakoutPullback_Backtesting_Guide.md
+summary/CODEX_SUMMARY_latest.txt
+
+Relevant boundaries: ApplySettingsPreset, ResolveRunSettings, QualifiedMode, FirstTouchMode, BeginQualification, TryQualifyImpulse, StartImpulseAt, SeedClassification, CanSeedImpulse, TryPromoteCandidate, RequiredTouchRetracement, ArmFirstTouch, ProcessFirstTouchTick, ProcessFirstTouchBar, RecoverFirstTouchChronologically, ConsumeImpulse, BindRunContext and ResetStrategy.
+
+Current mode 2 freezes a 20-bar M5 pre-origin range and requires a completed close beyond it plus 3 ATR endpoint displacement. StructuralTrend primarily selects 2R/3R targets; it is not an entry veto. Do not simply forbid all counter-trend entries or enable the existing M15/H4 EMA filter: accepted reversal candidates must remain possible.
+
+NEW SELECTOR, PRESET AND CUSTOM INPUTS
+Preserve the effective behavior and numeric identities of presets 0-7 and modes 0-2.
+Add entry mode 3, named structure-first-pullback, using the mode-2 qualification and first-touch engine plus the new gates below. Make Custom able to select it in either/both directions.
+
+Add preset 8: M5 structure-break first pullback both.
+It copies every effective preset-7 strategy setting, then sets TradeDirection=0 (both) and ImpulseEntryMode=3. Retain M5, 0.01 lots, existing seed-body cap/provisional evidence, ATR(14), adaptive stops, 2R/3R structural targets, EMA filter off, maximum depth 50%, existing 30-bar pullback/recovery setting, weekend rules and all other existing safety/execution rules. Explicitly apply the existing four qualification values: 20, 3.0, 0.10 and 25.0.
+
+Register three saved Custom controls with the existing Custom/effective pointer separation:
+- Structure context pivot strength: 2.
+- Structure impulse minimum efficiency: 0.70.
+- Structure impulse maximum bars: 12.
+Preset 8 explicitly sets these values. They affect mode 3 only. The context timeframe is fixed M15 and the bounded context scan is fixed at 200 completed M15 candles before the origin; document both constants. Do not couple context history to the separate ATR regime lookback.
+
+Preserve old saved Custom settings and once-per-run resolution after FT6 supplies late options. Add the new choices/labels narrowly. Keep all existing settings identities stable where supported by FT6. Check actual registration-array capacity and directly affected count assertions; do not permit overflow.
+
+The independent Maximum completed strategy trades (0 unlimited) remains default 100 and is NEVER overridden by a preset. Currency remains an explicitly required setting; do not auto-select a symbol.
+
+GATE 1 - FROZEN M15 STRUCTURE KNOWN BEFORE THE M5 ORIGIN
+Use the existing causally confirmed M5 impulse origin and frozen setup ATR. Do not replace the existing seed/origin/provisional selection machinery.
+
+At parent creation, derive a separate M15 context snapshot with an as-of cutoff at the OPEN TIME of the M5 origin candle. This intentionally excludes the developing M5 leg and information learned after its origin:
+1. Use the configured Currency and indexed M15 OHLC/time APIs from the installed SDK, without changing the selected M5 trading context.
+2. Only M15 candles whose end time is at/before that cutoff can participate. Never include index 0, an unfinished candle, or future data returned by a historical series. M15 candle end is its server timestamp plus 15 minutes; use a consistent comparison that does not accidentally admit a future candle through rounding.
+3. Consider at most the 200 most recent eligible completed M15 candles before the cutoff. A pivot must have its complete left and right neighborhood within this available eligible history.
+4. With strength S, a pivot high must be STRICTLY above each of the S older and S newer candle highs; a pivot low STRICTLY below the corresponding lows. Equal-price plateaus do not create multiple pivots. A pivot becomes known only after all S right-side candles have closed by the cutoff.
+5. For a long, take the two most recent eligible pivot highs and freeze contextResistance=max(their highs). For a short, take the two most recent eligible pivot lows and freeze contextSupport=min(their lows). Two distinct relevant pivots are required. This is a defined structure proxy, not a claim that it always identifies the user's full visual structure.
+6. Freeze pivot center times, confirmation times and prices, the cutoff and selected level for the parent. Never substitute pivots from inside the developing impulse or replace the snapshot with later structure.
+7. Qualification additionally requires a completed M5 close strictly ABOVE contextResistance + 0.10*setupATR for longs, or strictly BELOW contextSupport - 0.10*setupATR for shorts, using the existing effective qualification buffer input rather than a second independent buffer.
+8. Missing SDK capability, invalid OHLC/time, or insufficient confirmed relevant pivots must produce a clear deduplicated unavailable/pending reason and block mode-3 qualification. No fallback to the smaller local range and no silent success. Only the two relevant pivots are required; do not unnecessarily demand all 200 bars or pivots in the other direction. Incomplete S-neighborhoods are never accepted. A temporarily unavailable snapshot may be retried only against the same frozen origin cutoff; newer pivots must not cure a missing old reference.
+
+Continue requiring the existing full 20-bar M5 pre-origin range breakout and minimum 3.0*setupATR endpoint displacement in mode 3. Both range and context gates must hold at the actual qualifying completed bar. Modes 0-2 must make no new M15 context reads.
+
+GATE 2 - DIRECTIONAL EFFICIENCY AND BOUNDED IMPULSE DURATION
+For candidate origin bar o and completed qualification bar q, using their M5 CLOSE values:
+N = q-o.
+Path = sum(abs(C[j]-C[j-1])) for j=o+1 through q.
+Efficiency = dir*(C[q]-C[o])/Path, where dir is +1 long or -1 short.
+
+Mode 3 can qualify only when:
+- 1 <= N <= StructureImpulseMaximumBars (12 in preset 8).
+- Path is finite and strictly positive; all participating close values are available/valid.
+- Efficiency is finite and >= StructureImpulseMinimumEfficiency (0.70).
+- The existing local range, displacement and new frozen M15 structure-close gates pass on this SAME completed bar.
+
+This close-path measurement adds a directional-cohesion check. Do not use endpoint wicks in its numerator or denominator, abs() the signed numerator, replace missing candles, or measure against a later endpoint/close while replaying an earlier bar. Log measured efficiency and N. Preserve the original extreme-to-origin displacement calculation separately.
+
+Before qualification, the parent continues advancing without touchActive. If origin-to-current completed-bar age exceeds the new maximum, abandon this never-qualified candidate without spending a real consumed-parent boundary. Existing 30-bar provisional/recovery bounds and invalidation still apply; the new bound must also be enforced when promoting/recovering a candidate. Invalid/pending candidates must not trap later fresh valid legs.
+
+Once all gates pass, freeze the actual qualifying bar/time and qualification metrics. Latch qualification for that parent and use the existing mode-2 endpoint advancement, first-touch and consumption lifecycle. The 12-bar limit is a qualification deadline, not a new holding-time or post-qualification pullback limit.
+
+Validate only for mode 3: context strength >=1 with its 2*S+1 neighborhood fitting the fixed 200-bar scan; finite 0<minimumEfficiency<=1; maximum bars >=1 and <= the existing effective impulse recovery/pullback bar bound. Invalid mode-3 configuration emits one clear error per run and blocks entries. Legacy modes ignore unused new-control values. Never silently clamp invalid new settings.
+
+PROSPECTIVE ENTRY - PRESERVE THE EXISTING CONTRACT
+Reuse mode 2's rule:
+D = accepted endpoint-to-origin displacement.
+Retracement = max(existing minimum retracement ATR * frozen setupATR,
+                  qualified minimum pullback depth percent/100 * D).
+Long level = endpoint high - Retracement, rounded DOWN to Point().
+Short level = endpoint low + Retracement, rounded UP to Point().
+Preset 8 retains 0.50 ATR and 25% minimum depth. No extra candle confirmation at entry.
+
+Do not use the future pullback high/low to place entry, stop or target. Preserve:
+- Closed-bar endpoint updates; evaluate the old active level against the opening quote BEFORE accepting an endpoint/level refresh.
+- No arming/refresh-tick fill; no retrospective or second-touch fill after a passed/ambiguous path.
+- Executable Ask<=long level and Bid>=short level; actual available quote supplies fills after overshoot.
+- Complete observed tick-path checks, conservative spread/history/chronology handling and chronological provisional recovery.
+- Existing expiry, invalidation, maximum depth, risk/history, weekend, position, direction and optional Custom EMA gates.
+- Blocked/failed real first touches are consumed without queue/retry; order API success AND a nonnegative ticket are required.
+- One opportunity per consumed parent, fresh causal origin requirements, seed-body cap and oversized/provisional evidence.
+- Detection and lifecycle observation in BOTH directions even when Custom permits only one order direction.
+- Frozen entry risk/target and current StructuralTrend-based 2R/3R target selection. M15 context is a qualification gate, not a replacement target classifier.
+- Startup binding/readiness diagnostics and recovery, selected currency/timeframe context, and the working automatic pause after 100 unique completed matching strategy trades.
+
+Reset all new snapshot/metrics/readiness state on the appropriate parent/reset transitions. Keep new logic mode-scoped and reuse the engine; do not duplicate or redesign it.
+
+DIAGNOSTICS AND GUIDE
+Keep existing diagnostic prefixes and supported chart markers. Extend preset-8 initialization to show presetId=8, timeframe=5, direction=0, entryMode=structure-first-pullback, contextTF=15, contextStrength=2, contextScan=200, minEfficiency=0.70, impulseMaxBars=12, inherited qualification values and maxCompletedTrades.
+
+Emit concise event-based context/pending/qualified/abandon/arm/skip records with the frozen cutoff, both reference pivot center/confirmation times and prices, selected barrier, origin, accepted endpoint, actual qualifying time, efficiency, duration and explicit blocking reason. No per-tick/per-bar spam or extra chart clutter. Split messages safely if needed; do not overflow fixed sprintf buffers. Missing-context waiting must be distinguishable from M5 startup readiness and a valid setup that fails price/quality gates.
+
+Update only relevant FT6 guide sections with preset 8 selection, the exact causal formulas, the M15 snapshot timing, required Currency, unchanged presets and trade limit, and experimental limitations. State that synthetic cases do not prove screenshot matches, profit or statistical reliability from exactly 100 trades. No historical parameter tuning.
+
+ONLY THESE NINE FUNCTIONAL CASES ARE AUTHORISED
+Add three selected cases to tests/ft6_first_touch.cpp; no default suite:
+1. structure_context_gate - exercise actual M15 snapshot production logic on synthetic series. Cover last-two relevant pivot max/min, strict equal-price handling, complete right-side confirmation as of origin cutoff, exclusion of forming/future/inside-impulse candles, frozen references after later data changes, bounded scan, missing history/API with recovery against the same cutoff, and mirrored long/short rules. A clean local breakout beneath an older frozen resistance must fail. A reversal close beyond it and a bearish continuation close beneath support must be eligible when other gates pass.
+2. structure_impulse_quality - exercise production qualification transitions with completed synthetic M5 bars. Cover a clean directional path passing, an overlapping back-and-forth path failing despite enough extreme displacement, signed efficiency, exact duration/efficiency boundaries, zero/missing path, the same-bar conjunction of all gates, expiry without consumed-boundary lock, invalid controls and legacy modes ignoring unused controls. Do not initialise only the final qualified state and assert a restated formula.
+3. structure_first_touch - drive actual callbacks through the mode-3 path, with faithful M5 and M15 SDK mocks. Derive origin, context, qualification and prospective arming instead of injecting the final ready state. Exercise both an allowed long reversal and allowed short continuation with a future first-touch quote, no arm-tick fill, one order per parent, and reset. Include a Custom single-direction scenario proving opposite-side observation still advances. Identical information up to entry must yield identical decisions under different later continuations. Exercise chronological recovery without later-bar M15/efficiency look-ahead.
+
+Run these six existing selectors once after the affected implementation/fixtures are stable:
+ft6_first_touch.exe cold_start_context
+ft6_first_touch.exe qualified_pullback_touch
+ft6_first_touch.exe endpoint_refresh_ordering
+ft6_first_touch.exe legacy_confirmation_entries
+ft6_first_touch.exe trade_limit_stop
+ft6_preset_lifecycle.exe preset_lifecycle
+
+Extend preset_lifecycle narrowly for all preset-8 effective settings, late values, Custom restoration, mode-3 Custom controls, 8 -> 7 -> 6 -> Custom, unchanged older preset values, initialization diagnostics, registration capacity/counts and preservation of the independently selected trade limit. In cold_start_context preserve actual binding-before-context reads and full M5 warmup; do not fake startup success to accommodate the new mode.
+
+Compile only the affected harnesses and the strategy. Record exact commands and outputs. These nine selectors are the full permitted functional list; no historical test is authorised.
+
+BUILD AND INSTALL - CODEX MUST DO THIS
+Use the installed x86 Windows compiler and FT6 SDK at C:\ForexTester6\Examples\Strategies\C++. Build the canonical .cpp and matching .def as a native 32-bit Release DLL linked with oleaut32.lib. Verify the expected six FT6 exports. Do not edit SDK headers or install/change system tooling.
+
+Back up only the existing strategy DLL in a task-scoped excluded build directory, then install the new DLL at:
+C:\ForexTester6\Strategies\RangeBreakoutPullbackStrategy.dll
+
+Close FT6 gracefully before replacement, preserve projects/data and never force-kill it. If a genuine unsaved prompt/lock prevents replacement, report that specific blocker; do not shift compilation/copying to the user. No historical replay as a deployment check.
+
+Verify installed DLL hash equals the just-built artifact. Report path, SHA256, byte size and modification time. Do not claim an app has loaded it unless independently observed.
+
+DELIVERY AND CONCURRENT WORK
+Preserve unrelated working/staged changes and concurrent summary sections. Another terminal or advanced origin is not itself a reason to stop. No system changes, destructive cleanup, reset, force push or history rewrite.
+
+Before pushing, write the final task summary verbatim as a clearly identified new section in summary/CODEX_SUMMARY_latest.txt. Then run repository-root PATCH_DESKTOP_PUSH.bat using the existing task-scoped protected delivery mechanism. Its blanket staging/raw pull-rebase behavior must not capture unrelated tasks. Reuse the existing scoped adapter and protected helper C:\Users\User\.codex\tools\alexpsym_git_delivery.py with C:\Users\User\miniconda3\python.exe as established locally; do not modify the BAT or protected tools. Stage only owned brief/source/test/FT6-guide/summary changes, preserving unrelated staged content. Use the existing protected remote-advance procedure, not raw pull --rebase --autostash or raw push.
+
+Completion requires successful protected BAT delivery and verified local HEAD==origin/master. Keep binaries, backups, logs, caches and local state out of commits. Report an actual delivery failure precisely and leave the task incomplete.
+
+FINAL REPORT
+Give implemented behavior and new preset number/name, changed files, the nine selected-case results, build/export/installed-DLL evidence, commit and verified local/remote HEAD, expected preset-8 diagnostic, and any real limitation.
+Give the user one concise setup action: Currency EURUSD, numeric preset 8, Apply, then restart standard testing for chart acceptance. The independent limit remains 100 completed strategy trades; do not ask the user to run a full year. Do not claim the historical examples are now accepted/rejected until the user verifies them. Explicitly state no historical backtest/optimisation was run and profitability is unestablished.
+

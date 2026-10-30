@@ -3669,3 +3669,117 @@ timezone corrections; future/historical commission signs; heading Exit LTT;
 test-trade row styling. Job 4 actual MT5 fill and Job 7B local expiry acceptance
 remain PASSED per user. Job 5 live price-movement observation PENDING unless
 separately confirmed. Render DEFERRED; ETHUSDT fee/target CANCELLED.
+
+
+=== FT6 STRUCTURE-BREAK FIRST PULLBACK BOTH - 2026-10-30 ===
+
+Implemented preset 8: M5 structure-break first pullback both, and Custom entry mode 3 (structure-first-pullback). The existing mode-2 first-touch engine now supports a frozen pre-origin M15 structure gate plus signed close-path efficiency >=0.70 within 12 origin-to-qualification bars. The full 20-bar M5 pre-origin range, 3.0 ATR extreme displacement, 0.10 ATR close buffer and max(0.50 ATR,25% displacement) prospective retracement remain required. Both reversal and continuation can qualify, in either direction. Presets 0-7/modes 0-2, all existing execution safeguards, 2R/3R StructuralTrend targets, late Custom restoration and independently selected 100-completed-trade default remain intact.
+
+Changed files: forex-tester-6/RangeBreakoutPullbackStrategy/RangeBreakoutPullbackStrategy.cpp; tests/ft6_first_touch.cpp; tests/ft6_preset_lifecycle.cpp; docs/RangeBreakoutPullback_Backtesting_Guide.md; summary/CODEX_SUMMARY_latest.txt; added task brief CODEX_BRIEF_FT6_STRUCTURE_BREAK_PULLBACK_BOTH.txt. Matching .def inspected and unchanged. New Custom options append to the existing 57 controls: 60 detailed options, 62 total nonseparator registrations, safely within capacity 64. Existing option names/order stay stable; new preset/mode choices use added value descriptions.
+
+M15 snapshot: fixed timeframe 15 and scan of at most 200 eligible completed candles, independent of ATR regime lookback. Configured Currency/indexed OHLC/time APIs preserve the selected M5 context. Never index 0; candle end <= frozen M5 origin OPEN and current server time with direct unrounded comparison. Strict strength-2 pivots require complete older/newer neighborhoods; equality fails. Freeze the two most recent relevant highs' maximum (long) or lows' minimum (short), center/confirmation times, prices and cutoff. Missing/invalid/API-unavailable context blocks with a deduplicated reason and retries against the same cutoff only. No local fallback, all-200-bar requirement or demand for irrelevant opposite pivots.
+
+Quality: N=q-o; Path=sum(abs(C[j]-C[j-1]),j=o+1..q); Efficiency=direction*(C[q]-C[o])/Path. Available valid closes, positive finite path, 1<=N<=12 and efficiency>=0.70 are required on the same completed bar as local range/structure closes and extreme displacement. Keep displacement separate from close-path efficiency. Freeze actual qualifying bar/time and metrics; chronological recovery never uses a later close/endpoint to qualify an earlier bar. Never-qualified expiry abandons without advancing a real consumed boundary. Twelve bars is a qualification deadline, not a post-qualification hold/pullback limit. Mode-3-only configuration rejects invalid strength, efficiency or maximum bars without clamping. All snapshot, readiness and metrics state resets with the parent/reset lifecycle.
+
+Prospective mode-2 behavior is reused: old opening-quote level checked before endpoint refresh, no arm-tick/refresh-tick fill, conservative complete-path/spread/history chronology, Ask<=long/Bid>=short actual-quote execution, no retrospective/second-touch fill, no retry after blocked/failed real touch, success AND valid ticket, both-side observation, seed/provisional evidence, fresh-origin consumption, depth/expiry/invalidation/risk/history/weekend/position/direction/optional EMA gates. M15 is solely a qualification gate, not the target classifier. Event-based RBP structure records add bounded context/reference/pending/qualified/abandon/arm/skip/consume evidence without new chart objects; M15 waiting differs from M5 startup readiness and price/quality failures.
+
+Nine authorized selectors: all PASS. structure_context_gate; structure_impulse_quality; structure_first_touch; cold_start_context; qualified_pullback_touch; endpoint_refresh_ordering; legacy_confirmation_entries; trade_limit_stop; preset_lifecycle. The context selector passed first attempt. The other two new selectors initially failed because their small synthetic pivot highs were below the fixture's background high; corrected only that fixture's background for those small peaks, rebuilt the touch harness, and reran only those two failed selectors: both PASS. No failing strategy case was hidden or default suite invoked. The six existing selectors ran once after the implementation/fixtures stabilized. Full M5 startup and binding-before-context reads were preserved. Callback tests derive origin/context/qualification/arming, cover both directions, future touch, one order, reset, opposite-side Custom observation, identical causal entry prefixes and chronological recovery. Lifecycle verifies preset-8 inheritance, all three controls, late values, 8->7->6->Custom, initialization, capacity, old effective settings and the independent selected limit.
+
+Native x86 Release build: PASS, installed FT6 SDK/compiler, /O2 /MD /MACHINE:X86 and oleaut32.lib. Export verification: machine 14C (x86), 32-bit, exactly InitStrategy, DoneStrategy, ResetStrategy, GetSingleTick, ReplaceStr, IntrfProcsRec; canonical .def unchanged. No SDK/system-tooling edits. Existing installed strategy DLL alone backed up under excluded .codex_tmp_ft6_structure_20261030. No FT6 process was running before replacement; no force termination/project/data changes and no app-load claim. Initial sandbox copy denied access to the external FT6 path; the narrowly authorized elevated copy succeeded.
+
+Installed: C:\ForexTester6\Strategies\RangeBreakoutPullbackStrategy.dll
+SHA256: D10443C99A7473BCD64378888EF6967217C5B760C5EDAC80DCBC0F0E70A4729F
+Bytes: 81408
+Modified UTC: 2026-10-30T07:35:23.4284552Z
+Installed SHA256 equals just-built artifact. Prior backup SHA256: 81C5C323EDA62B0F4AC5C2E9720E05DED970304078BD3A3F76388FC18D7F70F3. Build outputs, backups, logs, adapters and deployment.json are excluded and not committed.
+
+Expected preset-8 initialization (default independent limit):
+RBP preset=M5 structure-break first pullback both timeframe=5 setup=1 confirmation=0 direction=0 body=1.00-1.50ATR depth=0-50% depthMode=1 stop=adaptive targets=2.0/3.0R EMAtrend=off scope=0 entryMode=structure-first-pullback touchATR=0.50 presetId=8 maxCompletedTrades=100 qualifiedLookback=20 qualifiedDisplacementATR=3.00 qualifiedBufferATR=0.10 qualifiedDepthPct=25.00 contextTF=15 contextStrength=2 contextScan=200 minEfficiency=0.70 impulseMaxBars=12
+
+Setup action: Currency EURUSD, numeric preset 8, Apply, then restart standard testing for chart acceptance. The independent default limit remains 100 completed matching strategy trades; no full-year run requested. Synthetic cases do not prove screenshot matches, profit or statistical reliability from exactly 100 trades. The historical examples remain for user acceptance. No historical backtest, replay, parameter tuning or optimisation was run; profitability is unestablished. Preset-7's reported 32 winners/68 losers and 0R with negative cash P&L establish no edge.
+
+Exact compilation/export commands, run from C:\GPT\CODEX-master:
+cmd /d /c .codex_tmp_ft6_structure_20261030\build.cmd
+The script (run twice, both exit 0; second after pre-functional code review) executes:
+@echo off
+setlocal
+call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat" x86 >nul
+if errorlevel 1 exit /b 1
+cl /nologo /O2 /MD /EHsc /D_CRT_SECURE_NO_WARNINGS /I"C:\ForexTester6\Examples\Strategies\C++" /LD forex-tester-6\RangeBreakoutPullbackStrategy\RangeBreakoutPullbackStrategy.cpp /Fo".codex_tmp_ft6_structure_20261030\strategy.obj" /Fe".codex_tmp_ft6_structure_20261030\RangeBreakoutPullbackStrategy.dll" /link /DEF:forex-tester-6\RangeBreakoutPullbackStrategy\RangeBreakoutPullbackStrategy.def /MACHINE:X86 /INCREMENTAL:NO /OPT:REF /OPT:ICF oleaut32.lib
+if errorlevel 1 exit /b 1
+cl /nologo /O2 /MD /EHsc /D_CRT_SECURE_NO_WARNINGS /I"C:\ForexTester6\Examples\Strategies\C++" tests\ft6_first_touch.cpp /Fo".codex_tmp_ft6_structure_20261030\touch.obj" /Fe".codex_tmp_ft6_structure_20261030\ft6_first_touch.exe" /link /MACHINE:X86 /INCREMENTAL:NO oleaut32.lib
+if errorlevel 1 exit /b 1
+cl /nologo /O2 /MD /EHsc /D_CRT_SECURE_NO_WARNINGS /I"C:\ForexTester6\Examples\Strategies\C++" tests\ft6_preset_lifecycle.cpp /Fo".codex_tmp_ft6_structure_20261030\lifecycle.obj" /Fe".codex_tmp_ft6_structure_20261030\ft6_preset_lifecycle.exe" /link /MACHINE:X86 /INCREMENTAL:NO oleaut32.lib
+if errorlevel 1 exit /b 1
+dumpbin /headers /exports .codex_tmp_ft6_structure_20261030\RangeBreakoutPullbackStrategy.dll > .codex_tmp_ft6_structure_20261030\exports.txt
+if errorlevel 1 exit /b 1
+
+Build stdout, both invocations (no warnings/errors):
+ÿþR a n g e B r e a k o u t P u l l b a c k S t r a t e g y . c p p 
+ 
+       C r e a t i n g   l i b r a r y   . c o d e x _ t m p _ f t 6 _ s t r u c t u r e _ 2 0 2 6 1 0 3 0 \ R a n g e B r e a k o u t P u l l b a c k S t r a t e g y . l i b   a n d   o b j e c t   . c o d e x _ t m p _ f t 6 _ s t r u c t u r e _ 2 0 2 6 1 0 3 0 \ R a n g e B r e a k o u t P u l l b a c k S t r a t e g y . e x p 
+ 
+ f t 6 _ f i r s t _ t o u c h . c p p 
+ 
+       C r e a t i n g   l i b r a r y   . c o d e x _ t m p _ f t 6 _ s t r u c t u r e _ 2 0 2 6 1 0 3 0 \ f t 6 _ f i r s t _ t o u c h . l i b   a n d   o b j e c t   . c o d e x _ t m p _ f t 6 _ s t r u c t u r e _ 2 0 2 6 1 0 3 0 \ f t 6 _ f i r s t _ t o u c h . e x p 
+ 
+ f t 6 _ p r e s e t _ l i f e c y c l e . c p p 
+ 
+       C r e a t i n g   l i b r a r y   . c o d e x _ t m p _ f t 6 _ s t r u c t u r e _ 2 0 2 6 1 0 3 0 \ f t 6 _ p r e s e t _ l i f e c y c l e . l i b   a n d   o b j e c t   . c o d e x _ t m p _ f t 6 _ s t r u c t u r e _ 2 0 2 6 1 0 3 0 \ f t 6 _ p r e s e t _ l i f e c y c l e . e x p 
+ 
+ 
+Fixture-only touch harness rebuild, exit 0:
+cmd /d /c .codex_tmp_ft6_structure_20261030\build-touch.cmd
+@echo off
+call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat" x86 >nul
+if errorlevel 1 exit /b 1
+cl /nologo /O2 /MD /EHsc /D_CRT_SECURE_NO_WARNINGS /I"C:\ForexTester6\Examples\Strategies\C++" tests\ft6_first_touch.cpp /Fo".codex_tmp_ft6_structure_20261030\touch.obj" /Fe".codex_tmp_ft6_structure_20261030\ft6_first_touch.exe" /link /MACHINE:X86 /INCREMENTAL:NO oleaut32.lib
+exit /b %errorlevel%
+
+stdout:
+ÿþf t 6 _ f i r s t _ t o u c h . c p p 
+ 
+       C r e a t i n g   l i b r a r y   . c o d e x _ t m p _ f t 6 _ s t r u c t u r e _ 2 0 2 6 1 0 3 0 \ f t 6 _ f i r s t _ t o u c h . l i b   a n d   o b j e c t   . c o d e x _ t m p _ f t 6 _ s t r u c t u r e _ 2 0 2 6 1 0 3 0 \ f t 6 _ f i r s t _ t o u c h . e x p 
+ 
+ 
+Exact selected-case commands and final outputs (each exit 0):
+.codex_tmp_ft6_structure_20261030\ft6_first_touch.exe structure_context_gate
+ÿþP A S S :   s t r u c t u r e _ c o n t e x t _ g a t e 
+ 
+ 
+.codex_tmp_ft6_structure_20261030\ft6_first_touch.exe structure_impulse_quality
+ÿþP A S S :   s t r u c t u r e _ i m p u l s e _ q u a l i t y 
+ 
+ 
+.codex_tmp_ft6_structure_20261030\ft6_first_touch.exe structure_first_touch
+ÿþP A S S :   s t r u c t u r e _ f i r s t _ t o u c h 
+ 
+ 
+.codex_tmp_ft6_structure_20261030\ft6_first_touch.exe cold_start_context
+PASS: cold_start_context
+
+.codex_tmp_ft6_structure_20261030\ft6_first_touch.exe qualified_pullback_touch
+PASS: qualified_pullback_touch
+
+.codex_tmp_ft6_structure_20261030\ft6_first_touch.exe endpoint_refresh_ordering
+PASS: endpoint_refresh_ordering
+
+.codex_tmp_ft6_structure_20261030\ft6_first_touch.exe legacy_confirmation_entries
+PASS: legacy_confirmation_entries
+
+.codex_tmp_ft6_structure_20261030\ft6_first_touch.exe trade_limit_stop
+PASS: trade_limit_stop
+
+.codex_tmp_ft6_structure_20261030\ft6_preset_lifecycle.exe preset_lifecycle
+PASS: preset lifecycle, late options, one diagnostic/run, all Custom values, targets, EMA, buys-only and M5 isolation
+
+The two failed-case retry commands are identical to the listed commands, after the fixture-only correction. Initial failure output was "FAIL: clean signed long/short close path qualifies via production transitions" and "FAIL: callbacks derive confirmed origin, M15 snapshot and pending parent"; both logs showed "two confirmed relevant M15 pivots unavailable in bounded history". No other functional selectors ran. Logs retain full initial diagnostics. No historical data replay, backtest or optimisation.
+
+Scoped diff/whitespace review PASS before delivery. Protected saved-credential no-op verify succeeded at local/fresh remote master 15da378d2b5eeb7c47d0a27fe5e60e661b63230a using:
+& 'C:\Users\User\miniconda3\python.exe' 'C:\Users\User\.codex\tools\alexpsym_git_delivery.py' verify
+
+Delivery: append this final task section verbatim, preserving all preceding/concurrent summary content. Existing mixed line endings are normalized to the committed LF representation so no earlier summary lines change in Git. Run unchanged repository-root PATCH_DESKTOP_PUSH.bat through the established task-local scoped adapter (run_delivery.py/scoped_git.py/git.bat), only the six owned paths above. Preserve unrelated staged/working/deleted/untracked content. Skip BAT blanket staging/reset/raw pull-rebase-autostash; no raw push, force or history rewrite. Its push routes solely through:
+& 'C:\Users\User\miniconda3\python.exe' 'C:\Users\User\.codex\tools\alexpsym_git_delivery.py' push
+The BAT must finish successfully and verify local HEAD==origin/master before completion. Actual task commit and verified heads will be reported separately after BAT execution; this pre-commit section makes no advance delivery-success claim. No second SHA-only summary commit.
+
+Delivery attempt 1: BAT exited 1 at scoped staging: fatal: Unable to create C:/GPT/CODEX-master/.git/index.lock: Permission denied. No commit/push occurred. Retry the same scoped BAT adapter with the required repository metadata access. Initial raw diff whitespace output reflected existing CRLF lines; normalized prior content is exactly HEAD, and the final ordinary task diff/whitespace check passes. No strategy/fixture/binary changes or repeated functional tests.

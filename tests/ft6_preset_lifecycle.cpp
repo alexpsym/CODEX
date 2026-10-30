@@ -81,7 +81,7 @@ int main(int argc,char **argv)
   IntrfProcsRec.Bars=NoHistory;
   InitStrategy();
   Check(messages.empty(),"DLL registration must not emit a stale diagnostic");
-  Check(runOptionCount==57&&options.size()==59,"all detailed options registered separately");
+  Check(runOptionCount==60&&options.size()==62&&runOptionCount<=sizeof(runOptions)/sizeof(runOptions[0]),"all detailed options registered separately");
   Check(MaximumCompletedStrategyTrades==100&&*(int*)Option("Maximum completed strategy trades")==100,"trade cap registered with default 100");
   IntrfProcsRec.HistoryTotal=EmptyHistory;IntrfProcsRec.pHistoryTotal=(void*)1;
   IntrfProcsRec.OrderSelect=EmptySelect;IntrfProcsRec.pOrderSelect=(void*)1;
@@ -214,8 +214,11 @@ int main(int argc,char **argv)
   Check(*(double*)Option("With-trend / neutral target R")==0.5&&*(double*)Option("Counter-trend target R")==1,"clamping does not overwrite Custom inputs");
   ResetStrategy();ResetStrategy();
   TickOnce("RBP preset=Custom timeframe=30",12);
-  // Late saved inputs survive 7 -> 6 -> Custom; limit remains independent.
-  *(int*)Option("Impulse entry mode")=2;
+  // Late saved inputs survive 8 -> 7 -> 6 -> Custom; limit remains independent.
+  *(int*)Option("Impulse entry mode")=3;
+  *(int*)Option("Structure context pivot strength")=3;
+  *(double*)Option("Structure impulse minimum efficiency")=0.80;
+  *(int*)Option("Structure impulse maximum bars")=10;
   *(int*)Option("Setup mode")=1;
   *(int*)Option("Qualified impulse range lookback bars")=23;
   *(double*)Option("Qualified impulse minimum displacement ATR")=4.25;
@@ -223,14 +226,27 @@ int main(int argc,char **argv)
   *(double*)Option("Qualified pullback minimum depth %")=30;
   *(int*)Option("Maximum completed strategy trades")=19;
   custom=Values(true);
+  ResetStrategy();*(int*)Option("Settings preset")=8;
+  TickOnce("RBP preset=M5 structure-break first pullback both timeframe=5 setup=1 confirmation=0 direction=0",13);
+  Check(TradeDirection==0&&ImpulseEntryMode==3&&StructureContextPivotStrength==2&&StructureImpulseMinimumEfficiency==0.70&&StructureImpulseMaximumBars==12,"preset 8 explicitly applies both directions and all structure hypotheses");
+  Check(QualifiedImpulseRangeLookbackBars==20&&QualifiedImpulseMinimumDisplacementATR==3&&QualifiedImpulseBreakoutBufferATR==0.10&&QualifiedPullbackMinimumDepth==25,"preset 8 applies all four qualification hypotheses");
+  Check(MaximumCompletedStrategyTrades==19&&Values(true)==custom&&qualifiedConfigValid,"preset 8 preserves late Custom and independently selected limit");
+  Check(messages[messages.size()-3].find("entryMode=structure-first-pullback touchATR=0.50 presetId=8 maxCompletedTrades=19 qualifiedLookback=20 qualifiedDisplacementATR=3.00 qualifiedBufferATR=0.10 qualifiedDepthPct=25.00 contextTF=15 contextStrength=2 contextScan=200 minEfficiency=0.70 impulseMaxBars=12")!=std::string::npos,"preset 8 complete initialization diagnostic");
+  auto structure=Values(false);
   ResetStrategy();*(int*)Option("Settings preset")=7;
-  TickOnce("RBP preset=M5 qualified first pullback buys-only timeframe=5 setup=1 confirmation=0 direction=1",13);
+  TickOnce("RBP preset=M5 qualified first pullback buys-only timeframe=5 setup=1 confirmation=0 direction=1",14);
   Check(ImpulseEntryMode==2&&QualifiedImpulseRangeLookbackBars==20&&QualifiedImpulseMinimumDisplacementATR==3&&QualifiedImpulseBreakoutBufferATR==0.10&&QualifiedPullbackMinimumDepth==25,"preset 7 applies four explicit hypotheses");
   Check(MaximumCompletedStrategyTrades==19&&Values(true)==custom,"preset 7 preserves saved Custom and independent limit");
   Check(messages[messages.size()-3].find("entryMode=qualified-first-pullback touchATR=0.50 presetId=7 maxCompletedTrades=19 qualifiedLookback=20 qualifiedDisplacementATR=3.00 qualifiedBufferATR=0.10 qualifiedDepthPct=25.00")!=std::string::npos,"effective qualified diagnostic values");
   auto qualified=Values(false);
+  for(size_t i=0;i<qualified.size();i++)
+  {
+    bool changed=i==EffectiveIndex(&TradeDirection)||i==EffectiveIndex(&ImpulseEntryMode)||i==EffectiveIndex(&StructureContextPivotStrength)||i==EffectiveIndex(&StructureImpulseMinimumEfficiency)||i==EffectiveIndex(&StructureImpulseMaximumBars);
+    Check(changed||qualified[i]==structure[i],"preset 8 copies every effective preset 7 safeguard");
+  }
+  Check(StructureContextPivotStrength==3&&StructureImpulseMinimumEfficiency==0.80&&StructureImpulseMaximumBars==10,"preset 7 restores unused Custom structure controls");
   ResetStrategy();*(int*)Option("Settings preset")=6;
-  TickOnce("RBP preset=M5 first-touch ATR buys-only timeframe=5",14);
+  TickOnce("RBP preset=M5 first-touch ATR buys-only timeframe=5",15);
   Check(ImpulseEntryMode==1&&QualifiedImpulseRangeLookbackBars==23&&QualifiedPullbackMinimumDepth==30&&MaximumCompletedStrategyTrades==19,"7 to 6 restores Custom-only controls without changing legacy behavior");
   for(size_t i=0;i<qualified.size();i++)
   {
@@ -238,10 +254,10 @@ int main(int argc,char **argv)
     Check(changed||qualified[i]==Values(false)[i],"preset 7 inherits every other preset 6 safeguard");
   }
   ResetStrategy();*(int*)Option("Settings preset")=0;
-  TickOnce("RBP preset=Custom timeframe=30 setup=1",15);
+  TickOnce("RBP preset=Custom timeframe=30 setup=1",16);
   // The previously exercised target floors remain effective while saved inputs stay below floor.
   auto restored=Values(false);custom[EffectiveIndex(&WithTrendNeutralTargetR)]=2;custom[EffectiveIndex(&CounterTrendTargetR)]=3;
-  Check(restored==custom&&ImpulseEntryMode==2&&qualifiedConfigValid&&MaximumCompletedStrategyTrades==19,"Custom restores every value including qualified mode after 7 -> 6");
+  Check(restored==custom&&ImpulseEntryMode==3&&StructureContextPivotStrength==3&&StructureImpulseMinimumEfficiency==0.80&&StructureImpulseMaximumBars==10&&qualifiedConfigValid&&MaximumCompletedStrategyTrades==19,"Custom restores every value including qualified mode after 7 -> 6");
   DoneStrategy();
   puts("PASS: preset lifecycle, late options, one diagnostic/run, all Custom values, targets, EMA, buys-only and M5 isolation");
 }

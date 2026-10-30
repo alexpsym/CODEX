@@ -4,6 +4,7 @@
 #include "../forex-tester-6/RangeBreakoutPullbackStrategy/RangeBreakoutPullbackStrategy.cpp"
 struct Bar {double o,h,l,c,t;};
 Bar series[512];
+Bar contextSeries[320];int contextSize=0,contextReadCount=0,oldestContextOHLC=0;
 std::vector<std::string> logs;
 std::vector<std::string> markerLabels;double markerPrice=0;
 double bidQuote,askQuote,now,grid=0.0001,orderQuote,orderSL,orderTP;
@@ -42,7 +43,17 @@ int __stdcall HistoryType(void*){return selectedHistory>=0?tradeHistory[selected
 double __stdcall HistoryClose(void*){return selectedHistory>=0?tradeHistory[selectedHistory].closeTime:0;}
 PChar __stdcall HistorySymbol(void*){return selectedHistory>=0?(PChar)tradeHistory[selectedHistory].symbol.c_str():(PChar)"EURUSD";}
 void __stdcall PauseMock(void*,PChar){pauseCalls++;}
-unsigned long __stdcall IBars(void*,PChar,int){return 0;}
+void CheckIndexedContext(PChar symbol,int frame,int index=1)
+{
+  Check(NeedContext()&&symbol&&strcmp(symbol,"EURUSD")==0&&frame==PERIOD_M15&&selectedTimeframe==PERIOD_M5,"indexed M15 reads preserve selected Currency/M5 context");
+  Check(index>=1&&index<contextSize,"no index zero or out-of-range M15 read");contextReadCount++;
+}
+unsigned long __stdcall IBars(void*,PChar symbol,int frame){contextReadCount++;return contextSize;}
+double __stdcall IO(void*,PChar symbol,int frame,int i){CheckIndexedContext(symbol,frame,i);oldestContextOHLC=i>oldestContextOHLC?i:oldestContextOHLC;return contextSeries[i].o;}
+double __stdcall IH(void*,PChar symbol,int frame,int i){CheckIndexedContext(symbol,frame,i);return contextSeries[i].h;}
+double __stdcall IL(void*,PChar symbol,int frame,int i){CheckIndexedContext(symbol,frame,i);return contextSeries[i].l;}
+double __stdcall IC(void*,PChar symbol,int frame,int i){CheckIndexedContext(symbol,frame,i);return contextSeries[i].c;}
+double __stdcall IT(void*,PChar symbol,int frame,int i){CheckIndexedContext(symbol,frame,i);return contextSeries[i].t;}
 bool __stdcall Exists(void*,PChar){return false;}
 bool __stdcall Create(void*,PChar name,int type,int,double,double price,double,double,double,double){Check(type==obj_Text,"supported text marker");if(strstr(name,"TOUCH"))markerPrice=price;return true;}
 bool __stdcall Text(void*,PChar,PChar text,int,PChar,int){markerLabels.push_back(text);return true;}
@@ -62,7 +73,10 @@ void Hooks()
   IntrfProcsRec.OrderSymbol=HistorySymbol;IntrfProcsRec.pOrderSymbol=(void*)1;IntrfProcsRec.HistoryTotal=HistoryTotalMock;IntrfProcsRec.pHistoryTotal=(void*)1;
   IntrfProcsRec.OrderTicket=HistoryTicket;IntrfProcsRec.pOrderTicket=(void*)1;IntrfProcsRec.OrderType=HistoryType;IntrfProcsRec.pOrderType=(void*)1;
   IntrfProcsRec.OrderCloseTime=HistoryClose;IntrfProcsRec.pOrderCloseTime=(void*)1;IntrfProcsRec.Pause=PauseMock;IntrfProcsRec.pPause=(void*)1;
-  IntrfProcsRec.iBars=IBars;IntrfProcsRec.SendInstantOrder2=Send;
+  IntrfProcsRec.iBars=IBars;IntrfProcsRec.piBars=(void*)1;
+  IntrfProcsRec.iOpen=IO;IntrfProcsRec.piOpen=(void*)1;IntrfProcsRec.iHigh=IH;IntrfProcsRec.piHigh=(void*)1;
+  IntrfProcsRec.iLow=IL;IntrfProcsRec.piLow=(void*)1;IntrfProcsRec.iClose=IC;IntrfProcsRec.piClose=(void*)1;
+  IntrfProcsRec.iTime=IT;IntrfProcsRec.piTime=(void*)1;IntrfProcsRec.SendInstantOrder2=Send;
   IntrfProcsRec.ObjectExists=Exists;IntrfProcsRec.ObjectCreate=Create;IntrfProcsRec.ObjectSetText=Text;IntrfProcsRec.pObjectCreate=(void*)1;IntrfProcsRec.pObjectSetText=(void*)1;
 }
 void Fresh()
@@ -640,13 +654,205 @@ void ColdStartContext()
   Check(Logged("RBP qualified qualified")&&Logged("RBP qualified armed"),"qualification and prospective arming diagnostics are present");
   Quote(touchLevel-0.0002,touchLevel);Check(attempts==1&&stage==IMPULSE_CONSUMED&&Logged("confirmed entry"),"one executable synthetic quote produces exactly one entry through GetSingleTick");
   Quote(touchLevel-0.0002,touchLevel);Check(attempts==1,"subsequent callback cannot duplicate the consumed opportunity");
+  Check(contextReadCount==0,"legacy mode 2 cold start performs no new M15 context reads");
   ResetStrategy();Check(!startupContextValidated&&!startupHistoryStateKnown&&!startupReadyProgressLogged&&firstProcessedClosedBar==-1&&lastProgressBar==0,"restart clears startup diagnostic and bar-progress state");
 }
+void StructureContextSeries(int d,TDateTime cutoff,double recent=1.207,double older=1.209)
+{
+  contextSize=260;contextReadCount=oldestContextOHLC=0;
+  for(int i=0;i<contextSize;i++)
+  {
+    double h=Min(1.201,recent-0.0002),l=1.199;
+    if(i==5)h=recent;if(i==9)h=older;if(i==13||i==14)h=1.212;if(i==18)h=1.215;
+    contextSeries[i]={1.20,QPrice(d,d==1?h:l),QPrice(d,d==1?l:h),1.20,cutoff+(2-i)*15.0/1440};
+  }
+  contextSeries[0].t=cutoff+1;contextSeries[0].h=99; // never indexed
+  contextSeries[1].h=contextSeries[2].h=99;contextSeries[1].l=contextSeries[2].l=0.01;
+}
+void StructurePending(int d=1,double barrier=1.209)
+{
+  Fresh();SettingsPreset=8;ApplySettingsPreset();EnableWeekendBlackout=false;
+  nbar=40;rmaATR=0.002;now=series[0].t;StructureContextSeries(d,ClosedTime(38),barrier-0.002,barrier);
+  series[3].c=1.20;series[2].c=QPrice(d,1.203);series[1].c=QPrice(d,1.207);
+  series[2].h=QPrice(d,d==1?1.204:1.202);series[2].l=QPrice(d,d==1?1.202:1.204);
+  series[1].h=QPrice(d,d==1?1.208:1.2068);series[1].l=QPrice(d,d==1?1.2068:1.208);
+  StartImpulseAt(d,QPrice(d,1.204),39,ClosedTime(39),1.20,38,ClosedTime(38),rmaATR,ClosedTime(39),"synthetic causal origin");
+}
+void StructureContextGate()
+{
+  for(int d:{1,-1})
+  {
+    StructurePending(d);
+    Check(structureContextReady&&Near(structureBarrier,QPrice(d,1.209)),"last two relevant pivots use max highs/min lows; plateaus and older third pivot excluded");
+    Check(structureReferences[0].center==contextSeries[5].t&&structureReferences[1].center==contextSeries[9].t&&structureReferences[0].confirmation==contextSeries[3].t+15.0/1440,"complete right-side confirmation by origin-open cutoff");
+    Check(oldestContextOHLC==202&&selectedTimeframe==PERIOD_M5,"scan uses exactly at most 200 eligible candles independent of ATR regime");
+    ProcessFirstTouchBar(High(1),Low(1),Close(1));
+    Check(!impulseQualified&&!touchActive&&Logged("has not broken frozen M15 structure"),"clean local breakout beneath older frozen resistance/support fails");
+    double boundary=structureBarrier+d*QualifiedImpulseBreakoutBufferATR*setupATR;
+    series[1].c=boundary;Check(!TryQualifyImpulse(nbar),"exact context close buffer is strict in both directions");
+    double barrier=structureBarrier;StructureReference saved[2];memcpy(saved,structureReferences,sizeof(saved));
+    contextSeries[5].h=10;contextSeries[9].l=0.01;int reads=contextReadCount;
+    Check(CaptureStructureContext()&&reads==contextReadCount&&memcmp(saved,structureReferences,sizeof(saved))==0&&barrier==structureBarrier,"snapshot never substituted after subsequent data changes");
+    QBar(d,1.211,1.212,1.2108,1.2115,1.2114);
+    Check(impulseQualified&&touchActive&&qualifyingTime==Time(1),"long reversal and bearish continuation beyond older structure can qualify");
+
+    StructurePending(d);ResetQualification();StructureContextSeries(d,ClosedTime(38));
+    contextSeries[5].t=ClosedTime(38)-15.0/1440+1.0/86400; // end one second after cutoff; cannot round it in
+    BeginQualification(39);
+    Check(!structureContextReady||structureReferences[0].center!=contextSeries[5].t,"future close cannot pass by minute rounding");
+
+    StructurePending(d);ResetQualification();StructureContextSeries(d,ClosedTime(38));
+    contextSize=10;BeginQualification(39);
+    Check(!structureContextReady&&!TryQualifyImpulse(40),"older pivot needs its full left neighborhood; no partial-history fallback");
+    size_t count=logs.size();CaptureStructureContext();CaptureStructureContext();Check(logs.size()==count,"missing-context reason deduplicates independently of M5 readiness");
+    TDateTime cutoff=structureCutoff;contextSize=260;Check(CaptureStructureContext()&&structureCutoff==cutoff,"missing history recovers only against original cutoff without demanding all 200");
+    ResetQualification();contextSize=12;BeginQualification(39);Check(structureContextReady,"two relevant pivots suffice with fewer than 200 bars and without opposite pivots");
+
+    ResetQualification();IntrfProcsRec.piHigh=NULL;BeginQualification(39);
+    Check(!structureContextReady&&Logged("API unavailable")&&!TryQualifyImpulse(40),"missing indexed SDK capability blocks qualification clearly");
+    IntrfProcsRec.piHigh=(void*)1;Check(CaptureStructureContext()&&structureCutoff==cutoff,"API recovery preserves origin cutoff");
+    ResetQualification();contextSeries[6].c=HUGE_VAL;BeginQualification(39);Check(!structureContextReady,"invalid eligible OHLC blocks context");
+
+    ResetQualification();StructureContextSeries(d,ClosedTime(38));
+    // Only one pivot inside the eligible 200. Pivots beyond the bound cannot cure it.
+    for(int i=3;i<203;i++){contextSeries[i].h=1.201;contextSeries[i].l=1.199;}
+    contextSeries[5].h=d==1?1.207:1.201;contextSeries[5].l=d==1?1.199:1.193;
+    contextSeries[210].h=1.22;contextSeries[210].l=1.18;BeginQualification(39);
+    Check(!structureContextReady,"older out-of-scan structure cannot supply missing second pivot");
+  }
+  for(int mode:{0,1,2}){Fresh();ImpulseEntryMode=mode;int before=contextReadCount;StartImpulseAt(1,1.21,nbar,Time(1),1.20,nbar-2,Time(3),rmaATR,Time(1),"legacy");Check(before==contextReadCount,"modes 0-2 make no new M15 context reads");}
+}
+// Build completed history, then run production chronological qualification transitions.
+void StructurePath(const std::vector<double> &closes,int d=1,double minimum=0.70,int maximum=12)
+{
+  Fresh();SettingsPreset=8;ApplySettingsPreset();EnableWeekendBlackout=false;
+  StructureImpulseMinimumEfficiency=minimum;StructureImpulseMaximumBars=maximum;nbar=50;rmaATR=0.002;
+  long origin=nbar-(long)closes.size()+1;StructureContextSeries(d,ClosedTime(origin),1.2006,1.2008);
+  for(size_t i=0;i<closes.size();i++)
+  {
+    int shift=ClosedBarShift(origin+(long)i);double c=QPrice(d,closes[i]);
+    series[shift]={c,c+0.0001,c-0.0001,c,series[shift].t};
+  }
+  long seed=origin+1;
+  StartImpulseAt(d,d==1?ClosedHigh(seed):ClosedLow(seed),seed,ClosedTime(seed),1.20,origin,ClosedTime(origin),rmaATR,ClosedTime(seed),"quality path seed");
+  // Preserve complete observed paths, with no historical retracement after endpoints.
+  for(long bar=seed;bar<=nbar;bar++)Remember(bar,d==1?ClosedHigh(bar):ClosedLow(bar),d,d==1?ClosedHigh(bar):ClosedLow(bar));
+  bidQuote=ClosedClose(nbar);askQuote=bidQuote+0.0002;
+}
+void StructureImpulseQuality()
+{
+  for(int d:{1,-1})
+  {
+    StructurePath({1.20,1.202,1.204,1.207},d);RecoverFirstTouchChronologically(qualifiedFirstSeedBar);
+    Check(impulseQualified&&touchActive&&Near(structureEfficiency,1)&&structureDuration==3,"clean signed long/short close path qualifies via production transitions");
+    double measured=structureEfficiency;long duration=structureDuration;QBar(d,1.209,1.21,1.2088,1.2095,1.2094);
+    Check(impulseQualified&&structureEfficiency==measured&&structureDuration==duration,"qualification metrics latch while endpoints advance");
+    StructurePath({1.20,1.205,1.201,1.207},d);RecoverFirstTouchChronologically(qualifiedFirstSeedBar);
+    Check(!impulseQualified&&!touchActive&&structureEfficiency<0.70&&ImpulseDisplacement()>=0.006,"overlapping close path fails despite sufficient extreme displacement");
+    StructurePath({1.20,1.198,1.197},d);Check(!TryQualifyImpulse(nbar)&&structureEfficiency<0,"signed numerator cannot turn wrong-direction movement into efficiency");
+  }
+  // Exact binary-representable efficiency boundary: net .125 / path .25 = .5.
+  StructurePath({1.25,1.28125,1.21875,1.375},1,0.5);QualifiedImpulseMinimumDisplacementATR=50;RecoverFirstTouchChronologically(qualifiedFirstSeedBar);
+  Check(impulseQualified&&structureEfficiency==0.5,"exact efficiency threshold is inclusive");
+  StructurePath({1.25,1.28125,1.21875,1.375},1,0.500001);QualifiedImpulseMinimumDisplacementATR=50;RecoverFirstTouchChronologically(qualifiedFirstSeedBar);Check(!impulseQualified,"just below configured efficiency fails");
+  std::vector<double> closes(13,1.20);for(int i=1;i<13;i++)closes[i]=1.20+i*0.00051;
+  StructurePath(closes);RecoverFirstTouchChronologically(qualifiedFirstSeedBar);Check(impulseQualified&&structureDuration==12,"exact 12-bar duration qualifies");
+  StructurePath(std::vector<double>(14,1.20));long boundary=consumedBar;RecoverFirstTouchChronologically(qualifiedFirstSeedBar);
+  Check(!impulseQualified&&stage==0&&consumedBar==boundary&&!touchActive,"13-bar never-qualified replay expires without consumed-boundary lock");
+  StructurePath({1.20,1.20,1.20});Check(!TryQualifyImpulse(nbar)&&structurePath==0,"zero close path rejected");
+  StructurePath({1.20,1.203,1.207});series[2].c=0;Check(!TryQualifyImpulse(nbar)&&Logged("missing or invalid M5 close path"),"missing participating close is not replaced");
+  StructurePath({1.20,1.203,1.207});series[2].c=HUGE_VAL;Check(!TryQualifyImpulse(nbar),"nonfinite path rejected");
+  StructurePath({1.20,1.203,1.207});historyBars=2;Check(!TryQualifyImpulse(nbar),"unavailable path history rejected");
+  StructurePath({1.20,1.202,1.2001}); // sufficient wick first, breakout close later but no early conjunction
+  series[2].c=1.2001;series[2].h=1.208;setupExtreme=1.208;Check(!TryQualifyImpulse(nbar-1),"M15/local close and displacement must hold on actual same bar");
+  series[1].c=1.207;Check(TryQualifyImpulse(nbar)&&qualifyingBar==nbar,"later conjunction records later qualifying bar, never earlier wick bar");
+  StructurePath({1.20,1.203,1.207});StructureImpulseMaximumBars=1;ProcessFirstTouchBar(High(1),Low(1),Close(1));Check(stage==0&&consumedBar==-1,"live pending expiry releases candidate");
+  haveLatestSwingLow=true;latestSwingLow=1.20;latestSwingLowBar=nbar-1;latestSwingLowTime=Time(2);StructureImpulseMaximumBars=12;
+  ProcessImpulseSetup(1.2000,1.203,1.1999,1.2025,1.20);Check(activeImpulseSetup&&impulseOriginBar==nbar-1&&consumedBar==-1,"fresh causal leg can follow expired candidate");
+  for(int bad=0;bad<7;bad++)
+  {
+    StructurePath({1.20,1.203,1.207});
+    if(bad==0)StructureContextPivotStrength=0;if(bad==1)StructureContextPivotStrength=100;
+    if(bad==2)StructureImpulseMinimumEfficiency=0;if(bad==3)StructureImpulseMinimumEfficiency=1.01;
+    if(bad==4)StructureImpulseMinimumEfficiency=HUGE_VAL;if(bad==5)StructureImpulseMaximumBars=0;if(bad==6)StructureImpulseMaximumBars=31;
+    qualifiedConfigValid=ValidateQualifiedSettings();Check(!qualifiedConfigValid&&!TryQualifyImpulse(nbar),"invalid mode-3 control blocks without clamping");
+    for(int mode:{0,1,2}){ImpulseEntryMode=mode;Check(ValidateQualifiedSettings(),"legacy modes ignore new invalid controls");}
+  }
+  // Resolve invalid late Custom inputs exactly once.
+  StructurePath({1.20,1.203,1.207});StructureImpulseMinimumEfficiency=0;SettingsPreset=0;
+  for(int i=0;i<runOptionCount;i++){RunOption &v=runOptions[i];if(v.type==ot_Double)v.custom.number=*(double*)v.effective;else if(v.type==ot_Boolean)v.custom.boolean=*(bool*)v.effective;else v.custom.integer=*(int*)v.effective;}
+  ResetStrategy();logs.clear();GetSingleTick();GetSingleTick();int errors=0;for(auto &line:logs)if(line.find("configuration error")!=std::string::npos)errors++;
+  Check(errors==1&&!qualifiedConfigValid&&attempts==0,"one clear mode-3 configuration error per run");
+}
+void CloseStructureBar(int d,double o,double h,double l,double c)
+{
+  double t=series[0].t;Bar closed={QPrice(d,o),QPrice(d,d==1?h:l),QPrice(d,d==1?l:h),QPrice(d,c),t};
+  // Observe the actual endpoint then closing quote in its live bar.
+  Quote(d==1?closed.h:closed.l,(d==1?closed.h:closed.l)+0.0002);
+  Quote(closed.c,closed.c+0.0002);
+  for(int i=511;i>0;i--)series[i]=series[i-1];series[1]=closed;
+  series[0]={closed.c,closed.c+0.0001,closed.c-0.0001,closed.c,t+5.0/1440};now=series[0].t;
+  bidQuote=closed.c;askQuote=closed.c+0.0002;GetSingleTick();
+}
+void StructureCallbackSetup(int d,bool singleDirection=false)
+{
+  Fresh();ResetStrategy();SettingsPreset=singleDirection?0:8;contextBound=false;logs.clear();
+  if(singleDirection)
+    for(int i=0;i<runOptionCount;i++){RunOption &v=runOptions[i];if(v.type==ot_Double)v.custom.number=*(double*)v.effective;else if(v.type==ot_Boolean)v.custom.boolean=*(bool*)v.effective;else v.custom.integer=*(int*)v.effective;}
+  if(singleDirection)
+    for(int i=0;i<runOptionCount;i++)
+    {
+      RunOption &v=runOptions[i];if(v.effective==&ImpulseEntryMode)v.custom.integer=3;if(v.effective==&TradeDirection)v.custom.integer=1;
+      if(v.effective==&RegimeLookback)v.custom.integer=200;if(v.effective==&StructureImpulseMinimumEfficiency)v.custom.number=0.70;
+      if(v.effective==&StructureImpulseMaximumBars)v.custom.integer=12;if(v.effective==&StructureContextPivotStrength)v.custom.integer=2;
+    }
+  now=46000.5;for(int i=0;i<512;i++)series[i]={1.20,1.2002,1.1998,1.20,now-i*5.0/1440};
+  bidQuote=1.20;askQuote=1.2002;attempts=buyAttempts=sellAttempts=0;busy=false;
+  for(int i=0;i<220;i++)CloseStructureBar(d,1.20,1.2002,1.1998,1.20);
+  Check(startupContextValidated&&startupHistoryReady&&atrPctCount>=200&&nbar>=200,"mode 3 builds real callback binding/history/risk warmup");
+  StructureContextSeries(d,series[0].t-2*5.0/1440,1.2006,1.2008);
+  // The third older pivot makes target structure irrelevant to the frozen last two gate.
+  CloseStructureBar(d,1.20,1.2010,1.1999,1.2005);
+  Check(activeImpulseSetup&&structureContextReady&&!impulseQualified&&!touchActive,"callbacks derive confirmed origin, M15 snapshot and pending parent");
+  CloseStructureBar(d,1.2005,1.2016,1.20115,1.2013);
+  Check(impulseQualified&&touchActive&&qualifyingBar==nbar&&structureEfficiency>=0.70&&attempts==0,"callbacks derive actual qualification and prospective arming without arm-tick order");
+}
+void StructureFirstTouch()
+{
+  for(int d:{1,-1})
+  {
+    std::vector<std::string> prefix;double entry=0;
+    for(int future:{0,1})
+    {
+      StructureCallbackSetup(d);double level=touchLevel;TDateTime cutoff=structureCutoff;
+      Touch(d);Check(attempts==1&&stage==IMPULSE_CONSUMED&&orderType==(d==1?op_Buy:op_Sell),"allowed long reversal/short continuation executes future first-touch quote");
+      if(!future){prefix=logs;entry=orderQuote;}else Check(prefix==logs&&entry==orderQuote,"identical information through entry yields identical decisions with different future continuations");
+      Touch(d);Check(attempts==1&&structureCutoff==cutoff,"one order per parent");
+      CloseStructureBar(d,1.2013,1.202+future*0.001,1.2012,1.2015);
+      ResetStrategy();Check(!structureContextReady&&structureCutoff==0&&structureBarrier==0&&structureDuration==0&&structurePath==0&&!impulseQualified&&!touchActive&&structureReferences[0].center==0&&lastStructureGateReason[0]==0,"reset clears every context/metric/readiness state");
+    }
+  }
+  StructureCallbackSetup(-1,true);Touch(-1);
+  Check(attempts==0&&stage==IMPULSE_CONSUMED&&consumedDirection==-1&&Logged("direction blocked at first touch"),"Custom buys-only still observes, qualifies and consumes opposite short");
+  // Recovery sees only old M15 structure and the close path of each replayed bar.
+  StructurePath({1.20,1.202,1.204,1.207,1.2075});long first=qualifiedFirstSeedBar;
+  contextSeries[1].h=50;contextSeries[2].h=50; // later, unfinished/inside-impulse data
+  RecoverFirstTouchChronologically(first);
+  Check(impulseQualified&&qualifyingBar==nbar-1&&structureDuration==3&&Near(structureEfficiency,1)&&touchActive,"chronological recovery freezes actual earlier qualifying metrics without later close/context look-ahead");
+  double oldBarrier=structureBarrier;Check(oldBarrier<2&&structureReferences[0].confirmation<=structureCutoff,"recovery references remain known before origin");
+  StructurePath({1.20,1.205,1.201,1.207,1.23});first=qualifiedFirstSeedBar;
+  RecoverFirstTouchChronologically(first);
+  Check(impulseQualified&&qualifyingBar==nbar&&structureDuration==4,"later efficient endpoint cannot make earlier overlapping replay bar qualify");
+}
+
 int main(int argc,char **argv)
 {
   if(argc!=2){fprintf(stderr,"One named case required\n");return 2;}Hooks();InitStrategy();ReplaceStr(Currency,(PChar)"EURUSD");
   std::string name=argv[1];
-  if(name=="cold_start_context")ColdStartContext();
+  if(name=="structure_context_gate")StructureContextGate();
+  else if(name=="structure_impulse_quality")StructureImpulseQuality();
+  else if(name=="structure_first_touch")StructureFirstTouch();
+  else if(name=="cold_start_context")ColdStartContext();
   else if(name=="qualified_impulse_gate")QualifiedImpulseGate();
   else if(name=="qualified_pullback_touch")QualifiedPullbackTouch();
   else if(name=="qualified_parent_lifecycle")QualifiedParentLifecycle();
