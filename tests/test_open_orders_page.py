@@ -6172,3 +6172,82 @@ vm.runInThisContext(fs.readFileSync(process.argv[1],'utf8'));
     result = subprocess.run([node, "-e", harness, str(ROOT / "render/static/open_orders.js"), json.dumps(headers), json.dumps(master_service.OPEN_ORDERS_TEMPLATE)], capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
     assert "price cell assertions passed" in result.stdout
+
+
+def test_price_edit_reload_retains_intent_and_resolves_row_readiness():
+    node = shutil.which("node") or r"C:\Program Files\nodejs\node.exe"
+    headers = re.findall(r"<th>(.*?)</th>", master_service.OPEN_ORDERS_TEMPLATE)
+    harness = r"""
+const fs=require('fs'),vm=require('vm'),assert=require('assert');
+class Element {
+  constructor(tag=''){this.tag=tag;this.children=[];this.parentNode=null;this.style={};this._text='';this.handlers={};this.dataset={};this.disabled=false;this.value='';this.hidden=false;}
+  set textContent(value){this.innerHTML='';this._text=String(value);}
+  get textContent(){return this._text+this.children.map(child=>child.textContent).join('');}
+  set innerHTML(value){for(const child of this.children)child.parentNode=null;this.children=[];this._text=String(value);}
+  appendChild(child){this.insertBefore(child,null);return child;}
+  insertBefore(child,before){if(child===before)return;if(child.parentNode)child.remove();const i=before?this.children.indexOf(before):this.children.length;assert(i>=0);this.children.splice(i,0,child);child.parentNode=this;}
+  remove(){if(this.parentNode){const p=this.parentNode;p.children.splice(p.children.indexOf(this),1);this.parentNode=null;}}
+  addEventListener(event,fn){this.handlers[event]=fn;}
+  setAttribute(k,v){this[k]=v;}
+  querySelector(){return null;}
+  click(){return this.disabled?undefined:this.handlers.click?.();}
+  focus(){document.activeElement=this;}
+  setSelectionRange(start,end){if(this.tag!=='input'||this.type!=='text')throw new Error('Selection requires text-backed input');this.selectionStart=start;this.selectionEnd=end;}
+  select(){this.setSelectionRange(0,this.value.length);}
+}
+
+const tbody=new Element('tbody'),table=new Element('table');table.querySelector=()=>tbody;
+const elements={'open-orders-table':table};for(const id of ['open-orders-status','open-orders-empty','refresh-btn','open-orders-errors','open-orders-warnings'])elements[id]=new Element();
+const headers=JSON.parse(process.argv[2]);
+const walk=node=>[node,...node.children.flatMap(walk)];const find=(root,text)=>walk(root).find(e=>e.tag==='button'&&e.textContent===text);
+const select=cell=>walk(cell).find(e=>e.tag==='select');const idle=cell=>walk(cell).find(e=>e.className==='classification-value');
+const cell=(tr,label)=>tr.children[headers.indexOf(label)];
+const change=(el,value)=>{assert(!el.disabled);assert(el.children.some(option=>option.value===value));el.value=value;el.handlers.change();};
+const escape=cell=>cell.handlers.keydown({key:'Escape',preventDefault(){}});
+const inside=(child,parent)=>walk(parent).includes(child);
+global.window={__OPEN_ORDERS_TESTING__:true,addEventListener(){}};
+global.document={hidden:true,getElementById:id=>elements[id]||null,createElement:tag=>new Element(tag),addEventListener(){}};
+global.BroadcastChannel=undefined;global.setInterval=()=>1;global.clearInterval=()=>{};
+
+const input=td=>walk(td).find(e=>e.tag==='input');
+const edit=td=>walk(td).find(e=>e.className==='price-edit');
+const enter=(td,value)=>{input(td).value=value;input(td).handlers.input();};
+const storage={};window.localStorage={getItem:k=>storage[k]||null,setItem:(k,v)=>{storage[k]=v;}};
+let count=0;window.crypto={randomUUID:()=>('operation_browser_'+String(++count).padStart(4,'0'))};
+
+let row={broker:'Bybit',account:'synthetic',category:'linear',instrument:'FIXTUREUSDT',type:'Position',id:'fixture',position_idx:0,side:'Buy',entry_price:'0.04996',current_price:'0.04986',stop_loss:'0.04858',take_profit:'0.05379',leverage:10,_price_read_started:1,source_pending:false,source_stale:false,collection_version:1,price_edit:{target:'fixture-life',fields:['stop_loss','take_profit'],unit:'0.00001',levels:{entry:'0.04996',stop_loss:'0.04858',take_profit:'0.05379'}}};
+let snapshot={version:1,progress_revision:1,items:[row],pending:true,core_complete:false,sources:[{state:'pending'}]};
+const reply=(data,status=200)=>({ok:status===200,status,json:async()=>data,text:async()=>JSON.stringify(data)});
+let reads=0,writes=0,queue=[];
+global.fetch=async(url,opts={})=>{
+ if(opts.method==='POST'){
+  if(url==='/api/open-orders/amend-status')return reply({status:'unknown',message:'Outcome unknown'});
+  assert.strictEqual(url,'/api/open-orders/amend');writes++;const body=JSON.parse(opts.body);assert.strictEqual(body.value,'0.04848');assert.strictEqual(body.mode,'price');assert.strictEqual(body.base.take_profit,'0.05379');assert.strictEqual(body.base.entry,'0.04996');return reply({detail:'Broker data incomplete. Refresh this row.'},409);
+ }
+ if(url.includes('/version'))return reply({version:1,progress_revision:1});
+ reads++;return reply(queue.length?queue.shift()():snapshot);
+};
+vm.runInThisContext(fs.readFileSync(process.argv[1],'utf8'));
+(async()=>{
+ const hooks=window.__openOrdersTestHooks;await hooks.refresh('progress');
+ let tr=tbody.children[0],sl=cell(tr,'Stop Loss');edit(sl).click();enter(sl,'0.04848');input(sl).setSelectionRange(3,5);input(sl).focus();
+ const typed=input(sl),units=select(sl);await find(sl,'Save').click();assert.strictEqual(writes,1);assert(find(sl,'Save').disabled);
+ let before=reads;
+ queue=[()=>{assert.strictEqual(typed.value,'0.04848');assert(find(sl,'Save').disabled);return {...snapshot,items:[{...row,source_pending:true,source_stale:true}]};},()=>({...snapshot,items:[{...row,_price_read_started:2}]})];
+ await find(sl,'Reload').click();assert.strictEqual(reads-before,2);assert.strictEqual(input(sl),typed);assert.strictEqual(typed.value,'0.04848');assert.strictEqual(units.value,'price');assert.strictEqual(document.activeElement,typed);assert.strictEqual(typed.selectionStart,3);assert(!find(sl,'Save').disabled);assert.strictEqual(writes,1);assert(cell(tr,'Take Profit').textContent.includes('0.05379'));
+ // A stale publication conflicts; three unchanged snapshots cannot recover it.
+ snapshot={...snapshot,items:[{...row,price_edit:{...row.price_edit,levels:{...row.price_edit.levels,stop_loss:'0.04857'}}}]};await hooks.refresh('progress');before=reads;await find(sl,'Reload').click();assert.strictEqual(reads-before,3);assert(find(sl,'Save').disabled);assert.strictEqual(typed.value,'0.04848');
+ // Missing and replacement lifecycle never acquire authority from the old draft.
+ snapshot={...snapshot,items:[]};await find(sl,'Reload').click();assert(find(sl,'Save').disabled);assert(sl.textContent.includes('missing'));assert.strictEqual(typed.value,'0.04848');
+ snapshot={...snapshot,items:[{...row,_price_read_started:3,price_edit:{...row.price_edit,target:'replacement'}}]};await find(sl,'Reload').click();assert(find(sl,'Save').disabled);assert.strictEqual(typed.value,'0.04848');
+ // An unresolved persisted operation remains blocked and is only reconciled by reads.
+ storage['ltt-open-order-amendments-v1']=JSON.stringify({pending_fixture:{operation_id:'pending_fixture',target:'replacement',field:'stop_loss',mode:'price',value:'0.04848',base:{unit:'0.00001',...row.price_edit.levels}}});
+ // Reinitialize the actual page, as after a browser reload with retained operation state.
+ tbody.innerHTML='';vm.runInThisContext(fs.readFileSync(process.argv[1],'utf8'));await window.__openOrdersTestHooks.refresh('progress');
+ tr=tbody.children[0];sl=cell(tr,'Stop Loss');assert(find(sl,'Save').disabled);assert(find(sl,'Cancel').disabled);document.hidden=false;await window.__openOrdersTestHooks.pollVersion();assert(find(sl,'Save').disabled);assert.strictEqual(writes,1);
+ console.log('reload intent/readiness assertions passed');
+})().catch(error=>{console.error(error);process.exitCode=1;});
+
+"""
+    result = subprocess.run([node, "-e", harness, str(ROOT / "render/static/open_orders.js"), json.dumps(headers)], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr

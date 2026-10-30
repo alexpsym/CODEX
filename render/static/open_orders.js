@@ -89,9 +89,9 @@
     if(list){list.innerHTML='';formatted.forEach(text=>{const li=document.createElement('li');li.textContent=text;list.appendChild(li);});}
   };
   const buildFetchError=(url,status,statusText,bodyText,bodyJson)=>{const detailErrors=bodyJson?.detail?.errors||bodyJson?.errors; const flattened=formatSourceErrors(detailErrors); if(flattened.length) return new Error(flattened.join(' | ')); const endpoint=safeEndpoint(url)||'unknown endpoint'; const httpStatus=safeDiagnostic(status,'unknown'); const parsedBody=bodyJson&&typeof bodyJson==='object'?JSON.stringify(bodyJson):bodyText; const body=safeDiagnostic(parsedBody); const reason=body||safeDiagnostic(statusText,'upstream returned no diagnostic details'); return new Error(`GET ${endpoint} failed: HTTP ${httpStatus} ${reason}`.trim());};
-  const fetchJson=async(url)=>{
+  const fetchJson=async(url,timeoutMs=GET_TIMEOUT_MS)=>{
     const controller=new AbortController(); let timer;
-    const deadline=new Promise((_,reject)=>{timer=setTimeout(()=>{controller.abort();reject(new Error('GET '+url+': deadline exceeded ('+GET_TIMEOUT_MS/1000+'s); broker visibility unknown'));},GET_TIMEOUT_MS);});
+    const deadline=new Promise((_,reject)=>{timer=setTimeout(()=>{controller.abort();reject(new Error('GET '+url+': deadline exceeded ('+GET_TIMEOUT_MS/1000+'s); broker visibility unknown'));},timeoutMs);});
     try{
       return await Promise.race([(async()=>{
         const response=await fetch(url,{cache:'no-store',signal:controller.signal});
@@ -278,6 +278,7 @@
     state.fillFeedback=document.createElement('span');state.fillFeedback.setAttribute('role','status');state.td.appendChild(state.fillFeedback);
     updateLocalFillCell(entry,state);input.focus?.();
   };
+  let priceRecovery=false;
   const updatePriceCell=(entry,state)=>{
     const d=state.draft;if(!d)return;
     const p=entry.item.price_edit;
@@ -288,7 +289,7 @@
     const busy=Boolean(d.operation),available=entry.present&&p?.fields?.includes(state.field);
     state.input.disabled=busy;state.units.disabled=busy;
     state.save.disabled=busy||priceBusy(entry)||!available||d.conflict||!d.dirty;
-    state.cancel.disabled=busy;state.reload.hidden=!d.conflict;state.reload.disabled=busy||!entry.present;
+    state.cancel.disabled=busy;state.reload.hidden=!d.conflict;state.reload.disabled=busy||d.recovering;
     state.feedback.textContent=d.message||'';
   };
   const renderPriceCell=(entry,state)=>{
@@ -366,7 +367,28 @@
     input.addEventListener('input',dirty);units.addEventListener('change',()=>{input.value=units.value==='ticks'?(p.ticks?.[state.field]||''):d.base[state.field];dirty();});
     const cancel=()=>{if(d.operation)return;state.draft=null;renderPriceCell(entry,state);};
     state.save=button('Save',()=>savePriceCell(entry,state));state.cancel=button('Cancel',cancel);
-    state.reload=button('Reload',async()=>{if(d.operation)return;await refresh('progress');if(!entry.present||refreshNeedsRecovery)return;state.draft=null;openPriceCell(entry,state);});
+    state.reload=button('Reload',async()=>{
+      if(d.operation||priceRecovery)return;
+      const started=Number(entry.item._price_read_started||0),key=rowKey(entry.item),deadline=Date.now()+20000;
+      d.recovering=true;d.conflict=true;priceRecovery=true;
+      d.message='Refreshing this row; your draft is retained.';updatePriceCell(entry,state);
+      try{
+        for(let attempt=0;attempt<3&&Date.now()<deadline;attempt++){
+          const payload=await refresh('price-recovery',Math.max(1,deadline-Date.now()));
+          const matches=(payload?.items||[]).filter(item=>rowKey(item)===key);
+          if(!payload){d.message='Row refresh failed; draft retained. Reload when broker data is available.';break;}
+          if(matches.length!==1){d.message='Row missing or ambiguous; draft retained. Review the trade before editing.';break;}
+          const item=matches[0],p=item.price_edit;
+          if(p?.target!==d.target){d.message='Row lifecycle changed; draft retained without permission to amend the replacement.';break;}
+          if(item.source_pending!==false||item.source_stale!==false||Number(item.collection_version)!==Number(payload.version)||Number(item._price_read_started||0)<=started||!p.fields?.includes(state.field)){
+            d.message='Fresh data for this row is still unavailable; draft retained. Reload later.';continue;
+          }
+          const changed=['entry','stop_loss','take_profit','unit'].some(k=>String(d.base[k]??'')!==String(k==='unit'?p.unit:p.levels?.[k]));
+          if(changed){d.message='Broker baseline changed; draft retained. Review it and reopen the editor before saving.';break;}
+          d.conflict=false;d.message='Fresh row verified; draft retained. Save explicitly when ready.';break;
+        }
+      }finally{d.recovering=false;priceRecovery=false;updatePriceCell(entry,state);}
+    });
     for(const el of [state.save,state.cancel,state.reload])state.td.appendChild(el);
     state.feedback=document.createElement('span');state.feedback.className='classification-feedback';state.feedback.setAttribute('role','status');state.td.appendChild(state.feedback);
     state.td.addEventListener('keydown',event=>{if(event.key==='Escape'){event.preventDefault();cancel();}if(event.key==='Enter'){event.preventDefault();savePriceCell(entry,state);}});
@@ -516,7 +538,9 @@
       if(visible){pendingVisibilityChecks.delete(key);setBadge('Submitted; broker state is now visible.');}
     }
   };
-  const refresh=async(reason='manual')=>{
+  const refresh=async(reason='manual',timeoutMs=GET_TIMEOUT_MS)=>{
+    if(priceRecovery&&reason!=='price-recovery')return;
+    if(reason==='price-recovery'&&refreshInFlight){await refreshInFlight;return null;}
     if(refreshInFlight){
       if(['broadcast','submit'].includes(reason))refreshQueued=true;
       return refreshInFlight.then(()=>{if(refreshQueued){refreshQueued=false;return refresh('progress');}});
@@ -524,7 +548,7 @@
     refreshInFlight=(async()=>{
       try{
         if(!hasSnapshot)setBadge('Loading broker data');
-        const payload=await fetchJson(reason==='manual'?'/api/open-orders?force=1':'/api/open-orders');
+        const payload=await fetchJson(['manual','price-recovery'].includes(reason)?'/api/open-orders?force=1':'/api/open-orders',timeoutMs);
         if(payload.refresh_superseded)return;
         const renderedVersion=Number(payload.version);
         if(knownVersion!==null&&Number.isFinite(renderedVersion)&&renderedVersion<knownVersion)return;
@@ -539,6 +563,7 @@
         const details=[pending?pending+' sources pending':'',errors?errors+' errors':'',warnings?warnings+' warnings':''].filter(Boolean).join(', ');
         setBadge(status+(details?' ('+details+')':''));
         confirmVisibility();
+        return payload;
       }catch(err){
         refreshNeedsRecovery=true;
         if(emptyState&&!hasData){emptyState.style.display='block';emptyState.textContent='Broker data incomplete';}
@@ -602,7 +627,7 @@
     if(changed)render(items,window.__openOrdersErrors||[],window.__openOrdersWarnings||[]);
   };
   const pollVersion=async()=>{
-    if(document.hidden)return;
+    if(document.hidden||priceRecovery)return;
     if(versionInFlight)return versionInFlight;
     versionInFlight=(async()=>{try{
       await reconcilePriceOperations();
