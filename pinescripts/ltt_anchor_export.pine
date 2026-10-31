@@ -1,5 +1,10 @@
 //@version=6
-indicator("LTT anchor export (personal)", overlay = true, max_lines_count = 1)
+indicator("LTT anchor export (personal)", overlay = true, behind_chart = false, max_lines_count = 1)
+// UPDATE: remove/re-add ONLY this helper instance for behind_chart=false to apply.
+// behind_chart=false places it in front of chart bars, not necessarily every
+// manual drawing. Use the helper's Visual Order > Bring to front if needed.
+// Preserve all rectangles, drawings and Custom Indicator. Copy the NEW ready
+// message after every point change; old Pine Logs messages are not current state.
 // PERSONAL script: published scripts cannot generate Pine Logs.
 // Select two endpoints on the SAME intended channel boundary, first then second.
 // Drag the paired markers, edit exact prices in Settings > Inputs, or use the
@@ -20,19 +25,47 @@ if time == time1
 if time == time2
     resolved2 := time
 bool supported = chart.is_standard and (timeframe.isseconds or timeframe.isminutes or timeframe.isdaily or timeframe.isweekly or timeframe.ismonthly)
-bool valid = supported and time1 > 0 and time2 > time1 and price1 > 0 and price2 > 0 and not na(resolved1) and not na(resolved2) and time2 <= last_bar_time
+string reason = ""
+if not supported
+    reason := "Unsupported chart. Use standard time-based bars/candles."
+else if time1 <= 0 or time2 <= 0
+    reason := "Select both anchor points (Reset points to reselect)."
+else if time2 <= time1
+    reason := "Anchor 2 must be later than anchor 1."
+else if price1 <= 0 or price2 <= 0
+    reason := "Both coordinate prices must be positive."
+else if time1 > timenow
+    reason := "Anchor 1 is in the future. Reselect a past loaded bar."
+else if time2 > timenow
+    reason := "Anchor 2 is in the future. Reselect a past loaded bar."
+else if na(resolved1)
+    reason := "Anchor 1 is not a loaded bar-opening time. Load history or reselect."
+else if na(resolved2)
+    reason := "Anchor 2 is not a loaded bar-opening time. Load history or reselect."
+else if time2 > last_bar_time
+    reason := "Anchor 2 is after the latest loaded bar. Reselect a loaded point."
+bool valid = reason == ""
 var line boundary = na
+var table selectionStatus = table.new(position.top_right, 1, 1, bgcolor = color.black, frame_color = color.white, frame_width = 1)
 varip string emitted = ""
+string coordinates = "A1 UTC " + str.format_time(time1, "yyyy-MM-dd HH:mm:ss", "UTC") + " @ " + str.tostring(price1, "0.################") + "\nA2 UTC " + str.format_time(time2, "yyyy-MM-dd HH:mm:ss", "UTC") + " @ " + str.tostring(price2, "0.################")
 if barstate.islast
+    string status = syminfo.tickerid + " / " + timeframe.period + "\n" + (valid ? "READY - copy the NEW LTT_ANCHORS_V1 message.\n" : "NOT READY: " + reason + "\n") + coordinates
+    table.cell(selectionStatus, 0, 0, status, text_color = valid ? color.aqua : color.yellow, bgcolor = color.black, text_size = size.small)
     if valid
         if na(boundary)
-            boundary := line.new(resolved1, price1, resolved2, price2, xloc = xloc.bar_time, color = color.aqua, width = 2)
+            boundary := line.new(resolved1, price1, resolved2, price2, xloc = xloc.bar_time, color = color.rgb(0, 255, 255), width = 4)
+        else
+            line.set_xy1(boundary, resolved1, price1)
+            line.set_xy2(boundary, resolved2, price2)
         string packet = '{"schema":"ltt-anchors/v1","symbol":"' + syminfo.tickerid + '","timeframe":"' + timeframe.period + '","anchors":[{"timestamp_ms":' + str.tostring(resolved1, "0") + ',"price":"' + str.tostring(price1, "0.################") + '"},{"timestamp_ms":' + str.tostring(resolved2, "0") + ',"price":"' + str.tostring(price2, "0.################") + '"}]}'
         if packet != emitted
             log.info("LTT_ANCHORS_V1 " + packet)
             emitted := packet
     else
-        string diagnostic = "LTT anchors unavailable: use a standard time-based chart, positive prices and two increasing loaded bar-opening times. Reset/reselect points; future or unloaded points cannot be exported."
-        if diagnostic != emitted
-            log.warning(diagnostic)
-            emitted := diagnostic
+        if not na(boundary)
+            line.delete(boundary)
+            boundary := na
+        if status != emitted
+            log.warning(status)
+            emitted := status

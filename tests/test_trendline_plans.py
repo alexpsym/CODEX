@@ -257,3 +257,28 @@ def test_trendline_plan_schema_projection_evaluation_and_atomic_claims(tmp_path)
     store.path.write_text(json.dumps(corrupted), encoding="utf-8")
     with pytest.raises(plans.TrendlinePlanPersistenceError, match="Invalid persisted"):
         store.load()
+
+
+def _saved_anchor_repair_payload():
+    return _payload(broker="oanda", account="demo", instrument="EUR_USD", action="sell", order_intent="limit",
+                    limit_entry_price="1.087654", test_trade=True,
+                    anchors=[{"timestamp_ms":1793368797123,"price":"1.087654"}, {"timestamp_ms":1793368801987,"price":"1.086543"}],
+                    risk_mode="fixed_aud", risk_value="17.2500", stop_loss_ticks=91, rr_target="3.5000", timeframe="15m",
+                    right_extension=False, trigger_mode="confirmed_cross", cross_direction="downward",
+                    trigger_price_basis="bid", tolerance_ticks=3, expiry_at_ms=1793455201987,
+                    max_quote_age_ms=60000, max_observation_gap_ms=300000,
+                    order_metadata={"setup":"Saved <swing>","pattern":"channel","ema":"No","vwap":"Yes","aths_atls":None,"round_number":"No"})
+
+
+def test_draft_anchor_settings_survive_fresh_store_reload(tmp_path):
+    path = tmp_path / "isolated-anchor-draft.json"
+    created = plans.TrendlinePlanStore(path).create(_saved_anchor_repair_payload(), now_ms=1793368802000)
+    reopened = plans.TrendlinePlanStore(path).get(created["plan_id"])
+    assert reopened == created
+    assert reopened["status"] == "draft"
+    assert reopened["anchors"] == _saved_anchor_repair_payload()["anchors"]
+    assert reopened["risk_value"] == "17.25" and reopened["rr_target"] == "3.5"
+    for key in ("broker", "account", "instrument", "action", "order_intent", "test_trade", "limit_entry_price",
+                "stop_loss_ticks", "risk_mode", "timeframe", "right_extension", "trigger_mode", "cross_direction",
+                "trigger_price_basis", "tolerance_ticks", "expiry_at_ms", "order_metadata"):
+        assert reopened[key] == _saved_anchor_repair_payload()[key]

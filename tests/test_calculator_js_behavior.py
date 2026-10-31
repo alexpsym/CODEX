@@ -1134,7 +1134,7 @@ def test_calculator_submits_without_pre_entry_classification():
     assert data["invalidQuoteDisabled"] and data["webhookDisabled"]
 
 
-def _run_anchor_import_behavior(mode, timezone):
+def _run_anchor_import_behavior(mode, timezone, saved_record=None):
     import os
     node = shutil.which("node") or r"C:\Program Files\nodejs\node.exe"
     harness = r'''
@@ -1167,7 +1167,7 @@ async function run(){
   if(url==='/api/calculator/bootstrap')return response({app_profile:'local',trendline_plans_available:true,trendline_monitoring:{running:false},webhook:{available:true}});
   if(url.startsWith('/api/calculator/instrument?'))return response({symbol:'BTCUSDT',asset:'crypto',broker:'bybit'});
   if(url==='/api/trendline-plans'&&method==='GET')return response({plans});
-  if(url==='/api/trendline-plans'&&method==='POST'){plans=[{...body,plan_id:'anchor-draft',status:'draft',order_intent:body.order_type,action:body.side}];return response({plan:plans[0]});}
+  if(url==='/api/trendline-plans'&&method==='POST'){plans=[{...body,plan_id:'anchor-draft',status:'draft',order_intent:body.order_type,action:body.side,order_metadata:Object.fromEntries(['setup','pattern','ema','vwap','aths_atls','round_number'].map(key=>[key,body[key]||null]))}];return response({plan:plans[0]});}
   if(url==='/api/trendline-plans/anchor-draft'&&method==='PATCH'){plans[0]={...plans[0],...body};return response({plan:plans[0]});}
   throw new Error('Unexpected mocked request '+url);
  };
@@ -1184,13 +1184,14 @@ async function run(){
  const edit=()=>el['trendline-plan-list'].actions.find(b=>b.dataset.tlAction==='edit').click();
  const expectedLocal=ms=>{const d=new Date(ms),p=n=>String(n).padStart(2,'0');return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}.${String(d.getMilliseconds()).padStart(3,'0')}`;};
  if(process.argv[2]==='roundtrip'){
-  const before=calls.length;preview('[2026-10-31 00:00:00] [Info] LTT_ANCHORS_V1 '+JSON.stringify(packet));
-  assert(!el['trendline-import-apply'].disabled);assert(el['trendline-import-preview'].textContent.includes('BYBIT:BTCUSDT.P'));assert(el['trendline-import-preview'].textContent.includes('UTC 2026-10-30T13:59:57.123Z'));assert(el['trendline-import-preview'].textContent.includes('Browser local '+expectedLocal(packet.anchors[1].timestamp_ms)));apply();assert.equal(calls.length,before);
+  const before=calls.length;const beforePreview=fields();preview('[2026-10-31 00:00:00] [Info] LTT_ANCHORS_V1 '+JSON.stringify(packet));
+  assert.deepEqual(fields(),beforePreview);assert(el['trendline-import-preview'].textContent.includes('Preview successful'));assert(!el['trendline-import-apply'].disabled);assert(el['trendline-import-preview'].textContent.includes('BYBIT:BTCUSDT.P'));assert(el['trendline-import-preview'].textContent.includes('UTC 2026-10-30T13:59:57.123Z'));assert(el['trendline-import-preview'].textContent.includes('Browser local '+expectedLocal(packet.anchors[1].timestamp_ms)));apply();assert(el['trendline-import-preview'].textContent.includes('both anchor times and prices are populated'));assert.equal(calls.length,before);
   assert.equal(el['trendline-anchor-1-time'].value,expectedLocal(packet.anchors[0].timestamp_ms));assert.equal(el['trendline-anchor-2-time'].value,expectedLocal(packet.anchors[1].timestamp_ms));
   if(process.env.TZ==='Australia/Brisbane')assert(el['trendline-anchor-2-time'].value.startsWith('2026-10-31T00:00:01.987'));
   const preserved=()=>{assert.equal(el['calc-risk'].value,'2.5');assert.equal(el['calc-sl-ticks'].value,'50');assert.equal(el['calc-rr'].value,'3.25');assert.equal(el['calc-limit'].value,'99.25');assert.equal(el['trendline-trigger-mode'].value,'confirmed_cross');assert.equal(el['trendline-cross-direction'].value,'upward');assert.equal(el['trendline-price-basis'].value,'midpoint');assert.equal(el['trendline-tolerance-ticks'].value,'2');assert.equal(el['trendline-right-extension'].checked,false);};preserved();
   await el['trendline-save'].click();assert.deepEqual(plans[0].anchors,packet.anchors);const initial=copy(plans[0]);await edit();preserved();assert.equal(el['trendline-anchor-1-time'].value,expectedLocal(packet.anchors[0].timestamp_ms));assert.equal(el['trendline-import-text'].value,'');assert.equal(el['trendline-import-preview'].textContent,'');
   await el['trendline-save'].click();assert.deepEqual(plans[0].anchors,packet.anchors);const patch=calls.find(c=>c.method==='PATCH').body;for(const k of ['risk_value','stop_loss_ticks','rr_target','limit_entry_price','trigger_mode','cross_direction','trigger_price_basis','tolerance_ticks','right_extension'])assert.deepEqual(patch[k],initial[k]);assert.equal(plans[0].plan_id,'anchor-draft');
+  await freshContext(JSON.parse(process.argv[3]));
  }else{
   preview(JSON.stringify(packet));apply();await el['trendline-save'].click();await edit();const original=fields();const before=calls.length;
   const invalid=['', '{', JSON.stringify(packet)+JSON.stringify(packet), 'LTT_ANCHORS_V1 '+JSON.stringify(packet)+' LTT_ANCHORS_V1 '+JSON.stringify(packet), 'x'.repeat(8193)];
@@ -1206,15 +1207,66 @@ async function run(){
  assert(!calls.some(c=>c.url.includes('/arm')||c.url.includes('/monitor/')&&c.method==='POST'||c.url.includes('/submit')||c.url.includes('/quote')||c.url.includes('webhook')));
  console.log('anchor import '+process.argv[2]+' passed');
 }
+
+async function freshContext(record){
+ const el=Object.fromEntries(ids.map(id=>[id,new Element(id)])),calls=[];
+ const groups={'risk-toggle':['fixed_aud','percent'],'asset-toggle':['crypto','fx'],'broker-toggle':['oanda','pepperstone'],'account-toggle':['live','demo'],'side-toggle':['buy','sell'],'order-toggle':['market','limit'],'webhook-toggle':['no','yes'],'test-toggle':['no','yes']};
+ for(const [id,values] of Object.entries(groups))el[id].buttons=values.map(v=>new Button(v));
+ el['calc-symbol'].value='WRONGUSDT';el['calc-risk'].value='999';el['calc-sl-ticks'].value='888';el['calc-rr'].value='9';el['calc-limit'].value='777';
+ let delayed;
+ const reply=data=>({ok:true,status:200,headers:{get:()=> 'application/json'},text:async()=>JSON.stringify(data)});
+ const fetch=async(url,opts={})=>{
+  const method=opts.method||'GET',body=opts.body?JSON.parse(opts.body):null;calls.push({url,method,body});
+  if(url==='/api/calculator/bootstrap')return reply({app_profile:'local',trendline_plans_available:true,trendline_monitoring:{running:false},webhook:{available:true}});
+  if(url==='/api/trendline-plans'&&method==='GET')return reply({plans:[record]});
+  if(url.startsWith('/api/calculator/instrument?'))return new Promise(resolve=>{delayed=()=>resolve(reply({asset:'crypto',broker:'bybit',symbol:'WRONGUSDT'}));});
+  if(url===`/api/trendline-plans/${record.plan_id}`&&method==='PATCH'){
+   const mapping={broker:'broker',account:'account',instrument:'instrument',side:'action',order_type:'order_intent',test_trade:'test_trade',limit_entry_price:'limit_entry_price',risk_mode:'risk_mode',risk_value:'risk_value',rr_target:'rr_target',timeframe:'timeframe',right_extension:'right_extension',trigger_mode:'trigger_mode',cross_direction:'cross_direction',trigger_price_basis:'trigger_price_basis',tolerance_ticks:'tolerance_ticks'};
+   for(const [client,stored] of Object.entries(mapping))assert.deepEqual(body[client],record[stored],client);
+   assert.deepEqual(body.anchors,record.anchors);assert.equal(Number(body.stop_loss_ticks),record.stop_loss_ticks);
+   for(const [key,value] of Object.entries(record.order_metadata))assert.deepEqual(body[key],value,key);
+   assert.equal(body.asset,'fx');assert(!Object.hasOwn(body,'expiry_at_ms'),'Keep absolute expiry via existing update API');
+   return reply({plan:record});
+  }
+  throw Error('Unexpected fresh context request '+url);
+ };
+ vm.runInNewContext(source,{document:{getElementById:id=>el[id]},fetch,confirm:()=>{throw Error('No confirmation');},navigator:{clipboard:{writeText:async()=>{}}},setTimeout:fn=>{fn();return 1;},clearTimeout(){},setInterval:()=>1,clearInterval(){},console,Date,Intl,URL,URLSearchParams,AbortController});
+ await flush();
+ const saved=el['trendline-plan-list'].innerHTML;
+ for(const text of ['Saved settings (server record)','EUR_USD','sell','15m','fixed_aud','17.25 AUD','91 / 3.5 R','downward','bid','UTC '+new Date(record.anchors[0].timestamp_ms).toISOString(),'Browser local','1.087654','Test mode: Yes','Saved &lt;swing&gt;','Not recorded'])assert(saved.includes(text),'Missing saved detail '+text);
+ assert(!saved.includes('999'));assert(!saved.includes('WRONGUSDT'));assert(!saved.includes('Saved <swing>'));
+ el['calc-symbol'].listeners.input();assert(delayed);const before=calls.length;
+ await el['trendline-plan-list'].actions.find(b=>b.dataset.tlAction==='edit').click();
+ assert.equal(calls.length,before,'Edit must not request quote/submit/resolve');delayed();await flush();
+ assert.equal(el['calc-symbol'].value,record.instrument);assert(el['calc-canonical-symbol'].textContent.includes(record.instrument));
+ for(const [id,value] of Object.entries({'calc-risk':'17.25','calc-sl-ticks':91,'calc-rr':'3.5','calc-limit':'1.087654'}))assert.equal(el[id].value,value,id);
+ assert(el['calc-risk-label'].textContent.includes('AUD'));assert.equal(el['trendline-expiry'].value,'keep');
+ assert.equal(el['trendline-anchor-1-price'].value,record.anchors[0].price);assert.equal(el['trendline-anchor-2-price'].value,record.anchors[1].price);
+ assert(el['trendline-anchor-1-utc'].textContent.includes(new Date(record.anchors[0].timestamp_ms).toISOString()));
+ for(const [id,value] of Object.entries({'account-toggle':'demo','asset-toggle':'fx','broker-toggle':'oanda','side-toggle':'sell','order-toggle':'limit','test-toggle':'yes','risk-toggle':'fixed_aud'}))assert(el[id].buttons.some(b=>b.dataset.v===value),id);
+ assert(el['setup-toggle'].innerHTML.includes('Saved &lt;swing&gt;'));assert(el['ema-toggle'].innerHTML.includes('No (saved)'));
+ await el['trendline-save'].click();assert.equal(calls.filter(c=>c.method==='PATCH').length,1);assert.equal(calls.slice(before).filter(c=>c.method==='POST').length,0,'Edit/Update must not add POSTs beyond existing startup prewarm');
+ assert(el['trendline-plan-list'].innerHTML.includes(new Date(record.expiry_at_ms).toISOString()));
+ assert(!calls.some(c=>c.url.includes('/arm')||c.url.includes('/monitor/')&&c.method==='POST'||c.url.includes('/quote')||c.url.includes('/submit')||c.url.includes('webhook')));
+}
 run().catch(e=>{console.error(e);process.exitCode=1;});
 
 '''
-    result = subprocess.run([node, '-e', harness, str(JS_PATH), mode], capture_output=True, text=True, timeout=30, env={**os.environ, 'TZ': timezone})
-    assert result.returncode == 0, result.stdout + result.stderr
+    result = subprocess.run([node, '-e', harness, str(JS_PATH), mode, json.dumps(saved_record)], capture_output=True, text=True, timeout=30, env={**os.environ, 'TZ': timezone})
+    if result.returncode != 0:
+        raise AssertionError(result.stdout + result.stderr)
 
-def test_tradingview_anchor_import_preserves_exact_draft_roundtrip():
+def test_tradingview_anchor_import_preserves_exact_draft_roundtrip(tmp_path):
+    import runpy
+    import sys
+    sys.path.insert(0, str(ROOT))
+    from render.trendline_plans import TrendlinePlanStore
+    payload = runpy.run_path(str(ROOT / 'tests/test_trendline_plans.py'))['_saved_anchor_repair_payload']()
+    path = tmp_path / 'server-returned-draft.json'
+    created = TrendlinePlanStore(path).create(payload, now_ms=1793368802000)
+    record = TrendlinePlanStore(path).get(created['plan_id'])
     for timezone in ('UTC', 'Australia/Brisbane'):
-        _run_anchor_import_behavior('roundtrip', timezone)
+        _run_anchor_import_behavior('roundtrip', timezone, record)
 
 def test_tradingview_anchor_import_rejects_invalid_and_stale_packets():
     _run_anchor_import_behavior('invalid', 'Australia/Brisbane')

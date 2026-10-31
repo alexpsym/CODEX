@@ -922,7 +922,7 @@
       const packet=validateAnchorPacket(JSON.parse(json));
       anchorImport={packet,form:anchorFormIds.map(id=>$(id).value)};
       anchorImportContext=anchorContext();
-      $('trendline-import-preview').textContent=`Source: ${packet.symbol} | timeframe ${packet.timeframe}\n`+packet.anchors.map((a,i)=>`Anchor ${i+1}: ${a.price} | UTC ${new Date(a.timestamp_ms).toISOString()} | Browser local ${localDateTime(a.timestamp_ms)} (${Intl.DateTimeFormat().resolvedOptions().timeZone})`).join('\n');
+      $('trendline-import-preview').textContent=`Preview successful - fields unchanged. Next: click Apply anchors, then Save/Update draft.\nSource: ${packet.symbol} | timeframe ${packet.timeframe}\n`+packet.anchors.map((a,i)=>`Anchor ${i+1}: ${a.price} | UTC ${new Date(a.timestamp_ms).toISOString()} | Browser local ${localDateTime(a.timestamp_ms)} (${Intl.DateTimeFormat().resolvedOptions().timeZone})`).join('\n');
       $('trendline-import-apply').disabled=false;
     } catch(err) { $('trendline-import-preview').textContent='Import rejected: '+String(err.message||err); }
   }
@@ -937,7 +937,7 @@
       const packet=validateAnchorPacket(anchorImport.packet);
       packet.anchors.forEach((a,i)=>{setAnchorTime(`trendline-anchor-${i+1}-time`,a.timestamp_ms);$(`trendline-anchor-${i+1}-price`).value=a.price;anchorEpoch(`trendline-anchor-${i+1}-time`,`trendline-anchor-${i+1}-utc`);});
       anchorImport=null;$('trendline-import-apply').disabled=true;
-      $('trendline-import-preview').textContent+='\nApplied to anchor fields only. Save/Update draft explicitly.';
+      $('trendline-import-preview').textContent+='\nApplied successfully: both anchor times and prices are populated. Next: Save/Update draft explicitly.';
     } catch(err) { clearAnchorImport('Import rejected: '+String(err.message||err)); }
   }
   function syncTrendlineTriggerControls() {
@@ -961,6 +961,7 @@
     throw new Error('Choose a valid trendline expiry preset.');
   }
   function trendlinePayload() {
+    if(state.trendlineEditId && state.trendlineRestoreMissing?.length) throw new Error('Saved draft information is missing: '+state.trendlineRestoreMissing.join(', ')+'. Review the saved record before updating.');
     const a1 = anchorEpoch('trendline-anchor-1-time', 'trendline-anchor-1-utc');
     const a2 = anchorEpoch('trendline-anchor-2-time', 'trendline-anchor-2-utc');
     const p1 = $('trendline-anchor-1-price')?.value; const p2 = $('trendline-anchor-2-price')?.value;
@@ -986,7 +987,7 @@
   }
   function resetTrendlineForm() {
     clearAnchorImport();
-    state.trendlineEditId = '';
+    state.trendlineEditId = ''; state.trendlineRestoreMissing=[];
     ['trendline-anchor-1-time','trendline-anchor-2-time','trendline-anchor-1-price','trendline-anchor-2-price'].forEach((id) => { const el=$(id); if(el) { el.value=''; delete el.dataset.anchorEpoch; delete el.dataset.anchorLocal; } });
     const extension=$('trendline-right-extension'); if(extension) extension.checked=true;
     const mode=$('trendline-trigger-mode'); if(mode) mode.value='touch'; const direction=$('trendline-cross-direction'); if(direction) direction.value='either';
@@ -995,13 +996,30 @@
     anchorEpoch('trendline-anchor-1-time','trendline-anchor-1-utc'); anchorEpoch('trendline-anchor-2-time','trendline-anchor-2-utc'); syncTrendlineTriggerControls();
     const save=$('trendline-save'); if(save) save.textContent='Save draft';
   }
+  function savedPlanDetails(plan) {
+    const text=value=>value===null || value===undefined || value===''?'Not recorded':String(value);
+    const date=value=>{
+      if(value===null || value===undefined || value==='') return 'Not recorded';
+      const d=new Date(Number(value));
+      return Number.isFinite(d.getTime())?`UTC ${d.toISOString()} | Browser local ${localDateTime(value)} (${Intl.DateTimeFormat().resolvedOptions().timeZone})`:'Invalid saved time';
+    };
+    const riskUnit=plan.risk_mode==='fixed_aud'?' AUD':plan.risk_mode==='percent'?' %':'';
+    const entries=[['Broker/account',`${text(plan.broker)} / ${text(plan.account)}`],['Instrument/side/timeframe',`${text(plan.instrument)} / ${text(plan.action)} / ${text(plan.timeframe)}`],
+      ['Test mode',typeof plan.test_trade==='boolean'?(plan.test_trade?'Yes':'No'):'Not recorded'],['Order',`${text(plan.order_intent)} | Limit price: ${text(plan.limit_entry_price)}`],
+      ['Risk',`${text(plan.risk_mode)} | ${text(plan.risk_value)}${riskUnit}`],['Stop ticks / target R',`${text(plan.stop_loss_ticks)} / ${text(plan.rr_target)} R`],
+      ['Trigger',`${text(plan.trigger_mode)} / ${text(plan.cross_direction)} / ${text(plan.trigger_price_basis)} | Tolerance: ${text(plan.tolerance_ticks)} ticks`],
+      ['Extension',typeof plan.right_extension==='boolean'?(plan.right_extension?'On':'Off'):'Not recorded'],
+      ['Expiry',plan.expiry_at_ms===null?'Lifetime':date(plan.expiry_at_ms)]];
+    for(let i=0;i<2;i++) entries.push([`Anchor ${i+1}`,`${date(plan.anchors?.[i]?.timestamp_ms)} | Price: ${text(plan.anchors?.[i]?.price)}`]);
+    for(const key of ['setup','pattern','ema','vwap','aths_atls','round_number']) entries.push([key,text(plan.order_metadata?.[key])]);
+    return '<details open><summary>Saved settings (server record)</summary><div class="muted">'+entries.map(([label,value])=>`${escapeHtml(label)}: ${escapeHtml(value)}`).join('<br>')+'</div></details>';
+  }
   function renderTrendlinePlans() {
     const list=$('trendline-plan-list'); if(!list) return;
     if (!state.trendlinePlans.length) { list.innerHTML='<div class="muted">No local trendline plans saved.</div>'; return; }
     list.innerHTML=state.trendlinePlans.map((plan) => {
-      const a=plan.anchors||[]; const expiry=plan.expiry_at_ms ? new Date(Number(plan.expiry_at_ms)).toISOString() : 'Lifetime';
       const actions=plan.status==='draft' ? `<button type="button" data-tl-action="edit" data-tl-id="${escapeHtml(plan.plan_id)}">Edit</button><button type="button" data-tl-action="arm" data-tl-id="${escapeHtml(plan.plan_id)}">Arm</button><button type="button" data-tl-action="cancel" data-tl-id="${escapeHtml(plan.plan_id)}">Cancel</button>` : plan.status==='armed' ? `<button type="button" data-tl-action="cancel" data-tl-id="${escapeHtml(plan.plan_id)}">Cancel</button>` : '';
-      return `<div class="card"><strong>${escapeHtml(plan.status)} · ${escapeHtml(plan.broker)}/${escapeHtml(plan.account)} · ${escapeHtml(plan.instrument)}</strong><div class="muted">${escapeHtml(plan.action)} ${escapeHtml(plan.order_intent)} · ${escapeHtml(plan.trigger_mode)}/${escapeHtml(plan.cross_direction)} · extension ${plan.right_extension ? 'on' : 'off'}</div><div class="muted">A1 ${escapeHtml(a[0]?.timestamp_ms)} @ ${escapeHtml(a[0]?.price)} · A2 ${escapeHtml(a[1]?.timestamp_ms)} @ ${escapeHtml(a[1]?.price)} · ${escapeHtml(expiry)} · ${escapeHtml(String(plan.plan_id).slice(0,8))}</div><div class="group">${actions}</div></div>`;
+      return `<div class="card"><strong>${escapeHtml(plan.status)} | ${escapeHtml(plan.broker)}/${escapeHtml(plan.account)} | ${escapeHtml(plan.instrument)}</strong>${savedPlanDetails(plan)}<div class="muted">${escapeHtml(String(plan.plan_id))}</div><div class="group">${actions}</div></div>`;
     }).join('');
     list.querySelectorAll('[data-tl-action]').forEach((btn) => btn.addEventListener('click', () => trendlineAction(btn.dataset.tlAction, btn.dataset.tlId)));
   }
@@ -1017,16 +1035,63 @@
   }
   function editTrendlinePlan(plan) {
     if (!plan || plan.status!=='draft') return;
+    // Hydrate the returned record directly: never simulate user clicks or fetch
+    // a quote while selecting a saved draft. Retire asynchronous old context.
+    if(symbolTimer) { clearTimeout(symbolTimer); symbolTimer=null; }
+    for(const controller of [resolveController,journalController,specsController,state.quoteController]) controller?.abort();
+    resolveController=null; resolveInFlight=null; journalController=null; specsController=null;
+    ++state.quoteRequestSeq; ++state.trendlineListRequestSeq;
     clearAnchorImport();
-    state.trendlineEditId=plan.plan_id; const a=plan.anchors||[];
-    setAnchorTime('trendline-anchor-1-time',a[0].timestamp_ms); setAnchorTime('trendline-anchor-2-time',a[1].timestamp_ms); $('trendline-anchor-1-price').value=a[0].price; $('trendline-anchor-2-price').value=a[1].price;
-    $('trendline-right-extension').checked=!!plan.right_extension; $('trendline-trigger-mode').value=plan.trigger_mode; $('trendline-cross-direction').value=plan.cross_direction; $('trendline-price-basis').value=plan.trigger_price_basis; $('trendline-tolerance-ticks').value=plan.tolerance_ticks;
-    state.order_type=plan.order_intent;
-    $('calc-limit').value=plan.order_intent==='limit' ? (plan.limit_entry_price||'') : '';
-    $('limit-wrap').style.display=plan.order_intent==='limit'?'':'none';
-    syncToggleState('order-toggle','order_type');
-    const expiry=$('trendline-expiry'); if(plan.expiry_at_ms){ expiry.innerHTML=`<option value="keep">Keep current expiry — ${escapeHtml(new Date(Number(plan.expiry_at_ms)).toLocaleString())}</option>`+expiry.innerHTML; expiry.value='keep'; }
-    $('trendline-save').textContent='Update draft'; anchorEpoch('trendline-anchor-1-time','trendline-anchor-1-utc'); anchorEpoch('trendline-anchor-2-time','trendline-anchor-2-utc'); syncTrendlineTriggerControls(); trendlineStatus(`Editing draft ${String(plan.plan_id).slice(0,8)}.`);
+    state.trendlineEditId=plan.plan_id;
+    state.trendlineRestoreMissing=['broker','account','instrument','action','order_intent','test_trade','anchors','right_extension','trigger_mode','cross_direction','trigger_price_basis','tolerance_ticks','expiry_at_ms','risk_mode','risk_value','stop_loss_ticks','rr_target','timeframe','order_metadata'].filter(key=>!Object.prototype.hasOwnProperty.call(plan,key) || (key!=='expiry_at_ms' && key!=='order_metadata' && plan[key]===null));
+    state.asset=plan.broker==='bybit'?'crypto':plan.broker==='oanda'?'fx':'';
+    state.broker=plan.broker??''; state.account=plan.account??'';
+    if(state.asset==='fx') state.fx_broker=state.broker;
+    state.side=plan.action??''; state.order_type=plan.order_intent??'';
+    state.test_mode=typeof plan.test_trade==='boolean'?(plan.test_trade?'yes':'no'):'';
+    state.risk_mode=plan.risk_mode??''; state.fx_risk_mode=state.risk_mode;
+    state.timeframe=plan.timeframe??''; state.resolvedSymbol=plan.instrument??'';
+    state.resolvedVenue=state.broker==='bybit'?'Bybit':state.broker==='oanda'?'OANDA':'';
+    $('calc-symbol').value=state.resolvedSymbol; canonicalEl.textContent='Saved instrument: '+(state.resolvedSymbol||'Not recorded');
+    $('calc-risk').value=plan.risk_value??''; $('calc-sl-ticks').value=plan.stop_loss_ticks??''; $('calc-rr').value=plan.rr_target??'';
+    $('calc-limit').value=plan.limit_entry_price??'';
+    if($('calc-target-mode')) $('calc-target-mode').value='rr';
+    syncTargetUi();
+    // Render risk controls without updateRiskUiForAsset's crypto default coercion.
+    riskToggleWrap.style.display=''; brokerToggleWrap.style.display=state.asset==='fx'?'':'none';
+    $('calc-risk-label').textContent=state.risk_mode==='fixed_aud'?'Risk value (AUD)':state.risk_mode==='percent'?'Risk value (%)':'Risk mode not recorded';
+    $('limit-wrap').style.display=state.order_type==='limit'?'':'none';
+    syncAllToggleStates(); setTimeframeButtons();
+    const metadata=plan.order_metadata||{};
+    const controls={setup:['setup-toggle',setSetupButtons],pattern:['pattern-toggle',setPatternButtons],ema:['ema-toggle',setEmaButtons],vwap:['vwap-toggle',setVwapButtons],aths_atls:['aths-atls-toggle',setAthsAtlsButtons],round_number:['round-number-toggle',setRoundNumberButtons]};
+    for(const [key,[id,render]] of Object.entries(controls)) {
+      state[key]=metadata[key]??null; render();
+      const root=$(id); if(!root) continue;
+      const buttons=[...root.querySelectorAll('button')];
+      if(state[key]!==null && !buttons.some(button=>button.dataset.v===state[key])) {
+        root.innerHTML=buttons.map(button=>`<button type="button" data-v="${escapeHtml(button.dataset.v)}">${escapeHtml(button.textContent||button.dataset.v||'None')}</button>`).join('')+`<button type="button" data-v="${escapeHtml(state[key])}">${escapeHtml(state[key])} (saved)</button>`;
+        root.querySelectorAll('button').forEach(button=>button.addEventListener('click',()=>{state[key]=button.dataset.v;syncToggleState(id,key);invalidateQuote();}));
+      }
+      syncToggleState(id,key);
+    }
+    const a=plan.anchors||[];
+    for(let i=0;i<2;i++) {
+      const id=`trendline-anchor-${i+1}-time`,anchor=a[i];
+      if(anchor && Number.isSafeInteger(anchor.timestamp_ms)) setAnchorTime(id,anchor.timestamp_ms);
+      else { $(id).value='';delete $(id).dataset.anchorEpoch;delete $(id).dataset.anchorLocal; }
+      $(`trendline-anchor-${i+1}-price`).value=anchor?.price??'';
+    }
+    $('trendline-right-extension').checked=plan.right_extension===true;
+    $('trendline-trigger-mode').value=plan.trigger_mode??''; $('trendline-cross-direction').value=plan.cross_direction??'';
+    $('trendline-price-basis').value=plan.trigger_price_basis??''; $('trendline-tolerance-ticks').value=plan.tolerance_ticks??'';
+    const expiry=$('trendline-expiry');
+    expiry.innerHTML='<option value="keep">Keep saved expiry: '+escapeHtml(plan.expiry_at_ms===null?'Lifetime':plan.expiry_at_ms===undefined?'Not recorded':new Date(Number(plan.expiry_at_ms)).toISOString())+'</option><option value="lifetime">Lifetime</option><option value="1h">1 hour</option><option value="4h">4 hours</option><option value="1d">1 day</option><option value="1w">1 week</option><option value="1mo">1 month</option>';
+    expiry.value='keep'; // API merges the existing absolute expiry; never restart its duration.
+    invalidateQuote({status:'idle',reason:'Saved draft selected. Calculate separately if needed.'});
+    if(journalEl) journalEl.innerHTML=''; if(specsEl) specsEl.innerHTML='';
+    $('trendline-save').textContent='Update draft';
+    anchorEpoch('trendline-anchor-1-time','trendline-anchor-1-utc'); anchorEpoch('trendline-anchor-2-time','trendline-anchor-2-utc');
+    syncTrendlineTriggerControls(); trendlineStatus(`Editing draft ${String(plan.plan_id).slice(0,8)}. All saved settings restored; Update draft explicitly.`);
   }
   async function trendlineAction(action, planId) {
     if (state.trendlineMutationPending) return; const plan=state.trendlinePlans.find((p)=>p.plan_id===planId);
