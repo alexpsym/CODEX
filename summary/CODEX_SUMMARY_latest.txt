@@ -4517,3 +4517,71 @@ Scoped git diff --check passed. Pytest/feature/data/app/MQL attempts remain ZERO
 Validation artifacts: validation_checks.json, validation_result1.json, stdout/stderr1
 in the private Job5 directory. Exact named files reviewed against saved baseline;
 only this documentation delta is authorized for the task-only commit/protected push.
+
+
+JOB 6 - DOWNLOADED TRADE FILE SORTER - 2026-11-01
+Preserve Jobs 1-5 accepted/delivered; Job5 at 0aa9c79. User usage-warning pause
+withdrawal remains effective. This phase changes only the existing journal menu,
+its thin local route, new focused sorter, its three focused tests and this summary.
+Initial master/HEAD 0aa9c79bf3d7378e7eeb92a5fa65dffe9d5d5780, no staged paths;
+authorized existing targets clean. Unrelated modified/deleted/untracked work preserved.
+
+Implemented explicit POST /api/trading-journal/sort-downloaded-files with local
+profile/loopback/same-origin/custom-header guards before filing. Browser submits
+only request identity. Existing import/resync/write reservations protect the saved
+read-only journal snapshot. A bounded subprocess does the work; no background daemon,
+refresh/import/broker request, new registry or trade-folder allocation. Fixed source
+C:\Users\User\Downloads\CHARTS; configured roots must remain within local
+C:\Users\User\Dropbox (CRYPTO/FOREX), never legacy Documents/journal fallbacks.
+
+Each file is matched independently using explicit labelled C/F IDs or corroborated
+symbol/account/trade-time evidence, exact saved links and verified existing folders.
+Ambiguous/missing/contradictory evidence remains unresolved. Read-only bounded literal
+TXT/MD/JSON/CSV/RTF/DOCX/XLSX/PDF and PNG text metadata extraction; no pixels/OCR,
+macro/formula execution or external links. XLSX table headers and unrelated cells
+cannot become contradictory metadata. Capture/export time differs from entry/exit;
+unzoned capture assumptions are recorded and insufficient alone for no-ID matching.
+
+Mover denies reparse escapes, incomplete/changing/locked sources and overwrites.
+Uses exclusive destination staging, streamed copy/hash/size then exact-byte final
+verification, deterministic hash-suffix collisions, locked final destination and
+verified unchanged source before source removal. Windows deletion uses the verified
+DELETE-access source handle, not an unchecked filename deletion. Directories remain.
+Durable private per-request/per-file planned/staged/copied/committed audit + single
+flight prevent replay after interruption/lost response. Inconclusive batches require
+audit review, not automatic retries. Structural/I/O failures stop remaining files;
+completed verified results are retained. Empty/missing source/root reports are clear.
+Runtime limits: child deadline285 sec, hard child timeout295 sec, <=1000 files/1GiB,
+20MiB parsed document, bounded metadata/extraction. UI escapes details and reports
+moved/already-filed/unresolved/failed/copied-source-retained/unprocessed separately;
+controls restore on all outcomes, no automatic POST retry. A deliberate lost-response
+retrieval retains the same request identity. Audit: ignored logs/trade-file-sort/.
+
+Focused verification: 3 distinct nodes, 2 pytest invocations, 4 scheduled executions.
+Invocation1 actual child exit1, 9.971311 sec: matching FAILED at XLSX evidence;
+verified_moves_collisions_and_recovery PASSED; local_menu_route_and_ui_contract PASSED.
+Corrected the demonstrated XLSX header/unrelated-cell extraction issue. Invocation2
+ONLY failed matching node: actual child exit0, 2.9072566 sec, PASSED. JUnit bodies and
+normal OS exits retained; no passing-node reruns. Tests cover temporary source/Dropbox
+trees, Windows guarded moves, collision/dedup, copy/delete/verification failure,
+interruption/repeated request, preserved partial results, actual extracted production
+route/template and production JS under mocked DOM/fetch. All external/state inputs
+mocked; full service/background workers never imported/started by tests.
+Python C:\Users\User\miniconda3\python.exe; Node C:\Program Files\nodejs\node.exe.
+Private baseline/commands/stdout/stderr/tracebacks/JUnit/results:
+.job6_file_sort_09de316940154fd0b9e1b79bb018c50d (excluded from Git).
+
+Development original-data capture 0/1; original files read/moved/deleted 0; real API,
+broker/workbook/cache writes, app restarts, MQL build/install, dependency/config/
+permission changes 0. No real files were sorted during fixture verification.
+Final scoped delta reviewed against five authorized paths. Protected helper verify
+exit0 freshly matched local/remote master 0aa9c79 before task-only commit; delivery
+SHA and fresh post-push match are reported in the session. Private evidence excluded.
+
+Activation/manual acceptance PENDING: USER safely restart LTT through
+run_local_master_control.bat, refresh existing Trading Journal menu and click Sort
+downloaded trade files ONCE. Inspect file/destination report and actual folders:
+confirmed matches present at destination/absent from Downloads, unresolved/failed
+sources retained, CHARTS/subdirectories retained. No new trade or broker resync.
+MT5 not applicable. No claim of original-data filing acceptance before user report.
+Job6 task-directory elapsed at final review: 1187.44 sec; test child execution total 12.878568 sec.
