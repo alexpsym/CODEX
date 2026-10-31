@@ -4150,3 +4150,65 @@ requests, no new trade. MT5 compilation/installation not applicable.
 After successful workbook installation, user starts LTT normally, opens journal and
 checks Yes/No/blank/counts/save-reopen. Job 3 manual acceptance pending; Jobs 4-6 queued.
 Usage-warning pause withdrawal remains in force as recorded above.
+
+
+JOB 3 WORKBOOK INSTALLATION ? SUCCESSFUL, MANUAL ACCEPTANCE PENDING.
+Source remains delivered at 6c9fee8b0ada0ffac0ca298c9e96d8c2c2ac23bf.
+All three focused nodes have passing results; no feature tests rerun in this
+installation continuation. Cumulative pytest 5 invocations / 8 executions / 3 nodes.
+Usage-warning pause withdrawal remains in force, including queued Job 5.
+
+Access diagnosis: original private installer opened source with GENERIC_READ
+(0x80000000), share flags READ|DELETE (5), and held that handle across os.replace.
+Microsoft CreateFileW documentation describes persistent handle sharing and
+FILE_SHARE_DELETE rename sharing. READ|DELETE did include rename sharing, so we
+did not assume its absence or blame Excel/permissions/antivirus. One task-owned
+dummy subprocess reproduced WinError 5 with those exact flags while open; after
+closing the same handle, atomic replacement succeeded. This demonstrated the
+self-owned lifetime issue for the diagnostic sequence, without proving every
+possible condition in the original failure. Source and candidate attributes 32
+(archive, not read-only); no attribute/ACL/system changes made.
+Diagnostic exit 0, elapsed 0.6225440001580864 seconds. Original evidence retained unchanged.
+Reference: https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew
+
+SECOND and final authorized production transaction: SUCCESS. Established journal
+OS/thread write reservation held throughout final verification/replacement. Excel
+owner file absent, source deny-write handle successfully obtained, no conflicting
+writer handle. Current source matched original pre-task SHA and retained backup.
+Reused exact saved validated candidate; no regeneration/classification/rebuild.
+New byte-exact backup and install copy verified; source identity/hash rechecked;
+closed ONLY our source handle before os.replace, retained coordination reservation.
+ONE atomic replacement in this transaction; installed SHA equals approved candidate:
+b7ef9bc791572c919379ad178821c1230bc5dbb553d32c9ee35cdcaa80f1c8fd.
+Child OS exit 0; wrapper 11.4178452 seconds, inner transaction 2.8417244 seconds.
+All reservations/resources released normally in finally. No app restart or live API.
+Production attempts cumulative 2: original failed 24.3657788 seconds, second succeeded
+11.4178452 seconds. Private diagnostic adds 0.6225440001580864 seconds; earlier test subprocess
+verification remains 90.7527163 seconds. No previous counters reset.
+
+Installed additions: Trade Log AY1:AY1572, merged AY1:AY3, Yes/No/blank dropdown
+and filter edge extension; STATS1 Counter Trend Overall/FX/Crypto count row;
+SYMBOLS edge count column; yearly and existing year-sheet monthly count rows.
+Manifest records exact cells per sheet. Existing values/formulas/cached results,
+links/presentation and other package parts validated against the frozen source.
+Sheet names/order unchanged, hidden Row ID role retained. No old row classified;
+Overall/FX/Crypto counts currently 0, unknown cells blank.
+Original pre-task binary matched HEAD; installed binary consists solely of these
+approved changes and is eligible for this workbook-only installation commit.
+Only tracked updates this continuation: journal/Trading Journal.xlsx and this summary.
+
+Artifacts in .job3_counter_d479b863dd65430e9e0d084691f270f2 (not committed):
+original Trading Journal.pre-counter-trend.xlsx and validated candidate retained;
+Trading Journal.pre-install2.xlsx is the second frozen original backup;
+install_workbook2.py, production_manifest2.json, production_result2.json,
+production_process_result2.json, production_stdout2.txt, production_stderr2.txt,
+sharing_diagnostic.py and diagnostic result/process JSON. Install copy moved atomically.
+Fresh protected verify confirmed local/remote master at 6c9fee8 before this commit;
+installation commit/push SHA/equality reported in session and private checkpoint.
+
+USER next: start LTT normally via run_local_master_control.bat, then open the journal.
+Check Counter Trend Yes/No dropdown, unknown history blank, and relevant count
+row/columns. Classify only a known trade; save/reopen and use normal derived refresh
+to confirm retention/counts. No new trade or broker resync needed.
+Manual acceptance pending user report. MT5 compilation/installation not applicable.
+Jobs 4-6 remain queued; no Dropbox/archive/cloud/broker operations performed.
