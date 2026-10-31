@@ -1183,6 +1183,29 @@ async function run(){
  const apply=()=>el['trendline-import-apply'].click();
  const edit=()=>el['trendline-plan-list'].actions.find(b=>b.dataset.tlAction==='edit').click();
  const expectedLocal=ms=>{const d=new Date(ms),p=n=>String(n).padStart(2,'0');return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}.${String(d.getMilliseconds()).padStart(3,'0')}`;};
+ if(process.argv[2]==='extension'){
+  const now=Date.now();packet.anchors[0].timestamp_ms=now-3600000+123;packet.anchors[1].timestamp_ms=now+3600000+987;
+  assert(packet.anchors[0].timestamp_ms<now && packet.anchors[1].timestamp_ms>now);
+  const baseline=calls.length;
+  const preserved=()=>{assert.equal(el['calc-risk'].value,'2.5');assert.equal(el['calc-sl-ticks'].value,'50');assert.equal(el['calc-rr'].value,'3.25');assert.equal(el['calc-limit'].value,'99.25');assert.equal(el['trendline-trigger-mode'].value,'confirmed_cross');assert.equal(el['trendline-cross-direction'].value,'upward');assert.equal(el['trendline-price-basis'].value,'midpoint');assert.equal(el['trendline-tolerance-ticks'].value,'2');};
+  const prior=fields();packet.right_extension=true;
+  preview('LTT Anchor Export 2A.1 | LTT_ANCHORS_V1 '+JSON.stringify(packet));
+  assert.deepEqual(fields(),prior);assert.equal(el['trendline-right-extension'].checked,false);assert(el['trendline-import-preview'].textContent.includes('ON (right ray)'));
+  apply();assert.equal(el['trendline-right-extension'].checked,true);assert.equal(calls.length,baseline);preserved();
+  await el['trendline-save'].click();assert.deepEqual(plans[0].anchors,packet.anchors);assert.equal(plans[0].right_extension,true);await edit();preserved();assert.equal(el['trendline-right-extension'].checked,true);
+  const beforeOff=calls.length;packet.right_extension=false;preview(JSON.stringify(packet));assert(el['trendline-import-preview'].textContent.includes('OFF (segment)'));assert.equal(el['trendline-right-extension'].checked,true);apply();assert.equal(el['trendline-right-extension'].checked,false);assert.equal(calls.length,beforeOff);preserved();
+  await el['trendline-save'].click();await edit();assert.equal(plans[0].right_extension,false);assert.equal(el['trendline-right-extension'].checked,false);assert.deepEqual(plans[0].anchors,packet.anchors);preserved();
+  delete packet.right_extension;preview(JSON.stringify(packet));assert(el['trendline-import-preview'].textContent.includes('not supplied'));apply();assert.equal(el['trendline-right-extension'].checked,false);
+  el['trendline-right-extension'].checked=true;preview(JSON.stringify(packet));apply();assert.equal(el['trendline-right-extension'].checked,true);
+  const intact=fields(),reads=calls.length;
+  for(const invalid of ['true',0,1,null,[],{}]){
+   preview(JSON.stringify({...packet,right_extension:invalid}));assert(el['trendline-import-apply'].disabled);assert(el['trendline-import-preview'].textContent.includes('boolean'));apply();assert.deepEqual(fields(),intact);assert.equal(el['trendline-right-extension'].checked,true);assert.equal(calls.length,reads);
+  }
+  preview(JSON.stringify({...packet,right_extension:false}));el['trendline-right-extension'].checked=false;apply();assert(el['trendline-import-preview'].textContent.includes('Form/context changed'));assert.deepEqual(fields(),intact);assert.equal(calls.length,reads);
+  assert.equal(calls.filter(c=>c.method==='POST'&&c.url==='/api/trendline-plans').length,1);assert.equal(calls.filter(c=>c.method==='PATCH').length,1);
+  assert(!calls.some(c=>c.url.includes('/arm')||c.url.includes('/monitor/')&&c.method==='POST'||c.url.includes('/quote')||c.url.includes('/submit')||c.url.includes('webhook')));
+  console.log('future coordinate extension roundtrip passed');return;
+ }
  if(process.argv[2]==='roundtrip'){
   const before=calls.length;const beforePreview=fields();preview('[2026-10-31 00:00:00] [Info] LTT_ANCHORS_V1 '+JSON.stringify(packet));
   assert.deepEqual(fields(),beforePreview);assert(el['trendline-import-preview'].textContent.includes('Preview successful'));assert(!el['trendline-import-apply'].disabled);assert(el['trendline-import-preview'].textContent.includes('BYBIT:BTCUSDT.P'));assert(el['trendline-import-preview'].textContent.includes('UTC 2026-10-30T13:59:57.123Z'));assert(el['trendline-import-preview'].textContent.includes('Browser local '+expectedLocal(packet.anchors[1].timestamp_ms)));apply();assert(el['trendline-import-preview'].textContent.includes('both anchor times and prices are populated'));assert.equal(calls.length,before);
@@ -1270,3 +1293,7 @@ def test_tradingview_anchor_import_preserves_exact_draft_roundtrip(tmp_path):
 
 def test_tradingview_anchor_import_rejects_invalid_and_stale_packets():
     _run_anchor_import_behavior('invalid', 'Australia/Brisbane')
+
+
+def test_tradingview_future_anchor_extension_import_roundtrip():
+    _run_anchor_import_behavior('extension', 'Australia/Brisbane')

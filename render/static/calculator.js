@@ -900,6 +900,7 @@
     if(!source || source[1]!==venue || !state.resolvedSymbol || chartSymbolKey(symbol)!==chartSymbolKey(state.resolvedSymbol)) throw new Error('Export venue/instrument must match the resolved calculator instrument. Calculator selections were not changed.');
     const frames={'1':'1m','5':'5m','15':'15m','30':'30m','60':'1h','240':'4h','D':'1d','1D':'1d','W':'1w','1W':'1w','M':'1mo','1M':'1mo'};
     if(!state.timeframe || frames[packet.timeframe]!==state.timeframe) throw new Error('Export timeframe must match the calculator timeframe.');
+    if(Object.prototype.hasOwnProperty.call(packet,'right_extension') && typeof packet.right_extension!=='boolean') throw new Error('Export right_extension must be a boolean when present.');
     if(!Array.isArray(packet.anchors) || packet.anchors.length!==2) throw new Error('Export requires exactly two anchors.');
     for(const a of packet.anchors) {
       if(!a || !Number.isSafeInteger(a.timestamp_ms) || a.timestamp_ms<=0 || !Number.isFinite(new Date(a.timestamp_ms).getTime())) throw new Error('Anchor timestamps must be valid positive integer milliseconds.');
@@ -920,9 +921,9 @@
         json=text.slice(at+marker.length).trim();
       }
       const packet=validateAnchorPacket(JSON.parse(json));
-      anchorImport={packet,form:anchorFormIds.map(id=>$(id).value)};
+      anchorImport={packet,form:anchorFormIds.map(id=>$(id).value),extension:$('trendline-right-extension').checked};
       anchorImportContext=anchorContext();
-      $('trendline-import-preview').textContent=`Preview successful - fields unchanged. Next: click Apply anchors, then Save/Update draft.\nSource: ${packet.symbol} | timeframe ${packet.timeframe}\n`+packet.anchors.map((a,i)=>`Anchor ${i+1}: ${a.price} | UTC ${new Date(a.timestamp_ms).toISOString()} | Browser local ${localDateTime(a.timestamp_ms)} (${Intl.DateTimeFormat().resolvedOptions().timeZone})`).join('\n');
+      $('trendline-import-preview').textContent=`Preview successful - fields unchanged. Next: click Apply anchors, then Save/Update draft.\nSource: ${packet.symbol} | timeframe ${packet.timeframe}\nRight extension: ${Object.prototype.hasOwnProperty.call(packet,'right_extension')?(packet.right_extension?'ON (right ray)':'OFF (segment)'):'not supplied; preserve checkbox ('+($('trendline-right-extension').checked?'ON':'OFF')+')'}\n`+packet.anchors.map((a,i)=>`Anchor ${i+1}: ${a.price} | UTC ${new Date(a.timestamp_ms).toISOString()} | Browser local ${localDateTime(a.timestamp_ms)} (${Intl.DateTimeFormat().resolvedOptions().timeZone})`).join('\n');
       $('trendline-import-apply').disabled=false;
     } catch(err) { $('trendline-import-preview').textContent='Import rejected: '+String(err.message||err); }
   }
@@ -933,9 +934,10 @@
   function applyAnchorImport() {
     if(!anchorImport || state.trendlineMutationPending) return;
     try {
-      if(anchorImportContext!==anchorContext() || anchorImport.form.some((value,i)=>value!==$(anchorFormIds[i]).value)) throw new Error('Form/context changed. Preview the export again before applying.');
+      if(anchorImportContext!==anchorContext() || anchorImport.extension!==$('trendline-right-extension').checked || anchorImport.form.some((value,i)=>value!==$(anchorFormIds[i]).value)) throw new Error('Form/context changed. Preview the export again before applying.');
       const packet=validateAnchorPacket(anchorImport.packet);
       packet.anchors.forEach((a,i)=>{setAnchorTime(`trendline-anchor-${i+1}-time`,a.timestamp_ms);$(`trendline-anchor-${i+1}-price`).value=a.price;anchorEpoch(`trendline-anchor-${i+1}-time`,`trendline-anchor-${i+1}-utc`);});
+      if(Object.prototype.hasOwnProperty.call(packet,'right_extension')) $('trendline-right-extension').checked=packet.right_extension;
       anchorImport=null;$('trendline-import-apply').disabled=true;
       $('trendline-import-preview').textContent+='\nApplied successfully: both anchor times and prices are populated. Next: Save/Update draft explicitly.';
     } catch(err) { clearAnchorImport('Import rejected: '+String(err.message||err)); }

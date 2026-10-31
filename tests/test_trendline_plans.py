@@ -282,3 +282,26 @@ def test_draft_anchor_settings_survive_fresh_store_reload(tmp_path):
                 "stop_loss_ticks", "risk_mode", "timeframe", "right_extension", "trigger_mode", "cross_direction",
                 "trigger_price_basis", "tolerance_ticks", "expiry_at_ms", "order_metadata"):
         assert reopened[key] == _saved_anchor_repair_payload()[key]
+
+
+def test_explicit_future_anchors_and_right_extension_geometry(tmp_path):
+    store = plans.TrendlinePlanStore(tmp_path / "coordinate-geometry.json")
+    plan = _arm(store, _payload(right_extension=True, trigger_mode="touch", tolerance_ticks=0))
+    # At synthetic now=15000, first anchor=10000 is past and second=20000 is future.
+    assert plans.projected_price(plan, 15000) == plans.Decimal("1.1")
+    between = {"timestamp_ms":15000, "bid":"1.099", "ask":"1.1"}
+    assert plans.evaluate_trigger(plan, between, now_ms=15000, tick_size="0.01")["triggered"]
+    off = copy.deepcopy(plan)
+    off["right_extension"] = False
+    assert plans.evaluate_trigger(off, between, now_ms=15000, tick_size="0.01")["triggered"]
+    # Later, a fresh observation on the SAME line beyond anchor 2 can touch the ray.
+    assert plans.projected_price(plan, 30000) == plans.Decimal("1.4")
+    beyond = {"timestamp_ms":30000, "bid":"1.399", "ask":"1.4"}
+    assert plans.evaluate_trigger(plan, beyond, now_ms=30000, tick_size="0.01")["triggered"]
+    blocked = plans.evaluate_trigger(off, beyond, now_ms=30000, tick_size="0.01")
+    assert not blocked["triggered"] and blocked["reason"] == "right_extension_disabled"
+    for candidate in (plan, off):
+        before = plans.evaluate_trigger(candidate, {"timestamp_ms":9999,"bid":"1","ask":"1"}, now_ms=15000, tick_size="0.01")
+        assert not before["triggered"] and before["reason"] == "before_first_anchor"
+        future = plans.evaluate_trigger(candidate, {"timestamp_ms":30001,"bid":"1.4","ask":"1.4"}, now_ms=30000, tick_size="0.01")
+        assert not future["triggered"] and future["reason"] == "current_observation_future"
