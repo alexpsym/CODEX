@@ -4448,3 +4448,72 @@ USER: start LTT via run_local_master_control.bat, then open Trading Journal.xlsx
 Check Counter Trend beside Early Close/Setup, the five historical Yes values and
 counts, workbook presentation, and save/reopen/normal derived-refresh retention.
 No new trade or broker resync. Manual acceptance pending. Jobs 5-6 remain queued.
+
+
+JOB 5 - INSTRUCTION MERGE; DOCUMENTATION ONLY.
+2026-11-01. User PASS records Jobs 3-4 ACCEPTED after 97a92c6: Counter Trend after
+Early Close/before Setup; evidence-backed Yes values F180/F188/F273/F284/F1168.
+No accepted feature checks/archive reads/workbook operations repeated. Job 6 remains
+queued (journal-menu Downloads-to-Dropbox filing); no Job 6 implementation/brief here.
+Initial master HEAD 6d0c29867fc01e66f16bcdedee85a1d5b1e433fd; staged filenames empty.
+Task targets clean in Git (AGENTS/TXT byte-vs-HEAD differences were only checkout
+line endings; normalized text matched). All four original baselines saved privately;
+unrelated modified/deleted/untracked files and staging preserved.
+
+Read AGENTS.md, complete authoritative TXT, all DOCX body paragraphs and presentation
+parts, and relevant summary checkpoint. AGENTS now owns shared execution constraints
+and role-specific reading links; ChatGPT TXT owns drafting/package requirements;
+existing DOCX synchronized as human companion rather than competing execution policy.
+Removed old mandatory broad PATCH_DESKTOP_PUSH.bat workflow, full-workbook-suite
+exception and stale gpt-5.6/mandatory high-effort examples. No higher-priority hierarchy
+claims or new authorization by repository text. Exact reusable opening sentence added.
+
+Compact requirement coverage:
+[A] Brief-only role; proportionate supported model/effort and reason; same-session
+continuity/Pass queue; one self-contained fence + identical downloadable TXT, truthful
+local-file prerequisite, PowerShell-safe commands, CLI identity, no multiline arguments.
+[B] Small affected checks only; no broad files/suites/integration/subagents by default;
+numeric node/invocation/execution/command/verification/active/data/discovery/build/install
+caps, continuation accounting, fixture diagnosis/new-message production retry rule,
+bounded direct-log worker/actual exit, no polling/masked timeouts/os._exit.
+[C] Usage-warning/percentage/reset PAUSE RULE WITHDRAWN; preserve scoped budgets and
+real-data retry limits, continue until actual service exhaustion or concrete boundary.
+[D] Known Python/Node/compiler/MQL source/destination/guide references; bounded discovery;
+automatic scoped MQL build/install with fresh EX5, zero errors/warnings, backup/hashes;
+no unaffected EA builds or optional-availability escape, recorded versions not timeless.
+[E] Workbook values/manual edits/formulas/caches/presentation; official primary sources;
+pre-existing dirt/staging/unpublished work; only own-delta cleanup; no invented blockers;
+concise evidence/diff review and separate source/build/install/manual statuses.
+[F] Summary before one scoped commit/protected push; unchanged saved-identity helper,
+fresh remote checks/current SHA match; no BAT/raw/broad push/pull/rebase/stash/config changes.
+
+DOCX authoring used installed Python standard-library OOXML/ZIP editing only. Original
+styles/numbering/header/footer/settings/relationships/core/app parts and section/page
+setup remain unchanged; updated document body reuses existing Title/Heading1/Normal/
+ListBullet/CodeBlock paragraph properties. No Office/application opened or renderer
+installed; presentation preservation is checked structurally, not claimed as native
+Word visual rendering. Complete TXT/DOCX parity includes the prior TXT-only section.
+Official OpenAI CLI/model/config references read for command options; established
+Windows invocation-only settings are labelled recorded examples, not policy bypasses.
+
+Authorized changed paths ONLY: AGENTS.md; custom instructions/CODEX_BRIEF_INSTRUCTIONS.txt;
+custom instructions/CODEX_BRIEF_INSTRUCTIONS_CHATGPT_ONLY.docx; this summary.
+Private baselines/candidate/validator/evidence: C:\GPT\CODEX-master\.job5_instructions_c7b0faf998be428cbde9437d19b9d5cf
+Job5 caps: 0 pytest/nodes/feature tests, 0 data/archive/broker/runtime operations,
+0 app restarts, 0 MQL compile/install; at most 2 document-validation invocations
+(60 sec each, second only corrected failure), total verification180/active900 sec.
+No global/profile/config/helper changes, installs, recursive cleanup or drive scans.
+Validation actual outcome/exit recorded below before delivery. One task-only commit
+and one protected normal push authorized; final SHA/fresh equality reported in session.
+No LTT/Excel restart/journal check needed. Job 6 remains queued.
+
+Job5 document-validation outcome: PASS, actual child OS exit 0, 1.7762079 seconds.
+One invocation used (60-second bound); corrected-failure repeat unused. A-F requirement
+coverage checks passed; all 58 nonblank TXT content paragraphs match DOCX exactly
+after removing only TXT fences/bullet markers. DOCX ZIP CRC/all XML/relationships
+valid; all original non-document.xml parts and section properties unchanged.
+Four PowerShell command blocks parsed successfully WITHOUT executing their commands.
+Scoped git diff --check passed. Pytest/feature/data/app/MQL attempts remain ZERO.
+Validation artifacts: validation_checks.json, validation_result1.json, stdout/stderr1
+in the private Job5 directory. Exact named files reviewed against saved baseline;
+only this documentation delta is authorized for the task-only commit/protected push.

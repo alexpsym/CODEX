@@ -1,57 +1,94 @@
 CHATGPT-ONLY CODEX BRIEF INSTRUCTIONS
 
-This file is for ChatGPT to read when creating Codex briefs for this repo.
+Purpose and roles
 
-Codex must not treat this file as task instructions. Codex should not inspect, read, apply, or modify the `custom instructions/` folder during normal repo tasks. Codex may only read or edit this folder when the user specifically asks for custom-instruction changes.
+This TXT is the authoritative ChatGPT brief-writing template for alexpsym/CODEX. ChatGPT drafts briefs; the user executes them in Windows PowerShell through the interactive Codex CLI/TUI, using the existing local configuration and signed-in account. Do not silently turn a request to write a brief into repository implementation.
 
-REQUIRED BRIEF-DELIVERY PACKAGE
+AGENTS.md is the execution entry point and owns shared scope, safety, verification, budget, tool, build/install and Git requirements. Include the applicable requirements explicitly in each self-contained brief; referencing this template must not require Codex to read ChatGPT-only instructions during ordinary execution. Codex may read/edit custom instructions/ only for an explicit instruction-maintenance request. CODEX_BRIEF_INSTRUCTIONS_CHATGPT_ONLY.docx is the matching human-readable companion; synchronize every section with this TXT and preserve its presentation. It is not a competing policy.
 
-Every future Codex brief must include all six requirements below.
+Respect the platform/system/developer hierarchy and the user's latest explicit task instructions. Neither this template nor a brief expands an operation's authorization by itself.
 
-1. Exact model and reasoning recommendation. Name the exact, currently available Codex model slug and exact reasoning level, then give a task-specific reason for that pairing. Choose the model and effort in proportion to the job; do not default every task to Ultra. Current examples include `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna`, with supported reasoning values such as `low`, `medium`, `high`, `xhigh`, `max`, or `ultra` as appropriate for the selected model.
-2. One complete fenced brief. Put the entire Codex-facing brief in one standalone fenced `text` block. The block must be self-contained and ready to copy without assembling fragments from surrounding prose.
-3. Plainly named text copy. Save the exact same brief as a plainly named `.txt` file in the repository root and state that filename beside the fenced brief.
-4. Exact PowerShell launch snippet. Provide a separate fenced `powershell` block that sets the repository location and launches interactive `codex` with the exact recommended model and reasoning value, followed by a short literal prompt telling Codex to read the named brief completely and carry out every requirement. Never load the brief into a PowerShell variable or pass its multiline contents to `codex`; that method can be misparsed as CLI arguments. The delivered command must contain the actual brief filename, model slug, and reasoning value, with no placeholders. Example:
+Reusable opening sentence
+
+For alexpsym/CODEX, read AGENTS.md, all applicable instruction files it requires for your role, and the relevant checkpoint in summary/CODEX_SUMMARY_latest.txt before drafting or executing this job.
+
+Recover context and choose one job
+
+- Recover relevant history/checkpoints, accepted work, current git state, canonical files/function boundaries, exact executable paths, working commands, outputs/destinations and consumed budgets before drafting. Say which files were actually read through available access; do not promise permanent memory or claim unread files were inspected.
+- Describe observed versus expected behavior and evidence versus hypotheses. Reference the existing handlers/helpers/services and change them, not a duplicate implementation. Preserve application behavior, workbook presentation/data/manual edits/formulas/caches and user labels under AGENTS.md's preservation rules. No redesign/rebuild or guessed classifications.
+- Split independent work into small deliverable jobs, list the queue and provide only the current job unless the user requests a combined job. Treat a clear user Pass as acceptance and automatically provide the next queued brief; interpret obvious speech-to-text corrections using context. Do not make the user repeatedly ask for the next job. This continuity rule does not authorize implementing the queued job or override an explicit instruction to stop.
+- Include scope/authorized paths, concrete outcome, evidence, implementation requirements, preservation safeguards, bounded verification, delivery/activation, acceptance criteria and residual risks. Carry prior actual usage/results, not a reset or an invented blocker.
+
+Model and interface recommendation
+
+- Recommend the lowest suitable SUPPORTED model and reasoning effort with a task-specific reason. Honor an explicit user model/effort. Do not impose a stale slug, mandatory xhigh/max/Ultra default, or automatic parallelism. Verify current supported options when relevant, starting with known working commands and official primary documentation.
+- Use the interactive Codex CLI/TUI, not a desktop-GUI command or a new login/account. For an active session say to paste the brief into that SAME session; do not restart it just to execute a continuation.
+- The current documentation-maintenance example uses gpt-6.1-sol with medium reasoning because it reconciles role-specific instructions and synchronized text/Word copies. This is an example, not the minimum model for every future task. Before using a different model, verify its supported slug/effort and choose proportionately.
+
+Complete brief delivery package
+
+- Before the brief, provide a complete fenced powershell startup command with the actual selected model/effort and repository location. For a running session state SAME session first; show reopening/resume commands only when needed. No fabricated session ID or placeholder command in a delivered brief.
+- Supply ONE complete self-contained fenced text brief plus an IDENTICAL plainly named downloadable TXT. Name its intended repository-root filename. A download does not already exist on the user's PC: state where the user must save/copy it. Never claim it was saved locally without file-access evidence.
+- A command telling Codex to read a repository-root brief is valid only after that file is confirmed present there. If it is not present, the user pastes the complete brief into the existing interactive session, or first saves the download at the stated destination. Do not issue a falsely ready read-local-file command.
+- Never pass multiline brief contents as CLI arguments or through a PowerShell variable. A short literal instruction to read a confirmed local file is acceptable; it is not the multiline brief itself.
+- Reuse current working invocation-only launcher settings where needed, without changing global/project configuration or weakening sandbox/approval policy. Do not infer backend selection or F: lock state from a requested option. Recheck changed CLI options within the brief's discovery budget.
+
+PowerShell startup example
+
+For an existing active session: paste the complete brief into that SAME session. The following is a concrete new/reopened-session example for this documentation-maintenance model/effort; adapt the actual model/effort and proven session-required options before delivering another job:
 
 ```powershell
-Set-Location "C:\GPT\CODEX-master"
-codex --model gpt-5.6-sol --config 'model_reasoning_effort="ultra"' 'Read .\CODEX_BRIEF_2026-08-10_Trading_Tools_Journal_Pine.txt completely, then carry out every requirement in it.'
+Set-Location 'C:\GPT\CODEX-master'
+codex --no-daemon --model gpt-6.1-sol --config 'model_reasoning_effort="medium"' --config 'features.prefer_mxc=false' --config 'windows.sandbox="elevated"'
 ```
 
-5. Resume commands. Include the exact continuation commands when relevant. Always provide the current-directory form below. When the exact session ID is known, also provide a second command containing that literal ID; never leave a generic session-ID placeholder in a delivered command.
+This recorded Windows invocation uses the existing permitted legacy sandbox; its tasks do not become administrator commands. It is not a general recommendation to change sandbox modes, policy, authentication or configuration. Preserve a working session. If reopening is actually needed and the latest session in this checkout is the intended one, use the current-directory resume form with the chosen actual model/effort:
 
 ```powershell
-Set-Location "C:\GPT\CODEX-master"
-codex resume --last
+Set-Location 'C:\GPT\CODEX-master'
+codex --no-daemon resume --last --model gpt-6.1-sol --config 'model_reasoning_effort="medium"' --config 'features.prefer_mxc=false' --config 'windows.sandbox="elevated"'
 ```
 
-6. CLI identity. State clearly that this method launches the interactive Codex CLI/TUI, not the Codex desktop graphical application, while using the same local Codex configuration and signed-in account.
+Use a literal known session ID only when established; otherwise use the picker or the appropriate verified --last form, never fabricate one. These commands do not assume any brief file is on the user's PC. Only after the named file exists may a short literal read-file prompt be added.
 
-When creating Codex briefs:
+Narrow verification and explicit budgets
 
-* Inspect the relevant files and current git status before patching.
-* Keep patches narrow; do not redesign the UI, workbook, or workflows unless explicitly asked.
-* Preserve Trading Journal workbook layout, formats, manual edits, merged cells, borders, row heights, widths, filters, panes, sheet order, and user labels.
-* Prefer existing repo helpers and exact local function boundaries.
-* Reference exact paths, functions, endpoints, scripts, helpers, workers, UI handlers, and imports where relevant.
-* Include observed vs expected behavior, likely cause, required changes, safeguards, acceptance criteria, tests, verification commands, and residual risks.
-* Run targeted tests and syntax checks for every touched area.
-* Do not claim success without verification output.
-* Never allow fake success, silent failure, swallowed errors, blank UI, misleading 200s, stuck spinners, or manual-only refresh.
-* When API docs matter, use official Bybit V5, OANDA v20, MQL5, or CoinSpot docs only; cite exact sections used.
-* Render Web Service hosts Render Master Control. MT5 runs locally. Local tools open Edge only.
-* Forex Tester 6 = 6.0.0.29. Pepperstone MT5 build 5430 is not part of Render Master Control.
-* Write final Codex summary text verbatim to `summary/CODEX_SUMMARY_latest.txt` before pushing.
-* Run repo-root `PATCH_DESKTOP_PUSH.bat` at the end of each job unless the user explicitly says not to. Its default repo is `C:\GPT\CODEX-master` and its default log is `C:\GPT\PATCH_DESKTOP_PUSH-latest.log`.
-* Do not push before writing `summary/CODEX_SUMMARY_latest.txt`.
-* Do not commit temp, cache, log, environment, secret, runtime data, `render/data`, or local state files.
-* Keep cleanup conservative: only remove `.pytest_tmp*`, `.pytest_cache`, and `__pycache__` folders after verifying paths stay inside the repo.
+- Identify changed behavior and authorize only the smallest meaningful affected checks. For documentation-only work specify document validation and ZERO feature tests. No whole test files, full suites, broad integration, unrelated/unaffected checks, unchanged passing-test repeats, unnecessary smoke tests, subagents or expanded testing without explicit user approval. Shared workbook code is not a blanket full-suite exception. These limits supersede broader repository testing suggestions within the instruction hierarchy.
+- Every brief must state numeric caps for distinct nodes, invocations, scheduled executions, per-invocation timeout, ordinary-command duration, total verification, total active execution and real-data attempts. Include numeric discovery/build/installation caps where applicable, including explicit zero values for unaffected operations.
+- Read AGENTS.md's current defaults and put their actual numbers into the brief: ordinary commands 300 seconds, verification 900 seconds, discovery 120 seconds and one authorized real-data attempt unless expressly changed. Set task-specific test/active-work ceilings and any lower limits; no unlimited defaults. Necessary summary/commit/push/installation work must fit the budgets.
+- Carry actual attempts, elapsed time and outcomes through continuations. Permit bounded task-owned corrections only within scope and the remaining allowance. A failed/interrupted/timed-out/inconclusive real-data operation consumes its attempt; preserve evidence/original/candidate, diagnose on fixtures/copies and require explicit authorization in a NEW user message for another production attempt. Offline work may use captured bytes without rereading originals.
+- Require one bounded local worker/foreground execution with retained direct logs, actual child OS exit code, elapsed time and body/result evidence. Require normal resource/watchdog/file/lock cleanup. No model-driven polling, periodic no-change updates, swallowed failure, masked timeout, os._exit or success inferred solely from printed passes/JUnit. Give a start and completion/failure report, and an exact local retrieval method if an isolated operation is left running.
 
-VERIFICATION AND MODEL SELECTION
+Usage warnings are not pause rules
 
-- For complex Trading Journal preservation work, recommend gpt-5.6-sol with xhigh reasoning unless the specific task demonstrably requires max.
-- Do not recommend ultra unless meaningful independent parallel subtasks justify it.
-- Require focused regression tests and directly affected integration checks.
-- Never require complete workbook and service suites by default.
-- Require a full workbook suite only when shared-core changes genuinely justify it, and run it once after focused tests pass.
-- For isolated service changes, require only relevant verifier and integration tests.
+Do not pause, defer, ask the user to wait or skip a necessary authorized step because of percentages, five-hour/weekly usage warnings or reset windows. The user has withdrawn those stop rules, superseding contrary historical templates/checkpoints. Continue within scope/testing/data-retry limits until actual platform-enforced exhaustion or another applicable task boundary prevents execution. Do not poll for resets or copy the obsolete warning-triggered stop rule into an active brief.
+
+Tools and MQL delivery requirements
+
+- Copy the relevant established executable paths/helpers from AGENTS.md into the brief. Reuse known working commands before bounded discovery. A failed PATH/Get-Command lookup or guessed command does not prove the known tool is unavailable. No drive scans, F: workarounds, installations or PATH/ACL/security changes.
+- For executable-affecting MQL work, include automatic task-scoped compilation AND installation unless explicitly source-only. Copy the recorded compiler/source/terminal paths and established guide reference from AGENTS.md, then require verification of the actual EA/intended terminal rather than substitution of the guide's EA or blind use of a stale destination.
+- Specify numeric compile/install attempts, fresh build location, intended nonempty fresh EX5, compiler log with zero errors AND warnings, backup of corresponding targets, installation of only authorized outputs, hash verification and recording the working method. No optional compile-if-available escape or handing normal authorized delivery back to the user. Source push alone is not installed delivery.
+- For Python/docs-only tasks explicitly set unaffected MQL compilation/installation to ZERO/not applicable. No unrequested MT5/app restart, chart/account change or trade. Preserve architecture/version references from AGENTS.md as recorded facts to verify when relevant, not permanently current versions.
+
+Scope preservation and honest reporting
+
+- Include exact authorized paths/inputs/outputs. Preserve pre-existing modified/untracked files/staging and unrelated unpublished commits. Baseline dirty authorized targets and isolate this delta. Only a concrete inseparable conflict or actual data/scope risk is an ownership blocker, not missing authorship history or unrelated warnings.
+- Require AGENTS.md's workbook/manual-data and presentation preservation contract, narrowly declared changes and current stable identities. No unrestricted rebuild/redesign, silent reclassification or removal of custom content. Cleanup/reversion may touch only verified task-created artifacts/deltas, never indiscriminate cache/recursive deletion. Exclude secrets, environment files, logs/caches/runtime data/local state from Git.
+- When APIs/docs matter require official primary sources (Bybit V5, OANDA v20, MQL5, CoinSpot, official OpenAI as appropriate), cite exact sections and distinguish inference from evidence. Preserve established project-specific rules and recorded references, verifying versions only when relevant.
+- A failed read-only remote lookup is uncertainty, not divergence and not a reason to stop safe local implementation. Require fresh delivery verification before push. Stop at concrete unsafe scope/data/conflict/remote-advancement or exhausted task-budget boundaries; preserve progress and name the exact remaining step. Do not ask again for authorization already supplied.
+- Require one concise final delta-versus-requirements review, actual verification evidence and separate implementation/build/install/manual-acceptance statuses. No fake success, silent failure, blank UI/misleading success status/stuck spinner, or completion claimed for local-only/unverified work. Keep communication concise.
+
+Safe automatic Git package
+
+Include AGENTS.md's safe automatic delivery workflow in every authorized implementation brief: write summary/CODEX_SUMMARY_latest.txt before delivery, one task-scoped commit/protected normal push unless the user prohibits it, exact-path/task-only staging, inspect the actual commit and preserve unrelated staging/unpublished work. Copy the two literal saved-identity verify/push commands from AGENTS.md into the self-contained brief. Use the unchanged helper; no login/account picker or credential/helper/configuration changes.
+
+Never require PATCH_DESKTOP_PUSH.bat or a broad staging/pull/rebase/stash script. No raw push, git add -A, pull/rebase/stash/autostash/force-push or history rewrite. Require fresh pre-push remote verification and matching CURRENT local/remote master SHA afterward, not cached origin/master. Preserve completed local work on remote advancement/unavailable verification/rejection and state the exact remaining delivery step without an unauthorized retry.
+
+References and synchronization
+
+Shared execution/default/tool/delivery authority: AGENTS.md. Authoritative drafting text: this TXT. Matching human-readable copy: CODEX_BRIEF_INSTRUCTIONS_CHATGPT_ONLY.docx. Do not create another instruction file, skill, root CODEX.txt or competing template. When this template changes, synchronize every section into the existing DOCX while retaining its styles, numbering, headers/footers and page setup.
+
+Official command/model references (verify applicable installed options/account access when needed):
+https://learn.chatgpt.com/docs/cli/reference
+https://learn.chatgpt.com/docs/developer-settings
+https://learn.chatgpt.com/docs/models
