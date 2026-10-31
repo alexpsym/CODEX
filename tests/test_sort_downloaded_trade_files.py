@@ -162,3 +162,38 @@ const context={window,document:{getElementById:id=>elements[id]||null,createElem
 const failed=button.click();const id=JSON.parse(requests.at(-1).opts.body).request_id;pending.reject(new Error('network lost'));await failed;assert(!button.disabled);assert(status.textContent.includes('No automatic retry'));const retrieve=button.click();assert.equal(JSON.parse(requests.at(-1).opts.body).request_id,id);pending.resolve({ok:true,json:async()=>({...f.payload,ok:true,status:'complete',files:[],counts:{moved:0}})});await retrieve;assert(!button.disabled);assert.equal(timers.size,0);assert.equal(requests.length,3);console.log('production menu handler contract passed');})().catch(e=>{console.error(e);process.exitCode=1});""",encoding='utf-8')
     completed=subprocess.run([r'C:\Program Files\nodejs\node.exe',str(script),str(fixture)],capture_output=True,text=True,timeout=25)
     assert completed.returncode==0,completed.stdout+'\n'+completed.stderr
+
+
+def test_worker_uses_literal_downloads_folder(tmp_path,monkeypatch):
+    assert str(m.SOURCE)==r'C:\Users\User\Downloads\CHARTS (no delete)'
+    source=tmp_path/'Downloads'/'CHARTS (no delete)';decoy=source.with_name('CHARTS')
+    source.mkdir(parents=True);decoy.mkdir();folder=tmp_path/'Dropbox'/'CRYPTO'/'2026'/'C398';folder.mkdir(parents=True)
+    intended=aged(source/'C398_chart.txt',b'intended verified chart');other=aged(decoy/'C398_decoy.txt',b'do not inspect or move')
+    audit=tmp_path/'audit';loaded=tmp_path/'candidate-loads.txt'
+    # Spawn a real Python worker with fixture-only roots/reader. The production
+    # main, run_batch, matcher, mover and parent subprocess adapter remain real.
+    worker=tmp_path/'fixture_worker.py'
+    worker.write_text("import sys\nfrom pathlib import Path\nsys.path.insert(0,"+repr(str(ROOT))+" )\nfrom tools import sort_downloaded_trade_files as worker\nworker.SOURCE=Path("+repr(str(source))+")\nworker.approved_roots=lambda:[Path("+repr(str(tmp_path/'Dropbox'/'CRYPTO'))+")]\ndef inputs(workbook,roots,deadline):\n Path("+repr(str(loaded))+").write_text('loaded')\n return "+repr([candidate(folder)])+"\nworker.read_candidates=inputs\nworker.main()\n",encoding='utf-8')
+    monkeypatch.setattr(m,'__file__',str(worker))
+    first=m.run_local_batch('a'*32,tmp_path/'unused-journal.xlsx',audit)
+    assert first['worker_returncode']==0 and first['ok'] and first['counts']['moved']==1
+    assert (folder/intended.name).read_bytes()==b'intended verified chart' and not intended.exists()
+    assert source.is_dir() and decoy.is_dir() and other.read_bytes()==b'do not inspect or move'
+    assert loaded.read_text()=='loaded';loaded.unlink();source.rmdir()
+    missing=m.run_local_batch('b'*32,tmp_path/'unused-journal.xlsx',audit)
+    assert missing['worker_returncode']==0 and missing['status']=='failed' and missing['ok'] is False
+    assert str(source) in missing['message'] and 'Source folder could not be opened' in missing['message']
+    assert 'FileNotFoundError' not in missing['error'] and not loaded.exists()
+    assert missing['files']==[] and all(value==0 for value in missing['counts'].values())
+    assert not source.exists() and other.read_bytes()==b'do not inspect or move' and decoy.is_dir()
+    # A non-directory is also a conclusive setup failure, never a decoy fallback.
+    source.write_bytes(b'not a directory')
+    invalid=m.run_local_batch('c'*32,tmp_path/'unused-journal.xlsx',audit)
+    assert invalid['worker_returncode']==0 and invalid['status']=='failed' and not invalid['ok']
+    assert str(source) in invalid['message'] and 'not a directory' in invalid['message']
+    assert invalid['files']==[] and all(value==0 for value in invalid['counts'].values()) and not loaded.exists()
+    assert source.read_bytes()==b'not a directory' and other.read_bytes()==b'do not inspect or move'
+    # Existing failed request/audit remains durable and is returned, not replayed.
+    before=(audit/('b'*32+'.json')).read_bytes()
+    repeat=m.run_local_batch('b'*32,tmp_path/'unused-journal.xlsx',audit)
+    assert repeat['status']=='failed' and (audit/('b'*32+'.json')).read_bytes()==before and not loaded.exists()

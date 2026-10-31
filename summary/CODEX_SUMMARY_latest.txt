@@ -4585,3 +4585,53 @@ confirmed matches present at destination/absent from Downloads, unresolved/faile
 sources retained, CHARTS/subdirectories retained. No new trade or broker resync.
 MT5 not applicable. No claim of original-data filing acceptance before user report.
 Job6 task-directory elapsed at final review: 1187.44 sec; test child execution total 12.878568 sec.
+
+
+JOB 6 CORRECTION - LITERAL DOWNLOADS SOURCE / WORKER BOUNDARY - 2026-11-01
+Manual acceptance of 940748ab36d4a4900ef5d32b93da5942ed781bce FAILED: the
+production constant incorrectly omitted the literal parenthetical folder text.
+Correct source is C:\Users\User\Downloads\CHARTS (no delete), including spaces
+and parentheses. Previous checkpoint's CHARTS-only statements are historical and
+superseded by this correction. No fallback, source picker or other Downloads scan.
+Initial correction HEAD/master 940748ab36d4a4900ef5d32b93da5942ed781bce; staged
+paths empty, all three authorized targets clean. Unrelated work preserved.
+
+Changed only tools/sort_downloaded_trade_files.py, its existing focused test file
+and this summary. SOURCE remains fixed server-side: run_local_batch launches the
+module without any source argument; real main passes SOURCE directly to run_batch.
+Source stat failures restricted to missing/not-a-directory receive a clear failed
+report naming the full expected source, ok=false and actual zero counts before
+candidate loading/discovery/transfers. Other I/O errors retain their actual category.
+Existing request identity/durable failed audit remains intact; no audit deletion or
+production replay. Matching, guarded mover, destinations, menu/server/JS unchanged.
+
+New test_worker_uses_literal_downloads_folder PASSED, actual Python child exit0,
+4.8508011 sec; JUnit completed body passed. One additional pytest invocation/one
+scheduled node execution; optional failed-node retry unused. Cumulative Job6:
+3 invocations/5 scheduled executions/4 distinct nodes (prior2/4/3 retained).
+Prior child test time12.878568 sec plus this4.8508011 =17.7293691 sec. Prior
+recorded task-directory elapsed1187.44 sec at its final review is retained, not reset;
+correction uses separate supplemental600 active/180 verification sec allowance,
+cumulative ceilings2400 active/780 verification sec. No other tests repeated.
+Real parent subprocess adapter invokes a fixture wrapper that injects temporary
+roots/journal inputs, then real main/run_batch/matcher/mover. Checks exact production
+Windows constant; intended literal folder alone inspected/moved; decoy CHARTS file
+and both directories retained. Missing intended source while decoy exists yields
+clear zero-count failure/no candidate load/no fallback; non-directory likewise;
+repeated failed request returns unchanged durable audit rather than retrying moves.
+Private baselines/commands/stdout/stderr/trace/JUnit/result:
+.job6_literal_source_103d87d372524881995a45f34da06ca4 (excluded from Git).
+
+Optional exact-directory metadata capture NOT used (development capture remains0/1).
+No original Downloads/Dropbox access, moves/deletions, live API/broker requests,
+workbook/cache writes, app restarts, installs/config/permission changes. MT5 N/A.
+One correction-only commit/protected push authorized (cumulative deliveries2 each);
+final scoped review/diff check and fresh helper verification required before commit.
+Delivery SHA/fresh remote equality reported in session. Usage pause withdrawal retained.
+
+Original-data acceptance PENDING. USER safely restart LTT with
+run_local_master_control.bat, refresh Trading Journal menu, click Sort downloaded
+trade files ONCE. It must use CHARTS (no delete). Verify matched destinations/source
+removal, unresolved/failed sources and source directories retained. If failure remains,
+retain the new report/audit and diagnose that result; no repeated unchanged clicks,
+new trade or broker resync. Fixture pass is not real filing acceptance.

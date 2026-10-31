@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
-SOURCE = Path(r'C:\Users\User\Downloads\CHARTS')
+SOURCE = Path(r'C:\Users\User\Downloads\CHARTS (no delete)')
 DROPBOX = Path(r'C:\Users\User\Dropbox')
 BRISBANE = timezone(timedelta(hours=10))
 MAX_FILES, MAX_BYTES, MAX_DOCUMENT = 1000, 1024**3, 20*1024**2
@@ -17,6 +17,7 @@ FINISHED = {'complete', 'partial', 'failed'}
 
 class Unsafe(ValueError): pass
 class BatchLimit(RuntimeError): pass
+class SourceUnavailable(ValueError): pass
 
 def check_deadline(deadline):
     if time.monotonic() >= deadline: raise BatchLimit('Batch time limit reached; remaining files retained')
@@ -354,6 +355,11 @@ def run_batch(request_id,source,roots,audit,candidates=None,loader=None,*,second
             report={'request_id':request_id,'status':'running','ok':False,'files':[],'source':str(source),'transferred_bytes':0}
             atomic_json(active,{'request_id':request_id});atomic_json(result_path,report)
             try:
+                try:source_info=source.stat()
+                except (FileNotFoundError,NotADirectoryError):
+                    raise SourceUnavailable(f'Source folder could not be opened: {source}. Expected an existing ordinary directory; no fallback was used.') from None
+                if not stat.S_ISDIR(source_info.st_mode):
+                    raise SourceUnavailable(f'Source folder could not be opened: {source}. The expected path is not a directory; no fallback was used.')
                 files,truncated=discover_files(source,deadline)
                 if not files:
                     report['message']='No downloaded files to sort.'
@@ -432,7 +438,8 @@ def run_batch(request_id,source,roots,audit,candidates=None,loader=None,*,second
                 if truncated:report['files'].append({'file':'Remaining source subtree','status':'unprocessed','reason':'Source metadata bound reached; remaining count unknown'})
                 report['status']='complete' if report_counts(report)['ok'] else 'partial'
             except Exception as exc:
-                report['error']=type(exc).__name__+': '+str(exc);report['status']='failed'
+                report['error']=str(exc) if isinstance(exc,SourceUnavailable) else type(exc).__name__+': '+str(exc);report['status']='failed'
+                if isinstance(exc,SourceUnavailable):report['message']=str(exc)
                 known={x['file'] for x in report['files']}
                 for path,issue in locals().get('files',[]):
                     rel=str(path.relative_to(source))
