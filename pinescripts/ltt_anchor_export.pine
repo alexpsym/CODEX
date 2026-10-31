@@ -1,0 +1,38 @@
+//@version=6
+indicator("LTT anchor export (personal)", overlay = true, max_lines_count = 1)
+// PERSONAL script: published scripts cannot generate Pine Logs.
+// Select two endpoints on the SAME intended channel boundary, first then second.
+// Drag the paired markers, edit exact prices in Settings > Inputs, or use the
+// script menu's Reset points to reselect. This cannot inspect drawing-tool lines.
+// Copy ONE complete LTT_ANCHORS_V1 message from Pine Logs into LTT.
+// Contract: schema ltt-anchors/v1; timestamp_ms = actual bar-opening UNIX ms;
+// price = positive decimal string. No alerts, webhooks, strategy or broker IO.
+float price1 = input.price(0, "Price 1", inline = "A1", group = "Anchor 1", confirm = true)
+int time1 = input.time(0, "Time 1", inline = "A1", group = "Anchor 1", confirm = true)
+float price2 = input.price(0, "Price 2", inline = "A2", group = "Anchor 2", confirm = true)
+int time2 = input.time(0, "Time 2", inline = "A2", group = "Anchor 2", confirm = true)
+
+var int resolved1 = na
+var int resolved2 = na
+// Match loaded bars themselves: never infer time from a bar index/timeframe.
+if time == time1
+    resolved1 := time
+if time == time2
+    resolved2 := time
+bool supported = chart.is_standard and (timeframe.isseconds or timeframe.isminutes or timeframe.isdaily or timeframe.isweekly or timeframe.ismonthly)
+bool valid = supported and time1 > 0 and time2 > time1 and price1 > 0 and price2 > 0 and not na(resolved1) and not na(resolved2) and time2 <= last_bar_time
+var line boundary = na
+varip string emitted = ""
+if barstate.islast
+    if valid
+        if na(boundary)
+            boundary := line.new(resolved1, price1, resolved2, price2, xloc = xloc.bar_time, color = color.aqua, width = 2)
+        string packet = '{"schema":"ltt-anchors/v1","symbol":"' + syminfo.tickerid + '","timeframe":"' + timeframe.period + '","anchors":[{"timestamp_ms":' + str.tostring(resolved1, "0") + ',"price":"' + str.tostring(price1, "0.################") + '"},{"timestamp_ms":' + str.tostring(resolved2, "0") + ',"price":"' + str.tostring(price2, "0.################") + '"}]}'
+        if packet != emitted
+            log.info("LTT_ANCHORS_V1 " + packet)
+            emitted := packet
+    else
+        string diagnostic = "LTT anchors unavailable: use a standard time-based chart, positive prices and two increasing loaded bar-opening times. Reset/reselect points; future or unloaded points cannot be exported."
+        if diagnostic != emitted
+            log.warning(diagnostic)
+            emitted := diagnostic

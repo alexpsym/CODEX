@@ -867,12 +867,78 @@
   }
   function localDateTime(ms) {
     const d = new Date(Number(ms)); const p = (v) => String(v).padStart(2, '0');
-    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}.${String(d.getMilliseconds()).padStart(3, '0')}`;
   }
   function anchorEpoch(id, previewId) {
-    const input = $(id); const preview = $(previewId); const ms = input && input.value ? new Date(input.value).getTime() : NaN;
+    const input = $(id); const preview = $(previewId); const ms = input && input.value ? (input.dataset.anchorLocal === input.value ? Number(input.dataset.anchorEpoch) : new Date(input.value).getTime()) : NaN;
     if (preview) preview.textContent = Number.isFinite(ms) ? `Stored UTC: ${new Date(ms).toISOString()}` : 'Enter a local date/time to preview UTC.';
     return ms;
+  }
+  let anchorImport = null;
+  let anchorImportContext = '';
+  const anchorFormIds = ['trendline-anchor-1-time','trendline-anchor-1-price','trendline-anchor-2-time','trendline-anchor-2-price'];
+  const anchorContext = () => JSON.stringify([state.asset,state.broker,state.account,state.resolvedSymbol,state.timeframe,state.trendlineEditId]);
+  function clearAnchorImport(message='') {
+    anchorImport=null; anchorImportContext='';
+    if($('trendline-import-text')) $('trendline-import-text').value='';
+    if($('trendline-import-preview')) $('trendline-import-preview').textContent=message;
+    if($('trendline-import-apply')) $('trendline-import-apply').disabled=true;
+  }
+  function syncAnchorImportContext() {
+    if(anchorImportContext && anchorImportContext!==anchorContext()) clearAnchorImport('Calculator context changed. Preview a matching export again.');
+  }
+  function setAnchorTime(id,ms) {
+    const el=$(id); el.value=localDateTime(ms);
+    el.dataset.anchorEpoch=String(ms); el.dataset.anchorLocal=el.value;
+  }
+  function validateAnchorPacket(packet) {
+    if(!packet || packet.schema!=='ltt-anchors/v1' || typeof packet.symbol!=='string' || typeof packet.timeframe!=='string') throw new Error('Use one ltt-anchors/v1 export with source symbol and timeframe.');
+    const source=packet.symbol.match(/^([A-Z0-9_]+):([A-Z0-9_/.]+)$/);
+    const venue=state.asset==='crypto'?'BYBIT':String(state.broker).toUpperCase();
+    let symbol=source?.[2]||'';
+    if(state.asset==='crypto') symbol=symbol.replace(/\.P$/,'');
+    if(!source || source[1]!==venue || !state.resolvedSymbol || chartSymbolKey(symbol)!==chartSymbolKey(state.resolvedSymbol)) throw new Error('Export venue/instrument must match the resolved calculator instrument. Calculator selections were not changed.');
+    const frames={'1':'1m','5':'5m','15':'15m','30':'30m','60':'1h','240':'4h','D':'1d','1D':'1d','W':'1w','1W':'1w','M':'1mo','1M':'1mo'};
+    if(!state.timeframe || frames[packet.timeframe]!==state.timeframe) throw new Error('Export timeframe must match the calculator timeframe.');
+    if(!Array.isArray(packet.anchors) || packet.anchors.length!==2) throw new Error('Export requires exactly two anchors.');
+    for(const a of packet.anchors) {
+      if(!a || !Number.isSafeInteger(a.timestamp_ms) || a.timestamp_ms<=0 || !Number.isFinite(new Date(a.timestamp_ms).getTime())) throw new Error('Anchor timestamps must be valid positive integer milliseconds.');
+      if(typeof a.price!=='string' || a.price.length>80 || !/^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(a.price) || !Number.isFinite(Number(a.price)) || Number(a.price)<=0) throw new Error('Anchor prices must be positive decimal strings.');
+    }
+    if(packet.anchors[1].timestamp_ms<=packet.anchors[0].timestamp_ms) throw new Error('Anchor 2 must be later than anchor 1.');
+    return packet;
+  }
+  function previewAnchorImport() {
+    clearAnchorImportPreview();
+    try {
+      const text=String($('trendline-import-text')?.value||'').trim();
+      if(!text || text.length>8192) throw new Error('Paste one export message (maximum 8192 characters).');
+      let json=text;
+      if(!text.startsWith('{')) {
+        const marker='LTT_ANCHORS_V1'; const at=text.indexOf(marker);
+        if(at<0 || at!==text.lastIndexOf(marker) || /[{}]/.test(text.slice(0,at))) throw new Error('Paste one unambiguous LTT_ANCHORS_V1 message or raw JSON.');
+        json=text.slice(at+marker.length).trim();
+      }
+      const packet=validateAnchorPacket(JSON.parse(json));
+      anchorImport={packet,form:anchorFormIds.map(id=>$(id).value)};
+      anchorImportContext=anchorContext();
+      $('trendline-import-preview').textContent=`Source: ${packet.symbol} | timeframe ${packet.timeframe}\n`+packet.anchors.map((a,i)=>`Anchor ${i+1}: ${a.price} | UTC ${new Date(a.timestamp_ms).toISOString()} | Browser local ${localDateTime(a.timestamp_ms)} (${Intl.DateTimeFormat().resolvedOptions().timeZone})`).join('\n');
+      $('trendline-import-apply').disabled=false;
+    } catch(err) { $('trendline-import-preview').textContent='Import rejected: '+String(err.message||err); }
+  }
+  function clearAnchorImportPreview() {
+    anchorImport=null;anchorImportContext='';
+    if($('trendline-import-apply')) $('trendline-import-apply').disabled=true;
+  }
+  function applyAnchorImport() {
+    if(!anchorImport || state.trendlineMutationPending) return;
+    try {
+      if(anchorImportContext!==anchorContext() || anchorImport.form.some((value,i)=>value!==$(anchorFormIds[i]).value)) throw new Error('Form/context changed. Preview the export again before applying.');
+      const packet=validateAnchorPacket(anchorImport.packet);
+      packet.anchors.forEach((a,i)=>{setAnchorTime(`trendline-anchor-${i+1}-time`,a.timestamp_ms);$(`trendline-anchor-${i+1}-price`).value=a.price;anchorEpoch(`trendline-anchor-${i+1}-time`,`trendline-anchor-${i+1}-utc`);});
+      anchorImport=null;$('trendline-import-apply').disabled=true;
+      $('trendline-import-preview').textContent+='\nApplied to anchor fields only. Save/Update draft explicitly.';
+    } catch(err) { clearAnchorImport('Import rejected: '+String(err.message||err)); }
   }
   function syncTrendlineTriggerControls() {
     const mode = $('trendline-trigger-mode'); const direction = $('trendline-cross-direction');
@@ -919,8 +985,9 @@
     return payload;
   }
   function resetTrendlineForm() {
+    clearAnchorImport();
     state.trendlineEditId = '';
-    ['trendline-anchor-1-time','trendline-anchor-2-time','trendline-anchor-1-price','trendline-anchor-2-price'].forEach((id) => { const el=$(id); if(el) el.value=''; });
+    ['trendline-anchor-1-time','trendline-anchor-2-time','trendline-anchor-1-price','trendline-anchor-2-price'].forEach((id) => { const el=$(id); if(el) { el.value=''; delete el.dataset.anchorEpoch; delete el.dataset.anchorLocal; } });
     const extension=$('trendline-right-extension'); if(extension) extension.checked=true;
     const mode=$('trendline-trigger-mode'); if(mode) mode.value='touch'; const direction=$('trendline-cross-direction'); if(direction) direction.value='either';
     const basis=$('trendline-price-basis'); if(basis) basis.value='executable'; const tolerance=$('trendline-tolerance-ticks'); if(tolerance) tolerance.value='0';
@@ -950,8 +1017,9 @@
   }
   function editTrendlinePlan(plan) {
     if (!plan || plan.status!=='draft') return;
+    clearAnchorImport();
     state.trendlineEditId=plan.plan_id; const a=plan.anchors||[];
-    $('trendline-anchor-1-time').value=localDateTime(a[0].timestamp_ms); $('trendline-anchor-2-time').value=localDateTime(a[1].timestamp_ms); $('trendline-anchor-1-price').value=a[0].price; $('trendline-anchor-2-price').value=a[1].price;
+    setAnchorTime('trendline-anchor-1-time',a[0].timestamp_ms); setAnchorTime('trendline-anchor-2-time',a[1].timestamp_ms); $('trendline-anchor-1-price').value=a[0].price; $('trendline-anchor-2-price').value=a[1].price;
     $('trendline-right-extension').checked=!!plan.right_extension; $('trendline-trigger-mode').value=plan.trigger_mode; $('trendline-cross-direction').value=plan.cross_direction; $('trendline-price-basis').value=plan.trigger_price_basis; $('trendline-tolerance-ticks').value=plan.tolerance_ticks;
     state.order_type=plan.order_intent;
     $('calc-limit').value=plan.order_intent==='limit' ? (plan.limit_entry_price||'') : '';
@@ -971,7 +1039,14 @@
   function initializeTrendlinePlans() {
     const panel=trendlinePanel(); if(!panel) return;
     panel.style.display='none'; resetTrendlineForm();
-    ['trendline-anchor-1-time','trendline-anchor-2-time'].forEach((id)=>$(id)?.addEventListener('input',()=>anchorEpoch(id,id==='trendline-anchor-1-time'?'trendline-anchor-1-utc':'trendline-anchor-2-utc')));
+    anchorFormIds.forEach(id=>$(id)?.addEventListener('input',()=>{
+      delete $(id).dataset.anchorEpoch;delete $(id).dataset.anchorLocal;
+      clearAnchorImport('Manual anchor edit; import provenance cleared.');
+      if(id.endsWith('-time')) anchorEpoch(id,id.replace('-time','-utc'));
+    }));
+    $('trendline-import-text')?.addEventListener('input',previewAnchorImport);
+    $('trendline-import-preview-btn')?.addEventListener('click',previewAnchorImport);
+    $('trendline-import-apply')?.addEventListener('click',applyAnchorImport);
     $('trendline-trigger-mode')?.addEventListener('change',syncTrendlineTriggerControls); $('trendline-save')?.addEventListener('click',saveTrendlinePlan); $('trendline-reset')?.addEventListener('click',resetTrendlineForm); $('trendline-refresh')?.addEventListener('click',refreshTrendlinePlans); $('trendline-monitor-start')?.addEventListener('click',()=>trendlineMonitor('start')); $('trendline-monitor-stop')?.addEventListener('click',()=>trendlineMonitor('stop'));
   }
   function configureTrendlinePlans(bootstrap) {
@@ -1064,7 +1139,7 @@
     } else {
       state.broker = 'bybit';
     }
-    state.resolvedSymbol = canonicalSymbol;
+    state.resolvedSymbol = canonicalSymbol; syncAnchorImportContext();
     if (payload.chart_tick_size_default || payload.chart_tick_size) renderChartTickProfile(payload);
     updateRiskUiForAsset();
     updateBrokerUiForAsset();
@@ -1127,7 +1202,7 @@
       btn.addEventListener('click', () => {
         const ariaDisabled = typeof btn.getAttribute === 'function' ? btn.getAttribute('aria-disabled') : btn.ariaDisabled;
         if (btn.disabled || ariaDisabled === 'true') return;
-        state[key] = btn.dataset.v;
+        state[key] = btn.dataset.v; syncAnchorImportContext();
         if (key === 'risk_mode' && state.asset === 'fx') {
           state.fx_risk_mode = state.risk_mode;
         }
@@ -1186,7 +1261,7 @@
       btn.addEventListener('click', () => {
         root.querySelectorAll('button').forEach((b) => b.classList.remove('active'));
         btn.classList.add('active');
-        state.timeframe = btn.dataset.v;
+        state.timeframe = btn.dataset.v; syncAnchorImportContext();
       });
     });
   }
@@ -1344,7 +1419,7 @@
     if ($('calc-chart-tick-auto')) $('calc-chart-tick-auto').value = 'Resolving…';
     if ($('calc-chart-tick-source')) $('calc-chart-tick-source').textContent = 'Resolving automatic symbol profile';
     invalidateQuote({ clearResults: false, status: state.hasCalculatedOnce ? 'stale' : 'idle', reason: 'Quote changed. Recalculate before submitting.' });
-    state.resolvedSymbol = '';
+    state.resolvedSymbol = ''; syncAnchorImportContext();
     canonicalEl.textContent = '';
     debounceSymbolResolve();
   });
