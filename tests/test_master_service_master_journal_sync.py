@@ -6116,3 +6116,21 @@ def test_sync_preserves_canonical_stats1_layout_and_manual_formatting(tmp_path, 
     )
     assert second["master_journal_ok"] is True, second
     assert_generator_owned_repairs()
+
+
+def test_counter_trend_manual_snapshot_statistics_pipeline(tmp_path,monkeypatch):
+    ms=master_service
+    row={'id':'counter-1','row_type':'trade','symbol':'EURUSD','asset_class':'fx','side':'BUY','net_profit':10,'open_time':'2026-05-01T00:00:00Z','close_time':'2026-05-01T01:00:00Z'}
+    edit=ms._normalize_trading_journal_edit_payload({'counter_trend':' yes '},for_create=False,existing=row)
+    assert edit['counter_trend']=='Yes'
+    saved=ms._apply_trading_journal_manual_overrides(row,edit)
+    incoming=dict(row,manual_overrides=saved['manual_overrides']);reapplied=ms._reapply_trading_journal_manual_overrides(incoming)
+    assert reapplied['counter_trend']=='Yes' and 'counter_trend' in ms._JOURNAL_WORKBOOK_MANUAL_PRESERVE_FIELDS
+    stats=ms._compute_journal_stats([reapplied,dict(row,id='no',counter_trend='No'),dict(row,id='unknown'),dict(row,id='test',counter_trend='Yes',is_test_trade=True),dict(row,id='cash',row_type='cashflow',counter_trend='Yes')],[])
+    assert stats['totals']['counter_trend_count']==1 and stats['totals']['trades']==3
+    assert stats['groups']['by_market']['fx']['counter_trend_count']==1
+    assert stats['by_instrument'][0]['counter_trend_count']==1
+    cleared=ms._normalize_trading_journal_edit_payload({'counter_trend':''},for_create=False,existing=saved)
+    assert ms._apply_trading_journal_manual_overrides(saved,cleared)['counter_trend']==''
+    with pytest.raises(ms.HTTPException) as exc:ms._normalize_trading_journal_edit_payload({'counter_trend':'perhaps'},for_create=False,existing=saved)
+    assert exc.value.status_code==422 and saved['counter_trend']=='Yes'

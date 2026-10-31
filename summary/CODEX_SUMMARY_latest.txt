@@ -3994,3 +3994,159 @@ Original evidence unchanged under C:\GPT\CODEX-master\.job2b_3901b99ec36348809fc
 2B cumulative counters now 2/2 FEATURE pytest invocations, 2 distinct targeted nodes, 4/4 scheduled executions, all four recorded body outcomes PASS across original timeout and clean final run. Feature-process time 130.8703753 seconds (120.0694404 + 10.8009349); separate diagnostic subprocess 11.5225752 seconds, one of one allowed, no feature nodes. Added continuation used +1 feature invocation/+2 scheduled executions only. Original failed process is not relabelled successful. No other tests or repeated-node groups. Original Job 2, three-invocation/four-execution restoration repair and Job 2A history/results retained separately, not reset. Diagnosis/verification stayed within added 120/180-second bounds and 480-second active allowance; exact reasoning overhead not independently measured.
 Implementation/delta reviewed and ready for delivery in original six authorized paths only: existing store locked fresh-read/atomic permanent deletion and evidence-based eligibility; derived nonpersisted can_delete; local guarded DELETE route; confirmed-removal/duplicate/stale-list UI guard with preserved editor/absolute expiry; Preview button/listener removed while automatic paste validation and explicit Apply/Save retained; two isolated focused tests; summary history. No Pine, geometry, broker/executor/journal/MQL changes. Unrelated edits/staging preserved. Protected helper verify succeeded as saved-credential host user, freshly observing matching local/remote master 1381b53a87cf935784c4705d617bdc818de8b6d6 and authenticated no-op transport. One task-only commit/protected normal push follows; session final reports matching delivered SHA. No broad BAT/add/raw push/history operations or helper/credentials changes.
 Zero real app/API/broker requests, real registry edits/deletions, new trades, broker amendments, arming/monitoring, app/worker/MT5 restarts, TradingView actions, compilers/installations or F:/drive/configuration/ACL/PATH operations. LTT running untouched. After delivery USER safely restarts LTT through run_local_master_control.bat and refreshes calculator. Delete an unwanted unused cancelled test plan; confirm disappearance and permanent absence after refresh/restart, with other records intact. Paste fresh anchor export: preview automatic, no Preview button, Apply anchors still explicit. DRAFT-only check, no arm/monitor/submit. No Pine replacement for 2B. Extension and rectangle visibility already user-confirmed; future-point selection remains separately unreported. Manual deletion/automatic-preview/future-point checks pending, so Job 2 not yet fully accepted. MT5 compilation/installation not applicable. Jobs 3-6 queued; no start under current warning exception.
+
+
+JOB 3 ? Counter Trend: LOCAL IMPLEMENTATION; NOT DELIVERED / NOT INSTALLED.
+2026-10-31. User accepted Job 2 after ef5d9559d2518954efcd2f4c5168d1ffb414e665.
+Earlier accepted SL/anchors/extension/visibility/deletion/automatic preview preserved;
+no earlier checks repeated. Jobs 4?6 remain queued.
+Initial branch master, HEAD ef5d9559d2518954efcd2f4c5168d1ffb414e665, no staged names.
+All authorized source targets and workbook were initially clean; unrelated dirt preserved.
+
+Local source changes: Counter Trend/manual counter_trend Yes/No/blank normalization,
+strict edit rejection, source/override and workbook preservation boundaries, incremental
+projection; additive STATS1 Overall/FX/Crypto, SYMBOLS and year/month counts.
+Only explicit Yes on eligible non-test real trades counts; No/unknown/cashflows/monthly
+revaluations do not. No historical classifications inferred. Existing schema constants
+retained, additive edge column and package-level preservation validator implemented.
+Current local pipeline wrappers and package migration still require successful verification.
+Changed source/tests: tools/master_journal_workbook.py, render/master_service.py,
+tests/test_master_journal_workbook.py, tests/test_master_service_master_journal_sync.py.
+
+Focused run 1: actual OS exit 1, 25.8087377 seconds; 3 bodies ran: counts PASSED;
+workbook roundtrip FAILED canonical-schema guard before incremental assertions;
+service pipeline FAILED missing balances fixture argument.
+Run 2: actual OS exit 1, 15.8828218 seconds; only failed nodes rerun: service pipeline
+PASSED; workbook roundtrip FAILED same canonical-schema guard. No passing node repeated.
+Both child runners used known Miniconda Python, direct logs, fresh checkout basetemp,
+180-second timeout and cancelled/closed traceback watchdog in finally; no socketpair loop.
+Cumulative Job 3: 2/2 pytest invocations, 3/3 distinct nodes, 5/6 scheduled executions;
+41.6915595 seconds test subprocess verification. No third invocation authorized.
+Inspection after run 2 establishes fixture omitted required vertical header merges.
+A correction adds those canonical merges only in the failed node before incremental
+update. That final fixture correction is UNVERIFIED; incremental and derived-refresh
+assertions remain unexecuted. Source guard also accepts additive columns while requiring
+every canonical header at its exact existing column. No further tests run.
+
+Real workbook: pre-task bytes matched HEAD, SHA256
+05faa5425274a440fc0832727a81223be0ec76a9c2973610aac5376f4f5af865.
+Actual sheets/order inspected: STATS1, STATS2, SYMBOLS, Trade Log, P&L Calendar,
+' SIM', YEARLY REPORT, 2018 through 2026. No sheets renamed/reordered.
+Workbook remains byte-identical: True. Production migration/replacement attempts 0/1.
+No production backup/candidate or changed production cells yet. No workbook installation.
+Excel owner file absent; process-command query was access denied, so LTT closure was
+NOT independently confirmed. No permissions changed or processes stopped.
+No real broker/cloud/app API/store operations, no restarts, no compilation/installations.
+MT5 not applicable. No commit/push (0/1 each), no remote delivery claim.
+
+Evidence/baselines/results: C:\GPT\CODEX-master\.job3_counter_d479b863dd65430e9e0d084691f270f2
+command1.json/command2.json, stdout1/2.txt, stderr1/2.txt, trace1/2.txt, junit1/2.xml,
+result1/2.json and checkpoint.json. Exact node IDs are retained in command JSON.
+Elapsed wall since task-directory creation at checkpoint: 888.63 seconds (excludes initial
+brief/skill/status discovery; do not treat this as a reset or exact total active-time count).
+Next safe action requires explicit additional failed-node-only verification allowance for
+test_counter_trend_additive_schema_roundtrip_preserves_workbook, followed by successful
+synthetic verification before the single reserved/hash-checked real migration transaction.
+Do not commit/push or install unverified work. Manual workbook acceptance remains pending.
+
+
+JOB 3 CONTINUATION ? final single-node verification FAILED; no installation/delivery.
+Explicit supplemental authorization used ONLY for
+tests/test_master_journal_workbook.py::test_counter_trend_additive_schema_roundtrip_preserves_workbook.
+Fixture vertical merges match the production canonical header requirements; preservation
+assertions retained, no production validation weakened. The node passed its earlier header
+guard and reached incremental output verification, which rejected the Trade Log filter:
+RuntimeError: Incremental workbook Trade Log filter verification failed.
+Stack: update_master_journal_workbook_incremental -> _incremental_validate_changed_rows
+-> _incremental_validate_trade_log_ranges, tools/master_journal_workbook.py:20026.
+Actual child OS returncode 1; elapsed 13.8106901 seconds; one executed body FAILED.
+Evidence: command3.json, stdout3.txt, stderr3.txt, trace3.txt, junit3.xml, result3.json
+in .job3_counter_d479b863dd65430e9e0d084691f270f2. No timeout or forced exit.
+Cumulative Job 3: THREE pytest invocations, SIX scheduled node executions, THREE distinct
+nodes; 55.5022496 seconds subprocess verification. Earlier count-table and service-pipeline
+PASSES retained and not rerun. Supplemental allowance exhausted; no further retry performed.
+Production migration attempts remain 0/1, workbook untouched; no backup/candidate/replacement
+transaction initiated because synthetic incremental verification is incomplete. Commit 0/1,
+protected push 0/1; no delivery or installation claimed. Source and baseline artifacts retained.
+Exact next action: correct the additive-column filter writer/validator contract without
+weakening preservation, then obtain explicit failed-node-only verification authorization
+before any further pytest invocation; installation/delivery remain contingent on success.
+LTT/Excel untouched, no broker/cloud/app requests or restarts. MT5 not applicable.
+Job 2 accepted; Jobs 4?6 remain queued.
+
+
+USER OVERRIDE 2026-10-31: Usage percentages/quota warnings/reset windows no longer
+require pausing, waiting, authorization or deferral. User withdrew ALL earlier
+usage-warning stop rules, including under-5% warning. Do not restore those obsolete
+rules in queued Job 5. Actual service-enforced exhaustion may still block execution.
+All scoped tests and data-preservation limits remain binding.
+
+
+JOB 3 FILTER-CONTRACT CONTINUATION ? fourth invocation FAILED, work preserved.
+User withdrew usage-warning pauses; override recorded above remains in force.
+Writer extended AutoFilter through Counter Trend while validator required the old
+fixed column count. Added shared table-filter calculation using schema columns and
+stable-row last data row; assigning only ref retains filter criteria/sort state.
+Fourth invocation: ONLY test_counter_trend_additive_schema_roundtrip_preserves_workbook;
+actual child returncode 1, 13.5156045 seconds. Header and AutoFilter validation passed;
+next failure: RuntimeError: Incremental workbook Trade Log conditional formatting
+verification failed, _incremental_validate_trade_log_ranges line 20044 at that run.
+Code inspection: generated CF already spans mapped columns including Counter Trend,
+while its validator still expected len(TRADE_LOG_HEADERS). Narrow follow-up correction
+now shares the schema edge-column helper between filter setup and expected CF.
+Two-rule and exact-range checks remain; custom rules/criteria are not removed.
+This final correction is UNVERIFIED; no fifth invocation is authorized/performed.
+No broad validation or passing nodes repeated. Cumulative: 4 pytest invocations,
+7 scheduled executions, 3 distinct nodes, 69.0178541 seconds subprocess verification.
+Prior count-table and service-pipeline passes retained. command4.json/result4.json,
+stdout4.txt/stderr4.txt/trace4.txt/junit4.xml remain in original task artifact directory.
+Production transaction remains unused (0/1); prepared task-local install_workbook.py
+was NOT executed. Real workbook unchanged. Commit/push remain 0/1 each.
+Next exact action requires one explicit failed-node-only test allowance after this
+CF contract correction; successful verification must precede reserved real migration
+and protected delivery. No app/broker/cloud/registry operations or restarts performed.
+Job 3 incomplete; Jobs 4?6 queued.
+
+
+JOB 3 FINAL SOURCE DELIVERY ? VERIFIED; WORKBOOK INSTALLATION BLOCKED.
+Fifth invocation ran ONLY test_counter_trend_additive_schema_roundtrip_preserves_workbook: 
+PASSED; actual Python child OS exit 0, 21.7348622 seconds. Header merges, exact filter
+range and generated CF edge coverage now agree with Counter Trend; all remaining
+roundtrip/incremental/manual-clear/idempotence/preservation assertions completed.
+Existing count-table and service-pipeline PASSES retained, no repeat of passing nodes.
+Cumulative phase: 5 pytest invocations / 8 scheduled node executions / 3 distinct nodes;
+90.7527163 seconds test subprocess verification. Sixth invocation NOT used.
+No full suites or additional checks. Runner watchdog/file cleanup normal.
+Python C:\Users\User\miniconda3\python.exe; command5.json/stdout5.txt/stderr5.txt/
+trace5.txt/junit5.xml/result5.json in original private task directory.
+
+Exactly ONE production transaction attempted, wrapper exit 1, 24.3657788 seconds;
+inner 16.8013574 seconds. Established journal OS/write reservation acquired; Excel
+owner file absent; Windows deny-write file handle obtained; backup verified byte-exact.
+Candidate prepared from frozen backup and whole-package preservation validation PASSED.
+Original SHA rechecked before replacement. Atomic os.replace failed WinError 5 Access
+is denied. No retry performed; handle and reservation released in finally.
+Workbook remains byte-identical to original: True. No production cells installed.
+Original pre-task bytes matched HEAD but binary EXCLUDED because installation failed.
+Backup: C:\GPT\CODEX-master\.job3_counter_d479b863dd65430e9e0d084691f270f2/Trading Journal.pre-counter-trend.xlsx
+Validated candidate: C:\GPT\CODEX-master\.job3_counter_d479b863dd65430e9e0d084691f270f2/Trading Journal.counter-trend-candidate.xlsx
+Install-copy evidence: C:\GPT\CODEX-master\.job3_counter_d479b863dd65430e9e0d084691f270f2/Trading Journal.install.xlsx
+production_manifest.json lists every declared new cell; production_result.json and
+production_process_result.json/stdout/stderr retain exact failure.
+Candidate SHA256 b7ef9bc791572c919379ad178821c1230bc5dbb553d32c9ee35cdcaa80f1c8fd.
+Only additive Counter Trend field/counts, no history inferred; all candidate counts 0
+because existing classifications are unknown. Existing values/formulas/caches/styles/
+links/relationships and presentation validated; no general rebuild or app refresh.
+
+Delivery scope: the four changed Python source/test files plus this summary ONLY.
+Fresh protected verify confirmed local and remote master at ef5d9559d2518954efcd2f4c5168d1ffb414e665
+before task commit. Task commit/push outcomes reported in session after this entry.
+Source delivery does not claim local workbook activation or Job 3 manual acceptance.
+Next safe action: explicit new authorization for a replacement transaction using the
+retained validated candidate after resolving the exact Windows replacement-access
+condition. Do not change permissions or retry without that message. Keep original,
+backup and candidate intact. No LTT/Excel/MT5 restart performed. No broker/cloud/archive
+requests, no new trade. MT5 compilation/installation not applicable.
+After successful workbook installation, user starts LTT normally, opens journal and
+checks Yes/No/blank/counts/save-reopen. Job 3 manual acceptance pending; Jobs 4-6 queued.
+Usage-warning pause withdrawal remains in force as recorded above.

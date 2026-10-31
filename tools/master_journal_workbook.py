@@ -108,6 +108,7 @@ QUALITY_ANALYSIS_FIELD_MAP = {
     "Near Perfect Entry": "near_perfect_entry",
     "Near Win": "near_win",
     "Early Close": "early_close",
+    "Counter Trend": "counter_trend",
 }
 TRADE_NUMBER_FIELD_MAP = {TRADE_NUMBER_HEADER: "trade_number"}
 TRADE_LOG_MANUAL_FIELD_MAP = {**TRADE_NUMBER_FIELD_MAP, **MOVE_TO_FIELD_MAP, **QUALITY_ANALYSIS_FIELD_MAP}
@@ -7362,8 +7363,12 @@ def _trade_log_last_populated_row(ws) -> int:
     return last_row
 
 
+def _trade_log_table_last_column(ws) -> int:
+    return max(len(TRADE_LOG_HEADERS), _trade_log_header_map(ws).get("Counter Trend", 0))
+
+
 def _set_trade_log_auto_filter(ws) -> None:
-    last_col = len(TRADE_LOG_HEADERS)
+    last_col = _trade_log_table_last_column(ws)
     last_row = max(
         TRADE_LOG_FILTER_HEADER_ROW,
         _trade_log_last_populated_row(ws),
@@ -7427,6 +7432,7 @@ def _apply_trade_log_dropdown_validations(ws) -> None:
         "Near Perfect Entry": '"Yes,No"',
         "Near Win": '"Yes,No"',
         "Early Close": '"Yes,No"',
+        "Counter Trend": '"Yes,No"',
     }
     for header, formula in specs.items():
         col = headers.get(header)
@@ -7789,10 +7795,7 @@ def _ensure_trade_log_schema(ws, diagnostics: Dict[str, Any] | None = None) -> N
     legacy_pre_rec_v1_grouped_headers = _trade_log_has_two_row_headers_for(ws, PRE_RECOMMENDATION_TRADE_LOG_HEADERS_V1)
     legacy_pre_rec_v1_duplicate_headers = _trade_log_has_legacy_duplicate_two_row_headers_for(ws, PRE_RECOMMENDATION_TRADE_LOG_HEADERS_V1)
     if already_current:
-        if ws.max_column > len(TRADE_LOG_HEADERS):
-            extra_count = ws.max_column - len(TRADE_LOG_HEADERS)
-            ws.delete_cols(len(TRADE_LOG_HEADERS) + 1, extra_count)
-            diagnostics["deleted_extra_trade_log_columns"] = extra_count
+        # Extra authored columns (including additive manual fields) are retained.
         headers = _trade_log_header_map(ws)
         trade_number_col = headers.get(TRADE_NUMBER_HEADER)
         if trade_number_col:
@@ -10729,6 +10732,7 @@ def _trade_log_row_values(
         "Near Perfect Entry": row_map.get("near_perfect_entry") or "",
         "Near Win": row_map.get("near_win") or "",
         "Early Close": row_map.get("early_close") or "",
+        "Counter Trend": normalize_counter_trend(row_map.get("counter_trend")),
         "Setup": setup_value,
         "Timeframe": _canonical_journal_timeframe(row_map.get("timeframe") or ""),
         "Breakeven": row_map.get("breakeven") or "",
@@ -19512,8 +19516,8 @@ def _incremental_require_canonical_trade_log(wb) -> Any:
     expected = {header: col for col, header in enumerate(TRADE_LOG_HEADERS, start=1)}
     if (
         not _trade_log_has_three_row_headers(ws)
-        or _trade_log_header_map(ws) != expected
-        or ws.max_column != len(TRADE_LOG_HEADERS)
+        or any(_trade_log_header_map(ws).get(header) != col for header, col in expected.items())
+        or ws.max_column < len(TRADE_LOG_HEADERS)
     ):
         raise IncrementalWorkbookUpdateNotEligible(
             "Incremental workbook update requires the current canonical Trade Log schema."
@@ -19639,7 +19643,7 @@ def _incremental_clone_trade_log_row_presentation(ws, source_row: int, target_ro
 _INCREMENTAL_GENERATED_DV_FORMULAS = {
     '"Yes,No"': {
         "Test", "VWAP", "Round Number", "Spiked Out", "Close Stopout",
-        "Near Perfect Entry", "Near Win", "Early Close",
+        "Near Perfect Entry", "Near Win", "Early Close", "Counter Trend",
     },
     '"All-Time High,All-Time Low"': {"ATHS/ATLS"},
     '"Market,Limit"': {"Order"},
@@ -20017,16 +20021,20 @@ def _incremental_validate_account_balance(
     }
 
 
+def _trade_log_table_filter_ref(ws, last_row: int) -> str:
+    # Schema columns, not style-only or authored worksheet extents. Row ID remains
+    # part of the table; the additive manual field may follow authored columns.
+    final_col = _trade_log_table_last_column(ws)
+    return f"A{TRADE_LOG_FILTER_HEADER_ROW}:{get_column_letter(final_col)}{last_row}"
+
+
 def _incremental_validate_trade_log_ranges(ws, last_row: int) -> None:
-    expected_filter = (
-        f"A{TRADE_LOG_FILTER_HEADER_ROW}:"
-        f"{get_column_letter(len(TRADE_LOG_HEADERS))}{last_row}"
-    )
+    expected_filter = _trade_log_table_filter_ref(ws, last_row)
     if not ws.auto_filter or str(ws.auto_filter.ref or "") != expected_filter:
         raise RuntimeError("Incremental workbook Trade Log filter verification failed.")
     expected_cf = (
         f"A{TRADE_LOG_DATA_START_ROW}:"
-        f"{get_column_letter(len(TRADE_LOG_HEADERS))}{last_row}"
+        f"{get_column_letter(_trade_log_table_last_column(ws))}{last_row}"
     )
     generated_ranges: List[str] = []
     for key, rules in ws.conditional_formatting._cf_rules.items():
@@ -20204,6 +20212,10 @@ def update_master_journal_workbook_incremental(
                 if explicit_balance is not None
                 else _resolve_balance_after(dict(row))
             )
+            if "counter_trend" not in row:
+                counter_col = _trade_log_header_map(ws).get("Counter Trend")
+                if counter_col:
+                    row = dict(row, counter_trend=ws.cell(row_number, counter_col).value)
             projection = _trade_log_row_values(
                 row,
                 resolved_balance=resolved_balance,
@@ -20225,11 +20237,9 @@ def update_master_journal_workbook_incremental(
             _apply_trade_number_hyperlinks(ws, incremental_link_diagnostics)
             _apply_trade_log_win_loss_direct_row_fills_for_rows(ws, affected_rows)
             _apply_trade_log_win_loss_row_formatting(ws)
-            last_populated = _trade_log_last_populated_row(ws)
-            ws.auto_filter.ref = (
-                f"A{TRADE_LOG_FILTER_HEADER_ROW}:"
-                f"{get_column_letter(len(TRADE_LOG_HEADERS))}{last_populated}"
-            )
+            _, last_populated = _incremental_trade_log_row_index(ws)
+            # Assign only ref: retain existing filter criteria and sort state.
+            ws.auto_filter.ref = _trade_log_table_filter_ref(ws, last_populated)
             validation_extended = _incremental_extend_generated_validations(
                 ws, last_populated
             )
@@ -21420,3 +21430,321 @@ def prepare_historical_commission_package(path: Path, candidate_path: Path, upda
 
 def _validate_historical_commission_package(original, candidate_path, part, payload):
     _validate_pepperstone_timestamp_package(original, candidate_path, part, payload)
+
+
+# Counter Trend is an additive edge field. Keep every historical schema list
+# unchanged; the exact pre-feature schema is still recognized by its old prefix.
+PRE_COUNTER_TREND_TRADE_LOG_HEADERS = tuple(TRADE_LOG_HEADERS)
+COUNTER_TREND_HEADER = "Counter Trend"
+
+def normalize_counter_trend(value):
+    if value is None or isinstance(value, str) and not value.strip():
+        return ""
+    if isinstance(value, str) and value.strip().casefold() in {"yes", "no"}:
+        return value.strip().title()
+    raise ValueError("Counter Trend must be Yes, No or blank.")
+
+def counter_trend_count(rows):
+    return sum(1 for row in rows if str(row.get("row_type") or "trade").strip().lower() == "trade"
+               and not _is_test_trade_value(row.get("is_test_trade"))
+               and normalize_counter_trend(row.get("counter_trend")) == "Yes")
+
+_counter_base_header_map = _trade_log_header_map
+def _trade_log_header_map(ws):
+    headers = _counter_base_header_map(ws)
+    for r in range(1, min(3, ws.max_row) + 1):
+        for c in range(1, ws.max_column + 1):
+            if str(ws.cell(r, c).value or "").strip() == COUNTER_TREND_HEADER:
+                headers[COUNTER_TREND_HEADER] = c
+    return headers
+
+_counter_base_manual_overrides = read_master_journal_manual_overrides
+def read_master_journal_manual_overrides(path):
+    values = _counter_base_manual_overrides(path)
+    for edit in values.values():
+        if "counter_trend" in edit:
+            edit["counter_trend"] = normalize_counter_trend(edit["counter_trend"])
+    return values
+
+_counter_base_source = read_master_journal_source
+def read_master_journal_source(path):
+    result = _counter_base_source(path)
+    overrides = read_master_journal_manual_overrides(path)
+    for row in result.get("items", []):
+        for key in _master_journal_manual_override_keys(row):
+            if key in overrides and "counter_trend" in overrides[key]:
+                row["counter_trend"] = overrides[key]["counter_trend"]
+                break
+    return result
+
+_counter_base_schema = _ensure_trade_log_schema
+def _ensure_trade_log_schema(ws, diagnostics=None):
+    panes = ws.freeze_panes
+    _counter_base_schema(ws, diagnostics)
+    ws.freeze_panes = panes
+    headers = _trade_log_header_map(ws)
+    if COUNTER_TREND_HEADER not in headers:
+        c = ws.max_column + 1
+        ref = headers.get("Early Close", 1)
+        for r in range(1, ws.max_row + 1):
+            _copy_cell_style(ws.cell(r, ref), ws.cell(r, c))
+        ws.cell(1, c, COUNTER_TREND_HEADER)
+        ws.merge_cells(start_row=1, end_row=3, start_column=c, end_column=c)
+        ws.column_dimensions[get_column_letter(c)].width = 16
+    _apply_trade_log_dropdown_validations(ws)
+
+
+def _counter_cell_package_patch(payload, changes, *, new_column=None, validation=None, merge=None):
+    """Patch cells and additive ranges without round-tripping an Excel package."""
+    from xml.sax.saxutils import escape
+    cell_pattern = rb'<c\b[^<>]*\br="([A-Z]+[0-9]+)"[^<>]*?(?:/>|>(?:(?!</?(?:c|row)\b).)*</c>)'
+    grouped = defaultdict(dict)
+    for coordinate, value in changes.items():
+        grouped[int(re.search(r"[0-9]+", coordinate).group())][coordinate] = value
+    def cell_xml(coordinate, spec):
+        value, style = spec
+        attr = f' r="{coordinate}"' + (f' s="{style}"' if style is not None else '')
+        if value is None or value == "": return ('<c'+attr+'/>').encode()
+        if isinstance(value, int): return ('<c'+attr+'><v>'+str(value)+'</v></c>').encode()
+        return ('<c'+attr+' t="inlineStr"><is><t>'+escape(str(value))+'</t></is></c>').encode()
+    def row_patch(match):
+        row = match.group(); n = int(re.search(rb'\br="([0-9]+)"',row).group(1))
+        edits = grouped.pop(n, {})
+        if not edits: return row
+        cells = {m.group(1).decode(): m.group() for m in re.finditer(cell_pattern,row,re.S)}
+        for coordinate, spec in edits.items(): cells[coordinate] = cell_xml(coordinate,spec)
+        opening = row[:row.index(b'>')+1]
+        if opening.endswith(b'/>'): opening=opening[:-2]+b'>'
+        return opening+b''.join(cells[k] for k in sorted(cells,key=lambda c: coordinate_to_column(c)))+b'</row>'
+    sd = re.search(rb'<sheetData\b[^>]*>(.*?)</sheetData>',payload,re.S)
+    if not sd: raise ValueError("Worksheet has no sheetData")
+    body = re.sub(rb'<row\b[^>]*?(?:/>|>.*?</row>)',row_patch,sd.group(1),flags=re.S)
+    for n, edits in sorted(grouped.items()):
+        # Additive rows are at the edge, never inserted between existing rows.
+        body += f'<row r="{n}">'.encode()+b''.join(cell_xml(c,v) for c,v in sorted(edits.items(),key=lambda pair:coordinate_to_column(pair[0])))+b'</row>'
+    payload=payload[:sd.start(1)]+body+payload[sd.end(1):]
+    if new_column:
+        index,width = new_column
+        col=f'<col min="{index}" max="{index}" width="{width}" customWidth="1"/>'.encode()
+        if b'</cols>' in payload: payload=payload.replace(b'</cols>',col+b'</cols>',1)
+        else: payload=payload.replace(b'<sheetData',b'<cols>'+col+b'</cols><sheetData',1)
+        def extend_filter(m):
+            old=m.group();ref=re.search(rb'\bref="([^"]+)"',old)
+            if not ref:return old
+            left,right=ref.group(1).decode().split(':')
+            end_row=re.search(r'[0-9]+',right).group()
+            return old.replace(ref.group(0),f'ref="{left}:{get_column_letter(index)}{end_row}"'.encode())
+        payload=re.sub(rb'<autoFilter\b[^>]*>',extend_filter,payload,count=1)
+    if merge:
+        item=f'<mergeCell ref="{merge}"/>'.encode()
+        if b'</mergeCells>' in payload:
+            payload=payload.replace(b'</mergeCells>',item+b'</mergeCells>',1)
+            payload=re.sub(rb'(<mergeCells\b[^>]*count=")([0-9]+)(")',lambda m:m.group(1)+str(int(m.group(2))+1).encode()+m.group(3),payload,count=1)
+        else:payload=payload.replace(b'</sheetData>',b'</sheetData><mergeCells count="1">'+item+b'</mergeCells>',1)
+    if validation:
+        dv=(f'<dataValidation sqref="{validation}" showDropDown="0" showErrorMessage="1" errorStyle="stop" allowBlank="1" type="list"><formula1>"Yes,No"</formula1></dataValidation>').encode()
+        if b'</dataValidations>' in payload:
+            payload=payload.replace(b'</dataValidations>',dv+b'</dataValidations>',1)
+            payload=re.sub(rb'(<dataValidations\b[^>]*count=")([0-9]+)(")',lambda m:m.group(1)+str(int(m.group(2))+1).encode()+m.group(3),payload,count=1)
+        else:
+            # OOXML dataValidations precede hyperlinks/page/drawing elements.
+            tag=re.search(rb'<(?:hyperlinks|printOptions|pageMargins|pageSetup|headerFooter|drawing|legacyDrawing|extLst)\b',payload)
+            at=tag.start() if tag else payload.index(b'</worksheet>')
+            payload=payload[:at]+b'<dataValidations count="1">'+dv+b'</dataValidations>'+payload[at:]
+    root=ET.fromstring(payload)
+    cells=root.findall(f'.//{{{_SPREADSHEETML_NAMESPACE}}}sheetData/{{{_SPREADSHEETML_NAMESPACE}}}row/{{{_SPREADSHEETML_NAMESPACE}}}c')
+    if cells:
+        max_col=max(coordinate_to_column(c.attrib['r']) for c in cells)
+        dimension=root.find('{'+_SPREADSHEETML_NAMESPACE+'}dimension')
+        old_end=dimension.attrib.get('ref','A1').split(':')[-1] if dimension is not None else 'A1'
+        max_col=max(max_col,coordinate_to_column(old_end))
+        max_row=max(int(re.search(r'[0-9]+',c.attrib['r']).group()) for c in cells)
+        max_row=max(max_row,int(re.search(r'[0-9]+',old_end).group()))
+        payload=re.sub(rb'(<dimension\b[^>]*ref=")[^"]*(")',lambda m:m.group(1)+f'A1:{get_column_letter(max_col)}{max_row}'.encode()+m.group(2),payload,count=1)
+    return payload
+
+
+def prepare_counter_trend_package(path, candidate_path, *, expected_sha256, rows=None):
+    """Only additive Counter Trend cells/ranges; preserve all other package data."""
+    import hashlib
+    from io import BytesIO
+    path,candidate_path=Path(path),Path(candidate_path)
+    original=path.read_bytes()
+    if hashlib.sha256(original).hexdigest()!=expected_sha256: raise RuntimeError("Source workbook identity changed")
+    source=read_master_journal_source(path)
+    source_rows=source.get('items') or []
+    supplied={str(key):r for r in (rows or []) for key in _master_journal_manual_override_keys(r)}
+    wb=load_workbook(BytesIO(original),data_only=False)
+    payloads={};approved={};meta={}
+    ns='{'+_SPREADSHEETML_NAMESPACE+'}'
+    with zipfile.ZipFile(BytesIO(original)) as style_package:
+        styles_by_sheet={ws.title:{cell.attrib['r']:int(cell.attrib.get('s','0')) for cell in ET.fromstring(style_package.read(_worksheet_ooxml_part_name(style_package,ws.title))).findall('.//'+ns+'c')} for ws in wb}
+    def cell_style(ws,row,col):
+        return styles_by_sheet[ws.title].get(f'{get_column_letter(col)}{row}',0)
+    try:
+        trade=_get_trade_log_sheet(wb);headers=_trade_log_header_map(trade)
+        if not {'Row ID','Test','Row Type'}.issubset(headers):raise RuntimeError('Unsupported pre-Counter-Trend Trade Log schema')
+        old_col=headers.get(COUNTER_TREND_HEADER);counter_col=old_col or trade.max_column+1
+        if counter_col>16384:raise RuntimeError('No additive column space')
+        letter=get_column_letter(counter_col);start=_trade_log_data_start_row(trade)
+        values={};row_values={}
+        for r in range(start,trade.max_row+1):
+            rid=str(trade.cell(r,headers['Row ID']).value or '')
+            incoming=supplied.get(rid)
+            raw=trade.cell(r,old_col).value if old_col else None
+            if incoming is not None and 'counter_trend' in incoming:raw=incoming['counter_trend']
+            value=normalize_counter_trend(raw);row_values[rid]=value
+            if not old_col or normalize_counter_trend(trade.cell(r,old_col).value)!=value:
+                values[f'{letter}{r}']=(value,cell_style(trade,r,old_col or headers.get('Early Close',1)))
+        for r in source_rows:
+            for key in _master_journal_manual_override_keys(r):
+                if str(key) in row_values:r['counter_trend']=row_values[str(key)];break
+        if not old_col:
+            for r in (1,2,3):values[f'{letter}{r}']=(COUNTER_TREND_HEADER if r==1 else None,cell_style(trade,r,headers.get('Early Close',1)))
+        plans={trade.title:(values, (counter_col,16) if not old_col else None, f'{letter}{start}:{letter}{max(start,trade.max_row)}' if not old_col else None, f'{letter}1:{letter}3' if not old_col else None)}
+        counts={market:counter_trend_count([r for r in source_rows if market=='overall' or _trade_row_market(r)==market]) for market in ('overall','fx','crypto')}
+        def metric_row(ws,values_by_col):
+            existing=[r for r in range(1,ws.max_row+1) if str(ws.cell(r,1).value or '').strip()==COUNTER_TREND_HEADER]
+            if len(existing)>1:raise RuntimeError('Duplicate Counter Trend metric rows')
+            row=existing[0] if existing else ws.max_row+1
+            ref=next((r for r in range(1,ws.max_row+1) if str(ws.cell(r,1).value or '').strip().lower() in {'test','trades','total trades'}),1)
+            edits={f'A{row}':(COUNTER_TREND_HEADER,cell_style(ws,ref,1))}
+            for col,val in values_by_col.items():edits[f'{get_column_letter(col)}{row}']=(int(val),cell_style(ws,ref,col))
+            plans[ws.title]=(edits,None,None,None)
+        if STATS1_SHEET in wb.sheetnames:
+            ws=wb[STATS1_SHEET];metric_row(ws,{col:counts[key] for key,col in _stats1_market_columns(ws).items() if key in counts})
+        if SYMBOLS_SHEET in wb.sheetnames:
+            ws=wb[SYMBOLS_SHEET];header_row=INSTRUMENT_AVERAGES_FILTER_HEADER_ROW
+            found=[c for c in range(1,ws.max_column+1) if ws.cell(header_row,c).value==COUNTER_TREND_HEADER]
+            if len(found)>1:raise RuntimeError('Duplicate Counter Trend symbol columns')
+            col=found[0] if found else ws.max_column+1;edits={f'{get_column_letter(col)}{header_row}':(COUNTER_TREND_HEADER,cell_style(ws,header_row,3))}
+            for row in range(INSTRUMENT_AVERAGES_DATA_START_ROW,ws.max_row+1):
+                symbol=str(ws.cell(row,1).value or '').strip()
+                if symbol and str(ws.cell(row,2).value or '').upper() in {'FX','FOREX','CRYPTO'}:
+                    edits[f'{get_column_letter(col)}{row}']=(counter_trend_count([r for r in source_rows if str(r.get('symbol') or '').upper()==symbol.upper()]),cell_style(ws,row,3))
+            plans[ws.title]=(edits,(col,16) if not found else None,None,None)
+        for ws in wb:
+            if ws.title==REPORT_YEARLY_SHEET:
+                period={c:counter_trend_count(_report_rows_for_period({'items':source_rows},year=int(ws.cell(1,c).value))) for c in range(2,ws.max_column+1) if str(ws.cell(1,c).value or '').isdigit() and len(str(ws.cell(1,c).value))==4}
+                metric_row(ws,period)
+            elif re.fullmatch(r'20[0-9]{2}|19[0-9]{2}',ws.title):
+                metric_row(ws,{c:counter_trend_count(_report_rows_for_period({'items':source_rows},year=int(ws.title),month=c-1)) for c in range(2,min(13,ws.max_column)+1)})
+        with zipfile.ZipFile(BytesIO(original)) as package:
+            for sheet,(edits,col,dv,merge) in plans.items():
+                part=_worksheet_ooxml_part_name(package,sheet);payloads[part]=_counter_cell_package_patch(package.read(part),edits,new_column=col,validation=dv,merge=merge)
+                approved[part]=set(edits);meta[part]={'new_column':col,'validation':dv,'merge':merge}
+            # Excel tables, when present, must remain consistent with appended edge columns.
+            for part in package.namelist():
+                if not part.startswith('xl/tables/') or not part.endswith('.xml'):continue
+                root=ET.fromstring(package.read(part));name=root.attrib.get('name','')
+                # Resolve ownership from worksheet relationship parts, not names.
+                for sheet,(edits,col,dv,merge) in plans.items():
+                    if not col:continue
+                    sheetpart=_worksheet_ooxml_part_name(package,sheet);relpart=_worksheet_relationship_part_name(sheetpart)
+                    if relpart not in package.namelist():continue
+                    rels=ET.fromstring(package.read(relpart))
+                    targets={posixpath.normpath(posixpath.join(posixpath.dirname(sheetpart),x.attrib.get('Target',''))) if not x.attrib.get('Target','').startswith('/') else x.attrib['Target'].lstrip('/') for x in rels}
+                    if part not in targets:continue
+                    left,right=root.attrib['ref'].split(':');last=coordinate_to_column(right)
+                    if col[0]!=last+1:raise RuntimeError('Authored table gap prevents safe edge-column extension')
+                    newref=left+':'+get_column_letter(col[0])+re.search(r'[0-9]+',right).group()
+                    old=package.read(part);new=old.replace(('ref="'+root.attrib['ref']+'"').encode(),('ref="'+newref+'"').encode())
+                    cols=root.find(ns+'tableColumns');count=len(cols)
+                    new=new.replace(b'</tableColumns>',f'<tableColumn id="{max(int(c.attrib["id"]) for c in cols)+1}" name="Counter Trend"/></tableColumns>'.encode())
+                    new=re.sub(rb'(<tableColumns count=")[0-9]+',lambda m:m.group(1)+str(count+1).encode(),new,count=1);payloads[part]=new
+            with zipfile.ZipFile(candidate_path,'w') as candidate:
+                for info in package.infolist():candidate.writestr(info,payloads.get(info.filename,package.read(info.filename)))
+        validate_counter_trend_package(path,candidate_path,approved,meta)
+        return {'changed_cells':{part:sorted(cells) for part,cells in approved.items()},'source_sha256':expected_sha256,'candidate_sha256':hashlib.sha256(candidate_path.read_bytes()).hexdigest(),'counts':counts,'preservation_verified':True}
+    finally:wb.close()
+
+
+def validate_counter_trend_package(source,candidate,approved,meta):
+    """Restore declared additions in-memory and compare complete XML trees."""
+    from copy import deepcopy
+    ns='{'+_SPREADSHEETML_NAMESPACE+'}'
+    with zipfile.ZipFile(source) as before,zipfile.ZipFile(candidate) as after:
+        if before.namelist()!=after.namelist():raise RuntimeError('Package entry set/order changed')
+        for name in before.namelist():
+            a,b=before.read(name),after.read(name)
+            if a==b:continue
+            if name.startswith('xl/tables/'):
+                old,new=ET.fromstring(a),ET.fromstring(b)
+                cols=new.find(ns+'tableColumns');extra=cols[-1]
+                if extra.attrib.get('name')!=COUNTER_TREND_HEADER:raise RuntimeError('Unexpected table change')
+                cols.remove(extra);cols.set('count',str(len(cols)))
+                for el in new.iter():
+                    if 'ref' in el.attrib:el.set('ref',old.attrib['ref'])
+                if ET.tostring(old)!=ET.tostring(new):raise RuntimeError('Table presentation changed')
+                continue
+            if name not in approved:raise RuntimeError('Unapproved package part changed: '+name)
+            old,new=ET.fromstring(a),ET.fromstring(b)
+            oldrows={r.attrib['r']:r for r in old.find(ns+'sheetData')};newdata=new.find(ns+'sheetData')
+            oldcells={c.attrib['r']:c for r in oldrows.values() for c in r}
+            for row in list(newdata):
+                for cell in list(row):
+                    coord=cell.attrib.get('r')
+                    if coord in approved[name]:
+                        row.remove(cell)
+                        if coord in oldcells:row.append(deepcopy(oldcells[coord]))
+                row[:]=sorted(row,key=lambda c:coordinate_to_column(c.attrib['r']))
+                if row.attrib['r'] not in oldrows and len(row)==0:newdata.remove(row)
+            for tag in ('dimension','cols','mergeCells','dataValidations','autoFilter'):
+                prev,cur=old.find(ns+tag),new.find(ns+tag)
+                if tag=='cols' and meta[name]['new_column']:
+                    idx=meta[name]['new_column'][0]
+                    if cur is not None:
+                        for col in list(cur):
+                            if int(col.attrib['min'])==idx and int(col.attrib['max'])==idx:cur.remove(col)
+                elif tag=='mergeCells' and meta[name]['merge'] and cur is not None:
+                    for merge in list(cur):
+                        if merge.attrib.get('ref')==meta[name]['merge']:cur.remove(merge)
+                    cur.set('count',str(len(cur)))
+                elif tag=='dataValidations' and meta[name]['validation'] and cur is not None:
+                    for dv in list(cur):
+                        if dv.attrib.get('sqref')==meta[name]['validation']:cur.remove(dv)
+                    cur.set('count',str(len(cur)))
+                elif tag=='autoFilter' and meta[name]['new_column'] and cur is not None and prev is not None:cur.set('ref',prev.attrib['ref'])
+                elif tag=='dimension' and cur is not None and prev is not None:cur.attrib.clear();cur.attrib.update(prev.attrib)
+                # Empty additive containers carry a count attribute; remove them too.
+                if prev is None and cur is not None and tag in ('cols','mergeCells','dataValidations') and len(cur)==0:new.remove(cur)
+            if ET.tostring(old)!=ET.tostring(new):raise RuntimeError('Existing worksheet content/presentation/cache changed: '+name)
+
+
+def _refresh_counter_trend_package(path,rows=None):
+    import hashlib
+    from uuid import uuid4
+    path=Path(path);candidate=path.with_name('.counter-trend-'+uuid4().hex+'.xlsx')
+    initial=hashlib.sha256(path.read_bytes()).hexdigest()
+    try:
+        result=prepare_counter_trend_package(path,candidate,expected_sha256=initial,rows=rows)
+        if hashlib.sha256(path.read_bytes()).hexdigest()!=initial:raise RuntimeError('Workbook changed during additive update')
+        candidate.replace(path)
+        return result
+    finally:candidate.unlink(missing_ok=True)
+
+# Existing generation/preservation/incremental operations keep their own safety
+# contracts. The same narrowly validated package step updates ONLY this metric.
+_counter_build = build_master_journal_workbook
+def build_master_journal_workbook(snapshot,output_path,**kwargs):
+    overrides=kwargs.get('manual_overrides')
+    reference=Path(kwargs.get('recommendation_workbook_path') or output_path)
+    if overrides is None and reference.exists():overrides=read_master_journal_manual_overrides(reference)
+    rows,_=_normalize_master_journal_rows(snapshot.get('items') or [],overrides)
+    result=_counter_build(snapshot,output_path,**kwargs)
+    if result.get('ok'):result.setdefault('diagnostics',{})['counter_trend']=_refresh_counter_trend_package(output_path,rows)
+    return result
+
+_counter_update = update_master_journal_workbook_data_only
+def update_master_journal_workbook_data_only(path,snapshot,*args,**kwargs):
+    result=_counter_update(path,snapshot,*args,**kwargs)
+    if result and result.get('ok'):
+        candidate=Path(result.get('candidate_path') or path)
+        result.setdefault('diagnostics',{})['counter_trend']=_refresh_counter_trend_package(candidate)
+    return result
+
+_counter_incremental = update_master_journal_workbook_incremental
+def update_master_journal_workbook_incremental(path,changed_rows,**kwargs):
+    result=_counter_incremental(path,changed_rows,**kwargs)
+    if result and result.get('ok'):result.setdefault('diagnostics',{})['counter_trend']=_refresh_counter_trend_package(path,changed_rows)
+    return result

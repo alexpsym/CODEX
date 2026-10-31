@@ -13268,3 +13268,66 @@ def test_test_trade_fill_package_patch_preserves_workbook(tmp_path):
     noop=mjw.prepare_test_trade_fill_package(candidate,tmp_path/'noop.xlsx',expected_sha256=hashlib.sha256(candidate.read_bytes()).hexdigest())
     assert noop['noop'] and not (tmp_path/'noop.xlsx').exists()
     assert path.read_bytes() == original
+
+
+# Job 3: deliberately small, existing-workbook fixtures; no archive or broker IO.
+def _counter_trend_fixture(path):
+    wb=Workbook(); ws=wb.active;ws.title='Trade Log'
+    for values in mjw._trade_log_three_row_header_values():ws.append(values)
+    headers=mjw._trade_log_header_map(ws)
+    rows=sample_snapshot()['items']
+    rows += [dict(rows[0],id='unknown',symbol='USDJPY'),dict(rows[0],id='test',is_test_trade=True),dict(rows[0],id='cash',row_type='cashflow'),dict(rows[0],id='reval',row_type='monthly_aud_reval')]
+    for n,row in enumerate(rows,4):
+        values=mjw._trade_log_row_values(row)
+        for label,col in headers.items():ws.cell(n,col,values.get(label))
+    ws.freeze_panes='G4';ws['BA1']='Authored extra';ws['BA4']='=1+2';ws['BA4'].hyperlink='https://example.invalid/keep';ws['BA4'].comment=Comment('keep','author');ws['BA4'].font=Font(bold=True,color='FF123456');ws.column_dimensions['BA'].width=27
+    ws.auto_filter.ref=f'A3:AX{ws.max_row}'
+    st=wb.create_sheet('STATS1');st.append(['Metric','Overall','FX','Crypto']);st.append(['Trades',3,2,1])
+    sy=wb.create_sheet('SYMBOLS');hr=mjw.INSTRUMENT_AVERAGES_FILTER_HEADER_ROW;dr=mjw.INSTRUMENT_AVERAGES_DATA_START_ROW
+    for c,v in enumerate(['Symbol','Market','Trades'],1):sy.cell(hr,c,v)
+    for r,values in enumerate([['EURUSD','FX',1],['BTCUSDT','Crypto',1],['USDJPY','FX',1]],dr):
+        for c,v in enumerate(values,1):sy.cell(r,c,v)
+    yr=wb.create_sheet('YEARLY REPORT');yr.append(['Metric',2026]);yr.append(['Trades',3])
+    mo=wb.create_sheet('2026');mo.append(['Metric']+list(range(1,13)));mo.append(['Trades']+[0]*12)
+    wb.save(path);wb.close();return rows
+
+
+def test_counter_trend_additive_schema_roundtrip_preserves_workbook(tmp_path,monkeypatch):
+    import hashlib
+    path=tmp_path/'before.xlsx';rows=_counter_trend_fixture(path);candidate=tmp_path/'candidate.xlsx'
+    supplied=[dict(rows[0],counter_trend=' yes '),dict(rows[1],counter_trend='NO')]
+    result=mjw.prepare_counter_trend_package(path,candidate,expected_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),rows=supplied)
+    assert result['preservation_verified']
+    wb=load_workbook(candidate);ws=wb['Trade Log'];h=mjw._trade_log_header_map(ws);c=h['Counter Trend']
+    assert [ws.cell(r,c).value for r in range(4,7)]==['Yes','No',None]
+    assert ws.freeze_panes=='G4' and ws['BA4'].value=='=1+2' and ws['BA4'].comment.text=='keep' and ws.column_dimensions['BA'].width==27
+    assert any(str(d.formula1)=='"Yes,No"' and d.allowBlank and d.showErrorMessage for d in ws.data_validations.dataValidation)
+    wb.close()
+    source=mjw.read_master_journal_source(candidate);byid={r['id']:r for r in source['items']};assert byid['t1']['counter_trend']=='Yes' and byid['t2']['counter_trend']=='No' and byid['unknown']['counter_trend']==''
+    overrides=mjw.read_master_journal_manual_overrides(candidate);normalized,_=mjw._normalize_master_journal_rows(rows,overrides);assert next(r for r in normalized if r['id']=='t1')['counter_trend']=='Yes'
+    again=tmp_path/'again.xlsx';mjw.prepare_counter_trend_package(candidate,again,expected_sha256=hashlib.sha256(candidate.read_bytes()).hexdigest());assert again.read_bytes()==candidate.read_bytes()
+    with pytest.raises(ValueError):mjw.prepare_counter_trend_package(candidate,tmp_path/'invalid.xlsx',expected_sha256=hashlib.sha256(candidate.read_bytes()).hexdigest(),rows=[dict(rows[0],counter_trend='maybe')])
+    # The incremental contract requires canonical header merges, not only labels.
+    # Supply the same required vertical merges as a supported real workbook.
+    wb=load_workbook(candidate);ws=wb['Trade Log']
+    for col,header in enumerate(mjw.TRADE_LOG_HEADERS,1):
+        ws.merge_cells(start_row=2 if header in mjw.MOVE_TO_FIELD_MAP else 1,end_row=3,start_column=col,end_column=col)
+    wb.save(candidate);wb.close()
+    monkeypatch.setattr(mjw,'assign_trade_numbers_and_create_folders',lambda *a,**kw:{})
+    update=mjw.update_master_journal_workbook_incremental(candidate,[dict(rows[0],counter_trend='')])
+    assert update['ok'];assert next(r for r in mjw.read_master_journal_source(candidate)['items'] if r['id']=='t1')['counter_trend']==''
+    # Same preservation package path is used by normal derived refresh.
+    mjw._refresh_counter_trend_package(candidate)
+    assert next(r for r in mjw.read_master_journal_source(candidate)['items'] if r['id']=='t2')['counter_trend']=='No'
+
+
+def test_counter_trend_counts_existing_workbook_periods_and_exclusions(tmp_path):
+    import hashlib
+    path=tmp_path/'counts.xlsx';rows=_counter_trend_fixture(path);out=tmp_path/'out.xlsx'
+    rows=[dict(r,counter_trend='Yes' if r['id']!='unknown' else '') for r in rows]
+    result=mjw.prepare_counter_trend_package(path,out,expected_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),rows=rows)
+    assert result['counts']=={'overall':2,'fx':1,'crypto':1}
+    wb=load_workbook(out);assert [wb['STATS1'].cell(3,c).value for c in range(1,5)]==['Counter Trend',2,1,1];assert wb['STATS1']['B2'].value==3
+    assert wb['YEARLY REPORT']['B3'].value==2 and wb['2026']['F3'].value==2
+    sy=wb['SYMBOLS'];assert [sy.cell(r,4).value for r in range(mjw.INSTRUMENT_AVERAGES_DATA_START_ROW,mjw.INSTRUMENT_AVERAGES_DATA_START_ROW+3)]==[1,1,0]
+    wb.close()

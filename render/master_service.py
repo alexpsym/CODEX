@@ -155,7 +155,7 @@ from shared.oanda_api import (
 )
 from render.dropbox_sync import download_bytes, list_excel_files, upload_bytes
 from render import dropbox_state_store
-from tools.master_journal_workbook import project_commission_cashflow, build_master_journal_workbook, read_master_journal_manual_overrides, read_master_journal_source, update_master_journal_workbook_data_only, update_master_journal_workbook_incremental, assign_trade_numbers_and_create_folders, IncrementalWorkbookUpdateNotEligible, refresh_master_journal_derived_sheets, stable_row_id, SHEET_ORDER, REPORT_YEARLY_SHEET, expected_report_sheet_names, _get_all_trades_sheet, _get_trade_log_sheet, _trade_log_header_map, _trade_log_data_start_row, _trade_log_last_populated_row, _find_instrument_leaders_table, LEADER_LABEL_TO_KEY, _repair_or_flag_zero_trade_qty, _canonicalize_and_dedupe_balances, _trade_execution_fingerprint, _trade_row_source_rank, _dedupe_trade_rows_by_execution, _normalize_master_journal_rows, _instrument_averages_header_map, INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, INSTRUMENT_AVERAGES_DATA_START_ROW, _result_percentage_totals_by_market, _risk_of_ruin_by_account, _stats1_sheet, _stats2_sheet, _symbols_sheet, STATS1_SHEET, STATS2_SHEET, SYMBOLS_SHEET, _parse_duration_text, _duration_ddhhmmss_cell_to_seconds, _is_ddhhmmss_number_format, STOP_RECOMMENDATION_HEADER, TARGET_RECOMMENDATION_HEADER, _distance_recommendation_summary, _stop_recommendation_payload, _apply_recommendation_cell_style, _ensure_dashboard_requested_metric_rows, _stats1_market_columns, _stats1_section_bounds, balance_drawdown_metrics
+from tools.master_journal_workbook import normalize_counter_trend, counter_trend_count, project_commission_cashflow, build_master_journal_workbook, read_master_journal_manual_overrides, read_master_journal_source, update_master_journal_workbook_data_only, update_master_journal_workbook_incremental, assign_trade_numbers_and_create_folders, IncrementalWorkbookUpdateNotEligible, refresh_master_journal_derived_sheets, stable_row_id, SHEET_ORDER, REPORT_YEARLY_SHEET, expected_report_sheet_names, _get_all_trades_sheet, _get_trade_log_sheet, _trade_log_header_map, _trade_log_data_start_row, _trade_log_last_populated_row, _find_instrument_leaders_table, LEADER_LABEL_TO_KEY, _repair_or_flag_zero_trade_qty, _canonicalize_and_dedupe_balances, _trade_execution_fingerprint, _trade_row_source_rank, _dedupe_trade_rows_by_execution, _normalize_master_journal_rows, _instrument_averages_header_map, INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, INSTRUMENT_AVERAGES_DATA_START_ROW, _result_percentage_totals_by_market, _risk_of_ruin_by_account, _stats1_sheet, _stats2_sheet, _symbols_sheet, STATS1_SHEET, STATS2_SHEET, SYMBOLS_SHEET, _parse_duration_text, _duration_ddhhmmss_cell_to_seconds, _is_ddhhmmss_number_format, STOP_RECOMMENDATION_HEADER, TARGET_RECOMMENDATION_HEADER, _distance_recommendation_summary, _stop_recommendation_payload, _apply_recommendation_cell_style, _ensure_dashboard_requested_metric_rows, _stats1_market_columns, _stats1_section_bounds, balance_drawdown_metrics
 from bybit_monitor import bybit_altcoin_monitor as bybit_monitor
 from oanda_monitor import oanda_forex_monitor as oanda_monitor
 from bybit_demo_tpsl_cache import (
@@ -5952,6 +5952,7 @@ def _editable_trading_journal_fields() -> Set[str]:
         "near_perfect_entry",
         "near_win",
         "early_close",
+        "counter_trend",
         "account",
         "account_label",
         "currency",
@@ -6024,6 +6025,12 @@ def _normalize_trading_journal_edit_payload(
             continue
         if field == "is_test_trade":
             normalized[field] = _normalize_test_trade_flag(value)
+            continue
+        if field == "counter_trend":
+            try:
+                normalized[field] = normalize_counter_trend(value)
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
             continue
         if field == "vwap":
             try:
@@ -7576,6 +7583,7 @@ _JOURNAL_WORKBOOK_MANUAL_PRESERVE_FIELDS = {
     "manual_overrides",
     "manual_override_fields",
     "manual_updated_at",
+    "counter_trend",
 }
 _OANDA_MANUAL_PRESERVE_FIELDS = _JOURNAL_WORKBOOK_MANUAL_PRESERVE_FIELDS
 
@@ -35184,6 +35192,7 @@ def _compute_journal_stats(
     streaks = _compute_longest_streaks(trade_rows)
     totals_money = _money_stats_by_currency(trade_rows)
     totals = {
+        "counter_trend_count": counter_trend_count(trade_rows),
             "trades": len(trade_rows),
             "test_trades": len(test_trade_rows),
             "wins": sum(1 for row in trade_rows if _is_win(row)),
@@ -35403,6 +35412,7 @@ def _compute_journal_stats(
         target_scope = "overall" if str(label or "").strip().lower() == "overall" else "standard"
         recommendation_payload = _cached_distance_recommendation_summary(rows_subset, scope=target_scope)
         return {
+            "counter_trend_count": counter_trend_count(rows_subset),
             "label": label,
             "trades": len(rows_subset),
             "wins": wins,
@@ -35526,6 +35536,8 @@ def _compute_journal_stats(
         }
 
     overall_recommendations = _cached_distance_recommendation_summary(trade_rows, scope="overall")
+    for record in out_by_instrument:
+        record["counter_trend_count"] = counter_trend_count([r for r in trade_rows if str(r.get("symbol") or "").upper() == str(record.get("symbol") or "").upper()])
     overall_market_bucket = _market_bucket(trade_rows, "Overall")
     fx_market_bucket = _market_bucket(fx_rows, "Forex")
     crypto_market_bucket = _market_bucket(crypto_rows, "Crypto")
