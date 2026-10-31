@@ -17,7 +17,7 @@ from io import BytesIO
 from openpyxl.styles import PatternFill, Border, Side, Alignment, Color
 from openpyxl.styles.numbers import BUILTIN_FORMATS_MAX_SIZE
 from openpyxl.formatting.rule import CellIsRule, FormulaRule
-from openpyxl.utils import get_column_letter
+from openpyxl.utils import get_column_letter, column_index_from_string
 from openpyxl.utils.cell import range_boundaries
 from openpyxl.utils.indexed_list import IndexedList
 import calendar
@@ -137,7 +137,9 @@ TRADE_LOG_HEADERS_V1 = [
     "Cashflow New Balance", "Currency", "Row Type", "Row ID",
 ]
 PRE_VWAP_TRADE_LOG_HEADERS = [TRADE_NUMBER_HEADER, *PRE_VWAP_TRADE_LOG_HEADERS_V1]
-TRADE_LOG_HEADERS = [TRADE_NUMBER_HEADER, *TRADE_LOG_HEADERS_V1]
+PRE_COUNTER_TREND_TRADE_LOG_HEADERS = (TRADE_NUMBER_HEADER, *TRADE_LOG_HEADERS_V1)
+TRADE_LOG_HEADERS = list(PRE_COUNTER_TREND_TRADE_LOG_HEADERS)
+TRADE_LOG_HEADERS.insert(TRADE_LOG_HEADERS.index("Early Close") + 1, "Counter Trend")
 PRE_VWAP_RECOMMENDATION_TRADE_LOG_HEADERS_V1 = [
     "Open Time", "Close Time", "Account", "Symbol", "Side", "Qty",
     "Entry Price", "Exit Price", "Stop Loss Price", "Stop Loss Distance",
@@ -7320,6 +7322,8 @@ def _trade_log_header_map(ws) -> Dict[str, int]:
 
 
 def _trade_log_data_start_row(ws) -> int:
+    if _trade_log_has_three_row_headers_for(ws, list(PRE_COUNTER_TREND_TRADE_LOG_HEADERS)):
+        return TRADE_LOG_DATA_START_ROW
     if _trade_log_has_three_row_headers(ws):
         return TRADE_LOG_DATA_START_ROW
     if _trade_log_has_recommendation_grouped_three_row_headers(ws):
@@ -7364,7 +7368,7 @@ def _trade_log_last_populated_row(ws) -> int:
 
 
 def _trade_log_table_last_column(ws) -> int:
-    return max(len(TRADE_LOG_HEADERS), _trade_log_header_map(ws).get("Counter Trend", 0))
+    return max(len(TRADE_LOG_HEADERS), _trade_log_header_map(ws).get("Row ID", 0), _trade_log_header_map(ws).get("Counter Trend", 0))
 
 
 def _set_trade_log_auto_filter(ws) -> None:
@@ -21434,7 +21438,6 @@ def _validate_historical_commission_package(original, candidate_path, part, payl
 
 # Counter Trend is an additive edge field. Keep every historical schema list
 # unchanged; the exact pre-feature schema is still recognized by its old prefix.
-PRE_COUNTER_TREND_TRADE_LOG_HEADERS = tuple(TRADE_LOG_HEADERS)
 COUNTER_TREND_HEADER = "Counter Trend"
 
 def normalize_counter_trend(value):
@@ -21451,7 +21454,10 @@ def counter_trend_count(rows):
 
 _counter_base_header_map = _trade_log_header_map
 def _trade_log_header_map(ws):
-    headers = _counter_base_header_map(ws)
+    if _trade_log_has_three_row_headers_for(ws, list(PRE_COUNTER_TREND_TRADE_LOG_HEADERS)):
+        headers = {header: col for col, header in enumerate(PRE_COUNTER_TREND_TRADE_LOG_HEADERS, 1)}
+    else:
+        headers = _counter_base_header_map(ws)
     for r in range(1, min(3, ws.max_row) + 1):
         for c in range(1, ws.max_column + 1):
             if str(ws.cell(r, c).value or "").strip() == COUNTER_TREND_HEADER:
@@ -21480,6 +21486,8 @@ def read_master_journal_source(path):
 _counter_base_schema = _ensure_trade_log_schema
 def _ensure_trade_log_schema(ws, diagnostics=None):
     panes = ws.freeze_panes
+    if _trade_log_has_three_row_headers_for(ws, list(PRE_COUNTER_TREND_TRADE_LOG_HEADERS)):
+        _group_counter_trend_in_memory(ws)
     _counter_base_schema(ws, diagnostics)
     ws.freeze_panes = panes
     headers = _trade_log_header_map(ws)
@@ -21564,7 +21572,7 @@ def _counter_cell_package_patch(payload, changes, *, new_column=None, validation
     return payload
 
 
-def prepare_counter_trend_package(path, candidate_path, *, expected_sha256, rows=None):
+def _prepare_counter_trend_cells_package(path, candidate_path, *, expected_sha256, rows=None):
     """Only additive Counter Trend cells/ranges; preserve all other package data."""
     import hashlib
     from io import BytesIO
@@ -21748,3 +21756,242 @@ def update_master_journal_workbook_incremental(path,changed_rows,**kwargs):
     result=_counter_incremental(path,changed_rows,**kwargs)
     if result and result.get('ok'):result.setdefault('diagnostics',{})['counter_trend']=_refresh_counter_trend_package(path,changed_rows)
     return result
+
+
+# One Counter Trend migration, shared by package installation and normal saves.
+def _counter_column_map(headers):
+    source = headers['Counter Trend']; destination = headers['Early Close'] + 1
+    if source == destination:return {}
+    if source < destination:raise ValueError('Unsupported Counter Trend placement')
+    return {c: destination if c == source else c + 1 for c in range(destination, source + 1)}
+
+
+def _counter_ref(text, mapping, *, multiple=False):
+    """Map A1 references; reject non-contiguous structural ranges, never truncate."""
+    if not text:return text
+    def one(ref):
+        match=re.fullmatch(r'(\$?)([A-Z]{1,3})(\$?\d+)?(?::(\$?)([A-Z]{1,3})(\$?\d+)?)?',ref)
+        if not match:return ref
+        a=column_index_from_string(match[2]);b=column_index_from_string(match[5]) if match[5] else a
+        columns=sorted(mapping.get(c,c) for c in range(a,b+1));groups=[]
+        for c in columns:
+            if groups and c==groups[-1][-1]+1:groups[-1].append(c)
+            else:groups.append([c])
+        if len(groups)>1 and not multiple:raise ValueError('Non-contiguous reference requires explicit review: '+ref)
+        out=[]
+        for group in groups:
+            left=match[1]+get_column_letter(group[0])+(match[3] or '')
+            right=(match[4] or '')+get_column_letter(group[-1])+(match[6] or match[3] or '')
+            out.append(left+(':'+right if match[5] else ''))
+        return ' '.join(out)
+    result=' '.join(one(part) for part in text.split())
+    if multiple:
+        parts=result.split();merged=[]
+        for part in sorted(parts,key=lambda p:range_boundaries(p) if re.fullmatch(r'[A-Z]+[0-9]+(?::[A-Z]+[0-9]+)?',p) else (0,0,0,0)):
+            if merged and re.fullmatch(r'[A-Z]+[0-9]+(?::[A-Z]+[0-9]+)?',part) and re.fullmatch(r'[A-Z]+[0-9]+(?::[A-Z]+[0-9]+)?',merged[-1]):
+                a,b,c,d=range_boundaries(merged[-1]);e,f,g,h=range_boundaries(part)
+                if b==f and d==h and c+1==e:merged[-1]=f'{get_column_letter(a)}{b}:{get_column_letter(g)}{d}';continue
+            merged.append(part)
+        result=' '.join(merged)
+    return result
+
+
+def _counter_formula(text,mapping,*,local=False):
+    if not text:return text
+    from openpyxl.formula.tokenizer import Tokenizer
+    prefix='' if str(text).startswith('=') else '='
+    tokens=Tokenizer(prefix+text).items
+    for token in tokens:
+        if token.type!='OPERAND' or token.subtype!='RANGE':continue
+        value=token.value
+        if '!' in value:
+            sheet,ref=value.rsplit('!',1)
+            if sheet.strip("'").replace("''", "'").casefold()!='trade log':continue
+            token.value=sheet+'!'+_counter_ref(ref,mapping)
+        elif local:token.value=_counter_ref(value,mapping)
+    rendered=''.join(token.value for token in tokens)
+    return ('=' if not prefix else '')+rendered
+
+
+def _counter_xml_dump(root,source):
+    from io import BytesIO
+    bindings=list(dict.fromkeys(value for event,value in ET.iterparse(BytesIO(source),events=['start-ns'])))
+    for prefix,uri in bindings:
+        if not re.fullmatch(r'ns[0-9]+',prefix):ET.register_namespace(prefix,uri)
+    output=ET.tostring(root,encoding='utf-8')
+    # Namespace prefixes may be used in extension attribute VALUES (mc:Ignorable),
+    # which ElementTree otherwise cannot see. Preserve every original declaration.
+    from xml.sax.saxutils import quoteattr
+    at=output.index(b'>')
+    for prefix,uri in bindings:
+        name='xmlns'+(':'+prefix if prefix else '')
+        if not re.search(rb'\s'+re.escape(name.encode())+rb'=',output[:at]):
+            declaration=(' '+name+'='+quoteattr(uri)).encode();output=output[:at]+declaration+output[at:];at+=len(declaration)
+    return output
+
+
+def _counter_permute_xml(payload,mapping,*,local=False,metadata=False,workbook=False,table=False):
+    # Use the existing standard-library XML stack; retain source namespace bindings.
+    X=ET
+    root=X.fromstring(payload);ns='{'+_SPREADSHEETML_NAMESPACE+'}'
+    for element in root.iter():
+        tag=element.tag.rsplit('}',1)[-1] if isinstance(element.tag,str) else ''
+        context=local or (workbook and tag=='definedName' and element.get('localSheetId')==str(getattr(_counter_permute_xml,'trade_index',-1)))
+        filter_name=(workbook and tag=='definedName' and element.get('name')=='_xlnm._FilterDatabase' and context)
+        if tag in {'f','formula','formula1','formula2','definedName','calculatedColumnFormula','totalsRowFormula'} and element.text and not filter_name:
+            element.text=_counter_formula(element.text,mapping,local=context)
+        if local or metadata:
+            for attr in ('r','ref','sqref','activeCell','topLeftCell','location'):
+                value=element.get(attr)
+                if value and not (tag=='row' and attr=='r'):
+                    element.set(attr,_counter_ref(value,mapping,multiple=attr=='sqref'))
+            if tag=='filterColumn' and element.get('colId') is not None:
+                # Trade Log tables/filters begin at A; retain criteria and sort state.
+                c=int(element.get('colId'))+1;element.set('colId',str(mapping.get(c,c)-1))
+            if tag=='pane' and element.get('xSplit'):
+                boundary=int(float(element.get('xSplit')))+1;element.set('xSplit',str(mapping.get(boundary,boundary)-1))
+            if tag=='Column' and element.text and element.text.isdigit():
+                c=int(element.text)+1;element.text=str(mapping.get(c,c)-1)
+            if tag=='Anchor' and element.text:
+                values=element.text.split(',')
+                if len(values)==8:
+                    for i in (0,4):values[i]=str(mapping.get(int(values[i])+1,int(values[i])+1)-1)
+                    element.text=','.join(values)
+        if metadata and tag=='col' and element.text and element.text.isdigit():
+            c=int(element.text)+1;element.text=str(mapping.get(c,c)-1)
+    if local:
+        data=root.find(ns+'sheetData')
+        if data is not None:
+            for row in data:
+                row[:]=sorted(row,key=lambda c:coordinate_to_column(c.get('r')))
+                if row.get('spans') and len(row):row.set('spans',str(min(coordinate_to_column(c.get('r')) for c in row))+':'+str(max(coordinate_to_column(c.get('r')) for c in row)))
+        cols=root.find(ns+'cols')
+        if cols is not None:
+            expanded=[]
+            from copy import deepcopy
+            for col in cols:
+                for c in range(int(col.get('min')),int(col.get('max'))+1):
+                    clone=deepcopy(col);dest=mapping.get(c,c);clone.set('min',str(dest));clone.set('max',str(dest));expanded.append(clone)
+            cols[:]=sorted(expanded,key=lambda c:int(c.get('min')))
+    if table:
+        cols=root.find(ns+'tableColumns')
+        if cols is not None:cols[:]=[c for _,c in sorted((mapping.get(i,i),c) for i,c in enumerate(cols,1))]
+    return _counter_xml_dump(root,payload)
+
+
+def _relocate_counter_trend_package(source,candidate):
+    from copy import copy
+    X=ET
+    wb=load_workbook(source);ws=wb['Trade Log'];headers=_trade_log_header_map(ws);mapping=_counter_column_map(headers);trade_index=wb.sheetnames.index('Trade Log');generated_refs={str(key.sqref) for key,items in ws.conditional_formatting._cf_rules.items() if items and all(_is_generated_trade_log_win_loss_row_rule(rule,str(key.sqref)) for rule in items)};last_row=max([r for r in range(_trade_log_data_start_row(ws),ws.max_row+1) if ws.cell(r,headers['Row ID']).value not in (None,'')],default=TRADE_LOG_FILTER_HEADER_ROW);wb.close()
+    inverse={v:k for k,v in mapping.items()};_counter_permute_xml.trade_index=trade_index
+    ns='{http://schemas.openxmlformats.org/package/2006/relationships}'
+    with zipfile.ZipFile(source) as before:
+        trade_part=_worksheet_ooxml_part_name(before,'Trade Log');relpart=_worksheet_relationship_part_name(trade_part);metadata=set();tables=set()
+        if relpart in before.namelist():
+            for rel in X.fromstring(before.read(relpart)):
+                if rel.get('TargetMode')=='External':continue
+                target=rel.get('Target');part=target.lstrip('/') if target.startswith('/') else posixpath.normpath(posixpath.join(posixpath.dirname(trade_part),target))
+                metadata.add(part)
+                if rel.get('Type','').endswith('/table'):tables.add(part)
+        changed={};structural=[]
+        table_ref=f'A{TRADE_LOG_FILTER_HEADER_ROW}:{get_column_letter(mapping.get(headers["Row ID"],headers["Row ID"]))}{last_row}'
+        for name in before.namelist():
+            if not name.endswith(('.xml','.vml')):continue
+            old=before.read(name);local=name==trade_part
+            # XML parts without formulas/references to Trade Log are byte-preserved.
+            if not local and name not in metadata and b'Trade Log' not in old:continue
+            new=_counter_permute_xml(old,mapping,local=local,metadata=name in metadata,workbook=name=='xl/workbook.xml',table=name in tables)
+            # Inverse audit maps each moved cell/style/cache/comment/reference back.
+            restored=_counter_permute_xml(new,inverse,local=local,metadata=name in metadata,workbook=name=='xl/workbook.xml',table=name in tables)
+            normalized=_counter_permute_xml(old,{},local=local,metadata=name in metadata,workbook=name=='xl/workbook.xml',table=name in tables)
+            if ET.canonicalize(restored,rewrite_prefixes=True)!=ET.canonicalize(normalized,rewrite_prefixes=True):raise RuntimeError('Column-permutation preservation audit failed: '+name)
+            if local and generated_refs:
+                tree=X.fromstring(new)
+                for cf in tree.findall('{'+_SPREADSHEETML_NAMESPACE+'}conditionalFormatting'):
+                    if cf.get('sqref') in {_counter_ref(ref,mapping,multiple=True) for ref in generated_refs}:
+                        # Only exact generated rules, already recognized by formula/fill.
+                        # Preserve their nodes/priorities; extend coverage to the moved field.
+                        cf.set('sqref',f'A{TRADE_LOG_DATA_START_ROW}:{get_column_letter(mapping.get(headers["Row ID"],headers["Row ID"]))}{last_row}')
+                new=_counter_xml_dump(tree,old)
+            if local:
+                tree=X.fromstring(new);auto=tree.find('{'+_SPREADSHEETML_NAMESPACE+'}autoFilter')
+                if auto is not None and auto.get('ref')!=table_ref:
+                    structural.append({'part':name,'kind':'autoFilter','before':auto.get('ref'),'after':table_ref});auto.set('ref',table_ref);new=_counter_xml_dump(tree,old)
+            if name=='xl/workbook.xml':
+                tree=X.fromstring(new)
+                for defined in tree.iter('{'+_SPREADSHEETML_NAMESPACE+'}definedName'):
+                    if defined.get('name')=='_xlnm._FilterDatabase' and defined.get('localSheetId')==str(trade_index):
+                        left,right=table_ref.split(':');absolute=lambda ref:re.sub(r'([A-Z]+)([0-9]+)',r'$\1$\2',ref)
+                        expected="'Trade Log'!"+absolute(left)+':'+absolute(right)
+                        if defined.text!=expected:
+                            structural.append({'part':name,'kind':'_FilterDatabase','scope':trade_index,'before':defined.text,'after':expected});defined.text=expected
+                        if defined.text!=expected:raise RuntimeError('Scoped filter database disagrees with table')
+                new=_counter_xml_dump(tree,old)
+            if new!=old:changed[name]=new
+        with zipfile.ZipFile(candidate,'w') as out:
+            out.comment=before.comment
+            for info in before.infolist():out.writestr(copy(info),changed.get(info.filename,before.read(info.filename)))
+        with zipfile.ZipFile(candidate) as after:
+            for name in before.namelist():
+                if name not in changed and after.read(name)!=before.read(name):raise RuntimeError('Unrelated package part changed: '+name)
+    return {'column_mapping':mapping,'parts':list(changed),'inverse_audit_verified':True,'structural_changes':structural,'table_filter_ref':table_ref}
+
+
+def prepare_counter_trend_package(path,candidate_path,*,expected_sha256,rows=None):
+    import hashlib
+    from uuid import uuid4
+    stage=Path(candidate_path).with_name('.counter-cells-'+uuid4().hex+'.xlsx')
+    try:
+        result=_prepare_counter_trend_cells_package(path,stage,expected_sha256=expected_sha256,rows=rows)
+        result['relocation']=_relocate_counter_trend_package(stage,candidate_path)
+        result['candidate_sha256']=hashlib.sha256(Path(candidate_path).read_bytes()).hexdigest()
+        return result
+    finally:stage.unlink(missing_ok=True)
+
+
+def _group_counter_trend_in_memory(ws):
+    # Normal refresh already has an in-memory workbook. Map fields (not just
+    # labels), retaining authored extras. Package migration handles original bytes.
+    from copy import copy
+    from openpyxl.worksheet.cell_range import MultiCellRange
+    from openpyxl.formatting.formatting import ConditionalFormatting
+    h=_trade_log_header_map(ws)
+    if 'Counter Trend' not in h:
+        col=ws.max_column+1
+        for r in range(1,ws.max_row+1):_copy_cell_style(ws.cell(r,h['Early Close']),ws.cell(r,col))
+        ws.cell(1,col,'Counter Trend');ws.merge_cells(start_row=1,end_row=3,start_column=col,end_column=col);h['Counter Trend']=col
+    mapping=_counter_column_map(h)
+    if not mapping:return
+    merges=[_counter_ref(str(x),mapping) for x in ws.merged_cells.ranges];ws.merged_cells.ranges.clear()
+    cells={}
+    for (r,c),cell in ws._cells.items():
+        dest=mapping.get(c,c);cell.column=dest
+        if cell.hyperlink:cell.hyperlink.ref=f'{get_column_letter(dest)}{r}'
+        cells[(r,dest)]=cell
+    ws._cells=cells
+    for ref in merges:ws.merge_cells(ref)
+    dimensions={}
+    for key,value in list(ws.column_dimensions.items()):
+        for c in range(value.min or column_index_from_string(key),(value.max or column_index_from_string(key))+1):
+            dest=mapping.get(c,c);clone=copy(value);clone.index=get_column_letter(dest);clone.min=clone.max=dest;dimensions[clone.index]=clone
+    ws.column_dimensions.clear();ws.column_dimensions.update(dimensions)
+    if ws.auto_filter.ref:
+        ws.auto_filter.ref=_counter_ref(ws.auto_filter.ref,mapping)
+        for item in ws.auto_filter.filterColumn:item.colId=mapping.get(item.colId+1,item.colId+1)-1
+        if ws.auto_filter.sortState and ws.auto_filter.sortState.ref:ws.auto_filter.sortState.ref=_counter_ref(ws.auto_filter.sortState.ref,mapping)
+    for dv in ws.data_validations.dataValidation:
+        dv.sqref=MultiCellRange(_counter_ref(str(dv.sqref),mapping,multiple=True))
+        dv.formula1=_counter_formula(dv.formula1,mapping,local=True) if dv.formula1 else None
+        dv.formula2=_counter_formula(dv.formula2,mapping,local=True) if dv.formula2 else None
+    rules={}
+    for key,items in ws.conditional_formatting._cf_rules.items():
+        dest=ConditionalFormatting(sqref=_counter_ref(str(key.sqref),mapping,multiple=True))
+        for rule in items:
+            if rule.formula:rule.formula=[_counter_formula(f,mapping,local=True) for f in rule.formula]
+        rules[dest]=items
+    ws.conditional_formatting._cf_rules=rules
+    for sheet in ws.parent:
+        for row in sheet:
+            for cell in row:
+                if cell.data_type=='f':cell.value=_counter_formula(cell.value,mapping,local=sheet is ws)
+    for name in ws.parent.defined_names.values():name.attr_text=_counter_formula(name.attr_text,mapping)

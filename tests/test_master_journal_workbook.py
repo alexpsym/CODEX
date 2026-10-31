@@ -13273,13 +13273,16 @@ def test_test_trade_fill_package_patch_preserves_workbook(tmp_path):
 # Job 3: deliberately small, existing-workbook fixtures; no archive or broker IO.
 def _counter_trend_fixture(path):
     wb=Workbook(); ws=wb.active;ws.title='Trade Log'
-    for values in mjw._trade_log_three_row_header_values():ws.append(values)
+    old_headers=list(mjw.PRE_COUNTER_TREND_TRADE_LOG_HEADERS)
+    for values in mjw._trade_log_three_row_header_values_for(old_headers):ws.append(values)
+    for col,header in enumerate(old_headers,1):ws.merge_cells(start_row=2 if header in mjw.MOVE_TO_FIELD_MAP else 1,end_row=3,start_column=col,end_column=col)
     headers=mjw._trade_log_header_map(ws)
     rows=sample_snapshot()['items']
     rows += [dict(rows[0],id='unknown',symbol='USDJPY'),dict(rows[0],id='test',is_test_trade=True),dict(rows[0],id='cash',row_type='cashflow'),dict(rows[0],id='reval',row_type='monthly_aud_reval')]
     for n,row in enumerate(rows,4):
         values=mjw._trade_log_row_values(row)
         for label,col in headers.items():ws.cell(n,col,values.get(label))
+    ws.column_dimensions['AX'].hidden=True
     ws.freeze_panes='G4';ws['BA1']='Authored extra';ws['BA4']='=1+2';ws['BA4'].hyperlink='https://example.invalid/keep';ws['BA4'].comment=Comment('keep','author');ws['BA4'].font=Font(bold=True,color='FF123456');ws.column_dimensions['BA'].width=27
     ws.auto_filter.ref=f'A3:AX{ws.max_row}'
     st=wb.create_sheet('STATS1');st.append(['Metric','Overall','FX','Crypto']);st.append(['Trades',3,2,1])
@@ -13293,30 +13296,53 @@ def _counter_trend_fixture(path):
 
 
 def test_counter_trend_additive_schema_roundtrip_preserves_workbook(tmp_path,monkeypatch):
-    import hashlib
-    path=tmp_path/'before.xlsx';rows=_counter_trend_fixture(path);candidate=tmp_path/'candidate.xlsx'
-    supplied=[dict(rows[0],counter_trend=' yes '),dict(rows[1],counter_trend='NO')]
-    result=mjw.prepare_counter_trend_package(path,candidate,expected_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),rows=supplied)
-    assert result['preservation_verified']
+    import hashlib,zipfile
+    from copy import copy
+    from openpyxl.formatting.rule import FormulaRule
+    from openpyxl.worksheet.filters import FilterColumn, Filters, SortState
+    path=tmp_path/'pre.xlsx';rows=_counter_trend_fixture(path)
+    wb=load_workbook(path);ws=wb['Trade Log'];ws.auto_filter.filterColumn.append(FilterColumn(colId=41,filters=Filters(filter=['S1'])))
+    ws.auto_filter.sortState=SortState(ref='AR4:AR9');ws.conditional_formatting.add('AR4:AR9',FormulaRule(formula=['AR4="S1"'],stopIfTrue=True))
+    wb['STATS1']['B4']="='Trade Log'!$AR$4";wb.save(path);wb.close()
+    # Representative existing formula caches must survive the package permutation.
+    frozen=tmp_path/'frozen.xlsx'
+    with zipfile.ZipFile(path) as z,zipfile.ZipFile(frozen,'w') as out:
+        for info in z.infolist():
+            data=z.read(info.filename)
+            if info.filename=='xl/worksheets/sheet1.xml':data=re.sub(rb'(<f>1\+2</f>)<v(?:\s*/>|></v>)',rb'\1<v>3</v>',data)
+            out.writestr(copy(info),data)
+    with zipfile.ZipFile(frozen) as z:assert b'<f>1+2</f><v>3</v>' in z.read('xl/worksheets/sheet1.xml')
+    path=frozen
+    appended=tmp_path/'appended.xlsx'
+    mjw._prepare_counter_trend_cells_package(path,appended,expected_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),rows=[dict(rows[0],counter_trend=' yes '),dict(rows[1],counter_trend='no')])
+    candidate=tmp_path/'grouped.xlsx';result=mjw.prepare_counter_trend_package(appended,candidate,expected_sha256=hashlib.sha256(appended.read_bytes()).hexdigest())
+    assert result['preservation_verified'] and result['relocation']['inverse_audit_verified']
     wb=load_workbook(candidate);ws=wb['Trade Log'];h=mjw._trade_log_header_map(ws);c=h['Counter Trend']
+    assert h['Early Close']+1==c==h['Setup']-1
     assert [ws.cell(r,c).value for r in range(4,7)]==['Yes','No',None]
-    assert ws.freeze_panes=='G4' and ws['BA4'].value=='=1+2' and ws['BA4'].comment.text=='keep' and ws.column_dimensions['BA'].width==27
-    assert any(str(d.formula1)=='"Yes,No"' and d.allowBlank and d.showErrorMessage for d in ws.data_validations.dataValidation)
+    assert ws.freeze_panes=='G4' and ws['BB4'].value=='=1+2' and ws['BB4'].comment.text=='keep' and ws['BB4'].hyperlink.target=='https://example.invalid/keep'
+    assert ws.column_dimensions['BB'].width==27 and ws.column_dimensions['AY'].hidden==True
+    assert wb['STATS1']['B4'].value=="='Trade Log'!$AS$4"
+    assert ws.auto_filter.filterColumn[0].colId==42 and ws.auto_filter.filterColumn[0].filters.filter==['S1']
+    assert ws.auto_filter.sortState.ref=='AS4:AS9'
+    assert any(str(key.sqref)=='AS4:AS9' and rules[0].formula==['AS4="S1"'] for key,rules in ws.conditional_formatting._cf_rules.items())
+    assert any(str(d.formula1)=='"Yes,No"' and d.allowBlank and all(r.min_col==r.max_col==c and r.min_row==4 and r.max_row==9 for r in d.sqref.ranges) for d in ws.data_validations.dataValidation)
     wb.close()
+    with zipfile.ZipFile(candidate) as z:
+        assert b'<f>1+2</f><v>3</v>' in z.read('xl/worksheets/sheet1.xml')
+        names=ET.fromstring(z.read('xl/workbook.xml'))
+        filtered=[n for n in names.iter() if n.tag.endswith('definedName') and n.get('name')=='_xlnm._FilterDatabase' and n.get('localSheetId')=='0']
+        assert len(filtered)==1 and filtered[0].text=="'Trade Log'!$A$3:$AY$9"
+    pre_grouped=tmp_path/'pre-grouped.xlsx';mjw.prepare_counter_trend_package(path,pre_grouped,expected_sha256=hashlib.sha256(path.read_bytes()).hexdigest())
+    assert mjw.read_master_journal_source(pre_grouped)['items']
     source=mjw.read_master_journal_source(candidate);byid={r['id']:r for r in source['items']};assert byid['t1']['counter_trend']=='Yes' and byid['t2']['counter_trend']=='No' and byid['unknown']['counter_trend']==''
-    overrides=mjw.read_master_journal_manual_overrides(candidate);normalized,_=mjw._normalize_master_journal_rows(rows,overrides);assert next(r for r in normalized if r['id']=='t1')['counter_trend']=='Yes'
     again=tmp_path/'again.xlsx';mjw.prepare_counter_trend_package(candidate,again,expected_sha256=hashlib.sha256(candidate.read_bytes()).hexdigest());assert again.read_bytes()==candidate.read_bytes()
-    with pytest.raises(ValueError):mjw.prepare_counter_trend_package(candidate,tmp_path/'invalid.xlsx',expected_sha256=hashlib.sha256(candidate.read_bytes()).hexdigest(),rows=[dict(rows[0],counter_trend='maybe')])
-    # The incremental contract requires canonical header merges, not only labels.
-    # Supply the same required vertical merges as a supported real workbook.
-    wb=load_workbook(candidate);ws=wb['Trade Log']
-    for col,header in enumerate(mjw.TRADE_LOG_HEADERS,1):
-        ws.merge_cells(start_row=2 if header in mjw.MOVE_TO_FIELD_MAP else 1,end_row=3,start_column=col,end_column=col)
-    wb.save(candidate);wb.close()
+    original=candidate.read_bytes()
+    with pytest.raises(ValueError):mjw.prepare_counter_trend_package(candidate,tmp_path/'invalid.xlsx',expected_sha256=hashlib.sha256(original).hexdigest(),rows=[dict(rows[0],counter_trend='maybe')])
+    assert candidate.read_bytes()==original
     monkeypatch.setattr(mjw,'assign_trade_numbers_and_create_folders',lambda *a,**kw:{})
     update=mjw.update_master_journal_workbook_incremental(candidate,[dict(rows[0],counter_trend='')])
     assert update['ok'];assert next(r for r in mjw.read_master_journal_source(candidate)['items'] if r['id']=='t1')['counter_trend']==''
-    # Same preservation package path is used by normal derived refresh.
     mjw._refresh_counter_trend_package(candidate)
     assert next(r for r in mjw.read_master_journal_source(candidate)['items'] if r['id']=='t2')['counter_trend']=='No'
 

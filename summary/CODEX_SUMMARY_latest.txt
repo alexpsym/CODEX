@@ -4212,3 +4212,239 @@ row/columns. Classify only a known trade; save/reopen and use normal derived ref
 to confirm retention/counts. No new trade or broker resync needed.
 Manual acceptance pending user report. MT5 compilation/installation not applicable.
 Jobs 4-6 remain queued; no Dropbox/archive/cloud/broker operations performed.
+
+
+COUNTER TREND PLACEMENT REPAIR + JOB 4 ? LOCAL, INCOMPLETE; NOT INSTALLED/DELIVERED.
+Current baseline verified, not assumed: master HEAD 99f4dd356fcc82a92822a72a169cc7a4402b6441;
+no staged filenames at start. Authorized sources initially clean. Workbook SHA256
+55825cb56b524477aa25ed089ecb31fb850f14fe3b08fc0c6bc2307efe67acc7, bytes matched
+current HEAD. This differs from the earlier installed b7ef9b... baseline; frozen
+current workbook and source/summary baselines retained privately before edits.
+Unrelated pre-existing dirt/staging preserved. No app/process stopped or restarted.
+Usage percentages/warnings/reset windows are NOT stop rules; user withdrawal remains
+in force, including queued Job 5. This checkpoint is due to scoped test exhaustion.
+
+Local source: canonical Counter Trend immediately after Early Close/before Setup,
+explicit pre-feature and appended-schema recognition, grouped generation and normal
+refresh/incremental boundaries. Existing package updater combines classification
+cells/counts with column permutation; inverse mapping audits cells/caches/formula
+references, dimensions, metadata and unchanged package parts. No second calculator
+or metadata store. Added tools/backfill_counter_trend.py: read-once private capture,
+cached text extraction/classification/matching, dry run ledger and explicit candidate
+apply through canonical workbook updater. No original archive changes.
+
+Verification for THIS phase: invocation 1 selected exactly 3 nodes, OS exit 1,
+19.9342356 sec: evidence/matching PASSED; both workbook nodes failed unavailable
+lxml import. Removed that dependency; existing standard-library XML implementation
+retains original namespace bindings. No installation/dependency changes performed.
+Invocation 2 selected only the 2 failures, OS exit 1, 38.2648075 sec: combined
+candidate + normal preservation refresh PASSED; relocation roundtrip FAILED.
+Remaining failure: ValueError: Non-contiguous reference requires explicit review:
+$A$3:$AX$9. Stack _relocate_counter_trend_package -> _counter_permute_xml ->
+_counter_formula -> _counter_ref. The pre-feature fixture's hidden
+_xlnm._FilterDatabase still uses the pre-Counter-Trend extent; its reference must be
+aligned with the relocated AutoFilter/table without weakening formula preservation.
+No further correction/test invocation performed after that result; fail-closed
+validation retained. Next exact code task: handle this structural named filter
+range via the shared intended-table boundary, preserving criteria/custom rules,
+then obtain one failed-node-only verification allowance before production/delivery.
+New phase totals: 2 pytest invocations, 5 scheduled executions, 3 distinct nodes;
+58.1990431 sec test subprocess verification. No passing node repeated. Original
+Job 3 history remains separately 5 pytest invocations/8 executions, 2 installation
+attempts (second succeeded), delivered 6c9fee8 source/8622762 workbook.
+New real workbook transaction attempts 0/1; workbook remains unchanged: True.
+New commit/push 0/1 each; no unverified source or private archive bytes committed.
+
+Archive capture: exactly ONE worker, 11.7912795 sec wrapper (11.4832256 inner),
+OS exit 0. Enumerated 6,839 entries across established local Dropbox CRYPTO/FOREX,
+all years 2018-2026 and nested trade folders, no legacy 2026 cutoff. Environment
+root overrides were unset. Original filenames/inventory, bytes/hashes, text and per
+file statuses captured privately. 438 note files captured; all 438 parsed offline.
+Four PDFs initially lacked pypdf/PyPDF2; repaired extraction using installed pdfminer
+on cached bytes ONLY, no archive reread or second worker. No OCR/images/videos or
+shortcuts/scripts executed. Raw capture coverage retains its initial parser failures;
+parsed_notes.jsonl and coverage_summary.json explain the recovered text separately.
+
+Clear matched proposals: 5 Yes rows: F180, F188, F273, F284 (2018 body annotations)
+and F1168 (2026 trade-specific counter trend eurgbp.txt marker). Exact current
+journal folder hyperlinks/stable IDs matched; no trade-number-only guessing.
+Nine corroborating note records across those 5 rows; no confirmed No, no existing
+explicit value overwritten. Ledger decisions: 404 unknown notes, 25 unmatched,
+9 supporting apply records. These are PROPOSALS, NOT yet installed/applied.
+Current counts remain the current workbook's values; no backfill counts claimed.
+
+C398 explicitly checked across captured current local inventory and journal:
+zero C398 path entries and zero C398 trade-number rows. F398 is a different
+FOREX trade and was not substituted. No forced Yes/No. Cloud-only/other-path
+existence is unverified; this does not establish absence from every user archive.
+Coverage NOT complete: 31 XLSX archive documents were inventoried but outside this
+text-note capture adapter's supported formats; their contents were not read.
+Twelve current journal links also point to Documents/TRADING/CRYPTO/DEMO/C1-C12,
+a separate root identified from link evidence but not included in the one completed
+capture. Original capture allowance is consumed; no second capture attempted.
+Completing missing coverage needs explicit new read-only capture authority for those
+precise documents/root (not a rescan of already captured originals).
+No evidence of No inferred from unsupported/missing/unreadable content.
+
+Private artifacts/baselines/results: C:\GPT\CODEX-master\.counter_trend_repair_0df391e2209342d8b8d978c08620936b
+archive/inventory.jsonl, notes.jsonl, parsed_notes.jsonl, bytes/hash-named inputs,
+evidence_ledger.json, coverage.json; coverage_summary.json, journal_rows.json,
+other_link_evidence.json, capture_roots.json, capture_command/process/stdout/stderr,
+command1/2.json, result1/2.json, junit1/2.xml, stdout/stderr/trace1/2.txt, checkpoint.json.
+Private evidence/backups are outside journal and Git. No archive mutation/cloud
+upload/broker operation/new trade/app restart/MT5 change. MT5 not applicable.
+Elapsed wall from private baseline at checkpoint 1053.26 sec, excluding initial status/
+brief discovery; prior usage not reset. Remaining source changes preserved locally.
+Job 3 placement and Job 4 backfill are not complete; Jobs 5-6 remain queued.
+
+
+PLACEMENT/BACKFILL CONTINUATION ? LOCAL ONLY; NO INSTALLATION/GIT DELIVERY.
+Usage-warning pause withdrawal remains in force. No quota/reset wait occurred.
+Named filter correction: treat only the scoped Trade Log _xlnm._FilterDatabase as
+structural metadata, not an arbitrary formula range. Inverse-audit other names
+and formula/cache mappings unchanged. AutoFilter and that proper quoted/scoped
+name now use the mapped Row ID table edge and stable-ID last data row. Declared
+structural changes recorded in migration manifest; print areas/titles and other
+names unchanged. Correct grouped position preserved: Early Close / Counter Trend
+(column AP=42) / Setup.
+
+Extended adapter with cached-only XLSX literal/comment extraction and sheet/cell
+provenance, skipping formula execution/external-link refresh. Per-row trade/stable
+identity binds Yes/No; multiple-trade sheets cannot classify every folder trade
+from one statement. Template, negation and contradictory comments remain safe.
+Extended evidence/matching node PASSED in invocation 3. Prior combined-candidate/
+normal-refresh PASS retained, not rerun. Invocation 3 (pair): OS exit 1,
+9.1832398 sec; relocation passed the former named-range failure, then failed an
+incorrect hard-coded dropdown assertion expecting AQ instead of actual AP=42.
+Corrected test to require the actual Counter Trend column, row4..9 and Yes/No/blank
+validation; production mapping was correct, not changed for that fixture error.
+Invocation 4 (failed relocation node only): OS exit 1, 7.5301646 sec. It passed
+that dropdown check, then the explicit cache assertion failed because the synthetic
+fixture never inserted cached 3. Saved pre.xlsx/frozen.xlsx already had <v />; the
+fixture replacement recognized only <v></v>. Source-to-candidate preserved the
+existing empty cache; no demonstrated production cache loss. Corrected fixture
+now recognizes either empty serialization and asserts cached 3 exists BEFORE
+migration, while retaining the final preservation assertion. This last correction
+is UNVERIFIED; remaining roundtrip assertions unexecuted. No fifth test run.
+Cumulative repair: 4 pytest invocations, 8 scheduled executions, 3 distinct nodes;
+74.9124475 seconds test subprocess verification. Earlier completed Job3 history
+remains separately 5 invocations/8 executions and 2 installation attempts.
+
+Supplemental capture: one worker launched, OS exit 1, 0.513898 sec. Failed in
+private setup BEFORE capture_supplement or any original-document read. Windows
+os.path.commonpath returned backslashes; the root assertion incorrectly expected
+a forward-slash suffix. Saved links resolve the exact Documents/TRADING/CRYPTO/DEMO
+root. Corrected only that private assertion for a future authorized attempt; no
+second worker/retry launched under the one-attempt rule. Supplemental originals
+read: ZERO. Existing 6,839-entry/438-note cache remains intact and is not rescanned.
+The 31 inventoried XLSX files and linked DEMO-root coverage therefore remain
+unread in production; new extraction behavior is verified only on synthetic cached
+XLSX fixtures. Original 5 Yes proposals F180/F188/F273/F284/F1168 retained, not applied
+and not yet checked against the still-missing supplemental evidence. C398 remains
+unlocated in original inventory/current journal; no identity manufactured.
+
+Private artifacts: existing .counter_trend_repair_0df391e2209342d8b8d978c08620936b;
+capture_supplement.py (corrected but not rerun), supplement_process.json,
+supplement_stdout.txt/stderr.txt; command3/4.json, result3/4.json, stdout/stderr/
+trace3/4.txt, junit3/4.xml; original cache/baselines/ledger preserved unchanged.
+Real workbook unchanged: True. New production attempts 0/1, commits/pushes 0/1.
+No unverified source committed; no app/broker/cloud/archive writes or restarts.
+Next exact actions need a failed-node-only verification allowance after cache-fixture
+correction, and one replacement supplemental capture allowance (local setup is
+corrected; no source reads were repeated). Then reconcile new evidence, prepare
+one validated combined candidate and perform reserved hash-checked installation
+with source handle CLOSED before atomic replacement. Existing named-filter and
+XLSX changes/baselines retained locally. Jobs 5-6 remain queued. MT5 not applicable.
+
+
+COUNTER TREND GROUPING + JOB 4 BACKFILL - INSTALLED; USER ACCEPTANCE PENDING.
+2026-11-01 continuation. Usage warnings/percentages/reset windows remain explicitly
+withdrawn as pause conditions, including queued Job 5. No earlier history erased.
+
+Final relocation verification: offline imports/path/containment preflight used ONLY
+cached paths and a task-owned tiny fixture. Source OOXML preflight independently
+seeded formula 1+2 with cached 3 at source BA4; relocation maps it to BB4 in the
+authored-extra fixture. No Excel recalculation, empty-cache acceptance or production
+workaround. Invocation 5 ran ONLY the existing relocation node, PASSED, actual
+Python child exit 0, 34.3566749 sec. Header placement, exact values, styles/widths,
+comments/hyperlinks, scoped quoted _FilterDatabase, AutoFilter criteria/sort state,
+custom CF/formulas, cached 3, idempotence and incremental/refresh assertions completed.
+XLSX evidence-matching PASS from invocation 3 and combined-candidate/normal-refresh
+PASS from invocation 2 retained; neither rerun. Cumulative placement/backfill repair:
+5 pytest invocations, 9 scheduled executions, 3 distinct nodes; 109.2691224 sec
+test subprocess verification. Optional sixth invocation unused. Previous completed
+Job3 feature history remains separately 5 invocations/8 executions, two installation
+attempts, source 6c9fee8/workbook 8622762. No full-suite/SL/calculator reruns.
+
+Capture history: original worker enumerated 6,839 entries and cached 438 note
+documents across CRYPTO/FOREX years 2018-2026. Four PDFs recovered using installed
+pdfminer from cached bytes only. First supplemental worker failed path-format setup
+before original-file reads (exit1, 0.513898 sec), retained. Replacement supplemental
+worker after offline preflight SUCCEEDED: exit0, 6.7384449 sec (5.8562477 inner).
+Read exactly the 31 previously inventoried XLSX files, inspected literal cells/comments
+with sheet/cell attribution; no formulas/macros/external links executed. Linked
+Documents/TRADING/CRYPTO/DEMO root enumerated, 48 entries, no additional eligible
+notes there. It was resolved from the twelve saved links, no guessed root/drive scan.
+Supplemental text 1,710,336 bytes; no unreadable/oversized/unsupported eligible
+documents left in the authorized note scope. Existing 438 originals NOT reread.
+Merged coverage: 469 readable documents, captured bytes/text/hash/status retained;
+all required scoped note inputs read. Images/videos and non-note settings excluded,
+not treated as evidence of No. No Dropbox/source-content changes or uploads.
+
+Matched/applied exactly FIVE previously blank records: F180, F188, F273, F284, F1168
+(marked Yes). First four supported by trade-specific body annotations in 2018 Word
+notes/text companions; F1168 by counter trend eurgbp.txt in its exact 2026 folder.
+Nine corroborating note records; all matched current exact folder hyperlinks/stable
+IDs under reservation, with classifications rechecked before application. No new
+contradictions; no explicit manual value overwritten; no confirmed No inferred.
+Ledger dispositions: 434 unknown records, 26 unmatched, 9 supporting apply records
+representing 5 unique rows. Unknown history remains blank. All other values retained.
+C398: no C398 folder/current journal row in the authorized captured scope. Two
+supplemental scanner workbooks contain cell addresses named C398, not trade evidence;
+those were rejected as selectors. No row created, number substituted or Yes forced.
+Final disposition is unlocated/unmatched, not proof of absence outside this scope.
+
+Production: exactly ONE repair transaction attempted and SUCCEEDED. Established
+journal OS/thread writer reservation held; Excel owner lock absent, deny-write
+source handle obtained. Frozen current backup matched pre-repair SHA256
+55825cb56b524477aa25ed089ecb31fb850f14fe3b08fc0c6bc2307efe67acc7 and HEAD-clean
+pre-repair baseline (master 99f4dd356fcc82a92822a72a169cc7a4402b6441). Combined
+candidate passed declared cell/count additions plus inverse column/reference audit.
+Stable-ID sets/manual values verified, actual STATS1 counts matched source counts.
+Closed ONLY installer-owned source handle before os.replace, retaining coordination
+reservation and final original hash/identity checks; all resources released in finally.
+Process exit0, 61.3634422 sec wrapper, 54.1758927 sec inner; no retry.
+Installed and approved candidate SHA256:
+480f541d4c1939b697f2ae95dde036fa81d95666df396b47df5136c9be0734fa.
+Counter Trend AP42 after Early Close AO41/before Setup AQ43, exactly one column;
+Row ID remains hidden AY51. Existing fields retain relative order/values and moved
+styles/widths/validation/comments/links/metadata. Existing sheet names/order/views,
+row heights, unaffected formulas/caches/styles/relationships preserved by audit.
+Counter Trend counts now Overall5/FX5/Crypto0, existing SYMBOLS/year/month cells
+updated by the same canonical eligibility metric; other metrics not redesigned.
+
+Changed tracked scope for delivery: tools/master_journal_workbook.py, new
+tools/backfill_counter_trend.py, tests/test_master_journal_workbook.py, new
+tests/test_backfill_counter_trend.py, summary/CODEX_SUMMARY_latest.txt,
+journal/Trading Journal.xlsx. render/master_service.py unchanged in this repair.
+Pre-repair binary matched HEAD and installed changes are solely this repair, so
+the workbook is included. Unrelated dirt/staging preserved; no broad push BAT.
+Fresh protected verify confirmed local/remote master at 99f4dd3 before task commit.
+Final commit/protected push SHA equality reported in session/private checkpoint.
+
+Private directory .counter_trend_repair_0df391e2209342d8b8d978c08620936b:
+original baseline.xlsx/source baselines; archive/ original bytes/parsed notes;
+supplement/ byte cache/notes/coverage; merged/notes.jsonl, coverage.json,
+evidence_ledger.json, c398_investigation.json; preflight_continuation.json,
+command5.json/result5.json/stdout5.txt/stderr5.txt/trace5.txt/junit5.xml;
+supplement_process2.json/stdout2/stderr2; production_original.xlsx frozen backup,
+combined_candidate.xlsx approved candidate, combined_manifest.json,
+production_source_rows.json, dry_run_evidence_ledger.json, install_combined.py,
+production_result.json, production_process.json, production_stdout/stderr.txt.
+No private notes, identities or archive bytes committed. No broker/cloud API, trade,
+app/worker restart, new dependencies, ACL/PATH/security/F: changes. MT5 not applicable.
+
+USER: start LTT via run_local_master_control.bat, then open Trading Journal.xlsx.
+Check Counter Trend beside Early Close/Setup, the five historical Yes values and
+counts, workbook presentation, and save/reopen/normal derived-refresh retention.
+No new trade or broker resync. Manual acceptance pending. Jobs 5-6 remain queued.
