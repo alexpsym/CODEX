@@ -23382,6 +23382,16 @@ async def _price_read(row, credentials):
     # An exact orderId lookup is not an inventory query. Bybit can return its
     # unique requested order with a nonempty cursor; no other page is needed.
     # Position inventories above have completed bounded cursor coverage.
+    if position:
+        # Exact-symbol inventory can include an uninitialized empty slot with
+        # the same one-way index as an active position. It is not a second
+        # position. Exclude only explicit absence across identity/state fields;
+        # incomplete or conflicting populated observations still fail closed.
+        rows = [item for item in rows if not (
+            item.get("side") == "" and item.get("size") == "0"
+            and all(item.get(field) == "" for field in ("avgPrice", "stopLoss", "takeProfit", "createdTime", "updatedTime"))
+            and str(item.get("seq")) == "-1"
+            and item.get("tpslMode") == "" and item.get("trailingStop") == "")]
     matches = [item for item in rows if (item.get("positionIdx") == row.get("position_idx") if position else item.get("orderId") == row["id"])]
     if len(matches) != 1:
         reject("zero_exact_matches" if not matches else "multiple_exact_matches",

@@ -6279,7 +6279,7 @@ def _run_scoped_price_mock_io(coro):
         return runner.run(coro)
 
 
-def _scoped_position_fixture(monkeypatch, tmp_path):
+def _scoped_position_fixture(monkeypatch, tmp_path, observed_empty_slot=False):
     import copy
     service, state = _price_edit_fixture(monkeypatch, tmp_path, position=True, tiny=True, idx=1)
     raw, row = state["raw"], state["row"]
@@ -6287,6 +6287,13 @@ def _scoped_position_fixture(monkeypatch, tmp_path):
                tpTriggerBy="LastPrice", slTriggerBy="LastPrice")
     row.update(instrument=raw["symbol"], entry_price=raw["avgPrice"], stop_loss=raw["stopLoss"], take_profit=raw["takeProfit"],
                _price_broker=copy.deepcopy(raw), source_pending=True, source_stale=True)
+    if observed_empty_slot:
+        # Sanitized live capture: populated one-way slot followed by an empty
+        # record sharing integer index 0. These are NOT equivalent duplicates.
+        raw.update(positionIdx=0, size="2088", avgPrice="0.05415", stopLoss="0.05277", takeProfit="0.05803",
+                   createdTime="1793365689500", seq=140712256072945, updatedTime="1793409853238")
+        row.update(position_idx=0, id=0, size="2088", entry_price=raw["avgPrice"], stop_loss=raw["stopLoss"],
+                   take_profit=raw["takeProfit"], _price_broker=copy.deepcopy(raw))
     service._PRICE_TARGETS.clear()
     service._enrich_price_edit(row)
     state["unrelated"] = {"OANDA demo": "maintenance", "pending": True}
@@ -6299,18 +6306,23 @@ def _scoped_position_fixture(monkeypatch, tmp_path):
         if "bad" in state:
             return copy.deepcopy(state["bad"])
         if params.get("orderFilter") == "StopOrder":
-            items = [dict(symbol=raw["symbol"], positionIdx=1, stopOrderType=kind, orderType="Market",
+            items = [dict(symbol=raw["symbol"], positionIdx=row["position_idx"], stopOrderType=kind, orderType="Market",
                           qty=raw["size"], triggerPrice=raw[field], triggerBy="LastPrice")
                      for field, kind in (("stopLoss", "StopLoss"), ("takeProfit", "TakeProfit"))]
-            items = items[1:] if params.get("cursor") else items[:1]
+            items = ([] if params.get("cursor") else items) if observed_empty_slot else (items[1:] if params.get("cursor") else items[:1])
         else:
-            items = [copy.deepcopy(raw)] if params.get("cursor") else []
+            if observed_empty_slot:
+                empty = dict(symbol=raw["symbol"], positionIdx=0, side="", size="0", avgPrice="", stopLoss="",
+                             takeProfit="", createdTime="", seq=-1, updatedTime="", tpslMode="", trailingStop="")
+                items = [empty] if params.get("cursor") else [copy.deepcopy(raw)]
+            else:
+                items = [copy.deepcopy(raw)] if params.get("cursor") else []
         return {"retCode": 0, "result": {"category": "linear", "list": items,
                 "nextPageCursor": "" if params.get("cursor") else "page-two"}}
     async def market(base, path, params, **kw):
         assert base == "https://bybit.fixture" and params == {"category": "linear", "symbol": "FIXTUREUSDT"}
         return {"result": {"list": [{"symbol": "FIXTUREUSDT", **({"priceFilter": {"tickSize": "0.00001"}}
-                if path.endswith("instruments-info") else {"lastPrice": "0.0501"})}]}}
+                if path.endswith("instruments-info") else {"lastPrice": "0.055" if observed_empty_slot else "0.0501"})}]}}
     monkeypatch.setattr(service, "_bybit_signed_get", get)
     monkeypatch.setattr(service, "_bybit_market_get_async", market)
     return service, state
@@ -6319,13 +6331,13 @@ def _scoped_position_fixture(monkeypatch, tmp_path):
 def test_position_sl_scoped_refresh_and_amend_confirm_under_partial_coverage(monkeypatch, tmp_path):
     import copy
     async def exercise():
-        service, state = _scoped_position_fixture(monkeypatch, tmp_path)
+        service, state = _scoped_position_fixture(monkeypatch, tmp_path, observed_empty_slot=True)
         row, raw = state["row"], state["raw"]
         target = row["price_edit"]["target"]
         fresh = await service.refresh_open_order_price({"target": target})
         assert fresh["status"] == "fresh" and fresh["target"] == target
         assert fresh["item"]["_price_read_started"] > 1
-        assert fresh["item"]["price_edit"]["levels"] == {"entry": "0.04996", "stop_loss": "0.04858", "take_profit": "0.05379"}
+        assert fresh["item"]["price_edit"]["levels"] == {"entry": "0.05415", "stop_loss": "0.05277", "take_profit": "0.05803"}
         assert len(state["reads"]) == 4 and state["writes"] == []
         original = copy.deepcopy(raw)
         # Every invalid scoped read must fail before any mutation.
@@ -6337,6 +6349,15 @@ def test_position_sl_scoped_refresh_and_amend_confirm_under_partial_coverage(mon
                         {"stopLoss": ""}, {"seq": "replacement"}):
             bads.append({"retCode": 0, "result": {"category": "linear", "list": [dict(raw, **changes)]}})
         bads.append({"retCode": 0, "result": {"category": "linear", "list": [raw, raw]}})
+        # Empty-only is closed/unavailable. Partially populated slot records
+        # cannot be silently ignored alongside an active position.
+        empty = dict(symbol=raw["symbol"], positionIdx=0, side="", size="0", avgPrice="", stopLoss="",
+                     takeProfit="", createdTime="", seq=-1, updatedTime="", tpslMode="", trailingStop="")
+        bads.append({"retCode": 0, "result": {"category": "linear", "list": [empty]}})
+        bads.append({"retCode": 0, "result": {"category": "linear", "list": []}})
+        for conflicting in (dict(raw, stopLoss="0.05276"), dict(raw, side="Sell"), dict(empty, size="1"),
+                            dict(empty, stopLoss="0.05277"), dict(empty, seq=raw["seq"]), dict(empty, positionIdx=None)):
+            bads.append({"retCode": 0, "result": {"category": "linear", "list": [raw, conflicting]}})
         for bad in bads:
             state["bad"] = bad
             with pytest.raises(service.HTTPException):
@@ -6346,23 +6367,23 @@ def test_position_sl_scoped_refresh_and_amend_confirm_under_partial_coverage(mon
         with pytest.raises(service.HTTPException):
             await service.refresh_open_order_price({"target": "missing-account-target"})
         # Exact existing amend route, real locks and durable reservation, single SL mutation.
-        result = await service.amend_open_order(state["request"]("stop_loss", "0.04848"))
-        assert result["status"] == "confirmed" and result["item"]["stop_loss"] == "0.04848"
+        result = await service.amend_open_order(state["request"]("stop_loss", "0.05267"))
+        assert result["status"] == "confirmed" and result["item"]["stop_loss"] == "0.05267"
         assert len(state["writes"]) == 1
         write = state["writes"][0]
         assert write["path"] == "/v5/position/trading-stop"
-        assert write["body"] == {"category": "linear", "symbol": "FIXTUREUSDT", "positionIdx": 1,
-                                  "tpslMode": "Full", "stopLoss": "0.04848", "slTriggerBy": "LastPrice"}
+        assert write["body"] == {"category": "linear", "symbol": "FIXTUREUSDT", "positionIdx": 0,
+                                  "tpslMode": "Full", "stopLoss": "0.05267", "slTriggerBy": "LastPrice"}
         for key in ("avgPrice", "size", "takeProfit"):
             assert raw[key] == original[key]
         # Retained unknown reservation blocks fresh requests; status only reads, never replays.
         op = next(iter(service._price_operations().values()))
-        op.update(operation_id="unknown_fixture_operation", status="unknown", expected={"stop_loss": "0.04847"})
+        op.update(operation_id="unknown_fixture_operation", status="unknown", expected={"stop_loss": "0.05266"})
         service._price_store(op)
         with pytest.raises(service.HTTPException):
             await service.refresh_open_order_price({"target": target})
         with pytest.raises(service.HTTPException):
-            await service.amend_open_order(state["request"]("stop_loss", "0.04846", op="blocked_fixture_operation"))
+            await service.amend_open_order(state["request"]("stop_loss", "0.05265", op="blocked_fixture_operation"))
         result = await service.open_order_amend_status({"operation_id": op["operation_id"]})
         assert result["status"] == "unknown" and len(state["writes"]) == 1
         assert state["unrelated"]["pending"]
