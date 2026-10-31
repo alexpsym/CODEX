@@ -4094,3 +4094,99 @@ def test_post_entry_classification_persists_for_exact_trade_and_reaches_journal(
             assert screenshot.read_bytes() == b"keep screenshot"
         await owner.close()
     asyncio.run(scenario())
+
+
+def test_unused_trendline_plan_delete_route_is_permanent_and_protected(tmp_path, monkeypatch):
+    import copy
+    import runpy
+    service = master_service
+    store = service.TrendlinePlanStore(tmp_path / "delete-registry.json")
+    monkeypatch.setattr(service, "TRENDLINE_PLAN_STORE", store)
+    monkeypatch.setattr(service, "APP_PROFILE", "local")
+    monkeypatch.setattr(service, "_trendline_response_state", lambda: {})
+    external = []
+    def forbidden(*args, **kwargs):
+        external.append(True)
+        raise AssertionError("Deletion must not contact external services")
+    monkeypatch.setattr(service.httpx.Client, "request", forbidden)
+    monkeypatch.setattr(service.httpx.AsyncClient, "request", forbidden)
+    monkeypatch.setattr(service, "_bybit_signed_post", forbidden)
+    payload = runpy.run_path(str(ROOT / "tests/test_trendline_plans.py"))["_payload"]()
+    def create():
+        return store.create(copy.deepcopy(payload), now_ms=5000)
+    def delete(pid):
+        return json.loads(_run_immediate_route(service.trendline_plan_delete(pid)).body)
+    keep = create()
+    draft = create()
+    cancelled = create()
+    store.cancel(cancelled["plan_id"], now_ms=7000)
+    assert service._trendline_plan_client_view(draft)["can_delete"] is True
+    assert "can_delete" not in store.get(draft["plan_id"])
+    for pid in (draft["plan_id"], cancelled["plan_id"]):
+        before = store.load()
+        result = delete(pid)
+        assert result["ok"] is True and result["deleted_plan_id"] == pid
+        fresh = service.TrendlinePlanStore(store.path).load()
+        assert fresh["schema_version"] == before["schema_version"]
+        assert fresh["plans"] == {key: value for key, value in before["plans"].items() if key != pid}
+        assert store.path.exists() and store.path.with_name(store.path.name + ".lock").exists()
+        with pytest.raises(service.HTTPException) as missing:
+            delete(pid)
+        assert missing.value.status_code == 404
+    assert store.get(keep["plan_id"]) == keep
+    with pytest.raises(service.HTTPException) as missing:
+        delete("never-existed")
+    assert missing.value.status_code == 404
+    for profile in ("render", "journal"):
+        monkeypatch.setattr(service, "APP_PROFILE", profile)
+        before = store.path.read_bytes()
+        with pytest.raises(service.HTTPException) as restricted:
+            delete(keep["plan_id"])
+        assert restricted.value.status_code == 410 and store.path.read_bytes() == before
+    monkeypatch.setattr(service, "APP_PROFILE", "local")
+    # Capability is advisory. Another store arms a previously deletable draft;
+    # deletion must read/check the now-active record inside its own lock.
+    stale = create()
+    assert service._trendline_plan_client_view(stale)["can_delete"]
+    service.TrendlinePlanStore(store.path).arm(stale["plan_id"], now_ms=6000)
+    protected = [stale["plan_id"]]
+    for status in ("claimed", "submitting", "submitted", "failed", "uncertain", "disabled", "expired"):
+        record = create()
+        if status in {"claimed", "submitting", "submitted", "failed", "uncertain"}:
+            store.arm(record["plan_id"], now_ms=6000)
+            record = store.claim_trigger(record["plan_id"], {"trigger_timestamp_ms":20000,"trigger_price":"1.2","trigger_kind":"entered_band"}, now_ms=20000)["plan"]
+        record["status"] = status
+        record["lifecycle"]["last_transition"] = "claim_" + status
+        with store._locked():
+            registry = store._read()
+            registry["plans"][record["plan_id"]] = record
+            store._write(registry)
+        protected.append(record["plan_id"])
+    # Even a draft/cancelled label cannot erase execution/auth/lifecycle evidence.
+    for kind in ("execution_result", "live_authorization", "lifecycle"):
+        record = create()
+        if kind == "execution_result":
+            record[kind] = {"outcome":"executed","recorded_at_ms":6000,"order_id":"synthetic-order"}
+        elif kind == "live_authorization":
+            record[kind] = {"execution_key":record["execution_key"],"plan_revision":1,"authorized_at_ms":6000}
+        else:
+            record[kind] = {"last_transition":"claim_submitted","last_transition_at_ms":6000}
+        with store._locked():
+            registry = store._read()
+            registry["plans"][record["plan_id"]] = record
+            store._write(registry)
+        protected.append(record["plan_id"])
+    for pid in protected:
+        assert service._trendline_plan_client_view(store.get(pid))["can_delete"] is False
+        before = store.path.read_bytes()
+        with pytest.raises(service.HTTPException) as blocked:
+            delete(pid)
+        assert blocked.value.status_code == 409 and store.path.read_bytes() == before
+    before = store.path.read_bytes()
+    with monkeypatch.context() as patch:
+        patch.setattr(store, "_write", lambda data: (_ for _ in ()).throw(service.TrendlinePlanPersistenceError("synthetic disk failure")))
+        with pytest.raises(service.HTTPException) as failure:
+            delete(keep["plan_id"])
+        assert failure.value.status_code == 500
+    assert store.path.read_bytes() == before
+    assert not external and "can_delete" not in store.path.read_text()

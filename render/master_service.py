@@ -29486,8 +29486,8 @@ CALCULATOR_TEMPLATE = """<!doctype html>
             <table class="calc-table">
               <caption id="trendline-plans-title">Local trendline plans</caption>
               <tbody>
-                <tr><td colspan="2"><div class="card"><strong>Local trendline monitoring</strong><div class="muted">Armed Bybit and OANDA plans are monitored locally only after you start monitoring. Keep Local Trading Tools running and the computer awake. Test plans simulate without sending broker orders; eligible non-test plans can submit once after fresh validation, and live plans require explicit live confirmation. For faster anchors, add pinescripts/ltt_anchor_export.pine as a personal TradingView script, select two points on the SAME channel boundary, then copy its LTT_ANCHORS_V1 message from Pine Logs. Paste below: Preview checks/displays only; Apply fills both anchor fields; Save/Update draft persists. Use LTT Anchor Export 2A.1: explicit past or future coordinates are supported. Preview shows its optional extension flag; Apply sets it when supplied, otherwise keeps your checkbox. After changing helper points/extension, copy a NEW message and import/Apply/Save again; saved plans do not live-sync. Exact prices can be set in helper inputs. Manual date/time and price entry remains available. Pepperstone trendline execution remains handled by the existing MT5 trendline EA. Times are entered in your browser timezone and stored as UTC.</div></div></td></tr>
-                <tr><th><label for="trendline-import-text">Import TradingView anchors</label></th><td><textarea id="trendline-import-text" maxlength="8192" rows="3" placeholder="Paste one LTT_ANCHORS_V1 export or its JSON"></textarea><div class="group"><div class="muted">1. Preview checks the message. 2. Apply fills the fields. 3. Save/Update draft persists.</div><button id="trendline-import-preview-btn" type="button">Preview</button><button id="trendline-import-apply" type="button" disabled>Apply anchors</button></div><div id="trendline-import-preview" class="muted" role="status" aria-live="polite" style="white-space:pre-wrap"></div></td></tr>
+                <tr><td colspan="2"><div class="card"><strong>Local trendline monitoring</strong><div class="muted">Armed Bybit and OANDA plans are monitored locally only after you start monitoring. Keep Local Trading Tools running and the computer awake. Test plans simulate without sending broker orders; eligible non-test plans can submit once after fresh validation, and live plans require explicit live confirmation. For faster anchors, add pinescripts/ltt_anchor_export.pine as a personal TradingView script, select two points on the SAME channel boundary, then copy its LTT_ANCHORS_V1 message from Pine Logs. Paste below for automatic preview; Apply fills both anchor fields; Save/Update draft persists. Use LTT Anchor Export 2A.1: explicit past or future coordinates are supported. Preview shows its optional extension flag; Apply sets it when supplied, otherwise keeps your checkbox. After changing helper points/extension, copy a NEW message and import/Apply/Save again; saved plans do not live-sync. Exact prices can be set in helper inputs. Manual date/time and price entry remains available. Pepperstone trendline execution remains handled by the existing MT5 trendline EA. Times are entered in your browser timezone and stored as UTC.</div></div></td></tr>
+                <tr><th><label for="trendline-import-text">Import TradingView anchors</label></th><td><textarea id="trendline-import-text" maxlength="8192" rows="3" placeholder="Paste one LTT_ANCHORS_V1 export or its JSON"></textarea><div class="group"><div class="muted">Paste -> automatic preview -> Apply anchors -> Save/Update draft.</div><button id="trendline-import-apply" type="button" disabled>Apply anchors</button></div><div id="trendline-import-preview" class="muted" role="status" aria-live="polite" style="white-space:pre-wrap"></div></td></tr>
                 <tr><th><label for="trendline-anchor-1-time">Anchor 1</label></th><td><div class="grid"><input id="trendline-anchor-1-time" type="datetime-local" step="0.001"/><input id="trendline-anchor-1-price" type="number" step="any" min="0" placeholder="Price"/></div><div id="trendline-anchor-1-utc" class="muted"></div></td></tr>
                 <tr><th><label for="trendline-anchor-2-time">Anchor 2</label></th><td><div class="grid"><input id="trendline-anchor-2-time" type="datetime-local" step="0.001"/><input id="trendline-anchor-2-price" type="number" step="any" min="0" placeholder="Price"/></div><div id="trendline-anchor-2-utc" class="muted"></div></td></tr>
                 <tr><th>Trigger</th><td><div class="grid"><label>Mode <select id="trendline-trigger-mode"><option value="touch">Touch</option><option value="confirmed_cross">Confirmed cross</option></select></label><label>Direction <select id="trendline-cross-direction"><option value="either">Either</option><option value="upward">Upward</option><option value="downward">Downward</option></select></label><label>Price basis <select id="trendline-price-basis"><option value="executable">Executable price</option><option value="bid">Bid</option><option value="ask">Ask</option><option value="midpoint">Midpoint</option></select></label><label>Tolerance ticks <input id="trendline-tolerance-ticks" type="number" min="0" step="1" value="0"/></label></div></td></tr>
@@ -30799,7 +30799,7 @@ def _trendline_plan_payload(payload: Mapping[str, object]) -> Dict[str, object]:
 
 
 def _trendline_plan_client_view(plan: Mapping[str, object]) -> Dict[str, object]:
-    return dict(plan)
+    return dict(plan, can_delete=TrendlinePlanStore.can_delete(plan))
 
 
 def _trendline_response_state() -> Dict[str, object]:
@@ -30826,6 +30826,16 @@ async def trendline_plan_create(payload: Dict[str, object] = Body(default={})) -
         return JSONResponse({"ok": True, "plan": _trendline_plan_client_view(plan), **_trendline_response_state()})
     except Exception as exc:
         _trendline_plan_http_error(exc)
+
+
+@app.delete("/api/trendline-plans/{plan_id}")
+async def trendline_plan_delete(plan_id: str) -> JSONResponse:
+    _trendline_plans_require_local()
+    try:
+        deleted = TRENDLINE_PLAN_STORE.delete(plan_id)
+        return JSONResponse({"ok": True, "deleted_plan_id": deleted, "message": "Unused plan permanently deleted."})
+    except Exception as exc:
+        _trendline_plan_http_error(exc, transition=True)
 
 
 @app.patch("/api/trendline-plans/{plan_id}")

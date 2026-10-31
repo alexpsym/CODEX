@@ -950,7 +950,7 @@
   }
   function trendlineExpiryAtMs() {
     const select = $('trendline-expiry'); const preset = select ? select.value : 'lifetime';
-    if (preset === 'lifetime' || preset === 'keep') return preset === 'keep' ? undefined : null;
+    if (preset === 'lifetime' || preset === 'keep') return preset === 'keep' ? (state.trendlineEditId ? undefined : state.trendlineDetachedExpiry?.value) : null;
     const now = new Date();
     if (preset === '1h') return now.getTime() + 60 * 60 * 1000;
     if (preset === '4h') return now.getTime() + 4 * 60 * 60 * 1000;
@@ -989,7 +989,7 @@
   }
   function resetTrendlineForm() {
     clearAnchorImport();
-    state.trendlineEditId = ''; state.trendlineRestoreMissing=[];
+    state.trendlineEditId = ''; state.trendlineRestoreMissing=[]; state.trendlineDetachedExpiry=null;
     ['trendline-anchor-1-time','trendline-anchor-2-time','trendline-anchor-1-price','trendline-anchor-2-price'].forEach((id) => { const el=$(id); if(el) { el.value=''; delete el.dataset.anchorEpoch; delete el.dataset.anchorLocal; } });
     const extension=$('trendline-right-extension'); if(extension) extension.checked=true;
     const mode=$('trendline-trigger-mode'); if(mode) mode.value='touch'; const direction=$('trendline-cross-direction'); if(direction) direction.value='either';
@@ -1020,7 +1020,8 @@
     const list=$('trendline-plan-list'); if(!list) return;
     if (!state.trendlinePlans.length) { list.innerHTML='<div class="muted">No local trendline plans saved.</div>'; return; }
     list.innerHTML=state.trendlinePlans.map((plan) => {
-      const actions=plan.status==='draft' ? `<button type="button" data-tl-action="edit" data-tl-id="${escapeHtml(plan.plan_id)}">Edit</button><button type="button" data-tl-action="arm" data-tl-id="${escapeHtml(plan.plan_id)}">Arm</button><button type="button" data-tl-action="cancel" data-tl-id="${escapeHtml(plan.plan_id)}">Cancel</button>` : plan.status==='armed' ? `<button type="button" data-tl-action="cancel" data-tl-id="${escapeHtml(plan.plan_id)}">Cancel</button>` : '';
+      let actions=plan.status==='draft' ? `<button type="button" data-tl-action="edit" data-tl-id="${escapeHtml(plan.plan_id)}">Edit</button><button type="button" data-tl-action="arm" data-tl-id="${escapeHtml(plan.plan_id)}">Arm</button><button type="button" data-tl-action="cancel" data-tl-id="${escapeHtml(plan.plan_id)}">Cancel</button>` : plan.status==='armed' ? `<button type="button" data-tl-action="cancel" data-tl-id="${escapeHtml(plan.plan_id)}">Cancel</button>` : '';
+      if(plan.can_delete===true) actions+=`<button type="button" data-tl-action="delete" data-tl-id="${escapeHtml(plan.plan_id)}" title="Permanently delete this unused plan">Delete</button>`;
       return `<div class="card"><strong>${escapeHtml(plan.status)} | ${escapeHtml(plan.broker)}/${escapeHtml(plan.account)} | ${escapeHtml(plan.instrument)}</strong>${savedPlanDetails(plan)}<div class="muted">${escapeHtml(String(plan.plan_id))}</div><div class="group">${actions}</div></div>`;
     }).join('');
     list.querySelectorAll('[data-tl-action]').forEach((btn) => btn.addEventListener('click', () => trendlineAction(btn.dataset.tlAction, btn.dataset.tlId)));
@@ -1044,7 +1045,7 @@
     resolveController=null; resolveInFlight=null; journalController=null; specsController=null;
     ++state.quoteRequestSeq; ++state.trendlineListRequestSeq;
     clearAnchorImport();
-    state.trendlineEditId=plan.plan_id;
+    state.trendlineEditId=plan.plan_id; state.trendlineDetachedExpiry=null;
     state.trendlineRestoreMissing=['broker','account','instrument','action','order_intent','test_trade','anchors','right_extension','trigger_mode','cross_direction','trigger_price_basis','tolerance_ticks','expiry_at_ms','risk_mode','risk_value','stop_loss_ticks','rr_target','timeframe','order_metadata'].filter(key=>!Object.prototype.hasOwnProperty.call(plan,key) || (key!=='expiry_at_ms' && key!=='order_metadata' && plan[key]===null));
     state.asset=plan.broker==='bybit'?'crypto':plan.broker==='oanda'?'fx':'';
     state.broker=plan.broker??''; state.account=plan.account??'';
@@ -1098,6 +1099,26 @@
   async function trendlineAction(action, planId) {
     if (state.trendlineMutationPending) return; const plan=state.trendlinePlans.find((p)=>p.plan_id===planId);
     if(action==='edit') return editTrendlinePlan(plan);
+    if(action==='delete') {
+      if(!plan || plan.can_delete!==true) { trendlineStatus('This plan is protected from deletion. Refresh the list.');return; }
+      ++state.trendlineListRequestSeq; state.trendlineMutationPending=true;
+      try {
+        const response=await request(`/api/trendline-plans/${encodeURIComponent(planId)}`,{method:'DELETE'});
+        if(response.ok!==true || response.deleted_plan_id!==planId) throw new Error('Deletion was not confirmed; plan retained.');
+        ++state.trendlineListRequestSeq;
+        state.trendlinePlans=state.trendlinePlans.filter(item=>item.plan_id!==planId);
+        if(state.trendlineEditId===planId) {
+          state.trendlineDetachedExpiry={value:plan.expiry_at_ms};
+          state.trendlineEditId='';state.trendlineRestoreMissing=[];
+          clearAnchorImport('Plan deleted. Entered settings retained; Save draft explicitly to create a new draft.');
+          $('trendline-save').textContent='Save draft';
+          trendlineStatus('Plan permanently deleted. Entered settings retained; the next explicit Save draft creates a new draft.');
+        } else trendlineStatus('Unused plan permanently deleted.');
+        renderTrendlinePlans(); state.trendlineMutationPending=false; await refreshTrendlinePlans();
+      } catch(err) { trendlineStatus('Delete failed: '+String(err.message||err)); }
+      finally { state.trendlineMutationPending=false; }
+      return;
+    }
     const liveArm=action==='arm' && plan?.account==='live' && !plan?.test_trade;
     if(liveArm && (typeof confirm!=='function' || !confirm('Authorize and arm this live plan for local monitoring and execution?'))) return;
     ++state.trendlineListRequestSeq; state.trendlineMutationPending=true;
@@ -1112,7 +1133,6 @@
       if(id.endsWith('-time')) anchorEpoch(id,id.replace('-time','-utc'));
     }));
     $('trendline-import-text')?.addEventListener('input',previewAnchorImport);
-    $('trendline-import-preview-btn')?.addEventListener('click',previewAnchorImport);
     $('trendline-import-apply')?.addEventListener('click',applyAnchorImport);
     $('trendline-trigger-mode')?.addEventListener('change',syncTrendlineTriggerControls); $('trendline-save')?.addEventListener('click',saveTrendlinePlan); $('trendline-reset')?.addEventListener('click',resetTrendlineForm); $('trendline-refresh')?.addEventListener('click',refreshTrendlinePlans); $('trendline-monitor-start')?.addEventListener('click',()=>trendlineMonitor('start')); $('trendline-monitor-stop')?.addEventListener('click',()=>trendlineMonitor('stop'));
   }

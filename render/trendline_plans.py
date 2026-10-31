@@ -631,6 +631,33 @@ class TrendlinePlanStore:
             self._write(registry)
             return copy.deepcopy(canonical)
 
+    @staticmethod
+    def can_delete(plan: Mapping[str, object]) -> bool:
+        """Only unused records; execution_key alone is normal draft identity."""
+        status = plan.get("status")
+        if status not in {"draft", "cancelled"}:
+            return False
+        if any(field not in plan or plan[field] is not None
+               for field in ("trigger_claim", "execution_result", "live_authorization")):
+            return False
+        lifecycle = plan.get("lifecycle")
+        allowed = {"created", "updated"} if status == "draft" else {"cancelled"}
+        return isinstance(lifecycle, Mapping) and lifecycle.get("last_transition") in allowed
+
+    def delete(self, plan_id: str) -> str:
+        """Permanently remove one unused plan under the existing registry lock."""
+        with self._locked():
+            registry = self._read()
+            key = _text(plan_id, "plan_id")
+            plan = registry["plans"].get(key)
+            if plan is None:
+                raise TrendlinePlanError("Unknown trendline plan.")
+            if not self.can_delete(plan):
+                raise TrendlinePlanError("Only unused draft or cancelled plans without execution or authorization evidence may be deleted.")
+            del registry["plans"][key]
+            self._write(registry)
+            return key
+
     def _transition(self, plan_id: str, *, target: str, event: str, now_ms: int) -> Dict[str, object]:
         registry = self._read()
         plan = registry["plans"].get(_text(plan_id, "plan_id"))
