@@ -43419,56 +43419,12 @@ body{margin:0;background:#0b1220;color:#e2e8f0;font-family:Inter,system-ui,sans-
 <body><main class="workspace">
 <section class="controls" aria-label="Journal controls">
   <button id="open-journal-btn">Open workbook</button><button id="import-journal-btn">Import</button><button id="journal-resync-btn">Resync</button>
-  <button id="sort-downloaded-trade-files-btn">Sort downloaded trade files</button>
   <div id="journal-import-drop-zone" class="drop-zone">Drop .xlsx/.xlsm/.xls/.csv or MT5 .html/.htm import files here<br/><span style="font-size:12px">or click Import to choose a file</span></div>
   <label style="font-size:12px;color:#94a3b8">Bybit CSV account <select id="journal-account-mode"><option value="" selected disabled>Select Demo or Live</option><option value="demo">Demo</option><option value="live">Live</option></select></label>
   <button id="crypto-monthly-pnl-btn">Crypto Monthly P&amp;L</button><button id="bybit-demo-balance-adjustment-btn">Bybit Demo Balance Adjustment</button>
   <input id="journal-file-input" type="file" accept=".xlsx,.xlsm,.xls,.csv,.html,.htm" hidden/><div id="journal-actions-status" class="status"></div>
 </section>
 </main><script src="/static/trading_journal_actions.js?v={{TRADING_JOURNAL_ACTIONS_JS_VERSION}}"></script></body></html>"""
-
-
-def _run_trading_journal_file_sort(request_id: str) -> Dict[str, object]:
-    """Hold existing identity-writer reservations while a bounded child files data."""
-    locks=[];reserved=False
-    try:
-        for lock in (TRADING_JOURNAL_IMPORT_LOCK, TRADING_JOURNAL_RESYNC_LOCK):
-            if not lock.acquire(blocking=False):
-                return {"ok":False,"status":"busy","message":"Journal is busy with import, resync or filing; this request started no new moves."}
-            locks.append(lock)
-        workbook=_master_journal_path()
-        busy=_reserve_master_journal_workbook_sync(workbook,"trade-file-sort-"+request_id,"trade-file-sort",wait_seconds=0)
-        if busy:return {"ok":False,"status":"busy","message":"Another journal writer is running; no files were moved."}
-        reserved=True
-        from tools.sort_downloaded_trade_files import guarded_open, run_local_batch
-        # Keep the saved identity snapshot stable even against non-cooperating
-        # workbook writers. This is read-only and never starts a journal refresh.
-        with guarded_open(workbook):
-            return run_local_batch(request_id,workbook,BASE_DIR/"logs"/"trade-file-sort")
-    finally:
-        if reserved:_release_master_journal_workbook_sync()
-        for lock in reversed(locks):lock.release()
-
-
-@app.post("/api/trading-journal/sort-downloaded-files")
-async def trading_journal_sort_downloaded_files(request: Request, payload: Dict[str, object]) -> JSONResponse:
-    path="/api/trading-journal/sort-downloaded-files"
-    if APP_PROFILE!="local" or _render_blocks_path(path):
-        return _local_only_disabled_response(path,as_json=True)
-    # Existing profile middleware remains authoritative; this destructive LOCAL
-    # action additionally requires a loopback peer, same origin and custom header.
-    peer=str(getattr(getattr(request,"client",None),"host","") or "")
-    origin=urlparse(str(request.headers.get("origin") or ""))
-    if peer not in {"127.0.0.1","::1"} or not _is_local_host(str(request.url.hostname or "")) or origin.scheme!=request.url.scheme or origin.netloc.casefold()!=request.url.netloc.casefold() or request.headers.get("x-ltt-action")!="sort-downloaded-files":
-        return JSONResponse({"ok":False,"message":"Use the local journal menu from the same origin."},status_code=403)
-    if not isinstance(payload,dict) or set(payload)!={"request_id"} or not re.fullmatch(r"[a-f0-9-]{32,36}",str(payload.get("request_id") or "")):
-        return JSONResponse({"ok":False,"message":"A valid filing request identity is required; paths cannot be supplied."},status_code=422)
-    try:result=await asyncio.to_thread(_run_trading_journal_file_sort,str(payload["request_id"]))
-    except Exception:
-        return JSONResponse({"ok":False,"status":"inconclusive","message":"Filing outcome unavailable. Review the local audit before another batch."},status_code=500)
-    status={"complete":200,"partial":207,"busy":409,"inconclusive":409,"failed":500}.get(str(result.get("status")),500)
-    return JSONResponse(result,status_code=status)
-
 
 @app.get("/dashboard/trading-journal")
 @app.get("/merged/trading-journal")

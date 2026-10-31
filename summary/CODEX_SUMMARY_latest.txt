@@ -4635,3 +4635,54 @@ trade files ONCE. It must use CHARTS (no delete). Verify matched destinations/so
 removal, unresolved/failed sources and source directories retained. If failure remains,
 retain the new report/audit and diagnose that result; no repeated unchanged clicks,
 new trade or broker resync. Fixture pass is not real filing acceptance.
+
+
+JOB 6 CANCELLED / REMOVED - 2026-11-01
+User cancellation supersedes ALL Job6 implementation, source-folder corrections,
+repairs/retries and pending original-filing acceptance instructions above. Job6 is
+NOT queued for continuation. Do not develop, run or ask the user to click the sorter.
+Jobs1-5 remain accepted/intact; no other job started. Usage pause withdrawal retained.
+
+Initial master/HEAD1fd0c5043f52ec4b834f0034919744a6f320b07d; staged paths empty;
+five authorized targets clean. Only delivered sorter commits940748a and1fd0c50
+follow pre-sorter0aa9c79 in current history. No later sorter-only delta found.
+Reversed the actual940748a patch ONLY for render/master_service.py and
+render/static/trading_journal_actions.js. Removed button, POST route, worker adapter,
+JS listener/status/request/session-storage/timers/guards. Shared files now exactly
+match pre-sorter0aa9c79; existing journal controls/routes and shared helpers preserved.
+Deleted exclusively sorter-created tools/sort_downloaded_trade_files.py and
+tests/test_sort_downloaded_trade_files.py, including literal-folder regression.
+No reset, history rewrite, whole shared-file replacement or summary-history deletion.
+
+Exact verified task-only cleanup: .job6_file_sort_pointer,
+.job6_literal_source_pointer, each referenced private directory's pytest_child.py,
+tools/__pycache__/sort_downloaded_trade_files.cpython-313.pyc and
+tests/__pycache__/test_sort_downloaded_trade_files.cpython-313-pytest-8.3.5.pyc.
+No recursive cleanup. Private historical baselines/logs/results/fixture evidence
+retained in the original Job6 directories. Runtime logs/trade-file-sort audits left
+untouched; no audit or user-data rollback performed. Earlier filing outcomes are not
+inferred from screenshots/zero counters. Downloads/Dropbox not accessed/enumerated,
+no source files restored/moved/deleted. Retain any existing audits for investigation.
+
+Cancellation verification ONLY: 0 pytest nodes/invocations/executions; 0 feature
+checks/real-data operations. Static invocation1 exit1,0.5468786 sec: validator decoded
+Git output using Windows default rather than UTF-8, causing false text mismatch;
+scoped Git diff against0aa9c79 was empty. Corrected only private validator encoding.
+Authorized corrected-failure repeat invocation2 exit0,12.4547407 sec. PASS: AST parse
+of master_service.py without import, exact shared-file pre-sorter equality, absence
+of sorter button/route/worker/JS references and deleted files, original AST route set
+and menu controls preserved, actual Node --check exit0, scoped git diff --check exit0.
+No passing feature nodes repeated; previous Job6 history3 invocations/5 executions/
+4 distinct nodes retained separately. Static time total13.0016193 sec; caps2x60sec,
+verification180/active600/discovery60 sec. No app/API/broker/workbook/chart operations,
+restarts, dependency/build/MT5/security/configuration changes. MT5 not applicable.
+
+Private cancellation baselines/forward patch/cleanup manifest/validator/stdout/stderr/
+actual exit results: .job6_cancel_15461e9587a04b19945ab72b70bb7af7 (outside Git).
+Final review confined to five authorized paths; unrelated work/staging preserved.
+One forward undo-only commit/protected normal push authorized, no delivery retry;
+actual commit SHA/fresh local-remote equality reported in session after helper checks.
+Activation: USER safely restart LTT through run_local_master_control.bat and refresh
+the journal menu to unload the removed route/action. Do NOT attempt sorting or replay
+any batch. No new trade, broker resync or other job. Cancellation implementation is
+complete after protected delivery; running-app removal awaits user-controlled restart.

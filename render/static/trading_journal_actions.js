@@ -2,8 +2,6 @@
   const openBtn = document.getElementById('open-journal-btn');
   const importBtn = document.getElementById('import-journal-btn');
   const resyncBtn = document.getElementById('journal-resync-btn');
-  const sortFilesBtn = document.getElementById('sort-downloaded-trade-files-btn');
-  let sortFilesInFlight = false;
   const fileInput = document.getElementById('journal-file-input');
   const dropZone = document.getElementById('journal-import-drop-zone');
   const cryptoMonthlyBtn = document.getElementById('crypto-monthly-pnl-btn');
@@ -107,7 +105,6 @@
   };
 
   openBtn?.addEventListener('click', async () => {
-    if (sortFilesInFlight) return;
     openBtn.disabled = true;
     setStatus('Opening Trading Journal...');
     try {
@@ -121,7 +118,6 @@
 
   importBtn?.addEventListener('click', () => fileInput?.click());
   const runImport = async (file, fixedAccountMode = null) => {
-    if (sortFilesInFlight) return;
     if (!file) return;
     if (openBtn) openBtn.disabled = true; if (importBtn) importBtn.disabled = true; if (resyncBtn) resyncBtn.disabled = true;
     if (importBtn) importBtn.disabled = true;
@@ -226,7 +222,7 @@
   };
 
   const runResync = async () => {
-    if (resyncInFlight || sortFilesInFlight) return;
+    if (resyncInFlight) return;
     resyncInFlight = true;
     if (resyncBtn) resyncBtn.disabled = true;
     if (importBtn) importBtn.disabled = true;
@@ -316,7 +312,6 @@
     setStatusHtml(`${body}<details class="crypto-monthly-pnl-diagnostics" open><summary>Crypto Monthly P&amp;L diagnostics / raw JSON</summary><pre>${escapeHtml(rawJson)}</pre></details>`, err);
   };
   const runCryptoMonthly = async () => {
-    if (sortFilesInFlight) return;
     if (cryptoMonthlyBtn) cryptoMonthlyBtn.disabled = true;
     setStatus('Checking crypto monthly P&L...');
     try {
@@ -337,7 +332,6 @@
   cryptoMonthlyBtn?.addEventListener('click', runCryptoMonthly);
 
   const runBybitAdjust = async (amount, reason) => {
-    if (sortFilesInFlight) return;
     if (bybitDemoBalanceAdjustmentBtn) bybitDemoBalanceAdjustmentBtn.disabled = true;
     setStatus('Applying Bybit Demo balance adjustment...');
     try {
@@ -388,51 +382,5 @@
       try { equityDataChannel?.close(); } catch {}
     });
   }
-
-
-  // A retry after a lost response uses the SAME identity to retrieve its durable
-  // outcome; no automatic POST, move replay or startup scan is performed.
-  let sortRequestId = '';
-  try { sortRequestId = window.sessionStorage?.getItem('trade-file-sort-request') || ''; } catch {}
-  const sortDownloadedFiles = async () => {
-    if (sortFilesInFlight || resyncInFlight || pendingRetry.run || importBtn?.disabled || openBtn?.disabled || cryptoMonthlyBtn?.disabled || bybitDemoBalanceAdjustmentBtn?.disabled) return;
-    sortFilesInFlight = true;
-    const controls = [sortFilesBtn, openBtn, importBtn, resyncBtn, cryptoMonthlyBtn, bybitDemoBalanceAdjustmentBtn, fileInput, accountModeSelect].filter(Boolean);
-    const previous = controls.map((control) => control.disabled);
-    controls.forEach((control) => { control.disabled = true; });
-    let timeout = null;
-    const controller = typeof AbortController === 'function' ? new AbortController() : null;
-    try {
-      if (!sortRequestId) {
-        sortRequestId = window.crypto.randomUUID();
-        try { window.sessionStorage?.setItem('trade-file-sort-request', sortRequestId); } catch {}
-      }
-      setStatus('Sorting downloaded trade files... one bounded batch. No automatic retry.');
-      if (controller) timeout = window.setTimeout(() => controller.abort(), 305000);
-      const response = await fetch('/api/trading-journal/sort-downloaded-files', {
-        method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json', 'X-LTT-Action': 'sort-downloaded-files' },
-        body: JSON.stringify({ request_id: sortRequestId }), ...(controller ? { signal: controller.signal } : {}),
-      });
-      const payload = await response.json();
-      if (!Array.isArray(payload.files) || !payload.counts) throw new Error(payload.message || payload.error || 'No complete filing report returned; outcome may be unknown.');
-      const counts = payload.counts;
-      const labels = [['moved', 'Moved'], ['already_filed', 'Already filed'], ['unresolved', 'Unresolved/ambiguous'], ['failed', 'Failed'], ['copied_source_retained', 'Copied; source retained'], ['unprocessed', 'Unprocessed']];
-      const summary = labels.map(([key, label]) => `${label}: ${Number(counts[key] || 0)}`).join(' | ');
-      const details = payload.files.map((file) => `<li><strong>${escapeHtml(file.file)}</strong>: ${escapeHtml(file.status)}${file.destination ? ` ? ${escapeHtml(file.destination)}` : ''}<br/>${escapeHtml(file.reason || '')}</li>`).join('');
-      const note = payload.message || payload.error || (payload.ok === true ? 'Verified filing complete. CHARTS and its directories remain.' : 'Some files remain. Review each reason; nothing is automatically retried.');
-      setStatusHtml(`<div>${escapeHtml(summary)}</div><div>${escapeHtml(note)}</div><ul>${details}</ul>`, !response.ok || payload.ok !== true);
-      if (['complete', 'partial', 'failed'].includes(payload.status)) {
-        sortRequestId = '';
-        try { window.sessionStorage?.removeItem('trade-file-sort-request'); } catch {}
-      }
-    } catch (error) {
-      setStatus(`Filing result unavailable: ${error?.message || 'request failed'}. Files may be partially filed. No automatic retry. A deliberate next click retrieves this same batch; review its audit before starting another.`, true);
-    } finally {
-      if (timeout !== null) window.clearTimeout(timeout);
-      controls.forEach((control, index) => { control.disabled = previous[index]; });
-      sortFilesInFlight = false;
-    }
-  };
-  sortFilesBtn?.addEventListener('click', sortDownloadedFiles);
 
 })();;
