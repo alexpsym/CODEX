@@ -9,7 +9,7 @@ import _winapi
 
 REPO = Path(__file__).resolve().parents[1]
 HELPER = REPO / 'tools/cleanup_pytest_temp.py'
-WORK = REPO / '.codex-work/active/repo-cleanup-20261101'
+WORK = REPO / '.codex-work/active/accepted-repair-closeout-20261101'
 
 
 def identity(p):
@@ -55,12 +55,40 @@ def run(root, data=None, mode='Apply'):
     return body
 
 
+def accepted(root, paths):
+    data=plan(root,paths);job='.codex-work/retained/accepted-fixture'
+    data['accepted_retention_release']=[dict(job=job,completed=True,accepted=True,
+        release_condition_ended=True,completion_evidence='fixture completed',
+        acceptance_evidence='explicit user Pass',release_condition='acceptance ended')]
+    for entry in data['entries']:
+        entry.update(status='accepted',release_condition='acceptance ended',
+            accepted_release=dict(job=job,generated=True,unresolved=False,
+                release_condition_ended=True,kind='candidate',reason='generated fixture accepted'))
+    return data
+
+
 def test_manifest_confinement_protection_reparse_and_audit():
     root = fixture(); rel = '.job-fixture/nested/item'; item = root / rel
     data = plan(root, [rel])
     assert run(root, data, 'Audit')['ok'] and item.read_bytes() == b'disposable'
     assert run(root, mode='Audit')['ok'] and item.exists()
     assert not run(root)['ok'] and item.exists()
+    retained='.codex-work/retained/accepted-fixture/candidate.xlsx'
+    (root/retained).parent.mkdir(parents=True);(root/retained).write_bytes(b'generated')
+    assert not run(root,plan(root,[rel,retained]))['ok'] and item.exists()
+    release=accepted(root,[retained])
+    assert run(root,release,'Audit')['ok'] and (root/retained).exists()
+    for bad in ['.codex-work/retained/other-job/candidate.xlsx',
+                '.codex-work/retained/accepted-fixture/apply.claim',
+                '.codex-work/retained/accepted-fixture/transaction.json',
+                '.codex-work/retained/accepted-fixture/native-final-result.json',
+                '.codex-work/retained/accepted-fixture/notes/unique.txt']:
+        (root/bad).parent.mkdir(parents=True,exist_ok=True);(root/bad).write_bytes(b'protected')
+        assert not run(root,accepted(root,[retained,bad]))['ok'] and (root/retained).exists()
+    unresolved=accepted(root,[retained]);unresolved['entries'][0]['accepted_release']['unresolved']=True
+    assert not run(root,unresolved)['ok'] and (root/retained).exists()
+    unaccepted=accepted(root,[retained]);unaccepted['accepted_retention_release'][0]['accepted']=False
+    assert not run(root,unaccepted)['ok'] and (root/retained).exists()
     for bad in ['../outside', str(item), '.job-fixture/../AGENTS.md']:
         altered = json.loads(json.dumps(data)); altered['entries'][0]['path'] = bad
         assert not run(root, altered)['ok'] and item.exists()
@@ -88,6 +116,12 @@ def test_exact_removal_empty_directories_identity_and_failure_status():
     root = fixture(); rel = '.job-fixture/nested/item'; item = root / rel
     data = plan(root, [rel]); item.write_bytes(b'changed')
     assert not run(root, data)['ok'] and item.read_bytes()==b'changed'
+    retained='.codex-work/retained/accepted-fixture/candidate.xlsx'
+    (root/retained).parent.mkdir(parents=True);(root/retained).write_bytes(b'generated')
+    release=accepted(root,[retained]);(root/retained).write_bytes(b'changed identity metadata')
+    assert not run(root,release)['ok'] and (root/retained).exists()
+    released=run(root,accepted(root,[retained,'.codex-work/retained/accepted-fixture']))
+    assert released['ok'] and len(released['results'])==2 and not (root/retained).parent.exists()
     data = plan(root, [rel]); item.unlink(); item.write_bytes(b'changed')
     assert not run(root, data)['ok'] and item.exists()
     assert not run(root, plan(root, ['.job-fixture/nested']))['ok'] and item.exists()
@@ -95,10 +129,13 @@ def test_exact_removal_empty_directories_identity_and_failure_status():
     import ctypes
     ctypes.windll.kernel32.SetFileAttributesW(str(extra), 1)
     try:
-        failed = run(root, plan(root, ['.job-fixture/readonly']))
-        assert not failed['ok'] and failed['results'][0]['status']=='failed' and extra.exists()
+        before=root/'.job-fixture/aaa';before.write_bytes(b'first')
+        skipped=root/'.job-fixture/zzz';skipped.write_bytes(b'skipped')
+        failed = run(root, plan(root, ['.job-fixture/aaa','.job-fixture/readonly','.job-fixture/zzz']))
+        assert not failed['ok'] and failed['results'][0]['status']=='deleted' and failed['results'][1]['status']=='failed' and extra.exists()
+        assert failed['results'][2]['status']=='skipped' and failed['deleted_bytes']==5
     finally:
         ctypes.windll.kernel32.SetFileAttributesW(str(extra), 128)
-    success = run(root, plan(root, [rel, '.job-fixture/readonly', '.job-fixture/nested', '.job-fixture']))
-    assert success['ok'] and success['deleted_bytes']==len(b'changed')+len(b'locked fixture')
-    assert len(success['results'])==4 and not (root / '.job-fixture').exists()
+    success = run(root, plan(root, [rel, '.job-fixture/readonly', '.job-fixture/zzz', '.job-fixture/nested', '.job-fixture']))
+    assert success['ok'] and success['deleted_bytes']==len(b'changed')+len(b'locked fixture')+len(b'skipped')
+    assert len(success['results'])==5 and not (root / '.job-fixture').exists()

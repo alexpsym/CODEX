@@ -5207,3 +5207,79 @@ BTC reservation retired_test with durable manual/context Test override; prior ca
 Protected verify issued a no-op push of existing e0955c904702e49b54a398d9d81a7d2510e08eca before this task commit.
 Manual journal/folder-link acceptance pending user review; no new trade/resync required.
 Actual scoped commit/protected-push SHA/current equality reported in native terminal/private receipt.
+
+
+ACCEPTED REPAIR CLOSEOUT / ARTIFACT RETIREMENT (2026-11-01)
+User "Pass, not pause" ACCEPTS both repository cleanup/automatic housekeeping and
+completed BTC Test/C379-C384 revision. Manual acceptance recorded; supersedes all
+historical pending-acceptance/next-job holds. Queue NONE; Jobs1-5 remain accepted,
+sorter Job6 CANCELLED. No further feature job established. No repair replay/readback.
+
+Saved revision native final receipt confirms committed installation exit0:6 folders
+moved,1 marker-only BTC scaffold removed,0 created,7 SQL records,6 workbook cells.
+Worker9.276440700050443sec; apply subprocess11.676638400182128sec; native complete
+27.43931720010005sec. Delivered e9d776de10573ca1cfc318302b6912e8137b8a93 with fresh
+local/remote equality then and unrelated staging preserved. BOTH successful repair
+attempts remain history. BTC Test Yes/blank/no link/no active numbered allocation;
+Q1 C379,Q2 C380,TREE C381,WET C382,DOOD C383,live actual BTWUSDT C384 and owner/content
+preserved; future import adopts allocation, new genuine trades may C385. LUMIA378,
+earlier/Forex/later BTC Test/retired ETH/Counter Trend/commissions preserved.
+
+Current master/HEAD b7d9f83a47227125009a2a3431294ddefa48b1cd; one fresh GitHub master
+observation confirms same SHA, parent e9d776d and ONLY journal/Trading Journal.xlsx
+changed. Preserve this later workbook commit/all manual edits by leaving workbook
+UNTOUCHED. Initial index empty; unrelated dirty/staged/untracked work preserved.
+No journal capture/open/patch/rebuild/resync/folder rename/broker operation performed.
+
+Existing single cleaner now supports OPTIONAL explicit schema1 accepted-retention
+release for exact named accepted job roots, completed/acceptance evidence and ended
+condition plus reviewed generated per-entry reason/kind. Default retained deletion
+still refused; global protected components unchanged. Claims/ledgers/digests/final
+results/receipts rejected. Complete validation before mutation; identity/reparse/
+Windows handle/exact-file/individually-empty-directory contracts preserved.
+Only TWO existing cleanup nodes extended/run once:2 passed, actual child exit0,
+completed JUnit bodies,11.400353099917993sec. Covers default refusal/exact release,
+protected/unresolved/cross-job preflight refusal/Audit safety/identity changes and
+truthful partial failure/skips/empty directories. No retry or crypto-node rerun.
+Historical cleanup2 nodes/2 invocations/4 executions/7.8701853sec; crypto3 distinct
+nodes/4 invocations/9 executions/62.3036947999747sec remain unchanged.
+
+Exact reviewed manifest Audit default mode exit0,267 targets,child0.8636400999967009sec.
+ONE closeout Apply exit0/completed,child3.8786699001211673sec,core3.643766100052744sec:
+262 files and5 empty directories removed,34,476,251 logical bytes. Observed C: free
+increase34,447,360 bytes (31,778,697,216 ->31,813,144,576); independent disk activity
+can affect free-space delta. Exact absent/retained postcheck passed. No legacy21.8GB
+cleanup repeated;75 inaccessible directories NOT revisited. No second batch allowed.
+Removed accepted-only workbook candidates/original recovery copies/captures/generated
+source baselines/duplicate full inventories/superseded native helpers and own finished
+fixture outputs. No chart/note/user content removed; BTC was marker-only.
+
+218 listed retained entries include immutable receipts/attempt history and mixed
+protected synthetic remnants (data/notes/locks/mock Git). No guard weakened to remove
+them. Exact retained paths/reasons/conditions in private retirement-manifest.json.
+Both original transaction-recovery/transaction.json and apply.claim, native claims,
+plan .digest and final execution/delivery receipts preserved byte-for-byte; hashes
+in immutable-history-hashes.json. These are permanent compact replay/audit provenance,
+not acceptance recovery. Compact legacy-protected-provenance.json preserves unresolved
+unknown/user/inaccessible/sorter-filing exclusions plus original manifest hash; release
+only after exact unresolved need is resolved, never by age. No cancelled sorter revival.
+
+Closeout allowance active900/verification300/discovery60/ordinary300; one cleanup
+<=210 including postcheck,tests2 nodes/1 invocation/2 executions,node120/invocation180.
+Accounted active at summary 356.920sec; native handoff<=300
+reserved within remaining allowance. Repair applies0 additional; captures0,crypto
+tests0; installs/builds/MQL/MT5/restarts/schedules/subagents0. Prior usage carried.
+Local housekeeping SUCCESS/manual repair acceptance COMPLETE; closeout Git delivery
+PENDING native saved-user route (known sandbox Git metadata/helper refusal not retried).
+Task tracked delta ONLY cleaner,its two-node test file,this summary. One new pinned
+native handoff verifies base/source/cleanup receipts, protected verify (authenticated
+NO-OP PUSH of existing HEAD), appends actual checkpoint BEFORE scoped path-only commit,
+inspects content/actual commit/preserved unrelated index, protected push ONCE and fresh
+CURRENT equality at new SHA. No unrelated unpublished commits/raw push/broad add or
+identity/security/helper changes. Pending step is closeout Git delivery only.
+
+
+ACCEPTED CLOSEOUT - NATIVE DELIVERY PREFLIGHT COMPLETED
+Cleanup remains completed:262 files,5 empty directories,34476251 logical bytes; no repair or cleanup replay.
+Protected verify completed with fresh equality and authenticated no-op push of existing b7d9f83a47227125009a2a3431294ddefa48b1cd.
+Acceptance COMPLETE; queue NONE; Job6 CANCELLED. Actual scoped commit/push and CURRENT equality follow in native terminal/private final receipt.

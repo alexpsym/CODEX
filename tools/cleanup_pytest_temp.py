@@ -44,21 +44,36 @@ def main():
         if os.path.commonpath([root,q])!=str(root) or q==root: raise ValueError('outside root')
         ancestry(q)
         return q
-    def permitted(rel):
+    accepted_jobs={}
+    def accepted_release(e):
+        rel=e['path']; parts=rel.split('/')
+        if len(parts)<3 or parts[:2]!=['.codex-work','retained']: return False
+        job='/'.join(parts[:3]); authorization=accepted_jobs.get(job)
+        release=e.get('accepted_release',{})
+        if not authorization or release.get('job')!=job: return False
+        if release.get('generated') is not True or release.get('release_condition_ended') is not True or release.get('unresolved') is not False: return False
+        if release.get('kind') not in {'fixture','candidate','generated-baseline','superseded-helper','accepted-recovery','duplicate-inventory'}: return False
+        if not isinstance(release.get('reason'),str) or not release['reason'].strip(): return False
+        name=parts[-1].lower()
+        if name.endswith(('.claim','.digest')) or name in {'transaction.json','ledger.json'} or 'ledger' in name: return False
+        if 'result' in name or 'receipt' in name or name.endswith('.events.jsonl'): return False
+        if e.get('status')!='accepted' or not e.get('release_condition'): return False
+        return True
+    def permitted(rel,e):
         parts=rel.lower().split('/')
         if any(x in {'.git','.venv','venv','node_modules','.runtime','uploads','archives','credentials','notes','charts','raw','history','data'} or x.startswith('.env') or x.endswith(('.pem','.key')) for x in parts): return False
         if parts[0] in {'journal','page-video-downloader'}: return False
         if parts[-1].endswith(('.lock','-wal','-shm','-journal')) or parts[-1] in {'settings.json','credentials.json','state.json'}: return False
         if parts[0] in {'render','bybit_monitor','oanda_monitor'}:
             return '__pycache__' in parts and (parts[-1]=='__pycache__' or parts[-1].endswith('.pyc'))
+        if parts[0]=='.codex-work': return len(parts)>=3 and (parts[1]=='active' or accepted_release(e))
         if '__pycache__' in parts: return parts[-1]=='__pycache__' or parts[-1].endswith('.pyc')
-        if parts[0]=='.codex-work': return len(parts)>=3 and parts[1]=='active'
         return parts[0].startswith(('.job','.pytest','.codex_tmp','.counter_trend_repair_'))
     def check(e,directory_after=False):
         deadline()
         if any(identity(root)[k]!=root_expected[k] for k in ('dev','ino','attributes')): raise ValueError('root identity changed')
         q=target(e['path'])
-        if not permitted(e['path']): raise ValueError('protected path: '+e['path'])
+        if not permitted(e['path'],e): raise ValueError('protected path: '+e['path'])
         s=q.lstat();typ=e['type']
         if typ not in ('file','directory') or (typ=='file' and not stat.S_ISREG(s.st_mode)) or (typ=='directory' and not stat.S_ISDIR(s.st_mode)): raise ValueError('unexpected type')
         now=identity(q);expected=e['identity'];keys=('dev','ino','attributes') if directory_after else tuple(now)
@@ -145,6 +160,14 @@ def main():
             plan=json.loads(mp.read_text(encoding='utf-8-sig'))
             if plan['schema']!=1 or os.path.normcase(plan['root'])!=os.path.normcase(str(root)): raise ValueError('root mismatch')
             if any(plan['root_identity'][k]!=identity(root)[k] for k in ('dev','ino')): raise ValueError('root identity changed')
+            for authorization in plan.get('accepted_retention_release',[]):
+                job=authorization.get('job',''); parts=job.split('/')
+                if len(parts)!=3 or parts[:2]!=['.codex-work','retained'] or parts[2] in ('','.','..') or any(c in job for c in ('\\',':')): raise ValueError('invalid accepted job root')
+                target(job)
+                if job in accepted_jobs: raise ValueError('duplicate accepted job')
+                if authorization.get('completed') is not True or authorization.get('accepted') is not True or authorization.get('release_condition_ended') is not True: raise ValueError('acceptance/release condition not ended')
+                if not all(isinstance(authorization.get(k),str) and authorization[k].strip() for k in ('completion_evidence','acceptance_evidence','release_condition')): raise ValueError('missing acceptance evidence')
+                accepted_jobs[job]=authorization
             entries=[e for e in plan['entries'] if e['decision']=='delete'];names=[e['path'].lower() for e in entries]
             if len(names)!=len(set(names)): raise ValueError('duplicate target')
             selected=set(names)
