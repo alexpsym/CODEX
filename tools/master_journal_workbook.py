@@ -3651,9 +3651,9 @@ def _legacy_target_r_recommendation_unused(rows: List[Dict[str, Any]], *, scope:
     else:
         direction = "Increase target"
     if coverage_label and coverage_note:
-        recommendation = f"{coverage_label} — Recommended: {_format_target_r_text(recommended_r)} — {coverage_note}"
+        recommendation = f"{coverage_label} â€” Recommended: {_format_target_r_text(recommended_r)} â€” {coverage_note}"
     else:
-        recommendation = f"{direction} — Recommended: {_format_target_r_text(recommended_r)}"
+        recommendation = f"{direction} â€” Recommended: {_format_target_r_text(recommended_r)}"
     if current_median is not None and not coverage_label:
         recommendation += f" (current median: {_format_target_r_text(current_median)})"
 
@@ -4471,7 +4471,7 @@ def _recommendation_svg(
         value = float(item["value"])
         colour = "#15803d" if item.get("outcome") == "winner" else "#b91c1c"
         value_text = _format_decimal_presentation(value, suffix=unit)
-        title = _recommendation_html_escape(f"{item['label']}: {value_text} — {item.get('outcome')}")
+        title = _recommendation_html_escape(f"{item['label']}: {value_text} â€” {item.get('outcome')}")
         svg.append(
             f'<circle data-role="observation" data-observation-index="{index}" cx="{x_pos(index):.2f}" cy="{y_pos(value):.2f}" r="{marker_radius}" fill="{colour}" stroke="#ffffff" stroke-width="{marker_stroke_width}"><title>{title}</title></circle>'
         )
@@ -4546,12 +4546,12 @@ def _recommendation_chart_html(
     exclusion_json = _recommendation_html_escape(json.dumps(exclusion_summary, indent=2, sort_keys=True))
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{_recommendation_html_escape(scope_label)} — {_recommendation_html_escape(metric_label)}</title>
+<title>{_recommendation_html_escape(scope_label)} â€” {_recommendation_html_escape(metric_label)}</title>
 <style>
 body{{margin:0;background:#f1f5f9;color:#0f172a;font:15px/1.45 Segoe UI,Arial,sans-serif}}main{{max-width:1180px;margin:0 auto;padding:28px}}h1{{margin:.2rem 0}}h2{{margin-top:2rem}}.sub{{color:#475569}}.cards{{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin:18px 0}}.card,section{{background:white;border:1px solid #cbd5e1;border-radius:10px;padding:16px;box-shadow:0 1px 2px #0001}}.card b{{display:block;font-size:1.25rem}}.recommendation{{border-left:5px solid #7c3aed}}.recommendation-chart-scroll{{overflow-x:auto}}.chart{{display:block;width:auto;max-width:none;height:520px;min-width:1040px;overflow:visible;background:white;border-radius:8px}}.axis-label{{font-size:11px;fill:#475569}}.axis-title{{font-size:13px;fill:#334155}}.recommendation-label{{font-size:13px;font-weight:700;fill:#6d28d9}}table{{width:100%;border-collapse:collapse;background:white}}th,td{{padding:8px;border-bottom:1px solid #e2e8f0;text-align:left;vertical-align:top}}th{{background:#e2e8f0;position:sticky;top:0}}.table-wrap{{overflow:auto;max-height:520px;border:1px solid #cbd5e1;border-radius:8px}}pre{{white-space:pre-wrap}}.bar-row{{display:grid;grid-template-columns:140px 1fr 48px;gap:8px;align-items:center;margin:7px 0}}.bar{{height:14px;background:#e2e8f0;border-radius:99px;overflow:hidden}}.bar i{{display:block;height:100%;background:#2563eb}}.offline{{font-size:.85rem;color:#475569}}@media(max-width:600px){{main{{padding:12px}}.card,section{{padding:10px}}}}
 </style></head><body><main>
 <p class="offline">Self-contained offline artifact. No Trading Tools server or network connection is required.</p>
-<h1>{_recommendation_html_escape(scope_label)} — {_recommendation_html_escape(metric_label)}</h1>
+<h1>{_recommendation_html_escape(scope_label)} â€” {_recommendation_html_escape(metric_label)}</h1>
 <p class="sub">{_recommendation_html_escape(method)}</p>
 <section class="recommendation" data-recommended-value="{recommended:.12g}"><strong>Workbook recommendation</strong><p>{_recommendation_html_escape(recommendation)}</p></section>
 <div class="cards"><div class="card">Eligible algorithm sample<b>{eligible_count}</b></div><div class="card">Plotted numeric observations<b>{len(numeric_observations)}</b></div><div class="card">Eligible loss-gate observations<b>{len(gate_observations)}</b></div><div class="card">Excluded observations<b>{len(excluded)}</b></div></div>
@@ -4618,7 +4618,7 @@ def _prepare_recommendation_chart_bundle(
                 observations=observations,
                 excluded=excluded,
             )
-            index_items.append(f'<li><a href="{_recommendation_html_escape(filename)}">{_recommendation_html_escape(scope_label)} — {metric.title()}</a></li>')
+            index_items.append(f'<li><a href="{_recommendation_html_escape(filename)}">{_recommendation_html_escape(scope_label)} â€” {metric.title()}</a></li>')
     files["index.html"] = (
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>Trading Journal recommendation charts</title></head>"
         "<body><h1>Trading Journal recommendation charts</h1><p>Self-contained offline artifacts.</p><ul>"
@@ -5509,7 +5509,7 @@ def _assign_trade_numbers_locked(
             continue
         if matches:
             key, record = matches[0]
-            if record.get("status") == "retired_cancelled":
+            if record.get("status") in {"retired_cancelled", "retired_test"}:
                 # Explicit, audited retirement must not rematerialize scaffolding
                 # from a stale acceptance context or allocate this order again.
                 skipped_root.append(row_id or key)
@@ -5880,7 +5880,7 @@ def _normalize_trade_log_display_durations(ws) -> None:
 def _fmt_duration(seconds: Any) -> str:
     n = _duration_seconds_to_ddhhmmss_number(seconds)
     if n is None:
-        return "—"
+        return "â€”"
     return f"{n:08d}"
 
 
@@ -11741,7 +11741,7 @@ def _write_stat_section(ws, start_row, start_col, title, rows, use_detail_col=Fa
         elif kind=='r':
             x = _as_float(val); vcell.value = '' if x is None else x; vcell.number_format='0.000"R"'
         elif kind=='count':
-            vcell.value = _as_float(val) if val is not None else '—'; vcell.number_format='0'
+            vcell.value = _as_float(val) if val is not None else 'â€”'; vcell.number_format='0'
         elif kind=='money':
             mm=(money_map or {}).get(money_key or '') if isinstance(money_map,dict) else {}
             if isinstance(mm, dict) and len(mm)==1:
@@ -11749,12 +11749,12 @@ def _write_stat_section(ws, start_row, start_col, title, rows, use_detail_col=Fa
             elif isinstance(mm, dict) and len(mm)>1:
                 vcell.value=' / '.join(f"{k} {float(v):.2f}" for k,v in sorted(mm.items()))
             else:
-                vcell.value = _as_float(val) if _as_float(val) is not None else '—'
+                vcell.value = _as_float(val) if _as_float(val) is not None else 'â€”'
         elif kind=='duration':
             vcell.value = _format_duration_display(val)
             vcell.number_format = "General"
         else:
-            vcell.value = '—' if val is None else val
+            vcell.value = 'â€”' if val is None else val
         if apply_semantic_cf and isinstance(vcell.value, (int, float)):
             if kind == "count":
                 pass
@@ -11764,7 +11764,7 @@ def _write_stat_section(ws, start_row, start_col, title, rows, use_detail_col=Fa
                 _negative_impact_rule(ws, f"{vcell.coordinate}:{vcell.coordinate}")
             elif sem == "profit" and kind in {"pct", "r", "money"}:
                 _profit_loss_rules(ws, f"{vcell.coordinate}:{vcell.coordinate}")
-        if detail_text not in (None, "", "—"):
+        if detail_text not in (None, "", "â€”"):
             r += 1
             ws.cell(r, start_col, "Source").font = Font(bold=True)
             ws.cell(r, start_col+1, detail_text)
@@ -13073,7 +13073,7 @@ def _write_instrument_leaders_section(ws, start_row, start_col, leaders):
     for label,key in rows:
         v=leaders.get(key) or {}
         ws.cell(rr,start_col,label).font=Font(bold=True)
-        ws.cell(rr,start_col+1,v.get("symbol") or "—")
+        ws.cell(rr,start_col+1,v.get("symbol") or "â€”")
         ws.cell(rr,start_col+2,v.get("wins"))
         ws.cell(rr,start_col+3,v.get("losses"))
         ws.cell(rr,start_col+4,v.get("total_trades"))
@@ -22035,12 +22035,14 @@ def _group_counter_trend_in_memory(ws):
     for name in ws.parent.defined_names.values():name.attr_text=_counter_formula(name.attr_text,mapping)
 
 
-def plan_crypto_number_correction(rows, boundary_id, *, anchors, allocations):
+def plan_crypto_number_correction(rows, boundary_id, *, anchors, allocations, reservations=(), test_row_id=None):
     """Explicit maintenance only: stable IDs/entry chronology, never a refresh hook.
 
     Preserve Test eligibility and unrelated reservations. Conflicting reserved
     numbers are returned as blockers, never silently recycled or shifted.
     """
+    reservation_ids = {str(row['id']) for row in reservations}
+    rows = list(rows) + list(reservations)
     by_id = {}
     for row in rows:
         rid = str(row.get('id') or '')
@@ -22072,10 +22074,19 @@ def plan_crypto_number_correction(rows, boundary_id, *, anchors, allocations):
     mapped = {e['id']:e for e in edits}
     if not anchors or any(rid not in mapped or mapped[rid]['new_number'] != number for rid,number in anchors.items()):
         raise ValueError('Execution chronology does not satisfy explicit BTC/Q/DOOD anchors')
+    if test_row_id is not None:
+        test_row=by_id.get(test_row_id)
+        if test_row is None or not _is_test_trade_value(test_row.get('is_test_trade',test_row.get('test'))):
+            raise ValueError('Authoritative Test classification is missing')
+        edits.insert(0,dict(id=test_row_id,symbol=test_row['symbol'],account=test_row.get('account'),open_time=str(test_row['open_time']),old_number=test_row.get('trade_number'),new_number=None,kind='retired_test'))
+        mapped[test_row_id]=edits[0]
+    for edit in edits:
+        if edit['id'] in reservation_ids:edit['kind']='reservation'
     affected = set(mapped)
     unaffected = {str(row.get('trade_number')) for row in rows if row['id'] not in affected and row.get('trade_number')}
     collisions = []
     for edit in edits:
+        if edit['new_number'] is None:continue
         if edit['new_number'] in unaffected:
             collisions.append(dict(number=edit['new_number'], reason='unaffected workbook execution'))
         for key,record in allocations.items():
@@ -22092,114 +22103,110 @@ def plan_crypto_number_correction(rows, boundary_id, *, anchors, allocations):
     return dict(edits=edits, conflicts=collisions, boundary_id=boundary_id)
 
 
-def patch_existing_trade_numbers_and_links(source, candidate, updates):
-    """Patch existing Trade Number cells/links only; preserve other package bytes.
+def patch_existing_trade_numbers_and_links(source, candidate, updates, *, test_updates=None):
+    """Explicit maintenance: existing number/link edits and one authorized Test cell.
 
-    This explicit maintenance primitive is separate from missing-number allocation.
-    Each update requires old_number/old_link/new_number/new_link and stable id_cell/id.
-    The existing hyperlink node is replaced in place; shared relationships are cloned.
+    Blank numbers remove their external hyperlink without touching shared targets.
+    Every cell is bound to an unchanged execution ID; no general workbook save.
     """
-    from io import BytesIO
-    original = Path(source).read_bytes()
-    ns = '{http://schemas.openxmlformats.org/spreadsheetml/2006/main}'
-    rn = '{http://schemas.openxmlformats.org/officeDocument/2006/relationships}'
-    with zipfile.ZipFile(BytesIO(original)) as zin:
-        sheet = _worksheet_ooxml_part_name(zin, 'Trade Log')
-        relpart = _worksheet_relationship_part_name(sheet)
-        payload = zin.read(sheet).decode('utf-8')
-        relpayload = zin.read(relpart).decode('utf-8')
-        tree = ET.fromstring(payload); reltree = ET.fromstring(relpayload)
-        shared = []
-        if 'xl/sharedStrings.xml' in zin.namelist():
-            shared = [''.join(t.text or '' for t in si.iter(ns+'t')) for si in ET.fromstring(zin.read('xl/sharedStrings.xml'))]
-        def value(cell):
-            if cell.get('t') == 'inlineStr': return ''.join(t.text or '' for t in cell.iter(ns+'t'))
-            v = cell.find(ns+'v'); text = v.text if v is not None else ''
-            return shared[int(text)] if cell.get('t') == 's' else text
-        cells = {c.get('r'):c for c in tree.iter(ns+'c')}
-        links = list(tree.iter(ns+'hyperlink'))
-        rels = {r.get('Id'):r for r in reltree}
-        ids = set(rels)
-        for coord, edit in updates.items():
-            cell = cells.get(coord)
-            if cell is None or value(cell) != str(edit['old_number']):
-                raise ValueError('Trade Number changed: '+coord)
-            if value(cells[edit['id_cell']]) != edit['id']:
-                raise ValueError('Stable row identity changed: '+coord)
-            selected = [h for h in links if h.get('ref') == coord]
-            if len(selected) != 1 or selected[0].get('location'):
-                raise ValueError('Expected one existing external hyperlink: '+coord)
-            rid = selected[0].get(rn+'id'); relationship = rels[rid]
-            if relationship.get('Target') != edit['old_link'] or relationship.get('TargetMode') != 'External':
-                raise ValueError('Existing hyperlink changed: '+coord)
-            cell_pattern = re.compile(r'<c\b(?P<attrs>[^>]*\br="'+re.escape(coord)+r'"[^>]*)>(?P<body>.*?)</c>',re.S)
-            match = cell_pattern.search(payload)
-            if match is None: raise ValueError('Unsupported cell serialization')
-            attrs = re.sub(r'\s+t="[^"]*"', '', match['attrs'])
-            replacement = '<c'+attrs+' t="inlineStr"><is><t>'+_xml_escape(edit['new_number'])+'</t></is></c>'
-            payload = payload[:match.start()]+replacement+payload[match.end():]
-            uses = sum(h.get(rn+'id') == rid for h in links)
-            new_target = _xml_escape(edit['new_link'], {'"':'&quot;'})
-            if uses > 1:
-                n=1
-                while 'rId'+str(n) in ids: n+=1
-                new_id='rId'+str(n);ids.add(new_id)
-                fragment='<Relationship Id="'+new_id+'" Type="'+relationship.get('Type')+'" Target="'+new_target+'" TargetMode="External"/>'
-                relpayload=relpayload.replace('</Relationships>',fragment+'</Relationships>',1)
-                pattern=re.compile(r'<hyperlink\b[^>]*\bref="'+re.escape(coord)+r'"[^>]*/>')
-                found=pattern.search(payload)
-                if found is None:raise ValueError('Unsupported hyperlink serialization')
-                changed=re.sub(r'(?:r:id|[A-Za-z_][\w.-]*:id)="'+re.escape(rid)+'"','r:id="'+new_id+'"',found[0])
-                payload=payload[:found.start()]+changed+payload[found.end():]
-            else:
-                pattern=re.compile(r'<Relationship\b(?=[^>]*\bId="'+re.escape(rid)+r'")[^>]*/>')
-                found=pattern.search(relpayload)
-                if found is None:raise ValueError('Unsupported relationship serialization')
-                changed=re.sub(r'Target="[^"]*"','Target="'+new_target+'"',found[0])
-                relpayload=relpayload[:found.start()]+changed+relpayload[found.end():]
-        with zipfile.ZipFile(candidate,'x') as zout:
-            zout.comment=zin.comment
-            for info in zin.infolist():
-                data=payload.encode() if info.filename==sheet else relpayload.encode() if info.filename==relpart else zin.read(info.filename)
-                zout.writestr(copy(info),data)
-    audit_existing_trade_number_package(original,Path(candidate).read_bytes(),updates)
-    return dict(worksheet=sheet,relationships=relpart,changed_cells=sorted(updates),sha256=hashlib.sha256(Path(candidate).read_bytes()).hexdigest())
-
-
-def audit_existing_trade_number_package(original, candidate, updates):
-    """Compare all ZIP payloads; normalize only the precise declared cell/link edits."""
-    from io import BytesIO
+    test_updates=test_updates or {}
+    original=Path(source).read_bytes()
     ns='{http://schemas.openxmlformats.org/spreadsheetml/2006/main}'
     rn='{http://schemas.openxmlformats.org/officeDocument/2006/relationships}'
+    with zipfile.ZipFile(BytesIO(original)) as zin:
+        sheet=_worksheet_ooxml_part_name(zin,'Trade Log');rp=_worksheet_relationship_part_name(sheet)
+        payload=zin.read(sheet).decode('utf-8');relpayload=zin.read(rp).decode('utf-8')
+        tree=ET.fromstring(payload);links=list(tree.iter(ns+'hyperlink'));rels={r.get('Id'):r for r in ET.fromstring(relpayload)};ids=set(rels)
+        cells={c.get('r'):c for c in tree.iter(ns+'c')}
+        shared=[''.join(t.text or '' for t in si.iter(ns+'t')) for si in ET.fromstring(zin.read('xl/sharedStrings.xml'))] if 'xl/sharedStrings.xml' in zin.namelist() else []
+        def value(cell):
+            if cell.get('t')=='inlineStr':return ''.join(t.text or '' for t in cell.iter(ns+'t'))
+            v=cell.find(ns+'v');text=v.text if v is not None else ''
+            return shared[int(text)] if cell.get('t')=='s' and text is not None else text
+        def cell_edit(coord,edit,old,new):
+            cell=cells.get(coord)
+            if cell is None or str(value(cell) or '')!=str(old or ''):raise ValueError('Existing cell changed: '+coord)
+            if value(cells[edit['id_cell']])!=edit['id']:raise ValueError('Stable row identity changed: '+coord)
+            pattern=re.compile(r'<c\b(?P<attrs>[^>]*\br="'+re.escape(coord)+r'"[^>]*?)(?:\s*/>|>(?P<body>.*?)</c>)',re.S)
+            found=pattern.search(payload)
+            if found is None:raise ValueError('Unsupported cell serialization')
+            attrs=re.sub(r'\s+t="[^"]*"','',found['attrs']).rstrip()
+            replacement=('<c'+attrs+'/>' if new in (None,'') else '<c'+attrs+' t="inlineStr"><is><t>'+_xml_escape(str(new))+'</t></is></c>')
+            return payload[:found.start()]+replacement+payload[found.end():]
+        for coord,edit in updates.items():
+            payload=cell_edit(coord,edit,edit['old_number'],edit['new_number'])
+            selected=[h for h in links if h.get('ref')==coord]
+            if len(selected)!=1 or selected[0].get('location'):raise ValueError('Expected one existing external hyperlink: '+coord)
+            rid=selected[0].get(rn+'id');relationship=rels[rid]
+            if relationship.get('Target')!=edit['old_link'] or relationship.get('TargetMode')!='External':raise ValueError('Existing hyperlink changed: '+coord)
+            lp=re.compile(r'<hyperlink\b[^>]*\bref="'+re.escape(coord)+r'"[^>]*/>');link=lp.search(payload)
+            if link is None:raise ValueError('Unsupported hyperlink serialization')
+            uses=sum(h.get(rn+'id')==rid for h in links)
+            relpattern=re.compile(r'<Relationship\b(?=[^>]*\bId="'+re.escape(rid)+r'")[^>]*/>')
+            relmatch=relpattern.search(relpayload)
+            if relmatch is None:raise ValueError('Unsupported relationship serialization')
+            if edit['new_number'] in (None,''):
+                if edit.get('new_link') not in (None,''):raise ValueError('Blank number must not retain a folder link')
+                payload=payload[:link.start()]+payload[link.end():]
+                if uses==1:relpayload=relpayload[:relmatch.start()]+relpayload[relmatch.end():]
+                continue
+            target=_xml_escape(edit['new_link'],{'"':'&quot;'})
+            if uses>1:
+                n=1
+                while 'rId'+str(n) in ids:n+=1
+                newrid='rId'+str(n);ids.add(newrid)
+                fragment='<Relationship Id="'+newrid+'" Type="'+relationship.get('Type')+'" Target="'+target+'" TargetMode="External"/>'
+                relpayload=relpayload.replace('</Relationships>',fragment+'</Relationships>',1)
+                changed=re.sub(r'(?:r:id|[A-Za-z_][\w.-]*:id)="'+re.escape(rid)+'"','r:id="'+newrid+'"',link[0])
+                payload=payload[:link.start()]+changed+payload[link.end():]
+            else:
+                changed=re.sub(r'Target="[^"]*"','Target="'+target+'"',relmatch[0]);relpayload=relpayload[:relmatch.start()]+changed+relpayload[relmatch.end():]
+        for coord,edit in test_updates.items():
+            if edit['new_value']!='Yes':raise ValueError('Only explicit Test=Yes maintenance is supported')
+            payload=cell_edit(coord,edit,edit['old_value'],'Yes')
+        with zipfile.ZipFile(candidate,'x') as zout:
+            zout.comment=zin.comment
+            for info in zin.infolist():zout.writestr(copy(info),payload.encode() if info.filename==sheet else relpayload.encode() if info.filename==rp else zin.read(info.filename))
+    audit_existing_trade_number_package(original,Path(candidate).read_bytes(),updates,test_updates=test_updates)
+    return dict(worksheet=sheet,relationships=rp,changed_cells=sorted(updates),test_cells=sorted(test_updates),sha256=hashlib.sha256(Path(candidate).read_bytes()).hexdigest())
+
+
+def audit_existing_trade_number_package(original,candidate,updates,*,test_updates=None):
+    """Normalize only declared number/link/Test edits; require exact remaining parts."""
+    test_updates=test_updates or {};ns='{http://schemas.openxmlformats.org/spreadsheetml/2006/main}';rn='{http://schemas.openxmlformats.org/officeDocument/2006/relationships}'
     with zipfile.ZipFile(BytesIO(original)) as before,zipfile.ZipFile(BytesIO(candidate)) as after:
         assert before.namelist()==after.namelist() and before.comment==after.comment
         part=_worksheet_ooxml_part_name(before,'Trade Log');rp=_worksheet_relationship_part_name(part)
         for name in before.namelist():
             if name not in (part,rp):assert before.read(name)==after.read(name),name
-        old=ET.fromstring(before.read(part));new=ET.fromstring(after.read(part))
-        oldcells={x.get('r'):x for x in old.iter(ns+'c')};newcells={x.get('r'):x for x in new.iter(ns+'c')}
-        oldlinks=list(old.iter(ns+'hyperlink'));newlinks=list(new.iter(ns+'hyperlink'))
-        a=ET.fromstring(before.read(rp));b=ET.fromstring(after.read(rp));oldrels={x.get('Id'):x for x in a};newrels={x.get('Id'):x for x in b}
-        allowed_added=set()
+        old=ET.fromstring(before.read(part));new=ET.fromstring(after.read(part));oc={c.get('r'):c for c in old.iter(ns+'c')};nc={c.get('r'):c for c in new.iter(ns+'c')}
+        ol=list(old.iter(ns+'hyperlink'));nl=list(new.iter(ns+'hyperlink'));a=ET.fromstring(before.read(rp));b=ET.fromstring(after.read(rp));ar={r.get('Id'):r for r in a};br={r.get('Id'):r for r in b};added=set();removed=set()
+        def normalize_cell(coord,newvalue):
+            source,target=oc[coord],nc[coord]
+            assert {k:v for k,v in source.attrib.items() if k!='t'}=={k:v for k,v in target.attrib.items() if k!='t'}
+            assert source.find(ns+'f') is None
+            if newvalue in (None,''):assert not list(target) and target.get('t') is None
+            else:assert target.get('t')=='inlineStr' and ''.join(t.text or '' for t in target.iter(ns+'t'))==newvalue and len(target)==1
+            target.clear();target.attrib.update(source.attrib)
+            for child in source:target.append(deepcopy(child))
         for coord,e in updates.items():
-            oc,nc=oldcells[coord],newcells[coord]
-            assert {k:v for k,v in oc.attrib.items() if k!='t'}=={k:v for k,v in nc.attrib.items() if k!='t'}
-            assert nc.get('t')=='inlineStr' and ''.join(t.text or '' for t in nc.iter(ns+'t'))==e['new_number']
-            assert len(list(nc))==1 and nc[0].tag==ns+'is'
-            assert len(oc.findall(ns+'f'))==0,'Trade Number is a formula'
-            nc.clear();nc.attrib.update(oc.attrib)
-            for child in oc:nc.append(deepcopy(child))
-            oh=[x for x in oldlinks if x.get('ref')==coord];nh=[x for x in newlinks if x.get('ref')==coord]
-            assert len(oh)==len(nh)==1
-            oldid=oh[0].get(rn+'id');newid=nh[0].get(rn+'id')
-            assert newrels[newid].get('Target')==e['new_link']
-            if newid!=oldid:
-                assert newid not in oldrels;allowed_added.add(newid)
+            normalize_cell(coord,e['new_number'])
+            oh=[x for x in ol if x.get('ref')==coord];nh=[x for x in nl if x.get('ref')==coord];assert len(oh)==1
+            rid=oh[0].get(rn+'id');uses=sum(x.get(rn+'id')==rid for x in ol)
+            if e['new_number'] in (None,''):
+                assert not nh and e.get('new_link') in (None,'')
+                old.find(ns+'hyperlinks').remove(oh[0])
+                if uses==1:assert rid not in br;removed.add(rid)
+                continue
+            assert len(nh)==1;newid=nh[0].get(rn+'id');assert br[newid].get('Target')==e['new_link']
+            if newid!=rid:assert newid not in ar;added.add(newid)
             else:
-                assert {k:v for k,v in oldrels[oldid].attrib.items() if k!='Target'}=={k:v for k,v in newrels[newid].attrib.items() if k!='Target'}
-                newrels[newid].set('Target',oldrels[oldid].get('Target'))
-            nh[0].set(rn+'id',oldid)
+                assert {k:v for k,v in ar[rid].attrib.items() if k!='Target'}=={k:v for k,v in br[newid].attrib.items() if k!='Target'}
+                br[newid].set('Target',ar[rid].get('Target'))
+            nh[0].set(rn+'id',rid)
+        for coord,e in test_updates.items():assert e['new_value']=='Yes';normalize_cell(coord,'Yes')
         assert ET.tostring(old)==ET.tostring(new),'undeclared worksheet change'
-        assert set(newrels)-set(oldrels)==allowed_added
-        for rid in oldrels:assert ET.tostring(oldrels[rid])==ET.tostring(newrels[rid]),'unrelated/shared relationship changed'
+        assert set(br)==(set(ar)-removed)|added
+        for rid in ar:
+            if rid not in removed:assert ET.tostring(ar[rid])==ET.tostring(br[rid]),'unrelated/shared relationship changed'
     return True

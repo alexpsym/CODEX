@@ -5111,3 +5111,99 @@ Only cancelled ETH number reservation retired; unrelated BTW C386 preserved.
 Protected verify issued a no-op push of existing 02729017233b17c1cc384a3b51889584c454f22c before this task commit.
 Manual journal/folder-link acceptance pending user review; no new trade/resync required.
 Actual scoped commit/protected-push SHA/current equality reported in native terminal/private receipt.
+
+
+BTC TEST REVISION - PREPARED / NATIVE INSTALL AND DELIVERY PENDING (2026-11-01)
+Latest user mapping supersedes earlier BTC C379 plan. Reconciled immutable old native
+result/claims/ledger: committed exit0; worker11.040290100034326sec,3 folders moved,
+1 created,2 scaffolds removed,6 SQL records,3 workbook cells. Old repair delivered
+c2c5ed3c26cae7fccf35e036aa1234dbf3f69a7f. Later workbook-only2b81d91aeace2c2ccf6f0157ae46022db22b192b
+and current master/HEAD e0955c904702e49b54a398d9d81a7d2510e08eca preserved.
+No old plan replay, receipt rewrite, claim reset or original restoration. Initial
+index empty; unrelated runtime/configuration/deleted briefs/untracked work preserved.
+
+ONE new scoped capture completed1.846028900006786sec. Saved workbook matches HEAD;
+BTC 2026-10-18 09:21:51 already Test Yes, canonical JSON/SQL False. Existing workbook
+manual override reader detects Yes. Persist exact execution through supported
+manual_overrides/fields/metrics and accepted-order classification_overrides/version;
+retire allocation retired_test, clear active number/folder aliases and retire exact
+early-folder request. No broad Demo/BTC classification or raw history/financial edits.
+
+Identity-based current -> final:
+BTCUSDT 2026-10-18 09:21:51 C379 -> blank, Test Yes, no hyperlink/active numbered folder.
+QUSDT 2026-10-18 20:38:05 C380 -> C379; preserve owner/content.
+QUSDT 2026-10-19 17:05:12 C381 -> C380; preserve owner/content.
+TREEUSDT 2026-10-24 20:48:54 C382 -> C381; preserve owner/content.
+WETUSDT 2026-10-24 21:16:07 C383 -> C382; preserve owner/content.
+DOODUSDT 2026-10-27 17:22:33 C384 -> C383; preserve current charts/content.
+Live BTWUSDT order825995ee-02d4-43d4-9fc0-40ae507c9a2c C386 -> C384.
+Actual saved ticker BTWUSDT verified by scoped accepted request/context/owner; no
+invented BITW, imported history, fabricated SQL execution or broker/lifecycle change.
+LUMIA C378/earlier/Forex/later BTC Test/retired cancelled ETH remain untouched.
+Future genuine trade can C385; synthetic import adopts same live C384 owner/folder.
+
+Fresh plan digest 0f6c2851eccdb1a3d33ed5283dc886b9cc18ad9eb2ab88e553c58a63339ec736.
+Candidate SHA256 15c08f23d06c7cac8c920f5749fdf7dd4bf65279db4d1bff4ce88e45674b2e0d.
+Only6 existing number cells/associated links change; BTC link removed cleanly.
+AD11 already Yes, no Test cell patch necessary. Precise allowed-change ZIP audit
+preserves unrelated payloads/manual/financial values/formulas AND cached results,
+styles/layout/views/Counter Trend/commissions. No openpyxl save/rebuild/recalculation.
+Plan6 collision-safe owned folder moves,0 creates,1 BTC marker-only scaffold removal,
+7 existing SQL records (6 trades plus BTC metric),42 exact JSON field edits.
+BTC folder contains only34-byte owner marker, no unique charts/notes. Both Q folders,
+TREE/WET/DOOD/live retain streamed-hash inventories/owner tokens. No bulk backups.
+Readback requires obsolete affected C385/C386 and staging siblings absent; unrelated
+new work never deleted to force endpoint. Current source revisions guard installation.
+
+Revised tests: SAME3 materially affected nodes,1 invocation/3 executions; all PASS,
+actual child exit0, completed JUnit bodies,37.664701299974695sec. Mapping/eligibility,
+blank-link/shared relationship/formula-cache preservation, durable raw-No refresh/
+replay override, future live import adoption, collision/real-lock rollback/idempotence
+and content preservation covered. Prior3 nodes/3 invocations/6 executions and
+24.6389935sec retained; cumulative3 distinct IDs/4 invocations/9 executions,
+62.3036947999747sec. No unchanged passing-node repeats. Final AST/scoped whitespace
+validation recorded separately. No service startup/live resync.
+
+Revised apply0/1; cumulative1 completed old apply of2 max. Revised installation,
+installed readback, Git commit/push and manual acceptance PENDING. Sandbox .git gate/
+Dropbox/Git restrictions respected; no known-denied operation repeated. NEW private
+revision-btc-test/native_handoff.py bound to NEW digest/current pins, old handoff and
+claims preserved. Exclusive workbook preflight: normal saved/closed Excel required.
+Coordinated journal->allocation locks, revision/owner checks, new durable ledger,
+sparse undo and ONE current original workbook; retained about5.9MB, guards25MiB
+recovery/50MiB combined peak. Keep original/undo until acceptance, then retire safely.
+Old receipts remain attempt history; never erase them to permit retry.
+
+Own exact-manifest housekeeping completed exit0, parent4.573948200093582sec:
+91 files/35 empty directories/1679764 logical bytes.
+55 conservative protected synthetic/mixed entries retained with exact reasons/release
+conditions in private manifest; release after native/manual acceptance. No old cleanup.
+Supplemental accounted active at preparation1572.495sec of1800; cumulative declared
+4200. Native allowance<=207sec including delivery; verification900/discovery60/
+ordinary300/capture180/apply300. New capture1/1; tests3 nodes/1of2 invocations/3of6
+executions; new apply0/1. No broker ops/restarts/installs/builds/MQL/MT5/schedules/subagents.
+Accepted Jobs1-5 preserved; sorter Job6 stays CANCELLED.
+
+One guarded native handoff performs saved-user preflight, unchanged protected verify
+(actual authenticated NO-OP PUSH of existing e0955c9, not read-only), one revised apply,
+full readback, actual summary BEFORE exact5-path/path-only commit, protected push ONCE.
+Require fresh CURRENT local/remote equality at new SHA. Any failed/inconclusive apply
+spends attempt; no automatic retry. Source preparation is not installation/delivery.
+Exact task paths: tools/master_journal_workbook.py; tools/repair_bybit_trade_chart_folder.py;
+tests/test_bybit_trade_chart_folder_repair.py; journal/Trading Journal.xlsx; this summary.
+Current workbook equals HEAD; staged binary must equal candidate. Later manual book
+commits/unrelated staging preserved. No raw push/broad add/security/identity changes.
+Manual acceptance after native success: BTC Test Yes/blank/no link; Q1 C379,Q2 C380,
+TREE C381,WET C382,DOOD C383,live BTW C384 content intact/no fabricated row. No new trade,
+broker import/resync or restart required. Return completed native output before any
+installation/delivery claim. Preserve existing summary bytes; append LF explicitly.
+
+
+BTC TEST REVISION - NATIVE INSTALL COMPLETED / DELIVERY PENDING
+Native worker completed normally: {"elapsed": 9.276440700050443, "folders_created": 0, "folders_moved": 6, "noop": false, "ok": true, "phase": "committed", "scaffolds_removed": 1, "sql_records": 7, "workbook_cells": 6}
+Installed candidate SHA256 15c08f23d06c7cac8c920f5749fdf7dd4bf65279db4d1bff4ce88e45674b2e0d; actual ledger: private transaction receipt.
+BTC Test=Yes, blank number/no folder link; Q1 C379; Q2 C380; TREE C381; WET C382; DOOD C383; live BTWUSDT C384, no fabricated history row.
+BTC reservation retired_test with durable manual/context Test override; prior cancelled ETH untouched; live scoped order/owner preserved through C386 -> C384.
+Protected verify issued a no-op push of existing e0955c904702e49b54a398d9d81a7d2510e08eca before this task commit.
+Manual journal/folder-link acceptance pending user review; no new trade/resync required.
+Actual scoped commit/protected-push SHA/current equality reported in native terminal/private receipt.

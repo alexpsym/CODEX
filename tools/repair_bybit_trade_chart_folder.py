@@ -635,6 +635,29 @@ def _number_pointer(document,pointer):
     return target,pointer[-1]
 
 
+def _validate_test_fields(before,fields,authorization,*,row_id=None,context_order=None):
+    """Permit only the declared BTC manual-Test overlay; preserve all other metadata."""
+    if not authorization or authorization.get('value') is not True:raise RepairRefused('Explicit single-row Test authorization required')
+    is_row=row_id==authorization['id'];is_context=context_order==authorization['order_id']
+    if not is_row and not is_context:raise RepairRefused('Test edit targets another execution/context')
+    for key,value in fields.items():
+        if key=='is_test_trade':
+            if not is_row or value is not True:raise RepairRefused('Only authorized row Test=True is permitted')
+        elif key in ('manual_overrides','metrics','classification_overrides'):
+            if key=='classification_overrides' and not is_context:raise RepairRefused('Wrong classification target')
+            if key!='classification_overrides' and not is_row:raise RepairRefused('Wrong manual override target')
+            expected=dict(before.get(key) or {});expected['is_test_trade']=True
+            if value!=expected:raise RepairRefused('Unrelated manual/metric classification change')
+        elif key=='manual_override_fields':
+            if not is_row or value!=sorted(set(before.get(key) or [])|{'is_test_trade'}):raise RepairRefused('Unrelated manual override fields changed')
+        elif key=='classification_version':
+            if not is_context or value!=int(before.get(key) or 0)+1:raise RepairRefused('Classification version must advance once')
+        elif key in ('manual_updated_at','classification_updated_at'):
+            if (key=='manual_updated_at' and not is_row) or (key=='classification_updated_at' and not is_context):raise RepairRefused('Wrong classification timestamp target')
+            datetime.fromisoformat(value)
+        else:raise RepairRefused('Non-Test field in classification change')
+
+
 def apply_number_repair_plan(plan, *, gate=None, failpoint=None):
     """One explicit, hash-bound transaction; sparse field undo and folder renames.
 
@@ -658,11 +681,20 @@ def apply_number_repair_plan(plan, *, gate=None, failpoint=None):
     for path in [Path(e[k]) for e in folder_ops for k in ('source','destination')]+[Path(e['path']) for e in scaffolds+creates]:
         if path.parent!=month or path.name.startswith('.'):raise RepairRefused('Folder plan escapes exact October scope')
     allowed={'trade_number','trade_folder','folder','identities','status','retired_from','retired_reason','retired_number_reservation'}
+    test_fields={'is_test_trade','manual_overrides','manual_override_fields','manual_updated_at','metrics','classification_overrides','classification_version','classification_updated_at'}
+    authorization=plan.get('test_classification')
+    for coord,edit in plan.get('test_cell_updates',{}).items():
+        if not authorization or edit['id']!=authorization['id'] or coord!=authorization['test_cell'] or edit['new_value']!='Yes':raise RepairRefused('Unauthorized Test cell edit')
     for store in plan['json_stores']:
         for change in store['changes']:
-            if change['pointer'][-1] not in allowed:raise RepairRefused('Non-number JSON field in plan')
+            if change['pointer'][-1] not in allowed|test_fields:raise RepairRefused('Non-number/Test JSON field in plan')
+            if change['pointer'][-1] in test_fields and not authorization:raise RepairRefused('Missing Test authorization')
+            if change['pointer'][-1]=='folder' and Path(store['path']).name!='trade_folder_allocations.json':raise RepairRefused('Folder field restricted to allocation registry')
     for record in plan['sql_records']:
-        if set(record['fields'])-{'trade_number','trade_folder'}:raise RepairRefused('Non-number SQL field in plan')
+        if record.get('table','journal_trades') not in {'journal_trades','journal_metrics'}:raise RepairRefused('Unexpected SQL table')
+        fields={k:v for k,v in record['fields'].items() if k not in {'trade_number','trade_folder'}}
+        if fields:_validate_test_fields(json.loads(record['before']),fields,authorization,row_id=record['id'])
+        if record.get('table')=='journal_metrics' and (not authorization or record['id']!=authorization['id'] or set(record['fields'])!={'is_test_trade'}):raise RepairRefused('Only this BTC Test metric may change')
     ledger_path=recovery/'transaction.json';claim=recovery/'apply.claim'
     if ledger_path.exists():
         saved=json.loads(ledger_path.read_text())
@@ -692,7 +724,7 @@ def apply_number_repair_plan(plan, *, gate=None, failpoint=None):
         resources.enter_context(m._trade_allocation_lock(timeout_seconds=5))
         _assert_workbook_available(workbook)
         if _sha256(workbook)!=plan['workbook_sha256'] or _sha256(candidate)!=plan['candidate_sha256']:raise RepairRefused('Workbook/candidate revision changed')
-        m.audit_existing_trade_number_package(workbook.read_bytes(),candidate.read_bytes(),plan['package_updates'])
+        m.audit_existing_trade_number_package(workbook.read_bytes(),candidate.read_bytes(),plan['package_updates'],test_updates=plan.get('test_cell_updates'))
         documents=[]
         for store in plan['json_stores']:
             path=Path(store['path'])
@@ -701,6 +733,8 @@ def apply_number_repair_plan(plan, *, gate=None, failpoint=None):
             for change in store['changes']:
                 target,key=_number_pointer(document,change['pointer'])
                 if (key in target)!=change['before_exists'] or target.get(key)!=change['before']:raise RepairRefused('JSON before-image changed')
+                if key in test_fields:
+                    _validate_test_fields(target,{key:change['after']},authorization,row_id=target.get('id'),context_order=target.get('order_id'))
                 target[key]=change['after']
             documents.append((store,document))
         sources={str(Path(e['source'])) for e in folder_ops}
@@ -719,7 +753,7 @@ def apply_number_repair_plan(plan, *, gate=None, failpoint=None):
         con.execute('BEGIN IMMEDIATE')
         resources.callback(con.rollback)
         for record in plan['sql_records']:
-            old=con.execute('SELECT payload_json,imported_at FROM journal_trades WHERE id=?',(record['id'],)).fetchone()
+            old=con.execute('SELECT payload_json,imported_at FROM '+record.get('table','journal_trades')+' WHERE id=?',(record['id'],)).fetchone()
             if old!=(record['before'],record['imported_at']):raise RepairRefused('SQL before-image changed')
         recovery_bytes=workbook.stat().st_size+len(json.dumps(plan).encode())
         peak=recovery_bytes+candidate.stat().st_size+max([len(json.dumps(document).encode()) for _,document in documents]+[0])
@@ -755,7 +789,7 @@ def apply_number_repair_plan(plan, *, gate=None, failpoint=None):
                 _number_atomic_json(path,document);stores_written.append((store,_sha256(path)));event('json_installed',path=str(path))
             for record in plan['sql_records']:
                 value=json.loads(record['before']);value.update(record['fields']);payload=json.dumps(value,ensure_ascii=False)
-                con.execute('UPDATE journal_trades SET payload_json=? WHERE id=? AND payload_json=?',(payload,record['id'],record['before']))
+                con.execute('UPDATE '+record.get('table','journal_trades')+' SET payload_json=? WHERE id=? AND payload_json=?',(payload,record['id'],record['before']))
                 if con.execute('SELECT changes()').fetchone()[0]!=1:raise RepairRefused('SQL ownership changed')
             _assert_workbook_available(workbook)
             if _sha256(workbook)!=plan['workbook_sha256']:raise RepairRefused('Workbook changed before replacement')
@@ -764,7 +798,7 @@ def apply_number_repair_plan(plan, *, gate=None, failpoint=None):
             with temporary.open('xb') as handle:handle.write(candidate.read_bytes());handle.flush();os.fsync(handle.fileno())
             os.replace(temporary,workbook);installed=True;event('workbook_installed')
             if _sha256(workbook)!=plan['candidate_sha256']:raise RepairRefused('Installed workbook hash mismatch')
-            m.audit_existing_trade_number_package(backup.read_bytes(),workbook.read_bytes(),plan['package_updates'])
+            m.audit_existing_trade_number_package(backup.read_bytes(),workbook.read_bytes(),plan['package_updates'],test_updates=plan.get('test_cell_updates'))
             for item in moved:
                 if _number_inventory(item['destination'])!=item['inventory']:raise RepairRefused('Moved content mismatch')
             for store,_ in stores_written:
@@ -772,6 +806,12 @@ def apply_number_repair_plan(plan, *, gate=None, failpoint=None):
                 for change in store['changes']:
                     target,key=_number_pointer(document,change['pointer'])
                     if target.get(key)!=change['after']:raise RepairRefused('Installed JSON mismatch')
+            for record in plan['sql_records']:
+                current=con.execute('SELECT payload_json FROM '+record.get('table','journal_trades')+' WHERE id=?',(record['id'],)).fetchone()
+                expected=json.loads(record['before']);expected.update(record['fields'])
+                if not current or json.loads(current[0])!=expected:raise RepairRefused('SQL installed readback mismatch')
+            for path in plan.get('absent_after',[]):
+                if Path(path).exists():raise RepairRefused('Obsolete affected folder remains: '+path)
             con.commit();sql_committed=True;event('sql_committed')
             ledger['phase']='committed';_number_atomic_json(ledger_path,ledger)
             for cache_key in list(m._TRADE_FOLDER_INDEX_CACHE):
@@ -785,9 +825,9 @@ def apply_number_repair_plan(plan, *, gate=None, failpoint=None):
                 else:
                     con.execute('BEGIN IMMEDIATE')
                     for record in plan['sql_records']:
-                        expected=json.loads(record['before']);expected.update(record['fields']);current=con.execute('SELECT payload_json FROM journal_trades WHERE id=?',(record['id'],)).fetchone()
+                        expected=json.loads(record['before']);expected.update(record['fields']);current=con.execute('SELECT payload_json FROM '+record.get('table','journal_trades')+' WHERE id=?',(record['id'],)).fetchone()
                         if not current or json.loads(current[0])!=expected:raise RepairRefused('SQL rollback ownership lost')
-                        con.execute('UPDATE journal_trades SET payload_json=? WHERE id=?',(record['before'],record['id']))
+                        con.execute('UPDATE '+record.get('table','journal_trades')+' SET payload_json=? WHERE id=?',(record['before'],record['id']))
                     con.commit()
                 if installed:
                     if _sha256(workbook)!=plan['candidate_sha256']:raise RepairRefused('Workbook rollback ownership lost')
