@@ -4686,3 +4686,304 @@ Activation: USER safely restart LTT through run_local_master_control.bat and ref
 the journal menu to unload the removed route/action. Do NOT attempt sorting or replay
 any batch. No new trade, broker resync or other job. Cancellation implementation is
 complete after protected delivery; running-app removal awaits user-controlled restart.
+
+
+REPOSITORY CLEANUP / AUTOMATIC HOUSEKEEPING - 2026-11-01 - LOCAL PARTIAL / BLOCKED
+This latest checkpoint supersedes no accepted application work. Recent Jobs1-5
+remain ACCEPTED. Job6 downloaded-file sorter remains CANCELLED/REMOVED; never
+restart it or replay filing. Only this cleanup/instruction-maintenance job ran.
+Baseline master c58214fb659a5d8176270c9322f7e3ffa2a679fa; index empty.
+Unrelated modified/deleted/untracked work preserved; no staging/commit occurred.
+
+Read AGENTS, authoritative drafting TXT, complete DOCX text/presentation parts,
+latest relevant summary history, ignore rules and existing cleanup helper. Bounded
+non-link-following inventory found no applicable additional scoped instructions;
+git grep found no existing helper callers. No application imports/startups.
+
+LOCAL IMPLEMENTATION: extended tools/cleanup_pytest_temp.ps1 in place: default
+read-only audit; explicit exact-manifest apply requiring a new private receipt;
+root/ancestry/identity/metadata checks; protected paths; whole-plan prevalidation;
+exact regular-file unlink and individually listed empty-directory rmdir; per-file
+results, stop on failure/nonzero status, no force/retry/recursive deletion.
+Added two focused fixture-only regression nodes, not application tests. Helper
+runtime safety is NOT verified: the actual script host blocked execution.
+AGENTS/TXT/DOCX now require job-owned manifests and the single managed work area,
+automatic successful-job cleanup before delivery, concise retained receipts and
+exact recovery/evidence release conditions, including later retirement of previous
+completed jobs' disposable artifacts. Unrelated safety/data/delivery rules retained.
+Added only /.codex-work/ ignore rule. Ignoring is not disposal.
+
+PRIVATE RECEIPTS: managed retained repo-cleanup-20261101 directory contains exact
+inventory/manifest/classification, baseline instructions, direct test logs/JUnit,
+document validation, before/after measurements, top-level list and continuation
+counters. Active private helpers/fixtures retained solely because safeguard tests
+and cleanup are blocked; release after permitted execution and successful cleanup.
+Do not commit these private inventories/logs or runtime/user data.
+
+MEASUREMENTS (observable lower bounds; .git contents deliberately excluded):
+Before: 29256694044 bytes, 7928 files, 2323 folders;
+C: free 10530168832 bytes. After local authoring: 29265452343 bytes,
+7965 files, 2333 folders; C: free 10502868992 bytes.
+Observed free-space change -27299840 bytes (includes unrelated disk activity).
+Actual cleanup: ZERO files, ZERO folders, ZERO logical bytes deleted; apply0/1.
+Manifest proposes 1667 files/803 directories,
+21801126924 logical bytes, predominantly redundant isolated Job11 test DBs.
+No space recovery claimed. All proposed clutter still remains. Inventory could not
+enter 75 access-denied directories; their contents/bytes are unknown, not zero.
+Top-level 208-directory list reinspected privately. Counts include generated working
+receipts as of measurement, before this checkpoint write.
+
+IMPORTANT RETENTION: live render/data database/caches/locks; canonical workbook;
+downloader dependencies/runtime; original notes/charts/archives/configuration;
+Counter Trend and commission native/stable-identity evidence for the queued repair;
+cancelled sorter audits/filing context pending resolution; inaccessible/unknown
+content. Exact per-path reasons/release conditions are in the private manifest.
+No workbook opened/read/saved, runtime capture, Dropbox/Downloads enumeration,
+broker operation, resync, trade, restart, installation/build/MQL/subagent/schedule.
+Workbook size/mtime/ctime remain unchanged; initial Windows DirEntry dev/ino were
+zero, so no initial inode or workbook-content/hash comparison is claimed.
+
+VERIFICATION: pytest invocation1 completed with actual child exit1 in2.981255sec,
+2 distinct nodes/2 executions, both failed before worker execution because Windows
+PowerShell reports running scripts is disabled. Invocation2 UNUSED; do not spend
+it until a permitted script host is available. No policy/permission setting changed
+or bypass attempted. Embedded Python compile/test AST/PowerShell parse-only checks
+passed; these do not substitute for actual helper safeguard tests.
+Document invocation1 actual exit0 in0.407242sec: complete TXT/DOCX parity, ZIP/XML
+integrity, unchanged non-document package parts/styles/numbering/headers/footers,
+existing paragraph properties/section/page setup and scoped whitespace passed.
+Document invocation2 UNUSED; no native visual rendering claimed.
+Caps retained: active2400/verification900/discovery120/ordinary300sec; cleanup1x300;
+pytest2nodes/2invocations/4executions,120sec each; docs2x60; all builds/installations,
+restarts/scheduled work/subagents0. Compact continuation preserves counters.
+
+DELIVERY BLOCKED BEFORE COMMIT: protected verify invoked once, exit1, reported
+0.04sec; refuses codexsandboxoffline because Git must run as saved-credential host
+user. No authenticated no-op transport proof/current remote SHA equality obtained.
+No retry, credential/helper/config/policy changes, raw push or broad BAT. Commits0,
+push attempts0. All seven authorized source/doc/test/summary paths remain LOCAL.
+
+NEXT SAFE STEP for THIS job: obtain a permitted script execution environment and
+saved-credential delivery route without policy/config changes; run only corrected
+failed/unexecuted safeguard nodes within remaining allowance, refresh/review exact
+manifest metadata, then the ONE authorized cleanup batch; measure/checkpoint and
+complete fresh protected verification, one scoped commit and one protected push.
+Manual cleanup acceptance remains PENDING; implementation is not delivered.
+
+QUEUED NEXT JOB - DO NOT EXECUTE UNTIL THIS CLEANUP IS ACCEPTED:
+Correct crypto Trade Numbers after LUMIAUSDT in journal/Trading Journal.xlsx.
+BTCUSDT opened2026-10-18 must be C379; first QUSDT C380; second QUSDT C381;
+DOODUSDT C384, not C385. Determine intervening/later numbers from stable trade
+identities and existing numbering rules. Relabel October2026 crypto Dropbox folders,
+or delete only proven unnecessary folders without losing user content; update
+hyperlinks to final matching folders and canonical persisted numbering so normal
+refresh cannot undo it. Preserve commissions, Counter Trend placement/backfill and
+all accepted behavior. This queued job had ZERO operations during cleanup.
+
+
+REPOSITORY CLEANUP CONTINUATION - 2026-11-01 - LOCAL CLEANUP COMPLETE / DELIVERY BLOCKED
+Supersedes the prior cleanup checkpoint's zero-deletion/script-loading blocker.
+Recent Jobs1-5 remain ACCEPTED; Job6 sorter remains CANCELLED/REMOVED. Queued
+journal/Dropbox numbering repair remains separate and had ZERO operations.
+Recovered local master c58214fb659a5d8176270c9322f7e3ffa2a679fa; index empty.
+Unrelated work preserved. No application/service imports, workbook/runtime reads or
+writes, broker/Dropbox/Downloads operations, restarts, installations/builds/MQL,
+schedules, subagents, policy/credential/helper/permission/identity changes.
+
+SINGLE CLEANER: ported the existing guarded implementation into
+ tools/cleanup_pytest_temp.py, invoked directly with established Miniconda Python.
+The .ps1 now only forwards compatible RepoRoot/Mode/Manifest/Result/Python options;
+it contains no independent cleanup implementation. Actual old failure concerned
+loading the .ps1, not a denied Python filesystem operation. No alternate blocked-
+script loader or policy override was used. Audit cannot delete. Apply requires an
+exact reviewed manifest and new private result. Whole-plan prevalidation checks
+root/paths/protected categories/identity/metadata/child coverage. Deletion pins
+ancestors and the exact candidate using Windows handles, rechecks lstat/fstat and
+marks only the verified object for deletion; individually listed directories must
+be empty. Locks, read-only files and errors are not forced/retried. Durable per-file
+planned/deleted events survive interruption; nonzero partial failures are explicit.
+CLI-only main guard mechanically added after tests; AST-equivalence receipt proves
+all tested statements unchanged except equivalent return/SystemExit packaging.
+Import performs no argument parsing, inventory or deletion.
+
+SAVED PLAN: original schema1 manifest SHA256
+6b5ff8763dc283767edfa0c0346a814a2231606bd468ff9f5e7fcc1b28768b6f.
+No whole-repository inventory or inaccessible-directory rediscovery repeated.
+Deterministic offline narrowing preserved schema/legacy selectors, with source hash
+and exact exclusion reasons. Only listed candidates were revalidated. Changed
+bytecode, locks/sidecars/configuration/protected categories and mixed ancestors
+were retained. Own-job exact expendable fixtures/helpers were separately reviewed
+and included in the SAME batch. Audit initially found an unlisted retained fixture
+child; narrowed that ancestor before any mutation. Final audit PASS/exit0,
+validated2154 targets in2.6000484sec; earlier failed audit2.4531629sec deleted0.
+
+ACTUAL CLEANUP: ONE apply, exit0, normal completed child,
+21.202752sec parent /21.018032sec worker, limit300sec.
+Removed1699 regular files and455 individually confirmed empty directories;
+logical bytes deleted21793819000. Breakdown: legacy1655 files/445 directories/
+21793769953 bytes; current-job44 files/10 directories/49047 bytes.
+All2154 selected targets absent afterward; remaining-selected files/directories/
+bytes0. No failures/skips/retries, recursive removal, bulk replacement backup,
+archive or movement elsewhere. Original proposed legacy candidates now retain
+12 files/358 directories (7356971 original logical file bytes), for concrete
+preservation/changed-state reasons; this is not a remaining authorized apply plan.
+
+IMMEDIATE MEASUREMENTS: before C: free10480709632 bytes; after
+32276049920 bytes; observed increase21795340288 bytes. Logical
+bytes and free-space change reported separately; other disk activity can affect
+free space. Manifest-scoped before1699 files/455 dirs/21793819000 bytes; after0.
+Top-level list reinspected nonrecursively:188 directories (prior208). No claim of
+complete repository byte totals, since75 inaccessible directories remain unknown.
+
+RETAINED: all75 previously inaccessible directories remain excluded, with no new
+access/ACL attempts. Live journal stores/databases/sidecars/configuration, canonical
+workbook, dependencies, user notes/charts/uploads/archives/raw histories and unique
+files remain protected. Counter Trend/commission provenance and stable-identity
+material remain for queued numbering/folder repair; sorter filing audits/evidence
+remain pending resolution. Original/final manifests and compact execution/JUnit/
+conversion/exclusion/durable deletion receipts are private under the existing
+managed retained cleanup directory, pending user review; do not commit them.
+Current active area now contains only15 protected synthetic fixture markers/data
+entries,73 file bytes; exact paths/reasons/release condition in the private remaining-
+managed-fixtures receipt. Do not weaken real .git/source/live-data guards to clear
+these tiny test leftovers. Retire reviewed redundant receipts after acceptance;
+retain concise result plus only concretely unresolved evidence/recovery.
+
+PERSISTENT INSTRUCTIONS: AGENTS and authoritative TXT/existing DOCX synchronized to
+normal direct Python cleanup, single managed work area/job manifests, automatic
+successful-job housekeeping before delivery, compact receipts and concrete retained
+paths/reasons/release conditions, including retirement when need ends. Existing
+scoped safety/ownership/data retry/delivery requirements remain. Narrow managed-work
+ignore rule retained; ignore is not cleaning. No extra instruction/skill/cleaner.
+
+VERIFICATION COUNTERS: previous pytest1 exit1/2.9812549sec, both nodes failed before
+worker execution. This continuation ONE additional invocation, SAME TWO nodes:
+confinement/protected/reparse/audit and exact-removal/empty-dir/identity/failure-status
+both PASS, zero skips/errors; actual child exit0/4.8889304sec, JUnit
+completed bodies3.385sec. Cumulative2 distinct nodes/2 invocations/4 executions;
+pytest time7.8701853sec. No new nodes/full suites/application checks/passing reruns.
+One changed-content document validation here exit0/0.4186007sec; complete
+TXT/DOCX parity, ZIP/XML integrity, unchanged other package parts/styles/numbering/
+headers/footers/page setup/paragraph properties and scoped whitespace passed.
+Cumulative document validations2; no native visual rendering claimed.
+Prior saved active accounting738.577450752sec; continuation measured473.461sec
+since saved continuation start plus conservative120sec initial read allowance;
+combined accounted1332.039sec at this checkpoint (not a newly invented exact
+clock for previously unclocked reads). Limits remain original2400 active/900
+verification, continuation1200 active/300 verification, ordinary300/discovery60,
+pytest120/doc60/apply300; actual workers all exited within limits. Apply1/1 consumed,
+successful: no additional legacy cleanup batch or retry authorized. Passing nodes
+must not repeat. Third cumulative pytest ceiling is not authorization for another
+invocation in this continuation.
+
+DELIVERY: still BLOCKED before commit. Read exact saved refusal and unchanged
+protected helper identity check. Read-only current whoami exit0/0.036183sec
+confirmed codexsandboxoffline SID ending1011; helper requires saved host SID1007.
+No already-permitted saved-user route is exposed in this session. Did NOT repeat the
+same rejected helper command, change/spoof identity/environment, edit credentials/
+helper, escalate to a different identity, or use raw/broad Git delivery. No task
+commit/staging/push; current remote equality is unverified. Remaining external step:
+provide an ALREADY PERMITTED saved-user execution route, then fresh protected verify,
+inspect exact eight-path task delta/index, one scoped commit and ONE protected push,
+requiring current local/remote master SHA equality. Cleanup need not be rerun.
+Authorized tracked delta: AGENTS.md; both named custom instruction files; .gitignore;
+existing PS wrapper; new Python cleaner; existing focused test file; this summary.
+
+MANUAL ACCEPTANCE: user's review of cleaned repository/report PENDING. No application
+restart, new trade or journal resync required. NEXT, ONLY AFTER ACCEPTANCE: crypto
+Trade Numbers after LUMIAUSDT; BTCUSDT opened2026-10-18 ->C379, first QUSDT ->C380,
+second QUSDT ->C381, DOODUSDT ->C384 (notC385). Reconcile affected intervening/later
+numbers from stable identities/rules, October2026 crypto Dropbox folders and final
+hyperlinks without losing user content; persist numbering so refresh cannot undo it.
+Preserve commissions, Counter Trend placement/backfill and all accepted behavior.
+
+
+CLEANUP COMMIT-ONLY HANDOFF - 2026-11-01 - NATIVE PRECOMMIT VERIFY COMPLETED
+This latest delivery checkpoint supersedes the prior unavailable-precommit-verify
+status only. Cleanup/verification remain complete; none repeated. Actual cleanup:
+1699 files,455 empty directories,21793819000 logical bytes deleted; observed C:
+free-space increase21795340288 bytes. All75 inaccessible directories remain
+preserved; changed/protected locks/sidecars/user/live data and queued-repair/sorter
+provenance remain retained for the reasons/releases in the prior checkpoint and
+private receipts. Housekeeping instructions/Python core/thin PS wrapper unchanged.
+
+EXTERNAL EVIDENCE supplied by user: unchanged protected helper verify completed in
+ordinary native Windows PowerShell under the required saved-user identity. It
+confirmed master, the pinned HTTPS origin and equal local/remote master SHA
+c58214fb659a5d8176270c9322f7e3ffa2a679fa; all reported Git exits0, elapsed10.55sec.
+An independent user-supplied read-only GitHub ref lookup observed the same SHA.
+IMPORTANT: verify itself issued a push of that EXISTING HEAD and returned
+"Everything up-to-date". This was an authenticated NO-OP PUSH, not read-only;
+it did NOT create a commit or deliver the uncommitted cleanup changes.
+Local branch/HEAD/fetch/push origin freshly matched that supplied evidence before
+preparing this commit. No helper rerun under rejected sandbox identity; no identity,
+credential/helper/policy change. Existing saved Git author identity retained.
+
+Reviewed exact task delta against saved baselines/results/cleanup receipt. Intended
+scope exactly8 paths: .gitignore; AGENTS.md; authoritative custom-instructions TXT;
+matching CHATGPT_ONLY DOCX; existing cleanup_pytest_temp.ps1 wrapper; new single
+cleanup_pytest_temp.py core; existing test_repo_artifact_cleanup.py; this summary.
+No tracked generated-artifact deletions were present in the applied manifest.
+Unrelated four brief deletions, live-data/config changes, untracked work and staging
+are excluded. Index was empty at commit-continuation baseline. Use exact-path staging
+and supported path-only commit; inspect staged contents and actual commit. Actual
+single commit SHA/outcome are recorded in private receipt and final session report
+following this precommit summary write; do not infer commit success from this text.
+
+COUNTERS RETAINED:2 distinct pytest nodes/2 invocations/4 executions, final both PASS;
+actual pytest child time7.8701853sec total. Document validations2, both final checks
+PASS,0.8258423sec combined. Cleanup1/1, completed exit0/21.202752sec; no repeat.
+Prior combined active accounting1332.038894415sec; native verify adds10.55sec of
+reported delivery verification. This commit-only continuation caps600 additional
+active seconds (also within original2400), verification180, discovery30, ordinary
+commands300. ZERO new tests/nodes/data/cleanup/restarts/builds/installs/schedules/
+subagents/helper invocations. Exact command/commit elapsed results kept privately;
+initial read/review phase conservatively accounted180sec, not claimed as timed.
+
+DELIVERY HANDOFF: exactly ONE new local task commit is authorized. No push by this
+sandbox session. Once commit success/full SHA is confirmed, user runs the unchanged
+protected helper push ONCE in the verified native PowerShell window. Require its
+completed output and fresh CURRENT local/remote master equality at the NEW task SHA
+before claiming delivery. Earlier no-op verify push must not be replayed as delivery.
+No raw/broad push, BAT, add-all, pull/rebase/stash/force/history/identity/config changes.
+Manual cleanup acceptance remains user's review; no application restart/trade/resync.
+
+QUEUE UNCHANGED: only after this job is accepted, separate journal/Dropbox repair:
+crypto numbering after LUMIAUSDT; BTCUSDT opened2026-10-18 C379; first QUSDT C380;
+second QUSDT C381; DOODUSDT C384 instead of C385. Reconcile intervening/later stable
+trade identities, matching October2026 crypto folder labels/hyperlinks and canonical
+persisted numbering without user-content loss or refresh reversal. No queued work
+performed. Jobs1-5 accepted; cancelled sorter Job6 stays cancelled.
+
+
+CLEANUP COMMIT-ONLY RESULT - 2026-11-01 - COMMIT BLOCKED BY GIT METADATA WRITE DENIAL
+After the precommit checkpoint above, exact eight-path git add failed before
+staging: fatal: Unable to create 'C:/GPT/CODEX-master/.git/index.lock': Permission
+denied. This is a concrete local Git metadata write denial, not a failed cleanup,
+test or protected transport check. No attempt to change permissions/identity/policy,
+use an alternate object/index/ref route, or bypass the denial. No commit invocation,
+commit SHA or new task commit exists. Index freshly confirmed EMPTY; local master
+HEAD remains c58214fb659a5d8176270c9322f7e3ffa2a679fa. All intended task changes,
+including this checkpoint, remain local/unstaged; unrelated work was not staged,
+committed, reverted or discarded. No new protected-helper invocation or push.
+
+User-supplied native verify evidence REMAINS VALID only for the old baseline: it
+issued an authenticated no-op push of existing c58214f, Everything up-to-date, all
+Git exits0,10.55sec; it did not deliver cleanup changes. Do not run task push now:
+a new task commit must exist first. Remaining external step: use an already permitted
+Git-metadata-writable native route for exact-path staging/content inspection and ONE
+scoped local commit, preserving unrelated staging/work; then inspect/report its full
+SHA and run the protected native push ONCE. Require completed output/current local-
+remote equality at that new SHA. No ACL/security/identity workaround authorized.
+
+Cleanup remains successful1699 files/455 empty dirs/21793819000 logical bytes;
+observed free increase21795340288 bytes;75 inaccessible directories/protected and
+changed items retained. No cleanup/inventory/tests/implementation repeated. Existing
+pytest2nodes/2invocations/4executions, docs2, apply1/1 counters unchanged. This
+commit-only continuation used ONE failed staging invocation and ZERO commit/push/
+helper/test/data/cleanup operations. Actual failure/postcheck/elapsed and author/
+path baseline are retained privately. The separate journal/Dropbox numbering job
+remains queued; Jobs1-5 accepted and cancelled sorter Job6 unchanged.
+
+NATIVE DELIVERY HANDOFF - 2026-11-01
+The reviewed eight-path cleanup commit and protected push are being finalized from native PowerShell after sandbox staging was denied. Existing cleanup and passing checks are retained; no cleanup or feature tests repeated. Actual commit SHA and fresh remote equality are reported in the terminal. Journal/Dropbox correction remains queued.

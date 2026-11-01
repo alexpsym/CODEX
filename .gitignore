@@ -39,3 +39,6 @@ journal/*.xlsx
 journal/~$*.xlsx
 journal/*.tmp.xlsx
 journal/*.pending.xlsx
+
+# Managed private job fixtures, manifests, receipts and recovery evidence
+/.codex-work/
